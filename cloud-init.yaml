@@ -14,3 +14,5 @@ package_update: true
 
 runcmd:
   - sudo -u kirin bash -c 'curl -L https://raw.githubusercontent.com/kirinnee/home-manager/main/scripts/setup-workspace.sh | sh'
+  - echo "keep-derivations = true" >> /etc/nix/nix.conf
+  - echo "keep-outputs = true" >> /etc/nix/nix.conf
