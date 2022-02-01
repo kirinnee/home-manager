@@ -1,0 +1,6 @@
+version: "3"
+tasks:
+  sh:
+    desc: Lint shell scripts
+    cmds:
+      - find . -name "*.sh" -o -name "*.zsh" -exec shellcheck {} +
