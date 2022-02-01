@@ -102,6 +102,7 @@ with pkgs;
       enable = true;
       enableCompletion = false;
       initExtra = ''
+        PATH="$PATH:/$HOME/.local/bin"
       '';
       oh-my-zsh = {
         enable = true;
