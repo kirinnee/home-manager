@@ -1,0 +1,19 @@
+version: "3"
+includes:
+  fmt: ./scripts/fmt.yml
+  lint: ./scripts/lint.yml
+tasks:
+  lint:
+    desc: Lint all files
+    cmds:
+      - task: lint:sh
+  fmt:
+    desc: Format all files
+    cmds:
+      - task: fmt:sh
+      - task: fmt:yaml
+      - task: fmt:nix
+      - task: fmt:md
+  cfg:scripts:
+    cmds:
+      - chmod -R +x ./scripts
