@@ -5,10 +5,10 @@ let pcloud-backup = import ./modules/backup-folder.nix { inherit pkgs; }; in
 
 let customDir = pkgs.stdenv.mkDerivation {
   name = "oh-my-zsh-custom-dir";
-  src = ./plugins;
+  src = ./zsh_custom;
   installPhase = ''
-    mkdir -p $out/plugins
-    cp -rv $src/* $out/plugins/
+    mkdir -p $out/
+    cp -rv $src/* $out/
   '';
 }; in
 with pkgs;
