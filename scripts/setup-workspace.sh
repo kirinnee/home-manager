@@ -10,4 +10,4 @@ cd "$HOME/.config" && rm -rf nixpkgs && ln -s "$HOME/home-manager-config" nixpkg
 
 bash --login -c "home-manager switch"
 
-bash --login -c "tmux new -d 'sudo $(which dockerd)'"
+bash --login -c "tmux new -d 'while true; do sudo $(which dockerd); done'"

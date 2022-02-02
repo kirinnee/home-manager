@@ -3,7 +3,7 @@
 users:
   - name: kirin
     sudo: ALL=(ALL) NOPASSWD:ALL
-    groups: users, admin
+    groups: users, admin, docker
     shell: /home/kirin/.nix-profile/bin/zsh
     lock_passwd: true
     ssh_authorized_keys:
