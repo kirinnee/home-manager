@@ -214,6 +214,10 @@ with pkgs;
         plugins = [
           # interactive JQ query builder
           {
+            name = "ogham/exa";
+            tags = [ use:completions/zsh ];
+          }
+          {
             name = "reegnz/jq-zsh-plugin";
           }
           # make sound when commands longer than 15 seconds completed
