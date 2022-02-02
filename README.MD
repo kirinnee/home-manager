@@ -14,10 +14,38 @@ To use home configuration, home-manager is needed. Here, I will document both th
 
 ### Convenience Script
 
+This repository contains convenience scripts to install both Nix and Home-manager
+
+#### With Single-User Nix (WSL/Linux)
+
+Install Home Manager (and Nix) from scratch:
+
+```
+curl -L https://raw.githubusercontent.com/kirinnee/home-manager/main/scripts/install-home-manager-single.sh | sh
+```
+
+#### With Multi-User Nix (MacOS/Linux)
+
 Install Home Manager (and Nix multi-user) from scratch:
 
 ```
 curl -L https://raw.githubusercontent.com/kirinnee/home-manager/main/scripts/install-home-manager.sh | sh
+```
+
+#### Only Home-Manager (Already have Nix installed)
+
+Install only Home Manager:
+
+```
+curl -L https://raw.githubusercontent.com/kirinnee/home-manager/main/scripts/only-home-manager.sh | sh
+```
+
+#### Kirin home.nix
+
+Install my home-manager configurations
+
+```
+curl -L https://raw.githubusercontent.com/kirinnee/home-manager/main/scripts/kirin-config.sh | sh
 ```
 
 ### Cloud-Init
