@@ -109,6 +109,7 @@ with pkgs;
       enable = true;
       enableCompletion = false;
       initExtra = ''
+        if [ -e $HOME/.nix-profile/etc/profile.d/nix.sh ]; then . $HOME/.nix-profile/etc/profile.d/nix.sh; fi
         PATH="$PATH:/$HOME/.local/bin"
       '';
       oh-my-zsh = {
@@ -184,6 +185,9 @@ with pkgs;
         ktnw = "watch -n 0.5 kubectl top nodes";
         kd = "kubectl describe";
         kdel = "kubectl delete";
+
+        # for windows only
+        open = "explorer.exe";
 
       };
       plugins = [
