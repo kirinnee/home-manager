@@ -46,6 +46,7 @@ with pkgs;
     yq-go
     uutils-coreutils
     setup-pcloud-rclone
+    ripgrep
   ];
 
   services = {
