@@ -135,6 +135,7 @@ with pkgs;
         unpack = "tar -xvf";
         pack = "tar -zcvf archive.tar.gz";
         glog = "git log --oneline --decorate --graph";
+        devbox = "ssh kirin@devbox";
 
         # helm
         h = "helm";
