@@ -31,6 +31,7 @@ with pkgs;
   # Let Home Manager install and manage itself.
   programs.home-manager.enable = true;
   home.packages = [
+    ngrok
     pcloud-backup
     gnutar
     rclone
