@@ -31,8 +31,8 @@ with pkgs;
   # Let Home Manager install and manage itself.
   programs.home-manager.enable = true;
   home.packages = [
+    neofetch
     ngrok
-    pcloud-backup
     gnutar
     rclone
     tmux
@@ -47,6 +47,7 @@ with pkgs;
     yq-go
     uutils-coreutils
     setup-pcloud-rclone
+    pcloud-backup
     ripgrep
   ];
 
