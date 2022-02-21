@@ -161,6 +161,7 @@ with pkgs;
         dridc = "docker run -id -e TERM=xterm-256color";
         dps = "docker ps";
         dpsa = "docker ps -a";
+        dpsm = "docker ps --format 'table{{.ID}}\t{{.Names}}\t{{.Image}}'";
 
         # nix & friends
         hms = "home-manager switch";
@@ -179,6 +180,7 @@ with pkgs;
         ndel = "nix-store --delete";
         nixfindroot = "nix-store -q --roots";
         der = "direnv reload";
+        dal = "direnv allow";
 
         # kubernetes
         kg = "kubectl get";
