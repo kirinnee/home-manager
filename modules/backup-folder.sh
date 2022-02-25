@@ -30,7 +30,7 @@ restore() {
 	echo ✅ Backup successfully downloaded!
 
 	echo 🔃 Restoring backup...
-	pv "$backup_target" | tar -xz
+	pv "$backup_target" | tar -x
 	echo ✅ Backup successfully restored!
 }
 
