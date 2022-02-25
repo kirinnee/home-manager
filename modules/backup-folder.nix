@@ -5,13 +5,7 @@ pkgs.writeShellScriptBin "pcloud-backup" ''
   #!/bin/sh
   set -e
 
-  echo="${pkgs.coreutils}/bin/echo"
-  date="${pkgs.coreutils}/bin/date"
-  tar="${pkgs.gnutar}/bin/tar"
-  pv="${pkgs.pv}/bin/pv"
-  du="${pkgs.coreutils}/bin/du"
-  cut="${pkgs.coreutils}/bin/cut"
-  rclone="${pkgs.rclone}/bin/rclone"
+  PATH="${pkgs.coreutils}/bin:${pkgs.gnutar}/bin:${pkgs.pv}/bin:${pkgs.rclone}/bin:$PATH"
 
   ${script}
 ''
