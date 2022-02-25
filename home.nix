@@ -130,6 +130,9 @@ with pkgs;
       };
       shellAliases = {
 
+        pcr = "pre-commit run --all"; # run all pre-commit hook
+
+
         # core utils
         cat = "bat -p";
         cz = "cat ~/.zshrc";
@@ -155,6 +158,8 @@ with pkgs;
 
         # docker
         dr = "docker run";
+        dk = "docker kill";
+        drm = "docker rm";
         drid = "docker run -id";
         db = "docker build -t";
         deti = "docker exec -ti";
@@ -165,6 +170,7 @@ with pkgs;
 
         # nix & friends
         hms = "home-manager switch";
+        hmsz = "home-manager switch && source ~/.zshrc";
         hmg = "home-manager generations";
         ne = "nix-env";
         ni = "nix-env -i";
