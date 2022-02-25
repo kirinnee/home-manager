@@ -9,12 +9,12 @@ pcloud_folder="$3"
 
 restore() {
 	echo "🔎 Looking for index in target backup folder..."
-	rclone lsf "pcloud_remote:Backup/$pcloud_folder/index.index" || echo "❌ Index not found, aborting..." && exit 1
+	rclone lsf "pcloud_remote:Backup/$pcloud_folder/index.index" || (echo "❌ Index not found, aborting..." && exit 1)
 	echo ✅ Index found!
 
 	echo 🔎 Checking latest backup status...
 	backup_target="$(cat rclone cat "pcloud_remote:Backup/$pcloud_folder/index.index")"
-	rclone lsf "pcloud_remote:Backup/$pcloud_folder/$backup_target" || echo "❌ Index found, but backup not found. Aborting..." && exit 1
+	rclone lsf "pcloud_remote:Backup/$pcloud_folder/$backup_target" || (echo "❌ Index found, but backup not found. Aborting..." && exit 1)
 	echo ✅ Backup found!
 
 	cleanup_restore() {
