@@ -115,6 +115,7 @@ with pkgs;
         if [ -e $HOME/.nix-profile/etc/profile.d/nix.sh ]; then . $HOME/.nix-profile/etc/profile.d/nix.sh; fi
         PATH="$PATH:/$HOME/.local/bin"
         export NIXPKGS_ALLOW_UNFREE=1
+        unalias gm
       '';
       oh-my-zsh = {
         enable = true;
