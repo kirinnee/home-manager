@@ -10,4 +10,4 @@ cd "$HOME/.config" && rm -rf nixpkgs && ln -s "$HOME/home-manager-config" nixpkg
 
 bash --login -c "export NIXPKGS_ALLOW_UNFREE=1 && home-manager switch"
 
-bash --login -c "tmux new -d 'while true; do sudo $(which dockerd); done'"
+bash --login -c "tmux new -d -s dockerd 'while true; do sudo $(which dockerd); done'"
