@@ -83,3 +83,12 @@ Within this home-manager, I created 2 CLI that helps me backup folders to pCloud
    backup-pcloud restore ./Workspace desktop1 # restores the first commnad previously
    backup-pcloud restore /home/kirin remote/devobx1 # restores the second command previously
    ```
+
+#### Crontab
+
+You can setup auto-backup with cron:
+
+```bash
+crontab -e
+0 0 * * * sudo -u kirin bash -i -c 'pcloud-backup backup Workspace devbox'
+```
