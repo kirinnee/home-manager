@@ -8,6 +8,8 @@ else
 	ssh_key=$(cat "$HOME"/ssh/"$1")
 fi
 
+$get_uuid
+
 # Get Github Username
 github_user=$(git config --get user.name)
 
