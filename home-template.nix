@@ -59,6 +59,7 @@ with pkgs;
     set-signing-key
     setup-keys
     get-uuid
+    register-with-github
   ];
 
   services = {
