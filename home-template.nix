@@ -124,6 +124,7 @@ with pkgs;
       enable = true;
       enableCompletion = false;
       initExtra = ''
+        ZSH_DISABLE_COMPFIX=true
         if [ -e $HOME/.nix-profile/etc/profile.d/nix.sh ]; then . $HOME/.nix-profile/etc/profile.d/nix.sh; fi
         PATH="$PATH:/$HOME/.local/bin"
         export NIXPKGS_ALLOW_UNFREE=1
