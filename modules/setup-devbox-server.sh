@@ -35,4 +35,3 @@ printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "b" "$ssh_pass" "$ssh_pass" "$gpg_name
 
 $set_signing_key
 $register_with_github
-# register-with-gitlab
