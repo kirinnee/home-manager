@@ -11,6 +11,7 @@ pkgs.writeShellScriptBin "register-with-github" ''
   # Add Curl
   PATH=$PATH:${pkgs.curl}/bin
 
+  sed=${pkgs.gnused}/bin/sed
   gpg=${pkgs.gnupg}/bin/gpg
   git=${pkgs.git}/bin/git
 
