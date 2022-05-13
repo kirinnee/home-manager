@@ -32,7 +32,7 @@ curl \
 	https://api.github.com/user/keys \
 	-d "{\"key\":\"$ssh_key\", \"title\":\"$title\"}"
 
-gpg_key=$($git config --get user.signingkey | $gpg --armour --export)
+gpg_key=$($git config --get user.signingkey | $gpg --armour --export | $sed ':a;N;$!ba;s/\n/\\n/g')
 
 curl \
 	-X POST \
