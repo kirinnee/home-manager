@@ -1,10 +1,7 @@
 #!/bin/sh
 
 # Install Nix
-{
-	curl -L "https://nixos.org/nix/install"
-	printf '%s\n%s\n%s\n%s\n\n' "y" "y" "y" "y"
-} | sh -s -- --daemon
+curl -L "https://nixos.org/nix/install" | sh -s -- --daemon
 
 # Update channels
 bash --login -c "nix-channel --add https://github.com/nix-community/home-manager/archive/release-21.11.tar.gz home-manager && nix-channel --update"
