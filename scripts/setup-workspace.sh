@@ -8,6 +8,8 @@ git clone https://github.com/kirinnee/home-manager.git "$HOME/home-manager-confi
 
 cd "$HOME/.config" && rm -rf nixpkgs && ln -s "$HOME/home-manager-config" nixpkgs && cd ..
 
-bash --login -c "export NIXPKGS_ALLOW_UNFREE=1 && home-manager switch"
+echo "experimental-features = nix-command flakes" >>/etc/nix/nix.conf
+
+bash --login -c "export NIXPKGS_ALLOW_UNFREE=1 && home-manager switch --flake $HOME/home-manager-config#$USER"
 
 bash --login -c "tmux new -d -s dockerd 'while true; do sudo $(which dockerd); done'"
