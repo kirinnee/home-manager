@@ -24,7 +24,7 @@
       homeConfigurations = {
         kirin = home-manager.lib.homeManagerConfiguration {
           # Specify the path to your home configuration here
-          configuration = import ./home.nix;
+          configuration = import ./home-template.nix;
           system = "x86_64-linux";
           username = personal.user;
           homeDirectory = "/home/${personal.user}";
@@ -36,7 +36,7 @@
 
         ernest = home-manager.lib.homeManagerConfiguration {
           # Specify the path to your home configuration here
-          configuration = import ./home.nix;
+          configuration = import ./home-template.nix;
 
           system = "aarch64-darwin";
           username = mac.user;
