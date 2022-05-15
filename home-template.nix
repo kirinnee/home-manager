@@ -8,7 +8,13 @@ let register-with-github = import ./modules/register-with-github.nix { inherit p
 
 let setup-pcloud-rclone = import ./modules/setup-pcloud-remote.nix { inherit pkgs; }; in
 let pcloud-backup = import ./modules/backup-folder.nix { inherit pkgs; }; in
-
+let linuxService = {
+  gpg-agent = {
+    enable = true;
+    enableSshSupport = true;
+    enableExtraSocket = true;
+  };
+}; in
 let customDir = pkgs.stdenv.mkDerivation {
   name = "oh-my-zsh-custom-dir";
   src = ./zsh_custom;
@@ -46,6 +52,9 @@ with pkgs;
     get-uuid
     register-with-github
   ];
+
+  services = (if userinfo.linux then linuxService else { });
+
   programs = {
     gpg = {
       enable = true;

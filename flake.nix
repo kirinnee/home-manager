@@ -12,24 +12,19 @@
       user = "kirin";
       email = "kirinnee97@gmail.com";
       gituser = "kirinnee";
+      linux = true;
     }; in
     let mac = {
       user = "ernest";
       email = "kirinnee97@gmail.com";
       gituser = "kirinnee";
+      linux = false;
     }; in
     {
       homeConfigurations = {
         kirin = home-manager.lib.homeManagerConfiguration {
           # Specify the path to your home configuration here
           configuration = import ./home.nix;
-          services = {
-            gpg-agent = {
-              enable = true;
-              enableSshSupport = true;
-              enableExtraSocket = true;
-            };
-          };
           system = "x86_64-linux";
           username = personal.user;
           homeDirectory = "/home/${personal.user}";
