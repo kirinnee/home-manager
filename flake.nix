@@ -18,8 +18,7 @@
       email = "kirinnee97@gmail.com";
       gituser = "kirinnee";
     }; in
-      let
-      {
+    {
       homeConfigurations = {
         kirin = home-manager.lib.homeManagerConfiguration {
           # Specify the path to your home configuration here
@@ -53,5 +52,5 @@
           };
         };
       };
-      };
+    };
 }
