@@ -8,7 +8,7 @@ git clone https://github.com/kirinnee/home-manager.git "$HOME/home-manager-confi
 
 cd "$HOME/.config" && rm -rf nixpkgs && ln -s "$HOME/home-manager-config" nixpkgs && cd ..
 
-echo "experimental-features = nix-command flakes" >>/etc/nix/nix.conf
+echo 'experimental-features = nix-command flakes' | sudo tee -a /etc/nix/nix.conf >/dev/null
 
 bash --login -c "export NIXPKGS_ALLOW_UNFREE=1 && home-manager switch --flake $HOME/home-manager-config#$USER"
 
