@@ -10,6 +10,6 @@ cd "$HOME/.config" && rm -rf nixpkgs && ln -s "$HOME/home-manager-config" nixpkg
 
 echo 'experimental-features = nix-command flakes' | sudo tee -a /etc/nix/nix.conf >/dev/null
 
-bash --login -c "export NIXPKGS_ALLOW_UNFREE=1 && home-manager switch --flake $HOME/home-manager-config#$USER"
+bash --login -c "export NIXPKGS_ALLOW_UNFREE=1 && home-manager switch --impure --flake $HOME/home-manager-config#$USER"
 
 bash --login -c "tmux new -d -s dockerd 'while true; do sudo $(which dockerd); done'"
