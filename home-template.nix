@@ -167,8 +167,8 @@ with pkgs;
         dpsm = "docker ps --format 'table{{.ID}}\t{{.Names}}\t{{.Image}}'";
 
         # nix & friends
-        hms = "home-manager switch";
-        hmsz = "home-manager switch && source ~/.zshrc";
+        hms = "home-manager switch --impure --flake $HOME/home-manager-config#$USER";
+        hmsz = "home-manager switch --impure --flake $HOME/home-manager-config#$USER && source ~/.zshrc";
         hmg = "home-manager generations";
         ne = "nix-env";
         ni = "nix-env -i";
