@@ -8,7 +8,7 @@ USAGE=$(
 	cat <<-END
 		    Configure AWS CLI to use MFA
 
-		    awsmfa setup <token>                 : Input AWS ARN
+		    awsmfa setup <AWS IAM ARN>           : Input AWS ARN
 		    awsmfa auth -u <username> -t <token> : Initialize MFA Auth
 	END
 )
@@ -16,22 +16,28 @@ USAGE=$(
 [ "$mode" != "auth" ] && [ "$mode" != "setup" ] && echo "$USAGE" && exit 1
 
 if [ "$mode" = "setup" ]; then
+	echo "Enter AWS IAM ARN"
 	read -r aws
-	print "%s" "$aws" >~/.awsmfa_arn
-	"Setup complete!"
+	printf "%s" "$aws" >~/.awsmfa_arn
+	echo "Setup complete!"
 	exit 0
 fi
+
+shift
 
 while getopts u:t: flag; do
 	case "${flag}" in
 	u) username=${OPTARG} ;;
 	t) token=${OPTARG} ;;
-	*) echo "Unknown Flag" ;;
+	*) echo "Unknown Flag" && exit 1 ;;
 	esac
 done
 
-[ "$username" = "" ] && echo "-u (username) not set" && exit
-[ "$token" = "" ] && echo "-t (token) not set" && exit
+[ -e ~/.awsmfa_arn ] || (echo "Have not been setup" && exit 1)
+[ "$username" = "" ] && echo "-u (username) not set" && exit 1
+[ "$token" = "" ] && echo "-t (token) not set" && exit 1
+
+aws="$(cat ~/.awsmfa_arn)"
 
 response=$(aws --profile default sts get-session-token --serial-number "arn:aws:iam::$aws:mfa/$username" --token-code "$token" | jq '.')
 accessKeyId=$(echo "$response" | jq -r '.Credentials.AccessKeyId')
