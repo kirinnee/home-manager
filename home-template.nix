@@ -5,7 +5,7 @@ let set-signing-key = import ./modules/set-signing-key.nix { inherit pkgs; }; in
 let setup-devbox-server = import ./modules/setup-devbox-server.nix { inherit pkgs; }; in
 let get-uuid = import ./modules/get-uuid.nix { inherit pkgs; }; in
 let register-with-github = import ./modules/register-with-github.nix { inherit pkgs; }; in
-
+let awsmfa = import ./modules/awsmfa.nix { inherit pkgs; }; in
 let setup-pcloud-rclone = import ./modules/setup-pcloud-remote.nix { inherit pkgs; }; in
 let pcloud-backup = import ./modules/backup-folder.nix { inherit pkgs; }; in
 let linuxService = {
@@ -24,34 +24,44 @@ let customDir = pkgs.stdenv.mkDerivation {
   '';
 }; in
 with pkgs;
+
+let apps = [
+  vscode
+  slack
+]; in
+
+let tools = [
+  neofetch
+  ngrok
+  gnutar
+  rclone
+  tmux
+  procs
+  tokei
+  du-dust
+  cachix
+  fd
+  kubectl
+  docker
+  jq
+  yq-go
+  uutils-coreutils
+  setup-pcloud-rclone
+  pcloud-backup
+  ripgrep
+  setup-devbox-server
+  set-signing-key
+  setup-keys
+  get-uuid
+  register-with-github
+  awscli2
+  awsmfa
+]; in
+
 {
   # Let Home Manager install and manage itself.
   programs.home-manager.enable = true;
-  home.packages = [
-    neofetch
-    ngrok
-    gnutar
-    rclone
-    tmux
-    procs
-    tokei
-    du-dust
-    cachix
-    fd
-    kubectl
-    docker
-    jq
-    yq-go
-    uutils-coreutils
-    setup-pcloud-rclone
-    pcloud-backup
-    ripgrep
-    setup-devbox-server
-    set-signing-key
-    setup-keys
-    get-uuid
-    register-with-github
-  ];
+  home.packages = (if userinfo.apps then apps ++ tools else tools);
 
   services = (if userinfo.linux then linuxService else { });
 

@@ -13,12 +13,14 @@
       email = "kirinnee97@gmail.com";
       gituser = "kirinnee";
       linux = true;
+      apps = false;
     }; in
     let mac = {
       user = "ernest";
       email = "kirinnee97@gmail.com";
       gituser = "kirinnee";
       linux = false;
+      apps = true;
     }; in
     {
       homeConfigurations = {
