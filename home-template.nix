@@ -211,55 +211,55 @@ let tools = [
         open = "explorer.exe";
 
         # gotrade only
-        gtmfa = "awsmfa auth -u tr8ernest -t"
+        gtmfa = "awsmfa auth -u tr8ernest -t";
 
+      };
+      plugins = [
+        # p10k config
+        {
+          name = "powerlevel10k-config";
+          src = ./p10k-config;
+          file = ".p10k.zsh";
+        }
+        # live autocomplete
+        {
+          name = "zsh-autocomplete";
+          file = "zsh-autocomplete.plugin.zsh";
+          src = pkgs.fetchFromGitHub {
+            owner = "marlonrichert";
+            repo = "zsh-autocomplete";
+            rev = "39423112977a8c520962bc11c46ee31e7ca873ca";
+            sha256 = "sha256-+UziTYsjgpiumSulrLojuqHtDrgvuG91+XNiaMD7wIs=";
           };
+        }
+      ];
+      zplug = {
+        enable = true;
         plugins = [
-          # p10k config
+          # interactive JQ query builder
           {
-            name = "powerlevel10k-config";
-            src = ./p10k-config;
-            file = ".p10k.zsh";
+            name = "ogham/exa";
+            tags = [ use:completions/zsh ];
           }
-          # live autocomplete
           {
-            name = "zsh-autocomplete";
-            file = "zsh-autocomplete.plugin.zsh";
-            src = pkgs.fetchFromGitHub {
-              owner = "marlonrichert";
-              repo = "zsh-autocomplete";
-              rev = "39423112977a8c520962bc11c46ee31e7ca873ca";
-              sha256 = "sha256-+UziTYsjgpiumSulrLojuqHtDrgvuG91+XNiaMD7wIs=";
-            };
+            name = "reegnz/jq-zsh-plugin";
+          }
+          # make sound when commands longer than 15 seconds completed
+          {
+            name = "kevinywlui/zlong_alert.zsh";
+          }
+          # remind you you have aliases
+          {
+            name = "djui/alias-tips";
+          }
+          # themes
+          {
+            name = "romkatv/powerlevel10k";
+            tags = [ as:theme depth:1 ];
           }
         ];
-        zplug = {
-          enable = true;
-          plugins = [
-            # interactive JQ query builder
-            {
-              name = "ogham/exa";
-              tags = [ use:completions/zsh ];
-            }
-            {
-              name = "reegnz/jq-zsh-plugin";
-            }
-            # make sound when commands longer than 15 seconds completed
-            {
-              name = "kevinywlui/zlong_alert.zsh";
-            }
-            # remind you you have aliases
-            {
-              name = "djui/alias-tips";
-            }
-            # themes
-            {
-              name = "romkatv/powerlevel10k";
-              tags = [ as:theme depth:1 ];
-            }
-          ];
-        };
       };
     };
+  };
 
-  }
+}
