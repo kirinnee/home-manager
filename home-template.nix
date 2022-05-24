@@ -1,11 +1,10 @@
-{ config, pkgs, userinfo, ... }:
+{ config, pkgs, userinfo, atomi, ... }:
 
 let setup-keys = import ./modules/setup-keys.nix { inherit pkgs; }; in
 let set-signing-key = import ./modules/set-signing-key.nix { inherit pkgs; }; in
 let setup-devbox-server = import ./modules/setup-devbox-server.nix { inherit pkgs; }; in
 let get-uuid = import ./modules/get-uuid.nix { inherit pkgs; }; in
 let register-with-github = import ./modules/register-with-github.nix { inherit pkgs; }; in
-let awsmfa = import ./modules/awsmfa.nix { inherit pkgs; }; in
 let setup-pcloud-rclone = import ./modules/setup-pcloud-remote.nix { inherit pkgs; }; in
 let pcloud-backup = import ./modules/backup-folder.nix { inherit pkgs; }; in
 let linuxService = {
@@ -54,9 +53,8 @@ let tools = [
   get-uuid
   register-with-github
   awscli2
-  awsmfa
+  atomi.awsmfa
 ]; in
-
 {
   # Let Home Manager install and manage itself.
   programs.home-manager.enable = true;
