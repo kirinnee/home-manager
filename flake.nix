@@ -8,27 +8,11 @@
   };
 
   outputs = { home-manager, ... }:
-    let personal = {
-      user = "kirin";
-      email = "kirinnee97@gmail.com";
-      gituser = "kirinnee";
-      linux = true;
-      apps = false;
-    }; in
-    let mac = {
-      user = "ernest";
-      email = "kirinnee97@gmail.com";
-      gituser = "kirinnee";
-      linux = false;
-      apps = true;
-    }; in
-    let macx64 = {
-      user = "e.ng.3";
-      email = "kirinnee97@gmail.com";
-      gituser = "kirinnee";
-      linux = false;
-      apps = true;
-    }; in
+    let atomi = import (fetchTarball "https://github.com/kirinnee/test-nix-repo/archive/refs/tags/v9.1.0.tar.gz"); in
+    let types = import ./types.nix; in
+    let personal = types.personal; in
+    let mac = types.mac; in
+    let macx64 = types.macx64; in
     {
       homeConfigurations = {
         kirin = home-manager.lib.homeManagerConfiguration {
@@ -40,6 +24,7 @@
           stateVersion = "21.11";
           extraSpecialArgs = {
             userinfo = personal;
+            inherit atomi;
           };
         };
 
@@ -53,6 +38,7 @@
           stateVersion = "21.11";
           extraSpecialArgs = {
             userinfo = mac;
+            inherit atomi;
           };
         };
 
@@ -66,6 +52,7 @@
           stateVersion = "21.11";
           extraSpecialArgs = {
             userinfo = macx64;
+            inherit atomi;
           };
         };
       };
