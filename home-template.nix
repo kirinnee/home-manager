@@ -127,6 +127,8 @@ let tools = [
         PATH="$PATH:/$HOME/.local/bin"
         export NIXPKGS_ALLOW_UNFREE=1
 
+        if [ -e $HOME/.secrets ]; then . $HOME/.secrets; fi
+
         unalias gm
 
         export AWS_PROFILE=default-mfa
