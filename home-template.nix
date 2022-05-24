@@ -27,7 +27,6 @@ with pkgs;
 
 let apps = [
   vscode
-  slack
 ]; in
 
 let tools = [
@@ -119,10 +118,17 @@ let tools = [
       enable = true;
       enableCompletion = false;
       initExtra = ''
+        if [ -e '/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh' ]; then
+          . '/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh'
+        fi
+
         if [ -e $HOME/.nix-profile/etc/profile.d/nix.sh ]; then . $HOME/.nix-profile/etc/profile.d/nix.sh; fi
+
         PATH="$PATH:/$HOME/.local/bin"
         export NIXPKGS_ALLOW_UNFREE=1
+
         unalias gm
+
         export AWS_PROFILE=default-mfa
       '';
       oh-my-zsh = {
