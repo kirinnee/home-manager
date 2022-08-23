@@ -1,64 +1,105 @@
 { config, pkgs, userinfo, atomi, ... }:
 
-let setup-keys = import ./modules/setup-keys.nix { inherit pkgs; }; in
+let setup-keys = import ./modules/setup-key.nix { inherit pkgs; }; in
 let set-signing-key = import ./modules/set-signing-key.nix { inherit pkgs; }; in
 let setup-devbox-server = import ./modules/setup-devbox-server.nix { inherit pkgs; }; in
 let get-uuid = import ./modules/get-uuid.nix { inherit pkgs; }; in
 let register-with-github = import ./modules/register-with-github.nix { inherit pkgs; }; in
 let setup-pcloud-rclone = import ./modules/setup-pcloud-remote.nix { inherit pkgs; }; in
 let pcloud-backup = import ./modules/backup-folder.nix { inherit pkgs; }; in
-let linuxService = {
-  gpg-agent = {
-    enable = true;
-    enableSshSupport = true;
-    enableExtraSocket = true;
+let
+  linuxService = {
+    gpg-agent = {
+      enable = true;
+      enableSshSupport = true;
+      enableExtraSocket = true;
+    };
   };
-}; in
-let customDir = pkgs.stdenv.mkDerivation {
-  name = "oh-my-zsh-custom-dir";
-  src = ./zsh_custom;
-  installPhase = ''
-    mkdir -p $out/
-    cp -rv $src/* $out/
-  '';
-}; in
+in
+let
+  customDir = pkgs.stdenv.mkDerivation {
+    name = "oh-my-zsh-custom-dir";
+    src = ./zsh_custom;
+    installPhase = ''
+      mkdir -p $out/
+      cp -rv $src/* $out/
+    '';
+  };
+in
 with pkgs;
 
-let apps = [
-  vscode
-]; in
+let
+  apps = [
+    vscode
+  ];
+in
 
-let tools = [
-  neofetch
-  ngrok
-  gnutar
-  rclone
-  tmux
-  procs
-  tokei
-  du-dust
-  cachix
-  fd
-  kubectl
-  docker
-  jq
-  yq-go
-  uutils-coreutils
-  setup-pcloud-rclone
-  pcloud-backup
-  ripgrep
-  setup-devbox-server
-  set-signing-key
-  setup-keys
-  get-uuid
-  register-with-github
-  awscli2
-  atomi.awsmfa
-]; in
+let
+  tools = [
+    mmv-go
+    neofetch
+    ngrok
+    gnutar
+    rclone
+    tmux
+    procs
+    tokei
+    du-dust
+    cachix
+    fd
+    kubectl
+    kubectx
+    docker
+    jq
+    yq-go
+    uutils-coreutils
+    setup-pcloud-rclone
+    ssm-session-manager-plugin
+    pcloud-backup
+    ripgrep
+    setup-devbox-server
+    set-signing-key
+    setup-keys
+    get-uuid
+    register-with-github
+    awscli2
+    unixtools.watch
+    atomi.awsmfa
+    atomi.narwhal
+  ];
+in
 {
   # Let Home Manager install and manage itself.
   programs.home-manager.enable = true;
   home.packages = (if userinfo.apps then apps ++ tools else tools);
+
+  home.sessionVariables = {
+    NIXPKGS_ALLOW_UNFREE = "1";
+    EDITOR = "code";
+    AWS_PROFILE = "default-mfa";
+  };
+
+  home.sessionPath = [
+    "$HOME/.local/bin"
+    "$HOME/Downloads/flutter/bin"
+  ];
+
+  home.file = {
+    direnv = {
+      target = ".config/direnv/lib/invalidate.sh";
+      executable = true;
+      text = ''
+        #!/usr/bin/env bash
+
+        use_atomi_nix() {
+            direnv_load nix-shell --show-trace "$@" --run "$(join_args "$direnv" dump)"
+            if [[ $# == 0 ]]; then
+              watch_file default.nix shell.nix nix/env.nix nix/packages.nix nix/shells.nix
+            fi
+        }
+      '';
+    };
+  };
 
   services = (if userinfo.linux then linuxService else { });
 
@@ -70,13 +111,13 @@ let tools = [
       enable = true;
     };
     git = {
+      package = pkgs.git.override { };
       enable = true;
       userEmail = "${userinfo.email}";
       userName = "${userinfo.gituser}";
       extraConfig = {
         init.defaultBranch = "main";
-        pull.rebase = false;
-        pull.ff = "only";
+        push.autoSetupRemote = "true";
       };
       includes = [
         { path = "$HOME/.gitconfig"; }
@@ -119,24 +160,20 @@ let tools = [
         if [ -e '/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh' ]; then
           . '/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh'
         fi
-
         if [ -e $HOME/.nix-profile/etc/profile.d/nix.sh ]; then . $HOME/.nix-profile/etc/profile.d/nix.sh; fi
-
-        PATH="$PATH:/$HOME/.local/bin"
-        export NIXPKGS_ALLOW_UNFREE=1
-
         if [ -e $HOME/.secrets ]; then . $HOME/.secrets; fi
 
         unalias gm
-
-        export AWS_PROFILE=default-mfa
       '';
       oh-my-zsh = {
         enable = true;
         extraConfig = ''
           ZSH_CUSTOM="${customDir}"
+          zstyle ':completion:*:*:man:*:*' menu select=long search
+          zstyle ':autocomplete:*' recent-dirs zoxide
         '';
         plugins = [
+          "vagrant"
           "git"
           "docker"
           "kubectl"
@@ -148,6 +185,8 @@ let tools = [
 
         pcr = "pre-commit run --all"; # run all pre-commit hook
 
+        # spacelift
+        sc = "spacectl";
 
         # core utils
         cat = "bat -p";
@@ -157,6 +196,7 @@ let tools = [
         pack = "tar -zcvf archive.tar.gz";
         glog = "git log --oneline --decorate --graph";
         devbox = "ssh -A kirin@devbox";
+        nw = "narwhal";
 
         # helm
         h = "helm";
@@ -214,6 +254,8 @@ let tools = [
         ktnw = "watch -n 0.5 kubectl top nodes";
         kd = "kubectl describe";
         kdel = "kubectl delete";
+        kctx = "kubectx";
+        kns = "kubens";
 
         # for windows only
         open = "explorer.exe";
@@ -236,8 +278,8 @@ let tools = [
           src = pkgs.fetchFromGitHub {
             owner = "marlonrichert";
             repo = "zsh-autocomplete";
-            rev = "39423112977a8c520962bc11c46ee31e7ca873ca";
-            sha256 = "sha256-+UziTYsjgpiumSulrLojuqHtDrgvuG91+XNiaMD7wIs=";
+            rev = "f52f45a49d2df31e7d7aff1fb599c89b1eacbcef";
+            sha256 = "sha256-SmLnp+ccqtYQEzIUbHcyB8Y+mR/6gcf4zjQw9rDGgSg=";
           };
         }
       ];
