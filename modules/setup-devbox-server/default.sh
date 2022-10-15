@@ -31,17 +31,23 @@ stty echo
 gpg_name="$(git config --get user.name)"
 gpg_email="$(git config --get user.email)"
 
-variable="b
-$ssh_pass
-$ssh_pass
-$gpg_name
-$gpg_email
-Devbox Key
-$gpg_pass
-$gpg_pass
-"
+ssh-keygen -b 4096 -t rsa -f "$HOME/.ssh/id_rsa" -q -N "$ssh_pass"
+gpg_init=$(
+	cat <<-EOF
+		%echo Generating GPG Key
+		Key-Type: RSA
+		Key-Length: 4096
+		Subkey-Type: RSA
+		Subkey-Length: 4096
+		Name-Real: $gpg_name
+		Name-Email: $gpg_email
+		Expire-Date: 0
+		Passphrase: $gpg_pass
+		%commit
+		%echo done
+	EOF
+)
+echo "$gpg_init" | gpg --verbose --batch --generate-key
 
-printf '%s' "$variable" | $setup_keys
-
-$set_signing_key
-$register_with_github
+set-signing-key
+register-with-github

@@ -3,7 +3,7 @@
 # shellcheck disable=SC2154
 
 USAGE=$(
-	"$cat" <<-END
+	cat <<-END
 		  Use a machine/computer with the follow criteria:
 		    1. Browser Access
 		    2. rclone installed
@@ -15,13 +15,13 @@ USAGE=$(
 	END
 )
 
-"$echo" "$USAGE"
-"$echo" "Token: "
+echo "$USAGE"
+echo "Token: "
 read -r token
 
 # write clone directory
 rclone_home="$HOME/.config/rclone"
-"$mkdir" -p "$rclone_home"
-"$echo" "[pcloud_remote]" >"$rclone_home/rclone.conf"
-"$echo" "type = pcloud" >>"$rclone_home/rclone.conf"
-"$echo" "token = $token" >>"$rclone_home/rclone.conf"
+mkdir -p "$rclone_home"
+echo "[pcloud_remote]" >"$rclone_home/rclone.conf"
+echo "type = pcloud" >>"$rclone_home/rclone.conf"
+echo "token = $token" >>"$rclone_home/rclone.conf"

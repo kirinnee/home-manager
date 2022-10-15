@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 # shellcheck disable=SC2154
 
@@ -8,7 +8,7 @@ else
 	ssh_key=$(cat "$HOME"/ssh/"$1")
 fi
 
-$get_uuid
+get-uuid
 
 # Get Github Username
 github_user=$(git config --get user.name)
@@ -25,7 +25,7 @@ while true; do
 done
 stty echo
 
-title="$USER-DevBox-$($get_uuid)"
+title="$USER-DevBox-$(get-uuid)"
 
 curl \
 	-X POST \
@@ -34,7 +34,7 @@ curl \
 	https://api.github.com/user/keys \
 	-d "{\"key\":\"$ssh_key\", \"title\":\"$title\"}"
 
-gpg_key=$($git config --get user.signingkey | $gpg --armour --export | $sed ':a;N;$!ba;s/\n/\\n/g')
+gpg_key=$(git config --get user.signingkey | gpg --armour --export | sed ':a;N;$!ba;s/\n/\\n/g')
 
 curl \
 	-X POST \

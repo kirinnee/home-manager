@@ -1,4 +1,6 @@
-#!/bin/sh
+#!/bin/bash
+
+set -e
 
 # shellcheck disable=SC2154
 command_type="$1"
