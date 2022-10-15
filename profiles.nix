@@ -3,22 +3,14 @@
     user = "kirin";
     email = "kirinnee97@gmail.com";
     gituser = "kirinnee";
-    linux = true;
     apps = false;
+    system = "x86_64-linux";
   };
   mac = {
     user = "ernest";
     email = "kirinnee97@gmail.com";
     gituser = "kirinnee";
-    linux = false;
     apps = true;
+    system = "aarch64-darwin";
   };
-  macx64 = {
-    user = "e.ng.3";
-    email = "kirinnee97@gmail.com";
-    gituser = "kirinnee";
-    linux = false;
-    apps = true;
-  };
-
 }

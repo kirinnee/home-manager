@@ -36,7 +36,7 @@ if [ "$option" = "b" ] || [ "$option" = "s" ]; then
 	done
 	stty echo
 	echo "Generating SSH RSA key of 4096 bits at $HOME/.ssh/id_rsa"
-	$ssh_keygen -b 4096 -t rsa -f "$HOME/.ssh/id_rsa" -q -N "$ssh_pass"
+	ssh-keygen -b 4096 -t rsa -f "$HOME/.ssh/id_rsa" -q -N "$ssh_pass"
 fi
 
 # Generate GPG Key
@@ -128,8 +128,8 @@ if [ "$option" = "b" ] || [ "$option" = "g" ]; then
 	)
 
 	# Actually generate the key
-	echo "$gpg_init" | $gpg --verbose --batch --generate-key
-	$gpg --list-secret-keys
+	echo "$gpg_init" | gpg --verbose --batch --generate-key
+	gpg --list-secret-keys
 fi
 
 if [ "$option" = "b" ] || [ "$option" = "s" ] || [ "$option" = "p" ] || [ "$option" = "ps" ]; then
@@ -140,7 +140,7 @@ fi
 
 if [ "$option" = "b" ] || [ "$option" = "g" ] || [ "$option" = "p" ] || [ "$option" = "pg" ]; then
 	echo "GPG Pub Key:"
-	$gpg -K --keyid-format long | $grep -B 3 -A 1 "$gpg_name" | $grep '\[SCE\?A\?\]' | $grep -v expired | $sed 's#sec \+[^/]\+/\([0-9A-F]\+\).*#\1#' | $gpg --armour --export
+	gpg -K --keyid-format long | grep -B 3 -A 1 "$gpg_name" | grep '\[SCE\?A\?\]' | grep -v expired | sed 's#sec \+[^/]\+/\([0-9A-F]\+\).*#\1#' | gpg --armour --export
 	echo "============================================================"
 fi
 
