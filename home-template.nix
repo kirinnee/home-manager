@@ -70,13 +70,13 @@ let
       # cncf
       kubectl
       docker
-      kubectx
       k9s
       krew
       kubernetes-helm
       kubelogin-oidc
       atomi.narwhal
       linkerd
+      flyctl
 
       # tooling
       mmv-go
@@ -87,7 +87,6 @@ let
       cachix
 
       # aws
-      awscli2
       ssm-session-manager-plugin
 
       #custom modules
@@ -110,7 +109,7 @@ let
       NIXPKGS_ALLOW_UNFREE = "1";
       EDITOR = "code";
       AWS_PROFILE = "default-mfa";
-      DEVBOX = "54.251.162.121";
+      DEVBOX = "ernest.devbox.tr8.io";
     };
 
     ##################
@@ -139,10 +138,8 @@ let
           vscode-extensions.github.copilot
           vscode-extensions.hashicorp.terraform
           vscode-extensions.ms-dotnettools.csharp
-          #       vscode-extensions.ms-python.python
           vscode-extensions.humao.rest-client
           vscode-extensions.jnoortheen.nix-ide
-
         ];
       };
 
@@ -234,26 +231,25 @@ let
           if [ -e $HOME/.secrets ]; then . $HOME/.secrets; fi
 
           unalias gm
+          zstyle ':completion:*:*:man:*:*' menu select=long search
+          zstyle ':autocomplete:*' recent-dirs zoxide
+          unsetopt extended_history
         '';
 
         oh-my-zsh = {
           enable = true;
           extraConfig = ''
             ZSH_CUSTOM="${customDir}"
-            zstyle ':completion:*:*:man:*:*' menu select=long search
-            zstyle ':autocomplete:*' recent-dirs zoxide
           '';
           plugins = [
+            "kubectl"
             "dotnet"
             "golang"
             "fd"
             "helm"
             "node"
-            "poetry"
-            "python"
             "git"
             "docker"
-            "kubectl"
             "pls"
             "aws"
           ];
@@ -301,6 +297,7 @@ let
           dps = "docker ps";
           dpsa = "docker ps -a";
           dpsm = "docker ps --format 'table{{.ID}}\t{{.Names}}\t{{.Image}}'";
+          dockerize = "docker --context default run --rm -it -v $(pwd):/workspace -w /workspace";
 
           # nix & friends
           hms = "home-manager switch --impure --flake $HOME/home-manager-config#$USER";
@@ -335,6 +332,7 @@ let
           kdel = "kubectl delete";
           kctx = "kubectx";
           kns = "kubens";
+          kdbg = "kubectl debug -it --image nicolaka/netshoot";
 
           # for windows only
           open = "explorer.exe";
@@ -358,7 +356,7 @@ let
             src = pkgs.fetchFromGitHub {
               owner = "marlonrichert";
               repo = "zsh-autocomplete";
-              rev = "f52f45a49d2df31e7d7aff1fb599c89b1eacbcef";
+              rev = "2023-07-13";
               sha256 = "sha256-SmLnp+ccqtYQEzIUbHcyB8Y+mR/6gcf4zjQw9rDGgSg=";
             };
           }

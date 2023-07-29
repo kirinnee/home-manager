@@ -1,29 +1,75 @@
 #compdef pls
 
-# Listing commands from Taskfile.yml
-function __list() {
-    local -a scripts
+local context state state_descr line
+typeset -A opt_args
 
-    if [ -f Taskfile.yml ]; then
-        tasks=$(pls -l | sed -En "s/^\* ([^[:space:]]+):[[:space:]]+(.+)$/\1 \2/p" | awk '{gsub(/:/,"\\:",$1)} 1' | awk "{ st = index(\$0,\" \"); print \$1 \":\" substr(\$0,st+1)}")
-        scripts=("${(@f)$(echo $tasks)}")
-        _describe 'script' scripts
+_GO_TASK_COMPLETION_LIST_OPTION="${GO_TASK_COMPLETION_LIST_OPTION:---list-all}"
+
+# Listing commands from Taskfile.yml
+function __task_list() {
+    local -a scripts cmd
+    local -i enabled=0
+    local taskfile item pls desc
+
+    cmd=(pls)
+    taskfile="${(v)opt_args[(i)-t|--taskfile]}"
+
+    if [[ -n "$taskfile" && -f "$taskfile" ]]; then
+        enabled=1
+        cmd+=(--taskfile "$taskfile")
+    else
+        dir=$(pwd)
+        while true; do
+            if [[ $dir == '/' ]]; then
+                for taskfile in Taskfile{,.dist}.{yaml,yml}; do
+                    if [[ -f "$dir/$taskfile" ]]; then
+                        enabled=1
+                        break
+                    fi
+                done
+                break
+            fi
+            for taskfile in Taskfile{,.dist}.{yaml,yml}; do
+                if [[ -f "$dir/$taskfile" ]]; then
+                    enabled=1
+                    break
+                fi
+            done
+            dir=$(dirname "$dir")
+        done
     fi
+
+    (( enabled )) || return 0
+
+    scripts=()
+    for item in "${(@)${(f)$("${cmd[@]}" $_GO_TASK_COMPLETION_LIST_OPTION)}[2,-1]#\* }"; do
+        task="${item%%:[[:space:]]*}"
+        desc="${item##[^[:space:]]##[[:space:]]##}"
+        scripts+=( "${task//:/\\:}:$desc" )
+    done
+    _describe 'Task to run' scripts
 }
 
 _arguments \
-    '(-d --dir)'{-d,--dir}'[sets directory of execution]: :_files' \
-    '(--dry)'--dry'[compiles and prints tasks in the order that they would be run, without executing them]' \
-    '(-f --force)'{-f,--force}'[forces execution even when the task is up-to-date]' \
-    '(-i --init)'{-i,--init}'[creates a new Taskfile.yml in the current folder]' \
-    '(-l --list)'{-l,--list}'[lists tasks with description of current Taskfile]' \
-    '(-p --parallel)'{-p,--parallel}'[executes tasks provided on command line in parallel]' \
-    '(-s --silent)'{-s,--silent}'[disables echoing]' \
-    '(--status)'--status'[exits with non-zero exit code if any of the given tasks is not up-to-date]' \
-    '(--summary)'--summary'[show summary about a task]' \
-    '(-t --taskfile)'{-t,--taskfile}'[choose which Taskfile to run. Defaults to "Taskfile.yml"]' \
-    '(-v --verbose)'{-v,--verbose}'[enables verbose mode]' \
-    '(--version)'--version'[show Task version]' \
-    '(-w --watch)'{-w,--watch}'[enables watch of the given task]' \
-    '(- *)'{-h,--help}'[show help]' \
-    '*: :__list'
+    '(-C --concurrency)'{-C,--concurrency}'[limit number of concurrent tasks]: ' \
+    '(-p --parallel)'{-p,--parallel}'[run command-line tasks in parallel]' \
+    '(-f --force)'{-f,--force}'[run even if task is up-to-date]' \
+    '(-c --color)'{-c,--color}'[colored output]' \
+    '(-d --dir)'{-d,--dir}'[dir to run in]:execution dir:_dirs' \
+    '(--dry)--dry[dry-run mode, compile and print tasks only]' \
+    '(-o --output)'{-o,--output}'[set output style]:style:(interleaved group prefixed)' \
+    '(--output-group-begin)--output-group-begin[message template before grouped output]:template text: ' \
+    '(--output-group-end)--output-group-end[message template after grouped output]:template text: ' \
+    '(-s --silent)'{-s,--silent}'[disable echoing]' \
+    '(--status)--status[exit non-zero if supplied tasks not up-to-date]' \
+    '(--summary)--summary[show summary\: field from tasks instead of running them]' \
+    '(-t --taskfile)'{-t,--taskfile}'[specify a different taskfile]:taskfile:_files' \
+    '(-v --verbose)'{-v,--verbose}'[verbose mode]' \
+    '(-w --watch)'{-w,--watch}'[watch-mode for given tasks, re-run when inputs change]' \
+    + '(operation)' \
+        {-l,--list}'[list describable tasks]' \
+        {-a,--list-all}'[list all tasks]' \
+        {-i,--init}'[create new Taskfile.yaml]' \
+        '(-*)'{-h,--help}'[show help]' \
+        '(-*)--version[show version and exit]' \
+        '*: :__task_list'
