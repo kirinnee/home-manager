@@ -12,7 +12,7 @@
 
     let isLinux = input: nixpkgs.lib.strings.hasSuffix "linux" input; in
 
-    let atomi = import (fetchTarball "https://github.com/kirinnee/test-nix-repo/archive/refs/tags/v9.1.0.tar.gz"); in
+    let atomi = import (fetchTarball "https://github.com/kirinnee/test-nix-repo/archive/refs/tags/v15.0.0.tar.gz"); in
     let profiles = import ./profiles.nix; in
 
     # Types of profiles

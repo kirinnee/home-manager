@@ -1,4 +1,4 @@
 import (builtins.fetchGit {
   url = "ssh://git@github.com/tr8team/home-manager-admin";
-  rev = "2893030615bad46b075b3c6b51526a8bea0270f9";
+  rev = "bd8ce710423b8b9bd7da24223adf68bcf10cbe0a";
 })
