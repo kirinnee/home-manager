@@ -129,7 +129,6 @@ let
     # Program Configurations #
     ##########################
     programs = {
-
       vscode = {
         enable = true;
         extensions = [
@@ -256,14 +255,7 @@ let
         };
 
         shellAliases = {
-
           pcr = "pre-commit run --all"; # run all pre-commit hook
-
-          # spacelift
-          sc = "spacectl";
-
-          # core utils
-          cat = "bat -p";
           cz = "cat ~/.zshrc";
           sz = "source ~/.zshrc";
           unpack = "tar -xvf";
@@ -271,7 +263,6 @@ let
           glog = "git log --oneline --decorate --graph";
           devbox = "ssh kirin@$DEVBOX";
           nw = "narwhal";
-
           # helm
           h = "helm";
           hi = "helm install";
@@ -323,6 +314,9 @@ let
           kg = "kubectl get";
           kc = "kubectl create";
           kgn = "kubectl get nodes";
+          kgp = "kubectl get pods";
+          kdes = "kubectl describe";
+          kgs = "kubectl get service";
           kgpw = "watch -n 0.5 kubectl get pods";
           ktp = "kubectl top pods";
           ktpw = "watch -n 0.5 kubectl top pods";
@@ -333,12 +327,6 @@ let
           kctx = "kubectx";
           kns = "kubens";
           kdbg = "kubectl debug -it --image nicolaka/netshoot";
-
-          # for windows only
-          open = "explorer.exe";
-
-          # gotrade only
-          gtmfa = "awsmfa auth -u tr8ernest -t";
 
         };
 
@@ -356,8 +344,8 @@ let
             src = pkgs.fetchFromGitHub {
               owner = "marlonrichert";
               repo = "zsh-autocomplete";
-              rev = "2023-07-13";
-              sha256 = "sha256-SmLnp+ccqtYQEzIUbHcyB8Y+mR/6gcf4zjQw9rDGgSg=";
+              rev = "6d059a3634c4880e8c9bb30ae565465601fb5bd2";
+              sha256 = "sha256-0NW0TI//qFpUA2Hdx6NaYdQIIUpRSd0Y4NhwBbdssCs=";
             };
           }
         ];
@@ -368,10 +356,6 @@ let
             {
               name = "ogham/exa";
               tags = [ use:completions/zsh ];
-            }
-            # interactive JQ query builder
-            {
-              name = "reegnz/jq-zsh-plugin";
             }
             # make sound when commands longer than 15 seconds completed
             {
