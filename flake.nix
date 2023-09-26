@@ -31,7 +31,7 @@
               home = {
                 username = personal.user;
                 homeDirectory = "/home/${personal.user}";
-                stateVersion = "21.11";
+                stateVersion = "23.05";
               };
             }
           ];
@@ -50,7 +50,7 @@
               home = {
                 username = mac.user;
                 homeDirectory = "/Users/${mac.user}";
-                stateVersion = "21.11";
+                stateVersion = "23.05";
               };
             }
           ];

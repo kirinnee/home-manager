@@ -53,9 +53,10 @@ let
     # Install packages here #
     #########################
 
-    home.packages = [
+    home.packages = ([
 
       # system
+      coreutils
       uutils-coreutils
       jq
       yq-go
@@ -66,6 +67,10 @@ let
       du-dust
       fd
       procs
+      dua
+      navi
+      tealdeer
+      zenith
 
       # cncf
       kubectl
@@ -77,6 +82,7 @@ let
       atomi.narwhal
       linkerd
       flyctl
+      bitwarden-cli
 
       # tooling
       mmv-go
@@ -97,9 +103,11 @@ let
       setup-keys
       get-uuid
       register-with-github
-
-
-    ];
+    ]
+      # ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+      #   pinentry_mac
+      # ]
+    );
 
 
     ###################################
@@ -107,7 +115,6 @@ let
     ###################################
     home.sessionVariables = {
       NIXPKGS_ALLOW_UNFREE = "1";
-      EDITOR = "code";
       AWS_PROFILE = "default-mfa";
       DEVBOX = "ernest.devbox.tr8.io";
     };
@@ -129,18 +136,6 @@ let
     # Program Configurations #
     ##########################
     programs = {
-      vscode = {
-        enable = true;
-        extensions = [
-          vscode-extensions.golang.go
-          vscode-extensions.tomoki1207.pdf
-          vscode-extensions.github.copilot
-          vscode-extensions.hashicorp.terraform
-          vscode-extensions.ms-dotnettools.csharp
-          vscode-extensions.humao.rest-client
-          vscode-extensions.jnoortheen.nix-ide
-        ];
-      };
 
       gpg = {
         enable = true;
@@ -186,14 +181,28 @@ let
         };
       };
 
+      alacritty = {
+        enable = true;
+        settings = {
+          font = {
+            normal = {
+              family = "JetBrainsMono Nerd Font";
+              style = "Regular";
+            };
+          };
+        };
+      };
+
       bat = {
         enable = true;
       };
 
 
-      exa = {
+      eza = {
         enable = true;
         enableAliases = true;
+        git = true;
+        icons = true;
       };
 
       broot = {
@@ -241,10 +250,19 @@ let
           if [ -e $HOME/.nix-profile/etc/profile.d/nix.sh ]; then . $HOME/.nix-profile/etc/profile.d/nix.sh; fi
           if [ -e $HOME/.secrets ]; then . $HOME/.secrets; fi
 
-          unalias gm
-          zstyle ':completion:*:*:man:*:*' menu select=long search
-          zstyle ':autocomplete:*' recent-dirs zoxide
-          unsetopt extended_history
+          () {
+             local -a prefix=( '\e'{\[,O} )
+             local -a up=( $${^prefix}A ) down=( $${^prefix}B )
+             local key=
+             for key in $up[@]; do
+                bindkey "$key" up-line-or-history
+             done
+             for key in $down[@]; do
+                bindkey "$key" down-line-or-history
+             done
+          }
+
+          bindkey "$${key[Up]}" up-line-or-search
         '';
 
         oh-my-zsh = {
@@ -343,6 +361,11 @@ let
         };
 
         plugins = [
+          {
+            name = "powerlevel10k";
+            src = pkgs.zsh-powerlevel10k;
+            file = "share/zsh-powerlevel10k/powerlevel10k.zsh-theme";
+          }
           # p10k config
           {
             name = "powerlevel10k-config";
@@ -354,36 +377,18 @@ let
             name = "zsh-autocomplete";
             file = "zsh-autocomplete.plugin.zsh";
             src = pkgs.fetchFromGitHub {
-              owner = "marlonrichert";
+              owner = "cat ";
               repo = "zsh-autocomplete";
               rev = "6d059a3634c4880e8c9bb30ae565465601fb5bd2";
               sha256 = "sha256-0NW0TI//qFpUA2Hdx6NaYdQIIUpRSd0Y4NhwBbdssCs=";
             };
           }
+          {
+            name = "you-should-use";
+            src = pkgs.zsh-you-should-use;
+            file = "share/zsh/plugins/you-should-use/you-should-use.plugin.zsh";
+          }
         ];
-
-        zplug = {
-          enable = true;
-          plugins = [
-            {
-              name = "ogham/exa";
-              tags = [ use:completions/zsh ];
-            }
-            # make sound when commands longer than 15 seconds completed
-            {
-              name = "kevinywlui/zlong_alert.zsh";
-            }
-            # remind you you have aliases
-            {
-              name = "djui/alias-tips";
-            }
-            # themes
-            {
-              name = "romkatv/powerlevel10k";
-              tags = [ as:theme depth:1 ];
-            }
-          ];
-        };
       };
     };
   };
