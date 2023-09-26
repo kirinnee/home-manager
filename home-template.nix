@@ -103,11 +103,7 @@ let
       setup-keys
       get-uuid
       register-with-github
-    ]
-      # ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-      #   pinentry_mac
-      # ]
-    );
+    ]);
 
 
     ###################################
