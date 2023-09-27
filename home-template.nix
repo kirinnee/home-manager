@@ -103,13 +103,13 @@ let
       setup-keys
       get-uuid
       register-with-github
-    ] ++ lib.optional stdenv.isLinux [
+    ] ++ (lib.optional stdenv.isLinux [
       jetbrains.webstorm
       jetbrains.idea-ultimate
       jetbrains.rider
       jetbrains.rust-rover
       jetbrains.goland
-    ]);
+    ]));
 
 
     ###################################
