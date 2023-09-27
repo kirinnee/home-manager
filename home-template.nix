@@ -103,6 +103,12 @@ let
       setup-keys
       get-uuid
       register-with-github
+    ] ++ pkgs.lib.optional pkgs.stdenv.isLinux [
+      jetbrains.webstorm
+      jetbrains.idea-ultimate
+      jetbrains.rider
+      jetbrains.rust-rover
+      jetbrains.goland
     ]);
 
 
@@ -132,6 +138,10 @@ let
     # Program Configurations #
     ##########################
     programs = {
+
+      vscode = {
+        enable = true;
+      };
 
       gpg = {
         enable = true;
