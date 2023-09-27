@@ -373,7 +373,7 @@ let
             name = "zsh-autocomplete";
             file = "zsh-autocomplete.plugin.zsh";
             src = pkgs.fetchFromGitHub {
-              owner = "cat ";
+              owner = "marlonrichert";
               repo = "zsh-autocomplete";
               rev = "6d059a3634c4880e8c9bb30ae565465601fb5bd2";
               sha256 = "sha256-0NW0TI//qFpUA2Hdx6NaYdQIIUpRSd0Y4NhwBbdssCs=";
