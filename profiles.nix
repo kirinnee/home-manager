@@ -1,16 +1,18 @@
-{
-  personal = {
+[
+  {
     user = "kirin";
     email = "kirinnee97@gmail.com";
     gituser = "kirinnee";
     apps = false;
-    system = "x86_64-linux";
-  };
-  mac = {
-    user = "ernest";
+    arch = "x86_64";
+    kernel = "linux";
+  }
+  {
+    user = "ernestng";
     email = "kirinnee97@gmail.com";
     gituser = "kirinnee";
     apps = true;
-    system = "aarch64-darwin";
-  };
-}
+    arch = "aarch64";
+    kernel = "darwin";
+  }
+]

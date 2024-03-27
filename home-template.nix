@@ -1,21 +1,14 @@
-{ config, pkgs, userinfo, atomi, linux, ... }:
+{ config, pkgs, atomi, profile, ... }:
 
 ####################
 # Custom Modules #
 ####################
 
-
 let modules = import ./modules/default.nix { nixpkgs = pkgs; }; in
 
-####################
-  # Upstream Mutator #
-  ####################
-
-let mutator = import ./upstream.nix; in
-
 ##################
-  # Linux Services #
-  ##################
+# Linux Services #
+##################
 let
   linuxService = {
     gpg-agent = {
@@ -27,8 +20,8 @@ let
 in
 
 #####################
-  # Custom ZSH folder #
-  #####################
+# Custom ZSH folder #
+#####################
 let
   customDir = pkgs.stdenv.mkDerivation {
     name = "oh-my-zsh-custom-dir";
@@ -39,14 +32,15 @@ let
     '';
   };
 in
-
 with pkgs;
 with modules;
+{
 
-
-let
-  output = {
     # Let Home Manager install and manage itself.
+    home.stateVersion = "23.11";
+    home.username = "${profile.user}";
+    home.homeDirectory = if profile.kernel == "linux" then "/home/${profile.user}" else "/Users/${profile.user}" ;
+
     programs.home-manager.enable = true;
 
     #########################
@@ -75,25 +69,20 @@ let
       # cncf
       kubectl
       docker
+      kubectx
       k9s
       krew
       kubernetes-helm
       kubelogin-oidc
-      atomi.narwhal
       linkerd
-      flyctl
       bitwarden-cli
 
       # tooling
       mmv-go
       neofetch
-      ngrok
       rclone
       tokei
       cachix
-
-      # aws
-      ssm-session-manager-plugin
 
       #custom modules
       backup-folder
@@ -103,7 +92,7 @@ let
       setup-keys
       get-uuid
       register-with-github
-    ] ++ (if stdenv.isLinux then [
+    ] ++ (if profile.kernel == "linux" then [
       jetbrains.webstorm
       jetbrains.idea-ultimate
       jetbrains.rider
@@ -116,9 +105,6 @@ let
     # Addtional environment variables #
     ###################################
     home.sessionVariables = {
-      NIXPKGS_ALLOW_UNFREE = "1";
-      AWS_PROFILE = "default-mfa";
-      DEVBOX = "ernest.devbox.tr8.io";
     };
 
     ##################
@@ -126,23 +112,16 @@ let
     ##################
     home.sessionPath = [
       "$HOME/.local/bin"
-      "$HOME/Downloads/flutter/bin"
-      "$HOME/.krew/bin"
     ];
     #######################
     # Background services #
     #######################
-    services = (if linux then linuxService else { });
+    services = (if profile.kernel == "linux" then linuxService else { });
 
     ##########################
     # Program Configurations #
     ##########################
     programs = {
-
-      vscode = {
-        enable = true;
-      };
-
       gpg = {
         enable = true;
       };
@@ -173,8 +152,8 @@ let
           };
         };
         enable = true;
-        userEmail = "${userinfo.email}";
-        userName = "${userinfo.gituser}";
+        userEmail = "${profile.email}";
+        userName = "${profile.gituser}";
         extraConfig = {
           init.defaultBranch = "main";
           push.autoSetupRemote = "true";
@@ -206,7 +185,6 @@ let
 
       eza = {
         enable = true;
-        enableAliases = true;
         git = true;
         icons = true;
       };
@@ -291,6 +269,7 @@ let
         };
 
         shellAliases = {
+          dal = "direnv allow";
           pcr = "pre-commit run --all"; # run all pre-commit hook
           cz = "cat ~/.zshrc";
           sz = "source ~/.zshrc";
@@ -327,24 +306,10 @@ let
           dockerize = "docker --context default run --rm -it -v $(pwd):/workspace -w /workspace";
 
           # nix & friends
-          hms = "home-manager switch --impure --flake $HOME/home-manager-config#$USER";
-          hmsz = "home-manager switch --impure --flake $HOME/home-manager-config#$USER && source ~/.zshrc";
+          hms = "home-manager switch";
+          hmsz = "home-manager switch && source ~/.zshrc";
           hmg = "home-manager generations";
-          ne = "nix-env";
-          ni = "nix-env -i";
-          nui = "nix-env --uninstall";
-          ns = "nix-shell";
-          nsp = "nix-shell -p";
-          nb = "nix-build";
-          nc = "nix-channel";
-          nca = "nix-channel --add";
-          ncr = "nix-channel --remove";
-          ncu = "nix-channel --update";
-          ngc = "nix-collect-garbage";
-          ndel = "nix-store --delete";
-          nixfindroot = "nix-store -q --roots";
-          der = "direnv reload";
-          dal = "direnv allow";
+          ns = "nix shell";
 
           # kubernetes
           kg = "kubectl get";
@@ -397,6 +362,4 @@ let
         ];
       };
     };
-  };
-in
-mutator { outputs = output; system = userinfo.system; nixpkgs = pkgs; }
+  }

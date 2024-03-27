@@ -1,10 +1,11 @@
-{ nixpkgs ? import <nixpkgs> { } }:
-let pkgs = import ./packages.nix { inherit nixpkgs; }; in
-with pkgs;
+{ pkgs, packages }:
+with packages;
 {
   system = [
+    bash
     coreutils
     gnugrep
+    jq
   ];
 
   dev = [
@@ -12,12 +13,13 @@ with pkgs;
     git
   ];
 
-  lint = [
-    pre-commit
-    nixpkgs-fmt
-    prettier
-    shfmt
-    shellcheck
+  main = [
+    infisical
   ];
 
+  lint = [
+    # core
+    treefmt
+    shellcheck
+  ];
 }
