@@ -39,35 +39,32 @@
       homeConfigurations = builtins.listToAttrs(map (profile:
         let
             system = "${profile.arch}-${profile.kernel}";
-            pkgs = nixpkgs.legacyPackages.${system};
-            pkgs-2305 = nixpkgs-2305.legacyPackages.${system};
-            pkgs-feb-05-24 = nixpkgs-feb-05-24.legacyPackages.${system};
+            pkgs = import nixpkgs { inherit system; config.allowUnfree = true; };
+            pkgs-2305 = import nixpkgs-2305 { inherit system; config.allowUnfree = true; };
+            pkgs-feb-05-24 = import nixpkgs-feb-05-24 { inherit system; config.allowUnfree = true; };
             pre-commit-lib = pre-commit-hooks.lib.${system};
             atomi = atomipkgs.packages.${system}; in
         {
             name = profile.user;
             value = home-manager.lib.homeManagerConfiguration {
-            inherit pkgs;
-            modules = [ ./home.nix ];
-            extraSpecialArgs = {
-            inherit atomi profile;
-            };
+                inherit pkgs;
+                modules = [ ./home.nix ];
+                extraSpecialArgs = {
+                    inherit atomi profile;
+                };
             };
         }) profiles );
     } // (
       flake-utils.lib.eachDefaultSystem
         (system:
         let
-            pkgs = nixpkgs.legacyPackages.${system};
-            pkgs-2305 = nixpkgs-2305.legacyPackages.${system};
-            pkgs-feb-05-24 = nixpkgs-feb-05-24.legacyPackages.${system};
+            pkgs = import nixpkgs { inherit system; config.allowUnfree = true; };
+            pkgs-2305 = import nixpkgs-2305 { inherit system; config.allowUnfree = true; };
+            pkgs-feb-05-24 = import nixpkgs-feb-05-24 { inherit system; config.allowUnfree = true; };
             pre-commit-lib = pre-commit-hooks.lib.${system};
             atomi = atomipkgs.packages.${system}; in
         let
           out = rec {
-            lib = {
-              mutate = import ./default.nix { inherit atomi; };
-            };
             pre-commit = import ./nix/pre-commit.nix {
               inherit pre-commit-lib formatter packages;
             };
@@ -92,7 +89,7 @@
         in
         with out;
         {
-          inherit checks formatter packages devShells lib;
+          inherit checks formatter packages devShells;
         }
         )
 

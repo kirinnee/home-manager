@@ -98,7 +98,13 @@ with modules;
       jetbrains.rider
       jetbrains.rust-rover
       jetbrains.goland
-    ] else [ ]));
+    ] else [
+      alt-tab-macos
+      rectangle
+      raycast
+      obsidian
+      nerdfonts
+    ]));
 
 
     ###################################
