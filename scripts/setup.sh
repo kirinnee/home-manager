@@ -19,7 +19,7 @@ rm -rf ~/.config/home-manager
 echo "✅ Remove existing Home Manager configuration!"
 
 echo "🔄 Syncing Home Manager..."
-nix run nixpkgs#git -- clone https://github.com/kirinnee/home-manager.git ~/.config
+nix run nixpkgs#git -- clone https://github.com/kirinnee/home-manager.git ~/.config/home-manager
 echo "✅ Synced Home Manager!"　
 
 echo "🔥 Initialize Home Manager..."
