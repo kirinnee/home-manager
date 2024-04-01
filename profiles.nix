@@ -8,7 +8,7 @@
     kernel = "linux";
   }
   {
-    user = "ernestng";
+    user = "ernest";
     email = "kirinnee97@gmail.com";
     gituser = "kirinnee";
     apps = true;

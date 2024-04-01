@@ -2,6 +2,8 @@
 
 # shellcheck disable=SC2154
 
+which sed
+
 if [ "$1" = "" ]; then
 	ssh_key=$(cat "$HOME"/.ssh/id_rsa.pub)
 else
@@ -42,3 +44,8 @@ curl \
 	-u "$github_user:$github_PAT" \
 	https://api.github.com/user/gpg_keys \
 	-d "{\"armored_public_key\":\"$gpg_key\"}"
+
+echo "Updating Nix configurations to use PAT..."
+sudo echo "Sudo Permission obtained!"
+
+echo "access-tokens = github.com=${github_PAT}" | sudo tee -a /etc/nix/nix.conf > /dev/null
