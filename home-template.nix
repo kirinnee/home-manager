@@ -5,6 +5,7 @@
 ####################
 
 let modules = import ./modules/default.nix { nixpkgs = pkgs; }; in
+let mm = import ./modules/macos/default.nix { nixpkgs = pkgs; inherit profile; }; in
 
 ##################
 # Linux Services #
@@ -98,13 +99,22 @@ with modules;
       jetbrains.rider
       jetbrains.rust-rover
       jetbrains.goland
-    ] else [
+    ] else (
+        with mm;
+        [
+      firefox
+      arc
+      beekeeper-studio
+      httpie
+      zed
+      aptakube
+
       alt-tab-macos
       rectangle
       raycast
       obsidian
       nerdfonts
-    ]));
+    ])));
 
 
     ###################################

@@ -3,8 +3,15 @@
 My personal [home-manager](https://github.com/nix-community/home-manager) configurations, which include ZSH plugins, configurations and basic binaries used for development.
 
 ## Setup New Box
+
+Install Basic Dependencies: Nix, Home Manager, and basic applications
 ```
 curl -L https://raw.githubusercontent.com/kirinnee/home-manager/main/scripts/setup.sh | bash
+```
+
+Configure SSH Key and GPG Key and setting up rate-limits for Nix
+```
+setup-devbox-server
 ```
 
 ## AutoBackup CLI

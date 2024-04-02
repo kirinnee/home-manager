@@ -1,4 +1,4 @@
-{ nixpkgs ? import <nixpkgs> { } }:
+{ nixpkgs }:
 with nixpkgs;
 let trivialBuilders = import ./trivialBuilders.nix { inherit lib stdenv stdenvNoCC lndir runtimeShell shellcheck; }; in
 rec {
