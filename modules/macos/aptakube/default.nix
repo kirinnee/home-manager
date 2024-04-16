@@ -7,12 +7,12 @@
 
 stdenvNoCC.mkDerivation (finalAttrs: {
   pname = "aptakube";
-  version = "1.6.3";
+  version = "1.6.4";
 
   src = fetchurl {
     name = "Aptakube.dmg";
     url = "https://github.com/aptakube/aptakube/releases/download/${finalAttrs.version}/Aptakube_${finalAttrs.version}_universal.dmg";
-    hash = "sha256-0TqiVenvNVHS/31hp8nOEH5HcysJxtlvv7Nka6nOr+s=";
+    hash = "sha256-o1Bw8iBBWTMUnTPgWmuuMRyYfKj2SxAXiqp47t+d2cs=";
   };
 
   dontPatch = true;
