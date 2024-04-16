@@ -9,5 +9,6 @@ else
 fi
 
 touch ~/.gitconfig
-sign_key_id=$(gpg -K --keyid-format long | grep -B 3 -A 1 "$gpg_name" | grep '\[SCE\?A\?\]' | grep -v expired | sed 's#sec \+[^/]\+/\([0-9A-F]\+\).*#\1#')
+sign_key_id=$(gpg -K --keyid-format long | grep -B 3 -A 1 "$gpg_name" | grep '\[SCE' | grep -v expired | sed 's#sec \+[^/]\+/\([0-9A-F]\+\).*#\1#')
+echo "✅ Obtained signing key id: ${sign_key_id}"
 printf "[commit]\n\tgpgsign = true\n[user]\n\tsigningkey = %s" "$sign_key_id" >~/.gitconfig
