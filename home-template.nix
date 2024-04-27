@@ -345,7 +345,7 @@ with modules;
           kns = "kubens";
           kdbg = "kubectl debug -it --image nicolaka/netshoot";
 
-          nix-housekeep = "sudo nix-collect-garbage && sudo nix-collect-garbage --delete-old && sudo nix-collect-garbage -d";
+          nix-housekeep = "sudo nix-collect-garbage && sudo nix-collect-garbage --delete-old && nix-collect-garbage -d";
 
         };
 
