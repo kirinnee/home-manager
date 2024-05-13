@@ -294,6 +294,7 @@ with modules;
           glog = "git log --oneline --decorate --graph";
           devbox = "ssh kirin@$DEVBOX";
           nw = "narwhal";
+          wr = "wrangler";
           # helm
           h = "helm";
           hi = "helm install";
