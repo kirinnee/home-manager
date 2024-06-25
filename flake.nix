@@ -10,6 +10,7 @@
     # Specify the source of Home Manager and Nixpkgs.
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     nixpkgs-2305.url = "nixpkgs/nixos-23.05";
+    nixpkgs-2405.url = "nixpkgs/nixos-24.05";
     nixpkgs-feb-05-24.url = "nixpkgs/057f9aecfb71c4437d2b27d3323df7f93c010b7e";
 
     atomipkgs.url = "github:kirinnee/test-nix-repo/v22.2.0";
@@ -30,6 +31,7 @@
 
     , nixpkgs
     , nixpkgs-2305
+    , nixpkgs-2405
     , nixpkgs-feb-05-24
     , atomipkgs
     , home-manager
@@ -41,6 +43,7 @@
             system = "${profile.arch}-${profile.kernel}";
             pkgs = import nixpkgs { inherit system; config.allowUnfree = true; };
             pkgs-2305 = import nixpkgs-2305 { inherit system; config.allowUnfree = true; };
+            pkgs-2405 = import nixpkgs-2405 { inherit system; config.allowUnfree = true; };
             pkgs-feb-05-24 = import nixpkgs-feb-05-24 { inherit system; config.allowUnfree = true; };
             pre-commit-lib = pre-commit-hooks.lib.${system};
             atomi = atomipkgs.packages.${system}; in
@@ -50,7 +53,7 @@
                 inherit pkgs;
                 modules = [ ./home.nix ];
                 extraSpecialArgs = {
-                    inherit atomi profile;
+                    inherit atomi profile pkgs-2405;
                 };
             };
         }) profiles );
@@ -60,6 +63,7 @@
         let
             pkgs = import nixpkgs { inherit system; config.allowUnfree = true; };
             pkgs-2305 = import nixpkgs-2305 { inherit system; config.allowUnfree = true; };
+            pkgs-2405 = import nixpkgs-2405 { inherit system; config.allowUnfree = true; };
             pkgs-feb-05-24 = import nixpkgs-feb-05-24 { inherit system; config.allowUnfree = true; };
             pre-commit-lib = pre-commit-hooks.lib.${system};
             atomi = atomipkgs.packages.${system}; in

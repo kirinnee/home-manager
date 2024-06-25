@@ -1,4 +1,4 @@
-{ config, pkgs, atomi, profile, ... }:
+{ config, pkgs, pkgs-2405, atomi, profile, ... }:
 
 ####################
 # Custom Modules #
@@ -76,7 +76,7 @@ with modules;
       kubernetes-helm
       kubelogin-oidc
       linkerd
-      bitwarden-cli
+      pkgs-2405.bitwarden-cli
 
       # tooling
       mmv-go
@@ -93,6 +93,7 @@ with modules;
       setup-keys
       get-uuid
       register-with-github
+      okta-aws-cli
     ] ++ (if profile.kernel == "linux" then [
       jetbrains.webstorm
       jetbrains.idea-ultimate
