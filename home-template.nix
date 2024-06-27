@@ -93,7 +93,11 @@ with modules;
       setup-keys
       get-uuid
       register-with-github
-      okta-aws-cli
+
+      # liftoff
+      awscli2
+      pkgs-2405.gimme-aws-creds
+      atomi.sdm
     ] ++ (if profile.kernel == "linux" then [
       jetbrains.webstorm
       jetbrains.idea-ultimate
@@ -145,10 +149,20 @@ with modules;
 
       ssh = {
         enable = true;
+        extraConfig = ''
+            Host github-personal
+            HostName github.com
+            PreferredAuthentications publickey
+            IdentityFile ~/.ssh/id_rsa
+
+            Host github-liftoff
+            HostName github.com
+            PreferredAuthentications publickey
+            IdentityFile ~/.ssh/id_ed25519
+        '';
       };
 
       git = {
-
         delta = {
           enable = true;
           options = {
@@ -174,6 +188,8 @@ with modules;
         extraConfig = {
           init.defaultBranch = "main";
           push.autoSetupRemote = "true";
+          branch.autosetuprebase = "always";
+          pull.rebase = "true";
         };
         includes = [
           { path = "$HOME/.gitconfig"; }
@@ -349,6 +365,10 @@ with modules;
 
           nix-housekeep = "sudo nix-collect-garbage && sudo nix-collect-garbage --delete-old && nix-collect-garbage -d";
 
+          awsp = "export AWS_PROFILE=$(grep -oP '(?<=^\\[)[^\\]]+(?=\\]$)' ~/.aws/credentials | fzf)";
+
+          # liftoff
+          awsl = "unset AWS_PROFILE && gimme-aws-creds && awsp";
         };
 
         plugins = [
