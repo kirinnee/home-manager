@@ -13,7 +13,7 @@
     nixpkgs-2405.url = "nixpkgs/nixos-24.05";
     nixpkgs-feb-05-24.url = "nixpkgs/057f9aecfb71c4437d2b27d3323df7f93c010b7e";
 
-    atomipkgs.url = "github:kirinnee/test-nix-repo/v22.2.0";
+    atomipkgs.url = "github:kirinnee/test-nix-repo/v25.1.0";
 
     home-manager = {
       url = "github:nix-community/home-manager";
