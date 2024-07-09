@@ -4,7 +4,7 @@
 # Custom Modules #
 ####################
 
-let modules = import ./modules/default.nix { nixpkgs = pkgs; }; in
+let modules = import ./modules/default.nix { nixpkgs = pkgs; sdm = atomi.sdm; }; in
 let mm = import ./modules/macos/default.nix { nixpkgs = pkgs; inherit profile; }; in
 
 ##################
@@ -56,6 +56,7 @@ with modules;
       jq
       yq-go
       ripgrep
+      gnugrep
       unixtools.watch
       gnutar
       tmux
@@ -93,6 +94,7 @@ with modules;
       setup-keys
       get-uuid
       register-with-github
+      k8s-sdm
 
       # liftoff
       awscli2
@@ -133,6 +135,7 @@ with modules;
     ##################
     home.sessionPath = [
       "$HOME/.local/bin"
+      "$HOME/bin"
     ];
     #######################
     # Background services #
