@@ -1,4 +1,4 @@
-{ nixpkgs }:
+{ nixpkgs, sdm }:
 with nixpkgs;
 let trivialBuilders = import ./trivialBuilders.nix { inherit lib stdenv stdenvNoCC lndir runtimeShell shellcheck; }; in
 rec {
@@ -9,4 +9,5 @@ rec {
   setup-devbox-server = import ./setup-devbox-server/default.nix { inherit nixpkgs trivialBuilders set-signing-key setup-keys register-with-github; };
   setup-keys = import ./setup-keys/default.nix { inherit nixpkgs trivialBuilders; };
   setup-pcloud-remote = import ./setup-pcloud-remote/default.nix { inherit nixpkgs trivialBuilders; };
+  k8s-sdm = import ./k8s-sdm/default.nix { inherit nixpkgs trivialBuilders sdm; };
 }
