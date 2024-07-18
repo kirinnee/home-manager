@@ -4,6 +4,9 @@ echo "🛠 Generating kubeconfig"
 mkdir -p "$HOME/.kube/configs"
 mkdir -p "$HOME/.kube/k3dconfigs"
 
+rm "$HOME/.kube/config" || true
+rm "$HOME/.kube/configs/sdm" || true
+
 sdm k8s update-config --dry-run > "$HOME/.kube/configs/sdm"
 
 KUBECONFIG=$(cd ~/.kube/configs && find "$(pwd)"/* | awk 'ORS=":"')$(cd ~/.kube/k3dconfigs && find "$(pwd)"/* | awk 'ORS=":"') kubectl config view --flatten >~/.kube/config

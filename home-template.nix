@@ -67,6 +67,7 @@ with modules;
       navi
       tealdeer
       zenith
+      gh
 
       # cncf
       kubectl
@@ -99,6 +100,7 @@ with modules;
       # liftoff
       awscli2
       pkgs-2405.gimme-aws-creds
+      ssm-session-manager-plugin
       atomi.sdm
     ] ++ (if profile.kernel == "linux" then [
       jetbrains.webstorm
@@ -369,6 +371,8 @@ with modules;
           nix-housekeep = "sudo nix-collect-garbage && sudo nix-collect-garbage --delete-old && nix-collect-garbage -d";
 
           awsp = "export AWS_PROFILE=$(grep -oP '(?<=^\\[)[^\\]]+(?=\\]$)' ~/.aws/credentials | fzf)";
+          aec2ls = "aws ec2 describe-instances --query 'Reservations[*].Instances[*].[InstanceId, Tags[?Key=='Name']|[0].Value]' --output text --region us-east-1";
+          aec2eti = "aws ssm start-session --target";
 
           # liftoff
           awsl = "unset AWS_PROFILE && gimme-aws-creds && awsp";
