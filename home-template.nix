@@ -111,6 +111,9 @@ with modules;
     ] else (
         with mm;
         [
+      pinentry-curses
+      pinentry_mac
+
       firefox
       arc
       beekeeper-studio
@@ -195,6 +198,7 @@ with modules;
           push.autoSetupRemote = "true";
           branch.autosetuprebase = "always";
           pull.rebase = "true";
+          rebase.autoStash = "true";
         };
         includes = [
           { path = "$HOME/.gitconfig"; }
