@@ -1,0 +1,22 @@
+version: 3
+tasks:
+  update:arc:
+    desc: Update Arc
+    cmds:
+      - ./scripts/updates/arc.sh
+  update:beekeeper-studio:
+    desc: Update Beekeeper Studio
+    cmds:
+      - ./scripts/updates/beekeeper-studio.sh
+  update:aptakube:
+    desc: Update Aptakube
+    cmds:
+      - ./scripts/updates/aptakube.sh
+  update:firefox:
+    desc: Update Firefox
+    cmds:
+      - ./scripts/updates/firefox.sh
+  update:httpie:
+    desc: Update HTTPie
+    cmds:
+      - ./scripts/updates/httpie.sh

@@ -3,7 +3,7 @@
 # shellcheck disable=SC2154
 
 USAGE=$(
-	cat <<-END
+  cat <<-END
 		  Use a machine/computer with the follow criteria:
 		    1. Browser Access
 		    2. rclone installed

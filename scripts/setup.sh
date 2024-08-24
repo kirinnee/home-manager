@@ -7,6 +7,7 @@ curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix 
 echo "✅ Nix installation completed!"
 
 set +eou
+# shellcheck disable=SC1091
 . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
 set -eou
 
@@ -24,5 +25,6 @@ echo "✅ Synced Home Manager!"　
 
 echo "🔥 Initialize Home Manager..."
 home-manager switch
+# shellcheck disable=SC1090
 source ~/.zshrc
 echo "✅ Home Manager Switched!"

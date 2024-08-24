@@ -38,35 +38,39 @@
     } @inputs:
     let profiles = import ./profiles.nix; in
     {
-      homeConfigurations = builtins.listToAttrs(map (profile:
-        let
+      homeConfigurations = builtins.listToAttrs (map
+        (profile:
+          let
             system = "${profile.arch}-${profile.kernel}";
             pkgs = import nixpkgs { inherit system; config.allowUnfree = true; };
             pkgs-2305 = import nixpkgs-2305 { inherit system; config.allowUnfree = true; };
             pkgs-2405 = import nixpkgs-2405 { inherit system; config.allowUnfree = true; };
             pkgs-feb-05-24 = import nixpkgs-feb-05-24 { inherit system; config.allowUnfree = true; };
             pre-commit-lib = pre-commit-hooks.lib.${system};
-            atomi = atomipkgs.packages.${system}; in
-        {
+            atomi = atomipkgs.packages.${system};
+          in
+          {
             name = profile.user;
             value = home-manager.lib.homeManagerConfiguration {
-                inherit pkgs;
-                modules = [ ./home.nix ];
-                extraSpecialArgs = {
-                    inherit atomi profile pkgs-2405;
-                };
+              inherit pkgs;
+              modules = [ ./home.nix ];
+              extraSpecialArgs = {
+                inherit atomi profile pkgs-2405;
+              };
             };
-        }) profiles );
+          })
+        profiles);
     } // (
       flake-utils.lib.eachDefaultSystem
         (system:
         let
-            pkgs = import nixpkgs { inherit system; config.allowUnfree = true; };
-            pkgs-2305 = import nixpkgs-2305 { inherit system; config.allowUnfree = true; };
-            pkgs-2405 = import nixpkgs-2405 { inherit system; config.allowUnfree = true; };
-            pkgs-feb-05-24 = import nixpkgs-feb-05-24 { inherit system; config.allowUnfree = true; };
-            pre-commit-lib = pre-commit-hooks.lib.${system};
-            atomi = atomipkgs.packages.${system}; in
+          pkgs = import nixpkgs { inherit system; config.allowUnfree = true; };
+          pkgs-2305 = import nixpkgs-2305 { inherit system; config.allowUnfree = true; };
+          pkgs-2405 = import nixpkgs-2405 { inherit system; config.allowUnfree = true; };
+          pkgs-feb-05-24 = import nixpkgs-feb-05-24 { inherit system; config.allowUnfree = true; };
+          pre-commit-lib = pre-commit-hooks.lib.${system};
+          atomi = atomipkgs.packages.${system};
+        in
         let
           out = rec {
             pre-commit = import ./nix/pre-commit.nix {

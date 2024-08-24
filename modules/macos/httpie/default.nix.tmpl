@@ -14,12 +14,12 @@ in
 
 stdenvNoCC.mkDerivation (finalAttrs: {
   pname = "httpie";
-  version = "2024.1.2";
+  version = "{{ .Env.VERSION }}";
 
   src = fetchurl {
     name = "HTTPie.dmg";
     url = "https://github.com/httpie/desktop/releases/download/v${finalAttrs.version}/HTTPie-${finalAttrs.version}${r."${profile.arch}"}.dmg";
-    hash = "sha256-YuH1KHFhknVzaQrHLpYRhWrpaOHQ0nktC+LNmlSKX/o=";
+    hash = "sha256:{{ .Env.HASH }}";
   };
 
   dontPatch = true;
