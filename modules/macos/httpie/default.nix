@@ -19,7 +19,7 @@ stdenvNoCC.mkDerivation (finalAttrs: {
   src = fetchurl {
     name = "HTTPie.dmg";
     url = "https://github.com/httpie/desktop/releases/download/v${finalAttrs.version}/HTTPie-${finalAttrs.version}${r."${profile.arch}"}.dmg";
-    hash = "sha256-YuH1KHFhknVzaQrHLpYRhWrpaOHQ0nktC+LNmlSKX/o=";
+    hash = "sha256:1yjzi9a9mkg21cnpklnhw5lfjsl526b2xiqad5rpb4k1f4lgbqb2";
   };
 
   dontPatch = true;

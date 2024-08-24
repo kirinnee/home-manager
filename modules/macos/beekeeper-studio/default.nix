@@ -7,13 +7,13 @@
 
 stdenvNoCC.mkDerivation (finalAttrs: {
   pname = "beekeeper-studio";
-  version = "4.6.0";
+  version = "4.6.2";
 
 
   src = fetchurl {
     name = "Beekeeper-Studio.dmg";
     url = "https://github.com/beekeeper-studio/beekeeper-studio/releases/download/v${finalAttrs.version}/Beekeeper-Studio-${finalAttrs.version}-arm64.dmg";
-    hash = "sha256-f/cAkTWxfTimbzdiwOrzYGm6/ihgonAVQVTENCpr518=";
+    hash = "sha256:0vvxg0qq994s8cmj42ana8s8yv10vn9j6s0ywnfsdwipm4azzxnx";
   };
 
   dontPatch = true;

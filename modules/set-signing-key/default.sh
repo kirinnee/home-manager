@@ -3,9 +3,9 @@
 # shellcheck disable=SC2154
 git_name="$(git config --get user.name)"
 if [ "$1" = "" ]; then
-	gpg_name="$git_name"
+  gpg_name="$git_name"
 else
-	gpg_name="$1"
+  gpg_name="$1"
 fi
 
 touch ~/.gitconfig

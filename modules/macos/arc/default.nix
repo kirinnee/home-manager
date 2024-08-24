@@ -6,11 +6,11 @@
 
 stdenvNoCC.mkDerivation (finalAttrs: {
   pname = "arc";
-  version = "1.48.2-51225";
+  version = "1.57.1-52939";
   src = fetchurl {
     name = "Arc.dmg";
     url = "https://releases.arc.net/release/Arc-${finalAttrs.version}.dmg";
-    hash = "sha256-8VukOTt94nstaGRuTQg32HNPEaGBQtJGqRYgKLSD/TY=";
+    hash = "sha256:1ff7di1lbbbzb9392z5fqrpfyx74d6c0ijl0g6xabqp6dr3r9vsg";
   };
 
   dontPatch = true;
@@ -36,7 +36,7 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     homepage = "https://arc.net/";
     license = with licenses; [ unfree ];
     sourceProvenance = with sourceTypes; [ binaryNativeCode ];
-    maintainers = with maintainers; [  ];
+    maintainers = with maintainers; [ ];
     platforms = [ "aarch64-darwin" "x86_64-darwin" ];
   };
 })
