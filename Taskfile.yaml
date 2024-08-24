@@ -1,5 +1,14 @@
 version: 3
 tasks:
+  delete-cycle:
+    desc: Delete cycle
+    cmds:
+      - ./scripts/delete_cycle.sh
+
+  update:
+    desc: Update all
+    cmds:
+      - ./scripts/update_mac.sh
   update:arc:
     desc: Update Arc
     cmds:
@@ -17,6 +26,10 @@ tasks:
     cmds:
       - ./scripts/updates/firefox.sh
   update:httpie:
+    desc: Update HTTPie
+    cmds:
+      - ./scripts/updates/httpie.sh
+  update:zed:
     desc: Update HTTPie
     cmds:
       - ./scripts/updates/httpie.sh

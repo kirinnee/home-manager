@@ -2,6 +2,7 @@
 
 set -euo pipefail
 
+echo "🔎 Fetching Firefox..."
 # Get the HTML content of the Firefox release notes page
 html_content=$( curl -s https://www.mozilla.org/en-US/firefox/releases/)
 
