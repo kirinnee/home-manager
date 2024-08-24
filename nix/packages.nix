@@ -18,6 +18,7 @@ let
       with pkgs-feb-05-24;
       {
         inherit
+          gomplate
           coreutils
           gnugrep
           bash

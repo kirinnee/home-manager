@@ -37,7 +37,7 @@ pre-commit-lib.run {
       enable = true;
       name = "Shell Check";
       entry = "${packages.shellcheck}/bin/shellcheck";
-      files = ".*sh$";
+      files = ".*\\.sh$";
       language = "system";
       pass_filenames = true;
     };
