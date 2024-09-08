@@ -53,6 +53,7 @@ with modules;
     # system
     coreutils
     uutils-coreutils
+    dogdns
     jq
     yq-go
     ripgrep
@@ -289,6 +290,8 @@ with modules;
            done
         }
 
+        unalias grep
+
         bindkey "$${key[Up]}" up-line-or-search
       '';
 
@@ -375,9 +378,10 @@ with modules;
 
         nix-housekeep = "sudo nix-collect-garbage && sudo nix-collect-garbage --delete-old && nix-collect-garbage -d";
 
-        awsp = "export AWS_PROFILE=$(grep -oP '(?<=^\\[)[^\\]]+(?=\\]$)' ~/.aws/credentials | fzf)";
-        aec2ls = "aws ec2 describe-instances --query 'Reservations[*].Instances[*].[InstanceId, Tags[?Key=='Name']|[0].Value]' --output text --region us-east-1";
+        awsp = "export AWS_PROFILE=$(grep '\\[' ~/.aws/credentials | tr -d '[]' | fzf)";
+        aec2ls = "aws ec2 describe-instances --filters \"Name=instance-state-name,Values=running\" --query \"Reservations[].Instances[].[InstanceId, Tags[?Key=='Name'].Value | [0]]\" --output text --region us-east-1";
         aec2eti = "aws ssm start-session --target";
+        aec2del = "aws ec2 terminate-instances --instance-ids";
 
         # liftoff
         awsl = "unset AWS_PROFILE && gimme-aws-creds && awsp";
