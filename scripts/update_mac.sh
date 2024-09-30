@@ -7,7 +7,6 @@ nix flake update
 echo "✅ Done!"
 
 echo "⬆️ Updating all nix definitions..."
-./scripts/updates/arc.sh &
 ./scripts/updates/beekeeper-studio.sh &
 ./scripts/updates/aptakube.sh &
 ./scripts/updates/httpie.sh &
