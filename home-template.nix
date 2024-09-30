@@ -117,7 +117,6 @@ with modules;
         pinentry_mac
 
         firefox
-        arc
         beekeeper-studio
         httpie
         zed
