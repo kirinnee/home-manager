@@ -69,6 +69,7 @@ with modules;
     tealdeer
     zenith
     gh
+    stern
 
     # cncf
     kubectl
