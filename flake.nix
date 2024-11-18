@@ -10,8 +10,9 @@
     # Specify the source of Home Manager and Nixpkgs.
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     nixpkgs-2305.url = "nixpkgs/nixos-23.05";
+    nixpkgs-240205.url = "nixpkgs/057f9aecfb71c4437d2b27d3323df7f93c010b7e";
     nixpkgs-2405.url = "nixpkgs/nixos-24.05";
-    nixpkgs-feb-05-24.url = "nixpkgs/057f9aecfb71c4437d2b27d3323df7f93c010b7e";
+    nixpkgs-240924.url = "nixpkgs/babc25a577c3310cce57c72d5bed70f4c3c3843a";
 
     atomipkgs.url = "github:kirinnee/test-nix-repo/v25.1.0";
 
@@ -31,8 +32,9 @@
 
     , nixpkgs
     , nixpkgs-2305
+    , nixpkgs-240205
     , nixpkgs-2405
-    , nixpkgs-feb-05-24
+    , nixpkgs-240924
     , atomipkgs
     , home-manager
     } @inputs:
@@ -44,8 +46,9 @@
             system = "${profile.arch}-${profile.kernel}";
             pkgs = import nixpkgs { inherit system; config.allowUnfree = true; };
             pkgs-2305 = import nixpkgs-2305 { inherit system; config.allowUnfree = true; };
+            pkgs-240205 = import nixpkgs-240205 { inherit system; config.allowUnfree = true; };
             pkgs-2405 = import nixpkgs-2405 { inherit system; config.allowUnfree = true; };
-            pkgs-feb-05-24 = import nixpkgs-feb-05-24 { inherit system; config.allowUnfree = true; };
+            pkgs-240924 = import nixpkgs-240924 { inherit system; config.allowUnfree = true; };
             pre-commit-lib = pre-commit-hooks.lib.${system};
             atomi = atomipkgs.packages.${system};
           in
@@ -55,7 +58,7 @@
               inherit pkgs;
               modules = [ ./home.nix ];
               extraSpecialArgs = {
-                inherit atomi profile pkgs-2405;
+                inherit atomi profile pkgs-2405 pkgs-240924;
               };
             };
           })
@@ -66,8 +69,9 @@
         let
           pkgs = import nixpkgs { inherit system; config.allowUnfree = true; };
           pkgs-2305 = import nixpkgs-2305 { inherit system; config.allowUnfree = true; };
+          pkgs-240205 = import nixpkgs-240205 { inherit system; config.allowUnfree = true; };
           pkgs-2405 = import nixpkgs-2405 { inherit system; config.allowUnfree = true; };
-          pkgs-feb-05-24 = import nixpkgs-feb-05-24 { inherit system; config.allowUnfree = true; };
+          pkgs-240924 = import nixpkgs-240924 { inherit system; config.allowUnfree = true; };
           pre-commit-lib = pre-commit-hooks.lib.${system};
           atomi = atomipkgs.packages.${system};
         in
@@ -80,7 +84,7 @@
               inherit treefmt-nix pkgs;
             };
             packages = import ./nix/packages.nix {
-              inherit pkgs atomi pkgs-2305 pkgs-feb-05-24;
+              inherit pkgs atomi pkgs-2305 pkgs-240205;
             };
             env = import ./nix/env.nix {
               inherit pkgs packages;

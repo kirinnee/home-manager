@@ -1,4 +1,4 @@
-{ pkgs, pkgs-2305, atomi, pkgs-feb-05-24 }:
+{ pkgs, pkgs-2305, atomi, pkgs-240205 }:
 let
 
   all = {
@@ -14,8 +14,8 @@ let
       with pkgs-2305;
       { }
     );
-    feb-05-24 = (
-      with pkgs-feb-05-24;
+    nix-240205 = (
+      with pkgs-240205;
       {
         inherit
           gomplate
@@ -36,4 +36,4 @@ in
 with all;
 nix-2305 //
 atomipkgs //
-feb-05-24
+nix-240205

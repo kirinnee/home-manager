@@ -27,7 +27,7 @@ stdenvNoCC.mkDerivation (finalAttrs: {
 
   installPhase = ''
     runHook preInstall
-
+    echo "hello"
     mkdir -p "$out/Applications/Beekeeper Studio.app"
     cp -R . "$out/Applications/Beekeeper Studio.app"
     ${xattr}/bin/xattr -c "$out/Applications/Beekeeper Studio.app"
