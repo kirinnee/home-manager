@@ -6,12 +6,12 @@
 }:
 stdenvNoCC.mkDerivation (finalAttrs: {
   pname = "zed";
-  version = "0.154.2";
+  version = "0.161.2";
 
   src = fetchurl {
     name = "Zed.dmg";
     url = "https://github.com/zed-industries/zed/releases/download/v${finalAttrs.version}/Zed-${profile.arch}.dmg";
-    hash = "sha256:1i045r954y6qi3rqi1z4bfml65gmcc7x5y4dhan5335gqf573zji";
+    hash = "sha256:1nm25q48cl2j7vbfjf9rzkm2lkbqc2bv83a4fj9kxdls160s192i";
   };
 
   dontPatch = true;

@@ -1,4 +1,4 @@
-{ config, pkgs, pkgs-2405, atomi, profile, ... }:
+{ config, pkgs, pkgs-2405, pkgs-240924, atomi, profile, ... }:
 
 ####################
 # Custom Modules #
@@ -80,7 +80,7 @@ with modules;
     kubernetes-helm
     kubelogin-oidc
     linkerd
-    pkgs-2405.bitwarden-cli
+    pkgs-240924.bitwarden-cli
 
     # tooling
     mmv-go
@@ -101,7 +101,7 @@ with modules;
 
     # liftoff
     awscli2
-    pkgs-2405.gimme-aws-creds
+    pkgs-240924.gimme-aws-creds
     ssm-session-manager-plugin
     atomi.sdm
   ] ++ (if profile.kernel == "linux" then [
@@ -230,7 +230,7 @@ with modules;
     eza = {
       enable = true;
       git = true;
-      icons = true;
+      icons = "auto";
     };
 
     broot = {
