@@ -135,7 +135,9 @@ with modules;
   ###################################
   # Addtional environment variables #
   ###################################
-  home.sessionVariables = { };
+  home.sessionVariables = {
+    REPOS = "$HOME/Workspace/work/liftoff";
+  };
 
   ##################
   # Addtional PATH #
@@ -169,6 +171,19 @@ with modules;
         HostName github.com
         PreferredAuthentications publickey
         IdentityFile ~/.ssh/id_ed25519
+
+        Host *.liftoff.io *.compute-1.amazonaws.com
+        User ubuntu
+        PasswordAuthentication no
+        ForwardAgent yes
+        SendEnv LIFTOFF_USER
+        StrictHostKeyChecking no
+        UserKnownHostsFile /dev/null
+        LogLevel ERROR
+        AddKeysToAgent yes
+        # The UseKeychain option is macOS-specific.
+        IgnoreUnknown UseKeychain
+        UseKeychain yes
       '';
     };
 
