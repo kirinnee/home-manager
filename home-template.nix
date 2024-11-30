@@ -172,7 +172,7 @@ with modules;
         PreferredAuthentications publickey
         IdentityFile ~/.ssh/id_ed25519
 
-        Host *.liftoff.io *.compute-1.amazonaws.com
+        Host *.liftoff.io
         User ubuntu
         PasswordAuthentication no
         ForwardAgent yes
