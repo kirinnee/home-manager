@@ -181,9 +181,6 @@ with modules;
         UserKnownHostsFile /dev/null
         LogLevel ERROR
         AddKeysToAgent yes
-        # The UseKeychain option is macOS-specific.
-        IgnoreUnknown UseKeychain
-        UseKeychain yes
       '';
     };
 
