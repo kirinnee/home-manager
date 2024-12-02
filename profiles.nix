@@ -23,4 +23,12 @@
     arch = "aarch64";
     kernel = "darwin";
   }
+  {
+    user = "ernest-liftoff";
+    email = "erng@liftoff.io";
+    gituser = "ernest-liftoff";
+    apps = true;
+    arch = "aarch64";
+    kernel = "darwin";
+  }
 ]
