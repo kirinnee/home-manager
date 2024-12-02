@@ -116,11 +116,12 @@ with modules;
       [
         pinentry-curses
         pinentry_mac
+        zed-editor
+        vscode
 
         firefox
         beekeeper-studio
         httpie
-        zed
         aptakube
 
         alt-tab-macos
