@@ -338,6 +338,9 @@ with modules;
         devbox = "ssh kirin@$DEVBOX";
         nw = "narwhal";
         wr = "wrangler";
+        zed = "zeditor";
+        rc = "open \"/nix/store/$(ls /nix/store | grep raycast | grep -v '.drv')\"";
+
         # helm
         h = "helm";
         hi = "helm install";
