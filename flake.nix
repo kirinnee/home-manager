@@ -14,7 +14,9 @@
     nixpkgs-2405.url = "nixpkgs/nixos-24.05";
     nixpkgs-240924.url = "nixpkgs/babc25a577c3310cce57c72d5bed70f4c3c3843a";
 
-    atomipkgs.url = "github:kirinnee/test-nix-repo/v25.1.0";
+    cyanprintpkgs.url = "github:AtomiCloud/sulfone.iridium";
+
+    atomipkgs.url = "github:kirinnee/test-nix-repo/v28.0.0";
 
     home-manager = {
       url = "github:nix-community/home-manager";
@@ -36,6 +38,7 @@
     , nixpkgs-2405
     , nixpkgs-240924
     , atomipkgs
+    , cyanprintpkgs
     , home-manager
     } @inputs:
     let profiles = import ./profiles.nix; in
@@ -51,6 +54,7 @@
             pkgs-240924 = import nixpkgs-240924 { inherit system; config.allowUnfree = true; };
             pre-commit-lib = pre-commit-hooks.lib.${system};
             atomi = atomipkgs.packages.${system};
+            cyanprint = cyanprintpkgs.packages.${system};
           in
           {
             name = profile.user;
@@ -58,7 +62,7 @@
               inherit pkgs;
               modules = [ ./home.nix ];
               extraSpecialArgs = {
-                inherit atomi profile pkgs-2405 pkgs-240924;
+                inherit atomi cyanprint profile pkgs-2405 pkgs-240924;
               };
             };
           })

@@ -36,7 +36,7 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     homepage = "https://arc.net/";
     license = with licenses; [ unfree ];
     sourceProvenance = with sourceTypes; [ binaryNativeCode ];
-    maintainers = with maintainers; [  ];
+    maintainers = with maintainers; [ ];
     platforms = [ "aarch64-darwin" "x86_64-darwin" ];
   };
 })

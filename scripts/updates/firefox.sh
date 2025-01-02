@@ -4,7 +4,7 @@ set -euo pipefail
 
 echo "🔎 Fetching Firefox..."
 # Get the HTML content of the Firefox release notes page
-html_content=$( curl -s https://www.mozilla.org/en-US/firefox/releases/)
+html_content=$(curl -s https://www.mozilla.org/en-US/firefox/releases/)
 
 # Extract all version numbers in the format major.minor.patch
 version_numbers=$(echo "$html_content" | grep -oP '(?<=<li><a href="\.\./)[0-9]+\.[0-9]+\.[0-9]+(?=/releasenotes/)')
