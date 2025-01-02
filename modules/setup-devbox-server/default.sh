@@ -4,27 +4,27 @@
 
 stty -echo
 while true; do
-	echo "SSH Passphrase:"
-	read -r ssh_pass
-	echo "Confirm SSH Passphrase:"
-	read -r ssh_verify
-	if [ "$ssh_pass" = "$ssh_verify" ]; then
-		break
-	else
-		echo "Passphrase Mismatched!"
-	fi
+  echo "SSH Passphrase:"
+  read -r ssh_pass
+  echo "Confirm SSH Passphrase:"
+  read -r ssh_verify
+  if [ "$ssh_pass" = "$ssh_verify" ]; then
+    break
+  else
+    echo "Passphrase Mismatched!"
+  fi
 done
 
 while true; do
-	echo "GPG Passphrase:"
-	read -r gpg_pass
-	echo "Confirm GPG Passphrase:"
-	read -r gpg_verify
-	if [ "$gpg_pass" = "$gpg_verify" ]; then
-		break
-	else
-		echo "Passphrase Mismatched!"
-	fi
+  echo "GPG Passphrase:"
+  read -r gpg_pass
+  echo "Confirm GPG Passphrase:"
+  read -r gpg_verify
+  if [ "$gpg_pass" = "$gpg_verify" ]; then
+    break
+  else
+    echo "Passphrase Mismatched!"
+  fi
 done
 stty echo
 
@@ -33,7 +33,7 @@ gpg_email="$(git config --get user.email)"
 
 ssh-keygen -b 4096 -t rsa -f "$HOME/.ssh/id_rsa" -q -N "$ssh_pass"
 gpg_init=$(
-	cat <<-EOF
+  cat <<-EOF
 		%echo Generating GPG Key
 		Key-Type: RSA
 		Key-Length: 4096

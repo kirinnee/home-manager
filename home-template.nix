@@ -1,4 +1,4 @@
-{ config, pkgs, pkgs-2405, pkgs-240924, atomi, profile, ... }:
+{ config, pkgs, pkgs-2405, pkgs-240924, atomi, cyanprint, profile, ... }:
 
 ####################
 # Custom Modules #
@@ -70,6 +70,7 @@ with modules;
     zenith
     gh
     stern
+    cyanprint.default
 
     # cncf
     kubectl
@@ -340,6 +341,7 @@ with modules;
         wr = "wrangler";
         zed = "zeditor";
         rc = "open \"/nix/store/$(ls /nix/store | grep raycast | grep -v '.drv')\"";
+        cyan = "cyanprint";
 
         # helm
         h = "helm";
