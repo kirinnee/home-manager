@@ -2,10 +2,8 @@
 with packages;
 {
   system = [
-    bash
-    coreutils
-    gnugrep
-    jq
+    atomiutils
+    sg
   ];
 
   dev = [
@@ -21,6 +19,7 @@ with packages;
   lint = [
     # core
     treefmt
+    gitlint
     shellcheck
   ];
 }

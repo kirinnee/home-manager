@@ -6,12 +6,12 @@
 
 stdenvNoCC.mkDerivation (finalAttrs: {
   pname = "firefox";
-  version = "132.0.2";
+  version = "134.0.2";
 
   src = fetchurl {
     name = "Firefox.dmg";
     url = "https://download-installer.cdn.mozilla.net/pub/firefox/releases/${finalAttrs.version}/mac/en-US/Firefox%20${finalAttrs.version}.dmg";
-    hash = "sha256:0k92g2dkmybslrqhfc9n0wbccnl5mcy27a8mv1l4i5mldv252ci3";
+    hash = "sha256:11basmslkbr25mgmfj43vra64asdwvhk4bdmq7g24cx1w78shckq";
   };
 
   dontPatch = true;

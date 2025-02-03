@@ -1,6 +1,6 @@
-{ trivialBuilders, nixpkgs, sdm }:
+{ trivialBuilders, nixpkgs }:
 
-let name = "k8s-sdm"; in
+let name = "k8s-update"; in
 let version = "1.0.0"; in
 let script = builtins.readFile ./default.sh; in
 trivialBuilders.writeShellApplication {
@@ -9,7 +9,7 @@ trivialBuilders.writeShellApplication {
   runtimeShell = "${nixpkgs.bash}/bin/sh";
   runtimeInputs = (
     with nixpkgs;
-    [ coreutils sdm gawk findutils ]
+    [ coreutils gawk findutils ]
   );
   text = script;
 }

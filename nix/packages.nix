@@ -1,4 +1,4 @@
-{ pkgs, pkgs-2305, atomi, pkgs-240205 }:
+{ pkgs, atomi, pkgs-2411 }:
 let
 
   all = {
@@ -6,26 +6,20 @@ let
       with atomi;
       {
         inherit
-          infisical
+          atomiutils
+          sg
           pls;
       }
     );
-    nix-2305 = (
-      with pkgs-2305;
-      { }
-    );
-    nix-240205 = (
-      with pkgs-240205;
+    nix-2411 = (
+      with pkgs-2411;
       {
         inherit
           gomplate
-          coreutils
-          gnugrep
-          bash
-          jq
+          infisical
 
           git
-
+          gitlint
           treefmt
           shellcheck
           ;
@@ -34,6 +28,5 @@ let
   };
 in
 with all;
-nix-2305 //
-atomipkgs //
-nix-240205
+nix-2411 //
+atomipkgs

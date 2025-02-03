@@ -1,0 +1,162 @@
+gitlint: .gitlint
+
+conventionMarkdown:
+  path: docs/developer/CommitConventions.md
+  template: |
+    ---
+    id: commit-conventions
+    title: Commit Conventions
+    ---
+    var___convention_docs___
+
+keywords:
+  - BREAKING CHANGE
+  - BREAKING CHANGES
+  - BREAKING
+
+branches:
+  - main
+
+specialScopes:
+  no-release:
+    desc: Prevent release from happening
+    release: false
+
+plugins:
+  # Generate Changelog
+  - module: '@semantic-release/changelog'
+    version: 6.0.3
+    config:
+      changelogFile: Changelog.md
+  # Commit Additional Changes & Artifacts
+  - module: '@semantic-release/git'
+    version: 10.0.1
+    config:
+      message: "release: ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+      assets:
+        - Changelog.md
+        - docs/developer/CommitConventions.md
+
+  # Github Release
+  - module: '@semantic-release/github'
+    version: 10.3.5
+
+# Angular Conventional Commit Example: https://github.com/angular/angular/blob/22b96b9/CONTRIBUTING.md#-commit-message-guidelines
+types:
+  - type: build
+    desc: 'Changes that affect the build system or external dependencies (example scopes: nix)'
+    scopes:
+      default:
+        desc: Fixes in nix
+        release: false
+  - type: config
+    desc: 'Changes to the configuration files (example scopes: nix, ci)'
+    scopes:
+      default:
+        desc: Update configuration files
+        release: false
+  - type: ci
+    desc: 'Changes to our CI configuration files and scripts (example scopes: github_workflow, github_action)'
+    scopes:
+      default:
+        desc: Update CI configuration
+        release: false
+  - type: docs
+    section: 📜 Documentation 📜
+    desc: Documentation only changes
+    scopes:
+      default:
+        desc: Update documentation such as README file
+        release: false
+  - type: feat
+    section: ✨ Features ✨
+    desc: A new feature
+    vae:
+      verb: add
+      application: <scope>, <title>
+      example: 'feat: new withdraw api for rapid'
+    scopes:
+      default:
+        desc: Release a new features
+        release: minor
+  - type: fix
+    section: 🐛 Bug Fixes 🐛
+    desc: A bug fix
+    vae:
+      verb: fix
+      application: <title>
+      example: 'fix: deposit api for rapid'
+    scopes:
+      default:
+        desc: Generic fixes
+        release: patch
+  - type: perf
+    section: 🚀 Performance Improvement 🚀
+    desc: A code change that improves performance
+    vae:
+      verb: improve
+      application: <title>
+      example: 'perf: alpaca api callback speed increase'
+    scopes:
+      default:
+        desc: Generic improvement statement
+        release: patch
+  - type: refactor
+    desc: A code change that neither fixes a bug nor adds a feature
+    vae:
+      verb: refactor
+      application: <scope>, <title>
+      example: 'refactor: make withdrawal code more reusable'
+    scopes:
+      default:
+        desc: Refactor existing feature
+        release: minor
+  - type: style
+    desc: Changes that do not affect the meaning of the code (white-space, formatting, missing semi-colons, etc)
+    vae:
+      verb: style
+      application: <title>
+      example: 'style: add missing semi colon'
+    scopes:
+      default:
+        desc: Generic improvement statement
+        release: patch
+  - type: test
+    section: 🧪 Tests 🧪
+    desc: Adding missing tests or correcting existing tests
+    vae:
+      verb: test
+      application: <scope>, <title>
+      example: 'test: update test for deposit api'
+    scopes:
+      default:
+        desc: Made changes to test
+        release: minor
+  - type: amend
+    desc: Any amendment, uncategorized, or small mistakes (like typos)
+    scopes:
+      default:
+        desc: amendments
+        release: false
+  - type: chore
+    desc: Chores like test, attempts, typos, etc
+    scopes:
+      default:
+        desc: Chores
+        release: false
+  - type: dep
+    desc: Dependency updates from upstream
+    section: 🔼 Dependency Upstreams 🔼
+    scopes:
+      default:
+        desc: Dependency updates
+        release: false
+      patch:
+        desc: Dependency updates are patches
+        release: patch
+      minor:
+        desc: Dependency updates are minor
+        release: minor
+      major:
+        desc: Dependency updates are major
+        release: major
