@@ -1,10 +1,10 @@
-{ config, pkgs, pkgs-2405, pkgs-240924, atomi, cyanprint, profile, ... }:
+{ config, pkgs, pkgs-240924, pkgs-2411, atomi, profile, ... }:
 
 ####################
 # Custom Modules #
 ####################
 
-let modules = import ./modules/default.nix { nixpkgs = pkgs; sdm = atomi.sdm; }; in
+let modules = import ./modules/default.nix { nixpkgs = pkgs; }; in
 let mm = import ./modules/macos/default.nix { nixpkgs = pkgs; inherit profile; }; in
 
 ##################
@@ -70,7 +70,7 @@ with modules;
     zenith
     gh
     stern
-    cyanprint.default
+    atomi.cyanprint
 
     # cncf
     kubectl
@@ -98,13 +98,12 @@ with modules;
     setup-keys
     get-uuid
     register-with-github
-    k8s-sdm
+    k8s-update
 
     # liftoff
     awscli2
     pkgs-240924.gimme-aws-creds
     ssm-session-manager-plugin
-    atomi.sdm
   ] ++ (if profile.kernel == "linux" then [
     jetbrains.webstorm
     jetbrains.idea-ultimate
@@ -129,7 +128,7 @@ with modules;
         rectangle
         raycast
         obsidian
-        nerdfonts
+        nerd-fonts.jetbrains-mono
       ]
     )));
 
@@ -139,6 +138,7 @@ with modules;
   ###################################
   home.sessionVariables = {
     REPOS = "$HOME/Workspace/work/liftoff";
+    EDITOR = "nano";
   };
 
   ##################
@@ -342,6 +342,8 @@ with modules;
         zed = "zeditor";
         rc = "open \"/nix/store/$(ls /nix/store | grep raycast | grep -v '.drv')\"";
         cyan = "cyanprint";
+        sgci = "sg committer install";
+        gundo = "git reset --soft HEAD~1";
 
         # helm
         h = "helm";

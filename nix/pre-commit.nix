@@ -42,10 +42,30 @@ pre-commit-lib.run {
       pass_filenames = true;
     };
 
+    a-gitlint = {
+      enable = true;
+      name = "Gitlint";
+      description = "Lints git commit message";
+      entry = "${packages.gitlint}/bin/gitlint --staged --msg-filename .git/COMMIT_EDITMSG";
+      language = "system";
+      pass_filenames = false;
+      stages = [ "commit-msg" ];
+    };
+
+    a-enforce-gitlint = {
+      enable = true;
+      name = "Enforce gitlint";
+      description = "Enforce atomi_releaser conforms to gitlint";
+      entry = "${packages.sg}/bin/sg gitlint";
+      files = "(atomi_release\\.yaml|\\.gitlint)";
+      language = "system";
+      pass_filenames = false;
+    };
+
     a-enforce-exec = {
       enable = true;
       name = "Enforce Shell Script executable";
-      entry = "${packages.coreutils}/bin/chmod +x";
+      entry = "${packages.atomiutils}/bin/chmod +x";
       files = ".*sh$";
       language = "system";
       pass_filenames = true;
