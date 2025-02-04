@@ -58,6 +58,7 @@ with modules;
     yq-go
     ripgrep
     gnugrep
+    nano
     unixtools.watch
     gnutar
     tmux
