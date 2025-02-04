@@ -344,6 +344,8 @@ with modules;
         cyan = "cyanprint";
         sgci = "sg committer install";
         gundo = "git reset --soft HEAD~1";
+        slog = "stern --only-log-lines -o raw";
+        slogl = "stern --only-log-lines -o raw -l app.kubernetes.io/name";
 
         # helm
         h = "helm";
