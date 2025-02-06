@@ -140,6 +140,7 @@ with modules;
   home.sessionVariables = {
     REPOS = "$HOME/Workspace/work/liftoff";
     EDITOR = "nano";
+    VAULT_ADDR = "https://vault.ops.vungle.io";
   };
 
   ##################
@@ -398,6 +399,8 @@ with modules;
         kctx = "kubectx";
         kns = "kubens";
         kdbg = "kubectl debug -it --image nicolaka/netshoot";
+
+        vaultlogin = "export VAULT_TOKEN=$(vault login -path=oktaoidc -token-only -method=oidc role=admin)";
 
         nix-housekeep = "sudo nix-collect-garbage && sudo nix-collect-garbage --delete-old && nix-collect-garbage -d";
 
