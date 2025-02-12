@@ -400,6 +400,7 @@ with modules;
         kns = "kubens";
         kdbg = "kubectl debug -it --image nicolaka/netshoot";
 
+        fixgpg = "gpgconf --kill gpg-agent";
         vaultlogin = "export VAULT_TOKEN=$(vault login -path=oktaoidc -token-only -method=oidc role=admin)";
 
         nix-housekeep = "sudo nix-collect-garbage && sudo nix-collect-garbage --delete-old && nix-collect-garbage -d";
