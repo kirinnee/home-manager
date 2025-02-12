@@ -56,6 +56,7 @@ with modules;
     dogdns
     jq
     yq-go
+    tailscale
     ripgrep
     gnugrep
     nano
