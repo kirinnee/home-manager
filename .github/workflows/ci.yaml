@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       # Setup
-      - uses: AtomiCloud/actions.setup-nix@v1
+      - uses: AtomiCloud/actions.setup-nix@v2
         with:
           namespacelabs: false
       # pre commit
