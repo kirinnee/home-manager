@@ -6,7 +6,10 @@ on:
 jobs:
   precommit:
     name: Pre-commit Check
-    runs-on: ubuntu-24.04
+    runs-on:
+      - nscloud-ubuntu-22.04-amd64-4x8-with-cache
+      - nscloud-cache-size-50gb
+      - nscloud-cache-tag-home-manager-nix-store-cache
     steps:
       # Setup
       - uses: AtomiCloud/actions.setup-nix@v2
