@@ -72,6 +72,7 @@ with modules;
     zenith
     gh
     stern
+    tesseract
     atomi.cyanprint
 
     # cncf
