@@ -9,9 +9,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       # Setup
-      - uses: AtomiCloud/actions.setup-nix@v1
-        with:
-          namespacelabs: false
+      - uses: AtomiCloud/actions.setup-nix@v2
       # pre commit
       - name: Run pre-commit
         run: nix develop .#ci -c ./scripts/ci/pre-commit.sh
