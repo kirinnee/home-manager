@@ -85,6 +85,7 @@ with modules;
     kubelogin-oidc
     linkerd
     pkgs-240924.bitwarden-cli
+    devenv
 
     # tooling
     mmv-go
