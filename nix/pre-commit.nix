@@ -8,6 +8,7 @@ pre-commit-lib.run {
     treefmt = {
       enable = true;
       excludes = [ ];
+      package = formatter;
     };
 
     # linters From https://github.com/cachix/pre-commit-hooks.nix
@@ -71,11 +72,5 @@ pre-commit-lib.run {
       pass_filenames = true;
     };
 
-  };
-
-  settings = {
-    treefmt = {
-      package = formatter;
-    };
   };
 }

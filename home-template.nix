@@ -86,6 +86,7 @@ with modules;
     linkerd
     pkgs-240924.bitwarden-cli
     devenv
+    httplz
 
     # tooling
     mmv-go
