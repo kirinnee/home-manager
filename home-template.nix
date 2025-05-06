@@ -224,6 +224,35 @@ with modules;
       };
       includes = [
         { path = "$HOME/.gitconfig"; }
+        {
+          condition = "gitdir:~/Workspace/work/";
+          contents = {
+            user = {
+              email = "ernest@liftoff.io";
+              name = "ernest-liftoff";
+            };
+          };
+        }
+        {
+          condition = "gitdir:~/Workspace/personal/";
+          path = "~/Workspace/personal/.gitconfig";
+          contents = {
+            user = {
+              email = "kirinnee97@gmail.com";
+              name = "kirinnee";
+            };
+          };
+        }
+        {
+          condition = "gitdir:~/Workspace/atomi/";
+          path = "~/Workspace/atomi/.gitconfig";
+          contents = {
+            user = {
+              email = "kirinnee97@gmail.com";
+              name = "kirinnee";
+            };
+          };
+        }
       ];
       lfs = {
         enable = true;
