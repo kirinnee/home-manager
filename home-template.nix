@@ -88,6 +88,7 @@ with modules;
     devenv
     httplz
 
+
     # tooling
     mmv-go
     neofetch
@@ -121,12 +122,10 @@ with modules;
       [
         pinentry-curses
         pinentry_mac
-        zed-editor
         vscode
 
         firefox
         beekeeper-studio
-        httpie
         aptakube
 
         alt-tab-macos
@@ -223,12 +222,15 @@ with modules;
         rebase.autoStash = "true";
       };
       includes = [
-        { path = "$HOME/.gitconfig"; }
+        {
+          condition = "gitdir:~/Workspace/work/";
+          path = "~/Workspace/work/.gitconfig";
+        }
         {
           condition = "gitdir:~/Workspace/work/";
           contents = {
             user = {
-              email = "ernest@liftoff.io";
+              email = "erng@liftoff.io";
               name = "ernest-liftoff";
             };
           };
@@ -236,6 +238,9 @@ with modules;
         {
           condition = "gitdir:~/Workspace/personal/";
           path = "~/Workspace/personal/.gitconfig";
+        }
+        {
+          condition = "gitdir:~/Workspace/personal/";
           contents = {
             user = {
               email = "kirinnee97@gmail.com";
@@ -246,6 +251,9 @@ with modules;
         {
           condition = "gitdir:~/Workspace/atomi/";
           path = "~/Workspace/atomi/.gitconfig";
+        }
+        {
+          condition = "gitdir:~/Workspace/atomi/";
           contents = {
             user = {
               email = "kirinnee97@gmail.com";
