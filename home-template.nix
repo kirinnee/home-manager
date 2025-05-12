@@ -1,11 +1,11 @@
-{ config, pkgs, pkgs-240924, pkgs-2411, atomi, profile, ... }:
+{ config, pkgs, pkgs-240924, pkgs-2411, pkgs-casks, atomi, profile, ... }:
 
 ####################
 # Custom Modules #
 ####################
 
 let modules = import ./modules/default.nix { nixpkgs = pkgs; }; in
-let mm = import ./modules/macos/default.nix { nixpkgs = pkgs; inherit profile; }; in
+let macos = import ./modules/macos/default.nix { nixpkgs = pkgs; inherit profile; }; in
 
 ##################
   # Linux Services #
@@ -19,7 +19,14 @@ let
     };
   };
 in
-
+let
+  brewOverride = package: hash: package.overrideAttrs (oldAttrs: {
+    src = pkgs.fetchurl {
+      url = builtins.head oldAttrs.src.urls;
+      hash = hash;
+    };
+  });
+in
 #####################
   # Custom ZSH folder #
   #####################
@@ -122,11 +129,26 @@ with modules;
       [
         pinentry-curses
         pinentry_mac
-        vscode
 
-        firefox
-        beekeeper-studio
-        aptakube
+        macos.beekeeper-studio
+        pkgs-casks.arc
+
+        pkgs-casks.orbstack
+        pkgs-casks.lark
+        (brewOverride pkgs-2411.brewCasks.google-chrome "sha256-TAyfI8gGujL7q+PXcznVrOJktt2f+elx9NwAm2DxWtA=")
+        pkgs-2411.brewCasks.firefox
+
+
+        pkgs-2411.brewCasks.jetbrains-toolbox
+        pkgs-2411.brewCasks.zed
+        pkgs-2411.brewCasks.cursor
+        pkgs-2411.brewCasks.trae
+
+        pkgs-2411.brewCasks.bruno
+        pkgs-2411.brewCasks.aptakube
+        pkgs-2411.brewCasks.beeper
+        pkgs-2411.brewCasks.discord
+        pkgs-2411.brewCasks.slack
 
         alt-tab-macos
         rectangle
