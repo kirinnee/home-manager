@@ -1,7 +1,7 @@
 {
   description = "Home Manager configuration for Ernest";
 
-  inputs = {
+  inputs = rec {
     # util
     flake-utils.url = "github:numtide/flake-utils";
     treefmt-nix.url = "github:numtide/treefmt-nix";
@@ -18,6 +18,15 @@
       url = "github:nix-community/home-manager";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    brew-api = {
+      url = "github:BatteredBunny/brew-api";
+      flake = false;
+    };
+    brew-nix = {
+      url = "github:BatteredBunny/brew-nix";
+      inputs.brew-api.follows = "brew-api";
+    };
+    nixcasks.url = "github:jacekszymanski/nixcasks";
   };
 
   outputs =
@@ -33,6 +42,9 @@
     , nixpkgs-2411
     , atomipkgs
     , home-manager
+    , brew-api
+    , brew-nix
+    , nixcasks
     } @inputs:
     let profiles = import ./profiles.nix; in
     {
@@ -41,10 +53,17 @@
           let
             system = "${profile.arch}-${profile.kernel}";
             pkgs = import nixpkgs { inherit system; config.allowUnfree = true; };
-            pkgs-2411 = import nixpkgs-2411 { inherit system; config.allowUnfree = true; };
+            pkgs-2411 = import nixpkgs-2411 {
+              inherit system;
+              config.allowUnfree = true;
+              overlays = [ brew-nix.overlays.default ];
+            };
             pkgs-240924 = import nixpkgs-240924 { inherit system; config.allowUnfree = true; };
             pre-commit-lib = pre-commit-hooks.lib.${system};
             atomi = atomipkgs.packages.${system};
+            pkgs-casks = (nixcasks.output {
+              osVersion = "sonoma";
+            }).packages.${system};
           in
           {
             name = profile.user;
@@ -52,7 +71,7 @@
               inherit pkgs;
               modules = [ ./home.nix ];
               extraSpecialArgs = {
-                inherit atomi profile pkgs-240924 pkgs-2411;
+                inherit atomi profile pkgs-240924 pkgs-2411 pkgs-casks;
               };
             };
           })
