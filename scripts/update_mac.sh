@@ -9,7 +9,6 @@ echo "✅ Done!"
 echo "⬆️ Updating all nix definitions..."
 ./scripts/updates/beekeeper-studio.sh &
 ./scripts/updates/aptakube.sh &
-./scripts/updates/httpie.sh &
 ./scripts/updates/firefox.sh &
 wait
 echo "✅ Done!"
