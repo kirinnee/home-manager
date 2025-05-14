@@ -14,6 +14,11 @@
 
     atomipkgs.url = "github:AtomiCloud/nix-registry/v2";
 
+    sops-nix = {
+      url = "github:Mic92/sops-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
     home-manager = {
       url = "github:nix-community/home-manager";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -45,6 +50,7 @@
     , brew-api
     , brew-nix
     , nixcasks
+    , sops-nix
     } @inputs:
     let profiles = import ./profiles.nix; in
     {
@@ -69,7 +75,9 @@
             name = profile.user;
             value = home-manager.lib.homeManagerConfiguration {
               inherit pkgs;
-              modules = [ ./home.nix ];
+              modules = [
+                ./home.nix
+              ];
               extraSpecialArgs = {
                 inherit atomi profile pkgs-240924 pkgs-2411 pkgs-casks;
               };

@@ -1,4 +1,4 @@
-{ config, pkgs, pkgs-240924, pkgs-2411, pkgs-casks, atomi, profile, ... }:
+{ config, pkgs, lib, pkgs-240924, pkgs-2411, pkgs-casks, atomi, profile, ... }:
 
 ####################
 # Custom Modules #
@@ -27,6 +27,9 @@ let
     };
   });
 in
+
+
+
 #####################
   # Custom ZSH folder #
   #####################
@@ -42,12 +45,24 @@ let
 in
 with pkgs;
 with modules;
-{
-
+rec {
+  nix = {
+    package = pkgs.nix;
+    extraOptions = ''
+      experimental-features = nix-command flakes
+      !include ${home.homeDirectory}/nix.conf
+    '';
+  };
   # Let Home Manager install and manage itself.
   home.stateVersion = "23.11";
   home.username = "${profile.user}";
   home.homeDirectory = if profile.kernel == "linux" then "/home/${profile.user}" else "/Users/${profile.user}";
+
+
+  home.activation.load-secrets = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+    export SECRETS_FILE="${./secrets.enc.yaml}"
+    ${modules.load-secrets}/bin/load-secrets
+  '';
 
   programs.home-manager.enable = true;
 
@@ -80,6 +95,8 @@ with modules;
     gh
     stern
     tesseract
+    age
+    sops
     atomi.cyanprint
 
     # cncf
@@ -106,12 +123,8 @@ with modules;
     #custom modules
     backup-folder
     setup-pcloud-remote
-    setup-devbox-server
-    set-signing-key
-    setup-keys
-    get-uuid
-    register-with-github
     k8s-update
+    load-secrets
 
     # liftoff
     awscli2
@@ -164,6 +177,7 @@ with modules;
   ###################################
   home.sessionVariables = {
     REPOS = "$HOME/Workspace/work/liftoff";
+    SOPS_AGE_KEY_FILE = "$HOME/.config/sops/age/keys.txt";
     EDITOR = "nano";
     VAULT_ADDR = "https://vault.ops.vungle.io";
   };
@@ -193,13 +207,24 @@ with modules;
       extraConfig = ''
         Host github-personal
         HostName github.com
+        User git
         PreferredAuthentications publickey
-        IdentityFile ~/.ssh/id_rsa
+        IdentityFile ~/.ssh/id_ed25519_kirin
+        IdentitiesOnly=yes
 
         Host github-liftoff
         HostName github.com
+        User git
         PreferredAuthentications publickey
-        IdentityFile ~/.ssh/id_ed25519
+        IdentityFile ~/.ssh/id_ed25519_vungle
+        IdentitiesOnly=yes
+
+        Host github-atomi
+        HostName github.com
+        User git
+        PreferredAuthentications publickey
+        IdentityFile ~/.ssh/id_ed25519_adelphi
+        IdentitiesOnly=yes 
 
         Host *.liftoff.io
         User ubuntu
@@ -246,11 +271,9 @@ with modules;
       includes = [
         {
           condition = "gitdir:~/Workspace/work/";
-          path = "~/Workspace/work/.gitconfig";
-        }
-        {
-          condition = "gitdir:~/Workspace/work/";
           contents = {
+            commit.gpgSign = true;
+            "url \"github-liftoff:\"".insteadOf = "git@github.com:";
             user = {
               email = "erng@liftoff.io";
               name = "ernest-liftoff";
@@ -258,28 +281,38 @@ with modules;
           };
         }
         {
-          condition = "gitdir:~/Workspace/personal/";
-          path = "~/Workspace/personal/.gitconfig";
+          condition = "gitdir:~/.config/home-manager/";
+          contents = {
+            commit.gpgSign = true;
+            "url \"github-personal:\"".insteadOf = "git@github.com:";
+            user = {
+              email = "kirinnee97@gmail.com";
+              name = "kirinnee";
+              signingkey = "0xA0F1D9B42BE0F85B"; # infisical-scan:ignore
+            };
+          };
         }
         {
           condition = "gitdir:~/Workspace/personal/";
           contents = {
+            commit.gpgSign = true;
+            "url \"github-personal:\"".insteadOf = "git@github.com:";
             user = {
               email = "kirinnee97@gmail.com";
               name = "kirinnee";
+              signingkey = "0xA0F1D9B42BE0F85B"; # infisical-scan:ignore
             };
           };
         }
         {
           condition = "gitdir:~/Workspace/atomi/";
-          path = "~/Workspace/atomi/.gitconfig";
-        }
-        {
-          condition = "gitdir:~/Workspace/atomi/";
           contents = {
+            commit.gpgSign = true;
+            "url \"github-atomi:\"".insteadOf = "git@github.com:";
             user = {
-              email = "kirinnee97@gmail.com";
-              name = "kirinnee";
+              email = "adelphi@atomi.cloud";
+              name = "adelphi-liong";
+              signingkey = "0x2F9E1DE31CB0061C"; # infisical-scan:ignore
             };
           };
         }
@@ -404,13 +437,14 @@ with modules;
         devbox = "ssh kirin@$DEVBOX";
         nw = "narwhal";
         wr = "wrangler";
-        zed = "zeditor";
         rc = "open \"/nix/store/$(ls /nix/store | grep raycast | grep -v '.drv')\"";
         cyan = "cyanprint";
         sgci = "sg committer install";
         gundo = "git reset --soft HEAD~1";
         slog = "stern --only-log-lines -o raw";
         slogl = "stern --only-log-lines -o raw -l app.kubernetes.io/name";
+        cursor = "/usr/local/bin/cursor";
+        zed = "/usr/local/bin/zed";
 
         # helm
         h = "helm";
