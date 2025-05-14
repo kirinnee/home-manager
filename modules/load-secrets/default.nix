@@ -1,16 +1,23 @@
-# Setup SSH and PGP keys
-{ trivialBuilders, nixpkgs ? import <nixpkgs> { } }:
+{ trivialBuilders, nixpkgs }:
 
-let name = "setup-keys"; in
+let name = "load-secrets"; in
 let version = "1.0.0"; in
 let script = builtins.readFile ./default.sh; in
 trivialBuilders.writeShellApplication {
   name = name;
   version = version;
-  runtimeShell = "${nixpkgs.bash}/bin/sh";
+  runtimeShell = "${nixpkgs.bash}/bin/bash";
   runtimeInputs = (
     with nixpkgs;
-    [ coreutils openssh gnupg gnugrep gnused ]
+    [
+      coreutils
+      sops
+      age
+      yq-go
+      gnupg
+      gawk
+      gnugrep
+    ]
   );
   text = script;
 }

@@ -9,27 +9,21 @@ tasks:
     desc: Update all
     cmds:
       - ./scripts/update_mac.sh
-  update:arc:
-    desc: Update Arc
-    cmds:
-      - ./scripts/updates/arc.sh
   update:beekeeper-studio:
     desc: Update Beekeeper Studio
     cmds:
       - ./scripts/updates/beekeeper-studio.sh
-  update:aptakube:
-    desc: Update Aptakube
+  secret:edit:
+    desc: Edit secrets
+    env:
+      EDITOR: zed
     cmds:
-      - ./scripts/updates/aptakube.sh
-  update:firefox:
-    desc: Update Firefox
+      - sops edit ./secrets.enc.yaml
+  secret:decrypt:
+    desc: Decrypt secrets
     cmds:
-      - ./scripts/updates/firefox.sh
-  update:httpie:
-    desc: Update HTTPie
+      - sops --decrypt ./secrets.enc.yaml > ./secrets.yaml
+  secret:encrypt:
+    desc: Encrypt secrets
     cmds:
-      - ./scripts/updates/httpie.sh
-  update:zed:
-    desc: Update HTTPie
-    cmds:
-      - ./scripts/updates/httpie.sh
+      - sops --encrypt ./secrets.yaml > ./secrets.enc.yaml
