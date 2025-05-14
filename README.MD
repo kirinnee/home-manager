@@ -9,11 +9,6 @@ Install Basic Dependencies: Nix, Home Manager, and basic applications
 curl -L https://raw.githubusercontent.com/kirinnee/home-manager/main/scripts/setup.sh | bash
 ```
 
-Configure SSH Key and GPG Key and setting up rate-limits for Nix
-```
-setup-devbox-server
-```
-
 ## AutoBackup CLI
 
 Within this home-manager, I created 2 CLI that helps me backup folders to pCloud itself.
