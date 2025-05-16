@@ -13,11 +13,7 @@
     nixpkgs-240924.url = "nixpkgs/babc25a577c3310cce57c72d5bed70f4c3c3843a";
 
     atomipkgs.url = "github:AtomiCloud/nix-registry/v2";
-
-    sops-nix = {
-      url = "github:Mic92/sops-nix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+    mac-app-util.url = "github:hraban/mac-app-util";
 
     home-manager = {
       url = "github:nix-community/home-manager";
@@ -50,7 +46,7 @@
     , brew-api
     , brew-nix
     , nixcasks
-    , sops-nix
+    , mac-app-util
     } @inputs:
     let profiles = import ./profiles.nix; in
     {
@@ -76,6 +72,7 @@
             value = home-manager.lib.homeManagerConfiguration {
               inherit pkgs;
               modules = [
+                mac-app-util.homeManagerModules.default
                 ./home.nix
               ];
               extraSpecialArgs = {
