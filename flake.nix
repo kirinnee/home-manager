@@ -9,7 +9,7 @@
 
     # Specify the source of Home Manager and Nixpkgs.
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
-    nixpkgs-2411.url = "nixpkgs/nixos-24.11";
+    nixpkgs-2505.url = "nixpkgs/nixos-25.05";
     nixpkgs-240924.url = "nixpkgs/babc25a577c3310cce57c72d5bed70f4c3c3843a";
 
     atomipkgs.url = "github:AtomiCloud/nix-registry/v2";
@@ -40,7 +40,7 @@
 
     , nixpkgs
     , nixpkgs-240924
-    , nixpkgs-2411
+    , nixpkgs-2505
     , atomipkgs
     , home-manager
     , brew-api
@@ -55,7 +55,7 @@
           let
             system = "${profile.arch}-${profile.kernel}";
             pkgs = import nixpkgs { inherit system; config.allowUnfree = true; };
-            pkgs-2411 = import nixpkgs-2411 {
+            pkgs-2505 = import nixpkgs-2505 {
               inherit system;
               config.allowUnfree = true;
               overlays = [ brew-nix.overlays.default ];
@@ -76,7 +76,7 @@
                 ./home.nix
               ];
               extraSpecialArgs = {
-                inherit atomi profile pkgs-240924 pkgs-2411 pkgs-casks;
+                inherit atomi profile pkgs-240924 pkgs-2505 pkgs-casks;
               };
             };
           })
@@ -86,9 +86,10 @@
         (system:
         let
           pkgs = import nixpkgs { inherit system; config.allowUnfree = true; };
-          pkgs-2411 = import nixpkgs-2411 { inherit system; config.allowUnfree = true; };
+          pkgs-2505 = import nixpkgs-2505 { inherit system; config.allowUnfree = true; };
           pre-commit-lib = pre-commit-hooks.lib.${system};
           atomi = atomipkgs.packages.${system};
+          attic = attic.packages.${system};
         in
         let
           out = rec {
@@ -99,7 +100,7 @@
               inherit treefmt-nix pkgs;
             };
             packages = import ./nix/packages.nix {
-              inherit pkgs atomi pkgs-2411;
+              inherit pkgs atomi pkgs-2505;
             };
             env = import ./nix/env.nix {
               inherit pkgs packages;

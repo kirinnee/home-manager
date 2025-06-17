@@ -1,4 +1,4 @@
-{ config, pkgs, lib, pkgs-240924, pkgs-2411, pkgs-casks, atomi, profile, ... }:
+{ config, pkgs, lib, pkgs-240924, pkgs-2505, pkgs-casks, atomi, profile, ... }:
 
 ####################
 # Custom Modules #
@@ -48,13 +48,31 @@ with modules;
 rec {
   nix = {
     package = pkgs.nix;
+    settings = {
+      fallback = true;
+      # List of substituters (binary caches)
+      substituters = [
+        "https://cache.nixos.org?priority=41"
+        "https://nix-community.cachix.org?priority=42"
+        "https://numtide.cachix.org?priority=43"
+        "https://attic-atomicloud.fly.dev/all?priority=44"
+      ];
+
+      # Corresponding public keys for the substituters
+      trusted-public-keys = [
+        "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
+        "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs="
+        "numtide.cachix.org-1:2ps1kLBUWjxIneOy1Ik6cQjb41X0iXVXeHigGmycPPE="
+        "all:uiWsynIsiSHKa2RuLZ3+8yE9lm1EVstE9RQ6RvRnVgU="
+      ];
+    };
     extraOptions = ''
       experimental-features = nix-command flakes
       !include ${home.homeDirectory}/nix.conf
     '';
   };
   # Let Home Manager install and manage itself.
-  home.stateVersion = "23.11";
+  home.stateVersion = "25.05";
   home.username = "${profile.user}";
   home.homeDirectory = if profile.kernel == "linux" then "/home/${profile.user}" else "/Users/${profile.user}";
 
@@ -78,7 +96,6 @@ rec {
     dogdns
     jq
     yq-go
-    tailscale
     ripgrep
     gnugrep
     nano
@@ -98,6 +115,7 @@ rec {
     age
     sops
     atomi.cyanprint
+    atomi.attic
 
     # cncf
     kubectl
@@ -111,6 +129,8 @@ rec {
     pkgs-240924.bitwarden-cli
     devenv
     httplz
+    nodejs
+    # claude-code
 
 
     # tooling
@@ -148,20 +168,20 @@ rec {
 
         pkgs-casks.orbstack
         pkgs-casks.lark
-        (brewOverride pkgs-2411.brewCasks.google-chrome "sha256-TAyfI8gGujL7q+PXcznVrOJktt2f+elx9NwAm2DxWtA=")
-        pkgs-2411.brewCasks.firefox
+        (brewOverride pkgs-2505.brewCasks.google-chrome "sha256-rQFg/dbshXVvA7gxWk8jn42UmYcA61cyvE+sFI6CWII=")
+        pkgs-2505.brewCasks.firefox
 
 
-        pkgs-2411.brewCasks.jetbrains-toolbox
-        pkgs-2411.brewCasks.zed
-        pkgs-2411.brewCasks.cursor
-        pkgs-2411.brewCasks.trae
+        pkgs-2505.brewCasks.jetbrains-toolbox
+        pkgs-2505.brewCasks.zed
+        pkgs-2505.brewCasks.cursor
+        pkgs-2505.brewCasks.trae
 
-        pkgs-2411.brewCasks.bruno
-        pkgs-2411.brewCasks.aptakube
-        pkgs-2411.brewCasks.beeper
-        pkgs-2411.brewCasks.discord
-        pkgs-2411.brewCasks.slack
+        pkgs-2505.brewCasks.bruno
+        pkgs-2505.brewCasks.aptakube
+        pkgs-2505.brewCasks.beeper
+        pkgs-2505.brewCasks.discord
+        pkgs-2505.brewCasks.slack
 
         alt-tab-macos
         rectangle
@@ -188,6 +208,7 @@ rec {
   home.sessionPath = [
     "$HOME/.local/bin"
     "$HOME/bin"
+    "$HOME/.npm-global/bin"
   ];
   #######################
   # Background services #
@@ -389,6 +410,8 @@ rec {
         fi
         if [ -e $HOME/.nix-profile/etc/profile.d/nix.sh ]; then . $HOME/.nix-profile/etc/profile.d/nix.sh; fi
         if [ -e $HOME/.secrets ]; then . $HOME/.secrets; fi
+
+        # attic login atomicloud https://atomi-attic-app.fly.dev "$ATTI_TOKEN"
 
         () {
            local -a prefix=( '\e'{\[,O} )

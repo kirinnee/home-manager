@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  workflow_call:
+    inputs:
+      cache:
+        default: 'all'
+        type: string
+      darwin-aarch64:
+        default: true
+        type: boolean
+      darwin-x86_64:
+        default: true
+        type: boolean
+      linux-x86_64:
+        default: true
+        type: boolean
+      linux-aarch64:
+        default: true
+        type: boolean
+
+jobs:
+  cacheshell-linux:
+    name: Cache Shell Linux
+    strategy:
+      matrix:
+        platform:
+          - name: Linux x86_64
+            namespacelabs: true
+            enabled: ${{ inputs.linux-x86_64 }}
+            os:
+              - nscloud-ubuntu-22.04-amd64-4x8-with-cache
+              - nscloud-cache-size-50gb
+              - nscloud-cache-tag-home-manager-nix-store-cache
+          - name: Linux aarch64
+            namespacelabs: true
+            enabled: ${{ inputs.linux-aarch64 }}
+            os:
+              - nscloud-ubuntu-22.04-arm64-4x8-with-cache
+              - nscloud-cache-size-50gb
+              - nscloud-cache-tag-home-manager-nix-store-cache
+          - name: MacOS x86_64
+            namespacelabs: false
+            enabled: ${{ inputs.darwin-x86_64 }}
+            os:
+              - macos-13
+          - name: MacOS aarch64
+            namespacelabs: false
+            enabled: ${{ inputs.darwin-aarch64 }}
+            os:
+              - macos-15
+    runs-on: ${{ matrix.platform.os }}
+    steps:
+      # Setup
+      - uses: AtomiCloud/actions.setup-nix@v2
+        if: ${{ matrix.platform.enabled }}
+        with:
+          namespacelabs: ${{ matrix.platform.namespacelabs }}
+          attic-token: ${{ secrets.ATTIC_TOKEN }}
+      # Build and Push Shell
+      - name: Build and Push Shell
+        if: ${{ matrix.platform.enabled }}
+        run: nix develop .#ci -c scripts/ci/cache-shell.sh "${{ inputs.cache }}"
