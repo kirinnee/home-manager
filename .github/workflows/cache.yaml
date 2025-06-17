@@ -1,0 +1,10 @@
+name: 'Cache'
+on:
+  push:
+    branches:
+      - 'main'
+jobs:
+  cacheshell:
+    name: Cache Shell
+    uses: ./.github/workflows/⚡reusable-cacheshell.yaml
+    secrets: inherit
