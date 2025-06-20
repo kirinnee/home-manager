@@ -168,7 +168,7 @@ rec {
 
         pkgs-casks.orbstack
         pkgs-casks.lark
-        (brewOverride pkgs-2505.brewCasks.google-chrome "sha256-rQFg/dbshXVvA7gxWk8jn42UmYcA61cyvE+sFI6CWII=")
+        (brewOverride pkgs-2505.brewCasks.google-chrome "sha256-O7qB+n0egMvYQGPN285FvVUWlx/O50hMcVsCKZb+4zo=")
         pkgs-2505.brewCasks.firefox
 
 
