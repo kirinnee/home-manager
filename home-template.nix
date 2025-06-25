@@ -1,4 +1,4 @@
-{ config, pkgs, lib, pkgs-240924, pkgs-2505, pkgs-casks, atomi, profile, ... }:
+{ config, pkgs, lib, pkgs-240924, pkgs-2505, pkgs-unstable, pkgs-casks, atomi, profile, ... }:
 
 ####################
 # Custom Modules #
@@ -168,14 +168,12 @@ rec {
 
         pkgs-casks.orbstack
         pkgs-casks.lark
-        (brewOverride pkgs-2505.brewCasks.google-chrome "sha256-O7qB+n0egMvYQGPN285FvVUWlx/O50hMcVsCKZb+4zo=")
         pkgs-2505.brewCasks.firefox
 
 
         pkgs-2505.brewCasks.jetbrains-toolbox
         pkgs-2505.brewCasks.zed
         pkgs-2505.brewCasks.cursor
-        pkgs-2505.brewCasks.trae
 
         pkgs-2505.brewCasks.bruno
         pkgs-2505.brewCasks.aptakube

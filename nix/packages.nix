@@ -1,4 +1,4 @@
-{ pkgs, atomi, pkgs-2505 }:
+{ pkgs, atomi, pkgs-2505, pkgs-unstable }:
 let
 
   all = {
@@ -10,6 +10,10 @@ let
           sg
           pls;
       }
+    );
+    nix-unstable = (
+      with pkgs-unstable;
+      { }
     );
     nix-2505 = (
       with pkgs-2505;
@@ -29,4 +33,5 @@ let
 in
 with all;
 nix-2505 //
+nix-unstable //
 atomipkgs
