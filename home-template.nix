@@ -409,7 +409,7 @@ rec {
         if [ -e $HOME/.nix-profile/etc/profile.d/nix.sh ]; then . $HOME/.nix-profile/etc/profile.d/nix.sh; fi
         if [ -e $HOME/.secrets ]; then . $HOME/.secrets; fi
 
-        # attic login atomicloud https://atomi-attic-app.fly.dev "$ATTI_TOKEN"
+        attic login atomicloud https://atomi-attic-app.fly.dev "$ATTIC_TOKEN"
 
         () {
            local -a prefix=( '\e'{\[,O} )
@@ -431,6 +431,33 @@ rec {
       oh-my-zsh = {
         enable = true;
         extraConfig = ''
+          if [[ -n "$npm_config_yes" ]] || [[ -n "$CI" ]] || [[ "$-" != *i* ]]; then
+            export AGENT_MODE=true
+          else
+            export AGENT_MODE=false
+          fi
+
+          if [[ "$AGENT_MODE" == "true" ]]; then
+            # Nuclear option to disable p10k
+            export POWERLEVEL9K_INSTANT_PROMPT=off
+            export POWERLEVEL9K_DISABLE_CONFIGURATION_WIZARD=true
+            export POWERLEVEL9K_DISABLE_GITSTATUS=true
+            export POWERLEVEL9K_LEFT_PROMPT_ELEMENTS=()
+            export POWERLEVEL9K_RIGHT_PROMPT_ELEMENTS=()
+            export POWERLEVEL9K_CONFIG_FILE=/dev/null
+            export POWERLEVEL9K_DISABLE_RPROMPT=true
+            export P9K_TTY=none
+            
+          fi
+
+          # Set Oh My Zsh theme conditionally - disable for agents only
+          if [[ "$AGENT_MODE" == "true" ]]; then
+            ZSH_THEME="" 
+            export PREFIX="block"
+          else
+            ZSH_THEME="powerlevel10k/powerlevel10k"
+            export PREFIX=""
+          fi
           ZSH_CUSTOM="${customDir}"
         '';
         plugins = [
@@ -537,13 +564,14 @@ rec {
         {
           name = "powerlevel10k";
           src = pkgs.zsh-powerlevel10k;
-          file = "share/zsh-powerlevel10k/powerlevel10k.zsh-theme";
+
+          file = "\${PREFIX}share/zsh-powerlevel10k/powerlevel10k.zsh-theme";
         }
         # p10k config
         {
           name = "powerlevel10k-config";
           src = ./p10k-config;
-          file = ".p10k.zsh";
+          file = "\${PREFIX}.p10k.zsh";
         }
         # live autocomplete
         {
