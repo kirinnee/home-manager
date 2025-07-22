@@ -6,4 +6,5 @@ rec {
   setup-pcloud-remote = import ./setup-pcloud-remote/default.nix { inherit nixpkgs trivialBuilders; };
   k8s-update = import ./k8s-update/default.nix { inherit nixpkgs trivialBuilders; };
   load-secrets = import ./load-secrets/default.nix { inherit nixpkgs trivialBuilders; };
+  gawt = import ./gawt/default.nix { inherit nixpkgs trivialBuilders; };
 }
