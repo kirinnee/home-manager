@@ -100,6 +100,7 @@ rec {
     gnugrep
     nano
     unixtools.watch
+    modules.gawt
     gnutar
     tmux
     du-dust
@@ -409,7 +410,7 @@ rec {
         if [ -e $HOME/.nix-profile/etc/profile.d/nix.sh ]; then . $HOME/.nix-profile/etc/profile.d/nix.sh; fi
         if [ -e $HOME/.secrets ]; then . $HOME/.secrets; fi
 
-        attic login atomicloud https://atomi-attic-app.fly.dev "$ATTIC_TOKEN"
+        # attic login atomicloud https://atomi-attic-app.fly.dev "$ATTIC_TOKEN"
 
         () {
            local -a prefix=( '\e'{\[,O} )
@@ -426,6 +427,24 @@ rec {
         unalias grep
 
         bindkey "$${key[Up]}" up-line-or-search
+
+        update_env_by_dir() {
+          case "$PWD" in
+            ~/Workspace/work*)
+              export CLAUDE_CONFIG_DIR="$HOME/.claude-work"
+              ;;
+            ~/Workspace/atomi*|~/Workspace/personal*)
+              export CLAUDE_CONFIG_DIR="$HOME/.claude"
+              ;;
+            *)
+              unset CLAUDE_CONFIG_DIR
+              ;;
+          esac
+        }
+
+        autoload -U add-zsh-hook
+        add-zsh-hook chpwd update_env_by_dir
+        update_env_by_dir
       '';
 
       oh-my-zsh = {
@@ -459,6 +478,7 @@ rec {
             export PREFIX=""
           fi
           ZSH_CUSTOM="${customDir}"
+           
         '';
         plugins = [
           "kubectl"
