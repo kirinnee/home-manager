@@ -165,7 +165,6 @@ rec {
         pinentry_mac
 
         macos.beekeeper-studio
-        pkgs-casks.arc
 
         pkgs-casks.orbstack
         pkgs-casks.lark
@@ -173,7 +172,6 @@ rec {
 
 
         pkgs-2505.brewCasks.jetbrains-toolbox
-        pkgs-2505.brewCasks.zed
         pkgs-2505.brewCasks.cursor
 
         pkgs-2505.brewCasks.bruno
@@ -181,6 +179,9 @@ rec {
         pkgs-2505.brewCasks.beeper
         pkgs-2505.brewCasks.discord
         pkgs-2505.brewCasks.slack
+
+        # pkgs-casks.arc
+        # pkgs-2505.brewCasks.zed
 
         alt-tab-macos
         rectangle
