@@ -577,6 +577,7 @@ rec {
 
         # liftoff
         awsl = "unset AWS_PROFILE && gimme-aws-creds && awsp";
+        cc = "claude --dangerously-skip-permissions";
       };
 
       plugins = [
