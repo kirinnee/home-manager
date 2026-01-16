@@ -98,7 +98,6 @@ rec {
     gnugrep
     nano
     unixtools.watch
-    modules.gawt
     gnutar
     tmux
     du-dust
@@ -150,11 +149,6 @@ rec {
     pkgs-240924.gimme-aws-creds
     ssm-session-manager-plugin
   ] ++ (if profile.kernel == "linux" then [
-    jetbrains.webstorm
-    jetbrains.idea-ultimate
-    jetbrains.rider
-    jetbrains.rust-rover
-    jetbrains.goland
   ] else
     (
       with mm;
