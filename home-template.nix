@@ -5,7 +5,6 @@
 ####################
 
 let modules = import ./modules/default.nix { nixpkgs = pkgs; }; in
-let macos = import ./modules/macos/default.nix { nixpkgs = pkgs; inherit profile; }; in
 
 ##################
   # Linux Services #
@@ -16,17 +15,9 @@ let
       enable = true;
       enableSshSupport = true;
       enableExtraSocket = true;
-      pinentry.package = pkgs.pinentry-all;
+      pinentry.package = if profile.kernel == "linux" then pkgs.pinentry-all else pkgs.pinentry_mac;
     };
   };
-in
-let
-  brewOverride = package: hash: package.overrideAttrs (oldAttrs: {
-    src = pkgs.fetchurl {
-      url = builtins.head oldAttrs.src.urls;
-      hash = hash;
-    };
-  });
 in
 
 
@@ -148,34 +139,19 @@ rec {
     awscli2
     pkgs-240924.gimme-aws-creds
     ssm-session-manager-plugin
-    pinentry-all
+
     pkgs-unstable.claude-code
   ] ++ (if profile.kernel == "linux" then [
-  ] else
-    (
-      with mm;
-      [
-
-        pkgs-casks.orbstack
-        pkgs-casks.lark
-        pkgs-2505.brewCasks.firefox
-
-        pkgs-2505.brewCasks.jetbrains-toolbox
-        pkgs-2505.brewCasks.cursor
-
-        pkgs-2505.brewCasks.bruno
-        pkgs-2505.brewCasks.aptakube
-        pkgs-2505.brewCasks.beeper
-        pkgs-2505.brewCasks.discord
-        pkgs-2505.brewCasks.slack
-
-        alt-tab-macos
-        rectangle
-        raycast
-        obsidian
-        nerd-fonts.jetbrains-mono
-      ]
-    )));
+    pinentry-all
+  ] else [
+    alt-tab-macos
+    rectangle
+    pinentry_mac
+    raycast
+    obsidian
+    nerd-fonts.jetbrains-mono
+  ]
+  ));
 
 
   ###################################

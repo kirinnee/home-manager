@@ -7,6 +7,10 @@
     treefmt-nix.url = "github:numtide/treefmt-nix";
     pre-commit-hooks.url = "github:cachix/pre-commit-hooks.nix";
 
+    # Darwin Config
+    # darwin.url = "github:lnl7/nix-darwin";
+    # darwin.inputs.nixpkgs.follows = "nixpkgs-25.11";
+
     # Specify the source of Home Manager and Nixpkgs.
     nixpkgs-unstable.url = "github:nixos/nixpkgs/nixos-unstable";
     nixpkgs-2505.url = "nixpkgs/nixos-25.05";
@@ -19,15 +23,6 @@
       url = "github:nix-community/home-manager/release-25.05";
       inputs.nixpkgs.follows = "nixpkgs-2505";
     };
-    brew-api = {
-      url = "github:BatteredBunny/brew-api";
-      flake = false;
-    };
-    brew-nix = {
-      url = "github:BatteredBunny/brew-nix";
-      inputs.brew-api.follows = "brew-api";
-    };
-    nixcasks.url = "github:jacekszymanski/nixcasks";
   };
 
   outputs =
@@ -43,9 +38,8 @@
     , nixpkgs-2505
     , atomipkgs
     , home-manager
-    , brew-api
-    , brew-nix
-    , nixcasks
+      # , darwin
+
     , mac-app-util
     } @inputs:
     let profiles = import ./profiles.nix; in
@@ -58,12 +52,10 @@
             pkgs-2505 = import nixpkgs-2505 {
               inherit system;
               config.allowUnfree = true;
-              overlays = [ brew-nix.overlays.default ];
             };
             pkgs-240924 = import nixpkgs-240924 { inherit system; config.allowUnfree = true; };
             pre-commit-lib = pre-commit-hooks.lib.${system};
             atomi = atomipkgs.packages.${system};
-            pkgs-casks = (nixcasks.output { osVersion = "sonoma"; }).packages.${system};
           in
           let pkgs = pkgs-2505; in
           {
@@ -75,7 +67,7 @@
                 ./home.nix
               ];
               extraSpecialArgs = {
-                inherit atomi profile pkgs-240924 pkgs-2505 pkgs-unstable pkgs-casks;
+                inherit atomi profile pkgs-240924 pkgs-2505 pkgs-unstable;
               };
             };
           })
