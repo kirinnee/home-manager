@@ -16,6 +16,7 @@ let
       enable = true;
       enableSshSupport = true;
       enableExtraSocket = true;
+      pinentry.package = pkgs.pinentry-all;
     };
   };
 in
@@ -128,7 +129,6 @@ rec {
     devenv
     httplz
     nodejs
-    # claude-code
 
 
     # tooling
@@ -148,20 +148,17 @@ rec {
     awscli2
     pkgs-240924.gimme-aws-creds
     ssm-session-manager-plugin
+    pinentry-all
+    pkgs-unstable.claude-code
   ] ++ (if profile.kernel == "linux" then [
   ] else
     (
       with mm;
       [
-        pinentry-curses
-        pinentry_mac
-
-        macos.beekeeper-studio
 
         pkgs-casks.orbstack
         pkgs-casks.lark
         pkgs-2505.brewCasks.firefox
-
 
         pkgs-2505.brewCasks.jetbrains-toolbox
         pkgs-2505.brewCasks.cursor
@@ -171,9 +168,6 @@ rec {
         pkgs-2505.brewCasks.beeper
         pkgs-2505.brewCasks.discord
         pkgs-2505.brewCasks.slack
-
-        # pkgs-casks.arc
-        # pkgs-2505.brewCasks.zed
 
         alt-tab-macos
         rectangle
@@ -443,35 +437,7 @@ rec {
       oh-my-zsh = {
         enable = true;
         extraConfig = ''
-          if [[ -n "$npm_config_yes" ]] || [[ -n "$CI" ]] || [[ "$-" != *i* ]]; then
-            export AGENT_MODE=true
-          else
-            export AGENT_MODE=false
-          fi
-
-          if [[ "$AGENT_MODE" == "true" ]]; then
-            # Nuclear option to disable p10k
-            export POWERLEVEL9K_INSTANT_PROMPT=off
-            export POWERLEVEL9K_DISABLE_CONFIGURATION_WIZARD=true
-            export POWERLEVEL9K_DISABLE_GITSTATUS=true
-            export POWERLEVEL9K_LEFT_PROMPT_ELEMENTS=()
-            export POWERLEVEL9K_RIGHT_PROMPT_ELEMENTS=()
-            export POWERLEVEL9K_CONFIG_FILE=/dev/null
-            export POWERLEVEL9K_DISABLE_RPROMPT=true
-            export P9K_TTY=none
-            
-          fi
-
-          # Set Oh My Zsh theme conditionally - disable for agents only
-          if [[ "$AGENT_MODE" == "true" ]]; then
-            ZSH_THEME="" 
-            export PREFIX="block"
-          else
-            ZSH_THEME="powerlevel10k/powerlevel10k"
-            export PREFIX=""
-          fi
-          ZSH_CUSTOM="${customDir}"
-           
+          ZSH_CUSTOM="${customDir}" 
         '';
         plugins = [
           "kubectl"
@@ -504,8 +470,6 @@ rec {
         gundo = "git reset --soft HEAD~1";
         slog = "stern --only-log-lines -o raw";
         slogl = "stern --only-log-lines -o raw -l app.kubernetes.io/name";
-        cursor = "/usr/local/bin/cursor";
-        zed = "/usr/local/bin/zed";
 
         # helm
         h = "helm";
@@ -572,7 +536,11 @@ rec {
         # liftoff
         awsl = "unset AWS_PROFILE && gimme-aws-creds && awsp";
         cc = "claude --dangerously-skip-permissions";
-      };
+      } // (if profile.kernel == "linux" then {
+        cursor = "/mnt/c/Users/Hoengager/AppData/Local/Programs/cursor/resources/app/bin/cursor";
+      } else {
+        cursor = "/usr/local/bin/cursor";
+      });
 
       plugins = [
         {
