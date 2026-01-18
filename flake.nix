@@ -7,9 +7,9 @@
     treefmt-nix.url = "github:numtide/treefmt-nix";
     pre-commit-hooks.url = "github:cachix/pre-commit-hooks.nix";
 
-    # Darwin Config
-    # darwin.url = "github:lnl7/nix-darwin";
-    # darwin.inputs.nixpkgs.follows = "nixpkgs-25.11";
+    # Darwin Config - use release-25.05 to match nixpkgs-2505
+    darwin.url = "github:lnl7/nix-darwin/nix-darwin-25.05";
+    darwin.inputs.nixpkgs.follows = "nixpkgs-2505";
 
     # Specify the source of Home Manager and Nixpkgs.
     nixpkgs-unstable.url = "github:nixos/nixpkgs/nixos-unstable";
@@ -38,7 +38,7 @@
     , nixpkgs-2505
     , atomipkgs
     , home-manager
-      # , darwin
+    , darwin
 
     , mac-app-util
     } @inputs:
@@ -72,6 +72,43 @@
             };
           })
         profiles);
+
+      darwinConfigurations = builtins.listToAttrs (map
+        (profile:
+          let
+            system = "${profile.arch}-${profile.kernel}";
+            pkgs-unstable = import nixpkgs-unstable { inherit system; config.allowUnfree = true; };
+            pkgs-2505 = import nixpkgs-2505 {
+              inherit system;
+              config.allowUnfree = true;
+            };
+            pkgs-240924 = import nixpkgs-240924 { inherit system; config.allowUnfree = true; };
+            atomi = atomipkgs.packages.${system};
+          in
+          let pkgs = pkgs-2505; in
+          {
+            name = profile.user;
+            value = darwin.lib.darwinSystem {
+              inherit pkgs system;
+              specialArgs = {
+                inherit atomi profile pkgs-240924 pkgs-2505 pkgs-unstable self;
+              };
+              modules = [
+                {
+                  nixpkgs.config.allowUnfree = true;
+                  home-manager.useGlobalPkgs = true;
+                  home-manager.users.${profile.user} = import ./home.nix;
+                  home-manager.extraSpecialArgs = {
+                    inherit atomi profile pkgs-240924 pkgs-2505 pkgs-unstable;
+                  };
+                }
+                home-manager.darwinModules.home-manager
+                mac-app-util.darwinModules.default
+                ./darwin.nix
+              ];
+            };
+          })
+        (builtins.filter (p: p.kernel == "darwin") profiles));
     } // (
       flake-utils.lib.eachDefaultSystem
         (system:

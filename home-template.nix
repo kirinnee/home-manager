@@ -38,26 +38,54 @@ in
 with pkgs;
 with modules;
 rec {
-  nix = {
+  # Nix configuration - Linux only (darwin manages nix via darwin.nix)
+  nix = lib.mkIf (profile.kernel == "linux") {
     package = pkgs.nix;
     settings = {
-      fallback = true;
-      # List of substituters (binary caches)
+      # Core features
+      experimental-features = "nix-command flakes";
+      always-allow-substitutes = true;
+
+      # Substituters (merged from home-manager and flakehub)
       substituters = [
         "https://cache.nixos.org?priority=41"
         "https://nix-community.cachix.org?priority=42"
         "https://numtide.cachix.org?priority=43"
+        "https://cache.flakehub.com"
       ];
 
-      # Corresponding public keys for the substituters
+      # Trusted public keys (merged from home-manager and flakehub)
       trusted-public-keys = [
         "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
         "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs="
         "numtide.cachix.org-1:2ps1kLBUWjxIneOy1Ik6cQjb41X0iXVXeHigGmycPPE="
+        "cache.flakehub.com-3:hJuILl5sVK4iKm86JzgdXW12Y2Hwd5G07qKtHTOcDCM="
+        "cache.flakehub.com-4:Asi8qIv291s0aYLyH6IOnr5Kf6+OF14WVjkE6t3xMio="
+        "cache.flakehub.com-5:zB96CRlL7tiPtzA9/WKyPkp3A2vqxqgdgyTVNGShPDU="
+        "cache.flakehub.com-6:W4EGFwAGgBj3he7c5fNh9NkOXw0PUVaxygCVKeuvaqU="
+        "cache.flakehub.com-7:mvxJ2DZVHn/kRxlIaxYNMuDG1OvMckZu32um1TadOR8="
+        "cache.flakehub.com-8:moO+OVS0mnTjBTcOUh2kYLQEd59ExzyoW1QgQ8XAARQ="
+        "cache.flakehub.com-9:wChaSeTI6TeCuV/Sg2513ZIM9i0qJaYsF+lZCXg0J6o="
+        "cache.flakehub.com-10:2GqeNlIp6AKp4EF2MVbE1kBOp9iBSyo0UPR9KoR0o1Y="
       ];
+
+      # Performance
+      max-jobs = "auto";
+
+      # Bash prompt
+      bash-prompt-prefix = "(nix:$name) ";
+
+      # Nix path
+      nix-path = "nixpkgs=flake:nixpkgs";
+
+      # Trusted users (Linux typically uses wheel group)
+      trusted-users = [ "root" profile.user ];
     };
+
+    # Include user's custom nix.conf for settings not covered above
     extraOptions = ''
-      experimental-features = nix-command flakes
+      fallback = true
+      upgrade-nix-store-path-url = https://install.determinate.systems/nix-upgrade/stable/universal
       !include ${home.homeDirectory}/nix.conf
     '';
   };
@@ -408,6 +436,22 @@ rec {
         autoload -U add-zsh-hook
         add-zsh-hook chpwd update_env_by_dir
         update_env_by_dir
+
+        # Clear old aliases before defining function
+        unalias hmsz 2>/dev/null || true
+
+        # hmsz - apply config and reload zsh (works on both darwin and linux)
+        ${
+          if profile.kernel == "darwin" then ''
+            hmsz() {
+              sudo /run/current-system/sw/bin/darwin-rebuild switch --flake ~/.config/home-manager#${profile.user} && source ~/.zshrc
+            }
+          '' else ''
+            hmsz() {
+              home-manager switch && source ~/.zshrc
+            }
+          ''
+        }
       '';
 
       oh-my-zsh = {
@@ -476,7 +520,6 @@ rec {
 
         # nix & friends
         hms = "home-manager switch";
-        hmsz = "home-manager switch && source ~/.zshrc";
         hmg = "home-manager generations";
         ns = "nix shell";
 
