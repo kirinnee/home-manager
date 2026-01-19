@@ -46,27 +46,18 @@ rec {
       experimental-features = "nix-command flakes";
       always-allow-substitutes = true;
 
-      # Substituters (merged from home-manager and flakehub)
+      # Substituters
       substituters = [
         "https://cache.nixos.org?priority=41"
         "https://nix-community.cachix.org?priority=42"
         "https://numtide.cachix.org?priority=43"
-        "https://cache.flakehub.com"
       ];
 
-      # Trusted public keys (merged from home-manager and flakehub)
+      # Trusted public keys
       trusted-public-keys = [
         "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
         "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs="
         "numtide.cachix.org-1:2ps1kLBUWjxIneOy1Ik6cQjb41X0iXVXeHigGmycPPE="
-        "cache.flakehub.com-3:hJuILl5sVK4iKm86JzgdXW12Y2Hwd5G07qKtHTOcDCM="
-        "cache.flakehub.com-4:Asi8qIv291s0aYLyH6IOnr5Kf6+OF14WVjkE6t3xMio="
-        "cache.flakehub.com-5:zB96CRlL7tiPtzA9/WKyPkp3A2vqxqgdgyTVNGShPDU="
-        "cache.flakehub.com-6:W4EGFwAGgBj3he7c5fNh9NkOXw0PUVaxygCVKeuvaqU="
-        "cache.flakehub.com-7:mvxJ2DZVHn/kRxlIaxYNMuDG1OvMckZu32um1TadOR8="
-        "cache.flakehub.com-8:moO+OVS0mnTjBTcOUh2kYLQEd59ExzyoW1QgQ8XAARQ="
-        "cache.flakehub.com-9:wChaSeTI6TeCuV/Sg2513ZIM9i0qJaYsF+lZCXg0J6o="
-        "cache.flakehub.com-10:2GqeNlIp6AKp4EF2MVbE1kBOp9iBSyo0UPR9KoR0o1Y="
       ];
 
       # Performance
@@ -172,11 +163,8 @@ rec {
   ] ++ (if profile.kernel == "linux" then [
     pinentry-all
   ] else [
-    alt-tab-macos
-    rectangle
     pinentry_mac
-    raycast
-    obsidian
+    xcbuild
     nerd-fonts.jetbrains-mono
   ]
   ));
@@ -446,6 +434,24 @@ rec {
             hmsz() {
               sudo /run/current-system/sw/bin/darwin-rebuild switch --flake ~/.config/home-manager#${profile.user} && source ~/.zshrc
             }
+
+            nix-init() {
+              sudo launchctl load -w /Library/LaunchDaemons/org.nixos.nix-daemon.plist || true
+              cd ~/.config/home-manager
+              nix build ".#darwinConfigurations.${profile.user}.config.system.build.toplevel"
+              sudo ./result/sw/bin/darwin-rebuild switch --flake .#${profile.user}
+              rm -f result
+              cd -
+            }
+
+            claude() {
+              claude --dangerously-skip-permissions "$@"
+            }
+
+            claude-work() {
+              claude --dangerously-skip-permissions --config-dir ~/.claude-work "$@"
+            }
+
           '' else ''
             hmsz() {
               home-manager switch && source ~/.zshrc
@@ -482,7 +488,6 @@ rec {
         pack = "tar -zcvf archive.tar.gz";
         glog = "git log --oneline --decorate --graph";
         devbox = "ssh kirin@$DEVBOX";
-        nw = "narwhal";
         wr = "wrangler";
         rc = "open \"/nix/store/$(ls /nix/store | grep raycast | grep -v '.drv')\"";
         cyan = "cyanprint";
@@ -557,9 +562,7 @@ rec {
         cc = "claude --dangerously-skip-permissions";
       } // (if profile.kernel == "linux" then {
         cursor = "/mnt/c/Users/Hoengager/AppData/Local/Programs/cursor/resources/app/bin/cursor";
-      } else {
-        cursor = "/usr/local/bin/cursor";
-      });
+      } else { });
 
       plugins = [
         {
