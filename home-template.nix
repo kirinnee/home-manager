@@ -38,8 +38,8 @@ in
 with pkgs;
 with modules;
 rec {
-  # Nix configuration - Linux only (darwin manages nix via darwin.nix)
-  nix = lib.mkIf (profile.kernel == "linux") {
+  # Nix configuration
+  nix = {
     package = pkgs.nix;
     settings = {
       # Core features
@@ -321,22 +321,7 @@ rec {
       };
     };
 
-    alacritty = {
-      enable = true;
-      settings = {
-        font = {
-          normal = {
-            family = "JetBrainsMono Nerd Font";
-            style = "Regular";
-          };
-        };
-      };
-    };
-
-    bat = {
-      enable = true;
-    };
-
+    bat.enable = true;
 
     eza = {
       enable = true;
@@ -442,14 +427,6 @@ rec {
               sudo ./result/sw/bin/darwin-rebuild switch --flake .#${profile.user}
               rm -f result
               cd -
-            }
-
-            claude() {
-              claude --dangerously-skip-permissions "$@"
-            }
-
-            claude-work() {
-              claude --dangerously-skip-permissions --config-dir ~/.claude-work "$@"
             }
 
           '' else ''
