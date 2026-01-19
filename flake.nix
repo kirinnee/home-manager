@@ -10,6 +10,7 @@
     # Darwin Config - use release-25.05 to match nixpkgs-2505
     darwin.url = "github:lnl7/nix-darwin/nix-darwin-25.05";
     darwin.inputs.nixpkgs.follows = "nixpkgs-2505";
+    nix-homebrew.url = "github:zhaofengli/nix-homebrew";
 
     # Specify the source of Home Manager and Nixpkgs.
     nixpkgs-unstable.url = "github:nixos/nixpkgs/nixos-unstable";
@@ -39,6 +40,7 @@
     , atomipkgs
     , home-manager
     , darwin
+    , nix-homebrew
 
     , mac-app-util
     } @inputs:
@@ -94,6 +96,14 @@
                 inherit atomi profile pkgs-240924 pkgs-2505 pkgs-unstable self;
               };
               modules = [
+                nix-homebrew.darwinModules.nix-homebrew
+                {
+                  nix-homebrew = {
+                    enable = true;
+                    enableRosetta = true;
+                    user = profile.user;
+                  };
+                }
                 {
                   nixpkgs.config.allowUnfree = true;
                   home-manager.useGlobalPkgs = true;
