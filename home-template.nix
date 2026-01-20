@@ -1,4 +1,4 @@
-{ config, pkgs, lib, pkgs-240924, pkgs-2511, pkgs-unstable, pkgs-casks, atomi, profile, ... }:
+{ config, pkgs, lib, pkgs-240924, pkgs-stable, pkgs-unstable, pkgs-casks, atomi, profile, ... }:
 
 ####################
 # Custom Modules #
@@ -40,6 +40,7 @@ with modules;
 rec {
   imports = [
     ./modules/claude-config
+    ./modules/workspace
   ];
 
   # Nix configuration
@@ -88,6 +89,9 @@ rec {
   home.stateVersion = "25.11";
   home.username = "${profile.user}";
   home.homeDirectory = if profile.kernel == "linux" then "/home/${profile.user}" else "/Users/${profile.user}";
+
+  # Workspace directories setup
+  workspace.enable = true;
 
 
   home.activation.load-secrets = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
@@ -157,6 +161,7 @@ rec {
     k8s-update
     load-secrets
     speak
+    hms
 
     # liftoff
     awscli2
@@ -374,69 +379,20 @@ rec {
     zsh = {
       enable = true;
       enableCompletion = false;
-      initContent = ''
-        if [ -e '/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh' ]; then
-          . '/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh'
-        fi
-        if [ -e $HOME/.nix-profile/etc/profile.d/nix.sh ]; then . $HOME/.nix-profile/etc/profile.d/nix.sh; fi
-        if [ -e $HOME/.secrets ]; then . $HOME/.secrets; fi
-
-        # attic login atomicloud https://atomi-attic-app.fly.dev "$ATTIC_TOKEN"
-
-        () {
-           local -a prefix=( '\e'{\[,O} )
-           local -a up=( $${^prefix}A ) down=( $${^prefix}B )
-           local key=
-           for key in $up[@]; do
-              bindkey "$key" up-line-or-history
-           done
-           for key in $down[@]; do
-              bindkey "$key" down-line-or-history
-           done
-        }
-
-        unalias grep
-
-        bindkey "$${key[Up]}" up-line-or-search
-
-        update_env_by_dir() {
-          case "$PWD" in
-            ~/Workspace/work*)
-              export CLAUDE_CONFIG_DIR="$HOME/.claude-work"
-              ;;
-            ~/Workspace/atomi*|~/Workspace/personal*)
-              export CLAUDE_CONFIG_DIR="$HOME/.claude"
-              ;;
-            *)
-              unset CLAUDE_CONFIG_DIR
-              ;;
-          esac
-        }
-
-        autoload -U add-zsh-hook
-        add-zsh-hook chpwd update_env_by_dir
-        update_env_by_dir
-        ${
-          if profile.kernel == "darwin" then ''
-            hmsz() {
-              sudo /run/current-system/sw/bin/darwin-rebuild switch --flake ~/.config/home-manager#${profile.user} && source ~/.zshrc
-            }
-
-            nix-init() {
-              cd ~/.config/home-manager
-              nix build ".#darwinConfigurations.${profile.user}.config.system.build.toplevel"
-              sudo ./result/sw/bin/darwin-rebuild switch --flake .#${profile.user}
-              rm -f result
-              cd -
-            }
-
-          '' else ''
-            hmsz() {
-              home-manager switch && source ~/.zshrc
-            }
-          ''
-        }
-      '';
+      initContent =
+        let
+          initExtraFirst = lib.mkOrder 550 ''
+            if [ -e '/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh' ]; then
+              . '/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh'
+            fi
+            if [ -e $HOME/.nix-profile/etc/profile.d/nix.sh ]; then . $HOME/.nix-profile/etc/profile.d/nix.sh; fi
+            if [ -e $HOME/.secrets ]; then . $HOME/.secrets; fi
+          '';
+          zshConfig = lib.mkOrder 1000 ''
+            unalias grep
+          '';
+        in
+        lib.mkMerge [ initExtraFirst zshConfig ];
 
       oh-my-zsh = {
         enable = true;
@@ -502,7 +458,6 @@ rec {
         dockerize = "docker --context default run --rm -it -v $(pwd):/workspace -w /workspace";
 
         # nix & friends
-        hms = "home-manager switch";
         hmg = "home-manager generations";
         ns = "nix shell";
 
