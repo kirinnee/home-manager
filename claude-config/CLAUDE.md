@@ -1,0 +1,2 @@
+- use zsh interactive mode to run commands
+- dont write coauthored by claude
