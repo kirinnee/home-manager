@@ -38,6 +38,10 @@ in
 with pkgs;
 with modules;
 rec {
+  imports = [
+    ./modules/claude-config
+  ];
+
   # Nix configuration
   nix = {
     package = pkgs.nix;

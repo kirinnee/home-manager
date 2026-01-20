@@ -1,0 +1,32 @@
+{
+  "model": "opus",
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "say -v Samantha 'Claude is waiting for you'"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "say -v Samantha 'Task complete'"
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "liftoff-kafka-runbook-skill@claude-skills": true,
+    "ralph-wiggum@plugins": true
+  },
+  "alwaysThinkingEnabled": true
+}

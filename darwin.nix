@@ -5,34 +5,6 @@
   # Nix configuration (manages /etc/nix/nix.conf)
   # ============================================================
   nix.enable = false;
-  # nix.settings = {
-  #   experimental-features = "nix-command flakes";
-  #   always-allow-substitutes = true;
-
-  #   substituters = [
-  #     "https://cache.nixos.org?priority=41"
-  #     "https://nix-community.cachix.org?priority=42"
-  #     "https://numtide.cachix.org?priority=43"
-  #   ];
-
-  #   trusted-public-keys = [
-  #     "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
-  #     "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs="
-  #     "numtide.cachix.org-1:2ps1kLBUWjxIneOy1Ik6cQjb41X0iXVXeHigGmycPPE="
-  #   ];
-
-  #   max-jobs = "auto";
-  #   bash-prompt-prefix = "(nix:$name) ";
-  #   nix-path = "nixpkgs=flake:nixpkgs";
-  #   trusted-users = [ "root" profile.user ];
-  # };
-
-  # nix.extraOptions = ''
-  #   fallback = true
-  #   upgrade-nix-store-path-url = https://install.determinate.systems/nix-upgrade/stable/universal
-  #   !include ${config.users.users.${profile.user}.home}/nix.conf
-  # '';
-
 
   homebrew = {
     enable = true;
@@ -59,6 +31,7 @@
       "aptakube"
       "beekeeper-studio"
       "bruno"
+      "voiceink"
     ];
     masApps = { };
   };
