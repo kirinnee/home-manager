@@ -1,4 +1,4 @@
-{ pkgs, atomi, pkgs-2511, pkgs-unstable }:
+{ pkgs, atomi, pkgs-stable, pkgs-unstable }:
 let
 
   all = {
@@ -15,8 +15,8 @@ let
       with pkgs-unstable;
       { }
     );
-    nix-2511 = (
-      with pkgs-2511;
+    nix-stable = (
+      with pkgs-stable;
       {
         inherit
           gomplate
@@ -32,6 +32,6 @@ let
   };
 in
 with all;
-nix-2511 //
+nix-stable //
 nix-unstable //
 atomipkgs

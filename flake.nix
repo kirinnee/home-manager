@@ -9,20 +9,20 @@
 
     # Darwin Config - use release-25.11 to match nixpkgs-2511
     darwin.url = "github:lnl7/nix-darwin/nix-darwin-25.11";
-    darwin.inputs.nixpkgs.follows = "nixpkgs-2511";
+    darwin.inputs.nixpkgs.follows = "nixpkgs-stable";
     nix-homebrew.url = "github:zhaofengli/nix-homebrew";
 
     # Specify the source of Home Manager and Nixpkgs.
     nixpkgs-unstable.url = "github:nixos/nixpkgs/nixos-unstable";
-    nixpkgs-2511.url = "nixpkgs/nixos-25.11";
-    nixpkgs-240924.url = "nixpkgs/babc25a577c3310cce57c72d5bed70f4c3c3843a";
+    nixpkgs-stable.url = "github:nixos/nixpkgs/nixos-25.11";
+    nixpkgs-240924.url = "github:nixos/nixpkgs/babc25a577c3310cce57c72d5bed70f4c3c3843a";
 
     atomipkgs.url = "github:AtomiCloud/nix-registry/v2";
     mac-app-util.url = "github:hraban/mac-app-util";
 
     home-manager = {
       url = "github:nix-community/home-manager/release-25.11";
-      inputs.nixpkgs.follows = "nixpkgs-2511";
+      inputs.nixpkgs.follows = "nixpkgs-stable";
     };
   };
 
@@ -36,7 +36,7 @@
 
     , nixpkgs-unstable
     , nixpkgs-240924
-    , nixpkgs-2511
+    , nixpkgs-stable
     , atomipkgs
     , home-manager
     , darwin
@@ -51,7 +51,7 @@
           let
             system = "${profile.arch}-${profile.kernel}";
             pkgs-unstable = import nixpkgs-unstable { inherit system; config.allowUnfree = true; };
-            pkgs-2511 = import nixpkgs-2511 {
+            pkgs-stable = import nixpkgs-stable {
               inherit system;
               config.allowUnfree = true;
             };
@@ -59,7 +59,7 @@
             pre-commit-lib = pre-commit-hooks.lib.${system};
             atomi = atomipkgs.packages.${system};
           in
-          let pkgs = pkgs-2511; in
+          let pkgs = pkgs-stable; in
           {
             name = profile.user;
             value = home-manager.lib.homeManagerConfiguration {
@@ -69,7 +69,7 @@
                 ./home.nix
               ];
               extraSpecialArgs = {
-                inherit atomi profile pkgs-240924 pkgs-2511 pkgs-unstable;
+                inherit atomi profile pkgs-240924 pkgs-stable pkgs-unstable;
               };
             };
           })
@@ -80,20 +80,20 @@
           let
             system = "${profile.arch}-${profile.kernel}";
             pkgs-unstable = import nixpkgs-unstable { inherit system; config.allowUnfree = true; };
-            pkgs-2511 = import nixpkgs-2511 {
+            pkgs-stable = import nixpkgs-stable {
               inherit system;
               config.allowUnfree = true;
             };
             pkgs-240924 = import nixpkgs-240924 { inherit system; config.allowUnfree = true; };
             atomi = atomipkgs.packages.${system};
           in
-          let pkgs = pkgs-2511; in
+          let pkgs = pkgs-stable; in
           {
             name = profile.user;
             value = darwin.lib.darwinSystem {
               inherit pkgs system;
               specialArgs = {
-                inherit atomi profile pkgs-240924 pkgs-2511 pkgs-unstable self;
+                inherit atomi profile pkgs-240924 pkgs-stable pkgs-unstable self;
               };
               modules = [
                 nix-homebrew.darwinModules.nix-homebrew
@@ -109,7 +109,7 @@
                   home-manager.useGlobalPkgs = true;
                   home-manager.users.${profile.user} = import ./home.nix;
                   home-manager.extraSpecialArgs = {
-                    inherit atomi profile pkgs-240924 pkgs-2511 pkgs-unstable;
+                    inherit atomi profile pkgs-240924 pkgs-stable pkgs-unstable;
                   };
                 }
                 home-manager.darwinModules.home-manager
@@ -124,12 +124,12 @@
         (system:
         let
           pkgs-unstable = import nixpkgs-unstable { inherit system; config.allowUnfree = true; };
-          pkgs-2511 = import nixpkgs-2511 { inherit system; config.allowUnfree = true; };
+          pkgs-stable = import nixpkgs-stable { inherit system; config.allowUnfree = true; };
           pre-commit-lib = pre-commit-hooks.lib.${system};
           atomi = atomipkgs.packages.${system};
           attic = attic.packages.${system};
         in
-        let pkgs = pkgs-2511; in
+        let pkgs = pkgs-stable; in
         let
           out = rec {
             pre-commit = import ./nix/pre-commit.nix {
@@ -139,7 +139,7 @@
               inherit treefmt-nix pkgs;
             };
             packages = import ./nix/packages.nix {
-              inherit pkgs atomi pkgs-2511 pkgs-unstable;
+              inherit pkgs atomi pkgs-stable pkgs-unstable;
             };
             env = import ./nix/env.nix {
               inherit pkgs packages;

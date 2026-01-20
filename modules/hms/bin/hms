@@ -1,0 +1,15 @@
+#!/bin/bash
+# hms - Home Manager switch for Linux
+# Auto-detects OS and uses appropriate command
+
+set -euo pipefail
+
+OS=$(uname)
+
+if [[ "$OS" == "Darwin" ]]; then
+    # On Darwin, hms is an alias for hmsz
+    exec hmsz "$@"
+else
+    # On Linux, use home-manager switch
+    home-manager switch "$@"
+fi
