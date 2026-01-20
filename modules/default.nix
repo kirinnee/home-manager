@@ -7,4 +7,5 @@ rec {
   k8s-update = import ./k8s-update/default.nix { inherit nixpkgs trivialBuilders; };
   load-secrets = import ./load-secrets/default.nix { inherit nixpkgs trivialBuilders; };
   gawt = import ./gawt/default.nix { inherit nixpkgs trivialBuilders; };
+  speak = import ./speak/default.nix { inherit trivialBuilders nixpkgs; };
 }

@@ -157,6 +157,7 @@ rec {
     setup-pcloud-remote
     k8s-update
     load-secrets
+    speak
 
     # liftoff
     awscli2
