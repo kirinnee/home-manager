@@ -11,7 +11,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "say -v Samantha 'Claude is waiting for you'"
+            "command": "speak 'Claude is waiting for you'"
           }
         ]
       }
@@ -22,7 +22,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "say -v Samantha 'Task complete'"
+            "command": "speak 'Task complete'"
           }
         ]
       }
