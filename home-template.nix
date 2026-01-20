@@ -421,7 +421,6 @@ rec {
             }
 
             nix-init() {
-              sudo launchctl load -w /Library/LaunchDaemons/org.nixos.nix-daemon.plist || true
               cd ~/.config/home-manager
               nix build ".#darwinConfigurations.${profile.user}.config.system.build.toplevel"
               sudo ./result/sw/bin/darwin-rebuild switch --flake .#${profile.user}
