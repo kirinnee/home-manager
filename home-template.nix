@@ -1,4 +1,4 @@
-{ config, pkgs, lib, pkgs-240924, pkgs-2505, pkgs-unstable, pkgs-casks, atomi, profile, ... }:
+{ config, pkgs, lib, pkgs-240924, pkgs-2511, pkgs-unstable, pkgs-casks, atomi, profile, ... }:
 
 ####################
 # Custom Modules #
@@ -85,7 +85,7 @@ rec {
     '';
   };
   # Let Home Manager install and manage itself.
-  home.stateVersion = "25.05";
+  home.stateVersion = "25.11";
   home.username = "${profile.user}";
   home.homeDirectory = if profile.kernel == "linux" then "/home/${profile.user}" else "/Users/${profile.user}";
 
@@ -115,7 +115,7 @@ rec {
     unixtools.watch
     gnutar
     tmux
-    du-dust
+    dust
     fd
     procs
     dua
@@ -141,7 +141,6 @@ rec {
     linkerd
     pkgs-240924.bitwarden-cli
     devenv
-    httplz
     nodejs
 
 
@@ -208,69 +207,55 @@ rec {
 
     ssh = {
       enable = true;
-      extraConfig = ''
-        Host github-personal
-        HostName github.com
-        User git
-        PreferredAuthentications publickey
-        IdentityFile ~/.ssh/id_ed25519_kirin
-        IdentitiesOnly=yes
-
-        Host github-liftoff
-        HostName github.com
-        User git
-        PreferredAuthentications publickey
-        IdentityFile ~/.ssh/id_ed25519_vungle
-        IdentitiesOnly=yes
-
-        Host github-atomi
-        HostName github.com
-        User git
-        PreferredAuthentications publickey
-        IdentityFile ~/.ssh/id_ed25519_adelphi
-        IdentitiesOnly=yes 
-
-        Host *.liftoff.io
-        User ubuntu
-        PasswordAuthentication no
-        ForwardAgent yes
-        SendEnv LIFTOFF_USER
-        StrictHostKeyChecking no
-        UserKnownHostsFile /dev/null
-        LogLevel ERROR
-        AddKeysToAgent yes
-      '';
-    };
-
-    git = {
-      delta = {
-        enable = true;
-        options = {
-          navigate = true;
-          side-by-side = true;
-          theme = "Monokai Extended";
-          features = "decorations";
-
-          decorations = {
-            file-style = "lightcoral bold ul";
-            file-decoration-style = "blue ul";
-            file-modified-label = "#";
-            hunk-header-style = "line-number syntax bold";
-            hunk-header-decoration-style = "lightcoral box";
-            hunk-header-line-number-style = "lightcoral ul";
-            hunk-label = "";
+      enableDefaultConfig = false;
+      matchBlocks = {
+        "*" = {
+          forwardAgent = false;
+          identitiesOnly = false;
+        };
+        "github-personal" = {
+          hostname = "github.com";
+          user = "git";
+          identitiesOnly = true;
+          identityFile = "~/.ssh/id_ed25519_kirin";
+        };
+        "github-liftoff" = {
+          hostname = "github.com";
+          user = "git";
+          identitiesOnly = true;
+          identityFile = "~/.ssh/id_ed25519_vungle";
+        };
+        "github-atomi" = {
+          hostname = "github.com";
+          user = "git";
+          identitiesOnly = true;
+          identityFile = "~/.ssh/id_ed25519_adelphi";
+        };
+        "*.liftoff.io" = {
+          user = "ubuntu";
+          forwardAgent = true;
+          extraOptions = {
+            PasswordAuthentication = "no";
+            SendEnv = "LIFTOFF_USER";
+            StrictHostKeyChecking = "no";
+            UserKnownHostsFile = "/dev/null";
+            LogLevel = "ERROR";
+            AddKeysToAgent = "yes";
           };
         };
       };
+    };
+
+    git = {
       enable = true;
-      userEmail = "${profile.email}";
-      userName = "${profile.gituser}";
-      extraConfig = {
+      settings = {
+        user.email = "${profile.email}";
+        user.name = "${profile.gituser}";
         init.defaultBranch = "main";
-        push.autoSetupRemote = "true";
+        push.autoSetupRemote = true;
         branch.autosetuprebase = "always";
-        pull.rebase = "true";
-        rebase.autoStash = "true";
+        pull.rebase = true;
+        rebase.autoStash = true;
       };
       includes = [
         {
@@ -321,12 +306,31 @@ rec {
           };
         }
       ];
-      lfs = {
-        enable = true;
-      };
+      lfs.enable = true;
     };
 
     bat.enable = true;
+
+    delta = {
+      enable = true;
+      enableGitIntegration = true;
+      options = {
+        navigate = true;
+        side-by-side = true;
+        theme = "Monokai Extended";
+        features = "decorations";
+
+        decorations = {
+          file-style = "lightcoral bold ul";
+          file-decoration-style = "blue ul";
+          file-modified-label = "#";
+          hunk-header-style = "line-number syntax bold";
+          hunk-header-decoration-style = "lightcoral box";
+          hunk-header-line-number-style = "lightcoral ul";
+          hunk-label = "";
+        };
+      };
+    };
 
     eza = {
       enable = true;
@@ -354,9 +358,7 @@ rec {
         }
       '';
       enableZshIntegration = true;
-      nix-direnv = {
-        enable = true;
-      };
+      nix-direnv.enable = true;
     };
 
     fzf = {
@@ -414,11 +416,6 @@ rec {
         autoload -U add-zsh-hook
         add-zsh-hook chpwd update_env_by_dir
         update_env_by_dir
-
-        # Clear old aliases before defining function
-        unalias hmsz 2>/dev/null || true
-
-        # hmsz - apply config and reload zsh (works on both darwin and linux)
         ${
           if profile.kernel == "darwin" then ''
             hmsz() {
@@ -549,14 +546,13 @@ rec {
         {
           name = "powerlevel10k";
           src = pkgs.zsh-powerlevel10k;
-
-          file = "\${PREFIX}share/zsh-powerlevel10k/powerlevel10k.zsh-theme";
+          file = "share/zsh-powerlevel10k/powerlevel10k.zsh-theme";
         }
         # p10k config
         {
           name = "powerlevel10k-config";
           src = ./p10k-config;
-          file = "\${PREFIX}.p10k.zsh";
+          file = ".p10k.zsh";
         }
         # live autocomplete
         {

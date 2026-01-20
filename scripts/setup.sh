@@ -70,7 +70,7 @@ else
   # Install home-manager if not present
   if ! command -v home-manager >/dev/null 2>&1; then
     echo "⏬ Installing Home Manager..."
-    nix run home-manager/release-25.05 -- init --switch
+    nix run home-manager/release-25.11 -- init --switch
     echo "✅ Home Manager installed!"
   fi
 
