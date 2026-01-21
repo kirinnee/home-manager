@@ -93,6 +93,8 @@ rec {
   # Workspace directories setup
   workspace.enable = true;
 
+  # Worktrunk config
+  xdg.configFile."worktrunk/config.toml".source = ./worktrunk/config.toml;
 
   home.activation.load-secrets = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
     export SECRETS_FILE="${./secrets.enc.yaml}"
@@ -133,6 +135,8 @@ rec {
     sops
     atomi.cyanprint
     atomi.attic
+    atomi.worktrunk
+    atomi.cliproxyapi
 
     # cncf
     kubectl
@@ -169,6 +173,7 @@ rec {
     ssm-session-manager-plugin
 
     pkgs-unstable.claude-code
+
   ] ++ (if profile.kernel == "linux" then [
     pinentry-all
   ] else [
@@ -196,6 +201,7 @@ rec {
     "$HOME/.local/bin"
     "$HOME/bin"
     "$HOME/.npm-global/bin"
+    "/opt/homebrew/bin"
   ];
   #######################
   # Background services #
@@ -391,8 +397,11 @@ rec {
           zshConfig = lib.mkOrder 1000 ''
             unalias grep
           '';
+          wtShell = lib.mkOrder 5000 ''
+            if command -v wt >/dev/null 2>&1; then eval "$(command wt config shell init zsh)"; fi
+          '';
         in
-        lib.mkMerge [ initExtraFirst zshConfig ];
+        lib.mkMerge [ initExtraFirst zshConfig wtShell ];
 
       oh-my-zsh = {
         enable = true;
@@ -489,6 +498,12 @@ rec {
         aec2eti = "aws ssm start-session --target";
         aec2del = "aws ec2 terminate-instances --instance-ids";
         configterm = "POWERLEVEL9K_CONFIG_FILE=\"$HOME/.config/home-manager/p10k-config/.p10k.zsh\" p10k configure";
+
+        wts = "wt select";
+        wtc = "wt switch -c";
+        wtcc = "wt switch -c -x cc";
+        wtsc = "wt switch -x cc";
+        wtrm = "wt remove";
 
         # liftoff
         awsl = "unset AWS_PROFILE && gimme-aws-creds && awsp";
