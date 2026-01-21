@@ -1,5 +1,5 @@
 #!/bin/bash
-# hms - Home Manager switch for Linux
+# hms - Home Manager switch
 # Auto-detects OS and uses appropriate command
 
 set -euo pipefail
@@ -7,8 +7,24 @@ set -euo pipefail
 OS=$(uname)
 
 if [[ "$OS" == "Darwin" ]]; then
-    # On Darwin, hms is an alias for hmsz
-    exec hmsz "$@"
+    # On Darwin, run darwin-rebuild
+    USER=$(whoami)
+    FLAKE_DIR="${HOME}/.config/home-manager"
+    PROFILE="${PROFILE:-$USER}"
+
+    if [[ ! -d "$FLAKE_DIR" ]]; then
+        echo "Error: Flake directory not found: $FLAKE_DIR" >&2
+        exit 1
+    fi
+
+    echo "Building darwin configuration for user: $PROFILE"
+    cd "$FLAKE_DIR"
+
+    if command -v darwin-rebuild &>/dev/null; then
+        sudo darwin-rebuild switch --flake "$FLAKE_DIR#$PROFILE" "$@"
+    else
+        sudo /run/current-system/sw/bin/darwin-rebuild switch --flake "$FLAKE_DIR#$PROFILE" "$@"
+    fi
 else
     # On Linux, use home-manager switch
     home-manager switch "$@"
