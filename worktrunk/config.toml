@@ -1,0 +1,2 @@
+[post-create]
+direnv = "direnv allow"
