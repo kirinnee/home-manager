@@ -1,37 +1,32 @@
 { config, lib, pkgs, ... }:
-
-let
-  hooks = {
-    Notification = [
-      {
-        matcher = "";
-        hooks = [
-          {
-            type = "command";
-            command = "speak 'Claude is waiting for you'";
-          }
-        ];
-      }
-    ];
-    Stop = [
-      {
-        matcher = "";
-        hooks = [
-          {
-            type = "command";
-            command = "speak 'Task complete'";
-          }
-        ];
-      }
-    ];
-
-  };
-in
-
 let
   baseConfig = {
     model = "opus";
-    inherit hooks;
+    hooks = {
+      Notification = [
+        {
+          matcher = "";
+          hooks = [
+            {
+              type = "command";
+              command = "speak 'Claude is waiting for you'";
+            }
+          ];
+        }
+      ];
+      Stop = [
+        {
+          matcher = "";
+          hooks = [
+            {
+              type = "command";
+              command = "speak 'Task complete'";
+            }
+          ];
+        }
+      ];
+
+    };
     alwaysThinkingEnabled = true;
     attribution = {
       commit = "Co-authored by Claude Code";
