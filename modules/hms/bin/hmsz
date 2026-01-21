@@ -1,28 +1,12 @@
 #!/bin/bash
-# hmsz - Darwin rebuild switch for macOS
-# Auto-detects username and runs darwin-rebuild
+# hmsz - hms + source zshrc
 
 set -euo pipefail
 
-USER=$(whoami)
-FLAKE_DIR="${HOME}/.config/home-manager"
+# Call hms
+hms "$@"
 
-# Get the profile from flake metadata or default to username
-PROFILE="${PROFILE:-$USER}"
-
-if [[ ! -d "$FLAKE_DIR" ]]; then
-    echo "Error: Flake directory not found: $FLAKE_DIR" >&2
-    exit 1
-fi
-
-echo "Building darwin configuration for user: $PROFILE"
-cd "$FLAKE_DIR"
-
-# Run darwin-rebuild switch
-if command -v darwin-rebuild &>/dev/null; then
-    sudo darwin-rebuild switch --flake "$FLAKE_DIR#$PROFILE" "$@"
-else
-    sudo /run/current-system/sw/bin/darwin-rebuild switch --flake "$FLAKE_DIR#$PROFILE" "$@"
-fi
-
-echo "Done! Start a new shell or run: exec zsh"
+# Source zshrc
+echo "Sourcing zshrc..."
+ZDOTDIR="${ZDOTDIR:-$HOME}"
+. "$ZDOTDIR/.zshrc"

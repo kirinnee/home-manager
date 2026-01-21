@@ -14,7 +14,8 @@ speak_linux() {
 
 speak_wsl() {
   # WSL: use PowerShell TTS (Windows built-in)
-  powershell.exe -Command "Add-Type -AssemblyName System.Speech; \$speak = New-Object System.Speech.Synthesis.SpeechSynthesizer; \$speak.Speak([string]::Join(' ', \$args))" "$@"
+  local text="$*"
+  powershell.exe -Command "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('${text//\'/\'\'}')"
 }
 
 # Detect platform

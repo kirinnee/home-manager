@@ -3,6 +3,8 @@
 let
   version = "1.0.0";
 
+  isDarwin = nixpkgs.stdenv.isDarwin;
+
   # Create a package that provides all three scripts
   package = nixpkgs.symlinkJoin {
     name = "hms-${version}";
@@ -20,6 +22,7 @@ let
         runtimeShell = "${nixpkgs.bash}/bin/bash";
         text = builtins.readFile ./bin/hmsz;
       })
+    ] ++ nixpkgs.lib.optionals isDarwin [
       (trivialBuilders.writeShellApplicationWithoutCheck {
         name = "nix-init";
         inherit version;
