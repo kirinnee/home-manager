@@ -113,11 +113,11 @@ rec {
           "~/.config/home-manager"
           "~/Workspace/personal"
         ];
-        settings = lib.recursiveUpdate (import ./modules/claude-config/base-settings.nix) {
-          env = {
-            ANTHROPIC_BASE_URL = "https://api.z.ai/api/anthropic";
-            API_TIMEOUT_MS = "3000000";
-          };
+        settings = lib.recursiveUpdate (import ./modules/claude-config/base-settings.nix) { };
+        env = {
+          ANTHROPIC_BASE_URL = "https://api.z.ai/api/anthropic";
+          API_TIMEOUT_MS = "3000000";
+          ANTHROPIC_AUTH_TOKEN = "\"$ZAI_AUTH_TOKEN\"";
         };
         mcpServers = lib.recursiveUpdate (import ./modules/claude-config/base-mcp.nix { }) { };
         memory.source = ./modules/claude-config/CLAUDE.md;
@@ -231,8 +231,6 @@ rec {
     SOPS_AGE_KEY_FILE = "$HOME/.config/sops/age/keys.txt";
     EDITOR = "nano";
     VAULT_ADDR = "https://vault.ops.vungle.io";
-    ANTHROPIC_BASE_URL = "https://api.z.ai/api/anthropic";
-    API_TIMEOUT_MS = "3000000";
   };
 
   ##################
