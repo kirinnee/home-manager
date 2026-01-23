@@ -39,7 +39,7 @@ with pkgs;
 with modules;
 rec {
   imports = [
-    ./modules/claude-config
+    ./modules/claude-multi
     ./modules/workspace
   ];
 
@@ -92,6 +92,45 @@ rec {
 
   # Workspace directories setup
   workspace.enable = true;
+
+  # Claude multi-account configuration
+  programs.claude-multi = {
+    enable = true;
+    defaultPackage = pkgs-unstable.claude-code;
+    defaultAccount = "personal";
+
+    smartWrapper.enable = true;
+
+    shellIntegration = {
+      functions = false;
+      showActive = true;
+    };
+
+    accounts = {
+      personal = {
+        directoryRules = [
+          "~"
+          "~/.config/home-manager"
+          "~/Workspace/personal"
+        ];
+        settings = lib.recursiveUpdate (import ./modules/claude-config/base-settings.nix) {
+          env = {
+            ANTHROPIC_BASE_URL = "https://api.z.ai/api/anthropic";
+            API_TIMEOUT_MS = "3000000";
+          };
+        };
+        mcpServers = lib.recursiveUpdate (import ./modules/claude-config/base-mcp.nix { }) { };
+        memory.source = ./modules/claude-config/CLAUDE.md;
+      };
+
+      liftoff = {
+        directoryRules = [ "~/Workspace/work" ];
+        settings = lib.recursiveUpdate (import ./modules/claude-config/base-settings.nix) { };
+        mcpServers = lib.recursiveUpdate (import ./modules/claude-config/base-mcp.nix { }) { };
+        memory.source = ./modules/claude-config/CLAUDE.md;
+      };
+    };
+  };
 
   # Worktrunk config
   xdg.configFile."worktrunk/config.toml".source = ./worktrunk/config.toml;
@@ -172,7 +211,7 @@ rec {
     pkgs-240924.gimme-aws-creds
     ssm-session-manager-plugin
 
-    pkgs-unstable.claude-code
+    # claude-code is now managed by claude-multi module
 
   ] ++ (if profile.kernel == "linux" then [
     pinentry-all
@@ -192,6 +231,8 @@ rec {
     SOPS_AGE_KEY_FILE = "$HOME/.config/sops/age/keys.txt";
     EDITOR = "nano";
     VAULT_ADDR = "https://vault.ops.vungle.io";
+    ANTHROPIC_BASE_URL = "https://api.z.ai/api/anthropic";
+    API_TIMEOUT_MS = "3000000";
   };
 
   ##################
@@ -507,7 +548,6 @@ rec {
 
         # liftoff
         awsl = "unset AWS_PROFILE && gimme-aws-creds && awsp";
-        cc = "claude --dangerously-skip-permissions";
       } // (if profile.kernel == "linux" then {
         cursor = "/mnt/c/Users/Hoengager/AppData/Local/Programs/cursor/resources/app/bin/cursor";
       } else { });

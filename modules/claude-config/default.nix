@@ -1,49 +1,6 @@
 { config, lib, pkgs, ... }:
 let
-  baseConfig = {
-    model = "opus";
-    hooks = {
-      Notification = [
-        {
-          matcher = "";
-          hooks = [
-            {
-              type = "command";
-              command = "speak 'Claude is waiting for you'";
-            }
-          ];
-        }
-      ];
-      Stop = [
-        {
-          matcher = "";
-          hooks = [
-            {
-              type = "command";
-              command = "speak 'Task complete'";
-            }
-          ];
-        }
-      ];
-
-    };
-    alwaysThinkingEnabled = true;
-    attribution = {
-      commit = "Co-authored by Claude Code";
-      pr = "Co-authored by Claude Code";
-    };
-    enabledPlugins = {
-      "ralph-wiggum@tuannvm" = true;
-    };
-    extraKnownMarketplaces = {
-      tuannvm = {
-        source = {
-          source = "github";
-          repo = "tuannvm/plugins";
-        };
-      };
-    };
-  };
+  baseConfig = import ./base-settings.nix;
 in
 {
   # Personal Claude config (~/.claude)
