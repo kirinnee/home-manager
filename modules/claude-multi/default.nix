@@ -70,9 +70,14 @@ let
       hasMcp = transformedServers != { };
       mcpFlags = lib.optionalString hasMcp "--mcp-config ${mcpConfigFile}";
       configDir = getConfigDir name accountCfg;
+      # Generate env var exports (supports shell expansion)
+      envExports = lib.concatStringsSep "\n" (
+        lib.mapAttrsToList (k: v: "export ${k}=${v}") accountCfg.env
+      );
     in
     pkgs.writeShellScriptBin "claude-${name}" ''
       export CLAUDE_CONFIG_DIR="$HOME/${configDir}"
+      ${envExports}
       exec ${claudeBinary} ${mcpFlags} "$@"
     '';
 
@@ -253,6 +258,12 @@ in
             type = lib.types.nullOr lib.types.path;
             default = null;
             description = "Directory of skill files to symlink";
+          };
+
+          env = lib.mkOption {
+            type = lib.types.attrsOf lib.types.str;
+            default = { };
+            description = "Environment variables to export before running claude binary. Supports shell expansion (e.g. ANTHROPIC_AUTH_TOKEN = \"$ZAI_AUTH_TOKEN\")";
           };
         };
       }));
