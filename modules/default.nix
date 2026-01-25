@@ -9,4 +9,5 @@ rec {
   gawt = import ./gawt/default.nix { inherit nixpkgs trivialBuilders; };
   speak = import ./speak/default.nix { inherit trivialBuilders nixpkgs; };
   hms = import ./hms/default.nix { inherit trivialBuilders nixpkgs; };
+  dev-loop = import ./dev-loop/default.nix { inherit trivialBuilders nixpkgs; };
 }
