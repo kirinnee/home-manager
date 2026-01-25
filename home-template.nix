@@ -39,7 +39,6 @@ with pkgs;
 with modules;
 rec {
   imports = [
-    ./modules/claude-multi
     ./modules/workspace
   ];
 
@@ -113,7 +112,16 @@ rec {
           "~/.config/home-manager"
           "~/Workspace/personal"
         ];
-        settings = lib.recursiveUpdate (import ./modules/claude-config/base-settings.nix) { };
+        settings = lib.recursiveUpdate (import ./modules/claude-config/base-settings.nix) {
+          hooks.Stop = [
+            {
+              matcher = "";
+              hooks = [
+                { type = "command"; command = "speak 'Task complete'"; }
+              ];
+            }
+          ];
+        };
         env = {
           ANTHROPIC_BASE_URL = "https://api.z.ai/api/anthropic";
           API_TIMEOUT_MS = "3000000";
@@ -121,13 +129,76 @@ rec {
         };
         mcpServers = lib.recursiveUpdate (import ./modules/claude-config/base-mcp.nix { }) { };
         memory.source = ./modules/claude-config/CLAUDE.md;
+        skillsDir = ./modules/claude-config/skills;
       };
 
       liftoff = {
         directoryRules = [ "~/Workspace/work" ];
-        settings = lib.recursiveUpdate (import ./modules/claude-config/base-settings.nix) { };
+        settings = lib.recursiveUpdate (import ./modules/claude-config/base-settings.nix) {
+          hooks.Stop = [
+            {
+              matcher = "";
+              hooks = [
+                { type = "command"; command = "speak 'Task complete'"; }
+              ];
+            }
+          ];
+        };
         mcpServers = lib.recursiveUpdate (import ./modules/claude-config/base-mcp.nix { }) { };
         memory.source = ./modules/claude-config/CLAUDE.md;
+        skillsDir = ./modules/claude-config/skills;
+      };
+
+      reviewer-anthropic = {
+        directoryRules = [ ]; # No directory rules - call manually with claude-reviewer
+        settings.model = "opus";
+        mcpServers = { };
+        env = {
+          ANTHROPIC_BASE_URL = "http://127.0.0.1:8317";
+          ANTHROPIC_AUTH_TOKEN = "7e5387c8-f1ba-40fb-834a-87ee673b04f5"; # infisical-scan:ignore
+          ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-5-20251101";
+          ANTHROPIC_DEFAULT_SONNET_MODEL = "claude-sonnet-4-5-20250929";
+          ANTHROPIC_DEFAULT_HAIKU_MODEL = "claude-haiku-4-5-20251001";
+        };
+        memory.source = ./modules/claude-config/CLAUDE-reviewer.md;
+      };
+
+      reviewer-gemini = {
+        directoryRules = [ ]; # No directory rules - call manually with claude-reviewer
+        settings.model = "opus";
+        mcpServers = { };
+        env = {
+          ANTHROPIC_BASE_URL = "http://127.0.0.1:8317";
+          ANTHROPIC_AUTH_TOKEN = "7e5387c8-f1ba-40fb-834a-87ee673b04f5"; # infisical-scan:ignore
+          ANTHROPIC_DEFAULT_OPUS_MODEL = "gemini-3-pro-preview";
+          ANTHROPIC_DEFAULT_SONNET_MODEL = "gemini-3-flash-preview";
+          ANTHROPIC_DEFAULT_HAIKU_MODEL = "gemini-2.5-flash";
+        };
+        memory.source = ./modules/claude-config/CLAUDE-reviewer.md;
+      };
+      reviewer-zai = {
+        directoryRules = [ ]; # No directory rules - call manually with claude-reviewer
+        settings.model = "opus";
+        mcpServers = { };
+        env = {
+          ANTHROPIC_BASE_URL = "https://api.z.ai/api/anthropic";
+          API_TIMEOUT_MS = "3000000";
+          ANTHROPIC_AUTH_TOKEN = "\"$ZAI_AUTH_TOKEN\"";
+        };
+        memory.source = ./modules/claude-config/CLAUDE-reviewer.md;
+      };
+      reviewer-codex = {
+        directoryRules = [ ]; # No directory rules - call manually with claude-reviewer
+        settings.model = "opus";
+        mcpServers = { };
+        env = {
+          ANTHROPIC_BASE_URL = "http://127.0.0.1:8317";
+          ANTHROPIC_AUTH_TOKEN = "7e5387c8-f1ba-40fb-834a-87ee673b04f5"; # infisical-scan:ignore
+          ANTHROPIC_DEFAULT_OPUS_MODEL = "gpt-5.2-codex";
+          ANTHROPIC_DEFAULT_SONNET_MODEL = "gpt-5.1-codex";
+          ANTHROPIC_DEFAULT_HAIKU_MODEL = "gpt-5.1-codex-mini";
+        };
+        memory.source = ./modules/claude-config/CLAUDE-reviewer.md;
       };
     };
   };
@@ -205,6 +276,7 @@ rec {
     load-secrets
     speak
     hms
+    dev-loop
 
     # liftoff
     awscli2
@@ -546,6 +618,8 @@ rec {
 
         # liftoff
         awsl = "unset AWS_PROFILE && gimme-aws-creds && awsp";
+
+        cc = "claude --dangerously-skip-permissions";
       } // (if profile.kernel == "linux" then {
         cursor = "/mnt/c/Users/Hoengager/AppData/Local/Programs/cursor/resources/app/bin/cursor";
       } else { });

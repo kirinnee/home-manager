@@ -32,6 +32,8 @@
       "beekeeper-studio"
       "bruno"
       "voiceink"
+      "antigravity"
+      "google-chrome"
     ];
     masApps = { };
   };

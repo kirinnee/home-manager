@@ -24,6 +24,8 @@
       url = "github:nix-community/home-manager/release-25.11";
       inputs.nixpkgs.follows = "nixpkgs-stable";
     };
+
+    claude-multi.url = "github:kirinnee/multi-claude-home-manager";
   };
 
   outputs =
@@ -43,6 +45,7 @@
     , nix-homebrew
 
     , mac-app-util
+    , claude-multi
     } @inputs:
     let profiles = import ./profiles.nix; in
     {
@@ -66,6 +69,7 @@
               inherit pkgs;
               modules = [
                 mac-app-util.homeManagerModules.default
+                claude-multi.homeManagerModules.claude-multi
                 ./home.nix
               ];
               extraSpecialArgs = {
@@ -111,6 +115,9 @@
                   home-manager.extraSpecialArgs = {
                     inherit atomi profile pkgs-240924 pkgs-stable pkgs-unstable;
                   };
+                  home-manager.sharedModules = [
+                    claude-multi.homeManagerModules.claude-multi
+                  ];
                 }
                 home-manager.darwinModules.home-manager
                 mac-app-util.darwinModules.default
