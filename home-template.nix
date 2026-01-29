@@ -100,11 +100,55 @@ rec {
 
     smartWrapper.enable = true;
 
+    aliases = {
+      "yolo" = "--dangerously-skip-permissions";
+    };
+
     shellIntegration = {
       functions = false;
       showActive = true;
     };
 
+    accounts =
+      let imported = import ./modules/claude-config/default.nix; in
+      let inherit (imported) userConfig implConfig revConfig auth;
+        merge = lib.recursiveUpdate;
+      in
+      {
+        personal = merge userConfig {
+          directoryRules = [
+            "~"
+            "~/.config/home-manager"
+            "~/Workspace/personal"
+          ];
+          env = auth.zai;
+        };
+
+        liftoff = merge userConfig {
+          directoryRules = [ "~/Workspace/work" ];
+          env = auth.anthropic;
+        };
+
+        codex = merge userConfig { env = auth.codex; };
+        gemini = merge userConfig { env = auth.gemini; };
+
+        impl-anthropic = merge implConfig { env = auth.anthropic; };
+        impl-codex = merge implConfig { env = auth.codex; };
+        impl-gemini = merge implConfig { env = auth.gemini; };
+        impl-zai = merge implConfig { env = auth.zai; };
+
+        reviewer-anthropic = merge revConfig { env = auth.anthropic; };
+        reviewer-codex = merge revConfig { env = auth.codex; };
+        reviewer-gemini = merge revConfig { env = auth.gemini; };
+        reviewer-zai = merge revConfig { env = auth.zai; };
+      };
+  };
+
+  programs.multi-gh = {
+    enable = true;
+    defaultAccount = "personal";
+    defaultPackage = pkgs-unstable.gh;
+    smartWrapper.enable = true;
     accounts = {
       personal = {
         directoryRules = [
@@ -112,93 +156,15 @@ rec {
           "~/.config/home-manager"
           "~/Workspace/personal"
         ];
-        settings = lib.recursiveUpdate (import ./modules/claude-config/base-settings.nix) {
-          hooks.Stop = [
-            {
-              matcher = "";
-              hooks = [
-                { type = "command"; command = "speak 'Task complete'"; }
-              ];
-            }
-          ];
-        };
-        env = {
-          ANTHROPIC_BASE_URL = "https://api.z.ai/api/anthropic";
-          API_TIMEOUT_MS = "3000000";
-          ANTHROPIC_AUTH_TOKEN = "\"$ZAI_AUTH_TOKEN\"";
-        };
-        mcpServers = lib.recursiveUpdate (import ./modules/claude-config/base-mcp.nix { }) { };
-        memory.source = ./modules/claude-config/CLAUDE.md;
-        skillsDir = ./modules/claude-config/skills;
+        username = "kirinnee";
       };
-
+      atomi = {
+        directoryRules = [ "~/Workspace/atomi" ];
+        username = "adelphi-liong";
+      };
       liftoff = {
         directoryRules = [ "~/Workspace/work" ];
-        settings = lib.recursiveUpdate (import ./modules/claude-config/base-settings.nix) {
-          hooks.Stop = [
-            {
-              matcher = "";
-              hooks = [
-                { type = "command"; command = "speak 'Task complete'"; }
-              ];
-            }
-          ];
-        };
-        mcpServers = lib.recursiveUpdate (import ./modules/claude-config/base-mcp.nix { }) { };
-        memory.source = ./modules/claude-config/CLAUDE.md;
-        skillsDir = ./modules/claude-config/skills;
-      };
-
-      reviewer-anthropic = {
-        directoryRules = [ ]; # No directory rules - call manually with claude-reviewer
-        settings.model = "opus";
-        mcpServers = { };
-        env = {
-          ANTHROPIC_BASE_URL = "http://127.0.0.1:8317";
-          ANTHROPIC_AUTH_TOKEN = "7e5387c8-f1ba-40fb-834a-87ee673b04f5"; # infisical-scan:ignore
-          ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-5-20251101";
-          ANTHROPIC_DEFAULT_SONNET_MODEL = "claude-sonnet-4-5-20250929";
-          ANTHROPIC_DEFAULT_HAIKU_MODEL = "claude-haiku-4-5-20251001";
-        };
-        memory.source = ./modules/claude-config/CLAUDE-reviewer.md;
-      };
-
-      reviewer-gemini = {
-        directoryRules = [ ]; # No directory rules - call manually with claude-reviewer
-        settings.model = "opus";
-        mcpServers = { };
-        env = {
-          ANTHROPIC_BASE_URL = "http://127.0.0.1:8317";
-          ANTHROPIC_AUTH_TOKEN = "7e5387c8-f1ba-40fb-834a-87ee673b04f5"; # infisical-scan:ignore
-          ANTHROPIC_DEFAULT_OPUS_MODEL = "gemini-3-pro-preview";
-          ANTHROPIC_DEFAULT_SONNET_MODEL = "gemini-3-flash-preview";
-          ANTHROPIC_DEFAULT_HAIKU_MODEL = "gemini-2.5-flash";
-        };
-        memory.source = ./modules/claude-config/CLAUDE-reviewer.md;
-      };
-      reviewer-zai = {
-        directoryRules = [ ]; # No directory rules - call manually with claude-reviewer
-        settings.model = "opus";
-        mcpServers = { };
-        env = {
-          ANTHROPIC_BASE_URL = "https://api.z.ai/api/anthropic";
-          API_TIMEOUT_MS = "3000000";
-          ANTHROPIC_AUTH_TOKEN = "\"$ZAI_AUTH_TOKEN\"";
-        };
-        memory.source = ./modules/claude-config/CLAUDE-reviewer.md;
-      };
-      reviewer-codex = {
-        directoryRules = [ ]; # No directory rules - call manually with claude-reviewer
-        settings.model = "opus";
-        mcpServers = { };
-        env = {
-          ANTHROPIC_BASE_URL = "http://127.0.0.1:8317";
-          ANTHROPIC_AUTH_TOKEN = "7e5387c8-f1ba-40fb-834a-87ee673b04f5"; # infisical-scan:ignore
-          ANTHROPIC_DEFAULT_OPUS_MODEL = "gpt-5.2-codex";
-          ANTHROPIC_DEFAULT_SONNET_MODEL = "gpt-5.1-codex";
-          ANTHROPIC_DEFAULT_HAIKU_MODEL = "gpt-5.1-codex-mini";
-        };
-        memory.source = ./modules/claude-config/CLAUDE-reviewer.md;
+        username = "ernest-liftoff";
       };
     };
   };
@@ -238,7 +204,6 @@ rec {
     navi
     tealdeer
     zenith
-    gh
     stern
     tesseract
     age
@@ -257,7 +222,7 @@ rec {
     kubernetes-helm
     kubelogin-oidc
     linkerd
-    pkgs-240924.bitwarden-cli
+    bitwarden-cli
     devenv
     nodejs
 
@@ -280,7 +245,8 @@ rec {
 
     # liftoff
     awscli2
-    pkgs-240924.gimme-aws-creds
+    pkgs-unstable.acli
+    gimme-aws-creds
     ssm-session-manager-plugin
 
     # claude-code is now managed by claude-multi module
@@ -619,7 +585,14 @@ rec {
         # liftoff
         awsl = "unset AWS_PROFILE && gimme-aws-creds && awsp";
 
-        cc = "claude --dangerously-skip-permissions";
+        # devloop
+        dl = "dev-loop";
+        dli = "dev-loop init";
+        dlr = "dev-loop run";
+        dls = "dev-loop status";
+        dlc = "dev-loop cancel";
+        dll = "dev-loop logs";
+
       } // (if profile.kernel == "linux" then {
         cursor = "/mnt/c/Users/Hoengager/AppData/Local/Programs/cursor/resources/app/bin/cursor";
       } else { });

@@ -9,7 +9,7 @@ LEARNINGS_FILE="$LOOP_DIR/learnings.md"
 SESSIONS_FILE="$LOOP_DIR/sessions.json"
 VERDICTS_DIR="$LOOP_DIR/verdicts"
 REVIEWER_STATUS="$LOOP_DIR/reviewer-status.txt"
-CLAUDE_CMD="${DEV_LOOP_CLAUDE:-claude}"
+TIMEOUT_MINS="${DEV_LOOP_TIMEOUT_MINS:-20}"
 
 [[ -f $LOOP_STATE ]] || {
   echo "❌ No dev-loop. Run: dev-loop init" >&2
@@ -25,13 +25,14 @@ status=$(jq -r '.status // ""' "$LOOP_STATE")
 
 loop_num=$(jq -r '.loop // 0' "$LOOP_STATE")
 max_loops=$(jq -r '.max_loops // 40' "$LOOP_STATE")
+CLAUDE_CMD=$(jq -r '.claude // "claude"' "$LOOP_STATE")
 mapfile -t reviewers < <(jq -r '.reviewers[]' "$LOOP_STATE" 2>/dev/null)
 [[ ${#reviewers[@]} -eq 0 ]] && reviewers=("claude-reviewer")
 
 mkdir -p "$REVIEW_DIR" "$VERDICTS_DIR"
 [[ -f $SESSIONS_FILE ]] || echo '[]' >"$SESSIONS_FILE"
 
-echo "🔄 DEV LOOP: ${#reviewers[@]} reviewers (parallel), max $max_loops loops"
+echo "🔄 DEV LOOP: ${#reviewers[@]} reviewers (parallel), max $max_loops loops, ${TIMEOUT_MINS}m timeout"
 
 # Get config dir from claude binary name
 # claude -> ~/.claude, claude-foo -> ~/.claude-foo
@@ -137,7 +138,7 @@ run_reviewer() {
 
   local verdict_file="$VERDICTS_DIR/${reviewer_name}.txt"
 
-  "$reviewer" --dangerously-skip-permissions --print --session-id "$expected_session_id" -p "You are reviewing iteration $current_loop.
+  timeout "${TIMEOUT_MINS}m" "$reviewer" --dangerously-skip-permissions --print --session-id "$expected_session_id" -p "You are reviewing iteration $current_loop.
 
 TASKS:
 1. Read spec: $SPEC_FILE
@@ -258,7 +259,7 @@ while [[ $current_loop -lt $max_loops ]]; do
   impl_session_json="[{\"iteration\": $current_loop, \"role\": \"implementer\", \"name\": \"$(basename "$CLAUDE_CMD")\", \"session_id\": \"$expected_impl_session_id\", \"config_dir\": \"$impl_config_dir\", \"time\": \"$(date -Iseconds)\"}]"
   record_sessions_batch "$impl_session_json"
 
-  $CLAUDE_CMD --dangerously-skip-permissions --print --session-id "$expected_impl_session_id" -p "$impl_prompt" || true
+  timeout "${TIMEOUT_MINS}m" "$CLAUDE_CMD" --dangerously-skip-permissions --print --session-id "$expected_impl_session_id" -p "$impl_prompt" || true
 
   # Find actual session ID
   actual_impl_session_id=$(find_actual_session "$impl_config_dir" "$expected_impl_session_id")
