@@ -18,14 +18,13 @@
     nixpkgs-240924.url = "github:nixos/nixpkgs/babc25a577c3310cce57c72d5bed70f4c3c3843a";
 
     atomipkgs.url = "github:AtomiCloud/nix-registry/v2";
-    mac-app-util.url = "github:hraban/mac-app-util";
 
     home-manager = {
       url = "github:nix-community/home-manager/release-25.11";
       inputs.nixpkgs.follows = "nixpkgs-stable";
     };
 
-    claude-multi.url = "github:kirinnee/multi-claude-home-manager";
+    home-manager-modules.url = "github:/kirinnee/home-manager-modules";
   };
 
   outputs =
@@ -44,8 +43,7 @@
     , darwin
     , nix-homebrew
 
-    , mac-app-util
-    , claude-multi
+    , home-manager-modules
     } @inputs:
     let profiles = import ./profiles.nix; in
     {
@@ -68,8 +66,8 @@
             value = home-manager.lib.homeManagerConfiguration {
               inherit pkgs;
               modules = [
-                mac-app-util.homeManagerModules.default
-                claude-multi.homeManagerModules.claude-multi
+                home-manager-modules.homeManagerModules.multi-claude
+                home-manager-modules.homeManagerModules.multi-gh
                 ./home.nix
               ];
               extraSpecialArgs = {
@@ -116,11 +114,11 @@
                     inherit atomi profile pkgs-240924 pkgs-stable pkgs-unstable;
                   };
                   home-manager.sharedModules = [
-                    claude-multi.homeManagerModules.claude-multi
+                    home-manager-modules.homeManagerModules.multi-claude
+                    home-manager-modules.homeManagerModules.multi-gh
                   ];
                 }
                 home-manager.darwinModules.home-manager
-                mac-app-util.darwinModules.default
                 ./darwin.nix
               ];
             };

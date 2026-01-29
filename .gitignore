@@ -4,3 +4,4 @@
 .idea
 secrets.yaml
 result
+node_modules/

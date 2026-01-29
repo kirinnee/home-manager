@@ -1,0 +1,26 @@
+rec {
+  proxy = {
+    ANTHROPIC_BASE_URL = "http://127.0.0.1:8317";
+    ANTHROPIC_AUTH_TOKEN = "proxy-auth-token-placeholder";
+  };
+  zai = {
+    ANTHROPIC_BASE_URL = "https://api.z.ai/api/anthropic";
+    API_TIMEOUT_MS = "3000000";
+    ANTHROPIC_AUTH_TOKEN = "\"$ZAI_AUTH_TOKEN\"";
+  };
+  anthropic = proxy // {
+    ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-5-20251101";
+    ANTHROPIC_DEFAULT_SONNET_MODEL = "claude-sonnet-4-5-20250929";
+    ANTHROPIC_DEFAULT_HAIKU_MODEL = "claude-haiku-4-5-20251001";
+  };
+  codex = proxy // {
+    ANTHROPIC_DEFAULT_OPUS_MODEL = "gpt-5.2-codex";
+    ANTHROPIC_DEFAULT_SONNET_MODEL = "gpt-5.1-codex";
+    ANTHROPIC_DEFAULT_HAIKU_MODEL = "gpt-5.1-codex-mini";
+  };
+  gemini = proxy // {
+    ANTHROPIC_DEFAULT_OPUS_MODEL = "gemini-3-pro-preview";
+    ANTHROPIC_DEFAULT_SONNET_MODEL = "gemini-3-flash-preview";
+    ANTHROPIC_DEFAULT_HAIKU_MODEL = "gemini-2.5-flash";
+  };
+}

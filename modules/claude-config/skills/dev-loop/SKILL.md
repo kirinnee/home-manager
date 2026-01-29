@@ -1,50 +1,52 @@
 ---
 name: dev-loop
-description: 'Start a spec-driven development loop with automated review cycles'
-argument-hint: 'TASK_DESCRIPTION'
+description: 'Run spec-driven code implementation with multi-reviewer consensus. Use when running /dev-loop, starting an implementation loop, needing automated code review cycles, or iterating on code until all reviewers approve.'
+argument-hint: '[TASK_DESCRIPTION]'
 ---
 
 # Dev Loop - Spec-Driven Development with Multi-Reviewer Consensus
 
-This skill starts an iterative development loop where you implement based on a spec, and multiple configurable reviewers evaluate your work. ALL reviewers must approve for the loop to complete.
+An iterative development loop where an implementer works from a spec, and multiple reviewers evaluate the work in parallel. ALL reviewers must approve for the loop to complete.
+
+## When to Use
+
+- User runs `/dev-loop` with a task description
+- User wants automated implement→review→fix cycles
+- User needs multiple AI reviewers to reach consensus
+- User wants hands-off iteration until code is approved
+
+## Prerequisites
+
+- `tmux` installed
+- `jq` installed
+- At least one `claude-*` binary available
+- For reviewers: `claude-reviewer-*` binaries configured
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ Phase 1: Interactive Setup (this session)                   │
-│                                                             │
-│   1. Discover available claude-* binaries                   │
-│   2. User selects executor (implementer)                    │
-│   3. User selects reviewers (multi-select)                  │
-│   4. Claude helps write spec                                │
-│   5. User approves spec                                     │
+│   • Discover claude-* binaries                              │
+│   • User selects executor + reviewers                       │
+│   • Claude writes spec, user approves                       │
+│   • Start dev-loop in tmux                                  │
 └─────────────────────────────────────────────────────────────┘
                            │
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ Phase 2: Run Orchestrator (background)                      │
-│                                                             │
-│   dev-loop run &                                            │
-│                                                             │
+│ Phase 2: Automated Execution (tmux session)                 │
 │   for each iteration:                                       │
-│     executor --print "implement..."  (fresh context)        │
-│     reviewers run IN PARALLEL:                              │
-│       reviewer1 --print "review..." &                       │
-│       reviewer2 --print "review..." &                       │
-│       wait                                                  │
-│                                                             │
-│   Until: ALL reviewers approve OR max loops reached         │
+│     executor --print "implement..."                         │
+│     reviewers run IN PARALLEL                               │
+│   Until: ALL approve OR max loops reached                   │
 └─────────────────────────────────────────────────────────────┘
                            │
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ Phase 3: Poll Status (every 30 minutes)                     │
-│                                                             │
-│   while status == "running":                                │
-│     sleep 30m                                               │
-│     dev-loop status                                         │
-│     report to user                                          │
+│ Phase 3: Polling (this session)                             │
+│   Poll `dev-loop status` every 5 minutes                    │
+│   Report progress until complete                            │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -52,177 +54,92 @@ This skill starts an iterative development loop where you implement based on a s
 
 ### Step 1: Discover Claude Binaries
 
-Run this command to find available claude binaries:
-
 ```bash
 compgen -c | grep '^claude' | sort -u
 ```
 
-This will list binaries like:
+### Step 2: User Selects Executor
 
-- `claude` (default)
-- `claude-personal`
-- `claude-liftoff`
-- `claude-reviewer-anthropic`
-- `claude-reviewer-gemini`
-- `claude-reviewer-codex`
-
-### Step 2: Ask User to Select Executor
-
-Use `AskUserQuestion` to ask which binary to use for implementation:
+Use `AskUserQuestion`:
 
 - Header: "Executor"
 - Question: "Which claude binary should implement the code?"
-- Options: List discovered binaries (max 4, prioritize non-reviewer ones)
-- Single select
+- Options: discovered binaries (prioritize non-reviewer ones)
 
-### Step 3: Ask User to Select Reviewers
+### Step 3: User Selects Reviewers
 
 Use `AskUserQuestion` with `multiSelect: true`:
 
 - Header: "Reviewers"
-- Question: "Which claude binaries should review the code? (select multiple)"
-- Options: List discovered binaries (prioritize reviewer-\* ones)
-- Multi select enabled
+- Question: "Which claude binaries should review? (select multiple)"
+- Options: discovered binaries (prioritize reviewer-\* ones)
 
 ### Step 4: Initialize Dev Loop
 
 ```bash
-DEV_LOOP_CLAUDE=<selected-executor> dev-loop init --reviewers "<selected-reviewers>"
+dev-loop init --claude <executor> --reviewers "<reviewer1,reviewer2>"
 ```
 
 ### Step 5: Write Spec
 
-Edit `.claude/dev-loop/spec.md` based on user's task description:
-
-```markdown
-# Specification: [Title]
-
-## Objective
-
-[Clear, concise description of what to build]
-
-## Acceptance Criteria
-
-- [ ] Criterion 1 (specific, measurable)
-- [ ] Criterion 2
-- [ ] Criterion 3
-
-## Definition of Done
-
-- [ ] All acceptance criteria met
-- [ ] Tests pass (if applicable)
-- [ ] No lint/type errors (if applicable)
-
-## Out of Scope
-
-- [What this task does NOT include]
-
-## Technical Constraints
-
-- [Any specific requirements or limitations]
-```
+Edit `.claude/dev-loop/spec.md` using the template in [templates/spec-template.md](templates/spec-template.md).
 
 ### Step 6: User Approval
 
-**MANDATORY: Ask user to approve using AskUserQuestion.**
+**MANDATORY: Ask user to approve before proceeding.**
 
-- Present the spec content
-- Show selected executor and reviewers
-- Ask: "Does this spec look correct?"
-- Options: "Approve and start loop" / "Edit spec first"
-- **DO NOT proceed until user explicitly approves**
+Present the spec and selected executor/reviewers. Use `AskUserQuestion`:
 
-### Step 7: Start Loop in Background
+- Header: "Approve"
+- Question: "Does this spec look correct?"
+- Options: "Approve" / "Edit spec first"
 
-**Only after approval**, run in background using the Bash tool with `run_in_background: true`:
+### Step 7: Start in tmux
 
 ```bash
-DEV_LOOP_CLAUDE=<selected-executor> dev-loop run
+SESSION_UID=$(date +%Y%m%d-%H%M%S)-$(openssl rand -hex 4)
+tmux new-session -d -s "dev-loop-$SESSION_UID" "zsh -ic 'dev-loop run; read -q \"?Press Enter to close...\"'"
 ```
 
-**IMPORTANT**: Use `run_in_background: true` to prevent timeout. The dev-loop can run for hours.
+Tell user the session name and how to inspect: `tmux attach -t dev-loop-<UID>`
 
-### Step 8: Poll Status Every 30 Minutes
+### Step 8: Poll for Progress
 
-After starting the background task, enter a polling loop:
+Every 5 minutes, run `dev-loop status` and report to user. **Always include the tmux session name** in updates.
 
-1. Wait 30 minutes (use `sleep 1800` or similar)
-2. Run `dev-loop status` to check progress
-3. Report status to user
-4. If status is "running", continue polling
-5. If status is "completed" or "max_loops_reached", stop polling and inform user
-
-**NEVER let the dev-loop timeout.** Keep polling until it completes.
-
-## Commands
-
-```bash
-dev-loop init [--max-loops N] [--reviewers "cmd1,cmd2"]
-dev-loop run
-dev-loop status
-dev-loop cancel
-```
-
-## Environment Variables
-
-- `DEV_LOOP_CLAUDE` - Executor binary (default: `claude`)
-- `DEV_LOOP_REVIEWERS` - Comma-separated reviewer binaries
+Continue until status is `completed` or `max_loops_reached`.
 
 ## Rules
 
 1. **ALWAYS discover binaries first** - Run `compgen -c | grep '^claude'`
-2. **ALWAYS ask user to select** - Never assume which binaries to use
-3. **NEVER modify `spec.md`** after user approval
-4. **NEVER commit** - leave that to the user
-5. **ALL reviewers must approve** - consensus is required
-6. **NEVER let it timeout** - run in background and poll status
-7. **Reviewers run in parallel** - faster feedback cycles
+2. **ALWAYS ask user to select** - Never assume which binaries
+3. **NEVER modify spec after approval**
+4. **NEVER commit** - Leave that to user
+5. **ALL reviewers must approve** - Consensus required
+6. **ALWAYS run in tmux** - With unique session UID
+7. **ALWAYS poll and report** - Every 5 minutes
+8. **ALWAYS repeat session name** - In every progress update
 
-## Example Session
+## How to Verify
 
-```
-User: /dev-loop "Add user authentication with JWT"
+1. Check `.claude/dev-loop/` directory exists
+2. Check `loop-state.json` has correct status
+3. Check tmux session is running: `tmux has-session -t dev-loop-<UID>`
+4. Check `dev-loop status` shows expected phase
 
-Claude: Let me find available claude binaries...
-        [runs: compgen -c | grep '^claude' | sort -u]
+## Reference
 
-        Found: claude, claude-personal, claude-reviewer-anthropic,
-               claude-reviewer-gemini, claude-reviewer-codex
+See [reference.md](reference.md) for:
 
-        [AskUserQuestion: Which binary should implement?]
+- All CLI commands and options
+- State file formats
+- Environment variables
 
-User: claude-personal
+## Examples
 
-Claude: [AskUserQuestion: Which binaries should review? (multi-select)]
+See [examples.md](examples.md) for complete session examples.
 
-User: claude-reviewer-anthropic, claude-reviewer-gemini
+## Version History
 
-Claude: Setting up dev-loop with:
-        - Executor: claude-personal
-        - Reviewers: claude-reviewer-anthropic, claude-reviewer-gemini (parallel)
-
-        [runs: DEV_LOOP_CLAUDE=claude-personal dev-loop init --reviewers "claude-reviewer-anthropic,claude-reviewer-gemini"]
-        [edits spec.md based on task]
-
-        Here's the spec:
-        [shows spec content]
-
-        [AskUserQuestion: Approve spec?]
-
-User: Yes, start the loop
-
-Claude: Starting dev-loop in background...
-        [runs with run_in_background: true]
-
-        I'll poll status every 30 minutes. Current status:
-        [runs: dev-loop status]
-
-        🔄 Status: running
-        🔢 Iteration: 1 / 40
-
-        [waits 30 minutes, polls again...]
-
-        🔄 Status: completed
-        🎉 All reviewers approved! Dev loop finished successfully.
-```
+- v2.0.0 (2025-01): Restructured per skill best practices
+- v1.0.0 (2024-12): Initial implementation

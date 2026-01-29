@@ -11,6 +11,7 @@ SPEC_FILE="$LOOP_DIR/spec.md"
 # Defaults
 max_loops=10
 reviewers="${DEV_LOOP_REVIEWERS:-claude-reviewer}"
+claude_cmd="${DEV_LOOP_CLAUDE:-claude}"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -21,6 +22,10 @@ while [[ $# -gt 0 ]]; do
     ;;
   --reviewers)
     reviewers="$2"
+    shift 2
+    ;;
+  --claude)
+    claude_cmd="$2"
     shift 2
     ;;
   *)
@@ -83,6 +88,7 @@ cat >"$LOOP_STATE" <<EOF
   "max_loops": $max_loops,
   "status": "pending_approval",
   "phase": "init",
+  "claude": "$claude_cmd",
   "reviewers": $reviewers_json
 }
 EOF
@@ -91,5 +97,5 @@ echo "✅ Dev Loop Initialized"
 echo "📄 Spec: $SPEC_FILE"
 echo "🔢 Max loops: $max_loops"
 echo "👥 Reviewers: $reviewers"
-echo "🤖 Claude: ${DEV_LOOP_CLAUDE:-claude}"
+echo "🤖 Claude: $claude_cmd"
 echo "👉 Next: edit spec, then run: dev-loop run"
