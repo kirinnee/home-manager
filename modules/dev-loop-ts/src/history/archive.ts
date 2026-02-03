@@ -30,7 +30,6 @@ export function buildIterationSummary(sessions: Session[], learnings: string[]):
       sessions: iterSessions.map(s => ({
         role: s.role,
         reviewerIndex: s.reviewerIndex,
-        claudeSessionPath: s.claudeSessionPath ?? '',
       })),
     };
   });

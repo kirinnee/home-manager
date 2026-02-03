@@ -36,7 +36,7 @@ export async function handler(
     console.log(`  Implementer timeout: ${cfg.implementerTimeout}m`);
     console.log(`  Reviewer timeout: ${cfg.reviewerTimeout}m`);
     console.log('');
-    console.log('Next: edit .claude/dev-loop/spec.md, then run: dev-loop run');
+    console.log('Next: edit .kagent/spec.md, then run: dev-loop run');
   } catch (err) {
     console.error(`Error: ${(err as Error).message}`);
     process.exit(1);

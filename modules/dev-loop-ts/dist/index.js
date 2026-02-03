@@ -1,3 +1,4 @@
+#!/usr/bin/env bun
 // @bun
 var __create = Object.create;
 var __getProtoOf = Object.getPrototypeOf;
@@ -28,7 +29,7 @@ var __export = (target, all) => {
 };
 var __require = import.meta.require;
 
-// node_modules/commander/lib/error.js
+// modules/dev-loop-ts/node_modules/commander/lib/error.js
 var require_error = __commonJS(exports => {
   class CommanderError extends Error {
     constructor(exitCode, code, message) {
@@ -52,7 +53,7 @@ var require_error = __commonJS(exports => {
   exports.InvalidArgumentError = InvalidArgumentError;
 });
 
-// node_modules/commander/lib/argument.js
+// modules/dev-loop-ts/node_modules/commander/lib/argument.js
 var require_argument = __commonJS(exports => {
   var { InvalidArgumentError } = require_error();
 
@@ -131,7 +132,7 @@ var require_argument = __commonJS(exports => {
   exports.humanReadableArgName = humanReadableArgName;
 });
 
-// node_modules/commander/lib/help.js
+// modules/dev-loop-ts/node_modules/commander/lib/help.js
 var require_help = __commonJS(exports => {
   var { humanReadableArgName } = require_argument();
 
@@ -397,7 +398,7 @@ var require_help = __commonJS(exports => {
   exports.Help = Help;
 });
 
-// node_modules/commander/lib/option.js
+// modules/dev-loop-ts/node_modules/commander/lib/option.js
 var require_option = __commonJS(exports => {
   var { InvalidArgumentError } = require_error();
 
@@ -546,7 +547,7 @@ var require_option = __commonJS(exports => {
   exports.DualOptions = DualOptions;
 });
 
-// node_modules/commander/lib/suggestSimilar.js
+// modules/dev-loop-ts/node_modules/commander/lib/suggestSimilar.js
 var require_suggestSimilar = __commonJS(exports => {
   var maxDistance = 3;
   function editDistance(a, b) {
@@ -616,7 +617,7 @@ var require_suggestSimilar = __commonJS(exports => {
   exports.suggestSimilar = suggestSimilar;
 });
 
-// node_modules/commander/lib/command.js
+// modules/dev-loop-ts/node_modules/commander/lib/command.js
 var require_command = __commonJS(exports => {
   var EventEmitter = __require('events').EventEmitter;
   var childProcess = __require('child_process');
@@ -1904,7 +1905,7 @@ Expecting one of '${allowedValues.join("', '")}'`);
   exports.Command = Command;
 });
 
-// node_modules/commander/index.js
+// modules/dev-loop-ts/node_modules/commander/index.js
 var require_commander = __commonJS(exports => {
   var { Argument } = require_argument();
   var { Command } = require_command();
@@ -1924,7 +1925,7 @@ var require_commander = __commonJS(exports => {
   exports.InvalidOptionArgumentError = InvalidArgumentError;
 });
 
-// node_modules/picocolors/picocolors.js
+// modules/dev-loop-ts/node_modules/picocolors/picocolors.js
 var require_picocolors = __commonJS((exports, module) => {
   var p = process || {};
   var argv = p.argv || [];
@@ -2004,7 +2005,7 @@ var require_picocolors = __commonJS((exports, module) => {
   module.exports.createColors = createColors;
 });
 
-// node_modules/sisteransi/src/index.js
+// modules/dev-loop-ts/node_modules/sisteransi/src/index.js
 var require_src = __commonJS((exports, module) => {
   var ESC = '\x1B';
   var CSI = `${ESC}[`;
@@ -2055,7 +2056,7 @@ var require_src = __commonJS((exports, module) => {
   module.exports = { cursor, scroll, erase, beep };
 });
 
-// node_modules/commander/esm.mjs
+// modules/dev-loop-ts/node_modules/commander/esm.mjs
 var import__ = __toESM(require_commander(), 1);
 var {
   program,
@@ -2071,7 +2072,7 @@ var {
   Help,
 } = import__.default;
 
-// node_modules/zod/v3/external.js
+// modules/dev-loop-ts/node_modules/zod/v3/external.js
 var exports_external = {};
 __export(exports_external, {
   void: () => voidType,
@@ -2183,7 +2184,7 @@ __export(exports_external, {
   BRAND: () => BRAND,
 });
 
-// node_modules/zod/v3/helpers/util.js
+// modules/dev-loop-ts/node_modules/zod/v3/helpers/util.js
 var util;
 (function (util2) {
   util2.assertEqual = _ => {};
@@ -2319,7 +2320,7 @@ var getParsedType = data => {
   }
 };
 
-// node_modules/zod/v3/ZodError.js
+// modules/dev-loop-ts/node_modules/zod/v3/ZodError.js
 var ZodIssueCode = util.arrayToEnum([
   'invalid_type',
   'invalid_literal',
@@ -2440,7 +2441,7 @@ ZodError.create = issues => {
   return error;
 };
 
-// node_modules/zod/v3/locales/en.js
+// modules/dev-loop-ts/node_modules/zod/v3/locales/en.js
 var errorMap = (issue, _ctx) => {
   let message;
   switch (issue.code) {
@@ -2541,7 +2542,7 @@ var errorMap = (issue, _ctx) => {
 };
 var en_default = errorMap;
 
-// node_modules/zod/v3/errors.js
+// modules/dev-loop-ts/node_modules/zod/v3/errors.js
 var overrideErrorMap = en_default;
 function setErrorMap(map) {
   overrideErrorMap = map;
@@ -2549,7 +2550,7 @@ function setErrorMap(map) {
 function getErrorMap() {
   return overrideErrorMap;
 }
-// node_modules/zod/v3/helpers/parseUtil.js
+// modules/dev-loop-ts/node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = params => {
   const { data, path, errorMaps, issueData } = params;
   const fullPath = [...path, ...(issueData.path || [])];
@@ -2650,14 +2651,14 @@ var isAborted = x => x.status === 'aborted';
 var isDirty = x => x.status === 'dirty';
 var isValid = x => x.status === 'valid';
 var isAsync = x => typeof Promise !== 'undefined' && x instanceof Promise;
-// node_modules/zod/v3/helpers/errorUtil.js
+// modules/dev-loop-ts/node_modules/zod/v3/helpers/errorUtil.js
 var errorUtil;
 (function (errorUtil2) {
   errorUtil2.errToObj = message => (typeof message === 'string' ? { message } : message || {});
   errorUtil2.toString = message => (typeof message === 'string' ? message : message?.message);
 })(errorUtil || (errorUtil = {}));
 
-// node_modules/zod/v3/types.js
+// modules/dev-loop-ts/node_modules/zod/v3/types.js
 class ParseInputLazyPath {
   constructor(parent, value, path, key) {
     this._cachedPath = [];
@@ -6055,7 +6056,7 @@ var coerce = {
   date: arg => ZodDate.create({ ...arg, coerce: true }),
 };
 var NEVER = INVALID;
-// src/types.ts
+// modules/dev-loop-ts/src/types.ts
 var configSchema = exports_external.object({
   implementer: exports_external.string().min(1).default('claude'),
   reviewers: exports_external.array(exports_external.string().min(1)).min(1).default(['claude-reviewer-zai']),
@@ -6092,6 +6093,7 @@ var sessionSchema = exports_external.object({
 var verdictFileSchema = exports_external.object({
   verdict: verdictSchema,
   reasoning: exports_external.string(),
+  completionEstimate: exports_external.number().int().min(0).max(100).optional(),
 });
 var sessionSummarySchema = exports_external.object({
   role: agentRoleSchema,
@@ -6127,8 +6129,23 @@ var DEFAULT_CONFIG = {
   implementerTimeout: 30,
   reviewerTimeout: 15,
 };
+function parseConfig(data) {
+  return configSchema.parse(data);
+}
+function parseRun(data) {
+  return runSchema.parse(data);
+}
+function parseSession(data) {
+  return sessionSchema.parse(data);
+}
+function parseVerdictFile(data) {
+  return verdictFileSchema.parse(data);
+}
+function parseHistoryEntry(data) {
+  return historyEntrySchema.parse(data);
+}
 
-// src/state/config.ts
+// modules/dev-loop-ts/src/state/config.ts
 function mergeConfig(partial) {
   return {
     implementer: partial.implementer ?? DEFAULT_CONFIG.implementer,
@@ -6148,7 +6165,7 @@ function configFromOptions(opts) {
   return mergeConfig(partial);
 }
 
-// src/cli/init.ts
+// modules/dev-loop-ts/src/cli/init.ts
 async function handler(opts, state) {
   try {
     const reviewersList = opts.reviewers
@@ -6170,20 +6187,20 @@ async function handler(opts, state) {
     console.log(`  Implementer timeout: ${cfg.implementerTimeout}m`);
     console.log(`  Reviewer timeout: ${cfg.reviewerTimeout}m`);
     console.log('');
-    console.log('Next: edit .claude/dev-loop/spec.md, then run: dev-loop run');
+    console.log('Next: edit .kagent/spec.md, then run: dev-loop run');
   } catch (err) {
     console.error(`Error: ${err.message}`);
     process.exit(1);
   }
 }
 
-// src/loop/runner.ts
+// modules/dev-loop-ts/src/loop/runner.ts
 import * as fs2 from 'fs/promises';
 
-// src/deps.ts
+// modules/dev-loop-ts/src/deps.ts
 import * as path from 'path';
 import * as fs from 'fs/promises';
-var BASE_DIR = '.claude/dev-loop';
+var BASE_DIR = '.kagent';
 var CURRENT_DIR = `${BASE_DIR}/current`;
 var SESSIONS_DIR = `${CURRENT_DIR}/sessions`;
 var VERDICTS_DIR = `${CURRENT_DIR}/verdicts`;
@@ -6257,13 +6274,40 @@ var defaultFsService = new DefaultFsService();
 function generateId() {
   return crypto.randomUUID();
 }
+function generateRunId() {
+  return crypto.randomUUID().slice(0, 8);
+}
 function getDirHash(dirPath) {
   const hasher = new Bun.CryptoHasher('sha256');
   hasher.update(dirPath);
   return hasher.digest('hex').slice(0, 8);
 }
+function getCurrentTimestamp() {
+  return new Date().toISOString();
+}
+var SPEC_TEMPLATE = `# Specification: [Title]
 
-// src/loop/consensus.ts
+## Objective
+[Clear, concise description of what to build]
+
+## Acceptance Criteria
+- [ ] Criterion 1 (specific, measurable)
+- [ ] Criterion 2
+- [ ] Criterion 3
+
+## Definition of Done
+- [ ] All acceptance criteria met
+- [ ] Tests pass (if applicable)
+- [ ] No lint/type errors (if applicable)
+
+## Out of Scope
+- [What this task does NOT include]
+
+## Technical Constraints
+- [Any specific requirements or limitations]
+`;
+
+// modules/dev-loop-ts/src/loop/consensus.ts
 function checkConsensus(verdicts) {
   const approved = verdicts.filter(v => v.verdict === 'approved');
   const rejected = verdicts.filter(v => v.verdict === 'rejected');
@@ -6281,102 +6325,225 @@ function formatConsensusResult(result) {
   return `Approved: ${result.approvedCount}/${result.totalReviewers}, Rejected: ${result.rejectedCount}/${result.totalReviewers}`;
 }
 
-// src/agents/prompts.ts
+// modules/dev-loop-ts/src/agents/prompts.ts
 function buildImplementerPrompt(params) {
-  const { iteration, specPath, specContent, learnings } = params;
-  const evidenceDir = '.claude/dev-loop/current/evidence';
-  if (iteration === 1) {
-    return `You are the IMPLEMENTER for iteration 1 (first iteration).
-
-READ FIRST:
-- Spec: ${specPath}
-
-TASK:
-1. Implement the spec requirements
-2. Do NOT modify the spec
-3. Do NOT commit changes
-
-EVIDENCE OF COMPLETION:
-When your implementation is complete, you MUST provide evidence:
-- Build output showing successful compilation/build
-- Test output showing passing tests
-- Screenshots or terminal output demonstrating the feature works
-- Save all evidence to files in ${evidenceDir}/
-  - build-output.log or build-output.txt: Build/command output
-  - test-output.log or test-output.txt: Test results
-  - evidence.md: Summary of what was done and proof it works
-
-Example evidence commands:
-- For TypeScript: bun run build > ${evidenceDir}/build-output.log 2>&1
-- For tests: bun test > ${evidenceDir}/test-output.log 2>&1
-- For demo: echo "Demo output" > ${evidenceDir}/evidence.md
-
-Be concise and focused.`;
-  }
+  const { iteration, specPath, specContent, previousLoopLearnings, currentLoopReviews } = params;
+  const evidenceDir = `.kagent/current/evidence`;
+  const learningsFile = `.kagent/current/learnings.md`;
+  const hasReviews = currentLoopReviews && currentLoopReviews.length > 0;
+  const reviewsText = hasReviews
+    ? `
+PREVIOUS REVIEW FEEDBACK (from last loop):
+${currentLoopReviews.map(r => `- ${r}`).join(`
+`)}
+`
+    : '';
   const learningsText =
-    learnings.length > 0
-      ? learnings.map(l => `- ${l}`).join(`
-`)
-      : 'None yet';
-  return `You are the IMPLEMENTER for iteration ${iteration}.
+    previousLoopLearnings.length > 0
+      ? `
+LEARNINGS FROM PREVIOUS LOOPS:
+${previousLoopLearnings.map(l => `- ${l}`).join(`
+`)}
+`
+      : '';
+  return `# Implementation Task
 
-READ FIRST:
+## Specification
+
+${specContent}
+
+## Context
+
+- Loop: ${iteration}
 - Spec: ${specPath}
-
-PREVIOUS LEARNINGS (from earlier iterations):
+${reviewsText}
 ${learningsText}
 
-TASKS:
-1. Read the spec carefully
-2. Apply learnings from previous iterations
-3. Implement improvements based on what was learned
-4. Write new learnings to .claude/dev-loop/current/learnings.md (1-3 bullet points)
+## Instructions
 
-EVIDENCE OF COMPLETION:
-You MUST provide proof that your implementation works:
-- Build output: ${evidenceDir}/build-output.log
-- Test output: ${evidenceDir}/test-output.log
-- Summary: ${evidenceDir}/evidence.md
+1. Read and understand the specification completely
+2. If there are learnings or review feedback above, address those issues first
+3. Implement the required changes
+4. Run ALL tests and verify they pass
+5. Run the build and verify it succeeds
+6. Write evidence to ${evidenceDir}/:
+   - build-output.log: Complete build command output
+   - test-output.log: Complete test command output
+   - evidence.md: Summary of what you verified and how
+7. Write learnings to ${learningsFile}:
+   - Document any roadblocks encountered
+   - Note workarounds or discoveries
+   - Document any decisions made and why
+   - This helps the next iteration if reviewers find issues
 
-Do NOT modify the spec. Do NOT commit changes. Be concise.`;
+## Important
+
+- Do not interact with the user. Work autonomously.
+- Be thorough - reviewers will verify your work independently.
+- If tests fail, fix them before completing.
+- If build fails, fix it before completing.
+- Document everything in evidence so reviewers can verify.
+
+## Test/Build Commands
+
+Auto-detect and use the appropriate commands:
+- Makefile: \`make test\`, \`make build\`
+- Taskfile.yml: \`task test\`, \`task build\`
+- justfile: \`just test\`, \`just build\`
+- CI config: Use exact commands from CI configuration
+- If none detected, prompt user for commands
+
+## Git Safety - CRITICAL
+
+- NEVER use \`git push --force\` or \`git push -f\`
+- NEVER push to any branch other than the current task branch
+- NEVER push to main, master, or any protected branch
+- NEVER delete branches
+- NEVER rebase pushed commits
+- If push fails, use \`git pull\` and merge, never force
+- Do NOT commit changes - the run will commit on successful completion
+`;
 }
 function buildReviewerPrompt(params) {
   const { iteration, reviewerIndex, specPath } = params;
-  const evidenceDir = '.claude/dev-loop/current/evidence';
-  const reviewsDir = '.claude/dev-loop/current/reviews';
+  const evidenceDir = `.kagent/current/evidence`;
+  const reviewsDir = `.kagent/current/reviews`;
   const reviewFile = `${reviewsDir}/reviewer-${reviewerIndex}.md`;
-  const verdictFile = `.claude/dev-loop/current/verdicts/${iteration}-${reviewerIndex}.json`;
-  return `You are reviewing iteration ${iteration} (reviewer ${reviewerIndex}).
+  const verdictFile = `.kagent/current/verdicts/${iteration}-${reviewerIndex}.json`;
+  const learningsFile = `.kagent/current/learnings.md`;
+  return `# Code Review Task
 
-TASKS:
-1. Read spec: ${specPath}
-2. Run: git diff
-3. Check ALL acceptance criteria
-4. Review evidence in ${evidenceDir}/ (build output, tests, etc)
+## Specification
 
-OUTPUT (MANDATORY):
-1. Create the reviews directory if it doesn't exist:
-   mkdir -p ${reviewsDir}
+Read the spec from: ${specPath}
 
-2. Write your review to ${reviewFile}:
-   # Review: Reviewer ${reviewerIndex} (Iteration ${iteration})
-   ## Criteria: [x] or [ ] each
-   ## Issues: list or None
-   ## Evidence Review: Comment on provided evidence
-   ## Verdict: APPROVED or REJECTED
+## Your Task
 
-3. Write your final verdict to ${verdictFile} as JSON:
-   {"verdict": "approved" or "rejected", "reasoning": "explanation"}
-   This file MUST be created. Use lowercase for verdict value.`;
+You are Reviewer ${reviewerIndex} for loop ${iteration}.
+
+1. Review the current implementation against the specification
+2. Check the evidence in ${evidenceDir}/
+3. Run \`git diff\` to see the changes
+4. Run the tests yourself to verify they pass
+5. Run the build yourself to verify it succeeds
+6. Check CLAUDE.md in the project root (if exists) - ensure all changes conform to those guidelines
+7. Check for any relevant skills in the project - ensure implementation follows best practices
+8. Write your review to ${reviewFile}
+9. Write your verdict to ${verdictFile}:
+   \`\`\`json
+   {
+     "verdict": "approved" or "rejected",
+     "reasoning": "Your detailed reasoning here",
+     "completionEstimate": 0-100 (percentage of spec completion - be conservative, 100% only if ALL acceptance criteria are met)
+   }
+   \`\`\`
+
+## Completion Estimate Guidelines
+
+Estimate how much of the specification has been completed:
+- 0-30%: Basic structure started, most features missing
+- 30-60%: Core features implemented, but incomplete or buggy
+- 60-90%: Most features working, edge cases or polish needed
+- 100%: ALL acceptance criteria fully met, tests passing, no known issues
+
+**Be conservative** - it's better to underestimate than overestimate. Only give 100% if the spec is truly complete.
+
+## Review Criteria - BE STRICT
+
+You must verify ALL of the following. Reject if ANY criterion fails:
+
+### 1. Specification Compliance
+
+- Does the implementation address EVERY requirement in the spec?
+- Are there any spec requirements that were missed or partially implemented?
+- Does the behavior match what was specified exactly?
+
+### 2. Code Quality
+
+- Is the code clean, readable, and maintainable?
+- Are there any obvious bugs or logic errors?
+- Is error handling appropriate?
+- Are edge cases handled?
+
+### 3. Testing
+
+- Do ALL tests pass? (Run them yourself, don't trust evidence alone)
+- Is test coverage adequate for the changes?
+- Are there missing test cases for important scenarios?
+
+### 4. Build & Integration
+
+- Does the build succeed without warnings? (Run it yourself)
+- Are there any type errors or linting issues?
+- Does the change integrate properly with existing code?
+
+### 5. Security
+
+- Are there any security vulnerabilities introduced?
+- Is user input properly validated?
+- Are there any injection risks (SQL, XSS, command injection)?
+
+### 6. Evidence Verification
+
+- Did the implementer provide complete evidence?
+- Do the evidence files match what you observe when running commands yourself?
+- Are there any discrepancies between claimed and actual results?
+
+### 7. CLAUDE.md / Skills Compliance
+
+- If CLAUDE.md exists in the project root, do all changes follow those guidelines?
+- Are there relevant skills in the project that should be followed?
+- Does the implementation match the project's coding standards and conventions?
+
+## Verdict Guidelines
+
+**APPROVE only if:**
+
+- ALL specification requirements are fully implemented
+- ALL tests pass when you run them
+- Build succeeds when you run it
+- Code quality is acceptable
+- No security issues identified
+- Evidence is accurate and complete
+- Changes conform to CLAUDE.md (if present) and relevant skills
+
+**REJECT if:**
+
+- ANY specification requirement is missing or incomplete
+- ANY test fails
+- Build fails or has errors
+- Significant code quality issues
+- Security vulnerabilities present
+- Evidence is missing, incomplete, or inaccurate
+- Changes violate CLAUDE.md guidelines or relevant skills
+- You have ANY doubt about the implementation correctness
+
+When in doubt, REJECT. It is better to have another iteration than to approve incomplete work.
+
+## Learnings
+
+You can also check ${learningsFile} to understand what the implementer learned during this iteration. This may provide context for their decisions.
+
+## Git Safety - CRITICAL
+
+- NEVER use \`git push --force\` or \`git push -f\`
+- NEVER push to any branch other than the current task branch
+- NEVER push to main, master, or any protected branch
+- NEVER delete branches
+- NEVER rebase pushed commits
+- Reject if you see any evidence of force pushing or unsafe git operations
+
+Be thorough and strict. Your review ensures quality.
+`;
 }
 
-// src/loop/iteration.ts
+// modules/dev-loop-ts/src/loop/iteration.ts
 function buildIterationData(run, config, specPath, specContent) {
   const implementerPrompt = buildImplementerPrompt({
     iteration: run.iteration,
     specPath,
     specContent,
-    learnings: run.learnings,
+    previousLoopLearnings: run.learnings ?? [],
   });
   const reviewerPrompts = Array.from({ length: config.reviewers.length }, (_, i) => ({
     reviewerIndex: i,
@@ -6397,7 +6564,19 @@ function buildIterationData(run, config, specPath, specContent) {
   };
 }
 
-// src/loop/runner.ts
+// modules/dev-loop-ts/src/loop/runner.ts
+class CancelledError extends Error {
+  archived;
+  constructor(message, archived = false) {
+    super(message);
+    this.archived = archived;
+    this.name = 'CancelledError';
+  }
+}
+function isNoActiveRunError(error) {
+  return error instanceof Error && error.message === 'No active run';
+}
+
 class LoopRunner {
   state;
   tmux;
@@ -6420,7 +6599,7 @@ class LoopRunner {
       await this.state.archiveRun();
     }
     const config = await this.state.loadConfig();
-    const run = await this.state.createRun('.claude/dev-loop/spec.md');
+    const run = await this.state.createRun('.kagent/spec.md');
     const dirHash = getDirHash(process.cwd());
     console.log(
       `DEV LOOP [${run.id}]: ${config.reviewers.length} reviewers (${config.reviewers.join(', ')}), max ${config.maxIterations} iterations`,
@@ -6428,6 +6607,7 @@ class LoopRunner {
     let currentRun = run;
     try {
       while (currentRun.iteration < config.maxIterations) {
+        await this.assertRunActive();
         const iterResult = await this.runIteration(currentRun, config, dirHash);
         if (iterResult.approved) {
           const entry2 = await this.state.completeRun('completed');
@@ -6448,6 +6628,26 @@ class LoopRunner {
         historyEntry: entry,
       };
     } catch (error) {
+      if (error instanceof CancelledError || isNoActiveRunError(error)) {
+        let entry2 = null;
+        const stillActive = await this.state.loadRun();
+        if (stillActive) {
+          entry2 = await this.state.completeRun('cancelled');
+        } else {
+          const history = await this.state.listHistory();
+          if (history.length > 0) {
+            entry2 = history.find(h => h.id === currentRun.id) ?? history[0];
+          }
+        }
+        if (!entry2) {
+          throw error;
+        }
+        return {
+          status: 'cancelled',
+          finalRun: currentRun,
+          historyEntry: entry2,
+        };
+      }
       console.error('Loop error:', error instanceof Error ? error.message : error);
       if (error instanceof Error && error.stack) console.error(error.stack);
       const entry = await this.state.completeRun('failed');
@@ -6458,14 +6658,26 @@ class LoopRunner {
       };
     }
   }
+  async assertRunActive() {
+    const run = await this.state.loadRun();
+    if (!run) {
+      throw new CancelledError('Run was cancelled and archived', true);
+    }
+    if (run.status === 'cancelled') {
+      throw new CancelledError('Run was cancelled');
+    }
+  }
   async runIteration(run, config, dirHash) {
+    await this.assertRunActive();
     const iterNum = await this.state.incrementIteration();
     console.log(`Iteration ${iterNum} / ${config.maxIterations}`);
     await this.state.clearEvidence();
     await this.state.clearVerdicts(iterNum);
     await this.state.clearReviews();
     const currentRun = await this.state.loadRun();
-    if (!currentRun) throw new Error('Run not found after increment');
+    if (!currentRun) {
+      throw new CancelledError('Run was cancelled and archived', true);
+    }
     let specContent;
     try {
       specContent = await fs2.readFile(currentRun.spec, 'utf-8');
@@ -6474,6 +6686,7 @@ class LoopRunner {
 Run 'dev-loop init' to create it.`);
     }
     const iterData = buildIterationData(currentRun, config, currentRun.spec, specContent);
+    await this.assertRunActive();
     await this.state.updatePhase('implementing');
     const implResult = await this.agentRunner.runImplementer({
       runId: run.id,
@@ -6485,6 +6698,7 @@ Run 'dev-loop init' to create it.`);
     if (implResult.timedOut) {
       throw new Error('Implementer timed out');
     }
+    await this.assertRunActive();
     const learnings = await this.state.readLearnings();
     if (learnings) {
       await this.state.addLearning(learnings);
@@ -6497,6 +6711,7 @@ Run 'dev-loop init' to create it.`);
       prompts: iterData.reviewerPrompts,
       timeout: config.reviewerTimeout,
     });
+    await this.assertRunActive();
     await this.state.updatePhase('done');
     const verdicts = reviewerResults.map(r => ({
       reviewerIndex: r.reviewerIndex,
@@ -6505,6 +6720,17 @@ Run 'dev-loop init' to create it.`);
     }));
     const consensusResult = checkConsensus(verdicts);
     console.log(`Consensus: ${formatConsensusResult(consensusResult)}`);
+    const estimates = reviewerResults.map(r => r.completionEstimate).filter(e => e !== undefined);
+    if (estimates.length > 0) {
+      const lowestEstimate = Math.min(...estimates);
+      const lowestEstimateReviewer = reviewerResults.find(r => r.completionEstimate === lowestEstimate);
+      const reviewerInfo = lowestEstimateReviewer ? ` (Reviewer ${lowestEstimateReviewer.reviewerIndex})` : '';
+      const barWidth = 40;
+      const filled = Math.round((lowestEstimate / 100) * barWidth);
+      const empty = barWidth - filled;
+      const bar = '\u2588'.repeat(filled) + '\u2591'.repeat(empty);
+      console.log(`Progress: [${bar}] ${lowestEstimate}%${reviewerInfo}`);
+    }
     return {
       iteration: iterNum,
       approved: consensusResult.approved,
@@ -6514,18 +6740,19 @@ Run 'dev-loop init' to create it.`);
   }
 }
 
-// src/agents/runner.ts
+// modules/dev-loop-ts/src/agents/runner.ts
 import * as fs3 from 'fs/promises';
 import * as path2 from 'path';
 
-// src/agents/verdicts.ts
-function parseVerdictFile(content) {
+// modules/dev-loop-ts/src/agents/verdicts.ts
+function parseVerdictFile2(content) {
   try {
     const parsed = JSON.parse(content);
     if (parsed.verdict === 'approved' || parsed.verdict === 'rejected') {
       return {
         verdict: parsed.verdict,
         reasoning: parsed.reasoning ?? '',
+        completionEstimate: parsed.completionEstimate,
       };
     }
     return { verdict: null, reasoning: '' };
@@ -6552,7 +6779,7 @@ function determineVerdict(params) {
     return 'rejected';
   }
   if (verdictFileContent) {
-    const parsed = parseVerdictFile(verdictFileContent);
+    const parsed = parseVerdictFile2(verdictFileContent);
     if (parsed.verdict) {
       return parsed.verdict;
     }
@@ -6566,8 +6793,8 @@ function determineVerdict(params) {
   return 'rejected';
 }
 
-// src/agents/runner.ts
-var LOGS_BASE_DIR = '.claude/dev-loop/logs';
+// modules/dev-loop-ts/src/agents/runner.ts
+var LOGS_BASE_DIR = '.kagent/logs';
 
 class AgentRunner {
   tmux;
@@ -6679,9 +6906,9 @@ class AgentRunner {
       cwd: process.cwd(),
       timeoutMins: timeout,
     });
-    const verdictPath = `.claude/dev-loop/current/verdicts/${iteration}-${reviewerIndex}.json`;
+    const verdictPath = `.kagent/current/verdicts/${iteration}-${reviewerIndex}.json`;
     const verdictContent = await this.safeReadFile(verdictPath);
-    const reviewPath = `.claude/dev-loop/current/reviews/reviewer-${reviewerIndex}.md`;
+    const reviewPath = `.kagent/current/reviews/reviewer-${reviewerIndex}.md`;
     const reviewContent = await this.safeReadFile(reviewPath);
     const verdict = determineVerdict({
       verdictFileContent: verdictContent,
@@ -6690,9 +6917,11 @@ class AgentRunner {
       timedOut: result.timedOut,
     });
     let reasoning = '';
+    let completionEstimate;
     if (verdictContent) {
-      const parsed = parseVerdictFile(verdictContent);
+      const parsed = parseVerdictFile2(verdictContent);
       reasoning = parsed.reasoning;
+      completionEstimate = parsed.completionEstimate;
     }
     session.status = result.timedOut ? 'error' : 'completed';
     session.completedAt = new Date().toISOString();
@@ -6701,7 +6930,9 @@ class AgentRunner {
     await this.copyReviewFiles(runId, iteration, reviewerIndex, reviewerBinary, reviewContent, verdictContent);
     await this.cleanupPromptFile(promptFile);
     const icon = verdict === 'approved' ? '\u2713' : '\u2717';
-    console.log(`  ${icon} Reviewer ${reviewerIndex} (${reviewerBinary}): ${verdict}`);
+    console.log(
+      `  ${icon} Reviewer ${reviewerIndex} (${reviewerBinary}): ${verdict}${completionEstimate !== undefined ? ` (${completionEstimate}%)` : ''}`,
+    );
     return {
       sessionId,
       tmuxSession,
@@ -6712,6 +6943,7 @@ class AgentRunner {
       binary: reviewerBinary,
       verdict,
       reasoning,
+      completionEstimate,
     };
   }
   async writePromptFile(sessionId, prompt) {
@@ -6734,7 +6966,7 @@ class AgentRunner {
     }
   }
   async copyReviewFiles(runId, iteration, reviewerIndex, binary, reviewContent, verdictContent) {
-    const reviewsDir = `.claude/dev-loop/reviews/${runId}`;
+    const reviewsDir = `.kagent/reviews/${runId}`;
     await fs3.mkdir(reviewsDir, { recursive: true });
     const binaryName = binary.replace(/[^a-zA-Z0-9_-]/g, '_');
     if (reviewContent) {
@@ -6748,7 +6980,7 @@ class AgentRunner {
   }
 }
 
-// src/cli/run.ts
+// modules/dev-loop-ts/src/cli/run.ts
 async function handler2(deps) {
   try {
     const available = await deps.tmux.isAvailable();
@@ -6775,10 +7007,10 @@ async function handler2(deps) {
   }
 }
 
-// src/cli/status.ts
+// modules/dev-loop-ts/src/cli/status.ts
 var import_picocolors = __toESM(require_picocolors(), 1);
 
-// node_modules/date-fns/constants.js
+// modules/dev-loop-ts/node_modules/date-fns/constants.js
 var daysInYear = 365.2425;
 var maxTime = Math.pow(10, 8) * 24 * 60 * 60 * 1000;
 var minTime = -maxTime;
@@ -6792,7 +7024,7 @@ var secondsInMonth = secondsInYear / 12;
 var secondsInQuarter = secondsInMonth * 3;
 var constructFromSymbol = Symbol.for('constructDateFrom');
 
-// node_modules/date-fns/constructFrom.js
+// modules/dev-loop-ts/node_modules/date-fns/constructFrom.js
 function constructFrom(date, value) {
   if (typeof date === 'function') return date(value);
   if (date && typeof date === 'object' && constructFromSymbol in date) return date[constructFromSymbol](value);
@@ -6800,18 +7032,18 @@ function constructFrom(date, value) {
   return new Date(value);
 }
 
-// node_modules/date-fns/toDate.js
+// modules/dev-loop-ts/node_modules/date-fns/toDate.js
 function toDate(argument, context) {
   return constructFrom(context || argument, argument);
 }
 
-// node_modules/date-fns/_lib/defaultOptions.js
+// modules/dev-loop-ts/node_modules/date-fns/_lib/defaultOptions.js
 var defaultOptions = {};
 function getDefaultOptions() {
   return defaultOptions;
 }
 
-// node_modules/date-fns/startOfWeek.js
+// modules/dev-loop-ts/node_modules/date-fns/startOfWeek.js
 function startOfWeek(date, options) {
   const defaultOptions2 = getDefaultOptions();
   const weekStartsOn =
@@ -6828,12 +7060,12 @@ function startOfWeek(date, options) {
   return _date;
 }
 
-// node_modules/date-fns/startOfISOWeek.js
+// modules/dev-loop-ts/node_modules/date-fns/startOfISOWeek.js
 function startOfISOWeek(date, options) {
   return startOfWeek(date, { ...options, weekStartsOn: 1 });
 }
 
-// node_modules/date-fns/getISOWeekYear.js
+// modules/dev-loop-ts/node_modules/date-fns/getISOWeekYear.js
 function getISOWeekYear(date, options) {
   const _date = toDate(date, options?.in);
   const year = _date.getFullYear();
@@ -6854,7 +7086,7 @@ function getISOWeekYear(date, options) {
   }
 }
 
-// node_modules/date-fns/_lib/getTimezoneOffsetInMilliseconds.js
+// modules/dev-loop-ts/node_modules/date-fns/_lib/getTimezoneOffsetInMilliseconds.js
 function getTimezoneOffsetInMilliseconds(date) {
   const _date = toDate(date);
   const utcDate = new Date(
@@ -6872,20 +7104,20 @@ function getTimezoneOffsetInMilliseconds(date) {
   return +date - +utcDate;
 }
 
-// node_modules/date-fns/_lib/normalizeDates.js
+// modules/dev-loop-ts/node_modules/date-fns/_lib/normalizeDates.js
 function normalizeDates(context, ...dates) {
   const normalize = constructFrom.bind(null, context || dates.find(date => typeof date === 'object'));
   return dates.map(normalize);
 }
 
-// node_modules/date-fns/startOfDay.js
+// modules/dev-loop-ts/node_modules/date-fns/startOfDay.js
 function startOfDay(date, options) {
   const _date = toDate(date, options?.in);
   _date.setHours(0, 0, 0, 0);
   return _date;
 }
 
-// node_modules/date-fns/differenceInCalendarDays.js
+// modules/dev-loop-ts/node_modules/date-fns/differenceInCalendarDays.js
 function differenceInCalendarDays(laterDate, earlierDate, options) {
   const [laterDate_, earlierDate_] = normalizeDates(options?.in, laterDate, earlierDate);
   const laterStartOfDay = startOfDay(laterDate_);
@@ -6895,7 +7127,7 @@ function differenceInCalendarDays(laterDate, earlierDate, options) {
   return Math.round((laterTimestamp - earlierTimestamp) / millisecondsInDay);
 }
 
-// node_modules/date-fns/startOfISOWeekYear.js
+// modules/dev-loop-ts/node_modules/date-fns/startOfISOWeekYear.js
 function startOfISOWeekYear(date, options) {
   const year = getISOWeekYear(date, options);
   const fourthOfJanuary = constructFrom(options?.in || date, 0);
@@ -6904,19 +7136,19 @@ function startOfISOWeekYear(date, options) {
   return startOfISOWeek(fourthOfJanuary);
 }
 
-// node_modules/date-fns/isDate.js
+// modules/dev-loop-ts/node_modules/date-fns/isDate.js
 function isDate(value) {
   return (
     value instanceof Date || (typeof value === 'object' && Object.prototype.toString.call(value) === '[object Date]')
   );
 }
 
-// node_modules/date-fns/isValid.js
+// modules/dev-loop-ts/node_modules/date-fns/isValid.js
 function isValid2(date) {
   return !((!isDate(date) && typeof date !== 'number') || isNaN(+toDate(date)));
 }
 
-// node_modules/date-fns/startOfYear.js
+// modules/dev-loop-ts/node_modules/date-fns/startOfYear.js
 function startOfYear(date, options) {
   const date_ = toDate(date, options?.in);
   date_.setFullYear(date_.getFullYear(), 0, 1);
@@ -6924,7 +7156,7 @@ function startOfYear(date, options) {
   return date_;
 }
 
-// node_modules/date-fns/locale/en-US/_lib/formatDistance.js
+// modules/dev-loop-ts/node_modules/date-fns/locale/en-US/_lib/formatDistance.js
 var formatDistanceLocale = {
   lessThanXSeconds: {
     one: 'less than a second',
@@ -7008,7 +7240,7 @@ var formatDistance = (token, count, options) => {
   return result;
 };
 
-// node_modules/date-fns/locale/_lib/buildFormatLongFn.js
+// modules/dev-loop-ts/node_modules/date-fns/locale/_lib/buildFormatLongFn.js
 function buildFormatLongFn(args) {
   return (options = {}) => {
     const width = options.width ? String(options.width) : args.defaultWidth;
@@ -7017,7 +7249,7 @@ function buildFormatLongFn(args) {
   };
 }
 
-// node_modules/date-fns/locale/en-US/_lib/formatLong.js
+// modules/dev-loop-ts/node_modules/date-fns/locale/en-US/_lib/formatLong.js
 var dateFormats = {
   full: 'EEEE, MMMM do, y',
   long: 'MMMM do, y',
@@ -7051,7 +7283,7 @@ var formatLong = {
   }),
 };
 
-// node_modules/date-fns/locale/en-US/_lib/formatRelative.js
+// modules/dev-loop-ts/node_modules/date-fns/locale/en-US/_lib/formatRelative.js
 var formatRelativeLocale = {
   lastWeek: "'last' eeee 'at' p",
   yesterday: "'yesterday at' p",
@@ -7062,7 +7294,7 @@ var formatRelativeLocale = {
 };
 var formatRelative = (token, _date, _baseDate, _options) => formatRelativeLocale[token];
 
-// node_modules/date-fns/locale/_lib/buildLocalizeFn.js
+// modules/dev-loop-ts/node_modules/date-fns/locale/_lib/buildLocalizeFn.js
 function buildLocalizeFn(args) {
   return (value, options) => {
     const context = options?.context ? String(options.context) : 'standalone';
@@ -7081,7 +7313,7 @@ function buildLocalizeFn(args) {
   };
 }
 
-// node_modules/date-fns/locale/en-US/_lib/localize.js
+// modules/dev-loop-ts/node_modules/date-fns/locale/en-US/_lib/localize.js
 var eraValues = {
   narrow: ['B', 'A'],
   abbreviated: ['BC', 'AD'],
@@ -7222,7 +7454,7 @@ var localize = {
   }),
 };
 
-// node_modules/date-fns/locale/_lib/buildMatchFn.js
+// modules/dev-loop-ts/node_modules/date-fns/locale/_lib/buildMatchFn.js
 function buildMatchFn(args) {
   return (string, options = {}) => {
     const width = options.width;
@@ -7260,7 +7492,7 @@ function findIndex(array, predicate) {
   return;
 }
 
-// node_modules/date-fns/locale/_lib/buildMatchPatternFn.js
+// modules/dev-loop-ts/node_modules/date-fns/locale/_lib/buildMatchPatternFn.js
 function buildMatchPatternFn(args) {
   return (string, options = {}) => {
     const matchResult = string.match(args.matchPattern);
@@ -7275,7 +7507,7 @@ function buildMatchPatternFn(args) {
   };
 }
 
-// node_modules/date-fns/locale/en-US/_lib/match.js
+// modules/dev-loop-ts/node_modules/date-fns/locale/en-US/_lib/match.js
 var matchOrdinalNumberPattern = /^(\d+)(th|st|nd|rd)?/i;
 var parseOrdinalNumberPattern = /\d+/i;
 var matchEraPatterns = {
@@ -7368,7 +7600,7 @@ var match = {
   }),
 };
 
-// node_modules/date-fns/locale/en-US.js
+// modules/dev-loop-ts/node_modules/date-fns/locale/en-US.js
 var enUS = {
   code: 'en-US',
   formatDistance,
@@ -7381,7 +7613,7 @@ var enUS = {
     firstWeekContainsDate: 1,
   },
 };
-// node_modules/date-fns/getDayOfYear.js
+// modules/dev-loop-ts/node_modules/date-fns/getDayOfYear.js
 function getDayOfYear(date, options) {
   const _date = toDate(date, options?.in);
   const diff = differenceInCalendarDays(_date, startOfYear(_date));
@@ -7389,14 +7621,14 @@ function getDayOfYear(date, options) {
   return dayOfYear;
 }
 
-// node_modules/date-fns/getISOWeek.js
+// modules/dev-loop-ts/node_modules/date-fns/getISOWeek.js
 function getISOWeek(date, options) {
   const _date = toDate(date, options?.in);
   const diff = +startOfISOWeek(_date) - +startOfISOWeekYear(_date);
   return Math.round(diff / millisecondsInWeek) + 1;
 }
 
-// node_modules/date-fns/getWeekYear.js
+// modules/dev-loop-ts/node_modules/date-fns/getWeekYear.js
 function getWeekYear(date, options) {
   const _date = toDate(date, options?.in);
   const year = _date.getFullYear();
@@ -7424,7 +7656,7 @@ function getWeekYear(date, options) {
   }
 }
 
-// node_modules/date-fns/startOfWeekYear.js
+// modules/dev-loop-ts/node_modules/date-fns/startOfWeekYear.js
 function startOfWeekYear(date, options) {
   const defaultOptions2 = getDefaultOptions();
   const firstWeekContainsDate =
@@ -7441,21 +7673,21 @@ function startOfWeekYear(date, options) {
   return _date;
 }
 
-// node_modules/date-fns/getWeek.js
+// modules/dev-loop-ts/node_modules/date-fns/getWeek.js
 function getWeek(date, options) {
   const _date = toDate(date, options?.in);
   const diff = +startOfWeek(_date, options) - +startOfWeekYear(_date, options);
   return Math.round(diff / millisecondsInWeek) + 1;
 }
 
-// node_modules/date-fns/_lib/addLeadingZeros.js
+// modules/dev-loop-ts/node_modules/date-fns/_lib/addLeadingZeros.js
 function addLeadingZeros(number, targetLength) {
   const sign = number < 0 ? '-' : '';
   const output = Math.abs(number).toString().padStart(targetLength, '0');
   return sign + output;
 }
 
-// node_modules/date-fns/_lib/format/lightFormatters.js
+// modules/dev-loop-ts/node_modules/date-fns/_lib/format/lightFormatters.js
 var lightFormatters = {
   y(date, token) {
     const signedYear = date.getFullYear();
@@ -7504,7 +7736,7 @@ var lightFormatters = {
   },
 };
 
-// node_modules/date-fns/_lib/format/formatters.js
+// modules/dev-loop-ts/node_modules/date-fns/_lib/format/formatters.js
 var dayPeriodEnum = {
   am: 'am',
   pm: 'pm',
@@ -8045,7 +8277,7 @@ function formatTimezone(offset, delimiter = '') {
   return sign + hours + delimiter + minutes;
 }
 
-// node_modules/date-fns/_lib/format/longFormatters.js
+// modules/dev-loop-ts/node_modules/date-fns/_lib/format/longFormatters.js
 var dateLongFormatter = (pattern, formatLong2) => {
   switch (pattern) {
     case 'P':
@@ -8104,7 +8336,7 @@ var longFormatters = {
   P: dateTimeLongFormatter,
 };
 
-// node_modules/date-fns/_lib/protectedTokens.js
+// modules/dev-loop-ts/node_modules/date-fns/_lib/protectedTokens.js
 var dayOfYearTokenRE = /^D+$/;
 var weekYearTokenRE = /^Y+$/;
 var throwTokens = ['D', 'DD', 'YY', 'YYYY'];
@@ -8124,7 +8356,7 @@ function message(token, format, input) {
   return `Use \`${token.toLowerCase()}\` instead of \`${token}\` (in \`${format}\`) for formatting ${subject} to the input \`${input}\`; see: https://github.com/date-fns/date-fns/blob/master/docs/unicodeTokens.md`;
 }
 
-// node_modules/date-fns/format.js
+// modules/dev-loop-ts/node_modules/date-fns/format.js
 var formattingTokensRegExp = /[yYQqMLwIdDecihHKkms]o|(\w)\1*|''|'(''|[^'])+('|$)|./g;
 var longFormattingTokensRegExp = /P+p+|P+|p+|''|'(''|[^'])+('|$)|./g;
 var escapedStringRegExp = /^'([^]*?)'?$/;
@@ -8208,7 +8440,7 @@ function cleanEscapedString(input) {
   return matched[1].replace(doubleQuoteRegExp, "'");
 }
 
-// src/cli/status.ts
+// modules/dev-loop-ts/src/cli/status.ts
 async function handler3(state) {
   try {
     const hasConfig = await state.hasConfig();
@@ -8281,7 +8513,7 @@ async function handler3(state) {
   }
 }
 
-// node_modules/@clack/core/dist/index.mjs
+// modules/dev-loop-ts/node_modules/@clack/core/dist/index.mjs
 var import_sisteransi = __toESM(require_src(), 1);
 import { stdin as j, stdout as M } from 'process';
 import O from 'readline';
@@ -9105,7 +9337,7 @@ class LD extends x {
   }
 }
 
-// node_modules/@clack/prompts/dist/index.mjs
+// modules/dev-loop-ts/node_modules/@clack/prompts/dist/index.mjs
 var import_picocolors2 = __toESM(require_picocolors(), 1);
 var import_sisteransi2 = __toESM(require_src(), 1);
 import y2 from 'process';
@@ -9231,10 +9463,17 @@ ${import_picocolors2.default.gray(d2)}  ${t}
 };
 var J2 = `${import_picocolors2.default.gray(o)}  `;
 
-// src/cli/attach.ts
+// modules/dev-loop-ts/src/cli/attach.ts
 var import_picocolors3 = __toESM(require_picocolors(), 1);
 
-// src/tmux/commands.ts
+// modules/dev-loop-ts/src/tmux/commands.ts
+function generateSessionName(params) {
+  const { dirHash, runId, iteration, role, reviewerIndex } = params;
+  if (role === 'rev' && reviewerIndex !== undefined) {
+    return `devloop-${dirHash}-${runId}-${iteration}-rev-${reviewerIndex}`;
+  }
+  return `devloop-${dirHash}-${runId}-${iteration}-${role}`;
+}
 function parseSessionName(sessionName) {
   const prefix = 'devloop-';
   if (!sessionName.startsWith(prefix)) {
@@ -9264,8 +9503,23 @@ function parseSessionName(sessionName) {
     reviewerIndex,
   };
 }
+function buildNewSessionCommand(params) {
+  return ['tmux', 'new-session', '-d', '-s', params.sessionName, '-c', params.cwd, 'sh', '-c', params.command];
+}
+function buildHasSessionCommand(sessionName) {
+  return ['tmux', 'has-session', '-t', sessionName];
+}
+function buildListSessionsCommand() {
+  return ['tmux', 'ls', '-F', '#{session_name}'];
+}
+function buildKillSessionCommand(sessionName) {
+  return ['tmux', 'kill-session', '-t', sessionName];
+}
+function buildTimeoutCommand(command, timeoutMins) {
+  return `timeout ${timeoutMins}m ${command}`;
+}
 
-// src/cli/attach.ts
+// modules/dev-loop-ts/src/cli/attach.ts
 function formatSessionChoice(sessionName) {
   const parsed = parseSessionName(sessionName);
   if (!parsed) {
@@ -9305,28 +9559,52 @@ async function handler4(tmux) {
   }
 }
 
-// src/cli/cancel.ts
+// modules/dev-loop-ts/src/cli/cancel.ts
 async function handler5(state, tmux) {
   try {
     const run = await state.loadRun();
-    if (!run) {
-      console.log('No active run to cancel.');
-      return;
+    let targetRunId = run?.id ?? null;
+    if (!targetRunId) {
+      const history = await state.listHistory();
+      if (history.length === 0) {
+        console.log('No active run to cancel.');
+        return;
+      }
+      const latest = history[0];
+      targetRunId = latest.id;
+      console.log(`No active run found. Cleaning up latest run ${targetRunId}...`);
+    } else {
+      console.log(`Cancelling run ${targetRunId}...`);
+      await state.cancelRun();
     }
-    console.log(`Cancelling run ${run.id}...`);
-    const killed = await tmux.killAllSessions();
+    const sessions = await tmux.listSessions();
+    let killed = 0;
+    for (const session of sessions) {
+      const parsed = tmux.parseSessionName(session);
+      if (!parsed || parsed.runId !== targetRunId) continue;
+      if (await tmux.killSession(session)) {
+        killed++;
+      }
+    }
     if (killed > 0) {
       console.log(`Killed ${killed} tmux session(s)`);
     }
-    await state.cancelRun();
-    console.log('Run cancelled and archived.');
+    if (run) {
+      const stillActive = await state.loadRun();
+      if (stillActive) {
+        await state.completeRun('cancelled');
+      }
+      console.log('Run cancelled and archived.');
+    } else {
+      console.log('Cleanup complete.');
+    }
   } catch (err) {
     console.error(`Error: ${err.message}`);
     process.exit(1);
   }
 }
 
-// src/cli/history.ts
+// modules/dev-loop-ts/src/cli/history.ts
 var import_picocolors4 = __toESM(require_picocolors(), 1);
 async function listHandler(history, logs) {
   try {
@@ -9416,7 +9694,7 @@ async function clearHandler(history) {
   }
 }
 
-// src/cli/logs.ts
+// modules/dev-loop-ts/src/cli/logs.ts
 var import_picocolors5 = __toESM(require_picocolors(), 1);
 function formatLogLabel(log) {
   if (log.role === 'impl') {
@@ -9788,13 +10066,13 @@ async function clearHandler2(logs, runId) {
 }
 async function clearRunLogs(runId) {
   const fs4 = await import('fs/promises');
-  const logsDir = `.claude/dev-loop/logs/${runId}`;
+  const logsDir = `.kagent/logs/${runId}`;
   try {
     await fs4.rm(logsDir, { recursive: true });
   } catch {}
 }
 
-// src/cli/remove.ts
+// modules/dev-loop-ts/src/cli/remove.ts
 var import_picocolors6 = __toESM(require_picocolors(), 1);
 async function handler6(state) {
   try {
@@ -9807,7 +10085,7 @@ async function handler6(state) {
   }
 }
 
-// src/stream/parse.ts
+// modules/dev-loop-ts/src/stream/parse.ts
 function tryParseJson(line) {
   const trimmed = line.trim();
   if (!trimmed) return null;
@@ -9850,7 +10128,7 @@ function extractToolUses(content) {
   return content.filter(c => c.type === 'tool_use').map(c => ({ name: c.name, input: c.input }));
 }
 
-// src/stream/format.ts
+// modules/dev-loop-ts/src/stream/format.ts
 var import_picocolors7 = __toESM(require_picocolors(), 1);
 function formatEvent(event) {
   switch (event.type) {
@@ -9912,7 +10190,7 @@ function formatResult(result) {
   return import_picocolors7.default.dim(`[done] ${parts.join(' | ')}`);
 }
 
-// src/cli/stream.ts
+// modules/dev-loop-ts/src/cli/stream.ts
 async function handler7() {
   const decoder = new TextDecoder();
   let buffer = '';
@@ -9943,7 +10221,7 @@ function processLine(line) {
   }
 }
 
-// src/cli/index.ts
+// modules/dev-loop-ts/src/cli/index.ts
 function createCli(deps) {
   const program2 = new Command()
     .name('dev-loop')
@@ -10014,4 +10292,627 @@ function createCli(deps) {
     .action(async () => handler7());
   return program2;
 }
-export { createCli };
+
+// modules/dev-loop-ts/src/state/service.ts
+class StateService {
+  fs;
+  paths;
+  constructor(fs4, paths2) {
+    this.fs = fs4;
+    this.paths = paths2;
+  }
+  async initProject(overrides = {}) {
+    await this.fs.mkdir(this.paths.baseDir);
+    await this.fs.mkdir(this.paths.historyDir);
+    if (!(await this.fs.exists(this.paths.spec))) {
+      await this.fs.writeFile(this.paths.spec, SPEC_TEMPLATE);
+    }
+    if (await this.fs.exists(this.paths.config)) {
+      const existing = await this.loadConfig();
+      await this.saveConfig({ ...existing, ...overrides });
+    } else {
+      await this.saveConfig(mergeConfig(overrides));
+    }
+  }
+  async hasConfig() {
+    return this.fs.exists(this.paths.config);
+  }
+  async loadConfig() {
+    const content = await this.fs.readFile(this.paths.config);
+    return parseConfig(JSON.parse(content));
+  }
+  async saveConfig(cfg) {
+    await this.fs.writeJson(this.paths.config, cfg);
+  }
+  async hasCurrentRun() {
+    return this.fs.exists(this.paths.runJson);
+  }
+  async createRun(specPath) {
+    await this.fs.mkdir(this.paths.currentDir);
+    await this.fs.mkdir(this.paths.sessionsDir);
+    await this.fs.mkdir(this.paths.verdictsDir);
+    await this.fs.mkdir(this.paths.evidenceDir);
+    const run = {
+      id: generateRunId(),
+      spec: specPath,
+      status: 'running',
+      iteration: 0,
+      phase: 'implementing',
+      startedAt: getCurrentTimestamp(),
+      learnings: [],
+    };
+    await this.saveRun(run);
+    return run;
+  }
+  async loadRun() {
+    if (!(await this.fs.exists(this.paths.runJson))) return null;
+    const content = await this.fs.readFile(this.paths.runJson);
+    return parseRun(JSON.parse(content));
+  }
+  async saveRun(run) {
+    await this.fs.writeJson(this.paths.runJson, run);
+  }
+  async updatePhase(phase) {
+    const run = await this.loadRun();
+    if (!run) throw new Error('No active run');
+    run.phase = phase;
+    await this.saveRun(run);
+  }
+  async incrementIteration() {
+    const run = await this.loadRun();
+    if (!run) throw new Error('No active run');
+    run.iteration += 1;
+    await this.saveRun(run);
+    return run.iteration;
+  }
+  async addLearning(learning) {
+    const run = await this.loadRun();
+    if (!run) throw new Error('No active run');
+    run.learnings.push(learning);
+    await this.saveRun(run);
+  }
+  async completeRun(status) {
+    const run = await this.loadRun();
+    if (!run) throw new Error('No active run');
+    run.status = status;
+    run.phase = 'done';
+    await this.saveRun(run);
+    return await this.archiveRun();
+  }
+  async cancelRun() {
+    const run = await this.loadRun();
+    if (!run) return;
+    run.status = 'cancelled';
+    run.phase = 'done';
+    await this.saveRun(run);
+  }
+  async saveSession(session) {
+    await this.fs.writeJson(this.paths.sessionFile(session.id), session);
+  }
+  async loadSessions() {
+    if (!(await this.fs.exists(this.paths.sessionsDir))) return [];
+    const files = await this.fs.readdir(this.paths.sessionsDir);
+    const sessions = [];
+    for (const file of files.filter(f => f.endsWith('.json'))) {
+      try {
+        const content = await this.fs.readFile(`${this.paths.sessionsDir}/${file}`);
+        sessions.push(parseSession(JSON.parse(content)));
+      } catch (err) {
+        if (process.env.DEBUG) console.error(`Failed to parse session ${file}:`, err);
+      }
+    }
+    return sessions;
+  }
+  async saveVerdict(iteration, reviewerIndex, verdict) {
+    await this.fs.writeJson(this.paths.verdictFile(iteration, reviewerIndex), verdict);
+  }
+  async loadVerdicts(iteration) {
+    if (!(await this.fs.exists(this.paths.verdictsDir))) return new Map();
+    const files = await this.fs.readdir(this.paths.verdictsDir);
+    const pattern = new RegExp(`^${iteration}-(\\d+)\\.json$`);
+    const verdicts = new Map();
+    for (const file of files) {
+      const match2 = file.match(pattern);
+      if (match2) {
+        const content = await this.fs.readFile(`${this.paths.verdictsDir}/${file}`);
+        verdicts.set(parseInt(match2[1], 10), parseVerdictFile(JSON.parse(content)));
+      }
+    }
+    return verdicts;
+  }
+  async clearVerdicts(iteration) {
+    if (!(await this.fs.exists(this.paths.verdictsDir))) return;
+    const files = await this.fs.readdir(this.paths.verdictsDir);
+    const pattern = new RegExp(`^${iteration}-\\d+\\.json$`);
+    for (const file of files) {
+      if (pattern.test(file)) {
+        await this.fs.unlink(`${this.paths.verdictsDir}/${file}`);
+      }
+    }
+  }
+  async clearEvidence() {
+    if (await this.fs.exists(this.paths.evidenceDir)) {
+      const files = await this.fs.readdir(this.paths.evidenceDir);
+      for (const file of files) {
+        await this.fs.unlink(`${this.paths.evidenceDir}/${file}`);
+      }
+    }
+    await this.fs.mkdir(this.paths.evidenceDir);
+  }
+  async clearReviews() {
+    const reviewsDir = `${this.paths.currentDir}/reviews`;
+    if (await this.fs.exists(reviewsDir)) {
+      const files = await this.fs.readdir(reviewsDir);
+      for (const file of files) {
+        await this.fs.unlink(`${reviewsDir}/${file}`);
+      }
+    }
+    await this.fs.mkdir(reviewsDir);
+  }
+  async readLearnings() {
+    if (!(await this.fs.exists(this.paths.learnings))) return null;
+    return this.fs.readFile(this.paths.learnings);
+  }
+  async archiveRun() {
+    const run = await this.loadRun();
+    if (!run) throw new Error('No run to archive');
+    const sessions = await this.loadSessions();
+    const cfg = await this.loadConfig();
+    const entry = {
+      id: run.id,
+      spec: run.spec,
+      config: cfg,
+      status: run.status,
+      iterations: run.iteration,
+      startedAt: run.startedAt,
+      completedAt: getCurrentTimestamp(),
+      summary: this.buildSummary(sessions, run.learnings),
+    };
+    await this.fs.writeJson(this.paths.historyEntry(run.id), entry);
+    await this.fs.rm(this.paths.currentDir, { recursive: true });
+    return entry;
+  }
+  buildSummary(sessions, learnings) {
+    const byIteration = new Map();
+    for (const s of sessions) {
+      const list = byIteration.get(s.iteration) || [];
+      list.push(s);
+      byIteration.set(s.iteration, list);
+    }
+    return Array.from(byIteration.entries()).map(([iteration, iterSessions]) => {
+      const impl = iterSessions.find(s => s.role === 'implementer');
+      const reviewers = iterSessions.filter(s => s.role === 'reviewer');
+      return {
+        iteration,
+        implementerDuration:
+          impl?.completedAt && impl?.startedAt
+            ? new Date(impl.completedAt).getTime() - new Date(impl.startedAt).getTime()
+            : 0,
+        reviewerVerdicts: reviewers.map(r2 => ({
+          index: r2.reviewerIndex ?? 0,
+          verdict: r2.verdict ?? 'rejected',
+          binary: r2.binary,
+        })),
+        learnings: learnings.filter((_3, i) => i < iteration),
+        sessions: iterSessions.map(s => ({
+          role: s.role,
+          reviewerIndex: s.reviewerIndex,
+        })),
+      };
+    });
+  }
+  async listHistory() {
+    if (!(await this.fs.exists(this.paths.historyDir))) return [];
+    const files = await this.fs.readdir(this.paths.historyDir);
+    const entries = [];
+    for (const file of files.filter(f => f.endsWith('.json'))) {
+      try {
+        const content = await this.fs.readFile(`${this.paths.historyDir}/${file}`);
+        entries.push(parseHistoryEntry(JSON.parse(content)));
+      } catch (err) {
+        if (process.env.DEBUG) console.error(`Failed to parse history ${file}:`, err);
+      }
+    }
+    return entries.sort((a, b3) => new Date(b3.startedAt).getTime() - new Date(a.startedAt).getTime());
+  }
+  async loadHistoryEntry(runId) {
+    const entryPath = this.paths.historyEntry(runId);
+    if (!(await this.fs.exists(entryPath))) return null;
+    const content = await this.fs.readFile(entryPath);
+    return parseHistoryEntry(JSON.parse(content));
+  }
+  async clearCurrentRun() {
+    if (await this.fs.exists(this.paths.currentDir)) {
+      await this.fs.rm(this.paths.currentDir, { recursive: true });
+    }
+  }
+  async destroy() {
+    await this.clearCurrentRun();
+    if (await this.fs.exists(this.paths.config)) {
+      await this.fs.unlink(this.paths.config);
+    }
+    if (await this.fs.exists(this.paths.spec)) {
+      await this.fs.unlink(this.paths.spec);
+    }
+    if (await this.fs.exists(this.paths.historyDir)) {
+      const historyFiles = await this.fs.readdir(this.paths.historyDir);
+      if (historyFiles.length === 0) {
+        await this.fs.rm(this.paths.historyDir, { recursive: true });
+      }
+    }
+    if (await this.fs.exists(this.paths.baseDir)) {
+      try {
+        const remaining = await this.fs.readdir(this.paths.baseDir);
+        if (remaining.length === 0) {
+          await this.fs.rm(this.paths.baseDir, { recursive: true });
+        }
+      } catch {}
+    }
+  }
+  async destroyAll() {
+    if (await this.fs.exists(this.paths.baseDir)) {
+      await this.fs.rm(this.paths.baseDir, { recursive: true });
+    }
+  }
+}
+
+// modules/dev-loop-ts/src/tmux/service.ts
+import * as fs4 from 'fs/promises';
+import * as path3 from 'path';
+import * as os from 'os';
+class TmuxServiceImpl {
+  spawn;
+  statusDir = path3.join(os.tmpdir(), 'dev-loop', 'status');
+  constructor(spawn = Bun.spawn.bind(Bun)) {
+    this.spawn = spawn;
+  }
+  async isAvailable() {
+    try {
+      const proc = this.spawn(['tmux', '-V'], {
+        stdout: 'ignore',
+        stderr: 'ignore',
+      });
+      const exitCode = await proc.exited;
+      return exitCode === 0;
+    } catch {
+      return false;
+    }
+  }
+  async isSessionAlive(sessionName) {
+    const cmd = buildHasSessionCommand(sessionName);
+    const proc = this.spawn(cmd, {
+      stdout: 'ignore',
+      stderr: 'ignore',
+    });
+    const exitCode = await proc.exited;
+    return exitCode === 0;
+  }
+  async listSessions() {
+    const cmd = buildListSessionsCommand();
+    const proc = this.spawn(cmd, {
+      stdout: 'pipe',
+      stderr: 'ignore',
+    });
+    const exitCode = await proc.exited;
+    if (exitCode !== 0) {
+      return [];
+    }
+    const output = await new Response(proc.stdout).text();
+    return output
+      .split(
+        `
+`,
+      )
+      .map(s => s.trim())
+      .filter(s => s.startsWith('devloop-'));
+  }
+  async killSession(sessionName) {
+    const cmd = buildKillSessionCommand(sessionName);
+    const proc = this.spawn(cmd, {
+      stdout: 'ignore',
+      stderr: 'ignore',
+    });
+    const exitCode = await proc.exited;
+    return exitCode === 0;
+  }
+  async killAllSessions() {
+    const sessions = await this.listSessions();
+    let killed = 0;
+    for (const session of sessions) {
+      if (await this.killSession(session)) {
+        killed++;
+      }
+    }
+    return killed;
+  }
+  async runInSession(params) {
+    await this.ensureStatusDir();
+    const startTime = Date.now();
+    const statusFile = this.getStatusFilePath(params.sessionName);
+    try {
+      await fs4.unlink(statusFile);
+    } catch {}
+    await fs4.writeFile(statusFile, 'RUNNING', { mode: 384 });
+    const wrappedCommand = `${buildTimeoutCommand(params.command, params.timeoutMins)}; echo $? > "${statusFile}"`;
+    const cmd = buildNewSessionCommand({
+      sessionName: params.sessionName,
+      cwd: params.cwd,
+      command: wrappedCommand,
+    });
+    const createProc = this.spawn(cmd, {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const createExitCode = await createProc.exited;
+    if (createExitCode !== 0) {
+      const stderr = await new Response(createProc.stderr).text();
+      throw new Error(`Failed to create tmux session: ${stderr.trim() || `exit code ${createExitCode}`}`);
+    }
+    const maxPollTime = (params.timeoutMins + 2) * 60 * 1000;
+    const pollStart = Date.now();
+    while (true) {
+      const alive = await this.isSessionAlive(params.sessionName);
+      if (!alive) break;
+      if (Date.now() - pollStart > maxPollTime) {
+        await this.killSession(params.sessionName);
+        break;
+      }
+      await Bun.sleep(2000);
+    }
+    const durationMs = Date.now() - startTime;
+    let exitCode = 1;
+    let timedOut = false;
+    try {
+      const statusContent = await fs4.readFile(statusFile, 'utf-8');
+      const trimmed = statusContent.trim();
+      if (trimmed === 'RUNNING') {
+        exitCode = 1;
+      } else {
+        const parsed = parseInt(trimmed, 10);
+        if (Number.isFinite(parsed)) {
+          exitCode = parsed;
+          timedOut = exitCode === 124;
+        }
+      }
+    } catch {}
+    try {
+      await fs4.unlink(statusFile);
+    } catch {}
+    return { exitCode, durationMs, timedOut };
+  }
+  generateSessionName(params) {
+    return generateSessionName(params);
+  }
+  parseSessionName(sessionName) {
+    return parseSessionName(sessionName);
+  }
+  async ensureStatusDir() {
+    await fs4.mkdir(this.statusDir, { recursive: true, mode: 448 });
+  }
+  getStatusFilePath(sessionName) {
+    const safeName = sessionName.replace(/[^a-zA-Z0-9_-]/g, '_');
+    return path3.join(this.statusDir, `${safeName}.status`);
+  }
+}
+function createTmuxService(spawn) {
+  return new TmuxServiceImpl(spawn);
+}
+
+// modules/dev-loop-ts/src/history/format.ts
+var import_picocolors8 = __toESM(require_picocolors(), 1);
+function formatHistoryEntry(entry) {
+  const lines = [];
+  lines.push(import_picocolors8.default.bold(`Run: ${entry.id}`));
+  lines.push(`  Status: ${formatStatus(entry.status)}`);
+  lines.push(`  Iterations: ${entry.iterations}`);
+  lines.push(`  Started: ${format(new Date(entry.startedAt), 'yyyy-MM-dd HH:mm:ss')}`);
+  lines.push(`  Completed: ${format(new Date(entry.completedAt), 'yyyy-MM-dd HH:mm:ss')}`);
+  lines.push('');
+  for (const sum of entry.summary) {
+    lines.push(`  Iteration ${sum.iteration}:`);
+    lines.push(`    Duration: ${Math.round(sum.implementerDuration / 1000)}s`);
+    const verdicts = sum.reviewerVerdicts
+      .map(
+        v =>
+          `${v.verdict === 'approved' ? import_picocolors8.default.green('\u2713') : import_picocolors8.default.red('\u2717')}`,
+      )
+      .join(' ');
+    lines.push(`    Verdicts: ${verdicts}`);
+    if (sum.learnings.length > 0) {
+      lines.push(`    Learnings: ${sum.learnings.length}`);
+    }
+  }
+  return lines.join(`
+`);
+}
+function formatHistoryList(entries) {
+  if (entries.length === 0) {
+    return 'No history entries.';
+  }
+  return entries.map(e2 => {
+    const date = format(new Date(e2.startedAt), 'MM-dd HH:mm');
+    const status = formatStatus(e2.status);
+    return `${e2.id}  ${date}  ${status}  ${e2.iterations} iterations`;
+  }).join(`
+`);
+}
+function formatStatus(status) {
+  switch (status) {
+    case 'completed':
+      return import_picocolors8.default.green('completed');
+    case 'cancelled':
+      return import_picocolors8.default.yellow('cancelled');
+    case 'failed':
+      return import_picocolors8.default.red('failed');
+    default:
+      return status;
+  }
+}
+
+// modules/dev-loop-ts/src/history/service.ts
+class HistoryServiceImpl {
+  fs;
+  paths;
+  constructor(fs5, paths2) {
+    this.fs = fs5;
+    this.paths = paths2;
+  }
+  async list() {
+    if (!(await this.fs.exists(this.paths.historyDir))) return [];
+    const files = await this.fs.readdir(this.paths.historyDir);
+    const entries = [];
+    for (const file of files.filter(f => f.endsWith('.json'))) {
+      try {
+        const content = await this.fs.readFile(`${this.paths.historyDir}/${file}`);
+        entries.push(parseHistoryEntry(JSON.parse(content)));
+      } catch (err) {
+        if (process.env.DEBUG) console.error(`Failed to parse history ${file}:`, err);
+      }
+    }
+    return entries.sort((a, b3) => new Date(b3.startedAt).getTime() - new Date(a.startedAt).getTime());
+  }
+  async load(runId) {
+    const entryPath = this.paths.historyEntry(runId);
+    if (!(await this.fs.exists(entryPath))) return null;
+    try {
+      const content = await this.fs.readFile(entryPath);
+      return parseHistoryEntry(JSON.parse(content));
+    } catch (err) {
+      if (process.env.DEBUG) console.error(`Failed to load history ${runId}:`, err);
+      return null;
+    }
+  }
+  format(entry) {
+    return formatHistoryEntry(entry);
+  }
+  formatList(entries) {
+    return formatHistoryList(entries);
+  }
+  async clear() {
+    if (!(await this.fs.exists(this.paths.historyDir))) return;
+    const files = await this.fs.readdir(this.paths.historyDir);
+    for (const file of files.filter(f => f.endsWith('.json'))) {
+      await this.fs.unlink(`${this.paths.historyDir}/${file}`);
+    }
+  }
+}
+function createHistoryService(fs5, paths2) {
+  return new HistoryServiceImpl(fs5, paths2);
+}
+
+// modules/dev-loop-ts/src/logs/service.ts
+import * as path4 from 'path';
+
+class LogsServiceImpl {
+  fs;
+  paths;
+  constructor(fs5, paths2) {
+    this.fs = fs5;
+    this.paths = paths2;
+  }
+  async getCurrentRunId() {
+    try {
+      const content = await this.fs.readFile(this.paths.runJson);
+      const run = JSON.parse(content);
+      return run.id || null;
+    } catch {
+      return null;
+    }
+  }
+  async listRuns() {
+    if (!(await this.fs.exists(this.paths.logsDir))) {
+      return [];
+    }
+    const entries = await this.fs.readdir(this.paths.logsDir);
+    const runs = [];
+    for (const entry of entries) {
+      const entryPath = path4.join(this.paths.logsDir, entry);
+      try {
+        const files = await this.fs.readdir(entryPath);
+        if (files.some(f => f.endsWith('.log'))) {
+          runs.push(entry);
+        }
+      } catch {}
+    }
+    return runs.sort().reverse();
+  }
+  async listLogs(runId) {
+    if (runId) {
+      return this.listLogsForRun(runId);
+    }
+    const runs = await this.listRuns();
+    const allLogs = [];
+    for (const run of runs) {
+      const logs = await this.listLogsForRun(run);
+      allLogs.push(...logs);
+    }
+    return allLogs;
+  }
+  async listLogsByRun() {
+    const runs = await this.listRuns();
+    const result = [];
+    for (const runId of runs) {
+      const logs = await this.listLogsForRun(runId);
+      if (logs.length > 0) {
+        result.push({ runId, logs });
+      }
+    }
+    return result;
+  }
+  async listLogsForRun(runId) {
+    const runLogsDir = this.paths.runLogsDir(runId);
+    if (!(await this.fs.exists(runLogsDir))) {
+      return [];
+    }
+    const files = await this.fs.readdir(runLogsDir);
+    const logs = [];
+    for (const file of files.filter(f => f.endsWith('.log'))) {
+      const parsed = this.parseLogName(file);
+      if (parsed) {
+        logs.push({
+          runId,
+          name: file,
+          path: path4.join(runLogsDir, file),
+          ...parsed,
+        });
+      }
+    }
+    return logs.sort((a, b3) => {
+      if (a.iteration !== b3.iteration) return a.iteration - b3.iteration;
+      if (a.role !== b3.role) return a.role === 'impl' ? -1 : 1;
+      return (a.reviewerIndex ?? 0) - (b3.reviewerIndex ?? 0);
+    });
+  }
+  async readLog(logPath) {
+    return await this.fs.readFile(logPath);
+  }
+  parseLogName(name) {
+    const implMatch = name.match(/^impl-(\d+)\.log$/);
+    if (implMatch) {
+      return {
+        iteration: parseInt(implMatch[1], 10),
+        role: 'impl',
+      };
+    }
+    const revMatch = name.match(/^rev-(\d+)-(\d+)\.log$/);
+    if (revMatch) {
+      return {
+        iteration: parseInt(revMatch[1], 10),
+        role: 'rev',
+        reviewerIndex: parseInt(revMatch[2], 10),
+      };
+    }
+    return null;
+  }
+}
+function createLogsService(fs5, paths2) {
+  return new LogsServiceImpl(fs5, paths2);
+}
+
+// modules/dev-loop-ts/src/index.ts
+var state = new StateService(defaultFsService, paths);
+var tmux = createTmuxService();
+var history = createHistoryService(defaultFsService, paths);
+var logs = createLogsService(defaultFsService, paths);
+var program2 = createCli({ state, tmux, history, logs });
+program2.parse(process.argv);

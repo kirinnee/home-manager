@@ -7,8 +7,15 @@ Kagent is a CLI tool that orchestrates AI agents in iterative development cycles
 | Level    | Purpose                               | Completion Criteria                    |
 | -------- | ------------------------------------- | -------------------------------------- |
 | **Task** | Complete a ticket → ready-to-merge PR | CI passes + required reviewers approve |
-| **Run**  | Implement spec → one commit           | All AI reviewers approve               |
+| **Run**  | Implement spec.md → one commit        | All AI reviewers approve               |
 | **Loop** | One iteration within a run            | Implementer + reviewers complete       |
+
+**Key Architectural Notes:**
+
+- **Runs are first-class** and can operate independently of tasks
+- **Tasks are optional** wrappers that add ticket/PR integration around runs
+- **Specs live at run level** — each run has its own `spec.md`
+- **Pointer-based** — uses ordinal numbers and pointer files, no file movement
 
 ## Git Safety Rules
 
@@ -55,23 +62,37 @@ Project
 ├── TICKETS.md                    # Ticket system configuration (repo-level)
 └── {state-dir}/                  # Configurable, default: .kagent
     ├── config.json               # Agent configuration
-    ├── task/                     # Active task state
+    ├── .current-task             # Pointer: "1" (ordinal of active task)
+    ├── .current-run              # Pointer: "5" (ordinal of active run)
+    │
+    ├── task-1/                   # Task folder (optional, wraps runs)
     │   ├── task.json             # Task metadata (ticket, branch, PR)
-    │   ├── spec.md               # Current specification
-    │   ├── run/                  # Active run state
-    │   │   ├── run.json          # Run metadata
-    │   │   ├── current/          # Active loop
-    │   │   └── loop-{n}/         # Archived loops within this run
-    │   └── run-{n}/              # Archived runs within this task
-    └── archive/                  # Completed/abandoned tasks
-        └── task-{id}/            # Archived task with all runs
+    │   └── .current-run          # Pointer: "3" (active run for this task)
+    │
+    ├── task-2/                   # Another task
+    │
+    ├── run-1/                    # Run folder (can be standalone or in task)
+    │   ├── run.json              # Run metadata (includes optional taskId)
+    │   ├── .current-loop         # Pointer: "2" (active loop)
+    │   ├── spec.md               # What to implement (run-level)
+    │   ├── current/              # Active loop (always named "current")
+    │   │   ├── agents/           # Agent state files
+    │   │   ├── evidence/         # Implementer outputs
+    │   │   ├── learnings/        # Loop-scoped learnings only
+    │   │   ├── reviews/          # Reviewer outputs
+    │   │   ├── verdicts/         # Reviewer decisions
+    │   │   └── logs/             # Raw agent logs
+    │   └── loop-1/, loop-2/, ... # Completed loops
+    │
+    ├── run-2/                    # Another run
+    └── run-N/
 ```
 
 **Note:** The state directory is configurable via `--state-dir` flag or `KAGENT_STATE_DIR` environment variable. Default is `.kagent`.
 
 ### Task
 
-A **Task** represents work from a ticket (GitHub Issue, Jira, etc.) through to a PR that is ready to merge (CI passed + required reviewers approved). One task = one PR with potentially multiple commits.
+A **Task** represents work from a ticket (GitHub Issue, Jira, etc.) through to a PR that is ready to merge (CI passed + required reviewers approved). One task = one PR with potentially multiple commits (runs).
 
 **Prerequisites:**
 
@@ -82,27 +103,81 @@ A **Task** represents work from a ticket (GitHub Issue, Jira, etc.) through to a
 
 1. Detect ticket ID from branch (or prompt if detection fails) → fetch ticket details
 2. Move ticket to "In Progress" status
-3. Generate initial spec from ticket (AI-assisted)
-4. Execute runs until spec is implemented
-5. Commit, push, create/update PR
+3. Create first run and generate initial spec from ticket (AI-assisted)
+4. Execute run → if approved, commit and push
+5. Create or update PR
 6. Poll for CI status and human reviews
-7. If feedback received → AI updates spec → new run
+7. If feedback received → create new run with updated spec
 8. Repeat until CI passes and required reviewers approve
 9. Move ticket to "In Review" status (ready to merge)
 10. Notify user (manual merge)
 11. On merge → move ticket to "Done" status
 
+**Task ↔ Run Relationship:**
+
+- Tasks contain runs, but runs don't need tasks
+- `task.json.taskId` references the active run by ordinal
+- `run.json.taskId` optionally references the parent task
+- When `kagent task` creates a run, both references are set
+- Standalone runs (from `kagent init` + `kagent run`) have `taskId: null`
+
 ### Run
 
-A **Run** is a complete execution cycle for the current spec. One successful run = one commit. In task mode, when a run completes successfully:
+A **Run** is a complete execution cycle for a `spec.md`. One successful run = one commit.
 
-- Changes are committed to the task branch
-- Pushed to remote
-- PR is created or updated
+**Two Modes of Operation:**
 
-If a run fails or is cancelled, do not push and prompt the user to continue or stop.
+1. **Standalone Mode** (`kagent init` + `kagent run`):
+   - User writes `spec.md` manually or from a template
+   - No ticket, no PR, no CI integration
+   - One successful run = local commit (optional push)
+   - Useful for: experiments, refactoring, projects without ticket system
 
-If a previous run exists with history, it's archived before the new run starts.
+2. **Task Mode** (`kagent task`):
+   - Spec initially generated from ticket by AI
+   - User can edit before run starts
+   - After each run, AI generates new spec based on CI/review feedback
+   - Runs continue until ticket is complete and PR is approved
+
+**Run lifecycle:**
+
+1. Initialize `run-{N}/` directory with `spec.md`
+2. Execute loops until all reviewers approve
+3. On success:
+   - Stage all changes
+   - Commit with message following conventions
+   - Pull from remote (to sync any changes)
+   - If pull/merge fails → mark loop as FAILED, stop, prompt user
+   - Push to task branch (NEVER force push)
+   - If push fails → mark loop as FAILED, prompt user
+   - If in task mode: create PR on first push, update on subsequent pushes
+4. On failure (max iterations/cancelled): do not push; stop and prompt user
+
+**Cancellation Detection:**
+
+The loop re-reads `run.json` between phases. If the status is `cancelled`, stop immediately.
+
+**Cancellation can happen two ways:**
+
+1. **User runs `kagent cancel`:**
+   - Marks current run's `run.json` status as "cancelled"
+   - Kills all tmux sessions for this run
+   - Clears the `.current-run` pointer (or updates to different run)
+   - Does NOT immediately delete data — run remains in `run-{N}/` for inspection
+
+2. **Process crash / system failure:**
+   - On restart, check `run.json` status
+   - If "running" but no active agents → mark as "failed"
+   - Kill any orphaned tmux sessions
+
+**Phase Boundary Check:**
+
+- Before starting each phase (implementer → reviewers → decision)
+- Re-read `run.json`
+- If status is "cancelled" or `run.json` no longer exists:
+  - Stop immediately
+  - Clear the `.current-run` pointer
+  - Return to user with status
 
 ### Loop
 
@@ -112,7 +187,21 @@ A **Loop** is a single iteration within a run:
 2. Reviewer phase - Multiple AI reviewers evaluate the implementation
 3. Decision - Continue to next loop or complete
 
-When a loop ends, its data is archived within the current run before the next loop begins.
+When a loop ends:
+
+- Move `current/` to `loop-{N}/`
+- Create fresh `current/` structure
+- Learnings from `loop-{N}/learnings/` are available to next loop (by reading them)
+- Review feedback from `loop-{N}/reviews/` is passed to next implementer
+- **Working tree changes are preserved** between loops (no git reset)
+
+**Learnings Scope:**
+
+Learnings are **loop-scoped only**, not accumulated at task or run level.
+
+- Each loop has its own `learnings/learnings.md`
+- Next loop can read previous loops' learnings from `loop-{N}/learnings/`
+- No automatic accumulation or aggregation
 
 ---
 
@@ -237,65 +326,212 @@ Commit messages follow repository conventions. PRs use the repository template i
 
 ### spec.md
 
-Markdown file describing the implementation task. Created/edited during `kagent init` and auto-generated by `kagent task`.
+**Location:** `{state-dir}/run-{N}/spec.md`
+
+Markdown file describing what needs to be implemented for this specific run.
+
+**Creation:**
+
+- **Standalone mode:** User creates `spec.md` manually, or from a template
+- **Task mode:** AI generates initial `spec.md` from ticket title + body
+
+**Evolution (Task Mode Only):**
+
+When a run completes but CI fails or reviews come back:
+
+1. AI reads feedback:
+   - CI: failure logs, error messages
+   - Reviews: comments, change requests
+2. AI generates new spec for next run:
+   - Identifies what needs to change
+   - Preserves completed requirements
+   - Adds new requirements from feedback
+   - Marks addressed feedback
+3. New run is created with updated `spec.md`
+
+**Spec Scope:**
+
+Each run has its own `spec.md`. The spec defines:
+
+- What needs to be implemented
+- Acceptance criteria
+- Any constraints or requirements
+
+When a run completes successfully, its `spec.md` is considered fulfilled.
 
 ---
 
 ## Directory Structure
 
-### Active State: `{state-dir}/task/`
+### Pointer-Based Architecture
+
+**No file movement.** Pointer files track what's active:
 
 ```
-task/
-├── task.json                    # Task metadata (ticket, branch, PR)
-├── spec.md                      # Current specification
-├── spec-history/                # Previous spec versions
-│   └── spec-{run}.md            # Spec at start of each run
-├── run/                         # Active run state
-│   ├── run.json                 # Run metadata
-│   ├── current/                 # Active loop (always named "current")
-│   │   ├── agents/              # Agent state files
+{state-dir}/                      # Configurable, default: .kagent
+│
+├── config.json                   # Agent configuration
+├── .current-task                 # Pointer: "1" (ordinal of active task, empty if none)
+├── .current-run                  # Pointer: "5" (ordinal of active run)
+│
+├── task-1/                       # Task folder (optional)
+│   ├── task.json                 # Task metadata (ticket, branch, PR)
+│   ├── .current-run              # Pointer: "3" (active run for this task)
+│   └── (run data lives at top level, not nested)
+│
+├── task-2/                       # Another task
+│
+├── run-1/                        # Run folder (can be standalone or in task)
+│   ├── run.json                  # Run metadata (includes optional taskId)
+│   ├── .current-loop             # Pointer: "2" (active loop)
+│   ├── spec.md                   # What to implement (run-level)
+│   ├── current/                  # Active loop (always named "current")
+│   │   ├── agents/
 │   │   │   ├── implementer.json
 │   │   │   └── reviewer-{i}.json
-│   │   ├── evidence/            # Implementer outputs
+│   │   ├── evidence/
 │   │   │   ├── build-output.log
 │   │   │   ├── test-output.log
 │   │   │   └── evidence.md
-│   │   ├── learnings/           # Knowledge for next loop
+│   │   ├── learnings/            # Loop-scoped only
 │   │   │   └── learnings.md
-│   │   ├── reviews/             # Reviewer outputs
+│   │   ├── reviews/
 │   │   │   └── reviewer-{i}.md
-│   │   ├── verdicts/            # Reviewer decisions
+│   │   ├── verdicts/
 │   │   │   └── reviewer-{i}.json
-│   │   └── logs/                # Raw agent logs
+│   │   └── logs/
 │   │       ├── implementer.jsonl
 │   │       └── reviewer-{i}.jsonl
-│   └── loop-{n}/                # Archived loops within this run
-└── run-{n}/                     # Archived runs within this task
+│   └── loop-1/, loop-2/, ...     # Completed loops
+│
+├── run-2/                        # Another run
+└── run-N/
 ```
 
-### Archive: `{state-dir}/archive/`
+**Pointer Resolution:**
 
+- `.current-task` → which `task-N/` is active (or empty if no task)
+- `.current-run` → which `run-N/` is active
+- `task-N/.current-run` → which run is active for this task
+- `run-N/.current-loop` → which loop is active within this run
+
+**Historical data is implicit:**
+
+- Old runs/tasks/loops remain in their directories
+- Active ones are pointed to by `.current-*` files
+- Everything is discoverable by listing directories
+- No file movement — just create new `run-{N+1}/` and update pointer
+
+---
+
+## Pointer Resolution
+
+### Finding the Active Run
+
+```typescript
+function getActiveRun(): RunPath | null {
+  // 1. Check explicit pointer
+  if (exists('.current-run')) {
+    const ordinal = read('.current-run');
+    return `run-${ordinal}`;
+  }
+
+  // 2. Find highest numbered run
+  const runs = listDirectories('run-*');
+  if (runs.length === 0) return null;
+
+  const highest = runs.sort().last(); // run-5 > run-3
+  return highest;
+}
 ```
-archive/
-└── task-{id}/                   # Archived task
-    ├── task.json                # Final task metadata
-    ├── config.json              # Config snapshot
-    ├── ticket.json              # Original ticket data
-    ├── spec-history/            # All spec versions
-    │   └── spec-{run}.md
-    └── run-{n}/                 # All runs from this task
-        ├── run.json
-        └── loop-{n}/            # All loops from this run
-            └── ...
+
+### Starting a New Run
+
+```typescript
+function startNewRun(taskId?: number): number {
+  // 1. Find next ordinal
+  const runs = listDirectories('run-*');
+  const nextOrdinal = runs.length + 1;
+
+  // 2. Create run directory
+  const runDir = `run-${nextOrdinal}`;
+  createDirectory(runDir);
+
+  // 3. Initialize run.json
+  write(`${runDir}/run.json`, {
+    id: nextOrdinal,
+    taskId: taskId ?? null,
+    status: 'running',
+    currentLoop: 0,
+  });
+
+  // 4. Update pointer
+  write('.current-run', String(nextOrdinal));
+
+  if (taskId) {
+    write(`task-${taskId}/.current-run`, String(nextOrdinal));
+  }
+
+  return nextOrdinal;
+}
 ```
 
-**Note:**
+### Completing a Loop (Starting Next)
 
-- Active loop is always at `task/run/current/`
-- When loop completes, moves to `task/run/loop-{n}/`
-- When run completes, moves to `task/run-{n}/`
-- When task completes, moves to `archive/task-{id}/`
+```typescript
+function completeLoop(runOrdinal: number): void {
+  const runDir = `run-${runOrdinal}`;
+
+  // 1. Read current loop pointer
+  const currentLoop = read(`${runDir}/.current-loop`);
+
+  // 2. Move current/ to loop-{n}/
+  rename(`${runDir}/current`, `${runDir}/loop-${currentLoop}`);
+
+  // 3. Create new current/
+  createDirectory(`${runDir}/current`);
+  createDirectory(`${runDir}/current/agents`);
+  createDirectory(`${runDir}/current/evidence`);
+  createDirectory(`${runDir}/current/learnings`);
+  createDirectory(`${runDir}/current/reviews`);
+  createDirectory(`${runDir}/current/verdicts`);
+  createDirectory(`${runDir}/current/logs`);
+
+  // 4. Update loop pointer
+  write(`${runDir}/.current-loop`, String(currentLoop + 1));
+}
+```
+
+### Crash Recovery
+
+```typescript
+function recoverState(): RecoveryState {
+  const state: RecoveryState = {};
+
+  // 1. What was the active task?
+  state.activeTask = exists('.current-task') ? read('.current-task') : null;
+
+  // 2. What was the active run?
+  state.activeRun = exists('.current-run') ? read('.current-run') : null;
+
+  // 3. If active run, what was the active loop?
+  if (state.activeRun) {
+    const runDir = `.kagent/run-${state.activeRun}`;
+    state.activeLoop = exists(`${runDir}/.current-loop`) ? read(`${runDir}/.current-loop`) : null;
+
+    // 4. Check which agents were running
+    if (state.activeLoop) {
+      const loopDir = `${runDir}/current`;
+      state.agents = loadAgentStates(`${loopDir}/agents`);
+
+      // 5. Kill orphaned tmux sessions
+      killOrphanedSessions(state.agents);
+    }
+  }
+
+  return state;
+}
+```
 
 ---
 
@@ -305,7 +541,8 @@ archive/
 
 ```json
 {
-  "id": "task-abc123",
+  "id": 1,
+  "runId": 5,
   "ticket": {
     "source": "github",
     "id": "123",
@@ -320,16 +557,15 @@ archive/
     "status": "open"
   },
   "status": "running",
-  "currentRun": 2,
   "startedAt": "2025-01-27T10:00:00Z",
-  "completedAt": null,
-  "result": null
+  "completedAt": null
 }
 ```
 
 | Field           | Type         | Description                                                                   |
 | --------------- | ------------ | ----------------------------------------------------------------------------- |
-| `id`            | string       | Unique task identifier                                                        |
+| `id`            | number       | Ordinal task identifier (1, 2, 3, ...)                                        |
+| `runId`         | number       | Ordinal of the currently active run for this task                             |
 | `ticket.source` | enum         | `github`, `jira`, `linear`, `clickup`                                         |
 | `ticket.id`     | string       | Ticket ID (auto-detected from branch or user-provided)                        |
 | `ticket.title`  | string       | Ticket title                                                                  |
@@ -340,10 +576,8 @@ archive/
 | `pr.url`        | string       | PR URL                                                                        |
 | `pr.status`     | enum         | `draft`, `open`, `merged`, `closed`                                           |
 | `status`        | enum         | `running`, `waiting_ci`, `waiting_review`, `completed`, `abandoned`, `failed` |
-| `currentRun`    | number       | Current run number (1-indexed)                                                |
 | `startedAt`     | ISO datetime | Task start time                                                               |
 | `completedAt`   | ISO datetime | Task end time                                                                 |
-| `result`        | enum         | `merged`, `abandoned`, `max_runs`, `git_error` (null if running)              |
 
 **Note:** Branch is recorded at task initialization for reference/history. Kagent still only pushes to the currently checked-out branch.
 
@@ -351,7 +585,8 @@ archive/
 
 ```json
 {
-  "id": "abc12345",
+  "id": 5,
+  "taskId": 1,
   "status": "running",
   "currentLoop": 2,
   "startedAt": "2025-01-27T10:00:00Z",
@@ -362,7 +597,8 @@ archive/
 
 | Field         | Type         | Description                                                             |
 | ------------- | ------------ | ----------------------------------------------------------------------- |
-| `id`          | string       | Unique run identifier (8 chars)                                         |
+| `id`          | number       | Ordinal run identifier (1, 2, 3, ...)                                   |
+| `taskId`      | number\|null | Parent task ordinal (null if standalone run)                            |
 | `status`      | enum         | `running`, `completed`, `cancelled`, `failed`                           |
 | `currentLoop` | number       | Current loop number (1-indexed)                                         |
 | `startedAt`   | ISO datetime | Run start time                                                          |
@@ -381,7 +617,9 @@ Each agent (implementer and each reviewer) maintains its own state file:
   "binary": "claude",
   "status": "running",
   "phase": "executing",
-  "tmuxSession": "kagent-abc12345-2-impl",
+  "tmuxSession": "kagent-5-2-impl",
+  "pid": 12345,
+  "lastHeartbeat": "2025-01-27T10:10:00Z",
   "iteration": 2,
   "startedAt": "2025-01-27T10:05:00Z",
   "completedAt": null,
@@ -400,6 +638,8 @@ Each agent (implementer and each reviewer) maintains its own state file:
 | `status`        | enum         | `pending`, `running`, `completed`, `error`, `timeout` |
 | `phase`         | enum         | `starting`, `executing`, `finalizing`                 |
 | `tmuxSession`   | string       | Tmux session name                                     |
+| `pid`           | number       | Process ID for crash detection                        |
+| `lastHeartbeat` | ISO datetime | Last heartbeat timestamp                              |
 | `iteration`     | number       | Loop number this agent belongs to                     |
 | `startedAt`     | ISO datetime | Agent start time                                      |
 | `completedAt`   | ISO datetime | Agent end time                                        |
@@ -866,12 +1106,13 @@ Options:
 
 ### Modes
 
-- **Task mode (`kagent task`)**: full automation with ticket/PR/CI integration. The spec is generated from the ticket.
-- **Standalone mode (`kagent init` + `kagent run`)**: single-run workflow without ticket system, PR, or CI integration. The spec is user-authored.
+- **Task mode (`kagent task`)**: Full automation with ticket/PR/CI integration. Creates task-{N}/ and associated runs. Specs are generated from ticket and updated by AI based on CI/review feedback.
+
+- **Standalone mode (`kagent init` + `kagent run`)**: Single-run workflow without ticket system, PR, or CI integration. Creates run-{N}/ directly (no task wrapper). Specs are user-authored.
 
 ### `kagent init`
 
-Initialize project configuration and specification.
+Initialize project configuration and create a new run with spec.md (standalone mode).
 
 ```bash
 kagent init [options]
@@ -890,7 +1131,9 @@ Options:
 
 1. Creates state directory structure
 2. Creates or updates `config.json` with implementers array
-3. Opens `spec.md` in editor (or creates template)
+3. Creates new `run-{N}/` directory
+4. Creates `run-{N}/spec.md` template or opens in editor
+5. Updates `.current-run` pointer
 
 **Example:**
 
@@ -898,61 +1141,72 @@ Options:
 kagent init --implementers "claude:70,claude-opus:20,gemini:10" --reviewers "claude,claude-strict"
 ```
 
+**Note:** For ticket-based work, use `kagent task` instead. `kagent init` is for standalone runs without ticket/PR integration.
+
 ### `kagent run`
 
 Start or resume a development loop run.
 
 ```bash
 kagent run [options]
+kagent run --ordinal <N>    # Run specific run by ordinal
 
 Options:
-  --continue    Continue from last loop (don't archive)
+  --continue    Continue from last loop (don't reset)
 ```
 
 **Behavior:**
 
-1. Validate config and spec exist
-2. If previous run exists with completed loops:
-   - Archive to `task/run-{n}/` (within current task)
-3. Create new run in `task/run/`
-4. Execute loops until:
+1. Determine which run to execute:
+   - If `--ordinal` provided → use that run
+   - Else → read `.current-run` pointer
+   - If no pointer → prompt user to select or create new run
+2. Validate config and spec exist
+3. Execute loops until:
    - All reviewers approve (completed)
    - Max iterations reached (failed)
    - User cancellation (cancelled)
+   - Cancellation checks occur between phases
+4. On successful completion in task mode:
+   - Stage, commit, push changes
+   - Create or update PR
 5. If run failed or cancelled, do not push; prompt user to continue or stop.
 
-**Note:** In standalone mode (init + run), `kagent run` does not create PRs or interact with tickets/CI.
+**Note:** In standalone mode, `kagent run` does not create PRs or interact with tickets/CI.
 
 ### `kagent status`
 
 Show current run and agent status.
 
 ```bash
-kagent status [run-id] [options]
+kagent status [ordinal] [options]
 
 Arguments:
-  run-id    Run to show status for (interactive if omitted)
+  ordinal    Run ordinal to show status for (uses .current-run if omitted)
 
 Options:
   --json    Output as JSON
   --loop    Show specific loop details (interactive selector)
 ```
 
-**Interactive mode:** If no run-id provided and no current run, shows selector for archived runs.
+**Behavior:**
+
+- If no ordinal provided, reads `.current-run` pointer
+- If no pointer, prompts user to select from available runs
 
 **Output:**
 
 ```
-Run: abc12345 (running)
+Run: 5 (running)
 Loop: 2 of 10
 
 Agents:
-  ● implementer     running   claude       kagent-abc12345-2-impl
+  ● implementer     running   claude       kagent-5-2-impl    pid: 12345
   ● reviewer-0      pending   claude-r1    -
   ● reviewer-1      pending   claude-r2    -
 
 Evidence: ✓ build-output.log, ✓ test-output.log
-Learnings: 3 entries from previous loops
+Learnings: loop-1/learnings/learnings.md
 ```
 
 ### `kagent attach`
@@ -970,8 +1224,8 @@ Arguments:
 
 ```
 ? Select agent to attach: (Use arrow keys)
-❯ implementer  - running 5m 23s  - claude
-  reviewer-0   - running 2m 10s  - claude-r1
+❯ implementer  - running 5m 23s  - claude     (kagent-5-2-impl)
+  reviewer-0   - running 2m 10s  - claude-r1  (kagent-5-2-rev-0)
   reviewer-1   - pending         - claude-r2
 ```
 
@@ -988,31 +1242,45 @@ Options:
 
 **Behavior:**
 
-1. Kill all running tmux sessions
-2. Mark run as cancelled
-3. Archive run to history
+1. Load the active run from `.current-run` pointer
+2. Mark the run's `run.json` status as "cancelled"
+3. Kill all tmux sessions for this run (matched by run ordinal in session name)
+4. The run data remains in `run-{N}/` for inspection
+5. Clear the `.current-run` pointer (or update to different run)
+
+**Cancellation Flow:**
+
+- Cancellation marks the run but doesn't immediately stop execution
+- At the next phase boundary (implementer → reviewers → decision):
+  - Re-read `run.json`
+  - If status is "cancelled" → stop immediately
+  - Run remains in `run-{N}/` as a record
+
+**Notes:**
+
+- Cancellation is run-scoped; it must never kill tmux sessions from other runs.
+- The run ordinal is encoded in the tmux session name, enabling safe filtering.
 
 ### `kagent logs`
 
 View and manage agent logs.
 
 ```bash
-kagent logs list [run-id]
+kagent logs list [run-ordinal]
 kagent logs view [options] [agent]
 kagent logs tail [options] [agent]
-kagent logs clear [run-id]
 
 Options:
   --loop <n>     Loop number (interactive if omitted)
-  --run <id>     Run ID (interactive if omitted)
+  --run <n>      Run ordinal (interactive if omitted)
   --raw          Output raw JSON instead of formatted
   --follow, -f   Follow log output (for tail)
 ```
 
 **Interactive mode:** When `view` or `tail` is called without arguments:
 
-1. Select run (current or from archive)
-2. Select loop (current or archived within run)
+1. Select run (current or from available runs)
+2. Select loop (current or completed within run)
 3. Select agent (implementer or reviewer-{i})
 
 **View Command:**
@@ -1020,33 +1288,41 @@ The `view` command pipes the log file through the same formatter:
 
 ```bash
 # Internal implementation:
-cat "{state-dir}/task/run/current/logs/{agent}.jsonl" | kagent format
+cat "{state-dir}/run-{N}/loop-{L}/logs/{agent}.jsonl" | kagent format
+# or for current loop:
+cat "{state-dir}/run-{N}/current/logs/{agent}.jsonl" | kagent format
 ```
 
 ### `kagent history`
 
-Manage run history.
+Manage run and task history.
 
 ```bash
 kagent history list [options]
-kagent history show [run-id] [options]
-kagent history clear [run-id]
+kagent history show <ordinal> [options]
 
 Options:
   --loops        Show loop details
   --verdicts     Show verdict summaries
-  --loop <n>     Show specific loop (interactive if omitted with show)
+  --loop <n>     Show specific loop
 ```
 
-**Interactive mode:** When `show` is called without run-id:
-
-1. Select run from archived runs list
-2. Optionally select specific loop to drill down
-
-**Output for `history show`:**
+**Interactive mode:** When `list` is called, shows all runs and tasks:
 
 ```
-Run: abc12345
+Runs:
+  5  - completed  - Jan 27  - 3 loops  - (task: 1)
+  4  - cancelled - Jan 27  - 1 loop   - (standalone)
+  3  - completed - Jan 26  - 2 loops  - (task: 1)
+
+Tasks:
+  1  - running   - Jan 27  - PR: #456
+```
+
+**Output for `history show <ordinal>`:**
+
+```
+Run: 5
 Status: completed
 Started: Jan 27, 2025 10:00 AM
 Completed: Jan 27, 2025 10:25 AM
@@ -1056,12 +1332,6 @@ Loops: 3 total
   Loop 1: rejected (2 of 2 reviewers)
   Loop 2: rejected (1 of 2 reviewers)
   Loop 3: approved (2 of 2 reviewers)
-
-? View loop details? (Use arrow keys)
-❯ Loop 3 - approved
-  Loop 2 - rejected
-  Loop 1 - rejected
-  Exit
 ```
 
 ### `kagent format`
@@ -1107,17 +1377,19 @@ cat {state-dir}/task/run/loop-1/logs/implementer.jsonl | kagent format
    - browser: Open the ticket in a browser (implementation-defined), prompt user to confirm they've read it
    - mcp: Use MCP tools to fetch
 5. Move ticket to "In Progress" status (run on_start command from TICKETS.md)
-6. Create task state in {state-dir}/task/
-7. Generate initial spec from ticket (AI-assisted):
+6. Create task state in {state-dir}/task-{N}/
+7. Create first run:
+   - Generate initial spec from ticket (AI-assisted)
    - AI reads ticket title + body
    - AI generates spec.md with requirements
    - User can review/edit before proceeding
+8. Update .current-task and .current-run pointers
 ```
 
 ### Phase 2: Implementation (Run Loop)
 
 ```
-1. Execute kagent run (see Run/Loop lifecycle below)
+1. Execute current run (see Run/Loop lifecycle below)
    - Each loop within the run selects implementer based on weights
 2. On successful run (all AI reviewers approve):
    - Stage all changes
@@ -1137,6 +1409,7 @@ cat {state-dir}/task/run/loop-1/logs/implementer.jsonl | kagent format
      → Create PR immediately after push
    - Else:
      → PR already exists, push updates it automatically
+   - Create next run with updated spec (based on CI/reviews)
 3. Update task status to waiting_ci
 4. On run failure (max iterations/cancelled): do not push; stop and prompt user for manual input.
 ```
@@ -1163,7 +1436,7 @@ cat {state-dir}/task/run/loop-1/logs/implementer.jsonl | kagent format
 3. If all reviewers approved → Phase 5
 4. If changes requested:
    - AI updates spec based on feedback
-   - Archive current run
+   - Create new run with updated spec
    - Return to Phase 2 (new run)
 ```
 
@@ -1184,22 +1457,23 @@ cat {state-dir}/task/run/loop-1/logs/implementer.jsonl | kagent format
 
 ---
 
-### Spec Update (AI-Assisted)
+### Spec Update (AI-Assisted, Task Mode Only)
 
-When feedback is received (CI failure or review comments), the AI updates the spec:
+When feedback is received (CI failure or review comments), the AI generates a new spec for the next run:
 
 ```
-1. Load current spec.md
+1. Load previous run's spec.md
 2. Load feedback:
    - CI: failure logs, error messages
    - Reviews: comments, change requests
-3. AI generates spec update:
+3. AI generates new spec for next run:
    - Identifies what needs to change
    - Preserves completed requirements
    - Adds new requirements from feedback
    - Marks addressed feedback
-4. Write updated spec.md
-5. Log the update in task history
+4. Create new run-{N+1}/ directory
+5. Write new spec.md to run-{N+1}/spec.md
+6. Update pointers (.current-run, task-{M}/.current-run)
 ```
 
 **Spec Update Prompt Template:**
@@ -1207,9 +1481,9 @@ When feedback is received (CI failure or review comments), the AI updates the sp
 ```markdown
 # Spec Update Task
 
-## Current Specification
+## Previous Run's Specification
 
-{contents of spec.md}
+{contents of run-{N}/spec.md}
 
 ## Feedback to Address
 
@@ -1224,12 +1498,12 @@ When feedback is received (CI failure or review comments), the AI updates the sp
 ## Instructions
 
 1. Analyze the feedback carefully
-2. Update the specification to address ALL feedback
-3. Do not remove requirements that are already implemented
+2. Generate a NEW specification for the next run that addresses ALL feedback
+3. Do not remove requirements that were already implemented in previous runs
 4. Add new sections for new requirements
-5. Be specific about what needs to change
+5. Be specific about what needs to change in this run
 
-Write the updated specification to {state-dir}/task/spec.md
+Write the new specification to {state-dir}/run-{N+1}/spec.md
 ```
 
 ---
@@ -1315,50 +1589,48 @@ For each reviewer (parallel):
    - All approved → Run complete
    - Any rejected → Continue to next loop
    - Max iterations → Run failed
-3. Archive current loop: move task/run/current/ to task/run/loop-{n}/
-4. Proceed to Phase 1 of next loop (or end run)
+3. Complete loop: move `run-{N}/current/` to `run-{N}/loop-{n}/`
+4. Create fresh `run-{N}/current/` structure
+5. Proceed to Phase 1 of next loop (or end run)
 ```
 
-### Loop Archival (Before Next Loop)
+### Loop Completion (Before Next Loop)
 
 ```
-1. Move task/run/current/ contents to task/run/loop-{n}/
-2. Create fresh task/run/current/ structure
-3. Learnings from all task/run/loop-*/learnings/ are available to next implementer
-4. Review feedback from task/run/loop-{n}/reviews/ is passed to next implementer
+1. Move run-{N}/current/ contents to run-{N}/loop-{n}/
+2. Create fresh run-{N}/current/ structure
+3. Learnings from run-{N}/loop-{n}/learnings/ are available to next implementer
+4. Review feedback from run-{N}/loop-{n}/reviews/ is passed to next implementer
 5. Keep working tree changes between loops (no reset).
 ```
 
 ---
 
-## Run Archival (Within Task)
+## Starting a New Run
 
 When a run completes and a new run starts (due to CI failure or review feedback):
 
 ```
-1. Move task/run/ contents to task/run-{n}/
-2. Snapshot spec.md to spec-history/spec-{n}.md
-3. Create fresh task/run/ structure
-4. AI updates spec.md based on feedback
+1. Create new run-{N+1}/ directory
+2. Generate new spec.md for this run (AI-assisted in task mode)
+3. Update .current-run pointer to N+1
+4. If in task mode, update task-{M}/.current-run pointer
 5. Start new run
 ```
 
-## Task Archival (On Completion)
+Previous run data remains in run-{N}/ for reference.
+
+## Task Completion
 
 When a task is completed (merged) or abandoned:
 
 ```
-1. Create archive/task-{id}/ directory
-2. Move to archive:
-   - task.json (final state)
-   - config.json (snapshot)
-   - ticket.json (original ticket data)
-   - spec-history/ (all spec versions)
-   - run-*/ (all runs with their loops)
-3. Clear task/ directory
+1. Update task-{N}/task.json status to "completed" or "abandoned"
+2. Clear .current-task pointer
+3. Task data remains in task-{N}/ for historical reference
 ```
 
-This preserves complete history of all tasks, runs, and loops.
+All tasks, runs, and loops remain on disk for historical reference.
 
 ---
 
@@ -1580,12 +1852,12 @@ When in doubt, REJECT. It is better to have another iteration than to approve in
 
 ## Tmux Session Naming
 
-Format: `kagent-{runId}-{loop}-{role}[-{index}]`
+Format: `kagent-{runOrdinal}-{loop}-{role}[-{index}]`
 
 Examples:
-- `kagent-abc12345-2-impl` - Implementer, run abc12345, loop 2
-- `kagent-abc12345-2-rev-0` - Reviewer 0, run abc12345, loop 2
-- `kagent-abc12345-2-rev-1` - Reviewer 1, run abc12345, loop 2
+- `kagent-5-2-impl` - Implementer, run 5, loop 2
+- `kagent-5-2-rev-0` - Reviewer 0, run 5, loop 2
+- `kagent-5-2-rev-1` - Reviewer 1, run 5, loop 2
 
 ---
 
@@ -1601,6 +1873,10 @@ This design separates concerns into three levels:
 
 ### Key Features
 
+- **Pointer-Based Architecture** = No file movement, just update `.current-*` files
+- **Ordinals** = Simple numbering (1, 2, 3) instead of random IDs
+- **Runs are First-Class** = Can operate standalone without tasks
+- **Specs at Run Level** = Each run has its own spec.md
 - **TICKETS.md** = Repository-level ticket configuration
   - Ticket source and access method (CLI, browser, MCP)
   - Branch pattern for ticket ID extraction
@@ -1613,15 +1889,19 @@ This design separates concerns into three levels:
 - **Pre-existing Branch** = User creates/checks out branch, kagent only pushes to it
 - **PR on First Push** = Create PR immediately after first successful push
 - **Weighted Implementers** = Array of implementers with weights for random selection
-- **AI-Assisted Spec Updates** = Automatically incorporate CI/review feedback
+- **AI-Assisted Spec Updates** (Task mode) = Automatically incorporate CI/review feedback into new run specs
 - **Interactive CLI** = Browse and select without memorizing IDs
 - **Pretty-Printed Logs** = Human-readable formatter (not raw JSON)
-- **Hierarchical Archive** = Complete history of tasks, runs, and loops
+- **Historical Data** = Complete history by listing directories
+- **Learnings are Loop-Scoped** = Each loop has its own learnings, not accumulated
 - **Configurable State Dir** = `--state-dir` or `KAGENT_STATE_DIR`
+- **Crash Recovery** = Detect state from pointers, kill orphaned agents
 
 ### Command Hierarchy
 
 ```
+
+# Task mode (with ticket/PR integration)
 
 kagent task [--ticket ID] # Start task (auto-detects ticket from branch)
 kagent task --resume # Resume existing task
@@ -1629,15 +1909,22 @@ kagent task status # Show task + PR + CI status
 kagent task check # Poll CI/reviews
 kagent task abandon # Abandon task
 
-kagent run # Start run within task
+# Standalone mode (no ticket/PR)
+
+kagent init # Initialize config + create run with spec
+kagent run # Start run (uses .current-run or prompts)
+kagent run --ordinal <N> # Run specific run
+
+# Both modes
+
 kagent status # Show run status
 kagent attach # Attach to agent tmux
 kagent cancel # Cancel current run
 
 kagent logs view # View agent logs
-kagent history show # View archived runs/tasks
+kagent history list # List all runs/tasks
+kagent history show <N> # Show specific run/task details
 
-kagent init # Initialize config
 kagent format # Standalone formatter
 
 ```

@@ -29,7 +29,7 @@ Total:                   3808 lines
 dev-loop init --claude claude-personal --reviewers "reviewer-a,reviewer-b"
 
 # Edit spec
-$EDITOR .claude/dev-loop/spec.md
+$EDITOR .kagent/spec.md
 
 # Run (each agent spawns in its own tmux session)
 dev-loop run
