@@ -34,6 +34,7 @@
       "voiceink"
       "google-chrome"
       "clickup"
+      "antigravity"
     ];
     masApps = { };
   };

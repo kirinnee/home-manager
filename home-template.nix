@@ -234,6 +234,12 @@ rec {
     tokei
     cachix
 
+    # LSPs
+    typescript-language-server
+    gopls
+    pyright
+    rust-analyzer
+
     #custom modules
     backup-folder
     setup-pcloud-remote
@@ -584,6 +590,7 @@ rec {
 
         # liftoff
         awsl = "unset AWS_PROFILE && gimme-aws-creds && awsp";
+        tfi = "tfswitch && tf init && vaultlogin";
 
         # devloop
         dl = "dev-loop";

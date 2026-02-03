@@ -10,6 +10,20 @@ import * as agents from '../agents/runner';
 // LoopResult types
 // ============================================================================
 
+class CancelledError extends Error {
+  constructor(
+    message: string,
+    public readonly archived: boolean = false,
+  ) {
+    super(message);
+    this.name = 'CancelledError';
+  }
+}
+
+function isNoActiveRunError(error: unknown): boolean {
+  return error instanceof Error && error.message === 'No active run';
+}
+
 export interface LoopResult {
   status: 'completed' | 'cancelled' | 'failed' | 'max_iterations';
   finalRun: Run;
@@ -54,7 +68,7 @@ export class LoopRunner {
     }
 
     const config = await this.state.loadConfig();
-    const run = await this.state.createRun('.claude/dev-loop/spec.md');
+    const run = await this.state.createRun('.kagent/spec.md');
     const dirHash = getDirHash(process.cwd());
 
     console.log(
@@ -65,6 +79,7 @@ export class LoopRunner {
 
     try {
       while (currentRun.iteration < config.maxIterations) {
+        await this.assertRunActive();
         const iterResult = await this.runIteration(currentRun, config, dirHash);
 
         if (iterResult.approved) {
@@ -91,6 +106,27 @@ export class LoopRunner {
         historyEntry: entry,
       };
     } catch (error) {
+      if (error instanceof CancelledError || isNoActiveRunError(error)) {
+        let entry: HistoryEntry | null = null;
+        const stillActive = await this.state.loadRun();
+        if (stillActive) {
+          entry = await this.state.completeRun('cancelled');
+        } else {
+          const history = await this.state.listHistory();
+          if (history.length > 0) {
+            entry = history.find(h => h.id === currentRun.id) ?? history[0];
+          }
+        }
+        if (!entry) {
+          throw error;
+        }
+        return {
+          status: 'cancelled',
+          finalRun: currentRun,
+          historyEntry: entry,
+        };
+      }
+
       console.error('Loop error:', error instanceof Error ? error.message : error);
       if (error instanceof Error && error.stack) console.error(error.stack);
       const entry = await this.state.completeRun('failed');
@@ -105,7 +141,18 @@ export class LoopRunner {
   /**
    * Run a single iteration
    */
+  private async assertRunActive(): Promise<void> {
+    const run = await this.state.loadRun();
+    if (!run) {
+      throw new CancelledError('Run was cancelled and archived', true);
+    }
+    if (run.status === 'cancelled') {
+      throw new CancelledError('Run was cancelled');
+    }
+  }
+
   async runIteration(run: Run, config: Config, dirHash: string): Promise<IterationResult> {
+    await this.assertRunActive();
     const iterNum = await this.state.incrementIteration();
 
     console.log(`Iteration ${iterNum} / ${config.maxIterations}`);
@@ -118,7 +165,9 @@ export class LoopRunner {
 
     // Reload run to get updated iteration number
     const currentRun = await this.state.loadRun();
-    if (!currentRun) throw new Error('Run not found after increment');
+    if (!currentRun) {
+      throw new CancelledError('Run was cancelled and archived', true);
+    }
 
     // Load spec content
     let specContent: string;
@@ -130,6 +179,8 @@ export class LoopRunner {
 
     // Build iteration data with updated run
     const iterData = iteration.buildIterationData(currentRun, config, currentRun.spec, specContent);
+
+    await this.assertRunActive();
 
     // Phase: Implementing
     await this.state.updatePhase('implementing');
@@ -145,6 +196,8 @@ export class LoopRunner {
     if (implResult.timedOut) {
       throw new Error('Implementer timed out');
     }
+
+    await this.assertRunActive();
 
     // Read learnings if written
     const learnings = await this.state.readLearnings();
@@ -163,6 +216,8 @@ export class LoopRunner {
       timeout: config.reviewerTimeout,
     });
 
+    await this.assertRunActive();
+
     // Phase: Checking consensus
     await this.state.updatePhase('done');
 
@@ -175,6 +230,23 @@ export class LoopRunner {
     const consensusResult = consensus.checkConsensus(verdicts);
 
     console.log(`Consensus: ${consensus.formatConsensusResult(consensusResult)}`);
+
+    // Display completion estimate (lowest among all reviewers)
+    const estimates = reviewerResults.map(r => r.completionEstimate).filter((e): e is number => e !== undefined);
+
+    if (estimates.length > 0) {
+      const lowestEstimate = Math.min(...estimates);
+      const lowestEstimateReviewer = reviewerResults.find(r => r.completionEstimate === lowestEstimate);
+      const reviewerInfo = lowestEstimateReviewer ? ` (Reviewer ${lowestEstimateReviewer.reviewerIndex})` : '';
+
+      // Draw progress bar
+      const barWidth = 40;
+      const filled = Math.round((lowestEstimate / 100) * barWidth);
+      const empty = barWidth - filled;
+      const bar = '█'.repeat(filled) + '░'.repeat(empty);
+
+      console.log(`Progress: [${bar}] ${lowestEstimate}%${reviewerInfo}`);
+    }
 
     return {
       iteration: iterNum,

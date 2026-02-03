@@ -7,6 +7,7 @@ import type { Verdict, VerdictFile } from '../types';
 export interface VerdictParseResult {
   verdict: Verdict | null;
   reasoning: string;
+  completionEstimate?: number;
 }
 
 /**
@@ -20,6 +21,7 @@ export function parseVerdictFile(content: string): VerdictParseResult {
       return {
         verdict: parsed.verdict,
         reasoning: parsed.reasoning ?? '',
+        completionEstimate: parsed.completionEstimate,
       };
     }
 

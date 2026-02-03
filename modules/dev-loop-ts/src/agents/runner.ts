@@ -26,13 +26,14 @@ export interface ReviewerResult extends AgentResult {
   binary: string;
   verdict: Verdict;
   reasoning: string;
+  completionEstimate?: number;
 }
 
 // ============================================================================
 // AgentRunner class (IO edge)
 // ============================================================================
 
-const LOGS_BASE_DIR = '.claude/dev-loop/logs';
+const LOGS_BASE_DIR = '.kagent/logs';
 
 export class AgentRunner {
   constructor(
@@ -229,10 +230,10 @@ export class AgentRunner {
     });
 
     // Determine verdict
-    const verdictPath = `.claude/dev-loop/current/verdicts/${iteration}-${reviewerIndex}.json`;
+    const verdictPath = `.kagent/current/verdicts/${iteration}-${reviewerIndex}.json`;
     const verdictContent = await this.safeReadFile(verdictPath);
 
-    const reviewPath = `.claude/dev-loop/current/reviews/reviewer-${reviewerIndex}.md`;
+    const reviewPath = `.kagent/current/reviews/reviewer-${reviewerIndex}.md`;
     const reviewContent = await this.safeReadFile(reviewPath);
 
     const verdict = verdicts.determineVerdict({
@@ -242,11 +243,13 @@ export class AgentRunner {
       timedOut: result.timedOut,
     });
 
-    // Parse reasoning if available
+    // Parse reasoning and completion estimate if available
     let reasoning = '';
+    let completionEstimate: number | undefined;
     if (verdictContent) {
       const parsed = verdicts.parseVerdictFile(verdictContent);
       reasoning = parsed.reasoning;
+      completionEstimate = parsed.completionEstimate;
     }
 
     // Update session
@@ -262,7 +265,9 @@ export class AgentRunner {
     await this.cleanupPromptFile(promptFile);
 
     const icon = verdict === 'approved' ? '✓' : '✗';
-    console.log(`  ${icon} Reviewer ${reviewerIndex} (${reviewerBinary}): ${verdict}`);
+    console.log(
+      `  ${icon} Reviewer ${reviewerIndex} (${reviewerBinary}): ${verdict}${completionEstimate !== undefined ? ` (${completionEstimate}%)` : ''}`,
+    );
 
     return {
       sessionId,
@@ -274,6 +279,7 @@ export class AgentRunner {
       binary: reviewerBinary,
       verdict,
       reasoning,
+      completionEstimate,
     };
   }
 
@@ -305,8 +311,8 @@ export class AgentRunner {
 
   /**
    * Copy review files to persistent storage
-   * Creates: .claude/dev-loop/reviews/{runId}/review-{iteration}-{index}-{binary}.md
-   *          .claude/dev-loop/reviews/{runId}/verdict-{iteration}-{index}-{binary}.json
+   * Creates: .kagent/reviews/{runId}/review-{iteration}-{index}-{binary}.md
+   *          .kagent/reviews/{runId}/verdict-{iteration}-{index}-{binary}.json
    */
   private async copyReviewFiles(
     runId: string,
@@ -316,7 +322,7 @@ export class AgentRunner {
     reviewContent: string | null,
     verdictContent: string | null,
   ): Promise<void> {
-    const reviewsDir = `.claude/dev-loop/reviews/${runId}`;
+    const reviewsDir = `.kagent/reviews/${runId}`;
     await fs.mkdir(reviewsDir, { recursive: true });
 
     // Sanitize binary name for filename

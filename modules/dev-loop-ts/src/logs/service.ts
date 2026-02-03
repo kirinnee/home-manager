@@ -2,7 +2,7 @@ import * as path from 'path';
 import type { FsService, Paths } from '../deps';
 
 // ============================================================================
-// LogsService - reads raw JSON logs from .claude/dev-loop/logs/{runId}/
+// LogsService - reads raw JSON logs from .kagent/logs/{runId}/
 // ============================================================================
 
 export interface LogFile {

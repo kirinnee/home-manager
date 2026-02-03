@@ -15,7 +15,7 @@ export function buildIterationData(run: Run, config: Config, specPath: string, s
     iteration: run.iteration,
     specPath,
     specContent,
-    learnings: run.learnings,
+    previousLoopLearnings: run.learnings ?? [],
   });
 
   const reviewerPrompts = Array.from({ length: config.reviewers.length }, (_, i) => ({

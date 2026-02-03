@@ -447,7 +447,7 @@ export async function clearHandler(logs: LogsService, runId?: string): Promise<v
 
 async function clearRunLogs(runId: string): Promise<void> {
   const fs = await import('fs/promises');
-  const logsDir = `.claude/dev-loop/logs/${runId}`;
+  const logsDir = `.kagent/logs/${runId}`;
 
   try {
     await fs.rm(logsDir, { recursive: true });

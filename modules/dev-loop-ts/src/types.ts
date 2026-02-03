@@ -20,10 +20,10 @@ export const agentRoleSchema = z.enum(['implementer', 'reviewer']);
 export const sessionStatusSchema = z.enum(['running', 'completed', 'error']);
 export const verdictSchema = z.enum(['approved', 'rejected']);
 
-// Config stored in .claude/dev-loop/config.json
+// Config stored in .kagent/config.json
 export type Config = z.infer<typeof configSchema>;
 
-// Run state stored in .claude/dev-loop/current/run.json
+// Run state stored in .kagent/current/run.json
 export const runSchema = z.object({
   id: z.string().min(1), // run ID (short UUID)
   spec: z.string(), // spec file path
@@ -76,7 +76,7 @@ export const PHASE = {
   DONE: 'done' as const,
 } as const;
 
-// Session stored in .claude/dev-loop/current/sessions/{id}.json
+// Session stored in .kagent/current/sessions/{id}.json
 export const sessionSchema = z.object({
   id: z.string().min(1), // session ID (full or short UUID)
   iteration: z.number().int().positive(), // 1-based for sessions
@@ -92,15 +92,16 @@ export const sessionSchema = z.object({
 
 export type Session = z.infer<typeof sessionSchema>;
 
-// Verdict file content: .claude/dev-loop/current/verdicts/{iteration}-{reviewerIndex}.json
+// Verdict file content: .kagent/current/verdicts/{iteration}-{reviewerIndex}.json
 export const verdictFileSchema = z.object({
   verdict: verdictSchema,
   reasoning: z.string(),
+  completionEstimate: z.number().int().min(0).max(100).optional(),
 });
 
 export type VerdictFile = z.infer<typeof verdictFileSchema>;
 
-// History entry stored in .claude/dev-loop/history/{id}.json
+// History entry stored in .kagent/history/{id}.json
 export const sessionSummarySchema = z.object({
   role: agentRoleSchema,
   reviewerIndex: z.number().int().nonnegative().optional(),

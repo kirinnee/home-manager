@@ -1,12 +1,15 @@
 rec {
   proxy = {
     ANTHROPIC_BASE_URL = "http://127.0.0.1:8317";
-    ANTHROPIC_AUTH_TOKEN = "proxy-auth-token-placeholder";
+    ANTHROPIC_AUTH_TOKEN = "\"$API_CLI_PROXY_TOKEN\"";
   };
   zai = {
     ANTHROPIC_BASE_URL = "https://api.z.ai/api/anthropic";
     API_TIMEOUT_MS = "3000000";
     ANTHROPIC_AUTH_TOKEN = "\"$ZAI_AUTH_TOKEN\"";
+    ANTHROPIC_DEFAULT_HAIKU_MODEL = "glm-4.5-air";
+    ANTHROPIC_DEFAULT_SONNET_MODEL = "glm-4.6";
+    ANTHROPIC_DEFAULT_OPUS_MODEL = "glm-4.7";
   };
   anthropic = proxy // {
     ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-5-20251101";

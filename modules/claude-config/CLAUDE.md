@@ -1,1 +1,1 @@
-- use zsh interactive mode to run commands
+- When running commands in a directory with `.envrc`, use `direnv exec . <command>` to ensure the environment (including nix shell) is loaded

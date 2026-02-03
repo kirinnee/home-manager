@@ -131,7 +131,7 @@ export interface LogsService {
 // Default Paths Implementation
 // ============================================================================
 
-const BASE_DIR = '.claude/dev-loop';
+const BASE_DIR = '.kagent';
 const CURRENT_DIR = `${BASE_DIR}/current`;
 const SESSIONS_DIR = `${CURRENT_DIR}/sessions`;
 const VERDICTS_DIR = `${CURRENT_DIR}/verdicts`;
