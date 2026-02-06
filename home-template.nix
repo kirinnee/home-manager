@@ -1,4 +1,4 @@
-{ config, pkgs, lib, pkgs-240924, pkgs-stable, pkgs-unstable, pkgs-casks, atomi, profile, ... }:
+{ config, pkgs, lib, pkgs-claude-code, pkgs-240924, pkgs-stable, pkgs-unstable, pkgs-casks, atomi, profile, ... }:
 
 ####################
 # Custom Modules #
@@ -95,7 +95,7 @@ rec {
   # Claude multi-account configuration
   programs.claude-multi = {
     enable = true;
-    defaultPackage = pkgs-unstable.claude-code;
+    defaultPackage = pkgs-claude-code.default;
     defaultAccount = "personal";
 
     smartWrapper.enable = true;

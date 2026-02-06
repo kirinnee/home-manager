@@ -111,7 +111,7 @@ You are Reviewer ${reviewerIndex} for loop ${iteration}.
 
 1. Review the current implementation against the specification
 2. Check the evidence in ${evidenceDir}/
-3. Run \`git diff\` to see the changes
+3. Run \`git status\`, \`git diff\`, and \`git diff --staged\` to see all changes (staged, unstaged, and untracked files)
 4. Run the tests yourself to verify they pass
 5. Run the build yourself to verify it succeeds
 6. Check CLAUDE.md in the project root (if exists) - ensure all changes conform to those guidelines
