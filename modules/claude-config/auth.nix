@@ -12,12 +12,12 @@ rec {
     ANTHROPIC_DEFAULT_OPUS_MODEL = "glm-4.7";
   };
   anthropic = proxy // {
-    ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-5-20251101";
+    ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-6";
     ANTHROPIC_DEFAULT_SONNET_MODEL = "claude-sonnet-4-5-20250929";
     ANTHROPIC_DEFAULT_HAIKU_MODEL = "claude-haiku-4-5-20251001";
   };
   codex = proxy // {
-    ANTHROPIC_DEFAULT_OPUS_MODEL = "gpt-5.2-codex";
+    ANTHROPIC_DEFAULT_OPUS_MODEL = "gpt-5.3-codex";
     ANTHROPIC_DEFAULT_SONNET_MODEL = "gpt-5.1-codex";
     ANTHROPIC_DEFAULT_HAIKU_MODEL = "gpt-5.1-codex-mini";
   };

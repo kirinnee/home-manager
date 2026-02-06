@@ -25,6 +25,7 @@
     };
 
     home-manager-modules.url = "github:/kirinnee/home-manager-modules";
+    claude-code-pkg.url = "github:kirinnee/claude-code-nix";
   };
 
   outputs =
@@ -44,6 +45,7 @@
     , nix-homebrew
 
     , home-manager-modules
+    , claude-code-pkg
     } @inputs:
     let profiles = import ./profiles.nix; in
     {
@@ -59,6 +61,7 @@
             pkgs-240924 = import nixpkgs-240924 { inherit system; config.allowUnfree = true; };
             pre-commit-lib = pre-commit-hooks.lib.${system};
             atomi = atomipkgs.packages.${system};
+            pkgs-claude-code = claude-code-pkg.packages.${system};
           in
           let pkgs = pkgs-stable; in
           {
@@ -71,7 +74,7 @@
                 ./home.nix
               ];
               extraSpecialArgs = {
-                inherit atomi profile pkgs-240924 pkgs-stable pkgs-unstable;
+                inherit atomi pkgs-claude-code profile pkgs-240924 pkgs-stable pkgs-unstable;
               };
             };
           })
@@ -88,6 +91,7 @@
             };
             pkgs-240924 = import nixpkgs-240924 { inherit system; config.allowUnfree = true; };
             atomi = atomipkgs.packages.${system};
+            pkgs-claude-code = claude-code-pkg.packages.${system};
           in
           let pkgs = pkgs-stable; in
           {
@@ -111,7 +115,7 @@
                   home-manager.useGlobalPkgs = true;
                   home-manager.users.${profile.user} = import ./home.nix;
                   home-manager.extraSpecialArgs = {
-                    inherit atomi profile pkgs-240924 pkgs-stable pkgs-unstable;
+                    inherit atomi pkgs-claude-code profile pkgs-240924 pkgs-stable pkgs-unstable;
                   };
                   home-manager.sharedModules = [
                     home-manager-modules.homeManagerModules.multi-claude
