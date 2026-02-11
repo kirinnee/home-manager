@@ -24,8 +24,8 @@
       inputs.nixpkgs.follows = "nixpkgs-stable";
     };
 
-    home-manager-modules.url = "github:/kirinnee/home-manager-modules";
-    claude-code-pkg.url = "github:kirinnee/claude-code-nix";
+    home-manager-modules.url = "github:kirinnee/home-manager-modules";
+    claude-code-pkg.url = "github:sadjow/claude-code-nix";
   };
 
   outputs =

@@ -2,7 +2,7 @@
 
 ## Example 1: Basic Usage
 
-```
+````
 User: /dev-loop "Add input validation to the login form"
 
 Claude: Let me find available claude binaries...
@@ -44,60 +44,24 @@ Claude: Setting up dev-loop with:
 
 User: Approve
 
-Claude: Starting dev-loop in tmux session...
+Claude: ✅ Dev loop initialized at `.kagent/`
 
-        [runs: SESSION_UID=$(date +%Y%m%d-%H%M%S)-$(openssl rand -hex 4)]
-        [runs: tmux new-session -d -s "dev-loop-$SESSION_UID" "..."]
+        Here's the command to run the loop:
 
-        ✅ Dev loop started in tmux session: dev-loop-20250115-143022-a1b2c3d4
+        ```bash
+        SESSION_UID=$(date +%Y%m%d-%H%M%S)-$(openssl rand -hex 4)
+        tmux new-session -d -s "dev-loop-$SESSION_UID" "zsh -ic 'dev-loop run --dir .kagent; read -q \"?Press Enter to close...\"'"
+        ```
 
-        To inspect: tmux attach -t dev-loop-20250115-143022-a1b2c3d4
-        To detach: Ctrl+B, D
-        To cancel: dev-loop cancel
-
-        I'll poll for progress every 5 minutes...
-
-        [waits 5 minutes]
-        [runs: dev-loop status]
-
-        📊 Progress (session: dev-loop-20250115-143022-a1b2c3d4)
-           To inspect: tmux attach -t dev-loop-20250115-143022-a1b2c3d4
-        - Iteration: 1/10
-        - Phase: implementing
-
-        [waits 5 minutes]
-        [runs: dev-loop status]
-
-        📊 Progress (session: dev-loop-20250115-143022-a1b2c3d4)
-           To inspect: tmux attach -t dev-loop-20250115-143022-a1b2c3d4
-        - Iteration: 1/10
-        - Phase: reviewing
-        - Verdicts:
-          - claude-reviewer-anthropic: approved ✅
-          - claude-reviewer-gemini: rejected ❌
-
-        [waits 5 minutes]
-
-        📊 Progress (session: dev-loop-20250115-143022-a1b2c3d4)
-           To inspect: tmux attach -t dev-loop-20250115-143022-a1b2c3d4
-        - Iteration: 2/10
-        - Phase: implementing
-        - Learnings from iteration 1:
-          - Need to add aria-invalid attribute
-          - Error messages need proper contrast ratio
-
-        [continues polling...]
-
-        🎉 Dev loop completed! (session: dev-loop-20250115-143022-a1b2c3d4)
-        - Final iteration: 3
-        - All reviewers approved
-
-        Changes are ready. Run `git diff` to review, then commit when ready.
-```
+        To inspect progress once started:
+        - Attach to tmux: `tmux attach -t dev-loop-<UID>`
+        - Check status: `dev-loop status --dir .kagent`
+        - To cancel: `dev-loop cancel --dir .kagent`
+````
 
 ## Example 2: Single Reviewer
 
-```
+````
 User: /dev-loop "Fix the broken date parser"
 
 Claude: [discovers binaries...]
@@ -118,16 +82,21 @@ Claude: [initializes with single reviewer]
 
 User: Approve
 
-Claude: ✅ Dev loop started: dev-loop-20250115-150000-xyz789
+Claude: ✅ Dev loop initialized at `.kagent/`
+
+        Here's the command to run the loop:
+
+        ```bash
+        SESSION_UID=$(date +%Y%m%d-%H%M%S)-$(openssl rand -hex 4)
+        tmux new-session -d -s "dev-loop-$SESSION_UID" "zsh -ic 'dev-loop run --dir .kagent; read -q \"?Press Enter to close...\"'"
+        ```
 
         Note: Single reviewer means faster iterations but less diverse feedback.
-
-        [polling continues with single reviewer verdicts]
-```
+````
 
 ## Example 3: Editing Spec Before Approval
 
-```
+````
 User: /dev-loop "Refactor the API client"
 
 Claude: [discovers binaries, user selects...]
@@ -163,89 +132,65 @@ Claude: [edits spec.md]
 
 User: Approve
 
-Claude: [starts dev-loop...]
+Claude: ✅ Dev loop initialized at `.kagent/`
+
+        Here's the command to run the loop:
+
+        ```bash
+        SESSION_UID=$(date +%Y%m%d-%H%M%S)-$(openssl rand -hex 4)
+        tmux new-session -d -s "dev-loop-$SESSION_UID" "zsh -ic 'dev-loop run --dir .kagent; read -q \"?Press Enter to close...\"'"
+        ```
+````
+
+## Example 4: Checking Status After User Runs Loop
+
 ```
+User: I've started the loop. What's the status?
 
-## Example 4: Max Loops Reached
+Claude: Let me check the status for you.
 
-```
-User: /dev-loop "Implement OAuth flow"
+        [runs: dev-loop status --dir .kagent]
 
-[... setup and approval ...]
-
-Claude: 📊 Progress (session: dev-loop-20250115-160000-abc123)
-        - Iteration: 9/10
+        📊 Current Status:
+        - Iteration: 2/10
         - Phase: reviewing
         - Verdicts:
-          - claude-reviewer-anthropic: rejected ❌
-          - claude-reviewer-gemini: approved ✅
+          - claude-reviewer-anthropic: approved ✅
+          - claude-reviewer-gemini: rejected ❌
 
-        [waits 5 minutes]
+        The loop is still running. Once it completes or reaches max loops, you can review the changes with `git diff`.
+```
 
-        📊 Progress (session: dev-loop-20250115-160000-abc123)
-        - Iteration: 10/10
-        - Phase: reviewing
-        - Verdicts:
-          - claude-reviewer-anthropic: rejected ❌
-          - claude-reviewer-gemini: approved ✅
+## Example 5: Max Loops Reached
+
+```
+User: What's the status of the loop?
+
+Claude: Let me check.
+
+        [runs: dev-loop status --dir .kagent]
 
         ⚠️ Max loops reached (10/10)
 
         The reviewers couldn't reach consensus.
 
-        Last rejection reasons (from reviews/claude-reviewer-anthropic.md):
+        Last rejection reasons (from .kagent/reviews/):
         - Missing PKCE implementation
         - Token refresh not handling edge case
 
         Options:
         1. Review the changes manually: `git diff`
-        2. Inspect the session: `tmux attach -t dev-loop-20250115-160000-abc123`
+        2. Inspect the session: `tmux attach -t dev-loop-<UID>`
         3. Run another dev-loop with a more specific spec
         4. Take over manually
 ```
 
-## Example 5: Inspecting During Execution
+## Status Check Format
+
+When user asks for status, run `dev-loop status --dir .kagent/dev-loop` and report:
 
 ```
-User: /dev-loop "Add unit tests for utils"
-
-[... starts dev-loop ...]
-
-Claude: 📊 Progress (session: dev-loop-20250115-170000-def456)
-        - Iteration: 2/10
-        - Phase: implementing
-
-User: Let me check what's happening
-
-Claude: To inspect the live session:
-
-        tmux attach -t dev-loop-20250115-170000-def456
-
-        Once attached, you can see the implementer working in real-time.
-        Press Ctrl+B, then D to detach without interrupting.
-
-        Current sessions for iteration 2:
-        - 🔨 claude-personal: abc123-session
-        - 🔍 claude-reviewer-anthropic: pending
-        - 🔍 claude-reviewer-gemini: pending
-
-User: [attaches, watches, detaches]
-      Looks good, let it continue
-
-Claude: [continues polling...]
-
-        📊 Progress (session: dev-loop-20250115-170000-def456)
-        - Iteration: 2/10
-        - Phase: reviewing
-```
-
-## Progress Update Format
-
-Always include session name in every update:
-
-```
-📊 Progress (session: dev-loop-<SESSION_UID>)
-   To inspect: tmux attach -t dev-loop-<SESSION_UID>
+📊 Current Status:
 - Iteration: X/Y
 - Phase: <phase>
 - Verdicts: (if reviewing phase)
@@ -259,7 +204,7 @@ Always include session name in every update:
 **Success:**
 
 ```
-🎉 Dev loop completed! (session: dev-loop-<SESSION_UID>)
+🎉 Dev loop completed!
 - Final iteration: N
 - All reviewers approved
 
@@ -271,15 +216,13 @@ Changes are ready. Run `git diff` to review.
 ```
 ⚠️ Max loops reached (N/N)
 
-Session: dev-loop-<SESSION_UID>
-To inspect: tmux attach -t dev-loop-<SESSION_UID>
+The reviewers couldn't reach consensus.
 
 Last rejection reasons:
 - <reason from review files>
 
 Options:
 1. Review changes: git diff
-2. Inspect session
-3. Run new dev-loop with refined spec
-4. Take over manually
+2. Run new dev-loop with refined spec
+3. Take over manually
 ```

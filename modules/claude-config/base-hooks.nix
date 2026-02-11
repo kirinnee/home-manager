@@ -6,7 +6,7 @@
       hooks = [
         {
           type = "command";
-          command = "speak 'Claude is waiting for you'";
+          command = "$HOME/.config/home-manager/modules/claude-config/speak-dir.sh 'Claude is waiting for you in'";
         }
       ];
     }
@@ -17,7 +17,7 @@
       hooks = [
         {
           type = "command";
-          command = "speak 'Task complete'";
+          command = "$HOME/.config/home-manager/modules/claude-config/speak-dir.sh 'Task complete in'";
         }
       ];
     }

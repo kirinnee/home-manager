@@ -171,15 +171,15 @@
         "nixpkgs": "nixpkgs_26"
       },
       "locked": {
-        "lastModified": 1770352638,
-        "narHash": "sha256-0Aj6FTzIUgCQpaeoHqF72J/fmqBzHwDyXqVq0086wuI=",
-        "owner": "kirinnee",
+        "lastModified": 1770346435,
+        "narHash": "sha256-B6gy3AeCk9GkoyXAH2qt0bcDsX2sUuWebrspZGvtt38=",
+        "owner": "sadjow",
         "repo": "claude-code-nix",
-        "rev": "09d9e3b45a37b80d37215b5733ce7fcd64ab636f",
+        "rev": "13b7acb0fd769f7072e908d6aa08ae55b3f48981",
         "type": "github"
       },
       "original": {
-        "owner": "kirinnee",
+        "owner": "sadjow",
         "repo": "claude-code-nix",
         "type": "github"
       }
