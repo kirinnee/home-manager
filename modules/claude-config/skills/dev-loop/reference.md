@@ -7,7 +7,7 @@
 Initialize a new dev-loop session.
 
 ```bash
-dev-loop init [--claude CMD] [--max-loops N] [--reviewers "cmd1,cmd2"]
+dev-loop init [--claude CMD] [--max-loops N] [--reviewers "cmd1,cmd2"] [--dir PATH]
 ```
 
 | Option        | Default                                    | Description                       |
@@ -15,36 +15,37 @@ dev-loop init [--claude CMD] [--max-loops N] [--reviewers "cmd1,cmd2"]
 | `--claude`    | `claude` or `$DEV_LOOP_CLAUDE`             | Executor binary                   |
 | `--max-loops` | `10`                                       | Maximum iterations                |
 | `--reviewers` | `claude-reviewer` or `$DEV_LOOP_REVIEWERS` | Comma-separated reviewer binaries |
+| `--dir`       | `.kagent`                                  | Directory for dev-loop state      |
 
 **Creates:**
 
-- `.claude/dev-loop/` directory
-- `.claude/dev-loop/spec.md` (template)
-- `.claude/dev-loop/loop-state.json`
+- `.kagent/` directory
+- `.kagent/spec.md` (template)
+- `.kagent/loop-state.json`
 
 ### dev-loop run
 
 Execute the dev-loop. Should be run inside tmux.
 
 ```bash
-dev-loop run
+dev-loop run [--dir PATH]
 ```
 
 **Requires:** `loop-state.json` with status `pending_approval` or `running`
 
 **Creates:**
 
-- `.claude/dev-loop/reviews/` - Review files from each reviewer
-- `.claude/dev-loop/verdicts/` - Verdict files (APPROVED/REJECTED)
-- `.claude/dev-loop/sessions.json` - Session tracking
-- `.claude/dev-loop/learnings.md` - Learnings from implementer
+- `.kagent/reviews/` - Review files from each reviewer
+- `.kagent/verdicts/` - Verdict files (APPROVED/REJECTED)
+- `.kagent/sessions.json` - Session tracking
+- `.kagent/learnings.md` - Learnings from implementer
 
 ### dev-loop status
 
 Show current loop status.
 
 ```bash
-dev-loop status
+dev-loop status [--dir PATH]
 ```
 
 **Output includes:**
@@ -60,17 +61,17 @@ dev-loop status
 Remove all dev-loop state.
 
 ```bash
-dev-loop cancel
+dev-loop cancel [--dir PATH]
 ```
 
-**Removes:** entire `.claude/dev-loop/` directory
+**Removes:** entire `.kagent/` directory
 
 ### dev-loop logs
 
 View session history and logs.
 
 ```bash
-dev-loop logs
+dev-loop logs [--dir PATH]
 ```
 
 ## State Files
@@ -143,7 +144,7 @@ Tracks all agent sessions for debugging/inspection.
 
 ### Verdict Files
 
-Each reviewer writes to `.claude/dev-loop/verdicts/<reviewer-name>.txt`:
+Each reviewer writes to `.kagent/verdicts/<reviewer-name>.txt`:
 
 ```
 APPROVED
@@ -168,7 +169,7 @@ Must be exactly one of these values (whitespace trimmed).
 ## Directory Structure
 
 ```
-.claude/dev-loop/
+.kagent/
 ├── spec.md              # The specification (do not modify after approval)
 ├── loop-state.json      # Current state
 ├── sessions.json        # Session tracking
@@ -220,7 +221,7 @@ tmux ls
 
 ```bash
 # Check status
-dev-loop status
+dev-loop status --dir .kagent
 
 # Check if tmux session alive
 tmux has-session -t "dev-loop-$SESSION_UID" 2>/dev/null && echo "running" || echo "ended"
