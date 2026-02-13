@@ -248,6 +248,7 @@ rec {
     speak
     hms
     dev-loop
+    atomi.happy_coder
 
     # liftoff
     awscli2

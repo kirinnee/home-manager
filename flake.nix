@@ -17,7 +17,7 @@
     nixpkgs-stable.url = "github:nixos/nixpkgs/nixos-25.11";
     nixpkgs-240924.url = "github:nixos/nixpkgs/babc25a577c3310cce57c72d5bed70f4c3c3843a";
 
-    atomipkgs.url = "github:AtomiCloud/nix-registry/v2";
+    atomipkgs.url = "github:AtomiCloud/nix-registry/v2.15";
 
     home-manager = {
       url = "github:nix-community/home-manager/release-25.11";

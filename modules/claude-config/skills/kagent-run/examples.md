@@ -1,9 +1,9 @@
-# Dev Loop Examples
+# KAgent Run Examples
 
-## Example 1: Basic Usage
+## Example 1: Full Flow with Background Task
 
-````
-User: /dev-loop "Add input validation to the login form"
+```
+User: /kagent-run "Add input validation to the login form"
 
 Claude: Let me find available claude binaries...
         [runs: compgen -c | grep '^claude' | sort -u]
@@ -19,7 +19,7 @@ Claude: [AskUserQuestion: Which binaries should review? (multi-select)]
 
 User: claude-reviewer-anthropic, claude-reviewer-gemini
 
-Claude: Setting up dev-loop with:
+Claude: Setting up kagent with:
         - Executor: claude-personal
         - Reviewers: claude-reviewer-anthropic, claude-reviewer-gemini
 
@@ -44,25 +44,39 @@ Claude: Setting up dev-loop with:
 
 User: Approve
 
-Claude: ✅ Dev loop initialized at `.kagent/`
+Claude: [AskUserQuestion: How would you like to start the loop?]
+        - "Start now (I'll run it and wait for completion)"
+        - "I'll start it myself (show me the command)"
 
-        Here's the command to run the loop:
+User: Start now (I'll run it and wait for completion)
 
-        ```bash
-        SESSION_UID=$(date +%Y%m%d-%H%M%S)-$(openssl rand -hex 4)
-        tmux new-session -d -s "dev-loop-$SESSION_UID" "zsh -ic 'dev-loop run --dir .kagent; read -q \"?Press Enter to close...\"'"
-        ```
+Claude: Running the loop...
 
-        To inspect progress once started:
-        - Attach to tmux: `tmux attach -t dev-loop-<UID>`
-        - Check status: `dev-loop status --dir .kagent`
-        - To cancel: `dev-loop cancel --dir .kagent`
+        [runs Bash with run_in_background: true: dev-loop run 2>&1 | tee .kagent/run.log]
+
+        [waits with TaskOutput until completion]
+
+        KAgent run completed!
+        - Final iteration: 2
+        - All reviewers approved
+
+        [AskUserQuestion: The loop is done. What would you like to do?]
+        - "Review changes (git diff)"
+        - "Commit the changes"
+        - "Run tests"
+        - "Start another loop with refined spec"
+
+User: Commit the changes
+
+Claude: [runs git commands to commit the changes]
+
+        Changes committed!
+```
+
+## Example 2: User Starts Themselves
+
 ````
-
-## Example 2: Single Reviewer
-
-````
-User: /dev-loop "Fix the broken date parser"
+User: /kagent-run "Fix the broken date parser"
 
 Claude: [discovers binaries...]
 
@@ -82,22 +96,31 @@ Claude: [initializes with single reviewer]
 
 User: Approve
 
-Claude: ✅ Dev loop initialized at `.kagent/`
+Claude: [AskUserQuestion: How would you like to start?]
+        - "Start now (I'll run it and wait for completion)"
+        - "I'll start it myself (show me the command)"
+
+User: I'll start it myself (show me the command)
+
+Claude: KAgent initialized at `.kagent/`
 
         Here's the command to run the loop:
 
         ```bash
-        SESSION_UID=$(date +%Y%m%d-%H%M%S)-$(openssl rand -hex 4)
-        tmux new-session -d -s "dev-loop-$SESSION_UID" "zsh -ic 'dev-loop run --dir .kagent; read -q \"?Press Enter to close...\"'"
+        dev-loop run 2>&1 | tee .kagent/run.log
         ```
+
+        - Logs will be written to `.kagent/run.log`
+        - Check status anytime with: `dev-loop status`
+        - To cancel: `dev-loop cancel`
 
         Note: Single reviewer means faster iterations but less diverse feedback.
 ````
 
 ## Example 3: Editing Spec Before Approval
 
-````
-User: /dev-loop "Refactor the API client"
+```
+User: /kagent-run "Refactor the API client"
 
 Claude: [discovers binaries, user selects...]
 
@@ -132,45 +155,27 @@ Claude: [edits spec.md]
 
 User: Approve
 
-Claude: ✅ Dev loop initialized at `.kagent/`
+Claude: [AskUserQuestion: How would you like to start?]
 
-        Here's the command to run the loop:
-
-        ```bash
-        SESSION_UID=$(date +%Y%m%d-%H%M%S)-$(openssl rand -hex 4)
-        tmux new-session -d -s "dev-loop-$SESSION_UID" "zsh -ic 'dev-loop run --dir .kagent; read -q \"?Press Enter to close...\"'"
-        ```
-````
-
-## Example 4: Checking Status After User Runs Loop
-
-```
-User: I've started the loop. What's the status?
-
-Claude: Let me check the status for you.
-
-        [runs: dev-loop status --dir .kagent]
-
-        📊 Current Status:
-        - Iteration: 2/10
-        - Phase: reviewing
-        - Verdicts:
-          - claude-reviewer-anthropic: approved ✅
-          - claude-reviewer-gemini: rejected ❌
-
-        The loop is still running. Once it completes or reaches max loops, you can review the changes with `git diff`.
+        ...continues as in examples above
 ```
 
-## Example 5: Max Loops Reached
+## Example 4: Max Loops Reached
 
 ```
-User: What's the status of the loop?
+User: /kagent-run "Implement OAuth2 with PKCE"
 
-Claude: Let me check.
+Claude: [setup happens...]
 
-        [runs: dev-loop status --dir .kagent]
+        [AskUserQuestion: How would you like to start?]
 
-        ⚠️ Max loops reached (10/10)
+User: Start now
+
+Claude: Running the loop...
+
+        [runs background task, waits...]
+
+        Max loops reached (10/10)
 
         The reviewers couldn't reach consensus.
 
@@ -178,19 +183,47 @@ Claude: Let me check.
         - Missing PKCE implementation
         - Token refresh not handling edge case
 
-        Options:
-        1. Review the changes manually: `git diff`
-        2. Inspect the session: `tmux attach -t dev-loop-<UID>`
-        3. Run another dev-loop with a more specific spec
-        4. Take over manually
+        [AskUserQuestion: What would you like to do?]
+        - "Review changes (git diff)"
+        - "Start another loop with refined spec"
+        - "Take over manually"
+
+User: Start another loop with refined spec
+
+Claude: Let's refine the spec. Based on the rejection feedback, we should:
+        1. Focus specifically on PKCE implementation
+        2. Handle token refresh edge cases
+
+        [edits spec.md with more specific criteria...]
+
+        [AskUserQuestion: Approve refined spec?]
+```
+
+## Example 5: Checking Status Manually
+
+```
+User: I started a loop earlier. What's the status?
+
+Claude: Let me check the status for you.
+
+        [runs: dev-loop status]
+
+        Current Status:
+        - Iteration: 2/10
+        - Phase: reviewing
+        - Verdicts:
+          - claude-reviewer-anthropic: approved
+          - claude-reviewer-gemini: rejected
+
+        The loop is still running. Once it completes or reaches max loops, you can review the changes with `git diff`.
 ```
 
 ## Status Check Format
 
-When user asks for status, run `dev-loop status --dir .kagent/dev-loop` and report:
+When checking status, run `dev-loop status` and report:
 
 ```
-📊 Current Status:
+Current Status:
 - Iteration: X/Y
 - Phase: <phase>
 - Verdicts: (if reviewing phase)
@@ -204,7 +237,7 @@ When user asks for status, run `dev-loop status --dir .kagent/dev-loop` and repo
 **Success:**
 
 ```
-🎉 Dev loop completed!
+KAgent run completed!
 - Final iteration: N
 - All reviewers approved
 
@@ -214,7 +247,7 @@ Changes are ready. Run `git diff` to review.
 **Max Loops:**
 
 ```
-⚠️ Max loops reached (N/N)
+Max loops reached (N/N)
 
 The reviewers couldn't reach consensus.
 
@@ -223,6 +256,6 @@ Last rejection reasons:
 
 Options:
 1. Review changes: git diff
-2. Run new dev-loop with refined spec
+2. Run another kagent-run with refined spec
 3. Take over manually
 ```
