@@ -1,23 +1,22 @@
 ---
-name: dev-loop
-description: 'Run spec-driven code implementation with multi-reviewer consensus. Use when running /dev-loop, starting an implementation loop, needing automated code review cycles, or iterating on code until all reviewers approve.'
+name: kagent-run
+description: 'Run spec-driven code implementation with multi-reviewer consensus. Use when running /kagent-run, starting an implementation loop, needing automated code review cycles, or iterating on code until all reviewers approve.'
 argument-hint: '[TASK_DESCRIPTION]'
 ---
 
-# Dev Loop - Spec-Driven Development with Multi-Reviewer Consensus
+# KAgent Run - Spec-Driven Development with Multi-Reviewer Consensus
 
 An iterative development loop where an implementer works from a spec, and multiple reviewers evaluate the work in parallel. ALL reviewers must approve for the loop to complete.
 
 ## When to Use
 
-- User runs `/dev-loop` with a task description
+- User runs `/kagent-run` with a task description
 - User wants automated implement→review→fix cycles
 - User needs multiple AI reviewers to reach consensus
 - User wants hands-off iteration until code is approved
 
 ## Prerequisites
 
-- `tmux` installed
 - `jq` installed
 - At least one `claude-*` binary available
 - For reviewers: `claude-reviewer-*` binaries configured
@@ -30,15 +29,22 @@ An iterative development loop where an implementer works from a spec, and multip
 │   • Discover claude-* binaries                              │
 │   • User selects executor + reviewers                       │
 │   • Claude writes/refines spec, user approves               │
-│   • Initialize dev-loop in .kagent                          │
-│   • Give user command to run the loop                       │
+│   • Initialize kagent in .kagent                            │
+│   • Ask user: start now or later?                           │
 └─────────────────────────────────────────────────────────────┘
                            │
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ Phase 2: User-Initiated Execution                           │
-│   User runs the provided command to start the loop          │
-│   The loop runs in tmux with:                               │
+│ Phase 2: Execution                                           │
+│   If user chose "start now":                                 │
+│     • Run dev-loop as background task with Bash tool        │
+│     • Wait for completion with TaskOutput (blocks)          │
+│     • Report results, offer follow-up                       │
+│                                                             │
+│   If user chose "do it myself":                             │
+│     • Provide command for user to run in their terminal     │
+│                                                             │
+│   The loop runs with:                                       │
 │     for each iteration:                                     │
 │       executor --print "implement..."                       │
 │       reviewers run IN PARALLEL                             │
@@ -70,10 +76,10 @@ Use `AskUserQuestion` with `multiSelect: true`:
 - Question: "Which claude binaries should review? (select multiple)"
 - Options: discovered binaries (prioritize reviewer-\* ones)
 
-### Step 4: Initialize Dev Loop
+### Step 4: Initialize KAgent
 
 ```bash
-dev-loop init --claude <executor> --reviewers "<reviewer1,reviewer2>" --dir .kagent
+dev-loop init --claude <executor> --reviewers "<reviewer1,reviewer2>"
 ```
 
 ### Step 5: Write Spec
@@ -90,30 +96,67 @@ Present the spec and selected executor/reviewers. Use `AskUserQuestion`:
 - Question: "Does this spec look correct?"
 - Options: "Approve" / "Edit spec first"
 
-### Step 7: Provide Run Command
+### Step 7: Ask How to Start
 
-After spec approval, provide the user with the command to run the loop. Do NOT execute it yourself.
+After spec approval, ask the user how they want to proceed. Use `AskUserQuestion`:
+
+- Header: "Start"
+- Question: "How would you like to start the loop?"
+- Options:
+  - "Start now (I'll run it and wait for completion)"
+  - "I'll start it myself (show me the command)"
+
+### Step 8a: If User Wants You to Start
+
+Run the loop as a background bash task and wait for completion:
+
+```
+[Bash tool with run_in_background: true]
+command: dev-loop run 2>&1 | tee .kagent/run.log
+```
+
+Then use TaskOutput to wait for completion. This blocks until the loop finishes.
+
+**When complete, report results:**
+
+- If success: "KAgent run completed! All reviewers approved."
+- If max loops: "Max loops reached. Reviewers couldn't reach consensus."
+
+**Offer follow-up actions via `AskUserQuestion`:**
+
+- Header: "Next"
+- Question: "The loop is done. What would you like to do?"
+- Options:
+  - "Review changes (git diff)"
+  - "Commit the changes"
+  - "Run tests"
+  - "Start another loop with refined spec"
+
+**Note on logs:** User can check `.kagent/run.log` for the full output. Detailed session logs are in each claude binary's config directory.
+
+### Step 8b: If User Wants to Start Themselves
+
+Provide the command:
 
 ```bash
-SESSION_UID=$(date +%Y%m%d-%H%M%S)-$(openssl rand -hex 4)
-tmux new-session -d -s "dev-loop-$SESSION_UID" "zsh -ic 'dev-loop run --dir .kagent; read -q \"?Press Enter to close...\"'"
+dev-loop run 2>&1 | tee .kagent/run.log
 ```
 
 Explain to the user:
 
-- Run this command to start the dev loop
-- They can inspect progress with: `tmux attach -t dev-loop-<UID>`
-- Check loop status with: `dev-loop status --dir .kagent`
+- Run this command to start
+- Logs are written to `.kagent/run.log`
+- Check status anytime with: `dev-loop status`
 
 ## Rules
 
 1. **ALWAYS discover binaries first** - Run `compgen -c | grep '^claude'`
 2. **ALWAYS ask user to select** - Never assume which binaries
-3. **Use `.kagent`** - NOT `.claude/dev-loop`
+3. **Use `.kagent`** - Default directory for dev-loop
 4. **Help refine the spec** - Work with user to ensure clarity
 5. **NEVER modify spec after approval**
-6. **NEVER start the loop** - Only provide the command to user
-7. **NEVER commit** - Leave that to user
+6. **Ask before starting** - Let user choose if you start or they do
+7. **NEVER commit without asking** - Only commit if user approves
 8. **ALL reviewers must approve** - Consensus required
 
 ## How to Verify
@@ -121,7 +164,7 @@ Explain to the user:
 1. Check `.kagent/` directory exists
 2. Check `spec.md` exists and is complete
 3. Check `loop-state.json` has been initialized with correct executor and reviewers
-4. User has been provided with the run command
+4. Loop has been started (either by you or user has the command)
 
 ## Reference
 
@@ -137,5 +180,7 @@ See [examples.md](examples.md) for complete session examples.
 
 ## Version History
 
+- v4.0.0 (2025-02): Use background bash task instead of tmux, remove --dir flag
+- v3.0.0 (2025-02): Renamed to kagent-run, added option to start & monitor
 - v2.0.0 (2025-01): Restructured per skill best practices
 - v1.0.0 (2024-12): Initial implementation

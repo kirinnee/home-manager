@@ -1,4 +1,4 @@
-# Dev Loop Reference
+# KAgent Run Reference
 
 ## CLI Commands
 
@@ -25,7 +25,7 @@ dev-loop init [--claude CMD] [--max-loops N] [--reviewers "cmd1,cmd2"] [--dir PA
 
 ### dev-loop run
 
-Execute the dev-loop. Should be run inside tmux.
+Execute the dev-loop.
 
 ```bash
 dev-loop run [--dir PATH]
@@ -39,6 +39,7 @@ dev-loop run [--dir PATH]
 - `.kagent/verdicts/` - Verdict files (APPROVED/REJECTED)
 - `.kagent/sessions.json` - Session tracking
 - `.kagent/learnings.md` - Learnings from implementer
+- `.kagent/run.log` - If run with `tee .kagent/run.log`
 
 ### dev-loop status
 
@@ -174,6 +175,7 @@ Must be exactly one of these values (whitespace trimmed).
 ├── loop-state.json      # Current state
 ├── sessions.json        # Session tracking
 ├── learnings.md         # Implementer learnings (current iteration)
+├── run.log              # Output log (if using tee)
 ├── reviews/             # Review files
 │   ├── claude-reviewer-anthropic.md
 │   └── claude-reviewer-gemini.md
@@ -197,35 +199,3 @@ Sessions are stored at:
 ```
 
 Where `<project-hash>` is the current directory with `/` and `.` replaced by `-`.
-
-## tmux Commands
-
-```bash
-# Check if session exists
-tmux has-session -t "dev-loop-<UID>" 2>/dev/null && echo "running" || echo "ended"
-
-# Attach to session
-tmux attach -t "dev-loop-<UID>"
-
-# Detach from session
-# Press: Ctrl+B, then D
-
-# Kill session
-tmux kill-session -t "dev-loop-<UID>"
-
-# List all sessions
-tmux ls
-```
-
-## Polling Commands
-
-```bash
-# Check status
-dev-loop status --dir .kagent
-
-# Check if tmux session alive
-tmux has-session -t "dev-loop-$SESSION_UID" 2>/dev/null && echo "running" || echo "ended"
-
-# Wait 5 minutes
-sleep 300
-```
