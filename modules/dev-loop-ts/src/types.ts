@@ -8,15 +8,18 @@ export const configSchema = z.object({
   // Binary names
   implementer: z.string().min(1).default('claude'),
   reviewers: z.array(z.string().min(1)).min(1).default(['claude-reviewer-zai']),
+  conflictChecker: z.string().min(1).optional(), // defaults to implementer binary
   // Counts and limits
   maxIterations: z.number().min(1).max(100).default(10),
   implementerTimeout: z.number().min(1).max(120).default(30),
   reviewerTimeout: z.number().min(1).max(120).default(15),
+  // Conflict detection
+  conflictCheckThreshold: z.number().min(1).max(100).default(3),
 });
 
-export const runStatusSchema = z.enum(['running', 'completed', 'cancelled', 'failed']);
+export const runStatusSchema = z.enum(['running', 'completed', 'cancelled', 'failed', 'conflict']);
 export const phaseSchema = z.enum(['implementing', 'reviewing', 'done']);
-export const agentRoleSchema = z.enum(['implementer', 'reviewer']);
+export const agentRoleSchema = z.enum(['implementer', 'reviewer', 'checkpointer']);
 export const sessionStatusSchema = z.enum(['running', 'completed', 'error']);
 export const verdictSchema = z.enum(['approved', 'rejected']);
 
@@ -32,6 +35,7 @@ export const runSchema = z.object({
   phase: phaseSchema,
   startedAt: z.string().datetime(), // ISO date
   learnings: z.array(z.string()).default([]),
+  consecutiveFailures: z.number().int().nonnegative().default(0),
 });
 
 export type RunStatus = z.infer<typeof runStatusSchema>;
@@ -53,6 +57,7 @@ export const RUN_STATUS = {
   COMPLETED: 'completed' as const,
   CANCELLED: 'cancelled' as const,
   FAILED: 'failed' as const,
+  CONFLICT: 'conflict' as const,
 } as const;
 
 // Agent status enum
@@ -67,6 +72,7 @@ export const AGENT_STATUS = {
 export const AGENT_ROLE = {
   IMPLEMENTER: 'implementer' as const,
   REVIEWER: 'reviewer' as const,
+  CHECKPOINTER: 'checkpointer' as const,
 } as const;
 
 // Phase enum
@@ -119,6 +125,13 @@ export const iterationSummarySchema = z.object({
   ),
   learnings: z.array(z.string()),
   sessions: z.array(sessionSummarySchema),
+  checkpointInfo: z
+    .object({
+      outcome: z.enum(['conflict_found', 'spec_auto_fixed', 'spec_compressed', 'no_action']),
+      summary: z.string(),
+      progressPercent: z.number().optional(),
+    })
+    .optional(),
 });
 
 export const historyEntrySchema = z.object({
@@ -130,11 +143,31 @@ export const historyEntrySchema = z.object({
   startedAt: z.string().datetime(),
   completedAt: z.string().datetime(),
   summary: z.array(iterationSummarySchema),
+  checkpointRan: z.boolean().optional(), // Whether checkpointer ran during this run
 });
 
 export type SessionSummary = z.infer<typeof sessionSummarySchema>;
 export type IterationSummary = z.infer<typeof iterationSummarySchema>;
 export type HistoryEntry = z.infer<typeof historyEntrySchema>;
+
+// Checkpoint result type - outcome of running the checkpointer agent
+export const checkpointResultSchema = z.object({
+  outcome: z.enum(['conflict_found', 'spec_auto_fixed', 'spec_compressed', 'no_action']),
+  summary: z.string(),
+  progressPercent: z.number().int().min(0).max(100).optional(),
+  completedCriteria: z.array(z.string()).optional(),
+  remainingCriteria: z.array(z.string()).optional(),
+});
+
+export type CheckpointResult = z.infer<typeof checkpointResultSchema>;
+
+// Checkpointer outcome enum
+export const CHECKPOINT_OUTCOME = {
+  CONFLICT_FOUND: 'conflict_found' as const,
+  SPEC_AUTO_FIXED: 'spec_auto_fixed' as const,
+  SPEC_COMPRESSED: 'spec_compressed' as const,
+  NO_ACTION: 'no_action' as const,
+} as const;
 
 // Additional types for state management
 export interface Learning {
@@ -153,9 +186,11 @@ export interface AgentState extends Session {
 export const DEFAULT_CONFIG: Config = {
   implementer: 'claude',
   reviewers: ['claude-reviewer-zai'],
+  conflictChecker: undefined,
   maxIterations: 10,
   implementerTimeout: 30,
   reviewerTimeout: 15,
+  conflictCheckThreshold: 3,
 };
 
 // ============================================================================

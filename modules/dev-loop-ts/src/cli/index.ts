@@ -9,6 +9,7 @@ import * as historyCmd from './history';
 import * as logsCmd from './logs';
 import * as removeCmd from './remove';
 import * as streamCmd from './stream';
+import * as pollPrCmd from './poll-pr';
 
 // ============================================================================
 // CLI Setup
@@ -31,9 +32,11 @@ export function createCli(deps: {
     .description('Initialize dev-loop configuration (spec + config)')
     .option('--implementer <binary>', 'implementer binary name', 'claude')
     .option('--reviewers <list>', 'reviewer binaries (comma-separated)', 'claude-reviewer-zai')
+    .option('--conflict-checker <binary>', 'conflict checker binary name (defaults to implementer)')
     .option('--max-iterations <n>', 'maximum iterations', '10')
     .option('--implementer-timeout <mins>', 'implementer timeout in minutes', '30')
     .option('--reviewer-timeout <mins>', 'reviewer timeout in minutes', '15')
+    .option('--conflict-check-threshold <n>', 'consecutive failures before conflict check', '3')
     .action(async opts => initCmd.handler(opts, deps.state));
 
   // Run command
@@ -114,6 +117,14 @@ export function createCli(deps: {
     .command('stream')
     .description('Process streaming JSON from stdin (internal use)')
     .action(async () => streamCmd.handler());
+
+  // Poll PR command
+  program
+    .command('poll-pr <pr-number>')
+    .description('Poll a GitHub PR for CI, reviews, conflicts, and conversation status')
+    .option('--repo <owner/repo>', 'GitHub repository (default: detect from current directory)')
+    .option('--interval <seconds>', 'poll interval in seconds', '60')
+    .action(async (pr, opts) => pollPrCmd.handler(pr, opts));
 
   return program;
 }

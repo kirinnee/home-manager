@@ -23,7 +23,7 @@ Claude: Setting up kagent with:
         - Executor: claude-personal
         - Reviewers: claude-reviewer-anthropic, claude-reviewer-gemini
 
-        [runs: dev-loop init --claude claude-personal --reviewers "claude-reviewer-anthropic,claude-reviewer-gemini"]
+        [runs: dev-loop init --implementer claude-personal --reviewers "claude-reviewer-anthropic,claude-reviewer-gemini"]
 
         [writes spec.md based on task]
 
@@ -175,11 +175,11 @@ Claude: Running the loop...
 
         [runs background task, waits...]
 
-        Max loops reached (10/10)
+        Max iterations reached (10/10)
 
         The reviewers couldn't reach consensus.
 
-        Last rejection reasons (from .kagent/reviews/):
+        Last rejection reasons (from .kagent/reviews/{runId}/):
         - Missing PKCE implementation
         - Token refresh not handling edge case
 
@@ -244,14 +244,14 @@ KAgent run completed!
 Changes are ready. Run `git diff` to review.
 ```
 
-**Max Loops:**
+**Max Iterations:**
 
 ```
-Max loops reached (N/N)
+Max iterations reached (N/N)
 
 The reviewers couldn't reach consensus.
 
-Last rejection reasons:
+Last rejection reasons (from .kagent/reviews/{runId}/):
 - <reason from review files>
 
 Options:

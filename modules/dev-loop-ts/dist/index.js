@@ -6060,13 +6060,15 @@ var NEVER = INVALID;
 var configSchema = exports_external.object({
   implementer: exports_external.string().min(1).default('claude'),
   reviewers: exports_external.array(exports_external.string().min(1)).min(1).default(['claude-reviewer-zai']),
+  conflictChecker: exports_external.string().min(1).optional(),
   maxIterations: exports_external.number().min(1).max(100).default(10),
   implementerTimeout: exports_external.number().min(1).max(120).default(30),
   reviewerTimeout: exports_external.number().min(1).max(120).default(15),
+  conflictCheckThreshold: exports_external.number().min(1).max(100).default(3),
 });
-var runStatusSchema = exports_external.enum(['running', 'completed', 'cancelled', 'failed']);
+var runStatusSchema = exports_external.enum(['running', 'completed', 'cancelled', 'failed', 'conflict']);
 var phaseSchema = exports_external.enum(['implementing', 'reviewing', 'done']);
-var agentRoleSchema = exports_external.enum(['implementer', 'reviewer']);
+var agentRoleSchema = exports_external.enum(['implementer', 'reviewer', 'checkpointer']);
 var sessionStatusSchema = exports_external.enum(['running', 'completed', 'error']);
 var verdictSchema = exports_external.enum(['approved', 'rejected']);
 var runSchema = exports_external.object({
@@ -6077,6 +6079,7 @@ var runSchema = exports_external.object({
   phase: phaseSchema,
   startedAt: exports_external.string().datetime(),
   learnings: exports_external.array(exports_external.string()).default([]),
+  consecutiveFailures: exports_external.number().int().nonnegative().default(0),
 });
 var sessionSchema = exports_external.object({
   id: exports_external.string().min(1),
@@ -6111,6 +6114,13 @@ var iterationSummarySchema = exports_external.object({
   ),
   learnings: exports_external.array(exports_external.string()),
   sessions: exports_external.array(sessionSummarySchema),
+  checkpointInfo: exports_external
+    .object({
+      outcome: exports_external.enum(['conflict_found', 'spec_auto_fixed', 'spec_compressed', 'no_action']),
+      summary: exports_external.string(),
+      progressPercent: exports_external.number().optional(),
+    })
+    .optional(),
 });
 var historyEntrySchema = exports_external.object({
   id: exports_external.string().min(1),
@@ -6121,13 +6131,23 @@ var historyEntrySchema = exports_external.object({
   startedAt: exports_external.string().datetime(),
   completedAt: exports_external.string().datetime(),
   summary: exports_external.array(iterationSummarySchema),
+  checkpointRan: exports_external.boolean().optional(),
+});
+var checkpointResultSchema = exports_external.object({
+  outcome: exports_external.enum(['conflict_found', 'spec_auto_fixed', 'spec_compressed', 'no_action']),
+  summary: exports_external.string(),
+  progressPercent: exports_external.number().int().min(0).max(100).optional(),
+  completedCriteria: exports_external.array(exports_external.string()).optional(),
+  remainingCriteria: exports_external.array(exports_external.string()).optional(),
 });
 var DEFAULT_CONFIG = {
   implementer: 'claude',
   reviewers: ['claude-reviewer-zai'],
+  conflictChecker: undefined,
   maxIterations: 10,
   implementerTimeout: 30,
   reviewerTimeout: 15,
+  conflictCheckThreshold: 3,
 };
 function parseConfig(data) {
   return configSchema.parse(data);
@@ -6150,18 +6170,22 @@ function mergeConfig(partial) {
   return {
     implementer: partial.implementer ?? DEFAULT_CONFIG.implementer,
     reviewers: partial.reviewers ?? DEFAULT_CONFIG.reviewers,
+    conflictChecker: partial.conflictChecker ?? DEFAULT_CONFIG.conflictChecker,
     maxIterations: partial.maxIterations ?? DEFAULT_CONFIG.maxIterations,
     implementerTimeout: partial.implementerTimeout ?? DEFAULT_CONFIG.implementerTimeout,
     reviewerTimeout: partial.reviewerTimeout ?? DEFAULT_CONFIG.reviewerTimeout,
+    conflictCheckThreshold: partial.conflictCheckThreshold ?? DEFAULT_CONFIG.conflictCheckThreshold,
   };
 }
 function configFromOptions(opts) {
   const partial = {};
   if (opts.implementer) partial.implementer = opts.implementer;
   if (opts.reviewers && opts.reviewers.length > 0) partial.reviewers = opts.reviewers;
+  if (opts.conflictChecker) partial.conflictChecker = opts.conflictChecker;
   if (opts.maxIterations !== undefined) partial.maxIterations = opts.maxIterations;
   if (opts.implementerTimeout !== undefined) partial.implementerTimeout = opts.implementerTimeout;
   if (opts.reviewerTimeout !== undefined) partial.reviewerTimeout = opts.reviewerTimeout;
+  if (opts.conflictCheckThreshold !== undefined) partial.conflictCheckThreshold = opts.conflictCheckThreshold;
   return mergeConfig(partial);
 }
 
@@ -6175,17 +6199,23 @@ async function handler(opts, state) {
     const cfg = configFromOptions({
       implementer: opts.implementer || undefined,
       reviewers: reviewersList.length > 0 ? reviewersList : undefined,
+      conflictChecker: opts.conflictChecker || undefined,
       maxIterations: parseInt(opts.maxIterations, 10) || undefined,
       implementerTimeout: parseInt(opts.implementerTimeout, 10) || undefined,
       reviewerTimeout: parseInt(opts.reviewerTimeout, 10) || undefined,
+      conflictCheckThreshold: parseInt(opts.conflictCheckThreshold, 10) || undefined,
     });
     await state.initProject(cfg);
     console.log('Dev Loop Initialized');
     console.log(`  Implementer: ${cfg.implementer}`);
     console.log(`  Reviewers: ${cfg.reviewers.join(', ')}`);
+    if (cfg.conflictChecker) {
+      console.log(`  Conflict checker: ${cfg.conflictChecker}`);
+    }
     console.log(`  Max iterations: ${cfg.maxIterations}`);
     console.log(`  Implementer timeout: ${cfg.implementerTimeout}m`);
     console.log(`  Reviewer timeout: ${cfg.reviewerTimeout}m`);
+    console.log(`  Conflict check threshold: ${cfg.conflictCheckThreshold} failures`);
     console.log('');
     console.log('Next: edit .kagent/spec.md, then run: dev-loop run');
   } catch (err) {
@@ -6330,6 +6360,7 @@ function buildImplementerPrompt(params) {
   const { iteration, specPath, specContent, previousLoopLearnings, currentLoopReviews } = params;
   const evidenceDir = `.kagent/current/evidence`;
   const learningsFile = `.kagent/current/learnings.md`;
+  const reviewsDir = `.kagent/current/reviews`;
   const hasReviews = currentLoopReviews && currentLoopReviews.length > 0;
   const reviewsText = hasReviews
     ? `
@@ -6358,6 +6389,12 @@ ${specContent}
 - Spec: ${specPath}
 ${reviewsText}
 ${learningsText}
+
+## Reviews
+
+Check \`${reviewsDir}/\` for the latest review feedback.
+Previous reviews are archived in \`.kagent/reviews/{runId}/\` for reference.
+Focus on the most recent feedback to guide your implementation.
 
 ## Instructions
 
@@ -6423,7 +6460,7 @@ You are Reviewer ${reviewerIndex} for loop ${iteration}.
 
 1. Review the current implementation against the specification
 2. Check the evidence in ${evidenceDir}/
-3. Run \`git diff\` to see the changes
+3. Run \`git status\`, \`git diff\`, and \`git diff --staged\` to see all changes (staged, unstaged, and untracked files)
 4. Run the tests yourself to verify they pass
 5. Run the build yourself to verify it succeeds
 6. Check CLAUDE.md in the project root (if exists) - ensure all changes conform to those guidelines
@@ -6536,6 +6573,156 @@ You can also check ${learningsFile} to understand what the implementer learned d
 Be thorough and strict. Your review ensures quality.
 `;
 }
+function buildCheckpointerPrompt(params) {
+  const { iteration, specPath, specContent, runId } = params;
+  const currentReviewsDir = `.kagent/current/reviews`;
+  const archivedReviewsDir = `.kagent/reviews/${runId}`;
+  const conflictFile = `.kagent/conflict.md`;
+  const checkpointResultFile = `.kagent/current/checkpoint-result.json`;
+  const specFile = specPath;
+  return `# Checkpointer Task
+
+## Context
+
+The dev loop has failed to reach consensus after ${iteration} iterations. Your task is to:
+
+1. **Detect spec-level conflicts** that block progress \u2192 if found, exit with conflict status
+2. **Auto-fix unambiguous spec mistakes** (like typos) \u2192 if fixed, continue loop with corrected spec
+3. **Compress the spec** if no conflict AND progress > 60% \u2192 focus on remaining work
+
+## Specification
+
+Current spec content:
+\`\`\`
+${specContent}
+\`\`\`
+
+Spec file: ${specFile}
+
+## Your Task
+
+1. **Read ALL reviews:**
+   - Current iteration reviews: ${currentReviewsDir}/
+   - Archived reviews from previous iterations: ${archivedReviewsDir}/
+   - Each file is named: \`reviewer-{index}.md\` (current) or \`review-{iteration}-{index}-{binary}.md\` (archived)
+
+2. **Analyze reviews against the spec** to determine:
+   - What acceptance criteria are complete (based on reviewer feedback)
+   - What acceptance criteria remain incomplete
+   - Progress percentage (completed / total criteria)
+
+3. **Check for conflicts:**
+
+   **What IS a conflict (MUST flag):**
+   - Impossible requirements in the spec itself
+   - Contradictory constraints that cannot all be satisfied
+   - Ambiguous spec that leads to fundamentally different interpretations
+
+   **What is NOT a conflict (DO NOT flag):**
+   - Reviewer disagreement due to leniency/strictness
+   - Reviewer mistakes
+   - Implementer mistakes
+   - Reviewer preference differences
+   - Missing implementation (this is a normal failure, not a conflict)
+
+4. **Check for auto-fixable issues:**
+   - Obvious typos in the spec (e.g., "config.ts" when it should be "config.tsx")
+   - ONLY if the fix is completely unambiguous - if there's ANY doubt, treat as conflict
+
+5. **Determine outcome and take action:**
+
+### Outcome 1: conflict_found
+Spec contains impossible or contradictory requirements.
+
+**Actions:**
+1. Write \`${conflictFile}\` with conflict details
+2. Write checkpoint result JSON with outcome "conflict_found"
+3. Print conflict summary to stdout (will be shown to user)
+4. Exit - loop will end with status "conflict"
+
+### Outcome 2: spec_auto_fixed
+Found an unambiguous mistake (e.g., typo) and fixed it.
+
+**Actions:**
+1. Edit ${specFile} directly to fix the issue
+2. Write checkpoint result JSON with outcome "spec_auto_fixed"
+3. Loop will reload spec and continue
+
+**ONLY use this for completely unambiguous fixes.**
+If there's ANY ambiguity about what the user intended, use conflict_found instead.
+
+### Outcome 3: spec_compressed
+No conflict found, no auto-fix needed, progress > 60%.
+
+**Actions:**
+1. Backup original spec to \`.kagent/spec-${runId}.md\`
+2. Compress the spec to focus on remaining work:
+   - Remove or mark as done: items marked as complete in reviews
+   - Keep with updated status: items with partial progress
+   - Keep as-is: items not mentioned or incomplete
+   - Compress verbose descriptions to essential requirements
+3. Update ${specFile} with compressed spec
+4. Write checkpoint result JSON with outcome "spec_compressed"
+
+### Outcome 4: no_action
+No conflict found, no auto-fix needed, progress <= 60%.
+
+**Actions:**
+1. Write checkpoint result JSON with outcome "no_action"
+2. Loop continues normally
+
+## Checkpoint Result JSON
+
+Write your result to ${checkpointResultFile}:
+
+\`\`\`json
+{
+  "outcome": "conflict_found" | "spec_auto_fixed" | "spec_compressed" | "no_action",
+  "summary": "Brief description of what was found/decided",
+  "progressPercent": 75,
+  "completedCriteria": ["criterion 1", "criterion 2"],
+  "remainingCriteria": ["criterion 3", "criterion 4"]
+}
+\`\`\`
+
+## Conflict File Format
+
+If outcome is "conflict_found", write ${conflictFile}:
+
+\`\`\`markdown
+# Conflict Analysis
+
+## Summary
+[Brief summary of the conflict]
+
+## Conflicts Found
+
+### Conflict 1: [Title]
+- **Source**: [Which spec sections conflict]
+- **Description**: [What the conflict is]
+- **Impact**: [Why this prevents progress]
+- **User Decision Required**: [What the user needs to decide]
+
+## Recommendation
+[What should happen next]
+\`\`\`
+
+## Important
+
+- Be thorough - read ALL reviews from current and archived locations
+- Focus on SPEC-LEVEL conflicts only, NOT reviewer disagreements
+- A conflict means: the spec itself has impossible or contradictory requirements
+- Implementation mistakes are NOT conflicts
+- Auto-fix ONLY for completely unambiguous issues
+- When in doubt, use conflict_found or no_action rather than guessing
+
+## Output
+
+After analysis, write the checkpoint result JSON to ${checkpointResultFile}.
+If conflict_found, also write ${conflictFile}.
+If spec_auto_fixed or spec_compressed, edit ${specFile} directly.
+`;
+}
 
 // modules/dev-loop-ts/src/loop/iteration.ts
 function buildIterationData(run, config, specPath, specContent) {
@@ -6573,6 +6760,15 @@ class CancelledError extends Error {
     this.name = 'CancelledError';
   }
 }
+
+class ConflictError extends Error {
+  summary;
+  constructor(summary) {
+    super(`Conflict detected: ${summary}`);
+    this.summary = summary;
+    this.name = 'ConflictError';
+  }
+}
 function isNoActiveRunError(error) {
   return error instanceof Error && error.message === 'No active run';
 }
@@ -6602,37 +6798,98 @@ class LoopRunner {
     const run = await this.state.createRun('.kagent/spec.md');
     const dirHash = getDirHash(process.cwd());
     console.log(
-      `DEV LOOP [${run.id}]: ${config.reviewers.length} reviewers (${config.reviewers.join(', ')}), max ${config.maxIterations} iterations`,
+      `DEV LOOP [${run.id}]: ${config.reviewers.length} reviewers (${config.reviewers.join(', ')}), max ${config.maxIterations} iterations, conflict check after ${config.conflictCheckThreshold} failures`,
     );
     let currentRun = run;
+    let specContent;
+    let checkpointRan = false;
     try {
+      try {
+        specContent = await fs2.readFile(run.spec, 'utf-8');
+      } catch {
+        throw new Error(`Spec file not found: ${run.spec}
+Run 'dev-loop init' to create it.`);
+      }
       while (currentRun.iteration < config.maxIterations) {
         await this.assertRunActive();
-        const iterResult = await this.runIteration(currentRun, config, dirHash);
+        const iterResult = await this.runIteration(currentRun, config, dirHash, specContent);
         if (iterResult.approved) {
-          const entry2 = await this.state.completeRun('completed');
+          await this.state.resetConsecutiveFailures();
+          const entry2 = await this.state.completeRun('completed', checkpointRan);
           console.log(`UNANIMOUS APPROVAL after ${iterResult.iteration} iteration(s)`);
           return {
             status: 'completed',
             finalRun: currentRun,
             historyEntry: entry2,
+            checkpointRan,
           };
+        }
+        const consecutiveFailures = await this.state.incrementConsecutiveFailures();
+        console.log(`Consecutive failures: ${consecutiveFailures} / ${config.conflictCheckThreshold}`);
+        if (consecutiveFailures >= config.conflictCheckThreshold) {
+          console.log(`Conflict check threshold reached (${config.conflictCheckThreshold}), running checkpointer...`);
+          checkpointRan = true;
+          await this.state.backupSpec(currentRun.id);
+          const updatedRun = await this.state.loadRun();
+          if (!updatedRun) {
+            throw new CancelledError('Run was cancelled and archived', true);
+          }
+          currentRun = updatedRun;
+          const checkpointResult = await this.runCheckpoint(currentRun, config, dirHash, specContent);
+          switch (checkpointResult.outcome) {
+            case 'conflict_found':
+              throw new ConflictError(checkpointResult.summary);
+            case 'spec_auto_fixed':
+              console.log('Spec was auto-fixed, reloading spec...');
+              specContent = await this.state.loadSpec();
+              await this.state.resetConsecutiveFailures();
+              break;
+            case 'spec_compressed':
+              console.log(`Spec was compressed (${checkpointResult.progressPercent}% progress), reloading spec...`);
+              specContent = await this.state.loadSpec();
+              await this.state.resetConsecutiveFailures();
+              break;
+            case 'no_action':
+              console.log('No spec changes needed, continuing loop...');
+              await this.state.resetConsecutiveFailures();
+              break;
+          }
         }
         currentRun = (await this.state.loadRun()) ?? currentRun;
       }
-      const entry = await this.state.completeRun('completed');
+      const entry = await this.state.completeRun('completed', checkpointRan);
       console.log(`Max iterations reached (${config.maxIterations})`);
       return {
         status: 'max_iterations',
         finalRun: currentRun,
         historyEntry: entry,
+        checkpointRan,
       };
     } catch (error) {
+      if (error instanceof ConflictError) {
+        console.log(`
+========================================`);
+        console.log('CONFLICT DETECTED');
+        console.log('========================================');
+        console.log(error.summary);
+        console.log(`
+A conflict.md file has been generated.`);
+        console.log('Please resolve the conflict and restart the loop.');
+        console.log(`========================================
+`);
+        const entry2 = await this.state.completeRun('conflict', checkpointRan);
+        return {
+          status: 'conflict',
+          finalRun: currentRun,
+          historyEntry: entry2,
+          checkpointRan,
+        };
+      }
       if (error instanceof CancelledError || isNoActiveRunError(error)) {
         let entry2 = null;
         const stillActive = await this.state.loadRun();
         if (stillActive) {
-          entry2 = await this.state.completeRun('cancelled');
+          entry2 = await this.state.completeRun('cancelled', checkpointRan);
         } else {
           const history = await this.state.listHistory();
           if (history.length > 0) {
@@ -6646,15 +6903,17 @@ class LoopRunner {
           status: 'cancelled',
           finalRun: currentRun,
           historyEntry: entry2,
+          checkpointRan,
         };
       }
       console.error('Loop error:', error instanceof Error ? error.message : error);
       if (error instanceof Error && error.stack) console.error(error.stack);
-      const entry = await this.state.completeRun('failed');
+      const entry = await this.state.completeRun('failed', checkpointRan);
       return {
         status: 'failed',
         finalRun: currentRun,
         historyEntry: entry,
+        checkpointRan,
       };
     }
   }
@@ -6667,7 +6926,7 @@ class LoopRunner {
       throw new CancelledError('Run was cancelled');
     }
   }
-  async runIteration(run, config, dirHash) {
+  async runIteration(run, config, dirHash, specContent) {
     await this.assertRunActive();
     const iterNum = await this.state.incrementIteration();
     console.log(`Iteration ${iterNum} / ${config.maxIterations}`);
@@ -6677,13 +6936,6 @@ class LoopRunner {
     const currentRun = await this.state.loadRun();
     if (!currentRun) {
       throw new CancelledError('Run was cancelled and archived', true);
-    }
-    let specContent;
-    try {
-      specContent = await fs2.readFile(currentRun.spec, 'utf-8');
-    } catch {
-      throw new Error(`Spec file not found: ${currentRun.spec}
-Run 'dev-loop init' to create it.`);
     }
     const iterData = buildIterationData(currentRun, config, currentRun.spec, specContent);
     await this.assertRunActive();
@@ -6737,6 +6989,21 @@ Run 'dev-loop init' to create it.`);
       implementerResult: implResult,
       reviewerResults,
     };
+  }
+  async runCheckpoint(run, config, dirHash, specContent) {
+    await this.assertRunActive();
+    await this.state.updatePhase('reviewing');
+    const checkpointResult = await this.agentRunner.runCheckpointer({
+      runId: run.id,
+      iteration: run.iteration,
+      dirHash,
+      specPath: run.spec,
+      specContent,
+      timeout: config.reviewerTimeout,
+    });
+    await this.assertRunActive();
+    await this.state.updatePhase('done');
+    return checkpointResult;
   }
 }
 
@@ -6801,11 +7068,19 @@ class AgentRunner {
   state;
   implementerBinary;
   reviewerBinaries;
-  constructor(tmux, state, implementerBinary = 'claude', reviewerBinaries = ['claude-reviewer-zai']) {
+  checkpointerBinary;
+  constructor(
+    tmux,
+    state,
+    implementerBinary = 'claude',
+    reviewerBinaries = ['claude-reviewer-zai'],
+    checkpointerBinary,
+  ) {
     this.tmux = tmux;
     this.state = state;
     this.implementerBinary = implementerBinary;
     this.reviewerBinaries = reviewerBinaries;
+    this.checkpointerBinary = checkpointerBinary;
   }
   getLogsDir(runId) {
     return path2.join(LOGS_BASE_DIR, runId);
@@ -6946,6 +7221,101 @@ class AgentRunner {
       completionEstimate,
     };
   }
+  async runCheckpointer(params) {
+    const { runId, iteration, dirHash, specPath, specContent, timeout } = params;
+    const sessionId = generateId();
+    const tmuxSession = `devloop-${dirHash}-${runId}-${iteration}-checkpoint`;
+    const binary = this.checkpointerBinary ?? this.implementerBinary;
+    const session = {
+      id: sessionId,
+      iteration,
+      role: 'checkpointer',
+      binary,
+      tmuxSession,
+      status: 'running',
+      startedAt: new Date().toISOString(),
+    };
+    await this.state.saveSession(session);
+    const prompt = buildCheckpointerPrompt({
+      iteration,
+      specPath,
+      specContent,
+      runId,
+    });
+    const promptFile = await this.writePromptFile(sessionId, prompt);
+    await this.ensureLogsDir(runId);
+    const logFile = path2.join(this.getLogsDir(runId), `checkpoint-${iteration}.log`);
+    const command = `cat "${promptFile}" | ${binary} --dangerously-skip-permissions --verbose --print --session-id "${sessionId}" --output-format stream-json 2>&1 | tee "${logFile}" | dev-loop stream`;
+    console.log(`Checkpointer in tmux: ${tmuxSession} (log: ${logFile})`);
+    const result = await this.tmux.runInSession({
+      sessionName: tmuxSession,
+      command,
+      cwd: process.cwd(),
+      timeoutMins: timeout,
+    });
+    const checkpointResultPath = `.kagent/current/checkpoint-result.json`;
+    const checkpointResultContent = await this.safeReadFile(checkpointResultPath);
+    let outcome = 'no_action';
+    let summary = 'Unable to determine checkpoint status';
+    let progressPercent;
+    let completedCriteria;
+    let remainingCriteria;
+    if (checkpointResultContent) {
+      try {
+        const parsed = JSON.parse(checkpointResultContent);
+        if (
+          parsed.outcome === 'conflict_found' ||
+          parsed.outcome === 'spec_auto_fixed' ||
+          parsed.outcome === 'spec_compressed' ||
+          parsed.outcome === 'no_action'
+        ) {
+          outcome = parsed.outcome;
+        }
+        summary = parsed.summary ?? 'No summary provided';
+        progressPercent = parsed.progressPercent;
+        completedCriteria = parsed.completedCriteria;
+        remainingCriteria = parsed.remainingCriteria;
+        await this.state.saveCheckpointResult(
+          {
+            outcome,
+            summary,
+            progressPercent,
+            completedCriteria,
+            remainingCriteria,
+          },
+          iteration,
+        );
+      } catch {
+        console.log('Warning: Could not parse checkpoint result, assuming no action');
+      }
+    }
+    session.status = result.timedOut ? 'error' : 'completed';
+    session.completedAt = new Date().toISOString();
+    await this.state.saveSession(session);
+    await this.cleanupPromptFile(promptFile);
+    const outcomeDisplay = {
+      conflict_found: 'CONFLICT DETECTED',
+      spec_auto_fixed: 'SPEC AUTO-FIXED',
+      spec_compressed: 'SPEC COMPRESSED',
+      no_action: 'No action needed',
+    };
+    console.log(
+      `Checkpoint: ${outcomeDisplay[outcome]}${progressPercent !== undefined ? ` (${progressPercent}% progress)` : ''}`,
+    );
+    console.log(`  Summary: ${summary}`);
+    return {
+      sessionId,
+      tmuxSession,
+      durationMs: result.durationMs,
+      exitCode: result.exitCode,
+      timedOut: result.timedOut,
+      outcome,
+      summary,
+      progressPercent,
+      completedCriteria,
+      remainingCriteria,
+    };
+  }
   async writePromptFile(sessionId, prompt) {
     const tmpDir = '/tmp/dev-loop/prompts';
     await fs3.mkdir(tmpDir, { recursive: true });
@@ -6996,11 +7366,20 @@ async function handler2(deps) {
       process.exit(1);
     }
     const config = await deps.state.loadConfig();
-    const agentRunner = new AgentRunner(deps.tmux, deps.state, config.implementer, config.reviewers);
+    const agentRunner = new AgentRunner(
+      deps.tmux,
+      deps.state,
+      config.implementer,
+      config.reviewers,
+      config.conflictChecker,
+    );
     const loopRunner = new LoopRunner(deps.state, deps.tmux, agentRunner);
     const result = await loopRunner.run();
     console.log('');
     console.log(`Loop finished: ${result.status}`);
+    if (result.status === 'conflict') {
+      process.exit(2);
+    }
   } catch (err) {
     console.error(`Error: ${err.message}`);
     process.exit(1);
@@ -8456,8 +8835,12 @@ async function handler3(state) {
     console.log(import_picocolors.default.cyan('Config:'));
     console.log(`  Implementer: ${config.implementer}`);
     console.log(`  Reviewers: ${config.reviewers.join(', ')}`);
+    if (config.conflictChecker) {
+      console.log(`  Conflict checker: ${config.conflictChecker}`);
+    }
     console.log(`  Max iterations: ${config.maxIterations}`);
     console.log(`  Timeouts: impl ${config.implementerTimeout}m, rev ${config.reviewerTimeout}m`);
+    console.log(`  Conflict check threshold: ${config.conflictCheckThreshold} failures`);
     console.log('');
     if (!run) {
       console.log(import_picocolors.default.yellow('No active run.'));
@@ -8474,7 +8857,33 @@ async function handler3(state) {
     console.log(`  Iteration: ${run.iteration} / ${config.maxIterations}`);
     console.log(`  Phase: ${run.phase}`);
     console.log(`  Started: ${format(new Date(run.startedAt), 'yyyy-MM-dd HH:mm:ss')}`);
+    if (run.consecutiveFailures > 0) {
+      const failureColor =
+        run.consecutiveFailures >= config.conflictCheckThreshold
+          ? import_picocolors.default.red
+          : import_picocolors.default.yellow;
+      console.log(
+        `  Consecutive failures: ${failureColor(`${run.consecutiveFailures} / ${config.conflictCheckThreshold}`)}`,
+      );
+    }
     console.log('');
+    const checkpointResult = await state.loadCheckpointResult();
+    if (checkpointResult) {
+      const outcomeColors = {
+        conflict_found: import_picocolors.default.red,
+        spec_auto_fixed: import_picocolors.default.green,
+        spec_compressed: import_picocolors.default.blue,
+        no_action: import_picocolors.default.dim,
+      };
+      const outcomeColor = outcomeColors[checkpointResult.outcome] || import_picocolors.default.dim;
+      console.log(import_picocolors.default.cyan('Last Checkpoint:'));
+      console.log(`  Outcome: ${outcomeColor(checkpointResult.outcome)}`);
+      console.log(`  Summary: ${checkpointResult.summary}`);
+      if (checkpointResult.progressPercent !== undefined) {
+        console.log(`  Progress: ${checkpointResult.progressPercent}%`);
+      }
+      console.log('');
+    }
     if (run.learnings.length > 0) {
       console.log(import_picocolors.default.cyan(`Learnings (${run.learnings.length}):`));
       run.learnings.slice(-3).forEach((l, i) => {
@@ -8494,7 +8903,12 @@ async function handler3(state) {
               : s.status === 'completed'
                 ? import_picocolors.default.green('\u2713')
                 : import_picocolors.default.red('\u2717');
-          const role = s.role === 'implementer' ? '\uD83D\uDD28 impl' : `\uD83D\uDD0D rev${s.reviewerIndex ?? ''}`;
+          const role =
+            s.role === 'implementer'
+              ? '\uD83D\uDD28 impl'
+              : s.role === 'checkpointer'
+                ? '\uD83D\uDD27 checkpoint'
+                : `\uD83D\uDD0D rev${s.reviewerIndex ?? ''}`;
           const binary = s.binary ? import_picocolors.default.dim(` (${s.binary})`) : '';
           const verdict = s.verdict
             ? s.verdict === 'approved'
@@ -9586,9 +10000,17 @@ async function handler5(state, tmux) {
         killed++;
       }
     }
+    for (const session of sessions) {
+      if (session.includes('-checkpoint') && session.includes(targetRunId)) {
+        if (await tmux.killSession(session)) {
+          killed++;
+        }
+      }
+    }
     if (killed > 0) {
       console.log(`Killed ${killed} tmux session(s)`);
     }
+    await state.clearCheckpointResult();
     if (run) {
       const stillActive = await state.loadRun();
       if (stillActive) {
@@ -10221,6 +10643,241 @@ function processLine(line) {
   }
 }
 
+// modules/dev-loop-ts/src/cli/poll-pr.ts
+var import_picocolors8 = __toESM(require_picocolors(), 1);
+async function exec(cmd) {
+  const proc = Bun.spawn(cmd, {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+  const exitCode = await proc.exited;
+  return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
+}
+async function getChecks(pr, repoArgs) {
+  const { stdout, exitCode } = await exec(['gh', 'pr', 'checks', pr, ...repoArgs]);
+  if (exitCode !== 0 && !/pass|fail|pending|running|queued/i.test(stdout)) {
+    return null;
+  }
+  return { output: stdout, hasData: true };
+}
+var GRAPHQL_QUERY = `query($owner: String!, $repo: String!, $pr: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $pr) {
+      state
+      mergeable
+      mergeStateStatus
+      reviewDecision
+      reviewThreads(first: 100) {
+        nodes {
+          isResolved
+          path
+          line
+          comments(first: 3) {
+            nodes {
+              author { login }
+              body
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+async function getPRData(owner, repo, pr) {
+  const { stdout, exitCode } = await exec([
+    'gh',
+    'api',
+    'graphql',
+    '-f',
+    `query=${GRAPHQL_QUERY}`,
+    '-f',
+    `owner=${owner}`,
+    '-f',
+    `repo=${repo}`,
+    '-F',
+    `pr=${pr}`,
+  ]);
+  if (exitCode !== 0 || !stdout) return null;
+  try {
+    const parsed = JSON.parse(stdout);
+    return parsed?.data?.repository?.pullRequest ?? null;
+  } catch {
+    return null;
+  }
+}
+async function getReviewsJson(pr, repoArgs) {
+  const { stdout } = await exec(['gh', 'pr', 'view', pr, ...repoArgs, '--json', 'reviews']);
+  return stdout;
+}
+async function resolveRepo(repo) {
+  if (repo) {
+    const parts = repo.split('/');
+    if (parts.length !== 2) return null;
+    return { owner: parts[0], name: parts[1], repoArgs: ['--repo', repo] };
+  }
+  const ownerResult = await exec(['gh', 'repo', 'view', '--json', 'owner', '-q', '.owner.login']);
+  const nameResult = await exec(['gh', 'repo', 'view', '--json', 'name', '-q', '.name']);
+  if (!ownerResult.stdout || !nameResult.stdout) return null;
+  return { owner: ownerResult.stdout, name: nameResult.stdout, repoArgs: [] };
+}
+async function checkOnce(pr, owner, repoName, repoArgs) {
+  const checks = await getChecks(pr, repoArgs);
+  if (!checks) return 'retry';
+  const prData = await getPRData(owner, repoName, pr);
+  if (!prData) return 'retry';
+  const { state: prState, mergeable, mergeStateStatus: mergeState, reviewDecision, reviewThreads } = prData;
+  const review = reviewDecision ?? 'null';
+  const unresolvedThreads = reviewThreads.nodes.filter(t => !t.isResolved);
+  const unresolvedCount = unresolvedThreads.length;
+  if (prState === 'CLOSED') {
+    return { status: 'closed', exitCode: 6 };
+  }
+  if (prState === 'MERGED') {
+    return { status: 'merged', exitCode: 6 };
+  }
+  if (/pending|running|queued|in_progress/i.test(checks.output)) {
+    return 'retry';
+  }
+  if (mergeable === 'UNKNOWN') {
+    return 'retry';
+  }
+  if (mergeable === 'CONFLICTING') {
+    return {
+      status: 'merge_conflict',
+      exitCode: 4,
+      mergeable: 'CONFLICTING',
+      mergeState,
+    };
+  }
+  if (mergeState === 'BEHIND') {
+    return {
+      status: 'behind',
+      exitCode: 4,
+      mergeState: 'BEHIND',
+    };
+  }
+  if (/fail/i.test(checks.output)) {
+    return {
+      status: 'ci_failed',
+      exitCode: 1,
+      checks: checks.output,
+    };
+  }
+  if (review === 'CHANGES_REQUESTED') {
+    const reviewsJson = await getReviewsJson(pr, repoArgs);
+    return {
+      status: 'changes_requested',
+      exitCode: 2,
+      reviewsJson,
+    };
+  }
+  if (mergeState === 'BLOCKED' && unresolvedCount > 0) {
+    const threadDetails = unresolvedThreads.map(t => ({
+      path: t.path,
+      line: t.line,
+      author: t.comments.nodes[0]?.author?.login ?? '?',
+      body: (() => {
+        const b3 = t.comments.nodes[0]?.body ?? '';
+        return b3.length > 200 ? b3.slice(0, 200) + '...' : b3;
+      })(),
+    }));
+    return {
+      status: 'conversations_blocking',
+      exitCode: 5,
+      unresolvedCount,
+      threadDetails,
+    };
+  }
+  if (mergeState === 'CLEAN' || mergeState === 'HAS_HOOKS' || mergeState === 'UNSTABLE') {
+    return {
+      status: 'all_pass',
+      exitCode: 0,
+      checks: checks.output,
+      mergeState,
+      unresolvedCount,
+    };
+  }
+  if (mergeState === 'BLOCKED') {
+    return {
+      status: 'blocked',
+      exitCode: 5,
+      mergeState: 'BLOCKED',
+      review,
+      unresolvedCount,
+      checks: checks.output,
+    };
+  }
+  return 'retry';
+}
+function formatResult2(result) {
+  const lines = [];
+  lines.push(`STATUS:${result.status}`);
+  switch (result.status) {
+    case 'closed':
+      lines.push('PR is closed.');
+      break;
+    case 'merged':
+      lines.push('PR is already merged.');
+      break;
+    case 'merge_conflict':
+      lines.push(`MERGEABLE:${result.mergeable}`);
+      lines.push(`MERGE_STATE:${result.mergeState}`);
+      break;
+    case 'behind':
+      lines.push(`MERGE_STATE:${result.mergeState}`);
+      lines.push('Branch is behind the base branch and needs rebase or update.');
+      break;
+    case 'ci_failed':
+      if (result.checks) lines.push(result.checks);
+      break;
+    case 'changes_requested':
+      if (result.reviewsJson) lines.push(result.reviewsJson);
+      break;
+    case 'conversations_blocking':
+      lines.push(`UNRESOLVED_THREADS:${result.unresolvedCount}`);
+      if (result.threadDetails) lines.push(JSON.stringify(result.threadDetails));
+      break;
+    case 'all_pass':
+      if (result.checks) lines.push(result.checks);
+      lines.push(`MERGE_STATE:${result.mergeState}`);
+      if (result.unresolvedCount && result.unresolvedCount > 0) {
+        lines.push(`UNRESOLVED_THREADS:${result.unresolvedCount} (non-blocking)`);
+      }
+      break;
+    case 'blocked':
+      lines.push(`MERGE_STATE:${result.mergeState}`);
+      lines.push(`REVIEW_DECISION:${result.review}`);
+      lines.push(`UNRESOLVED_THREADS:${result.unresolvedCount ?? 0}`);
+      if (result.checks) lines.push(result.checks);
+      break;
+  }
+  return lines.join(`
+`);
+}
+async function handler8(pr, opts) {
+  const interval = parseInt(opts.interval ?? '60', 10) * 1000;
+  const ghCheck = await exec(['gh', '--version']);
+  if (ghCheck.exitCode !== 0) {
+    console.error(import_picocolors8.default.red('Error: gh CLI not found'));
+    process.exit(3);
+  }
+  const repoInfo = await resolveRepo(opts.repo);
+  if (!repoInfo) {
+    console.error(import_picocolors8.default.red('Error: could not determine repo owner/name'));
+    process.exit(3);
+  }
+  while (true) {
+    const result = await checkOnce(pr, repoInfo.owner, repoInfo.name, repoInfo.repoArgs);
+    if (result === 'retry') {
+      await Bun.sleep(interval);
+      continue;
+    }
+    console.log(formatResult2(result));
+    process.exit(result.exitCode);
+  }
+}
+
 // modules/dev-loop-ts/src/cli/index.ts
 function createCli(deps) {
   const program2 = new Command()
@@ -10232,9 +10889,11 @@ function createCli(deps) {
     .description('Initialize dev-loop configuration (spec + config)')
     .option('--implementer <binary>', 'implementer binary name', 'claude')
     .option('--reviewers <list>', 'reviewer binaries (comma-separated)', 'claude-reviewer-zai')
+    .option('--conflict-checker <binary>', 'conflict checker binary name (defaults to implementer)')
     .option('--max-iterations <n>', 'maximum iterations', '10')
     .option('--implementer-timeout <mins>', 'implementer timeout in minutes', '30')
     .option('--reviewer-timeout <mins>', 'reviewer timeout in minutes', '15')
+    .option('--conflict-check-threshold <n>', 'consecutive failures before conflict check', '3')
     .action(async opts => handler(opts, deps.state));
   program2
     .command('run')
@@ -10290,6 +10949,12 @@ function createCli(deps) {
     .command('stream')
     .description('Process streaming JSON from stdin (internal use)')
     .action(async () => handler7());
+  program2
+    .command('poll-pr <pr-number>')
+    .description('Poll a GitHub PR for CI, reviews, conflicts, and conversation status')
+    .option('--repo <owner/repo>', 'GitHub repository (default: detect from current directory)')
+    .option('--interval <seconds>', 'poll interval in seconds', '60')
+    .action(async (pr, opts) => handler8(pr, opts));
   return program2;
 }
 
@@ -10340,6 +11005,7 @@ class StateService {
       phase: 'implementing',
       startedAt: getCurrentTimestamp(),
       learnings: [],
+      consecutiveFailures: 0,
     };
     await this.saveRun(run);
     return run;
@@ -10365,19 +11031,40 @@ class StateService {
     await this.saveRun(run);
     return run.iteration;
   }
+  async incrementConsecutiveFailures() {
+    const run = await this.loadRun();
+    if (!run) throw new Error('No active run');
+    run.consecutiveFailures = (run.consecutiveFailures ?? 0) + 1;
+    await this.saveRun(run);
+    return run.consecutiveFailures;
+  }
+  async resetConsecutiveFailures() {
+    const run = await this.loadRun();
+    if (!run) throw new Error('No active run');
+    run.consecutiveFailures = 0;
+    await this.saveRun(run);
+  }
   async addLearning(learning) {
     const run = await this.loadRun();
     if (!run) throw new Error('No active run');
     run.learnings.push(learning);
     await this.saveRun(run);
   }
-  async completeRun(status) {
+  async completeRun(statusOrCheckpointRan, checkpointRanFlag) {
     const run = await this.loadRun();
     if (!run) throw new Error('No active run');
-    run.status = status;
+    let checkpointRan = false;
+    if (typeof statusOrCheckpointRan === 'string') {
+      run.status = statusOrCheckpointRan;
+      if (typeof checkpointRanFlag === 'boolean') {
+        checkpointRan = checkpointRanFlag;
+      }
+    } else if (typeof statusOrCheckpointRan === 'boolean') {
+      checkpointRan = statusOrCheckpointRan;
+    }
     run.phase = 'done';
     await this.saveRun(run);
-    return await this.archiveRun();
+    return await this.archiveRun(checkpointRan);
   }
   async cancelRun() {
     const run = await this.loadRun();
@@ -10449,11 +11136,65 @@ class StateService {
     }
     await this.fs.mkdir(reviewsDir);
   }
+  async saveCheckpointResult(result, iteration) {
+    const checkpointResultPath = `${this.paths.currentDir}/checkpoint-result.json`;
+    await this.fs.writeJson(checkpointResultPath, result);
+    if (iteration !== undefined) {
+      const iterationCheckpointPath = `${this.paths.currentDir}/checkpoint-${iteration}.json`;
+      await this.fs.writeJson(iterationCheckpointPath, result);
+    }
+  }
+  async loadCheckpointResult() {
+    const checkpointResultPath = `${this.paths.currentDir}/checkpoint-result.json`;
+    if (!(await this.fs.exists(checkpointResultPath))) return null;
+    try {
+      const content = await this.fs.readFile(checkpointResultPath);
+      return checkpointResultSchema.parse(JSON.parse(content));
+    } catch {
+      return null;
+    }
+  }
+  async loadCheckpointResultForIteration(iteration) {
+    const checkpointPath = `${this.paths.currentDir}/checkpoint-${iteration}.json`;
+    if (!(await this.fs.exists(checkpointPath))) return null;
+    try {
+      const content = await this.fs.readFile(checkpointPath);
+      return checkpointResultSchema.parse(JSON.parse(content));
+    } catch {
+      return null;
+    }
+  }
+  async clearCheckpointResult() {
+    const checkpointResultPath = `${this.paths.currentDir}/checkpoint-result.json`;
+    if (await this.fs.exists(checkpointResultPath)) {
+      await this.fs.unlink(checkpointResultPath);
+    }
+    if (await this.fs.exists(this.paths.currentDir)) {
+      const files = await this.fs.readdir(this.paths.currentDir);
+      for (const file of files) {
+        if (file.match(/^checkpoint-\d+\.json$/)) {
+          await this.fs.unlink(`${this.paths.currentDir}/${file}`);
+        }
+      }
+    }
+  }
+  async backupSpec(runId) {
+    const specContent = await this.fs.readFile(this.paths.spec);
+    const backupPath = `${this.paths.baseDir}/spec-${runId}.md`;
+    await this.fs.writeFile(backupPath, specContent);
+    return backupPath;
+  }
+  async loadSpec() {
+    return this.fs.readFile(this.paths.spec);
+  }
+  async saveSpec(content) {
+    await this.fs.writeFile(this.paths.spec, content);
+  }
   async readLearnings() {
     if (!(await this.fs.exists(this.paths.learnings))) return null;
     return this.fs.readFile(this.paths.learnings);
   }
-  async archiveRun() {
+  async archiveRun(checkpointRan = false) {
     const run = await this.loadRun();
     if (!run) throw new Error('No run to archive');
     const sessions = await this.loadSessions();
@@ -10466,40 +11207,59 @@ class StateService {
       iterations: run.iteration,
       startedAt: run.startedAt,
       completedAt: getCurrentTimestamp(),
-      summary: this.buildSummary(sessions, run.learnings),
+      summary: await this.buildSummary(sessions, run.learnings),
+      checkpointRan,
     };
     await this.fs.writeJson(this.paths.historyEntry(run.id), entry);
+    await this.clearCheckpointResult();
     await this.fs.rm(this.paths.currentDir, { recursive: true });
     return entry;
   }
-  buildSummary(sessions, learnings) {
+  async buildSummary(sessions, learnings) {
     const byIteration = new Map();
     for (const s of sessions) {
       const list = byIteration.get(s.iteration) || [];
       list.push(s);
       byIteration.set(s.iteration, list);
     }
-    return Array.from(byIteration.entries()).map(([iteration, iterSessions]) => {
-      const impl = iterSessions.find(s => s.role === 'implementer');
-      const reviewers = iterSessions.filter(s => s.role === 'reviewer');
-      return {
-        iteration,
-        implementerDuration:
-          impl?.completedAt && impl?.startedAt
-            ? new Date(impl.completedAt).getTime() - new Date(impl.startedAt).getTime()
-            : 0,
-        reviewerVerdicts: reviewers.map(r2 => ({
-          index: r2.reviewerIndex ?? 0,
-          verdict: r2.verdict ?? 'rejected',
-          binary: r2.binary,
-        })),
-        learnings: learnings.filter((_3, i) => i < iteration),
-        sessions: iterSessions.map(s => ({
-          role: s.role,
-          reviewerIndex: s.reviewerIndex,
-        })),
-      };
-    });
+    const summaries = await Promise.all(
+      Array.from(byIteration.entries()).map(async ([iteration, iterSessions]) => {
+        const impl = iterSessions.find(s => s.role === 'implementer');
+        const reviewers = iterSessions.filter(s => s.role === 'reviewer');
+        let checkpointInfo = undefined;
+        try {
+          const checkpointPath = `${this.paths.currentDir}/checkpoint-${iteration}.json`;
+          if (await this.fs.exists(checkpointPath)) {
+            const content = await this.fs.readFile(checkpointPath);
+            const result = checkpointResultSchema.parse(JSON.parse(content));
+            checkpointInfo = {
+              outcome: result.outcome,
+              summary: result.summary,
+              progressPercent: result.progressPercent,
+            };
+          }
+        } catch {}
+        return {
+          iteration,
+          implementerDuration:
+            impl?.completedAt && impl?.startedAt
+              ? new Date(impl.completedAt).getTime() - new Date(impl.startedAt).getTime()
+              : 0,
+          reviewerVerdicts: reviewers.map(r2 => ({
+            index: r2.reviewerIndex ?? 0,
+            verdict: r2.verdict ?? 'rejected',
+            binary: r2.binary,
+          })),
+          learnings: learnings.filter((_3, i) => i < iteration),
+          sessions: iterSessions.map(s => ({
+            role: s.role,
+            reviewerIndex: s.reviewerIndex,
+          })),
+          checkpointInfo,
+        };
+      }),
+    );
+    return summaries;
   }
   async listHistory() {
     if (!(await this.fs.exists(this.paths.historyDir))) return [];
@@ -10699,14 +11459,17 @@ function createTmuxService(spawn) {
 }
 
 // modules/dev-loop-ts/src/history/format.ts
-var import_picocolors8 = __toESM(require_picocolors(), 1);
+var import_picocolors9 = __toESM(require_picocolors(), 1);
 function formatHistoryEntry(entry) {
   const lines = [];
-  lines.push(import_picocolors8.default.bold(`Run: ${entry.id}`));
+  lines.push(import_picocolors9.default.bold(`Run: ${entry.id}`));
   lines.push(`  Status: ${formatStatus(entry.status)}`);
   lines.push(`  Iterations: ${entry.iterations}`);
   lines.push(`  Started: ${format(new Date(entry.startedAt), 'yyyy-MM-dd HH:mm:ss')}`);
   lines.push(`  Completed: ${format(new Date(entry.completedAt), 'yyyy-MM-dd HH:mm:ss')}`);
+  if (entry.checkpointRan) {
+    lines.push(`  Checkpoint ran: ${import_picocolors9.default.cyan('yes')}`);
+  }
   lines.push('');
   for (const sum of entry.summary) {
     lines.push(`  Iteration ${sum.iteration}:`);
@@ -10714,12 +11477,25 @@ function formatHistoryEntry(entry) {
     const verdicts = sum.reviewerVerdicts
       .map(
         v =>
-          `${v.verdict === 'approved' ? import_picocolors8.default.green('\u2713') : import_picocolors8.default.red('\u2717')}`,
+          `${v.verdict === 'approved' ? import_picocolors9.default.green('\u2713') : import_picocolors9.default.red('\u2717')}`,
       )
       .join(' ');
     lines.push(`    Verdicts: ${verdicts}`);
     if (sum.learnings.length > 0) {
       lines.push(`    Learnings: ${sum.learnings.length}`);
+    }
+    if (sum.checkpointInfo) {
+      const outcomeColors = {
+        conflict_found: import_picocolors9.default.red,
+        spec_auto_fixed: import_picocolors9.default.green,
+        spec_compressed: import_picocolors9.default.blue,
+        no_action: import_picocolors9.default.dim,
+      };
+      const colorFn = outcomeColors[sum.checkpointInfo.outcome] || import_picocolors9.default.dim;
+      lines.push(`    Checkpoint: ${colorFn(sum.checkpointInfo.outcome)}`);
+      if (sum.checkpointInfo.progressPercent !== undefined) {
+        lines.push(`      Progress: ${sum.checkpointInfo.progressPercent}%`);
+      }
     }
   }
   return lines.join(`
@@ -10732,18 +11508,21 @@ function formatHistoryList(entries) {
   return entries.map(e2 => {
     const date = format(new Date(e2.startedAt), 'MM-dd HH:mm');
     const status = formatStatus(e2.status);
-    return `${e2.id}  ${date}  ${status}  ${e2.iterations} iterations`;
+    const checkpoint = e2.checkpointRan ? import_picocolors9.default.cyan(' \u26A1') : '';
+    return `${e2.id}  ${date}  ${status}  ${e2.iterations} iterations${checkpoint}`;
   }).join(`
 `);
 }
 function formatStatus(status) {
   switch (status) {
     case 'completed':
-      return import_picocolors8.default.green('completed');
+      return import_picocolors9.default.green('completed');
     case 'cancelled':
-      return import_picocolors8.default.yellow('cancelled');
+      return import_picocolors9.default.yellow('cancelled');
     case 'failed':
-      return import_picocolors8.default.red('failed');
+      return import_picocolors9.default.red('failed');
+    case 'conflict':
+      return import_picocolors9.default.red('conflict');
     default:
       return status;
   }

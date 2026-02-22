@@ -225,6 +225,7 @@ rec {
     bitwarden-cli
     devenv
     nodejs
+    pkgs-unstable.cloudflared
 
 
     # tooling

@@ -1,9 +1,10 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import type { Session, Verdict, VerdictFile } from '../types';
+import type { Session, Verdict, VerdictFile, CheckpointResult, CHECKPOINT_OUTCOME } from '../types';
 import type { TmuxService, StateService } from '../deps';
 import { generateId } from '../deps';
 import * as verdicts from './verdicts';
+import { buildCheckpointerPrompt } from './prompts';
 
 // ============================================================================
 // Agent Result types
@@ -29,6 +30,16 @@ export interface ReviewerResult extends AgentResult {
   completionEstimate?: number;
 }
 
+export type CheckpointerOutcome = 'conflict_found' | 'spec_auto_fixed' | 'spec_compressed' | 'no_action';
+
+export interface CheckpointerResult extends AgentResult {
+  outcome: CheckpointerOutcome;
+  summary: string;
+  progressPercent?: number;
+  completedCriteria?: string[];
+  remainingCriteria?: string[];
+}
+
 // ============================================================================
 // AgentRunner class (IO edge)
 // ============================================================================
@@ -41,6 +52,7 @@ export class AgentRunner {
     private state: StateService,
     private implementerBinary: string = 'claude',
     private reviewerBinaries: string[] = ['claude-reviewer-zai'],
+    private checkpointerBinary?: string, // defaults to implementerBinary
   ) {}
 
   /**
@@ -280,6 +292,143 @@ export class AgentRunner {
       verdict,
       reasoning,
       completionEstimate,
+    };
+  }
+
+  /**
+   * Run the checkpointer agent
+   * Analyzes all reviews to detect conflicts, auto-fix spec typos, or compress spec
+   */
+  async runCheckpointer(params: {
+    runId: string;
+    iteration: number;
+    dirHash: string;
+    specPath: string;
+    specContent: string;
+    timeout: number;
+  }): Promise<CheckpointerResult> {
+    const { runId, iteration, dirHash, specPath, specContent, timeout } = params;
+
+    // Create session record
+    const sessionId = generateId();
+    const tmuxSession = `devloop-${dirHash}-${runId}-${iteration}-checkpoint`;
+
+    const binary = this.checkpointerBinary ?? this.implementerBinary;
+
+    const session: Session = {
+      id: sessionId,
+      iteration,
+      role: 'checkpointer', // Use dedicated checkpointer role
+      binary,
+      tmuxSession,
+      status: 'running',
+      startedAt: new Date().toISOString(),
+    };
+
+    await this.state.saveSession(session);
+
+    // Build checkpointer prompt
+    const prompt = buildCheckpointerPrompt({
+      iteration,
+      specPath,
+      specContent,
+      runId,
+    });
+
+    // Write prompt to temp file
+    const promptFile = await this.writePromptFile(sessionId, prompt);
+
+    // Ensure logs directory exists
+    await this.ensureLogsDir(runId);
+    const logFile = path.join(this.getLogsDir(runId), `checkpoint-${iteration}.log`);
+
+    // Build command - use checkpointer binary (defaults to implementer binary)
+    const command = `cat "${promptFile}" | ${binary} --dangerously-skip-permissions --verbose --print --session-id "${sessionId}" --output-format stream-json 2>&1 | tee "${logFile}" | dev-loop stream`;
+
+    // Run in tmux
+    console.log(`Checkpointer in tmux: ${tmuxSession} (log: ${logFile})`);
+
+    const result = await this.tmux.runInSession({
+      sessionName: tmuxSession,
+      command,
+      cwd: process.cwd(),
+      timeoutMins: timeout,
+    });
+
+    // Read checkpoint result file
+    const checkpointResultPath = `.kagent/current/checkpoint-result.json`;
+    const checkpointResultContent = await this.safeReadFile(checkpointResultPath);
+
+    let outcome: CheckpointerOutcome = 'no_action';
+    let summary = 'Unable to determine checkpoint status';
+    let progressPercent: number | undefined;
+    let completedCriteria: string[] | undefined;
+    let remainingCriteria: string[] | undefined;
+
+    if (checkpointResultContent) {
+      try {
+        const parsed = JSON.parse(checkpointResultContent);
+        if (
+          parsed.outcome === 'conflict_found' ||
+          parsed.outcome === 'spec_auto_fixed' ||
+          parsed.outcome === 'spec_compressed' ||
+          parsed.outcome === 'no_action'
+        ) {
+          outcome = parsed.outcome;
+        }
+        summary = parsed.summary ?? 'No summary provided';
+        progressPercent = parsed.progressPercent;
+        completedCriteria = parsed.completedCriteria;
+        remainingCriteria = parsed.remainingCriteria;
+
+        // Save checkpoint result to state (with iteration for history tracking)
+        await this.state.saveCheckpointResult(
+          {
+            outcome,
+            summary,
+            progressPercent,
+            completedCriteria,
+            remainingCriteria,
+          },
+          iteration,
+        );
+      } catch {
+        // If we can't parse, assume no action to allow loop to continue
+        console.log('Warning: Could not parse checkpoint result, assuming no action');
+      }
+    }
+
+    // Update session
+    session.status = result.timedOut ? 'error' : 'completed';
+    session.completedAt = new Date().toISOString();
+    await this.state.saveSession(session);
+
+    // Clean up prompt file
+    await this.cleanupPromptFile(promptFile);
+
+    const outcomeDisplay: Record<CheckpointerOutcome, string> = {
+      conflict_found: 'CONFLICT DETECTED',
+      spec_auto_fixed: 'SPEC AUTO-FIXED',
+      spec_compressed: 'SPEC COMPRESSED',
+      no_action: 'No action needed',
+    };
+
+    console.log(
+      `Checkpoint: ${outcomeDisplay[outcome]}${progressPercent !== undefined ? ` (${progressPercent}% progress)` : ''}`,
+    );
+    console.log(`  Summary: ${summary}`);
+
+    return {
+      sessionId,
+      tmuxSession,
+      durationMs: result.durationMs,
+      exitCode: result.exitCode,
+      timedOut: result.timedOut,
+      outcome,
+      summary,
+      progressPercent,
+      completedCriteria,
+      remainingCriteria,
     };
   }
 
