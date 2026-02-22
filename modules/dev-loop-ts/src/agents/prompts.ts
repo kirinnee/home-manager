@@ -17,10 +17,18 @@ export interface ReviewerPromptParams {
   specContent: string;
 }
 
+export interface CheckpointerPromptParams {
+  iteration: number;
+  specPath: string;
+  specContent: string;
+  runId: string;
+}
+
 export function buildImplementerPrompt(params: ImplementerPromptParams): string {
   const { iteration, specPath, specContent, previousLoopLearnings, currentLoopReviews } = params;
   const evidenceDir = `.kagent/current/evidence`;
   const learningsFile = `.kagent/current/learnings.md`;
+  const reviewsDir = `.kagent/current/reviews`;
 
   const hasReviews = currentLoopReviews && currentLoopReviews.length > 0;
   const reviewsText = hasReviews
@@ -44,6 +52,12 @@ ${specContent}
 - Spec: ${specPath}
 ${reviewsText}
 ${learningsText}
+
+## Reviews
+
+Check \`${reviewsDir}/\` for the latest review feedback.
+Previous reviews are archived in \`.kagent/reviews/{runId}/\` for reference.
+Focus on the most recent feedback to guide your implementation.
 
 ## Instructions
 
@@ -222,5 +236,157 @@ You can also check ${learningsFile} to understand what the implementer learned d
 - Reject if you see any evidence of force pushing or unsafe git operations
 
 Be thorough and strict. Your review ensures quality.
+`;
+}
+
+export function buildCheckpointerPrompt(params: CheckpointerPromptParams): string {
+  const { iteration, specPath, specContent, runId } = params;
+  const currentReviewsDir = `.kagent/current/reviews`;
+  const archivedReviewsDir = `.kagent/reviews/${runId}`;
+  const conflictFile = `.kagent/conflict.md`;
+  const checkpointResultFile = `.kagent/current/checkpoint-result.json`;
+  const specFile = specPath;
+
+  return `# Checkpointer Task
+
+## Context
+
+The dev loop has failed to reach consensus after ${iteration} iterations. Your task is to:
+
+1. **Detect spec-level conflicts** that block progress → if found, exit with conflict status
+2. **Auto-fix unambiguous spec mistakes** (like typos) → if fixed, continue loop with corrected spec
+3. **Compress the spec** if no conflict AND progress > 60% → focus on remaining work
+
+## Specification
+
+Current spec content:
+\`\`\`
+${specContent}
+\`\`\`
+
+Spec file: ${specFile}
+
+## Your Task
+
+1. **Read ALL reviews:**
+   - Current iteration reviews: ${currentReviewsDir}/
+   - Archived reviews from previous iterations: ${archivedReviewsDir}/
+   - Each file is named: \`reviewer-{index}.md\` (current) or \`review-{iteration}-{index}-{binary}.md\` (archived)
+
+2. **Analyze reviews against the spec** to determine:
+   - What acceptance criteria are complete (based on reviewer feedback)
+   - What acceptance criteria remain incomplete
+   - Progress percentage (completed / total criteria)
+
+3. **Check for conflicts:**
+
+   **What IS a conflict (MUST flag):**
+   - Impossible requirements in the spec itself
+   - Contradictory constraints that cannot all be satisfied
+   - Ambiguous spec that leads to fundamentally different interpretations
+
+   **What is NOT a conflict (DO NOT flag):**
+   - Reviewer disagreement due to leniency/strictness
+   - Reviewer mistakes
+   - Implementer mistakes
+   - Reviewer preference differences
+   - Missing implementation (this is a normal failure, not a conflict)
+
+4. **Check for auto-fixable issues:**
+   - Obvious typos in the spec (e.g., "config.ts" when it should be "config.tsx")
+   - ONLY if the fix is completely unambiguous - if there's ANY doubt, treat as conflict
+
+5. **Determine outcome and take action:**
+
+### Outcome 1: conflict_found
+Spec contains impossible or contradictory requirements.
+
+**Actions:**
+1. Write \`${conflictFile}\` with conflict details
+2. Write checkpoint result JSON with outcome "conflict_found"
+3. Print conflict summary to stdout (will be shown to user)
+4. Exit - loop will end with status "conflict"
+
+### Outcome 2: spec_auto_fixed
+Found an unambiguous mistake (e.g., typo) and fixed it.
+
+**Actions:**
+1. Edit ${specFile} directly to fix the issue
+2. Write checkpoint result JSON with outcome "spec_auto_fixed"
+3. Loop will reload spec and continue
+
+**ONLY use this for completely unambiguous fixes.**
+If there's ANY ambiguity about what the user intended, use conflict_found instead.
+
+### Outcome 3: spec_compressed
+No conflict found, no auto-fix needed, progress > 60%.
+
+**Actions:**
+1. Backup original spec to \`.kagent/spec-${runId}.md\`
+2. Compress the spec to focus on remaining work:
+   - Remove or mark as done: items marked as complete in reviews
+   - Keep with updated status: items with partial progress
+   - Keep as-is: items not mentioned or incomplete
+   - Compress verbose descriptions to essential requirements
+3. Update ${specFile} with compressed spec
+4. Write checkpoint result JSON with outcome "spec_compressed"
+
+### Outcome 4: no_action
+No conflict found, no auto-fix needed, progress <= 60%.
+
+**Actions:**
+1. Write checkpoint result JSON with outcome "no_action"
+2. Loop continues normally
+
+## Checkpoint Result JSON
+
+Write your result to ${checkpointResultFile}:
+
+\`\`\`json
+{
+  "outcome": "conflict_found" | "spec_auto_fixed" | "spec_compressed" | "no_action",
+  "summary": "Brief description of what was found/decided",
+  "progressPercent": 75,
+  "completedCriteria": ["criterion 1", "criterion 2"],
+  "remainingCriteria": ["criterion 3", "criterion 4"]
+}
+\`\`\`
+
+## Conflict File Format
+
+If outcome is "conflict_found", write ${conflictFile}:
+
+\`\`\`markdown
+# Conflict Analysis
+
+## Summary
+[Brief summary of the conflict]
+
+## Conflicts Found
+
+### Conflict 1: [Title]
+- **Source**: [Which spec sections conflict]
+- **Description**: [What the conflict is]
+- **Impact**: [Why this prevents progress]
+- **User Decision Required**: [What the user needs to decide]
+
+## Recommendation
+[What should happen next]
+\`\`\`
+
+## Important
+
+- Be thorough - read ALL reviews from current and archived locations
+- Focus on SPEC-LEVEL conflicts only, NOT reviewer disagreements
+- A conflict means: the spec itself has impossible or contradictory requirements
+- Implementation mistakes are NOT conflicts
+- Auto-fix ONLY for completely unambiguous issues
+- When in doubt, use conflict_found or no_action rather than guessing
+
+## Output
+
+After analysis, write the checkpoint result JSON to ${checkpointResultFile}.
+If conflict_found, also write ${conflictFile}.
+If spec_auto_fixed or spec_compressed, edit ${specFile} directly.
 `;
 }

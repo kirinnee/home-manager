@@ -20,14 +20,22 @@ class CancelledError extends Error {
   }
 }
 
+class ConflictError extends Error {
+  constructor(public readonly summary: string) {
+    super(`Conflict detected: ${summary}`);
+    this.name = 'ConflictError';
+  }
+}
+
 function isNoActiveRunError(error: unknown): boolean {
   return error instanceof Error && error.message === 'No active run';
 }
 
 export interface LoopResult {
-  status: 'completed' | 'cancelled' | 'failed' | 'max_iterations';
+  status: 'completed' | 'cancelled' | 'failed' | 'max_iterations' | 'conflict';
   finalRun: Run;
   historyEntry: HistoryEntry;
+  checkpointRan?: boolean;
 }
 
 export interface IterationResult {
@@ -35,6 +43,7 @@ export interface IterationResult {
   approved: boolean;
   implementerResult: agents.AgentResult;
   reviewerResults: agents.ReviewerResult[];
+  checkpointResult?: agents.CheckpointerResult;
 }
 
 // ============================================================================
@@ -72,25 +81,88 @@ export class LoopRunner {
     const dirHash = getDirHash(process.cwd());
 
     console.log(
-      `DEV LOOP [${run.id}]: ${config.reviewers.length} reviewers (${config.reviewers.join(', ')}), max ${config.maxIterations} iterations`,
+      `DEV LOOP [${run.id}]: ${config.reviewers.length} reviewers (${config.reviewers.join(', ')}), max ${config.maxIterations} iterations, conflict check after ${config.conflictCheckThreshold} failures`,
     );
 
     let currentRun = run;
+    let specContent: string;
+    let checkpointRan = false;
 
     try {
+      // Load spec content once at the start
+      try {
+        specContent = await fs.readFile(run.spec, 'utf-8');
+      } catch {
+        throw new Error(`Spec file not found: ${run.spec}\nRun 'dev-loop init' to create it.`);
+      }
+
       while (currentRun.iteration < config.maxIterations) {
         await this.assertRunActive();
-        const iterResult = await this.runIteration(currentRun, config, dirHash);
+        const iterResult = await this.runIteration(currentRun, config, dirHash, specContent);
 
         if (iterResult.approved) {
+          // Reset consecutive failures on approval
+          await this.state.resetConsecutiveFailures();
+
           // Unanimous approval - complete
-          const entry = await this.state.completeRun('completed');
+          const entry = await this.state.completeRun('completed', checkpointRan);
           console.log(`UNANIMOUS APPROVAL after ${iterResult.iteration} iteration(s)`);
           return {
             status: 'completed',
             finalRun: currentRun,
             historyEntry: entry,
+            checkpointRan,
           };
+        }
+
+        // Increment consecutive failures since iteration was not approved
+        const consecutiveFailures = await this.state.incrementConsecutiveFailures();
+        console.log(`Consecutive failures: ${consecutiveFailures} / ${config.conflictCheckThreshold}`);
+
+        // Check if we should run checkpointer
+        if (consecutiveFailures >= config.conflictCheckThreshold) {
+          console.log(`Conflict check threshold reached (${config.conflictCheckThreshold}), running checkpointer...`);
+          checkpointRan = true;
+
+          // Backup spec before checkpointer can modify it (for compression or auto-fix)
+          await this.state.backupSpec(currentRun.id);
+
+          // Reload run from state to get the correct iteration number
+          // (runIteration increments iteration internally)
+          const updatedRun = await this.state.loadRun();
+          if (!updatedRun) {
+            throw new CancelledError('Run was cancelled and archived', true);
+          }
+          currentRun = updatedRun;
+
+          const checkpointResult = await this.runCheckpoint(currentRun, config, dirHash, specContent);
+
+          switch (checkpointResult.outcome) {
+            case 'conflict_found':
+              // Conflict found that requires user decision - end loop with conflict status
+              throw new ConflictError(checkpointResult.summary);
+
+            case 'spec_auto_fixed':
+              // Spec was auto-fixed - reload spec, reset failures, continue
+              console.log('Spec was auto-fixed, reloading spec...');
+              specContent = await this.state.loadSpec();
+              await this.state.resetConsecutiveFailures();
+              break;
+
+            case 'spec_compressed':
+              // Spec was compressed - reload spec, reset failures, continue
+              // Backup was already made before checkpointer ran
+              console.log(`Spec was compressed (${checkpointResult.progressPercent}% progress), reloading spec...`);
+              specContent = await this.state.loadSpec();
+              await this.state.resetConsecutiveFailures();
+              break;
+
+            case 'no_action':
+              // No action needed - just reset failures and continue
+              console.log('No spec changes needed, continuing loop...');
+              await this.state.resetConsecutiveFailures();
+              break;
+          }
         }
 
         // Update run for next iteration
@@ -98,19 +170,39 @@ export class LoopRunner {
       }
 
       // Max iterations reached
-      const entry = await this.state.completeRun('completed');
+      const entry = await this.state.completeRun('completed', checkpointRan);
       console.log(`Max iterations reached (${config.maxIterations})`);
       return {
         status: 'max_iterations',
         finalRun: currentRun,
         historyEntry: entry,
+        checkpointRan,
       };
     } catch (error) {
+      if (error instanceof ConflictError) {
+        // Conflict detected - complete with conflict status
+        console.log('\n========================================');
+        console.log('CONFLICT DETECTED');
+        console.log('========================================');
+        console.log(error.summary);
+        console.log('\nA conflict.md file has been generated.');
+        console.log('Please resolve the conflict and restart the loop.');
+        console.log('========================================\n');
+
+        const entry = await this.state.completeRun('conflict', checkpointRan);
+        return {
+          status: 'conflict',
+          finalRun: currentRun,
+          historyEntry: entry,
+          checkpointRan,
+        };
+      }
+
       if (error instanceof CancelledError || isNoActiveRunError(error)) {
         let entry: HistoryEntry | null = null;
         const stillActive = await this.state.loadRun();
         if (stillActive) {
-          entry = await this.state.completeRun('cancelled');
+          entry = await this.state.completeRun('cancelled', checkpointRan);
         } else {
           const history = await this.state.listHistory();
           if (history.length > 0) {
@@ -124,16 +216,18 @@ export class LoopRunner {
           status: 'cancelled',
           finalRun: currentRun,
           historyEntry: entry,
+          checkpointRan,
         };
       }
 
       console.error('Loop error:', error instanceof Error ? error.message : error);
       if (error instanceof Error && error.stack) console.error(error.stack);
-      const entry = await this.state.completeRun('failed');
+      const entry = await this.state.completeRun('failed', checkpointRan);
       return {
         status: 'failed',
         finalRun: currentRun,
         historyEntry: entry,
+        checkpointRan,
       };
     }
   }
@@ -151,7 +245,7 @@ export class LoopRunner {
     }
   }
 
-  async runIteration(run: Run, config: Config, dirHash: string): Promise<IterationResult> {
+  async runIteration(run: Run, config: Config, dirHash: string, specContent: string): Promise<IterationResult> {
     await this.assertRunActive();
     const iterNum = await this.state.incrementIteration();
 
@@ -167,14 +261,6 @@ export class LoopRunner {
     const currentRun = await this.state.loadRun();
     if (!currentRun) {
       throw new CancelledError('Run was cancelled and archived', true);
-    }
-
-    // Load spec content
-    let specContent: string;
-    try {
-      specContent = await fs.readFile(currentRun.spec, 'utf-8');
-    } catch {
-      throw new Error(`Spec file not found: ${currentRun.spec}\nRun 'dev-loop init' to create it.`);
     }
 
     // Build iteration data with updated run
@@ -254,5 +340,36 @@ export class LoopRunner {
       implementerResult: implResult,
       reviewerResults,
     };
+  }
+
+  /**
+   * Run the checkpointer to detect conflicts, auto-fix spec, or compress spec
+   */
+  async runCheckpoint(
+    run: Run,
+    config: Config,
+    dirHash: string,
+    specContent: string,
+  ): Promise<agents.CheckpointerResult> {
+    await this.assertRunActive();
+
+    // Phase: Checkpointing
+    await this.state.updatePhase('reviewing');
+
+    const checkpointResult = await this.agentRunner.runCheckpointer({
+      runId: run.id,
+      iteration: run.iteration,
+      dirHash,
+      specPath: run.spec,
+      specContent,
+      timeout: config.reviewerTimeout, // Use reviewer timeout for checkpointer
+    });
+
+    await this.assertRunActive();
+
+    // Phase: Done
+    await this.state.updatePhase('done');
+
+    return checkpointResult;
   }
 }

@@ -1,6 +1,6 @@
 import * as path from 'path';
 import * as fs from 'fs/promises';
-import type { Config, Run, Session, VerdictFile, HistoryEntry } from './types';
+import type { Config, Run, Session, VerdictFile, HistoryEntry, CheckpointResult } from './types';
 import { DEFAULT_CONFIG } from './types';
 
 // ============================================================================
@@ -79,8 +79,10 @@ export interface StateService {
   saveRun(run: Run): Promise<void>;
   updatePhase(phase: Run['phase']): Promise<void>;
   incrementIteration(): Promise<number>;
+  incrementConsecutiveFailures(): Promise<number>;
+  resetConsecutiveFailures(): Promise<void>;
   addLearning(learning: string): Promise<void>;
-  completeRun(status: Run['status']): Promise<HistoryEntry>;
+  completeRun(statusOrCheckpointRan?: Run['status'] | boolean, checkpointRanFlag?: boolean): Promise<HistoryEntry>;
   cancelRun(): Promise<void>;
   saveSession(session: Session): Promise<void>;
   loadSessions(): Promise<Session[]>;
@@ -89,11 +91,19 @@ export interface StateService {
   clearVerdicts(iteration: number): Promise<void>;
   clearReviews(): Promise<void>;
   readLearnings(): Promise<string | null>;
-  archiveRun(): Promise<HistoryEntry>;
+  archiveRun(checkpointRan?: boolean): Promise<HistoryEntry>;
   listHistory(): Promise<HistoryEntry[]>;
   clearCurrentRun(): Promise<void>;
   destroy(): Promise<void>;
   destroyAll(): Promise<void>;
+  // Checkpoint methods
+  saveCheckpointResult(result: CheckpointResult, iteration?: number): Promise<void>;
+  loadCheckpointResult(): Promise<CheckpointResult | null>;
+  loadCheckpointResultForIteration(iteration: number): Promise<CheckpointResult | null>;
+  clearCheckpointResult(): Promise<void>;
+  backupSpec(runId: string): Promise<string>;
+  loadSpec(): Promise<string>;
+  saveSpec(content: string): Promise<void>;
 }
 
 export interface HistoryService {

@@ -28,9 +28,22 @@ export async function handler(state: StateService, tmux: TmuxService): Promise<v
         killed++;
       }
     }
+
+    // Also kill any checkpointer session (has "checkpoint" in the name)
+    for (const session of sessions) {
+      if (session.includes('-checkpoint') && session.includes(targetRunId)) {
+        if (await tmux.killSession(session)) {
+          killed++;
+        }
+      }
+    }
+
     if (killed > 0) {
       console.log(`Killed ${killed} tmux session(s)`);
     }
+
+    // Clean up checkpoint result file (preserves spec-{runId}.md backups and conflict.md)
+    await state.clearCheckpointResult();
 
     if (run) {
       const stillActive = await state.loadRun();

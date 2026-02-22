@@ -17,7 +17,7 @@ An iterative development loop where an implementer works from a spec, and multip
 
 ## Prerequisites
 
-- `jq` installed
+- `tmux` installed (brew install tmux / apt install tmux)
 - At least one `claude-*` binary available
 - For reviewers: `claude-reviewer-*` binaries configured
 
@@ -32,8 +32,8 @@ An iterative development loop where an implementer works from a spec, and multip
 │   • Initialize kagent in .kagent                            │
 │   • Ask user: start now or later?                           │
 └─────────────────────────────────────────────────────────────┘
-                           │
-                           ▼
+                          │
+                          ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ Phase 2: Execution                                           │
 │   If user chose "start now":                                 │
@@ -48,7 +48,7 @@ An iterative development loop where an implementer works from a spec, and multip
 │     for each iteration:                                     │
 │       executor --print "implement..."                       │
 │       reviewers run IN PARALLEL                             │
-│     Until: ALL approve OR max loops reached                 │
+│     Until: ALL approve OR max iterations reached            │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -79,8 +79,16 @@ Use `AskUserQuestion` with `multiSelect: true`:
 ### Step 4: Initialize KAgent
 
 ```bash
-dev-loop init --claude <executor> --reviewers "<reviewer1,reviewer2>"
+dev-loop init --implementer <executor> --reviewers "<reviewer1,reviewer2>"
 ```
+
+Options:
+
+- `--implementer <binary>`: Implementer binary name (default: claude)
+- `--reviewers <list>`: Reviewer binaries, comma-separated (default: claude-reviewer-zai)
+- `--max-iterations <n>`: Maximum iterations (default: 10)
+- `--implementer-timeout <mins>`: Implementer timeout (default: 30)
+- `--reviewer-timeout <mins>`: Reviewer timeout (default: 15)
 
 ### Step 5: Write Spec
 
@@ -120,7 +128,7 @@ Then use TaskOutput to wait for completion. This blocks until the loop finishes.
 **When complete, report results:**
 
 - If success: "KAgent run completed! All reviewers approved."
-- If max loops: "Max loops reached. Reviewers couldn't reach consensus."
+- If max iterations: "Max iterations reached. Reviewers couldn't reach consensus."
 
 **Offer follow-up actions via `AskUserQuestion`:**
 
@@ -132,7 +140,7 @@ Then use TaskOutput to wait for completion. This blocks until the loop finishes.
   - "Run tests"
   - "Start another loop with refined spec"
 
-**Note on logs:** User can check `.kagent/run.log` for the full output. Detailed session logs are in each claude binary's config directory.
+**Note on logs:** User can check `.kagent/run.log` for the full output. Detailed session logs are in `.kagent/logs/{runId}/`.
 
 ### Step 8b: If User Wants to Start Themselves
 
@@ -163,7 +171,7 @@ Explain to the user:
 
 1. Check `.kagent/` directory exists
 2. Check `spec.md` exists and is complete
-3. Check `loop-state.json` has been initialized with correct executor and reviewers
+3. Check `config.json` has been initialized with correct implementer and reviewers
 4. Loop has been started (either by you or user has the command)
 
 ## Reference
@@ -171,8 +179,8 @@ Explain to the user:
 See [reference.md](reference.md) for:
 
 - All CLI commands and options
-- State file formats
-- Environment variables
+- State file formats and directory structure
+- Tmux session naming and agent invocation
 
 ## Examples
 
@@ -180,6 +188,7 @@ See [examples.md](examples.md) for complete session examples.
 
 ## Version History
 
+- v5.0.0 (2025-02): Align docs with source - fix CLI flags, state file formats, directory structure
 - v4.0.0 (2025-02): Use background bash task instead of tmux, remove --dir flag
 - v3.0.0 (2025-02): Renamed to kagent-run, added option to start & monitor
 - v2.0.0 (2025-01): Restructured per skill best practices

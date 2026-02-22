@@ -10,6 +10,9 @@ export function formatHistoryEntry(entry: HistoryEntry): string {
   lines.push(`  Iterations: ${entry.iterations}`);
   lines.push(`  Started: ${format(new Date(entry.startedAt), 'yyyy-MM-dd HH:mm:ss')}`);
   lines.push(`  Completed: ${format(new Date(entry.completedAt), 'yyyy-MM-dd HH:mm:ss')}`);
+  if (entry.checkpointRan) {
+    lines.push(`  Checkpoint ran: ${pc.cyan('yes')}`);
+  }
   lines.push('');
 
   for (const sum of entry.summary) {
@@ -23,6 +26,20 @@ export function formatHistoryEntry(entry: HistoryEntry): string {
 
     if (sum.learnings.length > 0) {
       lines.push(`    Learnings: ${sum.learnings.length}`);
+    }
+
+    if (sum.checkpointInfo) {
+      const outcomeColors: Record<string, (s: string) => string> = {
+        conflict_found: pc.red,
+        spec_auto_fixed: pc.green,
+        spec_compressed: pc.blue,
+        no_action: pc.dim,
+      };
+      const colorFn = outcomeColors[sum.checkpointInfo.outcome] || pc.dim;
+      lines.push(`    Checkpoint: ${colorFn(sum.checkpointInfo.outcome)}`);
+      if (sum.checkpointInfo.progressPercent !== undefined) {
+        lines.push(`      Progress: ${sum.checkpointInfo.progressPercent}%`);
+      }
     }
   }
 
@@ -38,7 +55,8 @@ export function formatHistoryList(entries: HistoryEntry[]): string {
     .map(e => {
       const date = format(new Date(e.startedAt), 'MM-dd HH:mm');
       const status = formatStatus(e.status);
-      return `${e.id}  ${date}  ${status}  ${e.iterations} iterations`;
+      const checkpoint = e.checkpointRan ? pc.cyan(' ⚡') : '';
+      return `${e.id}  ${date}  ${status}  ${e.iterations} iterations${checkpoint}`;
     })
     .join('\n');
 }
@@ -51,6 +69,8 @@ function formatStatus(status: string): string {
       return pc.yellow('cancelled');
     case 'failed':
       return pc.red('failed');
+    case 'conflict':
+      return pc.red('conflict');
     default:
       return status;
   }

@@ -24,7 +24,13 @@ export async function handler(deps: { state: StateService; tmux: TmuxService }):
     const config = await deps.state.loadConfig();
 
     // Create agent runner with configured binaries
-    const agentRunner = new AgentRunner(deps.tmux, deps.state, config.implementer, config.reviewers);
+    const agentRunner = new AgentRunner(
+      deps.tmux,
+      deps.state,
+      config.implementer,
+      config.reviewers,
+      config.conflictChecker, // defaults to implementer binary if not specified
+    );
 
     // Create loop runner
     const loopRunner = new LoopRunner(deps.state, deps.tmux, agentRunner);
@@ -34,6 +40,11 @@ export async function handler(deps: { state: StateService; tmux: TmuxService }):
 
     console.log('');
     console.log(`Loop finished: ${result.status}`);
+
+    // Exit with code 2 if conflict was detected
+    if (result.status === 'conflict') {
+      process.exit(2);
+    }
   } catch (err) {
     console.error(`Error: ${(err as Error).message}`);
     process.exit(1);

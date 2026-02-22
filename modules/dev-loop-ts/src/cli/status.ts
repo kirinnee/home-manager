@@ -20,8 +20,12 @@ export async function handler(state: StateService): Promise<void> {
     console.log(pc.cyan('Config:'));
     console.log(`  Implementer: ${config.implementer}`);
     console.log(`  Reviewers: ${config.reviewers.join(', ')}`);
+    if (config.conflictChecker) {
+      console.log(`  Conflict checker: ${config.conflictChecker}`);
+    }
     console.log(`  Max iterations: ${config.maxIterations}`);
     console.log(`  Timeouts: impl ${config.implementerTimeout}m, rev ${config.reviewerTimeout}m`);
+    console.log(`  Conflict check threshold: ${config.conflictCheckThreshold} failures`);
     console.log('');
 
     if (!run) {
@@ -35,7 +39,34 @@ export async function handler(state: StateService): Promise<void> {
     console.log(`  Iteration: ${run.iteration} / ${config.maxIterations}`);
     console.log(`  Phase: ${run.phase}`);
     console.log(`  Started: ${format(new Date(run.startedAt), 'yyyy-MM-dd HH:mm:ss')}`);
+
+    // Show consecutive failures if any
+    if (run.consecutiveFailures > 0) {
+      const failureColor = run.consecutiveFailures >= config.conflictCheckThreshold ? pc.red : pc.yellow;
+      console.log(
+        `  Consecutive failures: ${failureColor(`${run.consecutiveFailures} / ${config.conflictCheckThreshold}`)}`,
+      );
+    }
     console.log('');
+
+    // Show checkpoint result if available
+    const checkpointResult = await state.loadCheckpointResult();
+    if (checkpointResult) {
+      const outcomeColors: Record<string, (s: string) => string> = {
+        conflict_found: pc.red,
+        spec_auto_fixed: pc.green,
+        spec_compressed: pc.blue,
+        no_action: pc.dim,
+      };
+      const outcomeColor = outcomeColors[checkpointResult.outcome] || pc.dim;
+      console.log(pc.cyan('Last Checkpoint:'));
+      console.log(`  Outcome: ${outcomeColor(checkpointResult.outcome)}`);
+      console.log(`  Summary: ${checkpointResult.summary}`);
+      if (checkpointResult.progressPercent !== undefined) {
+        console.log(`  Progress: ${checkpointResult.progressPercent}%`);
+      }
+      console.log('');
+    }
 
     if (run.learnings.length > 0) {
       console.log(pc.cyan(`Learnings (${run.learnings.length}):`));
@@ -53,7 +84,12 @@ export async function handler(state: StateService): Promise<void> {
         for (const s of currentIterSessions) {
           const status =
             s.status === 'running' ? pc.yellow('●') : s.status === 'completed' ? pc.green('✓') : pc.red('✗');
-          const role = s.role === 'implementer' ? '🔨 impl' : `🔍 rev${s.reviewerIndex ?? ''}`;
+          const role =
+            s.role === 'implementer'
+              ? '🔨 impl'
+              : s.role === 'checkpointer'
+                ? '🔧 checkpoint'
+                : `🔍 rev${s.reviewerIndex ?? ''}`;
           const binary = s.binary ? pc.dim(` (${s.binary})`) : '';
           const verdict = s.verdict ? (s.verdict === 'approved' ? pc.green(' ✓') : pc.red(' ✗')) : '';
           console.log(`  ${status} ${role}${binary}${verdict} ${pc.dim(s.tmuxSession)}`);

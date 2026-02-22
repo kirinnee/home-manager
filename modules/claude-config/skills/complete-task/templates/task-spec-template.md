@@ -1,14 +1,14 @@
-# Specification: {Ticket Title} ({TICKET_ID})
+# Task Specification: {Ticket Title} ({TICKET_ID})
 
 ## Source
 
 - Ticket: {TICKET_ID}
-- System: {Jira/ClickUp}
+- System: {Jira|ClickUp}
 - URL: {ticket-url}
 
 ## Objective
 
-{From ticket description - clear statement of what to build}
+{From ticket description - clear statement of what to build, 1-3 sentences}
 
 ## Acceptance Criteria
 
@@ -38,4 +38,4 @@
 
 ## Context
 
-{Additional context from ticket comments or clarifying questions}
+{Additional context from ticket comments, user clarifications, and answers to clarifying questions}
