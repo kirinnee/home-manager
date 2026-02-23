@@ -87,9 +87,11 @@ Include `[TICKET_ID]` prefix in the title when available. If null, use a descrip
 
 **If PR exists:** Push auto-updates it. No action needed.
 
-## Step 5: CodeRabbitAI Re-Review
+## Step 5: PR Re-Review Comment
 
-**REQUIRED** after every push that addresses polling feedback (CI fixes, review comments, conversations). Post this comment on the PR:
+**REQUIRED** after every push that addresses polling feedback (CI fixes, review comments, conversations). Post a comment on the PR based on the repository:
+
+### For atomicloud repos:
 
 ```bash
 gh pr comment <prNumber> --body "$(cat <<'EOF'
@@ -104,12 +106,15 @@ EOF
 )"
 ```
 
-This template:
+### For vungle repos:
 
-- Acknowledges the work done to address feedback
-- Requests thorough review of all conversations
-- Asks for re-review to catch any remaining issues
-- Includes the required signature
+```bash
+gh pr comment <prNumber> --body "@claude please review the changes and approve if possible"
+```
+
+### For all other repos:
+
+No re-review comment required — skip this step.
 
 ## Update State
 

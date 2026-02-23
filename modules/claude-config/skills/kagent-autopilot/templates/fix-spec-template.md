@@ -37,11 +37,11 @@ Ticket: {TICKET_ID} - {TICKET_TITLE}
 - **@{author}** on {file}:{line}: {comment text}
   - Action: {address the feedback — fix code, reply to resolve, or mark as won't-fix with justification}
 
-**After addressing all conversations:** Add a comment on the PR mentioning `@coderabbitai` to trigger a re-review and auto-resolve resolved threads. Example:
+**After addressing all conversations:** Add a comment on the PR to trigger a re-review (repo-dependent):
 
-```
-@coderabbitai please review - all feedback has been addressed
-```
+- **atomicloud repos:** `@coderabbitai please review - all feedback has been addressed`
+- **vungle repos:** `@claude please review the changes and approve if possible`
+- **Other repos:** No comment needed
 
 ### Spec Clarification
 

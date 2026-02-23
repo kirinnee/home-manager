@@ -58,7 +58,7 @@ Consider ALL comments from ALL sources when evaluating what needs to be addresse
 
 ## CodeRabbitAI Handling
 
-When exit 2 (changes requested) or exit 5 (conversations blocking) involves comments from `@coderabbitai`:
+**Only for atomicloud repos:** When exit 2 (changes requested) or exit 5 (conversations blocking) involves comments from `@coderabbitai`:
 
 1. **Evaluate each comment critically** — do NOT blindly follow. Ask yourself: is this comment valid? Does it apply to the actual code? Is the suggestion correct?
 2. **For invalid comments:** Reply directly to that PR conversation thread explaining why the comment is not applicable or incorrect. This dismisses the concern and helps resolve the thread.
@@ -66,7 +66,7 @@ When exit 2 (changes requested) or exit 5 (conversations blocking) involves comm
 
 ### Replying to PR Comments
 
-When replying to any PR comment (inline or general), **always** include a signature:
+**For atomicloud repos only:** When replying to any PR comment (inline or general), include a signature:
 
 ```
 By Claude Code Kagent Autopilot 🤖
@@ -79,6 +79,8 @@ gh api repos/{owner}/{repo}/pulls/comments/{commentId}/replies -f body="Your res
 
 By Claude Code Kagent Autopilot 🤖"
 ```
+
+**For vungle and other repos:** No signature required.
 
 After pushing fixes that address coderabbitai feedback (in the pushing phase), a PR comment will be posted to trigger re-review — see `phases/pushing.md`.
 
@@ -108,11 +110,26 @@ Fix the issues **directly** — no dev-loop, no spec files. Instead:
 
 ## Completed (Exit 0)
 
+**Move ticket to "Review" status:**
+
+**Jira (`ticketSystem: "jira"`):**
+
+```bash
+acli jira workitem transition {ticketId} --transition "Review"
+```
+
+**ClickUp (`ticketSystem: "clickup"`):**
+Use ClickUp MCP to update task status to "review".
+
+Skip this step if `ticketId` is null. Note: Status names may vary by workspace — adapt to your ticket system's actual status names (e.g., "In Review", "Code Review", etc.).
+
+Then report success:
+
 ```
 Task Complete!
   Ticket: {ticketId}
   PR: #{prNumber} - [{ticketId}] {ticketTitle}
-  URL: https://github.com/{owner}/{repo}/pull/{prNumber}
+  Link: https://github.com/{owner}/{repo}/pull/{prNumber}
   Push cycles used: {pushCycle}/{maxPushCycles}
 
   To merge: gh pr merge {prNumber}
