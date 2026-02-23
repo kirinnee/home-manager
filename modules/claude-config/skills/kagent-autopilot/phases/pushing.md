@@ -89,10 +89,10 @@ Include `[TICKET_ID]` prefix in the title when available. If null, use a descrip
 
 ## Step 5: CodeRabbitAI Re-Review
 
-If this push cycle addressed feedback from `@coderabbitai`, comment on the PR after pushing:
+**REQUIRED** after every push that addresses polling feedback (CI fixes, review comments, conversations). Post this comment on the PR:
 
 ```bash
-gh pr comment <prNumber> --body "@coderabbitai please resolve the conversation if the issue is no longer present, and re-review the PR"
+gh pr comment <prNumber> --body "@coderabbitai i have resolved the issues raised, please verify if they are resolved and if they are, mark the conversation as resolved, and re-review"
 ```
 
 ## Update State
