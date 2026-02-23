@@ -27,6 +27,7 @@
       "lark"
       "zoom"
       "zen"
+      "zed"
       "cloudflare-warp"
       "aptakube"
       "beekeeper-studio"
@@ -34,7 +35,6 @@
       "voiceink"
       "google-chrome"
       "clickup"
-      "antigravity"
     ];
     masApps = { };
   };
@@ -77,7 +77,22 @@
   # ============================================================
   # Launch Daemons & Agents (background services)
   # ============================================================
-  launchd.daemons = { };
+  launchd.daemons = {
+    # Increase max open files limit (default 256 is too low for nix-daemon)
+    limit-maxfiles = {
+      serviceConfig = {
+        Label = "limit.maxfiles";
+        ProgramArguments = [
+          "/bin/launchctl"
+          "limit"
+          "maxfiles"
+          "65536"
+          "524288"
+        ];
+        RunAtLoad = true;
+      };
+    };
+  };
 
   # ============================================================
   # System state & tracking

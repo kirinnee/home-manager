@@ -208,6 +208,7 @@ rec {
     tesseract
     age
     sops
+    nil
     atomi.cyanprint
     atomi.attic
     atomi.worktrunk
@@ -491,7 +492,7 @@ rec {
       oh-my-zsh = {
         enable = true;
         extraConfig = ''
-          ZSH_CUSTOM="${customDir}" 
+          ZSH_CUSTOM="${customDir}"
         '';
         plugins = [
           "kubectl"

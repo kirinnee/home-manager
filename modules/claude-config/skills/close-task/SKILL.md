@@ -6,11 +6,11 @@ argument-hint: '[PR_NUMBER]'
 
 # Close Task - Merge PR and Clean Up
 
-Merges the PR, removes the Obsidian symlink (if present), and deletes the worktree (if applicable). This is the counterpart to `/complete-task`.
+Merges the PR, removes the Obsidian symlink (if present), and deletes the worktree (if applicable). This is the counterpart to `/kagent-autopilot`.
 
 ## When to Use
 
-- User runs `/close-task` after `/complete-task` reports success
+- User runs `/close-task` after `/kagent-autopilot` reports success
 - User wants to merge a PR and clean up the workspace
 - User wants to tear down a worktree after a task is done
 
