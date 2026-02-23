@@ -12,11 +12,21 @@ dev-loop poll-pr <prNumber>
 
 Use `run_in_background: true` with Bash tool, then wait with TaskOutput. This costs zero tokens — it polls `gh` CLI + GraphQL API.
 
+**IMPORTANT:** Always remind the user of the PR URL when polling:
+
+```
+Polling PR #{prNumber}: https://github.com/{owner}/{repo}/pull/{prNumber}
+```
+
 Update state: `phase: "polling"`
 
 ## Evaluate Result
 
-When the poller exits, check the exit code:
+When the poller exits, check the exit code. **Always include the PR URL in your status update:**
+
+```
+PR #{prNumber}: https://github.com/{owner}/{repo}/pull/{prNumber}
+```
 
 | Exit | Meaning                                                                 | Action                                           |
 | ---- | ----------------------------------------------------------------------- | ------------------------------------------------ |
@@ -102,6 +112,7 @@ Fix the issues **directly** — no dev-loop, no spec files. Instead:
 Task Complete!
   Ticket: {ticketId}
   PR: #{prNumber} - [{ticketId}] {ticketTitle}
+  URL: https://github.com/{owner}/{repo}/pull/{prNumber}
   Push cycles used: {pushCycle}/{maxPushCycles}
 
   To merge: gh pr merge {prNumber}
@@ -117,6 +128,7 @@ Update state: `phase: "completed"`
 Max push cycles reached ({pushCycle}/{maxPushCycles})
   Ticket: {ticketId}
   PR: #{prNumber}
+  URL: https://github.com/{owner}/{repo}/pull/{prNumber}
 
   Remaining issues:
   - {issue details from poller output}
