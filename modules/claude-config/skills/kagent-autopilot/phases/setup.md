@@ -64,7 +64,11 @@ Before generating spec, ask about unclear requirements, technical approach, or s
 
 ### Step 5: Generate task-spec.md
 
-Create `.kagent/task-spec.md` using [templates/task-spec-template.md](../templates/task-spec-template.md) populated with ticket data and clarifications.
+Create `spec/<task-id>/task-spec.md` using [templates/task-spec-template.md](../templates/task-spec-template.md) populated with ticket data and clarifications.
+
+```bash
+mkdir -p spec/<task-id>
+```
 
 **MANDATORY:** Present spec and get user approval via `AskUserQuestion` before proceeding.
 
@@ -72,7 +76,10 @@ Create `.kagent/task-spec.md` using [templates/task-spec-template.md](../templat
 
 On approval:
 
-1. Ensure `.kagent` is in `.gitignore` (append if missing — check with `grep -qx '.kagent' .gitignore`)
+1. Ensure only `.kagent` is in `.gitignore` (NOT `spec/` — specs are committed):
+   ```bash
+   grep -qx '.kagent' .gitignore || echo '.kagent' >> .gitignore
+   ```
 2. If Obsidian symlink opted in:
    ```bash
    PROJECT_DIR=$(pwd)
@@ -83,7 +90,12 @@ On approval:
    [ ! -L ".kagent" ] && ln -s "$OBSIDIAN_TARGET" .kagent
    ```
 3. Verify on feature branch (not main/master) — fail if not
-4. Write `.kagent/task-state.json`:
+4. Commit the spec files:
+   ```bash
+   git add spec/<task-id>/
+   git commit -m "docs: add task spec for <task-id>"
+   ```
+5. Write `.kagent/task-state.json`:
 
 ```json
 {
@@ -111,11 +123,14 @@ On approval:
   "implementerTimeout": 30,
   "reviewerTimeout": 15,
   "conflictCheckThreshold": 3,
-  "conflictChecker": "claude"
+  "conflictChecker": "claude",
+  "specDir": "spec/PE-1234",
+  "subPlans": null,
+  "currentSubPlanIndex": null
 }
 ```
 
-**Next:** Read `phases/run-spec.md` and follow it.
+**Next:** Read `phases/sub-planning.md` and follow it.
 
 ---
 
@@ -134,7 +149,7 @@ Optionally detect ticket ID from branch (same patterns as autopilot). If found, 
 
 ### Step 2: Initialize State
 
-1. Ensure `.kagent` is in `.gitignore`
+1. Ensure only `.kagent` is in `.gitignore` (NOT `spec/`)
 2. Set up Obsidian symlink if opted in (same as autopilot Step 6)
 3. Verify on feature branch (not main/master) — fail if not
 4. Write `.kagent/task-state.json`:
@@ -165,7 +180,10 @@ Optionally detect ticket ID from branch (same patterns as autopilot). If found, 
   "implementerTimeout": null,
   "reviewerTimeout": null,
   "conflictCheckThreshold": null,
-  "conflictChecker": null
+  "conflictChecker": null,
+  "specDir": null,
+  "subPlans": null,
+  "currentSubPlanIndex": null
 }
 ```
 

@@ -29,6 +29,23 @@ When the poller exits, check the exit code:
 
 **Before retrying (exits 1, 2, 5):** Check `pushCycle >= maxPushCycles`. If so, transition to **Failed** instead.
 
+## Fetch All PR Comments
+
+**IMPORTANT:** Before processing any feedback, always fetch ALL PR comments to get complete context:
+
+```bash
+# Get all review comments (inline code comments)
+gh api repos/{owner}/{repo}/pulls/{prNumber}/comments --jq '.[] | {id, path, line, body, user: .user.login, created_at}'
+
+# Get all issue comments (general PR comments)
+gh api repos/{owner}/{repo}/issues/{prNumber}/comments --jq '.[] | {id, body, user: .user.login, created_at}'
+
+# Get all review threads (for conversation resolution status)
+gh api repos/{owner}/{repo}/pulls/{prNumber}/reviews --jq '.[] | {id, user: .user.login, state, body}'
+```
+
+Consider ALL comments from ALL sources when evaluating what needs to be addressed, not just the poller output.
+
 ## CodeRabbitAI Handling
 
 When exit 2 (changes requested) or exit 5 (conversations blocking) involves comments from `@coderabbitai`:
@@ -36,6 +53,22 @@ When exit 2 (changes requested) or exit 5 (conversations blocking) involves comm
 1. **Evaluate each comment critically** — do NOT blindly follow. Ask yourself: is this comment valid? Does it apply to the actual code? Is the suggestion correct?
 2. **For invalid comments:** Reply directly to that PR conversation thread explaining why the comment is not applicable or incorrect. This dismisses the concern and helps resolve the thread.
 3. **For valid comments only:** Include them in fixes. Ignore invalid ones.
+
+### Replying to PR Comments
+
+When replying to any PR comment (inline or general), **always** include a signature:
+
+```
+By Claude Code Kagent Autopilot 🤖
+```
+
+Example inline comment reply:
+
+```bash
+gh api repos/{owner}/{repo}/pulls/comments/{commentId}/replies -f body="Your response here.
+
+By Claude Code Kagent Autopilot 🤖"
+```
 
 After pushing fixes that address coderabbitai feedback (in the pushing phase), a PR comment will be posted to trigger re-review — see `phases/pushing.md`.
 

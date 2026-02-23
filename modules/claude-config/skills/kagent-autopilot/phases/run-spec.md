@@ -1,10 +1,30 @@
 # Phase: Run Spec
 
-This phase writes the spec file for dev-loop and starts the run. It handles both the first cycle (fresh from task-spec) and subsequent cycles (fix spec from feedback).
+This phase writes the spec file for dev-loop and starts the run. It handles both the first cycle (fresh from task-spec or sub-plans) and subsequent cycles (fix spec from feedback).
+
+## Directory Structure
+
+Specs are stored in a committed directory structure:
+
+```
+spec/
+└── <task-id>/              # e.g., "PE-1234" or "feature-auth"
+    ├── task-spec.md        # Original full task spec (persistent)
+    └── plans/              # Only created if sub-plans are needed
+        ├── phase-1.md      # Sub-plan 1
+        ├── phase-2.md      # Sub-plan 2
+        └── ...
+```
+
+**IMPORTANT:** The `spec/` directory is committed to git. Only `.kagent/` is gitignored.
 
 ## First Push Cycle (`devLoopInitialized` is false)
 
-1. Copy `.kagent/task-spec.md` content to `.kagent/spec.md`
+### Step 1: Initialize Dev-Loop
+
+1. Copy appropriate spec to `.kagent/spec.md`:
+   - Single plan: `spec/<task-id>/task-spec.md`
+   - Sub-plans: current sub-plan file from `subPlans[currentSubPlanIndex].file`
 2. Initialize dev-loop:
    ```bash
    dev-loop init \
@@ -27,9 +47,52 @@ This phase writes the spec file for dev-loop and starts the run. It handles both
 2. Generate fix spec from feedback (see below)
 3. Write fix spec to `.kagent/spec.md` (overwrites previous)
 
+## Handling Sub-Plans
+
+**If using sub-plans (`subPlans` is not null):**
+
+After a dev-loop run completes successfully (exit 0, status `completed`):
+
+1. **Commit the sub-plan's changes** — each sub-plan gets its own commit:
+
+   ```bash
+   git add -A  # Stage all changes from this sub-plan
+   git commit -m "$(cat <<'EOF'
+   <type>(<scope>): <sub-plan summary>
+
+   [<ticket-id>]
+
+   Phase N of M: <sub-plan title>
+
+   - Change 1
+   - Change 2
+   EOF
+   )"
+   ```
+
+2. Mark current sub-plan as complete in state:
+   ```json
+   { "id": "phase-N", "file": "spec/<task-id>/plans/phase-N.md", "status": "completed" }
+   ```
+3. Check if there are more pending sub-plans
+4. **If more sub-plans exist:**
+   - Increment `currentSubPlanIndex`
+   - Copy next sub-plan to `.kagent/spec.md`
+   - **Do NOT push yet** — continue to next sub-plan
+   - Read `phases/running.md` and follow it (start next dev-loop run)
+5. **If all sub-plans complete:**
+   - All changes are committed and ready — proceed to push phase
+   - Read `phases/pushing.md` and follow it (this pushes all commits together)
+
+This approach:
+
+- Creates one commit per sub-plan for clear history
+- Keeps related changes grouped together
+- Pushes once at the end with all commits
+
 ## Fix Spec Generation
 
-Use [templates/fix-spec-template.md](../templates/fix-spec-template.md). Read `.kagent/task-spec.md` for original context, then gather feedback from the appropriate source:
+Use [templates/fix-spec-template.md](../templates/fix-spec-template.md). Read `spec/<task-id>/task-spec.md` (use `specDir` from state) for original context, then gather feedback from the appropriate source:
 
 | Feedback Source          | How to Get                                                                                                                                                                            |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

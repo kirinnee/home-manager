@@ -92,8 +92,24 @@ Include `[TICKET_ID]` prefix in the title when available. If null, use a descrip
 **REQUIRED** after every push that addresses polling feedback (CI fixes, review comments, conversations). Post this comment on the PR:
 
 ```bash
-gh pr comment <prNumber> --body "@coderabbitai i have resolved the issues raised, please verify if they are resolved and if they are, mark the conversation as resolved, and re-review"
+gh pr comment <prNumber> --body "$(cat <<'EOF'
+@coderabbitai I have attempted to resolve all the issues mentioned, and replied to conversations that need further discussion.
+
+Please:
+1. Look through each and every conversation, and resolve those that you think have been resolved (if you agree, have learnt something, please resolve it too after commenting)
+2. Perform a re-review to see if there are any other issues
+
+By Claude Code Kagent Autopilot 🤖
+EOF
+)"
 ```
+
+This template:
+
+- Acknowledges the work done to address feedback
+- Requests thorough review of all conversations
+- Asks for re-review to catch any remaining issues
+- Includes the required signature
 
 ## Update State
 

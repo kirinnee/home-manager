@@ -24,6 +24,35 @@ Store `lastRunId`, `lastRunExitCode`, and `lastRunStatus` in state.
 
 Status in history file is `completed`.
 
+**If using sub-plans (`subPlans` is not null):**
+
+1. **Commit the sub-plan's changes** — each sub-plan gets its own commit:
+
+   ```bash
+   git add -A
+   git commit -m "$(cat <<'EOF'
+   <type>(<scope>): <sub-plan summary>
+
+   [<ticket-id>]
+
+   Phase N of M: <sub-plan title>
+
+   - Change 1
+   - Change 2
+   EOF
+   )"
+   ```
+
+2. Mark current sub-plan as completed in state:
+   ```json
+   { "id": "phase-N", "file": "spec/<task-id>/plans/phase-N.md", "status": "completed" }
+   ```
+3. Check remaining sub-plans:
+   - **More pending sub-plans:** Increment `currentSubPlanIndex`, copy next sub-plan file to `.kagent/spec.md`, read `phases/run-spec.md` to start next dev-loop run (skip initialization)
+   - **All sub-plans done:** All commits ready — proceed to push phase below
+
+**If single spec (no sub-plans):**
+
 **Next:** Read `phases/pushing.md` and follow it.
 
 ### Exit 0 — Max Iterations (consensus not reached)

@@ -13,20 +13,34 @@ Two modes:
 
 ## Glossary
 
-| Term           | Scope                            | Description                                                              |
-| -------------- | -------------------------------- | ------------------------------------------------------------------------ |
-| **Iteration**  | Inner (dev-loop, autopilot only) | One implement-then-review pass. Controlled by `maxIterations`.           |
-| **Push cycle** | Outer (both modes)               | One round: commit, push, CI/review check. Controlled by `maxPushCycles`. |
-| **Conflict**   | Dev-loop exit 2 (autopilot only) | The spec contains contradictory or ambiguous requirements.               |
+| Term           | Scope                            | Description                                                                             |
+| -------------- | -------------------------------- | --------------------------------------------------------------------------------------- |
+| **Iteration**  | Inner (dev-loop, autopilot only) | One implement-then-review pass. Controlled by `maxIterations`.                          |
+| **Push cycle** | Outer (both modes)               | One round: commit, push, CI/review check. Controlled by `maxPushCycles`.                |
+| **Sub-plan**   | Autopilot only (optional)        | A portion of a large task spec. Multiple sub-plans are run sequentially before pushing. |
+| **Conflict**   | Dev-loop exit 2 (autopilot only) | The spec contains contradictory or ambiguous requirements.                              |
 
 ## State Machine
 
 ```
 Autopilot mode:
-  [setup] ──→ run_spec ──→ running ──→ pushing ──→ polling ──→ completed
-                 ↑            |           |           |
-                 +────────────+───────────+───────────+
-                 (feedback from CI/reviews → fix spec → dev-loop)
+  [setup] ──→ approved ──→ sub_planning ──→ run_spec ──→ running ──→ pushing ──→ polling ──→ completed
+                                │               ↑            │           │           │
+                                │               │            │           │           │
+                                │               └────────────┴───────────┴───────────┘
+                                │                    (feedback from CI/reviews → fix spec)
+                                │
+                                ├──→ (skip if no sub-plans needed) ──→ run_spec
+                                │
+                                └──→ (if sub-plans approved)
+                                         │
+                                         └──→ run_spec ──→ running ──→ commit ──→ [more sub-plans?]
+                                                                            │
+                                          ┌─────────────────────────────────┘
+                                          ↓
+                                     yes: next sub-plan ──→ running (loop)
+                                          │
+                                          └──→ no: pushing ──→ polling ──→ completed
 
 Manual mode:
   [setup] ──→ pushing ──→ polling ──→ completed
@@ -35,35 +49,60 @@ Manual mode:
                  (feedback from CI/reviews → agent fixes directly)
 ```
 
+**Note:** Sub-planning is an optional phase that requires user approval. Each sub-plan results in its own commit. All commits are pushed together at the end.
+
 ## Key State Fields (`.kagent/task-state.json`)
 
-| Field                | Type        | Description                                                                     |
-| -------------------- | ----------- | ------------------------------------------------------------------------------- |
-| `phase`              | string      | Current state: approved, run_spec, running, pushing, polling, completed, failed |
-| `mode`               | string      | `"autopilot"` (dev-loop) or `"manual"` (direct fixes)                           |
-| `ticketId`           | string/null | Ticket ID (PE-1234, CU-abc123). Null in manual mode if no ticket.               |
-| `pushCycle`          | number      | Current push cycle (0-indexed, incremented after push)                          |
-| `maxPushCycles`      | number      | Outer loop limit (default 5)                                                    |
-| `prNumber`           | number/null | GitHub PR number                                                                |
-| `lastRunId`          | string/null | Most recent dev-loop run ID (autopilot only)                                    |
-| `devLoopInitialized` | boolean     | Whether `dev-loop init` has been run (autopilot only)                           |
+| Field                 | Type        | Description                                                                                   |
+| --------------------- | ----------- | --------------------------------------------------------------------------------------------- |
+| `phase`               | string      | Current state: approved, sub_planning, run_spec, running, pushing, polling, completed, failed |
+| `mode`                | string      | `"autopilot"` (dev-loop) or `"manual"` (direct fixes)                                         |
+| `ticketId`            | string/null | Ticket ID (PE-1234, CU-abc123). Null in manual mode if no ticket.                             |
+| `pushCycle`           | number      | Current push cycle (0-indexed, incremented after push)                                        |
+| `maxPushCycles`       | number      | Outer loop limit (default 5)                                                                  |
+| `prNumber`            | number/null | GitHub PR number                                                                              |
+| `lastRunId`           | string/null | Most recent dev-loop run ID (autopilot only)                                                  |
+| `devLoopInitialized`  | boolean     | Whether `dev-loop init` has been run (autopilot only)                                         |
+| `specDir`             | string/null | Path to spec directory, e.g., `spec/PE-1234`. Null in manual mode.                            |
+| `subPlans`            | array/null  | Sub-plan files for large tasks. Each item: `{id, file, status}`. Null if single plan.         |
+| `currentSubPlanIndex` | number/null | Current sub-plan index (0-indexed). Null if not using sub-plans                               |
 
 Full schema with all fields is in `phases/setup.md` (where the state file is created).
+
+## Spec Directory Structure
+
+Specs are committed to git in a structured directory:
+
+```
+spec/
+└── <task-id>/              # e.g., "PE-1234" or "feature-auth"
+    ├── task-spec.md        # Original full task spec (persistent)
+    └── plans/              # Only created if sub-plans are needed
+        ├── phase-1.md      # Sub-plan 1
+        ├── phase-2.md      # Sub-plan 2
+        └── ...
+```
+
+- **Single spec:** Use `task-spec.md` directly — no `plans/` folder needed
+- **Sub-plans:** Create `plans/` folder with separate phase files
+
+The `.kagent/` directory is gitignored and contains runtime state only.
 
 ## Phase Dispatch
 
 **On invocation, read `.kagent/task-state.json`.** Based on the `phase` field (or absence of file), use the Read tool to load the corresponding phase file and follow its instructions.
 
-| Condition            | Action                                                                                                                                       |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| File does not exist  | Read `phases/setup.md`                                                                                                                       |
-| `phase: "approved"`  | Read `phases/run-spec.md`                                                                                                                    |
-| `phase: "run_spec"`  | Read `phases/run-spec.md`                                                                                                                    |
-| `phase: "running"`   | Read `phases/running.md`                                                                                                                     |
-| `phase: "pushing"`   | Read `phases/pushing.md`                                                                                                                     |
-| `phase: "polling"`   | Read `phases/polling.md`                                                                                                                     |
-| `phase: "completed"` | Report: "Task already completed. PR #{prNumber}."                                                                                            |
-| `phase: "failed"`    | Report status and last error. Offer to retry — if yes and mode is autopilot, read `phases/run-spec.md`; if manual, read `phases/pushing.md`. |
+| Condition               | Action                                                                                                                                       |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| File does not exist     | Read `phases/setup.md`                                                                                                                       |
+| `phase: "approved"`     | Read `phases/sub-planning.md` (evaluate if sub-plans needed)                                                                                 |
+| `phase: "sub_planning"` | Read `phases/sub-planning.md`                                                                                                                |
+| `phase: "run_spec"`     | Read `phases/run-spec.md`                                                                                                                    |
+| `phase: "running"`      | Read `phases/running.md`                                                                                                                     |
+| `phase: "pushing"`      | Read `phases/pushing.md`                                                                                                                     |
+| `phase: "polling"`      | Read `phases/polling.md`                                                                                                                     |
+| `phase: "completed"`    | Report: "Task already completed. PR #{prNumber}."                                                                                            |
+| `phase: "failed"`       | Report status and last error. Offer to retry — if yes and mode is autopilot, read `phases/run-spec.md`; if manual, read `phases/pushing.md`. |
 
 **IMPORTANT: Read ONLY the one phase file indicated above. Do NOT preemptively read other phase files. Each phase file is self-contained with its own instructions, transitions, and next steps. When a phase file tells you "Next: read phases/X.md", read that file at that point — not before.**
 
@@ -75,7 +114,7 @@ Full schema with all fields is in `phases/setup.md` (where the state file is cre
 4. **Fully autonomous after approval** — only stop for spec conflict (exit 2) or push failure
 5. **Delegate to dev-loop** — don't duplicate its implement-then-review logic (autopilot only)
 6. **State file required** — read/write `.kagent/task-state.json` at every phase transition
-7. **Two spec files** — `task-spec.md` (persistent) + `spec.md` (per-cycle) — autopilot only
+7. **Committed spec files** — `spec/<task-id>/task-spec.md` (persistent) + `spec/<task-id>/plans/*.md` (phases) — autopilot only
 8. **Check commit conventions** — look for CONTRIBUTING.md, commitlint, recent git log
 9. **Include ticket ID** — in commits, branches, PRs (when available)
 10. **Never push to main/master**
