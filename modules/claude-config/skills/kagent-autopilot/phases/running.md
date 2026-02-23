@@ -2,6 +2,21 @@
 
 This phase executes dev-loop and handles the result based on exit code.
 
+## Update Ticket Status
+
+**Before starting dev-loop**, move the ticket to "In Progress" status:
+
+**Jira (`ticketSystem: "jira"`):**
+
+```bash
+acli jira workitem transition {ticketId} --transition "In Progress"
+```
+
+**ClickUp (`ticketSystem: "clickup"`):**
+Use ClickUp MCP to update task status to "in progress".
+
+Skip this step if `ticketId` is null.
+
 ## Execute Dev-Loop
 
 Run as a **background Bash task** and block with TaskOutput:

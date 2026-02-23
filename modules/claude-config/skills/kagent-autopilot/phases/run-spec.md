@@ -94,13 +94,13 @@ This approach:
 
 Use [templates/fix-spec-template.md](../templates/fix-spec-template.md). Read `spec/<task-id>/task-spec.md` (use `specDir` from state) for original context, then gather feedback from the appropriate source:
 
-| Feedback Source          | How to Get                                                                                                                                                                            |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| CI failures              | `gh pr checks {prNumber}` for failed names; `gh run list --branch {branch} --status failure --limit 1 --json databaseId -q '.[0].databaseId'` then `gh run view {runId} --log-failed` |
-| Review comments          | `gh api repos/{owner}/{repo}/pulls/{prNumber}/comments` (inline) + `gh pr view {prNumber} --json reviews` (top-level)                                                                 |
-| Unresolved conversations | Poller output (exit 5) has thread details JSON with path, line, author, body. After addressing, comment `@coderabbitai` on PR to trigger re-review.                                   |
-| Dev-loop max_iterations  | `.kagent/reviews/{lastRunId}/review-*.md` and `verdict-*.json`                                                                                                                        |
-| Spec conflict (exit 2)   | `.kagent/conflict.md` + review files + user's clarification from `conflictContext`                                                                                                    |
+| Feedback Source          | How to Get                                                                                                                                                                                     |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CI failures              | `gh pr checks {prNumber}` for failed names; `gh run list --branch {branch} --status failure --limit 1 --json databaseId -q '.[0].databaseId'` then `gh run view {runId} --log-failed`          |
+| Review comments          | `gh api repos/{owner}/{repo}/pulls/{prNumber}/comments` (inline) + `gh pr view {prNumber} --json reviews` (top-level)                                                                          |
+| Unresolved conversations | Poller output (exit 5) has thread details JSON with path, line, author, body. After addressing, post re-review comment per repo (atomicloud: `@coderabbitai`, vungle: `@claude`, other: none). |
+| Dev-loop max_iterations  | `.kagent/reviews/{lastRunId}/review-*.md` and `verdict-*.json`                                                                                                                                 |
+| Spec conflict (exit 2)   | `.kagent/conflict.md` + review files + user's clarification from `conflictContext`                                                                                                             |
 
 Write populated fix spec to `.kagent/spec.md`.
 

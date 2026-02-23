@@ -23,13 +23,31 @@ First, evaluate if the task **might** warrant sub-plans based on:
 Update state: `phase: "sub_planning"` (for resumability).
 
 1. Read `spec/<task-id>/task-spec.md` and identify potential independent work streams
-2. Propose 2-4 sub-plans, each being:
+
+2. **Check for Domain-Driven Design skill:**
+
+   ```bash
+   ls ~/.claude/skills/domain-driven-design/SKILL.md 2>/dev/null || \
+   ls ./.claude/skills/domain-driven-design/SKILL.md 2>/dev/null
+   ```
+
+3. **If DDD skill exists:** Read it and use its bounded context definitions to group plans:
+   - Group plans by **bounded context** (each context is a cohesive domain boundary)
+   - Note: **1 bounded context can have multiple plans** if the context is large or complex
+   - Name plans to reflect their bounded context (e.g., `auth-context-1.md`, `auth-context-2.md`)
+   - Ensure each plan stays within a single bounded context
+
+4. **If no DDD skill:** Group by technical boundaries or explicit phases from the ticket
+
+5. Propose 2-4 sub-plans, each being:
    - A complete, deliverable unit of work
    - Minimal overlap with other sub-plans (ideally no shared files)
    - Independently testable
+   - (If DDD) Contained within a single bounded context
 
-3. Present proposal to user via `AskUserQuestion`:
+6. Present proposal to user via `AskUserQuestion`:
    - Show the proposed breakdown with titles and summaries
+   - If DDD is used, indicate which bounded context each plan belongs to
    - Include option: "No, implement as single plan instead"
 
 ## Step 2: Handle User Decision

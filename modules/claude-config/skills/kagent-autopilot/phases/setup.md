@@ -70,6 +70,19 @@ Create `spec/<task-id>/task-spec.md` using [templates/task-spec-template.md](../
 mkdir -p spec/<task-id>
 ```
 
+**Check for Domain-Driven Design skill before generating:**
+
+```bash
+ls ~/.claude/skills/domain-driven-design/SKILL.md 2>/dev/null || \
+ls ./.claude/skills/domain-driven-design/SKILL.md 2>/dev/null
+```
+
+- **If DDD skill exists:** Read it and include in the spec:
+  - Bounded context(s) this task belongs to
+  - Relevant Ubiquitous Language terms from that context
+  - Any domain events if applicable
+- **If no DDD skill:** Omit the DDD section from the spec
+
 **MANDATORY:** Present spec and get user approval via `AskUserQuestion` before proceeding.
 
 ### Step 6: Initialize State
