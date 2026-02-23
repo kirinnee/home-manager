@@ -1,0 +1,110 @@
+# Phase: Pushing
+
+This phase commits changes, pushes to remote, and creates/updates the PR.
+
+## Step 1: Detect Commit Conventions
+
+```bash
+ls CONTRIBUTING.md COMMIT_CONVENTION.md \
+   .commitlintrc* commitlint.config.* \
+   .conventional-commit* .czrc .cz.json 2>/dev/null || true
+git log --oneline -10
+```
+
+Default format (if no convention found):
+
+```
+feat(scope): description
+
+[TICKET-ID]
+
+- Detail 1
+- Detail 2
+```
+
+Include `ticketId` in commit messages when available. If null, omit the ticket ID line — it is not mandatory.
+
+## Step 2: Stage and Commit
+
+Stage **specific changed files** (never `git add -A`):
+
+```bash
+git add src/feature.ts src/feature.test.ts
+```
+
+Create commit with ticket ID following detected convention:
+
+```bash
+git commit -m "$(cat <<'EOF'
+type(scope): description
+
+[TICKET_ID]
+
+- Detail 1
+EOF
+)"
+```
+
+## Step 3: Push
+
+**Pre-push safety checks:**
+
+- Verify not on main/master
+- **NEVER force push**
+
+```bash
+git push -u origin HEAD
+```
+
+**If push fails:**
+
+1. Auto-attempt fast-forward: `git pull --ff-only origin <branch>`
+   - If works → retry push
+2. Auto-attempt rebase: `git pull --rebase origin <branch>`
+   - If applies cleanly → retry push
+3. Only if both fail (merge conflicts): `AskUserQuestion`
+   - "Let me resolve the conflicts manually" → `git rebase --abort`, set `phase: "pushing"`, stop
+   - "Abort" → transition to `failed`
+
+## Step 4: Create or Update PR
+
+Check for existing PR:
+
+```bash
+gh pr list --head "$(git branch --show-current)" --json number -q '.[0].number'
+```
+
+**If no PR exists:** Create using [templates/pr-template.md](../templates/pr-template.md):
+
+```bash
+gh pr create --title "[TICKET_ID] Title" --body "$(cat <<'EOF'
+{PR body from template}
+EOF
+)"
+```
+
+Include `[TICKET_ID]` prefix in the title when available. If null, use a descriptive title without prefix.
+
+**If PR exists:** Push auto-updates it. No action needed.
+
+## Step 5: CodeRabbitAI Re-Review
+
+If this push cycle addressed feedback from `@coderabbitai`, comment on the PR after pushing:
+
+```bash
+gh pr comment <prNumber> --body "@coderabbitai please resolve the conversation if the issue is no longer present, and re-review the PR"
+```
+
+## Update State
+
+- Store `prNumber` in state
+- Increment `pushCycle`
+- Update `phase: "pushing"` (for resumability — set before push attempt)
+
+## Resumability
+
+If resuming into this phase: check `git log origin/{branch}..HEAD`. If unpushed commits exist, retry push. If nothing to push, the push already succeeded — proceed to polling.
+
+## Next
+
+After successful push + PR: Read `phases/polling.md` and follow it.

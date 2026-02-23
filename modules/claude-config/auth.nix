@@ -5,12 +5,12 @@ rec {
   };
   zai = proxy // {
     ANTHROPIC_DEFAULT_HAIKU_MODEL = "glm-4.5-air";
-    ANTHROPIC_DEFAULT_SONNET_MODEL = "glm-5";
+    ANTHROPIC_DEFAULT_SONNET_MODEL = "glm-4.7";
     ANTHROPIC_DEFAULT_OPUS_MODEL = "glm-5";
   };
   anthropic = proxy // {
     ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-6";
-    ANTHROPIC_DEFAULT_SONNET_MODEL = "claude-sonnet-4-5-20250929";
+    ANTHROPIC_DEFAULT_SONNET_MODEL = "claude-sonnet-4-6";
     ANTHROPIC_DEFAULT_HAIKU_MODEL = "claude-haiku-4-5-20251001";
   };
   codex = proxy // {
