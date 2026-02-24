@@ -118,12 +118,11 @@ After spec approval, ask the user how they want to proceed. Use `AskUserQuestion
 
 Run the loop as a background bash task and wait for completion:
 
-```
-[Bash tool with run_in_background: true]
-command: dev-loop run 2>&1 | tee .kagent/run.log
+```bash
+dev-loop run 2>&1 | tee .kagent/run.log
 ```
 
-Then use TaskOutput to wait for completion. This blocks until the loop finishes.
+Use `run_in_background: true` with Bash tool, then wait with TaskOutput. This blocks until the loop finishes.
 
 **When complete, report results:**
 

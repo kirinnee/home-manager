@@ -9918,7 +9918,8 @@ function parseSessionName(sessionName) {
   };
 }
 function buildNewSessionCommand(params) {
-  return ['tmux', 'new-session', '-d', '-s', params.sessionName, '-c', params.cwd, 'sh', '-c', params.command];
+  const commandWithUnset = `unset CLAUDECODE && ${params.command}`;
+  return ['tmux', 'new-session', '-d', '-s', params.sessionName, '-c', params.cwd, 'sh', '-c', commandWithUnset];
 }
 function buildHasSessionCommand(sessionName) {
   return ['tmux', 'has-session', '-t', sessionName];
