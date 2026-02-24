@@ -19,15 +19,32 @@ Skip this step if `ticketId` is null.
 
 ## Execute Dev-Loop
 
-Run as a **background Bash task** and block with TaskOutput:
+Start dev-loop in a tmux session, then attach via background task for TaskOutput waiting:
 
 ```bash
-dev-loop run 2>&1 | tee .kagent/run.log
+# Create a unique session name based on the task
+SESSION_NAME="imine-autopilot-$(date +%s)"
+
+# Start dev-loop in a new tmux session with CLAUDECODE unset (detached)
+tmux new-session -d -s "$SESSION_NAME" "unset CLAUDECODE && dev-loop run 2>&1 | tee .kagent/run.log"
 ```
 
-Use `run_in_background: true` with Bash tool, then wait with TaskOutput.
+**Report the session name to the user:**
 
-Update state: `phase: "running"`
+```
+Dev-loop running in tmux session: {SESSION_NAME}
+Attach from your terminal: tmux attach -t {SESSION_NAME}
+```
+
+Then attach to the session as a **background Bash task**:
+
+```bash
+tmux attach -t "$SESSION_NAME"
+```
+
+Use `run_in_background: true` with Bash tool, then wait with TaskOutput. The attach command blocks until the tmux session ends (when dev-loop completes).
+
+Update state: `phase: "running"`, store `tmuxSession: "$SESSION_NAME"`
 
 ## When Dev-Loop Returns
 
