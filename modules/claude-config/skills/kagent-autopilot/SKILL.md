@@ -66,6 +66,9 @@ Manual mode:
 | `specDir`             | string/null | Path to spec directory, e.g., `spec/PE-1234`. Null in manual mode.                            |
 | `subPlans`            | array/null  | Sub-plan files for large tasks. Each item: `{id, file, status}`. Null if single plan.         |
 | `currentSubPlanIndex` | number/null | Current sub-plan index (0-indexed). Null if not using sub-plans                               |
+| `tmuxSession`         | string/null | Name of the tmux session running dev-loop (autopilot only)                                    |
+
+**Note on ClickUp IDs:** When `ticketSystem: "clickup"`, the `ticketId` always includes the `CU-` prefix (e.g., `CU-abc123`). When searching via ClickUp MCP, strip the prefix and search for just the ID portion. The prefix is used for internal state and spec directory naming.
 
 Full schema with all fields is in `phases/setup.md` (where the state file is created).
 

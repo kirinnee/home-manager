@@ -37,9 +37,19 @@ Extract: `fields.summary` (title), `fields.description`, `fields.comment.comment
 
 **ClickUp (CU-XXXXX):**
 
-Use ClickUp MCP server tools to get task details, comments, and subtasks. Extract: `name` (title), `description`, `status.status`, comments via separate call.
+**IMPORTANT:** When searching ClickUp, strip the `CU-` prefix and search by the raw ID only. The ClickUp MCP does not recognize the `CU-` prefix format.
+
+```bash
+# If ticket ID is "CU-abc123", search for just "abc123"
+```
+
+Use ClickUp MCP `clickup_search` tool with keywords set to the ID **without** the `CU-` prefix. Then use `clickup_get_task` to get full details.
+
+Extract: `name` (title), `description`, `status.status`, comments via `clickup_get_task_comments`.
 
 If auth fails: Jira → `acli jira auth`. ClickUp → check MCP server configuration.
+
+**Note:** The `CU-` prefix is only used internally for identification. Always store `ticketId` with the `CU-` prefix (e.g., `"CU-abc123"`) in state and use it when creating spec directories.
 
 ### Step 3: Gather Configuration
 
@@ -66,8 +76,13 @@ Before generating spec, ask about unclear requirements, technical approach, or s
 
 Create `spec/<task-id>/task-spec.md` using [templates/task-spec-template.md](../templates/task-spec-template.md) populated with ticket data and clarifications.
 
+**IMPORTANT:** The `<task-id>` must include the prefix:
+
+- Jira: `PE-1234` (or whatever project prefix)
+- ClickUp: `CU-abc123` (always include `CU-` prefix for ClickUp)
+
 ```bash
-mkdir -p spec/<task-id>
+mkdir -p spec/<task-id>  # e.g., spec/PE-1234 or spec/CU-abc123
 ```
 
 **Check for Domain-Driven Design skill before generating:**
@@ -139,9 +154,12 @@ On approval:
   "conflictChecker": "claude",
   "specDir": "spec/PE-1234",
   "subPlans": null,
-  "currentSubPlanIndex": null
+  "currentSubPlanIndex": null,
+  "tmuxSession": null
 }
 ```
+
+**Note:** For ClickUp tickets, `ticketId` should include the `CU-` prefix (e.g., `"CU-abc123"`), and `specDir` should be `"spec/CU-abc123"`.
 
 **Next:** Read `phases/sub-planning.md` and follow it.
 
@@ -196,7 +214,8 @@ Optionally detect ticket ID from branch (same patterns as autopilot). If found, 
   "conflictChecker": null,
   "specDir": null,
   "subPlans": null,
-  "currentSubPlanIndex": null
+  "currentSubPlanIndex": null,
+  "tmuxSession": null
 }
 ```
 
