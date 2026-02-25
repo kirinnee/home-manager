@@ -121,6 +121,7 @@ The `.kagent/` directory is gitignored and contains runtime state only.
 9. **Include ticket ID** — in commits, branches, PRs (when available)
 10. **Never push to main/master**
 11. **Never force push**
+12. **Always use dev-loop poll-pr** — NEVER use `gh pr watch` in polling phase
 
 ## Prerequisites
 
