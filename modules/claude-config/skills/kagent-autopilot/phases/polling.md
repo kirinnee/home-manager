@@ -2,6 +2,8 @@
 
 This phase waits for CI/reviews, then dispatches based on result.
 
+**Agent Mode:** When spawned as a polling agent, execute this phase and report findings back to orchestrator. Do NOT update `.kagent/task-state.json`. Do NOT make code changes.
+
 ## Step 1: Start Poller
 
 **CRITICAL: ALWAYS use `dev-loop poll-pr`. NEVER use `gh pr watch` or any other command.**
@@ -93,3 +95,29 @@ Update state: `phase: "failed"`, store `lastError`
 ## Resumability
 
 If resuming: restart `dev-loop poll-pr` with stored `prNumber`.
+
+## Agent Report Format
+
+When running as an agent, report back to orchestrator with:
+
+```
+EXIT_CODE: <0|1|2|4|5|6>
+STATUS: <completed|needs_fix|rebase|failed>
+
+CI_STATUS: <passing|failing|pending>
+REVIEW_STATUS: <approved|changes_requested|pending|blocked>
+
+ISSUES:
+- <CI error or review comment 1>
+- <CI error or review comment 2>
+
+ACTION: <none|enrich_and_fix|rebase|manual_takeover>
+
+PR_URL: https://github.com/{owner}/{repo}/pull/{prNumber}
+```
+
+**Important for agents:**
+
+- Do NOT make code changes — just report what needs to be fixed
+- Do NOT update ticket status — orchestrator handles that
+- Include all actionable feedback in your ISSUES list
