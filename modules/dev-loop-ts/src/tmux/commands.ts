@@ -69,9 +69,28 @@ export function parseSessionName(sessionName: string): TmuxSessionParams | null 
  * Build tmux command to create a new session
  */
 export function buildNewSessionCommand(params: { sessionName: string; cwd: string; command: string }): string[] {
-  // Unset CLAUDECODE to prevent nested Claude Code sessions from inheriting this environment
+  // Triple-layer protection to prevent nested Claude Code sessions from inheriting CLAUDECODE:
+  // 1. tmux -e CLAUDECODE= - set to empty in tmux session environment
+  // 2. env -u CLAUDECODE - unset before running the shell
+  // 3. unset CLAUDECODE - unset in the shell itself (belt and suspenders)
   const commandWithUnset = `unset CLAUDECODE && ${params.command}`;
-  return ['tmux', 'new-session', '-d', '-s', params.sessionName, '-c', params.cwd, 'sh', '-c', commandWithUnset];
+  return [
+    'tmux',
+    'new-session',
+    '-d',
+    '-s',
+    params.sessionName,
+    '-c',
+    params.cwd,
+    '-e',
+    'CLAUDECODE=',
+    'env',
+    '-u',
+    'CLAUDECODE',
+    'sh',
+    '-c',
+    commandWithUnset,
+  ];
 }
 
 /**

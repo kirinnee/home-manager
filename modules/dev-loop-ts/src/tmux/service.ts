@@ -108,9 +108,13 @@ export class TmuxServiceImpl implements TmuxService {
       command: wrappedCommand,
     });
 
+    // Create environment without CLAUDECODE to prevent nested sessions from inheriting it
+    const { CLAUDECODE: _, ...envWithoutClaudeCode } = process.env;
+
     const createProc = this.spawn(cmd, {
       stdout: 'pipe',
       stderr: 'pipe',
+      env: envWithoutClaudeCode,
     });
 
     const createExitCode = await createProc.exited;
