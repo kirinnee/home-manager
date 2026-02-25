@@ -188,7 +188,7 @@ Optionally detect ticket ID from branch (same patterns as autopilot). If found, 
 ```json
 {
   "version": 1,
-  "phase": "pushing",
+  "phase": "prereview",
   "mode": "manual",
   "ticketId": null,
   "ticketSystem": null,
@@ -219,4 +219,4 @@ Optionally detect ticket ID from branch (same patterns as autopilot). If found, 
 }
 ```
 
-**Next:** Read `phases/pushing.md` and follow it.
+**Next:** Read `phases/prereview.md` and follow it.
