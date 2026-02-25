@@ -1,10 +1,23 @@
-{ config, pkgs, lib, pkgs-claude-code, pkgs-240924, pkgs-stable, pkgs-unstable, pkgs-casks, atomi, profile, ... }:
+{ config
+, pkgs
+, lib
+, pkgs-claude-code
+, pkgs-240924
+, pkgs-stable
+, pkgs-unstable
+, pkgs-casks
+, atomi
+, profile
+, ...
+}:
 
 ####################
 # Custom Modules #
 ####################
 
-let modules = import ./modules/default.nix { nixpkgs = pkgs; }; in
+let
+  modules = import ./modules/default.nix { nixpkgs = pkgs; };
+in
 
 ##################
   # Linux Services #
@@ -19,8 +32,6 @@ let
     };
   };
 in
-
-
 
 #####################
   # Custom ZSH folder #
@@ -74,7 +85,10 @@ rec {
       nix-path = "nixpkgs=flake:nixpkgs";
 
       # Trusted users (Linux typically uses wheel group)
-      trusted-users = [ "root" profile.user ];
+      trusted-users = [
+        "root"
+        profile.user
+      ];
     };
 
     # Include user's custom nix.conf for settings not covered above
@@ -87,7 +101,8 @@ rec {
   # Let Home Manager install and manage itself.
   home.stateVersion = "25.11";
   home.username = "${profile.user}";
-  home.homeDirectory = if profile.kernel == "linux" then "/home/${profile.user}" else "/Users/${profile.user}";
+  home.homeDirectory =
+    if profile.kernel == "linux" then "/home/${profile.user}" else "/Users/${profile.user}";
 
   # Workspace directories setup
   workspace.enable = true;
@@ -110,8 +125,16 @@ rec {
     };
 
     accounts =
-      let imported = import ./modules/claude-config/default.nix; in
-      let inherit (imported) userConfig implConfig revConfig auth;
+      let
+        imported = import ./modules/claude-config/default.nix;
+      in
+      let
+        inherit (imported)
+          userConfig
+          implConfig
+          revConfig
+          auth
+          ;
         merge = lib.recursiveUpdate;
       in
       {
@@ -183,92 +206,97 @@ rec {
   # Install packages here #
   #########################
 
-  home.packages = ([
+  home.packages = (
+    [
 
-    # system
-    coreutils
-    uutils-coreutils
-    dogdns
-    jq
-    yq-go
-    ripgrep
-    gnugrep
-    nano
-    unixtools.watch
-    gnutar
-    tmux
-    dust
-    fd
-    procs
-    dua
-    navi
-    tealdeer
-    zenith
-    stern
-    tesseract
-    age
-    sops
-    nil
-    atomi.cyanprint
-    atomi.attic
-    atomi.worktrunk
-    atomi.cliproxyapi
+      # system
+      coreutils
+      uutils-coreutils
+      dogdns
+      jq
+      yq-go
+      ripgrep
+      gnugrep
+      nano
+      unixtools.watch
+      gnutar
+      tmux
+      dust
+      fd
+      procs
+      dua
+      navi
+      tealdeer
+      zenith
+      stern
+      tesseract
+      age
+      sops
+      nil
+      atomi.cyanprint
+      atomi.attic
+      atomi.worktrunk
+      atomi.coderabbit
 
-    # cncf
-    kubectl
-    docker
-    kubectx
-    k9s
-    krew
-    kubernetes-helm
-    kubelogin-oidc
-    linkerd
-    bitwarden-cli
-    devenv
-    nodejs
-    pkgs-unstable.cloudflared
+      # cncf
+      kubectl
+      docker
+      kubectx
+      k9s
+      krew
+      kubernetes-helm
+      kubelogin-oidc
+      linkerd
+      bitwarden-cli
+      devenv
+      nodejs
+      pkgs-unstable.cloudflared
 
+      # tooling
+      mmv-go
+      neofetch
+      rclone
+      tokei
+      cachix
 
-    # tooling
-    mmv-go
-    neofetch
-    rclone
-    tokei
-    cachix
+      # LSPs
+      typescript-language-server
+      gopls
+      pyright
+      rust-analyzer
 
-    # LSPs
-    typescript-language-server
-    gopls
-    pyright
-    rust-analyzer
+      #custom modules
+      backup-folder
+      setup-pcloud-remote
+      k8s-update
+      load-secrets
+      speak
+      hms
+      dev-loop
+      atomi.happy_coder
 
-    #custom modules
-    backup-folder
-    setup-pcloud-remote
-    k8s-update
-    load-secrets
-    speak
-    hms
-    dev-loop
-    atomi.happy_coder
+      # liftoff
+      awscli2
+      pkgs-unstable.acli
+      gimme-aws-creds
+      ssm-session-manager-plugin
 
-    # liftoff
-    awscli2
-    pkgs-unstable.acli
-    gimme-aws-creds
-    ssm-session-manager-plugin
+      # claude-code is now managed by claude-multi module
 
-    # claude-code is now managed by claude-multi module
-
-  ] ++ (if profile.kernel == "linux" then [
-    pinentry-all
-  ] else [
-    pinentry_mac
-    xcbuild
-    nerd-fonts.jetbrains-mono
-  ]
-  ));
-
+    ]
+    ++ (
+      if profile.kernel == "linux" then
+        [
+          pinentry-all
+        ]
+      else
+        [
+          pinentry_mac
+          xcbuild
+          nerd-fonts.jetbrains-mono
+        ]
+    )
+  );
 
   ###################################
   # Addtional environment variables #
@@ -487,7 +515,11 @@ rec {
             if command -v wt >/dev/null 2>&1; then eval "$(command wt config shell init zsh)"; fi
           '';
         in
-        lib.mkMerge [ initExtraFirst zshConfig wtShell ];
+        lib.mkMerge [
+          initExtraFirst
+          zshConfig
+          wtShell
+        ];
 
       oh-my-zsh = {
         enable = true;
@@ -603,9 +635,15 @@ rec {
         dlc = "dev-loop cancel";
         dll = "dev-loop logs";
 
-      } // (if profile.kernel == "linux" then {
-        cursor = "/mnt/c/Users/Hoengager/AppData/Local/Programs/cursor/resources/app/bin/cursor";
-      } else { });
+      }
+      // (
+        if profile.kernel == "linux" then
+          {
+            cursor = "/mnt/c/Users/Hoengager/AppData/Local/Programs/cursor/resources/app/bin/cursor";
+          }
+        else
+          { }
+      );
 
       plugins = [
         {
