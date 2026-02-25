@@ -9919,7 +9919,23 @@ function parseSessionName(sessionName) {
 }
 function buildNewSessionCommand(params) {
   const commandWithUnset = `unset CLAUDECODE && ${params.command}`;
-  return ['tmux', 'new-session', '-d', '-s', params.sessionName, '-c', params.cwd, 'sh', '-c', commandWithUnset];
+  return [
+    'tmux',
+    'new-session',
+    '-d',
+    '-s',
+    params.sessionName,
+    '-c',
+    params.cwd,
+    '-e',
+    'CLAUDECODE=',
+    'env',
+    '-u',
+    'CLAUDECODE',
+    'sh',
+    '-c',
+    commandWithUnset,
+  ];
 }
 function buildHasSessionCommand(sessionName) {
   return ['tmux', 'has-session', '-t', sessionName];
@@ -11400,9 +11416,11 @@ class TmuxServiceImpl {
       cwd: params.cwd,
       command: wrappedCommand,
     });
+    const { CLAUDECODE: _3, ...envWithoutClaudeCode } = process.env;
     const createProc = this.spawn(cmd, {
       stdout: 'pipe',
       stderr: 'pipe',
+      env: envWithoutClaudeCode,
     });
     const createExitCode = await createProc.exited;
     if (createExitCode !== 0) {
