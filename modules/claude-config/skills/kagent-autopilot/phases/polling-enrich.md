@@ -50,7 +50,16 @@ For each unresolved CodeRabbit conversation, check:
 1. **You replied last** — and your reply explains why the comment is not applicable, or provides context
 2. **CodeRabbit acknowledged** — they said "added to learnings", "accepted", or similar
 
-If either condition is true, resolve the conversation yourself:
+If either condition is true, **BEFORE resolving**, you MUST post a comment explaining why the thread can be resolved:
+
+```bash
+# Reply to the thread explaining why it can be resolved
+gh pr comment {prNumber} --reply-to {commentId} --body "Resolving: [explain why this thread can be resolved - e.g., addressed in commit X, not applicable because Y, acknowledged by reviewer]
+
+By Claude Code Kagent Autopilot 🤖"
+```
+
+**Only AFTER posting the explanation**, resolve the conversation:
 
 ```bash
 # Resolve a review thread (requires GraphQL)
@@ -61,6 +70,8 @@ gh api graphql -f query='
     }
   }'
 ```
+
+**CRITICAL:** Never resolve a thread without first posting the reason with your signature.
 
 To get thread IDs:
 
