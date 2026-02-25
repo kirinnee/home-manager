@@ -17,7 +17,7 @@
     nixpkgs-stable.url = "github:nixos/nixpkgs/nixos-25.11";
     nixpkgs-240924.url = "github:nixos/nixpkgs/babc25a577c3310cce57c72d5bed70f4c3c3843a";
 
-    atomipkgs.url = "github:AtomiCloud/nix-registry/v2.15";
+    atomipkgs.url = "github:AtomiCloud/nix-registry/v2";
 
     home-manager = {
       url = "github:nix-community/home-manager/release-25.11";
@@ -30,12 +30,10 @@
 
   outputs =
     { self
-
-      # utils
-    , flake-utils
+    , # utils
+      flake-utils
     , treefmt-nix
     , pre-commit-hooks
-
     , nixpkgs-unstable
     , nixpkgs-240924
     , nixpkgs-stable
@@ -43,131 +41,196 @@
     , home-manager
     , darwin
     , nix-homebrew
-
     , home-manager-modules
     , claude-code-pkg
-    } @inputs:
-    let profiles = import ./profiles.nix; in
+    ,
+    }@inputs:
+    let
+      profiles = import ./profiles.nix;
+    in
     {
-      homeConfigurations = builtins.listToAttrs (map
-        (profile:
-          let
-            system = "${profile.arch}-${profile.kernel}";
-            pkgs-unstable = import nixpkgs-unstable { inherit system; config.allowUnfree = true; };
-            pkgs-stable = import nixpkgs-stable {
-              inherit system;
-              config.allowUnfree = true;
-            };
-            pkgs-240924 = import nixpkgs-240924 { inherit system; config.allowUnfree = true; };
-            pre-commit-lib = pre-commit-hooks.lib.${system};
-            atomi = atomipkgs.packages.${system};
-            pkgs-claude-code = claude-code-pkg.packages.${system};
-          in
-          let pkgs = pkgs-stable; in
-          {
-            name = profile.user;
-            value = home-manager.lib.homeManagerConfiguration {
-              inherit pkgs;
-              modules = [
-                home-manager-modules.homeManagerModules.multi-claude
-                home-manager-modules.homeManagerModules.multi-gh
-                ./home.nix
-              ];
-              extraSpecialArgs = {
-                inherit atomi pkgs-claude-code profile pkgs-240924 pkgs-stable pkgs-unstable;
+      homeConfigurations = builtins.listToAttrs (
+        map
+          (
+            profile:
+            let
+              system = "${profile.arch}-${profile.kernel}";
+              pkgs-unstable = import nixpkgs-unstable {
+                inherit system;
+                config.allowUnfree = true;
               };
-            };
-          })
-        profiles);
+              pkgs-stable = import nixpkgs-stable {
+                inherit system;
+                config.allowUnfree = true;
+              };
+              pkgs-240924 = import nixpkgs-240924 {
+                inherit system;
+                config.allowUnfree = true;
+              };
+              pre-commit-lib = pre-commit-hooks.lib.${system};
+              atomi = atomipkgs.packages.${system};
+              pkgs-claude-code = claude-code-pkg.packages.${system};
+            in
+            let
+              pkgs = pkgs-stable;
+            in
+            {
+              name = profile.user;
+              value = home-manager.lib.homeManagerConfiguration {
+                inherit pkgs;
+                modules = [
+                  home-manager-modules.homeManagerModules.multi-claude
+                  home-manager-modules.homeManagerModules.multi-gh
+                  ./home.nix
+                ];
+                extraSpecialArgs = {
+                  inherit
+                    atomi
+                    pkgs-claude-code
+                    profile
+                    pkgs-240924
+                    pkgs-stable
+                    pkgs-unstable
+                    ;
+                };
+              };
+            }
+          )
+          profiles
+      );
 
-      darwinConfigurations = builtins.listToAttrs (map
-        (profile:
-          let
-            system = "${profile.arch}-${profile.kernel}";
-            pkgs-unstable = import nixpkgs-unstable { inherit system; config.allowUnfree = true; };
-            pkgs-stable = import nixpkgs-stable {
-              inherit system;
-              config.allowUnfree = true;
-            };
-            pkgs-240924 = import nixpkgs-240924 { inherit system; config.allowUnfree = true; };
-            atomi = atomipkgs.packages.${system};
-            pkgs-claude-code = claude-code-pkg.packages.${system};
-          in
-          let pkgs = pkgs-stable; in
-          {
-            name = profile.user;
-            value = darwin.lib.darwinSystem {
-              inherit pkgs system;
-              specialArgs = {
-                inherit atomi profile pkgs-240924 pkgs-stable pkgs-unstable self;
+      darwinConfigurations = builtins.listToAttrs (
+        map
+          (
+            profile:
+            let
+              system = "${profile.arch}-${profile.kernel}";
+              pkgs-unstable = import nixpkgs-unstable {
+                inherit system;
+                config.allowUnfree = true;
               };
-              modules = [
-                nix-homebrew.darwinModules.nix-homebrew
-                {
-                  nix-homebrew = {
-                    enable = true;
-                    enableRosetta = true;
-                    user = profile.user;
-                  };
-                }
-                {
-                  nixpkgs.config.allowUnfree = true;
-                  home-manager.useGlobalPkgs = true;
-                  home-manager.users.${profile.user} = import ./home.nix;
-                  home-manager.extraSpecialArgs = {
-                    inherit atomi pkgs-claude-code profile pkgs-240924 pkgs-stable pkgs-unstable;
-                  };
-                  home-manager.sharedModules = [
-                    home-manager-modules.homeManagerModules.multi-claude
-                    home-manager-modules.homeManagerModules.multi-gh
-                  ];
-                }
-                home-manager.darwinModules.home-manager
-                ./darwin.nix
-              ];
-            };
-          })
-        (builtins.filter (p: p.kernel == "darwin") profiles));
-    } // (
-      flake-utils.lib.eachDefaultSystem
-        (system:
-        let
-          pkgs-unstable = import nixpkgs-unstable { inherit system; config.allowUnfree = true; };
-          pkgs-stable = import nixpkgs-stable { inherit system; config.allowUnfree = true; };
-          pre-commit-lib = pre-commit-hooks.lib.${system};
-          atomi = atomipkgs.packages.${system};
-          attic = attic.packages.${system};
-        in
-        let pkgs = pkgs-stable; in
-        let
-          out = rec {
-            pre-commit = import ./nix/pre-commit.nix {
-              inherit pre-commit-lib formatter packages;
-            };
-            formatter = import ./nix/fmt.nix {
-              inherit treefmt-nix pkgs;
-            };
-            packages = import ./nix/packages.nix {
-              inherit pkgs atomi pkgs-stable pkgs-unstable;
-            };
-            env = import ./nix/env.nix {
-              inherit pkgs packages;
-            };
-            devShells = import ./nix/shells.nix {
-              inherit pkgs env packages;
-              shellHook = checks.pre-commit-check.shellHook;
-            };
-            checks = {
-              pre-commit-check = pre-commit;
-              format = formatter;
-            };
+              pkgs-stable = import nixpkgs-stable {
+                inherit system;
+                config.allowUnfree = true;
+              };
+              pkgs-240924 = import nixpkgs-240924 {
+                inherit system;
+                config.allowUnfree = true;
+              };
+              atomi = atomipkgs.packages.${system};
+              pkgs-claude-code = claude-code-pkg.packages.${system};
+            in
+            let
+              pkgs = pkgs-stable;
+            in
+            {
+              name = profile.user;
+              value = darwin.lib.darwinSystem {
+                inherit pkgs system;
+                specialArgs = {
+                  inherit
+                    atomi
+                    profile
+                    pkgs-240924
+                    pkgs-stable
+                    pkgs-unstable
+                    self
+                    ;
+                };
+                modules = [
+                  nix-homebrew.darwinModules.nix-homebrew
+                  {
+                    nix-homebrew = {
+                      enable = true;
+                      enableRosetta = true;
+                      user = profile.user;
+                    };
+                  }
+                  {
+                    nixpkgs.config.allowUnfree = true;
+                    home-manager.useGlobalPkgs = true;
+                    home-manager.users.${profile.user} = import ./home.nix;
+                    home-manager.extraSpecialArgs = {
+                      inherit
+                        atomi
+                        pkgs-claude-code
+                        profile
+                        pkgs-240924
+                        pkgs-stable
+                        pkgs-unstable
+                        ;
+                    };
+                    home-manager.sharedModules = [
+                      home-manager-modules.homeManagerModules.multi-claude
+                      home-manager-modules.homeManagerModules.multi-gh
+                    ];
+                  }
+                  home-manager.darwinModules.home-manager
+                  ./darwin.nix
+                ];
+              };
+            }
+          )
+          (builtins.filter (p: p.kernel == "darwin") profiles)
+      );
+    }
+    // (flake-utils.lib.eachDefaultSystem (
+      system:
+      let
+        pkgs-unstable = import nixpkgs-unstable {
+          inherit system;
+          config.allowUnfree = true;
+        };
+        pkgs-stable = import nixpkgs-stable {
+          inherit system;
+          config.allowUnfree = true;
+        };
+        pre-commit-lib = pre-commit-hooks.lib.${system};
+        atomi = atomipkgs.packages.${system};
+        attic = attic.packages.${system};
+      in
+      let
+        pkgs = pkgs-stable;
+      in
+      let
+        out = rec {
+          pre-commit = import ./nix/pre-commit.nix {
+            inherit pre-commit-lib formatter packages;
           };
-        in
-        with out;
-        {
-          inherit checks formatter packages devShells;
-        }
-        )
+          formatter = import ./nix/fmt.nix {
+            inherit treefmt-nix pkgs;
+          };
+          packages = import ./nix/packages.nix {
+            inherit
+              pkgs
+              atomi
+              pkgs-stable
+              pkgs-unstable
+              ;
+          };
+          env = import ./nix/env.nix {
+            inherit pkgs packages;
+          };
+          devShells = import ./nix/shells.nix {
+            inherit pkgs env packages;
+            shellHook = checks.pre-commit-check.shellHook;
+          };
+          checks = {
+            pre-commit-check = pre-commit;
+            format = formatter;
+          };
+        };
+      in
+      with out;
+      {
+        inherit
+          checks
+          formatter
+          packages
+          devShells
+          ;
+      }
+    )
 
     );
 }
