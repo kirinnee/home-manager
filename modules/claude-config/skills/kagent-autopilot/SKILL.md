@@ -22,22 +22,36 @@ This skill runs as an agent team with an orchestrator and specialized phase agen
 │  - Handles phase dispatch                                   │
 │  - Spawns phase agents                                      │
 │  - Handles: setup, sub_planning, run_spec, pushing          │
+│  - Spawns resolvers IN PARALLEL after polling               │
 └─────────────────────────────────────────────────────────────┘
          │                    │                    │
          ▼                    ▼                    ▼
    ┌──────────┐        ┌──────────┐        ┌──────────┐
-   │  RUNNER  │        │PREREVIEW │        │ POLLING  │
+   │  RUNNER  │        │PREREVIEW │        │ POLLER   │
    │  AGENT   │        │  AGENT   │        │  AGENT   │
    └──────────┘        └──────────┘        └──────────┘
-   Long dev-loop       Fresh context        Fresh context
-   execution           for review           for CI parsing
+   Long dev-loop       Fresh context        Gathers ALL
+   execution           for review           PR context
+
+                              │
+                              ▼
+              ┌──────────────────────────────┐
+              │     RESOLVERS (parallel)     │
+              ├──────────────────────────────┤
+              │  ci-resolver                 │
+              │  review-resolver             │
+              │  coderabbit-resolver         │
+              │  thread-resolver             │
+              │  rebase-resolver             │
+              └──────────────────────────────┘
 ```
 
 **Why agents for these phases?**
 
 - **Runner**: Long-running (30+ min), needs isolation
 - **Prereview**: Needs fresh context for objective CodeRabbit analysis
-- **Polling**: Needs fresh context to parse CI/review feedback without prior baggage
+- **Poller**: Gathers ALL PR context, returns structured report
+- **Resolvers**: Each handles a specific issue type with focused context
 
 ## Glossary
 
@@ -55,13 +69,13 @@ Autopilot mode:
   [setup] ──→ approved ──→ sub_planning ──→ run_spec ──→ running ──→ prereview ──→ pushing ──→ polling ──→ completed
       │                                        │            │  (agent)     │  (agent)      │    │  (agent)    │
       └────────────────────────────────────────┴────────────┴─────────────┴───────────────┴────┴─────────────┘
-                                (feedback from CI/reviews → fix spec → runner agent)
+                                (feedback from CI/reviews → spawn resolvers → fix)
 
 Manual mode:
   [setup] ──→ prereview ──→ pushing ──→ polling ──→ completed
                  │  (agent)    │           │  (agent)
                  └─────────────┴───────────┴───────────┘
-                 (feedback from CI/reviews → agent fixes directly)
+                 (feedback from CI/reviews → spawn resolvers → fix)
 ```
 
 ## Key State Fields (`.kagent/task-state.json`)
@@ -117,18 +131,18 @@ Use TeamCreate with:
 
 Read `.kagent/task-state.json` and dispatch accordingly:
 
-| Condition               | Action                                                                                              |
-| ----------------------- | --------------------------------------------------------------------------------------------------- |
-| File does not exist     | Read `phases/setup.md` (handled by orchestrator)                                                    |
-| `phase: "approved"`     | Read `phases/sub-planning.md` (handled by orchestrator)                                             |
-| `phase: "sub_planning"` | Read `phases/sub-planning.md` (handled by orchestrator)                                             |
-| `phase: "run_spec"`     | Read `phases/run-spec.md` (handled by orchestrator)                                                 |
-| `phase: "running"`      | **Spawn runner agent** — see [Runner Agent](#runner-agent) below                                    |
-| `phase: "prereview"`    | **Spawn prereview agent** — see [Prereview Agent](#prereview-agent) below                           |
-| `phase: "pushing"`      | Read `phases/pushing.md` (handled by orchestrator)                                                  |
-| `phase: "polling"`      | **Spawn polling agent** — see [Polling Agent](#polling-agent) below                                 |
-| `phase: "completed"`    | Report: "Task already completed. PR #{prNumber}."                                                   |
-| `phase: "failed"`       | Report status and last error. Offer to retry — if yes, dispatch to appropriate phase based on mode. |
+| Condition               | Action                                                                                               |
+| ----------------------- | ---------------------------------------------------------------------------------------------------- |
+| File does not exist     | Read `phases/setup.md` (handled by orchestrator)                                                     |
+| `phase: "approved"`     | Read `phases/sub-planning.md` (handled by orchestrator)                                              |
+| `phase: "sub_planning"` | Read `phases/sub-planning.md` (handled by orchestrator)                                              |
+| `phase: "run_spec"`     | Read `phases/run-spec.md` (handled by orchestrator)                                                  |
+| `phase: "running"`      | **Spawn runner agent** — see [Runner Agent](#runner-agent) below                                     |
+| `phase: "prereview"`    | **Spawn prereview agent** — see [Prereview Agent](#prereview-agent) below                            |
+| `phase: "pushing"`      | Read `phases/pushing.md` (handled by orchestrator)                                                   |
+| `phase: "polling"`      | **Spawn poller agent** → **spawn resolvers in parallel** — see [Polling Phase](#polling-phase) below |
+| `phase: "completed"`    | Report: "Task already completed. PR #{prNumber}."                                                    |
+| `phase: "failed"`       | Report status and last error. Offer to retry — if yes, dispatch to appropriate phase based on mode.  |
 
 ## Phase Agents
 
@@ -146,27 +160,130 @@ Spawned for the `running` phase. Handles dev-loop execution.
 
 ### Prereview Agent
 
-Spawned for the `prereview` phase. Handles CodeRabbit local review with fresh context.
+Spawned for the `prereview` phase. Handles CodeRabbit local review with fresh context. **FIGHT BACK** - evaluate critically.
 
 ```json
 {
   "description": "Run CodeRabbit prereview",
-  "prompt": "You are the prereview agent for kagent-autopilot. Your job is to run CodeRabbit CLI review and fix findings.\n\n## Context\n- Working directory: {WORKDIR}\n- Task ID: {ticketId}\n- State file: .kagent/task-state.json\n\n## Your Task\n1. Read the phase file at phases/prereview.md\n2. Check if this is an atomicloud repo (git remote -v | grep -E '(atomicloud|atomi)')\n3. If not atomicloud, report 'skip'\n4. If atomicloud:\n   a. Run: coderabbit review --plain --base main > review.md 2>&1 (in background)\n   b. Wait with TaskOutput\n   c. Process findings:\n      - TRUE POSITIVES: fix directly in code\n      - FALSE POSITIVES (reasonable): add comments\n      - FALSE POSITIVES (wrong): use hidden comments in markdown, ignore for other files\n   d. Remove review.md\n   e. Commit any fixes\n5. Report back:\n   - 'skip' if not atomicloud\n   - 'no-findings' if review was clean\n   - 'fixed: N' if N issues were fixed\n   - 'error: <message>' if something failed\n\n## Important\n- Do NOT update .kagent/task-state.json\n- Focus on objective analysis with fresh eyes",
+  "prompt": "You are the prereview agent for kagent-autopilot. Your job is to run CodeRabbit CLI review and fix findings. **FIGHT BACK** - evaluate critically.\n\n## Context\n- Working directory: {WORKDIR}\n- Task ID: {ticketId}\n- State file: .kagent/task-state.json\n\n## Philosophy\n\n**CodeRabbit is often wrong.** Evaluate EVERY comment critically. Don't blindly accept suggestions.\n\n## Your Task\n1. Read the phase file at phases/prereview.md\n2. Check if this is an atomicloud repo (git remote -v | grep -E '(atomicloud|atomi)')\n3. If not atomicloud, report 'skip'\n4. If atomicloud:\n   a. Run: coderabbit review --plain --base main > review.md 2>&1 (in background)\n   b. Wait with TaskOutput\n   c. Process findings:\n      - TRUE POSITIVES: fix directly in code\n      - FALSE POSITIVES (reasonable): add comments\n      - FALSE POSITIVES (wrong): use hidden comments in markdown, ignore for other files\n   d. Remove review.md\n   e. Commit any fixes\n5. Report back:\n   - 'skip' if not atomicloud\n   - 'no-findings' if review was clean\n   - 'fixed: N' if N issues were fixed\n   - 'error: <message>' if something failed\n\n## Important\n- Do NOT update .kagent/task-state.json\n- **Never blindly accept** - always evaluate critically\n- Focus on objective analysis with fresh eyes",
   "subagent_type": "general-purpose"
 }
 ```
 
-### Polling Agent
+### Polling Phase
 
-Spawned for the `polling` phase. Handles CI/review checking with fresh context.
+The polling phase uses a **three-wave execution model**:
 
-````json
+```
+POLLER (gathers all context)
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────┐
+│  WAVE 1: IMMEDIATE ACTIONS                                  │
+│  • Close threads (outdated/ghosted/acknowledged)            │
+│  • Post replies (questions, false positives)                │
+│  → No code changes, execute directly                        │
+└─────────────────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────┐
+│  WAVE 2: CODE FIXES                                         │
+│  • Collect all code_fixes from resolvers                    │
+│  • Merge by priority: CI(1) > Review(2) > CodeRabbit(3)     │
+│  • Generate ONE combined spec                               │
+│  → Run dev-loop (autopilot) or apply directly (manual)      │
+│  → Commit and push                                          │
+└─────────────────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────┐
+│  WAVE 3: POST-PUSH ACTIONS                                  │
+│  • Post replies with commit SHA                             │
+│  • Request re-evaluation from CodeRabbit                    │
+└─────────────────────────────────────────────────────────────┘
+         │
+         ▼
+    LOOP TO POLLING
+```
+
+See `phases/polling.md` for full details.
+
+#### Poller Agent
+
+Gathers all PR context and returns a structured JSON report:
+
+```json
 {
-  "description": "Poll PR for CI/review",
-  "prompt": "You are the polling agent for kagent-autopilot. Your job is to check PR status and report feedback.\n\n## Context\n- Working directory: {WORKDIR}\n- Task ID: {ticketId}\n- PR Number: {prNumber}\n- State file: .kagent/task-state.json\n- Push Cycle: {pushCycle}/{maxPushCycles}\n\n## Your Task\n1. Read the phase file at phases/polling.md\n2. Use `dev-loop poll-pr` (NOT gh pr watch) to check PR status\n3. Parse the results and report back:\n   - CI status: passing/failing/pending\n   - Review status: approved/changes_requested/pending\n   - Any actionable feedback (CI errors, review comments)\n   - If changes needed, list them clearly\n\n## Report Format\n```\nSTATUS: <approved|changes_needed|pending>\nCI: <passing|failing|pending>\nREVIEWS: <approved|changes_requested|pending>\n\nFEEDBACK:\n- <item 1>\n- <item 2>\n\nACTION: <none|fix_and_push|wait>\n```\n\n## Important\n- Do NOT update .kagent/task-state.json\n- Do NOT make code changes (that's the orchestrator's job)\n- Just report what you find",
+  "description": "Gather full PR context",
+  "prompt": "You are the poller agent. Gather ALL PR context...\n\n[See phases/polling.md for full prompt]",
   "subagent_type": "general-purpose"
 }
-````
+```
+
+#### Resolver Agents
+
+After the poller returns, spawn resolvers IN PARALLEL based on `actions_needed`:
+
+| Action               | Resolver              | Description                                 |
+| -------------------- | --------------------- | ------------------------------------------- |
+| `ci_fix`             | `ci-resolver`         | Fix failing CI checks                       |
+| `human_review`       | `review-resolver`     | Address human review feedback               |
+| `coderabbit_threads` | `coderabbit-resolver` | Handle CodeRabbit AI comments (fight back!) |
+| `other_threads`      | `thread-resolver`     | Handle non-CodeRabbit conversations         |
+| `rebase`             | `rebase-resolver`     | Handle branch behind/conflicts              |
+
+All resolvers are in `phases/resolvers/`.
+
+#### Resolver Output Format
+
+Each resolver returns a structured output:
+
+```json
+{
+  "resolver_type": "ci|review|coderabbit|thread|rebase",
+
+  "immediate_actions": [
+    {
+      "type": "close_thread|post_reply",
+      "thread_id": "PRRT_...",
+      "comment_id": "...",
+      "body": "Reply with signature",
+      "reason": "outdated|ghosted|acknowledged|false_positive|answering"
+    }
+  ],
+
+  "code_fixes": [
+    {
+      "id": "fix-N",
+      "file": "path/to/file.ts",
+      "line": 42,
+      "description": "What needs to change",
+      "priority": 1|2|3,
+      "source": "ci|review|coderabbit",
+      "source_detail": "Original error/comment"
+    }
+  ],
+
+  "post_push_actions": [
+    {
+      "type": "post_reply",
+      "thread_id": "PRRT_...",
+      "comment_id": "...",
+      "body_template": "Fixed in {commit_sha}...",
+      "wait_for_fix_id": "fix-N",
+      "request_re_evaluation": true
+    }
+  ]
+}
+```
+
+#### Priority Order for Code Fixes
+
+| Priority | Source        | Reason                         |
+| -------- | ------------- | ------------------------------ |
+| 1        | CI failures   | Must pass before anything else |
+| 2        | Human reviews | Blocking merge                 |
+| 3        | CodeRabbit    | Nice to have, AI feedback      |
 
 ## Orchestrator Responsibilities
 
@@ -176,7 +293,11 @@ The orchestrator (you) handles:
 2. **Team coordination** — Create team, spawn agents, receive their reports
 3. **Direct phase execution** — setup, sub_planning, run_spec, pushing
 4. **Processing agent reports** — Update state based on agent findings
-5. **User interaction** — AskUserQuestion for spec approval, conflicts, failures
+5. **Resolver orchestration** — Spawn resolvers in parallel, execute three-wave model:
+   - **Wave 1**: Execute immediate_actions (close threads, post replies)
+   - **Wave 2**: Merge code_fixes into ONE spec, run dev-loop or apply directly
+   - **Wave 3**: Execute post_push_actions with commit SHA
+6. **User interaction** — AskUserQuestion for spec approval, conflicts, failures
 
 ## Spawning Agents
 
@@ -191,7 +312,18 @@ Task(
 )
 ```
 
-After the agent completes, read its report and update state accordingly.
+For resolvers, spawn IN PARALLEL with `run_in_background: true`:
+
+```
+Task(
+  subagent_type: "general-purpose",
+  description: "Fix CI failures for PR #42",
+  prompt: "<resolver prompt>",
+  run_in_background: true
+)
+```
+
+After all resolvers complete, aggregate results and proceed.
 
 ## Rules
 
@@ -207,6 +339,11 @@ After the agent completes, read its report and update state accordingly.
 10. **Never push to main/master**
 11. **Never force push**
 12. **Always use dev-loop poll-pr** — NEVER use `gh pr watch` in polling phase
+13. **Three-wave execution** — immediate actions → code fixes (merged) → post-push actions
+14. **One combined spec** — merge all resolver fixes into ONE spec before dev-loop
+15. **Priority merging** — CI(1) > Review(2) > CodeRabbit(3), drop lower priority overlaps
+16. **Fight CodeRabbit** — evaluate their comments critically, don't blindly accept
+17. **Never close threads without note** — always post explanation with signature first
 
 ## Prerequisites
 
