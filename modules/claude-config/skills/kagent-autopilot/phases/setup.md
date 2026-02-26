@@ -68,9 +68,83 @@ Use `AskUserQuestion` for:
   - Reviewer timeout (default 15 min)
 - **Obsidian symlink** (default yes) — symlink `.kagent` to `~/Documents/Main/kagent/...`
 
-### Step 4: Clarifying Questions
+### Step 4: Iterative Spec Clarification (Chat-Based)
 
-Before generating spec, ask about unclear requirements, technical approach, or scope. **This is the last chance for user input before the autonomous loop.**
+**This is a focused spec-generation phase. Your ONLY job here is to nail down the spec.**
+
+#### Philosophy
+
+- **Challenge everything** — be the devil's advocate
+- **Don't assume** — if something could be interpreted multiple ways, ask
+- **Think ahead** — what will bite us during implementation?
+- **Stay in chat** — use natural back-and-forth, NOT AskUserQuestion
+
+#### Clarification Loop
+
+1. **First pass analysis** — Read the ticket and identify:
+   - Ambiguous requirements (could mean A or B)
+   - Missing acceptance criteria
+   - Technical decisions that need user input
+   - Edge cases not covered
+   - Dependencies on other systems/tasks
+   - Scope creep risks
+
+2. **Challenge the user** (in chat, not AskUserQuestion):
+
+   ```
+   Looking at the ticket, I have some concerns before we proceed:
+
+   1. [Ambiguity] The ticket says "X" — does this mean A or B?
+      - If A: [implication]
+      - If B: [implication]
+
+   2. [Missing info] What about [edge case]? The ticket doesn't mention it.
+
+   3. [Technical decision] For [feature], should we [option A] or [option B]?
+      - Option A: [pros/cons]
+      - Option B: [pros/cons]
+
+   4. [Scope check] The ticket mentions X but also hints at Y. Should Y be in scope?
+   ```
+
+3. **Iterate until firm** — Keep asking until:
+   - All ambiguities resolved
+   - Technical approach decided
+   - Scope clearly bounded
+   - Acceptance criteria complete
+
+4. **Confirm understanding** — Summarize back to user:
+
+   ```
+   Let me confirm my understanding:
+   - We'll build [X] which does [Y]
+   - Scope includes: [list]
+   - Out of scope: [list]
+   - Technical approach: [decision]
+   - Acceptance: [criteria]
+
+   Does that capture it correctly?
+   ```
+
+#### What to Challenge
+
+| Category           | Questions to Ask                         |
+| ------------------ | ---------------------------------------- |
+| **Ambiguity**      | "This could mean X or Y — which?"        |
+| **Missing info**   | "What happens when Z?"                   |
+| **Technical**      | "For auth, JWT or session? Why?"         |
+| **Scope**          | "Is X in scope? The ticket hints at it." |
+| **Dependencies**   | "Does this depend on task Y?"            |
+| **Edge cases**     | "What if the user does X?"               |
+| **Error handling** | "How should failures be handled?"        |
+| **Performance**    | "Any latency/throughput requirements?"   |
+
+#### Anti-Patterns to Avoid
+
+- ❌ "Should I proceed?" (too vague)
+- ❌ Asking multiple unrelated questions at once
+- ❌ Accepting vague answers without follow-up
+- ❌ Using AskUserQuestion for iterative clarification
 
 ### Step 5: Generate task-spec.md
 

@@ -11,42 +11,20 @@ Two modes:
 - **Autopilot mode**: Takes a ticket and autonomously implements it through to a merge-ready PR using `dev-loop` (kagent-run). After spec approval, fully autonomous except **spec conflict** (exit 2) and **push failure**.
 - **Manual mode**: You already implemented the code. Autopilot handles the push → CI/review → fix loop, fixing issues directly without dev-loop.
 
-## Agent Team Architecture
+## Subagent Architecture
 
-This skill runs as an agent team with an orchestrator and specialized phase agents:
+The orchestrator (you) handles phases directly and spawns subagents via Task tool when needed:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     ORCHESTRATOR (you)                       │
-│  - Maintains state (.kagent/task-state.json)                │
-│  - Handles phase dispatch                                   │
-│  - Spawns phase agents                                      │
-│  - Handles: setup, sub_planning, run_spec, pushing          │
-│  - Spawns resolvers IN PARALLEL after polling               │
-└─────────────────────────────────────────────────────────────┘
-         │                    │                    │
-         ▼                    ▼                    ▼
-   ┌──────────┐        ┌──────────┐        ┌──────────┐
-   │  RUNNER  │        │PREREVIEW │        │ POLLER   │
-   │  AGENT   │        │  AGENT   │        │  AGENT   │
-   └──────────┘        └──────────┘        └──────────┘
-   Long dev-loop       Fresh context        Gathers ALL
-   execution           for review           PR context
-
-                              │
-                              ▼
-              ┌──────────────────────────────┐
-              │     RESOLVERS (parallel)     │
-              ├──────────────────────────────┤
-              │  ci-resolver                 │
-              │  review-resolver             │
-              │  coderabbit-resolver         │
-              │  thread-resolver             │
-              │  rebase-resolver             │
-              └──────────────────────────────┘
+ORCHESTRATOR (you)
+├── Direct: setup, sub_planning, run_spec, pushing
+├── Spawns: runner agent (long dev-loop execution)
+├── Spawns: prereview agent (fresh context for CodeRabbit)
+├── Spawns: poller agent (gathers PR context)
+└── Spawns: resolvers IN PARALLEL (ci, review, coderabbit, thread, rebase)
 ```
 
-**Why agents for these phases?**
+**Why subagents for these?**
 
 - **Runner**: Long-running (30+ min), needs isolation
 - **Prereview**: Needs fresh context for objective CodeRabbit analysis
@@ -55,20 +33,20 @@ This skill runs as an agent team with an orchestrator and specialized phase agen
 
 ## Glossary
 
-| Term           | Scope                            | Description                                                                             |
-| -------------- | -------------------------------- | --------------------------------------------------------------------------------------- |
-| **Iteration**  | Inner (dev-loop, autopilot only) | One implement-then-review pass. Controlled by `maxIterations`.                          |
-| **Push cycle** | Outer (both modes)               | One round: commit, push, CI/review check. Controlled by `maxPushCycles`.                |
-| **Sub-plan**   | Autopilot only (optional)        | A portion of a large task spec. Multiple sub-plans are run sequentially before pushing. |
-| **Conflict**   | Dev-loop exit 2 (autopilot only) | The spec contains contradictory or ambiguous requirements.                              |
+| Term           | Scope                            | Description                                                              |
+| -------------- | -------------------------------- | ------------------------------------------------------------------------ |
+| **Iteration**  | Inner (dev-loop, autopilot only) | One implement-then-review pass. Controlled by `maxIterations`.           |
+| **Push cycle** | Outer (both modes)               | One round: commit, push, CI/review check. Controlled by `maxPushCycles`. |
+| **Sub-plan**   | Autopilot only (RARE)            | Only for large/multi-bounded-context tasks. Most tasks use single plan.  |
+| **Conflict**   | Dev-loop exit 2 (autopilot only) | The spec contains contradictory or ambiguous requirements.               |
 
 ## State Machine
 
 ```
 Autopilot mode:
-  [setup] ──→ approved ──→ sub_planning ──→ run_spec ──→ running ──→ prereview ──→ pushing ──→ polling ──→ completed
-      │                                        │            │  (agent)     │  (agent)      │    │  (agent)    │
-      └────────────────────────────────────────┴────────────┴─────────────┴───────────────┴────┴─────────────┘
+  [setup] ──→ approved ──→ sub_planning? ──→ run_spec ──→ running ──→ prereview ──→ pushing ──→ polling ──→ completed
+      │                          │              │            │  (agent)     │  (agent)      │    │  (agent)    │
+      └──────────────────────────┴──────────────┴────────────┴─────────────┴───────────────┴────┴─────────────┘
                                 (feedback from CI/reviews → spawn resolvers → fix)
 
 Manual mode:
@@ -77,6 +55,8 @@ Manual mode:
                  └─────────────┴───────────┴───────────┘
                  (feedback from CI/reviews → spawn resolvers → fix)
 ```
+
+Note: `sub_planning?` is optional — only for large/multi-context tasks. Most tasks skip directly to `run_spec`.
 
 ## Key State Fields (`.kagent/task-state.json`)
 
@@ -110,26 +90,7 @@ spec/
 
 ## Phase Dispatch
 
-**On invocation, create the agent team and read `.kagent/task-state.json`.**
-
-### Step 1: Create Team (if not exists)
-
-```bash
-# Check if team already exists for this task
-ls ~/.claude/teams/kagent-autopilot-*/config.json 2>/dev/null | head -1
-```
-
-If no team exists, create one:
-
-Use TeamCreate with:
-
-- `team_name`: `"kagent-autopilot-{ticketId-or-branch}"` (e.g., `kagent-autopilot-PE-1234` or `kagent-autopilot-manual`)
-- `description`: `"Autopilot for {ticketId}"`
-- `agent_type`: `"general-purpose"`
-
-### Step 2: Dispatch Based on Phase
-
-Read `.kagent/task-state.json` and dispatch accordingly:
+**On invocation, read `.kagent/task-state.json` and dispatch accordingly:**
 
 | Condition               | Action                                                                                               |
 | ----------------------- | ---------------------------------------------------------------------------------------------------- |
@@ -290,8 +251,8 @@ Each resolver returns a structured output:
 The orchestrator (you) handles:
 
 1. **State management** — Read/write `.kagent/task-state.json` at every phase transition
-2. **Team coordination** — Create team, spawn agents, receive their reports
-3. **Direct phase execution** — setup, sub_planning, run_spec, pushing
+2. **Direct phase execution** — setup, sub_planning, run_spec, pushing
+3. **Spawning subagents** — runner, prereview, poller, resolvers via Task tool
 4. **Processing agent reports** — Update state based on agent findings
 5. **Resolver orchestration** — Spawn resolvers in parallel, execute three-wave model:
    - **Wave 1**: Execute immediate_actions (close threads, post replies)
@@ -299,16 +260,15 @@ The orchestrator (you) handles:
    - **Wave 3**: Execute post_push_actions with commit SHA
 6. **User interaction** — AskUserQuestion for spec approval, conflicts, failures
 
-## Spawning Agents
+## Spawning Subagents
 
-Use the Task tool to spawn phase agents:
+Use the Task tool to spawn subagents:
 
 ```
 Task(
   subagent_type: "general-purpose",
   description: "Run dev-loop for PE-1234",
-  prompt: "<agent prompt from above with variables substituted>",
-  team_name: "kagent-autopilot-PE-1234"
+  prompt: "<agent prompt from above with variables substituted>"
 )
 ```
 
@@ -330,20 +290,22 @@ After all resolvers complete, aggregate results and proceed.
 1. **Auto-detect ticket** — only ask if not found in argument, branch, or worktree
 2. **Auto-detect ticket system** — PE = Jira, CU = ClickUp
 3. **Require spec approval** — before entering autonomous loop (autopilot only)
-4. **Fully autonomous after approval** — only stop for spec conflict (exit 2) or push failure
-5. **Delegate to dev-loop** — don't duplicate its implement-then-review logic (autopilot only)
-6. **State file required** — read/write `.kagent/task-state.json` at every phase transition
-7. **Committed spec files** — `spec/<task-id>/task-spec.md` (persistent) + `spec/<task-id>/plans/*.md` (phases) — autopilot only
-8. **Check commit conventions** — look for CONTRIBUTING.md, commitlint, recent git log
-9. **Include ticket ID** — in commits, branches, PRs (when available)
-10. **Never push to main/master**
-11. **Never force push**
-12. **Always use dev-loop poll-pr** — NEVER use `gh pr watch` in polling phase
-13. **Three-wave execution** — immediate actions → code fixes (merged) → post-push actions
-14. **One combined spec** — merge all resolver fixes into ONE spec before dev-loop
-15. **Priority merging** — CI(1) > Review(2) > CodeRabbit(3), drop lower priority overlaps
-16. **Fight CodeRabbit** — evaluate their comments critically, don't blindly accept
-17. **Never close threads without note** — always post explanation with signature first
+4. **Challenge before building** — iteratively clarify specs and sub-plans in chat (not AskUserQuestion), be devil's advocate
+5. **Firm spec = firm commitment** — don't proceed until all ambiguities resolved
+6. **Fully autonomous after approval** — only stop for spec conflict (exit 2) or push failure
+7. **Delegate to dev-loop** — don't duplicate its implement-then-review logic (autopilot only)
+8. **State file required** — read/write `.kagent/task-state.json` at every phase transition
+9. **Committed spec files** — `spec/<task-id>/task-spec.md` (persistent) + `spec/<task-id>/plans/*.md` (phases) — autopilot only
+10. **Check commit conventions** — look for CONTRIBUTING.md, commitlint, recent git log
+11. **Include ticket ID** — in commits, branches, PRs (when available)
+12. **Never push to main/master**
+13. **Never force push**
+14. **Always use dev-loop poll-pr** — NEVER use `gh pr watch` in polling phase
+15. **Three-wave execution** — immediate actions → code fixes (merged) → post-push actions
+16. **One combined spec** — merge all resolver fixes into ONE spec before dev-loop
+17. **Priority merging** — CI(1) > Review(2) > CodeRabbit(3), drop lower priority overlaps
+18. **Fight CodeRabbit** — evaluate their comments critically, don't blindly accept
+19. **Never close threads without note** — always post explanation with signature first
 
 ## Prerequisites
 
