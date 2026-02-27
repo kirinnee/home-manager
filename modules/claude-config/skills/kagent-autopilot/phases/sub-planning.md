@@ -44,7 +44,7 @@ Skip directly to phases/run-spec.md
 
 Update state: `phase: "sub_planning"` (for resumability).
 
-1. Read `spec/<task-id>/task-spec.md` and identify potential independent work streams
+1. Read `{specDir}/task-spec.md` and identify potential independent work streams
 
 2. **Check for Domain-Driven Design skill:**
 
@@ -118,7 +118,7 @@ For each plan, ensure:
 1. Write each sub-plan using [templates/sub-plan-template.md](../templates/sub-plan-template.md):
 
    ```bash
-   mkdir -p spec/<task-id>/plans
+   mkdir -p {specDir}/plans
    ```
 
    Each plan file should include (from clarifications):
@@ -133,7 +133,7 @@ For each plan, ensure:
 
    ```bash
    git add spec/<task-id>/
-   git commit -m "docs: add sub-plans for <task-id>"
+   git commit -m "docs: add sub-plans for <task-id> v{specVersion}"
    ```
 
 3. Update state:
@@ -141,8 +141,8 @@ For each plan, ensure:
    {
      "phase": "run_spec",
      "subPlans": [
-       { "id": "phase-1", "file": "spec/<task-id>/plans/phase-1.md", "status": "pending" },
-       { "id": "phase-2", "file": "spec/<task-id>/plans/phase-2.md", "status": "pending" }
+       { "id": "phase-1", "file": "{specDir}/plans/phase-1.md", "status": "pending" },
+       { "id": "phase-2", "file": "{specDir}/plans/phase-2.md", "status": "pending" }
      ],
      "currentSubPlanIndex": 0
    }

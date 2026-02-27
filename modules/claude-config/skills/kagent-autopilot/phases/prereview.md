@@ -4,6 +4,16 @@ This phase runs CodeRabbit CLI review locally before pushing, allowing fixes for
 
 **Agent Mode:** When spawned as a prereview agent, execute this phase and report findings back to orchestrator. Do NOT update `.kagent/task-state.json`.
 
+## Agent Context (when spawned)
+
+- Working directory: `{WORKDIR}`
+- Task ID: `{ticketId}`
+- State file: `.kagent/task-state.json`
+
+## Philosophy
+
+**CodeRabbit is often wrong.** Evaluate EVERY comment critically. Don't blindly accept suggestions.
+
 ## Check Repository Type
 
 First, check if this is an atomicloud/atomi-based repository that has CodeRabbit integration:

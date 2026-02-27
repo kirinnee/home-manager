@@ -4,6 +4,30 @@ This phase executes dev-loop and handles the result based on exit code.
 
 **Agent Mode:** When spawned as a runner agent, execute this phase and report findings back to orchestrator. Do NOT update `.kagent/task-state.json`.
 
+## Agent Context (when spawned)
+
+- Working directory: `{WORKDIR}`
+- Task ID: `{ticketId}`
+- State file: `.kagent/task-state.json`
+
+## Agent Report Format
+
+When running as an agent, report back to orchestrator with:
+
+```
+EXIT_CODE: <0|1|2>
+RUN_ID: <latest run ID from .kagent/history/>
+STATUS: <completed|max_iterations|error|conflict>
+
+ERRORS:
+- <error message if any>
+
+CONFLICT:
+<contents of .kagent/conflict.md if exit code 2>
+
+NEXT_PHASE: <prereview|run_spec|failed>
+```
+
 ## Update Ticket Status
 
 **Before starting dev-loop**, move the ticket to "In Progress" status:
@@ -62,7 +86,7 @@ Status in history file is `completed`.
 
 2. Mark current sub-plan as completed in state:
    ```json
-   { "id": "phase-N", "file": "spec/<task-id>/plans/phase-N.md", "status": "completed" }
+   { "id": "phase-N", "file": "{specDir}/plans/phase-N.md", "status": "completed" }
    ```
 3. Check remaining sub-plans:
    - **More pending sub-plans:** Increment `currentSubPlanIndex`, copy next sub-plan file to `.kagent/spec.md`, read `phases/run-spec.md` to start next dev-loop run (skip initialization)
@@ -124,21 +148,3 @@ Max push cycles reached ({N}/{MAX})
 ```
 
 Update state: `phase: "failed"`
-
-## Agent Report Format
-
-When running as an agent, report back to orchestrator with:
-
-```
-EXIT_CODE: <0|1|2>
-RUN_ID: <latest run ID from .kagent/history/>
-STATUS: <completed|max_iterations|error|conflict>
-
-ERRORS:
-- <error message if any>
-
-CONFLICT:
-<contents of .kagent/conflict.md if exit code 2>
-
-NEXT_PHASE: <prereview|run_spec|failed>
-```

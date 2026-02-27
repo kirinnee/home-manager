@@ -4,6 +4,12 @@ This phase gathers ALL PR context, then executes a three-wave fix process.
 
 **Agent Mode:** When spawned as a poller agent, gather context and report to orchestrator. Do NOT update `.kagent/task-state.json`. Do NOT make code changes.
 
+## Agent Context (when spawned)
+
+- Working directory: `{WORKDIR}`
+- PR Number: `{prNumber}`
+- State file: `.kagent/task-state.json`
+
 ## Three-Wave Execution Model
 
 ```
