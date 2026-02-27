@@ -46,8 +46,22 @@ ORCHESTRATOR (you)
 Autopilot mode:
   [setup] ──→ approved ──→ sub_planning? ──→ run_spec ──→ running ──→ prereview ──→ pushing ──→ polling ──→ completed
       │                          │              │            │  (agent)     │  (agent)      │    │  (agent)    │
-      └──────────────────────────┴──────────────┴────────────┴─────────────┴───────────────┴────┴─────────────┘
-                                (feedback from CI/reviews → spawn resolvers → fix)
+      │                          │              │            │             │               │    │             │
+      │                          │              │            └─────────────┴───────────────┴────┘
+      │                          │              │                          (feedback from CI/reviews → spawn resolvers → fix)
+      │                          │              │
+      └──────────────────────────┴──────────────┴──────────────────────────────────────────────────────────────┐
+                                                                                                               │
+                                                                                                               ▼
+                                                                                                    ┌────────────────┐
+                                                                                                    │   completed    │
+                                                                                                    └───────┬────────┘
+                                                                                                            │ "I have feedback"
+                                                                                                            ▼
+                                                                                                    ┌────────────────┐
+                                                                                                    │    feedback    │──→ approved (with v{N+1})
+                                                                                                    └────────────────┘          │
+                                                                                                                                └──→ (loops back through entire flow)
 
 Manual mode:
   [setup] ──→ prereview ──→ pushing ──→ polling ──→ completed
@@ -60,33 +74,40 @@ Note: `sub_planning?` is optional — only for large/multi-context tasks. Most t
 
 ## Key State Fields (`.kagent/task-state.json`)
 
-| Field                 | Type        | Description                                                                                              |
-| --------------------- | ----------- | -------------------------------------------------------------------------------------------------------- |
-| `phase`               | string      | Current state: approved, sub_planning, run_spec, running, prereview, pushing, polling, completed, failed |
-| `mode`                | string      | `"autopilot"` (dev-loop) or `"manual"` (direct fixes)                                                    |
-| `ticketId`            | string/null | Ticket ID (PE-1234, CU-abc123). Null in manual mode if no ticket.                                        |
-| `pushCycle`           | number      | Current push cycle (0-indexed, incremented after push)                                                   |
-| `maxPushCycles`       | number      | Outer loop limit (default 5)                                                                             |
-| `prNumber`            | number/null | GitHub PR number                                                                                         |
-| `lastRunId`           | string/null | Most recent dev-loop run ID (autopilot only)                                                             |
-| `devLoopInitialized`  | boolean     | Whether `dev-loop init` has been run (autopilot only)                                                    |
-| `specDir`             | string/null | Path to spec directory, e.g., `spec/PE-1234`. Null in manual mode.                                       |
-| `subPlans`            | array/null  | Sub-plan files for large tasks. Each item: `{id, file, status}`. Null if single plan.                    |
-| `currentSubPlanIndex` | number/null | Current sub-plan index (0-indexed). Null if not using sub-plans                                          |
+| Field                 | Type        | Description                                                                                                        |
+| --------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------ |
+| `phase`               | string      | Current state: approved, sub_planning, run_spec, running, prereview, pushing, polling, feedback, completed, failed |
+| `mode`                | string      | `"autopilot"` (dev-loop) or `"manual"` (direct fixes)                                                              |
+| `ticketId`            | string/null | Ticket ID (PE-1234, CU-abc123). Null in manual mode if no ticket.                                                  |
+| `specVersion`         | number      | Current spec version (1, 2, 3...). Increments when user provides feedback after completion.                        |
+| `pushCycle`           | number      | Current push cycle (0-indexed, incremented after push)                                                             |
+| `maxPushCycles`       | number      | Outer loop limit (default 5)                                                                                       |
+| `prNumber`            | number/null | GitHub PR number                                                                                                   |
+| `lastRunId`           | string/null | Most recent dev-loop run ID (autopilot only)                                                                       |
+| `devLoopInitialized`  | boolean     | Whether `dev-loop init` has been run (autopilot only)                                                              |
+| `specDir`             | string/null | Path to spec version directory, e.g., `spec/PE-1234/v1`. Null in manual mode.                                      |
+| `subPlans`            | array/null  | Sub-plan files for large tasks. Each item: `{id, file, status}`. Null if single plan.                              |
+| `currentSubPlanIndex` | number/null | Current sub-plan index (0-indexed). Null if not using sub-plans                                                    |
 
 Full schema with all fields is in `phases/setup.md`.
 
-## Spec Directory Structure
+## Spec Directory Structure (Versioned)
 
 ```
 spec/
-└── <task-id>/              # e.g., "PE-1234" or "feature-auth"
-    ├── task-spec.md        # Original full task spec (persistent)
-    └── plans/              # Only created if sub-plans are needed
-        ├── phase-1.md      # Sub-plan 1
-        ├── phase-2.md      # Sub-plan 2
-        └── ...
+└── <task-id>/                  # e.g., "PE-1234" or "CU-abc123"
+    ├── v1/                     # Version 1
+    │   ├── task-spec.md        # Original spec
+    │   ├── plans/              # Sub-plans (if needed)
+    │   │   └── phase-1.md
+    │   └── feedback.md         # Created when user provides feedback after completion
+    ├── v2/                     # Version 2 (created from v1 spec + v1 feedback)
+    │   ├── task-spec.md        # Combined spec
+    │   └── ...
+    └── ...
 ```
+
+**Why versioned?** After PR completion, you may have learnings that warrant changes. Versioning preserves the original spec, captures feedback, and creates a new iteration.
 
 ## Phase Dispatch
 
@@ -102,88 +123,68 @@ spec/
 | `phase: "prereview"`    | **Spawn prereview agent** — see [Prereview Agent](#prereview-agent) below                            |
 | `phase: "pushing"`      | Read `phases/pushing.md` (handled by orchestrator)                                                   |
 | `phase: "polling"`      | **Spawn poller agent** → **spawn resolvers in parallel** — see [Polling Phase](#polling-phase) below |
-| `phase: "completed"`    | Report: "Task already completed. PR #{prNumber}."                                                    |
+| `phase: "feedback"`     | Read `phases/feedback.md` (handled by orchestrator) — post-completion iteration                      |
+| `phase: "completed"`    | Report: "Task completed. PR #{prNumber}. Say 'I have feedback' to iterate further."                  |
 | `phase: "failed"`       | Report status and last error. Offer to retry — if yes, dispatch to appropriate phase based on mode.  |
+
+## Resumption After Context Clear
+
+If context runs low during long phases (spec planning, sub-planning, running), ask the user:
+
+```
+Context is getting long. Please clear context and run:
+/kagent-autopilot
+
+I'll resume from `.kagent/task-state.json`.
+```
+
+The state file contains everything needed to resume: current phase, spec version, PR number, sub-plan progress, etc. On re-invocation, read the state and dispatch to the appropriate phase.
 
 ## Phase Agents
 
-### Runner Agent
+Agents are spawned for long-running or context-isolated tasks. Each agent reads its phase file for full instructions.
 
-Spawned for the `running` phase. Handles dev-loop execution.
+| Phase       | Agent     | Description                                        |
+| ----------- | --------- | -------------------------------------------------- |
+| `running`   | Runner    | Executes dev-loop, reports exit code/status        |
+| `prereview` | Prereview | Runs CodeRabbit CLI, fixes findings (fights back!) |
+| `polling`   | Poller    | Gathers PR context → orchestrator spawns resolvers |
 
-```json
-{
-  "description": "Run dev-loop for task",
-  "prompt": "You are the runner agent for kagent-autopilot. Your job is to execute dev-loop and report results.\n\n## Context\n- Working directory: {WORKDIR}\n- Task ID: {ticketId}\n- State file: .kagent/task-state.json\n\n## Your Task\n1. Read the phase file at phases/running.md\n2. Execute dev-loop as instructed\n3. When complete, report back:\n   - Exit code (0, 1, or 2)\n   - Run ID from .kagent/history/\n   - Status (completed, max_iterations, error, conflict)\n   - Any errors or conflicts\n\n## Important\n- Do NOT update .kagent/task-state.json (orchestrator does that)\n- Just report your findings when done\n- If conflict detected (exit 2), include conflict.md contents in your report",
-  "subagent_type": "general-purpose"
-}
-```
-
-### Prereview Agent
-
-Spawned for the `prereview` phase. Handles CodeRabbit local review with fresh context. **FIGHT BACK** - evaluate critically.
-
-```json
-{
-  "description": "Run CodeRabbit prereview",
-  "prompt": "You are the prereview agent for kagent-autopilot. Your job is to run CodeRabbit CLI review and fix findings. **FIGHT BACK** - evaluate critically.\n\n## Context\n- Working directory: {WORKDIR}\n- Task ID: {ticketId}\n- State file: .kagent/task-state.json\n\n## Philosophy\n\n**CodeRabbit is often wrong.** Evaluate EVERY comment critically. Don't blindly accept suggestions.\n\n## Your Task\n1. Read the phase file at phases/prereview.md\n2. Check if this is an atomicloud repo (git remote -v | grep -E '(atomicloud|atomi)')\n3. If not atomicloud, report 'skip'\n4. If atomicloud:\n   a. Run: coderabbit review --plain --base main > review.md 2>&1 (in background)\n   b. Wait with TaskOutput\n   c. Process findings:\n      - TRUE POSITIVES: fix directly in code\n      - FALSE POSITIVES (reasonable): add comments\n      - FALSE POSITIVES (wrong): use hidden comments in markdown, ignore for other files\n   d. Remove review.md\n   e. Commit any fixes\n5. Report back:\n   - 'skip' if not atomicloud\n   - 'no-findings' if review was clean\n   - 'fixed: N' if N issues were fixed\n   - 'error: <message>' if something failed\n\n## Important\n- Do NOT update .kagent/task-state.json\n- **Never blindly accept** - always evaluate critically\n- Focus on objective analysis with fresh eyes",
-  "subagent_type": "general-purpose"
-}
-```
-
-### Polling Phase
-
-The polling phase uses a **three-wave execution model**:
+### Spawning Pattern
 
 ```
-POLLER (gathers all context)
-         │
-         ▼
-┌─────────────────────────────────────────────────────────────┐
-│  WAVE 1: IMMEDIATE ACTIONS                                  │
-│  • Close threads (outdated/ghosted/acknowledged)            │
-│  • Post replies (questions, false positives)                │
-│  → No code changes, execute directly                        │
-└─────────────────────────────────────────────────────────────┘
-         │
-         ▼
-┌─────────────────────────────────────────────────────────────┐
-│  WAVE 2: CODE FIXES                                         │
-│  • Collect all code_fixes from resolvers                    │
-│  • Merge by priority: CI(1) > Review(2) > CodeRabbit(3)     │
-│  • Generate ONE combined spec                               │
-│  → Run dev-loop (autopilot) or apply directly (manual)      │
-│  → Commit and push                                          │
-└─────────────────────────────────────────────────────────────┘
-         │
-         ▼
-┌─────────────────────────────────────────────────────────────┐
-│  WAVE 3: POST-PUSH ACTIONS                                  │
-│  • Post replies with commit SHA                             │
-│  • Request re-evaluation from CodeRabbit                    │
-└─────────────────────────────────────────────────────────────┘
-         │
-         ▼
-    LOOP TO POLLING
+Task(
+  subagent_type: "general-purpose",
+  description: "Run dev-loop for {ticketId}",
+  prompt: "Read phases/running.md and execute. Working dir: {WORKDIR}. Report: exit_code, run_id, status."
+)
+```
+
+**Key point:** Agents read their phase file for full context. The prompt just provides working directory and expected report format.
+
+### Polling Phase (Three-Wave Model)
+
+```
+POLLER → gathers context → returns actions_needed
+    │
+    ▼
+WAVE 1: Immediate actions (close threads, post replies) — no code changes
+    │
+    ▼
+WAVE 2: Code fixes (merged into ONE spec) → dev-loop or direct apply → commit & push
+    │
+    ▼
+WAVE 3: Post-push replies with commit SHA
+    │
+    ▼
+LOOP TO POLLING
 ```
 
 See `phases/polling.md` for full details.
 
-#### Poller Agent
+### Resolver Agents
 
-Gathers all PR context and returns a structured JSON report:
-
-```json
-{
-  "description": "Gather full PR context",
-  "prompt": "You are the poller agent. Gather ALL PR context...\n\n[See phases/polling.md for full prompt]",
-  "subagent_type": "general-purpose"
-}
-```
-
-#### Resolver Agents
-
-After the poller returns, spawn resolvers IN PARALLEL based on `actions_needed`:
+After poller returns, spawn resolvers IN PARALLEL based on `actions_needed`:
 
 | Action               | Resolver              | Description                                 |
 | -------------------- | --------------------- | ------------------------------------------- |
@@ -193,58 +194,29 @@ After the poller returns, spawn resolvers IN PARALLEL based on `actions_needed`:
 | `other_threads`      | `thread-resolver`     | Handle non-CodeRabbit conversations         |
 | `rebase`             | `rebase-resolver`     | Handle branch behind/conflicts              |
 
-All resolvers are in `phases/resolvers/`.
+All resolvers are in `phases/resolvers/`. Each returns: `immediate_actions`, `code_fixes`, `post_push_actions`.
 
-#### Resolver Output Format
-
-Each resolver returns a structured output:
-
-```json
-{
-  "resolver_type": "ci|review|coderabbit|thread|rebase",
-
-  "immediate_actions": [
-    {
-      "type": "close_thread|post_reply",
-      "thread_id": "PRRT_...",
-      "comment_id": "...",
-      "body": "Reply with signature",
-      "reason": "outdated|ghosted|acknowledged|false_positive|answering"
-    }
-  ],
-
-  "code_fixes": [
-    {
-      "id": "fix-N",
-      "file": "path/to/file.ts",
-      "line": 42,
-      "description": "What needs to change",
-      "priority": 1|2|3,
-      "source": "ci|review|coderabbit",
-      "source_detail": "Original error/comment"
-    }
-  ],
-
-  "post_push_actions": [
-    {
-      "type": "post_reply",
-      "thread_id": "PRRT_...",
-      "comment_id": "...",
-      "body_template": "Fixed in {commit_sha}...",
-      "wait_for_fix_id": "fix-N",
-      "request_re_evaluation": true
-    }
-  ]
-}
-```
-
-#### Priority Order for Code Fixes
+### Priority Order for Code Fixes
 
 | Priority | Source        | Reason                         |
 | -------- | ------------- | ------------------------------ |
 | 1        | CI failures   | Must pass before anything else |
 | 2        | Human reviews | Blocking merge                 |
 | 3        | CodeRabbit    | Nice to have, AI feedback      |
+
+### Feedback Phase (Post-Completion Iteration)
+
+Triggered when `phase: "completed"` and user provides feedback. See `phases/feedback.md` for details.
+
+**Flow:**
+
+1. Capture user's feedback in chat (iteratively clarify if needed)
+2. Write to `spec/<task-id>/v{N}/feedback.md`
+3. Create `spec/<task-id>/v{N+1}/task-spec.md` — combine original spec + feedback
+4. Update state: `phase: "approved"`, `specVersion: N+1`, `specDir: "spec/<task-id>/v{N+1}"`
+5. Dispatch to `phases/sub-planning.md` (or `run-spec.md` if skipping sub-plans)
+
+This allows continuous iteration even after PR is "done" — learnings from the implementation can be fed back into the spec.
 
 ## Orchestrator Responsibilities
 
@@ -295,7 +267,7 @@ After all resolvers complete, aggregate results and proceed.
 6. **Fully autonomous after approval** — only stop for spec conflict (exit 2) or push failure
 7. **Delegate to dev-loop** — don't duplicate its implement-then-review logic (autopilot only)
 8. **State file required** — read/write `.kagent/task-state.json` at every phase transition
-9. **Committed spec files** — `spec/<task-id>/task-spec.md` (persistent) + `spec/<task-id>/plans/*.md` (phases) — autopilot only
+9. **Committed spec files** — `spec/<task-id>/v{N}/task-spec.md` (versioned) + `plans/*.md` (phases) — autopilot only
 10. **Check commit conventions** — look for CONTRIBUTING.md, commitlint, recent git log
 11. **Include ticket ID** — in commits, branches, PRs (when available)
 12. **Never push to main/master**

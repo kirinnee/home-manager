@@ -148,7 +148,7 @@ Use `AskUserQuestion` for:
 
 ### Step 5: Generate task-spec.md
 
-Create `spec/<task-id>/task-spec.md` using [templates/task-spec-template.md](../templates/task-spec-template.md) populated with ticket data and clarifications.
+Create `spec/<task-id>/v1/task-spec.md` using [templates/task-spec-template.md](../templates/task-spec-template.md) populated with ticket data and clarifications.
 
 **IMPORTANT:** The `<task-id>` must include the prefix:
 
@@ -156,7 +156,7 @@ Create `spec/<task-id>/task-spec.md` using [templates/task-spec-template.md](../
 - ClickUp: `CU-abc123` (always include `CU-` prefix for ClickUp)
 
 ```bash
-mkdir -p spec/<task-id>  # e.g., spec/PE-1234 or spec/CU-abc123
+mkdir -p spec/<task-id>/v1  # e.g., spec/PE-1234/v1 or spec/CU-abc123/v1
 ```
 
 **Check for Domain-Driven Design skill before generating:**
@@ -210,6 +210,7 @@ On approval:
   "ticketBody": "Full ticket description...",
   "branch": "PE-1234-add-auth",
   "prNumber": null,
+  "specVersion": 1,
   "pushCycle": 0,
   "maxPushCycles": 5,
   "lastRunId": null,
@@ -226,14 +227,14 @@ On approval:
   "reviewerTimeout": 15,
   "conflictCheckThreshold": 3,
   "conflictChecker": "claude",
-  "specDir": "spec/PE-1234",
+  "specDir": "spec/PE-1234/v1",
   "subPlans": null,
   "currentSubPlanIndex": null,
   "tmuxSession": null
 }
 ```
 
-**Note:** For ClickUp tickets, `ticketId` should include the `CU-` prefix (e.g., `"CU-abc123"`), and `specDir` should be `"spec/CU-abc123"`.
+**Note:** For ClickUp tickets, `ticketId` should include the `CU-` prefix (e.g., `"CU-abc123"`), and `specDir` should be `"spec/CU-abc123/v1"`.
 
 **Next:** Read `phases/sub-planning.md` and follow it.
 
@@ -270,6 +271,7 @@ Optionally detect ticket ID from branch (same patterns as autopilot). If found, 
   "ticketBody": null,
   "branch": "feature/my-thing",
   "prNumber": null,
+  "specVersion": null,
   "pushCycle": 0,
   "maxPushCycles": 5,
   "lastRunId": null,

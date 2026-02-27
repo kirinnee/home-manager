@@ -2,18 +2,22 @@
 
 This phase writes the spec file for dev-loop and starts the run. It handles both the first cycle (fresh from task-spec or sub-plans) and subsequent cycles (fix spec from feedback).
 
-## Directory Structure
+## Directory Structure (Versioned)
 
 Specs are stored in a committed directory structure:
 
 ```
 spec/
-└── <task-id>/              # e.g., "PE-1234" or "feature-auth"
-    ├── task-spec.md        # Original full task spec (persistent)
-    └── plans/              # Only created if sub-plans are needed
-        ├── phase-1.md      # Sub-plan 1
-        ├── phase-2.md      # Sub-plan 2
-        └── ...
+└── <task-id>/                  # e.g., "PE-1234" or "CU-abc123"
+    ├── v1/                     # Version 1
+    │   ├── task-spec.md        # Original spec
+    │   └── plans/              # Sub-plans (if needed)
+    │       ├── phase-1.md
+    │       └── phase-2.md
+    ├── v2/                     # Version 2 (after feedback iteration)
+    │   ├── task-spec.md
+    │   └── feedback.md         # Feedback that led to v2 (in v1)
+    └── ...
 ```
 
 **IMPORTANT:** The `spec/` directory is committed to git. Only `.kagent/` is gitignored.
@@ -23,7 +27,7 @@ spec/
 ### Step 1: Initialize Dev-Loop
 
 1. Copy appropriate spec to `.kagent/spec.md`:
-   - Single plan: `spec/<task-id>/task-spec.md`
+   - Single plan: `{specDir}/task-spec.md` (e.g., `spec/PE-1234/v1/task-spec.md`)
    - Sub-plans: current sub-plan file from `subPlans[currentSubPlanIndex].file`
 2. Initialize dev-loop:
    ```bash
@@ -92,7 +96,7 @@ This approach:
 
 ## Fix Spec Generation
 
-Use [templates/fix-spec-template.md](../templates/fix-spec-template.md). Read `spec/<task-id>/task-spec.md` (use `specDir` from state) for original context, then gather feedback from the appropriate source:
+Use [templates/fix-spec-template.md](../templates/fix-spec-template.md). Read `{specDir}/task-spec.md` for original context, then gather feedback from the appropriate source:
 
 | Feedback Source          | How to Get                                                                                                                                                                                     |
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
