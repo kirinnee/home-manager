@@ -12,7 +12,7 @@ This phase runs CodeRabbit CLI review locally before pushing, allowing fixes for
 
 ## Philosophy
 
-**CodeRabbit is often wrong.** Evaluate EVERY comment critically. Don't blindly accept suggestions.
+**CodeRabbit AI often produces false positives or low-value suggestions.** Evaluate each comment thoughtfully. Accept valid feedback, but don't hesitate to push back when the suggestion doesn't apply or isn't worth the change. Be professional and specific in your reasoning.
 
 ## Check Repository Type
 
@@ -67,14 +67,15 @@ Read `review.md` and identify all review findings. For each finding:
    - Fix the issue directly in the code
    - The fix should be minimal and targeted
 
-   **For FALSE POSITIVES (reasonable):**
-   - If the suggestion seems reasonable but not required, add a brief comment explaining why the current approach is correct
+   **For FALSE POSITIVES (reasonable but not needed):**
+   - If the suggestion seems reasonable but isn't required, add a brief comment explaining why the current approach is correct
    - For markdown files: add a visible note or hidden comment
    - For code files: add a brief inline comment if appropriate
 
-   **For FALSE POSITIVES (clearly wrong):**
+   **For FALSE POSITIVES (clearly wrong or low-value):**
    - For markdown files: use hidden HTML comment: `<!-- coderabbit: ignore - explanation here -->`
    - For other file types: ignore the finding entirely (no action needed)
+   - Remember: CodeRabbit AI often produces suggestions that don't apply or aren't worth implementing
 
 ### 3.2: Apply Fixes
 

@@ -2,14 +2,12 @@
 
 This phase runs when no `.kagent/task-state.json` exists.
 
-## Step 0: Choose Mode
+## Step 0: Detect Mode
 
-Use `AskUserQuestion`:
+Check the argument passed to `/kagent-autopilot`:
 
-- **Autopilot** — full ticket-to-PR: fetch ticket, generate spec, dev-loop implements, push, CI/review loop
-- **Manual** — you already implemented the code, autopilot handles push → CI/review → fix loop
-
-If **Manual**: skip to [Manual Mode Setup](#manual-mode-setup) below.
+1. If argument is `manual` → **Manual mode** — skip to [Manual Mode Setup](#manual-mode-setup)
+2. Otherwise (no argument, ticket ID, or any other value) → **Autopilot mode** — continue below
 
 ---
 
@@ -68,7 +66,39 @@ Use `AskUserQuestion` for:
   - Reviewer timeout (default 15 min)
 - **Obsidian symlink** (default yes) — symlink `.kagent` to `~/Documents/Main/kagent/...`
 
-### Step 4: Iterative Spec Clarification (Chat-Based)
+### Step 4: Gather Repository Context
+
+Before generating the spec, read ALL relevant files to understand conventions:
+
+1. **Read CLAUDE.md files** (in order of precedence):
+   - `.claude/CLAUDE.md` (project-level, highest precedence)
+   - `CLAUDE.md` (repo root)
+   - `~/.claude/CLAUDE.md` (global user defaults)
+
+2. **Read ALL skills** in the repository:
+
+   ```bash
+   # Find all skill files
+   find .claude/skills ~/.claude/skills -name "SKILL.md" 2>/dev/null
+   ```
+
+   Read each one to understand:
+   - Naming conventions
+   - Testing patterns
+   - Documentation standards
+   - Architecture patterns
+   - Any domain-specific rules
+
+3. **Check for project conventions**:
+   - `CONTRIBUTING.md` — commit conventions, PR guidelines
+   - `.commitlint.*` — commit message rules
+   - `package.json` scripts — test, lint, build commands
+   - `Makefile` — build targets
+   - CI/CD files (`.github/workflows/`, `.gitlab-ci.yml`, etc.)
+
+**Output:** Summarize key conventions found and confirm with user which apply to this task.
+
+### Step 5: Iterative Spec Clarification (Chat-Based)
 
 **This is a focused spec-generation phase. Your ONLY job here is to nail down the spec.**
 
@@ -78,6 +108,7 @@ Use `AskUserQuestion` for:
 - **Don't assume** — if something could be interpreted multiple ways, ask
 - **Think ahead** — what will bite us during implementation?
 - **Stay in chat** — use natural back-and-forth, NOT AskUserQuestion
+- **Apply relevant skills** — ensure all relevant skills in skill folders are applied
 
 #### Clarification Loop
 
@@ -146,7 +177,61 @@ Use `AskUserQuestion` for:
 - ❌ Accepting vague answers without follow-up
 - ❌ Using AskUserQuestion for iterative clarification
 
-### Step 5: Generate task-spec.md
+#### Implementation Checklist (Add to Spec)
+
+**CRITICAL:** Before finalizing the spec, ensure it includes an Implementation Checklist section with these items. Check for precedence in the codebase (some may not apply):
+
+| Priority | Category          | Items to Include in Spec                                     | Check For                                |
+| -------- | ----------------- | ------------------------------------------------------------ | ---------------------------------------- |
+| 1        | **Documentation** | Inline docs, README updates, API documentation               | Existing doc patterns, `docs/` folder    |
+| 2        | **Tests**         | Unit tests, functional tests, integration tests              | Test folder structure, testing framework |
+| 3        | **Metrics**       | OTEL metrics OR Prometheus metrics                           | Existing telemetry setup                 |
+| 4        | **Logging**       | Structured logging at correct levels (debug/info/warn/error) | Logging library in use                   |
+| 5        | **Alerts**        | Grafana alert rules (CRs) + runbook markdown                 | `alerts/`, `monitoring/` folders         |
+| 6        | **Dashboards**    | Grafana dashboard CRs with JSON                              | `dashboards/`, `grafana/` folders        |
+| 7        | **System Tests**  | Bruno integration tests                                      | `bruno/`, `.bruno/` folders              |
+
+**How to apply:**
+
+1. Check the codebase for existing patterns in each category
+2. If patterns exist, the spec MUST include corresponding items
+3. If no patterns exist, mark as "N/A - no existing pattern" in the spec
+4. Respect precedence — if tests go in `__tests__/` not `tests/`, follow that convention
+
+**Add this section to the spec:**
+
+```markdown
+## Implementation Checklist
+
+> Ensure all applicable items are implemented. Mark N/A if not applicable to this task.
+
+### Required
+
+- [ ] Code changes per technical spec above
+- [ ] Documentation updated (if applicable)
+
+### Testing (check all that apply)
+
+- [ ] Unit tests
+- [ ] Functional tests
+- [ ] Integration tests
+- [ ] Bruno system tests (if API changes)
+
+### Observability (check all that apply)
+
+- [ ] Metrics: [OTEL | Prometheus] — describe what's measured
+- [ ] Logging: correct levels used (debug/info/warn/error)
+- [ ] Alerts: Grafana CR + runbook markdown
+- [ ] Dashboards: Grafana CR with JSON
+
+### Notes
+
+- Test location: [follow existing pattern, e.g., `__tests__/`, `tests/`, `src/*.test.ts`]
+- Metrics pattern: [OTEL | Prometheus | N/A]
+- Logging library: [existing library name | N/A]
+```
+
+### Step 6: Generate task-spec.md
 
 Create `spec/<task-id>/v1/task-spec.md` using [templates/task-spec-template.md](../templates/task-spec-template.md) populated with ticket data and clarifications.
 

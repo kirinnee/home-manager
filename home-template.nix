@@ -235,8 +235,11 @@ rec {
       nil
       atomi.cyanprint
       atomi.attic
+
+      # LLM friendly
       atomi.worktrunk
       atomi.coderabbit
+      atomi.ccc
 
       # cncf
       kubectl

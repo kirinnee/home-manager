@@ -1,54 +1,16 @@
 # Base Claude Code settings for multi-account configuration
 # Telegram notifications for when Claude needs your attention
+# See: https://docs.anthropic.com/en/docs/claude-code/hooks
 {
+  # Single catch-all Notification hook - reads notification_type from stdin JSON
+  # Official notification types: permission_prompt, idle_prompt
   Notification = [
-    # Permission prompts - Claude needs approval for a tool
-    {
-      matcher = "permission_prompt";
-      hooks = [
-        {
-          type = "command";
-          command = "$HOME/.config/home-manager/modules/claude-config/telegram-notify.sh permission";
-        }
-      ];
-    }
-    # Idle prompts - Claude has been waiting 60+ seconds
-    {
-      matcher = "idle_prompt";
-      hooks = [
-        {
-          type = "command";
-          command = "$HOME/.config/home-manager/modules/claude-config/telegram-notify.sh idle";
-        }
-      ];
-    }
-    # MCP tool elicitation - tool needs user input
-    {
-      matcher = "elicitation_dialog";
-      hooks = [
-        {
-          type = "command";
-          command = "$HOME/.config/home-manager/modules/claude-config/telegram-notify.sh elicitation";
-        }
-      ];
-    }
-    # Auth success - authentication completed
-    {
-      matcher = "auth_success";
-      hooks = [
-        {
-          type = "command";
-          command = "$HOME/.config/home-manager/modules/claude-config/telegram-notify.sh auth";
-        }
-      ];
-    }
-    # Generic notification fallback (empty matcher catches all)
     {
       matcher = "";
       hooks = [
         {
           type = "command";
-          command = "$HOME/.config/home-manager/modules/claude-config/telegram-notify.sh notification";
+          command = "$HOME/.config/home-manager/modules/claude-config/telegram-notify.sh";
         }
       ];
     }
@@ -61,7 +23,23 @@
           type = "command";
           command = "$HOME/.config/home-manager/modules/claude-config/telegram-notify.sh complete";
         }
+        {
+          type = "command";
+          command = "$HOME/.nix-profile/bin/ccc hook-stop";
+        }
       ];
+    }
+  ];
+  PreToolUse = [
+    {
+      hooks = [
+        {
+          command = "$HOME/.nix-profile/bin/ccc hook-permission";
+          timeout = 300000;
+          type = "command";
+        }
+      ];
+      matcher = "";
     }
   ];
 }
