@@ -94,3 +94,41 @@ ls ./.claude/skills/domain-driven-design/SKILL.md 2>/dev/null
 {Key events that occur within this bounded context, if relevant to the task.}
 
 - `{Event Name}` — {trigger condition and what it signifies}
+
+## Implementation Checklist
+
+**Ensure all relevant skills in skill folders are applied to this implementation.**
+
+### Documentation
+
+- [ ] Update existing documentation if behavior changes
+- [ ] Add inline comments for complex logic
+- [ ] Update README if setup/usage changes
+
+### Testing
+
+Check all that apply:
+
+- [ ] Unit tests
+- [ ] Functional tests
+- [ ] Integration tests
+- [ ] Bruno system tests (if API changes)
+
+**Test location:** {follow existing pattern, e.g., `__tests__/`, `tests/`, `src/*.test.ts`}
+
+### Observability
+
+Check all that apply:
+
+- [ ] **Metrics**: [OTEL | Prometheus | N/A]
+  - Describe what's being measured:
+- [ ] **Logging**: Correct levels used (debug/info/warn/error)
+  - Logging library: {existing library name | N/A}
+- [ ] **Alerts**: Grafana CR + runbook markdown
+  - Alert location: `alerts/` or `monitoring/`
+- [ ] **Dashboards**: Grafana CR with JSON
+  - Dashboard location: `dashboards/` or `monitoring/`
+
+### Notes
+
+{Any additional implementation notes or considerations}

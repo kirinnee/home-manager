@@ -1,6 +1,6 @@
 # Resolver: CodeRabbit Threads
 
-Handles CodeRabbit AI review threads. **FIGHT BACK** - evaluate critically.
+Handles CodeRabbit AI review threads. Push back reasonably — evaluate critically but professionally.
 
 ## Context
 
@@ -10,7 +10,7 @@ Handles CodeRabbit AI review threads. **FIGHT BACK** - evaluate critically.
 
 ## Philosophy
 
-**CodeRabbit is often wrong.** Evaluate EVERY comment critically. Don't blindly accept suggestions.
+**CodeRabbit AI often produces false positives or low-value suggestions.** Evaluate each comment thoughtfully. Accept valid feedback, but don't hesitate to push back when the suggestion doesn't apply or isn't worth the change. Be professional and specific in your reasoning.
 
 ## Output Format
 
@@ -302,7 +302,7 @@ CodeRabbit fixes are **priority 3** (lowest):
 
 ## Important Rules
 
-1. **Never blindly accept** - always evaluate critically
+1. **Evaluate critically but professionally** - CodeRabbit AI tends to produce false positives; push back when appropriate with clear reasoning
 2. **Always include signature** in replies
 3. **Never close without posting a note first**
 4. **Check CI status before determining ghosted**

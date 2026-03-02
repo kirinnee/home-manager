@@ -1,15 +1,15 @@
 ---
 name: kagent-autopilot
 description: 'End-to-end task completion from ticket to merged PR, or push-to-merge for manual implementations. Use when running /kagent-autopilot, automating ticket workflow, wanting hands-off task completion, or needing autonomous PR cycles.'
-argument-hint: '[TICKET_ID]'
+argument-hint: '[TICKET_ID | manual]'
 ---
 
 # KAgent Autopilot — Autonomous Ticket to PR
 
-Two modes:
+## Mode Selection
 
-- **Autopilot mode**: Takes a ticket and autonomously implements it through to a merge-ready PR using `dev-loop` (kagent-run). After spec approval, fully autonomous except **spec conflict** (exit 2) and **push failure**.
-- **Manual mode**: You already implemented the code. Autopilot handles the push → CI/review → fix loop, fixing issues directly without dev-loop.
+- **Default (autopilot)**: `/kagent-autopilot` or `/kagent-autopilot PE-1234` — Takes a ticket and autonomously implements it through to a merge-ready PR using `dev-loop`. After spec approval, fully autonomous except **spec conflict** (exit 2) and **push failure**.
+- **Manual mode**: `/kagent-autopilot manual` — You already implemented the code. Autopilot handles the push → CI/review → fix loop, fixing issues directly without dev-loop.
 
 ## Subagent Architecture
 
@@ -144,11 +144,11 @@ The state file contains everything needed to resume: current phase, spec version
 
 Agents are spawned for long-running or context-isolated tasks. Each agent reads its phase file for full instructions.
 
-| Phase       | Agent     | Description                                        |
-| ----------- | --------- | -------------------------------------------------- |
-| `running`   | Runner    | Executes dev-loop, reports exit code/status        |
-| `prereview` | Prereview | Runs CodeRabbit CLI, fixes findings (fights back!) |
-| `polling`   | Poller    | Gathers PR context → orchestrator spawns resolvers |
+| Phase       | Agent     | Description                                                  |
+| ----------- | --------- | ------------------------------------------------------------ |
+| `running`   | Runner    | Executes dev-loop, reports exit code/status                  |
+| `prereview` | Prereview | Runs CodeRabbit CLI, fixes findings (pushes back reasonably) |
+| `polling`   | Poller    | Gathers PR context → orchestrator spawns resolvers           |
 
 ### Spawning Pattern
 
@@ -186,13 +186,13 @@ See `phases/polling.md` for full details.
 
 After poller returns, spawn resolvers IN PARALLEL based on `actions_needed`:
 
-| Action               | Resolver              | Description                                 |
-| -------------------- | --------------------- | ------------------------------------------- |
-| `ci_fix`             | `ci-resolver`         | Fix failing CI checks                       |
-| `human_review`       | `review-resolver`     | Address human review feedback               |
-| `coderabbit_threads` | `coderabbit-resolver` | Handle CodeRabbit AI comments (fight back!) |
-| `other_threads`      | `thread-resolver`     | Handle non-CodeRabbit conversations         |
-| `rebase`             | `rebase-resolver`     | Handle branch behind/conflicts              |
+| Action               | Resolver              | Description                                          |
+| -------------------- | --------------------- | ---------------------------------------------------- |
+| `ci_fix`             | `ci-resolver`         | Fix failing CI checks                                |
+| `human_review`       | `review-resolver`     | Address human review feedback                        |
+| `coderabbit_threads` | `coderabbit-resolver` | Handle CodeRabbit AI comments (push back reasonably) |
+| `other_threads`      | `thread-resolver`     | Handle non-CodeRabbit conversations                  |
+| `rebase`             | `rebase-resolver`     | Handle branch behind/conflicts                       |
 
 All resolvers are in `phases/resolvers/`. Each returns: `immediate_actions`, `code_fixes`, `post_push_actions`.
 
@@ -276,7 +276,7 @@ After all resolvers complete, aggregate results and proceed.
 15. **Three-wave execution** — immediate actions → code fixes (merged) → post-push actions
 16. **One combined spec** — merge all resolver fixes into ONE spec before dev-loop
 17. **Priority merging** — CI(1) > Review(2) > CodeRabbit(3), drop lower priority overlaps
-18. **Fight CodeRabbit** — evaluate their comments critically, don't blindly accept
+18. **Push back on CodeRabbit reasonably** — evaluate their comments critically but professionally; CodeRabbit AI often produces false positives
 19. **Never close threads without note** — always post explanation with signature first
 
 ## Prerequisites
