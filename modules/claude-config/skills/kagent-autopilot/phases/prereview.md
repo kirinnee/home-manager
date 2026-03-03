@@ -14,24 +14,19 @@ This phase runs CodeRabbit CLI review locally before pushing, allowing fixes for
 
 **CodeRabbit AI often produces false positives or low-value suggestions.** Evaluate each comment thoughtfully. Accept valid feedback, but don't hesitate to push back when the suggestion doesn't apply or isn't worth the change. Be professional and specific in your reasoning.
 
-## Check Repository Type
+## Check if Prereview is Enabled
 
-First, check if this is an atomicloud/atomi-based repository that has CodeRabbit integration:
+Read `repoConfig.prereviewEnabled` from state:
 
-```bash
-git remote -v | grep -E '(atomicloud|atomi)'
-```
-
-**If NOT an atomicloud repo:** Skip this phase entirely. Read `phases/pushing.md` and follow it.
-
-**If IS an atomicloud repo:** Proceed with local CodeRabbit review below.
+- If `prereviewEnabled: false`: Skip this phase entirely. Report `RESULT: skip`.
+- If `prereviewEnabled: true`: Proceed with local CodeRabbit review below.
 
 ## Step 1: Run CodeRabbit Review
 
 Run the CodeRabbit CLI review as a background task:
 
 ```bash
-coderabbit review --plain --base main > review.md 2>&1
+coderabbit review --plain --base {repoConfig.baseBranch} > review.md 2>&1
 ```
 
 Use `run_in_background: true` with Bash tool, then wait with TaskOutput (block=true, with appropriate timeout).
@@ -111,10 +106,9 @@ If there are uncommitted changes:
 
 If no changes were needed, proceed without committing.
 
-## Update State
+## Note on State
 
-- Keep `phase: "prereview"` until done (for resumability)
-- Once complete, update state to prepare for pushing
+Do NOT update `.kagent/task-state.json` — report back to orchestrator who handles state transitions via the state-agent.
 
 ## Resumability
 
@@ -133,7 +127,7 @@ When running as an agent, report back to orchestrator with:
 
 ```
 RESULT: <skip|no_findings|fixed|error>
-REPO_TYPE: <atomicloud|other>
+PREREVIEW_ENABLED: <true|false>
 
 FIXES_APPLIED: <N>
 - <brief description of fix 1>

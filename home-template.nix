@@ -117,6 +117,7 @@ rec {
 
     aliases = {
       "yolo" = "--dangerously-skip-permissions";
+      "autopilot" = "--dangerously-skip-permissions '/kagent-autopilot'";
     };
 
     shellIntegration = {
@@ -144,7 +145,6 @@ rec {
             "~/.config/home-manager"
             "~/Workspace/personal"
           ];
-          env = auth.zai;
         };
 
         liftoff = merge userConfig {
@@ -154,16 +154,20 @@ rec {
 
         codex = merge userConfig { env = auth.codex; };
         gemini = merge userConfig { env = auth.gemini; };
+        zai = merge userConfig { env = auth.zai; };
+        gwen = merge userConfig { env = auth.gwen; };
 
         impl-anthropic = merge implConfig { env = auth.anthropic; };
         impl-codex = merge implConfig { env = auth.codex; };
         impl-gemini = merge implConfig { env = auth.gemini; };
         impl-zai = merge implConfig { env = auth.zai; };
+        impl-gwen = merge implConfig { env = auth.gwen; };
 
         reviewer-anthropic = merge revConfig { env = auth.anthropic; };
         reviewer-codex = merge revConfig { env = auth.codex; };
         reviewer-gemini = merge revConfig { env = auth.gemini; };
         reviewer-zai = merge revConfig { env = auth.zai; };
+        reviewer-gwen = merge revConfig { env = auth.gwen; };
       };
   };
 
@@ -622,8 +626,8 @@ rec {
 
         wts = "wt select";
         wtc = "wt switch -c";
-        wtcc = "wt switch -c -x cc";
-        wtsc = "wt switch -x cc";
+        wtcz = "wt switch -c -x 'zed .'";
+        wtz = "wt switch -x 'zed .'";
         wtrm = "wt remove";
 
         # liftoff

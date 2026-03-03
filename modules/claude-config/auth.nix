@@ -8,6 +8,11 @@ rec {
     ANTHROPIC_DEFAULT_SONNET_MODEL = "glm-4.7";
     ANTHROPIC_DEFAULT_OPUS_MODEL = "glm-5";
   };
+  gwen = proxy // {
+    ANTHROPIC_DEFAULT_OPUS_MODEL = "gwen3-coder-plus";
+    ANTHROPIC_DEFAULT_SONNET_MODEL = "gwen3-coder-plus";
+    ANTHROPIC_DEFAULT_HAIKU_MODEL = "gwen3-coder-plus";
+  };
   anthropic = proxy // {
     ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-6";
     ANTHROPIC_DEFAULT_SONNET_MODEL = "claude-sonnet-4-6";
@@ -19,8 +24,8 @@ rec {
     ANTHROPIC_DEFAULT_HAIKU_MODEL = "gpt-5.1-codex-mini";
   };
   gemini = proxy // {
-    ANTHROPIC_DEFAULT_OPUS_MODEL = "gemini-3-pro-preview";
-    ANTHROPIC_DEFAULT_SONNET_MODEL = "gemini-3-flash-preview";
-    ANTHROPIC_DEFAULT_HAIKU_MODEL = "gemini-2.5-flash";
+    ANTHROPIC_DEFAULT_OPUS_MODEL = "gemini-3.1-pro-high";
+    ANTHROPIC_DEFAULT_SONNET_MODEL = "gemini-3.1-pro-low";
+    ANTHROPIC_DEFAULT_HAIKU_MODEL = "gemini-3.1-pro-low";
   };
 }

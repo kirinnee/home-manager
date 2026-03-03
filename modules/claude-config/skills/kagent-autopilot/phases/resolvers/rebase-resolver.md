@@ -6,8 +6,6 @@ Handles branch behind and merge conflict situations.
 
 - Working directory: {WORKDIR}
 - PR Number: {prNumber}
-- Branch: {BRANCH}
-- Merge Status: {MERGE_STATUS}
 
 ## Output Format
 
@@ -24,7 +22,14 @@ Handles branch behind and merge conflict situations.
   "rebase_action": {
     "status": "success|conflict|push_failed",
     "conflict_files": [],
+    "conflicts_resolved": [],
+    "manual_needed": false,
     "error": null
+  },
+
+  "summary": {
+    "action_taken": "none|rebase|conflict_resolution",
+    "status": "success|conflict|push_failed"
   }
 }
 ```

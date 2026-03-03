@@ -1,5 +1,14 @@
 # Phase: Pushing
 
+**Agent Mode:** Spawned as pushing-agent (sonnet). Commits, pushes, creates/updates PR.
+
+## Agent Context (when spawned)
+
+- Working directory: {WORKDIR}
+- Ticket ID: {ticketId}
+- PR Number: {prNumber} (null if first push)
+- Repo Config: {repoConfig}
+
 This phase commits changes, pushes to remote, and creates/updates the PR.
 
 ## Step 1: Detect Commit Conventions
@@ -45,6 +54,14 @@ EOF
 )"
 ```
 
+## Step 2.5: Clean Up Stale Review Files
+
+Delete any leftover `review.md` from prereview phase:
+
+```bash
+rm -f review.md
+```
+
 ## Step 3: Push
 
 **Pre-push safety checks:**
@@ -77,7 +94,7 @@ gh pr list --head "$(git branch --show-current)" --json number -q '.[0].number'
 **If no PR exists:** Create using [templates/pr-template.md](../templates/pr-template.md):
 
 ```bash
-gh pr create --title "[TICKET_ID] Title" --body "$(cat <<'EOF'
+gh pr create --title "[TICKET_ID] Title" --base {repoConfig.baseBranch} --body "$(cat <<'EOF'
 {PR body from template}
 EOF
 )"
@@ -89,32 +106,18 @@ Include `[TICKET_ID]` prefix in the title when available. If null, use a descrip
 
 ## Step 5: PR Re-Review Comment
 
-**REQUIRED** after every push that addresses polling feedback (CI fixes, review comments, conversations). Post a comment on the PR based on the repository:
+**REQUIRED** after every push that addresses polling feedback. Post based on `repoConfig.reReviewComment`:
 
-### For atomicloud repos:
+If `repoConfig.reReviewComment` is not null:
 
 ```bash
-gh pr comment <prNumber> --body "$(cat <<'EOF'
-@coderabbitai I have attempted to resolve all the issues mentioned, and replied to conversations that need further discussion.
-
-Please:
-1. Look through each and every conversation, and resolve those that you think have been resolved (if you agree, have learnt something, please resolve it too after commenting)
-2. Perform a re-review to see if there are any other issues
-
-By Claude Code Kagent Autopilot 🤖
+gh pr comment {prNumber} --body "$(cat <<'EOF'
+{repoConfig.reReviewComment}
 EOF
 )"
 ```
 
-### For vungle repos:
-
-```bash
-gh pr comment <prNumber> --body "@claude please review the changes and approve if possible"
-```
-
-### For all other repos:
-
-No re-review comment required — skip this step.
+If `repoConfig.reReviewComment` is null: skip this step.
 
 ## Update State
 
@@ -124,8 +127,18 @@ No re-review comment required — skip this step.
 
 ## Resumability
 
-If resuming into this phase: check `git log origin/{branch}..HEAD`. If unpushed commits exist, retry push. If nothing to push, the push already succeeded — proceed to polling.
+If resuming into this phase: check `git log origin/{branch}..HEAD`. If unpushed commits exist, retry push. If nothing to push, the push already succeeded — proceed to polling. On resume into pushing, also check for and delete stale `review.md`.
 
 ## Next
 
 After successful push + PR: Read `phases/polling.md` and follow it.
+
+## Agent Report Format
+
+```
+RESULT: <pushed|pr_created|pr_updated|error>
+PR_NUMBER: <number>
+COMMIT_SHA: <sha>
+RE_REVIEW_POSTED: <true|false>
+ERROR: <error message if any>
+```

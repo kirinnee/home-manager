@@ -28,20 +28,7 @@ CONFLICT:
 NEXT_PHASE: <prereview|run_spec|failed>
 ```
 
-## Update Ticket Status
-
-**Before starting dev-loop**, move the ticket to "In Progress" status:
-
-**Jira (`ticketSystem: "jira"`):**
-
-```bash
-acli jira workitem transition {ticketId} --transition "In Progress"
-```
-
-**ClickUp (`ticketSystem: "clickup"`):**
-Use ClickUp MCP to update task status to "in progress".
-
-Skip this step if `ticketId` is null.
+**Note:** Ticket status transitions are handled by the run-spec phase using `repoConfig.ticketTransitions`.
 
 ## Execute Dev-Loop
 
@@ -65,7 +52,7 @@ Store `lastRunId`, `lastRunExitCode`, and `lastRunStatus` in state.
 
 Status in history file is `completed`.
 
-**If using sub-plans (`subPlans` is not null):**
+After dev-loop completes with exit 0 (status completed):
 
 1. **Commit the sub-plan's changes** — each sub-plan gets its own commit:
 
@@ -91,10 +78,6 @@ Status in history file is `completed`.
 3. Check remaining sub-plans:
    - **More pending sub-plans:** Increment `currentSubPlanIndex`, copy next sub-plan file to `.kagent/spec.md`, read `phases/run-spec.md` to start next dev-loop run (skip initialization)
    - **All sub-plans done:** All commits ready — read `phases/prereview.md` and follow it
-
-**If single spec (no sub-plans):**
-
-**Next:** Read `phases/prereview.md` and follow it.
 
 ### Exit 0 — Max Iterations (consensus not reached)
 
@@ -130,7 +113,9 @@ The spec itself contains contradictory or ambiguous requirements. The conflict c
 
 ## Resumability
 
-If resuming into this phase: check `.kagent/current/run.json`. If exists, check for tmux sessions (`tmux ls 2>/dev/null | grep devloop`). If active, offer to wait or cancel. If no active run, read latest history entry for the result and handle accordingly.
+If resuming into this phase: check `.kagent/current/` for an active run. If a background Bash task is running, wait for it. If no active run, read latest history entry from `.kagent/history/` for the result and handle accordingly.
+
+**Resume-agent checks:** Is dev-loop process running? Check `.kagent/current/` for active run. Check `.kagent/history/` for completed results. Report exit code if found.
 
 ## Terminal States
 

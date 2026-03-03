@@ -49,7 +49,14 @@ Handles CodeRabbit AI review threads. Push back reasonably — evaluate critical
       "wait_for_fix_id": "coderabbit-fix-1",
       "request_re_evaluation": true
     }
-  ]
+  ],
+
+  "summary": {
+    "total_threads": 0,
+    "immediate_closed": 0,
+    "code_fixes": 0,
+    "pending": 0
+  }
 }
 ```
 
@@ -68,6 +75,10 @@ Store as `coderabbit_ci_status` in report.
 
 ## Step 1: Fetch Thread Details
 
+If `{CODERABBIT_THREADS}` is provided in the agent context: skip fetching and use the provided thread data directly. Proceed to Step 2.
+
+If `{CODERABBIT_THREADS}` is not provided: fetch threads as follows:
+
 ```bash
 OWNER=$(git remote get-url origin | sed -E 's|.*[:/]([^/]+)/([^.]+)(\.git)?|\1|')
 REPO=$(git remote get-url origin | sed -E 's|.*[:/]([^/]+)/([^.]+)(\.git)?|\2|')
@@ -75,7 +86,7 @@ REPO=$(git remote get-url origin | sed -E 's|.*[:/]([^/]+)/([^.]+)(\.git)?|\2|')
 gh api graphql -f query='
   query {
     repository(owner: "'$OWNER'", name: "'$REPO'") {
-      pullRequest(number: '$PR_NUMBER') {
+      pullRequest(number: {prNumber}) {
         reviewThreads(first: 50) {
           nodes {
             id

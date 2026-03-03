@@ -1,5 +1,22 @@
 # Phase: Run Spec
 
+**Agent Mode:** Spawned as run-spec-agent (haiku). Prepares spec file for dev-loop.
+
+## Agent Context (when spawned)
+
+- Working directory: {WORKDIR}
+- State file: `.kagent/task-state.json`
+
+## Agent Report Format
+
+```
+RESULT: <initialized|fix_spec_written|error>
+DEV_LOOP_INITIALIZED: <true|false>
+SPEC_FILE: .kagent/spec.md
+TICKET_TRANSITION: <executed|skipped|failed>
+ERROR: <error message if any>
+```
+
 This phase writes the spec file for dev-loop and starts the run. It handles both the first cycle (fresh from task-spec or sub-plans) and subsequent cycles (fix spec from feedback).
 
 ## Directory Structure (Versioned)
@@ -26,9 +43,7 @@ spec/
 
 ### Step 1: Initialize Dev-Loop
 
-1. Copy appropriate spec to `.kagent/spec.md`:
-   - Single plan: `{specDir}/task-spec.md` (e.g., `spec/PE-1234/v1/task-spec.md`)
-   - Sub-plans: current sub-plan file from `subPlans[currentSubPlanIndex].file`
+1. Copy current plan to `.kagent/spec.md`: use `subPlans[currentSubPlanIndex].file`
 2. Initialize dev-loop:
    ```bash
    dev-loop init \
@@ -42,75 +57,43 @@ spec/
    ```
 3. Update state: `devLoopInitialized: true`
 
+### Ticket Transition (first run per spec version)
+
+If `repoConfig.ticketTransitions` is not null and this is the first `run_spec` for this spec version:
+
+Execute `ticketTransitions.start` via `repoConfig.ticketTransitionAccess` + `repoConfig.ticketTransitionCommand`:
+
+**CLI:** Run the command template with `{ticketId}` and `{status}` substituted.
+**MCP:** Use the MCP tool with appropriate parameters.
+
+Store result in `ticketStatus`. If transition fails: log warning and continue.
+
 ## Subsequent Push Cycles (`devLoopInitialized` is true)
 
-1. Cancel previous run (cleans up stale tmux sessions, archives previous run):
+1. Cancel previous run (archives previous run):
    ```bash
    dev-loop cancel
    ```
 2. Generate fix spec from feedback (see below)
 3. Write fix spec to `.kagent/spec.md` (overwrites previous)
 
-## Handling Sub-Plans
-
-**If using sub-plans (`subPlans` is not null):**
-
-After a dev-loop run completes successfully (exit 0, status `completed`):
-
-1. **Commit the sub-plan's changes** — each sub-plan gets its own commit:
-
-   ```bash
-   git add -A  # Stage all changes from this sub-plan
-   git commit -m "$(cat <<'EOF'
-   <type>(<scope>): <sub-plan summary>
-
-   [<ticket-id>]
-
-   Phase N of M: <sub-plan title>
-
-   - Change 1
-   - Change 2
-   EOF
-   )"
-   ```
-
-2. Mark current sub-plan as complete in state:
-   ```json
-   { "id": "phase-N", "file": "spec/<task-id>/plans/phase-N.md", "status": "completed" }
-   ```
-3. Check if there are more pending sub-plans
-4. **If more sub-plans exist:**
-   - Increment `currentSubPlanIndex`
-   - Copy next sub-plan to `.kagent/spec.md`
-   - **Do NOT push yet** — continue to next sub-plan
-   - Read `phases/running.md` and follow it (start next dev-loop run)
-5. **If all sub-plans complete:**
-   - All changes are committed and ready — proceed to push phase
-   - Read `phases/pushing.md` and follow it (this pushes all commits together)
-
-This approach:
-
-- Creates one commit per sub-plan for clear history
-- Keeps related changes grouped together
-- Pushes once at the end with all commits
-
 ## Fix Spec Generation
 
 Use [templates/fix-spec-template.md](../templates/fix-spec-template.md). Read `{specDir}/task-spec.md` for original context, then gather feedback from the appropriate source:
 
-| Feedback Source          | How to Get                                                                                                                                                                                     |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| CI failures              | `gh pr checks {prNumber}` for failed names; `gh run list --branch {branch} --status failure --limit 1 --json databaseId -q '.[0].databaseId'` then `gh run view {runId} --log-failed`          |
-| Review comments          | `gh api repos/{owner}/{repo}/pulls/{prNumber}/comments` (inline) + `gh pr view {prNumber} --json reviews` (top-level)                                                                          |
-| Unresolved conversations | Poller output (exit 5) has thread details JSON with path, line, author, body. After addressing, post re-review comment per repo (atomicloud: `@coderabbitai`, vungle: `@claude`, other: none). |
-| Dev-loop max_iterations  | `.kagent/reviews/{lastRunId}/review-*.md` and `verdict-*.json`                                                                                                                                 |
-| Spec conflict (exit 2)   | `.kagent/conflict.md` + review files + user's clarification from `conflictContext`                                                                                                             |
+| Feedback Source          | How to Get                                                                                                                                                                                                |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CI failures              | `gh pr checks {prNumber}` for failed names; `gh run list --branch {branch} --status failure --limit 1 --json databaseId -q '.[0].databaseId'` then `gh run view {runId} --log-failed`                     |
+| Review comments          | `gh api repos/{owner}/{repo}/pulls/{prNumber}/comments` (inline) + `gh pr view {prNumber} --json reviews` (top-level)                                                                                     |
+| Unresolved conversations | Poller output (exit 5, from `dev-loop poll-pr`, not dev-loop run) has thread details JSON with path, line, author, body. Re-review comment is posted by pushing agent using `repoConfig.reReviewComment`. |
+| Dev-loop max_iterations  | `.kagent/reviews/{lastRunId}/review-*.md` and `verdict-*.json`                                                                                                                                            |
+| Spec conflict (exit 2)   | `.kagent/conflict.md` + review files + user's clarification from `conflictContext`                                                                                                                        |
 
 Write populated fix spec to `.kagent/spec.md`.
 
 ## Start Dev-Loop
 
-Update state: `phase: "run_spec"` (before running, for resumability).
+State update (`phase: "run_spec"`) is done via state-agent before this phase runs.
 
 Then proceed immediately to start the dev-loop run.
 

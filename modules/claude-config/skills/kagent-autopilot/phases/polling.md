@@ -23,7 +23,7 @@ This phase gathers ALL PR context, then executes a three-wave fix process.
 │  WAVE 1: IMMEDIATE ACTIONS (parallel execution)             │
 │                                                             │
 │  • Close OUTDATED/GHOSTED/ACKNOWLEDGED threads              │
-│  • Post replies for questions, FALSE_POSITIVEs              │
+│  • Post replies for questions, FALSE_POSITIVE              │
 │  • Handle non-code thread actions                           │
 │                                                             │
 │  → No code changes needed                                   │
@@ -73,7 +73,10 @@ This phase gathers ALL PR context, then executes a three-wave fix process.
 
 Based on `actions_needed`, spawn resolver agents:
 
+**CodeRabbit resolver:** Only spawn if `repoConfig.coderabbit` is `true`.
+
 ```bash
+# Pseudocode for orchestrator logic
 # Map actions to resolver files
 ACTION_MAP = {
   "ci_fix": "resolvers/ci-resolver.md",
@@ -98,9 +101,10 @@ resolver_outputs = [TaskOutput(task_id) for task_id in task_ids]
 
 ### Step 3: Execute Wave 1 - Immediate Actions
 
-```python
+```bash
+# Pseudocode for orchestrator logic
 def execute_immediate_actions(resolver_outputs):
-    """Execute all immediate thread/comment actions."""
+    # Execute all immediate thread/comment actions.
 
     for output in resolver_outputs:
         for action in output.immediate_actions:
@@ -131,9 +135,10 @@ gh api graphql -f query='
 
 ### Step 4: Execute Wave 2 - Code Fixes
 
-```python
+```bash
+# Pseudocode for orchestrator logic
 def execute_code_fixes(resolver_outputs, mode):
-    """Merge all code fixes, execute via dev-loop or direct."""
+    # Merge all code fixes, execute via dev-loop or direct.
 
     # 1. Collect all fixes
     all_fixes = []
@@ -160,8 +165,8 @@ def execute_code_fixes(resolver_outputs, mode):
     # 6. Execute
     if mode == "autopilot":
         # Run dev-loop with combined spec
-        write_file("spec/fix-combined.md", combined_spec)
-        run_id = run_dev_loop("spec/fix-combined.md")
+        write_file(".kagent/spec.md", combined_spec)
+        run_id = run_dev_loop(".kagent/spec.md")
         commit_sha = get_commit_from_run(run_id)
     else:
         # Apply fixes directly
@@ -200,9 +205,10 @@ def execute_code_fixes(resolver_outputs, mode):
 
 ### Step 5: Execute Wave 3 - Post-Push Actions
 
-```python
+```bash
+# Pseudocode for orchestrator logic
 def execute_post_push_actions(resolver_outputs, commit_sha):
-    """Post replies after code is pushed."""
+    # Post replies after code is pushed.
 
     for output in resolver_outputs:
         for action in output.post_push_actions:
@@ -218,9 +224,10 @@ def execute_post_push_actions(resolver_outputs, commit_sha):
 
 ### Step 6: Loop Decision
 
-```python
+```bash
+# Pseudocode for orchestrator logic
 def decide_next_step(poll_exit_code, commit_sha, push_cycle, max_push_cycles):
-    """Decide what to do after completing all waves."""
+    # Decide what to do after completing all waves.
 
     if poll_exit_code == 0:
         # Ready to merge
@@ -239,13 +246,14 @@ def decide_next_step(poll_exit_code, commit_sha, push_cycle, max_push_cycles):
 
 ## Exit Conditions
 
-| Condition                       | Action                             |
-| ------------------------------- | ---------------------------------- |
-| `poll_exit_code == 0`           | Move to `completed` phase          |
-| Code pushed                     | Loop to polling (new push cycle)   |
-| No code needed, threads handled | Loop to polling                    |
-| Max push cycles reached         | Move to `failed` phase             |
-| Manual takeover needed          | Move to `failed` phase, alert user |
+| Condition                       | Action                                 |
+| ------------------------------- | -------------------------------------- |
+| `poll_exit_code == 0`           | Move to `completed` phase              |
+| `poll_exit_code == 6`           | PR merged/closed → move to `completed` |
+| Code pushed                     | Loop to polling (new push cycle)       |
+| No code needed, threads handled | Loop to polling                        |
+| Max push cycles reached         | Move to `failed` phase                 |
+| Manual takeover needed          | Move to `failed` phase, alert user     |
 
 ## Resolver Output Merging
 
@@ -265,9 +273,10 @@ When fixes overlap (same file, overlapping lines):
 2. Annotate why lower priority was dropped
 3. If same priority, merge descriptions
 
-```python
+```bash
+# Pseudocode for orchestrator logic
 def dedupe_overlapping(fixes):
-    """Remove overlapping lower-priority fixes."""
+    # Remove overlapping lower-priority fixes.
     result = []
     for fix in fixes:
         overlapping = [f for f in result if overlaps(fix, f)]
@@ -277,6 +286,14 @@ def dedupe_overlapping(fixes):
         result.append(fix)
     return result
 ```
+
+### Rebase Resolver Integration
+
+If `rebase_action.status == "conflict"` and `manual_needed: true`:
+
+- Transition to `failed` phase
+- Report conflict files to user
+- Offer to let user resolve manually
 
 ## Resumability
 

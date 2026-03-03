@@ -6,7 +6,7 @@
 - System: {Jira|ClickUp}
 - URL: {ticket-url}
 
-## Objective
+## Summary
 
 {From ticket description - clear statement of what to build, 1-3 sentences}
 
@@ -18,18 +18,11 @@
 - [ ] Criterion 2
 - [ ] Criterion 3
 
-## Definition of Done
-
-- [ ] All acceptance criteria met
-- [ ] Tests pass
-- [ ] No lint/type errors
-- [ ] Ticket ID included in commit message
-
 ## Out of Scope
 
 - {What this task does NOT include}
 
-## Technical Constraints
+## Constraints
 
 {Any from ticket or codebase conventions}
 
@@ -40,15 +33,6 @@
 
 {Additional context from ticket comments, user clarifications, and answers to clarifying questions}
 
-## Technical Decisions
-
-{From clarification phase - key decisions made with reasoning}
-
-| Decision     | Choice          | Reasoning         |
-| ------------ | --------------- | ----------------- |
-| {Decision 1} | {Option chosen} | {Why this option} |
-| {Decision 2} | {Option chosen} | {Why this option} |
-
 ## Edge Cases
 
 {Scenarios identified during clarification that need handling}
@@ -56,22 +40,11 @@
 - **{Edge case 1}**: {How to handle}
 - **{Edge case 2}**: {How to handle}
 
-## Error Handling
-
-{How errors should be handled, identified during clarification}
-
-- {Error scenario}: {Expected behavior}
-
 ---
 
 ## Domain-Driven Design (Optional)
 
-_Only include this section if a `domain-driven-design` skill exists. Check with:_
-
-```bash
-ls ~/.claude/skills/domain-driven-design/SKILL.md 2>/dev/null || \
-ls ./.claude/skills/domain-driven-design/SKILL.md 2>/dev/null
-```
+_Only include if DDD skill exists in the repository. Checked during planning phase._
 
 ### Bounded Context(s)
 
@@ -105,6 +78,11 @@ ls ./.claude/skills/domain-driven-design/SKILL.md 2>/dev/null
 - [ ] Add inline comments for complex logic
 - [ ] Update README if setup/usage changes
 
+### Linting
+
+- [ ] Run `pls lint` (or project-specific command: {lint command})
+- [ ] Fix all linting errors before committing
+
 ### Testing
 
 Check all that apply:
@@ -132,3 +110,5 @@ Check all that apply:
 ### Notes
 
 {Any additional implementation notes or considerations}
+
+- Lint command: {`pls lint` | `npm run lint` | other}
