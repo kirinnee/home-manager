@@ -44,10 +44,16 @@ Human feedback is ALWAYS valid (unlike CodeRabbit). Address ALL concerns.
     {
       "type": "post_reply",
       "comment_id": "r456",
-      "body_template": "Addressed in {commit_sha}!",
+      "body_template": "Addressed in {commit_sha}!\n\nBy Claude Code Kagent Autopilot",
       "wait_for_fix_id": "review-fix-1"
     }
-  ]
+  ],
+
+  "summary": {
+    "comments_analyzed": 0,
+    "immediate_replies": 0,
+    "code_fixes": 0
+  }
 }
 ```
 

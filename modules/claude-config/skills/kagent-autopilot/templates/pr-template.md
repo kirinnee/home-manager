@@ -2,13 +2,9 @@
 
 {1-3 bullet points describing the changes}
 
-- Change 1
-- Change 2
-- Change 3
-
 ## Ticket
 
-- [{TICKET_ID}]({ticket-url})
+- {TICKET_ID}
 
 ## Changes
 
@@ -23,10 +19,6 @@
 - [ ] Unit tests pass
 - [ ] Integration tests pass
 - [ ] Manual verification completed
-
-## Screenshots
-
-{If applicable - UI changes, visual diffs}
 
 ## Checklist
 

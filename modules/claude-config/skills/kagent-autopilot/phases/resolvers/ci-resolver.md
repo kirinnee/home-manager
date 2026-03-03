@@ -29,7 +29,12 @@ Handles failing CI checks (tests, build, lint, type check, etc.).
     }
   ],
 
-  "post_push_actions": []
+  "post_push_actions": [],
+
+  "summary": {
+    "failures_analyzed": 0,
+    "fixes_proposed": 0
+  }
 }
 ```
 

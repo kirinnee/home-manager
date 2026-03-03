@@ -4,8 +4,8 @@ This phase handles iterations after the PR is marked complete. User provides lea
 
 ## Entry Conditions
 
-- `phase: "completed"` in state
-- User says something like "I have feedback" or provides post-completion learnings
+- `phase: "feedback"` in state (set by orchestrator when user provides feedback from completed state)
+- Autopilot mode only — feedback requires autopilot mode (manual mode has no spec to iterate on)
 
 ## Step 1: Capture Feedback (Chat-Based)
 
@@ -74,25 +74,50 @@ Create `spec/<task-id>/v{N}/feedback.md`:
    git commit -m "docs: add v{N+1} spec with post-completion feedback"
    ```
 
-## Step 4: Update State
+## Step 3.5: Spec Re-Approval
+
+Present the merged spec to user via `AskUserQuestion` for re-approval before proceeding to sub-planning.
+
+On approval: continue to Step 4.
+On rejection: iterate with user feedback, update the merged spec.
+
+## Step 4: Update State (Full Field Reset)
+
+**Reset to initial:**
 
 ```json
 {
   "phase": "approved",
   "specVersion": <N+1>,
-  "specDir": "spec/<task-id>/v<N+1>",
-  "subPlans": null,
-  "currentSubPlanIndex": null,
+  "specDir": "spec/{ticketId}/v{N+1}",
   "pushCycle": 0,
-  "devLoopInitialized": false
+  "devLoopInitialized": false,
+  "subPlans": [],
+  "currentSubPlanIndex": 0,
+  "lastRunId": null,
+  "lastRunExitCode": null,
+  "lastRunStatus": null,
+  "lastError": null,
+  "conflictContext": null
 }
 ```
 
-**Note:** Reset `pushCycle`, `devLoopInitialized`, `subPlans`, and `currentSubPlanIndex` since this is a fresh implementation cycle.
+**Keep as-is:** `ticketId`, `ticketTitle`, `ticketBody`, `branch`, `repoConfig`, `mode`, `implementer`, `reviewers`, `maxIterations`, `timeouts`, `maxPushCycles`, `teamName`
+
+**Smart detect `prNumber`:**
+
+```bash
+gh pr view {prNumber} --json state --jq '.state'
+```
+
+- If state is `MERGED`: set `prNumber: null` (pushing agent will create new PR)
+- If state is `OPEN`: keep `prNumber` as-is
+
+**Ticket transition:** Execute `ticketTransitions.feedback` via `repoConfig.ticketTransitionAccess` + `repoConfig.ticketTransitionCommand`. Update `ticketStatus`.
 
 ## Step 5: Dispatch
 
-Read `phases/sub-planning.md` and follow it (or skip directly to `run-spec.md` if single plan is appropriate).
+Dispatch to sub-planning phase (`phase: "approved"` triggers sub-planning inline).
 
 ## Resumability
 

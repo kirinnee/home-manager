@@ -5,31 +5,47 @@ var __getProtoOf = Object.getPrototypeOf;
 var __defProp = Object.defineProperty;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
+function __accessProp(key) {
+  return this[key];
+}
+var __toESMCache_node;
+var __toESMCache_esm;
 var __toESM = (mod, isNodeMode, target) => {
+  var canCache = mod != null && typeof mod === 'object';
+  if (canCache) {
+    var cache = isNodeMode ? (__toESMCache_node ??= new WeakMap()) : (__toESMCache_esm ??= new WeakMap());
+    var cached = cache.get(mod);
+    if (cached) return cached;
+  }
   target = mod != null ? __create(__getProtoOf(mod)) : {};
   const to =
     isNodeMode || !mod || !mod.__esModule ? __defProp(target, 'default', { value: mod, enumerable: true }) : target;
   for (let key of __getOwnPropNames(mod))
     if (!__hasOwnProp.call(to, key))
       __defProp(to, key, {
-        get: () => mod[key],
+        get: __accessProp.bind(mod, key),
         enumerable: true,
       });
+  if (canCache) cache.set(mod, to);
   return to;
 };
 var __commonJS = (cb, mod) => () => (mod || cb((mod = { exports: {} }).exports, mod), mod.exports);
+var __returnValue = v => v;
+function __exportSetter(name, newValue) {
+  this[name] = __returnValue.bind(null, newValue);
+}
 var __export = (target, all) => {
   for (var name in all)
     __defProp(target, name, {
       get: all[name],
       enumerable: true,
       configurable: true,
-      set: newValue => (all[name] = () => newValue),
+      set: __exportSetter.bind(all, name),
     });
 };
 var __require = import.meta.require;
 
-// modules/dev-loop-ts/node_modules/commander/lib/error.js
+// node_modules/commander/lib/error.js
 var require_error = __commonJS(exports => {
   class CommanderError extends Error {
     constructor(exitCode, code, message) {
@@ -53,7 +69,7 @@ var require_error = __commonJS(exports => {
   exports.InvalidArgumentError = InvalidArgumentError;
 });
 
-// modules/dev-loop-ts/node_modules/commander/lib/argument.js
+// node_modules/commander/lib/argument.js
 var require_argument = __commonJS(exports => {
   var { InvalidArgumentError } = require_error();
 
@@ -132,7 +148,7 @@ var require_argument = __commonJS(exports => {
   exports.humanReadableArgName = humanReadableArgName;
 });
 
-// modules/dev-loop-ts/node_modules/commander/lib/help.js
+// node_modules/commander/lib/help.js
 var require_help = __commonJS(exports => {
   var { humanReadableArgName } = require_argument();
 
@@ -398,7 +414,7 @@ var require_help = __commonJS(exports => {
   exports.Help = Help;
 });
 
-// modules/dev-loop-ts/node_modules/commander/lib/option.js
+// node_modules/commander/lib/option.js
 var require_option = __commonJS(exports => {
   var { InvalidArgumentError } = require_error();
 
@@ -547,7 +563,7 @@ var require_option = __commonJS(exports => {
   exports.DualOptions = DualOptions;
 });
 
-// modules/dev-loop-ts/node_modules/commander/lib/suggestSimilar.js
+// node_modules/commander/lib/suggestSimilar.js
 var require_suggestSimilar = __commonJS(exports => {
   var maxDistance = 3;
   function editDistance(a, b) {
@@ -617,7 +633,7 @@ var require_suggestSimilar = __commonJS(exports => {
   exports.suggestSimilar = suggestSimilar;
 });
 
-// modules/dev-loop-ts/node_modules/commander/lib/command.js
+// node_modules/commander/lib/command.js
 var require_command = __commonJS(exports => {
   var EventEmitter = __require('events').EventEmitter;
   var childProcess = __require('child_process');
@@ -1905,7 +1921,7 @@ Expecting one of '${allowedValues.join("', '")}'`);
   exports.Command = Command;
 });
 
-// modules/dev-loop-ts/node_modules/commander/index.js
+// node_modules/commander/index.js
 var require_commander = __commonJS(exports => {
   var { Argument } = require_argument();
   var { Command } = require_command();
@@ -1925,7 +1941,7 @@ var require_commander = __commonJS(exports => {
   exports.InvalidOptionArgumentError = InvalidArgumentError;
 });
 
-// modules/dev-loop-ts/node_modules/picocolors/picocolors.js
+// node_modules/picocolors/picocolors.js
 var require_picocolors = __commonJS((exports, module) => {
   var p = process || {};
   var argv = p.argv || [];
@@ -2005,7 +2021,7 @@ var require_picocolors = __commonJS((exports, module) => {
   module.exports.createColors = createColors;
 });
 
-// modules/dev-loop-ts/node_modules/sisteransi/src/index.js
+// node_modules/sisteransi/src/index.js
 var require_src = __commonJS((exports, module) => {
   var ESC = '\x1B';
   var CSI = `${ESC}[`;
@@ -2056,7 +2072,7 @@ var require_src = __commonJS((exports, module) => {
   module.exports = { cursor, scroll, erase, beep };
 });
 
-// modules/dev-loop-ts/node_modules/commander/esm.mjs
+// node_modules/commander/esm.mjs
 var import__ = __toESM(require_commander(), 1);
 var {
   program,
@@ -2072,7 +2088,7 @@ var {
   Help,
 } = import__.default;
 
-// modules/dev-loop-ts/node_modules/zod/v3/external.js
+// node_modules/zod/v3/external.js
 var exports_external = {};
 __export(exports_external, {
   void: () => voidType,
@@ -2184,7 +2200,7 @@ __export(exports_external, {
   BRAND: () => BRAND,
 });
 
-// modules/dev-loop-ts/node_modules/zod/v3/helpers/util.js
+// node_modules/zod/v3/helpers/util.js
 var util;
 (function (util2) {
   util2.assertEqual = _ => {};
@@ -2320,7 +2336,7 @@ var getParsedType = data => {
   }
 };
 
-// modules/dev-loop-ts/node_modules/zod/v3/ZodError.js
+// node_modules/zod/v3/ZodError.js
 var ZodIssueCode = util.arrayToEnum([
   'invalid_type',
   'invalid_literal',
@@ -2441,7 +2457,7 @@ ZodError.create = issues => {
   return error;
 };
 
-// modules/dev-loop-ts/node_modules/zod/v3/locales/en.js
+// node_modules/zod/v3/locales/en.js
 var errorMap = (issue, _ctx) => {
   let message;
   switch (issue.code) {
@@ -2542,7 +2558,7 @@ var errorMap = (issue, _ctx) => {
 };
 var en_default = errorMap;
 
-// modules/dev-loop-ts/node_modules/zod/v3/errors.js
+// node_modules/zod/v3/errors.js
 var overrideErrorMap = en_default;
 function setErrorMap(map) {
   overrideErrorMap = map;
@@ -2550,7 +2566,7 @@ function setErrorMap(map) {
 function getErrorMap() {
   return overrideErrorMap;
 }
-// modules/dev-loop-ts/node_modules/zod/v3/helpers/parseUtil.js
+// node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = params => {
   const { data, path, errorMaps, issueData } = params;
   const fullPath = [...path, ...(issueData.path || [])];
@@ -2651,14 +2667,14 @@ var isAborted = x => x.status === 'aborted';
 var isDirty = x => x.status === 'dirty';
 var isValid = x => x.status === 'valid';
 var isAsync = x => typeof Promise !== 'undefined' && x instanceof Promise;
-// modules/dev-loop-ts/node_modules/zod/v3/helpers/errorUtil.js
+// node_modules/zod/v3/helpers/errorUtil.js
 var errorUtil;
 (function (errorUtil2) {
   errorUtil2.errToObj = message => (typeof message === 'string' ? { message } : message || {});
   errorUtil2.toString = message => (typeof message === 'string' ? message : message?.message);
 })(errorUtil || (errorUtil = {}));
 
-// modules/dev-loop-ts/node_modules/zod/v3/types.js
+// node_modules/zod/v3/types.js
 class ParseInputLazyPath {
   constructor(parent, value, path, key) {
     this._cachedPath = [];
@@ -6056,7 +6072,7 @@ var coerce = {
   date: arg => ZodDate.create({ ...arg, coerce: true }),
 };
 var NEVER = INVALID;
-// modules/dev-loop-ts/src/types.ts
+// src/types.ts
 var configSchema = exports_external.object({
   implementer: exports_external.string().min(1).default('claude'),
   reviewers: exports_external.array(exports_external.string().min(1)).min(1).default(['claude-reviewer-zai']),
@@ -6165,7 +6181,7 @@ function parseHistoryEntry(data) {
   return historyEntrySchema.parse(data);
 }
 
-// modules/dev-loop-ts/src/state/config.ts
+// src/state/config.ts
 function mergeConfig(partial) {
   return {
     implementer: partial.implementer ?? DEFAULT_CONFIG.implementer,
@@ -6189,7 +6205,7 @@ function configFromOptions(opts) {
   return mergeConfig(partial);
 }
 
-// modules/dev-loop-ts/src/cli/init.ts
+// src/cli/init.ts
 async function handler(opts, state) {
   try {
     const reviewersList = opts.reviewers
@@ -6224,10 +6240,10 @@ async function handler(opts, state) {
   }
 }
 
-// modules/dev-loop-ts/src/loop/runner.ts
+// src/loop/runner.ts
 import * as fs2 from 'fs/promises';
 
-// modules/dev-loop-ts/src/deps.ts
+// src/deps.ts
 import * as path from 'path';
 import * as fs from 'fs/promises';
 var BASE_DIR = '.kagent';
@@ -6337,7 +6353,7 @@ var SPEC_TEMPLATE = `# Specification: [Title]
 - [Any specific requirements or limitations]
 `;
 
-// modules/dev-loop-ts/src/loop/consensus.ts
+// src/loop/consensus.ts
 function checkConsensus(verdicts) {
   const approved = verdicts.filter(v => v.verdict === 'approved');
   const rejected = verdicts.filter(v => v.verdict === 'rejected');
@@ -6355,7 +6371,7 @@ function formatConsensusResult(result) {
   return `Approved: ${result.approvedCount}/${result.totalReviewers}, Rejected: ${result.rejectedCount}/${result.totalReviewers}`;
 }
 
-// modules/dev-loop-ts/src/agents/prompts.ts
+// src/agents/prompts.ts
 function buildImplementerPrompt(params) {
   const { iteration, specPath, specContent, previousLoopLearnings, currentLoopReviews } = params;
   const evidenceDir = `.kagent/current/evidence`;
@@ -6724,7 +6740,7 @@ If spec_auto_fixed or spec_compressed, edit ${specFile} directly.
 `;
 }
 
-// modules/dev-loop-ts/src/loop/iteration.ts
+// src/loop/iteration.ts
 function buildIterationData(run, config, specPath, specContent) {
   const implementerPrompt = buildImplementerPrompt({
     iteration: run.iteration,
@@ -6751,7 +6767,7 @@ function buildIterationData(run, config, specPath, specContent) {
   };
 }
 
-// modules/dev-loop-ts/src/loop/runner.ts
+// src/loop/runner.ts
 class CancelledError extends Error {
   archived;
   constructor(message, archived = false) {
@@ -7007,11 +7023,11 @@ A conflict.md file has been generated.`);
   }
 }
 
-// modules/dev-loop-ts/src/agents/runner.ts
+// src/agents/runner.ts
 import * as fs3 from 'fs/promises';
 import * as path2 from 'path';
 
-// modules/dev-loop-ts/src/agents/verdicts.ts
+// src/agents/verdicts.ts
 function parseVerdictFile2(content) {
   try {
     const parsed = JSON.parse(content);
@@ -7060,7 +7076,7 @@ function determineVerdict(params) {
   return 'rejected';
 }
 
-// modules/dev-loop-ts/src/agents/runner.ts
+// src/agents/runner.ts
 var LOGS_BASE_DIR = '.kagent/logs';
 
 class AgentRunner {
@@ -7350,7 +7366,7 @@ class AgentRunner {
   }
 }
 
-// modules/dev-loop-ts/src/cli/run.ts
+// src/cli/run.ts
 async function handler2(deps) {
   try {
     const available = await deps.tmux.isAvailable();
@@ -7386,10 +7402,10 @@ async function handler2(deps) {
   }
 }
 
-// modules/dev-loop-ts/src/cli/status.ts
+// src/cli/status.ts
 var import_picocolors = __toESM(require_picocolors(), 1);
 
-// modules/dev-loop-ts/node_modules/date-fns/constants.js
+// node_modules/date-fns/constants.js
 var daysInYear = 365.2425;
 var maxTime = Math.pow(10, 8) * 24 * 60 * 60 * 1000;
 var minTime = -maxTime;
@@ -7403,7 +7419,7 @@ var secondsInMonth = secondsInYear / 12;
 var secondsInQuarter = secondsInMonth * 3;
 var constructFromSymbol = Symbol.for('constructDateFrom');
 
-// modules/dev-loop-ts/node_modules/date-fns/constructFrom.js
+// node_modules/date-fns/constructFrom.js
 function constructFrom(date, value) {
   if (typeof date === 'function') return date(value);
   if (date && typeof date === 'object' && constructFromSymbol in date) return date[constructFromSymbol](value);
@@ -7411,18 +7427,18 @@ function constructFrom(date, value) {
   return new Date(value);
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/toDate.js
+// node_modules/date-fns/toDate.js
 function toDate(argument, context) {
   return constructFrom(context || argument, argument);
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/_lib/defaultOptions.js
+// node_modules/date-fns/_lib/defaultOptions.js
 var defaultOptions = {};
 function getDefaultOptions() {
   return defaultOptions;
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/startOfWeek.js
+// node_modules/date-fns/startOfWeek.js
 function startOfWeek(date, options) {
   const defaultOptions2 = getDefaultOptions();
   const weekStartsOn =
@@ -7439,12 +7455,12 @@ function startOfWeek(date, options) {
   return _date;
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/startOfISOWeek.js
+// node_modules/date-fns/startOfISOWeek.js
 function startOfISOWeek(date, options) {
   return startOfWeek(date, { ...options, weekStartsOn: 1 });
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/getISOWeekYear.js
+// node_modules/date-fns/getISOWeekYear.js
 function getISOWeekYear(date, options) {
   const _date = toDate(date, options?.in);
   const year = _date.getFullYear();
@@ -7465,7 +7481,7 @@ function getISOWeekYear(date, options) {
   }
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/_lib/getTimezoneOffsetInMilliseconds.js
+// node_modules/date-fns/_lib/getTimezoneOffsetInMilliseconds.js
 function getTimezoneOffsetInMilliseconds(date) {
   const _date = toDate(date);
   const utcDate = new Date(
@@ -7483,20 +7499,20 @@ function getTimezoneOffsetInMilliseconds(date) {
   return +date - +utcDate;
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/_lib/normalizeDates.js
+// node_modules/date-fns/_lib/normalizeDates.js
 function normalizeDates(context, ...dates) {
   const normalize = constructFrom.bind(null, context || dates.find(date => typeof date === 'object'));
   return dates.map(normalize);
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/startOfDay.js
+// node_modules/date-fns/startOfDay.js
 function startOfDay(date, options) {
   const _date = toDate(date, options?.in);
   _date.setHours(0, 0, 0, 0);
   return _date;
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/differenceInCalendarDays.js
+// node_modules/date-fns/differenceInCalendarDays.js
 function differenceInCalendarDays(laterDate, earlierDate, options) {
   const [laterDate_, earlierDate_] = normalizeDates(options?.in, laterDate, earlierDate);
   const laterStartOfDay = startOfDay(laterDate_);
@@ -7506,7 +7522,7 @@ function differenceInCalendarDays(laterDate, earlierDate, options) {
   return Math.round((laterTimestamp - earlierTimestamp) / millisecondsInDay);
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/startOfISOWeekYear.js
+// node_modules/date-fns/startOfISOWeekYear.js
 function startOfISOWeekYear(date, options) {
   const year = getISOWeekYear(date, options);
   const fourthOfJanuary = constructFrom(options?.in || date, 0);
@@ -7515,19 +7531,19 @@ function startOfISOWeekYear(date, options) {
   return startOfISOWeek(fourthOfJanuary);
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/isDate.js
+// node_modules/date-fns/isDate.js
 function isDate(value) {
   return (
     value instanceof Date || (typeof value === 'object' && Object.prototype.toString.call(value) === '[object Date]')
   );
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/isValid.js
+// node_modules/date-fns/isValid.js
 function isValid2(date) {
   return !((!isDate(date) && typeof date !== 'number') || isNaN(+toDate(date)));
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/startOfYear.js
+// node_modules/date-fns/startOfYear.js
 function startOfYear(date, options) {
   const date_ = toDate(date, options?.in);
   date_.setFullYear(date_.getFullYear(), 0, 1);
@@ -7535,7 +7551,7 @@ function startOfYear(date, options) {
   return date_;
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/locale/en-US/_lib/formatDistance.js
+// node_modules/date-fns/locale/en-US/_lib/formatDistance.js
 var formatDistanceLocale = {
   lessThanXSeconds: {
     one: 'less than a second',
@@ -7619,7 +7635,7 @@ var formatDistance = (token, count, options) => {
   return result;
 };
 
-// modules/dev-loop-ts/node_modules/date-fns/locale/_lib/buildFormatLongFn.js
+// node_modules/date-fns/locale/_lib/buildFormatLongFn.js
 function buildFormatLongFn(args) {
   return (options = {}) => {
     const width = options.width ? String(options.width) : args.defaultWidth;
@@ -7628,7 +7644,7 @@ function buildFormatLongFn(args) {
   };
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/locale/en-US/_lib/formatLong.js
+// node_modules/date-fns/locale/en-US/_lib/formatLong.js
 var dateFormats = {
   full: 'EEEE, MMMM do, y',
   long: 'MMMM do, y',
@@ -7662,7 +7678,7 @@ var formatLong = {
   }),
 };
 
-// modules/dev-loop-ts/node_modules/date-fns/locale/en-US/_lib/formatRelative.js
+// node_modules/date-fns/locale/en-US/_lib/formatRelative.js
 var formatRelativeLocale = {
   lastWeek: "'last' eeee 'at' p",
   yesterday: "'yesterday at' p",
@@ -7673,7 +7689,7 @@ var formatRelativeLocale = {
 };
 var formatRelative = (token, _date, _baseDate, _options) => formatRelativeLocale[token];
 
-// modules/dev-loop-ts/node_modules/date-fns/locale/_lib/buildLocalizeFn.js
+// node_modules/date-fns/locale/_lib/buildLocalizeFn.js
 function buildLocalizeFn(args) {
   return (value, options) => {
     const context = options?.context ? String(options.context) : 'standalone';
@@ -7692,7 +7708,7 @@ function buildLocalizeFn(args) {
   };
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/locale/en-US/_lib/localize.js
+// node_modules/date-fns/locale/en-US/_lib/localize.js
 var eraValues = {
   narrow: ['B', 'A'],
   abbreviated: ['BC', 'AD'],
@@ -7833,7 +7849,7 @@ var localize = {
   }),
 };
 
-// modules/dev-loop-ts/node_modules/date-fns/locale/_lib/buildMatchFn.js
+// node_modules/date-fns/locale/_lib/buildMatchFn.js
 function buildMatchFn(args) {
   return (string, options = {}) => {
     const width = options.width;
@@ -7871,7 +7887,7 @@ function findIndex(array, predicate) {
   return;
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/locale/_lib/buildMatchPatternFn.js
+// node_modules/date-fns/locale/_lib/buildMatchPatternFn.js
 function buildMatchPatternFn(args) {
   return (string, options = {}) => {
     const matchResult = string.match(args.matchPattern);
@@ -7886,7 +7902,7 @@ function buildMatchPatternFn(args) {
   };
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/locale/en-US/_lib/match.js
+// node_modules/date-fns/locale/en-US/_lib/match.js
 var matchOrdinalNumberPattern = /^(\d+)(th|st|nd|rd)?/i;
 var parseOrdinalNumberPattern = /\d+/i;
 var matchEraPatterns = {
@@ -7979,7 +7995,7 @@ var match = {
   }),
 };
 
-// modules/dev-loop-ts/node_modules/date-fns/locale/en-US.js
+// node_modules/date-fns/locale/en-US.js
 var enUS = {
   code: 'en-US',
   formatDistance,
@@ -7992,7 +8008,7 @@ var enUS = {
     firstWeekContainsDate: 1,
   },
 };
-// modules/dev-loop-ts/node_modules/date-fns/getDayOfYear.js
+// node_modules/date-fns/getDayOfYear.js
 function getDayOfYear(date, options) {
   const _date = toDate(date, options?.in);
   const diff = differenceInCalendarDays(_date, startOfYear(_date));
@@ -8000,14 +8016,14 @@ function getDayOfYear(date, options) {
   return dayOfYear;
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/getISOWeek.js
+// node_modules/date-fns/getISOWeek.js
 function getISOWeek(date, options) {
   const _date = toDate(date, options?.in);
   const diff = +startOfISOWeek(_date) - +startOfISOWeekYear(_date);
   return Math.round(diff / millisecondsInWeek) + 1;
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/getWeekYear.js
+// node_modules/date-fns/getWeekYear.js
 function getWeekYear(date, options) {
   const _date = toDate(date, options?.in);
   const year = _date.getFullYear();
@@ -8035,7 +8051,7 @@ function getWeekYear(date, options) {
   }
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/startOfWeekYear.js
+// node_modules/date-fns/startOfWeekYear.js
 function startOfWeekYear(date, options) {
   const defaultOptions2 = getDefaultOptions();
   const firstWeekContainsDate =
@@ -8052,21 +8068,21 @@ function startOfWeekYear(date, options) {
   return _date;
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/getWeek.js
+// node_modules/date-fns/getWeek.js
 function getWeek(date, options) {
   const _date = toDate(date, options?.in);
   const diff = +startOfWeek(_date, options) - +startOfWeekYear(_date, options);
   return Math.round(diff / millisecondsInWeek) + 1;
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/_lib/addLeadingZeros.js
+// node_modules/date-fns/_lib/addLeadingZeros.js
 function addLeadingZeros(number, targetLength) {
   const sign = number < 0 ? '-' : '';
   const output = Math.abs(number).toString().padStart(targetLength, '0');
   return sign + output;
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/_lib/format/lightFormatters.js
+// node_modules/date-fns/_lib/format/lightFormatters.js
 var lightFormatters = {
   y(date, token) {
     const signedYear = date.getFullYear();
@@ -8115,7 +8131,7 @@ var lightFormatters = {
   },
 };
 
-// modules/dev-loop-ts/node_modules/date-fns/_lib/format/formatters.js
+// node_modules/date-fns/_lib/format/formatters.js
 var dayPeriodEnum = {
   am: 'am',
   pm: 'pm',
@@ -8656,7 +8672,7 @@ function formatTimezone(offset, delimiter = '') {
   return sign + hours + delimiter + minutes;
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/_lib/format/longFormatters.js
+// node_modules/date-fns/_lib/format/longFormatters.js
 var dateLongFormatter = (pattern, formatLong2) => {
   switch (pattern) {
     case 'P':
@@ -8715,7 +8731,7 @@ var longFormatters = {
   P: dateTimeLongFormatter,
 };
 
-// modules/dev-loop-ts/node_modules/date-fns/_lib/protectedTokens.js
+// node_modules/date-fns/_lib/protectedTokens.js
 var dayOfYearTokenRE = /^D+$/;
 var weekYearTokenRE = /^Y+$/;
 var throwTokens = ['D', 'DD', 'YY', 'YYYY'];
@@ -8735,7 +8751,7 @@ function message(token, format, input) {
   return `Use \`${token.toLowerCase()}\` instead of \`${token}\` (in \`${format}\`) for formatting ${subject} to the input \`${input}\`; see: https://github.com/date-fns/date-fns/blob/master/docs/unicodeTokens.md`;
 }
 
-// modules/dev-loop-ts/node_modules/date-fns/format.js
+// node_modules/date-fns/format.js
 var formattingTokensRegExp = /[yYQqMLwIdDecihHKkms]o|(\w)\1*|''|'(''|[^'])+('|$)|./g;
 var longFormattingTokensRegExp = /P+p+|P+|p+|''|'(''|[^'])+('|$)|./g;
 var escapedStringRegExp = /^'([^]*?)'?$/;
@@ -8819,7 +8835,7 @@ function cleanEscapedString(input) {
   return matched[1].replace(doubleQuoteRegExp, "'");
 }
 
-// modules/dev-loop-ts/src/cli/status.ts
+// src/cli/status.ts
 async function handler3(state) {
   try {
     const hasConfig = await state.hasConfig();
@@ -8927,7 +8943,7 @@ async function handler3(state) {
   }
 }
 
-// modules/dev-loop-ts/node_modules/@clack/core/dist/index.mjs
+// node_modules/@clack/core/dist/index.mjs
 var import_sisteransi = __toESM(require_src(), 1);
 import { stdin as j, stdout as M } from 'process';
 import O from 'readline';
@@ -9751,7 +9767,7 @@ class LD extends x {
   }
 }
 
-// modules/dev-loop-ts/node_modules/@clack/prompts/dist/index.mjs
+// node_modules/@clack/prompts/dist/index.mjs
 var import_picocolors2 = __toESM(require_picocolors(), 1);
 var import_sisteransi2 = __toESM(require_src(), 1);
 import y2 from 'process';
@@ -9877,10 +9893,10 @@ ${import_picocolors2.default.gray(d2)}  ${t}
 };
 var J2 = `${import_picocolors2.default.gray(o)}  `;
 
-// modules/dev-loop-ts/src/cli/attach.ts
+// src/cli/attach.ts
 var import_picocolors3 = __toESM(require_picocolors(), 1);
 
-// modules/dev-loop-ts/src/tmux/commands.ts
+// src/tmux/commands.ts
 function generateSessionName(params) {
   const { dirHash, runId, iteration, role, reviewerIndex } = params;
   if (role === 'rev' && reviewerIndex !== undefined) {
@@ -9950,7 +9966,7 @@ function buildTimeoutCommand(command, timeoutMins) {
   return `timeout ${timeoutMins}m ${command}`;
 }
 
-// modules/dev-loop-ts/src/cli/attach.ts
+// src/cli/attach.ts
 function formatSessionChoice(sessionName) {
   const parsed = parseSessionName(sessionName);
   if (!parsed) {
@@ -9990,7 +10006,7 @@ async function handler4(tmux) {
   }
 }
 
-// modules/dev-loop-ts/src/cli/cancel.ts
+// src/cli/cancel.ts
 async function handler5(state, tmux) {
   try {
     const run = await state.loadRun();
@@ -10043,7 +10059,7 @@ async function handler5(state, tmux) {
   }
 }
 
-// modules/dev-loop-ts/src/cli/history.ts
+// src/cli/history.ts
 var import_picocolors4 = __toESM(require_picocolors(), 1);
 async function listHandler(history, logs) {
   try {
@@ -10133,7 +10149,7 @@ async function clearHandler(history) {
   }
 }
 
-// modules/dev-loop-ts/src/cli/logs.ts
+// src/cli/logs.ts
 var import_picocolors5 = __toESM(require_picocolors(), 1);
 function formatLogLabel(log) {
   if (log.role === 'impl') {
@@ -10511,7 +10527,7 @@ async function clearRunLogs(runId) {
   } catch {}
 }
 
-// modules/dev-loop-ts/src/cli/remove.ts
+// src/cli/remove.ts
 var import_picocolors6 = __toESM(require_picocolors(), 1);
 async function handler6(state) {
   try {
@@ -10524,7 +10540,7 @@ async function handler6(state) {
   }
 }
 
-// modules/dev-loop-ts/src/stream/parse.ts
+// src/stream/parse.ts
 function tryParseJson(line) {
   const trimmed = line.trim();
   if (!trimmed) return null;
@@ -10567,7 +10583,7 @@ function extractToolUses(content) {
   return content.filter(c => c.type === 'tool_use').map(c => ({ name: c.name, input: c.input }));
 }
 
-// modules/dev-loop-ts/src/stream/format.ts
+// src/stream/format.ts
 var import_picocolors7 = __toESM(require_picocolors(), 1);
 function formatEvent(event) {
   switch (event.type) {
@@ -10629,7 +10645,7 @@ function formatResult(result) {
   return import_picocolors7.default.dim(`[done] ${parts.join(' | ')}`);
 }
 
-// modules/dev-loop-ts/src/cli/stream.ts
+// src/cli/stream.ts
 async function handler7() {
   const decoder = new TextDecoder();
   let buffer = '';
@@ -10660,7 +10676,7 @@ function processLine(line) {
   }
 }
 
-// modules/dev-loop-ts/src/cli/poll-pr.ts
+// src/cli/poll-pr.ts
 var import_picocolors8 = __toESM(require_picocolors(), 1);
 async function exec(cmd) {
   const proc = Bun.spawn(cmd, {
@@ -10895,7 +10911,7 @@ async function handler8(pr, opts) {
   }
 }
 
-// modules/dev-loop-ts/src/cli/index.ts
+// src/cli/index.ts
 function createCli(deps) {
   const program2 = new Command()
     .name('dev-loop')
@@ -10975,7 +10991,7 @@ function createCli(deps) {
   return program2;
 }
 
-// modules/dev-loop-ts/src/state/service.ts
+// src/state/service.ts
 class StateService {
   fs;
   paths;
@@ -11333,7 +11349,7 @@ class StateService {
   }
 }
 
-// modules/dev-loop-ts/src/tmux/service.ts
+// src/tmux/service.ts
 import * as fs4 from 'fs/promises';
 import * as path3 from 'path';
 import * as os from 'os';
@@ -11477,7 +11493,7 @@ function createTmuxService(spawn) {
   return new TmuxServiceImpl(spawn);
 }
 
-// modules/dev-loop-ts/src/history/format.ts
+// src/history/format.ts
 var import_picocolors9 = __toESM(require_picocolors(), 1);
 function formatHistoryEntry(entry) {
   const lines = [];
@@ -11547,7 +11563,7 @@ function formatStatus(status) {
   }
 }
 
-// modules/dev-loop-ts/src/history/service.ts
+// src/history/service.ts
 class HistoryServiceImpl {
   fs;
   paths;
@@ -11598,7 +11614,7 @@ function createHistoryService(fs5, paths2) {
   return new HistoryServiceImpl(fs5, paths2);
 }
 
-// modules/dev-loop-ts/src/logs/service.ts
+// src/logs/service.ts
 import * as path4 from 'path';
 
 class LogsServiceImpl {
@@ -11707,7 +11723,7 @@ function createLogsService(fs5, paths2) {
   return new LogsServiceImpl(fs5, paths2);
 }
 
-// modules/dev-loop-ts/src/index.ts
+// src/index.ts
 var state = new StateService(defaultFsService, paths);
 var tmux = createTmuxService();
 var history = createHistoryService(defaultFsService, paths);

@@ -30,13 +30,19 @@ Handle unresolved review threads from:
       "thread_id": "PRRT_...",
       "comment_id": "...",
       "body": "Reply content with signature",
-      "reason": "answering|stale|resolved"
+      "reason": "answering|stale|resolved|outdated"
     }
   ],
 
   "code_fixes": [],
 
-  "post_push_actions": []
+  "post_push_actions": [],
+
+  "summary": {
+    "threads_analyzed": 0,
+    "replied": 0,
+    "closed": 0
+  }
 }
 ```
 
@@ -51,7 +57,7 @@ REPO=$(git remote get-url origin | sed -E 's|.*[:/]([^/]+)/([^.]+)(\.git)?|\2|')
 gh api graphql -f query='
   query {
     repository(owner: "'$OWNER'", name: "'$REPO'") {
-      pullRequest(number: '$PR_NUMBER') {
+      pullRequest(number: {prNumber}) {
         reviewThreads(first: 50) {
           nodes {
             id

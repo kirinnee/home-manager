@@ -1,167 +1,156 @@
-# Phase: Sub-Planning (Optional)
+# Phase: Sub-Planning — Implementation Plans (HOW) — Orchestrator Inline
 
-This phase **ONLY runs when necessary**. Most tasks should be implemented as a single plan.
+**Always runs.** Every task gets at least 1 implementation plan. Runs inline with the orchestrator.
 
 ## Entry Condition
 
-This phase is entered from `setup.md` (after spec approval with `phase: "approved"`).
+- `phase: "approved"` in state (after spec approval in planning phase)
+- Also entered from `phases/feedback.md` (after feedback, `phase: "approved"`, `specVersion: N+1`)
 
-## Quick Check: Skip Sub-Planning?
+## Content Separation
 
-**Default to single plan.** Only consider sub-plans if ALL of these are true:
+|                  | Task Spec (`task-spec.md`)                            | Plan (`plan-N.md`)                                 |
+| ---------------- | ----------------------------------------------------- | -------------------------------------------------- |
+| Answers          | WHAT to build                                         | HOW to build it                                    |
+| Contains         | Acceptance criteria, edge cases, constraints, context | Files to modify, approach, patterns, test strategy |
+| Does NOT contain | Implementation details, exact code                    | Exact code — only suggestions/examples             |
 
-1. **Multiple bounded contexts** — Task spans 2+ distinct domain boundaries (check DDD skill)
-2. **Clearly separate deliverables** — Each phase can be tested and shipped independently
-3. **Significant complexity** — 15+ distinct requirements OR explicit phases in ticket
-4. **User explicitly requested phased delivery**
+## Step 1: Read Task Spec and Assess Complexity
 
-**If ANY condition is NOT met:**
+1. Read `{specDir}/task-spec.md` for requirements
+2. Decide plan count (1-4 based on complexity):
+   - **1 plan**: Most tasks — single feature, focused scope
+   - **2-3 plans**: Multi-bounded context, explicit phases in ticket, significant complexity
+   - **4 plans**: Very large epics only
 
-```
-Update state: phase: "run_spec" (keep subPlans: null)
-Skip directly to phases/run-spec.md
-```
-
-## When Sub-Planning Makes Sense
-
-| Scenario                  | Example                                  | Why Sub-Plan?                             |
-| ------------------------- | ---------------------------------------- | ----------------------------------------- |
-| Multi-bounded context     | Auth API + Dashboard UI                  | Different domains, can ship incrementally |
-| Explicit phases in ticket | "Phase 1: Backend, Phase 2: Frontend"    | Already defined by product                |
-| Very large epic           | 20+ requirements, 3+ weeks work          | Manageable chunks                         |
-| User request              | "I want to review after the API is done" | Stakeholder wants checkpoints             |
-
-## When to AVOID Sub-Planning
-
-| Scenario            | Why Skip                                      |
-| ------------------- | --------------------------------------------- |
-| Single feature      | No benefit to splitting                       |
-| Tight coupling      | Changes interdependent, can't test separately |
-| Small-medium ticket | Overhead outweighs benefit                    |
-| Unclear boundaries  | Will cause confusion and rework               |
-
-## Step 1: Update State and Propose Sub-Plans
-
-Update state: `phase: "sub_planning"` (for resumability).
-
-1. Read `{specDir}/task-spec.md` and identify potential independent work streams
-
-2. **Check for Domain-Driven Design skill:**
-
+3. **Check for Domain-Driven Design skill:**
    ```bash
    ls ~/.claude/skills/domain-driven-design/SKILL.md 2>/dev/null || \
    ls ./.claude/skills/domain-driven-design/SKILL.md 2>/dev/null
    ```
+   If DDD skill exists: use bounded context definitions to group plans.
 
-3. **If DDD skill exists:** Read it and use its bounded context definitions to group plans:
-   - Group plans by **bounded context** (each context is a cohesive domain boundary)
-   - Note: **1 bounded context can have multiple plans** if the context is large or complex
-   - Name plans to reflect their bounded context (e.g., `auth-context-1.md`, `auth-context-2.md`)
-   - Ensure each plan stays within a single bounded context
+## Step 2: Research with Explore Subagents
 
-4. **If no DDD skill:** Group by technical boundaries or explicit phases from the ticket
-
-5. Propose 2-4 sub-plans, each being:
-   - A complete, deliverable unit of work
-   - Minimal overlap with other sub-plans (ideally no shared files)
-   - Independently testable
-   - (If DDD) Contained within a single bounded context
-
-## Step 2: Iterative Plan Clarification (Chat-Based)
-
-**For EACH proposed sub-plan, challenge and clarify before writing.**
-
-### Per-Plan Clarification Loop
-
-Present each plan and ask targeted questions (in chat, not AskUserQuestion):
+**Spawn Explore subagents** (parallel, via Task tool) for deep research per plan area:
 
 ```
-I'm proposing to break this into 3 phases:
-
-## Phase 1: [Name]
-**Goal:** [What this accomplishes]
-**Files:** [Likely files touched]
-**Dependencies:** [What it needs]
-
-**Questions for this phase:**
-1. [Ambiguity about this specific phase]
-2. [Technical decision needed]
-3. [Edge case to consider]
-
-## Phase 2: ...
+Task(
+  subagent_type: "Explore",
+  description: "Research {plan area} implementation",
+  prompt: "Search the codebase for: {specific patterns, files, conventions relevant to this plan area}"
+)
 ```
 
-### What to Challenge Per Plan
+Research targets per plan:
 
-| Category        | Questions                                                              |
-| --------------- | ---------------------------------------------------------------------- |
-| **Boundaries**  | "Phase 1 touches X, but Y depends on it. Should Y be in phase 1 or 2?" |
-| **Files**       | "Both phases touch file Z. How should we handle the conflict?"         |
-| **Testing**     | "How do we test phase 1 independently before phase 2 is done?"         |
-| **Rollback**    | "If phase 2 fails, can we ship phase 1 alone?"                         |
-| **Integration** | "How do phases integrate? What's the contract?"                        |
+- Files that will need modification
+- Existing patterns and conventions in those areas
+- Testing patterns for similar code
+- Integration points with other components
 
-### Iterate Until Each Plan is Firm
+## Step 3: Write Plan Files
 
-For each plan, ensure:
+Create plan files in `{specDir}/plans/`:
 
-- [ ] Clear, unambiguous goal
-- [ ] File boundaries don't overlap (or overlap is explicit)
-- [ ] Can be tested independently
-- [ ] Implementation approach is decided
-- [ ] Edge cases addressed
+```bash
+mkdir -p {specDir}/plans
+```
 
-## Step 3: Handle User Decision
+Each plan file (`plan-1.md`, `plan-2.md`, etc.) should include:
 
-**If user approves sub-plans:**
+- Goal and scope (clear, single purpose)
+- Specific files to modify (with paths)
+- Suggested approach (direction, NOT exact code)
+- Edge cases to handle
+- How to test independently
+- Integration points with other plans
+- **Implementation Checklist** (copy from task-spec)
 
-1. Write each sub-plan using [templates/sub-plan-template.md](../templates/sub-plan-template.md):
+Use the sub-plan template as a guide.
+
+**Content rules:**
+
+- Describe HOW to build, not exact code
+- Provide direction and suggestions, not implementations
+- Include examples only as illustrations, not copy-paste solutions
+
+## Step 4: Discover Claude Binaries
+
+```bash
+direnv exec . bash -c "compgen -c | grep '^claude' | sort -u"
+```
+
+This provides the list of available implementer and reviewer binaries for the config prompt.
+
+## Step 5: Present Plans + Config for Approval
+
+Present to the user:
+
+1. **All plan files** — show content of each plan
+2. **Dev-loop config** with discovered binaries:
+   - Implementer binary (current default from state)
+   - Reviewer binaries (current defaults from state)
+   - Timeouts, maxPushCycles
+   - "Here's the default config. Want to change anything?"
+
+If user wants config changes: use `AskUserQuestion` with available binaries:
+
+- Multi-select for reviewers
+- Single-select for implementer
+
+## Step 6: On Approval
+
+1. Commit plan files:
 
    ```bash
-   mkdir -p {specDir}/plans
+   git add spec/{ticketId}/
+   git commit -m "docs: add implementation plans for {ticketId} v{specVersion}"
    ```
 
-   Each plan file should include (from clarifications):
-   - Goal and scope (clear, single purpose)
-   - Specific files to modify (with paths)
-   - Technical approach (step-by-step)
-   - Edge cases to handle
-   - How to test independently
-   - Integration points with other phases
+2. Update state with any config overrides:
 
-2. Commit the spec files:
-
-   ```bash
-   git add spec/<task-id>/
-   git commit -m "docs: add sub-plans for <task-id> v{specVersion}"
-   ```
-
-3. Update state:
    ```json
    {
      "phase": "run_spec",
      "subPlans": [
-       { "id": "phase-1", "file": "{specDir}/plans/phase-1.md", "status": "pending" },
-       { "id": "phase-2", "file": "{specDir}/plans/phase-2.md", "status": "pending" }
+       { "id": "plan-1", "file": "{specDir}/plans/plan-1.md", "status": "pending" },
+       ...
      ],
      "currentSubPlanIndex": 0
    }
    ```
 
-**If user rejects (wants single plan):**
+   Also update `implementer`, `reviewers`, timeouts if user changed them.
 
-1. Leave `subPlans: null` and `currentSubPlanIndex: null` in state
-2. Update state: `phase: "run_spec"`
+3. **Request context clear:**
 
-**If user requests changes:**
+   ```
+   Plans approved! Please clear context and re-invoke:
+   /kagent-autopilot
 
-1. Incorporate feedback and re-clarify affected plans
-2. Repeat until approved or user chooses single plan
+   State file has everything needed to resume from the execution phase.
+   ```
+
+## On Rejection
+
+Iterate with user feedback. Loop back to Step 3 (research) or Step 5 (re-present) depending on the nature of feedback.
+
+## Iterative Clarification (Chat-Based)
+
+For EACH proposed plan, challenge and clarify before writing:
+
+| Category        | Questions                                                            |
+| --------------- | -------------------------------------------------------------------- |
+| **Boundaries**  | "Plan 1 touches X, but Y depends on it. Should Y be in plan 1 or 2?" |
+| **Files**       | "Both plans touch file Z. How should we handle the conflict?"        |
+| **Testing**     | "How do we test plan 1 independently before plan 2 is done?"         |
+| **Integration** | "How do plans integrate? What's the contract?"                       |
 
 ## Resumability
 
-If resuming into this phase (`phase: "sub_planning"`): Re-propose the sub-plans and re-clarify.
+If resuming into `phase: "sub_planning"`:
 
-## Next
-
-Read `phases/run-spec.md` and follow it.
+- Check if plan files exist in `{specDir}/plans/`
+- If plans exist: present for approval (skip to Step 5)
+- If no plans: start from Step 1

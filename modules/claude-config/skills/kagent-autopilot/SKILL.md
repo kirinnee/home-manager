@@ -8,88 +8,162 @@ argument-hint: '[TICKET_ID | manual]'
 
 ## Mode Selection
 
-- **Default (autopilot)**: `/kagent-autopilot` or `/kagent-autopilot PE-1234` — Takes a ticket and autonomously implements it through to a merge-ready PR using `dev-loop`. After spec approval, fully autonomous except **spec conflict** (exit 2) and **push failure**.
+- **Default (autopilot)**: `/kagent-autopilot` or `/kagent-autopilot PE-1234` — Takes a ticket and autonomously implements it through to a merge-ready PR using `dev-loop`. Two approval checkpoints (spec + plans), then fully autonomous except **spec conflict** (exit 2) and **push failure**.
 - **Manual mode**: `/kagent-autopilot manual` — You already implemented the code. Autopilot handles the push → CI/review → fix loop, fixing issues directly without dev-loop.
 
-## Subagent Architecture
-
-The orchestrator (you) handles phases directly and spawns subagents via Task tool when needed:
+## Orchestrator Model
 
 ```
-ORCHESTRATOR (you)
-├── Direct: setup, sub_planning, run_spec, pushing
-├── Spawns: runner agent (long dev-loop execution)
-├── Spawns: prereview agent (fresh context for CodeRabbit)
-├── Spawns: poller agent (gathers PR context)
-└── Spawns: resolvers IN PARALLEL (ci, review, coderabbit, thread, rebase)
+ORCHESTRATOR (you = team lead)
+├── INLINE (user-facing only):
+│   ├── planning — spec writing (spawns Explore subagents for research)
+│   ├── sub_planning — plan writing (spawns Explore subagents for research)
+│   └── feedback — captures feedback, creates new spec version
+│
+├── [CONTEXT CLEAR after both approvals]
+│
+├── TEAM MEMBERS (spawned via Task tool with team_name):
+│   ├── setup-agent (haiku) — mode + branch + .gitignore
+│   ├── repo-setup-agent (sonnet) — org detection, ticket detection, repoConfig
+│   ├── state-agent (haiku) — resume assessment + all state writes
+│   ├── run-spec-agent (haiku) — prepares spec file for dev-loop
+│   ├── runner-agent (sonnet) — executes dev-loop
+│   ├── prereview-agent (sonnet) — CodeRabbit local review
+│   ├── pushing-agent (sonnet) — commit, push, PR, cleanup review.md
+│   ├── poller-agent (sonnet) — gathers PR context
+│   └── resolver-agents (sonnet/opus) — fix issues (ci, review, coderabbit, thread, rebase)
+│
+└── State: ALL writes go through state-agent (orchestrator never writes task-state.json directly)
 ```
 
-**Why subagents for these?**
+**Why this model?**
 
-- **Runner**: Long-running (30+ min), needs isolation
-- **Prereview**: Needs fresh context for objective CodeRabbit analysis
-- **Poller**: Gathers ALL PR context, returns structured report
-- **Resolvers**: Each handles a specific issue type with focused context
+- **Inline phases** need user interaction (clarification, approval)
+- **Team members** are spawned for isolated, well-defined tasks
+- **State-agent** is a single entry point for all state management, ensuring consistency
+- **Context clear** between approvals and execution prevents context rot
 
 ## Glossary
 
-| Term           | Scope                            | Description                                                              |
-| -------------- | -------------------------------- | ------------------------------------------------------------------------ |
-| **Iteration**  | Inner (dev-loop, autopilot only) | One implement-then-review pass. Controlled by `maxIterations`.           |
-| **Push cycle** | Outer (both modes)               | One round: commit, push, CI/review check. Controlled by `maxPushCycles`. |
-| **Sub-plan**   | Autopilot only (RARE)            | Only for large/multi-bounded-context tasks. Most tasks use single plan.  |
-| **Conflict**   | Dev-loop exit 2 (autopilot only) | The spec contains contradictory or ambiguous requirements.               |
+| Term           | Scope                            | Description                                                                    |
+| -------------- | -------------------------------- | ------------------------------------------------------------------------------ |
+| **Iteration**  | Inner (dev-loop, autopilot only) | One implement-then-review pass. Controlled by `maxIterations`.                 |
+| **Push cycle** | Outer (both modes)               | One round: commit, push, CI/review check. Controlled by `maxPushCycles`.       |
+| **Plan**       | Autopilot only                   | Implementation plan for a portion of the task. Every task has at least 1 plan. |
+| **Conflict**   | Dev-loop exit 2 (autopilot only) | The spec contains contradictory or ambiguous requirements.                     |
 
 ## State Machine
 
 ```
 Autopilot mode:
-  [setup] ──→ approved ──→ sub_planning? ──→ run_spec ──→ running ──→ prereview ──→ pushing ──→ polling ──→ completed
-      │                          │              │            │  (agent)     │  (agent)      │    │  (agent)    │
-      │                          │              │            │             │               │    │             │
-      │                          │              │            └─────────────┴───────────────┴────┘
-      │                          │              │                          (feedback from CI/reviews → spawn resolvers → fix)
-      │                          │              │
-      └──────────────────────────┴──────────────┴──────────────────────────────────────────────────────────────┐
-                                                                                                               │
-                                                                                                               ▼
-                                                                                                    ┌────────────────┐
-                                                                                                    │   completed    │
-                                                                                                    └───────┬────────┘
-                                                                                                            │ "I have feedback"
-                                                                                                            ▼
-                                                                                                    ┌────────────────┐
-                                                                                                    │    feedback    │──→ approved (with v{N+1})
-                                                                                                    └────────────────┘          │
-                                                                                                                                └──→ (loops back through entire flow)
+  [generic_setup] → [repo_setup] → [planning] → [SPEC APPROVAL] → [sub_planning] → [PLAN+CONFIG APPROVAL] → [CONTEXT CLEAR]
+   team member       team member     inline                          inline
+   mode+branch       repo+ticket     WHAT spec                       HOW plans
+
+  → [run_spec] → [running] → [prereview] → [pushing] → [polling] → [completed]
+     team member   team member  team member   team member  team member
+     prepare spec  dev-loop     coderabbit    push+PR      CI/review
+                                    ↑                            ↓
+                                    └────────────────────────────┘
+                                   (fix cycle: resolvers → push)
 
 Manual mode:
-  [setup] ──→ prereview ──→ pushing ──→ polling ──→ completed
-                 │  (agent)    │           │  (agent)
-                 └─────────────┴───────────┴───────────┘
-                 (feedback from CI/reviews → spawn resolvers → fix)
+  [generic_setup] → [repo_setup] → [prereview] → [pushing] → [polling] → [completed]
+   team member       team member     team member   team member  team member
+                                        ↑                            ↓
+                                        └────────────────────────────┘
+                                       (fix cycle: resolvers → push)
+
+Feedback loop (from completed):
+  [completed] → "I have feedback" → [feedback] → new spec v{N+1} → [SPEC RE-APPROVAL]
+                                      inline
+  → [sub_planning] → [PLAN+CONFIG APPROVAL] → [CONTEXT CLEAR] → (execution loop)
+     inline
 ```
 
-Note: `sub_planning?` is optional — only for large/multi-context tasks. Most tasks skip directly to `run_spec`.
+## Phase Dispatch
+
+**On invocation, read `.kagent/task-state.json` and dispatch accordingly:**
+
+| Phase          | Action                                                                                                                  |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| No state file  | Spawn setup-agent (team member, haiku)                                                                                  |
+| `repo_setup`   | Spawn repo-setup-agent (team member, sonnet)                                                                            |
+| `planning`     | Orchestrator reads `phases/planning.md` (inline)                                                                        |
+| `approved`     | Orchestrator reads `phases/sub-planning.md` (inline)                                                                    |
+| `sub_planning` | Orchestrator reads `phases/sub-planning.md` (inline)                                                                    |
+| `run_spec`     | Spawn state-agent (resume mode) → spawn run-spec team member (haiku)                                                    |
+| `running`      | Spawn state-agent (resume mode) → spawn runner team member (sonnet)                                                     |
+| `prereview`    | Spawn state-agent (resume mode) → spawn prereview team member (opus)                                                    |
+| `pushing`      | Spawn state-agent (resume mode) → spawn pushing team member (sonnet)                                                    |
+| `polling`      | Spawn state-agent (resume mode) → spawn poller team member (opus) → resolvers                                           |
+| `feedback`     | Orchestrator reads `phases/feedback.md` (inline)                                                                        |
+| `completed`    | Report: "Task completed. PR #{prNumber}. Say 'I have feedback' to iterate." Ticket transition: `ticketTransitions.done` |
+| `failed`       | Report status and last error. Offer retry from appropriate phase.                                                       |
+
+**Note:** For execution phases (`run_spec` through `polling`), state-agent (resume mode) is always spawned first on re-invocation to assess state before dispatching.
 
 ## Key State Fields (`.kagent/task-state.json`)
 
-| Field                 | Type        | Description                                                                                                        |
-| --------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------ |
-| `phase`               | string      | Current state: approved, sub_planning, run_spec, running, prereview, pushing, polling, feedback, completed, failed |
-| `mode`                | string      | `"autopilot"` (dev-loop) or `"manual"` (direct fixes)                                                              |
-| `ticketId`            | string/null | Ticket ID (PE-1234, CU-abc123). Null in manual mode if no ticket.                                                  |
-| `specVersion`         | number      | Current spec version (1, 2, 3...). Increments when user provides feedback after completion.                        |
-| `pushCycle`           | number      | Current push cycle (0-indexed, incremented after push)                                                             |
-| `maxPushCycles`       | number      | Outer loop limit (default 5)                                                                                       |
-| `prNumber`            | number/null | GitHub PR number                                                                                                   |
-| `lastRunId`           | string/null | Most recent dev-loop run ID (autopilot only)                                                                       |
-| `devLoopInitialized`  | boolean     | Whether `dev-loop init` has been run (autopilot only)                                                              |
-| `specDir`             | string/null | Path to spec version directory, e.g., `spec/PE-1234/v1`. Null in manual mode.                                      |
-| `subPlans`            | array/null  | Sub-plan files for large tasks. Each item: `{id, file, status}`. Null if single plan.                              |
-| `currentSubPlanIndex` | number/null | Current sub-plan index (0-indexed). Null if not using sub-plans                                                    |
+### Top-level state (dynamic — changes during execution)
 
-Full schema with all fields is in `phases/setup.md`.
+| Field                    | Type        | Description                                                |
+| ------------------------ | ----------- | ---------------------------------------------------------- |
+| `version`                | number      | State schema version                                       |
+| `phase`                  | string      | Current phase (see enum below)                             |
+| `mode`                   | string      | `"autopilot"` or `"manual"`                                |
+| `rawArgument`            | string/null | Raw CLI argument (passed to repo-setup for interpretation) |
+| `ticketId`               | string/null | Detected ticket ID (PE-1234, CU-abc123)                    |
+| `ticketTitle`            | string/null | From ticket system                                         |
+| `ticketBody`             | string/null | From ticket system                                         |
+| `ticketStatus`           | string/null | Current status on taskboard                                |
+| `branch`                 | string      | Current branch name                                        |
+| `prNumber`               | number/null | GitHub PR number                                           |
+| `specVersion`            | number/null | Current spec version (1, 2...)                             |
+| `specDir`                | string/null | Path to current spec dir (e.g., `spec/PE-1234/v1`)         |
+| `pushCycle`              | number      | Current push cycle (0-indexed)                             |
+| `maxPushCycles`          | number      | Outer loop limit (default 5)                               |
+| `lastRunId`              | string/null | Dev-loop run ID                                            |
+| `lastRunExitCode`        | number/null | Dev-loop exit code                                         |
+| `lastRunStatus`          | string/null | Dev-loop status                                            |
+| `lastError`              | string/null | Last error message                                         |
+| `conflictContext`        | string/null | Conflict details                                           |
+| `devLoopInitialized`     | boolean     | Whether dev-loop init ran                                  |
+| `subPlans`               | array       | Always an array (min 1 entry) — never null                 |
+| `currentSubPlanIndex`    | number      | Current plan index (starts 0)                              |
+| `implementer`            | string      | Claude binary for implementation                           |
+| `reviewers`              | array       | Reviewer binaries                                          |
+| `maxIterations`          | number      | Inner loop limit                                           |
+| `implementerTimeout`     | number      | Minutes                                                    |
+| `reviewerTimeout`        | number      | Minutes                                                    |
+| `conflictCheckThreshold` | number      | Consecutive failures before conflict check                 |
+| `conflictChecker`        | string      | Conflict checker binary                                    |
+| `repoConfig`             | object      | Nested repo config (see below)                             |
+| `teamName`               | string/null | Team name for this session                                 |
+
+### `repoConfig` (immutable per session — from SETUP.md or repos/\*.md)
+
+| Field                     | Type        | Description                                                  |
+| ------------------------- | ----------- | ------------------------------------------------------------ |
+| `org`                     | string      | Organization identifier                                      |
+| `baseBranch`              | string      | Base branch for PRs and prereview (main/master)              |
+| `ticketSystem`            | string/null | `"jira"` or `"clickup"`                                      |
+| `ticketPattern`           | string/null | Regex for ticket ID extraction from branch/arg               |
+| `ticketFetchAccess`       | string/null | `"cli"` or `"mcp"` — how to fetch ticket details             |
+| `ticketFetchCommand`      | string/null | CLI command template or MCP tool name for fetching           |
+| `ticketTransitions`       | object/null | `{ start, done, feedback }` — transition action/status names |
+| `ticketTransitionAccess`  | string/null | `"cli"` or `"mcp"` — how to transition                       |
+| `ticketTransitionCommand` | string/null | CLI command template or MCP tool name for transitioning      |
+| `coderabbit`              | boolean     | Whether CodeRabbit is active                                 |
+| `prereviewEnabled`        | boolean     | Whether to run local prereview                               |
+| `reReviewComment`         | string/null | Comment to post requesting re-review                         |
+| `reviewComment`           | string/null | Initial review request comment                               |
+
+### Phase enum
+
+`repo_setup`, `planning`, `approved`, `sub_planning`, `run_spec`, `running`, `prereview`, `pushing`, `polling`, `feedback`, `completed`, `failed`
+
+Full schema with all fields is in `phases/setup.md` (initial state) and `phases/resume.md` (per-phase checks).
 
 ## Spec Directory Structure (Versioned)
 
@@ -97,70 +171,45 @@ Full schema with all fields is in `phases/setup.md`.
 spec/
 └── <task-id>/                  # e.g., "PE-1234" or "CU-abc123"
     ├── v1/                     # Version 1
-    │   ├── task-spec.md        # Original spec
-    │   ├── plans/              # Sub-plans (if needed)
-    │   │   └── phase-1.md
+    │   ├── task-spec.md        # Original spec (WHAT)
+    │   ├── plans/              # Implementation plans (HOW)
+    │   │   ├── plan-1.md
+    │   │   └── plan-2.md
     │   └── feedback.md         # Created when user provides feedback after completion
     ├── v2/                     # Version 2 (created from v1 spec + v1 feedback)
     │   ├── task-spec.md        # Combined spec
+    │   ├── plans/
     │   └── ...
     └── ...
 ```
 
 **Why versioned?** After PR completion, you may have learnings that warrant changes. Versioning preserves the original spec, captures feedback, and creates a new iteration.
 
-## Phase Dispatch
-
-**On invocation, read `.kagent/task-state.json` and dispatch accordingly:**
-
-| Condition               | Action                                                                                               |
-| ----------------------- | ---------------------------------------------------------------------------------------------------- |
-| File does not exist     | Read `phases/setup.md` (handled by orchestrator)                                                     |
-| `phase: "approved"`     | Read `phases/sub-planning.md` (handled by orchestrator)                                              |
-| `phase: "sub_planning"` | Read `phases/sub-planning.md` (handled by orchestrator)                                              |
-| `phase: "run_spec"`     | Read `phases/run-spec.md` (handled by orchestrator)                                                  |
-| `phase: "running"`      | **Spawn runner agent** — see [Runner Agent](#runner-agent) below                                     |
-| `phase: "prereview"`    | **Spawn prereview agent** — see [Prereview Agent](#prereview-agent) below                            |
-| `phase: "pushing"`      | Read `phases/pushing.md` (handled by orchestrator)                                                   |
-| `phase: "polling"`      | **Spawn poller agent** → **spawn resolvers in parallel** — see [Polling Phase](#polling-phase) below |
-| `phase: "feedback"`     | Read `phases/feedback.md` (handled by orchestrator) — post-completion iteration                      |
-| `phase: "completed"`    | Report: "Task completed. PR #{prNumber}. Say 'I have feedback' to iterate further."                  |
-| `phase: "failed"`       | Report status and last error. Offer to retry — if yes, dispatch to appropriate phase based on mode.  |
-
-## Resumption After Context Clear
-
-If context runs low during long phases (spec planning, sub-planning, running), ask the user:
-
-```
-Context is getting long. Please clear context and run:
-/kagent-autopilot
-
-I'll resume from `.kagent/task-state.json`.
-```
-
-The state file contains everything needed to resume: current phase, spec version, PR number, sub-plan progress, etc. On re-invocation, read the state and dispatch to the appropriate phase.
-
 ## Phase Agents
 
-Agents are spawned for long-running or context-isolated tasks. Each agent reads its phase file for full instructions.
+All execution phases are team members. Each reads its phase file for instructions.
 
-| Phase       | Agent     | Description                                                  |
-| ----------- | --------- | ------------------------------------------------------------ |
-| `running`   | Runner    | Executes dev-loop, reports exit code/status                  |
-| `prereview` | Prereview | Runs CodeRabbit CLI, fixes findings (pushes back reasonably) |
-| `polling`   | Poller    | Gathers PR context → orchestrator spawns resolvers           |
+| Phase           | Agent            | Model  | Description                                          |
+| --------------- | ---------------- | ------ | ---------------------------------------------------- |
+| `generic_setup` | setup-agent      | haiku  | Mode + branch + .gitignore + initial state           |
+| `repo_setup`    | repo-setup-agent | sonnet | Org detection, ticket detection, populate repoConfig |
+| (resume/state)  | state-agent      | haiku  | Resume assessment + all state writes                 |
+| `run_spec`      | run-spec-agent   | haiku  | Copy plan to spec, init dev-loop, ticket transition  |
+| `running`       | runner-agent     | sonnet | Execute dev-loop, handle exit codes                  |
+| `prereview`     | prereview-agent  | opus   | CodeRabbit review, fix true positives                |
+| `pushing`       | pushing-agent    | sonnet | Commit, push, create/update PR, cleanup review.md    |
+| `polling`       | poller-agent     | opus   | Gather PR context, report actions needed             |
 
 ### Spawning Pattern
 
 ```
 Task(
   subagent_type: "general-purpose",
-  description: "Run dev-loop for {ticketId}",
-  prompt: "Read phases/running.md and execute. Working dir: {WORKDIR}. Report: exit_code, run_id, status."
+  model: "<haiku|sonnet|opus>",
+  description: "Run {phase} for {ticketId}",
+  prompt: "Read phases/{phase}.md and execute. Working dir: {WORKDIR}. State: {relevant state fields}. Report: {expected report format}."
 )
 ```
-
-**Key point:** Agents read their phase file for full context. The prompt just provides working directory and expected report format.
 
 ### Polling Phase (Three-Wave Model)
 
@@ -186,15 +235,17 @@ See `phases/polling.md` for full details.
 
 After poller returns, spawn resolvers IN PARALLEL based on `actions_needed`:
 
-| Action               | Resolver              | Description                                          |
-| -------------------- | --------------------- | ---------------------------------------------------- |
-| `ci_fix`             | `ci-resolver`         | Fix failing CI checks                                |
-| `human_review`       | `review-resolver`     | Address human review feedback                        |
-| `coderabbit_threads` | `coderabbit-resolver` | Handle CodeRabbit AI comments (push back reasonably) |
-| `other_threads`      | `thread-resolver`     | Handle non-CodeRabbit conversations                  |
-| `rebase`             | `rebase-resolver`     | Handle branch behind/conflicts                       |
+| Action               | Resolver            | Model  | Description                                          |
+| -------------------- | ------------------- | ------ | ---------------------------------------------------- |
+| `ci_fix`             | ci-resolver         | sonnet | Fix failing CI checks                                |
+| `human_review`       | review-resolver     | opus   | Address human review feedback                        |
+| `coderabbit_threads` | coderabbit-resolver | opus   | Handle CodeRabbit AI comments (push back reasonably) |
+| `other_threads`      | thread-resolver     | opus   | Handle non-CodeRabbit conversations                  |
+| `rebase`             | rebase-resolver     | sonnet | Handle branch behind/conflicts                       |
 
-All resolvers are in `phases/resolvers/`. Each returns: `immediate_actions`, `code_fixes`, `post_push_actions`.
+All resolvers are in `phases/resolvers/`. Each returns: `immediate_actions`, `code_fixes`, `post_push_actions`, `summary`.
+
+**CodeRabbit resolver:** Only spawn if `repoConfig.coderabbit` is `true`.
 
 ### Priority Order for Code Fixes
 
@@ -208,76 +259,77 @@ All resolvers are in `phases/resolvers/`. Each returns: `immediate_actions`, `co
 
 Triggered when `phase: "completed"` and user provides feedback. See `phases/feedback.md` for details.
 
-**Flow:**
+**Full loop:**
 
 1. Capture user's feedback in chat (iteratively clarify if needed)
 2. Write to `spec/<task-id>/v{N}/feedback.md`
 3. Create `spec/<task-id>/v{N+1}/task-spec.md` — combine original spec + feedback
-4. Update state: `phase: "approved"`, `specVersion: N+1`, `specDir: "spec/<task-id>/v{N+1}"`
-5. Dispatch to `phases/sub-planning.md` (or `run-spec.md` if skipping sub-plans)
+4. Present merged spec to user for re-approval via `AskUserQuestion`
+5. Update state: `phase: "approved"`, `specVersion: N+1`, `specDir: "spec/<task-id>/v{N+1}"`
+6. Full field reset: pushCycle→0, devLoopInitialized→false, subPlans→[], etc.
+7. Smart detect prNumber: keep if PR open, null if merged
+8. Ticket transition: `ticketTransitions.feedback`
+9. Dispatch to sub-planning (new plans for updated spec)
+10. After plan approval → context clear → execution
 
-This allows continuous iteration even after PR is "done" — learnings from the implementation can be fed back into the spec.
+## Resumption After Context Clear
+
+On every re-invocation (after context clear, or manual resume):
+
+1. Orchestrator reads `task-state.json`
+2. Spawns **state-agent** (resume mode) with the full state JSON
+3. State-agent inspects: git status, PR status (if prNumber set), dev-loop state, branch state, pending changes
+4. Reports: current phase assessment, what was last completed, what to do next, any cleanup needed
+5. Orchestrator dispatches accordingly
+
+See `phases/resume.md` for per-phase resume checks.
 
 ## Orchestrator Responsibilities
 
 The orchestrator (you) handles:
 
-1. **State management** — Read/write `.kagent/task-state.json` at every phase transition
-2. **Direct phase execution** — setup, sub_planning, run_spec, pushing
-3. **Spawning subagents** — runner, prereview, poller, resolvers via Task tool
-4. **Processing agent reports** — Update state based on agent findings
+1. **Phase dispatch** — Read state, spawn appropriate agent or run inline
+2. **Inline phases** — planning, sub_planning, feedback (user-facing)
+3. **Spawning team members** — setup, repo-setup, state, run-spec, runner, prereview, pushing, poller, resolvers
+4. **Processing agent reports** — Update state via state-agent based on findings
 5. **Resolver orchestration** — Spawn resolvers in parallel, execute three-wave model:
    - **Wave 1**: Execute immediate_actions (close threads, post replies)
    - **Wave 2**: Merge code_fixes into ONE spec, run dev-loop or apply directly
    - **Wave 3**: Execute post_push_actions with commit SHA
-6. **User interaction** — AskUserQuestion for spec approval, conflicts, failures
-
-## Spawning Subagents
-
-Use the Task tool to spawn subagents:
-
-```
-Task(
-  subagent_type: "general-purpose",
-  description: "Run dev-loop for PE-1234",
-  prompt: "<agent prompt from above with variables substituted>"
-)
-```
-
-For resolvers, spawn IN PARALLEL with `run_in_background: true`:
-
-```
-Task(
-  subagent_type: "general-purpose",
-  description: "Fix CI failures for PR #42",
-  prompt: "<resolver prompt>",
-  run_in_background: true
-)
-```
-
-After all resolvers complete, aggregate results and proceed.
+6. **User interaction** — AskUserQuestion for spec approval, plan+config approval, conflicts, failures
+7. **State management** — All state writes delegated to state-agent (never write task-state.json directly)
+8. **Ticket transitions** — At phase boundaries (via state-agent + repoConfig)
 
 ## Rules
 
 1. **Auto-detect ticket** — only ask if not found in argument, branch, or worktree
-2. **Auto-detect ticket system** — PE = Jira, CU = ClickUp
+2. **Auto-detect ticket system** — via `repoConfig.ticketSystem` (populated by repo-setup from repo config files)
 3. **Require spec approval** — before entering autonomous loop (autopilot only)
-4. **Challenge before building** — iteratively clarify specs and sub-plans in chat (not AskUserQuestion), be devil's advocate
+4. **Challenge before building** — iteratively clarify specs and plans in chat (not AskUserQuestion), be devil's advocate
 5. **Firm spec = firm commitment** — don't proceed until all ambiguities resolved
 6. **Fully autonomous after approval** — only stop for spec conflict (exit 2) or push failure
 7. **Delegate to dev-loop** — don't duplicate its implement-then-review logic (autopilot only)
-8. **State file required** — read/write `.kagent/task-state.json` at every phase transition
-9. **Committed spec files** — `spec/<task-id>/v{N}/task-spec.md` (versioned) + `plans/*.md` (phases) — autopilot only
-10. **Check commit conventions** — look for CONTRIBUTING.md, commitlint, recent git log
-11. **Include ticket ID** — in commits, branches, PRs (when available)
-12. **Never push to main/master**
-13. **Never force push**
-14. **Always use dev-loop poll-pr** — NEVER use `gh pr watch` in polling phase
-15. **Three-wave execution** — immediate actions → code fixes (merged) → post-push actions
-16. **One combined spec** — merge all resolver fixes into ONE spec before dev-loop
-17. **Priority merging** — CI(1) > Review(2) > CodeRabbit(3), drop lower priority overlaps
-18. **Push back on CodeRabbit reasonably** — evaluate their comments critically but professionally; CodeRabbit AI often produces false positives
-19. **Never close threads without note** — always post explanation with signature first
+8. **Task specs describe WHAT, plans describe HOW** — neither contains exact code
+9. **Always use sub-plans** — minimum 1 plan per task (no single-spec branching)
+10. **Transition ticket status at phase boundaries** — autopilot only, using `repoConfig.ticketTransitions`
+11. **After both approvals, request context clear before execution**
+12. **Manual mode: skip ticket transitions entirely** — no planning/sub-planning phases
+13. **On re-invocation, spawn state-agent (resume mode)** before dispatching to execution phases
+14. **Only planning, sub-planning, and feedback run inline** — all other phases are team members
+15. **Feedback loop: re-approve merged spec → new sub-plans → context clear → execute**
+16. **ALL state writes go through the state-agent** — orchestrator never writes task-state.json directly
+17. **Pushing agent cleans up review.md** before pushing
+18. **Committed spec files** — `spec/<task-id>/v{N}/task-spec.md` (versioned) + `plans/*.md` — autopilot only
+19. **Check commit conventions** — look for CONTRIBUTING.md, commitlint, recent git log
+20. **Include ticket ID** — in commits, branches, PRs (when available)
+21. **Never push to main/master**
+22. **Never force push**
+23. **Always use dev-loop poll-pr** — NEVER use `gh pr watch` in polling phase
+24. **Three-wave execution** — immediate actions → code fixes (merged) → post-push actions
+25. **One combined spec** — merge all resolver fixes into ONE spec before dev-loop
+26. **Priority merging** — CI(1) > Review(2) > CodeRabbit(3), drop lower priority overlaps
+27. **Push back on CodeRabbit reasonably** — evaluate their comments critically but professionally; CodeRabbit AI often produces false positives
+28. **Never close threads without note** — always post explanation with signature first
 
 ## Prerequisites
 
@@ -285,4 +337,4 @@ After all resolvers complete, aggregate results and proceed.
 - `gh` CLI installed and authenticated
 - For Jira: `acli` installed and authenticated (`acli jira auth`)
 - For ClickUp: ClickUp MCP server configured
-- `dev-loop` CLI and `tmux` (autopilot mode only)
+- `dev-loop` CLI (autopilot mode only)
