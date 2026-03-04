@@ -300,22 +300,22 @@ After poller returns, resolvers are dispatched from `polish/steps/resolve.md`:
 11. **After both approvals, request context clear before execution**
 12. **On re-invocation, dispatch based on currentPhase + per-phase state**
 13. **NEVER read step files directly** — always spawn a teammate and tell it which step file to read and execute the logic. This saves context on the main orchestrator.
-13. **Only write_spec, write_plans, resolve, resolve_fix, and feedback_check run inline** — all other steps are team agents or sub-agents
-14. **Feedback loop: re-approve merged spec → new sub-plans → context clear → execute**
-15. **Per-phase state-agents handle state writes** — orchestrator never writes state files directly (bootstrap exceptions: setup.md creates task-state.json, repo-setup.md writes repoConfig)
-16. **Push agent cleans up rb-review.md** before pushing
-17. **Committed spec files** — `spec/{ticketId}/v{N}/task-spec.md` (versioned) + `plans/*.md`
-18. **Check commit conventions** — look for CONTRIBUTING.md, commitlint, recent git log
-19. **Include ticket ID** — in commits, branches, PRs (when available), using `{ticketId}` placeholder
-20. **Never push to main/master**
-21. **Never force push** — except `--force-with-lease` after rebase-resolver
-22. **Always use dev-loop poll-pr** — NEVER use `gh pr watch` in polling
-23. **Three-wave execution** — immediate actions → code fixes (merged) → post-push actions
-24. **One combined spec** — merge all resolver fixes into ONE spec before dev-loop
-25. **Priority merging** — CI(1) > Review(2) > CodeRabbit(3), drop lower priority overlaps
-26. **Push back on CodeRabbit reasonably** — evaluate critically but professionally
-27. **Never close threads without note** — always post explanation with signature first
-28. **Bot signature** — all resolver replies include `"By Claude Code Kagent Autopilot 🤖"`
+14. **Only write_spec, write_plans, resolve, resolve_fix, and feedback_check run inline** — all other steps are team agents or sub-agents
+15. **Feedback loop: re-approve merged spec → new sub-plans → context clear → execute**
+16. **Per-phase state-agents handle state writes** — orchestrator never writes state files directly (bootstrap exceptions: setup.md creates task-state.json, repo-setup.md writes repoConfig)
+17. **Push agent cleans up rb-review.md** before pushing
+18. **Committed spec files** — `spec/{ticketId}/v{N}/task-spec.md` (versioned) + `plans/*.md`
+19. **Check commit conventions** — look for CONTRIBUTING.md, commitlint, recent git log
+20. **Include ticket ID** — in commits, branches, PRs (when available), using `{ticketId}` placeholder
+21. **Never push to main/master**
+22. **Never force push** — except `--force-with-lease` after rebase-resolver
+23. **Always use dev-loop poll-pr** — NEVER use `gh pr watch` in polling
+24. **Three-wave execution** — immediate actions → code fixes (merged) → post-push actions
+25. **One combined spec** — merge all resolver fixes into ONE spec before dev-loop
+26. **Priority merging** — CI(1) > Review(2) > CodeRabbit(3), drop lower priority overlaps
+27. **Push back on CodeRabbit reasonably** — evaluate critically but professionally
+28. **Never close threads without note** — always post explanation with signature first
+29. **Bot signature** — all resolver replies include `"By Claude Code Kagent Autopilot 🤖"`
 
 ## Prerequisites
 

@@ -19,16 +19,16 @@
 
 ## Step Dispatch
 
-| Step     | Agent        | Model  | Type   | File                        | Description   |
-| -------- | ------------ | ------ | ------ | --------------------------- | ------------- |
-| `step_a` | {agent-name} | haiku  | team   | `{phase}/steps/{step-a}.md` | {description} |
-| `step_b` | {agent-name} | haiku  | team   | `{phase}/steps/{step-b}.md` | {description} |
-| `step_c` | {agent-name} | sonnet | team   | `{phase}/steps/{step-c}.md` | {description} |
-| `step_d` | {agent-name} | haiku  | team   | `{phase}/steps/{step-d}.md` | {description} |
+| Step     | Agent        | Model  | Type | File                        | Description   |
+| -------- | ------------ | ------ | ---- | --------------------------- | ------------- |
+| `step_a` | {agent-name} | haiku  | team | `{phase}/steps/{step-a}.md` | {description} |
+| `step_b` | {agent-name} | haiku  | team | `{phase}/steps/{step-b}.md` | {description} |
+| `step_c` | {agent-name} | sonnet | team | `{phase}/steps/{step-c}.md` | {description} |
+| `step_d` | {agent-name} | haiku  | team | `{phase}/steps/{step-d}.md` | {description} |
 
 ## Step Dispatch Logic
 
- On entry to {Phase Name} phase, **NEVER read step files directly** — spawn a teammate and tell it which step file to read and execute the logic. This saves context on the main orchestrator.
+On entry to {Phase Name} phase, **NEVER read step files directly** — spawn a teammate and tell it which step file to read and execute the logic. This saves context on the main orchestrator.
 
 | Condition               | Action                                                             |
 | ----------------------- | ------------------------------------------------------------------ |
