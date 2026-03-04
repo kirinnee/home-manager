@@ -16,7 +16,7 @@ Handle unresolved review threads from:
 - Other bots (not CodeRabbit)
 - Any other conversation threads
 
-**CodeRabbit threads are handled by `coderabbit-resolver.md`.**
+**CodeRabbit threads are handled by `polish/resolvers/coderabbit-resolver.md`.**
 
 ## Output Format
 
@@ -64,6 +64,7 @@ gh api graphql -f query='
             isResolved
             path
             line
+            isOutdated
             comments(first: 20) {
               nodes {
                 id
@@ -81,19 +82,17 @@ gh api graphql -f query='
 
 ## Step 2: Filter Out CodeRabbit
 
-Skip threads where `coderabbitai[bot]` is a participant (handled by coderabbit-resolver).
+Skip threads where `coderabbitai[bot]` is a participant.
 
 ## Step 3: Analyze Each Thread
 
-### Thread Types
-
-| Type           | Indicators                        | Action                     |
-| -------------- | --------------------------------- | -------------------------- |
-| Question       | Ends with ?, asking for info      | IMMEDIATE: Answer          |
-| Answered       | Question was answered, still open | IMMEDIATE: Close           |
-| Stale          | No activity 7+ days               | IMMEDIATE: Close with note |
-| Outdated       | Code changed, thread irrelevant   | IMMEDIATE: Close with note |
-| Needs response | Someone asked us something        | IMMEDIATE: Reply           |
+| Type           | Indicators                                         | Action                     |
+| -------------- | -------------------------------------------------- | -------------------------- |
+| Question       | Ends with ?, asking for info                       | IMMEDIATE: Answer          |
+| Answered       | Question was answered, still open                  | IMMEDIATE: Close           |
+| Stale          | No activity 7+ days                                | IMMEDIATE: Close with note |
+| Outdated       | `isOutdated == true` or code changed significantly | IMMEDIATE: Close with note |
+| Needs response | Someone asked us something                         | IMMEDIATE: Reply           |
 
 ## Step 4: Immediate Actions
 
@@ -123,8 +122,6 @@ Skip threads where `coderabbitai[bot]` is a participant (handled by coderabbit-r
 
 ### Closing Resolved Threads
 
-If the conversation seems complete but thread is still open:
-
 ```json
 {
   "type": "close_thread",
@@ -137,8 +134,6 @@ If the conversation seems complete but thread is still open:
 
 ### Closing Outdated Threads
 
-If the code at that location has changed significantly:
-
 ```json
 {
   "type": "close_thread",
@@ -149,45 +144,11 @@ If the code at that location has changed significantly:
 }
 ```
 
-## Report Format
-
-```json
-{
-  "resolver_type": "thread",
-
-  "immediate_actions": [
-    {
-      "type": "post_reply",
-      "thread_id": "PRRT_abc123",
-      "comment_id": "r456",
-      "body": "The reason we use X is because Y.\n\nBy Claude Code Kagent Autopilot 🤖",
-      "reason": "answering"
-    },
-    {
-      "type": "close_thread",
-      "thread_id": "PRRT_def456",
-      "comment_id": "r789",
-      "body": "Closing as stale.\n\nBy Claude Code Kagent Autopilot 🤖",
-      "reason": "stale"
-    }
-  ],
-
-  "code_fixes": [],
-
-  "post_push_actions": [],
-
-  "summary": {
-    "threads_analyzed": 2,
-    "replied": 1,
-    "closed": 1
-  }
-}
-```
-
 ## Important
 
 - All actions are IMMEDIATE (no code changes needed)
-- Always include signature in replies
+- Always include signature: `"By Claude Code Kagent Autopilot 🤖"`
 - Never close without posting a note first
 - Don't handle CodeRabbit threads (those go to coderabbit-resolver)
 - If a thread needs code changes, it should have been caught by review-resolver
+- Always include `isOutdated` in GraphQL queries

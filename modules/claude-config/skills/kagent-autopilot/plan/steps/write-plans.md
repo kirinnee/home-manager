@@ -1,11 +1,11 @@
-# Phase: Sub-Planning — Implementation Plans (HOW) — Orchestrator Inline
+# Plan Step: Write Plans — Orchestrator Inline
 
 **Always runs.** Every task gets at least 1 implementation plan. Runs inline with the orchestrator.
 
 ## Entry Condition
 
-- `phase: "approved"` in state (after spec approval in planning phase)
-- Also entered from `phases/feedback.md` (after feedback, `phase: "approved"`, `specVersion: N+1`)
+- `plan-state.step: "write_plans"`
+- Also entered after feedback step when `specVersion: N+1`
 
 ## Content Separation
 
@@ -108,11 +108,12 @@ If user wants config changes: use `AskUserQuestion` with available binaries:
    git commit -m "docs: add implementation plans for {ticketId} v{specVersion}"
    ```
 
-2. Update state with any config overrides:
+2. Update state:
+   - `plan-state.json`: `step: "approved"`, `plansWritten: true`
+   - `task-state.json` (via state-agent): `subPlans` array, `currentSubPlanIndex: 0`, config overrides
 
    ```json
    {
-     "phase": "run_spec",
      "subPlans": [
        { "id": "plan-1", "file": "{specDir}/plans/plan-1.md", "status": "pending" },
        ...
@@ -129,7 +130,7 @@ If user wants config changes: use `AskUserQuestion` with available binaries:
    Plans approved! Please clear context and re-invoke:
    /kagent-autopilot
 
-   State file has everything needed to resume from the execution phase.
+   State file has everything needed to resume from the implementation phase.
    ```
 
 ## On Rejection
@@ -149,7 +150,7 @@ For EACH proposed plan, challenge and clarify before writing:
 
 ## Resumability
 
-If resuming into `phase: "sub_planning"`:
+If resuming into `write_plans`:
 
 - Check if plan files exist in `{specDir}/plans/`
 - If plans exist: present for approval (skip to Step 5)
