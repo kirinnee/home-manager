@@ -6,4 +6,11 @@
   theme = "dark";
   alwaysThinkingEnabled = true;
   includeCoAuthoredBy = false;
+
+  # Statusline configuration - shows model, duration, and estimated cost
+  # Inspired by p10k: model | dir git | duration | cost
+  statusLine = {
+    type = "command";
+    command = "/bin/zsh -c 'source ~/.claude/statusline.zsh'";
+  };
 }

@@ -1,14 +1,15 @@
-{ config
-, pkgs
-, lib
-, pkgs-claude-code
-, pkgs-240924
-, pkgs-stable
-, pkgs-unstable
-, pkgs-casks
-, atomi
-, profile
-, ...
+{
+  config,
+  pkgs,
+  lib,
+  pkgs-claude-code,
+  pkgs-240924,
+  pkgs-stable,
+  pkgs-unstable,
+  pkgs-casks,
+  atomi,
+  profile,
+  ...
 }:
 
 ####################
@@ -20,8 +21,8 @@ let
 in
 
 ##################
-  # Linux Services #
-  ##################
+# Linux Services #
+##################
 let
   linuxService = {
     gpg-agent = {
@@ -34,8 +35,8 @@ let
 in
 
 #####################
-  # Custom ZSH folder #
-  #####################
+# Custom ZSH folder #
+#####################
 let
   customDir = pkgs.stdenv.mkDerivation {
     name = "oh-my-zsh-custom-dir";
@@ -641,6 +642,7 @@ rec {
         dls = "dev-loop status";
         dlc = "dev-loop cancel";
         dll = "dev-loop logs";
+        kgl = "tail -f ./.kagent/run.log";
 
       }
       // (

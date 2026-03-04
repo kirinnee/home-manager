@@ -299,6 +299,7 @@ After poller returns, resolvers are dispatched from `polish/steps/resolve.md`:
 10. **Transition ticket status at phase boundaries** — using `repoConfig.ticketTransitions`
 11. **After both approvals, request context clear before execution**
 12. **On re-invocation, dispatch based on currentPhase + per-phase state**
+13. **NEVER read step files directly** — always spawn a teammate and tell it which step file to read and execute the logic. This saves context on the main orchestrator.
 13. **Only write_spec, write_plans, resolve, resolve_fix, and feedback_check run inline** — all other steps are team agents or sub-agents
 14. **Feedback loop: re-approve merged spec → new sub-plans → context clear → execute**
 15. **Per-phase state-agents handle state writes** — orchestrator never writes state files directly (bootstrap exceptions: setup.md creates task-state.json, repo-setup.md writes repoConfig)

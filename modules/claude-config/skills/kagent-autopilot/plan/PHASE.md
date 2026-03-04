@@ -4,7 +4,7 @@
 
 ```
 [setup] → [repo_setup] → [feedback?] → [write_spec] → SPEC APPROVAL → [write_plans] → PLAN APPROVAL
-  team(H)    team(S)        inline        inline                          inline
+  team(H)    team(S)        team(H)      team(H)                          team(H)
                             (v2+ only)
 
 → task-state.currentPhase: "implementation"
@@ -29,23 +29,25 @@
 | ------------- | ---------------- | ------ | ------ | --------------------------- | ---------------------------------------------------------------- |
 | `setup`       | setup-agent      | haiku  | team   | `plan/steps/setup.md`       | Mode, branch, .gitignore, create task-state.json (bootstrap)     |
 | `repo_setup`  | repo-setup-agent | sonnet | team   | `plan/steps/repo-setup.md`  | Org detection, ticket fetch, parent walking, populate repoConfig |
-| `feedback`    | (orchestrator)   | —      | inline | `plan/steps/feedback.md`    | v2+: capture feedback, create new spec version, merge specs      |
-| `write_spec`  | (orchestrator)   | —      | inline | `plan/steps/write-spec.md`  | Challenge user, research codebase, write task-spec.md            |
-| `write_plans` | (orchestrator)   | —      | inline | `plan/steps/write-plans.md` | Research, write plans, discover binaries, config approval        |
+| `feedback`    | feedback-agent    | haiku  | team   | `plan/steps/feedback.md`    | v2+: capture feedback, create new spec version, merge specs      |
+| `write_spec`  | write-spec-agent  | haiku  | team   | `plan/steps/write-spec.md`  | Read step content, challenge user, research codebase, write spec |
+| `write_plans` | write-plans-agent | haiku  | team   | `plan/steps/write-plans.md` | Read step content, write plans, discover binaries, config approval        |
 
 ## Step Dispatch Logic
 
-On entry to Plan phase, read `plan-state.json` and dispatch:
+ On entry to Plan phase, **NEVER read step files directly** — spawn a teammate and tell it which step file to read and execute the logic.
 
-| Condition             | Action                                                                                          |
-| --------------------- | ----------------------------------------------------------------------------------------------- |
-| No `plan-state.json`  | Create it with `step: "setup"`, spawn setup-agent                                               |
-| `step: "setup"`       | Spawn setup-agent (haiku)                                                                       |
-| `step: "repo_setup"`  | Spawn repo-setup-agent (sonnet)                                                                 |
-| `step: "feedback"`    | Orchestrator reads `plan/steps/feedback.md` (inline) — only for v2+                             |
-| `step: "write_spec"`  | Orchestrator reads `plan/steps/write-spec.md` (inline)                                          |
-| `step: "write_plans"` | Orchestrator reads `plan/steps/write-plans.md` (inline)                                         |
-| `step: "approved"`    | Plans approved — advance `task-state.currentPhase` to `"implementation"`, request context clear |
+ This saves context on the main orchestrator.
+
+| Condition               | Action                                                                                          |
+| ------------------------ | ----------------------------------------------------------------------------------------------- |
+| No `plan-state.json`        | Create it with `step: "setup"`, spawn setup-agent                                               |
+| `step: "setup"`           | Spawn setup-agent (haiku)                                                                       |
+| `step: "repo_setup"`      | Spawn repo-setup-agent (sonnet)                                                                 |
+| `step: "feedback"`          | Spawn feedback-agent (haiku) — v2+ only                                                       |
+| `step: "write_spec"`      | Spawn write-spec-agent (haiku)                                                        |
+| `step: "write_plans"`     | Spawn write-plans-agent (haiku)                                                      |
+| `step: "approved"`        | Plans approved — advance `task-state.currentPhase` to `"implementation"`, request context clear |
 
 ## Feedback Entry (v2+)
 
@@ -58,25 +60,17 @@ When returning from Phase 3 with feedback:
 
 ## Spawning Pattern
 
+ On entry to Plan phase, **NEVER read step files directly**. Spawn a teammate and tell it which step file to read and execute the logic. This saves context on the main orchestrator.
+
 ```
 Task(
   subagent_type: "general-purpose",
-  model: "<haiku|sonnet>",
+  model: "haiku",
   description: "Run {step} for {ticketId}",
-  prompt: "Read plan/steps/{step}.md and execute. Working dir: {WORKDIR}. State: {relevant state fields}."
+  prompt: "Read {step file path} and execute. Working dir: {WORKDIR}. State: {relevant state fields}. Report: {expected format}."
+    )
 )
 ```
 
-## State Transitions
+ Note: For steps that need user interaction (feedback, write_spec), use haiku since they user may have questions and handle complex decisions. For logic is they use sonnet or opus for deeper reasoning.
 
-All state writes go through the **plan state-agent** (sub-agent, haiku). Read `plan/state-agent.md` for the state management protocol.
-
-**Bootstrap exceptions:** `plan/steps/setup.md` creates `task-state.json` (initial bootstrap). `plan/steps/repo-setup.md` writes `repoConfig` to `task-state.json`. These are the only steps that write to `task-state.json` directly.
-
-## Context Clear
-
-After plan approval:
-
-1. Update `task-state.json`: `currentPhase: "implementation"`
-2. Request context clear from user
-3. On re-invocation, orchestrator reads `task-state.json` and enters Phase 2

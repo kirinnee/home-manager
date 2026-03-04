@@ -25,10 +25,6 @@ argument-hint: '{argument format}'
 
 ```
 ORCHESTRATOR (you = team lead)
-├── INLINE (user-facing only):
-│   ├── {inline_step_1} — {description}
-│   └── {inline_step_2} — {description}
-│
 ├── SUB-AGENTS (stateless, direct result):
 │   ├── {phase1}-state-agent (haiku) — {phase1} phase state reads/writes
 │   ├── {phase2}-state-agent (haiku) — {phase2} phase state reads/writes
@@ -40,6 +36,8 @@ ORCHESTRATOR (you = team lead)
 │
 └── State: Per-phase state-agents handle state writes. Bootstrap exceptions noted per step.
 ```
+
+**Key principle:** The orchestrator NEVER reads step files directly. Always spawn a team agent and tell it which step file to read and execute. This saves context on the main orchestrator.
 
 ## Glossary
 
