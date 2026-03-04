@@ -20,16 +20,17 @@ Handles branch behind and merge conflict situations.
   "post_push_actions": [],
 
   "rebase_action": {
-    "status": "success|conflict|push_failed",
+    "status": "success|conflict|push_failed|not_needed",
     "conflict_files": [],
     "conflicts_resolved": [],
     "manual_needed": false,
+    "pushed": false,
     "error": null
   },
 
   "summary": {
     "action_taken": "none|rebase|conflict_resolution",
-    "status": "success|conflict|push_failed"
+    "status": "success|conflict|push_failed|not_needed"
   }
 }
 ```
@@ -44,34 +45,24 @@ gh pr view {prNumber} --json mergeable,mergeStateStatus,headRefName
 
 | mergeStateStatus | Meaning            | Action                          |
 | ---------------- | ------------------ | ------------------------------- |
-| `CLEAN`          | Ready to merge     | Nothing to do                   |
+| `CLEAN`          | Ready to merge     | Nothing to do (`not_needed`)    |
 | `BEHIND`         | Branch behind base | Rebase                          |
 | `CONFLICTING`    | Has conflicts      | Attempt rebase, may need manual |
-| `UNSTABLE`       | Failing CI         | Not our concern here            |
-| `DRAFT`          | PR is draft        | Nothing to do                   |
+| `UNSTABLE`       | Failing CI         | Not our concern (`not_needed`)  |
+| `DRAFT`          | PR is draft        | Nothing to do (`not_needed`)    |
 
 ## Step 2: Handle BEHIND
 
-If `mergeStateStatus == "BEHIND"`:
-
 ```bash
-# Fetch latest
 git fetch origin
-
-# Detect base branch from PR
 BASE_BRANCH=$(gh pr view {prNumber} --json baseRefName --jq '.baseRefName')
-
-# Rebase
 git rebase origin/$BASE_BRANCH
-
-# Push with force-with-lease
 git push --force-with-lease
 ```
 
 ## Step 3: Handle CONFLICTING
 
 ```bash
-# Attempt rebase
 git fetch origin
 BASE_BRANCH=$(gh pr view {prNumber} --json baseRefName --jq '.baseRefName')
 git rebase origin/$BASE_BRANCH
@@ -80,11 +71,8 @@ git rebase origin/$BASE_BRANCH
 ### If Conflicts Occur
 
 ```bash
-# List conflicting files
 git diff --name-only --diff-filter=U
 ```
-
-For each conflict:
 
 | Conflict Type                | Resolution                     |
 | ---------------------------- | ------------------------------ |
@@ -92,52 +80,22 @@ For each conflict:
 | Complex (logic, semantic)    | Report for manual intervention |
 
 ```bash
-# After resolving simple conflicts
-git add .
+# After resolving simple conflicts, stage only the resolved files
+git add {resolved-file-1} {resolved-file-2} ...
 git rebase --continue
-
-# Push
 git push --force-with-lease
 ```
 
-## Step 4: Report Results
+## Reporting
 
-### Success
-
-```json
-{
-  "resolver_type": "rebase",
-
-  "immediate_actions": [],
-
-  "code_fixes": [],
-
-  "post_push_actions": [],
-
-  "rebase_action": {
-    "status": "success",
-    "conflict_files": [],
-    "error": null
-  }
-}
-```
-
-### Conflicts Resolved
+### Success (rebased and pushed)
 
 ```json
 {
-  "resolver_type": "rebase",
-
-  "immediate_actions": [],
-
-  "code_fixes": [],
-
-  "post_push_actions": [],
-
   "rebase_action": {
     "status": "success",
+    "pushed": true,
     "conflict_files": [],
-    "conflicts_resolved": [{ "file": "src/auth.ts", "resolution": "Kept our changes to validateUser" }],
     "error": null
   }
 }
@@ -147,19 +105,12 @@ git push --force-with-lease
 
 ```json
 {
-  "resolver_type": "rebase",
-
-  "immediate_actions": [],
-
-  "code_fixes": [],
-
-  "post_push_actions": [],
-
   "rebase_action": {
     "status": "conflict",
     "conflict_files": ["src/auth.ts", "src/user.ts"],
     "error": "Complex semantic conflicts require manual resolution",
-    "manual_needed": true
+    "manual_needed": true,
+    "pushed": false
   }
 }
 ```
@@ -168,18 +119,11 @@ git push --force-with-lease
 
 ```json
 {
-  "resolver_type": "rebase",
-
-  "immediate_actions": [],
-
-  "code_fixes": [],
-
-  "post_push_actions": [],
-
   "rebase_action": {
     "status": "push_failed",
     "conflict_files": [],
-    "error": "Push rejected: remote has new commits"
+    "error": "Push rejected: remote has new commits",
+    "pushed": false
   }
 }
 ```
@@ -187,8 +131,8 @@ git push --force-with-lease
 ## Important
 
 - Execute rebase directly (not through code_fixes)
-- Use `--force-with-lease`, never `--force`
+- Use `--force-with-lease`, never `--force` (exception to Rule 22 for rebase only)
 - Attempt simple conflict resolution
 - Don't guess on complex semantic conflicts
 - Report clearly if manual intervention needed
-- This resolver runs independently of code fixes
+- If pushed successfully, orchestrator goes back to `poll` (skip other resolvers)

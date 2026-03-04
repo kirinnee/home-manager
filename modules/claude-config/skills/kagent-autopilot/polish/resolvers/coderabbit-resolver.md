@@ -68,16 +68,12 @@ gh pr checks {prNumber} --json name,status,conclusion --jq '.[] | select(.name |
 
 | Status                   | Meaning                                        |
 | ------------------------ | ---------------------------------------------- |
-| `in_progress` / `queued` | Still reviewing - PENDING threads stay pending |
+| `in_progress` / `queued` | Still reviewing — PENDING threads stay pending |
 | `completed`              | Can determine ghosted/settled                  |
-
-Store as `coderabbit_ci_status` in report.
 
 ## Step 1: Fetch Thread Details
 
-If `{CODERABBIT_THREADS}` is provided in the agent context: skip fetching and use the provided thread data directly. Proceed to Step 2.
-
-If `{CODERABBIT_THREADS}` is not provided: fetch threads as follows:
+If `{CODERABBIT_THREADS}` is provided: use directly. Otherwise fetch:
 
 ```bash
 OWNER=$(git remote get-url origin | sed -E 's|.*[:/]([^/]+)/([^.]+)(\.git)?|\1|')
@@ -158,8 +154,6 @@ Filter to threads where `coderabbitai[bot]` is a participant.
 
 ### STATE: GHOSTED → IMMEDIATE ACTION
 
-CodeRabbit CI complete, we replied last, no response:
-
 ```json
 {
   "type": "close_thread",
@@ -184,16 +178,10 @@ CodeRabbit CI complete, we replied last, no response:
 
 ### STATE: FOLLOW_UP → Evaluate & Respond
 
-Read the follow-up question carefully:
-
 1. **If clarifying question** → IMMEDIATE: Reply with answer
 2. **If reveals real issue** → CODE_FIX + POST_PUSH: reply after fix
 
 ### STATE: NEW → Evaluate Critically
-
-Read the original comment and relevant code.
-
-**EVALUATION:**
 
 | Verdict             | Criteria                              | Action               |
 | ------------------- | ------------------------------------- | -------------------- |
@@ -204,7 +192,7 @@ Read the original comment and relevant code.
 #### TRUE_POSITIVE → Code Fix + Post-Push
 
 ```json
-// In code_fixes:
+// code_fixes:
 {
   "id": "coderabbit-fix-1",
   "file": "src/utils.ts",
@@ -215,7 +203,7 @@ Read the original comment and relevant code.
   "source_detail": "CodeRabbit: 'This function doesn't handle empty strings'"
 }
 
-// In post_push_actions:
+// post_push_actions:
 {
   "type": "post_reply",
   "thread_id": "PRRT_...",
@@ -238,20 +226,6 @@ Read the original comment and relevant code.
 }
 ```
 
-Note: Can also use `post_reply` instead of `close_thread` if you want to leave it open for CodeRabbit to respond.
-
-#### NEEDS_CLARIFICATION → Immediate Action
-
-```json
-{
-  "type": "post_reply",
-  "thread_id": "PRRT_...",
-  "comment_id": "...",
-  "body": "Could you clarify what you mean by [X]? I'm not sure I understand the concern.\n\nBy Claude Code Kagent Autopilot 🤖",
-  "reason": "needs_context"
-}
-```
-
 ### STATE: PENDING → Skip
 
 CodeRabbit still running. Don't close or reply yet.
@@ -263,59 +237,11 @@ CodeRabbit fixes are **priority 3** (lowest):
 - Below CI (must pass first)
 - Below human reviews (human > AI)
 
-## Report Format
-
-```json
-{
-  "resolver_type": "coderabbit",
-  "coderabbit_ci_status": "completed|in_progress|not_found",
-
-  "immediate_actions": [
-    { "type": "close_thread", "thread_id": "...", "reason": "outdated" },
-    { "type": "close_thread", "thread_id": "...", "reason": "ghosted" },
-    { "type": "close_thread", "thread_id": "...", "reason": "acknowledged" },
-    { "type": "close_thread", "thread_id": "...", "reason": "false_positive" }
-  ],
-
-  "code_fixes": [
-    {
-      "id": "coderabbit-fix-1",
-      "file": "src/utils.ts",
-      "line": 10,
-      "description": "Fix edge case",
-      "priority": 3,
-      "source": "coderabbit",
-      "source_detail": "..."
-    }
-  ],
-
-  "post_push_actions": [
-    {
-      "type": "post_reply",
-      "thread_id": "...",
-      "comment_id": "...",
-      "body_template": "Fixed in {commit_sha}.\n\nBy Claude Code Kagent Autopilot 🤖",
-      "wait_for_fix_id": "coderabbit-fix-1",
-      "request_re_evaluation": true
-    }
-  ],
-
-  "pending_threads": ["thread_id_1", "thread_id_2"],
-
-  "summary": {
-    "total_threads": 5,
-    "immediate_closed": 3,
-    "code_fixes": 1,
-    "pending": 1
-  }
-}
-```
-
 ## Important Rules
 
-1. **Evaluate critically but professionally** - CodeRabbit AI tends to produce false positives; push back when appropriate with clear reasoning
-2. **Always include signature** in replies
+1. **Evaluate critically but professionally** — push back when appropriate with clear reasoning
+2. **Always include signature:** `"By Claude Code Kagent Autopilot 🤖"`
 3. **Never close without posting a note first**
 4. **Check CI status before determining ghosted**
 5. **Request re-evaluation after TRUE_POSITIVE fixes**
-6. **Priority is 3** - lowest priority, human > AI
+6. **Priority is 3** — lowest priority, human > AI

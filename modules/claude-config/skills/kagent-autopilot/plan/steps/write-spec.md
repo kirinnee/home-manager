@@ -1,10 +1,10 @@
-# Phase: Planning — Orchestrator Inline
+# Plan Step: Write Spec — Orchestrator Inline
 
-This phase runs inline with the orchestrator when `phase: "planning"`. It creates the high-level task specification (WHAT to build).
+This step runs inline with the orchestrator. It creates the high-level task specification (WHAT to build).
 
 ## Entry Condition
 
-- `phase: "planning"` in state (set by repo-setup after config + ticket detection)
+- `plan-state.step: "write_spec"`
 
 ## Step 1: Gather Repository Context
 
@@ -29,6 +29,8 @@ Before writing the spec, read ALL relevant files to understand conventions:
    - CI/CD files (`.github/workflows/`, `.gitlab-ci.yml`, etc.)
 
 ## Step 2: Clarify the Task (Chat-Based)
+
+**Read `spec/{ticketId}/ticket.md`** first — this contains the full ticket and parent hierarchy, pre-fetched during repo setup. Do NOT access the ticket system directly during planning (no MCP calls or CLI commands for ticket data).
 
 **This is a focused spec-generation phase. Your ONLY job here is to nail down WHAT to build.**
 
@@ -126,8 +128,8 @@ If DDD skill exists: read it and include bounded contexts, ubiquitous language, 
    git add spec/{ticketId}/
    git commit -m "docs: add task spec for {ticketId}"
    ```
-2. Update state: `phase: "approved"`
-3. Continue inline to sub-planning phase
+2. Update `plan-state.json`: `step: "write_plans"`, `specWritten: true`
+3. Continue inline to write-plans step
 
 ### On rejection:
 
@@ -135,7 +137,7 @@ Iterate with user feedback, loop back to clarification.
 
 ## Resumability
 
-If resuming into `phase: "planning"`:
+If resuming into `write_spec`:
 
 - Check if `{specDir}/task-spec.md` exists
 - If exists: present for approval (skip to Step 5)

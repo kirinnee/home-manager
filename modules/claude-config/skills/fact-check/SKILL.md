@@ -20,7 +20,7 @@ Systematically verify documentation accuracy against source code using parallel 
 If context is lost, check whether pending files remain:
 
 ```bash
-bash .fact-check/next-file.sh .fact-check/state.json
+bash <skill-dir>/scripts/next-file.sh .fact-check/state.json
 ```
 
 If output is non-empty, work remains. Read config (without the file lists) to resume:
@@ -66,153 +66,26 @@ Questions:
 4. Output file location?
 ```
 
-### Step 2: Create Scripts
-
-Create the `.fact-check/` directory and helper scripts:
+### Step 2: Create Working Directory
 
 ```bash
 mkdir -p .fact-check/findings
 ```
 
-Write the following four scripts, then `chmod +x` them all.
-
-#### .fact-check/init-state.sh
-
-```bash
-#!/usr/bin/env bash
-# Usage: init-state.sh <state-file> <docs-path> <extensions> <source-paths-json> <concurrent> <output-file>
-# extensions: comma-separated, e.g. "md,mdx"
-set -euo pipefail
-STATE_FILE="$1"; DOCS_PATH="$2"; EXTENSIONS="$3"
-SOURCE_PATHS="$4"; CONCURRENT="$5"; OUTPUT_FILE="$6"
-
-FIND_ARGS=()
-IFS=',' read -ra EXTS <<< "$EXTENSIONS"
-for i in "${!EXTS[@]}"; do
-  [[ $i -gt 0 ]] && FIND_ARGS+=("-o")
-  FIND_ARGS+=("-name" "*.${EXTS[$i]}")
-done
-
-FILES_JSON=$(find "$DOCS_PATH" -type f \( "${FIND_ARGS[@]}" \) | sort | jq -R -s 'split("\n") | map(select(. != ""))')
-
-jq -n \
-  --arg docsPath "$DOCS_PATH" \
-  --argjson sourcePaths "$SOURCE_PATHS" \
-  --arg outputFile "$OUTPUT_FILE" \
-  --argjson concurrent "$CONCURRENT" \
-  --argjson files "$FILES_JSON" \
-  --arg startTime "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  '{
-    docsPath: $docsPath,
-    sourcePaths: $sourcePaths,
-    outputFile: $outputFile,
-    concurrentAgents: $concurrent,
-    filesToCheck: $files,
-    checkedFiles: [],
-    pendingFiles: $files,
-    startTime: $startTime
-  }' > "$STATE_FILE"
-
-echo "Initialized with $(echo "$FILES_JSON" | jq length) files"
-```
-
-#### .fact-check/next-file.sh
-
-```bash
-#!/usr/bin/env bash
-# Usage: next-file.sh <state-file> [--batch N]
-# Prints next pending file(s), one per line. Exit 1 if none remain.
-set -euo pipefail
-STATE_FILE="$1"; shift
-BATCH=1
-while [[ $# -gt 0 ]]; do
-  case "$1" in --batch) BATCH="$2"; shift 2 ;; *) shift ;; esac
-done
-PENDING=$(jq -r ".pendingFiles[:$BATCH][]" "$STATE_FILE")
-[[ -z "$PENDING" ]] && exit 1
-echo "$PENDING"
-```
-
-#### .fact-check/mark-done.sh
-
-```bash
-#!/usr/bin/env bash
-# Usage: mark-done.sh <state-file> <action> <filename>
-# Actions: mark-checked, mark-fixed
-set -euo pipefail
-STATE_FILE="$1"; ACTION="$2"; FILENAME="$3"
-TEMP=$(mktemp "${STATE_FILE}.XXXXXX")
-case "$ACTION" in
-  mark-checked)
-    jq --arg f "$FILENAME" \
-      '.pendingFiles -= [$f] | .checkedFiles += [$f] | .checkedFiles |= unique' \
-      "$STATE_FILE" > "$TEMP" ;;
-  mark-fixed)
-    jq --arg f "$FILENAME" \
-      '.pendingFiles -= [$f] | .fixedFiles += [$f] | .fixedFiles |= unique' \
-      "$STATE_FILE" > "$TEMP" ;;
-  *) echo "Unknown action: $ACTION" >&2; rm -f "$TEMP"; exit 1 ;;
-esac
-mv "$TEMP" "$STATE_FILE"
-```
-
-#### .fact-check/init-fix-state.sh
-
-Created here so fact-fix can use it later. Scans findings to build fix state.
-
-```bash
-#!/usr/bin/env bash
-# Usage: init-fix-state.sh <state-file> <mode> <concurrent>
-# mode: auto-apply or preview
-set -euo pipefail
-STATE_FILE="$1"; MODE="$2"; CONCURRENT="$3"
-
-FINDINGS_DIR=".fact-check/findings"
-[[ ! -d "$FINDINGS_DIR" ]] && echo "No findings. Run /fact-check first." >&2 && exit 1
-
-# Extract original paths from <!-- source: path --> metadata line
-FILES_JSON=$(for f in "$FINDINGS_DIR"/*.md; do
-  sed -n 's/^<!-- source: \(.*\) -->$/\1/p' "$f"
-done | jq -R -s 'split("\n") | map(select(. != ""))')
-
-jq -n \
-  --arg findingsDir "$FINDINGS_DIR" \
-  --arg mode "$MODE" \
-  --argjson concurrent "$CONCURRENT" \
-  --argjson files "$FILES_JSON" \
-  --arg startTime "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  '{
-    findingsDir: $findingsDir,
-    fixesDir: ".fact-check/fixes",
-    mode: $mode,
-    concurrentAgents: $concurrent,
-    filesToFix: $files,
-    fixedFiles: [],
-    pendingFiles: $files,
-    startTime: $startTime
-  }' > "$STATE_FILE"
-
-echo "Initialized with $(echo "$FILES_JSON" | jq length) files to fix"
-```
-
-Make all scripts executable:
-
-```bash
-chmod +x .fact-check/init-state.sh .fact-check/next-file.sh .fact-check/mark-done.sh .fact-check/init-fix-state.sh
-```
+Scripts are shipped in this skill's `scripts/` subfolder. Determine the skill directory path (the folder containing this SKILL.md) and use it for all script references below as `<skill-dir>`.
 
 ### Step 3: Initialize State
 
 Run the init script with user-provided config:
 
 ```bash
-bash .fact-check/init-state.sh .fact-check/state.json \
+bash <skill-dir>/scripts/init-state.sh .fact-check/state.json \
   "<docs-path>" "md,mdx" '["<source1>","<source2>"]' <N> "<output-file>"
 ```
 
 The script discovers all doc files and writes `state.json`. The main agent **never loads the file list**.
 
-**If resuming**: Skip Steps 2-3. The state file and scripts already exist. Read only the config:
+**If resuming**: Skip Steps 2-3. The state file already exists. Read only the config:
 
 ```bash
 jq '{docsPath, sourcePaths, outputFile, concurrentAgents}' .fact-check/state.json
@@ -227,7 +100,7 @@ Loop until `next-file.sh` returns nothing:
 1. **Get next batch**:
 
    ```bash
-   bash .fact-check/next-file.sh .fact-check/state.json --batch <N>
+   bash <skill-dir>/scripts/next-file.sh .fact-check/state.json --batch <N>
    ```
 
 2. **For each file**, compute safe name and spawn an agent:
@@ -286,7 +159,7 @@ Loop until `next-file.sh` returns nothing:
 
    ```
    a. TaskOutput(agent_id) — wait for completion
-   b. bash .fact-check/mark-done.sh .fact-check/state.json mark-checked <filename>
+   b. bash <skill-dir>/scripts/mark-done.sh .fact-check/state.json mark-checked <filename>
    ```
 
 4. Go back to step 1 if `next-file.sh` returns more files.

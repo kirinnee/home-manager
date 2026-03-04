@@ -20,7 +20,7 @@ Automatically fix documentation inaccuracies identified by fact-check using para
 If context is lost, check whether pending files remain:
 
 ```bash
-bash .fact-check/next-file.sh .fact-check/fix-state.json
+bash <skill-dir>/scripts/next-file.sh .fact-check/fix-state.json
 ```
 
 If output is non-empty, work remains. Read config to resume:
@@ -34,7 +34,6 @@ jq '{findingsDir, fixesDir, mode, concurrentAgents}' .fact-check/fix-state.json
 ## Prerequisites
 
 1. **Fact-check must have run** — `.fact-check/findings/` must exist with finding files
-2. **Scripts must exist** — `/fact-check` creates them; if not present, create per Step 2
 
 ### Required Questions
 
@@ -57,25 +56,25 @@ Questions:
 2. Auto-apply or preview mode?
 ```
 
-### Step 2: Setup Scripts & Initialize
+### Step 2: Setup & Initialize
 
-Verify `.fact-check/findings/` exists. If scripts don't exist (e.g., fact-check was run in a previous session), create them per the fact-check skill's Step 2.
+Verify `.fact-check/findings/` exists. Scripts are shipped in this skill's `scripts/` subfolder. Determine the skill directory path (the folder containing this SKILL.md) and use it for all script references below as `<skill-dir>`.
 
-Create fixes directory if in preview mode:
+Create working directories:
 
 ```bash
-mkdir -p .fact-check/fixes
+mkdir -p .fact-check/findings .fact-check/fixes
 ```
 
 Run the init script:
 
 ```bash
-bash .fact-check/init-fix-state.sh .fact-check/fix-state.json "<mode>" <N>
+bash <skill-dir>/scripts/init-fix-state.sh .fact-check/fix-state.json "<mode>" <N>
 ```
 
 The script scans `.fact-check/findings/`, extracts original file paths from the `<!-- source: path -->` metadata, and writes `fix-state.json`.
 
-**If resuming**: Skip this step — `fix-state.json` already exists. Read only the config:
+**If resuming**: Skip this step — `fix-state.json` already exists. Read only the config (scripts are always available in `<skill-dir>/scripts/`):
 
 ```bash
 jq '{findingsDir, fixesDir, mode, concurrentAgents}' .fact-check/fix-state.json
@@ -90,7 +89,7 @@ Loop until `next-file.sh` returns nothing:
 1. **Get next batch**:
 
    ```bash
-   bash .fact-check/next-file.sh .fact-check/fix-state.json --batch <N>
+   bash <skill-dir>/scripts/next-file.sh .fact-check/fix-state.json --batch <N>
    ```
 
 2. **For each file**, compute safe name and spawn an agent:
@@ -160,7 +159,7 @@ Loop until `next-file.sh` returns nothing:
 
    ```
    a. TaskOutput(agent_id) — wait for completion
-   b. bash .fact-check/mark-done.sh .fact-check/fix-state.json mark-fixed <filename>
+   b. bash <skill-dir>/scripts/mark-done.sh .fact-check/fix-state.json mark-fixed <filename>
    c. Verify: fix file exists (preview) or git diff shows changes (auto-apply)
    ```
 
