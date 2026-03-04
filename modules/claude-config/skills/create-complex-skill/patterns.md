@@ -58,36 +58,34 @@ The state directory should be gitignored.
 
 ## Agent Taxonomy
 
-### Three agent types
+### Two agent types
 
 | Type           | How spawned                          | Can chat with user? | State writes?   | Purpose                               |
 | -------------- | ------------------------------------ | ------------------- | --------------- | ------------------------------------- |
-| **Inline**     | Orchestrator reads file and executes | Yes                 | Via state agent | User interaction, complex dispatch    |
 | **Sub-agent**  | `Task` (no team), direct result      | No                  | No              | Mechanical: state management, cleanup |
 | **Team agent** | `Task` (with team), messaging        | No                  | No              | Complex work for a specific step      |
 
 ### Key constraint
 
-**Only inline steps can interact with the user.** Sub-agents and team agents communicate only via their report format back to the orchestrator. If a step needs user input (approval, clarification, feedback), it MUST be inline.
+**The orchestrator NEVER reads step files directly.** Instead, it spawns a teammate (team agent) and tells it which step file to read and execute. This saves context on the main orchestrator. Team agents report results back via their report format.
+
+If a step needs user input (approval, clarification, feedback), spawn a team agent (haiku) that reads the step file and uses AskUserQuestion internally.
 
 ## Agent Type Decision Framework
 
 For each step, ask:
 
 ```
-Does this step need to chat with the user?
-  YES → INLINE (orchestrator executes it)
-  NO →
-    Is this a simple, mechanical task (state read/write, file cleanup, copy)?
-      YES → SUB-AGENT (haiku, no team, direct result)
-      NO →
-        Does this require reading/writing many files or complex reasoning?
-          YES → TEAM AGENT
-            How much reasoning?
-              Mechanical (copy, commit, init) → haiku
-              Moderate (fetch data, create PR, push) → sonnet
-              Complex (review code, rewrite specs, analyze) → opus
+Is this a simple, mechanical task (state read/write, file cleanup, copy)?
+  YES → SUB-AGENT (haiku, no team, direct result)
+  NO → TEAM AGENT (spawn via Task tool, tell it which step file to read)
+    How much reasoning?
+      Mechanical (copy, commit, init) → haiku
+      Moderate (fetch data, create PR, push) → sonnet
+      Complex (review code, rewrite specs, analyze, user interaction) → opus
 ```
+
+**Important:** The orchestrator NEVER reads step content directly. Always spawn a team agent and tell it which step file to read. This prevents context bloat on the orchestrator.
 
 ## Context Rot Prevention
 

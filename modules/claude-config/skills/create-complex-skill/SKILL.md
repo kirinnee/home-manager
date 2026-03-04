@@ -18,9 +18,8 @@ Guides the creation of complex, multi-phase Claude Code skills that use state ma
 
 1. **Phases are independent** — each phase has its own state file, can be entered/cleared independently
 2. **Steps are idempotent** — sub-agents and team agents don't know they're in a state machine; they execute, report, and exit
-3. **Orchestrator stays lean** — defer expensive work (file reads, state management) to sub-agents to prevent context rot
+3. **Orchestrator stays lean** — NEVER read step files directly; spawn a teammate and tell it which step file to read. This saves context on the main orchestrator
 4. **State agents own state writes** — the orchestrator never reads/writes state JSON directly (bootstrap exceptions documented per step)
-5. **Inline steps only for user interaction** — anything requiring chat with the user runs inline; everything else is delegated
 
 ## Process
 

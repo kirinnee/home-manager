@@ -1,16 +1,16 @@
 # Phase 2: Implementation
 
 ## State Machine
-
 ```
 Per plan (loops over subPlans):
   clear-loop(sub) → [setup_run] → [running] → resolve_or_rewrite? → [commit] → next plan
                       team(H)       common(S)    inline/common        team(H)
 
-  On conflict/max_iter:
+  on conflict/max_iter:
     → orchestrator prompts user inline
     → [rewrite-spec] → [running] → ...
        team(O)          common(S)
+```
 
 All plans done → task-state.currentPhase: "polish"
 ```
@@ -30,19 +30,18 @@ All plans done → task-state.currentPhase: "polish"
 ```
 
 ## Step Dispatch
-
 | Step                 | Agent              | Model  | Type             | File                                   | Description                                  |
-| -------------------- | ------------------ | ------ | ---------------- | -------------------------------------- | -------------------------------------------- |
-| `clear`              | clear-loop         | haiku  | **sub** (common) | `common/clear-loop.md`                 | dev-loop status/cancel, remove stale files   |
+| ------------------- | ------------------ | ------ | ---------------- | -------------------------------------- | -------------------------------------------- |
+| `clear`              | clear-loop         | haiku  | **sub (common)** | `common/clear-loop.md`         | Phase 2 (between plans), Phase 3 (before fix cycle) |
 | `setup_run`          | setup-run-agent    | haiku  | team             | `implementation/steps/setup-run.md`    | Copy plan → `.kagent/spec.md`, init dev-loop |
-| `running`            | runner-agent       | sonnet | team (common)    | `common/run-devloop.md`                | Execute dev-loop, report exit code           |
-| `resolve_or_rewrite` | (orchestrator)     | —      | inline (common)  | `common/resolve-or-rewrite.md`         | Prompt user, dispatch rewrite-spec           |
-| `rewrite_spec`       | rewrite-spec-agent | opus   | team             | `implementation/steps/rewrite-spec.md` | Rewrite spec with user feedback              |
-| `commit`             | commit-agent       | haiku  | team             | `implementation/steps/commit.md`       | Commit per conventions, include ticket ID    |
+ |
+| `running`            | runner-agent       | sonnet | team (common)    | `common/run-devloop.md`          | Execute dev-loop, report exit code           |
+| `resolve_or_rewrite` | resolve-or-rewrite-agent | opus   | team             | `implementation/steps/resolve-or-rewrite.md` | Read step content, prompt user, dispatch rewrite-spec |
+ | `rewrite_spec`       | rewrite-spec-agent | opus   | team             | `implementation/steps/rewrite-spec.md` | Rewrite spec with user feedback              |
+| `commit`             | commit-agent       | haiku  | team             | `implementation/steps/commit.md`        | Commit per conventions, include ticket ID        |
 
 ## Step Dispatch Logic
-
-On entry to Implementation phase, read `impl-state.json` and dispatch:
+ On entry to Implementation phase, **NEVER read step files directly** — spawn a teammate and tell it which step file to read and execute the logic. This saves context on the main orchestrator.
 
 | Condition                    | Action                                                                  |
 | ---------------------------- | ----------------------------------------------------------------------- |
@@ -50,13 +49,12 @@ On entry to Implementation phase, read `impl-state.json` and dispatch:
 | `step: "clear"`              | Spawn clear-loop sub-agent (haiku)                                      |
 | `step: "setup_run"`          | Spawn setup-run-agent (haiku)                                           |
 | `step: "running"`            | Spawn runner-agent (sonnet) via `common/run-devloop.md`                 |
-| `step: "resolve_or_rewrite"` | Orchestrator reads `common/resolve-or-rewrite.md` (inline)              |
+| `step: "resolve_or_rewrite"` | Spawn resolve-or-rewrite-agent (opus)                             |
 | `step: "commit"`             | Spawn commit-agent (haiku)                                              |
 | `step: "next_plan"`          | Increment `currentSubPlanIndex`, reset to `step: "clear"` for next plan |
 | `step: "completed"`          | All plans done — advance `task-state.currentPhase` to `"polish"`        |
 
 ## Per-Plan Loop
-
 For each sub-plan in `task-state.subPlans`:
 
 1. `clear` — Clean up from previous run
@@ -70,29 +68,27 @@ For each sub-plan in `task-state.subPlans`:
 6. `next_plan` — Move to next sub-plan or `completed`
 
 ## Ticket Transition
-
 On first `setup_run` per spec version (when `ticketTransitioned: false`):
 
 - Execute `ticketTransitions.start` via `repoConfig.ticketTransitionAccess` + `repoConfig.ticketTransitionCommand`
 - Set `ticketTransitioned: true` in `impl-state.json`
 
 ## State Transitions
-
 All state writes go through the **implementation state-agent** (sub-agent, haiku). Read `implementation/state-agent.md` for the state management protocol.
 
 ## Spawning Pattern
+ on entry to Implementation phase, **NEVER read step files directly** — spawn a teammate and tell it which step file to read and execute the logic. this saves context on the main orchestrator.
 
 ```
 Task(
   subagent_type: "general-purpose",
   model: "<haiku|sonnet|opus>",
   description: "Run {step} for {ticketId}",
-  prompt: "Read {step file} and execute. Working dir: {WORKDIR}. State: {relevant fields}."
+  prompt: "Read {step file} and execute. Working dir: {WORKDIR}. State: {relevant fields}. Report: {expected format}."
 )
 ```
 
 ## Phase Completion
-
 When all sub-plans are completed:
 
 1. Update `task-state.json`: `currentPhase: "polish"`
