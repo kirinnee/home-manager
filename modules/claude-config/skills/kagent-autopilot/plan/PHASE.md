@@ -25,29 +25,29 @@
 
 ## Step Dispatch
 
-| Step          | Agent            | Model  | Type   | File                        | Description                                                      |
-| ------------- | ---------------- | ------ | ------ | --------------------------- | ---------------------------------------------------------------- |
-| `setup`       | setup-agent      | haiku  | team   | `plan/steps/setup.md`       | Mode, branch, .gitignore, create task-state.json (bootstrap)     |
-| `repo_setup`  | repo-setup-agent | sonnet | team   | `plan/steps/repo-setup.md`  | Org detection, ticket fetch, parent walking, populate repoConfig |
-| `feedback`    | feedback-agent    | haiku  | team   | `plan/steps/feedback.md`    | v2+: capture feedback, create new spec version, merge specs      |
-| `write_spec`  | write-spec-agent  | haiku  | team   | `plan/steps/write-spec.md`  | Read step content, challenge user, research codebase, write spec |
-| `write_plans` | write-plans-agent | haiku  | team   | `plan/steps/write-plans.md` | Read step content, write plans, discover binaries, config approval        |
+| Step          | Agent             | Model  | Type | File                        | Description                                                        |
+| ------------- | ----------------- | ------ | ---- | --------------------------- | ------------------------------------------------------------------ |
+| `setup`       | setup-agent       | haiku  | team | `plan/steps/setup.md`       | Mode, branch, .gitignore, create task-state.json (bootstrap)       |
+| `repo_setup`  | repo-setup-agent  | sonnet | team | `plan/steps/repo-setup.md`  | Org detection, ticket fetch, parent walking, populate repoConfig   |
+| `feedback`    | feedback-agent    | haiku  | team | `plan/steps/feedback.md`    | v2+: capture feedback, create new spec version, merge specs        |
+| `write_spec`  | write-spec-agent  | haiku  | team | `plan/steps/write-spec.md`  | Read step content, challenge user, research codebase, write spec   |
+| `write_plans` | write-plans-agent | haiku  | team | `plan/steps/write-plans.md` | Read step content, write plans, discover binaries, config approval |
 
 ## Step Dispatch Logic
 
- On entry to Plan phase, **NEVER read step files directly** — spawn a teammate and tell it which step file to read and execute the logic.
+On entry to Plan phase, **NEVER read step files directly** — spawn a teammate and tell it which step file to read and execute the logic.
 
- This saves context on the main orchestrator.
+This saves context on the main orchestrator.
 
-| Condition               | Action                                                                                          |
-| ------------------------ | ----------------------------------------------------------------------------------------------- |
-| No `plan-state.json`        | Create it with `step: "setup"`, spawn setup-agent                                               |
-| `step: "setup"`           | Spawn setup-agent (haiku)                                                                       |
-| `step: "repo_setup"`      | Spawn repo-setup-agent (sonnet)                                                                 |
-| `step: "feedback"`          | Spawn feedback-agent (haiku) — v2+ only                                                       |
-| `step: "write_spec"`      | Spawn write-spec-agent (haiku)                                                        |
-| `step: "write_plans"`     | Spawn write-plans-agent (haiku)                                                      |
-| `step: "approved"`        | Plans approved — advance `task-state.currentPhase` to `"implementation"`, request context clear |
+| Condition             | Action                                                                                          |
+| --------------------- | ----------------------------------------------------------------------------------------------- |
+| No `plan-state.json`  | Create it with `step: "setup"`, spawn setup-agent                                               |
+| `step: "setup"`       | Spawn setup-agent (haiku)                                                                       |
+| `step: "repo_setup"`  | Spawn repo-setup-agent (sonnet)                                                                 |
+| `step: "feedback"`    | Spawn feedback-agent (haiku) — v2+ only                                                         |
+| `step: "write_spec"`  | Spawn write-spec-agent (haiku)                                                                  |
+| `step: "write_plans"` | Spawn write-plans-agent (haiku)                                                                 |
+| `step: "approved"`    | Plans approved — advance `task-state.currentPhase` to `"implementation"`, request context clear |
 
 ## Feedback Entry (v2+)
 
@@ -60,7 +60,7 @@ When returning from Phase 3 with feedback:
 
 ## Spawning Pattern
 
- On entry to Plan phase, **NEVER read step files directly**. Spawn a teammate and tell it which step file to read and execute the logic. This saves context on the main orchestrator.
+On entry to Plan phase, **NEVER read step files directly**. Spawn a teammate and tell it which step file to read and execute the logic. This saves context on the main orchestrator.
 
 ```
 Task(
@@ -72,5 +72,4 @@ Task(
 )
 ```
 
- Note: For steps that need user interaction (feedback, write_spec), use haiku since they user may have questions and handle complex decisions. For logic is they use sonnet or opus for deeper reasoning.
-
+Note: For steps that need user interaction (feedback, write_spec), use haiku since they user may have questions and handle complex decisions. For logic is they use sonnet or opus for deeper reasoning.

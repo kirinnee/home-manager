@@ -60,10 +60,10 @@ The state directory should be gitignored.
 
 ### Two agent types
 
-| Type           | How spawned                          | Can chat with user? | State writes?   | Purpose                               |
-| -------------- | ------------------------------------ | ------------------- | --------------- | ------------------------------------- |
-| **Sub-agent**  | `Task` (no team), direct result      | No                  | No              | Mechanical: state management, cleanup |
-| **Team agent** | `Task` (with team), messaging        | No                  | No              | Complex work for a specific step      |
+| Type           | How spawned                     | Can chat with user? | State writes? | Purpose                               |
+| -------------- | ------------------------------- | ------------------- | ------------- | ------------------------------------- |
+| **Sub-agent**  | `Task` (no team), direct result | No                  | No            | Mechanical: state management, cleanup |
+| **Team agent** | `Task` (with team), messaging   | No                  | No            | Complex work for a specific step      |
 
 ### Key constraint
 
