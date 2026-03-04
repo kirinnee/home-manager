@@ -1,11 +1,11 @@
 ---
-name: create-complex-skill
-description: Create multi-phase, state-machine-driven Claude Code skills with orchestrator, sub-agents, and team agents. Use when building complex workflow skills, multi-phase automation, or stateful agent orchestration.
+name: create-multi-state-skill
+description: Create multi-phase, state-machine-driven Claude Code skills with orchestrator, sub-agents, and team agents. Use when building multi-state workflow skills, multi-phase automation, or stateful agent orchestration.
 ---
 
-# Create Complex Skill
+# Create Multi-State Skill
 
-Guides the creation of complex, multi-phase Claude Code skills that use state machines, agent delegation, and context-rot-aware orchestration. These skills follow the patterns proven in `kagent-autopilot`.
+Guides the creation of multi-phase Claude Code skills that use state machines, agent delegation, and context-rot-aware orchestration. These skills follow the patterns proven in `kagent-autopilot`.
 
 ## When to Use
 
@@ -151,4 +151,5 @@ See [patterns.md](patterns.md) for detailed architecture patterns including:
 
 ## Related Skills
 
-- [create-skill](../create-skill/SKILL.md) — for simple, single-file skills
+- [create-skill](../create-skill/SKILL.md) — base skill creation (invokes this technique when appropriate)
+- [create-file-processor-skill](../create-file-processor-skill/SKILL.md) — file-processor technique for divide-and-conquer patterns
