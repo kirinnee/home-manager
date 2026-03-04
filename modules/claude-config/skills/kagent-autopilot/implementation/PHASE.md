@@ -37,7 +37,7 @@ All plans done → task-state.currentPhase: "polish"
 | -------------------- | ------------------------ | ------ | ---------------- | -------------------------------------------- | ----------------------------------------------------- |
 | `clear`              | clear-loop               | haiku  | **sub (common)** | `common/clear-loop.md`                       | Phase 2 (between plans), Phase 3 (before fix cycle)   |
 | `setup_run`          | setup-run-agent          | haiku  | team             | `implementation/steps/setup-run.md`          | Copy plan → `.kagent/spec.md`, init dev-loop          |
-|  |
+|                      |
 | `running`            | runner-agent             | sonnet | team (common)    | `common/run-devloop.md`                      | Execute dev-loop, report exit code                    |
 | `resolve_or_rewrite` | resolve-or-rewrite-agent | opus   | team             | `implementation/steps/resolve-or-rewrite.md` | Read step content, prompt user, dispatch rewrite-spec |
 | `rewrite_spec`       | rewrite-spec-agent       | opus   | team             | `implementation/steps/rewrite-spec.md`       | Rewrite spec with user feedback                       |

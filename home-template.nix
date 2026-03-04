@@ -1,15 +1,14 @@
-{
-  config,
-  pkgs,
-  lib,
-  pkgs-claude-code,
-  pkgs-240924,
-  pkgs-stable,
-  pkgs-unstable,
-  pkgs-casks,
-  atomi,
-  profile,
-  ...
+{ config
+, pkgs
+, lib
+, pkgs-claude-code
+, pkgs-240924
+, pkgs-stable
+, pkgs-unstable
+, pkgs-casks
+, atomi
+, profile
+, ...
 }:
 
 ####################
@@ -21,8 +20,8 @@ let
 in
 
 ##################
-# Linux Services #
-##################
+  # Linux Services #
+  ##################
 let
   linuxService = {
     gpg-agent = {
@@ -35,8 +34,8 @@ let
 in
 
 #####################
-# Custom ZSH folder #
-#####################
+  # Custom ZSH folder #
+  #####################
 let
   customDir = pkgs.stdenv.mkDerivation {
     name = "oh-my-zsh-custom-dir";
@@ -156,19 +155,19 @@ rec {
         codex = merge userConfig { env = auth.codex; };
         gemini = merge userConfig { env = auth.gemini; };
         zai = merge userConfig { env = auth.zai; };
-        gwen = merge userConfig { env = auth.gwen; };
+        kimi = merge userConfig { env = auth.kimi; };
 
         impl-anthropic = merge implConfig { env = auth.anthropic; };
         impl-codex = merge implConfig { env = auth.codex; };
         impl-gemini = merge implConfig { env = auth.gemini; };
         impl-zai = merge implConfig { env = auth.zai; };
-        impl-gwen = merge implConfig { env = auth.gwen; };
+        impl-kimi = merge implConfig { env = auth.kimi; };
 
         reviewer-anthropic = merge revConfig { env = auth.anthropic; };
         reviewer-codex = merge revConfig { env = auth.codex; };
         reviewer-gemini = merge revConfig { env = auth.gemini; };
         reviewer-zai = merge revConfig { env = auth.zai; };
-        reviewer-gwen = merge revConfig { env = auth.gwen; };
+        reviewer-kimi = merge revConfig { env = auth.kimi; };
       };
   };
 

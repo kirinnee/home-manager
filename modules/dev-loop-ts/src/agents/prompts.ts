@@ -119,6 +119,8 @@ export function buildReviewerPrompt(params: ReviewerPromptParams): string {
 
 Read the spec from: ${specPath}
 
+**IMPORTANT:** Only refer to \`.kagent/spec.md\` as the source of truth for this implementation. Ignore any other spec files in the project (e.g., \`spec.md\`, \`spec-v2.md\`, \`spec-v3.md\`, \`spec-v4.md\` in the project root). The target specification is exclusively \`.kagent/spec.md\`.
+
 ## Your Task
 
 You are Reviewer ${reviewerIndex} for loop ${iteration}.

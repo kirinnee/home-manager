@@ -28,6 +28,17 @@ Skills are directories containing a `SKILL.md` file and optional supporting file
     └── helper.py
 ```
 
+## Techniques
+
+Create-skill supports two specialized techniques for common skill patterns. When the user's requirements match a technique, delegate to it instead of building the skill from scratch.
+
+| Technique          | When to Use                                                                                                                                          | Skill                                                                  |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| **File Processor** | Skill processes many files independently with parallel agents (divide-and-conquer). E.g., doc checking, link validation, spell checking.             | [create-file-processor-skill](../create-file-processor-skill/SKILL.md) |
+| **Multi-State**    | Skill has multiple phases, needs state persistence/resumability, orchestrates sub-agents/team agents. E.g., multi-cycle automation, CI/review loops. | [create-multi-state-skill](../create-multi-state-skill/SKILL.md)       |
+
+**How to decide:** After Step 1, if the gathered requirements clearly match a technique, read that technique's SKILL.md and follow its process instead. If requirements don't match either technique, continue with Step 2 below.
+
 ## Instructions
 
 ### Step 1: Gather Information
@@ -115,3 +126,8 @@ See [best-practices.md](best-practices.md) for guidelines on writing effective s
 
 - **Project skills**: `.claude/skills/{name}/SKILL.md`
 - **Personal skills**: `~/.claude/skills/{name}/SKILL.md`
+
+## Related Skills
+
+- [create-file-processor-skill](../create-file-processor-skill/SKILL.md) — file-processor technique
+- [create-multi-state-skill](../create-multi-state-skill/SKILL.md) — multi-state technique

@@ -8,10 +8,10 @@ rec {
     ANTHROPIC_DEFAULT_SONNET_MODEL = "glm-4.7";
     ANTHROPIC_DEFAULT_OPUS_MODEL = "glm-5";
   };
-  gwen = proxy // {
-    ANTHROPIC_DEFAULT_OPUS_MODEL = "gwen3-coder-plus";
-    ANTHROPIC_DEFAULT_SONNET_MODEL = "gwen3-coder-plus";
-    ANTHROPIC_DEFAULT_HAIKU_MODEL = "gwen3-coder-plus";
+  kimi = proxy // {
+    ANTHROPIC_DEFAULT_OPUS_MODEL = "kimi-k2.5";
+    ANTHROPIC_DEFAULT_SONNET_MODEL = "kimi-k2.5";
+    ANTHROPIC_DEFAULT_HAIKU_MODEL = "kimi-k2.5";
   };
   anthropic = proxy // {
     ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-6";
