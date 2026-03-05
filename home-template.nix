@@ -117,7 +117,7 @@ rec {
 
     aliases = {
       "yolo" = "--dangerously-skip-permissions";
-      "autopilot" = "--dangerously-skip-permissions '/kagent-autopilot'";
+      "ap" = "--dangerously-skip-permissions '/kagent-autopilot'";
     };
 
     shellIntegration = {

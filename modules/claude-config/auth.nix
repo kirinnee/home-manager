@@ -9,9 +9,9 @@ rec {
     ANTHROPIC_DEFAULT_OPUS_MODEL = "glm-5";
   };
   kimi = proxy // {
-    ANTHROPIC_DEFAULT_OPUS_MODEL = "kimi-k2.5";
-    ANTHROPIC_DEFAULT_SONNET_MODEL = "kimi-k2.5";
-    ANTHROPIC_DEFAULT_HAIKU_MODEL = "kimi-k2.5";
+    ANTHROPIC_DEFAULT_OPUS_MODEL = "kimi-for-coding";
+    ANTHROPIC_DEFAULT_SONNET_MODEL = "kimi-for-coding";
+    ANTHROPIC_DEFAULT_HAIKU_MODEL = "kimi-for-coding";
   };
   anthropic = proxy // {
     ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-6";
