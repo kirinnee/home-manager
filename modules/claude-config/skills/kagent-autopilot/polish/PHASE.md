@@ -95,6 +95,11 @@ See `polish/steps/resolve.md` for the full resolver dispatch logic including:
 
 All state writes go through the **polish state-agent** (sub-agent, haiku). Read `polish/state-agent.md` for the state management protocol.
 
+## Critical Rules
+
+1. **NEVER merge the PR** — no agent in this phase may run `gh pr merge` or merge the PR in any way. The user merges manually. This is absolute and non-negotiable.
+2. **All state files live in `.kagent/`** — always use `.kagent/` prefix for all state files. Never write state outside `.kagent/`.
+
 ## Spawning Pattern
 
 On entry to Polish phase, **NEVER read step files directly** — spawn a teammate and tell it which step file to read and execute the logic. This saves context on the main orchestrator.

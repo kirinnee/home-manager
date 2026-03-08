@@ -146,6 +146,7 @@ Skip threads where `coderabbitai[bot]` is a participant.
 
 ## Important
 
+- **NEVER merge the PR** — no `gh pr merge`, no merging in any way
 - All actions are IMMEDIATE (no code changes needed)
 - Always include signature: `"By Claude Code Kagent Autopilot 🤖"`
 - Never close without posting a note first

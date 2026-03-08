@@ -93,6 +93,7 @@ CI fixes are **priority 1** (highest) because:
 
 ## Important
 
+- **NEVER merge the PR** — no `gh pr merge`, no merging in any way
 - **Do NOT fix code directly** — just propose fixes
 - CI fixes are always priority 1
 - Read relevant code before proposing

@@ -2,6 +2,9 @@
 
 **This runs inline with the orchestrator.** Dispatches resolvers and executes Wave 1.
 
+**CRITICAL: NEVER merge the PR. No `gh pr merge`. The user merges manually.**
+**CRITICAL: All state files live in `.kagent/`. Always use the `.kagent/` prefix.**
+
 ## Entry Condition
 
 - `polish-state.step: "resolve"`

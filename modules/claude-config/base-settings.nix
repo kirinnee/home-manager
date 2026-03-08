@@ -11,6 +11,6 @@
   # Inspired by p10k: model | dir git | duration | cost
   statusLine = {
     type = "command";
-    command = "/bin/zsh -c 'source ~/.claude/statusline.zsh'";
+    command = "/bin/zsh ~/.config/claude-statusline.zsh";
   };
 }

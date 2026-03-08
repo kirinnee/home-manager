@@ -1,10 +1,10 @@
 ---
 name: kagent-autopilot
-description: 'End-to-end task completion from ticket to merged PR. Use when running /kagent-autopilot, automating ticket workflow, wanting hands-off task completion, or needing autonomous PR cycles.'
+description: 'End-to-end task completion from ticket to merge-ready PR. Use when running /kagent-autopilot, automating ticket workflow, wanting hands-off task completion, or needing autonomous PR cycles.'
 argument-hint: '[TICKET_ID | --phase impl | --phase polish]'
 ---
 
-# KAgent Autopilot — Autonomous Ticket to PR
+# KAgent Autopilot — Autonomous Ticket to Merge-Ready PR
 
 ## User Entry Points
 
@@ -130,14 +130,14 @@ Poll result:
 
 **On invocation, read `.kagent/task-state.json` and dispatch to the current phase:**
 
-| `currentPhase`   | Action                                                                                                                  |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| No state file    | Start Phase 1: spawn setup-agent                                                                                        |
-| `plan`           | Read `plan-state.json`, dispatch per `plan/PHASE.md`                                                                    |
-| `implementation` | Read `impl-state.json`, dispatch per `implementation/PHASE.md`                                                          |
-| `polish`         | Read `polish-state.json`, dispatch per `polish/PHASE.md`                                                                |
-| `completed`      | Report: "Task completed. PR #{prNumber}. Say 'I have feedback' to iterate." Ticket transition: `ticketTransitions.done` |
-| `failed`         | Report status and last error. Offer retry from appropriate phase.                                                       |
+| `currentPhase`   | Action                                                                                                                        |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| No state file    | Start Phase 1: spawn setup-agent                                                                                              |
+| `plan`           | Read `plan-state.json`, dispatch per `plan/PHASE.md`                                                                          |
+| `implementation` | Read `impl-state.json`, dispatch per `implementation/PHASE.md`                                                                |
+| `polish`         | Read `polish-state.json`, dispatch per `polish/PHASE.md`                                                                      |
+| `completed`      | Report: "Task completed. PR #{prNumber} is ready for you to merge." Do NOT merge. Ticket transition: `ticketTransitions.done` |
+| `failed`         | Report status and last error. Offer retry from appropriate phase.                                                             |
 
 Each phase has its own PHASE.md with step dispatch logic, state file schema, and step descriptions. Read the appropriate PHASE.md for full details.
 
@@ -287,35 +287,37 @@ After poller returns, resolvers are dispatched from `polish/steps/resolve.md`:
 
 ## Rules
 
-1. **Auto-detect ticket** — only ask if not found in argument, branch, or worktree
-2. **Auto-detect ticket system** — via `repoConfig.ticketSystem` (populated by repo-setup from repo config files)
-3. **Require spec approval** — before entering autonomous loop
-4. **Challenge before building** — iteratively clarify specs and plans in chat (not AskUserQuestion), be devil's advocate
-5. **Firm spec = firm commitment** — don't proceed until all ambiguities resolved
-6. **Fully autonomous after approval** — only stop for spec conflict (exit 2) or push failure
-7. **Delegate to dev-loop** — don't duplicate its implement-then-review logic
-8. **Task specs describe WHAT, plans describe HOW** — neither contains exact code
-9. **Always use sub-plans** — minimum 1 plan per task (no single-spec branching), named `plan-N` (not `phase-N`)
-10. **Transition ticket status at phase boundaries** — using `repoConfig.ticketTransitions`
-11. **After both approvals, request context clear before execution**
-12. **On re-invocation, dispatch based on currentPhase + per-phase state**
-13. **NEVER read step files directly** — always spawn a teammate and tell it which step file to read and execute the logic. This saves context on the main orchestrator.
-14. **Only write_spec, write_plans, resolve, resolve_fix, and feedback_check run inline** — all other steps are team agents or sub-agents
-15. **Feedback loop: re-approve merged spec → new sub-plans → context clear → execute**
-16. **Per-phase state-agents handle state writes** — orchestrator never writes state files directly (bootstrap exceptions: setup.md creates task-state.json, repo-setup.md writes repoConfig)
-17. **Push agent cleans up rb-review.md** before pushing
-18. **Committed spec files** — `spec/{ticketId}/v{N}/task-spec.md` (versioned) + `plans/*.md`
-19. **Check commit conventions** — look for CONTRIBUTING.md, commitlint, recent git log
-20. **Include ticket ID** — in commits, branches, PRs (when available), using `{ticketId}` placeholder
-21. **Never push to main/master**
-22. **Never force push** — except `--force-with-lease` after rebase-resolver
-23. **Always use dev-loop poll-pr** — NEVER use `gh pr watch` in polling
-24. **Three-wave execution** — immediate actions → code fixes (merged) → post-push actions
-25. **One combined spec** — merge all resolver fixes into ONE spec before dev-loop
-26. **Priority merging** — CI(1) > Review(2) > CodeRabbit(3), drop lower priority overlaps
-27. **Push back on CodeRabbit reasonably** — evaluate critically but professionally
-28. **Never close threads without note** — always post explanation with signature first
-29. **Bot signature** — all resolver replies include `"By Claude Code Kagent Autopilot 🤖"`
+1. **NEVER merge the PR** — no agent (orchestrator, sub-agent, or team agent) may run `gh pr merge` or merge the PR in any way. The user merges manually. This is a HARD rule with NO exceptions.
+2. **All state files live in `.kagent/`** — every state file (`task-state.json`, `plan-state.json`, `impl-state.json`, `polish-state.json`, `transitions.log`, `spec.md`, `conflict.md`, `run.log`) MUST use the `.kagent/` prefix. Never write state files outside `.kagent/`.
+3. **Auto-detect ticket** — only ask if not found in argument, branch, or worktree
+4. **Auto-detect ticket system** — via `repoConfig.ticketSystem` (populated by repo-setup from repo config files)
+5. **Require spec approval** — before entering autonomous loop
+6. **Challenge before building** — iteratively clarify specs and plans in chat (not AskUserQuestion), be devil's advocate
+7. **Firm spec = firm commitment** — don't proceed until all ambiguities resolved
+8. **Fully autonomous after approval** — only stop for spec conflict (exit 2) or push failure
+9. **Delegate to dev-loop** — don't duplicate its implement-then-review logic
+10. **Task specs describe WHAT, plans describe HOW** — neither contains exact code
+11. **Always use sub-plans** — minimum 1 plan per task (no single-spec branching), named `plan-N` (not `phase-N`)
+12. **Transition ticket status at phase boundaries** — using `repoConfig.ticketTransitions`
+13. **After both approvals, request context clear before execution**
+14. **On re-invocation, dispatch based on currentPhase + per-phase state**
+15. **NEVER read step files directly** — always spawn a teammate and tell it which step file to read and execute the logic. This saves context on the main orchestrator.
+16. **Only write_spec, write_plans, resolve, resolve_fix, and feedback_check run inline** — all other steps are team agents or sub-agents
+17. **Feedback loop: re-approve merged spec → new sub-plans → context clear → execute**
+18. **Per-phase state-agents handle state writes** — orchestrator never writes state files directly (bootstrap exceptions: setup.md creates task-state.json, repo-setup.md writes repoConfig)
+19. **Push agent cleans up rb-review.md** before pushing
+20. **Committed spec files** — `spec/{ticketId}/v{N}/task-spec.md` (versioned) + `plans/*.md`
+21. **Check commit conventions** — look for CONTRIBUTING.md, commitlint, recent git log
+22. **Include ticket ID** — in commits, branches, PRs (when available), using `{ticketId}` placeholder
+23. **Never push to main/master**
+24. **Never force push** — except `--force-with-lease` after rebase-resolver
+25. **Always use dev-loop poll-pr** — NEVER use `gh pr watch` in polling
+26. **Three-wave execution** — immediate actions → code fixes (merged) → post-push actions
+27. **One combined spec** — merge all resolver fixes into ONE spec before dev-loop
+28. **Priority merging** — CI(1) > Review(2) > CodeRabbit(3), drop lower priority overlaps
+29. **Push back on CodeRabbit reasonably** — evaluate critically but professionally
+30. **Never close threads without note** — always post explanation with signature first
+31. **Bot signature** — all resolver replies include `"By Claude Code Kagent Autopilot 🤖"`
 
 ## Prerequisites
 

@@ -130,8 +130,9 @@ git push --force-with-lease
 
 ## Important
 
+- **NEVER merge the PR** — no `gh pr merge`, no merging in any way
 - Execute rebase directly (not through code_fixes)
-- Use `--force-with-lease`, never `--force` (exception to Rule 22 for rebase only)
+- Use `--force-with-lease`, never `--force` (exception to Rule 24 for rebase only)
 - Attempt simple conflict resolution
 - Don't guess on complex semantic conflicts
 - Report clearly if manual intervention needed

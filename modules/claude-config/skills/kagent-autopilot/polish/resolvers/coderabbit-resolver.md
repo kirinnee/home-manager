@@ -239,9 +239,10 @@ CodeRabbit fixes are **priority 3** (lowest):
 
 ## Important Rules
 
-1. **Evaluate critically but professionally** — push back when appropriate with clear reasoning
-2. **Always include signature:** `"By Claude Code Kagent Autopilot 🤖"`
-3. **Never close without posting a note first**
-4. **Check CI status before determining ghosted**
-5. **Request re-evaluation after TRUE_POSITIVE fixes**
-6. **Priority is 3** — lowest priority, human > AI
+1. **NEVER merge the PR** — no `gh pr merge`, no merging in any way
+2. **Evaluate critically but professionally** — push back when appropriate with clear reasoning
+3. **Always include signature:** `"By Claude Code Kagent Autopilot 🤖"`
+4. **Never close without posting a note first**
+5. **Check CI status before determining ghosted**
+6. **Request re-evaluation after TRUE_POSITIVE fixes**
+7. **Priority is 3** — lowest priority, human > AI

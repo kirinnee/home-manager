@@ -68,6 +68,7 @@ Include `{ticketId}` in commit messages when available. If null, omit the ticket
 
 ## Important
 
+- **NEVER merge the PR** — no `gh pr merge`, no merging in any way
 - Do NOT push (push step handles that)
-- Do NOT update state files
+- Do NOT update state files — all state files live in `.kagent/`
 - Stage specific files, never `git add -A`

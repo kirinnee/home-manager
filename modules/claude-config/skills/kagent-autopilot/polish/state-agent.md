@@ -87,6 +87,8 @@ ERROR: <error message if any>
 
 ## Important
 
-- Only manage `polish-state.json`
+- **NEVER merge the PR** — no `gh pr merge`, no merging in any way
+- Only manage `.kagent/polish-state.json` — always use `.kagent/` prefix
 - Do NOT update `task-state.json` (orchestrator handles shared state)
 - Do NOT execute any phase steps — just assess and update state
+- All state files live in `.kagent/`
