@@ -56,7 +56,8 @@ If `repoConfig.reviewComment` is null: skip.
 
 ## Important
 
+- **NEVER merge the PR** — no `gh pr merge`, no merging in any way
 - Do NOT push (push step handles that)
-- Do NOT update state files
+- Do NOT update state files — all state files live in `.kagent/`
 - Use PR template for body
 - Include ticket ID in PR title when available

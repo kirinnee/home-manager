@@ -88,8 +88,9 @@ Ticket: {ticketId} - {ticketTitle}
 
 ## Important
 
+- **NEVER merge the PR** — no `gh pr merge`, no merging in any way
 - Do NOT run dev-loop
-- Do NOT update state files
+- Do NOT update state files — all state files live in `.kagent/`
 - Do NOT commit
 - Merge ALL fixes into ONE spec
 - Priority order: CI (1) > Review (2) > CodeRabbit (3)

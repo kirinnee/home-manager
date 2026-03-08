@@ -136,6 +136,7 @@ Human review fixes are **priority 2**:
 
 ## Important
 
+- **NEVER merge the PR** — no `gh pr merge`, no merging in any way
 - Address ALL human concerns
 - Questions can be answered immediately
 - Code fixes need post-push reply

@@ -125,8 +125,9 @@ If `pushCycle >= maxPushCycles` and issues remain:
 
 ## Important
 
+- **NEVER merge the PR** — no `gh pr merge`, no merging in any way
 - Do NOT make code changes
-- Do NOT update state files
+- Do NOT update state files — all state files live in `.kagent/`
 - Do NOT close or resolve threads
 - Only gather context and report
 - Always use `dev-loop poll-pr`, NEVER `gh pr watch`

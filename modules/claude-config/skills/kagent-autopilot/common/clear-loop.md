@@ -46,7 +46,8 @@ FILES_CLEANED: <list of files removed>
 
 ## Important
 
-- Do NOT update any state files (`task-state.json`, `impl-state.json`, `polish-state.json`)
+- **NEVER merge any PR** — no `gh pr merge`, no merging in any way
+- Do NOT update any state files (`task-state.json`, `impl-state.json`, `polish-state.json`) — all state files live in `.kagent/`
 - Do NOT commit anything
 - Do NOT modify code files
-- Only clean up dev-loop state and stale files
+- Only clean up dev-loop state and stale files in `.kagent/`

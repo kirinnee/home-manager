@@ -84,7 +84,8 @@ If resuming: check `git log origin/{branch}..HEAD`. If unpushed commits exist, r
 
 ## Important
 
+- **NEVER merge the PR** — no `gh pr merge`, no merging in any way
 - NEVER push to main/master
 - NEVER force push (exception: after rebase-resolver with `--force-with-lease`)
-- Do NOT update state files
+- Do NOT update state files — all state files live in `.kagent/`
 - Do NOT create PR (that's create-pr step)

@@ -155,19 +155,17 @@ rec {
         codex = merge userConfig { env = auth.codex; };
         gemini = merge userConfig { env = auth.gemini; };
         zai = merge userConfig { env = auth.zai; };
-        kimi = merge userConfig { env = auth.kimi; };
+        cerebras = merge userConfig { env = auth.cerebras; };
 
         impl-anthropic = merge implConfig { env = auth.anthropic; };
         impl-codex = merge implConfig { env = auth.codex; };
         impl-gemini = merge implConfig { env = auth.gemini; };
         impl-zai = merge implConfig { env = auth.zai; };
-        impl-kimi = merge implConfig { env = auth.kimi; };
 
         reviewer-anthropic = merge revConfig { env = auth.anthropic; };
         reviewer-codex = merge revConfig { env = auth.codex; };
         reviewer-gemini = merge revConfig { env = auth.gemini; };
         reviewer-zai = merge revConfig { env = auth.zai; };
-        reviewer-kimi = merge revConfig { env = auth.kimi; };
       };
   };
 
@@ -194,6 +192,12 @@ rec {
         username = "ernest-liftoff";
       };
     };
+  };
+
+  # Claude Code statusline (prettified, version-controlled)
+  home.file.".config/claude-statusline.zsh" = {
+    source = ./modules/claude-config/statusline.zsh;
+    executable = true;
   };
 
   # Worktrunk config
@@ -642,6 +646,7 @@ rec {
         dlc = "dev-loop cancel";
         dll = "dev-loop logs";
         kgl = "tail -f ./.kagent/run.log";
+        vpr = "gh pr view --web";
 
       }
       // (

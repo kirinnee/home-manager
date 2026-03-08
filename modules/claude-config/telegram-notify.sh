@@ -25,6 +25,13 @@ else
   esac
 fi
 
+# Escape MarkdownV2 reserved characters
+escape_md() {
+  # Escape MarkdownV2 reserved chars: _ * [ ] ( ) ~ ` > # + - = | { } . !
+  # shellcheck disable=SC2016
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/_/\\_/g; s/\*/\\*/g; s/\[/\\[/g; s/\]/\\]/g; s/(/\\(/g; s/)/\\)/g; s/~/\\~/g; s/`/\\`/g; s/>/\\>/g; s/#/\\#/g; s/+/\\+/g; s/-/\\-/g; s/=/\\=/g; s/|/\\|/g; s/{/\\{/g; s/}/\\}/g; s/\./\\./g; s/!/\\!/g'
+}
+
 # Get path relative to ~
 if [[ $PWD == "$HOME"* ]]; then
   REL_PATH="~${PWD#"$HOME"}"
@@ -32,13 +39,15 @@ else
   REL_PATH="$PWD"
 fi
 
-# Escape path for MarkdownV2: _ * [ ] ( ) ~ ` > # + - = | { } . !
-# Only need to escape chars that might appear in paths: . - _ ~ /
-ESC_PATH="${REL_PATH//\~/\\~}"
-ESC_PATH="${ESC_PATH//\./\\.}"
-ESC_PATH="${ESC_PATH//\-/\\-}"
-ESC_PATH="${ESC_PATH//_/\\_}"
-ESC_PATH="${ESC_PATH//\//\\/}"
+# Get last 2 directory components for display (e.g., "playground/deeplink-zed")
+SHORT_PATH="$(basename "$(dirname "$PWD")")/$(basename "$PWD")"
+
+# Build clickable path link (escape display text, but URL doesn't need escaping in MarkdownV2)
+ESC_SHORT_PATH=$(escape_md "$SHORT_PATH")
+ESC_URL="http://localhost:7621/${REL_PATH}"
+ESC_URL=$(escape_md "http://localhost:7621/${REL_PATH}")
+PATH_LINES="📂 ${ESC_SHORT_PATH}
+🔗 ${ESC_URL}"
 
 # Build message based on reason
 case "$REASON" in
@@ -47,44 +56,44 @@ permission)
 
 A tool approval is pending your review\.
 
-📂 Location: $ESC_PATH"
+$PATH_LINES"
   ;;
 idle)
   MSG="👀 *Psst\! Claude is waiting for you*
 
 She's been idle 60\+ seconds\.\.\. probably thinking about the meaning of life\.
 
-📂 Waiting in: $ESC_PATH"
+$PATH_LINES"
   ;;
 elicitation)
   MSG="🎯 *Claude needs your input\!*
 
 An MCP tool is asking for your wisdom\.
 
-📂 Consultation in: $ESC_PATH"
+$PATH_LINES"
   ;;
 auth)
   MSG="✅ *Auth success\!*
 
 Authentication completed successfully\.
 
-📂 Secured in: $ESC_PATH"
+$PATH_LINES"
   ;;
 complete | stop)
   MSG="🎉 *Task complete\!*
 
 Claude finished what she was doing\. Time to celebrate\!
 
-📂 Mission accomplished in: $ESC_PATH"
+$PATH_LINES"
   ;;
 *)
   MSG="🔔 *Claude is calling\!*
 
 Something needs your attention\.
 
-📂 Located in: $ESC_PATH"
+$PATH_LINES"
   ;;
 esac
 
-# Send to Telegram
+# Send to Telegram (Markdown parse mode)
 curl -s -X POST http://localhost:3313/send -d "$MSG"

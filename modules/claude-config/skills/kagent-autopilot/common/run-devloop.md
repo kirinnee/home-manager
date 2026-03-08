@@ -68,7 +68,8 @@ Report EXIT_CODE, RUN_ID, and STATUS. Include relevant error details if exit cod
 
 ## Important
 
-- Do NOT update any state files (`task-state.json`, `impl-state.json`, `polish-state.json`)
+- **NEVER merge any PR** — no `gh pr merge`, no merging in any way
+- Do NOT update any state files (`task-state.json`, `impl-state.json`, `polish-state.json`) — all state files live in `.kagent/`
 - Do NOT commit anything
 - Do NOT handle exit codes (orchestrator decides next step)
 - Just run dev-loop and report the result
