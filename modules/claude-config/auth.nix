@@ -6,7 +6,27 @@ rec {
   zai = proxy // {
     ANTHROPIC_DEFAULT_HAIKU_MODEL = "glm-4.5-air";
     ANTHROPIC_DEFAULT_SONNET_MODEL = "glm-4.7";
-    ANTHROPIC_DEFAULT_OPUS_MODEL = "glm-5";
+    ANTHROPIC_DEFAULT_OPUS_MODEL = "glm-5-turbo";
+  };
+  kimi = proxy // {
+    ANTHROPIC_DEFAULT_HAIKU_MODEL = "kimi-k2.5";
+    ANTHROPIC_DEFAULT_SONNET_MODEL = "kimi-k2.5";
+    ANTHROPIC_DEFAULT_OPUS_MODEL = "kimi-k2.5";
+  };
+  seed = proxy // {
+    ANTHROPIC_DEFAULT_HAIKU_MODEL = "doubao-seed-2.0-lite";
+    ANTHROPIC_DEFAULT_SONNET_MODEL = "doubao-seed-2.0-code";
+    ANTHROPIC_DEFAULT_OPUS_MODEL = "doubao-seed-2.0-pro";
+  };
+  minimax = proxy // {
+    ANTHROPIC_DEFAULT_HAIKU_MODEL = "minimax-m2.5";
+    ANTHROPIC_DEFAULT_SONNET_MODEL = "minimax-m2.5";
+    ANTHROPIC_DEFAULT_OPUS_MODEL = "minimax-m2.5";
+  };
+  mm = proxy // {
+    ANTHROPIC_DEFAULT_HAIKU_MODEL = "MiniMax-M2.7";
+    ANTHROPIC_DEFAULT_SONNET_MODEL = "MiniMax-M2.7";
+    ANTHROPIC_DEFAULT_OPUS_MODEL = "MiniMax-M2.7";
   };
   cerebras = proxy // {
     ANTHROPIC_DEFAULT_HAIKU_MODEL = "zai-glm-4.7";

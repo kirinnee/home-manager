@@ -6,6 +6,7 @@
   theme = "dark";
   alwaysThinkingEnabled = true;
   includeCoAuthoredBy = false;
+  skipDangerousModePermissionPrompt = true;
 
   # Statusline configuration - shows model, duration, and estimated cost
   # Inspired by p10k: model | dir git | duration | cost
