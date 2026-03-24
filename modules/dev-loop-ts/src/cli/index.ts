@@ -3,6 +3,7 @@ import type { StateService, TmuxService, HistoryService, LogsService } from '../
 import * as initCmd from './init';
 import * as runCmd from './run';
 import * as statusCmd from './status';
+import * as metricsCmd from './metrics';
 import * as attachCmd from './attach';
 import * as cancelCmd from './cancel';
 import * as historyCmd from './history';
@@ -30,13 +31,17 @@ export function createCli(deps: {
   program
     .command('init')
     .description('Initialize dev-loop configuration (spec + config)')
-    .option('--implementer <binary>', 'implementer binary name', 'claude')
-    .option('--reviewers <list>', 'reviewer binaries (comma-separated)', 'claude-reviewer-zai')
+    .option('--implementer <binary>', 'implementer binary name')
+    .option('--implementers <list>', 'implementer binaries with weights (e.g. "a:8,b:2")')
+    .option('--reviewers <list>', 'reviewer binaries (comma-separated, single phase)', 'claude-reviewer-zai')
+    .option('--review-phases <phases>', 'review phases (pipe-separated, e.g. "a,b|c")')
     .option('--conflict-checker <binary>', 'conflict checker binary name (defaults to implementer)')
     .option('--max-iterations <n>', 'maximum iterations', '10')
     .option('--implementer-timeout <mins>', 'implementer timeout in minutes', '30')
     .option('--reviewer-timeout <mins>', 'reviewer timeout in minutes', '15')
     .option('--conflict-check-threshold <n>', 'consecutive failures before conflict check', '3')
+    .option('--first-loop-full-review', 'run all review phases on the first loop (no short-circuit)')
+    .option('--previous-review-propagation <0-1>', 'probability (0–1) each reviewer sees previous loop reviews', '0')
     .action(async opts => initCmd.handler(opts, deps.state));
 
   // Run command
@@ -50,6 +55,13 @@ export function createCli(deps: {
     .command('status')
     .description('Show current run state')
     .action(async () => statusCmd.handler(deps.state));
+
+  // Metrics command
+  program
+    .command('metrics [query]')
+    .description('Query metrics from runs')
+    .option('--run <runId>', 'filter to specific run')
+    .action(async (query, opts) => metricsCmd.handler(query, opts.run, deps.state));
 
   // Attach command
   program

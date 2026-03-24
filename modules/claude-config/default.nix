@@ -13,26 +13,15 @@ let
   };
 in
 let
-  implConfig = {
+  autoConfig = {
     settings = baseSettings;
-    directoryRules = [ ];
-    mcpServers = { };
-    memory.source = ./CLAUDE-implementer.md;
-    skillsDir = ./skills;
-    env = baseEnv;
-  };
-in
-let
-  revConfig = {
-    settings = baseSettings;
-    directoryRules = [ ];
-    mcpServers = { };
-    memory.source = ./CLAUDE-reviewer.md;
+    mcpServers = baseMcp;
+    memory.source = ./CLAUDE-autonomous.md;
     skillsDir = ./skills;
     env = baseEnv;
   };
 in
 
 {
-  inherit userConfig implConfig revConfig auth;
+  inherit userConfig autoConfig auth;
 }

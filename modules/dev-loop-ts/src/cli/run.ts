@@ -20,17 +20,11 @@ export async function handler(deps: { state: StateService; tmux: TmuxService }):
       process.exit(1);
     }
 
-    // Load config to get implementer and reviewers
+    // Load config
     const config = await deps.state.loadConfig();
 
     // Create agent runner with configured binaries
-    const agentRunner = new AgentRunner(
-      deps.tmux,
-      deps.state,
-      config.implementer,
-      config.reviewers,
-      config.conflictChecker, // defaults to implementer binary if not specified
-    );
+    const agentRunner = new AgentRunner(deps.tmux, deps.state, config);
 
     // Create loop runner
     const loopRunner = new LoopRunner(deps.state, deps.tmux, agentRunner);
@@ -46,7 +40,20 @@ export async function handler(deps: { state: StateService; tmux: TmuxService }):
       process.exit(2);
     }
   } catch (err) {
-    console.error(`Error: ${(err as Error).message}`);
+    const error = err as Error & { name: string };
+    if (error.name === 'AgentFailureError') {
+      console.log('');
+      console.log('========================================');
+      console.log('AGENT FAILURE');
+      console.log('========================================');
+      console.log(error.message);
+      console.log('');
+      console.log('A failure.md file has been generated.');
+      console.log('Please resolve and restart the loop.');
+      console.log('========================================');
+      process.exit(3);
+    }
+    console.error(`Error: ${error.message}`);
     process.exit(1);
   }
 }

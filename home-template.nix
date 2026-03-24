@@ -132,8 +132,7 @@ rec {
       let
         inherit (imported)
           userConfig
-          implConfig
-          revConfig
+          autoConfig
           auth
           ;
         merge = lib.recursiveUpdate;
@@ -154,30 +153,22 @@ rec {
 
         codex = merge userConfig { env = auth.codex; };
         gemini = merge userConfig { env = auth.gemini; };
+        ag = merge userConfig { env = auth.ag; };
         zai = merge userConfig { env = auth.zai; };
         cerebras = merge userConfig { env = auth.cerebras; };
         kimi = merge userConfig { env = auth.kimi; };
         seed = merge userConfig { env = auth.seed; };
-        minimax = merge userConfig { env = auth.minimax; };
         mm = merge userConfig { env = auth.mm; };
 
-        impl-anthropic = merge implConfig { env = auth.anthropic; };
-        impl-codex = merge implConfig { env = auth.codex; };
-        impl-gemini = merge implConfig { env = auth.gemini; };
-        impl-zai = merge implConfig { env = auth.zai; };
-        impl-kimi = merge implConfig { env = auth.kimi; };
-        impl-seed = merge implConfig { env = auth.seed; };
-        impl-minimax = merge implConfig { env = auth.minimax; };
-        impl-mm = merge implConfig { env = auth.mm; };
-
-        reviewer-anthropic = merge revConfig { env = auth.anthropic; };
-        reviewer-codex = merge revConfig { env = auth.codex; };
-        reviewer-gemini = merge revConfig { env = auth.gemini; };
-        reviewer-zai = merge revConfig { env = auth.zai; };
-        reviewer-kimi = merge revConfig { env = auth.kimi; };
-        reviewer-seed = merge revConfig { env = auth.seed; };
-        reviewer-minimax = merge revConfig { env = auth.minimax; };
-        reviewer-mm = merge revConfig { env = auth.mm; };
+        auto-anthropic = merge autoConfig { env = auth.anthropic; };
+        auto-codex = merge autoConfig { env = auth.codex; };
+        auto-gemini = merge autoConfig { env = auth.gemini; };
+        auto-ag = merge autoConfig { env = auth.ag; };
+        auto-zai = merge autoConfig { env = auth.zai; };
+        auto-cerebras = merge autoConfig { env = auth.cerebras; };
+        auto-kimi = merge autoConfig { env = auth.kimi; };
+        auto-seed = merge autoConfig { env = auth.seed; };
+        auto-mm = merge autoConfig { env = auth.mm; };
       };
   };
 
@@ -305,7 +296,7 @@ rec {
       speak
       hms
       dev-loop
-      atomi.happy_coder
+      atomi.clickup_cli
 
       # liftoff
       awscli2
@@ -338,6 +329,7 @@ rec {
     SOPS_AGE_KEY_FILE = "$HOME/.config/sops/age/keys.txt";
     EDITOR = "nano";
     VAULT_ADDR = "https://vault.ops.vungle.io";
+    CU_TEAM_ID = "9018863174";
   };
 
   ##################
@@ -502,6 +494,7 @@ rec {
 
     direnv = {
       enable = true;
+      package = pkgs-unstable.direnv;
       stdlib = ''
         : "''${XDG_CACHE_HOME:="''${HOME}/.cache"}"
         declare -A direnv_layout_dirs
@@ -698,8 +691,8 @@ rec {
           src = pkgs.fetchFromGitHub {
             owner = "marlonrichert";
             repo = "zsh-autocomplete";
-            rev = "1f14a605f74c5b62d0bc8bb07fc1acd1e790f95a";
-            sha256 = "sha256-tpBqQJEJyI/PTeZZytX/o6sSwNx9kkRVa/Tx8YdQIcU=";
+            rev = "6d059a3634c4880e8c9bb30ae565465601fb5bd2";
+            sha256 = "sha256-0NW0TI//qFpUA2Hdx6NaYdQIIUpRSd0Y4NhwBbdssCs=";
           };
         }
         {

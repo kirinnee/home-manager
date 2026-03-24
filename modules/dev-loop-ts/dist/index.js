@@ -5,42 +5,26 @@ var __getProtoOf = Object.getPrototypeOf;
 var __defProp = Object.defineProperty;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
-function __accessProp(key) {
-  return this[key];
-}
-var __toESMCache_node;
-var __toESMCache_esm;
 var __toESM = (mod, isNodeMode, target) => {
-  var canCache = mod != null && typeof mod === 'object';
-  if (canCache) {
-    var cache = isNodeMode ? (__toESMCache_node ??= new WeakMap()) : (__toESMCache_esm ??= new WeakMap());
-    var cached = cache.get(mod);
-    if (cached) return cached;
-  }
   target = mod != null ? __create(__getProtoOf(mod)) : {};
   const to =
     isNodeMode || !mod || !mod.__esModule ? __defProp(target, 'default', { value: mod, enumerable: true }) : target;
   for (let key of __getOwnPropNames(mod))
     if (!__hasOwnProp.call(to, key))
       __defProp(to, key, {
-        get: __accessProp.bind(mod, key),
+        get: () => mod[key],
         enumerable: true,
       });
-  if (canCache) cache.set(mod, to);
   return to;
 };
 var __commonJS = (cb, mod) => () => (mod || cb((mod = { exports: {} }).exports, mod), mod.exports);
-var __returnValue = v => v;
-function __exportSetter(name, newValue) {
-  this[name] = __returnValue.bind(null, newValue);
-}
 var __export = (target, all) => {
   for (var name in all)
     __defProp(target, name, {
       get: all[name],
       enumerable: true,
       configurable: true,
-      set: __exportSetter.bind(all, name),
+      set: newValue => (all[name] = () => newValue),
     });
 };
 var __require = import.meta.require;
@@ -6073,14 +6057,68 @@ var coerce = {
 };
 var NEVER = INVALID;
 // src/types.ts
-var configSchema = exports_external.object({
-  implementer: exports_external.string().min(1).default('claude'),
-  reviewers: exports_external.array(exports_external.string().min(1)).min(1).default(['claude-reviewer-zai']),
+var metricSampleSchema = exports_external.object({
+  labels: exports_external.record(exports_external.string(), exports_external.string()),
+  durationMs: exports_external.number().nonnegative(),
+  inputTokens: exports_external.number().int().nonnegative().optional(),
+  outputTokens: exports_external.number().int().nonnegative().optional(),
+  error: exports_external.string().optional(),
+});
+var configSchema = exports_external
+  .object({
+    implementers: exports_external
+      .record(exports_external.string(), exports_external.number().int().positive())
+      .optional(),
+    implementer: exports_external.string().min(1).optional(),
+    reviewPhases: exports_external.array(exports_external.array(exports_external.string().min(1)).min(1)).optional(),
+    reviewers: exports_external.array(exports_external.string().min(1)).optional(),
+    conflictChecker: exports_external.string().min(1).optional(),
+    maxIterations: exports_external.number().min(1).max(100).default(10),
+    implementerTimeout: exports_external.number().min(0.001).max(120).default(30),
+    reviewerTimeout: exports_external.number().min(0.001).max(120).default(15),
+    conflictCheckThreshold: exports_external.number().min(1).max(100).default(3),
+    firstLoopFullReview: exports_external.boolean().default(false),
+    previousReviewPropagation: exports_external.number().min(0).max(1).default(0),
+  })
+  .transform(data => {
+    let implementers = data.implementers;
+    if (!implementers && data.implementer) {
+      implementers = { [data.implementer]: 1 };
+    } else if (data.implementer && implementers && !(data.implementer in implementers)) {
+      implementers = { ...implementers, [data.implementer]: 1 };
+    }
+    if (!implementers) {
+      implementers = { claude: 1 };
+    }
+    let reviewPhases = data.reviewPhases;
+    if (!reviewPhases && data.reviewers && data.reviewers.length > 0) {
+      reviewPhases = [data.reviewers];
+    }
+    if (!reviewPhases) {
+      reviewPhases = [['claude-reviewer-zai']];
+    }
+    return {
+      implementers,
+      reviewPhases,
+      conflictChecker: data.conflictChecker,
+      maxIterations: data.maxIterations,
+      implementerTimeout: data.implementerTimeout,
+      reviewerTimeout: data.reviewerTimeout,
+      conflictCheckThreshold: data.conflictCheckThreshold,
+      firstLoopFullReview: data.firstLoopFullReview,
+      previousReviewPropagation: data.previousReviewPropagation,
+    };
+  });
+var resolvedConfigSchema = exports_external.object({
+  implementers: exports_external.record(exports_external.string(), exports_external.number().int().positive()),
+  reviewPhases: exports_external.array(exports_external.array(exports_external.string().min(1))).min(1),
   conflictChecker: exports_external.string().min(1).optional(),
-  maxIterations: exports_external.number().min(1).max(100).default(10),
-  implementerTimeout: exports_external.number().min(1).max(120).default(30),
-  reviewerTimeout: exports_external.number().min(1).max(120).default(15),
-  conflictCheckThreshold: exports_external.number().min(1).max(100).default(3),
+  maxIterations: exports_external.number().min(1).max(100),
+  implementerTimeout: exports_external.number().min(0.001).max(120),
+  reviewerTimeout: exports_external.number().min(0.001).max(120),
+  conflictCheckThreshold: exports_external.number().min(1).max(100),
+  firstLoopFullReview: exports_external.boolean(),
+  previousReviewPropagation: exports_external.number().min(0).max(1),
 });
 var runStatusSchema = exports_external.enum(['running', 'completed', 'cancelled', 'failed', 'conflict']);
 var phaseSchema = exports_external.enum(['implementing', 'reviewing', 'done']);
@@ -6138,16 +6176,22 @@ var iterationSummarySchema = exports_external.object({
     })
     .optional(),
 });
+var metricsSummarySchema = exports_external.object({
+  totalDurationMs: exports_external.number().nonnegative(),
+  totalInputTokens: exports_external.number().int().nonnegative(),
+  totalOutputTokens: exports_external.number().int().nonnegative(),
+});
 var historyEntrySchema = exports_external.object({
   id: exports_external.string().min(1),
   spec: exports_external.string(),
-  config: configSchema,
+  config: resolvedConfigSchema,
   status: runStatusSchema,
   iterations: exports_external.number().int().nonnegative(),
   startedAt: exports_external.string().datetime(),
   completedAt: exports_external.string().datetime(),
   summary: exports_external.array(iterationSummarySchema),
   checkpointRan: exports_external.boolean().optional(),
+  metricsSummary: metricsSummarySchema.optional(),
 });
 var checkpointResultSchema = exports_external.object({
   outcome: exports_external.enum(['conflict_found', 'spec_auto_fixed', 'spec_compressed', 'no_action']),
@@ -6156,17 +6200,36 @@ var checkpointResultSchema = exports_external.object({
   completedCriteria: exports_external.array(exports_external.string()).optional(),
   remainingCriteria: exports_external.array(exports_external.string()).optional(),
 });
-var DEFAULT_CONFIG = {
-  implementer: 'claude',
-  reviewers: ['claude-reviewer-zai'],
-  conflictChecker: undefined,
-  maxIterations: 10,
-  implementerTimeout: 30,
-  reviewerTimeout: 15,
-  conflictCheckThreshold: 3,
-};
-function parseConfig(data) {
-  return configSchema.parse(data);
+function parseReviewerConfig(entry) {
+  const colonIndex = entry.lastIndexOf(':');
+  if (colonIndex > 0) {
+    const name = entry.slice(0, colonIndex).trim();
+    const flag = entry.slice(colonIndex + 1).trim();
+    if (name && (flag === '0' || flag === '1')) {
+      return { binary: name, noVerdictAsFailure: flag === '1' };
+    }
+  }
+  return { binary: entry.trim(), noVerdictAsFailure: true };
+}
+function getPrimaryImplementer(config) {
+  return Object.keys(config.implementers)[0];
+}
+function selectImplementer(config) {
+  const entries = Object.entries(config.implementers);
+  const totalWeight = entries.reduce((sum, [, weight]) => sum + weight, 0);
+  let rand = Math.random() * totalWeight;
+  for (const [binary, weight] of entries) {
+    rand -= weight;
+    if (rand <= 0) return binary;
+  }
+  return entries[entries.length - 1][0];
+}
+function parseRawConfig(data) {
+  const result = configSchema.safeParse(data);
+  if (!result.success) {
+    return resolvedConfigSchema.parse(data);
+  }
+  return resolvedConfigSchema.parse(result.data);
 }
 function parseRun(data) {
   return runSchema.parse(data);
@@ -6182,56 +6245,158 @@ function parseHistoryEntry(data) {
 }
 
 // src/state/config.ts
-function mergeConfig(partial) {
-  return {
-    implementer: partial.implementer ?? DEFAULT_CONFIG.implementer,
-    reviewers: partial.reviewers ?? DEFAULT_CONFIG.reviewers,
-    conflictChecker: partial.conflictChecker ?? DEFAULT_CONFIG.conflictChecker,
-    maxIterations: partial.maxIterations ?? DEFAULT_CONFIG.maxIterations,
-    implementerTimeout: partial.implementerTimeout ?? DEFAULT_CONFIG.implementerTimeout,
-    reviewerTimeout: partial.reviewerTimeout ?? DEFAULT_CONFIG.reviewerTimeout,
-    conflictCheckThreshold: partial.conflictCheckThreshold ?? DEFAULT_CONFIG.conflictCheckThreshold,
-  };
+function mergeConfig(partial, existing) {
+  const raw = {};
+  if (existing) {
+    raw.implementers = existing.implementers;
+    raw.reviewPhases = existing.reviewPhases;
+    raw.conflictChecker = existing.conflictChecker;
+    raw.maxIterations = existing.maxIterations;
+    raw.implementerTimeout = existing.implementerTimeout;
+    raw.reviewerTimeout = existing.reviewerTimeout;
+    raw.conflictCheckThreshold = existing.conflictCheckThreshold;
+  }
+  if (partial.implementers) raw.implementers = partial.implementers;
+  if (partial.implementer) raw.implementer = partial.implementer;
+  if (partial.reviewPhases) {
+    raw.reviewPhases = partial.reviewPhases;
+    delete raw.reviewers;
+  }
+  if (partial.reviewers) {
+    raw.reviewers = partial.reviewers;
+    delete raw.reviewPhases;
+  }
+  if (partial.conflictChecker !== undefined) raw.conflictChecker = partial.conflictChecker;
+  if (partial.maxIterations !== undefined) raw.maxIterations = partial.maxIterations;
+  if (partial.implementerTimeout !== undefined) raw.implementerTimeout = partial.implementerTimeout;
+  if (partial.reviewerTimeout !== undefined) raw.reviewerTimeout = partial.reviewerTimeout;
+  if (partial.conflictCheckThreshold !== undefined) raw.conflictCheckThreshold = partial.conflictCheckThreshold;
+  if (partial.firstLoopFullReview !== undefined) raw.firstLoopFullReview = partial.firstLoopFullReview;
+  if (partial.previousReviewPropagation !== undefined)
+    raw.previousReviewPropagation = partial.previousReviewPropagation;
+  return parseRawConfig(raw);
 }
 function configFromOptions(opts) {
   const partial = {};
-  if (opts.implementer) partial.implementer = opts.implementer;
-  if (opts.reviewers && opts.reviewers.length > 0) partial.reviewers = opts.reviewers;
+  if (opts.implementers) {
+    const entries = opts.implementers
+      .split(',')
+      .map(s => s.trim())
+      .filter(s => s.length > 0);
+    const implementers = {};
+    for (const entry of entries) {
+      const colonIndex = entry.indexOf(':');
+      if (colonIndex > 0) {
+        const name = entry.slice(0, colonIndex).trim();
+        const weight = parseInt(entry.slice(colonIndex + 1), 10);
+        if (name && weight > 0) {
+          implementers[name] = weight;
+        }
+      } else {
+        implementers[entry] = 1;
+      }
+    }
+    if (Object.keys(implementers).length > 0) {
+      partial.implementers = implementers;
+    }
+  }
+  if (opts.implementer) {
+    if (!partial.implementers) {
+      partial.implementers = { [opts.implementer]: 1 };
+    } else if (!(opts.implementer in partial.implementers)) {
+      partial.implementers[opts.implementer] = 1;
+    }
+  }
+  if (opts.reviewPhases) {
+    const phases = opts.reviewPhases
+      .split('|')
+      .map(phase => {
+        return phase
+          .split(',')
+          .map(s => s.trim())
+          .filter(s => s.length > 0);
+      })
+      .filter(phase => phase.length > 0);
+    if (phases.length > 0) {
+      partial.reviewPhases = phases;
+    }
+  }
+  if (opts.reviewers && opts.reviewers.length > 0) {
+    partial.reviewers = opts.reviewers;
+  }
   if (opts.conflictChecker) partial.conflictChecker = opts.conflictChecker;
   if (opts.maxIterations !== undefined) partial.maxIterations = opts.maxIterations;
   if (opts.implementerTimeout !== undefined) partial.implementerTimeout = opts.implementerTimeout;
   if (opts.reviewerTimeout !== undefined) partial.reviewerTimeout = opts.reviewerTimeout;
   if (opts.conflictCheckThreshold !== undefined) partial.conflictCheckThreshold = opts.conflictCheckThreshold;
-  return mergeConfig(partial);
+  if (opts.firstLoopFullReview !== undefined) partial.firstLoopFullReview = opts.firstLoopFullReview;
+  if (opts.previousReviewPropagation !== undefined) partial.previousReviewPropagation = opts.previousReviewPropagation;
+  return partial;
+}
+function formatConfigDisplay(config) {
+  const lines = [];
+  const implEntries = Object.entries(config.implementers);
+  if (implEntries.length === 1) {
+    lines.push(
+      `  Implementer: ${implEntries[0][0]}${implEntries[0][1] !== 1 ? ` (weight: ${implEntries[0][1]})` : ''}`,
+    );
+  } else {
+    lines.push(`  Implementers:`);
+    for (const [binary, weight] of implEntries) {
+      lines.push(`    ${binary} (weight: ${weight})`);
+    }
+  }
+  if (config.reviewPhases.length === 1) {
+    lines.push(`  Reviewers: ${config.reviewPhases[0].join(', ')}`);
+  } else {
+    lines.push(`  Review Phases:`);
+    for (let i = 0; i < config.reviewPhases.length; i++) {
+      lines.push(`    Phase ${i}: ${config.reviewPhases[i].join(', ')}`);
+    }
+  }
+  if (config.conflictChecker) {
+    lines.push(`  Conflict checker: ${config.conflictChecker}`);
+  }
+  lines.push(`  Max iterations: ${config.maxIterations}`);
+  lines.push(`  Implementer timeout: ${config.implementerTimeout}m`);
+  lines.push(`  Reviewer timeout: ${config.reviewerTimeout}m`);
+  lines.push(`  Conflict check threshold: ${config.conflictCheckThreshold} failures`);
+  if (config.firstLoopFullReview) {
+    lines.push(`  First loop full review: yes (all phases run, no short-circuit)`);
+  }
+  lines.push(`  Previous review propagation: ${(config.previousReviewPropagation * 100).toFixed(0)}%`);
+  return lines.join(`
+`);
 }
 
 // src/cli/init.ts
 async function handler(opts, state) {
   try {
-    const reviewersList = opts.reviewers
-      .split(',')
-      .map(s => s.trim())
-      .filter(s => s.length > 0);
-    const cfg = configFromOptions({
+    const hasReviewPhases = opts.reviewPhases !== undefined && opts.reviewPhases !== '';
+    const reviewersList =
+      !hasReviewPhases && opts.reviewers
+        ? opts.reviewers
+            .split(',')
+            .map(s => s.trim())
+            .filter(s => s.length > 0)
+        : [];
+    const partial = configFromOptions({
       implementer: opts.implementer || undefined,
+      implementers: opts.implementers || undefined,
       reviewers: reviewersList.length > 0 ? reviewersList : undefined,
+      reviewPhases: hasReviewPhases ? opts.reviewPhases : undefined,
       conflictChecker: opts.conflictChecker || undefined,
       maxIterations: parseInt(opts.maxIterations, 10) || undefined,
-      implementerTimeout: parseInt(opts.implementerTimeout, 10) || undefined,
-      reviewerTimeout: parseInt(opts.reviewerTimeout, 10) || undefined,
+      implementerTimeout: parseFloat(opts.implementerTimeout) || undefined,
+      reviewerTimeout: parseFloat(opts.reviewerTimeout) || undefined,
       conflictCheckThreshold: parseInt(opts.conflictCheckThreshold, 10) || undefined,
+      firstLoopFullReview: opts.firstLoopFullReview ? true : undefined,
+      previousReviewPropagation: parseFloat(opts.previousReviewPropagation) || undefined,
     });
-    await state.initProject(cfg);
+    await state.initProject(partial);
+    const cfg = await state.loadConfig();
     console.log('Dev Loop Initialized');
-    console.log(`  Implementer: ${cfg.implementer}`);
-    console.log(`  Reviewers: ${cfg.reviewers.join(', ')}`);
-    if (cfg.conflictChecker) {
-      console.log(`  Conflict checker: ${cfg.conflictChecker}`);
-    }
-    console.log(`  Max iterations: ${cfg.maxIterations}`);
-    console.log(`  Implementer timeout: ${cfg.implementerTimeout}m`);
-    console.log(`  Reviewer timeout: ${cfg.reviewerTimeout}m`);
-    console.log(`  Conflict check threshold: ${cfg.conflictCheckThreshold} failures`);
+    console.log(formatConfigDisplay(cfg));
     console.log('');
     console.log('Next: edit .kagent/spec.md, then run: dev-loop run');
   } catch (err) {
@@ -6254,6 +6419,7 @@ var EVIDENCE_DIR = `${CURRENT_DIR}/evidence`;
 var HISTORY_DIR = `${BASE_DIR}/history`;
 var LOGS_DIR = `${BASE_DIR}/logs`;
 var REVIEWS_DIR = `${BASE_DIR}/reviews`;
+var METRICS_DIR = `${BASE_DIR}/metrics`;
 var paths = {
   baseDir: BASE_DIR,
   spec: `${BASE_DIR}/spec.md`,
@@ -6268,11 +6434,14 @@ var paths = {
   historyDir: HISTORY_DIR,
   logsDir: LOGS_DIR,
   reviewsDir: REVIEWS_DIR,
+  metricsDir: METRICS_DIR,
+  failureMd: `${BASE_DIR}/failure.md`,
   historyEntry: runId => `${HISTORY_DIR}/${runId}.json`,
   verdictFile: (iteration, reviewerIndex) => `${VERDICTS_DIR}/${iteration}-${reviewerIndex}.json`,
   sessionFile: sessionId => `${SESSIONS_DIR}/${sessionId}.json`,
   runLogsDir: runId => `${LOGS_DIR}/${runId}`,
   runReviewsDir: runId => `${REVIEWS_DIR}/${runId}`,
+  metricsFile: runId => `${METRICS_DIR}/${runId}.jsonl`,
 };
 
 class DefaultFsService {
@@ -6354,7 +6523,7 @@ var SPEC_TEMPLATE = `# Specification: [Title]
 `;
 
 // src/loop/consensus.ts
-function checkConsensus(verdicts) {
+function checkConsensus(verdicts, totalPhases = 1, completedPhases = 1) {
   const approved = verdicts.filter(v => v.verdict === 'approved');
   const rejected = verdicts.filter(v => v.verdict === 'rejected');
   const incomplete = verdicts.filter(v => v.verdict !== 'approved' && v.verdict !== 'rejected');
@@ -6362,13 +6531,23 @@ function checkConsensus(verdicts) {
     approved: approved.length === verdicts.length && incomplete.length === 0,
     rejected: rejected.length > 0,
     incomplete: incomplete.length > 0,
+    partial: completedPhases < totalPhases && rejected.length > 0,
     approvedCount: approved.length,
     rejectedCount: rejected.length,
     totalReviewers: verdicts.length,
+    totalPhases,
+    completedPhases,
   };
 }
 function formatConsensusResult(result) {
-  return `Approved: ${result.approvedCount}/${result.totalReviewers}, Rejected: ${result.rejectedCount}/${result.totalReviewers}`;
+  let msg = `Approved: ${result.approvedCount}/${result.totalReviewers}, Rejected: ${result.rejectedCount}/${result.totalReviewers}`;
+  if (result.totalPhases > 1) {
+    msg += ` (phases ${result.completedPhases}/${result.totalPhases})`;
+  }
+  if (result.partial) {
+    msg += ' [short-circuited]';
+  }
+  return msg;
 }
 
 // src/agents/prompts.ts
@@ -6458,18 +6637,38 @@ Auto-detect and use the appropriate commands:
 `;
 }
 function buildReviewerPrompt(params) {
-  const { iteration, reviewerIndex, specPath } = params;
+  const { iteration, reviewerIndex, specPath, previousReviews } = params;
   const evidenceDir = `.kagent/current/evidence`;
   const reviewsDir = `.kagent/current/reviews`;
   const reviewFile = `${reviewsDir}/reviewer-${reviewerIndex}.md`;
   const verdictFile = `.kagent/current/verdicts/${iteration}-${reviewerIndex}.json`;
   const learningsFile = `.kagent/current/learnings.md`;
+  const previousReviewsSection = previousReviews
+    ? `## Previous Loop Reviews (loop ${iteration - 1})
+
+The following reviews were produced in the **previous loop**. Use them to:
+- Gain insight from other reviewers (especially on issues you may have missed)
+- Verify that issues flagged previously have actually been fixed
+
+\`\`\`markdown
+${previousReviews}
+\`\`\`
+
+**IMPORTANT: Do not take these reviews at face value.** They are input signals, not established facts. Perform your own independent verification:
+- If a previous reviewer claims something is broken, check it yourself before rejecting on that basis
+- If a previous reviewer claims something is correct, still verify it yourself before accepting
+- Focus especially on verifying whether issues raised last loop were actually addressed
+`
+    : '';
   return `# Code Review Task
 
 ## Specification
 
 Read the spec from: ${specPath}
 
+**IMPORTANT:** Only refer to \`.kagent/spec.md\` as the source of truth for this implementation. Ignore any other spec files in the project (e.g., \`spec.md\`, \`spec-v2.md\`, \`spec-v3.md\`, \`spec-v4.md\` in the project root). The target specification is exclusively \`.kagent/spec.md\`.
+
+${previousReviewsSection}
 ## Your Task
 
 You are Reviewer ${reviewerIndex} for loop ${iteration}.
@@ -6748,7 +6947,8 @@ function buildIterationData(run, config, specPath, specContent) {
     specContent,
     previousLoopLearnings: run.learnings ?? [],
   });
-  const reviewerPrompts = Array.from({ length: config.reviewers.length }, (_, i) => ({
+  const allReviewers = config.reviewPhases.flat();
+  const reviewerPrompts = Array.from({ length: allReviewers.length }, (_, i) => ({
     reviewerIndex: i,
     prompt: buildReviewerPrompt({
       iteration: run.iteration,
@@ -6785,6 +6985,17 @@ class ConflictError extends Error {
     this.name = 'ConflictError';
   }
 }
+
+class AgentFailureError extends Error {
+  failureInfo;
+  constructor(failureInfo) {
+    super(
+      `Agent failure: ${failureInfo.binary} ${failureInfo.error} in loop ${failureInfo.loop}, iteration ${failureInfo.iteration}`,
+    );
+    this.failureInfo = failureInfo;
+    this.name = 'AgentFailureError';
+  }
+}
 function isNoActiveRunError(error) {
   return error instanceof Error && error.message === 'No active run';
 }
@@ -6793,10 +7004,12 @@ class LoopRunner {
   state;
   tmux;
   agentRunner;
-  constructor(state, tmux, agentRunner) {
+  paths;
+  constructor(state, tmux, agentRunner, paths2 = paths) {
     this.state = state;
     this.tmux = tmux;
     this.agentRunner = agentRunner;
+    this.paths = paths2;
   }
   async run() {
     const existingRun = await this.state.loadRun();
@@ -6813,9 +7026,12 @@ class LoopRunner {
     const config = await this.state.loadConfig();
     const run = await this.state.createRun('.kagent/spec.md');
     const dirHash = getDirHash(process.cwd());
+    const totalReviewers = config.reviewPhases.reduce((sum, phase) => sum + phase.length, 0);
+    const phaseInfo = config.reviewPhases.length > 1 ? ` in ${config.reviewPhases.length} phases` : '';
     console.log(
-      `DEV LOOP [${run.id}]: ${config.reviewers.length} reviewers (${config.reviewers.join(', ')}), max ${config.maxIterations} iterations, conflict check after ${config.conflictCheckThreshold} failures`,
+      `DEV LOOP [${run.id}]: ${config.reviewPhases.flat().join(', ')} (${totalReviewers} reviewers${phaseInfo}), max ${config.maxIterations} iterations, conflict check after ${config.conflictCheckThreshold} failures`,
     );
+    console.log(`  Implementer: ${this.agentRunner.getSelectedImplementer()}`);
     let currentRun = run;
     let specContent;
     let checkpointRan = false;
@@ -6882,6 +7098,11 @@ Run 'dev-loop init' to create it.`);
         checkpointRan,
       };
     } catch (error) {
+      if (error instanceof AgentFailureError) {
+        await this.writeFailureMd(error.failureInfo);
+        await this.state.completeRun('failed', checkpointRan);
+        throw error;
+      }
       if (error instanceof ConflictError) {
         console.log(`
 ========================================`);
@@ -6964,34 +7185,85 @@ A conflict.md file has been generated.`);
       timeout: config.implementerTimeout,
     });
     if (implResult.timedOut) {
-      throw new Error('Implementer timed out');
+      const metric = {
+        labels: {
+          loop: String(iterNum),
+          phase: 'implementer',
+          binary: implResult.binary,
+          ordinal: '1',
+        },
+        durationMs: implResult.durationMs,
+        inputTokens: implResult.inputTokens,
+        outputTokens: implResult.outputTokens,
+        error: 'timeout',
+      };
+      await this.state.appendMetricSample(run.id, metric);
+      throw new AgentFailureError({
+        binary: implResult.binary,
+        error: 'timeout',
+        loop: iterNum,
+        iteration: iterNum,
+      });
     }
+    if (implResult.exitCode !== 0) {
+      const metric = {
+        labels: {
+          loop: String(iterNum),
+          phase: 'implementer',
+          binary: implResult.binary,
+          ordinal: '1',
+        },
+        durationMs: implResult.durationMs,
+        inputTokens: implResult.inputTokens,
+        outputTokens: implResult.outputTokens,
+        error: `exit_code_${implResult.exitCode}`,
+      };
+      await this.state.appendMetricSample(run.id, metric);
+      throw new AgentFailureError({
+        binary: implResult.binary,
+        error: `exited with code ${implResult.exitCode}`,
+        loop: iterNum,
+        iteration: iterNum,
+      });
+    }
+    const implMetric = {
+      labels: {
+        loop: String(iterNum),
+        phase: 'implementer',
+        binary: implResult.binary,
+        ordinal: '1',
+      },
+      durationMs: implResult.durationMs,
+      inputTokens: implResult.inputTokens,
+      outputTokens: implResult.outputTokens,
+    };
+    await this.state.appendMetricSample(run.id, implMetric);
     await this.assertRunActive();
     const learnings = await this.state.readLearnings();
     if (learnings) {
       await this.state.addLearning(learnings);
     }
     await this.state.updatePhase('reviewing');
-    const reviewerResults = await this.agentRunner.runReviewers({
-      runId: run.id,
-      iteration: iterNum,
-      dirHash,
-      prompts: iterData.reviewerPrompts,
-      timeout: config.reviewerTimeout,
-    });
+    const allReviewerResults = await this.runPhasedReviews(run, config, iterNum, dirHash, iterData);
     await this.assertRunActive();
     await this.state.updatePhase('done');
-    const verdicts = reviewerResults.map(r => ({
+    const verdictsList = allReviewerResults.map(r => ({
       reviewerIndex: r.reviewerIndex,
       verdict: r.verdict,
       binary: r.binary,
+      phase: r.phaseIndex,
+      error: r.error,
     }));
-    const consensusResult = checkConsensus(verdicts);
+    const consensusResult = checkConsensus(
+      verdictsList,
+      config.reviewPhases.length,
+      Math.max(1, ...allReviewerResults.map(r => (r.phaseIndex ?? 0) + 1)),
+    );
     console.log(`Consensus: ${formatConsensusResult(consensusResult)}`);
-    const estimates = reviewerResults.map(r => r.completionEstimate).filter(e => e !== undefined);
+    const estimates = allReviewerResults.map(r => r.completionEstimate).filter(e => e !== undefined);
     if (estimates.length > 0) {
       const lowestEstimate = Math.min(...estimates);
-      const lowestEstimateReviewer = reviewerResults.find(r => r.completionEstimate === lowestEstimate);
+      const lowestEstimateReviewer = allReviewerResults.find(r => r.completionEstimate === lowestEstimate);
       const reviewerInfo = lowestEstimateReviewer ? ` (Reviewer ${lowestEstimateReviewer.reviewerIndex})` : '';
       const barWidth = 40;
       const filled = Math.round((lowestEstimate / 100) * barWidth);
@@ -7003,8 +7275,81 @@ A conflict.md file has been generated.`);
       iteration: iterNum,
       approved: consensusResult.approved,
       implementerResult: implResult,
-      reviewerResults,
+      reviewerResults: allReviewerResults,
     };
+  }
+  async runPhasedReviews(run, config, iterNum, dirHash, iterData) {
+    const allResults = [];
+    let globalReviewerIndex = 0;
+    let previousReviews;
+    if (iterNum > 1 && config.previousReviewPropagation > 0) {
+      previousReviews = (await this.state.loadArchivedReviews(run.id, iterNum - 1)) ?? undefined;
+      if (previousReviews) {
+        console.log(
+          `Loaded previous loop (${iterNum - 1}) reviews (propagation: ${(config.previousReviewPropagation * 100).toFixed(0)}%)`,
+        );
+      }
+    }
+    for (let phaseIdx = 0; phaseIdx < config.reviewPhases.length; phaseIdx++) {
+      const phaseReviewers = config.reviewPhases[phaseIdx].map(parseReviewerConfig);
+      const sawPrevReviewsFlags = [];
+      const phasePrompts = phaseReviewers.map((_, i) => {
+        const shouldSeePrevious = previousReviews && Math.random() < config.previousReviewPropagation;
+        sawPrevReviewsFlags.push(!!shouldSeePrevious);
+        return {
+          reviewerIndex: globalReviewerIndex + i,
+          prompt: buildReviewerPrompt({
+            iteration: iterNum,
+            reviewerIndex: globalReviewerIndex + i,
+            specPath: run.spec,
+            specContent: iterData.spec,
+            previousReviews: shouldSeePrevious || undefined,
+          }),
+        };
+      });
+      const phaseResults = await this.agentRunner.runReviewersPhase({
+        runId: run.id,
+        iteration: iterNum,
+        dirHash,
+        phaseIndex: phaseIdx,
+        reviewers: phaseReviewers,
+        prompts: phasePrompts,
+        timeout: config.reviewerTimeout,
+      });
+      for (let i = 0; i < phaseResults.length; i++) {
+        const r = phaseResults[i];
+        const metric = {
+          labels: {
+            loop: String(iterNum),
+            phase: 'reviewer',
+            binary: r.binary,
+            ordinal: String(i + 1),
+            phaseIdx: String(phaseIdx),
+            phaseSize: String(phaseReviewers.length),
+            noVerdictFail: String(phaseReviewers[i]?.noVerdictAsFailure ? 1 : 0),
+            sawPrevReviews: String(sawPrevReviewsFlags[i] ? 1 : 0),
+          },
+          durationMs: r.durationMs,
+          inputTokens: r.inputTokens,
+          outputTokens: r.outputTokens,
+          error: r.error,
+        };
+        await this.state.appendMetricSample(run.id, metric);
+      }
+      allResults.push(...phaseResults);
+      globalReviewerIndex += phaseReviewers.length;
+      const anyRejected = phaseResults.some(r => r.verdict === 'rejected');
+      const isFirstLoop = iterNum === 1;
+      if (anyRejected && !(config.firstLoopFullReview && isFirstLoop)) {
+        if (config.reviewPhases.length > 1) {
+          console.log(
+            `Phase ${phaseIdx} rejection \u2192 short-circuiting (skipping ${config.reviewPhases.length - phaseIdx - 1} remaining phase(s))`,
+          );
+        }
+        break;
+      }
+    }
+    return allResults;
   }
   async runCheckpoint(run, config, dirHash, specContent) {
     await this.assertRunActive();
@@ -7020,6 +7365,25 @@ A conflict.md file has been generated.`);
     await this.assertRunActive();
     await this.state.updatePhase('done');
     return checkpointResult;
+  }
+  async writeFailureMd(info) {
+    const content = `# Agent Failure
+
+## What Failed
+Implementer "${info.binary}" ${info.error}
+
+## When
+Loop ${info.loop}, iteration ${info.iteration}
+
+## Next Steps
+1. Investigate the log files in \`.kagent/logs/\`
+2. Check if the spec is achievable
+3. Fix any configuration issues
+4. Remove this file and restart: \`dev-loop run\`
+`;
+    const { writeFile: writeFile2, mkdir: mkdir2 } = await import('fs/promises');
+    await mkdir2('.kagent', { recursive: true });
+    await writeFile2(this.paths.failureMd, content, 'utf-8');
   }
 }
 
@@ -7053,27 +7417,79 @@ function parseVerdictFromText(text) {
   }
   return null;
 }
-function determineVerdict(params) {
-  const { verdictFileContent, reviewFileContent, exitCode, timedOut } = params;
-  if (timedOut) {
-    return 'rejected';
+
+// src/stream/parse.ts
+function tryParseJson(line) {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return normalizeEvent(parsed);
+  } catch {
+    return null;
   }
-  if (exitCode !== 0) {
-    return 'rejected';
+}
+function normalizeEvent(obj) {
+  if (!obj || typeof obj !== 'object') {
+    return { type: 'unknown', raw: obj };
   }
-  if (verdictFileContent) {
-    const parsed = parseVerdictFile2(verdictFileContent);
-    if (parsed.verdict) {
-      return parsed.verdict;
-    }
+  const o = obj;
+  if (o.type === 'system' && typeof o.message === 'string') {
+    return { type: 'system', message: o.message, timestamp: o.timestamp };
   }
-  if (reviewFileContent) {
-    const fromText = parseVerdictFromText(reviewFileContent);
-    if (fromText) {
-      return fromText;
-    }
+  if (o.type === 'assistant' && o.message) {
+    return { type: 'assistant', message: o.message };
   }
-  return 'rejected';
+  if (o.type === 'user' && o.message) {
+    return { type: 'user', message: o.message };
+  }
+  if (o.type === 'result' && o.result) {
+    return { type: 'result', result: o.result };
+  }
+  if (o.type === 'error' && o.error) {
+    return { type: 'error', error: o.error };
+  }
+  return { type: 'unknown', raw: obj };
+}
+function extractText(content) {
+  return content
+    .filter(c => c.type === 'text')
+    .map(c => c.text)
+    .join('');
+}
+function extractToolUses(content) {
+  return content.filter(c => c.type === 'tool_use').map(c => ({ name: c.name, input: c.input }));
+}
+async function extractTokensFromLog(logFilePath) {
+  try {
+    const { readFile: readFile3 } = await import('fs/promises');
+    const content = await readFile3(logFilePath, 'utf-8');
+    return extractTokensFromContent(content);
+  } catch {
+    return {};
+  }
+}
+function extractTokensFromContent(content) {
+  const result = {};
+  for (const line of content.split(`
+`)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed.type === 'result') {
+        const usage = parsed.usage;
+        if (usage && typeof usage.input_tokens === 'number') {
+          result.inputTokens = usage.input_tokens;
+        }
+        if (usage && typeof usage.output_tokens === 'number') {
+          result.outputTokens = usage.output_tokens;
+        }
+        break;
+      }
+    } catch {}
+  }
+  return result;
 }
 
 // src/agents/runner.ts
@@ -7082,21 +7498,21 @@ var LOGS_BASE_DIR = '.kagent/logs';
 class AgentRunner {
   tmux;
   state;
-  implementerBinary;
+  config;
   reviewerBinaries;
   checkpointerBinary;
-  constructor(
-    tmux,
-    state,
-    implementerBinary = 'claude',
-    reviewerBinaries = ['claude-reviewer-zai'],
-    checkpointerBinary,
-  ) {
+  constructor(tmux, state, config) {
     this.tmux = tmux;
     this.state = state;
-    this.implementerBinary = implementerBinary;
-    this.reviewerBinaries = reviewerBinaries;
-    this.checkpointerBinary = checkpointerBinary;
+    this.config = config;
+    this.reviewerBinaries = config.reviewPhases.flat();
+    this.checkpointerBinary = config.conflictChecker ?? getPrimaryImplementer(config);
+  }
+  selectImplementer() {
+    return selectImplementer(this.config);
+  }
+  getSelectedImplementer() {
+    return getPrimaryImplementer(this.config);
   }
   getLogsDir(runId) {
     return path2.join(LOGS_BASE_DIR, runId);
@@ -7113,13 +7529,14 @@ class AgentRunner {
   }
   async runImplementer(params) {
     const { runId, iteration, dirHash, prompt, timeout } = params;
+    const implementerBinary = this.selectImplementer();
     const sessionId = generateId();
     const tmuxSession = `devloop-${dirHash}-${runId}-${iteration}-impl`;
     const session = {
       id: sessionId,
       iteration,
       role: 'implementer',
-      binary: this.implementerBinary,
+      binary: implementerBinary,
       tmuxSession,
       status: 'running',
       startedAt: new Date().toISOString(),
@@ -7128,8 +7545,8 @@ class AgentRunner {
     const promptFile = await this.writePromptFile(sessionId, prompt);
     await this.ensureLogsDir(runId);
     const logFile = this.getLogPath(runId, 'impl', iteration);
-    const command = `cat "${promptFile}" | ${this.implementerBinary} --dangerously-skip-permissions --verbose --print --session-id "${sessionId}" --output-format stream-json 2>&1 | tee "${logFile}" | dev-loop stream`;
-    console.log(`Implementing in tmux: ${tmuxSession} (log: ${logFile})`);
+    const command = `cat "${promptFile}" | ${implementerBinary} --dangerously-skip-permissions --verbose --print --session-id "${sessionId}" --output-format stream-json 2>&1 | tee "${logFile}" | dev-loop stream`;
+    console.log(`Implementing in tmux: ${tmuxSession} (binary: ${implementerBinary}, log: ${logFile})`);
     const result = await this.tmux.runInSession({
       sessionName: tmuxSession,
       command,
@@ -7141,6 +7558,7 @@ class AgentRunner {
     await this.state.saveSession(session);
     await this.cleanupPromptFile(promptFile);
     const learnings = await this.state.readLearnings();
+    const tokens = await extractTokensFromLog(logFile);
     return {
       sessionId,
       tmuxSession,
@@ -7148,33 +7566,54 @@ class AgentRunner {
       exitCode: result.exitCode,
       timedOut: result.timedOut,
       learnings,
+      binary: implementerBinary,
+      inputTokens: tokens.inputTokens,
+      outputTokens: tokens.outputTokens,
     };
   }
-  async runReviewers(params) {
-    const { runId, iteration, dirHash, prompts, timeout } = params;
-    console.log(`Running ${prompts.length} reviewers in parallel`);
+  async runReviewersPhase(params) {
+    const { runId, iteration, dirHash, phaseIndex, reviewers, prompts, timeout } = params;
+    console.log(`Running phase ${phaseIndex} reviewers (${reviewers.map(r => r.binary).join(', ')}) in parallel`);
     const results = await Promise.all(
-      prompts.map(p =>
+      prompts.map((p, ordinal) =>
         this.runReviewer({
           runId,
           iteration,
           dirHash,
           reviewerIndex: p.reviewerIndex,
+          binary: reviewers[ordinal]?.binary ?? reviewers[0].binary,
           prompt: p.prompt,
           timeout,
+          phaseIndex,
+          ordinal: ordinal + 1,
+          noVerdictAsFailure: reviewers[ordinal]?.noVerdictAsFailure ?? true,
         }),
       ),
     );
     const approved = results.filter(r => r.verdict === 'approved').length;
     const rejected = results.filter(r => r.verdict === 'rejected').length;
-    console.log(`Verdicts: ${approved} approved, ${rejected} rejected`);
+    console.log(`Phase ${phaseIndex} verdicts: ${approved} approved, ${rejected} rejected`);
     return results;
   }
+  async runReviewers(params) {
+    const { runId, iteration, dirHash, prompts, timeout } = params;
+    const allReviewers = this.config.reviewPhases.flat().map(parseReviewerConfig);
+    return this.runReviewersPhase({
+      runId,
+      iteration,
+      dirHash,
+      phaseIndex: 0,
+      reviewers: allReviewers,
+      prompts,
+      timeout,
+    });
+  }
   async runReviewer(params) {
-    const { runId, iteration, dirHash, reviewerIndex, prompt, timeout } = params;
+    const { runId, iteration, dirHash, reviewerIndex, prompt, timeout, phaseIndex, ordinal, noVerdictAsFailure } =
+      params;
+    const reviewerBinary = params.binary ?? this.reviewerBinaries[reviewerIndex % this.reviewerBinaries.length];
     const sessionId = generateId();
     const tmuxSession = `devloop-${dirHash}-${runId}-${iteration}-rev-${reviewerIndex}`;
-    const reviewerBinary = this.reviewerBinaries[reviewerIndex % this.reviewerBinaries.length];
     const session = {
       id: sessionId,
       iteration,
@@ -7201,11 +7640,18 @@ class AgentRunner {
     const verdictContent = await this.safeReadFile(verdictPath);
     const reviewPath = `.kagent/current/reviews/reviewer-${reviewerIndex}.md`;
     const reviewContent = await this.safeReadFile(reviewPath);
-    const verdict = determineVerdict({
+    let error;
+    const verdict = this.determineReviewerVerdict({
       verdictFileContent: verdictContent,
       reviewFileContent: reviewContent,
       exitCode: result.exitCode,
       timedOut: result.timedOut,
+      reviewerBinary,
+      phaseIndex,
+      noVerdictAsFailure: noVerdictAsFailure ?? true,
+      onError: msg => {
+        error = msg;
+      },
     });
     let reasoning = '';
     let completionEstimate;
@@ -7220,9 +7666,10 @@ class AgentRunner {
     await this.state.saveSession(session);
     await this.copyReviewFiles(runId, iteration, reviewerIndex, reviewerBinary, reviewContent, verdictContent);
     await this.cleanupPromptFile(promptFile);
+    const tokens = await extractTokensFromLog(logFile);
     const icon = verdict === 'approved' ? '\u2713' : '\u2717';
     console.log(
-      `  ${icon} Reviewer ${reviewerIndex} (${reviewerBinary}): ${verdict}${completionEstimate !== undefined ? ` (${completionEstimate}%)` : ''}`,
+      `  ${icon} Reviewer ${reviewerIndex} (${reviewerBinary})${phaseIndex !== undefined ? ` (phase ${phaseIndex})` : ''}: ${verdict}${completionEstimate !== undefined ? ` (${completionEstimate}%)` : ''}`,
     );
     return {
       sessionId,
@@ -7235,13 +7682,18 @@ class AgentRunner {
       verdict,
       reasoning,
       completionEstimate,
+      phaseIndex,
+      ordinal,
+      inputTokens: tokens.inputTokens,
+      outputTokens: tokens.outputTokens,
+      error,
     };
   }
   async runCheckpointer(params) {
     const { runId, iteration, dirHash, specPath, specContent, timeout } = params;
     const sessionId = generateId();
     const tmuxSession = `devloop-${dirHash}-${runId}-${iteration}-checkpoint`;
-    const binary = this.checkpointerBinary ?? this.implementerBinary;
+    const binary = this.checkpointerBinary;
     const session = {
       id: sessionId,
       iteration,
@@ -7332,6 +7784,53 @@ class AgentRunner {
       remainingCriteria,
     };
   }
+  determineReviewerVerdict(params) {
+    const {
+      verdictFileContent,
+      reviewFileContent,
+      exitCode,
+      timedOut,
+      reviewerBinary,
+      phaseIndex,
+      noVerdictAsFailure,
+      onError,
+    } = params;
+    const phaseStr = phaseIndex !== undefined ? ` (phase ${phaseIndex})` : '';
+    if (timedOut) {
+      console.log(`\u26A0 Reviewer "${reviewerBinary}"${phaseStr} timed out \u2014 treating as rejection`);
+      onError('timeout');
+      return 'rejected';
+    }
+    if (exitCode !== 0) {
+      console.log(
+        `\u26A0 Reviewer "${reviewerBinary}"${phaseStr} exited with code ${exitCode} \u2014 treating as rejection`,
+      );
+      onError(`exit_code_${exitCode}`);
+      return 'rejected';
+    }
+    if (verdictFileContent) {
+      const parsed = parseVerdictFile2(verdictFileContent);
+      if (parsed.verdict) {
+        return parsed.verdict;
+      }
+    }
+    if (reviewFileContent) {
+      const fromText = parseVerdictFromText(reviewFileContent);
+      if (fromText) {
+        return fromText;
+      }
+    }
+    if (noVerdictAsFailure) {
+      console.log(`\u26A0 Reviewer "${reviewerBinary}"${phaseStr} produced no verdict \u2014 treating as rejection`);
+      onError('no_verdict');
+      return 'rejected';
+    } else {
+      console.log(
+        `\u26A0 Reviewer "${reviewerBinary}"${phaseStr} produced no verdict (likely hit token limit) \u2014 treating as approval`,
+      );
+      return 'approved';
+    }
+  }
   async writePromptFile(sessionId, prompt) {
     const tmpDir = '/tmp/dev-loop/prompts';
     await fs3.mkdir(tmpDir, { recursive: true });
@@ -7382,13 +7881,7 @@ async function handler2(deps) {
       process.exit(1);
     }
     const config = await deps.state.loadConfig();
-    const agentRunner = new AgentRunner(
-      deps.tmux,
-      deps.state,
-      config.implementer,
-      config.reviewers,
-      config.conflictChecker,
-    );
+    const agentRunner = new AgentRunner(deps.tmux, deps.state, config);
     const loopRunner = new LoopRunner(deps.state, deps.tmux, agentRunner);
     const result = await loopRunner.run();
     console.log('');
@@ -7397,7 +7890,20 @@ async function handler2(deps) {
       process.exit(2);
     }
   } catch (err) {
-    console.error(`Error: ${err.message}`);
+    const error = err;
+    if (error.name === 'AgentFailureError') {
+      console.log('');
+      console.log('========================================');
+      console.log('AGENT FAILURE');
+      console.log('========================================');
+      console.log(error.message);
+      console.log('');
+      console.log('A failure.md file has been generated.');
+      console.log('Please resolve and restart the loop.');
+      console.log('========================================');
+      process.exit(3);
+    }
+    console.error(`Error: ${error.message}`);
     process.exit(1);
   }
 }
@@ -8849,8 +9355,23 @@ async function handler3(state) {
     console.log(import_picocolors.default.bold('Dev Loop Status'));
     console.log('');
     console.log(import_picocolors.default.cyan('Config:'));
-    console.log(`  Implementer: ${config.implementer}`);
-    console.log(`  Reviewers: ${config.reviewers.join(', ')}`);
+    const implEntries = Object.entries(config.implementers);
+    if (implEntries.length === 1 && implEntries[0][1] === 1) {
+      console.log(`  Implementer: ${implEntries[0][0]}`);
+    } else {
+      console.log(`  Implementers:`);
+      for (const [binary, weight] of implEntries) {
+        console.log(`    ${binary} (weight: ${weight})`);
+      }
+    }
+    if (config.reviewPhases.length === 1) {
+      console.log(`  Reviewers: ${config.reviewPhases[0].join(', ')}`);
+    } else {
+      console.log(`  Review Phases:`);
+      for (let i = 0; i < config.reviewPhases.length; i++) {
+        console.log(`    Phase ${i}: ${config.reviewPhases[i].join(', ')}`);
+      }
+    }
     if (config.conflictChecker) {
       console.log(`  Conflict checker: ${config.conflictChecker}`);
     }
@@ -8873,6 +9394,10 @@ async function handler3(state) {
     console.log(`  Iteration: ${run.iteration} / ${config.maxIterations}`);
     console.log(`  Phase: ${run.phase}`);
     console.log(`  Started: ${format(new Date(run.startedAt), 'yyyy-MM-dd HH:mm:ss')}`);
+    const elapsedMs = Date.now() - new Date(run.startedAt).getTime();
+    const elapsedMins = Math.floor(elapsedMs / 60000);
+    const elapsedSecs = Math.floor((elapsedMs % 60000) / 1000);
+    console.log(`  Elapsed: ${elapsedMins}m ${elapsedSecs}s`);
     if (run.consecutiveFailures > 0) {
       const failureColor =
         run.consecutiveFailures >= config.conflictCheckThreshold
@@ -8883,6 +9408,41 @@ async function handler3(state) {
       );
     }
     console.log('');
+    try {
+      const samples = await state.loadMetricSamples(run.id);
+      if (samples.length > 0) {
+        console.log(import_picocolors.default.cyan('Metrics:'));
+        const totalDurationMs = samples.reduce((sum, s) => sum + s.durationMs, 0);
+        const totalInputTokens = samples.reduce((sum, s) => sum + (s.inputTokens ?? 0), 0);
+        const totalOutputTokens = samples.reduce((sum, s) => sum + (s.outputTokens ?? 0), 0);
+        const totalTokens = totalInputTokens + totalOutputTokens;
+        console.log(`  Total time: ${Math.round(totalDurationMs / 1000)}s`);
+        if (totalTokens > 0) {
+          console.log(
+            `  Total tokens: ${totalTokens.toLocaleString()} (${totalInputTokens.toLocaleString()} in / ${totalOutputTokens.toLocaleString()} out)`,
+          );
+        } else {
+          console.log(`  Tokens: not available`);
+        }
+        console.log(`  Samples: ${samples.length}`);
+        const byLoop = new Map();
+        for (const s of samples) {
+          const loop = s.labels.loop;
+          if (!byLoop.has(loop)) byLoop.set(loop, []);
+          byLoop.get(loop).push(s);
+        }
+        console.log(`  Per-loop:`);
+        for (const [loop, loopSamples] of Array.from(byLoop.entries()).sort((a, b) => Number(a[0]) - Number(b[0]))) {
+          const loopDuration = loopSamples.reduce((sum, s) => sum + s.durationMs, 0);
+          const loopInput = loopSamples.reduce((sum, s) => sum + (s.inputTokens ?? 0), 0);
+          const loopOutput = loopSamples.reduce((sum, s) => sum + (s.outputTokens ?? 0), 0);
+          const loopTotal = loopInput + loopOutput;
+          const tokenStr = loopTotal > 0 ? `, ${loopTotal.toLocaleString()} tok` : '';
+          console.log(`    Loop ${loop}: ${Math.round(loopDuration / 1000)}s${tokenStr}`);
+        }
+        console.log('');
+      }
+    } catch {}
     const checkpointResult = await state.loadCheckpointResult();
     if (checkpointResult) {
       const outcomeColors = {
@@ -8936,9 +9496,284 @@ async function handler3(state) {
         console.log('');
       }
     }
-    console.log(import_picocolors.default.dim('Commands: dev-loop attach | dev-loop cancel | dev-loop logs'));
+    console.log(
+      import_picocolors.default.dim('Commands: dev-loop attach | dev-loop cancel | dev-loop logs | dev-loop metrics'),
+    );
   } catch (err) {
     console.error(import_picocolors.default.red(`Error: ${err.message}`));
+    process.exit(1);
+  }
+}
+
+// src/cli/metrics.ts
+function parseQuery(query) {
+  if (!query) return null;
+  const trimmed = query.trim();
+  const opMatch = trimmed.match(/^(\w+)\s+by\s*\(([^)]*)\)/);
+  if (!opMatch) return null;
+  const operator = opMatch[1];
+  if (!['sum', 'avg', 'min', 'max'].includes(operator)) return null;
+  const groupBy = opMatch[2]
+    .split(',')
+    .map(s => s.trim())
+    .filter(s => s.length > 0);
+  const remainder = trimmed.slice(opMatch[0].length).trim();
+  let matcherStr;
+  if (remainder.length === 0) {
+  } else if (remainder.startsWith('(') && remainder.endsWith(')')) {
+    const inner = remainder.slice(1, -1).trim();
+    if (inner.startsWith('{') && inner.endsWith('}')) {
+      matcherStr = inner.slice(1, -1).trim();
+    } else {
+      matcherStr = inner;
+    }
+  } else if (remainder.startsWith('{') && remainder.endsWith('}')) {
+    matcherStr = remainder.slice(1, -1).trim();
+  } else {
+    return null;
+  }
+  const matchers = [];
+  if (matcherStr) {
+    const pairs = matcherStr.split(',');
+    for (const pair of pairs) {
+      const eqIndex = pair.indexOf('=');
+      if (eqIndex > 0) {
+        const key = pair.slice(0, eqIndex).trim();
+        let value = pair.slice(eqIndex + 1).trim();
+        if ((value.startsWith("'") && value.endsWith("'")) || (value.startsWith('"') && value.endsWith('"'))) {
+          value = value.slice(1, -1);
+        }
+        if (key && value) {
+          matchers.push({ key, value });
+        }
+      }
+    }
+  }
+  return { operator, groupBy, matchers };
+}
+function matchesAll(sample, matchers) {
+  const byKey = new Map();
+  for (const { key, value } of matchers) {
+    if (!byKey.has(key)) byKey.set(key, new Set());
+    byKey.get(key).add(value);
+  }
+  for (const [key, values] of byKey) {
+    if (!values.has(sample.labels[key])) return false;
+  }
+  return true;
+}
+function aggregate(samples, query) {
+  const filtered = samples.filter(s => matchesAll(s, query.matchers));
+  const groups = new Map();
+  for (const s of filtered) {
+    const key = query.groupBy.length === 0 ? '__all__' : query.groupBy.map(k => s.labels[k] ?? '').join('|');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(s);
+  }
+  return Object.fromEntries(groups);
+}
+function padRight(s, len) {
+  return s.length >= len ? s : s + ' '.repeat(len - s.length);
+}
+function padLeft(s, len) {
+  return s.length >= len ? s : ' '.repeat(len - s.length) + s;
+}
+function renderTable(rows, groupByKeys) {
+  if (rows.length === 0) {
+    return 'No matching samples.';
+  }
+  const keyWidth =
+    groupByKeys.length > 0 ? Math.max(12, ...rows.map(r => groupByKeys.map(k => r.key[k] ?? '').join('/').length)) : 0;
+  const numWidth = 14;
+  const sampleWidth = 8;
+  const lines = [];
+  if (groupByKeys.length > 0) {
+    const header = groupByKeys.join('/');
+    lines.push(
+      padRight(header, keyWidth) +
+        padLeft('duration_s', numWidth) +
+        padLeft('input_tokens', numWidth) +
+        padLeft('output_tokens', numWidth) +
+        padLeft('total_tokens', numWidth) +
+        padLeft('samples', sampleWidth),
+    );
+  } else {
+    lines.push(
+      padLeft('duration_s', numWidth) +
+        padLeft('input_tokens', numWidth) +
+        padLeft('output_tokens', numWidth) +
+        padLeft('total_tokens', numWidth) +
+        padLeft('samples', sampleWidth),
+    );
+  }
+  const totalWidth = keyWidth + numWidth * 4 + sampleWidth;
+  lines.push('-'.repeat(totalWidth));
+  const sortedRows = [...rows].sort((a, b) => {
+    if (groupByKeys.length === 0) return 0;
+    for (const k of groupByKeys) {
+      const av = a.key[k] ?? '';
+      const bv = b.key[k] ?? '';
+      if (av !== bv) return av.localeCompare(bv);
+    }
+    return 0;
+  });
+  for (const row of sortedRows) {
+    const keyStr = groupByKeys.length > 0 ? padRight(groupByKeys.map(k => row.key[k] ?? '').join('/'), keyWidth) : '';
+    lines.push(
+      keyStr +
+        padLeft(row.duration_s.toFixed(1), numWidth) +
+        padLeft(row.input_tokens.toLocaleString(), numWidth) +
+        padLeft(row.output_tokens.toLocaleString(), numWidth) +
+        padLeft(row.total_tokens.toLocaleString(), numWidth) +
+        padLeft(String(row.samples), sampleWidth),
+    );
+  }
+  return lines.join(`
+`);
+}
+function renderRawTable(samples) {
+  if (samples.length === 0) {
+    return 'No metric samples found.';
+  }
+  const sorted = [...samples].sort((a, b) => {
+    const loopA = parseInt(a.labels.loop ?? '0');
+    const loopB = parseInt(b.labels.loop ?? '0');
+    if (loopA !== loopB) return loopA - loopB;
+    const phaseOrder = { implementer: 0, reviewer: 1 };
+    const phaseA = phaseOrder[a.labels.phase] ?? 99;
+    const phaseB = phaseOrder[b.labels.phase] ?? 99;
+    if (phaseA !== phaseB) return phaseA - phaseB;
+    return parseInt(a.labels.ordinal ?? '0') - parseInt(b.labels.ordinal ?? '0');
+  });
+  const colWidths = {
+    loop: 6,
+    phase: 14,
+    binary: 25,
+    ordinal: 8,
+    phaseIdx: 6,
+    nvf: 4,
+    prev: 5,
+    duration: 12,
+    input: 14,
+    output: 14,
+    error: 12,
+  };
+  const lines = [];
+  lines.push(
+    padLeft('loop', colWidths.loop) +
+      padLeft('phase', colWidths.phase) +
+      padRight('binary', colWidths.binary) +
+      padLeft('ord', colWidths.ordinal) +
+      padLeft('pidx', colWidths.phaseIdx) +
+      padLeft('nvf', colWidths.nvf) +
+      padLeft('prev', colWidths.prev) +
+      padLeft('duration_s', colWidths.duration) +
+      padLeft('input_tok', colWidths.input) +
+      padLeft('output_tok', colWidths.output) +
+      padLeft('error', colWidths.error),
+  );
+  const totalWidth = Object.values(colWidths).reduce((sum, w) => sum + w, 0);
+  lines.push('-'.repeat(totalWidth));
+  for (const s of sorted) {
+    lines.push(
+      padLeft(s.labels.loop ?? '-', colWidths.loop) +
+        padLeft(s.labels.phase ?? '-', colWidths.phase) +
+        padRight(s.labels.binary ?? '-', colWidths.binary) +
+        padLeft(s.labels.ordinal ?? '-', colWidths.ordinal) +
+        padLeft(s.labels.phaseIdx ?? '-', colWidths.phaseIdx) +
+        padLeft(s.labels.noVerdictFail ?? '-', colWidths.nvf) +
+        padLeft(s.labels.sawPrevReviews ?? '-', colWidths.prev) +
+        padLeft((s.durationMs / 1000).toFixed(1), colWidths.duration) +
+        padLeft(String(s.inputTokens ?? '-'), colWidths.input) +
+        padLeft(String(s.outputTokens ?? '-'), colWidths.output) +
+        padLeft(s.error ?? '-', colWidths.error),
+    );
+  }
+  return lines.join(`
+`);
+}
+async function handler4(query, runFilter, state) {
+  try {
+    let samples;
+    if (runFilter) {
+      samples = await state.loadMetricSamples(runFilter);
+      if (samples.length === 0) {
+        console.log(`No metrics found for run: ${runFilter}`);
+        console.log(`Available runs: ${(await state.listMetricRuns()).join(', ') || 'none'}`);
+        return;
+      }
+    } else {
+      const runs = await state.listMetricRuns();
+      if (runs.length === 0) {
+        console.log('No metrics found. Run dev-loop run to generate metrics.');
+        return;
+      }
+      const latestRun = runs[runs.length - 1];
+      samples = await state.loadMetricSamples(latestRun);
+      if (samples.length === 0) {
+        console.log(`No metric samples found for run: ${latestRun}`);
+        return;
+      }
+      if (!runFilter) {
+        console.log(`Run: ${latestRun}`);
+        console.log('');
+      }
+    }
+    const parsedQuery = parseQuery(query);
+    if (!parsedQuery) {
+      console.log(renderRawTable(samples));
+    } else {
+      const groups = aggregate(samples, parsedQuery);
+      const rows = [];
+      for (const [key, groupSamples] of Object.entries(groups)) {
+        const duration_s = groupSamples.reduce((sum, s) => sum + s.durationMs, 0) / 1000;
+        const input_tokens = groupSamples.reduce((sum, s) => sum + (s.inputTokens ?? 0), 0);
+        const output_tokens = groupSamples.reduce((sum, s) => sum + (s.outputTokens ?? 0), 0);
+        let aggDuration;
+        let aggInput;
+        let aggOutput;
+        switch (parsedQuery.operator) {
+          case 'sum':
+            aggDuration = duration_s;
+            aggInput = input_tokens;
+            aggOutput = output_tokens;
+            break;
+          case 'avg':
+            aggDuration = duration_s / groupSamples.length;
+            aggInput = input_tokens / groupSamples.length;
+            aggOutput = output_tokens / groupSamples.length;
+            break;
+          case 'min':
+            aggDuration = Math.min(...groupSamples.map(s => s.durationMs)) / 1000;
+            aggInput = Math.min(...groupSamples.map(s => s.inputTokens ?? 0));
+            aggOutput = Math.min(...groupSamples.map(s => s.outputTokens ?? 0));
+            break;
+          case 'max':
+            aggDuration = Math.max(...groupSamples.map(s => s.durationMs)) / 1000;
+            aggInput = Math.max(...groupSamples.map(s => s.inputTokens ?? 0));
+            aggOutput = Math.max(...groupSamples.map(s => s.outputTokens ?? 0));
+            break;
+        }
+        const keyObj = {};
+        if (key !== '__all__' && parsedQuery.groupBy.length > 0) {
+          const parts = key.split('|');
+          parsedQuery.groupBy.forEach((k, i) => {
+            keyObj[k] = parts[i] ?? '';
+          });
+        }
+        rows.push({
+          key: keyObj,
+          duration_s: aggDuration,
+          input_tokens: Math.round(aggInput),
+          output_tokens: Math.round(aggOutput),
+          total_tokens: Math.round(aggInput) + Math.round(aggOutput),
+          samples: groupSamples.length,
+        });
+      }
+      console.log(renderTable(rows, parsedQuery.groupBy));
+    }
+  } catch (err) {
+    console.error(`Error: ${err.message}`);
     process.exit(1);
   }
 }
@@ -9333,7 +10168,7 @@ var r = {
 Object.keys(r.modifier);
 var iD = Object.keys(r.color);
 var CD = Object.keys(r.bgColor);
-[...iD, ...CD];
+[...iD];
 function rD() {
   const e = new Map();
   for (const [u, t] of Object.entries(r)) {
@@ -9980,7 +10815,7 @@ function formatSessionChoice(sessionName) {
     hint: sessionName,
   };
 }
-async function handler4(tmux) {
+async function handler5(tmux) {
   try {
     const sessions = await tmux.listSessions();
     if (sessions.length === 0) {
@@ -10007,7 +10842,7 @@ async function handler4(tmux) {
 }
 
 // src/cli/cancel.ts
-async function handler5(state, tmux) {
+async function handler6(state, tmux) {
   try {
     const run = await state.loadRun();
     let targetRunId = run?.id ?? null;
@@ -10106,6 +10941,18 @@ async function showHandler(runId, history, logs) {
     console.log(`Started: ${entry.startedAt}`);
     console.log(`Completed: ${entry.completedAt}`);
     console.log(`Iterations: ${entry.iterations}`);
+    if (entry.metricsSummary) {
+      const ms = entry.metricsSummary;
+      const durationMins = Math.round(ms.totalDurationMs / 60000);
+      const durationSecs = Math.round((ms.totalDurationMs % 60000) / 1000);
+      const totalTokens = ms.totalInputTokens + ms.totalOutputTokens;
+      console.log(`Duration: ${durationMins}m ${durationSecs}s`);
+      if (totalTokens > 0) {
+        console.log(
+          `Tokens: ${totalTokens.toLocaleString()} (${ms.totalInputTokens.toLocaleString()} in / ${ms.totalOutputTokens.toLocaleString()} out)`,
+        );
+      }
+    }
     if (hasLogs) {
       console.log(`Logs: ${import_picocolors4.default.green(`${runLogs.length} file(s) available`)}`);
     }
@@ -10529,7 +11376,7 @@ async function clearRunLogs(runId) {
 
 // src/cli/remove.ts
 var import_picocolors6 = __toESM(require_picocolors(), 1);
-async function handler6(state) {
+async function handler7(state) {
   try {
     console.log('Removing dev-loop state (history preserved)...');
     await state.destroy();
@@ -10538,49 +11385,6 @@ async function handler6(state) {
     console.error(import_picocolors6.default.red(`Error: ${err.message}`));
     process.exit(1);
   }
-}
-
-// src/stream/parse.ts
-function tryParseJson(line) {
-  const trimmed = line.trim();
-  if (!trimmed) return null;
-  try {
-    const parsed = JSON.parse(trimmed);
-    return normalizeEvent(parsed);
-  } catch {
-    return null;
-  }
-}
-function normalizeEvent(obj) {
-  if (!obj || typeof obj !== 'object') {
-    return { type: 'unknown', raw: obj };
-  }
-  const o2 = obj;
-  if (o2.type === 'system' && typeof o2.message === 'string') {
-    return { type: 'system', message: o2.message, timestamp: o2.timestamp };
-  }
-  if (o2.type === 'assistant' && o2.message) {
-    return { type: 'assistant', message: o2.message };
-  }
-  if (o2.type === 'user' && o2.message) {
-    return { type: 'user', message: o2.message };
-  }
-  if (o2.type === 'result' && o2.result) {
-    return { type: 'result', result: o2.result };
-  }
-  if (o2.type === 'error' && o2.error) {
-    return { type: 'error', error: o2.error };
-  }
-  return { type: 'unknown', raw: obj };
-}
-function extractText(content) {
-  return content
-    .filter(c => c.type === 'text')
-    .map(c => c.text)
-    .join('');
-}
-function extractToolUses(content) {
-  return content.filter(c => c.type === 'tool_use').map(c => ({ name: c.name, input: c.input }));
 }
 
 // src/stream/format.ts
@@ -10646,7 +11450,7 @@ function formatResult(result) {
 }
 
 // src/cli/stream.ts
-async function handler7() {
+async function handler8() {
   const decoder = new TextDecoder();
   let buffer = '';
   for await (const chunk of Bun.stdin.stream()) {
@@ -10888,7 +11692,7 @@ function formatResult2(result) {
   return lines.join(`
 `);
 }
-async function handler8(pr, opts) {
+async function handler9(pr, opts) {
   const interval = parseInt(opts.interval ?? '60', 10) * 1000;
   const ghCheck = await exec(['gh', '--version']);
   if (ghCheck.exitCode !== 0) {
@@ -10920,13 +11724,21 @@ function createCli(deps) {
   program2
     .command('init')
     .description('Initialize dev-loop configuration (spec + config)')
-    .option('--implementer <binary>', 'implementer binary name', 'claude')
-    .option('--reviewers <list>', 'reviewer binaries (comma-separated)', 'claude-reviewer-zai')
+    .option('--implementer <binary>', 'implementer binary name')
+    .option('--implementers <list>', 'implementer binaries with weights (e.g. "a:8,b:2")')
+    .option('--reviewers <list>', 'reviewer binaries (comma-separated, single phase)', 'claude-reviewer-zai')
+    .option('--review-phases <phases>', 'review phases (pipe-separated, e.g. "a,b|c")')
     .option('--conflict-checker <binary>', 'conflict checker binary name (defaults to implementer)')
     .option('--max-iterations <n>', 'maximum iterations', '10')
     .option('--implementer-timeout <mins>', 'implementer timeout in minutes', '30')
     .option('--reviewer-timeout <mins>', 'reviewer timeout in minutes', '15')
     .option('--conflict-check-threshold <n>', 'consecutive failures before conflict check', '3')
+    .option('--first-loop-full-review', 'run all review phases on the first loop (no short-circuit)')
+    .option(
+      '--previous-review-propagation <0-1>',
+      'probability (0\u20131) each reviewer sees previous loop reviews',
+      '0',
+    )
     .action(async opts => handler(opts, deps.state));
   program2
     .command('run')
@@ -10937,13 +11749,18 @@ function createCli(deps) {
     .description('Show current run state')
     .action(async () => handler3(deps.state));
   program2
+    .command('metrics [query]')
+    .description('Query metrics from runs')
+    .option('--run <runId>', 'filter to specific run')
+    .action(async (query, opts) => handler4(query, opts.run, deps.state));
+  program2
     .command('attach')
     .description('Attach to a running tmux session')
-    .action(async () => handler4(deps.tmux));
+    .action(async () => handler5(deps.tmux));
   program2
     .command('cancel')
     .description('Stop current run, kill tmux sessions')
-    .action(async () => handler5(deps.state, deps.tmux));
+    .action(async () => handler6(deps.state, deps.tmux));
   const historyGroup = program2.command('history').description('View run history');
   historyGroup
     .command('list')
@@ -10977,17 +11794,17 @@ function createCli(deps) {
   program2
     .command('remove')
     .description('Remove dev-loop state (preserves history)')
-    .action(async () => handler6(deps.state));
+    .action(async () => handler7(deps.state));
   program2
     .command('stream')
     .description('Process streaming JSON from stdin (internal use)')
-    .action(async () => handler7());
+    .action(async () => handler8());
   program2
     .command('poll-pr <pr-number>')
     .description('Poll a GitHub PR for CI, reviews, conflicts, and conversation status')
     .option('--repo <owner/repo>', 'GitHub repository (default: detect from current directory)')
     .option('--interval <seconds>', 'poll interval in seconds', '60')
-    .action(async (pr, opts) => handler8(pr, opts));
+    .action(async (pr, opts) => handler9(pr, opts));
   return program2;
 }
 
@@ -11002,12 +11819,13 @@ class StateService {
   async initProject(overrides = {}) {
     await this.fs.mkdir(this.paths.baseDir);
     await this.fs.mkdir(this.paths.historyDir);
+    await this.fs.mkdir(this.paths.metricsDir);
     if (!(await this.fs.exists(this.paths.spec))) {
       await this.fs.writeFile(this.paths.spec, SPEC_TEMPLATE);
     }
     if (await this.fs.exists(this.paths.config)) {
       const existing = await this.loadConfig();
-      await this.saveConfig({ ...existing, ...overrides });
+      await this.saveConfig(mergeConfig(overrides, existing));
     } else {
       await this.saveConfig(mergeConfig(overrides));
     }
@@ -11017,7 +11835,7 @@ class StateService {
   }
   async loadConfig() {
     const content = await this.fs.readFile(this.paths.config);
-    return parseConfig(JSON.parse(content));
+    return parseRawConfig(JSON.parse(content));
   }
   async saveConfig(cfg) {
     await this.fs.writeJson(this.paths.config, cfg);
@@ -11169,6 +11987,25 @@ class StateService {
     }
     await this.fs.mkdir(reviewsDir);
   }
+  async loadArchivedReviews(runId, iteration) {
+    const runReviewsDir = this.paths.runReviewsDir(runId);
+    if (!(await this.fs.exists(runReviewsDir))) return null;
+    const files = await this.fs.readdir(runReviewsDir);
+    const reviewFiles = files.filter(f => f.startsWith(`review-${iteration}-`) && f.endsWith('.md')).sort();
+    if (reviewFiles.length === 0) return null;
+    const sections = [];
+    for (const file of reviewFiles) {
+      const content = await this.fs.readFile(`${runReviewsDir}/${file}`);
+      sections.push(`### ${file}
+
+${content}`);
+    }
+    return sections.join(`
+
+---
+
+`);
+  }
   async saveCheckpointResult(result, iteration) {
     const checkpointResultPath = `${this.paths.currentDir}/checkpoint-result.json`;
     await this.fs.writeJson(checkpointResultPath, result);
@@ -11227,11 +12064,45 @@ class StateService {
     if (!(await this.fs.exists(this.paths.learnings))) return null;
     return this.fs.readFile(this.paths.learnings);
   }
+  async appendMetricSample(runId, sample) {
+    await this.fs.mkdir(this.paths.metricsDir);
+    const filePath = this.paths.metricsFile(runId);
+    const line =
+      JSON.stringify(sample) +
+      `
+`;
+    const { appendFile } = await import('fs/promises');
+    await appendFile(filePath, line, 'utf-8');
+  }
+  async loadMetricSamples(runId) {
+    const filePath = this.paths.metricsFile(runId);
+    if (!(await this.fs.exists(filePath))) return [];
+    const content = await this.fs.readFile(filePath);
+    const samples = [];
+    for (const line of content.split(`
+`)) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        samples.push(JSON.parse(trimmed));
+      } catch {}
+    }
+    return samples;
+  }
+  async listMetricRuns() {
+    if (!(await this.fs.exists(this.paths.metricsDir))) return [];
+    const files = await this.fs.readdir(this.paths.metricsDir);
+    return files
+      .filter(f => f.endsWith('.jsonl'))
+      .map(f => f.replace(/\.jsonl$/, ''))
+      .sort();
+  }
   async archiveRun(checkpointRan = false) {
     const run = await this.loadRun();
     if (!run) throw new Error('No run to archive');
     const sessions = await this.loadSessions();
     const cfg = await this.loadConfig();
+    const metricsSummary = await this.computeMetricsSummary(run.id);
     const entry = {
       id: run.id,
       spec: run.spec,
@@ -11242,11 +12113,25 @@ class StateService {
       completedAt: getCurrentTimestamp(),
       summary: await this.buildSummary(sessions, run.learnings),
       checkpointRan,
+      metricsSummary,
     };
     await this.fs.writeJson(this.paths.historyEntry(run.id), entry);
     await this.clearCheckpointResult();
     await this.fs.rm(this.paths.currentDir, { recursive: true });
     return entry;
+  }
+  async computeMetricsSummary(runId) {
+    const samples = await this.loadMetricSamples(runId);
+    if (samples.length === 0) return;
+    let totalDurationMs = 0;
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    for (const s of samples) {
+      totalDurationMs += s.durationMs;
+      totalInputTokens += s.inputTokens ?? 0;
+      totalOutputTokens += s.outputTokens ?? 0;
+    }
+    return { totalDurationMs, totalInputTokens, totalOutputTokens };
   }
   async buildSummary(sessions, learnings) {
     const byIteration = new Map();
@@ -11505,15 +12390,31 @@ function formatHistoryEntry(entry) {
   if (entry.checkpointRan) {
     lines.push(`  Checkpoint ran: ${import_picocolors9.default.cyan('yes')}`);
   }
+  if (entry.metricsSummary) {
+    const ms = entry.metricsSummary;
+    const durationMins = Math.round(ms.totalDurationMs / 60000);
+    const durationSecs = Math.round((ms.totalDurationMs % 60000) / 1000);
+    const totalTokens = ms.totalInputTokens + ms.totalOutputTokens;
+    lines.push(`  Duration: ${durationMins}m ${durationSecs}s`);
+    if (totalTokens > 0) {
+      lines.push(
+        `  Tokens: ${totalTokens.toLocaleString()} (${ms.totalInputTokens.toLocaleString()} in / ${ms.totalOutputTokens.toLocaleString()} out)`,
+      );
+    }
+  }
   lines.push('');
   for (const sum of entry.summary) {
     lines.push(`  Iteration ${sum.iteration}:`);
     lines.push(`    Duration: ${Math.round(sum.implementerDuration / 1000)}s`);
     const verdicts = sum.reviewerVerdicts
-      .map(
-        v =>
-          `${v.verdict === 'approved' ? import_picocolors9.default.green('\u2713') : import_picocolors9.default.red('\u2717')}`,
-      )
+      .map(v => {
+        const verdict =
+          v.verdict === 'approved'
+            ? import_picocolors9.default.green('\u2713')
+            : import_picocolors9.default.red('\u2717');
+        const binary = v.binary ? ` (${v.binary})` : '';
+        return `${verdict}${binary}`;
+      })
       .join(' ');
     lines.push(`    Verdicts: ${verdicts}`);
     if (sum.learnings.length > 0) {
@@ -11544,7 +12445,14 @@ function formatHistoryList(entries) {
     const date = format(new Date(e2.startedAt), 'MM-dd HH:mm');
     const status = formatStatus(e2.status);
     const checkpoint = e2.checkpointRan ? import_picocolors9.default.cyan(' \u26A1') : '';
-    return `${e2.id}  ${date}  ${status}  ${e2.iterations} iterations${checkpoint}`;
+    let metricsInfo = '';
+    if (e2.metricsSummary) {
+      const totalTokens = e2.metricsSummary.totalInputTokens + e2.metricsSummary.totalOutputTokens;
+      if (totalTokens > 0) {
+        metricsInfo = import_picocolors9.default.dim(` ${totalTokens.toLocaleString()} tokens`);
+      }
+    }
+    return `${e2.id}  ${date}  ${status}  ${e2.iterations} iterations${checkpoint}${metricsInfo}`;
   }).join(`
 `);
 }

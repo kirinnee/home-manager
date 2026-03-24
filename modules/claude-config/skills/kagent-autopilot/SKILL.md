@@ -62,14 +62,15 @@ ORCHESTRATOR (you = team lead)
 
 ## Glossary
 
-| Term           | Scope            | Description                                                            |
-| -------------- | ---------------- | ---------------------------------------------------------------------- |
-| **Iteration**  | Inner (dev-loop) | One implement-then-review pass. Controlled by `maxIterations`.         |
-| **Push cycle** | Outer (Phase 3)  | One round: push, CI/review check. Controlled by `maxPushCycles`.       |
-| **Plan**       | Phase 1 output   | Implementation plan for a portion of the task. Every task has ≥1 plan. |
-| **Conflict**   | Dev-loop exit 2  | The spec contains contradictory or ambiguous requirements.             |
-| **Phase**      | Top-level        | One of: plan, implementation, polish.                                  |
-| **Step**       | Per-phase        | A discrete action within a phase.                                      |
+| Term              | Scope            | Description                                                            |
+| ----------------- | ---------------- | ---------------------------------------------------------------------- |
+| **Iteration**     | Inner (dev-loop) | One implement-then-review pass. Controlled by `maxIterations`.         |
+| **Push cycle**    | Outer (Phase 3)  | One round: push, CI/review check. Controlled by `maxPushCycles`.       |
+| **Plan**          | Phase 1 output   | Implementation plan for a portion of the task. Every task has ≥1 plan. |
+| **Conflict**      | Dev-loop exit 2  | The spec contains contradictory or ambiguous requirements.             |
+| **Agent failure** | Dev-loop exit 3  | An agent crashed or timed out.                                         |
+| **Phase**         | Top-level        | One of: plan, implementation, polish.                                  |
+| **Step**          | Per-phase        | A discrete action within a phase.                                      |
 
 ## Two-Level State
 
@@ -151,31 +152,34 @@ echo "$(date -Iseconds) phase-transition from={old_phase} to={new_phase}" >> .ka
 
 ### Top-level state
 
-| Field                    | Type        | Description                                               |
-| ------------------------ | ----------- | --------------------------------------------------------- |
-| `version`                | number      | State schema version                                      |
-| `currentPhase`           | string      | `plan`, `implementation`, `polish`, `completed`, `failed` |
-| `rawArgument`            | string/null | Raw CLI argument                                          |
-| `ticketId`               | string/null | Detected ticket ID (PE-1234, CU-abc123)                   |
-| `ticketTitle`            | string/null | From ticket system                                        |
-| `ticketBody`             | string/null | From ticket system                                        |
-| `ticketStatus`           | string/null | Current status on taskboard                               |
-| `branch`                 | string      | Current branch name                                       |
-| `prNumber`               | number/null | GitHub PR number                                          |
-| `specVersion`            | number      | Current spec version (1, 2...)                            |
-| `specDir`                | string/null | Path to current spec dir (e.g., `spec/PE-1234/v1`)        |
-| `repoConfig`             | object      | Nested repo config (see below)                            |
-| `teamName`               | string/null | Team name for this session                                |
-| `subPlans`               | array       | Always an array (min 1 entry) — never null                |
-| `currentSubPlanIndex`    | number      | Current plan index (starts 0)                             |
-| `implementer`            | string      | Claude binary for implementation                          |
-| `reviewers`              | array       | Reviewer binaries                                         |
-| `maxIterations`          | number      | Inner loop limit                                          |
-| `implementerTimeout`     | number      | Minutes                                                   |
-| `reviewerTimeout`        | number      | Minutes                                                   |
-| `conflictCheckThreshold` | number      | Consecutive failures before conflict check                |
-| `conflictChecker`        | string      | Conflict checker binary                                   |
-| `maxPushCycles`          | number      | Outer loop limit (default 5)                              |
+| Field                       | Type        | Description                                               |
+| --------------------------- | ----------- | --------------------------------------------------------- |
+| `version`                   | number      | State schema version                                      |
+| `currentPhase`              | string      | `plan`, `implementation`, `polish`, `completed`, `failed` |
+| `rawArgument`               | string/null | Raw CLI argument                                          |
+| `ticketId`                  | string/null | Detected ticket ID (PE-1234, CU-abc123)                   |
+| `ticketTitle`               | string/null | From ticket system                                        |
+| `ticketBody`                | string/null | From ticket system                                        |
+| `ticketStatus`              | string/null | Current status on taskboard                               |
+| `branch`                    | string      | Current branch name                                       |
+| `prNumber`                  | number/null | GitHub PR number                                          |
+| `specVersion`               | number      | Current spec version (1, 2...)                            |
+| `specDir`                   | string/null | Path to current spec dir (e.g., `spec/PE-1234/v1`)        |
+| `repoConfig`                | object      | Nested repo config (see below)                            |
+| `teamName`                  | string/null | Team name for this session                                |
+| `subPlans`                  | array       | Always an array (min 1 entry) — never null                |
+| `currentSubPlanIndex`       | number      | Current plan index (starts 0)                             |
+| `implementer`               | string      | Claude binary for implementation                          |
+| `implementers`              | array       | Weighted implementer list (name:weight pairs)             |
+| `reviewPhases`              | array       | Review phases (pipe-separated per phase)                  |
+| `maxIterations`             | number      | Inner loop limit                                          |
+| `implementerTimeout`        | number      | Minutes                                                   |
+| `reviewerTimeout`           | number      | Minutes                                                   |
+| `conflictChecker`           | string      | Conflict checker binary                                   |
+| `conflictCheckThreshold`    | number      | Consecutive failures before conflict check                |
+| `firstLoopFullReview`       | boolean     | Always run all review phases on first iteration           |
+| `previousReviewPropagation` | number      | Probability (0-1) reviewers see prior loop reviews        |
+| `maxPushCycles`             | number      | Outer loop limit (default 5)                              |
 
 ### `repoConfig` (immutable per session)
 
@@ -294,7 +298,7 @@ After poller returns, resolvers are dispatched from `polish/steps/resolve.md`:
 5. **Require spec approval** — before entering autonomous loop
 6. **Challenge before building** — iteratively clarify specs and plans in chat (not AskUserQuestion), be devil's advocate
 7. **Firm spec = firm commitment** — don't proceed until all ambiguities resolved
-8. **Fully autonomous after approval** — only stop for spec conflict (exit 2) or push failure
+8. **Fully autonomous after approval** — only stop for spec conflict (exit 2), agent failure (exit 3), or push failure
 9. **Delegate to dev-loop** — don't duplicate its implement-then-review logic
 10. **Task specs describe WHAT, plans describe HOW** — neither contains exact code
 11. **Always use sub-plans** — minimum 1 plan per task (no single-spec branching), named `plan-N` (not `phase-N`)

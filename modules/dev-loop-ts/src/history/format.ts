@@ -13,6 +13,21 @@ export function formatHistoryEntry(entry: HistoryEntry): string {
   if (entry.checkpointRan) {
     lines.push(`  Checkpoint ran: ${pc.cyan('yes')}`);
   }
+
+  // Show metrics summary if available
+  if (entry.metricsSummary) {
+    const ms = entry.metricsSummary;
+    const durationMins = Math.round(ms.totalDurationMs / 60000);
+    const durationSecs = Math.round((ms.totalDurationMs % 60000) / 1000);
+    const totalTokens = ms.totalInputTokens + ms.totalOutputTokens;
+    lines.push(`  Duration: ${durationMins}m ${durationSecs}s`);
+    if (totalTokens > 0) {
+      lines.push(
+        `  Tokens: ${totalTokens.toLocaleString()} (${ms.totalInputTokens.toLocaleString()} in / ${ms.totalOutputTokens.toLocaleString()} out)`,
+      );
+    }
+  }
+
   lines.push('');
 
   for (const sum of entry.summary) {
@@ -20,7 +35,11 @@ export function formatHistoryEntry(entry: HistoryEntry): string {
     lines.push(`    Duration: ${Math.round(sum.implementerDuration / 1000)}s`);
 
     const verdicts = sum.reviewerVerdicts
-      .map(v => `${v.verdict === 'approved' ? pc.green('✓') : pc.red('✗')}`)
+      .map(v => {
+        const verdict = v.verdict === 'approved' ? pc.green('✓') : pc.red('✗');
+        const binary = v.binary ? ` (${v.binary})` : '';
+        return `${verdict}${binary}`;
+      })
       .join(' ');
     lines.push(`    Verdicts: ${verdicts}`);
 
@@ -56,7 +75,14 @@ export function formatHistoryList(entries: HistoryEntry[]): string {
       const date = format(new Date(e.startedAt), 'MM-dd HH:mm');
       const status = formatStatus(e.status);
       const checkpoint = e.checkpointRan ? pc.cyan(' ⚡') : '';
-      return `${e.id}  ${date}  ${status}  ${e.iterations} iterations${checkpoint}`;
+      let metricsInfo = '';
+      if (e.metricsSummary) {
+        const totalTokens = e.metricsSummary.totalInputTokens + e.metricsSummary.totalOutputTokens;
+        if (totalTokens > 0) {
+          metricsInfo = pc.dim(` ${totalTokens.toLocaleString()} tokens`);
+        }
+      }
+      return `${e.id}  ${date}  ${status}  ${e.iterations} iterations${checkpoint}${metricsInfo}`;
     })
     .join('\n');
 }

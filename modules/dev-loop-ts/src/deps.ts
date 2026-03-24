@@ -1,6 +1,7 @@
 import * as path from 'path';
 import * as fs from 'fs/promises';
-import type { Config, Run, Session, VerdictFile, HistoryEntry, CheckpointResult } from './types';
+import type { Config, Run, Session, HistoryEntry, CheckpointResult, MetricSample } from './types';
+export type { VerdictFile } from './types';
 import { DEFAULT_CONFIG } from './types';
 
 // ============================================================================
@@ -21,11 +22,14 @@ export interface Paths {
   readonly historyDir: string;
   readonly logsDir: string;
   readonly reviewsDir: string;
+  readonly metricsDir: string;
+  readonly failureMd: string;
   readonly historyEntry: (runId: string) => string;
   readonly verdictFile: (iteration: number, reviewerIndex: number) => string;
   readonly sessionFile: (sessionId: string) => string;
   readonly runLogsDir: (runId: string) => string;
   readonly runReviewsDir: (runId: string) => string;
+  readonly metricsFile: (runId: string) => string;
 }
 
 export interface FsService {
@@ -104,6 +108,10 @@ export interface StateService {
   backupSpec(runId: string): Promise<string>;
   loadSpec(): Promise<string>;
   saveSpec(content: string): Promise<void>;
+  // Metrics methods
+  appendMetricSample(runId: string, sample: MetricSample): Promise<void>;
+  loadMetricSamples(runId: string): Promise<MetricSample[]>;
+  listMetricRuns(): Promise<string[]>;
 }
 
 export interface HistoryService {
@@ -149,6 +157,7 @@ const EVIDENCE_DIR = `${CURRENT_DIR}/evidence`;
 const HISTORY_DIR = `${BASE_DIR}/history`;
 const LOGS_DIR = `${BASE_DIR}/logs`;
 const REVIEWS_DIR = `${BASE_DIR}/reviews`;
+const METRICS_DIR = `${BASE_DIR}/metrics`;
 
 export const paths: Paths = {
   baseDir: BASE_DIR,
@@ -164,11 +173,14 @@ export const paths: Paths = {
   historyDir: HISTORY_DIR,
   logsDir: LOGS_DIR,
   reviewsDir: REVIEWS_DIR,
+  metricsDir: METRICS_DIR,
+  failureMd: `${BASE_DIR}/failure.md`,
   historyEntry: (runId: string) => `${HISTORY_DIR}/${runId}.json`,
   verdictFile: (iteration: number, reviewerIndex: number) => `${VERDICTS_DIR}/${iteration}-${reviewerIndex}.json`,
   sessionFile: (sessionId: string) => `${SESSIONS_DIR}/${sessionId}.json`,
   runLogsDir: (runId: string) => `${LOGS_DIR}/${runId}`,
   runReviewsDir: (runId: string) => `${REVIEWS_DIR}/${runId}`,
+  metricsFile: (runId: string) => `${METRICS_DIR}/${runId}.jsonl`,
 };
 
 // ============================================================================

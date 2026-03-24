@@ -6,7 +6,7 @@ argument-hint: '[TASK_DESCRIPTION]'
 
 # KAgent Run - Spec-Driven Development with Multi-Reviewer Consensus
 
-An iterative development loop where an implementer works from a spec, and multiple reviewers evaluate the work in parallel. ALL reviewers must approve for the loop to complete.
+An iterative development loop where an implementer works from a spec, and multiple reviewers evaluate the work in phases. Review phases short-circuit on rejection — if any reviewer in a phase rejects, remaining phases are skipped.
 
 ## When to Use
 
@@ -19,7 +19,7 @@ An iterative development loop where an implementer works from a spec, and multip
 
 - `tmux` installed (brew install tmux / apt install tmux)
 - At least one `claude-*` binary available
-- For reviewers: `claude-reviewer-*` binaries configured
+- For reviewers: `claude-*` binaries configured (reviewer binaries or standard ones)
 
 ## Architecture
 
@@ -27,7 +27,7 @@ An iterative development loop where an implementer works from a spec, and multip
 ┌─────────────────────────────────────────────────────────────┐
 │ Phase 1: Interactive Setup (this session)                   │
 │   • Discover claude-* binaries                              │
-│   • User selects executor + reviewers                       │
+│   • User selects implementers (weighted) + reviewers (phases)│
 │   • Claude writes/refines spec, user approves               │
 │   • Initialize kagent in .kagent                            │
 │   • Ask user: start now or later?                           │
@@ -46,9 +46,15 @@ An iterative development loop where an implementer works from a spec, and multip
 │                                                             │
 │   The loop runs with:                                       │
 │     for each iteration:                                     │
+│       randomly pick implementer (weighted)                  │
 │       executor --print "implement..."                       │
-│       reviewers run IN PARALLEL                             │
-│     Until: ALL approve OR max iterations reached            │
+│       run review phases IN SEQUENCE:                        │
+│         phase 1: reviewers IN PARALLEL                      │
+│         if any reject → skip remaining phases, fix          │
+│         phase 2: reviewers IN PARALLEL                      │
+│         ...                                                 │
+│       Conflict check if consecutive failures ≥ threshold     │
+│     Until: ALL phases approved OR max iterations reached    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -60,35 +66,61 @@ An iterative development loop where an implementer works from a spec, and multip
 compgen -c | grep '^claude' | sort -u
 ```
 
-### Step 2: User Selects Executor
+### Step 2: Select Implementers (Weighted)
 
 Use `AskUserQuestion`:
 
-- Header: "Executor"
-- Question: "Which claude binary should implement the code?"
+- Header: "Implementers"
+- Question: "Which claude binaries should implement? (weighted selection — weight after colon, e.g. auto-zai:2)"
 - Options: discovered binaries (prioritize non-reviewer ones)
+- Default: `claude-auto-zai:2,claude-auto-mm:1`
 
-### Step 3: User Selects Reviewers
+Weighted random selection picks an implementer per iteration based on weights. Higher weight = more likely.
+
+### Step 3: Select Reviewers (Phases + noVerdictAsFailure)
 
 Use `AskUserQuestion` with `multiSelect: true`:
 
 - Header: "Reviewers"
-- Question: "Which claude binaries should review? (select multiple)"
+- Question: "Which reviewers in which phases? (pipe separates phases, colon suffix controls noVerdictAsFailure)"
 - Options: discovered binaries (prioritize reviewer-\* ones)
+- Default: `"claude-auto-zai:1,claude-auto-mm:1,claude-auto-seed:0|claude-auto-zai:1,claude-auto-anthropic:1,claude-auto-gemini:0|claude-auto-codex:1,claude-auto-kimi:0"`
+
+**Review phase format:** `"phase1_reviewers|phase2_reviewers|phase3_reviewers"`
+
+- Reviewers within a phase run **in parallel**
+- Phases run **in sequence** — if any reviewer in a phase rejects, remaining phases are **skipped** (short-circuit)
+- First iteration runs **all reviewers across all phases in parallel** (no short-circuit) due to `--first-loop-full-review`
+
+**noVerdictAsFailure suffix** (after reviewer name, e.g. `auto-zai:1`):
+
+- `:1` = no verdict counts as **failure/rejection** (default) — used for critical reviewers
+- `:0` = no verdict counts as **success/approval** — used for optional/tolerant reviewers
 
 ### Step 4: Initialize KAgent
 
 ```bash
-dev-loop init --implementer <executor> --reviewers "<reviewer1,reviewer2>"
+dev-loop init \
+  --implementers "claude-auto-zai:2,claude-auto-mm:1" \
+  --review-phases "claude-auto-zai:1,claude-auto-mm:1,claude-auto-seed:0|claude-auto-zai:1,claude-auto-anthropic:1,claude-auto-gemini:0|claude-auto-codex:1,claude-auto-kimi:0" \
+  --conflict-checker claude-auto-zai \
+  --first-loop-full-review \
+  --previous-review-propagation 0.75
 ```
 
 Options:
 
-- `--implementer <binary>`: Implementer binary name (default: claude)
-- `--reviewers <list>`: Reviewer binaries, comma-separated (default: claude-reviewer-zai)
-- `--max-iterations <n>`: Maximum iterations (default: 10)
-- `--implementer-timeout <mins>`: Implementer timeout (default: 30)
-- `--reviewer-timeout <mins>`: Reviewer timeout (default: 15)
+| Option                          | Default                              | Description                                       |
+| ------------------------------- | ------------------------------------ | ------------------------------------------------- |
+| `--implementers`                | `claude-auto-zai:2,claude-auto-mm:1` | Weighted implementer list (name:weight pairs)     |
+| `--review-phases`               | see above                            | Pipe-separated review phases (parallel within)    |
+| `--conflict-checker`            | (none)                               | Binary to check for spec conflicts                |
+| `--conflict-check-threshold`    | `3`                                  | Consecutive failures before conflict check        |
+| `--first-loop-full-review`      | `true`                               | Always run all review phases on first iteration   |
+| `--previous-review-propagation` | `0.75`                               | Probability each reviewer sees prior loop reviews |
+| `--max-iterations`              | `10`                                 | Maximum iterations before giving up               |
+| `--implementer-timeout`         | `30`                                 | Implementer timeout in minutes                    |
+| `--reviewer-timeout`            | `15`                                 | Reviewer timeout in minutes                       |
 
 ### Step 5: Write Spec
 
@@ -98,7 +130,7 @@ Help the user refine the spec. Edit `.kagent/spec.md` using the template in [tem
 
 **MANDATORY: Ask user to approve before proceeding.**
 
-Present the spec and selected executor/reviewers. Use `AskUserQuestion`:
+Present the spec and selected implementers/reviewers. Use `AskUserQuestion`:
 
 - Header: "Approve"
 - Question: "Does this spec look correct?"
@@ -126,8 +158,11 @@ Use `run_in_background: true` with Bash tool, then wait with TaskOutput. This bl
 
 **When complete, report results:**
 
-- If success: "KAgent run completed! All reviewers approved."
-- If max iterations: "Max iterations reached. Reviewers couldn't reach consensus."
+- Exit 0 (completed): "KAgent run completed! All reviewers approved."
+- Exit 0 (max_iterations): "Max iterations reached. Reviewers couldn't reach consensus."
+- Exit 1 (error): "Run failed with error."
+- Exit 2 (conflict): "Conflict detected — the spec may contain contradictions."
+- Exit 3 (agent_failure): "Agent failure — a crash or timeout occurred."
 
 **Offer follow-up actions via `AskUserQuestion`:**
 
@@ -164,13 +199,14 @@ Explain to the user:
 5. **NEVER modify spec after approval**
 6. **Ask before starting** - Let user choose if you start or they do
 7. **NEVER commit without asking** - Only commit if user approves
-8. **ALL reviewers must approve** - Consensus required
+8. **Review phases short-circuit** - Rejection in any phase skips remaining phases
+9. **Conflict detection is automatic** - When consecutive failures ≥ threshold, the conflict checker runs
 
 ## How to Verify
 
 1. Check `.kagent/` directory exists
 2. Check `spec.md` exists and is complete
-3. Check `config.json` has been initialized with correct implementer and reviewers
+3. Check `config.json` has been initialized with correct implementers, review phases, and settings
 4. Loop has been started (either by you or user has the command)
 
 ## Reference
@@ -180,6 +216,7 @@ See [reference.md](reference.md) for:
 - All CLI commands and options
 - State file formats and directory structure
 - Tmux session naming and agent invocation
+- Checkpointer, conflict detection, metrics, and poll-pr
 
 ## Examples
 
@@ -187,6 +224,7 @@ See [examples.md](examples.md) for complete session examples.
 
 ## Version History
 
+- v6.0.0 (2025-03): Weighted implementers, review phases, noVerdictAsFailure, conflict checker, first-loop-full-review, previous-review-propagation, agent_failure exit code, metrics, poll-pr, checkpointer
 - v5.0.0 (2025-02): Align docs with source - fix CLI flags, state file formats, directory structure
 - v4.0.0 (2025-02): Use background bash task instead of tmux, remove --dir flag
 - v3.0.0 (2025-02): Renamed to kagent-run, added option to start & monitor

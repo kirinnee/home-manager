@@ -15,6 +15,7 @@ export interface ReviewerPromptParams {
   reviewerIndex: number;
   specPath: string;
   specContent: string;
+  previousReviews?: string;
 }
 
 export interface CheckpointerPromptParams {
@@ -66,10 +67,10 @@ Focus on the most recent feedback to guide your implementation.
 3. Implement the required changes
 4. Run ALL tests and verify they pass
 5. Run the build and verify it succeeds
-6. Write evidence to ${evidenceDir}/:
-   - build-output.log: Complete build command output
-   - test-output.log: Complete test command output
-   - evidence.md: Summary of what you verified and how
+6. Capture evidence by piping command output directly to files (NEVER write these files manually):
+   - build-output.log: Run build command and pipe output: \`make build 2>&1 | tee ${evidenceDir}/build-output.log\`
+   - test-output.log: Run test command and pipe output: \`make test 2>&1 | tee ${evidenceDir}/test-output.log\`
+   - evidence.md: Write a brief summary of what was verified and how
 7. Write learnings to ${learningsFile}:
    - Document any roadblocks encountered
    - Note workarounds or discoveries
@@ -106,12 +107,30 @@ Auto-detect and use the appropriate commands:
 }
 
 export function buildReviewerPrompt(params: ReviewerPromptParams): string {
-  const { iteration, reviewerIndex, specPath } = params;
+  const { iteration, reviewerIndex, specPath, previousReviews } = params;
   const evidenceDir = `.kagent/current/evidence`;
   const reviewsDir = `.kagent/current/reviews`;
   const reviewFile = `${reviewsDir}/reviewer-${reviewerIndex}.md`;
   const verdictFile = `.kagent/current/verdicts/${iteration}-${reviewerIndex}.json`;
   const learningsFile = `.kagent/current/learnings.md`;
+
+  const previousReviewsSection = previousReviews
+    ? `## Previous Loop Reviews (loop ${iteration - 1})
+
+The following reviews were produced in the **previous loop**. Use them to:
+- Gain insight from other reviewers (especially on issues you may have missed)
+- Verify that issues flagged previously have actually been fixed
+
+\`\`\`markdown
+${previousReviews}
+\`\`\`
+
+**IMPORTANT: Do not take these reviews at face value.** They are input signals, not established facts. Perform your own independent verification:
+- If a previous reviewer claims something is broken, check it yourself before rejecting on that basis
+- If a previous reviewer claims something is correct, still verify it yourself before accepting
+- Focus especially on verifying whether issues raised last loop were actually addressed
+`
+    : '';
 
   return `# Code Review Task
 
@@ -121,19 +140,18 @@ Read the spec from: ${specPath}
 
 **IMPORTANT:** Only refer to \`.kagent/spec.md\` as the source of truth for this implementation. Ignore any other spec files in the project (e.g., \`spec.md\`, \`spec-v2.md\`, \`spec-v3.md\`, \`spec-v4.md\` in the project root). The target specification is exclusively \`.kagent/spec.md\`.
 
+${previousReviewsSection}
 ## Your Task
 
 You are Reviewer ${reviewerIndex} for loop ${iteration}.
 
 1. Review the current implementation against the specification
-2. Check the evidence in ${evidenceDir}/
-3. Run \`git status\`, \`git diff\`, and \`git diff --staged\` to see all changes (staged, unstaged, and untracked files)
-4. Run the tests yourself to verify they pass
-5. Run the build yourself to verify it succeeds
-6. Check CLAUDE.md in the project root (if exists) - ensure all changes conform to those guidelines
-7. Check for any relevant skills in the project - ensure implementation follows best practices
-8. Write your review to ${reviewFile}
-9. Write your verdict to ${verdictFile}:
+2. Run \`git status\`, \`git diff\`, and \`git diff --staged\` to see all changes (staged, unstaged, and untracked files)
+3. Check the evidence in ${evidenceDir}/ — trust the evidence files as accurate
+4. Check CLAUDE.md in the project root (if exists) - ensure all changes conform to those guidelines
+5. Check for any relevant skills in the project - ensure implementation follows best practices
+6. Write your review to ${reviewFile} (include any missing evidence as review feedback for the implementer)
+7. Write your verdict to ${verdictFile}:
    \`\`\`json
    {
      "verdict": "approved" or "rejected",
@@ -171,15 +189,17 @@ You must verify ALL of the following. Reject if ANY criterion fails:
 
 ### 3. Testing
 
-- Do ALL tests pass? (Run them yourself, don't trust evidence alone)
+- Does the evidence in ${evidenceDir}/test-output.log show all tests passing?
 - Is test coverage adequate for the changes?
 - Are there missing test cases for important scenarios?
+- If test-output.log is missing, note it in your review so the implementer provides it
 
 ### 4. Build & Integration
 
-- Does the build succeed without warnings? (Run it yourself)
+- Does the evidence in ${evidenceDir}/build-output.log show a successful build without warnings?
 - Are there any type errors or linting issues?
 - Does the change integrate properly with existing code?
+- If build-output.log is missing, note it in your review so the implementer provides it
 
 ### 5. Security
 
@@ -189,9 +209,9 @@ You must verify ALL of the following. Reject if ANY criterion fails:
 
 ### 6. Evidence Verification
 
-- Did the implementer provide complete evidence?
-- Do the evidence files match what you observe when running commands yourself?
-- Are there any discrepancies between claimed and actual results?
+- Did the implementer provide all required evidence files (build-output.log, test-output.log, evidence.md)?
+- Are the evidence files non-empty and contain actual command output?
+- If evidence is missing, note it in your review — do NOT run commands yourself
 
 ### 7. CLAUDE.md / Skills Compliance
 

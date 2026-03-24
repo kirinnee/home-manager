@@ -20,6 +20,8 @@ export interface ResultMessage {
   cost_usd?: number;
   duration_ms?: number;
   session_id?: string;
+  input_tokens?: number;
+  output_tokens?: number;
 }
 
 export type ContentBlock =
@@ -80,4 +82,58 @@ export function extractToolUses(content: Array<ContentBlock>): Array<{ name: str
   return content
     .filter((c): c is { type: 'tool_use'; id: string; name: string; input: unknown } => c.type === 'tool_use')
     .map(c => ({ name: c.name, input: c.input }));
+}
+
+// ============================================================================
+// Token extraction from log files
+// ============================================================================
+
+export interface TokenCounts {
+  inputTokens?: number;
+  outputTokens?: number;
+}
+
+/**
+ * Parse a log file for the result event and extract token counts.
+ * Best-effort: returns undefined fields if not found or unparseable.
+ */
+export async function extractTokensFromLog(logFilePath: string): Promise<TokenCounts> {
+  try {
+    const { readFile } = await import('fs/promises');
+    const content = await readFile(logFilePath, 'utf-8');
+    return extractTokensFromContent(content);
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Parse log content for the result event and extract token counts.
+ */
+export function extractTokensFromContent(content: string): TokenCounts {
+  const result: TokenCounts = {};
+
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed.type === 'result') {
+        // Tokens live under parsed.usage (not parsed.result.usage)
+        const usage = parsed.usage;
+        if (usage && typeof usage.input_tokens === 'number') {
+          result.inputTokens = usage.input_tokens;
+        }
+        if (usage && typeof usage.output_tokens === 'number') {
+          result.outputTokens = usage.output_tokens;
+        }
+        // Found the result event, no need to continue
+        break;
+      }
+    } catch {
+      // Skip malformed lines
+    }
+  }
+
+  return result;
 }
