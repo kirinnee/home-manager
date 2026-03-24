@@ -34,9 +34,11 @@ cp {subPlans[currentSubPlanIndex].file} .kagent/spec.md
 
 ```bash
 dev-loop init \
-  --implementer {implementer} \
-  --reviewers "{reviewer1,reviewer2,...}" \
+  --implementers "{implementers}" \
+  --review-phases "{reviewPhases}" \
   --conflict-checker {conflictChecker} \
+  --first-loop-full-review \
+  --previous-review-propagation {previousReviewPropagation} \
   --max-iterations {maxIterations} \
   --implementer-timeout {implementerTimeout} \
   --reviewer-timeout {reviewerTimeout} \

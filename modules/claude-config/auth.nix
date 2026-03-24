@@ -18,15 +18,10 @@ rec {
     ANTHROPIC_DEFAULT_SONNET_MODEL = "doubao-seed-2.0-code";
     ANTHROPIC_DEFAULT_OPUS_MODEL = "doubao-seed-2.0-pro";
   };
-  minimax = proxy // {
-    ANTHROPIC_DEFAULT_HAIKU_MODEL = "minimax-m2.5";
-    ANTHROPIC_DEFAULT_SONNET_MODEL = "minimax-m2.5";
-    ANTHROPIC_DEFAULT_OPUS_MODEL = "minimax-m2.5";
-  };
   mm = proxy // {
-    ANTHROPIC_DEFAULT_HAIKU_MODEL = "MiniMax-M2.7";
-    ANTHROPIC_DEFAULT_SONNET_MODEL = "MiniMax-M2.7";
-    ANTHROPIC_DEFAULT_OPUS_MODEL = "MiniMax-M2.7";
+    ANTHROPIC_DEFAULT_HAIKU_MODEL = "minimax-m2.7";
+    ANTHROPIC_DEFAULT_SONNET_MODEL = "minimax-m2.7";
+    ANTHROPIC_DEFAULT_OPUS_MODEL = "minimax-m2.7";
   };
   cerebras = proxy // {
     ANTHROPIC_DEFAULT_HAIKU_MODEL = "zai-glm-4.7";
@@ -44,6 +39,11 @@ rec {
     ANTHROPIC_DEFAULT_HAIKU_MODEL = "gpt-5.1-codex-mini";
   };
   gemini = proxy // {
+    ANTHROPIC_DEFAULT_OPUS_MODEL = "gemini-3.1-pro-preview";
+    ANTHROPIC_DEFAULT_SONNET_MODEL = "gemini-3-flash-preview";
+    ANTHROPIC_DEFAULT_HAIKU_MODEL = "gemini-3.1-flash-lite-preview";
+  };
+  ag = proxy // {
     ANTHROPIC_DEFAULT_OPUS_MODEL = "gemini-3.1-pro-high";
     ANTHROPIC_DEFAULT_SONNET_MODEL = "gemini-3.1-pro-low";
     ANTHROPIC_DEFAULT_HAIKU_MODEL = "gemini-3.1-pro-low";

@@ -1,48 +1,58 @@
 import type { StateService } from '../deps';
-import { DEFAULT_CONFIG } from '../types';
 import * as config from '../state/config';
+import { formatConfigDisplay } from '../state/config';
 
 export async function handler(
   opts: {
     implementer: string;
+    implementers: string;
     reviewers: string;
+    reviewPhases: string;
     conflictChecker: string;
     maxIterations: string;
     implementerTimeout: string;
     reviewerTimeout: string;
     conflictCheckThreshold: string;
+    firstLoopFullReview: boolean;
+    previousReviewPropagation: string;
   },
   state: StateService,
 ): Promise<void> {
   try {
-    // Parse reviewers as comma-separated list
-    const reviewersList = opts.reviewers
-      .split(',')
-      .map(s => s.trim())
-      .filter(s => s.length > 0);
+    // When review-phases is explicitly provided, don't pass reviewers (to avoid override)
+    // Commander always provides the default value for --reviewers, so we check if review-phases is set
+    const hasReviewPhases = opts.reviewPhases !== undefined && opts.reviewPhases !== '';
 
-    const cfg = config.configFromOptions({
+    // Parse reviewers as comma-separated list (only when not using review-phases)
+    const reviewersList =
+      !hasReviewPhases && opts.reviewers
+        ? opts.reviewers
+            .split(',')
+            .map(s => s.trim())
+            .filter(s => s.length > 0)
+        : [];
+
+    const partial = config.configFromOptions({
       implementer: opts.implementer || undefined,
+      implementers: opts.implementers || undefined,
       reviewers: reviewersList.length > 0 ? reviewersList : undefined,
+      reviewPhases: hasReviewPhases ? opts.reviewPhases : undefined,
       conflictChecker: opts.conflictChecker || undefined,
       maxIterations: parseInt(opts.maxIterations, 10) || undefined,
-      implementerTimeout: parseInt(opts.implementerTimeout, 10) || undefined,
-      reviewerTimeout: parseInt(opts.reviewerTimeout, 10) || undefined,
+      implementerTimeout: parseFloat(opts.implementerTimeout) || undefined,
+      reviewerTimeout: parseFloat(opts.reviewerTimeout) || undefined,
       conflictCheckThreshold: parseInt(opts.conflictCheckThreshold, 10) || undefined,
+      firstLoopFullReview: opts.firstLoopFullReview ? true : undefined,
+      previousReviewPropagation: parseFloat(opts.previousReviewPropagation) || undefined,
     });
 
-    await state.initProject(cfg);
+    await state.initProject(partial);
+
+    // For display, build the resolved config
+    const cfg = await state.loadConfig();
 
     console.log('Dev Loop Initialized');
-    console.log(`  Implementer: ${cfg.implementer}`);
-    console.log(`  Reviewers: ${cfg.reviewers.join(', ')}`);
-    if (cfg.conflictChecker) {
-      console.log(`  Conflict checker: ${cfg.conflictChecker}`);
-    }
-    console.log(`  Max iterations: ${cfg.maxIterations}`);
-    console.log(`  Implementer timeout: ${cfg.implementerTimeout}m`);
-    console.log(`  Reviewer timeout: ${cfg.reviewerTimeout}m`);
-    console.log(`  Conflict check threshold: ${cfg.conflictCheckThreshold} failures`);
+    console.log(formatConfigDisplay(cfg));
     console.log('');
     console.log('Next: edit .kagent/spec.md, then run: dev-loop run');
   } catch (err) {

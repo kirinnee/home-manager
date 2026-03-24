@@ -7,15 +7,17 @@ import type {
   Phase,
   CheckpointResult,
   IterationSummary,
+  MetricSample,
+  MetricsSummary,
 } from '../types';
 import {
-  parseConfig,
   parseRun,
   parseSession,
   parseVerdictFile,
   parseHistoryEntry,
   DEFAULT_CONFIG,
   checkpointResultSchema,
+  parseRawConfig,
 } from '../types';
 import type { FsService, Paths } from '../deps';
 import { generateRunId, getCurrentTimestamp, SPEC_TEMPLATE } from '../deps';
@@ -28,9 +30,10 @@ export class StateService {
   ) {}
 
   // Configuration
-  async initProject(overrides: Partial<Config> = {}): Promise<void> {
+  async initProject(overrides: Record<string, unknown> = {}): Promise<void> {
     await this.fs.mkdir(this.paths.baseDir);
     await this.fs.mkdir(this.paths.historyDir);
+    await this.fs.mkdir(this.paths.metricsDir);
 
     if (!(await this.fs.exists(this.paths.spec))) {
       await this.fs.writeFile(this.paths.spec, SPEC_TEMPLATE);
@@ -38,7 +41,7 @@ export class StateService {
 
     if (await this.fs.exists(this.paths.config)) {
       const existing = await this.loadConfig();
-      await this.saveConfig({ ...existing, ...overrides });
+      await this.saveConfig(config.mergeConfig(overrides, existing));
     } else {
       await this.saveConfig(config.mergeConfig(overrides));
     }
@@ -50,7 +53,7 @@ export class StateService {
 
   async loadConfig(): Promise<Config> {
     const content = await this.fs.readFile(this.paths.config);
-    return parseConfig(JSON.parse(content));
+    return parseRawConfig(JSON.parse(content));
   }
 
   async saveConfig(cfg: Config): Promise<void> {
@@ -121,6 +124,30 @@ export class StateService {
     if (!run) throw new Error('No active run');
     run.consecutiveFailures = 0;
     await this.saveRun(run);
+  }
+
+  async incrementReviewerFailure(binary: string): Promise<number> {
+    const run = await this.loadRun();
+    if (!run) throw new Error('No active run');
+    run.reviewerFailures[binary] = (run.reviewerFailures[binary] ?? 0) + 1;
+    await this.saveRun(run);
+    return run.reviewerFailures[binary];
+  }
+
+  async resetReviewerFailures(): Promise<void> {
+    const run = await this.loadRun();
+    if (!run) throw new Error('No active run');
+    run.reviewerFailures = {};
+    await this.saveRun(run);
+  }
+
+  async resetReviewerFailure(binary: string): Promise<void> {
+    const run = await this.loadRun();
+    if (!run) throw new Error('No active run');
+    if (binary in run.reviewerFailures) {
+      delete run.reviewerFailures[binary];
+      await this.saveRun(run);
+    }
   }
 
   async addLearning(learning: string): Promise<void> {
@@ -246,6 +273,24 @@ export class StateService {
     await this.fs.mkdir(reviewsDir);
   }
 
+  // Archived reviews (per-iteration from .kagent/reviews/{runId}/)
+  async loadArchivedReviews(runId: string, iteration: number): Promise<string | null> {
+    const runReviewsDir = this.paths.runReviewsDir(runId);
+    if (!(await this.fs.exists(runReviewsDir))) return null;
+
+    const files = await this.fs.readdir(runReviewsDir);
+    const reviewFiles = files.filter(f => f.startsWith(`review-${iteration}-`) && f.endsWith('.md')).sort();
+
+    if (reviewFiles.length === 0) return null;
+
+    const sections: string[] = [];
+    for (const file of reviewFiles) {
+      const content = await this.fs.readFile(`${runReviewsDir}/${file}`);
+      sections.push(`### ${file}\n\n${content}`);
+    }
+    return sections.join('\n\n---\n\n');
+  }
+
   // Checkpoint Management
   async saveCheckpointResult(result: CheckpointResult, iteration?: number): Promise<void> {
     // Save to main checkpoint-result.json
@@ -321,6 +366,43 @@ export class StateService {
     return this.fs.readFile(this.paths.learnings);
   }
 
+  // Metrics
+  async appendMetricSample(runId: string, sample: MetricSample): Promise<void> {
+    await this.fs.mkdir(this.paths.metricsDir);
+    const filePath = this.paths.metricsFile(runId);
+    // Append a single JSON line (append-friendly)
+    const line = JSON.stringify(sample) + '\n';
+    // Use appendFile by writing to the file directly
+    const { appendFile } = await import('fs/promises');
+    await appendFile(filePath, line, 'utf-8');
+  }
+
+  async loadMetricSamples(runId: string): Promise<MetricSample[]> {
+    const filePath = this.paths.metricsFile(runId);
+    if (!(await this.fs.exists(filePath))) return [];
+    const content = await this.fs.readFile(filePath);
+    const samples: MetricSample[] = [];
+    for (const line of content.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        samples.push(JSON.parse(trimmed));
+      } catch {
+        // Skip malformed lines
+      }
+    }
+    return samples;
+  }
+
+  async listMetricRuns(): Promise<string[]> {
+    if (!(await this.fs.exists(this.paths.metricsDir))) return [];
+    const files = await this.fs.readdir(this.paths.metricsDir);
+    return files
+      .filter(f => f.endsWith('.jsonl'))
+      .map(f => f.replace(/\.jsonl$/, ''))
+      .sort();
+  }
+
   // History
   async archiveRun(checkpointRan: boolean = false): Promise<HistoryEntry> {
     const run = await this.loadRun();
@@ -328,6 +410,9 @@ export class StateService {
 
     const sessions = await this.loadSessions();
     const cfg = await this.loadConfig();
+
+    // Compute metrics summary from samples
+    const metricsSummary = await this.computeMetricsSummary(run.id);
 
     const entry: HistoryEntry = {
       id: run.id,
@@ -339,6 +424,7 @@ export class StateService {
       completedAt: getCurrentTimestamp(),
       summary: await this.buildSummary(sessions, run.learnings),
       checkpointRan,
+      metricsSummary,
     };
 
     await this.fs.writeJson(this.paths.historyEntry(run.id), entry);
@@ -348,6 +434,23 @@ export class StateService {
 
     await this.fs.rm(this.paths.currentDir, { recursive: true });
     return entry;
+  }
+
+  private async computeMetricsSummary(runId: string): Promise<MetricsSummary | undefined> {
+    const samples = await this.loadMetricSamples(runId);
+    if (samples.length === 0) return undefined;
+
+    let totalDurationMs = 0;
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+
+    for (const s of samples) {
+      totalDurationMs += s.durationMs;
+      totalInputTokens += s.inputTokens ?? 0;
+      totalOutputTokens += s.outputTokens ?? 0;
+    }
+
+    return { totalDurationMs, totalInputTokens, totalOutputTokens };
   }
 
   private async buildSummary(sessions: Session[], learnings: string[]) {

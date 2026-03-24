@@ -8,22 +8,28 @@ User: /kagent-run "Add input validation to the login form"
 Claude: Let me find available claude binaries...
         [runs: compgen -c | grep '^claude' | sort -u]
 
-        Found: claude, claude-personal, claude-reviewer-anthropic,
-               claude-reviewer-gemini
+        Found: claude, claude-personal, claude-auto-anthropic
 
-        [AskUserQuestion: Which binary should implement?]
+        [AskUserQuestion: Which claude binaries should implement? (weighted)]
+        Default: claude-auto-zai:2,claude-auto-mm:1
 
-User: claude-personal
+User: claude-personal:1,claude:1
 
-Claude: [AskUserQuestion: Which binaries should review? (multi-select)]
+Claude: [AskUserQuestion: Which reviewers in which phases?]
+        Default: claude-auto-zai:1,claude-auto-mm:1,claude-auto-seed:0|...
 
-User: claude-reviewer-anthropic, claude-reviewer-gemini
+User: claude-auto-anthropic:1
 
 Claude: Setting up kagent with:
-        - Executor: claude-personal
-        - Reviewers: claude-reviewer-anthropic, claude-reviewer-gemini
+        - Implementers: claude-personal:1,claude:1 (weighted random per iteration)
+        - Review phase 1: claude-auto-anthropic:1
 
-        [runs: dev-loop init --implementer claude-personal --reviewers "claude-reviewer-anthropic,claude-reviewer-gemini"]
+        [runs: dev-loop init \
+          --implementers "claude-personal:1,claude:1" \
+          --review-phases "claude-auto-anthropic:1" \
+          --conflict-checker claude-personal \
+          --first-loop-full-review \
+          --previous-review-propagation 0.75]
 
         [writes spec.md based on task]
 
@@ -73,24 +79,154 @@ Claude: [runs git commands to commit the changes]
         Changes committed!
 ```
 
-## Example 2: User Starts Themselves
+## Example 2: Multi-Phase Review with Short-Circuit
+
+```
+User: /kagent-run "Implement OAuth2 with PKCE"
+
+Claude: [discovers binaries...]
+        Found: claude, claude-auto-anthropic, claude-auto-codex
+
+        [AskUserQuestion: Implementers?]
+
+User: claude
+
+Claude: [AskUserQuestion: Reviewers by phase?]
+
+User: I want 3 phases:
+  Phase 1: claude-auto-anthropic:1
+  Phase 2: claude-auto-codex:1
+  Phase 3: claude-auto-anthropic:1 (final gate)
+
+Claude: Setting up:
+        - Implementer: claude
+        - Phase 1: claude-auto-anthropic (strict)
+        - Phase 2: claude-auto-codex (strict)
+        - Phase 3: claude-auto-anthropic (strict — final gate)
+
+        [runs: dev-loop init \
+          --implementers "claude" \
+          --review-phases "claude-auto-anthropic:1|claude-auto-codex:1|claude-auto-anthropic:1" \
+          --conflict-checker claude \
+          --first-loop-full-review \
+          --previous-review-propagation 0.75]
+
+        ...spec written and approved...
+
+        Running the loop...
+
+        Iteration 1 (first loop — full review, all phases run):
+          Phase 1: anthropic=approved
+          Phase 2: codex=rejected (missing PKCE implementation)
+          Phase 3: skipped (short-circuit)
+
+        Iteration 2 (subsequent — short-circuit active):
+          Phase 1: anthropic=approved
+          Phase 2: codex=approved
+          Phase 3: anthropic=approved
+
+        KAgent run completed! All phases approved in iteration 2.
+```
+
+## Example 3: Conflict Detection
+
+```
+User: /kagent-run "Make the API both RESTful and GraphQL"
+
+Claude: [...setup happens...]
+
+        [writes spec with contradictory requirements]
+
+User: Approve
+
+Claude: Running the loop...
+
+        [runs background task, waits...]
+
+        Iteration 1: anthropic=rejected
+        Iteration 2: anthropic=rejected
+        Iteration 3: anthropic=rejected
+          → consecutiveFailures (3) ≥ conflictCheckThreshold (3)
+          → Running conflict checker (claude-personal)...
+          → Conflict detected!
+          → Exit code 2 (conflict)
+
+        Conflict detected — the spec may contain contradictions.
+
+        Conflict checker analysis:
+        "The spec requires the API to be both RESTful and GraphQL
+         simultaneously. These are competing architectural patterns
+         that typically require separate endpoints/services."
+
+        Suggested fix: "Choose one primary pattern and optionally
+         add the other as a separate API surface."
+
+        Spec backed up to .kagent/spec-backup.md
+
+        [AskUserQuestion: What would you like to do?]
+        - "Edit spec to resolve conflict"
+        - "Start another loop with new spec"
+        - "Take over manually"
+
+User: Edit spec to resolve conflict
+
+Claude: Let's resolve the contradiction. Based on the conflict
+        checker's suggestion, I'll update the spec to focus on
+        one pattern.
+
+        [edits spec.md with clarified requirements...]
+
+        [AskUserQuestion: Approve updated spec?]
+```
+
+## Example 4: Agent Failure
+
+```
+User: /kagent-run "Refactor the database layer"
+
+Claude: [...setup happens...]
+
+        Running the loop...
+
+        [runs background task, waits...]
+
+        Agent failure — a crash or timeout occurred.
+
+        The implementer (claude) timed out after 30 minutes
+        during iteration 1. This typically means:
+        - The task is too large for a single iteration
+        - The agent got stuck in a loop
+
+        [AskUserQuestion: What would you like to do?]
+        - "Increase timeout and retry"
+        - "Break the task into smaller sub-tasks"
+        - "Take over manually"
+```
+
+## Example 5: User Starts Themselves
 
 ````
 User: /kagent-run "Fix the broken date parser"
 
 Claude: [discovers binaries...]
 
-        Found: claude, claude-reviewer-anthropic
+        Found: claude, claude-auto-anthropic
 
-        [AskUserQuestion: Executor?]
+        [AskUserQuestion: Implementers?]
 
 User: claude
 
 Claude: [AskUserQuestion: Reviewers?]
 
-User: claude-reviewer-anthropic
+User: claude-auto-anthropic
 
-Claude: [initializes with single reviewer]
+Claude: [initializes with single-phase review]
+        [runs: dev-loop init \
+          --implementers "claude" \
+          --review-phases "claude-auto-anthropic:1" \
+          --conflict-checker claude \
+          --first-loop-full-review \
+          --previous-review-propagation 0.75]
         [writes spec focusing on the date parser bug]
         [asks for approval...]
 
@@ -113,11 +249,13 @@ Claude: KAgent initialized at `.kagent/`
         - Logs will be written to `.kagent/run.log`
         - Check status anytime with: `dev-loop status`
         - To cancel: `dev-loop cancel`
+        - To view metrics: `dev-loop metrics`
 
-        Note: Single reviewer means faster iterations but less diverse feedback.
+        Note: Single-phase review means faster iterations.
+        Use `--review-phases "rev1:1|rev2:1"` for multi-phase gating.
 ````
 
-## Example 3: Editing Spec Before Approval
+## Example 6: Editing Spec Before Approval
 
 ```
 User: /kagent-run "Refactor the API client"
@@ -160,46 +298,7 @@ Claude: [AskUserQuestion: How would you like to start?]
         ...continues as in examples above
 ```
 
-## Example 4: Max Loops Reached
-
-```
-User: /kagent-run "Implement OAuth2 with PKCE"
-
-Claude: [setup happens...]
-
-        [AskUserQuestion: How would you like to start?]
-
-User: Start now
-
-Claude: Running the loop...
-
-        [runs background task, waits...]
-
-        Max iterations reached (10/10)
-
-        The reviewers couldn't reach consensus.
-
-        Last rejection reasons (from .kagent/reviews/{runId}/):
-        - Missing PKCE implementation
-        - Token refresh not handling edge case
-
-        [AskUserQuestion: What would you like to do?]
-        - "Review changes (git diff)"
-        - "Start another loop with refined spec"
-        - "Take over manually"
-
-User: Start another loop with refined spec
-
-Claude: Let's refine the spec. Based on the rejection feedback, we should:
-        1. Focus specifically on PKCE implementation
-        2. Handle token refresh edge cases
-
-        [edits spec.md with more specific criteria...]
-
-        [AskUserQuestion: Approve refined spec?]
-```
-
-## Example 5: Checking Status Manually
+## Checking Status Manually
 
 ```
 User: I started a loop earlier. What's the status?
@@ -210,10 +309,11 @@ Claude: Let me check the status for you.
 
         Current Status:
         - Iteration: 2/10
-        - Phase: reviewing
+        - Phase: reviewing (phase 1 of 3)
         - Verdicts:
-          - claude-reviewer-anthropic: approved
-          - claude-reviewer-gemini: rejected
+          - claude-auto-zai: approved (phase 0, iteration 1)
+          - claude-auto-mm: rejected (phase 0, iteration 1)
+        - Learnings: Fixed import order
 
         The loop is still running. Once it completes or reaches max loops, you can review the changes with `git diff`.
 ```
@@ -225,7 +325,7 @@ When checking status, run `dev-loop status` and report:
 ```
 Current Status:
 - Iteration: X/Y
-- Phase: <phase>
+- Phase: <phase> (phase N of M, if reviewing)
 - Verdicts: (if reviewing phase)
   - <reviewer>: <verdict>
 - Learnings: (if available)
@@ -257,5 +357,36 @@ Last rejection reasons (from .kagent/reviews/{runId}/):
 Options:
 1. Review changes: git diff
 2. Run another kagent-run with refined spec
+3. Take over manually
+```
+
+**Conflict:**
+
+```
+Conflict detected — the spec may contain contradictions.
+
+Conflict checker: <binary>
+Analysis: <reasoning from checkpoint-result.json>
+Suggested fix: <suggestedFix if available>
+
+Spec backed up to .kagent/spec-backup.md
+
+Options:
+1. Edit spec to resolve conflict
+2. Start another kagent-run with new spec
+3. Take over manually
+```
+
+**Agent Failure:**
+
+```
+Agent failure — a crash or timeout occurred.
+
+The <role> (<binary>) failed during iteration N.
+Check logs: .kagent/logs/{runId}/
+
+Options:
+1. Increase timeout and retry
+2. Break the task into smaller sub-tasks
 3. Take over manually
 ```

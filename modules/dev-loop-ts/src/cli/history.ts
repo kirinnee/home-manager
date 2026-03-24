@@ -51,6 +51,18 @@ export async function showHandler(runId: string, history: HistoryService, logs?:
     console.log(`Started: ${entry.startedAt}`);
     console.log(`Completed: ${entry.completedAt}`);
     console.log(`Iterations: ${entry.iterations}`);
+    if (entry.metricsSummary) {
+      const ms = entry.metricsSummary;
+      const durationMins = Math.round(ms.totalDurationMs / 60000);
+      const durationSecs = Math.round((ms.totalDurationMs % 60000) / 1000);
+      const totalTokens = ms.totalInputTokens + ms.totalOutputTokens;
+      console.log(`Duration: ${durationMins}m ${durationSecs}s`);
+      if (totalTokens > 0) {
+        console.log(
+          `Tokens: ${totalTokens.toLocaleString()} (${ms.totalInputTokens.toLocaleString()} in / ${ms.totalOutputTokens.toLocaleString()} out)`,
+        );
+      }
+    }
     if (hasLogs) {
       console.log(`Logs: ${pc.green(`${runLogs.length} file(s) available`)}`);
     }

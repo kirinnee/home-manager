@@ -80,13 +80,16 @@ Parse `rawArgument` to determine starting phase:
   "teamName": null,
   "subPlans": [],
   "currentSubPlanIndex": 0,
-  "implementer": "claude-impl-zai",
-  "reviewers": ["claude-reviewer-zai", "claude-reviewer-codex", "claude-reviewer-anthropic"],
+  "implementer": "claude-auto-zai",
+  "implementers": "claude-auto-zai:2,claude-auto-mm:1",
+  "reviewPhases": "claude-auto-zai:1,claude-auto-mm:1,claude-auto-seed:0|claude-auto-zai:1,claude-auto-anthropic:1,claude-auto-gemini:0|claude-auto-codex:1,claude-auto-kimi:0",
   "maxIterations": 10,
   "implementerTimeout": 30,
   "reviewerTimeout": 15,
   "conflictCheckThreshold": 3,
-  "conflictChecker": "claude",
+  "conflictChecker": "claude-auto-zai",
+  "firstLoopFullReview": true,
+  "previousReviewPropagation": 0.75,
   "maxPushCycles": 5
 }
 ```

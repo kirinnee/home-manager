@@ -18,7 +18,9 @@ export function buildIterationData(run: Run, config: Config, specPath: string, s
     previousLoopLearnings: run.learnings ?? [],
   });
 
-  const reviewerPrompts = Array.from({ length: config.reviewers.length }, (_, i) => ({
+  // Flatten review phases to build prompts for all reviewers
+  const allReviewers = config.reviewPhases.flat();
+  const reviewerPrompts = Array.from({ length: allReviewers.length }, (_, i) => ({
     reviewerIndex: i,
     prompt: buildReviewerPrompt({
       iteration: run.iteration,
@@ -37,3 +39,6 @@ export function buildIterationData(run: Run, config: Config, specPath: string, s
     reviewerPrompts,
   };
 }
+
+// Re-export for use by loop/runner.ts
+export { buildReviewerPrompt } from '../agents/prompts';
