@@ -81,7 +81,7 @@ Extract: title, description, status, comments.
 # Example: clickup_get_task
 ```
 
-**IMPORTANT:** For ClickUp tickets, strip the `CU-` prefix when searching. The ClickUp MCP does not recognize the `CU-` prefix format. Always store `ticketId` with the `CU-` prefix in state.
+**IMPORTANT:** For ClickUp tickets, the `cup` CLI uses the native ClickUp task ID directly (e.g., `86ev0gwax`). Store the raw task ID in state as-is.
 
 If auth fails: Jira → `acli jira auth`. ClickUp → check MCP server configuration.
 

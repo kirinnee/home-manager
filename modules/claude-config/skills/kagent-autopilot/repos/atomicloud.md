@@ -2,15 +2,15 @@
 org: atomicloud
 baseBranch: main
 ticketSystem: clickup
-ticketPattern: 'CU-[a-zA-Z0-9-]+'
-ticketFetchAccess: mcp
-ticketFetchCommand: clickup_get_task
+ticketPattern: '[0-9a-zA-Z]{6,}'
+ticketFetchAccess: cli
+ticketFetchCommand: 'cup task {ticketId} --json'
 ticketTransitions:
   start: 'in progress'
   done: 'review'
   feedback: 'in progress'
-ticketTransitionAccess: mcp
-ticketTransitionCommand: clickup_update_task
+ticketTransitionAccess: cli
+ticketTransitionCommand: 'cup update {ticketId} --status "{status}"'
 coderabbit: true
 prereviewEnabled: true
 reReviewComment: |
@@ -24,6 +24,6 @@ reReviewComment: |
 reviewComment: null
 ---
 
-- ClickUp tickets (CU-XXXXX), fetched via MCP `clickup_get_task`
+- ClickUp tickets, fetched via `cup task {ticketId} --json`
 - CodeRabbit active, local prereview before every push
-- Ticket transitions via MCP `clickup_update_task`
+- Ticket transitions via `cup update {ticketId} --status "{status}"`
