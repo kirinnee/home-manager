@@ -16,6 +16,7 @@ nixpkgs.stdenv.mkDerivation {
     mkdir -p $out/bin
 
     cp dist/index.js $out/lib/kloop/
+    cp package.json $out/package.json
 
     makeWrapper ${nixpkgs.bun}/bin/bun $out/bin/kloop \
       --add-flags "$out/lib/kloop/index.js"

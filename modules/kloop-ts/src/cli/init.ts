@@ -25,7 +25,6 @@ reviewerTimeout: 15        # minutes
 conflictCheckThreshold: 2
 firstLoopFullReview: false
 previousReviewPropagation: 0
-reviewerFailureLimit: 2
 
 # Agent prompt templates — edit these to customize agent behavior.
 # All {placeholders} are substituted at build time with actual runtime paths.

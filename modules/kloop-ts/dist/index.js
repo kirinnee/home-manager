@@ -11191,7 +11191,6 @@ reviewerTimeout: 15        # minutes
 conflictCheckThreshold: 2
 firstLoopFullReview: false
 previousReviewPropagation: 0
-reviewerFailureLimit: 2
 
 # Agent prompt templates \u2014 edit these to customize agent behavior.
 # All {placeholders} are substituted at build time with actual runtime paths.
@@ -11332,7 +11331,6 @@ reviewerTimeout: 15        # minutes
 conflictCheckThreshold: 2
 firstLoopFullReview: false
 previousReviewPropagation: 0
-reviewerFailureLimit: 2
 `;
 async function handler2(opts) {
   try {
@@ -15395,7 +15393,6 @@ var configSchema = exports_external
     conflictCheckThreshold: exports_external.number().min(1).max(100).default(3),
     firstLoopFullReview: exports_external.boolean().default(false),
     previousReviewPropagation: exports_external.number().min(0).max(1).default(0),
-    reviewerFailureLimit: exports_external.number().min(1).max(20).default(2),
     prompts: exports_external
       .object({
         implementer: exports_external.string().optional(),
@@ -15431,7 +15428,6 @@ var configSchema = exports_external
       conflictCheckThreshold: data.conflictCheckThreshold,
       firstLoopFullReview: data.firstLoopFullReview,
       previousReviewPropagation: data.previousReviewPropagation,
-      reviewerFailureLimit: data.reviewerFailureLimit,
       prompts: data.prompts,
     };
   });
@@ -15445,7 +15441,6 @@ var resolvedConfigSchema = exports_external.object({
   conflictCheckThreshold: exports_external.number().min(1).max(100),
   firstLoopFullReview: exports_external.boolean(),
   previousReviewPropagation: exports_external.number().min(0).max(1),
-  reviewerFailureLimit: exports_external.number().min(1).max(20),
   prompts: exports_external
     .object({
       implementer: exports_external.string().optional(),
@@ -15468,9 +15463,6 @@ var runSchema = exports_external.object({
   startedAt: exports_external.string().datetime(),
   learnings: exports_external.array(exports_external.string()).default([]),
   consecutiveFailures: exports_external.number().int().nonnegative().default(0),
-  reviewerFailures: exports_external
-    .record(exports_external.string(), exports_external.number().int().nonnegative())
-    .default({}),
 });
 var sessionSchema = exports_external.object({
   id: exports_external.string().min(1),
@@ -17404,7 +17396,7 @@ function formatProgress(estimates, allResults) {
 }
 
 // src/agents/runner.ts
-var KLOOP_BIN = `bun run ${path4.resolve(import.meta.dir, '..', 'index.ts')}`;
+var KLOOP_BIN = `bun run ${process.argv[1]}`;
 
 class AgentRunner {
   tmux;
@@ -17785,6 +17777,7 @@ class AgentFailureError extends Error {
     this.name = 'AgentFailureError';
   }
 }
+
 class LoopRunner {
   state;
   tmux;
@@ -17829,7 +17822,6 @@ class LoopRunner {
       startedAt: new Date().toISOString(),
       learnings: [],
       consecutiveFailures: 0,
-      reviewerFailures: {},
     };
     const writeEvent = async event => {
       const line =
@@ -18141,18 +18133,25 @@ ${learningsContent}
       const verdictsDir = this.paths.loopVerdictsPath(runId, iterNum);
       const evidenceDir = this.paths.loopEvidencePath(runId, iterNum);
       const learningsFile = this.paths.runLearnings(runId);
-      const phasePrompts = phaseReviewers.map((_, i) => ({
-        reviewerIndex: globalReviewerIndex + i,
-        prompt: buildReviewerPrompt(config.prompts?.reviewer, {
-          specPath,
-          iteration: String(iterNum),
-          reviewerIndex: String(globalReviewerIndex + i),
-          reviewsDir,
-          verdictsDir,
-          evidenceDir,
-          learningsFile,
-        }),
-      }));
+      const prevLoop = iterNum > 1 ? iterNum - 1 : null;
+      const phasePrompts = phaseReviewers.map((_, i) => {
+        const seesPrevReviews = prevLoop !== null && Math.random() < (config.previousReviewPropagation ?? 0);
+        const archivedReviews = seesPrevReviews ? this.paths.loopReviewsPath(runId, prevLoop) : null;
+        return {
+          reviewerIndex: globalReviewerIndex + i,
+          prompt: buildReviewerPrompt(config.prompts?.reviewer, {
+            specPath,
+            iteration: String(iterNum),
+            reviewerIndex: String(globalReviewerIndex + i),
+            reviewsDir,
+            verdictsDir,
+            evidenceDir,
+            learningsFile,
+            archivedReviews,
+          }),
+          propagated: seesPrevReviews,
+        };
+      });
       for (const rc of phaseReviewers) {
         await writeEvent({
           type: 'reviewer_start',
@@ -18171,6 +18170,9 @@ ${learningsContent}
         prompts: phasePrompts,
         timeout: config.reviewerTimeout,
         onReviewerEnd: async r => {
+          const promptMeta = phasePrompts.find(p => p.reviewerIndex === r.reviewerIndex);
+          const propagated = promptMeta?.propagated ?? false;
+          r.propagated = propagated;
           await writeEvent({
             type: 'reviewer_end',
             timestamp: new Date().toISOString(),
@@ -18182,6 +18184,7 @@ ${learningsContent}
             error: r.error,
             verdict: r.verdict,
             completionEstimate: r.completionEstimate,
+            propagated,
           });
         },
       });
@@ -18203,10 +18206,13 @@ ${learningsContent}
         shortCircuited: anyRejected,
       });
       if (anyRejected) {
-        if (reviewPhases.length > 1) {
-          formatPhaseShortCircuit(phaseIdx, reviewPhases.length - phaseIdx - 1);
+        const skipShortCircuit = iterNum === 1 && config.firstLoopFullReview;
+        if (!skipShortCircuit) {
+          if (reviewPhases.length > 1) {
+            formatPhaseShortCircuit(phaseIdx, reviewPhases.length - phaseIdx - 1);
+          }
+          break;
         }
-        break;
       }
     }
     return allResults;
@@ -18324,6 +18330,7 @@ ${learningsContent}
           outputTokens: r.outputTokens ?? 0,
           durationMs: r.durationMs,
           error: r.error,
+          propagated: r.propagated ?? false,
         }),
       );
     }
@@ -18573,6 +18580,7 @@ function applyEvent(status, event) {
         if (event.error) reviewer.error = event.error;
         if (event.verdict) reviewer.verdict = event.verdict;
         if (event.completionEstimate !== undefined) reviewer.completionEstimate = event.completionEstimate;
+        if (event.propagated !== undefined) reviewer.propagated = event.propagated;
       }
       break;
     }
@@ -19083,7 +19091,7 @@ async function handler3(runId, opts, deps) {
       console.error(import_picocolors4.default.dim('Cancel or attach first: kloop cancel / kloop attach'));
       process.exit(1);
     }
-    const entryPoint = path7.resolve(import.meta.dir, '..', 'index.ts');
+    const entryPoint = process.argv[1];
     const command = `bun run "${entryPoint}" run ${runId}`;
     const { spawn } = await import('child_process');
     const child = spawn('tmux', ['new-session', '-d', '-s', daemonSession, '-c', workspace, command], {
@@ -19404,24 +19412,26 @@ function renderLoop(loop, multiPhase, dimmed) {
       const errNote = r.error ? import_picocolors6.default.yellow(` ${r.error}`) : '';
       if (r.status === 'running' || r.status === 'pending') {
         const elapsed = r.startedAt ? formatDuration3(Date.now() - new Date(r.startedAt).getTime()) : '';
+        const propMark = r.propagated ? import_picocolors6.default.cyan('*') : '';
         console.log(
           prefix(
             fmtRow(
               role,
               shortBinary(r.binary),
               elapsed,
-              `${import_picocolors6.default.dim(r.status)}${r.verdict ? `  ${verdictMark(r.verdict)}` : ''}${pct ? `  ${pct}` : ''}`,
+              `${import_picocolors6.default.dim(r.status)}${r.verdict ? `  ${verdictMark(r.verdict)}` : ''}${pct ? `  ${pct}` : ''}${propMark ? `  ${propMark}` : ''}`,
             ),
           ),
         );
       } else {
+        const propMark = r.propagated ? import_picocolors6.default.cyan('*') : '';
         console.log(
           prefix(
             fmtRow(
               role,
               shortBinary(r.binary),
               agentDuration(r),
-              `${verdictMark(r.verdict)}  ${statusMark(agentOk(r))}${pct ? `  ${import_picocolors6.default.dim(pct)}` : ''}${errNote}`,
+              `${verdictMark(r.verdict)}  ${statusMark(agentOk(r))}${pct ? `  ${import_picocolors6.default.dim(pct)}` : ''}${errNote}${propMark ? `  ${propMark}` : ''}`,
             ),
           ),
         );
@@ -20034,6 +20044,8 @@ function getLabel(sample, label) {
       return sample.verdict ?? '';
     case 'loop':
       return String(sample.loop);
+    case 'propagated':
+      return sample.propagated ? 'true' : 'false';
     default:
       return '';
   }
@@ -20347,6 +20359,7 @@ async function loadSamples(runId, state) {
             outputTokens: parsed.outputTokens ?? 0,
             durationMs: parsed.durationMs ?? 0,
             error: parsed.error,
+            propagated: parsed.propagated ?? false,
           });
         } catch {}
       }
@@ -22856,7 +22869,6 @@ function mergeConfig(partial, existing) {
     raw.implementerTimeout = existing.implementerTimeout;
     raw.reviewerTimeout = existing.reviewerTimeout;
     raw.conflictCheckThreshold = existing.conflictCheckThreshold;
-    raw.reviewerFailureLimit = existing.reviewerFailureLimit;
   }
   if (partial.implementers) raw.implementers = partial.implementers;
   if (partial.implementer) raw.implementer = partial.implementer;
@@ -22876,7 +22888,6 @@ function mergeConfig(partial, existing) {
   if (partial.firstLoopFullReview !== undefined) raw.firstLoopFullReview = partial.firstLoopFullReview;
   if (partial.previousReviewPropagation !== undefined)
     raw.previousReviewPropagation = partial.previousReviewPropagation;
-  if (partial.reviewerFailureLimit !== undefined) raw.reviewerFailureLimit = partial.reviewerFailureLimit;
   if (partial.prompts) raw.prompts = partial.prompts;
   return parseRawConfig(raw);
 }
@@ -22967,27 +22978,6 @@ class StateService {
     if (!run) throw new Error('No active run');
     run.consecutiveFailures = 0;
     await this.saveRun(run);
-  }
-  async incrementReviewerFailure(binary) {
-    const run = await this.loadRun();
-    if (!run) throw new Error('No active run');
-    run.reviewerFailures[binary] = (run.reviewerFailures[binary] ?? 0) + 1;
-    await this.saveRun(run);
-    return run.reviewerFailures[binary];
-  }
-  async resetReviewerFailures() {
-    const run = await this.loadRun();
-    if (!run) throw new Error('No active run');
-    run.reviewerFailures = {};
-    await this.saveRun(run);
-  }
-  async resetReviewerFailure(binary) {
-    const run = await this.loadRun();
-    if (!run) throw new Error('No active run');
-    if (binary in run.reviewerFailures) {
-      delete run.reviewerFailures[binary];
-      await this.saveRun(run);
-    }
   }
   async addLearning(learning) {
     const run = await this.loadRun();

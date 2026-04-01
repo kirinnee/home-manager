@@ -35,8 +35,7 @@ export const configSchema = z
     // Review behavior
     firstLoopFullReview: z.boolean().default(false),
     previousReviewPropagation: z.number().min(0).max(1).default(0),
-    // Per-reviewer consecutive failure cap (for :1 reviewers)
-    reviewerFailureLimit: z.number().min(1).max(20).default(2),
+    // Per-reviewer consecutive failure cap — removed; checkpointing handles this
     // Agent prompt overrides
     prompts: z
       .object({
@@ -78,7 +77,6 @@ export const configSchema = z
       conflictCheckThreshold: data.conflictCheckThreshold,
       firstLoopFullReview: data.firstLoopFullReview,
       previousReviewPropagation: data.previousReviewPropagation,
-      reviewerFailureLimit: data.reviewerFailureLimit,
       prompts: data.prompts,
     };
   });
@@ -94,7 +92,6 @@ export const resolvedConfigSchema = z.object({
   conflictCheckThreshold: z.number().min(1).max(100),
   firstLoopFullReview: z.boolean(),
   previousReviewPropagation: z.number().min(0).max(1),
-  reviewerFailureLimit: z.number().min(1).max(20),
   prompts: z
     .object({
       implementer: z.string().optional(),
@@ -122,7 +119,6 @@ export const runSchema = z.object({
   startedAt: z.string().datetime(), // ISO date
   learnings: z.array(z.string()).default([]),
   consecutiveFailures: z.number().int().nonnegative().default(0),
-  reviewerFailures: z.record(z.string(), z.number().int().nonnegative()).default({}),
 });
 
 export type RunStatus = z.infer<typeof runStatusSchema>;
@@ -271,7 +267,6 @@ export const DEFAULT_CONFIG: Config = {
   conflictCheckThreshold: 2,
   firstLoopFullReview: false,
   previousReviewPropagation: 0,
-  reviewerFailureLimit: 2,
 };
 
 // ============================================================================
@@ -512,6 +507,7 @@ export interface ReviewerEndEvent extends BaseEvent {
   error?: string; // 'timeout' | 'no_verdict' | 'exit_code_N'
   verdict?: string; // 'approved' | 'rejected'
   completionEstimate?: number;
+  propagated?: boolean; // true if this reviewer received previous loop reviews
 }
 
 export interface ReviewPhaseEndEvent extends BaseEvent {
@@ -633,6 +629,7 @@ export interface MaterializedAgentState {
   completionEstimate?: number;
   inputTokens?: number;
   outputTokens?: number;
+  propagated?: boolean; // true if this reviewer received previous loop reviews
 }
 
 export interface MaterializedReviewPhase {

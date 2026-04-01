@@ -46,6 +46,7 @@ interface Sample {
   outputTokens: number;
   durationMs: number;
   error?: string;
+  propagated?: boolean;
 }
 
 interface Matcher {
@@ -162,6 +163,8 @@ function getLabel(sample: Sample, label: string): string {
       return sample.verdict ?? '';
     case 'loop':
       return String(sample.loop);
+    case 'propagated':
+      return sample.propagated ? 'true' : 'false';
     default:
       return '';
   }
@@ -558,6 +561,7 @@ async function loadSamples(
             outputTokens: parsed.outputTokens ?? 0,
             durationMs: parsed.durationMs ?? 0,
             error: parsed.error,
+            propagated: parsed.propagated ?? false,
           });
         } catch {
           // Skip malformed lines

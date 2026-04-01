@@ -245,6 +245,7 @@ function applyEvent(status: MaterializedStatus, event: KloopEvent): void {
         if (event.error) reviewer.error = event.error;
         if (event.verdict) reviewer.verdict = event.verdict;
         if (event.completionEstimate !== undefined) reviewer.completionEstimate = event.completionEstimate;
+        if (event.propagated !== undefined) reviewer.propagated = event.propagated;
       }
       break;
     }

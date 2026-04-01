@@ -17,7 +17,6 @@ reviewerTimeout: 15        # minutes
 conflictCheckThreshold: 2
 firstLoopFullReview: false
 previousReviewPropagation: 0
-reviewerFailureLimit: 2
 `;
 
 export async function handler(opts: { config?: string }): Promise<void> {
