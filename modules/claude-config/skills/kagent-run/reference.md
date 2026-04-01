@@ -2,74 +2,84 @@
 
 ## CLI Commands
 
-### dev-loop init
+### kloop init
 
-Initialize a new dev-loop project.
+Initialize a new kloop run. Requires spec and config files to be written first.
 
 ```bash
-dev-loop init \
-  [--implementers <weighted_list>] \
-  [--review-phases <phase_list>] \
-  [--conflict-checker <binary>] \
-  [--conflict-check-threshold <n>] \
-  [--first-loop-full-review] \
-  [--previous-review-propagation <0-1>] \
-  [--max-iterations <n>] \
-  [--implementer-timeout <mins>] \
-  [--reviewer-timeout <mins>]
+kloop init --spec ./spec.md --config ./config.yaml
 ```
 
-| Option                          | Default                              | Description                                       |
-| ------------------------------- | ------------------------------------ | ------------------------------------------------- |
-| `--implementers`                | `claude-auto-zai:2,claude-auto-mm:1` | Weighted implementer list (name:weight pairs)     |
-| `--review-phases`               | see below                            | Pipe-separated review phases                      |
-| `--conflict-checker`            | (none)                               | Binary to check for spec conflicts                |
-| `--conflict-check-threshold`    | `3`                                  | Consecutive failures before conflict check        |
-| `--first-loop-full-review`      | enabled                              | Always run all review phases on first iteration   |
-| `--previous-review-propagation` | `0.75`                               | Probability each reviewer sees prior loop reviews |
-| `--max-iterations`              | `10`                                 | Maximum iterations before giving up               |
-| `--implementer-timeout`         | `30`                                 | Implementer timeout in minutes                    |
-| `--reviewer-timeout`            | `15`                                 | Reviewer timeout in minutes                       |
+| Option               | Description                           |
+| -------------------- | ------------------------------------- |
+| `--spec <path>`      | Spec file to use                      |
+| `--config <path>`    | Config YAML file                      |
+| `--workspace <path>` | Workspace directory (defaults to CWD) |
 
-**Default review phases:**
+**Config YAML format:**
 
+```yaml
+implementers:
+  claude-auto-zai: 2 # name: weight
+  claude-auto-mm: 1
+
+reviewPhases:
+  - - claude-auto-zai # phase 1: reviewers in parallel
+    - claude-auto-mm
+    - claude-auto-seed
+  - - claude-auto-zai # phase 2: reviewers in parallel
+    - claude-auto-anthropic
+    - claude-auto-gemini
+  - - claude-auto-codex # phase 3: reviewers in parallel
+    - claude-auto-kimi
+
+maxIterations: 10
+implementerTimeout: 30 # minutes
+reviewerTimeout: 15 # minutes
+conflictCheckThreshold: 3
+firstLoopFullReview: true
+previousReviewPropagation: 0.75
+reviewerFailureLimit: 2
 ```
-"claude-auto-zai:1,claude-auto-mm:1,claude-auto-seed:0|claude-auto-zai:1,claude-auto-anthropic:1,claude-auto-gemini:0|claude-auto-codex:1,claude-auto-kimi:0"
-```
 
-- Phase 1: `claude-auto-zai`, `claude-auto-mm`, `claude-auto-seed` (parallel)
-- Phase 2: `claude-auto-zai`, `claude-auto-anthropic` (parallel)
-- Phase 3: `claude-auto-codex`, `claude-auto-kimi` (parallel)
+| Field                       | Type    | Description                                                     |
+| --------------------------- | ------- | --------------------------------------------------------------- |
+| `implementers`              | map     | Implementer binary name → weight                                |
+| `reviewPhases`              | list    | List of phases, each a list of reviewer names                   |
+| `maxIterations`             | number  | Maximum iterations before giving up                             |
+| `implementerTimeout`        | number  | Implementer timeout in minutes                                  |
+| `reviewerTimeout`           | number  | Reviewer timeout in minutes                                     |
+| `conflictCheckThreshold`    | number  | Consecutive failures before conflict check fires                |
+| `firstLoopFullReview`       | boolean | Always run all review phases on first iteration (default: true) |
+| `previousReviewPropagation` | number  | Probability (0-1) each reviewer sees previous loop reviews      |
+| `reviewerFailureLimit`      | number  | Allowed reviewer failures before abort                          |
 
-**Review phase format:** `"phase1|phase2|phase3"`
+**Review phase format:**
 
 - Reviewers within a phase run in parallel
 - Phases run in sequence — short-circuit on rejection (skip remaining phases)
-- When `--first-loop-full-review` is set, the first iteration runs **all reviewers across all phases in parallel** (no short-circuit); subsequent iterations use normal phased short-circuit
+- When `firstLoopFullReview: true`, the first iteration runs **all reviewers across all phases in parallel** (no short-circuit); subsequent iterations use normal phased short-circuit
 
-**noVerdictAsFailure suffix:** Append `:0` or `:1` after reviewer name:
-
-| Suffix | Behavior                     | Use for            |
-| ------ | ---------------------------- | ------------------ |
-| `:1`   | No verdict = failure/reject  | Critical reviewers |
-| `:0`   | No verdict = success/approve | Optional/tolerant  |
-
-Default is `:1` if suffix omitted.
+**Output:** Prints `Run ID: <id>` which must be captured for subsequent commands.
 
 **Creates:**
 
-- `.kagent/` directory
-- `.kagent/spec.md` (template)
-- `.kagent/config.json` (configuration)
-- `.kagent/history/` directory
+- Run directory in `~/.kloop/{runId}/` with frozen copies of spec and config
+- Event log at `~/.kloop/{runId}/events.jsonl`
 
-### dev-loop run
+After init, delete the local spec.md and config.yaml — kloop has its own copies.
 
-Execute the dev-loop. Requires `tmux` to be installed.
+### kloop run
+
+Execute the kloop run. Requires `tmux` to be installed.
 
 ```bash
-dev-loop run
+kloop run -d {runId}
 ```
+
+| Option         | Description                     |
+| -------------- | ------------------------------- |
+| `-d, --detach` | Run in background (daemon mode) |
 
 **Exit codes:**
 
@@ -81,353 +91,121 @@ dev-loop run
 | 2    | `conflict`       | Conflict checker found spec contradictions |
 | 3    | `agent_failure`  | Agent crashed or timed out                 |
 
-**Requires:** `.kagent/config.json` to exist (run `dev-loop init` first)
+### kloop status
 
-**Creates during execution:**
-
-- `.kagent/current/run.json` - Run state
-- `.kagent/current/sessions/` - Individual session files
-- `.kagent/current/verdicts/` - Verdict JSON files
-- `.kagent/current/evidence/` - Build/test evidence from implementer
-- `.kagent/current/learnings.md` - Learnings from implementer
-- `.kagent/current/reviews/` - Review files from reviewers
-- `.kagent/logs/{runId}/` - Agent log files
-- `.kagent/reviews/{runId}/` - Persistent copies of reviews and verdicts
-- `.kagent/current/checkpoint-result.json` - Checkpointer output (if conflict check triggered)
-
-### dev-loop status
-
-Show current loop status.
+Show current run snapshot (derived from events.jsonl).
 
 ```bash
-dev-loop status
+kloop status {runId}
+kloop status {runId} --json    # machine-readable output
 ```
 
-**Output includes:**
+### kloop describe
 
-- Config (implementers, review phases, max iterations, timeouts)
-- Run ID, status, iteration, phase, start time
-- Learnings (most recent 3)
-- Current iteration sessions with status, role, binary, verdict
-
-### dev-loop attach
-
-Attach to a running tmux session (interactive selector).
+Full history: all loops, verdicts, exit code, timings.
 
 ```bash
-dev-loop attach
+kloop describe {runId}
+kloop describe {runId} --json
 ```
 
-Lists running tmux sessions and lets you attach to one.
+### kloop ps
 
-### dev-loop cancel
-
-Cancel the active run, kill tmux sessions, and archive.
+List active (running) runs.
 
 ```bash
-dev-loop cancel
+kloop ps
+kloop ps -a              # all runs (running + completed)
+kloop ps --json          # machine-readable
 ```
 
-**Does:** Cancels the current run, kills associated tmux sessions, archives run to history. If no active run, cleans up the latest historical run's tmux sessions.
+### kloop attach
 
-### dev-loop history
-
-View run history.
+Attach to a running tmux session.
 
 ```bash
-dev-loop history              # List past runs (default)
-dev-loop history list         # List past runs
-dev-loop history show <runId> # Show details of a specific run
-dev-loop history clear        # Clear all history
+kloop attach {runId}
 ```
 
-### dev-loop logs
+Session names follow the pattern: `kloop-{runId}`
 
-View agent logs.
+### kloop cancel
+
+Cancel an active run (logged as event).
 
 ```bash
-dev-loop logs                 # Interactive log selector (default)
-dev-loop logs list            # List all logs
-dev-loop logs view <logName>  # View a specific log (e.g., impl-1, rev-1-0)
-dev-loop logs clear [runId]   # Clear logs (optionally for a specific run)
+kloop cancel {runId}
 ```
 
-### dev-loop remove
+### kloop logs
 
-Remove dev-loop state (preserves history).
+View run log.
 
 ```bash
-dev-loop remove
+kloop logs {runId}
+kloop logs {runId} -f              # follow mode
+kloop logs {runId} --since 5m      # entries since 5 minutes ago
 ```
 
-### dev-loop poll-pr
+### kloop view
 
-Poll a PR for CI and review status. Used by kagent-autopilot for automated PR cycles.
+View agent logs (implementer, reviewer, etc.).
 
 ```bash
-dev-loop poll-pr
+kloop view {runId} {loop} {role} [ordinal]
+kloop view {runId} -f              # follow mode
 ```
 
-**Exit codes:**
+### kloop review
 
-| Code | Meaning                        |
-| ---- | ------------------------------ |
-| 0    | Pass — PR is ready             |
-| 1    | CI failure                     |
-| 2    | Changes requested (reviews)    |
-| 4    | Conflict / behind base branch  |
-| 5    | Blocked (checks pending, etc.) |
-| 6    | Merged / closed                |
+Show reviewer verdicts and reasoning for each iteration.
 
-### dev-loop metrics
+```bash
+kloop review {runId}
+```
+
+### kloop rm
+
+Remove run(s) — supports multiple ids and prefix matching.
+
+```bash
+kloop rm {runId}
+kloop rm {runId} --force           # force remove even if active
+```
+
+### kloop metrics
 
 Query run metrics.
 
 ```bash
-dev-loop metrics              # Show all metrics for latest run
-dev-loop metrics <query>      # Query specific metrics
+kloop metrics --run {runId}
+kloop metrics --run {runId} --json
 ```
 
-Returns statistics about the current or latest run (iteration counts, verdict distributions, timing, etc.).
+### kloop summary
 
-## State Files
+Generate/show LLM-evaluated run summary.
 
-### config.json
-
-Stored at `.kagent/config.json`. Created by `dev-loop init`.
-
-```json
-{
-  "implementers": ["claude-auto-zai", "claude-auto-mm"],
-  "implementerWeights": [2, 1],
-  "reviewPhases": [
-    ["claude-auto-zai", "claude-auto-mm", "claude-auto-seed"],
-    ["claude-auto-zai", "claude-auto-anthropic"],
-    ["claude-auto-codex", "claude-auto-kimi"]
-  ],
-  "noVerdictAsFailure": {
-    "claude-auto-zai": true,
-    "claude-auto-mm": true,
-    "claude-auto-seed": false,
-    "claude-auto-anthropic": true,
-    "claude-auto-codex": true,
-    "claude-auto-kimi": false
-  },
-  "conflictChecker": "claude-auto-zai",
-  "conflictCheckThreshold": 3,
-  "firstLoopFullReview": true,
-  "previousReviewPropagation": 0.75,
-  "maxIterations": 10,
-  "implementerTimeout": 30,
-  "reviewerTimeout": 15
-}
+```bash
+kloop summary {runId}
+kloop summary {runId} --force      # regenerate
 ```
 
-| Field                       | Type       | Description                                                     |
-| --------------------------- | ---------- | --------------------------------------------------------------- |
-| `implementers`              | string[]   | Implementer binary names                                        |
-| `implementerWeights`        | number[]   | Weights corresponding to implementers (same length)             |
-| `reviewPhases`              | string[][] | Array of phases, each phase is an array of reviewer names       |
-| `noVerdictAsFailure`        | object     | Map of reviewer name → bool (true = no verdict = reject)        |
-| `conflictChecker`           | string?    | Binary used for conflict detection                              |
-| `conflictCheckThreshold`    | number     | Consecutive failures before conflict check fires                |
-| `firstLoopFullReview`       | boolean    | Always run all review phases on first iteration (default: true) |
-| `previousReviewPropagation` | number     | Probability (0-1) each reviewer sees previous loop reviews      |
-| `maxIterations`             | number     | Maximum iterations before giving up                             |
-| `implementerTimeout`        | number     | Implementer timeout in minutes                                  |
-| `reviewerTimeout`           | number     | Reviewer timeout in minutes                                     |
+## Run Storage
 
-### current/run.json
-
-Stored at `.kagent/current/run.json`. Created when `dev-loop run` starts.
-
-```json
-{
-  "id": "a1b2c3d4",
-  "spec": ".kagent/spec.md",
-  "status": "running",
-  "iteration": 2,
-  "phase": "reviewing",
-  "startedAt": "2025-02-15T10:30:00.000Z",
-  "learnings": ["Fixed import order", "Added missing types"],
-  "consecutiveFailures": 1
-}
-```
-
-| Field                 | Type     | Description                           |
-| --------------------- | -------- | ------------------------------------- |
-| `id`                  | string   | Short UUID run identifier             |
-| `spec`                | string   | Path to spec file                     |
-| `status`              | string   | Overall run status                    |
-| `iteration`           | number   | Current iteration (0 = not started)   |
-| `phase`               | string   | Current phase within iteration        |
-| `startedAt`           | string   | ISO datetime when run started         |
-| `learnings`           | string[] | Accumulated learnings from iterations |
-| `consecutiveFailures` | number   | Consecutive failure count             |
-
-**Status values:**
-
-| Status           | Exit Code | Meaning                                   |
-| ---------------- | --------- | ----------------------------------------- |
-| `running`        | —         | Loop is executing                         |
-| `completed`      | 0         | All reviewers approved                    |
-| `max_iterations` | 0         | Consensus not reached within limit        |
-| `cancelled`      | —         | User cancelled the run                    |
-| `error`          | 1         | Run failed due to error                   |
-| `conflict`       | 2         | Conflict detected (checkper found issues) |
-| `agent_failure`  | 3         | Agent crashed or timed out                |
-
-**Phase values:**
-
-- `implementing` - Implementer agent is working
-- `reviewing` - Reviewer agents are working (in parallel within current phase)
-- `conflict_checking` - Conflict checker is analyzing the spec
-- `done` - Iteration/run completed
-
-### checkpoint-result.json
-
-Created at `.kagent/current/checkpoint-result.json` when the conflict checker runs.
-
-```json
-{
-  "isConflict": true,
-  "reasoning": "Spec requires both nullable and non-nullable for the same field",
-  "suggestedFix": "Clarify the nullability requirement for the user field"
-}
-```
-
-| Field          | Type    | Description                                    |
-| -------------- | ------- | ---------------------------------------------- |
-| `isConflict`   | boolean | Whether a conflict was detected                |
-| `reasoning`    | string  | Conflict checker's analysis                    |
-| `suggestedFix` | string? | Optional suggestion for resolving the conflict |
-
-### Session Files
-
-Individual session files stored at `.kagent/current/sessions/{sessionId}.json`.
-
-```json
-{
-  "id": "abc123-def456-...",
-  "iteration": 1,
-  "role": "reviewer",
-  "reviewerIndex": 0,
-  "reviewPhase": 0,
-  "binary": "claude-auto-zai",
-  "tmuxSession": "devloop-a1b2c3d4-e5f6g7h8-1-rev-0",
-  "status": "completed",
-  "verdict": "approved",
-  "startedAt": "2025-02-15T10:35:00.000Z",
-  "completedAt": "2025-02-15T10:42:00.000Z"
-}
-```
-
-| Field           | Type    | Description                                      |
-| --------------- | ------- | ------------------------------------------------ |
-| `id`            | string  | Full UUID session identifier                     |
-| `iteration`     | number  | Iteration number (1-based)                       |
-| `role`          | string  | `implementer`, `reviewer`, or `conflict_checker` |
-| `reviewerIndex` | number? | Reviewer index (only for reviewer role)          |
-| `reviewPhase`   | number? | Which review phase (0-based)                     |
-| `binary`        | string? | Which binary was used                            |
-| `tmuxSession`   | string  | Tmux session name                                |
-| `status`        | string  | `running`, `completed`, or `error`               |
-| `verdict`       | string? | `approved` or `rejected` (only for reviewers)    |
-| `startedAt`     | string  | ISO datetime                                     |
-| `completedAt`   | string? | ISO datetime (set when session finishes)         |
-
-### Verdict Files
-
-Each reviewer writes a JSON verdict to `.kagent/current/verdicts/{iteration}-{reviewerIndex}.json`:
-
-```json
-{
-  "verdict": "approved",
-  "reasoning": "All acceptance criteria met, tests pass, build succeeds",
-  "completionEstimate": 100
-}
-```
-
-| Field                | Type    | Description                         |
-| -------------------- | ------- | ----------------------------------- |
-| `verdict`            | string  | `approved` or `rejected`            |
-| `reasoning`          | string  | Detailed reasoning for the verdict  |
-| `completionEstimate` | number? | 0-100 percentage of spec completion |
-
-**noVerdictAsFailure behavior:**
-
-- `:1` (default): no verdict file, timeout, or non-zero exit code → treated as `rejected`
-- `:0`: no verdict file, timeout, or non-zero exit code → treated as `approved`
-- Verdict files, if present, always take precedence regardless of exit code
-
-### History Files
-
-Archived runs stored at `.kagent/history/{runId}.json`.
-
-```json
-{
-  "id": "a1b2c3d4",
-  "spec": ".kagent/spec.md",
-  "config": {
-    "implementers": ["claude-auto-zai"],
-    "reviewPhases": [["claude-auto-zai", "claude-auto-mm"]],
-    "...": "..."
-  },
-  "status": "completed",
-  "iterations": 3,
-  "startedAt": "2025-02-15T10:30:00.000Z",
-  "completedAt": "2025-02-15T11:15:00.000Z",
-  "summary": [
-    {
-      "iteration": 1,
-      "reviewerVerdicts": [{ "index": 0, "verdict": "rejected", "binary": "claude-auto-zai", "phase": 0 }],
-      "learnings": [],
-      "sessions": [{ "role": "implementer" }, { "role": "reviewer", "reviewerIndex": 0 }]
-    }
-  ]
-}
-```
-
-## Conflict Detection + Checkpointer
-
-When `consecutiveFailures` reaches `conflictCheckThreshold`, the conflict checker binary runs:
-
-1. **Spec backup:** Current spec is backed up to `.kagent/spec-backup.md`
-2. **Conflict checker runs:** The `--conflict-checker` binary receives the spec and all review feedback
-3. **checkpoint-result.json:** Written with `isConflict`, `reasoning`, and optionally `suggestedFix`
-4. **Outcomes:**
-   - `isConflict: true` → run exits with code 2 (conflict), spec needs human revision
-   - `isConflict: false` → loop continues (counter resets)
-
-## Directory Structure
+kloop stores all run data in `~/.kloop/{runId}/`:
 
 ```
-.kagent/
-├── spec.md                  # The specification (edit before running)
-├── spec-backup.md           # Backup before conflict check (if triggered)
-├── config.json              # Configuration (implementers, review phases, limits)
-├── current/                 # Active run state (removed after archiving)
-│   ├── run.json             # Current run state
-│   ├── checkpoint-result.json  # Conflict checker output
-│   ├── sessions/            # Individual session records
-│   │   └── {sessionId}.json
-│   ├── verdicts/            # Verdict files per iteration
-│   │   └── {iteration}-{reviewerIndex}.json
-│   ├── evidence/            # Build/test evidence from implementer
-│   │   └── evidence.md
-│   ├── learnings.md         # Implementer learnings (current run)
-│   └── reviews/             # Review files (current iteration, cleared each loop)
-│       └── reviewer-{index}.md
-├── history/                 # Archived runs
-│   └── {runId}.json
-├── logs/                    # Agent output logs
-│   └── {runId}/
-│       ├── impl-{iteration}.log
-│       └── rev-{iteration}-{reviewerIndex}.log
-└── reviews/                 # Persistent review copies
-    └── {runId}/
-        ├── review-{iteration}-{index}-{binary}.md
-        └── verdict-{iteration}-{index}-{binary}.json
+~/.kloop/
+└── {runId}/
+    ├── events.jsonl          # append-only event log
+    ├── spec.md               # frozen spec for this run
+    ├── config.yaml           # frozen config for this run
+    ├── kloop.log             # run log
+    ├── reviews/              # review files per iteration
+    ├── verdicts/             # verdict JSON files
+    ├── evidence/             # build/test evidence
+    └── learnings.md          # accumulated learnings
 ```
 
 ## Tmux Session Naming
@@ -435,25 +213,20 @@ When `consecutiveFailures` reaches `conflictCheckThreshold`, the conflict checke
 Session names follow the pattern:
 
 ```
-devloop-{dirHash}-{runId}-{iteration}-{role}[-{reviewerIndex}]
+kloop-{runId}
 ```
-
-Examples:
-
-- `devloop-a1b2c3d4-e5f6g7h8-1-impl` (implementer, iteration 1)
-- `devloop-a1b2c3d4-e5f6g7h8-1-rev-0` (reviewer 0, iteration 1, phase 0)
 
 ## Agent Commands
 
 Agents are invoked via tmux with stream-json output:
 
 ```bash
-cat "<promptFile>" | <binary> --dangerously-skip-permissions --verbose --print --session-id "<sessionId>" --output-format stream-json 2>&1 | tee "<logFile>" | dev-loop stream
+cat "<promptFile>" | <binary> --dangerously-skip-permissions --verbose --print --session-id "<sessionId>" --output-format stream-json 2>&1 | tee "<logFile>" | kloop stream
 ```
 
 ### Spec Isolation
 
-**Reviewer spec isolation:** Reviewers only receive `.kagent/spec.md` as their spec — they do NOT see the original task description, prior learnings, or other context from the orchestrator. This ensures reviewers evaluate against the spec alone.
+**Reviewer spec isolation:** Reviewers only receive the spec — they do NOT see the original task description, prior learnings, or other context from the orchestrator. This ensures reviewers evaluate against the spec alone.
 
 ### Reviewer Change Detection
 
@@ -462,3 +235,12 @@ Reviewers check **all** changes — not just `git diff` of staged changes:
 - Staged changes (`git diff --cached`)
 - Unstaged changes (`git diff`)
 - Untracked files (`git ls-files --others --exclude-standard`)
+
+## Conflict Detection
+
+When `consecutiveFailures` reaches `conflictCheckThreshold`, the conflict checker runs:
+
+1. **Conflict checker runs:** Receives the spec and all review feedback
+2. **Outcomes:**
+   - `isConflict: true` → run exits with code 2 (conflict), spec needs human revision
+   - `isConflict: false` → loop continues (counter resets)

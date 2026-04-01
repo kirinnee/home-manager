@@ -89,7 +89,7 @@ Ticket: {ticketId} - {ticketTitle}
 ## Important
 
 - **NEVER merge the PR** — no `gh pr merge`, no merging in any way
-- Do NOT run dev-loop
+- Do NOT run kloop
 - Do NOT update state files — all state files live in `.kagent/`
 - Do NOT commit
 - Merge ALL fixes into ONE spec

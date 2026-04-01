@@ -21,7 +21,7 @@ When prompted: "Assess polish phase state"
    - Are there uncommitted changes? `git status --short`
    - Was latest commit pushed? `git log origin/{branch}..HEAD --oneline 2>/dev/null`
    - Does PR exist? `gh pr view {prNumber} --json state 2>/dev/null`
-   - Is dev-loop running? Check `.kagent/current/`
+   - Is kloop running? Check `.kagent/current/`
    - Does `rb-review.md` exist?
 4. Report next step
 
@@ -37,7 +37,7 @@ CONTEXT:
 - unpushedCommits: <true|false>
 - prExists: <true|false>
 - prState: <OPEN|MERGED|CLOSED|null>
-- devLoopActive: <true|false>
+- kloopActive: <true|false>
 ```
 
 ### Assessment Logic
@@ -50,9 +50,9 @@ CONTEXT:
 | `create_pr`      | Does PR exist?                              | `poll` if PR exists                             |
 | `poll`           | What was poll exit code?                    | Based on exit code (see dispatch logic)         |
 | `resolve`        | Were resolvers dispatched?                  | `clear` if code fixes, `poll` if only threads   |
-| `clear`          | Is dev-loop cleared?                        | `write_fix`                                     |
+| `clear`          | Is kloop cleared?                           | `write_fix`                                     |
 | `write_fix`      | Does `.kagent/spec.md` exist with fix spec? | `run_fix`                                       |
-| `run_fix`        | Did dev-loop complete?                      | Based on exit code                              |
+| `run_fix`        | Did kloop complete?                         | Based on exit code                              |
 | `resolve_fix`    | Was fix resolved?                           | `push`                                          |
 | `feedback_check` | User responded?                             | `completed` or Phase 1                          |
 

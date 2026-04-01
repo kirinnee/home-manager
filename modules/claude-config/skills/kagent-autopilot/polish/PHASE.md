@@ -34,11 +34,11 @@ Poll result:
 | `prereview`      | prereview-agent      | opus   | team          | `polish/steps/prereview.md`      | CodeRabbit local review (skip if disabled)                 |
 | `push`           | push-agent           | sonnet | team          | `polish/steps/push.md`           | Push to remote, handle failures                            |
 | `create_pr`      | create-pr-agent      | sonnet | team          | `polish/steps/create-pr.md`      | Create PR with template, post reviewComment                |
-| `poll`           | poller-agent         | opus   | team          | `polish/steps/poll.md`           | dev-loop poll-pr, gather CI/review/threads                 |
+| `poll`           | poller-agent         | opus   | team          | `polish/steps/poll.md`           | kloop poll-pr, gather CI/review/threads                    |
 | `resolve`        | resolve-agent        | opus   | team          | `polish/steps/resolve.md`        | Read step content, dispatch resolvers (rebase first)       |
-| `clear`          | clear-loop           | haiku  | sub (common)  | `common/clear-loop.md`           | Reset dev-loop                                             |
+| `clear`          | clear-loop           | haiku  | sub (common)  | `common/clear-loop.md`           | Reset kloop                                                |
 | `write_fix`      | write-fix-agent      | sonnet | team          | `polish/steps/write-fix-spec.md` | Merge resolver fixes into `.kagent/spec.md`                |
-| `run_fix`        | runner-agent         | sonnet | team (common) | `common/run-devloop.md`          | Execute dev-loop on fix spec                               |
+| `run_fix`        | runner-agent         | sonnet | team (common) | `common/run-devloop.md`          | Execute kloop on fix spec                                  |
 | `resolve_fix`    | resolve-fix-agent    | opus   | team          | `common/resolve-or-rewrite.md`   | Read step content, handle conflict/max-iter for fix run    |
 | `feedback_check` | feedback-check-agent | haiku  | team          | `polish/steps/feedback-check.md` | Read step content, ask for feedback → Phase 1 or completed |
 

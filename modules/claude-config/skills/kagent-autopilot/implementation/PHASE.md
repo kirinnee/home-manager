@@ -22,7 +22,7 @@ All plans done → task-state.currentPhase: "polish"
 ```json
 {
   "step": "clear | setup_run | running | resolve_or_rewrite | commit | next_plan | completed",
-  "devLoopInitialized": false,
+  "kloopInitialized": false,
   "lastRunId": null,
   "lastRunExitCode": null,
   "lastRunStatus": null,
@@ -36,9 +36,9 @@ All plans done → task-state.currentPhase: "polish"
 | Step                 | Agent                    | Model  | Type             | File                                         | Description                                           |
 | -------------------- | ------------------------ | ------ | ---------------- | -------------------------------------------- | ----------------------------------------------------- |
 | `clear`              | clear-loop               | haiku  | **sub (common)** | `common/clear-loop.md`                       | Phase 2 (between plans), Phase 3 (before fix cycle)   |
-| `setup_run`          | setup-run-agent          | haiku  | team             | `implementation/steps/setup-run.md`          | Copy plan → `.kagent/spec.md`, init dev-loop          |
+| `setup_run`          | setup-run-agent          | haiku  | team             | `implementation/steps/setup-run.md`          | Copy plan → `.kagent/spec.md`, init kloop             |
 |                      |
-| `running`            | runner-agent             | sonnet | team (common)    | `common/run-devloop.md`                      | Execute dev-loop, report exit code                    |
+| `running`            | runner-agent             | sonnet | team (common)    | `common/run-devloop.md`                      | Execute kloop, report exit code                       |
 | `resolve_or_rewrite` | resolve-or-rewrite-agent | opus   | team             | `implementation/steps/resolve-or-rewrite.md` | Read step content, prompt user, dispatch rewrite-spec |
 | `rewrite_spec`       | rewrite-spec-agent       | opus   | team             | `implementation/steps/rewrite-spec.md`       | Rewrite spec with user feedback                       |
 | `commit`             | commit-agent             | haiku  | team             | `implementation/steps/commit.md`             | Commit per conventions, include ticket ID             |
@@ -63,8 +63,8 @@ On entry to Implementation phase, **NEVER read step files directly** — spawn a
 For each sub-plan in `task-state.subPlans`:
 
 1. `clear` — Clean up from previous run
-2. `setup_run` — Copy current plan to `.kagent/spec.md`, init dev-loop
-3. `running` — Execute dev-loop
+2. `setup_run` — Copy current plan to `.kagent/spec.md`, init kloop
+3. `running` — Execute kloop
 4. Check exit code:
    - **Exit 0 (completed):** → `commit`
    - **Exit 0 (max_iterations) or Exit 2 (conflict):** → `resolve_or_rewrite` → `rewrite_spec` → back to `running`

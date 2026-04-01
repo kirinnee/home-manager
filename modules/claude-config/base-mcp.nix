@@ -6,11 +6,10 @@
     };
     disabled = false;
   };
-  browser = {
+  playwright = {
     command = "npx";
     args = [
-      "-y"
-      "@browsermcp/mcp@latest"
+      "@playwright/mcp@latest"
     ];
     disabled = false;
   };

@@ -24,14 +24,11 @@ Claude: Setting up kagent with:
         - Implementers: claude-personal:1,claude:1 (weighted random per iteration)
         - Review phase 1: claude-auto-anthropic:1
 
-        [runs: dev-loop init \
-          --implementers "claude-personal:1,claude:1" \
-          --review-phases "claude-auto-anthropic:1" \
-          --conflict-checker claude-personal \
-          --first-loop-full-review \
-          --previous-review-propagation 0.75]
-
-        [writes spec.md based on task]
+        [writes spec.md with task spec]
+        [writes config.yaml with implementers, reviewPhases, etc.]
+        [runs: kloop init --spec ./spec.md --config ./config.yaml]
+        [parses Run ID from output]
+        [runs: rm -f spec.md config.yaml]
 
         Here's the spec:
 
@@ -58,7 +55,7 @@ User: Start now (I'll run it and wait for completion)
 
 Claude: Running the loop...
 
-        [runs Bash with run_in_background: true: dev-loop run 2>&1 | tee .kagent/run.log]
+        [runs Bash with run_in_background: true: kloop run -d {runId} 2>&1 | tee .kagent/run.log]
 
         [waits with TaskOutput until completion]
 
@@ -104,12 +101,9 @@ Claude: Setting up:
         - Phase 2: claude-auto-codex (strict)
         - Phase 3: claude-auto-anthropic (strict — final gate)
 
-        [runs: dev-loop init \
-          --implementers "claude" \
-          --review-phases "claude-auto-anthropic:1|claude-auto-codex:1|claude-auto-anthropic:1" \
-          --conflict-checker claude \
-          --first-loop-full-review \
-          --previous-review-propagation 0.75]
+        [writes spec.md and config.yaml]
+        [runs: kloop init --spec ./spec.md --config ./config.yaml]
+        [runs: rm -f spec.md config.yaml]
 
         ...spec written and approved...
 
@@ -161,8 +155,6 @@ Claude: Running the loop...
         Suggested fix: "Choose one primary pattern and optionally
          add the other as a separate API surface."
 
-        Spec backed up to .kagent/spec-backup.md
-
         [AskUserQuestion: What would you like to do?]
         - "Edit spec to resolve conflict"
         - "Start another loop with new spec"
@@ -174,7 +166,7 @@ Claude: Let's resolve the contradiction. Based on the conflict
         checker's suggestion, I'll update the spec to focus on
         one pattern.
 
-        [edits spec.md with clarified requirements...]
+        [edits spec with clarified requirements...]
 
         [AskUserQuestion: Approve updated spec?]
 ```
@@ -221,13 +213,11 @@ Claude: [AskUserQuestion: Reviewers?]
 User: claude-auto-anthropic
 
 Claude: [initializes with single-phase review]
-        [runs: dev-loop init \
-          --implementers "claude" \
-          --review-phases "claude-auto-anthropic:1" \
-          --conflict-checker claude \
-          --first-loop-full-review \
-          --previous-review-propagation 0.75]
-        [writes spec focusing on the date parser bug]
+        [writes spec.md and config.yaml]
+        [runs: kloop init --spec ./spec.md --config ./config.yaml]
+        [parses Run ID: {runId}]
+        [runs: rm -f spec.md config.yaml]
+
         [asks for approval...]
 
 User: Approve
@@ -238,21 +228,20 @@ Claude: [AskUserQuestion: How would you like to start?]
 
 User: I'll start it myself (show me the command)
 
-Claude: KAgent initialized at `.kagent/`
+Claude: KAgent initialized.
 
         Here's the command to run the loop:
 
         ```bash
-        dev-loop run 2>&1 | tee .kagent/run.log
+        kloop run -d {runId} 2>&1 | tee .kagent/run.log
         ```
 
         - Logs will be written to `.kagent/run.log`
-        - Check status anytime with: `dev-loop status`
-        - To cancel: `dev-loop cancel`
-        - To view metrics: `dev-loop metrics`
+        - Check status anytime with: `kloop status {runId}`
+        - To cancel: `kloop cancel {runId}`
+        - To view metrics: `kloop metrics --run {runId}`
 
         Note: Single-phase review means faster iterations.
-        Use `--review-phases "rev1:1|rev2:1"` for multi-phase gating.
 ````
 
 ## Example 6: Editing Spec Before Approval
@@ -280,7 +269,7 @@ Claude: What changes would you like to make to the spec?
 User: Add a criterion for TypeScript types and remove the retry logic -
       we'll do that separately.
 
-Claude: [edits spec.md]
+Claude: [edits spec]
 
         Updated spec:
 
@@ -305,7 +294,8 @@ User: I started a loop earlier. What's the status?
 
 Claude: Let me check the status for you.
 
-        [runs: dev-loop status]
+        [runs: kloop ps]
+        [finds active runId, then runs: kloop status {runId}]
 
         Current Status:
         - Iteration: 2/10
@@ -320,7 +310,7 @@ Claude: Let me check the status for you.
 
 ## Status Check Format
 
-When checking status, run `dev-loop status` and report:
+When checking status, run `kloop status {runId}` and report:
 
 ```
 Current Status:
@@ -351,7 +341,7 @@ Max iterations reached (N/N)
 
 The reviewers couldn't reach consensus.
 
-Last rejection reasons (from .kagent/reviews/{runId}/):
+Last rejection reasons (from kloop review {runId}):
 - <reason from review files>
 
 Options:
@@ -365,11 +355,8 @@ Options:
 ```
 Conflict detected — the spec may contain contradictions.
 
-Conflict checker: <binary>
-Analysis: <reasoning from checkpoint-result.json>
+Analysis: <reasoning from conflict checker>
 Suggested fix: <suggestedFix if available>
-
-Spec backed up to .kagent/spec-backup.md
 
 Options:
 1. Edit spec to resolve conflict
@@ -383,7 +370,7 @@ Options:
 Agent failure — a crash or timeout occurred.
 
 The <role> (<binary>) failed during iteration N.
-Check logs: .kagent/logs/{runId}/
+Check logs: kloop logs {runId}
 
 Options:
 1. Increase timeout and retry

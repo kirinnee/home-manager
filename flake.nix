@@ -25,7 +25,7 @@
     };
 
     home-manager-modules.url = "github:kirinnee/home-manager-modules";
-    claude-code-pkg.url = "github:sadjow/claude-code-nix";
+    llm-agents.url = "github:numtide/llm-agents.nix";
   };
 
   outputs =
@@ -42,7 +42,7 @@
     , darwin
     , nix-homebrew
     , home-manager-modules
-    , claude-code-pkg
+    , llm-agents
     ,
     }@inputs:
     let
@@ -69,7 +69,7 @@
               };
               pre-commit-lib = pre-commit-hooks.lib.${system};
               atomi = atomipkgs.packages.${system};
-              pkgs-claude-code = claude-code-pkg.packages.${system};
+              pkgs-llm = llm-agents.packages.${system};
             in
             let
               pkgs = pkgs-stable;
@@ -81,12 +81,13 @@
                 modules = [
                   home-manager-modules.homeManagerModules.multi-claude
                   home-manager-modules.homeManagerModules.multi-gh
+                  home-manager-modules.homeManagerModules.multi-gws
                   ./home.nix
                 ];
                 extraSpecialArgs = {
                   inherit
                     atomi
-                    pkgs-claude-code
+                    pkgs-llm
                     profile
                     pkgs-240924
                     pkgs-stable
@@ -118,7 +119,7 @@
                 config.allowUnfree = true;
               };
               atomi = atomipkgs.packages.${system};
-              pkgs-claude-code = claude-code-pkg.packages.${system};
+              pkgs-llm = llm-agents.packages.${system};
             in
             let
               pkgs = pkgs-stable;
@@ -153,7 +154,7 @@
                     home-manager.extraSpecialArgs = {
                       inherit
                         atomi
-                        pkgs-claude-code
+                        pkgs-llm
                         profile
                         pkgs-240924
                         pkgs-stable
@@ -163,6 +164,7 @@
                     home-manager.sharedModules = [
                       home-manager-modules.homeManagerModules.multi-claude
                       home-manager-modules.homeManagerModules.multi-gh
+                      home-manager-modules.homeManagerModules.multi-gws
                     ];
                   }
                   home-manager.darwinModules.home-manager

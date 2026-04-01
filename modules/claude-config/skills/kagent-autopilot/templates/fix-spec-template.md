@@ -11,7 +11,7 @@ Ticket: {TICKET_ID} - {TICKET_TITLE}
 - Iterations: {count}
 - Final status: {status}
 
-{Brief summary of what the previous dev-loop run accomplished}
+{Brief summary of what the previous kloop run accomplished}
 
 ## Issues to Address
 

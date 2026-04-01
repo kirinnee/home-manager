@@ -42,22 +42,7 @@ Gathers ALL PR context and returns a structured report to the orchestrator.
 
 ## Steps
 
-### 1. Run dev-loop poll-pr
-
-```bash
-dev-loop poll-pr {prNumber}
-```
-
-Exit codes (**Note:** these are `dev-loop poll-pr` exit codes, different from `dev-loop run` exit codes used in Phase 2/fix cycles):
-
-- 0: Ready to merge
-- 1: CI failed
-- 2: Changes requested
-- 4: Merge conflict/behind
-- 5: Unresolved conversations
-- 6: PR closed/merged
-
-### 2. Gather CI Status
+### 1. Gather CI Status
 
 ```bash
 gh pr checks {prNumber} --json name,status,conclusion
@@ -69,20 +54,24 @@ For each failing check:
 gh run view {runId} --log-failed
 ```
 
-### 3. Gather Review Status
+### 2. Gather Review Status
 
 ```bash
 gh api repos/{owner}/{repo}/pulls/{prNumber}/reviews --jq '.[] | {user: .user.login, state, body}'
 gh api repos/{owner}/{repo}/pulls/{prNumber}/comments --jq '.[] | {id, path, line, body, user: .user.login}'
 ```
 
-### 4. Gather Thread Status
+### 3. Gather Thread Status
 
 ```bash
 gh api graphql -f query='
   query {
     repository(owner: "'$OWNER'", name: "'$REPO'") {
       pullRequest(number: '$PR_NUMBER') {
+        state
+        mergeable
+        mergeStateStatus
+        reviewDecision
         reviewThreads(first: 50) {
           nodes {
             id
@@ -100,17 +89,37 @@ gh api graphql -f query='
   }'
 ```
 
-### 5. Gather Merge Status
+### 4. Gather Merge Status
 
 ```bash
 gh pr view {prNumber} --json mergeable,mergeStateStatus,headRefName
 ```
 
-### 6. Check CodeRabbit CI Status
+### 5. Check CodeRabbit CI Status
 
 ```bash
 gh pr checks {prNumber} --json name,status,conclusion --jq '.[] | select(.name | test("coderabbit|CodeRabbit"; "i"))'
 ```
+
+### 6. Compute Poll Result
+
+Using the data gathered in steps 1-5, determine `poll_exit_code` with this priority:
+
+| Priority | Condition                                              | Exit Code | Status                   |
+| -------- | ------------------------------------------------------ | --------- | ------------------------ |
+| 1        | PR state is MERGED or CLOSED                           | 6         | `merged` or `closed`     |
+| 2        | CI checks still pending/running/queued                 | —         | Wait and re-poll         |
+| 3        | mergeable == UNKNOWN                                   | —         | Wait and re-poll         |
+| 4        | mergeable == CONFLICTING                               | 4         | `merge_conflict`         |
+| 5        | mergeStateStatus == BEHIND                             | 4         | `behind`                 |
+| 6        | CI checks have failures                                | 1         | `ci_failed`              |
+| 7        | reviewDecision == CHANGES_REQUESTED                    | 2         | `changes_requested`      |
+| 8        | mergeStateStatus == BLOCKED AND unresolved threads > 0 | 5         | `conversations_blocking` |
+| 9        | mergeStateStatus in (CLEAN, HAS_HOOKS, UNSTABLE)       | 0         | `all_pass`               |
+| 10       | mergeStateStatus == BLOCKED (other reason)             | 5         | `blocked`                |
+| 11       | Otherwise                                              | —         | Wait and re-poll         |
+
+For "wait and re-poll" cases, sleep for 60 seconds and repeat steps 1-6.
 
 ### 7. Determine Actions Needed
 
@@ -130,4 +139,3 @@ If `pushCycle >= maxPushCycles` and issues remain:
 - Do NOT update state files — all state files live in `.kagent/`
 - Do NOT close or resolve threads
 - Only gather context and report
-- Always use `dev-loop poll-pr`, NEVER `gh pr watch`

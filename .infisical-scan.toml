@@ -1,0 +1,8 @@
+[allowlist]
+description = "Exclude build artifacts and lock files"
+paths = [
+  '''dist/''',
+  '''bun\.lock''',
+  '''flake\.lock''',
+  '''node_modules/''',
+]

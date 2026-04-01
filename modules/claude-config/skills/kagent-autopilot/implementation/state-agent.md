@@ -18,7 +18,7 @@ When prompted: "Assess implementation phase state"
 1. Read `.kagent/impl-state.json` (if exists)
 2. Read `.kagent/task-state.json` for shared context (subPlans, currentSubPlanIndex)
 3. Inspect repo state:
-   - Is dev-loop running? Check `.kagent/current/`
+   - Is kloop running? Check `.kagent/current/`
    - Check `.kagent/history/` for completed results
    - Does `.kagent/spec.md` exist?
    - Are there uncommitted changes? `git status --short`
@@ -32,7 +32,7 @@ CURRENT_PLAN: <plan-N> (index {currentSubPlanIndex} of {total})
 NEXT_STEP: <what should execute next>
 CLEANUP_NEEDED: <any cleanup required>
 CONTEXT:
-- devLoopActive: <true|false>
+- kloopActive: <true|false>
 - specExists: <true|false>
 - lastRunExitCode: <code or null>
 - uncommittedChanges: <true|false>
@@ -41,14 +41,14 @@ CONTEXT:
 
 ### Assessment Logic
 
-| Current Step         | Check                                                  | Next Step                                           |
-| -------------------- | ------------------------------------------------------ | --------------------------------------------------- |
-| `clear`              | Are stale files removed?                               | `setup_run`                                         |
-| `setup_run`          | Does `.kagent/spec.md` exist? Is dev-loop initialized? | `running` if ready, re-run `setup_run` if not       |
-| `running`            | Is dev-loop active? Has it completed?                  | Handle exit code → `commit` or `resolve_or_rewrite` |
-| `resolve_or_rewrite` | Is rewritten spec available?                           | `running` (re-run with new spec)                    |
-| `commit`             | Are changes committed?                                 | `next_plan`                                         |
-| `next_plan`          | Are there more plans?                                  | `clear` (next plan) or `completed`                  |
+| Current Step         | Check                                               | Next Step                                           |
+| -------------------- | --------------------------------------------------- | --------------------------------------------------- |
+| `clear`              | Are stale files removed?                            | `setup_run`                                         |
+| `setup_run`          | Does `.kagent/spec.md` exist? Is kloop initialized? | `running` if ready, re-run `setup_run` if not       |
+| `running`            | Is kloop active? Has it completed?                  | Handle exit code → `commit` or `resolve_or_rewrite` |
+| `resolve_or_rewrite` | Is rewritten spec available?                        | `running` (re-run with new spec)                    |
+| `commit`             | Are changes committed?                              | `next_plan`                                         |
+| `next_plan`          | Are there more plans?                               | `clear` (next plan) or `completed`                  |
 
 ## Mode 2: Update (write state)
 
