@@ -34,6 +34,8 @@
       "bruno"
       "voiceink"
       "google-chrome"
+      "microsoft-edge"
+      "finicky"
       "clickup"
     ];
     masApps = { };

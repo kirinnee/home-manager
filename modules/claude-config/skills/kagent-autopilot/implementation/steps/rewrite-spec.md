@@ -22,7 +22,7 @@ ERROR: <error message if any>
 
 ## Task
 
-Rewrite `.kagent/spec.md` to resolve the conflict or incorporate feedback from failed iterations. This is a **critical blocker** — the spec must be clear and unambiguous for dev-loop to succeed.
+Rewrite `.kagent/spec.md` to resolve the conflict or incorporate feedback from failed iterations. This is a **critical blocker** — the spec must be clear and unambiguous for kloop to succeed.
 
 ## For Spec Conflict (Exit 2)
 
@@ -66,7 +66,7 @@ rm -f .kagent/conflict.md
 
 ## Important
 
-- Do NOT run dev-loop
+- Do NOT run kloop
 - Do NOT update state files
 - Do NOT commit anything
 - Only rewrite `.kagent/spec.md` with the resolved spec

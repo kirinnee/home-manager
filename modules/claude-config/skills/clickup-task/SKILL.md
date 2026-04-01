@@ -5,7 +5,7 @@ description: Create tasks in ClickUp with support for status changes, dependenci
 
 # ClickUp Task Creator
 
-Create, update, and manage tasks in ClickUp via MCP with optional dependency relationships (blocks/waiting_on), status changes, and more.
+Create, update, and manage tasks in ClickUp via the `cup` CLI.
 
 ## When to Use
 
@@ -16,79 +16,75 @@ Create, update, and manage tasks in ClickUp via MCP with optional dependency rel
 
 ## Prerequisites
 
-- ClickUp MCP server must be configured (mcp\_\_clickup tools available)
+- `cup` CLI must be installed and authenticated (`cup auth` to verify)
 
 ## Instructions
 
 ### Step 1: Determine the Target List
 
-Use `clickup_get_list` to find the list ID. Ask the user which list/space to create the task in if not specified.
+Run `cup spaces` to list spaces, then `cup lists <spaceId>` to find the list ID.
 
-If the user references a space name, use `clickup_get_workspace_hierarchy` to find the correct space and its lists.
+If the user doesn't specify a space/list, ask which one to use.
 
 ### Step 2: Create the Task
 
-Use `clickup_create_task` with the following parameters:
+```bash
+cup create -l <listId> -n "Task name" [options]
+```
 
-- `name` (required): Task name
-- `list_id` (required): List ID from Step 1
-- `description` or `markdown_description`: Task description (prefer markdown if rich formatting needed)
-- `assignees`: Array of user IDs, emails, usernames, or "me" (use `clickup_resolve_assignees` if needed)
-- `priority`: "urgent", "high", "normal", or "low"
-- `due_date`: YYYY-MM-DD or YYYY-MM-DD HH:MM format
-- `start_date`: YYYY-MM-DD or YYYY-MM-DD HH:MM format
-- `tags`: Array of tag names (tags must already exist in the space)
-- `status`: Override default status (must be valid for the list)
-- `parent`: Task ID if creating a subtask
-- `custom_fields`: Array of `{id, value}` objects
-- `task_type`: Name of the task type (e.g., 'Bug', 'Feature')
+Options:
+
+- `-d, --description <text>` — Task description (markdown supported)
+- `-p, --parent <taskId>` — Parent task ID (creates as subtask; list auto-detected from parent)
+- `-s, --status <status>` — Initial status (e.g. "in progress")
+- `--priority <level>` — `urgent`, `high`, `normal`, `low` (or 1-4)
+- `--due-date <YYYY-MM-DD>` — Due date
+- `--assignee <userId>` — Assignee user ID or `"me"`
+- `--tags <tags>` — Comma-separated tag names (must exist in the space)
+- `--custom-item-id <id>` — Custom task type ID
+- `--time-estimate <duration>` — e.g. `"2h"`, `"30m"`, `"1h30m"`
 
 ### Step 3: Change Task Status
 
-Use `clickup_update_task` with the `status` parameter to change a task's status.
-
-The `status` field accepts the **exact status name** as configured in the list. Common status names include:
-
-- `"backlog"` — not yet started
-- `"in progress"` — actively being worked on
-- `"review"` — in review/PR
-- `"done"` — completed (sets `date_done` and `date_closed`)
-
-**Important**: Status names must match exactly what's configured in the list. If you get "Status does not exist", the status name is wrong for that list.
-
-To discover valid status names for a list, check an existing task in that list via `clickup_get_task` — the response includes `status.status` (the name) and `status.id`.
-
-```json
-// Example: move task to "in progress"
-clickup_update_task(task_id="abc123", status="in progress")
-
-// Example: mark task as done
-clickup_update_task(task_id="abc123", status="done")
+```bash
+cup update <taskId> -s "in progress"
+cup update <taskId> -s "done"
 ```
+
+**Important**: Status names must match exactly what's configured in the list. To discover valid statuses, check an existing task with `cup task <taskId>`.
 
 ### Step 4: Set Up Dependencies (if requested)
 
-After creating tasks, use `clickup_add_task_dependency` to link them:
+```bash
+# This task is waiting on another task
+cup depend <taskId> --on <otherTaskId>
 
-- `task_id`: The task to set the dependency on
-- `depends_on`: The target task ID
-- `type`:
-  - `"blocking"` — task_id blocks depends_on (task_id must finish before depends_on can start)
-  - `"waiting_on"` — task_id is waiting on depends_on (task_id cannot start until depends_on finishes)
+# This task blocks another task
+cup depend <taskId> --blocks <otherTaskId>
 
-To remove a dependency, use `clickup_remove_task_dependency`.
+# Remove a dependency
+cup depend <taskId> --on <otherTaskId> --remove
+```
 
 ### Step 5: Add Additional Context (optional)
 
-- Use `clickup_create_task_comment` to add comments
-- Use `clickup_add_tag_to_task` to add tags
-- Use `clickup_start_time_tracking` to begin timing the task
+```bash
+# Post a comment
+cup comment <taskId> -m "Comment text"
+
+# Add tags
+cup tag <taskId> --add "tag1,tag2"
+
+# Assign users
+cup assign <taskId> --to me
+cup assign <taskId> --to <userId>
+```
 
 ### Step 6: Confirm and Link
 
 Report back to the user with:
 
-- Task name and URL
+- Task name and ID/URL
 - List/space location
 - Current status
 - Any dependencies created
@@ -96,11 +92,10 @@ Report back to the user with:
 
 ## Troubleshooting
 
-| Issue                     | Solution                                                                                                                                                                                                                       |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| "Status does not exist"   | Status name must exactly match the list's configured statuses. Use `clickup_get_task` on any task in the list to see valid `status.status` names. Case-insensitive but spaces matter — use `"in progress"` not `"In Progress"` |
-| List not found            | Use `clickup_get_workspace_hierarchy` to discover available lists                                                                                                                                                              |
-| Invalid status            | Omit status param to use list default, or check valid statuses via `clickup_get_list` or `clickup_get_task` on an existing task                                                                                                |
-| Tag not found             | Tags must pre-exist in the space                                                                                                                                                                                               |
-| Assignee not resolved     | Use `clickup_resolve_assignees` to convert names/emails to numeric IDs                                                                                                                                                         |
-| Dependency creation fails | Verify both task IDs are valid regular or custom IDs                                                                                                                                                                           |
+| Issue                   | Solution                                                                                                                 |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| "Status does not exist" | Status name must exactly match the list's configured statuses. Check valid names via `cup task <id>` on an existing task |
+| List not found          | Use `cup spaces` then `cup lists <spaceId>` to discover available lists                                                  |
+| Tag not found           | Tags must pre-exist in the space. Use `cup tags <spaceId>` to see available tags                                         |
+| Assignee not resolved   | Use `cup members` to find user IDs                                                                                       |
+| Not authenticated       | Run `cup auth` to verify or re-authenticate                                                                              |

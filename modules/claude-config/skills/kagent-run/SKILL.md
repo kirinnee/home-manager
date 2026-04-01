@@ -37,7 +37,7 @@ An iterative development loop where an implementer works from a spec, and multip
 ┌─────────────────────────────────────────────────────────────┐
 │ Phase 2: Execution                                           │
 │   If user chose "start now":                                 │
-│     • Run dev-loop as background task with Bash tool        │
+│     • Run kloop as background task with Bash tool           │
 │     • Wait for completion with TaskOutput (blocks)          │
 │     • Report results, offer follow-up                       │
 │                                                             │
@@ -99,32 +99,68 @@ Use `AskUserQuestion` with `multiSelect: true`:
 
 ### Step 4: Initialize KAgent
 
-```bash
-dev-loop init \
-  --implementers "claude-auto-zai:2,claude-auto-mm:1" \
-  --review-phases "claude-auto-zai:1,claude-auto-mm:1,claude-auto-seed:0|claude-auto-zai:1,claude-auto-anthropic:1,claude-auto-gemini:0|claude-auto-codex:1,claude-auto-kimi:0" \
-  --conflict-checker claude-auto-zai \
-  --first-loop-full-review \
-  --previous-review-propagation 0.75
+#### 4a. Write spec and config files
+
+Write spec to `spec.md` in the current directory (from the spec template).
+
+Write config to `config.yaml` in the current directory:
+
+```yaml
+implementers:
+  claude-auto-zai: 2
+  claude-auto-mm: 1
+
+reviewPhases:
+  - - claude-auto-zai
+    - claude-auto-mm
+    - claude-auto-seed
+  - - claude-auto-zai
+    - claude-auto-anthropic
+    - claude-auto-gemini
+  - - claude-auto-codex
+    - claude-auto-kimi
+
+maxIterations: 10
+implementerTimeout: 30
+reviewerTimeout: 15
+conflictCheckThreshold: 3
+firstLoopFullReview: true
+previousReviewPropagation: 0.75
+reviewerFailureLimit: 2
 ```
 
-Options:
+Config options:
 
-| Option                          | Default                              | Description                                       |
-| ------------------------------- | ------------------------------------ | ------------------------------------------------- |
-| `--implementers`                | `claude-auto-zai:2,claude-auto-mm:1` | Weighted implementer list (name:weight pairs)     |
-| `--review-phases`               | see above                            | Pipe-separated review phases (parallel within)    |
-| `--conflict-checker`            | (none)                               | Binary to check for spec conflicts                |
-| `--conflict-check-threshold`    | `3`                                  | Consecutive failures before conflict check        |
-| `--first-loop-full-review`      | `true`                               | Always run all review phases on first iteration   |
-| `--previous-review-propagation` | `0.75`                               | Probability each reviewer sees prior loop reviews |
-| `--max-iterations`              | `10`                                 | Maximum iterations before giving up               |
-| `--implementer-timeout`         | `30`                                 | Implementer timeout in minutes                    |
-| `--reviewer-timeout`            | `15`                                 | Reviewer timeout in minutes                       |
+| Option                      | Default | Description                                       |
+| --------------------------- | ------- | ------------------------------------------------- |
+| `implementers`              | (map)   | Weighted implementer map (name: weight)           |
+| `reviewPhases`              | (list)  | List of phases, each a list of reviewer names     |
+| `conflictCheckThreshold`    | `3`     | Consecutive failures before conflict check        |
+| `firstLoopFullReview`       | `true`  | Always run all review phases on first iteration   |
+| `previousReviewPropagation` | `0.75`  | Probability each reviewer sees prior loop reviews |
+| `maxIterations`             | `10`    | Maximum iterations before giving up               |
+| `implementerTimeout`        | `30`    | Implementer timeout in minutes                    |
+| `reviewerTimeout`           | `15`    | Reviewer timeout in minutes                       |
+
+#### 4b. Initialize kloop
+
+```bash
+kloop init --spec ./spec.md --config ./config.yaml
+```
+
+Parse the run ID from output (line containing `Run ID:`). Store as `{runId}`.
+
+#### 4c. Clean up temporary files
+
+```bash
+rm -f spec.md config.yaml
+```
+
+kloop copies spec and config into its own run directory during init — the local files are no longer needed.
 
 ### Step 5: Write Spec
 
-Help the user refine the spec. Edit `.kagent/spec.md` using the template in [templates/spec-template.md](templates/spec-template.md). Work collaboratively with the user to ensure the spec is clear and complete.
+Help the user refine the spec. Use the template in [templates/spec-template.md](templates/spec-template.md). Work collaboratively with the user to ensure the spec is clear and complete. The spec will be written to `spec.md` in Step 4a.
 
 ### Step 6: User Approval
 
@@ -148,10 +184,10 @@ After spec approval, ask the user how they want to proceed. Use `AskUserQuestion
 
 ### Step 8a: If User Wants You to Start
 
-Run the loop as a background bash task and wait for completion:
+Run the loop in detached mode as a background bash task and wait for completion:
 
 ```bash
-dev-loop run 2>&1 | tee .kagent/run.log
+kloop run -d {runId} 2>&1 | tee .kagent/run.log
 ```
 
 Use `run_in_background: true` with Bash tool, then wait with TaskOutput. This blocks until the loop finishes.
@@ -174,27 +210,27 @@ Use `run_in_background: true` with Bash tool, then wait with TaskOutput. This bl
   - "Run tests"
   - "Start another loop with refined spec"
 
-**Note on logs:** User can check `.kagent/run.log` for the full output. Detailed session logs are in `.kagent/logs/{runId}/`.
+**Note on logs:** User can check `.kagent/run.log` for the full output. View logs with `kloop logs {runId}`.
 
 ### Step 8b: If User Wants to Start Themselves
 
 Provide the command:
 
 ```bash
-dev-loop run 2>&1 | tee .kagent/run.log
+kloop run -d {runId} 2>&1 | tee .kagent/run.log
 ```
 
 Explain to the user:
 
 - Run this command to start
 - Logs are written to `.kagent/run.log`
-- Check status anytime with: `dev-loop status`
+- Check status anytime with: `kloop status {runId}`
 
 ## Rules
 
 1. **ALWAYS discover binaries first** - Run `compgen -c | grep '^claude'`
 2. **ALWAYS ask user to select** - Never assume which binaries
-3. **Use `.kagent`** - Default directory for dev-loop
+3. **Use `.kagent`** - Default directory for kloop state
 4. **Help refine the spec** - Work with user to ensure clarity
 5. **NEVER modify spec after approval**
 6. **Ask before starting** - Let user choose if you start or they do
@@ -205,9 +241,8 @@ Explain to the user:
 ## How to Verify
 
 1. Check `.kagent/` directory exists
-2. Check `spec.md` exists and is complete
-3. Check `config.json` has been initialized with correct implementers, review phases, and settings
-4. Loop has been started (either by you or user has the command)
+2. kloop run was initialized (`kloop status {runId}` shows config)
+3. Loop has been started (either by you or user has the command)
 
 ## Reference
 

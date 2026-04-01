@@ -1,7 +1,7 @@
 { config
 , pkgs
 , lib
-, pkgs-claude-code
+, pkgs-llm
 , pkgs-240924
 , pkgs-stable
 , pkgs-unstable
@@ -110,7 +110,7 @@ rec {
   # Claude multi-account configuration
   programs.claude-multi = {
     enable = true;
-    defaultPackage = pkgs-claude-code.default;
+    defaultPackage = pkgs-llm.claude-code;
     defaultAccount = "personal";
 
     smartWrapper.enable = true;
@@ -144,6 +144,7 @@ rec {
             "~/.config/home-manager"
             "~/Workspace/personal"
           ];
+          env = auth.zai;
         };
 
         liftoff = merge userConfig {
@@ -197,6 +198,24 @@ rec {
     };
   };
 
+  programs.multi-gws = {
+    enable = true;
+    defaultAccount = "lo";
+    smartWrapper.enable = true;
+    accounts = {
+      lo = {
+        directoryRules = [ "~/Workspace/work" ];
+      };
+      per = {
+        directoryRules = [
+          "~"
+          "~/.config/home-manager"
+          "~/Workspace/personal"
+        ];
+      };
+    };
+  };
+
   # Claude Code statusline (prettified, version-controlled)
   home.file.".config/claude-statusline.zsh" = {
     source = ./modules/claude-config/statusline.zsh;
@@ -214,6 +233,12 @@ rec {
 
   # Worktrunk config
   xdg.configFile."worktrunk/config.toml".source = ./worktrunk/config.toml;
+
+  # Finicky config
+  home.file.".finicky.js" = {
+    source = ./finicky/config.js;
+    executable = false;
+  };
 
   home.activation.load-secrets = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
     export SECRETS_FILE="${./secrets.enc.yaml}"
@@ -249,6 +274,8 @@ rec {
       tealdeer
       zenith
       stern
+      google-cloud-sdk
+
       tesseract
       age
       sops
@@ -256,10 +283,12 @@ rec {
       atomi.cyanprint
       atomi.attic
 
+
       # LLM friendly
       atomi.worktrunk
-      atomi.coderabbit
       atomi.ccc
+      pkgs-llm.gemini-cli
+      pkgs-llm.coderabbit-cli
 
       # cncf
       kubectl
@@ -295,8 +324,16 @@ rec {
       load-secrets
       speak
       hms
-      dev-loop
+      kloop
+      kautopilot
+      loctl
       atomi.clickup_cli
+      grafana-loki
+      prometheus.cli
+      grafanactl
+
+      # AI
+      pkgs-unstable.rtk
 
       # liftoff
       awscli2
@@ -652,14 +689,22 @@ rec {
         awsl = "unset AWS_PROFILE && gimme-aws-creds && awsp";
         tfi = "tfswitch && tf init && vaultlogin";
 
-        # devloop
-        dl = "dev-loop";
-        dli = "dev-loop init";
-        dlr = "dev-loop run";
-        dls = "dev-loop status";
-        dlc = "dev-loop cancel";
-        dll = "dev-loop logs";
-        kgl = "tail -f ./.kagent/run.log";
+        # kautopilot
+        kap = "kautopilot";
+        kapi = "kautopilot init";
+        kaps = "kautopilot start";
+        kapst = "kautopilot status";
+        kapps = "kautopilot ps";
+        kapx = "kautopilot stop";
+
+        # kloop
+        kp = "kloop";
+        kpi = "kloop init";
+        kpr = "kloop run";
+        kps = "kloop status";
+        kpc = "kloop cancel";
+        kpl = "kloop logs";
+        klg = "tail -f ./.kagent/run.log";
         vpr = "gh pr view --web";
 
       }

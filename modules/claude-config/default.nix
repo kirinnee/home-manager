@@ -3,11 +3,12 @@ let baseMcp = import ./base-mcp.nix; in
 let baseHooks = import ./base-hooks.nix; in
 let auth = import ./auth.nix; in
 let baseEnv = import ./base-env.nix; in
+let rtk = builtins.readFile ./RTK.md; in
 let
   userConfig = {
     settings = baseSettings // { hooks = baseHooks; };
     mcpServers = baseMcp;
-    memory.source = ./CLAUDE.md;
+    memory.text = builtins.readFile ./CLAUDE.md + "\n" + rtk;
     skillsDir = ./skills;
     env = baseEnv;
   };
@@ -16,7 +17,7 @@ let
   autoConfig = {
     settings = baseSettings;
     mcpServers = baseMcp;
-    memory.source = ./CLAUDE-autonomous.md;
+    memory.text = builtins.readFile ./CLAUDE-autonomous.md + "\n" + rtk;
     skillsDir = ./skills;
     env = baseEnv;
   };

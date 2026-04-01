@@ -32,6 +32,15 @@
   ];
   PreToolUse = [
     {
+      matcher = "Bash";
+      hooks = [
+        {
+          type = "command";
+          command = "$HOME/.claude/hooks/rtk-rewrite.sh";
+        }
+      ];
+    }
+    {
       hooks = [
         {
           command = "$HOME/.nix-profile/bin/ccc hook-permission";

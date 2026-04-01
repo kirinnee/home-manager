@@ -5,8 +5,8 @@ rec {
   };
   zai = proxy // {
     ANTHROPIC_DEFAULT_HAIKU_MODEL = "glm-4.5-air";
-    ANTHROPIC_DEFAULT_SONNET_MODEL = "glm-4.7";
-    ANTHROPIC_DEFAULT_OPUS_MODEL = "glm-5-turbo";
+    ANTHROPIC_DEFAULT_SONNET_MODEL = "glm-5-turbo";
+    ANTHROPIC_DEFAULT_OPUS_MODEL = "glm-5.1";
   };
   kimi = proxy // {
     ANTHROPIC_DEFAULT_HAIKU_MODEL = "kimi-k2.5";

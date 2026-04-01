@@ -1,0 +1,73 @@
+import { join } from 'node:path';
+import type { Config, TypeConfig } from './types';
+
+/**
+ * Prompt variable context — all resolved to absolute paths.
+ */
+export interface PromptVars {
+  ticket: string;
+  spec: string;
+  specDir: string;
+  plans: string;
+  worktree: string;
+}
+
+/**
+ * Build the prompt variable context for a given session.
+ */
+export function buildPromptVars(worktree: string, version: number): PromptVars {
+  const vDir = join(worktree, 'spec', `v${version}`);
+  return {
+    ticket: join(worktree, 'spec', 'ticket.md'),
+    spec: join(vDir, 'task-spec.md'),
+    specDir: vDir,
+    plans: join(vDir, 'plans'),
+    worktree,
+  };
+}
+
+/**
+ * Replace {variable} placeholders in a prompt string with resolved values.
+ */
+export function resolvePromptVars(prompt: string, vars: PromptVars): string {
+  let result = prompt;
+  for (const [key, value] of Object.entries(vars)) {
+    result = result.replace(new RegExp(`\\{${key}\\}`, 'g'), value);
+  }
+  return result;
+}
+
+/**
+ * Get a type config by name from the config. Returns null if type not found.
+ */
+export function getTypeConfig(config: Config, typeName: string): TypeConfig | null {
+  return config.types[typeName] ?? null;
+}
+
+/**
+ * Get all type names and descriptions (for LLM type routing).
+ */
+export function getTypeDescriptions(config: Config): Array<{ name: string; desc: string }> {
+  return Object.entries(config.types).map(([name, tc]) => ({
+    name,
+    desc: tc.desc,
+  }));
+}
+
+/**
+ * Resolve the timeout for an LLM call.
+ * Priority: per-prompt override > config.settings.defaultLlmTimeout
+ */
+export function resolveTimeout(specific: number | undefined, config: Config): number {
+  return specific ?? config.settings.defaultLlmTimeout;
+}
+
+/**
+ * Resolve the binary for a reviewer or context source.
+ * Priority: CLAUDE_BINARY env > first entry in binaries array > config.claude_binary > 'claude'
+ */
+export function resolveBinary(binaries: string[] | undefined, config: Config): string {
+  if (process.env.CLAUDE_BINARY) return process.env.CLAUDE_BINARY;
+  if (binaries && binaries.length > 0) return binaries[0];
+  return config.claude_binary ?? 'claude';
+}

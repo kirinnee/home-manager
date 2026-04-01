@@ -7,28 +7,27 @@ Used by: Phase 2 (between plans, before rewrite), Phase 3 (before fix cycle)
 ## Agent Context
 
 - Working directory: {WORKDIR}
+- kloop Run ID (if known): {kloopRunId}
 
 ## Task
 
-Clean up dev-loop state and stale files to prepare for a fresh run.
+Clean up kloop state and stale files to prepare for a fresh run.
 
 ## Steps
 
-### 1. Check Dev-Loop Status
+### 1. Check for Active Runs
 
 ```bash
-dev-loop status 2>&1 || true
+kloop ps 2>&1 || true
 ```
 
 ### 2. Cancel Active Run
 
-If dev-loop reports an active run:
+If kloop reports an active run (or a runId was provided):
 
 ```bash
-dev-loop cancel
+kloop cancel {kloopRunId}
 ```
-
-This archives the current run to `.kagent/history/`.
 
 ### 3. Remove Stale Files
 
@@ -40,7 +39,7 @@ rm -f .kagent/spec.md .kagent/conflict.md rb-review.md
 
 ```
 RESULT: cleared
-DEV_LOOP_WAS_ACTIVE: <true|false>
+KLOOP_WAS_ACTIVE: <true|false>
 FILES_CLEANED: <list of files removed>
 ```
 
@@ -50,4 +49,4 @@ FILES_CLEANED: <list of files removed>
 - Do NOT update any state files (`task-state.json`, `impl-state.json`, `polish-state.json`) — all state files live in `.kagent/`
 - Do NOT commit anything
 - Do NOT modify code files
-- Only clean up dev-loop state and stale files in `.kagent/`
+- Only clean up kloop state and stale files in `.kagent/`

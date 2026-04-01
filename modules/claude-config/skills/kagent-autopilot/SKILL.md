@@ -40,20 +40,20 @@ ORCHESTRATOR (you = team lead)
 │   ├── plan-state-agent (haiku) — plan phase state reads/writes
 │   ├── impl-state-agent (haiku) — implementation phase state reads/writes
 │   ├── polish-state-agent (haiku) — polish phase state reads/writes
-│   └── clear-loop (haiku) — dev-loop status/cancel, remove stale files
+│   └── clear-loop (haiku) — kloop ps/cancel, remove stale files
 │
 ├── TEAM AGENTS (spawned via Task tool):
 │   ├── setup-agent (haiku) — mode + branch + .gitignore + bootstrap state
 │   ├── repo-setup-agent (sonnet) — org detection, ticket, repoConfig
-│   ├── setup-run-agent (haiku) — copy plan → spec, init dev-loop
-│   ├── runner-agent (sonnet) — execute dev-loop, report exit code
+│   ├── setup-run-agent (haiku) — copy plan → spec, init kloop
+│   ├── runner-agent (sonnet) — execute kloop, report exit code
 │   ├── rewrite-spec-agent (opus) — rewrite spec with conflict/feedback
 │   ├── commit-agent (haiku) — commit per conventions
 │   ├── commit-pending-agent (haiku) — stage + commit uncommitted changes
 │   ├── prereview-agent (opus) — CodeRabbit local review
 │   ├── push-agent (sonnet) — push, post-push actions, re-review comment
 │   ├── create-pr-agent (sonnet) — create/update PR, post reviewComment
-│   ├── poller-agent (opus) — dev-loop poll-pr, gather context
+│   ├── poller-agent (opus) — poll PR via gh API, gather context
 │   ├── write-fix-agent (sonnet) — merge resolver fixes → spec
 │   └── resolver-agents — fix issues (ci, review, coderabbit, thread, rebase)
 │
@@ -62,15 +62,15 @@ ORCHESTRATOR (you = team lead)
 
 ## Glossary
 
-| Term              | Scope            | Description                                                            |
-| ----------------- | ---------------- | ---------------------------------------------------------------------- |
-| **Iteration**     | Inner (dev-loop) | One implement-then-review pass. Controlled by `maxIterations`.         |
-| **Push cycle**    | Outer (Phase 3)  | One round: push, CI/review check. Controlled by `maxPushCycles`.       |
-| **Plan**          | Phase 1 output   | Implementation plan for a portion of the task. Every task has ≥1 plan. |
-| **Conflict**      | Dev-loop exit 2  | The spec contains contradictory or ambiguous requirements.             |
-| **Agent failure** | Dev-loop exit 3  | An agent crashed or timed out.                                         |
-| **Phase**         | Top-level        | One of: plan, implementation, polish.                                  |
-| **Step**          | Per-phase        | A discrete action within a phase.                                      |
+| Term              | Scope           | Description                                                            |
+| ----------------- | --------------- | ---------------------------------------------------------------------- |
+| **Iteration**     | Inner (kloop)   | One implement-then-review pass. Controlled by `maxIterations`.         |
+| **Push cycle**    | Outer (Phase 3) | One round: push, CI/review check. Controlled by `maxPushCycles`.       |
+| **Plan**          | Phase 1 output  | Implementation plan for a portion of the task. Every task has ≥1 plan. |
+| **Conflict**      | kloop exit 2    | The spec contains contradictory or ambiguous requirements.             |
+| **Agent failure** | kloop exit 3    | An agent crashed or timed out.                                         |
+| **Phase**         | Top-level       | One of: plan, implementation, polish.                                  |
+| **Step**          | Per-phase       | A discrete action within a phase.                                      |
 
 ## Two-Level State
 
@@ -262,7 +262,7 @@ Shared between phases. See `common/` directory:
 | Agent              | Model  | Type       | File                           | Used by                                             |
 | ------------------ | ------ | ---------- | ------------------------------ | --------------------------------------------------- |
 | clear-loop         | haiku  | sub        | `common/clear-loop.md`         | Phase 2 (between plans), Phase 3 (before fix cycle) |
-| run-devloop        | sonnet | team       | `common/run-devloop.md`        | Phase 2 (`running`), Phase 3 (`run_fix`)            |
+| run-kloop          | sonnet | team       | `common/run-devloop.md`        | Phase 2 (`running`), Phase 3 (`run_fix`)            |
 | resolve-or-rewrite | —      | inline ref | `common/resolve-or-rewrite.md` | Phase 2 (after running), Phase 3 (after run_fix)    |
 
 ## Resolver Agents (Phase 3)
@@ -299,7 +299,7 @@ After poller returns, resolvers are dispatched from `polish/steps/resolve.md`:
 6. **Challenge before building** — iteratively clarify specs and plans in chat (not AskUserQuestion), be devil's advocate
 7. **Firm spec = firm commitment** — don't proceed until all ambiguities resolved
 8. **Fully autonomous after approval** — only stop for spec conflict (exit 2), agent failure (exit 3), or push failure
-9. **Delegate to dev-loop** — don't duplicate its implement-then-review logic
+9. **Delegate to kloop** — don't duplicate its implement-then-review logic
 10. **Task specs describe WHAT, plans describe HOW** — neither contains exact code
 11. **Always use sub-plans** — minimum 1 plan per task (no single-spec branching), named `plan-N` (not `phase-N`)
 12. **Transition ticket status at phase boundaries** — using `repoConfig.ticketTransitions`
@@ -315,9 +315,9 @@ After poller returns, resolvers are dispatched from `polish/steps/resolve.md`:
 22. **Include ticket ID** — in commits, branches, PRs (when available), using `{ticketId}` placeholder
 23. **Never push to main/master**
 24. **Never force push** — except `--force-with-lease` after rebase-resolver
-25. **Always use dev-loop poll-pr** — NEVER use `gh pr watch` in polling
+25. **Never use `gh pr watch`** — use inline `gh api graphql` polling instead
 26. **Three-wave execution** — immediate actions → code fixes (merged) → post-push actions
-27. **One combined spec** — merge all resolver fixes into ONE spec before dev-loop
+27. **One combined spec** — merge all resolver fixes into ONE spec before kloop
 28. **Priority merging** — CI(1) > Review(2) > CodeRabbit(3), drop lower priority overlaps
 29. **Push back on CodeRabbit reasonably** — evaluate critically but professionally
 30. **Never close threads without note** — always post explanation with signature first
@@ -329,4 +329,4 @@ After poller returns, resolvers are dispatched from `polish/steps/resolve.md`:
 - `gh` CLI installed and authenticated
 - For Jira: `acli` installed and authenticated (`acli jira auth`)
 - For ClickUp: ClickUp MCP server configured
-- `dev-loop` CLI (Phase 2 and fix cycles in Phase 3)
+- `kloop` CLI (Phase 2 and fix cycles in Phase 3)
