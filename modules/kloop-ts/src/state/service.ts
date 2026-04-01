@@ -124,30 +124,6 @@ export class StateService {
     await this.saveRun(run);
   }
 
-  async incrementReviewerFailure(binary: string): Promise<number> {
-    const run = await this.loadRun();
-    if (!run) throw new Error('No active run');
-    run.reviewerFailures[binary] = (run.reviewerFailures[binary] ?? 0) + 1;
-    await this.saveRun(run);
-    return run.reviewerFailures[binary];
-  }
-
-  async resetReviewerFailures(): Promise<void> {
-    const run = await this.loadRun();
-    if (!run) throw new Error('No active run');
-    run.reviewerFailures = {};
-    await this.saveRun(run);
-  }
-
-  async resetReviewerFailure(binary: string): Promise<void> {
-    const run = await this.loadRun();
-    if (!run) throw new Error('No active run');
-    if (binary in run.reviewerFailures) {
-      delete run.reviewerFailures[binary];
-      await this.saveRun(run);
-    }
-  }
-
   async addLearning(learning: string): Promise<void> {
     const run = await this.loadRun();
     if (!run) throw new Error('No active run');

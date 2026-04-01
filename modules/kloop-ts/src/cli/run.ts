@@ -127,7 +127,7 @@ export async function handler(runId: string | undefined, opts: { detach?: boolea
       process.exit(1);
     }
 
-    const entryPoint = path.resolve(import.meta.dir, '..', 'index.ts');
+    const entryPoint = process.argv[1];
     const command = `bun run "${entryPoint}" run ${runId}`;
 
     // Create a detached tmux session running the kloop command.
@@ -309,6 +309,7 @@ export async function handler(runId: string | undefined, opts: { detach?: boolea
       console.log('========================================');
       process.exit(3);
     }
+
     console.error(`Error: ${error.message}`);
     process.exit(1);
   }

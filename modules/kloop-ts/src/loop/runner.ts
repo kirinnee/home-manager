@@ -54,17 +54,6 @@ class AgentFailureError extends Error {
   }
 }
 
-class ReviewerFailureError extends Error {
-  constructor(
-    public readonly binary: string,
-    public readonly count: number,
-    public readonly limit: number,
-  ) {
-    super(`Reviewer "${binary}" failed ${count} consecutive times (limit: ${limit})`);
-    this.name = 'ReviewerFailureError';
-  }
-}
-
 export interface LoopResult {
   status: 'completed' | 'cancelled' | 'failed' | 'max_iterations' | 'conflict' | 'agent_failure';
   finalRun: Run;
@@ -138,7 +127,6 @@ export class LoopRunner {
       startedAt: new Date().toISOString(),
       learnings: [],
       consecutiveFailures: 0,
-      reviewerFailures: {},
     };
 
     // Helper: write event to events.jsonl
@@ -522,23 +510,33 @@ export class LoopRunner {
         reviewers: phaseReviewers.map(r => r.binary),
       });
 
-      // Build prompts
+      // Build prompts with per-reviewer propagation roll
       const reviewsDir = this.paths.loopReviewsPath(runId, iterNum);
       const verdictsDir = this.paths.loopVerdictsPath(runId, iterNum);
       const evidenceDir = this.paths.loopEvidencePath(runId, iterNum);
       const learningsFile = this.paths.runLearnings(runId);
-      const phasePrompts: Array<{ reviewerIndex: number; prompt: string }> = phaseReviewers.map((_, i) => ({
-        reviewerIndex: globalReviewerIndex + i,
-        prompt: iteration.buildReviewerPrompt(config.prompts?.reviewer, {
-          specPath,
-          iteration: String(iterNum),
-          reviewerIndex: String(globalReviewerIndex + i),
-          reviewsDir,
-          verdictsDir,
-          evidenceDir,
-          learningsFile,
-        }),
-      }));
+      const prevLoop = iterNum > 1 ? iterNum - 1 : null;
+      const phasePrompts: Array<{ reviewerIndex: number; prompt: string; propagated: boolean }> = phaseReviewers.map(
+        (_, i) => {
+          // Per-reviewer probability roll for seeing previous loop's reviews
+          const seesPrevReviews = prevLoop !== null && Math.random() < (config.previousReviewPropagation ?? 0);
+          const archivedReviews = seesPrevReviews ? this.paths.loopReviewsPath(runId, prevLoop) : null;
+          return {
+            reviewerIndex: globalReviewerIndex + i,
+            prompt: iteration.buildReviewerPrompt(config.prompts?.reviewer, {
+              specPath,
+              iteration: String(iterNum),
+              reviewerIndex: String(globalReviewerIndex + i),
+              reviewsDir,
+              verdictsDir,
+              evidenceDir,
+              learningsFile,
+              archivedReviews,
+            }),
+            propagated: seesPrevReviews,
+          };
+        },
+      );
 
       // Write reviewer_start events for all reviewers before launching
       for (const rc of phaseReviewers) {
@@ -561,6 +559,10 @@ export class LoopRunner {
         prompts: phasePrompts,
         timeout: config.reviewerTimeout,
         onReviewerEnd: async (r: agents.ReviewerResult) => {
+          // Find the propagated flag for this reviewer from phasePrompts
+          const promptMeta = phasePrompts.find(p => p.reviewerIndex === r.reviewerIndex);
+          const propagated = promptMeta?.propagated ?? false;
+          r.propagated = propagated;
           await writeEvent({
             type: 'reviewer_end',
             timestamp: new Date().toISOString(),
@@ -572,6 +574,7 @@ export class LoopRunner {
             error: r.error,
             verdict: r.verdict,
             completionEstimate: r.completionEstimate,
+            propagated,
           });
         },
       });
@@ -598,12 +601,16 @@ export class LoopRunner {
         shortCircuited: anyRejected,
       });
 
-      // Short-circuit on rejection
+      // Short-circuit on rejection (unless firstLoopFullReview bypasses on loop 1)
       if (anyRejected) {
-        if (reviewPhases.length > 1) {
-          fmt.formatPhaseShortCircuit(phaseIdx, reviewPhases.length - phaseIdx - 1);
+        const skipShortCircuit = iterNum === 1 && config.firstLoopFullReview;
+        if (!skipShortCircuit) {
+          if (reviewPhases.length > 1) {
+            fmt.formatPhaseShortCircuit(phaseIdx, reviewPhases.length - phaseIdx - 1);
+          }
+          break;
         }
-        break;
+        // firstLoopFullReview: continue running remaining phases despite rejection
       }
     }
 
@@ -759,6 +766,7 @@ export class LoopRunner {
           outputTokens: r.outputTokens ?? 0,
           durationMs: r.durationMs,
           error: r.error,
+          propagated: r.propagated ?? false,
         }),
       );
     }

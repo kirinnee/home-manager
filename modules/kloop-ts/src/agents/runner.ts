@@ -10,8 +10,9 @@ import type { CheckpointerPromptVars } from './prompts';
 import { extractTokensFromLog } from '../stream/parse';
 import { formatAgentLaunch } from '../loop/format';
 
-// Path to kloop binary (used by agents to pipe stream-json through `kloop stream`)
-const KLOOP_BIN = `bun run ${path.resolve(import.meta.dir, '..', 'index.ts')}`;
+// Path to kloop binary — use process.argv[1] (the running script) instead of
+// import.meta.dir so it survives nix store path changes after rebuilds.
+const KLOOP_BIN = `bun run ${process.argv[1]}`;
 
 // ============================================================================
 // Agent Result types
@@ -43,6 +44,7 @@ export interface ReviewerResult extends AgentResult {
   inputTokens?: number;
   outputTokens?: number;
   error?: string; // "timeout", "no_verdict", "exit_code_N"
+  propagated?: boolean; // true if reviewer received previous loop reviews
 }
 
 export type CheckpointerOutcome = 'conflict_found' | 'spec_auto_fixed' | 'spec_compressed' | 'no_action';

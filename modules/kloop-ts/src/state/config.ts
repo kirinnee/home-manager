@@ -20,7 +20,6 @@ export function mergeConfig(partial: Record<string, unknown>, existing?: Config)
     raw.implementerTimeout = existing.implementerTimeout;
     raw.reviewerTimeout = existing.reviewerTimeout;
     raw.conflictCheckThreshold = existing.conflictCheckThreshold;
-    raw.reviewerFailureLimit = existing.reviewerFailureLimit;
   }
 
   // Override with explicit partial values
@@ -44,7 +43,6 @@ export function mergeConfig(partial: Record<string, unknown>, existing?: Config)
   if (partial.firstLoopFullReview !== undefined) raw.firstLoopFullReview = partial.firstLoopFullReview;
   if (partial.previousReviewPropagation !== undefined)
     raw.previousReviewPropagation = partial.previousReviewPropagation;
-  if (partial.reviewerFailureLimit !== undefined) raw.reviewerFailureLimit = partial.reviewerFailureLimit;
   if (partial.prompts) raw.prompts = partial.prompts;
 
   return parseRawConfig(raw);

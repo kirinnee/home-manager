@@ -84,24 +84,26 @@ function renderLoop(loop: MaterializedLoop, multiPhase: boolean, dimmed: boolean
 
       if (r.status === 'running' || r.status === 'pending') {
         const elapsed = r.startedAt ? formatDuration(Date.now() - new Date(r.startedAt).getTime()) : '';
+        const propMark = r.propagated ? pc.cyan('*') : '';
         console.log(
           prefix(
             fmtRow(
               role,
               shortBinary(r.binary),
               elapsed,
-              `${pc.dim(r.status)}${r.verdict ? `  ${verdictMark(r.verdict)}` : ''}${pct ? `  ${pct}` : ''}`,
+              `${pc.dim(r.status)}${r.verdict ? `  ${verdictMark(r.verdict)}` : ''}${pct ? `  ${pct}` : ''}${propMark ? `  ${propMark}` : ''}`,
             ),
           ),
         );
       } else {
+        const propMark = r.propagated ? pc.cyan('*') : '';
         console.log(
           prefix(
             fmtRow(
               role,
               shortBinary(r.binary),
               agentDuration(r),
-              `${verdictMark(r.verdict)}  ${statusMark(agentOk(r))}${pct ? `  ${pc.dim(pct)}` : ''}${errNote}`,
+              `${verdictMark(r.verdict)}  ${statusMark(agentOk(r))}${pct ? `  ${pc.dim(pct)}` : ''}${errNote}${propMark ? `  ${propMark}` : ''}`,
             ),
           ),
         );

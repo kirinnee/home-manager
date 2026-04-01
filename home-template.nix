@@ -325,6 +325,7 @@ rec {
       speak
       hms
       kloop
+      kloop-dev
       kautopilot
       loctl
       atomi.clickup_cli
