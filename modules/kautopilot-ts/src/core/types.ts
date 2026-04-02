@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import { DEFAULT_TYPES } from './default-types';
 
 // ============================================================================
 // Log Entry
@@ -77,7 +76,7 @@ export interface AgentConfig {
 }
 
 // ============================================================================
-// Type Config Schemas (for type-driven Phase 1)
+// Reviewer Schema
 // ============================================================================
 
 export const reviewerSchema = z.object({
@@ -87,16 +86,6 @@ export const reviewerSchema = z.object({
   timeout: z.number().optional(),
 });
 
-export const typeConfigSchema = z.object({
-  desc: z.string(),
-  spec_writer: z.object({ prompt: z.string(), timeout: z.number().optional() }),
-  spec_reviewers: z.record(z.string(), reviewerSchema).default({}),
-  plan_writer: z.object({ prompt: z.string(), timeout: z.number().optional() }),
-  plan_reviewers: z.record(z.string(), reviewerSchema).default({}),
-  kloopPrompts: kloopPromptsSchema,
-});
-
-export type TypeConfig = z.infer<typeof typeConfigSchema>;
 export type ReviewerConfig = z.infer<typeof reviewerSchema>;
 
 // ============================================================================
@@ -117,7 +106,8 @@ export const configSchema = z.object({
       phase3: z.record(z.string(), agentSchema).default({}),
     })
     .default({ init: {}, phase2: {}, phase3: {} }),
-  types: z.record(z.string(), typeConfigSchema).default({}),
+  spec_reviewers: z.record(z.string(), reviewerSchema).default({}),
+  plan_reviewers: z.record(z.string(), reviewerSchema).default({}),
   kloop: kloopConfigSchema,
   settings: z
     .object({
@@ -155,16 +145,6 @@ const DEFAULT_LOCAL_INIT_PROMPT = `You are setting up a task for kautopilot. Ple
 4. Write implementation plans to ~/.kautopilot/{sessionId}/artifacts/v1/plans/plan-1.md
 
 The ticket.md should describe the problem. The task-spec should describe the solution. Plans should be concrete steps.`;
-
-const DEFAULT_ROUTE_TYPE_PROMPT = `Classify this ticket into one of the following types. Output JSON: {"type": "<name>"}
-
-Available types:
-{typeList}
-
-Ticket content:
-{ticketContent}
-
-If unsure, pick the type that best matches. Output ONLY the JSON.`;
 
 const DEFAULT_RESEARCH_TICKET_SYSTEM_PROMPT = `Research this task/ticket system: "{taskSystem}"
 
@@ -270,9 +250,6 @@ export const DEFAULT_CONFIG: Config = {
       localInit: {
         prompt: DEFAULT_LOCAL_INIT_PROMPT,
       },
-      routeType: {
-        prompt: DEFAULT_ROUTE_TYPE_PROMPT,
-      },
       researchTicketSystem: {
         prompt: DEFAULT_RESEARCH_TICKET_SYSTEM_PROMPT,
       },
@@ -337,7 +314,84 @@ Options: fix the issue and retry, skip and move on, or escalate.`,
       },
     },
   },
-  types: DEFAULT_TYPES,
+  spec_reviewers: {
+    completeness: {
+      desc: 'All requirements from ticket covered',
+      prompt: `Read the spec at {spec} and the ticket at {ticket}.
+Check: does the spec address every requirement in the ticket?
+List any requirements that are missing or insufficiently addressed.
+Output ONLY the problems found — one per line. If none, output "No issues found."`,
+    },
+    docs_accuracy: {
+      desc: 'Referenced tool/lib versions and interfaces are correct',
+      prompt: `Read the spec at {spec} and the ticket at {ticket}.
+Check: are all referenced tool versions, API interfaces, and method signatures accurate?
+Cross-reference with the codebase — grep for referenced functions, check package versions.
+Flag anything that looks hallucinated or version-incorrect.
+Output ONLY the problems found — one per line. If none, output "No issues found."`,
+    },
+    generalization: {
+      desc: 'Extends existing patterns rather than inventing new ones',
+      prompt: `Read the spec at {spec}. Explore the codebase.
+Check: does the spec propose new patterns, paths, or abstractions when existing ones could be extended?
+Flag any "reinventing the wheel" — new utilities when similar ones exist, new conventions when the codebase already has one.
+Output ONLY the problems found — one per line. If none, output "No issues found."`,
+    },
+    complexity: {
+      desc: 'Is there a simpler or faster approach?',
+      prompt: `Read the spec at {spec}.
+Check: is the proposed approach unnecessarily complex?
+Consider: could fewer files be changed? Could an existing tool/command handle this? Is there a more direct path?
+Don't flag reasonable complexity — only flag when there's a clearly simpler alternative.
+Output ONLY the problems found — one per line. If none, output "No issues found."`,
+    },
+    security: {
+      desc: 'Security and compliance implications',
+      prompt: `Read the spec at {spec}.
+Check for security concerns: injection risks, auth/authz gaps, secrets handling, data exposure, OWASP top 10.
+Only flag genuine issues, not theoretical concerns in internal code paths.
+Output ONLY the problems found — one per line. If none, output "No issues found."`,
+    },
+    proof_of_completion: {
+      desc: 'Spec includes programmatic proof of completion',
+      prompt: `Read the spec at {spec}.
+Check: does the spec include a "Proof of Completion" section with concrete, runnable verification?
+Good proofs: test commands, API calls, grep assertions, build commands, tf plan output.
+Bad proofs: "manually verify", "visually check", vague assertions.
+Output ONLY the problems found — one per line. If none, output "No issues found."`,
+    },
+  },
+  plan_reviewers: {
+    coverage: {
+      desc: 'Plans fully cover the spec',
+      prompt: `Read the plans at {plans} and the spec at {spec}.
+Check: do the plans together cover every requirement in the spec?
+List any spec items that are not addressed by any plan.
+Output ONLY the problems found — one per line. If none, output "No issues found."`,
+    },
+    ordering: {
+      desc: 'Plan dependencies ordered correctly',
+      prompt: `Read the plans at {plans}.
+Check: are plans ordered so that earlier plans don't depend on later ones?
+Flag any circular or incorrect dependency ordering.
+Output ONLY the problems found — one per line. If none, output "No issues found."`,
+    },
+    vertical_split: {
+      desc: 'Plans split by domain/feature, not by layer',
+      prompt: `Read the plans at {plans}.
+Check: are plans split vertically by domain/feature (each plan = complete slice with types+logic+tests)?
+Flag any plan that is a horizontal layer (e.g., "add types" or "write tests" as standalone plans).
+Each plan should produce an isolated working commit.
+Output ONLY the problems found — one per line. If none, output "No issues found."`,
+    },
+    cost: {
+      desc: 'Cost and resource implications',
+      prompt: `Read the plans at {plans} and the spec at {spec}.
+Check: are there cost implications (compute, storage, API calls, third-party services)?
+Flag any plans that could have unexpected cost impact without mentioning it.
+Output ONLY the problems found — one per line. If none, output "No issues found."`,
+    },
+  },
   kloop: {
     implementers: { claude: 1 },
     reviewPhases: [['claude']],

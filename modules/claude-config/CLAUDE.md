@@ -1,2 +1,4 @@
 - When running commands in a directory with `.envrc`, use `direnv exec . <command>` to ensure the environment (including nix shell) is loaded
 - Never use `cd` in Bash tool — zoxide overrides it and it fails with `command not found: __zoxide_z`. The Bash tool resets CWD between calls anyway. Instead, run commands with absolute paths or use `direnv exec /full/path <command>`.
+- When working on PE or Liftoff tasks that are ops-related (infrastructure, Kubernetes, metrics, logs, production debugging), use the `/liftoff-ops` skill. This ensures `loctl` is used instead of direct kubectl/helm/aws/etc.
+- For autonomous ticket-to-PR workflows, use the `/kagent-autopilot` skill.

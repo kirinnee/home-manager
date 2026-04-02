@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import type { Config, TypeConfig } from './types';
+import type { Config } from './types';
 
 /**
  * Prompt variable context — all resolved to absolute paths.
@@ -35,23 +35,6 @@ export function resolvePromptVars(prompt: string, vars: PromptVars): string {
     result = result.replace(new RegExp(`\\{${key}\\}`, 'g'), value);
   }
   return result;
-}
-
-/**
- * Get a type config by name from the config. Returns null if type not found.
- */
-export function getTypeConfig(config: Config, typeName: string): TypeConfig | null {
-  return config.types[typeName] ?? null;
-}
-
-/**
- * Get all type names and descriptions (for LLM type routing).
- */
-export function getTypeDescriptions(config: Config): Array<{ name: string; desc: string }> {
-  return Object.entries(config.types).map(([name, tc]) => ({
-    name,
-    desc: tc.desc,
-  }));
 }
 
 /**

@@ -35,7 +35,8 @@ export function readConfig(id: string): Config | null {
       phase2: { ...DEFAULT_CONFIG.agents.phase2, ...parsed.agents?.phase2 },
       phase3: { ...DEFAULT_CONFIG.agents.phase3, ...parsed.agents?.phase3 },
     },
-    types: { ...DEFAULT_CONFIG.types, ...parsed.types },
+    spec_reviewers: { ...DEFAULT_CONFIG.spec_reviewers, ...parsed.spec_reviewers },
+    plan_reviewers: { ...DEFAULT_CONFIG.plan_reviewers, ...parsed.plan_reviewers },
     kloop: { ...DEFAULT_CONFIG.kloop, ...migratedKloop },
     settings: { ...DEFAULT_CONFIG.settings, ...parsed.settings },
     repo: { ...DEFAULT_CONFIG.repo, ...parsed.repo },
@@ -58,6 +59,10 @@ function globalConfigPath(): string {
 
 function orgConfigPath(org: string): string {
   return `${process.env.HOME}/.kautopilot/orgs/${org}/config.yaml`;
+}
+
+export function resolvedConfigPath(org?: string, configPathOverride?: string): string | null {
+  return pickConfig(org, configPathOverride);
 }
 
 /**
@@ -117,7 +122,8 @@ export function resolveConfig(org?: string, configPathOverride?: string): Config
       phase2: { ...DEFAULT_CONFIG.agents.phase2, ...parsed.agents?.phase2 },
       phase3: { ...DEFAULT_CONFIG.agents.phase3, ...parsed.agents?.phase3 },
     },
-    types: { ...DEFAULT_CONFIG.types, ...parsed.types },
+    spec_reviewers: { ...DEFAULT_CONFIG.spec_reviewers, ...parsed.spec_reviewers },
+    plan_reviewers: { ...DEFAULT_CONFIG.plan_reviewers, ...parsed.plan_reviewers },
     kloop: { ...DEFAULT_CONFIG.kloop, ...migratedKloop },
     settings: { ...DEFAULT_CONFIG.settings, ...parsed.settings },
     repo: { ...DEFAULT_CONFIG.repo, ...parsed.repo },

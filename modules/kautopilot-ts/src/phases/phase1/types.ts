@@ -1,9 +1,7 @@
 import type { PhaseContext } from '../machine';
-import type { TypeConfig, DeliveryKind } from '../../core/types';
+import type { DeliveryKind } from '../../core/types';
 
 export interface Phase1Context extends PhaseContext {
-  ticketType?: string;
-  typeConfig?: TypeConfig;
   deliveryKind?: DeliveryKind;
 }
 

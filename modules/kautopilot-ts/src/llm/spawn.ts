@@ -1,7 +1,9 @@
 import { spawn } from 'bun';
 import { spinner } from '@clack/prompts';
-import { mkdirSync, appendFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { stringify as stringifyYaml } from 'yaml';
+import { nextRunNumber, runDir, runFilePath, type RunScope } from '../core/artifacts';
 
 /** Whether debug logging is enabled (KAUTOPILOT_DEBUG=1). */
 export const DEBUG = !!process.env.KAUTOPILOT_DEBUG;
@@ -22,18 +24,82 @@ export interface SpawnPrintOptions {
   timeout?: number;
   /** If set, show a clack spinner with this message while the LLM runs. */
   spinnerMsg?: string;
-  /** Session ID — when set, the JSONL stream is tee'd to the session's logs/llm/ dir. */
+  /** Legacy session ID shorthand for runtime session-scoped runs. */
   sessionId?: string;
+  /** Explicit run scope for session or init execution roots. */
+  runScope?: RunScope;
   /** Label for the log file (e.g. "gather-codebase", "review-completeness"). */
   label?: string;
+  /** Human-readable context about why this run is happening. */
+  context?: string;
 }
 
-/** Build the JSONL log file path for a session. Creates the directory. */
-function llmLogPath(sessionId: string, label: string): string {
-  const logsDir = join(process.env.HOME!, '.kautopilot', sessionId, 'logs', 'llm');
-  mkdirSync(logsDir, { recursive: true });
-  const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  return join(logsDir, `${ts}-${label}.jsonl`);
+interface RunArtifactInfo {
+  scope: RunScope;
+  runNumber: number;
+  runPath: string;
+  contextPath: string;
+  logsPath: string;
+  commandPath: string;
+  promptPath: string;
+  startedAt: string;
+}
+
+function resolveRunScope(options?: SpawnPrintOptions | SpawnTTYOptions): RunScope | null {
+  if (options?.runScope) return options.runScope;
+  if ('sessionId' in (options ?? {}) && options?.sessionId) {
+    return { kind: 'session', id: options.sessionId };
+  }
+  return null;
+}
+
+function buildCommandString(args: string[]): string {
+  return args.map(arg => (/^[A-Za-z0-9_./:-]+$/.test(arg) ? arg : JSON.stringify(arg))).join(' ');
+}
+
+function createRunArtifacts(
+  scope: RunScope,
+  executionType: 'llm_print' | 'tty_handoff',
+  binary: string,
+  args: string[],
+  prompt: string,
+  options?: SpawnPrintOptions | SpawnTTYOptions,
+): RunArtifactInfo {
+  const runNumber = nextRunNumber(scope);
+  const runPath = runDir(scope, runNumber);
+  mkdirSync(runPath, { recursive: true });
+
+  const contextPath = runFilePath(scope, runNumber, 'context');
+  const logsPath = runFilePath(scope, runNumber, 'logs');
+  const commandPath = runFilePath(scope, runNumber, 'command');
+  const promptPath = runFilePath(scope, runNumber, 'prompt.md');
+
+  writeFileSync(promptPath, prompt);
+  writeFileSync(commandPath, buildCommandString(args) + '\n');
+  writeFileSync(logsPath, '');
+  const startedAt = new Date().toISOString();
+  writeFileSync(
+    contextPath,
+    stringifyYaml({
+      run: runNumber,
+      scopeKind: scope.kind,
+      scopeId: scope.id,
+      executionType,
+      label: options?.label,
+      binary,
+      cwd: options?.cwd,
+      timeoutSeconds: 'timeout' in (options ?? {}) ? options?.timeout : undefined,
+      startedAt,
+      status: 'running',
+      why: options?.context,
+    }),
+  );
+
+  return { scope, runNumber, runPath, contextPath, logsPath, commandPath, promptPath, startedAt };
+}
+
+function updateRunContext(info: RunArtifactInfo, data: Record<string, unknown>): void {
+  writeFileSync(info.contextPath, stringifyYaml(data));
 }
 
 /**
@@ -84,14 +150,15 @@ async function spawnCore(
   prompt: string,
   options?: SpawnPrintOptions,
 ): Promise<{ stdout: string; stderr: string }> {
-  const logging = !!options?.sessionId;
+  const runScope = resolveRunScope(options);
+  const logging = !!runScope;
   const args = [binary, '--print', '--dangerously-skip-permissions'];
   if (logging) args.push('--output-format', 'stream-json', '--verbose');
   args.push(prompt);
 
   debugLog(`$ ${args.join(' ').slice(0, 200)}...`, options?.cwd ? `cwd=${options.cwd}` : '');
 
-  const logPath = logging ? llmLogPath(options.sessionId!, options.label ?? 'unnamed') : null;
+  const runInfo = runScope ? createRunArtifacts(runScope, 'llm_print', binary, args, prompt, options) : null;
 
   const proc = spawn({
     cmd: args,
@@ -108,12 +175,16 @@ async function spawnCore(
   const stderrChunks: string[] = [];
   const stdoutDone = (async () => {
     for await (const chunk of proc.stdout as AsyncIterable<Uint8Array>) {
-      stdoutChunks.push(new TextDecoder().decode(chunk));
+      const text = new TextDecoder().decode(chunk);
+      stdoutChunks.push(text);
+      if (runInfo) appendFileSync(runInfo.logsPath, text);
     }
   })();
   const stderrDone = (async () => {
     for await (const chunk of proc.stderr as AsyncIterable<Uint8Array>) {
-      stderrChunks.push(new TextDecoder().decode(chunk));
+      const text = new TextDecoder().decode(chunk);
+      stderrChunks.push(text);
+      if (runInfo) appendFileSync(runInfo.logsPath, text);
     }
   })();
 
@@ -121,10 +192,23 @@ async function spawnCore(
     setTimeout(() => {
       proc.kill();
       // Log partial output on timeout for debugging
-      const partial = stdoutChunks.join('');
-      if (logging && logPath) {
-        writeFileSync(logPath, partial + '\n--- TIMED OUT ---\n');
-        debugLog(`[llm-log] ${logPath} (partial, timed out)`);
+      if (runInfo) {
+        appendFileSync(runInfo.logsPath, '\n--- TIMED OUT ---\n');
+        updateRunContext(runInfo, {
+          run: runInfo.runNumber,
+          scopeKind: runInfo.scope.kind,
+          scopeId: runInfo.scope.id,
+          executionType: 'llm_print',
+          label: options?.label,
+          binary,
+          cwd: options?.cwd,
+          timeoutSeconds: options?.timeout,
+          startedAt: runInfo.startedAt,
+          completedAt: new Date().toISOString(),
+          status: 'timed_out',
+          why: options?.context,
+        });
+        debugLog(`[llm-run] ${runInfo.logsPath} (partial, timed out)`);
       }
       const stderrText = stderrChunks.join('').trim();
       const hint = stderrText ? `\nstderr: ${stderrText.slice(0, 500)}` : '';
@@ -141,10 +225,26 @@ async function spawnCore(
     debugLog(`[${binary}] stderr: ${stderr.trim()}`);
   }
 
+  if (runInfo) {
+    updateRunContext(runInfo, {
+      run: runInfo.runNumber,
+      scopeKind: runInfo.scope.kind,
+      scopeId: runInfo.scope.id,
+      executionType: 'llm_print',
+      label: options?.label,
+      binary,
+      cwd: options?.cwd,
+      timeoutSeconds: options?.timeout,
+      startedAt: runInfo.startedAt,
+      completedAt: new Date().toISOString(),
+      status: 'completed',
+      why: options?.context,
+    });
+    debugLog(`[llm-run] ${runInfo.logsPath}`);
+  }
+
   // Tee JSONL to log file and extract result text
-  if (logging && logPath) {
-    writeFileSync(logPath, rawStdout);
-    debugLog(`[llm-log] ${logPath}`);
+  if (logging) {
     const resultText = extractResultText(rawStdout);
     return { stdout: resultText, stderr };
   }
@@ -178,6 +278,12 @@ export interface SpawnTTYOptions {
   env?: Record<string, string>;
   /** Pre-generated UUID for claude --session-id (enables JSONL tracking). */
   claudeSessionId?: string;
+  /** Explicit run scope for session or init execution roots. */
+  runScope?: RunScope;
+  /** Human-readable context about why this run is happening. */
+  context?: string;
+  /** Optional label for the run directory metadata. */
+  label?: string;
 }
 
 export async function spawnTTY(binary: string, prompt: string, options?: SpawnTTYOptions): Promise<number> {
@@ -187,6 +293,9 @@ export async function spawnTTY(binary: string, prompt: string, options?: SpawnTT
   }
   args.push(prompt);
   debugLog(`$ ${args.join(' ').slice(0, 200)}...`, options?.cwd ? `cwd=${options.cwd}` : '');
+
+  const runScope = resolveRunScope(options);
+  const runInfo = runScope ? createRunArtifacts(runScope, 'tty_handoff', binary, args, prompt, options) : null;
 
   const proc = spawn({
     cmd: args,
@@ -198,6 +307,23 @@ export async function spawnTTY(binary: string, prompt: string, options?: SpawnTT
   });
 
   const exitCode = await proc.exited;
+  if (runInfo) {
+    updateRunContext(runInfo, {
+      run: runInfo.runNumber,
+      scopeKind: runInfo.scope.kind,
+      scopeId: runInfo.scope.id,
+      executionType: 'tty_handoff',
+      label: options?.label,
+      binary,
+      cwd: options?.cwd,
+      startedAt: runInfo.startedAt,
+      completedAt: new Date().toISOString(),
+      status: exitCode === 0 ? 'completed' : 'failed',
+      exitCode,
+      why: options?.context,
+      claudeSessionId: options?.claudeSessionId,
+    });
+  }
   debugLog(`$ ${binary} exited with code ${exitCode}`);
   return exitCode;
 }

@@ -1,7 +1,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import type { Config, Run, HistoryEntry } from '../types';
-import { parseReviewerConfig } from '../types';
+import { parseReviewerConfig, parseConflictCheckerConfig, parseImplementerConfig } from '../types';
 import type { StateService, TmuxService, Paths } from '../deps';
 import { getDirHash, paths as defaultPaths, nextSpecVersion } from '../deps';
 import * as consensus from './consensus';
@@ -172,6 +172,7 @@ export class LoopRunner {
               timestamp: new Date().toISOString(),
               loop: loopNum,
               binary,
+              harness: parseImplementerConfig(binary).harness,
             });
           },
         });
@@ -189,6 +190,7 @@ export class LoopRunner {
           timestamp: new Date().toISOString(),
           loop: loopNum,
           binary: implResult.binary,
+          harness: implResult.harness,
           exitCode: implResult.exitCode,
           durationMs: implResult.durationMs,
           ...(implError ? { error: implError } : {}),
@@ -218,11 +220,13 @@ export class LoopRunner {
             checkpointRan = true;
 
             const cpBinary = config.conflictChecker ?? implBinary;
+            const cpParsed = parseConflictCheckerConfig(cpBinary);
             await writeEvent({
               type: 'checkpoint_start',
               timestamp: new Date().toISOString(),
               loop: loopNum,
-              binary: cpBinary,
+              binary: cpParsed.binary,
+              harness: cpParsed.harness,
             });
 
             const checkpointResult = await agentRunner.runCheckpointer({
@@ -257,6 +261,10 @@ export class LoopRunner {
                 throw new ConflictError(checkpointResult.summary);
               case 'spec_auto_fixed':
               case 'spec_compressed':
+                if (!config.compressSpec) {
+                  // Compression disabled — treat as no_action
+                  break;
+                }
                 // Reload spec
                 specContent = await fs.readFile(specPath, 'utf-8');
                 // Save versioned spec copy
@@ -407,6 +415,11 @@ export class LoopRunner {
               throw new ConflictError(checkpointResult.summary);
 
             case 'spec_auto_fixed':
+              if (!config.compressSpec) {
+                fmt.formatCheckpointOutcome('no_action');
+                consecutiveFailures = 0;
+                break;
+              }
               fmt.formatCheckpointOutcome('spec_auto_fixed');
               specContent = await fs.readFile(specPath, 'utf-8');
               await this.saveSpecVersion(runId, specContent);
@@ -414,6 +427,11 @@ export class LoopRunner {
               break;
 
             case 'spec_compressed':
+              if (!config.compressSpec) {
+                fmt.formatCheckpointOutcome('no_action');
+                consecutiveFailures = 0;
+                break;
+              }
               fmt.formatCheckpointOutcome('spec_compressed', `${checkpointResult.progressPercent}% progress`);
               specContent = await fs.readFile(specPath, 'utf-8');
               await this.saveSpecVersion(runId, specContent);
@@ -546,6 +564,7 @@ export class LoopRunner {
           loop: iterNum,
           phase: phaseIdx,
           reviewer: rc.binary,
+          harness: rc.harness,
         });
       }
 
@@ -569,6 +588,7 @@ export class LoopRunner {
             loop: iterNum,
             phase: phaseIdx,
             reviewer: r.binary,
+            harness: r.harness,
             exitCode: r.exitCode,
             durationMs: r.durationMs,
             error: r.error,
@@ -690,6 +710,7 @@ export class LoopRunner {
       durationMs,
       implementer: {
         binary: implResult.binary,
+        harness: implResult.harness,
         exitCode: implResult.exitCode,
         durationMs: implResult.durationMs,
         inputTokens: implResult.inputTokens,
@@ -745,6 +766,7 @@ export class LoopRunner {
         agent: 'implementer',
         event: 'end',
         binary: implResult.binary,
+        harness: implResult.harness,
         inputTokens: implResult.inputTokens ?? 0,
         outputTokens: implResult.outputTokens ?? 0,
         durationMs: implResult.durationMs,
@@ -759,6 +781,7 @@ export class LoopRunner {
           agent: `reviewer-${r.reviewerIndex}`,
           event: 'end',
           binary: r.binary,
+          harness: r.harness,
           phaseIdx: r.phaseIndex ?? 0,
           verdict: r.verdict,
           completionEstimate: r.completionEstimate,

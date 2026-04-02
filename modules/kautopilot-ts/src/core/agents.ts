@@ -22,6 +22,10 @@ export const TTY_EXIT_INSTRUCTION =
 /** Cached session config for the current run */
 let _cachedConfig: Config | null = null;
 
+export function setCachedConfig(config: Config | null): void {
+  _cachedConfig = config;
+}
+
 // ============================================================================
 // Agent loading
 // ============================================================================

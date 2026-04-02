@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -52,5 +52,30 @@ describe('artifacts', () => {
     const { initDir } = require('../artifacts') as typeof import('../artifacts');
     const dir = initDir('init123');
     expect(dir).toBe(join(tempDir, '.kautopilot/init/init123'));
+  });
+
+  it('runsDir resolves session and init roots correctly', () => {
+    const { runsDir } = require('../artifacts') as typeof import('../artifacts');
+    expect(runsDir({ kind: 'session', id: 'abc123' })).toBe(join(tempDir, '.kautopilot/abc123/runs'));
+    expect(runsDir({ kind: 'init', id: 'init123' })).toBe(join(tempDir, '.kautopilot/init/init123/runs'));
+  });
+
+  it('nextRunNumber increments numeric run directories only', () => {
+    const { runsDir, nextRunNumber } = require('../artifacts') as typeof import('../artifacts');
+    const dir = runsDir({ kind: 'session', id: 'abc123' });
+    mkdirSync(join(dir, '1'), { recursive: true });
+    mkdirSync(join(dir, '2'), { recursive: true });
+    mkdirSync(join(dir, 'notes'), { recursive: true });
+    expect(nextRunNumber({ kind: 'session', id: 'abc123' })).toBe(3);
+  });
+
+  it('runFilePath builds standard run artifact file paths', () => {
+    const { runFilePath } = require('../artifacts') as typeof import('../artifacts');
+    expect(runFilePath({ kind: 'init', id: 'init123' }, 4, 'prompt.md')).toBe(
+      join(tempDir, '.kautopilot/init/init123/runs/4/prompt.md'),
+    );
+    expect(runFilePath({ kind: 'session', id: 'abc123' }, 2, 'logs')).toBe(
+      join(tempDir, '.kautopilot/abc123/runs/2/logs'),
+    );
   });
 });

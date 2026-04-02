@@ -266,6 +266,85 @@ describe('E2E: normalize preserves research hierarchy', () => {
     expect(setupBrief.defaults.userContext).toBe('always use project BACKEND, sprint folder current');
   });
 
+  it('normalize does not misclassify acli-based access as needing setup help', async () => {
+    const { normalize } = require('../init/states') as typeof import('../init/states');
+
+    const initId = 'normalize-test-acli-ready';
+    const initPath = join(tempDir, '.kautopilot', 'init', initId);
+    mkdirSync(initPath, { recursive: true });
+
+    writeFileSync(
+      join(initPath, 'identify.json'),
+      JSON.stringify({
+        systemName: 'jira',
+        timestamp: new Date().toISOString(),
+      }),
+    );
+
+    writeFileSync(
+      join(initPath, 'research.json'),
+      JSON.stringify({
+        systemName: 'jira',
+        accessPaths: [{ method: 'Atlassian CLI (acli)', tool: 'acli', available: true }],
+        hierarchy: 'project > issue',
+        transitionModel: 'workflow',
+        constraints: [],
+        detectionPlan: [],
+        detectedTools: { 'Atlassian CLI (acli)': 'acli version 1.3.14-stable' },
+        followUpQuestions: [],
+        timestamp: new Date().toISOString(),
+      }),
+    );
+
+    writeFileSync(
+      join(initPath, 'detection.json'),
+      JSON.stringify({
+        tools: { 'Atlassian CLI (acli)': 'acli version 1.3.14-stable' },
+        configFiles: {},
+        authStatus: { jira: 'unknown' },
+        available: ['Atlassian CLI (acli)', 'acli'],
+        missing: [],
+        uncertain: ['jira'],
+        timestamp: new Date().toISOString(),
+      }),
+    );
+
+    const userAnswer =
+      'acli. todo, in-progress, review. there are alot of weird workflow movement and constraint, which you need to study.';
+    writeFileSync(
+      join(initPath, 'user-context.json'),
+      JSON.stringify({
+        userAnswer,
+        accessAssessment: `Access appears ready: ${userAnswer}`,
+        needsSetupHelp: false,
+        timestamp: new Date().toISOString(),
+      }),
+    );
+
+    const ctx = {
+      initId,
+      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null } },
+      workDir: tempDir,
+      gitRootPath: tempDir,
+      worktree: tempDir,
+      remoteUrl: 'https://github.com/test/repo',
+      gitRootHost: 'github.com',
+      org: 'test',
+      forceLocal: false,
+      ticketIdArg: undefined,
+    };
+
+    await normalize(ctx as any);
+
+    const userContext = JSON.parse(readFileSync(join(initPath, 'user-context.json'), 'utf-8'));
+    const setupBrief = JSON.parse(readFileSync(join(initPath, 'setup-brief.json'), 'utf-8'));
+
+    expect(userContext.needsSetupHelp).toBe(false);
+    expect(userContext.accessAssessment).toContain('Access appears ready');
+    expect(setupBrief.chosenAccessPath).toBe('jira-cli');
+    expect(setupBrief.readiness).toBe('partial');
+  });
+
   it('normalize produces empty defaults when no data sources have defaults', async () => {
     const { normalize } = require('../init/states') as typeof import('../init/states');
 

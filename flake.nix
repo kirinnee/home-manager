@@ -26,6 +26,7 @@
 
     home-manager-modules.url = "github:kirinnee/home-manager-modules";
     llm-agents.url = "github:numtide/llm-agents.nix";
+    loctl.url = "path:/Users/erng/Workspace/work/vungle/loctl";
   };
 
   outputs =
@@ -43,6 +44,7 @@
     , nix-homebrew
     , home-manager-modules
     , llm-agents
+    , loctl
     ,
     }@inputs:
     let
@@ -70,6 +72,7 @@
               pre-commit-lib = pre-commit-hooks.lib.${system};
               atomi = atomipkgs.packages.${system};
               pkgs-llm = llm-agents.packages.${system};
+              pkgs-loctl = loctl.packages.${system};
             in
             let
               pkgs = pkgs-stable;
@@ -88,6 +91,7 @@
                   inherit
                     atomi
                     pkgs-llm
+                    pkgs-loctl
                     profile
                     pkgs-240924
                     pkgs-stable
@@ -120,6 +124,7 @@
               };
               atomi = atomipkgs.packages.${system};
               pkgs-llm = llm-agents.packages.${system};
+              pkgs-loctl = loctl.packages.${system};
             in
             let
               pkgs = pkgs-stable;
@@ -155,6 +160,7 @@
                       inherit
                         atomi
                         pkgs-llm
+                        pkgs-loctl
                         profile
                         pkgs-240924
                         pkgs-stable

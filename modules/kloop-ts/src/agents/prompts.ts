@@ -2,7 +2,12 @@
 // Pure: prompt template substitution
 // ============================================================================
 
-import { DEFAULT_IMPLEMENTER_PROMPT, DEFAULT_REVIEWER_PROMPT, DEFAULT_CHECKPOINTER_PROMPT } from './default-prompts';
+import {
+  DEFAULT_IMPLEMENTER_PROMPT,
+  DEFAULT_REVIEWER_PROMPT,
+  DEFAULT_CHECKPOINTER_PROMPT,
+  CONFLICT_ONLY_CHECKPOINTER_PROMPT,
+} from './default-prompts';
 
 /**
  * Substitute {placeholder} tokens in a template string.
@@ -67,6 +72,14 @@ export interface CheckpointerPromptVars {
   checkpointResultFile: string;
 }
 
-export function buildCheckpointerPrompt(template: string | undefined, vars: CheckpointerPromptVars): string {
-  return substitute(template ?? DEFAULT_CHECKPOINTER_PROMPT, vars);
+export function buildCheckpointerPrompt(
+  template: string | undefined,
+  vars: CheckpointerPromptVars,
+  compressSpec?: boolean,
+): string {
+  // If user provided a custom prompt, always use it
+  if (template) return substitute(template, vars);
+  // Otherwise select based on compressSpec flag
+  const defaultTemplate = compressSpec ? DEFAULT_CHECKPOINTER_PROMPT : CONFLICT_ONLY_CHECKPOINTER_PROMPT;
+  return substitute(defaultTemplate, vars);
 }

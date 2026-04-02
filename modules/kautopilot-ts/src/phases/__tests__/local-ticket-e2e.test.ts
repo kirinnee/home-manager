@@ -100,7 +100,7 @@ describe('E2E: Local-mode ticket preservation invariant', () => {
     };
 
     const nextState = await handlePullTicket(ctx);
-    expect(nextState).toBe('route_type'); // Handler should advance normally
+    expect(nextState).toBe('write_spec'); // Handler should advance normally
 
     // ── Step 3: Verify ticket content is preserved ──
     const afterContent = readFileSync(ticketPath, 'utf-8');

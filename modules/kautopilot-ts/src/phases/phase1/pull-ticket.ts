@@ -55,5 +55,5 @@ export async function handlePullTicket(ctx: Phase1Context): Promise<string | nul
     version,
   });
 
-  return 'route_type';
+  return 'write_spec';
 }

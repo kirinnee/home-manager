@@ -1,10 +1,10 @@
 import { Command } from 'commander';
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { generateSessionId } from '../core/id';
 import { getSessionByWorktree, deleteSession } from '../core/db';
 import { sessionDir } from '../core/artifacts';
 import { getActiveInitForWorktree, upsertInitAttempt, updateInitOutcome } from '../core/init-db';
-import { ensureGlobalConfig, resolveConfig } from '../core/config';
+import { ensureGlobalConfig, resolveConfig, resolvedConfigPath } from '../core/config';
 import { checkLock } from '../core/lock';
 import { acquireInitLock, releaseInitLock, checkInitLock } from '../core/init-lock';
 import { ensureInitStatus, detectAndRecoverInitCrash } from '../core/init-status';
@@ -149,7 +149,20 @@ export async function runInit(
 
   // 4. Resolve config
   ensureGlobalConfig();
+  const pickedConfigPath = resolvedConfigPath(org, opts.config);
   const config = resolveConfig(org, opts.config);
+
+  if (!resumeInitId) {
+    const initConfigDest = `${initDir(initId)}/config.yaml`;
+    const initConfigSourceDest = `${initDir(initId)}/config.source.txt`;
+    if (pickedConfigPath && existsSync(pickedConfigPath)) {
+      copyFileSync(pickedConfigPath, initConfigDest);
+      writeFileSync(initConfigSourceDest, pickedConfigPath + '\n');
+    } else {
+      writeFileSync(initConfigDest, '# resolved from built-in defaults\n');
+      writeFileSync(initConfigSourceDest, '(built-in defaults)\n');
+    }
+  }
 
   logInfo(`${resumeInitId ? 'Resuming' : 'Init attempt'}: ${initId}`);
   logField('Worktree', worktree);
