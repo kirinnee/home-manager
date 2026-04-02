@@ -1,7 +1,9 @@
 import { Command } from 'commander';
 import { getSessionByWorktree, getSessionById } from '../core/db';
-import { readLog } from '../core/log';
+import { getActiveInitForWorktree, getInitAttemptById, getInitAttemptByPromotedSessionId } from '../core/init-db';
+import { readLog, readInitLog } from '../core/log';
 import { ensureStatus } from '../core/status';
+import { ensureInitStatus } from '../core/init-status';
 import { getGitRoot, getWorktree } from '../core/git';
 import { formatDuration, logField, logHeading, logError, logDim } from '../util/format';
 import { readContractManifest, readPlanManifest, readDeliveryManifest } from '../core/manifests';
@@ -21,28 +23,53 @@ export function createDescribeCommand(): Command {
 }
 
 async function runDescribe(id: string | undefined, opts: { json?: boolean }): Promise<void> {
-  let session;
   if (id) {
-    session = getSessionById(id);
-    if (!session) {
-      logError(`Session ${id} not found in index.`);
-      process.exit(1);
+    const session = getSessionById(id);
+    if (session) {
+      await describeSession(session.id, opts);
+      return;
     }
-  } else {
-    const repoPath = getGitRoot();
-    const worktree = getWorktree();
-    session = getSessionByWorktree(repoPath, worktree);
-    if (!session) {
-      logError('No session found in this worktree.');
-      process.exit(1);
+
+    const initAttempt = getInitAttemptById(id);
+    if (initAttempt) {
+      await describeInitAttempt(initAttempt.id, opts);
+      return;
     }
+
+    logError(`Session or init attempt ${id} not found in index.`);
+    process.exit(1);
+  }
+
+  const repoPath = getGitRoot();
+  const worktree = getWorktree();
+  const session = getSessionByWorktree(repoPath, worktree);
+  if (session) {
+    await describeSession(session.id, opts);
+    return;
+  }
+
+  const activeInit = getActiveInitForWorktree(repoPath, worktree);
+  if (activeInit) {
+    await describeInitAttempt(activeInit.id, opts);
+    return;
+  }
+
+  logError('No session or init attempt found in this worktree.');
+  process.exit(1);
+}
+
+async function describeSession(sessionId: string, opts: { json?: boolean }): Promise<void> {
+  const session = getSessionById(sessionId);
+  if (!session) {
+    logError(`Session ${sessionId} not found in index.`);
+    process.exit(1);
   }
 
   const log = readLog(session.id);
   const status = ensureStatus(session.id);
+  const initAttemptId = getInitAttemptByPromotedSessionId(session.id)?.id ?? null;
 
   if (opts.json) {
-    // Build enriched event list with durations
     const events = log.map(entry => {
       const base: Record<string, unknown> = {
         ts: entry.ts,
@@ -52,7 +79,6 @@ async function runDescribe(id: string | undefined, opts: { json?: boolean }): Pr
       if (entry.attempt !== undefined) base.attempt = entry.attempt;
       if (entry.metadata) base.metadata = entry.metadata;
 
-      // Compute duration for :completed events
       if (entry.event.endsWith(':completed')) {
         const startEvent = entry.event.replace(':completed', ':started');
         const started = log.find(
@@ -68,20 +94,8 @@ async function runDescribe(id: string | undefined, opts: { json?: boolean }): Pr
       return base;
     });
 
-    // Active epoch
     const activeEpoch = status.version;
-
-    // Find superseded epochs from all contract manifests
     const supersededEpochs: Array<{ version: number; supersededBy: number; supersededAt: string }> = [];
-    for (const entry of log) {
-      if (entry.event === 'context:updated' && entry.version !== undefined) {
-        const meta = entry.metadata as Record<string, unknown> | undefined;
-        if (meta?.rewriteDecision === 'revisit_spec' || meta?.ticketFeedback) {
-          // A rewrite happened at this version
-        }
-      }
-    }
-    // Scan all versions for superseded contract manifests
     const versionedVersions = [...new Set(log.filter(e => e.version !== undefined).map(e => e.version as number))];
     for (const v of versionedVersions) {
       if (v === activeEpoch) continue;
@@ -95,10 +109,7 @@ async function runDescribe(id: string | undefined, opts: { json?: boolean }): Pr
       }
     }
 
-    // Current plan manifest (active epoch)
     const planManifest = readPlanManifest(session.id, activeEpoch);
-
-    // Rewrite history: collect all rewrite decisions from WAL
     const rewriteHistory: Array<{ version: number; decision: string; plan?: string }> = [];
     for (const entry of log) {
       if (entry.event === 'context:updated' && entry.version !== undefined) {
@@ -113,13 +124,8 @@ async function runDescribe(id: string | undefined, opts: { json?: boolean }): Pr
       }
     }
 
-    // Delivery state (active epoch)
     const delivery = readDeliveryManifest(session.id, activeEpoch);
-
-    // PR rollover history
     const rolloverHistory = delivery?.prRolloverHistory ?? [];
-
-    // Handoff reason: current rewrite decision or ticket feedback
     const handoffReason = status.context.rewriteDecision
       ? `rewrite: ${status.context.rewriteDecision}`
       : status.context.ticketFeedback
@@ -127,9 +133,10 @@ async function runDescribe(id: string | undefined, opts: { json?: boolean }): Pr
         : null;
 
     const data = {
+      kind: 'session',
       session: session.id,
+      initAttempt: initAttemptId,
       ticketId: session.ticket_id,
-      // Durable state surface (spec sections 9.2 / 13.1.E)
       activeEpoch,
       supersededEpochs,
       currentPlans:
@@ -151,7 +158,6 @@ async function runDescribe(id: string | undefined, opts: { json?: boolean }): Pr
         publishedAt: delivery?.publishedAt ?? null,
       },
       rolloverRecommendation: status.context.rolloverRecommendation ?? null,
-      // Legacy event data
       checkpoints: status.completedSteps
         .filter(s => log.some(e => e.event === `${s}:completed`))
         .map(s => {
@@ -169,6 +175,7 @@ async function runDescribe(id: string | undefined, opts: { json?: boolean }): Pr
   logField('Ticket', session.ticket_id || '—');
   logField('Branch', session.branch || '—');
   logField('Repo', session.git_root_host);
+  logField('Init attempt', initAttemptId || '—');
   console.log();
 
   if (log.length === 0) {
@@ -176,11 +183,9 @@ async function runDescribe(id: string | undefined, opts: { json?: boolean }): Pr
     return;
   }
 
-  // Separate versioned and non-versioned events
   const versionedEvents = log.filter(e => e.version !== undefined);
   const nonVersionedEvents = log.filter(e => e.version === undefined);
 
-  // Find max version
   let currentVersion = 0;
   for (const entry of versionedEvents) {
     if (entry.version !== undefined && entry.version > currentVersion) {
@@ -189,7 +194,6 @@ async function runDescribe(id: string | undefined, opts: { json?: boolean }): Pr
   }
 
   if (currentVersion === 0) {
-    // No versioned events, show all events
     for (const entry of log) {
       const ts = formatTimestamp(entry.ts);
       const meta = entry.metadata
@@ -200,52 +204,111 @@ async function runDescribe(id: string | undefined, opts: { json?: boolean }): Pr
         : '';
       console.log(`${ts} ${entry.event}${meta}`);
     }
-  } else {
-    // Group by version (only versioned events)
-    for (let v = 1; v <= currentVersion; v++) {
-      logHeading(`Version ${v}`);
-      const versionEvents = versionedEvents.filter(e => e.version === v);
-      const startedEvents = versionEvents.filter(e => e.event.endsWith(':started'));
+    return;
+  }
 
-      for (let i = 0; i < startedEvents.length; i++) {
-        const started = startedEvents[i];
-        const completed = versionEvents.find(
-          e => e.event === started.event.replace(':started', ':completed') && e.version === v,
-        );
+  for (let v = 1; v <= currentVersion; v++) {
+    logHeading(`Version ${v}`);
+    const versionEvents = versionedEvents.filter(e => e.version === v);
+    const startedEvents = versionEvents.filter(e => e.event.endsWith(':started'));
 
-        const startTime = new Date(started.ts);
-        const endTime = completed ? new Date(completed.ts) : startTime;
-        const duration = formatDuration(endTime.getTime() - startTime.getTime());
-        const stepName = started.event.replace(':started', '');
+    for (const started of startedEvents) {
+      const completed = versionEvents.find(
+        e => e.event === started.event.replace(':started', ':completed') && e.version === v,
+      );
 
-        const attemptStr = started.attempt ? ` (attempt ${started.attempt})` : '';
-        const resultStr = completed?.result ? ` (${completed.result})` : '';
-        const metaStr = completed?.metadata
-          ? ' ' +
-            Object.entries(completed.metadata)
-              .map(([k, v]) => `${k}=${v}`)
-              .join(', ')
-          : '';
+      const startTime = new Date(started.ts);
+      const endTime = completed ? new Date(completed.ts) : startTime;
+      const duration = formatDuration(endTime.getTime() - startTime.getTime());
+      const stepName = started.event.replace(':started', '');
+      const attemptStr = started.attempt ? ` (attempt ${started.attempt})` : '';
+      const resultStr = completed?.result ? ` (${completed.result})` : '';
+      const metaStr = completed?.metadata
+        ? ' ' +
+          Object.entries(completed.metadata)
+            .map(([k, v]) => `${k}=${v}`)
+            .join(', ')
+        : '';
 
-        console.log(`  ${stepName.padEnd(16)} ${duration.padStart(10)}${attemptStr}${resultStr}${metaStr}`);
-      }
-      console.log();
+      console.log(`  ${stepName.padEnd(16)} ${duration.padStart(10)}${attemptStr}${resultStr}${metaStr}`);
     }
+    console.log();
+  }
 
-    // Show non-versioned CLI events (init, start, stop)
-    if (nonVersionedEvents.length > 0) {
-      logHeading('CLI Events');
-      for (const entry of nonVersionedEvents) {
-        const ts = formatTimestamp(entry.ts);
-        const meta = entry.metadata
-          ? ' ' +
-            Object.entries(entry.metadata)
-              .map(([k, v]) => `${k}=${v}`)
-              .join(', ')
-          : '';
-        console.log(`${ts} ${entry.event}${meta}`);
-      }
+  if (nonVersionedEvents.length > 0) {
+    logHeading('CLI Events');
+    for (const entry of nonVersionedEvents) {
+      const ts = formatTimestamp(entry.ts);
+      const meta = entry.metadata
+        ? ' ' +
+          Object.entries(entry.metadata)
+            .map(([k, v]) => `${k}=${v}`)
+            .join(', ')
+        : '';
+      console.log(`${ts} ${entry.event}${meta}`);
     }
+  }
+}
+
+async function describeInitAttempt(initAttemptId: string, opts: { json?: boolean }): Promise<void> {
+  const initAttempt = getInitAttemptById(initAttemptId);
+  if (!initAttempt) {
+    logError(`Init attempt ${initAttemptId} not found in index.`);
+    process.exit(1);
+  }
+
+  const log = readInitLog(initAttempt.id);
+  const status = ensureInitStatus(initAttempt.id);
+
+  if (opts.json) {
+    console.log(
+      JSON.stringify(
+        {
+          kind: 'init',
+          initAttempt: initAttempt.id,
+          outcome: initAttempt.outcome,
+          promotedSessionId: initAttempt.promoted_session_id,
+          repoPath: initAttempt.repo_path,
+          worktree: initAttempt.worktree,
+          repo: initAttempt.git_root_host,
+          org: initAttempt.org,
+          state: status.state,
+          stateStatus: status.stateStatus,
+          running: status.running,
+          startedAt: status.startedAt,
+          walCursor: status.walCursor,
+          walTimestamp: status.walTimestamp,
+          context: status.context,
+          completedStates: status.completedStates,
+          events: log,
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+
+  logField('Init attempt', initAttempt.id);
+  logField('Outcome', initAttempt.outcome || 'active');
+  logField('Promoted', initAttempt.promoted_session_id || '—');
+  logField('Repo', initAttempt.git_root_host);
+  console.log();
+
+  if (log.length === 0) {
+    logDim('No events recorded.');
+    return;
+  }
+
+  for (const entry of log) {
+    const ts = formatTimestamp(entry.ts);
+    const meta = entry.metadata
+      ? ' ' +
+        Object.entries(entry.metadata)
+          .map(([k, v]) => `${k}=${v}`)
+          .join(', ')
+      : '';
+    console.log(`${ts} ${entry.event}${meta}`);
   }
 }
 

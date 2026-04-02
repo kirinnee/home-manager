@@ -15475,6 +15475,7 @@ var sessionSchema = exports_external.object({
   verdict: verdictSchema.optional(),
   startedAt: exports_external.string().datetime(),
   completedAt: exports_external.string().datetime().optional(),
+  harnessSessionId: exports_external.string().optional(),
 });
 var verdictFileSchema = exports_external.object({
   approved: exports_external.boolean(),
@@ -15529,16 +15530,72 @@ var checkpointResultSchema = exports_external.object({
   completedCriteria: exports_external.array(exports_external.string()).optional(),
   remainingCriteria: exports_external.array(exports_external.string()).optional(),
 });
-function parseReviewerConfig(entry) {
-  const colonIndex = entry.lastIndexOf(':');
-  if (colonIndex > 0) {
-    const name = entry.slice(0, colonIndex).trim();
-    const flag = entry.slice(colonIndex + 1).trim();
-    if (name && (flag === '0' || flag === '1')) {
-      return { binary: name, noVerdictAsFailure: flag === '1' };
-    }
+function parseHarness(value) {
+  if (value === 'claude' || value === 'gemini') {
+    return value;
   }
-  return { binary: entry.trim(), noVerdictAsFailure: true };
+  throw new Error(`Invalid harness type: "${value}". Must be "claude" or "gemini".`);
+}
+function parseImplementerConfig(entry) {
+  const trimmed = entry.trim();
+  if (!trimmed) {
+    throw new Error('Implementer config cannot be empty.');
+  }
+  const colonCount = (trimmed.match(/:/g) || []).length;
+  if (colonCount > 1) {
+    throw new Error(`Invalid implementer config "${entry}": too many colons. Expected format: binary:harness`);
+  }
+  const colonIndex = trimmed.indexOf(':');
+  if (colonIndex === -1) {
+    return { binary: trimmed, harness: 'claude' };
+  }
+  if (colonIndex === 0) {
+    throw new Error(`Invalid implementer config "${entry}": binary name cannot be empty.`);
+  }
+  const binary = trimmed.slice(0, colonIndex);
+  const harnessValue = trimmed.slice(colonIndex + 1);
+  if (!harnessValue) {
+    throw new Error(`Invalid implementer config "${entry}": harness cannot be empty.`);
+  }
+  return {
+    binary,
+    harness: parseHarness(harnessValue),
+  };
+}
+function parseReviewerConfig(entry) {
+  const trimmed = entry.trim();
+  if (!trimmed) {
+    throw new Error('Reviewer config cannot be empty.');
+  }
+  const colonCount = (trimmed.match(/:/g) || []).length;
+  if (colonCount > 2) {
+    throw new Error(
+      `Invalid reviewer config "${entry}": too many colons. Expected format: binary:harness:flag or binary:flag`,
+    );
+  }
+  const lastColonIndex = trimmed.lastIndexOf(':');
+  if (lastColonIndex === -1) {
+    return { ...parseImplementerConfig(trimmed), noVerdictAsFailure: true };
+  }
+  const potentialFlag = trimmed.slice(lastColonIndex + 1);
+  if (potentialFlag.length > 0 && /^\d+$/.test(potentialFlag) && potentialFlag !== '0' && potentialFlag !== '1') {
+    throw new Error(`Invalid reviewer config "${entry}": reviewer flag must be 0 or 1, got "${potentialFlag}".`);
+  }
+  if (potentialFlag === '0' || potentialFlag === '1') {
+    const binaryPart = trimmed.slice(0, lastColonIndex);
+    if (!binaryPart) {
+      throw new Error(`Invalid reviewer config "${entry}": binary name cannot be empty.`);
+    }
+    const parsed = parseImplementerConfig(binaryPart);
+    return {
+      ...parsed,
+      noVerdictAsFailure: potentialFlag === '1',
+    };
+  }
+  return { ...parseImplementerConfig(trimmed), noVerdictAsFailure: true };
+}
+function parseConflictCheckerConfig(entry) {
+  return parseImplementerConfig(entry);
 }
 function getPrimaryImplementer(config) {
   return Object.keys(config.implementers)[0];
@@ -15723,6 +15780,10 @@ function normalizeEvent(obj) {
     return { type: 'unknown', raw: obj };
   }
   const o = obj;
+  if (o.type === 'result' && o.status === 'error' && o.error) {
+    const error = o.error;
+    return { type: 'error', error: { message: error.message ?? 'Unknown error' } };
+  }
   if (o.type === 'system' && typeof o.message === 'string') {
     return { type: 'system', message: o.message, timestamp: o.timestamp };
   }
@@ -15738,6 +15799,52 @@ function normalizeEvent(obj) {
   if (o.type === 'error' && o.error) {
     return { type: 'error', error: o.error };
   }
+  if (o.type === 'init' && typeof o.session_id === 'string') {
+    return {
+      type: 'system',
+      subtype: 'init',
+      session_id: o.session_id,
+      tools: [],
+    };
+  }
+  if (o.type === 'message' && (o.role === 'model' || o.role === 'assistant')) {
+    const content = o.content;
+    let normalizedContent;
+    if (typeof content === 'string') {
+      normalizedContent = [{ type: 'text', text: content }];
+    } else if (Array.isArray(content)) {
+      normalizedContent = content;
+    } else {
+      normalizedContent = [];
+    }
+    return {
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: normalizedContent,
+      },
+    };
+  }
+  if (o.type === 'message' && o.role === 'user') {
+    const content = o.content;
+    return {
+      type: 'user',
+      message: {
+        content: typeof content === 'string' ? content : (content ?? ''),
+      },
+    };
+  }
+  if (o.type === 'result' && o.status === 'success' && o.stats) {
+    const stats = o.stats;
+    return {
+      type: 'result',
+      result: {
+        duration_ms: stats.duration_ms,
+        input_tokens: stats.input_tokens,
+        output_tokens: stats.output_tokens,
+      },
+    };
+  }
   return { type: 'unknown', raw: obj };
 }
 function extractText(content) {
@@ -15748,6 +15855,29 @@ function extractText(content) {
 }
 function extractToolUses(content) {
   return content.filter(c => c.type === 'tool_use').map(c => ({ name: c.name, input: c.input }));
+}
+async function extractHarnessSessionId(logFilePath) {
+  try {
+    const { readFile: readFile4 } = await import('fs/promises');
+    const content = await readFile4(logFilePath, 'utf-8');
+    return extractHarnessSessionIdFromContent(content);
+  } catch {
+    return;
+  }
+}
+function extractHarnessSessionIdFromContent(content) {
+  for (const line of content.split(`
+`)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed.type === 'init' && typeof parsed.session_id === 'string') {
+        return parsed.session_id;
+      }
+    } catch {}
+  }
+  return;
 }
 async function extractTokensFromLog(logFilePath) {
   try {
@@ -15773,6 +15903,21 @@ function extractTokensFromContent(content) {
         }
         if (usage && typeof usage.output_tokens === 'number') {
           result.outputTokens = usage.output_tokens;
+        }
+        const stats = parsed.stats;
+        if (stats) {
+          if (typeof stats.input_tokens === 'number' && result.inputTokens === undefined) {
+            result.inputTokens = stats.input_tokens;
+          }
+          if (typeof stats.output_tokens === 'number' && result.outputTokens === undefined) {
+            result.outputTokens = stats.output_tokens;
+          }
+          if (
+            typeof stats.total_tokens === 'number' &&
+            result.inputTokens === undefined &&
+            result.outputTokens === undefined
+          ) {
+          }
         }
         break;
       }
@@ -17397,6 +17542,14 @@ function formatProgress(estimates, allResults) {
 
 // src/agents/runner.ts
 var KLOOP_BIN = `bun run ${process.argv[1]}`;
+function buildAgentCommand(params) {
+  const { binary, harness, promptFile, sessionId, logFile } = params;
+  if (harness === 'claude') {
+    return `cat "${promptFile}" | ${binary} --dangerously-skip-permissions --verbose --print --session-id "${sessionId}" --output-format stream-json 2>&1 | tee "${logFile}" | ${KLOOP_BIN} stream`;
+  } else {
+    return `${binary} --yolo --output-format stream-json -p "$(cat "${promptFile}")" 2>&1 | tee "${logFile}" | ${KLOOP_BIN} stream`;
+  }
+}
 
 class AgentRunner {
   tmux;
@@ -17404,12 +17557,15 @@ class AgentRunner {
   config;
   reviewerBinaries;
   checkpointerBinary;
+  checkpointerHarness;
   constructor(tmux, state, config) {
     this.tmux = tmux;
     this.state = state;
     this.config = config;
     this.reviewerBinaries = config.reviewPhases.flat();
-    this.checkpointerBinary = config.conflictChecker ?? getPrimaryImplementer(config);
+    const checkpointerConfig = parseConflictCheckerConfig(config.conflictChecker ?? getPrimaryImplementer(config));
+    this.checkpointerBinary = checkpointerConfig.binary;
+    this.checkpointerHarness = checkpointerConfig.harness;
   }
   selectImplementer() {
     return selectImplementer(this.config);
@@ -17423,15 +17579,16 @@ class AgentRunner {
   }
   async runImplementer(params) {
     const { runId, iteration, dirHash, prompt, timeout, onStart } = params;
-    const implementerBinary = this.selectImplementer();
-    if (onStart) await onStart(implementerBinary);
+    const implementerBinaryName = this.selectImplementer();
+    const parsedImpl = parseImplementerConfig(implementerBinaryName);
+    if (onStart) await onStart(parsedImpl.binary);
     const sessionId = generateId();
     const tmuxSession = `kloop-${runId}-${iteration}-impl`;
     const session = {
       id: sessionId,
       iteration,
       role: 'implementer',
-      binary: implementerBinary,
+      binary: parsedImpl.binary,
       tmuxSession,
       status: 'running',
       startedAt: new Date().toISOString(),
@@ -17440,8 +17597,14 @@ class AgentRunner {
     const implDir = paths.loopImplementerPath(runId, iteration);
     const logFile = await this.ensureAgentDir(implDir);
     await fs4.writeFile(path4.join(implDir, 'prompt.md'), prompt, 'utf-8');
-    const command = `cat "${promptFile}" | ${implementerBinary} --dangerously-skip-permissions --verbose --print --session-id "${sessionId}" --output-format stream-json 2>&1 | tee "${logFile}" | ${KLOOP_BIN} stream`;
-    formatAgentLaunch('impl', 'implementer', implementerBinary, tmuxSession, logFile);
+    const command = buildAgentCommand({
+      binary: parsedImpl.binary,
+      harness: parsedImpl.harness,
+      promptFile,
+      sessionId,
+      logFile,
+    });
+    formatAgentLaunch('impl', 'implementer', parsedImpl.binary, tmuxSession, logFile);
     const result = await this.tmux.runInSession({
       sessionName: tmuxSession,
       command,
@@ -17456,6 +17619,13 @@ class AgentRunner {
       learnings = await fs4.readFile(paths.runLearnings(runId), 'utf-8');
     } catch {}
     const tokens = await extractTokensFromLog(logFile);
+    const harnessSessionId = await extractHarnessSessionId(logFile);
+    if (harnessSessionId) {
+      session.harnessSessionId = harnessSessionId;
+    } else if (parsedImpl.harness === 'claude') {
+      session.harnessSessionId = sessionId;
+    }
+    await this.state.saveSession(session);
     return {
       sessionId,
       tmuxSession,
@@ -17463,9 +17633,10 @@ class AgentRunner {
       exitCode: result.exitCode,
       timedOut: result.timedOut,
       learnings,
-      binary: implementerBinary,
+      binary: parsedImpl.binary,
       inputTokens: tokens.inputTokens,
       outputTokens: tokens.outputTokens,
+      harnessSessionId: session.harnessSessionId,
     };
   }
   async runReviewersPhase(params) {
@@ -17473,17 +17644,19 @@ class AgentRunner {
     console.log(`  review phase ${phaseIndex} \u2014 ${reviewers.map(r => r.binary).join(', ')}`);
     const results = await Promise.all(
       prompts.map(async (p, ordinal) => {
+        const reviewer = reviewers[ordinal] ?? reviewers[0];
         const result = await this.runReviewer({
           runId,
           iteration,
           dirHash,
           reviewerIndex: p.reviewerIndex,
-          binary: reviewers[ordinal]?.binary ?? reviewers[0].binary,
+          binary: reviewer.binary,
+          harness: reviewer.harness,
           prompt: p.prompt,
           timeout,
           phaseIndex,
           ordinal: ordinal + 1,
-          noVerdictAsFailure: reviewers[ordinal]?.noVerdictAsFailure ?? true,
+          noVerdictAsFailure: reviewer.noVerdictAsFailure,
         });
         if (onReviewerEnd) {
           await onReviewerEnd(result);
@@ -17510,9 +17683,19 @@ class AgentRunner {
     });
   }
   async runReviewer(params) {
-    const { runId, iteration, dirHash, reviewerIndex, prompt, timeout, phaseIndex, ordinal, noVerdictAsFailure } =
-      params;
-    const reviewerBinary = params.binary ?? this.reviewerBinaries[reviewerIndex % this.reviewerBinaries.length];
+    const {
+      runId,
+      iteration,
+      dirHash,
+      reviewerIndex,
+      binary,
+      harness,
+      prompt,
+      timeout,
+      phaseIndex,
+      ordinal,
+      noVerdictAsFailure,
+    } = params;
     const sessionId = generateId();
     const tmuxSession = `kloop-${runId}-${iteration}-rev-${reviewerIndex}`;
     const session = {
@@ -17520,7 +17703,7 @@ class AgentRunner {
       iteration,
       role: 'reviewer',
       reviewerIndex,
-      binary: reviewerBinary,
+      binary,
       tmuxSession,
       status: 'running',
       startedAt: new Date().toISOString(),
@@ -17530,8 +17713,14 @@ class AgentRunner {
     const reviewerDir = path4.join(reviewsDir, `reviewer-${reviewerIndex}`);
     const logFile = await this.ensureAgentDir(reviewerDir);
     await fs4.writeFile(path4.join(reviewerDir, 'prompt.md'), prompt, 'utf-8');
-    const command = `cat "${promptFile}" | ${reviewerBinary} --dangerously-skip-permissions --verbose --print --session-id "${sessionId}" --output-format stream-json 2>&1 | tee "${logFile}" | ${KLOOP_BIN} stream`;
-    formatAgentLaunch('reviewer', `rev-${reviewerIndex}`, reviewerBinary, tmuxSession, logFile);
+    const command = buildAgentCommand({
+      binary,
+      harness,
+      promptFile,
+      sessionId,
+      logFile,
+    });
+    formatAgentLaunch('reviewer', `rev-${reviewerIndex}`, binary, tmuxSession, logFile);
     const result = await this.tmux.runInSession({
       sessionName: tmuxSession,
       command,
@@ -17547,7 +17736,7 @@ class AgentRunner {
       reviewFileContent: reviewContent,
       exitCode: result.exitCode,
       timedOut: result.timedOut,
-      reviewerBinary,
+      reviewerBinary: binary,
       phaseIndex,
       noVerdictAsFailure: noVerdictAsFailure ?? true,
       onError: msg => {
@@ -17567,9 +17756,16 @@ class AgentRunner {
     await this.copyReviewFiles(runId, iteration, reviewerIndex, reviewContent, verdictContent);
     await this.cleanupPromptFile(promptFile);
     const tokens = await extractTokensFromLog(logFile);
+    const harnessSessionId = await extractHarnessSessionId(logFile);
+    if (harnessSessionId) {
+      session.harnessSessionId = harnessSessionId;
+    } else if (harness === 'claude') {
+      session.harnessSessionId = sessionId;
+    }
+    await this.state.saveSession(session);
     const icon = verdict === 'approved' ? '\u2713' : '\u2717';
     console.log(
-      `  ${icon} Reviewer ${reviewerIndex} (${reviewerBinary})${phaseIndex !== undefined ? ` (phase ${phaseIndex})` : ''}: ${verdict}${completionEstimate !== undefined ? ` (${completionEstimate}%)` : ''}`,
+      `  ${icon} Reviewer ${reviewerIndex} (${binary})${phaseIndex !== undefined ? ` (phase ${phaseIndex})` : ''}: ${verdict}${completionEstimate !== undefined ? ` (${completionEstimate}%)` : ''}`,
     );
     return {
       sessionId,
@@ -17578,7 +17774,7 @@ class AgentRunner {
       exitCode: result.exitCode,
       timedOut: result.timedOut,
       reviewerIndex,
-      binary: reviewerBinary,
+      binary,
       verdict,
       reasoning,
       completionEstimate,
@@ -17587,6 +17783,7 @@ class AgentRunner {
       inputTokens: tokens.inputTokens,
       outputTokens: tokens.outputTokens,
       error,
+      harnessSessionId: session.harnessSessionId,
     };
   }
   async runCheckpointer(params) {
@@ -17594,6 +17791,7 @@ class AgentRunner {
     const sessionId = generateId();
     const tmuxSession = `kloop-${runId}-${iteration}-checkpoint`;
     const binary = this.checkpointerBinary;
+    const harness = this.checkpointerHarness;
     const session = {
       id: sessionId,
       iteration,
@@ -17616,7 +17814,13 @@ class AgentRunner {
     const checkpointerDir = paths.loopCheckpointerPath(runId, iteration);
     const logFile = await this.ensureAgentDir(checkpointerDir);
     await fs4.writeFile(path4.join(checkpointerDir, 'prompt.md'), prompt, 'utf-8');
-    const command = `cat "${promptFile}" | ${binary} --dangerously-skip-permissions --verbose --print --session-id "${sessionId}" --output-format stream-json 2>&1 | tee "${logFile}" | ${KLOOP_BIN} stream`;
+    const command = buildAgentCommand({
+      binary,
+      harness,
+      promptFile,
+      sessionId,
+      logFile,
+    });
     formatAgentLaunch('checkpoint', 'checkpoint', binary, tmuxSession, logFile);
     const result = await this.tmux.runInSession({
       sessionName: tmuxSession,
@@ -17652,6 +17856,13 @@ class AgentRunner {
     }
     session.status = result.timedOut ? 'error' : 'completed';
     session.completedAt = new Date().toISOString();
+    const harnessSessionId = await extractHarnessSessionId(logFile);
+    if (harnessSessionId) {
+      session.harnessSessionId = harnessSessionId;
+    } else if (harness === 'claude') {
+      session.harnessSessionId = sessionId;
+    }
+    await this.state.saveSession(session);
     await this.cleanupPromptFile(promptFile);
     const outcomeDisplay = {
       conflict_found: 'CONFLICT DETECTED',
@@ -17674,6 +17885,7 @@ class AgentRunner {
       progressPercent,
       completedCriteria,
       remainingCriteria,
+      harnessSessionId: session.harnessSessionId,
     };
   }
   determineReviewerVerdict(params) {
@@ -21998,7 +22210,7 @@ function formatAssistantEntry(entry) {
       console.log('');
       console.log(
         import_picocolors14.default.green(
-          '\u250C\u2500 CLAUDE \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500',
+          '\u250C\u2500 AGENT \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500',
         ),
       );
       for (const line of block.text.split(`
@@ -22663,7 +22875,13 @@ var import_picocolors19 = __toESM(require_picocolors(), 1);
 function formatEvent(event) {
   switch (event.type) {
     case 'system':
-      return import_picocolors19.default.dim(`[system] ${event.message}`);
+      if (event.message) {
+        return import_picocolors19.default.dim(`[system] ${event.message}`);
+      }
+      if (event.subtype === 'init' && event.session_id) {
+        return import_picocolors19.default.dim(`[system:init session_id=${event.session_id}]`);
+      }
+      return import_picocolors19.default.dim(`[system]`);
     case 'user':
       return formatUserMessage(event.message.content);
     case 'assistant':

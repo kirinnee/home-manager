@@ -1,27 +1,20 @@
 import { Command } from 'commander';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
 import { generateSessionId } from '../core/id';
-import { upsertSession, getSessionByWorktree, deleteSession } from '../core/db';
-import { writeConfig, ensureGlobalConfig, resolveConfig } from '../core/config';
-import { appendEvent } from '../core/log';
-import { checkLock, acquireLock, releaseLock } from '../core/lock';
-import {
-  getGitRoot,
-  getWorktree,
-  getRemoteUrl,
-  normalizeGitRoot,
-  extractOrg,
-  getCurrentBranch,
-  createBranch,
-  isOnMain,
-} from '../core/git';
-import { spawnPrintRaw } from '../llm/spawn';
-import { getDefaultBinary, getAgentPrompt } from '../core/agents';
+import { getSessionByWorktree, deleteSession } from '../core/db';
+import { sessionDir } from '../core/artifacts';
+import { getActiveInitForWorktree, upsertInitAttempt, updateInitOutcome } from '../core/init-db';
+import { ensureGlobalConfig, resolveConfig } from '../core/config';
+import { checkLock } from '../core/lock';
+import { acquireInitLock, releaseInitLock, checkInitLock } from '../core/init-lock';
+import { ensureInitStatus, detectAndRecoverInitCrash } from '../core/init-status';
+import { appendInitEvent } from '../core/log';
+import { initDir } from '../core/artifacts';
+import { getGitRoot, getWorktree, getRemoteUrl, normalizeGitRoot, extractOrg } from '../core/git';
 import { confirmAction } from '../llm/inquirer';
-import { sessionDir, snapshotPath, ensureArtifactDir } from '../core/artifacts';
-import { loadOrgScripts, verifyCriticalScripts, promptSetupScripts, promptSaveOrg } from '../core/scripts';
-import { logField, logOk, logWarn, logInfo, logHeading, logDim } from '../util/format';
+import { runInitStateMachine } from '../phases/init/index';
+import type { InitContext } from '../phases/init/states';
+import { logField, logOk, logWarn, logInfo, logDim } from '../util/format';
 
 export function createInitCommand(): Command {
   return new Command('init')
@@ -53,215 +46,139 @@ export async function runInit(
   const gitRootHost = normalizeGitRoot(remoteUrl);
   const org = extractOrg(gitRootHost);
 
-  // 2. Check if session already exists for this worktree
-  const existing = getSessionByWorktree(gitRootPath, worktree);
-  if (existing) {
-    const lockInfo = checkLock(existing.id);
+  // 2. Check per-worktree uniqueness (spec section 2.3)
+
+  // 2a. Check for existing runtime session
+  const existingSession = getSessionByWorktree(gitRootPath, worktree);
+  if (existingSession) {
+    const lockInfo = checkLock(existingSession.id);
     if (lockInfo.locked) {
       throw new Error(`Session is already running (PID ${lockInfo.pid}). Use \`kautopilot stop\` first.`);
     }
 
-    if (existing.state === 'init') {
-      logWarn(`Found incomplete init (${existing.id}). Cleaning up and re-initializing.`);
-      rmSync(sessionDir(existing.id), { recursive: true, force: true });
-      deleteSession(existing.id);
-    } else if (!opts.reset) {
+    if (existingSession.state !== 'init' && !opts.reset) {
       throw new Error(
-        `Session already initialized (${existing.id}). Use \`kautopilot start\` or \`kautopilot init --reset\`.`,
+        `Session already initialized (${existingSession.id}). Use \`kautopilot start\` or \`kautopilot init --reset\`.`,
       );
-    } else {
-      const confirmed = await confirmAction(`Remove existing session ${existing.id} and re-initialize?`, false);
+    }
+
+    if (opts.reset) {
+      const confirmed = await confirmAction(`Remove existing session ${existingSession.id} and re-initialize?`, false);
       if (!confirmed) {
         console.log('Cancelled.');
         process.exit(0);
       }
-      rmSync(sessionDir(existing.id), { recursive: true, force: true });
-      deleteSession(existing.id);
-      logOk(`Removed session ${existing.id}.`);
+
+      // Retire old runtime session: remove DB row and directory (spec section 2.3, 8.7)
+      const oldSessionDir = sessionDir(existingSession.id);
+      deleteSession(existingSession.id);
+      if (existsSync(oldSessionDir)) {
+        rmSync(oldSessionDir, { recursive: true, force: true });
+      }
+      logOk(`Retired old session ${existingSession.id}. Starting fresh init.`);
     }
   }
 
-  // 3. Generate session ID
-  const id = generateSessionId();
-  const now = new Date().toISOString();
+  // 2b. Check for active init attempt
+  const activeInit = getActiveInitForWorktree(gitRootPath, worktree);
+  let resumeInitId: string | null = null;
 
-  // 4. Create session directory and config
-  const sDir = sessionDir(id);
-  mkdirSync(sDir, { recursive: true });
+  if (activeInit) {
+    const initLock = checkInitLock(activeInit.id);
+    if (initLock.locked) {
+      throw new Error(`Init is already running for this worktree (${activeInit.id}, PID ${initLock.pid}).`);
+    }
+
+    // Recover crashed init (non-terminal — preserves progress for resume)
+    detectAndRecoverInitCrash(activeInit.id);
+
+    // Check if this attempt has resumable progress
+    const status = ensureInitStatus(activeInit.id);
+    if (!status.outcome && status.completedStates.length > 0 && !opts.reset) {
+      // Has progress — offer resume
+      const doResume = await confirmAction(
+        `Previous init attempt ${activeInit.id} has progress (completed: ${status.completedStates.join(', ')}). Resume?`,
+        true,
+      );
+      if (doResume) {
+        resumeInitId = activeInit.id;
+      } else {
+        // Emit durable WAL event before updating DB (spec section 8.4)
+        appendInitEvent(activeInit.id, {
+          ts: new Date().toISOString(),
+          event: 'init:abandoned',
+          metadata: { reason: 'user_declined_resume', pid: process.pid },
+        });
+        updateInitOutcome(activeInit.id, 'abandoned');
+        logDim(`Marked previous init attempt ${activeInit.id} as abandoned.`);
+      }
+    } else if (!status.outcome) {
+      // No progress or --reset — mark abandoned silently
+      appendInitEvent(activeInit.id, {
+        ts: new Date().toISOString(),
+        event: 'init:abandoned',
+        metadata: { reason: 'reset_or_no_progress', pid: process.pid },
+      });
+      updateInitOutcome(activeInit.id, 'abandoned');
+      logDim(`Marked previous init attempt ${activeInit.id} as abandoned.`);
+    }
+  }
+
+  // 3. Create fresh init attempt or resume existing
+  const initId = resumeInitId ?? generateSessionId();
+
+  if (!resumeInitId) {
+    const now = new Date().toISOString();
+    const iDir = initDir(initId);
+    mkdirSync(iDir, { recursive: true });
+
+    // Register in init tracking DB (spec section 2.2 — never rewrite old attempts)
+    upsertInitAttempt({
+      id: initId,
+      repo_path: gitRootPath,
+      worktree,
+      git_root: remoteUrl,
+      git_root_host: gitRootHost,
+      org: org || null,
+      outcome: null,
+      promoted_session_id: null,
+      created_at: now,
+      updated_at: now,
+    });
+  }
+
+  // 4. Resolve config
   ensureGlobalConfig();
   const config = resolveConfig(org, opts.config);
-  config.repo.org = org;
-  config.repo.ticketSystem = null;
-  writeConfig(id, config);
 
-  // 4b. Write DB entry early (state: 'init') so aborted inits are detectable
-  upsertSession({
-    id,
-    repo_path: gitRootPath,
-    worktree,
-    git_root: remoteUrl,
-    git_root_host: gitRootHost,
-    ticket_id: null,
-    branch: null,
-    local: 0,
-    state: 'init',
-    created_at: now,
-    updated_at: now,
-  });
+  logInfo(`${resumeInitId ? 'Resuming' : 'Init attempt'}: ${initId}`);
+  logField('Worktree', worktree);
 
-  // 5. Scripts: try org first, then LLM for any missing
-  const scriptsDir = join(sDir, 'scripts');
-  const effectiveOrg = org || 'default';
-  const currentBranch = getCurrentBranch(workDir);
+  // 5. Acquire init lock
+  acquireInitLock(initId);
 
-  if (opts.local) {
-    // Local mode: no scripts needed
-    logInfo('Scripts skipped (local mode)');
-  } else {
-    const { found, missing } = loadOrgScripts(scriptsDir, effectiveOrg);
+  try {
+    // 6. Build init context
+    const ctx: InitContext = {
+      initId,
+      config,
+      workDir,
+      gitRootPath,
+      worktree,
+      remoteUrl,
+      gitRootHost,
+      org,
+      forceLocal: opts.local || false,
+      ticketIdArg: ticketId,
+    };
 
-    if (missing.length > 0) {
-      // Some or all scripts missing — LLM creates them
-      const ok = await promptSetupScripts(scriptsDir, missing, effectiveOrg, id);
-      if (!ok) {
-        process.exit(1);
-      }
+    // 7. Run init state machine (resumes from WAL for existing attempts)
+    const completed = await runInitStateMachine(ctx);
 
-      // Offer to save as org (only if we have a real org, not 'default')
-      if (org && org !== 'default') {
-        await promptSaveOrg(scriptsDir, org, id);
-      }
-    } else {
-      // All scripts loaded from org — verify they work
-      const verifyResult = verifyCriticalScripts(scriptsDir, currentBranch);
-      if (!verifyResult.extractTicketId || !verifyResult.getTicketOk) {
-        logWarn('Copied org scripts did not pass verification.');
-        const { selectOption } = await import('../llm/inquirer');
-        const fix = await selectOption<'retry' | 'continue' | 'regenerate'>(
-          'Critical scripts are not working. What would you like to do?',
-          [
-            { value: 'retry', label: 'Retry', hint: 'Fix your tool/config, then we verify again' },
-            { value: 'regenerate', label: 'Regenerate', hint: 'LLM creates new scripts' },
-            { value: 'continue', label: 'Continue anyway', hint: 'Proceed with non-working scripts' },
-          ],
-        );
-        if (fix === 'retry') {
-          const retry = verifyCriticalScripts(scriptsDir, currentBranch);
-          if (!retry.extractTicketId || !retry.getTicketOk) {
-            logWarn('Scripts still not working after retry.');
-          }
-        } else if (fix === 'regenerate') {
-          const ok = await promptSetupScripts(
-            scriptsDir,
-            ['extract-ticket', 'get-ticket', 'start-ticket', 'to-review', 'revert-to-inprogress'],
-            effectiveOrg,
-            id,
-          );
-          if (!ok) process.exit(1);
-          if (org && org !== 'default') {
-            await promptSaveOrg(scriptsDir, org, id);
-          }
-        }
-      }
+    if (!completed) {
+      logWarn('Init interrupted. Run `kautopilot init` to resume or `kautopilot init --reset` to restart.');
     }
+  } finally {
+    releaseInitLock(initId);
   }
-
-  // 6. Determine ticket ID
-  const localMode = opts.local || false;
-  let resolvedTicketId: string | undefined;
-
-  if (localMode) {
-    resolvedTicketId = undefined;
-  } else if (ticketId) {
-    resolvedTicketId = ticketId;
-  } else {
-    // Extract from current branch via the extract-ticket script
-    const extractScript = join(scriptsDir, 'extract-ticket');
-    if (existsSync(extractScript)) {
-      const proc = Bun.spawnSync({
-        cmd: [extractScript],
-        stdin: Buffer.from(currentBranch + '\n'),
-        stdout: 'pipe',
-        stderr: 'pipe',
-      });
-      if (proc.exitCode === 0) {
-        const result = proc.stdout.toString().trim();
-        if (result.length > 0) resolvedTicketId = result;
-      }
-    }
-    if (!resolvedTicketId) {
-      throw new Error('Could not extract ticket ID from branch. Provide one: kautopilot init PE-1234');
-    }
-  }
-
-  logField('Ticket', resolvedTicketId || '(local mode)');
-
-  // 7. Determine branch
-  let branch = getCurrentBranch(workDir);
-  if (localMode) {
-    if (isOnMain(config.repo.baseBranch, workDir)) {
-      branch = `feature/local-${generateSessionId().slice(0, 4)}`;
-      createBranch(branch, workDir);
-    }
-  } else if (isOnMain(config.repo.baseBranch, workDir)) {
-    branch = `feature/${resolvedTicketId}`;
-    createBranch(branch, workDir);
-  }
-
-  // 8. Update session with final fields + mark ready
-  upsertSession({
-    id,
-    repo_path: gitRootPath,
-    worktree,
-    git_root: remoteUrl,
-    git_root_host: gitRootHost,
-    ticket_id: resolvedTicketId ?? null,
-    branch,
-    local: localMode ? 1 : 0,
-    state: 'ready',
-    created_at: now,
-    updated_at: now,
-  });
-
-  // 9. Log events
-  appendEvent(id, { ts: now, event: 'init:started' });
-  appendEvent(id, {
-    ts: new Date().toISOString(),
-    event: 'init:completed',
-    metadata: { id, ticketId: resolvedTicketId, local: localMode },
-  });
-
-  // 10. Acquire lock
-  acquireLock(id);
-
-  // 11. If local mode, run LLM to generate ticket, spec, and plans
-  if (localMode) {
-    logInfo('Generating ticket, spec, and plans...');
-
-    const specArtifactPath = snapshotPath(id, 1, 'task-spec.md');
-    const plansArtifactDir = snapshotPath(id, 1, 'plans');
-    ensureArtifactDir(specArtifactPath);
-    ensureArtifactDir(plansArtifactDir + '/.keep');
-
-    try {
-      const localInitPrompt = getAgentPrompt('init', 'localInit', { sessionId: id });
-      await spawnPrintRaw(getDefaultBinary(), localInitPrompt, {
-        cwd: workDir,
-        timeout: 300,
-        spinnerMsg: 'Generating ticket, spec, and plans',
-      });
-    } catch (err) {
-      logWarn('Local mode generation encountered an issue: ' + (err instanceof Error ? err.message : String(err)));
-    }
-  }
-
-  // 12. Release lock (init completes, start will re-acquire)
-  releaseLock(id);
-
-  // 13. Output
-  logOk(`Session initialized: ${id}`);
-  logField('Ticket', resolvedTicketId || '(local mode)');
-  logField('Branch', branch);
-  logDim(`Config:    ~/.kautopilot/${id}/config.yaml`);
-  logDim('Next:      kautopilot start');
 }

@@ -5,7 +5,13 @@ import { extractText, extractToolUses } from './parse';
 export function formatEvent(event: StreamEvent): string | null {
   switch (event.type) {
     case 'system':
-      return pc.dim(`[system] ${event.message}`);
+      if (event.message) {
+        return pc.dim(`[system] ${event.message}`);
+      }
+      if (event.subtype === 'init' && event.session_id) {
+        return pc.dim(`[system:init session_id=${event.session_id}]`);
+      }
+      return pc.dim(`[system]`);
 
     case 'user':
       return formatUserMessage(event.message.content);

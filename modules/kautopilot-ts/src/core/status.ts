@@ -100,6 +100,8 @@ function isCheckpoint(phase: string, state: string): boolean {
 const LIFECYCLE_EVENTS = new Set([
   'init:started',
   'init:completed',
+  'init:failed',
+  'init:cancelled',
   'start:started',
   'start:completed',
   'stop:started',

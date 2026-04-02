@@ -80,6 +80,19 @@
   # Launch Daemons & Agents (background services)
   # ============================================================
   launchd.daemons = {
+    # Expose Nix binaries to GUI apps (they don't inherit shell PATH)
+    setenv-path = {
+      serviceConfig = {
+        Label = "setenv.path";
+        ProgramArguments = [
+          "/bin/launchctl"
+          "setenv"
+          "PATH"
+          "/nix/var/nix/profiles/default/bin:/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        ];
+        RunAtLoad = true;
+      };
+    };
     # Increase max open files limit (default 256 is too low for nix-daemon)
     limit-maxfiles = {
       serviceConfig = {

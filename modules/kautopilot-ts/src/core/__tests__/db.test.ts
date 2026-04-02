@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import type { SessionRow } from '../types';
+import type { InitAttemptRow } from '../init-types';
 
 function createTestDb(): Database {
   const db = new Database(':memory:');
@@ -19,6 +20,19 @@ function createTestDb(): Database {
       updated_at     TEXT NOT NULL
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_worktree ON sessions(repo_path, worktree);
+    CREATE TABLE IF NOT EXISTS init_attempts (
+      id                  TEXT PRIMARY KEY,
+      repo_path           TEXT NOT NULL,
+      worktree            TEXT NOT NULL,
+      git_root            TEXT NOT NULL,
+      git_root_host       TEXT NOT NULL,
+      org                 TEXT,
+      outcome             TEXT,
+      promoted_session_id TEXT,
+      created_at          TEXT NOT NULL,
+      updated_at          TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_init_worktree ON init_attempts(repo_path, worktree);
   `);
   return db;
 }
@@ -221,5 +235,116 @@ describe('Database operations', () => {
       .all('/repo') as SessionRow[];
     expect(results).toHaveLength(2);
     expect(results.map(r => r.worktree)).toEqual(['/repo', '/repo-wt']);
+  });
+
+  it('stores promotion provenance on init attempts', () => {
+    const row: InitAttemptRow = {
+      id: 'init1',
+      repo_path: '/tmp/repo',
+      worktree: '/tmp/repo',
+      git_root: 'git@github.com:test-org/test-repo.git',
+      git_root_host: 'github.com/test-org/test-repo',
+      org: 'test-org',
+      outcome: 'promoted',
+      promoted_session_id: 'sess1',
+      created_at: '2026-03-24T10:00:00Z',
+      updated_at: '2026-03-24T10:00:00Z',
+    };
+
+    db.query(
+      `INSERT INTO init_attempts (id, repo_path, worktree, git_root, git_root_host, org, outcome, promoted_session_id, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    ).run(
+      row.id,
+      row.repo_path,
+      row.worktree,
+      row.git_root,
+      row.git_root_host,
+      row.org,
+      row.outcome,
+      row.promoted_session_id,
+      row.created_at,
+      row.updated_at,
+    );
+
+    const result = db
+      .query('SELECT * FROM init_attempts WHERE promoted_session_id = $1')
+      .get('sess1') as InitAttemptRow;
+    expect(result.id).toBe('init1');
+    expect(result.outcome).toBe('promoted');
+  });
+
+  it('getActiveInitForWorktree: returns active init with NULL outcome', () => {
+    // Insert an active init (outcome = NULL)
+    db.query(
+      `INSERT INTO init_attempts (id, repo_path, worktree, git_root, git_root_host, org, outcome, promoted_session_id, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    ).run('active1', '/repo', '/repo', 'git@x', 'x', null, null, null, '2026-03-24T10:00:00Z', '2026-03-24T10:00:00Z');
+
+    const result = db
+      .query(
+        'SELECT * FROM init_attempts WHERE repo_path = $1 AND worktree = $2 AND outcome IS NULL ORDER BY created_at DESC LIMIT 1',
+      )
+      .get('/repo', '/repo') as InitAttemptRow | null;
+    expect(result).not.toBeNull();
+    expect(result!.id).toBe('active1');
+    expect(result!.outcome).toBeNull();
+  });
+
+  it('getActiveInitForWorktree: returns null when all inits have an outcome', () => {
+    // Insert a resolved init (outcome = 'failed')
+    db.query(
+      `INSERT INTO init_attempts (id, repo_path, worktree, git_root, git_root_host, org, outcome, promoted_session_id, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    ).run(
+      'resolved1',
+      '/repo',
+      '/repo',
+      'git@x',
+      'x',
+      null,
+      'failed',
+      null,
+      '2026-03-24T10:00:00Z',
+      '2026-03-24T10:00:00Z',
+    );
+
+    const result = db
+      .query(
+        'SELECT * FROM init_attempts WHERE repo_path = $1 AND worktree = $2 AND outcome IS NULL ORDER BY created_at DESC LIMIT 1',
+      )
+      .get('/repo', '/repo') as InitAttemptRow | null;
+    expect(result).toBeNull();
+  });
+
+  it('getActiveInitForWorktree: returns most recent active init', () => {
+    // Insert an older resolved init and a newer active init
+    db.query(
+      `INSERT INTO init_attempts (id, repo_path, worktree, git_root, git_root_host, org, outcome, promoted_session_id, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    ).run(
+      'old1',
+      '/repo',
+      '/repo',
+      'git@x',
+      'x',
+      null,
+      'abandoned',
+      null,
+      '2026-03-24T09:00:00Z',
+      '2026-03-24T09:00:00Z',
+    );
+    db.query(
+      `INSERT INTO init_attempts (id, repo_path, worktree, git_root, git_root_host, org, outcome, promoted_session_id, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    ).run('new1', '/repo', '/repo', 'git@x', 'x', null, null, null, '2026-03-24T11:00:00Z', '2026-03-24T11:00:00Z');
+
+    const result = db
+      .query(
+        'SELECT * FROM init_attempts WHERE repo_path = $1 AND worktree = $2 AND outcome IS NULL ORDER BY created_at DESC LIMIT 1',
+      )
+      .get('/repo', '/repo') as InitAttemptRow | null;
+    expect(result).not.toBeNull();
+    expect(result!.id).toBe('new1');
   });
 });

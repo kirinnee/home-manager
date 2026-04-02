@@ -1,11 +1,11 @@
 import { Command } from 'commander';
 import { getSessionByWorktree } from '../core/db';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { checkLock, acquireLock, releaseLock } from '../core/lock';
 import { appendEvent } from '../core/log';
 import { ensureStatus, detectAndRecoverCrash } from '../core/status';
 import { getGitRoot, getWorktree } from '../core/git';
-import { deleteSession } from '../core/db';
+
 import { runPhase } from '../phases/runner';
 import { supersedEpoch } from '../core/manifests';
 import type { Phase } from '../core/types';
@@ -47,14 +47,13 @@ async function runStart(opts: { phase?: string; local?: boolean }): Promise<void
     }
   }
 
-  // Guard against incomplete init
+  // Guard against incomplete init — runtime sessions with state='init' are stale
+  // (the new init lifecycle stores init attempts separately under ~/.kautopilot/init/)
   if (session.state === 'init') {
-    logError(`Session ${session.id} has incomplete initialization. Run \`kautopilot init --reset\` to re-initialize.`);
-    const sDir = sessionDir(session.id);
-    if (existsSync(sDir)) {
-      rmSync(sDir, { recursive: true, force: true });
-    }
-    deleteSession(session.id);
+    logError(
+      `Session ${session.id} has incomplete initialization. ` +
+        `Run \`kautopilot init\` to start a fresh init attempt or \`kautopilot init --reset\` to re-initialize.`,
+    );
     process.exit(1);
   }
 

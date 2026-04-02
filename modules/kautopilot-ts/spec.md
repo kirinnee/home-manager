@@ -1,707 +1,632 @@
-# kautopilot Specification
+# kautopilot Init and Session Spec
 
 ## 1. Purpose
 
-kautopilot is a session-based orchestrator for taking a task from intake to completion through a three-phase workflow:
+`kautopilot` has two distinct lifecycles:
 
-1. Phase 1: write and approve the contract
-2. Phase 2: execute approved plans through kloop
-3. Phase 3: deliver through a primary endpoint and babysit that endpoint until completion
+1. **Init lifecycle** — discover how to talk to the user’s ticket system, generate the adapter scripts, and decide whether the worktree can be promoted into a real session.
+2. **Runtime session lifecycle** — execute the actual plan / implementation / delivery workflow after init has succeeded or been downgraded to local mode.
 
-kautopilot is not itself the implementation loop. For implementation work, kloop is the execution backend.
+This spec defines the init lifecycle, how it is persisted, how it interacts with WAL/status/state-machine semantics, and how a successful init is promoted into a real session.
+
+The main goals are:
+
+- keep the current product shape (`kautopilot init`, `kautopilot start`, `kautopilot org init`)
+- keep the script adapter interface stable
+- move ticket-system discovery into a generic progressive research/detection workflow
+- preserve abandoned/failed init attempts for debugging
+- prevent broken init attempts from becoming broken runtime sessions
 
 ---
 
 ## 2. Core model
 
-### 2.1 Spec vs plan
+### 2.1 Init attempt vs runtime session
 
-The system distinguishes between two different kinds of artifacts:
+The system distinguishes between:
 
-- **Spec**: declarative, idempotent, describes **WHAT** should be true
-- **Plans**: imperative, procedural, describe **HOW** to move from the current state to the desired state
+- **Init attempt**: a per-worktree bootstrap attempt that researches the ticket system, gathers setup context, generates/verifies scripts, and ends in either promotion, downgrade, cancellation, or failure.
+- **Runtime session**: the promoted session under `~/.kautopilot/<sessionId>` that runs the normal phase machine after init is complete.
 
-A new epoch rewrites the declarative contract. A rewritten plan stays inside the same epoch unless the declarative contract itself changed.
+An init attempt is not yet a runtime session.
 
-### 2.2 Contract epoch
+### 2.2 Directory model
 
-A contract epoch is versioned as `vN`.
-
-Each epoch defines:
-
-- the approved declarative spec
-- the approved plan set
-- the primary delivery kind
-- any supporting ticket-side actions implied by the contract
-
-At any point, exactly one contract epoch is active.
-
-### 2.3 Delivery kind
-
-Each epoch has exactly one primary delivery kind:
-
-- `pr`
-- `ticket`
-
-There is no separate `report` delivery kind.
-
-If a report is needed, it is treated as a ticket artifact: attached, linked, or commented onto the ticket system.
-
-### 2.4 Primary delivery vs supporting side effects
-
-The primary delivery kind defines what it means for the epoch to complete.
-
-Supporting side effects may still occur, for example:
-
-- a `pr` epoch may update the ticket with links or comments
-- a `ticket` epoch may create downstream linked tickets or attach artifacts
-
-These are not separate delivery kinds.
-
----
-
-## 3. The three phases
-
-### 3.1 Phase 1: contract writing
-
-Phase 1 is responsible for producing an approved contract.
-
-It must:
-
-- clarify ambiguity before deep research
-- detect conflicting requirements
-- write the high-level declarative spec
-- choose the primary delivery kind for the epoch
-- decompose the work into plan units
-- attach proof requirements, dependencies, and strategy hints to each plan
-- optionally mutate the current ticket or propose/create downstream ticket outputs when the contract requires it
-
-Phase 1 output is the frozen contract for `vN`.
-
-### 3.2 Phase 2: plan execution
-
-Phase 2 executes the approved plans for the active epoch.
-
-Phase 2 is a plan/workset orchestrator that delegates implementation execution to kloop.
-
-It may:
-
-- execute one approved plan at a time
-- run bounded parallel worksets when the plan strategy requires divide-and-conquer
-- persist progress, handoffs, and rewrites durably
-
-Phase 2 does not redefine the declarative contract. If the declarative contract is wrong, Phase 2 must escalate back to Phase 1 through a new epoch.
-
-### 3.3 Phase 3: delivery and babysitting
-
-Phase 3 delivers the active epoch through its primary delivery endpoint.
-
-If the primary delivery kind is `pr`, Phase 3 is PR-native and keeps the current babysitting loop:
-
-- prereview
-- poll
-- eval
-- act
-- push
-
-If the primary delivery kind is `ticket`, Phase 3 performs ticket delivery:
-
-- update/comment on the current ticket
-- attach/link artifacts
-- create downstream linked tickets
-- move tickets across ticket-system states when appropriate
-
----
-
-## 4. Versioning and rewrite semantics
-
-### 4.1 Contract-level rewrite
-
-A contract-level rewrite creates a new epoch `vN+1` and supersedes the prior epoch.
-
-This is required when the approved declarative contract changed materially, including:
-
-- spec changes
-- plan decomposition changes that alter the contract
-- primary delivery kind changes
-- ticket intent changes that alter the approved WHAT
-
-When a new epoch is created:
-
-- the previous epoch remains on disk
-- the previous epoch is marked superseded/abandoned
-- the new epoch becomes active
-
-### 4.2 Execution-level rewrite
-
-An execution-level rewrite stays inside the same epoch.
-
-This is used when:
-
-- the current plan procedure is wrong
-- downstream plans need patching
-- remaining plans must be regenerated
-- the contract is still valid
-
-Execution-level rewrites must never overwrite prior files.
-
-### 4.3 Rewrite levels
-
-The allowed rewrite decisions are:
-
-- `refine_local`
-- `patch_downstream`
-- `regenerate_remaining`
-- `revisit_spec`
-
-`revisit_spec` is the only rewrite that creates a new epoch.
-
----
-
-## 5. Artifact model
-
-### 5.1 Contract artifacts
-
-Each epoch is stored under:
+Each init attempt is stored under:
 
 ```text
-~/.kautopilot/{sessionId}/artifacts/vN/
+~/.kautopilot/init/<sessionId>/
 ```
 
-Each epoch must contain:
+Each promoted runtime session is stored under:
 
-- `task-spec.md`
-- plan files
-- machine-readable manifests
-- step metadata
+```text
+~/.kautopilot/<sessionId>/
+```
 
-### 5.2 Manifest artifacts
+Rules:
 
-Each epoch should include typed manifests such as:
+- every promoted runtime session has exactly one source init attempt
+- not every init attempt becomes a runtime session
+- init attempts are retained for debugging even if they fail or are abandoned
+- promotion copies from the successful init attempt into the runtime session directory
+- a stale or abandoned init attempt must never be reused as the source of promotion
 
-- `contract.json`
-- `plans/manifest.json`
-- `delivery.json`
+### 2.3 Worktree uniqueness
 
-These manifests exist so runtime code does not need to infer everything from filenames alone.
+Init and runtime ownership remain unique per worktree.
 
-### 5.3 Plan files as paper trail
+Rules:
 
-The plan files themselves are the paper trail.
+- a worktree may have at most one active init/session process log at a time
+- if an init attempt is active, another init for that worktree is blocked
+- if a runtime session already exists for that worktree, re-init is blocked unless the user explicitly forces cancel/reset
+- forced reset does not overwrite an old init attempt; it closes that attempt and starts a fresh one
 
-There should be no separate paper-trail directory for plan rewrites.
-
-Examples:
-
-- `plan-1-1.md`
-- `plan-2-1.md`
-- `plan-1-2.md`
-- `plan-2-2.md`
-
-Meaning:
-
-- first number = plan ordinal
-- second number = rewrite ordinal within the same epoch
-
-The active plan for a given plan ordinal is the highest suffix in the active epoch.
-
-### 5.4 Approved plan finalization
-
-After Phase 1 approval, plan files are frozen directly into suffixed canonical filenames, such as:
-
-- `plan-1-1.md`
-- `plan-2-1.md`
-
-Later rewrites append new files directly in the same plans directory.
+This preserves the current per-worktree uniqueness model while allowing old init attempts to remain on disk as debug artifacts.
 
 ---
 
-## 6. Plan structure
+## 3. Init phases
 
-Each finalized plan must remain human-readable, but should also be machine-parseable.
+Init is a phased workflow. Each phase produces durable artifacts that are consumed by the next phase.
 
-Each plan should minimally carry:
+### 3.1 Phase A — Identify ticket system
 
-- id/title
-- goal
-- scope/domain
-- dependencies
-- evidence / proof requirements
-- definition of done
-- strategy hints
-- optional workset configuration
-- handoff/replan guidance
-- primary delivery kind
-- delivery impact / downstream ticket intent if relevant
+Goal:
 
----
+- capture the minimum seed input: what system the user uses
 
-## 7. kloop execution contract
+Input:
 
-### 7.1 kloop as backend
+- user answer to “What ticket/task system do you use?”
 
-For implementation execution, kloop is the backend loop.
+Output:
 
-kautopilot should treat kloop as the authoritative executor for iterative implementation work.
+- `systemName`
 
-### 7.2 Recognized backend outcomes
+Durable artifact:
 
-The orchestration layer should treat the execution backend as returning a narrow set of outcomes:
+- `identify.json` or equivalent status/context entry containing the selected system name
 
-- `completed`
-- `conflict`
-- `max_situations`
-- `crash`
+### 3.2 Phase B — Research
 
-### 7.3 Outcome interpretation
+Goal:
 
-- `completed`: the active plan completed successfully and may advance
-- `crash`: retry/recover first; do not rewrite immediately by default
-- `conflict`: enter rewrite analysis
-- `max_situations`: enter rewrite analysis
+- research the declared system and produce both system understanding and a detection plan
 
-Only `conflict` and `max_situations` should trigger rewrite analysis.
+Research output must include:
 
-### 7.4 TTY-assisted rewrite analysis
+- likely access paths (CLI, API, MCP, web/manual, custom wrapper)
+- likely hierarchy and work organization
+- likely transition model
+- likely constraints/restrictions
+- what tools/config/auth signals are worth checking locally
+- what information still needs to be asked from the user
 
-When `conflict` or `max_situations` occurs, kautopilot should enter a TTY-assisted analysis path.
+This phase must not only produce prose. It must produce machine-usable guidance for detection and follow-up questioning.
 
-That path should gather durable loop evidence, including:
+Durable artifacts:
 
-- `kloop describe`
-- loop review output
-- failure context
-- current plan and downstream plan state
+- `research.md`
+- `research.json` or equivalent normalized summary
 
-The analysis step must decide between:
+### 3.3 Phase C — Detect
 
-- `refine_local`
-- `patch_downstream`
-- `regenerate_remaining`
-- `revisit_spec`
+Goal:
 
-This decision should be explicit and durable.
+- probe the local environment using the research phase’s detection plan
 
----
+Detection is not a fixed global list. It is derived from research.
 
-## 8. Commit invariant
+Detection may include:
 
-The commit model is:
+- binaries to probe
+- wrapper CLIs to probe
+- config files to inspect
+- auth/context test commands to try
+- other provider-specific or environment-specific signals surfaced by research
 
-> one completed plan equals one commit
+Output:
 
-Implications:
+- detection result describing what seems available, missing, configured, or uncertain
 
-- a rewritten plan revision is not complete just because it exists
-- an abandoned rewrite does not get a commit
-- only the finally completed active revision for that plan produces the commit
+Durable artifact:
 
-Example:
+- `detection.json`
 
-- `plan-1-1.md` exists
-- it is superseded by `plan-1-2.md`
-- `plan-1-1.md` does not produce a commit if it never completed
-- `plan-1-2.md` produces the single commit for plan 1 if it completes
+### 3.4 Phase D — Gather operational context
 
----
+Goal:
 
-## 9. Handoff semantics
+- ask the user one broad context-aware question informed by research + detection
 
-Handoff is an explicit transfer of control between stable workflow states.
+This phase should minimize user friction. It should not turn into a long rigid questionnaire unless absolutely necessary.
 
-It is not the same thing as Claude's raw turn-tracking.
+The intake should gather, in one broad answer where possible:
 
-A handoff must always record:
+- how they actually access tickets
+- which detected tool/path they want to use
+- whether it is already working/authenticated
+- relevant state names
+- hierarchy/defaults
+- quirks/restrictions/custom fields
 
-- what stopped
-- why it stopped
-- what the next stable state is
-- what files/artifacts define that next state
-- what condition allows resumption
+Durable artifact:
 
-### 9.1 Valid handoff categories
+- `user-context.md` or `user-context.json`
 
-Examples include:
+### 3.5 Phase E — Normalize setup brief
 
-- user handoff
-- plan-to-plan handoff
-- replan handoff
-- phase handoff
-- external-wait handoff
+Goal:
 
-### 9.2 Durable handoff state
+- turn the research, detection result, and user answer into a stable setup brief for script generation
 
-Status/WAL should record:
+The normalized brief should define:
 
-- current contract version
-- current workset item
-- handoff boundary and reason
-- rewrite level and affected artifacts
-- superseded versions
-- primary delivery state
-- supporting side-effect state
-- PR rollover recommendation and history
+- chosen access path
+- readiness/confidence
+- hierarchy/defaults
+- state mapping
+- quirks/restrictions
+- which adapter capabilities are required
+- which non-critical capabilities are allowed to become no-op
 
-The combination of files and WAL/status should make `describe` trustworthy.
+Durable artifact:
 
----
+- `setup-brief.json`
 
-## 10. PR delivery semantics
+### 3.6 Phase F — Generate and verify
 
-### 10.1 Existing PR reuse
+Goal:
 
-For `pr` epochs, the existing PR should be reused by default across new epochs.
+- generate the adapter scripts and verify them through a bounded repair loop
 
-A new epoch does not imply a new PR.
+This is not a user-driven retry loop. One LLM agent gets several bounded attempts to:
 
-The PR is the stable delivery conversation surface.
+- generate scripts
+- run verification
+- inspect failures
+- repair scripts
+- retry
 
-### 10.2 PR rollover
+Durable artifacts:
 
-During poll, Phase 3 should evaluate whether the current PR is still a good reasoning and review surface.
+- generated `scripts/`
+- `verify.json`
+- generation/repair attempt logs
 
-If the PR has become too noisy, the system may recommend rolling over to a fresh PR.
+### 3.7 Phase G — Resolve outcome
 
-Rollover heuristics may consider signals such as:
+Goal:
 
-- unresolved thread count
-- total review comment volume
-- push cycle count
-- PR age
-- general unreadability / review saturation
+- convert verification results into one of the allowed init outcomes
 
-Any rollover decision must be explicit and durable so `describe` can explain why the PR was reused or replaced.
+Allowed outcomes:
+
+- `promoted`
+- `promoted_degraded`
+- `downgraded_local`
+- `cancelled`
+- `failed`
+- `abandoned`
+
+Durable artifact:
+
+- `outcome.json`
+- final status/WAL state for the init attempt
 
 ---
 
-## 11. Ticket delivery semantics
+## 4. Adapter script model
 
-If the primary delivery kind is `ticket`, Phase 3 should deliver through the ticket system rather than PR convergence.
+The ticket-system integration layer remains script-based and provider-agnostic.
 
-Ticket delivery covers:
+### 4.1 Stable interface
 
-- updating the current ticket
-- adding comments
-- attaching or linking artifacts
-- creating downstream linked tickets
-- moving tickets into the correct ticket-system states
+The existing script interface is the stable adapter surface. Runtime code should call scripts, not ask the LLM to perform provider-specific actions on demand.
 
-There is no separate report delivery kind.
+Current script surface includes:
 
-### 11.1 Draft artifacts before publish
+- `extract-ticket`
+- `get-ticket`
+- `start-ticket`
+- `to-review`
+- `revert-to-inprogress`
+- `update-ticket`
+- `create-downstream-ticket`
+- `add-comment`
+- `move-to-todo`
+- `attach-artifact`
 
-Before any irreversible ticket-side action happens, Phase 3 must first generate draft artifacts in the session artifacts directory.
+### 4.2 Critical vs non-critical capabilities
 
-Examples:
+Capabilities are split into:
 
-- `artifacts/vN/tickets-1.md`
-- `artifacts/vN/tickets-2.md`
-- `artifacts/vN/report-a.md`
+**Critical read-path capabilities**
 
-These are review artifacts, not yet published ticket-system side effects.
+- `extract-ticket`
+- `get-ticket`
 
-### 11.2 User review gate
+These must work before a non-local init can be promoted.
 
-Ticket delivery completion must include a user review gate after the ticket artifacts are generated and before any publish action occurs.
-
-This Phase 3 completion gate should:
-
-- ask the user to review the ticket/report artifacts
-- ask whether the artifacts are acceptable
-- ask whether the user has feedback
-
-If the user has feedback:
-
-- the current epoch is not published
-- the feedback becomes input to the next contract epoch
-- the workflow proceeds to `vN+1`
-
-If the user approves:
-
-- Phase 3 may perform the irreversible publish actions
-- reports may be attached/linked to the current ticket
-- downstream tickets may be created
-- ticket comments/updates may be emitted
-
-### 11.3 Publish happens only after approval
-
-For `ticket` epochs, publish is the final step, not the draft-generation step.
-
-That means:
-
-- generate draft artifacts first
-- gather user feedback first
-- only publish after explicit approval
-
-### 11.4 Built-in markdown to PDF conversion
-
-kautopilot should include a built-in markdown-to-PDF conversion path for ticket/report artifacts.
-
-If a report artifact needs PDF delivery, the system should be able to:
-
-- generate markdown first
-- convert markdown to PDF locally
-- attach or link the resulting PDF during the publish step
-
-Markdown remains the editable review artifact. PDF is a delivery/export format.
-
----
-
-## 12. Ticket-system script primitives
-
-The ticket-system integration layer should remain script-based and provider-agnostic.
-
-The existing init/org script vocabulary should be expanded beyond the current five scripts to support operations such as:
+**Non-critical write/transition capabilities**
 
 - update current ticket
-- create downstream tickets
-- add ticket comment
-- move ticket to todo
-- attach/link ticket artifact
+- create downstream ticket
+- add comment
+- attach/link artifact
+- transition ticket states
 
-Core orchestration should remain generic, while org scripts supply provider-specific behavior.
+These may degrade to no-op if they cannot be made reliable.
+
+### 4.3 No-op policy
+
+If non-critical capabilities fail after bounded repair attempts:
+
+- the corresponding scripts may be replaced with no-op implementations
+- the promoted session must record that those actions are manual
+- the user must be explicitly informed which operations they must remember to do themselves
 
 ---
 
-## 13. Definition of Done
+## 5. Agent-driven generation and repair loop
 
-This specification is complete only when both the functional and non-functional acceptance criteria below are satisfied.
+### 5.1 Input to the agent
 
-### 13.1 Functional Definition of Done
+The generation/repair agent receives:
 
-#### A. Spec / plan model
+- `research.md` / `research.json`
+- `detection.json`
+- user operational answer
+- `setup-brief.json`
+- the required adapter interface
+- critical/non-critical classification
 
-The runtime must reflect the declarative/imperative split:
+### 5.2 Bounded repair loop
 
-- spec is treated as declarative and idempotent
-- plans are treated as imperative and procedural
-- each epoch has exactly one primary delivery kind: `pr` or `ticket`
+The loop is bounded. It should:
 
-Expected behavior:
+- generate scripts
+- run verification
+- inspect failures
+- repair scripts
+- retry a few times
 
-- a new epoch rewrites the contract, not just the current implementation attempt
-- execution within the same epoch rewrites plans, not the declarative target
+The user is not asked to manually steer each repair attempt.
 
-How to test:
+### 5.3 Exhaustion behavior
 
-- create a scenario where the plan is wrong but the target is still right; confirm the runtime stays in the same epoch and emits a plan rewrite
-- create a scenario where the target itself changes; confirm the runtime creates `vN+1` and marks the previous epoch superseded
+After the bounded repair loop is exhausted:
 
-#### B. Plan file rewrite trail
+- if critical scripts still fail, init cannot promote as a ticket-integrated session
+- if only non-critical scripts fail, init may still promote in degraded mode
 
-Plan rewrites must be represented directly by suffixed filenames in the plan artifact directory.
-
-Expected behavior:
-
-- approved plan files are stored as `plan-1-1.md`, `plan-2-1.md`, etc.
-- local or downstream rewrites append new files like `plan-1-2.md`, `plan-2-2.md`
-- the active plan for a plan ordinal is the highest suffix in the active epoch
-- no prior plan file is overwritten
-
-How to test:
-
-- finalize a contract with multiple plans and verify suffixed files are written
-- trigger a local rewrite and verify a higher-suffix file appears without deleting the prior file
-- load plans through the runtime and confirm it resolves the highest suffix as active
-
-#### C. kloop outcome handling
-
-Phase 2 must treat kloop as the implementation backend and recognize only the narrow execution outcomes defined by this spec.
-
-Expected behavior:
-
-- `completed` advances to the next plan
-- `crash` retries or recovers before any rewrite path is entered
-- only `conflict` and `max_situations` enter TTY-assisted rewrite analysis
-- rewrite analysis uses loop evidence such as `kloop describe` and review/failure output
-
-How to test:
-
-- simulate or fixture each backend outcome and confirm the orchestrator transitions correctly
-- verify that `crash` does not immediately rewrite the plan
-- verify that `conflict` and `max_situations` enter the analysis path and require an explicit rewrite decision
-
-#### D. Commit behavior
-
-Commit generation must follow the plan completion invariant.
-
-Expected behavior:
-
-- one completed plan equals one commit
-- abandoned rewrites do not produce commits
-- if `plan-1-1` is superseded by `plan-1-2`, only the finally completed active revision may produce the commit for that plan
-
-How to test:
-
-- run a plan that completes without rewrite and verify exactly one commit is produced
-- run a plan that rewrites once before completion and verify the abandoned rewrite does not commit
-- verify the final active rewrite produces exactly one commit when complete
-
-#### E. Handoff and status semantics
-
-Handoff and rewrite state must be first-class and durable.
-
-Expected behavior:
-
-- `describe` and `status --json` expose the active epoch, superseded epochs, current plan/workset, rewrite history, handoff reason, and delivery state
-- workflow state can be resumed from files plus WAL/status rather than hidden model memory
-
-How to test:
-
-- interrupt execution mid-plan, mid-rewrite, and mid-delivery, then resume and confirm state is reconstructed from artifacts/status
-- inspect `describe` output and confirm it explains why a handoff or rewrite occurred
-
-#### F. PR delivery behavior
-
-For `pr` epochs, Phase 3 must remain PR-native.
-
-Expected behavior:
-
-- the existing PR is reused by default across epochs
-- poll computes an explicit rollover recommendation from heuristic signals
-- if the PR remains usable, Phase 3 continues on the same PR
-- if the PR is too noisy, Phase 3 can explicitly roll over to a fresh PR and record why
-
-How to test:
-
-- run a normal PR epoch and confirm PR reuse across a new contract epoch
-- fixture or simulate a noisy PR and verify rollover is recommended and persisted
-- verify `describe` records whether the PR was reused or replaced and why
-
-#### G. Ticket delivery behavior
-
-For `ticket` epochs, Phase 3 must produce review artifacts before publishing any irreversible side effects.
-
-Expected behavior:
-
-- draft artifacts are generated under the epoch artifact directory, such as `tickets-1.md`, `tickets-2.md`, `report-a.md`
-- Phase 3 asks the user to review those artifacts before publish
-- if the user has feedback, the workflow does not publish and instead proceeds to a new epoch
-- if the user approves, the workflow performs the real ticket-side actions: update ticket, comment, attach/link artifact, create downstream tickets, move ticket state
-
-How to test:
-
-- run a ticket epoch and verify draft artifacts are created before any external side effects
-- provide feedback at the approval gate and verify a new epoch is required instead of publishing
-- approve at the gate and verify publish actions occur only after approval
-
-#### H. Markdown to PDF export
-
-kautopilot must support markdown-to-PDF conversion for ticket/report artifacts.
-
-Expected behavior:
-
-- markdown remains the editable artifact
-- PDF can be generated locally from markdown
-- the PDF can be attached or linked during ticket publish
-
-How to test:
-
-- generate a markdown report artifact and verify a PDF can be produced
-- verify the publish path can reference the resulting PDF
-
-#### I. Ticket script expansion
-
-Init/org setup must support the expanded ticket action surface.
-
-Expected behavior:
-
-- script setup includes the ability to update current ticket, add comments, create downstream tickets, move tickets to todo, and attach/link artifacts
-- provider-specific behavior stays in scripts, not in core orchestration logic
-
-How to test:
-
-- initialize a session/org script set and verify the expanded script surface is scaffolded or validated
-- exercise each script hook through the runtime path that uses it
-
-### 13.2 Non-functional Definition of Done
-
-#### A. Tests
-
-The codebase must include automated coverage for the new behavior.
-
-Required test coverage:
-
-- plan/manifest parsing and validation
-- active-plan resolution from suffixed filenames
-- mapping from kloop outcomes into orchestrator transitions
-- TTY-assisted rewrite analysis entry only on `conflict` / `max_situations`
-- contract rewrite to `vN+1`
-- no-overwrite behavior for rewritten plan files
-- one completed plan equals one commit
-- PR rollover heuristic calculation and persistence
-- ticket approval gate behavior
-- markdown-to-PDF conversion path
-- init/org script scaffolding and validation for the expanded script set
-
-#### B. Build and type correctness
-
-The project must build and type-check cleanly after the change.
-
-Required outcome:
-
-- Bun/TypeScript checks pass for the updated codebase
-- no broken imports from removing the old `spec/` directory in favor of `spec.md`
-
-#### C. Runtime quality
-
-The implementation must preserve resumability, determinism, and auditability.
-
-Required outcome:
-
-- crashes do not corrupt active epoch state
-- WAL/status remains sufficient for resume
-- artifact history remains inspectable without hidden mutable state
-- rewrite decisions and PR rollover decisions are durable and explainable
-
-#### D. Dead code and compatibility cleanup
-
-The change should leave the repo in a coherent state.
-
-Required outcome:
-
-- dead code and stale readers tied to the old unsuffixed plan assumptions are removed or updated
-- old `spec/`-directory-specific references are removed or updated
-- no duplicate artifact mechanisms are introduced for the same concept
-- no stale delivery-kind logic remains for the removed standalone `report` mode
-
-#### E. User-facing clarity
-
-User-facing behavior should be understandable from CLI/status output.
-
-Required outcome:
-
-- status and describe output make the active epoch, plan revision, handoff reason, delivery mode, and PR rollover state obvious
-- ticket approval gates clearly separate draft generation from publish
-
-#### F. End-to-end verification
-
-Before this spec is considered complete, verify at least the following scenarios end-to-end:
-
-- normal PR-only flow
-- PR flow with contract rewrite and same-PR reuse
-- PR flow with heuristic rollover to a fresh PR
-- ticket flow with draft artifacts, feedback, and new epoch
-- ticket flow with approval and publish
-- conflict-triggered rewrite flow
-- max-situations-triggered rewrite flow
-- crash and resume flow
+The exhaustion result must be explicit and durable.
 
 ---
 
-## 14. Runtime invariants
+## 6. Outcome policy
+
+### 6.1 Critical failure
+
+If `extract-ticket` or `get-ticket` cannot be made reliable after bounded retries:
+
+- ticket-integrated init is not promotable
+- the user must be told the integration could not be made to work
+- the user must be offered downgrade to local mode
+- the init attempt remains on disk for debugging
+- no broken ticket-integrated runtime session is created
+
+### 6.2 Non-critical failure
+
+If the critical path works but some write/transition scripts do not:
+
+- init may promote to a runtime session
+- failing non-critical scripts become no-op
+- the outcome is `promoted_degraded`
+- the user is explicitly told which actions are now manual
+
+### 6.3 Cancelled or abandoned init
+
+If the user cancels init, or init is interrupted and never resumed:
+
+- the init attempt is marked `cancelled` or `abandoned`
+- its logs/artifacts remain intact
+- it is never reused as the source for a later promotion
+
+---
+
+## 7. Local-mode downgrade semantics
+
+Local mode is a first-class init outcome.
+
+On downgrade to local mode:
+
+- ticket integration is fully disabled
+- branch naming is chosen locally rather than derived from a real ticket ID
+- the ticket ID becomes `local-<random>`
+- ticket content is collected via TTY input and written as a local `ticket.md`
+- ticket-system adapter scripts are treated as fully disabled/no-op for that session
+
+This is not an error state. It is a valid promoted runtime mode.
+
+---
+
+## 8. Status, WAL, and state-machine semantics
+
+Init must interact cleanly with the existing WAL/status model rather than living as implicit transient logic.
+
+### 8.1 Separate init WAL/log root
+
+Runtime sessions currently log to:
+
+```text
+~/.kautopilot/<sessionId>/log.jsonl
+```
+
+Init attempts must analogously log to:
+
+```text
+~/.kautopilot/init/<sessionId>/log.jsonl
+```
+
+The init attempt also gets its own materialized status file, e.g.:
+
+```text
+~/.kautopilot/init/<sessionId>/status.yaml
+```
+
+This keeps init debugging separate from runtime session logs while preserving the same WAL/materialization pattern.
+
+### 8.2 Per-worktree uniqueness and locking
+
+Even though init logs live under a separate root, init still participates in the same unique per-worktree process model.
+
+Rules:
+
+- only one active init/session process may own a worktree at a time
+- an active init blocks a second init
+- an existing runtime session blocks re-init unless explicitly reset/cancelled
+- a reset closes the active owner and creates a fresh init attempt rather than rewriting the old one
+
+### 8.3 Init state machine
+
+Init should be modeled as a machine with explicit states, analogous to the runtime phase machine.
+
+Suggested init states:
+
+- `identify`
+- `research`
+- `detect`
+- `gather_context`
+- `normalize`
+- `generate`
+- `verify`
+- `promote`
+- `downgrade_local`
+- `failed`
+- `cancelled`
+
+The exact names may vary, but the machine must make the workflow resumable and inspectable.
+
+### 8.4 WAL events
+
+Init should emit its own `:started` / `:completed` events for init states, plus outcome events.
+
+Examples:
+
+- `init_phase:started` is too coarse by itself; state-level events are required
+- `research:started`
+- `research:completed`
+- `detect:started`
+- `detect:completed`
+- `generate:started`
+- `generate:completed`
+- `verify:started`
+- `verify:completed`
+- `promote:completed`
+- `downgrade_local:completed`
+- `init:failed`
+- `init:cancelled`
+
+The important requirement is not the exact string shape; it is that init is materialized through the same durable event + status pattern as runtime work.
+
+### 8.5 Status materialization
+
+Init status must be reconstructible from WAL the same way runtime session status is today.
+
+Status should track at least:
+
+- wal cursor/timestamp
+- current init state
+- state status (`pending`, `running`, `completed`, `failed`)
+- running flag / pid / start time
+- checkpoints if the init machine defines them
+- setup context fields that must survive crash recovery
+- bounded repair-loop metadata
+- final outcome classification
+
+### 8.6 Promotion boundary
+
+Promotion is the point where a successful init attempt creates the runtime session directory and associated session DB row.
+
+Rules:
+
+- before promotion, the init attempt exists only under `~/.kautopilot/init/<sessionId>`
+- promotion copies the approved/init-produced artifacts into `~/.kautopilot/<sessionId>`
+- promotion must only source from the fresh successful init attempt
+- abandoned/failed init attempts are never resumed in place and never copied from later
+
+### 8.7 Runtime session DB semantics
+
+A runtime session should only be registered as a real session once promotion happens.
+
+This prevents half-failed init attempts from polluting the real session index as if they were usable runtime sessions.
+
+If desired, init attempts may have a separate lightweight index, but they must not masquerade as ready runtime sessions before promotion.
+
+---
+
+## 9. Org setup relationship
+
+`kautopilot org init` may reuse parts of the same setup model, but it is not required to share every artifact or promotion rule.
+
+What must remain consistent:
+
+- research-driven setup
+- detection driven by research output
+- script adapter interface
+- critical vs non-critical behavior
+- bounded generation/repair loop
+
+What may differ:
+
+- org init may persist reusable script/config defaults without creating a runtime session
+- org init does not need the same promotion semantics as a worktree init attempt
+
+If org init diverges, the implementation/spec must state that divergence explicitly.
+
+---
+
+## 10. Definition of Done
+
+This spec is complete only when the later implementation satisfies the following.
+
+### 10.1 Functional requirements
+
+#### A. Progressive init flow
+
+Expected behavior:
+
+- init runs as a phased workflow: identify → research → detect → gather context → normalize → generate/verify → resolve outcome
+- each phase leaves durable artifacts that later phases consume
+
+How to test later:
+
+- run init and confirm each phase emits artifacts/log events and can be explained by status/describe output
+
+#### B. Init attempt persistence
+
+Expected behavior:
+
+- every init attempt gets its own directory under `~/.kautopilot/init/<sessionId>`
+- failed/abandoned attempts remain on disk for debugging
+- stale init attempts are never overwritten
+
+How to test later:
+
+- abandon an init attempt, rerun init with forced reset, and confirm a fresh init attempt directory is created while the old one remains intact
+
+#### C. Unique per-worktree ownership
+
+Expected behavior:
+
+- only one active init/session owner exists per worktree
+- active init blocks another init
+- active runtime session blocks re-init unless reset/cancelled
+
+How to test later:
+
+- start init and attempt a second init for the same worktree
+- create a runtime session and verify re-init is blocked without reset
+
+#### D. Promotion semantics
+
+Expected behavior:
+
+- successful init promotes into `~/.kautopilot/<sessionId>`
+- promotion copies only from the successful fresh init attempt
+- failed init does not create a broken ticket-integrated runtime session
+
+How to test later:
+
+- run one failed init and one successful retry, then verify the promoted session came from the successful attempt only
+
+#### E. Critical vs non-critical behavior
+
+Expected behavior:
+
+- critical script failure blocks ticket-integrated promotion and leads to local-mode downgrade choice
+- non-critical failure produces no-op scripts plus explicit manual-action warnings
+
+How to test later:
+
+- fixture a case where `extract-ticket` fails and confirm downgrade is required
+- fixture a case where only transition/update scripts fail and confirm degraded promotion succeeds
+
+#### F. Local-mode downgrade
+
+Expected behavior:
+
+- downgrade creates a valid local-mode promoted session
+- ticket ID is `local-<random>`
+- branch is local/user-chosen
+- local `ticket.md` is created via TTY input
+
+How to test later:
+
+- force downgrade and confirm local-mode artifacts and semantics are correct
+
+#### G. WAL/status correctness
+
+Expected behavior:
+
+- init has its own log and materialized status
+- init status can be reconstructed from WAL
+- promotion cleanly transitions from init-attempt storage to runtime session storage
+
+How to test later:
+
+- interrupt init mid-phase and verify it can be inspected/resolved from WAL/status
+- confirm failed/abandoned attempts remain inspectable after later successful init attempts
+
+### 10.2 Non-functional requirements
+
+#### A. Debuggability
+
+Required outcome:
+
+- abandoned and failed init attempts leave enough artifacts to understand what happened without relying on hidden memory
+
+#### B. Determinism
+
+Required outcome:
+
+- promotion rules are explicit
+- stale init attempts are never silently reused
+- runtime session indexing reflects only real promoted sessions
+
+#### C. Low user friction
+
+Required outcome:
+
+- setup minimizes repeated narrow prompts
+- the main user input after research/detection is broad and context-aware
+- users are only asked to intervene after the bounded repair loop is exhausted or a downgrade decision is required
+
+#### D. Compatibility
+
+Required outcome:
+
+- downstream runtime phases continue to use the same adapter script interface
+- provider-specific behavior remains in scripts/prompts, not in core orchestration branches
+
+---
+
+## 11. Runtime invariants
 
 The system should enforce these invariants:
 
-1. Spec is declarative and idempotent.
-2. Plans are imperative and procedural.
-3. Each epoch has exactly one primary delivery kind.
-4. Contract rewrites create a new epoch.
-5. Execution rewrites stay in the same epoch.
-6. Plan files themselves are the rewrite trail.
-7. Only `conflict` and `max_situations` trigger rewrite analysis.
-8. `crash` retries/recoveries before rewrite by default.
-9. One completed plan equals one commit.
-10. Existing PR is reused by default.
-11. PR rollover is heuristic and explicit.
-12. Status plus artifacts must be sufficient to explain and resume the workflow.
+1. Init attempt storage is separate from runtime session storage.
+2. Every promoted runtime session has exactly one source init attempt.
+3. Not every init attempt becomes a runtime session.
+4. Worktree ownership remains unique across init and runtime.
+5. A fresh forced/retried init creates a fresh init attempt; it never rewrites a prior abandoned attempt.
+6. Promotion copies only from the successful fresh init attempt.
+7. Critical read-path adapter scripts must work before non-local promotion.
+8. Non-critical adapter failures degrade to no-op plus explicit manual-action warnings.
+9. Critical adapter failure leads to local-mode downgrade or no promotion.
+10. Init is durably represented through WAL + materialized status, not hidden transient state.
+11. Runtime session indexing must only include real promoted sessions.
+12. Provider-specific behavior belongs in research/prompts/scripts, not hard-coded orchestration branches.

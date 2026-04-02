@@ -47,4 +47,10 @@ describe('artifacts', () => {
     const dir = sessionDir('xyz789');
     expect(dir).toBe(join(tempDir, '.kautopilot/xyz789'));
   });
+
+  it('initDir returns init attempt directory', () => {
+    const { initDir } = require('../artifacts') as typeof import('../artifacts');
+    const dir = initDir('init123');
+    expect(dir).toBe(join(tempDir, '.kautopilot/init/init123'));
+  });
 });

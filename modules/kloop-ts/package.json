@@ -1,6 +1,6 @@
 {
   "name": "kloop",
-  "version": "3.1.0-dev-1",
+  "version": "3.1.0-dev-2",
   "type": "module",
   "bin": {
     "kloop": "./src/index.ts"

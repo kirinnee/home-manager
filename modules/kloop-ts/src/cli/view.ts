@@ -463,7 +463,7 @@ function formatAssistantEntry(entry: LogEntry): void {
   for (const block of message.content) {
     if (block.type === 'text' && block.text) {
       console.log('');
-      console.log(pc.green('┌─ CLAUDE ─────────────────────────────────────────────────────'));
+      console.log(pc.green('┌─ AGENT ──────────────────────────────────────────────────────'));
       for (const line of block.text.split('\n')) {
         console.log(pc.green('│ ') + line);
       }
