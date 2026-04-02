@@ -9,8 +9,10 @@ import { paths } from '../deps';
 
 const CLAUDE_AUTO_PREFIX = 'claude-auto-';
 
-function shortBinary(binary: string): string {
-  return binary.startsWith(CLAUDE_AUTO_PREFIX) ? binary.slice(CLAUDE_AUTO_PREFIX.length) : binary;
+function shortBinary(binary: string, harness?: string): string {
+  const name = binary.startsWith(CLAUDE_AUTO_PREFIX) ? binary.slice(CLAUDE_AUTO_PREFIX.length) : binary;
+  if (harness && harness !== 'claude') return `${name}:${harness}`;
+  return name;
 }
 
 function formatDuration(ms: number): string {
@@ -39,6 +41,7 @@ interface Sample {
   loop: number;
   agent: string;
   binary: string;
+  harness?: string;
   phaseIdx?: number;
   verdict?: string;
   completionEstimate?: number;
@@ -165,6 +168,8 @@ function getLabel(sample: Sample, label: string): string {
       return String(sample.loop);
     case 'propagated':
       return sample.propagated ? 'true' : 'false';
+    case 'harness':
+      return sample.harness ?? 'claude';
     default:
       return '';
   }
@@ -482,7 +487,7 @@ function showRawTable(runId: string, samples: Sample[], opts: { json?: boolean }
     const total = s.inputTokens + s.outputTokens;
     const isImpl = s.agent === 'implementer';
     const agentStr = isImpl ? pc.cyan(padRight(s.agent, w.agent)) : pc.green(padRight(s.agent, w.agent));
-    const binaryStr = padRight(shortBinary(s.binary), w.binary);
+    const binaryStr = padRight(shortBinary(s.binary, s.harness), w.binary);
 
     const verdictStr = s.verdict
       ? s.verdict === 'approved'
@@ -554,6 +559,7 @@ async function loadSamples(
             loop: loopNum,
             agent: parsed.agent ?? '?',
             binary: parsed.binary ?? '',
+            harness: parsed.harness,
             phaseIdx: parsed.phaseIdx,
             verdict: parsed.verdict,
             completionEstimate: parsed.completionEstimate,

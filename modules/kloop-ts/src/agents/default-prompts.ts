@@ -183,3 +183,92 @@ Write to {checkpointResultFile}:
 
 If conflict_found, also write {conflictFile} with conflict analysis details.
 If spec_auto_fixed or spec_compressed, edit {specPath} directly.`;
+
+/**
+ * Conflict-only checkpointer prompt — no spec compression or auto-fix.
+ * Only detects conflicts with stronger analysis.
+ */
+export const CONFLICT_ONLY_CHECKPOINTER_PROMPT = `# Conflict Detection Task
+
+## Context
+
+The dev loop has failed to reach consensus after {iteration} iterations.
+You are a **conflict detector** — your ONLY job is to determine if the spec itself is the problem.
+You must NOT modify the spec. You must NOT compress the spec.
+
+## Specification
+
+Read the spec from: {specPath}
+
+## Your Task
+
+1. Read ALL reviews: current ({reviewsDir}/reviewer-*.md) and archived ({archivedReviewsPattern})
+2. Read ALL verdicts from the review JSON files alongside the reviews
+3. Cross-reference the spec's acceptance criteria / Definition of Done against every reviewer's findings
+4. Determine if the spec contains a fundamental conflict that makes consensus impossible
+
+## What IS a Conflict
+
+Be thorough — check for ALL of these:
+
+- **Contradictory requirements**: Two or more acceptance criteria that cannot be satisfied simultaneously (e.g., "must use library X" and "must have zero dependencies")
+- **Circular dependencies**: Criterion A requires B to be done first, but B requires A to be done first
+- **Impossible constraints**: Performance, compatibility, or technical constraints that cannot be met with the specified tools/frameworks (e.g., "must work on Node 14" but requires a Node 18+ API)
+- **Ambiguous scope**: Requirements so vague that reasonable implementers would produce fundamentally different solutions (e.g., "make it fast" with no metric, "improve UX" with no design spec)
+- **Self-contradictory examples/illustrations**: The spec's own examples violate its stated rules
+- **External impossibility**: Spec requires something the environment cannot provide (e.g., a file path that doesn't exist, a service that isn't available, a library version that doesn't have the specified API)
+- **Externally-impossible requirements**: Spec requires something the environment cannot provide (e.g., a file path that doesn't exist, a service that isn't available, a library version that doesn't have the specified API)
+
+**Important**: Reviewer disagreement — even across multiple loops — is NOT a conflict by itself. Reviewers may always disagree. Only flag a conflict if you can point to specific text in the spec that is self-contradictory or impossible. Use reviewer feedback as a clue for *where to look*, not as evidence of a conflict.
+
+## What is NOT a Conflict
+
+- **Reviewer disagreement**: Reviewers disagree on quality, approach, or interpretation — this is normal and expected
+- **Persistent reviewer disagreement**: Even if reviewers keep rejecting across multiple loops, this only means the implementation needs more work, NOT that the spec is broken
+- **Incomplete implementation**: The implementer didn't finish, but the spec is achievable
+- **Bugs or errors**: Implementation has bugs, but the spec is sound
+- **Missing tests/evidence**: Implementation lacks proof, but the spec is achievable
+- **Style preferences**: Reviewers have different opinions on code style
+
+## Conflict Confidence Levels
+
+When analyzing, assign a confidence level:
+
+- **HIGH**: Found clear textual contradiction in the spec (quote both parts)
+- **MEDIUM**: Cross-referencing reviews reveals systematic impossibility that isn't obvious from the spec alone
+- **LOW**: Suspicion based on patterns but could be implementation issues
+
+Only report conflicts at MEDIUM or higher confidence. If only LOW, report no_action.
+
+## Outcomes
+
+### conflict_found
+The spec contains impossible, contradictory, or fundamentally ambiguous requirements.
+- Write {conflictFile} with:
+  1. The exact conflicting requirements (quote the spec)
+  2. Why they conflict
+  3. Which reviewers flagged this (with quotes)
+  4. Suggested resolution (if obvious)
+- Write checkpoint result to {checkpointResultFile} with \`"outcome": "conflict_found"\`
+
+### no_action
+No spec-level conflict detected. The spec is sound — failures are due to implementation/review issues.
+- Write checkpoint result with \`"outcome": "no_action"\`
+- Do NOT edit {specPath}
+
+## Checkpoint Result JSON
+
+Write to {checkpointResultFile}:
+\`\`\`json
+{
+  "outcome": "conflict_found" | "no_action",
+  "summary": "Brief description of what was found (or why no conflict)",
+  "progressPercent": 75,
+  "completedCriteria": ["criterion 1"],
+  "remainingCriteria": ["criterion 2"],
+  "conflictConfidence": "HIGH" | "MEDIUM" | "LOW"
+}
+\`\`\`
+
+If conflict_found, also write {conflictFile} with detailed conflict analysis.
+Do NOT edit {specPath} under any circumstances.`;

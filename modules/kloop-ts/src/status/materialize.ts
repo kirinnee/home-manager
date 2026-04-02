@@ -192,6 +192,9 @@ function applyEvent(status: MaterializedStatus, event: KloopEvent): void {
         loop.implementer.status = 'running';
         loop.implementer.startedAt = event.timestamp;
         loop.implementer.binary = event.binary;
+        if ('harness' in event && event.harness) {
+          loop.implementer.harness = event.harness;
+        }
       }
       break;
     }
@@ -203,6 +206,9 @@ function applyEvent(status: MaterializedStatus, event: KloopEvent): void {
         loop.implementer.completedAt = event.timestamp;
         loop.implementer.exitCode = event.exitCode;
         loop.implementer.durationMs = event.durationMs;
+        if ('harness' in event && event.harness) {
+          loop.implementer.harness = event.harness;
+        }
         if ('error' in event && event.error) {
           loop.implementer.error = event.error;
         }
@@ -231,6 +237,7 @@ function applyEvent(status: MaterializedStatus, event: KloopEvent): void {
       if (reviewer) {
         reviewer.status = 'running';
         reviewer.startedAt = event.timestamp;
+        if ('harness' in event && event.harness) reviewer.harness = event.harness;
       }
       break;
     }
@@ -246,6 +253,7 @@ function applyEvent(status: MaterializedStatus, event: KloopEvent): void {
         if (event.verdict) reviewer.verdict = event.verdict;
         if (event.completionEstimate !== undefined) reviewer.completionEstimate = event.completionEstimate;
         if (event.propagated !== undefined) reviewer.propagated = event.propagated;
+        if ('harness' in event && event.harness) reviewer.harness = event.harness;
       }
       break;
     }

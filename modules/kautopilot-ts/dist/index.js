@@ -2119,12 +2119,17 @@ __export(exports_artifacts, {
   snapshotPath: () => snapshotPath,
   sessionDir: () => sessionDir,
   sessionArtifactPath: () => sessionArtifactPath,
+  scopeDir: () => scopeDir,
+  runsDir: () => runsDir,
+  runFilePath: () => runFilePath,
+  runDir: () => runDir,
+  nextRunNumber: () => nextRunNumber,
   initDir: () => initDir,
   ensureArtifactDir: () => ensureArtifactDir,
   artifactPath: () => artifactPath,
 });
-import { mkdirSync as mkdirSync2 } from 'fs';
-import { dirname as dirname2 } from 'path';
+import { mkdirSync as mkdirSync2, readdirSync } from 'fs';
+import { dirname as dirname2, join } from 'path';
 function artifactPath(id, version, phase, ...segments) {
   return `${process.env.HOME}/.kautopilot/${id}/artifacts/v${version}/${phase}/${segments.join('/')}`;
 }
@@ -2142,6 +2147,26 @@ function sessionDir(id) {
 }
 function initDir(id) {
   return `${process.env.HOME}/.kautopilot/init/${id}`;
+}
+function scopeDir(scope) {
+  return scope.kind === 'init' ? initDir(scope.id) : sessionDir(scope.id);
+}
+function runsDir(scope) {
+  return join(scopeDir(scope), 'runs');
+}
+function nextRunNumber(scope) {
+  const dir = runsDir(scope);
+  mkdirSync2(dir, { recursive: true });
+  const numbers = readdirSync(dir, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && /^\d+$/.test(entry.name))
+    .map(entry => Number(entry.name));
+  return numbers.length > 0 ? Math.max(...numbers) + 1 : 1;
+}
+function runDir(scope, runNumber) {
+  return join(runsDir(scope), String(runNumber));
+}
+function runFilePath(scope, runNumber, fileName) {
+  return join(runDir(scope, runNumber), fileName);
 }
 var init_artifacts = () => {};
 
@@ -13322,575 +13347,10 @@ var init_zod = __esm(() => {
   init_external();
 });
 
-// src/core/default-types.ts
-function specWriter(typeFocus, sections) {
-  return `You are running a specification debate. Your goal: produce a spec that is
-unambiguous, conflict-free, and achievable. The spec focuses on WHAT, not HOW.
-
-Context:
-- Ticket: {ticket}
-- Worktree: {worktree}
-- Spec drafts directory: {specDir}
-
-${typeFocus}
-
-## Phase 1: Gather Context \u2014 Create a Team
-
-Before writing anything, you MUST create a team to gather context in parallel.
-Use Claude Code's team/subagent capabilities to spawn teammates:
-
-- **code-explorer**: Read the ticket at {ticket}. Explore relevant code paths \u2014 find the files,
-  functions, types, and tests that relate to the ticket requirements. Report back what you found.
-- **lib-checker**: Check tool/library versions in package.json / lock files. Look up their docs
-  to verify API interfaces. Report any version-specific gotchas or deprecated APIs.
-- **pattern-finder**: Find existing patterns and abstractions in the codebase that should be
-  reused or extended. Report existing conventions, test patterns, naming schemes.
-
-Wait for all teammates to report back. Synthesize their findings into your understanding.
-Do NOT write a separate understanding document \u2014 the understanding feeds directly into the spec.
-
-## Phase 2: Debate & De-ambiguate
-
-Discuss with the user:
-1. Walk through each requirement from the ticket \u2014 are there hidden assumptions?
-2. Identify conflicts between requirements (e.g., "full test coverage" + "don't touch source code" \u2014 is the code even testable?)
-3. Identify risks \u2014 what could go wrong? What's the blast radius?
-4. For each risk: is it a spec problem (rewrite requirement) or a plan problem (handle during implementation)?
-5. Keep clarifying until NOTHING is left ambiguous.
-
-Do NOT proceed to writing the spec until the user confirms the requirements are clear.
-
-## Phase 3: Write Spec
-
-Write spec-draft-1.md with the following sections:
-
-${sections}
-
-The spec must NOT contain:
-- Which files to change or implementation details
-- Code snippets or internal architecture decisions
-- References to specific function names or line numbers
-
-The spec SHOULD contain:
-- What the end result looks like (observable behavior)
-- Acceptance criteria (testable, concrete, verifiable)
-- Constraints and explicit non-goals
-- Risks identified during the debate and their mitigations
-- Proof of completion (runnable commands that prove every criterion is met)
-
-## Phase 4: Review & Iterate
-
-1. Add a **reviewer** teammate to the team: have it run \`kautopilot spec-review\` and return the summary
-2. Evaluate each issue \u2014 fix what's real, ask the user about anything uncertain
-3. Write a NEW spec-draft-N.md (incremented ordinal) with the fixes
-4. Re-run the reviewer teammate after significant changes
-5. Repeat until you and the user are satisfied
-
-Be precise and concrete. Avoid vague criteria. Every requirement should be verifiable.`;
-}
-function planWriter(typeFocus) {
-  return `You are writing implementation plans derived from the approved spec.
-
-Context:
-- Spec: {spec}
-- Worktree: {worktree}
-
-Write plans to: {plans}/plan-1.md, plan-2.md, etc.
-
-${typeFocus}
-
-## Before Writing
-
-Read the spec thoroughly. Then explore the codebase to understand:
-- Which files and functions will need to change
-- What existing patterns and abstractions to follow
-- Where tests live and how they're structured
-- Any technical constraints not captured in the spec
-
-Use this understanding to **de-conflict**. If the spec asks for something that's not achievable
-given the current code (e.g., "add tests without changing source" but the code isn't testable),
-FLAG IT to the user before writing plans. The spec may need revision.
-
-## Plan Structure
-
-Each plan should be a self-contained unit of work completable in one dev-loop run. Include:
-1. **Objective** \u2014 what this plan accomplishes
-2. **Files to modify** \u2014 specific file paths
-3. **Implementation steps** \u2014 concrete, ordered steps
-4. **Test plan** \u2014 how to verify this plan's work
-5. **Proof of completion** \u2014 command(s) that prove it worked
-
-Order plans by dependency \u2014 earlier plans must not depend on later ones.
-
-## Process
-
-1. Read the spec carefully
-2. Explore the codebase for each area the spec touches
-3. Break the spec into logical, ordered plans
-4. Run reviewers: create a sub-teammate to run \`kautopilot plan-review\` and return the summary
-5. Fix issues, ask user about uncertainties
-6. When satisfied, tell the user to /exit`;
-}
-var COMMON_SPEC_REVIEWERS,
-  COMMON_PLAN_REVIEWERS,
-  product,
-  product_bug,
-  infra_bug,
-  ops,
-  incident,
-  refactoring,
-  DEFAULT_TYPES;
-var init_default_types = __esm(() => {
-  COMMON_SPEC_REVIEWERS = {
-    completeness: {
-      desc: 'All requirements from ticket covered',
-      prompt: `Read the spec at {spec} and the ticket at {ticket}.
-Check: does the spec address every requirement in the ticket?
-List any requirements that are missing or insufficiently addressed.
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-    },
-    docs_accuracy: {
-      desc: 'Referenced tool/lib versions and interfaces are correct',
-      prompt: `Read the spec at {spec} and the ticket at {ticket}.
-Check: are all referenced tool versions, API interfaces, and method signatures accurate?
-Cross-reference with the codebase \u2014 grep for referenced functions, check package versions.
-Flag anything that looks hallucinated or version-incorrect.
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-    },
-    generalization: {
-      desc: 'Extends existing patterns rather than inventing new ones',
-      prompt: `Read the spec at {spec}. Explore the codebase.
-Check: does the spec propose new patterns, paths, or abstractions when existing ones could be extended?
-Flag any "reinventing the wheel" \u2014 new utilities when similar ones exist, new conventions when the codebase already has one.
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-    },
-    complexity: {
-      desc: 'Is there a simpler or faster approach?',
-      prompt: `Read the spec at {spec}.
-Check: is the proposed approach unnecessarily complex?
-Consider: could fewer files be changed? Could an existing tool/command handle this? Is there a more direct path?
-Don't flag reasonable complexity \u2014 only flag when there's a clearly simpler alternative.
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-    },
-    security: {
-      desc: 'Security and compliance implications',
-      prompt: `Read the spec at {spec}.
-Check for security concerns: injection risks, auth/authz gaps, secrets handling, data exposure, OWASP top 10.
-Only flag genuine issues, not theoretical concerns in internal code paths.
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-    },
-    skill_adherence: {
-      desc: 'Should existing Claude Code skills be used?',
-      prompt: `Read the spec at {spec} and the plans at {plans}.
-Check: could any part of this work be handled by an existing Claude Code skill (e.g., per-file-fix for multi-file mechanical changes, research for investigation, fact-check for verification)?
-If a skill would be more appropriate than raw implementation, flag it.
-Output ONLY the suggestions \u2014 one per line. If none, output "No issues found."`,
-    },
-    proof_of_completion: {
-      desc: 'Spec includes programmatic proof of completion',
-      prompt: `Read the spec at {spec}.
-Check: does the spec include a "Proof of Completion" section with concrete, runnable verification?
-Good proofs: test commands, API calls, grep assertions, build commands, tf plan output.
-Bad proofs: "manually verify", "visually check", vague assertions.
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-    },
-  };
-  COMMON_PLAN_REVIEWERS = {
-    coverage: {
-      desc: 'Plans fully cover the spec',
-      prompt: `Read the plans at {plans} and the spec at {spec}.
-Check: do the plans together cover every requirement in the spec?
-List any spec items that are not addressed by any plan.
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-    },
-    ordering: {
-      desc: 'Plan dependencies ordered correctly',
-      prompt: `Read the plans at {plans}.
-Check: are plans ordered so that earlier plans don't depend on later ones?
-Flag any circular or incorrect dependency ordering.
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-    },
-    cost: {
-      desc: 'Cost and resource implications',
-      prompt: `Read the plans at {plans} and the spec at {spec}.
-Check: are there cost implications (compute, storage, API calls, third-party services)?
-Flag any plans that could have unexpected cost impact without mentioning it.
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-    },
-    skill_usage: {
-      desc: 'Plans reference appropriate Claude Code skills',
-      prompt: `Read the plans at {plans}.
-Check: for mechanical multi-file changes, do plans suggest using per-file-fix or similar skills?
-For research-heavy steps, do plans suggest the research skill?
-Only flag if a skill would clearly be better than raw implementation.
-Output ONLY the suggestions \u2014 one per line. If none, output "No issues found."`,
-    },
-  };
-  product = {
-    desc: 'Product feature work \u2014 new functionality, enhancements, UI changes',
-    spec_writer: {
-      prompt: specWriter(
-        'This is **product work** \u2014 focus on clear acceptance criteria, definition of done, and quality gates.',
-        `- **Objective** \u2014 what the feature does and why
-- **Acceptance Criteria** \u2014 numbered, testable criteria (Given/When/Then or similar)
-- **Definition of Done** \u2014 quality gates: test coverage, performance benchmarks, accessibility
-- **Out of Scope** \u2014 explicitly list what this does NOT include
-- **Technical Constraints** \u2014 API contracts, backward compatibility, performance budgets
-- **Proof of Completion** \u2014 commands/tests that prove every acceptance criterion is met`,
-      ),
-    },
-    spec_reviewers: {
-      ...COMMON_SPEC_REVIEWERS,
-      quality_gates: {
-        desc: 'Acceptance criteria, DoD, and test coverage',
-        prompt: `Read the spec at {spec}.
-Check: does the spec have clear, testable acceptance criteria (not vague)?
-Does the Definition of Done include test coverage requirements?
-Are quality gates concrete (e.g., "all tests pass", "< 200ms p95") not aspirational?
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-    },
-    plan_writer: {
-      prompt: planWriter(
-        'This is **product work**. Plans should include test coverage for each feature increment. Prefer small, shippable increments.',
-      ),
-    },
-    plan_reviewers: {
-      ...COMMON_PLAN_REVIEWERS,
-      test_coverage: {
-        desc: 'Each plan includes adequate test coverage',
-        prompt: `Read the plans at {plans} and the spec at {spec}.
-Check: does each plan include tests for the functionality it adds?
-Are edge cases considered? Is there integration test coverage?
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-    },
-    kloopPrompts: {
-      reviewer:
-        'Focus on: acceptance criteria coverage, test completeness, whether each feature increment is shippable and independently verifiable.',
-    },
-  };
-  product_bug = {
-    desc: 'Product bug \u2014 user-facing defect requiring reproduction and root cause analysis',
-    spec_writer: {
-      prompt: specWriter(
-        'This is a **product bug fix** \u2014 focus on reproduction, root cause, and regression prevention.',
-        `- **Problem Statement** \u2014 what is broken and who is affected
-- **Reproduction Steps** \u2014 exact steps to trigger (or "not yet reproduced" with investigation plan)
-- **Root Cause Analysis** \u2014 what code path causes this and why
-- **Fix Approach** \u2014 proposed fix with rationale
-- **Regression Test** \u2014 specific test(s) that prevent this from recurring
-- **Proof of Completion** \u2014 commands that prove the fix works and regression test passes`,
-      ),
-    },
-    spec_reviewers: {
-      ...COMMON_SPEC_REVIEWERS,
-      reproducibility: {
-        desc: 'Clear reproduction steps and root cause identified',
-        prompt: `Read the spec at {spec}.
-Check: are reproduction steps concrete and actionable (not "sometimes it happens")?
-Is the root cause identified with code references, or is it still speculative?
-Does the fix address the root cause, not just a symptom?
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-    },
-    plan_writer: {
-      prompt: planWriter(
-        'This is a **bug fix**. First plan should verify reproduction. Last plan should add a regression test. Fix should be minimal and targeted.',
-      ),
-    },
-    plan_reviewers: {
-      ...COMMON_PLAN_REVIEWERS,
-      regression: {
-        desc: 'Plans include regression test',
-        prompt: `Read the plans at {plans}.
-Check: is there a plan that adds a regression test for this specific bug?
-Does the test verify the exact scenario from the reproduction steps?
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-    },
-    kloopPrompts: {
-      reviewer:
-        'Focus on: regression risk, minimal scope of change, root cause correctly addressed (not symptom masking), regression test covers exact reproduction scenario.',
-    },
-  };
-  infra_bug = {
-    desc: 'Infrastructure bug \u2014 infra/platform defect requiring risk-assessed, read-only investigation',
-    spec_writer: {
-      prompt: specWriter(
-        `This is an **infrastructure bug** \u2014 ALL investigation must be READ-ONLY. Focus on risk assessment and programmatic proof.
-
-CRITICAL RULES:
-- NO write operations during investigation (no terraform apply, no kubectl apply, no helm upgrade)
-- Use read-only commands: terraform plan, helm template, kubectl get, kubectl diff
-- Every proposed change must have a "dry run" verification step
-- Include rollback plan for every write operation in the fix`,
-        `- **Problem Statement** \u2014 what infrastructure is broken and impact
-- **Impact Assessment** \u2014 blast radius, affected services, users impacted
-- **Root Cause Analysis** \u2014 from read-only investigation only
-- **Risk Assessment** \u2014 risk of the bug vs risk of the fix (matrix)
-- **Fix Approach** \u2014 with dry-run verification for each step
-- **Read-Only Verification Plan** \u2014 how to prove the fix will work BEFORE applying (tf plan, helm diff, kubectl diff, etc.)
-- **Rollback Plan** \u2014 exact steps to revert if the fix causes issues
-- **Proof of Completion** \u2014 programmatic commands that prove the fix worked (not "check the dashboard")`,
-      ),
-    },
-    spec_reviewers: {
-      ...COMMON_SPEC_REVIEWERS,
-      risk_assessment: {
-        desc: 'Blast radius and risk matrix present',
-        prompt: `Read the spec at {spec}.
-Check: is there a clear risk assessment comparing bug-risk vs fix-risk?
-Is the blast radius documented (what services, how many users)?
-Are there any write operations proposed without a dry-run step?
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-      read_only_proof: {
-        desc: 'All verification is read-only before any write',
-        prompt: `Read the spec at {spec}.
-Check: does the spec use ONLY read-only verification before writes?
-Good: terraform plan, helm template/diff, kubectl get/diff, cloud CLI describe
-Bad: terraform apply, helm upgrade, kubectl apply without prior diff
-Flag any verification step that involves a write operation.
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-    },
-    plan_writer: {
-      prompt: planWriter(`This is an **infrastructure bug fix**. Plans MUST follow this order:
-1. Read-only investigation and state capture
-2. Dry-run verification (tf plan, helm diff, etc.)
-3. Fix with rollback plan
-4. Post-fix verification
-
-NO write operations in investigation plans. Every write plan must have a preceding dry-run plan.`),
-    },
-    plan_reviewers: {
-      ...COMMON_PLAN_REVIEWERS,
-      safe_ordering: {
-        desc: 'Read-only before writes, dry-run before apply',
-        prompt: `Read the plans at {plans}.
-Check: do read-only investigation plans come before any write plans?
-Does every write plan have a preceding dry-run verification step?
-Is there a rollback plan for each write operation?
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-    },
-    kloopPrompts: {
-      reviewer:
-        'Focus on: safety of changes, rollback plan present and testable, dry-run verification completed before any write operation, no side effects beyond scope.',
-    },
-  };
-  ops = {
-    desc: 'Ops work \u2014 upgrades, migrations, infrastructure changes with rollback planning',
-    spec_writer: {
-      prompt: specWriter(
-        `This is **ops work** (upgrade/migration) \u2014 focus on risk assessment, read-only verification, and rollback at every step.
-
-CRITICAL RULES:
-- Every change must have a "before" state capture and "after" verification
-- Read-only verification before any write (tf plan, helm diff, disable autosync, etc.)
-- Rollback plan for EVERY step, not just the overall change
-- Consider: can we do this with zero downtime?`,
-        `- **Objective** \u2014 what is being upgraded/migrated and why
-- **Current State** \u2014 exact versions, config, architecture now
-- **Target State** \u2014 exact versions, config, architecture after
-- **Risk Assessment** \u2014 what could go wrong, likelihood, mitigation
-- **Pre-Change Verification** \u2014 read-only checks before starting (disable autosync, capture state)
-- **Migration Steps** \u2014 ordered, with dry-run before each write
-- **Rollback Plan** \u2014 per-step rollback, not just "revert everything"
-- **Post-Change Verification** \u2014 how to prove the migration succeeded
-- **Proof of Completion** \u2014 programmatic commands (not "check dashboard")`,
-      ),
-    },
-    spec_reviewers: {
-      ...COMMON_SPEC_REVIEWERS,
-      risk_assessment: {
-        desc: 'Risk matrix with likelihood and mitigation',
-        prompt: `Read the spec at {spec}.
-Check: is there a risk assessment with specific risks, not just "things might break"?
-Does each risk have a mitigation strategy?
-Is downtime considered and quantified?
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-      rollback_plan: {
-        desc: 'Per-step rollback procedure documented',
-        prompt: `Read the spec at {spec}.
-Check: is there a rollback plan for each migration step (not just overall)?
-Can rollback be executed without additional risk?
-Are rollback steps concrete commands, not vague instructions?
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-      read_only_proof: {
-        desc: 'Read-only verification before writes',
-        prompt: `Read the spec at {spec}.
-Check: does every write step have a preceding read-only verification?
-Examples: terraform plan before apply, helm diff before upgrade, kubectl diff before apply.
-Flag any write without prior read-only verification.
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-    },
-    plan_writer: {
-      prompt: planWriter(`This is **ops work**. Plans MUST follow this pattern:
-1. State capture and pre-checks (read-only)
-2. Disable autosync / pause reconciliation if applicable
-3. Dry-run verification (tf plan, helm diff)
-4. Execute change with monitoring
-5. Post-change verification
-6. Re-enable autosync / reconciliation
-
-Each plan must include its own rollback procedure.`),
-    },
-    plan_reviewers: {
-      ...COMMON_PLAN_REVIEWERS,
-      safe_ordering: {
-        desc: 'State capture \u2192 dry-run \u2192 apply \u2192 verify ordering',
-        prompt: `Read the plans at {plans}.
-Check: do plans follow the safe ordering pattern?
-1. State capture first
-2. Dry-run before any write
-3. Verification after each write
-4. Rollback documented for each step
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-    },
-    kloopPrompts: {
-      reviewer:
-        'Focus on: rollback completeness for every step, dry-run executed before apply, state captured before changes, no skipped verification steps.',
-    },
-  };
-  incident = {
-    desc: 'Incident investigation and resolution \u2014 containment first, then root cause and fix',
-    spec_writer: {
-      prompt: specWriter(
-        `This is an **incident** \u2014 containment first, then investigate, then fix.
-
-PRIORITY ORDER:
-1. Containment \u2014 stop the bleeding (feature flag, rollback, circuit breaker)
-2. Investigation \u2014 root cause (read-only, don't make it worse)
-3. Fix \u2014 address root cause
-4. Prevention \u2014 monitoring, alerts, tests to prevent recurrence`,
-        `- **Incident Summary** \u2014 what is broken, who is affected, severity
-- **Blast Radius** \u2014 affected services, users, data, downstream systems
-- **Containment Plan** \u2014 immediate actions to limit damage (before root cause)
-- **Root Cause Analysis** \u2014 what caused this (from investigation)
-- **Fix Approach** \u2014 how to fix the root cause
-- **Prevention** \u2014 what monitoring/alerts/tests prevent recurrence
-- **Proof of Resolution** \u2014 commands that prove the incident is resolved and contained`,
-      ),
-    },
-    spec_reviewers: {
-      ...COMMON_SPEC_REVIEWERS,
-      blast_radius: {
-        desc: 'Impact scope fully documented',
-        prompt: `Read the spec at {spec}.
-Check: is the blast radius clearly documented (not just "users are affected")?
-Are downstream dependencies and cascading failures considered?
-Is there quantification (how many users, which regions, what data)?
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-      containment: {
-        desc: 'Containment plan is actionable and immediate',
-        prompt: `Read the spec at {spec}.
-Check: is there a containment plan that can be executed BEFORE the root cause fix?
-Is containment independent of the fix (e.g., feature flag, rollback, rate limit)?
-Could containment itself cause additional issues?
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-    },
-    plan_writer: {
-      prompt: planWriter(`This is an **incident**. Plans MUST follow this order:
-1. Containment (can be deployed independently)
-2. Investigation and root cause verification
-3. Fix implementation
-4. Prevention (monitoring, alerts, regression tests)
-
-Containment plan must be deployable without the fix.`),
-    },
-    plan_reviewers: {
-      ...COMMON_PLAN_REVIEWERS,
-      containment_first: {
-        desc: 'Containment plan is independent and first',
-        prompt: `Read the plans at {plans}.
-Check: is the containment plan the first plan?
-Can containment be deployed independently of the root cause fix?
-Does the investigation plan come before the fix plan?
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-    },
-    kloopPrompts: {
-      reviewer:
-        'Focus on: containment independent of fix, monitoring/alerting in place before fix deployed, blast radius verified after containment, no new risks introduced.',
-    },
-  };
-  refactoring = {
-    desc: 'Refactoring \u2014 code improvement without behavior changes, extend existing patterns',
-    spec_writer: {
-      prompt: specWriter(
-        `This is a **refactoring** \u2014 NO behavior changes. Focus on generalizing existing patterns, not inventing new ones.
-
-CRITICAL RULES:
-- Extend existing patterns and abstractions, don't create new ones unless the existing one is fundamentally wrong
-- All existing tests must continue to pass unchanged (modulo import path changes)
-- No new behavior \u2014 if behavior changes, it's a feature, not a refactoring
-- Measure before and after (performance, bundle size, etc.)`,
-        `- **Objective** \u2014 what improvement and why
-- **Current State** \u2014 what's suboptimal with concrete examples
-- **Target State** \u2014 what it should look like after
-- **Generalization Approach** \u2014 which existing patterns are being extended
-- **Behavioral Equivalence** \u2014 what behavior is preserved, how to verify
-- **Performance Impact** \u2014 expected impact with measurement plan
-- **Proof of Completion** \u2014 all existing tests pass + performance comparison`,
-      ),
-    },
-    spec_reviewers: {
-      ...COMMON_SPEC_REVIEWERS,
-      backward_compat: {
-        desc: 'No unintended behavior changes',
-        prompt: `Read the spec at {spec}.
-Check: does the spec explicitly state what behavior must be preserved?
-Is there a plan to verify behavioral equivalence (existing tests, comparison)?
-Are there any changes that could subtly alter behavior (error messages, timing, ordering)?
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-    },
-    plan_writer: {
-      prompt: planWriter(`This is a **refactoring**. Plans should:
-- Preserve all existing tests (they must pass after each plan)
-- Move in small, safe increments (each plan is independently safe)
-- Include "before/after" verification for each step
-- Never mix behavior changes with structural changes`),
-    },
-    plan_reviewers: {
-      ...COMMON_PLAN_REVIEWERS,
-      behavioral_safety: {
-        desc: 'Each plan preserves existing behavior',
-        prompt: `Read the plans at {plans}.
-Check: does each plan maintain all existing tests passing?
-Is there a risk of subtle behavior changes in any plan?
-Are structural changes separated from any (even minor) behavior changes?
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-    },
-    kloopPrompts: {
-      reviewer:
-        'Focus on: behavioral equivalence preserved, no new behavior introduced, all existing tests pass, structural changes not mixed with behavior changes.',
-    },
-  };
-  DEFAULT_TYPES = {
-    product,
-    product_bug,
-    infra_bug,
-    ops,
-    incident,
-    refactoring,
-  };
-});
-
 // src/core/types.ts
 var kloopPromptsSchema,
   kloopConfigSchema,
   reviewerSchema,
-  typeConfigSchema,
   agentSchema,
   configSchema,
   DEFAULT_LOCAL_INIT_PROMPT = `You are setting up a task for kautopilot. Please:
@@ -13900,15 +13360,6 @@ var kloopPromptsSchema,
 4. Write implementation plans to ~/.kautopilot/{sessionId}/artifacts/v1/plans/plan-1.md
 
 The ticket.md should describe the problem. The task-spec should describe the solution. Plans should be concrete steps.`,
-  DEFAULT_ROUTE_TYPE_PROMPT = `Classify this ticket into one of the following types. Output JSON: {"type": "<name>"}
-
-Available types:
-{typeList}
-
-Ticket content:
-{ticketContent}
-
-If unsure, pick the type that best matches. Output ONLY the JSON.`,
   DEFAULT_RESEARCH_TICKET_SYSTEM_PROMPT = `Research this task/ticket system: "{taskSystem}"
 
 Generate a concise research doc covering:
@@ -14007,7 +13458,6 @@ NEVER leave a broken script \u2014 either it works or it is a no-op.`,
   PHASE_ALIASES;
 var init_types2 = __esm(() => {
   init_zod();
-  init_default_types();
   kloopPromptsSchema = exports_external
     .object({
       implementer: exports_external.string().optional(),
@@ -14037,20 +13487,6 @@ var init_types2 = __esm(() => {
     binaries: exports_external.array(exports_external.string()).optional(),
     timeout: exports_external.number().optional(),
   });
-  typeConfigSchema = exports_external.object({
-    desc: exports_external.string(),
-    spec_writer: exports_external.object({
-      prompt: exports_external.string(),
-      timeout: exports_external.number().optional(),
-    }),
-    spec_reviewers: exports_external.record(exports_external.string(), reviewerSchema).default({}),
-    plan_writer: exports_external.object({
-      prompt: exports_external.string(),
-      timeout: exports_external.number().optional(),
-    }),
-    plan_reviewers: exports_external.record(exports_external.string(), reviewerSchema).default({}),
-    kloopPrompts: kloopPromptsSchema,
-  });
   agentSchema = exports_external.object({
     prompt: exports_external.string(),
     binary: exports_external.string().optional(),
@@ -14064,7 +13500,8 @@ var init_types2 = __esm(() => {
         phase3: exports_external.record(exports_external.string(), agentSchema).default({}),
       })
       .default({ init: {}, phase2: {}, phase3: {} }),
-    types: exports_external.record(exports_external.string(), typeConfigSchema).default({}),
+    spec_reviewers: exports_external.record(exports_external.string(), reviewerSchema).default({}),
+    plan_reviewers: exports_external.record(exports_external.string(), reviewerSchema).default({}),
     kloop: kloopConfigSchema,
     settings: exports_external
       .object({
@@ -14094,9 +13531,6 @@ var init_types2 = __esm(() => {
       init: {
         localInit: {
           prompt: DEFAULT_LOCAL_INIT_PROMPT,
-        },
-        routeType: {
-          prompt: DEFAULT_ROUTE_TYPE_PROMPT,
         },
         researchTicketSystem: {
           prompt: DEFAULT_RESEARCH_TICKET_SYSTEM_PROMPT,
@@ -14162,7 +13596,84 @@ Options: fix the issue and retry, skip and move on, or escalate.`,
         },
       },
     },
-    types: DEFAULT_TYPES,
+    spec_reviewers: {
+      completeness: {
+        desc: 'All requirements from ticket covered',
+        prompt: `Read the spec at {spec} and the ticket at {ticket}.
+Check: does the spec address every requirement in the ticket?
+List any requirements that are missing or insufficiently addressed.
+Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
+      },
+      docs_accuracy: {
+        desc: 'Referenced tool/lib versions and interfaces are correct',
+        prompt: `Read the spec at {spec} and the ticket at {ticket}.
+Check: are all referenced tool versions, API interfaces, and method signatures accurate?
+Cross-reference with the codebase \u2014 grep for referenced functions, check package versions.
+Flag anything that looks hallucinated or version-incorrect.
+Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
+      },
+      generalization: {
+        desc: 'Extends existing patterns rather than inventing new ones',
+        prompt: `Read the spec at {spec}. Explore the codebase.
+Check: does the spec propose new patterns, paths, or abstractions when existing ones could be extended?
+Flag any "reinventing the wheel" \u2014 new utilities when similar ones exist, new conventions when the codebase already has one.
+Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
+      },
+      complexity: {
+        desc: 'Is there a simpler or faster approach?',
+        prompt: `Read the spec at {spec}.
+Check: is the proposed approach unnecessarily complex?
+Consider: could fewer files be changed? Could an existing tool/command handle this? Is there a more direct path?
+Don't flag reasonable complexity \u2014 only flag when there's a clearly simpler alternative.
+Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
+      },
+      security: {
+        desc: 'Security and compliance implications',
+        prompt: `Read the spec at {spec}.
+Check for security concerns: injection risks, auth/authz gaps, secrets handling, data exposure, OWASP top 10.
+Only flag genuine issues, not theoretical concerns in internal code paths.
+Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
+      },
+      proof_of_completion: {
+        desc: 'Spec includes programmatic proof of completion',
+        prompt: `Read the spec at {spec}.
+Check: does the spec include a "Proof of Completion" section with concrete, runnable verification?
+Good proofs: test commands, API calls, grep assertions, build commands, tf plan output.
+Bad proofs: "manually verify", "visually check", vague assertions.
+Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
+      },
+    },
+    plan_reviewers: {
+      coverage: {
+        desc: 'Plans fully cover the spec',
+        prompt: `Read the plans at {plans} and the spec at {spec}.
+Check: do the plans together cover every requirement in the spec?
+List any spec items that are not addressed by any plan.
+Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
+      },
+      ordering: {
+        desc: 'Plan dependencies ordered correctly',
+        prompt: `Read the plans at {plans}.
+Check: are plans ordered so that earlier plans don't depend on later ones?
+Flag any circular or incorrect dependency ordering.
+Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
+      },
+      vertical_split: {
+        desc: 'Plans split by domain/feature, not by layer',
+        prompt: `Read the plans at {plans}.
+Check: are plans split vertically by domain/feature (each plan = complete slice with types+logic+tests)?
+Flag any plan that is a horizontal layer (e.g., "add types" or "write tests" as standalone plans).
+Each plan should produce an isolated working commit.
+Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
+      },
+      cost: {
+        desc: 'Cost and resource implications',
+        prompt: `Read the plans at {plans} and the spec at {spec}.
+Check: are there cost implications (compute, storage, API calls, third-party services)?
+Flag any plans that could have unexpected cost impact without mentioning it.
+Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
+      },
+    },
     kloop: {
       implementers: { claude: 1 },
       reviewPhases: [['claude']],
@@ -14223,7 +13734,8 @@ function readConfig(id) {
       phase2: { ...DEFAULT_CONFIG.agents.phase2, ...parsed.agents?.phase2 },
       phase3: { ...DEFAULT_CONFIG.agents.phase3, ...parsed.agents?.phase3 },
     },
-    types: { ...DEFAULT_CONFIG.types, ...parsed.types },
+    spec_reviewers: { ...DEFAULT_CONFIG.spec_reviewers, ...parsed.spec_reviewers },
+    plan_reviewers: { ...DEFAULT_CONFIG.plan_reviewers, ...parsed.plan_reviewers },
     kloop: { ...DEFAULT_CONFIG.kloop, ...migratedKloop },
     settings: { ...DEFAULT_CONFIG.settings, ...parsed.settings },
     repo: { ...DEFAULT_CONFIG.repo, ...parsed.repo },
@@ -14239,6 +13751,9 @@ function globalConfigPath() {
 }
 function orgConfigPath(org) {
   return `${process.env.HOME}/.kautopilot/orgs/${org}/config.yaml`;
+}
+function resolvedConfigPath(org, configPathOverride) {
+  return pickConfig(org, configPathOverride);
 }
 function ensureGlobalConfig() {
   const path = globalConfigPath();
@@ -14281,7 +13796,8 @@ function resolveConfig(org, configPathOverride) {
       phase2: { ...DEFAULT_CONFIG.agents.phase2, ...parsed.agents?.phase2 },
       phase3: { ...DEFAULT_CONFIG.agents.phase3, ...parsed.agents?.phase3 },
     },
-    types: { ...DEFAULT_CONFIG.types, ...parsed.types },
+    spec_reviewers: { ...DEFAULT_CONFIG.spec_reviewers, ...parsed.spec_reviewers },
+    plan_reviewers: { ...DEFAULT_CONFIG.plan_reviewers, ...parsed.plan_reviewers },
     kloop: { ...DEFAULT_CONFIG.kloop, ...migratedKloop },
     settings: { ...DEFAULT_CONFIG.settings, ...parsed.settings },
     repo: { ...DEFAULT_CONFIG.repo, ...parsed.repo },
@@ -14388,9 +13904,9 @@ __export(exports_log, {
   appendEvent: () => appendEvent,
 });
 import { appendFileSync, readFileSync as readFileSync3, existsSync as existsSync3, mkdirSync as mkdirSync6 } from 'fs';
-import { join as join2, dirname as dirname6 } from 'path';
+import { join as join3, dirname as dirname6 } from 'path';
 function logPathForDir(dir) {
-  return join2(dir, 'log.jsonl');
+  return join3(dir, 'log.jsonl');
 }
 function appendEventToDir(dir, entry) {
   const path = logPathForDir(dir);
@@ -14449,9 +13965,9 @@ import {
   unlinkSync as unlinkSync2,
   mkdirSync as mkdirSync7,
 } from 'fs';
-import { join as join3, dirname as dirname7 } from 'path';
+import { join as join4, dirname as dirname7 } from 'path';
 function initLockPath(id) {
-  return join3(initDir(id), 'lock.pid');
+  return join4(initDir(id), 'lock.pid');
 }
 function isProcessAlive2(pid) {
   try {
@@ -14622,7 +14138,6 @@ var init_format = __esm(() => {
   };
   STATE_ICONS = {
     pull_ticket: '\uD83C\uDFAB',
-    route_type: '\uD83D\uDD00',
     gather_context: '\uD83D\uDD0D',
     write_spec: '\uD83D\uDCDD',
     finalize_spec: '\uD83D\uDCCC',
@@ -14659,7 +14174,7 @@ import {
   mkdirSync as mkdirSync8,
   renameSync,
 } from 'fs';
-import { join as join4, dirname as dirname8 } from 'path';
+import { join as join5, dirname as dirname8 } from 'path';
 function initialInitStatus() {
   return {
     walCursor: 0,
@@ -14738,7 +14253,7 @@ function applyInitEvent(status, entry, index) {
   }
 }
 function initStatusPath(id) {
-  return join4(initDir(id), 'status.yaml');
+  return join5(initDir(id), 'status.yaml');
 }
 function readInitStatusYaml(id) {
   const path = initStatusPath(id);
@@ -16313,6 +15828,9 @@ function ttyExitInstruction(sessionId) {
 [Session: ${sessionId}]
 When you are done, tell the user: "Exit this TTY (type /exit or Ctrl+C) to continue kautopilot."`;
 }
+function setCachedConfig(config) {
+  _cachedConfig = config;
+}
 function loadSessionAgents(sessionId) {
   const path = `${process.env.HOME}/.kautopilot/${sessionId}/config.yaml`;
   if (!existsSync6(path)) {
@@ -16379,16 +15897,57 @@ var init_agents = __esm(() => {
 
 // src/llm/spawn.ts
 var { spawn } = globalThis.Bun;
-import { mkdirSync as mkdirSync9, writeFileSync as writeFileSync5 } from 'fs';
-import { join as join5 } from 'path';
+import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync9, writeFileSync as writeFileSync5 } from 'fs';
 function debugLog(...args) {
   if (DEBUG) console.error('[debug]', ...args);
 }
-function llmLogPath(sessionId, label) {
-  const logsDir = join5(process.env.HOME, '.kautopilot', sessionId, 'logs', 'llm');
-  mkdirSync9(logsDir, { recursive: true });
-  const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  return join5(logsDir, `${ts}-${label}.jsonl`);
+function resolveRunScope(options) {
+  if (options?.runScope) return options.runScope;
+  if ('sessionId' in (options ?? {}) && options?.sessionId) {
+    return { kind: 'session', id: options.sessionId };
+  }
+  return null;
+}
+function buildCommandString(args) {
+  return args.map(arg => (/^[A-Za-z0-9_./:-]+$/.test(arg) ? arg : JSON.stringify(arg))).join(' ');
+}
+function createRunArtifacts(scope, executionType, binary, args, prompt, options) {
+  const runNumber = nextRunNumber(scope);
+  const runPath = runDir(scope, runNumber);
+  mkdirSync9(runPath, { recursive: true });
+  const contextPath = runFilePath(scope, runNumber, 'context');
+  const logsPath = runFilePath(scope, runNumber, 'logs');
+  const commandPath = runFilePath(scope, runNumber, 'command');
+  const promptPath = runFilePath(scope, runNumber, 'prompt.md');
+  writeFileSync5(promptPath, prompt);
+  writeFileSync5(
+    commandPath,
+    buildCommandString(args) +
+      `
+`,
+  );
+  writeFileSync5(logsPath, '');
+  const startedAt = new Date().toISOString();
+  writeFileSync5(
+    contextPath,
+    import_yaml2.stringify({
+      run: runNumber,
+      scopeKind: scope.kind,
+      scopeId: scope.id,
+      executionType,
+      label: options?.label,
+      binary,
+      cwd: options?.cwd,
+      timeoutSeconds: 'timeout' in (options ?? {}) ? options?.timeout : undefined,
+      startedAt,
+      status: 'running',
+      why: options?.context,
+    }),
+  );
+  return { scope, runNumber, runPath, contextPath, logsPath, commandPath, promptPath, startedAt };
+}
+function updateRunContext(info, data) {
+  writeFileSync5(info.contextPath, import_yaml2.stringify(data));
 }
 function extractResultText(jsonlOutput) {
   const lines = jsonlOutput
@@ -16421,12 +15980,13 @@ function extractResultText(jsonlOutput) {
   return resultText || textParts.join('') || jsonlOutput.trim();
 }
 async function spawnCore(binary, prompt, options) {
-  const logging = !!options?.sessionId;
+  const runScope = resolveRunScope(options);
+  const logging = !!runScope;
   const args = [binary, '--print', '--dangerously-skip-permissions'];
   if (logging) args.push('--output-format', 'stream-json', '--verbose');
   args.push(prompt);
   debugLog(`$ ${args.join(' ').slice(0, 200)}...`, options?.cwd ? `cwd=${options.cwd}` : '');
-  const logPath2 = logging ? llmLogPath(options.sessionId, options.label ?? 'unnamed') : null;
+  const runInfo = runScope ? createRunArtifacts(runScope, 'llm_print', binary, args, prompt, options) : null;
   const proc = spawn({
     cmd: args,
     stdout: 'pipe',
@@ -16439,27 +15999,43 @@ async function spawnCore(binary, prompt, options) {
   const stderrChunks = [];
   const stdoutDone = (async () => {
     for await (const chunk of proc.stdout) {
-      stdoutChunks.push(new TextDecoder().decode(chunk));
+      const text = new TextDecoder().decode(chunk);
+      stdoutChunks.push(text);
+      if (runInfo) appendFileSync2(runInfo.logsPath, text);
     }
   })();
   const stderrDone = (async () => {
     for await (const chunk of proc.stderr) {
-      stderrChunks.push(new TextDecoder().decode(chunk));
+      const text = new TextDecoder().decode(chunk);
+      stderrChunks.push(text);
+      if (runInfo) appendFileSync2(runInfo.logsPath, text);
     }
   })();
   const timeoutPromise = new Promise((_3, reject) =>
     setTimeout(() => {
       proc.kill();
-      const partial = stdoutChunks.join('');
-      if (logging && logPath2) {
-        writeFileSync5(
-          logPath2,
-          partial +
-            `
+      if (runInfo) {
+        appendFileSync2(
+          runInfo.logsPath,
+          `
 --- TIMED OUT ---
 `,
         );
-        debugLog(`[llm-log] ${logPath2} (partial, timed out)`);
+        updateRunContext(runInfo, {
+          run: runInfo.runNumber,
+          scopeKind: runInfo.scope.kind,
+          scopeId: runInfo.scope.id,
+          executionType: 'llm_print',
+          label: options?.label,
+          binary,
+          cwd: options?.cwd,
+          timeoutSeconds: options?.timeout,
+          startedAt: runInfo.startedAt,
+          completedAt: new Date().toISOString(),
+          status: 'timed_out',
+          why: options?.context,
+        });
+        debugLog(`[llm-run] ${runInfo.logsPath} (partial, timed out)`);
       }
       const stderrText = stderrChunks.join('').trim();
       const hint = stderrText
@@ -16475,9 +16051,24 @@ stderr: ${stderrText.slice(0, 500)}`
   if (stderr) {
     debugLog(`[${binary}] stderr: ${stderr.trim()}`);
   }
-  if (logging && logPath2) {
-    writeFileSync5(logPath2, rawStdout);
-    debugLog(`[llm-log] ${logPath2}`);
+  if (runInfo) {
+    updateRunContext(runInfo, {
+      run: runInfo.runNumber,
+      scopeKind: runInfo.scope.kind,
+      scopeId: runInfo.scope.id,
+      executionType: 'llm_print',
+      label: options?.label,
+      binary,
+      cwd: options?.cwd,
+      timeoutSeconds: options?.timeout,
+      startedAt: runInfo.startedAt,
+      completedAt: new Date().toISOString(),
+      status: 'completed',
+      why: options?.context,
+    });
+    debugLog(`[llm-run] ${runInfo.logsPath}`);
+  }
+  if (logging) {
     const resultText = extractResultText(rawStdout);
     return { stdout: resultText, stderr };
   }
@@ -16506,6 +16097,8 @@ async function spawnTTY(binary, prompt, options) {
   }
   args.push(prompt);
   debugLog(`$ ${args.join(' ').slice(0, 200)}...`, options?.cwd ? `cwd=${options.cwd}` : '');
+  const runScope = resolveRunScope(options);
+  const runInfo = runScope ? createRunArtifacts(runScope, 'tty_handoff', binary, args, prompt, options) : null;
   const proc = spawn({
     cmd: args,
     stdin: 'inherit',
@@ -16515,6 +16108,23 @@ async function spawnTTY(binary, prompt, options) {
     env: { ...process.env, ...options?.env },
   });
   const exitCode = await proc.exited;
+  if (runInfo) {
+    updateRunContext(runInfo, {
+      run: runInfo.runNumber,
+      scopeKind: runInfo.scope.kind,
+      scopeId: runInfo.scope.id,
+      executionType: 'tty_handoff',
+      label: options?.label,
+      binary,
+      cwd: options?.cwd,
+      startedAt: runInfo.startedAt,
+      completedAt: new Date().toISOString(),
+      status: exitCode === 0 ? 'completed' : 'failed',
+      exitCode,
+      why: options?.context,
+      claudeSessionId: options?.claudeSessionId,
+    });
+  }
   debugLog(`$ ${binary} exited with code ${exitCode}`);
   return exitCode;
 }
@@ -16526,9 +16136,11 @@ async function spawnPrintRaw(binary, prompt, options) {
   s?.stop(spinMsg ?? '');
   return stdout;
 }
-var DEBUG;
+var import_yaml2, DEBUG;
 var init_spawn = __esm(() => {
   init_dist2();
+  init_artifacts();
+  import_yaml2 = __toESM(require_dist(), 1);
   DEBUG = !!process.env.KAUTOPILOT_DEBUG;
 });
 
@@ -52334,8 +51946,8 @@ var require_r = __commonJS((exports, module) => {
 // node_modules/highlight.js/lib/languages/reasonml.js
 var require_reasonml = __commonJS((exports, module) => {
   function reasonml(hljs) {
-    function orReValues(ops2) {
-      return ops2
+    function orReValues(ops) {
+      return ops
         .map(function (op) {
           return op
             .split('')
@@ -81359,6 +80971,42 @@ function textLength(str) {
 function fixHardReturn(text, reflow) {
   return reflow ? text.replace(HARD_RETURN, /\n/g) : text;
 }
+function markedTerminal(options2, highlightOptions) {
+  const r2 = new Renderer(options2, highlightOptions);
+  const funcs = [
+    'text',
+    'code',
+    'blockquote',
+    'html',
+    'heading',
+    'hr',
+    'list',
+    'listitem',
+    'checkbox',
+    'paragraph',
+    'table',
+    'tablerow',
+    'tablecell',
+    'strong',
+    'em',
+    'codespan',
+    'br',
+    'del',
+    'link',
+    'image',
+  ];
+  return funcs.reduce(
+    (extension, func) => {
+      extension.renderer[func] = function (...args) {
+        r2.options = this.options;
+        r2.parser = this.parser;
+        return r2[func](...args);
+      };
+      return extension;
+    },
+    { renderer: {}, useNewRenderer: true },
+  );
+}
 function reflowText(text, width, gfm) {
   var splitRe = gfm ? HARD_RETURN_GFM_RE : HARD_RETURN_RE,
     sections = text.split(splitRe),
@@ -81603,7 +81251,6 @@ var import_cli_table3,
   HARD_RETURN_RE,
   HARD_RETURN_GFM_RE,
   defaultOptions,
-  marked_terminal_default,
   BULLET_POINT_REGEX = '\\*',
   NUMBERED_POINT_REGEX = '\\d+\\.',
   POINT_REGEX,
@@ -81904,7 +81551,6 @@ var init_marked_terminal = __esm(() => {
 `
     );
   };
-  marked_terminal_default = Renderer;
   POINT_REGEX = '(?:' + [BULLET_POINT_REGEX, NUMBERED_POINT_REGEX].join('|') + ')';
 });
 
@@ -81912,15 +81558,15 @@ var init_marked_terminal = __esm(() => {
 import { existsSync as existsSync7, writeFileSync as writeFileSync6 } from 'fs';
 function renderMarkdown(text) {
   if (!configured) {
-    marked.use({
-      renderer: new marked_terminal_default({
+    marked.use(
+      markedTerminal({
         width: process.stdout.columns || 80,
         reflowText: true,
         showSectionPrefix: true,
         emoji: true,
         tab: 2,
       }),
-    });
+    );
     configured = true;
   }
   return marked.parse(text);
@@ -81993,36 +81639,35 @@ import {
 } from 'fs';
 import { join as join6 } from 'path';
 function classifyAccessSetup(answer) {
-  const normalized = answer.trim().toLowerCase();
+  const trimmed = answer.trim();
+  const normalized = trimmed.toLowerCase();
   if (!normalized) {
     return { needsSetupHelp: true, assessment: 'No access method provided yet.' };
   }
-  const setupIndicators = [
-    'no',
-    'not set up',
-    'not setup',
-    'not configured',
-    'none',
-    'broken',
-    'idk',
-    "i don't know",
-    'not logged in',
-    'not authenticated',
-    'need login',
-    'need auth',
-    'need setup',
-    'not working',
-    'installed but',
-    'acli',
-    'jira',
-    'cli only',
-    'maybe',
-    'unsure',
+  const setupPatterns = [
+    /^no$/,
+    /\bnot set ?up\b/,
+    /\bnot configured\b/,
+    /^none$/,
+    /\bbroken\b/,
+    /\bidk\b/,
+    /\bi don't know\b/,
+    /\bnot logged in\b/,
+    /\bnot authenticated\b/,
+    /\bneed login\b/,
+    /\bneed auth(?:entication)?\b/,
+    /\bneed setup\b/,
+    /\bnot working\b/,
+    /\binstalled but\b/,
+    /^maybe$/,
+    /^unsure$/,
   ];
-  const needsSetupHelp = setupIndicators.some(indicator => normalized === indicator || normalized.includes(indicator));
+  const readySignals = [/\bauthenticated\b/, /\bworking\b/, /\buse\b.+\bacli\b/, /\bacli\b/, /\bcli\b/];
+  const needsSetupHelp =
+    setupPatterns.some(pattern => pattern.test(normalized)) && !readySignals.some(pattern => pattern.test(normalized));
   const assessment = needsSetupHelp
-    ? `Access may need setup or verification: ${answer.trim()}`
-    : `Access appears ready: ${answer.trim()}`;
+    ? `Access may need setup or verification: ${trimmed}`
+    : `Access appears ready: ${trimmed}`;
   return { needsSetupHelp, assessment };
 }
 function runScript(sessionId, name, args = []) {
@@ -82430,11 +82075,14 @@ import {
   writeFileSync as writeFileSync8,
   mkdirSync as mkdirSync11,
   copyFileSync as copyFileSync2,
-  readdirSync,
+  readdirSync as readdirSync2,
 } from 'fs';
 import { join as join7 } from 'path';
 function initArtifactPath(initId, ...segments) {
   return join7(initDir(initId), ...segments);
+}
+function initTimeoutSeconds(ctx) {
+  return ctx.config.settings.defaultLlmTimeout;
 }
 function writeInitArtifact(initId, filename, content) {
   const path = initArtifactPath(initId, filename);
@@ -82545,33 +82193,35 @@ function buildDetectionPlan(systemName, researchDoc) {
   });
 }
 function classifyAccessSetup2(answer) {
-  const normalized = answer.trim().toLowerCase();
+  const trimmed = answer.trim();
+  const normalized = trimmed.toLowerCase();
   if (!normalized) {
     return { needsSetupHelp: true, assessment: 'No access method provided yet.' };
   }
-  const setupIndicators = [
-    'no',
-    'not set up',
-    'not setup',
-    'not configured',
-    'none',
-    'broken',
-    'idk',
-    "i don't know",
-    'not logged in',
-    'not authenticated',
-    'need login',
-    'need auth',
-    'need setup',
-    'not working',
-    'installed but',
-    'maybe',
-    'unsure',
+  const setupPatterns = [
+    /^no$/,
+    /\bnot set ?up\b/,
+    /\bnot configured\b/,
+    /^none$/,
+    /\bbroken\b/,
+    /\bidk\b/,
+    /\bi don't know\b/,
+    /\bnot logged in\b/,
+    /\bnot authenticated\b/,
+    /\bneed login\b/,
+    /\bneed auth(?:entication)?\b/,
+    /\bneed setup\b/,
+    /\bnot working\b/,
+    /\binstalled but\b/,
+    /^maybe$/,
+    /^unsure$/,
   ];
-  const needsSetupHelp = setupIndicators.some(indicator => normalized === indicator || normalized.includes(indicator));
+  const readySignals = [/\bauthenticated\b/, /\bworking\b/, /\buse\b.+\bacli\b/, /\bacli\b/, /\bcli\b/];
+  const needsSetupHelp =
+    setupPatterns.some(pattern => pattern.test(normalized)) && !readySignals.some(pattern => pattern.test(normalized));
   const assessment = needsSetupHelp
-    ? `Access may need setup or verification: ${answer.trim()}`
-    : `Access appears ready: ${answer.trim()}`;
+    ? `Access may need setup or verification: ${trimmed}`
+    : `Access appears ready: ${trimmed}`;
   return { needsSetupHelp, assessment };
 }
 function parseStateMapping(answer) {
@@ -82587,6 +82237,7 @@ function parseStateMapping(answer) {
 }
 var identify = async ctx => {
     const { initId } = ctx;
+    setCachedConfig(ctx.config);
     appendInitEvent(initId, { ts: new Date().toISOString(), event: 'identify:started' });
     if (ctx.forceLocal) {
       appendInitEvent(initId, {
@@ -82654,9 +82305,11 @@ var identify = async ctx => {
     });
     const researchDoc = await spawnPrintRaw(getDefaultBinary(), researchPrompt, {
       cwd: ctx.workDir,
+      timeout: initTimeoutSeconds(ctx),
       spinnerMsg: `Researching ${systemName}`,
-      sessionId: initId,
+      runScope: { kind: 'init', id: initId },
       label: 'research-task-system',
+      context: `Init research phase for ${systemName}`,
     });
     const detectionPlan = buildDetectionPlan(systemName, researchDoc || '');
     const parsePrompt = `Parse this research doc and extract structured fields. Output ONLY valid JSON with this exact shape:
@@ -82675,9 +82328,11 @@ ${researchDoc || '(no research output)'}
 ---`;
     const parsedJson = await spawnPrintRaw(getDefaultBinary(), parsePrompt, {
       cwd: ctx.workDir,
+      timeout: initTimeoutSeconds(ctx),
       spinnerMsg: `Parsing research for ${systemName}`,
-      sessionId: initId,
+      runScope: { kind: 'init', id: initId },
       label: 'parse-research',
+      context: `Init research parsing phase for ${systemName}`,
     });
     let structured = null;
     if (parsedJson) {
@@ -82808,9 +82463,11 @@ ${researchDoc || '(no research output)'}
       });
       const setupInstructions = await spawnPrintRaw(getDefaultBinary(), setupPrompt, {
         cwd: ctx.workDir,
+        timeout: initTimeoutSeconds(ctx),
         spinnerMsg: 'Researching setup instructions',
-        sessionId: initId,
+        runScope: { kind: 'init', id: initId },
         label: 'research-setup',
+        context: `Init setup help research for ${systemName}`,
       });
       if (setupInstructions) {
         console.log(
@@ -82875,7 +82532,11 @@ ${researchDoc || '(no research output)'}
       userAnswerLower.includes('github')
     ) {
       chosenAccessPath = 'gh-cli';
-    } else if (detectedToolKeys.some(t => t.includes('jira')) || userAnswerLower.includes('jira')) {
+    } else if (
+      detectedToolKeys.some(t => t.includes('jira') || t.includes('atlassian')) ||
+      userAnswerLower.includes('jira') ||
+      userAnswerLower.includes('acli')
+    ) {
       chosenAccessPath = 'jira-cli';
     } else if (detectedToolKeys.some(t => t.includes('linear')) || userAnswerLower.includes('linear')) {
       chosenAccessPath = 'linear-cli';
@@ -83021,12 +82682,17 @@ exit 0`,
     while (repairAttempt < MAX_REPAIR_ATTEMPTS) {
       const llmOutput = await spawnPrintRaw(getDefaultBinary(), activePrompt, {
         cwd: workDir,
+        timeout: initTimeoutSeconds(ctx),
         spinnerMsg:
           repairAttempt === 0
             ? `Creating ${setupBrief.systemName} integration scripts`
             : `Repairing scripts (attempt ${repairAttempt + 1}/${MAX_REPAIR_ATTEMPTS})`,
-        sessionId: initId,
+        runScope: { kind: 'init', id: initId },
         label: repairAttempt === 0 ? 'create-scripts' : `repair-scripts-${repairAttempt}`,
+        context:
+          repairAttempt === 0
+            ? `Init generate phase creating ${setupBrief.systemName} integration scripts`
+            : `Init generate phase repairing ${setupBrief.systemName} integration scripts`,
       });
       if (llmOutput) {
         console.log(renderMarkdown(llmOutput));
@@ -83231,7 +82897,7 @@ exit 0
     const sessionScriptsDir = join7(sDir, 'scripts');
     mkdirSync11(sessionScriptsDir, { recursive: true });
     if (existsSync9(initScriptsDir)) {
-      for (const name of readdirSync(initScriptsDir)) {
+      for (const name of readdirSync2(initScriptsDir)) {
         copyFileSync2(join7(initScriptsDir, name), join7(sessionScriptsDir, name));
         Bun.spawnSync({ cmd: ['chmod', '+x', join7(sessionScriptsDir, name)] });
       }
@@ -83385,8 +83051,11 @@ exit 0
         const localInitPrompt = getAgentPrompt('init', 'localInit', { sessionId });
         await spawnPrintRaw(getDefaultBinary(), localInitPrompt, {
           cwd: workDir,
-          timeout: 300,
+          timeout: initTimeoutSeconds(ctx),
           spinnerMsg: 'Generating ticket, spec, and plans',
+          runScope: { kind: 'init', id: initId },
+          label: 'local-init',
+          context: 'Init local mode generation of ticket, spec, and plans',
         });
       } catch (err) {
         logWarn('Local mode generation encountered an issue: ' + (err instanceof Error ? err.message : String(err)));
@@ -83530,7 +83199,13 @@ __export(exports_init, {
   runInit: () => runInit,
   createInitCommand: () => createInitCommand,
 });
-import { existsSync as existsSync10, mkdirSync as mkdirSync12, rmSync } from 'fs';
+import {
+  copyFileSync as copyFileSync3,
+  existsSync as existsSync10,
+  mkdirSync as mkdirSync12,
+  rmSync,
+  writeFileSync as writeFileSync9,
+} from 'fs';
 function createInitCommand() {
   return new Command('init')
     .argument('[ticketId]', 'Ticket ID (e.g. PE-1234)')
@@ -83632,7 +83307,32 @@ async function runInit(ticketId, opts, cwd) {
     });
   }
   ensureGlobalConfig();
+  const pickedConfigPath = resolvedConfigPath(org, opts.config);
   const config = resolveConfig(org, opts.config);
+  if (!resumeInitId) {
+    const initConfigDest = `${initDir(initId)}/config.yaml`;
+    const initConfigSourceDest = `${initDir(initId)}/config.source.txt`;
+    if (pickedConfigPath && existsSync10(pickedConfigPath)) {
+      copyFileSync3(pickedConfigPath, initConfigDest);
+      writeFileSync9(
+        initConfigSourceDest,
+        pickedConfigPath +
+          `
+`,
+      );
+    } else {
+      writeFileSync9(
+        initConfigDest,
+        `# resolved from built-in defaults
+`,
+      );
+      writeFileSync9(
+        initConfigSourceDest,
+        `(built-in defaults)
+`,
+      );
+    }
+  }
   logInfo(`${resumeInitId ? 'Resuming' : 'Init attempt'}: ${initId}`);
   logField('Worktree', worktree);
   acquireInitLock(initId);
@@ -83679,7 +83379,7 @@ var init_init2 = __esm(() => {
 import {
   existsSync as existsSync11,
   readFileSync as readFileSync9,
-  writeFileSync as writeFileSync9,
+  writeFileSync as writeFileSync10,
   rmSync as rmSync2,
   mkdirSync as mkdirSync13,
   renameSync as renameSync2,
@@ -83834,7 +83534,7 @@ function readStatusYaml(sessionId) {
   if (!existsSync11(path)) return null;
   try {
     const raw = readFileSync9(path, 'utf-8');
-    return import_yaml2.default.parse(raw);
+    return import_yaml3.default.parse(raw);
   } catch {
     return null;
   }
@@ -83842,9 +83542,9 @@ function readStatusYaml(sessionId) {
 function writeStatusYaml(sessionId, status) {
   const path = statusPath(sessionId);
   mkdirSync13(dirname10(path), { recursive: true });
-  const content = import_yaml2.default.stringify(status, { lineWidth: 120 });
+  const content = import_yaml3.default.stringify(status, { lineWidth: 120 });
   const tmp = `${path}.tmp`;
-  writeFileSync9(tmp, content);
+  writeFileSync10(tmp, content);
   renameSync2(tmp, path);
 }
 function ensureStatus(sessionId) {
@@ -83950,15 +83650,15 @@ function detectAndRecoverCrash(sessionId, worktree) {
   }
   return true;
 }
-var import_yaml2, CHECKPOINTS, LIFECYCLE_EVENTS, CLEANUP;
+var import_yaml3, CHECKPOINTS, LIFECYCLE_EVENTS, CLEANUP;
 var init_status = __esm(() => {
   init_log();
   init_lock();
   init_artifacts();
   init_format();
-  import_yaml2 = __toESM(require_dist(), 1);
+  import_yaml3 = __toESM(require_dist(), 1);
   CHECKPOINTS = {
-    plan: new Set(['pull_ticket', 'route_type', 'write_spec', 'finalize_spec', 'finalize_plans']),
+    plan: new Set(['pull_ticket', 'write_spec', 'finalize_spec', 'finalize_plans']),
     implementation: new Set(['clear_loop', 'commit', 'next_plan', 'completed']),
     polish: new Set(['commit_pending', 'push', 'create_pr', 'poll', 'feedback_check', 'completed']),
   };
@@ -84005,13 +83705,13 @@ var init_status = __esm(() => {
 
 // src/core/config-dir.ts
 var { spawn: spawn2 } = globalThis.Bun;
-import { existsSync as existsSync14, readFileSync as readFileSync11, writeFileSync as writeFileSync13 } from 'fs';
-import { join as join12 } from 'path';
+import { existsSync as existsSync13, readFileSync as readFileSync10, writeFileSync as writeFileSync13 } from 'fs';
+import { join as join11 } from 'path';
 function loadPersistedConfigDirs(id) {
-  const path = join12(sessionDir(id), CACHE_FILE);
-  if (!existsSync14(path)) return false;
+  const path = join11(sessionDir(id), CACHE_FILE);
+  if (!existsSync13(path)) return false;
   try {
-    const data = JSON.parse(readFileSync11(path, 'utf-8'));
+    const data = JSON.parse(readFileSync10(path, 'utf-8'));
     for (const [binary, dir] of Object.entries(data)) {
       cache.set(binary, dir);
     }
@@ -84022,7 +83722,7 @@ function loadPersistedConfigDirs(id) {
   }
 }
 function persistConfigDirs(id, binaries) {
-  const path = join12(sessionDir(id), CACHE_FILE);
+  const path = join11(sessionDir(id), CACHE_FILE);
   const data = {};
   let count = 0;
   for (const binary of binaries) {
@@ -84076,13 +83776,15 @@ async function discoverConfigDirs(config, sessionId) {
       if (agent.binary) binaries.add(agent.binary);
     }
   }
-  for (const typeConfig of Object.values(config.types)) {
-    for (const reviewer of Object.values(typeConfig.spec_reviewers)) {
+  if (config.spec_reviewers) {
+    for (const reviewer of Object.values(config.spec_reviewers)) {
       if (reviewer.binaries) {
         for (const b3 of reviewer.binaries) binaries.add(b3);
       }
     }
-    for (const reviewer of Object.values(typeConfig.plan_reviewers)) {
+  }
+  if (config.plan_reviewers) {
+    for (const reviewer of Object.values(config.plan_reviewers)) {
       if (reviewer.binaries) {
         for (const b3 of reviewer.binaries) binaries.add(b3);
       }
@@ -84130,14 +83832,14 @@ var init_config_dir = __esm(() => {
 });
 
 // src/core/turn-watcher.ts
-import { watch, existsSync as existsSync15, readFileSync as readFileSync12, mkdirSync as mkdirSync17 } from 'fs';
-import { dirname as dirname13 } from 'path';
+import { watch, existsSync as existsSync14, readFileSync as readFileSync11, mkdirSync as mkdirSync16 } from 'fs';
+import { dirname as dirname12 } from 'path';
 function watchTurn(jsonlPath, onChange) {
   let lastSize = 0;
   let closed = false;
   let fileWatcher = null;
   function check() {
-    if (!existsSync15(jsonlPath)) return;
+    if (!existsSync14(jsonlPath)) return;
     let stat;
     try {
       stat = Bun.file(jsonlPath);
@@ -84146,7 +83848,7 @@ function watchTurn(jsonlPath, onChange) {
     }
     if (stat.size === lastSize) return;
     lastSize = stat.size;
-    const content = readFileSync12(jsonlPath, 'utf-8');
+    const content = readFileSync11(jsonlPath, 'utf-8');
     const lines = content
       .trim()
       .split(
@@ -84189,7 +83891,7 @@ function watchTurn(jsonlPath, onChange) {
     const maxDelay = 8000;
     function poll() {
       if (closed) return;
-      if (existsSync15(jsonlPath)) {
+      if (existsSync14(jsonlPath)) {
         startWatch();
       } else {
         delay = Math.min(delay * 2, maxDelay);
@@ -84199,8 +83901,8 @@ function watchTurn(jsonlPath, onChange) {
     }
     setTimeout(poll, delay);
   }
-  mkdirSync17(dirname13(jsonlPath), { recursive: true });
-  if (existsSync15(jsonlPath)) {
+  mkdirSync16(dirname12(jsonlPath), { recursive: true });
+  if (existsSync14(jsonlPath)) {
     startWatch();
   } else {
     waitForFile();
@@ -84236,8 +83938,8 @@ __export(exports_shared, {
   findLatestPlanDraftDir: () => findLatestPlanDraftDir,
   discoverPlans: () => discoverPlans,
 });
-import { existsSync as existsSync16, readdirSync as readdirSync2, readFileSync as readFileSync13 } from 'fs';
-import { join as join13 } from 'path';
+import { existsSync as existsSync15, readdirSync as readdirSync3, readFileSync as readFileSync12 } from 'fs';
+import { join as join12 } from 'path';
 function loadPromptTemplate(phase, name, vars) {
   const key = name.replace(/-/g, '_');
   return getAgentPrompt(phase, key, vars);
@@ -84254,8 +83956,8 @@ function parsePlanFilename(filename) {
   return null;
 }
 function resolveActivePlans(plansDir) {
-  if (!existsSync16(plansDir)) return [];
-  const files = readdirSync2(plansDir);
+  if (!existsSync15(plansDir)) return [];
+  const files = readdirSync3(plansDir);
   const byOrdinal = new Map();
   for (const f of files) {
     const parsed = parsePlanFilename(f);
@@ -84267,14 +83969,14 @@ function resolveActivePlans(plansDir) {
   }
   return Array.from(byOrdinal.entries())
     .sort(([a], [b3]) => a - b3)
-    .map(([, v2]) => join13(plansDir, v2.filename));
+    .map(([, v2]) => join12(plansDir, v2.filename));
 }
 function discoverPlans(plansDir) {
   return resolveActivePlans(plansDir);
 }
 function resolveSpec(sessionId, version, filename = 'task-spec.md') {
   const sessionPath = snapshotPath(sessionId, version, filename);
-  if (existsSync16(sessionPath)) return readFileSync13(sessionPath, 'utf-8');
+  if (existsSync15(sessionPath)) return readFileSync12(sessionPath, 'utf-8');
   return '';
 }
 function resolvePlans(sessionId, version) {
@@ -84283,14 +83985,14 @@ function resolvePlans(sessionId, version) {
 }
 function validatePlanContent(planFiles) {
   return planFiles.filter(p2 => {
-    const content = readFileSync13(p2, 'utf-8').trim();
+    const content = readFileSync12(p2, 'utf-8').trim();
     return content.length === 0;
   });
 }
 function findLatestPlanDraftDir(plansDir) {
   let entries;
   try {
-    entries = readdirSync2(plansDir, { withFileTypes: true });
+    entries = readdirSync3(plansDir, { withFileTypes: true });
   } catch {
     return null;
   }
@@ -84300,19 +84002,19 @@ function findLatestPlanDraftDir(plansDir) {
     .sort((a, b3) => b3.ordinal - a.ordinal);
   if (drafts.length === 0) return null;
   const latest = drafts[0];
-  const draftDir = join13(plansDir, latest.name);
-  const files = readdirSync2(draftDir)
+  const draftDir = join12(plansDir, latest.name);
+  const files = readdirSync3(draftDir)
     .filter(f => /^plan-\d+\.md$/.test(f))
     .sort((a, b3) => {
       const numA = parseInt(a.match(/plan-(\d+)/)?.[1] || '0', 10);
       const numB = parseInt(b3.match(/plan-(\d+)/)?.[1] || '0', 10);
       return numA - numB;
     })
-    .map(f => join13(draftDir, f));
+    .map(f => join12(draftDir, f));
   return { ordinal: latest.ordinal, dir: draftDir, files };
 }
 function readPlanDraftFiles(draftDir) {
-  const files = readdirSync2(draftDir)
+  const files = readdirSync3(draftDir)
     .filter(f => /^plan-\d+\.md$/.test(f))
     .sort((a, b3) => {
       const numA = parseInt(a.match(/plan-(\d+)/)?.[1] || '0', 10);
@@ -84321,7 +84023,7 @@ function readPlanDraftFiles(draftDir) {
     });
   return files.map(f => ({
     filename: f,
-    content: readFileSync13(join13(draftDir, f), 'utf-8'),
+    content: readFileSync12(join12(draftDir, f), 'utf-8'),
   }));
 }
 function deriveProjectKey(worktree) {
@@ -84331,7 +84033,7 @@ async function spawnTTYWithTurnTracking(sessionId, binary, prompt, options2) {
   const claudeSessionId = crypto.randomUUID();
   const configDir = getConfigDir(binary) ?? `${process.env.HOME}/.claude`;
   const projectKey = deriveProjectKey(options2.worktree);
-  const jsonlPath = join13(configDir, 'projects', projectKey, `${claudeSessionId}.jsonl`);
+  const jsonlPath = join12(configDir, 'projects', projectKey, `${claudeSessionId}.jsonl`);
   appendEvent(sessionId, {
     ts: new Date().toISOString(),
     event: 'context:updated',
@@ -84339,9 +84041,13 @@ async function spawnTTYWithTurnTracking(sessionId, binary, prompt, options2) {
   });
   const watcher = startTurnWatcher(sessionId, jsonlPath);
   try {
+    const runScope = { kind: 'session', id: sessionId };
     const exitCode = await spawnTTY(binary, prompt, {
       ...options2,
       claudeSessionId,
+      runScope,
+      label: options2.label ?? 'tty-handoff',
+      context: `TTY handoff for session ${sessionId}`,
     });
     return exitCode;
   } finally {
@@ -84667,9 +84373,9 @@ var init_github = () => {};
 // src/index.ts
 init_esm();
 init_init2();
-import { readFileSync as readFileSync29 } from 'fs';
+import { readFileSync as readFileSync25 } from 'fs';
 import { fileURLToPath } from 'url';
-import { dirname as dirname14, join as join22 } from 'path';
+import { dirname as dirname13, join as join19 } from 'path';
 
 // src/cli/start.ts
 init_esm();
@@ -84678,7 +84384,7 @@ init_lock();
 init_log();
 init_status();
 init_git();
-import { existsSync as existsSync30 } from 'fs';
+import { existsSync as existsSync29 } from 'fs';
 
 // src/phases/runner.ts
 init_log();
@@ -84764,9 +84470,9 @@ init_scripts();
 init_format();
 import {
   mkdirSync as mkdirSync14,
-  writeFileSync as writeFileSync10,
+  writeFileSync as writeFileSync11,
   existsSync as existsSync12,
-  copyFileSync as copyFileSync3,
+  copyFileSync as copyFileSync4,
 } from 'fs';
 import { join as join9 } from 'path';
 async function handlePullTicket(ctx) {
@@ -84783,7 +84489,7 @@ async function handlePullTicket(ctx) {
   if (session.ticket_id && !session.local) {
     const content = runScript(session.id, 'get-ticket', [session.ticket_id]);
     if (content) {
-      writeFileSync10(ticketPath, content);
+      writeFileSync11(ticketPath, content);
       logOk(
         `Ticket fetched (${
           content.split(`
@@ -84795,7 +84501,7 @@ async function handlePullTicket(ctx) {
     }
   } else if (session.local) {
     if (!existsSync12(ticketPath)) {
-      writeFileSync10(
+      writeFileSync11(
         ticketPath,
         `# Local Task
 
@@ -84810,21 +84516,19 @@ Describe the task here.
   if (existsSync12(ticketPath)) {
     const snapshotDest = sessionArtifactPath(session.id, 'ticket.md');
     ensureArtifactDir(snapshotDest);
-    copyFileSync3(ticketPath, snapshotDest);
+    copyFileSync4(ticketPath, snapshotDest);
   }
   appendEvent(session.id, {
     ts: new Date().toISOString(),
     event: 'pull_ticket:completed',
     version,
   });
-  return 'route_type';
+  return 'write_spec';
 }
 
-// src/phases/phase1/route-type.ts
+// src/phases/phase1/write-spec.ts
 init_log();
-init_artifacts();
-import { existsSync as existsSync13, readFileSync as readFileSync10, writeFileSync as writeFileSync11 } from 'fs';
-import { join as join11 } from 'path';
+import { mkdirSync as mkdirSync17, readdirSync as readdirSync4, readFileSync as readFileSync13 } from 'fs';
 
 // src/core/type-config.ts
 import { join as join10 } from 'path';
@@ -84845,15 +84549,6 @@ function resolvePromptVars(prompt, vars) {
   }
   return result;
 }
-function getTypeConfig(config, typeName) {
-  return config.types[typeName] ?? null;
-}
-function getTypeDescriptions(config) {
-  return Object.entries(config.types).map(([name, tc]) => ({
-    name,
-    desc: tc.desc,
-  }));
-}
 function resolveTimeout(specific, config) {
   return specific ?? config.settings.defaultLlmTimeout;
 }
@@ -84863,88 +84558,18 @@ function resolveBinary(binaries, config) {
   return config.claude_binary ?? 'claude';
 }
 
-// src/phases/phase1/route-type.ts
-init_spawn();
-init_agents();
-init_format();
-async function handleRouteType(ctx) {
-  const { session, config, version } = ctx;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'route_type:started',
-    version,
-    metadata: { stepType: 'llm' },
-  });
-  const types2 = getTypeDescriptions(config);
-  if (types2.length === 0) {
-    logError('No types configured. Add a `types` section to your config.yaml.');
-    throw new Error('No types configured');
-  }
-  const ticketPath = join11(session.worktree, 'spec', 'ticket.md');
-  let ticketContent = '';
-  if (existsSync13(ticketPath)) {
-    ticketContent = readFileSync10(ticketPath, 'utf-8');
-  }
-  const typeList = types2.map(t => `- "${t.name}": ${t.desc}`).join(`
-`);
-  const prompt = getAgentPrompt('init', 'routeType', {
-    typeList,
-    ticketContent: ticketContent || '(no ticket content available \u2014 local mode)',
-  });
-  const binary = getDefaultBinary();
-  let typeName;
-  if (types2.length === 1) {
-    typeName = types2[0].name;
-    debugLog(`[route_type] single type configured, using "${typeName}"`);
-  } else {
-    const result = await spawnPrint(binary, prompt, {
-      cwd: session.worktree,
-      spinnerMsg: 'Classifying ticket type',
-      sessionId: session.id,
-      label: 'route-type',
-    });
-    typeName = result.type;
-  }
-  const typeConfig = getTypeConfig(config, typeName);
-  if (!typeConfig) {
-    typeName = types2[0].name;
-    debugLog(`[route_type] LLM returned unknown type, falling back to "${typeName}"`);
-  }
-  const typeJson = { type: typeName, desc: config.types[typeName].desc };
-  const typeJsonPath = snapshotPath(session.id, version, 'type.json');
-  ensureArtifactDir(typeJsonPath);
-  writeFileSync11(typeJsonPath, JSON.stringify(typeJson, null, 2));
-  ctx.ticketType = typeName;
-  ctx.typeConfig = config.types[typeName];
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'context:updated',
-    metadata: { ticketType: typeName },
-  });
-  logOk(`Ticket type: ${typeName} \u2014 ${config.types[typeName].desc}`);
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'route_type:completed',
-    version,
-    metadata: { type: typeName },
-  });
-  return 'write_spec';
-}
-
 // src/phases/phase1/write-spec.ts
-init_log();
-import { mkdirSync as mkdirSync18, readdirSync as readdirSync3, readFileSync as readFileSync14 } from 'fs';
 init_agents();
 
 // src/core/step-init.ts
 init_artifacts();
-var import_yaml3 = __toESM(require_dist(), 1);
-import { writeFileSync as writeFileSync12, mkdirSync as mkdirSync16 } from 'fs';
-import { dirname as dirname12 } from 'path';
+var import_yaml4 = __toESM(require_dist(), 1);
+import { writeFileSync as writeFileSync12, mkdirSync as mkdirSync15 } from 'fs';
+import { dirname as dirname11 } from 'path';
 function writeStepInit(sessionId, version, stepName, record) {
   const path = artifactPath(sessionId, version, 'steps', `${stepName}.yaml`);
-  mkdirSync16(dirname12(path), { recursive: true });
-  writeFileSync12(path, import_yaml3.stringify(record));
+  mkdirSync15(dirname11(path), { recursive: true });
+  writeFileSync12(path, import_yaml4.stringify(record));
 }
 
 // src/phases/phase1/write-spec.ts
@@ -84967,6 +84592,21 @@ Each draft MUST be a complete, standalone spec \u2014 NOT a changelog or diff. W
 every time, with changes applied inline. Do NOT add "Changed:" or "Updated:" annotations.
 The draft should read as if it were written from scratch.
 
+### Delivery Kind Decision
+
+Before writing the first spec draft, you MUST decide the delivery kind and log it:
+
+- \`pr\` \u2014 the work is clear, scoped, and implementable as code in this session
+- \`ticket\` \u2014 the work needs decomposition into sub-tickets, a spike, or multi-phase work
+  (e.g., spike \u2192 impl, catalog \u2192 impl, large task needing multiple user intervention points)
+
+Log your decision by running this command:
+  \`kautopilot log-event deliveryKind:decided --metadata '{"kind": "pr"}'\`
+  OR
+  \`kautopilot log-event deliveryKind:decided --metadata '{"kind": "ticket"}'\`
+
+This MUST happen BEFORE writing spec-draft-1.md.
+
 ### Approval Protocol
 
 When the user approves the spec, you MUST do these things IN ORDER before exiting:
@@ -84981,10 +84621,103 @@ the spec will NOT be considered approved and this step will re-run from scratch.
 
 ---
 `;
+var SPEC_WRITER_PROMPT = `You are writing a declarative specification. The spec describes WHAT should be true
+when the work is complete \u2014 NOT how to get there. No file paths, no code snippets,
+no implementation details.
+
+Context:
+- Ticket: {ticket}
+- Worktree: {worktree}
+- Spec drafts directory: {specDir}
+
+## Phase 1: Gather Basic Context
+
+Before anything else, build enough understanding to make informed decisions.
+Create a team to gather context in parallel:
+
+- **code-explorer**: Read the ticket at {ticket}. Explore relevant code paths \u2014 find
+  the files, functions, types, and tests that relate to the ticket. Report what you found.
+- **pattern-finder**: Find existing patterns, abstractions, and conventions in the codebase
+  that are relevant. Report existing approaches.
+
+Wait for teammates. Synthesize findings. Identify what you DON'T know \u2014 the unknown unknowns.
+
+## Phase 2: Research Gate
+
+Now that you have basic context, decide: are there unknown unknowns that would make
+it dangerous to proceed?
+
+- If YES: do bare minimum targeted research to convert unknown unknowns into known unknowns.
+  Don't over-research \u2014 just enough to make an informed decision about task shape.
+- If NO: proceed directly.
+
+## Phase 3: Evaluate Task Shape & Decide Delivery Kind
+
+With basic context and resolved unknowns, evaluate the task:
+
+- Is this a single implementable unit? \u2192 \`pr\` delivery
+- Does this need decomposition? Consider:
+  - Is it too large for one session?
+  - Does it require multiple points of heavy user intervention?
+  - Does it need a spike/investigation before implementation?
+  - Would it be better as catalog \u2192 implement, or spike \u2192 implement?
+  - Does it need creating/updating multiple tickets?
+  \u2192 \`ticket\` delivery
+
+Log your decision using the delivery kind protocol above. Explain your reasoning to the user.
+
+## Phase 4: Targeted Research
+
+Based on the delivery kind and known unknowns, do targeted deep research:
+- For PR: understand the specific code paths, APIs, constraints
+- For ticket: understand the decomposition boundaries, dependencies between sub-tasks
+
+## Phase 5: Debate & De-ambiguate
+
+Discuss with the user:
+1. Walk through each requirement \u2014 are there hidden assumptions?
+2. Identify conflicts between requirements
+3. Identify risks \u2014 what could go wrong? What's the blast radius?
+4. For each risk: is it a spec problem (rewrite requirement) or a plan problem
+   (handle during implementation)?
+5. Keep clarifying until NOTHING is left ambiguous.
+
+Do NOT proceed to writing the spec until the user confirms requirements are clear.
+
+## Phase 6: Write Spec
+
+Write spec-draft-1.md. The spec is DECLARATIVE \u2014 it describes the desired end state.
+
+Required sections:
+- **Objective** \u2014 what should be true when this is done, and why
+- **Acceptance Criteria** \u2014 numbered, testable, concrete criteria
+  (Given/When/Then or equivalent \u2014 every criterion must be verifiable)
+- **Risk Assessment** \u2014 what could go wrong, blast radius, likelihood, mitigation strategy
+- **Constraints & Non-Goals** \u2014 what this explicitly does NOT include
+- **Delivery Kind** \u2014 pr or ticket, with rationale for the choice
+- **Proof of Completion** \u2014 runnable commands that prove every criterion is met
+  (good: test commands, API calls, grep assertions, build commands
+   bad: "manually verify", "visually check", vague assertions)
+
+The spec MUST NOT contain:
+- Which files to change or implementation details
+- Code snippets or internal architecture decisions
+- References to specific function names or line numbers
+- HOW to achieve the objective (that's for plans)
+
+## Phase 7: Review & Iterate
+
+1. Create a reviewer teammate to run \`kautopilot spec-review\` and return the summary
+2. Evaluate each issue \u2014 fix what's real, ask the user about anything uncertain
+3. Write a NEW spec-draft-N.md (incremented ordinal) with fixes
+4. Re-run reviewer after significant changes
+5. Repeat until you and the user are satisfied
+
+Be precise and concrete. Avoid vague criteria. Every requirement should be verifiable.`;
 function findLatestDraft(specDir) {
   let files;
   try {
-    files = readdirSync3(specDir);
+    files = readdirSync4(specDir);
   } catch {
     return null;
   }
@@ -84994,14 +84727,11 @@ function findLatestDraft(specDir) {
     .sort((a, b3) => b3.ordinal - a.ordinal);
   if (drafts.length === 0) return null;
   const latest = drafts[0];
-  const content = readFileSync14(`${specDir}/${latest.file}`, 'utf-8');
+  const content = readFileSync13(`${specDir}/${latest.file}`, 'utf-8');
   return { ordinal: latest.ordinal, content };
 }
 async function handleWriteSpec(ctx) {
-  const { session, version, typeConfig } = ctx;
-  if (!typeConfig) {
-    throw new Error('typeConfig not set \u2014 route_type must run first');
-  }
+  const { session, version } = ctx;
   const events = readLog(session.id);
   const approved = events.some(e2 => e2.event === 'spec:approved');
   if (approved) {
@@ -85015,8 +84745,8 @@ async function handleWriteSpec(ctx) {
     metadata: { stepType: 'tty' },
   });
   const vars = buildPromptVars(session.worktree, version);
-  mkdirSync18(vars.specDir, { recursive: true });
-  let prompt = resolvePromptVars(typeConfig.spec_writer.prompt, vars);
+  mkdirSync17(vars.specDir, { recursive: true });
+  let prompt;
   const latest = findLatestDraft(vars.specDir);
   if (latest) {
     logInfo(`Resuming from spec-draft-${latest.ordinal}.md`);
@@ -85030,7 +84760,9 @@ You are resuming a spec session. The latest draft is below. Continue from where 
 ${latest.content}
 ---
 
-${prompt}`;
+${resolvePromptVars(SPEC_WRITER_PROMPT, vars)}`;
+  } else {
+    prompt = resolvePromptVars(SPEC_MECHANICS + SPEC_WRITER_PROMPT, vars);
   }
   const binary = getDefaultBinary();
   writeStepInit(session.id, version, 'write_spec', {
@@ -85055,6 +84787,18 @@ ${prompt}`;
     });
     return null;
   }
+  const deliveryKindEvent = postEvents.find(e2 => e2.event === 'deliveryKind:decided');
+  if (deliveryKindEvent?.metadata?.kind) {
+    const kind = deliveryKindEvent.metadata.kind;
+    if (kind === 'pr' || kind === 'ticket') {
+      ctx.deliveryKind = kind;
+      appendEvent(session.id, {
+        ts: new Date().toISOString(),
+        event: 'context:updated',
+        metadata: { deliveryKind: kind },
+      });
+    }
+  }
   logOk('Spec approved');
   appendEvent(session.id, {
     ts: new Date().toISOString(),
@@ -85067,12 +84811,12 @@ ${prompt}`;
 // src/phases/phase1/finalize-spec.ts
 init_log();
 init_artifacts();
-import { existsSync as existsSync17, copyFileSync as copyFileSync4, readdirSync as readdirSync4 } from 'fs';
+import { existsSync as existsSync16, copyFileSync as copyFileSync5, readdirSync as readdirSync5 } from 'fs';
 init_format();
 function findLatestDraftPath(specDir) {
   let files;
   try {
-    files = readdirSync4(specDir);
+    files = readdirSync5(specDir);
   } catch {
     return null;
   }
@@ -85093,15 +84837,15 @@ async function handleFinalizeSpec(ctx) {
   });
   const vars = buildPromptVars(session.worktree, version);
   const latestDraft = findLatestDraftPath(vars.specDir);
-  if (!latestDraft || !existsSync17(latestDraft)) {
+  if (!latestDraft || !existsSync16(latestDraft)) {
     logError(`No spec-draft-N.md found in ${vars.specDir}. Did the TTY write it?`);
     throw new Error('No spec draft found');
   }
   const taskSpecWorktree = vars.spec;
-  copyFileSync4(latestDraft, taskSpecWorktree);
+  copyFileSync5(latestDraft, taskSpecWorktree);
   const dest = snapshotPath(session.id, version, 'task-spec.md');
   ensureArtifactDir(dest);
-  copyFileSync4(latestDraft, dest);
+  copyFileSync5(latestDraft, dest);
   logOk(`Spec finalized: ${latestDraft.split('/').pop()} \u2192 task-spec.md`);
   appendEvent(session.id, {
     ts: new Date().toISOString(),
@@ -85113,11 +84857,21 @@ async function handleFinalizeSpec(ctx) {
 
 // src/phases/phase1/write-plans.ts
 init_log();
-import { mkdirSync as mkdirSync19 } from 'fs';
+import { mkdirSync as mkdirSync18 } from 'fs';
 init_agents();
 init_shared();
 init_format();
 var PLAN_MECHANICS = `## CRITICAL: Plan Draft & Approval Mechanics
+
+### Plan Splitting Rules
+
+Plans MUST be split by domain/feature vertically, NOT by implementation layer/phase.
+
+WRONG: plan-1=add types, plan-2=implement logic, plan-3=write tests
+RIGHT: plan-1=feature-A (types+logic+tests), plan-2=feature-B (types+logic+tests)
+
+Each plan must produce a single working, isolated commit. After each plan completes,
+the codebase must be in a valid, buildable, testable state.
 
 ### Draft Files
 
@@ -85144,11 +84898,63 @@ the plans will NOT be considered approved and this step will re-run from scratch
 
 ---
 `;
+var PLAN_WRITER_PROMPT = `You are writing imperative implementation plans derived from the approved declarative spec.
+Plans describe HOW to move from the current state to the desired state.
+
+Context:
+- Spec: {spec}
+- Worktree: {worktree}
+- Plans directory: {plans}
+
+## Phase 1: Clarify Vertical Split
+
+Before writing any plans, discuss with the user how to slice the work.
+
+Plans MUST be split by domain/feature (vertical), NOT by implementation layer (horizontal).
+
+WRONG: plan-1=add types, plan-2=implement logic, plan-3=write tests
+RIGHT: plan-1=feature-A (types+logic+tests), plan-2=feature-B (types+logic+tests)
+
+Each plan produces ONE working, isolated commit. After each plan completes, the codebase
+MUST be in a valid, buildable, testable state.
+
+Ask the user: "How should we slice this? Here's what I see as the natural domain boundaries: ..."
+
+## Phase 2: Explore Codebase
+
+For each feature slice, explore:
+- Which files and functions will need to change
+- What existing patterns and abstractions to follow
+- Where tests live and how they're structured
+- Technical constraints not captured in the spec
+
+If the spec asks for something not achievable given the code, FLAG IT to the user.
+The spec may need revision (which would trigger a new epoch).
+
+## Phase 3: Write Plans
+
+Each plan must carry:
+- **ID / Title** \u2014 plan ordinal and descriptive name
+- **Goal** \u2014 what this plan accomplishes (the vertical feature slice)
+- **Scope / Domain** \u2014 which part of the system this touches
+- **Dependencies** \u2014 which plans must complete before this one
+- **Evidence / Proof Requirements** \u2014 how to prove this plan worked
+  (specific test commands, build commands, assertions)
+- **Definition of Done** \u2014 concrete exit criteria
+- **Strategy Hints** \u2014 recommended approach, patterns to follow
+- **Handoff / Replan Guidance** \u2014 what to do if this plan fails or needs rewriting
+- **Delivery Impact** \u2014 if ticket delivery: what ticket-side effects this plan implies
+
+Order plans by dependency \u2014 earlier plans must not depend on later ones.
+
+## Phase 4: Review & Iterate
+
+1. Create a teammate to run \`kautopilot plan-review\` and return the summary
+2. Fix issues, ask user about uncertainties
+3. Write new plan-draft-N/ directory with fixes
+4. Repeat until satisfied`;
 async function handleWritePlans(ctx) {
-  const { session, version, typeConfig } = ctx;
-  if (!typeConfig) {
-    throw new Error('typeConfig not set \u2014 route_type must run first');
-  }
+  const { session, version } = ctx;
   const events = readLog(session.id);
   const approved = events.some(e2 => e2.event === 'plans:approved');
   if (approved) {
@@ -85162,8 +84968,8 @@ async function handleWritePlans(ctx) {
     metadata: { stepType: 'tty' },
   });
   const vars = buildPromptVars(session.worktree, version);
-  mkdirSync19(vars.plans, { recursive: true });
-  let prompt = resolvePromptVars(typeConfig.plan_writer.prompt, vars);
+  mkdirSync18(vars.plans, { recursive: true });
+  let prompt;
   const latestDraft = findLatestPlanDraftDir(vars.plans);
   if (latestDraft) {
     logInfo(`Resuming from plan-draft-${latestDraft.ordinal}`);
@@ -85186,9 +84992,9 @@ You are resuming a plan session. The latest draft is below. Continue from where 
 ${draftContents}
 ---
 
-${prompt}`;
+${resolvePromptVars(PLAN_WRITER_PROMPT, vars)}`;
   } else {
-    prompt = resolvePromptVars(PLAN_MECHANICS, vars) + prompt;
+    prompt = resolvePromptVars(PLAN_MECHANICS + PLAN_WRITER_PROMPT, vars);
   }
   const binary = getDefaultBinary();
   writeStepInit(session.id, version, 'write_plans', {
@@ -85225,18 +85031,18 @@ ${prompt}`;
 // src/phases/phase1/finalize-plans.ts
 init_log();
 init_artifacts();
-import { copyFileSync as copyFileSync5, existsSync as existsSync19 } from 'fs';
-import { join as join14 } from 'path';
+import { copyFileSync as copyFileSync6, existsSync as existsSync18 } from 'fs';
+import { join as join13 } from 'path';
 init_shared();
 
 // src/core/manifests.ts
 init_artifacts();
 init_shared();
 import {
-  existsSync as existsSync18,
-  readFileSync as readFileSync16,
+  existsSync as existsSync17,
+  readFileSync as readFileSync14,
   writeFileSync as writeFileSync14,
-  readdirSync as readdirSync5,
+  readdirSync as readdirSync6,
 } from 'fs';
 function writeContractManifest(sessionId, version, deliveryKind, planCount) {
   const manifest = {
@@ -85252,8 +85058,8 @@ function writeContractManifest(sessionId, version, deliveryKind, planCount) {
 }
 function readContractManifest(sessionId, version) {
   const path = snapshotPath(sessionId, version, 'contract.json');
-  if (!existsSync18(path)) return null;
-  return JSON.parse(readFileSync16(path, 'utf-8'));
+  if (!existsSync17(path)) return null;
+  return JSON.parse(readFileSync14(path, 'utf-8'));
 }
 function supersedEpoch(sessionId, oldVersion, newVersion) {
   const manifest = readContractManifest(sessionId, oldVersion);
@@ -85267,8 +85073,8 @@ function supersedEpoch(sessionId, oldVersion, newVersion) {
 function writePlanManifest(sessionId, version) {
   const plansDir = snapshotPath(sessionId, version, 'plans');
   const plans = [];
-  if (existsSync18(plansDir)) {
-    const files = readdirSync5(plansDir);
+  if (existsSync17(plansDir)) {
+    const files = readdirSync6(plansDir);
     const byOrdinal = new Map();
     for (const f of files) {
       const parsed = parsePlanFilename(f);
@@ -85295,8 +85101,8 @@ function writePlanManifest(sessionId, version) {
 }
 function readPlanManifest(sessionId, version) {
   const path = snapshotPath(sessionId, version, 'plans', 'manifest.json');
-  if (!existsSync18(path)) return null;
-  return JSON.parse(readFileSync16(path, 'utf-8'));
+  if (!existsSync17(path)) return null;
+  return JSON.parse(readFileSync14(path, 'utf-8'));
 }
 function updatePlanManifestEntry(sessionId, version, planOrdinal, completed, commitSha) {
   const manifest = readPlanManifest(sessionId, version);
@@ -85316,8 +85122,8 @@ function writeDeliveryManifest(sessionId, version, delivery) {
 }
 function readDeliveryManifest(sessionId, version) {
   const path = snapshotPath(sessionId, version, 'delivery.json');
-  if (!existsSync18(path)) return null;
-  return JSON.parse(readFileSync16(path, 'utf-8'));
+  if (!existsSync17(path)) return null;
+  return JSON.parse(readFileSync14(path, 'utf-8'));
 }
 function updateDeliveryManifest(sessionId, version, updates) {
   const existing = readDeliveryManifest(sessionId, version) ?? { kind: 'pr' };
@@ -85348,10 +85154,10 @@ async function handleFinalizePlans(ctx) {
     throw new Error('Some plan files are empty');
   }
   const sessionPlansDir = snapshotPath(session.id, version, 'plans');
-  ensureArtifactDir(join14(sessionPlansDir, 'placeholder'));
+  ensureArtifactDir(join13(sessionPlansDir, 'placeholder'));
   for (let i = 0; i < planFiles.length; i++) {
     const specFilename = `plan-${i + 1}-1.md`;
-    copyFileSync5(planFiles[i], join14(sessionPlansDir, specFilename));
+    copyFileSync6(planFiles[i], join13(sessionPlansDir, specFilename));
   }
   const deliveryKind = ctx.deliveryKind ?? 'pr';
   writeContractManifest(session.id, version, deliveryKind, planFiles.length);
@@ -85366,7 +85172,7 @@ async function handleFinalizePlans(ctx) {
   try {
     const addedFiles = [];
     for (const f of planFiles) {
-      if (existsSync19(f)) {
+      if (existsSync18(f)) {
         await $2`git add ${f}`.cwd(session.worktree).quiet();
         addedFiles.push(f);
       }
@@ -85404,7 +85210,6 @@ async function handleFinalizePlans(ctx) {
 init_shared();
 var phase1States = {
   pull_ticket: handlePullTicket,
-  route_type: handleRouteType,
   write_spec: handleWriteSpec,
   finalize_spec: handleFinalizeSpec,
   write_plans: handleWritePlans,
@@ -85425,14 +85230,12 @@ async function runPhase1(session, config, options2) {
     Object.keys(phase1States).some(s => status.completedSteps.includes(s)) || status.state in phase1States;
   const version =
     options2?.versionOverride ?? (status.version === 0 ? 1 : phase1HasWork ? status.version : status.version + 1);
-  const ticketType = status.context.ticketType;
   const ctx = {
     session,
     config,
     version,
     attempt: 1,
-    ticketType,
-    typeConfig: ticketType ? config.types[ticketType] : undefined,
+    deliveryKind: status.context.deliveryKind,
   };
   return runStateMachine('phase1', phase1States, ctx, {
     terminalStates: ['finalize_plans'],
@@ -85451,8 +85254,8 @@ init_log();
 // src/core/devloop.ts
 init_artifacts();
 init_agents();
-import { mkdirSync as mkdirSync20, writeFileSync as writeFileSync15 } from 'fs';
-import { join as join15 } from 'path';
+import { mkdirSync as mkdirSync19, writeFileSync as writeFileSync15 } from 'fs';
+import { join as join14 } from 'path';
 function devloopInit(workspace, specPath, configPath2) {
   const args = ['kloop', 'init', '--workspace', workspace, '--spec', specPath];
   if (configPath2) {
@@ -85475,16 +85278,16 @@ function devloopInit(workspace, specPath, configPath2) {
   return match[1];
 }
 function writeKloopSpec(kautopilotSessionId, content, name = 'kloop-spec.md') {
-  const dir = join15(sessionDir(kautopilotSessionId), 'tmp');
-  mkdirSync20(dir, { recursive: true });
-  const specPath = join15(dir, name);
+  const dir = join14(sessionDir(kautopilotSessionId), 'tmp');
+  mkdirSync19(dir, { recursive: true });
+  const specPath = join14(dir, name);
   writeFileSync15(specPath, content);
   return specPath;
 }
 function writeKloopConfig(kautopilotSessionId, config) {
-  const dir = join15(sessionDir(kautopilotSessionId), 'tmp');
-  mkdirSync20(dir, { recursive: true });
-  const configPath2 = join15(dir, 'kloop-config.yaml');
+  const dir = join14(sessionDir(kautopilotSessionId), 'tmp');
+  mkdirSync19(dir, { recursive: true });
+  const configPath2 = join14(dir, 'kloop-config.yaml');
   const binary = getDefaultBinary();
   const yaml = [
     '# kloop config generated by kautopilot',
@@ -85633,7 +85436,7 @@ async function handleClearLoop(ctx) {
 
 // src/phases/phase2/setup-run.ts
 init_log();
-import { existsSync as existsSync20, readFileSync as readFileSync17 } from 'fs';
+import { existsSync as existsSync19, readFileSync as readFileSync15 } from 'fs';
 init_shared();
 init_artifacts();
 async function handleSetupRun(ctx) {
@@ -85652,10 +85455,10 @@ async function handleSetupRun(ctx) {
     throw new Error(`No plan files found for ${ctx.ticketId}`);
   }
   const planPath = plans[planIndex];
-  if (!planPath || !existsSync20(planPath)) {
+  if (!planPath || !existsSync19(planPath)) {
     throw new Error(`Plan file not found for plan index ${planIndex}`);
   }
-  const planContent = readFileSync17(planPath, 'utf-8');
+  const planContent = readFileSync15(planPath, 'utf-8');
   const specPath = writeKloopSpec(session.id, planContent, `plan-${planIndex + 1}-spec.md`);
   const configPath2 = writeKloopConfig(session.id, {
     maxIterations: ctx.config.kloop.maxIterations,
@@ -85735,7 +85538,7 @@ async function handleRunning(ctx) {
 // src/phases/phase2/resolve.ts
 init_log();
 init_artifacts();
-import { existsSync as existsSync21, readFileSync as readFileSync18 } from 'fs';
+import { existsSync as existsSync20, readFileSync as readFileSync16 } from 'fs';
 init_shared();
 init_agents();
 async function handleResolve(ctx) {
@@ -85762,7 +85565,7 @@ async function handleResolve(ctx) {
   const activePlans = resolveActivePlans2(snapPath(session.id, version, 'plans'));
   const activePlanPath = activePlans[planIndex];
   const planContent =
-    activePlanPath && existsSync21(activePlanPath)
+    activePlanPath && existsSync20(activePlanPath)
       ? readFile(activePlanPath, 'utf-8')
       : resolveSpec(session.id, version, `plans/plan-${planIndex + 1}-1.md`);
   const taskSpecContent = resolveSpec(session.id, version);
@@ -85811,8 +85614,8 @@ Where <decision> is one of:
   });
   let resolution = '';
   let rewriteDecision = 'refine_local';
-  if (existsSync21(resolutionPath)) {
-    resolution = readFileSync18(resolutionPath, 'utf-8');
+  if (existsSync20(resolutionPath)) {
+    resolution = readFileSync16(resolutionPath, 'utf-8');
     const decisionMatch = resolution.match(
       /REWRITE_DECISION:\s*(refine_local|patch_downstream|regenerate_remaining|revisit_spec)/i,
     );
@@ -85849,18 +85652,18 @@ Where <decision> is one of:
 // src/phases/phase2/rewrite-spec.ts
 init_log();
 import {
-  existsSync as existsSync22,
-  readFileSync as readFileSync19,
+  existsSync as existsSync21,
+  readFileSync as readFileSync17,
   writeFileSync as writeFileSync16,
-  readdirSync as readdirSync6,
+  readdirSync as readdirSync7,
 } from 'fs';
-import { join as join16 } from 'path';
+import { join as join15 } from 'path';
 init_artifacts();
 init_spawn();
 init_shared();
 init_agents();
 function getRewriteTargets(plansDir, currentPlanIndex, decision) {
-  const filenames = readdirSync6(plansDir).filter(
+  const filenames = readdirSync7(plansDir).filter(
     name => /^plan-\d+-\d+\.md$/.test(name) || /^plan-\d+\.md$/.test(name),
   );
   const ordinals = Array.from(
@@ -85877,7 +85680,7 @@ function getRewriteTargets(plansDir, currentPlanIndex, decision) {
   return [currentPlanIndex + 1];
 }
 function nextRewriteNumber(plansDir, ordinal) {
-  const filenames = readdirSync6(plansDir);
+  const filenames = readdirSync7(plansDir);
   let maxRewrite = 0;
   for (const filename of filenames) {
     const match = filename.match(new RegExp(`^plan-${ordinal}(?:-(\\d+))?\\.md$`));
@@ -85899,17 +85702,17 @@ async function handleRewriteSpec(ctx) {
     metadata: { stepType: 'llm' },
   });
   const resolutionPath = `${sessionDir(session.id)}/tmp/resolution.md`;
-  const resolution = existsSync22(resolutionPath) ? readFileSync19(resolutionPath, 'utf-8') : '';
+  const resolution = existsSync21(resolutionPath) ? readFileSync17(resolutionPath, 'utf-8') : '';
   const plansDir = snapshotPath(session.id, version, 'plans');
-  const currentPlanCandidates = readdirSync6(plansDir)
+  const currentPlanCandidates = readdirSync7(plansDir)
     .filter(name => new RegExp(`^plan-${planIndex + 1}(?:-\\d+)?\\.md$`).test(name))
     .sort();
   const activePlanPath =
     currentPlanCandidates.length > 0
-      ? join16(plansDir, currentPlanCandidates[currentPlanCandidates.length - 1])
+      ? join15(plansDir, currentPlanCandidates[currentPlanCandidates.length - 1])
       : snapshotPath(session.id, version, `plans/plan-${planIndex + 1}-1.md`);
-  const planContent = existsSync22(activePlanPath)
-    ? readFileSync19(activePlanPath, 'utf-8')
+  const planContent = existsSync21(activePlanPath)
+    ? readFileSync17(activePlanPath, 'utf-8')
     : resolveSpec(session.id, version, `plans/plan-${planIndex + 1}-1.md`);
   const taskSpecContent = resolveSpec(session.id, version);
   const rewriteInstruction = getAgentPrompt('phase2', 'rewrite_spec');
@@ -85940,8 +85743,8 @@ ${taskSpecContent}
       version,
       `plans/plan-${ordinal}-${ordinal === planIndex + 1 ? attempt : 1}.md`,
     );
-    const targetPlanContent = existsSync22(targetPlanPath)
-      ? readFileSync19(targetPlanPath, 'utf-8')
+    const targetPlanContent = existsSync21(targetPlanPath)
+      ? readFileSync17(targetPlanPath, 'utf-8')
       : resolveSpec(session.id, version, `plans/plan-${ordinal}-1.md`);
     const targetPrompt = `
 ${rewriteInstruction}
@@ -85967,15 +85770,15 @@ ${taskSpecContent}
       label: `rewrite-spec-plan-${ordinal}`,
     });
     const rewriteFilename = `plan-${ordinal}-${nextRewriteNumber(plansDir, ordinal)}.md`;
-    const rewritePath = join16(plansDir, rewriteFilename);
+    const rewritePath = join15(plansDir, rewriteFilename);
     ensureArtifactDir(rewritePath);
     writeFileSync16(rewritePath, rewrittenPlan);
     rewrittenPlans.push(rewriteFilename);
   }
   writePlanManifest(session.id, version);
   const activeRewriteFilename = rewrittenPlans[0] ?? `plan-${planIndex + 1}-${attempt + 1}.md`;
-  const activeRewritePath = join16(plansDir, activeRewriteFilename);
-  const rewrittenActivePlan = readFileSync19(activeRewritePath, 'utf-8');
+  const activeRewritePath = join15(plansDir, activeRewriteFilename);
+  const rewrittenActivePlan = readFileSync17(activeRewritePath, 'utf-8');
   const specPath = writeKloopSpec(session.id, rewrittenActivePlan, `plan-${planIndex + 1}-rewrite-${attempt}.md`);
   const configPath2 = writeKloopConfig(session.id, {
     maxIterations: ctx.config.kloop.maxIterations,
@@ -86001,7 +85804,7 @@ ${taskSpecContent}
 init_shared();
 init_log();
 init_spawn();
-import { existsSync as existsSync23, readFileSync as readFileSync20 } from 'fs';
+import { existsSync as existsSync22, readFileSync as readFileSync18 } from 'fs';
 init_agents();
 async function handleCommit(ctx) {
   const { session, version, planIndex } = ctx;
@@ -86031,10 +85834,10 @@ async function handleCommit(ctx) {
   let conventions = '';
   for (const f of conventionFiles) {
     const path = `${session.worktree}/${f}`;
-    if (existsSync23(path)) {
+    if (existsSync22(path)) {
       conventions += `
 ### ${f}
-${readFileSync20(path, 'utf-8')}
+${readFileSync18(path, 'utf-8')}
 `;
     }
   }
@@ -86045,8 +85848,8 @@ ${readFileSync20(path, 'utf-8')}
   const activePlans = resolveActivePlans2(snapPath(session.id, version, 'plans'));
   const activePlanPath = activePlans[planIndex];
   const planContent =
-    activePlanPath && existsSync23(activePlanPath)
-      ? readFileSync20(activePlanPath, 'utf-8')
+    activePlanPath && existsSync22(activePlanPath)
+      ? readFileSync18(activePlanPath, 'utf-8')
       : resolveSpec(session.id, version, `plans/plan-${planIndex + 1}-1.md`);
   const commitInstruction = getAgentPrompt('phase2', 'commit');
   const commitPrompt = `
@@ -86243,7 +86046,7 @@ init_agents();
 // src/phases/phase3/commit-pending.ts
 init_log();
 init_spawn();
-import { existsSync as existsSync24, readFileSync as readFileSync21 } from 'fs';
+import { existsSync as existsSync23, readFileSync as readFileSync19 } from 'fs';
 init_agents();
 async function handleCommitPending(ctx) {
   const { session, version } = ctx;
@@ -86298,10 +86101,10 @@ async function handleCommitPending(ctx) {
   let conventions = '';
   for (const f of conventionFiles) {
     const path = `${session.worktree}/${f}`;
-    if (existsSync24(path)) {
+    if (existsSync23(path)) {
       conventions += `
 ### ${f}
-${readFileSync21(path, 'utf-8')}
+${readFileSync19(path, 'utf-8')}
 `;
     }
   }
@@ -87478,7 +87281,7 @@ async function handleAct(ctx) {
 init_log();
 init_artifacts();
 init_shared();
-import { existsSync as existsSync25, readFileSync as readFileSync22 } from 'fs';
+import { existsSync as existsSync24, readFileSync as readFileSync20 } from 'fs';
 init_agents();
 async function handleTtyResolve(ctx) {
   const { session, version, ttyReason, baseBranch } = ctx;
@@ -87492,7 +87295,7 @@ async function handleTtyResolve(ctx) {
   const ticketId = ctx.ticketId;
   const specContent = resolveSpec(session.id, version);
   const plans = resolvePlans(session.id, version);
-  const plansContent = plans.map(p2 => readFileSync22(p2, 'utf-8')).join(`
+  const plansContent = plans.map(p2 => readFileSync20(p2, 'utf-8')).join(`
 
 ---
 
@@ -87501,8 +87304,8 @@ async function handleTtyResolve(ctx) {
   let feedbackContent = '';
   try {
     const feedbackPath = `${feedbackDir}/feedback.md`;
-    if (existsSync25(feedbackPath)) {
-      feedbackContent = readFileSync22(feedbackPath, 'utf-8');
+    if (existsSync24(feedbackPath)) {
+      feedbackContent = readFileSync20(feedbackPath, 'utf-8');
     }
   } catch {
     feedbackContent = '';
@@ -87669,7 +87472,7 @@ Please review the situation and help me resolve the issue. Apply any needed chan
 // src/phases/phase3/write-fix.ts
 init_log();
 init_spawn();
-import { existsSync as existsSync26, readFileSync as readFileSync23 } from 'fs';
+import { existsSync as existsSync25, readFileSync as readFileSync21 } from 'fs';
 init_artifacts();
 init_shared();
 init_agents();
@@ -87683,7 +87486,7 @@ async function handleWriteFix(ctx) {
   });
   const specContent = resolveSpec(session.id, version);
   const plans = resolvePlans(session.id, version);
-  const plansContent = plans.map(p2 => readFileSync23(p2, 'utf-8')).join(`
+  const plansContent = plans.map(p2 => readFileSync21(p2, 'utf-8')).join(`
 
 ---
 
@@ -87692,8 +87495,8 @@ async function handleWriteFix(ctx) {
   let feedbackContent = '';
   try {
     const feedbackPath = `${feedbackDir}/feedback.md`;
-    if (existsSync26(feedbackPath)) {
-      feedbackContent = readFileSync23(feedbackPath, 'utf-8');
+    if (existsSync25(feedbackPath)) {
+      feedbackContent = readFileSync21(feedbackPath, 'utf-8');
     }
   } catch {
     feedbackContent = '';
@@ -87888,7 +87691,7 @@ async function handleFeedback(ctx) {
     metadata: { stepType: 'code' },
   });
   const { textInput: textInput2 } = await Promise.resolve().then(() => (init_inquirer(), exports_inquirer));
-  const { writeFileSync: writeFileSync17, mkdirSync: mkdirSync21 } = await import('fs');
+  const { writeFileSync: writeFileSync17, mkdirSync: mkdirSync20 } = await import('fs');
   const { snapshotPath: snapshotPath2, ensureArtifactDir: ensureArtifactDir2 } = await Promise.resolve().then(
     () => (init_artifacts(), exports_artifacts),
   );
@@ -87914,8 +87717,8 @@ init_artifacts();
 init_shared();
 init_spawn();
 init_agents();
-import { writeFileSync as writeFileSync17, existsSync as existsSync27, readFileSync as readFileSync24 } from 'fs';
-import { join as join17 } from 'path';
+import { writeFileSync as writeFileSync17, existsSync as existsSync26, readFileSync as readFileSync22 } from 'fs';
+import { join as join16 } from 'path';
 async function handleTicketDraft(ctx) {
   const { session, version, ticketId } = ctx;
   appendEvent(session.id, {
@@ -87925,8 +87728,8 @@ async function handleTicketDraft(ctx) {
     metadata: { stepType: 'llm', deliveryKind: 'ticket' },
   });
   const specContent = resolveSpec(session.id, version);
-  const ticketPath = join17(`${process.env.HOME}/.kautopilot/${session.id}/artifacts`, 'ticket.md');
-  const ticketContent = existsSync27(ticketPath) ? readFileSync24(ticketPath, 'utf-8') : '';
+  const ticketPath = join16(`${process.env.HOME}/.kautopilot/${session.id}/artifacts`, 'ticket.md');
+  const ticketContent = existsSync26(ticketPath) ? readFileSync22(ticketPath, 'utf-8') : '';
   const binary = getAgentBinary('phase3', 'ticket_draft');
   const draftPrompt = `Generate ticket delivery artifacts based on the completed implementation.
 
@@ -88003,7 +87806,7 @@ init_log();
 init_artifacts();
 init_inquirer();
 init_markdown();
-import { readFileSync as readFileSync25, readdirSync as readdirSync8 } from 'fs';
+import { readFileSync as readFileSync23, readdirSync as readdirSync9 } from 'fs';
 async function handleTicketReview(ctx) {
   const { session, version } = ctx;
   appendEvent(session.id, {
@@ -88015,7 +87818,7 @@ async function handleTicketReview(ctx) {
   const epochDir = snapshotPath(session.id, version, '.');
   const artifactFiles = [];
   try {
-    const files = readdirSync8(epochDir);
+    const files = readdirSync9(epochDir);
     for (const f of files) {
       if (/^(tickets-\d+|report-[a-z])\.md$/.test(f)) {
         artifactFiles.push(f);
@@ -88038,7 +87841,7 @@ ${'='.repeat(60)}`);
   console.log(`${'='.repeat(60)}
 `);
   for (const f of artifactFiles.sort()) {
-    const content = readFileSync25(snapshotPath(session.id, version, f), 'utf-8');
+    const content = readFileSync23(snapshotPath(session.id, version, f), 'utf-8');
     console.log(`--- ${f} ---`);
     console.log(renderMarkdown(content));
     console.log();
@@ -88098,8 +87901,8 @@ ${'='.repeat(60)}`);
 init_log();
 init_artifacts();
 init_scripts();
-import { readFileSync as readFileSync26, readdirSync as readdirSync9 } from 'fs';
-import { join as join18 } from 'path';
+import { readFileSync as readFileSync24, readdirSync as readdirSync10 } from 'fs';
+import { join as join17 } from 'path';
 init_format();
 init_markdown();
 async function handleTicketPublish(ctx) {
@@ -88115,16 +87918,16 @@ async function handleTicketPublish(ctx) {
   const epochDir = snapshotPath(session.id, version, '.');
   const artifactFiles = [];
   try {
-    const files = readdirSync9(epochDir);
+    const files = readdirSync10(epochDir);
     for (const f of files) {
       if (/^(tickets-\d+|report-[a-z])\.md$/.test(f)) {
         artifactFiles.push(f);
       }
     }
   } catch {}
-  const scriptsDir = join18(sessionDir(session.id), 'scripts');
+  const scriptsDir = join17(sessionDir(session.id), 'scripts');
   for (const f of artifactFiles.sort()) {
-    const content = readFileSync26(snapshotPath(session.id, version, f), 'utf-8');
+    const content = readFileSync24(snapshotPath(session.id, version, f), 'utf-8');
     if (f.startsWith('tickets-1')) {
       const result = runScriptFromDir(scriptsDir, 'update-ticket', [ticketId, content]);
       if (result.ok) {
@@ -88150,8 +87953,8 @@ async function handleTicketPublish(ctx) {
     } else if (f.startsWith('report-')) {
       const mdPath = snapshotPath(session.id, version, f);
       let artifactPath2 = mdPath;
-      const pdfPath = join18(epochDir, f.replace(/\.md$/, '.pdf'));
-      const pdfResult = markdownToPdf(readFileSync26(mdPath, 'utf-8'), pdfPath, f.replace(/\.md$/, ''));
+      const pdfPath = join17(epochDir, f.replace(/\.md$/, '.pdf'));
+      const pdfResult = markdownToPdf(readFileSync24(mdPath, 'utf-8'), pdfPath, f.replace(/\.md$/, ''));
       if (pdfResult) {
         artifactPath2 = pdfResult;
         logOk(`Converted ${f} to PDF`);
@@ -88375,7 +88178,7 @@ async function runStart(opts) {
     process.exit(1);
   }
   const sDir = sessionDir(session.id);
-  if (!existsSync30(`${sDir}/config.yaml`)) {
+  if (!existsSync29(`${sDir}/config.yaml`)) {
     logError('Config file missing. Run `kautopilot init` first.');
     process.exit(1);
   }
@@ -88402,14 +88205,14 @@ async function runStart(opts) {
       process.exit(1);
     }
     if (phase === 'implementation' || phase === 'polish') {
-      const hasSpec = existsSync30(`${sDir}/artifacts`);
+      const hasSpec = existsSync29(`${sDir}/artifacts`);
       if (!hasSpec) {
         logError(`Cannot start ${phase}: no spec artifacts found. Run phase 'plan' first.`);
         process.exit(1);
       }
     }
     if (phase === 'polish') {
-      const hasPlans = existsSync30(`${sDir}/artifacts`);
+      const hasPlans = existsSync29(`${sDir}/artifacts`);
       if (!hasPlans) {
         logError(`Cannot start polish: no plan artifacts found. Run phase 'implementation' first.`);
         process.exit(1);
@@ -88430,7 +88233,7 @@ async function runStart(opts) {
       phase = status.phase;
       if (phase === 'implementation' || phase === 'polish') {
         const artifactsDir = `${sDir}/artifacts`;
-        if (!existsSync30(artifactsDir)) {
+        if (!existsSync29(artifactsDir)) {
           logWarn(`Cannot resume ${phase}: no session artifacts found. Restarting from plan.`);
           phase = 'plan';
         }
@@ -89236,8 +89039,8 @@ init_esm();
 init_config();
 init_scripts();
 init_format();
-import { existsSync as existsSync31, mkdirSync as mkdirSync21 } from 'fs';
-import { join as join19 } from 'path';
+import { existsSync as existsSync30, mkdirSync as mkdirSync20 } from 'fs';
+import { join as join18 } from 'path';
 var ORGS_DIR2 = `${process.env.HOME}/.kautopilot/orgs`;
 function createOrgCommand() {
   return new Command('org')
@@ -89259,19 +89062,19 @@ function createOrgInitCommand() {
     });
 }
 async function runOrgInit(name) {
-  const orgDir = join19(ORGS_DIR2, name);
-  if (existsSync31(orgDir)) {
+  const orgDir = join18(ORGS_DIR2, name);
+  if (existsSync30(orgDir)) {
     const { confirmAction: confirmAction3 } = await Promise.resolve().then(() => (init_inquirer(), exports_inquirer));
     const confirmed = await confirmAction3(`Org '${name}' already exists. Overwrite?`, false);
     if (!confirmed) return;
   }
-  mkdirSync21(orgDir, { recursive: true });
+  mkdirSync20(orgDir, { recursive: true });
   ensureGlobalConfig();
   const globalConfigPath2 = `${process.env.HOME}/.kautopilot/config.yaml`;
-  const orgConfigPath2 = join19(orgDir, 'config.yaml');
-  const { copyFileSync: copyFileSync6 } = await import('fs');
-  if (existsSync31(globalConfigPath2)) {
-    copyFileSync6(globalConfigPath2, orgConfigPath2);
+  const orgConfigPath2 = join18(orgDir, 'config.yaml');
+  const { copyFileSync: copyFileSync7 } = await import('fs');
+  if (existsSync30(globalConfigPath2)) {
+    copyFileSync7(globalConfigPath2, orgConfigPath2);
     logField('Config', `${orgConfigPath2} (copied from global)`);
   }
   logField('Org', name);
@@ -89300,9 +89103,9 @@ function createOrgLsCommand() {
   });
 }
 async function runOrgLs() {
-  mkdirSync21(ORGS_DIR2, { recursive: true });
-  const { readdirSync: readdirSync10, statSync } = await import('fs');
-  const orgs = readdirSync10(ORGS_DIR2, { withFileTypes: true }).filter(d3 => d3.isDirectory());
+  mkdirSync20(ORGS_DIR2, { recursive: true });
+  const { readdirSync: readdirSync11, statSync } = await import('fs');
+  const orgs = readdirSync11(ORGS_DIR2, { withFileTypes: true }).filter(d3 => d3.isDirectory());
   if (orgs.length === 0) {
     logInfo('No orgs configured. Run `kautopilot org init <name>` to create one.');
     return;
@@ -89310,12 +89113,12 @@ async function runOrgLs() {
   const cols = { org: 12, scripts: 60 };
   console.log('ORG'.padEnd(cols.org) + 'SCRIPTS');
   for (const org of orgs) {
-    const orgDir = join19(ORGS_DIR2, org.name);
-    const scripts = readdirSync10(orgDir)
+    const orgDir = join18(ORGS_DIR2, org.name);
+    const scripts = readdirSync11(orgDir)
       .filter(f => !f.startsWith('.'))
       .filter(f => {
         try {
-          return statSync(join19(orgDir, f)).isFile();
+          return statSync(join18(orgDir, f)).isFile();
         } catch {
           return false;
         }
@@ -89329,10 +89132,7 @@ init_esm();
 init_db();
 init_git();
 init_config();
-init_artifacts();
 init_status();
-import { existsSync as existsSync32, readFileSync as readFileSync27 } from 'fs';
-import { join as join20 } from 'path';
 
 // src/core/review-runner.ts
 init_log();
@@ -89571,21 +89371,9 @@ async function runSpecReview() {
   }
   const status = ensureStatus(session.id);
   const version = status.version || 1;
-  const typeJsonPath = join20(sessionDir(session.id), 'artifacts', `v${version}`, 'type.json');
-  if (!existsSync32(typeJsonPath)) {
-    logError(`No type.json found at ${typeJsonPath}. Has route_type completed?`);
-    process.exit(1);
-  }
-  const typeInfo = JSON.parse(readFileSync27(typeJsonPath, 'utf-8'));
-  const typeName = typeInfo.type;
-  const typeConfig = config.types[typeName];
-  if (!typeConfig) {
-    logError(`Type "${typeName}" not found in config.`);
-    process.exit(1);
-  }
-  const reviewers = typeConfig.spec_reviewers;
+  const reviewers = config.spec_reviewers;
   if (!reviewers || Object.keys(reviewers).length === 0) {
-    console.log('No spec reviewers configured for this type.');
+    console.log('No spec reviewers configured.');
     return;
   }
   const vars = buildPromptVars(worktree, version);
@@ -89598,10 +89386,7 @@ init_esm();
 init_db();
 init_git();
 init_config();
-init_artifacts();
 init_status();
-import { existsSync as existsSync33, readFileSync as readFileSync28 } from 'fs';
-import { join as join21 } from 'path';
 init_format();
 function createPlanReviewCommand() {
   return new Command('plan-review')
@@ -89630,21 +89415,9 @@ async function runPlanReview() {
   }
   const status = ensureStatus(session.id);
   const version = status.version || 1;
-  const typeJsonPath = join21(sessionDir(session.id), 'artifacts', `v${version}`, 'type.json');
-  if (!existsSync33(typeJsonPath)) {
-    logError(`No type.json found at ${typeJsonPath}. Has route_type completed?`);
-    process.exit(1);
-  }
-  const typeInfo = JSON.parse(readFileSync28(typeJsonPath, 'utf-8'));
-  const typeName = typeInfo.type;
-  const typeConfig = config.types[typeName];
-  if (!typeConfig) {
-    logError(`Type "${typeName}" not found in config.`);
-    process.exit(1);
-  }
-  const reviewers = typeConfig.plan_reviewers;
+  const reviewers = config.plan_reviewers;
   if (!reviewers || Object.keys(reviewers).length === 0) {
-    console.log('No plan reviewers configured for this type.');
+    console.log('No plan reviewers configured.');
     return;
   }
   const vars = buildPromptVars(worktree, version);
@@ -89694,8 +89467,8 @@ function createLogEventCommand() {
 }
 
 // src/index.ts
-var __dirname2 = dirname14(fileURLToPath(import.meta.url));
-var pkg = JSON.parse(readFileSync29(join22(__dirname2, '..', 'package.json'), 'utf-8'));
+var __dirname2 = dirname13(fileURLToPath(import.meta.url));
+var pkg = JSON.parse(readFileSync25(join19(__dirname2, '..', 'package.json'), 'utf-8'));
 var program2 = new Command();
 program2
   .name('kautopilot')

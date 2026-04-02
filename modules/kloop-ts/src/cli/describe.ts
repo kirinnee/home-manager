@@ -7,8 +7,14 @@ import { formatDurationHuman, formatAgeHuman } from '../loop/format';
 
 const CLAUDE_AUTO_PREFIX = 'claude-auto-';
 
-function shortBinary(binary: string): string {
-  return binary.startsWith(CLAUDE_AUTO_PREFIX) ? binary.slice(CLAUDE_AUTO_PREFIX.length) : binary;
+function shortBinary(binary: string, harness?: string): string {
+  const name = binary.startsWith(CLAUDE_AUTO_PREFIX) ? binary.slice(CLAUDE_AUTO_PREFIX.length) : binary;
+  if (harness && harness !== 'claude') return `${name}:${harness}`;
+  return name;
+}
+
+function agentLabel(agent: MaterializedAgentState): string {
+  return shortBinary(agent.binary, agent.harness);
 }
 
 function formatDuration(ms: number): string {
@@ -65,7 +71,7 @@ function renderLoopFull(loop: MaterializedLoop, multiPhase: boolean): void {
     const implTok = formatTokens(impl.inputTokens, impl.outputTokens);
     const errNote = impl.error ? pc.yellow(` ${impl.error}`) : '';
     if (impl.status === 'running') {
-      console.log(fmtRow('impl', shortBinary(impl.binary), agentDuration(impl), `${pc.green('●')} running`));
+      console.log(fmtRow('impl', agentLabel(impl), agentDuration(impl), `${pc.green('●')} running`));
     } else if (impl.status === 'pending') {
       console.log(fmtRow('impl', pc.dim('...'), '', pc.dim('pending')));
     } else {
@@ -73,7 +79,7 @@ function renderLoopFull(loop: MaterializedLoop, multiPhase: boolean): void {
       console.log(
         fmtRow(
           'impl',
-          shortBinary(impl.binary),
+          agentLabel(impl),
           agentDuration(impl),
           `${dot}${implTok ? `  ${pc.dim(implTok + ' tok')}` : ''}${errNote}`,
         ),
@@ -94,7 +100,7 @@ function renderLoopFull(loop: MaterializedLoop, multiPhase: boolean): void {
         console.log(
           fmtRow(
             role,
-            shortBinary(r.binary),
+            agentLabel(r),
             elapsed,
             `${pc.dim(r.status)}${r.verdict ? `  ${verdictMark(r.verdict)}` : ''}${pct ? `  ${pct}` : ''}`,
           ),
@@ -103,7 +109,7 @@ function renderLoopFull(loop: MaterializedLoop, multiPhase: boolean): void {
         console.log(
           fmtRow(
             role,
-            shortBinary(r.binary),
+            agentLabel(r),
             agentDuration(r),
             `${verdictMark(r.verdict)}  ${statusMark(agentOk(r))}${pct ? `  ${pc.dim(pct)}` : ''}${tok ? `  ${pc.dim(tok + ' tok')}` : ''}${errNote}`,
           ),

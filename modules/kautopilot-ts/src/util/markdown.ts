@@ -1,6 +1,6 @@
 import { existsSync, writeFileSync } from 'node:fs';
 import { marked, Marked } from 'marked';
-import markedTerminal from 'marked-terminal';
+import { markedTerminal } from 'marked-terminal';
 
 let configured = false;
 
@@ -11,15 +11,15 @@ let configured = false;
  */
 export function renderMarkdown(text: string): string {
   if (!configured) {
-    marked.use({
-      renderer: new (markedTerminal as any)({
+    marked.use(
+      markedTerminal({
         width: process.stdout.columns || 80,
         reflowText: true,
         showSectionPrefix: true,
         emoji: true,
         tab: 2,
       }),
-    });
+    );
     configured = true;
   }
 

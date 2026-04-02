@@ -6,7 +6,6 @@ import { ensureStatus } from '../../core/status';
 import { loadSessionAgents } from '../../core/agents';
 import { runScript } from '../../core/scripts';
 import { handlePullTicket } from './pull-ticket';
-import { handleRouteType } from './route-type';
 import { handleWriteSpec } from './write-spec';
 import { handleFinalizeSpec } from './finalize-spec';
 import { handleWritePlans } from './write-plans';
@@ -18,7 +17,6 @@ export { discoverPlans } from '../shared';
 // State map for Phase 1
 const phase1States: Phase1StateMap = {
   pull_ticket: handlePullTicket,
-  route_type: handleRouteType,
   write_spec: handleWriteSpec,
   finalize_spec: handleFinalizeSpec,
   write_plans: handleWritePlans,

@@ -14,8 +14,14 @@ import { formatDurationHuman, formatAgeHuman } from '../loop/format';
 
 const CLAUDE_AUTO_PREFIX = 'claude-auto-';
 
-function shortBinary(binary: string): string {
-  return binary.startsWith(CLAUDE_AUTO_PREFIX) ? binary.slice(CLAUDE_AUTO_PREFIX.length) : binary;
+function shortBinary(binary: string, harness?: string): string {
+  const name = binary.startsWith(CLAUDE_AUTO_PREFIX) ? binary.slice(CLAUDE_AUTO_PREFIX.length) : binary;
+  if (harness && harness !== 'claude') return `${name}:${harness}`;
+  return name;
+}
+
+function agentLabel(agent: MaterializedAgentState): string {
+  return shortBinary(agent.binary, agent.harness);
 }
 
 function formatDuration(ms: number): string {
@@ -66,12 +72,12 @@ function renderLoop(loop: MaterializedLoop, multiPhase: boolean, dimmed: boolean
     const impl = loop.implementer;
     const errNote = impl.error ? pc.yellow(` ${impl.error}`) : '';
     if (impl.status === 'running') {
-      console.log(prefix(fmtRow('impl', shortBinary(impl.binary), agentDuration(impl), `${pc.green('●')} running`)));
+      console.log(prefix(fmtRow('impl', agentLabel(impl), agentDuration(impl), `${pc.green('●')} running`)));
     } else if (impl.status === 'pending') {
       console.log(prefix(fmtRow('impl', pc.dim('...'), '', pc.dim('pending'))));
     } else {
       const dot = impl.exitCode === 0 ? pc.green('●') : pc.red('●');
-      console.log(prefix(fmtRow('impl', shortBinary(impl.binary), agentDuration(impl), `${dot}${errNote}`)));
+      console.log(prefix(fmtRow('impl', agentLabel(impl), agentDuration(impl), `${dot}${errNote}`)));
     }
   }
 
@@ -89,7 +95,7 @@ function renderLoop(loop: MaterializedLoop, multiPhase: boolean, dimmed: boolean
           prefix(
             fmtRow(
               role,
-              shortBinary(r.binary),
+              agentLabel(r),
               elapsed,
               `${pc.dim(r.status)}${r.verdict ? `  ${verdictMark(r.verdict)}` : ''}${pct ? `  ${pct}` : ''}${propMark ? `  ${propMark}` : ''}`,
             ),
@@ -101,7 +107,7 @@ function renderLoop(loop: MaterializedLoop, multiPhase: boolean, dimmed: boolean
           prefix(
             fmtRow(
               role,
-              shortBinary(r.binary),
+              agentLabel(r),
               agentDuration(r),
               `${verdictMark(r.verdict)}  ${statusMark(agentOk(r))}${pct ? `  ${pc.dim(pct)}` : ''}${errNote}${propMark ? `  ${propMark}` : ''}`,
             ),

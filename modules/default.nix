@@ -13,10 +13,10 @@ rec {
   kloop-dev = nixpkgs.writeShellScriptBin "kloop-dev" ''
     exec ${nixpkgs.bun}/bin/bun run ~/.config/home-manager/modules/kloop-ts/src/index.ts "$@"
   '';
-  kautopilot = nixpkgs.writeShellScriptBin "kautopilot" ''
+  kautopilot = import ./kautopilot-ts/default.nix { inherit nixpkgs; };
+  kautopilot-dev = nixpkgs.writeShellScriptBin "kautopilot-dev" ''
     exec ${nixpkgs.bun}/bin/bun run ~/.config/home-manager/modules/kautopilot-ts/src/index.ts "$@"
   '';
-  kautopilot-full = import ./kautopilot-ts/default.nix { inherit nixpkgs; };
   # gemini-auto wrapper: forwards to gemini-cli, owned by kloop command builder
   # kloop is responsible for passing --yolo, --output-format stream-json, -p flags
   gemini-auto = nixpkgs.writeShellScriptBin "gemini-auto" ''

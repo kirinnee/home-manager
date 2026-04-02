@@ -501,7 +501,11 @@ export class AgentRunner {
       checkpointResultFile: `${paths.loopCheckpointerPath(runId, iteration)}/checkpoint-result.json`,
     };
 
-    const prompt = buildCheckpointerPrompt(this.config.prompts?.checkpointer, checkpointerVars);
+    const prompt = buildCheckpointerPrompt(
+      this.config.prompts?.checkpointer,
+      checkpointerVars,
+      this.config.compressSpec,
+    );
 
     // Write prompt to temp file
     const promptFile = await this.writePromptFile(sessionId, prompt);

@@ -42,38 +42,38 @@ const NOOP_SCRIPT = '#!/bin/bash\n# no-op\nexit 0\n';
 const ORGS_DIR = `${process.env.HOME}/.kautopilot/orgs`;
 
 function classifyAccessSetup(answer: string): { needsSetupHelp: boolean; assessment: string } {
-  const normalized = answer.trim().toLowerCase();
+  const trimmed = answer.trim();
+  const normalized = trimmed.toLowerCase();
   if (!normalized) {
     return { needsSetupHelp: true, assessment: 'No access method provided yet.' };
   }
 
-  const setupIndicators = [
-    'no',
-    'not set up',
-    'not setup',
-    'not configured',
-    'none',
-    'broken',
-    'idk',
-    "i don't know",
-    'not logged in',
-    'not authenticated',
-    'need login',
-    'need auth',
-    'need setup',
-    'not working',
-    'installed but',
-    'acli',
-    'jira',
-    'cli only',
-    'maybe',
-    'unsure',
+  const setupPatterns = [
+    /^no$/,
+    /\bnot set ?up\b/,
+    /\bnot configured\b/,
+    /^none$/,
+    /\bbroken\b/,
+    /\bidk\b/,
+    /\bi don't know\b/,
+    /\bnot logged in\b/,
+    /\bnot authenticated\b/,
+    /\bneed login\b/,
+    /\bneed auth(?:entication)?\b/,
+    /\bneed setup\b/,
+    /\bnot working\b/,
+    /\binstalled but\b/,
+    /^maybe$/,
+    /^unsure$/,
   ];
 
-  const needsSetupHelp = setupIndicators.some(indicator => normalized === indicator || normalized.includes(indicator));
+  const readySignals = [/\bauthenticated\b/, /\bworking\b/, /\buse\b.+\bacli\b/, /\bacli\b/, /\bcli\b/];
+
+  const needsSetupHelp =
+    setupPatterns.some(pattern => pattern.test(normalized)) && !readySignals.some(pattern => pattern.test(normalized));
   const assessment = needsSetupHelp
-    ? `Access may need setup or verification: ${answer.trim()}`
-    : `Access appears ready: ${answer.trim()}`;
+    ? `Access may need setup or verification: ${trimmed}`
+    : `Access appears ready: ${trimmed}`;
   return { needsSetupHelp, assessment };
 }
 

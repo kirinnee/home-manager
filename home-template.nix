@@ -2,6 +2,7 @@
 , pkgs
 , lib
 , pkgs-llm
+, pkgs-loctl
 , pkgs-240924
 , pkgs-stable
 , pkgs-unstable
@@ -253,6 +254,7 @@ rec {
 
   home.packages = (
     [
+      pkgs-loctl.loctl-wrapper
 
       # system
       coreutils
@@ -327,6 +329,7 @@ rec {
       kloop
       kloop-dev
       kautopilot
+      kautopilot-dev
       atomi.clickup_cli
       grafana-loki
       prometheus.cli

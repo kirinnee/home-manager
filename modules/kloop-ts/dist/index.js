@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 // @bun
+import { createRequire } from 'node:module';
 var __create = Object.create;
 var __getProtoOf = Object.getPrototypeOf;
 var __defProp = Object.defineProperty;
@@ -62,7 +63,7 @@ var __export = (target, all) => {
     });
 };
 var __esm = (fn, res) => () => (fn && (res = fn((fn = 0))), res);
-var __require = import.meta.require;
+var __require = /* @__PURE__ */ createRequire(import.meta.url);
 
 // node_modules/commander/lib/error.js
 var require_error = __commonJS(exports => {
@@ -394,7 +395,7 @@ var require_help = __commonJS(exports => {
       );
     }
     wrap(str, width, indent, minColumnWidth = 40) {
-      const indents = ' \\f\\t\\v\xA0\u1680\u2000-\u200A\u202F\u205F\u3000\uFEFF';
+      const indents = ' \\f\\t\\v   -   　\uFEFF';
       const manualIndent = new RegExp(`[\\n][${indents}]+`);
       if (str.match(manualIndent)) return str;
       const columnWidth = width - indent;
@@ -407,7 +408,7 @@ var require_help = __commonJS(exports => {
 `,
       );
       const indentString = ' '.repeat(indent);
-      const zeroWidthSpace = '\u200B';
+      const zeroWidthSpace = '​';
       const breaks = `\\s${zeroWidthSpace}`;
       const regex = new RegExp(
         `
@@ -654,11 +655,11 @@ var require_suggestSimilar = __commonJS(exports => {
 
 // node_modules/commander/lib/command.js
 var require_command = __commonJS(exports => {
-  var EventEmitter = __require('events').EventEmitter;
-  var childProcess = __require('child_process');
-  var path = __require('path');
-  var fs = __require('fs');
-  var process2 = __require('process');
+  var EventEmitter = __require('node:events').EventEmitter;
+  var childProcess = __require('node:child_process');
+  var path = __require('node:path');
+  var fs = __require('node:fs');
+  var process2 = __require('node:process');
   var { Argument, humanReadableArgName } = require_argument();
   var { CommanderError } = require_error();
   var { Help } = require_help();
@@ -2052,7 +2053,7 @@ __export(exports_nanoid, {
   customRandom: () => customRandom,
   customAlphabet: () => customAlphabet,
 });
-import { webcrypto as crypto2 } from 'crypto';
+import { webcrypto as crypto2 } from 'node:crypto';
 function fillPool(bytes) {
   if (!pool || pool.length < bytes) {
     pool = Buffer.allocUnsafe(bytes * POOL_SIZE_MULTIPLIER);
@@ -5527,16 +5528,16 @@ var require_errors = __commonJS(exports => {
     let lineStr = src.substring(lc.lineStarts[line - 1], lc.lineStarts[line]).replace(/[\n\r]+$/, '');
     if (ci >= 60 && lineStr.length > 80) {
       const trimStart = Math.min(ci - 39, lineStr.length - 79);
-      lineStr = '\u2026' + lineStr.substring(trimStart);
+      lineStr = '…' + lineStr.substring(trimStart);
       ci -= trimStart - 1;
     }
-    if (lineStr.length > 80) lineStr = lineStr.substring(0, 79) + '\u2026';
+    if (lineStr.length > 80) lineStr = lineStr.substring(0, 79) + '…';
     if (line > 1 && /^ *$/.test(lineStr.substring(0, ci))) {
       let prev = src.substring(lc.lineStarts[line - 2], lc.lineStarts[line - 1]);
       if (prev.length > 80)
         prev =
           prev.substring(0, 79) +
-          `\u2026
+          `…
 `;
       lineStr = prev + lineStr;
     }
@@ -6657,8 +6658,8 @@ var require_resolve_flow_scalar = __commonJS(exports => {
     r: '\r',
     t: '\t',
     v: '\v',
-    N: '\x85',
-    _: '\xA0',
+    N: '',
+    _: ' ',
     L: '\u2028',
     P: '\u2029',
     ' ': ' ',
@@ -9380,7 +9381,7 @@ var require_utils = __commonJS((exports, module) => {
     return unwindState(state, ret);
   }
   function truncate(str, desiredLength, truncateChar) {
-    truncateChar = truncateChar || '\u2026';
+    truncateChar = truncateChar || '…';
     let lengthOfStr = strlen(str);
     if (lengthOfStr <= desiredLength) {
       return str;
@@ -9397,23 +9398,23 @@ var require_utils = __commonJS((exports, module) => {
   function defaultOptions2() {
     return {
       chars: {
-        top: '\u2500',
-        'top-mid': '\u252C',
-        'top-left': '\u250C',
-        'top-right': '\u2510',
-        bottom: '\u2500',
-        'bottom-mid': '\u2534',
-        'bottom-left': '\u2514',
-        'bottom-right': '\u2518',
-        left: '\u2502',
-        'left-mid': '\u251C',
-        mid: '\u2500',
-        'mid-mid': '\u253C',
-        right: '\u2502',
-        'right-mid': '\u2524',
-        middle: '\u2502',
+        top: '─',
+        'top-mid': '┬',
+        'top-left': '┌',
+        'top-right': '┐',
+        bottom: '─',
+        'bottom-mid': '┴',
+        'bottom-left': '└',
+        'bottom-right': '┘',
+        left: '│',
+        'left-mid': '├',
+        mid: '─',
+        'mid-mid': '┼',
+        right: '│',
+        'right-mid': '┤',
+        middle: '│',
       },
-      truncate: '\u2026',
+      truncate: '…',
       colWidths: [],
       rowHeights: [],
       colAligns: [],
@@ -9704,32 +9705,32 @@ var require_trap = __commonJS((exports, module) => {
     text = text || 'Run the trap, drop the bass';
     text = text.split('');
     var trap = {
-      a: ['@', '\u0104', '\u023A', '\u0245', '\u0394', '\u039B', '\u0414'],
-      b: ['\xDF', '\u0181', '\u0243', '\u026E', '\u03B2', '\u0E3F'],
-      c: ['\xA9', '\u023B', '\u03FE'],
-      d: ['\xD0', '\u018A', '\u0500', '\u0501', '\u0502', '\u0503'],
-      e: ['\xCB', '\u0115', '\u018E', '\u0258', '\u03A3', '\u03BE', '\u04BC', '\u0A6C'],
-      f: ['\u04FA'],
-      g: ['\u0262'],
-      h: ['\u0126', '\u0195', '\u04A2', '\u04BA', '\u04C7', '\u050A'],
-      i: ['\u0F0F'],
-      j: ['\u0134'],
-      k: ['\u0138', '\u04A0', '\u04C3', '\u051E'],
-      l: ['\u0139'],
-      m: ['\u028D', '\u04CD', '\u04CE', '\u0520', '\u0521', '\u0D69'],
-      n: ['\xD1', '\u014B', '\u019D', '\u0376', '\u03A0', '\u048A'],
-      o: ['\xD8', '\xF5', '\xF8', '\u01FE', '\u0298', '\u047A', '\u05DD', '\u06DD', '\u0E4F'],
-      p: ['\u01F7', '\u048E'],
-      q: ['\u09CD'],
-      r: ['\xAE', '\u01A6', '\u0210', '\u024C', '\u0280', '\u042F'],
-      s: ['\xA7', '\u03DE', '\u03DF', '\u03E8'],
-      t: ['\u0141', '\u0166', '\u0373'],
-      u: ['\u01B1', '\u054D'],
-      v: ['\u05D8'],
-      w: ['\u0428', '\u0460', '\u047C', '\u0D70'],
-      x: ['\u04B2', '\u04FE', '\u04FC', '\u04FD'],
-      y: ['\xA5', '\u04B0', '\u04CB'],
-      z: ['\u01B5', '\u0240'],
+      a: ['@', 'Ą', 'Ⱥ', 'Ʌ', 'Δ', 'Λ', 'Д'],
+      b: ['ß', 'Ɓ', 'Ƀ', 'ɮ', 'β', '฿'],
+      c: ['©', 'Ȼ', 'Ͼ'],
+      d: ['Ð', 'Ɗ', 'Ԁ', 'ԁ', 'Ԃ', 'ԃ'],
+      e: ['Ë', 'ĕ', 'Ǝ', 'ɘ', 'Σ', 'ξ', 'Ҽ', '੬'],
+      f: ['Ӻ'],
+      g: ['ɢ'],
+      h: ['Ħ', 'ƕ', 'Ң', 'Һ', 'Ӈ', 'Ԋ'],
+      i: ['༏'],
+      j: ['Ĵ'],
+      k: ['ĸ', 'Ҡ', 'Ӄ', 'Ԟ'],
+      l: ['Ĺ'],
+      m: ['ʍ', 'Ӎ', 'ӎ', 'Ԡ', 'ԡ', '൩'],
+      n: ['Ñ', 'ŋ', 'Ɲ', 'Ͷ', 'Π', 'Ҋ'],
+      o: ['Ø', 'õ', 'ø', 'Ǿ', 'ʘ', 'Ѻ', 'ם', '۝', '๏'],
+      p: ['Ƿ', 'Ҏ'],
+      q: ['্'],
+      r: ['®', 'Ʀ', 'Ȑ', 'Ɍ', 'ʀ', 'Я'],
+      s: ['§', 'Ϟ', 'ϟ', 'Ϩ'],
+      t: ['Ł', 'Ŧ', 'ͳ'],
+      u: ['Ʊ', 'Ս'],
+      v: ['ט'],
+      w: ['Ш', 'Ѡ', 'Ѽ', '൰'],
+      x: ['Ҳ', 'Ӿ', 'Ӽ', 'ӽ'],
+      y: ['¥', 'Ұ', 'Ӌ'],
+      z: ['Ƶ', 'ɀ'],
     };
     text.forEach(function (c) {
       c = c.toLowerCase();
@@ -9751,123 +9752,100 @@ var require_zalgo = __commonJS((exports, module) => {
     text = text || '   he is here   ';
     var soul = {
       up: [
-        '\u030D',
-        '\u030E',
-        '\u0304',
-        '\u0305',
-        '\u033F',
-        '\u0311',
-        '\u0306',
-        '\u0310',
-        '\u0352',
-        '\u0357',
-        '\u0351',
-        '\u0307',
-        '\u0308',
-        '\u030A',
-        '\u0342',
-        '\u0313',
-        '\u0308',
-        '\u034A',
-        '\u034B',
-        '\u034C',
-        '\u0303',
-        '\u0302',
-        '\u030C',
-        '\u0350',
-        '\u0300',
-        '\u0301',
-        '\u030B',
-        '\u030F',
-        '\u0312',
-        '\u0313',
-        '\u0314',
-        '\u033D',
-        '\u0309',
-        '\u0363',
-        '\u0364',
-        '\u0365',
-        '\u0366',
-        '\u0367',
-        '\u0368',
-        '\u0369',
-        '\u036A',
-        '\u036B',
-        '\u036C',
-        '\u036D',
-        '\u036E',
-        '\u036F',
-        '\u033E',
-        '\u035B',
-        '\u0346',
-        '\u031A',
+        '̍',
+        '̎',
+        '̄',
+        '̅',
+        '̿',
+        '̑',
+        '̆',
+        '̐',
+        '͒',
+        '͗',
+        '͑',
+        '̇',
+        '̈',
+        '̊',
+        '͂',
+        '̓',
+        '̈',
+        '͊',
+        '͋',
+        '͌',
+        '̃',
+        '̂',
+        '̌',
+        '͐',
+        '̀',
+        '́',
+        '̋',
+        '̏',
+        '̒',
+        '̓',
+        '̔',
+        '̽',
+        '̉',
+        'ͣ',
+        'ͤ',
+        'ͥ',
+        'ͦ',
+        'ͧ',
+        'ͨ',
+        'ͩ',
+        'ͪ',
+        'ͫ',
+        'ͬ',
+        'ͭ',
+        'ͮ',
+        'ͯ',
+        '̾',
+        '͛',
+        '͆',
+        '̚',
       ],
       down: [
-        '\u0316',
-        '\u0317',
-        '\u0318',
-        '\u0319',
-        '\u031C',
-        '\u031D',
-        '\u031E',
-        '\u031F',
-        '\u0320',
-        '\u0324',
-        '\u0325',
-        '\u0326',
-        '\u0329',
-        '\u032A',
-        '\u032B',
-        '\u032C',
-        '\u032D',
-        '\u032E',
-        '\u032F',
-        '\u0330',
-        '\u0331',
-        '\u0332',
-        '\u0333',
-        '\u0339',
-        '\u033A',
-        '\u033B',
-        '\u033C',
-        '\u0345',
-        '\u0347',
-        '\u0348',
-        '\u0349',
-        '\u034D',
-        '\u034E',
-        '\u0353',
-        '\u0354',
-        '\u0355',
-        '\u0356',
-        '\u0359',
-        '\u035A',
-        '\u0323',
+        '̖',
+        '̗',
+        '̘',
+        '̙',
+        '̜',
+        '̝',
+        '̞',
+        '̟',
+        '̠',
+        '̤',
+        '̥',
+        '̦',
+        '̩',
+        '̪',
+        '̫',
+        '̬',
+        '̭',
+        '̮',
+        '̯',
+        '̰',
+        '̱',
+        '̲',
+        '̳',
+        '̹',
+        '̺',
+        '̻',
+        '̼',
+        'ͅ',
+        '͇',
+        '͈',
+        '͉',
+        '͍',
+        '͎',
+        '͓',
+        '͔',
+        '͕',
+        '͖',
+        '͙',
+        '͚',
+        '̣',
       ],
-      mid: [
-        '\u0315',
-        '\u031B',
-        '\u0300',
-        '\u0301',
-        '\u0358',
-        '\u0321',
-        '\u0322',
-        '\u0327',
-        '\u0328',
-        '\u0334',
-        '\u0335',
-        '\u0336',
-        '\u035C',
-        '\u035D',
-        '\u035E',
-        '\u035F',
-        '\u0360',
-        '\u0362',
-        '\u0338',
-        '\u0337',
-        '\u0361',
-        ' \u0489',
-      ],
+      mid: ['̕', '̛', '̀', '́', '͘', '̡', '̢', '̧', '̨', '̴', '̵', '̶', '͜', '͝', '͞', '͟', '͠', '͢', '̸', '̷', '͡', ' ҉'],
     };
     var all = [].concat(soul.up, soul.down, soul.mid);
     function randomNumber(range) {
@@ -10353,7 +10331,7 @@ var require_cell = __commonJS((exports, module) => {
       let rightPadding = utils.repeat(' ', this.paddingRight);
       let line = this.lines[lineNum];
       let len = this.width - (this.paddingLeft + this.paddingRight);
-      if (forceTruncationSymbol) line += this.truncate || '\u2026';
+      if (forceTruncationSymbol) line += this.truncate || '…';
       let content = utils.truncate(line, len, this.truncate);
       content = utils.pad(content, len, ' ', this.hAlign);
       content = leftPadding + content + rightPadding;
@@ -11052,7 +11030,7 @@ Read CLAUDE.md and any project skills files if they exist.
 
 ## Instructions
 
-1. Read and understand the specification completely \u2014 especially the Definition of Done checklist
+1. Read and understand the specification completely — especially the Definition of Done checklist
 2. Before using any library, tool, or framework, research its current documentation and source code. Verify the version you are using matches the API signatures and configuration you are relying on. Do not rely on potentially outdated knowledge.
 3. Address any review feedback or learnings from above
 4. Implement the required changes
@@ -11067,7 +11045,7 @@ Read CLAUDE.md and any project skills files if they exist.
 - NEVER push to any branch other than the current task branch
 - NEVER push to main, master, or any protected branch
 - NEVER delete branches or rebase pushed commits
-- Do NOT commit changes \u2014 the run will commit on successful completion`;
+- Do NOT commit changes — the run will commit on successful completion`;
 var DEFAULT_REVIEWER_PROMPT = `# Code Review Task
 
 ## Specification
@@ -11083,13 +11061,13 @@ Read CLAUDE.md and any project skills files if they exist.
 You are Reviewer {reviewerIndex} for loop {iteration}. Be strict and thorough.
 
 1. Run \`git diff\` and \`git diff --staged\` to see all changes
-2. Review every changed file against the specification \u2014 not just a summary
+2. Review every changed file against the specification — not just a summary
 3. Before using any library, tool, or framework referenced in the code, research its current documentation and source code. Verify the version being used matches the actual API signature and configuration. Flag any usage of outdated or non-existent features.
-4. Check {evidenceDir}/ for build, test, and other output logs \u2014 trust these as accurate to save time
-5. **Validate evidence** \u2014 check {evidenceDir}/ for output logs
+4. Check {evidenceDir}/ for build, test, and other output logs — trust these as accurate to save time
+5. **Validate evidence** — check {evidenceDir}/ for output logs
    - If the spec has a Definition of Done checklist, be strict: every required evidence item must be present and passing. Reject if anything is missing.
    - If the spec has no checklist, use judgment: check what is reasonable for this project. Don't reject for missing evidence that the spec never asked for.
-6. Write your review to {reviewsDir}/reviewer-{reviewerIndex}.md \u2014 include any issues found and evidence gaps
+6. Write your review to {reviewsDir}/reviewer-{reviewerIndex}.md — include any issues found and evidence gaps
 7. Write your verdict to {verdictsDir}/reviewer-{reviewerIndex}.json:
    \`\`\`json
    {
@@ -11121,9 +11099,9 @@ var DEFAULT_CHECKPOINTER_PROMPT = `# Checkpointer Task
 
 The dev loop has failed to reach consensus after {iteration} iterations. Your task is to:
 
-1. **Detect spec-level conflicts** that block progress \u2192 if found, exit with conflict status
-2. **Auto-fix unambiguous spec mistakes** (like typos) \u2192 if fixed, continue loop with corrected spec
-3. **Compress the spec** if no conflict AND progress > 60% \u2192 focus on remaining work
+1. **Detect spec-level conflicts** that block progress → if found, exit with conflict status
+2. **Auto-fix unambiguous spec mistakes** (like typos) → if fixed, continue loop with corrected spec
+3. **Compress the spec** if no conflict AND progress > 60% → focus on remaining work
 
 ## Specification
 
@@ -11136,7 +11114,7 @@ Read the spec from: {specPath}
 3. Check for conflicts:
    - **IS a conflict:** impossible requirements, contradictory constraints, fundamentally ambiguous spec
    - **NOT a conflict:** reviewer disagreement, reviewer/implementer mistakes, missing implementation
-4. Check for auto-fixable issues (e.g., typos) \u2014 ONLY if completely unambiguous
+4. Check for auto-fixable issues (e.g., typos) — ONLY if completely unambiguous
 
 ## Outcomes
 
@@ -11175,6 +11153,90 @@ Write to {checkpointResultFile}:
 
 If conflict_found, also write {conflictFile} with conflict analysis details.
 If spec_auto_fixed or spec_compressed, edit {specPath} directly.`;
+var CONFLICT_ONLY_CHECKPOINTER_PROMPT = `# Conflict Detection Task
+
+## Context
+
+The dev loop has failed to reach consensus after {iteration} iterations.
+You are a **conflict detector** — your ONLY job is to determine if the spec itself is the problem.
+You must NOT modify the spec. You must NOT compress the spec.
+
+## Specification
+
+Read the spec from: {specPath}
+
+## Your Task
+
+1. Read ALL reviews: current ({reviewsDir}/reviewer-*.md) and archived ({archivedReviewsPattern})
+2. Read ALL verdicts from the review JSON files alongside the reviews
+3. Cross-reference the spec's acceptance criteria / Definition of Done against every reviewer's findings
+4. Determine if the spec contains a fundamental conflict that makes consensus impossible
+
+## What IS a Conflict
+
+Be thorough — check for ALL of these:
+
+- **Contradictory requirements**: Two or more acceptance criteria that cannot be satisfied simultaneously (e.g., "must use library X" and "must have zero dependencies")
+- **Circular dependencies**: Criterion A requires B to be done first, but B requires A to be done first
+- **Impossible constraints**: Performance, compatibility, or technical constraints that cannot be met with the specified tools/frameworks (e.g., "must work on Node 14" but requires a Node 18+ API)
+- **Ambiguous scope**: Requirements so vague that reasonable implementers would produce fundamentally different solutions (e.g., "make it fast" with no metric, "improve UX" with no design spec)
+- **Self-contradictory examples/illustrations**: The spec's own examples violate its stated rules
+- **External impossibility**: Spec requires something the environment cannot provide (e.g., a file path that doesn't exist, a service that isn't available, a library version that doesn't have the specified API)
+- **Externally-impossible requirements**: Spec requires something the environment cannot provide (e.g., a file path that doesn't exist, a service that isn't available, a library version that doesn't have the specified API)
+
+**Important**: Reviewer disagreement — even across multiple loops — is NOT a conflict by itself. Reviewers may always disagree. Only flag a conflict if you can point to specific text in the spec that is self-contradictory or impossible. Use reviewer feedback as a clue for *where to look*, not as evidence of a conflict.
+
+## What is NOT a Conflict
+
+- **Reviewer disagreement**: Reviewers disagree on quality, approach, or interpretation — this is normal and expected
+- **Persistent reviewer disagreement**: Even if reviewers keep rejecting across multiple loops, this only means the implementation needs more work, NOT that the spec is broken
+- **Incomplete implementation**: The implementer didn't finish, but the spec is achievable
+- **Bugs or errors**: Implementation has bugs, but the spec is sound
+- **Missing tests/evidence**: Implementation lacks proof, but the spec is achievable
+- **Style preferences**: Reviewers have different opinions on code style
+
+## Conflict Confidence Levels
+
+When analyzing, assign a confidence level:
+
+- **HIGH**: Found clear textual contradiction in the spec (quote both parts)
+- **MEDIUM**: Cross-referencing reviews reveals systematic impossibility that isn't obvious from the spec alone
+- **LOW**: Suspicion based on patterns but could be implementation issues
+
+Only report conflicts at MEDIUM or higher confidence. If only LOW, report no_action.
+
+## Outcomes
+
+### conflict_found
+The spec contains impossible, contradictory, or fundamentally ambiguous requirements.
+- Write {conflictFile} with:
+  1. The exact conflicting requirements (quote the spec)
+  2. Why they conflict
+  3. Which reviewers flagged this (with quotes)
+  4. Suggested resolution (if obvious)
+- Write checkpoint result to {checkpointResultFile} with \`"outcome": "conflict_found"\`
+
+### no_action
+No spec-level conflict detected. The spec is sound — failures are due to implementation/review issues.
+- Write checkpoint result with \`"outcome": "no_action"\`
+- Do NOT edit {specPath}
+
+## Checkpoint Result JSON
+
+Write to {checkpointResultFile}:
+\`\`\`json
+{
+  "outcome": "conflict_found" | "no_action",
+  "summary": "Brief description of what was found (or why no conflict)",
+  "progressPercent": 75,
+  "completedCriteria": ["criterion 1"],
+  "remainingCriteria": ["criterion 2"],
+  "conflictConfidence": "HIGH" | "MEDIUM" | "LOW"
+}
+\`\`\`
+
+If conflict_found, also write {conflictFile} with detailed conflict analysis.
+Do NOT edit {specPath} under any circumstances.`;
 
 // src/cli/init.ts
 function buildDefaultConfigYaml() {
@@ -11192,7 +11254,7 @@ conflictCheckThreshold: 2
 firstLoopFullReview: false
 previousReviewPropagation: 0
 
-# Agent prompt templates \u2014 edit these to customize agent behavior.
+# Agent prompt templates — edit these to customize agent behavior.
 # All {placeholders} are substituted at build time with actual runtime paths.
 prompts:
   # implementer variables:
@@ -11380,7 +11442,7 @@ async function fileExists2(p) {
 
 // src/cli/run.ts
 var import_picocolors4 = __toESM(require_picocolors(), 1);
-import * as path7 from 'path';
+import * as path6 from 'path';
 
 // src/loop/runner.ts
 import * as fs5 from 'fs/promises';
@@ -15391,6 +15453,7 @@ var configSchema = exports_external
     implementerTimeout: exports_external.number().min(0.001).max(120).default(30),
     reviewerTimeout: exports_external.number().min(0.001).max(120).default(15),
     conflictCheckThreshold: exports_external.number().min(1).max(100).default(3),
+    compressSpec: exports_external.boolean().default(false),
     firstLoopFullReview: exports_external.boolean().default(false),
     previousReviewPropagation: exports_external.number().min(0).max(1).default(0),
     prompts: exports_external
@@ -15426,6 +15489,7 @@ var configSchema = exports_external
       implementerTimeout: data.implementerTimeout,
       reviewerTimeout: data.reviewerTimeout,
       conflictCheckThreshold: data.conflictCheckThreshold,
+      compressSpec: data.compressSpec,
       firstLoopFullReview: data.firstLoopFullReview,
       previousReviewPropagation: data.previousReviewPropagation,
       prompts: data.prompts,
@@ -15439,6 +15503,7 @@ var resolvedConfigSchema = exports_external.object({
   implementerTimeout: exports_external.number().min(0.001).max(120),
   reviewerTimeout: exports_external.number().min(0.001).max(120),
   conflictCheckThreshold: exports_external.number().min(1).max(100),
+  compressSpec: exports_external.boolean(),
   firstLoopFullReview: exports_external.boolean(),
   previousReviewPropagation: exports_external.number().min(0).max(1),
   prompts: exports_external
@@ -15678,13 +15743,15 @@ function buildReviewerPrompt(template, vars) {
   const archivedSection =
     vars.archivedReviews !== null
       ? `Check the previous loop's completed reviews at ${vars.archivedReviews}/ for context on what reviewers found.
-(Read these for background only \u2014 do not let previous reviewers opinions override your own assessment of the spec and code.)`
+(Read these for background only — do not let previous reviewers opinions override your own assessment of the spec and code.)`
       : `No previous loop reviews available yet.`;
   prompt = substitute(prompt, { ...vars, archivedReviews: archivedSection });
   return prompt;
 }
-function buildCheckpointerPrompt(template, vars) {
-  return substitute(template ?? DEFAULT_CHECKPOINTER_PROMPT, vars);
+function buildCheckpointerPrompt(template, vars, compressSpec) {
+  if (template) return substitute(template, vars);
+  const defaultTemplate = compressSpec ? DEFAULT_CHECKPOINTER_PROMPT : CONFLICT_ONLY_CHECKPOINTER_PROMPT;
+  return substitute(defaultTemplate, vars);
 }
 
 // src/loop/iteration.ts
@@ -17407,10 +17474,10 @@ function formatHeader(runId, config, workspace) {
   const phaseInfo = config.reviewPhases?.length > 1 ? ` in ${config.reviewPhases.length} phases` : '';
   console.log('');
   console.log(
-    `  ${import_picocolors3.default.bold(import_picocolors3.default.cyan(`kloop ${runId}`))}  ${import_picocolors3.default.green('\u25CF')}  ${import_picocolors3.default.green('running')}`,
+    `  ${import_picocolors3.default.bold(import_picocolors3.default.cyan(`kloop ${runId}`))}  ${import_picocolors3.default.green('●')}  ${import_picocolors3.default.green('running')}`,
   );
   console.log(
-    import_picocolors3.default.dim(`  implementer: ${implBinary}  \u2502  ${totalReviewers} reviewers${phaseInfo}`),
+    import_picocolors3.default.dim(`  implementer: ${implBinary}  │  ${totalReviewers} reviewers${phaseInfo}`),
   );
   console.log(import_picocolors3.default.dim(`  workspace: ${workspace}`));
   console.log('');
@@ -17418,12 +17485,12 @@ function formatHeader(runId, config, workspace) {
 function formatIterationStart(loopNum, maxIterations) {
   console.log(
     import_picocolors3.default.dim(
-      `\u2500\u2500 iteration ${loopNum}/${maxIterations} ${'\u2500'.repeat(Math.max(1, 45 - String(loopNum).length - String(maxIterations).length))}`,
+      `── iteration ${loopNum}/${maxIterations} ${'─'.repeat(Math.max(1, 45 - String(loopNum).length - String(maxIterations).length))}`,
     ),
   );
 }
 function formatImplementerResult(binary, exitCode, durationMs) {
-  const icon = exitCode === 0 ? import_picocolors3.default.green('\u2713') : import_picocolors3.default.red('\u2717');
+  const icon = exitCode === 0 ? import_picocolors3.default.green('✓') : import_picocolors3.default.red('✗');
   const color = exitCode === 0 ? import_picocolors3.default.green : import_picocolors3.default.red;
   console.log(
     `  ${icon} impl  ${binary}     ${color(`exit ${exitCode}`)}   ${import_picocolors3.default.dim(formatDuration(durationMs))}`,
@@ -17431,11 +17498,11 @@ function formatImplementerResult(binary, exitCode, durationMs) {
 }
 function formatReviewPhaseStart(phaseIdx, reviewers) {
   console.log('');
-  console.log(import_picocolors3.default.dim(`  \u25C6 review phase ${phaseIdx} (${reviewers.length} reviewers)`));
+  console.log(import_picocolors3.default.dim(`  ◆ review phase ${phaseIdx} (${reviewers.length} reviewers)`));
 }
 function formatReviewerResult(reviewerIndex, binary, verdict, completionEstimate, durationMs) {
   const approved = verdict === 'approved';
-  const icon = approved ? import_picocolors3.default.green('\u2713') : import_picocolors3.default.red('\u2717');
+  const icon = approved ? import_picocolors3.default.green('✓') : import_picocolors3.default.red('✗');
   const verdictColor = approved
     ? import_picocolors3.default.green('approved')
     : import_picocolors3.default.red('rejected');
@@ -17446,12 +17513,12 @@ function formatReviewerResult(reviewerIndex, binary, verdict, completionEstimate
 }
 function formatConsensus(approved, verdictsList) {
   if (approved) {
-    console.log(`  ${import_picocolors3.default.green('\u2713 consensus: approved')}`);
+    console.log(`  ${import_picocolors3.default.green('✓ consensus: approved')}`);
   } else {
     const approvedCount = verdictsList.filter(v => v.verdict === 'approved').length;
     const totalCount = verdictsList.length;
     console.log(
-      `  ${import_picocolors3.default.red('\u2717 consensus: rejected')}  ${import_picocolors3.default.dim(`(${approvedCount}/${totalCount} approved)`)}`,
+      `  ${import_picocolors3.default.red('✗ consensus: rejected')}  ${import_picocolors3.default.dim(`(${approvedCount}/${totalCount} approved)`)}`,
     );
   }
 }
@@ -17459,34 +17526,34 @@ function formatFailure(consecutive, threshold) {
   console.log(import_picocolors3.default.dim(`  failures ${consecutive}/${threshold}`));
 }
 function formatCheckpointStart() {
-  console.log(import_picocolors3.default.yellow('  \u25C6 conflict threshold reached, running checkpointer...'));
+  console.log(import_picocolors3.default.yellow('  ◆ conflict threshold reached, running checkpointer...'));
 }
 function formatCheckpointOutcome(outcome, detail) {
   switch (outcome) {
     case 'conflict_found':
-      console.log(import_picocolors3.default.red('  \u2717 conflict detected'));
+      console.log(import_picocolors3.default.red('  ✗ conflict detected'));
       if (detail) console.log(import_picocolors3.default.dim(`    ${detail}`));
       break;
     case 'spec_auto_fixed':
-      console.log(import_picocolors3.default.yellow('  \u25C6 spec auto-fixed, reloading...'));
+      console.log(import_picocolors3.default.yellow('  ◆ spec auto-fixed, reloading...'));
       break;
     case 'spec_compressed':
-      console.log(import_picocolors3.default.yellow(`  \u25C6 spec compressed, reloading...`));
+      console.log(import_picocolors3.default.yellow(`  ◆ spec compressed, reloading...`));
       break;
     case 'no_action':
-      console.log(import_picocolors3.default.dim('  \u25C6 no action needed, continuing...'));
+      console.log(import_picocolors3.default.dim('  ◆ no action needed, continuing...'));
       break;
   }
 }
 function formatPhaseShortCircuit(phaseIdx, remaining) {
   console.log(
-    import_picocolors3.default.dim(`  phase ${phaseIdx} rejection \u2192 skipping ${remaining} remaining phase(s)`),
+    import_picocolors3.default.dim(`  phase ${phaseIdx} rejection → skipping ${remaining} remaining phase(s)`),
   );
 }
 function formatApproval(loopNum) {
   console.log('');
   console.log(
-    `  ${import_picocolors3.default.green(import_picocolors3.default.bold(`\u2713 approved after ${loopNum} iteration(s)`))}`,
+    `  ${import_picocolors3.default.green(import_picocolors3.default.bold(`✓ approved after ${loopNum} iteration(s)`))}`,
   );
 }
 function formatMaxIterations(maxIterations) {
@@ -17494,37 +17561,25 @@ function formatMaxIterations(maxIterations) {
 }
 function formatAgentLaunch(role, label, binary, tmuxSession, logPath) {
   const roleLabel = role === 'impl' ? 'implementer' : role === 'reviewer' ? label : 'checkpointer';
-  console.log(`  \u25B8 ${import_picocolors3.default.cyan(roleLabel)}  ${import_picocolors3.default.bold(binary)}`);
+  console.log(`  ▸ ${import_picocolors3.default.cyan(roleLabel)}  ${import_picocolors3.default.bold(binary)}`);
   console.log(import_picocolors3.default.dim(`    tmux: ${tmuxSession}`));
   console.log(import_picocolors3.default.dim(`    log:  ${logPath}`));
 }
 function formatImplementerFailure(error) {
-  console.log(import_picocolors3.default.red(`  \u2717 implementer failed: ${error}`));
+  console.log(import_picocolors3.default.red(`  ✗ implementer failed: ${error}`));
 }
 function formatConflict(summary) {
   console.log('');
-  console.log(
-    import_picocolors3.default.red(
-      '  \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500',
-    ),
-  );
+  console.log(import_picocolors3.default.red('  ───────────────────────────────────────────'));
   console.log(import_picocolors3.default.red(import_picocolors3.default.bold('  CONFLICT DETECTED')));
-  console.log(
-    import_picocolors3.default.red(
-      '  \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500',
-    ),
-  );
+  console.log(import_picocolors3.default.red('  ───────────────────────────────────────────'));
   for (const line of summary.split(`
 `)) {
     console.log(import_picocolors3.default.red(`  ${line}`));
   }
   console.log(import_picocolors3.default.dim('  A conflict.md file has been generated.'));
   console.log(import_picocolors3.default.dim('  Please resolve the conflict and restart the loop.'));
-  console.log(
-    import_picocolors3.default.red(
-      '  \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500',
-    ),
-  );
+  console.log(import_picocolors3.default.red('  ───────────────────────────────────────────'));
   console.log('');
 }
 function formatProgress(estimates, allResults) {
@@ -17535,8 +17590,7 @@ function formatProgress(estimates, allResults) {
   const barWidth = 30;
   const filled = Math.round((lowestEstimate / 100) * barWidth);
   const empty = barWidth - filled;
-  const bar =
-    import_picocolors3.default.green('\u2588'.repeat(filled)) + import_picocolors3.default.dim('\u2591'.repeat(empty));
+  const bar = import_picocolors3.default.green('█'.repeat(filled)) + import_picocolors3.default.dim('░'.repeat(empty));
   console.log(`  progress  ${bar} ${lowestEstimate}%${reviewerInfo}`);
 }
 
@@ -17547,7 +17601,7 @@ function buildAgentCommand(params) {
   if (harness === 'claude') {
     return `cat "${promptFile}" | ${binary} --dangerously-skip-permissions --verbose --print --session-id "${sessionId}" --output-format stream-json 2>&1 | tee "${logFile}" | ${KLOOP_BIN} stream`;
   } else {
-    return `${binary} --yolo --output-format stream-json -p "$(cat "${promptFile}")" 2>&1 | tee "${logFile}" | ${KLOOP_BIN} stream`;
+    return `cat "${promptFile}" | ${binary} --yolo --output-format stream-json -p "" 2>&1 | tee "${logFile}" | ${KLOOP_BIN} stream`;
   }
 }
 
@@ -17641,7 +17695,7 @@ class AgentRunner {
   }
   async runReviewersPhase(params) {
     const { runId, iteration, dirHash, phaseIndex, reviewers, prompts, timeout, onReviewerEnd } = params;
-    console.log(`  review phase ${phaseIndex} \u2014 ${reviewers.map(r => r.binary).join(', ')}`);
+    console.log(`  review phase ${phaseIndex} — ${reviewers.map(r => r.binary).join(', ')}`);
     const results = await Promise.all(
       prompts.map(async (p, ordinal) => {
         const reviewer = reviewers[ordinal] ?? reviewers[0];
@@ -17763,7 +17817,7 @@ class AgentRunner {
       session.harnessSessionId = sessionId;
     }
     await this.state.saveSession(session);
-    const icon = verdict === 'approved' ? '\u2713' : '\u2717';
+    const icon = verdict === 'approved' ? '✓' : '✗';
     console.log(
       `  ${icon} Reviewer ${reviewerIndex} (${binary})${phaseIndex !== undefined ? ` (phase ${phaseIndex})` : ''}: ${verdict}${completionEstimate !== undefined ? ` (${completionEstimate}%)` : ''}`,
     );
@@ -17809,7 +17863,11 @@ class AgentRunner {
       conflictFile: `${paths.runPath(runId)}/conflict.md`,
       checkpointResultFile: `${paths.loopCheckpointerPath(runId, iteration)}/checkpoint-result.json`,
     };
-    const prompt = buildCheckpointerPrompt(this.config.prompts?.checkpointer, checkpointerVars);
+    const prompt = buildCheckpointerPrompt(
+      this.config.prompts?.checkpointer,
+      checkpointerVars,
+      this.config.compressSpec,
+    );
     const promptFile = await this.writePromptFile(sessionId, prompt);
     const checkpointerDir = paths.loopCheckpointerPath(runId, iteration);
     const logFile = await this.ensureAgentDir(checkpointerDir);
@@ -17914,12 +17972,12 @@ class AgentRunner {
     }
     if (noVerdictAsFailure) {
       const reason = timedOut ? 'timed out' : exitCode !== 0 ? `exited with code ${exitCode}` : 'produced no verdict';
-      console.log(`\u26A0 Reviewer "${reviewerBinary}"${phaseStr} ${reason} \u2014 treating as rejection`);
+      console.log(`⚠ Reviewer "${reviewerBinary}"${phaseStr} ${reason} — treating as rejection`);
       onError(timedOut ? 'timeout' : exitCode !== 0 ? `exit_code_${exitCode}` : 'no_verdict');
       return 'rejected';
     } else {
       const reason = timedOut ? 'timed out' : exitCode !== 0 ? `exited with code ${exitCode}` : 'produced no verdict';
-      console.log(`\u26A0 Reviewer "${reviewerBinary}"${phaseStr} ${reason} \u2014 treating as approval`);
+      console.log(`⚠ Reviewer "${reviewerBinary}"${phaseStr} ${reason} — treating as approval`);
       return 'approved';
     }
   }
@@ -18069,6 +18127,7 @@ class LoopRunner {
               timestamp: new Date().toISOString(),
               loop: loopNum,
               binary,
+              harness: parseImplementerConfig(binary).harness,
             });
           },
         });
@@ -18083,6 +18142,7 @@ class LoopRunner {
           timestamp: new Date().toISOString(),
           loop: loopNum,
           binary: implResult.binary,
+          harness: implResult.harness,
           exitCode: implResult.exitCode,
           durationMs: implResult.durationMs,
           ...(implError ? { error: implError } : {}),
@@ -18103,11 +18163,13 @@ class LoopRunner {
             formatCheckpointStart();
             checkpointRan = true;
             const cpBinary = config.conflictChecker ?? implBinary;
+            const cpParsed = parseConflictCheckerConfig(cpBinary);
             await writeEvent({
               type: 'checkpoint_start',
               timestamp: new Date().toISOString(),
               loop: loopNum,
-              binary: cpBinary,
+              binary: cpParsed.binary,
+              harness: cpParsed.harness,
             });
             const checkpointResult = await agentRunner.runCheckpointer({
               runId,
@@ -18139,6 +18201,9 @@ class LoopRunner {
                 throw new ConflictError(checkpointResult.summary);
               case 'spec_auto_fixed':
               case 'spec_compressed':
+                if (!config.compressSpec) {
+                  break;
+                }
                 specContent = await fs5.readFile(specPath, 'utf-8');
                 await this.saveSpecVersion(runId, specContent);
                 break;
@@ -18263,12 +18328,22 @@ ${learningsContent}
               await this.writeConflictMd(runId, checkpointResult.summary);
               throw new ConflictError(checkpointResult.summary);
             case 'spec_auto_fixed':
+              if (!config.compressSpec) {
+                formatCheckpointOutcome('no_action');
+                consecutiveFailures = 0;
+                break;
+              }
               formatCheckpointOutcome('spec_auto_fixed');
               specContent = await fs5.readFile(specPath, 'utf-8');
               await this.saveSpecVersion(runId, specContent);
               consecutiveFailures = 0;
               break;
             case 'spec_compressed':
+              if (!config.compressSpec) {
+                formatCheckpointOutcome('no_action');
+                consecutiveFailures = 0;
+                break;
+              }
               formatCheckpointOutcome('spec_compressed', `${checkpointResult.progressPercent}% progress`);
               specContent = await fs5.readFile(specPath, 'utf-8');
               await this.saveSpecVersion(runId, specContent);
@@ -18371,6 +18446,7 @@ ${learningsContent}
           loop: iterNum,
           phase: phaseIdx,
           reviewer: rc.binary,
+          harness: rc.harness,
         });
       }
       const phaseResults = await agentRunner.runReviewersPhase({
@@ -18391,6 +18467,7 @@ ${learningsContent}
             loop: iterNum,
             phase: phaseIdx,
             reviewer: r.binary,
+            harness: r.harness,
             exitCode: r.exitCode,
             durationMs: r.durationMs,
             error: r.error,
@@ -18476,6 +18553,7 @@ ${learningsContent}
       durationMs,
       implementer: {
         binary: implResult.binary,
+        harness: implResult.harness,
         exitCode: implResult.exitCode,
         durationMs: implResult.durationMs,
         inputTokens: implResult.inputTokens,
@@ -18523,6 +18601,7 @@ ${learningsContent}
         agent: 'implementer',
         event: 'end',
         binary: implResult.binary,
+        harness: implResult.harness,
         inputTokens: implResult.inputTokens ?? 0,
         outputTokens: implResult.outputTokens ?? 0,
         durationMs: implResult.durationMs,
@@ -18535,6 +18614,7 @@ ${learningsContent}
           agent: `reviewer-${r.reviewerIndex}`,
           event: 'end',
           binary: r.binary,
+          harness: r.harness,
           phaseIdx: r.phaseIndex ?? 0,
           verdict: r.verdict,
           completionEstimate: r.completionEstimate,
@@ -18622,9 +18702,6 @@ Loop ${info.loop}, iteration ${info.iteration}
     await writeFile6(failurePath, content, 'utf-8');
   }
 }
-
-// src/index-db.ts
-import * as path6 from 'path';
 
 // src/status/materialize.ts
 var YAML = __toESM(require_dist(), 1);
@@ -18743,6 +18820,9 @@ function applyEvent(status, event) {
         loop.implementer.status = 'running';
         loop.implementer.startedAt = event.timestamp;
         loop.implementer.binary = event.binary;
+        if ('harness' in event && event.harness) {
+          loop.implementer.harness = event.harness;
+        }
       }
       break;
     }
@@ -18753,6 +18833,9 @@ function applyEvent(status, event) {
         loop.implementer.completedAt = event.timestamp;
         loop.implementer.exitCode = event.exitCode;
         loop.implementer.durationMs = event.durationMs;
+        if ('harness' in event && event.harness) {
+          loop.implementer.harness = event.harness;
+        }
         if ('error' in event && event.error) {
           loop.implementer.error = event.error;
         }
@@ -18779,6 +18862,7 @@ function applyEvent(status, event) {
       if (reviewer) {
         reviewer.status = 'running';
         reviewer.startedAt = event.timestamp;
+        if ('harness' in event && event.harness) reviewer.harness = event.harness;
       }
       break;
     }
@@ -18793,6 +18877,7 @@ function applyEvent(status, event) {
         if (event.verdict) reviewer.verdict = event.verdict;
         if (event.completionEstimate !== undefined) reviewer.completionEstimate = event.completionEstimate;
         if (event.propagated !== undefined) reviewer.propagated = event.propagated;
+        if ('harness' in event && event.harness) reviewer.harness = event.harness;
       }
       break;
     }
@@ -19019,163 +19104,6 @@ function toRunState(status) {
 }
 
 // src/index-db.ts
-class IndexDb {
-  fs;
-  paths;
-  db;
-  constructor(fs6, paths2) {
-    this.fs = fs6;
-    this.paths = paths2;
-    const { Database } = __require('bun:sqlite');
-    this.fs.mkdir(path6.dirname(this.paths.indexDb));
-    this.db = new Database(this.paths.indexDb, { create: true });
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS runs (
-        id          TEXT PRIMARY KEY,
-        workspace   TEXT NOT NULL,
-        started_at  TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_runs_workspace ON runs(workspace);
-      CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at DESC);
-    `);
-    this.db.exec('PRAGMA journal_mode=WAL');
-  }
-  async insertRun(row) {
-    this.db
-      .prepare('INSERT INTO runs (id, workspace, started_at) VALUES (?, ?, ?)')
-      .run(row.id, row.workspace, row.started_at);
-  }
-  async getRun(runId) {
-    const row = this.db.prepare('SELECT * FROM runs WHERE id = ?').get(runId);
-    return row ? row : null;
-  }
-  async getRunByWorkspace(workspace) {
-    const row = this.db
-      .prepare('SELECT * FROM runs WHERE workspace = ? ORDER BY started_at DESC LIMIT 1')
-      .get(workspace);
-    return row ? row : null;
-  }
-  async listRuns(workspace) {
-    let query = 'SELECT * FROM runs';
-    const params = [];
-    if (workspace) {
-      query += ' WHERE workspace = ?';
-      params.push(workspace);
-    }
-    query += ' ORDER BY started_at DESC';
-    const rows = this.db.prepare(query).all(...params);
-    return rows;
-  }
-  async removeRun(runId) {
-    const result = this.db.prepare('DELETE FROM runs WHERE id = ?').run(runId);
-    return result.changes > 0;
-  }
-  close() {
-    this.db.close();
-  }
-}
-
-class EventLog {
-  fs;
-  paths;
-  constructor(fs6, paths2) {
-    this.fs = fs6;
-    this.paths = paths2;
-  }
-  async append(runId, event) {
-    const line =
-      JSON.stringify(event) +
-      `
-`;
-    const { appendFile } = await import('fs/promises');
-    await appendFile(this.paths.runEvents(runId), line, 'utf-8');
-  }
-  async readAll(runId) {
-    const filePath = this.paths.runEvents(runId);
-    if (!(await this.fs.exists(filePath))) return [];
-    const content = await this.fs.readFile(filePath);
-    const events = [];
-    for (const line of content.split(`
-`)) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      try {
-        events.push(JSON.parse(trimmed));
-      } catch {}
-    }
-    return events;
-  }
-  async deriveStatus(runId, pid) {
-    const status = await materialize(runId, this.fs, this.paths, pid);
-    return toRunState(status);
-  }
-  async materializeStatus(runId, pid) {
-    return materialize(runId, this.fs, this.paths, pid);
-  }
-  async enrichStatus(status, runId) {
-    return enrich(status, runId, this.fs, this.paths);
-  }
-  isTerminal(status) {
-    return status !== 'running' && status !== 'pending';
-  }
-}
-
-class PidLock {
-  fs;
-  paths;
-  constructor(fs6, paths2) {
-    this.fs = fs6;
-    this.paths = paths2;
-  }
-  async acquire(runId, workspace) {
-    const lockPath = this.paths.lockFile(runId);
-    const info = {
-      pid: process.pid,
-      runId,
-      workspace,
-      createdAt: new Date().toISOString(),
-    };
-    await this.fs.writeJson(lockPath, info);
-  }
-  async read(runId) {
-    const lockPath = this.paths.lockFile(runId);
-    if (!(await this.fs.exists(lockPath))) return null;
-    try {
-      return await this.fs.readJson(lockPath);
-    } catch {
-      return null;
-    }
-  }
-  async release(runId) {
-    const lockPath = this.paths.lockFile(runId);
-    if (await this.fs.exists(lockPath)) {
-      await this.fs.unlink(lockPath);
-    }
-  }
-  async isPidAlive(pid) {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  async listLocks() {
-    const home = this.paths.kloopHome;
-    if (!(await this.fs.exists(home))) return [];
-    const files = await this.fs.readdir(home);
-    const locks = [];
-    for (const file of files) {
-      if (!file.endsWith('.lock')) continue;
-      const lockPath = `${home}/${file}`;
-      try {
-        const info = await this.fs.readJson(lockPath);
-        if (info) locks.push(info);
-      } catch {}
-    }
-    return locks;
-  }
-}
 async function killRunTmuxSessions(tmux, runId) {
   const sessions = await tmux.listSessions();
   let killed = 0;
@@ -19312,9 +19240,9 @@ async function handler3(runId, opts, deps) {
     });
     child.unref();
     console.log(import_picocolors4.default.green(`Detached: ${runId}`));
-    console.log(import_picocolors4.default.dim(`  kloop status   \u2014 check progress`));
-    console.log(import_picocolors4.default.dim(`  kloop logs     \u2014 view run log`));
-    console.log(import_picocolors4.default.dim(`  kloop attach   \u2014 jump into tmux`));
+    console.log(import_picocolors4.default.dim(`  kloop status   — check progress`));
+    console.log(import_picocolors4.default.dim(`  kloop logs     — view run log`));
+    console.log(import_picocolors4.default.dim(`  kloop attach   — jump into tmux`));
     process.exitCode = 0;
     return;
   }
@@ -19433,7 +19361,7 @@ async function handler3(runId, opts, deps) {
 }
 async function unlinkLocalKloop() {
   const { stat, rm: rm2 } = await import('fs/promises');
-  const localKloop = path7.join(process.cwd(), '.kloop');
+  const localKloop = path6.join(process.cwd(), '.kloop');
   try {
     const s = await stat(localKloop);
     if (s.isSymbolicLink()) {
@@ -19502,7 +19430,7 @@ async function handler4(opts, deps) {
       } else if (run.status === 'completed' && run.exitReason === 'max_iterations') {
         verdictStr = import_picocolors5.default.red('max iterations');
       } else if (run.exitReason) {
-        verdictStr = run.exitReason.length > 20 ? run.exitReason.slice(0, 17) + '\u2026' : run.exitReason;
+        verdictStr = run.exitReason.length > 20 ? run.exitReason.slice(0, 17) + '…' : run.exitReason;
       }
       let workspace = run.workspace;
       const home = process.env.HOME ?? '/home';
@@ -19510,7 +19438,7 @@ async function handler4(opts, deps) {
         workspace = '~' + workspace.slice(home.length);
       }
       if (workspace.length > 20) {
-        workspace = '\u2026' + workspace.slice(-19);
+        workspace = '…' + workspace.slice(-19);
       }
       table.push([run.id, workspace, statusColor(run.status), loopStr, verdictStr, ageStr, durationStr]);
     }
@@ -19559,20 +19487,25 @@ async function listRuns(indexDb, eventLog, pidLock, tmux, includeAll, workspace)
 // src/cli/status.ts
 var import_picocolors6 = __toESM(require_picocolors(), 1);
 var CLAUDE_AUTO_PREFIX = 'claude-auto-';
-function shortBinary(binary) {
-  return binary.startsWith(CLAUDE_AUTO_PREFIX) ? binary.slice(CLAUDE_AUTO_PREFIX.length) : binary;
+function shortBinary(binary, harness) {
+  const name = binary.startsWith(CLAUDE_AUTO_PREFIX) ? binary.slice(CLAUDE_AUTO_PREFIX.length) : binary;
+  if (harness && harness !== 'claude') return `${name}:${harness}`;
+  return name;
+}
+function agentLabel(agent) {
+  return shortBinary(agent.binary, agent.harness);
 }
 function formatDuration3(ms) {
   return formatDurationHuman(ms);
 }
 function statusMark(ok) {
-  if (ok === undefined) return import_picocolors6.default.dim('\u25CB');
-  return ok ? import_picocolors6.default.green('\u25CF') : import_picocolors6.default.red('\u25CF');
+  if (ok === undefined) return import_picocolors6.default.dim('○');
+  return ok ? import_picocolors6.default.green('●') : import_picocolors6.default.red('●');
 }
 function verdictMark(verdict) {
-  if (verdict === 'approved') return import_picocolors6.default.green('\u2713');
-  if (verdict === 'rejected') return import_picocolors6.default.red('\u2717');
-  return import_picocolors6.default.dim('\xB7');
+  if (verdict === 'approved') return import_picocolors6.default.green('✓');
+  if (verdict === 'rejected') return import_picocolors6.default.red('✗');
+  return import_picocolors6.default.dim('·');
 }
 var NAME_W = 10;
 var ROLE_W = 8;
@@ -19599,12 +19532,7 @@ function renderLoop(loop, multiPhase, dimmed) {
     if (impl.status === 'running') {
       console.log(
         prefix(
-          fmtRow(
-            'impl',
-            shortBinary(impl.binary),
-            agentDuration(impl),
-            `${import_picocolors6.default.green('\u25CF')} running`,
-          ),
+          fmtRow('impl', agentLabel(impl), agentDuration(impl), `${import_picocolors6.default.green('●')} running`),
         ),
       );
     } else if (impl.status === 'pending') {
@@ -19612,9 +19540,8 @@ function renderLoop(loop, multiPhase, dimmed) {
         prefix(fmtRow('impl', import_picocolors6.default.dim('...'), '', import_picocolors6.default.dim('pending'))),
       );
     } else {
-      const dot =
-        impl.exitCode === 0 ? import_picocolors6.default.green('\u25CF') : import_picocolors6.default.red('\u25CF');
-      console.log(prefix(fmtRow('impl', shortBinary(impl.binary), agentDuration(impl), `${dot}${errNote}`)));
+      const dot = impl.exitCode === 0 ? import_picocolors6.default.green('●') : import_picocolors6.default.red('●');
+      console.log(prefix(fmtRow('impl', agentLabel(impl), agentDuration(impl), `${dot}${errNote}`)));
     }
   }
   for (const phase of loop.reviewPhases) {
@@ -19629,7 +19556,7 @@ function renderLoop(loop, multiPhase, dimmed) {
           prefix(
             fmtRow(
               role,
-              shortBinary(r.binary),
+              agentLabel(r),
               elapsed,
               `${import_picocolors6.default.dim(r.status)}${r.verdict ? `  ${verdictMark(r.verdict)}` : ''}${pct ? `  ${pct}` : ''}${propMark ? `  ${propMark}` : ''}`,
             ),
@@ -19641,7 +19568,7 @@ function renderLoop(loop, multiPhase, dimmed) {
           prefix(
             fmtRow(
               role,
-              shortBinary(r.binary),
+              agentLabel(r),
               agentDuration(r),
               `${verdictMark(r.verdict)}  ${statusMark(agentOk(r))}${pct ? `  ${import_picocolors6.default.dim(pct)}` : ''}${errNote}${propMark ? `  ${propMark}` : ''}`,
             ),
@@ -19822,7 +19749,7 @@ async function handler5(id, opts, deps) {
       console.log('');
       console.log(
         import_picocolors6.default.dim(
-          `Previous \u2014 Iteration ${prev.loop}  ${prev.durationMs ? formatDuration3(prev.durationMs) : ''}`,
+          `Previous — Iteration ${prev.loop}  ${prev.durationMs ? formatDuration3(prev.durationMs) : ''}`,
         ),
       );
       renderLoop(prev, multiPhase, true);
@@ -19860,8 +19787,13 @@ async function handler5(id, opts, deps) {
 // src/cli/describe.ts
 var import_picocolors7 = __toESM(require_picocolors(), 1);
 var CLAUDE_AUTO_PREFIX2 = 'claude-auto-';
-function shortBinary2(binary) {
-  return binary.startsWith(CLAUDE_AUTO_PREFIX2) ? binary.slice(CLAUDE_AUTO_PREFIX2.length) : binary;
+function shortBinary2(binary, harness) {
+  const name = binary.startsWith(CLAUDE_AUTO_PREFIX2) ? binary.slice(CLAUDE_AUTO_PREFIX2.length) : binary;
+  if (harness && harness !== 'claude') return `${name}:${harness}`;
+  return name;
+}
+function agentLabel2(agent) {
+  return shortBinary2(agent.binary, agent.harness);
 }
 function formatDuration4(ms) {
   return formatDurationHuman(ms);
@@ -19873,13 +19805,13 @@ function formatTokens(input, output) {
   return `${(total / 1000).toFixed(1)}k`;
 }
 function statusMark2(ok) {
-  if (ok === undefined) return import_picocolors7.default.dim('\u25CB');
-  return ok ? import_picocolors7.default.green('\u25CF') : import_picocolors7.default.red('\u25CF');
+  if (ok === undefined) return import_picocolors7.default.dim('○');
+  return ok ? import_picocolors7.default.green('●') : import_picocolors7.default.red('●');
 }
 function verdictMark2(verdict) {
-  if (verdict === 'approved') return import_picocolors7.default.green('\u2713');
-  if (verdict === 'rejected') return import_picocolors7.default.red('\u2717');
-  return import_picocolors7.default.dim('\xB7');
+  if (verdict === 'approved') return import_picocolors7.default.green('✓');
+  if (verdict === 'rejected') return import_picocolors7.default.red('✗');
+  return import_picocolors7.default.dim('·');
 }
 var NAME_W2 = 10;
 var ROLE_W2 = 10;
@@ -19905,24 +19837,18 @@ function renderLoopFull(loop, multiPhase) {
     const errNote = impl.error ? import_picocolors7.default.yellow(` ${impl.error}`) : '';
     if (impl.status === 'running') {
       console.log(
-        fmtRow2(
-          'impl',
-          shortBinary2(impl.binary),
-          agentDuration2(impl),
-          `${import_picocolors7.default.green('\u25CF')} running`,
-        ),
+        fmtRow2('impl', agentLabel2(impl), agentDuration2(impl), `${import_picocolors7.default.green('●')} running`),
       );
     } else if (impl.status === 'pending') {
       console.log(
         fmtRow2('impl', import_picocolors7.default.dim('...'), '', import_picocolors7.default.dim('pending')),
       );
     } else {
-      const dot =
-        impl.exitCode === 0 ? import_picocolors7.default.green('\u25CF') : import_picocolors7.default.red('\u25CF');
+      const dot = impl.exitCode === 0 ? import_picocolors7.default.green('●') : import_picocolors7.default.red('●');
       console.log(
         fmtRow2(
           'impl',
-          shortBinary2(impl.binary),
+          agentLabel2(impl),
           agentDuration2(impl),
           `${dot}${implTok ? `  ${import_picocolors7.default.dim(implTok + ' tok')}` : ''}${errNote}`,
         ),
@@ -19940,7 +19866,7 @@ function renderLoopFull(loop, multiPhase) {
         console.log(
           fmtRow2(
             role,
-            shortBinary2(r.binary),
+            agentLabel2(r),
             elapsed,
             `${import_picocolors7.default.dim(r.status)}${r.verdict ? `  ${verdictMark2(r.verdict)}` : ''}${pct ? `  ${pct}` : ''}`,
           ),
@@ -19949,7 +19875,7 @@ function renderLoopFull(loop, multiPhase) {
         console.log(
           fmtRow2(
             role,
-            shortBinary2(r.binary),
+            agentLabel2(r),
             agentDuration2(r),
             `${verdictMark2(r.verdict)}  ${statusMark2(agentOk2(r))}${pct ? `  ${import_picocolors7.default.dim(pct)}` : ''}${tok ? `  ${import_picocolors7.default.dim(tok + ' tok')}` : ''}${errNote}`,
           ),
@@ -20103,7 +20029,7 @@ async function handler6(runId, opts, deps) {
     console.log('');
     for (const loop of status.loops) {
       const isCurrent = loop === status.loops[status.loops.length - 1] && isRunning;
-      const prefix = isCurrent ? '' : import_picocolors7.default.dim('Previous \u2014 ');
+      const prefix = isCurrent ? '' : import_picocolors7.default.dim('Previous — ');
       console.log(
         isCurrent
           ? import_picocolors7.default.bold(
@@ -20169,8 +20095,10 @@ async function handler6(runId, opts, deps) {
 // src/cli/metrics.ts
 var import_picocolors8 = __toESM(require_picocolors(), 1);
 var CLAUDE_AUTO_PREFIX3 = 'claude-auto-';
-function shortBinary3(binary) {
-  return binary.startsWith(CLAUDE_AUTO_PREFIX3) ? binary.slice(CLAUDE_AUTO_PREFIX3.length) : binary;
+function shortBinary3(binary, harness) {
+  const name = binary.startsWith(CLAUDE_AUTO_PREFIX3) ? binary.slice(CLAUDE_AUTO_PREFIX3.length) : binary;
+  if (harness && harness !== 'claude') return `${name}:${harness}`;
+  return name;
 }
 function formatDuration5(ms) {
   if (ms < 1000) return `${Math.round(ms)}ms`;
@@ -20258,6 +20186,8 @@ function getLabel(sample, label) {
       return String(sample.loop);
     case 'propagated':
       return sample.propagated ? 'true' : 'false';
+    case 'harness':
+      return sample.harness ?? 'claude';
     default:
       return '';
   }
@@ -20415,7 +20345,7 @@ async function handler7(query, opts, deps) {
           : 12;
       const w = { label: labelW + 2, count: 8 };
       console.log(`${padRight('GROUP', w.label)}  ${padLeft('COUNT', w.count)}`);
-      console.log(import_picocolors8.default.dim(`${'\u2500'.repeat(w.label)}  ${'\u2500'.repeat(w.count)}`));
+      console.log(import_picocolors8.default.dim(`${'─'.repeat(w.label)}  ${'─'.repeat(w.count)}`));
       for (const r of results) {
         const labelStr = parsed.groupBy.map(l => r.labels[l] ?? '-').join(', ');
         console.log(`${padRight(labelStr, w.label)}  ${padLeft(String(r.count), w.count)}`);
@@ -20435,7 +20365,7 @@ async function handler7(query, opts, deps) {
       );
       console.log(
         import_picocolors8.default.dim(
-          `${'\u2500'.repeat(w.label)}  ${'\u2500'.repeat(w.count)}  ${'\u2500'.repeat(w.dur)}  ${'\u2500'.repeat(w.inTok)}  ${'\u2500'.repeat(w.outTok)}  ${'\u2500'.repeat(w.total)}`,
+          `${'─'.repeat(w.label)}  ${'─'.repeat(w.count)}  ${'─'.repeat(w.dur)}  ${'─'.repeat(w.inTok)}  ${'─'.repeat(w.outTok)}  ${'─'.repeat(w.total)}`,
         ),
       );
       for (const r of results) {
@@ -20502,7 +20432,7 @@ function showRawTable(runId, samples, opts) {
     padLeft('out_tok', w.output) +
     padLeft('total', w.total) +
     padLeft('error', w.error);
-  const sep = '\u2500'.repeat(Object.values(w).reduce((a, b) => a + b, 0));
+  const sep = '─'.repeat(Object.values(w).reduce((a, b) => a + b, 0));
   console.log(header);
   console.log(import_picocolors8.default.dim(sep));
   for (const s of samples) {
@@ -20511,7 +20441,7 @@ function showRawTable(runId, samples, opts) {
     const agentStr = isImpl
       ? import_picocolors8.default.cyan(padRight(s.agent, w.agent))
       : import_picocolors8.default.green(padRight(s.agent, w.agent));
-    const binaryStr = padRight(shortBinary3(s.binary), w.binary);
+    const binaryStr = padRight(shortBinary3(s.binary, s.harness), w.binary);
     const verdictStr = s.verdict
       ? s.verdict === 'approved'
         ? import_picocolors8.default.green(padLeft(s.verdict, w.verdict))
@@ -20564,6 +20494,7 @@ async function loadSamples(runId, state) {
             loop: loopNum,
             agent: parsed.agent ?? '?',
             binary: parsed.binary ?? '',
+            harness: parsed.harness,
             phaseIdx: parsed.phaseIdx,
             verdict: parsed.verdict,
             completionEstimate: parsed.completionEstimate,
@@ -20582,9 +20513,9 @@ async function loadSamples(runId, state) {
 
 // node_modules/@clack/core/dist/index.mjs
 var import_sisteransi = __toESM(require_src(), 1);
-import { stdin as j, stdout as M } from 'process';
-import O from 'readline';
-import { Writable as X } from 'stream';
+import { stdin as j, stdout as M } from 'node:process';
+import O from 'node:readline';
+import { Writable as X } from 'node:stream';
 function DD({ onlyFirst: e = false } = {}) {
   const t = [
     '[\\u001B\\u009B][[\\]()#;?]*(?:(?:(?:(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]+)*|[a-zA-Z\\d]+(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]*)*)?(?:\\u0007|\\u001B\\u005C|\\u009C))',
@@ -21037,7 +20968,7 @@ function rD() {
   );
 }
 var ED = rD();
-var d = new Set(['\x1B', '\x9B']);
+var d = new Set(['\x1B', '']);
 var oD = 39;
 var y = '\x07';
 var V = '[';
@@ -21407,7 +21338,7 @@ class LD extends x {
 // node_modules/@clack/prompts/dist/index.mjs
 var import_picocolors9 = __toESM(require_picocolors(), 1);
 var import_sisteransi2 = __toESM(require_src(), 1);
-import y2 from 'process';
+import y2 from 'node:process';
 function ce() {
   return y2.platform !== 'win32'
     ? y2.env.TERM !== 'linux'
@@ -21423,27 +21354,27 @@ function ce() {
 }
 var V2 = ce();
 var u = (t, n) => (V2 ? t : n);
-var le = u('\u25C6', '*');
-var L2 = u('\u25A0', 'x');
-var W2 = u('\u25B2', 'x');
-var C = u('\u25C7', 'o');
-var ue = u('\u250C', 'T');
-var o = u('\u2502', '|');
-var d2 = u('\u2514', '\u2014');
-var k2 = u('\u25CF', '>');
-var P2 = u('\u25CB', ' ');
-var A2 = u('\u25FB', '[\u2022]');
-var T = u('\u25FC', '[+]');
-var F = u('\u25FB', '[ ]');
-var $e = u('\u25AA', '\u2022');
-var _2 = u('\u2500', '-');
-var me = u('\u256E', '+');
-var de = u('\u251C', '+');
-var pe = u('\u256F', '+');
-var q = u('\u25CF', '\u2022');
-var D = u('\u25C6', '*');
-var U = u('\u25B2', '!');
-var K2 = u('\u25A0', 'x');
+var le = u('◆', '*');
+var L2 = u('■', 'x');
+var W2 = u('▲', 'x');
+var C = u('◇', 'o');
+var ue = u('┌', 'T');
+var o = u('│', '|');
+var d2 = u('└', '—');
+var k2 = u('●', '>');
+var P2 = u('○', ' ');
+var A2 = u('◻', '[•]');
+var T = u('◼', '[+]');
+var F = u('◻', '[ ]');
+var $e = u('▪', '•');
+var _2 = u('─', '-');
+var me = u('╮', '+');
+var de = u('├', '+');
+var pe = u('╯', '+');
+var q = u('●', '•');
+var D = u('◆', '*');
+var U = u('▲', '!');
+var K2 = u('■', 'x');
 var b2 = t => {
   switch (t) {
     case 'initial':
@@ -21689,7 +21620,7 @@ async function handler8(id, tmux) {
 // src/cli/cancel.ts
 var import_picocolors11 = __toESM(require_picocolors(), 1);
 import * as fs6 from 'fs/promises';
-import * as path8 from 'path';
+import * as path7 from 'path';
 async function handler9(id, deps) {
   try {
     const { tmux, indexDb, eventLog, pidLock, state } = deps;
@@ -21740,7 +21671,7 @@ async function handler9(id, deps) {
       console.log(`Killed ${killed} tmux session(s)`);
     }
     await pidLock.release(runId);
-    const localKloop = path8.join(process.cwd(), '.kloop');
+    const localKloop = path7.join(process.cwd(), '.kloop');
     try {
       const stat = await fs6.lstat(localKloop);
       if (stat.isDirectory() || stat.isSymbolicLink()) {
@@ -21757,7 +21688,7 @@ async function handler9(id, deps) {
 
 // src/cli/link.ts
 var import_picocolors12 = __toESM(require_picocolors(), 1);
-import * as path9 from 'path';
+import * as path8 from 'path';
 import * as fs7 from 'fs/promises';
 async function handler10(runId, deps) {
   try {
@@ -21776,7 +21707,7 @@ async function handler10(runId, deps) {
       console.log(import_picocolors12.default.red(`Run not found: ${runId}`));
       return;
     }
-    const localKloop = path9.join(process.cwd(), '.kloop');
+    const localKloop = path8.join(process.cwd(), '.kloop');
     const specTarget = paths.runSpec(runId);
     const configTarget = paths.runConfig(runId);
     if (!(await fileExists3(specTarget))) {
@@ -21788,16 +21719,16 @@ async function handler10(runId, deps) {
       return;
     }
     await fs7.mkdir(localKloop, { recursive: true });
-    const specLink = path9.join(localKloop, 'spec.md');
+    const specLink = path8.join(localKloop, 'spec.md');
     await fs7.symlink(specTarget, specLink);
     if (await fileExists3(configTarget)) {
-      const configLink = path9.join(localKloop, 'config.yaml');
+      const configLink = path8.join(localKloop, 'config.yaml');
       await fs7.symlink(configTarget, configLink);
     }
     console.log(import_picocolors12.default.green(`Linked run ${runId} into .kloop/`));
-    console.log(import_picocolors12.default.dim(`  .kloop/spec.md \u2192 ${specTarget}`));
+    console.log(import_picocolors12.default.dim(`  .kloop/spec.md → ${specTarget}`));
     if (await fileExists3(configTarget)) {
-      console.log(import_picocolors12.default.dim(`  .kloop/config.yaml \u2192 ${configTarget}`));
+      console.log(import_picocolors12.default.dim(`  .kloop/config.yaml → ${configTarget}`));
     }
     console.log('');
     console.log(import_picocolors12.default.dim('Edit the files, then run:'));
@@ -21894,7 +21825,7 @@ import * as fs9 from 'fs/promises';
 import * as fsSync from 'fs';
 import { createReadStream, existsSync, statSync } from 'fs';
 import * as readline from 'readline';
-import * as path10 from 'path';
+import * as path9 from 'path';
 async function handler12(runId, loopArg, roleArg, ordinalArg, opts, deps) {
   try {
     const { indexDb } = deps;
@@ -21961,7 +21892,7 @@ async function discoverLoops(runDir) {
     const match2 = entry.match(/^loop-(\d+)$/);
     if (!match2) continue;
     const loopNum = parseInt(match2[1], 10);
-    const loopDir = path10.join(runDir, entry);
+    const loopDir = path9.join(runDir, entry);
     const agents = await discoverAgents(loopDir, loopNum);
     if (agents.length > 0) {
       loops.push({ loopNum, agents });
@@ -21978,10 +21909,10 @@ async function discoverAgents(loopDir, _loopNum) {
         continue;
       if (!entry.startsWith('implementer') && !entry.startsWith('reviewer-') && !entry.startsWith('checkpointer'))
         continue;
-      const entryPath = path10.join(loopDir, entry);
+      const entryPath = path9.join(loopDir, entry);
       const stat2 = await fs9.stat(entryPath).catch(() => null);
       if (!stat2?.isDirectory()) continue;
-      const logPath = path10.join(entryPath, 'log');
+      const logPath = path9.join(entryPath, 'log');
       const label = entry === 'implementer' ? 'impl' : entry === 'checkpointer' ? 'checkpoint' : entry;
       agents.push({ dirName: entry, label, logPath });
     }
@@ -22007,7 +21938,7 @@ async function displayLog(agent, opts) {
   }
   if (!(await fileExists5(agent.logPath))) {
     if (opts.f) return;
-    console.log(import_picocolors14.default.yellow(`No log yet \u2014 ${agent.label} may still be starting.`));
+    console.log(import_picocolors14.default.yellow(`No log yet — ${agent.label} may still be starting.`));
     console.log(
       import_picocolors14.default.dim(
         `Try: kloop view ${agent.dirName === 'implementer' ? '1 impl' : '1 ' + agent.dirName} -f`,
@@ -22026,7 +21957,7 @@ async function displayLog(agent, opts) {
     console.log(import_picocolors14.default.yellow('No log entries.'));
     return;
   }
-  console.log(import_picocolors14.default.dim(`${agent.label} \u2014 ${agent.logPath}`));
+  console.log(import_picocolors14.default.dim(`${agent.label} — ${agent.logPath}`));
   console.log('');
   displayFormattedLog(content);
 }
@@ -22071,7 +22002,7 @@ async function promptAgent(agents) {
   return selected;
 }
 async function followLog(agent, opts) {
-  console.log(import_picocolors14.default.dim(`Following: ${agent.label} \u2014 ${agent.logPath}`));
+  console.log(import_picocolors14.default.dim(`Following: ${agent.label} — ${agent.logPath}`));
   console.log(import_picocolors14.default.dim('Press Ctrl+C to stop'));
   console.log('');
   const cutoff = opts.since ? parseSince2(opts.since) : null;
@@ -22184,19 +22115,11 @@ function formatLogEntry(entry) {
 }
 function formatSystemEntry(entry) {
   if (entry.subtype === 'init') {
-    console.log(
-      import_picocolors14.default.yellow(
-        '\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550',
-      ),
-    );
+    console.log(import_picocolors14.default.yellow('══════════════════════════════════════════════════════════════'));
     console.log(import_picocolors14.default.yellow('  SESSION START'));
     if (entry.cwd) console.log(import_picocolors14.default.dim(`  cwd: ${entry.cwd}`));
     if (entry.session_id) console.log(import_picocolors14.default.dim(`  session: ${entry.session_id}`));
-    console.log(
-      import_picocolors14.default.yellow(
-        '\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550',
-      ),
-    );
+    console.log(import_picocolors14.default.yellow('══════════════════════════════════════════════════════════════'));
     console.log('');
   } else if (typeof entry.message === 'string') {
     console.log(import_picocolors14.default.yellow(`[system] ${entry.message}`));
@@ -22208,23 +22131,15 @@ function formatAssistantEntry(entry) {
   for (const block of message2.content) {
     if (block.type === 'text' && block.text) {
       console.log('');
-      console.log(
-        import_picocolors14.default.green(
-          '\u250C\u2500 AGENT \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500',
-        ),
-      );
+      console.log(import_picocolors14.default.green('┌─ AGENT ──────────────────────────────────────────────────────'));
       for (const line of block.text.split(`
 `)) {
-        console.log(import_picocolors14.default.green('\u2502 ') + line);
+        console.log(import_picocolors14.default.green('│ ') + line);
       }
-      console.log(
-        import_picocolors14.default.green(
-          '\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500',
-        ),
-      );
+      console.log(import_picocolors14.default.green('└──────────────────────────────────────────────────────────────'));
     } else if (block.type === 'tool_use' && block.name) {
       console.log('');
-      console.log(import_picocolors14.default.blue(`  \u26A1 ${block.name}`));
+      console.log(import_picocolors14.default.blue(`  ⚡ ${block.name}`));
       if (block.input) {
         const formatted = formatToolInput(block.name, block.input);
         for (const line of formatted.split(`
@@ -22251,32 +22166,24 @@ function formatUserEntry(entry) {
       const truncated = lines.length > maxLines;
       const displayLines = truncated ? lines.slice(0, maxLines) : lines;
       if (filePath) {
-        console.log(import_picocolors14.default.dim(`     \u21B3 ${filePath}`));
+        console.log(import_picocolors14.default.dim(`     ↳ ${filePath}`));
       }
       for (const line of displayLines) {
-        const cleanLine = line.replace(/^\s*\d+\u2192/, '');
+        const cleanLine = line.replace(/^\s*\d+→/, '');
         const truncatedLine = cleanLine.length > 100 ? cleanLine.slice(0, 100) + '...' : cleanLine;
-        console.log(import_picocolors14.default.dim(`     \u2502 ${truncatedLine}`));
+        console.log(import_picocolors14.default.dim(`     │ ${truncatedLine}`));
       }
       if (truncated) {
-        console.log(import_picocolors14.default.dim(`     \u2502 ... (${lines.length - maxLines} more lines)`));
+        console.log(import_picocolors14.default.dim(`     │ ... (${lines.length - maxLines} more lines)`));
       }
     }
   }
 }
 function formatFinalResult(entry) {
   console.log('');
-  console.log(
-    import_picocolors14.default.magenta(
-      '\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550',
-    ),
-  );
+  console.log(import_picocolors14.default.magenta('══════════════════════════════════════════════════════════════'));
   console.log(import_picocolors14.default.magenta('  SESSION COMPLETE'));
-  console.log(
-    import_picocolors14.default.magenta(
-      '\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550',
-    ),
-  );
+  console.log(import_picocolors14.default.magenta('══════════════════════════════════════════════════════════════'));
   if (entry.duration_ms) {
     const mins = Math.floor(entry.duration_ms / 60000);
     const secs = Math.floor((entry.duration_ms % 60000) / 1000);
@@ -22329,7 +22236,7 @@ ${truncateMultiline(preview, 200)}`;
       const todos = input.todos;
       if (todos) {
         return todos.map(t => {
-          const icon = t.status === 'completed' ? '\u2713' : t.status === 'in_progress' ? '\u2192' : '\u25CB';
+          const icon = t.status === 'completed' ? '✓' : t.status === 'in_progress' ? '→' : '○';
           return `${icon} ${t.content}`;
         }).join(`
 `);
@@ -22477,8 +22384,10 @@ var import_picocolors17 = __toESM(require_picocolors(), 1);
 // src/cli/shared.ts
 var import_picocolors16 = __toESM(require_picocolors(), 1);
 var CLAUDE_AUTO_PREFIX4 = 'claude-auto-';
-function shortBinary4(binary) {
-  return binary.startsWith(CLAUDE_AUTO_PREFIX4) ? binary.slice(CLAUDE_AUTO_PREFIX4.length) : binary;
+function shortBinary4(binary, harness) {
+  const name = binary.startsWith(CLAUDE_AUTO_PREFIX4) ? binary.slice(CLAUDE_AUTO_PREFIX4.length) : binary;
+  if (harness && harness !== 'claude') return `${name}:${harness}`;
+  return name;
 }
 async function loadLoopSummaries(runId, fs10) {
   const runDir = paths.runPath(runId);
@@ -22501,9 +22410,9 @@ async function loadLoopSummaries(runId, fs10) {
   return summaries;
 }
 function verdictMark3(verdict) {
-  if (verdict === 'approved') return import_picocolors16.default.green('\u2713');
-  if (verdict === 'rejected') return import_picocolors16.default.red('\u2717');
-  return import_picocolors16.default.dim('\xB7');
+  if (verdict === 'approved') return import_picocolors16.default.green('✓');
+  if (verdict === 'rejected') return import_picocolors16.default.red('✗');
+  return import_picocolors16.default.dim('·');
 }
 
 // src/cli/review.ts
@@ -22531,7 +22440,7 @@ async function handler14(id, opts, deps) {
       return;
     }
     console.log(
-      import_picocolors17.default.bold(`Run ${runId} \u2014 Review Verdicts
+      import_picocolors17.default.bold(`Run ${runId} — Review Verdicts
 `),
     );
     for (const summary of summaries) {
@@ -22563,7 +22472,7 @@ async function handler14(id, opts, deps) {
             const lines = r2.reasoning.split(`
 `);
             for (const line of lines) {
-              console.log(import_picocolors17.default.dim(`      \u2502 ${line}`));
+              console.log(import_picocolors17.default.dim(`      │ ${line}`));
             }
           }
         }
@@ -22639,7 +22548,7 @@ function buildDataSummary(runId, startedAt, status, exitReason, maxIterations, s
     }
     if (summary.checkpoint) {
       const ck = summary.checkpoint;
-      const ckLabel = `${ck.outcome}${ck.progressPercent !== undefined ? ` \u2014 ${ck.progressPercent}% progress` : ''}`;
+      const ckLabel = `${ck.outcome}${ck.progressPercent !== undefined ? ` — ${ck.progressPercent}% progress` : ''}`;
       md += `**Checkpoint**: ${ckLabel}
 `;
       if (ck.summary)
@@ -22817,7 +22726,7 @@ async function handler15(id, opts, deps) {
       console.log(content);
       console.log(
         import_picocolors18.default.dim(`
-(summary already exists \u2014 use --force to regenerate)`),
+(summary already exists — use --force to regenerate)`),
       );
       return;
     }
@@ -22870,6 +22779,9 @@ async function handler15(id, opts, deps) {
   }
 }
 
+// src/cli/stream.ts
+var import_picocolors20 = __toESM(require_picocolors(), 1);
+
 // src/stream/format.ts
 var import_picocolors19 = __toESM(require_picocolors(), 1);
 function formatEvent(event) {
@@ -22897,16 +22809,16 @@ function formatEvent(event) {
 function formatUserMessage(content) {
   if (typeof content === 'string') {
     const truncated = content.length > 200 ? content.slice(0, 200) + '...' : content;
-    return import_picocolors19.default.cyan(`\u25B6 ${truncated.replace(/\n/g, ' ')}`);
+    return import_picocolors19.default.cyan(`▶ ${truncated.replace(/\n/g, ' ')}`);
   }
   const text = extractText(content);
   if (text) {
     const truncated = text.length > 200 ? text.slice(0, 200) + '...' : text;
-    return import_picocolors19.default.cyan(`\u25B6 ${truncated.replace(/\n/g, ' ')}`);
+    return import_picocolors19.default.cyan(`▶ ${truncated.replace(/\n/g, ' ')}`);
   }
   const toolResults = content.filter(c => c.type === 'tool_use_result' || c.type === 'tool_result');
   if (toolResults.length > 0) {
-    return import_picocolors19.default.dim(`  \u21B3 ${toolResults.length} tool result(s)`);
+    return import_picocolors19.default.dim(`  ↳ ${toolResults.length} tool result(s)`);
   }
   return '';
 }
@@ -22950,16 +22862,32 @@ function formatResult(result) {
 }
 
 // src/cli/stream.ts
+var RETRY_PATTERN = /Attempt \d+ failed.*Retrying after/i;
+var MAX_CONSECUTIVE_RETRIES = 5;
 async function handler16() {
   const decoder = new TextDecoder();
   let buffer = '';
+  let consecutiveRetries = 0;
   for await (const chunk of Bun.stdin.stream()) {
     buffer += decoder.decode(chunk);
     const lines = buffer.split(`
 `);
     buffer = lines.pop() ?? '';
     for (const line of lines) {
-      processLine(line);
+      const action = processLine(line);
+      if (action === 'retry') {
+        consecutiveRetries++;
+        if (consecutiveRetries >= MAX_CONSECUTIVE_RETRIES) {
+          console.error(
+            import_picocolors20.default.red(
+              `[kloop] Detected ${MAX_CONSECUTIVE_RETRIES} consecutive retries — aborting.`,
+            ),
+          );
+          process.exit(1);
+        }
+      } else if (action === 'progress') {
+        consecutiveRetries = 0;
+      }
     }
   }
   if (buffer.trim()) {
@@ -22968,16 +22896,20 @@ async function handler16() {
 }
 function processLine(line) {
   const trimmed = line.trim();
-  if (!trimmed) return;
+  if (!trimmed) return 'skip';
   const event = tryParseJson(trimmed);
   if (event) {
     const formatted = formatEvent(event);
     if (formatted) {
       console.log(formatted);
     }
-  } else {
-    console.log(line);
+    return 'progress';
   }
+  if (RETRY_PATTERN.test(trimmed)) {
+    console.log(import_picocolors20.default.yellow(trimmed));
+    return 'retry';
+  }
+  return 'skip';
 }
 
 // src/cli/index.ts
@@ -23049,7 +22981,7 @@ function createCli(deps) {
   program2
     .command('remove [ids...]')
     .alias('rm')
-    .description('Delete run(s) \u2014 supports multiple ids and prefix matching')
+    .description('Delete run(s) — supports multiple ids and prefix matching')
     .option('--force', 'force remove even if run is active')
     .action(async (ids, opts) => handler13(ids, opts, deps));
   program2
@@ -23075,6 +23007,116 @@ function createCli(deps) {
     .action(async () => handler16());
   return program2;
 }
+
+// src/deps.ts
+import * as path10 from 'path';
+import * as os2 from 'os';
+import * as fs10 from 'fs/promises';
+var BASE_DIR2 = '.kagent';
+var CURRENT_DIR2 = `${BASE_DIR2}/current`;
+var SESSIONS_DIR2 = `${CURRENT_DIR2}/sessions`;
+var VERDICTS_DIR2 = `${CURRENT_DIR2}/verdicts`;
+var EVIDENCE_DIR2 = `${CURRENT_DIR2}/evidence`;
+var HISTORY_DIR2 = `${BASE_DIR2}/history`;
+var LOGS_DIR2 = `${BASE_DIR2}/logs`;
+var REVIEWS_DIR2 = `${BASE_DIR2}/reviews`;
+var METRICS_DIR2 = `${BASE_DIR2}/metrics`;
+function getKloopHome3() {
+  return process.env.KLOOP_HOME ?? path10.join(os2.homedir(), '.kloop');
+}
+var paths2 = {
+  baseDir: BASE_DIR2,
+  spec: `${BASE_DIR2}/spec.md`,
+  config: `${BASE_DIR2}/config.json`,
+  currentDir: CURRENT_DIR2,
+  runJson: `${CURRENT_DIR2}/run.json`,
+  sessionsDir: SESSIONS_DIR2,
+  verdictsDir: VERDICTS_DIR2,
+  evidenceDir: EVIDENCE_DIR2,
+  evidenceMd: `${EVIDENCE_DIR2}/evidence.md`,
+  learnings: `${CURRENT_DIR2}/learnings.md`,
+  historyDir: HISTORY_DIR2,
+  logsDir: LOGS_DIR2,
+  reviewsDir: REVIEWS_DIR2,
+  metricsDir: METRICS_DIR2,
+  failureMd: `${BASE_DIR2}/failure.md`,
+  historyEntry: runId => `${HISTORY_DIR2}/${runId}.json`,
+  verdictFile: (iteration, reviewerIndex) => `${VERDICTS_DIR2}/${iteration}-${reviewerIndex}.json`,
+  sessionFile: sessionId => `${SESSIONS_DIR2}/${sessionId}.json`,
+  runLogsDir: runId => `${LOGS_DIR2}/${runId}`,
+  runReviewsDir: runId => `${REVIEWS_DIR2}/${runId}`,
+  metricsFile: runId => `${METRICS_DIR2}/${runId}.jsonl`,
+  kloopHome: getKloopHome3(),
+  indexDb: path10.join(getKloopHome3(), 'index.db'),
+  lockFile: runId => path10.join(getKloopHome3(), `${runId}.lock`),
+  runPath: runId => path10.join(getKloopHome3(), runId),
+  loopPath: (runId, loopIndex) => path10.join(getKloopHome3(), runId, `loop-${loopIndex}`),
+  agentPath: (runId, loopIndex, agentName) => path10.join(getKloopHome3(), runId, `loop-${loopIndex}`, agentName),
+  runConfig: runId => path10.join(getKloopHome3(), runId, 'config.yaml'),
+  runSpec: runId => path10.join(getKloopHome3(), runId, 'spec.md'),
+  runSpecVersioned: (runId, version) => path10.join(getKloopHome3(), runId, `spec-${version}.md`),
+  runEvents: runId => path10.join(getKloopHome3(), runId, 'events.jsonl'),
+  runStatus: runId => path10.join(getKloopHome3(), runId, 'status.yaml'),
+  runLearnings: runId => path10.join(getKloopHome3(), runId, 'learnings.md'),
+  runLog: runId => path10.join(getKloopHome3(), runId, 'run.log'),
+  loopSummaryMd: (runId, loopIndex) => path10.join(getKloopHome3(), runId, `loop-${loopIndex}`, 'summary.md'),
+  loopSummaryJson: (runId, loopIndex) => path10.join(getKloopHome3(), runId, `loop-${loopIndex}`, 'summary.json'),
+  loopLearningMd: (runId, loopIndex) => path10.join(getKloopHome3(), runId, `loop-${loopIndex}`, 'learning.md'),
+  loopCheckpoint: (runId, loopIndex) => path10.join(getKloopHome3(), runId, `loop-${loopIndex}`, 'checkpoint.json'),
+  loopMetrics: (runId, loopIndex) => path10.join(getKloopHome3(), runId, `loop-${loopIndex}`, 'metrics.jsonl'),
+  loopImplementerPath: (runId, loopIndex) => path10.join(getKloopHome3(), runId, `loop-${loopIndex}`, 'implementer'),
+  loopReviewerPath: (runId, loopIndex, reviewerIndex) =>
+    path10.join(getKloopHome3(), runId, `loop-${loopIndex}`, `reviewer-${reviewerIndex}`),
+  loopEvidencePath: (runId, loopIndex) => path10.join(getKloopHome3(), runId, `loop-${loopIndex}`, 'evidence'),
+  loopReviewsPath: (runId, loopIndex) => path10.join(getKloopHome3(), runId, `loop-${loopIndex}`, 'reviews'),
+  loopVerdictsPath: (runId, loopIndex) => path10.join(getKloopHome3(), runId, `loop-${loopIndex}`, 'verdicts'),
+  loopCheckpointerPath: (runId, loopIndex) => path10.join(getKloopHome3(), runId, `loop-${loopIndex}`, 'checkpointer'),
+};
+
+class DefaultFsService2 {
+  async mkdir(dir) {
+    await fs10.mkdir(dir, { recursive: true });
+  }
+  async readFile(filePath) {
+    return await fs10.readFile(filePath, 'utf-8');
+  }
+  async readJson(filePath) {
+    try {
+      const content = await fs10.readFile(filePath, 'utf-8');
+      return JSON.parse(content);
+    } catch {
+      return null;
+    }
+  }
+  async writeFile(filePath, content) {
+    await fs10.mkdir(path10.dirname(filePath), { recursive: true });
+    await fs10.writeFile(filePath, content, 'utf-8');
+  }
+  async writeJson(filePath, data) {
+    await fs10.mkdir(path10.dirname(filePath), { recursive: true });
+    await fs10.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
+  }
+  async unlink(filePath) {
+    await fs10.unlink(filePath);
+  }
+  async exists(filePath) {
+    try {
+      await fs10.access(filePath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  async readdir(dirPath) {
+    return await fs10.readdir(dirPath);
+  }
+  async rm(dirPath, options = { recursive: false }) {
+    await fs10.rm(dirPath, options);
+  }
+}
+var defaultFsService2 = new DefaultFsService2();
+var { customAlphabet: customAlphabet3 } = (init_nanoid(), __toCommonJS(exports_nanoid));
+var _kloopNanoid2 = customAlphabet3('0123456789abcdefghijklmnopqrstuvwxyz', 8);
 
 // src/state/config.ts
 function mergeConfig(partial, existing) {
@@ -23114,9 +23156,9 @@ function mergeConfig(partial, existing) {
 class StateService {
   fs;
   paths;
-  constructor(fs10, paths2) {
-    this.fs = fs10;
-    this.paths = paths2;
+  constructor(fs11, paths3) {
+    this.fs = fs11;
+    this.paths = paths3;
   }
   async initProject(overrides = {}) {
     await this.fs.mkdir(this.paths.baseDir);
@@ -23520,12 +23562,12 @@ ${content}`);
 }
 
 // src/tmux/service.ts
-import * as fs10 from 'fs/promises';
+import * as fs11 from 'fs/promises';
 import * as path11 from 'path';
-import * as os2 from 'os';
+import * as os3 from 'os';
 class TmuxServiceImpl {
   spawn;
-  statusDir = path11.join(os2.tmpdir(), 'kloop', 'status');
+  statusDir = path11.join(os3.tmpdir(), 'kloop', 'status');
   constructor(spawn = Bun.spawn.bind(Bun)) {
     this.spawn = spawn;
   }
@@ -23593,9 +23635,9 @@ class TmuxServiceImpl {
     const startTime = Date.now();
     const statusFile = this.getStatusFilePath(params.sessionName);
     try {
-      await fs10.unlink(statusFile);
+      await fs11.unlink(statusFile);
     } catch {}
-    await fs10.writeFile(statusFile, 'RUNNING', { mode: 384 });
+    await fs11.writeFile(statusFile, 'RUNNING', { mode: 384 });
     const wrappedCommand = `${buildTimeoutCommand(params.command, params.timeoutMins)}; echo $? > "${statusFile}"`;
     const cmd = buildNewSessionCommand({
       sessionName: params.sessionName,
@@ -23628,7 +23670,7 @@ class TmuxServiceImpl {
     let exitCode = 1;
     let timedOut = false;
     try {
-      const statusContent = await fs10.readFile(statusFile, 'utf-8');
+      const statusContent = await fs11.readFile(statusFile, 'utf-8');
       const trimmed = statusContent.trim();
       if (trimmed === 'RUNNING') {
         exitCode = 1;
@@ -23641,7 +23683,7 @@ class TmuxServiceImpl {
       }
     } catch {}
     try {
-      await fs10.unlink(statusFile);
+      await fs11.unlink(statusFile);
     } catch {}
     return { exitCode, durationMs, timedOut };
   }
@@ -23652,7 +23694,7 @@ class TmuxServiceImpl {
     return parseSessionName(sessionName);
   }
   async ensureStatusDir() {
-    await fs10.mkdir(this.statusDir, { recursive: true, mode: 448 });
+    await fs11.mkdir(this.statusDir, { recursive: true, mode: 448 });
   }
   getStatusFilePath(sessionName) {
     const safeName = sessionName.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -23669,9 +23711,9 @@ import * as path12 from 'path';
 class LogsServiceImpl {
   fs;
   paths;
-  constructor(fs11, paths2) {
-    this.fs = fs11;
-    this.paths = paths2;
+  constructor(fs12, paths3) {
+    this.fs = fs12;
+    this.paths = paths3;
   }
   async getCurrentRunId() {
     try {
@@ -23798,16 +23840,176 @@ class LogsServiceImpl {
     return null;
   }
 }
-function createLogsService(fs11, paths2) {
-  return new LogsServiceImpl(fs11, paths2);
+function createLogsService(fs12, paths3) {
+  return new LogsServiceImpl(fs12, paths3);
+}
+
+// src/index-db.ts
+import * as path13 from 'path';
+class IndexDb2 {
+  fs;
+  paths;
+  db;
+  constructor(fs12, paths3) {
+    this.fs = fs12;
+    this.paths = paths3;
+    const { Database } = __require('bun:sqlite');
+    this.fs.mkdir(path13.dirname(this.paths.indexDb));
+    this.db = new Database(this.paths.indexDb, { create: true });
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS runs (
+        id          TEXT PRIMARY KEY,
+        workspace   TEXT NOT NULL,
+        started_at  TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_runs_workspace ON runs(workspace);
+      CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at DESC);
+    `);
+    this.db.exec('PRAGMA journal_mode=WAL');
+  }
+  async insertRun(row) {
+    this.db
+      .prepare('INSERT INTO runs (id, workspace, started_at) VALUES (?, ?, ?)')
+      .run(row.id, row.workspace, row.started_at);
+  }
+  async getRun(runId) {
+    const row = this.db.prepare('SELECT * FROM runs WHERE id = ?').get(runId);
+    return row ? row : null;
+  }
+  async getRunByWorkspace(workspace) {
+    const row = this.db
+      .prepare('SELECT * FROM runs WHERE workspace = ? ORDER BY started_at DESC LIMIT 1')
+      .get(workspace);
+    return row ? row : null;
+  }
+  async listRuns(workspace) {
+    let query = 'SELECT * FROM runs';
+    const params = [];
+    if (workspace) {
+      query += ' WHERE workspace = ?';
+      params.push(workspace);
+    }
+    query += ' ORDER BY started_at DESC';
+    const rows = this.db.prepare(query).all(...params);
+    return rows;
+  }
+  async removeRun(runId) {
+    const result = this.db.prepare('DELETE FROM runs WHERE id = ?').run(runId);
+    return result.changes > 0;
+  }
+  close() {
+    this.db.close();
+  }
+}
+
+class EventLog2 {
+  fs;
+  paths;
+  constructor(fs12, paths3) {
+    this.fs = fs12;
+    this.paths = paths3;
+  }
+  async append(runId, event) {
+    const line =
+      JSON.stringify(event) +
+      `
+`;
+    const { appendFile } = await import('fs/promises');
+    await appendFile(this.paths.runEvents(runId), line, 'utf-8');
+  }
+  async readAll(runId) {
+    const filePath = this.paths.runEvents(runId);
+    if (!(await this.fs.exists(filePath))) return [];
+    const content = await this.fs.readFile(filePath);
+    const events = [];
+    for (const line of content.split(`
+`)) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        events.push(JSON.parse(trimmed));
+      } catch {}
+    }
+    return events;
+  }
+  async deriveStatus(runId, pid) {
+    const status = await materialize(runId, this.fs, this.paths, pid);
+    return toRunState(status);
+  }
+  async materializeStatus(runId, pid) {
+    return materialize(runId, this.fs, this.paths, pid);
+  }
+  async enrichStatus(status, runId) {
+    return enrich(status, runId, this.fs, this.paths);
+  }
+  isTerminal(status) {
+    return status !== 'running' && status !== 'pending';
+  }
+}
+
+class PidLock2 {
+  fs;
+  paths;
+  constructor(fs12, paths3) {
+    this.fs = fs12;
+    this.paths = paths3;
+  }
+  async acquire(runId, workspace) {
+    const lockPath = this.paths.lockFile(runId);
+    const info = {
+      pid: process.pid,
+      runId,
+      workspace,
+      createdAt: new Date().toISOString(),
+    };
+    await this.fs.writeJson(lockPath, info);
+  }
+  async read(runId) {
+    const lockPath = this.paths.lockFile(runId);
+    if (!(await this.fs.exists(lockPath))) return null;
+    try {
+      return await this.fs.readJson(lockPath);
+    } catch {
+      return null;
+    }
+  }
+  async release(runId) {
+    const lockPath = this.paths.lockFile(runId);
+    if (await this.fs.exists(lockPath)) {
+      await this.fs.unlink(lockPath);
+    }
+  }
+  async isPidAlive(pid) {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  async listLocks() {
+    const home = this.paths.kloopHome;
+    if (!(await this.fs.exists(home))) return [];
+    const files = await this.fs.readdir(home);
+    const locks = [];
+    for (const file of files) {
+      if (!file.endsWith('.lock')) continue;
+      const lockPath = `${home}/${file}`;
+      try {
+        const info = await this.fs.readJson(lockPath);
+        if (info) locks.push(info);
+      } catch {}
+    }
+    return locks;
+  }
 }
 
 // src/index.ts
-var state = new StateService(defaultFsService, paths);
+var state = new StateService(defaultFsService2, paths2);
 var tmux = createTmuxService();
-var logs = createLogsService(defaultFsService, paths);
-var indexDb = new IndexDb(defaultFsService, paths);
-var eventLog = new EventLog(defaultFsService, paths);
-var pidLock = new PidLock(defaultFsService, paths);
+var logs = createLogsService(defaultFsService2, paths2);
+var indexDb = new IndexDb2(defaultFsService2, paths2);
+var eventLog = new EventLog2(defaultFsService2, paths2);
+var pidLock = new PidLock2(defaultFsService2, paths2);
 var program2 = createCli({ state, tmux, logs, indexDb, eventLog, pidLock });
 program2.parse(process.argv);

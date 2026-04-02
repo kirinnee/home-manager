@@ -1,5 +1,7 @@
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { mkdirSync, readdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+
+export type RunScope = { kind: 'session' | 'init'; id: string };
 
 export function artifactPath(id: string, version: number, phase: string, ...segments: string[]): string {
   return `${process.env.HOME}/.kautopilot/${id}/artifacts/v${version}/${phase}/${segments.join('/')}`;
@@ -36,4 +38,33 @@ export function sessionDir(id: string): string {
  */
 export function initDir(id: string): string {
   return `${process.env.HOME}/.kautopilot/init/${id}`;
+}
+
+export function scopeDir(scope: RunScope): string {
+  return scope.kind === 'init' ? initDir(scope.id) : sessionDir(scope.id);
+}
+
+export function runsDir(scope: RunScope): string {
+  return join(scopeDir(scope), 'runs');
+}
+
+export function nextRunNumber(scope: RunScope): number {
+  const dir = runsDir(scope);
+  mkdirSync(dir, { recursive: true });
+  const numbers = readdirSync(dir, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && /^\d+$/.test(entry.name))
+    .map(entry => Number(entry.name));
+  return numbers.length > 0 ? Math.max(...numbers) + 1 : 1;
+}
+
+export function runDir(scope: RunScope, runNumber: number): string {
+  return join(runsDir(scope), String(runNumber));
+}
+
+export function runFilePath(
+  scope: RunScope,
+  runNumber: number,
+  fileName: 'context' | 'logs' | 'command' | 'prompt.md',
+): string {
+  return join(runDir(scope, runNumber), fileName);
 }

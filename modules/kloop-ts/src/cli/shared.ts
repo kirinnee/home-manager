@@ -9,8 +9,10 @@ import { paths } from '../deps';
 
 const CLAUDE_AUTO_PREFIX = 'claude-auto-';
 
-export function shortBinary(binary: string): string {
-  return binary.startsWith(CLAUDE_AUTO_PREFIX) ? binary.slice(CLAUDE_AUTO_PREFIX.length) : binary;
+export function shortBinary(binary: string, harness?: string): string {
+  const name = binary.startsWith(CLAUDE_AUTO_PREFIX) ? binary.slice(CLAUDE_AUTO_PREFIX.length) : binary;
+  if (harness && harness !== 'claude') return `${name}:${harness}`;
+  return name;
 }
 
 export async function loadLoopSummaries(

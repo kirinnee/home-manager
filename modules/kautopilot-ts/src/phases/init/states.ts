@@ -14,7 +14,7 @@ import type {
 import { MAX_REPAIR_ATTEMPTS, CRITICAL_CAPABILITIES, NON_CRITICAL_CAPABILITIES } from '../../core/init-types';
 import { appendInitEvent } from '../../core/log';
 import { initDir, sessionDir, snapshotPath, ensureArtifactDir, sessionArtifactPath } from '../../core/artifacts';
-import { getDefaultBinary, getAgentPrompt } from '../../core/agents';
+import { getDefaultBinary, getAgentPrompt, setCachedConfig } from '../../core/agents';
 import { spawnPrintRaw, spawnPrint } from '../../llm/spawn';
 import { textInput, selectOption, confirmAction } from '../../llm/inquirer';
 import {
@@ -71,6 +71,10 @@ function initArtifactPath(initId: string, ...segments: string[]): string {
   return join(initDir(initId), ...segments);
 }
 
+function initTimeoutSeconds(ctx: InitContext): number {
+  return ctx.config.settings.defaultLlmTimeout;
+}
+
 function writeInitArtifact(initId: string, filename: string, content: string): void {
   const path = initArtifactPath(initId, filename);
   mkdirSync(join(initDir(initId)), { recursive: true });
@@ -86,9 +90,63 @@ function writeInitArtifactJson(initId: string, filename: string, data: unknown):
 // ============================================================================
 
 export const identify: InitStateHandler = async ctx => {
-  const { initId } = ctx;
+  const { initId, org, workDir } = ctx;
+  setCachedConfig(ctx.config);
 
   appendInitEvent(initId, { ts: new Date().toISOString(), event: 'identify:started' });
+
+  // Fast-path: if all org scripts already exist, skip straight to promote
+  if (!ctx.forceLocal && org) {
+    const scriptsDir = join(initDir(initId), 'scripts');
+    mkdirSync(scriptsDir, { recursive: true });
+    const { found, missing } = loadOrgScripts(scriptsDir, org);
+    if (missing.length === 0) {
+      logOk(`All scripts loaded from org "${org}" — fast-path`);
+
+      // Run critical verification to extract ticket ID
+      const branch = getCurrentBranch(workDir);
+      const critical = verifyCriticalScripts(scriptsDir, branch);
+
+      // Build non-critical results
+      const nonCritical: Record<string, { ok: boolean; noOp: boolean; error?: string }> = {};
+      for (const name of OPTIONAL_SCRIPTS) {
+        const scriptFile = join(scriptsDir, name);
+        if (!existsSync(scriptFile)) {
+          nonCritical[name] = { ok: false, noOp: false, error: 'missing' };
+          continue;
+        }
+        const content = readFileSync(scriptFile, 'utf-8');
+        const isNoOp = content.includes('# no-op') || (content.includes('exit 0') && content.split('\n').length <= 4);
+        nonCritical[name] = { ok: true, noOp: isNoOp };
+      }
+
+      // Write synthetic verify.json for promote
+      const verifyResult: VerifyResult = {
+        extractTicket: {
+          ok: !!critical.extractTicketId,
+          ticketId: critical.extractTicketId,
+          error: critical.extractTicketId ? undefined : 'no ticket ID extracted',
+        },
+        getTicket: {
+          ok: critical.getTicketOk,
+          contentLength: critical.getTicketOk ? 1 : 0,
+          error: critical.getTicketOk ? undefined : 'no usable content',
+        },
+        nonCritical,
+        repairAttempts: 0,
+        timestamp: new Date().toISOString(),
+      };
+      writeInitArtifactJson(initId, 'verify.json', verifyResult);
+
+      appendInitEvent(initId, {
+        ts: new Date().toISOString(),
+        event: 'identify:completed',
+        metadata: { source: 'org-fast-path', org, found: found.length },
+      });
+
+      return 'promote';
+    }
+  }
 
   if (ctx.forceLocal) {
     appendInitEvent(initId, {
@@ -173,9 +231,11 @@ export const research: InitStateHandler = async ctx => {
 
   const researchDoc = await spawnPrintRaw(getDefaultBinary(), researchPrompt, {
     cwd: ctx.workDir,
+    timeout: initTimeoutSeconds(ctx),
     spinnerMsg: `Researching ${systemName}`,
-    sessionId: initId,
+    runScope: { kind: 'init', id: initId },
     label: 'research-task-system',
+    context: `Init research phase for ${systemName}`,
   });
 
   // Derive detection plan from research output (spec section 3.2)
@@ -199,9 +259,11 @@ ${researchDoc || '(no research output)'}
 
   const parsedJson = await spawnPrintRaw(getDefaultBinary(), parsePrompt, {
     cwd: ctx.workDir,
+    timeout: initTimeoutSeconds(ctx),
     spinnerMsg: `Parsing research for ${systemName}`,
-    sessionId: initId,
+    runScope: { kind: 'init', id: initId },
     label: 'parse-research',
+    context: `Init research parsing phase for ${systemName}`,
   });
 
   let structured: ResearchSummary | null = null;
@@ -375,9 +437,11 @@ export const gather_context: InitStateHandler = async ctx => {
 
     const setupInstructions = await spawnPrintRaw(getDefaultBinary(), setupPrompt, {
       cwd: ctx.workDir,
+      timeout: initTimeoutSeconds(ctx),
       spinnerMsg: 'Researching setup instructions',
-      sessionId: initId,
+      runScope: { kind: 'init', id: initId },
       label: 'research-setup',
+      context: `Init setup help research for ${systemName}`,
     });
 
     if (setupInstructions) {
@@ -458,7 +522,11 @@ export const normalize: InitStateHandler = async ctx => {
     userAnswerLower.includes('github')
   ) {
     chosenAccessPath = 'gh-cli';
-  } else if (detectedToolKeys.some(t => t.includes('jira')) || userAnswerLower.includes('jira')) {
+  } else if (
+    detectedToolKeys.some(t => t.includes('jira') || t.includes('atlassian')) ||
+    userAnswerLower.includes('jira') ||
+    userAnswerLower.includes('acli')
+  ) {
     chosenAccessPath = 'jira-cli';
   } else if (detectedToolKeys.some(t => t.includes('linear')) || userAnswerLower.includes('linear')) {
     chosenAccessPath = 'linear-cli';
@@ -629,12 +697,17 @@ export const generate: InitStateHandler = async ctx => {
   while (repairAttempt < MAX_REPAIR_ATTEMPTS) {
     const llmOutput = await spawnPrintRaw(getDefaultBinary(), activePrompt, {
       cwd: workDir,
+      timeout: initTimeoutSeconds(ctx),
       spinnerMsg:
         repairAttempt === 0
           ? `Creating ${setupBrief.systemName} integration scripts`
           : `Repairing scripts (attempt ${repairAttempt + 1}/${MAX_REPAIR_ATTEMPTS})`,
-      sessionId: initId,
+      runScope: { kind: 'init', id: initId },
       label: repairAttempt === 0 ? 'create-scripts' : `repair-scripts-${repairAttempt}`,
+      context:
+        repairAttempt === 0
+          ? `Init generate phase creating ${setupBrief.systemName} integration scripts`
+          : `Init generate phase repairing ${setupBrief.systemName} integration scripts`,
     });
 
     if (llmOutput) {
@@ -951,9 +1024,13 @@ export const promote: InitStateHandler = async ctx => {
     }
   }
 
-  // Offer to save as org config
+  // Offer to save as org config (skip if org already has all scripts — fast-path)
   if (org && org !== 'default') {
-    await promptSaveOrg(sessionScriptsDir, org, sessionId);
+    const orgDir = join(`${process.env.HOME}/.kautopilot/orgs`, org);
+    const orgComplete = existsSync(orgDir) && ALL_SCRIPTS.every(s => existsSync(join(orgDir, s)));
+    if (!orgComplete) {
+      await promptSaveOrg(sessionScriptsDir, org, sessionId);
+    }
   }
 
   appendInitEvent(initId, {
@@ -1082,8 +1159,11 @@ export const downgrade_local: InitStateHandler = async ctx => {
       const localInitPrompt = getAgentPrompt('init', 'localInit', { sessionId });
       await spawnPrintRaw(getDefaultBinary(), localInitPrompt, {
         cwd: workDir,
-        timeout: 300,
+        timeout: initTimeoutSeconds(ctx),
         spinnerMsg: 'Generating ticket, spec, and plans',
+        runScope: { kind: 'init', id: initId },
+        label: 'local-init',
+        context: 'Init local mode generation of ticket, spec, and plans',
       });
     } catch (err) {
       logWarn('Local mode generation encountered an issue: ' + (err instanceof Error ? err.message : String(err)));
@@ -1279,35 +1359,38 @@ function buildDetectionPlan(systemName: string, researchDoc: string): ResearchSu
 }
 
 function classifyAccessSetup(answer: string): { needsSetupHelp: boolean; assessment: string } {
-  const normalized = answer.trim().toLowerCase();
+  const trimmed = answer.trim();
+  const normalized = trimmed.toLowerCase();
   if (!normalized) {
     return { needsSetupHelp: true, assessment: 'No access method provided yet.' };
   }
 
-  const setupIndicators = [
-    'no',
-    'not set up',
-    'not setup',
-    'not configured',
-    'none',
-    'broken',
-    'idk',
-    "i don't know",
-    'not logged in',
-    'not authenticated',
-    'need login',
-    'need auth',
-    'need setup',
-    'not working',
-    'installed but',
-    'maybe',
-    'unsure',
+  const setupPatterns = [
+    /^no$/,
+    /\bnot set ?up\b/,
+    /\bnot configured\b/,
+    /^none$/,
+    /\bbroken\b/,
+    /\bidk\b/,
+    /\bi don't know\b/,
+    /\bnot logged in\b/,
+    /\bnot authenticated\b/,
+    /\bneed login\b/,
+    /\bneed auth(?:entication)?\b/,
+    /\bneed setup\b/,
+    /\bnot working\b/,
+    /\binstalled but\b/,
+    /^maybe$/,
+    /^unsure$/,
   ];
 
-  const needsSetupHelp = setupIndicators.some(indicator => normalized === indicator || normalized.includes(indicator));
+  const readySignals = [/\bauthenticated\b/, /\bworking\b/, /\buse\b.+\bacli\b/, /\bacli\b/, /\bcli\b/];
+
+  const needsSetupHelp =
+    setupPatterns.some(pattern => pattern.test(normalized)) && !readySignals.some(pattern => pattern.test(normalized));
   const assessment = needsSetupHelp
-    ? `Access may need setup or verification: ${answer.trim()}`
-    : `Access appears ready: ${answer.trim()}`;
+    ? `Access may need setup or verification: ${trimmed}`
+    : `Access appears ready: ${trimmed}`;
   return { needsSetupHelp, assessment };
 }
 

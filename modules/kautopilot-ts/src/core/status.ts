@@ -52,7 +52,6 @@ export interface SessionStatus {
 
   // Phase-specific context (survives crash recovery)
   context: {
-    ticketType?: string;
     planIndex?: number;
     maxPlans?: number;
     prNumber?: number;
@@ -84,7 +83,7 @@ export interface SessionStatus {
 // ============================================================================
 
 const CHECKPOINTS: Record<string, Set<string>> = {
-  plan: new Set(['pull_ticket', 'route_type', 'write_spec', 'finalize_spec', 'finalize_plans']),
+  plan: new Set(['pull_ticket', 'write_spec', 'finalize_spec', 'finalize_plans']),
   implementation: new Set(['clear_loop', 'commit', 'next_plan', 'completed']),
   polish: new Set(['commit_pending', 'push', 'create_pr', 'poll', 'feedback_check', 'completed']),
 };

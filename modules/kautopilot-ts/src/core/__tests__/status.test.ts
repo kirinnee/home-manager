@@ -47,12 +47,12 @@ describe('ensureStatus', () => {
     appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:01Z', event: 'phase1:started', version: 1 });
     appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:02Z', event: 'pull_ticket:started', version: 1 });
     appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:03Z', event: 'pull_ticket:completed', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:04Z', event: 'route_type:started', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:05Z', event: 'route_type:completed', version: 1 });
+    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:04Z', event: 'write_spec:started', version: 1 });
+    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:05Z', event: 'write_spec:completed', version: 1 });
 
     const status = ensureStatus(TEST_SESSION);
-    expect(status.completedSteps).toEqual(['pull_ticket', 'route_type']);
-    expect(status.lastCheckpoint).toBe('route_type');
+    expect(status.completedSteps).toEqual(['pull_ticket', 'write_spec']);
+    expect(status.lastCheckpoint).toBe('write_spec');
     expect(status.stateStatus).toBe('completed');
   });
 
@@ -105,11 +105,11 @@ describe('ensureStatus', () => {
     appendEvent(TEST_SESSION, {
       ts: '2026-03-24T10:00:01Z',
       event: 'context:updated',
-      metadata: { ticketType: 'product' },
+      metadata: { deliveryKind: 'ticket' },
     });
 
     const status = ensureStatus(TEST_SESSION);
-    expect(status.context.ticketType).toBe('product');
+    expect(status.context.deliveryKind).toBe('ticket');
   });
 
   it('handles reset:completed — rolls back to checkpoint', () => {
@@ -117,30 +117,30 @@ describe('ensureStatus', () => {
     appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:01Z', event: 'phase1:started', version: 1 });
     appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:02Z', event: 'pull_ticket:started', version: 1 });
     appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:03Z', event: 'pull_ticket:completed', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:04Z', event: 'route_type:started', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:05Z', event: 'route_type:completed', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:06Z', event: 'gather_context:started', version: 1 });
+    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:04Z', event: 'write_spec:started', version: 1 });
+    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:05Z', event: 'write_spec:completed', version: 1 });
+    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:06Z', event: 'finalize_spec:started', version: 1 });
     appendEvent(TEST_SESSION, {
       ts: '2026-03-24T10:00:07Z',
       event: 'subtask:started',
-      metadata: { task: 'codebase', parent: 'gather_context' },
+      metadata: { task: 'codebase', parent: 'finalize_spec' },
     });
     // Crash here, then reset
     appendEvent(TEST_SESSION, {
       ts: '2026-03-24T10:01:00Z',
       event: 'crash:detected',
-      metadata: { state: 'gather_context', checkpoint: 'route_type' },
+      metadata: { state: 'finalize_spec', checkpoint: 'write_spec' },
     });
     appendEvent(TEST_SESSION, {
       ts: '2026-03-24T10:01:01Z',
       event: 'reset:completed',
-      metadata: { checkpoint: 'route_type' },
+      metadata: { checkpoint: 'write_spec' },
     });
 
     const status = ensureStatus(TEST_SESSION);
-    expect(status.state).toBe('route_type');
+    expect(status.state).toBe('write_spec');
     expect(status.stateStatus).toBe('completed');
-    expect(status.completedSteps).toEqual(['pull_ticket', 'route_type']);
+    expect(status.completedSteps).toEqual(['pull_ticket', 'write_spec']);
     expect(Object.keys(status.tasks)).toEqual([]);
     expect(status.running).toBe(false);
   });
@@ -155,12 +155,12 @@ describe('ensureStatus', () => {
     expect(status1.completedSteps).toEqual(['pull_ticket']);
 
     // Add more events
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:03Z', event: 'route_type:started', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:04Z', event: 'route_type:completed', version: 1 });
+    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:03Z', event: 'write_spec:started', version: 1 });
+    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:04Z', event: 'write_spec:completed', version: 1 });
 
     const status2 = ensureStatus(TEST_SESSION);
     expect(status2.walCursor).toBe(5);
-    expect(status2.completedSteps).toEqual(['pull_ticket', 'route_type']);
+    expect(status2.completedSteps).toEqual(['pull_ticket', 'write_spec']);
   });
 
   it('persists status to YAML file', () => {

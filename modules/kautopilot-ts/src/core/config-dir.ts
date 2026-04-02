@@ -111,14 +111,16 @@ export async function discoverConfigDirs(config: Config, sessionId?: string): Pr
     }
   }
 
-  // Also check type-level binaries (reviewers)
-  for (const typeConfig of Object.values(config.types)) {
-    for (const reviewer of Object.values(typeConfig.spec_reviewers)) {
+  // Check reviewer-level binaries
+  if (config.spec_reviewers) {
+    for (const reviewer of Object.values(config.spec_reviewers)) {
       if (reviewer.binaries) {
         for (const b of reviewer.binaries) binaries.add(b);
       }
     }
-    for (const reviewer of Object.values(typeConfig.plan_reviewers)) {
+  }
+  if (config.plan_reviewers) {
+    for (const reviewer of Object.values(config.plan_reviewers)) {
       if (reviewer.binaries) {
         for (const b of reviewer.binaries) binaries.add(b);
       }

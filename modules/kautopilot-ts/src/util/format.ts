@@ -84,7 +84,6 @@ export function logDim(msg: string): void {
 
 const STATE_ICONS: Record<string, string> = {
   pull_ticket: '🎫',
-  route_type: '🔀',
   gather_context: '🔍',
   write_spec: '📝',
   finalize_spec: '📌',

@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { snapshotPath } from '../core/artifacts';
+import { snapshotPath, type RunScope } from '../core/artifacts';
 import { getAgentPrompt } from '../core/agents';
 import { spawnTTY, type SpawnTTYOptions } from '../llm/spawn';
 import { appendEvent } from '../core/log';
@@ -191,9 +191,13 @@ export async function spawnTTYWithTurnTracking(
   const watcher = startTurnWatcher(sessionId, jsonlPath);
 
   try {
+    const runScope: RunScope = { kind: 'session', id: sessionId };
     const exitCode = await spawnTTY(binary, prompt, {
       ...options,
       claudeSessionId,
+      runScope,
+      label: options.label ?? 'tty-handoff',
+      context: `TTY handoff for session ${sessionId}`,
     });
     return exitCode;
   } finally {

@@ -32,6 +32,8 @@ export const configSchema = z
     reviewerTimeout: z.number().min(0.001).max(120).default(15),
     // Conflict detection
     conflictCheckThreshold: z.number().min(1).max(100).default(3),
+    // Checkpoint behavior
+    compressSpec: z.boolean().default(false),
     // Review behavior
     firstLoopFullReview: z.boolean().default(false),
     previousReviewPropagation: z.number().min(0).max(1).default(0),
@@ -75,6 +77,7 @@ export const configSchema = z
       implementerTimeout: data.implementerTimeout,
       reviewerTimeout: data.reviewerTimeout,
       conflictCheckThreshold: data.conflictCheckThreshold,
+      compressSpec: data.compressSpec,
       firstLoopFullReview: data.firstLoopFullReview,
       previousReviewPropagation: data.previousReviewPropagation,
       prompts: data.prompts,
@@ -90,6 +93,7 @@ export const resolvedConfigSchema = z.object({
   implementerTimeout: z.number().min(0.001).max(120),
   reviewerTimeout: z.number().min(0.001).max(120),
   conflictCheckThreshold: z.number().min(1).max(100),
+  compressSpec: z.boolean(),
   firstLoopFullReview: z.boolean(),
   previousReviewPropagation: z.number().min(0).max(1),
   prompts: z
@@ -402,6 +406,7 @@ export const DEFAULT_CONFIG: Config = {
   implementerTimeout: 30,
   reviewerTimeout: 15,
   conflictCheckThreshold: 2,
+  compressSpec: false,
   firstLoopFullReview: false,
   previousReviewPropagation: 0,
 };
@@ -583,12 +588,14 @@ export interface ImplementerStartEvent extends BaseEvent {
   type: typeof EVENT_TYPES.IMPLEMENTER_START;
   loop: number;
   binary: string;
+  harness: HarnessType;
 }
 
 export interface ImplementerEndEvent extends BaseEvent {
   type: typeof EVENT_TYPES.IMPLEMENTER_END;
   loop: number;
   binary: string;
+  harness: HarnessType;
   exitCode: number;
   durationMs: number;
   error?: string; // 'timeout' | 'exit_code_N'
@@ -607,6 +614,7 @@ export interface ReviewerStartEvent extends BaseEvent {
   loop: number;
   phase: number;
   reviewer: string;
+  harness?: HarnessType;
 }
 
 export interface ReviewerEndEvent extends BaseEvent {
@@ -614,6 +622,7 @@ export interface ReviewerEndEvent extends BaseEvent {
   loop: number;
   phase: number;
   reviewer: string;
+  harness?: HarnessType;
   exitCode: number;
   durationMs: number;
   error?: string; // 'timeout' | 'no_verdict' | 'exit_code_N'
@@ -641,6 +650,7 @@ export interface CheckpointStartEvent extends BaseEvent {
   type: typeof EVENT_TYPES.CHECKPOINT_START;
   loop: number;
   binary: string;
+  harness?: HarnessType;
 }
 
 export interface CheckpointEndEvent extends BaseEvent {
@@ -730,6 +740,7 @@ export type MaterializedAgentStatus = 'pending' | 'running' | 'completed' | 'err
 
 export interface MaterializedAgentState {
   binary: string;
+  harness?: HarnessType;
   status: MaterializedAgentStatus;
   startedAt?: string;
   completedAt?: string;
@@ -804,6 +815,7 @@ export interface LoopSummary {
   durationMs: number;
   implementer: {
     binary: string;
+    harness?: HarnessType;
     exitCode: number;
     durationMs: number;
     inputTokens?: number;
@@ -814,6 +826,7 @@ export interface LoopSummary {
     reviewers: Array<{
       reviewerIndex: number;
       binary: string;
+      harness?: HarnessType;
       exitCode: number;
       durationMs: number;
       timedOut?: boolean;
