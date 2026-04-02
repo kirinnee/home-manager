@@ -327,7 +327,6 @@ rec {
       kloop
       kloop-dev
       kautopilot
-      loctl
       atomi.clickup_cli
       grafana-loki
       prometheus.cli
@@ -335,6 +334,7 @@ rec {
 
       # AI
       pkgs-unstable.rtk
+      gemini-auto
 
       # liftoff
       awscli2

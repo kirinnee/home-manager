@@ -177,6 +177,7 @@ export const sessionSchema = z.object({
   verdict: verdictSchema.optional(),
   startedAt: z.string().datetime(),
   completedAt: z.string().datetime().optional(),
+  harnessSessionId: z.string().optional(), // Harness-native session ID (e.g., Gemini init.session_id)
 });
 
 export type Session = z.infer<typeof sessionSchema>;
@@ -254,6 +255,142 @@ export const checkpointResultSchema = z.object({
 export type CheckpointResult = z.infer<typeof checkpointResultSchema>;
 
 // ============================================================================
+// Harness Types (Claude vs Gemini)
+// ============================================================================
+
+export type HarnessType = 'claude' | 'gemini';
+
+/**
+ * Parsed binary config for implementers and conflict checker.
+ * Format: binary:harness (e.g., "gemini-auto:gemini")
+ */
+export interface ParsedBinary {
+  binary: string;
+  harness: HarnessType;
+}
+
+/**
+ * Parsed binary config for reviewers (which have an additional noVerdictAsFailure flag).
+ * Format: binary:harness:flag (e.g., "gemini-auto:gemini:0" or "gemini-auto:gemini:1")
+ */
+export interface ReviewerBinary extends ParsedBinary {
+  noVerdictAsFailure: boolean;
+}
+
+/**
+ * Validate a harness type string.
+ * @throws if the harness value is not 'claude' or 'gemini'
+ */
+export function parseHarness(value: string): HarnessType {
+  if (value === 'claude' || value === 'gemini') {
+    return value;
+  }
+  throw new Error(`Invalid harness type: "${value}". Must be "claude" or "gemini".`);
+}
+
+/**
+ * Parse an implementer or conflictChecker config entry.
+ * Supports both legacy format (bare binary name) and new format (binary:harness).
+ *
+ * Legacy: "claude-auto-zai" -> { binary: "claude-auto-zai", harness: "claude" }
+ * New: "gemini-auto:gemini" -> { binary: "gemini-auto", harness: "gemini" }
+ */
+export function parseImplementerConfig(entry: string): ParsedBinary {
+  const trimmed = entry.trim();
+  if (!trimmed) {
+    throw new Error('Implementer config cannot be empty.');
+  }
+
+  const colonCount = (trimmed.match(/:/g) || []).length;
+  if (colonCount > 1) {
+    throw new Error(`Invalid implementer config "${entry}": too many colons. Expected format: binary:harness`);
+  }
+
+  const colonIndex = trimmed.indexOf(':');
+  if (colonIndex === -1) {
+    // Legacy format: bare binary name defaults to Claude harness
+    return { binary: trimmed, harness: 'claude' };
+  }
+
+  if (colonIndex === 0) {
+    throw new Error(`Invalid implementer config "${entry}": binary name cannot be empty.`);
+  }
+
+  const binary = trimmed.slice(0, colonIndex);
+  const harnessValue = trimmed.slice(colonIndex + 1);
+
+  if (!harnessValue) {
+    throw new Error(`Invalid implementer config "${entry}": harness cannot be empty.`);
+  }
+
+  return {
+    binary,
+    harness: parseHarness(harnessValue),
+  };
+}
+
+/**
+ * Parse a reviewer config entry.
+ * Supports legacy format (binary:flag), new format (binary:harness:flag), and bare binary.
+ *
+ * Legacy: "claude-auto-zai:1" -> { binary: "claude-auto-zai", harness: "claude", noVerdictAsFailure: true }
+ * New: "gemini-auto:gemini:0" -> { binary: "gemini-auto", harness: "gemini", noVerdictAsFailure: false }
+ * Bare: "claude-reviewer-zai" -> { binary: "claude-reviewer-zai", harness: "claude", noVerdictAsFailure: true }
+ */
+export function parseReviewerConfig(entry: string): ReviewerBinary {
+  const trimmed = entry.trim();
+  if (!trimmed) {
+    throw new Error('Reviewer config cannot be empty.');
+  }
+
+  const colonCount = (trimmed.match(/:/g) || []).length;
+  if (colonCount > 2) {
+    throw new Error(
+      `Invalid reviewer config "${entry}": too many colons. Expected format: binary:harness:flag or binary:flag`,
+    );
+  }
+
+  // Find the last colon (separates the flag if present)
+  const lastColonIndex = trimmed.lastIndexOf(':');
+
+  if (lastColonIndex === -1) {
+    // No flag: "binary" or "binary:harness" (no flag defaults to noVerdictAsFailure: true)
+    return { ...parseImplementerConfig(trimmed), noVerdictAsFailure: true };
+  }
+
+  // Check if the part after last colon is a valid flag (0 or 1)
+  const potentialFlag = trimmed.slice(lastColonIndex + 1);
+
+  // If the flag segment looks numeric but isn't 0 or 1, reject explicitly
+  if (potentialFlag.length > 0 && /^\d+$/.test(potentialFlag) && potentialFlag !== '0' && potentialFlag !== '1') {
+    throw new Error(`Invalid reviewer config "${entry}": reviewer flag must be 0 or 1, got "${potentialFlag}".`);
+  }
+
+  if (potentialFlag === '0' || potentialFlag === '1') {
+    // There is a flag: parse the binary:harness part and apply the flag
+    const binaryPart = trimmed.slice(0, lastColonIndex);
+    if (!binaryPart) {
+      throw new Error(`Invalid reviewer config "${entry}": binary name cannot be empty.`);
+    }
+    const parsed = parseImplementerConfig(binaryPart);
+    return {
+      ...parsed,
+      noVerdictAsFailure: potentialFlag === '1',
+    };
+  }
+
+  // Not a valid flag (0 or 1), so it's binary:harness with no flag
+  return { ...parseImplementerConfig(trimmed), noVerdictAsFailure: true };
+}
+
+/**
+ * Parse a conflictChecker config entry (same as implementer, no flag).
+ */
+export function parseConflictCheckerConfig(entry: string): ParsedBinary {
+  return parseImplementerConfig(entry);
+}
+
+// ============================================================================
 // Default Config Values
 // ============================================================================
 
@@ -272,31 +409,6 @@ export const DEFAULT_CONFIG: Config = {
 // ============================================================================
 // Helper Functions
 // ============================================================================
-
-/**
- * Parse a reviewer config string like "binary-name:1" or "binary-name:0" or "binary-name".
- * Returns the binary name and whether no-verdict counts as failure.
- *
- * Format: "name" or "name:1" (no verdict/timeout/non-zero exit = rejection)
- *        or "name:0" (no verdict/timeout/non-zero exit = approval)
- * Default is noVerdictAsFailure = true for backwards compatibility.
- */
-export interface ReviewerConfig {
-  binary: string;
-  noVerdictAsFailure: boolean;
-}
-
-export function parseReviewerConfig(entry: string): ReviewerConfig {
-  const colonIndex = entry.lastIndexOf(':');
-  if (colonIndex > 0) {
-    const name = entry.slice(0, colonIndex).trim();
-    const flag = entry.slice(colonIndex + 1).trim();
-    if (name && (flag === '0' || flag === '1')) {
-      return { binary: name, noVerdictAsFailure: flag === '1' };
-    }
-  }
-  return { binary: entry.trim(), noVerdictAsFailure: true };
-}
 
 /**
  * Get all implementer binary names from config

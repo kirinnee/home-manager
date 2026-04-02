@@ -1,7 +1,7 @@
 { nixpkgs ? import <nixpkgs> { } }:
 
 let
-  version = "3.1.0-dev-1";
+  version = "3.1.0-dev-2";
   pname = "kloop";
 
 in

@@ -12,7 +12,7 @@ let configured = false;
 export function renderMarkdown(text: string): string {
   if (!configured) {
     marked.use({
-      renderer: new markedTerminal({
+      renderer: new (markedTerminal as any)({
         width: process.stdout.columns || 80,
         reflowText: true,
         showSectionPrefix: true,

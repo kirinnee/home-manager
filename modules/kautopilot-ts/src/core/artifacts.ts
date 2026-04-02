@@ -29,3 +29,11 @@ export function ensureArtifactDir(path: string): void {
 export function sessionDir(id: string): string {
   return `${process.env.HOME}/.kautopilot/${id}`;
 }
+
+/**
+ * Init attempt directory — separate from runtime sessions.
+ * e.g. initDir('abc12345') → ~/.kautopilot/init/abc12345
+ */
+export function initDir(id: string): string {
+  return `${process.env.HOME}/.kautopilot/init/${id}`;
+}

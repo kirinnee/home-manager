@@ -2025,7 +2025,7 @@ var init_id = __esm(() => {
 
 // src/core/db.ts
 import { Database } from 'bun:sqlite';
-import { mkdirSync, existsSync, readFileSync } from 'fs';
+import { mkdirSync } from 'fs';
 import { dirname } from 'path';
 function rowToParams(row) {
   return [
@@ -2083,26 +2083,11 @@ function getSessionByWorktree(repoPath, worktree) {
 }
 function listSessions(options) {
   const d = getDb();
-  if (options?.includeAll) {
-    return d.query('SELECT * FROM sessions ORDER BY created_at DESC').all();
-  }
   const sessions = d.query('SELECT * FROM sessions ORDER BY created_at DESC').all();
-  const lockDir = `${process.env.HOME}/.kautopilot`;
-  return sessions.filter(s => {
-    const lockFile = `${lockDir}/${s.id}/lock.pid`;
-    try {
-      if (!existsSync(lockFile)) return false;
-      const pid = parseInt(readFileSync(lockFile, 'utf-8').trim(), 10);
-      try {
-        process.kill(pid, 0);
-        return true;
-      } catch {
-        return false;
-      }
-    } catch {
-      return false;
-    }
-  });
+  if (options?.includeAll) {
+    return sessions;
+  }
+  return sessions.filter(s => s.state === 'running');
 }
 function deleteSession(id) {
   const d = getDb();
@@ -2126,6 +2111,120 @@ var DB_PATH,
   db = null;
 var init_db = __esm(() => {
   DB_PATH = `${process.env.HOME}/.kautopilot/index.db`;
+});
+
+// src/core/artifacts.ts
+var exports_artifacts = {};
+__export(exports_artifacts, {
+  snapshotPath: () => snapshotPath,
+  sessionDir: () => sessionDir,
+  sessionArtifactPath: () => sessionArtifactPath,
+  initDir: () => initDir,
+  ensureArtifactDir: () => ensureArtifactDir,
+  artifactPath: () => artifactPath,
+});
+import { mkdirSync as mkdirSync2 } from 'fs';
+import { dirname as dirname2 } from 'path';
+function artifactPath(id, version, phase, ...segments) {
+  return `${process.env.HOME}/.kautopilot/${id}/artifacts/v${version}/${phase}/${segments.join('/')}`;
+}
+function snapshotPath(id, version, ...segments) {
+  return `${process.env.HOME}/.kautopilot/${id}/artifacts/v${version}/${segments.join('/')}`;
+}
+function sessionArtifactPath(id, ...segments) {
+  return `${process.env.HOME}/.kautopilot/${id}/artifacts/${segments.join('/')}`;
+}
+function ensureArtifactDir(path) {
+  mkdirSync2(dirname2(path), { recursive: true });
+}
+function sessionDir(id) {
+  return `${process.env.HOME}/.kautopilot/${id}`;
+}
+function initDir(id) {
+  return `${process.env.HOME}/.kautopilot/init/${id}`;
+}
+var init_artifacts = () => {};
+
+// src/core/init-db.ts
+import { Database as Database2 } from 'bun:sqlite';
+import { mkdirSync as mkdirSync3 } from 'fs';
+import { dirname as dirname3 } from 'path';
+function getDb2() {
+  if (!db2) {
+    mkdirSync3(dirname3(DB_PATH2), { recursive: true });
+    db2 = new Database2(DB_PATH2);
+    db2.exec('PRAGMA journal_mode=WAL');
+    db2.exec(`
+      CREATE TABLE IF NOT EXISTS init_attempts (
+        id                  TEXT PRIMARY KEY,
+        repo_path           TEXT NOT NULL,
+        worktree            TEXT NOT NULL,
+        git_root            TEXT NOT NULL,
+        git_root_host       TEXT NOT NULL,
+        org                 TEXT,
+        outcome             TEXT,
+        promoted_session_id TEXT,
+        created_at          TEXT NOT NULL,
+        updated_at          TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_init_worktree ON init_attempts(repo_path, worktree);
+    `);
+  }
+  return db2;
+}
+function upsertInitAttempt(row) {
+  const d = getDb2();
+  d.query(
+    `INSERT INTO init_attempts (id, repo_path, worktree, git_root, git_root_host, org, outcome, promoted_session_id, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+     ON CONFLICT(id) DO UPDATE SET
+       outcome = $7,
+       promoted_session_id = $8,
+       updated_at = $10`,
+  ).run(
+    row.id,
+    row.repo_path,
+    row.worktree,
+    row.git_root,
+    row.git_root_host,
+    row.org,
+    row.outcome,
+    row.promoted_session_id,
+    row.created_at,
+    row.updated_at,
+  );
+}
+function updateInitOutcome(id, outcome, promotedSessionId) {
+  const d = getDb2();
+  d.query('UPDATE init_attempts SET outcome = $1, promoted_session_id = $2, updated_at = $3 WHERE id = $4').run(
+    outcome,
+    promotedSessionId ?? null,
+    new Date().toISOString(),
+    id,
+  );
+}
+function getInitAttemptById(id) {
+  const d = getDb2();
+  return d.query('SELECT * FROM init_attempts WHERE id = $1').get(id);
+}
+function getInitAttemptByPromotedSessionId(sessionId) {
+  const d = getDb2();
+  return d
+    .query('SELECT * FROM init_attempts WHERE promoted_session_id = $1 ORDER BY created_at DESC LIMIT 1')
+    .get(sessionId);
+}
+function getActiveInitForWorktree(repoPath, worktree) {
+  const d = getDb2();
+  return d
+    .query(
+      'SELECT * FROM init_attempts WHERE repo_path = $1 AND worktree = $2 AND outcome IS NULL ORDER BY created_at DESC LIMIT 1',
+    )
+    .get(repoPath, worktree);
+}
+var DB_PATH2,
+  db2 = null;
+var init_init_db = __esm(() => {
+  DB_PATH2 = `${process.env.HOME}/.kautopilot/index.db`;
 });
 
 // node_modules/yaml/dist/nodes/identity.js
@@ -13837,13 +13936,16 @@ Detected CLI tools on this system:
 {detectedInfo}
 
 Keep it factual and concise. Output as markdown.`,
-  DEFAULT_RESEARCH_SETUP_PROMPT = `The user needs to set up access to "{taskSystem}" but hasn't configured it yet.
+  DEFAULT_RESEARCH_SETUP_PROMPT = `The user needs to set up access to "{taskSystem}" but it may be partially configured or not authenticated yet.
+
+Access hint from the user: {accessMethod}
 
 Based on the research above, propose the simplest setup path.
 
 1. What is the recommended access method? (CLI, API token, MCP server)
 2. Give step-by-step setup instructions
 3. How to verify it works (test command)
+4. If the user already has the CLI installed, include auth/context checks before assuming it works
 
 Keep it concise and actionable.`,
   DEFAULT_CREATE_SCRIPTS_PROMPT = `You are creating ticket integration scripts for kautopilot.
@@ -13856,6 +13958,7 @@ State mapping: {stateMapping}
 Current branch: {branch}
 Scripts dir: {scriptsDir}
 {quirks}
+Setup assessment: {setupAssessment}
 
 ## Research Doc (from earlier research)
 {researchDoc}
@@ -13878,7 +13981,8 @@ Script requirements:
 - Transition scripts:
   - Research how transitions work for this specific system
   - If transitions are complex (e.g., Jira workflows), use the correct transition IDs
-  - Verify auth is working before using API/CLI calls
+  - Verify auth and project/site context are working before using API/CLI calls
+  - For Jira/Atlassian CLI, do not guess workflow names or transition IDs; discover them first or fall back to a clear no-op with explanation
 
 ## Test
 
@@ -14089,17 +14193,17 @@ Options: fix the issue and retry, skip and move on, or escalate.`,
 });
 
 // src/core/config.ts
-import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync2 } from 'fs';
-import { dirname as dirname2 } from 'path';
+import { readFileSync, writeFileSync, mkdirSync as mkdirSync4, existsSync } from 'fs';
+import { dirname as dirname4 } from 'path';
 function configPath(id) {
   return `${process.env.HOME}/.kautopilot/${id}/config.yaml`;
 }
 function readConfig(id) {
   const path = configPath(id);
-  if (!existsSync2(path)) {
+  if (!existsSync(path)) {
     return null;
   }
-  const raw = readFileSync2(path, 'utf-8');
+  const raw = readFileSync(path, 'utf-8');
   const parsed = YAML.parse(raw);
   if (!parsed) return DEFAULT_CONFIG;
   const legacySettings = parsed.settings;
@@ -14127,7 +14231,7 @@ function readConfig(id) {
 }
 function writeConfig(id, config) {
   const path = configPath(id);
-  mkdirSync2(dirname2(path), { recursive: true });
+  mkdirSync4(dirname4(path), { recursive: true });
   writeFileSync(path, YAML.stringify(config));
 }
 function globalConfigPath() {
@@ -14138,8 +14242,8 @@ function orgConfigPath(org) {
 }
 function ensureGlobalConfig() {
   const path = globalConfigPath();
-  if (existsSync2(path)) return;
-  mkdirSync2(dirname2(path), { recursive: true });
+  if (existsSync(path)) return;
+  mkdirSync4(dirname4(path), { recursive: true });
   const header = `# kautopilot global config
 # Edit these to customize agent behavior and binary.
 
@@ -14150,14 +14254,14 @@ function pickConfig(org, configPathOverride) {
   if (configPathOverride) return configPathOverride;
   if (org) {
     const orgPath = orgConfigPath(org);
-    if (existsSync2(orgPath)) return orgPath;
+    if (existsSync(orgPath)) return orgPath;
   }
   return globalConfigPath();
 }
 function resolveConfig(org, configPathOverride) {
   const picked = pickConfig(org, configPathOverride);
-  if (!picked || !existsSync2(picked)) return { ...DEFAULT_CONFIG };
-  const raw = readFileSync2(picked, 'utf-8');
+  if (!picked || !existsSync(picked)) return { ...DEFAULT_CONFIG };
+  const raw = readFileSync(picked, 'utf-8');
   const parsed = YAML.parse(raw);
   if (!parsed) return { ...DEFAULT_CONFIG };
   const legacySettings = parsed.settings;
@@ -14189,56 +14293,15 @@ var init_config = __esm(() => {
   YAML = __toESM(require_dist(), 1);
 });
 
-// src/core/log.ts
-var exports_log = {};
-__export(exports_log, {
-  readLog: () => readLog,
-  logPath: () => logPath,
-  appendEvent: () => appendEvent,
-});
-import { appendFileSync, readFileSync as readFileSync3, existsSync as existsSync3, mkdirSync as mkdirSync3 } from 'fs';
-import { dirname as dirname3 } from 'path';
-function logPath(id) {
-  return `${process.env.HOME}/.kautopilot/${id}/log.jsonl`;
-}
-function appendEvent(id, entry) {
-  const path = logPath(id);
-  mkdirSync3(dirname3(path), { recursive: true });
-  appendFileSync(
-    path,
-    JSON.stringify(entry) +
-      `
-`,
-  );
-}
-function readLog(id) {
-  const path = logPath(id);
-  if (!existsSync3(path)) return [];
-  const raw = readFileSync3(path, 'utf-8');
-  const entries = [];
-  for (const line of raw.split(`
-`)) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      entries.push(JSON.parse(trimmed));
-    } catch {
-      console.warn(`Warning: skipping malformed log line: ${trimmed.slice(0, 80)}`);
-    }
-  }
-  return entries;
-}
-var init_log = () => {};
-
 // src/core/lock.ts
 import {
   writeFileSync as writeFileSync2,
-  readFileSync as readFileSync4,
-  existsSync as existsSync4,
+  readFileSync as readFileSync2,
+  existsSync as existsSync2,
   unlinkSync,
-  mkdirSync as mkdirSync4,
+  mkdirSync as mkdirSync5,
 } from 'fs';
-import { dirname as dirname4 } from 'path';
+import { dirname as dirname5 } from 'path';
 function lockPath(id) {
   return `${process.env.HOME}/.kautopilot/${id}/lock.pid`;
 }
@@ -14252,9 +14315,9 @@ function isProcessAlive(pid) {
 }
 function acquireLock(id) {
   const path = lockPath(id);
-  mkdirSync4(dirname4(path), { recursive: true });
-  if (existsSync4(path)) {
-    const existingPid = parseInt(readFileSync4(path, 'utf-8').trim(), 10);
+  mkdirSync5(dirname5(path), { recursive: true });
+  if (existsSync2(path)) {
+    const existingPid = parseInt(readFileSync2(path, 'utf-8').trim(), 10);
     if (isProcessAlive(existingPid)) {
       throw new Error(`Session is already running (PID ${existingPid}). Use \`kautopilot stop\` first.`);
     }
@@ -14264,8 +14327,8 @@ function acquireLock(id) {
   writeFileSync2(path, String(process.pid));
   const cleanup = () => {
     try {
-      if (existsSync4(path)) {
-        const storedPid = readFileSync4(path, 'utf-8').trim();
+      if (existsSync2(path)) {
+        const storedPid = readFileSync2(path, 'utf-8').trim();
         if (storedPid === String(process.pid)) {
           unlinkSync(path);
         }
@@ -14284,10 +14347,10 @@ function acquireLock(id) {
 }
 function checkLock(id) {
   const path = lockPath(id);
-  if (!existsSync4(path)) {
+  if (!existsSync2(path)) {
     return { locked: false, pid: 0, alive: false };
   }
-  const pid = parseInt(readFileSync4(path, 'utf-8').trim(), 10);
+  const pid = parseInt(readFileSync2(path, 'utf-8').trim(), 10);
   const alive = isProcessAlive(pid);
   if (!alive) {
     console.warn(`Warning: Stale lock detected (PID ${pid} not alive). Auto-cleaning.`);
@@ -14301,8 +14364,8 @@ function checkLock(id) {
 function releaseLock(id) {
   const path = lockPath(id);
   try {
-    if (existsSync4(path)) {
-      const storedPid = readFileSync4(path, 'utf-8').trim();
+    if (existsSync2(path)) {
+      const storedPid = readFileSync2(path, 'utf-8').trim();
       if (storedPid === String(process.pid)) {
         unlinkSync(path);
       }
@@ -14311,7 +14374,444 @@ function releaseLock(id) {
 }
 var init_lock = () => {};
 
+// src/core/log.ts
+var exports_log = {};
+__export(exports_log, {
+  readLogFromDir: () => readLogFromDir,
+  readLog: () => readLog,
+  readInitLog: () => readInitLog,
+  logPathForDir: () => logPathForDir,
+  logPath: () => logPath,
+  initLogPath: () => initLogPath,
+  appendInitEvent: () => appendInitEvent,
+  appendEventToDir: () => appendEventToDir,
+  appendEvent: () => appendEvent,
+});
+import { appendFileSync, readFileSync as readFileSync3, existsSync as existsSync3, mkdirSync as mkdirSync6 } from 'fs';
+import { join as join2, dirname as dirname6 } from 'path';
+function logPathForDir(dir) {
+  return join2(dir, 'log.jsonl');
+}
+function appendEventToDir(dir, entry) {
+  const path = logPathForDir(dir);
+  mkdirSync6(dirname6(path), { recursive: true });
+  appendFileSync(
+    path,
+    JSON.stringify(entry) +
+      `
+`,
+  );
+}
+function readLogFromDir(dir) {
+  const path = logPathForDir(dir);
+  if (!existsSync3(path)) return [];
+  const raw = readFileSync3(path, 'utf-8');
+  const entries = [];
+  for (const line of raw.split(`
+`)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      entries.push(JSON.parse(trimmed));
+    } catch {
+      console.warn(`Warning: skipping malformed log line: ${trimmed.slice(0, 80)}`);
+    }
+  }
+  return entries;
+}
+function logPath(id) {
+  return logPathForDir(sessionDir(id));
+}
+function appendEvent(id, entry) {
+  appendEventToDir(sessionDir(id), entry);
+}
+function readLog(id) {
+  return readLogFromDir(sessionDir(id));
+}
+function initLogPath(id) {
+  return logPathForDir(initDir(id));
+}
+function appendInitEvent(id, entry) {
+  appendEventToDir(initDir(id), entry);
+}
+function readInitLog(id) {
+  return readLogFromDir(initDir(id));
+}
+var init_log = __esm(() => {
+  init_artifacts();
+});
+
+// src/core/init-lock.ts
+import {
+  writeFileSync as writeFileSync3,
+  readFileSync as readFileSync4,
+  existsSync as existsSync4,
+  unlinkSync as unlinkSync2,
+  mkdirSync as mkdirSync7,
+} from 'fs';
+import { join as join3, dirname as dirname7 } from 'path';
+function initLockPath(id) {
+  return join3(initDir(id), 'lock.pid');
+}
+function isProcessAlive2(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function acquireInitLock(id) {
+  const path = initLockPath(id);
+  mkdirSync7(dirname7(path), { recursive: true });
+  if (existsSync4(path)) {
+    const existingPid = parseInt(readFileSync4(path, 'utf-8').trim(), 10);
+    if (isProcessAlive2(existingPid)) {
+      throw new Error(`Init is already running (PID ${existingPid}).`);
+    }
+    unlinkSync2(path);
+  }
+  writeFileSync3(path, String(process.pid));
+  currentInitId = id;
+  currentLockPath = path;
+  const cleanupCurrentLock = () => {
+    const lockPath2 = currentLockPath;
+    if (!lockPath2) return;
+    try {
+      if (existsSync4(lockPath2)) {
+        const storedPid = readFileSync4(lockPath2, 'utf-8').trim();
+        if (storedPid === String(process.pid)) {
+          unlinkSync2(lockPath2);
+        }
+      }
+    } catch {}
+  };
+  if (!signalHandlersRegistered) {
+    signalHandlersRegistered = true;
+    process.on('SIGINT', () => {
+      const initId = currentInitId;
+      if (initId) {
+        try {
+          appendInitEvent(initId, {
+            ts: new Date().toISOString(),
+            event: 'init:cancelled',
+            metadata: { reason: 'sigint', pid: process.pid },
+          });
+          updateInitOutcome(initId, 'cancelled');
+        } catch {}
+      }
+      cleanupCurrentLock();
+      process.exit(130);
+    });
+    process.on('SIGTERM', () => {
+      const initId = currentInitId;
+      if (initId) {
+        try {
+          appendInitEvent(initId, {
+            ts: new Date().toISOString(),
+            event: 'init:cancelled',
+            metadata: { reason: 'sigterm', pid: process.pid },
+          });
+          updateInitOutcome(initId, 'cancelled');
+        } catch {}
+      }
+      cleanupCurrentLock();
+      process.exit(143);
+    });
+    process.on('exit', cleanupCurrentLock);
+  }
+}
+function checkInitLock(id) {
+  const path = initLockPath(id);
+  if (!existsSync4(path)) {
+    return { locked: false, pid: 0, alive: false };
+  }
+  const pid = parseInt(readFileSync4(path, 'utf-8').trim(), 10);
+  const alive = isProcessAlive2(pid);
+  if (!alive) {
+    try {
+      unlinkSync2(path);
+    } catch {}
+    return { locked: false, pid, alive: false };
+  }
+  return { locked: true, pid, alive: true };
+}
+function releaseInitLock(id) {
+  const path = initLockPath(id);
+  try {
+    if (existsSync4(path)) {
+      const storedPid = readFileSync4(path, 'utf-8').trim();
+      if (storedPid === String(process.pid)) {
+        unlinkSync2(path);
+      }
+    }
+  } catch {}
+}
+var signalHandlersRegistered = false,
+  currentInitId = null,
+  currentLockPath = null;
+var init_init_lock = __esm(() => {
+  init_artifacts();
+  init_log();
+  init_init_db();
+});
+
+// src/util/format.ts
+function formatDuration(ms) {
+  if (ms <= 0) return '0s';
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const s = seconds % 60;
+  const m = minutes % 60;
+  if (hours > 0) {
+    return `${hours}h ${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`;
+  }
+  if (minutes > 0) {
+    return `${m}m ${String(s).padStart(2, '0')}s`;
+  }
+  return `${s}s`;
+}
+function logField(label, value) {
+  console.log(`${c.cyan}${label.padEnd(11)}${c.reset}${value}`);
+}
+function logOk(msg) {
+  console.log(`${c.green}\u2713${c.reset} ${msg}`);
+}
+function logInfo(msg) {
+  console.log(`${c.blue}\u2139${c.reset} ${msg}`);
+}
+function logWarn(msg) {
+  console.warn(`${c.yellow}\u26A0${c.reset} ${msg}`);
+}
+function logError(msg) {
+  console.error(`${c.red}\u2717${c.reset} ${msg}`);
+}
+function logHeading(title) {
+  console.log(`
+${c.bold}${c.cyan}${title}${c.reset}`);
+}
+function logDim(msg) {
+  console.log(`${c.dim}${msg}${c.reset}`);
+}
+function stateIcon(state) {
+  return STATE_ICONS[state] ?? '\u25CF';
+}
+function formatStatus(state, running) {
+  if (state === 'init') return `${c.yellow}init-incomplete${c.reset}`;
+  if (running) return `${c.green}running${c.reset}`;
+  return `${c.dim}stopped${c.reset}`;
+}
+function formatPhase(phase) {
+  if (!phase || phase === 'none') return `${c.dim}\u2014${c.reset}`;
+  return `${c.magenta}${phase}${c.reset}`;
+}
+var isTTY, c, STATE_ICONS;
+var init_format = __esm(() => {
+  isTTY = process.stdout.isTTY;
+  c = {
+    reset: isTTY ? '\x1B[0m' : '',
+    bold: isTTY ? '\x1B[1m' : '',
+    dim: isTTY ? '\x1B[2m' : '',
+    green: isTTY ? '\x1B[32m' : '',
+    yellow: isTTY ? '\x1B[33m' : '',
+    red: isTTY ? '\x1B[31m' : '',
+    cyan: isTTY ? '\x1B[36m' : '',
+    magenta: isTTY ? '\x1B[35m' : '',
+    blue: isTTY ? '\x1B[34m' : '',
+  };
+  STATE_ICONS = {
+    pull_ticket: '\uD83C\uDFAB',
+    route_type: '\uD83D\uDD00',
+    gather_context: '\uD83D\uDD0D',
+    write_spec: '\uD83D\uDCDD',
+    finalize_spec: '\uD83D\uDCCC',
+    write_plans: '\uD83D\uDCCB',
+    finalize_plans: '\u2705',
+    setup_run: '\u2699\uFE0F',
+    running: '\uD83C\uDFC3',
+    commit: '\uD83D\uDCBE',
+    completed: '\u2705',
+    failed: '\u274C',
+    create_pr: '\uD83D\uDD17',
+    ensure_branch: '\uD83C\uDF3F',
+    commit_pending: '\uD83D\uDCBE',
+    poll: '\uD83D\uDC40',
+    eval: '\uD83E\uDDEA',
+    push: '\uD83D\uDE80',
+    prereview: '\uD83D\uDD2C',
+    feedback_check: '\uD83D\uDCAC',
+    act: '\u26A1',
+    run_fix: '\uD83D\uDD27',
+    tty_resolve: '\uD83D\uDDA5\uFE0F',
+    next_plan: '\uD83D\uDCD1',
+    clear_loop: '\uD83E\uDDF9',
+    resolve: '\uD83D\uDD13',
+    rewrite_spec: '\u270F\uFE0F',
+  };
+});
+
+// src/core/init-status.ts
+import {
+  existsSync as existsSync5,
+  readFileSync as readFileSync5,
+  writeFileSync as writeFileSync4,
+  mkdirSync as mkdirSync8,
+  renameSync,
+} from 'fs';
+import { join as join4, dirname as dirname8 } from 'path';
+function initialInitStatus() {
+  return {
+    walCursor: 0,
+    walTimestamp: '',
+    state: 'identify',
+    stateStatus: 'pending',
+    pid: null,
+    running: false,
+    startedAt: null,
+    context: {},
+    completedStates: [],
+    outcome: null,
+  };
+}
+function applyInitEvent(status, entry, index) {
+  status.walCursor = index + 1;
+  status.walTimestamp = entry.ts;
+  const { event } = entry;
+  if (event === 'init:started') {
+    status.running = true;
+    status.pid = entry.metadata?.pid ?? null;
+    status.startedAt = entry.ts;
+  }
+  if (
+    event === 'init:completed' ||
+    event === 'init:failed' ||
+    event === 'init:cancelled' ||
+    event === 'init:abandoned'
+  ) {
+    status.running = false;
+    status.pid = null;
+    if (event === 'init:failed') {
+      status.outcome = 'failed';
+    } else if (event === 'init:cancelled') {
+      status.outcome = 'cancelled';
+    } else if (event === 'init:abandoned') {
+      status.outcome = 'abandoned';
+    }
+  }
+  if (event.endsWith(':started') && !INIT_LIFECYCLE_EVENTS.has(event)) {
+    const name = event.replace(':started', '');
+    status.state = name;
+    status.stateStatus = 'running';
+  }
+  if (event.endsWith(':completed') && !INIT_LIFECYCLE_EVENTS.has(event)) {
+    const name = event.replace(':completed', '');
+    if (name === status.state) {
+      status.stateStatus = 'completed';
+    }
+    if (!status.completedStates.includes(name)) {
+      status.completedStates.push(name);
+    }
+  }
+  if (event.endsWith(':failed') && !INIT_LIFECYCLE_EVENTS.has(event)) {
+    const name = event.replace(':failed', '');
+    if (name === status.state) {
+      status.stateStatus = 'failed';
+    }
+  }
+  if (event === 'init:crash_recovered') {
+    status.running = false;
+    status.pid = null;
+    if (status.stateStatus === 'running') {
+      status.stateStatus = 'pending';
+    }
+  }
+  if (event === 'context:updated' && entry.metadata) {
+    const { reason, pid, state, criticalOk, downgrade, regenerate, retry, ...contextFields } = entry.metadata;
+    Object.assign(status.context, contextFields);
+  }
+  if (event === 'promote:completed') {
+    status.outcome = entry.metadata?.outcome ?? 'promoted';
+  }
+  if (event === 'downgrade_local:completed') {
+    status.outcome = 'downgraded_local';
+  }
+}
+function initStatusPath(id) {
+  return join4(initDir(id), 'status.yaml');
+}
+function readInitStatusYaml(id) {
+  const path = initStatusPath(id);
+  if (!existsSync5(path)) return null;
+  try {
+    const raw = readFileSync5(path, 'utf-8');
+    return import_yaml.default.parse(raw);
+  } catch {
+    return null;
+  }
+}
+function writeInitStatusYaml(id, status) {
+  const path = initStatusPath(id);
+  mkdirSync8(dirname8(path), { recursive: true });
+  const content = import_yaml.default.stringify(status, { lineWidth: 120 });
+  const tmp = `${path}.tmp`;
+  writeFileSync4(tmp, content);
+  renameSync(tmp, path);
+}
+function ensureInitStatus(id) {
+  const log = readInitLog(id);
+  const existing = readInitStatusYaml(id);
+  if (existing && existing.walCursor >= log.length) {
+    return existing;
+  }
+  const status = existing ?? initialInitStatus();
+  const startIdx = existing ? existing.walCursor : 0;
+  for (let i = startIdx; i < log.length; i++) {
+    applyInitEvent(status, log[i], i);
+  }
+  writeInitStatusYaml(id, status);
+  return status;
+}
+function detectAndRecoverInitCrash(initId) {
+  const status = ensureInitStatus(initId);
+  if (!status.running) return false;
+  const lock = checkInitLock(initId);
+  if (lock.locked) return false;
+  const crashedState = status.state;
+  const crashedPid = status.pid;
+  appendInitEvent(initId, {
+    ts: new Date().toISOString(),
+    event: 'init:crash_recovered',
+    metadata: {
+      reason: 'crash',
+      pid: crashedPid,
+      state: crashedState,
+    },
+  });
+  ensureInitStatus(initId);
+  logWarn(`Init crash detected (PID ${crashedPid} in ${crashedState}) \u2014 recovered for resume`);
+  return true;
+}
+var import_yaml, INIT_LIFECYCLE_EVENTS;
+var init_init_status = __esm(() => {
+  init_log();
+  init_artifacts();
+  init_init_lock();
+  init_log();
+  init_format();
+  import_yaml = __toESM(require_dist(), 1);
+  INIT_LIFECYCLE_EVENTS = new Set([
+    'init:started',
+    'init:completed',
+    'init:failed',
+    'init:cancelled',
+    'init:crash_recovered',
+    'context:updated',
+  ]);
+});
+
 // src/core/git.ts
+import { dirname as dirname9 } from 'path';
 function gitSync(args, cwd) {
   const proc = Bun.spawnSync({
     cmd: ['git', ...args],
@@ -14326,14 +14826,19 @@ function gitSync(args, cwd) {
   };
 }
 function getGitRoot(cwd) {
-  const result = gitSync(['rev-parse', '--show-toplevel'], cwd);
+  const result = gitSync(['rev-parse', '--path-format=absolute', '--git-common-dir'], cwd);
+  if (result.exitCode !== 0) throw new Error('Not a git repository.');
+  return dirname9(result.stdout);
+}
+function getWorktree(cwd) {
+  const result = gitSync(['rev-parse', '--path-format=absolute', '--show-toplevel'], cwd);
   if (result.exitCode !== 0) throw new Error('Not a git repository.');
   return result.stdout;
 }
-function getWorktree(cwd) {
-  const result = gitSync(['rev-parse', '--show-toplevel'], cwd);
-  if (result.exitCode !== 0) throw new Error('Not a git repository.');
-  return result.stdout;
+function hasUnmergedPaths(cwd) {
+  const result = gitSync(['diff', '--name-only', '--diff-filter=U'], cwd);
+  if (result.exitCode !== 0) return false;
+  return result.stdout.length > 0;
 }
 function getRemoteUrl(cwd) {
   const result = gitSync(['remote', 'get-url', 'origin'], cwd);
@@ -14370,6 +14875,7 @@ function isOnMain(baseBranch, cwd) {
   const mainBranch = baseBranch || 'main';
   return branch === mainBranch;
 }
+var init_git = () => {};
 
 // node_modules/sisteransi/src/index.js
 var require_src = __commonJS((exports, module) => {
@@ -14933,8 +15439,8 @@ var import_sisteransi,
           (o > 0 || t.trim === false) && ((C[C.length - 1] += ' '), o++)),
         t.hard && D[E] > u)
       ) {
-        const c = u - o,
-          f = 1 + Math.floor((D[E] - c - 1) / u);
+        const c2 = u - o,
+          f = 1 + Math.floor((D[E] - c2 - 1) / u);
         (Math.floor((D[E] - 1) / u) < f && C.push(''), k(C, a, u));
         continue;
       }
@@ -14958,13 +15464,13 @@ var import_sisteransi,
     ];
     for (const [E, a] of n.entries()) {
       if (((F += a), d.has(a))) {
-        const { groups: c } = new RegExp(`(?:\\${V}(?<code>\\d+)m|\\${_}(?<uri>.*)${y})`).exec(n.slice(E).join('')) || {
-          groups: {},
-        };
-        if (c.code !== undefined) {
-          const f = Number.parseFloat(c.code);
+        const { groups: c2 } = new RegExp(`(?:\\${V}(?<code>\\d+)m|\\${_}(?<uri>.*)${y})`).exec(
+          n.slice(E).join(''),
+        ) || { groups: {} };
+        if (c2.code !== undefined) {
+          const f = Number.parseFloat(c2.code);
           s = f === oD ? undefined : f;
-        } else c.uri !== undefined && (i = c.uri.length === 0 ? undefined : c.uri);
+        } else c2.uri !== undefined && (i = c2.uri.length === 0 ? undefined : c2.uri);
       }
       const o = ED.codes.get(Number(s));
       n[E + 1] ===
@@ -15479,8 +15985,8 @@ var import_picocolors2,
   G2 = t => {
     const { cursor: n, options: r2, style: i } = t,
       s = t.maxItems ?? Number.POSITIVE_INFINITY,
-      c = Math.max(process.stdout.rows - 4, 0),
-      a = Math.min(c, Math.max(s, 5));
+      c2 = Math.max(process.stdout.rows - 4, 0),
+      a = Math.min(c2, Math.max(s, 5));
     let l2 = 0;
     n >= l2 + a - 3 ? (l2 = Math.max(Math.min(n - a + 3, r2.length - a), 0)) : n < l2 + 2 && (l2 = Math.max(n - 2, 0));
     const $2 = a < r2.length && l2 > 0,
@@ -15601,7 +16107,7 @@ ${import_picocolors2.default.cyan(d2)}
       r2 = V2 ? 80 : 120,
       i = process.env.CI === 'true';
     let s,
-      c,
+      c2,
       a = false,
       l2 = '',
       $2,
@@ -15653,7 +16159,7 @@ ${import_picocolors2.default.cyan(d2)}
         let h2 = 0,
           w2 = 0;
         (j2(),
-          (c = setInterval(() => {
+          (c2 = setInterval(() => {
             if (i && l2 === $2) return;
             (B2(), ($2 = l2));
             const I2 = import_picocolors2.default.magenta(n[h2]);
@@ -15667,7 +16173,7 @@ ${import_picocolors2.default.cyan(d2)}
           }, r2)));
       },
       N2 = (m2 = '', h2 = 0) => {
-        ((a = false), clearInterval(c), B2());
+        ((a = false), clearInterval(c2), B2());
         const w2 =
           h2 === 0
             ? import_picocolors2.default.green(C)
@@ -15721,18 +16227,168 @@ var init_dist2 = __esm(() => {
   J2 = `${import_picocolors2.default.gray(o)}  `;
 });
 
+// src/llm/inquirer.ts
+var exports_inquirer = {};
+__export(exports_inquirer, {
+  triageIssues: () => triageIssues,
+  textInput: () => textInput,
+  selectOption: () => selectOption,
+  confirmAction: () => confirmAction,
+});
+async function confirmAction(message, defaultValue = false) {
+  const result = await ye({ message, initialValue: defaultValue });
+  if (pD(result)) {
+    process.exit(0);
+  }
+  return result;
+}
+async function selectOption(message, options) {
+  const result = await ve({
+    message,
+    options,
+  });
+  if (pD(result) || typeof result !== 'string') {
+    process.exit(0);
+  }
+  return result;
+}
+async function textInput(message, placeholder) {
+  const result = await he({ message, placeholder });
+  if (pD(result)) {
+    process.exit(0);
+  }
+  return result;
+}
+async function triageIssues(issues) {
+  const valid = [];
+  const invalid = [];
+  const discuss = [];
+  for (const issue of issues) {
+    const action = await selectOption(`Issue: ${issue}`, [
+      { value: 'accept', label: 'Accept (valid)', hint: 'Mark as valid issue' },
+      { value: 'reject', label: 'Reject (invalid)', hint: 'Mark as invalid, will be ignored' },
+      { value: 'discuss', label: 'Discuss', hint: 'Flag for further discussion' },
+    ]);
+    switch (action) {
+      case 'accept':
+        valid.push(issue);
+        break;
+      case 'reject':
+        invalid.push(issue);
+        break;
+      case 'discuss':
+        discuss.push(issue);
+        break;
+    }
+  }
+  return { valid, invalid, discuss };
+}
+var init_inquirer = __esm(() => {
+  init_dist2();
+});
+
+// src/core/init-types.ts
+var CRITICAL_CAPABILITIES,
+  NON_CRITICAL_CAPABILITIES,
+  MAX_REPAIR_ATTEMPTS = 3;
+var init_init_types = __esm(() => {
+  CRITICAL_CAPABILITIES = ['extract-ticket', 'get-ticket'];
+  NON_CRITICAL_CAPABILITIES = [
+    'start-ticket',
+    'to-review',
+    'revert-to-inprogress',
+    'update-ticket',
+    'create-downstream-ticket',
+    'add-comment',
+    'move-to-todo',
+    'attach-artifact',
+  ];
+});
+
+// src/core/agents.ts
+import { existsSync as existsSync6, readFileSync as readFileSync6 } from 'fs';
+function ttyExitInstruction(sessionId) {
+  return `
+
+[Session: ${sessionId}]
+When you are done, tell the user: "Exit this TTY (type /exit or Ctrl+C) to continue kautopilot."`;
+}
+function loadSessionAgents(sessionId) {
+  const path = `${process.env.HOME}/.kautopilot/${sessionId}/config.yaml`;
+  if (!existsSync6(path)) {
+    _cachedConfig = DEFAULT_CONFIG;
+    return;
+  }
+  try {
+    const raw = readFileSync6(path, 'utf-8');
+    const parsed = YAML3.parse(raw);
+    if (!parsed) {
+      _cachedConfig = DEFAULT_CONFIG;
+      return;
+    }
+    _cachedConfig = {
+      claude_binary: parsed.claude_binary ?? DEFAULT_CONFIG.claude_binary,
+      agents: {
+        init: { ...DEFAULT_CONFIG.agents.init, ...parsed.agents?.init },
+        phase2: { ...DEFAULT_CONFIG.agents.phase2, ...parsed.agents?.phase2 },
+        phase3: { ...DEFAULT_CONFIG.agents.phase3, ...parsed.agents?.phase3 },
+      },
+      types: { ...DEFAULT_CONFIG.types, ...parsed.types },
+      kloop: { ...DEFAULT_CONFIG.kloop, ...parsed.kloop },
+      settings: { ...DEFAULT_CONFIG.settings, ...parsed.settings },
+      repo: { ...DEFAULT_CONFIG.repo, ...parsed.repo },
+    };
+  } catch {
+    _cachedConfig = DEFAULT_CONFIG;
+  }
+}
+function getAgentPrompt(phase, name, vars) {
+  const config = _cachedConfig ?? DEFAULT_CONFIG;
+  const phaseAgents = config.agents[phase];
+  let content = phaseAgents?.[name]?.prompt ?? `Execute ${name} task.`;
+  if (vars) {
+    for (const [key, value] of Object.entries(vars)) {
+      content = content.replace(new RegExp(`\\{${key}\\}`, 'g'), value);
+    }
+  }
+  return content;
+}
+function getAgentBinary(phase, name) {
+  const config = _cachedConfig ?? DEFAULT_CONFIG;
+  if (process.env.CLAUDE_BINARY) return process.env.CLAUDE_BINARY;
+  if (name) {
+    const phaseAgents = config.agents[phase];
+    return phaseAgents?.[name]?.binary ?? config.claude_binary ?? 'claude';
+  }
+  return config.claude_binary ?? 'claude';
+}
+function getDefaultBinary() {
+  const config = _cachedConfig ?? DEFAULT_CONFIG;
+  if (process.env.CLAUDE_BINARY) return process.env.CLAUDE_BINARY;
+  return config.claude_binary ?? 'claude';
+}
+var YAML3,
+  TTY_EXIT_INSTRUCTION = `
+
+When you are done, tell the user: "Exit this TTY (type /exit or Ctrl+C) to continue kautopilot."`,
+  _cachedConfig = null;
+var init_agents = __esm(() => {
+  init_types2();
+  YAML3 = __toESM(require_dist(), 1);
+});
+
 // src/llm/spawn.ts
 var { spawn } = globalThis.Bun;
-import { mkdirSync as mkdirSync5, writeFileSync as writeFileSync3 } from 'fs';
-import { join as join2 } from 'path';
+import { mkdirSync as mkdirSync9, writeFileSync as writeFileSync5 } from 'fs';
+import { join as join5 } from 'path';
 function debugLog(...args) {
   if (DEBUG) console.error('[debug]', ...args);
 }
 function llmLogPath(sessionId, label) {
-  const logsDir = join2(process.env.HOME, '.kautopilot', sessionId, 'logs', 'llm');
-  mkdirSync5(logsDir, { recursive: true });
+  const logsDir = join5(process.env.HOME, '.kautopilot', sessionId, 'logs', 'llm');
+  mkdirSync9(logsDir, { recursive: true });
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  return join2(logsDir, `${ts}-${label}.jsonl`);
+  return join5(logsDir, `${ts}-${label}.jsonl`);
 }
 function extractResultText(jsonlOutput) {
   const lines = jsonlOutput
@@ -15796,7 +16452,7 @@ async function spawnCore(binary, prompt, options) {
       proc.kill();
       const partial = stdoutChunks.join('');
       if (logging && logPath2) {
-        writeFileSync3(
+        writeFileSync5(
           logPath2,
           partial +
             `
@@ -15820,7 +16476,7 @@ stderr: ${stderrText.slice(0, 500)}`
     debugLog(`[${binary}] stderr: ${stderr.trim()}`);
   }
   if (logging && logPath2) {
-    writeFileSync3(logPath2, rawStdout);
+    writeFileSync5(logPath2, rawStdout);
     debugLog(`[llm-log] ${logPath2}`);
     const resultText = extractResultText(rawStdout);
     return { stdout: resultText, stderr };
@@ -15874,261 +16530,6 @@ var DEBUG;
 var init_spawn = __esm(() => {
   init_dist2();
   DEBUG = !!process.env.KAUTOPILOT_DEBUG;
-});
-
-// src/core/agents.ts
-import { existsSync as existsSync5, readFileSync as readFileSync5 } from 'fs';
-function ttyExitInstruction(sessionId) {
-  return `
-
-[Session: ${sessionId}]
-When you are done, tell the user: "Exit this TTY (type /exit or Ctrl+C) to continue kautopilot."`;
-}
-function loadSessionAgents(sessionId) {
-  const path = `${process.env.HOME}/.kautopilot/${sessionId}/config.yaml`;
-  if (!existsSync5(path)) {
-    _cachedConfig = DEFAULT_CONFIG;
-    return;
-  }
-  try {
-    const raw = readFileSync5(path, 'utf-8');
-    const parsed = YAML2.parse(raw);
-    if (!parsed) {
-      _cachedConfig = DEFAULT_CONFIG;
-      return;
-    }
-    _cachedConfig = {
-      claude_binary: parsed.claude_binary ?? DEFAULT_CONFIG.claude_binary,
-      agents: {
-        init: { ...DEFAULT_CONFIG.agents.init, ...parsed.agents?.init },
-        phase2: { ...DEFAULT_CONFIG.agents.phase2, ...parsed.agents?.phase2 },
-        phase3: { ...DEFAULT_CONFIG.agents.phase3, ...parsed.agents?.phase3 },
-      },
-      types: { ...DEFAULT_CONFIG.types, ...parsed.types },
-      kloop: { ...DEFAULT_CONFIG.kloop, ...parsed.kloop },
-      settings: { ...DEFAULT_CONFIG.settings, ...parsed.settings },
-      repo: { ...DEFAULT_CONFIG.repo, ...parsed.repo },
-    };
-  } catch {
-    _cachedConfig = DEFAULT_CONFIG;
-  }
-}
-function getAgentPrompt(phase, name, vars) {
-  const config = _cachedConfig ?? DEFAULT_CONFIG;
-  const phaseAgents = config.agents[phase];
-  let content = phaseAgents?.[name]?.prompt ?? `Execute ${name} task.`;
-  if (vars) {
-    for (const [key, value] of Object.entries(vars)) {
-      content = content.replace(new RegExp(`\\{${key}\\}`, 'g'), value);
-    }
-  }
-  return content;
-}
-function getAgentBinary(phase, name) {
-  const config = _cachedConfig ?? DEFAULT_CONFIG;
-  if (process.env.CLAUDE_BINARY) return process.env.CLAUDE_BINARY;
-  if (name) {
-    const phaseAgents = config.agents[phase];
-    return phaseAgents?.[name]?.binary ?? config.claude_binary ?? 'claude';
-  }
-  return config.claude_binary ?? 'claude';
-}
-function getDefaultBinary() {
-  const config = _cachedConfig ?? DEFAULT_CONFIG;
-  if (process.env.CLAUDE_BINARY) return process.env.CLAUDE_BINARY;
-  return config.claude_binary ?? 'claude';
-}
-var YAML2,
-  TTY_EXIT_INSTRUCTION = `
-
-When you are done, tell the user: "Exit this TTY (type /exit or Ctrl+C) to continue kautopilot."`,
-  _cachedConfig = null;
-var init_agents = __esm(() => {
-  init_types2();
-  YAML2 = __toESM(require_dist(), 1);
-});
-
-// src/llm/inquirer.ts
-var exports_inquirer = {};
-__export(exports_inquirer, {
-  triageIssues: () => triageIssues,
-  textInput: () => textInput,
-  selectOption: () => selectOption,
-  confirmAction: () => confirmAction,
-});
-async function confirmAction(message, defaultValue = false) {
-  const result = await ye({ message, initialValue: defaultValue });
-  if (pD(result)) {
-    process.exit(0);
-  }
-  return result;
-}
-async function selectOption(message, options) {
-  const result = await ve({
-    message,
-    options,
-  });
-  if (pD(result) || typeof result !== 'string') {
-    process.exit(0);
-  }
-  return result;
-}
-async function textInput(message, placeholder) {
-  const result = await he({ message, placeholder });
-  if (pD(result)) {
-    process.exit(0);
-  }
-  return result;
-}
-async function triageIssues(issues) {
-  const valid = [];
-  const invalid = [];
-  const discuss = [];
-  for (const issue of issues) {
-    const action = await selectOption(`Issue: ${issue}`, [
-      { value: 'accept', label: 'Accept (valid)', hint: 'Mark as valid issue' },
-      { value: 'reject', label: 'Reject (invalid)', hint: 'Mark as invalid, will be ignored' },
-      { value: 'discuss', label: 'Discuss', hint: 'Flag for further discussion' },
-    ]);
-    switch (action) {
-      case 'accept':
-        valid.push(issue);
-        break;
-      case 'reject':
-        invalid.push(issue);
-        break;
-      case 'discuss':
-        discuss.push(issue);
-        break;
-    }
-  }
-  return { valid, invalid, discuss };
-}
-var init_inquirer = __esm(() => {
-  init_dist2();
-});
-
-// src/core/artifacts.ts
-var exports_artifacts = {};
-__export(exports_artifacts, {
-  snapshotPath: () => snapshotPath,
-  sessionDir: () => sessionDir,
-  sessionArtifactPath: () => sessionArtifactPath,
-  ensureArtifactDir: () => ensureArtifactDir,
-  artifactPath: () => artifactPath,
-});
-import { mkdirSync as mkdirSync6 } from 'fs';
-import { dirname as dirname5 } from 'path';
-function artifactPath(id, version, phase, ...segments) {
-  return `${process.env.HOME}/.kautopilot/${id}/artifacts/v${version}/${phase}/${segments.join('/')}`;
-}
-function snapshotPath(id, version, ...segments) {
-  return `${process.env.HOME}/.kautopilot/${id}/artifacts/v${version}/${segments.join('/')}`;
-}
-function sessionArtifactPath(id, ...segments) {
-  return `${process.env.HOME}/.kautopilot/${id}/artifacts/${segments.join('/')}`;
-}
-function ensureArtifactDir(path) {
-  mkdirSync6(dirname5(path), { recursive: true });
-}
-function sessionDir(id) {
-  return `${process.env.HOME}/.kautopilot/${id}`;
-}
-var init_artifacts = () => {};
-
-// src/util/format.ts
-function formatDuration(ms) {
-  if (ms <= 0) return '0s';
-  const seconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(seconds / 60);
-  const hours = Math.floor(minutes / 60);
-  const s = seconds % 60;
-  const m2 = minutes % 60;
-  if (hours > 0) {
-    return `${hours}h ${String(m2).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`;
-  }
-  if (minutes > 0) {
-    return `${m2}m ${String(s).padStart(2, '0')}s`;
-  }
-  return `${s}s`;
-}
-function logField(label, value) {
-  console.log(`${c.cyan}${label.padEnd(11)}${c.reset}${value}`);
-}
-function logOk(msg) {
-  console.log(`${c.green}\u2713${c.reset} ${msg}`);
-}
-function logInfo(msg) {
-  console.log(`${c.blue}\u2139${c.reset} ${msg}`);
-}
-function logWarn(msg) {
-  console.warn(`${c.yellow}\u26A0${c.reset} ${msg}`);
-}
-function logError(msg) {
-  console.error(`${c.red}\u2717${c.reset} ${msg}`);
-}
-function logHeading(title) {
-  console.log(`
-${c.bold}${c.cyan}${title}${c.reset}`);
-}
-function logDim(msg) {
-  console.log(`${c.dim}${msg}${c.reset}`);
-}
-function stateIcon(state) {
-  return STATE_ICONS[state] ?? '\u25CF';
-}
-function formatStatus(state, running) {
-  if (state === 'init') return `${c.yellow}init-incomplete${c.reset}`;
-  if (running) return `${c.green}running${c.reset}`;
-  return `${c.dim}stopped${c.reset}`;
-}
-function formatPhase(phase) {
-  if (!phase || phase === 'none') return `${c.dim}\u2014${c.reset}`;
-  return `${c.magenta}${phase}${c.reset}`;
-}
-var isTTY, c, STATE_ICONS;
-var init_format = __esm(() => {
-  isTTY = process.stdout.isTTY;
-  c = {
-    reset: isTTY ? '\x1B[0m' : '',
-    bold: isTTY ? '\x1B[1m' : '',
-    dim: isTTY ? '\x1B[2m' : '',
-    green: isTTY ? '\x1B[32m' : '',
-    yellow: isTTY ? '\x1B[33m' : '',
-    red: isTTY ? '\x1B[31m' : '',
-    cyan: isTTY ? '\x1B[36m' : '',
-    magenta: isTTY ? '\x1B[35m' : '',
-    blue: isTTY ? '\x1B[34m' : '',
-  };
-  STATE_ICONS = {
-    pull_ticket: '\uD83C\uDFAB',
-    route_type: '\uD83D\uDD00',
-    gather_context: '\uD83D\uDD0D',
-    write_spec: '\uD83D\uDCDD',
-    finalize_spec: '\uD83D\uDCCC',
-    write_plans: '\uD83D\uDCCB',
-    finalize_plans: '\u2705',
-    setup_run: '\u2699\uFE0F',
-    running: '\uD83C\uDFC3',
-    commit: '\uD83D\uDCBE',
-    completed: '\u2705',
-    failed: '\u274C',
-    create_pr: '\uD83D\uDD17',
-    ensure_branch: '\uD83C\uDF3F',
-    commit_pending: '\uD83D\uDCBE',
-    poll: '\uD83D\uDC40',
-    eval: '\uD83E\uDDEA',
-    push: '\uD83D\uDE80',
-    prereview: '\uD83D\uDD2C',
-    feedback_check: '\uD83D\uDCAC',
-    act: '\u26A1',
-    run_fix: '\uD83D\uDD27',
-    tty_resolve: '\uD83D\uDDA5\uFE0F',
-    next_plan: '\uD83D\uDCD1',
-    clear_loop: '\uD83E\uDDF9',
-    resolve: '\uD83D\uDD13',
-    rewrite_spec: '\u270F\uFE0F',
-  };
 });
 
 // node_modules/marked/lib/marked.esm.js
@@ -21052,7 +21453,7 @@ var require_core = __commonJS((exports, module) => {
     return match && match.index === 0;
   }
   var BACKREF_RE = /\[(?:[^\\\]]|\\.)*\]|\(\??|\\([1-9][0-9]*)|\\./;
-  function join3(regexps, separator = '|') {
+  function join6(regexps, separator = '|') {
     let numCaptures = 0;
     return regexps
       .map(regex => {
@@ -21337,7 +21738,7 @@ var require_core = __commonJS((exports, module) => {
           this.exec = () => null;
         }
         const terminators = this.regexes.map(el => el[1]);
-        this.matcherRe = langRe(join3(terminators), true);
+        this.matcherRe = langRe(join6(terminators), true);
         this.lastIndex = 0;
       }
       exec(s) {
@@ -81508,18 +81909,18 @@ var init_marked_terminal = __esm(() => {
 });
 
 // src/util/markdown.ts
-import { existsSync as existsSync6, writeFileSync as writeFileSync4 } from 'fs';
+import { existsSync as existsSync7, writeFileSync as writeFileSync6 } from 'fs';
 function renderMarkdown(text) {
   if (!configured) {
-    marked.use(
-      marked_terminal_default({
+    marked.use({
+      renderer: new marked_terminal_default({
         width: process.stdout.columns || 80,
         reflowText: true,
         showSectionPrefix: true,
         emoji: true,
         tab: 2,
       }),
-    );
+    });
     configured = true;
   }
   return marked.parse(text);
@@ -81553,11 +81954,11 @@ ${body}
 function markdownToPdf(mdContent, outputPath, title) {
   const html2 = markdownToHtml(mdContent, title);
   const htmlPath = outputPath.replace(/\.pdf$/, '.html');
-  writeFileSync4(htmlPath, html2);
+  writeFileSync6(htmlPath, html2);
   function tryConvert(cmd) {
     try {
       const result = Bun.spawnSync({ cmd, stdout: 'pipe', stderr: 'pipe' });
-      return result.exitCode === 0 && existsSync6(outputPath);
+      return result.exitCode === 0 && existsSync7(outputPath);
     } catch {
       return false;
     }
@@ -81584,19 +81985,52 @@ var init_markdown = __esm(() => {
 
 // src/core/scripts.ts
 import {
-  existsSync as existsSync7,
-  readFileSync as readFileSync6,
+  existsSync as existsSync8,
+  readFileSync as readFileSync7,
   copyFileSync,
-  writeFileSync as writeFileSync5,
-  mkdirSync as mkdirSync7,
+  writeFileSync as writeFileSync7,
+  mkdirSync as mkdirSync10,
 } from 'fs';
-import { join as join3 } from 'path';
+import { join as join6 } from 'path';
+function classifyAccessSetup(answer) {
+  const normalized = answer.trim().toLowerCase();
+  if (!normalized) {
+    return { needsSetupHelp: true, assessment: 'No access method provided yet.' };
+  }
+  const setupIndicators = [
+    'no',
+    'not set up',
+    'not setup',
+    'not configured',
+    'none',
+    'broken',
+    'idk',
+    "i don't know",
+    'not logged in',
+    'not authenticated',
+    'need login',
+    'need auth',
+    'need setup',
+    'not working',
+    'installed but',
+    'acli',
+    'jira',
+    'cli only',
+    'maybe',
+    'unsure',
+  ];
+  const needsSetupHelp = setupIndicators.some(indicator => normalized === indicator || normalized.includes(indicator));
+  const assessment = needsSetupHelp
+    ? `Access may need setup or verification: ${answer.trim()}`
+    : `Access appears ready: ${answer.trim()}`;
+  return { needsSetupHelp, assessment };
+}
 function runScript(sessionId, name, args = []) {
-  return runScriptFromDir(join3(sessionDir(sessionId), 'scripts'), name, args).stdout;
+  return runScriptFromDir(join6(sessionDir(sessionId), 'scripts'), name, args).stdout;
 }
 function runScriptFromDir(scriptsDir, name, args = []) {
-  const path = join3(scriptsDir, name);
-  if (!existsSync7(path)) return { ok: false, stdout: '' };
+  const path = join6(scriptsDir, name);
+  if (!existsSync8(path)) return { ok: false, stdout: '' };
   debugLog(`$ ${path} ${args.join(' ')}`);
   try {
     const proc = Bun.spawnSync({
@@ -81618,17 +82052,17 @@ function runScriptFromDir(scriptsDir, name, args = []) {
   }
 }
 function loadOrgScripts(targetDir, org) {
-  mkdirSync7(targetDir, { recursive: true });
-  const orgDir = join3(ORGS_DIR, org);
+  mkdirSync10(targetDir, { recursive: true });
+  const orgDir = join6(ORGS_DIR, org);
   const found = [];
   const missing = [];
-  if (!org || !existsSync7(orgDir)) {
+  if (!org || !existsSync8(orgDir)) {
     return { found: [], missing: [...ALL_SCRIPTS] };
   }
   for (const name of ALL_SCRIPTS) {
-    const src = join3(orgDir, name);
-    const dest = join3(targetDir, name);
-    if (existsSync7(src)) {
+    const src = join6(orgDir, name);
+    const dest = join6(targetDir, name);
+    if (existsSync8(src)) {
       copyFileSync(src, dest);
       Bun.spawnSync({ cmd: ['chmod', '+x', dest] });
       found.push(name);
@@ -81644,9 +82078,9 @@ function loadOrgScripts(targetDir, org) {
   return { found, missing };
 }
 function verifyCriticalScripts(scriptsDir, branch) {
-  const extractScript = join3(scriptsDir, 'extract-ticket');
+  const extractScript = join6(scriptsDir, 'extract-ticket');
   let extractedId = null;
-  if (existsSync7(extractScript)) {
+  if (existsSync8(extractScript)) {
     const proc = Bun.spawnSync({
       cmd: [extractScript],
       stdin: Buffer.from(
@@ -81681,11 +82115,11 @@ function verifyCriticalScripts(scriptsDir, branch) {
 function showScripts(scriptsDir, scripts) {
   logHeading('Scripts');
   for (const name of scripts) {
-    const path = join3(scriptsDir, name);
-    if (existsSync7(path)) {
+    const path = join6(scriptsDir, name);
+    if (existsSync8(path)) {
       console.log(`
 --- ${name} ---`);
-      console.log(readFileSync6(path, 'utf-8'));
+      console.log(readFileSync7(path, 'utf-8'));
     }
   }
   console.log();
@@ -81751,10 +82185,12 @@ async function promptSetupScripts(scriptsDir, missing, org, sessionId) {
   const toolHint = detectedNames.length > 0 ? ` I detected ${detectedNames.join(', ')} on your system.` : '';
   const accessQuestion = `How do you access your ${systemName} tickets?${toolHint} Is it set up and working?`;
   const accessAnswer = await textInput(accessQuestion, '');
-  if (/^(no|not set up|not setup|not configured|none|broken|idk|i don't know)$/i.test(accessAnswer.trim())) {
+  const accessSetup = classifyAccessSetup(accessAnswer);
+  if (accessSetup.needsSetupHelp) {
     logDim('Researching setup instructions...');
     const setupPrompt = getAgentPrompt('init', 'researchSetup', {
       taskSystem: taskSystem.trim(),
+      accessMethod: accessAnswer.trim() || 'unknown',
     });
     const setupInstructions = await spawnPrintRaw(getDefaultBinary(), setupPrompt, {
       cwd: process.cwd(),
@@ -81848,6 +82284,7 @@ exit 0`,
     branch,
     scriptsDir,
     quirks: quirksSection,
+    setupAssessment: accessSetup.assessment,
     researchDoc: researchDoc || '(no research available)',
     detectedInfo,
     scriptList,
@@ -81866,15 +82303,15 @@ exit 0`,
   if (transitionNoOp) {
     for (const name of OPTIONAL_SCRIPTS) {
       if (missing.includes(name)) {
-        const dest = join3(scriptsDir, name);
-        writeFileSync5(dest, NOOP_SCRIPT);
+        const dest = join6(scriptsDir, name);
+        writeFileSync7(dest, NOOP_SCRIPT);
         Bun.spawnSync({ cmd: ['chmod', '+x', dest] });
       }
     }
   }
   for (const name of ALL_SCRIPTS) {
-    const dest = join3(scriptsDir, name);
-    if (existsSync7(dest)) {
+    const dest = join6(scriptsDir, name);
+    if (existsSync8(dest)) {
       Bun.spawnSync({ cmd: ['chmod', '+x', dest] });
     }
   }
@@ -81926,20 +82363,20 @@ async function promptSaveOrg(scriptsDir, org, sessionId) {
     true,
   );
   if (!save) return;
-  const orgDir = join3(ORGS_DIR, org);
-  mkdirSync7(orgDir, { recursive: true });
+  const orgDir = join6(ORGS_DIR, org);
+  mkdirSync10(orgDir, { recursive: true });
   for (const name of ALL_SCRIPTS) {
-    const src = join3(scriptsDir, name);
-    const dest = join3(orgDir, name);
-    if (existsSync7(src)) {
+    const src = join6(scriptsDir, name);
+    const dest = join6(orgDir, name);
+    if (existsSync8(src)) {
       copyFileSync(src, dest);
     }
   }
   if (sessionId) {
     const sDir = sessionDir(sessionId);
-    const sessionConfig = join3(sDir, 'config.yaml');
-    if (existsSync7(sessionConfig)) {
-      copyFileSync(sessionConfig, join3(orgDir, 'config.yaml'));
+    const sessionConfig = join6(sDir, 'config.yaml');
+    if (existsSync8(sessionConfig)) {
+      copyFileSync(sessionConfig, join6(orgDir, 'config.yaml'));
     }
   }
   logOk(`Org scripts and config saved to ${orgDir}`);
@@ -81954,6 +82391,7 @@ exit 0
   ORGS_DIR;
 var init_scripts = __esm(() => {
   init_artifacts();
+  init_git();
   init_spawn();
   init_agents();
   init_inquirer();
@@ -81985,14 +82423,1114 @@ var init_scripts = __esm(() => {
   ORGS_DIR = `${process.env.HOME}/.kautopilot/orgs`;
 });
 
+// src/phases/init/states.ts
+import {
+  existsSync as existsSync9,
+  readFileSync as readFileSync8,
+  writeFileSync as writeFileSync8,
+  mkdirSync as mkdirSync11,
+  copyFileSync as copyFileSync2,
+  readdirSync,
+} from 'fs';
+import { join as join7 } from 'path';
+function initArtifactPath(initId, ...segments) {
+  return join7(initDir(initId), ...segments);
+}
+function writeInitArtifact(initId, filename, content) {
+  const path = initArtifactPath(initId, filename);
+  mkdirSync11(join7(initDir(initId)), { recursive: true });
+  writeFileSync8(path, content);
+}
+function writeInitArtifactJson(initId, filename, data) {
+  writeInitArtifact(initId, filename, JSON.stringify(data, null, 2));
+}
+function detectTicketingTools2() {
+  const tools = [
+    { name: 'ClickUp CLI (cup)', cmd: ['cup', '--version'] },
+    { name: 'Jira CLI (jira)', cmd: ['jira', '--version'] },
+    { name: 'Atlassian CLI (acli)', cmd: ['acli', '--version'] },
+    { name: 'go-jira (jira)', cmd: ['jira', 'version'] },
+    { name: 'jira-cli (jira)', cmd: ['jira', 'help'] },
+    { name: 'GitHub CLI (gh)', cmd: ['gh', '--version'] },
+    { name: 'Linear CLI (linear)', cmd: ['linear', '--version'] },
+    { name: 'Asana CLI (asana)', cmd: ['asana', '--version'] },
+    { name: 'Notion CLI (notion)', cmd: ['notion', '--version'] },
+  ];
+  const detected = {};
+  for (const tool of tools) {
+    try {
+      const proc = Bun.spawnSync({
+        cmd: tool.cmd,
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      if (proc.exitCode === 0 || proc.exitCode === null) {
+        const out = (proc.stdout?.toString().trim() ?? '') || (proc.stderr?.toString().trim() ?? '');
+        detected[tool.name] = out.slice(0, 100);
+      }
+    } catch {}
+  }
+  return detected;
+}
+function buildDetectionPlan(systemName, researchDoc) {
+  const plan = [];
+  const doc = researchDoc.toLowerCase();
+  const toolDetections = [
+    {
+      keywords: ['github', 'gh cli', 'gh '],
+      steps: [
+        { check: 'gh', type: 'binary', command: 'gh --version' },
+        { check: '~/.config/gh/hosts.yml', type: 'config', command: '~/.config/gh/hosts.yml' },
+        { check: 'gh', type: 'auth', command: 'gh auth status' },
+      ],
+    },
+    {
+      keywords: ['clickup', 'cup'],
+      steps: [
+        { check: 'cup', type: 'binary', command: 'cup --version' },
+        { check: 'cup', type: 'cli_test', command: 'cup me' },
+      ],
+    },
+    {
+      keywords: ['jira', 'atlassian'],
+      steps: [
+        { check: 'jira', type: 'binary', command: 'jira --version' },
+        { check: 'acli', type: 'binary', command: 'acli --version' },
+        { check: 'jira', type: 'auth', command: 'jira me' },
+      ],
+    },
+    {
+      keywords: ['linear'],
+      steps: [
+        { check: 'linear', type: 'binary', command: 'linear --version' },
+        { check: 'linear', type: 'cli_test', command: 'linear whoami' },
+      ],
+    },
+    {
+      keywords: ['asana'],
+      steps: [{ check: 'asana', type: 'binary', command: 'asana --version' }],
+    },
+    {
+      keywords: ['notion'],
+      steps: [{ check: 'notion', type: 'binary', command: 'notion --version' }],
+    },
+    {
+      keywords: ['trello'],
+      steps: [{ check: 'trello', type: 'binary', command: 'trello --version' }],
+    },
+    {
+      keywords: ['azure devops', 'azure boards', 'az boards'],
+      steps: [
+        { check: 'az', type: 'binary', command: 'az --version' },
+        { check: 'az', type: 'auth', command: 'az account show' },
+      ],
+    },
+    {
+      keywords: ['shortcut', 'clubhouse'],
+      steps: [{ check: 'shortcut', type: 'binary', command: 'shortcut --version' }],
+    },
+  ];
+  const systemLower = systemName.toLowerCase();
+  for (const { keywords, steps } of toolDetections) {
+    if (keywords.some(k3 => doc.includes(k3) || systemLower.includes(k3))) {
+      plan.push(...steps);
+    }
+  }
+  const seen = new Set();
+  return plan.filter(step => {
+    const key = `${step.check}:${step.type}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+function classifyAccessSetup2(answer) {
+  const normalized = answer.trim().toLowerCase();
+  if (!normalized) {
+    return { needsSetupHelp: true, assessment: 'No access method provided yet.' };
+  }
+  const setupIndicators = [
+    'no',
+    'not set up',
+    'not setup',
+    'not configured',
+    'none',
+    'broken',
+    'idk',
+    "i don't know",
+    'not logged in',
+    'not authenticated',
+    'need login',
+    'need auth',
+    'need setup',
+    'not working',
+    'installed but',
+    'maybe',
+    'unsure',
+  ];
+  const needsSetupHelp = setupIndicators.some(indicator => normalized === indicator || normalized.includes(indicator));
+  const assessment = needsSetupHelp
+    ? `Access may need setup or verification: ${answer.trim()}`
+    : `Access appears ready: ${answer.trim()}`;
+  return { needsSetupHelp, assessment };
+}
+function parseStateMapping(answer) {
+  const parts = answer
+    .split(/[,\u2192/]/)
+    .map(s => s.trim())
+    .filter(Boolean);
+  return {
+    todo: parts[0] || 'open',
+    inProgress: parts[1] || 'in progress',
+    inReview: parts[2] || 'review',
+  };
+}
+var identify = async ctx => {
+    const { initId } = ctx;
+    appendInitEvent(initId, { ts: new Date().toISOString(), event: 'identify:started' });
+    if (ctx.forceLocal) {
+      appendInitEvent(initId, {
+        ts: new Date().toISOString(),
+        event: 'identify:completed',
+        metadata: { systemName: 'local' },
+      });
+      appendInitEvent(initId, {
+        ts: new Date().toISOString(),
+        event: 'context:updated',
+        metadata: { systemName: 'local', localMode: true },
+      });
+      writeInitArtifactJson(initId, 'identify.json', {
+        systemName: 'local',
+        timestamp: new Date().toISOString(),
+      });
+      return 'downgrade_local';
+    }
+    const taskSystem = await textInput(
+      'What task/ticket system do you use? (e.g., "ClickUp", "Jira", "GitHub Issues", "Linear")',
+      '',
+    );
+    if (!taskSystem.trim()) {
+      logInfo('No task system specified. Falling back to local mode.');
+      appendInitEvent(initId, {
+        ts: new Date().toISOString(),
+        event: 'identify:completed',
+        metadata: { systemName: 'none' },
+      });
+      return 'downgrade_local';
+    }
+    const systemName = taskSystem.trim();
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'context:updated',
+      metadata: { systemName },
+    });
+    writeInitArtifactJson(initId, 'identify.json', {
+      systemName,
+      timestamp: new Date().toISOString(),
+    });
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'identify:completed',
+      metadata: { systemName },
+    });
+    return 'research';
+  },
+  research = async ctx => {
+    const { initId } = ctx;
+    appendInitEvent(initId, { ts: new Date().toISOString(), event: 'research:started' });
+    const identifyPath = initArtifactPath(initId, 'identify.json');
+    const identifyData = JSON.parse(readFileSync8(identifyPath, 'utf-8'));
+    const systemName = identifyData.systemName;
+    const detected = detectTicketingTools2();
+    const detectedNames = Object.keys(detected);
+    const detectedInfo =
+      detectedNames.length > 0
+        ? detectedNames.map(n => `  - ${n}: ${detected[n]}`).join(`
+`)
+        : '  (none detected)';
+    const researchPrompt = getAgentPrompt('init', 'researchTicketSystem', {
+      taskSystem: systemName,
+      detectedInfo,
+    });
+    const researchDoc = await spawnPrintRaw(getDefaultBinary(), researchPrompt, {
+      cwd: ctx.workDir,
+      spinnerMsg: `Researching ${systemName}`,
+      sessionId: initId,
+      label: 'research-task-system',
+    });
+    const detectionPlan = buildDetectionPlan(systemName, researchDoc || '');
+    const parsePrompt = `Parse this research doc and extract structured fields. Output ONLY valid JSON with this exact shape:
+{
+  "accessPaths": [{"method": "string", "tool": "string", "available": bool, "notes": "string"}],
+  "hierarchy": "string",
+  "transitionModel": "string",
+  "constraints": ["string"],
+  "followUpQuestions": ["string"]
+}
+If a field cannot be determined from the doc, use an empty array or "unknown".
+
+Research doc:
+---
+${researchDoc || '(no research output)'}
+---`;
+    const parsedJson = await spawnPrintRaw(getDefaultBinary(), parsePrompt, {
+      cwd: ctx.workDir,
+      spinnerMsg: `Parsing research for ${systemName}`,
+      sessionId: initId,
+      label: 'parse-research',
+    });
+    let structured = null;
+    if (parsedJson) {
+      try {
+        const jsonStr = parsedJson
+          .replace(/^```json\s*/i, '')
+          .replace(/```\s*$/i, '')
+          .trim();
+        structured = JSON.parse(jsonStr);
+      } catch {}
+    }
+    const researchSummary = structured ?? {
+      systemName,
+      accessPaths: [],
+      hierarchy: 'unknown',
+      transitionModel: 'unknown',
+      constraints: [],
+      detectionPlan,
+      detectedTools: detected,
+      followUpQuestions: [],
+      timestamp: new Date().toISOString(),
+    };
+    researchSummary.systemName = systemName;
+    researchSummary.timestamp = new Date().toISOString();
+    researchSummary.detectionPlan = detectionPlan;
+    researchSummary.detectedTools = detected;
+    writeInitArtifact(initId, 'research.md', researchDoc || '(no research output)');
+    writeInitArtifactJson(initId, 'research.json', researchSummary);
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'context:updated',
+      metadata: { detectedTools: detected },
+    });
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'research:completed',
+      metadata: { systemName },
+    });
+    return 'detect';
+  },
+  detect = async ctx => {
+    const { initId } = ctx;
+    appendInitEvent(initId, { ts: new Date().toISOString(), event: 'detect:started' });
+    const researchPath = initArtifactPath(initId, 'research.json');
+    const researchData = JSON.parse(readFileSync8(researchPath, 'utf-8'));
+    const detected = researchData.detectedTools ?? {};
+    const detectionPlan = researchData.detectionPlan || [];
+    const configFiles = {};
+    const authStatus = {};
+    const available = Object.keys(detected);
+    const missing = [];
+    for (const step of detectionPlan) {
+      try {
+        if (step.type === 'binary' && step.command) {
+          const cmd = step.command.split(/\s+/);
+          const proc = Bun.spawnSync({ cmd, stdout: 'pipe', stderr: 'pipe' });
+          if (proc.exitCode === 0 || proc.exitCode === null) {
+            if (!available.includes(step.check)) available.push(step.check);
+          } else {
+            missing.push(step.check);
+          }
+        } else if (step.type === 'config') {
+          const configPath2 = step.command || step.check;
+          const resolvedPath = configPath2.replace('~', process.env.HOME);
+          configFiles[configPath2] = existsSync9(resolvedPath);
+        } else if (step.type === 'auth' && step.command) {
+          const cmd = step.command.split(/\s+/);
+          const proc = Bun.spawnSync({ cmd, stdout: 'pipe', stderr: 'pipe' });
+          if (proc.exitCode === 0) {
+            authStatus[step.check] = 'authenticated';
+          } else {
+            authStatus[step.check] = 'not_authenticated';
+            if (!missing.includes(step.check)) missing.push(step.check);
+          }
+        } else if (step.type === 'cli_test' && step.command) {
+          const cmd = step.command.split(/\s+/);
+          const proc = Bun.spawnSync({ cmd, stdout: 'pipe', stderr: 'pipe' });
+          if (proc.exitCode === 0) {
+            authStatus[step.check] = 'authenticated';
+          } else {
+            authStatus[step.check] = 'not_authenticated';
+            if (!missing.includes(step.check)) missing.push(step.check);
+          }
+        }
+      } catch {
+        authStatus[step.check] = 'unknown';
+      }
+    }
+    const detectionResult = {
+      tools: detected,
+      configFiles,
+      authStatus,
+      available,
+      missing,
+      uncertain: Object.keys(authStatus).filter(k3 => authStatus[k3] === 'unknown'),
+      timestamp: new Date().toISOString(),
+    };
+    writeInitArtifactJson(initId, 'detection.json', detectionResult);
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'detect:completed',
+      metadata: { available: available.length, missing: missing.length, uncertain: detectionResult.uncertain.length },
+    });
+    return 'gather_context';
+  },
+  gather_context = async ctx => {
+    const { initId } = ctx;
+    appendInitEvent(initId, { ts: new Date().toISOString(), event: 'gather_context:started' });
+    const identifyData = JSON.parse(readFileSync8(initArtifactPath(initId, 'identify.json'), 'utf-8'));
+    const detectionData = JSON.parse(readFileSync8(initArtifactPath(initId, 'detection.json'), 'utf-8'));
+    const systemName = identifyData.systemName;
+    const detectedNames = Object.keys(detectionData.tools);
+    const toolHint = detectedNames.length > 0 ? ` Detected: ${detectedNames.join(', ')}.` : '';
+    const contextAnswer = await textInput(
+      `Tell me about your ${systemName} setup.${toolHint}
+` +
+        'How do you access tickets? Is it authenticated? ' +
+        'What are your ticket states (e.g., todo \u2192 in-progress \u2192 review)? ' +
+        'Any defaults, quirks, or restrictions?',
+      'e.g., "I use the gh CLI, states are open/in-progress/review, always in project X"',
+    );
+    const accessSetup = classifyAccessSetup2(contextAnswer);
+    if (accessSetup.needsSetupHelp) {
+      logDim('Researching setup instructions...');
+      const setupPrompt = getAgentPrompt('init', 'researchSetup', {
+        taskSystem: systemName,
+        accessMethod: contextAnswer.trim() || 'unknown',
+      });
+      const setupInstructions = await spawnPrintRaw(getDefaultBinary(), setupPrompt, {
+        cwd: ctx.workDir,
+        spinnerMsg: 'Researching setup instructions',
+        sessionId: initId,
+        label: 'research-setup',
+      });
+      if (setupInstructions) {
+        console.log(
+          `
+` +
+            renderMarkdown(setupInstructions) +
+            `
+`,
+        );
+      }
+      const setupChoice = await selectOption('What would you like to do?', [
+        { value: 'done', label: 'I have set it up', hint: 'Continue with ticket integration' },
+        { value: 'local', label: 'Downgrade to local mode', hint: 'Skip ticket integration' },
+      ]);
+      if (setupChoice === 'local') {
+        appendInitEvent(initId, {
+          ts: new Date().toISOString(),
+          event: 'gather_context:completed',
+          metadata: { downgrade: true },
+        });
+        return 'downgrade_local';
+      }
+    }
+    writeInitArtifactJson(initId, 'user-context.json', {
+      systemName,
+      userAnswer: contextAnswer.trim(),
+      accessAssessment: accessSetup.assessment,
+      needsSetupHelp: accessSetup.needsSetupHelp,
+      timestamp: new Date().toISOString(),
+    });
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'context:updated',
+      metadata: {
+        accessMethod: contextAnswer.trim(),
+        setupAssessment: accessSetup.assessment,
+      },
+    });
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'gather_context:completed',
+    });
+    return 'normalize';
+  },
+  normalize = async ctx => {
+    const { initId } = ctx;
+    appendInitEvent(initId, { ts: new Date().toISOString(), event: 'normalize:started' });
+    const identifyData = JSON.parse(readFileSync8(initArtifactPath(initId, 'identify.json'), 'utf-8'));
+    const researchData = JSON.parse(readFileSync8(initArtifactPath(initId, 'research.json'), 'utf-8'));
+    const detectionData = JSON.parse(readFileSync8(initArtifactPath(initId, 'detection.json'), 'utf-8'));
+    const userContext = JSON.parse(readFileSync8(initArtifactPath(initId, 'user-context.json'), 'utf-8'));
+    const userAnswer = userContext.userAnswer || '';
+    const stateMapping = parseStateMapping(userAnswer);
+    const noOp = /doesn'?t map|doesn'?t apply|no\s*op|skip|n\/a|none/i.test(userAnswer);
+    const detectedTools = Object.keys(detectionData.tools || {});
+    let chosenAccessPath = 'cli';
+    const userAnswerLower = userAnswer.toLowerCase();
+    const detectedToolKeys = detectedTools.map(t => t.toLowerCase());
+    if (
+      detectedToolKeys.some(t => t.includes('github')) ||
+      userAnswerLower.includes('gh ') ||
+      userAnswerLower.includes('github')
+    ) {
+      chosenAccessPath = 'gh-cli';
+    } else if (detectedToolKeys.some(t => t.includes('jira')) || userAnswerLower.includes('jira')) {
+      chosenAccessPath = 'jira-cli';
+    } else if (detectedToolKeys.some(t => t.includes('linear')) || userAnswerLower.includes('linear')) {
+      chosenAccessPath = 'linear-cli';
+    } else if (detectedToolKeys.some(t => t.includes('clickup')) || userAnswerLower.includes('clickup')) {
+      chosenAccessPath = 'clickup-cli';
+    } else if (detectedToolKeys.some(t => t.includes('asana')) || userAnswerLower.includes('asana')) {
+      chosenAccessPath = 'asana-cli';
+    } else if (detectedToolKeys.some(t => t.includes('notion')) || userAnswerLower.includes('notion')) {
+      chosenAccessPath = 'notion-cli';
+    } else if (userAnswerLower.includes('api') || userAnswerLower.includes('rest')) {
+      chosenAccessPath = 'api';
+    } else if (userAnswerLower.includes('mcp') || userAnswerLower.includes('model context')) {
+      chosenAccessPath = 'mcp';
+    }
+    const isAuthenticated = Object.values(detectionData.authStatus || {}).some(s => s === 'authenticated');
+    const readiness = isAuthenticated ? 'ready' : detectedTools.length > 0 ? 'partial' : 'not_ready';
+    const quirks = [];
+    if (userAnswer.includes('always') || userAnswer.includes('only') || userAnswer.includes('must')) {
+      quirks.push(userAnswer);
+    }
+    const defaults = {};
+    if (researchData.constraints?.length > 0) {
+      defaults.constraints = researchData.constraints.join('; ');
+    }
+    if (researchData.transitionModel && researchData.transitionModel !== 'unknown') {
+      defaults.transitionModel = researchData.transitionModel;
+    }
+    if (detectedTools.length > 0) {
+      defaults.detectedTools = detectedTools.join(', ');
+    }
+    if (userAnswer.trim()) {
+      defaults.userContext = userAnswer.trim();
+    }
+    const setupBrief = {
+      systemName: identifyData.systemName,
+      chosenAccessPath,
+      readiness,
+      confidence: readiness === 'ready' ? 'high' : readiness === 'partial' ? 'medium' : 'low',
+      hierarchy: researchData.hierarchy || 'unknown',
+      defaults,
+      stateMapping: {
+        todo: stateMapping.todo || 'open',
+        inProgress: stateMapping.inProgress || 'in progress',
+        inReview: stateMapping.inReview || 'review',
+        noOp,
+      },
+      quirks,
+      requiredCapabilities: [...CRITICAL_CAPABILITIES],
+      noOpCapabilities: noOp ? [...NON_CRITICAL_CAPABILITIES] : [],
+      timestamp: new Date().toISOString(),
+    };
+    writeInitArtifactJson(initId, 'setup-brief.json', setupBrief);
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'context:updated',
+      metadata: {
+        stateMapping: `${setupBrief.stateMapping.todo} \u2192 ${setupBrief.stateMapping.inProgress} \u2192 ${setupBrief.stateMapping.inReview}`,
+      },
+    });
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'normalize:completed',
+    });
+    return 'generate';
+  },
+  generate = async ctx => {
+    const { initId, workDir, org } = ctx;
+    appendInitEvent(initId, { ts: new Date().toISOString(), event: 'generate:started' });
+    const scriptsDir = join7(initDir(initId), 'scripts');
+    mkdirSync11(scriptsDir, { recursive: true });
+    const effectiveOrg = org || 'default';
+    const branch = getCurrentBranch(workDir);
+    const { found, missing } = loadOrgScripts(scriptsDir, effectiveOrg);
+    if (missing.length === 0) {
+      logOk('All scripts loaded from org config');
+      appendInitEvent(initId, {
+        ts: new Date().toISOString(),
+        event: 'generate:completed',
+        metadata: { source: 'org', found: found.length },
+      });
+      return 'verify';
+    }
+    const setupBrief = JSON.parse(readFileSync8(initArtifactPath(initId, 'setup-brief.json'), 'utf-8'));
+    const researchDoc = readFileSync8(initArtifactPath(initId, 'research.md'), 'utf-8');
+    const detectionData = JSON.parse(readFileSync8(initArtifactPath(initId, 'detection.json'), 'utf-8'));
+    const userContext = JSON.parse(readFileSync8(initArtifactPath(initId, 'user-context.json'), 'utf-8'));
+    const detectedNames = Object.keys(detectionData.tools || {});
+    const detectedInfo =
+      detectedNames.length > 0
+        ? detectedNames.map(n => `  - ${n}: ${detectionData.tools[n]}`).join(`
+`)
+        : '  (none detected)';
+    const scriptInterfaces = {
+      'extract-ticket': 'reads branch name from stdin, outputs ticket ID to stdout',
+      'get-ticket': 'takes ticket ID as $1, outputs ticket markdown to stdout',
+      'start-ticket': 'takes ticket ID as $1, transitions ticket from todo to in-progress',
+      'to-review': 'takes ticket ID as $1, transitions ticket from in-progress to review',
+      'revert-to-inprogress': 'takes ticket ID as $1, transitions ticket from review back to in-progress',
+      'update-ticket': 'takes ticket ID as $1 and update content as $2, updates the ticket description/body',
+      'create-downstream-ticket':
+        'takes parent ticket ID as $1 and content as $2, creates a linked downstream ticket, outputs new ticket ID',
+      'add-comment': 'takes ticket ID as $1 and comment text as $2, adds a comment to the ticket',
+      'move-to-todo': 'takes ticket ID as $1, transitions ticket to todo/backlog state',
+      'attach-artifact': 'takes ticket ID as $1 and file path as $2, attaches or links the file to the ticket',
+    };
+    const transitionNoOp = setupBrief.stateMapping.noOp;
+    const scriptsToCreate = transitionNoOp ? missing.filter(s => CRITICAL_SCRIPTS.includes(s)) : missing;
+    const scriptList = scriptsToCreate.map(s => `- ${s}: ${scriptInterfaces[s]}`).join(`
+`);
+    const optionalScriptsSection =
+      transitionNoOp && missing.some(s => OPTIONAL_SCRIPTS.includes(s))
+        ? `
+These transition scripts should be NO-OPS:
+` +
+          missing
+            .filter(s => OPTIONAL_SCRIPTS.includes(s))
+            .map(
+              s => `- ${s}: #!/bin/bash
+# no-op (state mapping not applicable)
+exit 0`,
+            ).join(`
+`)
+        : '';
+    const transitionNoOpSection = transitionNoOp
+      ? 'NOTE: Transition scripts should be NO-OPS (exit 0). User says states do not map well.'
+      : '';
+    const prompt = getAgentPrompt('init', 'createScripts', {
+      taskSystem: setupBrief.systemName,
+      accessMethod: userContext.userAnswer || '',
+      stateMapping: `${setupBrief.stateMapping.todo} \u2192 ${setupBrief.stateMapping.inProgress} \u2192 ${setupBrief.stateMapping.inReview}`,
+      transitionNoOp: transitionNoOpSection,
+      branch,
+      scriptsDir,
+      quirks: setupBrief.quirks.length > 0 ? `Context/quirks: ${setupBrief.quirks.join(', ')}` : '',
+      setupAssessment: `readiness: ${setupBrief.readiness}, confidence: ${setupBrief.confidence}`,
+      researchDoc: researchDoc || '(no research available)',
+      detectedInfo,
+      scriptList,
+      optionalScripts: optionalScriptsSection,
+    });
+    let repairAttempt = 0;
+    let activePrompt = prompt;
+    while (repairAttempt < MAX_REPAIR_ATTEMPTS) {
+      const llmOutput = await spawnPrintRaw(getDefaultBinary(), activePrompt, {
+        cwd: workDir,
+        spinnerMsg:
+          repairAttempt === 0
+            ? `Creating ${setupBrief.systemName} integration scripts`
+            : `Repairing scripts (attempt ${repairAttempt + 1}/${MAX_REPAIR_ATTEMPTS})`,
+        sessionId: initId,
+        label: repairAttempt === 0 ? 'create-scripts' : `repair-scripts-${repairAttempt}`,
+      });
+      if (llmOutput) {
+        console.log(renderMarkdown(llmOutput));
+        console.log();
+      }
+      if (transitionNoOp) {
+        for (const name of OPTIONAL_SCRIPTS) {
+          if (missing.includes(name)) {
+            const dest = join7(scriptsDir, name);
+            writeFileSync8(
+              dest,
+              `#!/bin/bash
+# no-op
+exit 0
+`,
+            );
+            Bun.spawnSync({ cmd: ['chmod', '+x', dest] });
+          }
+        }
+      }
+      for (const name of ALL_SCRIPTS) {
+        const dest = join7(scriptsDir, name);
+        if (existsSync9(dest)) {
+          Bun.spawnSync({ cmd: ['chmod', '+x', dest] });
+        }
+      }
+      const result = verifyCriticalScripts(scriptsDir, branch);
+      if (result.extractTicketId && result.getTicketOk) {
+        logOk('Critical scripts verified successfully');
+        break;
+      }
+      repairAttempt++;
+      if (repairAttempt < MAX_REPAIR_ATTEMPTS) {
+        const failures = [];
+        if (!result.extractTicketId) {
+          failures.push(
+            `extract-ticket FAILED: Given branch "${branch}", the script did not output a valid ticket ID.`,
+          );
+        }
+        if (!result.getTicketOk) {
+          failures.push(`get-ticket FAILED: The script did not return usable ticket content.`);
+        }
+        activePrompt =
+          prompt +
+          `
+
+--- REPAIR CONTEXT ---
+` +
+          `This is repair attempt ${repairAttempt}/${MAX_REPAIR_ATTEMPTS}.
+` +
+          `The previous scripts failed verification with these specific errors:
+` +
+          failures.map(f => `- ${f}`).join(`
+`) +
+          `
+` +
+          `Inspect the existing scripts in ${scriptsDir}, identify the root cause of each failure, and fix them.
+` +
+          `Do NOT regenerate from scratch \u2014 read the failing scripts, diagnose, and repair.
+`;
+        logWarn(
+          `Critical scripts failed verification (attempt ${repairAttempt}/${MAX_REPAIR_ATTEMPTS}). Retrying with failure details...`,
+        );
+      }
+    }
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'context:updated',
+      metadata: { repairAttempts: repairAttempt, maxRepairAttempts: MAX_REPAIR_ATTEMPTS },
+    });
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'generate:completed',
+      metadata: { repairAttempts: repairAttempt },
+    });
+    return 'verify';
+  },
+  verify = async ctx => {
+    const { initId, workDir } = ctx;
+    appendInitEvent(initId, { ts: new Date().toISOString(), event: 'verify:started' });
+    const scriptsDir = join7(initDir(initId), 'scripts');
+    const branch = getCurrentBranch(workDir);
+    const critical = verifyCriticalScripts(scriptsDir, branch);
+    const nonCritical = {};
+    for (const name of OPTIONAL_SCRIPTS) {
+      const scriptFile = join7(scriptsDir, name);
+      if (!existsSync9(scriptFile)) {
+        nonCritical[name] = { ok: false, noOp: false, error: 'missing' };
+        continue;
+      }
+      const content = readFileSync8(scriptFile, 'utf-8');
+      const isNoOp =
+        content.includes('# no-op') ||
+        (content.includes('exit 0') &&
+          content.split(`
+`).length <= 4);
+      nonCritical[name] = { ok: true, noOp: isNoOp };
+    }
+    const initStatus = ensureInitStatus(initId);
+    const repairAttempts = initStatus.context.repairAttempts ?? 0;
+    const verifyResult = {
+      extractTicket: {
+        ok: !!critical.extractTicketId,
+        ticketId: critical.extractTicketId,
+        error: critical.extractTicketId ? undefined : 'no ticket ID extracted',
+      },
+      getTicket: {
+        ok: critical.getTicketOk,
+        contentLength: critical.getTicketOk ? 1 : 0,
+        error: critical.getTicketOk ? undefined : 'no usable content',
+      },
+      nonCritical,
+      repairAttempts,
+      timestamp: new Date().toISOString(),
+    };
+    writeInitArtifactJson(initId, 'verify.json', verifyResult);
+    if (!critical.extractTicketId || !critical.getTicketOk) {
+      logWarn('Critical scripts did not pass verification.');
+      const exhausted = repairAttempts >= MAX_REPAIR_ATTEMPTS;
+      let fix;
+      if (exhausted) {
+        fix = await selectOption(
+          'Critical scripts are not working after maximum repair attempts. What would you like to do?',
+          [{ value: 'local', label: 'Use local mode', hint: 'Skip ticket integration entirely' }],
+        );
+      } else {
+        fix = await selectOption('Critical scripts are not working. What would you like to do?', [
+          { value: 'retry', label: 'Retry', hint: 'Fix your tool/auth, then we verify again' },
+          { value: 'regenerate', label: 'Regenerate', hint: 'Go back to generate phase' },
+          { value: 'local', label: 'Use local mode', hint: 'Skip ticket integration entirely' },
+        ]);
+      }
+      if (fix === 'local') {
+        appendInitEvent(initId, {
+          ts: new Date().toISOString(),
+          event: 'verify:completed',
+          metadata: { criticalOk: false, downgrade: true },
+        });
+        return 'downgrade_local';
+      }
+      if (fix === 'regenerate') {
+        appendInitEvent(initId, {
+          ts: new Date().toISOString(),
+          event: 'verify:completed',
+          metadata: { criticalOk: false, regenerate: true },
+        });
+        return 'generate';
+      }
+      await textInput('Press Enter when ready to re-verify...', '');
+      appendInitEvent(initId, {
+        ts: new Date().toISOString(),
+        event: 'verify:completed',
+        metadata: { criticalOk: false, retry: true },
+      });
+      return 'verify';
+    }
+    const degradedCapabilities = Object.entries(nonCritical)
+      .filter(([_3, v2]) => !v2.ok)
+      .map(([k3]) => k3);
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'context:updated',
+      metadata: {
+        ticketId: critical.extractTicketId,
+      },
+    });
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'verify:completed',
+      metadata: {
+        criticalOk: true,
+        degradedCapabilities: degradedCapabilities.length > 0 ? degradedCapabilities : undefined,
+      },
+    });
+    return 'promote';
+  },
+  promote = async ctx => {
+    const { initId, config, workDir, gitRootPath, worktree, remoteUrl, gitRootHost, org, ticketIdArg } = ctx;
+    appendInitEvent(initId, { ts: new Date().toISOString(), event: 'promote:started' });
+    const attempt = getInitAttemptById(initId);
+    if (!attempt) {
+      throw new Error(`Init attempt ${initId} not found in index \u2014 cannot promote.`);
+    }
+    if (attempt.outcome !== null) {
+      throw new Error(
+        `Init attempt ${initId} has outcome "${attempt.outcome}" \u2014 stale/abandoned attempts cannot be promoted.`,
+      );
+    }
+    const verifyResult = JSON.parse(readFileSync8(initArtifactPath(initId, 'verify.json'), 'utf-8'));
+    const degradedCapabilities = Object.entries(verifyResult.nonCritical)
+      .filter(([_3, v2]) => !v2.ok)
+      .map(([k3]) => k3);
+    const noOpCapabilities = Object.entries(verifyResult.nonCritical)
+      .filter(([_3, v2]) => v2.noOp)
+      .map(([k3]) => k3);
+    const outcome = degradedCapabilities.length > 0 ? 'promoted_degraded' : 'promoted';
+    const sessionId = generateSessionId();
+    const now = new Date().toISOString();
+    const sDir = sessionDir(sessionId);
+    mkdirSync11(sDir, { recursive: true });
+    const initScriptsDir = join7(initDir(initId), 'scripts');
+    const sessionScriptsDir = join7(sDir, 'scripts');
+    mkdirSync11(sessionScriptsDir, { recursive: true });
+    if (existsSync9(initScriptsDir)) {
+      for (const name of readdirSync(initScriptsDir)) {
+        copyFileSync2(join7(initScriptsDir, name), join7(sessionScriptsDir, name));
+        Bun.spawnSync({ cmd: ['chmod', '+x', join7(sessionScriptsDir, name)] });
+      }
+    }
+    config.repo.org = org;
+    config.repo.ticketSystem = null;
+    writeConfig(sessionId, config);
+    const branch = getCurrentBranch(workDir);
+    let resolvedTicketId;
+    if (ticketIdArg) {
+      resolvedTicketId = ticketIdArg;
+    } else if (verifyResult.extractTicket.ticketId) {
+      resolvedTicketId = verifyResult.extractTicket.ticketId;
+    }
+    if (!resolvedTicketId) {
+      throw new Error('Could not extract ticket ID from branch. Provide one: kautopilot init PE-1234');
+    }
+    let sessionBranch = branch;
+    if (isOnMain(config.repo.baseBranch, workDir)) {
+      sessionBranch = `feature/${resolvedTicketId}`;
+      createBranch(sessionBranch, workDir);
+    }
+    upsertSession({
+      id: sessionId,
+      repo_path: gitRootPath,
+      worktree,
+      git_root: remoteUrl,
+      git_root_host: gitRootHost,
+      ticket_id: resolvedTicketId ?? null,
+      branch: sessionBranch,
+      local: 0,
+      state: 'ready',
+      created_at: now,
+      updated_at: now,
+    });
+    updateInitOutcome(initId, outcome, sessionId);
+    const manualActions = noOpCapabilities.map(c2 => `${c2} (no-op \u2014 must be done manually)`);
+    const outcomeArtifact = {
+      outcome,
+      promotedSessionId: sessionId,
+      criticalScriptsWorking: true,
+      degradedCapabilities,
+      manualActions,
+      timestamp: now,
+    };
+    writeInitArtifactJson(initId, 'outcome.json', outcomeArtifact);
+    if (outcome === 'promoted_degraded') {
+      logWarn('Promoted with degraded capabilities:');
+      for (const action of manualActions) {
+        logWarn(`  - ${action}`);
+      }
+    }
+    if (org && org !== 'default') {
+      await promptSaveOrg(sessionScriptsDir, org, sessionId);
+    }
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'promote:completed',
+      metadata: { outcome, sessionId, ticketId: resolvedTicketId },
+    });
+    logOk(`Session initialized: ${sessionId}`);
+    logField('Ticket', resolvedTicketId);
+    logField('Branch', sessionBranch);
+    logField('Init attempt', initId);
+    logDim(`Config:    ~/.kautopilot/${sessionId}/config.yaml`);
+    logDim('Next:      kautopilot start');
+    return null;
+  },
+  downgrade_local = async ctx => {
+    const { initId, config, workDir, gitRootPath, worktree, remoteUrl, gitRootHost, org } = ctx;
+    appendInitEvent(initId, { ts: new Date().toISOString(), event: 'downgrade_local:started' });
+    const attempt = getInitAttemptById(initId);
+    if (!attempt) {
+      throw new Error(`Init attempt ${initId} not found in index \u2014 cannot promote to local mode.`);
+    }
+    if (attempt.outcome !== null) {
+      throw new Error(
+        `Init attempt ${initId} has outcome "${attempt.outcome}" \u2014 stale/abandoned attempts cannot be promoted.`,
+      );
+    }
+    const sessionId = generateSessionId();
+    const now = new Date().toISOString();
+    const sDir = sessionDir(sessionId);
+    mkdirSync11(sDir, { recursive: true });
+    config.repo.org = org;
+    config.repo.ticketSystem = null;
+    writeConfig(sessionId, config);
+    const localTicketId = `local-${generateSessionId().slice(0, 6)}`;
+    const ticketContent = await textInput(
+      'Describe the task/ticket for this local session:',
+      'e.g., "Refactor auth middleware to support JWT tokens"',
+    );
+    const ticketBody = `# ${localTicketId}
+
+${ticketContent.trim() || '(no description provided)'}
+`;
+    const specDir = join7(worktree, 'spec');
+    mkdirSync11(specDir, { recursive: true });
+    writeFileSync8(join7(specDir, 'ticket.md'), ticketBody);
+    const artifactDest = sessionArtifactPath(sessionId, 'ticket.md');
+    ensureArtifactDir(artifactDest);
+    writeFileSync8(artifactDest, ticketBody);
+    let branch = getCurrentBranch(workDir);
+    if (isOnMain(config.repo.baseBranch, workDir)) {
+      branch = `feature/${localTicketId}`;
+      createBranch(branch, workDir);
+    }
+    const sessionScriptsDir = join7(sDir, 'scripts');
+    mkdirSync11(sessionScriptsDir, { recursive: true });
+    for (const scriptName of ALL_SCRIPTS) {
+      const dest = join7(sessionScriptsDir, scriptName);
+      writeFileSync8(
+        dest,
+        `#!/bin/bash
+# no-op (local mode \u2014 ticket integration disabled)
+exit 0
+`,
+      );
+      Bun.spawnSync({ cmd: ['chmod', '+x', dest] });
+    }
+    upsertSession({
+      id: sessionId,
+      repo_path: gitRootPath,
+      worktree,
+      git_root: remoteUrl,
+      git_root_host: gitRootHost,
+      ticket_id: localTicketId,
+      branch,
+      local: 1,
+      state: 'ready',
+      created_at: now,
+      updated_at: now,
+    });
+    updateInitOutcome(initId, 'downgraded_local', sessionId);
+    const outcomeArtifact = {
+      outcome: 'downgraded_local',
+      promotedSessionId: sessionId,
+      criticalScriptsWorking: false,
+      degradedCapabilities: [...CRITICAL_CAPABILITIES, ...NON_CRITICAL_CAPABILITIES],
+      manualActions: ['All ticket operations must be done manually'],
+      timestamp: now,
+    };
+    writeInitArtifactJson(initId, 'outcome.json', outcomeArtifact);
+    if (ctx.forceLocal) {
+      logInfo('Generating ticket, spec, and plans...');
+      const specArtifactPath = snapshotPath(sessionId, 1, 'task-spec.md');
+      const plansArtifactDir = snapshotPath(sessionId, 1, 'plans');
+      ensureArtifactDir(specArtifactPath);
+      ensureArtifactDir(plansArtifactDir + '/.keep');
+      try {
+        const localInitPrompt = getAgentPrompt('init', 'localInit', { sessionId });
+        await spawnPrintRaw(getDefaultBinary(), localInitPrompt, {
+          cwd: workDir,
+          timeout: 300,
+          spinnerMsg: 'Generating ticket, spec, and plans',
+        });
+      } catch (err) {
+        logWarn('Local mode generation encountered an issue: ' + (err instanceof Error ? err.message : String(err)));
+      }
+    }
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'downgrade_local:completed',
+      metadata: { sessionId, ticketId: localTicketId },
+    });
+    logOk(`Session initialized (local mode): ${sessionId}`);
+    logField('Ticket', localTicketId);
+    logField('Branch', branch);
+    logField('Init attempt', initId);
+    logDim(`Config:    ~/.kautopilot/${sessionId}/config.yaml`);
+    logDim('Next:      kautopilot start');
+    return null;
+  },
+  failed = async ctx => {
+    const { initId } = ctx;
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'init:failed',
+      metadata: { reason: 'terminal_state' },
+    });
+    updateInitOutcome(initId, 'failed');
+    logWarn('Init failed.');
+    return null;
+  },
+  cancelled = async ctx => {
+    const { initId } = ctx;
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'init:cancelled',
+    });
+    updateInitOutcome(initId, 'cancelled');
+    logInfo('Init cancelled.');
+    return null;
+  },
+  INIT_STATES,
+  INIT_TERMINAL_STATES;
+var init_states = __esm(() => {
+  init_init_types();
+  init_log();
+  init_artifacts();
+  init_agents();
+  init_spawn();
+  init_inquirer();
+  init_scripts();
+  init_db();
+  init_init_db();
+  init_init_status();
+  init_id();
+  init_config();
+  init_git();
+  init_markdown();
+  init_format();
+  INIT_STATES = {
+    identify,
+    research,
+    detect,
+    gather_context,
+    normalize,
+    generate,
+    verify,
+    promote,
+    downgrade_local,
+    failed,
+    cancelled,
+  };
+  INIT_TERMINAL_STATES = ['promote', 'downgrade_local', 'failed', 'cancelled'];
+});
+
+// src/phases/init/index.ts
+async function runInitStateMachine(ctx) {
+  const { initId } = ctx;
+  const status = ensureInitStatus(initId);
+  let currentState = null;
+  if (status.stateStatus === 'running' && status.state in INIT_STATES) {
+    currentState = status.state;
+    logDim(`[init] Resuming from incomplete state: ${currentState}`);
+  } else {
+    const stateNames = Object.keys(INIT_STATES);
+    for (const name of stateNames) {
+      if (INIT_TERMINAL_STATES.includes(name)) continue;
+      if (!status.completedStates.includes(name)) {
+        currentState = name;
+        break;
+      }
+    }
+  }
+  if (!currentState) {
+    logDim('[init] All states completed');
+    return true;
+  }
+  const hasCompletedWork = status.completedStates.length > 0;
+  if (!hasCompletedWork) {
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'init:started',
+      metadata: { pid: process.pid },
+    });
+  }
+  let interrupted = false;
+  while (currentState !== null) {
+    const handler = INIT_STATES[currentState];
+    if (!handler) {
+      throw new Error(`No handler for init state: ${currentState}`);
+    }
+    logDim(`${stateIcon(currentState)} [init] ${currentState}`);
+    const nextState = await handler(ctx);
+    if (INIT_TERMINAL_STATES.includes(currentState)) {
+      logDim(`[init] Reached terminal state: ${currentState}`);
+      break;
+    }
+    if (nextState === null) {
+      interrupted = true;
+      break;
+    }
+    currentState = nextState;
+  }
+  if (!interrupted) {
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'init:completed',
+      metadata: { finalState: currentState },
+    });
+  }
+  return !interrupted;
+}
+var init_init = __esm(() => {
+  init_log();
+  init_init_status();
+  init_states();
+  init_format();
+});
+
 // src/cli/init.ts
 var exports_init = {};
 __export(exports_init, {
   runInit: () => runInit,
   createInitCommand: () => createInitCommand,
 });
-import { existsSync as existsSync8, mkdirSync as mkdirSync8, rmSync } from 'fs';
-import { join as join4 } from 'path';
+import { existsSync as existsSync10, mkdirSync as mkdirSync12, rmSync } from 'fs';
 function createInitCommand() {
   return new Command('init')
     .argument('[ticketId]', 'Ticket ID (e.g. PE-1234)')
@@ -82015,206 +83553,138 @@ async function runInit(ticketId, opts, cwd) {
   const remoteUrl = getRemoteUrl(workDir);
   const gitRootHost = normalizeGitRoot(remoteUrl);
   const org = extractOrg(gitRootHost);
-  const existing = getSessionByWorktree(gitRootPath, worktree);
-  if (existing) {
-    const lockInfo = checkLock(existing.id);
+  const existingSession = getSessionByWorktree(gitRootPath, worktree);
+  if (existingSession) {
+    const lockInfo = checkLock(existingSession.id);
     if (lockInfo.locked) {
       throw new Error(`Session is already running (PID ${lockInfo.pid}). Use \`kautopilot stop\` first.`);
     }
-    if (existing.state === 'init') {
-      logWarn(`Found incomplete init (${existing.id}). Cleaning up and re-initializing.`);
-      rmSync(sessionDir(existing.id), { recursive: true, force: true });
-      deleteSession(existing.id);
-    } else if (!opts.reset) {
+    if (existingSession.state !== 'init' && !opts.reset) {
       throw new Error(
-        `Session already initialized (${existing.id}). Use \`kautopilot start\` or \`kautopilot init --reset\`.`,
+        `Session already initialized (${existingSession.id}). Use \`kautopilot start\` or \`kautopilot init --reset\`.`,
       );
-    } else {
-      const confirmed = await confirmAction(`Remove existing session ${existing.id} and re-initialize?`, false);
+    }
+    if (opts.reset) {
+      const confirmed = await confirmAction(`Remove existing session ${existingSession.id} and re-initialize?`, false);
       if (!confirmed) {
         console.log('Cancelled.');
         process.exit(0);
       }
-      rmSync(sessionDir(existing.id), { recursive: true, force: true });
-      deleteSession(existing.id);
-      logOk(`Removed session ${existing.id}.`);
+      const oldSessionDir = sessionDir(existingSession.id);
+      deleteSession(existingSession.id);
+      if (existsSync10(oldSessionDir)) {
+        rmSync(oldSessionDir, { recursive: true, force: true });
+      }
+      logOk(`Retired old session ${existingSession.id}. Starting fresh init.`);
     }
   }
-  const id = generateSessionId();
-  const now = new Date().toISOString();
-  const sDir = sessionDir(id);
-  mkdirSync8(sDir, { recursive: true });
+  const activeInit = getActiveInitForWorktree(gitRootPath, worktree);
+  let resumeInitId = null;
+  if (activeInit) {
+    const initLock = checkInitLock(activeInit.id);
+    if (initLock.locked) {
+      throw new Error(`Init is already running for this worktree (${activeInit.id}, PID ${initLock.pid}).`);
+    }
+    detectAndRecoverInitCrash(activeInit.id);
+    const status = ensureInitStatus(activeInit.id);
+    if (!status.outcome && status.completedStates.length > 0 && !opts.reset) {
+      const doResume = await confirmAction(
+        `Previous init attempt ${activeInit.id} has progress (completed: ${status.completedStates.join(', ')}). Resume?`,
+        true,
+      );
+      if (doResume) {
+        resumeInitId = activeInit.id;
+      } else {
+        appendInitEvent(activeInit.id, {
+          ts: new Date().toISOString(),
+          event: 'init:abandoned',
+          metadata: { reason: 'user_declined_resume', pid: process.pid },
+        });
+        updateInitOutcome(activeInit.id, 'abandoned');
+        logDim(`Marked previous init attempt ${activeInit.id} as abandoned.`);
+      }
+    } else if (!status.outcome) {
+      appendInitEvent(activeInit.id, {
+        ts: new Date().toISOString(),
+        event: 'init:abandoned',
+        metadata: { reason: 'reset_or_no_progress', pid: process.pid },
+      });
+      updateInitOutcome(activeInit.id, 'abandoned');
+      logDim(`Marked previous init attempt ${activeInit.id} as abandoned.`);
+    }
+  }
+  const initId = resumeInitId ?? generateSessionId();
+  if (!resumeInitId) {
+    const now = new Date().toISOString();
+    const iDir = initDir(initId);
+    mkdirSync12(iDir, { recursive: true });
+    upsertInitAttempt({
+      id: initId,
+      repo_path: gitRootPath,
+      worktree,
+      git_root: remoteUrl,
+      git_root_host: gitRootHost,
+      org: org || null,
+      outcome: null,
+      promoted_session_id: null,
+      created_at: now,
+      updated_at: now,
+    });
+  }
   ensureGlobalConfig();
   const config = resolveConfig(org, opts.config);
-  config.repo.org = org;
-  config.repo.ticketSystem = null;
-  writeConfig(id, config);
-  upsertSession({
-    id,
-    repo_path: gitRootPath,
-    worktree,
-    git_root: remoteUrl,
-    git_root_host: gitRootHost,
-    ticket_id: null,
-    branch: null,
-    local: 0,
-    state: 'init',
-    created_at: now,
-    updated_at: now,
-  });
-  const scriptsDir = join4(sDir, 'scripts');
-  const effectiveOrg = org || 'default';
-  const currentBranch = getCurrentBranch(workDir);
-  if (opts.local) {
-    logInfo('Scripts skipped (local mode)');
-  } else {
-    const { found, missing } = loadOrgScripts(scriptsDir, effectiveOrg);
-    if (missing.length > 0) {
-      const ok = await promptSetupScripts(scriptsDir, missing, effectiveOrg, id);
-      if (!ok) {
-        process.exit(1);
-      }
-      if (org && org !== 'default') {
-        await promptSaveOrg(scriptsDir, org, id);
-      }
-    } else {
-      const verifyResult = verifyCriticalScripts(scriptsDir, currentBranch);
-      if (!verifyResult.extractTicketId || !verifyResult.getTicketOk) {
-        logWarn('Copied org scripts did not pass verification.');
-        const { selectOption: selectOption2 } = await Promise.resolve().then(() => (init_inquirer(), exports_inquirer));
-        const fix = await selectOption2('Critical scripts are not working. What would you like to do?', [
-          { value: 'retry', label: 'Retry', hint: 'Fix your tool/config, then we verify again' },
-          { value: 'regenerate', label: 'Regenerate', hint: 'LLM creates new scripts' },
-          { value: 'continue', label: 'Continue anyway', hint: 'Proceed with non-working scripts' },
-        ]);
-        if (fix === 'retry') {
-          const retry = verifyCriticalScripts(scriptsDir, currentBranch);
-          if (!retry.extractTicketId || !retry.getTicketOk) {
-            logWarn('Scripts still not working after retry.');
-          }
-        } else if (fix === 'regenerate') {
-          const ok = await promptSetupScripts(
-            scriptsDir,
-            ['extract-ticket', 'get-ticket', 'start-ticket', 'to-review', 'revert-to-inprogress'],
-            effectiveOrg,
-            id,
-          );
-          if (!ok) process.exit(1);
-          if (org && org !== 'default') {
-            await promptSaveOrg(scriptsDir, org, id);
-          }
-        }
-      }
+  logInfo(`${resumeInitId ? 'Resuming' : 'Init attempt'}: ${initId}`);
+  logField('Worktree', worktree);
+  acquireInitLock(initId);
+  try {
+    const ctx = {
+      initId,
+      config,
+      workDir,
+      gitRootPath,
+      worktree,
+      remoteUrl,
+      gitRootHost,
+      org,
+      forceLocal: opts.local || false,
+      ticketIdArg: ticketId,
+    };
+    const completed = await runInitStateMachine(ctx);
+    if (!completed) {
+      logWarn('Init interrupted. Run `kautopilot init` to resume or `kautopilot init --reset` to restart.');
     }
+  } finally {
+    releaseInitLock(initId);
   }
-  const localMode = opts.local || false;
-  let resolvedTicketId;
-  if (localMode) {
-    resolvedTicketId = undefined;
-  } else if (ticketId) {
-    resolvedTicketId = ticketId;
-  } else {
-    const extractScript = join4(scriptsDir, 'extract-ticket');
-    if (existsSync8(extractScript)) {
-      const proc = Bun.spawnSync({
-        cmd: [extractScript],
-        stdin: Buffer.from(
-          currentBranch +
-            `
-`,
-        ),
-        stdout: 'pipe',
-        stderr: 'pipe',
-      });
-      if (proc.exitCode === 0) {
-        const result = proc.stdout.toString().trim();
-        if (result.length > 0) resolvedTicketId = result;
-      }
-    }
-    if (!resolvedTicketId) {
-      throw new Error('Could not extract ticket ID from branch. Provide one: kautopilot init PE-1234');
-    }
-  }
-  logField('Ticket', resolvedTicketId || '(local mode)');
-  let branch = getCurrentBranch(workDir);
-  if (localMode) {
-    if (isOnMain(config.repo.baseBranch, workDir)) {
-      branch = `feature/local-${generateSessionId().slice(0, 4)}`;
-      createBranch(branch, workDir);
-    }
-  } else if (isOnMain(config.repo.baseBranch, workDir)) {
-    branch = `feature/${resolvedTicketId}`;
-    createBranch(branch, workDir);
-  }
-  upsertSession({
-    id,
-    repo_path: gitRootPath,
-    worktree,
-    git_root: remoteUrl,
-    git_root_host: gitRootHost,
-    ticket_id: resolvedTicketId ?? null,
-    branch,
-    local: localMode ? 1 : 0,
-    state: 'ready',
-    created_at: now,
-    updated_at: now,
-  });
-  appendEvent(id, { ts: now, event: 'init:started' });
-  appendEvent(id, {
-    ts: new Date().toISOString(),
-    event: 'init:completed',
-    metadata: { id, ticketId: resolvedTicketId, local: localMode },
-  });
-  acquireLock(id);
-  if (localMode) {
-    logInfo('Generating ticket, spec, and plans...');
-    const specArtifactPath = snapshotPath(id, 1, 'task-spec.md');
-    const plansArtifactDir = snapshotPath(id, 1, 'plans');
-    ensureArtifactDir(specArtifactPath);
-    ensureArtifactDir(plansArtifactDir + '/.keep');
-    try {
-      const localInitPrompt = getAgentPrompt('init', 'localInit', { sessionId: id });
-      await spawnPrintRaw(getDefaultBinary(), localInitPrompt, {
-        cwd: workDir,
-        timeout: 300,
-        spinnerMsg: 'Generating ticket, spec, and plans',
-      });
-    } catch (err) {
-      logWarn('Local mode generation encountered an issue: ' + (err instanceof Error ? err.message : String(err)));
-    }
-  }
-  releaseLock(id);
-  logOk(`Session initialized: ${id}`);
-  logField('Ticket', resolvedTicketId || '(local mode)');
-  logField('Branch', branch);
-  logDim(`Config:    ~/.kautopilot/${id}/config.yaml`);
-  logDim('Next:      kautopilot start');
 }
-var init_init = __esm(() => {
+var init_init2 = __esm(() => {
   init_esm();
   init_id();
   init_db();
-  init_config();
-  init_log();
-  init_lock();
-  init_spawn();
-  init_agents();
-  init_inquirer();
   init_artifacts();
-  init_scripts();
+  init_init_db();
+  init_config();
+  init_lock();
+  init_init_lock();
+  init_init_status();
+  init_log();
+  init_artifacts();
+  init_git();
+  init_inquirer();
+  init_init();
   init_format();
 });
 
 // src/core/status.ts
 import {
-  existsSync as existsSync9,
-  readFileSync as readFileSync7,
-  writeFileSync as writeFileSync6,
+  existsSync as existsSync11,
+  readFileSync as readFileSync9,
+  writeFileSync as writeFileSync9,
   rmSync as rmSync2,
-  mkdirSync as mkdirSync9,
-  renameSync,
+  mkdirSync as mkdirSync13,
+  renameSync as renameSync2,
 } from 'fs';
-import { join as join5, dirname as dirname6 } from 'path';
+import { join as join8, dirname as dirname10 } from 'path';
 function isCheckpoint(phase, state) {
   return CHECKPOINTS[phase]?.has(state) ?? false;
 }
@@ -82361,21 +83831,21 @@ function statusPath(sessionId) {
 }
 function readStatusYaml(sessionId) {
   const path = statusPath(sessionId);
-  if (!existsSync9(path)) return null;
+  if (!existsSync11(path)) return null;
   try {
-    const raw = readFileSync7(path, 'utf-8');
-    return import_yaml.default.parse(raw);
+    const raw = readFileSync9(path, 'utf-8');
+    return import_yaml2.default.parse(raw);
   } catch {
     return null;
   }
 }
 function writeStatusYaml(sessionId, status) {
   const path = statusPath(sessionId);
-  mkdirSync9(dirname6(path), { recursive: true });
-  const content = import_yaml.default.stringify(status, { lineWidth: 120 });
+  mkdirSync13(dirname10(path), { recursive: true });
+  const content = import_yaml2.default.stringify(status, { lineWidth: 120 });
   const tmp = `${path}.tmp`;
-  writeFileSync6(tmp, content);
-  renameSync(tmp, path);
+  writeFileSync9(tmp, content);
+  renameSync2(tmp, path);
 }
 function ensureStatus(sessionId) {
   const log = readLog(sessionId);
@@ -82399,10 +83869,10 @@ function updateUserTurn(sessionId, userTurn) {
   writeStatusYaml(sessionId, status);
 }
 function cancelKloopIfAlive(sessionId) {
-  const kloopLock = join5(sessionDir(sessionId), 'tmp', 'kloop.pid');
-  if (existsSync9(kloopLock)) {
+  const kloopLock = join8(sessionDir(sessionId), 'tmp', 'kloop.pid');
+  if (existsSync11(kloopLock)) {
     try {
-      const pid = parseInt(readFileSync7(kloopLock, 'utf-8').trim(), 10);
+      const pid = parseInt(readFileSync9(kloopLock, 'utf-8').trim(), 10);
       process.kill(pid, 0);
       process.kill(pid, 'SIGTERM');
       return [`killed kloop PID ${pid}`];
@@ -82411,9 +83881,9 @@ function cancelKloopIfAlive(sessionId) {
   return [];
 }
 function abortRebaseIfNeeded(worktree) {
-  const rebaseDir = join5(worktree, '.git', 'rebase-merge');
-  const rebaseApply = join5(worktree, '.git', 'rebase-apply');
-  if (existsSync9(rebaseDir) || existsSync9(rebaseApply)) {
+  const rebaseDir = join8(worktree, '.git', 'rebase-merge');
+  const rebaseApply = join8(worktree, '.git', 'rebase-apply');
+  if (existsSync11(rebaseDir) || existsSync11(rebaseApply)) {
     try {
       Bun.spawnSync({ cmd: ['git', 'rebase', '--abort'], cwd: worktree });
       return ['aborted in-progress rebase'];
@@ -82480,13 +83950,13 @@ function detectAndRecoverCrash(sessionId, worktree) {
   }
   return true;
 }
-var import_yaml, CHECKPOINTS, LIFECYCLE_EVENTS, CLEANUP;
+var import_yaml2, CHECKPOINTS, LIFECYCLE_EVENTS, CLEANUP;
 var init_status = __esm(() => {
   init_log();
   init_lock();
   init_artifacts();
   init_format();
-  import_yaml = __toESM(require_dist(), 1);
+  import_yaml2 = __toESM(require_dist(), 1);
   CHECKPOINTS = {
     plan: new Set(['pull_ticket', 'route_type', 'write_spec', 'finalize_spec', 'finalize_plans']),
     implementation: new Set(['clear_loop', 'commit', 'next_plan', 'completed']),
@@ -82495,6 +83965,8 @@ var init_status = __esm(() => {
   LIFECYCLE_EVENTS = new Set([
     'init:started',
     'init:completed',
+    'init:failed',
+    'init:cancelled',
     'start:started',
     'start:completed',
     'stop:started',
@@ -82512,8 +83984,8 @@ var init_status = __esm(() => {
   ]);
   CLEANUP = {
     gather_context: (_sid, v2, wt) => {
-      const dir = join5(wt, 'spec', `v${v2}`, 'understanding');
-      if (existsSync9(dir)) {
+      const dir = join8(wt, 'spec', `v${v2}`, 'understanding');
+      if (existsSync11(dir)) {
         rmSync2(dir, { recursive: true });
         return [`removed ${dir}`];
       }
@@ -82533,13 +84005,13 @@ var init_status = __esm(() => {
 
 // src/core/config-dir.ts
 var { spawn: spawn2 } = globalThis.Bun;
-import { existsSync as existsSync12, readFileSync as readFileSync9, writeFileSync as writeFileSync10 } from 'fs';
-import { join as join9 } from 'path';
+import { existsSync as existsSync14, readFileSync as readFileSync11, writeFileSync as writeFileSync13 } from 'fs';
+import { join as join12 } from 'path';
 function loadPersistedConfigDirs(id) {
-  const path = join9(sessionDir(id), CACHE_FILE);
-  if (!existsSync12(path)) return false;
+  const path = join12(sessionDir(id), CACHE_FILE);
+  if (!existsSync14(path)) return false;
   try {
-    const data = JSON.parse(readFileSync9(path, 'utf-8'));
+    const data = JSON.parse(readFileSync11(path, 'utf-8'));
     for (const [binary, dir] of Object.entries(data)) {
       cache.set(binary, dir);
     }
@@ -82549,14 +84021,18 @@ function loadPersistedConfigDirs(id) {
     return false;
   }
 }
-function persistConfigDirs(id) {
-  const path = join9(sessionDir(id), CACHE_FILE);
+function persistConfigDirs(id, binaries) {
+  const path = join12(sessionDir(id), CACHE_FILE);
   const data = {};
-  for (const [binary, dir] of cache) {
+  let count = 0;
+  for (const binary of binaries) {
+    const dir = cache.get(binary);
+    if (!dir) continue;
     data[binary] = dir;
+    count++;
   }
-  writeFileSync10(path, JSON.stringify(data, null, 2));
-  debugLog(`[config-dir] Persisted ${cache.size} dirs to ${path}`);
+  writeFileSync13(path, JSON.stringify(data, null, 2));
+  debugLog(`[config-dir] Persisted ${count} dirs to ${path}`);
 }
 async function probeConfigDir(binary) {
   const cached = cache.get(binary);
@@ -82592,13 +84068,6 @@ async function probeConfigDir(binary) {
   return configDir;
 }
 async function discoverConfigDirs(config, sessionId) {
-  if (sessionId && loadPersistedConfigDirs(sessionId)) {
-    const result2 = {};
-    for (const [binary, dir] of cache) {
-      result2[binary] = dir;
-    }
-    return result2;
-  }
   const binaries = new Set();
   const defaultBin = process.env.CLAUDE_BINARY ?? config.claude_binary ?? 'claude';
   binaries.add(defaultBin);
@@ -82619,26 +84088,32 @@ async function discoverConfigDirs(config, sessionId) {
       }
     }
   }
-  const s = process.stdout.isTTY ? Y2() : null;
-  s?.start('Probing binaries');
-  const entries = await Promise.all(
-    [...binaries].map(async binary => {
-      try {
-        const dir = await probeConfigDir(binary);
-        return [binary, dir];
-      } catch (err) {
-        debugLog(`[config-dir] Failed to probe ${binary}:`, err);
-        return [binary, `${process.env.HOME}/.claude`];
-      }
-    }),
-  );
-  s?.stop('Probing binaries');
+  if (sessionId) {
+    loadPersistedConfigDirs(sessionId);
+  }
+  const missingBinaries = [...binaries].filter(binary => !cache.has(binary));
+  if (missingBinaries.length > 0) {
+    const s = process.stdout.isTTY ? Y2() : null;
+    s?.start('Probing binaries');
+    await Promise.all(
+      missingBinaries.map(async binary => {
+        try {
+          await probeConfigDir(binary);
+        } catch (err) {
+          const fallback = `${process.env.HOME}/.claude`;
+          cache.set(binary, fallback);
+          debugLog(`[config-dir] Failed to probe ${binary}:`, err);
+        }
+      }),
+    );
+    s?.stop('Probing binaries');
+  }
   const result = {};
-  for (const [binary, dir] of entries) {
-    result[binary] = dir;
+  for (const binary of binaries) {
+    result[binary] = cache.get(binary) ?? `${process.env.HOME}/.claude`;
   }
   if (sessionId) {
-    persistConfigDirs(sessionId);
+    persistConfigDirs(sessionId, binaries);
   }
   return result;
 }
@@ -82655,14 +84130,14 @@ var init_config_dir = __esm(() => {
 });
 
 // src/core/turn-watcher.ts
-import { watch, existsSync as existsSync13, readFileSync as readFileSync10, mkdirSync as mkdirSync13 } from 'fs';
-import { dirname as dirname9 } from 'path';
+import { watch, existsSync as existsSync15, readFileSync as readFileSync12, mkdirSync as mkdirSync17 } from 'fs';
+import { dirname as dirname13 } from 'path';
 function watchTurn(jsonlPath, onChange) {
   let lastSize = 0;
   let closed = false;
   let fileWatcher = null;
   function check() {
-    if (!existsSync13(jsonlPath)) return;
+    if (!existsSync15(jsonlPath)) return;
     let stat;
     try {
       stat = Bun.file(jsonlPath);
@@ -82671,7 +84146,7 @@ function watchTurn(jsonlPath, onChange) {
     }
     if (stat.size === lastSize) return;
     lastSize = stat.size;
-    const content = readFileSync10(jsonlPath, 'utf-8');
+    const content = readFileSync12(jsonlPath, 'utf-8');
     const lines = content
       .trim()
       .split(
@@ -82714,7 +84189,7 @@ function watchTurn(jsonlPath, onChange) {
     const maxDelay = 8000;
     function poll() {
       if (closed) return;
-      if (existsSync13(jsonlPath)) {
+      if (existsSync15(jsonlPath)) {
         startWatch();
       } else {
         delay = Math.min(delay * 2, maxDelay);
@@ -82724,8 +84199,8 @@ function watchTurn(jsonlPath, onChange) {
     }
     setTimeout(poll, delay);
   }
-  mkdirSync13(dirname9(jsonlPath), { recursive: true });
-  if (existsSync13(jsonlPath)) {
+  mkdirSync17(dirname13(jsonlPath), { recursive: true });
+  if (existsSync15(jsonlPath)) {
     startWatch();
   } else {
     waitForFile();
@@ -82761,8 +84236,8 @@ __export(exports_shared, {
   findLatestPlanDraftDir: () => findLatestPlanDraftDir,
   discoverPlans: () => discoverPlans,
 });
-import { existsSync as existsSync14, readdirSync, readFileSync as readFileSync11 } from 'fs';
-import { join as join10 } from 'path';
+import { existsSync as existsSync16, readdirSync as readdirSync2, readFileSync as readFileSync13 } from 'fs';
+import { join as join13 } from 'path';
 function loadPromptTemplate(phase, name, vars) {
   const key = name.replace(/-/g, '_');
   return getAgentPrompt(phase, key, vars);
@@ -82779,8 +84254,8 @@ function parsePlanFilename(filename) {
   return null;
 }
 function resolveActivePlans(plansDir) {
-  if (!existsSync14(plansDir)) return [];
-  const files = readdirSync(plansDir);
+  if (!existsSync16(plansDir)) return [];
+  const files = readdirSync2(plansDir);
   const byOrdinal = new Map();
   for (const f of files) {
     const parsed = parsePlanFilename(f);
@@ -82792,14 +84267,14 @@ function resolveActivePlans(plansDir) {
   }
   return Array.from(byOrdinal.entries())
     .sort(([a], [b3]) => a - b3)
-    .map(([, v2]) => join10(plansDir, v2.filename));
+    .map(([, v2]) => join13(plansDir, v2.filename));
 }
 function discoverPlans(plansDir) {
   return resolveActivePlans(plansDir);
 }
 function resolveSpec(sessionId, version, filename = 'task-spec.md') {
   const sessionPath = snapshotPath(sessionId, version, filename);
-  if (existsSync14(sessionPath)) return readFileSync11(sessionPath, 'utf-8');
+  if (existsSync16(sessionPath)) return readFileSync13(sessionPath, 'utf-8');
   return '';
 }
 function resolvePlans(sessionId, version) {
@@ -82808,14 +84283,14 @@ function resolvePlans(sessionId, version) {
 }
 function validatePlanContent(planFiles) {
   return planFiles.filter(p2 => {
-    const content = readFileSync11(p2, 'utf-8').trim();
+    const content = readFileSync13(p2, 'utf-8').trim();
     return content.length === 0;
   });
 }
 function findLatestPlanDraftDir(plansDir) {
   let entries;
   try {
-    entries = readdirSync(plansDir, { withFileTypes: true });
+    entries = readdirSync2(plansDir, { withFileTypes: true });
   } catch {
     return null;
   }
@@ -82825,19 +84300,19 @@ function findLatestPlanDraftDir(plansDir) {
     .sort((a, b3) => b3.ordinal - a.ordinal);
   if (drafts.length === 0) return null;
   const latest = drafts[0];
-  const draftDir = join10(plansDir, latest.name);
-  const files = readdirSync(draftDir)
+  const draftDir = join13(plansDir, latest.name);
+  const files = readdirSync2(draftDir)
     .filter(f => /^plan-\d+\.md$/.test(f))
     .sort((a, b3) => {
       const numA = parseInt(a.match(/plan-(\d+)/)?.[1] || '0', 10);
       const numB = parseInt(b3.match(/plan-(\d+)/)?.[1] || '0', 10);
       return numA - numB;
     })
-    .map(f => join10(draftDir, f));
+    .map(f => join13(draftDir, f));
   return { ordinal: latest.ordinal, dir: draftDir, files };
 }
 function readPlanDraftFiles(draftDir) {
-  const files = readdirSync(draftDir)
+  const files = readdirSync2(draftDir)
     .filter(f => /^plan-\d+\.md$/.test(f))
     .sort((a, b3) => {
       const numA = parseInt(a.match(/plan-(\d+)/)?.[1] || '0', 10);
@@ -82846,7 +84321,7 @@ function readPlanDraftFiles(draftDir) {
     });
   return files.map(f => ({
     filename: f,
-    content: readFileSync11(join10(draftDir, f), 'utf-8'),
+    content: readFileSync13(join13(draftDir, f), 'utf-8'),
   }));
 }
 function deriveProjectKey(worktree) {
@@ -82856,7 +84331,7 @@ async function spawnTTYWithTurnTracking(sessionId, binary, prompt, options2) {
   const claudeSessionId = crypto.randomUUID();
   const configDir = getConfigDir(binary) ?? `${process.env.HOME}/.claude`;
   const projectKey = deriveProjectKey(options2.worktree);
-  const jsonlPath = join10(configDir, 'projects', projectKey, `${claudeSessionId}.jsonl`);
+  const jsonlPath = join13(configDir, 'projects', projectKey, `${claudeSessionId}.jsonl`);
   appendEvent(sessionId, {
     ts: new Date().toISOString(),
     event: 'context:updated',
@@ -83191,10 +84666,10 @@ var init_github = () => {};
 
 // src/index.ts
 init_esm();
-init_init();
-import { readFileSync as readFileSync27 } from 'fs';
+init_init2();
+import { readFileSync as readFileSync29 } from 'fs';
 import { fileURLToPath } from 'url';
-import { dirname as dirname10, join as join19 } from 'path';
+import { dirname as dirname14, join as join22 } from 'path';
 
 // src/cli/start.ts
 init_esm();
@@ -83202,8 +84677,8 @@ init_db();
 init_lock();
 init_log();
 init_status();
-init_db();
-import { existsSync as existsSync28, rmSync as rmSync3 } from 'fs';
+init_git();
+import { existsSync as existsSync30 } from 'fs';
 
 // src/phases/runner.ts
 init_log();
@@ -83288,12 +84763,12 @@ init_artifacts();
 init_scripts();
 init_format();
 import {
-  mkdirSync as mkdirSync10,
-  writeFileSync as writeFileSync7,
-  existsSync as existsSync10,
-  copyFileSync as copyFileSync2,
+  mkdirSync as mkdirSync14,
+  writeFileSync as writeFileSync10,
+  existsSync as existsSync12,
+  copyFileSync as copyFileSync3,
 } from 'fs';
-import { join as join6 } from 'path';
+import { join as join9 } from 'path';
 async function handlePullTicket(ctx) {
   const { session, version } = ctx;
   appendEvent(session.id, {
@@ -83302,13 +84777,13 @@ async function handlePullTicket(ctx) {
     version,
     metadata: { stepType: 'code' },
   });
-  const specDir = join6(session.worktree, 'spec');
-  mkdirSync10(specDir, { recursive: true });
-  const ticketPath = join6(specDir, 'ticket.md');
+  const specDir = join9(session.worktree, 'spec');
+  mkdirSync14(specDir, { recursive: true });
+  const ticketPath = join9(specDir, 'ticket.md');
   if (session.ticket_id && !session.local) {
     const content = runScript(session.id, 'get-ticket', [session.ticket_id]);
     if (content) {
-      writeFileSync7(ticketPath, content);
+      writeFileSync10(ticketPath, content);
       logOk(
         `Ticket fetched (${
           content.split(`
@@ -83319,8 +84794,8 @@ async function handlePullTicket(ctx) {
       logWarn('No content from get-ticket script');
     }
   } else if (session.local) {
-    if (!existsSync10(ticketPath)) {
-      writeFileSync7(
+    if (!existsSync12(ticketPath)) {
+      writeFileSync10(
         ticketPath,
         `# Local Task
 
@@ -83332,10 +84807,10 @@ Describe the task here.
   } else {
     logDim('No ticket ID \u2014 skipping ticket fetch');
   }
-  if (existsSync10(ticketPath)) {
+  if (existsSync12(ticketPath)) {
     const snapshotDest = sessionArtifactPath(session.id, 'ticket.md');
     ensureArtifactDir(snapshotDest);
-    copyFileSync2(ticketPath, snapshotDest);
+    copyFileSync3(ticketPath, snapshotDest);
   }
   appendEvent(session.id, {
     ts: new Date().toISOString(),
@@ -83348,18 +84823,18 @@ Describe the task here.
 // src/phases/phase1/route-type.ts
 init_log();
 init_artifacts();
-import { existsSync as existsSync11, readFileSync as readFileSync8, writeFileSync as writeFileSync8 } from 'fs';
-import { join as join8 } from 'path';
+import { existsSync as existsSync13, readFileSync as readFileSync10, writeFileSync as writeFileSync11 } from 'fs';
+import { join as join11 } from 'path';
 
 // src/core/type-config.ts
-import { join as join7 } from 'path';
+import { join as join10 } from 'path';
 function buildPromptVars(worktree, version) {
-  const vDir = join7(worktree, 'spec', `v${version}`);
+  const vDir = join10(worktree, 'spec', `v${version}`);
   return {
-    ticket: join7(worktree, 'spec', 'ticket.md'),
-    spec: join7(vDir, 'task-spec.md'),
+    ticket: join10(worktree, 'spec', 'ticket.md'),
+    spec: join10(vDir, 'task-spec.md'),
     specDir: vDir,
-    plans: join7(vDir, 'plans'),
+    plans: join10(vDir, 'plans'),
     worktree,
   };
 }
@@ -83405,10 +84880,10 @@ async function handleRouteType(ctx) {
     logError('No types configured. Add a `types` section to your config.yaml.');
     throw new Error('No types configured');
   }
-  const ticketPath = join8(session.worktree, 'spec', 'ticket.md');
+  const ticketPath = join11(session.worktree, 'spec', 'ticket.md');
   let ticketContent = '';
-  if (existsSync11(ticketPath)) {
-    ticketContent = readFileSync8(ticketPath, 'utf-8');
+  if (existsSync13(ticketPath)) {
+    ticketContent = readFileSync10(ticketPath, 'utf-8');
   }
   const typeList = types2.map(t => `- "${t.name}": ${t.desc}`).join(`
 `);
@@ -83438,7 +84913,7 @@ async function handleRouteType(ctx) {
   const typeJson = { type: typeName, desc: config.types[typeName].desc };
   const typeJsonPath = snapshotPath(session.id, version, 'type.json');
   ensureArtifactDir(typeJsonPath);
-  writeFileSync8(typeJsonPath, JSON.stringify(typeJson, null, 2));
+  writeFileSync11(typeJsonPath, JSON.stringify(typeJson, null, 2));
   ctx.ticketType = typeName;
   ctx.typeConfig = config.types[typeName];
   appendEvent(session.id, {
@@ -83458,18 +84933,18 @@ async function handleRouteType(ctx) {
 
 // src/phases/phase1/write-spec.ts
 init_log();
-import { mkdirSync as mkdirSync14, readdirSync as readdirSync2, readFileSync as readFileSync12 } from 'fs';
+import { mkdirSync as mkdirSync18, readdirSync as readdirSync3, readFileSync as readFileSync14 } from 'fs';
 init_agents();
 
 // src/core/step-init.ts
 init_artifacts();
-var import_yaml2 = __toESM(require_dist(), 1);
-import { writeFileSync as writeFileSync9, mkdirSync as mkdirSync12 } from 'fs';
-import { dirname as dirname8 } from 'path';
+var import_yaml3 = __toESM(require_dist(), 1);
+import { writeFileSync as writeFileSync12, mkdirSync as mkdirSync16 } from 'fs';
+import { dirname as dirname12 } from 'path';
 function writeStepInit(sessionId, version, stepName, record) {
   const path = artifactPath(sessionId, version, 'steps', `${stepName}.yaml`);
-  mkdirSync12(dirname8(path), { recursive: true });
-  writeFileSync9(path, import_yaml2.stringify(record));
+  mkdirSync16(dirname12(path), { recursive: true });
+  writeFileSync12(path, import_yaml3.stringify(record));
 }
 
 // src/phases/phase1/write-spec.ts
@@ -83509,7 +84984,7 @@ the spec will NOT be considered approved and this step will re-run from scratch.
 function findLatestDraft(specDir) {
   let files;
   try {
-    files = readdirSync2(specDir);
+    files = readdirSync3(specDir);
   } catch {
     return null;
   }
@@ -83519,7 +84994,7 @@ function findLatestDraft(specDir) {
     .sort((a, b3) => b3.ordinal - a.ordinal);
   if (drafts.length === 0) return null;
   const latest = drafts[0];
-  const content = readFileSync12(`${specDir}/${latest.file}`, 'utf-8');
+  const content = readFileSync14(`${specDir}/${latest.file}`, 'utf-8');
   return { ordinal: latest.ordinal, content };
 }
 async function handleWriteSpec(ctx) {
@@ -83540,7 +85015,7 @@ async function handleWriteSpec(ctx) {
     metadata: { stepType: 'tty' },
   });
   const vars = buildPromptVars(session.worktree, version);
-  mkdirSync14(vars.specDir, { recursive: true });
+  mkdirSync18(vars.specDir, { recursive: true });
   let prompt = resolvePromptVars(typeConfig.spec_writer.prompt, vars);
   const latest = findLatestDraft(vars.specDir);
   if (latest) {
@@ -83592,12 +85067,12 @@ ${prompt}`;
 // src/phases/phase1/finalize-spec.ts
 init_log();
 init_artifacts();
-import { existsSync as existsSync15, copyFileSync as copyFileSync3, readdirSync as readdirSync3 } from 'fs';
+import { existsSync as existsSync17, copyFileSync as copyFileSync4, readdirSync as readdirSync4 } from 'fs';
 init_format();
 function findLatestDraftPath(specDir) {
   let files;
   try {
-    files = readdirSync3(specDir);
+    files = readdirSync4(specDir);
   } catch {
     return null;
   }
@@ -83618,15 +85093,15 @@ async function handleFinalizeSpec(ctx) {
   });
   const vars = buildPromptVars(session.worktree, version);
   const latestDraft = findLatestDraftPath(vars.specDir);
-  if (!latestDraft || !existsSync15(latestDraft)) {
+  if (!latestDraft || !existsSync17(latestDraft)) {
     logError(`No spec-draft-N.md found in ${vars.specDir}. Did the TTY write it?`);
     throw new Error('No spec draft found');
   }
   const taskSpecWorktree = vars.spec;
-  copyFileSync3(latestDraft, taskSpecWorktree);
+  copyFileSync4(latestDraft, taskSpecWorktree);
   const dest = snapshotPath(session.id, version, 'task-spec.md');
   ensureArtifactDir(dest);
-  copyFileSync3(latestDraft, dest);
+  copyFileSync4(latestDraft, dest);
   logOk(`Spec finalized: ${latestDraft.split('/').pop()} \u2192 task-spec.md`);
   appendEvent(session.id, {
     ts: new Date().toISOString(),
@@ -83638,7 +85113,7 @@ async function handleFinalizeSpec(ctx) {
 
 // src/phases/phase1/write-plans.ts
 init_log();
-import { mkdirSync as mkdirSync15 } from 'fs';
+import { mkdirSync as mkdirSync19 } from 'fs';
 init_agents();
 init_shared();
 init_format();
@@ -83687,7 +85162,7 @@ async function handleWritePlans(ctx) {
     metadata: { stepType: 'tty' },
   });
   const vars = buildPromptVars(session.worktree, version);
-  mkdirSync15(vars.plans, { recursive: true });
+  mkdirSync19(vars.plans, { recursive: true });
   let prompt = resolvePromptVars(typeConfig.plan_writer.prompt, vars);
   const latestDraft = findLatestPlanDraftDir(vars.plans);
   if (latestDraft) {
@@ -83750,18 +85225,18 @@ ${prompt}`;
 // src/phases/phase1/finalize-plans.ts
 init_log();
 init_artifacts();
-import { copyFileSync as copyFileSync4, existsSync as existsSync17 } from 'fs';
-import { join as join11 } from 'path';
+import { copyFileSync as copyFileSync5, existsSync as existsSync19 } from 'fs';
+import { join as join14 } from 'path';
 init_shared();
 
 // src/core/manifests.ts
 init_artifacts();
 init_shared();
 import {
-  existsSync as existsSync16,
-  readFileSync as readFileSync14,
-  writeFileSync as writeFileSync11,
-  readdirSync as readdirSync4,
+  existsSync as existsSync18,
+  readFileSync as readFileSync16,
+  writeFileSync as writeFileSync14,
+  readdirSync as readdirSync5,
 } from 'fs';
 function writeContractManifest(sessionId, version, deliveryKind, planCount) {
   const manifest = {
@@ -83773,12 +85248,12 @@ function writeContractManifest(sessionId, version, deliveryKind, planCount) {
   };
   const path = snapshotPath(sessionId, version, 'contract.json');
   ensureArtifactDir(path);
-  writeFileSync11(path, JSON.stringify(manifest, null, 2));
+  writeFileSync14(path, JSON.stringify(manifest, null, 2));
 }
 function readContractManifest(sessionId, version) {
   const path = snapshotPath(sessionId, version, 'contract.json');
-  if (!existsSync16(path)) return null;
-  return JSON.parse(readFileSync14(path, 'utf-8'));
+  if (!existsSync18(path)) return null;
+  return JSON.parse(readFileSync16(path, 'utf-8'));
 }
 function supersedEpoch(sessionId, oldVersion, newVersion) {
   const manifest = readContractManifest(sessionId, oldVersion);
@@ -83786,14 +85261,14 @@ function supersedEpoch(sessionId, oldVersion, newVersion) {
     manifest.supersededBy = newVersion;
     manifest.supersededAt = new Date().toISOString();
     const path = snapshotPath(sessionId, oldVersion, 'contract.json');
-    writeFileSync11(path, JSON.stringify(manifest, null, 2));
+    writeFileSync14(path, JSON.stringify(manifest, null, 2));
   }
 }
 function writePlanManifest(sessionId, version) {
   const plansDir = snapshotPath(sessionId, version, 'plans');
   const plans = [];
-  if (existsSync16(plansDir)) {
-    const files = readdirSync4(plansDir);
+  if (existsSync18(plansDir)) {
+    const files = readdirSync5(plansDir);
     const byOrdinal = new Map();
     for (const f of files) {
       const parsed = parsePlanFilename(f);
@@ -83815,13 +85290,13 @@ function writePlanManifest(sessionId, version) {
   const manifest = { plans };
   const path = snapshotPath(sessionId, version, 'plans', 'manifest.json');
   ensureArtifactDir(path);
-  writeFileSync11(path, JSON.stringify(manifest, null, 2));
+  writeFileSync14(path, JSON.stringify(manifest, null, 2));
   return manifest;
 }
 function readPlanManifest(sessionId, version) {
   const path = snapshotPath(sessionId, version, 'plans', 'manifest.json');
-  if (!existsSync16(path)) return null;
-  return JSON.parse(readFileSync14(path, 'utf-8'));
+  if (!existsSync18(path)) return null;
+  return JSON.parse(readFileSync16(path, 'utf-8'));
 }
 function updatePlanManifestEntry(sessionId, version, planOrdinal, completed, commitSha) {
   const manifest = readPlanManifest(sessionId, version);
@@ -83832,17 +85307,17 @@ function updatePlanManifestEntry(sessionId, version, planOrdinal, completed, com
     if (commitSha) entry.commitSha = commitSha;
   }
   const path = snapshotPath(sessionId, version, 'plans', 'manifest.json');
-  writeFileSync11(path, JSON.stringify(manifest, null, 2));
+  writeFileSync14(path, JSON.stringify(manifest, null, 2));
 }
 function writeDeliveryManifest(sessionId, version, delivery) {
   const path = snapshotPath(sessionId, version, 'delivery.json');
   ensureArtifactDir(path);
-  writeFileSync11(path, JSON.stringify(delivery, null, 2));
+  writeFileSync14(path, JSON.stringify(delivery, null, 2));
 }
 function readDeliveryManifest(sessionId, version) {
   const path = snapshotPath(sessionId, version, 'delivery.json');
-  if (!existsSync16(path)) return null;
-  return JSON.parse(readFileSync14(path, 'utf-8'));
+  if (!existsSync18(path)) return null;
+  return JSON.parse(readFileSync16(path, 'utf-8'));
 }
 function updateDeliveryManifest(sessionId, version, updates) {
   const existing = readDeliveryManifest(sessionId, version) ?? { kind: 'pr' };
@@ -83873,10 +85348,10 @@ async function handleFinalizePlans(ctx) {
     throw new Error('Some plan files are empty');
   }
   const sessionPlansDir = snapshotPath(session.id, version, 'plans');
-  ensureArtifactDir(join11(sessionPlansDir, 'placeholder'));
+  ensureArtifactDir(join14(sessionPlansDir, 'placeholder'));
   for (let i = 0; i < planFiles.length; i++) {
     const specFilename = `plan-${i + 1}-1.md`;
-    copyFileSync4(planFiles[i], join11(sessionPlansDir, specFilename));
+    copyFileSync5(planFiles[i], join14(sessionPlansDir, specFilename));
   }
   const deliveryKind = ctx.deliveryKind ?? 'pr';
   writeContractManifest(session.id, version, deliveryKind, planFiles.length);
@@ -83891,7 +85366,7 @@ async function handleFinalizePlans(ctx) {
   try {
     const addedFiles = [];
     for (const f of planFiles) {
-      if (existsSync17(f)) {
+      if (existsSync19(f)) {
         await $2`git add ${f}`.cwd(session.worktree).quiet();
         addedFiles.push(f);
       }
@@ -83976,8 +85451,8 @@ init_log();
 // src/core/devloop.ts
 init_artifacts();
 init_agents();
-import { mkdirSync as mkdirSync16, writeFileSync as writeFileSync12 } from 'fs';
-import { join as join12 } from 'path';
+import { mkdirSync as mkdirSync20, writeFileSync as writeFileSync15 } from 'fs';
+import { join as join15 } from 'path';
 function devloopInit(workspace, specPath, configPath2) {
   const args = ['kloop', 'init', '--workspace', workspace, '--spec', specPath];
   if (configPath2) {
@@ -84000,16 +85475,16 @@ function devloopInit(workspace, specPath, configPath2) {
   return match[1];
 }
 function writeKloopSpec(kautopilotSessionId, content, name = 'kloop-spec.md') {
-  const dir = join12(sessionDir(kautopilotSessionId), 'tmp');
-  mkdirSync16(dir, { recursive: true });
-  const specPath = join12(dir, name);
-  writeFileSync12(specPath, content);
+  const dir = join15(sessionDir(kautopilotSessionId), 'tmp');
+  mkdirSync20(dir, { recursive: true });
+  const specPath = join15(dir, name);
+  writeFileSync15(specPath, content);
   return specPath;
 }
 function writeKloopConfig(kautopilotSessionId, config) {
-  const dir = join12(sessionDir(kautopilotSessionId), 'tmp');
-  mkdirSync16(dir, { recursive: true });
-  const configPath2 = join12(dir, 'kloop-config.yaml');
+  const dir = join15(sessionDir(kautopilotSessionId), 'tmp');
+  mkdirSync20(dir, { recursive: true });
+  const configPath2 = join15(dir, 'kloop-config.yaml');
   const binary = getDefaultBinary();
   const yaml = [
     '# kloop config generated by kautopilot',
@@ -84028,7 +85503,7 @@ function writeKloopConfig(kautopilotSessionId, config) {
     'reviewerFailureLimit: 2',
   ].join(`
 `);
-  writeFileSync12(configPath2, yaml);
+  writeFileSync15(configPath2, yaml);
   return configPath2;
 }
 async function devloopRun(kloopRunId, timeoutMs) {
@@ -84158,7 +85633,7 @@ async function handleClearLoop(ctx) {
 
 // src/phases/phase2/setup-run.ts
 init_log();
-import { existsSync as existsSync18, readFileSync as readFileSync15 } from 'fs';
+import { existsSync as existsSync20, readFileSync as readFileSync17 } from 'fs';
 init_shared();
 init_artifacts();
 async function handleSetupRun(ctx) {
@@ -84177,10 +85652,10 @@ async function handleSetupRun(ctx) {
     throw new Error(`No plan files found for ${ctx.ticketId}`);
   }
   const planPath = plans[planIndex];
-  if (!planPath || !existsSync18(planPath)) {
+  if (!planPath || !existsSync20(planPath)) {
     throw new Error(`Plan file not found for plan index ${planIndex}`);
   }
-  const planContent = readFileSync15(planPath, 'utf-8');
+  const planContent = readFileSync17(planPath, 'utf-8');
   const specPath = writeKloopSpec(session.id, planContent, `plan-${planIndex + 1}-spec.md`);
   const configPath2 = writeKloopConfig(session.id, {
     maxIterations: ctx.config.kloop.maxIterations,
@@ -84260,7 +85735,7 @@ async function handleRunning(ctx) {
 // src/phases/phase2/resolve.ts
 init_log();
 init_artifacts();
-import { existsSync as existsSync19, readFileSync as readFileSync16 } from 'fs';
+import { existsSync as existsSync21, readFileSync as readFileSync18 } from 'fs';
 init_shared();
 init_agents();
 async function handleResolve(ctx) {
@@ -84287,7 +85762,7 @@ async function handleResolve(ctx) {
   const activePlans = resolveActivePlans2(snapPath(session.id, version, 'plans'));
   const activePlanPath = activePlans[planIndex];
   const planContent =
-    activePlanPath && existsSync19(activePlanPath)
+    activePlanPath && existsSync21(activePlanPath)
       ? readFile(activePlanPath, 'utf-8')
       : resolveSpec(session.id, version, `plans/plan-${planIndex + 1}-1.md`);
   const taskSpecContent = resolveSpec(session.id, version);
@@ -84336,8 +85811,8 @@ Where <decision> is one of:
   });
   let resolution = '';
   let rewriteDecision = 'refine_local';
-  if (existsSync19(resolutionPath)) {
-    resolution = readFileSync16(resolutionPath, 'utf-8');
+  if (existsSync21(resolutionPath)) {
+    resolution = readFileSync18(resolutionPath, 'utf-8');
     const decisionMatch = resolution.match(
       /REWRITE_DECISION:\s*(refine_local|patch_downstream|regenerate_remaining|revisit_spec)/i,
     );
@@ -84374,18 +85849,18 @@ Where <decision> is one of:
 // src/phases/phase2/rewrite-spec.ts
 init_log();
 import {
-  existsSync as existsSync20,
-  readFileSync as readFileSync17,
-  writeFileSync as writeFileSync13,
-  readdirSync as readdirSync5,
+  existsSync as existsSync22,
+  readFileSync as readFileSync19,
+  writeFileSync as writeFileSync16,
+  readdirSync as readdirSync6,
 } from 'fs';
-import { join as join13 } from 'path';
+import { join as join16 } from 'path';
 init_artifacts();
 init_spawn();
 init_shared();
 init_agents();
 function getRewriteTargets(plansDir, currentPlanIndex, decision) {
-  const filenames = readdirSync5(plansDir).filter(
+  const filenames = readdirSync6(plansDir).filter(
     name => /^plan-\d+-\d+\.md$/.test(name) || /^plan-\d+\.md$/.test(name),
   );
   const ordinals = Array.from(
@@ -84402,7 +85877,7 @@ function getRewriteTargets(plansDir, currentPlanIndex, decision) {
   return [currentPlanIndex + 1];
 }
 function nextRewriteNumber(plansDir, ordinal) {
-  const filenames = readdirSync5(plansDir);
+  const filenames = readdirSync6(plansDir);
   let maxRewrite = 0;
   for (const filename of filenames) {
     const match = filename.match(new RegExp(`^plan-${ordinal}(?:-(\\d+))?\\.md$`));
@@ -84424,17 +85899,17 @@ async function handleRewriteSpec(ctx) {
     metadata: { stepType: 'llm' },
   });
   const resolutionPath = `${sessionDir(session.id)}/tmp/resolution.md`;
-  const resolution = existsSync20(resolutionPath) ? readFileSync17(resolutionPath, 'utf-8') : '';
+  const resolution = existsSync22(resolutionPath) ? readFileSync19(resolutionPath, 'utf-8') : '';
   const plansDir = snapshotPath(session.id, version, 'plans');
-  const currentPlanCandidates = readdirSync5(plansDir)
+  const currentPlanCandidates = readdirSync6(plansDir)
     .filter(name => new RegExp(`^plan-${planIndex + 1}(?:-\\d+)?\\.md$`).test(name))
     .sort();
   const activePlanPath =
     currentPlanCandidates.length > 0
-      ? join13(plansDir, currentPlanCandidates[currentPlanCandidates.length - 1])
+      ? join16(plansDir, currentPlanCandidates[currentPlanCandidates.length - 1])
       : snapshotPath(session.id, version, `plans/plan-${planIndex + 1}-1.md`);
-  const planContent = existsSync20(activePlanPath)
-    ? readFileSync17(activePlanPath, 'utf-8')
+  const planContent = existsSync22(activePlanPath)
+    ? readFileSync19(activePlanPath, 'utf-8')
     : resolveSpec(session.id, version, `plans/plan-${planIndex + 1}-1.md`);
   const taskSpecContent = resolveSpec(session.id, version);
   const rewriteInstruction = getAgentPrompt('phase2', 'rewrite_spec');
@@ -84465,8 +85940,8 @@ ${taskSpecContent}
       version,
       `plans/plan-${ordinal}-${ordinal === planIndex + 1 ? attempt : 1}.md`,
     );
-    const targetPlanContent = existsSync20(targetPlanPath)
-      ? readFileSync17(targetPlanPath, 'utf-8')
+    const targetPlanContent = existsSync22(targetPlanPath)
+      ? readFileSync19(targetPlanPath, 'utf-8')
       : resolveSpec(session.id, version, `plans/plan-${ordinal}-1.md`);
     const targetPrompt = `
 ${rewriteInstruction}
@@ -84492,15 +85967,15 @@ ${taskSpecContent}
       label: `rewrite-spec-plan-${ordinal}`,
     });
     const rewriteFilename = `plan-${ordinal}-${nextRewriteNumber(plansDir, ordinal)}.md`;
-    const rewritePath = join13(plansDir, rewriteFilename);
+    const rewritePath = join16(plansDir, rewriteFilename);
     ensureArtifactDir(rewritePath);
-    writeFileSync13(rewritePath, rewrittenPlan);
+    writeFileSync16(rewritePath, rewrittenPlan);
     rewrittenPlans.push(rewriteFilename);
   }
   writePlanManifest(session.id, version);
   const activeRewriteFilename = rewrittenPlans[0] ?? `plan-${planIndex + 1}-${attempt + 1}.md`;
-  const activeRewritePath = join13(plansDir, activeRewriteFilename);
-  const rewrittenActivePlan = readFileSync17(activeRewritePath, 'utf-8');
+  const activeRewritePath = join16(plansDir, activeRewriteFilename);
+  const rewrittenActivePlan = readFileSync19(activeRewritePath, 'utf-8');
   const specPath = writeKloopSpec(session.id, rewrittenActivePlan, `plan-${planIndex + 1}-rewrite-${attempt}.md`);
   const configPath2 = writeKloopConfig(session.id, {
     maxIterations: ctx.config.kloop.maxIterations,
@@ -84526,7 +86001,7 @@ ${taskSpecContent}
 init_shared();
 init_log();
 init_spawn();
-import { existsSync as existsSync21, readFileSync as readFileSync18 } from 'fs';
+import { existsSync as existsSync23, readFileSync as readFileSync20 } from 'fs';
 init_agents();
 async function handleCommit(ctx) {
   const { session, version, planIndex } = ctx;
@@ -84556,10 +86031,10 @@ async function handleCommit(ctx) {
   let conventions = '';
   for (const f of conventionFiles) {
     const path = `${session.worktree}/${f}`;
-    if (existsSync21(path)) {
+    if (existsSync23(path)) {
       conventions += `
 ### ${f}
-${readFileSync18(path, 'utf-8')}
+${readFileSync20(path, 'utf-8')}
 `;
     }
   }
@@ -84570,8 +86045,8 @@ ${readFileSync18(path, 'utf-8')}
   const activePlans = resolveActivePlans2(snapPath(session.id, version, 'plans'));
   const activePlanPath = activePlans[planIndex];
   const planContent =
-    activePlanPath && existsSync21(activePlanPath)
-      ? readFileSync18(activePlanPath, 'utf-8')
+    activePlanPath && existsSync23(activePlanPath)
+      ? readFileSync20(activePlanPath, 'utf-8')
       : resolveSpec(session.id, version, `plans/plan-${planIndex + 1}-1.md`);
   const commitInstruction = getAgentPrompt('phase2', 'commit');
   const commitPrompt = `
@@ -84768,7 +86243,7 @@ init_agents();
 // src/phases/phase3/commit-pending.ts
 init_log();
 init_spawn();
-import { existsSync as existsSync22, readFileSync as readFileSync19 } from 'fs';
+import { existsSync as existsSync24, readFileSync as readFileSync21 } from 'fs';
 init_agents();
 async function handleCommitPending(ctx) {
   const { session, version } = ctx;
@@ -84823,10 +86298,10 @@ async function handleCommitPending(ctx) {
   let conventions = '';
   for (const f of conventionFiles) {
     const path = `${session.worktree}/${f}`;
-    if (existsSync22(path)) {
+    if (existsSync24(path)) {
       conventions += `
 ### ${f}
-${readFileSync19(path, 'utf-8')}
+${readFileSync21(path, 'utf-8')}
 `;
     }
   }
@@ -85091,6 +86566,7 @@ Fix: ${f.fix || 'determine appropriate fix'}`,
 
 // src/phases/phase3/push.ts
 init_log();
+init_git();
 init_github();
 async function handlePush(ctx) {
   const { session, version, pushCycle, baseBranch } = ctx;
@@ -85125,7 +86601,7 @@ async function handlePush(ctx) {
         }
         ctx.forceWithLease = false;
       }
-      let result = await $2`git push`.cwd(session.worktree).quiet();
+      let result = pushed ? { exitCode: 0 } : await $2`git push`.cwd(session.worktree).quiet();
       if (result.exitCode === 0) {
         pushed = true;
       }
@@ -85143,6 +86619,9 @@ async function handlePush(ctx) {
         if (rebaseResult.exitCode === 0) {
           result = await $2`git push`.cwd(session.worktree).quiet();
           if (result.exitCode === 0) pushed = true;
+        } else if (hasUnmergedPaths(session.worktree)) {
+          ctx.ttyReason = 'merge_conflict';
+          throw new Error('Push rebase hit merge conflicts');
         }
       }
       if (!pushed) {
@@ -85196,6 +86675,7 @@ async function handlePush(ctx) {
 // src/phases/phase3/create-pr.ts
 init_log();
 init_status();
+init_git();
 init_github();
 init_shared();
 async function handleCreatePr(ctx) {
@@ -85308,6 +86788,7 @@ ${specContent.slice(0, 2000)}${
 
 // src/phases/phase3/poll.ts
 init_log();
+init_status();
 init_github();
 function computePollState(signals, ctx) {
   if (signals.prState === 'CLOSED') {
@@ -85316,7 +86797,7 @@ function computePollState(signals, ctx) {
   if (signals.changesRequested) {
     return 'blocked';
   }
-  if (signals.threads > 0) {
+  if (signals.unresolvedThreads > 0) {
     return 'blocked';
   }
   const failingChecks = signals.checks.filter(c2 => c2.status === 'failing');
@@ -85328,9 +86809,13 @@ function computePollState(signals, ctx) {
     return 'pending';
   }
   if (ctx.mergePolicy?.requiresApprovingReviews) {
-    if (!signals.approved) {
+    const requiredApprovals = Math.max(ctx.mergePolicy.requiredApprovingReviewCount, 1);
+    if (signals.approvals < requiredApprovals) {
       return 'pending';
     }
+  }
+  if (!signals.mergeable || !['CLEAN', 'HAS_HOOKS', 'UNSTABLE'].includes(signals.mergeStateStatus)) {
+    return 'pending';
   }
   if (signals.crStatus === 'running' || signals.crStatus === 'failing') {
     return 'pending';
@@ -85369,6 +86854,10 @@ function computeRolloverRecommendation(signals, pushCycles) {
     result.reason = `PR review saturation: ${reasons.join('; ')}`;
   }
   return result;
+}
+function ensureReportedRunIds(ctx) {
+  const status = ensureStatus(ctx.session.id);
+  return status.context.reportedFailedRunIds ?? [];
 }
 async function handlePoll(ctx) {
   const { session, version, prNumber, pushCycle, config } = ctx;
@@ -85411,18 +86900,26 @@ async function handlePoll(ctx) {
     const { ghPrRuns: ghPrRuns2 } = await Promise.resolve().then(() => (init_github(), exports_github));
     const runs = await ghPrRuns2(prView.headRefName, session.worktree).catch(() => []);
     const failedRuns = runs.filter(r2 => r2.conclusion === 'failure');
+    const reportedFailedRunIds = new Set(ctx.session.state === 'running' ? ensureReportedRunIds(ctx) : []);
+    const newlyFailedRuns = failedRuns.filter(run => !reportedFailedRunIds.has(run.databaseId));
     await Promise.all(
-      failedRuns.map(async run => {
+      newlyFailedRuns.map(async run => {
         const logs = await ghRunLogsFailed(String(run.databaseId), session.worktree).catch(() => '');
         if (logs) {
           console.warn(`[poll] CI failure logs for ${run.name}:
 ${logs.slice(0, 1000)}`);
         }
+        reportedFailedRunIds.add(run.databaseId);
       }),
     );
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'context:updated',
+      metadata: { reportedFailedRunIds: [...reportedFailedRunIds].sort((a, b3) => a - b3) },
+    });
   }
   const changesRequested = reviews.some(r2 => r2.state === 'CHANGES_REQUESTED');
-  const approved = reviews.some(r2 => r2.state === 'APPROVED');
+  const approvals = reviews.filter(r2 => r2.state === 'APPROVED').length;
   const crCheck = checks.find(c2 => c2.name.toLowerCase().includes('coderabbit'));
   const crStatus = crCheck
     ? crCheck.status === 'passing'
@@ -85443,7 +86940,7 @@ ${logs.slice(0, 1000)}`);
     reviews: reviews.map(r2 => ({ author: r2.author.login, state: r2.state })),
     prComments: prComments.length,
     changesRequested,
-    approved,
+    approvals,
     crStatus,
     prAge: prAgeHours,
   };
@@ -85518,14 +87015,14 @@ ${logs.slice(0, 1000)}`);
         threads: signals.threads,
         unresolvedThreads: signals.unresolvedThreads,
         changesRequested: signals.changesRequested,
-        approved: signals.approved,
+        approvals: signals.approvals,
         crStatus: signals.crStatus,
         prAgeHours,
       },
     },
   });
   console.log(
-    `[poll] State: ${pollState} (checks: ${checks.filter(c2 => c2.status === 'passing').length}/${checks.length} passing, threads: ${threads.length}, approved: ${approved}, cr: ${crStatus})`,
+    `[poll] State: ${pollState} (checks: ${checks.filter(c2 => c2.status === 'passing').length}/${checks.length} passing, threads: ${threads.length}, approvals: ${approvals}, cr: ${crStatus})`,
   );
   switch (pollState) {
     case 'mergeable':
@@ -85546,6 +87043,7 @@ ${logs.slice(0, 1000)}`);
 
 // src/phases/phase3/ensure-branch.ts
 init_log();
+init_git();
 async function handleEnsureBranch(ctx) {
   const { session, version, baseBranch } = ctx;
   appendEvent(session.id, {
@@ -85584,9 +87082,7 @@ async function handleEnsureBranch(ctx) {
     ctx.forceWithLease = true;
     return 'push';
   }
-  const statusResult = await $2`git status --porcelain`.cwd(session.worktree).quiet().text();
-  const hasConflicts = statusResult.includes('UU') || statusResult.includes('AA') || statusResult.includes('DU');
-  if (hasConflicts) {
+  if (hasUnmergedPaths(session.worktree)) {
     console.log('[ensure_branch] Merge conflicts detected \u2014 routing to tty_resolve');
     appendEvent(session.id, {
       ts: new Date().toISOString(),
@@ -85982,7 +87478,7 @@ async function handleAct(ctx) {
 init_log();
 init_artifacts();
 init_shared();
-import { existsSync as existsSync23, readFileSync as readFileSync20 } from 'fs';
+import { existsSync as existsSync25, readFileSync as readFileSync22 } from 'fs';
 init_agents();
 async function handleTtyResolve(ctx) {
   const { session, version, ttyReason, baseBranch } = ctx;
@@ -85996,7 +87492,7 @@ async function handleTtyResolve(ctx) {
   const ticketId = ctx.ticketId;
   const specContent = resolveSpec(session.id, version);
   const plans = resolvePlans(session.id, version);
-  const plansContent = plans.map(p2 => readFileSync20(p2, 'utf-8')).join(`
+  const plansContent = plans.map(p2 => readFileSync22(p2, 'utf-8')).join(`
 
 ---
 
@@ -86005,8 +87501,8 @@ async function handleTtyResolve(ctx) {
   let feedbackContent = '';
   try {
     const feedbackPath = `${feedbackDir}/feedback.md`;
-    if (existsSync23(feedbackPath)) {
-      feedbackContent = readFileSync20(feedbackPath, 'utf-8');
+    if (existsSync25(feedbackPath)) {
+      feedbackContent = readFileSync22(feedbackPath, 'utf-8');
     }
   } catch {
     feedbackContent = '';
@@ -86173,7 +87669,7 @@ Please review the situation and help me resolve the issue. Apply any needed chan
 // src/phases/phase3/write-fix.ts
 init_log();
 init_spawn();
-import { existsSync as existsSync24, readFileSync as readFileSync21 } from 'fs';
+import { existsSync as existsSync26, readFileSync as readFileSync23 } from 'fs';
 init_artifacts();
 init_shared();
 init_agents();
@@ -86187,7 +87683,7 @@ async function handleWriteFix(ctx) {
   });
   const specContent = resolveSpec(session.id, version);
   const plans = resolvePlans(session.id, version);
-  const plansContent = plans.map(p2 => readFileSync21(p2, 'utf-8')).join(`
+  const plansContent = plans.map(p2 => readFileSync23(p2, 'utf-8')).join(`
 
 ---
 
@@ -86196,8 +87692,8 @@ async function handleWriteFix(ctx) {
   let feedbackContent = '';
   try {
     const feedbackPath = `${feedbackDir}/feedback.md`;
-    if (existsSync24(feedbackPath)) {
-      feedbackContent = readFileSync21(feedbackPath, 'utf-8');
+    if (existsSync26(feedbackPath)) {
+      feedbackContent = readFileSync23(feedbackPath, 'utf-8');
     }
   } catch {
     feedbackContent = '';
@@ -86392,7 +87888,7 @@ async function handleFeedback(ctx) {
     metadata: { stepType: 'code' },
   });
   const { textInput: textInput2 } = await Promise.resolve().then(() => (init_inquirer(), exports_inquirer));
-  const { writeFileSync: writeFileSync14, mkdirSync: mkdirSync17 } = await import('fs');
+  const { writeFileSync: writeFileSync17, mkdirSync: mkdirSync21 } = await import('fs');
   const { snapshotPath: snapshotPath2, ensureArtifactDir: ensureArtifactDir2 } = await Promise.resolve().then(
     () => (init_artifacts(), exports_artifacts),
   );
@@ -86400,7 +87896,7 @@ async function handleFeedback(ctx) {
   if (feedback.trim()) {
     const feedbackPath = snapshotPath2(session.id, version, 'feedback.md');
     ensureArtifactDir2(feedbackPath);
-    writeFileSync14(feedbackPath, feedback);
+    writeFileSync17(feedbackPath, feedback);
     console.log('[feedback] Feedback saved. Run `kautopilot start --phase plan` to re-run Phase 1.');
   }
   appendEvent(session.id, {
@@ -86418,8 +87914,8 @@ init_artifacts();
 init_shared();
 init_spawn();
 init_agents();
-import { writeFileSync as writeFileSync14, existsSync as existsSync25, readFileSync as readFileSync22 } from 'fs';
-import { join as join14 } from 'path';
+import { writeFileSync as writeFileSync17, existsSync as existsSync27, readFileSync as readFileSync24 } from 'fs';
+import { join as join17 } from 'path';
 async function handleTicketDraft(ctx) {
   const { session, version, ticketId } = ctx;
   appendEvent(session.id, {
@@ -86429,8 +87925,8 @@ async function handleTicketDraft(ctx) {
     metadata: { stepType: 'llm', deliveryKind: 'ticket' },
   });
   const specContent = resolveSpec(session.id, version);
-  const ticketPath = join14(`${process.env.HOME}/.kautopilot/${session.id}/artifacts`, 'ticket.md');
-  const ticketContent = existsSync25(ticketPath) ? readFileSync22(ticketPath, 'utf-8') : '';
+  const ticketPath = join17(`${process.env.HOME}/.kautopilot/${session.id}/artifacts`, 'ticket.md');
+  const ticketContent = existsSync27(ticketPath) ? readFileSync24(ticketPath, 'utf-8') : '';
   const binary = getAgentBinary('phase3', 'ticket_draft');
   const draftPrompt = `Generate ticket delivery artifacts based on the completed implementation.
 
@@ -86478,7 +87974,7 @@ Only include artifacts that are actually needed. Output clean markdown.`;
         const content = section2.slice(firstLine.length).trim();
         const artifactPath2 = snapshotPath(session.id, version, filename);
         ensureArtifactDir(artifactPath2);
-        writeFileSync14(artifactPath2, content);
+        writeFileSync17(artifactPath2, content);
         artifactsWritten.push(filename);
       }
     }
@@ -86489,7 +87985,7 @@ Only include artifacts that are actually needed. Output clean markdown.`;
 ${draftOutput || specContent.slice(0, 2000)}`;
     const defaultPath = snapshotPath(session.id, version, 'tickets-1.md');
     ensureArtifactDir(defaultPath);
-    writeFileSync14(defaultPath, defaultArtifact);
+    writeFileSync17(defaultPath, defaultArtifact);
     artifactsWritten.push('tickets-1.md');
   }
   console.log(`[ticket_draft] Generated ${artifactsWritten.length} draft artifact(s): ${artifactsWritten.join(', ')}`);
@@ -86507,7 +88003,7 @@ init_log();
 init_artifacts();
 init_inquirer();
 init_markdown();
-import { readFileSync as readFileSync23, readdirSync as readdirSync7 } from 'fs';
+import { readFileSync as readFileSync25, readdirSync as readdirSync8 } from 'fs';
 async function handleTicketReview(ctx) {
   const { session, version } = ctx;
   appendEvent(session.id, {
@@ -86519,7 +88015,7 @@ async function handleTicketReview(ctx) {
   const epochDir = snapshotPath(session.id, version, '.');
   const artifactFiles = [];
   try {
-    const files = readdirSync7(epochDir);
+    const files = readdirSync8(epochDir);
     for (const f of files) {
       if (/^(tickets-\d+|report-[a-z])\.md$/.test(f)) {
         artifactFiles.push(f);
@@ -86542,7 +88038,7 @@ ${'='.repeat(60)}`);
   console.log(`${'='.repeat(60)}
 `);
   for (const f of artifactFiles.sort()) {
-    const content = readFileSync23(snapshotPath(session.id, version, f), 'utf-8');
+    const content = readFileSync25(snapshotPath(session.id, version, f), 'utf-8');
     console.log(`--- ${f} ---`);
     console.log(renderMarkdown(content));
     console.log();
@@ -86573,13 +88069,13 @@ ${'='.repeat(60)}`);
       },
     });
     if (feedback.trim()) {
-      const { writeFileSync: writeFileSync15 } = await import('fs');
+      const { writeFileSync: writeFileSync18 } = await import('fs');
       const feedbackPath = snapshotPath(session.id, version, 'feedback.md');
       const { ensureArtifactDir: ensureArtifactDir2 } = await Promise.resolve().then(
         () => (init_artifacts(), exports_artifacts),
       );
       ensureArtifactDir2(feedbackPath);
-      writeFileSync15(feedbackPath, feedback);
+      writeFileSync18(feedbackPath, feedback);
       console.log('[ticket_review] Feedback saved. A new epoch is needed.');
       appendEvent(session.id, {
         ts: new Date().toISOString(),
@@ -86602,8 +88098,8 @@ ${'='.repeat(60)}`);
 init_log();
 init_artifacts();
 init_scripts();
-import { readFileSync as readFileSync24, readdirSync as readdirSync8 } from 'fs';
-import { join as join15 } from 'path';
+import { readFileSync as readFileSync26, readdirSync as readdirSync9 } from 'fs';
+import { join as join18 } from 'path';
 init_format();
 init_markdown();
 async function handleTicketPublish(ctx) {
@@ -86619,16 +88115,16 @@ async function handleTicketPublish(ctx) {
   const epochDir = snapshotPath(session.id, version, '.');
   const artifactFiles = [];
   try {
-    const files = readdirSync8(epochDir);
+    const files = readdirSync9(epochDir);
     for (const f of files) {
       if (/^(tickets-\d+|report-[a-z])\.md$/.test(f)) {
         artifactFiles.push(f);
       }
     }
   } catch {}
-  const scriptsDir = join15(sessionDir(session.id), 'scripts');
+  const scriptsDir = join18(sessionDir(session.id), 'scripts');
   for (const f of artifactFiles.sort()) {
-    const content = readFileSync24(snapshotPath(session.id, version, f), 'utf-8');
+    const content = readFileSync26(snapshotPath(session.id, version, f), 'utf-8');
     if (f.startsWith('tickets-1')) {
       const result = runScriptFromDir(scriptsDir, 'update-ticket', [ticketId, content]);
       if (result.ok) {
@@ -86654,8 +88150,8 @@ async function handleTicketPublish(ctx) {
     } else if (f.startsWith('report-')) {
       const mdPath = snapshotPath(session.id, version, f);
       let artifactPath2 = mdPath;
-      const pdfPath = join15(epochDir, f.replace(/\.md$/, '.pdf'));
-      const pdfResult = markdownToPdf(readFileSync24(mdPath, 'utf-8'), pdfPath, f.replace(/\.md$/, ''));
+      const pdfPath = join18(epochDir, f.replace(/\.md$/, '.pdf'));
+      const pdfResult = markdownToPdf(readFileSync26(mdPath, 'utf-8'), pdfPath, f.replace(/\.md$/, ''));
       if (pdfResult) {
         artifactPath2 = pdfResult;
         logOk(`Converted ${f} to PDF`);
@@ -86848,25 +88344,23 @@ function createStartCommand() {
     });
 }
 async function runStart(opts) {
-  const worktree = getGitRoot();
-  let session = getSessionByWorktree(worktree, worktree);
+  const repoPath = getGitRoot();
+  const worktree = getWorktree();
+  let session = getSessionByWorktree(repoPath, worktree);
   if (!session) {
     logInfo('No session found. Initializing...');
-    const { runInit: runInit2 } = await Promise.resolve().then(() => (init_init(), exports_init));
+    const { runInit: runInit2 } = await Promise.resolve().then(() => (init_init2(), exports_init));
     await runInit2(undefined, { local: opts.local });
-    session = getSessionByWorktree(worktree, worktree);
+    session = getSessionByWorktree(repoPath, worktree);
     if (!session) {
       logError('Init completed but session not found. Something went wrong.');
       process.exit(1);
     }
   }
   if (session.state === 'init') {
-    logError(`Session ${session.id} has incomplete initialization. Run \`kautopilot init --reset\` to re-initialize.`);
-    const sDir2 = sessionDir(session.id);
-    if (existsSync28(sDir2)) {
-      rmSync3(sDir2, { recursive: true, force: true });
-    }
-    deleteSession(session.id);
+    logError(
+      `Session ${session.id} has incomplete initialization. Run \`kautopilot init\` to start a fresh init attempt or \`kautopilot init --reset\` to re-initialize.`,
+    );
     process.exit(1);
   }
   detectAndRecoverCrash(session.id, session.worktree);
@@ -86881,7 +88375,7 @@ async function runStart(opts) {
     process.exit(1);
   }
   const sDir = sessionDir(session.id);
-  if (!existsSync28(`${sDir}/config.yaml`)) {
+  if (!existsSync30(`${sDir}/config.yaml`)) {
     logError('Config file missing. Run `kautopilot init` first.');
     process.exit(1);
   }
@@ -86908,14 +88402,14 @@ async function runStart(opts) {
       process.exit(1);
     }
     if (phase === 'implementation' || phase === 'polish') {
-      const hasSpec = existsSync28(`${sDir}/artifacts`);
+      const hasSpec = existsSync30(`${sDir}/artifacts`);
       if (!hasSpec) {
         logError(`Cannot start ${phase}: no spec artifacts found. Run phase 'plan' first.`);
         process.exit(1);
       }
     }
     if (phase === 'polish') {
-      const hasPlans = existsSync28(`${sDir}/artifacts`);
+      const hasPlans = existsSync30(`${sDir}/artifacts`);
       if (!hasPlans) {
         logError(`Cannot start polish: no plan artifacts found. Run phase 'implementation' first.`);
         process.exit(1);
@@ -86936,7 +88430,7 @@ async function runStart(opts) {
       phase = status.phase;
       if (phase === 'implementation' || phase === 'polish') {
         const artifactsDir = `${sDir}/artifacts`;
-        if (!existsSync28(artifactsDir)) {
+        if (!existsSync30(artifactsDir)) {
           logWarn(`Cannot resume ${phase}: no session artifacts found. Restarting from plan.`);
           phase = 'plan';
         }
@@ -86945,75 +88439,81 @@ async function runStart(opts) {
     logInfo(`Starting phase: ${phase}`);
   }
   acquireLock(session.id);
-  await discoverConfigDirs(config, session.id);
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'start:started',
-    metadata: { phase, pid: process.pid },
-  });
-  const PHASE_ORDER = ['plan', 'implementation', 'polish'];
-  const startIdx = PHASE_ORDER.indexOf(phase);
-  for (let i = startIdx; i < PHASE_ORDER.length; i++) {
-    const currentPhase = PHASE_ORDER[i];
-    if (i > startIdx) {
-      logInfo(`Advancing to phase: ${currentPhase}`);
-    }
-    const completed = await runPhase(currentPhase, session, config, i === startIdx ? { forceStartState } : {});
-    if (!completed) {
-      const status = ensureStatus(session.id);
-      if (currentPhase === 'implementation' && status.context.rewriteDecision === 'revisit_spec') {
-        const nextVersion = status.version + 1;
-        logInfo(`Escalating to plan for contract rewrite v${nextVersion}`);
-        supersedEpoch(session.id, status.version, nextVersion);
-        appendEvent(session.id, {
-          ts: new Date().toISOString(),
-          event: 'context:updated',
-          metadata: { rewriteDecision: undefined },
-        });
-        const replanned = await runPhase('plan', session, config, { versionOverride: nextVersion });
-        if (!replanned) {
-          logInfo('Phase plan interrupted \u2014 run `kautopilot start` to resume');
-          break;
-        }
-        i = PHASE_ORDER.indexOf('implementation') - 1;
-        continue;
+  try {
+    await discoverConfigDirs(config, session.id);
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'start:started',
+      metadata: { phase, pid: process.pid },
+    });
+    const PHASE_ORDER = ['plan', 'implementation', 'polish'];
+    const startIdx = PHASE_ORDER.indexOf(phase);
+    for (let i = startIdx; i < PHASE_ORDER.length; i++) {
+      const currentPhase = PHASE_ORDER[i];
+      if (i > startIdx) {
+        logInfo(`Advancing to phase: ${currentPhase}`);
       }
-      logInfo(`Phase ${currentPhase} interrupted \u2014 run \`kautopilot start\` to resume`);
-      break;
-    }
-    if (currentPhase === 'polish') {
-      const feedbackStatus = ensureStatus(session.id);
-      if (feedbackStatus.context.ticketFeedback) {
-        const nextVersion = feedbackStatus.version + 1;
-        logInfo(`Ticket feedback detected \u2014 escalating to v${nextVersion}`);
-        supersedEpoch(session.id, feedbackStatus.version, nextVersion);
-        appendEvent(session.id, {
-          ts: new Date().toISOString(),
-          event: 'context:updated',
-          metadata: { ticketFeedback: undefined },
-        });
-        const replanned = await runPhase('plan', session, config, { versionOverride: nextVersion });
-        if (!replanned) {
-          logInfo('Phase plan interrupted \u2014 run `kautopilot start` to resume');
-          break;
+      const completed = await runPhase(currentPhase, session, config, i === startIdx ? { forceStartState } : {});
+      if (!completed) {
+        const status = ensureStatus(session.id);
+        if (currentPhase === 'implementation' && status.context.rewriteDecision === 'revisit_spec') {
+          const nextVersion = status.version + 1;
+          logInfo(`Escalating to plan for contract rewrite v${nextVersion}`);
+          supersedEpoch(session.id, status.version, nextVersion);
+          appendEvent(session.id, {
+            ts: new Date().toISOString(),
+            event: 'context:updated',
+            metadata: { rewriteDecision: undefined },
+          });
+          const replanned = await runPhase('plan', session, config, { versionOverride: nextVersion });
+          if (!replanned) {
+            logInfo('Phase plan interrupted \u2014 run `kautopilot start` to resume');
+            break;
+          }
+          i = PHASE_ORDER.indexOf('implementation') - 1;
+          continue;
         }
-        i = PHASE_ORDER.indexOf('implementation') - 1;
-        continue;
+        logInfo(`Phase ${currentPhase} interrupted \u2014 run \`kautopilot start\` to resume`);
+        break;
+      }
+      if (currentPhase === 'polish') {
+        const feedbackStatus = ensureStatus(session.id);
+        if (feedbackStatus.context.ticketFeedback) {
+          const nextVersion = feedbackStatus.version + 1;
+          logInfo(`Ticket feedback detected \u2014 escalating to v${nextVersion}`);
+          supersedEpoch(session.id, feedbackStatus.version, nextVersion);
+          appendEvent(session.id, {
+            ts: new Date().toISOString(),
+            event: 'context:updated',
+            metadata: { ticketFeedback: undefined },
+          });
+          const replanned = await runPhase('plan', session, config, { versionOverride: nextVersion });
+          if (!replanned) {
+            logInfo('Phase plan interrupted \u2014 run `kautopilot start` to resume');
+            break;
+          }
+          i = PHASE_ORDER.indexOf('implementation') - 1;
+          continue;
+        }
       }
     }
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'start:completed',
+      metadata: { phase: 'all' },
+    });
+  } finally {
+    releaseLock(session.id);
   }
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'start:completed',
-    metadata: { phase: 'all' },
-  });
-  releaseLock(session.id);
 }
 
 // src/cli/status.ts
 init_esm();
 init_db();
+init_init_db();
 init_status();
+init_init_status();
+init_git();
 init_format();
 function createStatusCommand() {
   return new Command('status')
@@ -87029,106 +88529,153 @@ function createStatusCommand() {
     });
 }
 async function runStatus(id, opts) {
-  let session;
   if (id) {
-    session = getSessionById(id);
-    if (!session) {
-      logError(`Session ${id} not found in index.`);
+    const session2 = getSessionById(id);
+    if (session2) {
+      const status = ensureStatus(session2.id);
+      const phaseElapsed = status.startedAt ? Date.now() - new Date(status.startedAt).getTime() : 0;
+      const data2 = {
+        kind: 'session',
+        session: session2.id,
+        ticketId: session2.ticket_id,
+        branch: session2.branch,
+        repo: session2.git_root_host,
+        org: session2.git_root_host.split('/')[1],
+        local: session2.local === 1,
+        phase: status.phase,
+        state: status.state,
+        stateStatus: status.stateStatus,
+        running: status.running,
+        stepType: status.stepType,
+        userTurn: status.userTurn,
+        checkpoint: status.lastCheckpoint,
+        version: status.version,
+        tasks: status.tasks,
+        context: status.context,
+        stats: status.stats,
+        elapsed: phaseElapsed,
+        walCursor: status.walCursor,
+        initAttempt: getInitAttemptByPromotedSessionId(session2.id)?.id ?? null,
+        activeEpoch: status.version,
+        currentPlans: (() => {
+          const pm = readPlanManifest(session2.id, status.version);
+          return (
+            pm?.plans.map(p2 => ({
+              ordinal: p2.ordinal,
+              file: p2.file,
+              activeRewrite: p2.activeRewrite,
+              completed: p2.completed,
+              commitSha: p2.commitSha ?? null,
+            })) ?? []
+          );
+        })(),
+        delivery: (() => {
+          const d3 = readDeliveryManifest(session2.id, status.version);
+          return d3
+            ? {
+                kind: d3.kind,
+                prNumber: d3.prNumber ?? null,
+                prUrl: d3.prUrl ?? null,
+                rolloverHistory: d3.prRolloverHistory ?? [],
+                ticketArtifacts: d3.ticketArtifacts ?? [],
+                publishedAt: d3.publishedAt ?? null,
+              }
+            : null;
+        })(),
+        rolloverRecommendation: status.context.rolloverRecommendation ?? null,
+      };
+      if (opts.json) {
+        console.log(JSON.stringify(data2, null, 2));
+        return;
+      }
+      logField('Session', session2.id);
+      logField('Ticket', session2.ticket_id || '\u2014');
+      logField('Branch', session2.branch || '\u2014');
+      logField('Repo', session2.git_root_host);
+      logField('Local', session2.local === 1 ? 'yes' : 'no');
+      console.log();
+      logField('Phase', status.phase);
+      const stepSuffix = status.stepType
+        ? ` (${status.stepType}${status.userTurn === true ? ", user's turn" : status.userTurn === false ? ", LLM's turn" : ''})`
+        : '';
+      logField('Step', (status.state || '\u2014') + stepSuffix);
+      logField('Status', status.running ? `running (${status.stateStatus})` : 'stopped');
+      logField('Checkpoint', status.lastCheckpoint || '\u2014');
+      console.log();
+      logField('Duration', formatDuration(phaseElapsed));
+      logField('Version', String(status.version));
+      logField('Init attempt', data2.initAttempt || '\u2014');
+      const taskEntries = Object.entries(status.tasks);
+      if (taskEntries.length > 0) {
+        console.log();
+        logField('Tasks', '');
+        for (const [name, task] of taskEntries) {
+          logField(`  ${name}`, task.status);
+        }
+      }
+      return;
+    }
+    const initAttempt = getInitAttemptById(id);
+    if (!initAttempt) {
+      logError(`Session or init attempt ${id} not found in index.`);
       process.exit(1);
     }
-  } else {
-    const worktree = getGitRoot();
-    session = getSessionByWorktree(worktree, worktree);
-    if (!session) {
-      logError('No session found in this worktree.');
-      process.exit(1);
+    const initStatus = ensureInitStatus(initAttempt.id);
+    const elapsed = initStatus.startedAt ? Date.now() - new Date(initStatus.startedAt).getTime() : 0;
+    const data = {
+      kind: 'init',
+      initAttempt: initAttempt.id,
+      outcome: initAttempt.outcome,
+      promotedSessionId: initAttempt.promoted_session_id,
+      repoPath: initAttempt.repo_path,
+      worktree: initAttempt.worktree,
+      repo: initAttempt.git_root_host,
+      org: initAttempt.org,
+      state: initStatus.state,
+      stateStatus: initStatus.stateStatus,
+      running: initStatus.running,
+      context: initStatus.context,
+      completedStates: initStatus.completedStates,
+      elapsed,
+      walCursor: initStatus.walCursor,
+    };
+    if (opts.json) {
+      console.log(JSON.stringify(data, null, 2));
+      return;
     }
-  }
-  const status = ensureStatus(session.id);
-  const phaseElapsed = status.startedAt ? Date.now() - new Date(status.startedAt).getTime() : 0;
-  const data = {
-    session: session.id,
-    ticketId: session.ticket_id,
-    branch: session.branch,
-    repo: session.git_root_host,
-    org: session.git_root_host.split('/')[1],
-    local: session.local === 1,
-    phase: status.phase,
-    state: status.state,
-    stateStatus: status.stateStatus,
-    running: status.running,
-    stepType: status.stepType,
-    userTurn: status.userTurn,
-    checkpoint: status.lastCheckpoint,
-    version: status.version,
-    tasks: status.tasks,
-    context: status.context,
-    stats: status.stats,
-    elapsed: phaseElapsed,
-    walCursor: status.walCursor,
-    activeEpoch: status.version,
-    currentPlans: (() => {
-      const pm = readPlanManifest(session.id, status.version);
-      return (
-        pm?.plans.map(p2 => ({
-          ordinal: p2.ordinal,
-          file: p2.file,
-          activeRewrite: p2.activeRewrite,
-          completed: p2.completed,
-          commitSha: p2.commitSha ?? null,
-        })) ?? []
-      );
-    })(),
-    delivery: (() => {
-      const d3 = readDeliveryManifest(session.id, status.version);
-      return d3
-        ? {
-            kind: d3.kind,
-            prNumber: d3.prNumber ?? null,
-            prUrl: d3.prUrl ?? null,
-            rolloverHistory: d3.prRolloverHistory ?? [],
-            ticketArtifacts: d3.ticketArtifacts ?? [],
-            publishedAt: d3.publishedAt ?? null,
-          }
-        : null;
-    })(),
-    rolloverRecommendation: status.context.rolloverRecommendation ?? null,
-  };
-  if (opts.json) {
-    console.log(JSON.stringify(data, null, 2));
+    logField('Init attempt', initAttempt.id);
+    logField('Outcome', initAttempt.outcome || 'active');
+    logField('Promoted', initAttempt.promoted_session_id || '\u2014');
+    logField('Repo', initAttempt.git_root_host);
+    console.log();
+    logField('State', initStatus.state);
+    logField('Status', initStatus.running ? `running (${initStatus.stateStatus})` : initStatus.stateStatus);
+    logField('Duration', formatDuration(elapsed));
     return;
   }
-  logField('Session', session.id);
-  logField('Ticket', session.ticket_id || '\u2014');
-  logField('Branch', session.branch || '\u2014');
-  logField('Repo', session.git_root_host);
-  logField('Local', session.local === 1 ? 'yes' : 'no');
-  console.log();
-  logField('Phase', status.phase);
-  const stepSuffix = status.stepType
-    ? ` (${status.stepType}${status.userTurn === true ? ", user's turn" : status.userTurn === false ? ", LLM's turn" : ''})`
-    : '';
-  logField('Step', (status.state || '\u2014') + stepSuffix);
-  logField('Status', status.running ? `running (${status.stateStatus})` : 'stopped');
-  logField('Checkpoint', status.lastCheckpoint || '\u2014');
-  console.log();
-  logField('Duration', formatDuration(phaseElapsed));
-  logField('Version', String(status.version));
-  const taskEntries = Object.entries(status.tasks);
-  if (taskEntries.length > 0) {
-    console.log();
-    logField('Tasks', '');
-    for (const [name, task] of taskEntries) {
-      logField(`  ${name}`, task.status);
-    }
+  const repoPath = getGitRoot();
+  const worktree = getWorktree();
+  const session = getSessionByWorktree(repoPath, worktree);
+  if (session) {
+    await runStatus(session.id, opts);
+    return;
   }
+  const activeInit = getActiveInitForWorktree(repoPath, worktree);
+  if (!activeInit) {
+    logError('No session or init attempt found in this worktree.');
+    process.exit(1);
+  }
+  await runStatus(activeInit.id, opts);
 }
 
 // src/cli/describe.ts
 init_esm();
 init_db();
+init_init_db();
 init_log();
 init_status();
+init_init_status();
+init_git();
 init_format();
 function createDescribeCommand() {
   return new Command('describe')
@@ -87144,23 +88691,44 @@ function createDescribeCommand() {
     });
 }
 async function runDescribe(id, opts) {
-  let session;
   if (id) {
-    session = getSessionById(id);
-    if (!session) {
-      logError(`Session ${id} not found in index.`);
-      process.exit(1);
+    const session2 = getSessionById(id);
+    if (session2) {
+      await describeSession(session2.id, opts);
+      return;
     }
-  } else {
-    const worktree = getGitRoot();
-    session = getSessionByWorktree(worktree, worktree);
-    if (!session) {
-      logError('No session found in this worktree.');
-      process.exit(1);
+    const initAttempt = getInitAttemptById(id);
+    if (initAttempt) {
+      await describeInitAttempt(initAttempt.id, opts);
+      return;
     }
+    logError(`Session or init attempt ${id} not found in index.`);
+    process.exit(1);
+  }
+  const repoPath = getGitRoot();
+  const worktree = getWorktree();
+  const session = getSessionByWorktree(repoPath, worktree);
+  if (session) {
+    await describeSession(session.id, opts);
+    return;
+  }
+  const activeInit = getActiveInitForWorktree(repoPath, worktree);
+  if (activeInit) {
+    await describeInitAttempt(activeInit.id, opts);
+    return;
+  }
+  logError('No session or init attempt found in this worktree.');
+  process.exit(1);
+}
+async function describeSession(sessionId, opts) {
+  const session = getSessionById(sessionId);
+  if (!session) {
+    logError(`Session ${sessionId} not found in index.`);
+    process.exit(1);
   }
   const log = readLog(session.id);
   const status = ensureStatus(session.id);
+  const initAttemptId = getInitAttemptByPromotedSessionId(session.id)?.id ?? null;
   if (opts.json) {
     const events = log.map(entry => {
       const base2 = {
@@ -87186,13 +88754,6 @@ async function runDescribe(id, opts) {
     });
     const activeEpoch = status.version;
     const supersededEpochs = [];
-    for (const entry of log) {
-      if (entry.event === 'context:updated' && entry.version !== undefined) {
-        const meta = entry.metadata;
-        if (meta?.rewriteDecision === 'revisit_spec' || meta?.ticketFeedback) {
-        }
-      }
-    }
     const versionedVersions = [...new Set(log.filter(e2 => e2.version !== undefined).map(e2 => e2.version))];
     for (const v2 of versionedVersions) {
       if (v2 === activeEpoch) continue;
@@ -87227,7 +88788,9 @@ async function runDescribe(id, opts) {
         ? 'ticket_feedback'
         : null;
     const data = {
+      kind: 'session',
       session: session.id,
+      initAttempt: initAttemptId,
       ticketId: session.ticket_id,
       activeEpoch,
       supersededEpochs,
@@ -87265,6 +88828,7 @@ async function runDescribe(id, opts) {
   logField('Ticket', session.ticket_id || '\u2014');
   logField('Branch', session.branch || '\u2014');
   logField('Repo', session.git_root_host);
+  logField('Init attempt', initAttemptId || '\u2014');
   console.log();
   if (log.length === 0) {
     logDim('No events recorded.');
@@ -87289,45 +88853,100 @@ async function runDescribe(id, opts) {
         : '';
       console.log(`${ts} ${entry.event}${meta}`);
     }
-  } else {
-    for (let v2 = 1; v2 <= currentVersion; v2++) {
-      logHeading(`Version ${v2}`);
-      const versionEvents = versionedEvents.filter(e2 => e2.version === v2);
-      const startedEvents = versionEvents.filter(e2 => e2.event.endsWith(':started'));
-      for (let i = 0; i < startedEvents.length; i++) {
-        const started = startedEvents[i];
-        const completed = versionEvents.find(
-          e2 => e2.event === started.event.replace(':started', ':completed') && e2.version === v2,
-        );
-        const startTime = new Date(started.ts);
-        const endTime = completed ? new Date(completed.ts) : startTime;
-        const duration = formatDuration(endTime.getTime() - startTime.getTime());
-        const stepName = started.event.replace(':started', '');
-        const attemptStr = started.attempt ? ` (attempt ${started.attempt})` : '';
-        const resultStr = completed?.result ? ` (${completed.result})` : '';
-        const metaStr = completed?.metadata
-          ? ' ' +
-            Object.entries(completed.metadata)
-              .map(([k3, v3]) => `${k3}=${v3}`)
-              .join(', ')
-          : '';
-        console.log(`  ${stepName.padEnd(16)} ${duration.padStart(10)}${attemptStr}${resultStr}${metaStr}`);
-      }
-      console.log();
+    return;
+  }
+  for (let v2 = 1; v2 <= currentVersion; v2++) {
+    logHeading(`Version ${v2}`);
+    const versionEvents = versionedEvents.filter(e2 => e2.version === v2);
+    const startedEvents = versionEvents.filter(e2 => e2.event.endsWith(':started'));
+    for (const started of startedEvents) {
+      const completed = versionEvents.find(
+        e2 => e2.event === started.event.replace(':started', ':completed') && e2.version === v2,
+      );
+      const startTime = new Date(started.ts);
+      const endTime = completed ? new Date(completed.ts) : startTime;
+      const duration = formatDuration(endTime.getTime() - startTime.getTime());
+      const stepName = started.event.replace(':started', '');
+      const attemptStr = started.attempt ? ` (attempt ${started.attempt})` : '';
+      const resultStr = completed?.result ? ` (${completed.result})` : '';
+      const metaStr = completed?.metadata
+        ? ' ' +
+          Object.entries(completed.metadata)
+            .map(([k3, v3]) => `${k3}=${v3}`)
+            .join(', ')
+        : '';
+      console.log(`  ${stepName.padEnd(16)} ${duration.padStart(10)}${attemptStr}${resultStr}${metaStr}`);
     }
-    if (nonVersionedEvents.length > 0) {
-      logHeading('CLI Events');
-      for (const entry of nonVersionedEvents) {
-        const ts = formatTimestamp(entry.ts);
-        const meta = entry.metadata
-          ? ' ' +
-            Object.entries(entry.metadata)
-              .map(([k3, v2]) => `${k3}=${v2}`)
-              .join(', ')
-          : '';
-        console.log(`${ts} ${entry.event}${meta}`);
-      }
+    console.log();
+  }
+  if (nonVersionedEvents.length > 0) {
+    logHeading('CLI Events');
+    for (const entry of nonVersionedEvents) {
+      const ts = formatTimestamp(entry.ts);
+      const meta = entry.metadata
+        ? ' ' +
+          Object.entries(entry.metadata)
+            .map(([k3, v2]) => `${k3}=${v2}`)
+            .join(', ')
+        : '';
+      console.log(`${ts} ${entry.event}${meta}`);
     }
+  }
+}
+async function describeInitAttempt(initAttemptId, opts) {
+  const initAttempt = getInitAttemptById(initAttemptId);
+  if (!initAttempt) {
+    logError(`Init attempt ${initAttemptId} not found in index.`);
+    process.exit(1);
+  }
+  const log = readInitLog(initAttempt.id);
+  const status = ensureInitStatus(initAttempt.id);
+  if (opts.json) {
+    console.log(
+      JSON.stringify(
+        {
+          kind: 'init',
+          initAttempt: initAttempt.id,
+          outcome: initAttempt.outcome,
+          promotedSessionId: initAttempt.promoted_session_id,
+          repoPath: initAttempt.repo_path,
+          worktree: initAttempt.worktree,
+          repo: initAttempt.git_root_host,
+          org: initAttempt.org,
+          state: status.state,
+          stateStatus: status.stateStatus,
+          running: status.running,
+          startedAt: status.startedAt,
+          walCursor: status.walCursor,
+          walTimestamp: status.walTimestamp,
+          context: status.context,
+          completedStates: status.completedStates,
+          events: log,
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+  logField('Init attempt', initAttempt.id);
+  logField('Outcome', initAttempt.outcome || 'active');
+  logField('Promoted', initAttempt.promoted_session_id || '\u2014');
+  logField('Repo', initAttempt.git_root_host);
+  console.log();
+  if (log.length === 0) {
+    logDim('No events recorded.');
+    return;
+  }
+  for (const entry of log) {
+    const ts = formatTimestamp(entry.ts);
+    const meta = entry.metadata
+      ? ' ' +
+        Object.entries(entry.metadata)
+          .map(([k3, v2]) => `${k3}=${v2}`)
+          .join(', ')
+      : '';
+    console.log(`${ts} ${entry.event}${meta}`);
   }
 }
 function formatTimestamp(ts) {
@@ -87344,10 +88963,11 @@ init_esm();
 init_db();
 init_lock();
 init_log();
+init_git();
 init_artifacts();
 init_inquirer();
 init_format();
-import { rmSync as rmSync4 } from 'fs';
+import { rmSync as rmSync3 } from 'fs';
 function createStopCommand() {
   return new Command('stop')
     .argument('[id]', 'Session ID (optional \u2014 defaults to local)')
@@ -87372,8 +88992,9 @@ async function runStop(id, opts) {
     }
   } else {
     try {
-      const worktree = getGitRoot();
-      session = getSessionByWorktree(worktree, worktree);
+      const repoPath = getGitRoot();
+      const worktree = getWorktree();
+      session = getSessionByWorktree(repoPath, worktree);
     } catch {
       logError('No session found in this worktree.');
       process.exit(1);
@@ -87424,7 +89045,7 @@ async function runStop(id, opts) {
   if (isGlobal) {
     const doDelete = opts.force || (await confirmAction(`Delete session directory and index entry?`, false));
     if (doDelete) {
-      rmSync4(sessionDir(session.id), { recursive: true, force: true });
+      rmSync3(sessionDir(session.id), { recursive: true, force: true });
       deleteSession(session.id);
       logOk(`Session ${session.id} stopped and removed.`);
       return;
@@ -87437,6 +89058,7 @@ async function runStop(id, opts) {
 init_esm();
 init_db();
 init_log();
+init_git();
 init_format();
 function createLogsCommand() {
   return new Command('logs')
@@ -87453,8 +89075,9 @@ function createLogsCommand() {
     });
 }
 async function runLogs(phase, opts) {
-  const worktree = getGitRoot();
-  const session = getSessionByWorktree(worktree, worktree);
+  const repoPath = getGitRoot();
+  const worktree = getWorktree();
+  const session = getSessionByWorktree(repoPath, worktree);
   if (!session) {
     logError('No session found in this worktree.');
     process.exit(1);
@@ -87541,16 +89164,17 @@ function createPsCommand() {
     });
 }
 async function runPs(opts) {
-  const sessions = listSessions({ includeAll: opts.all });
+  const sessions = listSessions({ includeAll: true });
   let filtered = sessions;
   if (opts.repo) {
     filtered = sessions.filter(s => s.git_root_host.includes(opts.repo.toLowerCase()));
   }
-  if (filtered.length === 0) {
+  const runningRows = filtered.filter(session => opts.all || checkLock(session.id).locked);
+  if (runningRows.length === 0) {
     console.log('No sessions found.');
     return;
   }
-  const rows = filtered.map(session => {
+  const rows = runningRows.map(session => {
     const lockInfo = checkLock(session.id);
     const status = ensureStatus(session.id);
     const elapsed = lockInfo.locked && status.startedAt ? Date.now() - new Date(status.startedAt).getTime() : 0;
@@ -87612,8 +89236,8 @@ init_esm();
 init_config();
 init_scripts();
 init_format();
-import { existsSync as existsSync29, mkdirSync as mkdirSync17 } from 'fs';
-import { join as join16 } from 'path';
+import { existsSync as existsSync31, mkdirSync as mkdirSync21 } from 'fs';
+import { join as join19 } from 'path';
 var ORGS_DIR2 = `${process.env.HOME}/.kautopilot/orgs`;
 function createOrgCommand() {
   return new Command('org')
@@ -87635,19 +89259,19 @@ function createOrgInitCommand() {
     });
 }
 async function runOrgInit(name) {
-  const orgDir = join16(ORGS_DIR2, name);
-  if (existsSync29(orgDir)) {
-    const { confirmAction: confirmAction2 } = await Promise.resolve().then(() => (init_inquirer(), exports_inquirer));
-    const confirmed = await confirmAction2(`Org '${name}' already exists. Overwrite?`, false);
+  const orgDir = join19(ORGS_DIR2, name);
+  if (existsSync31(orgDir)) {
+    const { confirmAction: confirmAction3 } = await Promise.resolve().then(() => (init_inquirer(), exports_inquirer));
+    const confirmed = await confirmAction3(`Org '${name}' already exists. Overwrite?`, false);
     if (!confirmed) return;
   }
-  mkdirSync17(orgDir, { recursive: true });
+  mkdirSync21(orgDir, { recursive: true });
   ensureGlobalConfig();
   const globalConfigPath2 = `${process.env.HOME}/.kautopilot/config.yaml`;
-  const orgConfigPath2 = join16(orgDir, 'config.yaml');
-  const { copyFileSync: copyFileSync5 } = await import('fs');
-  if (existsSync29(globalConfigPath2)) {
-    copyFileSync5(globalConfigPath2, orgConfigPath2);
+  const orgConfigPath2 = join19(orgDir, 'config.yaml');
+  const { copyFileSync: copyFileSync6 } = await import('fs');
+  if (existsSync31(globalConfigPath2)) {
+    copyFileSync6(globalConfigPath2, orgConfigPath2);
     logField('Config', `${orgConfigPath2} (copied from global)`);
   }
   logField('Org', name);
@@ -87676,9 +89300,9 @@ function createOrgLsCommand() {
   });
 }
 async function runOrgLs() {
-  mkdirSync17(ORGS_DIR2, { recursive: true });
-  const { readdirSync: readdirSync9, statSync } = await import('fs');
-  const orgs = readdirSync9(ORGS_DIR2, { withFileTypes: true }).filter(d3 => d3.isDirectory());
+  mkdirSync21(ORGS_DIR2, { recursive: true });
+  const { readdirSync: readdirSync10, statSync } = await import('fs');
+  const orgs = readdirSync10(ORGS_DIR2, { withFileTypes: true }).filter(d3 => d3.isDirectory());
   if (orgs.length === 0) {
     logInfo('No orgs configured. Run `kautopilot org init <name>` to create one.');
     return;
@@ -87686,12 +89310,12 @@ async function runOrgLs() {
   const cols = { org: 12, scripts: 60 };
   console.log('ORG'.padEnd(cols.org) + 'SCRIPTS');
   for (const org of orgs) {
-    const orgDir = join16(ORGS_DIR2, org.name);
-    const scripts = readdirSync9(orgDir)
+    const orgDir = join19(ORGS_DIR2, org.name);
+    const scripts = readdirSync10(orgDir)
       .filter(f => !f.startsWith('.'))
       .filter(f => {
         try {
-          return statSync(join16(orgDir, f)).isFile();
+          return statSync(join19(orgDir, f)).isFile();
         } catch {
           return false;
         }
@@ -87703,11 +89327,12 @@ async function runOrgLs() {
 // src/cli/spec-review.ts
 init_esm();
 init_db();
+init_git();
 init_config();
 init_artifacts();
 init_status();
-import { existsSync as existsSync30, readFileSync as readFileSync25 } from 'fs';
-import { join as join17 } from 'path';
+import { existsSync as existsSync32, readFileSync as readFileSync27 } from 'fs';
+import { join as join20 } from 'path';
 
 // src/core/review-runner.ts
 init_log();
@@ -87932,8 +89557,9 @@ function createSpecReviewCommand() {
     });
 }
 async function runSpecReview() {
-  const worktree = getGitRoot();
-  const session = getSessionByWorktree(worktree, worktree);
+  const repoPath = getGitRoot();
+  const worktree = getWorktree();
+  const session = getSessionByWorktree(repoPath, worktree);
   if (!session) {
     logError('No session found in this worktree.');
     process.exit(1);
@@ -87945,12 +89571,12 @@ async function runSpecReview() {
   }
   const status = ensureStatus(session.id);
   const version = status.version || 1;
-  const typeJsonPath = join17(sessionDir(session.id), 'artifacts', `v${version}`, 'type.json');
-  if (!existsSync30(typeJsonPath)) {
+  const typeJsonPath = join20(sessionDir(session.id), 'artifacts', `v${version}`, 'type.json');
+  if (!existsSync32(typeJsonPath)) {
     logError(`No type.json found at ${typeJsonPath}. Has route_type completed?`);
     process.exit(1);
   }
-  const typeInfo = JSON.parse(readFileSync25(typeJsonPath, 'utf-8'));
+  const typeInfo = JSON.parse(readFileSync27(typeJsonPath, 'utf-8'));
   const typeName = typeInfo.type;
   const typeConfig = config.types[typeName];
   if (!typeConfig) {
@@ -87970,11 +89596,12 @@ async function runSpecReview() {
 // src/cli/plan-review.ts
 init_esm();
 init_db();
+init_git();
 init_config();
 init_artifacts();
 init_status();
-import { existsSync as existsSync31, readFileSync as readFileSync26 } from 'fs';
-import { join as join18 } from 'path';
+import { existsSync as existsSync33, readFileSync as readFileSync28 } from 'fs';
+import { join as join21 } from 'path';
 init_format();
 function createPlanReviewCommand() {
   return new Command('plan-review')
@@ -87989,8 +89616,9 @@ function createPlanReviewCommand() {
     });
 }
 async function runPlanReview() {
-  const worktree = getGitRoot();
-  const session = getSessionByWorktree(worktree, worktree);
+  const repoPath = getGitRoot();
+  const worktree = getWorktree();
+  const session = getSessionByWorktree(repoPath, worktree);
   if (!session) {
     logError('No session found in this worktree.');
     process.exit(1);
@@ -88002,12 +89630,12 @@ async function runPlanReview() {
   }
   const status = ensureStatus(session.id);
   const version = status.version || 1;
-  const typeJsonPath = join18(sessionDir(session.id), 'artifacts', `v${version}`, 'type.json');
-  if (!existsSync31(typeJsonPath)) {
+  const typeJsonPath = join21(sessionDir(session.id), 'artifacts', `v${version}`, 'type.json');
+  if (!existsSync33(typeJsonPath)) {
     logError(`No type.json found at ${typeJsonPath}. Has route_type completed?`);
     process.exit(1);
   }
-  const typeInfo = JSON.parse(readFileSync26(typeJsonPath, 'utf-8'));
+  const typeInfo = JSON.parse(readFileSync28(typeJsonPath, 'utf-8'));
   const typeName = typeInfo.type;
   const typeConfig = config.types[typeName];
   if (!typeConfig) {
@@ -88028,6 +89656,7 @@ async function runPlanReview() {
 init_esm();
 init_db();
 init_log();
+init_git();
 init_format();
 function createLogEventCommand() {
   return new Command('log-event')
@@ -88035,8 +89664,9 @@ function createLogEventCommand() {
     .option('--metadata <json>', 'JSON metadata to attach')
     .action(async (event, opts) => {
       try {
-        const worktree = getGitRoot();
-        const session = getSessionByWorktree(worktree, worktree);
+        const repoPath = getGitRoot();
+        const worktree = getWorktree();
+        const session = getSessionByWorktree(repoPath, worktree);
         if (!session) {
           logError('No session found for this worktree.');
           process.exit(1);
@@ -88064,8 +89694,8 @@ function createLogEventCommand() {
 }
 
 // src/index.ts
-var __dirname2 = dirname10(fileURLToPath(import.meta.url));
-var pkg = JSON.parse(readFileSync27(join19(__dirname2, '..', 'package.json'), 'utf-8'));
+var __dirname2 = dirname14(fileURLToPath(import.meta.url));
+var pkg = JSON.parse(readFileSync29(join22(__dirname2, '..', 'package.json'), 'utf-8'));
 var program2 = new Command();
 program2
   .name('kautopilot')

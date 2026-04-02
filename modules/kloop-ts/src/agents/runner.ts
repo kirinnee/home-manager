@@ -1,14 +1,16 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import type { Config, Session, Verdict, ReviewerConfig } from '../types';
-import { getPrimaryImplementer, selectImplementer, parseReviewerConfig } from '../types';
+import type { Config, Session, Verdict, HarnessType } from '../types';
+import { getPrimaryImplementer, selectImplementer } from '../types';
 import type { TmuxService, StateService } from '../deps';
 import { generateId, paths } from '../deps';
 import * as verdicts from './verdicts';
 import { buildCheckpointerPrompt } from './prompts';
 import type { CheckpointerPromptVars } from './prompts';
-import { extractTokensFromLog } from '../stream/parse';
+import { extractTokensFromLog, extractHarnessSessionId } from '../stream/parse';
 import { formatAgentLaunch } from '../loop/format';
+import type { ParsedBinary, ReviewerBinary } from '../types';
+import { parseImplementerConfig, parseReviewerConfig, parseConflictCheckerConfig } from '../types';
 
 // Path to kloop binary — use process.argv[1] (the running script) instead of
 // import.meta.dir so it survives nix store path changes after rebuilds.
@@ -31,6 +33,7 @@ export interface ImplementerResult extends AgentResult {
   binary: string;
   inputTokens?: number;
   outputTokens?: number;
+  harnessSessionId?: string;
 }
 
 export interface ReviewerResult extends AgentResult {
@@ -45,6 +48,7 @@ export interface ReviewerResult extends AgentResult {
   outputTokens?: number;
   error?: string; // "timeout", "no_verdict", "exit_code_N"
   propagated?: boolean; // true if reviewer received previous loop reviews
+  harnessSessionId?: string;
 }
 
 export type CheckpointerOutcome = 'conflict_found' | 'spec_auto_fixed' | 'spec_compressed' | 'no_action';
@@ -55,6 +59,35 @@ export interface CheckpointerResult extends AgentResult {
   progressPercent?: number;
   completedCriteria?: string[];
   remainingCriteria?: string[];
+  harnessSessionId?: string;
+}
+
+// ============================================================================
+// Harness-aware command builder
+// ============================================================================
+
+/**
+ * Build the agent command for a given harness type.
+ *
+ * Claude: cat "${promptFile}" | claude-auto-zai --dangerously-skip-permissions --verbose --print --session-id "${sessionId}" --output-format stream-json 2>&1 | tee "${logFile}" | kloop stream
+ * Gemini: gemini-auto --yolo --output-format stream-json -p "$(cat "${promptFile}")" 2>&1 | tee "${logFile}" | kloop stream
+ */
+function buildAgentCommand(params: {
+  binary: string;
+  harness: HarnessType;
+  promptFile: string;
+  sessionId: string;
+  logFile: string;
+}): string {
+  const { binary, harness, promptFile, sessionId, logFile } = params;
+
+  if (harness === 'claude') {
+    // Claude: injects kloop session ID as --session-id
+    return `cat "${promptFile}" | ${binary} --dangerously-skip-permissions --verbose --print --session-id "${sessionId}" --output-format stream-json 2>&1 | tee "${logFile}" | ${KLOOP_BIN} stream`;
+  } else {
+    // Gemini: no session ID injection, pipe prompt via stdin (avoids shell arg length limits)
+    return `cat "${promptFile}" | ${binary} --yolo --output-format stream-json -p "" 2>&1 | tee "${logFile}" | ${KLOOP_BIN} stream`;
+  }
 }
 
 // ============================================================================
@@ -64,15 +97,19 @@ export interface CheckpointerResult extends AgentResult {
 export class AgentRunner {
   private reviewerBinaries: string[]; // flat list from all phases
   private checkpointerBinary: string;
+  private checkpointerHarness: HarnessType;
 
   constructor(
     private tmux: TmuxService,
     private state: StateService,
     private config: Config,
   ) {
-    // Flatten reviewer binaries from all phases
+    // Flatten reviewer binaries from all phases (keep raw strings for now, parse when running)
     this.reviewerBinaries = config.reviewPhases.flat();
-    this.checkpointerBinary = config.conflictChecker ?? getPrimaryImplementer(config);
+    // Parse checkpointer binary and harness
+    const checkpointerConfig = parseConflictCheckerConfig(config.conflictChecker ?? getPrimaryImplementer(config));
+    this.checkpointerBinary = checkpointerConfig.binary;
+    this.checkpointerHarness = checkpointerConfig.harness;
   }
 
   /**
@@ -113,10 +150,11 @@ export class AgentRunner {
     const { runId, iteration, dirHash, prompt, timeout, onStart } = params;
 
     // Select an implementer binary fresh for each run (weighted random)
-    const implementerBinary = this.selectImplementer();
+    const implementerBinaryName = this.selectImplementer();
+    const parsedImpl = parseImplementerConfig(implementerBinaryName);
 
     // Notify caller of selected binary before launch
-    if (onStart) await onStart(implementerBinary);
+    if (onStart) await onStart(parsedImpl.binary);
 
     // Create session record
     const sessionId = generateId();
@@ -126,7 +164,7 @@ export class AgentRunner {
       id: sessionId,
       iteration,
       role: 'implementer',
-      binary: implementerBinary,
+      binary: parsedImpl.binary,
       tmuxSession,
       status: 'running',
       startedAt: new Date().toISOString(),
@@ -140,11 +178,17 @@ export class AgentRunner {
     const logFile = await this.ensureAgentDir(implDir);
     await fs.writeFile(path.join(implDir, 'prompt.md'), prompt, 'utf-8');
 
-    // Build command with stream-json output piped through formatter
-    const command = `cat "${promptFile}" | ${implementerBinary} --dangerously-skip-permissions --verbose --print --session-id "${sessionId}" --output-format stream-json 2>&1 | tee "${logFile}" | ${KLOOP_BIN} stream`;
+    // Build harness-aware command
+    const command = buildAgentCommand({
+      binary: parsedImpl.binary,
+      harness: parsedImpl.harness,
+      promptFile,
+      sessionId,
+      logFile,
+    });
 
     // Run in tmux
-    formatAgentLaunch('impl', 'implementer', implementerBinary, tmuxSession, logFile);
+    formatAgentLaunch('impl', 'implementer', parsedImpl.binary, tmuxSession, logFile);
 
     const result = await this.tmux.runInSession({
       sessionName: tmuxSession,
@@ -168,8 +212,18 @@ export class AgentRunner {
       // No learnings yet
     }
 
-    // Extract token counts from log file
+    // Extract token counts and harness session ID from log file
     const tokens = await extractTokensFromLog(logFile);
+    const harnessSessionId = await extractHarnessSessionId(logFile);
+    if (harnessSessionId) {
+      session.harnessSessionId = harnessSessionId;
+    } else if (parsedImpl.harness === 'claude') {
+      // For Claude, the harness session ID is the same as the internal session ID
+      session.harnessSessionId = sessionId;
+    }
+
+    // Persist session with harnessSessionId to disk
+    await this.state.saveSession(session);
 
     return {
       sessionId,
@@ -178,9 +232,10 @@ export class AgentRunner {
       exitCode: result.exitCode,
       timedOut: result.timedOut,
       learnings,
-      binary: implementerBinary,
+      binary: parsedImpl.binary,
       inputTokens: tokens.inputTokens,
       outputTokens: tokens.outputTokens,
+      harnessSessionId: session.harnessSessionId,
     };
   }
 
@@ -192,7 +247,7 @@ export class AgentRunner {
     iteration: number;
     dirHash: string;
     phaseIndex: number;
-    reviewers: ReviewerConfig[];
+    reviewers: ReviewerBinary[];
     prompts: Array<{ reviewerIndex: number; prompt: string }>;
     timeout: number;
     onReviewerEnd?: (result: ReviewerResult) => Promise<void>;
@@ -203,17 +258,19 @@ export class AgentRunner {
 
     const results = await Promise.all(
       prompts.map(async (p, ordinal) => {
+        const reviewer = reviewers[ordinal] ?? reviewers[0];
         const result = await this.runReviewer({
           runId,
           iteration,
           dirHash,
           reviewerIndex: p.reviewerIndex,
-          binary: reviewers[ordinal]?.binary ?? reviewers[0].binary,
+          binary: reviewer.binary,
+          harness: reviewer.harness,
           prompt: p.prompt,
           timeout,
           phaseIndex,
           ordinal: ordinal + 1,
-          noVerdictAsFailure: reviewers[ordinal]?.noVerdictAsFailure ?? true,
+          noVerdictAsFailure: reviewer.noVerdictAsFailure,
         });
         // Notify caller as soon as this reviewer finishes (real-time event emission)
         if (onReviewerEnd) {
@@ -262,18 +319,27 @@ export class AgentRunner {
     iteration: number;
     dirHash: string;
     reviewerIndex: number;
-    binary?: string;
+    binary: string;
+    harness: HarnessType;
     prompt: string;
     timeout: number;
     phaseIndex?: number;
     ordinal?: number;
     noVerdictAsFailure?: boolean;
   }): Promise<ReviewerResult> {
-    const { runId, iteration, dirHash, reviewerIndex, prompt, timeout, phaseIndex, ordinal, noVerdictAsFailure } =
-      params;
-
-    // Get the reviewer binary
-    const reviewerBinary = params.binary ?? this.reviewerBinaries[reviewerIndex % this.reviewerBinaries.length];
+    const {
+      runId,
+      iteration,
+      dirHash,
+      reviewerIndex,
+      binary,
+      harness,
+      prompt,
+      timeout,
+      phaseIndex,
+      ordinal,
+      noVerdictAsFailure,
+    } = params;
 
     // Create session record
     const sessionId = generateId();
@@ -284,7 +350,7 @@ export class AgentRunner {
       iteration,
       role: 'reviewer',
       reviewerIndex,
-      binary: reviewerBinary,
+      binary,
       tmuxSession,
       status: 'running',
       startedAt: new Date().toISOString(),
@@ -299,11 +365,17 @@ export class AgentRunner {
     const logFile = await this.ensureAgentDir(reviewerDir);
     await fs.writeFile(path.join(reviewerDir, 'prompt.md'), prompt, 'utf-8');
 
-    // Build command with stream-json output piped through formatter
-    const command = `cat "${promptFile}" | ${reviewerBinary} --dangerously-skip-permissions --verbose --print --session-id "${sessionId}" --output-format stream-json 2>&1 | tee "${logFile}" | ${KLOOP_BIN} stream`;
+    // Build harness-aware command
+    const command = buildAgentCommand({
+      binary,
+      harness,
+      promptFile,
+      sessionId,
+      logFile,
+    });
 
     // Run in tmux
-    formatAgentLaunch('reviewer', `rev-${reviewerIndex}`, reviewerBinary, tmuxSession, logFile);
+    formatAgentLaunch('reviewer', `rev-${reviewerIndex}`, binary, tmuxSession, logFile);
 
     const result = await this.tmux.runInSession({
       sessionName: tmuxSession,
@@ -324,7 +396,7 @@ export class AgentRunner {
       reviewFileContent: reviewContent,
       exitCode: result.exitCode,
       timedOut: result.timedOut,
-      reviewerBinary,
+      reviewerBinary: binary,
       phaseIndex,
       noVerdictAsFailure: noVerdictAsFailure ?? true,
       onError: msg => {
@@ -352,12 +424,21 @@ export class AgentRunner {
     // Clean up prompt file
     await this.cleanupPromptFile(promptFile);
 
-    // Extract token counts from log file
+    // Extract token counts and harness session ID from log file
     const tokens = await extractTokensFromLog(logFile);
+    const harnessSessionId = await extractHarnessSessionId(logFile);
+    if (harnessSessionId) {
+      session.harnessSessionId = harnessSessionId;
+    } else if (harness === 'claude') {
+      session.harnessSessionId = sessionId;
+    }
+
+    // Persist session with harnessSessionId to disk
+    await this.state.saveSession(session);
 
     const icon = verdict === 'approved' ? '✓' : '✗';
     console.log(
-      `  ${icon} Reviewer ${reviewerIndex} (${reviewerBinary})${phaseIndex !== undefined ? ` (phase ${phaseIndex})` : ''}: ${verdict}${completionEstimate !== undefined ? ` (${completionEstimate}%)` : ''}`,
+      `  ${icon} Reviewer ${reviewerIndex} (${binary})${phaseIndex !== undefined ? ` (phase ${phaseIndex})` : ''}: ${verdict}${completionEstimate !== undefined ? ` (${completionEstimate}%)` : ''}`,
     );
 
     return {
@@ -367,7 +448,7 @@ export class AgentRunner {
       exitCode: result.exitCode,
       timedOut: result.timedOut,
       reviewerIndex,
-      binary: reviewerBinary,
+      binary,
       verdict,
       reasoning,
       completionEstimate,
@@ -376,6 +457,7 @@ export class AgentRunner {
       inputTokens: tokens.inputTokens,
       outputTokens: tokens.outputTokens,
       error,
+      harnessSessionId: session.harnessSessionId,
     };
   }
 
@@ -397,6 +479,7 @@ export class AgentRunner {
     const tmuxSession = `kloop-${runId}-${iteration}-checkpoint`;
 
     const binary = this.checkpointerBinary;
+    const harness = this.checkpointerHarness;
 
     const session: Session = {
       id: sessionId,
@@ -428,8 +511,14 @@ export class AgentRunner {
     const logFile = await this.ensureAgentDir(checkpointerDir);
     await fs.writeFile(path.join(checkpointerDir, 'prompt.md'), prompt, 'utf-8');
 
-    // Build command - use checkpointer binary (defaults to implementer binary)
-    const command = `cat "${promptFile}" | ${binary} --dangerously-skip-permissions --verbose --print --session-id "${sessionId}" --output-format stream-json 2>&1 | tee "${logFile}" | ${KLOOP_BIN} stream`;
+    // Build harness-aware command
+    const command = buildAgentCommand({
+      binary,
+      harness,
+      promptFile,
+      sessionId,
+      logFile,
+    });
 
     // Run in tmux
     formatAgentLaunch('checkpoint', 'checkpoint', binary, tmuxSession, logFile);
@@ -476,6 +565,17 @@ export class AgentRunner {
     session.status = result.timedOut ? 'error' : 'completed';
     session.completedAt = new Date().toISOString();
 
+    // Extract harness session ID from log file
+    const harnessSessionId = await extractHarnessSessionId(logFile);
+    if (harnessSessionId) {
+      session.harnessSessionId = harnessSessionId;
+    } else if (harness === 'claude') {
+      session.harnessSessionId = sessionId;
+    }
+
+    // Persist session with harnessSessionId to disk
+    await this.state.saveSession(session);
+
     // Clean up prompt file
     await this.cleanupPromptFile(promptFile);
 
@@ -502,6 +602,7 @@ export class AgentRunner {
       progressPercent,
       completedCriteria,
       remainingCriteria,
+      harnessSessionId: session.harnessSessionId,
     };
   }
 
