@@ -185,8 +185,10 @@ export async function handlePoll(ctx: Phase3Context): Promise<string | null> {
   const changesRequested = reviews.some(r => r.state === 'CHANGES_REQUESTED');
   const approvals = reviews.filter(r => r.state === 'APPROVED').length;
 
-  // Detect CodeRabbit status from checks
-  const crCheck = checks.find(c => c.name.toLowerCase().includes('coderabbit'));
+  // Detect CodeRabbit status from checks (skip if coderabbit disabled)
+  const crCheck = config.settings.coderabbit
+    ? checks.find(c => c.name.toLowerCase().includes('coderabbit'))
+    : undefined;
   const crStatus = crCheck
     ? crCheck.status === 'passing'
       ? ('passing' as const)

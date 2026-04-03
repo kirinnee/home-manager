@@ -204,3 +204,62 @@ export async function spawnTTYWithTurnTracking(
     watcher.close();
   }
 }
+
+/**
+ * Scan the worktree for commit convention files and return their contents.
+ * Searches for: any markdown file with "commit" in the name (case-insensitive),
+ * commitlint configs, CONTRIBUTING.md, and package.json commitlint config.
+ */
+export function scanCommitConventions(worktree: string): string {
+  const found: string[] = [];
+
+  // Glob for *commit*.md files (case-insensitive) in repo root
+  try {
+    const rootFiles = readdirSync(worktree);
+    for (const f of rootFiles) {
+      if (f.toLowerCase().includes('commit') && f.toLowerCase().endsWith('.md')) {
+        found.push(f);
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  // Static config files to check
+  const configFiles = [
+    'CONTRIBUTING.md',
+    '.commitlintrc',
+    '.commitlintrc.js',
+    '.commitlintrc.json',
+    '.commitlintrc.yml',
+    '.commitlintrc.yaml',
+    'commitlint.config.js',
+    'commitlint.config.ts',
+  ];
+  for (const f of configFiles) {
+    if (!found.includes(f)) found.push(f);
+  }
+
+  let conventions = '';
+  for (const f of found) {
+    const path = join(worktree, f);
+    if (existsSync(path)) {
+      conventions += `\n### ${f}\n${readFileSync(path, 'utf-8')}\n`;
+    }
+  }
+
+  // Check package.json for commitlint config
+  const pkgPath = join(worktree, 'package.json');
+  if (existsSync(pkgPath)) {
+    try {
+      const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
+      if (pkg.commitlint) {
+        conventions += `\n### package.json (commitlint)\n${JSON.stringify(pkg.commitlint, null, 2)}\n`;
+      }
+    } catch {
+      // ignore parse errors
+    }
+  }
+
+  return conventions;
+}

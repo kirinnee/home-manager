@@ -105,8 +105,10 @@ export async function handleEval(ctx: Phase3Context): Promise<string | null> {
     ghPrComments(prNumber, undefined, session.worktree).catch(() => []),
   ]);
 
-  // Detect CodeRabbit status from checks
-  const crCheck = checks.find(c => c.name.toLowerCase().includes('coderabbit'));
+  // Detect CodeRabbit status from checks (skip if coderabbit disabled)
+  const crCheck = ctx.config.settings.coderabbit
+    ? checks.find(c => c.name.toLowerCase().includes('coderabbit'))
+    : undefined;
   const crStatus: 'passing' | 'failing' | 'running' | 'none' = crCheck
     ? crCheck.status === 'passing'
       ? 'passing'
@@ -182,11 +184,12 @@ export async function handleEval(ctx: Phase3Context): Promise<string | null> {
 
   // PR comments (not from bot)
   for (const comment of prComments) {
-    if (comment.author.login === 'claude[bot]') continue;
+    const login = comment.author?.login;
+    if (!login || login === 'claude[bot]') continue;
     units.push({
       id: `comment-${comment.id}`,
       type: 'pr_comment',
-      title: `PR comment by ${comment.author.login}`,
+      title: `PR comment by ${login}`,
       content: comment.body,
       metadata: { commentId: comment.id },
     });
@@ -211,7 +214,7 @@ export async function handleEval(ctx: Phase3Context): Promise<string | null> {
   const ambiguous = evalResults.filter(r => r.ambiguous);
 
   console.log(
-    `[eval] Pre-filtered: ${autoResolved} auto-resolved, ${needsEval.length} + ${failingChecks.length} CI + ${prComments.filter(c => c.author.login !== 'claude[bot]').length} comment units evaluated`,
+    `[eval] Pre-filtered: ${autoResolved} auto-resolved, ${needsEval.length} + ${failingChecks.length} CI + ${prComments.filter(c => c.author?.login && c.author.login !== 'claude[bot]').length} comment units evaluated`,
   );
   console.log(
     `[eval] Results: ${evalResults.filter(r => r.verdict === 'reply').length} replies, ${evalResults.filter(r => r.verdict === 'resolve').length} resolves, ${codeFixes.length} code fixes, ${ambiguous.length} ambiguous`,

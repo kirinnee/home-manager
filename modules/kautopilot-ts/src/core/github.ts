@@ -52,12 +52,11 @@ function parseJson<T>(stdout: string, label: string): T {
 
 interface GhCheck {
   name: string;
-  status: string;
-  conclusion: string | null;
+  state: string;
 }
 
 export async function ghPrChecks(prNumber: number, cwd?: string): Promise<CheckStatus[]> {
-  const result = await gh(['pr', 'checks', String(prNumber), '--json', 'name,status,conclusion'], cwd);
+  const result = await gh(['pr', 'checks', String(prNumber), '--json', 'name,state'], cwd);
 
   if (result.exitCode !== 0) {
     throw new Error(`gh pr checks failed: ${result.stderr}`);
@@ -66,12 +65,7 @@ export async function ghPrChecks(prNumber: number, cwd?: string): Promise<CheckS
   const checks = parseJson<GhCheck[]>(result.stdout, 'pr-checks');
   return checks.map(c => ({
     name: c.name,
-    status:
-      c.status === 'completed' && c.conclusion === 'success'
-        ? 'passing'
-        : c.status === 'completed' && c.conclusion === 'failure'
-          ? 'failing'
-          : 'pending',
+    status: c.state === 'pass' ? 'passing' : c.state === 'fail' ? 'failing' : 'pending',
   }));
 }
 
@@ -114,7 +108,6 @@ interface GhReviewThread {
     id: string;
     author: { login: string };
     body: string;
-    isBot: boolean;
     createdAt: string;
   }[];
 }
@@ -134,7 +127,6 @@ interface GhReviewThreadsResponse {
                 author: { login: string | null };
                 body: string;
                 createdAt: string;
-                isBot: boolean;
               }[];
             };
           }[];
@@ -160,7 +152,6 @@ export async function ghReviewThreads(prNumber: number, cwd?: string): Promise<P
                   author { login }
                   body
                   createdAt
-                  isBot
                 }
               }
             }
@@ -181,7 +172,7 @@ export async function ghReviewThreads(prNumber: number, cwd?: string): Promise<P
       `owner=${repoInfo.owner}`,
       '-f',
       `repo=${repoInfo.repo}`,
-      '-f',
+      '-F',
       `pr=${prNumber}`,
     ],
     cwd,
@@ -206,7 +197,7 @@ export async function ghReviewThreads(prNumber: number, cwd?: string): Promise<P
         id: c.id,
         author: c.author?.login || 'unknown',
         body: c.body,
-        isBot: c.isBot ?? c.author?.login?.includes('[bot]') ?? false,
+        isBot: c.author?.login?.includes('[bot]') ?? false,
       })),
     }));
 }
@@ -419,8 +410,6 @@ interface GhMergePolicyResponse {
           requiredStatusCheckContexts: string[];
           requiresStrictStatusChecks: boolean;
           requiresCodeOwnerReviews: boolean;
-          allowDeletions: boolean;
-          allowForcePushes: boolean;
         }>;
       };
       defaultBranchRef: {
@@ -453,8 +442,6 @@ export async function ghFetchMergePolicy(owner: string, repo: string, cwd?: stri
             requiredStatusCheckContexts
             requiresStrictStatusChecks
             requiresCodeOwnerReviews
-            allowDeletions
-            allowForcePushes
           }
         }
         defaultBranchRef {

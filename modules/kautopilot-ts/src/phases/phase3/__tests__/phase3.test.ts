@@ -49,6 +49,7 @@ function makeCtx(overrides?: Partial<Phase3Context>): Phase3Context {
         maxPushCycles: 10,
         pollInterval: 60,
         defaultLlmTimeout: 300,
+        coderabbit: true,
       },
       repo: {
         baseBranch: 'main',

@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { resolveSpec } from '../shared';
+import { resolveSpec, scanCommitConventions } from '../shared';
 import type { Phase2Context } from './types';
 import { appendEvent } from '../../core/log';
 import { spawnPrintRaw } from '../../llm/spawn';
@@ -32,21 +32,7 @@ export async function handleCommit(ctx: Phase2Context): Promise<string | null> {
   }
 
   // Read convention files if they exist
-  const conventionFiles = [
-    'CommitConventions.md',
-    'CONTRIBUTING.md',
-    '.commitlintrc',
-    '.commitlintrc.js',
-    '.commitlintrc.json',
-  ];
-
-  let conventions = '';
-  for (const f of conventionFiles) {
-    const path = `${session.worktree}/${f}`;
-    if (existsSync(path)) {
-      conventions += `\n### ${f}\n${readFileSync(path, 'utf-8')}\n`;
-    }
-  }
+  const conventions = scanCommitConventions(session.worktree);
 
   // Resolve the active plan (highest rewrite suffix for this ordinal)
   const { resolveActivePlans } = await import('../shared');

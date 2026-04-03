@@ -599,3 +599,70 @@ describe('E2E Scenario 8: Crash and resume flow', () => {
     expect(resetEvent?.metadata?.checkpoint).toBe('clear_loop');
   });
 });
+
+describe('E2E Scenario 9: Crash during re-executed checkpoint state', () => {
+  const S = `e2e-crash-checkpoint-reexec-${Date.now()}`;
+  afterEach(() => cleanSession(S));
+
+  it('crash in create_pr → reset to push checkpoint → resumes at create_pr (skips push)', () => {
+    // Scenario: push completes (checkpoint), create_pr crashes.
+    // Reset to checkpoint push means push succeeded — resume from create_pr.
+    appendEvent(S, {
+      ts: '2026-04-01T10:00:00Z',
+      event: 'start:started',
+      metadata: { pid: 99999998, phase: 'polish' },
+    });
+    appendEvent(S, { ts: '2026-04-01T10:00:01Z', event: 'phase3:started', version: 1 });
+
+    // commit_pending completes (checkpoint)
+    appendEvent(S, {
+      ts: '2026-04-01T10:01:00Z',
+      event: 'commit_pending:started',
+      version: 1,
+      metadata: { stepType: 'code' },
+    });
+    appendEvent(S, { ts: '2026-04-01T10:01:01Z', event: 'commit_pending:completed', version: 1 });
+
+    // prereview completes (not a checkpoint)
+    appendEvent(S, {
+      ts: '2026-04-01T10:01:30Z',
+      event: 'prereview:started',
+      version: 1,
+      metadata: { stepType: 'code' },
+    });
+    appendEvent(S, { ts: '2026-04-01T10:01:31Z', event: 'prereview:completed', version: 1 });
+
+    // push completes (checkpoint = push)
+    appendEvent(S, { ts: '2026-04-01T10:02:00Z', event: 'push:started', version: 1, metadata: { stepType: 'code' } });
+    appendEvent(S, { ts: '2026-04-01T10:02:01Z', event: 'push:completed', version: 1 });
+
+    // create_pr starts then crashes (no :completed)
+    appendEvent(S, {
+      ts: '2026-04-01T10:03:00Z',
+      event: 'create_pr:started',
+      version: 1,
+      metadata: { stepType: 'code' },
+    });
+
+    let status = ensureStatus(S);
+    expect(status.state).toBe('create_pr');
+    expect(status.lastCheckpoint).toBe('push');
+
+    // Crash recovery
+    const recovered = detectAndRecoverCrash(S, '/tmp/fake-worktree');
+    expect(recovered).toBe(true);
+
+    status = ensureStatus(S);
+    expect(status.running).toBe(false);
+    // Reset to push checkpoint — push is completed, resume from next state (create_pr)
+    expect(status.state).toBe('push');
+    expect(status.stateStatus).toBe('completed');
+    expect(status.completedSteps).toEqual(['commit_pending', 'prereview', 'push']);
+    expect(status.lastCheckpoint).toBe('push');
+
+    // Verify WAL
+    const log = readLog(S);
+    const resetEvent = log.findLast(e => e.event === 'reset:completed');
+    expect(resetEvent?.metadata?.checkpoint).toBe('push');
+  });
+});

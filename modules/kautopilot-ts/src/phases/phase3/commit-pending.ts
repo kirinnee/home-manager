@@ -1,12 +1,12 @@
-import { existsSync, readFileSync } from 'node:fs';
 import type { Phase3Context } from './types';
 import { appendEvent } from '../../core/log';
 import { spawnPrintRaw } from '../../llm/spawn';
 import { writeStepInit } from '../../core/step-init';
 import { getAgentPrompt, getAgentBinary } from '../../core/agents';
+import { scanCommitConventions } from '../shared';
 
 export async function handleCommitPending(ctx: Phase3Context): Promise<string | null> {
-  const { session, version } = ctx;
+  const { session, version, config } = ctx;
 
   appendEvent(session.id, {
     ts: new Date().toISOString(),
@@ -39,7 +39,7 @@ export async function handleCommitPending(ctx: Phase3Context): Promise<string | 
       version,
       metadata: { skipped: true },
     });
-    return 'prereview';
+    return config.settings.coderabbit ? 'prereview' : 'push';
   }
 
   // LLM --print: detect conventions and generate commit message
@@ -50,20 +50,7 @@ export async function handleCommitPending(ctx: Phase3Context): Promise<string | 
     commitLog = '';
   }
 
-  const conventionFiles = [
-    'CommitConventions.md',
-    'CONTRIBUTING.md',
-    '.commitlintrc',
-    '.commitlintrc.js',
-    '.commitlintrc.json',
-  ];
-  let conventions = '';
-  for (const f of conventionFiles) {
-    const path = `${session.worktree}/${f}`;
-    if (existsSync(path)) {
-      conventions += `\n### ${f}\n${readFileSync(path, 'utf-8')}\n`;
-    }
-  }
+  const conventions = scanCommitConventions(session.worktree);
 
   // Build diff summary for context
   const diffContent = await $`git diff --stat`.cwd(session.worktree).quiet().text();

@@ -19634,6 +19634,7 @@ async function handler5(id, opts, deps) {
             status: status.status,
             loop: status.loops.length > 0 ? status.loops[status.loops.length - 1].loop : 0,
             maxIterations: config?.maxIterations,
+            compressSpec: config?.compressSpec,
             startedAt: status.startedAt,
             elapsedMs,
             exitCode: status.exitCode,
@@ -19698,9 +19699,10 @@ async function handler5(id, opts, deps) {
       const phases = config.reviewPhases;
       const phaseCount = phases?.length ?? 1;
       const revCount = phases?.flat().length ?? 0;
+      const compressLabel = config.compressSpec ? 'on' : 'off';
       console.log(
         import_picocolors6.default.dim(
-          `Impl: ${implStr}  |  ${revCount} reviewers in ${phaseCount} phase${phaseCount > 1 ? 's' : ''}  |  max ${config.maxIterations} loops`,
+          `Impl: ${implStr}  |  ${revCount} reviewers in ${phaseCount} phase${phaseCount > 1 ? 's' : ''}  |  max ${config.maxIterations} loops  |  compress: ${compressLabel}`,
         ),
       );
       console.log('');
@@ -19939,6 +19941,7 @@ async function handler6(runId, opts, deps) {
             status: status.status,
             loop: status.loops.length > 0 ? status.loops[status.loops.length - 1].loop : 0,
             maxIterations: config?.maxIterations,
+            compressSpec: config?.compressSpec,
             startedAt: status.startedAt,
             elapsedMs,
             exitCode: status.exitCode,
@@ -20014,8 +20017,9 @@ async function handler6(runId, opts, deps) {
           console.log(`    Phase ${i}:    ${phases[i].map(shortBinary2).join(', ')}`);
         }
       }
+      const compressLabel = config.compressSpec ? 'on' : 'off';
       console.log(
-        `  Max: ${config.maxIterations} loops | Impl: ${config.implementerTimeout}m | Rev: ${config.reviewerTimeout}m`,
+        `  Max: ${config.maxIterations} loops | Impl: ${config.implementerTimeout}m | Rev: ${config.reviewerTimeout}m | Compress: ${compressLabel}`,
       );
       console.log('');
     }

@@ -189,6 +189,7 @@ export async function handler(runId: string | undefined, opts: { json: boolean }
             status: status.status,
             loop: status.loops.length > 0 ? status.loops[status.loops.length - 1].loop : 0,
             maxIterations: config?.maxIterations,
+            compressSpec: config?.compressSpec,
             startedAt: status.startedAt,
             elapsedMs,
             exitCode: status.exitCode,
@@ -269,8 +270,9 @@ export async function handler(runId: string | undefined, opts: { json: boolean }
           console.log(`    Phase ${i}:    ${phases[i].map(shortBinary).join(', ')}`);
         }
       }
+      const compressLabel = config.compressSpec ? 'on' : 'off';
       console.log(
-        `  Max: ${config.maxIterations} loops | Impl: ${config.implementerTimeout}m | Rev: ${config.reviewerTimeout}m`,
+        `  Max: ${config.maxIterations} loops | Impl: ${config.implementerTimeout}m | Rev: ${config.reviewerTimeout}m | Compress: ${compressLabel}`,
       );
       console.log('');
     }
