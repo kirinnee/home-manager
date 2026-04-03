@@ -114,11 +114,13 @@ export const configSchema = z.object({
       maxPushCycles: z.number().min(1).max(20).default(10),
       pollInterval: z.number().min(5).max(300).default(60),
       defaultLlmTimeout: z.number().min(10).max(600).default(300),
+      coderabbit: z.boolean().default(true),
     })
     .default({
       maxPushCycles: 10,
       pollInterval: 60,
       defaultLlmTimeout: 300,
+      coderabbit: true,
     }),
   repo: z
     .object({
@@ -272,9 +274,13 @@ Preserve what was working. Only change what needs to change.
 Output ONLY the rewritten spec in markdown format.`,
       },
       commit: {
-        prompt: `Generate a commit message following project conventions.
-First line is the title (max 72 chars). Blank line, then body if needed.
-Match the style of recent commits in the repo.`,
+        prompt: `Generate a commit message for the implemented plan.
+Rules:
+1. If convention files are provided, follow them EXACTLY (format, prefix, scope, etc.)
+2. If no convention files but recent commits use a pattern (e.g., "feat:", "fix:", ticket prefixes), match that pattern
+3. First line is the title (max 72 chars). Blank line, then body if needed
+4. Body should briefly describe what was implemented from the plan
+5. Do NOT invent conventions — only follow what you see in the repo`,
       },
     },
     phase3: {
@@ -289,8 +295,12 @@ Deduplicate overlapping fixes on the same file.
 Output the complete spec (not just the changes).`,
       },
       commit_pending: {
-        prompt: `Generate a commit message for pending changes.
-First line is the title. Match the style of recent commits.`,
+        prompt: `Generate a commit message for pending uncommitted changes.
+Rules:
+1. If convention files are provided, follow them EXACTLY (format, prefix, scope, etc.)
+2. If no convention files but recent commits use a pattern (e.g., "feat:", "fix:", ticket prefixes), match that pattern
+3. First line is the title (max 72 chars). Blank line, then body if needed
+4. Do NOT invent conventions — only follow what you see in the repo`,
       },
       prereview_classify: {
         prompt: `Classify CodeRabbit findings as fix/comment/ignore.
@@ -407,6 +417,7 @@ Output ONLY the problems found — one per line. If none, output "No issues foun
     maxPushCycles: 10,
     pollInterval: 60,
     defaultLlmTimeout: 300,
+    coderabbit: true,
   },
   repo: {
     baseBranch: 'main',

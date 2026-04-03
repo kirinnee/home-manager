@@ -68,6 +68,19 @@ export function createBranch(name: string, cwd?: string): void {
   }
 }
 
+export function detectDefaultBranch(cwd?: string): string {
+  // Try git symbolic-ref for the remote HEAD
+  const result = gitSync(['symbolic-ref', 'refs/remotes/origin/HEAD', '--short'], cwd);
+  if (result.exitCode === 0) {
+    // Returns e.g. "origin/master" → strip "origin/"
+    return result.stdout.replace(/^origin\//, '');
+  }
+  // Fallback: check if master exists
+  const masterCheck = gitSync(['rev-parse', '--verify', 'refs/remotes/origin/master'], cwd);
+  if (masterCheck.exitCode === 0) return 'master';
+  return 'main';
+}
+
 export function isOnMain(baseBranch?: string, cwd?: string): boolean {
   const branch = getCurrentBranch(cwd);
   const mainBranch = baseBranch || 'main';

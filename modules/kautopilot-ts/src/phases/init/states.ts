@@ -39,6 +39,7 @@ import {
   getCurrentBranch,
   createBranch,
   isOnMain,
+  detectDefaultBranch,
 } from '../../core/git';
 import { renderMarkdown } from '../../util/markdown';
 import { logField, logOk, logWarn, logInfo, logDim } from '../../util/format';
@@ -960,9 +961,10 @@ export const promote: InitStateHandler = async ctx => {
     }
   }
 
-  // Write config
+  // Write config — auto-detect default branch from remote
   config.repo.org = org;
   config.repo.ticketSystem = null;
+  config.repo.baseBranch = detectDefaultBranch(workDir);
   writeConfig(sessionId, config);
 
   // Resolve ticket ID
@@ -1075,9 +1077,10 @@ export const downgrade_local: InitStateHandler = async ctx => {
   const sDir = sessionDir(sessionId);
   mkdirSync(sDir, { recursive: true });
 
-  // Write config
+  // Write config — auto-detect default branch from remote
   config.repo.org = org;
   config.repo.ticketSystem = null;
+  config.repo.baseBranch = detectDefaultBranch(workDir);
   writeConfig(sessionId, config);
 
   // Local ticket ID

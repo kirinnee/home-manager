@@ -25,7 +25,7 @@ export async function handlePush(ctx: Phase3Context): Promise<string | null> {
 
   try {
     // Check if this is the first push (no upstream tracking)
-    const remoteResult = await $`git rev-parse --abbrev-ref @{upstream}`.cwd(session.worktree).quiet();
+    const remoteResult = await $`git rev-parse --abbrev-ref @{upstream}`.cwd(session.worktree).quiet().nothrow();
     const hasUpstream = remoteResult.exitCode === 0;
 
     if (!hasUpstream) {

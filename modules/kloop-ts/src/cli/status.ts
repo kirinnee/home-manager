@@ -191,6 +191,7 @@ export async function handler(id: string | undefined, opts: { json: boolean }, d
             status: status.status,
             loop: status.loops.length > 0 ? status.loops[status.loops.length - 1].loop : 0,
             maxIterations: config?.maxIterations,
+            compressSpec: config?.compressSpec,
             startedAt: status.startedAt,
             elapsedMs,
             exitCode: status.exitCode,
@@ -260,9 +261,10 @@ export async function handler(id: string | undefined, opts: { json: boolean }, d
       const phases = config.reviewPhases as string[][];
       const phaseCount = phases?.length ?? 1;
       const revCount = phases?.flat().length ?? 0;
+      const compressLabel = config.compressSpec ? 'on' : 'off';
       console.log(
         pc.dim(
-          `Impl: ${implStr}  |  ${revCount} reviewers in ${phaseCount} phase${phaseCount > 1 ? 's' : ''}  |  max ${config.maxIterations} loops`,
+          `Impl: ${implStr}  |  ${revCount} reviewers in ${phaseCount} phase${phaseCount > 1 ? 's' : ''}  |  max ${config.maxIterations} loops  |  compress: ${compressLabel}`,
         ),
       );
       console.log('');

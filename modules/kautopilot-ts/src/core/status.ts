@@ -276,7 +276,7 @@ function applyEvent(status: SessionStatus, entry: LogEntry, index: number): void
     Object.assign(status.context, contextFields);
   }
 
-  // Reset — roll back to checkpoint
+  // Reset — roll back to checkpoint (resume from the next state after it)
   if (event === 'reset:completed' && entry.metadata?.checkpoint) {
     const checkpoint = entry.metadata.checkpoint as string;
     status.state = checkpoint;

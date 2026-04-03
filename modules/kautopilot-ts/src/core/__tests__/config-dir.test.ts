@@ -33,6 +33,7 @@ const TEST_CONFIG: Config = {
     maxPushCycles: 10,
     pollInterval: 60,
     defaultLlmTimeout: 300,
+    coderabbit: true,
   },
   repo: {
     baseBranch: 'main',
