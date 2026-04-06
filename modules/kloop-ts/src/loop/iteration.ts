@@ -80,4 +80,3 @@ export function buildIterationData(
 
 // Re-export for use by loop/runner.ts
 export { buildReviewerPrompt } from '../agents/prompts';
-export type { ReviewerPromptVars } from '../agents/prompts';

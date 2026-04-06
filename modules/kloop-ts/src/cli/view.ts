@@ -363,8 +363,8 @@ async function followLog(agent: AgentEntry, opts: { since?: string }): Promise<v
     stream.destroy();
     process.exit(0);
   };
-  process.on('SIGINT', cleanup, { once: true });
-  process.on('SIGTERM', cleanup, { once: true });
+  process.on('SIGINT', () => cleanup());
+  process.on('SIGTERM', () => cleanup());
 }
 
 function formatLine(line: string): void {

@@ -44,13 +44,8 @@ function formatUserMessage(content: string | Array<ContentBlock>): string {
 
   // tool_use_result / tool_result blocks — show truncated summary
   const toolResults = content.filter(
-    (
-      c,
-    ): c is {
-      type: 'tool_use_result' | 'tool_result';
-      tool_use_id: string;
-      content: string | Array<{ type: string; text?: string }>;
-    } => c.type === 'tool_use_result' || c.type === 'tool_result',
+    (c): c is Extract<ContentBlock, { type: 'tool_use_result' }> | Extract<ContentBlock, { type: 'tool_result' }> =>
+      c.type === 'tool_use_result' || c.type === 'tool_result',
   );
   if (toolResults.length > 0) {
     return pc.dim(`  ↳ ${toolResults.length} tool result(s)`);

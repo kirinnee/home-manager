@@ -9,7 +9,7 @@ import { getDirHash } from '../deps';
 // TmuxService class (IO edge)
 // ============================================================================
 
-export class TmuxServiceImpl implements TmuxService {
+class TmuxServiceImpl implements TmuxService {
   private statusDir = path.join(os.tmpdir(), 'kloop', 'status');
 
   constructor(private spawn: typeof Bun.spawn = Bun.spawn.bind(Bun)) {}

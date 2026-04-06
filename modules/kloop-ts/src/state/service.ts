@@ -22,10 +22,14 @@ import { generateRunId, getCurrentTimestamp, SPEC_TEMPLATE } from '../deps';
 import * as config from './config';
 
 export class StateService {
+  public readonly fs: FsService;
+
   constructor(
-    private fs: FsService,
+    fs: FsService,
     private paths: Paths,
-  ) {}
+  ) {
+    this.fs = fs;
+  }
 
   // Configuration
   async initProject(overrides: Record<string, unknown> = {}): Promise<void> {

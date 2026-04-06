@@ -1,6 +1,7 @@
 import pc from 'picocolors';
 import Table from 'cli-table3';
 import type { IndexDb, EventLog, PidLock } from '../index-db';
+import type { TmuxService } from '../deps';
 import { reapDeadRun } from '../index-db';
 import type { CliDeps } from './index';
 import { formatDurationHuman, formatAgeHuman } from '../loop/format';

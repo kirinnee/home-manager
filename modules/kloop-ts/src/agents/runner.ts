@@ -31,6 +31,7 @@ export interface AgentResult {
 export interface ImplementerResult extends AgentResult {
   learnings: string | null;
   binary: string;
+  harness: HarnessType;
   inputTokens?: number;
   outputTokens?: number;
   harnessSessionId?: string;
@@ -39,6 +40,7 @@ export interface ImplementerResult extends AgentResult {
 export interface ReviewerResult extends AgentResult {
   reviewerIndex: number;
   binary: string;
+  harness: HarnessType;
   verdict: Verdict;
   reasoning: string;
   completionEstimate?: number;
@@ -51,9 +53,9 @@ export interface ReviewerResult extends AgentResult {
   harnessSessionId?: string;
 }
 
-export type CheckpointerOutcome = 'conflict_found' | 'spec_auto_fixed' | 'spec_compressed' | 'no_action';
+type CheckpointerOutcome = 'conflict_found' | 'spec_auto_fixed' | 'spec_compressed' | 'no_action';
 
-export interface CheckpointerResult extends AgentResult {
+interface CheckpointerResult extends AgentResult {
   outcome: CheckpointerOutcome;
   summary: string;
   progressPercent?: number;
@@ -233,6 +235,7 @@ export class AgentRunner {
       timedOut: result.timedOut,
       learnings,
       binary: parsedImpl.binary,
+      harness: parsedImpl.harness,
       inputTokens: tokens.inputTokens,
       outputTokens: tokens.outputTokens,
       harnessSessionId: session.harnessSessionId,
@@ -449,6 +452,7 @@ export class AgentRunner {
       timedOut: result.timedOut,
       reviewerIndex,
       binary,
+      harness,
       verdict,
       reasoning,
       completionEstimate,

@@ -115,7 +115,6 @@ function normalizeEvent(obj: unknown): StreamEvent {
     return {
       type: 'assistant',
       message: {
-        role: 'assistant',
         content: normalizedContent,
       },
     };
@@ -127,7 +126,7 @@ function normalizeEvent(obj: unknown): StreamEvent {
     return {
       type: 'user',
       message: {
-        content: typeof content === 'string' ? content : (content ?? ''),
+        content: typeof content === 'string' ? content : Array.isArray(content) ? (content as Array<ContentBlock>) : '',
       },
     };
   }
@@ -165,7 +164,7 @@ export function extractToolUses(content: Array<ContentBlock>): Array<{ name: str
 // Token extraction from log files
 // ============================================================================
 
-export interface TokenCounts {
+interface TokenCounts {
   inputTokens?: number;
   outputTokens?: number;
 }
@@ -189,7 +188,7 @@ export async function extractHarnessSessionId(logFilePath: string): Promise<stri
  * Parse log content for the harness-native session ID.
  * Gemini emits: {"type":"init","session_id":"..."}
  */
-export function extractHarnessSessionIdFromContent(content: string): string | undefined {
+function extractHarnessSessionIdFromContent(content: string): string | undefined {
   for (const line of content.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -224,7 +223,7 @@ export async function extractTokensFromLog(logFilePath: string): Promise<TokenCo
  * Parse log content for the result event and extract token counts.
  * Supports both Claude (usage.*) and Gemini (stats.*) token formats.
  */
-export function extractTokensFromContent(content: string): TokenCounts {
+function extractTokensFromContent(content: string): TokenCounts {
   const result: TokenCounts = {};
 
   for (const line of content.split('\n')) {
