@@ -4,7 +4,7 @@ import type { Verdict, VerdictFile } from '../types';
 // Pure: parse verdict from file or text
 // ============================================================================
 
-export interface VerdictParseResult {
+interface VerdictParseResult {
   verdict: Verdict | null;
   reasoning: string;
   completionEstimate?: number;

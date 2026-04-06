@@ -13,7 +13,8 @@ import {
  * Substitute {placeholder} tokens in a template string.
  * Unknown placeholders are left as-is.
  */
-export function substitute(template: string, vars: Record<string, string>): string {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function substitute(template: string, vars: any): string {
   return template.replace(/{(\w+)}/g, (_, key) => vars[key] ?? `{${key}}`);
 }
 

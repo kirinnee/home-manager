@@ -1,34 +1,11 @@
 import * as path from 'path';
-import type { FsService, Paths } from '../deps';
+import type { FsService, Paths, LogFile, RunLogs, LogsService } from '../deps';
 
 // ============================================================================
 // LogsService - reads raw JSON logs from ~/.kloop/{runId}/loop-{L}/{agent}/log
 // ============================================================================
 
-export interface LogFile {
-  runId: string;
-  name: string;
-  path: string;
-  iteration: number;
-  role: 'impl' | 'rev';
-  reviewerIndex?: number;
-}
-
-export interface RunLogs {
-  runId: string;
-  logs: LogFile[];
-}
-
-export interface LogsService {
-  listRuns(): Promise<string[]>;
-  listLogs(runId?: string): Promise<LogFile[]>;
-  listLogsByRun(): Promise<RunLogs[]>;
-  readLog(logPath: string): Promise<string>;
-  parseLogName(name: string): Omit<LogFile, 'runId' | 'name' | 'path'> | null;
-  getCurrentRunId(): Promise<string | null>;
-}
-
-export class LogsServiceImpl implements LogsService {
+class LogsServiceImpl implements LogsService {
   constructor(
     private fs: FsService,
     private paths: Paths,

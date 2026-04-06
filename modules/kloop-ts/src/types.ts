@@ -15,7 +15,7 @@ export const metricSampleSchema = z.object({
 
 export type MetricSample = z.infer<typeof metricSampleSchema>;
 
-export const configSchema = z
+const configSchema = z
   .object({
     // Binary names — new format: weighted implementers
     implementers: z.record(z.string(), z.number().int().positive()).optional(),
@@ -107,10 +107,10 @@ export const resolvedConfigSchema = z.object({
 
 export type Config = z.infer<typeof resolvedConfigSchema>;
 
-export const runStatusSchema = z.enum(['running', 'completed', 'cancelled', 'failed', 'conflict']);
+const runStatusSchema = z.enum(['running', 'completed', 'cancelled', 'failed', 'conflict']);
 export const phaseSchema = z.enum(['implementing', 'reviewing', 'done']);
-export const agentRoleSchema = z.enum(['implementer', 'reviewer', 'checkpointer']);
-export const sessionStatusSchema = z.enum(['running', 'completed', 'error']);
+const agentRoleSchema = z.enum(['implementer', 'reviewer', 'checkpointer']);
+const sessionStatusSchema = z.enum(['running', 'completed', 'error']);
 export const verdictSchema = z.enum(['approved', 'rejected']);
 
 // Run state stored in .kagent/current/run.json
@@ -125,49 +125,9 @@ export const runSchema = z.object({
   consecutiveFailures: z.number().int().nonnegative().default(0),
 });
 
-export type RunStatus = z.infer<typeof runStatusSchema>;
 export type Phase = z.infer<typeof phaseSchema>;
-export type AgentRole = z.infer<typeof agentRoleSchema>;
-export type SessionStatus = z.infer<typeof sessionStatusSchema>;
 export type Verdict = z.infer<typeof verdictSchema>;
 export type Run = z.infer<typeof runSchema>;
-
-// Verdict enum for convenience (matches verdictSchema)
-export const VERDICT = {
-  APPROVED: 'approved' as const,
-  REJECTED: 'rejected' as const,
-} as const;
-
-// Run status enum
-export const RUN_STATUS = {
-  RUNNING: 'running' as const,
-  COMPLETED: 'completed' as const,
-  CANCELLED: 'cancelled' as const,
-  FAILED: 'failed' as const,
-  CONFLICT: 'conflict' as const,
-} as const;
-
-// Agent status enum
-export const AGENT_STATUS = {
-  NOT_STARTED: 'not_started' as const,
-  RUNNING: 'running' as const,
-  COMPLETED: 'completed' as const,
-  ERROR: 'error' as const,
-} as const;
-
-// Agent role enum
-export const AGENT_ROLE = {
-  IMPLEMENTER: 'implementer' as const,
-  REVIEWER: 'reviewer' as const,
-  CHECKPOINTER: 'checkpointer' as const,
-} as const;
-
-// Phase enum
-export const PHASE = {
-  IMPLEMENTING: 'implementing' as const,
-  REVIEWING: 'reviewing' as const,
-  DONE: 'done' as const,
-} as const;
 
 // Session stored in .kagent/current/sessions/{id}.json
 export const sessionSchema = z.object({
@@ -196,7 +156,7 @@ export const verdictFileSchema = z.object({
 export type VerdictFile = z.infer<typeof verdictFileSchema>;
 
 // History entry stored in .kagent/history/{id}.json
-export const sessionSummarySchema = z.object({
+const sessionSummarySchema = z.object({
   role: agentRoleSchema,
   reviewerIndex: z.number().int().nonnegative().optional(),
 });
@@ -243,7 +203,6 @@ export const historyEntrySchema = z.object({
   metricsSummary: metricsSummarySchema.optional(),
 });
 
-export type SessionSummary = z.infer<typeof sessionSummarySchema>;
 export type IterationSummary = z.infer<typeof iterationSummarySchema>;
 export type HistoryEntry = z.infer<typeof historyEntrySchema>;
 
@@ -285,7 +244,7 @@ export interface ReviewerBinary extends ParsedBinary {
  * Validate a harness type string.
  * @throws if the harness value is not 'claude' or 'gemini'
  */
-export function parseHarness(value: string): HarnessType {
+function parseHarness(value: string): HarnessType {
   if (value === 'claude' || value === 'gemini') {
     return value;
   }
@@ -416,31 +375,10 @@ export const DEFAULT_CONFIG: Config = {
 // ============================================================================
 
 /**
- * Get all implementer binary names from config
- */
-export function getImplementerBinaries(config: Config): string[] {
-  return Object.keys(config.implementers);
-}
-
-/**
  * Get the first implementer binary (for backwards compat)
  */
 export function getPrimaryImplementer(config: Config): string {
   return Object.keys(config.implementers)[0];
-}
-
-/**
- * Get all reviewer binaries flattened from phases
- */
-export function getAllReviewers(config: Config): string[] {
-  return config.reviewPhases.flat();
-}
-
-/**
- * Get total reviewers across all phases
- */
-export function getTotalReviewers(config: Config): number {
-  return config.reviewPhases.reduce((sum, phase) => sum + phase.length, 0);
 }
 
 /**
@@ -715,14 +653,6 @@ export interface KloopRunState {
   startedAt: string;
   lastEventAt: string;
   config?: Config;
-}
-
-// Lock file format
-export interface LockFile {
-  pid: number;
-  runId: string;
-  workspace: string;
-  createdAt: string;
 }
 
 // Index db row (stored in SQLite)

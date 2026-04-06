@@ -139,7 +139,7 @@ export class EventLog {
 // PID Lock
 // ============================================================================
 
-export interface LockInfo {
+interface LockInfo {
   pid: number;
   runId: string;
   workspace: string;

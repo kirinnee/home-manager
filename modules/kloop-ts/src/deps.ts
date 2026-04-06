@@ -1,9 +1,7 @@
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs/promises';
-import type { Config, Run, HistoryEntry, CheckpointResult } from './types';
-export type { VerdictFile } from './types';
-import { DEFAULT_CONFIG } from './types';
+import type { Config, Run, Session, HistoryEntry, CheckpointResult } from './types';
 
 // ============================================================================
 // Dependency Interfaces
@@ -101,6 +99,7 @@ export interface TmuxService {
 }
 
 export interface StateService {
+  fs: FsService;
   initProject(config?: Partial<Config>): Promise<void>;
   hasConfig(): Promise<boolean>;
   loadConfig(): Promise<Config>;
@@ -354,24 +353,6 @@ export const SPEC_TEMPLATE = `# Specification: [Title]
 ## Technical Constraints
 - [Any specific requirements or limitations]
 `;
-
-// ============================================================================
-// Dependency Factory
-// ============================================================================
-
-export interface Dependencies {
-  paths: Paths;
-  fs: FsService;
-}
-
-export function createDeps(overrides: Partial<Dependencies> = {}): Dependencies {
-  return {
-    paths: overrides.paths ?? paths,
-    fs: overrides.fs ?? defaultFsService,
-  };
-}
-
-export type Deps = ReturnType<typeof createDeps>;
 
 /**
  * Count existing spec-N.md files in a run directory to determine the next version number.

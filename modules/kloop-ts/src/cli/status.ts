@@ -324,7 +324,7 @@ export async function handler(id: string | undefined, opts: { json: boolean }, d
     const learningsPath = paths.runLearnings(runId);
     if (await state.fs.exists(learningsPath)) {
       const content = await state.fs.readFile(learningsPath);
-      const lines = content.split('\n').filter(l => l.trim() && !l.startsWith('#'));
+      const lines = content.split('\n').filter((l: string) => l.trim() && !l.startsWith('#'));
       if (lines.length > 0) {
         console.log(pc.cyan(`Learnings (${lines.length}):`));
         for (let i = 0; i < Math.min(3, lines.length); i++) {

@@ -54,7 +54,7 @@ class AgentFailureError extends Error {
   }
 }
 
-export interface LoopResult {
+interface LoopResult {
   status: 'completed' | 'cancelled' | 'failed' | 'max_iterations' | 'conflict' | 'agent_failure';
   finalRun: Run;
   historyEntry: HistoryEntry;

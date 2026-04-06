@@ -220,17 +220,17 @@ function aggregate(samples: Sample[], aggregation: ParsedQuery['aggregation'], g
     const dur = compute(
       n,
       group.samples.map(s => s.durationMs),
-      aggregation,
+      aggregation!,
     );
     const inTok = compute(
       n,
       group.samples.map(s => s.inputTokens),
-      aggregation,
+      aggregation!,
     );
     const outTok = compute(
       n,
       group.samples.map(s => s.outputTokens),
-      aggregation,
+      aggregation!,
     );
 
     results.push({ labels: group.labels, count: n, durationMs: dur, inputTokens: inTok, outputTokens: outTok });

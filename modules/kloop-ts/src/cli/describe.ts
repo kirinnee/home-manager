@@ -264,10 +264,10 @@ export async function handler(runId: string | undefined, opts: { json: boolean }
       }
       const phases = config.reviewPhases as string[][];
       if (phases?.length === 1) {
-        console.log(`  Reviewers:   ${phases[0].map(shortBinary).join(', ')}`);
+        console.log(`  Reviewers:   ${phases[0].map(b => shortBinary(b)).join(', ')}`);
       } else if (phases) {
         for (let i = 0; i < phases.length; i++) {
-          console.log(`    Phase ${i}:    ${phases[i].map(shortBinary).join(', ')}`);
+          console.log(`    Phase ${i}:    ${phases[i].map(b => shortBinary(b)).join(', ')}`);
         }
       }
       const compressLabel = config.compressSpec ? 'on' : 'off';
@@ -333,7 +333,7 @@ export async function handler(runId: string | undefined, opts: { json: boolean }
     const learningsPath = paths.runLearnings(runId);
     if (await state.fs.exists(learningsPath)) {
       const content = await state.fs.readFile(learningsPath);
-      const lines = content.split('\n').filter(l => l.trim() && !l.startsWith('#'));
+      const lines = content.split('\n').filter((l: string) => l.trim() && !l.startsWith('#'));
       if (lines.length > 0) {
         console.log(pc.cyan(`Learnings (${lines.length}):`));
         for (let i = 0; i < Math.min(5, lines.length); i++) {

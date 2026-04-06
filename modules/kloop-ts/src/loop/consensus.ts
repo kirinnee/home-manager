@@ -12,7 +12,7 @@ export interface VerdictResult {
   error?: string; // "timeout", "no_verdict", "exit_code_N"
 }
 
-export interface ConsensusResult {
+interface ConsensusResult {
   approved: boolean;
   rejected: boolean;
   incomplete: boolean;
@@ -50,33 +50,4 @@ export function checkConsensus(
     totalPhases,
     completedPhases,
   };
-}
-
-/**
- * Check if consensus is reached (all approve)
- */
-export function isConsensusReached(verdicts: VerdictResult[]): boolean {
-  const result = checkConsensus(verdicts);
-  return result.approved;
-}
-
-/**
- * Check if iteration should continue (not unanimous approval)
- */
-export function shouldContinue(verdicts: VerdictResult[]): boolean {
-  return !isConsensusReached(verdicts);
-}
-
-/**
- * Get verdict summary for display
- */
-export function formatConsensusResult(result: ConsensusResult): string {
-  let msg = `Approved: ${result.approvedCount}/${result.totalReviewers}, Rejected: ${result.rejectedCount}/${result.totalReviewers}`;
-  if (result.totalPhases > 1) {
-    msg += ` (phases ${result.completedPhases}/${result.totalPhases})`;
-  }
-  if (result.partial) {
-    msg += ' [short-circuited]';
-  }
-  return msg;
 }

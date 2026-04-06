@@ -6,7 +6,7 @@ import { format } from 'date-fns';
 // ============================================================================
 
 /** Legacy short duration for live loop output */
-export function formatDuration(ms: number): string {
+function formatDuration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`;
   const secs = Math.floor(ms / 1000);
   if (secs < 60) return `${secs}s`;
@@ -72,7 +72,7 @@ export function formatHeader(
 ): void {
   const implBinary = config.implementers ? Object.keys(config.implementers)[0] : 'claude';
   const totalReviewers = config.reviewPhases?.reduce((sum: number, phase: string[]) => sum + phase.length, 0) ?? 0;
-  const phaseInfo = config.reviewPhases?.length > 1 ? ` in ${config.reviewPhases.length} phases` : '';
+  const phaseInfo = (config.reviewPhases?.length ?? 0) > 1 ? ` in ${config.reviewPhases!.length} phases` : '';
 
   console.log('');
   console.log(`  ${pc.bold(pc.cyan(`kloop ${runId}`))}  ${pc.green('●')}  ${pc.green('running')}`);
@@ -116,10 +116,7 @@ export function formatReviewerResult(
   );
 }
 
-export function formatConsensus(
-  approved: boolean,
-  verdictsList: Array<{ verdict: string; approved: boolean; rejected: boolean }>,
-): void {
+export function formatConsensus(approved: boolean, verdictsList: Array<{ verdict: string }>): void {
   if (approved) {
     console.log(`  ${pc.green('✓ consensus: approved')}`);
   } else {
@@ -166,19 +163,6 @@ export function formatApproval(loopNum: number): void {
 
 export function formatMaxIterations(maxIterations: number): void {
   console.log(pc.yellow(`  max iterations reached (${maxIterations})`));
-}
-
-export function formatAgentFailure(binary: string, error: string): void {
-  console.log(pc.red('  ───────────────────────────────────────────'));
-  console.log(pc.red('  AGENT FAILURE'));
-  console.log(pc.red('  ───────────────────────────────────────────'));
-  console.log(pc.red(`  ${binary}: ${error}`));
-  console.log(pc.dim('  Use kloop view to inspect the agent log.'));
-  console.log(pc.red('  ───────────────────────────────────────────'));
-}
-
-export function formatRunStart(): void {
-  console.log('');
 }
 
 export function formatAgentLaunch(

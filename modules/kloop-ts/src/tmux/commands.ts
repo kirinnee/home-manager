@@ -2,7 +2,7 @@
 // Pure: build tmux command strings and session name parsing
 // ============================================================================
 
-export interface TmuxSessionParams {
+interface TmuxSessionParams {
   dirHash: string;
   runId: string;
   iteration: number;
@@ -164,13 +164,6 @@ export function buildListSessionsCommand(): string[] {
  */
 export function buildKillSessionCommand(sessionName: string): string[] {
   return ['tmux', 'kill-session', '-t', sessionName];
-}
-
-/**
- * Build tmux command to attach to a session
- */
-export function buildAttachCommand(sessionName: string): string[] {
-  return ['tmux', 'attach', '-t', sessionName];
 }
 
 /**
