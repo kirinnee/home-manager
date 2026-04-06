@@ -36,11 +36,7 @@ export async function handleSetupRun(ctx: Phase2Context): Promise<string | null>
   const specPath = writeKloopSpec(session.id, planContent, `plan-${planIndex + 1}-spec.md`);
 
   // Write kloop config from kautopilot settings
-  const configPath = writeKloopConfig(session.id, {
-    maxIterations: ctx.config.kloop.maxIterations,
-    implementerTimeout: ctx.config.kloop.implementerTimeout,
-    reviewerTimeout: ctx.config.kloop.reviewerTimeout,
-  });
+  const configPath = writeKloopConfig(session.id, ctx.config.kloop);
 
   // Initialize kloop run with spec + config
   console.log(`[setup_run] Initializing kloop run for ${planName}...`);

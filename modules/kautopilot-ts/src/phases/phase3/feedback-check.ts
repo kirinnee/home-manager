@@ -2,6 +2,7 @@ import type { Phase3Context } from './types';
 import { appendEvent } from '../../core/log';
 import { selectOption } from '../../llm/inquirer';
 import { runScript } from '../../core/scripts';
+import { logBanner } from '../../util/format';
 
 export async function handleFeedbackCheck(ctx: Phase3Context): Promise<string | null> {
   const { session, version, prNumber, prUrl, pushCycle } = ctx;
@@ -13,20 +14,13 @@ export async function handleFeedbackCheck(ctx: Phase3Context): Promise<string | 
     metadata: { stepType: 'code' },
   });
 
-  // Build summary
-  const summary = [
-    `PR: ${prUrl || `#${prNumber}`}`,
-    `Push cycles: ${pushCycle}`,
-    ctx.mergePolicy?.requiresApprovingReviews
+  logBanner('Phase 3 Complete — PR is merge-ready', {
+    PR: prUrl || `#${prNumber}`,
+    'Push cycles': String(pushCycle),
+    Approvals: ctx.mergePolicy?.requiresApprovingReviews
       ? `Requires ${ctx.mergePolicy.requiredApprovingReviewCount} approval(s)`
       : 'No approval required',
-  ].join('\n');
-
-  console.log(`\n${'='.repeat(60)}`);
-  console.log('Phase 3 Complete — PR is merge-ready');
-  console.log(`${'='.repeat(60)}`);
-  console.log(summary);
-  console.log(`${'='.repeat(60)}\n`);
+  });
 
   const choice = await selectOption<'done' | 'feedback'>('The PR is merge-ready. What would you like to do?', [
     {

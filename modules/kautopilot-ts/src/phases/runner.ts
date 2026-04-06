@@ -15,7 +15,7 @@ export async function runPhase(
   session: SessionRow,
   config: Config,
   options?: { forceStartState?: string; versionOverride?: number },
-): Promise<boolean> {
+): Promise<boolean | 'amend_spec'> {
   try {
     switch (phase) {
       case 'plan':

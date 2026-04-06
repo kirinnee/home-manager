@@ -1,5 +1,6 @@
 import type { Phase3Context } from './types';
 import { appendEvent } from '../../core/log';
+import { logBanner } from '../../util/format';
 
 export async function handleCompleted(ctx: Phase3Context): Promise<string | null> {
   const { session, version, prNumber, prUrl } = ctx;
@@ -11,13 +12,10 @@ export async function handleCompleted(ctx: Phase3Context): Promise<string | null
     metadata: { prNumber, prUrl },
   });
 
-  console.log(`\nPhase 3 completed successfully`);
-  if (prUrl) {
-    console.log(`PR: ${prUrl}`);
-  } else if (prNumber) {
-    console.log(`PR: #${prNumber}`);
-  }
-  console.log(`The PR is merge-ready. Please review and merge manually.\n`);
+  logBanner('Phase 3 Complete', {
+    PR: prUrl || (prNumber ? `#${prNumber}` : 'N/A'),
+    Status: 'Merge-ready — please review and merge manually',
+  });
 
   return null;
 }

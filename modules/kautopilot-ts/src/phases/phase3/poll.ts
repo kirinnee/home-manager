@@ -44,16 +44,13 @@ export function computePollState(signals: PollSignals, ctx: Phase3Context): Poll
     return 'pending';
   }
 
-  // Check approval requirements from merge policy
-  if (ctx.mergePolicy?.requiresApprovingReviews) {
-    const requiredApprovals = Math.max(ctx.mergePolicy.requiredApprovingReviewCount, 1);
-    if (signals.approvals < requiredApprovals) {
-      return 'pending';
-    }
-  }
+  // Note: required reviewer approvals are intentionally excluded — they may
+  // take days and are outside automation scope. We only gate on CI/checks.
 
-  // Check GitHub mergeability after local review/CI gates
-  if (!signals.mergeable || !['CLEAN', 'HAS_HOOKS', 'UNSTABLE'].includes(signals.mergeStateStatus)) {
+  // Check GitHub mergeability after local review/CI gates.
+  // BLOCKED is allowed — it typically means required reviewers haven't approved,
+  // which we intentionally exclude from automation scope.
+  if (!signals.mergeable || !['CLEAN', 'HAS_HOOKS', 'UNSTABLE', 'BLOCKED'].includes(signals.mergeStateStatus)) {
     return 'pending';
   }
 

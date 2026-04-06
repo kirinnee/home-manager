@@ -1,8 +1,21 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'bun:test';
 import { ensureStatus } from '../../core/status';
 import { appendEvent, logPath, readLog } from '../../core/log';
-import { mkdirSync, rmSync, existsSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdirSync, rmSync, existsSync, writeFileSync, readFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+
+let origHome: string;
+let tempHome: string;
+beforeAll(() => {
+  origHome = process.env.HOME!;
+  tempHome = mkdtempSync(join(tmpdir(), 'kautopilot-outcomes-test-'));
+  process.env.HOME = tempHome;
+});
+afterAll(() => {
+  process.env.HOME = origHome;
+  rmSync(tempHome, { recursive: true, force: true });
+});
 import type { Phase3Context, PollSignals } from '../phase3/types';
 import { computeRolloverRecommendation } from '../phase3/poll';
 import {

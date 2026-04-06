@@ -39,7 +39,7 @@ export async function handleAct(ctx: Phase3Context): Promise<string | null> {
     return 'poll';
   }
 
-  const actionable = evalResults.filter(r => r.verdict !== 'skip');
+  const actionable = evalResults;
   const codeFixes: EvalResult[] = [];
   const ambiguousItems: TtyResolveItem[] = [];
   let repliesPosted = 0;

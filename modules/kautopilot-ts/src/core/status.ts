@@ -85,7 +85,7 @@ export interface SessionStatus {
 const CHECKPOINTS: Record<string, Set<string>> = {
   plan: new Set(['pull_ticket', 'write_spec', 'finalize_spec', 'finalize_plans']),
   implementation: new Set(['clear_loop', 'commit', 'next_plan', 'completed']),
-  polish: new Set(['commit_pending', 'push', 'create_pr', 'poll', 'feedback_check', 'completed']),
+  polish: new Set(['commit_pending', 'prereview', 'push', 'create_pr', 'poll', 'feedback_check', 'completed']),
 };
 
 function isCheckpoint(phase: string, state: string): boolean {
@@ -373,24 +373,24 @@ export function updateUserTurn(sessionId: string, userTurn: boolean): void {
 // Cleanup functions
 // ============================================================================
 
-type CleanupFn = (sessionId: string, version: number, worktree: string) => string[];
+type CleanupFn = (sessionId: string, version: number, worktree: string, ticketId: string) => string[];
 
 const CLEANUP: Record<string, CleanupFn> = {
-  gather_context: (_sid, v, wt) => {
-    const dir = join(wt, 'spec', `v${v}`, 'understanding');
+  gather_context: (_sid, v, wt, tid) => {
+    const dir = join(wt, 'spec', tid, `v${v}`, 'understanding');
     if (existsSync(dir)) {
       rmSync(dir, { recursive: true });
       return [`removed ${dir}`];
     }
     return [];
   },
-  running: (sid, _v, _wt) => {
+  running: (sid, _v, _wt, _tid) => {
     return cancelKloopIfAlive(sid);
   },
-  run_fix: (sid, _v, _wt) => {
+  run_fix: (sid, _v, _wt, _tid) => {
     return cancelKloopIfAlive(sid);
   },
-  ensure_branch: (_sid, _v, wt) => {
+  ensure_branch: (_sid, _v, wt, _tid) => {
     return abortRebaseIfNeeded(wt);
   },
 };
@@ -425,9 +425,9 @@ function abortRebaseIfNeeded(worktree: string): string[] {
   return [];
 }
 
-function runCleanup(state: string, sessionId: string, version: number, worktree: string): string[] {
+function runCleanup(state: string, sessionId: string, version: number, worktree: string, ticketId: string): string[] {
   const fn = CLEANUP[state];
-  return fn ? fn(sessionId, version, worktree) : [];
+  return fn ? fn(sessionId, version, worktree, ticketId) : [];
 }
 
 // ============================================================================
@@ -439,7 +439,7 @@ function runCleanup(state: string, sessionId: string, version: number, worktree:
  * Call BEFORE acquiring lock in start.ts.
  * Returns true if recovery was performed.
  */
-export function detectAndRecoverCrash(sessionId: string, worktree: string): boolean {
+export function detectAndRecoverCrash(sessionId: string, worktree: string, ticketId: string = 'local'): boolean {
   const status = ensureStatus(sessionId);
 
   // Only recover if status says running but no lock is held
@@ -465,7 +465,7 @@ export function detectAndRecoverCrash(sessionId: string, worktree: string): bool
   });
 
   // Run cleanup for the crashed state
-  const actions = runCleanup(crashedState, sessionId, version, worktree);
+  const actions = runCleanup(crashedState, sessionId, version, worktree, ticketId);
 
   appendEvent(sessionId, {
     ts: new Date().toISOString(),

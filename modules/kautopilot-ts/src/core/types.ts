@@ -47,7 +47,6 @@ export interface KloopConfig {
   conflictCheckThreshold: number;
   firstLoopFullReview: boolean;
   previousReviewPropagation: number;
-  reviewerFailureLimit: number;
   prompts?: KloopPrompts;
 }
 
@@ -61,7 +60,6 @@ export const kloopConfigSchema = z
     conflictCheckThreshold: z.number().min(1).max(10).default(2),
     firstLoopFullReview: z.boolean().default(false),
     previousReviewPropagation: z.number().min(0).max(1).default(0),
-    reviewerFailureLimit: z.number().min(1).max(10).default(2),
     prompts: kloopPromptsSchema,
   })
   .default({});
@@ -69,11 +67,6 @@ export const kloopConfigSchema = z
 // ============================================================================
 // Config
 // ============================================================================
-
-export interface AgentConfig {
-  prompt: string;
-  binary?: string;
-}
 
 // ============================================================================
 // Reviewer Schema
@@ -97,40 +90,354 @@ const agentSchema = z.object({
   binary: z.string().optional(),
 });
 
-export const configSchema = z.object({
-  claude_binary: z.string().default('claude'),
-  agents: z
-    .object({
-      init: z.record(z.string(), agentSchema).default({}),
-      phase2: z.record(z.string(), agentSchema).default({}),
-      phase3: z.record(z.string(), agentSchema).default({}),
-    })
-    .default({ init: {}, phase2: {}, phase3: {} }),
+// ============================================================================
+// Default Output Templates for Phase 1
+// ============================================================================
+
+export const DEFAULT_TRIAGE_TEMPLATE = `# Triage: {title}
+
+## Delivery Kind
+pr | ticket
+
+## Complexity
+straightforward | moderate | complex
+
+## Assessment
+[2-5 sentence summary of what needs to happen]
+
+## Clarifications
+[Any points clarified with the user, or "None needed"]
+
+## Risks
+[Risk factors with specific evidence, or "Low risk" with justification]
+
+## Verification
+
+### Assumptions to Verify
+[What assumptions does this task make that must be checked against reality?
+ This is domain-dependent and open-ended. Any assumption about external
+ behavior that the implementation will depend on belongs here.
+ Or "None — all assumptions are grounded in code already read."]
+
+### Access Required
+[What access/permissions are needed to verify assumptions above?
+ Request it here so the user grants it before spec/plan writing.
+ Or "None"]
+
+### Testing Level
+none | light | moderate | heavy
+[Rationale for this level]
+
+### Validation Matrix
+- Automated immediate: [what to check before release, automated]
+- Manual immediate: [human checks before release, or "none"]
+- Automated post-release: [automated checks after release, or "none"]
+- Manual post-release: [human checks after release, or "none"]`;
+
+export const DEFAULT_SPEC_TEMPLATE = `# Spec: {title}
+
+## Summary
+[What this change does and why. 2-3 sentences.]
+
+## Verification Evidence
+[For each assumption the triage listed under "Assumptions to Verify":
+ - State the assumption
+ - State what you checked (doc URL, file path, command output, live query result)
+ - State confirmed or denied, with the evidence
+ If you could not verify an assumption, flag it:
+ "UNVERIFIED: [assumption] — could not verify because [reason]"
+ If triage said "None", write "No assumptions to verify."]
+
+## Requirements
+
+### Functional Requirements
+[What the system must do. Each requirement should describe:
+ - The observable behavior from the user's or caller's perspective
+ - Inputs and expected outputs (or state transitions)
+ - Edge cases and error behavior — what happens when input is invalid,
+   when a dependency is unavailable, when the operation is interrupted?
+ - Boundary conditions — empty lists, max values, concurrent access
+
+ Write each requirement as a testable statement. "The API returns 404
+ when the resource does not exist" is testable. "The API handles errors
+ gracefully" is not.
+
+ Reference actual files, functions, and types from the codebase.]
+
+### Non-Functional Requirements
+[You MUST evaluate every item in the checklist below. For each item:
+ - State whether it applies to this task
+ - If it applies: describe what is required, concretely
+ - If it does not apply: briefly explain why not (one sentence)
+ Then add any domain-specific non-functional requirements the checklist missed.
+
+ Checklist:
+
+ 1. **Linting** — Does this change introduce code that must pass linters?
+    Are there new lint rules needed? Does the existing lint config cover
+    the new code patterns?
+
+ 2. **Building** — Does this compile/build cleanly? Are there new build
+    steps, dependencies, or build config changes? Does it affect build
+    time or artifact size?
+
+ 3. **Unit Testing** — What unit tests are needed? What functions, modules,
+    or components need test coverage? What edge cases must be covered?
+
+ 4. **Integration Testing** — Do components interact in ways that need
+    integration tests? API contracts, database queries, service
+    communication, message queues?
+
+ 5. **End-to-End Testing** — Does this change user-facing behavior that
+    needs E2E tests? What user flows are affected? What tool is
+    appropriate for this project's stack (Playwright, Cypress, Detox,
+    XCTest, etc.)?
+
+ 6. **Documentation** — Do code comments, README, API docs, changelog,
+    or user-facing docs need updating? Are there architectural decision
+    records (ADRs) to write?
+
+ 7. **Observability** — Does this need new or updated: metrics, alerts,
+    log statements, dashboard panels, or runbook entries? Will operators
+    know if this breaks in production?
+
+ 8. **Invariant Checking** — What invariants must hold? Are there runtime
+    assertions, type constraints, or data consistency rules that should be
+    enforced? Can any invariants be checked at build time vs. runtime?
+
+ 9. **Security** — Does this handle user input, authentication, authorization,
+    secrets, or data at rest/in transit? Are there OWASP concerns? Does it
+    need a security review?
+
+ 10. **Performance** — Does this affect latency, throughput, memory usage,
+     or startup time? Are there benchmarks to run? Does it need load testing?
+
+ 11. **Backwards Compatibility** — Does this change public APIs, config
+    formats, database schemas, or wire protocols? Is migration needed?
+    Can old clients still work?
+
+ 12. **Accessibility** — Does this change UI? Does it meet WCAG guidelines?
+    Screen reader support, keyboard navigation, color contrast?
+
+ Additional domain-specific items:
+ [Add any non-functional requirements specific to this task's domain
+  that the checklist above did not cover.]]
+
+## Acceptance Criteria
+[Concrete, testable criteria that prove this task is done. Each criterion
+ should be verifiable by running a command, inspecting output, or checking
+ a measurable condition. Base the depth on the triage testing level:
+ - none: build passes, lints clean
+ - light: existing tests pass, no regressions
+ - moderate: new test coverage for changed behavior
+ - heavy: comprehensive test suite, E2E coverage, performance verification]
+
+## Out of Scope
+[What this change explicitly does NOT address. Prevents scope creep during
+ planning and implementation.]`;
+
+export const DEFAULT_PLAN_TEMPLATE = `# Plan {N}: {title}
+
+## Overview
+[What this plan implements and why it is a self-contained, committable unit.
+ Reference the spec requirements this plan addresses.]
+
+## Changes
+[Files to modify or create, with rationale for each change.
+ Reference actual file paths and functions.]
+
+## Spec Adherence
+[List which spec requirements (functional and non-functional) this plan
+ addresses. Every applicable spec requirement must be covered by at least
+ one plan across the full plan set.]
+
+## Acceptance Criteria
+
+### Functional Checks
+[What observable behavior proves this plan is correctly implemented.
+ Each check should be concrete enough for the dev loop to implement as
+ an automated test. Reference specific inputs, outputs, and state changes.]
+
+### Non-Functional Checks
+[From the spec's non-functional requirements that apply to this plan:
+ which items must be satisfied? How will they be verified?
+ Examples: "lint passes on new files", "unit tests cover the new parser",
+ "API response time stays under 200ms for N=1000".]
+
+## Validation Approach
+[From the triage's validation matrix, what applies to this plan?
+ - Immediate automated checks: what the dev loop should verify
+ - Post-release checks: what to verify after deployment
+ - Manual checks: what a human must review
+ Describe the general approach — the dev loop will implement the scripts.]`;
+
+// ============================================================================
+// Default prompt constants for Phase 1
+// ============================================================================
+
+const DEFAULT_TRIAGE_PROMPT = `You are triaging a ticket for kautopilot. Read the ticket at {ticket} and do **thorough** codebase exploration to assess scope and risk.
+
+Your job is to classify this ticket, NOT to solve it or write implementation details.
+
+## Research Before Assessing
+
+Do NOT guess at risk or complexity. Before writing your assessment:
+- **Read the relevant code** — find the files that will be touched, understand the current implementation
+- **Trace dependencies** — grep for usages of functions/types/configs being changed; understand blast radius
+- **Check for tests** — are there existing tests covering the affected code? Will they break?
+- **Look at recent changes** — git log the affected files to understand velocity and stability
+- **Identify shared state** — does this touch database schemas, API contracts, shared configs, or public interfaces?
+
+## Evaluate (with evidence)
+
+For each evaluation point, cite specific files, functions, or patterns you found:
+- **Complexity** — how many moving parts, how many files likely touched. Name the files.
+- **Parallelizability** — can this be split into independent streams of work
+- **Risk factors** — blast radius, backward compatibility, data migration. Be specific: "changing X in file Y affects Z callers"
+- **Manual work** — infra changes, config deployments, manual verification needed
+- **Known/unknown ratio** — is the approach clear or does it need research first
+- **Disambiguate with user** — if the ticket is vague or under-specified, firm it up through conversation. If you are unsure about the risk level, ASK the user for input rather than defaulting to low risk.
+
+## Risk Assessment Guidelines
+
+Default to **moderate** risk unless you have concrete evidence otherwise:
+- **Low risk**: Only if the change is truly isolated (single file, no callers, has test coverage, no shared state)
+- **Moderate risk**: Multiple files, some callers, or any shared state involved
+- **High risk**: Database/API changes, many callers, no test coverage, or unclear requirements
+
+Err on the side of caution. It is much better to overestimate risk than to underestimate it.
+
+## Verification
+
+Your job is to IDENTIFY what needs verifying — not to do the verification yourself.
+The spec and plan phases will perform the actual checks.
+
+**Assumptions** — What does this task take for granted that could be wrong? Think broadly
+across whatever domain this task touches. Any assumption about external behavior (libraries,
+APIs, platforms, infrastructure, data formats, integrations) that the implementation will
+depend on should be listed. For each, note what source could confirm or deny it.
+
+**Access** — If verifying any assumption requires access the user hasn't granted (cluster
+credentials, API keys, staging environments, etc.), request it here so it's available before
+spec/plan writing begins.
+
+**Testing level** — Set the bar based on blast radius and behavioral impact.
+
+**Validation matrix** — Always push toward automated-immediate. Human time is far more
+expensive than machine time. If something CAN be checked before release and CAN be automated,
+it MUST be. Describe what to validate, not how.
+
+## User Approval
+
+After writing your triage assessment to the file, present a clear summary to the user showing:
+1. The delivery kind and complexity you chose
+2. Key risks identified (or why you believe risk is low)
+3. Ask the user to confirm before you log the approval event. Do NOT auto-approve.`;
+
+const DEFAULT_SPEC_WRITER_PROMPT = `You are writing a spec for a kautopilot task. Read the ticket at {ticket} and the triage assessment at {triage}.
+
+Based on the triage assessment:
+- **If triage says "straightforward"**: write a focused, concise spec. No heavy debate. Cover what to change, acceptance criteria, and proof of completion.
+- **If triage says "moderate" or "complex"**: do thorough exploration and debate. Walk through requirements, identify hidden assumptions, conflicts, and risks. Clarify until nothing is ambiguous.
+- **If delivery kind is "ticket"**: spec the research or decomposition, NOT the implementation.
+
+Explore the codebase to ground your spec in reality. Reference actual files, functions, and patterns.
+
+## Verification
+
+Check the triage at {triage} for its verification section. If it lists assumptions to verify,
+you MUST verify each one before writing the spec. Read docs, query live systems, inspect
+package versions — whatever it takes. Cite evidence for each confirmed assumption. Flag
+unverifiable ones as "UNVERIFIED: [assumption] — [reason]".
+
+If the triage requested access, use it now to check actual state.
+
+Ground every claim in evidence. No hypotheticals.
+
+## Non-Functional Checklist
+
+You MUST evaluate every item in the non-functional checklist from the spec template. For each:
+decide if it applies, state why or why not, and describe the concrete requirement if it does.
+Then add any domain-specific items the checklist missed. Do not skip any item.`;
+
+const DEFAULT_PLAN_WRITER_PROMPT = `You are writing implementation plans for a kautopilot task. Read the spec at {spec} and the triage assessment at {triage}.
+
+Rules:
+- Plans must be vertically split (by domain/feature, not by layer)
+- Each plan is one isolated, committable unit of work
+- For "ticket" delivery: plans describe investigation steps or ticket creation, not code changes
+- Reference actual files and functions from the codebase
+
+## Verification & Testing
+
+Check the triage at {triage}. Plans MUST NOT be based on unverified assumptions — the spec
+should have resolved them. If any remain unverified in the spec, resolve them now or flag
+them to the user.
+
+Based on the triage testing level, suggest the general testing approach using tools
+appropriate for this project's stack. Front-load automated testing aggressively.
+
+For the validation matrix: describe the general approach in each plan. The dev loop will
+implement concrete scripts. Keep it concise — ideas, not implementations.
+
+## Spec Adherence
+
+Every plan must list which spec requirements it addresses. Across the full set of plans,
+every functional requirement and every applicable non-functional requirement from the spec
+must be covered by at least one plan. If you discover a requirement cannot be addressed
+as specified, flag it — do not silently drop it.`;
+
+const phase1AgentsSchema = z.object({
+  triage: agentSchema,
+  spec_writer: agentSchema,
+  plan_writer: agentSchema,
   spec_reviewers: z.record(z.string(), reviewerSchema).default({}),
   plan_reviewers: z.record(z.string(), reviewerSchema).default({}),
+});
+
+export const configSchema = z.object({
+  claude_binary: z.string().default('claude'),
+  agents: z.object({
+    init: z.record(z.string(), agentSchema).default({}),
+    phase1: phase1AgentsSchema,
+    phase2: z.record(z.string(), agentSchema).default({}),
+    phase3: z.record(z.string(), agentSchema).default({}),
+    generic: z.record(z.string(), agentSchema).default({}),
+  }),
+  templates: z
+    .object({
+      triage: z.string().default(DEFAULT_TRIAGE_TEMPLATE),
+      spec: z.string().default(DEFAULT_SPEC_TEMPLATE),
+      plan: z.string().default(DEFAULT_PLAN_TEMPLATE),
+    })
+    .default({}),
   kloop: kloopConfigSchema,
   settings: z
     .object({
       maxPushCycles: z.number().min(1).max(20).default(10),
-      pollInterval: z.number().min(5).max(300).default(60),
+      pollInterval: z.number().min(1).max(300).default(5),
       defaultLlmTimeout: z.number().min(10).max(600).default(300),
       coderabbit: z.boolean().default(true),
+      removeSpecOnPush: z.boolean().default(false),
     })
     .default({
       maxPushCycles: 10,
-      pollInterval: 60,
+      pollInterval: 5,
       defaultLlmTimeout: 300,
       coderabbit: true,
+      removeSpecOnPush: false,
     }),
   repo: z
     .object({
       org: z.string().optional(),
       baseBranch: z.string().default('main'),
       ticketSystem: z.string().nullable().default(null),
+      prComment: z.string().nullable().default(null),
     })
     .default({
       baseBranch: 'main',
       ticketSystem: null,
+      prComment: null,
     }),
 });
 
@@ -245,162 +552,286 @@ Output a SUMMARY with:
 
 NEVER leave a broken script — either it works or it is a no-op.`;
 
+// ============================================================================
+// Shared Commit Agent Prompt
+// ============================================================================
+
+/**
+ * Generic commit agent prompt used across phases.
+ * Variable: {context} — optional context to include (e.g., plan content).
+ * If no context needed, pass empty string or omit.
+ */
+const DEFAULT_COMMIT_PROMPT = `You are committing code changes in a repository. Your task:
+
+1. Discover commit conventions:
+   - Search for any .md file whose name contains "commit" (case-insensitive), e.g. COMMIT_CONVENTIONS.md, commit-guide.md
+   - Check for .commitlintrc, .commitlintrc.json, .commitlintrc.yml, .commitlintrc.yaml, .commitlintrc.js, commitlint.config.js, commitlint.config.ts
+   - Check package.json for a "commitlint" config section
+   - Read git log --oneline -10 to see existing commit message style
+
+2. Stage all changes (git add the specific changed files, never git add -A)
+
+3. Commit with a message that follows the discovered conventions. If no conventions found, use conventional commits style (e.g. "feat: ...", "fix: ...", etc.) matching the style of recent commits.
+
+4. If pre-commit hooks fail:
+   - Read the error output carefully
+   - Fix the underlying issues (formatting, lint, type errors, etc.)
+   - Re-stage the fixed files and retry the commit
+
+5. When done, output ONLY the commit SHA (the output of git rev-parse HEAD), nothing else.
+
+{context}`;
+
+// Legacy export for backward compatibility - prefer getAgentPrompt('generic', 'commit')
+export const COMMIT_AGENT_PROMPT = DEFAULT_COMMIT_PROMPT;
+
 export const DEFAULT_CONFIG: Config = {
   claude_binary: 'claude',
   agents: {
     init: {
       localInit: {
+        // Available vars: {sessionId}
         prompt: DEFAULT_LOCAL_INIT_PROMPT,
       },
       researchTicketSystem: {
+        // Available vars: {taskSystem}, {detectedInfo}
         prompt: DEFAULT_RESEARCH_TICKET_SYSTEM_PROMPT,
       },
       researchSetup: {
+        // Available vars: {taskSystem}, {accessMethod}
         prompt: DEFAULT_RESEARCH_SETUP_PROMPT,
       },
       createScripts: {
+        // Available vars: {taskSystem}, {accessMethod}, {stateMapping}, {transitionNoOp}, {branch}, {scriptsDir}, {quirks}, {setupAssessment}, {researchDoc}, {detectedInfo}, {scriptList}, {optionalScripts}
         prompt: DEFAULT_CREATE_SCRIPTS_PROMPT,
+      },
+    },
+    phase1: {
+      // Available vars: {ticket} — file path, NOT inlined content
+      // Mechanics prepended by handler: TRIAGE_MECHANICS (output file, approval gate)
+      triage: { prompt: DEFAULT_TRIAGE_PROMPT },
+      // Available vars: {ticket}, {triage} — file paths, NOT inlined content
+      // Mechanics prepended by handler: SPEC_MECHANICS (ordinal drafts, approval protocol)
+      spec_writer: { prompt: DEFAULT_SPEC_WRITER_PROMPT },
+      // Available vars: {spec}, {triage} — file paths, NOT inlined content
+      // Mechanics prepended by handler: PLAN_MECHANICS (ordinal drafts, approval protocol, spec amendment escalation)
+      plan_writer: { prompt: DEFAULT_PLAN_WRITER_PROMPT },
+      spec_reviewers: {
+        // All reviewers: Available vars {spec}, {ticket} — file paths, NOT inlined content
+        completeness: {
+          desc: 'All requirements from ticket covered',
+          prompt: `Read the spec at {spec} and the ticket at {ticket}.
+Check: does the spec address every requirement in the ticket?
+List any requirements that are missing or insufficiently addressed.
+Output ONLY the problems found — one per line. If none, output "No issues found."`,
+        },
+        docs_accuracy: {
+          desc: 'Referenced tool/lib versions and interfaces are correct',
+          prompt: `Read the spec at {spec} and the ticket at {ticket}.
+Check: are all referenced tool versions, API interfaces, and method signatures accurate?
+Cross-reference with the codebase — grep for referenced functions, check package versions.
+Flag anything that looks hallucinated or version-incorrect.
+Output ONLY the problems found — one per line. If none, output "No issues found."`,
+        },
+        generalization: {
+          desc: 'Extends existing patterns rather than inventing new ones',
+          prompt: `Read the spec at {spec}. Explore the codebase.
+Check: does the spec propose new patterns, paths, or abstractions when existing ones could be extended?
+Flag any "reinventing the wheel" — new utilities when similar ones exist, new conventions when the codebase already has one.
+Output ONLY the problems found — one per line. If none, output "No issues found."`,
+        },
+        complexity: {
+          desc: 'Is there a simpler or faster approach?',
+          prompt: `Read the spec at {spec}.
+Check: is the proposed approach unnecessarily complex?
+Consider: could fewer files be changed? Could an existing tool/command handle this? Is there a more direct path?
+Don't flag reasonable complexity — only flag when there's a clearly simpler alternative.
+Output ONLY the problems found — one per line. If none, output "No issues found."`,
+        },
+        security: {
+          desc: 'Security and compliance implications',
+          prompt: `Read the spec at {spec}.
+Check for security concerns: injection risks, auth/authz gaps, secrets handling, data exposure, OWASP top 10.
+Only flag genuine issues, not theoretical concerns in internal code paths.
+Output ONLY the problems found — one per line. If none, output "No issues found."`,
+        },
+        proof_of_completion: {
+          desc: 'Spec includes testable acceptance criteria',
+          prompt: `Read the spec at {spec}.
+Check: does the spec include an "Acceptance Criteria" section with concrete, testable criteria?
+Good criteria: test commands, API calls, grep assertions, build commands, measurable conditions.
+Bad criteria: "manually verify", "visually check", vague assertions, unmeasurable claims.
+Output ONLY the problems found — one per line. If none, output "No issues found."`,
+        },
+        nonfunctional_checklist: {
+          desc: 'All non-functional checklist items evaluated',
+          prompt: `Read the spec at {spec}.
+Check: has every item in the non-functional checklist been evaluated?
+The checklist has 12 standard items (linting, building, unit testing, integration testing,
+E2E testing, documentation, observability, invariant checking, security, performance,
+backwards compatibility, accessibility). For each item, the spec must state whether it
+applies and why.
+Flag any items that are missing, skipped without justification, or dismissed too quickly.
+Also check: did the spec add domain-specific non-functional items beyond the checklist?
+Output ONLY the problems found — one per line. If none, output "No issues found."`,
+        },
+        verification_evidence: {
+          desc: 'All triage assumptions have verification evidence',
+          prompt: `Read the spec at {spec} and the triage at {triage}.
+Check: if the triage listed assumptions to verify, does the spec provide verification
+evidence for each one? Evidence must include a concrete source (doc URL, file path,
+command output, live query result).
+Flag any assumptions that are unaddressed or claimed as verified without evidence.
+Flag any "UNVERIFIED" items and assess whether they are blocking.
+Output ONLY the problems found — one per line. If none, output "No issues found."`,
+        },
+      },
+      plan_reviewers: {
+        // All reviewers: Available vars {plans}, {spec} — file paths, NOT inlined content
+        coverage: {
+          desc: 'Plans fully cover the spec',
+          prompt: `Read the plans at {plans} and the spec at {spec}.
+Check: do the plans together cover every requirement in the spec?
+List any spec items that are not addressed by any plan.
+Output ONLY the problems found — one per line. If none, output "No issues found."`,
+        },
+        ordering: {
+          desc: 'Plan dependencies ordered correctly',
+          prompt: `Read the plans at {plans}.
+Check: are plans ordered so that earlier plans don't depend on later ones?
+Flag any circular or incorrect dependency ordering.
+Output ONLY the problems found — one per line. If none, output "No issues found."`,
+        },
+        vertical_split: {
+          desc: 'Plans split by domain/feature, not by layer',
+          prompt: `Read the plans at {plans}.
+Check: are plans split vertically by domain/feature (each plan = complete slice with types+logic+tests)?
+Flag any plan that is a horizontal layer (e.g., "add types" or "write tests" as standalone plans).
+Each plan should produce an isolated working commit.
+Output ONLY the problems found — one per line. If none, output "No issues found."`,
+        },
+        cost: {
+          desc: 'Cost and resource implications',
+          prompt: `Read the plans at {plans} and the spec at {spec}.
+Check: are there cost implications (compute, storage, API calls, third-party services)?
+Flag any plans that could have unexpected cost impact without mentioning it.
+Output ONLY the problems found — one per line. If none, output "No issues found."`,
+        },
+        spec_adherence: {
+          desc: 'Plans address all spec requirements, no drift',
+          prompt: `Read the plans at {plans} and the spec at {spec}.
+Check: across all plans, is every functional requirement from the spec addressed by at
+least one plan? Is every applicable non-functional requirement addressed?
+List any spec requirements that are not covered by any plan.
+List any plan content that introduces scope not present in the spec (scope creep).
+If you find drift — plans that contradict or ignore spec requirements — flag each instance
+with the specific spec requirement and the conflicting plan content.
+Output ONLY the problems found — one per line. If none, output "No issues found."`,
+        },
       },
     },
     phase2: {
       resolve: {
-        prompt: `Analyze the conflict or failure and discuss resolution options.
-Consider: root cause, alternative approaches, scope reduction.
-When resolved, document your approach clearly.`,
+        // Available vars: {plan}, {spec}, {taskSpec}, {reason}, {attempt}
+        prompt: `Analyze the conflict or failure and discuss resolution options with the user.
+
+## What is a Conflict?
+
+A conflict occurs when the spec defines something that seems plausible, but during implementation we discover it's not possible. This is called "the devil is in the details" — the spec looked reasonable on paper, but reality says otherwise.
+
+**Example**: The spec says "don't touch source code, add tests till 100% coverage." This seems reasonable until implementation reveals unreachable dead code that MUST be removed to achieve 100% coverage. Removing dead code VIOLATES the spec constraint, creating a conflict.
+
+## Where to Look
+
+1. **Plan contents** — read the current plan at the path provided
+2. **Task spec** — read the constraints and requirements at the path provided
+3. **Kloop evidence** — the implementation log shows exactly where things went wrong
+4. **Source code** — the actual codebase state in the worktree
+
+## Resolution Options
+
+When you identify a conflict, consider:
+- **Root cause** — what assumption in the spec turned out to be wrong?
+- **Alternative approaches** — is there another way to satisfy the intent?
+- **Scope reduction** — can we solve a smaller problem that's still valuable?
+
+Discuss with the user until you have a clear resolution. Document your approach in the resolution file.`,
       },
       rewrite_spec: {
+        // Available vars: none
         prompt: `Rewrite the working spec to address the resolution.
 Preserve what was working. Only change what needs to change.
 Output ONLY the rewritten spec in markdown format.`,
       },
-      commit: {
-        prompt: `Generate a commit message for the implemented plan.
-Rules:
-1. If convention files are provided, follow them EXACTLY (format, prefix, scope, etc.)
-2. If no convention files but recent commits use a pattern (e.g., "feat:", "fix:", ticket prefixes), match that pattern
-3. First line is the title (max 72 chars). Blank line, then body if needed
-4. Body should briefly describe what was implemented from the plan
-5. Do NOT invent conventions — only follow what you see in the repo`,
-      },
+      // NOTE: 'commit' uses shared COMMIT_AGENT_PROMPT directly (not in config)
+      // Handlers import COMMIT_AGENT_PROMPT and build prompt with {context} var
     },
     phase3: {
       eval: {
+        // Available vars: {spec_path}, {plan_paths} — file paths, NOT inlined content
         prompt: `Analyze PR feedback and decide what action to take.
 Be precise: only suggest code_fix for genuine issues.
 Mark items as ambiguous when you're unsure rather than guessing.`,
       },
       write_fix: {
+        // Available vars: none — context is prepended by handler
         prompt: `Merge all pending code fixes into a single coherent implementation spec.
 Deduplicate overlapping fixes on the same file.
 Output the complete spec (not just the changes).`,
       },
-      commit_pending: {
-        prompt: `Generate a commit message for pending uncommitted changes.
-Rules:
-1. If convention files are provided, follow them EXACTLY (format, prefix, scope, etc.)
-2. If no convention files but recent commits use a pattern (e.g., "feat:", "fix:", ticket prefixes), match that pattern
-3. First line is the title (max 72 chars). Blank line, then body if needed
-4. Do NOT invent conventions — only follow what you see in the repo`,
-      },
+      // NOTE: 'commit_pending' uses shared COMMIT_AGENT_PROMPT directly (not in config)
+      // Handlers import COMMIT_AGENT_PROMPT and build prompt with {context} var
       prereview_classify: {
+        // Available vars: none — content is prepended by handler
         prompt: `Classify CodeRabbit findings as fix/comment/ignore.
 Be conservative — only mark as "fix" if it's a genuine issue.`,
       },
       prereview_fix: {
+        // Available vars: none — content is prepended by handler
         prompt: `Apply the classified fixes to the codebase.
 Be precise and minimal — only change what's needed.`,
       },
+      create_pr: {
+        // Available vars: {baseBranch}, {ticketId}, {spec_path} — file path, NOT inlined content
+        prompt: `You are creating a GitHub Pull Request. Your task:
+
+1. Discover PR conventions:
+   - Check for PR templates: .github/PULL_REQUEST_TEMPLATE.md, .github/pull_request_template.md, or any template in .github/PULL_REQUEST_TEMPLATE/
+   - Check CONTRIBUTING.md for PR guidelines
+   - Look at recent merged PRs for title/body style: gh pr list --state merged --limit 5 --json title,body
+
+2. Create a PR against the "{baseBranch}" branch using gh pr create:
+   - Title must start with "[{ticketId}]" followed by a concise summary of what was implemented
+   - Body should follow the discovered template/conventions, or include a summary, what changed, and how to test
+
+3. Output ONLY a JSON object with the PR number and URL:
+   {"number": <int>, "url": "<string>"}`,
+      },
       tty_resolve_ambiguous: {
+        // Available vars: none — context is prepended by handler
         prompt: `Help resolve ambiguous items from the PR review.
 For each item, decide: reply, code fix, or skip.`,
       },
       tty_resolve_conflict: {
+        // Available vars: none — context is prepended by handler
         prompt: `Help resolve merge conflicts from the rebase.
 Resolve conflicts while preserving the intent of both changes.`,
       },
       tty_resolve_failure: {
+        // Available vars: none — context is prepended by handler
         prompt: `The dev-loop execution failed. Help investigate and determine next steps.
 Options: fix the issue and retry, skip and move on, or escalate.`,
       },
     },
-  },
-  spec_reviewers: {
-    completeness: {
-      desc: 'All requirements from ticket covered',
-      prompt: `Read the spec at {spec} and the ticket at {ticket}.
-Check: does the spec address every requirement in the ticket?
-List any requirements that are missing or insufficiently addressed.
-Output ONLY the problems found — one per line. If none, output "No issues found."`,
-    },
-    docs_accuracy: {
-      desc: 'Referenced tool/lib versions and interfaces are correct',
-      prompt: `Read the spec at {spec} and the ticket at {ticket}.
-Check: are all referenced tool versions, API interfaces, and method signatures accurate?
-Cross-reference with the codebase — grep for referenced functions, check package versions.
-Flag anything that looks hallucinated or version-incorrect.
-Output ONLY the problems found — one per line. If none, output "No issues found."`,
-    },
-    generalization: {
-      desc: 'Extends existing patterns rather than inventing new ones',
-      prompt: `Read the spec at {spec}. Explore the codebase.
-Check: does the spec propose new patterns, paths, or abstractions when existing ones could be extended?
-Flag any "reinventing the wheel" — new utilities when similar ones exist, new conventions when the codebase already has one.
-Output ONLY the problems found — one per line. If none, output "No issues found."`,
-    },
-    complexity: {
-      desc: 'Is there a simpler or faster approach?',
-      prompt: `Read the spec at {spec}.
-Check: is the proposed approach unnecessarily complex?
-Consider: could fewer files be changed? Could an existing tool/command handle this? Is there a more direct path?
-Don't flag reasonable complexity — only flag when there's a clearly simpler alternative.
-Output ONLY the problems found — one per line. If none, output "No issues found."`,
-    },
-    security: {
-      desc: 'Security and compliance implications',
-      prompt: `Read the spec at {spec}.
-Check for security concerns: injection risks, auth/authz gaps, secrets handling, data exposure, OWASP top 10.
-Only flag genuine issues, not theoretical concerns in internal code paths.
-Output ONLY the problems found — one per line. If none, output "No issues found."`,
-    },
-    proof_of_completion: {
-      desc: 'Spec includes programmatic proof of completion',
-      prompt: `Read the spec at {spec}.
-Check: does the spec include a "Proof of Completion" section with concrete, runnable verification?
-Good proofs: test commands, API calls, grep assertions, build commands, tf plan output.
-Bad proofs: "manually verify", "visually check", vague assertions.
-Output ONLY the problems found — one per line. If none, output "No issues found."`,
+    generic: {
+      // Available vars: {context} — optional context (e.g., plan path, reason for commit)
+      commit: { prompt: DEFAULT_COMMIT_PROMPT },
     },
   },
-  plan_reviewers: {
-    coverage: {
-      desc: 'Plans fully cover the spec',
-      prompt: `Read the plans at {plans} and the spec at {spec}.
-Check: do the plans together cover every requirement in the spec?
-List any spec items that are not addressed by any plan.
-Output ONLY the problems found — one per line. If none, output "No issues found."`,
-    },
-    ordering: {
-      desc: 'Plan dependencies ordered correctly',
-      prompt: `Read the plans at {plans}.
-Check: are plans ordered so that earlier plans don't depend on later ones?
-Flag any circular or incorrect dependency ordering.
-Output ONLY the problems found — one per line. If none, output "No issues found."`,
-    },
-    vertical_split: {
-      desc: 'Plans split by domain/feature, not by layer',
-      prompt: `Read the plans at {plans}.
-Check: are plans split vertically by domain/feature (each plan = complete slice with types+logic+tests)?
-Flag any plan that is a horizontal layer (e.g., "add types" or "write tests" as standalone plans).
-Each plan should produce an isolated working commit.
-Output ONLY the problems found — one per line. If none, output "No issues found."`,
-    },
-    cost: {
-      desc: 'Cost and resource implications',
-      prompt: `Read the plans at {plans} and the spec at {spec}.
-Check: are there cost implications (compute, storage, API calls, third-party services)?
-Flag any plans that could have unexpected cost impact without mentioning it.
-Output ONLY the problems found — one per line. If none, output "No issues found."`,
-    },
+  templates: {
+    triage: DEFAULT_TRIAGE_TEMPLATE,
+    spec: DEFAULT_SPEC_TEMPLATE,
+    plan: DEFAULT_PLAN_TEMPLATE,
   },
   kloop: {
     implementers: { claude: 1 },
@@ -411,17 +842,18 @@ Output ONLY the problems found — one per line. If none, output "No issues foun
     conflictCheckThreshold: 2,
     firstLoopFullReview: false,
     previousReviewPropagation: 0,
-    reviewerFailureLimit: 2,
   },
   settings: {
     maxPushCycles: 10,
     pollInterval: 60,
     defaultLlmTimeout: 300,
     coderabbit: true,
+    removeSpecOnPush: false,
   },
   repo: {
     baseBranch: 'main',
     ticketSystem: null,
+    prComment: null,
   },
 };
 
@@ -535,7 +967,7 @@ export interface DeliveryManifest {
 // Rewrite Decision Types
 // ============================================================================
 
-export type RewriteDecision = 'refine_local' | 'patch_downstream' | 'regenerate_remaining' | 'revisit_spec';
+export type RewriteDecision = 'refine_local' | 'regenerate_remaining' | 'revisit_spec';
 
 // ============================================================================
 // Phase Constants

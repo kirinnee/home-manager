@@ -47,7 +47,6 @@ export async function handleEnsureBranch(ctx: Phase3Context): Promise<string | n
       version,
       metadata: { action: 'rebase', success: true },
     });
-    ctx.forceWithLease = true;
     return 'push';
   }
 

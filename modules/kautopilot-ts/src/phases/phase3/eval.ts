@@ -13,6 +13,8 @@ import {
   ghResolveThread,
   withBotSignature,
 } from '../../core/github';
+import { resolvePlans } from '../shared';
+import { snapshotPath } from '../../core/artifacts';
 
 // ============================================================================
 // Deterministic pre-filter
@@ -231,7 +233,7 @@ export async function handleEval(ctx: Phase3Context): Promise<string | null> {
       resolves: evalResults.filter(r => r.verdict === 'resolve').length,
       codeFixes: codeFixes.length,
       ambiguous: ambiguous.length,
-      skipped: evalResults.filter(r => r.verdict === 'skip').length,
+      resolved: evalResults.filter(r => r.verdict === 'resolve').length,
     },
   });
 
@@ -244,10 +246,36 @@ export async function handleEval(ctx: Phase3Context): Promise<string | null> {
 
 // Non-changeable flow prompt — eval structure is kautopilot plumbing.
 // The changeable part (eval instruction) comes from getAgentPrompt('phase3', 'eval').
-function buildEvalPrompt(ticketId: string, content: string): string {
-  const evalInstruction = getAgentPrompt('phase3', 'eval');
+// {spec_path} and {plan_paths} are injected into the agent prompt template.
+const EVAL_MECHANICS = `## Context Paths
+
+You have access to these files to understand the original intent and determine if feedback is valid:
+- Spec: {spec_path}
+- Plans: {plan_paths}
+
+Read these files. They define what was INTENDED. Compare against the feedback to determine if it's a genuine issue or a false positive.
+
+## How to Detect False Positives
+
+1. **Read the spec** — what was the stated requirement? Does the feedback conflict with the spec?
+2. **Read the plan** — what was the implementation approach? Does the feedback misunderstand the design?
+3. **Check the code** — use file reading tools to verify the actual state matches the spec/plan
+4. **Consider context** — is the reviewer missing information? Are they applying a generic rule that doesn't fit?
+
+A false positive is when the feedback asks for something that:
+- Contradicts the spec (spec says X, reviewer wants Y)
+- Is already satisfied (reviewer missed it)
+- Is out of scope (reviewer scope creep)
+- Is stylistic preference vs. correctness issue`;
+
+function buildEvalPrompt(ticketId: string, content: string, vars: Record<string, string>): string {
+  const evalInstruction = getAgentPrompt('phase3', 'eval', vars);
+  const mechanics = EVAL_MECHANICS.replace('{spec_path}', vars.spec_path || '(not provided)').replace(
+    '{plan_paths}',
+    vars.plan_paths || '(not provided)',
+  );
   return `
-You are reviewing feedback on a pull request.
+${mechanics}
 
 ${evalInstruction}
 
@@ -259,14 +287,13 @@ ${content}
 
 ## Possible Actions
 - "reply": Post a reply explaining your position or acknowledging the feedback
-- "resolve": Resolve the thread (the issue has been addressed or is no longer relevant)
+- "resolve": Resolve the thread (the issue has been addressed, is not actionable, or is no longer relevant)
 - "code_fix": The feedback requires code changes — provide fix instructions
-- "skip": Ignore this feedback (false positive, duplicate, or not actionable)
 
 ## Output Format
 Return a JSON object:
 {
-  "verdict": "reply" | "resolve" | "code_fix" | "skip",
+  "verdict": "reply" | "resolve" | "code_fix",
   "reply": "string (for reply verdict — the text to post)",
   "codeFix": "string (for code_fix verdict — fix instructions)",
   "resolveThread": true/false (should the thread be resolved?),
@@ -277,8 +304,8 @@ Return a JSON object:
 `.trim();
 }
 
-async function evalSingleUnit(unit: EvalUnit, ctx: Phase3Context): Promise<EvalResult> {
-  const prompt = buildEvalPrompt(ctx.ticketId, unit.content);
+async function evalSingleUnit(unit: EvalUnit, ctx: Phase3Context, vars: Record<string, string>): Promise<EvalResult> {
+  const prompt = buildEvalPrompt(ctx.ticketId, unit.content, vars);
 
   const result = await spawnPrint<{
     verdict: string;
@@ -298,7 +325,7 @@ async function evalSingleUnit(unit: EvalUnit, ctx: Phase3Context): Promise<EvalR
   return {
     unitId: unit.id,
     unitType: unit.type,
-    verdict: (result.verdict as EvalResult['verdict']) || 'skip',
+    verdict: (result.verdict as EvalResult['verdict']) || 'resolve',
     reply: result.reply,
     codeFix: result.codeFix,
     resolveThread: result.resolveThread,
@@ -311,21 +338,29 @@ async function evalSingleUnit(unit: EvalUnit, ctx: Phase3Context): Promise<EvalR
 async function fanOutEval(units: EvalUnit[], ctx: Phase3Context): Promise<EvalResult[]> {
   if (units.length === 0) return [];
 
+  // Build template vars once — pass file paths so the LLM can read on demand
+  const specPath = snapshotPath(ctx.session.id, ctx.version, 'task-spec.md');
+  const planPaths = resolvePlans(ctx.session.id, ctx.version);
+  const vars: Record<string, string> = {
+    spec_path: specPath,
+    plan_paths: planPaths.join('\n'),
+  };
+
   // Run all evals in parallel with individual retry
   const results = await Promise.all(
     units.map(async unit => {
       try {
-        return await evalSingleUnit(unit, ctx);
+        return await evalSingleUnit(unit, ctx, vars);
       } catch (err) {
         console.warn(`[eval] Unit ${unit.id} failed, retrying...`);
         try {
-          return await evalSingleUnit(unit, ctx);
+          return await evalSingleUnit(unit, ctx, vars);
         } catch (retryErr) {
           console.error(`[eval] Unit ${unit.id} failed after retry:`, retryErr);
           return {
             unitId: unit.id,
             unitType: unit.type,
-            verdict: 'skip' as const,
+            verdict: 'resolve' as const,
           };
         }
       }

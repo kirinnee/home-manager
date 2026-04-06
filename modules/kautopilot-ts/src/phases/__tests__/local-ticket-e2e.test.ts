@@ -8,9 +8,22 @@
  * This test exercises the actual runtime file I/O paths:
  *   init writes spec/ticket.md → pull-ticket reads it → verifies preservation
  */
-import { describe, it, expect, afterEach } from 'bun:test';
-import { mkdirSync, rmSync, existsSync, writeFileSync, readFileSync } from 'node:fs';
+import { describe, it, expect, afterEach, beforeAll, afterAll } from 'bun:test';
+import { mkdirSync, rmSync, existsSync, writeFileSync, readFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+
+let origHome: string;
+let tempHome: string;
+beforeAll(() => {
+  origHome = process.env.HOME!;
+  tempHome = mkdtempSync(join(tmpdir(), 'kautopilot-local-e2e-test-'));
+  process.env.HOME = tempHome;
+});
+afterAll(() => {
+  process.env.HOME = origHome;
+  rmSync(tempHome, { recursive: true, force: true });
+});
 import { sessionDir, sessionArtifactPath, ensureArtifactDir } from '../../core/artifacts';
 import { handlePullTicket } from '../phase1/pull-ticket';
 import type { Phase1Context } from '../phase1/types';
@@ -53,6 +66,7 @@ function makeConfig(): Config {
       org: 'test-org',
       baseBranch: 'main',
       ticketSystem: null,
+      prComment: null,
     },
   } as Config;
 }
@@ -76,7 +90,7 @@ describe('E2E: Local-mode ticket preservation invariant', () => {
 
     // ── Step 1: Simulate downgrade_local writing ticket content ──
     // This is what states.ts:906-915 does
-    const specDir = join(worktree, 'spec');
+    const specDir = join(worktree, 'spec', session.ticket_id!);
     mkdirSync(specDir, { recursive: true });
     const ticketPath = join(specDir, 'ticket.md');
     writeFileSync(ticketPath, TICKET_BODY);
@@ -100,7 +114,7 @@ describe('E2E: Local-mode ticket preservation invariant', () => {
     };
 
     const nextState = await handlePullTicket(ctx);
-    expect(nextState).toBe('write_spec'); // Handler should advance normally
+    expect(nextState).toBe('triage'); // Handler should advance to triage
 
     // ── Step 3: Verify ticket content is preserved ──
     const afterContent = readFileSync(ticketPath, 'utf-8');
@@ -141,7 +155,7 @@ describe('E2E: Local-mode ticket preservation invariant', () => {
       await handlePullTicket(ctx);
 
       // Placeholder SHOULD be written
-      const ticketPath = join(altWorktree, 'spec', 'ticket.md');
+      const ticketPath = join(altWorktree, 'spec', altSession.ticket_id!, 'ticket.md');
       expect(existsSync(ticketPath)).toBe(true);
       const content = readFileSync(ticketPath, 'utf-8');
       expect(content).toContain(PLACEHOLDER_HEADING);

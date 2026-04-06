@@ -81,14 +81,6 @@ function classifyAccessSetup(answer: string): { needsSetupHelp: boolean; assessm
 // Script path resolution
 // ============================================================================
 
-/**
- * Get the path to a session script.
- * Scripts live at ~/.kautopilot/{sessionId}/scripts/{name}
- */
-export function scriptPath(sessionId: string, name: string): string {
-  return join(sessionDir(sessionId), 'scripts', name);
-}
-
 // ============================================================================
 // Script execution
 // ============================================================================

@@ -1,6 +1,7 @@
 import type { Phase3Context } from './types';
 import { appendEvent } from '../../core/log';
 import { confirmAction } from '../../llm/inquirer';
+import { logErrorBanner } from '../../util/format';
 
 export async function handleFailed(ctx: Phase3Context): Promise<string | null> {
   const { session, version } = ctx;
@@ -19,7 +20,7 @@ export async function handleFailed(ctx: Phase3Context): Promise<string | null> {
     metadata: { error: errorMsg },
   });
 
-  console.error(`\nPhase 3 failed: ${errorMsg}`);
+  logErrorBanner('Phase 3 Failed', { Error: errorMsg });
 
   const retry = await confirmAction('Would you like to retry?', false);
 
@@ -33,6 +34,6 @@ export async function handleFailed(ctx: Phase3Context): Promise<string | null> {
     return 'commit_pending';
   }
 
-  console.log('\nPhase 3 aborted. Use "kautopilot start --phase polish" to retry.\n');
+  logErrorBanner('Phase 3 Aborted', { Retry: 'kautopilot start --phase polish' });
   return null;
 }

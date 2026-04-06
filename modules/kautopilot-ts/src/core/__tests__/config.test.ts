@@ -27,8 +27,9 @@ describe('config', () => {
     const config = readConfig('testid');
     expect(config).not.toBeNull();
     expect(config!.claude_binary).toBe('claude');
-    expect(config!.agents.phase2.commit).toBeDefined();
-    expect(config!.agents.phase2.commit.prompt).toContain('commit message');
+    // commit agent uses shared COMMIT_AGENT_PROMPT (not in config.agents)
+    expect(config!.agents.phase2.resolve).toBeDefined();
+    expect(config!.agents.phase2.resolve.prompt).toContain('conflict or failure');
     expect(config!.kloop.maxIterations).toBe(10);
     expect(config!.repo.baseBranch).toBe('main');
     expect(config!.repo.ticketSystem).toBeNull();
@@ -103,7 +104,7 @@ describe('config', () => {
     const config = resolveConfig();
     expect(config.claude_binary).toBe('custom-claude');
     // Defaults should still be present
-    expect(config.agents.phase2.commit).toBeDefined();
+    expect(config.agents.phase2.resolve).toBeDefined();
     expect(config.kloop.maxIterations).toBe(10);
   });
 

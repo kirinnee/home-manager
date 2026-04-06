@@ -51,7 +51,7 @@ describe('E2E: detect state reads research.json correctly', () => {
 
     const ctx = {
       initId,
-      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null } },
+      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null, prComment: null } },
       workDir: tempDir,
       gitRootPath: tempDir,
       worktree: tempDir,
@@ -109,7 +109,7 @@ describe('E2E: detect state reads research.json correctly', () => {
 
     const ctx = {
       initId,
-      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null } },
+      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null, prComment: null } },
       workDir: tempDir,
       gitRootPath: tempDir,
       worktree: tempDir,

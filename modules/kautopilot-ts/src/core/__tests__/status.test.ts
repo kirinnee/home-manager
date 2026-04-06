@@ -1,20 +1,35 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdirSync, rmSync, existsSync, readFileSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'bun:test';
+import { mkdirSync, rmSync, existsSync, readFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+
+let origHome: string;
+let tempHome: string;
+beforeAll(() => {
+  origHome = process.env.HOME!;
+  tempHome = mkdtempSync(join(tmpdir(), 'kautopilot-status-test-'));
+  process.env.HOME = tempHome;
+});
+afterAll(() => {
+  process.env.HOME = origHome;
+  rmSync(tempHome, { recursive: true, force: true });
+});
 import { ensureStatus } from '../status';
 import { appendEvent } from '../log';
 import type { LogEntry } from '../types';
 
 const TEST_SESSION = 'test-status-' + Date.now();
-const SESSION_DIR = join(process.env.HOME!, '.kautopilot', TEST_SESSION);
+function sessionDir() {
+  return join(process.env.HOME!, '.kautopilot', TEST_SESSION);
+}
 
 beforeEach(() => {
-  mkdirSync(SESSION_DIR, { recursive: true });
+  mkdirSync(sessionDir(), { recursive: true });
 });
 
 afterEach(() => {
-  if (existsSync(SESSION_DIR)) {
-    rmSync(SESSION_DIR, { recursive: true });
+  if (existsSync(sessionDir())) {
+    rmSync(sessionDir(), { recursive: true });
   }
 });
 
@@ -167,7 +182,7 @@ describe('ensureStatus', () => {
     appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:00Z', event: 'phase1:started', version: 1 });
     ensureStatus(TEST_SESSION);
 
-    const yamlPath = join(SESSION_DIR, 'status.yaml');
+    const yamlPath = join(sessionDir(), 'status.yaml');
     expect(existsSync(yamlPath)).toBe(true);
 
     const content = readFileSync(yamlPath, 'utf-8');

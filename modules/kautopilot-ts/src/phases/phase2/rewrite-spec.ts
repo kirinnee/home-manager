@@ -150,11 +150,7 @@ ${taskSpecContent}
   const activeRewritePath = join(plansDir, activeRewriteFilename);
   const rewrittenActivePlan = readFileSync(activeRewritePath, 'utf-8');
   const specPath = writeKloopSpec(session.id, rewrittenActivePlan, `plan-${planIndex + 1}-rewrite-${attempt}.md`);
-  const configPath = writeKloopConfig(session.id, {
-    maxIterations: ctx.config.kloop.maxIterations,
-    implementerTimeout: ctx.config.kloop.implementerTimeout,
-    reviewerTimeout: ctx.config.kloop.reviewerTimeout,
-  });
+  const configPath = writeKloopConfig(session.id, ctx.config.kloop);
 
   const kloopRunId = devloopInit(session.worktree, specPath, configPath);
   ctx.kloopRunId = kloopRunId;

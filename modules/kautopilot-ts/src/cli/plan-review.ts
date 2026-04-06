@@ -41,14 +41,14 @@ async function runPlanReview(): Promise<void> {
   const status = ensureStatus(session.id);
   const version = status.version || 1;
 
-  const reviewers = config.plan_reviewers;
+  const reviewers = config.agents.phase1.plan_reviewers;
   if (!reviewers || Object.keys(reviewers).length === 0) {
     console.log('No plan reviewers configured.');
     return;
   }
 
   // Build prompt vars
-  const vars = buildPromptVars(worktree, version);
+  const vars = buildPromptVars(worktree, version, session.ticket_id || 'local');
 
   // Run reviewers and print summary to stdout
   const summary = await runReviewers(reviewers, vars, config, session.id);

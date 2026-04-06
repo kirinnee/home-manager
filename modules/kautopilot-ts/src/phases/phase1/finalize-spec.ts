@@ -39,7 +39,7 @@ export async function handleFinalizeSpec(ctx: Phase1Context): Promise<string | n
     metadata: { stepType: 'code' },
   });
 
-  const vars = buildPromptVars(session.worktree, version);
+  const vars = buildPromptVars(session.worktree, version, session.ticket_id || 'local');
 
   // Find latest spec draft
   const latestDraft = findLatestDraftPath(vars.specDir);

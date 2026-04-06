@@ -7,11 +7,24 @@
  * These are integration tests that validate real runtime paths,
  * not mocks or type-level assertions.
  */
-import { describe, it, expect, afterEach } from 'bun:test';
+import { describe, it, expect, afterEach, beforeAll, afterAll } from 'bun:test';
 import { ensureStatus, detectAndRecoverCrash } from '../../core/status';
 import { appendEvent, logPath, readLog } from '../../core/log';
-import { mkdirSync, rmSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, existsSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+
+let origHome: string;
+let tempHome: string;
+beforeAll(() => {
+  origHome = process.env.HOME!;
+  tempHome = mkdtempSync(join(tmpdir(), 'kautopilot-e2e-test-'));
+  process.env.HOME = tempHome;
+});
+afterAll(() => {
+  process.env.HOME = origHome;
+  rmSync(tempHome, { recursive: true, force: true });
+});
 import {
   writeContractManifest,
   readContractManifest,

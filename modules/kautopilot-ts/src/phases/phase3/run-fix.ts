@@ -18,8 +18,7 @@ export async function handleRunFix(ctx: Phase3Context): Promise<string | null> {
 
   console.log(`[run_fix] Starting kloop run ${ctx.kloopRunId} for fixes (push cycle ${pushCycle})`);
 
-  const timeoutMs = config.kloop.implementerTimeout * 60_000;
-  const result = await devloopRun(ctx.kloopRunId, timeoutMs);
+  const result = await devloopRun(ctx.kloopRunId);
 
   appendEvent(session.id, {
     ts: new Date().toISOString(),

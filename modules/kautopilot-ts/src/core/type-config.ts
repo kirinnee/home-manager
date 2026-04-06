@@ -10,19 +10,21 @@ export interface PromptVars {
   specDir: string;
   plans: string;
   worktree: string;
+  triage: string;
 }
 
 /**
  * Build the prompt variable context for a given session.
  */
-export function buildPromptVars(worktree: string, version: number): PromptVars {
-  const vDir = join(worktree, 'spec', `v${version}`);
+export function buildPromptVars(worktree: string, version: number, ticketId: string): PromptVars {
+  const vDir = join(worktree, 'spec', ticketId, `v${version}`);
   return {
-    ticket: join(worktree, 'spec', 'ticket.md'),
+    ticket: join(worktree, 'spec', ticketId, 'ticket.md'),
     spec: join(vDir, 'task-spec.md'),
     specDir: vDir,
     plans: join(vDir, 'plans'),
     worktree,
+    triage: join(vDir, 'triage.md'),
   };
 }
 

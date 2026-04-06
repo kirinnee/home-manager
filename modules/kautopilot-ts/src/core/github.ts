@@ -63,10 +63,18 @@ export async function ghPrChecks(prNumber: number, cwd?: string): Promise<CheckS
   }
 
   const checks = parseJson<GhCheck[]>(result.stdout, 'pr-checks');
-  return checks.map(c => ({
-    name: c.name,
-    status: c.state === 'pass' ? 'passing' : c.state === 'fail' ? 'failing' : 'pending',
-  }));
+  return checks.map(c => {
+    const s = c.state.toLowerCase();
+    return {
+      name: c.name,
+      status:
+        s === 'pass' || s === 'success'
+          ? ('passing' as const)
+          : s === 'fail' || s === 'failure'
+            ? ('failing' as const)
+            : ('pending' as const),
+    };
+  });
 }
 
 // ============================================================================
@@ -252,6 +260,17 @@ export async function ghPrComments(prNumber: number, since?: string, cwd?: strin
 }
 
 // ============================================================================
+// Post PR comment
+// ============================================================================
+
+export async function ghPrComment(prNumber: number, body: string, cwd?: string): Promise<void> {
+  const result = await gh(['pr', 'comment', String(prNumber), '--body', body], cwd);
+  if (result.exitCode !== 0) {
+    throw new Error(`gh pr comment failed: ${result.stderr}`);
+  }
+}
+
+// ============================================================================
 // Reply to review thread
 // ============================================================================
 
@@ -339,31 +358,6 @@ export async function ghReact(commentId: number, reaction: string = '+1', cwd?: 
   if (result.exitCode !== 0) {
     throw new Error(`gh react failed: ${result.stderr}`);
   }
-}
-
-// ============================================================================
-// Create PR
-// ============================================================================
-
-export async function ghCreatePr(
-  title: string,
-  baseBranch: string,
-  body: string,
-  cwd?: string,
-): Promise<{ number: number; url: string }> {
-  const result = await gh(['pr', 'create', '--title', title, '--base', baseBranch, '--body', body], cwd);
-
-  if (result.exitCode !== 0) {
-    throw new Error(`gh pr create failed: ${result.stderr}`);
-  }
-
-  // Parse the URL from output like: https://github.com/owner/repo/pull/123
-  const urlMatch = result.stdout.match(/https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)/);
-  if (!urlMatch) {
-    throw new Error(`Could not parse PR URL from output: ${result.stdout}`);
-  }
-
-  return { number: parseInt(urlMatch[1], 10), url: urlMatch[0] };
 }
 
 // ============================================================================

@@ -22,7 +22,7 @@ export async function handleFinalizePlans(ctx: Phase1Context): Promise<string | 
     metadata: { stepType: 'code' },
   });
 
-  const vars = buildPromptVars(session.worktree, version);
+  const vars = buildPromptVars(session.worktree, version, session.ticket_id || 'local');
 
   // Discover plan files from worktree — try draft-based first, then flat files
   const latestDraft = findLatestPlanDraftDir(vars.plans);

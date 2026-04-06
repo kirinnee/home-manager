@@ -88,13 +88,3 @@ export function getActiveInitForWorktree(repoPath: string, worktree: string): In
     )
     .get(repoPath, worktree) as InitAttemptRow | null;
 }
-
-/**
- * List all init attempts for a worktree, including completed/failed ones.
- */
-export function listInitAttemptsForWorktree(repoPath: string, worktree: string): InitAttemptRow[] {
-  const d = getDb();
-  return d
-    .query('SELECT * FROM init_attempts WHERE repo_path = $1 AND worktree = $2 ORDER BY created_at DESC')
-    .all(repoPath, worktree) as InitAttemptRow[];
-}

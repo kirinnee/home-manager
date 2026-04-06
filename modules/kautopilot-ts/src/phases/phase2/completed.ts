@@ -1,5 +1,6 @@
 import type { Phase2Context } from './types';
 import { appendEvent } from '../../core/log';
+import { logBanner } from '../../util/format';
 
 export async function handleCompleted(ctx: Phase2Context): Promise<string | null> {
   const { session, version } = ctx;
@@ -10,6 +11,6 @@ export async function handleCompleted(ctx: Phase2Context): Promise<string | null
     version,
   });
 
-  console.log('[Phase 2] All plans completed');
+  logBanner('Phase 2 Complete — All plans implemented');
   return null; // Terminal state
 }

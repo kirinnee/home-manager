@@ -13,11 +13,6 @@ export function debugLog(...args: unknown[]): void {
   if (DEBUG) console.error('[debug]', ...args);
 }
 
-/** Resolve the Claude binary: CLAUDE_BINARY env var, or 'claude' as default. */
-export function claudeBinary(): string {
-  return process.env.CLAUDE_BINARY ?? 'claude';
-}
-
 export interface SpawnPrintOptions {
   cwd?: string;
   env?: Record<string, string>;
@@ -262,11 +257,7 @@ export async function spawnPrint<T = unknown>(binary: string, prompt: string, op
   s?.stop(spinMsg ?? '');
 
   try {
-    // Strip markdown code fences if present (LLMs often wrap JSON in ```json ... ```)
-    const cleaned = stdout
-      .replace(/^```(?:json)?\s*\n?/m, '')
-      .replace(/\n?```\s*$/m, '')
-      .trim();
+    const cleaned = stripCodeFences(stdout);
     return JSON.parse(cleaned) as T;
   } catch {
     throw new Error(`LLM returned invalid JSON: ${stdout.slice(0, 200)}`);
@@ -328,6 +319,18 @@ export async function spawnTTY(binary: string, prompt: string, options?: SpawnTT
   return exitCode;
 }
 
+/**
+ * Strip markdown code fences that LLMs commonly wrap around responses.
+ * Handles ``` and ```lang at start/end, including when the fence is the
+ * entire content (e.g. LLM returns just "```").
+ */
+export function stripCodeFences(text: string): string {
+  return text
+    .replace(/^```[^\n]*\n?/m, '')
+    .replace(/\n?```\s*$/m, '')
+    .trim();
+}
+
 /** Convenience: spawnPrint that returns raw string (no JSON parsing). */
 export async function spawnPrintRaw(binary: string, prompt: string, options?: SpawnPrintOptions): Promise<string> {
   const spinMsg = options?.spinnerMsg;
@@ -338,5 +341,5 @@ export async function spawnPrintRaw(binary: string, prompt: string, options?: Sp
 
   s?.stop(spinMsg ?? '');
 
-  return stdout;
+  return stripCodeFences(stdout);
 }

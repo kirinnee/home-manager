@@ -4,6 +4,7 @@ import { appendEvent } from '../../core/log';
 import { snapshotPath } from '../../core/artifacts';
 import { selectOption, textInput } from '../../llm/inquirer';
 import { renderMarkdown } from '../../util/markdown';
+import { logBanner } from '../../util/format';
 
 /**
  * [code] User review gate for ticket delivery artifacts.
@@ -49,9 +50,7 @@ export async function handleTicketReview(ctx: Phase3Context): Promise<string | n
   }
 
   // Display each artifact
-  console.log(`\n${'='.repeat(60)}`);
-  console.log('Ticket Delivery — Review Draft Artifacts');
-  console.log(`${'='.repeat(60)}\n`);
+  logBanner('Ticket Delivery — Review Draft Artifacts');
 
   for (const f of artifactFiles.sort()) {
     const content = readFileSync(snapshotPath(session.id, version, f), 'utf-8');
@@ -60,7 +59,7 @@ export async function handleTicketReview(ctx: Phase3Context): Promise<string | n
     console.log();
   }
 
-  console.log(`${'='.repeat(60)}\n`);
+  console.log();
 
   // Ask user for approval (spec section 11.2)
   const choice = await selectOption<'approve' | 'feedback'>('Do you approve these ticket artifacts for publishing?', [

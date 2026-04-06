@@ -1,30 +1,28 @@
 import { spawn } from 'bun';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { spinner } from '@clack/prompts';
 import type { Config } from './types';
 import { debugLog } from '../llm/spawn';
-import { sessionDir } from './artifacts';
 
 // In-memory cache: binary path → config dir
 const cache = new Map<string, string>();
 
-const CACHE_FILE = 'binary-config-dirs.json';
+const GLOBAL_CACHE_FILE = join(process.env.HOME ?? '', '.kautopilot', 'binary-config-dirs.json');
 
 /**
- * Load persisted binary config dirs from disk into the in-memory cache.
+ * Load persisted binary config dirs from the global cache into memory.
  * Returns true if cache was loaded (probing can be skipped).
  */
-export function loadPersistedConfigDirs(id: string): boolean {
-  const path = join(sessionDir(id), CACHE_FILE);
-  if (!existsSync(path)) return false;
+export function loadPersistedConfigDirs(): boolean {
+  if (!existsSync(GLOBAL_CACHE_FILE)) return false;
 
   try {
-    const data = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, string>;
+    const data = JSON.parse(readFileSync(GLOBAL_CACHE_FILE, 'utf-8')) as Record<string, string>;
     for (const [binary, dir] of Object.entries(data)) {
       cache.set(binary, dir);
     }
-    debugLog(`[config-dir] Loaded ${Object.keys(data).length} cached dirs from ${path}`);
+    debugLog(`[config-dir] Loaded ${Object.keys(data).length} cached dirs from ${GLOBAL_CACHE_FILE}`);
     return true;
   } catch {
     return false;
@@ -32,20 +30,27 @@ export function loadPersistedConfigDirs(id: string): boolean {
 }
 
 /**
- * Persist the selected cache entries to disk.
+ * Persist cache entries to the global cache file.
  */
-function persistConfigDirs(id: string, binaries: Iterable<string>): void {
-  const path = join(sessionDir(id), CACHE_FILE);
-  const data: Record<string, string> = {};
-  let count = 0;
+function persistConfigDirs(binaries: Iterable<string>): void {
+  // Merge with existing file to avoid clobbering entries from other sessions
+  let existing: Record<string, string> = {};
+  if (existsSync(GLOBAL_CACHE_FILE)) {
+    try {
+      existing = JSON.parse(readFileSync(GLOBAL_CACHE_FILE, 'utf-8')) as Record<string, string>;
+    } catch {
+      /* ignore */
+    }
+  }
+
   for (const binary of binaries) {
     const dir = cache.get(binary);
-    if (!dir) continue;
-    data[binary] = dir;
-    count++;
+    if (dir) existing[binary] = dir;
   }
-  writeFileSync(path, JSON.stringify(data, null, 2));
-  debugLog(`[config-dir] Persisted ${count} dirs to ${path}`);
+
+  mkdirSync(dirname(GLOBAL_CACHE_FILE), { recursive: true });
+  writeFileSync(GLOBAL_CACHE_FILE, JSON.stringify(existing, null, 2));
+  debugLog(`[config-dir] Persisted ${Object.keys(existing).length} dirs to ${GLOBAL_CACHE_FILE}`);
 }
 
 /**
@@ -99,37 +104,42 @@ export async function probeConfigDir(binary: string): Promise<string> {
  * Loads from persisted cache if available (instant). Otherwise probes in parallel
  * with a spinner and persists the results for next time.
  */
-export async function discoverConfigDirs(config: Config, sessionId?: string): Promise<Record<string, string>> {
+export async function discoverConfigDirs(config: Config): Promise<Record<string, string>> {
   // Collect all unique binary paths
   const binaries = new Set<string>();
   const defaultBin = process.env.CLAUDE_BINARY ?? config.claude_binary ?? 'claude';
   binaries.add(defaultBin);
 
-  for (const phase of Object.values(config.agents)) {
-    for (const agent of Object.values(phase)) {
-      if (agent.binary) binaries.add(agent.binary);
-    }
+  // Collect binaries from agent configs
+  const agentEntries: Array<{ binary?: string }> = [
+    config.agents.phase1.triage,
+    config.agents.phase1.spec_writer,
+    config.agents.phase1.plan_writer,
+    ...Object.values(config.agents.init),
+    ...Object.values(config.agents.phase2),
+    ...Object.values(config.agents.phase3),
+  ];
+  for (const agent of agentEntries) {
+    if (agent.binary) binaries.add(agent.binary);
   }
 
   // Check reviewer-level binaries
-  if (config.spec_reviewers) {
-    for (const reviewer of Object.values(config.spec_reviewers)) {
+  if (config.agents.phase1.spec_reviewers) {
+    for (const reviewer of Object.values(config.agents.phase1.spec_reviewers)) {
       if (reviewer.binaries) {
         for (const b of reviewer.binaries) binaries.add(b);
       }
     }
   }
-  if (config.plan_reviewers) {
-    for (const reviewer of Object.values(config.plan_reviewers)) {
+  if (config.agents.phase1.plan_reviewers) {
+    for (const reviewer of Object.values(config.agents.phase1.plan_reviewers)) {
       if (reviewer.binaries) {
         for (const b of reviewer.binaries) binaries.add(b);
       }
     }
   }
 
-  if (sessionId) {
-    loadPersistedConfigDirs(sessionId);
-  }
+  loadPersistedConfigDirs();
 
   const missingBinaries = [...binaries].filter(binary => !cache.has(binary));
 
@@ -157,9 +167,9 @@ export async function discoverConfigDirs(config: Config, sessionId?: string): Pr
     result[binary] = cache.get(binary) ?? `${process.env.HOME}/.claude`;
   }
 
-  // Persist for next time
-  if (sessionId) {
-    persistConfigDirs(sessionId, binaries);
+  // Persist globally for future sessions
+  if (missingBinaries.length > 0) {
+    persistConfigDirs(binaries);
   }
 
   return result;

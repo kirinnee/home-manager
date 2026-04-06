@@ -1093,9 +1093,9 @@ export const downgrade_local: InitStateHandler = async ctx => {
   );
   const ticketBody = `# ${localTicketId}\n\n${ticketContent.trim() || '(no description provided)'}\n`;
 
-  // Write to spec/ticket.md at the worktree root — the canonical runtime ticket path
+  // Write to spec/{ticketId}/ticket.md at the worktree root — the canonical runtime ticket path
   // that pull-ticket.ts reads (prevents placeholder overwrite)
-  const specDir = join(worktree, 'spec');
+  const specDir = join(worktree, 'spec', localTicketId);
   mkdirSync(specDir, { recursive: true });
   writeFileSync(join(specDir, 'ticket.md'), ticketBody);
 
