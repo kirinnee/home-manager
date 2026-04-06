@@ -29,32 +29,3 @@ export async function textInput(message: string, placeholder?: string): Promise<
   }
   return result;
 }
-
-export async function triageIssues(
-  issues: string[],
-): Promise<{ valid: string[]; invalid: string[]; discuss: string[] }> {
-  const valid: string[] = [];
-  const invalid: string[] = [];
-  const discuss: string[] = [];
-
-  for (const issue of issues) {
-    const action = await selectOption<'accept' | 'reject' | 'discuss'>(`Issue: ${issue}`, [
-      { value: 'accept', label: 'Accept (valid)', hint: 'Mark as valid issue' },
-      { value: 'reject', label: 'Reject (invalid)', hint: 'Mark as invalid, will be ignored' },
-      { value: 'discuss', label: 'Discuss', hint: 'Flag for further discussion' },
-    ]);
-    switch (action) {
-      case 'accept':
-        valid.push(issue);
-        break;
-      case 'reject':
-        invalid.push(issue);
-        break;
-      case 'discuss':
-        discuss.push(issue);
-        break;
-    }
-  }
-
-  return { valid, invalid, discuss };
-}

@@ -154,21 +154,21 @@ rec {
         };
 
         codex = merge userConfig { env = auth.codex; };
-        gemini = merge userConfig { env = auth.gemini; };
-        ag = merge userConfig { env = auth.ag; };
         zai = merge userConfig { env = auth.zai; };
         cerebras = merge userConfig { env = auth.cerebras; };
+        fireworks = merge userConfig { env = auth.fireworks; };
+        friendli = merge userConfig { env = auth.friendli; };
         kimi = merge userConfig { env = auth.kimi; };
         seed = merge userConfig { env = auth.seed; };
         mm = merge userConfig { env = auth.mm; };
 
         auto-anthropic = merge autoConfig { env = auth.anthropic; };
         auto-codex = merge autoConfig { env = auth.codex; };
-        auto-gemini = merge autoConfig { env = auth.gemini; };
-        auto-ag = merge autoConfig { env = auth.ag; };
         auto-zai = merge autoConfig { env = auth.zai; };
         auto-cerebras = merge autoConfig { env = auth.cerebras; };
         auto-kimi = merge autoConfig { env = auth.kimi; };
+        auto-fireworks = merge autoConfig { env = auth.fireworks; };
+        auto-friendli = merge autoConfig { env = auth.friendli; };
         auto-seed = merge autoConfig { env = auth.seed; };
         auto-mm = merge autoConfig { env = auth.mm; };
       };

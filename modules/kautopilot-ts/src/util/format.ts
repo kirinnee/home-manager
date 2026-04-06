@@ -79,6 +79,40 @@ export function logDim(msg: string): void {
 }
 
 // ============================================================================
+// Banners
+// ============================================================================
+
+/** Display a bordered banner with title and optional key-value fields */
+export function logBanner(title: string, fields?: Record<string, string>): void {
+  const line = '─'.repeat(60);
+  console.log(`\n${c.cyan}${line}${c.reset}`);
+  console.log(`${c.bold}  ${title}${c.reset}`);
+  console.log(`${c.cyan}${line}${c.reset}`);
+  if (fields && Object.keys(fields).length > 0) {
+    for (const [key, value] of Object.entries(fields)) {
+      console.log(`  ${c.cyan}${key}:${c.reset} ${value}`);
+    }
+    console.log(`${c.cyan}${line}${c.reset}`);
+  }
+  console.log();
+}
+
+/** Display an error banner with title and optional key-value fields */
+export function logErrorBanner(title: string, fields?: Record<string, string>): void {
+  const line = '─'.repeat(60);
+  console.log(`\n${c.red}${line}${c.reset}`);
+  console.log(`${c.bold}${c.red}  ${title}${c.reset}`);
+  console.log(`${c.red}${line}${c.reset}`);
+  if (fields && Object.keys(fields).length > 0) {
+    for (const [key, value] of Object.entries(fields)) {
+      console.log(`  ${c.cyan}${key}:${c.reset} ${value}`);
+    }
+    console.log(`${c.red}${line}${c.reset}`);
+  }
+  console.log();
+}
+
+// ============================================================================
 // State icons
 // ============================================================================
 

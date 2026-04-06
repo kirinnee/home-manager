@@ -13,6 +13,17 @@ rec {
     ANTHROPIC_DEFAULT_SONNET_MODEL = "kimi-k2.5";
     ANTHROPIC_DEFAULT_OPUS_MODEL = "kimi-k2.5";
   };
+  friendli = proxy // {
+    ANTHROPIC_DEFAULT_HAIKU_MODEL = "MiniMaxAI/MiniMax-M2.5";
+    ANTHROPIC_DEFAULT_SONNET_MODEL = "zai-org/GLM-4.7";
+    ANTHROPIC_DEFAULT_OPUS_MODEL = "zai-org/GLM-5";
+
+  };
+  fireworks = proxy // {
+    ANTHROPIC_DEFAULT_HAIKU_MODEL = "accounts/fireworks/routers/kimi-k2p5-turbo";
+    ANTHROPIC_DEFAULT_SONNET_MODEL = "accounts/fireworks/routers/kimi-k2p5-turbo";
+    ANTHROPIC_DEFAULT_OPUS_MODEL = "accounts/fireworks/routers/kimi-k2p5-turbo";
+  };
   seed = proxy // {
     ANTHROPIC_DEFAULT_HAIKU_MODEL = "doubao-seed-2.0-lite";
     ANTHROPIC_DEFAULT_SONNET_MODEL = "doubao-seed-2.0-code";
@@ -36,16 +47,6 @@ rec {
   codex = proxy // {
     ANTHROPIC_DEFAULT_OPUS_MODEL = "gpt-5.4";
     ANTHROPIC_DEFAULT_SONNET_MODEL = "gpt-5.4";
-    ANTHROPIC_DEFAULT_HAIKU_MODEL = "gpt-5.1-codex-mini";
-  };
-  gemini = proxy // {
-    ANTHROPIC_DEFAULT_OPUS_MODEL = "gemini-3.1-pro-preview";
-    ANTHROPIC_DEFAULT_SONNET_MODEL = "gemini-3-flash-preview";
-    ANTHROPIC_DEFAULT_HAIKU_MODEL = "gemini-3.1-flash-lite-preview";
-  };
-  ag = proxy // {
-    ANTHROPIC_DEFAULT_OPUS_MODEL = "gemini-3.1-pro-high";
-    ANTHROPIC_DEFAULT_SONNET_MODEL = "gemini-3.1-pro-low";
-    ANTHROPIC_DEFAULT_HAIKU_MODEL = "gemini-3.1-pro-low";
+    ANTHROPIC_DEFAULT_HAIKU_MODEL = "gpt-5.4-mini";
   };
 }

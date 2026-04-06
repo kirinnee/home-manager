@@ -17,6 +17,7 @@ import { createOrgCommand } from './cli/org';
 import { createSpecReviewCommand } from './cli/spec-review';
 import { createPlanReviewCommand } from './cli/plan-review';
 import { createLogEventCommand } from './cli/log-event';
+import { createResetCommand } from './cli/reset';
 
 const program = new Command();
 
@@ -33,6 +34,7 @@ program
   .addCommand(createOrgCommand())
   .addCommand(createSpecReviewCommand())
   .addCommand(createPlanReviewCommand())
-  .addCommand(createLogEventCommand());
+  .addCommand(createLogEventCommand())
+  .addCommand(createResetCommand());
 
 program.parseAsync(process.argv).then(() => process.exit(0));

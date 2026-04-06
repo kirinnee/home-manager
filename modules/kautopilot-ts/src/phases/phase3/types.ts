@@ -55,7 +55,7 @@ export type Phase3StateMap = Record<string, (ctx: Phase3Context) => Promise<stri
 export interface EvalResult {
   unitId: string;
   unitType: 'ci_failure' | 'thread' | 'pr_comment';
-  verdict: 'reply' | 'resolve' | 'code_fix' | 'skip';
+  verdict: 'reply' | 'resolve' | 'code_fix';
   reply?: string;
   codeFix?: string;
   resolveThread?: boolean;

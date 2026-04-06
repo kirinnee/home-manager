@@ -7,11 +7,11 @@ import { DEFAULT_CONFIG } from './types';
 // TTY exit instruction — appended to all TTY agent prompts
 // ============================================================================
 
-export function ttyExitInstruction(sessionId: string): string {
-  return `\n\n[Session: ${sessionId}]\nWhen you are done, tell the user: "Exit this TTY (type /exit or Ctrl+C) to continue kautopilot."`;
-}
-
-/** @deprecated Use ttyExitInstruction(sessionId) instead */
+/**
+ * TTY exit instruction — only append to TTY prompts that do NOT have their own
+ * approval protocol with exit instructions. Phase 1 TTYs (triage, write-spec,
+ * write-plans) handle exit via their approval gates and should NOT use this.
+ */
 export const TTY_EXIT_INSTRUCTION =
   '\n\nWhen you are done, tell the user: "Exit this TTY (type /exit or Ctrl+C) to continue kautopilot."';
 
@@ -52,10 +52,18 @@ export function loadSessionAgents(sessionId: string): void {
       claude_binary: parsed.claude_binary ?? DEFAULT_CONFIG.claude_binary,
       agents: {
         init: { ...DEFAULT_CONFIG.agents.init, ...parsed.agents?.init },
+        phase1: {
+          triage: { ...DEFAULT_CONFIG.agents.phase1.triage, ...parsed.agents?.phase1?.triage },
+          spec_writer: { ...DEFAULT_CONFIG.agents.phase1.spec_writer, ...parsed.agents?.phase1?.spec_writer },
+          plan_writer: { ...DEFAULT_CONFIG.agents.phase1.plan_writer, ...parsed.agents?.phase1?.plan_writer },
+          spec_reviewers: { ...DEFAULT_CONFIG.agents.phase1.spec_reviewers, ...parsed.agents?.phase1?.spec_reviewers },
+          plan_reviewers: { ...DEFAULT_CONFIG.agents.phase1.plan_reviewers, ...parsed.agents?.phase1?.plan_reviewers },
+        },
         phase2: { ...DEFAULT_CONFIG.agents.phase2, ...parsed.agents?.phase2 },
         phase3: { ...DEFAULT_CONFIG.agents.phase3, ...parsed.agents?.phase3 },
+        generic: { ...DEFAULT_CONFIG.agents.generic, ...parsed.agents?.generic },
       },
-      types: { ...DEFAULT_CONFIG.types, ...parsed.types },
+      templates: { ...DEFAULT_CONFIG.templates, ...parsed.templates },
       kloop: { ...DEFAULT_CONFIG.kloop, ...parsed.kloop },
       settings: { ...DEFAULT_CONFIG.settings, ...parsed.settings },
       repo: { ...DEFAULT_CONFIG.repo, ...parsed.repo },
@@ -115,6 +123,6 @@ export function getDefaultBinary(): string {
 /**
  * Get the raw default agents map (for testing/inspection).
  */
-export function getDefaultAgents(): Record<string, Record<string, { prompt: string; binary?: string }>> {
+export function getDefaultAgents(): Config['agents'] {
   return { ...DEFAULT_CONFIG.agents };
 }

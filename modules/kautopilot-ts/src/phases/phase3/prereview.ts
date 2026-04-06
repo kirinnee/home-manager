@@ -16,15 +16,14 @@ export async function handlePrereview(ctx: Phase3Context): Promise<string | null
     metadata: { stepType: 'llm' },
   });
 
-  // Check if prereview is enabled (prereview_classify agent configured)
-  const prereviewEnabled = config.agents.phase3?.prereview_classify !== undefined;
-  if (!prereviewEnabled) {
-    console.log('[prereview] Prereview disabled in config — skipping');
+  // Prereview requires CodeRabbit — skip entirely if disabled
+  if (!config.settings.coderabbit) {
+    console.log('[prereview] CodeRabbit disabled in config — skipping');
     appendEvent(session.id, {
       ts: new Date().toISOString(),
       event: 'prereview:completed',
       version,
-      metadata: { skipped: true },
+      metadata: { skipped: true, reason: 'coderabbit_disabled' },
     });
     return 'push';
   }

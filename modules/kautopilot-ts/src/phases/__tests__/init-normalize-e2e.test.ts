@@ -75,7 +75,7 @@ describe('E2E: normalize preserves research hierarchy', () => {
 
     const ctx = {
       initId,
-      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null } },
+      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null, prComment: null } },
       workDir: tempDir,
       gitRootPath: tempDir,
       worktree: tempDir,
@@ -166,7 +166,7 @@ describe('E2E: normalize preserves research hierarchy', () => {
 
     const ctx = {
       initId,
-      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null } },
+      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null, prComment: null } },
       workDir: tempDir,
       gitRootPath: tempDir,
       worktree: tempDir,
@@ -241,7 +241,7 @@ describe('E2E: normalize preserves research hierarchy', () => {
 
     const ctx = {
       initId,
-      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null } },
+      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null, prComment: null } },
       workDir: tempDir,
       gitRootPath: tempDir,
       worktree: tempDir,
@@ -323,7 +323,7 @@ describe('E2E: normalize preserves research hierarchy', () => {
 
     const ctx = {
       initId,
-      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null } },
+      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null, prComment: null } },
       workDir: tempDir,
       gitRootPath: tempDir,
       worktree: tempDir,
@@ -398,7 +398,7 @@ describe('E2E: normalize preserves research hierarchy', () => {
 
     const ctx = {
       initId,
-      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null } },
+      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null, prComment: null } },
       workDir: tempDir,
       gitRootPath: tempDir,
       worktree: tempDir,
@@ -464,7 +464,7 @@ describe('E2E: normalize preserves research hierarchy', () => {
 
     const ctx = {
       initId,
-      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null } },
+      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null, prComment: null } },
       workDir: tempDir,
       gitRootPath: tempDir,
       worktree: tempDir,

@@ -54,10 +54,6 @@ export function readLog(id: string): LogEntry[] {
 // Init log operations
 // ============================================================================
 
-export function initLogPath(id: string): string {
-  return logPathForDir(initDir(id));
-}
-
 export function appendInitEvent(id: string, entry: LogEntry): void {
   appendEventToDir(initDir(id), entry);
 }

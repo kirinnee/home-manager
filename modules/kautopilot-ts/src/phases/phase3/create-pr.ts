@@ -2,9 +2,19 @@ import type { Phase3Context } from './types';
 import { appendEvent } from '../../core/log';
 import { ensureStatus } from '../../core/status';
 import { isOnMain } from '../../core/git';
-import { ghCreatePr, ghListPrsForBranch, ghRepoInfo, ghFetchMergePolicy } from '../../core/github';
+import { ghListPrsForBranch, ghRepoInfo, ghFetchMergePolicy, ghPrComment } from '../../core/github';
 import { readDeliveryManifest, updateDeliveryManifest } from '../../core/manifests';
-import { resolveSpec } from '../shared';
+import { snapshotPath } from '../../core/artifacts';
+import { spawnPrintRaw } from '../../llm/spawn';
+import { writeStepInit } from '../../core/step-init';
+import { getAgentBinary, getAgentPrompt } from '../../core/agents';
+
+// Mechanical context prepended by handler — NOT part of user-editable prompt
+const CREATE_PR_MECHANICS = `## Spec Context
+
+Read the spec at: {spec_path}
+
+The spec contains what was implemented. Use it for PR body context.`;
 
 export async function handleCreatePr(ctx: Phase3Context): Promise<string | null> {
   const { session, version, ticketId, baseBranch } = ctx;
@@ -66,17 +76,49 @@ export async function handleCreatePr(ctx: Phase3Context): Promise<string | null>
     return 'poll';
   }
 
-  // Build PR title and body
-  const title = `[${ticketId}] Implement task`;
+  // Resolve spec path (don't inline content)
+  const specPath = snapshotPath(session.id, version, 'task-spec.md');
 
-  // Read spec for PR body from session artifacts
-  const specContent = resolveSpec(session.id, version);
+  // Get user-configurable prompt, then prepend mechanics
+  const userPrompt = getAgentPrompt('phase3', 'create_pr', {
+    baseBranch,
+    ticketId,
+    spec_path: specPath,
+  });
+  const mechanics = CREATE_PR_MECHANICS.replace('{spec_path}', specPath);
+  const prompt = `${mechanics}\n\n${userPrompt}`;
 
-  const body = `## Summary\n\nImplements ${ticketId}\n\n## Spec\n\n${specContent.slice(0, 2000)}${specContent.length > 2000 ? '\n\n...(truncated)' : ''}`;
+  const binary = getAgentBinary('phase3', 'create_pr');
+  writeStepInit(session.id, version, 'create_pr', {
+    prompt,
+    command: `${binary} --print (LLM create PR)`,
+    type: 'llm_print',
+  });
 
-  // Create PR
-  console.log(`[create_pr] Creating PR: ${title}`);
-  const pr = await ghCreatePr(title, baseBranch, body, session.worktree);
+  console.log(`[create_pr] Creating PR via LLM for ${ticketId}`);
+  const rawOutput = await spawnPrintRaw(binary, prompt, {
+    cwd: session.worktree,
+    timeout: 120,
+    sessionId: session.id,
+    label: 'create-pr',
+  });
+
+  // Parse PR number and URL from LLM output
+  let pr: { number: number; url: string };
+  try {
+    const cleaned = rawOutput
+      .replace(/^```(?:json)?\s*\n?/m, '')
+      .replace(/\n?```\s*$/m, '')
+      .trim();
+    pr = JSON.parse(cleaned);
+  } catch {
+    // Fallback: try to extract from gh pr create output URL pattern
+    const urlMatch = rawOutput.match(/https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)/);
+    if (!urlMatch) {
+      throw new Error(`Could not parse PR info from LLM output: ${rawOutput.slice(0, 300)}`);
+    }
+    pr = { number: parseInt(urlMatch[1], 10), url: urlMatch[0] };
+  }
 
   ctx.prNumber = pr.number;
   ctx.prUrl = pr.url;
@@ -95,6 +137,16 @@ export async function handleCreatePr(ctx: Phase3Context): Promise<string | null>
     ctx.mergePolicy = await ghFetchMergePolicy(repoInfo.owner, repoInfo.repo, session.worktree);
   } catch (err) {
     console.warn('[create_pr] Could not fetch merge policy:', err);
+  }
+
+  // Post per-cycle PR comment if configured
+  if (ctx.config.repo.prComment) {
+    try {
+      await ghPrComment(pr.number, ctx.config.repo.prComment, session.worktree);
+      console.log('[create_pr] Posted PR comment');
+    } catch (err) {
+      console.warn('[create_pr] Failed to post PR comment:', err);
+    }
   }
 
   appendEvent(session.id, {

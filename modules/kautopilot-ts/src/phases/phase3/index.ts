@@ -72,7 +72,7 @@ export async function runPhase3(
   session: SessionRow,
   config: Config,
   options?: { forceStartState?: string },
-): Promise<boolean> {
+): Promise<boolean | 'amend_spec'> {
   // Initialize agent resolution from session config
   loadSessionAgents(session.id);
 

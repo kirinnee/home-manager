@@ -1,10 +1,36 @@
-import { existsSync, readFileSync } from 'node:fs';
 import type { Phase3Context } from './types';
 import { appendEvent } from '../../core/log';
 import { sessionDir } from '../../core/artifacts';
-import { resolveSpec, resolvePlans, spawnTTYWithTurnTracking } from '../shared';
+import { resolvePlans, spawnTTYWithTurnTracking } from '../shared';
 import { writeStepInit } from '../../core/step-init';
 import { getAgentPrompt, getAgentBinary, TTY_EXIT_INSTRUCTION } from '../../core/agents';
+
+// Mechanical instructions prepended by handler — NOT part of user-editable prompt
+const TTY_RESOLVE_MECHANICS = {
+  ambiguous: `## Your Task
+Review each ambiguous item and tell me:
+1. Should I reply to the reviewer? If so, what should I say?
+2. Should I make a code fix? If so, describe the fix.
+3. Should I skip the item?
+
+After resolving, apply any needed changes to the codebase.`,
+
+  conflict: `## Your Task
+1. Open the conflicted files and resolve the merge conflicts
+2. Stage the resolved files with \`git add\`
+3. Continue the rebase with \`git rebase --continue\`
+4. If the conflict cannot be resolved, run \`git rebase --abort\` and I will try an alternative approach
+
+Please resolve the merge conflicts and continue the rebase.`,
+
+  failure: `## Your Task
+Investigate the failure and help me determine the next steps. Options:
+1. Fix the specific issue and retry
+2. Skip this fix and move on
+3. Escalate and stop
+
+Please review the situation and help me resolve the issue. Apply any needed changes.`,
+};
 
 export async function handleTtyResolve(ctx: Phase3Context): Promise<string | null> {
   const { session, version, ttyReason, baseBranch } = ctx;
@@ -21,23 +47,11 @@ export async function handleTtyResolve(ctx: Phase3Context): Promise<string | nul
   // Build context for TTY handoff
   const ticketId = ctx.ticketId;
 
-  // Load spec and plans from session artifacts
-  const specContent = resolveSpec(session.id, version);
-
-  const plans = resolvePlans(session.id, version);
-  const plansContent = plans.map(p => readFileSync(p, 'utf-8')).join('\n\n---\n\n');
-
-  // Load feedback history
-  const feedbackDir = `${sessionDir(session.id)}/artifacts/v${version}`;
-  let feedbackContent = '';
-  try {
-    const feedbackPath = `${feedbackDir}/feedback.md`;
-    if (existsSync(feedbackPath)) {
-      feedbackContent = readFileSync(feedbackPath, 'utf-8');
-    }
-  } catch {
-    feedbackContent = '';
-  }
+  // Resolve file paths (don't inline content)
+  const specPath = `${sessionDir(session.id)}/artifacts/v${version}/task-spec.md`;
+  const planPaths = resolvePlans(session.id, version);
+  const plansPathList = planPaths.join('\n');
+  const feedbackPath = `${sessionDir(session.id)}/artifacts/v${version}/feedback.md`;
 
   // Determine agent name based on reason
   const agentName =
@@ -47,7 +61,10 @@ export async function handleTtyResolve(ctx: Phase3Context): Promise<string | nul
         ? 'tty_resolve_conflict'
         : 'tty_resolve_failure';
 
-  // Build TTY prompt based on reason — the instruction part is configurable
+  // Get user-configurable prompt
+  const userPrompt = getAgentPrompt('phase3', agentName);
+
+  // Build TTY prompt based on reason — prepend mechanics to user prompt
   let ttyPrompt: string;
   if (ttyReason === 'ambiguous_eval') {
     const items = ctx.ttyResolveItems || [];
@@ -61,26 +78,21 @@ export async function handleTtyResolve(ctx: Phase3Context): Promise<string | nul
             .join('\n\n')
         : 'No specific items available — check the eval results in the log.';
 
-    const ambiguousInstruction = getAgentPrompt('phase3', agentName);
     ttyPrompt = `
-${ambiguousInstruction}
+${userPrompt}
 
 ## Context
-Spec: ${specContent.slice(0, 1500)}
-Plans: ${plansContent.slice(0, 1500)}
+Spec path: ${specPath}
+Plan paths:
+${plansPathList}
 
 ## Ambiguous Items
 ${itemsSection}
 
-${feedbackContent ? `## Previous Feedback\n${feedbackContent.slice(0, 500)}` : ''}
+## Previous Feedback
+Read at: ${feedbackPath}
 
-## Your Task
-Review each ambiguous item and tell me:
-1. Should I reply to the reviewer? If so, what should I say?
-2. Should I make a code fix? If so, describe the fix.
-3. Should I skip the item?
-
-After resolving, apply any needed changes to the codebase.
+${TTY_RESOLVE_MECHANICS.ambiguous}
 `.trim();
   } else if (ttyReason === 'merge_conflict') {
     // Get conflict markers from current tree
@@ -94,46 +106,36 @@ After resolving, apply any needed changes to the codebase.
       .split('\n')
       .filter(f => f.length > 0);
 
-    const conflictInstruction = getAgentPrompt('phase3', agentName);
     ttyPrompt = `
-${conflictInstruction}
+${userPrompt}
 
 ## Context
-Spec: ${specContent.slice(0, 1500)}
-Plans: ${plansContent.slice(0, 1500)}
+Spec path: ${specPath}
+Plan paths:
+${plansPathList}
 
 ## Conflicted Files
 ${conflictFiles.length > 0 ? conflictFiles.join('\n') : 'No conflict markers found in source files.'}
 
-## Your Task
-1. Open the conflicted files and resolve the merge conflicts
-2. Stage the resolved files with \`git add\`
-3. Continue the rebase with \`git rebase --continue\`
-4. If the conflict cannot be resolved, run \`git rebase --abort\` and I will try an alternative approach
+${TTY_RESOLVE_MECHANICS.conflict}
 
-${feedbackContent ? `## Previous Feedback\n${feedbackContent.slice(0, 500)}` : ''}
-
-Please resolve the merge conflicts and continue the rebase.
+## Previous Feedback
+Read at: ${feedbackPath}
 `.trim();
   } else {
     // run_fix_failure
-    const failureInstruction = getAgentPrompt('phase3', agentName);
     ttyPrompt = `
-${failureInstruction}
+${userPrompt}
 
 ## Context
-Spec: ${specContent.slice(0, 1500)}
-Plans: ${plansContent.slice(0, 1500)}
+Spec path: ${specPath}
+Plan paths:
+${plansPathList}
 
-## Your Task
-Investigate the failure and help me determine the next steps. Options:
-1. Fix the specific issue and retry
-2. Skip this fix and move on
-3. Escalate and stop
+${TTY_RESOLVE_MECHANICS.failure}
 
-${feedbackContent ? `## Previous Feedback\n${feedbackContent.slice(0, 500)}` : ''}
-
-Please review the situation and help me resolve the issue. Apply any needed changes.
+## Previous Feedback
+Read at: ${feedbackPath}
 `.trim();
   }
 

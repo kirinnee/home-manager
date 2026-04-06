@@ -8,10 +8,11 @@ import { logOk, logWarn, logDim } from '../../util/format';
 
 /**
  * [code] Fetch ticket content via get-ticket script and write to worktree.
- * Ticket is version-agnostic — lives at spec/ticket.md (not inside v{version}/).
+ * Ticket lives at spec/{ticketId}/ticket.md.
  */
 export async function handlePullTicket(ctx: Phase1Context): Promise<string | null> {
   const { session, version } = ctx;
+  const ticketId = session.ticket_id || 'local';
 
   appendEvent(session.id, {
     ts: new Date().toISOString(),
@@ -20,7 +21,7 @@ export async function handlePullTicket(ctx: Phase1Context): Promise<string | nul
     metadata: { stepType: 'code' },
   });
 
-  const specDir = join(session.worktree, 'spec');
+  const specDir = join(session.worktree, 'spec', ticketId);
   mkdirSync(specDir, { recursive: true });
   const ticketPath = join(specDir, 'ticket.md');
 
@@ -55,5 +56,5 @@ export async function handlePullTicket(ctx: Phase1Context): Promise<string | nul
     version,
   });
 
-  return 'write_spec';
+  return 'triage';
 }

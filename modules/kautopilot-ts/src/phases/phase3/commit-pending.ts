@@ -2,8 +2,8 @@ import type { Phase3Context } from './types';
 import { appendEvent } from '../../core/log';
 import { spawnPrintRaw } from '../../llm/spawn';
 import { writeStepInit } from '../../core/step-init';
-import { getAgentPrompt, getAgentBinary } from '../../core/agents';
-import { scanCommitConventions } from '../shared';
+import { getAgentBinary } from '../../core/agents';
+import { COMMIT_AGENT_PROMPT } from '../../core/types';
 
 export async function handleCommitPending(ctx: Phase3Context): Promise<string | null> {
   const { session, version, config } = ctx;
@@ -42,62 +42,32 @@ export async function handleCommitPending(ctx: Phase3Context): Promise<string | 
     return config.settings.coderabbit ? 'prereview' : 'push';
   }
 
-  // LLM --print: detect conventions and generate commit message
-  let commitLog = '';
-  try {
-    commitLog = await $`git log --oneline -10`.cwd(session.worktree).quiet().text();
-  } catch {
-    commitLog = '';
-  }
+  // Use shared COMMIT_AGENT_PROMPT directly with empty context
+  const prompt = COMMIT_AGENT_PROMPT.replace('{context}', '');
 
-  const conventions = scanCommitConventions(session.worktree);
-
-  // Build diff summary for context
-  const diffContent = await $`git diff --stat`.cwd(session.worktree).quiet().text();
-
-  const commitPendingInstruction = getAgentPrompt('phase3', 'commit_pending');
-  const prompt = `
-${commitPendingInstruction}
-
-Recent commits:
-${commitLog}
-
-Conventions:
-${conventions || '(no convention files found)'}
-
-Changed files summary:
-${diffContent}
-
-Output ONLY the commit message (first line = title, blank line, body if needed).
-`.trim();
-
-  // Record step init
   const binary = getAgentBinary('phase3', 'commit_pending');
   writeStepInit(session.id, version, 'commit_pending', {
     prompt,
-    command: `${binary} --print (LLM print)`,
+    command: `${binary} --print (LLM commit)`,
     type: 'llm_print',
   });
 
-  const commitMessage = await spawnPrintRaw(binary, prompt, {
+  await spawnPrintRaw(binary, prompt, {
     cwd: session.worktree,
-    timeout: 30,
+    timeout: 120,
     sessionId: session.id,
     label: 'commit-pending',
   });
 
-  // Stage and commit
+  // Read commit SHA as verification
   let commitSha = '';
   try {
-    for (const file of allFiles) {
-      await $`git add ${file}`.cwd(session.worktree).quiet();
-    }
-    await $`git commit -m ${commitMessage}`.cwd(session.worktree).quiet();
     const shaResult = await $`git rev-parse HEAD`.cwd(session.worktree).quiet().text();
     commitSha = shaResult.trim();
-    console.log(`[commit_pending] Committed: ${commitMessage.split('\n')[0]} (${commitSha.slice(0, 7)})`);
+    const msgResult = await $`git log --oneline -1`.cwd(session.worktree).quiet().text();
+    console.log(`[commit_pending] Committed: ${msgResult.trim()}`);
   } catch (err) {
-    console.warn('[commit_pending] Git commit failed:', err);
+    console.warn('[commit_pending] Could not read commit SHA:', err);
   }
 
   appendEvent(session.id, {
@@ -106,10 +76,9 @@ Output ONLY the commit message (first line = title, blank line, body if needed).
     version,
     metadata: {
       commitSha,
-      commitMessage: commitMessage.split('\n')[0],
       filesStaged: allFiles.length,
     },
   });
 
-  return 'prereview';
+  return config.settings.coderabbit ? 'prereview' : 'push';
 }

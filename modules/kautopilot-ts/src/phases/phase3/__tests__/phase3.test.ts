@@ -30,10 +30,22 @@ function makeCtx(overrides?: Partial<Phase3Context>): Phase3Context {
       claude_binary: 'claude',
       agents: {
         init: {},
+        phase1: {
+          triage: { prompt: '' },
+          spec_writer: { prompt: '' },
+          plan_writer: { prompt: '' },
+          spec_reviewers: {},
+          plan_reviewers: {},
+        },
         phase2: {},
         phase3: {},
+        generic: {},
       },
-      types: {},
+      templates: {
+        triage: '',
+        spec: '',
+        plan: '',
+      },
       kloop: {
         implementers: { claude: 1 },
         reviewPhases: [['claude']],
@@ -50,10 +62,12 @@ function makeCtx(overrides?: Partial<Phase3Context>): Phase3Context {
         pollInterval: 60,
         defaultLlmTimeout: 300,
         coderabbit: true,
+        removeSpecOnPush: false,
       },
       repo: {
         baseBranch: 'main',
         ticketSystem: null,
+        prComment: null,
       },
     },
     version: 1,
@@ -152,7 +166,7 @@ describe('computePollState', () => {
     expect(computePollState(signals, ctx)).toBe('pending');
   });
 
-  it('returns pending when more approvals are required', () => {
+  it('returns mergeable even when more approvals are required (approvals excluded from automation)', () => {
     const signals = makeSignals({
       approvals: 1,
       checks: [{ name: 'ci', status: 'passing' }],
@@ -166,7 +180,7 @@ describe('computePollState', () => {
         requiresCodeOwnerReviews: false,
       },
     });
-    expect(computePollState(signals, ctx)).toBe('pending');
+    expect(computePollState(signals, ctx)).toBe('mergeable');
   });
 
   it('returns blocked when CI is failing', () => {
@@ -188,7 +202,7 @@ describe('computePollState', () => {
     expect(computePollState(signals, ctx)).toBe('pending');
   });
 
-  it('returns pending when approval required but not yet given', () => {
+  it('returns mergeable when approval required but not yet given (approvals excluded from automation)', () => {
     const signals = makeSignals({
       checks: [{ name: 'ci', status: 'passing' }],
       approvals: 0,
@@ -202,7 +216,7 @@ describe('computePollState', () => {
         requiresCodeOwnerReviews: false,
       },
     });
-    expect(computePollState(signals, ctx)).toBe('pending');
+    expect(computePollState(signals, ctx)).toBe('mergeable');
   });
 
   it('throws when PR is closed', () => {

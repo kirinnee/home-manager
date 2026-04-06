@@ -41,7 +41,7 @@ export async function runStateMachine(
     terminalStates?: string[];
     forceStartState?: string;
   },
-): Promise<boolean> {
+): Promise<boolean | 'amend_spec'> {
   const { session, version } = ctx;
   const terminalStates = options?.terminalStates ?? [];
 
@@ -114,6 +114,11 @@ export async function runStateMachine(
     if (nextState === null) {
       interrupted = true;
       break;
+    }
+
+    // Handler returned 'amend_spec' — spec amendment escalation (phase 1 only)
+    if (nextState === 'amend_spec') {
+      return 'amend_spec';
     }
 
     // Advance to next state

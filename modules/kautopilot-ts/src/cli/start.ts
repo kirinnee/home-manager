@@ -58,7 +58,7 @@ async function runStart(opts: { phase?: string; local?: boolean }): Promise<void
   }
 
   // Crash recovery — detect dead process before checking lock
-  detectAndRecoverCrash(session.id, session.worktree);
+  detectAndRecoverCrash(session.id, session.worktree, session.ticket_id || 'local');
 
   // Check lock
   const lockInfo = checkLock(session.id);
@@ -159,7 +159,7 @@ async function runStart(opts: { phase?: string; local?: boolean }): Promise<void
 
   try {
     // Discover config dirs for all binaries (loads from disk cache on resume, probes on first run)
-    await discoverConfigDirs(config, session.id);
+    await discoverConfigDirs(config);
 
     // Log start
     appendEvent(session.id, {
