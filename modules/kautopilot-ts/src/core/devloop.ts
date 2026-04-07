@@ -86,9 +86,14 @@ export function writeKloopConfig(kautopilotSessionId: string, kloopConfig: Kloop
     implementerTimeout: kloopConfig.implementerTimeout,
     reviewerTimeout: kloopConfig.reviewerTimeout,
     conflictCheckThreshold: kloopConfig.conflictCheckThreshold,
+    compressSpec: kloopConfig.compressSpec,
     firstLoopFullReview: kloopConfig.firstLoopFullReview,
     previousReviewPropagation: kloopConfig.previousReviewPropagation,
   };
+
+  if (kloopConfig.conflictChecker) {
+    yamlObj.conflictChecker = kloopConfig.conflictChecker;
+  }
 
   if (kloopConfig.prompts) {
     yamlObj.prompts = kloopConfig.prompts;

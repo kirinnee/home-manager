@@ -51,11 +51,8 @@ export interface ReviewerPromptVars {
 
 export function buildReviewerPrompt(template: string | undefined, vars: ReviewerPromptVars): string {
   let prompt = template ?? DEFAULT_REVIEWER_PROMPT;
-  // Handle the conditional archivedReviews section
-  const archivedSection =
-    vars.archivedReviews !== null
-      ? `Check the previous loop's completed reviews at ${vars.archivedReviews}/ for context on what reviewers found.\n(Read these for background only — do not let previous reviewers opinions override your own assessment of the spec and code.)`
-      : `No previous loop reviews available yet.`;
+  // Handle the conditional archivedReviews section — path only, no inline instructions
+  const archivedSection = vars.archivedReviews !== null ? vars.archivedReviews : '';
   prompt = substitute(prompt, { ...vars, archivedReviews: archivedSection });
   return prompt;
 }

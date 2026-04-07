@@ -36,8 +36,8 @@ Read CLAUDE.md and any project skills files if they exist.
 
 1. Read and understand the specification completely — especially the Definition of Done checklist
 2. Before using any library, tool, or framework, research its current documentation and source code. Verify the version you are using matches the API signatures and configuration you are relying on. Do not rely on potentially outdated knowledge.
-3. Address any review feedback or learnings from above
-4. Implement the required changes
+3. **Focus on rejected reviews first.** Read the reviews from the previous loop at {reviewsDir}/. UNANIMOUS approval is required — every reviewer must pass. If any reviewer rejected, address their concerns before moving on to other work. Do NOT treat a minority rejection as optional.
+4. Implement the required changes, with special attention to addressing every rejected reviewer's concerns
 5. Capture evidence to {evidenceDir}/:
    - If the spec has a Definition of Done checklist, capture evidence for each item
    - If the spec has no checklist, figure out what checks are available (build, test, lint, type-check, etc.) and capture what you can
@@ -73,6 +73,7 @@ Read CLAUDE.md and any project skills files if they exist.
 
 ## Previous Loop Reviews
 {archivedReviews}
+If previous reviews are available above, read the verdict JSONs to identify which reviewers REJECTED. For each rejected reviewer, specifically verify whether their concerns have been addressed. Do not let previous opinions override your own assessment — but ensure previously raised issues are no longer present.
 
 ## Your Task
 

@@ -62,21 +62,27 @@ function findRepoSpecPath(sessionId: string, epochVersion: number): string | nul
   const worktree = session?.worktree;
   if (!worktree) return null;
 
-  // Read status.yaml to find ticket ID
-  const statusPath = join(sessionDir(sessionId), 'status.yaml');
-  if (!existsSync(statusPath)) return null;
-
-  const content = readFileSync(statusPath, 'utf-8');
-  const parsed = YAML.parse(content);
-  const ticketId = parsed?.context?.ticketId || parsed?.ticketId || 'local';
+  // Get ticket ID from DB (primary source), then fall back to status.yaml
+  let ticketId = session?.ticket_id || null;
+  if (!ticketId) {
+    const statusPath = join(sessionDir(sessionId), 'status.yaml');
+    if (existsSync(statusPath)) {
+      const content = readFileSync(statusPath, 'utf-8');
+      const parsed = YAML.parse(content);
+      ticketId = parsed?.context?.ticketId || parsed?.ticketId || null;
+    }
+  }
+  ticketId = ticketId || 'local';
 
   // Check common path
   const specPath = join(worktree, 'spec', ticketId, `v${epochVersion}`, 'task-spec.md');
   if (existsSync(specPath)) return specPath;
 
   // Try "local" as fallback
-  const localSpecPath = join(worktree, 'spec', 'local', `v${epochVersion}`, 'task-spec.md');
-  if (existsSync(localSpecPath)) return localSpecPath;
+  if (ticketId !== 'local') {
+    const localSpecPath = join(worktree, 'spec', 'local', `v${epochVersion}`, 'task-spec.md');
+    if (existsSync(localSpecPath)) return localSpecPath;
+  }
 
   return null;
 }
@@ -90,18 +96,25 @@ function findRepoPlansPath(sessionId: string, epochVersion: number): string | nu
   const worktree = session?.worktree;
   if (!worktree) return null;
 
-  const statusPath = join(sessionDir(sessionId), 'status.yaml');
-  if (!existsSync(statusPath)) return null;
-
-  const content = readFileSync(statusPath, 'utf-8');
-  const parsed = YAML.parse(content);
-  const ticketId = parsed?.context?.ticketId || parsed?.ticketId || 'local';
+  // Get ticket ID from DB (primary source), then fall back to status.yaml
+  let ticketId = session?.ticket_id || null;
+  if (!ticketId) {
+    const statusPath = join(sessionDir(sessionId), 'status.yaml');
+    if (existsSync(statusPath)) {
+      const content = readFileSync(statusPath, 'utf-8');
+      const parsed = YAML.parse(content);
+      ticketId = parsed?.context?.ticketId || parsed?.ticketId || null;
+    }
+  }
+  ticketId = ticketId || 'local';
 
   const plansPath = join(worktree, 'spec', ticketId, `v${epochVersion}`, 'plans');
   if (existsSync(plansPath)) return plansPath;
 
-  const localPlansPath = join(worktree, 'spec', 'local', `v${epochVersion}`, 'plans');
-  if (existsSync(localPlansPath)) return localPlansPath;
+  if (ticketId !== 'local') {
+    const localPlansPath = join(worktree, 'spec', 'local', `v${epochVersion}`, 'plans');
+    if (existsSync(localPlansPath)) return localPlansPath;
+  }
 
   return null;
 }
