@@ -1,11 +1,11 @@
 import { Command } from 'commander';
-import { getSessionByWorktree, getSessionById } from '../core/db';
-import { getActiveInitForWorktree, getInitAttemptById, getInitAttemptByPromotedSessionId } from '../core/init-db';
-import { ensureStatus } from '../core/status';
-import { ensureInitStatus } from '../core/init-status';
+import { getSessionById, getSessionByWorktree } from '../core/db';
 import { getGitRoot, getWorktree } from '../core/git';
-import { formatDuration, logField, logError } from '../util/format';
-import { readPlanManifest, readDeliveryManifest } from '../core/manifests';
+import { getActiveInitForWorktree, getInitAttemptById, getInitAttemptByPromotedSessionId } from '../core/init-db';
+import { ensureInitStatus } from '../core/init-status';
+import { readDeliveryManifest, readPlanManifest } from '../core/manifests';
+import { ensureStatus } from '../core/status';
+import { formatDuration, logError, logField } from '../util/format';
 
 export function createStatusCommand(): Command {
   return new Command('status')

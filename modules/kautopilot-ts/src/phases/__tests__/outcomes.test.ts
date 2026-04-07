@@ -1,9 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'bun:test';
-import { ensureStatus } from '../../core/status';
-import { appendEvent, logPath, readLog } from '../../core/log';
-import { mkdirSync, rmSync, existsSync, writeFileSync, readFileSync, mkdtempSync } from 'node:fs';
-import { join } from 'node:path';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { appendEvent, logPath, readLog } from '../../core/log';
+import { ensureStatus } from '../../core/status';
 
 let origHome: string;
 let tempHome: string;
@@ -16,17 +16,18 @@ afterAll(() => {
   process.env.HOME = origHome;
   rmSync(tempHome, { recursive: true, force: true });
 });
-import type { Phase3Context, PollSignals } from '../phase3/types';
-import { computeRolloverRecommendation } from '../phase3/poll';
+
+import { snapshotPath } from '../../core/artifacts';
 import {
-  updatePlanManifestEntry,
-  readPlanManifest,
-  writePlanManifest,
-  updateDeliveryManifest,
   readDeliveryManifest,
+  readPlanManifest,
+  updateDeliveryManifest,
+  updatePlanManifestEntry,
+  writePlanManifest,
 } from '../../core/manifests';
-import { runScriptFromDir, type ScriptResult } from '../../core/scripts';
-import { snapshotPath, ensureArtifactDir } from '../../core/artifacts';
+import { runScriptFromDir } from '../../core/scripts';
+import { computeRolloverRecommendation } from '../phase3/poll';
+import type { PollSignals } from '../phase3/types';
 
 // ============================================================================
 // kloop outcome → orchestrator transition tests (spec section 7)
@@ -216,8 +217,16 @@ describe('contract epoch versioning (spec section 4)', () => {
   });
 
   it('persists revisit_spec as durable status context for phase1 escalation', () => {
-    appendEvent(TEST_SESSION, { ts: '2026-04-01T10:00:00Z', event: 'phase2:started', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-04-01T10:00:01Z', event: 'resolve:started', version: 1 });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-04-01T10:00:00Z',
+      event: 'phase2:started',
+      version: 1,
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-04-01T10:00:01Z',
+      event: 'resolve:started',
+      version: 1,
+    });
     appendEvent(TEST_SESSION, {
       ts: '2026-04-01T10:00:02Z',
       event: 'context:updated',
@@ -429,31 +438,59 @@ describe('revisit_spec re-entry through implementation (spec section 1.1)', () =
 
   it('revisit_spec WAL sequence creates v2 epoch and preserves rewrite history', () => {
     // Simulate Phase 2 running on v1, hitting a conflict, resolve deciding revisit_spec
-    appendEvent(SESSION, { ts: '2026-04-01T10:00:00Z', event: 'phase2:started', version: 1 });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:00:00Z',
+      event: 'phase2:started',
+      version: 1,
+    });
     appendEvent(SESSION, {
       ts: '2026-04-01T10:01:00Z',
       event: 'clear_loop:started',
       version: 1,
       metadata: { planIndex: 0 },
     });
-    appendEvent(SESSION, { ts: '2026-04-01T10:01:01Z', event: 'clear_loop:completed', version: 1 });
-    appendEvent(SESSION, { ts: '2026-04-01T10:02:00Z', event: 'setup_run:started', version: 1 });
-    appendEvent(SESSION, { ts: '2026-04-01T10:02:01Z', event: 'setup_run:completed', version: 1 });
-    appendEvent(SESSION, { ts: '2026-04-01T10:03:00Z', event: 'running:started', version: 1 });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:01:01Z',
+      event: 'clear_loop:completed',
+      version: 1,
+    });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:02:00Z',
+      event: 'setup_run:started',
+      version: 1,
+    });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:02:01Z',
+      event: 'setup_run:completed',
+      version: 1,
+    });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:03:00Z',
+      event: 'running:started',
+      version: 1,
+    });
     appendEvent(SESSION, {
       ts: '2026-04-01T10:10:00Z',
       event: 'running:completed',
       version: 1,
       metadata: { status: 'max_situations' },
     });
-    appendEvent(SESSION, { ts: '2026-04-01T10:10:01Z', event: 'resolve:started', version: 1 });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:10:01Z',
+      event: 'resolve:started',
+      version: 1,
+    });
     appendEvent(SESSION, {
       ts: '2026-04-01T10:11:00Z',
       event: 'context:updated',
       version: 1,
       metadata: { rewriteDecision: 'revisit_spec' },
     });
-    appendEvent(SESSION, { ts: '2026-04-01T10:11:01Z', event: 'resolve:completed', version: 1 });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:11:01Z',
+      event: 'resolve:completed',
+      version: 1,
+    });
 
     // Status reconstructs the revisit_spec decision
     let status = ensureStatus(SESSION);
@@ -473,18 +510,34 @@ describe('revisit_spec re-entry through implementation (spec section 1.1)', () =
     expect(v1Contract?.supersededAt).toBeDefined();
 
     // Start Phase 1 for v2
-    appendEvent(SESSION, { ts: '2026-04-01T10:12:00Z', event: 'phase1:started', version: 2 });
-    appendEvent(SESSION, { ts: '2026-04-01T10:15:00Z', event: 'phase1:completed', version: 2 });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:12:00Z',
+      event: 'phase1:started',
+      version: 2,
+    });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:15:00Z',
+      event: 'phase1:completed',
+      version: 2,
+    });
 
     // Then Phase 2 for v2
-    appendEvent(SESSION, { ts: '2026-04-01T10:15:01Z', event: 'phase2:started', version: 2 });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:15:01Z',
+      event: 'phase2:started',
+      version: 2,
+    });
     appendEvent(SESSION, {
       ts: '2026-04-01T10:16:00Z',
       event: 'clear_loop:started',
       version: 2,
       metadata: { planIndex: 0 },
     });
-    appendEvent(SESSION, { ts: '2026-04-01T10:16:01Z', event: 'clear_loop:completed', version: 2 });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:16:01Z',
+      event: 'clear_loop:completed',
+      version: 2,
+    });
 
     status = ensureStatus(SESSION);
     expect(status.phase).toBe('implementation');
@@ -495,7 +548,11 @@ describe('revisit_spec re-entry through implementation (spec section 1.1)', () =
 
   it('rewrite history is reconstructable from WAL for describe --json', () => {
     // Simulate two rewrite events across versions
-    appendEvent(SESSION, { ts: '2026-04-01T10:00:00Z', event: 'phase2:started', version: 1 });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:00:00Z',
+      event: 'phase2:started',
+      version: 1,
+    });
     appendEvent(SESSION, {
       ts: '2026-04-01T10:05:00Z',
       event: 'context:updated',
@@ -510,7 +567,11 @@ describe('revisit_spec re-entry through implementation (spec section 1.1)', () =
     });
 
     const log = readLog(SESSION);
-    const rewriteHistory: Array<{ version: number; decision: string; plan?: string }> = [];
+    const rewriteHistory: Array<{
+      version: number;
+      decision: string;
+      plan?: string;
+    }> = [];
     for (const entry of log) {
       if (entry.event === 'context:updated' && entry.version !== undefined) {
         const meta = entry.metadata as Record<string, unknown> | undefined;
@@ -525,8 +586,16 @@ describe('revisit_spec re-entry through implementation (spec section 1.1)', () =
     }
 
     expect(rewriteHistory).toHaveLength(2);
-    expect(rewriteHistory[0]).toEqual({ version: 1, decision: 'refine_local', plan: 'plan-1' });
-    expect(rewriteHistory[1]).toEqual({ version: 1, decision: 'revisit_spec', plan: undefined });
+    expect(rewriteHistory[0]).toEqual({
+      version: 1,
+      decision: 'refine_local',
+      plan: 'plan-1',
+    });
+    expect(rewriteHistory[1]).toEqual({
+      version: 1,
+      decision: 'revisit_spec',
+      plan: undefined,
+    });
   });
 });
 
@@ -597,7 +666,11 @@ describe('PR rollover execution flow (spec section 1.3)', () => {
 
   it('rollover context signal persists in WAL and is cleared after new PR creation', () => {
     // Simulate rollover context update
-    appendEvent(SESSION, { ts: '2026-04-01T10:00:00Z', event: 'phase3:started', version: 1 });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:00:00Z',
+      event: 'phase3:started',
+      version: 1,
+    });
     appendEvent(SESSION, {
       ts: '2026-04-01T10:01:00Z',
       event: 'context:updated',
@@ -611,7 +684,11 @@ describe('PR rollover execution flow (spec section 1.3)', () => {
     appendEvent(SESSION, {
       ts: '2026-04-01T10:02:00Z',
       event: 'context:updated',
-      metadata: { rolloverFromPr: undefined, prNumber: 85, prUrl: 'https://github.com/org/repo/pull/85' },
+      metadata: {
+        rolloverFromPr: undefined,
+        prNumber: 85,
+        prUrl: 'https://github.com/org/repo/pull/85',
+      },
     });
 
     status = ensureStatus(SESSION);
@@ -634,16 +711,32 @@ describe('describe --json durable state surface (spec sections 9.2 / 13.1.E)', (
 
   it('synthesizes full describe --json output from WAL + manifests', () => {
     // Set up WAL events
-    appendEvent(SESSION, { ts: '2026-04-01T10:00:00Z', event: 'phase1:started', version: 1 });
-    appendEvent(SESSION, { ts: '2026-04-01T10:01:00Z', event: 'phase1:completed', version: 1 });
-    appendEvent(SESSION, { ts: '2026-04-01T10:02:00Z', event: 'phase2:started', version: 1 });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:00:00Z',
+      event: 'phase1:started',
+      version: 1,
+    });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:01:00Z',
+      event: 'phase1:completed',
+      version: 1,
+    });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:02:00Z',
+      event: 'phase2:started',
+      version: 1,
+    });
     appendEvent(SESSION, {
       ts: '2026-04-01T10:05:00Z',
       event: 'context:updated',
       version: 1,
       metadata: { rewriteDecision: 'refine_local', plan: 'plan-1' },
     });
-    appendEvent(SESSION, { ts: '2026-04-01T10:10:00Z', event: 'phase2:completed', version: 1 });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:10:00Z',
+      event: 'phase2:completed',
+      version: 1,
+    });
 
     // Set up plan manifest with completion state
     const plansDir = snapshotPath(SESSION, VERSION, 'plans');
@@ -679,7 +772,11 @@ describe('describe --json durable state surface (spec sections 9.2 / 13.1.E)', (
     const delivery = readDeliveryManifest(SESSION, VERSION);
 
     // Rewrite history from WAL
-    const rewriteHistory: Array<{ version: number; decision: string; plan?: string }> = [];
+    const rewriteHistory: Array<{
+      version: number;
+      decision: string;
+      plan?: string;
+    }> = [];
     for (const entry of log) {
       if (entry.event === 'context:updated' && entry.version !== undefined) {
         const meta = entry.metadata as Record<string, unknown> | undefined;
@@ -749,7 +846,11 @@ describe('describe --json durable state surface (spec sections 9.2 / 13.1.E)', (
   });
 
   it('status --json exposes matching fields from WAL + manifests', () => {
-    appendEvent(SESSION, { ts: '2026-04-01T10:00:00Z', event: 'phase2:started', version: 1 });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:00:00Z',
+      event: 'phase2:started',
+      version: 1,
+    });
     appendEvent(SESSION, {
       ts: '2026-04-01T10:05:00Z',
       event: 'context:updated',
@@ -810,8 +911,16 @@ describe('describe --json durable state surface (spec sections 9.2 / 13.1.E)', (
 
   it('handoffReason correctly identifies ticket_feedback vs rewrite', () => {
     // Test ticket_feedback handoff reason
-    appendEvent(SESSION, { ts: '2026-04-01T10:00:00Z', event: 'phase3:started', version: 1 });
-    appendEvent(SESSION, { ts: '2026-04-01T10:01:00Z', event: 'context:updated', metadata: { ticketFeedback: true } });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:00:00Z',
+      event: 'phase3:started',
+      version: 1,
+    });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:01:00Z',
+      event: 'context:updated',
+      metadata: { ticketFeedback: true },
+    });
 
     let status = ensureStatus(SESSION);
     let handoffReason = status.context.rewriteDecision

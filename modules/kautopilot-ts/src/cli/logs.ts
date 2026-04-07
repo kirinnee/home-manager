@@ -1,8 +1,8 @@
 import { Command } from 'commander';
 import { getSessionByWorktree } from '../core/db';
-import { readLog } from '../core/log';
 import { getGitRoot, getWorktree } from '../core/git';
-import { logError, logDim } from '../util/format';
+import { readLog } from '../core/log';
+import { logDim, logError } from '../util/format';
 
 export function createLogsCommand(): Command {
   return new Command('logs')

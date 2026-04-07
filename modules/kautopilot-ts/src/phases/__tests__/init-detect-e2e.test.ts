@@ -7,8 +7,8 @@
  * 3. Produces valid detection.json artifact
  * 4. Emits detect:started and detect:completed WAL events
  */
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -29,7 +29,7 @@ describe('E2E: detect state reads research.json correctly', () => {
 
   it('detect state handles research.json with detectedTools present', async () => {
     const { detect } = require('../init/states') as typeof import('../init/states');
-    const { appendInitEvent, readInitLog } = require('../../core/log') as typeof import('../../core/log');
+    const { readInitLog } = require('../../core/log') as typeof import('../../core/log');
 
     const initId = 'detect-test-with-tools';
     const initPath = join(tempDir, '.kautopilot', 'init', initId);
@@ -42,7 +42,13 @@ describe('E2E: detect state reads research.json correctly', () => {
       hierarchy: 'org > repo > issue',
       transitionModel: 'open/closed',
       constraints: [],
-      detectionPlan: [{ check: 'nonexistent-binary', type: 'binary', command: 'nonexistent-binary-xyz --version' }],
+      detectionPlan: [
+        {
+          check: 'nonexistent-binary',
+          type: 'binary',
+          command: 'nonexistent-binary-xyz --version',
+        },
+      ],
       detectedTools: { 'GitHub CLI (gh)': 'gh version 2.x' },
       followUpQuestions: [],
       timestamp: new Date().toISOString(),
@@ -51,7 +57,14 @@ describe('E2E: detect state reads research.json correctly', () => {
 
     const ctx = {
       initId,
-      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null, prComment: null } },
+      config: {
+        repo: {
+          org: 'test',
+          baseBranch: 'main',
+          ticketSystem: null,
+          prComment: null,
+        },
+      },
       workDir: tempDir,
       gitRootPath: tempDir,
       worktree: tempDir,
@@ -109,7 +122,14 @@ describe('E2E: detect state reads research.json correctly', () => {
 
     const ctx = {
       initId,
-      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null, prComment: null } },
+      config: {
+        repo: {
+          org: 'test',
+          baseBranch: 'main',
+          ticketSystem: null,
+          prComment: null,
+        },
+      },
       workDir: tempDir,
       gitRootPath: tempDir,
       worktree: tempDir,

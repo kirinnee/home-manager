@@ -5,68 +5,7 @@ import type { StateService } from '../deps';
 import { generateKloopRunId, paths, SPEC_TEMPLATE, getKloopHome } from '../deps';
 import type { IndexDb } from '../index-db';
 import type { EventLog } from '../index-db';
-import {
-  DEFAULT_IMPLEMENTER_PROMPT,
-  DEFAULT_REVIEWER_PROMPT,
-  DEFAULT_CHECKPOINTER_PROMPT,
-} from '../agents/default-prompts';
-
-function buildDefaultConfigYaml(): string {
-  return `# kloop run configuration
-implementers:
-  claude: 1
-
-reviewPhases:
-  - - claude
-
-maxIterations: 10
-implementerTimeout: 30     # minutes
-reviewerTimeout: 15        # minutes
-conflictCheckThreshold: 2
-firstLoopFullReview: false
-previousReviewPropagation: 0
-
-# Agent prompt templates — edit these to customize agent behavior.
-# All {placeholders} are substituted at build time with actual runtime paths.
-prompts:
-  # implementer variables:
-  #   {specPath}          - path to spec file (agent reads on demand)
-  #   {iteration}         - current loop number
-  #   {reviewsDir}        - path to reviews/ folder
-  #   {evidenceDir}       - path to evidence/ folder
-  #   {learningsFile}     - path to learnings.md
-  implementer: |
-${indent(DEFAULT_IMPLEMENTER_PROMPT, 4)}
-  # reviewer variables:
-  #   {specPath}        - path to spec file
-  #   {iteration}       - current loop number
-  #   {reviewerIndex}   - which reviewer this is
-  #   {reviewsDir}      - path to reviews/ folder (write review here)
-  #   {verdictsDir}     - path to verdicts/ folder (write verdict here)
-  #   {evidenceDir}     - path to evidence/ folder
-  #   {learningsFile}   - path to learnings.md
-  reviewer: |
-${indent(DEFAULT_REVIEWER_PROMPT, 4)}
-  # checkpointer variables:
-  #   {specPath}               - path to spec file
-  #   {iteration}              - current loop number
-  #   {reviewsDir}             - path to current loop's reviews/
-  #   {archivedReviewsPattern} - glob for all previous loop reviews
-  #   {conflictFile}           - path to conflict.md
-  #   {specBackupFile}         - path to spec-backup.md
-  #   {checkpointResultFile}  - path to checkpoint-result.json
-  checkpointer: |
-${indent(DEFAULT_CHECKPOINTER_PROMPT, 4)}
-`;
-}
-
-function indent(text: string, spaces: number): string {
-  const pad = ' '.repeat(spaces);
-  return text
-    .split('\n')
-    .map(line => pad + line)
-    .join('\n');
-}
+import { buildDefaultConfigYaml } from '../agents/default-config';
 
 export async function handler(
   opts: {

@@ -1,18 +1,17 @@
-import type { Phase2Context, Phase2StateMap } from './types';
-import type { SessionRow, Config } from '../../core/types';
-import { runStateMachine } from '../machine';
-import { ensureStatus } from '../../core/status';
-import { resolvePlans } from '../shared';
 import { loadSessionAgents } from '../../core/agents';
+import { ensureStatus } from '../../core/status';
+import type { Config, SessionRow } from '../../core/types';
+import { runStateMachine } from '../machine';
+import { resolvePlans } from '../shared';
 import { handleClearLoop } from './clear-loop';
-import { handleSetupRun } from './setup-run';
-import { handleRunning } from './running';
-import { handleResolve } from './resolve';
-import { handleRewriteSpec } from './rewrite-spec';
 import { handleCommit } from './commit';
-import { handleNextPlan } from './next-plan';
 import { handleCompleted } from './completed';
 import { handleFailed } from './failed';
+import { handleNextPlan } from './next-plan';
+import { handleResolve } from './resolve';
+import { handleRunning } from './running';
+import { handleSetupRun } from './setup-run';
+import type { Phase2Context, Phase2StateMap } from './types';
 
 // State map for Phase 2
 const phase2States: Phase2StateMap = {
@@ -20,7 +19,6 @@ const phase2States: Phase2StateMap = {
   setup_run: handleSetupRun,
   running: handleRunning,
   resolve: handleResolve,
-  rewrite_spec: handleRewriteSpec,
   commit: handleCommit,
   next_plan: handleNextPlan,
   completed: handleCompleted,
@@ -37,7 +35,7 @@ export async function runPhase2(
   session: SessionRow,
   config: Config,
   options?: { forceStartState?: string },
-): Promise<boolean | 'amend_spec'> {
+): Promise<boolean | 'amend_spec' | 'revisit_spec'> {
   // Initialize agent resolution from session config
   loadSessionAgents(session.id);
 

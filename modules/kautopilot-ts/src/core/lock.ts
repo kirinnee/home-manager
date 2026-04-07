@@ -1,4 +1,4 @@
-import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { LockInfo } from './types';
 

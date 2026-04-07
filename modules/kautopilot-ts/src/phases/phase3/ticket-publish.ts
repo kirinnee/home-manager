@@ -1,12 +1,12 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Phase3Context } from './types';
+import { sessionDir, snapshotPath } from '../../core/artifacts';
 import { appendEvent } from '../../core/log';
-import { snapshotPath, sessionDir } from '../../core/artifacts';
-import { runScriptFromDir } from '../../core/scripts';
 import { updateDeliveryManifest } from '../../core/manifests';
-import { logOk, logWarn, logDim } from '../../util/format';
+import { runScriptFromDir } from '../../core/scripts';
+import { logDim, logOk, logWarn } from '../../util/format';
 import { markdownToPdf } from '../../util/markdown';
+import type { Phase3Context } from './types';
 
 /**
  * [code] Publish ticket artifacts after user approval.

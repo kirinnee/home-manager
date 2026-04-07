@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'bun:test';
-import { mkdirSync, rmSync, writeFileSync, existsSync, readFileSync, mkdtempSync } from 'node:fs';
-import { join } from 'node:path';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 let origHome: string;
 let tempHome: string;
@@ -14,11 +14,12 @@ afterAll(() => {
   process.env.HOME = origHome;
   rmSync(tempHome, { recursive: true, force: true });
 });
+
 import { discoverConfigDirs } from '../config-dir';
 import type { Config } from '../types';
 
 const GLOBAL_CACHE_FILE = join(process.env.HOME!, '.kautopilot', 'binary-config-dirs.json');
-const BACKUP_PATH = GLOBAL_CACHE_FILE + '.test-backup';
+const BACKUP_PATH = `${GLOBAL_CACHE_FILE}.test-backup`;
 
 const TEST_CONFIG: Config = {
   claude_binary: 'claude',
@@ -51,7 +52,6 @@ const TEST_CONFIG: Config = {
     conflictCheckThreshold: 2,
     firstLoopFullReview: false,
     previousReviewPropagation: 0,
-    reviewerFailureLimit: 2,
   },
   settings: {
     maxPushCycles: 10,

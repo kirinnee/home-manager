@@ -8,10 +8,10 @@
  * This test exercises the actual runtime file I/O paths:
  *   init writes spec/ticket.md → pull-ticket reads it → verifies preservation
  */
-import { describe, it, expect, afterEach, beforeAll, afterAll } from 'bun:test';
-import { mkdirSync, rmSync, existsSync, writeFileSync, readFileSync, mkdtempSync } from 'node:fs';
-import { join } from 'node:path';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 let origHome: string;
 let tempHome: string;
@@ -24,10 +24,11 @@ afterAll(() => {
   process.env.HOME = origHome;
   rmSync(tempHome, { recursive: true, force: true });
 });
-import { sessionDir, sessionArtifactPath, ensureArtifactDir } from '../../core/artifacts';
+
+import { ensureArtifactDir, sessionArtifactPath, sessionDir } from '../../core/artifacts';
+import type { Config, SessionRow } from '../../core/types';
 import { handlePullTicket } from '../phase1/pull-ticket';
 import type { Phase1Context } from '../phase1/types';
-import type { SessionRow, Config } from '../../core/types';
 
 // Distinctive marker text — proves this exact content survived
 const MARKER = `UNIQUE_LOCAL_TICKET_MARKER_${Date.now()}_A7F3B9`;

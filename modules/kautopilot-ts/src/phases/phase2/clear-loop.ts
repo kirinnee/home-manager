@@ -1,6 +1,6 @@
-import type { Phase2Context } from './types';
+import { devloopCancel, devloopStatus } from '../../core/devloop';
 import { appendEvent } from '../../core/log';
-import { devloopStatus, devloopCancel } from '../../core/devloop';
+import type { Phase2Context } from './types';
 
 export async function handleClearLoop(ctx: Phase2Context): Promise<string | null> {
   const { session, version, planIndex } = ctx;

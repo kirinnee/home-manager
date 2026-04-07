@@ -1,11 +1,11 @@
 import { readFileSync } from 'node:fs';
-import type { Phase1Context } from './types';
+import { getAgentPrompt, getDefaultBinary } from '../../core/agents';
 import { appendEvent, readLog } from '../../core/log';
-import { buildPromptVars, resolvePromptVars } from '../../core/type-config';
-import { getDefaultBinary, getAgentPrompt } from '../../core/agents';
 import { writeStepInit } from '../../core/step-init';
+import { buildPromptVars, resolvePromptVars } from '../../core/type-config';
+import { logBanner, logInfo, logOk } from '../../util/format';
 import { spawnTTYWithTurnTracking } from '../shared';
-import { logOk, logInfo, logBanner } from '../../util/format';
+import type { Phase1Context } from './types';
 
 /**
  * Non-negotiable mechanics injected by the runner — NOT part of the user-editable prompt.
@@ -48,7 +48,7 @@ export function parseTriage(triagePath: string): TriageResult | null {
     const deliveryMatch = content.match(/^## Delivery Kind\s*$/m);
     const deliveryLine = deliveryMatch
       ? content
-          .slice(deliveryMatch.index! + deliveryMatch[0].length)
+          .slice((deliveryMatch.index as number) + deliveryMatch[0].length)
           .trim()
           .split('\n')[0]
           .trim()
@@ -57,7 +57,7 @@ export function parseTriage(triagePath: string): TriageResult | null {
     const complexityMatch = content.match(/^## Complexity\s*$/m);
     const complexityLine = complexityMatch
       ? content
-          .slice(complexityMatch.index! + complexityMatch[0].length)
+          .slice((complexityMatch.index as number) + complexityMatch[0].length)
           .trim()
           .split('\n')[0]
           .trim()
@@ -66,7 +66,7 @@ export function parseTriage(triagePath: string): TriageResult | null {
 
     const deliveryKind = deliveryLine === 'ticket' ? 'ticket' : 'pr';
     const complexity = ['straightforward', 'moderate', 'complex'].includes(complexityLine ?? '')
-      ? complexityLine!
+      ? (complexityLine as string)
       : 'moderate';
 
     // Parse verification flags
@@ -74,7 +74,7 @@ export function parseTriage(triagePath: string): TriageResult | null {
     const assumptionsMatch = content.match(/^### Assumptions to Verify\s*$/m);
     const assumptionsSection = assumptionsMatch
       ? content
-          .slice(assumptionsMatch.index! + assumptionsMatch[0].length)
+          .slice((assumptionsMatch.index as number) + assumptionsMatch[0].length)
           .trim()
           .split(/^### /m)[0]
       : '';
@@ -85,7 +85,7 @@ export function parseTriage(triagePath: string): TriageResult | null {
     const testingMatch = content.match(/^### Testing Level\s*$/m);
     const testingSection = testingMatch
       ? content
-          .slice(testingMatch.index! + testingMatch[0].length)
+          .slice((testingMatch.index as number) + testingMatch[0].length)
           .trim()
           .split('\n')[0]
           .trim()
@@ -99,7 +99,7 @@ export function parseTriage(triagePath: string): TriageResult | null {
     const validationMatch = content.match(/^### Validation Matrix\s*$/m);
     const validationSection = validationMatch
       ? content
-          .slice(validationMatch.index! + validationMatch[0].length)
+          .slice((validationMatch.index as number) + validationMatch[0].length)
           .trim()
           .split(/^### /m)[0]
       : '';
@@ -230,7 +230,11 @@ export async function handleTriage(ctx: Phase1Context): Promise<string | null> {
     event: 'triage:completed',
     version,
     metadata: parsed
-      ? { deliveryKind: parsed.deliveryKind, complexity: parsed.complexity, verification: parsed.verification }
+      ? {
+          deliveryKind: parsed.deliveryKind,
+          complexity: parsed.complexity,
+          verification: parsed.verification,
+        }
       : {},
   });
 

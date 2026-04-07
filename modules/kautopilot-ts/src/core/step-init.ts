@@ -1,7 +1,7 @@
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { artifactPath } from './artifacts';
 import { stringify as stringifyYaml } from 'yaml';
+import { artifactPath } from './artifacts';
 
 export type ExecutionType = 'tty_handoff' | 'llm_print' | 'command' | 'inquirer';
 

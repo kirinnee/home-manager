@@ -1,48 +1,38 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, readdirSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Config, SessionRow } from '../../core/types';
+import { getAgentPrompt, getDefaultBinary, setCachedConfig } from '../../core/agents';
+import { ensureArtifactDir, initDir, sessionArtifactPath, sessionDir, snapshotPath } from '../../core/artifacts';
+import { writeConfig } from '../../core/config';
+import { upsertSession } from '../../core/db';
+import { createBranch, detectDefaultBranch, getCurrentBranch, isOnMain } from '../../core/git';
+import { generateSessionId } from '../../core/id';
+import { getInitAttemptById, updateInitOutcome } from '../../core/init-db';
+import { ensureInitStatus } from '../../core/init-status';
 import type {
-  InitState,
-  InitOutcome,
-  IdentifyArtifact,
-  ResearchSummary,
   DetectionResult,
+  IdentifyArtifact,
+  InitOutcome,
+  InitState,
+  OutcomeArtifact,
+  ResearchSummary,
   SetupBrief,
   VerifyResult,
-  OutcomeArtifact,
 } from '../../core/init-types';
-import { MAX_REPAIR_ATTEMPTS, CRITICAL_CAPABILITIES, NON_CRITICAL_CAPABILITIES } from '../../core/init-types';
+import { CRITICAL_CAPABILITIES, MAX_REPAIR_ATTEMPTS, NON_CRITICAL_CAPABILITIES } from '../../core/init-types';
 import { appendInitEvent } from '../../core/log';
-import { initDir, sessionDir, snapshotPath, ensureArtifactDir, sessionArtifactPath } from '../../core/artifacts';
-import { getDefaultBinary, getAgentPrompt, setCachedConfig } from '../../core/agents';
-import { spawnPrintRaw, spawnPrint } from '../../llm/spawn';
-import { textInput, selectOption, confirmAction } from '../../llm/inquirer';
 import {
-  verifyCriticalScripts,
-  loadOrgScripts,
   ALL_SCRIPTS,
   CRITICAL_SCRIPTS,
+  loadOrgScripts,
   OPTIONAL_SCRIPTS,
   promptSaveOrg,
+  verifyCriticalScripts,
 } from '../../core/scripts';
-import { upsertSession, updateSessionState } from '../../core/db';
-import { updateInitOutcome, upsertInitAttempt, getInitAttemptById } from '../../core/init-db';
-import { ensureInitStatus } from '../../core/init-status';
-import { generateSessionId } from '../../core/id';
-import { writeConfig, resolveConfig } from '../../core/config';
-import {
-  getGitRoot,
-  getWorktree,
-  getRemoteUrl,
-  normalizeGitRoot,
-  extractOrg,
-  getCurrentBranch,
-  createBranch,
-  isOnMain,
-  detectDefaultBranch,
-} from '../../core/git';
+import type { Config } from '../../core/types';
+import { selectOption, textInput } from '../../llm/inquirer';
+import { spawnPrintRaw } from '../../llm/spawn';
+import { logDim, logField, logInfo, logOk, logWarn } from '../../util/format';
 import { renderMarkdown } from '../../util/markdown';
-import { logField, logOk, logWarn, logInfo, logDim } from '../../util/format';
 
 // ============================================================================
 // Init Context — passed through all state handlers
@@ -94,7 +84,10 @@ export const identify: InitStateHandler = async ctx => {
   const { initId, org, workDir } = ctx;
   setCachedConfig(ctx.config);
 
-  appendInitEvent(initId, { ts: new Date().toISOString(), event: 'identify:started' });
+  appendInitEvent(initId, {
+    ts: new Date().toISOString(),
+    event: 'identify:started',
+  });
 
   // Fast-path: if all org scripts already exist, skip straight to promote
   if (!ctx.forceLocal && org) {
@@ -211,7 +204,10 @@ export const identify: InitStateHandler = async ctx => {
 export const research: InitStateHandler = async ctx => {
   const { initId } = ctx;
 
-  appendInitEvent(initId, { ts: new Date().toISOString(), event: 'research:started' });
+  appendInitEvent(initId, {
+    ts: new Date().toISOString(),
+    event: 'research:started',
+  });
 
   // Read system name from context artifact
   const identifyPath = initArtifactPath(initId, 'identify.json');
@@ -325,7 +321,10 @@ ${researchDoc || '(no research output)'}
 export const detect: InitStateHandler = async ctx => {
   const { initId } = ctx;
 
-  appendInitEvent(initId, { ts: new Date().toISOString(), event: 'detect:started' });
+  appendInitEvent(initId, {
+    ts: new Date().toISOString(),
+    event: 'detect:started',
+  });
 
   // Read research context including detection plan (spec section 3.3)
   const researchPath = initArtifactPath(initId, 'research.json');
@@ -351,7 +350,7 @@ export const detect: InitStateHandler = async ctx => {
         }
       } else if (step.type === 'config') {
         const configPath = step.command || step.check;
-        const resolvedPath = configPath.replace('~', process.env.HOME!);
+        const resolvedPath = configPath.replace('~', process.env.HOME as string);
         configFiles[configPath] = existsSync(resolvedPath);
       } else if (step.type === 'auth' && step.command) {
         const cmd = step.command.split(/\s+/);
@@ -394,7 +393,11 @@ export const detect: InitStateHandler = async ctx => {
   appendInitEvent(initId, {
     ts: new Date().toISOString(),
     event: 'detect:completed',
-    metadata: { available: available.length, missing: missing.length, uncertain: detectionResult.uncertain.length },
+    metadata: {
+      available: available.length,
+      missing: missing.length,
+      uncertain: detectionResult.uncertain.length,
+    },
   });
 
   return 'gather_context';
@@ -407,7 +410,10 @@ export const detect: InitStateHandler = async ctx => {
 export const gather_context: InitStateHandler = async ctx => {
   const { initId } = ctx;
 
-  appendInitEvent(initId, { ts: new Date().toISOString(), event: 'gather_context:started' });
+  appendInitEvent(initId, {
+    ts: new Date().toISOString(),
+    event: 'gather_context:started',
+  });
 
   // Read context from prior phases
   const identifyData: IdentifyArtifact = JSON.parse(readFileSync(initArtifactPath(initId, 'identify.json'), 'utf-8'));
@@ -446,12 +452,20 @@ export const gather_context: InitStateHandler = async ctx => {
     });
 
     if (setupInstructions) {
-      console.log('\n' + renderMarkdown(setupInstructions) + '\n');
+      console.log(`\n${renderMarkdown(setupInstructions)}\n`);
     }
 
     const setupChoice = await selectOption<'done' | 'local'>('What would you like to do?', [
-      { value: 'done', label: 'I have set it up', hint: 'Continue with ticket integration' },
-      { value: 'local', label: 'Downgrade to local mode', hint: 'Skip ticket integration' },
+      {
+        value: 'done',
+        label: 'I have set it up',
+        hint: 'Continue with ticket integration',
+      },
+      {
+        value: 'local',
+        label: 'Downgrade to local mode',
+        hint: 'Skip ticket integration',
+      },
     ]);
 
     if (setupChoice === 'local') {
@@ -497,7 +511,10 @@ export const gather_context: InitStateHandler = async ctx => {
 export const normalize: InitStateHandler = async ctx => {
   const { initId } = ctx;
 
-  appendInitEvent(initId, { ts: new Date().toISOString(), event: 'normalize:started' });
+  appendInitEvent(initId, {
+    ts: new Date().toISOString(),
+    event: 'normalize:started',
+  });
 
   // Read prior artifacts
   const identifyData = JSON.parse(readFileSync(initArtifactPath(initId, 'identify.json'), 'utf-8'));
@@ -612,7 +629,10 @@ export const normalize: InitStateHandler = async ctx => {
 export const generate: InitStateHandler = async ctx => {
   const { initId, workDir, org } = ctx;
 
-  appendInitEvent(initId, { ts: new Date().toISOString(), event: 'generate:started' });
+  appendInitEvent(initId, {
+    ts: new Date().toISOString(),
+    event: 'generate:started',
+  });
 
   const scriptsDir = join(initDir(initId), 'scripts');
   mkdirSync(scriptsDir, { recursive: true });
@@ -770,7 +790,10 @@ export const generate: InitStateHandler = async ctx => {
   appendInitEvent(initId, {
     ts: new Date().toISOString(),
     event: 'context:updated',
-    metadata: { repairAttempts: repairAttempt, maxRepairAttempts: MAX_REPAIR_ATTEMPTS },
+    metadata: {
+      repairAttempts: repairAttempt,
+      maxRepairAttempts: MAX_REPAIR_ATTEMPTS,
+    },
   });
 
   appendInitEvent(initId, {
@@ -789,7 +812,10 @@ export const generate: InitStateHandler = async ctx => {
 export const verify: InitStateHandler = async ctx => {
   const { initId, workDir } = ctx;
 
-  appendInitEvent(initId, { ts: new Date().toISOString(), event: 'verify:started' });
+  appendInitEvent(initId, {
+    ts: new Date().toISOString(),
+    event: 'verify:started',
+  });
 
   const scriptsDir = join(initDir(initId), 'scripts');
   const branch = getCurrentBranch(workDir);
@@ -844,15 +870,33 @@ export const verify: InitStateHandler = async ctx => {
       // Post-exhaustion: critical failure cannot promote, only local mode is allowed
       fix = await selectOption<'local'>(
         'Critical scripts are not working after maximum repair attempts. What would you like to do?',
-        [{ value: 'local', label: 'Use local mode', hint: 'Skip ticket integration entirely' }],
+        [
+          {
+            value: 'local',
+            label: 'Use local mode',
+            hint: 'Skip ticket integration entirely',
+          },
+        ],
       );
     } else {
       fix = await selectOption<'retry' | 'regenerate' | 'local'>(
         'Critical scripts are not working. What would you like to do?',
         [
-          { value: 'retry', label: 'Retry', hint: 'Fix your tool/auth, then we verify again' },
-          { value: 'regenerate', label: 'Regenerate', hint: 'Go back to generate phase' },
-          { value: 'local', label: 'Use local mode', hint: 'Skip ticket integration entirely' },
+          {
+            value: 'retry',
+            label: 'Retry',
+            hint: 'Fix your tool/auth, then we verify again',
+          },
+          {
+            value: 'regenerate',
+            label: 'Regenerate',
+            hint: 'Go back to generate phase',
+          },
+          {
+            value: 'local',
+            label: 'Use local mode',
+            hint: 'Skip ticket integration entirely',
+          },
         ],
       );
     }
@@ -917,7 +961,10 @@ export const verify: InitStateHandler = async ctx => {
 export const promote: InitStateHandler = async ctx => {
   const { initId, config, workDir, gitRootPath, worktree, remoteUrl, gitRootHost, org, ticketIdArg } = ctx;
 
-  appendInitEvent(initId, { ts: new Date().toISOString(), event: 'promote:started' });
+  appendInitEvent(initId, {
+    ts: new Date().toISOString(),
+    event: 'promote:started',
+  });
 
   // Promotion freshness guard (spec section 8.6, invariant 11.5/11.6)
   // Only promote from the active, non-terminal init attempt.
@@ -1058,7 +1105,10 @@ export const promote: InitStateHandler = async ctx => {
 export const downgrade_local: InitStateHandler = async ctx => {
   const { initId, config, workDir, gitRootPath, worktree, remoteUrl, gitRootHost, org } = ctx;
 
-  appendInitEvent(initId, { ts: new Date().toISOString(), event: 'downgrade_local:started' });
+  appendInitEvent(initId, {
+    ts: new Date().toISOString(),
+    event: 'downgrade_local:started',
+  });
 
   // Promotion freshness guard (spec section 8.6, invariant 11.5/11.6)
   const attempt = getInitAttemptById(initId);
@@ -1156,10 +1206,12 @@ export const downgrade_local: InitStateHandler = async ctx => {
     const specArtifactPath = snapshotPath(sessionId, 1, 'task-spec.md');
     const plansArtifactDir = snapshotPath(sessionId, 1, 'plans');
     ensureArtifactDir(specArtifactPath);
-    ensureArtifactDir(plansArtifactDir + '/.keep');
+    ensureArtifactDir(`${plansArtifactDir}/.keep`);
 
     try {
-      const localInitPrompt = getAgentPrompt('init', 'localInit', { sessionId });
+      const localInitPrompt = getAgentPrompt('init', 'localInit', {
+        sessionId,
+      });
       await spawnPrintRaw(getDefaultBinary(), localInitPrompt, {
         cwd: workDir,
         timeout: initTimeoutSeconds(ctx),
@@ -1169,7 +1221,7 @@ export const downgrade_local: InitStateHandler = async ctx => {
         context: 'Init local mode generation of ticket, spec, and plans',
       });
     } catch (err) {
-      logWarn('Local mode generation encountered an issue: ' + (err instanceof Error ? err.message : String(err)));
+      logWarn(`Local mode generation encountered an issue: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -1291,7 +1343,11 @@ function buildDetectionPlan(systemName: string, researchDoc: string): ResearchSu
       keywords: ['github', 'gh cli', 'gh '],
       steps: [
         { check: 'gh', type: 'binary', command: 'gh --version' },
-        { check: '~/.config/gh/hosts.yml', type: 'config', command: '~/.config/gh/hosts.yml' },
+        {
+          check: '~/.config/gh/hosts.yml',
+          type: 'config',
+          command: '~/.config/gh/hosts.yml',
+        },
         { check: 'gh', type: 'auth', command: 'gh auth status' },
       ],
     },
@@ -1361,11 +1417,17 @@ function buildDetectionPlan(systemName: string, researchDoc: string): ResearchSu
   });
 }
 
-function classifyAccessSetup(answer: string): { needsSetupHelp: boolean; assessment: string } {
+function classifyAccessSetup(answer: string): {
+  needsSetupHelp: boolean;
+  assessment: string;
+} {
   const trimmed = answer.trim();
   const normalized = trimmed.toLowerCase();
   if (!normalized) {
-    return { needsSetupHelp: true, assessment: 'No access method provided yet.' };
+    return {
+      needsSetupHelp: true,
+      assessment: 'No access method provided yet.',
+    };
   }
 
   const setupPatterns = [
@@ -1397,7 +1459,11 @@ function classifyAccessSetup(answer: string): { needsSetupHelp: boolean; assessm
   return { needsSetupHelp, assessment };
 }
 
-function parseStateMapping(answer: string): { todo: string; inProgress: string; inReview: string } {
+function parseStateMapping(answer: string): {
+  todo: string;
+  inProgress: string;
+  inReview: string;
+} {
   // Try to parse "state1, state2, state3" or "state1 → state2 → state3"
   const parts = answer
     .split(/[,→/]/)

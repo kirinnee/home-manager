@@ -1,10 +1,9 @@
 import { spawn } from 'bun';
-import { existsSync } from 'node:fs';
-import type { Phase3Context } from './types';
+import { getAgentBinary, getAgentPrompt } from '../../core/agents';
 import { appendEvent } from '../../core/log';
-import { spawnPrint, spawnPrintRaw } from '../../llm/spawn';
 import { writeStepInit } from '../../core/step-init';
-import { getAgentPrompt, getAgentBinary } from '../../core/agents';
+import { spawnPrint, spawnPrintRaw } from '../../llm/spawn';
+import type { Phase3Context } from './types';
 
 export async function handlePrereview(ctx: Phase3Context): Promise<string | null> {
   const { session, version, config } = ctx;
@@ -169,7 +168,7 @@ ${fixes.map((f, i) => `## Fix ${i + 1}: ${f.file}\n${f.description}\nFix: ${f.fi
 `.trim();
 
   try {
-    const exitCode = await spawnPrintRaw(getAgentBinary('phase3', 'prereview_fix'), fixPrompt, {
+    const _exitCode = await spawnPrintRaw(getAgentBinary('phase3', 'prereview_fix'), fixPrompt, {
       cwd: session.worktree,
       timeout: 120,
       sessionId: session.id,

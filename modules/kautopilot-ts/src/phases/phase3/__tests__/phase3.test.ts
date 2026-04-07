@@ -1,11 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach, mock } from 'bun:test';
+import { afterEach, describe, expect, it } from 'bun:test';
 import { existsSync, rmSync } from 'node:fs';
-import type { Phase3Context } from '../types';
-import type { PollSignals } from '../types';
-import { computePollState } from '../poll';
-import { preFilterThreads } from '../eval';
 import { withBotSignature } from '../../../core/github';
 import { appendEvent } from '../../../core/log';
+import { preFilterThreads } from '../eval';
+import { computePollState } from '../poll';
+import type { Phase3Context, PollSignals } from '../types';
 
 // ============================================================================
 // Test helpers
@@ -55,7 +54,6 @@ function makeCtx(overrides?: Partial<Phase3Context>): Phase3Context {
         conflictCheckThreshold: 2,
         firstLoopFullReview: false,
         previousReviewPropagation: 0,
-        reviewerFailureLimit: 2,
       },
       settings: {
         maxPushCycles: 10,
@@ -484,8 +482,8 @@ describe('phase3 state map', () => {
       },
     ];
     expect(ctx.evalResults).toHaveLength(2);
-    expect(ctx.evalResults![0].verdict).toBe('reply');
-    expect(ctx.evalResults![1].verdict).toBe('code_fix');
+    expect(ctx.evalResults?.[0].verdict).toBe('reply');
+    expect(ctx.evalResults?.[1].verdict).toBe('code_fix');
   });
 
   it('context supports tty resolve items', () => {
@@ -500,7 +498,7 @@ describe('phase3 state map', () => {
       },
     ];
     expect(ctx.ttyResolveItems).toHaveLength(1);
-    expect(ctx.ttyResolveItems![0].ambiguityReason).toBe('Could be either a false positive or real issue');
+    expect(ctx.ttyResolveItems?.[0].ambiguityReason).toBe('Could be either a false positive or real issue');
   });
 });
 
@@ -590,7 +588,10 @@ describe('bug fixes', () => {
         ts: '2026-03-25T00:00:00Z',
         event: 'create_pr:completed',
         version: 1,
-        metadata: { prNumber: 42, prUrl: 'https://github.com/test/repo/pull/42' },
+        metadata: {
+          prNumber: 42,
+          prUrl: 'https://github.com/test/repo/pull/42',
+        },
       },
       {
         ts: '2026-03-25T00:01:00Z',
@@ -623,8 +624,8 @@ describe('bug fixes', () => {
 // Ticket delivery behavioral tests (spec sections 11.2, 13.1.G, 13.1.7, 13.1.8)
 // ============================================================================
 
-import { logPath } from '../../../core/log';
 import { snapshotPath } from '../../../core/artifacts';
+import { logPath } from '../../../core/log';
 
 describe('ticket_review no artifacts → failed (spec section 13.1.8)', () => {
   const SESSION = `test-ticket-review-noartifacts-${Date.now()}`;

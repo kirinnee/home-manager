@@ -1,9 +1,9 @@
-import { Command } from 'commander';
 import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { Command } from 'commander';
 import { ensureGlobalConfig } from '../core/config';
-import { ALL_SCRIPTS, loadOrgScripts, promptSetupScripts, promptSaveOrg, showScripts } from '../core/scripts';
-import { logField, logOk, logInfo, logError, logDim } from '../util/format';
+import { ALL_SCRIPTS, loadOrgScripts, promptSaveOrg, promptSetupScripts, showScripts } from '../core/scripts';
+import { logError, logField, logInfo } from '../util/format';
 
 const ORGS_DIR = `${process.env.HOME}/.kautopilot/orgs`;
 
@@ -96,7 +96,7 @@ async function runOrgLs(): Promise<void> {
   }
 
   const cols = { org: 12, scripts: 60 };
-  console.log('ORG'.padEnd(cols.org) + 'SCRIPTS');
+  console.log(`${'ORG'.padEnd(cols.org)}SCRIPTS`);
 
   for (const org of orgs) {
     const orgDir = join(ORGS_DIR, org.name);

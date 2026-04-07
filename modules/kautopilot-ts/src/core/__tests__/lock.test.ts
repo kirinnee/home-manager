@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -39,7 +39,7 @@ describe('lock', () => {
   });
 
   it('releaseLock removes lock file', () => {
-    const { acquireLock, checkLock, releaseLock } = require('../lock') as typeof import('../lock');
+    const { acquireLock, releaseLock } = require('../lock') as typeof import('../lock');
     acquireLock('testlock');
 
     expect(existsSync(join(tempDir, '.kautopilot/testlock/lock.pid'))).toBe(true);

@@ -1,8 +1,7 @@
-import { existsSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
-import { snapshotPath, ensureArtifactDir } from './artifacts';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { parsePlanFilename } from '../phases/shared';
-import type { ContractManifest, PlanManifest, DeliveryManifest, DeliveryKind } from './types';
+import { ensureArtifactDir, snapshotPath } from './artifacts';
+import type { ContractManifest, DeliveryKind, DeliveryManifest, PlanManifest } from './types';
 
 // ============================================================================
 // Contract manifest
@@ -127,7 +126,9 @@ export function readDeliveryManifest(sessionId: string, version: number): Delive
 }
 
 export function updateDeliveryManifest(sessionId: string, version: number, updates: Partial<DeliveryManifest>): void {
-  const existing = readDeliveryManifest(sessionId, version) ?? { kind: 'pr' as const };
+  const existing = readDeliveryManifest(sessionId, version) ?? {
+    kind: 'pr' as const,
+  };
   Object.assign(existing, updates);
   writeDeliveryManifest(sessionId, version, existing);
 }

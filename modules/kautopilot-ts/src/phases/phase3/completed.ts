@@ -1,6 +1,6 @@
-import type { Phase3Context } from './types';
 import { appendEvent } from '../../core/log';
 import { logBanner } from '../../util/format';
+import type { Phase3Context } from './types';
 
 export async function handleCompleted(ctx: Phase3Context): Promise<string | null> {
   const { session, version, prNumber, prUrl } = ctx;

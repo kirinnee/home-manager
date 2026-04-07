@@ -337,7 +337,8 @@ rec {
 
       # AI
       pkgs-unstable.rtk
-      gemini-auto
+      pkgs-llm.opencode
+
 
       # liftoff
       awscli2

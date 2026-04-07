@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'bun:test';
+import { describe, expect, it } from 'bun:test';
 import { withBotSignature } from '../github';
 
 describe('github helpers', () => {
@@ -9,7 +9,7 @@ describe('github helpers', () => {
 
     it('handles multiline bodies', () => {
       const body = 'Great catch!\n\nI have addressed this in commit abc123.';
-      expect(withBotSignature(body)).toBe(body + '\n\nBy Claude Code Kautopilot');
+      expect(withBotSignature(body)).toBe(`${body}\n\nBy Claude Code Kautopilot`);
     });
 
     it('handles empty string', () => {
@@ -26,7 +26,7 @@ describe('github helpers', () => {
       expect(withBotSignature('x').endsWith(sig)).toBe(true);
       expect(withBotSignature('y').endsWith(sig)).toBe(true);
       // Same signature for all calls
-      const expected = 'test' + sig;
+      const expected = `test${sig}`;
       expect(withBotSignature('test')).toBe(expected);
     });
   });

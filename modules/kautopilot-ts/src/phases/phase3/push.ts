@@ -1,12 +1,12 @@
-import type { Phase3Context } from './types';
-import { appendEvent } from '../../core/log';
-import { hasUnmergedPaths, isOnMain } from '../../core/git';
-import { withBotSignature } from '../../core/github';
-import { spawnPrintRaw } from '../../llm/spawn';
-import { getAgentBinary } from '../../core/agents';
-import { COMMIT_AGENT_PROMPT } from '../../core/types';
 import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { getAgentBinary } from '../../core/agents';
+import { hasUnmergedPaths, isOnMain } from '../../core/git';
+import { withBotSignature } from '../../core/github';
+import { appendEvent } from '../../core/log';
+import { COMMIT_AGENT_PROMPT } from '../../core/types';
+import { spawnPrintRaw } from '../../llm/spawn';
+import type { Phase3Context } from './types';
 
 export async function handlePush(ctx: Phase3Context): Promise<string | null> {
   const { session, version, pushCycle, baseBranch } = ctx;

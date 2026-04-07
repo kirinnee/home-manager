@@ -1,19 +1,19 @@
-import type { Phase1Context, Phase1StateMap } from './types';
-import type { SessionRow, Config } from '../../core/types';
-import { runStateMachine } from '../machine';
-import { appendEvent, readLog } from '../../core/log';
-import { ensureStatus } from '../../core/status';
+import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { loadSessionAgents } from '../../core/agents';
-import { runScript } from '../../core/scripts';
+import { appendEvent, readLog } from '../../core/log';
 import { supersedEpoch } from '../../core/manifests';
+import { runScript } from '../../core/scripts';
+import { ensureStatus } from '../../core/status';
+import type { Config, SessionRow } from '../../core/types';
+import { runStateMachine } from '../machine';
+import { handleFinalizePlans } from './finalize-plans';
+import { handleFinalizeSpec } from './finalize-spec';
 import { handlePullTicket } from './pull-ticket';
 import { handleTriage } from './triage';
-import { handleWriteSpec } from './write-spec';
-import { handleFinalizeSpec } from './finalize-spec';
+import type { Phase1Context, Phase1StateMap } from './types';
 import { handleWritePlans } from './write-plans';
-import { handleFinalizePlans } from './finalize-plans';
-import { copyFileSync, mkdirSync, existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { handleWriteSpec } from './write-spec';
 
 // Re-export shared utilities for external use
 export { discoverPlans } from '../shared';
@@ -31,29 +31,6 @@ function copyTriageToNewVersion(worktree: string, ticketId: string, oldVersion: 
     mkdirSync(newVersionDir, { recursive: true });
     copyFileSync(oldTriagePath, newTriagePath);
   }
-}
-
-/**
- * Find the latest spec-draft-N.md from the old version directory.
- * Returns the content of the latest draft, or null if none exists.
- */
-function findPreviousSpecDraft(worktree: string, ticketId: string, oldVersion: number): string | null {
-  const specDir = join(worktree, 'spec', ticketId, `v${oldVersion}`);
-  let files: string[];
-  try {
-    files = readdirSync(specDir);
-  } catch {
-    return null;
-  }
-
-  const drafts = files
-    .filter(f => /^spec-draft-\d+\.md$/.test(f))
-    .map(f => ({ file: f, ordinal: parseInt(f.match(/spec-draft-(\d+)\.md/)![1]) }))
-    .sort((a, b) => b.ordinal - a.ordinal);
-
-  if (drafts.length === 0) return null;
-
-  return readFileSync(join(specDir, drafts[0].file), 'utf-8');
 }
 
 // State map for Phase 1
@@ -84,8 +61,9 @@ export async function runPhase1(
     forceStartState?: string;
     versionOverride?: number;
     specAmendmentContext?: import('./types').SpecAmendmentContext;
+    suppressPhaseStarted?: boolean;
   },
-): Promise<boolean> {
+): Promise<boolean | 'revisit_spec'> {
   // Initialize agent resolution from session config
   loadSessionAgents(session.id);
 
@@ -121,6 +99,7 @@ export async function runPhase1(
   const result = await runStateMachine('phase1', phase1States, ctx, {
     terminalStates: ['finalize_plans'],
     forceStartState: options?.forceStartState,
+    suppressPhaseStarted: options?.suppressPhaseStarted,
   });
 
   // Handle spec amendment escalation
@@ -132,8 +111,9 @@ export async function runPhase1(
     const ticketId = session.ticket_id || 'local';
     copyTriageToNewVersion(session.worktree, ticketId, version, nextVersion);
 
-    // Find previous spec draft and amendment reason for context
-    const previousSpec = findPreviousSpecDraft(session.worktree, ticketId, version);
+    // Find previous spec path and amendment reason for context
+    // Use path reference, not inlined content (per spec: paths, not inlined content)
+    const previousSpecPath = join(session.worktree, 'spec', ticketId, `v${version}`, 'task-spec.md');
     const amendmentEvents = readLog(session.id).filter(e => e.event === 'spec_amendment:requested');
     const amendmentReason =
       amendmentEvents.length > 0
@@ -141,13 +121,26 @@ export async function runPhase1(
           'Plan writing discovered spec drift'
         : 'Plan writing discovered spec drift';
 
+    // Emit phase1:started with required metadata for new epoch
+    // (machine.ts won't emit because hasCompletedWork=false with forceStartState)
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'phase1:started',
+      version: nextVersion,
+      metadata: {
+        previousVersion: version,
+        reason: amendmentReason,
+      },
+    });
+
     // Re-run phase 1 starting from write_spec with new version and amendment context
     return runPhase1(session, config, {
       versionOverride: nextVersion,
       forceStartState: 'write_spec',
-      specAmendmentContext: previousSpec
+      suppressPhaseStarted: true,
+      specAmendmentContext: existsSync(previousSpecPath)
         ? {
-            previousSpec,
+            previousSpecPath,
             reason: amendmentReason,
             previousVersion: version,
           }

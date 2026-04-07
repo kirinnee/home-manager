@@ -1,6 +1,6 @@
-import type { Phase2Context } from './types';
 import { appendEvent } from '../../core/log';
 import { logBanner } from '../../util/format';
+import type { Phase2Context } from './types';
 
 export async function handleCompleted(ctx: Phase2Context): Promise<string | null> {
   const { session, version } = ctx;

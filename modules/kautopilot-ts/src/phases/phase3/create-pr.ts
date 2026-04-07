@@ -1,13 +1,14 @@
-import type { Phase3Context } from './types';
-import { appendEvent } from '../../core/log';
-import { ensureStatus } from '../../core/status';
-import { isOnMain } from '../../core/git';
-import { ghListPrsForBranch, ghRepoInfo, ghFetchMergePolicy, ghPrComment } from '../../core/github';
-import { readDeliveryManifest, updateDeliveryManifest } from '../../core/manifests';
-import { snapshotPath } from '../../core/artifacts';
-import { spawnPrintRaw } from '../../llm/spawn';
-import { writeStepInit } from '../../core/step-init';
 import { getAgentBinary, getAgentPrompt } from '../../core/agents';
+import { findLatestSpecPath } from '../../core/artifact-versioning';
+import { snapshotPath } from '../../core/artifacts';
+import { isOnMain } from '../../core/git';
+import { ghFetchMergePolicy, ghListPrsForBranch, ghPrComment, ghRepoInfo } from '../../core/github';
+import { appendEvent } from '../../core/log';
+import { readDeliveryManifest, updateDeliveryManifest } from '../../core/manifests';
+import { ensureStatus } from '../../core/status';
+import { writeStepInit } from '../../core/step-init';
+import { spawnPrintRaw } from '../../llm/spawn';
+import type { Phase3Context } from './types';
 
 // Mechanical context prepended by handler — NOT part of user-editable prompt
 const CREATE_PR_MECHANICS = `## Spec Context
@@ -76,8 +77,8 @@ export async function handleCreatePr(ctx: Phase3Context): Promise<string | null>
     return 'poll';
   }
 
-  // Resolve spec path (don't inline content)
-  const specPath = snapshotPath(session.id, version, 'task-spec.md');
+  // Resolve spec path (use latest versioned snapshot)
+  const specPath = findLatestSpecPath(session.id, version) || snapshotPath(session.id, version, 'task-spec.md');
 
   // Get user-configurable prompt, then prepend mechanics
   const userPrompt = getAgentPrompt('phase3', 'create_pr', {
@@ -171,7 +172,9 @@ export async function handleCreatePr(ctx: Phase3Context): Promise<string | null>
       );
       if (lastEntry) {
         lastEntry.toPr = pr.number;
-        updateDeliveryManifest(session.id, version, { prRolloverHistory: delivery.prRolloverHistory });
+        updateDeliveryManifest(session.id, version, {
+          prRolloverHistory: delivery.prRolloverHistory,
+        });
         console.log(`[create_pr] Rollover recorded: PR #${fromPr} → #${pr.number}`);
       }
     }

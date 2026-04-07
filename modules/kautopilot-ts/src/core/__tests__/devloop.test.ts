@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
-import { writeKloopSpec, writeKloopConfig } from '../devloop';
-import { existsSync, readFileSync, mkdirSync, rmSync, mkdtempSync } from 'node:fs';
-import { join } from 'node:path';
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { writeKloopConfig, writeKloopSpec } from '../devloop';
 
 let origHome: string;
 let tempHome: string;
@@ -56,7 +56,6 @@ describe('devloop helpers', () => {
         conflictCheckThreshold: 2,
         firstLoopFullReview: false,
         previousReviewPropagation: 0,
-        reviewerFailureLimit: 2,
       });
       expect(existsSync(configPath)).toBe(true);
       const content = readFileSync(configPath, 'utf-8');

@@ -1,23 +1,25 @@
 #!/usr/bin/env bun
-import { readFileSync } from 'fs';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
+
+import { createDescribeCommand } from './cli/describe';
 import { createInitCommand } from './cli/init';
+import { createLogEventCommand } from './cli/log-event';
+import { createLogsCommand } from './cli/logs';
+import { createOrgCommand } from './cli/org';
+import { createPlanReviewCommand } from './cli/plan-review';
+import { createPsCommand } from './cli/ps';
+import { createResetCommand } from './cli/reset';
+import { createSnapshotCommand } from './cli/snapshot';
+import { createSpecReviewCommand } from './cli/spec-review';
 import { createStartCommand } from './cli/start';
 import { createStatusCommand } from './cli/status';
-import { createDescribeCommand } from './cli/describe';
 import { createStopCommand } from './cli/stop';
-import { createLogsCommand } from './cli/logs';
-import { createPsCommand } from './cli/ps';
-import { createOrgCommand } from './cli/org';
-import { createSpecReviewCommand } from './cli/spec-review';
-import { createPlanReviewCommand } from './cli/plan-review';
-import { createLogEventCommand } from './cli/log-event';
-import { createResetCommand } from './cli/reset';
 
 const program = new Command();
 
@@ -34,6 +36,7 @@ program
   .addCommand(createOrgCommand())
   .addCommand(createSpecReviewCommand())
   .addCommand(createPlanReviewCommand())
+  .addCommand(createSnapshotCommand())
   .addCommand(createLogEventCommand())
   .addCommand(createResetCommand());
 

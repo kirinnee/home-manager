@@ -2,15 +2,15 @@ import pc from 'picocolors';
 import { format } from 'date-fns';
 import type { CliDeps } from './index';
 import type { MaterializedStatus, MaterializedLoop, MaterializedAgentState, Config } from '../types';
+import { parseReviewerConfig } from '../types';
 import { paths } from '../deps';
 import { formatDurationHuman, formatAgeHuman } from '../loop/format';
 
 const CLAUDE_AUTO_PREFIX = 'claude-auto-';
 
 function shortBinary(binary: string, harness?: string): string {
-  const name = binary.startsWith(CLAUDE_AUTO_PREFIX) ? binary.slice(CLAUDE_AUTO_PREFIX.length) : binary;
-  if (harness && harness !== 'claude') return `${name}:${harness}`;
-  return name;
+  if (harness && harness !== 'claude') return `${binary}:${harness}`;
+  return binary;
 }
 
 function agentLabel(agent: MaterializedAgentState): string {
@@ -263,11 +263,15 @@ export async function handler(runId: string | undefined, opts: { json: boolean }
         }
       }
       const phases = config.reviewPhases as string[][];
+      const fmtReviewer = (raw: string) => {
+        const p = parseReviewerConfig(raw);
+        return shortBinary(p.binary, p.harness);
+      };
       if (phases?.length === 1) {
-        console.log(`  Reviewers:   ${phases[0].map(b => shortBinary(b)).join(', ')}`);
+        console.log(`  Reviewers:   ${phases[0].map(fmtReviewer).join(', ')}`);
       } else if (phases) {
         for (let i = 0; i < phases.length; i++) {
-          console.log(`    Phase ${i}:    ${phases[i].map(b => shortBinary(b)).join(', ')}`);
+          console.log(`    Phase ${i}:    ${phases[i].map(fmtReviewer).join(', ')}`);
         }
       }
       const compressLabel = config.compressSpec ? 'on' : 'off';

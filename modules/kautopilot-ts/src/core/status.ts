@@ -1,11 +1,11 @@
-import { existsSync, readFileSync, writeFileSync, rmSync, mkdirSync, renameSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import YAML from 'yaml';
-import type { LogEntry } from './types';
-import { readLog, appendEvent } from './log';
-import { checkLock } from './lock';
+import { logDim, logWarn } from '../util/format';
 import { sessionDir } from './artifacts';
-import { logWarn, logDim } from '../util/format';
+import { checkLock } from './lock';
+import { appendEvent, readLog } from './log';
+import type { LogEntry } from './types';
 
 // ============================================================================
 // Types
@@ -251,7 +251,11 @@ function applyEvent(status: SessionStatus, entry: LogEntry, index: number): void
   // Subtask events
   if (event === 'subtask:started' && entry.metadata?.task) {
     const task = entry.metadata.task as string;
-    status.tasks[task] = { status: 'running', startedAt: entry.ts, logRef: index };
+    status.tasks[task] = {
+      status: 'running',
+      startedAt: entry.ts,
+      logRef: index,
+    };
   }
   if (event === 'subtask:completed' && entry.metadata?.task) {
     const task = entry.metadata.task as string;

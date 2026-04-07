@@ -1,13 +1,12 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import YAML from 'yaml';
-import type { LogEntry } from './types';
-import type { InitStatus, InitState } from './init-types';
-import { readInitLog } from './log';
+import { logWarn } from '../util/format';
 import { initDir } from './artifacts';
 import { checkInitLock } from './init-lock';
-import { appendInitEvent } from './log';
-import { logWarn, logDim } from '../util/format';
+import type { InitState, InitStatus } from './init-types';
+import { appendInitEvent, readInitLog } from './log';
+import type { LogEntry } from './types';
 
 // ============================================================================
 // Initial status

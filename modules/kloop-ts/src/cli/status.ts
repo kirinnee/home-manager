@@ -15,9 +15,8 @@ import { formatDurationHuman, formatAgeHuman } from '../loop/format';
 const CLAUDE_AUTO_PREFIX = 'claude-auto-';
 
 function shortBinary(binary: string, harness?: string): string {
-  const name = binary.startsWith(CLAUDE_AUTO_PREFIX) ? binary.slice(CLAUDE_AUTO_PREFIX.length) : binary;
-  if (harness && harness !== 'claude') return `${name}:${harness}`;
-  return name;
+  if (harness && harness !== 'claude') return `${binary}:${harness}`;
+  return binary;
 }
 
 function agentLabel(agent: MaterializedAgentState): string {

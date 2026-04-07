@@ -1,11 +1,12 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { snapshotPath, type RunScope } from '../core/artifacts';
 import { getAgentPrompt } from '../core/agents';
-import { spawnTTY, type SpawnTTYOptions } from '../llm/spawn';
-import { appendEvent } from '../core/log';
+import { findLatestPlansPath } from '../core/artifact-versioning';
+import { type RunScope, snapshotPath } from '../core/artifacts';
 import { getConfigDir } from '../core/config-dir';
+import { appendEvent } from '../core/log';
 import { startTurnWatcher } from '../core/turn-watcher';
+import { type SpawnTTYOptions, spawnTTY } from '../llm/spawn';
 
 /**
  * Load prompt template — delegates to the agent resolution system.
@@ -26,7 +27,10 @@ export function parsePlanFilename(filename: string): { ordinal: number; rewrite:
   // Spec convention: plan-{ordinal}-{rewrite}.md
   const suffixed = filename.match(/^plan-(\d+)-(\d+)\.md$/);
   if (suffixed) {
-    return { ordinal: parseInt(suffixed[1], 10), rewrite: parseInt(suffixed[2], 10) };
+    return {
+      ordinal: parseInt(suffixed[1], 10),
+      rewrite: parseInt(suffixed[2], 10),
+    };
   }
   // Legacy: plan-{ordinal}.md (treated as rewrite 1)
   const flat = filename.match(/^plan-(\d+)\.md$/);
@@ -81,11 +85,13 @@ export function resolveSpec(sessionId: string, version: number, filename: string
 
 /**
  * Discover plan file paths from session snapshot.
- * Uses resolveActivePlans to pick the highest rewrite suffix per ordinal.
+ * Uses findLatestPlansPath to get the latest plans-{N}/ directory,
+ * then resolveActivePlans to pick the highest rewrite suffix per ordinal.
+ * Falls back to flat plans/ directory for backward compatibility.
  */
 export function resolvePlans(sessionId: string, version: number): string[] {
-  const sessionPlansDir = snapshotPath(sessionId, version, 'plans');
-  return resolveActivePlans(sessionPlansDir);
+  const latestPlansDir = findLatestPlansPath(sessionId, version) || snapshotPath(sessionId, version, 'plans');
+  return resolveActivePlans(latestPlansDir);
 }
 
 /**
@@ -97,58 +103,6 @@ export function validatePlanContent(planFiles: string[]): string[] {
     const content = readFileSync(p, 'utf-8').trim();
     return content.length === 0;
   });
-}
-
-/**
- * Find the latest plan-draft-N/ directory in the plans dir.
- * Returns { ordinal, dir, files } or null if no drafts exist.
- */
-export function findLatestPlanDraftDir(plansDir: string): { ordinal: number; dir: string; files: string[] } | null {
-  let entries: import('node:fs').Dirent[];
-  try {
-    entries = readdirSync(plansDir, { withFileTypes: true });
-  } catch {
-    return null;
-  }
-
-  const drafts = entries
-    .filter(e => e.isDirectory() && /^plan-draft-\d+$/.test(e.name))
-    .map(e => ({ name: e.name, ordinal: parseInt(e.name.match(/plan-draft-(\d+)/)![1]) }))
-    .sort((a, b) => b.ordinal - a.ordinal);
-
-  if (drafts.length === 0) return null;
-
-  const latest = drafts[0];
-  const draftDir = join(plansDir, latest.name);
-  const files = readdirSync(draftDir)
-    .filter(f => /^plan-\d+\.md$/.test(f))
-    .sort((a, b) => {
-      const numA = parseInt(a.match(/plan-(\d+)/)?.[1] || '0', 10);
-      const numB = parseInt(b.match(/plan-(\d+)/)?.[1] || '0', 10);
-      return numA - numB;
-    })
-    .map(f => join(draftDir, f));
-
-  return { ordinal: latest.ordinal, dir: draftDir, files };
-}
-
-/**
- * Read all plan files from a plan-draft-N directory, returning
- * an array of { filename, content } in plan order.
- */
-export function readPlanDraftFiles(draftDir: string): Array<{ filename: string; content: string }> {
-  const files = readdirSync(draftDir)
-    .filter(f => /^plan-\d+\.md$/.test(f))
-    .sort((a, b) => {
-      const numA = parseInt(a.match(/plan-(\d+)/)?.[1] || '0', 10);
-      const numB = parseInt(b.match(/plan-(\d+)/)?.[1] || '0', 10);
-      return numA - numB;
-    });
-
-  return files.map(f => ({
-    filename: f,
-    content: readFileSync(join(draftDir, f), 'utf-8'),
-  }));
 }
 
 /**

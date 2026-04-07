@@ -1,11 +1,12 @@
-import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
-import type { Phase1Context } from './types';
+import { existsSync, mkdirSync } from 'node:fs';
+import { getAgentPrompt, getDefaultBinary } from '../../core/agents';
+import { snapshotPath } from '../../core/artifacts';
 import { appendEvent, readLog } from '../../core/log';
-import { buildPromptVars, resolvePromptVars } from '../../core/type-config';
-import { getDefaultBinary, getAgentPrompt } from '../../core/agents';
 import { writeStepInit } from '../../core/step-init';
+import { buildPromptVars, resolvePromptVars } from '../../core/type-config';
+import { logBanner, logInfo, logOk } from '../../util/format';
 import { spawnTTYWithTurnTracking } from '../shared';
-import { logOk, logInfo, logBanner } from '../../util/format';
+import type { Phase1Context } from './types';
 
 /**
  * Non-negotiable mechanics injected by the runner — NOT part of the user-editable prompt.
@@ -15,74 +16,62 @@ const SPEC_APPROVAL_PROTOCOL = `### Approval Protocol
 
 When the user approves the spec, you MUST do these things IN ORDER before exiting:
 1. Write the approval event by running this command:
-   \`kautopilot log-event spec:approved --metadata '{"draft": N}'\`
-   (where N is the final draft ordinal number)
+   \`kautopilot log-event spec:approved\`
 2. THEN tell the user to /exit
 
 **CRITICAL**: Do NOT tell the user to /exit before writing the approval event.
 If the session crashes or the user Ctrl+C's before the approval event is logged,
 the spec will NOT be considered approved and this step will re-run from scratch.`;
 
-const SPEC_MECHANICS = `## CRITICAL: Spec Draft & Approval Mechanics
+const SPEC_MECHANICS = `## CRITICAL: Spec Writing & Approval Mechanics
 
-### Draft Files
+### Working Copy
 
-Every draft of the spec MUST be written as a new ordinal file:
-- First draft: {specDir}/spec-draft-1.md
-- After feedback: {specDir}/spec-draft-2.md
-- After more feedback: {specDir}/spec-draft-3.md
-- And so on...
+Write the spec to the working copy file:
+- {spec}
 
-NEVER overwrite a previous draft. Always increment the ordinal. This lets us diff between
-versions to see exactly what changed.
+This is the ONLY spec file you edit. On each feedback round, edit this same file in-place
+and re-snapshot. Do NOT create numbered drafts or separate files — the snapshot command
+handles versioning automatically.
 
-Each draft MUST be a complete, standalone spec — NOT a changelog or diff. Write the full spec
+Each version MUST be a complete, standalone spec — NOT a changelog or diff. Write the full spec
 every time, with changes applied inline. Do NOT add "Changed:" or "Updated:" annotations.
-The draft should read as if it were written from scratch.
 
-Each draft MUST follow this template:
+Each version MUST follow this template:
 {specTemplate}
+
+### Snapshot Workflow (COMPULSORY)
+
+After each edit cycle (writing or editing the spec), you MUST create a snapshot:
+\`\`\`bash
+kautopilot snapshot spec {epoch}
+\`\`\`
+
+This copies the working copy to a versioned snapshot in the global artifacts directory.
+The snapshot command outputs:
+- SNAPSHOT_VERSION=N (the new version number)
+- SNAPSHOT_PATH=... (the path to the snapshot)
+
+This step is COMPULSORY — do not skip it. It creates an audit trail of all spec versions.
+
+### Previous Epoch Feedback
+
+{feedback_reference}
 
 ${SPEC_APPROVAL_PROTOCOL}
 `;
 
 /**
- * Find the latest spec-draft-N.md in the spec dir and return its content + ordinal.
- */
-function findLatestDraft(specDir: string): { ordinal: number; content: string } | null {
-  let files: string[];
-  try {
-    files = readdirSync(specDir);
-  } catch {
-    return null;
-  }
-
-  const drafts = files
-    .filter(f => /^spec-draft-\d+\.md$/.test(f))
-    .map(f => ({ file: f, ordinal: parseInt(f.match(/spec-draft-(\d+)\.md/)![1]) }))
-    .sort((a, b) => b.ordinal - a.ordinal);
-
-  if (drafts.length === 0) return null;
-
-  const latest = drafts[0];
-  const content = readFileSync(`${specDir}/${latest.file}`, 'utf-8');
-  return { ordinal: latest.ordinal, content };
-}
-
-/**
  * [tty] Interactive spec writing via TTY handoff.
  *
  * The TTY Claude creates a team to gather context, debates with user,
- * writes ordinal spec drafts (spec-draft-1.md, spec-draft-2.md, ...),
+ * writes/edits the working copy (task-spec.md), snapshots each version,
  * and logs spec:approved before exiting.
  */
 export async function handleWriteSpec(ctx: Phase1Context): Promise<string | null> {
   const { session, version, config } = ctx;
 
   // Check if spec was already approved for THIS version (crash recovery — don't re-run)
-  // Use write_spec:completed (which has version) as the marker, since spec:approved
-  // from log-event CLI doesn't carry version. This prevents old-version approvals
-  // from skipping re-entered spec writing after spec amendment escalation.
   const events = readLog(session.id);
   const completedForThisVersion = events.some(e => e.event === 'write_spec:completed' && e.version === version);
   if (completedForThisVersion) {
@@ -99,6 +88,15 @@ export async function handleWriteSpec(ctx: Phase1Context): Promise<string | null
 
   const vars = buildPromptVars(session.worktree, version, session.ticket_id || 'local');
 
+  // Build feedback reference for new epochs (v{N} reads v{N-1}/feedback.md)
+  let feedbackReference = 'No previous epoch feedback — this is the first epoch.';
+  if (version > 1) {
+    const prevFeedbackPath = snapshotPath(session.id, version - 1, 'feedback.md');
+    if (existsSync(prevFeedbackPath)) {
+      feedbackReference = `This is epoch v${version}. The previous epoch v${version - 1} failed. Read the feedback at:\n${prevFeedbackPath}\n\nAddress this feedback in your new spec.`;
+    }
+  }
+
   // Ensure spec dir exists
   mkdirSync(vars.specDir, { recursive: true });
 
@@ -106,22 +104,25 @@ export async function handleWriteSpec(ctx: Phase1Context): Promise<string | null
   let prompt = getAgentPrompt('phase1', 'spec_writer', vars as unknown as Record<string, string>);
 
   // Build spec amendment context note if present (from amend_spec escalation)
+  // Use path reference, not inlined content (per spec: paths, not inlined content)
   const amendmentNote = ctx.specAmendmentContext
-    ? `\n## Previous Spec Amendment\n\nPrevious spec v${ctx.specAmendmentContext.previousVersion} is below for reference. It needs amendment because: ${ctx.specAmendmentContext.reason}\n\n---\n${ctx.specAmendmentContext.previousSpec}\n---\n`
+    ? `\n## Previous Spec Amendment\n\nThe spec needs amendment because: ${ctx.specAmendmentContext.reason}\nThe previous spec v${ctx.specAmendmentContext.previousVersion} is at:\n${ctx.specAmendmentContext.previousSpecPath}\n\nRead the previous spec to understand what needs to be amended.\n`
     : '';
 
-  // Prepend latest draft if resuming — mechanics go first so they're always at the top
-  const latest = findLatestDraft(vars.specDir);
-  if (latest) {
-    logInfo(`Resuming from spec-draft-${latest.ordinal}.md`);
-    const mechanicsWithTemplate = SPEC_MECHANICS.replace('{specTemplate}', config.templates.spec);
-    const resumeCtx = resolvePromptVars(mechanicsWithTemplate, vars);
-    prompt = `${resumeCtx}${amendmentNote}\n## Resuming: Current Draft is spec-draft-${latest.ordinal}.md\n\nYou are resuming a spec session. The latest draft is below. Continue from where you left off — the next draft should be spec-draft-${latest.ordinal + 1}.md.\n\n---\n${latest.content}\n---\n\n${prompt}`;
-  } else {
-    // Prepend mechanics for fresh starts too — inject template first
-    const mechanicsWithTemplate = SPEC_MECHANICS.replace('{specTemplate}', config.templates.spec);
-    prompt = resolvePromptVars(mechanicsWithTemplate, vars) + amendmentNote + prompt;
+  // Build mechanics with template, feedback reference, and epoch
+  const mechanicsResolved = SPEC_MECHANICS.replace('{specTemplate}', config.templates.spec)
+    .replace('{feedback_reference}', feedbackReference)
+    .replace('{epoch}', String(version));
+  const mechanicsPrompt = resolvePromptVars(mechanicsResolved, vars);
+
+  // Prepend existing working copy if resuming (use path, not inlined content)
+  let resumeNote = '';
+  if (existsSync(vars.spec)) {
+    resumeNote = `\n## Resuming: task-spec.md exists\n\nYou are resuming a spec session. The working copy is at:\n${vars.spec}\n\nRead it and continue editing in-place.\n\n`;
+    logInfo('Resuming from existing task-spec.md');
   }
+
+  prompt = mechanicsPrompt + amendmentNote + resumeNote + prompt;
 
   const binary = getDefaultBinary();
   writeStepInit(session.id, version, 'write_spec', {
@@ -137,21 +138,17 @@ export async function handleWriteSpec(ctx: Phase1Context): Promise<string | null
   });
 
   // Check if approval event was logged during THIS version's TTY session
-  // Scope to events after write_spec:started for the current version, so that
-  // old approval events from previous versions don't count.
   const postEvents = readLog(session.id);
   const startedIdx = postEvents.findLastIndex(e => e.event === 'write_spec:started' && e.version === version);
   const eventsSinceStart = startedIdx >= 0 ? postEvents.slice(startedIdx + 1) : postEvents;
   const wasApproved = eventsSinceStart.some(e => e.event === 'spec:approved');
   if (!wasApproved) {
-    // TTY exited without approval — re-run on next start
     logInfo('Spec not approved yet — will resume on next start');
     appendEvent(session.id, {
       ts: new Date().toISOString(),
       event: 'write_spec:interrupted',
       version,
     });
-    // Return null to stop the state machine (user needs to restart)
     return null;
   }
 

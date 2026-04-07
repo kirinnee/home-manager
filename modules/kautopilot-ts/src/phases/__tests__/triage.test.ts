@@ -4,10 +4,10 @@
  * Tests exercise actual runtime code paths (file I/O, log parsing, config resolution)
  * without requiring a live kautopilot session or TTY binary.
  */
-import { describe, it, expect, afterEach, beforeAll, afterAll } from 'bun:test';
-import { mkdirSync, rmSync, writeFileSync, existsSync, readFileSync, mkdtempSync } from 'node:fs';
-import { join } from 'node:path';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 let origHome: string;
 let tempHome: string;
@@ -20,19 +20,19 @@ afterAll(() => {
   process.env.HOME = origHome;
   rmSync(tempHome, { recursive: true, force: true });
 });
-import { parseTriage } from '../phase1/triage';
-import { handlePullTicket } from '../phase1/pull-ticket';
-import type { Phase1Context } from '../phase1/types';
-import type { SessionRow, Config } from '../../core/types';
-import { buildPromptVars, resolvePromptVars } from '../../core/type-config';
+
+import { sessionDir } from '../../core/artifacts';
 import { appendEvent, readLog } from '../../core/log';
-import { sessionDir, sessionArtifactPath, ensureArtifactDir } from '../../core/artifacts';
 import {
-  writeContractManifest,
-  writeDeliveryManifest,
   readContractManifest,
   readDeliveryManifest,
+  writeContractManifest,
+  writeDeliveryManifest,
 } from '../../core/manifests';
+import { buildPromptVars, resolvePromptVars } from '../../core/type-config';
+import type { Config, SessionRow } from '../../core/types';
+import { parseTriage } from '../phase1/triage';
+import type { Phase1Context } from '../phase1/types';
 
 // ============================================================================
 // Test helpers
@@ -84,7 +84,6 @@ function makeConfig(overrides?: { triage?: string; spec_writer?: string; plan_wr
       conflictCheckThreshold: 2,
       firstLoopFullReview: false,
       previousReviewPropagation: 0,
-      reviewerFailureLimit: 2,
     },
     settings: {
       maxPushCycles: 10,
@@ -132,7 +131,10 @@ describe('A. Configurable prompts', () => {
   it('config.agents.phase1 prompts can be overridden', () => {
     const customTriage = 'Custom triage prompt for org X';
     const customSpec = 'Custom spec writer prompt';
-    const config = makeConfig({ triage: customTriage, spec_writer: customSpec });
+    const config = makeConfig({
+      triage: customTriage,
+      spec_writer: customSpec,
+    });
     expect(config.agents.phase1.triage.prompt).toBe(customTriage);
     expect(config.agents.phase1.spec_writer.prompt).toBe(customSpec);
     expect(config.agents.phase1.plan_writer.prompt).toBe(''); // default from makeConfig
@@ -151,7 +153,13 @@ describe('A. Configurable prompts', () => {
   it('configSchema parses agents.phase1 with defaults when omitted', async () => {
     const { configSchema } = await import('../../core/types');
     const parsed = configSchema.parse({
-      agents: { phase1: { triage: { prompt: 't' }, spec_writer: { prompt: 's' }, plan_writer: { prompt: 'p' } } },
+      agents: {
+        phase1: {
+          triage: { prompt: 't' },
+          spec_writer: { prompt: 's' },
+          plan_writer: { prompt: 'p' },
+        },
+      },
     });
     expect(parsed.agents.phase1.triage.prompt).toBe('t');
     expect(parsed.agents.phase1.spec_writer.prompt).toBe('s');
@@ -162,7 +170,11 @@ describe('A. Configurable prompts', () => {
     const { configSchema } = await import('../../core/types');
     const parsed = configSchema.parse({
       agents: {
-        phase1: { triage: { prompt: 'custom triage' }, spec_writer: { prompt: 's' }, plan_writer: { prompt: 'p' } },
+        phase1: {
+          triage: { prompt: 'custom triage' },
+          spec_writer: { prompt: 's' },
+          plan_writer: { prompt: 'p' },
+        },
       },
     });
     expect(parsed.agents.phase1.triage.prompt).toBe('custom triage');
@@ -204,8 +216,8 @@ describe('B. Triage phase — parseTriage', () => {
 
     const result = parseTriage(triagePath);
     expect(result).not.toBeNull();
-    expect(result!.deliveryKind).toBe('pr');
-    expect(result!.complexity).toBe('straightforward');
+    expect(result?.deliveryKind).toBe('pr');
+    expect(result?.complexity).toBe('straightforward');
 
     rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -238,8 +250,8 @@ describe('B. Triage phase — parseTriage', () => {
 
     const result = parseTriage(triagePath);
     expect(result).not.toBeNull();
-    expect(result!.deliveryKind).toBe('ticket');
-    expect(result!.complexity).toBe('complex');
+    expect(result?.deliveryKind).toBe('ticket');
+    expect(result?.complexity).toBe('complex');
 
     rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -272,8 +284,8 @@ describe('B. Triage phase — parseTriage', () => {
 
     const result = parseTriage(triagePath);
     expect(result).not.toBeNull();
-    expect(result!.deliveryKind).toBe('pr');
-    expect(result!.complexity).toBe('moderate');
+    expect(result?.deliveryKind).toBe('pr');
+    expect(result?.complexity).toBe('moderate');
 
     rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -311,8 +323,8 @@ describe('B. Triage phase — parseTriage', () => {
 
     const result = parseTriage(triagePath);
     expect(result).not.toBeNull();
-    expect(result!.deliveryKind).toBe('pr'); // defaults to pr
-    expect(result!.complexity).toBe('straightforward');
+    expect(result?.deliveryKind).toBe('pr'); // defaults to pr
+    expect(result?.complexity).toBe('straightforward');
 
     rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -345,8 +357,8 @@ describe('B. Triage phase — parseTriage', () => {
 
     const result = parseTriage(triagePath);
     expect(result).not.toBeNull();
-    expect(result!.deliveryKind).toBe('pr');
-    expect(result!.complexity).toBe('moderate'); // default fallback
+    expect(result?.deliveryKind).toBe('pr');
+    expect(result?.complexity).toBe('moderate'); // default fallback
 
     rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -392,9 +404,9 @@ describe('B2. Triage phase — parseTriage verification fields', () => {
 
     const result = parseTriage(triagePath);
     expect(result).not.toBeNull();
-    expect(result!.verification.hasAssumptions).toBe(true);
-    expect(result!.verification.testing).toBe('moderate');
-    expect(result!.verification.hasValidators).toBe(false);
+    expect(result?.verification.hasAssumptions).toBe(true);
+    expect(result?.verification.testing).toBe('moderate');
+    expect(result?.verification.hasValidators).toBe(false);
 
     rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -430,8 +442,8 @@ describe('B2. Triage phase — parseTriage verification fields', () => {
 
     const result = parseTriage(triagePath);
     expect(result).not.toBeNull();
-    expect(result!.verification.hasAssumptions).toBe(false);
-    expect(result!.verification.testing).toBe('none');
+    expect(result?.verification.hasAssumptions).toBe(false);
+    expect(result?.verification.testing).toBe('none');
 
     rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -459,7 +471,7 @@ describe('B2. Triage phase — parseTriage verification fields', () => {
 
     const result = parseTriage(triagePath);
     expect(result).not.toBeNull();
-    expect(result!.verification.testing).toBe('light');
+    expect(result?.verification.testing).toBe('light');
 
     rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -487,7 +499,7 @@ describe('B2. Triage phase — parseTriage verification fields', () => {
 
     const result = parseTriage(triagePath);
     expect(result).not.toBeNull();
-    expect(result!.verification.testing).toBe('heavy');
+    expect(result?.verification.testing).toBe('heavy');
 
     rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -515,7 +527,7 @@ describe('B2. Triage phase — parseTriage verification fields', () => {
 
     const result = parseTriage(triagePath);
     expect(result).not.toBeNull();
-    expect(result!.verification.testing).toBe('none');
+    expect(result?.verification.testing).toBe('none');
 
     rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -553,9 +565,9 @@ describe('B2. Triage phase — parseTriage verification fields', () => {
 
     const result = parseTriage(triagePath);
     expect(result).not.toBeNull();
-    expect(result!.verification.hasValidators).toBe(true);
-    expect(result!.verification.hasAssumptions).toBe(false);
-    expect(result!.verification.testing).toBe('moderate');
+    expect(result?.verification.hasValidators).toBe(true);
+    expect(result?.verification.hasAssumptions).toBe(false);
+    expect(result?.verification.testing).toBe('moderate');
 
     rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -585,7 +597,7 @@ describe('B2. Triage phase — parseTriage verification fields', () => {
 
     const result = parseTriage(triagePath);
     expect(result).not.toBeNull();
-    expect(result!.verification.hasValidators).toBe(false);
+    expect(result?.verification.hasValidators).toBe(false);
 
     rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -624,11 +636,11 @@ describe('B3. Triage phase — parseTriage backward compat (no verification sect
 
     const result = parseTriage(triagePath);
     expect(result).not.toBeNull();
-    expect(result!.deliveryKind).toBe('pr');
-    expect(result!.complexity).toBe('moderate');
-    expect(result!.verification.hasAssumptions).toBe(false);
-    expect(result!.verification.testing).toBe('none');
-    expect(result!.verification.hasValidators).toBe(false);
+    expect(result?.deliveryKind).toBe('pr');
+    expect(result?.complexity).toBe('moderate');
+    expect(result?.verification.hasAssumptions).toBe(false);
+    expect(result?.verification.testing).toBe('none');
+    expect(result?.verification.hasValidators).toBe(false);
 
     rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -644,9 +656,9 @@ describe('B3. Triage phase — parseTriage backward compat (no verification sect
 
     const result = parseTriage(triagePath);
     expect(result).not.toBeNull();
-    expect(result!.verification.hasAssumptions).toBe(false);
-    expect(result!.verification.testing).toBe('none');
-    expect(result!.verification.hasValidators).toBe(false);
+    expect(result?.verification.hasAssumptions).toBe(false);
+    expect(result?.verification.testing).toBe('none');
+    expect(result?.verification.hasValidators).toBe(false);
 
     rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -687,11 +699,11 @@ describe('B3. Triage phase — parseTriage backward compat (no verification sect
 
       const result = parseTriage(triagePath);
       expect(result).not.toBeNull();
-      expect(result!.deliveryKind).toBe(expected.deliveryKind);
-      expect(result!.complexity).toBe(expected.complexity);
-      expect(result!.verification.hasAssumptions).toBe(false);
-      expect(result!.verification.testing).toBe('none');
-      expect(result!.verification.hasValidators).toBe(false);
+      expect(result?.deliveryKind).toBe(expected.deliveryKind);
+      expect(result?.complexity).toBe(expected.complexity);
+      expect(result?.verification.hasAssumptions).toBe(false);
+      expect(result?.verification.testing).toBe('none');
+      expect(result?.verification.hasValidators).toBe(false);
 
       rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -823,7 +835,9 @@ describe('B. Triage phase — crash recovery', () => {
     });
 
     // Create worktree but no triage.md — parseTriage returns null
-    mkdirSync(join(altWorktree, 'spec', 'local-test', 'v1'), { recursive: true });
+    mkdirSync(join(altWorktree, 'spec', 'local-test', 'v1'), {
+      recursive: true,
+    });
 
     const ctx = makeCtx(altSessionId, altWorktree);
     const { handleTriage } = await import('../phase1/triage');
@@ -921,9 +935,9 @@ describe('D. Delivery kind propagation to manifests', () => {
 
     const manifest = readContractManifest(sessionId, 1);
     expect(manifest).not.toBeNull();
-    expect(manifest!.deliveryKind).toBe('pr');
-    expect(manifest!.planCount).toBe(2);
-    expect(manifest!.version).toBe(1);
+    expect(manifest?.deliveryKind).toBe('pr');
+    expect(manifest?.planCount).toBe(2);
+    expect(manifest?.version).toBe(1);
   });
 
   it('writeContractManifest writes deliveryKind=ticket', () => {
@@ -934,8 +948,8 @@ describe('D. Delivery kind propagation to manifests', () => {
 
     const manifest = readContractManifest(sessionId, 1);
     expect(manifest).not.toBeNull();
-    expect(manifest!.deliveryKind).toBe('ticket');
-    expect(manifest!.planCount).toBe(3);
+    expect(manifest?.deliveryKind).toBe('ticket');
+    expect(manifest?.planCount).toBe(3);
   });
 
   it('writeDeliveryManifest writes kind=pr', () => {
@@ -946,7 +960,7 @@ describe('D. Delivery kind propagation to manifests', () => {
 
     const manifest = readDeliveryManifest(sessionId, 1);
     expect(manifest).not.toBeNull();
-    expect(manifest!.kind).toBe('pr');
+    expect(manifest?.kind).toBe('pr');
   });
 
   it('writeDeliveryManifest writes kind=ticket', () => {
@@ -957,7 +971,7 @@ describe('D. Delivery kind propagation to manifests', () => {
 
     const manifest = readDeliveryManifest(sessionId, 1);
     expect(manifest).not.toBeNull();
-    expect(manifest!.kind).toBe('ticket');
+    expect(manifest?.kind).toBe('ticket');
   });
 
   it('finalize_plans propagates ctx.deliveryKind to both manifests', async () => {
@@ -992,12 +1006,12 @@ describe('D. Delivery kind propagation to manifests', () => {
     // Verify contract manifest
     const contract = readContractManifest(finalizeSessionId, 1);
     expect(contract).not.toBeNull();
-    expect(contract!.deliveryKind).toBe('ticket');
+    expect(contract?.deliveryKind).toBe('ticket');
 
     // Verify delivery manifest
     const delivery = readDeliveryManifest(finalizeSessionId, 1);
     expect(delivery).not.toBeNull();
-    expect(delivery!.kind).toBe('ticket');
+    expect(delivery?.kind).toBe('ticket');
 
     cleanSession(finalizeSessionId);
     cleanWorktree(finalizeWorktree);
@@ -1030,10 +1044,10 @@ describe('D. Delivery kind propagation to manifests', () => {
     await handleFinalizePlans(ctx);
 
     const contract = readContractManifest(defaultSessionId, 1);
-    expect(contract!.deliveryKind).toBe('pr'); // defaults to pr
+    expect(contract?.deliveryKind).toBe('pr'); // defaults to pr
 
     const delivery = readDeliveryManifest(defaultSessionId, 1);
-    expect(delivery!.kind).toBe('pr'); // defaults to pr
+    expect(delivery?.kind).toBe('pr'); // defaults to pr
 
     cleanSession(defaultSessionId);
     cleanWorktree(defaultWorktree);
@@ -1103,8 +1117,8 @@ describe('E. Crash recovery — event log patterns', () => {
     const events = readLog(sessionId);
     const completed = events.find(e => e.event === 'triage:completed');
     expect(completed).toBeDefined();
-    expect(completed!.metadata!.deliveryKind).toBe('ticket');
-    expect(completed!.metadata!.complexity).toBe('complex');
+    expect(completed?.metadata?.deliveryKind).toBe('ticket');
+    expect(completed?.metadata?.complexity).toBe('complex');
   });
 });
 
@@ -1177,9 +1191,9 @@ describe('G. parseTriage — mixed validation matrix', () => {
 
     const result = parseTriage(triagePath);
     expect(result).not.toBeNull();
-    expect(result!.verification.hasValidators).toBe(true);
-    expect(result!.verification.hasAssumptions).toBe(false);
-    expect(result!.verification.testing).toBe('moderate');
+    expect(result?.verification.hasValidators).toBe(true);
+    expect(result?.verification.hasAssumptions).toBe(false);
+    expect(result?.verification.testing).toBe('moderate');
 
     rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -1209,7 +1223,7 @@ describe('G. parseTriage — mixed validation matrix', () => {
 
     const result = parseTriage(triagePath);
     expect(result).not.toBeNull();
-    expect(result!.verification.hasValidators).toBe(true);
+    expect(result?.verification.hasValidators).toBe(true);
 
     rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -1239,7 +1253,7 @@ describe('G. parseTriage — mixed validation matrix', () => {
 
     const result = parseTriage(triagePath);
     expect(result).not.toBeNull();
-    expect(result!.verification.hasValidators).toBe(false);
+    expect(result?.verification.hasValidators).toBe(false);
 
     rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -1260,17 +1274,37 @@ describe('H. Version-scoped event checks', () => {
     mkdirSync(sessionDir(sessionId), { recursive: true });
 
     // v1 events — spec was approved and completed
-    appendEvent(sessionId, { ts: new Date().toISOString(), event: 'write_spec:started', version: 1 });
-    appendEvent(sessionId, { ts: new Date().toISOString(), event: 'spec:approved', metadata: { draft: 1 } });
-    appendEvent(sessionId, { ts: new Date().toISOString(), event: 'write_spec:completed', version: 1 });
+    appendEvent(sessionId, {
+      ts: new Date().toISOString(),
+      event: 'write_spec:started',
+      version: 1,
+    });
+    appendEvent(sessionId, {
+      ts: new Date().toISOString(),
+      event: 'spec:approved',
+      metadata: { draft: 1 },
+    });
+    appendEvent(sessionId, {
+      ts: new Date().toISOString(),
+      event: 'write_spec:completed',
+      version: 1,
+    });
     // v1 amendment escalation
-    appendEvent(sessionId, { ts: new Date().toISOString(), event: 'write_plans:started', version: 1 });
+    appendEvent(sessionId, {
+      ts: new Date().toISOString(),
+      event: 'write_plans:started',
+      version: 1,
+    });
     appendEvent(sessionId, {
       ts: new Date().toISOString(),
       event: 'spec_amendment:requested',
       metadata: { reason: 'spec drift' },
     });
-    appendEvent(sessionId, { ts: new Date().toISOString(), event: 'write_plans:escalated', version: 1 });
+    appendEvent(sessionId, {
+      ts: new Date().toISOString(),
+      event: 'write_plans:escalated',
+      version: 1,
+    });
 
     const events = readLog(sessionId);
 
@@ -1287,9 +1321,20 @@ describe('H. Version-scoped event checks', () => {
     mkdirSync(sessionDir(sessionId), { recursive: true });
 
     // v1 events — plans were NOT completed (escalated instead)
-    appendEvent(sessionId, { ts: new Date().toISOString(), event: 'write_plans:started', version: 1 });
-    appendEvent(sessionId, { ts: new Date().toISOString(), event: 'spec_amendment:requested' });
-    appendEvent(sessionId, { ts: new Date().toISOString(), event: 'write_plans:escalated', version: 1 });
+    appendEvent(sessionId, {
+      ts: new Date().toISOString(),
+      event: 'write_plans:started',
+      version: 1,
+    });
+    appendEvent(sessionId, {
+      ts: new Date().toISOString(),
+      event: 'spec_amendment:requested',
+    });
+    appendEvent(sessionId, {
+      ts: new Date().toISOString(),
+      event: 'write_plans:escalated',
+      version: 1,
+    });
 
     const events = readLog(sessionId);
 
@@ -1302,12 +1347,27 @@ describe('H. Version-scoped event checks', () => {
     mkdirSync(sessionDir(sessionId), { recursive: true });
 
     // v1 events — amendment was requested
-    appendEvent(sessionId, { ts: new Date().toISOString(), event: 'write_plans:started', version: 1 });
-    appendEvent(sessionId, { ts: new Date().toISOString(), event: 'spec_amendment:requested' });
-    appendEvent(sessionId, { ts: new Date().toISOString(), event: 'write_plans:escalated', version: 1 });
+    appendEvent(sessionId, {
+      ts: new Date().toISOString(),
+      event: 'write_plans:started',
+      version: 1,
+    });
+    appendEvent(sessionId, {
+      ts: new Date().toISOString(),
+      event: 'spec_amendment:requested',
+    });
+    appendEvent(sessionId, {
+      ts: new Date().toISOString(),
+      event: 'write_plans:escalated',
+      version: 1,
+    });
 
     // v2 events — new TTY session
-    appendEvent(sessionId, { ts: new Date().toISOString(), event: 'write_plans:started', version: 2 });
+    appendEvent(sessionId, {
+      ts: new Date().toISOString(),
+      event: 'write_plans:started',
+      version: 2,
+    });
 
     const events = readLog(sessionId);
 
@@ -1323,11 +1383,22 @@ describe('H. Version-scoped event checks', () => {
     mkdirSync(sessionDir(sessionId), { recursive: true });
 
     // v1 events — spec was approved
-    appendEvent(sessionId, { ts: new Date().toISOString(), event: 'write_spec:started', version: 1 });
-    appendEvent(sessionId, { ts: new Date().toISOString(), event: 'spec:approved' });
+    appendEvent(sessionId, {
+      ts: new Date().toISOString(),
+      event: 'write_spec:started',
+      version: 1,
+    });
+    appendEvent(sessionId, {
+      ts: new Date().toISOString(),
+      event: 'spec:approved',
+    });
 
     // v2 events — new TTY session
-    appendEvent(sessionId, { ts: new Date().toISOString(), event: 'write_spec:started', version: 2 });
+    appendEvent(sessionId, {
+      ts: new Date().toISOString(),
+      event: 'write_spec:started',
+      version: 2,
+    });
 
     const events = readLog(sessionId);
 

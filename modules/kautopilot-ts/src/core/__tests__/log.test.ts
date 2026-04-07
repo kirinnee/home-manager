@@ -1,6 +1,5 @@
-import { describe, it, expect } from 'bun:test';
-import { readLog, appendEvent } from '../log';
-import type { LogEntry } from '../types';
+import { describe, expect, it } from 'bun:test';
+import { readLog } from '../log';
 
 // Test the log read/write helpers (appendEvent/readLog still in log.ts)
 describe('readLog', () => {

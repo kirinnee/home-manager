@@ -1,6 +1,6 @@
-import type { PhaseContext } from '../machine';
 import type { MergePolicyInfo } from '../../core/github';
-import type { PollThread, DeliveryKind } from '../../core/types';
+import type { DeliveryKind, PollThread } from '../../core/types';
+import type { PhaseContext } from '../machine';
 
 export type { PollThread };
 

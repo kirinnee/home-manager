@@ -1,8 +1,8 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as YAML from 'yaml';
-import { sessionDir } from './artifacts';
 import { getDefaultBinary } from './agents';
+import { sessionDir } from './artifacts';
 import type { KloopConfig } from './types';
 
 export interface DevloopRunResult {

@@ -1,9 +1,10 @@
 import { existsSync, readFileSync } from 'node:fs';
-import type { Phase2Context } from './types';
-import { appendEvent } from '../../core/log';
-import { devloopInit, writeKloopSpec, writeKloopConfig } from '../../core/devloop';
-import { resolvePlans, resolveActivePlans } from '../shared';
+import { findLatestPlansPath } from '../../core/artifact-versioning';
 import { snapshotPath } from '../../core/artifacts';
+import { devloopInit, writeKloopConfig, writeKloopSpec } from '../../core/devloop';
+import { appendEvent } from '../../core/log';
+import { resolveActivePlans } from '../shared';
+import type { Phase2Context } from './types';
 
 export async function handleSetupRun(ctx: Phase2Context): Promise<string | null> {
   const { session, version, planIndex, firstRun } = ctx;
@@ -17,8 +18,8 @@ export async function handleSetupRun(ctx: Phase2Context): Promise<string | null>
     metadata: { stepType: 'code', firstRun },
   });
 
-  // Resolve active plans from session artifacts (highest rewrite suffix per ordinal)
-  const sessionPlansDir = snapshotPath(session.id, version, 'plans');
+  // Resolve active plans from session artifacts (use latest plans-{N}/ snapshot)
+  const sessionPlansDir = findLatestPlansPath(session.id, version) || snapshotPath(session.id, version, 'plans');
   const plans = resolveActivePlans(sessionPlansDir);
 
   if (plans.length === 0) {

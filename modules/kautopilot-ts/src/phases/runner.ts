@@ -1,5 +1,5 @@
-import type { Config, SessionRow, Phase } from '../core/types';
 import { appendEvent } from '../core/log';
+import type { Config, Phase, SessionRow } from '../core/types';
 import { runPhase1 } from './phase1';
 import { runPhase2 } from './phase2';
 import { runPhase3 } from './phase3';
@@ -10,16 +10,26 @@ const PHASE_TO_MACHINE_NAME: Record<string, string> = {
   polish: 'phase3',
 };
 
+export type PhaseResult = boolean | 'amend_spec' | 'revisit_spec';
+
 export async function runPhase(
   phase: Phase,
   session: SessionRow,
   config: Config,
-  options?: { forceStartState?: string; versionOverride?: number },
-): Promise<boolean | 'amend_spec'> {
+  options?: {
+    forceStartState?: string;
+    versionOverride?: number;
+    suppressPhaseStarted?: boolean;
+  },
+): Promise<PhaseResult> {
   try {
     switch (phase) {
       case 'plan':
-        return await runPhase1(session, config, options);
+        return await runPhase1(session, config, {
+          forceStartState: options?.forceStartState,
+          versionOverride: options?.versionOverride,
+          suppressPhaseStarted: options?.suppressPhaseStarted,
+        });
       case 'implementation':
         return await runPhase2(session, config, options);
       case 'polish':

@@ -1,10 +1,10 @@
-import { mkdirSync, writeFileSync, existsSync, copyFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Phase1Context } from './types';
+import { ensureArtifactDir, sessionArtifactPath } from '../../core/artifacts';
 import { appendEvent } from '../../core/log';
-import { sessionArtifactPath, ensureArtifactDir } from '../../core/artifacts';
 import { runScript } from '../../core/scripts';
-import { logOk, logWarn, logDim } from '../../util/format';
+import { logDim, logOk, logWarn } from '../../util/format';
+import type { Phase1Context } from './types';
 
 /**
  * [code] Fetch ticket content via get-ticket script and write to worktree.

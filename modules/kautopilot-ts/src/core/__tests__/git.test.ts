@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'bun:test';
-import { normalizeGitRoot, extractOrg } from '../git';
+import { describe, expect, it } from 'bun:test';
+import { extractOrg, normalizeGitRoot } from '../git';
 
 describe('normalizeGitRoot', () => {
   it('strips git@ protocol', () => {

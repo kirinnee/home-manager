@@ -1,7 +1,7 @@
-import type { Phase2Context } from './types';
 import { appendEvent } from '../../core/log';
 import { confirmAction } from '../../llm/inquirer';
 import { logErrorBanner } from '../../util/format';
+import type { Phase2Context } from './types';
 
 export async function handleFailed(ctx: Phase2Context): Promise<string | null> {
   const { session, version, planIndex, attempt } = ctx;
@@ -16,7 +16,10 @@ export async function handleFailed(ctx: Phase2Context): Promise<string | null> {
     attempt,
   });
 
-  logErrorBanner('Phase 2 Failed', { Plan: planName, Attempt: String(attempt) });
+  logErrorBanner('Phase 2 Failed', {
+    Plan: planName,
+    Attempt: String(attempt),
+  });
 
   const retry = await confirmAction('Retry from current plan?');
   if (retry) {
@@ -24,6 +27,8 @@ export async function handleFailed(ctx: Phase2Context): Promise<string | null> {
     return 'clear_loop';
   }
 
-  logErrorBanner('Phase 2 Aborted', { Retry: 'kautopilot start --phase impl:clear_loop' });
+  logErrorBanner('Phase 2 Aborted', {
+    Retry: 'kautopilot start --phase impl:clear_loop',
+  });
   return null; // Terminal state
 }

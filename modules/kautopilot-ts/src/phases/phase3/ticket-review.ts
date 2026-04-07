@@ -1,10 +1,10 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import type { Phase3Context } from './types';
-import { appendEvent } from '../../core/log';
+import { readdirSync, readFileSync } from 'node:fs';
 import { snapshotPath } from '../../core/artifacts';
+import { appendEvent } from '../../core/log';
 import { selectOption, textInput } from '../../llm/inquirer';
-import { renderMarkdown } from '../../util/markdown';
 import { logBanner } from '../../util/format';
+import { renderMarkdown } from '../../util/markdown';
+import type { Phase3Context } from './types';
 
 /**
  * [code] User review gate for ticket delivery artifacts.

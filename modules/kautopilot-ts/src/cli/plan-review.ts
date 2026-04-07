@@ -1,10 +1,10 @@
 import { Command } from 'commander';
+import { readConfig } from '../core/config';
 import { getSessionByWorktree } from '../core/db';
 import { getGitRoot, getWorktree } from '../core/git';
-import { readConfig } from '../core/config';
+import { runReviewers } from '../core/review-runner';
 import { ensureStatus } from '../core/status';
 import { buildPromptVars } from '../core/type-config';
-import { runReviewers } from '../core/review-runner';
 import { logError } from '../util/format';
 
 export function createPlanReviewCommand(): Command {
