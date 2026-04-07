@@ -54,6 +54,7 @@ describe('devloop helpers', () => {
         implementerTimeout: 20,
         reviewerTimeout: 10,
         conflictCheckThreshold: 2,
+        compressSpec: false,
         firstLoopFullReview: false,
         previousReviewPropagation: 0,
       });
@@ -63,6 +64,7 @@ describe('devloop helpers', () => {
       expect(content).toContain('implementerTimeout: 20');
       expect(content).toContain('reviewerTimeout: 10');
       expect(content).toContain('conflictCheckThreshold: 2');
+      expect(content).toContain('compressSpec: false');
       expect(content).toContain('firstLoopFullReview: false');
       expect(content).toContain('previousReviewPropagation: 0');
       cleanup();
@@ -77,6 +79,7 @@ describe('devloop helpers', () => {
         implementerTimeout: 30,
         reviewerTimeout: 15,
         conflictCheckThreshold: 2,
+        compressSpec: false,
         firstLoopFullReview: false,
         previousReviewPropagation: 0,
         prompts: {

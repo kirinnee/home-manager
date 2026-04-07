@@ -77,7 +77,8 @@ async function runStart(opts: { phase?: string; local?: boolean }): Promise<void
   // Load config
   const config = readConfig(session.id);
   if (!config) {
-    logError('No config found. Run `kautopilot init` first.');
+    logError(`Session ${session.id} has no config. This can happen if init was interrupted or the config was deleted.`);
+    logInfo('Run `kautopilot init --reset` to re-initialize this worktree.');
     process.exit(1);
   }
 

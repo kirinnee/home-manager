@@ -110,6 +110,46 @@ function buildVarComments(path: string): string {
 }
 
 /**
+ * Kloop prompt variable descriptions.
+ */
+const KLOOP_PROMPT_VARS: Record<string, Record<string, string>> = {
+  implementer: {
+    specPath: 'path to the spec file',
+    iteration: 'current loop number',
+    reviewsDir: "path to previous loop's reviews/ folder (empty for loop 1)",
+    evidenceDir: 'path to evidence/ folder',
+    learningsFile: 'path to learnings.md',
+  },
+  reviewer: {
+    specPath: 'path to the spec file',
+    iteration: 'current loop number',
+    reviewerIndex: 'which reviewer this is',
+    reviewsDir: 'path to reviews/ folder (write review .md here)',
+    verdictsDir: 'path to verdicts/ folder (write verdict .json here)',
+    evidenceDir: 'path to evidence/ folder',
+    learningsFile: 'path to learnings.md',
+    archivedReviews: 'conditional block for previous loop reviews',
+  },
+  checkpointer: {
+    specPath: 'path to the spec file',
+    iteration: 'current loop number',
+    reviewsDir: "path to current loop's reviews/",
+    archivedReviewsPattern: 'glob pattern for all previous loop reviews',
+    conflictFile: 'path to run-level conflict.md',
+    checkpointResultFile: 'path to checkpoint-result.json',
+  },
+  checkpointerFull: {
+    specPath: 'path to the spec file',
+    iteration: 'current loop number',
+    reviewsDir: "path to current loop's reviews/",
+    archivedReviewsPattern: 'glob pattern for all previous loop reviews',
+    conflictFile: 'path to run-level conflict.md',
+    checkpointResultFile: 'path to checkpoint-result.json',
+    specBackupFile: 'path to spec-backup.md (used during compression)',
+  },
+};
+
+/**
  * Serialize config to YAML with variable comments for prompts.
  * This ensures users know what variables are available.
  */
@@ -207,12 +247,33 @@ export function serializeConfigWithComments(config: Config): string {
   for (const phase of config.kloop.reviewPhases) {
     lines.push(`    - [${phase.join(', ')}]`);
   }
+  if (config.kloop.conflictChecker) {
+    lines.push(`  conflictChecker: ${config.kloop.conflictChecker}`);
+  }
   lines.push(`  maxIterations: ${config.kloop.maxIterations}`);
   lines.push(`  implementerTimeout: ${config.kloop.implementerTimeout}`);
   lines.push(`  reviewerTimeout: ${config.kloop.reviewerTimeout}`);
   lines.push(`  conflictCheckThreshold: ${config.kloop.conflictCheckThreshold}`);
+  lines.push(`  compressSpec: ${config.kloop.compressSpec}`);
   lines.push(`  firstLoopFullReview: ${config.kloop.firstLoopFullReview}`);
   lines.push(`  previousReviewPropagation: ${config.kloop.previousReviewPropagation}`);
+  // Kloop prompts section
+  if (config.kloop.prompts) {
+    lines.push('  prompts:');
+    for (const [name, prompt] of Object.entries(config.kloop.prompts)) {
+      if (prompt) {
+        lines.push(`    ${name}:`);
+        const vars = KLOOP_PROMPT_VARS[name];
+        if (vars) {
+          for (const [v, desc] of Object.entries(vars)) {
+            lines.push(`      # {${v}} - ${desc}`);
+          }
+        }
+        lines.push(`      prompt: |`);
+        lines.push(indentLines(prompt, 8));
+      }
+    }
+  }
   lines.push('');
 
   // Settings section
@@ -316,7 +377,15 @@ export function readConfig(id: string): Config | null {
       generic: { ...DEFAULT_CONFIG.agents.generic, ...parsed.agents?.generic },
     },
     templates: { ...DEFAULT_CONFIG.templates, ...parsed.templates },
-    kloop: { ...DEFAULT_CONFIG.kloop, ...migratedKloop },
+    kloop: {
+      ...DEFAULT_CONFIG.kloop,
+      ...migratedKloop,
+      // Deep merge prompts
+      prompts: {
+        ...DEFAULT_CONFIG.kloop.prompts,
+        ...(migratedKloop.prompts as Record<string, string> | undefined),
+      },
+    },
     settings: { ...DEFAULT_CONFIG.settings, ...parsed.settings },
     repo: { ...DEFAULT_CONFIG.repo, ...parsed.repo },
   };
@@ -424,7 +493,15 @@ export function resolveConfig(org?: string, configPathOverride?: string): Config
       generic: { ...DEFAULT_CONFIG.agents.generic, ...parsed.agents?.generic },
     },
     templates: { ...DEFAULT_CONFIG.templates, ...parsed.templates },
-    kloop: { ...DEFAULT_CONFIG.kloop, ...migratedKloop },
+    kloop: {
+      ...DEFAULT_CONFIG.kloop,
+      ...migratedKloop,
+      // Deep merge prompts
+      prompts: {
+        ...DEFAULT_CONFIG.kloop.prompts,
+        ...(migratedKloop.prompts as Record<string, string> | undefined),
+      },
+    },
     settings: { ...DEFAULT_CONFIG.settings, ...parsed.settings },
     repo: { ...DEFAULT_CONFIG.repo, ...parsed.repo },
   };

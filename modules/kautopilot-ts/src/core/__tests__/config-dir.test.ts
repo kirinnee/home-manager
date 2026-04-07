@@ -50,6 +50,7 @@ const TEST_CONFIG: Config = {
     implementerTimeout: 30,
     reviewerTimeout: 15,
     conflictCheckThreshold: 2,
+    compressSpec: false,
     firstLoopFullReview: false,
     previousReviewPropagation: 0,
   },

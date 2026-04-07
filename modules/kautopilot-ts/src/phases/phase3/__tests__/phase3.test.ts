@@ -52,6 +52,7 @@ function makeCtx(overrides?: Partial<Phase3Context>): Phase3Context {
         implementerTimeout: 30,
         reviewerTimeout: 15,
         conflictCheckThreshold: 2,
+        compressSpec: false,
         firstLoopFullReview: false,
         previousReviewPropagation: 0,
       },
