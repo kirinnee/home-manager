@@ -1,10 +1,9 @@
-import type { Config } from '../../core/types';
+import { ensureInitStatus } from '../../core/init-status';
 import type { InitState } from '../../core/init-types';
 import { appendInitEvent } from '../../core/log';
-import { ensureInitStatus } from '../../core/init-status';
-import { INIT_STATES, INIT_TERMINAL_STATES } from './states';
-import type { InitContext } from './states';
 import { logDim, stateIcon } from '../../util/format';
+import type { InitContext } from './states';
+import { INIT_STATES, INIT_TERMINAL_STATES } from './states';
 
 /**
  * Run the init state machine.

@@ -1,26 +1,26 @@
-import type { Phase3Context, Phase3StateMap } from './types';
-import type { SessionRow, Config } from '../../core/types';
+import { loadSessionAgents } from '../../core/agents';
+import { ensureStatus } from '../../core/status';
+import type { Config, SessionRow } from '../../core/types';
 import type { PhaseContext } from '../machine';
 import { runStateMachine } from '../machine';
-import { ensureStatus } from '../../core/status';
-import { loadSessionAgents } from '../../core/agents';
+import { handleAct } from './act';
 import { handleCommitPending } from './commit-pending';
-import { handlePrereview } from './prereview';
-import { handlePush } from './push';
+import { handleCompleted } from './completed';
 import { handleCreatePr } from './create-pr';
-import { handlePoll } from './poll';
 import { handleEnsureBranch } from './ensure-branch';
 import { handleEval } from './eval';
-import { handleAct } from './act';
-import { handleTtyResolve } from './tty-resolve';
-import { handleWriteFix } from './write-fix';
-import { handleRunFix } from './run-fix';
-import { handleFeedbackCheck, handleFeedback } from './feedback-check';
-import { handleTicketDraft } from './ticket-draft';
-import { handleTicketReview } from './ticket-review';
-import { handleTicketPublish } from './ticket-publish';
-import { handleCompleted } from './completed';
 import { handleFailed } from './failed';
+import { handleFeedback, handleFeedbackCheck } from './feedback-check';
+import { handlePoll } from './poll';
+import { handlePrereview } from './prereview';
+import { handlePush } from './push';
+import { handleRunFix } from './run-fix';
+import { handleTicketDraft } from './ticket-draft';
+import { handleTicketPublish } from './ticket-publish';
+import { handleTicketReview } from './ticket-review';
+import { handleTtyResolve } from './tty-resolve';
+import type { Phase3Context, Phase3StateMap } from './types';
+import { handleWriteFix } from './write-fix';
 
 // State map for Phase 3 — PR delivery path
 const prStates: Phase3StateMap = {
@@ -72,7 +72,7 @@ export async function runPhase3(
   session: SessionRow,
   config: Config,
   options?: { forceStartState?: string },
-): Promise<boolean | 'amend_spec'> {
+): Promise<boolean | 'amend_spec' | 'revisit_spec'> {
   // Initialize agent resolution from session config
   loadSessionAgents(session.id);
 

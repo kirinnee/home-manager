@@ -74,13 +74,15 @@ export interface CheckpointerPromptVars {
 }
 
 export function buildCheckpointerPrompt(
-  template: string | undefined,
+  conflictOnlyTemplate: string | undefined,
+  fullTemplate: string | undefined,
   vars: CheckpointerPromptVars,
   compressSpec?: boolean,
 ): string {
-  // If user provided a custom prompt, always use it
+  // Pick the right custom template based on compressSpec flag
+  const template = compressSpec ? fullTemplate : conflictOnlyTemplate;
   if (template) return substitute(template, vars);
-  // Otherwise select based on compressSpec flag
+  // Fall back to built-in defaults based on compressSpec flag
   const defaultTemplate = compressSpec ? DEFAULT_CHECKPOINTER_PROMPT : CONFLICT_ONLY_CHECKPOINTER_PROMPT;
   return substitute(defaultTemplate, vars);
 }

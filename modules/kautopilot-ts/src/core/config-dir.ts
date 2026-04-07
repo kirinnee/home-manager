@@ -1,9 +1,9 @@
-import { spawn } from 'bun';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { spinner } from '@clack/prompts';
-import type { Config } from './types';
+import { spawn } from 'bun';
 import { debugLog } from '../llm/spawn';
+import type { Config } from './types';
 
 // In-memory cache: binary path → config dir
 const cache = new Map<string, string>();

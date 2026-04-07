@@ -1,5 +1,5 @@
-import type { Phase2Context } from './types';
 import { appendEvent } from '../../core/log';
+import type { Phase2Context } from './types';
 
 export async function handleNextPlan(ctx: Phase2Context): Promise<string | null> {
   const { session, version, planIndex, maxPlans } = ctx;

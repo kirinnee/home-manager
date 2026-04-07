@@ -8,8 +8,8 @@
  * 4. Produces valid setup-brief.json artifact
  * 5. Derives defaults from research constraints, detection, and user context
  */
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -37,7 +37,10 @@ describe('E2E: normalize preserves research hierarchy', () => {
     mkdirSync(initPath, { recursive: true });
 
     // Write identify.json
-    const identifyData = { systemName: 'GitHub Issues', timestamp: new Date().toISOString() };
+    const identifyData = {
+      systemName: 'GitHub Issues',
+      timestamp: new Date().toISOString(),
+    };
     writeFileSync(join(initPath, 'identify.json'), JSON.stringify(identifyData));
 
     // Write research.json WITH structured hierarchy
@@ -75,7 +78,14 @@ describe('E2E: normalize preserves research hierarchy', () => {
 
     const ctx = {
       initId,
-      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null, prComment: null } },
+      config: {
+        repo: {
+          org: 'test',
+          baseBranch: 'main',
+          ticketSystem: null,
+          prComment: null,
+        },
+      },
       workDir: tempDir,
       gitRootPath: tempDir,
       worktree: tempDir,
@@ -121,14 +131,15 @@ describe('E2E: normalize preserves research hierarchy', () => {
 
   it('normalize uses unknown when research.json has no hierarchy', async () => {
     const { normalize } = require('../init/states') as typeof import('../init/states');
-    const { readInitLog } = require('../../core/log') as typeof import('../../core/log');
-
     const initId = 'normalize-test-unknown-hierarchy';
     const initPath = join(tempDir, '.kautopilot', 'init', initId);
     mkdirSync(initPath, { recursive: true });
 
     // Write identify.json
-    const identifyData = { systemName: 'Generic Ticket System', timestamp: new Date().toISOString() };
+    const identifyData = {
+      systemName: 'Generic Ticket System',
+      timestamp: new Date().toISOString(),
+    };
     writeFileSync(join(initPath, 'identify.json'), JSON.stringify(identifyData));
 
     // Write research.json with hierarchy set to 'unknown'
@@ -166,7 +177,14 @@ describe('E2E: normalize preserves research hierarchy', () => {
 
     const ctx = {
       initId,
-      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null, prComment: null } },
+      config: {
+        repo: {
+          org: 'test',
+          baseBranch: 'main',
+          ticketSystem: null,
+          prComment: null,
+        },
+      },
       workDir: tempDir,
       gitRootPath: tempDir,
       worktree: tempDir,
@@ -241,7 +259,14 @@ describe('E2E: normalize preserves research hierarchy', () => {
 
     const ctx = {
       initId,
-      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null, prComment: null } },
+      config: {
+        repo: {
+          org: 'test',
+          baseBranch: 'main',
+          ticketSystem: null,
+          prComment: null,
+        },
+      },
       workDir: tempDir,
       gitRootPath: tempDir,
       worktree: tempDir,
@@ -323,7 +348,14 @@ describe('E2E: normalize preserves research hierarchy', () => {
 
     const ctx = {
       initId,
-      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null, prComment: null } },
+      config: {
+        repo: {
+          org: 'test',
+          baseBranch: 'main',
+          ticketSystem: null,
+          prComment: null,
+        },
+      },
       workDir: tempDir,
       gitRootPath: tempDir,
       worktree: tempDir,
@@ -398,7 +430,14 @@ describe('E2E: normalize preserves research hierarchy', () => {
 
     const ctx = {
       initId,
-      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null, prComment: null } },
+      config: {
+        repo: {
+          org: 'test',
+          baseBranch: 'main',
+          ticketSystem: null,
+          prComment: null,
+        },
+      },
       workDir: tempDir,
       gitRootPath: tempDir,
       worktree: tempDir,
@@ -426,7 +465,10 @@ describe('E2E: normalize preserves research hierarchy', () => {
     mkdirSync(initPath, { recursive: true });
 
     // Write identify.json
-    const identifyData = { systemName: 'Jira', timestamp: new Date().toISOString() };
+    const identifyData = {
+      systemName: 'Jira',
+      timestamp: new Date().toISOString(),
+    };
     writeFileSync(join(initPath, 'identify.json'), JSON.stringify(identifyData));
 
     // Write research.json WITHOUT hierarchy field (simulates pre-fix legacy artifact)
@@ -464,7 +506,14 @@ describe('E2E: normalize preserves research hierarchy', () => {
 
     const ctx = {
       initId,
-      config: { repo: { org: 'test', baseBranch: 'main', ticketSystem: null, prComment: null } },
+      config: {
+        repo: {
+          org: 'test',
+          baseBranch: 'main',
+          ticketSystem: null,
+          prComment: null,
+        },
+      },
       workDir: tempDir,
       gitRootPath: tempDir,
       worktree: tempDir,

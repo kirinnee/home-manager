@@ -7,12 +7,12 @@
  * These are integration tests that validate real runtime paths,
  * not mocks or type-level assertions.
  */
-import { describe, it, expect, afterEach, beforeAll, afterAll } from 'bun:test';
-import { ensureStatus, detectAndRecoverCrash } from '../../core/status';
-import { appendEvent, logPath, readLog } from '../../core/log';
-import { mkdirSync, rmSync, existsSync, writeFileSync, mkdtempSync } from 'node:fs';
-import { join } from 'node:path';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { appendEvent, readLog } from '../../core/log';
+import { detectAndRecoverCrash, ensureStatus } from '../../core/status';
 
 let origHome: string;
 let tempHome: string;
@@ -25,18 +25,19 @@ afterAll(() => {
   process.env.HOME = origHome;
   rmSync(tempHome, { recursive: true, force: true });
 });
+
+import { snapshotPath } from '../../core/artifacts';
 import {
-  writeContractManifest,
   readContractManifest,
-  supersedEpoch,
-  writePlanManifest,
-  readPlanManifest,
-  updatePlanManifestEntry,
-  writeDeliveryManifest,
   readDeliveryManifest,
+  readPlanManifest,
+  supersedEpoch,
   updateDeliveryManifest,
+  updatePlanManifestEntry,
+  writeContractManifest,
+  writeDeliveryManifest,
+  writePlanManifest,
 } from '../../core/manifests';
-import { snapshotPath, sessionDir } from '../../core/artifacts';
 import { computeRolloverRecommendation } from '../phase3/poll';
 
 function cleanSession(sessionId: string) {
@@ -64,15 +65,36 @@ describe('E2E Scenario 1: Normal PR-only flow', () => {
   it('completes Phase 1 → Phase 2 → Phase 3 with PR delivery', () => {
     // Phase 1: Plan
     writeContractManifest(S, 1, 'pr', 2);
-    appendEvent(S, { ts: '2026-04-01T10:00:00Z', event: 'phase1:started', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:05:00Z', event: 'phase1:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:00:00Z',
+      event: 'phase1:started',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:05:00Z',
+      event: 'phase1:completed',
+      version: 1,
+    });
     setupPlans(S, 1, 2);
 
     // Phase 2: Implementation
-    appendEvent(S, { ts: '2026-04-01T10:06:00Z', event: 'phase2:started', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:06:00Z',
+      event: 'phase2:started',
+      version: 1,
+    });
     // Plan 1
-    appendEvent(S, { ts: '2026-04-01T10:06:01Z', event: 'clear_loop:started', version: 1, metadata: { planIndex: 0 } });
-    appendEvent(S, { ts: '2026-04-01T10:06:02Z', event: 'clear_loop:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:06:01Z',
+      event: 'clear_loop:started',
+      version: 1,
+      metadata: { planIndex: 0 },
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:06:02Z',
+      event: 'clear_loop:completed',
+      version: 1,
+    });
     appendEvent(S, {
       ts: '2026-04-01T10:07:00Z',
       event: 'running:started',
@@ -85,12 +107,29 @@ describe('E2E Scenario 1: Normal PR-only flow', () => {
       version: 1,
       metadata: { status: 'completed' },
     });
-    appendEvent(S, { ts: '2026-04-01T10:20:01Z', event: 'commit:started', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:20:02Z', event: 'commit:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:20:01Z',
+      event: 'commit:started',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:20:02Z',
+      event: 'commit:completed',
+      version: 1,
+    });
     updatePlanManifestEntry(S, 1, 1, true, 'sha-plan1');
     // Plan 2
-    appendEvent(S, { ts: '2026-04-01T10:21:00Z', event: 'clear_loop:started', version: 1, metadata: { planIndex: 1 } });
-    appendEvent(S, { ts: '2026-04-01T10:21:01Z', event: 'clear_loop:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:21:00Z',
+      event: 'clear_loop:started',
+      version: 1,
+      metadata: { planIndex: 1 },
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:21:01Z',
+      event: 'clear_loop:completed',
+      version: 1,
+    });
     appendEvent(S, {
       ts: '2026-04-01T10:22:00Z',
       event: 'running:started',
@@ -103,24 +142,64 @@ describe('E2E Scenario 1: Normal PR-only flow', () => {
       version: 1,
       metadata: { status: 'completed' },
     });
-    appendEvent(S, { ts: '2026-04-01T10:35:01Z', event: 'commit:started', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:35:02Z', event: 'commit:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:35:01Z',
+      event: 'commit:started',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:35:02Z',
+      event: 'commit:completed',
+      version: 1,
+    });
     updatePlanManifestEntry(S, 1, 2, true, 'sha-plan2');
-    appendEvent(S, { ts: '2026-04-01T10:35:03Z', event: 'phase2:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:35:03Z',
+      event: 'phase2:completed',
+      version: 1,
+    });
 
     // Phase 3: Polish (PR delivery)
-    appendEvent(S, { ts: '2026-04-01T10:36:00Z', event: 'phase3:started', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:36:01Z', event: 'push:started', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:36:02Z', event: 'push:completed', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:37:00Z', event: 'create_pr:started', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:36:00Z',
+      event: 'phase3:started',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:36:01Z',
+      event: 'push:started',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:36:02Z',
+      event: 'push:completed',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:37:00Z',
+      event: 'create_pr:started',
+      version: 1,
+    });
     appendEvent(S, {
       ts: '2026-04-01T10:37:01Z',
       event: 'context:updated',
       metadata: { prNumber: 42, prUrl: 'https://github.com/org/repo/pull/42' },
     });
-    appendEvent(S, { ts: '2026-04-01T10:37:02Z', event: 'create_pr:completed', version: 1 });
-    writeDeliveryManifest(S, 1, { kind: 'pr', prNumber: 42, prUrl: 'https://github.com/org/repo/pull/42' });
-    appendEvent(S, { ts: '2026-04-01T11:00:00Z', event: 'phase3:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:37:02Z',
+      event: 'create_pr:completed',
+      version: 1,
+    });
+    writeDeliveryManifest(S, 1, {
+      kind: 'pr',
+      prNumber: 42,
+      prUrl: 'https://github.com/org/repo/pull/42',
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T11:00:00Z',
+      event: 'phase3:completed',
+      version: 1,
+    });
 
     // Validate final state
     const status = ensureStatus(S);
@@ -152,9 +231,21 @@ describe('E2E Scenario 2: PR flow with contract rewrite and same-PR reuse', () =
     setupPlans(S, 1, 2);
 
     // Phase 1 + Phase 2 start
-    appendEvent(S, { ts: '2026-04-01T10:00:00Z', event: 'phase1:started', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:01:00Z', event: 'phase1:completed', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:02:00Z', event: 'phase2:started', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:00:00Z',
+      event: 'phase1:started',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:01:00Z',
+      event: 'phase1:completed',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:02:00Z',
+      event: 'phase2:started',
+      version: 1,
+    });
 
     // Plan 1 hits max_situations → resolve → refine_local
     appendEvent(S, {
@@ -169,16 +260,32 @@ describe('E2E Scenario 2: PR flow with contract rewrite and same-PR reuse', () =
       version: 1,
       metadata: { status: 'max_situations' },
     });
-    appendEvent(S, { ts: '2026-04-01T10:10:01Z', event: 'resolve:started', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:10:01Z',
+      event: 'resolve:started',
+      version: 1,
+    });
     appendEvent(S, {
       ts: '2026-04-01T10:11:00Z',
       event: 'context:updated',
       version: 1,
       metadata: { rewriteDecision: 'refine_local' },
     });
-    appendEvent(S, { ts: '2026-04-01T10:11:01Z', event: 'resolve:completed', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:11:02Z', event: 'rewrite_spec:started', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:12:00Z', event: 'rewrite_spec:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:11:01Z',
+      event: 'resolve:completed',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:11:02Z',
+      event: 'rewrite_spec:started',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:12:00Z',
+      event: 'rewrite_spec:completed',
+      version: 1,
+    });
 
     // Retry plan 1 successfully
     appendEvent(S, {
@@ -193,20 +300,40 @@ describe('E2E Scenario 2: PR flow with contract rewrite and same-PR reuse', () =
       version: 1,
       metadata: { status: 'completed' },
     });
-    appendEvent(S, { ts: '2026-04-01T10:20:01Z', event: 'commit:started', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:20:02Z', event: 'commit:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:20:01Z',
+      event: 'commit:started',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:20:02Z',
+      event: 'commit:completed',
+      version: 1,
+    });
     updatePlanManifestEntry(S, 1, 1, true, 'sha-plan1-v2');
-    appendEvent(S, { ts: '2026-04-01T10:25:00Z', event: 'phase2:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:25:00Z',
+      event: 'phase2:completed',
+      version: 1,
+    });
 
     // Phase 3 — creates PR
-    appendEvent(S, { ts: '2026-04-01T10:26:00Z', event: 'phase3:started', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:26:00Z',
+      event: 'phase3:started',
+      version: 1,
+    });
     appendEvent(S, {
       ts: '2026-04-01T10:27:00Z',
       event: 'context:updated',
       metadata: { prNumber: 77, prUrl: 'https://github.com/org/repo/pull/77' },
     });
     writeDeliveryManifest(S, 1, { kind: 'pr', prNumber: 77 });
-    appendEvent(S, { ts: '2026-04-01T10:30:00Z', event: 'phase3:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:30:00Z',
+      event: 'phase3:completed',
+      version: 1,
+    });
 
     // Validate: same version, same PR
     const status = ensureStatus(S);
@@ -235,10 +362,22 @@ describe('E2E Scenario 3: PR flow with heuristic rollover to fresh PR', () => {
     writeContractManifest(S, 1, 'pr', 1);
     setupPlans(S, 1, 1);
 
-    appendEvent(S, { ts: '2026-04-01T10:00:00Z', event: 'phase3:started', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:00:00Z',
+      event: 'phase3:started',
+      version: 1,
+    });
     // Initial PR
-    writeDeliveryManifest(S, 1, { kind: 'pr', prNumber: 10, prUrl: 'https://github.com/org/repo/pull/10' });
-    appendEvent(S, { ts: '2026-04-01T10:01:00Z', event: 'context:updated', metadata: { prNumber: 10 } });
+    writeDeliveryManifest(S, 1, {
+      kind: 'pr',
+      prNumber: 10,
+      prUrl: 'https://github.com/org/repo/pull/10',
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:01:00Z',
+      event: 'context:updated',
+      metadata: { prNumber: 10 },
+    });
 
     // Poll detects rollover signals
     const signals = {
@@ -279,25 +418,31 @@ describe('E2E Scenario 3: PR flow with heuristic rollover to fresh PR', () => {
     // Create new PR #25
     const newPr = 25;
     const delivery = readDeliveryManifest(S, 1)!;
-    delivery.prRolloverHistory![0].toPr = newPr;
+    const prRolloverHistory = delivery.prRolloverHistory
+      ? [{ ...delivery.prRolloverHistory[0], toPr: newPr }]
+      : undefined;
     updateDeliveryManifest(S, 1, {
       prNumber: newPr,
       prUrl: `https://github.com/org/repo/pull/${newPr}`,
-      prRolloverHistory: delivery.prRolloverHistory,
+      prRolloverHistory,
     });
     appendEvent(S, {
       ts: '2026-04-01T10:06:00Z',
       event: 'context:updated',
       metadata: { rolloverFromPr: undefined, prNumber: newPr },
     });
-    appendEvent(S, { ts: '2026-04-01T10:10:00Z', event: 'phase3:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:10:00Z',
+      event: 'phase3:completed',
+      version: 1,
+    });
 
     // Validate
     const finalDelivery = readDeliveryManifest(S, 1)!;
     expect(finalDelivery.prNumber).toBe(25);
     expect(finalDelivery.prRolloverHistory).toHaveLength(1);
-    expect(finalDelivery.prRolloverHistory![0].fromPr).toBe(10);
-    expect(finalDelivery.prRolloverHistory![0].toPr).toBe(25);
+    expect(finalDelivery.prRolloverHistory?.[0].fromPr).toBe(10);
+    expect(finalDelivery.prRolloverHistory?.[0].toPr).toBe(25);
 
     const status = ensureStatus(S);
     expect(status.context.prNumber).toBe(25);
@@ -317,32 +462,80 @@ describe('E2E Scenario 4: Ticket flow with feedback → new epoch', () => {
     writeContractManifest(S, 1, 'ticket', 1);
     setupPlans(S, 1, 1);
 
-    appendEvent(S, { ts: '2026-04-01T10:00:00Z', event: 'phase1:started', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:01:00Z', event: 'phase1:completed', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:02:00Z', event: 'phase2:started', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:10:00Z', event: 'commit:started', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:10:01Z', event: 'commit:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:00:00Z',
+      event: 'phase1:started',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:01:00Z',
+      event: 'phase1:completed',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:02:00Z',
+      event: 'phase2:started',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:10:00Z',
+      event: 'commit:started',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:10:01Z',
+      event: 'commit:completed',
+      version: 1,
+    });
     updatePlanManifestEntry(S, 1, 1, true, 'sha-v1');
-    appendEvent(S, { ts: '2026-04-01T10:10:02Z', event: 'phase2:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:10:02Z',
+      event: 'phase2:completed',
+      version: 1,
+    });
 
     // Phase 3: ticket_draft produces artifacts
-    appendEvent(S, { ts: '2026-04-01T10:11:00Z', event: 'phase3:started', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:12:00Z', event: 'ticket_draft:started', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:11:00Z',
+      event: 'phase3:started',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:12:00Z',
+      event: 'ticket_draft:started',
+      version: 1,
+    });
     const artifactDir = snapshotPath(S, 1, 'ticket-artifacts');
     mkdirSync(artifactDir, { recursive: true });
     writeFileSync(join(artifactDir, 'report-1.md'), '# Report\nFindings here.');
-    appendEvent(S, { ts: '2026-04-01T10:13:00Z', event: 'ticket_draft:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:13:00Z',
+      event: 'ticket_draft:completed',
+      version: 1,
+    });
 
     // ticket_review: user gives feedback → ticketFeedback signal
-    appendEvent(S, { ts: '2026-04-01T10:14:00Z', event: 'ticket_review:started', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:14:00Z',
+      event: 'ticket_review:started',
+      version: 1,
+    });
     appendEvent(S, {
       ts: '2026-04-01T10:15:00Z',
       event: 'context:updated',
       version: 1,
       metadata: { ticketFeedback: true },
     });
-    appendEvent(S, { ts: '2026-04-01T10:15:01Z', event: 'ticket_review:completed', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:15:02Z', event: 'phase3:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:15:01Z',
+      event: 'ticket_review:completed',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:15:02Z',
+      event: 'phase3:completed',
+      version: 1,
+    });
 
     // Status shows ticketFeedback
     let status = ensureStatus(S);
@@ -353,9 +546,21 @@ describe('E2E Scenario 4: Ticket flow with feedback → new epoch', () => {
     writeContractManifest(S, 2, 'ticket', 1);
     setupPlans(S, 2, 1);
 
-    appendEvent(S, { ts: '2026-04-01T10:16:00Z', event: 'phase1:started', version: 2 });
-    appendEvent(S, { ts: '2026-04-01T10:17:00Z', event: 'phase1:completed', version: 2 });
-    appendEvent(S, { ts: '2026-04-01T10:18:00Z', event: 'phase2:started', version: 2 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:16:00Z',
+      event: 'phase1:started',
+      version: 2,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:17:00Z',
+      event: 'phase1:completed',
+      version: 2,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:18:00Z',
+      event: 'phase2:started',
+      version: 2,
+    });
 
     status = ensureStatus(S);
     expect(status.version).toBe(2);
@@ -379,22 +584,62 @@ describe('E2E Scenario 5: Ticket flow with approval and publish', () => {
     setupPlans(S, 1, 1);
 
     // Phases 1-2
-    appendEvent(S, { ts: '2026-04-01T10:00:00Z', event: 'phase1:started', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:01:00Z', event: 'phase1:completed', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:02:00Z', event: 'phase2:started', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:05:00Z', event: 'phase2:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:00:00Z',
+      event: 'phase1:started',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:01:00Z',
+      event: 'phase1:completed',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:02:00Z',
+      event: 'phase2:started',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:05:00Z',
+      event: 'phase2:completed',
+      version: 1,
+    });
 
     // Phase 3: ticket_draft → ticket_review (approval) → ticket_publish
-    appendEvent(S, { ts: '2026-04-01T10:06:00Z', event: 'phase3:started', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:07:00Z', event: 'ticket_draft:started', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:06:00Z',
+      event: 'phase3:started',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:07:00Z',
+      event: 'ticket_draft:started',
+      version: 1,
+    });
     const artifactDir = snapshotPath(S, 1, 'ticket-artifacts');
     mkdirSync(artifactDir, { recursive: true });
     writeFileSync(join(artifactDir, 'report-1.md'), '# Report');
-    appendEvent(S, { ts: '2026-04-01T10:08:00Z', event: 'ticket_draft:completed', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:09:00Z', event: 'ticket_review:started', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:08:00Z',
+      event: 'ticket_draft:completed',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:09:00Z',
+      event: 'ticket_review:started',
+      version: 1,
+    });
     // User approves (no ticketFeedback event)
-    appendEvent(S, { ts: '2026-04-01T10:10:00Z', event: 'ticket_review:completed', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:11:00Z', event: 'ticket_publish:started', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:10:00Z',
+      event: 'ticket_review:completed',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:11:00Z',
+      event: 'ticket_publish:started',
+      version: 1,
+    });
 
     // Publish succeeds, delivery manifest updated
     const publishedAt = '2026-04-01T10:12:00Z';
@@ -403,8 +648,16 @@ describe('E2E Scenario 5: Ticket flow with approval and publish', () => {
       ticketArtifacts: ['report-1.md', 'report-1.pdf'],
       publishedAt,
     });
-    appendEvent(S, { ts: publishedAt, event: 'ticket_publish:completed', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:12:01Z', event: 'phase3:completed', version: 1 });
+    appendEvent(S, {
+      ts: publishedAt,
+      event: 'ticket_publish:completed',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:12:01Z',
+      event: 'phase3:completed',
+      version: 1,
+    });
 
     const delivery = readDeliveryManifest(S, 1)!;
     expect(delivery.kind).toBe('ticket');
@@ -429,18 +682,48 @@ describe('E2E Scenario 6: Conflict-triggered rewrite flow', () => {
     writeContractManifest(S, 1, 'pr', 3);
     setupPlans(S, 1, 3);
 
-    appendEvent(S, { ts: '2026-04-01T10:00:00Z', event: 'phase2:started', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:00:00Z',
+      event: 'phase2:started',
+      version: 1,
+    });
 
     // Plan 1 completes
-    appendEvent(S, { ts: '2026-04-01T10:01:00Z', event: 'clear_loop:started', version: 1, metadata: { planIndex: 0 } });
-    appendEvent(S, { ts: '2026-04-01T10:01:01Z', event: 'clear_loop:completed', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:05:00Z', event: 'commit:started', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:05:01Z', event: 'commit:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:01:00Z',
+      event: 'clear_loop:started',
+      version: 1,
+      metadata: { planIndex: 0 },
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:01:01Z',
+      event: 'clear_loop:completed',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:05:00Z',
+      event: 'commit:started',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:05:01Z',
+      event: 'commit:completed',
+      version: 1,
+    });
     updatePlanManifestEntry(S, 1, 1, true, 'sha-p1');
 
     // Plan 2 hits conflict
-    appendEvent(S, { ts: '2026-04-01T10:06:00Z', event: 'clear_loop:started', version: 1, metadata: { planIndex: 1 } });
-    appendEvent(S, { ts: '2026-04-01T10:06:01Z', event: 'clear_loop:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:06:00Z',
+      event: 'clear_loop:started',
+      version: 1,
+      metadata: { planIndex: 1 },
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:06:01Z',
+      event: 'clear_loop:completed',
+      version: 1,
+    });
     appendEvent(S, {
       ts: '2026-04-01T10:07:00Z',
       event: 'running:started',
@@ -453,18 +736,34 @@ describe('E2E Scenario 6: Conflict-triggered rewrite flow', () => {
       version: 1,
       metadata: { status: 'conflict' },
     });
-    appendEvent(S, { ts: '2026-04-01T10:15:01Z', event: 'resolve:started', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:15:01Z',
+      event: 'resolve:started',
+      version: 1,
+    });
     appendEvent(S, {
       ts: '2026-04-01T10:16:00Z',
       event: 'context:updated',
       version: 1,
       metadata: { rewriteDecision: 'patch_downstream' },
     });
-    appendEvent(S, { ts: '2026-04-01T10:16:01Z', event: 'resolve:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:16:01Z',
+      event: 'resolve:completed',
+      version: 1,
+    });
 
     // patch_downstream rewrites plans 2 and 3 — stays in same epoch
-    appendEvent(S, { ts: '2026-04-01T10:16:02Z', event: 'rewrite_spec:started', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:17:00Z', event: 'rewrite_spec:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:16:02Z',
+      event: 'rewrite_spec:started',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:17:00Z',
+      event: 'rewrite_spec:completed',
+      version: 1,
+    });
 
     const status = ensureStatus(S);
     expect(status.version).toBe(1);
@@ -492,9 +791,22 @@ describe('E2E Scenario 7: Max-situations-triggered rewrite → revisit_spec', ()
     writeContractManifest(S, 1, 'pr', 1);
     setupPlans(S, 1, 1);
 
-    appendEvent(S, { ts: '2026-04-01T10:00:00Z', event: 'phase2:started', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:01:00Z', event: 'clear_loop:started', version: 1, metadata: { planIndex: 0 } });
-    appendEvent(S, { ts: '2026-04-01T10:01:01Z', event: 'clear_loop:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:00:00Z',
+      event: 'phase2:started',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:01:00Z',
+      event: 'clear_loop:started',
+      version: 1,
+      metadata: { planIndex: 0 },
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:01:01Z',
+      event: 'clear_loop:completed',
+      version: 1,
+    });
     appendEvent(S, {
       ts: '2026-04-01T10:02:00Z',
       event: 'running:started',
@@ -507,14 +819,22 @@ describe('E2E Scenario 7: Max-situations-triggered rewrite → revisit_spec', ()
       version: 1,
       metadata: { status: 'max_situations' },
     });
-    appendEvent(S, { ts: '2026-04-01T10:10:01Z', event: 'resolve:started', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:10:01Z',
+      event: 'resolve:started',
+      version: 1,
+    });
     appendEvent(S, {
       ts: '2026-04-01T10:11:00Z',
       event: 'context:updated',
       version: 1,
       metadata: { rewriteDecision: 'revisit_spec' },
     });
-    appendEvent(S, { ts: '2026-04-01T10:11:01Z', event: 'resolve:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:11:01Z',
+      event: 'resolve:completed',
+      version: 1,
+    });
 
     let status = ensureStatus(S);
     expect(status.context.rewriteDecision).toBe('revisit_spec');
@@ -525,9 +845,21 @@ describe('E2E Scenario 7: Max-situations-triggered rewrite → revisit_spec', ()
     setupPlans(S, 2, 2);
 
     // v2 Phase 1 → Phase 2
-    appendEvent(S, { ts: '2026-04-01T10:12:00Z', event: 'phase1:started', version: 2 });
-    appendEvent(S, { ts: '2026-04-01T10:13:00Z', event: 'phase1:completed', version: 2 });
-    appendEvent(S, { ts: '2026-04-01T10:14:00Z', event: 'phase2:started', version: 2 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:12:00Z',
+      event: 'phase1:started',
+      version: 2,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:13:00Z',
+      event: 'phase1:completed',
+      version: 2,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:14:00Z',
+      event: 'phase2:started',
+      version: 2,
+    });
 
     status = ensureStatus(S);
     expect(status.version).toBe(2);
@@ -560,16 +892,46 @@ describe('E2E Scenario 8: Crash and resume flow', () => {
       event: 'start:started',
       metadata: { pid: 99999998, phase: 'implementation' },
     });
-    appendEvent(S, { ts: '2026-04-01T10:00:01Z', event: 'phase2:started', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:01:00Z', event: 'clear_loop:started', version: 1, metadata: { planIndex: 0 } });
-    appendEvent(S, { ts: '2026-04-01T10:01:01Z', event: 'clear_loop:completed', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:05:00Z', event: 'commit:started', version: 1 });
-    appendEvent(S, { ts: '2026-04-01T10:05:01Z', event: 'commit:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:00:01Z',
+      event: 'phase2:started',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:01:00Z',
+      event: 'clear_loop:started',
+      version: 1,
+      metadata: { planIndex: 0 },
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:01:01Z',
+      event: 'clear_loop:completed',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:05:00Z',
+      event: 'commit:started',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:05:01Z',
+      event: 'commit:completed',
+      version: 1,
+    });
     updatePlanManifestEntry(S, 1, 1, true, 'sha-p1');
 
     // Plan 2 starts running then "crashes" (no completed event)
-    appendEvent(S, { ts: '2026-04-01T10:06:00Z', event: 'clear_loop:started', version: 1, metadata: { planIndex: 1 } });
-    appendEvent(S, { ts: '2026-04-01T10:06:01Z', event: 'clear_loop:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:06:00Z',
+      event: 'clear_loop:started',
+      version: 1,
+      metadata: { planIndex: 1 },
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:06:01Z',
+      event: 'clear_loop:completed',
+      version: 1,
+    });
     appendEvent(S, {
       ts: '2026-04-01T10:07:00Z',
       event: 'running:started',
@@ -625,7 +987,11 @@ describe('E2E Scenario 9: Crash during re-executed checkpoint state', () => {
       event: 'start:started',
       metadata: { pid: 99999998, phase: 'polish' },
     });
-    appendEvent(S, { ts: '2026-04-01T10:00:01Z', event: 'phase3:started', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:00:01Z',
+      event: 'phase3:started',
+      version: 1,
+    });
 
     // commit_pending completes (checkpoint)
     appendEvent(S, {
@@ -634,7 +1000,11 @@ describe('E2E Scenario 9: Crash during re-executed checkpoint state', () => {
       version: 1,
       metadata: { stepType: 'code' },
     });
-    appendEvent(S, { ts: '2026-04-01T10:01:01Z', event: 'commit_pending:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:01:01Z',
+      event: 'commit_pending:completed',
+      version: 1,
+    });
 
     // prereview completes (not a checkpoint)
     appendEvent(S, {
@@ -643,11 +1013,24 @@ describe('E2E Scenario 9: Crash during re-executed checkpoint state', () => {
       version: 1,
       metadata: { stepType: 'code' },
     });
-    appendEvent(S, { ts: '2026-04-01T10:01:31Z', event: 'prereview:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:01:31Z',
+      event: 'prereview:completed',
+      version: 1,
+    });
 
     // push completes (checkpoint = push)
-    appendEvent(S, { ts: '2026-04-01T10:02:00Z', event: 'push:started', version: 1, metadata: { stepType: 'code' } });
-    appendEvent(S, { ts: '2026-04-01T10:02:01Z', event: 'push:completed', version: 1 });
+    appendEvent(S, {
+      ts: '2026-04-01T10:02:00Z',
+      event: 'push:started',
+      version: 1,
+      metadata: { stepType: 'code' },
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:02:01Z',
+      event: 'push:completed',
+      version: 1,
+    });
 
     // create_pr starts then crashes (no :completed)
     appendEvent(S, {

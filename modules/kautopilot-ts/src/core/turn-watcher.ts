@@ -1,7 +1,7 @@
-import { watch, existsSync, readFileSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, watch } from 'node:fs';
 import { dirname } from 'node:path';
-import { updateUserTurn } from './status';
 import { debugLog } from '../llm/spawn';
+import { updateUserTurn } from './status';
 
 interface TurnState {
   userTurn: boolean;

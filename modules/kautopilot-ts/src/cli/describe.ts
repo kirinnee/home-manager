@@ -1,12 +1,12 @@
 import { Command } from 'commander';
-import { getSessionByWorktree, getSessionById } from '../core/db';
-import { getActiveInitForWorktree, getInitAttemptById, getInitAttemptByPromotedSessionId } from '../core/init-db';
-import { readLog, readInitLog } from '../core/log';
-import { ensureStatus } from '../core/status';
-import { ensureInitStatus } from '../core/init-status';
+import { getSessionById, getSessionByWorktree } from '../core/db';
 import { getGitRoot, getWorktree } from '../core/git';
-import { formatDuration, logField, logHeading, logError, logDim } from '../util/format';
-import { readContractManifest, readPlanManifest, readDeliveryManifest } from '../core/manifests';
+import { getActiveInitForWorktree, getInitAttemptById, getInitAttemptByPromotedSessionId } from '../core/init-db';
+import { ensureInitStatus } from '../core/init-status';
+import { readInitLog, readLog } from '../core/log';
+import { readContractManifest, readDeliveryManifest, readPlanManifest } from '../core/manifests';
+import { ensureStatus } from '../core/status';
+import { formatDuration, logDim, logError, logField, logHeading } from '../util/format';
 
 export function createDescribeCommand(): Command {
   return new Command('describe')
@@ -95,7 +95,11 @@ async function describeSession(sessionId: string, opts: { json?: boolean }): Pro
     });
 
     const activeEpoch = status.version;
-    const supersededEpochs: Array<{ version: number; supersededBy: number; supersededAt: string }> = [];
+    const supersededEpochs: Array<{
+      version: number;
+      supersededBy: number;
+      supersededAt: string;
+    }> = [];
     const versionedVersions = [...new Set(log.filter(e => e.version !== undefined).map(e => e.version as number))];
     for (const v of versionedVersions) {
       if (v === activeEpoch) continue;
@@ -110,7 +114,11 @@ async function describeSession(sessionId: string, opts: { json?: boolean }): Pro
     }
 
     const planManifest = readPlanManifest(session.id, activeEpoch);
-    const rewriteHistory: Array<{ version: number; decision: string; plan?: string }> = [];
+    const rewriteHistory: Array<{
+      version: number;
+      decision: string;
+      plan?: string;
+    }> = [];
     for (const entry of log) {
       if (entry.event === 'context:updated' && entry.version !== undefined) {
         const meta = entry.metadata as Record<string, unknown> | undefined;

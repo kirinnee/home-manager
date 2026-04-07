@@ -16,6 +16,7 @@ import * as viewCmd from './view';
 import * as removeCmd from './remove';
 import * as reviewCmd from './review';
 import * as summaryCmd from './summary';
+import * as resetCmd from './reset';
 import * as streamCmd from './stream';
 import { readFileSync } from 'fs';
 
@@ -132,6 +133,11 @@ export function createCli(deps: CliDeps): Command {
     .option('--force', 'regenerate summary even if it already exists')
     .option('--run <id>', 'run ID (default: current workspace)')
     .action(async (id, opts) => summaryCmd.handler(id, opts, deps));
+
+  program
+    .command('reset')
+    .description('Reset global config (~/.kloop/config.yaml) to defaults')
+    .action(async () => resetCmd.handler());
 
   program
     .command('stream')

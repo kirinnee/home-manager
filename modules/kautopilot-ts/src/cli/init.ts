@@ -1,20 +1,19 @@
-import { Command } from 'commander';
 import { copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { generateSessionId } from '../core/id';
-import { getSessionByWorktree, deleteSession } from '../core/db';
-import { sessionDir } from '../core/artifacts';
-import { getActiveInitForWorktree, upsertInitAttempt, updateInitOutcome } from '../core/init-db';
+import { Command } from 'commander';
+import { initDir, sessionDir } from '../core/artifacts';
 import { ensureGlobalConfig, resolveConfig, resolvedConfigPath } from '../core/config';
+import { deleteSession, getSessionByWorktree } from '../core/db';
+import { extractOrg, getGitRoot, getRemoteUrl, getWorktree, normalizeGitRoot } from '../core/git';
+import { generateSessionId } from '../core/id';
+import { getActiveInitForWorktree, updateInitOutcome, upsertInitAttempt } from '../core/init-db';
+import { acquireInitLock, checkInitLock, releaseInitLock } from '../core/init-lock';
+import { detectAndRecoverInitCrash, ensureInitStatus } from '../core/init-status';
 import { checkLock } from '../core/lock';
-import { acquireInitLock, releaseInitLock, checkInitLock } from '../core/init-lock';
-import { ensureInitStatus, detectAndRecoverInitCrash } from '../core/init-status';
 import { appendInitEvent } from '../core/log';
-import { initDir } from '../core/artifacts';
-import { getGitRoot, getWorktree, getRemoteUrl, normalizeGitRoot, extractOrg } from '../core/git';
 import { confirmAction } from '../llm/inquirer';
 import { runInitStateMachine } from '../phases/init/index';
 import type { InitContext } from '../phases/init/states';
-import { logField, logOk, logWarn, logInfo, logDim } from '../util/format';
+import { logDim, logField, logInfo, logOk, logWarn } from '../util/format';
 
 export function createInitCommand(): Command {
   return new Command('init')
@@ -157,7 +156,7 @@ export async function runInit(
     const initConfigSourceDest = `${initDir(initId)}/config.source.txt`;
     if (pickedConfigPath && existsSync(pickedConfigPath)) {
       copyFileSync(pickedConfigPath, initConfigDest);
-      writeFileSync(initConfigSourceDest, pickedConfigPath + '\n');
+      writeFileSync(initConfigSourceDest, `${pickedConfigPath}\n`);
     } else {
       writeFileSync(initConfigDest, '# resolved from built-in defaults\n');
       writeFileSync(initConfigSourceDest, '(built-in defaults)\n');

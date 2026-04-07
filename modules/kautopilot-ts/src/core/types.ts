@@ -732,36 +732,31 @@ Output ONLY the problems found — one per line. If none, output "No issues foun
     },
     phase2: {
       resolve: {
-        // Available vars: {plan}, {spec}, {taskSpec}, {reason}, {attempt}
-        prompt: `Analyze the conflict or failure and discuss resolution options with the user.
+        // Available vars: {task_spec_path}, {plan_path}, {plans_dir}, {kloop_evidence}, {feedback_path}
+        prompt: `## Context Paths
+- Task spec: {task_spec_path}
+- Current plan: {plan_path}
+- Plans directory: {plans_dir}
 
-## What is a Conflict?
+Read these files to understand the original intent.
 
-A conflict occurs when the spec defines something that seems plausible, but during implementation we discover it's not possible. This is called "the devil is in the details" — the spec looked reasonable on paper, but reality says otherwise.
+## Kloop Evidence
 
-**Example**: The spec says "don't touch source code, add tests till 100% coverage." This seems reasonable until implementation reveals unreachable dead code that MUST be removed to achieve 100% coverage. Removing dead code VIOLATES the spec constraint, creating a conflict.
+{kloop_evidence}
 
-## Where to Look
+## Discussion
 
-1. **Plan contents** — read the current plan at the path provided
-2. **Task spec** — read the constraints and requirements at the path provided
-3. **Kloop evidence** — the implementation log shows exactly where things went wrong
-4. **Source code** — the actual codebase state in the worktree
+Discuss with the user:
+1. What specifically went wrong?
+2. Is this a plan implementation issue or a spec constraint issue?
+3. What should change in the spec to address this?
 
-## Resolution Options
+## Feedback
 
-When you identify a conflict, consider:
-- **Root cause** — what assumption in the spec turned out to be wrong?
-- **Alternative approaches** — is there another way to satisfy the intent?
-- **Scope reduction** — can we solve a smaller problem that's still valuable?
+When ready, write the feedback to {feedback_path}
+The feedback will be used to guide the next iteration.
 
-Discuss with the user until you have a clear resolution. Document your approach in the resolution file.`,
-      },
-      rewrite_spec: {
-        // Available vars: none
-        prompt: `Rewrite the working spec to address the resolution.
-Preserve what was working. Only change what needs to change.
-Output ONLY the rewritten spec in markdown format.`,
+After writing feedback, return the revisit_spec signal.`,
       },
       // NOTE: 'commit' uses shared COMMIT_AGENT_PROMPT directly (not in config)
       // Handlers import COMMIT_AGENT_PROMPT and build prompt with {context} var
@@ -821,6 +816,33 @@ Resolve conflicts while preserving the intent of both changes.`,
         // Available vars: none — context is prepended by handler
         prompt: `The dev-loop execution failed. Help investigate and determine next steps.
 Options: fix the issue and retry, skip and move on, or escalate.`,
+      },
+      feedback: {
+        // Available vars: {task_spec_path}, {plans_dir}, {pr_url}, {checks_status}, {thread_count}, {feedback_path}
+        prompt: `## Context Paths
+- Task spec: {task_spec_path}
+- Plans directory: {plans_dir}
+
+Read these files to understand the original intent.
+
+## PR State
+- URL: {pr_url}
+- Checks status: {checks_status}
+- Open threads: {thread_count}
+
+## Discussion
+
+Discuss with the user:
+1. What about the PR needs improvement?
+2. Is this an implementation issue or a spec issue?
+3. What should change in the spec to address this?
+
+## Feedback
+
+When ready, write the feedback to {feedback_path}
+The feedback will be used to guide the next iteration.
+
+After writing feedback, return the revisit_spec signal.`,
       },
     },
     generic: {
@@ -967,7 +989,7 @@ export interface DeliveryManifest {
 // Rewrite Decision Types
 // ============================================================================
 
-export type RewriteDecision = 'refine_local' | 'regenerate_remaining' | 'revisit_spec';
+export type RewriteDecision = 'revisit_spec';
 
 // ============================================================================
 // Phase Constants

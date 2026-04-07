@@ -1,9 +1,8 @@
-import { spawn } from 'bun';
-import { spinner } from '@clack/prompts';
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { spinner } from '@clack/prompts';
+import { spawn } from 'bun';
 import { stringify as stringifyYaml } from 'yaml';
-import { nextRunNumber, runDir, runFilePath, type RunScope } from '../core/artifacts';
+import { nextRunNumber, type RunScope, runDir, runFilePath } from '../core/artifacts';
 
 /** Whether debug logging is enabled (KAUTOPILOT_DEBUG=1). */
 export const DEBUG = !!process.env.KAUTOPILOT_DEBUG;
@@ -42,8 +41,9 @@ interface RunArtifactInfo {
 
 function resolveRunScope(options?: SpawnPrintOptions | SpawnTTYOptions): RunScope | null {
   if (options?.runScope) return options.runScope;
-  if ('sessionId' in (options ?? {}) && options?.sessionId) {
-    return { kind: 'session', id: options.sessionId };
+  const sessionId = 'sessionId' in (options ?? {}) ? (options as SpawnPrintOptions).sessionId : undefined;
+  if (sessionId) {
+    return { kind: 'session', id: sessionId };
   }
   return null;
 }
@@ -70,7 +70,7 @@ function createRunArtifacts(
   const promptPath = runFilePath(scope, runNumber, 'prompt.md');
 
   writeFileSync(promptPath, prompt);
-  writeFileSync(commandPath, buildCommandString(args) + '\n');
+  writeFileSync(commandPath, `${buildCommandString(args)}\n`);
   writeFileSync(logsPath, '');
   const startedAt = new Date().toISOString();
   writeFileSync(
@@ -83,14 +83,23 @@ function createRunArtifacts(
       label: options?.label,
       binary,
       cwd: options?.cwd,
-      timeoutSeconds: 'timeout' in (options ?? {}) ? options?.timeout : undefined,
+      timeoutSeconds: 'timeout' in (options ?? {}) ? (options as SpawnPrintOptions).timeout : undefined,
       startedAt,
       status: 'running',
       why: options?.context,
     }),
   );
 
-  return { scope, runNumber, runPath, contextPath, logsPath, commandPath, promptPath, startedAt };
+  return {
+    scope,
+    runNumber,
+    runPath,
+    contextPath,
+    logsPath,
+    commandPath,
+    promptPath,
+    startedAt,
+  };
 }
 
 function updateRunContext(info: RunArtifactInfo, data: Record<string, unknown>): void {
@@ -250,7 +259,7 @@ async function spawnCore(
 export async function spawnPrint<T = unknown>(binary: string, prompt: string, options?: SpawnPrintOptions): Promise<T> {
   const spinMsg = options?.spinnerMsg;
   const s = spinMsg && process.stdout.isTTY ? spinner() : null;
-  s?.start(spinMsg!);
+  s?.start(spinMsg as string);
 
   const { stdout } = await spawnCore(binary, prompt, options);
 
@@ -335,7 +344,7 @@ export function stripCodeFences(text: string): string {
 export async function spawnPrintRaw(binary: string, prompt: string, options?: SpawnPrintOptions): Promise<string> {
   const spinMsg = options?.spinnerMsg;
   const s = spinMsg && process.stdout.isTTY ? spinner() : null;
-  s?.start(spinMsg!);
+  s?.start(spinMsg as string);
 
   const { stdout } = await spawnCore(binary, prompt, options);
 

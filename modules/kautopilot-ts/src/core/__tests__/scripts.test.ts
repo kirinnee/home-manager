@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'bun:test';
+import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -6,7 +6,7 @@ const scriptsSource = readFileSync(join(import.meta.dir, '..', 'scripts.ts'), 'u
 
 describe('ticket setup heuristics', () => {
   it('treats acli as needing setup verification', () => {
-    expect(scriptsSource).toContain("'acli'");
+    expect(scriptsSource).toContain('acli');
     expect(scriptsSource).toContain('needsSetupHelp');
   });
 

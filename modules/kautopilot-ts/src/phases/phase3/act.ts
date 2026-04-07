@@ -1,13 +1,13 @@
-import type { Phase3Context, EvalResult, TtyResolveItem } from './types';
-import { appendEvent } from '../../core/log';
 import {
-  ghReplyToThread,
-  ghReplyToIssueComment,
-  ghResolveThread,
   ghReact,
+  ghReplyToIssueComment,
+  ghReplyToThread,
+  ghResolveThread,
   ghReviewThreads,
   withBotSignature,
 } from '../../core/github';
+import { appendEvent } from '../../core/log';
+import type { EvalResult, Phase3Context, TtyResolveItem } from './types';
 
 export async function handleAct(ctx: Phase3Context): Promise<string | null> {
   const { session, version, prNumber, evalResults } = ctx;
@@ -90,7 +90,7 @@ export async function handleAct(ctx: Phase3Context): Promise<string | null> {
       if (result.reply && result.unitType === 'pr_comment') {
         const commentId = result.unitId.replace('comment-', '');
         const numericId = parseInt(commentId, 10);
-        if (!isNaN(numericId)) {
+        if (!Number.isNaN(numericId)) {
           await ghReplyToIssueComment(prNumber, withBotSignature(result.reply), numericId, session.worktree);
           repliesPosted++;
         }
@@ -110,7 +110,7 @@ export async function handleAct(ctx: Phase3Context): Promise<string | null> {
         const thread = threads.find(t => t.id === threadId);
         if (thread && thread.replies.length > 0) {
           const commentId = parseInt(thread.replies[0].id, 10);
-          if (!isNaN(commentId)) {
+          if (!Number.isNaN(commentId)) {
             await ghReact(commentId, '+1', session.worktree);
             reactionsAdded++;
           }

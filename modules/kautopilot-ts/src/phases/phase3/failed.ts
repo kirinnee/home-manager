@@ -1,7 +1,7 @@
-import type { Phase3Context } from './types';
 import { appendEvent } from '../../core/log';
 import { confirmAction } from '../../llm/inquirer';
 import { logErrorBanner } from '../../util/format';
+import type { Phase3Context } from './types';
 
 export async function handleFailed(ctx: Phase3Context): Promise<string | null> {
   const { session, version } = ctx;
@@ -34,6 +34,8 @@ export async function handleFailed(ctx: Phase3Context): Promise<string | null> {
     return 'commit_pending';
   }
 
-  logErrorBanner('Phase 3 Aborted', { Retry: 'kautopilot start --phase polish' });
+  logErrorBanner('Phase 3 Aborted', {
+    Retry: 'kautopilot start --phase polish',
+  });
   return null;
 }

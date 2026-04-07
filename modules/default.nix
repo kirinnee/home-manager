@@ -17,9 +17,4 @@ rec {
   kautopilot-dev = nixpkgs.writeShellScriptBin "kautopilot-dev" ''
     exec ${nixpkgs.bun}/bin/bun run ~/.config/home-manager/modules/kautopilot-ts/src/index.ts "$@"
   '';
-  # gemini-auto wrapper: forwards to gemini-cli, owned by kloop command builder
-  # kloop is responsible for passing --yolo, --output-format stream-json, -p flags
-  gemini-auto = nixpkgs.writeShellScriptBin "gemini-auto" ''
-    exec ${nixpkgs.gemini-cli}/bin/gemini-cli "$@"
-  '';
 }

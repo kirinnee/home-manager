@@ -1,9 +1,9 @@
-import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import type { LockInfo } from './types';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { initDir } from './artifacts';
-import { appendInitEvent } from './log';
 import { updateInitOutcome } from './init-db';
+import { appendInitEvent } from './log';
+import type { LockInfo } from './types';
 
 // Track whether signal handlers have been registered to prevent accumulation
 let signalHandlersRegistered = false;

@@ -53,15 +53,33 @@ export function loadSessionAgents(sessionId: string): void {
       agents: {
         init: { ...DEFAULT_CONFIG.agents.init, ...parsed.agents?.init },
         phase1: {
-          triage: { ...DEFAULT_CONFIG.agents.phase1.triage, ...parsed.agents?.phase1?.triage },
-          spec_writer: { ...DEFAULT_CONFIG.agents.phase1.spec_writer, ...parsed.agents?.phase1?.spec_writer },
-          plan_writer: { ...DEFAULT_CONFIG.agents.phase1.plan_writer, ...parsed.agents?.phase1?.plan_writer },
-          spec_reviewers: { ...DEFAULT_CONFIG.agents.phase1.spec_reviewers, ...parsed.agents?.phase1?.spec_reviewers },
-          plan_reviewers: { ...DEFAULT_CONFIG.agents.phase1.plan_reviewers, ...parsed.agents?.phase1?.plan_reviewers },
+          triage: {
+            ...DEFAULT_CONFIG.agents.phase1.triage,
+            ...parsed.agents?.phase1?.triage,
+          },
+          spec_writer: {
+            ...DEFAULT_CONFIG.agents.phase1.spec_writer,
+            ...parsed.agents?.phase1?.spec_writer,
+          },
+          plan_writer: {
+            ...DEFAULT_CONFIG.agents.phase1.plan_writer,
+            ...parsed.agents?.phase1?.plan_writer,
+          },
+          spec_reviewers: {
+            ...DEFAULT_CONFIG.agents.phase1.spec_reviewers,
+            ...parsed.agents?.phase1?.spec_reviewers,
+          },
+          plan_reviewers: {
+            ...DEFAULT_CONFIG.agents.phase1.plan_reviewers,
+            ...parsed.agents?.phase1?.plan_reviewers,
+          },
         },
         phase2: { ...DEFAULT_CONFIG.agents.phase2, ...parsed.agents?.phase2 },
         phase3: { ...DEFAULT_CONFIG.agents.phase3, ...parsed.agents?.phase3 },
-        generic: { ...DEFAULT_CONFIG.agents.generic, ...parsed.agents?.generic },
+        generic: {
+          ...DEFAULT_CONFIG.agents.generic,
+          ...parsed.agents?.generic,
+        },
       },
       templates: { ...DEFAULT_CONFIG.templates, ...parsed.templates },
       kloop: { ...DEFAULT_CONFIG.kloop, ...parsed.kloop },

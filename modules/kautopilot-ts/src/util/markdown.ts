@@ -1,5 +1,5 @@
 import { existsSync, writeFileSync } from 'node:fs';
-import { marked, Marked } from 'marked';
+import { Marked, marked } from 'marked';
 import { markedTerminal } from 'marked-terminal';
 
 let configured = false;

@@ -1,9 +1,9 @@
-import type { Config, ReviewerConfig } from './types';
-import { resolvePromptVars, resolveBinary, resolveTimeout } from './type-config';
-import type { PromptVars } from './type-config';
-import { appendEvent } from './log';
-import { spawnPrintRaw, debugLog } from '../llm/spawn';
+import { debugLog, spawnPrintRaw } from '../llm/spawn';
 import { MultiSpinner } from '../util/spinner';
+import { appendEvent } from './log';
+import type { PromptVars } from './type-config';
+import { resolveBinary, resolvePromptVars, resolveTimeout } from './type-config';
+import type { Config, ReviewerConfig } from './types';
 
 export interface ReviewResult {
   reviewer: string;

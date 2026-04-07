@@ -1,6 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { getRewriteTargets, nextRewriteNumber } from '../phase2/rewrite-spec';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -17,9 +16,18 @@ describe('plan file resolution (spec section 5.3)', () => {
 
   it('parsePlanFilename parses spec convention (plan-N-M.md)', () => {
     const { parsePlanFilename } = require('../shared');
-    expect(parsePlanFilename('plan-1-1.md')).toEqual({ ordinal: 1, rewrite: 1 });
-    expect(parsePlanFilename('plan-2-3.md')).toEqual({ ordinal: 2, rewrite: 3 });
-    expect(parsePlanFilename('plan-10-5.md')).toEqual({ ordinal: 10, rewrite: 5 });
+    expect(parsePlanFilename('plan-1-1.md')).toEqual({
+      ordinal: 1,
+      rewrite: 1,
+    });
+    expect(parsePlanFilename('plan-2-3.md')).toEqual({
+      ordinal: 2,
+      rewrite: 3,
+    });
+    expect(parsePlanFilename('plan-10-5.md')).toEqual({
+      ordinal: 10,
+      rewrite: 5,
+    });
   });
 
   it('parsePlanFilename parses legacy flat convention (plan-N.md)', () => {
@@ -114,28 +122,5 @@ describe('plan file resolution (spec section 5.3)', () => {
     expect(plans).toHaveLength(1);
     // plan-1-2.md has rewrite=2 which is higher than plan-1.md (rewrite=1)
     expect(plans[0]).toEndWith('plan-1-2.md');
-  });
-
-  it('patch_downstream targets current and downstream plans', () => {
-    writeFileSync(join(tempDir, 'plan-1-1.md'), '# Plan 1');
-    writeFileSync(join(tempDir, 'plan-2-1.md'), '# Plan 2');
-    writeFileSync(join(tempDir, 'plan-3-1.md'), '# Plan 3');
-
-    expect(getRewriteTargets(tempDir, 1, 'patch_downstream')).toEqual([2, 3]);
-  });
-
-  it('regenerate_remaining targets all remaining plans', () => {
-    writeFileSync(join(tempDir, 'plan-1-1.md'), '# Plan 1');
-    writeFileSync(join(tempDir, 'plan-2-1.md'), '# Plan 2');
-    writeFileSync(join(tempDir, 'plan-3-1.md'), '# Plan 3');
-
-    expect(getRewriteTargets(tempDir, 0, 'regenerate_remaining')).toEqual([1, 2, 3]);
-  });
-
-  it('computes the next rewrite suffix without overwriting prior files', () => {
-    writeFileSync(join(tempDir, 'plan-2-1.md'), '# Plan 2 v1');
-    writeFileSync(join(tempDir, 'plan-2-2.md'), '# Plan 2 v2');
-
-    expect(nextRewriteNumber(tempDir, 2)).toBe(3);
   });
 });

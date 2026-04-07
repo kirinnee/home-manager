@@ -1,9 +1,9 @@
-import type { PhaseContext } from '../machine';
 import type { DeliveryKind } from '../../core/types';
+import type { PhaseContext } from '../machine';
 import type { TestingLevel } from './triage';
 
 export interface SpecAmendmentContext {
-  previousSpec: string;
+  previousSpecPath: string;
   reason: string;
   previousVersion: number;
 }

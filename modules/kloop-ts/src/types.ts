@@ -27,7 +27,7 @@ const configSchema = z
     reviewers: z.array(z.string().min(1)).optional(),
     conflictChecker: z.string().min(1).optional(), // defaults to implementer binary
     // Counts and limits
-    maxIterations: z.number().min(1).max(100).default(10),
+    maxIterations: z.number().min(1).max(100).default(7),
     implementerTimeout: z.number().min(0.001).max(120).default(30),
     reviewerTimeout: z.number().min(0.001).max(120).default(15),
     // Conflict detection
@@ -35,8 +35,8 @@ const configSchema = z
     // Checkpoint behavior
     compressSpec: z.boolean().default(false),
     // Review behavior
-    firstLoopFullReview: z.boolean().default(false),
-    previousReviewPropagation: z.number().min(0).max(1).default(0),
+    firstLoopFullReview: z.boolean().default(true),
+    previousReviewPropagation: z.number().min(0).max(1).default(0.7),
     // Per-reviewer consecutive failure cap — removed; checkpointing handles this
     // Agent prompt overrides
     prompts: z
@@ -44,6 +44,7 @@ const configSchema = z
         implementer: z.string().optional(),
         reviewer: z.string().optional(),
         checkpointer: z.string().optional(),
+        checkpointerFull: z.string().optional(),
       })
       .optional(),
   })
@@ -101,6 +102,7 @@ export const resolvedConfigSchema = z.object({
       implementer: z.string().optional(),
       reviewer: z.string().optional(),
       checkpointer: z.string().optional(),
+      checkpointerFull: z.string().optional(),
     })
     .optional(),
 });
@@ -361,13 +363,13 @@ export const DEFAULT_CONFIG: Config = {
   implementers: { claude: 1 },
   reviewPhases: [['claude']],
   conflictChecker: 'claude',
-  maxIterations: 10,
+  maxIterations: 7,
   implementerTimeout: 30,
   reviewerTimeout: 15,
-  conflictCheckThreshold: 2,
+  conflictCheckThreshold: 3,
   compressSpec: false,
-  firstLoopFullReview: false,
-  previousReviewPropagation: 0,
+  firstLoopFullReview: true,
+  previousReviewPropagation: 0.7,
 };
 
 // ============================================================================

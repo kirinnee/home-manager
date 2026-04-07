@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import type { SessionRow } from '../types';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import type { InitAttemptRow } from '../init-types';
+import type { SessionRow } from '../types';
 
 function createTestDb(): Database {
   const db = new Database(':memory:');
@@ -98,10 +98,10 @@ describe('Database operations', () => {
 
     const result = db.query('SELECT * FROM sessions WHERE id = $1').get(row.id) as SessionRow;
     expect(result).not.toBeNull();
-    expect(result!.ticket_id).toBe('PE-1234');
-    expect(result!.branch).toBe('feature/PE-1234');
-    expect(result!.local).toBe(0);
-    expect(result!.state).toBe('ready');
+    expect(result?.ticket_id).toBe('PE-1234');
+    expect(result?.branch).toBe('feature/PE-1234');
+    expect(result?.local).toBe(0);
+    expect(result?.state).toBe('ready');
   });
 
   it('upserts a session', () => {
@@ -122,13 +122,18 @@ describe('Database operations', () => {
     db.query(UPSERT_SQL).run(...rowToParams(row));
 
     // Upsert with updated values
-    const updated = { ...row, ticket_id: 'PE-5678', state: 'ready' as const, updated_at: '2026-03-24T11:00:00Z' };
+    const updated = {
+      ...row,
+      ticket_id: 'PE-5678',
+      state: 'ready' as const,
+      updated_at: '2026-03-24T11:00:00Z',
+    };
     db.query(UPSERT_SQL).run(...rowToParams(updated));
 
     const result = db.query('SELECT * FROM sessions WHERE id = $1').get(row.id) as SessionRow;
-    expect(result!.ticket_id).toBe('PE-5678');
-    expect(result!.state).toBe('ready');
-    expect(result!.updated_at).toBe('2026-03-24T11:00:00Z');
+    expect(result?.ticket_id).toBe('PE-5678');
+    expect(result?.state).toBe('ready');
+    expect(result?.updated_at).toBe('2026-03-24T11:00:00Z');
   });
 
   it('lists all sessions', () => {
@@ -287,8 +292,8 @@ describe('Database operations', () => {
       )
       .get('/repo', '/repo') as InitAttemptRow | null;
     expect(result).not.toBeNull();
-    expect(result!.id).toBe('active1');
-    expect(result!.outcome).toBeNull();
+    expect(result?.id).toBe('active1');
+    expect(result?.outcome).toBeNull();
   });
 
   it('getActiveInitForWorktree: returns null when all inits have an outcome', () => {
@@ -345,6 +350,6 @@ describe('Database operations', () => {
       )
       .get('/repo', '/repo') as InitAttemptRow | null;
     expect(result).not.toBeNull();
-    expect(result!.id).toBe('new1');
+    expect(result?.id).toBe('new1');
   });
 });

@@ -507,6 +507,7 @@ export class AgentRunner {
 
     const prompt = buildCheckpointerPrompt(
       this.config.prompts?.checkpointer,
+      this.config.prompts?.checkpointerFull,
       checkpointerVars,
       this.config.compressSpec,
     );

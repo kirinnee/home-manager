@@ -1,8 +1,8 @@
 import { Command } from 'commander';
 import { listSessions } from '../core/db';
-import { ensureStatus } from '../core/status';
 import { checkLock } from '../core/lock';
-import { formatDuration, formatStatus, formatPhase } from '../util/format';
+import { ensureStatus } from '../core/status';
+import { formatDuration, formatPhase, formatStatus } from '../util/format';
 
 export function createPsCommand(): Command {
   return new Command('ps')
@@ -25,7 +25,8 @@ async function runPs(opts: { repo?: string; all?: boolean; json?: boolean }): Pr
   // Filter by repo
   let filtered = sessions;
   if (opts.repo) {
-    filtered = sessions.filter(s => s.git_root_host.includes(opts.repo!.toLowerCase()));
+    const repoFilter = opts.repo.toLowerCase();
+    filtered = sessions.filter(s => s.git_root_host.includes(repoFilter));
   }
 
   const runningRows = filtered.filter(session => opts.all || checkLock(session.id).locked);
@@ -86,7 +87,7 @@ async function runPs(opts: { repo?: string; all?: boolean; json?: boolean }): Pr
   console.log(header);
 
   for (const row of rows) {
-    const statusText =
+    const _statusText =
       row.state === 'init' ? 'init-incomplete' : row.running ? `running (${formatDuration(row.elapsed)})` : 'stopped';
 
     const line = [

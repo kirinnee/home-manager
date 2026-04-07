@@ -39,7 +39,13 @@ export class MultiSpinner {
   private maxMsgLen = 0;
 
   add(id: string, msg: string): void {
-    this.tasks.push({ id, msg, state: 'spinning', startedAt: Date.now(), finishedAt: null });
+    this.tasks.push({
+      id,
+      msg,
+      state: 'spinning',
+      startedAt: Date.now(),
+      finishedAt: null,
+    });
     if (msg.length > this.maxMsgLen) this.maxMsgLen = msg.length;
     if (isTTY && !this.timer) {
       this.startTimer();
@@ -118,7 +124,7 @@ export class MultiSpinner {
       const maxMsg = cols - 13;
       let msg = task.msg;
       if (maxMsg > 4 && msg.length > maxMsg) {
-        msg = msg.slice(0, maxMsg - 1) + '…';
+        msg = `${msg.slice(0, maxMsg - 1)}…`;
       }
       const padded = msg.padEnd(Math.min(this.maxMsgLen, maxMsg > 0 ? maxMsg : this.maxMsgLen));
       const time = `${c.dim}${timeStr}${c.reset}`;

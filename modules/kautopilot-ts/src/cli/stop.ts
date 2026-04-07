@@ -1,12 +1,12 @@
+import { rmSync } from 'node:fs';
 import { Command } from 'commander';
-import { getSessionByWorktree, getSessionById, deleteSession } from '../core/db';
+import { sessionDir } from '../core/artifacts';
+import { deleteSession, getSessionById, getSessionByWorktree } from '../core/db';
+import { getGitRoot, getWorktree } from '../core/git';
 import { checkLock, releaseLock } from '../core/lock';
 import { appendEvent } from '../core/log';
-import { getGitRoot, getWorktree } from '../core/git';
-import { rmSync } from 'node:fs';
-import { sessionDir } from '../core/artifacts';
 import { confirmAction } from '../llm/inquirer';
-import { logOk, logError } from '../util/format';
+import { logError, logOk } from '../util/format';
 
 export function createStopCommand(): Command {
   return new Command('stop')
@@ -23,8 +23,8 @@ export function createStopCommand(): Command {
 }
 
 async function runStop(id: string | undefined, opts: { force?: boolean }): Promise<void> {
-  let session;
-  let isGlobal = !!id;
+  let session: import('../core/types').SessionRow | null;
+  const isGlobal = !!id;
 
   if (id) {
     session = getSessionById(id);

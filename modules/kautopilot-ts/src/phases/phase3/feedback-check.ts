@@ -1,8 +1,15 @@
-import type { Phase3Context } from './types';
+import { existsSync } from 'node:fs';
+import { getAgentBinary, TTY_EXIT_INSTRUCTION } from '../../core/agents';
+import { findLatestPlansPath, findLatestSpecPath } from '../../core/artifact-versioning';
+import { snapshotPath } from '../../core/artifacts';
+import { ghPrChecks, ghReviewThreads } from '../../core/github';
 import { appendEvent } from '../../core/log';
-import { selectOption } from '../../llm/inquirer';
 import { runScript } from '../../core/scripts';
+import { writeStepInit } from '../../core/step-init';
+import { selectOption } from '../../llm/inquirer';
 import { logBanner } from '../../util/format';
+import { loadPromptTemplate, spawnTTYWithTurnTracking } from '../shared';
+import type { Phase3Context } from './types';
 
 export async function handleFeedbackCheck(ctx: Phase3Context): Promise<string | null> {
   const { session, version, prNumber, prUrl, pushCycle } = ctx;
@@ -69,41 +76,98 @@ export async function handleFeedbackCheck(ctx: Phase3Context): Promise<string | 
     });
   }
 
-  // Transition to Phase 1 feedback
+  // Transition to feedback TTY
   return 'feedback';
 }
 
 export async function handleFeedback(ctx: Phase3Context): Promise<string | null> {
-  const { session, version } = ctx;
+  const { session, version, prNumber, prUrl } = ctx;
 
   appendEvent(session.id, {
     ts: new Date().toISOString(),
     event: 'feedback:started',
     version,
-    metadata: { stepType: 'code' },
+    metadata: { stepType: 'tty' },
   });
 
-  // Collect feedback from user
-  const { textInput } = await import('../../llm/inquirer');
-  const { writeFileSync, mkdirSync } = await import('node:fs');
-  const { snapshotPath, ensureArtifactDir } = await import('../../core/artifacts');
+  // Gather PR state
+  let checksStatus = 'unknown';
+  let threadCount = 0;
+  if (prNumber) {
+    try {
+      const checks = await ghPrChecks(prNumber, session.worktree);
+      const passing = checks.filter((c: { status: string }) => c.status === 'passing').length;
+      const failing = checks.filter((c: { status: string }) => c.status === 'failing').length;
+      const pending = checks.filter((c: { status: string }) => c.status === 'pending').length;
+      checksStatus = `${passing} passing, ${failing} failing, ${pending} pending`;
+    } catch {
+      checksStatus = 'unable to fetch';
+    }
+    try {
+      const threads = await ghReviewThreads(prNumber, session.worktree);
+      threadCount = threads.filter((t: { isOutdated: boolean }) => !t.isOutdated).length;
+    } catch {
+      threadCount = -1;
+    }
+  }
 
-  const feedback = await textInput('What feedback do you have? (This will be used to improve the next iteration)', '');
+  // Find latest artifact paths
+  const specPath = findLatestSpecPath(session.id, version);
+  const plansDir = findLatestPlansPath(session.id, version);
+  const feedbackPath = snapshotPath(session.id, version, 'feedback.md');
 
-  if (feedback.trim()) {
-    // Write feedback to artifacts for Phase 1 v2+ to consume
-    const feedbackPath = snapshotPath(session.id, version, 'feedback.md');
-    ensureArtifactDir(feedbackPath);
-    writeFileSync(feedbackPath, feedback);
-    console.log('[feedback] Feedback saved. Run `kautopilot start --phase plan` to re-run Phase 1.');
+  // Build prompt with variable substitution
+  const feedbackPrompt = loadPromptTemplate('phase3', 'feedback', {
+    task_spec_path: specPath || '(no spec found)',
+    plans_dir: plansDir || '(no plans found)',
+    pr_url: prUrl || `#${prNumber}`,
+    checks_status: checksStatus,
+    thread_count: String(threadCount),
+    feedback_path: feedbackPath,
+  });
+
+  // Record step init
+  const binary = getAgentBinary('phase3', 'feedback');
+  writeStepInit(session.id, version, 'feedback', {
+    prompt: feedbackPrompt,
+    command: `${binary} (TTY handoff)`,
+    type: 'tty_handoff',
+  });
+
+  logBanner('Collecting PR Feedback', {
+    PR: prUrl || `#${prNumber}`,
+    Checks: checksStatus,
+    Threads: String(threadCount),
+  });
+  console.log(`Discuss the PR with Claude. When ready, write feedback to ${feedbackPath}`);
+
+  // TTY handoff
+  await spawnTTYWithTurnTracking(session.id, binary, feedbackPrompt + TTY_EXIT_INSTRUCTION, {
+    cwd: session.worktree,
+    worktree: session.worktree,
+  });
+
+  // Check if feedback.md was written
+  const feedbackWritten = existsSync(feedbackPath);
+
+  // Enforce spec contract: feedback.md MUST exist before advancing to new epoch.
+  // The TTY prompt instructs the user to write feedback before returning revisit_spec.
+  // If feedback.md is missing, the TTY did not complete properly — do NOT proceed.
+  if (!feedbackWritten) {
+    throw new Error(
+      `feedback.md was not written at ${feedbackPath}. ` +
+        `The TTY must write actual feedback before returning revisit_spec. ` +
+        `Refusing to advance to new epoch without required artifact.`,
+    );
   }
 
   appendEvent(session.id, {
     ts: new Date().toISOString(),
     event: 'feedback:completed',
     version,
-    metadata: { hasFeedback: !!feedback.trim() },
+    metadata: { hasFeedback: feedbackWritten },
   });
 
-  return 'completed';
+  console.log(`[feedback] feedback.md written — returning revisit_spec`);
+  return 'revisit_spec';
 }

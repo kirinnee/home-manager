@@ -1,11 +1,11 @@
-import { writeFileSync, existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Phase3Context } from './types';
-import { appendEvent } from '../../core/log';
-import { snapshotPath, ensureArtifactDir } from '../../core/artifacts';
-import { resolveSpec } from '../shared';
-import { spawnPrintRaw } from '../../llm/spawn';
 import { getAgentBinary } from '../../core/agents';
+import { ensureArtifactDir, snapshotPath } from '../../core/artifacts';
+import { appendEvent } from '../../core/log';
+import { spawnPrintRaw } from '../../llm/spawn';
+import { resolveSpec } from '../shared';
+import type { Phase3Context } from './types';
 
 /**
  * [llm] Generate draft ticket/report artifacts before any irreversible publish actions.
@@ -70,7 +70,7 @@ Only include artifacts that are actually needed. Output clean markdown.`;
     const sections = draftOutput.split(/^### /m).filter(s => s.trim());
     for (const section of sections) {
       const firstLine = section.split('\n')[0].trim();
-      const filename = firstLine.replace(/\.md$/, '').trim() + '.md';
+      const filename = `${firstLine.replace(/\.md$/, '').trim()}.md`;
       if (/^(tickets-\d+|report-[a-z])\.md$/.test(filename)) {
         const content = section.slice(firstLine.length).trim();
         const artifactPath = snapshotPath(session.id, version, filename);

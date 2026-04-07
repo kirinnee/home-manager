@@ -1,5 +1,5 @@
+import type { DeliveryKind } from '../../core/types';
 import type { PhaseContext } from '../machine';
-import type { DeliveryKind, RewriteDecision } from '../../core/types';
 
 export interface Phase2Context extends PhaseContext {
   ticketId: string;
@@ -10,8 +10,6 @@ export interface Phase2Context extends PhaseContext {
   firstRun: boolean;
   /** kloop run ID for the current plan execution */
   kloopRunId?: string;
-  /** Last rewrite decision for audit trail */
-  lastRewriteDecision?: RewriteDecision;
   /** Crash retry count for current plan */
   crashRetryCount?: number;
 }

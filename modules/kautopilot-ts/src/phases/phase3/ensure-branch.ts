@@ -1,6 +1,6 @@
-import type { Phase3Context } from './types';
-import { appendEvent } from '../../core/log';
 import { hasUnmergedPaths } from '../../core/git';
+import { appendEvent } from '../../core/log';
+import type { Phase3Context } from './types';
 
 export async function handleEnsureBranch(ctx: Phase3Context): Promise<string | null> {
   const { session, version, baseBranch } = ctx;

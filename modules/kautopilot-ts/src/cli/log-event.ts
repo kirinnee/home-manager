@@ -1,8 +1,8 @@
 import { Command } from 'commander';
 import { getSessionByWorktree } from '../core/db';
-import { appendEvent } from '../core/log';
 import { getGitRoot, getWorktree } from '../core/git';
-import { logOk, logError } from '../util/format';
+import { appendEvent } from '../core/log';
+import { logError, logOk } from '../util/format';
 
 export function createLogEventCommand(): Command {
   return new Command('log-event')

@@ -1,9 +1,8 @@
+import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { Command } from 'commander';
-import { existsSync, unlinkSync } from 'node:fs';
-import { mkdirSync, writeFileSync } from 'node:fs';
 import { serializeConfigWithComments } from '../core/config';
 import { DEFAULT_CONFIG } from '../core/types';
-import { logOk, logInfo, logError, logDim } from '../util/format';
+import { logDim, logError, logInfo, logOk } from '../util/format';
 
 const GLOBAL_DIR = `${process.env.HOME}/.kautopilot`;
 const GLOBAL_CONFIG = `${GLOBAL_DIR}/config.yaml`;

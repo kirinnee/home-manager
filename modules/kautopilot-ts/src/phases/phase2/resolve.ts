@@ -1,35 +1,13 @@
-import { existsSync, readFileSync } from 'node:fs';
-import type { Phase2Context } from './types';
-import type { RewriteDecision } from '../../core/types';
-import { appendEvent } from '../../core/log';
-import { sessionDir } from '../../core/artifacts';
-import { devloopDescribe } from '../../core/devloop';
-import { loadPromptTemplate, resolveSpec, spawnTTYWithTurnTracking } from '../shared';
-import { writeStepInit } from '../../core/step-init';
+import { existsSync } from 'node:fs';
 import { getAgentBinary, TTY_EXIT_INSTRUCTION } from '../../core/agents';
+import { findLatestPlansPath, findLatestSpecPath } from '../../core/artifact-versioning';
+import { snapshotPath } from '../../core/artifacts';
+import { devloopDescribe } from '../../core/devloop';
+import { appendEvent } from '../../core/log';
+import { writeStepInit } from '../../core/step-init';
 import { logBanner } from '../../util/format';
-
-const VALID_REWRITE_DECISIONS: RewriteDecision[] = ['refine_local', 'regenerate_remaining', 'revisit_spec'];
-
-// Mechanical instructions prepended by handler — NOT part of user-editable prompt
-const RESOLVE_MECHANICS = `## Loop Evidence (from kloop describe)
-{kloop_evidence}
-
-## Rewrite Decision Required
-
-After analysis, you MUST write your resolution AND your rewrite decision to the resolution file.
-
-At the END of your resolution, add a line exactly like:
-\`\`\`
-REWRITE_DECISION: <decision>
-\`\`\`
-
-Where <decision> is one of:
-- refine_local — fix only the current plan procedure
-- regenerate_remaining — regenerate all remaining plans from scratch
-- revisit_spec — the declarative contract itself is wrong (creates new epoch vN+1)
-
-Resolution file path: {resolution_path}`;
+import { loadPromptTemplate, resolveActivePlans, spawnTTYWithTurnTracking } from '../shared';
+import type { Phase2Context } from './types';
 
 export async function handleResolve(ctx: Phase2Context): Promise<string | null> {
   const { session, version, planIndex, attempt } = ctx;
@@ -52,64 +30,41 @@ export async function handleResolve(ctx: Phase2Context): Promise<string | null> 
     kloopDescribeOutput = devloopDescribe(ctx.kloopRunId);
   }
 
-  // Read context from session artifacts (active plan = highest rewrite suffix)
-  const { resolveActivePlans } = await import('../shared');
-  const { snapshotPath: snapPath } = await import('../../core/artifacts');
-  const activePlans = resolveActivePlans(snapPath(session.id, version, 'plans'));
+  // Find context paths — use versioned-first with fallback for backward compat
+  const plansDir = findLatestPlansPath(session.id, version) || snapshotPath(session.id, version, 'plans');
+  const activePlans = resolveActivePlans(plansDir);
   const activePlanPath = activePlans[planIndex];
-  const taskSpecPath = snapPath(session.id, version, 'task-spec.md');
+  const taskSpecPath = findLatestSpecPath(session.id, version) || snapshotPath(session.id, version, 'task-spec.md');
+  const feedbackPath = snapshotPath(session.id, version, 'feedback.md');
 
-  // Get user-configurable prompt with vars
+  // Build prompt with variable substitution
   const resolvePrompt = loadPromptTemplate('phase2', 'resolve', {
-    plan: planName,
-    spec: activePlanPath || '',
-    taskSpec: taskSpecPath,
-    reason,
-    attempt: String(attempt),
+    task_spec_path: taskSpecPath,
+    plan_path: activePlanPath || '',
+    plans_dir: plansDir,
+    kloop_evidence: kloopDescribeOutput || '(no evidence available)',
+    feedback_path: feedbackPath,
   });
-
-  const resolutionPath = `${sessionDir(session.id)}/tmp/resolution.md`;
-
-  // Prepend mechanical instructions
-  const mechanics = RESOLVE_MECHANICS.replace(
-    '{kloop_evidence}',
-    kloopDescribeOutput || '(no evidence available)',
-  ).replace('{resolution_path}', resolutionPath);
-
-  const fullPrompt = `${resolvePrompt}\n\n${mechanics}`;
 
   // Record step init
   const binary = getAgentBinary('phase2', 'resolve');
   writeStepInit(session.id, version, 'resolve', {
-    prompt: fullPrompt,
+    prompt: resolvePrompt,
     command: `${binary} (TTY handoff)`,
     type: 'tty_handoff',
   });
 
   logBanner('Resolving Plan', { Plan: planName, Reason: reason });
-  console.log(`Discuss the issue with Claude. When resolved, write your approach to ${resolutionPath}`);
-  console.log(`Include REWRITE_DECISION: <refine_local|regenerate_remaining|revisit_spec>\n`);
+  console.log(`Discuss the issue with Claude. When resolved, write feedback to ${feedbackPath}`);
 
   // TTY handoff
-  await spawnTTYWithTurnTracking(session.id, binary, fullPrompt + TTY_EXIT_INSTRUCTION, {
+  await spawnTTYWithTurnTracking(session.id, binary, resolvePrompt + TTY_EXIT_INSTRUCTION, {
     cwd: session.worktree,
     worktree: session.worktree,
   });
 
-  // Read resolution and parse rewrite decision
-  let resolution = '';
-  let rewriteDecision: RewriteDecision = 'refine_local'; // default
-  if (existsSync(resolutionPath)) {
-    resolution = readFileSync(resolutionPath, 'utf-8');
-
-    // Parse REWRITE_DECISION from the resolution
-    const decisionMatch = resolution.match(/REWRITE_DECISION:\s*(refine_local|regenerate_remaining|revisit_spec)/i);
-    if (decisionMatch) {
-      rewriteDecision = decisionMatch[1].toLowerCase() as RewriteDecision;
-    }
-  }
-
-  ctx.lastRewriteDecision = rewriteDecision;
+  // Check if feedback.md was written
+  const feedbackWritten = existsSync(feedbackPath);
 
   appendEvent(session.id, {
     ts: new Date().toISOString(),
@@ -119,24 +74,22 @@ export async function handleResolve(ctx: Phase2Context): Promise<string | null> 
     attempt,
     metadata: {
       kloopDescribeAvailable: !!kloopDescribeOutput,
-      rewriteDecision,
+      feedbackWritten,
       reason,
-      resolution,
     },
   });
 
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'context:updated',
-    metadata: { rewriteDecision },
-  });
-
-  // Route based on rewrite decision (spec section 4.3)
-  if (rewriteDecision === 'revisit_spec') {
-    // revisit_spec creates a new epoch — escalate back to Phase 1
-    console.log(`[resolve] Decision: revisit_spec — escalating to new epoch`);
-    return 'failed'; // Will trigger re-run with new epoch
+  // Enforce spec contract: feedback.md MUST exist before advancing to new epoch.
+  // The TTY prompt instructs the user to write feedback before returning revisit_spec.
+  // If feedback.md is missing, the TTY did not complete properly — do NOT proceed.
+  if (!feedbackWritten) {
+    throw new Error(
+      `feedback.md was not written at ${feedbackPath}. ` +
+        `The TTY must write actual feedback before returning revisit_spec. ` +
+        `Refusing to advance to new epoch without required artifact.`,
+    );
   }
 
-  return 'rewrite_spec';
+  console.log(`[resolve] feedback.md written — returning revisit_spec`);
+  return 'revisit_spec';
 }

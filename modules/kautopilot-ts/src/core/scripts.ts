@@ -1,12 +1,12 @@
-import { existsSync, readFileSync, copyFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { selectOption, textInput } from '../llm/inquirer';
+import { debugLog, spawnPrintRaw } from '../llm/spawn';
+import { logDim, logField, logHeading, logInfo, logOk, logWarn } from '../util/format';
+import { renderMarkdown } from '../util/markdown';
+import { getAgentPrompt, getDefaultBinary } from './agents';
 import { sessionDir } from './artifacts';
 import { getCurrentBranch } from './git';
-import { spawnPrintRaw, debugLog } from '../llm/spawn';
-import { getDefaultBinary, getAgentPrompt } from './agents';
-import { textInput, selectOption } from '../llm/inquirer';
-import { logField, logOk, logWarn, logInfo, logHeading, logDim } from '../util/format';
-import { renderMarkdown } from '../util/markdown';
 
 // ============================================================================
 // Script constants
@@ -41,11 +41,17 @@ const NOOP_SCRIPT = '#!/bin/bash\n# no-op\nexit 0\n';
 
 const ORGS_DIR = `${process.env.HOME}/.kautopilot/orgs`;
 
-function classifyAccessSetup(answer: string): { needsSetupHelp: boolean; assessment: string } {
+function classifyAccessSetup(answer: string): {
+  needsSetupHelp: boolean;
+  assessment: string;
+} {
   const trimmed = answer.trim();
   const normalized = trimmed.toLowerCase();
   if (!normalized) {
-    return { needsSetupHelp: true, assessment: 'No access method provided yet.' };
+    return {
+      needsSetupHelp: true,
+      assessment: 'No access method provided yet.',
+    };
   }
 
   const setupPatterns = [
@@ -188,7 +194,7 @@ export function verifyCriticalScripts(
   if (existsSync(extractScript)) {
     const proc = Bun.spawnSync({
       cmd: [extractScript],
-      stdin: Buffer.from(branch + '\n'),
+      stdin: Buffer.from(`${branch}\n`),
       stdout: 'pipe',
       stderr: 'pipe',
     });
@@ -298,7 +304,7 @@ function detectTicketingTools(): Record<string, string> {
 export async function promptSetupScripts(
   scriptsDir: string,
   missing: string[],
-  org: string | undefined | null,
+  _org: string | undefined | null,
   sessionId?: string,
 ): Promise<boolean> {
   const branch = getCurrentBranch(process.cwd());
@@ -359,12 +365,20 @@ export async function promptSetupScripts(
     });
 
     if (setupInstructions) {
-      console.log('\n' + renderMarkdown(setupInstructions) + '\n');
+      console.log(`\n${renderMarkdown(setupInstructions)}\n`);
     }
 
     const setupChoice = await selectOption<'done' | 'local'>('What would you like to do?', [
-      { value: 'done', label: 'I have set it up', hint: 'Continue with ticket integration' },
-      { value: 'local', label: 'Downgrade to local mode', hint: 'Skip ticket integration' },
+      {
+        value: 'done',
+        label: 'I have set it up',
+        hint: 'Continue with ticket integration',
+      },
+      {
+        value: 'local',
+        label: 'Downgrade to local mode',
+        hint: 'Skip ticket integration',
+      },
     ]);
 
     if (setupChoice === 'local') {
@@ -497,9 +511,21 @@ export async function promptSetupScripts(
   while (!result.extractTicketId || !result.getTicketOk) {
     logWarn('Critical scripts are not working correctly.');
     const fix = await selectOption<'retry' | 'regenerate' | 'local'>('What would you like to do?', [
-      { value: 'retry', label: 'Retry verify', hint: 'Fix your tool/auth, then we verify again' },
-      { value: 'regenerate', label: 'Regenerate scripts', hint: 'LLM tries again from scratch' },
-      { value: 'local', label: 'Use local mode', hint: 'Skip ticket integration' },
+      {
+        value: 'retry',
+        label: 'Retry verify',
+        hint: 'Fix your tool/auth, then we verify again',
+      },
+      {
+        value: 'regenerate',
+        label: 'Regenerate scripts',
+        hint: 'LLM tries again from scratch',
+      },
+      {
+        value: 'local',
+        label: 'Use local mode',
+        hint: 'Skip ticket integration',
+      },
     ]);
 
     if (fix === 'local') {

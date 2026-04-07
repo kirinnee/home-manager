@@ -1,6 +1,6 @@
-import type { Phase2Context } from './types';
-import { appendEvent } from '../../core/log';
 import { devloopRun } from '../../core/devloop';
+import { appendEvent } from '../../core/log';
+import type { Phase2Context } from './types';
 
 const MAX_CRASH_RETRIES = 2;
 
@@ -59,7 +59,10 @@ export async function handleRunning(ctx: Phase2Context): Promise<string | null> 
           event: 'crash:retry',
           version,
           plan: planName,
-          metadata: { crashRetryCount: ctx.crashRetryCount, maxRetries: MAX_CRASH_RETRIES },
+          metadata: {
+            crashRetryCount: ctx.crashRetryCount,
+            maxRetries: MAX_CRASH_RETRIES,
+          },
         });
         // Re-setup and retry the same plan
         return 'setup_run';

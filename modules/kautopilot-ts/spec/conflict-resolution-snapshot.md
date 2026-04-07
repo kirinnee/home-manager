@@ -1,49 +1,46 @@
-# Spec: Conflict Resolution & Snapshot System
+# Spec: Conflict Resolution & Versioned Artifacts
 
 ## Summary
 
-Restructure the conflict resolution flow to properly route back to phase1, add a `kautopilot snapshot` command for audit-friendly editing, and simplify prompts for spec/plan writers.
+Restructure conflict resolution to properly route back to phase1, add versioned artifact snapshots for audit trail, and simplify prompts for spec/plan writers.
 
 ---
 
-## Part 1: Conflict Resolution State Machine
+## Part 1: Conflict Resolution & Feedback
 
-### Current Problems
+### Two Feedback Paths
 
-1. **`resolve` embeds decision in file** - parsed by regex, fragile
-2. **No analysis phase** - user must pick from 4 options blindly
-3. **`revisit_spec` stops at `failed`** - doesn't create new epoch or return to phase1
-4. **`rewrite_spec` name lies** - it rewrites plans, not task spec
-5. **LLM sees inlined content** - bloats context
+Both paths lead to the same outcome: new epoch v{N+1} with feedback.md.
 
-### New Flow
+| Context                     | Phase   | Trigger                              | TTY        |
+| --------------------------- | ------- | ------------------------------------ | ---------- |
+| **Implementation conflict** | Phase 2 | kloop failure / max_situations       | `resolve`  |
+| **PR feedback**             | Phase 3 | User wants changes after merge-ready | `feedback` |
+
+### Flow
 
 ```
-running → (conflict/max_situations) → resolve
-                                    ↓
-                          resolve (TTY):
-                          1. Show kloop evidence
-                          2. ANALYZE conflict yourself
-                          3. PROPOSE decision + reasoning
-                          4. CLARIFY if user disagrees
-                          5. Write event, proceed
-                                    ↓
-                          Decision routing:
-                          ┌─────────────────────────────────────────┐
-                          │ refine_local                            │
-                          │   → rewrite_plan (current only)         │
-                          │   → running                             │
-                          ├─────────────────────────────────────────┤
-                          │ regenerate_remaining                    │
-                          │   → rewrite_plan (current + downstream) │
-                          │   → running                             │
-                          ├─────────────────────────────────────────┤
-                          │ revisit_spec                            │
-                          │   → returns signal to runner            │
-                          │   → runner creates vN+1                 │
-                          │   → runner writes conflict-context.yaml│
-                          │   → runner restarts phase1              │
-                          └─────────────────────────────────────────┘
+Phase 2: running → conflict → resolve (TTY)
+                              ↓
+                              resolve:
+                              1. Show kloop evidence
+                              2. Discuss with user
+                              3. Write feedback.md
+                              4. Return 'revisit_spec' signal
+                              ↓
+                              Runner: create v{N+1}, start phase1
+
+Phase 3: poll → merge-ready → feedback_check
+                                ↓
+                                User chooses "I have feedback"
+                                ↓
+                                feedback (TTY):
+                                1. Review PR state with user
+                                2. Discuss what needs improvement
+                                3. Write feedback.md
+                                4. Return 'revisit_spec' signal
+                                ↓
+                                Runner: create v{N+1}, start phase1
 ```
 
 ### Cross-Phase Mechanics
@@ -52,79 +49,33 @@ running → (conflict/max_situations) → resolve
 
 **Solution:** Return special signals that the **runner** intercepts, not the state machine.
 
-**Signal flow:**
-
 ```ts
 // In phase2/resolve.ts
-if (decision === 'revisit_spec') {
-  // Write conflict context to artifacts (persists across phases)
-  writeConflictContext(sessionId, version, {
-    previousVersion: version,
-    failedPlan: planName,
-    conflictDescription: '...',
-    kloopRunId: ctx.kloopRunId,
-    failedConstraint: 'spec said X, reality says Y',
-  });
-
-  // Return special signal
-  return 'revisit_spec'; // Runner intercepts this
-}
+// After discussion with user, write feedback
+writeFileSync(snapshotPath(sessionId, version, 'feedback.md'), feedbackText);
+return 'revisit_spec'; // Runner intercepts this
 
 // In runner (src/phases/runner.ts)
 const result = await runPhase2State(state, ctx);
 if (result === 'revisit_spec') {
-  // Runner handles cross-phase transition
-  const newVersion = incrementVersion(sessionId, version);
-  await restartPhase1(sessionId, newVersion);
-  return;
+  await handleRevisitSpec(sessionId, ctx);
+  return; // Exit phase2 runner
 }
 ```
 
-**Conflict context persistence:**
+### `resolve` (phase2) - Simplified TTY
 
-```
-~/.kautopilot/<session>/
-├── artifacts/
-│   └── v1/
-│       └── conflict-context.yaml   # Written by resolve when revisit_spec
-│
-├── artifacts/
-│   └── v2/                         # Created by runner on restart
-│       └── conflict-context.yaml   # Copied from v1 + amended
-```
-
-**Phase1 handlers read conflict context:**
-
-```ts
-// In phase1/write-spec.ts
-const conflictContext = readConflictContext(sessionId, version);
-if (conflictContext) {
-  // Inject into prompt
-  prompt += `\n\n## Conflict from Previous Version\n...`;
-}
-```
-
-### New States
-
-#### `resolve` (phase2) - Enhanced TTY
-
-**Purpose**: Analyze conflict, propose resolution, agree with user.
+**Purpose**: Analyze conflict with user, write feedback for next iteration.
 
 **Behavior**:
 
 1. Load kloop evidence via `kloop describe`
 2. Load paths (not inlined content):
-   - `{task_spec_path}` - task-spec.md
-   - `{plan_path}` - current plan
-   - `{plans_dir}` - plans directory
-3. Analyze: Is this local? Cascading? Spec-level?
-4. Propose decision with reasoning
-5. If user disagrees → clarify → re-propose loop
-6. Once user confirms (via approval event, not regex), write `resolve:decision` event
-7. Return next state based on decision:
-   - `refine_local` → `rewrite_plan`
-   - `regenerate_remaining` → `rewrite_plan`
-   - `revisit_spec` → write conflict-context.yaml, return `'revisit_spec'` signal
+   - Latest spec: `~/.kautopilot/<session>/artifacts/v<N>/task-spec-{latest}.md`
+   - Current plan: from plans directory
+3. Discuss with user what went wrong and how to fix
+4. Write `feedback.md` to `artifacts/v<N>/feedback.md`
+5. Return `'revisit_spec'` signal
 
 **Prompt structure**:
 
@@ -140,140 +91,229 @@ Read these files to understand the original intent.
 
 {kloop_evidence}
 
-## Analysis
+## Discussion
 
-Based on the evidence above:
+Discuss with the user:
 1. What specifically went wrong?
 2. Is this a plan implementation issue or a spec constraint issue?
-3. How many plans are affected? (current only? downstream too?)
+3. What should change in the spec to address this?
 
-## Proposed Decision
+## Feedback
 
-I propose: [refine_local | regenerate_remaining | revisit_spec]
+When ready, write the feedback to {feedback_path}
+The feedback will be used to guide the next iteration.
 
-Reasoning: [explanation]
-
-[If user disagrees, clarify and re-propose]
-
-When ready, log your approval event to proceed.
+After writing feedback, return the revisit_spec signal.
 ```
 
 **Variables**:
 
-- `{task_spec_path}` - path to task-spec.md
-- `{plan_path}` - path to current plan
-- `{plans_dir}` - path to plans directory
+- `{task_spec_path}` - latest versioned spec (from `findLatestSpecPath`)
+- `{plan_path}` - current plan
+- `{plans_dir}` - plans directory
 - `{kloop_evidence}` - output from `kloop describe`
+- `{feedback_path}` - `artifacts/v{N}/feedback.md`
 
-**Mechanics injected by handler** (not in user-configurable prompt):
+### `feedback` (phase3) - TTY for PR Feedback
 
-- File read instructions
-- Approval event format
-- Decision options with semantics
-
-**Approval mechanism**:
-User logs approval event (same pattern as triage/spec_writer TTY), not regex parsing:
-
-```ts
-appendEvent(sessionId, {
-  event: 'resolve:approved',
-  metadata: { decision: 'refine_local', reasoning: '...' },
-});
-```
-
-#### `rewrite_plan` (renamed from `rewrite_spec`)
-
-**Purpose**: Rewrite affected plans based on resolution.
+**Purpose**: Collect feedback after PR is merge-ready, write for next iteration.
 
 **Behavior**:
 
-1. Read decision from `resolve:approved` event (last resolve event)
-2. Determine affected plans:
-   - `refine_local`: only current plan
-   - `regenerate_remaining`: current + all downstream (plans with higher ordinals)
-3. Handler calls `snapshot plans {version}` before any edits
-4. For each affected plan, invoke LLM with paths (not inlined content)
-5. LLM edits working copies directly
-6. Init new kloop run
-7. Return `running`
-
-**Decision semantics**:
-
-| Decision               | Meaning                                | LLM behavior                                              |
-| ---------------------- | -------------------------------------- | --------------------------------------------------------- |
-| `refine_local`         | Plan implementation approach was wrong | Edit existing plan in-place, preserve structure and scope |
-| `regenerate_remaining` | Cascading plan-level issue             | Generate fresh plans for all affected, may restructure    |
+1. Load PR state (URL, checks, threads)
+2. Load paths (not inlined content):
+   - Latest spec: `~/.kautopilot/<session>/artifacts/v<N>/task-spec-{latest}.md`
+   - Plans directory: `~/.kautopilot/<session>/artifacts/v<N>/plans-{latest}/`
+3. Review PR with user - what needs improvement
+4. Write `feedback.md` to `artifacts/v<N>/feedback.md`
+5. Return `'revisit_spec'` signal
 
 **Prompt structure**:
 
 ```
-## Task
-Rewrite plan-{ordinal} to address the resolution.
-
 ## Context Paths
 - Task spec: {task_spec_path}
-- Resolution event: {resolve_event_path}
-- Previous plan: {plan_path}
+- Plans: {plans_dir}
 
-Read these files to understand what needs to change.
+Read these files to understand the original intent.
 
-## Snapshot
-A snapshot has been created at plans-{snapshot_version}/
-Edit the working copy at {plans_dir}/plan-{ordinal}.md
+## PR State
+- URL: {pr_url}
+- Checks status: {checks_status}
+- Open threads: {thread_count}
 
-## Output
-Write the updated plan directly to the working copy path above.
+## Discussion
+
+Discuss with the user:
+1. What about the PR needs improvement?
+2. Is this an implementation issue or a spec issue?
+3. What should change in the spec to address this?
+
+## Feedback
+
+When ready, write the feedback to {feedback_path}
+The feedback will be used to guide the next iteration.
+
+After writing feedback, return the revisit_spec signal.
 ```
 
 **Variables**:
 
-- `{task_spec_path}` - path to task-spec.md
-- `{resolve_event_path}` - path to resolve:approved event in logs
-- `{plan_path}` - path to the plan being rewritten
-- `{plans_dir}` - plans directory
-- `{snapshot_version}` - version number from snapshot command
-- `{ordinal}` - which plan number
-
-**Handler behavior** (not user-configurable):
-
-```ts
-// Handler calls snapshot before LLM
-const snapshotVersion = snapshotPlans(sessionId, version);
-
-// Handler loops through affected plans
-for (const ordinal of affectedOrdinals) {
-  const result = await spawnPrint(binary, prompt, { ... });
-  // LLM edits file directly via tools
-}
-
-// Re-init kloop
-const kloopRunId = devloopInit(worktree, specPath, configPath);
-ctx.kloopRunId = kloopRunId;
-```
+- `{task_spec_path}` - latest versioned spec
+- `{plans_dir}` - latest plans directory
+- `{pr_url}` - PR URL
+- `{checks_status}` - summary of CI checks
+- `{thread_count}` - number of open review threads
+- `{feedback_path}` - `artifacts/v{N}/feedback.md`
 
 ### Removed States
 
-- `rewrite_spec` → renamed to `rewrite_plan`
-- `amend_spec` → removed (cross-phase handled by runner, not a state)
+- `rewrite_spec` → removed (revisit_spec goes directly to phase1)
+- `amend_spec` → removed
 
 ### Simplified Decisions
 
-| Decision               | Meaning                   | Affected Plans           |
-| ---------------------- | ------------------------- | ------------------------ |
-| `refine_local`         | Plan implementation wrong | Current plan only        |
-| `regenerate_remaining` | Plan-level, cascading     | Current + all downstream |
-| `revisit_spec`         | Spec constraint wrong     | Return to phase1, vN+1   |
+Only one decision: **revisit_spec** - go back to phase1 with feedback.
 
-Removed `patch_downstream` - redundant with `regenerate_remaining`.
+Removed `refine_local`, `regenerate_remaining`, `patch_downstream` - these are now handled by the natural iteration flow: write feedback → phase1 rewrites spec → phase1 rewrites plans → kloop runs.
 
 ---
 
-## Part 2: Snapshot Command
+## Part 2: Versioned Artifacts
+
+### Core Concept
+
+**Repo has working copies. Global has snapshots.**
+
+- LLM edits working copies in repo (clean, single file per artifact)
+- After each edit cycle, handler calls snapshot command
+- Snapshots are stored in `~/.kautopilot/<session>/artifacts/v<N>/` with version numbers
+
+### Repo Structure (Working Copies)
+
+```
+<repo>/
+└── spec/
+    └── <ticket-id>/
+        └── v<N>/
+            ├── task-spec.md       # Working copy (LLM edits this)
+            ├── triage.md           # Not versioned (doesn't change)
+            └── plans/
+                ├── plan-1.md       # Working copies
+                ├── plan-2.md
+                └── plan-3.md
+```
+
+### Global Structure (Snapshots)
+
+```
+~/.kautopilot/
+├── <session-id>/
+│   ├── artifacts/
+│   │   ├── ticket.md              # Session-level (not versioned)
+│   │   └── v1/
+│   │       ├── task-spec-1.md     # First write
+│   │       ├── task-spec-2.md     # After first feedback round
+│   │       ├── task-spec-3.md     # After second feedback round
+│   │       ├── plans-1/           # First write
+│   │       │   ├── plan-1.md
+│   │       │   └── plan-2.md
+│   │       ├── plans-2/           # After rewrite
+│   │       │   ├── plan-1.md
+│   │       │   └── plan-2.md
+│   │       ├── feedback.md        # Written by resolve TTY
+│   │       └── contract.json      # Epoch metadata
+│   ├── v2/                        # New epoch after revisit_spec
+│   │   ├── task-spec-1.md         # Full rewrite addressing feedback
+│   │   ├── plans-1/               # Incremental plans (only remaining work)
+│   │   │   └── plan-1.md
+│   │   └── contract.json          # (no feedback.md here - references v1/feedback.md)
+│   ├── config.yaml
+│   ├── log.jsonl
+│   └── status.yaml
+```
+
+### Versioning Semantics
+
+**Two numberings:**
+
+1. **Epoch version (vN)** - `artifacts/v1/`, `artifacts/v2/`
+   - Incremented on `revisit_spec` (cross-phase reset)
+   - Each epoch is a fresh attempt at the ticket
+
+2. **Snapshot version (-N)** - `task-spec-1.md`, `task-spec-2.md`
+   - Incremented within each epoch
+   - Per-epoch: each epoch starts fresh at 1
+
+**Example evolution:**
+
+```
+v1/
+├── task-spec-1.md     # Initial spec
+├── task-spec-2.md     # After user feedback in spec_writer
+├── plans-1/           # Initial plans
+├── plans-2/           # After user feedback in plan_writer
+├── feedback.md        # From resolve (conflict found) → caused v2
+└── contract.json
+
+v2/                    # New epoch after revisit_spec
+├── task-spec-1.md     # Fresh spec addressing v1/feedback.md
+├── plans-1/           # Incremental plans (remaining work only)
+├── feedback.md        # From resolve (if v2 also fails) → caused v3
+└── contract.json
+
+v3/                    # If v2 also had a conflict
+├── task-spec-1.md     # Fresh spec addressing v2/feedback.md
+├── plans-1/           # Incremental plans from v2's state
+└── contract.json
+```
+
+**Feedback reference chain:**
+
+- `v{N}/spec_writer` reads `v{N-1}/feedback.md` (reason we're at v{N})
+- `v{N}/resolve` writes `v{N}/feedback.md` (why v{N} failed)
+- Each epoch's feedback.md is preserved, not copied
+
+---
+
+## Part 3: Snapshot Command
 
 ### Command
 
 ```bash
-kautopilot snapshot <spec|plans> <version> [--session <id>]
+kautopilot snapshot <spec|plans> <epoch-version> [--session <id>]
+```
+
+**Purpose**: Called by LLM within TTY session after each edit cycle. Creates versioned snapshot of working copies.
+
+### Behavior
+
+**Spec snapshot:**
+
+```bash
+# LLM calls this after writing/editing task-spec.md
+kautopilot snapshot spec 1
+# 1. Find next available number in artifacts/v1/
+# 2. Copy repo: spec/<ticket>/v1/task-spec.md → artifacts/v1/task-spec-{N}.md
+# 3. Output version info for LLM to display to user
+
+# Output:
+SNAPSHOT_VERSION=2
+SNAPSHOT_PATH=~/.kautopilot/<session>/artifacts/v1/task-spec-2.md
+```
+
+**Plans snapshot:**
+
+```bash
+# LLM calls this after writing/editing plans
+kautopilot snapshot plans 1
+# 1. Find next available number in artifacts/v1/
+# 2. Copy entire folder: spec/<ticket>/v1/plans/ → artifacts/v1/plans-{N}/
+# 3. Output version info
+
+# Output:
+SNAPSHOT_VERSION=2
+SNAPSHOT_PATH=~/.kautopilot/<session>/artifacts/v1/plans-2/
 ```
 
 ### Session Resolution
@@ -285,272 +325,179 @@ Session is optional. Resolution order:
 3. Look for `status.yaml` in current directory tree (walk up to git root)
 4. Error if not found
 
-### Behavior
-
-**Spec snapshot**:
-
-```bash
-kautopilot snapshot spec 1
-# Workflow:
-# 1. Find next available number in snapshots/<session>/v1/
-# 2. Copy artifacts/v1/task-spec.md → snapshots/<session>/v1/task-spec-{N}.md
-# 3. Output snapshot info
-
-# First snapshot:
-kautopilot snapshot spec 1
-# → Copies to snapshots/<session>/v1/task-spec-1.md
-# → Outputs: SNAPSHOT_VERSION=1
-
-# Second snapshot:
-kautopilot snapshot spec 1
-# → Copies to snapshots/<session>/v1/task-spec-2.md
-# → Outputs: SNAPSHOT_VERSION=2
-```
-
-**Plans snapshot**:
-
-```bash
-kautopilot snapshot plans 1
-# Workflow:
-# 1. Find next available number in snapshots/<session>/v1/
-# 2. Copy entire artifacts/v1/plans/ → snapshots/<session>/v1/plans-{N}/
-# 3. Output snapshot info
-
-# First snapshot:
-kautopilot snapshot plans 1
-# → Copies to snapshots/<session>/v1/plans-1/
-# → Outputs: SNAPSHOT_VERSION=1
-
-# Second snapshot:
-kautopilot snapshot plans 1
-# → Copies to snapshots/<session>/v1/plans-2/
-# → Outputs: SNAPSHOT_VERSION=2
-```
-
-### Output Format
-
-Machine-parseable output for LLM consumption:
-
-```
-SNAPSHOT_VERSION=2
-SNAPSHOT_PATH=~/.kautopilot/<session>/snapshots/v1/plans-2/
-WORKING_PATH=~/.kautopilot/<session>/artifacts/v1/plans/
-```
-
-### Storage Structure
-
-```
-~/.kautopilot/
-├── <session-id>/
-│   ├── artifacts/
-│   │   └── v1/
-│   │       ├── task-spec.md      # Working copy (LLM edits this)
-│   │       └── plans/            # Working copy folder
-│   │           ├── plan-1.md
-│   │           └── plan-2.md
-│   │
-│   └── snapshots/
-│       └── v1/
-│           ├── task-spec-1.md    # First spec snapshot
-│           ├── task-spec-2.md    # After conflict revision
-│           ├── plans-1/          # First plans state
-│           │   ├── plan-1.md
-│           │   └── plan-2.md
-│           └── plans-2/          # After rewrite
-│               ├── plan-1.md
-│               └── plan-2.md
-```
-
-**All snapshots live in `snapshots/`** - no in-place versioning in `artifacts/`.
-
-### Versioning Strategy
-
-| Artifact     | Versioning                     | Commands                      |
-| ------------ | ------------------------------ | ----------------------------- |
-| task-spec.md | Numbered backups in snapshots/ | `kautopilot snapshot spec 1`  |
-| plans/       | Folder-based atomic snapshots  | `kautopilot snapshot plans 1` |
-
-**Why folder for plans:**
-
-- Plans are interdependent - rewriting one affects others
-- Whole folder = one decision point state
-- Simpler audit - "what did all plans look like at plans-2?"
-- No partial state confusion
-
-### Benefits
-
-1. **Audit trail** - all versions preserved in `snapshots/`
-2. **Simple workflow** - handler calls snapshot, LLM edits working copy
-3. **No inline content** - paths only in prompts
-4. **Automatic numbering** - no manual version tracking
-5. **Session-aware** - works from any directory in repo
-
----
-
-## Part 3: Prompt Changes for Spec/Plan Writers
-
-### spec_writer
-
-**Variables**:
-
-- `{task_spec_path}` - working copy path: `artifacts/v{version}/task-spec.md`
-- `{version}` - current version number
-- `{triage_path}` - path to triage file
-- `{ticket_path}` - path to ticket file
-- **Conditionally** (when conflict-context.yaml exists):
-  - `{previous_version}` - the failed version
-  - `{conflict_description}` - what went wrong
-  - `{failed_constraint}` - spec said X, reality says Y
-
-**Prompt (in config)**:
-
-```
-## Context Paths
-- Ticket: {ticket_path}
-- Triage: {triage_path}
-- Output: {task_spec_path}
-
-## Task
-Write a task spec for this kautopilot task.
-
-## Instructions
-1. Read the ticket and triage files
-2. Explore the codebase thoroughly
-3. Write the spec to {task_spec_path}
-4. The spec should be concrete and testable
-
-[If conflict context exists - INJECTED BY HANDLER]
-## Conflict from Previous Version
-The previous spec (v{previous_version}) failed during implementation:
-- What went wrong: {conflict_description}
-- Spec constraint that was invalid: {failed_constraint}
-
-You must amend the spec to resolve this conflict. The constraint was wrong
-because reality differs from what the spec assumed. Adjust the spec to match
-reality while preserving what was correct.
-```
-
-**Handler behavior**:
+### Finding Next Version
 
 ```ts
-// Check for conflict context
-const conflictContext = readConflictContext(sessionId, version);
-if (conflictContext) {
-  // Inject conflict section into prompt
-  prompt += buildConflictSection(conflictContext);
+function findNextSpecVersion(sessionId: string, epochVersion: number): number {
+  const artifactDir = `${sessionDir(sessionId)}/artifacts/v${epochVersion}`;
+  const files = readdirSync(artifactDir);
+  const versions = files
+    .filter(f => f.match(/^task-spec-(\d+)\.md$/))
+    .map(f => parseInt(f.match(/^task-spec-(\d+)\.md$/)![1]));
+  return versions.length > 0 ? Math.max(...versions) + 1 : 1;
 }
 
-// Handler calls snapshot BEFORE TTY handoff
-snapshotSpec(sessionId, version);
-
-// TTY handoff - LLM edits working copy directly
-await spawnTTY(binary, prompt, { ... });
-```
-
-### plan_writer
-
-**Variables**:
-
-- `{plans_dir}` - plans directory: `artifacts/v{version}/plans/`
-- `{version}` - current version number
-- `{spec_path}` - path to task spec
-- `{triage_path}` - path to triage file
-- **Conditionally** (when conflict-context.yaml exists):
-  - `{previous_version}` - the failed version
-  - `{failed_plan}` - which plan(s) failed
-  - `{conflict_description}` - what went wrong
-
-**Prompt (in config)**:
-
-```
-## Context Paths
-- Spec: {spec_path}
-- Triage: {triage_path}
-- Output directory: {plans_dir}
-
-## Task
-Write implementation plans for this kautopilot task.
-
-## Instructions
-1. Read the spec and triage files
-2. Plans should be vertically split (by domain/feature)
-3. Each plan is one isolated, committable unit
-4. Write plans to {plans_dir}/plan-1.md, plan-2.md, etc.
-
-[If conflict context exists - INJECTED BY HANDLER]
-## Conflict from Previous Plans
-The previous plans (v{previous_version}) failed during implementation:
-- Failed plan: {failed_plan}
-- What went wrong: {conflict_description}
-
-Adjust the affected plans. The previous approach didn't work because
-reality differs from what was planned. Find an alternative approach.
-```
-
-**Handler behavior**:
-
-```ts
-// Check for conflict context
-const conflictContext = readConflictContext(sessionId, version);
-if (conflictContext) {
-  prompt += buildConflictSection(conflictContext);
+function findLatestSpecPath(sessionId: string, epochVersion: number): string | null {
+  const next = findNextSpecVersion(sessionId, epochVersion);
+  const current = next - 1;
+  if (current === 0) return null;
+  return `${sessionDir(sessionId)}/artifacts/v${epochVersion}/task-spec-${current}.md`;
 }
-
-// Handler calls snapshot BEFORE TTY handoff
-snapshotPlans(sessionId, version);
-
-// TTY handoff
-await spawnTTY(binary, prompt, { ... });
 ```
 
 ---
 
-## Part 4: Conflict Context System
+## Part 4: Handler Integration
 
-### Data Structure
-
-```ts
-interface ConflictContext {
-  previousVersion: number; // The version that failed
-  failedPlan?: string; // e.g., "plan-2"
-  conflictDescription: string; // Human-readable summary
-  kloopRunId?: string; // Reference to failed run
-  failedConstraint?: string; // "spec said X, reality says Y"
-  proposedResolution?: string; // What the user decided
-}
-```
-
-### File Location
+### spec_writer Flow
 
 ```
-~/.kautopilot/<session>/artifacts/v{N}/conflict-context.yaml
+TTY starts with prompt:
+- Output path: spec/<ticket>/v<N>/task-spec.md (repo working copy)
+- Feedback path: artifacts/v{N-1}/feedback.md (if this is a new epoch from revisit_spec)
+
+Within TTY loop:
+1. LLM reads previous spec (if exists) and/or feedback
+2. LLM writes to task-spec.md
+3. LLM calls: kautopilot snapshot spec <epoch>
+   → Creates: artifacts/v<N>/task-spec-{next}.md
+4. LLM asks user for feedback in TTY
+5. User provides feedback OR approves
+6. If feedback: loop back to step 2 (edit → snapshot → ask)
+7. If approved: LLM exits TTY
+
+Result: Multiple snapshots created per feedback cycle (task-spec-1.md, task-spec-2.md, ...)
 ```
 
-### Writing (by resolve handler)
+**Spec vs Plans Semantics:**
 
-```ts
-function writeConflictContext(sessionId: string, version: number, context: ConflictContext): void {
-  const path = `${sessionDir(sessionId)}/artifacts/v${version}/conflict-context.yaml`;
-  writeFileSync(path, YAML.stringify(context));
-}
+| Artifact    | Type                          | On revisit_spec (vN → vN+1)                                           |
+| ----------- | ----------------------------- | --------------------------------------------------------------------- |
+| `task-spec` | Declarative (what we want)    | **FULL reconstruction** - rewrite entire spec with feedback addressed |
+| `plans`     | Imperative (how to get there) | **INCREMENTAL** - only remaining work, LLM assesses code state        |
+
+### plan_writer Flow
+
+```
+TTY starts with prompt:
+- Output dir: spec/<ticket>/v<N>/plans/ (repo working copy)
+- Spec path: artifacts/v<N>/task-spec-{latest}.md
+- Feedback path: artifacts/v{N-1}/feedback.md (if new epoch from revisit_spec)
+- Previous plans: artifacts/v{N-1}/plans-{latest}/ (if new epoch, for reference)
+
+Within TTY loop:
+1. LLM reads spec, feedback, previous plans, and checks codebase state
+2. LLM writes plans to spec/<ticket>/v<N>/plans/
+3. LLM calls: kautopilot snapshot plans <epoch>
+   → Creates: artifacts/v<N>/plans-{next}/
+4. LLM asks user for feedback in TTY
+5. User provides feedback OR approves
+6. If feedback: loop back to step 2 (edit → snapshot → ask)
+7. If approved: LLM exits TTY
+
+Result: Multiple plan snapshots created per feedback cycle (plans-1/, plans-2/, ...)
 ```
 
-### Reading (by phase1 handlers)
+**After revisit_spec (new epoch):**
 
-```ts
-function readConflictContext(sessionId: string, version: number): ConflictContext | null {
-  const path = `${sessionDir(sessionId)}/artifacts/v${version}/conflict-context.yaml`;
-  if (!existsSync(path)) return null;
-  return YAML.parse(readFileSync(path, 'utf-8'));
-}
+When starting v{N} after a conflict in v{N-1}:
+
+- LLM checks actual codebase state (git history, what's committed)
+- LLM reads v{N-1}/feedback.md to understand what went wrong
+- LLM writes only plans for remaining work (incremental, not full rewrite)
+
+**Key insight for plans after revisit_spec:**
+
+The LLM does NOT trust metadata like `contract.json` or `manifest.json`. It grounds itself in actual code state:
+
+```
+Inputs for v2 plans (within TTY):
+1. Actual codebase state (git diff, what's committed)
+2. v2/task-spec-{latest}.md (new spec - just written in spec_writer TTY)
+3. v1/feedback.md (what went wrong - from previous epoch's resolve)
+4. v1/plans-{latest}/ (reference - what was attempted)
+
+LLM decides:
+- What's already done (check git history, code state)
+- What needs changing (from feedback)
+- What's new (from spec changes)
+
+Output:
+- Plans for remaining work only (incremental)
 ```
 
-### Lifecycle
+**Prompt mechanics for spec_writer and plan_writer:**
 
-1. **Written by** `resolve` handler when decision is `revisit_spec`
-2. **Copied to** v{N+1} by runner when restarting phase1
-3. **Read by** `spec_writer` and `plan_writer` handlers
-4. **Cleared** after successful spec approval (or kept for audit)
+The snapshot command is called by the LLM as a compulsory step within the existing TTY approval flow:
+
+```
+## Workflow (extends existing approval mechanics)
+
+1. Read the context files listed above
+2. Write/edit the output file(s)
+3. Run snapshot:
+   - For spec: kautopilot snapshot spec {epoch}
+   - For plans: kautopilot snapshot plans {epoch}
+4. Present your work to the user
+5. Ask for feedback
+6. If feedback provided:
+   - Incorporate feedback
+   - Edit the files again
+   - Run snapshot again (version increments automatically)
+   - Loop back to step 4
+7. When user approves:
+   - Log approval event (existing mechanic)
+   - Exit TTY
+```
+
+**Existing mechanics preserved:**
+
+- Approval event logging (`appendEvent` with approval metadata)
+- TTY handoff via `spawnTTYWithTurnTracking`
+- Step recording (`writeStepInit`)
+
+**New mechanic added:**
+
+- Snapshot call is compulsory after each edit cycle (step 3)
+- Snapshot version auto-increments within epoch
+
+**Variables for Prompts**
+
+**spec_writer:**
+
+- `{task_spec_working_path}` - `spec/<ticket>/v<N>/task-spec.md` (repo)
+- `{task_spec_snapshot_path}` - `artifacts/v<N>/task-spec-{next}.md` (will be created)
+- `{previous_spec_path}` - `artifacts/v<N>/task-spec-{prev}.md` (if exists within same epoch)
+- `{previous_epoch_feedback_path}` - `artifacts/v{N-1}/feedback.md` (if new epoch from revisit_spec)
+- `{triage_path}` - `spec/<ticket>/v<N>/triage.md`
+- `{ticket_path}` - `artifacts/ticket.md`
+
+**plan_writer:**
+
+- `{plans_working_dir}` - `spec/<ticket>/v<N>/plans/` (repo)
+- `{plans_snapshot_dir}` - `artifacts/v<N>/plans-{next}/` (will be created)
+- `{previous_plans_dir}` - `artifacts/v<N>/plans-{prev}/` (if exists within same epoch)
+- `{spec_path}` - `artifacts/v<N>/task-spec-{latest}.md`
+- `{previous_epoch_feedback_path}` - `artifacts/v{N-1}/feedback.md` (if new epoch from revisit_spec)
+- `{previous_epoch_plans_dir}` - `artifacts/v{N-1}/plans-{latest}/` (if new epoch, for reference)
+- `{triage_path}` - `spec/<ticket>/v<N>/triage.md`
+
+**resolve:**
+
+- `{task_spec_path}` - `artifacts/v<N>/task-spec-{latest}.md`
+- `{plan_path}` - current plan path
+- `{plans_dir}` - plans directory
+- `{kloop_evidence}` - from `kloop describe`
+- `{feedback_path}` - `artifacts/v<N>/feedback.md` (to write)
+
+**feedback (phase3):**
+
+- `{task_spec_path}` - `artifacts/v<N>/task-spec-{latest}.md`
+- `{plans_dir}` - `artifacts/v<N>/plans-{latest}`
+- `{pr_url}` - PR URL
+- `{checks_status}` - summary of CI checks status
+- `{thread_count}` - number of open review threads
+- `{feedback_path}` - `artifacts/v<N>/feedback.md` (to write)
 
 ---
 
@@ -558,20 +505,11 @@ function readConflictContext(sessionId: string, version: number): ConflictContex
 
 ### State Machine Reconstruction
 
-The state machine reconstructs from WAL events via `ensureStatus()`. The `status.yaml` contains:
-
-- `phase`: current phase ('plan', 'implementation', 'polish')
-- `version`: current version number
-- `state`: current state name
-- `stateStatus`: 'pending' | 'running' | 'completed' | 'failed'
-
-Phase and version are set by `phase{N}:started` events. Cross-phase transitions must write proper events so reconstruction works correctly.
+The state machine reconstructs from WAL events via `ensureStatus()`. Phase and version are set by `phase{N}:started` events.
 
 ### Runner Signal Interception
 
 ```ts
-// In src/phases/runner.ts
-
 async function runPhase2(sessionId: string): Promise<void> {
   let state = 'setup_run';
   const ctx = await loadPhase2Context(sessionId);
@@ -579,7 +517,6 @@ async function runPhase2(sessionId: string): Promise<void> {
   while (state !== 'done' && state !== 'phase3') {
     const result = await runPhase2State(state, ctx);
 
-    // Cross-phase signal interception
     if (result === 'revisit_spec') {
       await handleRevisitSpec(sessionId, ctx);
       return; // Exit phase2 runner
@@ -593,85 +530,43 @@ async function handleRevisitSpec(sessionId: string, ctx: Phase2Context): Promise
   const oldVersion = ctx.version;
   const newVersion = oldVersion + 1;
 
-  // 1. Mark v{oldVersion} as superseded (updates contract.json)
+  // 1. Mark v{oldVersion} as superseded
   supersedEpoch(sessionId, oldVersion, newVersion);
 
-  // 2. Write version superseded event for audit
+  // 2. Write version superseded event
   appendEvent(sessionId, {
-    ts: new Date().toISOString(),
     event: 'version:superseded',
     version: oldVersion,
-    metadata: {
-      supersededBy: newVersion,
-      reason: 'revisit_spec',
-      conflictDescription: ctx.conflictDescription,
-    },
+    metadata: { supersededBy: newVersion, reason: 'revisit_spec' },
   });
 
   // 3. Write phase2 completion event
   appendEvent(sessionId, {
-    ts: new Date().toISOString(),
     event: 'phase2:completed',
     version: oldVersion,
     metadata: { reason: 'revisit_spec' },
   });
 
-  // 4. Create new version directory
+  // 4. Create new epoch directory
   const newVersionDir = `${sessionDir(sessionId)}/artifacts/v${newVersion}`;
   mkdirSync(newVersionDir, { recursive: true });
 
-  // 5. Copy conflict context to new version
-  const oldConflictPath = `${sessionDir(sessionId)}/artifacts/v${oldVersion}/conflict-context.yaml`;
-  if (existsSync(oldConflictPath)) {
-    const context = YAML.parse(readFileSync(oldConflictPath, 'utf-8'));
-    context.previousVersion = oldVersion;
-    writeFileSync(`${newVersionDir}/conflict-context.yaml`, YAML.stringify(context));
-  }
+  // NOTE: Do NOT copy feedback.md - each epoch has its own
+  // v{N} reads v{N-1}/feedback.md, v{N} writes v{N}/feedback.md
 
-  // 6. Write phase1 start event with new version
-  // This triggers applyEvent to set phase='plan' and version=newVersion
+  // 5. Write phase1 start event with new version
   appendEvent(sessionId, {
-    ts: new Date().toISOString(),
     event: 'phase1:started',
     version: newVersion,
-    metadata: {
-      previousVersion: oldVersion,
-      conflictContext: true,
-    },
+    metadata: { previousVersion: oldVersion, reason: 'revisit_spec' },
   });
 
-  // 7. Reconstruct status from WAL (includes new events)
-  const status = ensureStatus(sessionId);
-  // Now status.phase === 'plan' and status.version === newVersion
+  // 6. Reconstruct status
+  ensureStatus(sessionId);
 
-  // 8. Start phase1 runner
+  // 7. Start phase1 runner
   await runPhase1(sessionId);
 }
-```
-
-### Event Flow for Cross-Phase
-
-```
-Before:
-  status.yaml: { phase: 'implementation', version: 1, ... }
-  contract.json (v1): { version: 1, ... }
-
-Events written (in order):
-  1. version:superseded (v1)  → audit trail for v1's closure
-  2. phase2:completed (v1)   → marks phase2 done
-  3. phase1:started (v2)     → applyEvent sets phase='plan', v=2
-
-Side effects:
-  - contract.json (v1) updated: { supersededBy: 2, supersededAt: '...' }
-  - v2/ directory created with conflict-context.yaml
-
-After ensureStatus():
-  status.yaml: { phase: 'plan', version: 2, ... }
-
-Phase1 runner starts:
-  - Reads status.yaml
-  - Loads Phase1Context with version=2
-  - phase1 handlers check for conflict-context.yaml in v2
 ```
 
 ---
@@ -680,180 +575,60 @@ Phase1 runner starts:
 
 ### New Files
 
-- `src/cli/snapshot.ts` - snapshot command
-- `src/core/snapshot.ts` - snapshot logic (snapshotSpec, snapshotPlans)
-- `src/core/conflict-context.ts` - read/write conflict context
+- `src/cli/snapshot.ts` - snapshot CLI command
+- `src/core/artifact-versioning.ts` - `findNextSpecVersion`, `findLatestSpecPath`, `findNextPlansVersion`, `findLatestPlansPath`
 
 ### Modified Files
 
-- `src/phases/phase2/resolve.ts` - enhanced TTY with analysis/proposal, write conflict context
-- `src/phases/phase2/rewrite-spec.ts` → `src/phases/phase2/rewrite-plan.ts` - renamed
-- `src/phases/runner.ts` - add cross-phase signal handling for `revisit_spec`
-- `src/phases/machine.ts` - update state names, add `'revisit_spec'` return
-- `src/core/types.ts` - add `ConflictContext` interface, update prompts
-- `src/phases/phase1/write-spec.ts` - read conflict context, inject into prompt
-- `src/phases/phase1/write-plans.ts` - read conflict context, inject into prompt
+- `src/phases/phase2/resolve.ts` - simplified TTY, write feedback.md, return revisit_spec
+- `src/phases/phase3/feedback.ts` - TTY handoff, write feedback.md, return revisit_spec
+- `src/phases/runner.ts` - add `revisit_spec` signal handling for both phase2 and phase3
+- `src/core/types.ts` - update resolve prompt, add snapshot workflow to spec_writer/plan_writer prompts
+- `src/phases/phase1/write-spec.ts` - inject snapshot workflow into prompt, handle feedback.md reference
+- `src/phases/phase1/write-plans.ts` - inject snapshot workflow into prompt, handle feedback.md reference, previous epoch plans
+- Delete: `src/phases/phase2/rewrite-spec.ts` (removed state)
 
-### Prompt Changes (in `src/core/types.ts` DEFAULT_CONFIG)
+**Note: Existing mechanics preserved:**
 
-#### `resolve` (phase2) - Major Rewrite
+- Approval event logging (`appendEvent` with approval metadata)
+- TTY handoff via `spawnTTYWithTurnTracking`
+- Step recording (`writeStepInit`)
+- All existing prompt variables and context building
+- Session resolution from `status.yaml`
 
-**Current variables**: `{plan}`, `{spec}`, `{taskSpec}`, `{reason}`, `{attempt}`
-**New variables**: `{task_spec_path}`, `{plan_path}`, `{plans_dir}`, `{kloop_evidence}`
+**Only additions:**
 
-**Current prompt** (to replace):
-
-```
-Analyze the conflict or failure and discuss resolution options with the user.
-
-## What is a Conflict?
-
-A conflict occurs when the spec defines something that seems plausible, but during implementation we discover it's not possible. This is called "the devil is in the details" — the spec looked reasonable on paper, but reality says otherwise.
-
-**Example**: The spec says "don't touch source code, add tests till 100% coverage." This seems reasonable until implementation reveals unreachable dead code that MUST be removed to achieve 100% coverage. Removing dead code VIOLATES the spec constraint, creating a conflict.
-
-## Where to Look
-
-1. **Plan contents** — read the current plan at the path provided
-2. **Task spec** — read the constraints and requirements at the path provided
-3. **Kloop evidence** — the implementation log shows exactly where things went wrong
-4. **Source code** — the actual codebase state in the worktree
-
-## Resolution Options
-
-When you identify a conflict, consider:
-- **Root cause** — what assumption in the spec turned out to be wrong?
-- **Alternative approaches** — is there another way to satisfy the intent?
-- **Scope reduction** — can we solve a smaller problem that's still valuable?
-
-Discuss with the user until you have a clear resolution. Document your approach in the resolution file.
-```
-
-**New prompt**:
-
-```
-## Context Paths
-- Task spec: {task_spec_path}
-- Current plan: {plan_path}
-- Plans directory: {plans_dir}
-
-Read these files to understand the original intent.
-
-## Kloop Evidence
-
-{kloop_evidence}
-
-## Analysis
-
-Based on the evidence above:
-1. What specifically went wrong?
-2. Is this a plan implementation issue or a spec constraint issue?
-3. How many plans are affected? (current only? downstream too?)
-
-## Proposed Decision
-
-I propose: [refine_local | regenerate_remaining | revisit_spec]
-
-Reasoning: [explanation]
-
-[If user disagrees, clarify and re-propose]
-
-When ready, log your approval event to proceed.
-```
-
----
-
-#### `rewrite_spec` → `rewrite_plan` (phase2) - Rename + Rewrite
-
-**Rename**: `agents.phase2.rewrite_spec` → `agents.phase2.rewrite_plan`
-
-**New variables**: `{task_spec_path}`, `{resolve_event_path}`, `{plan_path}`, `{plans_dir}`, `{snapshot_version}`, `{ordinal}`
-
-**Current prompt** (to replace):
-
-```
-Rewrite the working spec to address the resolution.
-Preserve what was working. Only change what needs to change.
-Output ONLY the rewritten spec in markdown format.
-```
-
-**New prompt**:
-
-```
-## Task
-Rewrite plan-{ordinal} to address the resolution.
-
-## Context Paths
-- Task spec: {task_spec_path}
-- Resolution event: {resolve_event_path}
-- Previous plan: {plan_path}
-
-Read these files to understand what needs to change.
-
-## Snapshot
-A snapshot has been created at plans-{snapshot_version}/
-Edit the working copy at {plans_dir}/plan-{ordinal}.md
-
-## Output
-Write the updated plan directly to the working copy path above.
-```
-
----
-
-#### `spec_writer` (phase1) - Variable Alignment
-
-**Current variables**: `{ticket}`, `{triage}`
-**New variables**: `{ticket_path}`, `{triage_path}`, `{task_spec_path}`, `{version}`
-
-**Prompt stays similar, just variable renames**. Conflict context injection handled by handler, not prompt change.
-
----
-
-#### `plan_writer` (phase1) - Variable Alignment
-
-**Current variables**: `{spec}`, `{triage}`
-**New variables**: `{spec_path}`, `{triage_path}`, `{plans_dir}`, `{version}`
-
-**Prompt stays similar, just variable renames**. Conflict context injection handled by handler, not prompt change.
-
----
-
-#### Also update in `types.ts`
-
-- Remove `patch_downstream` from `RewriteDecision` type (already done)
-- Remove `patch_downstream` from `resolve.ts` VALID_REWRITE_DECISIONS (already done)
+- Snapshot CLI command (new)
+- Snapshot workflow injected into prompts (compulsory step)
+- Version lookup helpers (new)
+- feedback.md reference for new epochs (new variable)
 
 ### Events
 
 ```ts
-// In resolve (TTY) - after user approval
+// In resolve - after writing feedback
 appendEvent(sessionId, {
-  event: 'resolve:approved',
-  metadata: {
-    decision: 'refine_local' | 'regenerate_remaining' | 'revisit_spec',
-    reasoning: '...',
-    affectedPlans: ['plan-2'], // if applicable
-  },
-});
-
-// In runner (cross-phase handling)
-appendEvent(sessionId, {
-  event: 'revisit_spec:started',
-  metadata: {
-    previousVersion: 1,
-    newVersion: 2,
-  },
+  event: 'resolve:completed',
+  version,
+  metadata: { feedbackWritten: true },
 });
 
 // In snapshot command
 appendEvent(sessionId, {
   event: 'snapshot:created',
   metadata: {
-    type: 'plans',
-    version: 1,
+    type: 'spec' | 'plans',
+    epochVersion: 1,
     snapshotVersion: 2,
-    path: 'snapshots/v1/plans-2/',
+    path: 'artifacts/v1/task-spec-2.md',
   },
+});
+
+// In runner (cross-phase)
+appendEvent(sessionId, {
+  event: 'version:superseded',
+  version: 1,
+  metadata: { supersededBy: 2, reason: 'revisit_spec' },
 });
 ```
 
@@ -863,55 +638,49 @@ appendEvent(sessionId, {
 
 ### Functional
 
-- [ ] `kautopilot snapshot spec 1` creates backup in snapshots/v1/
-- [ ] `kautopilot snapshot plans 1` backs up entire plans folder
-- [ ] Snapshot numbering auto-increments
-- [ ] Session resolution works without --session flag (via status.yaml)
-- [ ] `resolve` shows kloop evidence and analyzes conflict
-- [ ] `resolve` proposes decision with reasoning
-- [ ] `resolve` clarifies with user if they disagree
-- [ ] User approval via event (not regex parsing)
-- [ ] `refine_local` rewrites only current plan
-- [ ] `regenerate_remaining` rewrites current + downstream plans
-- [ ] `revisit_spec` writes conflict-context.yaml
-- [ ] `revisit_spec` signal triggers runner cross-phase handling
-- [ ] Runner creates vN+1 directory and copies conflict context
-- [ ] Runner restarts phase1 with new version
-- [ ] `spec_writer` reads conflict context and injects into prompt
-- [ ] `plan_writer` reads conflict context and injects into prompt
-- [ ] All prompts use paths, not inlined content
-- [ ] Snapshot called by handlers before LLM edits
+- [ ] Repo working copies: `spec/<ticket>/v<N>/task-spec.md`, `plans/plan-*.md`
+- [ ] Global snapshots: `artifacts/v<N>/task-spec-{N}.md`, `plans-{N}/`
+- [ ] `kautopilot snapshot spec <epoch>` copies repo spec to global
+- [ ] `kautopilot snapshot plans <epoch>` copies repo plans folder to global
+- [ ] Snapshot numbering per-epoch (each epoch starts at 1)
+- [ ] Session resolution works without --session flag
+- [ ] Snapshot command called by LLM within TTY (after each edit cycle)
+- [ ] Multiple snapshots per TTY session (one per feedback round)
+- [ ] `resolve` writes `feedback.md` to current epoch (`v<N>/feedback.md`)
+- [ ] `resolve` returns `revisit_spec` signal
+- [ ] `feedback` (phase3) uses TTY with its own prompt
+- [ ] `feedback` writes `feedback.md` to current epoch (`v<N>/feedback.md`)
+- [ ] `feedback` returns `revisit_spec` signal
+- [ ] Runner handles `revisit_spec` from both phase2 and phase3
+- [ ] Runner creates v{N+1} directory (does NOT copy feedback.md)
+- [ ] `spec_writer` reads `v{N-1}/feedback.md` when starting new epoch
+- [ ] `plan_writer` at new epoch checks codebase, writes incremental plans
+- [ ] Each epoch's `feedback.md` preserved (not overwritten)
+- [ ] LLM doesn't trust metadata - grounds in actual code state
 
 ### Non-Functional
 
+- [ ] `bun run check` passes with zero errors
 - [ ] Snapshot command completes in <100ms
-- [ ] Snapshot storage uses copy (no dedup needed initially)
-- [ ] LLM prompts are 50%+ smaller (paths vs inline)
-- [ ] Audit trail is complete and human-readable
-- [ ] Cross-phase mechanics clearly documented
+- [ ] All prompts use paths, not inlined content
+- [ ] Audit trail complete in artifacts/
+- [ ] Cross-phase mechanics documented
 
 ---
 
 ## Part 8: Open Questions
 
 1. **Garbage collection** - should old snapshots be cleaned up?
-   - Proposed: keep last 5 per artifact type, add `kautopilot gc` command later
+   - Proposed: keep last 5 per artifact type per epoch
 
-2. **Conflict context cleanup** - when to delete conflict-context.yaml?
-   - Proposed: keep for audit, never auto-delete
-
-3. **Multiple conflicts** - what if v2 also fails and goes to v3?
-   - Proposed: each version has its own conflict-context.yaml, chain is preserved
-
-4. **Partial plan completion** - if plan-1 is committed but plan-2 fails during `regenerate_remaining`, does plan-1 stay committed?
-   - Proposed: yes, already-committed plans are not affected, only pending plans regenerated
+2. **Multiple conflicts** - what if v2 also fails?
+   - **Solved**: Each epoch writes its own `v{N}/feedback.md`. Chain preserved: v3 reads v2/feedback.md, v2 reads v1/feedback.md.
 
 ---
 
 ## Part 9: Out of Scope
 
-- Snapshot diff/merge tools
-- Snapshot restoration UI
-- Conflict pattern library (future: autodetect common conflicts)
-- Interactive snapshot browsing
-- Multi-session snapshot management
+- Artifact diff/merge tools
+- Artifact restoration UI
+- Interactive artifact browsing
+- Multi-session management

@@ -1,19 +1,26 @@
+import { existsSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { Command } from 'commander';
+import { sessionDir } from '../core/artifacts';
+import { readConfig } from '../core/config';
+import { discoverConfigDirs } from '../core/config-dir';
 import { getSessionByWorktree } from '../core/db';
-import { existsSync } from 'node:fs';
-import { checkLock, acquireLock, releaseLock } from '../core/lock';
-import { appendEvent } from '../core/log';
-import { ensureStatus, detectAndRecoverCrash } from '../core/status';
 import { getGitRoot, getWorktree } from '../core/git';
-
-import { runPhase } from '../phases/runner';
+import { acquireLock, checkLock, releaseLock } from '../core/lock';
+import { appendEvent } from '../core/log';
 import { supersedEpoch } from '../core/manifests';
+import { detectAndRecoverCrash, ensureStatus } from '../core/status';
 import type { Phase } from '../core/types';
 import { PHASE_ALIASES } from '../core/types';
-import { readConfig } from '../core/config';
-import { sessionDir } from '../core/artifacts';
-import { logField, logOk, logInfo, logWarn, logError, logHeading, logDim } from '../util/format';
-import { discoverConfigDirs } from '../core/config-dir';
+import { type PhaseResult, runPhase } from '../phases/runner';
+import { logError, logField, logInfo, logWarn } from '../util/format';
+
+/** Map internal phase names to canonical WAL event names */
+const PHASE_EVENT_NAME: Record<Phase, string> = {
+  plan: 'phase1',
+  implementation: 'phase2',
+  polish: 'phase3',
+};
 
 export function createStartCommand(): Command {
   return new Command('start')
@@ -176,53 +183,86 @@ async function runStart(opts: { phase?: string; local?: boolean }): Promise<void
       if (i > startIdx) {
         logInfo(`Advancing to phase: ${currentPhase}`);
       }
-      const completed = await runPhase(currentPhase, session, config, i === startIdx ? { forceStartState } : {});
-      if (!completed) {
+
+      const result: PhaseResult = await runPhase(
+        currentPhase,
+        session,
+        config,
+        i === startIdx ? { forceStartState } : {},
+      );
+
+      // Handle revisit_spec — cross-phase reset to phase1 with feedback
+      if (result === 'revisit_spec') {
         const status = ensureStatus(session.id);
-        if (currentPhase === 'implementation' && status.context.rewriteDecision === 'revisit_spec') {
-          const nextVersion = status.version + 1;
-          logInfo(`Escalating to plan for contract rewrite v${nextVersion}`);
-          supersedEpoch(session.id, status.version, nextVersion);
-          appendEvent(session.id, {
-            ts: new Date().toISOString(),
-            event: 'context:updated',
-            metadata: { rewriteDecision: undefined },
-          });
-          const replanned = await runPhase('plan', session, config, { versionOverride: nextVersion });
-          if (!replanned) {
-            logInfo('Phase plan interrupted — run `kautopilot start` to resume');
-            break;
-          }
-          // Re-enter implementation phase for the new contract epoch (spec section 4.1)
-          i = PHASE_ORDER.indexOf('implementation') - 1; // -1 so loop increments to 'implementation'
-          continue;
+        const oldVersion = status.version;
+        const nextVersion = oldVersion + 1;
+
+        logInfo(`Revisit spec signal — escalating to plan for epoch v${nextVersion}`);
+
+        // Mark old epoch as superseded
+        supersedEpoch(session.id, oldVersion, nextVersion);
+
+        // Create new epoch directory (spec Part 5 step 4)
+        const newVersionDir = join(sessionDir(session.id), 'artifacts', `v${nextVersion}`);
+        mkdirSync(newVersionDir, { recursive: true });
+
+        // Log version superseded event
+        appendEvent(session.id, {
+          ts: new Date().toISOString(),
+          event: 'version:superseded',
+          version: oldVersion,
+          metadata: {
+            supersededBy: nextVersion,
+            reason: 'revisit_spec',
+            fromPhase: currentPhase,
+          },
+        });
+
+        // Log phase completion for the interrupted phase (canonical WAL name)
+        appendEvent(session.id, {
+          ts: new Date().toISOString(),
+          event: `${PHASE_EVENT_NAME[currentPhase]}:completed`,
+          version: oldVersion,
+          metadata: { reason: 'revisit_spec' },
+        });
+
+        // Emit phase1:started with required metadata for new epoch
+        // (machine.ts won't emit because hasCompletedWork=true from prior phase1 work)
+        appendEvent(session.id, {
+          ts: new Date().toISOString(),
+          event: 'phase1:started',
+          version: nextVersion,
+          metadata: {
+            previousVersion: oldVersion,
+            reason: 'revisit_spec',
+          },
+        });
+
+        // Re-run plan phase with new version
+        const replanned = await runPhase('plan', session, config, {
+          versionOverride: nextVersion,
+          suppressPhaseStarted: true,
+        });
+
+        if (replanned !== true && replanned !== 'revisit_spec' && replanned !== 'amend_spec') {
+          logInfo('Phase plan interrupted — run `kautopilot start` to resume');
+          break;
         }
-        logInfo(`Phase ${currentPhase} interrupted — run \`kautopilot start\` to resume`);
-        break;
+
+        // Handle chained revisit_spec or amend_spec from plan phase
+        if (replanned === 'revisit_spec' || replanned === 'amend_spec') {
+          logInfo('Plan phase also returned a signal — run `kautopilot start` to resume');
+          break;
+        }
+
+        // Re-enter implementation phase for the new epoch
+        i = PHASE_ORDER.indexOf('implementation') - 1; // -1 so loop increments to 'implementation'
+        continue;
       }
 
-      // After successful phase completion, check for ticket feedback escalation (spec sections 4.2 / 11.2)
-      // This MUST be outside the !completed block because Phase 3 returns completed=true
-      // when ticket-review reaches the 'completed' terminal state after writing feedback.
-      if (currentPhase === 'polish') {
-        const feedbackStatus = ensureStatus(session.id);
-        if (feedbackStatus.context.ticketFeedback) {
-          const nextVersion = feedbackStatus.version + 1;
-          logInfo(`Ticket feedback detected — escalating to v${nextVersion}`);
-          supersedEpoch(session.id, feedbackStatus.version, nextVersion);
-          appendEvent(session.id, {
-            ts: new Date().toISOString(),
-            event: 'context:updated',
-            metadata: { ticketFeedback: undefined },
-          });
-          const replanned = await runPhase('plan', session, config, { versionOverride: nextVersion });
-          if (!replanned) {
-            logInfo('Phase plan interrupted — run `kautopilot start` to resume');
-            break;
-          }
-          i = PHASE_ORDER.indexOf('implementation') - 1;
-          continue;
-        }
+      if (!result) {
+        logInfo(`Phase ${currentPhase} interrupted — run \`kautopilot start\` to resume`);
+        break;
       }
     }
 

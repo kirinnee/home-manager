@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'bun:test';
-import { mkdirSync, rmSync, existsSync, readFileSync, mkdtempSync } from 'node:fs';
-import { join } from 'node:path';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 let origHome: string;
 let tempHome: string;
@@ -14,11 +14,11 @@ afterAll(() => {
   process.env.HOME = origHome;
   rmSync(tempHome, { recursive: true, force: true });
 });
-import { ensureStatus } from '../status';
-import { appendEvent } from '../log';
-import type { LogEntry } from '../types';
 
-const TEST_SESSION = 'test-status-' + Date.now();
+import { appendEvent } from '../log';
+import { ensureStatus } from '../status';
+
+const TEST_SESSION = `test-status-${Date.now()}`;
 function sessionDir() {
   return join(process.env.HOME!, '.kautopilot', TEST_SESSION);
 }
@@ -45,9 +45,21 @@ describe('ensureStatus', () => {
   });
 
   it('tracks phase and state from events', () => {
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:00Z', event: 'start:started', metadata: { phase: 'plan' } });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:01Z', event: 'phase1:started', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:02Z', event: 'pull_ticket:started', version: 1 });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:00Z',
+      event: 'start:started',
+      metadata: { phase: 'plan' },
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:01Z',
+      event: 'phase1:started',
+      version: 1,
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:02Z',
+      event: 'pull_ticket:started',
+      version: 1,
+    });
 
     const status = ensureStatus(TEST_SESSION);
     expect(status.phase).toBe('plan');
@@ -58,12 +70,36 @@ describe('ensureStatus', () => {
   });
 
   it('marks completed steps and checkpoints', () => {
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:00Z', event: 'start:started', metadata: { phase: 'plan' } });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:01Z', event: 'phase1:started', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:02Z', event: 'pull_ticket:started', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:03Z', event: 'pull_ticket:completed', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:04Z', event: 'write_spec:started', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:05Z', event: 'write_spec:completed', version: 1 });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:00Z',
+      event: 'start:started',
+      metadata: { phase: 'plan' },
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:01Z',
+      event: 'phase1:started',
+      version: 1,
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:02Z',
+      event: 'pull_ticket:started',
+      version: 1,
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:03Z',
+      event: 'pull_ticket:completed',
+      version: 1,
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:04Z',
+      event: 'write_spec:started',
+      version: 1,
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:05Z',
+      event: 'write_spec:completed',
+      version: 1,
+    });
 
     const status = ensureStatus(TEST_SESSION);
     expect(status.completedSteps).toEqual(['pull_ticket', 'write_spec']);
@@ -72,8 +108,16 @@ describe('ensureStatus', () => {
   });
 
   it('tracks parallel subtasks', () => {
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:00Z', event: 'phase1:started', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:01Z', event: 'gather_context:started', version: 1 });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:00Z',
+      event: 'phase1:started',
+      version: 1,
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:01Z',
+      event: 'gather_context:started',
+      version: 1,
+    });
     appendEvent(TEST_SESSION, {
       ts: '2026-03-24T10:00:02Z',
       event: 'subtask:started',
@@ -96,8 +140,16 @@ describe('ensureStatus', () => {
   });
 
   it('clears tasks when parent state completes', () => {
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:00Z', event: 'phase1:started', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:01Z', event: 'gather_context:started', version: 1 });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:00Z',
+      event: 'phase1:started',
+      version: 1,
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:01Z',
+      event: 'gather_context:started',
+      version: 1,
+    });
     appendEvent(TEST_SESSION, {
       ts: '2026-03-24T10:00:02Z',
       event: 'subtask:started',
@@ -108,7 +160,11 @@ describe('ensureStatus', () => {
       event: 'subtask:completed',
       metadata: { task: 'codebase', parent: 'gather_context' },
     });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:11Z', event: 'gather_context:completed', version: 1 });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:11Z',
+      event: 'gather_context:completed',
+      version: 1,
+    });
 
     const status = ensureStatus(TEST_SESSION);
     expect(Object.keys(status.tasks)).toEqual([]);
@@ -116,7 +172,11 @@ describe('ensureStatus', () => {
   });
 
   it('handles context:updated events', () => {
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:00Z', event: 'phase1:started', version: 1 });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:00Z',
+      event: 'phase1:started',
+      version: 1,
+    });
     appendEvent(TEST_SESSION, {
       ts: '2026-03-24T10:00:01Z',
       event: 'context:updated',
@@ -128,13 +188,41 @@ describe('ensureStatus', () => {
   });
 
   it('handles reset:completed — rolls back to checkpoint', () => {
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:00Z', event: 'start:started', metadata: { phase: 'plan' } });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:01Z', event: 'phase1:started', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:02Z', event: 'pull_ticket:started', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:03Z', event: 'pull_ticket:completed', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:04Z', event: 'write_spec:started', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:05Z', event: 'write_spec:completed', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:06Z', event: 'finalize_spec:started', version: 1 });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:00Z',
+      event: 'start:started',
+      metadata: { phase: 'plan' },
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:01Z',
+      event: 'phase1:started',
+      version: 1,
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:02Z',
+      event: 'pull_ticket:started',
+      version: 1,
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:03Z',
+      event: 'pull_ticket:completed',
+      version: 1,
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:04Z',
+      event: 'write_spec:started',
+      version: 1,
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:05Z',
+      event: 'write_spec:completed',
+      version: 1,
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:06Z',
+      event: 'finalize_spec:started',
+      version: 1,
+    });
     appendEvent(TEST_SESSION, {
       ts: '2026-03-24T10:00:07Z',
       event: 'subtask:started',
@@ -161,17 +249,37 @@ describe('ensureStatus', () => {
   });
 
   it('incremental replay — only processes new events', () => {
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:00Z', event: 'phase1:started', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:01Z', event: 'pull_ticket:started', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:02Z', event: 'pull_ticket:completed', version: 1 });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:00Z',
+      event: 'phase1:started',
+      version: 1,
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:01Z',
+      event: 'pull_ticket:started',
+      version: 1,
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:02Z',
+      event: 'pull_ticket:completed',
+      version: 1,
+    });
 
     const status1 = ensureStatus(TEST_SESSION);
     expect(status1.walCursor).toBe(3);
     expect(status1.completedSteps).toEqual(['pull_ticket']);
 
     // Add more events
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:03Z', event: 'write_spec:started', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:04Z', event: 'write_spec:completed', version: 1 });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:03Z',
+      event: 'write_spec:started',
+      version: 1,
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:04Z',
+      event: 'write_spec:completed',
+      version: 1,
+    });
 
     const status2 = ensureStatus(TEST_SESSION);
     expect(status2.walCursor).toBe(5);
@@ -179,7 +287,11 @@ describe('ensureStatus', () => {
   });
 
   it('persists status to YAML file', () => {
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:00Z', event: 'phase1:started', version: 1 });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:00Z',
+      event: 'phase1:started',
+      version: 1,
+    });
     ensureStatus(TEST_SESSION);
 
     const yamlPath = join(sessionDir(), 'status.yaml');
@@ -191,18 +303,58 @@ describe('ensureStatus', () => {
   });
 
   it('tracks per-plan cycle with completedPlans', () => {
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:00Z', event: 'phase2:started', version: 1 });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:00Z',
+      event: 'phase2:started',
+      version: 1,
+    });
     // Plan 0
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:01Z', event: 'clear_loop:started', metadata: { planIndex: 0 } });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:02Z', event: 'clear_loop:completed', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:03Z', event: 'setup_run:started', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:04Z', event: 'setup_run:completed', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:05Z', event: 'running:started', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:06Z', event: 'running:completed', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:07Z', event: 'commit:started', version: 1 });
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:08Z', event: 'commit:completed', version: 1 });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:01Z',
+      event: 'clear_loop:started',
+      metadata: { planIndex: 0 },
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:02Z',
+      event: 'clear_loop:completed',
+      version: 1,
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:03Z',
+      event: 'setup_run:started',
+      version: 1,
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:04Z',
+      event: 'setup_run:completed',
+      version: 1,
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:05Z',
+      event: 'running:started',
+      version: 1,
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:06Z',
+      event: 'running:completed',
+      version: 1,
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:07Z',
+      event: 'commit:started',
+      version: 1,
+    });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:08Z',
+      event: 'commit:completed',
+      version: 1,
+    });
     // Plan 1
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:09Z', event: 'clear_loop:started', metadata: { planIndex: 1 } });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:09Z',
+      event: 'clear_loop:started',
+      metadata: { planIndex: 1 },
+    });
 
     const status = ensureStatus(TEST_SESSION);
     expect(status.completedPlans).toEqual([0]);
@@ -224,7 +376,11 @@ describe('ensureStatus', () => {
   });
 
   it('persists reported failed run ids from context updates', () => {
-    appendEvent(TEST_SESSION, { ts: '2026-03-24T10:00:00Z', event: 'phase3:started', version: 1 });
+    appendEvent(TEST_SESSION, {
+      ts: '2026-03-24T10:00:00Z',
+      event: 'phase3:started',
+      version: 1,
+    });
     appendEvent(TEST_SESSION, {
       ts: '2026-03-24T10:00:01Z',
       event: 'context:updated',

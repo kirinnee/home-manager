@@ -1,5 +1,5 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import * as YAML from 'yaml';
 import type { Config } from './types';
 import { DEFAULT_CONFIG } from './types';
@@ -106,7 +106,7 @@ function buildVarComments(path: string): string {
   const lines = Object.entries(vars)
     .map(([v, desc]) => `# {${v}} - ${desc}`)
     .join('\n');
-  return lines + '\n';
+  return `${lines}\n`;
 }
 
 /**
@@ -231,7 +231,7 @@ export function serializeConfigWithComments(config: Config): string {
   lines.push(`  ticketSystem: ${config.repo.ticketSystem ?? 'null'}`);
   lines.push(`  prComment: ${config.repo.prComment ?? 'null'}`);
 
-  return lines.join('\n') + '\n';
+  return `${lines.join('\n')}\n`;
 }
 
 /**
@@ -290,11 +290,26 @@ export function readConfig(id: string): Config | null {
     agents: {
       init: { ...DEFAULT_CONFIG.agents.init, ...parsed.agents?.init },
       phase1: {
-        triage: { ...DEFAULT_CONFIG.agents.phase1.triage, ...parsed.agents?.phase1?.triage },
-        spec_writer: { ...DEFAULT_CONFIG.agents.phase1.spec_writer, ...parsed.agents?.phase1?.spec_writer },
-        plan_writer: { ...DEFAULT_CONFIG.agents.phase1.plan_writer, ...parsed.agents?.phase1?.plan_writer },
-        spec_reviewers: { ...DEFAULT_CONFIG.agents.phase1.spec_reviewers, ...parsed.agents?.phase1?.spec_reviewers },
-        plan_reviewers: { ...DEFAULT_CONFIG.agents.phase1.plan_reviewers, ...parsed.agents?.phase1?.plan_reviewers },
+        triage: {
+          ...DEFAULT_CONFIG.agents.phase1.triage,
+          ...parsed.agents?.phase1?.triage,
+        },
+        spec_writer: {
+          ...DEFAULT_CONFIG.agents.phase1.spec_writer,
+          ...parsed.agents?.phase1?.spec_writer,
+        },
+        plan_writer: {
+          ...DEFAULT_CONFIG.agents.phase1.plan_writer,
+          ...parsed.agents?.phase1?.plan_writer,
+        },
+        spec_reviewers: {
+          ...DEFAULT_CONFIG.agents.phase1.spec_reviewers,
+          ...parsed.agents?.phase1?.spec_reviewers,
+        },
+        plan_reviewers: {
+          ...DEFAULT_CONFIG.agents.phase1.plan_reviewers,
+          ...parsed.agents?.phase1?.plan_reviewers,
+        },
       },
       phase2: { ...DEFAULT_CONFIG.agents.phase2, ...parsed.agents?.phase2 },
       phase3: { ...DEFAULT_CONFIG.agents.phase3, ...parsed.agents?.phase3 },
@@ -383,11 +398,26 @@ export function resolveConfig(org?: string, configPathOverride?: string): Config
     agents: {
       init: { ...DEFAULT_CONFIG.agents.init, ...parsed.agents?.init },
       phase1: {
-        triage: { ...DEFAULT_CONFIG.agents.phase1.triage, ...parsed.agents?.phase1?.triage },
-        spec_writer: { ...DEFAULT_CONFIG.agents.phase1.spec_writer, ...parsed.agents?.phase1?.spec_writer },
-        plan_writer: { ...DEFAULT_CONFIG.agents.phase1.plan_writer, ...parsed.agents?.phase1?.plan_writer },
-        spec_reviewers: { ...DEFAULT_CONFIG.agents.phase1.spec_reviewers, ...parsed.agents?.phase1?.spec_reviewers },
-        plan_reviewers: { ...DEFAULT_CONFIG.agents.phase1.plan_reviewers, ...parsed.agents?.phase1?.plan_reviewers },
+        triage: {
+          ...DEFAULT_CONFIG.agents.phase1.triage,
+          ...parsed.agents?.phase1?.triage,
+        },
+        spec_writer: {
+          ...DEFAULT_CONFIG.agents.phase1.spec_writer,
+          ...parsed.agents?.phase1?.spec_writer,
+        },
+        plan_writer: {
+          ...DEFAULT_CONFIG.agents.phase1.plan_writer,
+          ...parsed.agents?.phase1?.plan_writer,
+        },
+        spec_reviewers: {
+          ...DEFAULT_CONFIG.agents.phase1.spec_reviewers,
+          ...parsed.agents?.phase1?.spec_reviewers,
+        },
+        plan_reviewers: {
+          ...DEFAULT_CONFIG.agents.phase1.plan_reviewers,
+          ...parsed.agents?.phase1?.plan_reviewers,
+        },
       },
       phase2: { ...DEFAULT_CONFIG.agents.phase2, ...parsed.agents?.phase2 },
       phase3: { ...DEFAULT_CONFIG.agents.phase3, ...parsed.agents?.phase3 },

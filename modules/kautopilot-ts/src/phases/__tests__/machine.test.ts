@@ -1,14 +1,29 @@
-import { describe, it, expect } from 'bun:test';
-import { findLastEvent } from '../machine';
+import { describe, expect, it } from 'bun:test';
 import type { LogEntry } from '../../core/types';
+import { findLastEvent } from '../machine';
 
 describe('machine helpers', () => {
   describe('findLastEvent', () => {
     const log: LogEntry[] = [
       { ts: '2026-03-24T10:00:00Z', event: 'phase1:started', version: 1 },
-      { ts: '2026-03-24T10:00:01Z', event: 'write_spec:started', version: 1, attempt: 1 },
-      { ts: '2026-03-24T10:05:00Z', event: 'write_spec:completed', version: 1, attempt: 1 },
-      { ts: '2026-03-24T10:05:01Z', event: 'spec_review:started', version: 1, attempt: 1 },
+      {
+        ts: '2026-03-24T10:00:01Z',
+        event: 'write_spec:started',
+        version: 1,
+        attempt: 1,
+      },
+      {
+        ts: '2026-03-24T10:05:00Z',
+        event: 'write_spec:completed',
+        version: 1,
+        attempt: 1,
+      },
+      {
+        ts: '2026-03-24T10:05:01Z',
+        event: 'spec_review:started',
+        version: 1,
+        attempt: 1,
+      },
     ];
 
     it('finds last event matching pattern', () => {

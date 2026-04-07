@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -26,13 +26,13 @@ describe('config', () => {
 
     const config = readConfig('testid');
     expect(config).not.toBeNull();
-    expect(config!.claude_binary).toBe('claude');
+    expect(config?.claude_binary).toBe('claude');
     // commit agent uses shared COMMIT_AGENT_PROMPT (not in config.agents)
-    expect(config!.agents.phase2.resolve).toBeDefined();
-    expect(config!.agents.phase2.resolve.prompt).toContain('conflict or failure');
-    expect(config!.kloop.maxIterations).toBe(10);
-    expect(config!.repo.baseBranch).toBe('main');
-    expect(config!.repo.ticketSystem).toBeNull();
+    expect(config?.agents.phase2.resolve).toBeDefined();
+    expect(config?.agents.phase2.resolve.prompt).toContain('revisit_spec');
+    expect(config?.kloop.maxIterations).toBe(10);
+    expect(config?.repo.baseBranch).toBe('main');
+    expect(config?.repo.ticketSystem).toBeNull();
 
     expect(existsSync(join(tempDir, '.kautopilot/testid/config.yaml'))).toBe(true);
   });
@@ -49,8 +49,8 @@ describe('config', () => {
     writeConfig('testid', { ...DEFAULT_CONFIG });
     const config = readConfig('testid');
     expect(config).not.toBeNull();
-    expect(config!.claude_binary).toBe('claude');
-    expect(config!.kloop.maxIterations).toBe(10);
+    expect(config?.claude_binary).toBe('claude');
+    expect(config?.kloop.maxIterations).toBe(10);
   });
 
   it('writeConfig persists changes', () => {

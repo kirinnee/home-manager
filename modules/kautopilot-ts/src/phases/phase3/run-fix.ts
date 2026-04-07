@@ -1,9 +1,9 @@
-import type { Phase3Context } from './types';
-import { appendEvent } from '../../core/log';
 import { devloopRun } from '../../core/devloop';
+import { appendEvent } from '../../core/log';
+import type { Phase3Context } from './types';
 
 export async function handleRunFix(ctx: Phase3Context): Promise<string | null> {
-  const { session, version, pushCycle, config } = ctx;
+  const { session, version, pushCycle } = ctx;
 
   appendEvent(session.id, {
     ts: new Date().toISOString(),

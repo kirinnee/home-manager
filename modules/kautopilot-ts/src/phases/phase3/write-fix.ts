@@ -1,11 +1,12 @@
-import type { Phase3Context } from './types';
+import { getAgentBinary, getAgentPrompt } from '../../core/agents';
+import { findLatestPlansPath, findLatestSpecPath } from '../../core/artifact-versioning';
+import { snapshotPath } from '../../core/artifacts';
+import { devloopInit, writeKloopConfig, writeKloopSpec } from '../../core/devloop';
 import { appendEvent } from '../../core/log';
-import { spawnPrintRaw } from '../../llm/spawn';
-import { devloopInit, writeKloopSpec, writeKloopConfig } from '../../core/devloop';
-import { sessionDir } from '../../core/artifacts';
-import { resolvePlans } from '../shared';
 import { writeStepInit } from '../../core/step-init';
-import { getAgentPrompt, getAgentBinary } from '../../core/agents';
+import { spawnPrintRaw } from '../../llm/spawn';
+import { resolveActivePlans } from '../shared';
+import type { Phase3Context } from './types';
 
 // Mechanical context prepended by handler — NOT part of user-editable prompt
 const WRITE_FIX_MECHANICS = `## Context Paths
@@ -42,7 +43,7 @@ Write a structured implementation spec for each fix. Use this format:
 Output ALL fixes in this format, one per section. Deduplicate overlapping fixes on the same file.`;
 
 export async function handleWriteFix(ctx: Phase3Context): Promise<string | null> {
-  const { session, version, ticketId } = ctx;
+  const { session, version } = ctx;
 
   appendEvent(session.id, {
     ts: new Date().toISOString(),
@@ -51,11 +52,12 @@ export async function handleWriteFix(ctx: Phase3Context): Promise<string | null>
     metadata: { stepType: 'llm' },
   });
 
-  // Resolve file paths (don't inline content)
-  const specPath = `${sessionDir(session.id)}/artifacts/v${version}/task-spec.md`;
-  const planPaths = resolvePlans(session.id, version);
+  // Resolve file paths (don't inline content) — use versioned snapshots
+  const specPath = findLatestSpecPath(session.id, version) || snapshotPath(session.id, version, 'task-spec.md');
+  const latestPlansDir = findLatestPlansPath(session.id, version) || snapshotPath(session.id, version, 'plans');
+  const planPaths = resolveActivePlans(latestPlansDir);
   const plansPathList = planPaths.join('\n');
-  const feedbackPath = `${sessionDir(session.id)}/artifacts/v${version}/feedback.md`;
+  const feedbackPath = snapshotPath(session.id, version, 'feedback.md');
 
   // Build fixes section from eval results on context
   const evalResults = ctx.evalResults || [];

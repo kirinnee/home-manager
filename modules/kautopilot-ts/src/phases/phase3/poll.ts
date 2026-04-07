@@ -1,22 +1,22 @@
-import type { Phase3Context, PollSignals, RolloverRecommendation } from './types';
-import type { PollState, DeliveryManifest } from '../../core/types';
-import { appendEvent } from '../../core/log';
-import { ensureStatus } from '../../core/status';
-import { updateDeliveryManifest, readDeliveryManifest } from '../../core/manifests';
 import {
-  ghPrChecks,
-  ghPrView,
-  ghReviewThreads,
-  ghReviews,
-  ghPrComments,
-  ghRunLogsFailed,
   ghClosePr,
+  ghPrChecks,
+  ghPrComments,
+  ghPrView,
+  ghReviews,
+  ghReviewThreads,
+  ghRunLogsFailed,
 } from '../../core/github';
+import { appendEvent } from '../../core/log';
+import { readDeliveryManifest, updateDeliveryManifest } from '../../core/manifests';
+import { ensureStatus } from '../../core/status';
+import type { DeliveryManifest, PollState } from '../../core/types';
+import type { Phase3Context, PollSignals, RolloverRecommendation } from './types';
 
 /**
  * Compute poll state from GitHub signals and merge policy.
  */
-export function computePollState(signals: PollSignals, ctx: Phase3Context): PollState {
+export function computePollState(signals: PollSignals, _ctx: Phase3Context): PollState {
   // PR closed externally
   if (signals.prState === 'CLOSED') {
     throw new Error('PR was closed externally');
@@ -174,7 +174,9 @@ export async function handlePoll(ctx: Phase3Context): Promise<string | null> {
     appendEvent(session.id, {
       ts: new Date().toISOString(),
       event: 'context:updated',
-      metadata: { reportedFailedRunIds: [...reportedFailedRunIds].sort((a, b) => a - b) },
+      metadata: {
+        reportedFailedRunIds: [...reportedFailedRunIds].sort((a, b) => a - b),
+      },
     });
   }
 
@@ -231,14 +233,14 @@ export async function handlePoll(ctx: Phase3Context): Promise<string | null> {
   // Build delivery manifest updates (spec section 10.2 / 13.1.F)
   const deliveryUpdates: Partial<DeliveryManifest> = {
     kind: 'pr',
-    prNumber: prNumber!,
+    prNumber: prNumber as number,
   };
 
   // If rollover is recommended, close old PR and route to create_pr for a fresh one
   if (rollover.shouldRollover) {
     const existing = readDeliveryManifest(session.id, version);
     const history = existing?.prRolloverHistory ?? [];
-    const oldPrNumber = prNumber!;
+    const oldPrNumber = prNumber as number;
 
     // Close the old PR (spec section 1.3 / 10.2: rollover must be actionable)
     try {
@@ -275,7 +277,11 @@ export async function handlePoll(ctx: Phase3Context): Promise<string | null> {
       metadata: {
         pushCycle,
         pollState,
-        rollover: { shouldRollover: true, fromPr: oldPrNumber, reason: rollover.reason },
+        rollover: {
+          shouldRollover: true,
+          fromPr: oldPrNumber,
+          reason: rollover.reason,
+        },
       },
     });
 
@@ -319,7 +325,7 @@ export async function handlePoll(ctx: Phase3Context): Promise<string | null> {
     case 'mergeable':
       return 'feedback_check';
 
-    case 'pending':
+    case 'pending': {
       // Wait then re-poll, bounded by maxPushCycles
       if (pushCycle >= config.settings.maxPushCycles) {
         console.log(`[poll] Max push cycles (${config.settings.maxPushCycles}) exceeded`);
@@ -329,6 +335,7 @@ export async function handlePoll(ctx: Phase3Context): Promise<string | null> {
       console.log(`[poll] Pending — waiting ${(waitMs / 1000).toFixed(0)}s before re-poll...`);
       await new Promise(resolve => setTimeout(resolve, waitMs));
       return 'poll';
+    }
 
     case 'blocked':
       return 'ensure_branch';

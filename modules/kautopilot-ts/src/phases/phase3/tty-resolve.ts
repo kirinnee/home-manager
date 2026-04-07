@@ -1,9 +1,10 @@
-import type { Phase3Context } from './types';
+import { getAgentBinary, getAgentPrompt, TTY_EXIT_INSTRUCTION } from '../../core/agents';
+import { findLatestPlansPath, findLatestSpecPath } from '../../core/artifact-versioning';
+import { snapshotPath } from '../../core/artifacts';
 import { appendEvent } from '../../core/log';
-import { sessionDir } from '../../core/artifacts';
-import { resolvePlans, spawnTTYWithTurnTracking } from '../shared';
 import { writeStepInit } from '../../core/step-init';
-import { getAgentPrompt, getAgentBinary, TTY_EXIT_INSTRUCTION } from '../../core/agents';
+import { resolveActivePlans, spawnTTYWithTurnTracking } from '../shared';
+import type { Phase3Context } from './types';
 
 // Mechanical instructions prepended by handler — NOT part of user-editable prompt
 const TTY_RESOLVE_MECHANICS = {
@@ -33,7 +34,7 @@ Please review the situation and help me resolve the issue. Apply any needed chan
 };
 
 export async function handleTtyResolve(ctx: Phase3Context): Promise<string | null> {
-  const { session, version, ttyReason, baseBranch } = ctx;
+  const { session, version, ttyReason } = ctx;
 
   appendEvent(session.id, {
     ts: new Date().toISOString(),
@@ -45,13 +46,14 @@ export async function handleTtyResolve(ctx: Phase3Context): Promise<string | nul
   const { $ } = await import('bun');
 
   // Build context for TTY handoff
-  const ticketId = ctx.ticketId;
+  const _ticketId = ctx.ticketId;
 
-  // Resolve file paths (don't inline content)
-  const specPath = `${sessionDir(session.id)}/artifacts/v${version}/task-spec.md`;
-  const planPaths = resolvePlans(session.id, version);
+  // Resolve file paths (don't inline content) — use versioned snapshots
+  const specPath = findLatestSpecPath(session.id, version) || snapshotPath(session.id, version, 'task-spec.md');
+  const latestPlansDir = findLatestPlansPath(session.id, version) || snapshotPath(session.id, version, 'plans');
+  const planPaths = resolveActivePlans(latestPlansDir);
   const plansPathList = planPaths.join('\n');
-  const feedbackPath = `${sessionDir(session.id)}/artifacts/v${version}/feedback.md`;
+  const feedbackPath = snapshotPath(session.id, version, 'feedback.md');
 
   // Determine agent name based on reason
   const agentName =
@@ -149,7 +151,7 @@ Read at: ${feedbackPath}
 
   // Hand off to TTY
   console.log(`[tty_resolve] Handing off to user for ${ttyReason}`);
-  const exitCode = await spawnTTYWithTurnTracking(session.id, ttyBinary, ttyPrompt + TTY_EXIT_INSTRUCTION, {
+  const _exitCode = await spawnTTYWithTurnTracking(session.id, ttyBinary, ttyPrompt + TTY_EXIT_INSTRUCTION, {
     cwd: session.worktree,
     worktree: session.worktree,
   });

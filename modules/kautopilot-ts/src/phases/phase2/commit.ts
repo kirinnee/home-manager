@@ -1,13 +1,14 @@
 import { existsSync } from 'node:fs';
-import { resolveSpec, resolveActivePlans } from '../shared';
-import type { Phase2Context } from './types';
-import { appendEvent } from '../../core/log';
-import { spawnPrintRaw, stripCodeFences } from '../../llm/spawn';
-import { writeStepInit } from '../../core/step-init';
 import { getAgentBinary } from '../../core/agents';
-import { COMMIT_AGENT_PROMPT } from '../../core/types';
-import { updatePlanManifestEntry } from '../../core/manifests';
+import { findLatestPlansPath } from '../../core/artifact-versioning';
 import { snapshotPath } from '../../core/artifacts';
+import { appendEvent } from '../../core/log';
+import { updatePlanManifestEntry } from '../../core/manifests';
+import { writeStepInit } from '../../core/step-init';
+import { COMMIT_AGENT_PROMPT } from '../../core/types';
+import { spawnPrintRaw, stripCodeFences } from '../../llm/spawn';
+import { resolveActivePlans } from '../shared';
+import type { Phase2Context } from './types';
 
 export async function handleCommit(ctx: Phase2Context): Promise<string | null> {
   const { session, version, planIndex } = ctx;
@@ -21,8 +22,9 @@ export async function handleCommit(ctx: Phase2Context): Promise<string | null> {
     metadata: { stepType: 'code' },
   });
 
-  // Resolve the active plan path (don't inline content)
-  const activePlans = resolveActivePlans(snapshotPath(session.id, version, 'plans'));
+  // Resolve the active plan path (don't inline content) — use latest plans-{N}/ snapshot
+  const latestPlansDir = findLatestPlansPath(session.id, version) || snapshotPath(session.id, version, 'plans');
+  const activePlans = resolveActivePlans(latestPlansDir);
   const activePlanPath = activePlans[planIndex];
   const planPath =
     activePlanPath && existsSync(activePlanPath)

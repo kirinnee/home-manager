@@ -141,10 +141,32 @@ Read the spec from: {specPath}
 
 1. Read ALL reviews: current ({reviewsDir}/reviewer-*.md) and archived ({archivedReviewsPattern})
 2. Analyze reviews against the spec to determine what criteria are complete vs remaining
-3. Check for conflicts:
-   - **IS a conflict:** impossible requirements, contradictory constraints, fundamentally ambiguous spec
-   - **NOT a conflict:** reviewer disagreement, reviewer/implementer mistakes, missing implementation
+3. Check for conflicts (see below)
 4. Check for auto-fixable issues (e.g., typos) — ONLY if completely unambiguous
+
+## What IS a Conflict
+
+A conflict is a spec defect where **no possible implementation can satisfy all requirements simultaneously**, regardless of how intelligent or persistent the implementer is.
+
+**The litmus test:** Imagine giving the implementer 10x intelligence and 10x more attempts. Could it eventually fulfil the spec? If the answer is NO, that is a conflict.
+
+Conflicts are often subtle — the spec may look reasonable at a glance, but becomes impossible after implementation reveals ground truth:
+
+- **Contradictory constraints**: Two or more acceptance criteria that cannot coexist. Example: "Do not modify any files in \`src/\`" combined with "Achieve 100% test coverage" — if \`src/\` contains dead code paths that are unreachable, the implementer cannot cover them without modifying \`src/\`. No amount of intelligence or retries solves this.
+- **Circular dependencies**: Criterion A requires B done first, but B requires A done first.
+- **Impossible environmental constraints**: Spec requires something the environment cannot provide (e.g., a file path that doesn't exist, a library version that lacks the specified API, a Node 14 requirement for a Node 18+ API).
+- **Fundamentally ambiguous requirements**: Requirements so vague that reasonable implementers would produce fundamentally different solutions (e.g., "make it fast" with no metric, "improve UX" with no design spec).
+
+**Important**: Reviewer disagreement — even across multiple loops — is NOT a conflict by itself. Use reviewer feedback as a clue for *where to look*, not as evidence of a conflict. Only flag a conflict if you can point to specific spec text that is self-contradictory or impossible to satisfy.
+
+## What is NOT a Conflict
+
+- **Reviewer disagreement**: Reviewers disagree on quality, approach, or interpretation — this is normal
+- **Persistent reviewer rejection**: Even across many loops, this means the implementation needs more work
+- **Incomplete implementation**: The implementer didn't finish, but the spec is achievable
+- **Bugs or errors**: Implementation has bugs, but the spec is sound
+- **Missing tests/evidence**: Implementation lacks proof, but the spec is achievable
+- **Hard but possible**: The spec is difficult but achievable with enough effort
 
 ## Outcomes
 
@@ -205,21 +227,22 @@ Read the spec from: {specPath}
 1. Read ALL reviews: current ({reviewsDir}/reviewer-*.md) and archived ({archivedReviewsPattern})
 2. Read ALL verdicts from the review JSON files alongside the reviews
 3. Cross-reference the spec's acceptance criteria / Definition of Done against every reviewer's findings
-4. Determine if the spec contains a fundamental conflict that makes consensus impossible
+4. Determine if the spec contains a fundamental conflict that makes it impossible to implement
 
 ## What IS a Conflict
 
-Be thorough — check for ALL of these:
+A conflict is a spec defect where **no possible implementation can satisfy all requirements simultaneously**, regardless of how intelligent or persistent the implementer is.
 
-- **Contradictory requirements**: Two or more acceptance criteria that cannot be satisfied simultaneously (e.g., "must use library X" and "must have zero dependencies")
-- **Circular dependencies**: Criterion A requires B to be done first, but B requires A to be done first
-- **Impossible constraints**: Performance, compatibility, or technical constraints that cannot be met with the specified tools/frameworks (e.g., "must work on Node 14" but requires a Node 18+ API)
-- **Ambiguous scope**: Requirements so vague that reasonable implementers would produce fundamentally different solutions (e.g., "make it fast" with no metric, "improve UX" with no design spec)
-- **Self-contradictory examples/illustrations**: The spec's own examples violate its stated rules
-- **External impossibility**: Spec requires something the environment cannot provide (e.g., a file path that doesn't exist, a service that isn't available, a library version that doesn't have the specified API)
-- **Externally-impossible requirements**: Spec requires something the environment cannot provide (e.g., a file path that doesn't exist, a service that isn't available, a library version that doesn't have the specified API)
+**The litmus test:** Imagine giving the implementer 10x intelligence and 10x more attempts. Could it eventually fulfil the spec? If the answer is NO, that is a conflict.
 
-**Important**: Reviewer disagreement — even across multiple loops — is NOT a conflict by itself. Reviewers may always disagree. Only flag a conflict if you can point to specific text in the spec that is self-contradictory or impossible. Use reviewer feedback as a clue for *where to look*, not as evidence of a conflict.
+Conflicts are often subtle — the spec may look reasonable at a glance, but becomes impossible after implementation reveals ground truth:
+
+- **Contradictory constraints**: Two or more acceptance criteria that cannot coexist. Example: "Do not modify any files in \`src/\`" combined with "Achieve 100% test coverage" — if \`src/\` contains dead code paths that are unreachable, the implementer cannot cover them without modifying \`src/\`. No amount of intelligence or retries solves this.
+- **Circular dependencies**: Criterion A requires B done first, but B requires A done first.
+- **Impossible environmental constraints**: Spec requires something the environment cannot provide (e.g., a file path that doesn't exist, a library version that lacks the specified API, a Node 14 requirement for a Node 18+ API).
+- **Fundamentally ambiguous requirements**: Requirements so vague that reasonable implementers would produce fundamentally different solutions (e.g., "make it fast" with no metric, "improve UX" with no design spec).
+
+**Important**: Reviewer disagreement — even across multiple loops — is NOT a conflict by itself. Use reviewer feedback as a clue for *where to look*, not as evidence of a conflict. Only flag a conflict if you can point to specific spec text that is self-contradictory or impossible to satisfy.
 
 ## What is NOT a Conflict
 
@@ -229,6 +252,7 @@ Be thorough — check for ALL of these:
 - **Bugs or errors**: Implementation has bugs, but the spec is sound
 - **Missing tests/evidence**: Implementation lacks proof, but the spec is achievable
 - **Style preferences**: Reviewers have different opinions on code style
+- **Hard but possible**: The spec is difficult but achievable with enough effort
 
 ## Conflict Confidence Levels
 

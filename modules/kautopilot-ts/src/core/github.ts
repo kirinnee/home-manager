@@ -1,5 +1,5 @@
 import { spawn } from 'bun';
-import type { PollThread, PollReply, CheckStatus, MergePolicy } from './types';
+import type { CheckStatus, PollThread } from './types';
 
 // ============================================================================
 // Bot signature
@@ -107,18 +107,6 @@ export async function ghPrView(prNumber: number, cwd?: string): Promise<GhPrView
 // ============================================================================
 // Review threads (GraphQL)
 // ============================================================================
-
-interface GhReviewThread {
-  threadId: string;
-  isOutdated: boolean;
-  isResolved: boolean;
-  comments: {
-    id: string;
-    author: { login: string };
-    body: string;
-    createdAt: string;
-  }[];
-}
 
 interface GhReviewThreadsResponse {
   data: {

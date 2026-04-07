@@ -1,7 +1,7 @@
-import { appendFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { initDir, sessionDir } from './artifacts';
 import type { LogEntry } from './types';
-import { sessionDir, initDir } from './artifacts';
 
 // ============================================================================
 // Directory-based log operations
@@ -14,7 +14,7 @@ export function logPathForDir(dir: string): string {
 export function appendEventToDir(dir: string, entry: LogEntry): void {
   const path = logPathForDir(dir);
   mkdirSync(dirname(path), { recursive: true });
-  appendFileSync(path, JSON.stringify(entry) + '\n');
+  appendFileSync(path, `${JSON.stringify(entry)}\n`);
 }
 
 export function readLogFromDir(dir: string): LogEntry[] {

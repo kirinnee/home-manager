@@ -1,11 +1,13 @@
-import { mkdirSync, readFileSync } from 'node:fs';
-import type { Phase1Context } from './types';
+import { existsSync, mkdirSync } from 'node:fs';
+import { getAgentPrompt, getDefaultBinary } from '../../core/agents';
+import { findLatestPlansPath } from '../../core/artifact-versioning';
+import { snapshotPath } from '../../core/artifacts';
 import { appendEvent, readLog } from '../../core/log';
-import { buildPromptVars, resolvePromptVars } from '../../core/type-config';
-import { getDefaultBinary, getAgentPrompt } from '../../core/agents';
 import { writeStepInit } from '../../core/step-init';
-import { spawnTTYWithTurnTracking, findLatestPlanDraftDir, readPlanDraftFiles } from '../shared';
-import { logOk, logInfo, logBanner } from '../../util/format';
+import { buildPromptVars, resolvePromptVars } from '../../core/type-config';
+import { logBanner, logInfo, logOk } from '../../util/format';
+import { discoverPlans, spawnTTYWithTurnTracking } from '../shared';
+import type { Phase1Context } from './types';
 
 /**
  * Non-negotiable mechanics injected by the runner — NOT part of the user-editable prompt.
@@ -15,55 +17,76 @@ const PLAN_APPROVAL_PROTOCOL = `### Approval Protocol
 
 When the user approves the plans, you MUST do these things IN ORDER before exiting:
 1. Write the approval event by running this command:
-   \`kautopilot log-event plans:approved --metadata '{"draft": N}'\`
-   (where N is the final draft ordinal number)
+   \`kautopilot log-event plans:approved\`
 2. THEN tell the user to /exit
 
 **CRITICAL**: Do NOT tell the user to /exit before writing the approval event.
 If the session crashes or the user Ctrl+C's before the approval event is logged,
 the plans will NOT be considered approved and this step will re-run from scratch.`;
 
-const PLAN_MECHANICS = `## CRITICAL: Plan Draft & Approval Mechanics
+const PLAN_MECHANICS = `## CRITICAL: Plan Writing & Approval Mechanics
 
-### Draft Files
+### Working Copies
 
-Plan drafts are stored as subdirectories of the plans directory:
-- First iteration: {plans}/plan-draft-1/plan-1.md, plan-2.md, etc.
-- After feedback: {plans}/plan-draft-2/plan-1.md, plan-2.md, etc.
-- And so on...
+Write plan files directly in the plans directory:
+- {plans}/plan-1.md
+- {plans}/plan-2.md
+- etc.
 
-NEVER overwrite a previous draft directory. Always increment the ordinal.
-Each draft directory contains the COMPLETE set of plans, NOT a diff or changelog.
+These are the ONLY plan files you edit. On each feedback round, edit these same files in-place
+and re-snapshot. Do NOT create draft subdirectories — the snapshot command handles versioning
+automatically.
+
+Each version MUST be a complete, standalone set of plans — NOT a diff or changelog.
 Write the full plans every time, with changes applied inline.
 
 Each plan file MUST follow this template:
 {planTemplate}
 
-${PLAN_APPROVAL_PROTOCOL}
+### Snapshot Workflow (COMPULSORY)
+
+After each edit cycle (writing or editing the plans), you MUST create a snapshot:
+\`\`\`bash
+kautopilot snapshot plans {epoch}
+\`\`\`
+
+This copies the working copies to a versioned snapshot in the global artifacts directory.
+The snapshot command outputs:
+- SNAPSHOT_VERSION=N (the new version number)
+- SNAPSHOT_PATH=... (the path to the snapshot)
+
+This step is COMPULSORY — do not skip it. It creates an audit trail of all plan versions.
+
+### Previous Epoch Feedback
+
+{feedback_reference}
+
+### Previous Epoch Plans (for reference only)
+
+{previous_epoch_plans_reference}
 
 ### Spec Amendment Escalation
 
 If during plan writing you discover the spec is wrong or incomplete:
 1. Log the issue: \`kautopilot log-event spec_amendment:requested --metadata '{"reason": "..."}'\`
 2. Tell the user to /exit — do NOT write plans:approved
+
+${PLAN_APPROVAL_PROTOCOL}
 `;
 
 /**
  * [tty] Interactive plan writing via TTY handoff.
  *
  * The TTY Claude:
- * 1. Reads the approved spec (draft-spec.md)
- * 2. Writes plan-draft-N/plan-1.md, plan-2.md, etc. derived from the spec
- * 3. Creates a sub-teammate to run `kautopilot plan-review` for feedback
+ * 1. Reads the approved spec
+ * 2. Writes plan-1.md, plan-2.md, etc. directly in plans/
+ * 3. Snapshots each version
  * 4. Iterates until user approves and exits (/exit)
  */
 export async function handleWritePlans(ctx: Phase1Context): Promise<string | null> {
   const { session, version, config } = ctx;
 
   // Check if plans were already approved for THIS version (crash recovery — don't re-run)
-  // Use write_plans:completed (which has version) as the marker, since plans:approved
-  // from log-event CLI doesn't carry version. This prevents old-version approvals
-  // from skipping re-entered plan writing after spec amendment escalation.
   const events = readLog(session.id);
   const completedForThisVersion = events.some(e => e.event === 'write_plans:completed' && e.version === version);
   if (completedForThisVersion) {
@@ -80,26 +103,47 @@ export async function handleWritePlans(ctx: Phase1Context): Promise<string | nul
 
   const vars = buildPromptVars(session.worktree, version, session.ticket_id || 'local');
 
+  // Build feedback reference for new epochs
+  let feedbackReference = 'No previous epoch feedback — this is the first epoch.';
+  if (version > 1) {
+    const prevFeedbackPath = snapshotPath(session.id, version - 1, 'feedback.md');
+    if (existsSync(prevFeedbackPath)) {
+      feedbackReference = `This is epoch v${version}. The previous epoch v${version - 1} failed. Read the feedback at:\n${prevFeedbackPath}\n\nAddress this feedback in your plans.`;
+    }
+  }
+
+  // Build previous epoch plans reference
+  let previousEpochPlansReference = 'No previous epoch plans — this is the first epoch.';
+  if (version > 1) {
+    const prevPlansDir = findLatestPlansPath(session.id, version - 1);
+    if (prevPlansDir) {
+      previousEpochPlansReference = `Previous epoch v${version - 1} plans are at: ${prevPlansDir}\nRead them to understand what was attempted, but DO NOT trust their metadata. Ground yourself in actual codebase state (git diff, code state) to determine what's already done.`;
+    }
+  }
+
   // Ensure plans dir exists
   mkdirSync(vars.plans, { recursive: true });
 
   // Build prompt from config
   let prompt = getAgentPrompt('phase1', 'plan_writer', vars as unknown as Record<string, string>);
 
-  // Prepend latest draft if resuming — mechanics go first so they're always at the top
-  const latestDraft = findLatestPlanDraftDir(vars.plans);
-  if (latestDraft) {
-    logInfo(`Resuming from plan-draft-${latestDraft.ordinal}`);
-    const mechanicsWithTemplate = PLAN_MECHANICS.replace('{planTemplate}', config.templates.plan);
-    const mechanicsResolved = resolvePromptVars(mechanicsWithTemplate, vars);
-    const draftFiles = readPlanDraftFiles(latestDraft.dir);
-    const draftContents = draftFiles.map(f => `### ${f.filename}\n${f.content}`).join('\n\n---\n\n');
-    prompt = `${mechanicsResolved}\n## Resuming: Current Draft is plan-draft-${latestDraft.ordinal}/\n\nYou are resuming a plan session. The latest draft is below. Continue from where you left off — the next draft should be plan-draft-${latestDraft.ordinal + 1}/.\n\n---\n${draftContents}\n---\n\n${prompt}`;
-  } else {
-    // Prepend mechanics for fresh starts too — inject template first
-    const mechanicsWithTemplate = PLAN_MECHANICS.replace('{planTemplate}', config.templates.plan);
-    prompt = resolvePromptVars(mechanicsWithTemplate, vars) + prompt;
+  // Build mechanics with template, feedback, epoch
+  const mechanicsResolved = PLAN_MECHANICS.replace('{planTemplate}', config.templates.plan)
+    .replace('{feedback_reference}', feedbackReference)
+    .replace('{previous_epoch_plans_reference}', previousEpochPlansReference)
+    .replace('{epoch}', String(version));
+  const mechanicsPrompt = resolvePromptVars(mechanicsResolved, vars);
+
+  // Prepend existing working copies if resuming (use paths, not inlined content)
+  let resumeNote = '';
+  const existingPlans = discoverPlans(vars.plans);
+  if (existingPlans.length > 0) {
+    const planPaths = existingPlans.map(p => `- ${p}`).join('\n');
+    resumeNote = `\n## Resuming: Plans exist\n\nYou are resuming a plan session. The working copies are at:\n${planPaths}\n\nRead them and continue editing in-place.\n\n`;
+    logInfo(`Resuming from ${existingPlans.length} existing plan(s)`);
   }
+
+  prompt = mechanicsPrompt + resumeNote + prompt;
 
   const binary = getDefaultBinary();
   writeStepInit(session.id, version, 'write_plans', {
@@ -115,8 +159,6 @@ export async function handleWritePlans(ctx: Phase1Context): Promise<string | nul
   });
 
   // Check if approval/amendment events were logged during THIS version's TTY session.
-  // Scope to events after write_plans:started for the current version, so that
-  // old events from previous versions don't poison the check.
   const postEvents = readLog(session.id);
   const startedIdx = postEvents.findLastIndex(e => e.event === 'write_plans:started' && e.version === version);
   const eventsSinceStart = startedIdx >= 0 ? postEvents.slice(startedIdx + 1) : postEvents;

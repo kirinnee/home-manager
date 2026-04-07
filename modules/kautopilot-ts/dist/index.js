@@ -1972,57 +1972,6 @@ var init_esm = __esm(() => {
   } = import__.default);
 });
 
-// node_modules/nanoid/index.js
-import { webcrypto as crypto2 } from 'crypto';
-function fillPool(bytes) {
-  if (!pool || pool.length < bytes) {
-    pool = Buffer.allocUnsafe(bytes * POOL_SIZE_MULTIPLIER);
-    crypto2.getRandomValues(pool);
-    poolOffset = 0;
-  } else if (poolOffset + bytes > pool.length) {
-    crypto2.getRandomValues(pool);
-    poolOffset = 0;
-  }
-  poolOffset += bytes;
-}
-function random(bytes) {
-  fillPool((bytes |= 0));
-  return pool.subarray(poolOffset - bytes, poolOffset);
-}
-function customRandom(alphabet, defaultSize, getRandom) {
-  let mask = (2 << (31 - Math.clz32((alphabet.length - 1) | 1))) - 1;
-  let step = Math.ceil((1.6 * mask * defaultSize) / alphabet.length);
-  return (size = defaultSize) => {
-    if (!size) return '';
-    let id = '';
-    while (true) {
-      let bytes = getRandom(step);
-      let i = step;
-      while (i--) {
-        id += alphabet[bytes[i] & mask] || '';
-        if (id.length >= size) return id;
-      }
-    }
-  };
-}
-function customAlphabet(alphabet, size = 21) {
-  return customRandom(alphabet, size, random);
-}
-var POOL_SIZE_MULTIPLIER = 128,
-  pool,
-  poolOffset;
-var init_nanoid = () => {};
-
-// src/core/id.ts
-function generateSessionId() {
-  return shortId();
-}
-var shortId;
-var init_id = __esm(() => {
-  init_nanoid();
-  shortId = customAlphabet('0123456789abcdefghijklmnopqrstuvwxyz', 8);
-});
-
 // src/core/db.ts
 import { Database } from 'bun:sqlite';
 import { mkdirSync } from 'fs';
@@ -2113,70 +2062,89 @@ var init_db = __esm(() => {
   DB_PATH = `${process.env.HOME}/.kautopilot/index.db`;
 });
 
-// src/core/artifacts.ts
-var exports_artifacts = {};
-__export(exports_artifacts, {
-  snapshotPath: () => snapshotPath,
-  sessionDir: () => sessionDir,
-  sessionArtifactPath: () => sessionArtifactPath,
-  scopeDir: () => scopeDir,
-  runsDir: () => runsDir,
-  runFilePath: () => runFilePath,
-  runDir: () => runDir,
-  nextRunNumber: () => nextRunNumber,
-  initDir: () => initDir,
-  ensureArtifactDir: () => ensureArtifactDir,
-  artifactPath: () => artifactPath,
-});
-import { mkdirSync as mkdirSync2, readdirSync } from 'fs';
-import { dirname as dirname2, join } from 'path';
-function artifactPath(id, version, phase, ...segments) {
-  return `${process.env.HOME}/.kautopilot/${id}/artifacts/v${version}/${phase}/${segments.join('/')}`;
+// src/core/git.ts
+import { dirname as dirname2 } from 'path';
+function gitSync(args, cwd) {
+  const proc = Bun.spawnSync({
+    cmd: ['git', ...args],
+    cwd: cwd || process.cwd(),
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  return {
+    exitCode: proc.exitCode,
+    stdout: proc.stdout.toString().trim(),
+    stderr: proc.stderr.toString().trim(),
+  };
 }
-function snapshotPath(id, version, ...segments) {
-  return `${process.env.HOME}/.kautopilot/${id}/artifacts/v${version}/${segments.join('/')}`;
+function getGitRoot(cwd) {
+  const result = gitSync(['rev-parse', '--path-format=absolute', '--git-common-dir'], cwd);
+  if (result.exitCode !== 0) throw new Error('Not a git repository.');
+  return dirname2(result.stdout);
 }
-function sessionArtifactPath(id, ...segments) {
-  return `${process.env.HOME}/.kautopilot/${id}/artifacts/${segments.join('/')}`;
+function getWorktree(cwd) {
+  const result = gitSync(['rev-parse', '--path-format=absolute', '--show-toplevel'], cwd);
+  if (result.exitCode !== 0) throw new Error('Not a git repository.');
+  return result.stdout;
 }
-function ensureArtifactDir(path) {
-  mkdirSync2(dirname2(path), { recursive: true });
+function hasUnmergedPaths(cwd) {
+  const result = gitSync(['diff', '--name-only', '--diff-filter=U'], cwd);
+  if (result.exitCode !== 0) return false;
+  return result.stdout.length > 0;
 }
-function sessionDir(id) {
-  return `${process.env.HOME}/.kautopilot/${id}`;
+function getRemoteUrl(cwd) {
+  const result = gitSync(['remote', 'get-url', 'origin'], cwd);
+  if (result.exitCode !== 0) throw new Error('No remote "origin" found.');
+  return result.stdout;
 }
-function initDir(id) {
-  return `${process.env.HOME}/.kautopilot/init/${id}`;
+function normalizeGitRoot(url) {
+  return url
+    .replace(/^git@/, '')
+    .replace(/^https?:\/\//, '')
+    .replace(/\.git$/, '')
+    .replace(/^([^/]+):/, '$1/')
+    .toLowerCase();
 }
-function scopeDir(scope) {
-  return scope.kind === 'init' ? initDir(scope.id) : sessionDir(scope.id);
+function extractOrg(gitRootHost) {
+  if (!gitRootHost) return 'default';
+  const parts = gitRootHost.split('/');
+  if (parts.length >= 2) return parts[1];
+  return gitRootHost;
 }
-function runsDir(scope) {
-  return join(scopeDir(scope), 'runs');
+function getCurrentBranch(cwd) {
+  const result = gitSync(['branch', '--show-current'], cwd);
+  if (result.exitCode !== 0) throw new Error('Could not determine current branch.');
+  return result.stdout;
 }
-function nextRunNumber(scope) {
-  const dir = runsDir(scope);
-  mkdirSync2(dir, { recursive: true });
-  const numbers = readdirSync(dir, { withFileTypes: true })
-    .filter(entry => entry.isDirectory() && /^\d+$/.test(entry.name))
-    .map(entry => Number(entry.name));
-  return numbers.length > 0 ? Math.max(...numbers) + 1 : 1;
+function createBranch(name, cwd) {
+  const result = gitSync(['checkout', '-b', name], cwd);
+  if (result.exitCode !== 0) {
+    throw new Error(`Failed to create branch "${name}".`);
+  }
 }
-function runDir(scope, runNumber) {
-  return join(runsDir(scope), String(runNumber));
+function detectDefaultBranch(cwd) {
+  const result = gitSync(['symbolic-ref', 'refs/remotes/origin/HEAD', '--short'], cwd);
+  if (result.exitCode === 0) {
+    return result.stdout.replace(/^origin\//, '');
+  }
+  const masterCheck = gitSync(['rev-parse', '--verify', 'refs/remotes/origin/master'], cwd);
+  if (masterCheck.exitCode === 0) return 'master';
+  return 'main';
 }
-function runFilePath(scope, runNumber, fileName) {
-  return join(runDir(scope, runNumber), fileName);
+function isOnMain(baseBranch, cwd) {
+  const branch = getCurrentBranch(cwd);
+  const mainBranch = baseBranch || 'main';
+  return branch === mainBranch;
 }
-var init_artifacts = () => {};
+var init_git = () => {};
 
 // src/core/init-db.ts
 import { Database as Database2 } from 'bun:sqlite';
-import { mkdirSync as mkdirSync3 } from 'fs';
+import { mkdirSync as mkdirSync2 } from 'fs';
 import { dirname as dirname3 } from 'path';
 function getDb2() {
   if (!db2) {
-    mkdirSync3(dirname3(DB_PATH2), { recursive: true });
+    mkdirSync2(dirname3(DB_PATH2), { recursive: true });
     db2 = new Database2(DB_PATH2);
     db2.exec('PRAGMA journal_mode=WAL');
     db2.exec(`
@@ -9256,6 +9224,520 @@ var require_dist = __commonJS(exports => {
   exports.visitAsync = visit.visitAsync;
 });
 
+// src/util/format.ts
+function formatDuration(ms) {
+  if (ms <= 0) return '0s';
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const s = seconds % 60;
+  const m = minutes % 60;
+  if (hours > 0) {
+    return `${hours}h ${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`;
+  }
+  if (minutes > 0) {
+    return `${m}m ${String(s).padStart(2, '0')}s`;
+  }
+  return `${s}s`;
+}
+function logField(label, value) {
+  console.log(`${c.cyan}${label.padEnd(11)}${c.reset}${value}`);
+}
+function logOk(msg) {
+  console.log(`${c.green}\u2713${c.reset} ${msg}`);
+}
+function logInfo(msg) {
+  console.log(`${c.blue}\u2139${c.reset} ${msg}`);
+}
+function logWarn(msg) {
+  console.warn(`${c.yellow}\u26A0${c.reset} ${msg}`);
+}
+function logError(msg) {
+  console.error(`${c.red}\u2717${c.reset} ${msg}`);
+}
+function logHeading(title) {
+  console.log(`
+${c.bold}${c.cyan}${title}${c.reset}`);
+}
+function logDim(msg) {
+  console.log(`${c.dim}${msg}${c.reset}`);
+}
+function logBanner(title, fields) {
+  const line = '\u2500'.repeat(60);
+  console.log(`
+${c.cyan}${line}${c.reset}`);
+  console.log(`${c.bold}  ${title}${c.reset}`);
+  console.log(`${c.cyan}${line}${c.reset}`);
+  if (fields && Object.keys(fields).length > 0) {
+    for (const [key, value] of Object.entries(fields)) {
+      console.log(`  ${c.cyan}${key}:${c.reset} ${value}`);
+    }
+    console.log(`${c.cyan}${line}${c.reset}`);
+  }
+  console.log();
+}
+function logErrorBanner(title, fields) {
+  const line = '\u2500'.repeat(60);
+  console.log(`
+${c.red}${line}${c.reset}`);
+  console.log(`${c.bold}${c.red}  ${title}${c.reset}`);
+  console.log(`${c.red}${line}${c.reset}`);
+  if (fields && Object.keys(fields).length > 0) {
+    for (const [key, value] of Object.entries(fields)) {
+      console.log(`  ${c.cyan}${key}:${c.reset} ${value}`);
+    }
+    console.log(`${c.red}${line}${c.reset}`);
+  }
+  console.log();
+}
+function stateIcon(state) {
+  return STATE_ICONS[state] ?? '\u25CF';
+}
+function formatStatus(state, running) {
+  if (state === 'init') return `${c.yellow}init-incomplete${c.reset}`;
+  if (running) return `${c.green}running${c.reset}`;
+  return `${c.dim}stopped${c.reset}`;
+}
+function formatPhase(phase) {
+  if (!phase || phase === 'none') return `${c.dim}\u2014${c.reset}`;
+  return `${c.magenta}${phase}${c.reset}`;
+}
+var isTTY, c, STATE_ICONS;
+var init_format = __esm(() => {
+  isTTY = process.stdout.isTTY;
+  c = {
+    reset: isTTY ? '\x1B[0m' : '',
+    bold: isTTY ? '\x1B[1m' : '',
+    dim: isTTY ? '\x1B[2m' : '',
+    green: isTTY ? '\x1B[32m' : '',
+    yellow: isTTY ? '\x1B[33m' : '',
+    red: isTTY ? '\x1B[31m' : '',
+    cyan: isTTY ? '\x1B[36m' : '',
+    magenta: isTTY ? '\x1B[35m' : '',
+    blue: isTTY ? '\x1B[34m' : '',
+  };
+  STATE_ICONS = {
+    pull_ticket: '\uD83C\uDFAB',
+    gather_context: '\uD83D\uDD0D',
+    write_spec: '\uD83D\uDCDD',
+    finalize_spec: '\uD83D\uDCCC',
+    write_plans: '\uD83D\uDCCB',
+    finalize_plans: '\u2705',
+    setup_run: '\u2699\uFE0F',
+    running: '\uD83C\uDFC3',
+    commit: '\uD83D\uDCBE',
+    completed: '\u2705',
+    failed: '\u274C',
+    create_pr: '\uD83D\uDD17',
+    ensure_branch: '\uD83C\uDF3F',
+    commit_pending: '\uD83D\uDCBE',
+    poll: '\uD83D\uDC40',
+    eval: '\uD83E\uDDEA',
+    push: '\uD83D\uDE80',
+    prereview: '\uD83D\uDD2C',
+    feedback_check: '\uD83D\uDCAC',
+    act: '\u26A1',
+    run_fix: '\uD83D\uDD27',
+    tty_resolve: '\uD83D\uDDA5\uFE0F',
+    next_plan: '\uD83D\uDCD1',
+    clear_loop: '\uD83E\uDDF9',
+    resolve: '\uD83D\uDD13',
+    rewrite_spec: '\u270F\uFE0F',
+  };
+});
+
+// src/core/artifacts.ts
+var exports_artifacts = {};
+__export(exports_artifacts, {
+  snapshotPath: () => snapshotPath,
+  sessionDir: () => sessionDir,
+  sessionArtifactPath: () => sessionArtifactPath,
+  scopeDir: () => scopeDir,
+  runsDir: () => runsDir,
+  runFilePath: () => runFilePath,
+  runDir: () => runDir,
+  nextRunNumber: () => nextRunNumber,
+  initDir: () => initDir,
+  ensureArtifactDir: () => ensureArtifactDir,
+  artifactPath: () => artifactPath,
+});
+import { mkdirSync as mkdirSync3, readdirSync } from 'fs';
+import { dirname as dirname4, join } from 'path';
+function artifactPath(id, version, phase, ...segments) {
+  return `${process.env.HOME}/.kautopilot/${id}/artifacts/v${version}/${phase}/${segments.join('/')}`;
+}
+function snapshotPath(id, version, ...segments) {
+  return `${process.env.HOME}/.kautopilot/${id}/artifacts/v${version}/${segments.join('/')}`;
+}
+function sessionArtifactPath(id, ...segments) {
+  return `${process.env.HOME}/.kautopilot/${id}/artifacts/${segments.join('/')}`;
+}
+function ensureArtifactDir(path) {
+  mkdirSync3(dirname4(path), { recursive: true });
+}
+function sessionDir(id) {
+  return `${process.env.HOME}/.kautopilot/${id}`;
+}
+function initDir(id) {
+  return `${process.env.HOME}/.kautopilot/init/${id}`;
+}
+function scopeDir(scope) {
+  return scope.kind === 'init' ? initDir(scope.id) : sessionDir(scope.id);
+}
+function runsDir(scope) {
+  return join(scopeDir(scope), 'runs');
+}
+function nextRunNumber(scope) {
+  const dir = runsDir(scope);
+  mkdirSync3(dir, { recursive: true });
+  const numbers = readdirSync(dir, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && /^\d+$/.test(entry.name))
+    .map(entry => Number(entry.name));
+  return numbers.length > 0 ? Math.max(...numbers) + 1 : 1;
+}
+function runDir(scope, runNumber) {
+  return join(runsDir(scope), String(runNumber));
+}
+function runFilePath(scope, runNumber, fileName) {
+  return join(runDir(scope, runNumber), fileName);
+}
+var init_artifacts = () => {};
+
+// src/core/log.ts
+var exports_log = {};
+__export(exports_log, {
+  readLogFromDir: () => readLogFromDir,
+  readLog: () => readLog,
+  readInitLog: () => readInitLog,
+  logPathForDir: () => logPathForDir,
+  logPath: () => logPath,
+  appendInitEvent: () => appendInitEvent,
+  appendEventToDir: () => appendEventToDir,
+  appendEvent: () => appendEvent,
+});
+import { appendFileSync, existsSync, mkdirSync as mkdirSync4, readFileSync } from 'fs';
+import { dirname as dirname5, join as join2 } from 'path';
+function logPathForDir(dir) {
+  return join2(dir, 'log.jsonl');
+}
+function appendEventToDir(dir, entry) {
+  const path = logPathForDir(dir);
+  mkdirSync4(dirname5(path), { recursive: true });
+  appendFileSync(
+    path,
+    `${JSON.stringify(entry)}
+`,
+  );
+}
+function readLogFromDir(dir) {
+  const path = logPathForDir(dir);
+  if (!existsSync(path)) return [];
+  const raw = readFileSync(path, 'utf-8');
+  const entries = [];
+  for (const line of raw.split(`
+`)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      entries.push(JSON.parse(trimmed));
+    } catch {
+      console.warn(`Warning: skipping malformed log line: ${trimmed.slice(0, 80)}`);
+    }
+  }
+  return entries;
+}
+function logPath(id) {
+  return logPathForDir(sessionDir(id));
+}
+function appendEvent(id, entry) {
+  appendEventToDir(sessionDir(id), entry);
+}
+function readLog(id) {
+  return readLogFromDir(sessionDir(id));
+}
+function appendInitEvent(id, entry) {
+  appendEventToDir(initDir(id), entry);
+}
+function readInitLog(id) {
+  return readLogFromDir(initDir(id));
+}
+var init_log = __esm(() => {
+  init_artifacts();
+});
+
+// src/core/init-lock.ts
+import {
+  existsSync as existsSync2,
+  mkdirSync as mkdirSync5,
+  readFileSync as readFileSync2,
+  unlinkSync,
+  writeFileSync,
+} from 'fs';
+import { dirname as dirname6, join as join3 } from 'path';
+function initLockPath(id) {
+  return join3(initDir(id), 'lock.pid');
+}
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function acquireInitLock(id) {
+  const path = initLockPath(id);
+  mkdirSync5(dirname6(path), { recursive: true });
+  if (existsSync2(path)) {
+    const existingPid = parseInt(readFileSync2(path, 'utf-8').trim(), 10);
+    if (isProcessAlive(existingPid)) {
+      throw new Error(`Init is already running (PID ${existingPid}).`);
+    }
+    unlinkSync(path);
+  }
+  writeFileSync(path, String(process.pid));
+  currentInitId = id;
+  currentLockPath = path;
+  const cleanupCurrentLock = () => {
+    const lockPath = currentLockPath;
+    if (!lockPath) return;
+    try {
+      if (existsSync2(lockPath)) {
+        const storedPid = readFileSync2(lockPath, 'utf-8').trim();
+        if (storedPid === String(process.pid)) {
+          unlinkSync(lockPath);
+        }
+      }
+    } catch {}
+  };
+  if (!signalHandlersRegistered) {
+    signalHandlersRegistered = true;
+    process.on('SIGINT', () => {
+      const initId = currentInitId;
+      if (initId) {
+        try {
+          appendInitEvent(initId, {
+            ts: new Date().toISOString(),
+            event: 'init:cancelled',
+            metadata: { reason: 'sigint', pid: process.pid },
+          });
+          updateInitOutcome(initId, 'cancelled');
+        } catch {}
+      }
+      cleanupCurrentLock();
+      process.exit(130);
+    });
+    process.on('SIGTERM', () => {
+      const initId = currentInitId;
+      if (initId) {
+        try {
+          appendInitEvent(initId, {
+            ts: new Date().toISOString(),
+            event: 'init:cancelled',
+            metadata: { reason: 'sigterm', pid: process.pid },
+          });
+          updateInitOutcome(initId, 'cancelled');
+        } catch {}
+      }
+      cleanupCurrentLock();
+      process.exit(143);
+    });
+    process.on('exit', cleanupCurrentLock);
+  }
+}
+function checkInitLock(id) {
+  const path = initLockPath(id);
+  if (!existsSync2(path)) {
+    return { locked: false, pid: 0, alive: false };
+  }
+  const pid = parseInt(readFileSync2(path, 'utf-8').trim(), 10);
+  const alive = isProcessAlive(pid);
+  if (!alive) {
+    try {
+      unlinkSync(path);
+    } catch {}
+    return { locked: false, pid, alive: false };
+  }
+  return { locked: true, pid, alive: true };
+}
+function releaseInitLock(id) {
+  const path = initLockPath(id);
+  try {
+    if (existsSync2(path)) {
+      const storedPid = readFileSync2(path, 'utf-8').trim();
+      if (storedPid === String(process.pid)) {
+        unlinkSync(path);
+      }
+    }
+  } catch {}
+}
+var signalHandlersRegistered = false,
+  currentInitId = null,
+  currentLockPath = null;
+var init_init_lock = __esm(() => {
+  init_artifacts();
+  init_init_db();
+  init_log();
+});
+
+// src/core/init-status.ts
+import {
+  existsSync as existsSync3,
+  mkdirSync as mkdirSync6,
+  readFileSync as readFileSync3,
+  renameSync,
+  writeFileSync as writeFileSync2,
+} from 'fs';
+import { dirname as dirname7, join as join4 } from 'path';
+function initialInitStatus() {
+  return {
+    walCursor: 0,
+    walTimestamp: '',
+    state: 'identify',
+    stateStatus: 'pending',
+    pid: null,
+    running: false,
+    startedAt: null,
+    context: {},
+    completedStates: [],
+    outcome: null,
+  };
+}
+function applyInitEvent(status, entry, index) {
+  status.walCursor = index + 1;
+  status.walTimestamp = entry.ts;
+  const { event } = entry;
+  if (event === 'init:started') {
+    status.running = true;
+    status.pid = entry.metadata?.pid ?? null;
+    status.startedAt = entry.ts;
+  }
+  if (
+    event === 'init:completed' ||
+    event === 'init:failed' ||
+    event === 'init:cancelled' ||
+    event === 'init:abandoned'
+  ) {
+    status.running = false;
+    status.pid = null;
+    if (event === 'init:failed') {
+      status.outcome = 'failed';
+    } else if (event === 'init:cancelled') {
+      status.outcome = 'cancelled';
+    } else if (event === 'init:abandoned') {
+      status.outcome = 'abandoned';
+    }
+  }
+  if (event.endsWith(':started') && !INIT_LIFECYCLE_EVENTS.has(event)) {
+    const name = event.replace(':started', '');
+    status.state = name;
+    status.stateStatus = 'running';
+  }
+  if (event.endsWith(':completed') && !INIT_LIFECYCLE_EVENTS.has(event)) {
+    const name = event.replace(':completed', '');
+    if (name === status.state) {
+      status.stateStatus = 'completed';
+    }
+    if (!status.completedStates.includes(name)) {
+      status.completedStates.push(name);
+    }
+  }
+  if (event.endsWith(':failed') && !INIT_LIFECYCLE_EVENTS.has(event)) {
+    const name = event.replace(':failed', '');
+    if (name === status.state) {
+      status.stateStatus = 'failed';
+    }
+  }
+  if (event === 'init:crash_recovered') {
+    status.running = false;
+    status.pid = null;
+    if (status.stateStatus === 'running') {
+      status.stateStatus = 'pending';
+    }
+  }
+  if (event === 'context:updated' && entry.metadata) {
+    const { reason, pid, state, criticalOk, downgrade, regenerate, retry, ...contextFields } = entry.metadata;
+    Object.assign(status.context, contextFields);
+  }
+  if (event === 'promote:completed') {
+    status.outcome = entry.metadata?.outcome ?? 'promoted';
+  }
+  if (event === 'downgrade_local:completed') {
+    status.outcome = 'downgraded_local';
+  }
+}
+function initStatusPath(id) {
+  return join4(initDir(id), 'status.yaml');
+}
+function readInitStatusYaml(id) {
+  const path = initStatusPath(id);
+  if (!existsSync3(path)) return null;
+  try {
+    const raw = readFileSync3(path, 'utf-8');
+    return import_yaml.default.parse(raw);
+  } catch {
+    return null;
+  }
+}
+function writeInitStatusYaml(id, status) {
+  const path = initStatusPath(id);
+  mkdirSync6(dirname7(path), { recursive: true });
+  const content = import_yaml.default.stringify(status, { lineWidth: 120 });
+  const tmp = `${path}.tmp`;
+  writeFileSync2(tmp, content);
+  renameSync(tmp, path);
+}
+function ensureInitStatus(id) {
+  const log = readInitLog(id);
+  const existing = readInitStatusYaml(id);
+  if (existing && existing.walCursor >= log.length) {
+    return existing;
+  }
+  const status = existing ?? initialInitStatus();
+  const startIdx = existing ? existing.walCursor : 0;
+  for (let i = startIdx; i < log.length; i++) {
+    applyInitEvent(status, log[i], i);
+  }
+  writeInitStatusYaml(id, status);
+  return status;
+}
+function detectAndRecoverInitCrash(initId) {
+  const status = ensureInitStatus(initId);
+  if (!status.running) return false;
+  const lock = checkInitLock(initId);
+  if (lock.locked) return false;
+  const crashedState = status.state;
+  const crashedPid = status.pid;
+  appendInitEvent(initId, {
+    ts: new Date().toISOString(),
+    event: 'init:crash_recovered',
+    metadata: {
+      reason: 'crash',
+      pid: crashedPid,
+      state: crashedState,
+    },
+  });
+  ensureInitStatus(initId);
+  logWarn(`Init crash detected (PID ${crashedPid} in ${crashedState}) \u2014 recovered for resume`);
+  return true;
+}
+var import_yaml, INIT_LIFECYCLE_EVENTS;
+var init_init_status = __esm(() => {
+  init_format();
+  init_artifacts();
+  init_init_lock();
+  init_log();
+  import_yaml = __toESM(require_dist(), 1);
+  INIT_LIFECYCLE_EVENTS = new Set([
+    'init:started',
+    'init:completed',
+    'init:failed',
+    'init:cancelled',
+    'init:crash_recovered',
+    'context:updated',
+  ]);
+});
+
 // node_modules/zod/v3/helpers/util.js
 var util,
   objectUtil,
@@ -13352,6 +13834,290 @@ var kloopPromptsSchema,
   kloopConfigSchema,
   reviewerSchema,
   agentSchema,
+  DEFAULT_TRIAGE_TEMPLATE = `# Triage: {title}
+
+## Delivery Kind
+pr | ticket
+
+## Complexity
+straightforward | moderate | complex
+
+## Assessment
+[2-5 sentence summary of what needs to happen]
+
+## Clarifications
+[Any points clarified with the user, or "None needed"]
+
+## Risks
+[Risk factors with specific evidence, or "Low risk" with justification]
+
+## Verification
+
+### Assumptions to Verify
+[What assumptions does this task make that must be checked against reality?
+ This is domain-dependent and open-ended. Any assumption about external
+ behavior that the implementation will depend on belongs here.
+ Or "None \u2014 all assumptions are grounded in code already read."]
+
+### Access Required
+[What access/permissions are needed to verify assumptions above?
+ Request it here so the user grants it before spec/plan writing.
+ Or "None"]
+
+### Testing Level
+none | light | moderate | heavy
+[Rationale for this level]
+
+### Validation Matrix
+- Automated immediate: [what to check before release, automated]
+- Manual immediate: [human checks before release, or "none"]
+- Automated post-release: [automated checks after release, or "none"]
+- Manual post-release: [human checks after release, or "none"]`,
+  DEFAULT_SPEC_TEMPLATE = `# Spec: {title}
+
+## Summary
+[What this change does and why. 2-3 sentences.]
+
+## Verification Evidence
+[For each assumption the triage listed under "Assumptions to Verify":
+ - State the assumption
+ - State what you checked (doc URL, file path, command output, live query result)
+ - State confirmed or denied, with the evidence
+ If you could not verify an assumption, flag it:
+ "UNVERIFIED: [assumption] \u2014 could not verify because [reason]"
+ If triage said "None", write "No assumptions to verify."]
+
+## Requirements
+
+### Functional Requirements
+[What the system must do. Each requirement should describe:
+ - The observable behavior from the user's or caller's perspective
+ - Inputs and expected outputs (or state transitions)
+ - Edge cases and error behavior \u2014 what happens when input is invalid,
+   when a dependency is unavailable, when the operation is interrupted?
+ - Boundary conditions \u2014 empty lists, max values, concurrent access
+
+ Write each requirement as a testable statement. "The API returns 404
+ when the resource does not exist" is testable. "The API handles errors
+ gracefully" is not.
+
+ Reference actual files, functions, and types from the codebase.]
+
+### Non-Functional Requirements
+[You MUST evaluate every item in the checklist below. For each item:
+ - State whether it applies to this task
+ - If it applies: describe what is required, concretely
+ - If it does not apply: briefly explain why not (one sentence)
+ Then add any domain-specific non-functional requirements the checklist missed.
+
+ Checklist:
+
+ 1. **Linting** \u2014 Does this change introduce code that must pass linters?
+    Are there new lint rules needed? Does the existing lint config cover
+    the new code patterns?
+
+ 2. **Building** \u2014 Does this compile/build cleanly? Are there new build
+    steps, dependencies, or build config changes? Does it affect build
+    time or artifact size?
+
+ 3. **Unit Testing** \u2014 What unit tests are needed? What functions, modules,
+    or components need test coverage? What edge cases must be covered?
+
+ 4. **Integration Testing** \u2014 Do components interact in ways that need
+    integration tests? API contracts, database queries, service
+    communication, message queues?
+
+ 5. **End-to-End Testing** \u2014 Does this change user-facing behavior that
+    needs E2E tests? What user flows are affected? What tool is
+    appropriate for this project's stack (Playwright, Cypress, Detox,
+    XCTest, etc.)?
+
+ 6. **Documentation** \u2014 Do code comments, README, API docs, changelog,
+    or user-facing docs need updating? Are there architectural decision
+    records (ADRs) to write?
+
+ 7. **Observability** \u2014 Does this need new or updated: metrics, alerts,
+    log statements, dashboard panels, or runbook entries? Will operators
+    know if this breaks in production?
+
+ 8. **Invariant Checking** \u2014 What invariants must hold? Are there runtime
+    assertions, type constraints, or data consistency rules that should be
+    enforced? Can any invariants be checked at build time vs. runtime?
+
+ 9. **Security** \u2014 Does this handle user input, authentication, authorization,
+    secrets, or data at rest/in transit? Are there OWASP concerns? Does it
+    need a security review?
+
+ 10. **Performance** \u2014 Does this affect latency, throughput, memory usage,
+     or startup time? Are there benchmarks to run? Does it need load testing?
+
+ 11. **Backwards Compatibility** \u2014 Does this change public APIs, config
+    formats, database schemas, or wire protocols? Is migration needed?
+    Can old clients still work?
+
+ 12. **Accessibility** \u2014 Does this change UI? Does it meet WCAG guidelines?
+    Screen reader support, keyboard navigation, color contrast?
+
+ Additional domain-specific items:
+ [Add any non-functional requirements specific to this task's domain
+  that the checklist above did not cover.]]
+
+## Acceptance Criteria
+[Concrete, testable criteria that prove this task is done. Each criterion
+ should be verifiable by running a command, inspecting output, or checking
+ a measurable condition. Base the depth on the triage testing level:
+ - none: build passes, lints clean
+ - light: existing tests pass, no regressions
+ - moderate: new test coverage for changed behavior
+ - heavy: comprehensive test suite, E2E coverage, performance verification]
+
+## Out of Scope
+[What this change explicitly does NOT address. Prevents scope creep during
+ planning and implementation.]`,
+  DEFAULT_PLAN_TEMPLATE = `# Plan {N}: {title}
+
+## Overview
+[What this plan implements and why it is a self-contained, committable unit.
+ Reference the spec requirements this plan addresses.]
+
+## Changes
+[Files to modify or create, with rationale for each change.
+ Reference actual file paths and functions.]
+
+## Spec Adherence
+[List which spec requirements (functional and non-functional) this plan
+ addresses. Every applicable spec requirement must be covered by at least
+ one plan across the full plan set.]
+
+## Acceptance Criteria
+
+### Functional Checks
+[What observable behavior proves this plan is correctly implemented.
+ Each check should be concrete enough for the dev loop to implement as
+ an automated test. Reference specific inputs, outputs, and state changes.]
+
+### Non-Functional Checks
+[From the spec's non-functional requirements that apply to this plan:
+ which items must be satisfied? How will they be verified?
+ Examples: "lint passes on new files", "unit tests cover the new parser",
+ "API response time stays under 200ms for N=1000".]
+
+## Validation Approach
+[From the triage's validation matrix, what applies to this plan?
+ - Immediate automated checks: what the dev loop should verify
+ - Post-release checks: what to verify after deployment
+ - Manual checks: what a human must review
+ Describe the general approach \u2014 the dev loop will implement the scripts.]`,
+  DEFAULT_TRIAGE_PROMPT = `You are triaging a ticket for kautopilot. Read the ticket at {ticket} and do **thorough** codebase exploration to assess scope and risk.
+
+Your job is to classify this ticket, NOT to solve it or write implementation details.
+
+## Research Before Assessing
+
+Do NOT guess at risk or complexity. Before writing your assessment:
+- **Read the relevant code** \u2014 find the files that will be touched, understand the current implementation
+- **Trace dependencies** \u2014 grep for usages of functions/types/configs being changed; understand blast radius
+- **Check for tests** \u2014 are there existing tests covering the affected code? Will they break?
+- **Look at recent changes** \u2014 git log the affected files to understand velocity and stability
+- **Identify shared state** \u2014 does this touch database schemas, API contracts, shared configs, or public interfaces?
+
+## Evaluate (with evidence)
+
+For each evaluation point, cite specific files, functions, or patterns you found:
+- **Complexity** \u2014 how many moving parts, how many files likely touched. Name the files.
+- **Parallelizability** \u2014 can this be split into independent streams of work
+- **Risk factors** \u2014 blast radius, backward compatibility, data migration. Be specific: "changing X in file Y affects Z callers"
+- **Manual work** \u2014 infra changes, config deployments, manual verification needed
+- **Known/unknown ratio** \u2014 is the approach clear or does it need research first
+- **Disambiguate with user** \u2014 if the ticket is vague or under-specified, firm it up through conversation. If you are unsure about the risk level, ASK the user for input rather than defaulting to low risk.
+
+## Risk Assessment Guidelines
+
+Default to **moderate** risk unless you have concrete evidence otherwise:
+- **Low risk**: Only if the change is truly isolated (single file, no callers, has test coverage, no shared state)
+- **Moderate risk**: Multiple files, some callers, or any shared state involved
+- **High risk**: Database/API changes, many callers, no test coverage, or unclear requirements
+
+Err on the side of caution. It is much better to overestimate risk than to underestimate it.
+
+## Verification
+
+Your job is to IDENTIFY what needs verifying \u2014 not to do the verification yourself.
+The spec and plan phases will perform the actual checks.
+
+**Assumptions** \u2014 What does this task take for granted that could be wrong? Think broadly
+across whatever domain this task touches. Any assumption about external behavior (libraries,
+APIs, platforms, infrastructure, data formats, integrations) that the implementation will
+depend on should be listed. For each, note what source could confirm or deny it.
+
+**Access** \u2014 If verifying any assumption requires access the user hasn't granted (cluster
+credentials, API keys, staging environments, etc.), request it here so it's available before
+spec/plan writing begins.
+
+**Testing level** \u2014 Set the bar based on blast radius and behavioral impact.
+
+**Validation matrix** \u2014 Always push toward automated-immediate. Human time is far more
+expensive than machine time. If something CAN be checked before release and CAN be automated,
+it MUST be. Describe what to validate, not how.
+
+## User Approval
+
+After writing your triage assessment to the file, present a clear summary to the user showing:
+1. The delivery kind and complexity you chose
+2. Key risks identified (or why you believe risk is low)
+3. Ask the user to confirm before you log the approval event. Do NOT auto-approve.`,
+  DEFAULT_SPEC_WRITER_PROMPT = `You are writing a spec for a kautopilot task. Read the ticket at {ticket} and the triage assessment at {triage}.
+
+Based on the triage assessment:
+- **If triage says "straightforward"**: write a focused, concise spec. No heavy debate. Cover what to change, acceptance criteria, and proof of completion.
+- **If triage says "moderate" or "complex"**: do thorough exploration and debate. Walk through requirements, identify hidden assumptions, conflicts, and risks. Clarify until nothing is ambiguous.
+- **If delivery kind is "ticket"**: spec the research or decomposition, NOT the implementation.
+
+Explore the codebase to ground your spec in reality. Reference actual files, functions, and patterns.
+
+## Verification
+
+Check the triage at {triage} for its verification section. If it lists assumptions to verify,
+you MUST verify each one before writing the spec. Read docs, query live systems, inspect
+package versions \u2014 whatever it takes. Cite evidence for each confirmed assumption. Flag
+unverifiable ones as "UNVERIFIED: [assumption] \u2014 [reason]".
+
+If the triage requested access, use it now to check actual state.
+
+Ground every claim in evidence. No hypotheticals.
+
+## Non-Functional Checklist
+
+You MUST evaluate every item in the non-functional checklist from the spec template. For each:
+decide if it applies, state why or why not, and describe the concrete requirement if it does.
+Then add any domain-specific items the checklist missed. Do not skip any item.`,
+  DEFAULT_PLAN_WRITER_PROMPT = `You are writing implementation plans for a kautopilot task. Read the spec at {spec} and the triage assessment at {triage}.
+
+Rules:
+- Plans must be vertically split (by domain/feature, not by layer)
+- Each plan is one isolated, committable unit of work
+- For "ticket" delivery: plans describe investigation steps or ticket creation, not code changes
+- Reference actual files and functions from the codebase
+
+## Verification & Testing
+
+Check the triage at {triage}. Plans MUST NOT be based on unverified assumptions \u2014 the spec
+should have resolved them. If any remain unverified in the spec, resolve them now or flag
+them to the user.
+
+Based on the triage testing level, suggest the general testing approach using tools
+appropriate for this project's stack. Front-load automated testing aggressively.
+
+For the validation matrix: describe the general approach in each plan. The dev loop will
+implement concrete scripts. Keep it concise \u2014 ideas, not implementations.
+
+## Spec Adherence
+
+Every plan must list which spec requirements it addresses. Across the full set of plans,
+every functional requirement and every applicable non-functional requirement from the spec
+must be covered by at least one plan. If you discover a requirement cannot be addressed
+as specified, flag it \u2014 do not silently drop it.`,
+  phase1AgentsSchema,
   configSchema,
   DEFAULT_LOCAL_INIT_PROMPT = `You are setting up a task for kautopilot. Please:
 1. Understand what this project needs (look at the codebase)
@@ -13454,6 +14220,27 @@ Output a SUMMARY with:
 - If failed: why and how the user can fix it
 
 NEVER leave a broken script \u2014 either it works or it is a no-op.`,
+  DEFAULT_COMMIT_PROMPT = `You are committing code changes in a repository. Your task:
+
+1. Discover commit conventions:
+   - Search for any .md file whose name contains "commit" (case-insensitive), e.g. COMMIT_CONVENTIONS.md, commit-guide.md
+   - Check for .commitlintrc, .commitlintrc.json, .commitlintrc.yml, .commitlintrc.yaml, .commitlintrc.js, commitlint.config.js, commitlint.config.ts
+   - Check package.json for a "commitlint" config section
+   - Read git log --oneline -10 to see existing commit message style
+
+2. Stage all changes (git add the specific changed files, never git add -A)
+
+3. Commit with a message that follows the discovered conventions. If no conventions found, use conventional commits style (e.g. "feat: ...", "fix: ...", etc.) matching the style of recent commits.
+
+4. If pre-commit hooks fail:
+   - Read the error output carefully
+   - Fix the underlying issues (formatting, lint, type errors, etc.)
+   - Re-stage the fixed files and retry the commit
+
+5. When done, output ONLY the commit SHA (the output of git rev-parse HEAD), nothing else.
+
+{context}`,
+  COMMIT_AGENT_PROMPT,
   DEFAULT_CONFIG,
   PHASE_ALIASES;
 var init_types2 = __esm(() => {
@@ -13477,7 +14264,6 @@ var init_types2 = __esm(() => {
       conflictCheckThreshold: exports_external.number().min(1).max(10).default(2),
       firstLoopFullReview: exports_external.boolean().default(false),
       previousReviewPropagation: exports_external.number().min(0).max(1).default(0),
-      reviewerFailureLimit: exports_external.number().min(1).max(10).default(2),
       prompts: kloopPromptsSchema,
     })
     .default({});
@@ -13491,40 +14277,59 @@ var init_types2 = __esm(() => {
     prompt: exports_external.string(),
     binary: exports_external.string().optional(),
   });
-  configSchema = exports_external.object({
-    claude_binary: exports_external.string().default('claude'),
-    agents: exports_external
-      .object({
-        init: exports_external.record(exports_external.string(), agentSchema).default({}),
-        phase2: exports_external.record(exports_external.string(), agentSchema).default({}),
-        phase3: exports_external.record(exports_external.string(), agentSchema).default({}),
-      })
-      .default({ init: {}, phase2: {}, phase3: {} }),
+  phase1AgentsSchema = exports_external.object({
+    triage: agentSchema,
+    spec_writer: agentSchema,
+    plan_writer: agentSchema,
     spec_reviewers: exports_external.record(exports_external.string(), reviewerSchema).default({}),
     plan_reviewers: exports_external.record(exports_external.string(), reviewerSchema).default({}),
+  });
+  configSchema = exports_external.object({
+    claude_binary: exports_external.string().default('claude'),
+    agents: exports_external.object({
+      init: exports_external.record(exports_external.string(), agentSchema).default({}),
+      phase1: phase1AgentsSchema,
+      phase2: exports_external.record(exports_external.string(), agentSchema).default({}),
+      phase3: exports_external.record(exports_external.string(), agentSchema).default({}),
+      generic: exports_external.record(exports_external.string(), agentSchema).default({}),
+    }),
+    templates: exports_external
+      .object({
+        triage: exports_external.string().default(DEFAULT_TRIAGE_TEMPLATE),
+        spec: exports_external.string().default(DEFAULT_SPEC_TEMPLATE),
+        plan: exports_external.string().default(DEFAULT_PLAN_TEMPLATE),
+      })
+      .default({}),
     kloop: kloopConfigSchema,
     settings: exports_external
       .object({
         maxPushCycles: exports_external.number().min(1).max(20).default(10),
-        pollInterval: exports_external.number().min(5).max(300).default(60),
+        pollInterval: exports_external.number().min(1).max(300).default(5),
         defaultLlmTimeout: exports_external.number().min(10).max(600).default(300),
+        coderabbit: exports_external.boolean().default(true),
+        removeSpecOnPush: exports_external.boolean().default(false),
       })
       .default({
         maxPushCycles: 10,
-        pollInterval: 60,
+        pollInterval: 5,
         defaultLlmTimeout: 300,
+        coderabbit: true,
+        removeSpecOnPush: false,
       }),
     repo: exports_external
       .object({
         org: exports_external.string().optional(),
         baseBranch: exports_external.string().default('main'),
         ticketSystem: exports_external.string().nullable().default(null),
+        prComment: exports_external.string().nullable().default(null),
       })
       .default({
         baseBranch: 'main',
         ticketSystem: null,
+        prComment: null,
       }),
   });
+  COMMIT_AGENT_PROMPT = DEFAULT_COMMIT_PROMPT;
   DEFAULT_CONFIG = {
     claude_binary: 'claude',
     agents: {
@@ -13542,21 +14347,148 @@ var init_types2 = __esm(() => {
           prompt: DEFAULT_CREATE_SCRIPTS_PROMPT,
         },
       },
+      phase1: {
+        triage: { prompt: DEFAULT_TRIAGE_PROMPT },
+        spec_writer: { prompt: DEFAULT_SPEC_WRITER_PROMPT },
+        plan_writer: { prompt: DEFAULT_PLAN_WRITER_PROMPT },
+        spec_reviewers: {
+          completeness: {
+            desc: 'All requirements from ticket covered',
+            prompt: `Read the spec at {spec} and the ticket at {ticket}.
+Check: does the spec address every requirement in the ticket?
+List any requirements that are missing or insufficiently addressed.
+Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
+          },
+          docs_accuracy: {
+            desc: 'Referenced tool/lib versions and interfaces are correct',
+            prompt: `Read the spec at {spec} and the ticket at {ticket}.
+Check: are all referenced tool versions, API interfaces, and method signatures accurate?
+Cross-reference with the codebase \u2014 grep for referenced functions, check package versions.
+Flag anything that looks hallucinated or version-incorrect.
+Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
+          },
+          generalization: {
+            desc: 'Extends existing patterns rather than inventing new ones',
+            prompt: `Read the spec at {spec}. Explore the codebase.
+Check: does the spec propose new patterns, paths, or abstractions when existing ones could be extended?
+Flag any "reinventing the wheel" \u2014 new utilities when similar ones exist, new conventions when the codebase already has one.
+Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
+          },
+          complexity: {
+            desc: 'Is there a simpler or faster approach?',
+            prompt: `Read the spec at {spec}.
+Check: is the proposed approach unnecessarily complex?
+Consider: could fewer files be changed? Could an existing tool/command handle this? Is there a more direct path?
+Don't flag reasonable complexity \u2014 only flag when there's a clearly simpler alternative.
+Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
+          },
+          security: {
+            desc: 'Security and compliance implications',
+            prompt: `Read the spec at {spec}.
+Check for security concerns: injection risks, auth/authz gaps, secrets handling, data exposure, OWASP top 10.
+Only flag genuine issues, not theoretical concerns in internal code paths.
+Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
+          },
+          proof_of_completion: {
+            desc: 'Spec includes testable acceptance criteria',
+            prompt: `Read the spec at {spec}.
+Check: does the spec include an "Acceptance Criteria" section with concrete, testable criteria?
+Good criteria: test commands, API calls, grep assertions, build commands, measurable conditions.
+Bad criteria: "manually verify", "visually check", vague assertions, unmeasurable claims.
+Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
+          },
+          nonfunctional_checklist: {
+            desc: 'All non-functional checklist items evaluated',
+            prompt: `Read the spec at {spec}.
+Check: has every item in the non-functional checklist been evaluated?
+The checklist has 12 standard items (linting, building, unit testing, integration testing,
+E2E testing, documentation, observability, invariant checking, security, performance,
+backwards compatibility, accessibility). For each item, the spec must state whether it
+applies and why.
+Flag any items that are missing, skipped without justification, or dismissed too quickly.
+Also check: did the spec add domain-specific non-functional items beyond the checklist?
+Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
+          },
+          verification_evidence: {
+            desc: 'All triage assumptions have verification evidence',
+            prompt: `Read the spec at {spec} and the triage at {triage}.
+Check: if the triage listed assumptions to verify, does the spec provide verification
+evidence for each one? Evidence must include a concrete source (doc URL, file path,
+command output, live query result).
+Flag any assumptions that are unaddressed or claimed as verified without evidence.
+Flag any "UNVERIFIED" items and assess whether they are blocking.
+Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
+          },
+        },
+        plan_reviewers: {
+          coverage: {
+            desc: 'Plans fully cover the spec',
+            prompt: `Read the plans at {plans} and the spec at {spec}.
+Check: do the plans together cover every requirement in the spec?
+List any spec items that are not addressed by any plan.
+Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
+          },
+          ordering: {
+            desc: 'Plan dependencies ordered correctly',
+            prompt: `Read the plans at {plans}.
+Check: are plans ordered so that earlier plans don't depend on later ones?
+Flag any circular or incorrect dependency ordering.
+Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
+          },
+          vertical_split: {
+            desc: 'Plans split by domain/feature, not by layer',
+            prompt: `Read the plans at {plans}.
+Check: are plans split vertically by domain/feature (each plan = complete slice with types+logic+tests)?
+Flag any plan that is a horizontal layer (e.g., "add types" or "write tests" as standalone plans).
+Each plan should produce an isolated working commit.
+Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
+          },
+          cost: {
+            desc: 'Cost and resource implications',
+            prompt: `Read the plans at {plans} and the spec at {spec}.
+Check: are there cost implications (compute, storage, API calls, third-party services)?
+Flag any plans that could have unexpected cost impact without mentioning it.
+Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
+          },
+          spec_adherence: {
+            desc: 'Plans address all spec requirements, no drift',
+            prompt: `Read the plans at {plans} and the spec at {spec}.
+Check: across all plans, is every functional requirement from the spec addressed by at
+least one plan? Is every applicable non-functional requirement addressed?
+List any spec requirements that are not covered by any plan.
+List any plan content that introduces scope not present in the spec (scope creep).
+If you find drift \u2014 plans that contradict or ignore spec requirements \u2014 flag each instance
+with the specific spec requirement and the conflicting plan content.
+Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
+          },
+        },
+      },
       phase2: {
         resolve: {
-          prompt: `Analyze the conflict or failure and discuss resolution options.
-Consider: root cause, alternative approaches, scope reduction.
-When resolved, document your approach clearly.`,
-        },
-        rewrite_spec: {
-          prompt: `Rewrite the working spec to address the resolution.
-Preserve what was working. Only change what needs to change.
-Output ONLY the rewritten spec in markdown format.`,
-        },
-        commit: {
-          prompt: `Generate a commit message following project conventions.
-First line is the title (max 72 chars). Blank line, then body if needed.
-Match the style of recent commits in the repo.`,
+          prompt: `## Context Paths
+- Task spec: {task_spec_path}
+- Current plan: {plan_path}
+- Plans directory: {plans_dir}
+
+Read these files to understand the original intent.
+
+## Kloop Evidence
+
+{kloop_evidence}
+
+## Discussion
+
+Discuss with the user:
+1. What specifically went wrong?
+2. Is this a plan implementation issue or a spec constraint issue?
+3. What should change in the spec to address this?
+
+## Feedback
+
+When ready, write the feedback to {feedback_path}
+The feedback will be used to guide the next iteration.
+
+After writing feedback, return the revisit_spec signal.`,
         },
       },
       phase3: {
@@ -13570,10 +14502,6 @@ Mark items as ambiguous when you're unsure rather than guessing.`,
 Deduplicate overlapping fixes on the same file.
 Output the complete spec (not just the changes).`,
         },
-        commit_pending: {
-          prompt: `Generate a commit message for pending changes.
-First line is the title. Match the style of recent commits.`,
-        },
         prereview_classify: {
           prompt: `Classify CodeRabbit findings as fix/comment/ignore.
 Be conservative \u2014 only mark as "fix" if it's a genuine issue.`,
@@ -13581,6 +14509,21 @@ Be conservative \u2014 only mark as "fix" if it's a genuine issue.`,
         prereview_fix: {
           prompt: `Apply the classified fixes to the codebase.
 Be precise and minimal \u2014 only change what's needed.`,
+        },
+        create_pr: {
+          prompt: `You are creating a GitHub Pull Request. Your task:
+
+1. Discover PR conventions:
+   - Check for PR templates: .github/PULL_REQUEST_TEMPLATE.md, .github/pull_request_template.md, or any template in .github/PULL_REQUEST_TEMPLATE/
+   - Check CONTRIBUTING.md for PR guidelines
+   - Look at recent merged PRs for title/body style: gh pr list --state merged --limit 5 --json title,body
+
+2. Create a PR against the "{baseBranch}" branch using gh pr create:
+   - Title must start with "[{ticketId}]" followed by a concise summary of what was implemented
+   - Body should follow the discovered template/conventions, or include a summary, what changed, and how to test
+
+3. Output ONLY a JSON object with the PR number and URL:
+   {"number": <int>, "url": "<string>"}`,
         },
         tty_resolve_ambiguous: {
           prompt: `Help resolve ambiguous items from the PR review.
@@ -13594,85 +14537,41 @@ Resolve conflicts while preserving the intent of both changes.`,
           prompt: `The dev-loop execution failed. Help investigate and determine next steps.
 Options: fix the issue and retry, skip and move on, or escalate.`,
         },
+        feedback: {
+          prompt: `## Context Paths
+- Task spec: {task_spec_path}
+- Plans directory: {plans_dir}
+
+Read these files to understand the original intent.
+
+## PR State
+- URL: {pr_url}
+- Checks status: {checks_status}
+- Open threads: {thread_count}
+
+## Discussion
+
+Discuss with the user:
+1. What about the PR needs improvement?
+2. Is this an implementation issue or a spec issue?
+3. What should change in the spec to address this?
+
+## Feedback
+
+When ready, write the feedback to {feedback_path}
+The feedback will be used to guide the next iteration.
+
+After writing feedback, return the revisit_spec signal.`,
+        },
+      },
+      generic: {
+        commit: { prompt: DEFAULT_COMMIT_PROMPT },
       },
     },
-    spec_reviewers: {
-      completeness: {
-        desc: 'All requirements from ticket covered',
-        prompt: `Read the spec at {spec} and the ticket at {ticket}.
-Check: does the spec address every requirement in the ticket?
-List any requirements that are missing or insufficiently addressed.
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-      docs_accuracy: {
-        desc: 'Referenced tool/lib versions and interfaces are correct',
-        prompt: `Read the spec at {spec} and the ticket at {ticket}.
-Check: are all referenced tool versions, API interfaces, and method signatures accurate?
-Cross-reference with the codebase \u2014 grep for referenced functions, check package versions.
-Flag anything that looks hallucinated or version-incorrect.
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-      generalization: {
-        desc: 'Extends existing patterns rather than inventing new ones',
-        prompt: `Read the spec at {spec}. Explore the codebase.
-Check: does the spec propose new patterns, paths, or abstractions when existing ones could be extended?
-Flag any "reinventing the wheel" \u2014 new utilities when similar ones exist, new conventions when the codebase already has one.
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-      complexity: {
-        desc: 'Is there a simpler or faster approach?',
-        prompt: `Read the spec at {spec}.
-Check: is the proposed approach unnecessarily complex?
-Consider: could fewer files be changed? Could an existing tool/command handle this? Is there a more direct path?
-Don't flag reasonable complexity \u2014 only flag when there's a clearly simpler alternative.
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-      security: {
-        desc: 'Security and compliance implications',
-        prompt: `Read the spec at {spec}.
-Check for security concerns: injection risks, auth/authz gaps, secrets handling, data exposure, OWASP top 10.
-Only flag genuine issues, not theoretical concerns in internal code paths.
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-      proof_of_completion: {
-        desc: 'Spec includes programmatic proof of completion',
-        prompt: `Read the spec at {spec}.
-Check: does the spec include a "Proof of Completion" section with concrete, runnable verification?
-Good proofs: test commands, API calls, grep assertions, build commands, tf plan output.
-Bad proofs: "manually verify", "visually check", vague assertions.
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-    },
-    plan_reviewers: {
-      coverage: {
-        desc: 'Plans fully cover the spec',
-        prompt: `Read the plans at {plans} and the spec at {spec}.
-Check: do the plans together cover every requirement in the spec?
-List any spec items that are not addressed by any plan.
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-      ordering: {
-        desc: 'Plan dependencies ordered correctly',
-        prompt: `Read the plans at {plans}.
-Check: are plans ordered so that earlier plans don't depend on later ones?
-Flag any circular or incorrect dependency ordering.
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-      vertical_split: {
-        desc: 'Plans split by domain/feature, not by layer',
-        prompt: `Read the plans at {plans}.
-Check: are plans split vertically by domain/feature (each plan = complete slice with types+logic+tests)?
-Flag any plan that is a horizontal layer (e.g., "add types" or "write tests" as standalone plans).
-Each plan should produce an isolated working commit.
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
-      cost: {
-        desc: 'Cost and resource implications',
-        prompt: `Read the plans at {plans} and the spec at {spec}.
-Check: are there cost implications (compute, storage, API calls, third-party services)?
-Flag any plans that could have unexpected cost impact without mentioning it.
-Output ONLY the problems found \u2014 one per line. If none, output "No issues found."`,
-      },
+    templates: {
+      triage: DEFAULT_TRIAGE_TEMPLATE,
+      spec: DEFAULT_SPEC_TEMPLATE,
+      plan: DEFAULT_PLAN_TEMPLATE,
     },
     kloop: {
       implementers: { claude: 1 },
@@ -13683,16 +14582,18 @@ Output ONLY the problems found \u2014 one per line. If none, output "No issues f
       conflictCheckThreshold: 2,
       firstLoopFullReview: false,
       previousReviewPropagation: 0,
-      reviewerFailureLimit: 2,
     },
     settings: {
       maxPushCycles: 10,
       pollInterval: 60,
       defaultLlmTimeout: 300,
+      coderabbit: true,
+      removeSpecOnPush: false,
     },
     repo: {
       baseBranch: 'main',
       ticketSystem: null,
+      prComment: null,
     },
   };
   PHASE_ALIASES = {
@@ -13703,694 +14604,100 @@ Output ONLY the problems found \u2014 one per line. If none, output "No issues f
   };
 });
 
-// src/core/config.ts
-import { readFileSync, writeFileSync, mkdirSync as mkdirSync4, existsSync } from 'fs';
-import { dirname as dirname4 } from 'path';
-function configPath(id) {
-  return `${process.env.HOME}/.kautopilot/${id}/config.yaml`;
+// src/core/agents.ts
+import { existsSync as existsSync4, readFileSync as readFileSync4 } from 'fs';
+function setCachedConfig(config) {
+  _cachedConfig = config;
 }
-function readConfig(id) {
-  const path = configPath(id);
-  if (!existsSync(path)) {
-    return null;
-  }
-  const raw = readFileSync(path, 'utf-8');
-  const parsed = YAML.parse(raw);
-  if (!parsed) return DEFAULT_CONFIG;
-  const legacySettings = parsed.settings;
-  const migratedKloop = { ...(parsed.kloop ?? {}) };
-  if (legacySettings) {
-    if (migratedKloop.maxIterations == null && legacySettings.maxIterations != null)
-      migratedKloop.maxIterations = legacySettings.maxIterations;
-    if (migratedKloop.implementerTimeout == null && legacySettings.implementerTimeout != null)
-      migratedKloop.implementerTimeout = legacySettings.implementerTimeout;
-    if (migratedKloop.reviewerTimeout == null && legacySettings.reviewerTimeout != null)
-      migratedKloop.reviewerTimeout = legacySettings.reviewerTimeout;
-  }
-  return {
-    claude_binary: parsed.claude_binary ?? DEFAULT_CONFIG.claude_binary,
-    agents: {
-      init: { ...DEFAULT_CONFIG.agents.init, ...parsed.agents?.init },
-      phase2: { ...DEFAULT_CONFIG.agents.phase2, ...parsed.agents?.phase2 },
-      phase3: { ...DEFAULT_CONFIG.agents.phase3, ...parsed.agents?.phase3 },
-    },
-    spec_reviewers: { ...DEFAULT_CONFIG.spec_reviewers, ...parsed.spec_reviewers },
-    plan_reviewers: { ...DEFAULT_CONFIG.plan_reviewers, ...parsed.plan_reviewers },
-    kloop: { ...DEFAULT_CONFIG.kloop, ...migratedKloop },
-    settings: { ...DEFAULT_CONFIG.settings, ...parsed.settings },
-    repo: { ...DEFAULT_CONFIG.repo, ...parsed.repo },
-  };
-}
-function writeConfig(id, config) {
-  const path = configPath(id);
-  mkdirSync4(dirname4(path), { recursive: true });
-  writeFileSync(path, YAML.stringify(config));
-}
-function globalConfigPath() {
-  return `${process.env.HOME}/.kautopilot/config.yaml`;
-}
-function orgConfigPath(org) {
-  return `${process.env.HOME}/.kautopilot/orgs/${org}/config.yaml`;
-}
-function resolvedConfigPath(org, configPathOverride) {
-  return pickConfig(org, configPathOverride);
-}
-function ensureGlobalConfig() {
-  const path = globalConfigPath();
-  if (existsSync(path)) return;
-  mkdirSync4(dirname4(path), { recursive: true });
-  const header = `# kautopilot global config
-# Edit these to customize agent behavior and binary.
-
-`;
-  writeFileSync(path, header + YAML.stringify(DEFAULT_CONFIG));
-}
-function pickConfig(org, configPathOverride) {
-  if (configPathOverride) return configPathOverride;
-  if (org) {
-    const orgPath = orgConfigPath(org);
-    if (existsSync(orgPath)) return orgPath;
-  }
-  return globalConfigPath();
-}
-function resolveConfig(org, configPathOverride) {
-  const picked = pickConfig(org, configPathOverride);
-  if (!picked || !existsSync(picked)) return { ...DEFAULT_CONFIG };
-  const raw = readFileSync(picked, 'utf-8');
-  const parsed = YAML.parse(raw);
-  if (!parsed) return { ...DEFAULT_CONFIG };
-  const legacySettings = parsed.settings;
-  const migratedKloop = { ...(parsed.kloop ?? {}) };
-  if (legacySettings) {
-    if (migratedKloop.maxIterations == null && legacySettings.maxIterations != null)
-      migratedKloop.maxIterations = legacySettings.maxIterations;
-    if (migratedKloop.implementerTimeout == null && legacySettings.implementerTimeout != null)
-      migratedKloop.implementerTimeout = legacySettings.implementerTimeout;
-    if (migratedKloop.reviewerTimeout == null && legacySettings.reviewerTimeout != null)
-      migratedKloop.reviewerTimeout = legacySettings.reviewerTimeout;
-  }
-  return {
-    claude_binary: parsed.claude_binary ?? DEFAULT_CONFIG.claude_binary,
-    agents: {
-      init: { ...DEFAULT_CONFIG.agents.init, ...parsed.agents?.init },
-      phase2: { ...DEFAULT_CONFIG.agents.phase2, ...parsed.agents?.phase2 },
-      phase3: { ...DEFAULT_CONFIG.agents.phase3, ...parsed.agents?.phase3 },
-    },
-    spec_reviewers: { ...DEFAULT_CONFIG.spec_reviewers, ...parsed.spec_reviewers },
-    plan_reviewers: { ...DEFAULT_CONFIG.plan_reviewers, ...parsed.plan_reviewers },
-    kloop: { ...DEFAULT_CONFIG.kloop, ...migratedKloop },
-    settings: { ...DEFAULT_CONFIG.settings, ...parsed.settings },
-    repo: { ...DEFAULT_CONFIG.repo, ...parsed.repo },
-  };
-}
-var YAML;
-var init_config = __esm(() => {
-  init_types2();
-  YAML = __toESM(require_dist(), 1);
-});
-
-// src/core/lock.ts
-import {
-  writeFileSync as writeFileSync2,
-  readFileSync as readFileSync2,
-  existsSync as existsSync2,
-  unlinkSync,
-  mkdirSync as mkdirSync5,
-} from 'fs';
-import { dirname as dirname5 } from 'path';
-function lockPath(id) {
-  return `${process.env.HOME}/.kautopilot/${id}/lock.pid`;
-}
-function isProcessAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function acquireLock(id) {
-  const path = lockPath(id);
-  mkdirSync5(dirname5(path), { recursive: true });
-  if (existsSync2(path)) {
-    const existingPid = parseInt(readFileSync2(path, 'utf-8').trim(), 10);
-    if (isProcessAlive(existingPid)) {
-      throw new Error(`Session is already running (PID ${existingPid}). Use \`kautopilot stop\` first.`);
-    }
-    console.warn(`Warning: Stale lock detected (PID ${existingPid} not alive). Auto-cleaning.`);
-    unlinkSync(path);
-  }
-  writeFileSync2(path, String(process.pid));
-  const cleanup = () => {
-    try {
-      if (existsSync2(path)) {
-        const storedPid = readFileSync2(path, 'utf-8').trim();
-        if (storedPid === String(process.pid)) {
-          unlinkSync(path);
-        }
-      }
-    } catch {}
-  };
-  process.on('SIGINT', () => {
-    cleanup();
-    process.exit(130);
-  });
-  process.on('SIGTERM', () => {
-    cleanup();
-    process.exit(143);
-  });
-  process.on('exit', cleanup);
-}
-function checkLock(id) {
-  const path = lockPath(id);
-  if (!existsSync2(path)) {
-    return { locked: false, pid: 0, alive: false };
-  }
-  const pid = parseInt(readFileSync2(path, 'utf-8').trim(), 10);
-  const alive = isProcessAlive(pid);
-  if (!alive) {
-    console.warn(`Warning: Stale lock detected (PID ${pid} not alive). Auto-cleaning.`);
-    try {
-      unlinkSync(path);
-    } catch {}
-    return { locked: false, pid, alive: false };
-  }
-  return { locked: true, pid, alive: true };
-}
-function releaseLock(id) {
-  const path = lockPath(id);
-  try {
-    if (existsSync2(path)) {
-      const storedPid = readFileSync2(path, 'utf-8').trim();
-      if (storedPid === String(process.pid)) {
-        unlinkSync(path);
-      }
-    }
-  } catch {}
-}
-var init_lock = () => {};
-
-// src/core/log.ts
-var exports_log = {};
-__export(exports_log, {
-  readLogFromDir: () => readLogFromDir,
-  readLog: () => readLog,
-  readInitLog: () => readInitLog,
-  logPathForDir: () => logPathForDir,
-  logPath: () => logPath,
-  initLogPath: () => initLogPath,
-  appendInitEvent: () => appendInitEvent,
-  appendEventToDir: () => appendEventToDir,
-  appendEvent: () => appendEvent,
-});
-import { appendFileSync, readFileSync as readFileSync3, existsSync as existsSync3, mkdirSync as mkdirSync6 } from 'fs';
-import { join as join3, dirname as dirname6 } from 'path';
-function logPathForDir(dir) {
-  return join3(dir, 'log.jsonl');
-}
-function appendEventToDir(dir, entry) {
-  const path = logPathForDir(dir);
-  mkdirSync6(dirname6(path), { recursive: true });
-  appendFileSync(
-    path,
-    JSON.stringify(entry) +
-      `
-`,
-  );
-}
-function readLogFromDir(dir) {
-  const path = logPathForDir(dir);
-  if (!existsSync3(path)) return [];
-  const raw = readFileSync3(path, 'utf-8');
-  const entries = [];
-  for (const line of raw.split(`
-`)) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      entries.push(JSON.parse(trimmed));
-    } catch {
-      console.warn(`Warning: skipping malformed log line: ${trimmed.slice(0, 80)}`);
-    }
-  }
-  return entries;
-}
-function logPath(id) {
-  return logPathForDir(sessionDir(id));
-}
-function appendEvent(id, entry) {
-  appendEventToDir(sessionDir(id), entry);
-}
-function readLog(id) {
-  return readLogFromDir(sessionDir(id));
-}
-function initLogPath(id) {
-  return logPathForDir(initDir(id));
-}
-function appendInitEvent(id, entry) {
-  appendEventToDir(initDir(id), entry);
-}
-function readInitLog(id) {
-  return readLogFromDir(initDir(id));
-}
-var init_log = __esm(() => {
-  init_artifacts();
-});
-
-// src/core/init-lock.ts
-import {
-  writeFileSync as writeFileSync3,
-  readFileSync as readFileSync4,
-  existsSync as existsSync4,
-  unlinkSync as unlinkSync2,
-  mkdirSync as mkdirSync7,
-} from 'fs';
-import { join as join4, dirname as dirname7 } from 'path';
-function initLockPath(id) {
-  return join4(initDir(id), 'lock.pid');
-}
-function isProcessAlive2(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function acquireInitLock(id) {
-  const path = initLockPath(id);
-  mkdirSync7(dirname7(path), { recursive: true });
-  if (existsSync4(path)) {
-    const existingPid = parseInt(readFileSync4(path, 'utf-8').trim(), 10);
-    if (isProcessAlive2(existingPid)) {
-      throw new Error(`Init is already running (PID ${existingPid}).`);
-    }
-    unlinkSync2(path);
-  }
-  writeFileSync3(path, String(process.pid));
-  currentInitId = id;
-  currentLockPath = path;
-  const cleanupCurrentLock = () => {
-    const lockPath2 = currentLockPath;
-    if (!lockPath2) return;
-    try {
-      if (existsSync4(lockPath2)) {
-        const storedPid = readFileSync4(lockPath2, 'utf-8').trim();
-        if (storedPid === String(process.pid)) {
-          unlinkSync2(lockPath2);
-        }
-      }
-    } catch {}
-  };
-  if (!signalHandlersRegistered) {
-    signalHandlersRegistered = true;
-    process.on('SIGINT', () => {
-      const initId = currentInitId;
-      if (initId) {
-        try {
-          appendInitEvent(initId, {
-            ts: new Date().toISOString(),
-            event: 'init:cancelled',
-            metadata: { reason: 'sigint', pid: process.pid },
-          });
-          updateInitOutcome(initId, 'cancelled');
-        } catch {}
-      }
-      cleanupCurrentLock();
-      process.exit(130);
-    });
-    process.on('SIGTERM', () => {
-      const initId = currentInitId;
-      if (initId) {
-        try {
-          appendInitEvent(initId, {
-            ts: new Date().toISOString(),
-            event: 'init:cancelled',
-            metadata: { reason: 'sigterm', pid: process.pid },
-          });
-          updateInitOutcome(initId, 'cancelled');
-        } catch {}
-      }
-      cleanupCurrentLock();
-      process.exit(143);
-    });
-    process.on('exit', cleanupCurrentLock);
-  }
-}
-function checkInitLock(id) {
-  const path = initLockPath(id);
+function loadSessionAgents(sessionId) {
+  const path = `${process.env.HOME}/.kautopilot/${sessionId}/config.yaml`;
   if (!existsSync4(path)) {
-    return { locked: false, pid: 0, alive: false };
+    _cachedConfig = DEFAULT_CONFIG;
+    return;
   }
-  const pid = parseInt(readFileSync4(path, 'utf-8').trim(), 10);
-  const alive = isProcessAlive2(pid);
-  if (!alive) {
-    try {
-      unlinkSync2(path);
-    } catch {}
-    return { locked: false, pid, alive: false };
-  }
-  return { locked: true, pid, alive: true };
-}
-function releaseInitLock(id) {
-  const path = initLockPath(id);
   try {
-    if (existsSync4(path)) {
-      const storedPid = readFileSync4(path, 'utf-8').trim();
-      if (storedPid === String(process.pid)) {
-        unlinkSync2(path);
-      }
+    const raw = readFileSync4(path, 'utf-8');
+    const parsed = YAML2.parse(raw);
+    if (!parsed) {
+      _cachedConfig = DEFAULT_CONFIG;
+      return;
     }
-  } catch {}
-}
-var signalHandlersRegistered = false,
-  currentInitId = null,
-  currentLockPath = null;
-var init_init_lock = __esm(() => {
-  init_artifacts();
-  init_log();
-  init_init_db();
-});
-
-// src/util/format.ts
-function formatDuration(ms) {
-  if (ms <= 0) return '0s';
-  const seconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(seconds / 60);
-  const hours = Math.floor(minutes / 60);
-  const s = seconds % 60;
-  const m = minutes % 60;
-  if (hours > 0) {
-    return `${hours}h ${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`;
-  }
-  if (minutes > 0) {
-    return `${m}m ${String(s).padStart(2, '0')}s`;
-  }
-  return `${s}s`;
-}
-function logField(label, value) {
-  console.log(`${c.cyan}${label.padEnd(11)}${c.reset}${value}`);
-}
-function logOk(msg) {
-  console.log(`${c.green}\u2713${c.reset} ${msg}`);
-}
-function logInfo(msg) {
-  console.log(`${c.blue}\u2139${c.reset} ${msg}`);
-}
-function logWarn(msg) {
-  console.warn(`${c.yellow}\u26A0${c.reset} ${msg}`);
-}
-function logError(msg) {
-  console.error(`${c.red}\u2717${c.reset} ${msg}`);
-}
-function logHeading(title) {
-  console.log(`
-${c.bold}${c.cyan}${title}${c.reset}`);
-}
-function logDim(msg) {
-  console.log(`${c.dim}${msg}${c.reset}`);
-}
-function stateIcon(state) {
-  return STATE_ICONS[state] ?? '\u25CF';
-}
-function formatStatus(state, running) {
-  if (state === 'init') return `${c.yellow}init-incomplete${c.reset}`;
-  if (running) return `${c.green}running${c.reset}`;
-  return `${c.dim}stopped${c.reset}`;
-}
-function formatPhase(phase) {
-  if (!phase || phase === 'none') return `${c.dim}\u2014${c.reset}`;
-  return `${c.magenta}${phase}${c.reset}`;
-}
-var isTTY, c, STATE_ICONS;
-var init_format = __esm(() => {
-  isTTY = process.stdout.isTTY;
-  c = {
-    reset: isTTY ? '\x1B[0m' : '',
-    bold: isTTY ? '\x1B[1m' : '',
-    dim: isTTY ? '\x1B[2m' : '',
-    green: isTTY ? '\x1B[32m' : '',
-    yellow: isTTY ? '\x1B[33m' : '',
-    red: isTTY ? '\x1B[31m' : '',
-    cyan: isTTY ? '\x1B[36m' : '',
-    magenta: isTTY ? '\x1B[35m' : '',
-    blue: isTTY ? '\x1B[34m' : '',
-  };
-  STATE_ICONS = {
-    pull_ticket: '\uD83C\uDFAB',
-    gather_context: '\uD83D\uDD0D',
-    write_spec: '\uD83D\uDCDD',
-    finalize_spec: '\uD83D\uDCCC',
-    write_plans: '\uD83D\uDCCB',
-    finalize_plans: '\u2705',
-    setup_run: '\u2699\uFE0F',
-    running: '\uD83C\uDFC3',
-    commit: '\uD83D\uDCBE',
-    completed: '\u2705',
-    failed: '\u274C',
-    create_pr: '\uD83D\uDD17',
-    ensure_branch: '\uD83C\uDF3F',
-    commit_pending: '\uD83D\uDCBE',
-    poll: '\uD83D\uDC40',
-    eval: '\uD83E\uDDEA',
-    push: '\uD83D\uDE80',
-    prereview: '\uD83D\uDD2C',
-    feedback_check: '\uD83D\uDCAC',
-    act: '\u26A1',
-    run_fix: '\uD83D\uDD27',
-    tty_resolve: '\uD83D\uDDA5\uFE0F',
-    next_plan: '\uD83D\uDCD1',
-    clear_loop: '\uD83E\uDDF9',
-    resolve: '\uD83D\uDD13',
-    rewrite_spec: '\u270F\uFE0F',
-  };
-});
-
-// src/core/init-status.ts
-import {
-  existsSync as existsSync5,
-  readFileSync as readFileSync5,
-  writeFileSync as writeFileSync4,
-  mkdirSync as mkdirSync8,
-  renameSync,
-} from 'fs';
-import { join as join5, dirname as dirname8 } from 'path';
-function initialInitStatus() {
-  return {
-    walCursor: 0,
-    walTimestamp: '',
-    state: 'identify',
-    stateStatus: 'pending',
-    pid: null,
-    running: false,
-    startedAt: null,
-    context: {},
-    completedStates: [],
-    outcome: null,
-  };
-}
-function applyInitEvent(status, entry, index) {
-  status.walCursor = index + 1;
-  status.walTimestamp = entry.ts;
-  const { event } = entry;
-  if (event === 'init:started') {
-    status.running = true;
-    status.pid = entry.metadata?.pid ?? null;
-    status.startedAt = entry.ts;
-  }
-  if (
-    event === 'init:completed' ||
-    event === 'init:failed' ||
-    event === 'init:cancelled' ||
-    event === 'init:abandoned'
-  ) {
-    status.running = false;
-    status.pid = null;
-    if (event === 'init:failed') {
-      status.outcome = 'failed';
-    } else if (event === 'init:cancelled') {
-      status.outcome = 'cancelled';
-    } else if (event === 'init:abandoned') {
-      status.outcome = 'abandoned';
-    }
-  }
-  if (event.endsWith(':started') && !INIT_LIFECYCLE_EVENTS.has(event)) {
-    const name = event.replace(':started', '');
-    status.state = name;
-    status.stateStatus = 'running';
-  }
-  if (event.endsWith(':completed') && !INIT_LIFECYCLE_EVENTS.has(event)) {
-    const name = event.replace(':completed', '');
-    if (name === status.state) {
-      status.stateStatus = 'completed';
-    }
-    if (!status.completedStates.includes(name)) {
-      status.completedStates.push(name);
-    }
-  }
-  if (event.endsWith(':failed') && !INIT_LIFECYCLE_EVENTS.has(event)) {
-    const name = event.replace(':failed', '');
-    if (name === status.state) {
-      status.stateStatus = 'failed';
-    }
-  }
-  if (event === 'init:crash_recovered') {
-    status.running = false;
-    status.pid = null;
-    if (status.stateStatus === 'running') {
-      status.stateStatus = 'pending';
-    }
-  }
-  if (event === 'context:updated' && entry.metadata) {
-    const { reason, pid, state, criticalOk, downgrade, regenerate, retry, ...contextFields } = entry.metadata;
-    Object.assign(status.context, contextFields);
-  }
-  if (event === 'promote:completed') {
-    status.outcome = entry.metadata?.outcome ?? 'promoted';
-  }
-  if (event === 'downgrade_local:completed') {
-    status.outcome = 'downgraded_local';
-  }
-}
-function initStatusPath(id) {
-  return join5(initDir(id), 'status.yaml');
-}
-function readInitStatusYaml(id) {
-  const path = initStatusPath(id);
-  if (!existsSync5(path)) return null;
-  try {
-    const raw = readFileSync5(path, 'utf-8');
-    return import_yaml.default.parse(raw);
+    _cachedConfig = {
+      claude_binary: parsed.claude_binary ?? DEFAULT_CONFIG.claude_binary,
+      agents: {
+        init: { ...DEFAULT_CONFIG.agents.init, ...parsed.agents?.init },
+        phase1: {
+          triage: {
+            ...DEFAULT_CONFIG.agents.phase1.triage,
+            ...parsed.agents?.phase1?.triage,
+          },
+          spec_writer: {
+            ...DEFAULT_CONFIG.agents.phase1.spec_writer,
+            ...parsed.agents?.phase1?.spec_writer,
+          },
+          plan_writer: {
+            ...DEFAULT_CONFIG.agents.phase1.plan_writer,
+            ...parsed.agents?.phase1?.plan_writer,
+          },
+          spec_reviewers: {
+            ...DEFAULT_CONFIG.agents.phase1.spec_reviewers,
+            ...parsed.agents?.phase1?.spec_reviewers,
+          },
+          plan_reviewers: {
+            ...DEFAULT_CONFIG.agents.phase1.plan_reviewers,
+            ...parsed.agents?.phase1?.plan_reviewers,
+          },
+        },
+        phase2: { ...DEFAULT_CONFIG.agents.phase2, ...parsed.agents?.phase2 },
+        phase3: { ...DEFAULT_CONFIG.agents.phase3, ...parsed.agents?.phase3 },
+        generic: {
+          ...DEFAULT_CONFIG.agents.generic,
+          ...parsed.agents?.generic,
+        },
+      },
+      templates: { ...DEFAULT_CONFIG.templates, ...parsed.templates },
+      kloop: { ...DEFAULT_CONFIG.kloop, ...parsed.kloop },
+      settings: { ...DEFAULT_CONFIG.settings, ...parsed.settings },
+      repo: { ...DEFAULT_CONFIG.repo, ...parsed.repo },
+    };
   } catch {
-    return null;
+    _cachedConfig = DEFAULT_CONFIG;
   }
 }
-function writeInitStatusYaml(id, status) {
-  const path = initStatusPath(id);
-  mkdirSync8(dirname8(path), { recursive: true });
-  const content = import_yaml.default.stringify(status, { lineWidth: 120 });
-  const tmp = `${path}.tmp`;
-  writeFileSync4(tmp, content);
-  renameSync(tmp, path);
-}
-function ensureInitStatus(id) {
-  const log = readInitLog(id);
-  const existing = readInitStatusYaml(id);
-  if (existing && existing.walCursor >= log.length) {
-    return existing;
+function getAgentPrompt(phase, name, vars) {
+  const config = _cachedConfig ?? DEFAULT_CONFIG;
+  const phaseAgents = config.agents[phase];
+  let content = phaseAgents?.[name]?.prompt ?? `Execute ${name} task.`;
+  if (vars) {
+    for (const [key, value] of Object.entries(vars)) {
+      content = content.replace(new RegExp(`\\{${key}\\}`, 'g'), value);
+    }
   }
-  const status = existing ?? initialInitStatus();
-  const startIdx = existing ? existing.walCursor : 0;
-  for (let i = startIdx; i < log.length; i++) {
-    applyInitEvent(status, log[i], i);
+  return content;
+}
+function getAgentBinary(phase, name) {
+  const config = _cachedConfig ?? DEFAULT_CONFIG;
+  if (process.env.CLAUDE_BINARY) return process.env.CLAUDE_BINARY;
+  if (name) {
+    const phaseAgents = config.agents[phase];
+    return phaseAgents?.[name]?.binary ?? config.claude_binary ?? 'claude';
   }
-  writeInitStatusYaml(id, status);
-  return status;
+  return config.claude_binary ?? 'claude';
 }
-function detectAndRecoverInitCrash(initId) {
-  const status = ensureInitStatus(initId);
-  if (!status.running) return false;
-  const lock = checkInitLock(initId);
-  if (lock.locked) return false;
-  const crashedState = status.state;
-  const crashedPid = status.pid;
-  appendInitEvent(initId, {
-    ts: new Date().toISOString(),
-    event: 'init:crash_recovered',
-    metadata: {
-      reason: 'crash',
-      pid: crashedPid,
-      state: crashedState,
-    },
-  });
-  ensureInitStatus(initId);
-  logWarn(`Init crash detected (PID ${crashedPid} in ${crashedState}) \u2014 recovered for resume`);
-  return true;
+function getDefaultBinary() {
+  const config = _cachedConfig ?? DEFAULT_CONFIG;
+  if (process.env.CLAUDE_BINARY) return process.env.CLAUDE_BINARY;
+  return config.claude_binary ?? 'claude';
 }
-var import_yaml, INIT_LIFECYCLE_EVENTS;
-var init_init_status = __esm(() => {
-  init_log();
-  init_artifacts();
-  init_init_lock();
-  init_log();
-  init_format();
-  import_yaml = __toESM(require_dist(), 1);
-  INIT_LIFECYCLE_EVENTS = new Set([
-    'init:started',
-    'init:completed',
-    'init:failed',
-    'init:cancelled',
-    'init:crash_recovered',
-    'context:updated',
-  ]);
-});
+var YAML2,
+  TTY_EXIT_INSTRUCTION = `
 
-// src/core/git.ts
-import { dirname as dirname9 } from 'path';
-function gitSync(args, cwd) {
-  const proc = Bun.spawnSync({
-    cmd: ['git', ...args],
-    cwd: cwd || process.cwd(),
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  return {
-    exitCode: proc.exitCode,
-    stdout: proc.stdout.toString().trim(),
-    stderr: proc.stderr.toString().trim(),
-  };
-}
-function getGitRoot(cwd) {
-  const result = gitSync(['rev-parse', '--path-format=absolute', '--git-common-dir'], cwd);
-  if (result.exitCode !== 0) throw new Error('Not a git repository.');
-  return dirname9(result.stdout);
-}
-function getWorktree(cwd) {
-  const result = gitSync(['rev-parse', '--path-format=absolute', '--show-toplevel'], cwd);
-  if (result.exitCode !== 0) throw new Error('Not a git repository.');
-  return result.stdout;
-}
-function hasUnmergedPaths(cwd) {
-  const result = gitSync(['diff', '--name-only', '--diff-filter=U'], cwd);
-  if (result.exitCode !== 0) return false;
-  return result.stdout.length > 0;
-}
-function getRemoteUrl(cwd) {
-  const result = gitSync(['remote', 'get-url', 'origin'], cwd);
-  if (result.exitCode !== 0) throw new Error('No remote "origin" found.');
-  return result.stdout;
-}
-function normalizeGitRoot(url) {
-  return url
-    .replace(/^git@/, '')
-    .replace(/^https?:\/\//, '')
-    .replace(/\.git$/, '')
-    .replace(/^([^/]+):/, '$1/')
-    .toLowerCase();
-}
-function extractOrg(gitRootHost) {
-  if (!gitRootHost) return 'default';
-  const parts = gitRootHost.split('/');
-  if (parts.length >= 2) return parts[1];
-  return gitRootHost;
-}
-function getCurrentBranch(cwd) {
-  const result = gitSync(['branch', '--show-current'], cwd);
-  if (result.exitCode !== 0) throw new Error('Could not determine current branch.');
-  return result.stdout;
-}
-function createBranch(name, cwd) {
-  const result = gitSync(['checkout', '-b', name], cwd);
-  if (result.exitCode !== 0) {
-    throw new Error(`Failed to create branch "${name}".`);
-  }
-}
-function isOnMain(baseBranch, cwd) {
-  const branch = getCurrentBranch(cwd);
-  const mainBranch = baseBranch || 'main';
-  return branch === mainBranch;
-}
-var init_git = () => {};
+When you are done, tell the user: "Exit this TTY (type /exit or Ctrl+C) to continue kautopilot."`,
+  _cachedConfig = null;
+var init_agents = __esm(() => {
+  init_types2();
+  YAML2 = __toESM(require_dist(), 1);
+});
 
 // node_modules/sisteransi/src/index.js
 var require_src = __commonJS((exports, module) => {
@@ -15742,169 +16049,17 @@ var init_dist2 = __esm(() => {
   J2 = `${import_picocolors2.default.gray(o)}  `;
 });
 
-// src/llm/inquirer.ts
-var exports_inquirer = {};
-__export(exports_inquirer, {
-  triageIssues: () => triageIssues,
-  textInput: () => textInput,
-  selectOption: () => selectOption,
-  confirmAction: () => confirmAction,
-});
-async function confirmAction(message, defaultValue = false) {
-  const result = await ye({ message, initialValue: defaultValue });
-  if (pD(result)) {
-    process.exit(0);
-  }
-  return result;
-}
-async function selectOption(message, options) {
-  const result = await ve({
-    message,
-    options,
-  });
-  if (pD(result) || typeof result !== 'string') {
-    process.exit(0);
-  }
-  return result;
-}
-async function textInput(message, placeholder) {
-  const result = await he({ message, placeholder });
-  if (pD(result)) {
-    process.exit(0);
-  }
-  return result;
-}
-async function triageIssues(issues) {
-  const valid = [];
-  const invalid = [];
-  const discuss = [];
-  for (const issue of issues) {
-    const action = await selectOption(`Issue: ${issue}`, [
-      { value: 'accept', label: 'Accept (valid)', hint: 'Mark as valid issue' },
-      { value: 'reject', label: 'Reject (invalid)', hint: 'Mark as invalid, will be ignored' },
-      { value: 'discuss', label: 'Discuss', hint: 'Flag for further discussion' },
-    ]);
-    switch (action) {
-      case 'accept':
-        valid.push(issue);
-        break;
-      case 'reject':
-        invalid.push(issue);
-        break;
-      case 'discuss':
-        discuss.push(issue);
-        break;
-    }
-  }
-  return { valid, invalid, discuss };
-}
-var init_inquirer = __esm(() => {
-  init_dist2();
-});
-
-// src/core/init-types.ts
-var CRITICAL_CAPABILITIES,
-  NON_CRITICAL_CAPABILITIES,
-  MAX_REPAIR_ATTEMPTS = 3;
-var init_init_types = __esm(() => {
-  CRITICAL_CAPABILITIES = ['extract-ticket', 'get-ticket'];
-  NON_CRITICAL_CAPABILITIES = [
-    'start-ticket',
-    'to-review',
-    'revert-to-inprogress',
-    'update-ticket',
-    'create-downstream-ticket',
-    'add-comment',
-    'move-to-todo',
-    'attach-artifact',
-  ];
-});
-
-// src/core/agents.ts
-import { existsSync as existsSync6, readFileSync as readFileSync6 } from 'fs';
-function ttyExitInstruction(sessionId) {
-  return `
-
-[Session: ${sessionId}]
-When you are done, tell the user: "Exit this TTY (type /exit or Ctrl+C) to continue kautopilot."`;
-}
-function setCachedConfig(config) {
-  _cachedConfig = config;
-}
-function loadSessionAgents(sessionId) {
-  const path = `${process.env.HOME}/.kautopilot/${sessionId}/config.yaml`;
-  if (!existsSync6(path)) {
-    _cachedConfig = DEFAULT_CONFIG;
-    return;
-  }
-  try {
-    const raw = readFileSync6(path, 'utf-8');
-    const parsed = YAML3.parse(raw);
-    if (!parsed) {
-      _cachedConfig = DEFAULT_CONFIG;
-      return;
-    }
-    _cachedConfig = {
-      claude_binary: parsed.claude_binary ?? DEFAULT_CONFIG.claude_binary,
-      agents: {
-        init: { ...DEFAULT_CONFIG.agents.init, ...parsed.agents?.init },
-        phase2: { ...DEFAULT_CONFIG.agents.phase2, ...parsed.agents?.phase2 },
-        phase3: { ...DEFAULT_CONFIG.agents.phase3, ...parsed.agents?.phase3 },
-      },
-      types: { ...DEFAULT_CONFIG.types, ...parsed.types },
-      kloop: { ...DEFAULT_CONFIG.kloop, ...parsed.kloop },
-      settings: { ...DEFAULT_CONFIG.settings, ...parsed.settings },
-      repo: { ...DEFAULT_CONFIG.repo, ...parsed.repo },
-    };
-  } catch {
-    _cachedConfig = DEFAULT_CONFIG;
-  }
-}
-function getAgentPrompt(phase, name, vars) {
-  const config = _cachedConfig ?? DEFAULT_CONFIG;
-  const phaseAgents = config.agents[phase];
-  let content = phaseAgents?.[name]?.prompt ?? `Execute ${name} task.`;
-  if (vars) {
-    for (const [key, value] of Object.entries(vars)) {
-      content = content.replace(new RegExp(`\\{${key}\\}`, 'g'), value);
-    }
-  }
-  return content;
-}
-function getAgentBinary(phase, name) {
-  const config = _cachedConfig ?? DEFAULT_CONFIG;
-  if (process.env.CLAUDE_BINARY) return process.env.CLAUDE_BINARY;
-  if (name) {
-    const phaseAgents = config.agents[phase];
-    return phaseAgents?.[name]?.binary ?? config.claude_binary ?? 'claude';
-  }
-  return config.claude_binary ?? 'claude';
-}
-function getDefaultBinary() {
-  const config = _cachedConfig ?? DEFAULT_CONFIG;
-  if (process.env.CLAUDE_BINARY) return process.env.CLAUDE_BINARY;
-  return config.claude_binary ?? 'claude';
-}
-var YAML3,
-  TTY_EXIT_INSTRUCTION = `
-
-When you are done, tell the user: "Exit this TTY (type /exit or Ctrl+C) to continue kautopilot."`,
-  _cachedConfig = null;
-var init_agents = __esm(() => {
-  init_types2();
-  YAML3 = __toESM(require_dist(), 1);
-});
-
 // src/llm/spawn.ts
+import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync7, writeFileSync as writeFileSync3 } from 'fs';
 var { spawn } = globalThis.Bun;
-import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync9, writeFileSync as writeFileSync5 } from 'fs';
 function debugLog(...args) {
   if (DEBUG) console.error('[debug]', ...args);
 }
 function resolveRunScope(options) {
   if (options?.runScope) return options.runScope;
-  if ('sessionId' in (options ?? {}) && options?.sessionId) {
-    return { kind: 'session', id: options.sessionId };
+  const sessionId = 'sessionId' in (options ?? {}) ? options.sessionId : undefined;
+  if (sessionId) {
+    return { kind: 'session', id: sessionId };
   }
   return null;
 }
@@ -15914,21 +16069,20 @@ function buildCommandString(args) {
 function createRunArtifacts(scope, executionType, binary, args, prompt, options) {
   const runNumber = nextRunNumber(scope);
   const runPath = runDir(scope, runNumber);
-  mkdirSync9(runPath, { recursive: true });
+  mkdirSync7(runPath, { recursive: true });
   const contextPath = runFilePath(scope, runNumber, 'context');
   const logsPath = runFilePath(scope, runNumber, 'logs');
   const commandPath = runFilePath(scope, runNumber, 'command');
   const promptPath = runFilePath(scope, runNumber, 'prompt.md');
-  writeFileSync5(promptPath, prompt);
-  writeFileSync5(
+  writeFileSync3(promptPath, prompt);
+  writeFileSync3(
     commandPath,
-    buildCommandString(args) +
-      `
+    `${buildCommandString(args)}
 `,
   );
-  writeFileSync5(logsPath, '');
+  writeFileSync3(logsPath, '');
   const startedAt = new Date().toISOString();
-  writeFileSync5(
+  writeFileSync3(
     contextPath,
     import_yaml2.stringify({
       run: runNumber,
@@ -15938,16 +16092,25 @@ function createRunArtifacts(scope, executionType, binary, args, prompt, options)
       label: options?.label,
       binary,
       cwd: options?.cwd,
-      timeoutSeconds: 'timeout' in (options ?? {}) ? options?.timeout : undefined,
+      timeoutSeconds: 'timeout' in (options ?? {}) ? options.timeout : undefined,
       startedAt,
       status: 'running',
       why: options?.context,
     }),
   );
-  return { scope, runNumber, runPath, contextPath, logsPath, commandPath, promptPath, startedAt };
+  return {
+    scope,
+    runNumber,
+    runPath,
+    contextPath,
+    logsPath,
+    commandPath,
+    promptPath,
+    startedAt,
+  };
 }
 function updateRunContext(info, data) {
-  writeFileSync5(info.contextPath, import_yaml2.stringify(data));
+  writeFileSync3(info.contextPath, import_yaml2.stringify(data));
 }
 function extractResultText(jsonlOutput) {
   const lines = jsonlOutput
@@ -16081,10 +16244,7 @@ async function spawnPrint(binary, prompt, options) {
   const { stdout } = await spawnCore(binary, prompt, options);
   s?.stop(spinMsg ?? '');
   try {
-    const cleaned = stdout
-      .replace(/^```(?:json)?\s*\n?/m, '')
-      .replace(/\n?```\s*$/m, '')
-      .trim();
+    const cleaned = stripCodeFences(stdout);
     return JSON.parse(cleaned);
   } catch {
     throw new Error(`LLM returned invalid JSON: ${stdout.slice(0, 200)}`);
@@ -16128,13 +16288,19 @@ async function spawnTTY(binary, prompt, options) {
   debugLog(`$ ${binary} exited with code ${exitCode}`);
   return exitCode;
 }
+function stripCodeFences(text) {
+  return text
+    .replace(/^```[^\n]*\n?/m, '')
+    .replace(/\n?```\s*$/m, '')
+    .trim();
+}
 async function spawnPrintRaw(binary, prompt, options) {
   const spinMsg = options?.spinnerMsg;
   const s = spinMsg && process.stdout.isTTY ? Y2() : null;
   s?.start(spinMsg);
   const { stdout } = await spawnCore(binary, prompt, options);
   s?.stop(spinMsg ?? '');
-  return stdout;
+  return stripCodeFences(stdout);
 }
 var import_yaml2, DEBUG;
 var init_spawn = __esm(() => {
@@ -16142,6 +16308,544 @@ var init_spawn = __esm(() => {
   init_artifacts();
   import_yaml2 = __toESM(require_dist(), 1);
   DEBUG = !!process.env.KAUTOPILOT_DEBUG;
+});
+
+// src/core/lock.ts
+import {
+  existsSync as existsSync7,
+  mkdirSync as mkdirSync9,
+  readFileSync as readFileSync6,
+  unlinkSync as unlinkSync2,
+  writeFileSync as writeFileSync5,
+} from 'fs';
+import { dirname as dirname9 } from 'path';
+function lockPath(id) {
+  return `${process.env.HOME}/.kautopilot/${id}/lock.pid`;
+}
+function isProcessAlive2(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function acquireLock(id) {
+  const path = lockPath(id);
+  mkdirSync9(dirname9(path), { recursive: true });
+  if (existsSync7(path)) {
+    const existingPid = parseInt(readFileSync6(path, 'utf-8').trim(), 10);
+    if (isProcessAlive2(existingPid)) {
+      throw new Error(`Session is already running (PID ${existingPid}). Use \`kautopilot stop\` first.`);
+    }
+    console.warn(`Warning: Stale lock detected (PID ${existingPid} not alive). Auto-cleaning.`);
+    unlinkSync2(path);
+  }
+  writeFileSync5(path, String(process.pid));
+  const cleanup = () => {
+    try {
+      if (existsSync7(path)) {
+        const storedPid = readFileSync6(path, 'utf-8').trim();
+        if (storedPid === String(process.pid)) {
+          unlinkSync2(path);
+        }
+      }
+    } catch {}
+  };
+  process.on('SIGINT', () => {
+    cleanup();
+    process.exit(130);
+  });
+  process.on('SIGTERM', () => {
+    cleanup();
+    process.exit(143);
+  });
+  process.on('exit', cleanup);
+}
+function checkLock(id) {
+  const path = lockPath(id);
+  if (!existsSync7(path)) {
+    return { locked: false, pid: 0, alive: false };
+  }
+  const pid = parseInt(readFileSync6(path, 'utf-8').trim(), 10);
+  const alive = isProcessAlive2(pid);
+  if (!alive) {
+    console.warn(`Warning: Stale lock detected (PID ${pid} not alive). Auto-cleaning.`);
+    try {
+      unlinkSync2(path);
+    } catch {}
+    return { locked: false, pid, alive: false };
+  }
+  return { locked: true, pid, alive: true };
+}
+function releaseLock(id) {
+  const path = lockPath(id);
+  try {
+    if (existsSync7(path)) {
+      const storedPid = readFileSync6(path, 'utf-8').trim();
+      if (storedPid === String(process.pid)) {
+        unlinkSync2(path);
+      }
+    }
+  } catch {}
+}
+var init_lock = () => {};
+
+// src/core/config.ts
+import {
+  existsSync as existsSync12,
+  mkdirSync as mkdirSync12,
+  readFileSync as readFileSync11,
+  writeFileSync as writeFileSync8,
+} from 'fs';
+import { dirname as dirname12 } from 'path';
+function buildVarComments(path) {
+  const vars = PROMPT_VARS[path];
+  if (!vars || Object.keys(vars).length === 0) return '';
+  const lines = Object.entries(vars).map(([v2, desc]) => `# {${v2}} - ${desc}`).join(`
+`);
+  return `${lines}
+`;
+}
+function serializeConfigWithComments(config) {
+  const lines = ['# kautopilot global config', '# Edit these to customize agent behavior and binary.', ''];
+  lines.push(`claude_binary: ${config.claude_binary}`);
+  lines.push('');
+  lines.push('agents:');
+  for (const [phaseKey, phaseAgents] of Object.entries(config.agents)) {
+    lines.push(`  ${phaseKey}:`);
+    if (phaseKey === 'phase1') {
+      const p1 = phaseAgents;
+      for (const agent of ['triage', 'spec_writer', 'plan_writer']) {
+        const path = `agents.phase1.${agent}`;
+        lines.push(`    ${agent}:`);
+        lines.push(createPromptBlock(path, p1[agent].prompt, 6));
+      }
+      lines.push('    spec_reviewers:');
+      for (const [name, reviewer] of Object.entries(p1.spec_reviewers)) {
+        const path = 'agents.phase1.spec_reviewers.*';
+        lines.push(`      ${name}:`);
+        lines.push(`        desc: ${JSON.stringify(reviewer.desc)}`);
+        const varComments = buildVarComments(path);
+        if (varComments) {
+          lines.push(indentLines(varComments.trimEnd(), 8));
+        }
+        lines.push(`        prompt: |`);
+        lines.push(indentLines(reviewer.prompt, 10));
+      }
+      lines.push('    plan_reviewers:');
+      for (const [name, reviewer] of Object.entries(p1.plan_reviewers)) {
+        const path = 'agents.phase1.plan_reviewers.*';
+        lines.push(`      ${name}:`);
+        lines.push(`        desc: ${JSON.stringify(reviewer.desc)}`);
+        const varComments = buildVarComments(path);
+        if (varComments) {
+          lines.push(indentLines(varComments.trimEnd(), 8));
+        }
+        lines.push(`        prompt: |`);
+        lines.push(indentLines(reviewer.prompt, 10));
+      }
+    } else if (phaseKey === 'phase2' || phaseKey === 'phase3') {
+      for (const [agentName, agentConfig] of Object.entries(phaseAgents)) {
+        const path = `agents.${phaseKey}.${agentName}`;
+        lines.push(`    ${agentName}:`);
+        lines.push(createPromptBlock(path, agentConfig.prompt, 6));
+      }
+    } else if (phaseKey === 'init') {
+      for (const [agentName, agentConfig] of Object.entries(phaseAgents)) {
+        const path = `agents.init.${agentName}`;
+        lines.push(`    ${agentName}:`);
+        lines.push(createPromptBlock(path, agentConfig.prompt, 6));
+      }
+    } else if (phaseKey === 'generic') {
+      const genericAgents = phaseAgents;
+      for (const [agentName, agentConfig] of Object.entries(genericAgents)) {
+        const path = `agents.generic.${agentName}`;
+        lines.push(`    ${agentName}:`);
+        lines.push(createPromptBlock(path, agentConfig.prompt, 6));
+      }
+    }
+  }
+  lines.push('');
+  lines.push('templates:');
+  for (const [key, value] of Object.entries(config.templates)) {
+    lines.push(`  ${key}: |`);
+    lines.push(indentLines(value, 4));
+  }
+  lines.push('');
+  lines.push('kloop:');
+  lines.push(`  implementers:`);
+  for (const [k3, v2] of Object.entries(config.kloop.implementers)) {
+    lines.push(`    ${k3}: ${v2}`);
+  }
+  lines.push(`  reviewPhases:`);
+  for (const phase of config.kloop.reviewPhases) {
+    lines.push(`    - [${phase.join(', ')}]`);
+  }
+  lines.push(`  maxIterations: ${config.kloop.maxIterations}`);
+  lines.push(`  implementerTimeout: ${config.kloop.implementerTimeout}`);
+  lines.push(`  reviewerTimeout: ${config.kloop.reviewerTimeout}`);
+  lines.push(`  conflictCheckThreshold: ${config.kloop.conflictCheckThreshold}`);
+  lines.push(`  firstLoopFullReview: ${config.kloop.firstLoopFullReview}`);
+  lines.push(`  previousReviewPropagation: ${config.kloop.previousReviewPropagation}`);
+  lines.push('');
+  lines.push('settings:');
+  lines.push(`  maxPushCycles: ${config.settings.maxPushCycles}`);
+  lines.push(`  pollInterval: ${config.settings.pollInterval}`);
+  lines.push(`  defaultLlmTimeout: ${config.settings.defaultLlmTimeout}`);
+  lines.push(`  coderabbit: ${config.settings.coderabbit}`);
+  lines.push(`  removeSpecOnPush: ${config.settings.removeSpecOnPush}`);
+  lines.push('');
+  lines.push('repo:');
+  if (config.repo.org) lines.push(`  org: ${config.repo.org}`);
+  lines.push(`  baseBranch: ${config.repo.baseBranch}`);
+  lines.push(`  ticketSystem: ${config.repo.ticketSystem ?? 'null'}`);
+  lines.push(`  prComment: ${config.repo.prComment ?? 'null'}`);
+  return `${lines.join(`
+`)}
+`;
+}
+function createPromptBlock(path, prompt, indentSpaces) {
+  const varComments = buildVarComments(path);
+  const indent = ' '.repeat(indentSpaces);
+  const indentedPrompt = indentLines(prompt, indentSpaces + 2);
+  if (varComments) {
+    const indentedComments = indentLines(varComments.trimEnd(), indentSpaces);
+    return `${indentedComments}
+${indent}prompt: |
+${indentedPrompt}`;
+  }
+  return `${indent}prompt: |
+${indentedPrompt}`;
+}
+function indentLines(text, spaces) {
+  const indent = ' '.repeat(spaces);
+  return text
+    .split(
+      `
+`,
+    )
+    .map(line => indent + line).join(`
+`);
+}
+function configPath(id) {
+  return `${process.env.HOME}/.kautopilot/${id}/config.yaml`;
+}
+function readConfig(id) {
+  const path = configPath(id);
+  if (!existsSync12(path)) {
+    return null;
+  }
+  const raw = readFileSync11(path, 'utf-8');
+  const parsed = YAML4.parse(raw);
+  if (!parsed) return DEFAULT_CONFIG;
+  const legacySettings = parsed.settings;
+  const migratedKloop = { ...(parsed.kloop ?? {}) };
+  if (legacySettings) {
+    if (migratedKloop.maxIterations == null && legacySettings.maxIterations != null)
+      migratedKloop.maxIterations = legacySettings.maxIterations;
+    if (migratedKloop.implementerTimeout == null && legacySettings.implementerTimeout != null)
+      migratedKloop.implementerTimeout = legacySettings.implementerTimeout;
+    if (migratedKloop.reviewerTimeout == null && legacySettings.reviewerTimeout != null)
+      migratedKloop.reviewerTimeout = legacySettings.reviewerTimeout;
+  }
+  return {
+    claude_binary: parsed.claude_binary ?? DEFAULT_CONFIG.claude_binary,
+    agents: {
+      init: { ...DEFAULT_CONFIG.agents.init, ...parsed.agents?.init },
+      phase1: {
+        triage: {
+          ...DEFAULT_CONFIG.agents.phase1.triage,
+          ...parsed.agents?.phase1?.triage,
+        },
+        spec_writer: {
+          ...DEFAULT_CONFIG.agents.phase1.spec_writer,
+          ...parsed.agents?.phase1?.spec_writer,
+        },
+        plan_writer: {
+          ...DEFAULT_CONFIG.agents.phase1.plan_writer,
+          ...parsed.agents?.phase1?.plan_writer,
+        },
+        spec_reviewers: {
+          ...DEFAULT_CONFIG.agents.phase1.spec_reviewers,
+          ...parsed.agents?.phase1?.spec_reviewers,
+        },
+        plan_reviewers: {
+          ...DEFAULT_CONFIG.agents.phase1.plan_reviewers,
+          ...parsed.agents?.phase1?.plan_reviewers,
+        },
+      },
+      phase2: { ...DEFAULT_CONFIG.agents.phase2, ...parsed.agents?.phase2 },
+      phase3: { ...DEFAULT_CONFIG.agents.phase3, ...parsed.agents?.phase3 },
+      generic: { ...DEFAULT_CONFIG.agents.generic, ...parsed.agents?.generic },
+    },
+    templates: { ...DEFAULT_CONFIG.templates, ...parsed.templates },
+    kloop: { ...DEFAULT_CONFIG.kloop, ...migratedKloop },
+    settings: { ...DEFAULT_CONFIG.settings, ...parsed.settings },
+    repo: { ...DEFAULT_CONFIG.repo, ...parsed.repo },
+  };
+}
+function writeConfig(id, config) {
+  const path = configPath(id);
+  mkdirSync12(dirname12(path), { recursive: true });
+  writeFileSync8(path, YAML4.stringify(config));
+}
+function globalConfigPath() {
+  return `${process.env.HOME}/.kautopilot/config.yaml`;
+}
+function orgConfigPath(org) {
+  return `${process.env.HOME}/.kautopilot/orgs/${org}/config.yaml`;
+}
+function resolvedConfigPath(org, configPathOverride) {
+  return pickConfig(org, configPathOverride);
+}
+function ensureGlobalConfig() {
+  const path = globalConfigPath();
+  if (existsSync12(path)) return;
+  mkdirSync12(dirname12(path), { recursive: true });
+  writeFileSync8(path, serializeConfigWithComments(DEFAULT_CONFIG));
+}
+function pickConfig(org, configPathOverride) {
+  if (configPathOverride) return configPathOverride;
+  if (org) {
+    const orgPath = orgConfigPath(org);
+    if (existsSync12(orgPath)) return orgPath;
+  }
+  return globalConfigPath();
+}
+function resolveConfig(org, configPathOverride) {
+  const picked = pickConfig(org, configPathOverride);
+  if (!picked || !existsSync12(picked)) return { ...DEFAULT_CONFIG };
+  const raw = readFileSync11(picked, 'utf-8');
+  const parsed = YAML4.parse(raw);
+  if (!parsed) return { ...DEFAULT_CONFIG };
+  const legacySettings = parsed.settings;
+  const migratedKloop = { ...(parsed.kloop ?? {}) };
+  if (legacySettings) {
+    if (migratedKloop.maxIterations == null && legacySettings.maxIterations != null)
+      migratedKloop.maxIterations = legacySettings.maxIterations;
+    if (migratedKloop.implementerTimeout == null && legacySettings.implementerTimeout != null)
+      migratedKloop.implementerTimeout = legacySettings.implementerTimeout;
+    if (migratedKloop.reviewerTimeout == null && legacySettings.reviewerTimeout != null)
+      migratedKloop.reviewerTimeout = legacySettings.reviewerTimeout;
+  }
+  return {
+    claude_binary: parsed.claude_binary ?? DEFAULT_CONFIG.claude_binary,
+    agents: {
+      init: { ...DEFAULT_CONFIG.agents.init, ...parsed.agents?.init },
+      phase1: {
+        triage: {
+          ...DEFAULT_CONFIG.agents.phase1.triage,
+          ...parsed.agents?.phase1?.triage,
+        },
+        spec_writer: {
+          ...DEFAULT_CONFIG.agents.phase1.spec_writer,
+          ...parsed.agents?.phase1?.spec_writer,
+        },
+        plan_writer: {
+          ...DEFAULT_CONFIG.agents.phase1.plan_writer,
+          ...parsed.agents?.phase1?.plan_writer,
+        },
+        spec_reviewers: {
+          ...DEFAULT_CONFIG.agents.phase1.spec_reviewers,
+          ...parsed.agents?.phase1?.spec_reviewers,
+        },
+        plan_reviewers: {
+          ...DEFAULT_CONFIG.agents.phase1.plan_reviewers,
+          ...parsed.agents?.phase1?.plan_reviewers,
+        },
+      },
+      phase2: { ...DEFAULT_CONFIG.agents.phase2, ...parsed.agents?.phase2 },
+      phase3: { ...DEFAULT_CONFIG.agents.phase3, ...parsed.agents?.phase3 },
+      generic: { ...DEFAULT_CONFIG.agents.generic, ...parsed.agents?.generic },
+    },
+    templates: { ...DEFAULT_CONFIG.templates, ...parsed.templates },
+    kloop: { ...DEFAULT_CONFIG.kloop, ...migratedKloop },
+    settings: { ...DEFAULT_CONFIG.settings, ...parsed.settings },
+    repo: { ...DEFAULT_CONFIG.repo, ...parsed.repo },
+  };
+}
+var YAML4, PROMPT_VARS;
+var init_config = __esm(() => {
+  init_types2();
+  YAML4 = __toESM(require_dist(), 1);
+  PROMPT_VARS = {
+    'agents.init.localInit': {
+      sessionId: 'the kautopilot session ID',
+    },
+    'agents.init.researchTicketSystem': {
+      taskSystem: 'the ticket system name (e.g., "jira", "linear", "clickup")',
+      detectedInfo: 'detected CLI tools on the system',
+    },
+    'agents.init.researchSetup': {
+      taskSystem: 'the ticket system name',
+      accessMethod: 'user-provided access hint',
+    },
+    'agents.init.createScripts': {
+      taskSystem: 'the ticket system name',
+      accessMethod: 'the chosen access method',
+      stateMapping: 'JSON mapping of ticket states',
+      transitionNoOp: 'comment if a transition is a no-op',
+      branch: 'current git branch name',
+      scriptsDir: 'path to the scripts directory',
+      quirks: 'any system-specific quirks',
+      setupAssessment: 'result of setup assessment',
+      researchDoc: 'the research document content',
+      detectedInfo: 'detected CLI tools',
+      scriptList: 'required scripts to create',
+      optionalScripts: 'optional scripts to create',
+    },
+    'agents.phase1.triage': {
+      ticket: 'path to the ticket file',
+    },
+    'agents.phase1.spec_writer': {
+      ticket: 'path to the ticket file',
+      triage: 'path to the triage file',
+    },
+    'agents.phase1.plan_writer': {
+      spec: 'path to the spec file',
+      triage: 'path to the triage file',
+    },
+    'agents.phase1.spec_reviewers.*': {
+      spec: 'path to the spec file',
+      ticket: 'path to the ticket file',
+      triage: 'path to the triage file (for verification_evidence reviewer)',
+    },
+    'agents.phase1.plan_reviewers.*': {
+      plans: 'path to the plans directory',
+      spec: 'path to the spec file',
+    },
+    'agents.phase2.resolve': {
+      plan: 'name of the current plan (e.g., "plan-1")',
+      spec: 'path to the current plan file',
+      taskSpec: 'path to the task spec file',
+      reason: 'reason for resolve ("conflict" or "retry")',
+      attempt: 'attempt number (1-indexed)',
+    },
+    'agents.phase2.rewrite_spec': {},
+    'agents.phase3.eval': {
+      spec_path: 'path to the task spec file',
+      plan_paths: 'paths to plan files (newline-separated)',
+    },
+    'agents.phase3.write_fix': {},
+    'agents.phase3.create_pr': {
+      baseBranch: 'the base branch name (e.g., "main")',
+      ticketId: 'the ticket ID',
+      spec_path: 'path to the spec file',
+    },
+    'agents.phase3.prereview_classify': {},
+    'agents.phase3.prereview_fix': {},
+    'agents.phase3.tty_resolve_ambiguous': {},
+    'agents.phase3.tty_resolve_conflict': {},
+    'agents.phase3.tty_resolve_failure': {},
+    'agents.generic.commit': {
+      context: 'optional context (e.g., plan path, reason for commit)',
+    },
+  };
+});
+
+// node_modules/nanoid/index.js
+import { webcrypto as crypto2 } from 'crypto';
+function fillPool(bytes) {
+  if (!pool || pool.length < bytes) {
+    pool = Buffer.allocUnsafe(bytes * POOL_SIZE_MULTIPLIER);
+    crypto2.getRandomValues(pool);
+    poolOffset = 0;
+  } else if (poolOffset + bytes > pool.length) {
+    crypto2.getRandomValues(pool);
+    poolOffset = 0;
+  }
+  poolOffset += bytes;
+}
+function random(bytes) {
+  fillPool((bytes |= 0));
+  return pool.subarray(poolOffset - bytes, poolOffset);
+}
+function customRandom(alphabet, defaultSize, getRandom) {
+  let mask = (2 << (31 - Math.clz32((alphabet.length - 1) | 1))) - 1;
+  let step = Math.ceil((1.6 * mask * defaultSize) / alphabet.length);
+  return (size = defaultSize) => {
+    if (!size) return '';
+    let id = '';
+    while (true) {
+      let bytes = getRandom(step);
+      let i = step;
+      while (i--) {
+        id += alphabet[bytes[i] & mask] || '';
+        if (id.length >= size) return id;
+      }
+    }
+  };
+}
+function customAlphabet(alphabet, size = 21) {
+  return customRandom(alphabet, size, random);
+}
+var POOL_SIZE_MULTIPLIER = 128,
+  pool,
+  poolOffset;
+var init_nanoid = () => {};
+
+// src/core/id.ts
+function generateSessionId() {
+  return shortId();
+}
+var shortId;
+var init_id = __esm(() => {
+  init_nanoid();
+  shortId = customAlphabet('0123456789abcdefghijklmnopqrstuvwxyz', 8);
+});
+
+// src/llm/inquirer.ts
+var exports_inquirer = {};
+__export(exports_inquirer, {
+  textInput: () => textInput,
+  selectOption: () => selectOption,
+  confirmAction: () => confirmAction,
+});
+async function confirmAction(message, defaultValue = false) {
+  const result = await ye({ message, initialValue: defaultValue });
+  if (pD(result)) {
+    process.exit(0);
+  }
+  return result;
+}
+async function selectOption(message, options) {
+  const result = await ve({
+    message,
+    options,
+  });
+  if (pD(result) || typeof result !== 'string') {
+    process.exit(0);
+  }
+  return result;
+}
+async function textInput(message, placeholder) {
+  const result = await he({ message, placeholder });
+  if (pD(result)) {
+    process.exit(0);
+  }
+  return result;
+}
+var init_inquirer = __esm(() => {
+  init_dist2();
+});
+
+// src/core/init-types.ts
+var CRITICAL_CAPABILITIES,
+  NON_CRITICAL_CAPABILITIES,
+  MAX_REPAIR_ATTEMPTS = 3;
+var init_init_types = __esm(() => {
+  CRITICAL_CAPABILITIES = ['extract-ticket', 'get-ticket'];
+  NON_CRITICAL_CAPABILITIES = [
+    'start-ticket',
+    'to-review',
+    'revert-to-inprogress',
+    'update-ticket',
+    'create-downstream-ticket',
+    'add-comment',
+    'move-to-todo',
+    'attach-artifact',
+  ];
 });
 
 // node_modules/marked/lib/marked.esm.js
@@ -21065,7 +21769,7 @@ var require_core = __commonJS((exports, module) => {
     return match && match.index === 0;
   }
   var BACKREF_RE = /\[(?:[^\\\]]|\\.)*\]|\(\??|\\([1-9][0-9]*)|\\./;
-  function join6(regexps, separator = '|') {
+  function join8(regexps, separator = '|') {
     let numCaptures = 0;
     return regexps
       .map(regex => {
@@ -21350,7 +22054,7 @@ var require_core = __commonJS((exports, module) => {
           this.exec = () => null;
         }
         const terminators = this.regexes.map(el => el[1]);
-        this.matcherRe = langRe(join6(terminators), true);
+        this.matcherRe = langRe(join8(terminators), true);
         this.lastIndex = 0;
       }
       exec(s) {
@@ -81077,7 +81781,7 @@ function reflowText(text, width, gfm) {
   return reflowed.join(`
 `);
 }
-function indentLines(indent, text) {
+function indentLines2(indent, text) {
   return text.replace(/(^|\n)(.+)/g, '$1' + indent + '$2');
 }
 function indentify(indent, text) {
@@ -81358,7 +82062,7 @@ var init_marked_terminal = __esm(() => {
       }
     }
     body = this.o.list(body, ordered, this.tab);
-    return section(fixNestedLists(indentLines(this.tab, body), this.tab));
+    return section(fixNestedLists(indentLines2(this.tab, body), this.tab));
   };
   Renderer.prototype.listitem = function (text) {
     if (typeof text === 'object') {
@@ -81555,7 +82259,7 @@ var init_marked_terminal = __esm(() => {
 });
 
 // src/util/markdown.ts
-import { existsSync as existsSync7, writeFileSync as writeFileSync6 } from 'fs';
+import { existsSync as existsSync13, writeFileSync as writeFileSync9 } from 'fs';
 function renderMarkdown(text) {
   if (!configured) {
     marked.use(
@@ -81600,11 +82304,11 @@ ${body}
 function markdownToPdf(mdContent, outputPath, title) {
   const html2 = markdownToHtml(mdContent, title);
   const htmlPath = outputPath.replace(/\.pdf$/, '.html');
-  writeFileSync6(htmlPath, html2);
+  writeFileSync9(htmlPath, html2);
   function tryConvert(cmd) {
     try {
       const result = Bun.spawnSync({ cmd, stdout: 'pipe', stderr: 'pipe' });
-      return result.exitCode === 0 && existsSync7(outputPath);
+      return result.exitCode === 0 && existsSync13(outputPath);
     } catch {
       return false;
     }
@@ -81631,18 +82335,21 @@ var init_markdown = __esm(() => {
 
 // src/core/scripts.ts
 import {
-  existsSync as existsSync8,
-  readFileSync as readFileSync7,
   copyFileSync,
-  writeFileSync as writeFileSync7,
-  mkdirSync as mkdirSync10,
+  existsSync as existsSync14,
+  mkdirSync as mkdirSync13,
+  readFileSync as readFileSync12,
+  writeFileSync as writeFileSync10,
 } from 'fs';
-import { join as join6 } from 'path';
+import { join as join8 } from 'path';
 function classifyAccessSetup(answer) {
   const trimmed = answer.trim();
   const normalized = trimmed.toLowerCase();
   if (!normalized) {
-    return { needsSetupHelp: true, assessment: 'No access method provided yet.' };
+    return {
+      needsSetupHelp: true,
+      assessment: 'No access method provided yet.',
+    };
   }
   const setupPatterns = [
     /^no$/,
@@ -81671,11 +82378,11 @@ function classifyAccessSetup(answer) {
   return { needsSetupHelp, assessment };
 }
 function runScript(sessionId, name, args = []) {
-  return runScriptFromDir(join6(sessionDir(sessionId), 'scripts'), name, args).stdout;
+  return runScriptFromDir(join8(sessionDir(sessionId), 'scripts'), name, args).stdout;
 }
 function runScriptFromDir(scriptsDir, name, args = []) {
-  const path = join6(scriptsDir, name);
-  if (!existsSync8(path)) return { ok: false, stdout: '' };
+  const path = join8(scriptsDir, name);
+  if (!existsSync14(path)) return { ok: false, stdout: '' };
   debugLog(`$ ${path} ${args.join(' ')}`);
   try {
     const proc = Bun.spawnSync({
@@ -81697,17 +82404,17 @@ function runScriptFromDir(scriptsDir, name, args = []) {
   }
 }
 function loadOrgScripts(targetDir, org) {
-  mkdirSync10(targetDir, { recursive: true });
-  const orgDir = join6(ORGS_DIR, org);
+  mkdirSync13(targetDir, { recursive: true });
+  const orgDir = join8(ORGS_DIR, org);
   const found = [];
   const missing = [];
-  if (!org || !existsSync8(orgDir)) {
+  if (!org || !existsSync14(orgDir)) {
     return { found: [], missing: [...ALL_SCRIPTS] };
   }
   for (const name of ALL_SCRIPTS) {
-    const src = join6(orgDir, name);
-    const dest = join6(targetDir, name);
-    if (existsSync8(src)) {
+    const src = join8(orgDir, name);
+    const dest = join8(targetDir, name);
+    if (existsSync14(src)) {
       copyFileSync(src, dest);
       Bun.spawnSync({ cmd: ['chmod', '+x', dest] });
       found.push(name);
@@ -81723,16 +82430,13 @@ function loadOrgScripts(targetDir, org) {
   return { found, missing };
 }
 function verifyCriticalScripts(scriptsDir, branch) {
-  const extractScript = join6(scriptsDir, 'extract-ticket');
+  const extractScript = join8(scriptsDir, 'extract-ticket');
   let extractedId = null;
-  if (existsSync8(extractScript)) {
+  if (existsSync14(extractScript)) {
     const proc = Bun.spawnSync({
       cmd: [extractScript],
-      stdin: Buffer.from(
-        branch +
-          `
-`,
-      ),
+      stdin: Buffer.from(`${branch}
+`),
       stdout: 'pipe',
       stderr: 'pipe',
     });
@@ -81760,11 +82464,11 @@ function verifyCriticalScripts(scriptsDir, branch) {
 function showScripts(scriptsDir, scripts) {
   logHeading('Scripts');
   for (const name of scripts) {
-    const path = join6(scriptsDir, name);
-    if (existsSync8(path)) {
+    const path = join8(scriptsDir, name);
+    if (existsSync14(path)) {
       console.log(`
 --- ${name} ---`);
-      console.log(readFileSync7(path, 'utf-8'));
+      console.log(readFileSync12(path, 'utf-8'));
     }
   }
   console.log();
@@ -81797,7 +82501,7 @@ function detectTicketingTools() {
   }
   return detected;
 }
-async function promptSetupScripts(scriptsDir, missing, org, sessionId) {
+async function promptSetupScripts(scriptsDir, missing, _org, sessionId) {
   const branch = getCurrentBranch(process.cwd());
   const detected = detectTicketingTools();
   const detectedNames = Object.keys(detected);
@@ -81844,17 +82548,21 @@ async function promptSetupScripts(scriptsDir, missing, org, sessionId) {
       label: 'research-setup',
     });
     if (setupInstructions) {
-      console.log(
-        `
-` +
-          renderMarkdown(setupInstructions) +
-          `
-`,
-      );
+      console.log(`
+${renderMarkdown(setupInstructions)}
+`);
     }
     const setupChoice = await selectOption('What would you like to do?', [
-      { value: 'done', label: 'I have set it up', hint: 'Continue with ticket integration' },
-      { value: 'local', label: 'Downgrade to local mode', hint: 'Skip ticket integration' },
+      {
+        value: 'done',
+        label: 'I have set it up',
+        hint: 'Continue with ticket integration',
+      },
+      {
+        value: 'local',
+        label: 'Downgrade to local mode',
+        hint: 'Skip ticket integration',
+      },
     ]);
     if (setupChoice === 'local') {
       logInfo('Use `kautopilot init --local` for future sessions.');
@@ -81948,15 +82656,15 @@ exit 0`,
   if (transitionNoOp) {
     for (const name of OPTIONAL_SCRIPTS) {
       if (missing.includes(name)) {
-        const dest = join6(scriptsDir, name);
-        writeFileSync7(dest, NOOP_SCRIPT);
+        const dest = join8(scriptsDir, name);
+        writeFileSync10(dest, NOOP_SCRIPT);
         Bun.spawnSync({ cmd: ['chmod', '+x', dest] });
       }
     }
   }
   for (const name of ALL_SCRIPTS) {
-    const dest = join6(scriptsDir, name);
-    if (existsSync8(dest)) {
+    const dest = join8(scriptsDir, name);
+    if (existsSync14(dest)) {
       Bun.spawnSync({ cmd: ['chmod', '+x', dest] });
     }
   }
@@ -81970,9 +82678,21 @@ exit 0`,
   while (!result.extractTicketId || !result.getTicketOk) {
     logWarn('Critical scripts are not working correctly.');
     const fix = await selectOption('What would you like to do?', [
-      { value: 'retry', label: 'Retry verify', hint: 'Fix your tool/auth, then we verify again' },
-      { value: 'regenerate', label: 'Regenerate scripts', hint: 'LLM tries again from scratch' },
-      { value: 'local', label: 'Use local mode', hint: 'Skip ticket integration' },
+      {
+        value: 'retry',
+        label: 'Retry verify',
+        hint: 'Fix your tool/auth, then we verify again',
+      },
+      {
+        value: 'regenerate',
+        label: 'Regenerate scripts',
+        hint: 'LLM tries again from scratch',
+      },
+      {
+        value: 'local',
+        label: 'Use local mode',
+        hint: 'Skip ticket integration',
+      },
     ]);
     if (fix === 'local') {
       logInfo('Use `kautopilot init --local` instead.');
@@ -82008,20 +82728,20 @@ async function promptSaveOrg(scriptsDir, org, sessionId) {
     true,
   );
   if (!save) return;
-  const orgDir = join6(ORGS_DIR, org);
-  mkdirSync10(orgDir, { recursive: true });
+  const orgDir = join8(ORGS_DIR, org);
+  mkdirSync13(orgDir, { recursive: true });
   for (const name of ALL_SCRIPTS) {
-    const src = join6(scriptsDir, name);
-    const dest = join6(orgDir, name);
-    if (existsSync8(src)) {
+    const src = join8(scriptsDir, name);
+    const dest = join8(orgDir, name);
+    if (existsSync14(src)) {
       copyFileSync(src, dest);
     }
   }
   if (sessionId) {
     const sDir = sessionDir(sessionId);
-    const sessionConfig = join6(sDir, 'config.yaml');
-    if (existsSync8(sessionConfig)) {
-      copyFileSync(sessionConfig, join6(orgDir, 'config.yaml'));
+    const sessionConfig = join8(sDir, 'config.yaml');
+    if (existsSync14(sessionConfig)) {
+      copyFileSync(sessionConfig, join8(orgDir, 'config.yaml'));
     }
   }
   logOk(`Org scripts and config saved to ${orgDir}`);
@@ -82035,13 +82755,13 @@ exit 0
 `,
   ORGS_DIR;
 var init_scripts = __esm(() => {
-  init_artifacts();
-  init_git();
-  init_spawn();
-  init_agents();
   init_inquirer();
+  init_spawn();
   init_format();
   init_markdown();
+  init_agents();
+  init_artifacts();
+  init_git();
   ALL_SCRIPTS = [
     'extract-ticket',
     'get-ticket',
@@ -82070,24 +82790,24 @@ var init_scripts = __esm(() => {
 
 // src/phases/init/states.ts
 import {
-  existsSync as existsSync9,
-  readFileSync as readFileSync8,
-  writeFileSync as writeFileSync8,
-  mkdirSync as mkdirSync11,
   copyFileSync as copyFileSync2,
-  readdirSync as readdirSync2,
+  existsSync as existsSync15,
+  mkdirSync as mkdirSync14,
+  readdirSync as readdirSync5,
+  readFileSync as readFileSync13,
+  writeFileSync as writeFileSync11,
 } from 'fs';
-import { join as join7 } from 'path';
+import { join as join9 } from 'path';
 function initArtifactPath(initId, ...segments) {
-  return join7(initDir(initId), ...segments);
+  return join9(initDir(initId), ...segments);
 }
 function initTimeoutSeconds(ctx) {
   return ctx.config.settings.defaultLlmTimeout;
 }
 function writeInitArtifact(initId, filename, content) {
   const path = initArtifactPath(initId, filename);
-  mkdirSync11(join7(initDir(initId)), { recursive: true });
-  writeFileSync8(path, content);
+  mkdirSync14(join9(initDir(initId)), { recursive: true });
+  writeFileSync11(path, content);
 }
 function writeInitArtifactJson(initId, filename, data) {
   writeInitArtifact(initId, filename, JSON.stringify(data, null, 2));
@@ -82128,7 +82848,11 @@ function buildDetectionPlan(systemName, researchDoc) {
       keywords: ['github', 'gh cli', 'gh '],
       steps: [
         { check: 'gh', type: 'binary', command: 'gh --version' },
-        { check: '~/.config/gh/hosts.yml', type: 'config', command: '~/.config/gh/hosts.yml' },
+        {
+          check: '~/.config/gh/hosts.yml',
+          type: 'config',
+          command: '~/.config/gh/hosts.yml',
+        },
         { check: 'gh', type: 'auth', command: 'gh auth status' },
       ],
     },
@@ -82196,7 +82920,10 @@ function classifyAccessSetup2(answer) {
   const trimmed = answer.trim();
   const normalized = trimmed.toLowerCase();
   if (!normalized) {
-    return { needsSetupHelp: true, assessment: 'No access method provided yet.' };
+    return {
+      needsSetupHelp: true,
+      assessment: 'No access method provided yet.',
+    };
   }
   const setupPatterns = [
     /^no$/,
@@ -82236,9 +82963,59 @@ function parseStateMapping(answer) {
   };
 }
 var identify = async ctx => {
-    const { initId } = ctx;
+    const { initId, org, workDir } = ctx;
     setCachedConfig(ctx.config);
-    appendInitEvent(initId, { ts: new Date().toISOString(), event: 'identify:started' });
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'identify:started',
+    });
+    if (!ctx.forceLocal && org) {
+      const scriptsDir = join9(initDir(initId), 'scripts');
+      mkdirSync14(scriptsDir, { recursive: true });
+      const { found, missing } = loadOrgScripts(scriptsDir, org);
+      if (missing.length === 0) {
+        logOk(`All scripts loaded from org "${org}" \u2014 fast-path`);
+        const branch = getCurrentBranch(workDir);
+        const critical = verifyCriticalScripts(scriptsDir, branch);
+        const nonCritical = {};
+        for (const name of OPTIONAL_SCRIPTS) {
+          const scriptFile = join9(scriptsDir, name);
+          if (!existsSync15(scriptFile)) {
+            nonCritical[name] = { ok: false, noOp: false, error: 'missing' };
+            continue;
+          }
+          const content = readFileSync13(scriptFile, 'utf-8');
+          const isNoOp =
+            content.includes('# no-op') ||
+            (content.includes('exit 0') &&
+              content.split(`
+`).length <= 4);
+          nonCritical[name] = { ok: true, noOp: isNoOp };
+        }
+        const verifyResult = {
+          extractTicket: {
+            ok: !!critical.extractTicketId,
+            ticketId: critical.extractTicketId,
+            error: critical.extractTicketId ? undefined : 'no ticket ID extracted',
+          },
+          getTicket: {
+            ok: critical.getTicketOk,
+            contentLength: critical.getTicketOk ? 1 : 0,
+            error: critical.getTicketOk ? undefined : 'no usable content',
+          },
+          nonCritical,
+          repairAttempts: 0,
+          timestamp: new Date().toISOString(),
+        };
+        writeInitArtifactJson(initId, 'verify.json', verifyResult);
+        appendInitEvent(initId, {
+          ts: new Date().toISOString(),
+          event: 'identify:completed',
+          metadata: { source: 'org-fast-path', org, found: found.length },
+        });
+        return 'promote';
+      }
+    }
     if (ctx.forceLocal) {
       appendInitEvent(initId, {
         ts: new Date().toISOString(),
@@ -82288,9 +83065,12 @@ var identify = async ctx => {
   },
   research = async ctx => {
     const { initId } = ctx;
-    appendInitEvent(initId, { ts: new Date().toISOString(), event: 'research:started' });
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'research:started',
+    });
     const identifyPath = initArtifactPath(initId, 'identify.json');
-    const identifyData = JSON.parse(readFileSync8(identifyPath, 'utf-8'));
+    const identifyData = JSON.parse(readFileSync13(identifyPath, 'utf-8'));
     const systemName = identifyData.systemName;
     const detected = detectTicketingTools2();
     const detectedNames = Object.keys(detected);
@@ -82375,9 +83155,12 @@ ${researchDoc || '(no research output)'}
   },
   detect = async ctx => {
     const { initId } = ctx;
-    appendInitEvent(initId, { ts: new Date().toISOString(), event: 'detect:started' });
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'detect:started',
+    });
     const researchPath = initArtifactPath(initId, 'research.json');
-    const researchData = JSON.parse(readFileSync8(researchPath, 'utf-8'));
+    const researchData = JSON.parse(readFileSync13(researchPath, 'utf-8'));
     const detected = researchData.detectedTools ?? {};
     const detectionPlan = researchData.detectionPlan || [];
     const configFiles = {};
@@ -82397,7 +83180,7 @@ ${researchDoc || '(no research output)'}
         } else if (step.type === 'config') {
           const configPath2 = step.command || step.check;
           const resolvedPath = configPath2.replace('~', process.env.HOME);
-          configFiles[configPath2] = existsSync9(resolvedPath);
+          configFiles[configPath2] = existsSync15(resolvedPath);
         } else if (step.type === 'auth' && step.command) {
           const cmd = step.command.split(/\s+/);
           const proc = Bun.spawnSync({ cmd, stdout: 'pipe', stderr: 'pipe' });
@@ -82434,15 +83217,22 @@ ${researchDoc || '(no research output)'}
     appendInitEvent(initId, {
       ts: new Date().toISOString(),
       event: 'detect:completed',
-      metadata: { available: available.length, missing: missing.length, uncertain: detectionResult.uncertain.length },
+      metadata: {
+        available: available.length,
+        missing: missing.length,
+        uncertain: detectionResult.uncertain.length,
+      },
     });
     return 'gather_context';
   },
   gather_context = async ctx => {
     const { initId } = ctx;
-    appendInitEvent(initId, { ts: new Date().toISOString(), event: 'gather_context:started' });
-    const identifyData = JSON.parse(readFileSync8(initArtifactPath(initId, 'identify.json'), 'utf-8'));
-    const detectionData = JSON.parse(readFileSync8(initArtifactPath(initId, 'detection.json'), 'utf-8'));
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'gather_context:started',
+    });
+    const identifyData = JSON.parse(readFileSync13(initArtifactPath(initId, 'identify.json'), 'utf-8'));
+    const detectionData = JSON.parse(readFileSync13(initArtifactPath(initId, 'detection.json'), 'utf-8'));
     const systemName = identifyData.systemName;
     const detectedNames = Object.keys(detectionData.tools);
     const toolHint = detectedNames.length > 0 ? ` Detected: ${detectedNames.join(', ')}.` : '';
@@ -82470,17 +83260,21 @@ ${researchDoc || '(no research output)'}
         context: `Init setup help research for ${systemName}`,
       });
       if (setupInstructions) {
-        console.log(
-          `
-` +
-            renderMarkdown(setupInstructions) +
-            `
-`,
-        );
+        console.log(`
+${renderMarkdown(setupInstructions)}
+`);
       }
       const setupChoice = await selectOption('What would you like to do?', [
-        { value: 'done', label: 'I have set it up', hint: 'Continue with ticket integration' },
-        { value: 'local', label: 'Downgrade to local mode', hint: 'Skip ticket integration' },
+        {
+          value: 'done',
+          label: 'I have set it up',
+          hint: 'Continue with ticket integration',
+        },
+        {
+          value: 'local',
+          label: 'Downgrade to local mode',
+          hint: 'Skip ticket integration',
+        },
       ]);
       if (setupChoice === 'local') {
         appendInitEvent(initId, {
@@ -82514,11 +83308,14 @@ ${researchDoc || '(no research output)'}
   },
   normalize = async ctx => {
     const { initId } = ctx;
-    appendInitEvent(initId, { ts: new Date().toISOString(), event: 'normalize:started' });
-    const identifyData = JSON.parse(readFileSync8(initArtifactPath(initId, 'identify.json'), 'utf-8'));
-    const researchData = JSON.parse(readFileSync8(initArtifactPath(initId, 'research.json'), 'utf-8'));
-    const detectionData = JSON.parse(readFileSync8(initArtifactPath(initId, 'detection.json'), 'utf-8'));
-    const userContext = JSON.parse(readFileSync8(initArtifactPath(initId, 'user-context.json'), 'utf-8'));
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'normalize:started',
+    });
+    const identifyData = JSON.parse(readFileSync13(initArtifactPath(initId, 'identify.json'), 'utf-8'));
+    const researchData = JSON.parse(readFileSync13(initArtifactPath(initId, 'research.json'), 'utf-8'));
+    const detectionData = JSON.parse(readFileSync13(initArtifactPath(initId, 'detection.json'), 'utf-8'));
+    const userContext = JSON.parse(readFileSync13(initArtifactPath(initId, 'user-context.json'), 'utf-8'));
     const userAnswer = userContext.userAnswer || '';
     const stateMapping = parseStateMapping(userAnswer);
     const noOp = /doesn'?t map|doesn'?t apply|no\s*op|skip|n\/a|none/i.test(userAnswer);
@@ -82604,9 +83401,12 @@ ${researchDoc || '(no research output)'}
   },
   generate = async ctx => {
     const { initId, workDir, org } = ctx;
-    appendInitEvent(initId, { ts: new Date().toISOString(), event: 'generate:started' });
-    const scriptsDir = join7(initDir(initId), 'scripts');
-    mkdirSync11(scriptsDir, { recursive: true });
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'generate:started',
+    });
+    const scriptsDir = join9(initDir(initId), 'scripts');
+    mkdirSync14(scriptsDir, { recursive: true });
     const effectiveOrg = org || 'default';
     const branch = getCurrentBranch(workDir);
     const { found, missing } = loadOrgScripts(scriptsDir, effectiveOrg);
@@ -82619,10 +83419,10 @@ ${researchDoc || '(no research output)'}
       });
       return 'verify';
     }
-    const setupBrief = JSON.parse(readFileSync8(initArtifactPath(initId, 'setup-brief.json'), 'utf-8'));
-    const researchDoc = readFileSync8(initArtifactPath(initId, 'research.md'), 'utf-8');
-    const detectionData = JSON.parse(readFileSync8(initArtifactPath(initId, 'detection.json'), 'utf-8'));
-    const userContext = JSON.parse(readFileSync8(initArtifactPath(initId, 'user-context.json'), 'utf-8'));
+    const setupBrief = JSON.parse(readFileSync13(initArtifactPath(initId, 'setup-brief.json'), 'utf-8'));
+    const researchDoc = readFileSync13(initArtifactPath(initId, 'research.md'), 'utf-8');
+    const detectionData = JSON.parse(readFileSync13(initArtifactPath(initId, 'detection.json'), 'utf-8'));
+    const userContext = JSON.parse(readFileSync13(initArtifactPath(initId, 'user-context.json'), 'utf-8'));
     const detectedNames = Object.keys(detectionData.tools || {});
     const detectedInfo =
       detectedNames.length > 0
@@ -82701,8 +83501,8 @@ exit 0`,
       if (transitionNoOp) {
         for (const name of OPTIONAL_SCRIPTS) {
           if (missing.includes(name)) {
-            const dest = join7(scriptsDir, name);
-            writeFileSync8(
+            const dest = join9(scriptsDir, name);
+            writeFileSync11(
               dest,
               `#!/bin/bash
 # no-op
@@ -82714,8 +83514,8 @@ exit 0
         }
       }
       for (const name of ALL_SCRIPTS) {
-        const dest = join7(scriptsDir, name);
-        if (existsSync9(dest)) {
+        const dest = join9(scriptsDir, name);
+        if (existsSync15(dest)) {
           Bun.spawnSync({ cmd: ['chmod', '+x', dest] });
         }
       }
@@ -82761,7 +83561,10 @@ exit 0
     appendInitEvent(initId, {
       ts: new Date().toISOString(),
       event: 'context:updated',
-      metadata: { repairAttempts: repairAttempt, maxRepairAttempts: MAX_REPAIR_ATTEMPTS },
+      metadata: {
+        repairAttempts: repairAttempt,
+        maxRepairAttempts: MAX_REPAIR_ATTEMPTS,
+      },
     });
     appendInitEvent(initId, {
       ts: new Date().toISOString(),
@@ -82772,18 +83575,21 @@ exit 0
   },
   verify = async ctx => {
     const { initId, workDir } = ctx;
-    appendInitEvent(initId, { ts: new Date().toISOString(), event: 'verify:started' });
-    const scriptsDir = join7(initDir(initId), 'scripts');
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'verify:started',
+    });
+    const scriptsDir = join9(initDir(initId), 'scripts');
     const branch = getCurrentBranch(workDir);
     const critical = verifyCriticalScripts(scriptsDir, branch);
     const nonCritical = {};
     for (const name of OPTIONAL_SCRIPTS) {
-      const scriptFile = join7(scriptsDir, name);
-      if (!existsSync9(scriptFile)) {
+      const scriptFile = join9(scriptsDir, name);
+      if (!existsSync15(scriptFile)) {
         nonCritical[name] = { ok: false, noOp: false, error: 'missing' };
         continue;
       }
-      const content = readFileSync8(scriptFile, 'utf-8');
+      const content = readFileSync13(scriptFile, 'utf-8');
       const isNoOp =
         content.includes('# no-op') ||
         (content.includes('exit 0') &&
@@ -82816,13 +83622,31 @@ exit 0
       if (exhausted) {
         fix = await selectOption(
           'Critical scripts are not working after maximum repair attempts. What would you like to do?',
-          [{ value: 'local', label: 'Use local mode', hint: 'Skip ticket integration entirely' }],
+          [
+            {
+              value: 'local',
+              label: 'Use local mode',
+              hint: 'Skip ticket integration entirely',
+            },
+          ],
         );
       } else {
         fix = await selectOption('Critical scripts are not working. What would you like to do?', [
-          { value: 'retry', label: 'Retry', hint: 'Fix your tool/auth, then we verify again' },
-          { value: 'regenerate', label: 'Regenerate', hint: 'Go back to generate phase' },
-          { value: 'local', label: 'Use local mode', hint: 'Skip ticket integration entirely' },
+          {
+            value: 'retry',
+            label: 'Retry',
+            hint: 'Fix your tool/auth, then we verify again',
+          },
+          {
+            value: 'regenerate',
+            label: 'Regenerate',
+            hint: 'Go back to generate phase',
+          },
+          {
+            value: 'local',
+            label: 'Use local mode',
+            hint: 'Skip ticket integration entirely',
+          },
         ]);
       }
       if (fix === 'local') {
@@ -82871,7 +83695,10 @@ exit 0
   },
   promote = async ctx => {
     const { initId, config, workDir, gitRootPath, worktree, remoteUrl, gitRootHost, org, ticketIdArg } = ctx;
-    appendInitEvent(initId, { ts: new Date().toISOString(), event: 'promote:started' });
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'promote:started',
+    });
     const attempt = getInitAttemptById(initId);
     if (!attempt) {
       throw new Error(`Init attempt ${initId} not found in index \u2014 cannot promote.`);
@@ -82881,7 +83708,7 @@ exit 0
         `Init attempt ${initId} has outcome "${attempt.outcome}" \u2014 stale/abandoned attempts cannot be promoted.`,
       );
     }
-    const verifyResult = JSON.parse(readFileSync8(initArtifactPath(initId, 'verify.json'), 'utf-8'));
+    const verifyResult = JSON.parse(readFileSync13(initArtifactPath(initId, 'verify.json'), 'utf-8'));
     const degradedCapabilities = Object.entries(verifyResult.nonCritical)
       .filter(([_3, v2]) => !v2.ok)
       .map(([k3]) => k3);
@@ -82892,18 +83719,19 @@ exit 0
     const sessionId = generateSessionId();
     const now = new Date().toISOString();
     const sDir = sessionDir(sessionId);
-    mkdirSync11(sDir, { recursive: true });
-    const initScriptsDir = join7(initDir(initId), 'scripts');
-    const sessionScriptsDir = join7(sDir, 'scripts');
-    mkdirSync11(sessionScriptsDir, { recursive: true });
-    if (existsSync9(initScriptsDir)) {
-      for (const name of readdirSync2(initScriptsDir)) {
-        copyFileSync2(join7(initScriptsDir, name), join7(sessionScriptsDir, name));
-        Bun.spawnSync({ cmd: ['chmod', '+x', join7(sessionScriptsDir, name)] });
+    mkdirSync14(sDir, { recursive: true });
+    const initScriptsDir = join9(initDir(initId), 'scripts');
+    const sessionScriptsDir = join9(sDir, 'scripts');
+    mkdirSync14(sessionScriptsDir, { recursive: true });
+    if (existsSync15(initScriptsDir)) {
+      for (const name of readdirSync5(initScriptsDir)) {
+        copyFileSync2(join9(initScriptsDir, name), join9(sessionScriptsDir, name));
+        Bun.spawnSync({ cmd: ['chmod', '+x', join9(sessionScriptsDir, name)] });
       }
     }
     config.repo.org = org;
     config.repo.ticketSystem = null;
+    config.repo.baseBranch = detectDefaultBranch(workDir);
     writeConfig(sessionId, config);
     const branch = getCurrentBranch(workDir);
     let resolvedTicketId;
@@ -82951,7 +83779,11 @@ exit 0
       }
     }
     if (org && org !== 'default') {
-      await promptSaveOrg(sessionScriptsDir, org, sessionId);
+      const orgDir = join9(`${process.env.HOME}/.kautopilot/orgs`, org);
+      const orgComplete = existsSync15(orgDir) && ALL_SCRIPTS.every(s => existsSync15(join9(orgDir, s)));
+      if (!orgComplete) {
+        await promptSaveOrg(sessionScriptsDir, org, sessionId);
+      }
     }
     appendInitEvent(initId, {
       ts: new Date().toISOString(),
@@ -82968,7 +83800,10 @@ exit 0
   },
   downgrade_local = async ctx => {
     const { initId, config, workDir, gitRootPath, worktree, remoteUrl, gitRootHost, org } = ctx;
-    appendInitEvent(initId, { ts: new Date().toISOString(), event: 'downgrade_local:started' });
+    appendInitEvent(initId, {
+      ts: new Date().toISOString(),
+      event: 'downgrade_local:started',
+    });
     const attempt = getInitAttemptById(initId);
     if (!attempt) {
       throw new Error(`Init attempt ${initId} not found in index \u2014 cannot promote to local mode.`);
@@ -82981,9 +83816,10 @@ exit 0
     const sessionId = generateSessionId();
     const now = new Date().toISOString();
     const sDir = sessionDir(sessionId);
-    mkdirSync11(sDir, { recursive: true });
+    mkdirSync14(sDir, { recursive: true });
     config.repo.org = org;
     config.repo.ticketSystem = null;
+    config.repo.baseBranch = detectDefaultBranch(workDir);
     writeConfig(sessionId, config);
     const localTicketId = `local-${generateSessionId().slice(0, 6)}`;
     const ticketContent = await textInput(
@@ -82994,22 +83830,22 @@ exit 0
 
 ${ticketContent.trim() || '(no description provided)'}
 `;
-    const specDir = join7(worktree, 'spec');
-    mkdirSync11(specDir, { recursive: true });
-    writeFileSync8(join7(specDir, 'ticket.md'), ticketBody);
+    const specDir = join9(worktree, 'spec', localTicketId);
+    mkdirSync14(specDir, { recursive: true });
+    writeFileSync11(join9(specDir, 'ticket.md'), ticketBody);
     const artifactDest = sessionArtifactPath(sessionId, 'ticket.md');
     ensureArtifactDir(artifactDest);
-    writeFileSync8(artifactDest, ticketBody);
+    writeFileSync11(artifactDest, ticketBody);
     let branch = getCurrentBranch(workDir);
     if (isOnMain(config.repo.baseBranch, workDir)) {
       branch = `feature/${localTicketId}`;
       createBranch(branch, workDir);
     }
-    const sessionScriptsDir = join7(sDir, 'scripts');
-    mkdirSync11(sessionScriptsDir, { recursive: true });
+    const sessionScriptsDir = join9(sDir, 'scripts');
+    mkdirSync14(sessionScriptsDir, { recursive: true });
     for (const scriptName of ALL_SCRIPTS) {
-      const dest = join7(sessionScriptsDir, scriptName);
-      writeFileSync8(
+      const dest = join9(sessionScriptsDir, scriptName);
+      writeFileSync11(
         dest,
         `#!/bin/bash
 # no-op (local mode \u2014 ticket integration disabled)
@@ -83046,9 +83882,11 @@ exit 0
       const specArtifactPath = snapshotPath(sessionId, 1, 'task-spec.md');
       const plansArtifactDir = snapshotPath(sessionId, 1, 'plans');
       ensureArtifactDir(specArtifactPath);
-      ensureArtifactDir(plansArtifactDir + '/.keep');
+      ensureArtifactDir(`${plansArtifactDir}/.keep`);
       try {
-        const localInitPrompt = getAgentPrompt('init', 'localInit', { sessionId });
+        const localInitPrompt = getAgentPrompt('init', 'localInit', {
+          sessionId,
+        });
         await spawnPrintRaw(getDefaultBinary(), localInitPrompt, {
           cwd: workDir,
           timeout: initTimeoutSeconds(ctx),
@@ -83058,7 +83896,7 @@ exit 0
           context: 'Init local mode generation of ticket, spec, and plans',
         });
       } catch (err) {
-        logWarn('Local mode generation encountered an issue: ' + (err instanceof Error ? err.message : String(err)));
+        logWarn(`Local mode generation encountered an issue: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
     appendInitEvent(initId, {
@@ -83098,21 +83936,21 @@ exit 0
   INIT_STATES,
   INIT_TERMINAL_STATES;
 var init_states = __esm(() => {
-  init_init_types();
-  init_log();
-  init_artifacts();
   init_agents();
-  init_spawn();
-  init_inquirer();
-  init_scripts();
+  init_artifacts();
+  init_config();
   init_db();
+  init_git();
+  init_id();
   init_init_db();
   init_init_status();
-  init_id();
-  init_config();
-  init_git();
-  init_markdown();
+  init_init_types();
+  init_log();
+  init_scripts();
+  init_inquirer();
+  init_spawn();
   init_format();
+  init_markdown();
   INIT_STATES = {
     identify,
     research,
@@ -83187,10 +84025,10 @@ async function runInitStateMachine(ctx) {
   return !interrupted;
 }
 var init_init = __esm(() => {
-  init_log();
   init_init_status();
-  init_states();
+  init_log();
   init_format();
+  init_states();
 });
 
 // src/cli/init.ts
@@ -83201,10 +84039,10 @@ __export(exports_init, {
 });
 import {
   copyFileSync as copyFileSync3,
-  existsSync as existsSync10,
-  mkdirSync as mkdirSync12,
-  rmSync,
-  writeFileSync as writeFileSync9,
+  existsSync as existsSync16,
+  mkdirSync as mkdirSync15,
+  rmSync as rmSync2,
+  writeFileSync as writeFileSync12,
 } from 'fs';
 function createInitCommand() {
   return new Command('init')
@@ -83247,8 +84085,8 @@ async function runInit(ticketId, opts, cwd) {
       }
       const oldSessionDir = sessionDir(existingSession.id);
       deleteSession(existingSession.id);
-      if (existsSync10(oldSessionDir)) {
-        rmSync(oldSessionDir, { recursive: true, force: true });
+      if (existsSync16(oldSessionDir)) {
+        rmSync2(oldSessionDir, { recursive: true, force: true });
       }
       logOk(`Retired old session ${existingSession.id}. Starting fresh init.`);
     }
@@ -83292,7 +84130,7 @@ async function runInit(ticketId, opts, cwd) {
   if (!resumeInitId) {
     const now = new Date().toISOString();
     const iDir = initDir(initId);
-    mkdirSync12(iDir, { recursive: true });
+    mkdirSync15(iDir, { recursive: true });
     upsertInitAttempt({
       id: initId,
       repo_path: gitRootPath,
@@ -83312,21 +84150,20 @@ async function runInit(ticketId, opts, cwd) {
   if (!resumeInitId) {
     const initConfigDest = `${initDir(initId)}/config.yaml`;
     const initConfigSourceDest = `${initDir(initId)}/config.source.txt`;
-    if (pickedConfigPath && existsSync10(pickedConfigPath)) {
+    if (pickedConfigPath && existsSync16(pickedConfigPath)) {
       copyFileSync3(pickedConfigPath, initConfigDest);
-      writeFileSync9(
+      writeFileSync12(
         initConfigSourceDest,
-        pickedConfigPath +
-          `
+        `${pickedConfigPath}
 `,
       );
     } else {
-      writeFileSync9(
+      writeFileSync12(
         initConfigDest,
         `# resolved from built-in defaults
 `,
       );
-      writeFileSync9(
+      writeFileSync12(
         initConfigSourceDest,
         `(built-in defaults)
 `,
@@ -83359,35 +84196,573 @@ async function runInit(ticketId, opts, cwd) {
 }
 var init_init2 = __esm(() => {
   init_esm();
-  init_id();
-  init_db();
   init_artifacts();
-  init_init_db();
   init_config();
-  init_lock();
+  init_db();
+  init_git();
+  init_id();
+  init_init_db();
   init_init_lock();
   init_init_status();
+  init_lock();
   init_log();
-  init_artifacts();
-  init_git();
   init_inquirer();
   init_init();
   init_format();
 });
 
-// src/core/status.ts
+// src/core/github.ts
+var exports_github = {};
+__export(exports_github, {
+  withBotSignature: () => withBotSignature,
+  ghRunLogsFailed: () => ghRunLogsFailed,
+  ghReviews: () => ghReviews,
+  ghReviewThreads: () => ghReviewThreads,
+  ghResolveThread: () => ghResolveThread,
+  ghRepoInfo: () => ghRepoInfo,
+  ghReplyToThread: () => ghReplyToThread,
+  ghReplyToIssueComment: () => ghReplyToIssueComment,
+  ghReact: () => ghReact,
+  ghPrView: () => ghPrView,
+  ghPrRuns: () => ghPrRuns,
+  ghPrComments: () => ghPrComments,
+  ghPrComment: () => ghPrComment,
+  ghPrChecks: () => ghPrChecks,
+  ghListPrsForBranch: () => ghListPrsForBranch,
+  ghFetchMergePolicy: () => ghFetchMergePolicy,
+  ghClosePr: () => ghClosePr,
+});
+var { spawn: spawn3 } = globalThis.Bun;
+function withBotSignature(body) {
+  return body + BOT_SIGNATURE;
+}
+async function gh(args, cwd) {
+  const proc = spawn3({
+    cmd: ['gh', ...args],
+    cwd,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+  return {
+    exitCode: await proc.exited,
+    stdout: stdout.trim(),
+    stderr: stderr.trim(),
+  };
+}
+function parseJson(stdout, label) {
+  try {
+    return JSON.parse(stdout);
+  } catch {
+    throw new Error(`gh ${label}: invalid JSON output: ${stdout.slice(0, 200)}`);
+  }
+}
+async function ghPrChecks(prNumber, cwd) {
+  const result = await gh(['pr', 'checks', String(prNumber), '--json', 'name,state'], cwd);
+  if (result.exitCode !== 0) {
+    throw new Error(`gh pr checks failed: ${result.stderr}`);
+  }
+  const checks = parseJson(result.stdout, 'pr-checks');
+  return checks.map(c3 => {
+    const s = c3.state.toLowerCase();
+    return {
+      name: c3.name,
+      status: s === 'pass' || s === 'success' ? 'passing' : s === 'fail' || s === 'failure' ? 'failing' : 'pending',
+    };
+  });
+}
+async function ghPrView(prNumber, cwd) {
+  const result = await gh(
+    ['pr', 'view', String(prNumber), '--json', 'mergeable,mergeStateStatus,headRefName,state,url,reviews,createdAt'],
+    cwd,
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(`gh pr view failed: ${result.stderr}`);
+  }
+  return parseJson(result.stdout, 'pr-view');
+}
+async function ghReviewThreads(prNumber, cwd) {
+  const query = `
+    query($owner: String!, $repo: String!, $pr: Int!) {
+      repository(owner: $owner, name: $repo) {
+        pullRequest(number: $pr) {
+          reviewThreads(first: 100) {
+            nodes {
+              id
+              isOutdated
+              isResolved
+              comments(first: 100) {
+                nodes {
+                  id
+                  author { login }
+                  body
+                  createdAt
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+  const repoInfo = await ghRepoInfo(cwd);
+  const result = await gh(
+    [
+      'api',
+      'graphql',
+      '-f',
+      `query=${query}`,
+      '-f',
+      `owner=${repoInfo.owner}`,
+      '-f',
+      `repo=${repoInfo.repo}`,
+      '-F',
+      `pr=${prNumber}`,
+    ],
+    cwd,
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(`gh review threads failed: ${result.stderr}`);
+  }
+  const data = parseJson(result.stdout, 'review-threads');
+  const threads = data.data.repository.pullRequest.reviewThreads.nodes;
+  return threads
+    .filter(t => !t.isResolved)
+    .map(t => ({
+      id: t.id,
+      isOutdated: t.isOutdated,
+      author: t.comments.nodes[0]?.author?.login || 'unknown',
+      body: t.comments.nodes[0]?.body || '',
+      firstCommentId: t.comments.nodes[0]?.id || '',
+      replies: t.comments.nodes.slice(1).map(c3 => ({
+        id: c3.id,
+        author: c3.author?.login || 'unknown',
+        body: c3.body,
+        isBot: c3.author?.login?.includes('[bot]') ?? false,
+      })),
+    }));
+}
+async function ghReviews(prNumber, cwd) {
+  const repoInfo = await ghRepoInfo(cwd);
+  const result = await gh(['api', `repos/${repoInfo.owner}/${repoInfo.repo}/pulls/${prNumber}/reviews`], cwd);
+  if (result.exitCode !== 0) {
+    throw new Error(`gh reviews failed: ${result.stderr}`);
+  }
+  return parseJson(result.stdout, 'reviews');
+}
+async function ghPrComments(prNumber, since, cwd) {
+  const repoInfo = await ghRepoInfo(cwd);
+  let url = `repos/${repoInfo.owner}/${repoInfo.repo}/issues/${prNumber}/comments`;
+  if (since) {
+    url += `?since=${encodeURIComponent(since)}`;
+  }
+  const result = await gh(['api', url], cwd);
+  if (result.exitCode !== 0) {
+    throw new Error(`gh pr comments failed: ${result.stderr}`);
+  }
+  return parseJson(result.stdout, 'pr-comments');
+}
+async function ghPrComment(prNumber, body, cwd) {
+  const result = await gh(['pr', 'comment', String(prNumber), '--body', body], cwd);
+  if (result.exitCode !== 0) {
+    throw new Error(`gh pr comment failed: ${result.stderr}`);
+  }
+}
+async function ghReplyToThread(prNumber, commentId, body, cwd) {
+  const repoInfo = await ghRepoInfo(cwd);
+  const result = await gh(
+    [
+      'api',
+      `repos/${repoInfo.owner}/${repoInfo.repo}/pulls/${prNumber}/comments/${commentId}/replies`,
+      '-f',
+      `body=${body}`,
+      '--method',
+      'POST',
+    ],
+    cwd,
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(`gh reply to thread failed: ${result.stderr}`);
+  }
+}
+async function ghReplyToIssueComment(prNumber, body, inReplyTo, cwd) {
+  const repoInfo = await ghRepoInfo(cwd);
+  const args = ['api', `repos/${repoInfo.owner}/${repoInfo.repo}/issues/${prNumber}/comments`, '-f', `body=${body}`];
+  if (inReplyTo) {
+    args.push('-f', `in_reply_to=${inReplyTo}`);
+  }
+  const result = await gh([...args, '--method', 'POST'], cwd);
+  if (result.exitCode !== 0) {
+    throw new Error(`gh reply to issue comment failed: ${result.stderr}`);
+  }
+}
+async function ghResolveThread(threadId, cwd) {
+  const mutation = `
+    mutation($threadId: ID!) {
+      resolveReviewThread(input: { threadId: $threadId }) {
+        thread { id }
+      }
+    }
+  `;
+  const result = await gh(['api', 'graphql', '-f', `query=${mutation}`, '-f', `threadId=${threadId}`], cwd);
+  if (result.exitCode !== 0) {
+    throw new Error(`gh resolve thread failed: ${result.stderr}`);
+  }
+}
+async function ghReact(commentId, reaction = '+1', cwd) {
+  const repoInfo = await ghRepoInfo(cwd);
+  const result = await gh(
+    [
+      'api',
+      `repos/${repoInfo.owner}/${repoInfo.repo}/issues/comments/${commentId}/reactions`,
+      '-f',
+      `content=${reaction}`,
+      '--method',
+      'POST',
+    ],
+    cwd,
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(`gh react failed: ${result.stderr}`);
+  }
+}
+async function ghClosePr(prNumber, cwd) {
+  const result = await gh(
+    ['pr', 'close', String(prNumber), '--comment', 'Closed for rollover \u2014 creating fresh PR'],
+    cwd,
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(`gh pr close failed: ${result.stderr}`);
+  }
+}
+async function ghListPrsForBranch(branch, cwd) {
+  const result = await gh(['pr', 'list', '--head', branch, '--json', 'number'], cwd);
+  if (result.exitCode !== 0) {
+    throw new Error(`gh pr list failed: ${result.stderr}`);
+  }
+  return parseJson(result.stdout, 'pr-list');
+}
+async function ghFetchMergePolicy(owner, repo, cwd) {
+  const query = `
+    query($owner: String!, $repo: String!) {
+      repository(owner: $owner, name: $repo) {
+        branchProtectionRules(first: 10) {
+          nodes {
+            requiresApprovingReviews
+            requiredApprovingReviewCount
+            requiresStatusChecks
+            requiredStatusCheckContexts
+            requiresStrictStatusChecks
+            requiresCodeOwnerReviews
+          }
+        }
+        defaultBranchRef {
+          name
+          target { oid }
+        }
+      }
+    }
+  `;
+  const result = await gh(
+    ['api', 'graphql', '-f', `query=${query}`, '-f', `owner=${owner}`, '-f', `repo=${repo}`],
+    cwd,
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(`gh merge policy failed: ${result.stderr}`);
+  }
+  const data = parseJson(result.stdout, 'merge-policy');
+  const rules = data.data.repository.branchProtectionRules.nodes;
+  return {
+    requiresApprovingReviews: rules.some(r2 => r2.requiresApprovingReviews),
+    requiredApprovingReviewCount: Math.max(...rules.map(r2 => r2.requiredApprovingReviewCount), 0),
+    requiresStatusChecks: rules.some(r2 => r2.requiresStatusChecks),
+    requiredStatusCheckContexts: rules.flatMap(r2 => r2.requiredStatusCheckContexts),
+    requiresCodeOwnerReviews: rules.some(r2 => r2.requiresCodeOwnerReviews),
+  };
+}
+async function ghRunLogsFailed(runId, cwd) {
+  const result = await gh(['run', 'view', runId, '--log-failed'], cwd);
+  return result.exitCode !== 0 ? `Failed to fetch logs: ${result.stderr}` : result.stdout;
+}
+async function ghRepoInfo(cwd) {
+  const result = await gh(['repo', 'view', '--json', 'nameWithOwner'], cwd);
+  if (result.exitCode !== 0) {
+    throw new Error(`gh repo view failed: ${result.stderr}`);
+  }
+  const data = parseJson(result.stdout, 'repo-view');
+  const [owner, repo] = data.nameWithOwner.split('/');
+  return { owner, repo };
+}
+async function ghPrRuns(branch, cwd) {
+  const result = await gh(
+    ['run', 'list', '--branch', branch, '--json', 'databaseId,name,status,conclusion,headBranch', '--limit', '10'],
+    cwd,
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(`gh run list failed: ${result.stderr}`);
+  }
+  return parseJson(result.stdout, 'run-list');
+}
+var BOT_SIGNATURE = `
+
+By Claude Code Kautopilot`;
+var init_github = () => {};
+
+// src/index.ts
+init_esm();
+import { readFileSync as readFileSync20 } from 'fs';
+import { dirname as dirname15, join as join21 } from 'path';
+import { fileURLToPath } from 'url';
+
+// src/cli/describe.ts
+init_esm();
+init_db();
+init_git();
+init_init_db();
+init_init_status();
+init_log();
+
+// src/core/manifests.ts
 import {
   existsSync as existsSync11,
-  readFileSync as readFileSync9,
-  writeFileSync as writeFileSync10,
-  rmSync as rmSync2,
-  mkdirSync as mkdirSync13,
-  renameSync as renameSync2,
+  readdirSync as readdirSync4,
+  readFileSync as readFileSync10,
+  writeFileSync as writeFileSync7,
 } from 'fs';
-import { join as join8, dirname as dirname10 } from 'path';
+
+// src/phases/shared.ts
+init_agents();
+import { existsSync as existsSync10, readdirSync as readdirSync3, readFileSync as readFileSync9 } from 'fs';
+import { join as join7 } from 'path';
+
+// src/core/artifact-versioning.ts
+init_artifacts();
+import { existsSync as existsSync5, readdirSync as readdirSync2 } from 'fs';
+function findNextSpecVersion(sessionId, epochVersion) {
+  const artifactDir = snapshotPath(sessionId, epochVersion);
+  if (!existsSync5(artifactDir)) return 1;
+  const files = readdirSync2(artifactDir);
+  const versions = files
+    .filter(f => /^task-spec-(\d+)\.md$/.test(f))
+    .map(f => {
+      const match = f.match(/^task-spec-(\d+)\.md$/);
+      return match ? parseInt(match[1], 10) : 0;
+    });
+  return versions.length > 0 ? Math.max(...versions) + 1 : 1;
+}
+function findLatestSpecPath(sessionId, epochVersion) {
+  const next = findNextSpecVersion(sessionId, epochVersion);
+  const current = next - 1;
+  if (current === 0) return null;
+  return snapshotPath(sessionId, epochVersion, `task-spec-${current}.md`);
+}
+function findNextPlansVersion(sessionId, epochVersion) {
+  const artifactDir = snapshotPath(sessionId, epochVersion);
+  if (!existsSync5(artifactDir)) return 1;
+  const entries = readdirSync2(artifactDir, { withFileTypes: true });
+  const versions = entries
+    .filter(e => e.isDirectory() && /^plans-(\d+)$/.test(e.name))
+    .map(e => {
+      const match = e.name.match(/^plans-(\d+)$/);
+      return match ? parseInt(match[1], 10) : 0;
+    });
+  return versions.length > 0 ? Math.max(...versions) + 1 : 1;
+}
+function findLatestPlansPath(sessionId, epochVersion) {
+  const next = findNextPlansVersion(sessionId, epochVersion);
+  const current = next - 1;
+  if (current === 0) return null;
+  return snapshotPath(sessionId, epochVersion, `plans-${current}`);
+}
+
+// src/phases/shared.ts
+init_artifacts();
+
+// src/core/config-dir.ts
+init_dist2();
+init_spawn();
+import {
+  existsSync as existsSync6,
+  mkdirSync as mkdirSync8,
+  readFileSync as readFileSync5,
+  writeFileSync as writeFileSync4,
+} from 'fs';
+import { dirname as dirname8, join as join5 } from 'path';
+var { spawn: spawn2 } = globalThis.Bun;
+var cache = new Map();
+var GLOBAL_CACHE_FILE = join5(process.env.HOME ?? '', '.kautopilot', 'binary-config-dirs.json');
+function loadPersistedConfigDirs() {
+  if (!existsSync6(GLOBAL_CACHE_FILE)) return false;
+  try {
+    const data = JSON.parse(readFileSync5(GLOBAL_CACHE_FILE, 'utf-8'));
+    for (const [binary, dir] of Object.entries(data)) {
+      cache.set(binary, dir);
+    }
+    debugLog(`[config-dir] Loaded ${Object.keys(data).length} cached dirs from ${GLOBAL_CACHE_FILE}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function persistConfigDirs(binaries) {
+  let existing = {};
+  if (existsSync6(GLOBAL_CACHE_FILE)) {
+    try {
+      existing = JSON.parse(readFileSync5(GLOBAL_CACHE_FILE, 'utf-8'));
+    } catch {}
+  }
+  for (const binary of binaries) {
+    const dir = cache.get(binary);
+    if (dir) existing[binary] = dir;
+  }
+  mkdirSync8(dirname8(GLOBAL_CACHE_FILE), { recursive: true });
+  writeFileSync4(GLOBAL_CACHE_FILE, JSON.stringify(existing, null, 2));
+  debugLog(`[config-dir] Persisted ${Object.keys(existing).length} dirs to ${GLOBAL_CACHE_FILE}`);
+}
+async function probeConfigDir(binary) {
+  const cached = cache.get(binary);
+  if (cached) return cached;
+  const prompt = 'Run: echo $CLAUDE_CONFIG_DIR. Output ONLY the path, nothing else.';
+  const proc = spawn2({
+    cmd: [binary, '--print', '--dangerously-skip-permissions', prompt],
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  const timeoutMs = 30000;
+  const timeout = new Promise((_3, reject) =>
+    setTimeout(() => {
+      proc.kill();
+      reject(new Error(`Probing ${binary} for CLAUDE_CONFIG_DIR timed out after ${timeoutMs / 1000}s`));
+    }, timeoutMs),
+  );
+  const [stdout, stderr] = await Promise.race([
+    Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]),
+    timeout,
+  ]);
+  if (stderr.trim()) {
+    debugLog(`[config-dir] ${binary} stderr: ${stderr.trim()}`);
+  }
+  const raw = stdout
+    .replace(/^```[^\n]*\n?/m, '')
+    .replace(/\n?```\s*$/m, '')
+    .replace(/`/g, '')
+    .trim();
+  const configDir = raw.startsWith('/') ? raw : `${process.env.HOME}/.claude`;
+  cache.set(binary, configDir);
+  debugLog(`[config-dir] ${binary} \u2192 ${configDir}`);
+  return configDir;
+}
+async function discoverConfigDirs(config) {
+  const binaries = new Set();
+  const defaultBin = process.env.CLAUDE_BINARY ?? config.claude_binary ?? 'claude';
+  binaries.add(defaultBin);
+  const agentEntries = [
+    config.agents.phase1.triage,
+    config.agents.phase1.spec_writer,
+    config.agents.phase1.plan_writer,
+    ...Object.values(config.agents.init),
+    ...Object.values(config.agents.phase2),
+    ...Object.values(config.agents.phase3),
+  ];
+  for (const agent of agentEntries) {
+    if (agent.binary) binaries.add(agent.binary);
+  }
+  if (config.agents.phase1.spec_reviewers) {
+    for (const reviewer of Object.values(config.agents.phase1.spec_reviewers)) {
+      if (reviewer.binaries) {
+        for (const b3 of reviewer.binaries) binaries.add(b3);
+      }
+    }
+  }
+  if (config.agents.phase1.plan_reviewers) {
+    for (const reviewer of Object.values(config.agents.phase1.plan_reviewers)) {
+      if (reviewer.binaries) {
+        for (const b3 of reviewer.binaries) binaries.add(b3);
+      }
+    }
+  }
+  loadPersistedConfigDirs();
+  const missingBinaries = [...binaries].filter(binary => !cache.has(binary));
+  if (missingBinaries.length > 0) {
+    const s = process.stdout.isTTY ? Y2() : null;
+    s?.start('Probing binaries');
+    await Promise.all(
+      missingBinaries.map(async binary => {
+        try {
+          await probeConfigDir(binary);
+        } catch (err) {
+          const fallback = `${process.env.HOME}/.claude`;
+          cache.set(binary, fallback);
+          debugLog(`[config-dir] Failed to probe ${binary}:`, err);
+        }
+      }),
+    );
+    s?.stop('Probing binaries');
+  }
+  const result = {};
+  for (const binary of binaries) {
+    result[binary] = cache.get(binary) ?? `${process.env.HOME}/.claude`;
+  }
+  if (missingBinaries.length > 0) {
+    persistConfigDirs(binaries);
+  }
+  return result;
+}
+function getConfigDir(binary) {
+  return cache.get(binary) ?? null;
+}
+
+// src/phases/shared.ts
+init_log();
+
+// src/core/turn-watcher.ts
+init_spawn();
+import { existsSync as existsSync9, mkdirSync as mkdirSync11, readFileSync as readFileSync8, watch } from 'fs';
+import { dirname as dirname11 } from 'path';
+
+// src/core/status.ts
+init_format();
+init_artifacts();
+init_lock();
+init_log();
+var import_yaml3 = __toESM(require_dist(), 1);
+import {
+  existsSync as existsSync8,
+  mkdirSync as mkdirSync10,
+  readFileSync as readFileSync7,
+  renameSync as renameSync2,
+  rmSync,
+  writeFileSync as writeFileSync6,
+} from 'fs';
+import { dirname as dirname10, join as join6 } from 'path';
+var CHECKPOINTS = {
+  plan: new Set(['pull_ticket', 'write_spec', 'finalize_spec', 'finalize_plans']),
+  implementation: new Set(['clear_loop', 'commit', 'next_plan', 'completed']),
+  polish: new Set(['commit_pending', 'prereview', 'push', 'create_pr', 'poll', 'feedback_check', 'completed']),
+};
 function isCheckpoint(phase, state) {
   return CHECKPOINTS[phase]?.has(state) ?? false;
 }
+var LIFECYCLE_EVENTS = new Set([
+  'init:started',
+  'init:completed',
+  'init:failed',
+  'init:cancelled',
+  'start:started',
+  'start:completed',
+  'stop:started',
+  'stop:completed',
+  'phase_start:forced',
+  'start_ticket:called',
+  'crash:detected',
+  'reset:started',
+  'reset:cleanup',
+  'reset:completed',
+  'subtask:started',
+  'subtask:completed',
+  'subtask:failed',
+  'context:updated',
+]);
 function isLifecycleEvent(event) {
   return LIFECYCLE_EVENTS.has(event);
 }
@@ -83485,7 +84860,11 @@ function applyEvent(status, entry, index) {
   }
   if (event === 'subtask:started' && entry.metadata?.task) {
     const task = entry.metadata.task;
-    status.tasks[task] = { status: 'running', startedAt: entry.ts, logRef: index };
+    status.tasks[task] = {
+      status: 'running',
+      startedAt: entry.ts,
+      logRef: index,
+    };
   }
   if (event === 'subtask:completed' && entry.metadata?.task) {
     const task = entry.metadata.task;
@@ -83531,9 +84910,9 @@ function statusPath(sessionId) {
 }
 function readStatusYaml(sessionId) {
   const path = statusPath(sessionId);
-  if (!existsSync11(path)) return null;
+  if (!existsSync8(path)) return null;
   try {
-    const raw = readFileSync9(path, 'utf-8');
+    const raw = readFileSync7(path, 'utf-8');
     return import_yaml3.default.parse(raw);
   } catch {
     return null;
@@ -83541,10 +84920,10 @@ function readStatusYaml(sessionId) {
 }
 function writeStatusYaml(sessionId, status) {
   const path = statusPath(sessionId);
-  mkdirSync13(dirname10(path), { recursive: true });
+  mkdirSync10(dirname10(path), { recursive: true });
   const content = import_yaml3.default.stringify(status, { lineWidth: 120 });
   const tmp = `${path}.tmp`;
-  writeFileSync10(tmp, content);
+  writeFileSync6(tmp, content);
   renameSync2(tmp, path);
 }
 function ensureStatus(sessionId) {
@@ -83568,11 +84947,30 @@ function updateUserTurn(sessionId, userTurn) {
   status.userTurn = userTurn;
   writeStatusYaml(sessionId, status);
 }
+var CLEANUP = {
+  gather_context: (_sid, v2, wt, tid) => {
+    const dir = join6(wt, 'spec', tid, `v${v2}`, 'understanding');
+    if (existsSync8(dir)) {
+      rmSync(dir, { recursive: true });
+      return [`removed ${dir}`];
+    }
+    return [];
+  },
+  running: (sid, _v, _wt, _tid) => {
+    return cancelKloopIfAlive(sid);
+  },
+  run_fix: (sid, _v, _wt, _tid) => {
+    return cancelKloopIfAlive(sid);
+  },
+  ensure_branch: (_sid, _v, wt, _tid) => {
+    return abortRebaseIfNeeded(wt);
+  },
+};
 function cancelKloopIfAlive(sessionId) {
-  const kloopLock = join8(sessionDir(sessionId), 'tmp', 'kloop.pid');
-  if (existsSync11(kloopLock)) {
+  const kloopLock = join6(sessionDir(sessionId), 'tmp', 'kloop.pid');
+  if (existsSync8(kloopLock)) {
     try {
-      const pid = parseInt(readFileSync9(kloopLock, 'utf-8').trim(), 10);
+      const pid = parseInt(readFileSync7(kloopLock, 'utf-8').trim(), 10);
       process.kill(pid, 0);
       process.kill(pid, 'SIGTERM');
       return [`killed kloop PID ${pid}`];
@@ -83581,9 +84979,9 @@ function cancelKloopIfAlive(sessionId) {
   return [];
 }
 function abortRebaseIfNeeded(worktree) {
-  const rebaseDir = join8(worktree, '.git', 'rebase-merge');
-  const rebaseApply = join8(worktree, '.git', 'rebase-apply');
-  if (existsSync11(rebaseDir) || existsSync11(rebaseApply)) {
+  const rebaseDir = join6(worktree, '.git', 'rebase-merge');
+  const rebaseApply = join6(worktree, '.git', 'rebase-apply');
+  if (existsSync8(rebaseDir) || existsSync8(rebaseApply)) {
     try {
       Bun.spawnSync({ cmd: ['git', 'rebase', '--abort'], cwd: worktree });
       return ['aborted in-progress rebase'];
@@ -83591,11 +84989,11 @@ function abortRebaseIfNeeded(worktree) {
   }
   return [];
 }
-function runCleanup(state, sessionId, version, worktree) {
+function runCleanup(state, sessionId, version, worktree, ticketId) {
   const fn = CLEANUP[state];
-  return fn ? fn(sessionId, version, worktree) : [];
+  return fn ? fn(sessionId, version, worktree, ticketId) : [];
 }
-function detectAndRecoverCrash(sessionId, worktree) {
+function detectAndRecoverCrash(sessionId, worktree, ticketId = 'local') {
   const status = ensureStatus(sessionId);
   if (!status.running) return false;
   const lock = checkLock(sessionId);
@@ -83614,7 +85012,7 @@ function detectAndRecoverCrash(sessionId, worktree) {
       checkpoint,
     },
   });
-  const actions = runCleanup(crashedState, sessionId, version, worktree);
+  const actions = runCleanup(crashedState, sessionId, version, worktree, ticketId);
   appendEvent(sessionId, {
     ts: new Date().toISOString(),
     event: 'reset:started',
@@ -83650,196 +85048,14 @@ function detectAndRecoverCrash(sessionId, worktree) {
   }
   return true;
 }
-var import_yaml3, CHECKPOINTS, LIFECYCLE_EVENTS, CLEANUP;
-var init_status = __esm(() => {
-  init_log();
-  init_lock();
-  init_artifacts();
-  init_format();
-  import_yaml3 = __toESM(require_dist(), 1);
-  CHECKPOINTS = {
-    plan: new Set(['pull_ticket', 'write_spec', 'finalize_spec', 'finalize_plans']),
-    implementation: new Set(['clear_loop', 'commit', 'next_plan', 'completed']),
-    polish: new Set(['commit_pending', 'push', 'create_pr', 'poll', 'feedback_check', 'completed']),
-  };
-  LIFECYCLE_EVENTS = new Set([
-    'init:started',
-    'init:completed',
-    'init:failed',
-    'init:cancelled',
-    'start:started',
-    'start:completed',
-    'stop:started',
-    'stop:completed',
-    'phase_start:forced',
-    'start_ticket:called',
-    'crash:detected',
-    'reset:started',
-    'reset:cleanup',
-    'reset:completed',
-    'subtask:started',
-    'subtask:completed',
-    'subtask:failed',
-    'context:updated',
-  ]);
-  CLEANUP = {
-    gather_context: (_sid, v2, wt) => {
-      const dir = join8(wt, 'spec', `v${v2}`, 'understanding');
-      if (existsSync11(dir)) {
-        rmSync2(dir, { recursive: true });
-        return [`removed ${dir}`];
-      }
-      return [];
-    },
-    running: (sid, _v, _wt) => {
-      return cancelKloopIfAlive(sid);
-    },
-    run_fix: (sid, _v, _wt) => {
-      return cancelKloopIfAlive(sid);
-    },
-    ensure_branch: (_sid, _v, wt) => {
-      return abortRebaseIfNeeded(wt);
-    },
-  };
-});
-
-// src/core/config-dir.ts
-var { spawn: spawn2 } = globalThis.Bun;
-import { existsSync as existsSync13, readFileSync as readFileSync10, writeFileSync as writeFileSync13 } from 'fs';
-import { join as join11 } from 'path';
-function loadPersistedConfigDirs(id) {
-  const path = join11(sessionDir(id), CACHE_FILE);
-  if (!existsSync13(path)) return false;
-  try {
-    const data = JSON.parse(readFileSync10(path, 'utf-8'));
-    for (const [binary, dir] of Object.entries(data)) {
-      cache.set(binary, dir);
-    }
-    debugLog(`[config-dir] Loaded ${Object.keys(data).length} cached dirs from ${path}`);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function persistConfigDirs(id, binaries) {
-  const path = join11(sessionDir(id), CACHE_FILE);
-  const data = {};
-  let count = 0;
-  for (const binary of binaries) {
-    const dir = cache.get(binary);
-    if (!dir) continue;
-    data[binary] = dir;
-    count++;
-  }
-  writeFileSync13(path, JSON.stringify(data, null, 2));
-  debugLog(`[config-dir] Persisted ${count} dirs to ${path}`);
-}
-async function probeConfigDir(binary) {
-  const cached = cache.get(binary);
-  if (cached) return cached;
-  const prompt = 'Run: echo $CLAUDE_CONFIG_DIR. Output ONLY the path, nothing else.';
-  const proc = spawn2({
-    cmd: [binary, '--print', '--dangerously-skip-permissions', prompt],
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  const timeoutMs = 30000;
-  const timeout = new Promise((_3, reject) =>
-    setTimeout(() => {
-      proc.kill();
-      reject(new Error(`Probing ${binary} for CLAUDE_CONFIG_DIR timed out after ${timeoutMs / 1000}s`));
-    }, timeoutMs),
-  );
-  const [stdout, stderr] = await Promise.race([
-    Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]),
-    timeout,
-  ]);
-  if (stderr.trim()) {
-    debugLog(`[config-dir] ${binary} stderr: ${stderr.trim()}`);
-  }
-  const raw = stdout
-    .replace(/^```[^\n]*\n?/m, '')
-    .replace(/\n?```\s*$/m, '')
-    .replace(/`/g, '')
-    .trim();
-  const configDir = raw.startsWith('/') ? raw : `${process.env.HOME}/.claude`;
-  cache.set(binary, configDir);
-  debugLog(`[config-dir] ${binary} \u2192 ${configDir}`);
-  return configDir;
-}
-async function discoverConfigDirs(config, sessionId) {
-  const binaries = new Set();
-  const defaultBin = process.env.CLAUDE_BINARY ?? config.claude_binary ?? 'claude';
-  binaries.add(defaultBin);
-  for (const phase of Object.values(config.agents)) {
-    for (const agent of Object.values(phase)) {
-      if (agent.binary) binaries.add(agent.binary);
-    }
-  }
-  if (config.spec_reviewers) {
-    for (const reviewer of Object.values(config.spec_reviewers)) {
-      if (reviewer.binaries) {
-        for (const b3 of reviewer.binaries) binaries.add(b3);
-      }
-    }
-  }
-  if (config.plan_reviewers) {
-    for (const reviewer of Object.values(config.plan_reviewers)) {
-      if (reviewer.binaries) {
-        for (const b3 of reviewer.binaries) binaries.add(b3);
-      }
-    }
-  }
-  if (sessionId) {
-    loadPersistedConfigDirs(sessionId);
-  }
-  const missingBinaries = [...binaries].filter(binary => !cache.has(binary));
-  if (missingBinaries.length > 0) {
-    const s = process.stdout.isTTY ? Y2() : null;
-    s?.start('Probing binaries');
-    await Promise.all(
-      missingBinaries.map(async binary => {
-        try {
-          await probeConfigDir(binary);
-        } catch (err) {
-          const fallback = `${process.env.HOME}/.claude`;
-          cache.set(binary, fallback);
-          debugLog(`[config-dir] Failed to probe ${binary}:`, err);
-        }
-      }),
-    );
-    s?.stop('Probing binaries');
-  }
-  const result = {};
-  for (const binary of binaries) {
-    result[binary] = cache.get(binary) ?? `${process.env.HOME}/.claude`;
-  }
-  if (sessionId) {
-    persistConfigDirs(sessionId, binaries);
-  }
-  return result;
-}
-function getConfigDir(binary) {
-  return cache.get(binary) ?? null;
-}
-var cache,
-  CACHE_FILE = 'binary-config-dirs.json';
-var init_config_dir = __esm(() => {
-  init_dist2();
-  init_spawn();
-  init_artifacts();
-  cache = new Map();
-});
 
 // src/core/turn-watcher.ts
-import { watch, existsSync as existsSync14, readFileSync as readFileSync11, mkdirSync as mkdirSync16 } from 'fs';
-import { dirname as dirname12 } from 'path';
 function watchTurn(jsonlPath, onChange) {
   let lastSize = 0;
   let closed = false;
   let fileWatcher = null;
   function check() {
-    if (!existsSync14(jsonlPath)) return;
+    if (!existsSync9(jsonlPath)) return;
     let stat;
     try {
       stat = Bun.file(jsonlPath);
@@ -83848,7 +85064,7 @@ function watchTurn(jsonlPath, onChange) {
     }
     if (stat.size === lastSize) return;
     lastSize = stat.size;
-    const content = readFileSync11(jsonlPath, 'utf-8');
+    const content = readFileSync8(jsonlPath, 'utf-8');
     const lines = content
       .trim()
       .split(
@@ -83891,7 +85107,7 @@ function watchTurn(jsonlPath, onChange) {
     const maxDelay = 8000;
     function poll() {
       if (closed) return;
-      if (existsSync14(jsonlPath)) {
+      if (existsSync9(jsonlPath)) {
         startWatch();
       } else {
         delay = Math.min(delay * 2, maxDelay);
@@ -83901,8 +85117,8 @@ function watchTurn(jsonlPath, onChange) {
     }
     setTimeout(poll, delay);
   }
-  mkdirSync16(dirname12(jsonlPath), { recursive: true });
-  if (existsSync14(jsonlPath)) {
+  mkdirSync11(dirname11(jsonlPath), { recursive: true });
+  if (existsSync9(jsonlPath)) {
     startWatch();
   } else {
     waitForFile();
@@ -83919,27 +85135,9 @@ function startTurnWatcher(sessionId, jsonlPath) {
     updateUserTurn(sessionId, state.userTurn);
   });
 }
-var init_turn_watcher = __esm(() => {
-  init_status();
-  init_spawn();
-});
 
 // src/phases/shared.ts
-var exports_shared = {};
-__export(exports_shared, {
-  validatePlanContent: () => validatePlanContent,
-  spawnTTYWithTurnTracking: () => spawnTTYWithTurnTracking,
-  resolveSpec: () => resolveSpec,
-  resolvePlans: () => resolvePlans,
-  resolveActivePlans: () => resolveActivePlans,
-  readPlanDraftFiles: () => readPlanDraftFiles,
-  parsePlanFilename: () => parsePlanFilename,
-  loadPromptTemplate: () => loadPromptTemplate,
-  findLatestPlanDraftDir: () => findLatestPlanDraftDir,
-  discoverPlans: () => discoverPlans,
-});
-import { existsSync as existsSync15, readdirSync as readdirSync3, readFileSync as readFileSync12 } from 'fs';
-import { join as join12 } from 'path';
+init_spawn();
 function loadPromptTemplate(phase, name, vars) {
   const key = name.replace(/-/g, '_');
   return getAgentPrompt(phase, key, vars);
@@ -83947,7 +85145,10 @@ function loadPromptTemplate(phase, name, vars) {
 function parsePlanFilename(filename) {
   const suffixed = filename.match(/^plan-(\d+)-(\d+)\.md$/);
   if (suffixed) {
-    return { ordinal: parseInt(suffixed[1], 10), rewrite: parseInt(suffixed[2], 10) };
+    return {
+      ordinal: parseInt(suffixed[1], 10),
+      rewrite: parseInt(suffixed[2], 10),
+    };
   }
   const flat = filename.match(/^plan-(\d+)\.md$/);
   if (flat) {
@@ -83956,7 +85157,7 @@ function parsePlanFilename(filename) {
   return null;
 }
 function resolveActivePlans(plansDir) {
-  if (!existsSync15(plansDir)) return [];
+  if (!existsSync10(plansDir)) return [];
   const files = readdirSync3(plansDir);
   const byOrdinal = new Map();
   for (const f of files) {
@@ -83969,71 +85170,34 @@ function resolveActivePlans(plansDir) {
   }
   return Array.from(byOrdinal.entries())
     .sort(([a], [b3]) => a - b3)
-    .map(([, v2]) => join12(plansDir, v2.filename));
+    .map(([, v2]) => join7(plansDir, v2.filename));
 }
 function discoverPlans(plansDir) {
   return resolveActivePlans(plansDir);
 }
 function resolveSpec(sessionId, version, filename = 'task-spec.md') {
   const sessionPath = snapshotPath(sessionId, version, filename);
-  if (existsSync15(sessionPath)) return readFileSync12(sessionPath, 'utf-8');
+  if (existsSync10(sessionPath)) return readFileSync9(sessionPath, 'utf-8');
   return '';
 }
 function resolvePlans(sessionId, version) {
-  const sessionPlansDir = snapshotPath(sessionId, version, 'plans');
-  return resolveActivePlans(sessionPlansDir);
+  const latestPlansDir = findLatestPlansPath(sessionId, version) || snapshotPath(sessionId, version, 'plans');
+  return resolveActivePlans(latestPlansDir);
 }
 function validatePlanContent(planFiles) {
   return planFiles.filter(p2 => {
-    const content = readFileSync12(p2, 'utf-8').trim();
+    const content = readFileSync9(p2, 'utf-8').trim();
     return content.length === 0;
   });
-}
-function findLatestPlanDraftDir(plansDir) {
-  let entries;
-  try {
-    entries = readdirSync3(plansDir, { withFileTypes: true });
-  } catch {
-    return null;
-  }
-  const drafts = entries
-    .filter(e2 => e2.isDirectory() && /^plan-draft-\d+$/.test(e2.name))
-    .map(e2 => ({ name: e2.name, ordinal: parseInt(e2.name.match(/plan-draft-(\d+)/)[1]) }))
-    .sort((a, b3) => b3.ordinal - a.ordinal);
-  if (drafts.length === 0) return null;
-  const latest = drafts[0];
-  const draftDir = join12(plansDir, latest.name);
-  const files = readdirSync3(draftDir)
-    .filter(f => /^plan-\d+\.md$/.test(f))
-    .sort((a, b3) => {
-      const numA = parseInt(a.match(/plan-(\d+)/)?.[1] || '0', 10);
-      const numB = parseInt(b3.match(/plan-(\d+)/)?.[1] || '0', 10);
-      return numA - numB;
-    })
-    .map(f => join12(draftDir, f));
-  return { ordinal: latest.ordinal, dir: draftDir, files };
-}
-function readPlanDraftFiles(draftDir) {
-  const files = readdirSync3(draftDir)
-    .filter(f => /^plan-\d+\.md$/.test(f))
-    .sort((a, b3) => {
-      const numA = parseInt(a.match(/plan-(\d+)/)?.[1] || '0', 10);
-      const numB = parseInt(b3.match(/plan-(\d+)/)?.[1] || '0', 10);
-      return numA - numB;
-    });
-  return files.map(f => ({
-    filename: f,
-    content: readFileSync12(join12(draftDir, f), 'utf-8'),
-  }));
 }
 function deriveProjectKey(worktree) {
   return worktree.replace(/[/.]/g, '-');
 }
-async function spawnTTYWithTurnTracking(sessionId, binary, prompt, options2) {
+async function spawnTTYWithTurnTracking(sessionId, binary, prompt, options) {
   const claudeSessionId = crypto.randomUUID();
   const configDir = getConfigDir(binary) ?? `${process.env.HOME}/.claude`;
-  const projectKey = deriveProjectKey(options2.worktree);
-  const jsonlPath = join12(configDir, 'projects', projectKey, `${claudeSessionId}.jsonl`);
+  const projectKey = deriveProjectKey(options.worktree);
+  const jsonlPath = join7(configDir, 'projects', projectKey, `${claudeSessionId}.jsonl`);
   appendEvent(sessionId, {
     ts: new Date().toISOString(),
     event: 'context:updated',
@@ -84043,10 +85207,10 @@ async function spawnTTYWithTurnTracking(sessionId, binary, prompt, options2) {
   try {
     const runScope = { kind: 'session', id: sessionId };
     const exitCode = await spawnTTY(binary, prompt, {
-      ...options2,
+      ...options,
       claudeSessionId,
       runScope,
-      label: options2.label ?? 'tty-handoff',
+      label: options.label ?? 'tty-handoff',
       context: `TTY handoff for session ${sessionId}`,
     });
     return exitCode;
@@ -84054,996 +85218,9 @@ async function spawnTTYWithTurnTracking(sessionId, binary, prompt, options2) {
     watcher.close();
   }
 }
-var init_shared = __esm(() => {
-  init_artifacts();
-  init_agents();
-  init_spawn();
-  init_log();
-  init_config_dir();
-  init_turn_watcher();
-});
-
-// src/core/github.ts
-var exports_github = {};
-__export(exports_github, {
-  withBotSignature: () => withBotSignature,
-  ghRunLogsFailed: () => ghRunLogsFailed,
-  ghReviews: () => ghReviews,
-  ghReviewThreads: () => ghReviewThreads,
-  ghResolveThread: () => ghResolveThread,
-  ghRepoInfo: () => ghRepoInfo,
-  ghReplyToThread: () => ghReplyToThread,
-  ghReplyToIssueComment: () => ghReplyToIssueComment,
-  ghReact: () => ghReact,
-  ghPrView: () => ghPrView,
-  ghPrRuns: () => ghPrRuns,
-  ghPrComments: () => ghPrComments,
-  ghPrChecks: () => ghPrChecks,
-  ghListPrsForBranch: () => ghListPrsForBranch,
-  ghFetchMergePolicy: () => ghFetchMergePolicy,
-  ghCreatePr: () => ghCreatePr,
-  ghClosePr: () => ghClosePr,
-});
-var { spawn: spawn4 } = globalThis.Bun;
-function withBotSignature(body) {
-  return body + BOT_SIGNATURE;
-}
-async function gh(args, cwd) {
-  const proc = spawn4({
-    cmd: ['gh', ...args],
-    cwd,
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-  return {
-    exitCode: await proc.exited,
-    stdout: stdout.trim(),
-    stderr: stderr.trim(),
-  };
-}
-function parseJson(stdout, label) {
-  try {
-    return JSON.parse(stdout);
-  } catch {
-    throw new Error(`gh ${label}: invalid JSON output: ${stdout.slice(0, 200)}`);
-  }
-}
-async function ghPrChecks(prNumber, cwd) {
-  const result = await gh(['pr', 'checks', String(prNumber), '--json', 'name,status,conclusion'], cwd);
-  if (result.exitCode !== 0) {
-    throw new Error(`gh pr checks failed: ${result.stderr}`);
-  }
-  const checks = parseJson(result.stdout, 'pr-checks');
-  return checks.map(c2 => ({
-    name: c2.name,
-    status:
-      c2.status === 'completed' && c2.conclusion === 'success'
-        ? 'passing'
-        : c2.status === 'completed' && c2.conclusion === 'failure'
-          ? 'failing'
-          : 'pending',
-  }));
-}
-async function ghPrView(prNumber, cwd) {
-  const result = await gh(
-    ['pr', 'view', String(prNumber), '--json', 'mergeable,mergeStateStatus,headRefName,state,url,reviews,createdAt'],
-    cwd,
-  );
-  if (result.exitCode !== 0) {
-    throw new Error(`gh pr view failed: ${result.stderr}`);
-  }
-  return parseJson(result.stdout, 'pr-view');
-}
-async function ghReviewThreads(prNumber, cwd) {
-  const query = `
-    query($owner: String!, $repo: String!, $pr: Int!) {
-      repository(owner: $owner, name: $repo) {
-        pullRequest(number: $pr) {
-          reviewThreads(first: 100) {
-            nodes {
-              id
-              isOutdated
-              isResolved
-              comments(first: 100) {
-                nodes {
-                  id
-                  author { login }
-                  body
-                  createdAt
-                  isBot
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  `;
-  const repoInfo = await ghRepoInfo(cwd);
-  const result = await gh(
-    [
-      'api',
-      'graphql',
-      '-f',
-      `query=${query}`,
-      '-f',
-      `owner=${repoInfo.owner}`,
-      '-f',
-      `repo=${repoInfo.repo}`,
-      '-f',
-      `pr=${prNumber}`,
-    ],
-    cwd,
-  );
-  if (result.exitCode !== 0) {
-    throw new Error(`gh review threads failed: ${result.stderr}`);
-  }
-  const data = parseJson(result.stdout, 'review-threads');
-  const threads = data.data.repository.pullRequest.reviewThreads.nodes;
-  return threads
-    .filter(t => !t.isResolved)
-    .map(t => ({
-      id: t.id,
-      isOutdated: t.isOutdated,
-      author: t.comments.nodes[0]?.author?.login || 'unknown',
-      body: t.comments.nodes[0]?.body || '',
-      firstCommentId: t.comments.nodes[0]?.id || '',
-      replies: t.comments.nodes.slice(1).map(c2 => ({
-        id: c2.id,
-        author: c2.author?.login || 'unknown',
-        body: c2.body,
-        isBot: c2.isBot ?? c2.author?.login?.includes('[bot]') ?? false,
-      })),
-    }));
-}
-async function ghReviews(prNumber, cwd) {
-  const repoInfo = await ghRepoInfo(cwd);
-  const result = await gh(['api', `repos/${repoInfo.owner}/${repoInfo.repo}/pulls/${prNumber}/reviews`], cwd);
-  if (result.exitCode !== 0) {
-    throw new Error(`gh reviews failed: ${result.stderr}`);
-  }
-  return parseJson(result.stdout, 'reviews');
-}
-async function ghPrComments(prNumber, since, cwd) {
-  const repoInfo = await ghRepoInfo(cwd);
-  let url = `repos/${repoInfo.owner}/${repoInfo.repo}/issues/${prNumber}/comments`;
-  if (since) {
-    url += `?since=${encodeURIComponent(since)}`;
-  }
-  const result = await gh(['api', url], cwd);
-  if (result.exitCode !== 0) {
-    throw new Error(`gh pr comments failed: ${result.stderr}`);
-  }
-  return parseJson(result.stdout, 'pr-comments');
-}
-async function ghReplyToThread(prNumber, commentId, body, cwd) {
-  const repoInfo = await ghRepoInfo(cwd);
-  const result = await gh(
-    [
-      'api',
-      `repos/${repoInfo.owner}/${repoInfo.repo}/pulls/${prNumber}/comments/${commentId}/replies`,
-      '-f',
-      `body=${body}`,
-      '--method',
-      'POST',
-    ],
-    cwd,
-  );
-  if (result.exitCode !== 0) {
-    throw new Error(`gh reply to thread failed: ${result.stderr}`);
-  }
-}
-async function ghReplyToIssueComment(prNumber, body, inReplyTo, cwd) {
-  const repoInfo = await ghRepoInfo(cwd);
-  const args = ['api', `repos/${repoInfo.owner}/${repoInfo.repo}/issues/${prNumber}/comments`, '-f', `body=${body}`];
-  if (inReplyTo) {
-    args.push('-f', `in_reply_to=${inReplyTo}`);
-  }
-  const result = await gh([...args, '--method', 'POST'], cwd);
-  if (result.exitCode !== 0) {
-    throw new Error(`gh reply to issue comment failed: ${result.stderr}`);
-  }
-}
-async function ghResolveThread(threadId, cwd) {
-  const mutation = `
-    mutation($threadId: ID!) {
-      resolveReviewThread(input: { threadId: $threadId }) {
-        thread { id }
-      }
-    }
-  `;
-  const result = await gh(['api', 'graphql', '-f', `query=${mutation}`, '-f', `threadId=${threadId}`], cwd);
-  if (result.exitCode !== 0) {
-    throw new Error(`gh resolve thread failed: ${result.stderr}`);
-  }
-}
-async function ghReact(commentId, reaction = '+1', cwd) {
-  const repoInfo = await ghRepoInfo(cwd);
-  const result = await gh(
-    [
-      'api',
-      `repos/${repoInfo.owner}/${repoInfo.repo}/issues/comments/${commentId}/reactions`,
-      '-f',
-      `content=${reaction}`,
-      '--method',
-      'POST',
-    ],
-    cwd,
-  );
-  if (result.exitCode !== 0) {
-    throw new Error(`gh react failed: ${result.stderr}`);
-  }
-}
-async function ghCreatePr(title, baseBranch, body, cwd) {
-  const result = await gh(['pr', 'create', '--title', title, '--base', baseBranch, '--body', body], cwd);
-  if (result.exitCode !== 0) {
-    throw new Error(`gh pr create failed: ${result.stderr}`);
-  }
-  const urlMatch = result.stdout.match(/https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)/);
-  if (!urlMatch) {
-    throw new Error(`Could not parse PR URL from output: ${result.stdout}`);
-  }
-  return { number: parseInt(urlMatch[1], 10), url: urlMatch[0] };
-}
-async function ghClosePr(prNumber, cwd) {
-  const result = await gh(
-    ['pr', 'close', String(prNumber), '--comment', 'Closed for rollover \u2014 creating fresh PR'],
-    cwd,
-  );
-  if (result.exitCode !== 0) {
-    throw new Error(`gh pr close failed: ${result.stderr}`);
-  }
-}
-async function ghListPrsForBranch(branch, cwd) {
-  const result = await gh(['pr', 'list', '--head', branch, '--json', 'number'], cwd);
-  if (result.exitCode !== 0) {
-    throw new Error(`gh pr list failed: ${result.stderr}`);
-  }
-  return parseJson(result.stdout, 'pr-list');
-}
-async function ghFetchMergePolicy(owner, repo, cwd) {
-  const query = `
-    query($owner: String!, $repo: String!) {
-      repository(owner: $owner, name: $repo) {
-        branchProtectionRules(first: 10) {
-          nodes {
-            requiresApprovingReviews
-            requiredApprovingReviewCount
-            requiresStatusChecks
-            requiredStatusCheckContexts
-            requiresStrictStatusChecks
-            requiresCodeOwnerReviews
-            allowDeletions
-            allowForcePushes
-          }
-        }
-        defaultBranchRef {
-          name
-          target { oid }
-        }
-      }
-    }
-  `;
-  const result = await gh(
-    ['api', 'graphql', '-f', `query=${query}`, '-f', `owner=${owner}`, '-f', `repo=${repo}`],
-    cwd,
-  );
-  if (result.exitCode !== 0) {
-    throw new Error(`gh merge policy failed: ${result.stderr}`);
-  }
-  const data = parseJson(result.stdout, 'merge-policy');
-  const rules = data.data.repository.branchProtectionRules.nodes;
-  return {
-    requiresApprovingReviews: rules.some(r2 => r2.requiresApprovingReviews),
-    requiredApprovingReviewCount: Math.max(...rules.map(r2 => r2.requiredApprovingReviewCount), 0),
-    requiresStatusChecks: rules.some(r2 => r2.requiresStatusChecks),
-    requiredStatusCheckContexts: rules.flatMap(r2 => r2.requiredStatusCheckContexts),
-    requiresCodeOwnerReviews: rules.some(r2 => r2.requiresCodeOwnerReviews),
-  };
-}
-async function ghRunLogsFailed(runId, cwd) {
-  const result = await gh(['run', 'view', runId, '--log-failed'], cwd);
-  return result.exitCode !== 0 ? `Failed to fetch logs: ${result.stderr}` : result.stdout;
-}
-async function ghRepoInfo(cwd) {
-  const result = await gh(['repo', 'view', '--json', 'nameWithOwner'], cwd);
-  if (result.exitCode !== 0) {
-    throw new Error(`gh repo view failed: ${result.stderr}`);
-  }
-  const data = parseJson(result.stdout, 'repo-view');
-  const [owner, repo] = data.nameWithOwner.split('/');
-  return { owner, repo };
-}
-async function ghPrRuns(branch, cwd) {
-  const result = await gh(
-    ['run', 'list', '--branch', branch, '--json', 'databaseId,name,status,conclusion,headBranch', '--limit', '10'],
-    cwd,
-  );
-  if (result.exitCode !== 0) {
-    throw new Error(`gh run list failed: ${result.stderr}`);
-  }
-  return parseJson(result.stdout, 'run-list');
-}
-var BOT_SIGNATURE = `
-
-By Claude Code Kautopilot`;
-var init_github = () => {};
-
-// src/index.ts
-init_esm();
-init_init2();
-import { readFileSync as readFileSync25 } from 'fs';
-import { fileURLToPath } from 'url';
-import { dirname as dirname13, join as join19 } from 'path';
-
-// src/cli/start.ts
-init_esm();
-init_db();
-init_lock();
-init_log();
-init_status();
-init_git();
-import { existsSync as existsSync29 } from 'fs';
-
-// src/phases/runner.ts
-init_log();
-
-// src/phases/machine.ts
-init_log();
-init_status();
-init_format();
-async function runStateMachine(phaseName, states, ctx, options2) {
-  const { session, version } = ctx;
-  const terminalStates = options2?.terminalStates ?? [];
-  const status = ensureStatus(session.id);
-  let currentState = null;
-  if (options2?.forceStartState) {
-    const stateName = options2.forceStartState;
-    if (!(stateName in states)) {
-      throw new Error(`Invalid force-start state: ${stateName}. Valid states: ${Object.keys(states).join(', ')}`);
-    }
-    currentState = stateName;
-    logDim(`[${phaseName}] Force-starting at state: ${currentState}`);
-  } else if (status.stateStatus === 'running' && status.state in states) {
-    currentState = status.state;
-    logDim(`[${phaseName}] Resuming from incomplete state: ${currentState}`);
-  } else {
-    for (const name of Object.keys(states)) {
-      if (terminalStates.includes(name)) continue;
-      if (!status.completedSteps.includes(name)) {
-        currentState = name;
-        break;
-      }
-    }
-  }
-  if (!currentState) {
-    logDim(`[${phaseName}] All states completed`);
-    return true;
-  }
-  const hasCompletedWork = Object.keys(states).some(s => status.completedSteps.includes(s));
-  if (!hasCompletedWork) {
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: `${phaseName}:started`,
-      version,
-    });
-  }
-  let interrupted = false;
-  while (currentState !== null) {
-    const handler = states[currentState];
-    if (!handler) {
-      throw new Error(`No handler for state: ${currentState}`);
-    }
-    logDim(`${stateIcon(currentState)} [${phaseName}] ${currentState}`);
-    const nextState = await handler(ctx);
-    if (terminalStates.includes(currentState)) {
-      logDim(`[${phaseName}] Reached terminal state: ${currentState}`);
-      break;
-    }
-    if (nextState === null) {
-      interrupted = true;
-      break;
-    }
-    currentState = nextState;
-  }
-  if (!interrupted) {
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: `${phaseName}:completed`,
-      version,
-    });
-  }
-  return !interrupted;
-}
-
-// src/phases/phase1/index.ts
-init_log();
-init_status();
-init_agents();
-init_scripts();
-
-// src/phases/phase1/pull-ticket.ts
-init_log();
-init_artifacts();
-init_scripts();
-init_format();
-import {
-  mkdirSync as mkdirSync14,
-  writeFileSync as writeFileSync11,
-  existsSync as existsSync12,
-  copyFileSync as copyFileSync4,
-} from 'fs';
-import { join as join9 } from 'path';
-async function handlePullTicket(ctx) {
-  const { session, version } = ctx;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'pull_ticket:started',
-    version,
-    metadata: { stepType: 'code' },
-  });
-  const specDir = join9(session.worktree, 'spec');
-  mkdirSync14(specDir, { recursive: true });
-  const ticketPath = join9(specDir, 'ticket.md');
-  if (session.ticket_id && !session.local) {
-    const content = runScript(session.id, 'get-ticket', [session.ticket_id]);
-    if (content) {
-      writeFileSync11(ticketPath, content);
-      logOk(
-        `Ticket fetched (${
-          content.split(`
-`).length
-        } lines)`,
-      );
-    } else {
-      logWarn('No content from get-ticket script');
-    }
-  } else if (session.local) {
-    if (!existsSync12(ticketPath)) {
-      writeFileSync11(
-        ticketPath,
-        `# Local Task
-
-Describe the task here.
-`,
-      );
-      logDim('Local mode \u2014 wrote placeholder ticket.md');
-    }
-  } else {
-    logDim('No ticket ID \u2014 skipping ticket fetch');
-  }
-  if (existsSync12(ticketPath)) {
-    const snapshotDest = sessionArtifactPath(session.id, 'ticket.md');
-    ensureArtifactDir(snapshotDest);
-    copyFileSync4(ticketPath, snapshotDest);
-  }
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'pull_ticket:completed',
-    version,
-  });
-  return 'write_spec';
-}
-
-// src/phases/phase1/write-spec.ts
-init_log();
-import { mkdirSync as mkdirSync17, readdirSync as readdirSync4, readFileSync as readFileSync13 } from 'fs';
-
-// src/core/type-config.ts
-import { join as join10 } from 'path';
-function buildPromptVars(worktree, version) {
-  const vDir = join10(worktree, 'spec', `v${version}`);
-  return {
-    ticket: join10(worktree, 'spec', 'ticket.md'),
-    spec: join10(vDir, 'task-spec.md'),
-    specDir: vDir,
-    plans: join10(vDir, 'plans'),
-    worktree,
-  };
-}
-function resolvePromptVars(prompt, vars) {
-  let result = prompt;
-  for (const [key, value] of Object.entries(vars)) {
-    result = result.replace(new RegExp(`\\{${key}\\}`, 'g'), value);
-  }
-  return result;
-}
-function resolveTimeout(specific, config) {
-  return specific ?? config.settings.defaultLlmTimeout;
-}
-function resolveBinary(binaries, config) {
-  if (process.env.CLAUDE_BINARY) return process.env.CLAUDE_BINARY;
-  if (binaries && binaries.length > 0) return binaries[0];
-  return config.claude_binary ?? 'claude';
-}
-
-// src/phases/phase1/write-spec.ts
-init_agents();
-
-// src/core/step-init.ts
-init_artifacts();
-var import_yaml4 = __toESM(require_dist(), 1);
-import { writeFileSync as writeFileSync12, mkdirSync as mkdirSync15 } from 'fs';
-import { dirname as dirname11 } from 'path';
-function writeStepInit(sessionId, version, stepName, record) {
-  const path = artifactPath(sessionId, version, 'steps', `${stepName}.yaml`);
-  mkdirSync15(dirname11(path), { recursive: true });
-  writeFileSync12(path, import_yaml4.stringify(record));
-}
-
-// src/phases/phase1/write-spec.ts
-init_shared();
-init_format();
-var SPEC_MECHANICS = `## CRITICAL: Spec Draft & Approval Mechanics
-
-### Draft Files
-
-Every draft of the spec MUST be written as a new ordinal file:
-- First draft: {specDir}/spec-draft-1.md
-- After feedback: {specDir}/spec-draft-2.md
-- After more feedback: {specDir}/spec-draft-3.md
-- And so on...
-
-NEVER overwrite a previous draft. Always increment the ordinal. This lets us diff between
-versions to see exactly what changed.
-
-Each draft MUST be a complete, standalone spec \u2014 NOT a changelog or diff. Write the full spec
-every time, with changes applied inline. Do NOT add "Changed:" or "Updated:" annotations.
-The draft should read as if it were written from scratch.
-
-### Delivery Kind Decision
-
-Before writing the first spec draft, you MUST decide the delivery kind and log it:
-
-- \`pr\` \u2014 the work is clear, scoped, and implementable as code in this session
-- \`ticket\` \u2014 the work needs decomposition into sub-tickets, a spike, or multi-phase work
-  (e.g., spike \u2192 impl, catalog \u2192 impl, large task needing multiple user intervention points)
-
-Log your decision by running this command:
-  \`kautopilot log-event deliveryKind:decided --metadata '{"kind": "pr"}'\`
-  OR
-  \`kautopilot log-event deliveryKind:decided --metadata '{"kind": "ticket"}'\`
-
-This MUST happen BEFORE writing spec-draft-1.md.
-
-### Approval Protocol
-
-When the user approves the spec, you MUST do these things IN ORDER before exiting:
-1. Write the approval event by running this command:
-   \`kautopilot log-event spec:approved --metadata '{"draft": N}'\`
-   (where N is the final draft ordinal number)
-2. THEN tell the user to /exit
-
-**CRITICAL**: Do NOT tell the user to /exit before writing the approval event.
-If the session crashes or the user Ctrl+C's before the approval event is logged,
-the spec will NOT be considered approved and this step will re-run from scratch.
-
----
-`;
-var SPEC_WRITER_PROMPT = `You are writing a declarative specification. The spec describes WHAT should be true
-when the work is complete \u2014 NOT how to get there. No file paths, no code snippets,
-no implementation details.
-
-Context:
-- Ticket: {ticket}
-- Worktree: {worktree}
-- Spec drafts directory: {specDir}
-
-## Phase 1: Gather Basic Context
-
-Before anything else, build enough understanding to make informed decisions.
-Create a team to gather context in parallel:
-
-- **code-explorer**: Read the ticket at {ticket}. Explore relevant code paths \u2014 find
-  the files, functions, types, and tests that relate to the ticket. Report what you found.
-- **pattern-finder**: Find existing patterns, abstractions, and conventions in the codebase
-  that are relevant. Report existing approaches.
-
-Wait for teammates. Synthesize findings. Identify what you DON'T know \u2014 the unknown unknowns.
-
-## Phase 2: Research Gate
-
-Now that you have basic context, decide: are there unknown unknowns that would make
-it dangerous to proceed?
-
-- If YES: do bare minimum targeted research to convert unknown unknowns into known unknowns.
-  Don't over-research \u2014 just enough to make an informed decision about task shape.
-- If NO: proceed directly.
-
-## Phase 3: Evaluate Task Shape & Decide Delivery Kind
-
-With basic context and resolved unknowns, evaluate the task:
-
-- Is this a single implementable unit? \u2192 \`pr\` delivery
-- Does this need decomposition? Consider:
-  - Is it too large for one session?
-  - Does it require multiple points of heavy user intervention?
-  - Does it need a spike/investigation before implementation?
-  - Would it be better as catalog \u2192 implement, or spike \u2192 implement?
-  - Does it need creating/updating multiple tickets?
-  \u2192 \`ticket\` delivery
-
-Log your decision using the delivery kind protocol above. Explain your reasoning to the user.
-
-## Phase 4: Targeted Research
-
-Based on the delivery kind and known unknowns, do targeted deep research:
-- For PR: understand the specific code paths, APIs, constraints
-- For ticket: understand the decomposition boundaries, dependencies between sub-tasks
-
-## Phase 5: Debate & De-ambiguate
-
-Discuss with the user:
-1. Walk through each requirement \u2014 are there hidden assumptions?
-2. Identify conflicts between requirements
-3. Identify risks \u2014 what could go wrong? What's the blast radius?
-4. For each risk: is it a spec problem (rewrite requirement) or a plan problem
-   (handle during implementation)?
-5. Keep clarifying until NOTHING is left ambiguous.
-
-Do NOT proceed to writing the spec until the user confirms requirements are clear.
-
-## Phase 6: Write Spec
-
-Write spec-draft-1.md. The spec is DECLARATIVE \u2014 it describes the desired end state.
-
-Required sections:
-- **Objective** \u2014 what should be true when this is done, and why
-- **Acceptance Criteria** \u2014 numbered, testable, concrete criteria
-  (Given/When/Then or equivalent \u2014 every criterion must be verifiable)
-- **Risk Assessment** \u2014 what could go wrong, blast radius, likelihood, mitigation strategy
-- **Constraints & Non-Goals** \u2014 what this explicitly does NOT include
-- **Delivery Kind** \u2014 pr or ticket, with rationale for the choice
-- **Proof of Completion** \u2014 runnable commands that prove every criterion is met
-  (good: test commands, API calls, grep assertions, build commands
-   bad: "manually verify", "visually check", vague assertions)
-
-The spec MUST NOT contain:
-- Which files to change or implementation details
-- Code snippets or internal architecture decisions
-- References to specific function names or line numbers
-- HOW to achieve the objective (that's for plans)
-
-## Phase 7: Review & Iterate
-
-1. Create a reviewer teammate to run \`kautopilot spec-review\` and return the summary
-2. Evaluate each issue \u2014 fix what's real, ask the user about anything uncertain
-3. Write a NEW spec-draft-N.md (incremented ordinal) with fixes
-4. Re-run reviewer after significant changes
-5. Repeat until you and the user are satisfied
-
-Be precise and concrete. Avoid vague criteria. Every requirement should be verifiable.`;
-function findLatestDraft(specDir) {
-  let files;
-  try {
-    files = readdirSync4(specDir);
-  } catch {
-    return null;
-  }
-  const drafts = files
-    .filter(f => /^spec-draft-\d+\.md$/.test(f))
-    .map(f => ({ file: f, ordinal: parseInt(f.match(/spec-draft-(\d+)\.md/)[1]) }))
-    .sort((a, b3) => b3.ordinal - a.ordinal);
-  if (drafts.length === 0) return null;
-  const latest = drafts[0];
-  const content = readFileSync13(`${specDir}/${latest.file}`, 'utf-8');
-  return { ordinal: latest.ordinal, content };
-}
-async function handleWriteSpec(ctx) {
-  const { session, version } = ctx;
-  const events = readLog(session.id);
-  const approved = events.some(e2 => e2.event === 'spec:approved');
-  if (approved) {
-    logOk('Spec already approved \u2014 skipping write_spec');
-    return 'finalize_spec';
-  }
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'write_spec:started',
-    version,
-    metadata: { stepType: 'tty' },
-  });
-  const vars = buildPromptVars(session.worktree, version);
-  mkdirSync17(vars.specDir, { recursive: true });
-  let prompt;
-  const latest = findLatestDraft(vars.specDir);
-  if (latest) {
-    logInfo(`Resuming from spec-draft-${latest.ordinal}.md`);
-    const resumeCtx = resolvePromptVars(SPEC_MECHANICS, vars);
-    prompt = `${resumeCtx}
-## Resuming: Current Draft is spec-draft-${latest.ordinal}.md
-
-You are resuming a spec session. The latest draft is below. Continue from where you left off \u2014 the next draft should be spec-draft-${latest.ordinal + 1}.md.
-
----
-${latest.content}
----
-
-${resolvePromptVars(SPEC_WRITER_PROMPT, vars)}`;
-  } else {
-    prompt = resolvePromptVars(SPEC_MECHANICS + SPEC_WRITER_PROMPT, vars);
-  }
-  const binary = getDefaultBinary();
-  writeStepInit(session.id, version, 'write_spec', {
-    prompt,
-    command: `${binary} (TTY handoff)`,
-    type: 'tty_handoff',
-  });
-  console.log(`
-=== Writing Spec v${version} ===`);
-  await spawnTTYWithTurnTracking(session.id, binary, prompt + ttyExitInstruction(session.id), {
-    cwd: session.worktree,
-    worktree: session.worktree,
-  });
-  const postEvents = readLog(session.id);
-  const wasApproved = postEvents.some(e2 => e2.event === 'spec:approved');
-  if (!wasApproved) {
-    logInfo('Spec not approved yet \u2014 will resume on next start');
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'write_spec:interrupted',
-      version,
-    });
-    return null;
-  }
-  const deliveryKindEvent = postEvents.find(e2 => e2.event === 'deliveryKind:decided');
-  if (deliveryKindEvent?.metadata?.kind) {
-    const kind = deliveryKindEvent.metadata.kind;
-    if (kind === 'pr' || kind === 'ticket') {
-      ctx.deliveryKind = kind;
-      appendEvent(session.id, {
-        ts: new Date().toISOString(),
-        event: 'context:updated',
-        metadata: { deliveryKind: kind },
-      });
-    }
-  }
-  logOk('Spec approved');
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'write_spec:completed',
-    version,
-  });
-  return 'finalize_spec';
-}
-
-// src/phases/phase1/finalize-spec.ts
-init_log();
-init_artifacts();
-import { existsSync as existsSync16, copyFileSync as copyFileSync5, readdirSync as readdirSync5 } from 'fs';
-init_format();
-function findLatestDraftPath(specDir) {
-  let files;
-  try {
-    files = readdirSync5(specDir);
-  } catch {
-    return null;
-  }
-  const drafts = files
-    .filter(f => /^spec-draft-\d+\.md$/.test(f))
-    .map(f => ({ file: f, ordinal: parseInt(f.match(/spec-draft-(\d+)\.md/)[1]) }))
-    .sort((a, b3) => b3.ordinal - a.ordinal);
-  if (drafts.length === 0) return null;
-  return `${specDir}/${drafts[0].file}`;
-}
-async function handleFinalizeSpec(ctx) {
-  const { session, version } = ctx;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'finalize_spec:started',
-    version,
-    metadata: { stepType: 'code' },
-  });
-  const vars = buildPromptVars(session.worktree, version);
-  const latestDraft = findLatestDraftPath(vars.specDir);
-  if (!latestDraft || !existsSync16(latestDraft)) {
-    logError(`No spec-draft-N.md found in ${vars.specDir}. Did the TTY write it?`);
-    throw new Error('No spec draft found');
-  }
-  const taskSpecWorktree = vars.spec;
-  copyFileSync5(latestDraft, taskSpecWorktree);
-  const dest = snapshotPath(session.id, version, 'task-spec.md');
-  ensureArtifactDir(dest);
-  copyFileSync5(latestDraft, dest);
-  logOk(`Spec finalized: ${latestDraft.split('/').pop()} \u2192 task-spec.md`);
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'finalize_spec:completed',
-    version,
-  });
-  return 'write_plans';
-}
-
-// src/phases/phase1/write-plans.ts
-init_log();
-import { mkdirSync as mkdirSync18 } from 'fs';
-init_agents();
-init_shared();
-init_format();
-var PLAN_MECHANICS = `## CRITICAL: Plan Draft & Approval Mechanics
-
-### Plan Splitting Rules
-
-Plans MUST be split by domain/feature vertically, NOT by implementation layer/phase.
-
-WRONG: plan-1=add types, plan-2=implement logic, plan-3=write tests
-RIGHT: plan-1=feature-A (types+logic+tests), plan-2=feature-B (types+logic+tests)
-
-Each plan must produce a single working, isolated commit. After each plan completes,
-the codebase must be in a valid, buildable, testable state.
-
-### Draft Files
-
-Plan drafts are stored as subdirectories of the plans directory:
-- First iteration: {plans}/plan-draft-1/plan-1.md, plan-2.md, etc.
-- After feedback: {plans}/plan-draft-2/plan-1.md, plan-2.md, etc.
-- And so on...
-
-NEVER overwrite a previous draft directory. Always increment the ordinal.
-Each draft directory contains the COMPLETE set of plans, NOT a diff or changelog.
-Write the full plans every time, with changes applied inline.
-
-### Approval Protocol
-
-When the user approves the plans, you MUST do these things IN ORDER before exiting:
-1. Write the approval event by running this command:
-   \`kautopilot log-event plans:approved --metadata '{"draft": N}'\`
-   (where N is the final draft ordinal number)
-2. THEN tell the user to /exit
-
-**CRITICAL**: Do NOT tell the user to /exit before writing the approval event.
-If the session crashes or the user Ctrl+C's before the approval event is logged,
-the plans will NOT be considered approved and this step will re-run from scratch.
-
----
-`;
-var PLAN_WRITER_PROMPT = `You are writing imperative implementation plans derived from the approved declarative spec.
-Plans describe HOW to move from the current state to the desired state.
-
-Context:
-- Spec: {spec}
-- Worktree: {worktree}
-- Plans directory: {plans}
-
-## Phase 1: Clarify Vertical Split
-
-Before writing any plans, discuss with the user how to slice the work.
-
-Plans MUST be split by domain/feature (vertical), NOT by implementation layer (horizontal).
-
-WRONG: plan-1=add types, plan-2=implement logic, plan-3=write tests
-RIGHT: plan-1=feature-A (types+logic+tests), plan-2=feature-B (types+logic+tests)
-
-Each plan produces ONE working, isolated commit. After each plan completes, the codebase
-MUST be in a valid, buildable, testable state.
-
-Ask the user: "How should we slice this? Here's what I see as the natural domain boundaries: ..."
-
-## Phase 2: Explore Codebase
-
-For each feature slice, explore:
-- Which files and functions will need to change
-- What existing patterns and abstractions to follow
-- Where tests live and how they're structured
-- Technical constraints not captured in the spec
-
-If the spec asks for something not achievable given the code, FLAG IT to the user.
-The spec may need revision (which would trigger a new epoch).
-
-## Phase 3: Write Plans
-
-Each plan must carry:
-- **ID / Title** \u2014 plan ordinal and descriptive name
-- **Goal** \u2014 what this plan accomplishes (the vertical feature slice)
-- **Scope / Domain** \u2014 which part of the system this touches
-- **Dependencies** \u2014 which plans must complete before this one
-- **Evidence / Proof Requirements** \u2014 how to prove this plan worked
-  (specific test commands, build commands, assertions)
-- **Definition of Done** \u2014 concrete exit criteria
-- **Strategy Hints** \u2014 recommended approach, patterns to follow
-- **Handoff / Replan Guidance** \u2014 what to do if this plan fails or needs rewriting
-- **Delivery Impact** \u2014 if ticket delivery: what ticket-side effects this plan implies
-
-Order plans by dependency \u2014 earlier plans must not depend on later ones.
-
-## Phase 4: Review & Iterate
-
-1. Create a teammate to run \`kautopilot plan-review\` and return the summary
-2. Fix issues, ask user about uncertainties
-3. Write new plan-draft-N/ directory with fixes
-4. Repeat until satisfied`;
-async function handleWritePlans(ctx) {
-  const { session, version } = ctx;
-  const events = readLog(session.id);
-  const approved = events.some(e2 => e2.event === 'plans:approved');
-  if (approved) {
-    logOk('Plans already approved \u2014 skipping write_plans');
-    return 'finalize_plans';
-  }
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'write_plans:started',
-    version,
-    metadata: { stepType: 'tty' },
-  });
-  const vars = buildPromptVars(session.worktree, version);
-  mkdirSync18(vars.plans, { recursive: true });
-  let prompt;
-  const latestDraft = findLatestPlanDraftDir(vars.plans);
-  if (latestDraft) {
-    logInfo(`Resuming from plan-draft-${latestDraft.ordinal}`);
-    const mechanicsResolved = resolvePromptVars(PLAN_MECHANICS, vars);
-    const draftFiles = readPlanDraftFiles(latestDraft.dir);
-    const draftContents = draftFiles.map(
-      f => `### ${f.filename}
-${f.content}`,
-    ).join(`
-
----
-
-`);
-    prompt = `${mechanicsResolved}
-## Resuming: Current Draft is plan-draft-${latestDraft.ordinal}/
-
-You are resuming a plan session. The latest draft is below. Continue from where you left off \u2014 the next draft should be plan-draft-${latestDraft.ordinal + 1}/.
-
----
-${draftContents}
----
-
-${resolvePromptVars(PLAN_WRITER_PROMPT, vars)}`;
-  } else {
-    prompt = resolvePromptVars(PLAN_MECHANICS + PLAN_WRITER_PROMPT, vars);
-  }
-  const binary = getDefaultBinary();
-  writeStepInit(session.id, version, 'write_plans', {
-    prompt,
-    command: `${binary} (TTY handoff)`,
-    type: 'tty_handoff',
-  });
-  console.log(`
-=== Writing Plans v${version} ===`);
-  await spawnTTYWithTurnTracking(session.id, binary, prompt + ttyExitInstruction(session.id), {
-    cwd: session.worktree,
-    worktree: session.worktree,
-  });
-  const postEvents = readLog(session.id);
-  const wasApproved = postEvents.some(e2 => e2.event === 'plans:approved');
-  if (!wasApproved) {
-    logInfo('Plans not approved yet \u2014 will resume on next start');
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'write_plans:interrupted',
-      version,
-    });
-    return null;
-  }
-  logOk('Plans approved');
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'write_plans:completed',
-    version,
-  });
-  return 'finalize_plans';
-}
-
-// src/phases/phase1/finalize-plans.ts
-init_log();
-init_artifacts();
-import { copyFileSync as copyFileSync6, existsSync as existsSync18 } from 'fs';
-import { join as join13 } from 'path';
-init_shared();
 
 // src/core/manifests.ts
 init_artifacts();
-init_shared();
-import {
-  existsSync as existsSync17,
-  readFileSync as readFileSync14,
-  writeFileSync as writeFileSync14,
-  readdirSync as readdirSync6,
-} from 'fs';
 function writeContractManifest(sessionId, version, deliveryKind, planCount) {
   const manifest = {
     version,
@@ -85054,12 +85231,12 @@ function writeContractManifest(sessionId, version, deliveryKind, planCount) {
   };
   const path = snapshotPath(sessionId, version, 'contract.json');
   ensureArtifactDir(path);
-  writeFileSync14(path, JSON.stringify(manifest, null, 2));
+  writeFileSync7(path, JSON.stringify(manifest, null, 2));
 }
 function readContractManifest(sessionId, version) {
   const path = snapshotPath(sessionId, version, 'contract.json');
-  if (!existsSync17(path)) return null;
-  return JSON.parse(readFileSync14(path, 'utf-8'));
+  if (!existsSync11(path)) return null;
+  return JSON.parse(readFileSync10(path, 'utf-8'));
 }
 function supersedEpoch(sessionId, oldVersion, newVersion) {
   const manifest = readContractManifest(sessionId, oldVersion);
@@ -85067,14 +85244,14 @@ function supersedEpoch(sessionId, oldVersion, newVersion) {
     manifest.supersededBy = newVersion;
     manifest.supersededAt = new Date().toISOString();
     const path = snapshotPath(sessionId, oldVersion, 'contract.json');
-    writeFileSync14(path, JSON.stringify(manifest, null, 2));
+    writeFileSync7(path, JSON.stringify(manifest, null, 2));
   }
 }
 function writePlanManifest(sessionId, version) {
   const plansDir = snapshotPath(sessionId, version, 'plans');
   const plans = [];
-  if (existsSync17(plansDir)) {
-    const files = readdirSync6(plansDir);
+  if (existsSync11(plansDir)) {
+    const files = readdirSync4(plansDir);
     const byOrdinal = new Map();
     for (const f of files) {
       const parsed = parsePlanFilename(f);
@@ -85096,13 +85273,13 @@ function writePlanManifest(sessionId, version) {
   const manifest = { plans };
   const path = snapshotPath(sessionId, version, 'plans', 'manifest.json');
   ensureArtifactDir(path);
-  writeFileSync14(path, JSON.stringify(manifest, null, 2));
+  writeFileSync7(path, JSON.stringify(manifest, null, 2));
   return manifest;
 }
 function readPlanManifest(sessionId, version) {
   const path = snapshotPath(sessionId, version, 'plans', 'manifest.json');
-  if (!existsSync17(path)) return null;
-  return JSON.parse(readFileSync14(path, 'utf-8'));
+  if (!existsSync11(path)) return null;
+  return JSON.parse(readFileSync10(path, 'utf-8'));
 }
 function updatePlanManifestEntry(sessionId, version, planOrdinal, completed, commitSha) {
   const manifest = readPlanManifest(sessionId, version);
@@ -85113,3372 +85290,27 @@ function updatePlanManifestEntry(sessionId, version, planOrdinal, completed, com
     if (commitSha) entry.commitSha = commitSha;
   }
   const path = snapshotPath(sessionId, version, 'plans', 'manifest.json');
-  writeFileSync14(path, JSON.stringify(manifest, null, 2));
+  writeFileSync7(path, JSON.stringify(manifest, null, 2));
 }
 function writeDeliveryManifest(sessionId, version, delivery) {
   const path = snapshotPath(sessionId, version, 'delivery.json');
   ensureArtifactDir(path);
-  writeFileSync14(path, JSON.stringify(delivery, null, 2));
+  writeFileSync7(path, JSON.stringify(delivery, null, 2));
 }
 function readDeliveryManifest(sessionId, version) {
   const path = snapshotPath(sessionId, version, 'delivery.json');
-  if (!existsSync17(path)) return null;
-  return JSON.parse(readFileSync14(path, 'utf-8'));
+  if (!existsSync11(path)) return null;
+  return JSON.parse(readFileSync10(path, 'utf-8'));
 }
 function updateDeliveryManifest(sessionId, version, updates) {
-  const existing = readDeliveryManifest(sessionId, version) ?? { kind: 'pr' };
+  const existing = readDeliveryManifest(sessionId, version) ?? {
+    kind: 'pr',
+  };
   Object.assign(existing, updates);
   writeDeliveryManifest(sessionId, version, existing);
 }
 
-// src/phases/phase1/finalize-plans.ts
-init_format();
-async function handleFinalizePlans(ctx) {
-  const { session, version } = ctx;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'finalize_plans:started',
-    version,
-    metadata: { stepType: 'code' },
-  });
-  const vars = buildPromptVars(session.worktree, version);
-  const latestDraft = findLatestPlanDraftDir(vars.plans);
-  const planFiles = latestDraft ? latestDraft.files : discoverPlans(vars.plans);
-  if (planFiles.length === 0) {
-    logError(`No plan files found at ${vars.plans}. Did the TTY write them?`);
-    throw new Error('No plan files written');
-  }
-  const emptyPlans = validatePlanContent(planFiles);
-  if (emptyPlans.length > 0) {
-    logError(`Empty plan files: ${emptyPlans.join(', ')}`);
-    throw new Error('Some plan files are empty');
-  }
-  const sessionPlansDir = snapshotPath(session.id, version, 'plans');
-  ensureArtifactDir(join13(sessionPlansDir, 'placeholder'));
-  for (let i = 0; i < planFiles.length; i++) {
-    const specFilename = `plan-${i + 1}-1.md`;
-    copyFileSync6(planFiles[i], join13(sessionPlansDir, specFilename));
-  }
-  const deliveryKind = ctx.deliveryKind ?? 'pr';
-  writeContractManifest(session.id, version, deliveryKind, planFiles.length);
-  writePlanManifest(session.id, version);
-  writeDeliveryManifest(session.id, version, { kind: deliveryKind });
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'context:updated',
-    metadata: { deliveryKind },
-  });
-  const { $: $2 } = await Promise.resolve(globalThis.Bun);
-  try {
-    const addedFiles = [];
-    for (const f of planFiles) {
-      if (existsSync18(f)) {
-        await $2`git add ${f}`.cwd(session.worktree).quiet();
-        addedFiles.push(f);
-      }
-    }
-    if (addedFiles.length > 0) {
-      const ticketPrefix = session.ticket_id ? `[${session.ticket_id}] ` : '';
-      const commitProc = Bun.spawnSync({
-        cmd: ['git', 'commit', '-m', `${ticketPrefix}spec + plans v${version}`],
-        cwd: session.worktree,
-        stdout: 'pipe',
-        stderr: 'pipe',
-      });
-      if (commitProc.exitCode === 0) {
-        logOk(`Committed spec + ${planFiles.length} plan(s) (v${version})`);
-      } else {
-        const stderr = commitProc.stderr.toString().trim();
-        if (!stderr.includes('nothing to commit')) {
-          logError(`git commit failed: ${stderr}`);
-        }
-      }
-    }
-  } catch (err) {
-    logWarn(`[finalize_plans] Git staging/commit error: ${err}`);
-  }
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'finalize_plans:completed',
-    version,
-    metadata: { planCount: planFiles.length },
-  });
-  return null;
-}
-
-// src/phases/phase1/index.ts
-init_shared();
-var phase1States = {
-  pull_ticket: handlePullTicket,
-  write_spec: handleWriteSpec,
-  finalize_spec: handleFinalizeSpec,
-  write_plans: handleWritePlans,
-  finalize_plans: handleFinalizePlans,
-};
-async function runPhase1(session, config, options2) {
-  loadSessionAgents(session.id);
-  if (session.ticket_id) {
-    runScript(session.id, 'start-ticket', [session.ticket_id]);
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'start_ticket:called',
-      metadata: { ticketId: session.ticket_id },
-    });
-  }
-  const status = ensureStatus(session.id);
-  const phase1HasWork =
-    Object.keys(phase1States).some(s => status.completedSteps.includes(s)) || status.state in phase1States;
-  const version =
-    options2?.versionOverride ?? (status.version === 0 ? 1 : phase1HasWork ? status.version : status.version + 1);
-  const ctx = {
-    session,
-    config,
-    version,
-    attempt: 1,
-    deliveryKind: status.context.deliveryKind,
-  };
-  return runStateMachine('phase1', phase1States, ctx, {
-    terminalStates: ['finalize_plans'],
-    forceStartState: options2?.forceStartState,
-  });
-}
-
-// src/phases/phase2/index.ts
-init_status();
-init_shared();
-init_agents();
-
-// src/phases/phase2/clear-loop.ts
-init_log();
-
-// src/core/devloop.ts
-init_artifacts();
-init_agents();
-import { mkdirSync as mkdirSync19, writeFileSync as writeFileSync15 } from 'fs';
-import { join as join14 } from 'path';
-function devloopInit(workspace, specPath, configPath2) {
-  const args = ['kloop', 'init', '--workspace', workspace, '--spec', specPath];
-  if (configPath2) {
-    args.push('--config', configPath2);
-  }
-  const proc = Bun.spawnSync({
-    cmd: args,
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  if (proc.exitCode !== 0) {
-    const stderr = proc.stderr.toString().trim();
-    throw new Error(`kloop init failed (exit ${proc.exitCode}): ${stderr}`);
-  }
-  const stdout = proc.stdout.toString();
-  const match = stdout.match(/Run ID:\s+(\S+)/);
-  if (!match) {
-    throw new Error(`Could not parse kloop run ID from output: ${stdout}`);
-  }
-  return match[1];
-}
-function writeKloopSpec(kautopilotSessionId, content, name = 'kloop-spec.md') {
-  const dir = join14(sessionDir(kautopilotSessionId), 'tmp');
-  mkdirSync19(dir, { recursive: true });
-  const specPath = join14(dir, name);
-  writeFileSync15(specPath, content);
-  return specPath;
-}
-function writeKloopConfig(kautopilotSessionId, config) {
-  const dir = join14(sessionDir(kautopilotSessionId), 'tmp');
-  mkdirSync19(dir, { recursive: true });
-  const configPath2 = join14(dir, 'kloop-config.yaml');
-  const binary = getDefaultBinary();
-  const yaml = [
-    '# kloop config generated by kautopilot',
-    'implementers:',
-    `  ${binary}: 1`,
-    '',
-    'reviewPhases:',
-    `  - - ${binary}`,
-    '',
-    `maxIterations: ${config.maxIterations ?? 10}`,
-    `implementerTimeout: ${config.implementerTimeout ?? 30}`,
-    `reviewerTimeout: ${config.reviewerTimeout ?? 15}`,
-    'conflictCheckThreshold: 2',
-    'firstLoopFullReview: false',
-    'previousReviewPropagation: 0',
-    'reviewerFailureLimit: 2',
-  ].join(`
-`);
-  writeFileSync15(configPath2, yaml);
-  return configPath2;
-}
-async function devloopRun(kloopRunId, timeoutMs) {
-  const proc = Bun.spawn({
-    cmd: ['kloop', 'run', kloopRunId],
-    stdout: 'inherit',
-    stderr: 'inherit',
-  });
-  const timeout = timeoutMs ?? 600000;
-  const exitCode = await Promise.race([
-    proc.exited,
-    new Promise(resolve =>
-      setTimeout(() => {
-        proc.kill();
-        resolve(-1);
-      }, timeout),
-    ),
-  ]);
-  let status;
-  if (exitCode === 0) {
-    const postStatus = devloopGetStatus(kloopRunId);
-    status = postStatus.status;
-  } else if (exitCode === 2) {
-    status = 'conflict';
-  } else {
-    status = 'crash';
-  }
-  return { exitCode, status, runId: kloopRunId };
-}
-function devloopGetStatus(kloopRunId) {
-  try {
-    const proc = Bun.spawnSync({
-      cmd: ['kloop', 'status', kloopRunId, '--json'],
-      stdout: 'pipe',
-      stderr: 'pipe',
-    });
-    if (proc.exitCode === 0) {
-      const output = proc.stdout.toString().trim();
-      const data = JSON.parse(output);
-      if (data.exitReason === 'max_iterations' || data.exitReason === 'max_situations') {
-        return { status: 'max_situations' };
-      }
-      return { status: 'completed' };
-    }
-  } catch {}
-  return { status: 'completed' };
-}
-function devloopDescribe(kloopRunId) {
-  try {
-    const proc = Bun.spawnSync({
-      cmd: ['kloop', 'describe', kloopRunId],
-      stdout: 'pipe',
-      stderr: 'pipe',
-    });
-    if (proc.exitCode === 0) {
-      return proc.stdout.toString().trim();
-    }
-    return `(kloop describe failed: exit ${proc.exitCode})`;
-  } catch {
-    return '(kloop describe unavailable)';
-  }
-}
-function devloopStatus(kloopRunId) {
-  try {
-    const proc = Bun.spawnSync({
-      cmd: ['kloop', 'status', kloopRunId, '--json'],
-      stdout: 'pipe',
-      stderr: 'pipe',
-    });
-    if (proc.exitCode === 0) {
-      const output = proc.stdout.toString().trim();
-      const data = JSON.parse(output);
-      return {
-        running: data.status === 'running',
-        lastStatus: data.status,
-        exitReason: data.exitReason,
-      };
-    }
-    return { running: false };
-  } catch {
-    return { running: false };
-  }
-}
-function devloopCancel(kloopRunId) {
-  try {
-    const proc = Bun.spawnSync({
-      cmd: ['kloop', 'cancel', kloopRunId],
-      stdout: 'inherit',
-      stderr: 'inherit',
-    });
-    return proc.exitCode === 0;
-  } catch {
-    return false;
-  }
-}
-
-// src/phases/phase2/clear-loop.ts
-async function handleClearLoop(ctx) {
-  const { session, version, planIndex } = ctx;
-  const planName = `plan-${planIndex + 1}`;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'clear_loop:started',
-    version,
-    plan: planName,
-    metadata: { stepType: 'code', planIndex },
-  });
-  let runWasActive = false;
-  if (ctx.kloopRunId) {
-    const status = devloopStatus(ctx.kloopRunId);
-    if (status.running) {
-      console.log(`[clear_loop] kloop run ${ctx.kloopRunId} is active, canceling...`);
-      devloopCancel(ctx.kloopRunId);
-      runWasActive = true;
-    }
-    ctx.kloopRunId = undefined;
-  }
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'clear_loop:completed',
-    version,
-    plan: planName,
-    metadata: { runWasActive },
-  });
-  return 'setup_run';
-}
-
-// src/phases/phase2/setup-run.ts
-init_log();
-import { existsSync as existsSync19, readFileSync as readFileSync15 } from 'fs';
-init_shared();
-init_artifacts();
-async function handleSetupRun(ctx) {
-  const { session, version, planIndex, firstRun } = ctx;
-  const planName = `plan-${planIndex + 1}`;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'setup_run:started',
-    version,
-    plan: planName,
-    metadata: { stepType: 'code', firstRun },
-  });
-  const sessionPlansDir = snapshotPath(session.id, version, 'plans');
-  const plans = resolveActivePlans(sessionPlansDir);
-  if (plans.length === 0) {
-    throw new Error(`No plan files found for ${ctx.ticketId}`);
-  }
-  const planPath = plans[planIndex];
-  if (!planPath || !existsSync19(planPath)) {
-    throw new Error(`Plan file not found for plan index ${planIndex}`);
-  }
-  const planContent = readFileSync15(planPath, 'utf-8');
-  const specPath = writeKloopSpec(session.id, planContent, `plan-${planIndex + 1}-spec.md`);
-  const configPath2 = writeKloopConfig(session.id, {
-    maxIterations: ctx.config.kloop.maxIterations,
-    implementerTimeout: ctx.config.kloop.implementerTimeout,
-    reviewerTimeout: ctx.config.kloop.reviewerTimeout,
-  });
-  console.log(`[setup_run] Initializing kloop run for ${planName}...`);
-  const kloopRunId = devloopInit(session.worktree, specPath, configPath2);
-  ctx.kloopRunId = kloopRunId;
-  console.log(`[setup_run] kloop run initialized: ${kloopRunId}`);
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'setup_run:completed',
-    version,
-    plan: planName,
-    metadata: { kloopRunId },
-  });
-  return 'running';
-}
-
-// src/phases/phase2/running.ts
-init_log();
-var MAX_CRASH_RETRIES = 2;
-async function handleRunning(ctx) {
-  const { session, version, planIndex, attempt } = ctx;
-  const planName = `plan-${planIndex + 1}`;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'running:started',
-    version,
-    plan: planName,
-    attempt,
-    metadata: { stepType: 'code' },
-  });
-  if (!ctx.kloopRunId) {
-    throw new Error('No kloop run ID \u2014 setup_run must run first');
-  }
-  console.log(`[running] Executing kloop run ${ctx.kloopRunId} for ${planName}, attempt ${attempt}`);
-  const result = await devloopRun(ctx.kloopRunId);
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'running:completed',
-    version,
-    plan: planName,
-    attempt,
-    metadata: {
-      stepType: 'code',
-      exitCode: result.exitCode,
-      status: result.status,
-      runId: result.runId,
-    },
-  });
-  switch (result.status) {
-    case 'completed':
-      return 'commit';
-    case 'conflict':
-    case 'max_situations':
-      return 'resolve';
-    case 'crash':
-      ctx.crashRetryCount = (ctx.crashRetryCount ?? 0) + 1;
-      if (ctx.crashRetryCount <= MAX_CRASH_RETRIES) {
-        console.log(`[running] Crash detected \u2014 retrying (${ctx.crashRetryCount}/${MAX_CRASH_RETRIES})`);
-        appendEvent(session.id, {
-          ts: new Date().toISOString(),
-          event: 'crash:retry',
-          version,
-          plan: planName,
-          metadata: { crashRetryCount: ctx.crashRetryCount, maxRetries: MAX_CRASH_RETRIES },
-        });
-        return 'setup_run';
-      }
-      console.log(`[running] Crash retries exhausted (${MAX_CRASH_RETRIES}) \u2014 failing`);
-      return 'failed';
-  }
-}
-
-// src/phases/phase2/resolve.ts
-init_log();
-init_artifacts();
-import { existsSync as existsSync20, readFileSync as readFileSync16 } from 'fs';
-init_shared();
-init_agents();
-async function handleResolve(ctx) {
-  const { session, version, planIndex, attempt } = ctx;
-  const planName = `plan-${planIndex + 1}`;
-  const reason = attempt > 1 ? 'retry' : 'conflict';
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'resolve:started',
-    version,
-    plan: planName,
-    attempt,
-    metadata: { stepType: 'tty', reason },
-  });
-  let kloopDescribeOutput = '';
-  if (ctx.kloopRunId) {
-    kloopDescribeOutput = devloopDescribe(ctx.kloopRunId);
-  }
-  const { resolveActivePlans: resolveActivePlans2 } = await Promise.resolve().then(
-    () => (init_shared(), exports_shared),
-  );
-  const { snapshotPath: snapPath } = await Promise.resolve().then(() => (init_artifacts(), exports_artifacts));
-  const { readFileSync: readFile } = await import('fs');
-  const activePlans = resolveActivePlans2(snapPath(session.id, version, 'plans'));
-  const activePlanPath = activePlans[planIndex];
-  const planContent =
-    activePlanPath && existsSync20(activePlanPath)
-      ? readFile(activePlanPath, 'utf-8')
-      : resolveSpec(session.id, version, `plans/plan-${planIndex + 1}-1.md`);
-  const taskSpecContent = resolveSpec(session.id, version);
-  const resolvePrompt = loadPromptTemplate('phase2', 'resolve', {
-    plan: planName,
-    spec: planContent,
-    taskSpec: taskSpecContent,
-    reason,
-    attempt: String(attempt),
-  });
-  const fullPrompt = `${resolvePrompt}
-
-## Loop Evidence (from kloop describe)
-${kloopDescribeOutput || '(no evidence available)'}
-
-## Rewrite Decision Required
-
-After analysis, you MUST write your resolution AND your rewrite decision to the resolution file.
-
-At the END of your resolution, add a line exactly like:
-\`\`\`
-REWRITE_DECISION: <decision>
-\`\`\`
-
-Where <decision> is one of:
-- refine_local \u2014 fix only the current plan procedure
-- patch_downstream \u2014 patch remaining downstream plans
-- regenerate_remaining \u2014 regenerate all remaining plans from scratch
-- revisit_spec \u2014 the declarative contract itself is wrong (creates new epoch vN+1)
-`;
-  const resolutionPath = `${sessionDir(session.id)}/tmp/resolution.md`;
-  const binary = getAgentBinary('phase2', 'resolve');
-  writeStepInit(session.id, version, 'resolve', {
-    prompt: fullPrompt,
-    command: `${binary} (TTY handoff)`,
-    type: 'tty_handoff',
-  });
-  console.log(`
-=== Resolving ${planName} (${reason}) ===`);
-  console.log(`Discuss the issue with Claude. When resolved, write your approach to ${resolutionPath}`);
-  console.log(`Include REWRITE_DECISION: <refine_local|patch_downstream|regenerate_remaining|revisit_spec>
-`);
-  await spawnTTYWithTurnTracking(session.id, binary, fullPrompt + TTY_EXIT_INSTRUCTION, {
-    cwd: session.worktree,
-    worktree: session.worktree,
-  });
-  let resolution = '';
-  let rewriteDecision = 'refine_local';
-  if (existsSync20(resolutionPath)) {
-    resolution = readFileSync16(resolutionPath, 'utf-8');
-    const decisionMatch = resolution.match(
-      /REWRITE_DECISION:\s*(refine_local|patch_downstream|regenerate_remaining|revisit_spec)/i,
-    );
-    if (decisionMatch) {
-      rewriteDecision = decisionMatch[1].toLowerCase();
-    }
-  }
-  ctx.lastRewriteDecision = rewriteDecision;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'resolve:completed',
-    version,
-    plan: planName,
-    attempt,
-    metadata: {
-      kloopDescribeAvailable: !!kloopDescribeOutput,
-      rewriteDecision,
-      reason,
-      resolution,
-    },
-  });
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'context:updated',
-    metadata: { rewriteDecision },
-  });
-  if (rewriteDecision === 'revisit_spec') {
-    console.log(`[resolve] Decision: revisit_spec \u2014 escalating to new epoch`);
-    return 'failed';
-  }
-  return 'rewrite_spec';
-}
-
-// src/phases/phase2/rewrite-spec.ts
-init_log();
-import {
-  existsSync as existsSync21,
-  readFileSync as readFileSync17,
-  writeFileSync as writeFileSync16,
-  readdirSync as readdirSync7,
-} from 'fs';
-import { join as join15 } from 'path';
-init_artifacts();
-init_spawn();
-init_shared();
-init_agents();
-function getRewriteTargets(plansDir, currentPlanIndex, decision) {
-  const filenames = readdirSync7(plansDir).filter(
-    name => /^plan-\d+-\d+\.md$/.test(name) || /^plan-\d+\.md$/.test(name),
-  );
-  const ordinals = Array.from(
-    new Set(
-      filenames
-        .map(name => name.match(/^plan-(\d+)(?:-\d+)?\.md$/)?.[1])
-        .filter(value => !!value)
-        .map(value => parseInt(value, 10)),
-    ),
-  ).sort((a, b3) => a - b3);
-  if (decision === 'patch_downstream' || decision === 'regenerate_remaining') {
-    return ordinals.filter(ordinal => ordinal - 1 >= currentPlanIndex);
-  }
-  return [currentPlanIndex + 1];
-}
-function nextRewriteNumber(plansDir, ordinal) {
-  const filenames = readdirSync7(plansDir);
-  let maxRewrite = 0;
-  for (const filename of filenames) {
-    const match = filename.match(new RegExp(`^plan-${ordinal}(?:-(\\d+))?\\.md$`));
-    if (!match) continue;
-    const rewrite = match[1] ? parseInt(match[1], 10) : 1;
-    maxRewrite = Math.max(maxRewrite, rewrite);
-  }
-  return maxRewrite + 1;
-}
-async function handleRewriteSpec(ctx) {
-  const { session, version, planIndex, attempt } = ctx;
-  const planName = `plan-${planIndex + 1}`;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'rewrite_spec:started',
-    version,
-    plan: planName,
-    attempt,
-    metadata: { stepType: 'llm' },
-  });
-  const resolutionPath = `${sessionDir(session.id)}/tmp/resolution.md`;
-  const resolution = existsSync21(resolutionPath) ? readFileSync17(resolutionPath, 'utf-8') : '';
-  const plansDir = snapshotPath(session.id, version, 'plans');
-  const currentPlanCandidates = readdirSync7(plansDir)
-    .filter(name => new RegExp(`^plan-${planIndex + 1}(?:-\\d+)?\\.md$`).test(name))
-    .sort();
-  const activePlanPath =
-    currentPlanCandidates.length > 0
-      ? join15(plansDir, currentPlanCandidates[currentPlanCandidates.length - 1])
-      : snapshotPath(session.id, version, `plans/plan-${planIndex + 1}-1.md`);
-  const planContent = existsSync21(activePlanPath)
-    ? readFileSync17(activePlanPath, 'utf-8')
-    : resolveSpec(session.id, version, `plans/plan-${planIndex + 1}-1.md`);
-  const taskSpecContent = resolveSpec(session.id, version);
-  const rewriteInstruction = getAgentPrompt('phase2', 'rewrite_spec');
-  const rewritePrompt = `
-${rewriteInstruction}
-
-RESOLUTION:
-${resolution}
-
-CURRENT SPEC:
-${planContent}
-
-TASK SPEC:
-${taskSpecContent}
-`.trim();
-  const binary = getAgentBinary('phase2', 'rewrite_spec');
-  writeStepInit(session.id, version, 'rewrite_spec', {
-    prompt: rewritePrompt,
-    command: `${binary} --print (LLM print)`,
-    type: 'llm_print',
-  });
-  const rewriteDecision = ctx.lastRewriteDecision ?? 'refine_local';
-  const rewriteTargets = getRewriteTargets(plansDir, planIndex, rewriteDecision);
-  const rewrittenPlans = [];
-  for (const ordinal of rewriteTargets) {
-    const targetPlanPath = snapshotPath(
-      session.id,
-      version,
-      `plans/plan-${ordinal}-${ordinal === planIndex + 1 ? attempt : 1}.md`,
-    );
-    const targetPlanContent = existsSync21(targetPlanPath)
-      ? readFileSync17(targetPlanPath, 'utf-8')
-      : resolveSpec(session.id, version, `plans/plan-${ordinal}-1.md`);
-    const targetPrompt = `
-${rewriteInstruction}
-
-REWRITE DECISION:
-${rewriteDecision}
-
-TARGET PLAN: plan-${ordinal}
-
-RESOLUTION:
-${resolution}
-
-CURRENT SPEC:
-${targetPlanContent}
-
-TASK SPEC:
-${taskSpecContent}
-`.trim();
-    const rewrittenPlan = await spawnPrintRaw(binary, targetPrompt, {
-      cwd: session.worktree,
-      timeout: 60,
-      sessionId: session.id,
-      label: `rewrite-spec-plan-${ordinal}`,
-    });
-    const rewriteFilename = `plan-${ordinal}-${nextRewriteNumber(plansDir, ordinal)}.md`;
-    const rewritePath = join15(plansDir, rewriteFilename);
-    ensureArtifactDir(rewritePath);
-    writeFileSync16(rewritePath, rewrittenPlan);
-    rewrittenPlans.push(rewriteFilename);
-  }
-  writePlanManifest(session.id, version);
-  const activeRewriteFilename = rewrittenPlans[0] ?? `plan-${planIndex + 1}-${attempt + 1}.md`;
-  const activeRewritePath = join15(plansDir, activeRewriteFilename);
-  const rewrittenActivePlan = readFileSync17(activeRewritePath, 'utf-8');
-  const specPath = writeKloopSpec(session.id, rewrittenActivePlan, `plan-${planIndex + 1}-rewrite-${attempt}.md`);
-  const configPath2 = writeKloopConfig(session.id, {
-    maxIterations: ctx.config.kloop.maxIterations,
-    implementerTimeout: ctx.config.kloop.implementerTimeout,
-    reviewerTimeout: ctx.config.kloop.reviewerTimeout,
-  });
-  const kloopRunId = devloopInit(session.worktree, specPath, configPath2);
-  ctx.kloopRunId = kloopRunId;
-  console.log(`[rewrite_spec] New kloop run initialized: ${kloopRunId}`);
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'rewrite_spec:completed',
-    version,
-    plan: planName,
-    attempt,
-    metadata: { kloopRunId, rewriteDecision, rewrittenPlans },
-  });
-  ctx.attempt += 1;
-  return 'running';
-}
-
-// src/phases/phase2/commit.ts
-init_shared();
-init_log();
-init_spawn();
-import { existsSync as existsSync22, readFileSync as readFileSync18 } from 'fs';
-init_agents();
-async function handleCommit(ctx) {
-  const { session, version, planIndex } = ctx;
-  const planName = `plan-${planIndex + 1}`;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'commit:started',
-    version,
-    plan: planName,
-    metadata: { stepType: 'llm' },
-  });
-  const { $: $2 } = await Promise.resolve(globalThis.Bun);
-  let commitLog = '';
-  try {
-    const result = await $2`git log --oneline -10`.cwd(session.worktree).quiet().text();
-    commitLog = result;
-  } catch {
-    commitLog = '';
-  }
-  const conventionFiles = [
-    'CommitConventions.md',
-    'CONTRIBUTING.md',
-    '.commitlintrc',
-    '.commitlintrc.js',
-    '.commitlintrc.json',
-  ];
-  let conventions = '';
-  for (const f of conventionFiles) {
-    const path = `${session.worktree}/${f}`;
-    if (existsSync22(path)) {
-      conventions += `
-### ${f}
-${readFileSync18(path, 'utf-8')}
-`;
-    }
-  }
-  const { resolveActivePlans: resolveActivePlans2 } = await Promise.resolve().then(
-    () => (init_shared(), exports_shared),
-  );
-  const { snapshotPath: snapPath } = await Promise.resolve().then(() => (init_artifacts(), exports_artifacts));
-  const activePlans = resolveActivePlans2(snapPath(session.id, version, 'plans'));
-  const activePlanPath = activePlans[planIndex];
-  const planContent =
-    activePlanPath && existsSync22(activePlanPath)
-      ? readFileSync18(activePlanPath, 'utf-8')
-      : resolveSpec(session.id, version, `plans/plan-${planIndex + 1}-1.md`);
-  const commitInstruction = getAgentPrompt('phase2', 'commit');
-  const commitPrompt = `
-${commitInstruction}
-
-Recent commits:
-${commitLog}
-
-Conventions:
-${conventions || '(no convention files found)'}
-
-Plan:
-${planContent}
-
-Output ONLY the commit message (first line = title, blank line, body if needed).
-`.trim();
-  const binary = getAgentBinary('phase2', 'commit');
-  writeStepInit(session.id, version, 'commit', {
-    prompt: commitPrompt,
-    command: `${binary} --print (LLM print)`,
-    type: 'llm_print',
-  });
-  const commitMessage = await spawnPrintRaw(binary, commitPrompt, {
-    cwd: session.worktree,
-    timeout: 30,
-    sessionId: session.id,
-    label: 'commit',
-  });
-  let commitSha = '';
-  try {
-    const diffResult = await $2`git diff --name-only`.cwd(session.worktree).quiet().text();
-    const changedFiles = diffResult
-      .trim()
-      .split(
-        `
-`,
-      )
-      .filter(f => f.length > 0);
-    const untrackedResult = await $2`git ls-files --others --exclude-standard`.cwd(session.worktree).quiet().text();
-    const untrackedFiles = untrackedResult
-      .trim()
-      .split(
-        `
-`,
-      )
-      .filter(f => f.length > 0);
-    const allFiles = [...changedFiles, ...untrackedFiles];
-    if (allFiles.length > 0) {
-      for (const file of allFiles) {
-        await $2`git add ${file}`.cwd(session.worktree).quiet();
-      }
-      await $2`git commit -m ${commitMessage}`.cwd(session.worktree).quiet();
-      const shaResult = await $2`git rev-parse HEAD`.cwd(session.worktree).quiet().text();
-      commitSha = shaResult.trim();
-      console.log(
-        `[commit] Committed: ${
-          commitMessage.split(`
-`)[0]
-        } (${commitSha.slice(0, 7)})`,
-      );
-      updatePlanManifestEntry(session.id, version, planIndex + 1, true, commitSha);
-    } else {
-      console.log('[commit] No changes to commit');
-    }
-  } catch (err) {
-    console.warn('[commit] Git commit failed:', err);
-  }
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'commit:completed',
-    version,
-    plan: planName,
-    metadata: {
-      commitSha,
-      commitMessage: commitMessage.split(`
-`)[0],
-    },
-  });
-  return 'next_plan';
-}
-
-// src/phases/phase2/next-plan.ts
-init_log();
-async function handleNextPlan(ctx) {
-  const { session, version, planIndex, maxPlans } = ctx;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'next_plan:started',
-    version,
-    metadata: { stepType: 'code' },
-  });
-  const fromPlan = `plan-${planIndex + 1}`;
-  ctx.planIndex += 1;
-  const toPlan = ctx.planIndex < maxPlans ? `plan-${ctx.planIndex + 1}` : 'done';
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'context:updated',
-    metadata: { planIndex: ctx.planIndex, maxPlans },
-  });
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'next_plan:completed',
-    version,
-    metadata: { from: fromPlan, to: toPlan },
-  });
-  if (ctx.planIndex < maxPlans) {
-    ctx.firstRun = false;
-    ctx.attempt = 1;
-    return 'clear_loop';
-  }
-  return 'completed';
-}
-
-// src/phases/phase2/completed.ts
-init_log();
-async function handleCompleted(ctx) {
-  const { session, version } = ctx;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'phase2:completed',
-    version,
-  });
-  console.log('[Phase 2] All plans completed');
-  return null;
-}
-
-// src/phases/phase2/failed.ts
-init_log();
-init_inquirer();
-async function handleFailed(ctx) {
-  const { session, version, planIndex, attempt } = ctx;
-  const planName = `plan-${planIndex + 1}`;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'phase2:failed',
-    version,
-    plan: planName,
-    attempt,
-  });
-  console.error(`[Phase 2] Failed on ${planName} (attempt ${attempt})`);
-  const retry = await confirmAction('Retry from current plan?');
-  if (retry) {
-    ctx.attempt = 1;
-    return 'clear_loop';
-  }
-  console.log('[Phase 2] Aborting. Use `kautopilot start --phase impl:clear_loop` to retry.');
-  return null;
-}
-
-// src/phases/phase2/index.ts
-var phase2States = {
-  clear_loop: handleClearLoop,
-  setup_run: handleSetupRun,
-  running: handleRunning,
-  resolve: handleResolve,
-  rewrite_spec: handleRewriteSpec,
-  commit: handleCommit,
-  next_plan: handleNextPlan,
-  completed: handleCompleted,
-  failed: handleFailed,
-};
-async function runPhase2(session, config, options2) {
-  loadSessionAgents(session.id);
-  const status = ensureStatus(session.id);
-  const version = status.version;
-  const planFiles = resolvePlans(session.id, version);
-  const maxPlans = planFiles.length;
-  if (maxPlans === 0) {
-    throw new Error('No plan files found. Run Phase 1 first.');
-  }
-  const planIndex = status.context.planIndex ?? 0;
-  const firstRun = status.completedPlans.length === 0 && status.completedSteps.length === 0;
-  const ctx = {
-    session,
-    config,
-    version,
-    attempt: status.context.attempt ?? 1,
-    ticketId: session.ticket_id || 'unknown',
-    deliveryKind: status.context.deliveryKind ?? 'pr',
-    planIndex,
-    maxPlans,
-    firstRun,
-  };
-  return runStateMachine('phase2', phase2States, ctx, {
-    terminalStates: ['completed', 'failed'],
-    forceStartState: options2?.forceStartState,
-  });
-}
-
-// src/phases/phase3/index.ts
-init_status();
-init_agents();
-
-// src/phases/phase3/commit-pending.ts
-init_log();
-init_spawn();
-import { existsSync as existsSync23, readFileSync as readFileSync19 } from 'fs';
-init_agents();
-async function handleCommitPending(ctx) {
-  const { session, version } = ctx;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'commit_pending:started',
-    version,
-    metadata: { stepType: 'code' },
-  });
-  const { $: $2 } = await Promise.resolve(globalThis.Bun);
-  const diffResult = await $2`git diff --name-only`.cwd(session.worktree).quiet().text();
-  const untrackedResult = await $2`git ls-files --others --exclude-standard`.cwd(session.worktree).quiet().text();
-  const allFiles = [
-    ...diffResult
-      .trim()
-      .split(
-        `
-`,
-      )
-      .filter(f => f.length > 0),
-    ...untrackedResult
-      .trim()
-      .split(
-        `
-`,
-      )
-      .filter(f => f.length > 0),
-  ];
-  if (allFiles.length === 0) {
-    console.log('[commit_pending] No uncommitted changes \u2014 skipping');
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'commit_pending:completed',
-      version,
-      metadata: { skipped: true },
-    });
-    return 'prereview';
-  }
-  let commitLog = '';
-  try {
-    commitLog = await $2`git log --oneline -10`.cwd(session.worktree).quiet().text();
-  } catch {
-    commitLog = '';
-  }
-  const conventionFiles = [
-    'CommitConventions.md',
-    'CONTRIBUTING.md',
-    '.commitlintrc',
-    '.commitlintrc.js',
-    '.commitlintrc.json',
-  ];
-  let conventions = '';
-  for (const f of conventionFiles) {
-    const path = `${session.worktree}/${f}`;
-    if (existsSync23(path)) {
-      conventions += `
-### ${f}
-${readFileSync19(path, 'utf-8')}
-`;
-    }
-  }
-  const diffContent = await $2`git diff --stat`.cwd(session.worktree).quiet().text();
-  const commitPendingInstruction = getAgentPrompt('phase3', 'commit_pending');
-  const prompt = `
-${commitPendingInstruction}
-
-Recent commits:
-${commitLog}
-
-Conventions:
-${conventions || '(no convention files found)'}
-
-Changed files summary:
-${diffContent}
-
-Output ONLY the commit message (first line = title, blank line, body if needed).
-`.trim();
-  const binary = getAgentBinary('phase3', 'commit_pending');
-  writeStepInit(session.id, version, 'commit_pending', {
-    prompt,
-    command: `${binary} --print (LLM print)`,
-    type: 'llm_print',
-  });
-  const commitMessage = await spawnPrintRaw(binary, prompt, {
-    cwd: session.worktree,
-    timeout: 30,
-    sessionId: session.id,
-    label: 'commit-pending',
-  });
-  let commitSha = '';
-  try {
-    for (const file of allFiles) {
-      await $2`git add ${file}`.cwd(session.worktree).quiet();
-    }
-    await $2`git commit -m ${commitMessage}`.cwd(session.worktree).quiet();
-    const shaResult = await $2`git rev-parse HEAD`.cwd(session.worktree).quiet().text();
-    commitSha = shaResult.trim();
-    console.log(
-      `[commit_pending] Committed: ${
-        commitMessage.split(`
-`)[0]
-      } (${commitSha.slice(0, 7)})`,
-    );
-  } catch (err) {
-    console.warn('[commit_pending] Git commit failed:', err);
-  }
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'commit_pending:completed',
-    version,
-    metadata: {
-      commitSha,
-      commitMessage: commitMessage.split(`
-`)[0],
-      filesStaged: allFiles.length,
-    },
-  });
-  return 'prereview';
-}
-
-// src/phases/phase3/prereview.ts
-init_log();
-init_spawn();
-var { spawn: spawn3 } = globalThis.Bun;
-init_agents();
-async function handlePrereview(ctx) {
-  const { session, version, config } = ctx;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'prereview:started',
-    version,
-    metadata: { stepType: 'llm' },
-  });
-  const prereviewEnabled = config.agents.phase3?.prereview_classify !== undefined;
-  if (!prereviewEnabled) {
-    console.log('[prereview] Prereview disabled in config \u2014 skipping');
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'prereview:completed',
-      version,
-      metadata: { skipped: true },
-    });
-    return 'push';
-  }
-  let coderabbitAvailable = false;
-  try {
-    const whichProc = spawn3({
-      cmd: ['which', 'coderabbit'],
-      stdout: 'pipe',
-      stderr: 'pipe',
-    });
-    const exitCode = await whichProc.exited;
-    coderabbitAvailable = exitCode === 0;
-  } catch {
-    coderabbitAvailable = false;
-  }
-  if (!coderabbitAvailable) {
-    console.log('[prereview] CodeRabbit not installed \u2014 skipping');
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'prereview:completed',
-      version,
-      metadata: { skipped: true, reason: 'coderabbit_not_installed' },
-    });
-    return 'push';
-  }
-  console.log('[prereview] Running CodeRabbit local review...');
-  let reviewOutput = '';
-  try {
-    const proc = spawn3({
-      cmd: ['coderabbit', 'review', '--plain', '--base', ctx.baseBranch],
-      cwd: session.worktree,
-      stdout: 'pipe',
-      stderr: 'pipe',
-    });
-    const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-    await proc.exited;
-    reviewOutput = stdout.trim();
-    if (stderr) console.error(`[prereview] CodeRabbit stderr: ${stderr.slice(0, 500)}`);
-  } catch (err) {
-    console.warn('[prereview] CodeRabbit failed:', err);
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'prereview:completed',
-      version,
-      metadata: {
-        skipped: true,
-        reason: 'coderabbit_error',
-        error: err instanceof Error ? err.message : String(err),
-      },
-    });
-    return 'push';
-  }
-  if (!reviewOutput) {
-    console.log('[prereview] CodeRabbit returned no findings');
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'prereview:completed',
-      version,
-      metadata: { skipped: true, reason: 'no_findings' },
-    });
-    return 'push';
-  }
-  const classifyInstruction = getAgentPrompt('phase3', 'prereview_classify');
-  const classifyPrompt = `
-${classifyInstruction}
-
-CodeRabbit findings:
-${reviewOutput}
-
-For each finding, decide:
-- "fix": True positive issue that should be fixed now
-- "comment": Valid concern but doesn't need code change
-- "ignore": False positive or not applicable
-
-Output a JSON array of objects with: action, file, description, fix (for "fix" items, provide the fix instructions).
-`.trim();
-  const classifyBinary = getAgentBinary('phase3', 'prereview_classify');
-  writeStepInit(session.id, version, 'prereview', {
-    prompt: classifyPrompt,
-    command: `${classifyBinary} --print (LLM print) + coderabbit review`,
-    type: 'llm_print',
-  });
-  let findings = [];
-  try {
-    findings = await spawnPrint(classifyBinary, classifyPrompt, {
-      cwd: session.worktree,
-      timeout: 60,
-      sessionId: session.id,
-      label: 'prereview-classify',
-    });
-  } catch (err) {
-    console.warn('[prereview] LLM classification failed:', err);
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'prereview:completed',
-      version,
-      metadata: { skipped: true, reason: 'llm_classification_failed' },
-    });
-    return 'push';
-  }
-  const fixes = findings.filter(f => f.action === 'fix');
-  if (fixes.length === 0) {
-    console.log(`[prereview] No actionable fixes (${findings.length} findings, all comments/ignored)`);
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'prereview:completed',
-      version,
-      metadata: {
-        totalFindings: findings.length,
-        fixesApplied: 0,
-      },
-    });
-    return 'push';
-  }
-  const fixInstruction = getAgentPrompt('phase3', 'prereview_fix');
-  const fixPrompt = `
-${fixInstruction}
-
-${fixes.map(
-  (f, i) => `## Fix ${i + 1}: ${f.file}
-${f.description}
-Fix: ${f.fix || 'determine appropriate fix'}`,
-).join(`
-
-`)}
-`.trim();
-  try {
-    const exitCode = await spawnPrintRaw(getAgentBinary('phase3', 'prereview_fix'), fixPrompt, {
-      cwd: session.worktree,
-      timeout: 120,
-      sessionId: session.id,
-      label: 'prereview-fix',
-    });
-    console.log(`[prereview] Applied ${fixes.length} fixes`);
-  } catch (err) {
-    console.warn('[prereview] Fix application failed:', err);
-  }
-  const { $: $2 } = await Promise.resolve(globalThis.Bun);
-  try {
-    const diffResult = await $2`git diff --name-only`.cwd(session.worktree).quiet().text();
-    const changedFiles = diffResult
-      .trim()
-      .split(
-        `
-`,
-      )
-      .filter(f => f.length > 0);
-    if (changedFiles.length > 0) {
-      const commitMsg = await spawnPrintRaw(
-        getAgentBinary('phase3', 'commit_pending'),
-        'Generate a short commit message for CodeRabbit fixes. Output only the message.',
-        {
-          cwd: session.worktree,
-          timeout: 15,
-          sessionId: session.id,
-          label: 'prereview-commit',
-        },
-      );
-      for (const file of changedFiles) {
-        await $2`git add ${file}`.cwd(session.worktree).quiet();
-      }
-      await $2`git commit -m ${commitMsg}`.cwd(session.worktree).quiet();
-      console.log('[prereview] Committed prereview fixes');
-    }
-  } catch (err) {
-    console.warn('[prereview] Failed to commit fixes:', err);
-  }
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'prereview:completed',
-    version,
-    metadata: {
-      totalFindings: findings.length,
-      fixesApplied: fixes.length,
-    },
-  });
-  return 'push';
-}
-
-// src/phases/phase3/push.ts
-init_log();
-init_git();
-init_github();
-async function handlePush(ctx) {
-  const { session, version, pushCycle, baseBranch } = ctx;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'push:started',
-    version,
-    metadata: { stepType: 'code', pushCycle },
-  });
-  const { $: $2 } = await Promise.resolve(globalThis.Bun);
-  if (isOnMain(baseBranch, session.worktree)) {
-    throw new Error(`Refusing to push from ${baseBranch} \u2014 safety check`);
-  }
-  const branch = await $2`git branch --show-current`.cwd(session.worktree).quiet().text();
-  const currentBranch = branch.trim();
-  try {
-    const remoteResult = await $2`git rev-parse --abbrev-ref @{upstream}`.cwd(session.worktree).quiet();
-    const hasUpstream = remoteResult.exitCode === 0;
-    if (!hasUpstream) {
-      console.log(`[push] First push: git push -u origin ${currentBranch}`);
-      const result = await $2`git push -u origin ${currentBranch}`.cwd(session.worktree).quiet();
-      if (result.exitCode !== 0) {
-        throw new Error(`First push failed: ${result.stderr.toString()}`);
-      }
-    } else {
-      let pushed = false;
-      if (ctx.forceWithLease) {
-        console.log('[push] Using --force-with-lease (post-rebase)');
-        const forceResult = await $2`git push --force-with-lease`.cwd(session.worktree).quiet();
-        if (forceResult.exitCode === 0) {
-          pushed = true;
-        }
-        ctx.forceWithLease = false;
-      }
-      let result = pushed ? { exitCode: 0 } : await $2`git push`.cwd(session.worktree).quiet();
-      if (result.exitCode === 0) {
-        pushed = true;
-      }
-      if (!pushed) {
-        console.log('[push] Push rejected, trying pull --ff-only...');
-        const pullResult = await $2`git pull --ff-only`.cwd(session.worktree).quiet();
-        if (pullResult.exitCode === 0) {
-          result = await $2`git push`.cwd(session.worktree).quiet();
-          if (result.exitCode === 0) pushed = true;
-        }
-      }
-      if (!pushed) {
-        console.log('[push] Fast-forward failed, trying pull --rebase...');
-        const rebaseResult = await $2`git pull --rebase`.cwd(session.worktree).quiet();
-        if (rebaseResult.exitCode === 0) {
-          result = await $2`git push`.cwd(session.worktree).quiet();
-          if (result.exitCode === 0) pushed = true;
-        } else if (hasUnmergedPaths(session.worktree)) {
-          ctx.ttyReason = 'merge_conflict';
-          throw new Error('Push rebase hit merge conflicts');
-        }
-      }
-      if (!pushed) {
-        throw new Error('Push failed after all retry attempts');
-      }
-    }
-    console.log(`[push] Successfully pushed to origin/${currentBranch}`);
-  } catch (err) {
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'push:completed',
-      version,
-      metadata: {
-        pushCycle,
-        success: false,
-        error: err instanceof Error ? err.message : String(err),
-      },
-    });
-    throw err;
-  }
-  let repliesPosted = 0;
-  for (const action of ctx.deferredActions) {
-    try {
-      if (action.type === 'reply_thread' && action.threadId && action.body && ctx.prNumber) {
-        const { ghReplyToThread: ghReplyToThread2 } = await Promise.resolve().then(
-          () => (init_github(), exports_github),
-        );
-        await ghReplyToThread2(ctx.prNumber, action.threadId, withBotSignature(action.body), session.worktree);
-        repliesPosted++;
-      }
-    } catch (err) {
-      console.warn('[push] Deferred action failed:', err);
-    }
-  }
-  ctx.deferredActions = [];
-  const commitSha = await $2`git rev-parse HEAD`.cwd(session.worktree).quiet().text();
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'push:completed',
-    version,
-    metadata: {
-      pushCycle,
-      success: true,
-      commitSha: commitSha.trim(),
-      deferredRepliesPosted: repliesPosted,
-    },
-  });
-  return ctx.prNumber ? 'poll' : 'create_pr';
-}
-
-// src/phases/phase3/create-pr.ts
-init_log();
-init_status();
-init_git();
-init_github();
-init_shared();
-async function handleCreatePr(ctx) {
-  const { session, version, ticketId, baseBranch } = ctx;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'create_pr:started',
-    version,
-    metadata: { stepType: 'code' },
-  });
-  const { $: $2 } = await Promise.resolve(globalThis.Bun);
-  if (isOnMain(baseBranch, session.worktree)) {
-    throw new Error(`Refusing to create PR from ${baseBranch} \u2014 safety check`);
-  }
-  const branch = await $2`git branch --show-current`.cwd(session.worktree).quiet().text();
-  const currentBranch = branch.trim();
-  const existingPrs = await ghListPrsForBranch(currentBranch, session.worktree);
-  if (existingPrs.length > 0) {
-    const existingPr = existingPrs[0];
-    console.log(`[create_pr] PR already exists: #${existingPr.number} \u2014 reusing`);
-    ctx.prNumber = existingPr.number;
-    try {
-      const repoInfo = await ghRepoInfo(session.worktree);
-      ctx.prUrl = `https://github.com/${repoInfo.owner}/${repoInfo.repo}/pull/${existingPr.number}`;
-    } catch {
-      ctx.prUrl = null;
-    }
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'context:updated',
-      metadata: { prNumber: ctx.prNumber, prUrl: ctx.prUrl },
-    });
-    try {
-      const repoInfo = await ghRepoInfo(session.worktree);
-      ctx.mergePolicy = await ghFetchMergePolicy(repoInfo.owner, repoInfo.repo, session.worktree);
-    } catch (err) {
-      console.warn('[create_pr] Could not fetch merge policy:', err);
-    }
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'create_pr:completed',
-      version,
-      metadata: {
-        prNumber: existingPr.number,
-        reused: true,
-      },
-    });
-    return 'poll';
-  }
-  const title = `[${ticketId}] Implement task`;
-  const specContent = resolveSpec(session.id, version);
-  const body = `## Summary
-
-Implements ${ticketId}
-
-## Spec
-
-${specContent.slice(0, 2000)}${
-    specContent.length > 2000
-      ? `
-
-...(truncated)`
-      : ''
-  }`;
-  console.log(`[create_pr] Creating PR: ${title}`);
-  const pr = await ghCreatePr(title, baseBranch, body, session.worktree);
-  ctx.prNumber = pr.number;
-  ctx.prUrl = pr.url;
-  console.log(`[create_pr] Created PR: ${pr.url}`);
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'context:updated',
-    metadata: { prNumber: pr.number, prUrl: pr.url },
-  });
-  try {
-    const repoInfo = await ghRepoInfo(session.worktree);
-    ctx.mergePolicy = await ghFetchMergePolicy(repoInfo.owner, repoInfo.repo, session.worktree);
-  } catch (err) {
-    console.warn('[create_pr] Could not fetch merge policy:', err);
-  }
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'create_pr:completed',
-    version,
-    metadata: {
-      prNumber: pr.number,
-      prUrl: pr.url,
-    },
-  });
-  const status = ensureStatus(session.id);
-  if (status.context.rolloverFromPr) {
-    const fromPr = status.context.rolloverFromPr;
-    const delivery = readDeliveryManifest(session.id, version);
-    if (delivery?.prRolloverHistory) {
-      const lastEntry = delivery.prRolloverHistory.findLast(e2 => e2.fromPr === fromPr && e2.toPr === 0);
-      if (lastEntry) {
-        lastEntry.toPr = pr.number;
-        updateDeliveryManifest(session.id, version, { prRolloverHistory: delivery.prRolloverHistory });
-        console.log(`[create_pr] Rollover recorded: PR #${fromPr} \u2192 #${pr.number}`);
-      }
-    }
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'context:updated',
-      metadata: { rolloverFromPr: undefined },
-    });
-  }
-  return 'poll';
-}
-
-// src/phases/phase3/poll.ts
-init_log();
-init_status();
-init_github();
-function computePollState(signals, ctx) {
-  if (signals.prState === 'CLOSED') {
-    throw new Error('PR was closed externally');
-  }
-  if (signals.changesRequested) {
-    return 'blocked';
-  }
-  if (signals.unresolvedThreads > 0) {
-    return 'blocked';
-  }
-  const failingChecks = signals.checks.filter(c2 => c2.status === 'failing');
-  const pendingChecks = signals.checks.filter(c2 => c2.status === 'pending');
-  if (failingChecks.length > 0) {
-    return 'blocked';
-  }
-  if (pendingChecks.length > 0) {
-    return 'pending';
-  }
-  if (ctx.mergePolicy?.requiresApprovingReviews) {
-    const requiredApprovals = Math.max(ctx.mergePolicy.requiredApprovingReviewCount, 1);
-    if (signals.approvals < requiredApprovals) {
-      return 'pending';
-    }
-  }
-  if (!signals.mergeable || !['CLEAN', 'HAS_HOOKS', 'UNSTABLE'].includes(signals.mergeStateStatus)) {
-    return 'pending';
-  }
-  if (signals.crStatus === 'running' || signals.crStatus === 'failing') {
-    return 'pending';
-  }
-  return 'mergeable';
-}
-function computeRolloverRecommendation(signals, pushCycles) {
-  const result = {
-    shouldRollover: false,
-    signals: {
-      unresolvedThreads: signals.unresolvedThreads,
-      totalComments: signals.prComments,
-      pushCycles,
-      prAgeHours: signals.prAge ?? 0,
-    },
-  };
-  const UNRESOLVED_THREAD_THRESHOLD = 15;
-  const COMMENT_VOLUME_THRESHOLD = 50;
-  const PUSH_CYCLE_THRESHOLD = 8;
-  const PR_AGE_HOURS_THRESHOLD = 168;
-  const reasons = [];
-  if (signals.unresolvedThreads >= UNRESOLVED_THREAD_THRESHOLD) {
-    reasons.push(`${signals.unresolvedThreads} unresolved threads (threshold: ${UNRESOLVED_THREAD_THRESHOLD})`);
-  }
-  if (signals.prComments >= COMMENT_VOLUME_THRESHOLD) {
-    reasons.push(`${signals.prComments} total comments (threshold: ${COMMENT_VOLUME_THRESHOLD})`);
-  }
-  if (pushCycles >= PUSH_CYCLE_THRESHOLD) {
-    reasons.push(`${pushCycles} push cycles (threshold: ${PUSH_CYCLE_THRESHOLD})`);
-  }
-  if ((signals.prAge ?? 0) >= PR_AGE_HOURS_THRESHOLD) {
-    reasons.push(`PR age: ${signals.prAge}h (threshold: ${PR_AGE_HOURS_THRESHOLD}h)`);
-  }
-  if (reasons.length >= 2) {
-    result.shouldRollover = true;
-    result.reason = `PR review saturation: ${reasons.join('; ')}`;
-  }
-  return result;
-}
-function ensureReportedRunIds(ctx) {
-  const status = ensureStatus(ctx.session.id);
-  return status.context.reportedFailedRunIds ?? [];
-}
-async function handlePoll(ctx) {
-  const { session, version, prNumber, pushCycle, config } = ctx;
-  if (!prNumber) {
-    throw new Error('poll: no PR number available');
-  }
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'poll:started',
-    version,
-    metadata: { stepType: 'code', pushCycle },
-  });
-  const [checks, prView, threads, reviews, prComments] = await Promise.all([
-    ghPrChecks(prNumber, session.worktree).catch(e2 => {
-      console.warn('[poll] Failed to fetch checks:', e2);
-      return [];
-    }),
-    ghPrView(prNumber, session.worktree).catch(e2 => {
-      console.warn('[poll] Failed to fetch PR view:', e2);
-      return null;
-    }),
-    ghReviewThreads(prNumber, session.worktree).catch(e2 => {
-      console.warn('[poll] Failed to fetch threads:', e2);
-      return [];
-    }),
-    ghReviews(prNumber, session.worktree).catch(e2 => {
-      console.warn('[poll] Failed to fetch reviews:', e2);
-      return [];
-    }),
-    ghPrComments(prNumber, undefined, session.worktree).catch(e2 => {
-      console.warn('[poll] Failed to fetch PR comments:', e2);
-      return [];
-    }),
-  ]);
-  if (!prView) {
-    throw new Error('poll: could not fetch PR status');
-  }
-  const failingChecks = checks.filter(c2 => c2.status === 'failing');
-  if (failingChecks.length > 0) {
-    const { ghPrRuns: ghPrRuns2 } = await Promise.resolve().then(() => (init_github(), exports_github));
-    const runs = await ghPrRuns2(prView.headRefName, session.worktree).catch(() => []);
-    const failedRuns = runs.filter(r2 => r2.conclusion === 'failure');
-    const reportedFailedRunIds = new Set(ctx.session.state === 'running' ? ensureReportedRunIds(ctx) : []);
-    const newlyFailedRuns = failedRuns.filter(run => !reportedFailedRunIds.has(run.databaseId));
-    await Promise.all(
-      newlyFailedRuns.map(async run => {
-        const logs = await ghRunLogsFailed(String(run.databaseId), session.worktree).catch(() => '');
-        if (logs) {
-          console.warn(`[poll] CI failure logs for ${run.name}:
-${logs.slice(0, 1000)}`);
-        }
-        reportedFailedRunIds.add(run.databaseId);
-      }),
-    );
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'context:updated',
-      metadata: { reportedFailedRunIds: [...reportedFailedRunIds].sort((a, b3) => a - b3) },
-    });
-  }
-  const changesRequested = reviews.some(r2 => r2.state === 'CHANGES_REQUESTED');
-  const approvals = reviews.filter(r2 => r2.state === 'APPROVED').length;
-  const crCheck = checks.find(c2 => c2.name.toLowerCase().includes('coderabbit'));
-  const crStatus = crCheck
-    ? crCheck.status === 'passing'
-      ? 'passing'
-      : crCheck.status === 'failing'
-        ? 'failing'
-        : 'running'
-    : 'none';
-  const prCreatedAt = prView.createdAt ? new Date(prView.createdAt).getTime() : Date.now();
-  const prAgeHours = Math.round((Date.now() - prCreatedAt) / 3600000);
-  const signals = {
-    prState: prView.state,
-    mergeable: prView.mergeable,
-    mergeStateStatus: prView.mergeStateStatus,
-    checks: checks.map(c2 => ({ name: c2.name, status: c2.status })),
-    threads: threads.length,
-    unresolvedThreads: threads.length,
-    reviews: reviews.map(r2 => ({ author: r2.author.login, state: r2.state })),
-    prComments: prComments.length,
-    changesRequested,
-    approvals,
-    crStatus,
-    prAge: prAgeHours,
-  };
-  const pollState = computePollState(signals, ctx);
-  const rollover = computeRolloverRecommendation(signals, pushCycle);
-  if (rollover.shouldRollover) {
-    console.log(`[poll] Rollover recommended: ${rollover.reason}`);
-  }
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'context:updated',
-    metadata: { rolloverRecommendation: rollover },
-  });
-  const deliveryUpdates = {
-    kind: 'pr',
-    prNumber,
-  };
-  if (rollover.shouldRollover) {
-    const existing = readDeliveryManifest(session.id, version);
-    const history = existing?.prRolloverHistory ?? [];
-    const oldPrNumber = prNumber;
-    try {
-      await ghClosePr(oldPrNumber, session.worktree);
-      console.log(`[poll] Closed old PR #${oldPrNumber} for rollover`);
-    } catch (err) {
-      console.warn(`[poll] Failed to close old PR #${oldPrNumber}: ${err}`);
-    }
-    history.push({
-      fromPr: oldPrNumber,
-      toPr: 0,
-      reason: rollover.reason ?? 'PR review saturation',
-      timestamp: new Date().toISOString(),
-    });
-    deliveryUpdates.prRolloverHistory = history;
-    updateDeliveryManifest(session.id, version, deliveryUpdates);
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'context:updated',
-      metadata: { prNumber: null, prUrl: null, rolloverFromPr: oldPrNumber },
-    });
-    ctx.prNumber = null;
-    ctx.prUrl = null;
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'poll:completed',
-      version,
-      metadata: {
-        pushCycle,
-        pollState,
-        rollover: { shouldRollover: true, fromPr: oldPrNumber, reason: rollover.reason },
-      },
-    });
-    return 'create_pr';
-  }
-  updateDeliveryManifest(session.id, version, deliveryUpdates);
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'poll:completed',
-    version,
-    metadata: {
-      pushCycle,
-      pollState,
-      rollover: {
-        shouldRollover: rollover.shouldRollover,
-        reason: rollover.reason,
-      },
-      signals: {
-        prState: signals.prState,
-        mergeable: signals.mergeable,
-        mergeStateStatus: signals.mergeStateStatus,
-        checks: signals.checks.map(c2 => c2.status),
-        threads: signals.threads,
-        unresolvedThreads: signals.unresolvedThreads,
-        changesRequested: signals.changesRequested,
-        approvals: signals.approvals,
-        crStatus: signals.crStatus,
-        prAgeHours,
-      },
-    },
-  });
-  console.log(
-    `[poll] State: ${pollState} (checks: ${checks.filter(c2 => c2.status === 'passing').length}/${checks.length} passing, threads: ${threads.length}, approvals: ${approvals}, cr: ${crStatus})`,
-  );
-  switch (pollState) {
-    case 'mergeable':
-      return 'feedback_check';
-    case 'pending':
-      if (pushCycle >= config.settings.maxPushCycles) {
-        console.log(`[poll] Max push cycles (${config.settings.maxPushCycles}) exceeded`);
-        return 'failed';
-      }
-      const waitMs = (config.settings.pollInterval ?? 60) * 1000;
-      console.log(`[poll] Pending \u2014 waiting ${(waitMs / 1000).toFixed(0)}s before re-poll...`);
-      await new Promise(resolve => setTimeout(resolve, waitMs));
-      return 'poll';
-    case 'blocked':
-      return 'ensure_branch';
-  }
-}
-
-// src/phases/phase3/ensure-branch.ts
-init_log();
-init_git();
-async function handleEnsureBranch(ctx) {
-  const { session, version, baseBranch } = ctx;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'ensure_branch:started',
-    version,
-    metadata: { stepType: 'code' },
-  });
-  const { $: $2 } = await Promise.resolve(globalThis.Bun);
-  const fetchResult = await $2`git fetch origin ${baseBranch}`.cwd(session.worktree).quiet();
-  if (fetchResult.exitCode !== 0) {
-    console.warn('[ensure_branch] Failed to fetch base branch:', fetchResult.stderr.toString());
-  }
-  const aheadBehind = await $2`git rev-list --count HEAD..origin/${baseBranch}`.cwd(session.worktree).quiet().text();
-  const behindCount = parseInt(aheadBehind.trim(), 10);
-  if (behindCount === 0) {
-    console.log('[ensure_branch] Branch is up to date');
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'ensure_branch:completed',
-      version,
-      metadata: { action: 'none' },
-    });
-    return 'eval';
-  }
-  console.log(`[ensure_branch] Branch is ${behindCount} commits behind ${baseBranch} \u2014 rebasing`);
-  const rebaseResult = await $2`git rebase origin/${baseBranch}`.cwd(session.worktree).quiet();
-  if (rebaseResult.exitCode === 0) {
-    console.log('[ensure_branch] Rebase succeeded');
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'ensure_branch:completed',
-      version,
-      metadata: { action: 'rebase', success: true },
-    });
-    ctx.forceWithLease = true;
-    return 'push';
-  }
-  if (hasUnmergedPaths(session.worktree)) {
-    console.log('[ensure_branch] Merge conflicts detected \u2014 routing to tty_resolve');
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'ensure_branch:completed',
-      version,
-      metadata: { action: 'conflict', success: false },
-    });
-    ctx.ttyReason = 'merge_conflict';
-    return 'tty_resolve';
-  }
-  console.error('[ensure_branch] Rebase failed:', rebaseResult.stderr.toString());
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'ensure_branch:completed',
-    version,
-    metadata: {
-      action: 'rebase',
-      success: false,
-      error: rebaseResult.stderr.toString(),
-    },
-  });
-  await $2`git rebase --abort`.cwd(session.worktree).quiet();
-  return 'eval';
-}
-
-// src/phases/phase3/eval.ts
-init_log();
-init_spawn();
-init_agents();
-init_github();
-var OUTDATED_REPLY = withBotSignature(
-  'This comment is outdated (the code it refers to has changed). Marking as resolved.',
-);
-var GHOSTED_REPLY = withBotSignature(
-  'The CI checks triggered by my previous change have now completed. Marking as resolved.',
-);
-function preFilterThreads(threads, crStatus) {
-  const results = [];
-  for (const thread of threads) {
-    if (thread.isOutdated) {
-      results.push({
-        category: 'outdated',
-        threadId: thread.id,
-        reason: 'Thread marked as outdated by GitHub',
-        templateReply: OUTDATED_REPLY,
-      });
-      continue;
-    }
-    if (thread.lastReplyByBot && (crStatus === 'passing' || crStatus === 'failing' || crStatus === 'none')) {
-      results.push({
-        category: 'ghosted',
-        threadId: thread.id,
-        reason: 'Last reply by bot and CR CI completed',
-        templateReply: GHOSTED_REPLY,
-      });
-      continue;
-    }
-    if (thread.lastReplyByBot && crStatus === 'running') {
-      results.push({
-        category: 'pending',
-        threadId: thread.id,
-        reason: 'Last reply by bot and CR CI still running',
-      });
-      continue;
-    }
-    results.push({
-      category: 'needs_eval',
-      threadId: thread.id,
-      reason: 'Needs LLM evaluation',
-    });
-  }
-  return results;
-}
-async function handleEval(ctx) {
-  const { session, version, prNumber } = ctx;
-  if (!prNumber) {
-    throw new Error('eval: no PR number available');
-  }
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'eval:started',
-    version,
-    metadata: { stepType: 'llm' },
-  });
-  const [threads, checks, prView, prComments] = await Promise.all([
-    ghReviewThreads(prNumber, session.worktree),
-    ghPrChecks(prNumber, session.worktree).catch(() => []),
-    ghPrView(prNumber, session.worktree),
-    ghPrComments(prNumber, undefined, session.worktree).catch(() => []),
-  ]);
-  const crCheck = checks.find(c2 => c2.name.toLowerCase().includes('coderabbit'));
-  const crStatus = crCheck
-    ? crCheck.status === 'passing'
-      ? 'passing'
-      : crCheck.status === 'failing'
-        ? 'failing'
-        : 'running'
-    : 'none';
-  const threadsWithReplies = threads.map(t => ({
-    ...t,
-    lastReplyByBot: t.replies.length > 0 && t.replies[t.replies.length - 1].isBot,
-  }));
-  const preFilterResults = preFilterThreads(threadsWithReplies, crStatus);
-  const closings = preFilterResults.filter(r2 => r2.category === 'outdated' || r2.category === 'ghosted');
-  let autoResolved = 0;
-  for (const closing of closings) {
-    try {
-      if (closing.templateReply) {
-        const thread = threads.find(t => t.id === closing.threadId);
-        if (thread && thread.replies.length > 0) {
-          await ghReplyToThread(prNumber, thread.replies[0].id, closing.templateReply, session.worktree);
-        }
-      }
-      await ghResolveThread(closing.threadId, session.worktree);
-      autoResolved++;
-    } catch (err) {
-      console.warn(`[eval] Auto-close failed for ${closing.threadId}:`, err);
-    }
-  }
-  const needsEval = preFilterResults.filter(r2 => r2.category === 'needs_eval');
-  const failingChecks = checks.filter(c2 => c2.status === 'failing');
-  const units = [];
-  for (const check of failingChecks) {
-    units.push({
-      id: `ci-${check.name}`,
-      type: 'ci_failure',
-      title: `CI Failure: ${check.name}`,
-      content: `The CI check "${check.name}" is failing. This needs to be investigated and fixed.`,
-      metadata: { checkName: check.name },
-    });
-  }
-  for (const pf of needsEval) {
-    const thread = threads.find(t => t.id === pf.threadId);
-    if (!thread) continue;
-    const commentsText = [
-      `## Original comment by ${thread.author}:`,
-      thread.body,
-      ...thread.replies.map(
-        r2 => `## Reply by ${r2.author}:
-${r2.body}`,
-      ),
-    ].join(`
-
-`);
-    units.push({
-      id: `thread-${pf.threadId}`,
-      type: 'thread',
-      title: `Review thread by ${thread.author}`,
-      content: commentsText,
-      metadata: { threadId: pf.threadId, commentId: thread.firstCommentId || thread.replies[0]?.id },
-    });
-  }
-  for (const comment of prComments) {
-    if (comment.author.login === 'claude[bot]') continue;
-    units.push({
-      id: `comment-${comment.id}`,
-      type: 'pr_comment',
-      title: `PR comment by ${comment.author.login}`,
-      content: comment.body,
-      metadata: { commentId: comment.id },
-    });
-  }
-  const evalBinary = getAgentBinary('phase3', 'eval');
-  writeStepInit(session.id, version, 'eval', {
-    prompt: `eval: ${units.length} units (${units.map(u2 => u2.type).join(', ')})`,
-    command: `${evalBinary} --print (LLM print, fan-out)`,
-    type: 'llm_print',
-  });
-  const evalResults = await fanOutEval(units, ctx);
-  ctx.evalResults = evalResults;
-  const codeFixes = evalResults.filter(r2 => r2.verdict === 'code_fix');
-  const ambiguous = evalResults.filter(r2 => r2.ambiguous);
-  console.log(
-    `[eval] Pre-filtered: ${autoResolved} auto-resolved, ${needsEval.length} + ${failingChecks.length} CI + ${prComments.filter(c2 => c2.author.login !== 'claude[bot]').length} comment units evaluated`,
-  );
-  console.log(
-    `[eval] Results: ${evalResults.filter(r2 => r2.verdict === 'reply').length} replies, ${evalResults.filter(r2 => r2.verdict === 'resolve').length} resolves, ${codeFixes.length} code fixes, ${ambiguous.length} ambiguous`,
-  );
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'eval:completed',
-    version,
-    metadata: {
-      autoResolved,
-      totalEvalUnits: units.length,
-      replies: evalResults.filter(r2 => r2.verdict === 'reply').length,
-      resolves: evalResults.filter(r2 => r2.verdict === 'resolve').length,
-      codeFixes: codeFixes.length,
-      ambiguous: ambiguous.length,
-      skipped: evalResults.filter(r2 => r2.verdict === 'skip').length,
-    },
-  });
-  return 'act';
-}
-function buildEvalPrompt(ticketId, content) {
-  const evalInstruction = getAgentPrompt('phase3', 'eval');
-  return `
-You are reviewing feedback on a pull request.
-
-${evalInstruction}
-
-## Task Context
-Ticket: ${ticketId}
-
-## Feedback Item
-${content}
-
-## Possible Actions
-- "reply": Post a reply explaining your position or acknowledging the feedback
-- "resolve": Resolve the thread (the issue has been addressed or is no longer relevant)
-- "code_fix": The feedback requires code changes \u2014 provide fix instructions
-- "skip": Ignore this feedback (false positive, duplicate, or not actionable)
-
-## Output Format
-Return a JSON object:
-{
-  "verdict": "reply" | "resolve" | "code_fix" | "skip",
-  "reply": "string (for reply verdict \u2014 the text to post)",
-  "codeFix": "string (for code_fix verdict \u2014 fix instructions)",
-  "resolveThread": true/false (should the thread be resolved?),
-  "reactThumbsUp": true/false (should we react +1 to the comment?),
-  "ambiguous": true/false (are you unsure about the verdict?),
-  "ambiguousReason": "string (if ambiguous, explain why)"
-}
-`.trim();
-}
-async function evalSingleUnit(unit, ctx) {
-  const prompt = buildEvalPrompt(ctx.ticketId, unit.content);
-  const result = await spawnPrint(getAgentBinary('phase3', 'eval'), prompt, {
-    cwd: ctx.session.worktree,
-    timeout: ctx.config.kloop.reviewerTimeout,
-    sessionId: ctx.session.id,
-    label: `eval-${unit.content.slice(0, 30).replace(/[^a-z0-9]/gi, '-')}`,
-  });
-  return {
-    unitId: unit.id,
-    unitType: unit.type,
-    verdict: result.verdict || 'skip',
-    reply: result.reply,
-    codeFix: result.codeFix,
-    resolveThread: result.resolveThread,
-    reactThumbsUp: result.reactThumbsUp,
-    ambiguous: result.ambiguous,
-    ambiguousReason: result.ambiguousReason,
-  };
-}
-async function fanOutEval(units, ctx) {
-  if (units.length === 0) return [];
-  const results = await Promise.all(
-    units.map(async unit => {
-      try {
-        return await evalSingleUnit(unit, ctx);
-      } catch (err) {
-        console.warn(`[eval] Unit ${unit.id} failed, retrying...`);
-        try {
-          return await evalSingleUnit(unit, ctx);
-        } catch (retryErr) {
-          console.error(`[eval] Unit ${unit.id} failed after retry:`, retryErr);
-          return {
-            unitId: unit.id,
-            unitType: unit.type,
-            verdict: 'skip',
-          };
-        }
-      }
-    }),
-  );
-  return results;
-}
-
-// src/phases/phase3/act.ts
-init_log();
-init_github();
-async function handleAct(ctx) {
-  const { session, version, prNumber, evalResults } = ctx;
-  if (!prNumber) {
-    throw new Error('act: no PR number available');
-  }
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'act:started',
-    version,
-    metadata: { stepType: 'code' },
-  });
-  if (!evalResults || evalResults.length === 0) {
-    console.log('[act] No eval results found \u2014 skipping');
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'act:completed',
-      version,
-      metadata: {
-        replies: 0,
-        resolved: 0,
-        codeFixes: 0,
-      },
-    });
-    return 'poll';
-  }
-  const actionable = evalResults.filter(r2 => r2.verdict !== 'skip');
-  const codeFixes = [];
-  const ambiguousItems = [];
-  let repliesPosted = 0;
-  let threadsResolved = 0;
-  let reactionsAdded = 0;
-  for (const result of actionable) {
-    try {
-      if (result.verdict === 'code_fix') {
-        codeFixes.push(result);
-        continue;
-      }
-      if (result.ambiguous) {
-        ambiguousItems.push({
-          id: result.unitId,
-          type: result.unitType,
-          title: result.unitId,
-          reasoning: result.reply || result.codeFix || 'No reasoning provided',
-          ambiguityReason: result.ambiguousReason,
-        });
-        continue;
-      }
-      if (result.reply && result.unitType === 'thread') {
-        const threadId = result.unitId.replace('thread-', '');
-        const threads = await ghReviewThreads(prNumber, session.worktree);
-        const thread = threads.find(t => t.id === threadId);
-        if (thread && thread.replies.length > 0) {
-          await ghReplyToThread(prNumber, thread.replies[0].id, withBotSignature(result.reply), session.worktree);
-          repliesPosted++;
-        } else if (thread) {
-          const firstCommentId = thread.firstCommentId;
-          if (firstCommentId) {
-            await ghReplyToThread(prNumber, firstCommentId, withBotSignature(result.reply), session.worktree);
-            repliesPosted++;
-          } else {
-            console.warn(`[act] No first comment ID for thread ${threadId}`);
-          }
-        }
-      }
-      if (result.reply && result.unitType === 'pr_comment') {
-        const commentId = result.unitId.replace('comment-', '');
-        const numericId = parseInt(commentId, 10);
-        if (!isNaN(numericId)) {
-          await ghReplyToIssueComment(prNumber, withBotSignature(result.reply), numericId, session.worktree);
-          repliesPosted++;
-        }
-      }
-      if (result.resolveThread && result.unitType === 'thread') {
-        const threadId = result.unitId.replace('thread-', '');
-        await ghResolveThread(threadId, session.worktree);
-        threadsResolved++;
-      }
-      if (result.reactThumbsUp && result.unitType === 'thread') {
-        const threadId = result.unitId.replace('thread-', '');
-        const threads = await ghReviewThreads(prNumber, session.worktree);
-        const thread = threads.find(t => t.id === threadId);
-        if (thread && thread.replies.length > 0) {
-          const commentId = parseInt(thread.replies[0].id, 10);
-          if (!isNaN(commentId)) {
-            await ghReact(commentId, '+1', session.worktree);
-            reactionsAdded++;
-          }
-        }
-      }
-    } catch (err) {
-      console.warn(`[act] Action failed for ${result.unitId}:`, err);
-    }
-  }
-  console.log(
-    `[act] Posted ${repliesPosted} replies, resolved ${threadsResolved} threads, added ${reactionsAdded} reactions, ${codeFixes.length} code fixes, ${ambiguousItems.length} ambiguous`,
-  );
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'act:completed',
-    version,
-    metadata: {
-      replies: repliesPosted,
-      resolved: threadsResolved,
-      codeFixes: codeFixes.length,
-      ambiguous: ambiguousItems.length,
-    },
-  });
-  ctx.ttyResolveItems = ambiguousItems;
-  if (ambiguousItems.length > 0) {
-    ctx.ttyReason = 'ambiguous_eval';
-    return 'tty_resolve';
-  }
-  if (codeFixes.length > 0) {
-    return 'write_fix';
-  }
-  return 'poll';
-}
-
-// src/phases/phase3/tty-resolve.ts
-init_log();
-init_artifacts();
-init_shared();
-import { existsSync as existsSync24, readFileSync as readFileSync20 } from 'fs';
-init_agents();
-async function handleTtyResolve(ctx) {
-  const { session, version, ttyReason, baseBranch } = ctx;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'tty_resolve:started',
-    version,
-    metadata: { stepType: 'tty', ttyReason: ttyReason || 'unknown' },
-  });
-  const { $: $2 } = await Promise.resolve(globalThis.Bun);
-  const ticketId = ctx.ticketId;
-  const specContent = resolveSpec(session.id, version);
-  const plans = resolvePlans(session.id, version);
-  const plansContent = plans.map(p2 => readFileSync20(p2, 'utf-8')).join(`
-
----
-
-`);
-  const feedbackDir = `${sessionDir(session.id)}/artifacts/v${version}`;
-  let feedbackContent = '';
-  try {
-    const feedbackPath = `${feedbackDir}/feedback.md`;
-    if (existsSync24(feedbackPath)) {
-      feedbackContent = readFileSync20(feedbackPath, 'utf-8');
-    }
-  } catch {
-    feedbackContent = '';
-  }
-  const agentName =
-    ttyReason === 'ambiguous_eval'
-      ? 'tty_resolve_ambiguous'
-      : ttyReason === 'merge_conflict'
-        ? 'tty_resolve_conflict'
-        : 'tty_resolve_failure';
-  let ttyPrompt;
-  if (ttyReason === 'ambiguous_eval') {
-    const items = ctx.ttyResolveItems || [];
-    const itemsSection =
-      items.length > 0
-        ? items.map(
-            (item, i) => `### Item ${i + 1}: ${item.id}
-${item.reasoning}
-
-Ambiguity: ${item.ambiguityReason || 'Unknown'}`,
-          ).join(`
-
-`)
-        : 'No specific items available \u2014 check the eval results in the log.';
-    const ambiguousInstruction = getAgentPrompt('phase3', agentName);
-    ttyPrompt = `
-${ambiguousInstruction}
-
-## Context
-Spec: ${specContent.slice(0, 1500)}
-Plans: ${plansContent.slice(0, 1500)}
-
-## Ambiguous Items
-${itemsSection}
-
-${
-  feedbackContent
-    ? `## Previous Feedback
-${feedbackContent.slice(0, 500)}`
-    : ''
-}
-
-## Your Task
-Review each ambiguous item and tell me:
-1. Should I reply to the reviewer? If so, what should I say?
-2. Should I make a code fix? If so, describe the fix.
-3. Should I skip the item?
-
-After resolving, apply any needed changes to the codebase.
-`.trim();
-  } else if (ttyReason === 'merge_conflict') {
-    const grepResult =
-      await $2`grep -rn '<<<<<<<' --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' || true`
-        .cwd(session.worktree)
-        .quiet()
-        .text();
-    const conflictFiles = grepResult
-      .trim()
-      .split(
-        `
-`,
-      )
-      .filter(f => f.length > 0);
-    const conflictInstruction = getAgentPrompt('phase3', agentName);
-    ttyPrompt = `
-${conflictInstruction}
-
-## Context
-Spec: ${specContent.slice(0, 1500)}
-Plans: ${plansContent.slice(0, 1500)}
-
-## Conflicted Files
-${
-  conflictFiles.length > 0
-    ? conflictFiles.join(`
-`)
-    : 'No conflict markers found in source files.'
-}
-
-## Your Task
-1. Open the conflicted files and resolve the merge conflicts
-2. Stage the resolved files with \`git add\`
-3. Continue the rebase with \`git rebase --continue\`
-4. If the conflict cannot be resolved, run \`git rebase --abort\` and I will try an alternative approach
-
-${
-  feedbackContent
-    ? `## Previous Feedback
-${feedbackContent.slice(0, 500)}`
-    : ''
-}
-
-Please resolve the merge conflicts and continue the rebase.
-`.trim();
-  } else {
-    const failureInstruction = getAgentPrompt('phase3', agentName);
-    ttyPrompt = `
-${failureInstruction}
-
-## Context
-Spec: ${specContent.slice(0, 1500)}
-Plans: ${plansContent.slice(0, 1500)}
-
-## Your Task
-Investigate the failure and help me determine the next steps. Options:
-1. Fix the specific issue and retry
-2. Skip this fix and move on
-3. Escalate and stop
-
-${
-  feedbackContent
-    ? `## Previous Feedback
-${feedbackContent.slice(0, 500)}`
-    : ''
-}
-
-Please review the situation and help me resolve the issue. Apply any needed changes.
-`.trim();
-  }
-  const ttyBinary = getAgentBinary('phase3', agentName);
-  writeStepInit(session.id, version, `tty_resolve_${ttyReason || 'unknown'}`, {
-    prompt: ttyPrompt,
-    command: `${ttyBinary} (TTY handoff)`,
-    type: 'tty_handoff',
-  });
-  console.log(`[tty_resolve] Handing off to user for ${ttyReason}`);
-  const exitCode = await spawnTTYWithTurnTracking(session.id, ttyBinary, ttyPrompt + TTY_EXIT_INSTRUCTION, {
-    cwd: session.worktree,
-    worktree: session.worktree,
-  });
-  const diffResult = await $2`git diff --name-only`.cwd(session.worktree).quiet().text();
-  const changedFiles = diffResult
-    .trim()
-    .split(
-      `
-`,
-    )
-    .filter(f => f.length > 0);
-  if (changedFiles.length > 0) {
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'tty_resolve:completed',
-      version,
-      metadata: {
-        ttyReason,
-        result: 'fixes_applied',
-        filesChanged: changedFiles.length,
-      },
-    });
-    return 'write_fix';
-  }
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'tty_resolve:completed',
-    version,
-    metadata: {
-      ttyReason,
-      result: 'no_fixes',
-    },
-  });
-  return 'poll';
-}
-
-// src/phases/phase3/write-fix.ts
-init_log();
-init_spawn();
-import { existsSync as existsSync25, readFileSync as readFileSync21 } from 'fs';
-init_artifacts();
-init_shared();
-init_agents();
-async function handleWriteFix(ctx) {
-  const { session, version, ticketId } = ctx;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'write_fix:started',
-    version,
-    metadata: { stepType: 'llm' },
-  });
-  const specContent = resolveSpec(session.id, version);
-  const plans = resolvePlans(session.id, version);
-  const plansContent = plans.map(p2 => readFileSync21(p2, 'utf-8')).join(`
-
----
-
-`);
-  const feedbackDir = `${sessionDir(session.id)}/artifacts/v${version}`;
-  let feedbackContent = '';
-  try {
-    const feedbackPath = `${feedbackDir}/feedback.md`;
-    if (existsSync25(feedbackPath)) {
-      feedbackContent = readFileSync21(feedbackPath, 'utf-8');
-    }
-  } catch {
-    feedbackContent = '';
-  }
-  const evalResults = ctx.evalResults || [];
-  const codeFixes = evalResults.filter(r2 => r2.verdict === 'code_fix' && r2.codeFix);
-  const fixesSection =
-    codeFixes.length > 0
-      ? codeFixes.map(
-          (fix, i) => `### Fix ${i + 1}: ${fix.unitId}
-${fix.codeFix}`,
-        ).join(`
-
-`)
-      : 'Based on the current PR review feedback \u2014 check the eval results in the log for details.';
-  const writeFixInstruction = getAgentPrompt('phase3', 'write_fix');
-  const fixPrompt = `
-${writeFixInstruction}
-
-## Original Spec
-${specContent}
-
-## Original Plans
-${plansContent}
-
-## Fixes Needed
-${fixesSection}
-
-${
-  feedbackContent
-    ? `## Previous Feedback
-${feedbackContent}`
-    : ''
-}
-
-## Instructions
-1. Review all pending fixes
-2. Deduplicate any overlapping fixes on the same file
-3. Merge into one coherent implementation spec
-4. Output the complete spec (not just the changes)
-
-Output the complete implementation spec.
-`.trim();
-  const binary = getAgentBinary('phase3', 'write_fix');
-  writeStepInit(session.id, version, 'write_fix', {
-    prompt: fixPrompt,
-    command: `${binary} --print (LLM print)`,
-    type: 'llm_print',
-  });
-  console.log(`[write_fix] Generating merged fix spec from ${codeFixes.length} code fixes...`);
-  const fixSpec = await spawnPrintRaw(binary, fixPrompt, {
-    cwd: session.worktree,
-    timeout: 60,
-    sessionId: session.id,
-    label: 'write-fix',
-  });
-  const specPath = writeKloopSpec(session.id, fixSpec, `fix-cycle-${ctx.pushCycle}-spec.md`);
-  const configPath2 = writeKloopConfig(session.id, {
-    maxIterations: ctx.config.kloop.maxIterations,
-    implementerTimeout: ctx.config.kloop.implementerTimeout,
-    reviewerTimeout: ctx.config.kloop.reviewerTimeout,
-  });
-  const kloopRunId = devloopInit(session.worktree, specPath, configPath2);
-  ctx.kloopRunId = kloopRunId;
-  console.log(`[write_fix] kloop run initialized: ${kloopRunId}`);
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'write_fix:completed',
-    version,
-    metadata: {
-      kloopRunId,
-      codeFixCount: codeFixes.length,
-    },
-  });
-  return 'run_fix';
-}
-
-// src/phases/phase3/run-fix.ts
-init_log();
-async function handleRunFix(ctx) {
-  const { session, version, pushCycle, config } = ctx;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'run_fix:started',
-    version,
-    metadata: { stepType: 'code', pushCycle },
-  });
-  if (!ctx.kloopRunId) {
-    throw new Error('No kloop run ID \u2014 write_fix must run first');
-  }
-  console.log(`[run_fix] Starting kloop run ${ctx.kloopRunId} for fixes (push cycle ${pushCycle})`);
-  const timeoutMs = config.kloop.implementerTimeout * 60000;
-  const result = await devloopRun(ctx.kloopRunId, timeoutMs);
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'run_fix:completed',
-    version,
-    metadata: {
-      pushCycle,
-      exitCode: result.exitCode,
-      status: result.status,
-      kloopRunId: result.runId,
-    },
-  });
-  if (result.status === 'completed') {
-    ctx.pushCycle++;
-    return 'push';
-  }
-  if (result.status === 'conflict' || result.status === 'max_situations') {
-    ctx.ttyReason = 'run_fix_failure';
-    return 'tty_resolve';
-  }
-  return 'failed';
-}
-
-// src/phases/phase3/feedback-check.ts
-init_log();
-init_inquirer();
-init_scripts();
-async function handleFeedbackCheck(ctx) {
-  const { session, version, prNumber, prUrl, pushCycle } = ctx;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'feedback_check:started',
-    version,
-    metadata: { stepType: 'code' },
-  });
-  const summary = [
-    `PR: ${prUrl || `#${prNumber}`}`,
-    `Push cycles: ${pushCycle}`,
-    ctx.mergePolicy?.requiresApprovingReviews
-      ? `Requires ${ctx.mergePolicy.requiredApprovingReviewCount} approval(s)`
-      : 'No approval required',
-  ].join(`
-`);
-  console.log(`
-${'='.repeat(60)}`);
-  console.log('Phase 3 Complete \u2014 PR is merge-ready');
-  console.log(`${'='.repeat(60)}`);
-  console.log(summary);
-  console.log(`${'='.repeat(60)}
-`);
-  const choice = await selectOption('The PR is merge-ready. What would you like to do?', [
-    {
-      value: 'done',
-      label: 'Done',
-      hint: 'Mark this task as complete',
-    },
-    {
-      value: 'feedback',
-      label: 'I have feedback',
-      hint: 'Go back to Phase 1 with feedback to improve the implementation',
-    },
-  ]);
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'feedback_check:completed',
-    version,
-    metadata: {
-      choice,
-      prNumber,
-      pushCycles: pushCycle,
-    },
-  });
-  if (choice === 'done') {
-    if (ctx.ticketId) {
-      runScript(ctx.session.id, 'to-review', [ctx.ticketId]);
-      appendEvent(ctx.session.id, {
-        ts: new Date().toISOString(),
-        event: 'transition:in_progress_to_review',
-        metadata: { ticketId: ctx.ticketId },
-      });
-    }
-    return 'completed';
-  }
-  if (ctx.ticketId) {
-    runScript(ctx.session.id, 'revert-to-inprogress', [ctx.ticketId]);
-    appendEvent(ctx.session.id, {
-      ts: new Date().toISOString(),
-      event: 'transition:review_to_in_progress',
-      metadata: { ticketId: ctx.ticketId },
-    });
-  }
-  return 'feedback';
-}
-async function handleFeedback(ctx) {
-  const { session, version } = ctx;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'feedback:started',
-    version,
-    metadata: { stepType: 'code' },
-  });
-  const { textInput: textInput2 } = await Promise.resolve().then(() => (init_inquirer(), exports_inquirer));
-  const { writeFileSync: writeFileSync17, mkdirSync: mkdirSync20 } = await import('fs');
-  const { snapshotPath: snapshotPath2, ensureArtifactDir: ensureArtifactDir2 } = await Promise.resolve().then(
-    () => (init_artifacts(), exports_artifacts),
-  );
-  const feedback = await textInput2('What feedback do you have? (This will be used to improve the next iteration)', '');
-  if (feedback.trim()) {
-    const feedbackPath = snapshotPath2(session.id, version, 'feedback.md');
-    ensureArtifactDir2(feedbackPath);
-    writeFileSync17(feedbackPath, feedback);
-    console.log('[feedback] Feedback saved. Run `kautopilot start --phase plan` to re-run Phase 1.');
-  }
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'feedback:completed',
-    version,
-    metadata: { hasFeedback: !!feedback.trim() },
-  });
-  return 'completed';
-}
-
-// src/phases/phase3/ticket-draft.ts
-init_log();
-init_artifacts();
-init_shared();
-init_spawn();
-init_agents();
-import { writeFileSync as writeFileSync17, existsSync as existsSync26, readFileSync as readFileSync22 } from 'fs';
-import { join as join16 } from 'path';
-async function handleTicketDraft(ctx) {
-  const { session, version, ticketId } = ctx;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'ticket_draft:started',
-    version,
-    metadata: { stepType: 'llm', deliveryKind: 'ticket' },
-  });
-  const specContent = resolveSpec(session.id, version);
-  const ticketPath = join16(`${process.env.HOME}/.kautopilot/${session.id}/artifacts`, 'ticket.md');
-  const ticketContent = existsSync26(ticketPath) ? readFileSync22(ticketPath, 'utf-8') : '';
-  const binary = getAgentBinary('phase3', 'ticket_draft');
-  const draftPrompt = `Generate ticket delivery artifacts based on the completed implementation.
-
-## Task Spec
-${specContent}
-
-## Original Ticket
-${ticketContent || '(no ticket content available)'}
-
-## Instructions
-Based on the completed work, generate:
-1. A summary ticket update (markdown) describing what was implemented
-2. Any downstream ticket proposals if the spec implies them
-3. A report artifact if the spec requires one
-
-Output each artifact as a separate markdown section with a clear filename header:
-### tickets-1.md
-(content for the main ticket update)
-
-### tickets-2.md
-(optional: downstream ticket proposal)
-
-### report-a.md
-(optional: detailed report)
-
-Only include artifacts that are actually needed. Output clean markdown.`;
-  const draftOutput = await spawnPrintRaw(binary, draftPrompt, {
-    cwd: session.worktree,
-    timeout: 120,
-    sessionId: session.id,
-    label: 'ticket-draft',
-  });
-  const artifactsWritten = [];
-  if (draftOutput) {
-    const sections = draftOutput.split(/^### /m).filter(s => s.trim());
-    for (const section2 of sections) {
-      const firstLine = section2
-        .split(
-          `
-`,
-        )[0]
-        .trim();
-      const filename = firstLine.replace(/\.md$/, '').trim() + '.md';
-      if (/^(tickets-\d+|report-[a-z])\.md$/.test(filename)) {
-        const content = section2.slice(firstLine.length).trim();
-        const artifactPath2 = snapshotPath(session.id, version, filename);
-        ensureArtifactDir(artifactPath2);
-        writeFileSync17(artifactPath2, content);
-        artifactsWritten.push(filename);
-      }
-    }
-  }
-  if (artifactsWritten.length === 0) {
-    const defaultArtifact = `# Ticket Update: ${ticketId}
-
-${draftOutput || specContent.slice(0, 2000)}`;
-    const defaultPath = snapshotPath(session.id, version, 'tickets-1.md');
-    ensureArtifactDir(defaultPath);
-    writeFileSync17(defaultPath, defaultArtifact);
-    artifactsWritten.push('tickets-1.md');
-  }
-  console.log(`[ticket_draft] Generated ${artifactsWritten.length} draft artifact(s): ${artifactsWritten.join(', ')}`);
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'ticket_draft:completed',
-    version,
-    metadata: { artifacts: artifactsWritten },
-  });
-  return 'ticket_review';
-}
-
-// src/phases/phase3/ticket-review.ts
-init_log();
-init_artifacts();
-init_inquirer();
-init_markdown();
-import { readFileSync as readFileSync23, readdirSync as readdirSync9 } from 'fs';
-async function handleTicketReview(ctx) {
-  const { session, version } = ctx;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'ticket_review:started',
-    version,
-    metadata: { stepType: 'code', deliveryKind: 'ticket' },
-  });
-  const epochDir = snapshotPath(session.id, version, '.');
-  const artifactFiles = [];
-  try {
-    const files = readdirSync9(epochDir);
-    for (const f of files) {
-      if (/^(tickets-\d+|report-[a-z])\.md$/.test(f)) {
-        artifactFiles.push(f);
-      }
-    }
-  } catch {}
-  if (artifactFiles.length === 0) {
-    console.log('[ticket_review] No draft artifacts to review \u2014 cannot complete');
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'ticket_review:completed',
-      version,
-      metadata: { approved: false, error: 'no_artifacts' },
-    });
-    return 'failed';
-  }
-  console.log(`
-${'='.repeat(60)}`);
-  console.log('Ticket Delivery \u2014 Review Draft Artifacts');
-  console.log(`${'='.repeat(60)}
-`);
-  for (const f of artifactFiles.sort()) {
-    const content = readFileSync23(snapshotPath(session.id, version, f), 'utf-8');
-    console.log(`--- ${f} ---`);
-    console.log(renderMarkdown(content));
-    console.log();
-  }
-  console.log(`${'='.repeat(60)}
-`);
-  const choice = await selectOption('Do you approve these ticket artifacts for publishing?', [
-    {
-      value: 'approve',
-      label: 'Approve & publish',
-      hint: 'Publish ticket updates, comments, and artifacts',
-    },
-    {
-      value: 'feedback',
-      label: 'I have feedback',
-      hint: 'Do not publish \u2014 provide feedback for a new contract epoch',
-    },
-  ]);
-  if (choice === 'feedback') {
-    const feedback = await textInput('What feedback do you have? (This will seed a new contract epoch)', '');
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'ticket_review:completed',
-      version,
-      metadata: {
-        approved: false,
-        hasFeedback: !!feedback.trim(),
-      },
-    });
-    if (feedback.trim()) {
-      const { writeFileSync: writeFileSync18 } = await import('fs');
-      const feedbackPath = snapshotPath(session.id, version, 'feedback.md');
-      const { ensureArtifactDir: ensureArtifactDir2 } = await Promise.resolve().then(
-        () => (init_artifacts(), exports_artifacts),
-      );
-      ensureArtifactDir2(feedbackPath);
-      writeFileSync18(feedbackPath, feedback);
-      console.log('[ticket_review] Feedback saved. A new epoch is needed.');
-      appendEvent(session.id, {
-        ts: new Date().toISOString(),
-        event: 'context:updated',
-        metadata: { ticketFeedback: true },
-      });
-    }
-    return 'completed';
-  }
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'ticket_review:completed',
-    version,
-    metadata: { approved: true },
-  });
-  return 'ticket_publish';
-}
-
-// src/phases/phase3/ticket-publish.ts
-init_log();
-init_artifacts();
-init_scripts();
-import { readFileSync as readFileSync24, readdirSync as readdirSync10 } from 'fs';
-import { join as join17 } from 'path';
-init_format();
-init_markdown();
-async function handleTicketPublish(ctx) {
-  const { session, version, ticketId } = ctx;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'ticket_publish:started',
-    version,
-    metadata: { stepType: 'code', deliveryKind: 'ticket' },
-  });
-  const publishedArtifacts = [];
-  const actions = [];
-  const epochDir = snapshotPath(session.id, version, '.');
-  const artifactFiles = [];
-  try {
-    const files = readdirSync10(epochDir);
-    for (const f of files) {
-      if (/^(tickets-\d+|report-[a-z])\.md$/.test(f)) {
-        artifactFiles.push(f);
-      }
-    }
-  } catch {}
-  const scriptsDir = join17(sessionDir(session.id), 'scripts');
-  for (const f of artifactFiles.sort()) {
-    const content = readFileSync24(snapshotPath(session.id, version, f), 'utf-8');
-    if (f.startsWith('tickets-1')) {
-      const result = runScriptFromDir(scriptsDir, 'update-ticket', [ticketId, content]);
-      if (result.ok) {
-        logOk(`Updated ticket ${ticketId}`);
-        actions.push('update_ticket');
-      } else {
-        const commentResult = runScriptFromDir(scriptsDir, 'add-comment', [ticketId, content]);
-        if (commentResult.ok) {
-          logOk(`Added comment to ${ticketId}`);
-          actions.push('add_comment');
-        } else {
-          logWarn(`Could not update ticket ${ticketId} \u2014 scripts may not be configured`);
-        }
-      }
-      publishedArtifacts.push(f);
-    } else if (f.startsWith('tickets-')) {
-      const result = runScriptFromDir(scriptsDir, 'create-downstream-ticket', [ticketId, content]);
-      if (result.ok) {
-        logOk(`Created downstream ticket from ${f}`);
-        actions.push('create_downstream');
-      }
-      publishedArtifacts.push(f);
-    } else if (f.startsWith('report-')) {
-      const mdPath = snapshotPath(session.id, version, f);
-      let artifactPath2 = mdPath;
-      const pdfPath = join17(epochDir, f.replace(/\.md$/, '.pdf'));
-      const pdfResult = markdownToPdf(readFileSync24(mdPath, 'utf-8'), pdfPath, f.replace(/\.md$/, ''));
-      if (pdfResult) {
-        artifactPath2 = pdfResult;
-        logOk(`Converted ${f} to PDF`);
-      } else {
-        logDim(`PDF conversion not available for ${f}, attaching markdown`);
-      }
-      const result = runScriptFromDir(scriptsDir, 'attach-artifact', [ticketId, artifactPath2]);
-      if (result.ok) {
-        logOk(`Attached ${artifactPath2} to ${ticketId}`);
-        actions.push('attach_artifact');
-      }
-      publishedArtifacts.push(f);
-      if (pdfResult) {
-        publishedArtifacts.push(f.replace(/\.md$/, '.pdf'));
-      }
-    }
-  }
-  if (ticketId) {
-    runScriptFromDir(scriptsDir, 'to-review', [ticketId]);
-    actions.push('move_to_review');
-  }
-  updateDeliveryManifest(session.id, version, {
-    ticketArtifacts: publishedArtifacts,
-    publishedAt: new Date().toISOString(),
-  });
-  console.log(`[ticket_publish] Published ${publishedArtifacts.length} artifact(s), ${actions.length} action(s)`);
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'ticket_publish:completed',
-    version,
-    metadata: {
-      publishedArtifacts,
-      actions,
-    },
-  });
-  return 'completed';
-}
-
-// src/phases/phase3/completed.ts
-init_log();
-async function handleCompleted2(ctx) {
-  const { session, version, prNumber, prUrl } = ctx;
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'phase3:completed',
-    version,
-    metadata: { prNumber, prUrl },
-  });
-  console.log(`
-Phase 3 completed successfully`);
-  if (prUrl) {
-    console.log(`PR: ${prUrl}`);
-  } else if (prNumber) {
-    console.log(`PR: #${prNumber}`);
-  }
-  console.log(`The PR is merge-ready. Please review and merge manually.
-`);
-  return null;
-}
-
-// src/phases/phase3/failed.ts
-init_log();
-init_inquirer();
-async function handleFailed2(ctx) {
-  const { session, version } = ctx;
-  const { readLog: readLog3 } = await Promise.resolve().then(() => (init_log(), exports_log));
-  const log = readLog3(session.id);
-  const errorEvent = [...log].reverse().find(e2 => e2.event.includes(':error') || e2.metadata?.error);
-  const errorMsg = errorEvent?.metadata?.error || 'Unknown error';
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'phase3:failed',
-    version,
-    metadata: { error: errorMsg },
-  });
-  console.error(`
-Phase 3 failed: ${errorMsg}`);
-  const retry = await confirmAction('Would you like to retry?', false);
-  if (retry) {
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'phase3:retry',
-      version,
-    });
-    return 'commit_pending';
-  }
-  console.log(`
-Phase 3 aborted. Use "kautopilot start --phase polish" to retry.
-`);
-  return null;
-}
-
-// src/phases/phase3/index.ts
-var prStates = {
-  commit_pending: handleCommitPending,
-  prereview: handlePrereview,
-  push: handlePush,
-  create_pr: handleCreatePr,
-  poll: handlePoll,
-  ensure_branch: handleEnsureBranch,
-  eval: handleEval,
-  act: handleAct,
-  tty_resolve: handleTtyResolve,
-  write_fix: handleWriteFix,
-  run_fix: handleRunFix,
-  feedback_check: handleFeedbackCheck,
-  feedback: handleFeedback,
-  completed: handleCompleted2,
-  failed: handleFailed2,
-};
-var ticketStates = {
-  commit_pending: handleCommitPending,
-  ticket_draft: handleTicketDraft,
-  ticket_review: handleTicketReview,
-  ticket_publish: handleTicketPublish,
-  completed: handleCompleted2,
-  failed: handleFailed2,
-};
-async function runPhase3(session, config, options2) {
-  loadSessionAgents(session.id);
-  const status = ensureStatus(session.id);
-  const version = status.version;
-  const deliveryKind = status.context.deliveryKind ?? 'pr';
-  const ctx = {
-    session,
-    config,
-    version,
-    attempt: status.context.attempt ?? 1,
-    ticketId: session.ticket_id || 'unknown',
-    deliveryKind,
-    prNumber: status.context.prNumber ?? null,
-    prUrl: status.context.prUrl ?? null,
-    baseBranch: config.repo.baseBranch,
-    pushCycle: status.context.pushCycle ?? 0,
-    mergePolicy: null,
-    deferredActions: [],
-    forceWithLease: false,
-  };
-  const states = deliveryKind === 'ticket' ? ticketStates : prStates;
-  return runStateMachine('phase3', states, ctx, {
-    terminalStates: ['completed', 'failed'],
-    forceStartState: options2?.forceStartState,
-  });
-}
-
-// src/phases/runner.ts
-var PHASE_TO_MACHINE_NAME = {
-  plan: 'phase1',
-  implementation: 'phase2',
-  polish: 'phase3',
-};
-async function runPhase(phase, session, config, options2) {
-  try {
-    switch (phase) {
-      case 'plan':
-        return await runPhase1(session, config, options2);
-      case 'implementation':
-        return await runPhase2(session, config, options2);
-      case 'polish':
-        return await runPhase3(session, config, options2);
-    }
-  } catch (err) {
-    const machineName = PHASE_TO_MACHINE_NAME[phase];
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: `${machineName}:error`,
-      metadata: { error: err instanceof Error ? err.message : String(err) },
-    });
-    throw err;
-  }
-}
-
-// src/cli/start.ts
-init_types2();
-init_config();
-init_artifacts();
-init_format();
-init_config_dir();
-function createStartCommand() {
-  return new Command('start')
-    .option('--phase <phaseOrStep>', 'Force start at specific phase or step')
-    .option('--local', 'Local mode')
-    .action(async opts => {
-      try {
-        await runStart(opts);
-      } catch (err) {
-        logError(err instanceof Error ? err.message : String(err));
-        process.exit(1);
-      }
-    });
-}
-async function runStart(opts) {
-  const repoPath = getGitRoot();
-  const worktree = getWorktree();
-  let session = getSessionByWorktree(repoPath, worktree);
-  if (!session) {
-    logInfo('No session found. Initializing...');
-    const { runInit: runInit2 } = await Promise.resolve().then(() => (init_init2(), exports_init));
-    await runInit2(undefined, { local: opts.local });
-    session = getSessionByWorktree(repoPath, worktree);
-    if (!session) {
-      logError('Init completed but session not found. Something went wrong.');
-      process.exit(1);
-    }
-  }
-  if (session.state === 'init') {
-    logError(
-      `Session ${session.id} has incomplete initialization. Run \`kautopilot init\` to start a fresh init attempt or \`kautopilot init --reset\` to re-initialize.`,
-    );
-    process.exit(1);
-  }
-  detectAndRecoverCrash(session.id, session.worktree);
-  const lockInfo = checkLock(session.id);
-  if (lockInfo.locked) {
-    logError(`Session is already running (PID ${lockInfo.pid}). Use \`kautopilot stop\` first.`);
-    process.exit(1);
-  }
-  const config = readConfig(session.id);
-  if (!config) {
-    logError('No config found. Run `kautopilot init` first.');
-    process.exit(1);
-  }
-  const sDir = sessionDir(session.id);
-  if (!existsSync29(`${sDir}/config.yaml`)) {
-    logError('Config file missing. Run `kautopilot init` first.');
-    process.exit(1);
-  }
-  let phase;
-  let forceStartState;
-  if (opts.phase) {
-    const normalized = opts.phase.toLowerCase();
-    const colonMatch = normalized.match(/^(\w+):(\w+)$/);
-    if (colonMatch) {
-      const [_3, phasePart, statePart] = colonMatch;
-      if (phasePart in PHASE_ALIASES) {
-        phase = PHASE_ALIASES[phasePart];
-        forceStartState = statePart;
-      } else {
-        logError(`Unknown phase: ${phasePart}. Valid phases: plan, impl(ementation), polish`);
-        process.exit(1);
-      }
-    } else if (normalized in PHASE_ALIASES) {
-      phase = PHASE_ALIASES[normalized];
-    } else {
-      logError(
-        `Unknown phase: ${opts.phase}. Valid phases: plan, impl(ementation), polish, or phase:state (e.g., impl:setup_run)`,
-      );
-      process.exit(1);
-    }
-    if (phase === 'implementation' || phase === 'polish') {
-      const hasSpec = existsSync29(`${sDir}/artifacts`);
-      if (!hasSpec) {
-        logError(`Cannot start ${phase}: no spec artifacts found. Run phase 'plan' first.`);
-        process.exit(1);
-      }
-    }
-    if (phase === 'polish') {
-      const hasPlans = existsSync29(`${sDir}/artifacts`);
-      if (!hasPlans) {
-        logError(`Cannot start polish: no plan artifacts found. Run phase 'implementation' first.`);
-        process.exit(1);
-      }
-    }
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'phase_start:forced',
-      metadata: { to: phase, reason: 'user_start_phase', forceStartState },
-    });
-    logField('Session', session.id);
-    logInfo(`Jumping to ${phase}${forceStartState ? `:${forceStartState}` : ''} (user-specified)`);
-  } else {
-    const status = ensureStatus(session.id);
-    if (status.phase === 'none' || status.phase === '') {
-      phase = 'plan';
-    } else {
-      phase = status.phase;
-      if (phase === 'implementation' || phase === 'polish') {
-        const artifactsDir = `${sDir}/artifacts`;
-        if (!existsSync29(artifactsDir)) {
-          logWarn(`Cannot resume ${phase}: no session artifacts found. Restarting from plan.`);
-          phase = 'plan';
-        }
-      }
-    }
-    logInfo(`Starting phase: ${phase}`);
-  }
-  acquireLock(session.id);
-  try {
-    await discoverConfigDirs(config, session.id);
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'start:started',
-      metadata: { phase, pid: process.pid },
-    });
-    const PHASE_ORDER = ['plan', 'implementation', 'polish'];
-    const startIdx = PHASE_ORDER.indexOf(phase);
-    for (let i = startIdx; i < PHASE_ORDER.length; i++) {
-      const currentPhase = PHASE_ORDER[i];
-      if (i > startIdx) {
-        logInfo(`Advancing to phase: ${currentPhase}`);
-      }
-      const completed = await runPhase(currentPhase, session, config, i === startIdx ? { forceStartState } : {});
-      if (!completed) {
-        const status = ensureStatus(session.id);
-        if (currentPhase === 'implementation' && status.context.rewriteDecision === 'revisit_spec') {
-          const nextVersion = status.version + 1;
-          logInfo(`Escalating to plan for contract rewrite v${nextVersion}`);
-          supersedEpoch(session.id, status.version, nextVersion);
-          appendEvent(session.id, {
-            ts: new Date().toISOString(),
-            event: 'context:updated',
-            metadata: { rewriteDecision: undefined },
-          });
-          const replanned = await runPhase('plan', session, config, { versionOverride: nextVersion });
-          if (!replanned) {
-            logInfo('Phase plan interrupted \u2014 run `kautopilot start` to resume');
-            break;
-          }
-          i = PHASE_ORDER.indexOf('implementation') - 1;
-          continue;
-        }
-        logInfo(`Phase ${currentPhase} interrupted \u2014 run \`kautopilot start\` to resume`);
-        break;
-      }
-      if (currentPhase === 'polish') {
-        const feedbackStatus = ensureStatus(session.id);
-        if (feedbackStatus.context.ticketFeedback) {
-          const nextVersion = feedbackStatus.version + 1;
-          logInfo(`Ticket feedback detected \u2014 escalating to v${nextVersion}`);
-          supersedEpoch(session.id, feedbackStatus.version, nextVersion);
-          appendEvent(session.id, {
-            ts: new Date().toISOString(),
-            event: 'context:updated',
-            metadata: { ticketFeedback: undefined },
-          });
-          const replanned = await runPhase('plan', session, config, { versionOverride: nextVersion });
-          if (!replanned) {
-            logInfo('Phase plan interrupted \u2014 run `kautopilot start` to resume');
-            break;
-          }
-          i = PHASE_ORDER.indexOf('implementation') - 1;
-          continue;
-        }
-      }
-    }
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'start:completed',
-      metadata: { phase: 'all' },
-    });
-  } finally {
-    releaseLock(session.id);
-  }
-}
-
-// src/cli/status.ts
-init_esm();
-init_db();
-init_init_db();
-init_status();
-init_init_status();
-init_git();
-init_format();
-function createStatusCommand() {
-  return new Command('status')
-    .argument('[id]', 'Session ID (optional \u2014 defaults to local worktree)')
-    .option('--json', 'Machine-readable JSON output')
-    .action(async (id, opts) => {
-      try {
-        await runStatus(id, opts);
-      } catch (err) {
-        logError(err instanceof Error ? err.message : String(err));
-        process.exit(1);
-      }
-    });
-}
-async function runStatus(id, opts) {
-  if (id) {
-    const session2 = getSessionById(id);
-    if (session2) {
-      const status = ensureStatus(session2.id);
-      const phaseElapsed = status.startedAt ? Date.now() - new Date(status.startedAt).getTime() : 0;
-      const data2 = {
-        kind: 'session',
-        session: session2.id,
-        ticketId: session2.ticket_id,
-        branch: session2.branch,
-        repo: session2.git_root_host,
-        org: session2.git_root_host.split('/')[1],
-        local: session2.local === 1,
-        phase: status.phase,
-        state: status.state,
-        stateStatus: status.stateStatus,
-        running: status.running,
-        stepType: status.stepType,
-        userTurn: status.userTurn,
-        checkpoint: status.lastCheckpoint,
-        version: status.version,
-        tasks: status.tasks,
-        context: status.context,
-        stats: status.stats,
-        elapsed: phaseElapsed,
-        walCursor: status.walCursor,
-        initAttempt: getInitAttemptByPromotedSessionId(session2.id)?.id ?? null,
-        activeEpoch: status.version,
-        currentPlans: (() => {
-          const pm = readPlanManifest(session2.id, status.version);
-          return (
-            pm?.plans.map(p2 => ({
-              ordinal: p2.ordinal,
-              file: p2.file,
-              activeRewrite: p2.activeRewrite,
-              completed: p2.completed,
-              commitSha: p2.commitSha ?? null,
-            })) ?? []
-          );
-        })(),
-        delivery: (() => {
-          const d3 = readDeliveryManifest(session2.id, status.version);
-          return d3
-            ? {
-                kind: d3.kind,
-                prNumber: d3.prNumber ?? null,
-                prUrl: d3.prUrl ?? null,
-                rolloverHistory: d3.prRolloverHistory ?? [],
-                ticketArtifacts: d3.ticketArtifacts ?? [],
-                publishedAt: d3.publishedAt ?? null,
-              }
-            : null;
-        })(),
-        rolloverRecommendation: status.context.rolloverRecommendation ?? null,
-      };
-      if (opts.json) {
-        console.log(JSON.stringify(data2, null, 2));
-        return;
-      }
-      logField('Session', session2.id);
-      logField('Ticket', session2.ticket_id || '\u2014');
-      logField('Branch', session2.branch || '\u2014');
-      logField('Repo', session2.git_root_host);
-      logField('Local', session2.local === 1 ? 'yes' : 'no');
-      console.log();
-      logField('Phase', status.phase);
-      const stepSuffix = status.stepType
-        ? ` (${status.stepType}${status.userTurn === true ? ", user's turn" : status.userTurn === false ? ", LLM's turn" : ''})`
-        : '';
-      logField('Step', (status.state || '\u2014') + stepSuffix);
-      logField('Status', status.running ? `running (${status.stateStatus})` : 'stopped');
-      logField('Checkpoint', status.lastCheckpoint || '\u2014');
-      console.log();
-      logField('Duration', formatDuration(phaseElapsed));
-      logField('Version', String(status.version));
-      logField('Init attempt', data2.initAttempt || '\u2014');
-      const taskEntries = Object.entries(status.tasks);
-      if (taskEntries.length > 0) {
-        console.log();
-        logField('Tasks', '');
-        for (const [name, task] of taskEntries) {
-          logField(`  ${name}`, task.status);
-        }
-      }
-      return;
-    }
-    const initAttempt = getInitAttemptById(id);
-    if (!initAttempt) {
-      logError(`Session or init attempt ${id} not found in index.`);
-      process.exit(1);
-    }
-    const initStatus = ensureInitStatus(initAttempt.id);
-    const elapsed = initStatus.startedAt ? Date.now() - new Date(initStatus.startedAt).getTime() : 0;
-    const data = {
-      kind: 'init',
-      initAttempt: initAttempt.id,
-      outcome: initAttempt.outcome,
-      promotedSessionId: initAttempt.promoted_session_id,
-      repoPath: initAttempt.repo_path,
-      worktree: initAttempt.worktree,
-      repo: initAttempt.git_root_host,
-      org: initAttempt.org,
-      state: initStatus.state,
-      stateStatus: initStatus.stateStatus,
-      running: initStatus.running,
-      context: initStatus.context,
-      completedStates: initStatus.completedStates,
-      elapsed,
-      walCursor: initStatus.walCursor,
-    };
-    if (opts.json) {
-      console.log(JSON.stringify(data, null, 2));
-      return;
-    }
-    logField('Init attempt', initAttempt.id);
-    logField('Outcome', initAttempt.outcome || 'active');
-    logField('Promoted', initAttempt.promoted_session_id || '\u2014');
-    logField('Repo', initAttempt.git_root_host);
-    console.log();
-    logField('State', initStatus.state);
-    logField('Status', initStatus.running ? `running (${initStatus.stateStatus})` : initStatus.stateStatus);
-    logField('Duration', formatDuration(elapsed));
-    return;
-  }
-  const repoPath = getGitRoot();
-  const worktree = getWorktree();
-  const session = getSessionByWorktree(repoPath, worktree);
-  if (session) {
-    await runStatus(session.id, opts);
-    return;
-  }
-  const activeInit = getActiveInitForWorktree(repoPath, worktree);
-  if (!activeInit) {
-    logError('No session or init attempt found in this worktree.');
-    process.exit(1);
-  }
-  await runStatus(activeInit.id, opts);
-}
-
 // src/cli/describe.ts
-init_esm();
-init_db();
-init_init_db();
-init_log();
-init_status();
-init_init_status();
-init_git();
 init_format();
 function createDescribeCommand() {
   return new Command('describe')
@@ -88534,13 +85366,13 @@ async function describeSession(sessionId, opts) {
   const initAttemptId = getInitAttemptByPromotedSessionId(session.id)?.id ?? null;
   if (opts.json) {
     const events = log.map(entry => {
-      const base2 = {
+      const base = {
         ts: entry.ts,
         event: entry.event,
       };
-      if (entry.version !== undefined) base2.version = entry.version;
-      if (entry.attempt !== undefined) base2.attempt = entry.attempt;
-      if (entry.metadata) base2.metadata = entry.metadata;
+      if (entry.version !== undefined) base.version = entry.version;
+      if (entry.attempt !== undefined) base.attempt = entry.attempt;
+      if (entry.metadata) base.metadata = entry.metadata;
       if (entry.event.endsWith(':completed')) {
         const startEvent = entry.event.replace(':completed', ':started');
         const started = log.find(
@@ -88550,10 +85382,10 @@ async function describeSession(sessionId, opts) {
             (entry.attempt === undefined || e2.attempt === entry.attempt),
         );
         if (started) {
-          base2.duration = new Date(entry.ts).getTime() - new Date(started.ts).getTime();
+          base.duration = new Date(entry.ts).getTime() - new Date(started.ts).getTime();
         }
       }
-      return base2;
+      return base;
     });
     const activeEpoch = status.version;
     const supersededEpochs = [];
@@ -88761,107 +85593,55 @@ function formatTimestamp(ts) {
   });
 }
 
-// src/cli/stop.ts
+// src/index.ts
+init_init2();
+
+// src/cli/log-event.ts
 init_esm();
 init_db();
-init_lock();
-init_log();
 init_git();
-init_artifacts();
-init_inquirer();
+init_log();
 init_format();
-import { rmSync as rmSync3 } from 'fs';
-function createStopCommand() {
-  return new Command('stop')
-    .argument('[id]', 'Session ID (optional \u2014 defaults to local)')
-    .option('--force', 'Skip confirmation')
-    .action(async (id, opts) => {
+function createLogEventCommand() {
+  return new Command('log-event')
+    .argument('<event>', 'Event name (e.g. spec:approved)')
+    .option('--metadata <json>', 'JSON metadata to attach')
+    .action(async (event, opts) => {
       try {
-        await runStop(id, opts);
+        const repoPath = getGitRoot();
+        const worktree = getWorktree();
+        const session = getSessionByWorktree(repoPath, worktree);
+        if (!session) {
+          logError('No session found for this worktree.');
+          process.exit(1);
+        }
+        let metadata;
+        if (opts.metadata) {
+          try {
+            metadata = JSON.parse(opts.metadata);
+          } catch {
+            logError('Invalid JSON for --metadata');
+            process.exit(1);
+          }
+        }
+        appendEvent(session.id, {
+          ts: new Date().toISOString(),
+          event,
+          metadata,
+        });
+        logOk(`Event logged: ${event}`);
       } catch (err) {
         logError(err instanceof Error ? err.message : String(err));
         process.exit(1);
       }
     });
 }
-async function runStop(id, opts) {
-  let session;
-  let isGlobal = !!id;
-  if (id) {
-    session = getSessionById(id);
-    if (!session) {
-      logError(`Session ${id} not found in index.`);
-      process.exit(1);
-    }
-  } else {
-    try {
-      const repoPath = getGitRoot();
-      const worktree = getWorktree();
-      session = getSessionByWorktree(repoPath, worktree);
-    } catch {
-      logError('No session found in this worktree.');
-      process.exit(1);
-    }
-    if (!session) {
-      logError('No session found in this worktree.');
-      process.exit(1);
-    }
-  }
-  const lockInfo = checkLock(session.id);
-  if (!lockInfo.locked) {
-    logOk('Session is not running.');
-    return;
-  }
-  if (!opts.force && !isGlobal) {
-    const confirmed = await confirmAction(`Stop session ${session.id}?`, false);
-    if (!confirmed) return;
-  }
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'stop:started',
-  });
-  let processesKilled = 0;
-  const pid = lockInfo.pid;
-  try {
-    process.kill(pid, 'SIGTERM');
-    processesKilled++;
-    for (let i = 0; i < 50; i++) {
-      await new Promise(r2 => setTimeout(r2, 100));
-      try {
-        process.kill(pid, 0);
-      } catch {
-        break;
-      }
-    }
-    try {
-      process.kill(pid, 0);
-      process.kill(pid, 'SIGKILL');
-      processesKilled++;
-    } catch {}
-  } catch {}
-  releaseLock(session.id);
-  appendEvent(session.id, {
-    ts: new Date().toISOString(),
-    event: 'stop:completed',
-    metadata: { processesKilled },
-  });
-  if (isGlobal) {
-    const doDelete = opts.force || (await confirmAction(`Delete session directory and index entry?`, false));
-    if (doDelete) {
-      rmSync3(sessionDir(session.id), { recursive: true, force: true });
-      deleteSession(session.id);
-      logOk(`Session ${session.id} stopped and removed.`);
-      return;
-    }
-  }
-  logOk(`Session ${session.id} stopped.`);
-}
 
 // src/cli/logs.ts
 init_esm();
 init_db();
-init_log();
 init_git();
+init_log();
 init_format();
 function createLogsCommand() {
   return new Command('logs')
@@ -88946,101 +85726,13 @@ async function runLogs(phase, opts) {
   }
 }
 
-// src/cli/ps.ts
-init_esm();
-init_db();
-init_status();
-init_lock();
-init_format();
-function createPsCommand() {
-  return new Command('ps')
-    .option('--repo <origin>', 'Filter by git root (substring match)')
-    .option('--all', 'Include stopped/completed sessions')
-    .option('--json', 'Machine-readable output')
-    .action(async opts => {
-      try {
-        await runPs(opts);
-      } catch (err) {
-        console.error(err instanceof Error ? err.message : String(err));
-        process.exit(1);
-      }
-    });
-}
-async function runPs(opts) {
-  const sessions = listSessions({ includeAll: true });
-  let filtered = sessions;
-  if (opts.repo) {
-    filtered = sessions.filter(s => s.git_root_host.includes(opts.repo.toLowerCase()));
-  }
-  const runningRows = filtered.filter(session => opts.all || checkLock(session.id).locked);
-  if (runningRows.length === 0) {
-    console.log('No sessions found.');
-    return;
-  }
-  const rows = runningRows.map(session => {
-    const lockInfo = checkLock(session.id);
-    const status = ensureStatus(session.id);
-    const elapsed = lockInfo.locked && status.startedAt ? Date.now() - new Date(status.startedAt).getTime() : 0;
-    return {
-      id: session.id,
-      ticketId: session.ticket_id || '\u2014',
-      repo: session.git_root_host,
-      branch: session.branch || '\u2014',
-      state: session.state,
-      phase: status.phase,
-      step: status.state,
-      stateStatus: status.stateStatus,
-      stepType: status.stepType,
-      userTurn: status.userTurn,
-      running: lockInfo.locked,
-      checkpoint: status.lastCheckpoint,
-      elapsed,
-      tasks: Object.fromEntries(Object.entries(status.tasks).map(([k3, v2]) => [k3, v2.status])),
-    };
-  });
-  if (opts.json) {
-    console.log(JSON.stringify(rows, null, 2));
-    return;
-  }
-  const cols = {
-    session: 10,
-    ticket: 12,
-    repo: 32,
-    branch: 30,
-    phase: 16,
-    status: 16,
-  };
-  const header = [
-    'SESSION'.padEnd(cols.session),
-    'TICKET'.padEnd(cols.ticket),
-    'REPO'.padEnd(cols.repo),
-    'BRANCH'.padEnd(cols.branch),
-    'PHASE'.padEnd(cols.phase),
-    'STATUS'.padEnd(cols.status),
-  ].join(' ');
-  console.log(header);
-  for (const row of rows) {
-    const statusText =
-      row.state === 'init' ? 'init-incomplete' : row.running ? `running (${formatDuration(row.elapsed)})` : 'stopped';
-    const line = [
-      row.id.padEnd(cols.session),
-      row.ticketId.padEnd(cols.ticket),
-      row.repo.slice(0, cols.repo).padEnd(cols.repo),
-      row.branch.slice(0, cols.branch).padEnd(cols.branch),
-      formatPhase(row.phase),
-      formatStatus(row.state, row.running),
-    ].join(' ');
-    console.log(line);
-  }
-}
-
 // src/cli/org.ts
 init_esm();
 init_config();
 init_scripts();
 init_format();
-import { existsSync as existsSync30, mkdirSync as mkdirSync20 } from 'fs';
-import { join as join18 } from 'path';
+import { existsSync as existsSync17, mkdirSync as mkdirSync16 } from 'fs';
+import { join as join10 } from 'path';
 var ORGS_DIR2 = `${process.env.HOME}/.kautopilot/orgs`;
 function createOrgCommand() {
   return new Command('org')
@@ -89062,19 +85754,19 @@ function createOrgInitCommand() {
     });
 }
 async function runOrgInit(name) {
-  const orgDir = join18(ORGS_DIR2, name);
-  if (existsSync30(orgDir)) {
-    const { confirmAction: confirmAction3 } = await Promise.resolve().then(() => (init_inquirer(), exports_inquirer));
-    const confirmed = await confirmAction3(`Org '${name}' already exists. Overwrite?`, false);
+  const orgDir = join10(ORGS_DIR2, name);
+  if (existsSync17(orgDir)) {
+    const { confirmAction: confirmAction2 } = await Promise.resolve().then(() => (init_inquirer(), exports_inquirer));
+    const confirmed = await confirmAction2(`Org '${name}' already exists. Overwrite?`, false);
     if (!confirmed) return;
   }
-  mkdirSync20(orgDir, { recursive: true });
+  mkdirSync16(orgDir, { recursive: true });
   ensureGlobalConfig();
   const globalConfigPath2 = `${process.env.HOME}/.kautopilot/config.yaml`;
-  const orgConfigPath2 = join18(orgDir, 'config.yaml');
-  const { copyFileSync: copyFileSync7 } = await import('fs');
-  if (existsSync30(globalConfigPath2)) {
-    copyFileSync7(globalConfigPath2, orgConfigPath2);
+  const orgConfigPath2 = join10(orgDir, 'config.yaml');
+  const { copyFileSync: copyFileSync4 } = await import('fs');
+  if (existsSync17(globalConfigPath2)) {
+    copyFileSync4(globalConfigPath2, orgConfigPath2);
     logField('Config', `${orgConfigPath2} (copied from global)`);
   }
   logField('Org', name);
@@ -89103,22 +85795,22 @@ function createOrgLsCommand() {
   });
 }
 async function runOrgLs() {
-  mkdirSync20(ORGS_DIR2, { recursive: true });
-  const { readdirSync: readdirSync11, statSync } = await import('fs');
-  const orgs = readdirSync11(ORGS_DIR2, { withFileTypes: true }).filter(d3 => d3.isDirectory());
+  mkdirSync16(ORGS_DIR2, { recursive: true });
+  const { readdirSync: readdirSync6, statSync } = await import('fs');
+  const orgs = readdirSync6(ORGS_DIR2, { withFileTypes: true }).filter(d3 => d3.isDirectory());
   if (orgs.length === 0) {
     logInfo('No orgs configured. Run `kautopilot org init <name>` to create one.');
     return;
   }
   const cols = { org: 12, scripts: 60 };
-  console.log('ORG'.padEnd(cols.org) + 'SCRIPTS');
+  console.log(`${'ORG'.padEnd(cols.org)}SCRIPTS`);
   for (const org of orgs) {
-    const orgDir = join18(ORGS_DIR2, org.name);
-    const scripts = readdirSync11(orgDir)
+    const orgDir = join10(ORGS_DIR2, org.name);
+    const scripts = readdirSync6(orgDir)
       .filter(f => !f.startsWith('.'))
       .filter(f => {
         try {
-          return statSync(join18(orgDir, f)).isFile();
+          return statSync(join10(orgDir, f)).isFile();
         } catch {
           return false;
         }
@@ -89127,15 +85819,13 @@ async function runOrgLs() {
   }
 }
 
-// src/cli/spec-review.ts
+// src/cli/plan-review.ts
 init_esm();
+init_config();
 init_db();
 init_git();
-init_config();
-init_status();
 
 // src/core/review-runner.ts
-init_log();
 init_spawn();
 
 // src/util/spinner.ts
@@ -89163,7 +85853,13 @@ class MultiSpinner {
   rendered = false;
   maxMsgLen = 0;
   add(id, msg) {
-    this.tasks.push({ id, msg, state: 'spinning', startedAt: Date.now(), finishedAt: null });
+    this.tasks.push({
+      id,
+      msg,
+      state: 'spinning',
+      startedAt: Date.now(),
+      finishedAt: null,
+    });
     if (msg.length > this.maxMsgLen) this.maxMsgLen = msg.length;
     if (isTTY2 && !this.timer) {
       this.startTimer();
@@ -89231,7 +85927,7 @@ class MultiSpinner {
       const maxMsg = cols - 13;
       let msg = task.msg;
       if (maxMsg > 4 && msg.length > maxMsg) {
-        msg = msg.slice(0, maxMsg - 1) + '\u2026';
+        msg = `${msg.slice(0, maxMsg - 1)}\u2026`;
       }
       const padded = msg.padEnd(Math.min(this.maxMsgLen, maxMsg > 0 ? maxMsg : this.maxMsgLen));
       const time = `${c2.dim}${timeStr}${c2.reset}`;
@@ -89240,6 +85936,38 @@ class MultiSpinner {
     }
     this.rendered = true;
   }
+}
+
+// src/core/review-runner.ts
+init_log();
+
+// src/core/type-config.ts
+import { join as join11 } from 'path';
+function buildPromptVars(worktree, version, ticketId) {
+  const vDir = join11(worktree, 'spec', ticketId, `v${version}`);
+  return {
+    ticket: join11(worktree, 'spec', ticketId, 'ticket.md'),
+    spec: join11(vDir, 'task-spec.md'),
+    specDir: vDir,
+    plans: join11(vDir, 'plans'),
+    worktree,
+    triage: join11(vDir, 'triage.md'),
+  };
+}
+function resolvePromptVars(prompt, vars) {
+  let result = prompt;
+  for (const [key, value] of Object.entries(vars)) {
+    result = result.replace(new RegExp(`\\{${key}\\}`, 'g'), value);
+  }
+  return result;
+}
+function resolveTimeout(specific, config) {
+  return specific ?? config.settings.defaultLlmTimeout;
+}
+function resolveBinary(binaries, config) {
+  if (process.env.CLAUDE_BINARY) return process.env.CLAUDE_BINARY;
+  if (binaries && binaries.length > 0) return binaries[0];
+  return config.claude_binary ?? 'claude';
 }
 
 // src/core/review-runner.ts
@@ -89342,51 +86070,7 @@ ${r2.issues}`,
   }
 }
 
-// src/cli/spec-review.ts
-init_format();
-function createSpecReviewCommand() {
-  return new Command('spec-review')
-    .description('Run spec reviewers for the current session (stateless, stdout only)')
-    .action(async () => {
-      try {
-        await runSpecReview();
-      } catch (err) {
-        logError(err instanceof Error ? err.message : String(err));
-        process.exit(1);
-      }
-    });
-}
-async function runSpecReview() {
-  const repoPath = getGitRoot();
-  const worktree = getWorktree();
-  const session = getSessionByWorktree(repoPath, worktree);
-  if (!session) {
-    logError('No session found in this worktree.');
-    process.exit(1);
-  }
-  const config = readConfig(session.id);
-  if (!config) {
-    logError('No config found for this session.');
-    process.exit(1);
-  }
-  const status = ensureStatus(session.id);
-  const version = status.version || 1;
-  const reviewers = config.spec_reviewers;
-  if (!reviewers || Object.keys(reviewers).length === 0) {
-    console.log('No spec reviewers configured.');
-    return;
-  }
-  const vars = buildPromptVars(worktree, version);
-  const summary = await runReviewers(reviewers, vars, config, session.id);
-  console.log(summary);
-}
-
 // src/cli/plan-review.ts
-init_esm();
-init_db();
-init_git();
-init_config();
-init_status();
 init_format();
 function createPlanReviewCommand() {
   return new Command('plan-review')
@@ -89415,60 +86099,4320 @@ async function runPlanReview() {
   }
   const status = ensureStatus(session.id);
   const version = status.version || 1;
-  const reviewers = config.plan_reviewers;
+  const reviewers = config.agents.phase1.plan_reviewers;
   if (!reviewers || Object.keys(reviewers).length === 0) {
     console.log('No plan reviewers configured.');
     return;
   }
-  const vars = buildPromptVars(worktree, version);
+  const vars = buildPromptVars(worktree, version, session.ticket_id || 'local');
   const summary = await runReviewers(reviewers, vars, config, session.id);
   console.log(summary);
 }
 
-// src/cli/log-event.ts
+// src/cli/ps.ts
 init_esm();
 init_db();
-init_log();
-init_git();
+init_lock();
 init_format();
-function createLogEventCommand() {
-  return new Command('log-event')
-    .argument('<event>', 'Event name (e.g. spec:approved)')
-    .option('--metadata <json>', 'JSON metadata to attach')
-    .action(async (event, opts) => {
+function createPsCommand() {
+  return new Command('ps')
+    .option('--repo <origin>', 'Filter by git root (substring match)')
+    .option('--all', 'Include stopped/completed sessions')
+    .option('--json', 'Machine-readable output')
+    .action(async opts => {
       try {
-        const repoPath = getGitRoot();
-        const worktree = getWorktree();
-        const session = getSessionByWorktree(repoPath, worktree);
-        if (!session) {
-          logError('No session found for this worktree.');
-          process.exit(1);
-        }
-        let metadata;
-        if (opts.metadata) {
-          try {
-            metadata = JSON.parse(opts.metadata);
-          } catch {
-            logError('Invalid JSON for --metadata');
-            process.exit(1);
-          }
-        }
-        appendEvent(session.id, {
-          ts: new Date().toISOString(),
-          event,
-          metadata,
-        });
-        logOk(`Event logged: ${event}`);
+        await runPs(opts);
+      } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+    });
+}
+async function runPs(opts) {
+  const sessions = listSessions({ includeAll: true });
+  let filtered = sessions;
+  if (opts.repo) {
+    const repoFilter = opts.repo.toLowerCase();
+    filtered = sessions.filter(s => s.git_root_host.includes(repoFilter));
+  }
+  const runningRows = filtered.filter(session => opts.all || checkLock(session.id).locked);
+  if (runningRows.length === 0) {
+    console.log('No sessions found.');
+    return;
+  }
+  const rows = runningRows.map(session => {
+    const lockInfo = checkLock(session.id);
+    const status = ensureStatus(session.id);
+    const elapsed = lockInfo.locked && status.startedAt ? Date.now() - new Date(status.startedAt).getTime() : 0;
+    return {
+      id: session.id,
+      ticketId: session.ticket_id || '\u2014',
+      repo: session.git_root_host,
+      branch: session.branch || '\u2014',
+      state: session.state,
+      phase: status.phase,
+      step: status.state,
+      stateStatus: status.stateStatus,
+      stepType: status.stepType,
+      userTurn: status.userTurn,
+      running: lockInfo.locked,
+      checkpoint: status.lastCheckpoint,
+      elapsed,
+      tasks: Object.fromEntries(Object.entries(status.tasks).map(([k3, v2]) => [k3, v2.status])),
+    };
+  });
+  if (opts.json) {
+    console.log(JSON.stringify(rows, null, 2));
+    return;
+  }
+  const cols = {
+    session: 10,
+    ticket: 12,
+    repo: 32,
+    branch: 30,
+    phase: 16,
+    status: 16,
+  };
+  const header = [
+    'SESSION'.padEnd(cols.session),
+    'TICKET'.padEnd(cols.ticket),
+    'REPO'.padEnd(cols.repo),
+    'BRANCH'.padEnd(cols.branch),
+    'PHASE'.padEnd(cols.phase),
+    'STATUS'.padEnd(cols.status),
+  ].join(' ');
+  console.log(header);
+  for (const row of rows) {
+    const _statusText =
+      row.state === 'init' ? 'init-incomplete' : row.running ? `running (${formatDuration(row.elapsed)})` : 'stopped';
+    const line = [
+      row.id.padEnd(cols.session),
+      row.ticketId.padEnd(cols.ticket),
+      row.repo.slice(0, cols.repo).padEnd(cols.repo),
+      row.branch.slice(0, cols.branch).padEnd(cols.branch),
+      formatPhase(row.phase),
+      formatStatus(row.state, row.running),
+    ].join(' ');
+    console.log(line);
+  }
+}
+
+// src/cli/reset.ts
+init_esm();
+init_config();
+init_types2();
+init_format();
+import {
+  existsSync as existsSync18,
+  mkdirSync as mkdirSync17,
+  unlinkSync as unlinkSync3,
+  writeFileSync as writeFileSync13,
+} from 'fs';
+var GLOBAL_DIR = `${process.env.HOME}/.kautopilot`;
+var GLOBAL_CONFIG = `${GLOBAL_DIR}/config.yaml`;
+var BINARY_CACHE = `${GLOBAL_DIR}/binary-config-dirs.json`;
+function createResetCommand() {
+  return new Command('reset')
+    .description('Reset global config to defaults')
+    .option('--binary-cache', 'Also clear the binary config dir cache')
+    .option('-y, --yes', 'Skip confirmation prompt')
+    .action(async opts => {
+      try {
+        await runReset(opts);
       } catch (err) {
         logError(err instanceof Error ? err.message : String(err));
         process.exit(1);
       }
     });
 }
+async function runReset(opts) {
+  if (!opts.yes) {
+    const { confirmAction: confirmAction2 } = await Promise.resolve().then(() => (init_inquirer(), exports_inquirer));
+    const confirmed = await confirmAction2('Reset global config to defaults?', false);
+    if (!confirmed) {
+      logInfo('Cancelled.');
+      return;
+    }
+  }
+  mkdirSync17(GLOBAL_DIR, { recursive: true });
+  writeFileSync13(GLOBAL_CONFIG, serializeConfigWithComments(DEFAULT_CONFIG));
+  logOk(`Reset ${GLOBAL_CONFIG}`);
+  if (opts.binaryCache && existsSync18(BINARY_CACHE)) {
+    unlinkSync3(BINARY_CACHE);
+    logOk(`Removed ${BINARY_CACHE}`);
+  } else if (existsSync18(BINARY_CACHE)) {
+    logDim(`Binary cache preserved (${BINARY_CACHE}). Use --binary-cache to clear.`);
+  }
+}
+
+// src/cli/snapshot.ts
+init_esm();
+var YAML5 = __toESM(require_dist(), 1);
+import {
+  copyFileSync as copyFileSync4,
+  existsSync as existsSync19,
+  mkdirSync as mkdirSync18,
+  readdirSync as readdirSync6,
+  readFileSync as readFileSync14,
+} from 'fs';
+import { dirname as dirname13, join as join12 } from 'path';
+init_artifacts();
+init_db();
+init_git();
+init_log();
+function resolveSessionId(explicitSession) {
+  if (explicitSession) return explicitSession;
+  const envSession = process.env.KAUTOPILOT_SESSION;
+  if (envSession) return envSession;
+  let dir = process.cwd();
+  for (let i = 0; i < 20; i++) {
+    const statusPath2 = join12(dir, 'status.yaml');
+    if (existsSync19(statusPath2)) {
+      const kautopilotIdx = dir.indexOf('.kautopilot');
+      if (kautopilotIdx !== -1) {
+        const sessionId = dir.slice(kautopilotIdx + '.kautopilot/'.length).split('/')[0];
+        if (sessionId) return sessionId;
+      }
+    }
+    const parent = dirname13(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  try {
+    const repoPath = getGitRoot();
+    const worktree = getWorktree();
+    const session = getSessionByWorktree(repoPath, worktree);
+    if (session) return session.id;
+  } catch {}
+  throw new Error(
+    'Could not resolve session. Use --session <id>, set KAUTOPILOT_SESSION, or run from within a worktree with an active session.',
+  );
+}
+function findRepoSpecPath(sessionId, epochVersion) {
+  const session = getSessionById(sessionId);
+  const worktree = session?.worktree;
+  if (!worktree) return null;
+  const statusPath2 = join12(sessionDir(sessionId), 'status.yaml');
+  if (!existsSync19(statusPath2)) return null;
+  const content = readFileSync14(statusPath2, 'utf-8');
+  const parsed = YAML5.parse(content);
+  const ticketId = parsed?.context?.ticketId || parsed?.ticketId || 'local';
+  const specPath = join12(worktree, 'spec', ticketId, `v${epochVersion}`, 'task-spec.md');
+  if (existsSync19(specPath)) return specPath;
+  const localSpecPath = join12(worktree, 'spec', 'local', `v${epochVersion}`, 'task-spec.md');
+  if (existsSync19(localSpecPath)) return localSpecPath;
+  return null;
+}
+function findRepoPlansPath(sessionId, epochVersion) {
+  const session = getSessionById(sessionId);
+  const worktree = session?.worktree;
+  if (!worktree) return null;
+  const statusPath2 = join12(sessionDir(sessionId), 'status.yaml');
+  if (!existsSync19(statusPath2)) return null;
+  const content = readFileSync14(statusPath2, 'utf-8');
+  const parsed = YAML5.parse(content);
+  const ticketId = parsed?.context?.ticketId || parsed?.ticketId || 'local';
+  const plansPath = join12(worktree, 'spec', ticketId, `v${epochVersion}`, 'plans');
+  if (existsSync19(plansPath)) return plansPath;
+  const localPlansPath = join12(worktree, 'spec', 'local', `v${epochVersion}`, 'plans');
+  if (existsSync19(localPlansPath)) return localPlansPath;
+  return null;
+}
+function copyDirRecursive(src, dest) {
+  mkdirSync18(dest, { recursive: true });
+  const entries = readdirSync6(src, { withFileTypes: true });
+  for (const entry of entries) {
+    const srcPath = join12(src, entry.name);
+    const destPath = join12(dest, entry.name);
+    if (entry.isDirectory()) {
+      copyDirRecursive(srcPath, destPath);
+    } else {
+      copyFileSync4(srcPath, destPath);
+    }
+  }
+}
+function handleSnapshot(type, epochVersion, sessionId) {
+  const id = resolveSessionId(sessionId);
+  const artifactDir = snapshotPath(id, epochVersion);
+  mkdirSync18(artifactDir, { recursive: true });
+  if (type === 'spec') {
+    const repoSpecPath = findRepoSpecPath(id, epochVersion);
+    if (!repoSpecPath || !existsSync19(repoSpecPath)) {
+      throw new Error(
+        `No working copy spec found. Expected at spec/<ticket>/v${epochVersion}/task-spec.md in worktree.`,
+      );
+    }
+    const snapshotVersion = findNextSpecVersion(id, epochVersion);
+    const destPath = snapshotPath(id, epochVersion, `task-spec-${snapshotVersion}.md`);
+    ensureArtifactDir(destPath);
+    copyFileSync4(repoSpecPath, destPath);
+    appendEvent(id, {
+      ts: new Date().toISOString(),
+      event: 'snapshot:created',
+      metadata: {
+        type: 'spec',
+        epochVersion,
+        snapshotVersion,
+        path: destPath,
+      },
+    });
+    console.log(`SNAPSHOT_VERSION=${snapshotVersion}`);
+    console.log(`SNAPSHOT_PATH=${destPath}`);
+  } else {
+    const repoPlansPath = findRepoPlansPath(id, epochVersion);
+    if (!repoPlansPath || !existsSync19(repoPlansPath)) {
+      throw new Error(`No working copy plans found. Expected at spec/<ticket>/v${epochVersion}/plans/ in worktree.`);
+    }
+    const snapshotVersion = findNextPlansVersion(id, epochVersion);
+    const destDir = snapshotPath(id, epochVersion, `plans-${snapshotVersion}`);
+    copyDirRecursive(repoPlansPath, destDir);
+    appendEvent(id, {
+      ts: new Date().toISOString(),
+      event: 'snapshot:created',
+      metadata: {
+        type: 'plans',
+        epochVersion,
+        snapshotVersion,
+        path: destDir,
+      },
+    });
+    console.log(`SNAPSHOT_VERSION=${snapshotVersion}`);
+    console.log(`SNAPSHOT_PATH=${destDir}`);
+  }
+}
+function createSnapshotCommand() {
+  return new Command('snapshot')
+    .description('Create a versioned snapshot of working copies')
+    .argument('<type>', 'Artifact type: spec or plans')
+    .argument('<epoch-version>', 'Epoch version number', v2 => {
+      const n = Number.parseInt(v2, 10);
+      if (Number.isNaN(n) || n < 1) {
+        throw new Error('Epoch version must be a positive integer');
+      }
+      return n;
+    })
+    .option('--session <id>', 'Session ID (or set KAUTOPILOT_SESSION)')
+    .action((type, epochVersion, opts) => {
+      if (type !== 'spec' && type !== 'plans') {
+        console.error(`Invalid type: ${type}. Must be 'spec' or 'plans'.`);
+        process.exit(1);
+      }
+      handleSnapshot(type, epochVersion, opts.session);
+    });
+}
+
+// src/cli/spec-review.ts
+init_esm();
+init_config();
+init_db();
+init_git();
+init_format();
+function createSpecReviewCommand() {
+  return new Command('spec-review')
+    .description('Run spec reviewers for the current session (stateless, stdout only)')
+    .action(async () => {
+      try {
+        await runSpecReview();
+      } catch (err) {
+        logError(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+    });
+}
+async function runSpecReview() {
+  const repoPath = getGitRoot();
+  const worktree = getWorktree();
+  const session = getSessionByWorktree(repoPath, worktree);
+  if (!session) {
+    logError('No session found in this worktree.');
+    process.exit(1);
+  }
+  const config = readConfig(session.id);
+  if (!config) {
+    logError('No config found for this session.');
+    process.exit(1);
+  }
+  const status = ensureStatus(session.id);
+  const version = status.version || 1;
+  const reviewers = config.agents.phase1.spec_reviewers;
+  if (!reviewers || Object.keys(reviewers).length === 0) {
+    console.log('No spec reviewers configured.');
+    return;
+  }
+  const vars = buildPromptVars(worktree, version, session.ticket_id || 'local');
+  const summary = await runReviewers(reviewers, vars, config, session.id);
+  console.log(summary);
+}
+
+// src/cli/start.ts
+init_esm();
+init_artifacts();
+init_config();
+import { existsSync as existsSync32, mkdirSync as mkdirSync25 } from 'fs';
+import { join as join20 } from 'path';
+init_db();
+init_git();
+init_lock();
+init_log();
+init_types2();
+
+// src/phases/runner.ts
+init_log();
+
+// src/phases/phase1/index.ts
+init_agents();
+init_log();
+import { copyFileSync as copyFileSync8, existsSync as existsSync25, mkdirSync as mkdirSync23 } from 'fs';
+import { join as join15 } from 'path';
+init_scripts();
+
+// src/phases/machine.ts
+init_log();
+init_format();
+async function runStateMachine(phaseName, states, ctx, options2) {
+  const { session, version } = ctx;
+  const terminalStates = options2?.terminalStates ?? [];
+  const status = ensureStatus(session.id);
+  let currentState = null;
+  if (options2?.forceStartState) {
+    const stateName = options2.forceStartState;
+    if (!(stateName in states)) {
+      throw new Error(`Invalid force-start state: ${stateName}. Valid states: ${Object.keys(states).join(', ')}`);
+    }
+    currentState = stateName;
+    logDim(`[${phaseName}] Force-starting at state: ${currentState}`);
+  } else if (status.stateStatus === 'running' && status.state in states) {
+    currentState = status.state;
+    logDim(`[${phaseName}] Resuming from incomplete state: ${currentState}`);
+  } else {
+    for (const name of Object.keys(states)) {
+      if (terminalStates.includes(name)) continue;
+      if (!status.completedSteps.includes(name)) {
+        currentState = name;
+        break;
+      }
+    }
+  }
+  if (!currentState) {
+    logDim(`[${phaseName}] All states completed`);
+    return true;
+  }
+  const hasCompletedWork = Object.keys(states).some(s => status.completedSteps.includes(s));
+  if (!hasCompletedWork) {
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: `${phaseName}:started`,
+      version,
+    });
+  }
+  let interrupted = false;
+  while (currentState !== null) {
+    const handler = states[currentState];
+    if (!handler) {
+      throw new Error(`No handler for state: ${currentState}`);
+    }
+    logDim(`${stateIcon(currentState)} [${phaseName}] ${currentState}`);
+    const nextState = await handler(ctx);
+    if (terminalStates.includes(currentState)) {
+      logDim(`[${phaseName}] Reached terminal state: ${currentState}`);
+      break;
+    }
+    if (nextState === null) {
+      interrupted = true;
+      break;
+    }
+    if (nextState === 'amend_spec') {
+      return 'amend_spec';
+    }
+    if (nextState === 'revisit_spec') {
+      return 'revisit_spec';
+    }
+    currentState = nextState;
+  }
+  if (!interrupted) {
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: `${phaseName}:completed`,
+      version,
+    });
+  }
+  return !interrupted;
+}
+
+// src/phases/phase1/finalize-plans.ts
+init_artifacts();
+init_log();
+import { copyFileSync as copyFileSync5, existsSync as existsSync20 } from 'fs';
+import { join as join13 } from 'path';
+init_format();
+async function handleFinalizePlans(ctx) {
+  const { session, version } = ctx;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'finalize_plans:started',
+    version,
+    metadata: { stepType: 'code' },
+  });
+  const vars = buildPromptVars(session.worktree, version, session.ticket_id || 'local');
+  const planFiles = discoverPlans(vars.plans);
+  if (planFiles.length === 0) {
+    logError(`No plan files found at ${vars.plans}. Did the TTY write them?`);
+    throw new Error('No plan files written');
+  }
+  const emptyPlans = validatePlanContent(planFiles);
+  if (emptyPlans.length > 0) {
+    logError(`Empty plan files: ${emptyPlans.join(', ')}`);
+    throw new Error('Some plan files are empty');
+  }
+  const sessionPlansDir = snapshotPath(session.id, version, 'plans');
+  ensureArtifactDir(join13(sessionPlansDir, 'placeholder'));
+  for (let i = 0; i < planFiles.length; i++) {
+    const specFilename = `plan-${i + 1}-1.md`;
+    copyFileSync5(planFiles[i], join13(sessionPlansDir, specFilename));
+  }
+  const deliveryKind = ctx.deliveryKind ?? 'pr';
+  writeContractManifest(session.id, version, deliveryKind, planFiles.length);
+  writePlanManifest(session.id, version);
+  writeDeliveryManifest(session.id, version, { kind: deliveryKind });
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'context:updated',
+    metadata: { deliveryKind },
+  });
+  const { $: $2 } = await Promise.resolve(globalThis.Bun);
+  try {
+    const addedFiles = [];
+    for (const f of planFiles) {
+      if (existsSync20(f)) {
+        await $2`git add ${f}`.cwd(session.worktree).quiet();
+        addedFiles.push(f);
+      }
+    }
+    if (addedFiles.length > 0) {
+      const ticketPrefix = session.ticket_id ? `[${session.ticket_id}] ` : '';
+      const commitProc = Bun.spawnSync({
+        cmd: ['git', 'commit', '-m', `${ticketPrefix}spec + plans v${version}`],
+        cwd: session.worktree,
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      if (commitProc.exitCode === 0) {
+        logOk(`Committed spec + ${planFiles.length} plan(s) (v${version})`);
+      } else {
+        const stderr = commitProc.stderr.toString().trim();
+        if (!stderr.includes('nothing to commit')) {
+          logError(`git commit failed: ${stderr}`);
+        }
+      }
+    }
+  } catch (err) {
+    logWarn(`[finalize_plans] Git staging/commit error: ${err}`);
+  }
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'finalize_plans:completed',
+    version,
+    metadata: { planCount: planFiles.length },
+  });
+  return null;
+}
+
+// src/phases/phase1/finalize-spec.ts
+init_artifacts();
+init_log();
+import { copyFileSync as copyFileSync6, existsSync as existsSync21 } from 'fs';
+init_format();
+async function handleFinalizeSpec(ctx) {
+  const { session, version } = ctx;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'finalize_spec:started',
+    version,
+    metadata: { stepType: 'code' },
+  });
+  const vars = buildPromptVars(session.worktree, version, session.ticket_id || 'local');
+  if (!existsSync21(vars.spec)) {
+    logError(`No task-spec.md found at ${vars.spec}. Did the TTY write it?`);
+    throw new Error('No spec working copy found');
+  }
+  const dest = snapshotPath(session.id, version, 'task-spec.md');
+  ensureArtifactDir(dest);
+  copyFileSync6(vars.spec, dest);
+  logOk(`Spec finalized: task-spec.md \u2192 session artifacts`);
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'finalize_spec:completed',
+    version,
+  });
+  return 'write_plans';
+}
+
+// src/phases/phase1/pull-ticket.ts
+init_artifacts();
+init_log();
+init_scripts();
+init_format();
+import {
+  copyFileSync as copyFileSync7,
+  existsSync as existsSync22,
+  mkdirSync as mkdirSync19,
+  writeFileSync as writeFileSync14,
+} from 'fs';
+import { join as join14 } from 'path';
+async function handlePullTicket(ctx) {
+  const { session, version } = ctx;
+  const ticketId = session.ticket_id || 'local';
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'pull_ticket:started',
+    version,
+    metadata: { stepType: 'code' },
+  });
+  const specDir = join14(session.worktree, 'spec', ticketId);
+  mkdirSync19(specDir, { recursive: true });
+  const ticketPath = join14(specDir, 'ticket.md');
+  if (session.ticket_id && !session.local) {
+    const content = runScript(session.id, 'get-ticket', [session.ticket_id]);
+    if (content) {
+      writeFileSync14(ticketPath, content);
+      logOk(
+        `Ticket fetched (${
+          content.split(`
+`).length
+        } lines)`,
+      );
+    } else {
+      logWarn('No content from get-ticket script');
+    }
+  } else if (session.local) {
+    if (!existsSync22(ticketPath)) {
+      writeFileSync14(
+        ticketPath,
+        `# Local Task
+
+Describe the task here.
+`,
+      );
+      logDim('Local mode \u2014 wrote placeholder ticket.md');
+    }
+  } else {
+    logDim('No ticket ID \u2014 skipping ticket fetch');
+  }
+  if (existsSync22(ticketPath)) {
+    const snapshotDest = sessionArtifactPath(session.id, 'ticket.md');
+    ensureArtifactDir(snapshotDest);
+    copyFileSync7(ticketPath, snapshotDest);
+  }
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'pull_ticket:completed',
+    version,
+  });
+  return 'triage';
+}
+
+// src/phases/phase1/triage.ts
+init_agents();
+init_log();
+import { readFileSync as readFileSync15 } from 'fs';
+
+// src/core/step-init.ts
+init_artifacts();
+var import_yaml4 = __toESM(require_dist(), 1);
+import { mkdirSync as mkdirSync20, writeFileSync as writeFileSync15 } from 'fs';
+import { dirname as dirname14 } from 'path';
+function writeStepInit(sessionId, version, stepName, record) {
+  const path = artifactPath(sessionId, version, 'steps', `${stepName}.yaml`);
+  mkdirSync20(dirname14(path), { recursive: true });
+  writeFileSync15(path, import_yaml4.stringify(record));
+}
+
+// src/phases/phase1/triage.ts
+init_format();
+var TRIAGE_APPROVAL_GATE = `### User Approval Gate
+
+After writing triage.md, you MUST present a summary to the user and wait for their explicit confirmation:
+
+1. Show the user: delivery kind, complexity, key risks, and files affected
+2. Ask: "Does this triage assessment look correct? (yes/no)"
+3. ONLY after the user confirms, write the approval event:
+   \`kautopilot log-event triage:approved --metadata '{"deliveryKind": "pr|ticket", "complexity": "..."}'\`
+4. THEN tell the user to /exit
+
+CRITICAL: Do NOT log the approval event or tell the user to /exit until they explicitly confirm the triage.`;
+function parseTriage(triagePath) {
+  try {
+    const content = readFileSync15(triagePath, 'utf-8');
+    const deliveryMatch = content.match(/^## Delivery Kind\s*$/m);
+    const deliveryLine = deliveryMatch
+      ? content
+          .slice(deliveryMatch.index + deliveryMatch[0].length)
+          .trim()
+          .split(
+            `
+`,
+          )[0]
+          .trim()
+          .toLowerCase()
+      : null;
+    const complexityMatch = content.match(/^## Complexity\s*$/m);
+    const complexityLine = complexityMatch
+      ? content
+          .slice(complexityMatch.index + complexityMatch[0].length)
+          .trim()
+          .split(
+            `
+`,
+          )[0]
+          .trim()
+          .toLowerCase()
+      : null;
+    const deliveryKind = deliveryLine === 'ticket' ? 'ticket' : 'pr';
+    const complexity = ['straightforward', 'moderate', 'complex'].includes(complexityLine ?? '')
+      ? complexityLine
+      : 'moderate';
+    const assumptionsMatch = content.match(/^### Assumptions to Verify\s*$/m);
+    const assumptionsSection = assumptionsMatch
+      ? content
+          .slice(assumptionsMatch.index + assumptionsMatch[0].length)
+          .trim()
+          .split(/^### /m)[0]
+      : '';
+    const hasAssumptions =
+      !/(?:None|no assumptions|all assumptions are grounded)/i.test(assumptionsSection) &&
+      assumptionsSection.trim().length > 0;
+    const testingMatch = content.match(/^### Testing Level\s*$/m);
+    const testingSection = testingMatch
+      ? content
+          .slice(testingMatch.index + testingMatch[0].length)
+          .trim()
+          .split(
+            `
+`,
+          )[0]
+          .trim()
+          .toLowerCase()
+      : 'none';
+    const validTestingLevels = ['none', 'light', 'moderate', 'heavy'];
+    const testing = validTestingLevels.includes(testingSection) ? testingSection : 'none';
+    const validationMatch = content.match(/^### Validation Matrix\s*$/m);
+    const validationSection = validationMatch
+      ? content
+          .slice(validationMatch.index + validationMatch[0].length)
+          .trim()
+          .split(/^### /m)[0]
+      : '';
+    const validationLines = validationSection
+      .split(
+        `
+`,
+      )
+      .map(l2 => l2.trim())
+      .filter(l2 => l2.startsWith('-'));
+    const hasValidators =
+      validationLines.length > 0 &&
+      validationLines.some(line => {
+        const value = line.replace(/^-\s*/, '').trim();
+        const colonIdx = value.indexOf(':');
+        const content2 = colonIdx >= 0 ? value.slice(colonIdx + 1).trim() : value;
+        return content2.length > 0 && !/^(?:none|n\/a|no automated|no manual)/i.test(content2);
+      });
+    return {
+      deliveryKind,
+      complexity,
+      verification: {
+        hasAssumptions,
+        testing,
+        hasValidators,
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+var TRIAGE_MECHANICS = `## CRITICAL: Triage Output & Approval Mechanics
+
+### Output File
+
+Write your triage assessment to: {specDir}/triage.md
+
+The triage document MUST follow this template structure:
+{triageTemplate}
+
+${TRIAGE_APPROVAL_GATE}`;
+async function handleTriage(ctx) {
+  const { session, version, config } = ctx;
+  const events = readLog(session.id);
+  const approved = events.some(e2 => e2.event === 'triage:approved');
+  if (approved) {
+    logOk('Triage already approved \u2014 skipping triage');
+    const vars2 = buildPromptVars(session.worktree, version, session.ticket_id || 'local');
+    const parsed2 = parseTriage(vars2.triage);
+    if (parsed2) {
+      ctx.deliveryKind = parsed2.deliveryKind;
+      ctx.verification = parsed2.verification;
+    }
+    return 'write_spec';
+  }
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'triage:started',
+    version,
+    metadata: { stepType: 'tty' },
+  });
+  const vars = buildPromptVars(session.worktree, version, session.ticket_id || 'local');
+  const mechanicsWithTemplate = TRIAGE_MECHANICS.replace('{triageTemplate}', config.templates.triage);
+  const mechanics = resolvePromptVars(mechanicsWithTemplate, vars);
+  const userPrompt = getAgentPrompt('phase1', 'triage', vars);
+  const prompt = mechanics + userPrompt;
+  const binary = getDefaultBinary();
+  writeStepInit(session.id, version, 'triage', {
+    prompt,
+    command: `${binary} (TTY handoff)`,
+    type: 'tty_handoff',
+  });
+  logBanner('Triage', { Version: `v${version}` });
+  await spawnTTYWithTurnTracking(session.id, binary, prompt, {
+    cwd: session.worktree,
+    worktree: session.worktree,
+  });
+  const postEvents = readLog(session.id);
+  const wasApproved = postEvents.some(e2 => e2.event === 'triage:approved');
+  if (!wasApproved) {
+    logInfo('Triage not approved yet \u2014 will resume on next start');
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'triage:interrupted',
+      version,
+    });
+    return null;
+  }
+  const parsed = parseTriage(vars.triage);
+  if (parsed) {
+    ctx.deliveryKind = parsed.deliveryKind;
+    ctx.verification = parsed.verification;
+  }
+  logOk('Triage approved');
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'triage:completed',
+    version,
+    metadata: parsed
+      ? {
+          deliveryKind: parsed.deliveryKind,
+          complexity: parsed.complexity,
+          verification: parsed.verification,
+        }
+      : {},
+  });
+  return 'write_spec';
+}
+
+// src/phases/phase1/write-plans.ts
+init_agents();
+import { existsSync as existsSync23, mkdirSync as mkdirSync21 } from 'fs';
+init_artifacts();
+init_log();
+init_format();
+var PLAN_APPROVAL_PROTOCOL = `### Approval Protocol
+
+When the user approves the plans, you MUST do these things IN ORDER before exiting:
+1. Write the approval event by running this command:
+   \`kautopilot log-event plans:approved\`
+2. THEN tell the user to /exit
+
+**CRITICAL**: Do NOT tell the user to /exit before writing the approval event.
+If the session crashes or the user Ctrl+C's before the approval event is logged,
+the plans will NOT be considered approved and this step will re-run from scratch.`;
+var PLAN_MECHANICS = `## CRITICAL: Plan Writing & Approval Mechanics
+
+### Working Copies
+
+Write plan files directly in the plans directory:
+- {plans}/plan-1.md
+- {plans}/plan-2.md
+- etc.
+
+These are the ONLY plan files you edit. On each feedback round, edit these same files in-place
+and re-snapshot. Do NOT create draft subdirectories \u2014 the snapshot command handles versioning
+automatically.
+
+Each version MUST be a complete, standalone set of plans \u2014 NOT a diff or changelog.
+Write the full plans every time, with changes applied inline.
+
+Each plan file MUST follow this template:
+{planTemplate}
+
+### Snapshot Workflow (COMPULSORY)
+
+After each edit cycle (writing or editing the plans), you MUST create a snapshot:
+\`\`\`bash
+kautopilot snapshot plans {epoch}
+\`\`\`
+
+This copies the working copies to a versioned snapshot in the global artifacts directory.
+The snapshot command outputs:
+- SNAPSHOT_VERSION=N (the new version number)
+- SNAPSHOT_PATH=... (the path to the snapshot)
+
+This step is COMPULSORY \u2014 do not skip it. It creates an audit trail of all plan versions.
+
+### Previous Epoch Feedback
+
+{feedback_reference}
+
+### Previous Epoch Plans (for reference only)
+
+{previous_epoch_plans_reference}
+
+### Spec Amendment Escalation
+
+If during plan writing you discover the spec is wrong or incomplete:
+1. Log the issue: \`kautopilot log-event spec_amendment:requested --metadata '{"reason": "..."}'\`
+2. Tell the user to /exit \u2014 do NOT write plans:approved
+
+${PLAN_APPROVAL_PROTOCOL}
+`;
+async function handleWritePlans(ctx) {
+  const { session, version, config } = ctx;
+  const events = readLog(session.id);
+  const completedForThisVersion = events.some(e2 => e2.event === 'write_plans:completed' && e2.version === version);
+  if (completedForThisVersion) {
+    logOk('Plans already approved \u2014 skipping write_plans');
+    return 'finalize_plans';
+  }
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'write_plans:started',
+    version,
+    metadata: { stepType: 'tty' },
+  });
+  const vars = buildPromptVars(session.worktree, version, session.ticket_id || 'local');
+  let feedbackReference = 'No previous epoch feedback \u2014 this is the first epoch.';
+  if (version > 1) {
+    const prevFeedbackPath = snapshotPath(session.id, version - 1, 'feedback.md');
+    if (existsSync23(prevFeedbackPath)) {
+      feedbackReference = `This is epoch v${version}. The previous epoch v${version - 1} failed. Read the feedback at:
+${prevFeedbackPath}
+
+Address this feedback in your plans.`;
+    }
+  }
+  let previousEpochPlansReference = 'No previous epoch plans \u2014 this is the first epoch.';
+  if (version > 1) {
+    const prevPlansDir = findLatestPlansPath(session.id, version - 1);
+    if (prevPlansDir) {
+      previousEpochPlansReference = `Previous epoch v${version - 1} plans are at: ${prevPlansDir}
+Read them to understand what was attempted, but DO NOT trust their metadata. Ground yourself in actual codebase state (git diff, code state) to determine what's already done.`;
+    }
+  }
+  mkdirSync21(vars.plans, { recursive: true });
+  let prompt = getAgentPrompt('phase1', 'plan_writer', vars);
+  const mechanicsResolved = PLAN_MECHANICS.replace('{planTemplate}', config.templates.plan)
+    .replace('{feedback_reference}', feedbackReference)
+    .replace('{previous_epoch_plans_reference}', previousEpochPlansReference)
+    .replace('{epoch}', String(version));
+  const mechanicsPrompt = resolvePromptVars(mechanicsResolved, vars);
+  let resumeNote = '';
+  const existingPlans = discoverPlans(vars.plans);
+  if (existingPlans.length > 0) {
+    const planPaths = existingPlans.map(p2 => `- ${p2}`).join(`
+`);
+    resumeNote = `
+## Resuming: Plans exist
+
+You are resuming a plan session. The working copies are at:
+${planPaths}
+
+Read them and continue editing in-place.
+
+`;
+    logInfo(`Resuming from ${existingPlans.length} existing plan(s)`);
+  }
+  prompt = mechanicsPrompt + resumeNote + prompt;
+  const binary = getDefaultBinary();
+  writeStepInit(session.id, version, 'write_plans', {
+    prompt,
+    command: `${binary} (TTY handoff)`,
+    type: 'tty_handoff',
+  });
+  logBanner('Writing Plans', { Version: `v${version}` });
+  await spawnTTYWithTurnTracking(session.id, binary, prompt, {
+    cwd: session.worktree,
+    worktree: session.worktree,
+  });
+  const postEvents = readLog(session.id);
+  const startedIdx = postEvents.findLastIndex(e2 => e2.event === 'write_plans:started' && e2.version === version);
+  const eventsSinceStart = startedIdx >= 0 ? postEvents.slice(startedIdx + 1) : postEvents;
+  const wasApproved = eventsSinceStart.some(e2 => e2.event === 'plans:approved');
+  const amendmentRequested = eventsSinceStart.some(e2 => e2.event === 'spec_amendment:requested');
+  if (wasApproved) {
+    logOk('Plans approved');
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'write_plans:completed',
+      version,
+    });
+    return 'finalize_plans';
+  }
+  if (amendmentRequested) {
+    logOk('Spec amendment requested \u2014 escalating to new spec version');
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'write_plans:escalated',
+      version,
+    });
+    return 'amend_spec';
+  }
+  logInfo('Plans not approved yet \u2014 will resume on next start');
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'write_plans:interrupted',
+    version,
+  });
+  return null;
+}
+
+// src/phases/phase1/write-spec.ts
+init_agents();
+init_artifacts();
+init_log();
+import { existsSync as existsSync24, mkdirSync as mkdirSync22 } from 'fs';
+init_format();
+var SPEC_APPROVAL_PROTOCOL = `### Approval Protocol
+
+When the user approves the spec, you MUST do these things IN ORDER before exiting:
+1. Write the approval event by running this command:
+   \`kautopilot log-event spec:approved\`
+2. THEN tell the user to /exit
+
+**CRITICAL**: Do NOT tell the user to /exit before writing the approval event.
+If the session crashes or the user Ctrl+C's before the approval event is logged,
+the spec will NOT be considered approved and this step will re-run from scratch.`;
+var SPEC_MECHANICS = `## CRITICAL: Spec Writing & Approval Mechanics
+
+### Working Copy
+
+Write the spec to the working copy file:
+- {spec}
+
+This is the ONLY spec file you edit. On each feedback round, edit this same file in-place
+and re-snapshot. Do NOT create numbered drafts or separate files \u2014 the snapshot command
+handles versioning automatically.
+
+Each version MUST be a complete, standalone spec \u2014 NOT a changelog or diff. Write the full spec
+every time, with changes applied inline. Do NOT add "Changed:" or "Updated:" annotations.
+
+Each version MUST follow this template:
+{specTemplate}
+
+### Snapshot Workflow (COMPULSORY)
+
+After each edit cycle (writing or editing the spec), you MUST create a snapshot:
+\`\`\`bash
+kautopilot snapshot spec {epoch}
+\`\`\`
+
+This copies the working copy to a versioned snapshot in the global artifacts directory.
+The snapshot command outputs:
+- SNAPSHOT_VERSION=N (the new version number)
+- SNAPSHOT_PATH=... (the path to the snapshot)
+
+This step is COMPULSORY \u2014 do not skip it. It creates an audit trail of all spec versions.
+
+### Previous Epoch Feedback
+
+{feedback_reference}
+
+${SPEC_APPROVAL_PROTOCOL}
+`;
+async function handleWriteSpec(ctx) {
+  const { session, version, config } = ctx;
+  const events = readLog(session.id);
+  const completedForThisVersion = events.some(e2 => e2.event === 'write_spec:completed' && e2.version === version);
+  if (completedForThisVersion) {
+    logOk('Spec already approved \u2014 skipping write_spec');
+    return 'finalize_spec';
+  }
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'write_spec:started',
+    version,
+    metadata: { stepType: 'tty' },
+  });
+  const vars = buildPromptVars(session.worktree, version, session.ticket_id || 'local');
+  let feedbackReference = 'No previous epoch feedback \u2014 this is the first epoch.';
+  if (version > 1) {
+    const prevFeedbackPath = snapshotPath(session.id, version - 1, 'feedback.md');
+    if (existsSync24(prevFeedbackPath)) {
+      feedbackReference = `This is epoch v${version}. The previous epoch v${version - 1} failed. Read the feedback at:
+${prevFeedbackPath}
+
+Address this feedback in your new spec.`;
+    }
+  }
+  mkdirSync22(vars.specDir, { recursive: true });
+  let prompt = getAgentPrompt('phase1', 'spec_writer', vars);
+  const amendmentNote = ctx.specAmendmentContext
+    ? `
+## Previous Spec Amendment
+
+The spec needs amendment because: ${ctx.specAmendmentContext.reason}
+The previous spec v${ctx.specAmendmentContext.previousVersion} is at:
+${ctx.specAmendmentContext.previousSpecPath}
+
+Read the previous spec to understand what needs to be amended.
+`
+    : '';
+  const mechanicsResolved = SPEC_MECHANICS.replace('{specTemplate}', config.templates.spec)
+    .replace('{feedback_reference}', feedbackReference)
+    .replace('{epoch}', String(version));
+  const mechanicsPrompt = resolvePromptVars(mechanicsResolved, vars);
+  let resumeNote = '';
+  if (existsSync24(vars.spec)) {
+    resumeNote = `
+## Resuming: task-spec.md exists
+
+You are resuming a spec session. The working copy is at:
+${vars.spec}
+
+Read it and continue editing in-place.
+
+`;
+    logInfo('Resuming from existing task-spec.md');
+  }
+  prompt = mechanicsPrompt + amendmentNote + resumeNote + prompt;
+  const binary = getDefaultBinary();
+  writeStepInit(session.id, version, 'write_spec', {
+    prompt,
+    command: `${binary} (TTY handoff)`,
+    type: 'tty_handoff',
+  });
+  logBanner('Writing Spec', { Version: `v${version}` });
+  await spawnTTYWithTurnTracking(session.id, binary, prompt, {
+    cwd: session.worktree,
+    worktree: session.worktree,
+  });
+  const postEvents = readLog(session.id);
+  const startedIdx = postEvents.findLastIndex(e2 => e2.event === 'write_spec:started' && e2.version === version);
+  const eventsSinceStart = startedIdx >= 0 ? postEvents.slice(startedIdx + 1) : postEvents;
+  const wasApproved = eventsSinceStart.some(e2 => e2.event === 'spec:approved');
+  if (!wasApproved) {
+    logInfo('Spec not approved yet \u2014 will resume on next start');
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'write_spec:interrupted',
+      version,
+    });
+    return null;
+  }
+  logOk('Spec approved');
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'write_spec:completed',
+    version,
+  });
+  return 'finalize_spec';
+}
+
+// src/phases/phase1/index.ts
+function copyTriageToNewVersion(worktree, ticketId, oldVersion, newVersion) {
+  const oldTriagePath = join15(worktree, 'spec', ticketId, `v${oldVersion}`, 'triage.md');
+  const newVersionDir = join15(worktree, 'spec', ticketId, `v${newVersion}`);
+  const newTriagePath = join15(newVersionDir, 'triage.md');
+  if (existsSync25(oldTriagePath)) {
+    mkdirSync23(newVersionDir, { recursive: true });
+    copyFileSync8(oldTriagePath, newTriagePath);
+  }
+}
+var phase1States = {
+  pull_ticket: handlePullTicket,
+  triage: handleTriage,
+  write_spec: handleWriteSpec,
+  finalize_spec: handleFinalizeSpec,
+  write_plans: handleWritePlans,
+  finalize_plans: handleFinalizePlans,
+};
+async function runPhase1(session, config, options2) {
+  loadSessionAgents(session.id);
+  if (session.ticket_id) {
+    runScript(session.id, 'start-ticket', [session.ticket_id]);
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'start_ticket:called',
+      metadata: { ticketId: session.ticket_id },
+    });
+  }
+  const status = ensureStatus(session.id);
+  const phase1HasWork =
+    Object.keys(phase1States).some(s => status.completedSteps.includes(s)) || status.state in phase1States;
+  const version =
+    options2?.versionOverride ?? (status.version === 0 ? 1 : phase1HasWork ? status.version : status.version + 1);
+  const ctx = {
+    session,
+    config,
+    version,
+    attempt: 1,
+    specAmendmentContext: options2?.specAmendmentContext,
+  };
+  const result = await runStateMachine('phase1', phase1States, ctx, {
+    terminalStates: ['finalize_plans'],
+    forceStartState: options2?.forceStartState,
+  });
+  if (result === 'amend_spec') {
+    const nextVersion = version + 1;
+    supersedEpoch(session.id, version, nextVersion);
+    const ticketId = session.ticket_id || 'local';
+    copyTriageToNewVersion(session.worktree, ticketId, version, nextVersion);
+    const previousSpecPath = join15(session.worktree, 'spec', ticketId, `v${version}`, 'task-spec.md');
+    const amendmentEvents = readLog(session.id).filter(e2 => e2.event === 'spec_amendment:requested');
+    const amendmentReason =
+      amendmentEvents.length > 0
+        ? amendmentEvents[amendmentEvents.length - 1].metadata?.reason || 'Plan writing discovered spec drift'
+        : 'Plan writing discovered spec drift';
+    return runPhase1(session, config, {
+      versionOverride: nextVersion,
+      forceStartState: 'write_spec',
+      specAmendmentContext: existsSync25(previousSpecPath)
+        ? {
+            previousSpecPath,
+            reason: amendmentReason,
+            previousVersion: version,
+          }
+        : undefined,
+    });
+  }
+  return result;
+}
+
+// src/phases/phase2/index.ts
+init_agents();
+
+// src/core/devloop.ts
+init_agents();
+init_artifacts();
+var YAML6 = __toESM(require_dist(), 1);
+import { mkdirSync as mkdirSync24, writeFileSync as writeFileSync16 } from 'fs';
+import { join as join16 } from 'path';
+function devloopInit(workspace, specPath, configPath2) {
+  const args = ['kloop', 'init', '--workspace', workspace, '--spec', specPath];
+  if (configPath2) {
+    args.push('--config', configPath2);
+  }
+  const proc = Bun.spawnSync({
+    cmd: args,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  if (proc.exitCode !== 0) {
+    const stderr = proc.stderr.toString().trim();
+    throw new Error(`kloop init failed (exit ${proc.exitCode}): ${stderr}`);
+  }
+  const stdout = proc.stdout.toString();
+  const match = stdout.match(/Run ID:\s+(\S+)/);
+  if (!match) {
+    throw new Error(`Could not parse kloop run ID from output: ${stdout}`);
+  }
+  return match[1];
+}
+function writeKloopSpec(kautopilotSessionId, content, name = 'kloop-spec.md') {
+  const dir = join16(sessionDir(kautopilotSessionId), 'tmp');
+  mkdirSync24(dir, { recursive: true });
+  const specPath = join16(dir, name);
+  writeFileSync16(specPath, content);
+  return specPath;
+}
+function writeKloopConfig(kautopilotSessionId, kloopConfig) {
+  const dir = join16(sessionDir(kautopilotSessionId), 'tmp');
+  mkdirSync24(dir, { recursive: true });
+  const configPath2 = join16(dir, 'kloop-config.yaml');
+  const binary = getDefaultBinary();
+  const implementers = resolveDefaultBinary(kloopConfig.implementers, binary);
+  const reviewPhases = kloopConfig.reviewPhases.map(phase => phase.map(r2 => (r2 === 'claude' ? binary : r2)));
+  const yamlObj = {
+    implementers,
+    reviewPhases,
+    maxIterations: kloopConfig.maxIterations,
+    implementerTimeout: kloopConfig.implementerTimeout,
+    reviewerTimeout: kloopConfig.reviewerTimeout,
+    conflictCheckThreshold: kloopConfig.conflictCheckThreshold,
+    firstLoopFullReview: kloopConfig.firstLoopFullReview,
+    previousReviewPropagation: kloopConfig.previousReviewPropagation,
+  };
+  if (kloopConfig.prompts) {
+    yamlObj.prompts = kloopConfig.prompts;
+  }
+  const header = `# kloop config generated by kautopilot
+`;
+  writeFileSync16(configPath2, header + YAML6.stringify(yamlObj));
+  return configPath2;
+}
+function resolveDefaultBinary(implementers, binary) {
+  const result = {};
+  for (const [key, value] of Object.entries(implementers)) {
+    result[key === 'claude' ? binary : key] = value;
+  }
+  return result;
+}
+async function devloopRun(kloopRunId) {
+  const proc = Bun.spawn({
+    cmd: ['kloop', 'run', kloopRunId],
+    stdout: 'inherit',
+    stderr: 'inherit',
+  });
+  const exitCode = await proc.exited;
+  let status;
+  if (exitCode === 0) {
+    const postStatus = devloopGetStatus(kloopRunId);
+    status = postStatus.status;
+  } else if (exitCode === 2) {
+    status = 'conflict';
+  } else {
+    status = 'crash';
+  }
+  return { exitCode, status, runId: kloopRunId };
+}
+function devloopGetStatus(kloopRunId) {
+  try {
+    const proc = Bun.spawnSync({
+      cmd: ['kloop', 'status', kloopRunId, '--json'],
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    if (proc.exitCode === 0) {
+      const output = proc.stdout.toString().trim();
+      const data = JSON.parse(output);
+      if (data.exitReason === 'max_iterations' || data.exitReason === 'max_situations') {
+        return { status: 'max_situations' };
+      }
+      return { status: 'completed' };
+    }
+  } catch {}
+  return { status: 'completed' };
+}
+function devloopDescribe(kloopRunId) {
+  try {
+    const proc = Bun.spawnSync({
+      cmd: ['kloop', 'describe', kloopRunId],
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    if (proc.exitCode === 0) {
+      return proc.stdout.toString().trim();
+    }
+    return `(kloop describe failed: exit ${proc.exitCode})`;
+  } catch {
+    return '(kloop describe unavailable)';
+  }
+}
+function devloopStatus(kloopRunId) {
+  try {
+    const proc = Bun.spawnSync({
+      cmd: ['kloop', 'status', kloopRunId, '--json'],
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    if (proc.exitCode === 0) {
+      const output = proc.stdout.toString().trim();
+      const data = JSON.parse(output);
+      return {
+        running: data.status === 'running',
+        lastStatus: data.status,
+        exitReason: data.exitReason,
+      };
+    }
+    return { running: false };
+  } catch {
+    return { running: false };
+  }
+}
+function devloopCancel(kloopRunId) {
+  try {
+    const proc = Bun.spawnSync({
+      cmd: ['kloop', 'cancel', kloopRunId],
+      stdout: 'inherit',
+      stderr: 'inherit',
+    });
+    return proc.exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
+// src/phases/phase2/clear-loop.ts
+init_log();
+async function handleClearLoop(ctx) {
+  const { session, version, planIndex } = ctx;
+  const planName = `plan-${planIndex + 1}`;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'clear_loop:started',
+    version,
+    plan: planName,
+    metadata: { stepType: 'code', planIndex },
+  });
+  let runWasActive = false;
+  if (ctx.kloopRunId) {
+    const status = devloopStatus(ctx.kloopRunId);
+    if (status.running) {
+      console.log(`[clear_loop] kloop run ${ctx.kloopRunId} is active, canceling...`);
+      devloopCancel(ctx.kloopRunId);
+      runWasActive = true;
+    }
+    ctx.kloopRunId = undefined;
+  }
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'clear_loop:completed',
+    version,
+    plan: planName,
+    metadata: { runWasActive },
+  });
+  return 'setup_run';
+}
+
+// src/phases/phase2/commit.ts
+init_agents();
+import { existsSync as existsSync26 } from 'fs';
+init_artifacts();
+init_log();
+init_types2();
+init_spawn();
+async function handleCommit(ctx) {
+  const { session, version, planIndex } = ctx;
+  const planName = `plan-${planIndex + 1}`;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'commit:started',
+    version,
+    plan: planName,
+    metadata: { stepType: 'code' },
+  });
+  const latestPlansDir = findLatestPlansPath(session.id, version) || snapshotPath(session.id, version, 'plans');
+  const activePlans = resolveActivePlans(latestPlansDir);
+  const activePlanPath = activePlans[planIndex];
+  const planPath =
+    activePlanPath && existsSync26(activePlanPath)
+      ? activePlanPath
+      : snapshotPath(session.id, version, `plans/plan-${planIndex + 1}-1.md`);
+  const contextSection = `### Plan Context
+Read the plan at: ${planPath}`;
+  const prompt = COMMIT_AGENT_PROMPT.replace('{context}', contextSection);
+  const binary = getAgentBinary('phase2', 'commit');
+  writeStepInit(session.id, version, 'commit', {
+    prompt,
+    command: `${binary} --print (LLM commit)`,
+    type: 'llm_print',
+  });
+  const result = await spawnPrintRaw(binary, prompt, {
+    cwd: session.worktree,
+    timeout: 120,
+    sessionId: session.id,
+    label: 'commit',
+  });
+  const commitSha = stripCodeFences(result).trim().split(`
+`)[0];
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'commit:completed',
+    version,
+    plan: planName,
+    metadata: { commitSha },
+  });
+  if (commitSha && /^[0-9a-f]{7,40}$/.test(commitSha)) {
+    updatePlanManifestEntry(session.id, version, planIndex + 1, true, commitSha);
+    console.log(`[commit] Committed: ${commitSha.slice(0, 7)}`);
+  } else {
+    console.warn(`[commit] Unexpected output (expected SHA): ${commitSha.slice(0, 60)}`);
+  }
+  return 'next_plan';
+}
+
+// src/phases/phase2/completed.ts
+init_log();
+init_format();
+async function handleCompleted(ctx) {
+  const { session, version } = ctx;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'phase2:completed',
+    version,
+  });
+  logBanner('Phase 2 Complete \u2014 All plans implemented');
+  return null;
+}
+
+// src/phases/phase2/failed.ts
+init_log();
+init_inquirer();
+init_format();
+async function handleFailed(ctx) {
+  const { session, version, planIndex, attempt } = ctx;
+  const planName = `plan-${planIndex + 1}`;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'phase2:failed',
+    version,
+    plan: planName,
+    attempt,
+  });
+  logErrorBanner('Phase 2 Failed', {
+    Plan: planName,
+    Attempt: String(attempt),
+  });
+  const retry = await confirmAction('Retry from current plan?');
+  if (retry) {
+    ctx.attempt = 1;
+    return 'clear_loop';
+  }
+  logErrorBanner('Phase 2 Aborted', {
+    Retry: 'kautopilot start --phase impl:clear_loop',
+  });
+  return null;
+}
+
+// src/phases/phase2/next-plan.ts
+init_log();
+async function handleNextPlan(ctx) {
+  const { session, version, planIndex, maxPlans } = ctx;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'next_plan:started',
+    version,
+    metadata: { stepType: 'code' },
+  });
+  const fromPlan = `plan-${planIndex + 1}`;
+  ctx.planIndex += 1;
+  const toPlan = ctx.planIndex < maxPlans ? `plan-${ctx.planIndex + 1}` : 'done';
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'context:updated',
+    metadata: { planIndex: ctx.planIndex, maxPlans },
+  });
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'next_plan:completed',
+    version,
+    metadata: { from: fromPlan, to: toPlan },
+  });
+  if (ctx.planIndex < maxPlans) {
+    ctx.firstRun = false;
+    ctx.attempt = 1;
+    return 'clear_loop';
+  }
+  return 'completed';
+}
+
+// src/phases/phase2/resolve.ts
+init_agents();
+import { existsSync as existsSync27, writeFileSync as writeFileSync17 } from 'fs';
+init_artifacts();
+init_log();
+init_format();
+async function handleResolve(ctx) {
+  const { session, version, planIndex, attempt } = ctx;
+  const planName = `plan-${planIndex + 1}`;
+  const reason = attempt > 1 ? 'retry' : 'conflict';
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'resolve:started',
+    version,
+    plan: planName,
+    attempt,
+    metadata: { stepType: 'tty', reason },
+  });
+  let kloopDescribeOutput = '';
+  if (ctx.kloopRunId) {
+    kloopDescribeOutput = devloopDescribe(ctx.kloopRunId);
+  }
+  const plansDir = findLatestPlansPath(session.id, version) || snapshotPath(session.id, version, 'plans');
+  const activePlans = resolveActivePlans(plansDir);
+  const activePlanPath = activePlans[planIndex];
+  const taskSpecPath = findLatestSpecPath(session.id, version) || snapshotPath(session.id, version, 'task-spec.md');
+  const feedbackPath = snapshotPath(session.id, version, 'feedback.md');
+  const resolvePrompt = loadPromptTemplate('phase2', 'resolve', {
+    task_spec_path: taskSpecPath,
+    plan_path: activePlanPath || '',
+    plans_dir: plansDir,
+    kloop_evidence: kloopDescribeOutput || '(no evidence available)',
+    feedback_path: feedbackPath,
+  });
+  const binary = getAgentBinary('phase2', 'resolve');
+  writeStepInit(session.id, version, 'resolve', {
+    prompt: resolvePrompt,
+    command: `${binary} (TTY handoff)`,
+    type: 'tty_handoff',
+  });
+  logBanner('Resolving Plan', { Plan: planName, Reason: reason });
+  console.log(`Discuss the issue with Claude. When resolved, write feedback to ${feedbackPath}`);
+  await spawnTTYWithTurnTracking(session.id, binary, resolvePrompt + TTY_EXIT_INSTRUCTION, {
+    cwd: session.worktree,
+    worktree: session.worktree,
+  });
+  const feedbackWritten = existsSync27(feedbackPath);
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'resolve:completed',
+    version,
+    plan: planName,
+    attempt,
+    metadata: {
+      kloopDescribeAvailable: !!kloopDescribeOutput,
+      feedbackWritten,
+      reason,
+    },
+  });
+  if (!feedbackWritten) {
+    ensureArtifactDir(feedbackPath);
+    writeFileSync17(
+      feedbackPath,
+      `# Resolution Feedback
+
+Plan ${planName} encountered a conflict (${reason}). User discussed with Claude but no explicit feedback was written.
+`,
+    );
+  }
+  console.log(`[resolve] Returning revisit_spec \u2014 escalating to new epoch`);
+  return 'revisit_spec';
+}
+
+// src/phases/phase2/running.ts
+init_log();
+var MAX_CRASH_RETRIES = 2;
+async function handleRunning(ctx) {
+  const { session, version, planIndex, attempt } = ctx;
+  const planName = `plan-${planIndex + 1}`;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'running:started',
+    version,
+    plan: planName,
+    attempt,
+    metadata: { stepType: 'code' },
+  });
+  if (!ctx.kloopRunId) {
+    throw new Error('No kloop run ID \u2014 setup_run must run first');
+  }
+  console.log(`[running] Executing kloop run ${ctx.kloopRunId} for ${planName}, attempt ${attempt}`);
+  const result = await devloopRun(ctx.kloopRunId);
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'running:completed',
+    version,
+    plan: planName,
+    attempt,
+    metadata: {
+      stepType: 'code',
+      exitCode: result.exitCode,
+      status: result.status,
+      runId: result.runId,
+    },
+  });
+  switch (result.status) {
+    case 'completed':
+      return 'commit';
+    case 'conflict':
+    case 'max_situations':
+      return 'resolve';
+    case 'crash':
+      ctx.crashRetryCount = (ctx.crashRetryCount ?? 0) + 1;
+      if (ctx.crashRetryCount <= MAX_CRASH_RETRIES) {
+        console.log(`[running] Crash detected \u2014 retrying (${ctx.crashRetryCount}/${MAX_CRASH_RETRIES})`);
+        appendEvent(session.id, {
+          ts: new Date().toISOString(),
+          event: 'crash:retry',
+          version,
+          plan: planName,
+          metadata: {
+            crashRetryCount: ctx.crashRetryCount,
+            maxRetries: MAX_CRASH_RETRIES,
+          },
+        });
+        return 'setup_run';
+      }
+      console.log(`[running] Crash retries exhausted (${MAX_CRASH_RETRIES}) \u2014 failing`);
+      return 'failed';
+  }
+}
+
+// src/phases/phase2/setup-run.ts
+import { existsSync as existsSync28, readFileSync as readFileSync16 } from 'fs';
+init_artifacts();
+init_log();
+async function handleSetupRun(ctx) {
+  const { session, version, planIndex, firstRun } = ctx;
+  const planName = `plan-${planIndex + 1}`;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'setup_run:started',
+    version,
+    plan: planName,
+    metadata: { stepType: 'code', firstRun },
+  });
+  const sessionPlansDir = findLatestPlansPath(session.id, version) || snapshotPath(session.id, version, 'plans');
+  const plans = resolveActivePlans(sessionPlansDir);
+  if (plans.length === 0) {
+    throw new Error(`No plan files found for ${ctx.ticketId}`);
+  }
+  const planPath = plans[planIndex];
+  if (!planPath || !existsSync28(planPath)) {
+    throw new Error(`Plan file not found for plan index ${planIndex}`);
+  }
+  const planContent = readFileSync16(planPath, 'utf-8');
+  const specPath = writeKloopSpec(session.id, planContent, `plan-${planIndex + 1}-spec.md`);
+  const configPath2 = writeKloopConfig(session.id, ctx.config.kloop);
+  console.log(`[setup_run] Initializing kloop run for ${planName}...`);
+  const kloopRunId = devloopInit(session.worktree, specPath, configPath2);
+  ctx.kloopRunId = kloopRunId;
+  console.log(`[setup_run] kloop run initialized: ${kloopRunId}`);
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'setup_run:completed',
+    version,
+    plan: planName,
+    metadata: { kloopRunId },
+  });
+  return 'running';
+}
+
+// src/phases/phase2/index.ts
+var phase2States = {
+  clear_loop: handleClearLoop,
+  setup_run: handleSetupRun,
+  running: handleRunning,
+  resolve: handleResolve,
+  commit: handleCommit,
+  next_plan: handleNextPlan,
+  completed: handleCompleted,
+  failed: handleFailed,
+};
+async function runPhase2(session, config, options2) {
+  loadSessionAgents(session.id);
+  const status = ensureStatus(session.id);
+  const version = status.version;
+  const planFiles = resolvePlans(session.id, version);
+  const maxPlans = planFiles.length;
+  if (maxPlans === 0) {
+    throw new Error('No plan files found. Run Phase 1 first.');
+  }
+  const planIndex = status.context.planIndex ?? 0;
+  const firstRun = status.completedPlans.length === 0 && status.completedSteps.length === 0;
+  const ctx = {
+    session,
+    config,
+    version,
+    attempt: status.context.attempt ?? 1,
+    ticketId: session.ticket_id || 'unknown',
+    deliveryKind: status.context.deliveryKind ?? 'pr',
+    planIndex,
+    maxPlans,
+    firstRun,
+  };
+  return runStateMachine('phase2', phase2States, ctx, {
+    terminalStates: ['completed', 'failed'],
+    forceStartState: options2?.forceStartState,
+  });
+}
+
+// src/phases/phase3/index.ts
+init_agents();
+
+// src/phases/phase3/act.ts
+init_github();
+init_log();
+async function handleAct(ctx) {
+  const { session, version, prNumber, evalResults } = ctx;
+  if (!prNumber) {
+    throw new Error('act: no PR number available');
+  }
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'act:started',
+    version,
+    metadata: { stepType: 'code' },
+  });
+  if (!evalResults || evalResults.length === 0) {
+    console.log('[act] No eval results found \u2014 skipping');
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'act:completed',
+      version,
+      metadata: {
+        replies: 0,
+        resolved: 0,
+        codeFixes: 0,
+      },
+    });
+    return 'poll';
+  }
+  const actionable = evalResults;
+  const codeFixes = [];
+  const ambiguousItems = [];
+  let repliesPosted = 0;
+  let threadsResolved = 0;
+  let reactionsAdded = 0;
+  for (const result of actionable) {
+    try {
+      if (result.verdict === 'code_fix') {
+        codeFixes.push(result);
+        continue;
+      }
+      if (result.ambiguous) {
+        ambiguousItems.push({
+          id: result.unitId,
+          type: result.unitType,
+          title: result.unitId,
+          reasoning: result.reply || result.codeFix || 'No reasoning provided',
+          ambiguityReason: result.ambiguousReason,
+        });
+        continue;
+      }
+      if (result.reply && result.unitType === 'thread') {
+        const threadId = result.unitId.replace('thread-', '');
+        const threads = await ghReviewThreads(prNumber, session.worktree);
+        const thread = threads.find(t => t.id === threadId);
+        if (thread && thread.replies.length > 0) {
+          await ghReplyToThread(prNumber, thread.replies[0].id, withBotSignature(result.reply), session.worktree);
+          repliesPosted++;
+        } else if (thread) {
+          const firstCommentId = thread.firstCommentId;
+          if (firstCommentId) {
+            await ghReplyToThread(prNumber, firstCommentId, withBotSignature(result.reply), session.worktree);
+            repliesPosted++;
+          } else {
+            console.warn(`[act] No first comment ID for thread ${threadId}`);
+          }
+        }
+      }
+      if (result.reply && result.unitType === 'pr_comment') {
+        const commentId = result.unitId.replace('comment-', '');
+        const numericId = parseInt(commentId, 10);
+        if (!Number.isNaN(numericId)) {
+          await ghReplyToIssueComment(prNumber, withBotSignature(result.reply), numericId, session.worktree);
+          repliesPosted++;
+        }
+      }
+      if (result.resolveThread && result.unitType === 'thread') {
+        const threadId = result.unitId.replace('thread-', '');
+        await ghResolveThread(threadId, session.worktree);
+        threadsResolved++;
+      }
+      if (result.reactThumbsUp && result.unitType === 'thread') {
+        const threadId = result.unitId.replace('thread-', '');
+        const threads = await ghReviewThreads(prNumber, session.worktree);
+        const thread = threads.find(t => t.id === threadId);
+        if (thread && thread.replies.length > 0) {
+          const commentId = parseInt(thread.replies[0].id, 10);
+          if (!Number.isNaN(commentId)) {
+            await ghReact(commentId, '+1', session.worktree);
+            reactionsAdded++;
+          }
+        }
+      }
+    } catch (err) {
+      console.warn(`[act] Action failed for ${result.unitId}:`, err);
+    }
+  }
+  console.log(
+    `[act] Posted ${repliesPosted} replies, resolved ${threadsResolved} threads, added ${reactionsAdded} reactions, ${codeFixes.length} code fixes, ${ambiguousItems.length} ambiguous`,
+  );
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'act:completed',
+    version,
+    metadata: {
+      replies: repliesPosted,
+      resolved: threadsResolved,
+      codeFixes: codeFixes.length,
+      ambiguous: ambiguousItems.length,
+    },
+  });
+  ctx.ttyResolveItems = ambiguousItems;
+  if (ambiguousItems.length > 0) {
+    ctx.ttyReason = 'ambiguous_eval';
+    return 'tty_resolve';
+  }
+  if (codeFixes.length > 0) {
+    return 'write_fix';
+  }
+  return 'poll';
+}
+
+// src/phases/phase3/commit-pending.ts
+init_agents();
+init_log();
+init_types2();
+init_spawn();
+async function handleCommitPending(ctx) {
+  const { session, version, config } = ctx;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'commit_pending:started',
+    version,
+    metadata: { stepType: 'code' },
+  });
+  const { $: $2 } = await Promise.resolve(globalThis.Bun);
+  const diffResult = await $2`git diff --name-only`.cwd(session.worktree).quiet().text();
+  const untrackedResult = await $2`git ls-files --others --exclude-standard`.cwd(session.worktree).quiet().text();
+  const allFiles = [
+    ...diffResult
+      .trim()
+      .split(
+        `
+`,
+      )
+      .filter(f => f.length > 0),
+    ...untrackedResult
+      .trim()
+      .split(
+        `
+`,
+      )
+      .filter(f => f.length > 0),
+  ];
+  if (allFiles.length === 0) {
+    console.log('[commit_pending] No uncommitted changes \u2014 skipping');
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'commit_pending:completed',
+      version,
+      metadata: { skipped: true },
+    });
+    return config.settings.coderabbit ? 'prereview' : 'push';
+  }
+  const prompt = COMMIT_AGENT_PROMPT.replace('{context}', '');
+  const binary = getAgentBinary('phase3', 'commit_pending');
+  writeStepInit(session.id, version, 'commit_pending', {
+    prompt,
+    command: `${binary} --print (LLM commit)`,
+    type: 'llm_print',
+  });
+  await spawnPrintRaw(binary, prompt, {
+    cwd: session.worktree,
+    timeout: 120,
+    sessionId: session.id,
+    label: 'commit-pending',
+  });
+  let commitSha = '';
+  try {
+    const shaResult = await $2`git rev-parse HEAD`.cwd(session.worktree).quiet().text();
+    commitSha = shaResult.trim();
+    const msgResult = await $2`git log --oneline -1`.cwd(session.worktree).quiet().text();
+    console.log(`[commit_pending] Committed: ${msgResult.trim()}`);
+  } catch (err) {
+    console.warn('[commit_pending] Could not read commit SHA:', err);
+  }
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'commit_pending:completed',
+    version,
+    metadata: {
+      commitSha,
+      filesStaged: allFiles.length,
+    },
+  });
+  return config.settings.coderabbit ? 'prereview' : 'push';
+}
+
+// src/phases/phase3/completed.ts
+init_log();
+init_format();
+async function handleCompleted2(ctx) {
+  const { session, version, prNumber, prUrl } = ctx;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'phase3:completed',
+    version,
+    metadata: { prNumber, prUrl },
+  });
+  logBanner('Phase 3 Complete', {
+    PR: prUrl || (prNumber ? `#${prNumber}` : 'N/A'),
+    Status: 'Merge-ready \u2014 please review and merge manually',
+  });
+  return null;
+}
+
+// src/phases/phase3/create-pr.ts
+init_agents();
+init_artifacts();
+init_git();
+init_github();
+init_log();
+init_spawn();
+var CREATE_PR_MECHANICS = `## Spec Context
+
+Read the spec at: {spec_path}
+
+The spec contains what was implemented. Use it for PR body context.`;
+async function handleCreatePr(ctx) {
+  const { session, version, ticketId, baseBranch } = ctx;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'create_pr:started',
+    version,
+    metadata: { stepType: 'code' },
+  });
+  const { $: $2 } = await Promise.resolve(globalThis.Bun);
+  if (isOnMain(baseBranch, session.worktree)) {
+    throw new Error(`Refusing to create PR from ${baseBranch} \u2014 safety check`);
+  }
+  const branch = await $2`git branch --show-current`.cwd(session.worktree).quiet().text();
+  const currentBranch = branch.trim();
+  const existingPrs = await ghListPrsForBranch(currentBranch, session.worktree);
+  if (existingPrs.length > 0) {
+    const existingPr = existingPrs[0];
+    console.log(`[create_pr] PR already exists: #${existingPr.number} \u2014 reusing`);
+    ctx.prNumber = existingPr.number;
+    try {
+      const repoInfo = await ghRepoInfo(session.worktree);
+      ctx.prUrl = `https://github.com/${repoInfo.owner}/${repoInfo.repo}/pull/${existingPr.number}`;
+    } catch {
+      ctx.prUrl = null;
+    }
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'context:updated',
+      metadata: { prNumber: ctx.prNumber, prUrl: ctx.prUrl },
+    });
+    try {
+      const repoInfo = await ghRepoInfo(session.worktree);
+      ctx.mergePolicy = await ghFetchMergePolicy(repoInfo.owner, repoInfo.repo, session.worktree);
+    } catch (err) {
+      console.warn('[create_pr] Could not fetch merge policy:', err);
+    }
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'create_pr:completed',
+      version,
+      metadata: {
+        prNumber: existingPr.number,
+        reused: true,
+      },
+    });
+    return 'poll';
+  }
+  const specPath = findLatestSpecPath(session.id, version) || snapshotPath(session.id, version, 'task-spec.md');
+  const userPrompt = getAgentPrompt('phase3', 'create_pr', {
+    baseBranch,
+    ticketId,
+    spec_path: specPath,
+  });
+  const mechanics = CREATE_PR_MECHANICS.replace('{spec_path}', specPath);
+  const prompt = `${mechanics}
+
+${userPrompt}`;
+  const binary = getAgentBinary('phase3', 'create_pr');
+  writeStepInit(session.id, version, 'create_pr', {
+    prompt,
+    command: `${binary} --print (LLM create PR)`,
+    type: 'llm_print',
+  });
+  console.log(`[create_pr] Creating PR via LLM for ${ticketId}`);
+  const rawOutput = await spawnPrintRaw(binary, prompt, {
+    cwd: session.worktree,
+    timeout: 120,
+    sessionId: session.id,
+    label: 'create-pr',
+  });
+  let pr;
+  try {
+    const cleaned = rawOutput
+      .replace(/^```(?:json)?\s*\n?/m, '')
+      .replace(/\n?```\s*$/m, '')
+      .trim();
+    pr = JSON.parse(cleaned);
+  } catch {
+    const urlMatch = rawOutput.match(/https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)/);
+    if (!urlMatch) {
+      throw new Error(`Could not parse PR info from LLM output: ${rawOutput.slice(0, 300)}`);
+    }
+    pr = { number: parseInt(urlMatch[1], 10), url: urlMatch[0] };
+  }
+  ctx.prNumber = pr.number;
+  ctx.prUrl = pr.url;
+  console.log(`[create_pr] Created PR: ${pr.url}`);
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'context:updated',
+    metadata: { prNumber: pr.number, prUrl: pr.url },
+  });
+  try {
+    const repoInfo = await ghRepoInfo(session.worktree);
+    ctx.mergePolicy = await ghFetchMergePolicy(repoInfo.owner, repoInfo.repo, session.worktree);
+  } catch (err) {
+    console.warn('[create_pr] Could not fetch merge policy:', err);
+  }
+  if (ctx.config.repo.prComment) {
+    try {
+      await ghPrComment(pr.number, ctx.config.repo.prComment, session.worktree);
+      console.log('[create_pr] Posted PR comment');
+    } catch (err) {
+      console.warn('[create_pr] Failed to post PR comment:', err);
+    }
+  }
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'create_pr:completed',
+    version,
+    metadata: {
+      prNumber: pr.number,
+      prUrl: pr.url,
+    },
+  });
+  const status = ensureStatus(session.id);
+  if (status.context.rolloverFromPr) {
+    const fromPr = status.context.rolloverFromPr;
+    const delivery = readDeliveryManifest(session.id, version);
+    if (delivery?.prRolloverHistory) {
+      const lastEntry = delivery.prRolloverHistory.findLast(e2 => e2.fromPr === fromPr && e2.toPr === 0);
+      if (lastEntry) {
+        lastEntry.toPr = pr.number;
+        updateDeliveryManifest(session.id, version, {
+          prRolloverHistory: delivery.prRolloverHistory,
+        });
+        console.log(`[create_pr] Rollover recorded: PR #${fromPr} \u2192 #${pr.number}`);
+      }
+    }
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'context:updated',
+      metadata: { rolloverFromPr: undefined },
+    });
+  }
+  return 'poll';
+}
+
+// src/phases/phase3/ensure-branch.ts
+init_git();
+init_log();
+async function handleEnsureBranch(ctx) {
+  const { session, version, baseBranch } = ctx;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'ensure_branch:started',
+    version,
+    metadata: { stepType: 'code' },
+  });
+  const { $: $2 } = await Promise.resolve(globalThis.Bun);
+  const fetchResult = await $2`git fetch origin ${baseBranch}`.cwd(session.worktree).quiet();
+  if (fetchResult.exitCode !== 0) {
+    console.warn('[ensure_branch] Failed to fetch base branch:', fetchResult.stderr.toString());
+  }
+  const aheadBehind = await $2`git rev-list --count HEAD..origin/${baseBranch}`.cwd(session.worktree).quiet().text();
+  const behindCount = parseInt(aheadBehind.trim(), 10);
+  if (behindCount === 0) {
+    console.log('[ensure_branch] Branch is up to date');
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'ensure_branch:completed',
+      version,
+      metadata: { action: 'none' },
+    });
+    return 'eval';
+  }
+  console.log(`[ensure_branch] Branch is ${behindCount} commits behind ${baseBranch} \u2014 rebasing`);
+  const rebaseResult = await $2`git rebase origin/${baseBranch}`.cwd(session.worktree).quiet();
+  if (rebaseResult.exitCode === 0) {
+    console.log('[ensure_branch] Rebase succeeded');
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'ensure_branch:completed',
+      version,
+      metadata: { action: 'rebase', success: true },
+    });
+    return 'push';
+  }
+  if (hasUnmergedPaths(session.worktree)) {
+    console.log('[ensure_branch] Merge conflicts detected \u2014 routing to tty_resolve');
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'ensure_branch:completed',
+      version,
+      metadata: { action: 'conflict', success: false },
+    });
+    ctx.ttyReason = 'merge_conflict';
+    return 'tty_resolve';
+  }
+  console.error('[ensure_branch] Rebase failed:', rebaseResult.stderr.toString());
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'ensure_branch:completed',
+    version,
+    metadata: {
+      action: 'rebase',
+      success: false,
+      error: rebaseResult.stderr.toString(),
+    },
+  });
+  await $2`git rebase --abort`.cwd(session.worktree).quiet();
+  return 'eval';
+}
+
+// src/phases/phase3/eval.ts
+init_agents();
+init_artifacts();
+init_github();
+init_log();
+init_spawn();
+var OUTDATED_REPLY = withBotSignature(
+  'This comment is outdated (the code it refers to has changed). Marking as resolved.',
+);
+var GHOSTED_REPLY = withBotSignature(
+  'The CI checks triggered by my previous change have now completed. Marking as resolved.',
+);
+function preFilterThreads(threads, crStatus) {
+  const results = [];
+  for (const thread of threads) {
+    if (thread.isOutdated) {
+      results.push({
+        category: 'outdated',
+        threadId: thread.id,
+        reason: 'Thread marked as outdated by GitHub',
+        templateReply: OUTDATED_REPLY,
+      });
+      continue;
+    }
+    if (thread.lastReplyByBot && (crStatus === 'passing' || crStatus === 'failing' || crStatus === 'none')) {
+      results.push({
+        category: 'ghosted',
+        threadId: thread.id,
+        reason: 'Last reply by bot and CR CI completed',
+        templateReply: GHOSTED_REPLY,
+      });
+      continue;
+    }
+    if (thread.lastReplyByBot && crStatus === 'running') {
+      results.push({
+        category: 'pending',
+        threadId: thread.id,
+        reason: 'Last reply by bot and CR CI still running',
+      });
+      continue;
+    }
+    results.push({
+      category: 'needs_eval',
+      threadId: thread.id,
+      reason: 'Needs LLM evaluation',
+    });
+  }
+  return results;
+}
+async function handleEval(ctx) {
+  const { session, version, prNumber } = ctx;
+  if (!prNumber) {
+    throw new Error('eval: no PR number available');
+  }
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'eval:started',
+    version,
+    metadata: { stepType: 'llm' },
+  });
+  const [threads, checks, _prView, prComments] = await Promise.all([
+    ghReviewThreads(prNumber, session.worktree),
+    ghPrChecks(prNumber, session.worktree).catch(() => []),
+    ghPrView(prNumber, session.worktree),
+    ghPrComments(prNumber, undefined, session.worktree).catch(() => []),
+  ]);
+  const crCheck = ctx.config.settings.coderabbit
+    ? checks.find(c3 => c3.name.toLowerCase().includes('coderabbit'))
+    : undefined;
+  const crStatus = crCheck
+    ? crCheck.status === 'passing'
+      ? 'passing'
+      : crCheck.status === 'failing'
+        ? 'failing'
+        : 'running'
+    : 'none';
+  const threadsWithReplies = threads.map(t => ({
+    ...t,
+    lastReplyByBot: t.replies.length > 0 && t.replies[t.replies.length - 1].isBot,
+  }));
+  const preFilterResults = preFilterThreads(threadsWithReplies, crStatus);
+  const closings = preFilterResults.filter(r2 => r2.category === 'outdated' || r2.category === 'ghosted');
+  let autoResolved = 0;
+  for (const closing of closings) {
+    try {
+      if (closing.templateReply) {
+        const thread = threads.find(t => t.id === closing.threadId);
+        if (thread && thread.replies.length > 0) {
+          await ghReplyToThread(prNumber, thread.replies[0].id, closing.templateReply, session.worktree);
+        }
+      }
+      await ghResolveThread(closing.threadId, session.worktree);
+      autoResolved++;
+    } catch (err) {
+      console.warn(`[eval] Auto-close failed for ${closing.threadId}:`, err);
+    }
+  }
+  const needsEval = preFilterResults.filter(r2 => r2.category === 'needs_eval');
+  const failingChecks = checks.filter(c3 => c3.status === 'failing');
+  const units = [];
+  for (const check of failingChecks) {
+    units.push({
+      id: `ci-${check.name}`,
+      type: 'ci_failure',
+      title: `CI Failure: ${check.name}`,
+      content: `The CI check "${check.name}" is failing. This needs to be investigated and fixed.`,
+      metadata: { checkName: check.name },
+    });
+  }
+  for (const pf of needsEval) {
+    const thread = threads.find(t => t.id === pf.threadId);
+    if (!thread) continue;
+    const commentsText = [
+      `## Original comment by ${thread.author}:`,
+      thread.body,
+      ...thread.replies.map(
+        r2 => `## Reply by ${r2.author}:
+${r2.body}`,
+      ),
+    ].join(`
+
+`);
+    units.push({
+      id: `thread-${pf.threadId}`,
+      type: 'thread',
+      title: `Review thread by ${thread.author}`,
+      content: commentsText,
+      metadata: {
+        threadId: pf.threadId,
+        commentId: thread.firstCommentId || thread.replies[0]?.id,
+      },
+    });
+  }
+  for (const comment of prComments) {
+    const login = comment.author?.login;
+    if (!login || login === 'claude[bot]') continue;
+    units.push({
+      id: `comment-${comment.id}`,
+      type: 'pr_comment',
+      title: `PR comment by ${login}`,
+      content: comment.body,
+      metadata: { commentId: comment.id },
+    });
+  }
+  const evalBinary = getAgentBinary('phase3', 'eval');
+  writeStepInit(session.id, version, 'eval', {
+    prompt: `eval: ${units.length} units (${units.map(u2 => u2.type).join(', ')})`,
+    command: `${evalBinary} --print (LLM print, fan-out)`,
+    type: 'llm_print',
+  });
+  const evalResults = await fanOutEval(units, ctx);
+  ctx.evalResults = evalResults;
+  const codeFixes = evalResults.filter(r2 => r2.verdict === 'code_fix');
+  const ambiguous = evalResults.filter(r2 => r2.ambiguous);
+  console.log(
+    `[eval] Pre-filtered: ${autoResolved} auto-resolved, ${needsEval.length} + ${failingChecks.length} CI + ${prComments.filter(c3 => c3.author?.login && c3.author.login !== 'claude[bot]').length} comment units evaluated`,
+  );
+  console.log(
+    `[eval] Results: ${evalResults.filter(r2 => r2.verdict === 'reply').length} replies, ${evalResults.filter(r2 => r2.verdict === 'resolve').length} resolves, ${codeFixes.length} code fixes, ${ambiguous.length} ambiguous`,
+  );
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'eval:completed',
+    version,
+    metadata: {
+      autoResolved,
+      totalEvalUnits: units.length,
+      replies: evalResults.filter(r2 => r2.verdict === 'reply').length,
+      resolves: evalResults.filter(r2 => r2.verdict === 'resolve').length,
+      codeFixes: codeFixes.length,
+      ambiguous: ambiguous.length,
+      resolved: evalResults.filter(r2 => r2.verdict === 'resolve').length,
+    },
+  });
+  return 'act';
+}
+var EVAL_MECHANICS = `## Context Paths
+
+You have access to these files to understand the original intent and determine if feedback is valid:
+- Spec: {spec_path}
+- Plans: {plan_paths}
+
+Read these files. They define what was INTENDED. Compare against the feedback to determine if it's a genuine issue or a false positive.
+
+## How to Detect False Positives
+
+1. **Read the spec** \u2014 what was the stated requirement? Does the feedback conflict with the spec?
+2. **Read the plan** \u2014 what was the implementation approach? Does the feedback misunderstand the design?
+3. **Check the code** \u2014 use file reading tools to verify the actual state matches the spec/plan
+4. **Consider context** \u2014 is the reviewer missing information? Are they applying a generic rule that doesn't fit?
+
+A false positive is when the feedback asks for something that:
+- Contradicts the spec (spec says X, reviewer wants Y)
+- Is already satisfied (reviewer missed it)
+- Is out of scope (reviewer scope creep)
+- Is stylistic preference vs. correctness issue`;
+function buildEvalPrompt(ticketId, content, vars) {
+  const evalInstruction = getAgentPrompt('phase3', 'eval', vars);
+  const mechanics = EVAL_MECHANICS.replace('{spec_path}', vars.spec_path || '(not provided)').replace(
+    '{plan_paths}',
+    vars.plan_paths || '(not provided)',
+  );
+  return `
+${mechanics}
+
+${evalInstruction}
+
+## Task Context
+Ticket: ${ticketId}
+
+## Feedback Item
+${content}
+
+## Possible Actions
+- "reply": Post a reply explaining your position or acknowledging the feedback
+- "resolve": Resolve the thread (the issue has been addressed, is not actionable, or is no longer relevant)
+- "code_fix": The feedback requires code changes \u2014 provide fix instructions
+
+## Output Format
+Return a JSON object:
+{
+  "verdict": "reply" | "resolve" | "code_fix",
+  "reply": "string (for reply verdict \u2014 the text to post)",
+  "codeFix": "string (for code_fix verdict \u2014 fix instructions)",
+  "resolveThread": true/false (should the thread be resolved?),
+  "reactThumbsUp": true/false (should we react +1 to the comment?),
+  "ambiguous": true/false (are you unsure about the verdict?),
+  "ambiguousReason": "string (if ambiguous, explain why)"
+}
+`.trim();
+}
+async function evalSingleUnit(unit, ctx, vars) {
+  const prompt = buildEvalPrompt(ctx.ticketId, unit.content, vars);
+  const result = await spawnPrint(getAgentBinary('phase3', 'eval'), prompt, {
+    cwd: ctx.session.worktree,
+    timeout: ctx.config.kloop.reviewerTimeout,
+    sessionId: ctx.session.id,
+    label: `eval-${unit.content.slice(0, 30).replace(/[^a-z0-9]/gi, '-')}`,
+  });
+  return {
+    unitId: unit.id,
+    unitType: unit.type,
+    verdict: result.verdict || 'resolve',
+    reply: result.reply,
+    codeFix: result.codeFix,
+    resolveThread: result.resolveThread,
+    reactThumbsUp: result.reactThumbsUp,
+    ambiguous: result.ambiguous,
+    ambiguousReason: result.ambiguousReason,
+  };
+}
+async function fanOutEval(units, ctx) {
+  if (units.length === 0) return [];
+  const specPath =
+    findLatestSpecPath(ctx.session.id, ctx.version) || snapshotPath(ctx.session.id, ctx.version, 'task-spec.md');
+  const latestPlansDir =
+    findLatestPlansPath(ctx.session.id, ctx.version) || snapshotPath(ctx.session.id, ctx.version, 'plans');
+  const planPaths = resolveActivePlans(latestPlansDir);
+  const vars = {
+    spec_path: specPath,
+    plan_paths: planPaths.join(`
+`),
+  };
+  const results = await Promise.all(
+    units.map(async unit => {
+      try {
+        return await evalSingleUnit(unit, ctx, vars);
+      } catch (_err) {
+        console.warn(`[eval] Unit ${unit.id} failed, retrying...`);
+        try {
+          return await evalSingleUnit(unit, ctx, vars);
+        } catch (retryErr) {
+          console.error(`[eval] Unit ${unit.id} failed after retry:`, retryErr);
+          return {
+            unitId: unit.id,
+            unitType: unit.type,
+            verdict: 'resolve',
+          };
+        }
+      }
+    }),
+  );
+  return results;
+}
+
+// src/phases/phase3/failed.ts
+init_log();
+init_inquirer();
+init_format();
+async function handleFailed2(ctx) {
+  const { session, version } = ctx;
+  const { readLog: readLog2 } = await Promise.resolve().then(() => (init_log(), exports_log));
+  const log = readLog2(session.id);
+  const errorEvent = [...log].reverse().find(e2 => e2.event.includes(':error') || e2.metadata?.error);
+  const errorMsg = errorEvent?.metadata?.error || 'Unknown error';
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'phase3:failed',
+    version,
+    metadata: { error: errorMsg },
+  });
+  logErrorBanner('Phase 3 Failed', { Error: errorMsg });
+  const retry = await confirmAction('Would you like to retry?', false);
+  if (retry) {
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'phase3:retry',
+      version,
+    });
+    return 'commit_pending';
+  }
+  logErrorBanner('Phase 3 Aborted', {
+    Retry: 'kautopilot start --phase polish',
+  });
+  return null;
+}
+
+// src/phases/phase3/feedback-check.ts
+init_agents();
+import { existsSync as existsSync29, writeFileSync as writeFileSync18 } from 'fs';
+init_artifacts();
+init_github();
+init_log();
+init_scripts();
+init_inquirer();
+init_format();
+async function handleFeedbackCheck(ctx) {
+  const { session, version, prNumber, prUrl, pushCycle } = ctx;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'feedback_check:started',
+    version,
+    metadata: { stepType: 'code' },
+  });
+  logBanner('Phase 3 Complete \u2014 PR is merge-ready', {
+    PR: prUrl || `#${prNumber}`,
+    'Push cycles': String(pushCycle),
+    Approvals: ctx.mergePolicy?.requiresApprovingReviews
+      ? `Requires ${ctx.mergePolicy.requiredApprovingReviewCount} approval(s)`
+      : 'No approval required',
+  });
+  const choice = await selectOption('The PR is merge-ready. What would you like to do?', [
+    {
+      value: 'done',
+      label: 'Done',
+      hint: 'Mark this task as complete',
+    },
+    {
+      value: 'feedback',
+      label: 'I have feedback',
+      hint: 'Go back to Phase 1 with feedback to improve the implementation',
+    },
+  ]);
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'feedback_check:completed',
+    version,
+    metadata: {
+      choice,
+      prNumber,
+      pushCycles: pushCycle,
+    },
+  });
+  if (choice === 'done') {
+    if (ctx.ticketId) {
+      runScript(ctx.session.id, 'to-review', [ctx.ticketId]);
+      appendEvent(ctx.session.id, {
+        ts: new Date().toISOString(),
+        event: 'transition:in_progress_to_review',
+        metadata: { ticketId: ctx.ticketId },
+      });
+    }
+    return 'completed';
+  }
+  if (ctx.ticketId) {
+    runScript(ctx.session.id, 'revert-to-inprogress', [ctx.ticketId]);
+    appendEvent(ctx.session.id, {
+      ts: new Date().toISOString(),
+      event: 'transition:review_to_in_progress',
+      metadata: { ticketId: ctx.ticketId },
+    });
+  }
+  return 'feedback';
+}
+async function handleFeedback(ctx) {
+  const { session, version, prNumber, prUrl } = ctx;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'feedback:started',
+    version,
+    metadata: { stepType: 'tty' },
+  });
+  let checksStatus = 'unknown';
+  let threadCount = 0;
+  if (prNumber) {
+    try {
+      const checks = await ghPrChecks(prNumber, session.worktree);
+      const passing = checks.filter(c3 => c3.status === 'passing').length;
+      const failing = checks.filter(c3 => c3.status === 'failing').length;
+      const pending = checks.filter(c3 => c3.status === 'pending').length;
+      checksStatus = `${passing} passing, ${failing} failing, ${pending} pending`;
+    } catch {
+      checksStatus = 'unable to fetch';
+    }
+    try {
+      const threads = await ghReviewThreads(prNumber, session.worktree);
+      threadCount = threads.filter(t => !t.isOutdated).length;
+    } catch {
+      threadCount = -1;
+    }
+  }
+  const specPath = findLatestSpecPath(session.id, version);
+  const plansDir = findLatestPlansPath(session.id, version);
+  const feedbackPath = snapshotPath(session.id, version, 'feedback.md');
+  const feedbackPrompt = loadPromptTemplate('phase3', 'feedback', {
+    task_spec_path: specPath || '(no spec found)',
+    plans_dir: plansDir || '(no plans found)',
+    pr_url: prUrl || `#${prNumber}`,
+    checks_status: checksStatus,
+    thread_count: String(threadCount),
+    feedback_path: feedbackPath,
+  });
+  const binary = getAgentBinary('phase3', 'feedback');
+  writeStepInit(session.id, version, 'feedback', {
+    prompt: feedbackPrompt,
+    command: `${binary} (TTY handoff)`,
+    type: 'tty_handoff',
+  });
+  logBanner('Collecting PR Feedback', {
+    PR: prUrl || `#${prNumber}`,
+    Checks: checksStatus,
+    Threads: String(threadCount),
+  });
+  console.log(`Discuss the PR with Claude. When ready, write feedback to ${feedbackPath}`);
+  await spawnTTYWithTurnTracking(session.id, binary, feedbackPrompt + TTY_EXIT_INSTRUCTION, {
+    cwd: session.worktree,
+    worktree: session.worktree,
+  });
+  const feedbackWritten = existsSync29(feedbackPath);
+  if (!feedbackWritten) {
+    ensureArtifactDir(feedbackPath);
+    writeFileSync18(
+      feedbackPath,
+      `# PR Feedback
+
+User discussed PR feedback with Claude but no explicit feedback was written.
+PR: ${prUrl || `#${prNumber}`}
+`,
+    );
+  }
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'feedback:completed',
+    version,
+    metadata: { hasFeedback: true, feedbackWritten },
+  });
+  console.log(`[feedback] Returning revisit_spec \u2014 escalating to new epoch`);
+  return 'revisit_spec';
+}
+
+// src/phases/phase3/poll.ts
+init_github();
+init_log();
+function computePollState(signals, _ctx) {
+  if (signals.prState === 'CLOSED') {
+    throw new Error('PR was closed externally');
+  }
+  if (signals.changesRequested) {
+    return 'blocked';
+  }
+  if (signals.unresolvedThreads > 0) {
+    return 'blocked';
+  }
+  const failingChecks = signals.checks.filter(c3 => c3.status === 'failing');
+  const pendingChecks = signals.checks.filter(c3 => c3.status === 'pending');
+  if (failingChecks.length > 0) {
+    return 'blocked';
+  }
+  if (pendingChecks.length > 0) {
+    return 'pending';
+  }
+  if (!signals.mergeable || !['CLEAN', 'HAS_HOOKS', 'UNSTABLE', 'BLOCKED'].includes(signals.mergeStateStatus)) {
+    return 'pending';
+  }
+  if (signals.crStatus === 'running' || signals.crStatus === 'failing') {
+    return 'pending';
+  }
+  return 'mergeable';
+}
+function computeRolloverRecommendation(signals, pushCycles) {
+  const result = {
+    shouldRollover: false,
+    signals: {
+      unresolvedThreads: signals.unresolvedThreads,
+      totalComments: signals.prComments,
+      pushCycles,
+      prAgeHours: signals.prAge ?? 0,
+    },
+  };
+  const UNRESOLVED_THREAD_THRESHOLD = 15;
+  const COMMENT_VOLUME_THRESHOLD = 50;
+  const PUSH_CYCLE_THRESHOLD = 8;
+  const PR_AGE_HOURS_THRESHOLD = 168;
+  const reasons = [];
+  if (signals.unresolvedThreads >= UNRESOLVED_THREAD_THRESHOLD) {
+    reasons.push(`${signals.unresolvedThreads} unresolved threads (threshold: ${UNRESOLVED_THREAD_THRESHOLD})`);
+  }
+  if (signals.prComments >= COMMENT_VOLUME_THRESHOLD) {
+    reasons.push(`${signals.prComments} total comments (threshold: ${COMMENT_VOLUME_THRESHOLD})`);
+  }
+  if (pushCycles >= PUSH_CYCLE_THRESHOLD) {
+    reasons.push(`${pushCycles} push cycles (threshold: ${PUSH_CYCLE_THRESHOLD})`);
+  }
+  if ((signals.prAge ?? 0) >= PR_AGE_HOURS_THRESHOLD) {
+    reasons.push(`PR age: ${signals.prAge}h (threshold: ${PR_AGE_HOURS_THRESHOLD}h)`);
+  }
+  if (reasons.length >= 2) {
+    result.shouldRollover = true;
+    result.reason = `PR review saturation: ${reasons.join('; ')}`;
+  }
+  return result;
+}
+function ensureReportedRunIds(ctx) {
+  const status = ensureStatus(ctx.session.id);
+  return status.context.reportedFailedRunIds ?? [];
+}
+async function handlePoll(ctx) {
+  const { session, version, prNumber, pushCycle, config } = ctx;
+  if (!prNumber) {
+    throw new Error('poll: no PR number available');
+  }
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'poll:started',
+    version,
+    metadata: { stepType: 'code', pushCycle },
+  });
+  const [checks, prView, threads, reviews, prComments] = await Promise.all([
+    ghPrChecks(prNumber, session.worktree).catch(e2 => {
+      console.warn('[poll] Failed to fetch checks:', e2);
+      return [];
+    }),
+    ghPrView(prNumber, session.worktree).catch(e2 => {
+      console.warn('[poll] Failed to fetch PR view:', e2);
+      return null;
+    }),
+    ghReviewThreads(prNumber, session.worktree).catch(e2 => {
+      console.warn('[poll] Failed to fetch threads:', e2);
+      return [];
+    }),
+    ghReviews(prNumber, session.worktree).catch(e2 => {
+      console.warn('[poll] Failed to fetch reviews:', e2);
+      return [];
+    }),
+    ghPrComments(prNumber, undefined, session.worktree).catch(e2 => {
+      console.warn('[poll] Failed to fetch PR comments:', e2);
+      return [];
+    }),
+  ]);
+  if (!prView) {
+    throw new Error('poll: could not fetch PR status');
+  }
+  const failingChecks = checks.filter(c3 => c3.status === 'failing');
+  if (failingChecks.length > 0) {
+    const { ghPrRuns: ghPrRuns2 } = await Promise.resolve().then(() => (init_github(), exports_github));
+    const runs = await ghPrRuns2(prView.headRefName, session.worktree).catch(() => []);
+    const failedRuns = runs.filter(r2 => r2.conclusion === 'failure');
+    const reportedFailedRunIds = new Set(ctx.session.state === 'running' ? ensureReportedRunIds(ctx) : []);
+    const newlyFailedRuns = failedRuns.filter(run => !reportedFailedRunIds.has(run.databaseId));
+    await Promise.all(
+      newlyFailedRuns.map(async run => {
+        const logs = await ghRunLogsFailed(String(run.databaseId), session.worktree).catch(() => '');
+        if (logs) {
+          console.warn(`[poll] CI failure logs for ${run.name}:
+${logs.slice(0, 1000)}`);
+        }
+        reportedFailedRunIds.add(run.databaseId);
+      }),
+    );
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'context:updated',
+      metadata: {
+        reportedFailedRunIds: [...reportedFailedRunIds].sort((a, b3) => a - b3),
+      },
+    });
+  }
+  const changesRequested = reviews.some(r2 => r2.state === 'CHANGES_REQUESTED');
+  const approvals = reviews.filter(r2 => r2.state === 'APPROVED').length;
+  const crCheck = config.settings.coderabbit
+    ? checks.find(c3 => c3.name.toLowerCase().includes('coderabbit'))
+    : undefined;
+  const crStatus = crCheck
+    ? crCheck.status === 'passing'
+      ? 'passing'
+      : crCheck.status === 'failing'
+        ? 'failing'
+        : 'running'
+    : 'none';
+  const prCreatedAt = prView.createdAt ? new Date(prView.createdAt).getTime() : Date.now();
+  const prAgeHours = Math.round((Date.now() - prCreatedAt) / 3600000);
+  const signals = {
+    prState: prView.state,
+    mergeable: prView.mergeable,
+    mergeStateStatus: prView.mergeStateStatus,
+    checks: checks.map(c3 => ({ name: c3.name, status: c3.status })),
+    threads: threads.length,
+    unresolvedThreads: threads.length,
+    reviews: reviews.map(r2 => ({ author: r2.author.login, state: r2.state })),
+    prComments: prComments.length,
+    changesRequested,
+    approvals,
+    crStatus,
+    prAge: prAgeHours,
+  };
+  const pollState = computePollState(signals, ctx);
+  const rollover = computeRolloverRecommendation(signals, pushCycle);
+  if (rollover.shouldRollover) {
+    console.log(`[poll] Rollover recommended: ${rollover.reason}`);
+  }
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'context:updated',
+    metadata: { rolloverRecommendation: rollover },
+  });
+  const deliveryUpdates = {
+    kind: 'pr',
+    prNumber,
+  };
+  if (rollover.shouldRollover) {
+    const existing = readDeliveryManifest(session.id, version);
+    const history = existing?.prRolloverHistory ?? [];
+    const oldPrNumber = prNumber;
+    try {
+      await ghClosePr(oldPrNumber, session.worktree);
+      console.log(`[poll] Closed old PR #${oldPrNumber} for rollover`);
+    } catch (err) {
+      console.warn(`[poll] Failed to close old PR #${oldPrNumber}: ${err}`);
+    }
+    history.push({
+      fromPr: oldPrNumber,
+      toPr: 0,
+      reason: rollover.reason ?? 'PR review saturation',
+      timestamp: new Date().toISOString(),
+    });
+    deliveryUpdates.prRolloverHistory = history;
+    updateDeliveryManifest(session.id, version, deliveryUpdates);
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'context:updated',
+      metadata: { prNumber: null, prUrl: null, rolloverFromPr: oldPrNumber },
+    });
+    ctx.prNumber = null;
+    ctx.prUrl = null;
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'poll:completed',
+      version,
+      metadata: {
+        pushCycle,
+        pollState,
+        rollover: {
+          shouldRollover: true,
+          fromPr: oldPrNumber,
+          reason: rollover.reason,
+        },
+      },
+    });
+    return 'create_pr';
+  }
+  updateDeliveryManifest(session.id, version, deliveryUpdates);
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'poll:completed',
+    version,
+    metadata: {
+      pushCycle,
+      pollState,
+      rollover: {
+        shouldRollover: rollover.shouldRollover,
+        reason: rollover.reason,
+      },
+      signals: {
+        prState: signals.prState,
+        mergeable: signals.mergeable,
+        mergeStateStatus: signals.mergeStateStatus,
+        checks: signals.checks.map(c3 => c3.status),
+        threads: signals.threads,
+        unresolvedThreads: signals.unresolvedThreads,
+        changesRequested: signals.changesRequested,
+        approvals: signals.approvals,
+        crStatus: signals.crStatus,
+        prAgeHours,
+      },
+    },
+  });
+  console.log(
+    `[poll] State: ${pollState} (checks: ${checks.filter(c3 => c3.status === 'passing').length}/${checks.length} passing, threads: ${threads.length}, approvals: ${approvals}, cr: ${crStatus})`,
+  );
+  switch (pollState) {
+    case 'mergeable':
+      return 'feedback_check';
+    case 'pending': {
+      if (pushCycle >= config.settings.maxPushCycles) {
+        console.log(`[poll] Max push cycles (${config.settings.maxPushCycles}) exceeded`);
+        return 'failed';
+      }
+      const waitMs = (config.settings.pollInterval ?? 60) * 1000;
+      console.log(`[poll] Pending \u2014 waiting ${(waitMs / 1000).toFixed(0)}s before re-poll...`);
+      await new Promise(resolve => setTimeout(resolve, waitMs));
+      return 'poll';
+    }
+    case 'blocked':
+      return 'ensure_branch';
+  }
+}
+
+// src/phases/phase3/prereview.ts
+init_agents();
+init_log();
+var { spawn: spawn4 } = globalThis.Bun;
+init_spawn();
+async function handlePrereview(ctx) {
+  const { session, version, config } = ctx;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'prereview:started',
+    version,
+    metadata: { stepType: 'llm' },
+  });
+  if (!config.settings.coderabbit) {
+    console.log('[prereview] CodeRabbit disabled in config \u2014 skipping');
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'prereview:completed',
+      version,
+      metadata: { skipped: true, reason: 'coderabbit_disabled' },
+    });
+    return 'push';
+  }
+  let coderabbitAvailable = false;
+  try {
+    const whichProc = spawn4({
+      cmd: ['which', 'coderabbit'],
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const exitCode = await whichProc.exited;
+    coderabbitAvailable = exitCode === 0;
+  } catch {
+    coderabbitAvailable = false;
+  }
+  if (!coderabbitAvailable) {
+    console.log('[prereview] CodeRabbit not installed \u2014 skipping');
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'prereview:completed',
+      version,
+      metadata: { skipped: true, reason: 'coderabbit_not_installed' },
+    });
+    return 'push';
+  }
+  console.log('[prereview] Running CodeRabbit local review...');
+  let reviewOutput = '';
+  try {
+    const proc = spawn4({
+      cmd: ['coderabbit', 'review', '--plain', '--base', ctx.baseBranch],
+      cwd: session.worktree,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+    await proc.exited;
+    reviewOutput = stdout.trim();
+    if (stderr) console.error(`[prereview] CodeRabbit stderr: ${stderr.slice(0, 500)}`);
+  } catch (err) {
+    console.warn('[prereview] CodeRabbit failed:', err);
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'prereview:completed',
+      version,
+      metadata: {
+        skipped: true,
+        reason: 'coderabbit_error',
+        error: err instanceof Error ? err.message : String(err),
+      },
+    });
+    return 'push';
+  }
+  if (!reviewOutput) {
+    console.log('[prereview] CodeRabbit returned no findings');
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'prereview:completed',
+      version,
+      metadata: { skipped: true, reason: 'no_findings' },
+    });
+    return 'push';
+  }
+  const classifyInstruction = getAgentPrompt('phase3', 'prereview_classify');
+  const classifyPrompt = `
+${classifyInstruction}
+
+CodeRabbit findings:
+${reviewOutput}
+
+For each finding, decide:
+- "fix": True positive issue that should be fixed now
+- "comment": Valid concern but doesn't need code change
+- "ignore": False positive or not applicable
+
+Output a JSON array of objects with: action, file, description, fix (for "fix" items, provide the fix instructions).
+`.trim();
+  const classifyBinary = getAgentBinary('phase3', 'prereview_classify');
+  writeStepInit(session.id, version, 'prereview', {
+    prompt: classifyPrompt,
+    command: `${classifyBinary} --print (LLM print) + coderabbit review`,
+    type: 'llm_print',
+  });
+  let findings = [];
+  try {
+    findings = await spawnPrint(classifyBinary, classifyPrompt, {
+      cwd: session.worktree,
+      timeout: 60,
+      sessionId: session.id,
+      label: 'prereview-classify',
+    });
+  } catch (err) {
+    console.warn('[prereview] LLM classification failed:', err);
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'prereview:completed',
+      version,
+      metadata: { skipped: true, reason: 'llm_classification_failed' },
+    });
+    return 'push';
+  }
+  const fixes = findings.filter(f => f.action === 'fix');
+  if (fixes.length === 0) {
+    console.log(`[prereview] No actionable fixes (${findings.length} findings, all comments/ignored)`);
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'prereview:completed',
+      version,
+      metadata: {
+        totalFindings: findings.length,
+        fixesApplied: 0,
+      },
+    });
+    return 'push';
+  }
+  const fixInstruction = getAgentPrompt('phase3', 'prereview_fix');
+  const fixPrompt = `
+${fixInstruction}
+
+${fixes.map(
+  (f, i) => `## Fix ${i + 1}: ${f.file}
+${f.description}
+Fix: ${f.fix || 'determine appropriate fix'}`,
+).join(`
+
+`)}
+`.trim();
+  try {
+    const _exitCode = await spawnPrintRaw(getAgentBinary('phase3', 'prereview_fix'), fixPrompt, {
+      cwd: session.worktree,
+      timeout: 120,
+      sessionId: session.id,
+      label: 'prereview-fix',
+    });
+    console.log(`[prereview] Applied ${fixes.length} fixes`);
+  } catch (err) {
+    console.warn('[prereview] Fix application failed:', err);
+  }
+  const { $: $2 } = await Promise.resolve(globalThis.Bun);
+  try {
+    const diffResult = await $2`git diff --name-only`.cwd(session.worktree).quiet().text();
+    const changedFiles = diffResult
+      .trim()
+      .split(
+        `
+`,
+      )
+      .filter(f => f.length > 0);
+    if (changedFiles.length > 0) {
+      const commitMsg = await spawnPrintRaw(
+        getAgentBinary('phase3', 'commit_pending'),
+        'Generate a short commit message for CodeRabbit fixes. Output only the message.',
+        {
+          cwd: session.worktree,
+          timeout: 15,
+          sessionId: session.id,
+          label: 'prereview-commit',
+        },
+      );
+      for (const file of changedFiles) {
+        await $2`git add ${file}`.cwd(session.worktree).quiet();
+      }
+      await $2`git commit -m ${commitMsg}`.cwd(session.worktree).quiet();
+      console.log('[prereview] Committed prereview fixes');
+    }
+  } catch (err) {
+    console.warn('[prereview] Failed to commit fixes:', err);
+  }
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'prereview:completed',
+    version,
+    metadata: {
+      totalFindings: findings.length,
+      fixesApplied: fixes.length,
+    },
+  });
+  return 'push';
+}
+
+// src/phases/phase3/push.ts
+init_agents();
+init_git();
+init_github();
+init_log();
+init_types2();
+init_spawn();
+import { existsSync as existsSync30, rmSync as rmSync3 } from 'fs';
+import { join as join17 } from 'path';
+async function handlePush(ctx) {
+  const { session, version, pushCycle, baseBranch } = ctx;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'push:started',
+    version,
+    metadata: { stepType: 'code', pushCycle },
+  });
+  const { $: $2 } = await Promise.resolve(globalThis.Bun);
+  if (isOnMain(baseBranch, session.worktree)) {
+    throw new Error(`Refusing to push from ${baseBranch} \u2014 safety check`);
+  }
+  const branch = await $2`git branch --show-current`.cwd(session.worktree).quiet().text();
+  const currentBranch = branch.trim();
+  if (ctx.config.settings.removeSpecOnPush) {
+    const specDir = join17(session.worktree, 'spec');
+    if (existsSync30(specDir)) {
+      rmSync3(specDir, { recursive: true, force: true });
+      console.log('[push] Removed spec/ folder \u2014 delegating commit to agent');
+      const contextSection = `### Context
+Removed spec/ folder before push. Commit the removal.`;
+      const commitPrompt = COMMIT_AGENT_PROMPT.replace('{context}', contextSection);
+      const binary = getAgentBinary('phase3', 'commit_pending');
+      await spawnPrintRaw(binary, commitPrompt, {
+        cwd: session.worktree,
+        timeout: 120,
+        sessionId: session.id,
+        label: 'remove-spec-commit',
+      });
+    }
+  }
+  try {
+    const remoteResult = await $2`git rev-parse --abbrev-ref @{upstream}`.cwd(session.worktree).quiet().nothrow();
+    const hasUpstream = remoteResult.exitCode === 0;
+    if (hasUpstream) {
+      const ahead = await $2`git rev-list @{upstream}..HEAD --count`.cwd(session.worktree).quiet().text();
+      if (ahead.trim() === '0') {
+        console.log('[push] Nothing to push \u2014 already up to date');
+        appendEvent(session.id, {
+          ts: new Date().toISOString(),
+          event: 'push:completed',
+          version,
+          metadata: { pushCycle, success: true, skipped: true },
+        });
+        return ctx.prNumber ? 'poll' : 'create_pr';
+      }
+    }
+    if (!hasUpstream) {
+      console.log(`[push] First push: git push -u origin ${currentBranch}`);
+      const result = await $2`git push -u origin ${currentBranch}`.cwd(session.worktree).quiet();
+      if (result.exitCode !== 0) {
+        throw new Error(`First push failed: ${result.stderr.toString()}`);
+      }
+    } else {
+      let pushed = false;
+      let result = await $2`git push`.cwd(session.worktree).quiet();
+      if (result.exitCode === 0) {
+        pushed = true;
+      }
+      if (!pushed) {
+        console.log('[push] Push rejected, trying pull --ff-only...');
+        const pullResult = await $2`git pull --ff-only`.cwd(session.worktree).quiet();
+        if (pullResult.exitCode === 0) {
+          result = await $2`git push`.cwd(session.worktree).quiet();
+          if (result.exitCode === 0) pushed = true;
+        }
+      }
+      if (!pushed) {
+        console.log('[push] Fast-forward failed, trying pull --rebase...');
+        const rebaseResult = await $2`git pull --rebase`.cwd(session.worktree).quiet();
+        if (rebaseResult.exitCode === 0) {
+          result = await $2`git push`.cwd(session.worktree).quiet();
+          if (result.exitCode === 0) pushed = true;
+        } else if (hasUnmergedPaths(session.worktree)) {
+          ctx.ttyReason = 'merge_conflict';
+          throw new Error('Push rebase hit merge conflicts');
+        }
+      }
+      if (!pushed) {
+        throw new Error('Push failed after all retry attempts');
+      }
+    }
+    console.log(`[push] Successfully pushed to origin/${currentBranch}`);
+  } catch (err) {
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'push:completed',
+      version,
+      metadata: {
+        pushCycle,
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      },
+    });
+    throw err;
+  }
+  let repliesPosted = 0;
+  for (const action of ctx.deferredActions) {
+    try {
+      if (action.type === 'reply_thread' && action.threadId && action.body && ctx.prNumber) {
+        const { ghReplyToThread: ghReplyToThread2 } = await Promise.resolve().then(
+          () => (init_github(), exports_github),
+        );
+        await ghReplyToThread2(ctx.prNumber, action.threadId, withBotSignature(action.body), session.worktree);
+        repliesPosted++;
+      }
+    } catch (err) {
+      console.warn('[push] Deferred action failed:', err);
+    }
+  }
+  ctx.deferredActions = [];
+  if (ctx.prNumber && ctx.config.repo.prComment) {
+    try {
+      const { ghPrComment: ghPrComment2 } = await Promise.resolve().then(() => (init_github(), exports_github));
+      await ghPrComment2(ctx.prNumber, ctx.config.repo.prComment, session.worktree);
+      console.log('[push] Posted PR comment');
+    } catch (err) {
+      console.warn('[push] Failed to post PR comment:', err);
+    }
+  }
+  const commitSha = await $2`git rev-parse HEAD`.cwd(session.worktree).quiet().text();
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'push:completed',
+    version,
+    metadata: {
+      pushCycle,
+      success: true,
+      commitSha: commitSha.trim(),
+      deferredRepliesPosted: repliesPosted,
+    },
+  });
+  return ctx.prNumber ? 'poll' : 'create_pr';
+}
+
+// src/phases/phase3/run-fix.ts
+init_log();
+async function handleRunFix(ctx) {
+  const { session, version, pushCycle } = ctx;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'run_fix:started',
+    version,
+    metadata: { stepType: 'code', pushCycle },
+  });
+  if (!ctx.kloopRunId) {
+    throw new Error('No kloop run ID \u2014 write_fix must run first');
+  }
+  console.log(`[run_fix] Starting kloop run ${ctx.kloopRunId} for fixes (push cycle ${pushCycle})`);
+  const result = await devloopRun(ctx.kloopRunId);
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'run_fix:completed',
+    version,
+    metadata: {
+      pushCycle,
+      exitCode: result.exitCode,
+      status: result.status,
+      kloopRunId: result.runId,
+    },
+  });
+  if (result.status === 'completed') {
+    ctx.pushCycle++;
+    return 'push';
+  }
+  if (result.status === 'conflict' || result.status === 'max_situations') {
+    ctx.ttyReason = 'run_fix_failure';
+    return 'tty_resolve';
+  }
+  return 'failed';
+}
+
+// src/phases/phase3/ticket-draft.ts
+init_agents();
+init_artifacts();
+init_log();
+init_spawn();
+import { existsSync as existsSync31, readFileSync as readFileSync17, writeFileSync as writeFileSync19 } from 'fs';
+import { join as join18 } from 'path';
+async function handleTicketDraft(ctx) {
+  const { session, version, ticketId } = ctx;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'ticket_draft:started',
+    version,
+    metadata: { stepType: 'llm', deliveryKind: 'ticket' },
+  });
+  const specContent = resolveSpec(session.id, version);
+  const ticketPath = join18(`${process.env.HOME}/.kautopilot/${session.id}/artifacts`, 'ticket.md');
+  const ticketContent = existsSync31(ticketPath) ? readFileSync17(ticketPath, 'utf-8') : '';
+  const binary = getAgentBinary('phase3', 'ticket_draft');
+  const draftPrompt = `Generate ticket delivery artifacts based on the completed implementation.
+
+## Task Spec
+${specContent}
+
+## Original Ticket
+${ticketContent || '(no ticket content available)'}
+
+## Instructions
+Based on the completed work, generate:
+1. A summary ticket update (markdown) describing what was implemented
+2. Any downstream ticket proposals if the spec implies them
+3. A report artifact if the spec requires one
+
+Output each artifact as a separate markdown section with a clear filename header:
+### tickets-1.md
+(content for the main ticket update)
+
+### tickets-2.md
+(optional: downstream ticket proposal)
+
+### report-a.md
+(optional: detailed report)
+
+Only include artifacts that are actually needed. Output clean markdown.`;
+  const draftOutput = await spawnPrintRaw(binary, draftPrompt, {
+    cwd: session.worktree,
+    timeout: 120,
+    sessionId: session.id,
+    label: 'ticket-draft',
+  });
+  const artifactsWritten = [];
+  if (draftOutput) {
+    const sections = draftOutput.split(/^### /m).filter(s => s.trim());
+    for (const section2 of sections) {
+      const firstLine = section2
+        .split(
+          `
+`,
+        )[0]
+        .trim();
+      const filename = `${firstLine.replace(/\.md$/, '').trim()}.md`;
+      if (/^(tickets-\d+|report-[a-z])\.md$/.test(filename)) {
+        const content = section2.slice(firstLine.length).trim();
+        const artifactPath2 = snapshotPath(session.id, version, filename);
+        ensureArtifactDir(artifactPath2);
+        writeFileSync19(artifactPath2, content);
+        artifactsWritten.push(filename);
+      }
+    }
+  }
+  if (artifactsWritten.length === 0) {
+    const defaultArtifact = `# Ticket Update: ${ticketId}
+
+${draftOutput || specContent.slice(0, 2000)}`;
+    const defaultPath = snapshotPath(session.id, version, 'tickets-1.md');
+    ensureArtifactDir(defaultPath);
+    writeFileSync19(defaultPath, defaultArtifact);
+    artifactsWritten.push('tickets-1.md');
+  }
+  console.log(`[ticket_draft] Generated ${artifactsWritten.length} draft artifact(s): ${artifactsWritten.join(', ')}`);
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'ticket_draft:completed',
+    version,
+    metadata: { artifacts: artifactsWritten },
+  });
+  return 'ticket_review';
+}
+
+// src/phases/phase3/ticket-publish.ts
+init_artifacts();
+init_log();
+import { readdirSync as readdirSync7, readFileSync as readFileSync18 } from 'fs';
+import { join as join19 } from 'path';
+init_scripts();
+init_format();
+init_markdown();
+async function handleTicketPublish(ctx) {
+  const { session, version, ticketId } = ctx;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'ticket_publish:started',
+    version,
+    metadata: { stepType: 'code', deliveryKind: 'ticket' },
+  });
+  const publishedArtifacts = [];
+  const actions = [];
+  const epochDir = snapshotPath(session.id, version, '.');
+  const artifactFiles = [];
+  try {
+    const files = readdirSync7(epochDir);
+    for (const f of files) {
+      if (/^(tickets-\d+|report-[a-z])\.md$/.test(f)) {
+        artifactFiles.push(f);
+      }
+    }
+  } catch {}
+  const scriptsDir = join19(sessionDir(session.id), 'scripts');
+  for (const f of artifactFiles.sort()) {
+    const content = readFileSync18(snapshotPath(session.id, version, f), 'utf-8');
+    if (f.startsWith('tickets-1')) {
+      const result = runScriptFromDir(scriptsDir, 'update-ticket', [ticketId, content]);
+      if (result.ok) {
+        logOk(`Updated ticket ${ticketId}`);
+        actions.push('update_ticket');
+      } else {
+        const commentResult = runScriptFromDir(scriptsDir, 'add-comment', [ticketId, content]);
+        if (commentResult.ok) {
+          logOk(`Added comment to ${ticketId}`);
+          actions.push('add_comment');
+        } else {
+          logWarn(`Could not update ticket ${ticketId} \u2014 scripts may not be configured`);
+        }
+      }
+      publishedArtifacts.push(f);
+    } else if (f.startsWith('tickets-')) {
+      const result = runScriptFromDir(scriptsDir, 'create-downstream-ticket', [ticketId, content]);
+      if (result.ok) {
+        logOk(`Created downstream ticket from ${f}`);
+        actions.push('create_downstream');
+      }
+      publishedArtifacts.push(f);
+    } else if (f.startsWith('report-')) {
+      const mdPath = snapshotPath(session.id, version, f);
+      let artifactPath2 = mdPath;
+      const pdfPath = join19(epochDir, f.replace(/\.md$/, '.pdf'));
+      const pdfResult = markdownToPdf(readFileSync18(mdPath, 'utf-8'), pdfPath, f.replace(/\.md$/, ''));
+      if (pdfResult) {
+        artifactPath2 = pdfResult;
+        logOk(`Converted ${f} to PDF`);
+      } else {
+        logDim(`PDF conversion not available for ${f}, attaching markdown`);
+      }
+      const result = runScriptFromDir(scriptsDir, 'attach-artifact', [ticketId, artifactPath2]);
+      if (result.ok) {
+        logOk(`Attached ${artifactPath2} to ${ticketId}`);
+        actions.push('attach_artifact');
+      }
+      publishedArtifacts.push(f);
+      if (pdfResult) {
+        publishedArtifacts.push(f.replace(/\.md$/, '.pdf'));
+      }
+    }
+  }
+  if (ticketId) {
+    runScriptFromDir(scriptsDir, 'to-review', [ticketId]);
+    actions.push('move_to_review');
+  }
+  updateDeliveryManifest(session.id, version, {
+    ticketArtifacts: publishedArtifacts,
+    publishedAt: new Date().toISOString(),
+  });
+  console.log(`[ticket_publish] Published ${publishedArtifacts.length} artifact(s), ${actions.length} action(s)`);
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'ticket_publish:completed',
+    version,
+    metadata: {
+      publishedArtifacts,
+      actions,
+    },
+  });
+  return 'completed';
+}
+
+// src/phases/phase3/ticket-review.ts
+init_artifacts();
+init_log();
+init_inquirer();
+init_format();
+init_markdown();
+import { readdirSync as readdirSync8, readFileSync as readFileSync19 } from 'fs';
+async function handleTicketReview(ctx) {
+  const { session, version } = ctx;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'ticket_review:started',
+    version,
+    metadata: { stepType: 'code', deliveryKind: 'ticket' },
+  });
+  const epochDir = snapshotPath(session.id, version, '.');
+  const artifactFiles = [];
+  try {
+    const files = readdirSync8(epochDir);
+    for (const f of files) {
+      if (/^(tickets-\d+|report-[a-z])\.md$/.test(f)) {
+        artifactFiles.push(f);
+      }
+    }
+  } catch {}
+  if (artifactFiles.length === 0) {
+    console.log('[ticket_review] No draft artifacts to review \u2014 cannot complete');
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'ticket_review:completed',
+      version,
+      metadata: { approved: false, error: 'no_artifacts' },
+    });
+    return 'failed';
+  }
+  logBanner('Ticket Delivery \u2014 Review Draft Artifacts');
+  for (const f of artifactFiles.sort()) {
+    const content = readFileSync19(snapshotPath(session.id, version, f), 'utf-8');
+    console.log(`--- ${f} ---`);
+    console.log(renderMarkdown(content));
+    console.log();
+  }
+  console.log();
+  const choice = await selectOption('Do you approve these ticket artifacts for publishing?', [
+    {
+      value: 'approve',
+      label: 'Approve & publish',
+      hint: 'Publish ticket updates, comments, and artifacts',
+    },
+    {
+      value: 'feedback',
+      label: 'I have feedback',
+      hint: 'Do not publish \u2014 provide feedback for a new contract epoch',
+    },
+  ]);
+  if (choice === 'feedback') {
+    const feedback = await textInput('What feedback do you have? (This will seed a new contract epoch)', '');
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'ticket_review:completed',
+      version,
+      metadata: {
+        approved: false,
+        hasFeedback: !!feedback.trim(),
+      },
+    });
+    if (feedback.trim()) {
+      const { writeFileSync: writeFileSync20 } = await import('fs');
+      const feedbackPath = snapshotPath(session.id, version, 'feedback.md');
+      const { ensureArtifactDir: ensureArtifactDir2 } = await Promise.resolve().then(
+        () => (init_artifacts(), exports_artifacts),
+      );
+      ensureArtifactDir2(feedbackPath);
+      writeFileSync20(feedbackPath, feedback);
+      console.log('[ticket_review] Feedback saved. A new epoch is needed.');
+      appendEvent(session.id, {
+        ts: new Date().toISOString(),
+        event: 'context:updated',
+        metadata: { ticketFeedback: true },
+      });
+    }
+    return 'completed';
+  }
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'ticket_review:completed',
+    version,
+    metadata: { approved: true },
+  });
+  return 'ticket_publish';
+}
+
+// src/phases/phase3/tty-resolve.ts
+init_agents();
+init_artifacts();
+init_log();
+var TTY_RESOLVE_MECHANICS = {
+  ambiguous: `## Your Task
+Review each ambiguous item and tell me:
+1. Should I reply to the reviewer? If so, what should I say?
+2. Should I make a code fix? If so, describe the fix.
+3. Should I skip the item?
+
+After resolving, apply any needed changes to the codebase.`,
+  conflict: `## Your Task
+1. Open the conflicted files and resolve the merge conflicts
+2. Stage the resolved files with \`git add\`
+3. Continue the rebase with \`git rebase --continue\`
+4. If the conflict cannot be resolved, run \`git rebase --abort\` and I will try an alternative approach
+
+Please resolve the merge conflicts and continue the rebase.`,
+  failure: `## Your Task
+Investigate the failure and help me determine the next steps. Options:
+1. Fix the specific issue and retry
+2. Skip this fix and move on
+3. Escalate and stop
+
+Please review the situation and help me resolve the issue. Apply any needed changes.`,
+};
+async function handleTtyResolve(ctx) {
+  const { session, version, ttyReason } = ctx;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'tty_resolve:started',
+    version,
+    metadata: { stepType: 'tty', ttyReason: ttyReason || 'unknown' },
+  });
+  const { $: $2 } = await Promise.resolve(globalThis.Bun);
+  const _ticketId = ctx.ticketId;
+  const specPath = findLatestSpecPath(session.id, version) || snapshotPath(session.id, version, 'task-spec.md');
+  const latestPlansDir = findLatestPlansPath(session.id, version) || snapshotPath(session.id, version, 'plans');
+  const planPaths = resolveActivePlans(latestPlansDir);
+  const plansPathList = planPaths.join(`
+`);
+  const feedbackPath = snapshotPath(session.id, version, 'feedback.md');
+  const agentName =
+    ttyReason === 'ambiguous_eval'
+      ? 'tty_resolve_ambiguous'
+      : ttyReason === 'merge_conflict'
+        ? 'tty_resolve_conflict'
+        : 'tty_resolve_failure';
+  const userPrompt = getAgentPrompt('phase3', agentName);
+  let ttyPrompt;
+  if (ttyReason === 'ambiguous_eval') {
+    const items = ctx.ttyResolveItems || [];
+    const itemsSection =
+      items.length > 0
+        ? items.map(
+            (item, i) => `### Item ${i + 1}: ${item.id}
+${item.reasoning}
+
+Ambiguity: ${item.ambiguityReason || 'Unknown'}`,
+          ).join(`
+
+`)
+        : 'No specific items available \u2014 check the eval results in the log.';
+    ttyPrompt = `
+${userPrompt}
+
+## Context
+Spec path: ${specPath}
+Plan paths:
+${plansPathList}
+
+## Ambiguous Items
+${itemsSection}
+
+## Previous Feedback
+Read at: ${feedbackPath}
+
+${TTY_RESOLVE_MECHANICS.ambiguous}
+`.trim();
+  } else if (ttyReason === 'merge_conflict') {
+    const grepResult =
+      await $2`grep -rn '<<<<<<<' --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' || true`
+        .cwd(session.worktree)
+        .quiet()
+        .text();
+    const conflictFiles = grepResult
+      .trim()
+      .split(
+        `
+`,
+      )
+      .filter(f => f.length > 0);
+    ttyPrompt = `
+${userPrompt}
+
+## Context
+Spec path: ${specPath}
+Plan paths:
+${plansPathList}
+
+## Conflicted Files
+${
+  conflictFiles.length > 0
+    ? conflictFiles.join(`
+`)
+    : 'No conflict markers found in source files.'
+}
+
+${TTY_RESOLVE_MECHANICS.conflict}
+
+## Previous Feedback
+Read at: ${feedbackPath}
+`.trim();
+  } else {
+    ttyPrompt = `
+${userPrompt}
+
+## Context
+Spec path: ${specPath}
+Plan paths:
+${plansPathList}
+
+${TTY_RESOLVE_MECHANICS.failure}
+
+## Previous Feedback
+Read at: ${feedbackPath}
+`.trim();
+  }
+  const ttyBinary = getAgentBinary('phase3', agentName);
+  writeStepInit(session.id, version, `tty_resolve_${ttyReason || 'unknown'}`, {
+    prompt: ttyPrompt,
+    command: `${ttyBinary} (TTY handoff)`,
+    type: 'tty_handoff',
+  });
+  console.log(`[tty_resolve] Handing off to user for ${ttyReason}`);
+  const _exitCode = await spawnTTYWithTurnTracking(session.id, ttyBinary, ttyPrompt + TTY_EXIT_INSTRUCTION, {
+    cwd: session.worktree,
+    worktree: session.worktree,
+  });
+  const diffResult = await $2`git diff --name-only`.cwd(session.worktree).quiet().text();
+  const changedFiles = diffResult
+    .trim()
+    .split(
+      `
+`,
+    )
+    .filter(f => f.length > 0);
+  if (changedFiles.length > 0) {
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'tty_resolve:completed',
+      version,
+      metadata: {
+        ttyReason,
+        result: 'fixes_applied',
+        filesChanged: changedFiles.length,
+      },
+    });
+    return 'write_fix';
+  }
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'tty_resolve:completed',
+    version,
+    metadata: {
+      ttyReason,
+      result: 'no_fixes',
+    },
+  });
+  return 'poll';
+}
+
+// src/phases/phase3/write-fix.ts
+init_agents();
+init_artifacts();
+init_log();
+init_spawn();
+var WRITE_FIX_MECHANICS = `## Context Paths
+
+- Spec: {spec_path}
+- Plans: {plan_paths}
+- Previous feedback: {feedback_path}
+
+Read these files to understand the original context.
+
+## Fixes
+{fixes_section}
+
+## Output Format
+
+Write a structured implementation spec for each fix. Use this format:
+
+### Fix N: [Title]
+
+**File**: [path to file or files]
+
+**Issue**: [what's wrong, referenced from PR feedback]
+
+**Changes**:
+- [specific change 1]
+- [specific change 2]
+- ...
+
+**Definition of Done**:
+- [ ] [verifiable condition 1]
+- [ ] [verifiable condition 2]
+- ...
+
+Output ALL fixes in this format, one per section. Deduplicate overlapping fixes on the same file.`;
+async function handleWriteFix(ctx) {
+  const { session, version } = ctx;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'write_fix:started',
+    version,
+    metadata: { stepType: 'llm' },
+  });
+  const specPath = findLatestSpecPath(session.id, version) || snapshotPath(session.id, version, 'task-spec.md');
+  const latestPlansDir = findLatestPlansPath(session.id, version) || snapshotPath(session.id, version, 'plans');
+  const planPaths = resolveActivePlans(latestPlansDir);
+  const plansPathList = planPaths.join(`
+`);
+  const feedbackPath = snapshotPath(session.id, version, 'feedback.md');
+  const evalResults = ctx.evalResults || [];
+  const codeFixes = evalResults.filter(r2 => r2.verdict === 'code_fix' && r2.codeFix);
+  const fixesSection =
+    codeFixes.length > 0
+      ? codeFixes.map(
+          (fix, i) => `### Fix ${i + 1}: ${fix.unitId}
+${fix.codeFix}`,
+        ).join(`
+
+`)
+      : 'Based on the current PR review feedback \u2014 check the eval results in the log for details.';
+  const userPrompt = getAgentPrompt('phase3', 'write_fix');
+  const mechanics = WRITE_FIX_MECHANICS.replace('{spec_path}', specPath)
+    .replace('{plan_paths}', plansPathList)
+    .replace('{feedback_path}', feedbackPath)
+    .replace('{fixes_section}', fixesSection);
+  const prompt = `${mechanics}
+
+${userPrompt}`;
+  const binary = getAgentBinary('phase3', 'write_fix');
+  writeStepInit(session.id, version, 'write_fix', {
+    prompt,
+    command: `${binary} --print (LLM print)`,
+    type: 'llm_print',
+  });
+  console.log(`[write_fix] Generating merged fix spec from ${codeFixes.length} code fixes...`);
+  const fixSpec = await spawnPrintRaw(binary, prompt, {
+    cwd: session.worktree,
+    timeout: 60,
+    sessionId: session.id,
+    label: 'write-fix',
+  });
+  const specPathKloop = writeKloopSpec(session.id, fixSpec, `fix-cycle-${ctx.pushCycle}-spec.md`);
+  const configPath2 = writeKloopConfig(session.id, ctx.config.kloop);
+  const kloopRunId = devloopInit(session.worktree, specPathKloop, configPath2);
+  ctx.kloopRunId = kloopRunId;
+  console.log(`[write_fix] kloop run initialized: ${kloopRunId}`);
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'write_fix:completed',
+    version,
+    metadata: {
+      kloopRunId,
+      codeFixCount: codeFixes.length,
+    },
+  });
+  return 'run_fix';
+}
+
+// src/phases/phase3/index.ts
+var prStates = {
+  commit_pending: handleCommitPending,
+  prereview: handlePrereview,
+  push: handlePush,
+  create_pr: handleCreatePr,
+  poll: handlePoll,
+  ensure_branch: handleEnsureBranch,
+  eval: handleEval,
+  act: handleAct,
+  tty_resolve: handleTtyResolve,
+  write_fix: handleWriteFix,
+  run_fix: handleRunFix,
+  feedback_check: handleFeedbackCheck,
+  feedback: handleFeedback,
+  completed: handleCompleted2,
+  failed: handleFailed2,
+};
+var ticketStates = {
+  commit_pending: handleCommitPending,
+  ticket_draft: handleTicketDraft,
+  ticket_review: handleTicketReview,
+  ticket_publish: handleTicketPublish,
+  completed: handleCompleted2,
+  failed: handleFailed2,
+};
+async function runPhase3(session, config, options2) {
+  loadSessionAgents(session.id);
+  const status = ensureStatus(session.id);
+  const version = status.version;
+  const deliveryKind = status.context.deliveryKind ?? 'pr';
+  const ctx = {
+    session,
+    config,
+    version,
+    attempt: status.context.attempt ?? 1,
+    ticketId: session.ticket_id || 'unknown',
+    deliveryKind,
+    prNumber: status.context.prNumber ?? null,
+    prUrl: status.context.prUrl ?? null,
+    baseBranch: config.repo.baseBranch,
+    pushCycle: status.context.pushCycle ?? 0,
+    mergePolicy: null,
+    deferredActions: [],
+    forceWithLease: false,
+  };
+  const states = deliveryKind === 'ticket' ? ticketStates : prStates;
+  return runStateMachine('phase3', states, ctx, {
+    terminalStates: ['completed', 'failed'],
+    forceStartState: options2?.forceStartState,
+  });
+}
+
+// src/phases/runner.ts
+var PHASE_TO_MACHINE_NAME = {
+  plan: 'phase1',
+  implementation: 'phase2',
+  polish: 'phase3',
+};
+async function runPhase(phase, session, config, options2) {
+  try {
+    switch (phase) {
+      case 'plan':
+        return await runPhase1(session, config, options2);
+      case 'implementation':
+        return await runPhase2(session, config, options2);
+      case 'polish':
+        return await runPhase3(session, config, options2);
+    }
+  } catch (err) {
+    const machineName = PHASE_TO_MACHINE_NAME[phase];
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: `${machineName}:error`,
+      metadata: { error: err instanceof Error ? err.message : String(err) },
+    });
+    throw err;
+  }
+}
+
+// src/cli/start.ts
+init_format();
+function createStartCommand() {
+  return new Command('start')
+    .option('--phase <phaseOrStep>', 'Force start at specific phase or step')
+    .option('--local', 'Local mode')
+    .action(async opts => {
+      try {
+        await runStart(opts);
+      } catch (err) {
+        logError(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+    });
+}
+async function runStart(opts) {
+  const repoPath = getGitRoot();
+  const worktree = getWorktree();
+  let session = getSessionByWorktree(repoPath, worktree);
+  if (!session) {
+    logInfo('No session found. Initializing...');
+    const { runInit: runInit2 } = await Promise.resolve().then(() => (init_init2(), exports_init));
+    await runInit2(undefined, { local: opts.local });
+    session = getSessionByWorktree(repoPath, worktree);
+    if (!session) {
+      logError('Init completed but session not found. Something went wrong.');
+      process.exit(1);
+    }
+  }
+  if (session.state === 'init') {
+    logError(
+      `Session ${session.id} has incomplete initialization. Run \`kautopilot init\` to start a fresh init attempt or \`kautopilot init --reset\` to re-initialize.`,
+    );
+    process.exit(1);
+  }
+  detectAndRecoverCrash(session.id, session.worktree, session.ticket_id || 'local');
+  const lockInfo = checkLock(session.id);
+  if (lockInfo.locked) {
+    logError(`Session is already running (PID ${lockInfo.pid}). Use \`kautopilot stop\` first.`);
+    process.exit(1);
+  }
+  const config = readConfig(session.id);
+  if (!config) {
+    logError('No config found. Run `kautopilot init` first.');
+    process.exit(1);
+  }
+  const sDir = sessionDir(session.id);
+  if (!existsSync32(`${sDir}/config.yaml`)) {
+    logError('Config file missing. Run `kautopilot init` first.');
+    process.exit(1);
+  }
+  let phase;
+  let forceStartState;
+  if (opts.phase) {
+    const normalized = opts.phase.toLowerCase();
+    const colonMatch = normalized.match(/^(\w+):(\w+)$/);
+    if (colonMatch) {
+      const [_3, phasePart, statePart] = colonMatch;
+      if (phasePart in PHASE_ALIASES) {
+        phase = PHASE_ALIASES[phasePart];
+        forceStartState = statePart;
+      } else {
+        logError(`Unknown phase: ${phasePart}. Valid phases: plan, impl(ementation), polish`);
+        process.exit(1);
+      }
+    } else if (normalized in PHASE_ALIASES) {
+      phase = PHASE_ALIASES[normalized];
+    } else {
+      logError(
+        `Unknown phase: ${opts.phase}. Valid phases: plan, impl(ementation), polish, or phase:state (e.g., impl:setup_run)`,
+      );
+      process.exit(1);
+    }
+    if (phase === 'implementation' || phase === 'polish') {
+      const hasSpec = existsSync32(`${sDir}/artifacts`);
+      if (!hasSpec) {
+        logError(`Cannot start ${phase}: no spec artifacts found. Run phase 'plan' first.`);
+        process.exit(1);
+      }
+    }
+    if (phase === 'polish') {
+      const hasPlans = existsSync32(`${sDir}/artifacts`);
+      if (!hasPlans) {
+        logError(`Cannot start polish: no plan artifacts found. Run phase 'implementation' first.`);
+        process.exit(1);
+      }
+    }
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'phase_start:forced',
+      metadata: { to: phase, reason: 'user_start_phase', forceStartState },
+    });
+    logField('Session', session.id);
+    logInfo(`Jumping to ${phase}${forceStartState ? `:${forceStartState}` : ''} (user-specified)`);
+  } else {
+    const status = ensureStatus(session.id);
+    if (status.phase === 'none' || status.phase === '') {
+      phase = 'plan';
+    } else {
+      phase = status.phase;
+      if (phase === 'implementation' || phase === 'polish') {
+        const artifactsDir = `${sDir}/artifacts`;
+        if (!existsSync32(artifactsDir)) {
+          logWarn(`Cannot resume ${phase}: no session artifacts found. Restarting from plan.`);
+          phase = 'plan';
+        }
+      }
+    }
+    logInfo(`Starting phase: ${phase}`);
+  }
+  acquireLock(session.id);
+  try {
+    await discoverConfigDirs(config);
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'start:started',
+      metadata: { phase, pid: process.pid },
+    });
+    const PHASE_ORDER = ['plan', 'implementation', 'polish'];
+    const startIdx = PHASE_ORDER.indexOf(phase);
+    for (let i = startIdx; i < PHASE_ORDER.length; i++) {
+      const currentPhase = PHASE_ORDER[i];
+      if (i > startIdx) {
+        logInfo(`Advancing to phase: ${currentPhase}`);
+      }
+      const result = await runPhase(currentPhase, session, config, i === startIdx ? { forceStartState } : {});
+      if (result === 'revisit_spec') {
+        const status = ensureStatus(session.id);
+        const oldVersion = status.version;
+        const nextVersion = oldVersion + 1;
+        logInfo(`Revisit spec signal \u2014 escalating to plan for epoch v${nextVersion}`);
+        supersedEpoch(session.id, oldVersion, nextVersion);
+        const newVersionDir = join20(sessionDir(session.id), 'artifacts', `v${nextVersion}`);
+        mkdirSync25(newVersionDir, { recursive: true });
+        appendEvent(session.id, {
+          ts: new Date().toISOString(),
+          event: 'version:superseded',
+          version: oldVersion,
+          metadata: {
+            supersededBy: nextVersion,
+            reason: 'revisit_spec',
+            fromPhase: currentPhase,
+          },
+        });
+        appendEvent(session.id, {
+          ts: new Date().toISOString(),
+          event: `${currentPhase}:completed`,
+          version: oldVersion,
+          metadata: { reason: 'revisit_spec' },
+        });
+        const replanned = await runPhase('plan', session, config, {
+          versionOverride: nextVersion,
+        });
+        if (replanned !== true && replanned !== 'revisit_spec' && replanned !== 'amend_spec') {
+          logInfo('Phase plan interrupted \u2014 run `kautopilot start` to resume');
+          break;
+        }
+        if (replanned === 'revisit_spec' || replanned === 'amend_spec') {
+          logInfo('Plan phase also returned a signal \u2014 run `kautopilot start` to resume');
+          break;
+        }
+        i = PHASE_ORDER.indexOf('implementation') - 1;
+        continue;
+      }
+      if (!result) {
+        logInfo(`Phase ${currentPhase} interrupted \u2014 run \`kautopilot start\` to resume`);
+        break;
+      }
+    }
+    appendEvent(session.id, {
+      ts: new Date().toISOString(),
+      event: 'start:completed',
+      metadata: { phase: 'all' },
+    });
+  } finally {
+    releaseLock(session.id);
+  }
+}
+
+// src/cli/status.ts
+init_esm();
+init_db();
+init_git();
+init_init_db();
+init_init_status();
+init_format();
+function createStatusCommand() {
+  return new Command('status')
+    .argument('[id]', 'Session ID (optional \u2014 defaults to local worktree)')
+    .option('--json', 'Machine-readable JSON output')
+    .action(async (id, opts) => {
+      try {
+        await runStatus(id, opts);
+      } catch (err) {
+        logError(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+    });
+}
+async function runStatus(id, opts) {
+  if (id) {
+    const session2 = getSessionById(id);
+    if (session2) {
+      const status = ensureStatus(session2.id);
+      const phaseElapsed = status.startedAt ? Date.now() - new Date(status.startedAt).getTime() : 0;
+      const data2 = {
+        kind: 'session',
+        session: session2.id,
+        ticketId: session2.ticket_id,
+        branch: session2.branch,
+        repo: session2.git_root_host,
+        org: session2.git_root_host.split('/')[1],
+        local: session2.local === 1,
+        phase: status.phase,
+        state: status.state,
+        stateStatus: status.stateStatus,
+        running: status.running,
+        stepType: status.stepType,
+        userTurn: status.userTurn,
+        checkpoint: status.lastCheckpoint,
+        version: status.version,
+        tasks: status.tasks,
+        context: status.context,
+        stats: status.stats,
+        elapsed: phaseElapsed,
+        walCursor: status.walCursor,
+        initAttempt: getInitAttemptByPromotedSessionId(session2.id)?.id ?? null,
+        activeEpoch: status.version,
+        currentPlans: (() => {
+          const pm = readPlanManifest(session2.id, status.version);
+          return (
+            pm?.plans.map(p2 => ({
+              ordinal: p2.ordinal,
+              file: p2.file,
+              activeRewrite: p2.activeRewrite,
+              completed: p2.completed,
+              commitSha: p2.commitSha ?? null,
+            })) ?? []
+          );
+        })(),
+        delivery: (() => {
+          const d3 = readDeliveryManifest(session2.id, status.version);
+          return d3
+            ? {
+                kind: d3.kind,
+                prNumber: d3.prNumber ?? null,
+                prUrl: d3.prUrl ?? null,
+                rolloverHistory: d3.prRolloverHistory ?? [],
+                ticketArtifacts: d3.ticketArtifacts ?? [],
+                publishedAt: d3.publishedAt ?? null,
+              }
+            : null;
+        })(),
+        rolloverRecommendation: status.context.rolloverRecommendation ?? null,
+      };
+      if (opts.json) {
+        console.log(JSON.stringify(data2, null, 2));
+        return;
+      }
+      logField('Session', session2.id);
+      logField('Ticket', session2.ticket_id || '\u2014');
+      logField('Branch', session2.branch || '\u2014');
+      logField('Repo', session2.git_root_host);
+      logField('Local', session2.local === 1 ? 'yes' : 'no');
+      console.log();
+      logField('Phase', status.phase);
+      const stepSuffix = status.stepType
+        ? ` (${status.stepType}${status.userTurn === true ? ", user's turn" : status.userTurn === false ? ", LLM's turn" : ''})`
+        : '';
+      logField('Step', (status.state || '\u2014') + stepSuffix);
+      logField('Status', status.running ? `running (${status.stateStatus})` : 'stopped');
+      logField('Checkpoint', status.lastCheckpoint || '\u2014');
+      console.log();
+      logField('Duration', formatDuration(phaseElapsed));
+      logField('Version', String(status.version));
+      logField('Init attempt', data2.initAttempt || '\u2014');
+      const taskEntries = Object.entries(status.tasks);
+      if (taskEntries.length > 0) {
+        console.log();
+        logField('Tasks', '');
+        for (const [name, task] of taskEntries) {
+          logField(`  ${name}`, task.status);
+        }
+      }
+      return;
+    }
+    const initAttempt = getInitAttemptById(id);
+    if (!initAttempt) {
+      logError(`Session or init attempt ${id} not found in index.`);
+      process.exit(1);
+    }
+    const initStatus = ensureInitStatus(initAttempt.id);
+    const elapsed = initStatus.startedAt ? Date.now() - new Date(initStatus.startedAt).getTime() : 0;
+    const data = {
+      kind: 'init',
+      initAttempt: initAttempt.id,
+      outcome: initAttempt.outcome,
+      promotedSessionId: initAttempt.promoted_session_id,
+      repoPath: initAttempt.repo_path,
+      worktree: initAttempt.worktree,
+      repo: initAttempt.git_root_host,
+      org: initAttempt.org,
+      state: initStatus.state,
+      stateStatus: initStatus.stateStatus,
+      running: initStatus.running,
+      context: initStatus.context,
+      completedStates: initStatus.completedStates,
+      elapsed,
+      walCursor: initStatus.walCursor,
+    };
+    if (opts.json) {
+      console.log(JSON.stringify(data, null, 2));
+      return;
+    }
+    logField('Init attempt', initAttempt.id);
+    logField('Outcome', initAttempt.outcome || 'active');
+    logField('Promoted', initAttempt.promoted_session_id || '\u2014');
+    logField('Repo', initAttempt.git_root_host);
+    console.log();
+    logField('State', initStatus.state);
+    logField('Status', initStatus.running ? `running (${initStatus.stateStatus})` : initStatus.stateStatus);
+    logField('Duration', formatDuration(elapsed));
+    return;
+  }
+  const repoPath = getGitRoot();
+  const worktree = getWorktree();
+  const session = getSessionByWorktree(repoPath, worktree);
+  if (session) {
+    await runStatus(session.id, opts);
+    return;
+  }
+  const activeInit = getActiveInitForWorktree(repoPath, worktree);
+  if (!activeInit) {
+    logError('No session or init attempt found in this worktree.');
+    process.exit(1);
+  }
+  await runStatus(activeInit.id, opts);
+}
+
+// src/cli/stop.ts
+init_esm();
+init_artifacts();
+init_db();
+init_git();
+init_lock();
+init_log();
+init_inquirer();
+init_format();
+import { rmSync as rmSync4 } from 'fs';
+function createStopCommand() {
+  return new Command('stop')
+    .argument('[id]', 'Session ID (optional \u2014 defaults to local)')
+    .option('--force', 'Skip confirmation')
+    .action(async (id, opts) => {
+      try {
+        await runStop(id, opts);
+      } catch (err) {
+        logError(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+    });
+}
+async function runStop(id, opts) {
+  let session;
+  const isGlobal = !!id;
+  if (id) {
+    session = getSessionById(id);
+    if (!session) {
+      logError(`Session ${id} not found in index.`);
+      process.exit(1);
+    }
+  } else {
+    try {
+      const repoPath = getGitRoot();
+      const worktree = getWorktree();
+      session = getSessionByWorktree(repoPath, worktree);
+    } catch {
+      logError('No session found in this worktree.');
+      process.exit(1);
+    }
+    if (!session) {
+      logError('No session found in this worktree.');
+      process.exit(1);
+    }
+  }
+  const lockInfo = checkLock(session.id);
+  if (!lockInfo.locked) {
+    logOk('Session is not running.');
+    return;
+  }
+  if (!opts.force && !isGlobal) {
+    const confirmed = await confirmAction(`Stop session ${session.id}?`, false);
+    if (!confirmed) return;
+  }
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'stop:started',
+  });
+  let processesKilled = 0;
+  const pid = lockInfo.pid;
+  try {
+    process.kill(pid, 'SIGTERM');
+    processesKilled++;
+    for (let i = 0; i < 50; i++) {
+      await new Promise(r2 => setTimeout(r2, 100));
+      try {
+        process.kill(pid, 0);
+      } catch {
+        break;
+      }
+    }
+    try {
+      process.kill(pid, 0);
+      process.kill(pid, 'SIGKILL');
+      processesKilled++;
+    } catch {}
+  } catch {}
+  releaseLock(session.id);
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'stop:completed',
+    metadata: { processesKilled },
+  });
+  if (isGlobal) {
+    const doDelete = opts.force || (await confirmAction(`Delete session directory and index entry?`, false));
+    if (doDelete) {
+      rmSync4(sessionDir(session.id), { recursive: true, force: true });
+      deleteSession(session.id);
+      logOk(`Session ${session.id} stopped and removed.`);
+      return;
+    }
+  }
+  logOk(`Session ${session.id} stopped.`);
+}
 
 // src/index.ts
-var __dirname2 = dirname13(fileURLToPath(import.meta.url));
-var pkg = JSON.parse(readFileSync25(join19(__dirname2, '..', 'package.json'), 'utf-8'));
+var __dirname2 = dirname15(fileURLToPath(import.meta.url));
+var pkg = JSON.parse(readFileSync20(join21(__dirname2, '..', 'package.json'), 'utf-8'));
 var program2 = new Command();
 program2
   .name('kautopilot')
@@ -89485,5 +90429,7 @@ program2
   .addCommand(createOrgCommand())
   .addCommand(createSpecReviewCommand())
   .addCommand(createPlanReviewCommand())
-  .addCommand(createLogEventCommand());
+  .addCommand(createSnapshotCommand())
+  .addCommand(createLogEventCommand())
+  .addCommand(createResetCommand());
 program2.parseAsync(process.argv).then(() => process.exit(0));

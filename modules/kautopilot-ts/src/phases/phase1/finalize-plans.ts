@@ -1,16 +1,20 @@
 import { copyFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Phase1Context } from './types';
+import { ensureArtifactDir, snapshotPath } from '../../core/artifacts';
 import { appendEvent } from '../../core/log';
-import { snapshotPath, ensureArtifactDir } from '../../core/artifacts';
+import { writeContractManifest, writeDeliveryManifest, writePlanManifest } from '../../core/manifests';
 import { buildPromptVars } from '../../core/type-config';
-import { discoverPlans, validatePlanContent, findLatestPlanDraftDir } from '../shared';
-import { writeContractManifest, writePlanManifest, writeDeliveryManifest } from '../../core/manifests';
-import { logOk, logError, logWarn } from '../../util/format';
+import { logError, logOk, logWarn } from '../../util/format';
+import { discoverPlans, validatePlanContent } from '../shared';
+import type { Phase1Context } from './types';
 
 /**
  * [code] Snapshot plans from worktree to session artifacts and commit.
  * Terminal state for Phase 1.
+ *
+ * The TTY already wrote plan files to the working copies (plans/plan-*.md)
+ * and called snapshot. This step copies them to session artifacts as the
+ * canonical reference and writes manifests.
  */
 export async function handleFinalizePlans(ctx: Phase1Context): Promise<string | null> {
   const { session, version } = ctx;
@@ -24,9 +28,8 @@ export async function handleFinalizePlans(ctx: Phase1Context): Promise<string | 
 
   const vars = buildPromptVars(session.worktree, version, session.ticket_id || 'local');
 
-  // Discover plan files from worktree — try draft-based first, then flat files
-  const latestDraft = findLatestPlanDraftDir(vars.plans);
-  const planFiles = latestDraft ? latestDraft.files : discoverPlans(vars.plans);
+  // Discover plan files from working copies in plans/
+  const planFiles = discoverPlans(vars.plans);
   if (planFiles.length === 0) {
     logError(`No plan files found at ${vars.plans}. Did the TTY write them?`);
     throw new Error('No plan files written');
@@ -39,7 +42,7 @@ export async function handleFinalizePlans(ctx: Phase1Context): Promise<string | 
     throw new Error('Some plan files are empty');
   }
 
-  // Snapshot to session artifacts with spec convention: plan-{ordinal}-1.md
+  // Copy to session artifacts with spec convention: plan-{ordinal}-1.md
   const sessionPlansDir = snapshotPath(session.id, version, 'plans');
   ensureArtifactDir(join(sessionPlansDir, 'placeholder'));
   for (let i = 0; i < planFiles.length; i++) {

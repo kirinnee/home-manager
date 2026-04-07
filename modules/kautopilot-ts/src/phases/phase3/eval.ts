@@ -1,20 +1,20 @@
-import type { Phase3Context, EvalResult, EvalUnit, PreFilterResult, TtyResolveItem, PollThread } from './types';
-import type { CheckStatus } from '../../core/types';
-import { appendEvent } from '../../core/log';
-import { spawnPrint } from '../../llm/spawn';
-import { writeStepInit } from '../../core/step-init';
-import { getAgentPrompt, getAgentBinary } from '../../core/agents';
+import { getAgentBinary, getAgentPrompt } from '../../core/agents';
+import { findLatestPlansPath, findLatestSpecPath } from '../../core/artifact-versioning';
+import { snapshotPath } from '../../core/artifacts';
 import {
-  ghReviewThreads,
   ghPrChecks,
-  ghPrView,
   ghPrComments,
+  ghPrView,
   ghReplyToThread,
   ghResolveThread,
+  ghReviewThreads,
   withBotSignature,
 } from '../../core/github';
-import { resolvePlans } from '../shared';
-import { snapshotPath } from '../../core/artifacts';
+import { appendEvent } from '../../core/log';
+import { writeStepInit } from '../../core/step-init';
+import { spawnPrint } from '../../llm/spawn';
+import { resolveActivePlans } from '../shared';
+import type { EvalResult, EvalUnit, Phase3Context, PollThread, PreFilterResult } from './types';
 
 // ============================================================================
 // Deterministic pre-filter
@@ -100,7 +100,7 @@ export async function handleEval(ctx: Phase3Context): Promise<string | null> {
   });
 
   // Fetch current state in parallel
-  const [threads, checks, prView, prComments] = await Promise.all([
+  const [threads, checks, _prView, prComments] = await Promise.all([
     ghReviewThreads(prNumber, session.worktree),
     ghPrChecks(prNumber, session.worktree).catch(() => []),
     ghPrView(prNumber, session.worktree),
@@ -180,7 +180,10 @@ export async function handleEval(ctx: Phase3Context): Promise<string | null> {
       type: 'thread',
       title: `Review thread by ${thread.author}`,
       content: commentsText,
-      metadata: { threadId: pf.threadId, commentId: thread.firstCommentId || thread.replies[0]?.id },
+      metadata: {
+        threadId: pf.threadId,
+        commentId: thread.firstCommentId || thread.replies[0]?.id,
+      },
     });
   }
 
@@ -339,8 +342,11 @@ async function fanOutEval(units: EvalUnit[], ctx: Phase3Context): Promise<EvalRe
   if (units.length === 0) return [];
 
   // Build template vars once — pass file paths so the LLM can read on demand
-  const specPath = snapshotPath(ctx.session.id, ctx.version, 'task-spec.md');
-  const planPaths = resolvePlans(ctx.session.id, ctx.version);
+  const specPath =
+    findLatestSpecPath(ctx.session.id, ctx.version) || snapshotPath(ctx.session.id, ctx.version, 'task-spec.md');
+  const latestPlansDir =
+    findLatestPlansPath(ctx.session.id, ctx.version) || snapshotPath(ctx.session.id, ctx.version, 'plans');
+  const planPaths = resolveActivePlans(latestPlansDir);
   const vars: Record<string, string> = {
     spec_path: specPath,
     plan_paths: planPaths.join('\n'),
@@ -351,7 +357,7 @@ async function fanOutEval(units: EvalUnit[], ctx: Phase3Context): Promise<EvalRe
     units.map(async unit => {
       try {
         return await evalSingleUnit(unit, ctx, vars);
-      } catch (err) {
+      } catch (_err) {
         console.warn(`[eval] Unit ${unit.id} failed, retrying...`);
         try {
           return await evalSingleUnit(unit, ctx, vars);

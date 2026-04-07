@@ -1,7 +1,7 @@
-import type { LogEntry, SessionRow, Config } from '../core/types';
-import { appendEvent, readLog } from '../core/log';
+import { appendEvent } from '../core/log';
 import { ensureStatus } from '../core/status';
-import { logDim, logInfo, stateIcon } from '../util/format';
+import type { Config, LogEntry, SessionRow } from '../core/types';
+import { logDim, stateIcon } from '../util/format';
 
 export interface PhaseContext {
   session: SessionRow;
@@ -40,8 +40,9 @@ export async function runStateMachine(
   options?: {
     terminalStates?: string[];
     forceStartState?: string;
+    suppressPhaseStarted?: boolean;
   },
-): Promise<boolean | 'amend_spec'> {
+): Promise<boolean | 'amend_spec' | 'revisit_spec'> {
   const { session, version } = ctx;
   const terminalStates = options?.terminalStates ?? [];
 
@@ -82,7 +83,8 @@ export async function runStateMachine(
   // Only emit phase:started for fresh starts — not resumes.
   // Check if any of THIS phase's states have been completed.
   const hasCompletedWork = Object.keys(states).some(s => status.completedSteps.includes(s));
-  if (!hasCompletedWork) {
+  // Skip emission if caller already emitted with proper metadata (e.g., revisit_spec or amend_spec)
+  if (!hasCompletedWork && !options?.suppressPhaseStarted) {
     appendEvent(session.id, {
       ts: new Date().toISOString(),
       event: `${phaseName}:started`,
@@ -119,6 +121,11 @@ export async function runStateMachine(
     // Handler returned 'amend_spec' — spec amendment escalation (phase 1 only)
     if (nextState === 'amend_spec') {
       return 'amend_spec';
+    }
+
+    // Handler returned 'revisit_spec' — cross-phase reset to phase1 with feedback
+    if (nextState === 'revisit_spec') {
+      return 'revisit_spec';
     }
 
     // Advance to next state

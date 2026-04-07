@@ -1,9 +1,9 @@
-import type { Phase3Context } from './types';
-import { appendEvent } from '../../core/log';
-import { spawnPrintRaw } from '../../llm/spawn';
-import { writeStepInit } from '../../core/step-init';
 import { getAgentBinary } from '../../core/agents';
+import { appendEvent } from '../../core/log';
+import { writeStepInit } from '../../core/step-init';
 import { COMMIT_AGENT_PROMPT } from '../../core/types';
+import { spawnPrintRaw } from '../../llm/spawn';
+import type { Phase3Context } from './types';
 
 export async function handleCommitPending(ctx: Phase3Context): Promise<string | null> {
   const { session, version, config } = ctx;
