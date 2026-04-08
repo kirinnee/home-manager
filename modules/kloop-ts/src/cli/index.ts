@@ -18,6 +18,7 @@ import * as reviewCmd from './review';
 import * as summaryCmd from './summary';
 import * as resetCmd from './reset';
 import * as streamCmd from './stream';
+import * as skillCmd from './skill';
 import { readFileSync } from 'fs';
 
 // Read version from package.json at runtime
@@ -143,6 +144,17 @@ export function createCli(deps: CliDeps): Command {
     .command('stream')
     .description('Process streaming JSON from stdin (internal use)')
     .action(async () => streamCmd.handler());
+
+  const skillCmd_ = new Command('skill').description('Claude Code skill management');
+  skillCmd_
+    .command('show')
+    .description('Print the kloop Claude Code skill to stdout')
+    .action(() => skillCmd.showHandler());
+  skillCmd_
+    .command('install')
+    .description('Install the kloop skill to ~/.claude/skills/kloop/')
+    .action(() => skillCmd.installHandler());
+  program.addCommand(skillCmd_);
 
   return program;
 }

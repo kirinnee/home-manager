@@ -11,15 +11,21 @@ nixpkgs.stdenv.mkDerivation {
 
   nativeBuildInputs = [ nixpkgs.bun nixpkgs.makeWrapper ];
 
+  buildPhase = ''
+    export HOME=$TMPDIR
+    bun install --frozen-lockfile
+  '';
+
   installPhase = ''
     mkdir -p $out/lib/kloop
     mkdir -p $out/bin
 
-    cp dist/index.js $out/lib/kloop/
-    cp package.json $out/package.json
+    cp -r src $out/lib/kloop/
+    cp package.json $out/lib/kloop/
+    cp -r node_modules $out/lib/kloop/
 
     makeWrapper ${nixpkgs.bun}/bin/bun $out/bin/kloop \
-      --add-flags "$out/lib/kloop/index.js"
+      --add-flags "run $out/lib/kloop/src/index.ts"
   '';
 
   meta = {

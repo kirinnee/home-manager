@@ -21,7 +21,7 @@ export default {
     },
     {
       // Atomi profile
-      match: ({ urlString }) => /atomi/i.test(urlString),
+      match: ({ urlString }) => /atomi|clickup/i.test(urlString),
       browser: {
         name: 'Microsoft Edge',
         profile: 'Profile 2',
