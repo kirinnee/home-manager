@@ -106,12 +106,6 @@ export async function runStateMachine(
     // Note: handlers emit their own :started/:completed events to the WAL.
     const nextState: string | null = await handler(ctx);
 
-    // Check if we've reached a terminal state
-    if (terminalStates.includes(currentState)) {
-      logDim(`[${phaseName}] Reached terminal state: ${currentState}`);
-      break;
-    }
-
     // Handler returned null — interrupted (e.g. spec not approved, user Ctrl+C)
     if (nextState === null) {
       interrupted = true;
@@ -126,6 +120,13 @@ export async function runStateMachine(
     // Handler returned 'revisit_spec' — cross-phase reset to phase1 with feedback
     if (nextState === 'revisit_spec') {
       return 'revisit_spec';
+    }
+
+    // Check if we're entering a terminal state
+    // (handlers can return a non-terminal state to escape a terminal state, e.g. retry)
+    if (terminalStates.includes(nextState)) {
+      logDim(`[${phaseName}] Reached terminal state: ${nextState}`);
+      break;
     }
 
     // Advance to next state

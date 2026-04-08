@@ -70,6 +70,9 @@ export interface SessionStatus {
     reportedFailedRunIds?: number[];
   };
 
+  // Kloop run IDs per plan (plan name -> list of run IDs)
+  planRuns: Record<string, string[]>;
+
   // Stats
   stats: {
     totalReplies: number;
@@ -155,6 +158,7 @@ function initialStatus(): SessionStatus {
     completedSteps: [],
     completedPlans: [],
     context: {},
+    planRuns: {},
     stats: { totalReplies: 0, totalResolved: 0, pushCycles: 0 },
   };
 }
@@ -196,6 +200,16 @@ function applyEvent(status: SessionStatus, entry: LogEntry, index: number): void
     if (!status.completedPlans.includes(status.context.planIndex)) {
       status.completedPlans.push(status.context.planIndex);
     }
+  }
+
+  // Track kloop run IDs per plan
+  if (event === 'setup_run:completed' && entry.metadata?.kloopRunId) {
+    const plan = (entry.plan as string) ?? `plan-${(status.context.planIndex ?? 0) + 1}`;
+    const runId = entry.metadata.kloopRunId as string;
+    if (!status.planRuns[plan]) {
+      status.planRuns[plan] = [];
+    }
+    status.planRuns[plan].push(runId);
   }
 
   // State started (skip lifecycle/meta events)

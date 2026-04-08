@@ -257,20 +257,20 @@ export function serializeConfigWithComments(config: Config): string {
   lines.push(`  compressSpec: ${config.kloop.compressSpec}`);
   lines.push(`  firstLoopFullReview: ${config.kloop.firstLoopFullReview}`);
   lines.push(`  previousReviewPropagation: ${config.kloop.previousReviewPropagation}`);
-  // Kloop prompts section
+  // Kloop prompts section — uses raw string values, not nested objects
   if (config.kloop.prompts) {
     lines.push('  prompts:');
     for (const [name, prompt] of Object.entries(config.kloop.prompts)) {
       if (prompt) {
-        lines.push(`    ${name}:`);
         const vars = KLOOP_PROMPT_VARS[name];
+        // Variable comments go BEFORE the key (as regular YAML comments)
         if (vars) {
           for (const [v, desc] of Object.entries(vars)) {
-            lines.push(`      # {${v}} - ${desc}`);
+            lines.push(`    # {${v}} - ${desc}`);
           }
         }
-        lines.push(`      prompt: |`);
-        lines.push(indentLines(prompt, 8));
+        lines.push(`    ${name}: |`);
+        lines.push(indentLines(prompt, 6));
       }
     }
   }

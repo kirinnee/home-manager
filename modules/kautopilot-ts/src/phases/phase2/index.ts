@@ -73,7 +73,7 @@ export async function runPhase2(
     phase2States as unknown as Record<string, (ctx: import('../machine').PhaseContext) => Promise<string | null>>,
     ctx,
     {
-      terminalStates: ['completed', 'failed'],
+      terminalStates: ['completed'],
       forceStartState: options?.forceStartState,
     },
   );
