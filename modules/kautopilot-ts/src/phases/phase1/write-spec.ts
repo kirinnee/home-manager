@@ -44,10 +44,11 @@ Each version MUST follow this template:
 
 After each edit cycle (writing or editing the spec), you MUST create a snapshot:
 \`\`\`bash
-kautopilot snapshot spec {epoch}
+kautopilot snapshot spec
 \`\`\`
 
 This copies the working copy to a versioned snapshot in the global artifacts directory.
+The epoch version is auto-detected from the session — you do not need to specify it.
 The snapshot command outputs:
 - SNAPSHOT_VERSION=N (the new version number)
 - SNAPSHOT_PATH=... (the path to the snapshot)
@@ -109,10 +110,11 @@ export async function handleWriteSpec(ctx: Phase1Context): Promise<string | null
     ? `\n## Previous Spec Amendment\n\nThe spec needs amendment because: ${ctx.specAmendmentContext.reason}\nThe previous spec v${ctx.specAmendmentContext.previousVersion} is at:\n${ctx.specAmendmentContext.previousSpecPath}\n\nRead the previous spec to understand what needs to be amended.\n`
     : '';
 
-  // Build mechanics with template, feedback reference, and epoch
-  const mechanicsResolved = SPEC_MECHANICS.replace('{specTemplate}', config.templates.spec)
-    .replace('{feedback_reference}', feedbackReference)
-    .replace('{epoch}', String(version));
+  // Build mechanics with template, feedback reference
+  const mechanicsResolved = SPEC_MECHANICS.replace('{specTemplate}', config.templates.spec).replace(
+    '{feedback_reference}',
+    feedbackReference,
+  );
   const mechanicsPrompt = resolvePromptVars(mechanicsResolved, vars);
 
   // Prepend existing working copy if resuming (use path, not inlined content)

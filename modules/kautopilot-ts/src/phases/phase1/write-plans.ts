@@ -47,10 +47,11 @@ Each plan file MUST follow this template:
 
 After each edit cycle (writing or editing the plans), you MUST create a snapshot:
 \`\`\`bash
-kautopilot snapshot plans {epoch}
+kautopilot snapshot plans
 \`\`\`
 
 This copies the working copies to a versioned snapshot in the global artifacts directory.
+The epoch version is auto-detected from the session — you do not need to specify it.
 The snapshot command outputs:
 - SNAPSHOT_VERSION=N (the new version number)
 - SNAPSHOT_PATH=... (the path to the snapshot)
@@ -127,11 +128,10 @@ export async function handleWritePlans(ctx: Phase1Context): Promise<string | nul
   // Build prompt from config
   let prompt = getAgentPrompt('phase1', 'plan_writer', vars as unknown as Record<string, string>);
 
-  // Build mechanics with template, feedback, epoch
+  // Build mechanics with template, feedback
   const mechanicsResolved = PLAN_MECHANICS.replace('{planTemplate}', config.templates.plan)
     .replace('{feedback_reference}', feedbackReference)
-    .replace('{previous_epoch_plans_reference}', previousEpochPlansReference)
-    .replace('{epoch}', String(version));
+    .replace('{previous_epoch_plans_reference}', previousEpochPlansReference);
   const mechanicsPrompt = resolvePromptVars(mechanicsResolved, vars);
 
   // Prepend existing working copies if resuming (use paths, not inlined content)
