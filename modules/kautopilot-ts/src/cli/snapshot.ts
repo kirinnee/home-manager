@@ -136,27 +136,55 @@ function copyDirRecursive(src: string, dest: string): void {
   }
 }
 
-function handleSnapshot(type: 'spec' | 'plans', epochVersion: number, sessionId?: string): void {
+/**
+ * Resolve epoch version: explicit argument > session status.yaml > error.
+ */
+export function resolveEpochVersion(sessionId: string, explicitVersion?: number): number {
+  if (explicitVersion !== undefined) return explicitVersion;
+
+  const statusPath = join(sessionDir(sessionId), 'status.yaml');
+  if (existsSync(statusPath)) {
+    const raw = readFileSync(statusPath, 'utf-8');
+    const parsed = YAML.parse(raw);
+    if (parsed?.version && typeof parsed.version === 'number') {
+      console.log(`EPOCH_VERSION=${parsed.version}`);
+      return parsed.version;
+    }
+  }
+
+  throw new Error('Could not auto-detect epoch version. Specify it explicitly: kautopilot snapshot <type> <version>');
+}
+
+function handleSnapshot(type: 'spec' | 'plans', epochVersion: number | undefined, sessionId?: string): void {
   const id = resolveSessionId(sessionId);
+  const resolvedVersion = resolveEpochVersion(id, epochVersion);
 
   // Ensure artifact directory exists
-  const artifactDir = snapshotPath(id, epochVersion);
+  const artifactDir = snapshotPath(id, resolvedVersion);
   mkdirSync(artifactDir, { recursive: true });
 
   if (type === 'spec') {
     // Find repo working copy
-    const repoSpecPath = findRepoSpecPath(id, epochVersion);
+    const repoSpecPath = findRepoSpecPath(id, resolvedVersion);
     if (!repoSpecPath || !existsSync(repoSpecPath)) {
       throw new Error(
-        `No working copy spec found. Expected at spec/<ticket>/v${epochVersion}/task-spec.md in worktree.`,
+        `No working copy spec found. Expected at spec/<ticket>/v${resolvedVersion}/task-spec.md in worktree.`,
       );
     }
 
     // Find next version
-    const snapshotVersion = findNextSpecVersion(id, epochVersion);
-    const destPath = snapshotPath(id, epochVersion, `task-spec-${snapshotVersion}.md`);
+    const snapshotVersion = findNextSpecVersion(id, resolvedVersion);
+    const destPath = snapshotPath(id, resolvedVersion, `task-spec-${snapshotVersion}.md`);
     ensureArtifactDir(destPath);
     copyFileSync(repoSpecPath, destPath);
+
+    // If feedback.md exists alongside task-spec.md, persist it as the current epoch feedback artifact.
+    const repoFeedbackPath = join(dirname(repoSpecPath), 'feedback.md');
+    if (existsSync(repoFeedbackPath)) {
+      const feedbackDestPath = snapshotPath(id, resolvedVersion, 'feedback.md');
+      ensureArtifactDir(feedbackDestPath);
+      copyFileSync(repoFeedbackPath, feedbackDestPath);
+    }
 
     // Log event
     appendEvent(id, {
@@ -164,7 +192,7 @@ function handleSnapshot(type: 'spec' | 'plans', epochVersion: number, sessionId?
       event: 'snapshot:created',
       metadata: {
         type: 'spec',
-        epochVersion,
+        epochVersion: resolvedVersion,
         snapshotVersion,
         path: destPath,
       },
@@ -175,14 +203,14 @@ function handleSnapshot(type: 'spec' | 'plans', epochVersion: number, sessionId?
     console.log(`SNAPSHOT_PATH=${destPath}`);
   } else {
     // Plans snapshot
-    const repoPlansPath = findRepoPlansPath(id, epochVersion);
+    const repoPlansPath = findRepoPlansPath(id, resolvedVersion);
     if (!repoPlansPath || !existsSync(repoPlansPath)) {
-      throw new Error(`No working copy plans found. Expected at spec/<ticket>/v${epochVersion}/plans/ in worktree.`);
+      throw new Error(`No working copy plans found. Expected at spec/<ticket>/v${resolvedVersion}/plans/ in worktree.`);
     }
 
     // Find next version
-    const snapshotVersion = findNextPlansVersion(id, epochVersion);
-    const destDir = snapshotPath(id, epochVersion, `plans-${snapshotVersion}`);
+    const snapshotVersion = findNextPlansVersion(id, resolvedVersion);
+    const destDir = snapshotPath(id, resolvedVersion, `plans-${snapshotVersion}`);
     copyDirRecursive(repoPlansPath, destDir);
 
     // Log event
@@ -191,7 +219,7 @@ function handleSnapshot(type: 'spec' | 'plans', epochVersion: number, sessionId?
       event: 'snapshot:created',
       metadata: {
         type: 'plans',
-        epochVersion,
+        epochVersion: resolvedVersion,
         snapshotVersion,
         path: destDir,
       },
@@ -207,7 +235,7 @@ export function createSnapshotCommand(): Command {
   return new Command('snapshot')
     .description('Create a versioned snapshot of working copies')
     .argument('<type>', 'Artifact type: spec or plans')
-    .argument('<epoch-version>', 'Epoch version number', v => {
+    .argument('[epoch-version]', 'Epoch version number (auto-detected if omitted)', v => {
       const n = Number.parseInt(v, 10);
       if (Number.isNaN(n) || n < 1) {
         throw new Error('Epoch version must be a positive integer');
@@ -215,7 +243,7 @@ export function createSnapshotCommand(): Command {
       return n;
     })
     .option('--session <id>', 'Session ID (or set KAUTOPILOT_SESSION)')
-    .action((type: string, epochVersion: number, opts: { session?: string }) => {
+    .action((type: string, epochVersion: number | undefined, opts: { session?: string }) => {
       if (type !== 'spec' && type !== 'plans') {
         console.error(`Invalid type: ${type}. Must be 'spec' or 'plans'.`);
         process.exit(1);

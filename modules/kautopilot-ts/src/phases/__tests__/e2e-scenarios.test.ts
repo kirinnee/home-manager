@@ -273,18 +273,38 @@ describe('E2E Scenario 2: PR flow with contract rewrite and same-PR reuse', () =
     });
     appendEvent(S, {
       ts: '2026-04-01T10:11:01Z',
-      event: 'resolve:completed',
+      event: 'snapshot:created',
       version: 1,
+      metadata: { type: 'plans', epochVersion: 1, snapshotVersion: 1 },
     });
     appendEvent(S, {
       ts: '2026-04-01T10:11:02Z',
+      event: 'resolve:completed',
+      version: 1,
+      metadata: { reason: 'conflict', rewriteDecision: 'refine_local' },
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:11:03Z',
       event: 'rewrite_spec:started',
       version: 1,
+      metadata: { rewriteDecision: 'refine_local' },
     });
     appendEvent(S, {
       ts: '2026-04-01T10:12:00Z',
+      event: 'rewrite_plans:approved',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:12:01Z',
+      event: 'snapshot:created',
+      version: 1,
+      metadata: { type: 'plans', epochVersion: 1, snapshotVersion: 2 },
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:12:02Z',
       event: 'rewrite_spec:completed',
       version: 1,
+      metadata: { rewriteDecision: 'refine_local' },
     });
 
     // Retry plan 1 successfully
@@ -749,20 +769,40 @@ describe('E2E Scenario 6: Conflict-triggered rewrite flow', () => {
     });
     appendEvent(S, {
       ts: '2026-04-01T10:16:01Z',
+      event: 'snapshot:created',
+      version: 1,
+      metadata: { type: 'plans', epochVersion: 1, snapshotVersion: 1 },
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:16:02Z',
       event: 'resolve:completed',
       version: 1,
+      metadata: { reason: 'conflict', rewriteDecision: 'patch_downstream' },
     });
 
     // patch_downstream rewrites plans 2 and 3 — stays in same epoch
     appendEvent(S, {
-      ts: '2026-04-01T10:16:02Z',
+      ts: '2026-04-01T10:16:03Z',
       event: 'rewrite_spec:started',
       version: 1,
+      metadata: { rewriteDecision: 'patch_downstream' },
     });
     appendEvent(S, {
       ts: '2026-04-01T10:17:00Z',
+      event: 'rewrite_plans:approved',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:17:01Z',
+      event: 'snapshot:created',
+      version: 1,
+      metadata: { type: 'plans', epochVersion: 1, snapshotVersion: 2 },
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:17:02Z',
       event: 'rewrite_spec:completed',
       version: 1,
+      metadata: { rewriteDecision: 'patch_downstream' },
     });
 
     const status = ensureStatus(S);
@@ -832,8 +872,38 @@ describe('E2E Scenario 7: Max-situations-triggered rewrite → revisit_spec', ()
     });
     appendEvent(S, {
       ts: '2026-04-01T10:11:01Z',
+      event: 'snapshot:created',
+      version: 1,
+      metadata: { type: 'spec', epochVersion: 1, snapshotVersion: 1 },
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:11:02Z',
       event: 'resolve:completed',
       version: 1,
+      metadata: { reason: 'conflict', rewriteDecision: 'revisit_spec' },
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:11:03Z',
+      event: 'rewrite_spec:started',
+      version: 1,
+      metadata: { rewriteDecision: 'revisit_spec' },
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:12:00Z',
+      event: 'feedback:approved',
+      version: 1,
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:12:01Z',
+      event: 'snapshot:created',
+      version: 1,
+      metadata: { type: 'spec', epochVersion: 1, snapshotVersion: 2 },
+    });
+    appendEvent(S, {
+      ts: '2026-04-01T10:12:02Z',
+      event: 'rewrite_spec:completed',
+      version: 1,
+      metadata: { rewriteDecision: 'revisit_spec' },
     });
 
     let status = ensureStatus(S);

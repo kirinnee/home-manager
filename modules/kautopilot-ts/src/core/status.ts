@@ -68,6 +68,7 @@ export interface SessionStatus {
     };
     rolloverFromPr?: number;
     reportedFailedRunIds?: number[];
+    lastPhase2Version?: number;
   };
 
   // Kloop run IDs per plan (plan name -> list of run IDs)

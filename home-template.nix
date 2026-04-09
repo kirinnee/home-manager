@@ -305,6 +305,7 @@ rec {
       devenv
       nodejs
       pkgs-unstable.cloudflared
+      zellij
 
       # tooling
       mmv-go

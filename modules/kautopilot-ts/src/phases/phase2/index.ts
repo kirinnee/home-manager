@@ -1,4 +1,5 @@
 import { loadSessionAgents } from '../../core/agents';
+import { appendEvent } from '../../core/log';
 import { ensureStatus } from '../../core/status';
 import type { Config, SessionRow } from '../../core/types';
 import { runStateMachine } from '../machine';
@@ -9,9 +10,10 @@ import { handleCompleted } from './completed';
 import { handleFailed } from './failed';
 import { handleNextPlan } from './next-plan';
 import { handleResolve } from './resolve';
+import { handleRewriteSpec } from './rewrite-spec';
 import { handleRunning } from './running';
 import { handleSetupRun } from './setup-run';
-import type { Phase2Context, Phase2StateMap } from './types';
+import { isRewriteDecision, type Phase2Context, type Phase2StateMap } from './types';
 
 // State map for Phase 2
 const phase2States: Phase2StateMap = {
@@ -19,6 +21,7 @@ const phase2States: Phase2StateMap = {
   setup_run: handleSetupRun,
   running: handleRunning,
   resolve: handleResolve,
+  rewrite_spec: handleRewriteSpec,
   commit: handleCommit,
   next_plan: handleNextPlan,
   completed: handleCompleted,
@@ -42,6 +45,13 @@ export async function runPhase2(
   const status = ensureStatus(session.id);
   const version = status.version;
 
+  // Persist this phase2 version so we can detect epoch changes on re-entry
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'context:updated',
+    metadata: { lastPhase2Version: version },
+  });
+
   // Discover plan files from session artifacts
   const planFiles = resolvePlans(session.id, version);
   const maxPlans = planFiles.length;
@@ -50,8 +60,12 @@ export async function runPhase2(
     throw new Error('No plan files found. Run Phase 1 first.');
   }
 
-  // Determine plan progress from status
-  const planIndex = status.context.planIndex ?? 0;
+  // Determine plan progress from status.
+  // When a new epoch starts (version changed since last phase2), plans are
+  // regenerated from scratch — old planIndex is meaningless, reset to 0.
+  const lastPhase2Version = status.context.lastPhase2Version as number | undefined;
+  const versionChanged = lastPhase2Version !== undefined && lastPhase2Version !== version;
+  const planIndex = versionChanged ? 0 : (status.context.planIndex ?? 0);
   const firstRun = status.completedPlans.length === 0 && status.completedSteps.length === 0;
 
   // Build initial context
@@ -65,6 +79,7 @@ export async function runPhase2(
     planIndex,
     maxPlans,
     firstRun,
+    rewriteDecision: isRewriteDecision(status.context.rewriteDecision) ? status.context.rewriteDecision : undefined,
   };
 
   // Use generic state machine runner with resume support

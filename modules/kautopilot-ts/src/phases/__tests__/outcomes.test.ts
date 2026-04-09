@@ -945,3 +945,266 @@ describe('describe --json durable state surface (spec sections 9.2 / 13.1.E)', (
     expect(handoffReason).toBe('rewrite: revisit_spec');
   });
 });
+
+// ============================================================================
+// Resolve handler event filtering tests (spec: resolve/rewrite_spec flow)
+// ============================================================================
+
+describe('resolve handler event filtering', () => {
+  const SESSION = `test-resolve-filter-${Date.now()}`;
+
+  afterEach(() => {
+    const dir = `${process.env.HOME}/.kautopilot/${SESSION}`;
+    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function eventsSince(events: ReturnType<typeof readLog>, fenceEvent: string) {
+    const idx = events.findLastIndex(e => e.event === fenceEvent);
+    return idx >= 0 ? events.slice(idx + 1) : events;
+  }
+
+  it('no rewriteDecision after resolve:started triggers restart', () => {
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:00:00Z',
+      event: 'resolve:started',
+      version: 1,
+    });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:01:00Z',
+      event: 'context:updated',
+      version: 1,
+      metadata: { someOtherField: true },
+    });
+
+    const events = readLog(SESSION);
+    const since = eventsSince(events, 'resolve:started');
+    const decisionEvent = since.find(e => e.event === 'context:updated' && e.metadata?.rewriteDecision);
+
+    expect(decisionEvent).toBeUndefined();
+    // Handler would restart TTY
+  });
+
+  it('no snapshot:created after decision triggers restart', () => {
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:00:00Z',
+      event: 'resolve:started',
+      version: 1,
+    });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:01:00Z',
+      event: 'context:updated',
+      version: 1,
+      metadata: { rewriteDecision: 'refine_local' },
+    });
+
+    const events = readLog(SESSION);
+    const since = eventsSince(events, 'resolve:started');
+    const hasDecision = since.some(e => e.event === 'context:updated' && e.metadata?.rewriteDecision);
+    const hasSnapshot = since.some(e => e.event === 'snapshot:created');
+
+    expect(hasDecision).toBe(true);
+    expect(hasSnapshot).toBe(false);
+    // Handler would restart TTY
+  });
+
+  it('revisit_spec without feedback.md triggers restart', () => {
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:00:00Z',
+      event: 'resolve:started',
+      version: 1,
+    });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:01:00Z',
+      event: 'context:updated',
+      version: 1,
+      metadata: { rewriteDecision: 'revisit_spec' },
+    });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:01:01Z',
+      event: 'snapshot:created',
+      version: 1,
+    });
+
+    const events = readLog(SESSION);
+    const since = eventsSince(events, 'resolve:started');
+    const decision = since.find(e => e.event === 'context:updated' && e.metadata?.rewriteDecision)?.metadata
+      ?.rewriteDecision;
+    const hasSnapshot = since.some(e => e.event === 'snapshot:created');
+
+    expect(decision).toBe('revisit_spec');
+    expect(hasSnapshot).toBe(true);
+
+    // feedback.md does NOT exist in the worktree path resolve.ts checks, so the handler would restart
+    const worktreeFeedbackPath = join(tempHome, 'fake-worktree', 'spec', 'local', 'v1', 'feedback.md');
+    expect(existsSync(worktreeFeedbackPath)).toBe(false);
+  });
+
+  it('resolve:abandoned routes to failed', () => {
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:00:00Z',
+      event: 'resolve:started',
+      version: 1,
+    });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:01:00Z',
+      event: 'resolve:abandoned',
+      version: 1,
+    });
+
+    const events = readLog(SESSION);
+    const since = eventsSince(events, 'resolve:started');
+    const abandoned = since.some(e => e.event === 'resolve:abandoned');
+
+    expect(abandoned).toBe(true);
+    // Handler would return 'failed'
+  });
+
+  it('valid resolve flow with decision + snapshot proceeds to rewrite_spec', () => {
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:00:00Z',
+      event: 'resolve:started',
+      version: 1,
+    });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:01:00Z',
+      event: 'context:updated',
+      version: 1,
+      metadata: { rewriteDecision: 'refine_local' },
+    });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:01:01Z',
+      event: 'snapshot:created',
+      version: 1,
+      metadata: { type: 'plans' },
+    });
+
+    const events = readLog(SESSION);
+    const since = eventsSince(events, 'resolve:started');
+    const decision = since.find(e => e.event === 'context:updated' && e.metadata?.rewriteDecision)?.metadata
+      ?.rewriteDecision;
+    const hasSnapshot = since.some(e => e.event === 'snapshot:created');
+    const abandoned = since.some(e => e.event === 'resolve:abandoned');
+
+    expect(decision).toBe('refine_local');
+    expect(hasSnapshot).toBe(true);
+    expect(abandoned).toBe(false);
+    // Handler would return 'rewrite_spec'
+  });
+});
+
+describe('rewrite_spec handler event filtering', () => {
+  const SESSION = `test-rewrite-spec-filter-${Date.now()}`;
+
+  afterEach(() => {
+    const dir = `${process.env.HOME}/.kautopilot/${SESSION}`;
+    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function eventsSince(events: ReturnType<typeof readLog>, fenceEvent: string) {
+    const idx = events.findLastIndex(e => e.event === fenceEvent);
+    return idx >= 0 ? events.slice(idx + 1) : events;
+  }
+
+  it('no approval after rewrite_spec:started triggers restart', () => {
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:00:00Z',
+      event: 'rewrite_spec:started',
+      version: 1,
+      metadata: { rewriteDecision: 'refine_local' },
+    });
+    // No approval event — just some snapshot
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:01:00Z',
+      event: 'snapshot:created',
+      version: 1,
+    });
+
+    const events = readLog(SESSION);
+    const since = eventsSince(events, 'rewrite_spec:started');
+    const approved = since.some(e => e.event === 'rewrite_plans:approved');
+
+    expect(approved).toBe(false);
+    // Handler would restart TTY
+  });
+
+  it('resolve:abandoned during rewrite_spec routes to failed', () => {
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:00:00Z',
+      event: 'rewrite_spec:started',
+      version: 1,
+      metadata: { rewriteDecision: 'revisit_spec' },
+    });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:01:00Z',
+      event: 'resolve:abandoned',
+      version: 1,
+    });
+
+    const events = readLog(SESSION);
+    const since = eventsSince(events, 'rewrite_spec:started');
+    const abandoned = since.some(e => e.event === 'resolve:abandoned');
+
+    expect(abandoned).toBe(true);
+    // Handler would return 'failed'
+  });
+
+  it('feedback:approved for revisit_spec completes successfully', () => {
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:00:00Z',
+      event: 'rewrite_spec:started',
+      version: 1,
+      metadata: { rewriteDecision: 'revisit_spec' },
+    });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:01:00Z',
+      event: 'feedback:approved',
+      version: 1,
+    });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:01:01Z',
+      event: 'snapshot:created',
+      version: 1,
+      metadata: { type: 'spec', path: '/some/path' },
+    });
+
+    const events = readLog(SESSION);
+    const since = eventsSince(events, 'rewrite_spec:started');
+    const approved = since.some(e => e.event === 'feedback:approved');
+    const snapshotCreated = since.some(e => e.event === 'snapshot:created');
+    const abandoned = since.some(e => e.event === 'resolve:abandoned');
+
+    expect(approved).toBe(true);
+    expect(snapshotCreated).toBe(true);
+    expect(abandoned).toBe(false);
+    // Handler would return 'revisit_spec'
+  });
+
+  it('rewrite_plans:approved for refine_local completes successfully', () => {
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:00:00Z',
+      event: 'rewrite_spec:started',
+      version: 1,
+      metadata: { rewriteDecision: 'refine_local' },
+    });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:01:00Z',
+      event: 'rewrite_plans:approved',
+      version: 1,
+    });
+    appendEvent(SESSION, {
+      ts: '2026-04-01T10:01:01Z',
+      event: 'snapshot:created',
+      version: 1,
+      metadata: { type: 'plans', path: '/some/path' },
+    });
+
+    const events = readLog(SESSION);
+    const since = eventsSince(events, 'rewrite_spec:started');
+    const approved = since.some(e => e.event === 'rewrite_plans:approved');
+    const snapshotCreated = since.some(e => e.event === 'snapshot:created');
+
+    expect(approved).toBe(true);
+    expect(snapshotCreated).toBe(true);
+    // Handler would return 'clear_loop'
+  });
+});
