@@ -151,6 +151,7 @@ class TmuxServiceImpl implements TmuxService {
 
       if (trimmed === 'RUNNING') {
         exitCode = 1;
+        timedOut = true;
       } else {
         const parsed = parseInt(trimmed, 10);
         if (Number.isFinite(parsed)) {

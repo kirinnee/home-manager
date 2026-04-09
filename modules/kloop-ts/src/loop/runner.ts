@@ -500,7 +500,13 @@ export class LoopRunner {
   }
 
   /**
-   * Run phased reviews for kloop mode (writes events)
+   * Run phased reviews for kloop mode (writes events).
+   *
+   * When firstLoopFullReview is true AND iterNum === 1, all reviewers across
+   * all phases run in a single parallel batch — no phase gating or short-circuit.
+   * When false (or only one phase), the traditional sequential phase model is
+   * used: each phase runs in parallel, and a rejection short-circuits
+   * remaining phases.
    */
   private async runPhasedReviewsForKloop(
     runId: string,
@@ -511,10 +517,202 @@ export class LoopRunner {
     iterData: iteration.IterationData,
     writeEvent: (event: Record<string, unknown>) => Promise<void>,
   ): Promise<agents.ReviewerResult[]> {
-    const allResults: agents.ReviewerResult[] = [];
     const reviewPhases = config.reviewPhases ?? [['claude-auto-zai']];
-    let globalReviewerIndex = 0;
     const specPath = this.paths.runSpec(runId);
+
+    // When firstLoopFullReview is enabled on the first iteration, flatten all
+    // phases into one parallel batch (no phase gating or short-circuit)
+    if (iterNum === 1 && config.firstLoopFullReview && reviewPhases.length > 1) {
+      return this.runFlattenedReviews(runId, agentRunner, config, iterNum, dirHash, specPath, reviewPhases, writeEvent);
+    }
+
+    // Traditional sequential phase model
+    return this.runSequentialPhasedReviews(
+      runId,
+      agentRunner,
+      config,
+      iterNum,
+      dirHash,
+      specPath,
+      reviewPhases,
+      writeEvent,
+    );
+  }
+
+  /**
+   * Run all reviewers from all phases in a single parallel batch.
+   * No phase gating — every reviewer runs at once regardless of verdicts.
+   */
+  private async runFlattenedReviews(
+    runId: string,
+    agentRunner: agents.AgentRunner,
+    config: Config,
+    iterNum: number,
+    dirHash: string,
+    specPath: string,
+    reviewPhases: string[][],
+    writeEvent: (event: Record<string, unknown>) => Promise<void>,
+  ): Promise<agents.ReviewerResult[]> {
+    const allReviewers: Array<{
+      parsed: ReturnType<typeof parseReviewerConfig>;
+      originalPhase: number;
+      globalIndex: number;
+    }> = [];
+    let globalIndex = 0;
+
+    for (let phaseIdx = 0; phaseIdx < reviewPhases.length; phaseIdx++) {
+      for (const entry of reviewPhases[phaseIdx] ?? []) {
+        allReviewers.push({ parsed: parseReviewerConfig(entry), originalPhase: phaseIdx, globalIndex });
+        globalIndex++;
+      }
+    }
+
+    // Write review_phase_start events for each original phase so the
+    // materializer creates phase records that reviewer events can attach to.
+    const reviewersByPhase = new Map<number, typeof allReviewers>();
+    for (const r of allReviewers) {
+      if (!reviewersByPhase.has(r.originalPhase)) reviewersByPhase.set(r.originalPhase, []);
+      reviewersByPhase.get(r.originalPhase)!.push(r);
+    }
+    for (const [phase, reviewers] of [...reviewersByPhase.entries()].sort(([a], [b]) => a - b)) {
+      await writeEvent({
+        type: 'review_phase_start',
+        timestamp: new Date().toISOString(),
+        loop: iterNum,
+        phase,
+        reviewers: reviewers.map(r => r.parsed.binary),
+      });
+    }
+
+    // Build prompts for all reviewers
+    const reviewsDir = this.paths.loopReviewsPath(runId, iterNum);
+    const verdictsDir = this.paths.loopVerdictsPath(runId, iterNum);
+    const evidenceDir = this.paths.loopEvidencePath(runId, iterNum);
+    const learningsFile = this.paths.runLearnings(runId);
+    const prevLoop = iterNum > 1 ? iterNum - 1 : null;
+
+    const allPrompts: Array<{ reviewerIndex: number; prompt: string; propagated: boolean }> = allReviewers.map(
+      ({ globalIndex: idx }) => {
+        const seesPrevReviews = prevLoop !== null && Math.random() < (config.previousReviewPropagation ?? 0);
+        const archivedReviews = seesPrevReviews ? this.paths.loopReviewsPath(runId, prevLoop) : null;
+        return {
+          reviewerIndex: idx,
+          prompt: iteration.buildReviewerPrompt(config.prompts?.reviewer, {
+            specPath,
+            iteration: String(iterNum),
+            reviewerIndex: String(idx),
+            reviewsDir,
+            verdictsDir,
+            evidenceDir,
+            learningsFile,
+            archivedReviews,
+          }),
+          propagated: seesPrevReviews,
+        };
+      },
+    );
+
+    // Write reviewer_start events for all reviewers
+    for (const { parsed, originalPhase } of allReviewers) {
+      await writeEvent({
+        type: 'reviewer_start',
+        timestamp: new Date().toISOString(),
+        loop: iterNum,
+        phase: originalPhase,
+        reviewer: parsed.binary,
+        harness: parsed.harness,
+      });
+    }
+
+    // Run all reviewers in parallel
+    const allResults = await agentRunner.runReviewersPhase({
+      runId,
+      iteration: iterNum,
+      dirHash,
+      phaseIndex: 0,
+      reviewers: allReviewers.map(r => r.parsed),
+      prompts: allPrompts,
+      timeout: config.reviewerTimeout,
+      onReviewerEnd: async (r: agents.ReviewerResult) => {
+        const promptMeta = allPrompts.find(p => p.reviewerIndex === r.reviewerIndex);
+        const propagated = promptMeta?.propagated ?? false;
+        r.propagated = propagated;
+        // Use originalPhase for the event so downstream grouping is correct
+        const entry = allReviewers.find(e => e.globalIndex === r.reviewerIndex);
+        const originalPhase = entry?.originalPhase ?? 0;
+        await writeEvent({
+          type: 'reviewer_end',
+          timestamp: new Date().toISOString(),
+          loop: iterNum,
+          phase: originalPhase,
+          reviewer: r.binary,
+          harness: r.harness,
+          exitCode: r.exitCode,
+          durationMs: r.durationMs,
+          error: r.error,
+          verdict: r.verdict,
+          completionEstimate: r.completionEstimate,
+          propagated,
+        });
+      },
+    });
+
+    // Stamp each result with its original phase for correct grouping downstream
+    for (const r of allResults) {
+      const entry = allReviewers.find(e => e.globalIndex === r.reviewerIndex);
+      if (entry) {
+        r.phaseIndex = entry.originalPhase;
+      }
+    }
+
+    // Print results grouped by original phase
+    const byPhase = new Map<number, agents.ReviewerResult[]>();
+    for (const r of allResults) {
+      const phase = r.phaseIndex ?? 0;
+      if (!byPhase.has(phase)) byPhase.set(phase, []);
+      byPhase.get(phase)!.push(r);
+    }
+
+    for (const [phase, results] of [...byPhase.entries()].sort(([a], [b]) => a - b)) {
+      fmt.formatReviewPhaseStart(
+        phase,
+        results.map(r => r.binary),
+      );
+      for (const r of results) {
+        fmt.formatReviewerResult(r.reviewerIndex, r.binary, r.verdict, r.completionEstimate, r.durationMs);
+      }
+    }
+
+    // Write review_phase_end for each original phase (no short-circuit)
+    for (const phase of [...reviewersByPhase.keys()].sort((a, b) => a - b)) {
+      await writeEvent({
+        type: 'review_phase_end',
+        timestamp: new Date().toISOString(),
+        loop: iterNum,
+        phase,
+        shortCircuited: false,
+      });
+    }
+
+    return allResults;
+  }
+
+  /**
+   * Traditional sequential phase model: each phase runs in parallel,
+   * rejection short-circuits remaining phases.
+   */
+  private async runSequentialPhasedReviews(
+    runId: string,
+    agentRunner: agents.AgentRunner,
+    config: Config,
+    iterNum: number,
+    dirHash: string,
+    specPath: string,
+    reviewPhases: string[][],
+    writeEvent: (event: Record<string, unknown>) => Promise<void>,
+  ): Promise<agents.ReviewerResult[]> {
+    const allResults: agents.ReviewerResult[] = [];
+    let globalReviewerIndex = 0;
 
     for (let phaseIdx = 0; phaseIdx < reviewPhases.length; phaseIdx++) {
       const phaseReviewers = (reviewPhases[phaseIdx] ?? []).map(parseReviewerConfig);
@@ -621,16 +819,12 @@ export class LoopRunner {
         shortCircuited: anyRejected,
       });
 
-      // Short-circuit on rejection (unless firstLoopFullReview bypasses on loop 1)
+      // Short-circuit on rejection
       if (anyRejected) {
-        const skipShortCircuit = iterNum === 1 && config.firstLoopFullReview;
-        if (!skipShortCircuit) {
-          if (reviewPhases.length > 1) {
-            fmt.formatPhaseShortCircuit(phaseIdx, reviewPhases.length - phaseIdx - 1);
-          }
-          break;
+        if (reviewPhases.length > 1) {
+          fmt.formatPhaseShortCircuit(phaseIdx, reviewPhases.length - phaseIdx - 1);
         }
-        // firstLoopFullReview: continue running remaining phases despite rejection
+        break;
       }
     }
 

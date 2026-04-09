@@ -16,7 +16,7 @@ rec {
   friendli = proxy // {
     ANTHROPIC_DEFAULT_HAIKU_MODEL = "MiniMaxAI/MiniMax-M2.5";
     ANTHROPIC_DEFAULT_SONNET_MODEL = "zai-org/GLM-4.7";
-    ANTHROPIC_DEFAULT_OPUS_MODEL = "zai-org/GLM-5";
+    ANTHROPIC_DEFAULT_OPUS_MODEL = "zai-org/GLM-5.1";
 
   };
   fireworks = proxy // {

@@ -164,10 +164,12 @@ export function ensureInitStatus(id: string): InitStatus {
   const existing = readInitStatusYaml(id);
 
   if (existing && existing.walCursor >= log.length) {
-    return existing;
+    return { ...initialInitStatus(), ...existing };
   }
 
-  const status = existing ?? initialInitStatus();
+  // Merge with initialInitStatus() so new fields get their defaults when
+  // reading status.yaml from a session created before those fields existed.
+  const status = existing ? { ...initialInitStatus(), ...existing } : initialInitStatus();
   const startIdx = existing ? existing.walCursor : 0;
 
   for (let i = startIdx; i < log.length; i++) {

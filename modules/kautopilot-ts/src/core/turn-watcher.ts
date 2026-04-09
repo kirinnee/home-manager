@@ -1,19 +1,179 @@
-import { existsSync, mkdirSync, readFileSync, watch } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync, watch } from 'node:fs';
 import { dirname } from 'node:path';
 import { debugLog } from '../llm/spawn';
 import { updateUserTurn } from './status';
+
+// ============================================================================
+// Types
+// ============================================================================
 
 interface TurnState {
   userTurn: boolean;
   ts: string;
 }
 
+type MachineState = 'user_turn' | 'llm_thinking' | 'llm_executing' | 'user_interactive';
+
+export interface TurnMachineContext {
+  cursor: number;
+  state: MachineState;
+  permissionMode: string | null;
+  lastSize: number;
+  lastTs: string;
+  pendingTail: string;
+}
+
+// biome-ignore lint/suspicious/noExplicitAny: JSONL entries are untyped
+export type ParsedEntry = Record<string, any>;
+
+// ============================================================================
+// Interactive tool classification
+// ============================================================================
+
+const INTERACTIVE_TOOLS = new Set(['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode']);
+
+// ============================================================================
+// Pure state machine
+// ============================================================================
+
+function userTurnFromState(state: MachineState): boolean {
+  return state === 'user_turn' || state === 'user_interactive';
+}
+
+export function readAppendedRaw(path: string, startOffset: number, endOffset: number): string {
+  if (endOffset <= startOffset) {
+    return '';
+  }
+
+  const fd = openSync(path, 'r');
+  try {
+    const length = endOffset - startOffset;
+    const buffer = Buffer.alloc(length);
+    const bytesRead = readSync(fd, buffer, 0, length, startOffset);
+    if (bytesRead <= 0) {
+      return '';
+    }
+    return buffer.subarray(0, bytesRead).toString('utf8');
+  } finally {
+    closeSync(fd);
+  }
+}
+
+export function readAppendedLines(path: string, startOffset: number, endOffset: number): string[] {
+  return readAppendedRaw(path, startOffset, endOffset).split('\n').filter(Boolean);
+}
+
+/**
+ * Process a single parsed JSONL entry and return the updated context.
+ * Pure function — no I/O, fully testable.
+ */
+export function processEntry(ctx: TurnMachineContext, entry: ParsedEntry): TurnMachineContext {
+  const next = { ...ctx };
+  const ts = entry.timestamp ?? ctx.lastTs;
+  next.lastTs = ts;
+
+  const type = entry.type;
+
+  if (type === 'user') {
+    // Track permission mode from human user entries (those without toolUseResult)
+    if (!('toolUseResult' in entry) && entry.permissionMode != null) {
+      next.permissionMode = entry.permissionMode;
+    }
+    next.state = 'llm_thinking';
+    return next;
+  }
+
+  if (type === 'assistant') {
+    const msg = entry.message;
+    if (!msg) return next; // malformed
+
+    const stopReason = msg.stop_reason;
+
+    // Streaming intermediate — no state change
+    if (stopReason == null) {
+      return next;
+    }
+
+    if (stopReason === 'end_turn') {
+      next.state = 'user_turn';
+      return next;
+    }
+
+    if (stopReason === 'tool_use') {
+      // Extract tool names from content array
+      const content: Array<{ type: string; name?: string }> = msg.content ?? [];
+      const toolNames = content
+        .filter((c: { type: string }) => c.type === 'tool_use')
+        .map((c: { name?: string }) => c.name)
+        .filter(Boolean);
+
+      // If ANY tool is interactive → user_interactive
+      const hasInteractive = toolNames.some((name: string | undefined) => name != null && INTERACTIVE_TOOLS.has(name));
+      if (hasInteractive) {
+        next.state = 'user_interactive';
+        return next;
+      }
+
+      // Non-interactive tool: check permission mode
+      const isBypass = ctx.permissionMode === 'bypassPermissions';
+      if (isBypass) {
+        next.state = 'llm_executing';
+      } else {
+        // Non-bypass: user needs to approve tool execution
+        next.state = 'user_interactive';
+      }
+      return next;
+    }
+
+    // Unknown stop_reason — treat as LLM still working
+    return next;
+  }
+
+  if (type === 'queue-operation') {
+    if (entry.operation === 'enqueue' && ctx.state === 'user_turn') {
+      next.state = 'llm_thinking';
+    }
+    return next;
+  }
+
+  // system, progress, file-history-snapshot, last-prompt, custom-title, agent-name — no change
+  return next;
+}
+
+/**
+ * Process multiple entries in sequence and return the final context.
+ */
+export function processEntries(ctx: TurnMachineContext, entries: ParsedEntry[]): TurnMachineContext {
+  let current = ctx;
+  for (const entry of entries) {
+    current = processEntry(current, entry);
+  }
+  return current;
+}
+
+export function createInitialContext(): TurnMachineContext {
+  return {
+    cursor: 0,
+    state: 'user_turn',
+    permissionMode: null,
+    lastSize: 0,
+    lastTs: new Date().toISOString(),
+    pendingTail: '',
+  };
+}
+
+// ============================================================================
+// File watcher with cursor-based incremental reads
+// ============================================================================
+
 /**
  * Watch a Claude JSONL conversation log to determine whose turn it is.
  *
- * - `type: 'assistant'` with `stop_reason: 'end_turn'` → user's turn (Claude finished)
- * - `type: 'assistant'` with other stop_reason → Claude still working (tool_use, etc.)
- * - `type: 'user'` → Claude's turn (user just sent something)
+ * Uses a cursor-based forward state machine:
+ * - Tracks how many lines have been processed
+ * - On each file change, only processes newly appended lines
+ * - Classifies interactive tools (AskUserQuestion, EnterPlanMode, ExitPlanMode) as user's turn
+ * - Tracks permission mode to determine if tool approval is needed
  *
  * Uses fs.watch for efficient change notification. Safe to run while the main
  * process is blocked on `await proc.exited` — only the watcher callback writes.
@@ -22,50 +182,63 @@ interface TurnState {
  * may not have created it yet when the watcher starts).
  */
 export function watchTurn(jsonlPath: string, onChange: (state: TurnState) => void): { close: () => void } {
-  let lastSize = 0;
+  let ctx = createInitialContext();
   let closed = false;
   let fileWatcher: ReturnType<typeof watch> | null = null;
 
   function check() {
     if (!existsSync(jsonlPath)) return;
 
-    // Only re-parse if file has grown
+    // Only re-parse if file has grown (or been truncated/replaced)
     let stat: { size: number };
     try {
-      stat = Bun.file(jsonlPath);
+      stat = statSync(jsonlPath);
     } catch {
       return;
     }
-    if (stat.size === lastSize) return;
-    lastSize = stat.size;
 
-    const content = readFileSync(jsonlPath, 'utf-8');
-    const lines = content.trim().split('\n').filter(Boolean);
+    // File truncated/replaced — reset and re-process (including pendingTail)
+    if (stat.size < ctx.lastSize) {
+      ctx = createInitialContext();
+    }
 
-    // Walk backwards to find the last assistant or user message
-    for (let i = lines.length - 1; i >= 0; i--) {
+    if (stat.size === ctx.lastSize) return;
+
+    const prevState = ctx.state;
+    const prevCursor = ctx.cursor;
+    const endOffset = stat.size;
+    const raw = readAppendedRaw(jsonlPath, prevCursor, endOffset);
+    ctx.lastSize = endOffset;
+    ctx.cursor = endOffset;
+
+    // Prepend any buffered incomplete line from the previous read
+    const text = ctx.pendingTail + raw;
+
+    // If text doesn't end with newline, the last segment may be incomplete
+    const endsWithNewline = text.endsWith('\n');
+    const segments = text.split('\n').filter(Boolean);
+
+    if (!endsWithNewline && segments.length > 0) {
+      // Last segment is potentially incomplete — buffer it for next read
+      ctx.pendingTail = segments.pop() as string;
+    } else {
+      ctx.pendingTail = '';
+    }
+
+    for (const line of segments) {
       try {
-        const d = JSON.parse(lines[i]);
-        if (d.type === 'assistant') {
-          const stopReason = d.message?.stop_reason;
-          // end_turn = Claude finished its turn, waiting for user input
-          onChange({
-            userTurn: stopReason === 'end_turn',
-            ts: d.timestamp || new Date().toISOString(),
-          });
-          return;
-        }
-        if (d.type === 'user') {
-          // User just sent something, it's Claude's turn now
-          onChange({
-            userTurn: false,
-            ts: d.timestamp || new Date().toISOString(),
-          });
-          return;
-        }
+        const entry = JSON.parse(line);
+        ctx = processEntry(ctx, entry);
       } catch {
         // Skip non-JSON lines
       }
+    }
+
+    if (ctx.state !== prevState || prevCursor === 0) {
+      onChange({
+        userTurn: userTurnFromState(ctx.state),
+        ts: ctx.lastTs,
+      });
     }
   }
 
