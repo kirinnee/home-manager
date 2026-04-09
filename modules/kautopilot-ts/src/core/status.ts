@@ -355,11 +355,13 @@ export function ensureStatus(sessionId: string): SessionStatus {
   const existing = readStatusYaml(sessionId);
 
   if (existing && existing.walCursor >= log.length) {
-    return existing;
+    return { ...initialStatus(), ...existing };
   }
 
   // Incremental replay from cursor, or full replay if missing
-  const status = existing ?? initialStatus();
+  // Merge with initialStatus() so new fields get their defaults when
+  // reading status.yaml from a session created before those fields existed.
+  const status = existing ? { ...initialStatus(), ...existing } : initialStatus();
   const startIdx = existing ? existing.walCursor : 0;
 
   for (let i = startIdx; i < log.length; i++) {
@@ -380,8 +382,9 @@ export function ensureStatus(sessionId: string): SessionStatus {
  * is blocked on `await proc.exited`, so only the watcher callback writes.
  */
 export function updateUserTurn(sessionId: string, userTurn: boolean): void {
-  const status = readStatusYaml(sessionId);
-  if (!status) return;
+  const raw = readStatusYaml(sessionId);
+  if (!raw) return;
+  const status = { ...initialStatus(), ...raw };
   if (status.userTurn === userTurn) return; // no-op
   status.userTurn = userTurn;
   writeStatusYaml(sessionId, status);
