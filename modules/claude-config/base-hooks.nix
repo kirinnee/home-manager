@@ -7,6 +7,10 @@
       hooks = [
         {
           type = "command";
+          command = "loctl hook-check";
+        }
+        {
+          type = "command";
           command = "$HOME/.claude/hooks/rtk-rewrite.sh";
         }
       ];

@@ -19,6 +19,7 @@ import * as summaryCmd from './summary';
 import * as resetCmd from './reset';
 import * as streamCmd from './stream';
 import * as skillCmd from './skill';
+import * as showCmd from './show';
 import { readFileSync } from 'fs';
 
 // Read version from package.json at runtime
@@ -144,6 +145,47 @@ export function createCli(deps: CliDeps): Command {
     .command('stream')
     .description('Process streaming JSON from stdin (internal use)')
     .action(async () => streamCmd.handler());
+
+  // show subcommand group
+  const showCmd_ = new Command('show').description('View run artifacts (reviews, prompts, verdicts, evidence, etc.)');
+  showCmd_
+    .command('reviews [id] [loop]')
+    .description('Show formatted reviews for a loop')
+    .option('--run <id>', 'run ID (default: current workspace)')
+    .action(async (id, loop, opts) => showCmd.showReviews(id, loop, opts, deps));
+  showCmd_
+    .command('prompts [id] [loop]')
+    .description('Show agent prompts for a loop')
+    .option('--run <id>', 'run ID (default: current workspace)')
+    .action(async (id, loop, opts) => showCmd.showPrompts(id, loop, opts, deps));
+  showCmd_
+    .command('verdicts [id] [loop]')
+    .description('Show verdict dashboard for a loop')
+    .option('--run <id>', 'run ID (default: current workspace)')
+    .action(async (id, loop, opts) => showCmd.showVerdicts(id, loop, opts, deps));
+  showCmd_
+    .command('evidence [id] [loop]')
+    .description('Show evidence (diff stats, verification, changed files)')
+    .option('--run <id>', 'run ID (default: current workspace)')
+    .action(async (id, loop, opts) => showCmd.showEvidence(id, loop, opts, deps));
+  showCmd_
+    .command('learnings [id]')
+    .description('Show run learnings')
+    .option('--run <id>', 'run ID (default: current workspace)')
+    .action(async (id, opts) => showCmd.showLearnings(id, opts, deps));
+  showCmd_
+    .command('spec [id]')
+    .description('Show current spec')
+    .option('--run <id>', 'run ID (default: current workspace)')
+    .option('--diff', 'diff current spec against previous version')
+    .option('--versions', 'list all spec versions')
+    .action(async (id, opts) => showCmd.showSpec(id, opts, deps));
+  showCmd_
+    .command('config [id]')
+    .description('Show run config')
+    .option('--run <id>', 'run ID (default: current workspace)')
+    .action(async (id, opts) => showCmd.showConfig(id, opts, deps));
+  program.addCommand(showCmd_);
 
   const skillCmd_ = new Command('skill').description('Claude Code skill management');
   skillCmd_

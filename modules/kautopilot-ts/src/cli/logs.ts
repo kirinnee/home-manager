@@ -44,7 +44,7 @@ async function runLogs(phase: string | undefined, opts: { tail: string; json?: b
         'plans_approve',
         'approved',
       ],
-      implementation: ['clear_loop', 'setup_run', 'running', 'commit', 'next_plan', 'resolve', 'rewrite_spec'],
+      implementation: ['clear_loop', 'setup_run', 'running', 'commit', 'next_plan', 'resolve', 'amend_plans'],
       polish: [
         'commit_pending',
         'prereview',

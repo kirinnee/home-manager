@@ -7,6 +7,7 @@ import { Command } from 'commander';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
 
+import { createDeleteCommand } from './cli/delete';
 import { createDescribeCommand } from './cli/describe';
 import { createInitCommand } from './cli/init';
 import { createLogEventCommand } from './cli/log-event';
@@ -17,7 +18,7 @@ import { createPsCommand } from './cli/ps';
 import { createResetCommand } from './cli/reset';
 import { createSnapshotCommand } from './cli/snapshot';
 import { createSpecReviewCommand } from './cli/spec-review';
-import { createStartCommand } from './cli/start';
+import { createInternalStartCommand, createStartCommand } from './cli/start';
 import { createStatusCommand } from './cli/status';
 import { createStopCommand } from './cli/stop';
 
@@ -28,8 +29,10 @@ program.name('kautopilot').description('End-to-end task completion from ticket t
 program
   .addCommand(createInitCommand())
   .addCommand(createStartCommand())
+  .addCommand(createInternalStartCommand(), { hidden: true })
   .addCommand(createStatusCommand())
   .addCommand(createDescribeCommand())
+  .addCommand(createDeleteCommand())
   .addCommand(createStopCommand())
   .addCommand(createLogsCommand())
   .addCommand(createPsCommand())

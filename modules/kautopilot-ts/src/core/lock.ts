@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { LockInfo } from './types';
+import { isZellijSessionAlive, killZellijSession, zellijSessionName } from './zellij';
 
 function lockPath(id: string): string {
   return `${process.env.HOME}/.kautopilot/${id}/lock.pid`;
@@ -60,8 +61,15 @@ export function acquireLock(id: string): void {
 
 export function checkLock(id: string): LockInfo {
   const path = lockPath(id);
+  const zellijAlive = isZellijSessionAlive(id);
+
   if (!existsSync(path)) {
-    return { locked: false, pid: 0, alive: false };
+    // No lock file — reap orphaned zellij if present, unless we're inside it
+    if (zellijAlive && process.env.ZELLIJ_SESSION_NAME !== zellijSessionName(id)) {
+      console.warn(`Warning: Orphaned zellij session for ${id} (no PID). Reaping.`);
+      killZellijSession(id);
+    }
+    return { locked: false, pid: 0, alive: false, zellijAlive };
   }
 
   const pid = parseInt(readFileSync(path, 'utf-8').trim(), 10);
@@ -75,10 +83,15 @@ export function checkLock(id: string): LockInfo {
     } catch {
       // Ignore
     }
-    return { locked: false, pid, alive: false };
+    // Reap orphaned zellij if PID is dead, unless we're inside it
+    if (zellijAlive && process.env.ZELLIJ_SESSION_NAME !== zellijSessionName(id)) {
+      console.warn(`Warning: Orphaned zellij session for ${id}. Reaping.`);
+      killZellijSession(id);
+    }
+    return { locked: false, pid, alive: false, zellijAlive };
   }
 
-  return { locked: true, pid, alive: true };
+  return { locked: true, pid, alive: true, zellijAlive };
 }
 
 export function releaseLock(id: string): void {

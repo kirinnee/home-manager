@@ -8,12 +8,10 @@ import { DEFAULT_CONFIG } from './types';
 // ============================================================================
 
 /**
- * TTY exit instruction — only append to TTY prompts that do NOT have their own
- * approval protocol with exit instructions. Phase 1 TTYs (triage, write-spec,
- * write-plans) handle exit via their approval gates and should NOT use this.
+ * TTY exit instruction — kept as empty string for call-site compatibility.
+ * Each TTY's approval protocol now owns its own post-approval exit instruction.
  */
-export const TTY_EXIT_INSTRUCTION =
-  '\n\nWhen you are done, tell the user: "Exit this TTY (type /exit or Ctrl+C) to continue kautopilot."';
+export const TTY_EXIT_INSTRUCTION = '';
 
 // ============================================================================
 // Session agent cache

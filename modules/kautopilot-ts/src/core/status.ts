@@ -5,6 +5,7 @@ import { logDim, logWarn } from '../util/format';
 import { sessionDir } from './artifacts';
 import { checkLock } from './lock';
 import { appendEvent, readLog } from './log';
+import { readPlanManifest } from './manifests';
 import type { LogEntry } from './types';
 
 // ============================================================================
@@ -17,6 +18,52 @@ export interface TaskStatus {
   completedAt?: string;
   failedAt?: string;
   logRef: number;
+}
+
+/** Active plan context during implementation phase */
+export interface ActivePlan {
+  name: string;
+  planIndex: number;
+  maxPlans: number;
+  kloopRunId: string | null;
+  rewriteDecision: string | null;
+  attempt: number;
+}
+
+/** Polish phase state for PR delivery visibility */
+export interface PolishState {
+  deliveryKind: 'pr' | 'ticket';
+  prNumber: number | null;
+  prUrl: string | null;
+  pushCycle: number;
+  kloopRunId: string | null;
+  lastPollState: 'mergeable' | 'pending' | 'blocked' | null;
+  lastPollAt: string | null;
+  lastEvalSummary: {
+    autoResolved: number;
+    totalEvalUnits: number;
+    replies: number;
+    resolves: number;
+    codeFixes: number;
+    ambiguous: number;
+  } | null;
+  ttyReason: string | null;
+}
+
+/** Per-phase summary for overall progress visibility */
+export interface PhaseSummary {
+  status: 'pending' | 'active' | 'completed';
+  currentStep: string | null;
+}
+
+/** Implementation phase summary with plan progress */
+export interface ImplPhaseSummary extends PhaseSummary {
+  planProgress: string | null;
+}
+
+/** Polish phase summary with poll state */
+export interface PolishPhaseSummary extends PhaseSummary {
+  pollState: string | null;
 }
 
 export interface SessionStatus {
@@ -69,10 +116,32 @@ export interface SessionStatus {
     rolloverFromPr?: number;
     reportedFailedRunIds?: number[];
     lastPhase2Version?: number;
+    ttyReason?: string;
   };
 
   // Kloop run IDs per plan (plan name -> list of run IDs)
   planRuns: Record<string, string[]>;
+
+  // Active plan context (implementation phase)
+  activePlan: ActivePlan | null;
+
+  // Polish phase state
+  polishState: PolishState | null;
+
+  // All plans from manifest
+  allPlans: Array<{
+    ordinal: number;
+    file: string;
+    completed: boolean;
+    commitSha: string | null;
+  }>;
+
+  // Per-phase summary
+  phases: {
+    plan: PhaseSummary;
+    implementation: ImplPhaseSummary;
+    polish: PolishPhaseSummary;
+  };
 
   // Stats
   stats: {
@@ -86,10 +155,31 @@ export interface SessionStatus {
 // Checkpoint Definitions
 // ============================================================================
 
-const CHECKPOINTS: Record<string, Set<string>> = {
+export const CHECKPOINTS: Record<string, Set<string>> = {
   plan: new Set(['pull_ticket', 'write_spec', 'finalize_spec', 'finalize_plans']),
   implementation: new Set(['clear_loop', 'commit', 'next_plan', 'completed']),
   polish: new Set(['commit_pending', 'prereview', 'push', 'create_pr', 'poll', 'feedback_check', 'completed']),
+};
+
+/** Ordered step names per phase for display purposes */
+export const PHASE_STEPS: Record<string, string[]> = {
+  plan: ['pull_ticket', 'triage', 'write_spec', 'finalize_spec', 'write_plans', 'finalize_plans'],
+  implementation: ['clear_loop', 'setup_run', 'running', 'resolve', 'amend_plans', 'commit', 'next_plan', 'completed'],
+  polish: [
+    'commit_pending',
+    'prereview',
+    'push',
+    'create_pr',
+    'poll',
+    'ensure_branch',
+    'eval',
+    'act',
+    'tty_resolve',
+    'write_fix',
+    'run_fix',
+    'feedback_check',
+    'completed',
+  ],
 };
 
 function isCheckpoint(phase: string, state: string): boolean {
@@ -160,6 +250,18 @@ function initialStatus(): SessionStatus {
     completedPlans: [],
     context: {},
     planRuns: {},
+    activePlan: null,
+    polishState: null,
+    allPlans: [],
+    phases: {
+      plan: { status: 'pending', currentStep: null },
+      implementation: {
+        status: 'pending',
+        currentStep: null,
+        planProgress: null,
+      },
+      polish: { status: 'pending', currentStep: null, pollState: null },
+    },
     stats: { totalReplies: 0, totalResolved: 0, pushCycles: 0 },
   };
 }
@@ -176,24 +278,77 @@ function applyEvent(status: SessionStatus, entry: LogEntry, index: number): void
 
   // Phase start
   if (/^phase\d:started$/.test(event)) {
-    status.phase = phaseFromEvent(event);
+    const newPhase = phaseFromEvent(event);
+    status.phase = newPhase;
     status.version = entry.version ?? status.version;
     status.completedSteps = [];
     status.completedPlans = [];
     status.tasks = {};
     status.lastCheckpoint = null;
     status.checkpointRef = 0;
+
+    // Bug fix #1: Reset phase-specific context fields on phase transitions
+    if (newPhase === 'plan') {
+      // Bug fix #6: Clear planRuns on new epoch (revisit_spec / amend_spec)
+      status.planRuns = {};
+      // Bug fix #7: Clear ALL context except deliveryKind on revisit_spec
+      const deliveryKind = status.context.deliveryKind;
+      status.context = { deliveryKind };
+      status.activePlan = null;
+      status.polishState = null;
+    } else if (newPhase === 'implementation') {
+      // Reset phase2-specific context
+      status.context.rewriteDecision = undefined;
+      status.context.attempt = undefined;
+      status.activePlan = null;
+      status.polishState = null;
+    } else if (newPhase === 'polish') {
+      // Reset phase3-specific context
+      status.context.pushCycle = undefined;
+      status.context.prNumber = undefined;
+      status.context.prUrl = undefined;
+      status.context.ttyReason = undefined;
+      status.activePlan = null;
+      // Initialize polishState
+      status.polishState = {
+        deliveryKind: (status.context.deliveryKind as 'pr' | 'ticket') ?? 'pr',
+        prNumber: null,
+        prUrl: null,
+        pushCycle: 0,
+        kloopRunId: null,
+        lastPollState: null,
+        lastPollAt: null,
+        lastEvalSummary: null,
+        ttyReason: null,
+      };
+    }
   }
 
-  // Phase complete
+  // Phase complete — clear ephemeral state
   if (/^phase\d:completed$/.test(event)) {
-    // Phase done — keep state as-is for visibility
+    const completedPhase = phaseFromEvent(event);
+    if (completedPhase === 'implementation') {
+      status.activePlan = null;
+    }
+    if (completedPhase === 'polish') {
+      status.polishState = null;
+    }
   }
 
   // Per-plan cycle reset (phase2 loops per plan)
   if (event === 'clear_loop:started' && entry.metadata?.planIndex != null) {
     status.completedSteps = [];
-    status.context.planIndex = entry.metadata.planIndex as number;
+    const planIndex = entry.metadata.planIndex as number;
+    status.context.planIndex = planIndex;
+    const maxPlans = status.context.maxPlans ?? 0;
+    status.activePlan = {
+      name: `plan-${planIndex + 1}`,
+      planIndex,
+      maxPlans,
+      kloopRunId: null,
+      rewriteDecision: null,
+      attempt: (status.context.attempt as number) ?? 1,
+    };
   }
 
   // Plan completion tracking
@@ -211,6 +366,47 @@ function applyEvent(status: SessionStatus, entry: LogEntry, index: number): void
       status.planRuns[plan] = [];
     }
     status.planRuns[plan].push(runId);
+    // Update activePlan kloopRunId (create if missing, e.g. after crash recovery)
+    if (status.activePlan) {
+      if (status.activePlan.name === plan) {
+        status.activePlan.kloopRunId = runId;
+      }
+    } else {
+      const planIndex = status.context.planIndex ?? 0;
+      status.activePlan = {
+        name: plan,
+        planIndex,
+        maxPlans: (status.context.maxPlans as number) ?? 0,
+        kloopRunId: runId,
+        rewriteDecision: null,
+        attempt: (status.context.attempt as number) ?? 1,
+      };
+    }
+  }
+
+  // Update activePlan when running completes (kloop finished)
+  if (event === 'running:completed' && status.activePlan) {
+    status.activePlan.kloopRunId = null;
+  }
+
+  // Track rewrite decision in activePlan
+  if (event === 'resolve:completed' && entry.metadata?.rewriteDecision && status.activePlan) {
+    status.activePlan.rewriteDecision = entry.metadata.rewriteDecision as string;
+  }
+
+  // Update activePlan on next_plan
+  if (event === 'next_plan:completed' && status.activePlan && entry.metadata?.to) {
+    const to = entry.metadata.to as string;
+    if (to !== 'done') {
+      const match = to.match(/^plan-(\d+)$/);
+      if (match) {
+        const newPlanIndex = parseInt(match[1], 10) - 1;
+        status.activePlan.planIndex = newPlanIndex;
+        status.activePlan.name = to;
+        status.activePlan.kloopRunId = null;
+        status.activePlan.rewriteDecision = null;
+      }
+    }
   }
 
   // State started (skip lifecycle/meta events)
@@ -289,10 +485,51 @@ function applyEvent(status: SessionStatus, entry: LogEntry, index: number): void
     }
   }
 
-  // Context updates
+  // Context updates — also track polish-specific fields
   if (event === 'context:updated' && entry.metadata) {
     const { task, parent, error, ...contextFields } = entry.metadata;
     Object.assign(status.context, contextFields);
+
+    // Update polishState from context changes
+    if (status.polishState) {
+      if (contextFields.prNumber != null) status.polishState.prNumber = contextFields.prNumber as number;
+      if (contextFields.prUrl != null) status.polishState.prUrl = contextFields.prUrl as string;
+      if (contextFields.pushCycle != null) status.polishState.pushCycle = contextFields.pushCycle as number;
+      if (contextFields.ttyReason != null) status.polishState.ttyReason = contextFields.ttyReason as string;
+      if (contextFields.deliveryKind != null)
+        status.polishState.deliveryKind = contextFields.deliveryKind as 'pr' | 'ticket';
+    }
+  }
+
+  // Track polish poll state from poll:completed
+  if (event === 'poll:completed' && status.polishState) {
+    const pollState = entry.metadata?.pollState as string | undefined;
+    if (pollState) {
+      status.polishState.lastPollState = pollState as 'mergeable' | 'pending' | 'blocked';
+      status.polishState.lastPollAt = entry.ts;
+    }
+  }
+
+  // Track polish eval summary from eval:completed
+  if (event === 'eval:completed' && status.polishState) {
+    status.polishState.lastEvalSummary = {
+      autoResolved: (entry.metadata?.autoResolved as number) ?? 0,
+      totalEvalUnits: (entry.metadata?.totalEvalUnits as number) ?? 0,
+      replies: (entry.metadata?.replies as number) ?? 0,
+      resolves: (entry.metadata?.resolves as number) ?? 0,
+      codeFixes: (entry.metadata?.codeFixes as number) ?? 0,
+      ambiguous: (entry.metadata?.ambiguous as number) ?? 0,
+    };
+  }
+
+  // Track polish kloop run from write_fix:completed
+  if (event === 'write_fix:completed' && entry.metadata?.kloopRunId && status.polishState) {
+    status.polishState.kloopRunId = entry.metadata.kloopRunId as string;
+  }
+
+  // Clear polish kloop run when run_fix completes
+  if (event === 'run_fix:completed' && status.polishState) {
+    status.polishState.kloopRunId = null;
   }
 
   // Reset — roll back to checkpoint (resume from the next state after it)
@@ -301,6 +538,8 @@ function applyEvent(status: SessionStatus, entry: LogEntry, index: number): void
     status.state = checkpoint;
     status.stateStatus = 'completed';
     status.tasks = {};
+    status.activePlan = null;
+    status.polishState = null;
     const idx = status.completedSteps.indexOf(checkpoint);
     if (idx >= 0) {
       status.completedSteps = status.completedSteps.slice(0, idx + 1);
@@ -356,7 +595,9 @@ export function ensureStatus(sessionId: string): SessionStatus {
   const existing = readStatusYaml(sessionId);
 
   if (existing && existing.walCursor >= log.length) {
-    return { ...initialStatus(), ...existing };
+    const status = { ...initialStatus(), ...existing };
+    computeDerivedFields(status, sessionId);
+    return status;
   }
 
   // Incremental replay from cursor, or full replay if missing
@@ -369,8 +610,109 @@ export function ensureStatus(sessionId: string): SessionStatus {
     applyEvent(status, log[i], i);
   }
 
+  computeDerivedFields(status, sessionId);
   writeStatusYaml(sessionId, status);
   return status;
+}
+
+// ============================================================================
+// Derived field computation
+// ============================================================================
+
+/**
+ * Compute fields that depend on external data (plan manifest) or are
+ * summary views of the replayed state (phases summary).
+ */
+function computeDerivedFields(status: SessionStatus, sessionId: string): void {
+  // allPlans — from plan manifest
+  const manifest = readPlanManifest(sessionId, status.version);
+  if (manifest) {
+    status.allPlans = manifest.plans.map(p => ({
+      ordinal: p.ordinal,
+      file: p.file,
+      completed: p.completed,
+      commitSha: p.commitSha ?? null,
+    }));
+  } else {
+    status.allPlans = [];
+  }
+
+  // phases summary
+  const phaseOrder: Array<'plan' | 'implementation' | 'polish'> = ['plan', 'implementation', 'polish'];
+  const currentPhaseIdx = phaseOrder.indexOf(status.phase as 'plan' | 'implementation' | 'polish');
+
+  for (const p of phaseOrder) {
+    const pIdx = phaseOrder.indexOf(p);
+    if (
+      pIdx < currentPhaseIdx ||
+      (pIdx === currentPhaseIdx && status.stateStatus === 'completed' && status.phase === p)
+    ) {
+      // Completed phase
+      if (p === 'implementation') {
+        status.phases.implementation = {
+          status: 'completed',
+          currentStep: null,
+          planProgress: null,
+        };
+      } else if (p === 'polish') {
+        status.phases.polish = {
+          status: 'completed',
+          currentStep: null,
+          pollState: null,
+        };
+      } else {
+        status.phases.plan = { status: 'completed', currentStep: null };
+      }
+    } else if (p === status.phase) {
+      // Active phase
+      const step = status.stateStatus === 'running' ? status.state : null;
+      if (p === 'implementation') {
+        const planProgress = status.activePlan
+          ? `${status.activePlan.planIndex + 1}/${status.activePlan.maxPlans}`
+          : status.context.maxPlans != null
+            ? `${(status.context.planIndex ?? 0) + 1}/${status.context.maxPlans}`
+            : null;
+        status.phases.implementation = {
+          status: 'active',
+          currentStep: step,
+          planProgress,
+        };
+      } else if (p === 'polish') {
+        status.phases.polish = {
+          status: 'active',
+          currentStep: step,
+          pollState: status.polishState?.lastPollState ?? null,
+        };
+      } else {
+        status.phases.plan = { status: 'active', currentStep: step };
+      }
+    } else {
+      // Pending phase
+      if (p === 'implementation') {
+        status.phases.implementation = {
+          status: 'pending',
+          currentStep: null,
+          planProgress: null,
+        };
+      } else if (p === 'polish') {
+        status.phases.polish = {
+          status: 'pending',
+          currentStep: null,
+          pollState: null,
+        };
+      } else {
+        status.phases.plan = { status: 'pending', currentStep: null };
+      }
+    }
+  }
+}
+
+/**
+ * Get the current kloop run ID from either activePlan or polishState.
+ * Convenience accessor for CLI commands.
+ */
+export function getCurrentKloopRunId(status: SessionStatus): string | null {
+  return status.activePlan?.kloopRunId ?? status.polishState?.kloopRunId ?? null;
 }
 
 // ============================================================================

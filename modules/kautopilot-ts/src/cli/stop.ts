@@ -5,6 +5,7 @@ import { deleteSession, getSessionById, getSessionByWorktree } from '../core/db'
 import { getGitRoot, getWorktree } from '../core/git';
 import { checkLock, releaseLock } from '../core/lock';
 import { appendEvent } from '../core/log';
+import { killZellijSession } from '../core/zellij';
 import { confirmAction } from '../llm/inquirer';
 import { logError, logOk } from '../util/format';
 
@@ -99,6 +100,9 @@ async function runStop(id: string | undefined, opts: { force?: boolean }): Promi
 
   // Release lock
   releaseLock(session.id);
+
+  // Kill zellij session if it exists
+  killZellijSession(session.id);
 
   // Log stop completed BEFORE any deletion
   appendEvent(session.id, {

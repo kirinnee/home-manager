@@ -990,158 +990,35 @@ Output ONLY the problems found — one per line. If none, output "No issues foun
     },
     phase2: {
       resolve: {
-        // Available vars: {task_spec_path}, {plan_path}, {plans_dir}, {kloop_evidence}, {feedback_path},
-        //   {plan_name}, {completed_plans_list}, {incomplete_plans_list}, {planTemplate}
-        prompt: `## Context Paths
+        // Available vars: {task_spec_path}, {plan_path}, {plans_dir}, {kloop_evidence},
+        //   {plan_name}, {reason}, {attempt}
+        // Mechanics (strategy list, context doc writing, approval protocol) are hardcoded in resolve.ts
+        prompt: `You are helping the user resolve a kloop failure for {plan_name}.
+
+## What Happened
+
+{kloop_evidence}
+
+## Context
 - Task spec: {task_spec_path}
 - Current plan: {plan_path}
 - Plans directory: {plans_dir}
 
-Read these files to understand the original intent.
-
-## Kloop Evidence
-
-{kloop_evidence}
-
-## What Happened
-
-The implementation loop for {plan_name} could not complete within its iteration limit.
-Review the kloop evidence above to understand what went wrong.
-
-## Decision Required
-
-Based on your analysis, you MUST choose one of these rewrite strategies.
-Discuss each option with the user and decide together:
-
-1. **refine_local** — The current plan is mostly correct but needs targeted fixes.
-   Choose when: the kloop was close to passing, issues are localized to this plan.
-   Effect: you rewrite the current plan, then a second review pass iterates on it.
-
-2. **patch_downstream** — Completed plans are fine, but remaining plans need updates
-   to account for what was learned. Choose when: earlier plans changed the approach
-   and downstream plans are now out of date.
-   Effect: you patch remaining plans, then a second review pass iterates on them.
-
-3. **regenerate_remaining** — Too much has changed; remaining plans should be
-   regenerated from scratch against the spec. Choose when: fundamental assumptions
-   shifted and incremental patches won't suffice.
-   Effect: you regenerate incomplete plans, then a second review pass iterates on them.
-
-4. **revisit_spec** — The spec itself has a contradiction or fundamental issue that
-   makes it impossible for ANY plan to succeed.
-   Choose when: the problem isn't the plans, it's what they're implementing.
-   Effect: you write feedback explaining what's wrong, then a second review pass
-   validates the feedback before escalating to a full replan.
-
-## After Deciding — You MUST Do All Three Steps
-
-### Step 1: Write the amendment
-
-For **refine_local**: Rewrite ONLY {plan_name} ({plan_path}). Each plan file MUST follow the template: {planTemplate}
-
-For **patch_downstream**: Rewrite INCOMPLETE plan files only.
-Completed plans (DO NOT edit):
-{completed_plans_list}
-Incomplete plans to update:
-{incomplete_plans_list}
-Each plan file MUST follow the template: {planTemplate}
-
-For **regenerate_remaining**: Rewrite ALL incomplete plan files from scratch.
-Completed plans (DO NOT edit):
-{completed_plans_list}
-Incomplete plans to regenerate:
-{incomplete_plans_list}
-Each plan file MUST follow the template: {planTemplate}
-
-For **revisit_spec**: Write feedback to {feedback_path} explaining what went wrong and what spec changes are needed.
-
-### Step 2: Snapshot the amendment
-
-\`\`\`bash
-kautopilot snapshot plans
-\`\`\`
-For revisit_spec, use: \`kautopilot snapshot spec\`
-
-The epoch version is auto-detected. This step is COMPULSORY — exit without a snapshot
-and this step will restart from scratch.
-
-### Step 3: Log your decision
-
-\`\`\`bash
-kautopilot log-event context:updated --metadata '{"rewriteDecision": "<your_choice>"}'
-\`\`\`
-
-Replace \`<your_choice>\` with one of: refine_local, patch_downstream, regenerate_remaining, revisit_spec.
-
-After all three steps are done, tell the user the draft is ready for review and /exit.
-A second TTY will open so you and the user can iterate on the amendment before it's finalized.
-
-### If You Want to Abandon
-
-If the situation is unsalvageable and you want to give up entirely:
-\`\`\`
-kautopilot log-event resolve:abandoned
-\`\`\`
-Then /exit. The session will be marked as failed.`,
+Read these to understand the original intent before proposing a strategy.`,
       },
-      rewrite_spec: {
-        // Available vars: {decision_title}, {decision_specific_review_section}, {kloop_evidence},
-        //   {task_spec_path}, {plans_dir}, {snapshot_type}, {approval_event}, {feedback_path}
-        prompt: `## Review Amendment: {decision_title}
+      amend_plans: {
+        // Available vars: {resolution_path}, {task_spec_path}, {plans_dir}, {kloop_evidence}
+        // Mechanics (per-strategy prompts, approval protocol) are hardcoded in amend-plans.ts
+        prompt: `You are amending plans for the current epoch. Read the resolution document at {resolution_path}
+— the previous TTY wrote it to explain what went wrong and what needs to change.
 
-{decision_specific_review_section}
-
-## Kloop Evidence
-
-{kloop_evidence}
-
-## Context Paths
+## Context
 - Task spec: {task_spec_path}
 - Plans directory: {plans_dir}
 
-Read these files to understand the original intent and verify the amendment.
+## Kloop Evidence
 
-## CRITICAL: Iteration & Approval Mechanics
-
-### Working Copies
-
-Edit files directly in their directories. Each version MUST be a complete, standalone
-document — NOT a diff or changelog.
-
-### Snapshot Workflow (COMPULSORY)
-
-After each edit cycle, you MUST create a snapshot:
-\`\`\`bash
-kautopilot snapshot {snapshot_type}
-\`\`\`
-
-This copies the working copies to a versioned snapshot. It outputs:
-- SNAPSHOT_VERSION=N
-- SNAPSHOT_PATH=...
-
-The epoch version is auto-detected from the session — you do not need to specify it.
-
-This step is COMPULSORY.
-
-### Approval Protocol
-
-When the user approves the amendment, you MUST do these things IN ORDER:
-1. Write the approval event:
-   \`\`\`bash
-   kautopilot log-event {approval_event}
-   \`\`\`
-2. THEN tell the user to /exit
-
-**CRITICAL**: Do NOT tell the user to /exit before writing the approval event.
-If the session crashes or the user Ctrl+C's before the approval event is logged,
-the amendment will NOT be considered approved and this step will re-run.
-
-### If You Want to Abandon
-
-\`\`\`
-kautopilot log-event resolve:abandoned
-\`\`\`
-Then /exit. The session will be marked as failed.`,
+{kloop_evidence}`,
       },
       // NOTE: 'commit' uses shared COMMIT_AGENT_PROMPT directly (not in config)
       // Handlers import COMMIT_AGENT_PROMPT and build prompt with {context} var
@@ -1204,6 +1081,7 @@ Options: fix the issue and retry, skip and move on, or escalate.`,
       },
       feedback: {
         // Available vars: {task_spec_path}, {plans_dir}, {pr_url}, {checks_status}, {thread_count}, {feedback_path}
+        // Mechanics (approval protocol, file writing, restart loop) are hardcoded in feedback-check.ts
         prompt: `## Context Paths
 - Task spec: {task_spec_path}
 - Plans directory: {plans_dir}
@@ -1215,19 +1093,10 @@ Read these files to understand the original intent.
 - Checks status: {checks_status}
 - Open threads: {thread_count}
 
-## Discussion
-
-Discuss with the user:
-1. What about the PR needs improvement?
-2. Is this an implementation issue or a spec issue?
-3. What should change in the spec to address this?
-
-## Feedback
-
-When ready, write the feedback to {feedback_path}
-The feedback will be used to guide the next iteration.
-
-After writing feedback, return the revisit_spec signal.`,
+Discuss the PR with the user. Figure out:
+1. What needs improvement?
+2. Implementation issue or spec issue?
+3. What spec changes would address it?`,
       },
     },
     generic: {
@@ -1381,4 +1250,5 @@ export interface LockInfo {
   locked: boolean;
   pid: number;
   alive: boolean;
+  zellijAlive: boolean;
 }

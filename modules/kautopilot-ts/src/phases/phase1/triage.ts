@@ -11,17 +11,21 @@ import type { Phase1Context } from './types';
  * Non-negotiable mechanics injected by the runner — NOT part of the user-editable prompt.
  * Always prepended so the pipeline contract is never broken by custom prompts.
  */
-const TRIAGE_APPROVAL_GATE = `### User Approval Gate
+const TRIAGE_APPROVAL_GATE = `### Interaction Protocol — STRICT
 
-After writing triage.md, you MUST present a summary to the user and wait for their explicit confirmation:
+Follow this loop for the triage decision:
 
-1. Show the user: delivery kind, complexity, key risks, and files affected
-2. Ask: "Does this triage assessment look correct? (yes/no)"
-3. ONLY after the user confirms, write the approval event:
+1. **You suggest first.** Based on your analysis, propose a concrete triage assessment (delivery kind, complexity, key risks, files affected) — do not open with "what do you want to do?" The user hired you to be proactive.
+2. **Debate with the user.** They will push back, ask questions, suggest alternatives. Iterate until you both agree.
+3. **Confirm the final decision.** State clearly what you both agreed on so there is no ambiguity.
+4. **Wait for explicit approval.** The user must say "approve" (or a clear equivalent like "yes approve this"). Ambiguous acknowledgements like "ok", "sounds good", or "sure" are NOT approval — ask for explicit confirmation.
+5. **Only after approval**, run:
    \`kautopilot log-event triage:approved --metadata '{"deliveryKind": "pr|ticket", "complexity": "..."}'\`
-4. THEN tell the user to /exit
+6. **Only after the event is logged**, tell the user: "All set — type /exit (or Ctrl+C) to continue kautopilot."
 
-CRITICAL: Do NOT log the approval event or tell the user to /exit until they explicitly confirm the triage.`;
+**DO NOT mention /exit before step 6.** Mentioning it earlier makes the user think the session is over before the event is committed. If they exit early, this step re-runs from scratch.
+
+**DO NOT log the event before step 4.** Explicit approval is the only gate.`;
 
 // ============================================================================
 // TriageResult & TestingLevel — exported for use by Phase1Context

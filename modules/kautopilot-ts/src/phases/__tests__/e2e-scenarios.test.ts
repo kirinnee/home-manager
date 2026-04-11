@@ -247,7 +247,7 @@ describe('E2E Scenario 2: PR flow with contract rewrite and same-PR reuse', () =
       version: 1,
     });
 
-    // Plan 1 hits max_situations → resolve → refine_local
+    // Plan 1 hits max_iterations → resolve → refine_local
     appendEvent(S, {
       ts: '2026-04-01T10:03:00Z',
       event: 'running:started',
@@ -258,7 +258,7 @@ describe('E2E Scenario 2: PR flow with contract rewrite and same-PR reuse', () =
       ts: '2026-04-01T10:10:00Z',
       event: 'running:completed',
       version: 1,
-      metadata: { status: 'max_situations' },
+      metadata: { status: 'max_iterations' },
     });
     appendEvent(S, {
       ts: '2026-04-01T10:10:01Z',
@@ -285,7 +285,7 @@ describe('E2E Scenario 2: PR flow with contract rewrite and same-PR reuse', () =
     });
     appendEvent(S, {
       ts: '2026-04-01T10:11:03Z',
-      event: 'rewrite_spec:started',
+      event: 'amend_plans:started',
       version: 1,
       metadata: { rewriteDecision: 'refine_local' },
     });
@@ -302,7 +302,7 @@ describe('E2E Scenario 2: PR flow with contract rewrite and same-PR reuse', () =
     });
     appendEvent(S, {
       ts: '2026-04-01T10:12:02Z',
-      event: 'rewrite_spec:completed',
+      event: 'amend_plans:completed',
       version: 1,
       metadata: { rewriteDecision: 'refine_local' },
     });
@@ -783,7 +783,7 @@ describe('E2E Scenario 6: Conflict-triggered rewrite flow', () => {
     // patch_downstream rewrites plans 2 and 3 — stays in same epoch
     appendEvent(S, {
       ts: '2026-04-01T10:16:03Z',
-      event: 'rewrite_spec:started',
+      event: 'amend_plans:started',
       version: 1,
       metadata: { rewriteDecision: 'patch_downstream' },
     });
@@ -800,7 +800,7 @@ describe('E2E Scenario 6: Conflict-triggered rewrite flow', () => {
     });
     appendEvent(S, {
       ts: '2026-04-01T10:17:02Z',
-      event: 'rewrite_spec:completed',
+      event: 'amend_plans:completed',
       version: 1,
       metadata: { rewriteDecision: 'patch_downstream' },
     });
@@ -823,11 +823,11 @@ describe('E2E Scenario 6: Conflict-triggered rewrite flow', () => {
 // Scenario 7: Max-situations-triggered rewrite flow
 // ============================================================================
 
-describe('E2E Scenario 7: Max-situations-triggered rewrite → revisit_spec', () => {
-  const S = `e2e-max-sit-rewrite-${Date.now()}`;
+describe('E2E Scenario 7: Max-iterations-triggered rewrite → revisit_spec', () => {
+  const S = `e2e-max-iter-rewrite-${Date.now()}`;
   afterEach(() => cleanSession(S));
 
-  it('max_situations → revisit_spec creates v2 epoch', () => {
+  it('max_iterations → revisit_spec creates v2 epoch', () => {
     writeContractManifest(S, 1, 'pr', 1);
     setupPlans(S, 1, 1);
 
@@ -857,7 +857,7 @@ describe('E2E Scenario 7: Max-situations-triggered rewrite → revisit_spec', ()
       ts: '2026-04-01T10:10:00Z',
       event: 'running:completed',
       version: 1,
-      metadata: { status: 'max_situations' },
+      metadata: { status: 'max_iterations' },
     });
     appendEvent(S, {
       ts: '2026-04-01T10:10:01Z',
@@ -882,29 +882,7 @@ describe('E2E Scenario 7: Max-situations-triggered rewrite → revisit_spec', ()
       version: 1,
       metadata: { reason: 'conflict', rewriteDecision: 'revisit_spec' },
     });
-    appendEvent(S, {
-      ts: '2026-04-01T10:11:03Z',
-      event: 'rewrite_spec:started',
-      version: 1,
-      metadata: { rewriteDecision: 'revisit_spec' },
-    });
-    appendEvent(S, {
-      ts: '2026-04-01T10:12:00Z',
-      event: 'feedback:approved',
-      version: 1,
-    });
-    appendEvent(S, {
-      ts: '2026-04-01T10:12:01Z',
-      event: 'snapshot:created',
-      version: 1,
-      metadata: { type: 'spec', epochVersion: 1, snapshotVersion: 2 },
-    });
-    appendEvent(S, {
-      ts: '2026-04-01T10:12:02Z',
-      event: 'rewrite_spec:completed',
-      version: 1,
-      metadata: { rewriteDecision: 'revisit_spec' },
-    });
+    // revisit_spec bypasses amend_plans — goes directly from resolve to phase 1
 
     let status = ensureStatus(S);
     expect(status.context.rewriteDecision).toBe('revisit_spec');

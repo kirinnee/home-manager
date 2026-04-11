@@ -10,7 +10,7 @@ import { handleCompleted } from './completed';
 import { handleFailed } from './failed';
 import { handleNextPlan } from './next-plan';
 import { handleResolve } from './resolve';
-import { handleRewriteSpec } from './rewrite-spec';
+import { handleAmendPlans } from './amend-plans';
 import { handleRunning } from './running';
 import { handleSetupRun } from './setup-run';
 import { isRewriteDecision, type Phase2Context, type Phase2StateMap } from './types';
@@ -21,7 +21,7 @@ const phase2States: Phase2StateMap = {
   setup_run: handleSetupRun,
   running: handleRunning,
   resolve: handleResolve,
-  rewrite_spec: handleRewriteSpec,
+  amend_plans: handleAmendPlans,
   commit: handleCommit,
   next_plan: handleNextPlan,
   completed: handleCompleted,

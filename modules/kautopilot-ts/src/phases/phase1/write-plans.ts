@@ -13,16 +13,21 @@ import type { Phase1Context } from './types';
  * Non-negotiable mechanics injected by the runner — NOT part of the user-editable prompt.
  * Always prepended so users can freely edit type configs without breaking the pipeline.
  */
-const PLAN_APPROVAL_PROTOCOL = `### Approval Protocol
+const PLAN_APPROVAL_PROTOCOL = `### Interaction Protocol — STRICT
 
-When the user approves the plans, you MUST do these things IN ORDER before exiting:
-1. Write the approval event by running this command:
+Follow this loop for the plans approval:
+
+1. **You suggest first.** Based on your analysis, propose concrete plans — do not open with "what do you want to do?" The user hired you to be proactive.
+2. **Debate with the user.** They will push back, ask questions, suggest alternatives. Iterate until you both agree on the final plans.
+3. **Confirm the final decision.** State clearly what you both agreed on so there is no ambiguity.
+4. **Wait for explicit approval.** The user must say "approve" (or a clear equivalent like "yes approve this"). Ambiguous acknowledgements like "ok", "sounds good", or "sure" are NOT approval — ask for explicit confirmation.
+5. **Only after approval**, run:
    \`kautopilot log-event plans:approved\`
-2. THEN tell the user to /exit
+6. **Only after the event is logged**, tell the user: "All set — type /exit (or Ctrl+C) to continue kautopilot."
 
-**CRITICAL**: Do NOT tell the user to /exit before writing the approval event.
-If the session crashes or the user Ctrl+C's before the approval event is logged,
-the plans will NOT be considered approved and this step will re-run from scratch.`;
+**DO NOT mention /exit before step 6.** Mentioning it earlier makes the user think the session is over before the event is committed. If they exit early, this step re-runs from scratch.
+
+**DO NOT log the event before step 4.** Explicit approval is the only gate.`;
 
 const PLAN_MECHANICS = `## CRITICAL: Plan Writing & Approval Mechanics
 
@@ -69,8 +74,12 @@ This step is COMPULSORY — do not skip it. It creates an audit trail of all pla
 ### Spec Amendment Escalation
 
 If during plan writing you discover the spec is wrong or incomplete:
-1. Log the issue: \`kautopilot log-event spec_amendment:requested --metadata '{"reason": "..."}'\`
-2. Tell the user to /exit — do NOT write plans:approved
+1. **Suggest the escalation** — explain what's wrong with the spec and why plans can't proceed.
+2. **Debate with the user** until they agree the spec needs amendment.
+3. **Wait for explicit approval** — the user must say "approve" before you escalate.
+4. **Only after approval**, log: \`kautopilot log-event spec_amendment:requested --metadata '{"reason": "..."}'\`
+5. **Then** tell the user: "All set — type /exit (or Ctrl+C) to continue kautopilot."
+Do NOT write plans:approved when escalating.
 
 ${PLAN_APPROVAL_PROTOCOL}
 `;

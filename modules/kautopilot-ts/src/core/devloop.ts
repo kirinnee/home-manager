@@ -7,7 +7,7 @@ import type { KloopConfig } from './types';
 
 export interface DevloopRunResult {
   exitCode: number;
-  status: 'completed' | 'max_situations' | 'conflict' | 'crash';
+  status: 'completed' | 'max_iterations' | 'conflict' | 'crash';
   runId?: string;
 }
 
@@ -130,7 +130,7 @@ export async function devloopRun(kloopRunId: string): Promise<DevloopRunResult> 
   const exitCode = await proc.exited;
 
   // Determine status based on exit code and post-run status check
-  // Maps to spec-defined outcomes: completed, max_situations, conflict, crash
+  // Maps to spec-defined outcomes: completed, max_iterations, conflict, crash
   let status: DevloopRunResult['status'];
 
   if (exitCode === 0) {
@@ -150,7 +150,7 @@ export async function devloopRun(kloopRunId: string): Promise<DevloopRunResult> 
  * Query kloop status for a run to determine the actual outcome.
  */
 interface PostRunResult {
-  status: 'completed' | 'max_situations';
+  status: 'completed' | 'max_iterations';
 }
 
 function devloopGetStatus(kloopRunId: string): PostRunResult {
@@ -165,9 +165,9 @@ function devloopGetStatus(kloopRunId: string): PostRunResult {
       const output = proc.stdout.toString().trim();
       const data = JSON.parse(output);
 
-      // kloop may report max_iterations or max_situations
-      if (data.exitReason === 'max_iterations' || data.exitReason === 'max_situations') {
-        return { status: 'max_situations' };
+      // kloop reports max_iterations when the loop hit the iteration limit
+      if (data.exitReason === 'max_iterations') {
+        return { status: 'max_iterations' };
       }
       return { status: 'completed' };
     }

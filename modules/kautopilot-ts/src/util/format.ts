@@ -142,7 +142,7 @@ const STATE_ICONS: Record<string, string> = {
   next_plan: '📑',
   clear_loop: '🧹',
   resolve: '🔓',
-  rewrite_spec: '✏️',
+  amend_plans: '✏️',
 };
 
 /** Get an icon for a state machine state name. */
@@ -163,4 +163,32 @@ export function formatStatus(state: string, running: boolean): string {
 export function formatPhase(phase: string): string {
   if (!phase || phase === 'none') return `${c.dim}—${c.reset}`;
   return `${c.magenta}${phase}${c.reset}`;
+}
+
+// ============================================================================
+// Step line formatting for phase progress display
+// ============================================================================
+
+export function formatStepLine(step: string, status: 'done' | 'active' | 'pending', detail?: string): string {
+  const icon =
+    status === 'done' ? `${c.green}✓${c.reset}` : status === 'active' ? `${c.cyan}→${c.reset}` : `${c.dim}○${c.reset}`;
+  const label =
+    status === 'done'
+      ? `${c.dim}${step}${c.reset}`
+      : status === 'active'
+        ? `${c.bold}${step}${c.reset}`
+        : `${c.dim}${step}${c.reset}`;
+  const detailStr = detail ? `  ${c.dim}${detail}${c.reset}` : '';
+  return ` ${icon} ${label}${detailStr}`;
+}
+
+// ============================================================================
+// Repo parsing
+// ============================================================================
+
+export function parseRepoHost(gitRootHost: string): { platform: string; org: string; repo: string } {
+  // Format: github-{platform}/{org}/{repo}
+  const match = gitRootHost.match(/^(github-[^/]+)\/(.+)\/(.+)$/);
+  if (!match) return { platform: gitRootHost, org: '?', repo: '?' };
+  return { platform: match[1], org: match[2], repo: match[3] };
 }

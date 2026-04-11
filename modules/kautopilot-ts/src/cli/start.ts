@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync } from 'node:fs';
+import { spawnSync as nodeSpawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Command } from 'commander';
 import { sessionDir } from '../core/artifacts';
@@ -12,6 +13,7 @@ import { supersedEpoch } from '../core/manifests';
 import { detectAndRecoverCrash, ensureStatus } from '../core/status';
 import type { Phase } from '../core/types';
 import { PHASE_ALIASES } from '../core/types';
+import { zellijSessionName } from '../core/zellij';
 import { type PhaseResult, runPhase } from '../phases/runner';
 import { logError, logField, logInfo, logWarn } from '../util/format';
 
@@ -26,7 +28,23 @@ export function createStartCommand(): Command {
   return new Command('start')
     .option('--phase <phaseOrStep>', 'Force start at specific phase or step')
     .option('--local', 'Local mode')
-    .action(async (opts: { phase?: string; local?: boolean }) => {
+    .option('--force', 'Bypass lock and running-state guard (use with caution)')
+    .action(async (opts: { phase?: string; local?: boolean; force?: boolean }) => {
+      try {
+        await runStartZellij(opts);
+      } catch (err) {
+        logError(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+    });
+}
+
+export function createInternalStartCommand(): Command {
+  return new Command('internal-start')
+    .option('--phase <phaseOrStep>', 'Force start at specific phase or step')
+    .option('--local', 'Local mode')
+    .option('--force', 'Bypass lock and running-state guard (use with caution)')
+    .action(async (opts: { phase?: string; local?: boolean; force?: boolean }) => {
       try {
         await runStart(opts);
       } catch (err) {
@@ -36,7 +54,124 @@ export function createStartCommand(): Command {
     });
 }
 
-async function runStart(opts: { phase?: string; local?: boolean }): Promise<void> {
+async function runStartZellij(opts: { phase?: string; local?: boolean; force?: boolean }): Promise<void> {
+  // Check if zellij is available
+  const which = Bun.spawnSync(['which', 'zellij']);
+  if (which.exitCode !== 0) {
+    logWarn('zellij not found — running directly without session management');
+    await runStart(opts);
+    return;
+  }
+
+  // Look up session (auto-init if needed, before zellij so init prompts work)
+  const repoPath = getGitRoot();
+  const worktree = getWorktree();
+  let session = getSessionByWorktree(repoPath, worktree);
+
+  if (!session) {
+    logInfo('No session found. Initializing...');
+    const { runInit } = await import('./init');
+    await runInit(undefined, { local: opts.local });
+    session = getSessionByWorktree(repoPath, worktree);
+    if (!session) {
+      logError('Init completed but session not found. Something went wrong.');
+      process.exit(1);
+    }
+  }
+
+  if (session.state === 'init') {
+    logError(
+      `Session ${session.id} has incomplete initialization. ` +
+        `Run \`kautopilot init\` to start a fresh init attempt or \`kautopilot init --reset\` to re-initialize.`,
+    );
+    process.exit(1);
+  }
+
+  const zellijName = zellijSessionName(session.id);
+
+  // Check if zellij session already exists
+  const listResult = Bun.spawnSync(['zellij', 'list-sessions', '-n', '-s']);
+  const zellijSessions = listResult.stdout.toString().trim().split('\n').filter(Boolean);
+  const zellijExists = zellijSessions.includes(zellijName);
+
+  if (zellijExists) {
+    // Check if the internal process is still alive
+    const lockInfo = checkLock(session.id);
+    if (lockInfo.locked) {
+      // PID alive + zellij alive → attach normally
+      logInfo(`Attaching to existing zellij session: ${zellijName}`);
+      const result = nodeSpawnSync('zellij', ['attach', zellijName], {
+        stdio: 'inherit',
+      });
+      process.exit(result.status ?? 1);
+    }
+    // PID dead + zellij alive → checkLock already reaped the orphaned zellij
+    // Fall through to create a fresh session
+    logWarn('Previous session process died — starting fresh.');
+  }
+
+  // Build internal-start args
+  const args = ['internal-start'];
+  if (opts.phase) args.push('--phase', opts.phase);
+  if (opts.local) args.push('--local');
+  if (opts.force) args.push('--force');
+
+  // Write a temporary KDL layout that runs kautopilot internal-start
+  // Use full binary path — zellij panes may not resolve bare commands from PATH
+  const kautopilotBin = Bun.which('kautopilot') ?? 'kautopilot';
+  const sDir = sessionDir(session.id);
+  const layoutPath = join(sDir, 'zellij-layout.kdl');
+  const escapedCwd = session.worktree.replace(/"/g, '\\"');
+  // Wrap in bash so the pane always exists (zellij can't apply close_on_exit if the
+  // command binary itself is not found). bash -c also gives us a visible error on failure.
+  const innerCmd = `${kautopilotBin} internal-start${args.length > 1 ? ` ${args.slice(1).join(' ')}` : ''}`;
+  const escapedCmd = innerCmd.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  // No session_name in layout — session name is set by `zellij attach <name>`
+  const layoutContent = `layout {\n  pane command="bash" cwd="${escapedCwd}" close_on_exit=false {\n    args "-c" "${escapedCmd}"\n  }\n}\n`;
+  writeFileSync(layoutPath, layoutContent);
+
+  // Write a temporary config that uses our layout as the default
+  // This lets `zellij attach --create-background` pick up the layout
+  const configPath = join(sDir, 'zellij-config.kdl');
+  writeFileSync(configPath, `default_layout "${layoutPath}"\n`);
+
+  // Delete any dead/serialized zellij session with the same name
+  Bun.spawnSync(['zellij', 'delete-session', zellijName], {
+    stdout: 'ignore',
+    stderr: 'ignore',
+  });
+
+  // Create session in background (no TTY needed — server-only)
+  logInfo(`Creating zellij session: ${zellijName}`);
+  const createResult = Bun.spawnSync(['zellij', '-c', configPath, 'attach', zellijName, '--create-background'], {
+    cwd: session.worktree,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+
+  // Clean up temp files
+  try {
+    unlinkSync(configPath);
+  } catch {}
+  try {
+    unlinkSync(layoutPath);
+  } catch {}
+
+  if (createResult.exitCode !== 0) {
+    const stderr = createResult.stderr.toString().trim();
+    logError(`Failed to create zellij session: ${stderr || `exit ${createResult.exitCode}`}`);
+    process.exit(1);
+  }
+
+  // Attach to the session — use node:child_process for proper TTY passthrough
+  // (Bun.spawnSync does not correctly forward TTY to interactive programs like zellij)
+  const attachResult = nodeSpawnSync('zellij', ['attach', zellijName], {
+    stdio: 'inherit',
+  });
+  process.exit(attachResult.status ?? 1);
+}
+
+async function runStart(opts: { phase?: string; local?: boolean; force?: boolean }): Promise<void> {
   const repoPath = getGitRoot();
   const worktree = getWorktree();
   let session = getSessionByWorktree(repoPath, worktree);
@@ -67,11 +202,27 @@ async function runStart(opts: { phase?: string; local?: boolean }): Promise<void
   // Crash recovery — detect dead process before checking lock
   detectAndRecoverCrash(session.id, session.worktree, session.ticket_id || 'local');
 
-  // Check lock
-  const lockInfo = checkLock(session.id);
-  if (lockInfo.locked) {
-    logError(`Session is already running (PID ${lockInfo.pid}). Use \`kautopilot stop\` first.`);
-    process.exit(1);
+  // Check lock (unless --force)
+  if (!opts.force) {
+    const lockInfo = checkLock(session.id);
+    if (lockInfo.locked) {
+      logError(
+        `Session is already running (PID ${lockInfo.pid}). Use \`kautopilot stop\` first or \`kautopilot start --force\` to override.`,
+      );
+      process.exit(1);
+    }
+
+    // Re-verify status after crash recovery — ensure status no longer shows running
+    const postRecoveryStatus = ensureStatus(session.id);
+    if (postRecoveryStatus.running) {
+      logError(
+        `Session ${session.id} status still shows running after crash recovery. ` +
+          `This may indicate a race condition. Use \`kautopilot start --force\` to override.`,
+      );
+      process.exit(1);
+    }
+  } else {
+    logWarn('--force: bypassing lock and running-state guard');
   }
 
   // Load config

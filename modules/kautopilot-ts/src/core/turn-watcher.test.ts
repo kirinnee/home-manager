@@ -197,10 +197,25 @@ describe('turn state machine', () => {
     expect(c.state).toBe('llm_thinking');
   });
 
-  test('system/progress/file-history-snapshot entries → no change', () => {
-    for (const type of ['system', 'progress', 'file-history-snapshot', 'last-prompt', 'custom-title', 'agent-name']) {
+  test('system:turn_duration → user_turn', () => {
+    let c = ctx({ state: 'llm_thinking' });
+    c = processEntry(c, { type: 'system', subtype: 'turn_duration', timestamp: '2026-04-08T10:00:00Z' });
+    expect(c.state).toBe('user_turn');
+  });
+
+  test('system (other subtypes) / progress / file-history-snapshot → no change', () => {
+    const entries: ParsedEntry[] = [
+      { type: 'system', timestamp: '2026-04-08T10:00:00Z' },
+      { type: 'system', subtype: 'summary', timestamp: '2026-04-08T10:00:00Z' },
+      { type: 'progress', timestamp: '2026-04-08T10:00:00Z' },
+      { type: 'file-history-snapshot', timestamp: '2026-04-08T10:00:00Z' },
+      { type: 'last-prompt', timestamp: '2026-04-08T10:00:00Z' },
+      { type: 'custom-title', timestamp: '2026-04-08T10:00:00Z' },
+      { type: 'agent-name', timestamp: '2026-04-08T10:00:00Z' },
+    ];
+    for (const entry of entries) {
       let c = ctx({ state: 'llm_thinking' });
-      c = processEntry(c, { type, timestamp: '2026-04-08T10:00:00Z' });
+      c = processEntry(c, entry);
       expect(c.state).toBe('llm_thinking');
     }
   });

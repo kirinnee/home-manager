@@ -1972,67 +1972,10 @@ var init_esm = __esm(() => {
   } = import__.default);
 });
 
-// src/core/artifacts.ts
-var exports_artifacts = {};
-__export(exports_artifacts, {
-  snapshotPath: () => snapshotPath,
-  sessionDir: () => sessionDir,
-  sessionArtifactPath: () => sessionArtifactPath,
-  scopeDir: () => scopeDir,
-  runsDir: () => runsDir,
-  runFilePath: () => runFilePath,
-  runDir: () => runDir,
-  nextRunNumber: () => nextRunNumber,
-  initDir: () => initDir,
-  ensureArtifactDir: () => ensureArtifactDir,
-  artifactPath: () => artifactPath,
-});
-import { mkdirSync, readdirSync } from 'fs';
-import { dirname, join } from 'path';
-function artifactPath(id, version, phase, ...segments) {
-  return `${process.env.HOME}/.kautopilot/${id}/artifacts/v${version}/${phase}/${segments.join('/')}`;
-}
-function snapshotPath(id, version, ...segments) {
-  return `${process.env.HOME}/.kautopilot/${id}/artifacts/v${version}/${segments.join('/')}`;
-}
-function sessionArtifactPath(id, ...segments) {
-  return `${process.env.HOME}/.kautopilot/${id}/artifacts/${segments.join('/')}`;
-}
-function ensureArtifactDir(path) {
-  mkdirSync(dirname(path), { recursive: true });
-}
-function sessionDir(id) {
-  return `${process.env.HOME}/.kautopilot/${id}`;
-}
-function initDir(id) {
-  return `${process.env.HOME}/.kautopilot/init/${id}`;
-}
-function scopeDir(scope) {
-  return scope.kind === 'init' ? initDir(scope.id) : sessionDir(scope.id);
-}
-function runsDir(scope) {
-  return join(scopeDir(scope), 'runs');
-}
-function nextRunNumber(scope) {
-  const dir = runsDir(scope);
-  mkdirSync(dir, { recursive: true });
-  const numbers = readdirSync(dir, { withFileTypes: true })
-    .filter(entry => entry.isDirectory() && /^\d+$/.test(entry.name))
-    .map(entry => Number(entry.name));
-  return numbers.length > 0 ? Math.max(...numbers) + 1 : 1;
-}
-function runDir(scope, runNumber) {
-  return join(runsDir(scope), String(runNumber));
-}
-function runFilePath(scope, runNumber, fileName) {
-  return join(runDir(scope, runNumber), fileName);
-}
-var init_artifacts = () => {};
-
 // src/core/db.ts
 import { Database } from 'bun:sqlite';
-import { mkdirSync as mkdirSync2 } from 'fs';
-import { dirname as dirname2 } from 'path';
+import { mkdirSync } from 'fs';
+import { dirname } from 'path';
 function rowToParams(row) {
   return [
     row.id,
@@ -2050,7 +1993,7 @@ function rowToParams(row) {
 }
 function getDb() {
   if (!db) {
-    mkdirSync2(dirname2(DB_PATH), { recursive: true });
+    mkdirSync(dirname(DB_PATH), { recursive: true });
     db = new Database(DB_PATH);
     db.exec(`
       CREATE TABLE IF NOT EXISTS sessions (
@@ -2120,7 +2063,7 @@ var init_db = __esm(() => {
 });
 
 // src/core/git.ts
-import { dirname as dirname3 } from 'path';
+import { dirname as dirname2 } from 'path';
 function gitSync(args, cwd) {
   const proc = Bun.spawnSync({
     cmd: ['git', ...args],
@@ -2137,7 +2080,7 @@ function gitSync(args, cwd) {
 function getGitRoot(cwd) {
   const result = gitSync(['rev-parse', '--path-format=absolute', '--git-common-dir'], cwd);
   if (result.exitCode !== 0) throw new Error('Not a git repository.');
-  return dirname3(result.stdout);
+  return dirname2(result.stdout);
 }
 function getWorktree(cwd) {
   const result = gitSync(['rev-parse', '--path-format=absolute', '--show-toplevel'], cwd);
@@ -2195,1652 +2138,13 @@ function isOnMain(baseBranch, cwd) {
 }
 var init_git = () => {};
 
-// src/core/zellij.ts
-function zellijSessionName(sessionId) {
-  return `kautopilot-${sessionId}`;
-}
-function isZellijSessionAlive(sessionId) {
-  const name = zellijSessionName(sessionId);
-  try {
-    const result = Bun.spawnSync(['zellij', 'list-sessions', '-n', '-s']);
-    if (result.exitCode !== 0) return false;
-    const sessions = result.stdout
-      .toString()
-      .trim()
-      .split(
-        `
-`,
-      )
-      .filter(Boolean);
-    return sessions.includes(name);
-  } catch {
-    return false;
-  }
-}
-function killZellijSession(sessionId) {
-  const name = zellijSessionName(sessionId);
-  try {
-    const result = Bun.spawnSync(['zellij', 'kill-session', name]);
-    return result.exitCode === 0;
-  } catch {
-    return false;
-  }
-}
-
-// src/core/lock.ts
-import { existsSync, mkdirSync as mkdirSync3, readFileSync, unlinkSync, writeFileSync } from 'fs';
-import { dirname as dirname4 } from 'path';
-function lockPath(id) {
-  return `${process.env.HOME}/.kautopilot/${id}/lock.pid`;
-}
-function isProcessAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function acquireLock(id) {
-  const path = lockPath(id);
-  mkdirSync3(dirname4(path), { recursive: true });
-  if (existsSync(path)) {
-    const existingPid = parseInt(readFileSync(path, 'utf-8').trim(), 10);
-    if (isProcessAlive(existingPid)) {
-      throw new Error(`Session is already running (PID ${existingPid}). Use \`kautopilot stop\` first.`);
-    }
-    console.warn(`Warning: Stale lock detected (PID ${existingPid} not alive). Auto-cleaning.`);
-    unlinkSync(path);
-  }
-  writeFileSync(path, String(process.pid));
-  const cleanup = () => {
-    try {
-      if (existsSync(path)) {
-        const storedPid = readFileSync(path, 'utf-8').trim();
-        if (storedPid === String(process.pid)) {
-          unlinkSync(path);
-        }
-      }
-    } catch {}
-  };
-  process.on('SIGINT', () => {
-    cleanup();
-    process.exit(130);
-  });
-  process.on('SIGTERM', () => {
-    cleanup();
-    process.exit(143);
-  });
-  process.on('exit', cleanup);
-}
-function checkLock(id) {
-  const path = lockPath(id);
-  const zellijAlive = isZellijSessionAlive(id);
-  if (!existsSync(path)) {
-    if (zellijAlive && process.env.ZELLIJ_SESSION_NAME !== zellijSessionName(id)) {
-      console.warn(`Warning: Orphaned zellij session for ${id} (no PID). Reaping.`);
-      killZellijSession(id);
-    }
-    return { locked: false, pid: 0, alive: false, zellijAlive };
-  }
-  const pid = parseInt(readFileSync(path, 'utf-8').trim(), 10);
-  const alive = isProcessAlive(pid);
-  if (!alive) {
-    console.warn(`Warning: Stale lock detected (PID ${pid} not alive). Auto-cleaning.`);
-    try {
-      unlinkSync(path);
-    } catch {}
-    if (zellijAlive && process.env.ZELLIJ_SESSION_NAME !== zellijSessionName(id)) {
-      console.warn(`Warning: Orphaned zellij session for ${id}. Reaping.`);
-      killZellijSession(id);
-    }
-    return { locked: false, pid, alive: false, zellijAlive };
-  }
-  return { locked: true, pid, alive: true, zellijAlive };
-}
-function releaseLock(id) {
-  const path = lockPath(id);
-  try {
-    if (existsSync(path)) {
-      const storedPid = readFileSync(path, 'utf-8').trim();
-      if (storedPid === String(process.pid)) {
-        unlinkSync(path);
-      }
-    }
-  } catch {}
-}
-var init_lock = () => {};
-
-// node_modules/sisteransi/src/index.js
-var require_src = __commonJS((exports, module) => {
-  var ESC = '\x1B';
-  var CSI = `${ESC}[`;
-  var beep = '\x07';
-  var cursor = {
-    to(x, y) {
-      if (!y) return `${CSI}${x + 1}G`;
-      return `${CSI}${y + 1};${x + 1}H`;
-    },
-    move(x, y) {
-      let ret = '';
-      if (x < 0) ret += `${CSI}${-x}D`;
-      else if (x > 0) ret += `${CSI}${x}C`;
-      if (y < 0) ret += `${CSI}${-y}A`;
-      else if (y > 0) ret += `${CSI}${y}B`;
-      return ret;
-    },
-    up: (count = 1) => `${CSI}${count}A`,
-    down: (count = 1) => `${CSI}${count}B`,
-    forward: (count = 1) => `${CSI}${count}C`,
-    backward: (count = 1) => `${CSI}${count}D`,
-    nextLine: (count = 1) => `${CSI}E`.repeat(count),
-    prevLine: (count = 1) => `${CSI}F`.repeat(count),
-    left: `${CSI}G`,
-    hide: `${CSI}?25l`,
-    show: `${CSI}?25h`,
-    save: `${ESC}7`,
-    restore: `${ESC}8`,
-  };
-  var scroll = {
-    up: (count = 1) => `${CSI}S`.repeat(count),
-    down: (count = 1) => `${CSI}T`.repeat(count),
-  };
-  var erase = {
-    screen: `${CSI}2J`,
-    up: (count = 1) => `${CSI}1J`.repeat(count),
-    down: (count = 1) => `${CSI}J`.repeat(count),
-    line: `${CSI}2K`,
-    lineEnd: `${CSI}K`,
-    lineStart: `${CSI}1K`,
-    lines(count) {
-      let clear = '';
-      for (let i = 0; i < count; i++) clear += this.line + (i < count - 1 ? cursor.up() : '');
-      if (count) clear += cursor.left;
-      return clear;
-    },
-  };
-  module.exports = { cursor, scroll, erase, beep };
-});
-
-// node_modules/picocolors/picocolors.js
-var require_picocolors = __commonJS((exports, module) => {
-  var p = process || {};
-  var argv = p.argv || [];
-  var env = p.env || {};
-  var isColorSupported =
-    !(!!env.NO_COLOR || argv.includes('--no-color')) &&
-    (!!env.FORCE_COLOR ||
-      argv.includes('--color') ||
-      p.platform === 'win32' ||
-      ((p.stdout || {}).isTTY && env.TERM !== 'dumb') ||
-      !!env.CI);
-  var formatter =
-    (open, close, replace = open) =>
-    input => {
-      let string = '' + input,
-        index = string.indexOf(close, open.length);
-      return ~index ? open + replaceClose(string, close, replace, index) + close : open + string + close;
-    };
-  var replaceClose = (string, close, replace, index) => {
-    let result = '',
-      cursor = 0;
-    do {
-      result += string.substring(cursor, index) + replace;
-      cursor = index + close.length;
-      index = string.indexOf(close, cursor);
-    } while (~index);
-    return result + string.substring(cursor);
-  };
-  var createColors = (enabled = isColorSupported) => {
-    let f = enabled ? formatter : () => String;
-    return {
-      isColorSupported: enabled,
-      reset: f('\x1B[0m', '\x1B[0m'),
-      bold: f('\x1B[1m', '\x1B[22m', '\x1B[22m\x1B[1m'),
-      dim: f('\x1B[2m', '\x1B[22m', '\x1B[22m\x1B[2m'),
-      italic: f('\x1B[3m', '\x1B[23m'),
-      underline: f('\x1B[4m', '\x1B[24m'),
-      inverse: f('\x1B[7m', '\x1B[27m'),
-      hidden: f('\x1B[8m', '\x1B[28m'),
-      strikethrough: f('\x1B[9m', '\x1B[29m'),
-      black: f('\x1B[30m', '\x1B[39m'),
-      red: f('\x1B[31m', '\x1B[39m'),
-      green: f('\x1B[32m', '\x1B[39m'),
-      yellow: f('\x1B[33m', '\x1B[39m'),
-      blue: f('\x1B[34m', '\x1B[39m'),
-      magenta: f('\x1B[35m', '\x1B[39m'),
-      cyan: f('\x1B[36m', '\x1B[39m'),
-      white: f('\x1B[37m', '\x1B[39m'),
-      gray: f('\x1B[90m', '\x1B[39m'),
-      bgBlack: f('\x1B[40m', '\x1B[49m'),
-      bgRed: f('\x1B[41m', '\x1B[49m'),
-      bgGreen: f('\x1B[42m', '\x1B[49m'),
-      bgYellow: f('\x1B[43m', '\x1B[49m'),
-      bgBlue: f('\x1B[44m', '\x1B[49m'),
-      bgMagenta: f('\x1B[45m', '\x1B[49m'),
-      bgCyan: f('\x1B[46m', '\x1B[49m'),
-      bgWhite: f('\x1B[47m', '\x1B[49m'),
-      blackBright: f('\x1B[90m', '\x1B[39m'),
-      redBright: f('\x1B[91m', '\x1B[39m'),
-      greenBright: f('\x1B[92m', '\x1B[39m'),
-      yellowBright: f('\x1B[93m', '\x1B[39m'),
-      blueBright: f('\x1B[94m', '\x1B[39m'),
-      magentaBright: f('\x1B[95m', '\x1B[39m'),
-      cyanBright: f('\x1B[96m', '\x1B[39m'),
-      whiteBright: f('\x1B[97m', '\x1B[39m'),
-      bgBlackBright: f('\x1B[100m', '\x1B[49m'),
-      bgRedBright: f('\x1B[101m', '\x1B[49m'),
-      bgGreenBright: f('\x1B[102m', '\x1B[49m'),
-      bgYellowBright: f('\x1B[103m', '\x1B[49m'),
-      bgBlueBright: f('\x1B[104m', '\x1B[49m'),
-      bgMagentaBright: f('\x1B[105m', '\x1B[49m'),
-      bgCyanBright: f('\x1B[106m', '\x1B[49m'),
-      bgWhiteBright: f('\x1B[107m', '\x1B[49m'),
-    };
-  };
-  module.exports = createColors();
-  module.exports.createColors = createColors;
-});
-
-// node_modules/@clack/core/dist/index.mjs
-import { stdin as j, stdout as M } from 'process';
-import * as g from 'readline';
-import O from 'readline';
-import { Writable as X } from 'stream';
-function DD({ onlyFirst: e = false } = {}) {
-  const t = [
-    '[\\u001B\\u009B][[\\]()#;?]*(?:(?:(?:(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]+)*|[a-zA-Z\\d]+(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]*)*)?(?:\\u0007|\\u001B\\u005C|\\u009C))',
-    '(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]))',
-  ].join('|');
-  return new RegExp(t, e ? undefined : 'g');
-}
-function P(e) {
-  if (typeof e != 'string') throw new TypeError(`Expected a \`string\`, got \`${typeof e}\``);
-  return e.replace(uD, '');
-}
-function L(e) {
-  return e && e.__esModule && Object.prototype.hasOwnProperty.call(e, 'default') ? e.default : e;
-}
-function p(e, u = {}) {
-  if (typeof e != 'string' || e.length === 0 || ((u = { ambiguousIsNarrow: true, ...u }), (e = P(e)), e.length === 0))
-    return 0;
-  e = e.replace(sD(), '  ');
-  const t = u.ambiguousIsNarrow ? 1 : 2;
-  let F = 0;
-  for (const s of e) {
-    const i = s.codePointAt(0);
-    if (i <= 31 || (i >= 127 && i <= 159) || (i >= 768 && i <= 879)) continue;
-    switch (eD.eastAsianWidth(s)) {
-      case 'F':
-      case 'W':
-        F += 2;
-        break;
-      case 'A':
-        F += t;
-        break;
-      default:
-        F += 1;
-    }
-  }
-  return F;
-}
-function rD() {
-  const e = new Map();
-  for (const [u, t] of Object.entries(r)) {
-    for (const [F, s] of Object.entries(t))
-      ((r[F] = { open: `\x1B[${s[0]}m`, close: `\x1B[${s[1]}m` }), (t[F] = r[F]), e.set(s[0], s[1]));
-    Object.defineProperty(r, u, { value: t, enumerable: false });
-  }
-  return (
-    Object.defineProperty(r, 'codes', { value: e, enumerable: false }),
-    (r.color.close = '\x1B[39m'),
-    (r.bgColor.close = '\x1B[49m'),
-    (r.color.ansi = N()),
-    (r.color.ansi256 = I()),
-    (r.color.ansi16m = R()),
-    (r.bgColor.ansi = N(w)),
-    (r.bgColor.ansi256 = I(w)),
-    (r.bgColor.ansi16m = R(w)),
-    Object.defineProperties(r, {
-      rgbToAnsi256: {
-        value: (u, t, F) =>
-          u === t && t === F
-            ? u < 8
-              ? 16
-              : u > 248
-                ? 231
-                : Math.round(((u - 8) / 247) * 24) + 232
-            : 16 + 36 * Math.round((u / 255) * 5) + 6 * Math.round((t / 255) * 5) + Math.round((F / 255) * 5),
-        enumerable: false,
-      },
-      hexToRgb: {
-        value: u => {
-          const t = /[a-f\d]{6}|[a-f\d]{3}/i.exec(u.toString(16));
-          if (!t) return [0, 0, 0];
-          let [F] = t;
-          F.length === 3 && (F = [...F].map(i => i + i).join(''));
-          const s = Number.parseInt(F, 16);
-          return [(s >> 16) & 255, (s >> 8) & 255, s & 255];
-        },
-        enumerable: false,
-      },
-      hexToAnsi256: { value: u => r.rgbToAnsi256(...r.hexToRgb(u)), enumerable: false },
-      ansi256ToAnsi: {
-        value: u => {
-          if (u < 8) return 30 + u;
-          if (u < 16) return 90 + (u - 8);
-          let t, F, s;
-          if (u >= 232) ((t = ((u - 232) * 10 + 8) / 255), (F = t), (s = t));
-          else {
-            u -= 16;
-            const C = u % 36;
-            ((t = Math.floor(u / 36) / 5), (F = Math.floor(C / 6) / 5), (s = (C % 6) / 5));
-          }
-          const i = Math.max(t, F, s) * 2;
-          if (i === 0) return 30;
-          let D = 30 + ((Math.round(s) << 2) | (Math.round(F) << 1) | Math.round(t));
-          return (i === 2 && (D += 60), D);
-        },
-        enumerable: false,
-      },
-      rgbToAnsi: { value: (u, t, F) => r.ansi256ToAnsi(r.rgbToAnsi256(u, t, F)), enumerable: false },
-      hexToAnsi: { value: u => r.ansi256ToAnsi(r.hexToAnsi256(u)), enumerable: false },
-    }),
-    r
-  );
-}
-function Y(e, u, t) {
-  return String(e)
-    .normalize()
-    .replace(
-      /\r\n/g,
-      `
-`,
-    )
-    .split(
-      `
-`,
-    )
-    .map(F => lD(F, u, t)).join(`
-`);
-}
-function $(e, u) {
-  if (typeof e == 'string') return B.aliases.get(e) === u;
-  for (const t of e) if (t !== undefined && $(t, u)) return true;
-  return false;
-}
-function BD(e, u) {
-  if (e === u) return;
-  const t = e.split(`
-`),
-    F = u.split(`
-`),
-    s = [];
-  for (let i = 0; i < Math.max(t.length, F.length); i++) t[i] !== F[i] && s.push(i);
-  return s;
-}
-function pD(e) {
-  return e === S;
-}
-function m(e, u) {
-  const t = e;
-  t.isTTY && t.setRawMode(u);
-}
-function fD({ input: e = j, output: u = M, overwrite: t = true, hideCursor: F = true } = {}) {
-  const s = g.createInterface({ input: e, output: u, prompt: '', tabSize: 1 });
-  (g.emitKeypressEvents(e, s), e.isTTY && e.setRawMode(true));
-  const i = (D, { name: C, sequence: n }) => {
-    const E = String(D);
-    if ($([E, C, n], 'cancel')) {
-      (F && u.write(import_sisteransi.cursor.show), process.exit(0));
-      return;
-    }
-    if (!t) return;
-    const a = C === 'return' ? 0 : -1,
-      o = C === 'return' ? -1 : 0;
-    g.moveCursor(u, a, o, () => {
-      g.clearLine(u, 1, () => {
-        e.once('keypress', i);
-      });
-    });
-  };
-  return (
-    F && u.write(import_sisteransi.cursor.hide),
-    e.once('keypress', i),
-    () => {
-      (e.off('keypress', i),
-        F && u.write(import_sisteransi.cursor.show),
-        e.isTTY && !AD && e.setRawMode(false),
-        (s.terminal = false),
-        s.close());
-    }
-  );
-}
-
-class x {
-  constructor(u, t = true) {
-    (h(this, 'input'),
-      h(this, 'output'),
-      h(this, '_abortSignal'),
-      h(this, 'rl'),
-      h(this, 'opts'),
-      h(this, '_render'),
-      h(this, '_track', false),
-      h(this, '_prevFrame', ''),
-      h(this, '_subscribers', new Map()),
-      h(this, '_cursor', 0),
-      h(this, 'state', 'initial'),
-      h(this, 'error', ''),
-      h(this, 'value'));
-    const { input: F = j, output: s = M, render: i, signal: D, ...C } = u;
-    ((this.opts = C),
-      (this.onKeypress = this.onKeypress.bind(this)),
-      (this.close = this.close.bind(this)),
-      (this.render = this.render.bind(this)),
-      (this._render = i.bind(this)),
-      (this._track = t),
-      (this._abortSignal = D),
-      (this.input = F),
-      (this.output = s));
-  }
-  unsubscribe() {
-    this._subscribers.clear();
-  }
-  setSubscriber(u, t) {
-    const F = this._subscribers.get(u) ?? [];
-    (F.push(t), this._subscribers.set(u, F));
-  }
-  on(u, t) {
-    this.setSubscriber(u, { cb: t });
-  }
-  once(u, t) {
-    this.setSubscriber(u, { cb: t, once: true });
-  }
-  emit(u, ...t) {
-    const F = this._subscribers.get(u) ?? [],
-      s = [];
-    for (const i of F) (i.cb(...t), i.once && s.push(() => F.splice(F.indexOf(i), 1)));
-    for (const i of s) i();
-  }
-  prompt() {
-    return new Promise((u, t) => {
-      if (this._abortSignal) {
-        if (this._abortSignal.aborted) return ((this.state = 'cancel'), this.close(), u(S));
-        this._abortSignal.addEventListener(
-          'abort',
-          () => {
-            ((this.state = 'cancel'), this.close());
-          },
-          { once: true },
-        );
-      }
-      const F = new X();
-      ((F._write = (s, i, D) => {
-        (this._track &&
-          ((this.value = this.rl?.line.replace(/\t/g, '')),
-          (this._cursor = this.rl?.cursor ?? 0),
-          this.emit('value', this.value)),
-          D());
-      }),
-        this.input.pipe(F),
-        (this.rl = O.createInterface({
-          input: this.input,
-          output: F,
-          tabSize: 2,
-          prompt: '',
-          escapeCodeTimeout: 50,
-          terminal: true,
-        })),
-        O.emitKeypressEvents(this.input, this.rl),
-        this.rl.prompt(),
-        this.opts.initialValue !== undefined && this._track && this.rl.write(this.opts.initialValue),
-        this.input.on('keypress', this.onKeypress),
-        m(this.input, true),
-        this.output.on('resize', this.render),
-        this.render(),
-        this.once('submit', () => {
-          (this.output.write(import_sisteransi.cursor.show),
-            this.output.off('resize', this.render),
-            m(this.input, false),
-            u(this.value));
-        }),
-        this.once('cancel', () => {
-          (this.output.write(import_sisteransi.cursor.show),
-            this.output.off('resize', this.render),
-            m(this.input, false),
-            u(S));
-        }));
-    });
-  }
-  onKeypress(u, t) {
-    if (
-      (this.state === 'error' && (this.state = 'active'),
-      t?.name &&
-        (!this._track && B.aliases.has(t.name) && this.emit('cursor', B.aliases.get(t.name)),
-        B.actions.has(t.name) && this.emit('cursor', t.name)),
-      u && (u.toLowerCase() === 'y' || u.toLowerCase() === 'n') && this.emit('confirm', u.toLowerCase() === 'y'),
-      u === '\t' &&
-        this.opts.placeholder &&
-        (this.value || (this.rl?.write(this.opts.placeholder), this.emit('value', this.opts.placeholder))),
-      u && this.emit('key', u.toLowerCase()),
-      t?.name === 'return')
-    ) {
-      if (this.opts.validate) {
-        const F = this.opts.validate(this.value);
-        F && ((this.error = F instanceof Error ? F.message : F), (this.state = 'error'), this.rl?.write(this.value));
-      }
-      this.state !== 'error' && (this.state = 'submit');
-    }
-    ($([u, t?.name, t?.sequence], 'cancel') && (this.state = 'cancel'),
-      (this.state === 'submit' || this.state === 'cancel') && this.emit('finalize'),
-      this.render(),
-      (this.state === 'submit' || this.state === 'cancel') && this.close());
-  }
-  close() {
-    (this.input.unpipe(),
-      this.input.removeListener('keypress', this.onKeypress),
-      this.output.write(`
-`),
-      m(this.input, false),
-      this.rl?.close(),
-      (this.rl = undefined),
-      this.emit(`${this.state}`, this.value),
-      this.unsubscribe());
-  }
-  restoreCursor() {
-    const u =
-      Y(this._prevFrame, process.stdout.columns, { hard: true }).split(`
-`).length - 1;
-    this.output.write(import_sisteransi.cursor.move(-999, u * -1));
-  }
-  render() {
-    const u = Y(this._render(this) ?? '', process.stdout.columns, { hard: true });
-    if (u !== this._prevFrame) {
-      if (this.state === 'initial') this.output.write(import_sisteransi.cursor.hide);
-      else {
-        const t = BD(this._prevFrame, u);
-        if ((this.restoreCursor(), t && t?.length === 1)) {
-          const F = t[0];
-          (this.output.write(import_sisteransi.cursor.move(0, F)), this.output.write(import_sisteransi.erase.lines(1)));
-          const s = u.split(`
-`);
-          (this.output.write(s[F]),
-            (this._prevFrame = u),
-            this.output.write(import_sisteransi.cursor.move(0, s.length - F - 1)));
-          return;
-        }
-        if (t && t?.length > 1) {
-          const F = t[0];
-          (this.output.write(import_sisteransi.cursor.move(0, F)), this.output.write(import_sisteransi.erase.down()));
-          const s = u
-            .split(
-              `
-`,
-            )
-            .slice(F);
-          (this.output.write(
-            s.join(`
-`),
-          ),
-            (this._prevFrame = u));
-          return;
-        }
-        this.output.write(import_sisteransi.erase.down());
-      }
-      (this.output.write(u), this.state === 'initial' && (this.state = 'active'), (this._prevFrame = u));
-    }
-  }
-}
-var import_sisteransi,
-  import_picocolors,
-  uD,
-  W,
-  tD,
-  eD,
-  FD = function () {
-    return /\uD83C\uDFF4\uDB40\uDC67\uDB40\uDC62(?:\uDB40\uDC77\uDB40\uDC6C\uDB40\uDC73|\uDB40\uDC73\uDB40\uDC63\uDB40\uDC74|\uDB40\uDC65\uDB40\uDC6E\uDB40\uDC67)\uDB40\uDC7F|(?:\uD83E\uDDD1\uD83C\uDFFF\u200D\u2764\uFE0F\u200D(?:\uD83D\uDC8B\u200D)?\uD83E\uDDD1|\uD83D\uDC69\uD83C\uDFFF\u200D\uD83E\uDD1D\u200D(?:\uD83D[\uDC68\uDC69]))(?:\uD83C[\uDFFB-\uDFFE])|(?:\uD83E\uDDD1\uD83C\uDFFE\u200D\u2764\uFE0F\u200D(?:\uD83D\uDC8B\u200D)?\uD83E\uDDD1|\uD83D\uDC69\uD83C\uDFFE\u200D\uD83E\uDD1D\u200D(?:\uD83D[\uDC68\uDC69]))(?:\uD83C[\uDFFB-\uDFFD\uDFFF])|(?:\uD83E\uDDD1\uD83C\uDFFD\u200D\u2764\uFE0F\u200D(?:\uD83D\uDC8B\u200D)?\uD83E\uDDD1|\uD83D\uDC69\uD83C\uDFFD\u200D\uD83E\uDD1D\u200D(?:\uD83D[\uDC68\uDC69]))(?:\uD83C[\uDFFB\uDFFC\uDFFE\uDFFF])|(?:\uD83E\uDDD1\uD83C\uDFFC\u200D\u2764\uFE0F\u200D(?:\uD83D\uDC8B\u200D)?\uD83E\uDDD1|\uD83D\uDC69\uD83C\uDFFC\u200D\uD83E\uDD1D\u200D(?:\uD83D[\uDC68\uDC69]))(?:\uD83C[\uDFFB\uDFFD-\uDFFF])|(?:\uD83E\uDDD1\uD83C\uDFFB\u200D\u2764\uFE0F\u200D(?:\uD83D\uDC8B\u200D)?\uD83E\uDDD1|\uD83D\uDC69\uD83C\uDFFB\u200D\uD83E\uDD1D\u200D(?:\uD83D[\uDC68\uDC69]))(?:\uD83C[\uDFFC-\uDFFF])|\uD83D\uDC68(?:\uD83C\uDFFB(?:\u200D(?:\u2764\uFE0F\u200D(?:\uD83D\uDC8B\u200D\uD83D\uDC68(?:\uD83C[\uDFFB-\uDFFF])|\uD83D\uDC68(?:\uD83C[\uDFFB-\uDFFF]))|\uD83E\uDD1D\u200D\uD83D\uDC68(?:\uD83C[\uDFFC-\uDFFF])|[\u2695\u2696\u2708]\uFE0F|\uD83C[\uDF3E\uDF73\uDF7C\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD]))?|(?:\uD83C[\uDFFC-\uDFFF])\u200D\u2764\uFE0F\u200D(?:\uD83D\uDC8B\u200D\uD83D\uDC68(?:\uD83C[\uDFFB-\uDFFF])|\uD83D\uDC68(?:\uD83C[\uDFFB-\uDFFF]))|\u200D(?:\u2764\uFE0F\u200D(?:\uD83D\uDC8B\u200D)?\uD83D\uDC68|(?:\uD83D[\uDC68\uDC69])\u200D(?:\uD83D\uDC66\u200D\uD83D\uDC66|\uD83D\uDC67\u200D(?:\uD83D[\uDC66\uDC67]))|\uD83D\uDC66\u200D\uD83D\uDC66|\uD83D\uDC67\u200D(?:\uD83D[\uDC66\uDC67])|\uD83C[\uDF3E\uDF73\uDF7C\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFF\u200D(?:\uD83E\uDD1D\u200D\uD83D\uDC68(?:\uD83C[\uDFFB-\uDFFE])|\uD83C[\uDF3E\uDF73\uDF7C\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFE\u200D(?:\uD83E\uDD1D\u200D\uD83D\uDC68(?:\uD83C[\uDFFB-\uDFFD\uDFFF])|\uD83C[\uDF3E\uDF73\uDF7C\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFD\u200D(?:\uD83E\uDD1D\u200D\uD83D\uDC68(?:\uD83C[\uDFFB\uDFFC\uDFFE\uDFFF])|\uD83C[\uDF3E\uDF73\uDF7C\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFC\u200D(?:\uD83E\uDD1D\u200D\uD83D\uDC68(?:\uD83C[\uDFFB\uDFFD-\uDFFF])|\uD83C[\uDF3E\uDF73\uDF7C\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|(?:\uD83C\uDFFF\u200D[\u2695\u2696\u2708]|\uD83C\uDFFE\u200D[\u2695\u2696\u2708]|\uD83C\uDFFD\u200D[\u2695\u2696\u2708]|\uD83C\uDFFC\u200D[\u2695\u2696\u2708]|\u200D[\u2695\u2696\u2708])\uFE0F|\u200D(?:(?:\uD83D[\uDC68\uDC69])\u200D(?:\uD83D[\uDC66\uDC67])|\uD83D[\uDC66\uDC67])|\uD83C\uDFFF|\uD83C\uDFFE|\uD83C\uDFFD|\uD83C\uDFFC)?|(?:\uD83D\uDC69(?:\uD83C\uDFFB\u200D\u2764\uFE0F\u200D(?:\uD83D\uDC8B\u200D(?:\uD83D[\uDC68\uDC69])|\uD83D[\uDC68\uDC69])|(?:\uD83C[\uDFFC-\uDFFF])\u200D\u2764\uFE0F\u200D(?:\uD83D\uDC8B\u200D(?:\uD83D[\uDC68\uDC69])|\uD83D[\uDC68\uDC69]))|\uD83E\uDDD1(?:\uD83C[\uDFFB-\uDFFF])\u200D\uD83E\uDD1D\u200D\uD83E\uDDD1)(?:\uD83C[\uDFFB-\uDFFF])|\uD83D\uDC69\u200D\uD83D\uDC69\u200D(?:\uD83D\uDC66\u200D\uD83D\uDC66|\uD83D\uDC67\u200D(?:\uD83D[\uDC66\uDC67]))|\uD83D\uDC69(?:\u200D(?:\u2764\uFE0F\u200D(?:\uD83D\uDC8B\u200D(?:\uD83D[\uDC68\uDC69])|\uD83D[\uDC68\uDC69])|\uD83C[\uDF3E\uDF73\uDF7C\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFF\u200D(?:\uD83C[\uDF3E\uDF73\uDF7C\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFE\u200D(?:\uD83C[\uDF3E\uDF73\uDF7C\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFD\u200D(?:\uD83C[\uDF3E\uDF73\uDF7C\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFC\u200D(?:\uD83C[\uDF3E\uDF73\uDF7C\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFB\u200D(?:\uD83C[\uDF3E\uDF73\uDF7C\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD]))|\uD83E\uDDD1(?:\u200D(?:\uD83E\uDD1D\u200D\uD83E\uDDD1|\uD83C[\uDF3E\uDF73\uDF7C\uDF84\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFF\u200D(?:\uD83C[\uDF3E\uDF73\uDF7C\uDF84\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFE\u200D(?:\uD83C[\uDF3E\uDF73\uDF7C\uDF84\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFD\u200D(?:\uD83C[\uDF3E\uDF73\uDF7C\uDF84\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFC\u200D(?:\uD83C[\uDF3E\uDF73\uDF7C\uDF84\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFB\u200D(?:\uD83C[\uDF3E\uDF73\uDF7C\uDF84\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD]))|\uD83D\uDC69\u200D\uD83D\uDC66\u200D\uD83D\uDC66|\uD83D\uDC69\u200D\uD83D\uDC69\u200D(?:\uD83D[\uDC66\uDC67])|\uD83D\uDC69\u200D\uD83D\uDC67\u200D(?:\uD83D[\uDC66\uDC67])|(?:\uD83D\uDC41\uFE0F\u200D\uD83D\uDDE8|\uD83E\uDDD1(?:\uD83C\uDFFF\u200D[\u2695\u2696\u2708]|\uD83C\uDFFE\u200D[\u2695\u2696\u2708]|\uD83C\uDFFD\u200D[\u2695\u2696\u2708]|\uD83C\uDFFC\u200D[\u2695\u2696\u2708]|\uD83C\uDFFB\u200D[\u2695\u2696\u2708]|\u200D[\u2695\u2696\u2708])|\uD83D\uDC69(?:\uD83C\uDFFF\u200D[\u2695\u2696\u2708]|\uD83C\uDFFE\u200D[\u2695\u2696\u2708]|\uD83C\uDFFD\u200D[\u2695\u2696\u2708]|\uD83C\uDFFC\u200D[\u2695\u2696\u2708]|\uD83C\uDFFB\u200D[\u2695\u2696\u2708]|\u200D[\u2695\u2696\u2708])|\uD83D\uDE36\u200D\uD83C\uDF2B|\uD83C\uDFF3\uFE0F\u200D\u26A7|\uD83D\uDC3B\u200D\u2744|(?:(?:\uD83C[\uDFC3\uDFC4\uDFCA]|\uD83D[\uDC6E\uDC70\uDC71\uDC73\uDC77\uDC81\uDC82\uDC86\uDC87\uDE45-\uDE47\uDE4B\uDE4D\uDE4E\uDEA3\uDEB4-\uDEB6]|\uD83E[\uDD26\uDD35\uDD37-\uDD39\uDD3D\uDD3E\uDDB8\uDDB9\uDDCD-\uDDCF\uDDD4\uDDD6-\uDDDD])(?:\uD83C[\uDFFB-\uDFFF])|\uD83D\uDC6F|\uD83E[\uDD3C\uDDDE\uDDDF])\u200D[\u2640\u2642]|(?:\u26F9|\uD83C[\uDFCB\uDFCC]|\uD83D\uDD75)(?:\uFE0F|\uD83C[\uDFFB-\uDFFF])\u200D[\u2640\u2642]|\uD83C\uDFF4\u200D\u2620|(?:\uD83C[\uDFC3\uDFC4\uDFCA]|\uD83D[\uDC6E\uDC70\uDC71\uDC73\uDC77\uDC81\uDC82\uDC86\uDC87\uDE45-\uDE47\uDE4B\uDE4D\uDE4E\uDEA3\uDEB4-\uDEB6]|\uD83E[\uDD26\uDD35\uDD37-\uDD39\uDD3D\uDD3E\uDDB8\uDDB9\uDDCD-\uDDCF\uDDD4\uDDD6-\uDDDD])\u200D[\u2640\u2642]|[\xA9\xAE\u203C\u2049\u2122\u2139\u2194-\u2199\u21A9\u21AA\u2328\u23CF\u23ED-\u23EF\u23F1\u23F2\u23F8-\u23FA\u24C2\u25AA\u25AB\u25B6\u25C0\u25FB\u25FC\u2600-\u2604\u260E\u2611\u2618\u2620\u2622\u2623\u2626\u262A\u262E\u262F\u2638-\u263A\u2640\u2642\u265F\u2660\u2663\u2665\u2666\u2668\u267B\u267E\u2692\u2694-\u2697\u2699\u269B\u269C\u26A0\u26A7\u26B0\u26B1\u26C8\u26CF\u26D1\u26D3\u26E9\u26F0\u26F1\u26F4\u26F7\u26F8\u2702\u2708\u2709\u270F\u2712\u2714\u2716\u271D\u2721\u2733\u2734\u2744\u2747\u2763\u27A1\u2934\u2935\u2B05-\u2B07\u3030\u303D\u3297\u3299]|\uD83C[\uDD70\uDD71\uDD7E\uDD7F\uDE02\uDE37\uDF21\uDF24-\uDF2C\uDF36\uDF7D\uDF96\uDF97\uDF99-\uDF9B\uDF9E\uDF9F\uDFCD\uDFCE\uDFD4-\uDFDF\uDFF5\uDFF7]|\uD83D[\uDC3F\uDCFD\uDD49\uDD4A\uDD6F\uDD70\uDD73\uDD76-\uDD79\uDD87\uDD8A-\uDD8D\uDDA5\uDDA8\uDDB1\uDDB2\uDDBC\uDDC2-\uDDC4\uDDD1-\uDDD3\uDDDC-\uDDDE\uDDE1\uDDE3\uDDE8\uDDEF\uDDF3\uDDFA\uDECB\uDECD-\uDECF\uDEE0-\uDEE5\uDEE9\uDEF0\uDEF3])\uFE0F|\uD83C\uDFF3\uFE0F\u200D\uD83C\uDF08|\uD83D\uDC69\u200D\uD83D\uDC67|\uD83D\uDC69\u200D\uD83D\uDC66|\uD83D\uDE35\u200D\uD83D\uDCAB|\uD83D\uDE2E\u200D\uD83D\uDCA8|\uD83D\uDC15\u200D\uD83E\uDDBA|\uD83E\uDDD1(?:\uD83C\uDFFF|\uD83C\uDFFE|\uD83C\uDFFD|\uD83C\uDFFC|\uD83C\uDFFB)?|\uD83D\uDC69(?:\uD83C\uDFFF|\uD83C\uDFFE|\uD83C\uDFFD|\uD83C\uDFFC|\uD83C\uDFFB)?|\uD83C\uDDFD\uD83C\uDDF0|\uD83C\uDDF6\uD83C\uDDE6|\uD83C\uDDF4\uD83C\uDDF2|\uD83D\uDC08\u200D\u2B1B|\u2764\uFE0F\u200D(?:\uD83D\uDD25|\uD83E\uDE79)|\uD83D\uDC41\uFE0F|\uD83C\uDFF3\uFE0F|\uD83C\uDDFF(?:\uD83C[\uDDE6\uDDF2\uDDFC])|\uD83C\uDDFE(?:\uD83C[\uDDEA\uDDF9])|\uD83C\uDDFC(?:\uD83C[\uDDEB\uDDF8])|\uD83C\uDDFB(?:\uD83C[\uDDE6\uDDE8\uDDEA\uDDEC\uDDEE\uDDF3\uDDFA])|\uD83C\uDDFA(?:\uD83C[\uDDE6\uDDEC\uDDF2\uDDF3\uDDF8\uDDFE\uDDFF])|\uD83C\uDDF9(?:\uD83C[\uDDE6\uDDE8\uDDE9\uDDEB-\uDDED\uDDEF-\uDDF4\uDDF7\uDDF9\uDDFB\uDDFC\uDDFF])|\uD83C\uDDF8(?:\uD83C[\uDDE6-\uDDEA\uDDEC-\uDDF4\uDDF7-\uDDF9\uDDFB\uDDFD-\uDDFF])|\uD83C\uDDF7(?:\uD83C[\uDDEA\uDDF4\uDDF8\uDDFA\uDDFC])|\uD83C\uDDF5(?:\uD83C[\uDDE6\uDDEA-\uDDED\uDDF0-\uDDF3\uDDF7-\uDDF9\uDDFC\uDDFE])|\uD83C\uDDF3(?:\uD83C[\uDDE6\uDDE8\uDDEA-\uDDEC\uDDEE\uDDF1\uDDF4\uDDF5\uDDF7\uDDFA\uDDFF])|\uD83C\uDDF2(?:\uD83C[\uDDE6\uDDE8-\uDDED\uDDF0-\uDDFF])|\uD83C\uDDF1(?:\uD83C[\uDDE6-\uDDE8\uDDEE\uDDF0\uDDF7-\uDDFB\uDDFE])|\uD83C\uDDF0(?:\uD83C[\uDDEA\uDDEC-\uDDEE\uDDF2\uDDF3\uDDF5\uDDF7\uDDFC\uDDFE\uDDFF])|\uD83C\uDDEF(?:\uD83C[\uDDEA\uDDF2\uDDF4\uDDF5])|\uD83C\uDDEE(?:\uD83C[\uDDE8-\uDDEA\uDDF1-\uDDF4\uDDF6-\uDDF9])|\uD83C\uDDED(?:\uD83C[\uDDF0\uDDF2\uDDF3\uDDF7\uDDF9\uDDFA])|\uD83C\uDDEC(?:\uD83C[\uDDE6\uDDE7\uDDE9-\uDDEE\uDDF1-\uDDF3\uDDF5-\uDDFA\uDDFC\uDDFE])|\uD83C\uDDEB(?:\uD83C[\uDDEE-\uDDF0\uDDF2\uDDF4\uDDF7])|\uD83C\uDDEA(?:\uD83C[\uDDE6\uDDE8\uDDEA\uDDEC\uDDED\uDDF7-\uDDFA])|\uD83C\uDDE9(?:\uD83C[\uDDEA\uDDEC\uDDEF\uDDF0\uDDF2\uDDF4\uDDFF])|\uD83C\uDDE8(?:\uD83C[\uDDE6\uDDE8\uDDE9\uDDEB-\uDDEE\uDDF0-\uDDF5\uDDF7\uDDFA-\uDDFF])|\uD83C\uDDE7(?:\uD83C[\uDDE6\uDDE7\uDDE9-\uDDEF\uDDF1-\uDDF4\uDDF6-\uDDF9\uDDFB\uDDFC\uDDFE\uDDFF])|\uD83C\uDDE6(?:\uD83C[\uDDE8-\uDDEC\uDDEE\uDDF1\uDDF2\uDDF4\uDDF6-\uDDFA\uDDFC\uDDFD\uDDFF])|[#\*0-9]\uFE0F\u20E3|\u2764\uFE0F|(?:\uD83C[\uDFC3\uDFC4\uDFCA]|\uD83D[\uDC6E\uDC70\uDC71\uDC73\uDC77\uDC81\uDC82\uDC86\uDC87\uDE45-\uDE47\uDE4B\uDE4D\uDE4E\uDEA3\uDEB4-\uDEB6]|\uD83E[\uDD26\uDD35\uDD37-\uDD39\uDD3D\uDD3E\uDDB8\uDDB9\uDDCD-\uDDCF\uDDD4\uDDD6-\uDDDD])(?:\uD83C[\uDFFB-\uDFFF])|(?:\u26F9|\uD83C[\uDFCB\uDFCC]|\uD83D\uDD75)(?:\uFE0F|\uD83C[\uDFFB-\uDFFF])|\uD83C\uDFF4|(?:[\u270A\u270B]|\uD83C[\uDF85\uDFC2\uDFC7]|\uD83D[\uDC42\uDC43\uDC46-\uDC50\uDC66\uDC67\uDC6B-\uDC6D\uDC72\uDC74-\uDC76\uDC78\uDC7C\uDC83\uDC85\uDC8F\uDC91\uDCAA\uDD7A\uDD95\uDD96\uDE4C\uDE4F\uDEC0\uDECC]|\uD83E[\uDD0C\uDD0F\uDD18-\uDD1C\uDD1E\uDD1F\uDD30-\uDD34\uDD36\uDD77\uDDB5\uDDB6\uDDBB\uDDD2\uDDD3\uDDD5])(?:\uD83C[\uDFFB-\uDFFF])|(?:[\u261D\u270C\u270D]|\uD83D[\uDD74\uDD90])(?:\uFE0F|\uD83C[\uDFFB-\uDFFF])|[\u270A\u270B]|\uD83C[\uDF85\uDFC2\uDFC7]|\uD83D[\uDC08\uDC15\uDC3B\uDC42\uDC43\uDC46-\uDC50\uDC66\uDC67\uDC6B-\uDC6D\uDC72\uDC74-\uDC76\uDC78\uDC7C\uDC83\uDC85\uDC8F\uDC91\uDCAA\uDD7A\uDD95\uDD96\uDE2E\uDE35\uDE36\uDE4C\uDE4F\uDEC0\uDECC]|\uD83E[\uDD0C\uDD0F\uDD18-\uDD1C\uDD1E\uDD1F\uDD30-\uDD34\uDD36\uDD77\uDDB5\uDDB6\uDDBB\uDDD2\uDDD3\uDDD5]|\uD83C[\uDFC3\uDFC4\uDFCA]|\uD83D[\uDC6E\uDC70\uDC71\uDC73\uDC77\uDC81\uDC82\uDC86\uDC87\uDE45-\uDE47\uDE4B\uDE4D\uDE4E\uDEA3\uDEB4-\uDEB6]|\uD83E[\uDD26\uDD35\uDD37-\uDD39\uDD3D\uDD3E\uDDB8\uDDB9\uDDCD-\uDDCF\uDDD4\uDDD6-\uDDDD]|\uD83D\uDC6F|\uD83E[\uDD3C\uDDDE\uDDDF]|[\u231A\u231B\u23E9-\u23EC\u23F0\u23F3\u25FD\u25FE\u2614\u2615\u2648-\u2653\u267F\u2693\u26A1\u26AA\u26AB\u26BD\u26BE\u26C4\u26C5\u26CE\u26D4\u26EA\u26F2\u26F3\u26F5\u26FA\u26FD\u2705\u2728\u274C\u274E\u2753-\u2755\u2757\u2795-\u2797\u27B0\u27BF\u2B1B\u2B1C\u2B50\u2B55]|\uD83C[\uDC04\uDCCF\uDD8E\uDD91-\uDD9A\uDE01\uDE1A\uDE2F\uDE32-\uDE36\uDE38-\uDE3A\uDE50\uDE51\uDF00-\uDF20\uDF2D-\uDF35\uDF37-\uDF7C\uDF7E-\uDF84\uDF86-\uDF93\uDFA0-\uDFC1\uDFC5\uDFC6\uDFC8\uDFC9\uDFCF-\uDFD3\uDFE0-\uDFF0\uDFF8-\uDFFF]|\uD83D[\uDC00-\uDC07\uDC09-\uDC14\uDC16-\uDC3A\uDC3C-\uDC3E\uDC40\uDC44\uDC45\uDC51-\uDC65\uDC6A\uDC79-\uDC7B\uDC7D-\uDC80\uDC84\uDC88-\uDC8E\uDC90\uDC92-\uDCA9\uDCAB-\uDCFC\uDCFF-\uDD3D\uDD4B-\uDD4E\uDD50-\uDD67\uDDA4\uDDFB-\uDE2D\uDE2F-\uDE34\uDE37-\uDE44\uDE48-\uDE4A\uDE80-\uDEA2\uDEA4-\uDEB3\uDEB7-\uDEBF\uDEC1-\uDEC5\uDED0-\uDED2\uDED5-\uDED7\uDEEB\uDEEC\uDEF4-\uDEFC\uDFE0-\uDFEB]|\uD83E[\uDD0D\uDD0E\uDD10-\uDD17\uDD1D\uDD20-\uDD25\uDD27-\uDD2F\uDD3A\uDD3F-\uDD45\uDD47-\uDD76\uDD78\uDD7A-\uDDB4\uDDB7\uDDBA\uDDBC-\uDDCB\uDDD0\uDDE0-\uDDFF\uDE70-\uDE74\uDE78-\uDE7A\uDE80-\uDE86\uDE90-\uDEA8\uDEB0-\uDEB6\uDEC0-\uDEC2\uDED0-\uDED6]|(?:[\u231A\u231B\u23E9-\u23EC\u23F0\u23F3\u25FD\u25FE\u2614\u2615\u2648-\u2653\u267F\u2693\u26A1\u26AA\u26AB\u26BD\u26BE\u26C4\u26C5\u26CE\u26D4\u26EA\u26F2\u26F3\u26F5\u26FA\u26FD\u2705\u270A\u270B\u2728\u274C\u274E\u2753-\u2755\u2757\u2795-\u2797\u27B0\u27BF\u2B1B\u2B1C\u2B50\u2B55]|\uD83C[\uDC04\uDCCF\uDD8E\uDD91-\uDD9A\uDDE6-\uDDFF\uDE01\uDE1A\uDE2F\uDE32-\uDE36\uDE38-\uDE3A\uDE50\uDE51\uDF00-\uDF20\uDF2D-\uDF35\uDF37-\uDF7C\uDF7E-\uDF93\uDFA0-\uDFCA\uDFCF-\uDFD3\uDFE0-\uDFF0\uDFF4\uDFF8-\uDFFF]|\uD83D[\uDC00-\uDC3E\uDC40\uDC42-\uDCFC\uDCFF-\uDD3D\uDD4B-\uDD4E\uDD50-\uDD67\uDD7A\uDD95\uDD96\uDDA4\uDDFB-\uDE4F\uDE80-\uDEC5\uDECC\uDED0-\uDED2\uDED5-\uDED7\uDEEB\uDEEC\uDEF4-\uDEFC\uDFE0-\uDFEB]|\uD83E[\uDD0C-\uDD3A\uDD3C-\uDD45\uDD47-\uDD78\uDD7A-\uDDCB\uDDCD-\uDDFF\uDE70-\uDE74\uDE78-\uDE7A\uDE80-\uDE86\uDE90-\uDEA8\uDEB0-\uDEB6\uDEC0-\uDEC2\uDED0-\uDED6])|(?:[#\*0-9\xA9\xAE\u203C\u2049\u2122\u2139\u2194-\u2199\u21A9\u21AA\u231A\u231B\u2328\u23CF\u23E9-\u23F3\u23F8-\u23FA\u24C2\u25AA\u25AB\u25B6\u25C0\u25FB-\u25FE\u2600-\u2604\u260E\u2611\u2614\u2615\u2618\u261D\u2620\u2622\u2623\u2626\u262A\u262E\u262F\u2638-\u263A\u2640\u2642\u2648-\u2653\u265F\u2660\u2663\u2665\u2666\u2668\u267B\u267E\u267F\u2692-\u2697\u2699\u269B\u269C\u26A0\u26A1\u26A7\u26AA\u26AB\u26B0\u26B1\u26BD\u26BE\u26C4\u26C5\u26C8\u26CE\u26CF\u26D1\u26D3\u26D4\u26E9\u26EA\u26F0-\u26F5\u26F7-\u26FA\u26FD\u2702\u2705\u2708-\u270D\u270F\u2712\u2714\u2716\u271D\u2721\u2728\u2733\u2734\u2744\u2747\u274C\u274E\u2753-\u2755\u2757\u2763\u2764\u2795-\u2797\u27A1\u27B0\u27BF\u2934\u2935\u2B05-\u2B07\u2B1B\u2B1C\u2B50\u2B55\u3030\u303D\u3297\u3299]|\uD83C[\uDC04\uDCCF\uDD70\uDD71\uDD7E\uDD7F\uDD8E\uDD91-\uDD9A\uDDE6-\uDDFF\uDE01\uDE02\uDE1A\uDE2F\uDE32-\uDE3A\uDE50\uDE51\uDF00-\uDF21\uDF24-\uDF93\uDF96\uDF97\uDF99-\uDF9B\uDF9E-\uDFF0\uDFF3-\uDFF5\uDFF7-\uDFFF]|\uD83D[\uDC00-\uDCFD\uDCFF-\uDD3D\uDD49-\uDD4E\uDD50-\uDD67\uDD6F\uDD70\uDD73-\uDD7A\uDD87\uDD8A-\uDD8D\uDD90\uDD95\uDD96\uDDA4\uDDA5\uDDA8\uDDB1\uDDB2\uDDBC\uDDC2-\uDDC4\uDDD1-\uDDD3\uDDDC-\uDDDE\uDDE1\uDDE3\uDDE8\uDDEF\uDDF3\uDDFA-\uDE4F\uDE80-\uDEC5\uDECB-\uDED2\uDED5-\uDED7\uDEE0-\uDEE5\uDEE9\uDEEB\uDEEC\uDEF0\uDEF3-\uDEFC\uDFE0-\uDFEB]|\uD83E[\uDD0C-\uDD3A\uDD3C-\uDD45\uDD47-\uDD78\uDD7A-\uDDCB\uDDCD-\uDDFF\uDE70-\uDE74\uDE78-\uDE7A\uDE80-\uDE86\uDE90-\uDEA8\uDEB0-\uDEB6\uDEC0-\uDEC2\uDED0-\uDED6])\uFE0F|(?:[\u261D\u26F9\u270A-\u270D]|\uD83C[\uDF85\uDFC2-\uDFC4\uDFC7\uDFCA-\uDFCC]|\uD83D[\uDC42\uDC43\uDC46-\uDC50\uDC66-\uDC78\uDC7C\uDC81-\uDC83\uDC85-\uDC87\uDC8F\uDC91\uDCAA\uDD74\uDD75\uDD7A\uDD90\uDD95\uDD96\uDE45-\uDE47\uDE4B-\uDE4F\uDEA3\uDEB4-\uDEB6\uDEC0\uDECC]|\uD83E[\uDD0C\uDD0F\uDD18-\uDD1F\uDD26\uDD30-\uDD39\uDD3C-\uDD3E\uDD77\uDDB5\uDDB6\uDDB8\uDDB9\uDDBB\uDDCD-\uDDCF\uDDD1-\uDDDD])/g;
-  },
-  sD,
-  w = 10,
-  N =
-    (e = 0) =>
-    u =>
-      `\x1B[${u + e}m`,
-  I =
-    (e = 0) =>
-    u =>
-      `\x1B[${38 + e};5;${u}m`,
-  R =
-    (e = 0) =>
-    (u, t, F) =>
-      `\x1B[${38 + e};2;${u};${t};${F}m`,
-  r,
-  iD,
-  CD,
-  ED,
-  d,
-  oD = 39,
-  y = '\x07',
-  V = '[',
-  nD = ']',
-  G = 'm',
-  _,
-  z = e => `${d.values().next().value}${V}${e}${G}`,
-  K = e => `${d.values().next().value}${_}${e}${y}`,
-  aD = e => e.split(' ').map(u => p(u)),
-  k = (e, u, t) => {
-    const F = [...u];
-    let s = false,
-      i = false,
-      D = p(P(e[e.length - 1]));
-    for (const [C, n] of F.entries()) {
-      const E = p(n);
-      if (
-        (D + E <= t ? (e[e.length - 1] += n) : (e.push(n), (D = 0)),
-        d.has(n) &&
-          ((s = true),
-          (i = F.slice(C + 1)
-            .join('')
-            .startsWith(_))),
-        s)
-      ) {
-        i ? n === y && ((s = false), (i = false)) : n === G && (s = false);
-        continue;
-      }
-      ((D += E), D === t && C < F.length - 1 && (e.push(''), (D = 0)));
-    }
-    !D && e[e.length - 1].length > 0 && e.length > 1 && (e[e.length - 2] += e.pop());
-  },
-  hD = e => {
-    const u = e.split(' ');
-    let t = u.length;
-    for (; t > 0 && !(p(u[t - 1]) > 0); ) t--;
-    return t === u.length ? e : u.slice(0, t).join(' ') + u.slice(t).join('');
-  },
-  lD = (e, u, t = {}) => {
-    if (t.trim !== false && e.trim() === '') return '';
-    let F = '',
-      s,
-      i;
-    const D = aD(e);
-    let C = [''];
-    for (const [E, a] of e.split(' ').entries()) {
-      t.trim !== false && (C[C.length - 1] = C[C.length - 1].trimStart());
-      let o = p(C[C.length - 1]);
-      if (
-        (E !== 0 &&
-          (o >= u && (t.wordWrap === false || t.trim === false) && (C.push(''), (o = 0)),
-          (o > 0 || t.trim === false) && ((C[C.length - 1] += ' '), o++)),
-        t.hard && D[E] > u)
-      ) {
-        const c = u - o,
-          f = 1 + Math.floor((D[E] - c - 1) / u);
-        (Math.floor((D[E] - 1) / u) < f && C.push(''), k(C, a, u));
-        continue;
-      }
-      if (o + D[E] > u && o > 0 && D[E] > 0) {
-        if (t.wordWrap === false && o < u) {
-          k(C, a, u);
-          continue;
-        }
-        C.push('');
-      }
-      if (o + D[E] > u && t.wordWrap === false) {
-        k(C, a, u);
-        continue;
-      }
-      C[C.length - 1] += a;
-    }
-    t.trim !== false && (C = C.map(E => hD(E)));
-    const n = [
-      ...C.join(`
-`),
-    ];
-    for (const [E, a] of n.entries()) {
-      if (((F += a), d.has(a))) {
-        const { groups: c } = new RegExp(`(?:\\${V}(?<code>\\d+)m|\\${_}(?<uri>.*)${y})`).exec(n.slice(E).join('')) || {
-          groups: {},
-        };
-        if (c.code !== undefined) {
-          const f = Number.parseFloat(c.code);
-          s = f === oD ? undefined : f;
-        } else c.uri !== undefined && (i = c.uri.length === 0 ? undefined : c.uri);
-      }
-      const o = ED.codes.get(Number(s));
-      n[E + 1] ===
-      `
-`
-        ? (i && (F += K('')), s && o && (F += z(o)))
-        : a ===
-            `
-` && (s && o && (F += z(s)), i && (F += K(i)));
-    }
-    return F;
-  },
-  xD,
-  B,
-  AD,
-  S,
-  gD,
-  vD = (e, u, t) =>
-    u in e ? gD(e, u, { enumerable: true, configurable: true, writable: true, value: t }) : (e[u] = t),
-  h = (e, u, t) => (vD(e, typeof u != 'symbol' ? u + '' : u, t), t),
-  dD,
-  A,
-  OD,
-  PD = (e, u, t) =>
-    u in e ? OD(e, u, { enumerable: true, configurable: true, writable: true, value: t }) : (e[u] = t),
-  J = (e, u, t) => (PD(e, typeof u != 'symbol' ? u + '' : u, t), t),
-  LD,
-  RD;
-var init_dist = __esm(() => {
-  import_sisteransi = __toESM(require_src(), 1);
-  import_picocolors = __toESM(require_picocolors(), 1);
-  uD = DD();
-  W = { exports: {} };
-  (function (e) {
-    var u = {};
-    ((e.exports = u),
-      (u.eastAsianWidth = function (F) {
-        var s = F.charCodeAt(0),
-          i = F.length == 2 ? F.charCodeAt(1) : 0,
-          D = s;
-        return (
-          55296 <= s &&
-            s <= 56319 &&
-            56320 <= i &&
-            i <= 57343 &&
-            ((s &= 1023), (i &= 1023), (D = (s << 10) | i), (D += 65536)),
-          D == 12288 || (65281 <= D && D <= 65376) || (65504 <= D && D <= 65510)
-            ? 'F'
-            : D == 8361 ||
-                (65377 <= D && D <= 65470) ||
-                (65474 <= D && D <= 65479) ||
-                (65482 <= D && D <= 65487) ||
-                (65490 <= D && D <= 65495) ||
-                (65498 <= D && D <= 65500) ||
-                (65512 <= D && D <= 65518)
-              ? 'H'
-              : (4352 <= D && D <= 4447) ||
-                  (4515 <= D && D <= 4519) ||
-                  (4602 <= D && D <= 4607) ||
-                  (9001 <= D && D <= 9002) ||
-                  (11904 <= D && D <= 11929) ||
-                  (11931 <= D && D <= 12019) ||
-                  (12032 <= D && D <= 12245) ||
-                  (12272 <= D && D <= 12283) ||
-                  (12289 <= D && D <= 12350) ||
-                  (12353 <= D && D <= 12438) ||
-                  (12441 <= D && D <= 12543) ||
-                  (12549 <= D && D <= 12589) ||
-                  (12593 <= D && D <= 12686) ||
-                  (12688 <= D && D <= 12730) ||
-                  (12736 <= D && D <= 12771) ||
-                  (12784 <= D && D <= 12830) ||
-                  (12832 <= D && D <= 12871) ||
-                  (12880 <= D && D <= 13054) ||
-                  (13056 <= D && D <= 19903) ||
-                  (19968 <= D && D <= 42124) ||
-                  (42128 <= D && D <= 42182) ||
-                  (43360 <= D && D <= 43388) ||
-                  (44032 <= D && D <= 55203) ||
-                  (55216 <= D && D <= 55238) ||
-                  (55243 <= D && D <= 55291) ||
-                  (63744 <= D && D <= 64255) ||
-                  (65040 <= D && D <= 65049) ||
-                  (65072 <= D && D <= 65106) ||
-                  (65108 <= D && D <= 65126) ||
-                  (65128 <= D && D <= 65131) ||
-                  (110592 <= D && D <= 110593) ||
-                  (127488 <= D && D <= 127490) ||
-                  (127504 <= D && D <= 127546) ||
-                  (127552 <= D && D <= 127560) ||
-                  (127568 <= D && D <= 127569) ||
-                  (131072 <= D && D <= 194367) ||
-                  (177984 <= D && D <= 196605) ||
-                  (196608 <= D && D <= 262141)
-                ? 'W'
-                : (32 <= D && D <= 126) ||
-                    (162 <= D && D <= 163) ||
-                    (165 <= D && D <= 166) ||
-                    D == 172 ||
-                    D == 175 ||
-                    (10214 <= D && D <= 10221) ||
-                    (10629 <= D && D <= 10630)
-                  ? 'Na'
-                  : D == 161 ||
-                      D == 164 ||
-                      (167 <= D && D <= 168) ||
-                      D == 170 ||
-                      (173 <= D && D <= 174) ||
-                      (176 <= D && D <= 180) ||
-                      (182 <= D && D <= 186) ||
-                      (188 <= D && D <= 191) ||
-                      D == 198 ||
-                      D == 208 ||
-                      (215 <= D && D <= 216) ||
-                      (222 <= D && D <= 225) ||
-                      D == 230 ||
-                      (232 <= D && D <= 234) ||
-                      (236 <= D && D <= 237) ||
-                      D == 240 ||
-                      (242 <= D && D <= 243) ||
-                      (247 <= D && D <= 250) ||
-                      D == 252 ||
-                      D == 254 ||
-                      D == 257 ||
-                      D == 273 ||
-                      D == 275 ||
-                      D == 283 ||
-                      (294 <= D && D <= 295) ||
-                      D == 299 ||
-                      (305 <= D && D <= 307) ||
-                      D == 312 ||
-                      (319 <= D && D <= 322) ||
-                      D == 324 ||
-                      (328 <= D && D <= 331) ||
-                      D == 333 ||
-                      (338 <= D && D <= 339) ||
-                      (358 <= D && D <= 359) ||
-                      D == 363 ||
-                      D == 462 ||
-                      D == 464 ||
-                      D == 466 ||
-                      D == 468 ||
-                      D == 470 ||
-                      D == 472 ||
-                      D == 474 ||
-                      D == 476 ||
-                      D == 593 ||
-                      D == 609 ||
-                      D == 708 ||
-                      D == 711 ||
-                      (713 <= D && D <= 715) ||
-                      D == 717 ||
-                      D == 720 ||
-                      (728 <= D && D <= 731) ||
-                      D == 733 ||
-                      D == 735 ||
-                      (768 <= D && D <= 879) ||
-                      (913 <= D && D <= 929) ||
-                      (931 <= D && D <= 937) ||
-                      (945 <= D && D <= 961) ||
-                      (963 <= D && D <= 969) ||
-                      D == 1025 ||
-                      (1040 <= D && D <= 1103) ||
-                      D == 1105 ||
-                      D == 8208 ||
-                      (8211 <= D && D <= 8214) ||
-                      (8216 <= D && D <= 8217) ||
-                      (8220 <= D && D <= 8221) ||
-                      (8224 <= D && D <= 8226) ||
-                      (8228 <= D && D <= 8231) ||
-                      D == 8240 ||
-                      (8242 <= D && D <= 8243) ||
-                      D == 8245 ||
-                      D == 8251 ||
-                      D == 8254 ||
-                      D == 8308 ||
-                      D == 8319 ||
-                      (8321 <= D && D <= 8324) ||
-                      D == 8364 ||
-                      D == 8451 ||
-                      D == 8453 ||
-                      D == 8457 ||
-                      D == 8467 ||
-                      D == 8470 ||
-                      (8481 <= D && D <= 8482) ||
-                      D == 8486 ||
-                      D == 8491 ||
-                      (8531 <= D && D <= 8532) ||
-                      (8539 <= D && D <= 8542) ||
-                      (8544 <= D && D <= 8555) ||
-                      (8560 <= D && D <= 8569) ||
-                      D == 8585 ||
-                      (8592 <= D && D <= 8601) ||
-                      (8632 <= D && D <= 8633) ||
-                      D == 8658 ||
-                      D == 8660 ||
-                      D == 8679 ||
-                      D == 8704 ||
-                      (8706 <= D && D <= 8707) ||
-                      (8711 <= D && D <= 8712) ||
-                      D == 8715 ||
-                      D == 8719 ||
-                      D == 8721 ||
-                      D == 8725 ||
-                      D == 8730 ||
-                      (8733 <= D && D <= 8736) ||
-                      D == 8739 ||
-                      D == 8741 ||
-                      (8743 <= D && D <= 8748) ||
-                      D == 8750 ||
-                      (8756 <= D && D <= 8759) ||
-                      (8764 <= D && D <= 8765) ||
-                      D == 8776 ||
-                      D == 8780 ||
-                      D == 8786 ||
-                      (8800 <= D && D <= 8801) ||
-                      (8804 <= D && D <= 8807) ||
-                      (8810 <= D && D <= 8811) ||
-                      (8814 <= D && D <= 8815) ||
-                      (8834 <= D && D <= 8835) ||
-                      (8838 <= D && D <= 8839) ||
-                      D == 8853 ||
-                      D == 8857 ||
-                      D == 8869 ||
-                      D == 8895 ||
-                      D == 8978 ||
-                      (9312 <= D && D <= 9449) ||
-                      (9451 <= D && D <= 9547) ||
-                      (9552 <= D && D <= 9587) ||
-                      (9600 <= D && D <= 9615) ||
-                      (9618 <= D && D <= 9621) ||
-                      (9632 <= D && D <= 9633) ||
-                      (9635 <= D && D <= 9641) ||
-                      (9650 <= D && D <= 9651) ||
-                      (9654 <= D && D <= 9655) ||
-                      (9660 <= D && D <= 9661) ||
-                      (9664 <= D && D <= 9665) ||
-                      (9670 <= D && D <= 9672) ||
-                      D == 9675 ||
-                      (9678 <= D && D <= 9681) ||
-                      (9698 <= D && D <= 9701) ||
-                      D == 9711 ||
-                      (9733 <= D && D <= 9734) ||
-                      D == 9737 ||
-                      (9742 <= D && D <= 9743) ||
-                      (9748 <= D && D <= 9749) ||
-                      D == 9756 ||
-                      D == 9758 ||
-                      D == 9792 ||
-                      D == 9794 ||
-                      (9824 <= D && D <= 9825) ||
-                      (9827 <= D && D <= 9829) ||
-                      (9831 <= D && D <= 9834) ||
-                      (9836 <= D && D <= 9837) ||
-                      D == 9839 ||
-                      (9886 <= D && D <= 9887) ||
-                      (9918 <= D && D <= 9919) ||
-                      (9924 <= D && D <= 9933) ||
-                      (9935 <= D && D <= 9953) ||
-                      D == 9955 ||
-                      (9960 <= D && D <= 9983) ||
-                      D == 10045 ||
-                      D == 10071 ||
-                      (10102 <= D && D <= 10111) ||
-                      (11093 <= D && D <= 11097) ||
-                      (12872 <= D && D <= 12879) ||
-                      (57344 <= D && D <= 63743) ||
-                      (65024 <= D && D <= 65039) ||
-                      D == 65533 ||
-                      (127232 <= D && D <= 127242) ||
-                      (127248 <= D && D <= 127277) ||
-                      (127280 <= D && D <= 127337) ||
-                      (127344 <= D && D <= 127386) ||
-                      (917760 <= D && D <= 917999) ||
-                      (983040 <= D && D <= 1048573) ||
-                      (1048576 <= D && D <= 1114109)
-                    ? 'A'
-                    : 'N'
-        );
-      }),
-      (u.characterLength = function (F) {
-        var s = this.eastAsianWidth(F);
-        return s == 'F' || s == 'W' || s == 'A' ? 2 : 1;
-      }));
-    function t(F) {
-      return F.match(/[\uD800-\uDBFF][\uDC00-\uDFFF]|[^\uD800-\uDFFF]/g) || [];
-    }
-    ((u.length = function (F) {
-      for (var s = t(F), i = 0, D = 0; D < s.length; D++) i = i + this.characterLength(s[D]);
-      return i;
-    }),
-      (u.slice = function (F, s, i) {
-        ((textLen = u.length(F)), (s = s || 0), (i = i || 1), s < 0 && (s = textLen + s), i < 0 && (i = textLen + i));
-        for (var D = '', C = 0, n = t(F), E = 0; E < n.length; E++) {
-          var a = n[E],
-            o = u.length(a);
-          if (C >= s - (o == 2 ? 1 : 0))
-            if (C + o <= i) D += a;
-            else break;
-          C += o;
-        }
-        return D;
-      }));
-  })(W);
-  tD = W.exports;
-  eD = L(tD);
-  sD = L(FD);
-  r = {
-    modifier: {
-      reset: [0, 0],
-      bold: [1, 22],
-      dim: [2, 22],
-      italic: [3, 23],
-      underline: [4, 24],
-      overline: [53, 55],
-      inverse: [7, 27],
-      hidden: [8, 28],
-      strikethrough: [9, 29],
-    },
-    color: {
-      black: [30, 39],
-      red: [31, 39],
-      green: [32, 39],
-      yellow: [33, 39],
-      blue: [34, 39],
-      magenta: [35, 39],
-      cyan: [36, 39],
-      white: [37, 39],
-      blackBright: [90, 39],
-      gray: [90, 39],
-      grey: [90, 39],
-      redBright: [91, 39],
-      greenBright: [92, 39],
-      yellowBright: [93, 39],
-      blueBright: [94, 39],
-      magentaBright: [95, 39],
-      cyanBright: [96, 39],
-      whiteBright: [97, 39],
-    },
-    bgColor: {
-      bgBlack: [40, 49],
-      bgRed: [41, 49],
-      bgGreen: [42, 49],
-      bgYellow: [43, 49],
-      bgBlue: [44, 49],
-      bgMagenta: [45, 49],
-      bgCyan: [46, 49],
-      bgWhite: [47, 49],
-      bgBlackBright: [100, 49],
-      bgGray: [100, 49],
-      bgGrey: [100, 49],
-      bgRedBright: [101, 49],
-      bgGreenBright: [102, 49],
-      bgYellowBright: [103, 49],
-      bgBlueBright: [104, 49],
-      bgMagentaBright: [105, 49],
-      bgCyanBright: [106, 49],
-      bgWhiteBright: [107, 49],
-    },
-  };
-  Object.keys(r.modifier);
-  iD = Object.keys(r.color);
-  CD = Object.keys(r.bgColor);
-  [...iD, ...CD];
-  ED = rD();
-  d = new Set(['\x1B', '\x9B']);
-  _ = `${nD}8;;`;
-  xD = ['up', 'down', 'left', 'right', 'space', 'enter', 'cancel'];
-  B = {
-    actions: new Set(xD),
-    aliases: new Map([
-      ['k', 'up'],
-      ['j', 'down'],
-      ['h', 'left'],
-      ['l', 'right'],
-      ['\x03', 'cancel'],
-      ['escape', 'cancel'],
-    ]),
-  };
-  AD = globalThis.process.platform.startsWith('win');
-  S = Symbol('clack:cancel');
-  gD = Object.defineProperty;
-  dD = class dD extends x {
-    get cursor() {
-      return this.value ? 0 : 1;
-    }
-    get _value() {
-      return this.cursor === 0;
-    }
-    constructor(u) {
-      (super(u, false),
-        (this.value = !!u.initialValue),
-        this.on('value', () => {
-          this.value = this._value;
-        }),
-        this.on('confirm', t => {
-          (this.output.write(import_sisteransi.cursor.move(0, -1)),
-            (this.value = t),
-            (this.state = 'submit'),
-            this.close());
-        }),
-        this.on('cursor', () => {
-          this.value = !this.value;
-        }));
-    }
-  };
-  A = new WeakMap();
-  OD = Object.defineProperty;
-  LD = class LD extends x {
-    constructor(u) {
-      (super(u, false),
-        J(this, 'options'),
-        J(this, 'cursor', 0),
-        (this.options = u.options),
-        (this.cursor = this.options.findIndex(({ value: t }) => t === u.initialValue)),
-        this.cursor === -1 && (this.cursor = 0),
-        this.changeValue(),
-        this.on('cursor', t => {
-          switch (t) {
-            case 'left':
-            case 'up':
-              this.cursor = this.cursor === 0 ? this.options.length - 1 : this.cursor - 1;
-              break;
-            case 'down':
-            case 'right':
-              this.cursor = this.cursor === this.options.length - 1 ? 0 : this.cursor + 1;
-              break;
-          }
-          this.changeValue();
-        }));
-    }
-    get _value() {
-      return this.options[this.cursor];
-    }
-    changeValue() {
-      this.value = this._value.value;
-    }
-  };
-  RD = class RD extends x {
-    get valueWithCursor() {
-      if (this.state === 'submit') return this.value;
-      if (this.cursor >= this.value.length) return `${this.value}\u2588`;
-      const u = this.value.slice(0, this.cursor),
-        [t, ...F] = this.value.slice(this.cursor);
-      return `${u}${import_picocolors.default.inverse(t)}${F.join('')}`;
-    }
-    get cursor() {
-      return this._cursor;
-    }
-    constructor(u) {
-      (super(u),
-        this.on('finalize', () => {
-          this.value || (this.value = u.defaultValue);
-        }));
-    }
-  };
-});
-
-// node_modules/@clack/prompts/dist/index.mjs
-import y2 from 'process';
-function ce() {
-  return y2.platform !== 'win32'
-    ? y2.env.TERM !== 'linux'
-    : !!y2.env.CI ||
-        !!y2.env.WT_SESSION ||
-        !!y2.env.TERMINUS_SUBLIME ||
-        y2.env.ConEmuTask === '{cmd::Cmder}' ||
-        y2.env.TERM_PROGRAM === 'Terminus-Sublime' ||
-        y2.env.TERM_PROGRAM === 'vscode' ||
-        y2.env.TERM === 'xterm-256color' ||
-        y2.env.TERM === 'alacritty' ||
-        y2.env.TERMINAL_EMULATOR === 'JetBrains-JediTerm';
-}
-var import_picocolors2,
-  import_sisteransi2,
-  V2,
-  u = (t, n) => (V2 ? t : n),
-  le,
-  L2,
-  W2,
-  C,
-  ue,
-  o,
-  d2,
-  k2,
-  P2,
-  A2,
-  T,
-  F,
-  $e,
-  _2,
-  me,
-  de,
-  pe,
-  q,
-  D,
-  U,
-  K2,
-  b2 = t => {
-    switch (t) {
-      case 'initial':
-      case 'active':
-        return import_picocolors2.default.cyan(le);
-      case 'cancel':
-        return import_picocolors2.default.red(L2);
-      case 'error':
-        return import_picocolors2.default.yellow(W2);
-      case 'submit':
-        return import_picocolors2.default.green(C);
-    }
-  },
-  G2 = t => {
-    const { cursor: n, options: r2, style: i } = t,
-      s = t.maxItems ?? Number.POSITIVE_INFINITY,
-      c = Math.max(process.stdout.rows - 4, 0),
-      a = Math.min(c, Math.max(s, 5));
-    let l2 = 0;
-    n >= l2 + a - 3 ? (l2 = Math.max(Math.min(n - a + 3, r2.length - a), 0)) : n < l2 + 2 && (l2 = Math.max(n - 2, 0));
-    const $2 = a < r2.length && l2 > 0,
-      g2 = a < r2.length && l2 + a < r2.length;
-    return r2.slice(l2, l2 + a).map((p2, v2, f) => {
-      const j2 = v2 === 0 && $2,
-        E = v2 === f.length - 1 && g2;
-      return j2 || E ? import_picocolors2.default.dim('...') : i(p2, v2 + l2 === n);
-    });
-  },
-  he = t =>
-    new RD({
-      validate: t.validate,
-      placeholder: t.placeholder,
-      defaultValue: t.defaultValue,
-      initialValue: t.initialValue,
-      render() {
-        const n = `${import_picocolors2.default.gray(o)}
-${b2(this.state)}  ${t.message}
-`,
-          r2 = t.placeholder
-            ? import_picocolors2.default.inverse(t.placeholder[0]) +
-              import_picocolors2.default.dim(t.placeholder.slice(1))
-            : import_picocolors2.default.inverse(import_picocolors2.default.hidden('_')),
-          i = this.value ? this.valueWithCursor : r2;
-        switch (this.state) {
-          case 'error':
-            return `${n.trim()}
-${import_picocolors2.default.yellow(o)}  ${i}
-${import_picocolors2.default.yellow(d2)}  ${import_picocolors2.default.yellow(this.error)}
-`;
-          case 'submit':
-            return `${n}${import_picocolors2.default.gray(o)}  ${import_picocolors2.default.dim(this.value || t.placeholder)}`;
-          case 'cancel':
-            return `${n}${import_picocolors2.default.gray(o)}  ${import_picocolors2.default.strikethrough(import_picocolors2.default.dim(this.value ?? ''))}${
-              this.value?.trim()
-                ? `
-${import_picocolors2.default.gray(o)}`
-                : ''
-            }`;
-          default:
-            return `${n}${import_picocolors2.default.cyan(o)}  ${i}
-${import_picocolors2.default.cyan(d2)}
-`;
-        }
-      },
-    }).prompt(),
-  ye = t => {
-    const n = t.active ?? 'Yes',
-      r2 = t.inactive ?? 'No';
-    return new dD({
-      active: n,
-      inactive: r2,
-      initialValue: t.initialValue ?? true,
-      render() {
-        const i = `${import_picocolors2.default.gray(o)}
-${b2(this.state)}  ${t.message}
-`,
-          s = this.value ? n : r2;
-        switch (this.state) {
-          case 'submit':
-            return `${i}${import_picocolors2.default.gray(o)}  ${import_picocolors2.default.dim(s)}`;
-          case 'cancel':
-            return `${i}${import_picocolors2.default.gray(o)}  ${import_picocolors2.default.strikethrough(import_picocolors2.default.dim(s))}
-${import_picocolors2.default.gray(o)}`;
-          default:
-            return `${i}${import_picocolors2.default.cyan(o)}  ${this.value ? `${import_picocolors2.default.green(k2)} ${n}` : `${import_picocolors2.default.dim(P2)} ${import_picocolors2.default.dim(n)}`} ${import_picocolors2.default.dim('/')} ${this.value ? `${import_picocolors2.default.dim(P2)} ${import_picocolors2.default.dim(r2)}` : `${import_picocolors2.default.green(k2)} ${r2}`}
-${import_picocolors2.default.cyan(d2)}
-`;
-        }
-      },
-    }).prompt();
-  },
-  ve = t => {
-    const n = (r2, i) => {
-      const s = r2.label ?? String(r2.value);
-      switch (i) {
-        case 'selected':
-          return `${import_picocolors2.default.dim(s)}`;
-        case 'active':
-          return `${import_picocolors2.default.green(k2)} ${s} ${r2.hint ? import_picocolors2.default.dim(`(${r2.hint})`) : ''}`;
-        case 'cancelled':
-          return `${import_picocolors2.default.strikethrough(import_picocolors2.default.dim(s))}`;
-        default:
-          return `${import_picocolors2.default.dim(P2)} ${import_picocolors2.default.dim(s)}`;
-      }
-    };
-    return new LD({
-      options: t.options,
-      initialValue: t.initialValue,
-      render() {
-        const r2 = `${import_picocolors2.default.gray(o)}
-${b2(this.state)}  ${t.message}
-`;
-        switch (this.state) {
-          case 'submit':
-            return `${r2}${import_picocolors2.default.gray(o)}  ${n(this.options[this.cursor], 'selected')}`;
-          case 'cancel':
-            return `${r2}${import_picocolors2.default.gray(o)}  ${n(this.options[this.cursor], 'cancelled')}
-${import_picocolors2.default.gray(o)}`;
-          default:
-            return `${r2}${import_picocolors2.default.cyan(o)}  ${G2({
-              cursor: this.cursor,
-              options: this.options,
-              maxItems: t.maxItems,
-              style: (i, s) => n(i, s ? 'active' : 'inactive'),
-            }).join(`
-${import_picocolors2.default.cyan(o)}  `)}
-${import_picocolors2.default.cyan(d2)}
-`;
-        }
-      },
-    }).prompt();
-  },
-  J2,
-  Y2 = ({ indicator: t = 'dots' } = {}) => {
-    const n = V2 ? ['\u25D2', '\u25D0', '\u25D3', '\u25D1'] : ['\u2022', 'o', 'O', '0'],
-      r2 = V2 ? 80 : 120,
-      i = process.env.CI === 'true';
-    let s,
-      c,
-      a = false,
-      l2 = '',
-      $2,
-      g2 = performance.now();
-    const p2 = m2 => {
-        const h2 = m2 > 1 ? 'Something went wrong' : 'Canceled';
-        a && N2(h2, m2);
-      },
-      v2 = () => p2(2),
-      f = () => p2(1),
-      j2 = () => {
-        (process.on('uncaughtExceptionMonitor', v2),
-          process.on('unhandledRejection', v2),
-          process.on('SIGINT', f),
-          process.on('SIGTERM', f),
-          process.on('exit', p2));
-      },
-      E = () => {
-        (process.removeListener('uncaughtExceptionMonitor', v2),
-          process.removeListener('unhandledRejection', v2),
-          process.removeListener('SIGINT', f),
-          process.removeListener('SIGTERM', f),
-          process.removeListener('exit', p2));
-      },
-      B2 = () => {
-        if ($2 === undefined) return;
-        i &&
-          process.stdout.write(`
-`);
-        const m2 = $2.split(`
-`);
-        (process.stdout.write(import_sisteransi2.cursor.move(-999, m2.length - 1)),
-          process.stdout.write(import_sisteransi2.erase.down(m2.length)));
-      },
-      R2 = m2 => m2.replace(/\.+$/, ''),
-      O2 = m2 => {
-        const h2 = (performance.now() - m2) / 1000,
-          w2 = Math.floor(h2 / 60),
-          I2 = Math.floor(h2 % 60);
-        return w2 > 0 ? `[${w2}m ${I2}s]` : `[${I2}s]`;
-      },
-      H = (m2 = '') => {
-        ((a = true),
-          (s = fD()),
-          (l2 = R2(m2)),
-          (g2 = performance.now()),
-          process.stdout.write(`${import_picocolors2.default.gray(o)}
-`));
-        let h2 = 0,
-          w2 = 0;
-        (j2(),
-          (c = setInterval(() => {
-            if (i && l2 === $2) return;
-            (B2(), ($2 = l2));
-            const I2 = import_picocolors2.default.magenta(n[h2]);
-            if (i) process.stdout.write(`${I2}  ${l2}...`);
-            else if (t === 'timer') process.stdout.write(`${I2}  ${l2} ${O2(g2)}`);
-            else {
-              const z2 = '.'.repeat(Math.floor(w2)).slice(0, 3);
-              process.stdout.write(`${I2}  ${l2}${z2}`);
-            }
-            ((h2 = h2 + 1 < n.length ? h2 + 1 : 0), (w2 = w2 < n.length ? w2 + 0.125 : 0));
-          }, r2)));
-      },
-      N2 = (m2 = '', h2 = 0) => {
-        ((a = false), clearInterval(c), B2());
-        const w2 =
-          h2 === 0
-            ? import_picocolors2.default.green(C)
-            : h2 === 1
-              ? import_picocolors2.default.red(L2)
-              : import_picocolors2.default.red(W2);
-        ((l2 = R2(m2 ?? l2)),
-          t === 'timer'
-            ? process.stdout.write(`${w2}  ${l2} ${O2(g2)}
-`)
-            : process.stdout.write(`${w2}  ${l2}
-`),
-          E(),
-          s());
-      };
-    return {
-      start: H,
-      stop: N2,
-      message: (m2 = '') => {
-        l2 = R2(m2 ?? l2);
-      },
-    };
-  };
-var init_dist2 = __esm(() => {
-  init_dist();
-  init_dist();
-  import_picocolors2 = __toESM(require_picocolors(), 1);
-  import_sisteransi2 = __toESM(require_src(), 1);
-  V2 = ce();
-  le = u('\u25C6', '*');
-  L2 = u('\u25A0', 'x');
-  W2 = u('\u25B2', 'x');
-  C = u('\u25C7', 'o');
-  ue = u('\u250C', 'T');
-  o = u('\u2502', '|');
-  d2 = u('\u2514', '\u2014');
-  k2 = u('\u25CF', '>');
-  P2 = u('\u25CB', ' ');
-  A2 = u('\u25FB', '[\u2022]');
-  T = u('\u25FC', '[+]');
-  F = u('\u25FB', '[ ]');
-  $e = u('\u25AA', '\u2022');
-  _2 = u('\u2500', '-');
-  me = u('\u256E', '+');
-  de = u('\u251C', '+');
-  pe = u('\u256F', '+');
-  q = u('\u25CF', '\u2022');
-  D = u('\u25C6', '*');
-  U = u('\u25B2', '!');
-  K2 = u('\u25A0', 'x');
-  J2 = `${import_picocolors2.default.gray(o)}  `;
-});
-
-// src/llm/inquirer.ts
-var exports_inquirer = {};
-__export(exports_inquirer, {
-  textInput: () => textInput,
-  selectOption: () => selectOption,
-  confirmAction: () => confirmAction,
-});
-async function confirmAction(message, defaultValue = false) {
-  const result = await ye({ message, initialValue: defaultValue });
-  if (pD(result)) {
-    process.exit(0);
-  }
-  return result;
-}
-async function selectOption(message, options) {
-  const result = await ve({
-    message,
-    options,
-  });
-  if (pD(result) || typeof result !== 'string') {
-    process.exit(0);
-  }
-  return result;
-}
-async function textInput(message, placeholder) {
-  const result = await he({ message, placeholder });
-  if (pD(result)) {
-    process.exit(0);
-  }
-  return result;
-}
-var init_inquirer = __esm(() => {
-  init_dist2();
-});
-
-// src/util/format.ts
-function formatDuration(ms) {
-  if (ms <= 0) return '0s';
-  const seconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(seconds / 60);
-  const hours = Math.floor(minutes / 60);
-  const s = seconds % 60;
-  const m2 = minutes % 60;
-  if (hours > 0) {
-    return `${hours}h ${String(m2).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`;
-  }
-  if (minutes > 0) {
-    return `${m2}m ${String(s).padStart(2, '0')}s`;
-  }
-  return `${s}s`;
-}
-function logField(label, value) {
-  console.log(`${c.cyan}${label.padEnd(11)}${c.reset}${value}`);
-}
-function logOk(msg) {
-  console.log(`${c.green}\u2713${c.reset} ${msg}`);
-}
-function logInfo(msg) {
-  console.log(`${c.blue}\u2139${c.reset} ${msg}`);
-}
-function logWarn(msg) {
-  console.warn(`${c.yellow}\u26A0${c.reset} ${msg}`);
-}
-function logError(msg) {
-  console.error(`${c.red}\u2717${c.reset} ${msg}`);
-}
-function logHeading(title) {
-  console.log(`
-${c.bold}${c.cyan}${title}${c.reset}`);
-}
-function logDim(msg) {
-  console.log(`${c.dim}${msg}${c.reset}`);
-}
-function logBanner(title, fields) {
-  const line = '\u2500'.repeat(60);
-  console.log(`
-${c.cyan}${line}${c.reset}`);
-  console.log(`${c.bold}  ${title}${c.reset}`);
-  console.log(`${c.cyan}${line}${c.reset}`);
-  if (fields && Object.keys(fields).length > 0) {
-    for (const [key, value] of Object.entries(fields)) {
-      console.log(`  ${c.cyan}${key}:${c.reset} ${value}`);
-    }
-    console.log(`${c.cyan}${line}${c.reset}`);
-  }
-  console.log();
-}
-function logErrorBanner(title, fields) {
-  const line = '\u2500'.repeat(60);
-  console.log(`
-${c.red}${line}${c.reset}`);
-  console.log(`${c.bold}${c.red}  ${title}${c.reset}`);
-  console.log(`${c.red}${line}${c.reset}`);
-  if (fields && Object.keys(fields).length > 0) {
-    for (const [key, value] of Object.entries(fields)) {
-      console.log(`  ${c.cyan}${key}:${c.reset} ${value}`);
-    }
-    console.log(`${c.red}${line}${c.reset}`);
-  }
-  console.log();
-}
-function stateIcon(state) {
-  return STATE_ICONS[state] ?? '\u25CF';
-}
-function formatPhase(phase) {
-  if (!phase || phase === 'none') return `${c.dim}\u2014${c.reset}`;
-  return `${c.magenta}${phase}${c.reset}`;
-}
-function formatStepLine(step, status, detail) {
-  const icon =
-    status === 'done'
-      ? `${c.green}\u2713${c.reset}`
-      : status === 'active'
-        ? `${c.cyan}\u2192${c.reset}`
-        : `${c.dim}\u25CB${c.reset}`;
-  const label =
-    status === 'done'
-      ? `${c.dim}${step}${c.reset}`
-      : status === 'active'
-        ? `${c.bold}${step}${c.reset}`
-        : `${c.dim}${step}${c.reset}`;
-  const detailStr = detail ? `  ${c.dim}${detail}${c.reset}` : '';
-  return ` ${icon} ${label}${detailStr}`;
-}
-function parseRepoHost(gitRootHost) {
-  const match = gitRootHost.match(/^(github-[^/]+)\/(.+)\/(.+)$/);
-  if (!match) return { platform: gitRootHost, org: '?', repo: '?' };
-  return { platform: match[1], org: match[2], repo: match[3] };
-}
-var isTTY, c, STATE_ICONS;
-var init_format = __esm(() => {
-  isTTY = process.stdout.isTTY;
-  c = {
-    reset: isTTY ? '\x1B[0m' : '',
-    bold: isTTY ? '\x1B[1m' : '',
-    dim: isTTY ? '\x1B[2m' : '',
-    green: isTTY ? '\x1B[32m' : '',
-    yellow: isTTY ? '\x1B[33m' : '',
-    red: isTTY ? '\x1B[31m' : '',
-    cyan: isTTY ? '\x1B[36m' : '',
-    magenta: isTTY ? '\x1B[35m' : '',
-    blue: isTTY ? '\x1B[34m' : '',
-  };
-  STATE_ICONS = {
-    pull_ticket: '\uD83C\uDFAB',
-    gather_context: '\uD83D\uDD0D',
-    write_spec: '\uD83D\uDCDD',
-    finalize_spec: '\uD83D\uDCCC',
-    write_plans: '\uD83D\uDCCB',
-    finalize_plans: '\u2705',
-    setup_run: '\u2699\uFE0F',
-    running: '\uD83C\uDFC3',
-    commit: '\uD83D\uDCBE',
-    completed: '\u2705',
-    failed: '\u274C',
-    create_pr: '\uD83D\uDD17',
-    ensure_branch: '\uD83C\uDF3F',
-    commit_pending: '\uD83D\uDCBE',
-    poll: '\uD83D\uDC40',
-    eval: '\uD83E\uDDEA',
-    push: '\uD83D\uDE80',
-    prereview: '\uD83D\uDD2C',
-    feedback_check: '\uD83D\uDCAC',
-    act: '\u26A1',
-    run_fix: '\uD83D\uDD27',
-    tty_resolve: '\uD83D\uDDA5\uFE0F',
-    next_plan: '\uD83D\uDCD1',
-    clear_loop: '\uD83E\uDDF9',
-    resolve: '\uD83D\uDD13',
-    amend_plans: '\u270F\uFE0F',
-  };
-});
-
 // src/core/init-db.ts
 import { Database as Database2 } from 'bun:sqlite';
-import { mkdirSync as mkdirSync4 } from 'fs';
-import { dirname as dirname5 } from 'path';
+import { mkdirSync as mkdirSync2 } from 'fs';
+import { dirname as dirname3 } from 'path';
 function getDb2() {
   if (!db2) {
-    mkdirSync4(dirname5(DB_PATH2), { recursive: true });
+    mkdirSync2(dirname3(DB_PATH2), { recursive: true });
     db2 = new Database2(DB_PATH2);
     db2.exec('PRAGMA journal_mode=WAL');
     db2.exec(`
@@ -3862,8 +2166,8 @@ function getDb2() {
   return db2;
 }
 function upsertInitAttempt(row) {
-  const d3 = getDb2();
-  d3.query(
+  const d = getDb2();
+  d.query(
     `INSERT INTO init_attempts (id, repo_path, worktree, git_root, git_root_host, org, outcome, promoted_session_id, created_at, updated_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      ON CONFLICT(id) DO UPDATE SET
@@ -3884,8 +2188,8 @@ function upsertInitAttempt(row) {
   );
 }
 function updateInitOutcome(id, outcome, promotedSessionId) {
-  const d3 = getDb2();
-  d3.query('UPDATE init_attempts SET outcome = $1, promoted_session_id = $2, updated_at = $3 WHERE id = $4').run(
+  const d = getDb2();
+  d.query('UPDATE init_attempts SET outcome = $1, promoted_session_id = $2, updated_at = $3 WHERE id = $4').run(
     outcome,
     promotedSessionId ?? null,
     new Date().toISOString(),
@@ -3893,18 +2197,18 @@ function updateInitOutcome(id, outcome, promotedSessionId) {
   );
 }
 function getInitAttemptById(id) {
-  const d3 = getDb2();
-  return d3.query('SELECT * FROM init_attempts WHERE id = $1').get(id);
+  const d = getDb2();
+  return d.query('SELECT * FROM init_attempts WHERE id = $1').get(id);
 }
 function getInitAttemptByPromotedSessionId(sessionId) {
-  const d3 = getDb2();
-  return d3
+  const d = getDb2();
+  return d
     .query('SELECT * FROM init_attempts WHERE promoted_session_id = $1 ORDER BY created_at DESC LIMIT 1')
     .get(sessionId);
 }
 function getActiveInitForWorktree(repoPath, worktree) {
-  const d3 = getDb2();
-  return d3
+  const d = getDb2();
+  return d
     .query(
       'SELECT * FROM init_attempts WHERE repo_path = $1 AND worktree = $2 AND outcome IS NULL ORDER BY created_at DESC LIMIT 1',
     )
@@ -4324,11 +2628,11 @@ var require_applyReviver = __commonJS(exports => {
           else if (v1 !== v0) val[i] = v1;
         }
       } else if (val instanceof Map) {
-        for (const k3 of Array.from(val.keys())) {
-          const v0 = val.get(k3);
-          const v1 = applyReviver(reviver, val, k3, v0);
-          if (v1 === undefined) val.delete(k3);
-          else if (v1 !== v0) val.set(k3, v1);
+        for (const k of Array.from(val.keys())) {
+          const v0 = val.get(k);
+          const v1 = applyReviver(reviver, val, k, v0);
+          if (v1 === undefined) val.delete(k);
+          else if (v1 !== v0) val.set(k, v1);
         }
       } else if (val instanceof Set) {
         for (const v0 of Array.from(val)) {
@@ -4340,10 +2644,10 @@ var require_applyReviver = __commonJS(exports => {
           }
         }
       } else {
-        for (const [k3, v0] of Object.entries(val)) {
-          const v1 = applyReviver(reviver, val, k3, v0);
-          if (v1 === undefined) delete val[k3];
-          else if (v1 !== v0) val[k3] = v1;
+        for (const [k, v0] of Object.entries(val)) {
+          const v1 = applyReviver(reviver, val, k, v0);
+          if (v1 === undefined) delete val[k];
+          else if (v1 !== v0) val[k] = v1;
         }
       }
     }
@@ -4356,7 +2660,7 @@ var require_applyReviver = __commonJS(exports => {
 var require_toJS = __commonJS(exports => {
   var identity = require_identity();
   function toJS(value, arg, ctx) {
-    if (Array.isArray(value)) return value.map((v2, i) => toJS(v2, String(i), ctx));
+    if (Array.isArray(value)) return value.map((v, i) => toJS(v, String(i), ctx));
     if (value && typeof value.toJSON === 'function') {
       if (!ctx || !identity.hasAnchor(value)) return value.toJSON(arg, ctx);
       const data = { aliasCount: 0, count: 1, res: undefined };
@@ -4495,8 +2799,8 @@ var require_Alias = __commonJS(exports => {
     } else if (identity.isCollection(node)) {
       let count = 0;
       for (const item of node.items) {
-        const c2 = getAliasCount(doc, item, anchors2);
-        if (c2 > count) count = c2;
+        const c = getAliasCount(doc, item, anchors2);
+        if (c > count) count = c;
       }
       return count;
     } else if (identity.isPair(node)) {
@@ -4621,18 +2925,18 @@ var require_Collection = __commonJS(exports => {
   var identity = require_identity();
   var Node = require_Node();
   function collectionFromPath(schema, path, value) {
-    let v2 = value;
+    let v = value;
     for (let i = path.length - 1; i >= 0; --i) {
-      const k3 = path[i];
-      if (typeof k3 === 'number' && Number.isInteger(k3) && k3 >= 0) {
+      const k = path[i];
+      if (typeof k === 'number' && Number.isInteger(k) && k >= 0) {
         const a = [];
-        a[k3] = v2;
-        v2 = a;
+        a[k] = v;
+        v = a;
       } else {
-        v2 = new Map([[k3, v2]]);
+        v = new Map([[k, v]]);
       }
     }
-    return createNode.createNode(v2, undefined, {
+    return createNode.createNode(v, undefined, {
       aliasDuplicateObjects: false,
       keepUndefined: false,
       onAnchor: () => {
@@ -4828,11 +3132,11 @@ var require_foldFlowLines = __commonJS(exports => {
               ch = text[(i += 1)];
               overflow = true;
             }
-            const j2 = i > escEnd + 1 ? i - 2 : escStart - 1;
-            if (escapedFolds[j2]) return text;
-            folds.push(j2);
-            escapedFolds[j2] = true;
-            end = j2 + endStep;
+            const j = i > escEnd + 1 ? i - 2 : escStart - 1;
+            if (escapedFolds[j]) return text;
+            folds.push(j);
+            escapedFolds[j] = true;
+            end = j + endStep;
             split = undefined;
           } else {
             overflow = true;
@@ -5341,7 +3645,7 @@ var require_stringify = __commonJS(exports => {
       }
     }
     let tagObj = undefined;
-    const node = identity.isNode(item) ? item : ctx.doc.createNode(item, { onTagObj: o2 => (tagObj = o2) });
+    const node = identity.isNode(item) ? item : ctx.doc.createNode(item, { onTagObj: o => (tagObj = o) });
     tagObj ?? (tagObj = getTagObject(ctx.doc.schema.tags, node));
     const props = stringifyProps(node, tagObj, ctx);
     if (props.length > 0) ctx.indentAtStart = (ctx.indentAtStart ?? 0) + props.length + 1;
@@ -5660,9 +3964,9 @@ var require_Pair = __commonJS(exports => {
   var addPairToJSMap = require_addPairToJSMap();
   var identity = require_identity();
   function createPair(key, value, ctx) {
-    const k3 = createNode.createNode(key, undefined, ctx);
-    const v2 = createNode.createNode(value, undefined, ctx);
-    return new Pair(k3, v2);
+    const k = createNode.createNode(key, undefined, ctx);
+    const v = createNode.createNode(value, undefined, ctx);
+    return new Pair(k, v);
   }
 
   class Pair {
@@ -5677,7 +3981,7 @@ var require_Pair = __commonJS(exports => {
       if (identity.isNode(value)) value = value.clone(schema);
       return new Pair(key, value);
     }
-    toJSON(_3, ctx) {
+    toJSON(_, ctx) {
       const pair = ctx?.mapAsMap ? new Map() : {};
       return addPairToJSMap.addPairToJSMap(ctx, pair, this);
     }
@@ -5861,11 +4165,11 @@ var require_YAMLMap = __commonJS(exports => {
   var Pair = require_Pair();
   var Scalar = require_Scalar();
   function findPair(items, key) {
-    const k3 = identity.isScalar(key) ? key.value : key;
+    const k = identity.isScalar(key) ? key.value : key;
     for (const it of items) {
       if (identity.isPair(it)) {
-        if (it.key === key || it.key === k3) return it;
-        if (identity.isScalar(it.key) && it.key.value === k3) return it;
+        if (it.key === key || it.key === k) return it;
+        if (identity.isScalar(it.key) && it.key.value === k) return it;
       }
     }
     return;
@@ -5934,7 +4238,7 @@ var require_YAMLMap = __commonJS(exports => {
     set(key, value) {
       this.add(new Pair.Pair(key, value), true);
     }
-    toJSON(_3, ctx, Type) {
+    toJSON(_, ctx, Type) {
       const map = Type ? new Type() : ctx?.mapAsMap ? new Map() : {};
       if (ctx?.onCreate) ctx.onCreate(map);
       for (const item of this.items) addPairToJSMap.addPairToJSMap(ctx, map, item);
@@ -6021,7 +4325,7 @@ var require_YAMLSeq = __commonJS(exports => {
       if (identity.isScalar(prev) && Scalar.isScalarValue(value)) prev.value = value;
       else this.items[idx] = value;
     }
-    toJSON(_3, ctx) {
+    toJSON(_, ctx) {
       const seq = [];
       if (ctx?.onCreate) ctx.onCreate(seq);
       let i = 0;
@@ -6145,8 +4449,8 @@ var require_stringifyNumber = __commonJS(exports => {
         i = n.length;
         n += '.';
       }
-      let d3 = minFractionDigits - (n.length - i - 1);
-      while (d3-- > 0) n += '0';
+      let d = minFractionDigits - (n.length - i - 1);
+      while (d-- > 0) n += '0';
     }
     return n;
   }
@@ -6374,8 +4678,8 @@ var require_binary = __commonJS(exports => {
         const lineWidth = Math.max(ctx.options.lineWidth - ctx.indent.length, ctx.options.minContentWidth);
         const n = Math.ceil(str.length / lineWidth);
         const lines = new Array(n);
-        for (let i = 0, o2 = 0; i < n; ++i, o2 += lineWidth) {
-          lines[i] = str.substr(o2, lineWidth);
+        for (let i = 0, o = 0; i < n; ++i, o += lineWidth) {
+          lines[i] = str.substr(o, lineWidth);
         }
         str = lines.join(
           type === Scalar.Scalar.BLOCK_LITERAL
@@ -6482,8 +4786,8 @@ var require_omap = __commonJS(exports => {
       this.set = YAMLMap.YAMLMap.prototype.set.bind(this);
       this.tag = YAMLOMap.tag;
     }
-    toJSON(_3, ctx) {
-      if (!ctx) return super.toJSON(_3);
+    toJSON(_, ctx) {
+      if (!ctx) return super.toJSON(_);
       const map = new Map();
       if (ctx?.onCreate) ctx.onCreate(map);
       for (const pair of this.items) {
@@ -6720,8 +5024,8 @@ var require_set = __commonJS(exports => {
         this.items.push(new Pair.Pair(key));
       }
     }
-    toJSON(_3, ctx) {
-      return super.toJSON(_3, ctx, Set);
+    toJSON(_, ctx) {
+      return super.toJSON(_, ctx, Set);
     }
     toString(ctx, onComment, onChompKeep) {
       if (!ctx) return JSON.stringify(this);
@@ -6770,7 +5074,7 @@ var require_timestamp = __commonJS(exports => {
     const res = parts
       .replace(/_/g, '')
       .split(':')
-      .reduce((res2, p2) => res2 * num(60) + num(p2), num(0));
+      .reduce((res2, p) => res2 * num(60) + num(p), num(0));
     return sign === '-' ? num(-1) * res : res;
   }
   function stringifySexagesimal(node) {
@@ -6841,9 +5145,9 @@ var require_timestamp = __commonJS(exports => {
       let date = Date.UTC(year, month - 1, day, hour || 0, minute || 0, second || 0, millisec);
       const tz = match[8];
       if (tz && tz !== 'Z') {
-        let d3 = parseSexagesimal(tz, false);
-        if (Math.abs(d3) < 30) d3 *= 60;
-        date -= 60000 * d3;
+        let d = parseSexagesimal(tz, false);
+        if (Math.abs(d) < 30) d *= 60;
+        date -= 60000 * d;
       }
       return new Date(date);
     },
@@ -6994,7 +5298,7 @@ var require_Schema = __commonJS(exports => {
   var seq = require_seq();
   var string = require_string();
   var tags = require_tags();
-  var sortMapEntriesByKey = (a, b3) => (a.key < b3.key ? -1 : a.key > b3.key ? 1 : 0);
+  var sortMapEntriesByKey = (a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
 
   class Schema {
     constructor({ compat, customTags, merge, resolveKnownTags, schema, sortMapEntries, toStringDefaults }) {
@@ -7179,7 +5483,7 @@ var require_Document = __commonJS(exports => {
         value = replacer.call({ '': value }, '', value);
         _replacer = replacer;
       } else if (Array.isArray(replacer)) {
-        const keyToStr = v2 => typeof v2 === 'number' || v2 instanceof String || v2 instanceof Number;
+        const keyToStr = v => typeof v === 'number' || v instanceof String || v instanceof Number;
         const asStr = replacer.filter(keyToStr).map(String);
         if (asStr.length > 0) replacer = replacer.concat(asStr);
         _replacer = replacer;
@@ -7204,9 +5508,9 @@ var require_Document = __commonJS(exports => {
       return node;
     }
     createPair(key, value, options = {}) {
-      const k3 = this.createNode(key, null, options);
-      const v2 = this.createNode(value, null, options);
-      return new Pair.Pair(k3, v2);
+      const k = this.createNode(key, null, options);
+      const v = this.createNode(value, null, options);
+      return new Pair.Pair(k, v);
     }
     delete(key) {
       return assertCollection(this.contents) ? this.contents.delete(key) : false;
@@ -7569,7 +5873,7 @@ var require_util_map_includes = __commonJS(exports => {
     const isEqual =
       typeof uniqueKeys === 'function'
         ? uniqueKeys
-        : (a, b3) => a === b3 || (identity.isScalar(a) && identity.isScalar(b3) && a.value === b3.value);
+        : (a, b) => a === b || (identity.isScalar(a) && identity.isScalar(b) && a.value === b.value);
     return items.some(pair => isEqual(pair.key, search));
   }
   exports.mapIncludes = mapIncludes;
@@ -7933,16 +6237,16 @@ var require_resolve_flow_collection = __commonJS(exports => {
       }
     }
     const expectedEnd = isMap ? '}' : ']';
-    const [ce2, ...ee] = fc.end;
+    const [ce, ...ee] = fc.end;
     let cePos = offset;
-    if (ce2?.source === expectedEnd) cePos = ce2.offset + ce2.source.length;
+    if (ce?.source === expectedEnd) cePos = ce.offset + ce.source.length;
     else {
       const name = fcName[0].toUpperCase() + fcName.substring(1);
       const msg = atRoot
         ? `${name} must end with a ${expectedEnd}`
         : `${name} in block collection must be sufficiently indented and end with a ${expectedEnd}`;
       onError(offset, atRoot ? 'MISSING_CHAR' : 'BAD_INDENT', msg);
-      if (ce2 && ce2.source.length !== 1) ee.unshift(ce2);
+      if (ce && ce.source.length !== 1) ee.unshift(ce);
     }
     if (ee.length > 0) {
       const end = resolveEnd.resolveEnd(ee, cePos, ctx.options.strict, onError);
@@ -8235,8 +6539,8 @@ var require_resolve_block_scalar = __commonJS(exports => {
   function splitLines(source) {
     const split = source.split(/\n( *)/);
     const first = split[0];
-    const m2 = first.match(/^( *)/);
-    const line0 = m2?.[1] ? [m2[1], first.slice(m2[1].length)] : ['', first];
+    const m = first.match(/^( *)/);
+    const line0 = m?.[1] ? [m[1], first.slice(m[1].length)] : ['', first];
     const lines = [line0];
     for (let i = 1; i < split.length; i += 2) lines.push([split[i], split[i + 1]]);
     return lines;
@@ -8977,11 +7281,11 @@ var require_cst_scalar = __commonJS(exports => {
     switch (source[0]) {
       case '|':
       case '>': {
-        const he2 = source.indexOf(`
+        const he = source.indexOf(`
 `);
-        const head = source.substring(0, he2);
+        const head = source.substring(0, he);
         const body =
-          source.substring(he2 + 1) +
+          source.substring(he + 1) +
           `
 `;
         const props = [{ type: 'block-scalar-header', offset, indent, source: head }];
@@ -9049,11 +7353,11 @@ var require_cst_scalar = __commonJS(exports => {
     }
   }
   function setBlockScalarValue(token, source) {
-    const he2 = source.indexOf(`
+    const he = source.indexOf(`
 `);
-    const head = source.substring(0, he2);
+    const head = source.substring(0, he);
     const body =
-      source.substring(he2 + 1) +
+      source.substring(he + 1) +
       `
 `;
     if (token.type === 'block-scalar') {
@@ -10920,6 +9224,185 @@ var require_dist = __commonJS(exports => {
   exports.visitAsync = visit.visitAsync;
 });
 
+// src/util/format.ts
+function formatDuration(ms) {
+  if (ms <= 0) return '0s';
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const s = seconds % 60;
+  const m = minutes % 60;
+  if (hours > 0) {
+    return `${hours}h ${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`;
+  }
+  if (minutes > 0) {
+    return `${m}m ${String(s).padStart(2, '0')}s`;
+  }
+  return `${s}s`;
+}
+function logField(label, value) {
+  console.log(`${c.cyan}${label.padEnd(11)}${c.reset}${value}`);
+}
+function logOk(msg) {
+  console.log(`${c.green}\u2713${c.reset} ${msg}`);
+}
+function logInfo(msg) {
+  console.log(`${c.blue}\u2139${c.reset} ${msg}`);
+}
+function logWarn(msg) {
+  console.warn(`${c.yellow}\u26A0${c.reset} ${msg}`);
+}
+function logError(msg) {
+  console.error(`${c.red}\u2717${c.reset} ${msg}`);
+}
+function logHeading(title) {
+  console.log(`
+${c.bold}${c.cyan}${title}${c.reset}`);
+}
+function logDim(msg) {
+  console.log(`${c.dim}${msg}${c.reset}`);
+}
+function logBanner(title, fields) {
+  const line = '\u2500'.repeat(60);
+  console.log(`
+${c.cyan}${line}${c.reset}`);
+  console.log(`${c.bold}  ${title}${c.reset}`);
+  console.log(`${c.cyan}${line}${c.reset}`);
+  if (fields && Object.keys(fields).length > 0) {
+    for (const [key, value] of Object.entries(fields)) {
+      console.log(`  ${c.cyan}${key}:${c.reset} ${value}`);
+    }
+    console.log(`${c.cyan}${line}${c.reset}`);
+  }
+  console.log();
+}
+function logErrorBanner(title, fields) {
+  const line = '\u2500'.repeat(60);
+  console.log(`
+${c.red}${line}${c.reset}`);
+  console.log(`${c.bold}${c.red}  ${title}${c.reset}`);
+  console.log(`${c.red}${line}${c.reset}`);
+  if (fields && Object.keys(fields).length > 0) {
+    for (const [key, value] of Object.entries(fields)) {
+      console.log(`  ${c.cyan}${key}:${c.reset} ${value}`);
+    }
+    console.log(`${c.red}${line}${c.reset}`);
+  }
+  console.log();
+}
+function stateIcon(state) {
+  return STATE_ICONS[state] ?? '\u25CF';
+}
+function formatStatus(state, running) {
+  if (state === 'init') return `${c.yellow}init-incomplete${c.reset}`;
+  if (running) return `${c.green}running${c.reset}`;
+  return `${c.dim}stopped${c.reset}`;
+}
+function formatPhase(phase) {
+  if (!phase || phase === 'none') return `${c.dim}\u2014${c.reset}`;
+  return `${c.magenta}${phase}${c.reset}`;
+}
+var isTTY, c, STATE_ICONS;
+var init_format = __esm(() => {
+  isTTY = process.stdout.isTTY;
+  c = {
+    reset: isTTY ? '\x1B[0m' : '',
+    bold: isTTY ? '\x1B[1m' : '',
+    dim: isTTY ? '\x1B[2m' : '',
+    green: isTTY ? '\x1B[32m' : '',
+    yellow: isTTY ? '\x1B[33m' : '',
+    red: isTTY ? '\x1B[31m' : '',
+    cyan: isTTY ? '\x1B[36m' : '',
+    magenta: isTTY ? '\x1B[35m' : '',
+    blue: isTTY ? '\x1B[34m' : '',
+  };
+  STATE_ICONS = {
+    pull_ticket: '\uD83C\uDFAB',
+    gather_context: '\uD83D\uDD0D',
+    write_spec: '\uD83D\uDCDD',
+    finalize_spec: '\uD83D\uDCCC',
+    write_plans: '\uD83D\uDCCB',
+    finalize_plans: '\u2705',
+    setup_run: '\u2699\uFE0F',
+    running: '\uD83C\uDFC3',
+    commit: '\uD83D\uDCBE',
+    completed: '\u2705',
+    failed: '\u274C',
+    create_pr: '\uD83D\uDD17',
+    ensure_branch: '\uD83C\uDF3F',
+    commit_pending: '\uD83D\uDCBE',
+    poll: '\uD83D\uDC40',
+    eval: '\uD83E\uDDEA',
+    push: '\uD83D\uDE80',
+    prereview: '\uD83D\uDD2C',
+    feedback_check: '\uD83D\uDCAC',
+    act: '\u26A1',
+    run_fix: '\uD83D\uDD27',
+    tty_resolve: '\uD83D\uDDA5\uFE0F',
+    next_plan: '\uD83D\uDCD1',
+    clear_loop: '\uD83E\uDDF9',
+    resolve: '\uD83D\uDD13',
+    rewrite_spec: '\u270F\uFE0F',
+  };
+});
+
+// src/core/artifacts.ts
+var exports_artifacts = {};
+__export(exports_artifacts, {
+  snapshotPath: () => snapshotPath,
+  sessionDir: () => sessionDir,
+  sessionArtifactPath: () => sessionArtifactPath,
+  scopeDir: () => scopeDir,
+  runsDir: () => runsDir,
+  runFilePath: () => runFilePath,
+  runDir: () => runDir,
+  nextRunNumber: () => nextRunNumber,
+  initDir: () => initDir,
+  ensureArtifactDir: () => ensureArtifactDir,
+  artifactPath: () => artifactPath,
+});
+import { mkdirSync as mkdirSync3, readdirSync } from 'fs';
+import { dirname as dirname4, join } from 'path';
+function artifactPath(id, version, phase, ...segments) {
+  return `${process.env.HOME}/.kautopilot/${id}/artifacts/v${version}/${phase}/${segments.join('/')}`;
+}
+function snapshotPath(id, version, ...segments) {
+  return `${process.env.HOME}/.kautopilot/${id}/artifacts/v${version}/${segments.join('/')}`;
+}
+function sessionArtifactPath(id, ...segments) {
+  return `${process.env.HOME}/.kautopilot/${id}/artifacts/${segments.join('/')}`;
+}
+function ensureArtifactDir(path) {
+  mkdirSync3(dirname4(path), { recursive: true });
+}
+function sessionDir(id) {
+  return `${process.env.HOME}/.kautopilot/${id}`;
+}
+function initDir(id) {
+  return `${process.env.HOME}/.kautopilot/init/${id}`;
+}
+function scopeDir(scope) {
+  return scope.kind === 'init' ? initDir(scope.id) : sessionDir(scope.id);
+}
+function runsDir(scope) {
+  return join(scopeDir(scope), 'runs');
+}
+function nextRunNumber(scope) {
+  const dir = runsDir(scope);
+  mkdirSync3(dir, { recursive: true });
+  const numbers = readdirSync(dir, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && /^\d+$/.test(entry.name))
+    .map(entry => Number(entry.name));
+  return numbers.length > 0 ? Math.max(...numbers) + 1 : 1;
+}
+function runDir(scope, runNumber) {
+  return join(runsDir(scope), String(runNumber));
+}
+function runFilePath(scope, runNumber, fileName) {
+  return join(runDir(scope, runNumber), fileName);
+}
+var init_artifacts = () => {};
+
 // src/core/log.ts
 var exports_log = {};
 __export(exports_log, {
@@ -10932,14 +9415,14 @@ __export(exports_log, {
   appendEventToDir: () => appendEventToDir,
   appendEvent: () => appendEvent,
 });
-import { appendFileSync, existsSync as existsSync2, mkdirSync as mkdirSync5, readFileSync as readFileSync2 } from 'fs';
-import { dirname as dirname6, join as join2 } from 'path';
+import { appendFileSync, existsSync, mkdirSync as mkdirSync4, readFileSync } from 'fs';
+import { dirname as dirname5, join as join2 } from 'path';
 function logPathForDir(dir) {
   return join2(dir, 'log.jsonl');
 }
 function appendEventToDir(dir, entry) {
   const path = logPathForDir(dir);
-  mkdirSync5(dirname6(path), { recursive: true });
+  mkdirSync4(dirname5(path), { recursive: true });
   appendFileSync(
     path,
     `${JSON.stringify(entry)}
@@ -10948,8 +9431,8 @@ function appendEventToDir(dir, entry) {
 }
 function readLogFromDir(dir) {
   const path = logPathForDir(dir);
-  if (!existsSync2(path)) return [];
-  const raw = readFileSync2(path, 'utf-8');
+  if (!existsSync(path)) return [];
+  const raw = readFileSync(path, 'utf-8');
   const entries = [];
   for (const line of raw.split(`
 `)) {
@@ -10984,17 +9467,17 @@ var init_log = __esm(() => {
 
 // src/core/init-lock.ts
 import {
-  existsSync as existsSync3,
-  mkdirSync as mkdirSync6,
-  readFileSync as readFileSync3,
-  unlinkSync as unlinkSync2,
-  writeFileSync as writeFileSync2,
+  existsSync as existsSync2,
+  mkdirSync as mkdirSync5,
+  readFileSync as readFileSync2,
+  unlinkSync,
+  writeFileSync,
 } from 'fs';
-import { dirname as dirname7, join as join3 } from 'path';
+import { dirname as dirname6, join as join3 } from 'path';
 function initLockPath(id) {
   return join3(initDir(id), 'lock.pid');
 }
-function isProcessAlive2(pid) {
+function isProcessAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;
@@ -11004,25 +9487,25 @@ function isProcessAlive2(pid) {
 }
 function acquireInitLock(id) {
   const path = initLockPath(id);
-  mkdirSync6(dirname7(path), { recursive: true });
-  if (existsSync3(path)) {
-    const existingPid = parseInt(readFileSync3(path, 'utf-8').trim(), 10);
-    if (isProcessAlive2(existingPid)) {
+  mkdirSync5(dirname6(path), { recursive: true });
+  if (existsSync2(path)) {
+    const existingPid = parseInt(readFileSync2(path, 'utf-8').trim(), 10);
+    if (isProcessAlive(existingPid)) {
       throw new Error(`Init is already running (PID ${existingPid}).`);
     }
-    unlinkSync2(path);
+    unlinkSync(path);
   }
-  writeFileSync2(path, String(process.pid));
+  writeFileSync(path, String(process.pid));
   currentInitId = id;
   currentLockPath = path;
   const cleanupCurrentLock = () => {
-    const lockPath2 = currentLockPath;
-    if (!lockPath2) return;
+    const lockPath = currentLockPath;
+    if (!lockPath) return;
     try {
-      if (existsSync3(lockPath2)) {
-        const storedPid = readFileSync3(lockPath2, 'utf-8').trim();
+      if (existsSync2(lockPath)) {
+        const storedPid = readFileSync2(lockPath, 'utf-8').trim();
         if (storedPid === String(process.pid)) {
-          unlinkSync2(lockPath2);
+          unlinkSync(lockPath);
         }
       }
     } catch {}
@@ -11064,26 +9547,26 @@ function acquireInitLock(id) {
 }
 function checkInitLock(id) {
   const path = initLockPath(id);
-  if (!existsSync3(path)) {
-    return { locked: false, pid: 0, alive: false, zellijAlive: false };
+  if (!existsSync2(path)) {
+    return { locked: false, pid: 0, alive: false };
   }
-  const pid = parseInt(readFileSync3(path, 'utf-8').trim(), 10);
-  const alive = isProcessAlive2(pid);
+  const pid = parseInt(readFileSync2(path, 'utf-8').trim(), 10);
+  const alive = isProcessAlive(pid);
   if (!alive) {
     try {
-      unlinkSync2(path);
+      unlinkSync(path);
     } catch {}
-    return { locked: false, pid, alive: false, zellijAlive: false };
+    return { locked: false, pid, alive: false };
   }
-  return { locked: true, pid, alive: true, zellijAlive: false };
+  return { locked: true, pid, alive: true };
 }
 function releaseInitLock(id) {
   const path = initLockPath(id);
   try {
-    if (existsSync3(path)) {
-      const storedPid = readFileSync3(path, 'utf-8').trim();
+    if (existsSync2(path)) {
+      const storedPid = readFileSync2(path, 'utf-8').trim();
       if (storedPid === String(process.pid)) {
-        unlinkSync2(path);
+        unlinkSync(path);
       }
     }
   } catch {}
@@ -11099,13 +9582,13 @@ var init_init_lock = __esm(() => {
 
 // src/core/init-status.ts
 import {
-  existsSync as existsSync4,
-  mkdirSync as mkdirSync7,
-  readFileSync as readFileSync4,
+  existsSync as existsSync3,
+  mkdirSync as mkdirSync6,
+  readFileSync as readFileSync3,
   renameSync,
-  writeFileSync as writeFileSync3,
+  writeFileSync as writeFileSync2,
 } from 'fs';
-import { dirname as dirname8, join as join4 } from 'path';
+import { dirname as dirname7, join as join4 } from 'path';
 function initialInitStatus() {
   return {
     walCursor: 0,
@@ -11188,9 +9671,9 @@ function initStatusPath(id) {
 }
 function readInitStatusYaml(id) {
   const path = initStatusPath(id);
-  if (!existsSync4(path)) return null;
+  if (!existsSync3(path)) return null;
   try {
-    const raw = readFileSync4(path, 'utf-8');
+    const raw = readFileSync3(path, 'utf-8');
     return import_yaml.default.parse(raw);
   } catch {
     return null;
@@ -11198,10 +9681,10 @@ function readInitStatusYaml(id) {
 }
 function writeInitStatusYaml(id, status) {
   const path = initStatusPath(id);
-  mkdirSync7(dirname8(path), { recursive: true });
+  mkdirSync6(dirname7(path), { recursive: true });
   const content = import_yaml.default.stringify(status, { lineWidth: 120 });
   const tmp = `${path}.tmp`;
-  writeFileSync3(tmp, content);
+  writeFileSync2(tmp, content);
   renameSync(tmp, path);
 }
 function ensureInitStatus(id) {
@@ -11302,7 +9785,7 @@ var util,
   };
 var init_util = __esm(() => {
   (function (util2) {
-    util2.assertEqual = _3 => {};
+    util2.assertEqual = _ => {};
     function assertIs(_arg) {}
     util2.assertIs = assertIs;
     function assertNever(_x) {
@@ -11317,16 +9800,16 @@ var init_util = __esm(() => {
       return obj;
     };
     util2.getValidEnumValues = obj => {
-      const validKeys = util2.objectKeys(obj).filter(k3 => typeof obj[obj[k3]] !== 'number');
+      const validKeys = util2.objectKeys(obj).filter(k => typeof obj[obj[k]] !== 'number');
       const filtered = {};
-      for (const k3 of validKeys) {
-        filtered[k3] = obj[k3];
+      for (const k of validKeys) {
+        filtered[k] = obj[k];
       }
       return util2.objectValues(filtered);
     };
     util2.objectValues = obj => {
-      return util2.objectKeys(obj).map(function (e2) {
-        return obj[e2];
+      return util2.objectKeys(obj).map(function (e) {
+        return obj[e];
       });
     };
     util2.objectKeys =
@@ -11355,7 +9838,7 @@ var init_util = __esm(() => {
       return array.map(val => (typeof val === 'string' ? `'${val}'` : val)).join(separator);
     }
     util2.joinValues = joinValues;
-    util2.jsonStringifyReplacer = (_3, value) => {
+    util2.jsonStringifyReplacer = (_, value) => {
       if (typeof value === 'bigint') {
         return value.toString();
       }
@@ -11650,7 +10133,7 @@ function addIssueToContext(ctx, issueData) {
       ctx.schemaErrorMap,
       overrideMap,
       overrideMap === en_default ? undefined : en_default,
-    ].filter(x2 => !!x2),
+    ].filter(x => !!x),
   });
   ctx.common.issues.push(issue);
 }
@@ -11717,7 +10200,7 @@ var makeIssue = params => {
     }
     let errorMessage = '';
     const maps = errorMaps
-      .filter(m2 => !!m2)
+      .filter(m => !!m)
       .slice()
       .reverse();
     for (const map of maps) {
@@ -11733,10 +10216,10 @@ var makeIssue = params => {
   INVALID,
   DIRTY = value => ({ status: 'dirty', value }),
   OK = value => ({ status: 'valid', value }),
-  isAborted = x2 => x2.status === 'aborted',
-  isDirty = x2 => x2.status === 'dirty',
-  isValid = x2 => x2.status === 'valid',
-  isAsync = x2 => typeof Promise !== 'undefined' && x2 instanceof Promise;
+  isAborted = x => x.status === 'aborted',
+  isDirty = x => x.status === 'dirty',
+  isValid = x => x.status === 'valid',
+  isAsync = x => typeof Promise !== 'undefined' && x instanceof Promise;
 var init_parseUtil = __esm(() => {
   init_errors();
   init_en();
@@ -12181,17 +10664,17 @@ function deepPartialify(schema) {
     return schema;
   }
 }
-function mergeValues(a, b3) {
+function mergeValues(a, b) {
   const aType = getParsedType(a);
-  const bType = getParsedType(b3);
-  if (a === b3) {
+  const bType = getParsedType(b);
+  if (a === b) {
     return { valid: true, data: a };
   } else if (aType === ZodParsedType.object && bType === ZodParsedType.object) {
-    const bKeys = util.objectKeys(b3);
+    const bKeys = util.objectKeys(b);
     const sharedKeys = util.objectKeys(a).filter(key => bKeys.indexOf(key) !== -1);
-    const newObj = { ...a, ...b3 };
+    const newObj = { ...a, ...b };
     for (const key of sharedKeys) {
-      const sharedValue = mergeValues(a[key], b3[key]);
+      const sharedValue = mergeValues(a[key], b[key]);
       if (!sharedValue.valid) {
         return { valid: false };
       }
@@ -12199,13 +10682,13 @@ function mergeValues(a, b3) {
     }
     return { valid: true, data: newObj };
   } else if (aType === ZodParsedType.array && bType === ZodParsedType.array) {
-    if (a.length !== b3.length) {
+    if (a.length !== b.length) {
       return { valid: false };
     }
     const newArray = [];
     for (let index = 0; index < a.length; index++) {
       const itemA = a[index];
-      const itemB = b3[index];
+      const itemB = b[index];
       const sharedValue = mergeValues(itemA, itemB);
       if (!sharedValue.valid) {
         return { valid: false };
@@ -12213,7 +10696,7 @@ function mergeValues(a, b3) {
       newArray.push(sharedValue.data);
     }
     return { valid: true, data: newArray };
-  } else if (aType === ZodParsedType.date && bType === ZodParsedType.date && +a === +b3) {
+  } else if (aType === ZodParsedType.date && bType === ZodParsedType.date && +a === +b) {
     return { valid: true, data: a };
   } else {
     return { valid: false };
@@ -12227,24 +10710,24 @@ function createZodEnum(values, params) {
   });
 }
 function cleanParams(params, data) {
-  const p2 = typeof params === 'function' ? params(data) : typeof params === 'string' ? { message: params } : params;
-  const p22 = typeof p2 === 'string' ? { message: p2 } : p2;
-  return p22;
+  const p = typeof params === 'function' ? params(data) : typeof params === 'string' ? { message: params } : params;
+  const p2 = typeof p === 'string' ? { message: p } : p;
+  return p2;
 }
 function custom(check, _params = {}, fatal) {
   if (check)
     return ZodAny.create().superRefine((data, ctx) => {
-      const r2 = check(data);
-      if (r2 instanceof Promise) {
-        return r2.then(r3 => {
-          if (!r3) {
+      const r = check(data);
+      if (r instanceof Promise) {
+        return r.then(r2 => {
+          if (!r2) {
             const params = cleanParams(_params, data);
             const _fatal = params.fatal ?? fatal ?? true;
             ctx.addIssue({ code: 'custom', ...params, fatal: _fatal });
           }
         });
       }
-      if (!r2) {
+      if (!r) {
         const params = cleanParams(_params, data);
         const _fatal = params.fatal ?? fatal ?? true;
         ctx.addIssue({ code: 'custom', ...params, fatal: _fatal });
@@ -14249,7 +12732,7 @@ var init_types = __esm(() => {
           if (!schema) return null;
           return schema._parse(new ParseInputLazyPath(ctx, item, ctx.path, itemIndex));
         })
-        .filter(x2 => !!x2);
+        .filter(x => !!x);
       if (ctx.common.async) {
         return Promise.all(items).then(results => {
           return ParseStatus.mergeArray(status, results);
@@ -14502,7 +12985,7 @@ var init_types = __esm(() => {
         return makeIssue({
           data: args,
           path: ctx.path,
-          errorMaps: [ctx.common.contextualErrorMap, ctx.schemaErrorMap, getErrorMap(), en_default].filter(x2 => !!x2),
+          errorMaps: [ctx.common.contextualErrorMap, ctx.schemaErrorMap, getErrorMap(), en_default].filter(x => !!x),
           issueData: {
             code: ZodIssueCode.invalid_arguments,
             argumentsError: error,
@@ -14513,7 +12996,7 @@ var init_types = __esm(() => {
         return makeIssue({
           data: returns,
           path: ctx.path,
-          errorMaps: [ctx.common.contextualErrorMap, ctx.schemaErrorMap, getErrorMap(), en_default].filter(x2 => !!x2),
+          errorMaps: [ctx.common.contextualErrorMap, ctx.schemaErrorMap, getErrorMap(), en_default].filter(x => !!x),
           issueData: {
             code: ZodIssueCode.invalid_return_type,
             returnTypeError: error,
@@ -14523,29 +13006,29 @@ var init_types = __esm(() => {
       const params = { errorMap: ctx.common.contextualErrorMap };
       const fn = ctx.data;
       if (this._def.returns instanceof ZodPromise) {
-        const me2 = this;
+        const me = this;
         return OK(async function (...args) {
           const error = new ZodError([]);
-          const parsedArgs = await me2._def.args.parseAsync(args, params).catch(e2 => {
-            error.addIssue(makeArgsIssue(args, e2));
+          const parsedArgs = await me._def.args.parseAsync(args, params).catch(e => {
+            error.addIssue(makeArgsIssue(args, e));
             throw error;
           });
           const result = await Reflect.apply(fn, this, parsedArgs);
-          const parsedReturns = await me2._def.returns._def.type.parseAsync(result, params).catch(e2 => {
-            error.addIssue(makeReturnsIssue(result, e2));
+          const parsedReturns = await me._def.returns._def.type.parseAsync(result, params).catch(e => {
+            error.addIssue(makeReturnsIssue(result, e));
             throw error;
           });
           return parsedReturns;
         });
       } else {
-        const me2 = this;
+        const me = this;
         return OK(function (...args) {
-          const parsedArgs = me2._def.args.safeParse(args, params);
+          const parsedArgs = me._def.args.safeParse(args, params);
           if (!parsedArgs.success) {
             throw new ZodError([makeArgsIssue(args, parsedArgs.error)]);
           }
           const result = Reflect.apply(fn, this, parsedArgs.data);
-          const parsedReturns = me2._def.returns.safeParse(result, params);
+          const parsedReturns = me._def.returns.safeParse(result, params);
           if (!parsedReturns.success) {
             throw new ZodError([makeReturnsIssue(result, parsedReturns.error)]);
           }
@@ -15101,10 +13584,10 @@ var init_types = __esm(() => {
         }
       }
     }
-    static create(a, b3) {
+    static create(a, b) {
       return new ZodPipeline({
         in: a,
-        out: b3,
+        out: b,
         typeName: ZodFirstPartyTypeKind.ZodPipeline,
       });
     }
@@ -16232,30 +14715,160 @@ Output ONLY the problems found \u2014 one per line. If none, output "No issues f
       },
       phase2: {
         resolve: {
-          prompt: `You are helping the user resolve a kloop failure for {plan_name}.
-
-## What Happened
-
-{kloop_evidence}
-
-## Context
+          prompt: `## Context Paths
 - Task spec: {task_spec_path}
 - Current plan: {plan_path}
 - Plans directory: {plans_dir}
 
-Read these to understand the original intent before proposing a strategy.`,
-        },
-        amend_plans: {
-          prompt: `You are amending plans for the current epoch. Read the resolution document at {resolution_path}
-\u2014 the previous TTY wrote it to explain what went wrong and what needs to change.
-
-## Context
-- Task spec: {task_spec_path}
-- Plans directory: {plans_dir}
+Read these files to understand the original intent.
 
 ## Kloop Evidence
 
-{kloop_evidence}`,
+{kloop_evidence}
+
+## What Happened
+
+The implementation loop for {plan_name} could not complete within its iteration limit.
+Review the kloop evidence above to understand what went wrong.
+
+## Decision Required
+
+Based on your analysis, you MUST choose one of these rewrite strategies.
+Discuss each option with the user and decide together:
+
+1. **refine_local** \u2014 The current plan is mostly correct but needs targeted fixes.
+   Choose when: the kloop was close to passing, issues are localized to this plan.
+   Effect: you rewrite the current plan, then a second review pass iterates on it.
+
+2. **patch_downstream** \u2014 Completed plans are fine, but remaining plans need updates
+   to account for what was learned. Choose when: earlier plans changed the approach
+   and downstream plans are now out of date.
+   Effect: you patch remaining plans, then a second review pass iterates on them.
+
+3. **regenerate_remaining** \u2014 Too much has changed; remaining plans should be
+   regenerated from scratch against the spec. Choose when: fundamental assumptions
+   shifted and incremental patches won't suffice.
+   Effect: you regenerate incomplete plans, then a second review pass iterates on them.
+
+4. **revisit_spec** \u2014 The spec itself has a contradiction or fundamental issue that
+   makes it impossible for ANY plan to succeed.
+   Choose when: the problem isn't the plans, it's what they're implementing.
+   Effect: you write feedback explaining what's wrong, then a second review pass
+   validates the feedback before escalating to a full replan.
+
+5. **retry** \u2014 The plan is fine as-is; just re-run the loop with more iterations.
+   Choose when: the failure was transient, environmental, or the loop just needed more time.
+   Effect: immediately re-runs the same plan without changes.
+
+## After Deciding \u2014 You MUST Do All Three Steps
+
+For **retry**: No amendments or snapshots needed. ONLY log the decision (Step 3), then /exit.
+
+### Step 1: Write the amendment
+
+For **refine_local**: Rewrite ONLY {plan_name} ({plan_path}). Each plan file MUST follow the template: {planTemplate}
+
+For **patch_downstream**: Rewrite INCOMPLETE plan files only.
+Completed plans (DO NOT edit):
+{completed_plans_list}
+Incomplete plans to update:
+{incomplete_plans_list}
+Each plan file MUST follow the template: {planTemplate}
+
+For **regenerate_remaining**: Rewrite ALL incomplete plan files from scratch.
+Completed plans (DO NOT edit):
+{completed_plans_list}
+Incomplete plans to regenerate:
+{incomplete_plans_list}
+Each plan file MUST follow the template: {planTemplate}
+
+For **revisit_spec**: Write feedback to {feedback_path} explaining what went wrong and what spec changes are needed.
+
+### Step 2: Snapshot the amendment
+
+\`\`\`bash
+kautopilot snapshot plans
+\`\`\`
+For revisit_spec, use: \`kautopilot snapshot spec\`
+
+The epoch version is auto-detected. This step is COMPULSORY \u2014 exit without a snapshot
+and this step will restart from scratch.
+
+### Step 3: Log your decision
+
+\`\`\`bash
+kautopilot log-event context:updated --metadata '{"rewriteDecision": "<your_choice>"}'
+\`\`\`
+
+Replace \`<your_choice>\` with one of: refine_local, patch_downstream, regenerate_remaining, revisit_spec, retry.
+
+After all three steps are done, tell the user the draft is ready for review and /exit.
+A second TTY will open so you and the user can iterate on the amendment before it's finalized.
+
+### If You Want to Abandon
+
+If the situation is unsalvageable and you want to give up entirely:
+\`\`\`
+kautopilot log-event resolve:abandoned
+\`\`\`
+Then /exit. The session will be marked as failed.`,
+        },
+        rewrite_spec: {
+          prompt: `## Review Amendment: {decision_title}
+
+{decision_specific_review_section}
+
+## Kloop Evidence
+
+{kloop_evidence}
+
+## Context Paths
+- Task spec: {task_spec_path}
+- Plans directory: {plans_dir}
+
+Read these files to understand the original intent and verify the amendment.
+
+## CRITICAL: Iteration & Approval Mechanics
+
+### Working Copies
+
+Edit files directly in their directories. Each version MUST be a complete, standalone
+document \u2014 NOT a diff or changelog.
+
+### Snapshot Workflow (COMPULSORY)
+
+After each edit cycle, you MUST create a snapshot:
+\`\`\`bash
+kautopilot snapshot {snapshot_type}
+\`\`\`
+
+This copies the working copies to a versioned snapshot. It outputs:
+- SNAPSHOT_VERSION=N
+- SNAPSHOT_PATH=...
+
+The epoch version is auto-detected from the session \u2014 you do not need to specify it.
+
+This step is COMPULSORY.
+
+### Approval Protocol
+
+When the user approves the amendment, you MUST do these things IN ORDER:
+1. Write the approval event:
+   \`\`\`bash
+   kautopilot log-event {approval_event}
+   \`\`\`
+2. THEN tell the user to /exit
+
+**CRITICAL**: Do NOT tell the user to /exit before writing the approval event.
+If the session crashes or the user Ctrl+C's before the approval event is logged,
+the amendment will NOT be considered approved and this step will re-run.
+
+### If You Want to Abandon
+
+\`\`\`
+kautopilot log-event resolve:abandoned
+\`\`\`
+Then /exit. The session will be marked as failed.`,
         },
       },
       phase3: {
@@ -16316,10 +14929,19 @@ Read these files to understand the original intent.
 - Checks status: {checks_status}
 - Open threads: {thread_count}
 
-Discuss the PR with the user. Figure out:
-1. What needs improvement?
-2. Implementation issue or spec issue?
-3. What spec changes would address it?`,
+## Discussion
+
+Discuss with the user:
+1. What about the PR needs improvement?
+2. Is this an implementation issue or a spec issue?
+3. What should change in the spec to address this?
+
+## Feedback
+
+When ready, write the feedback to {feedback_path}
+The feedback will be used to guide the next iteration.
+
+After writing feedback, return the revisit_spec signal.`,
         },
       },
       generic: {
@@ -16371,18 +14993,18 @@ Discuss the PR with the user. Figure out:
 });
 
 // src/core/agents.ts
-import { existsSync as existsSync5, readFileSync as readFileSync5 } from 'fs';
+import { existsSync as existsSync4, readFileSync as readFileSync4 } from 'fs';
 function setCachedConfig(config) {
   _cachedConfig = config;
 }
 function loadSessionAgents(sessionId) {
   const path = `${process.env.HOME}/.kautopilot/${sessionId}/config.yaml`;
-  if (!existsSync5(path)) {
+  if (!existsSync4(path)) {
     _cachedConfig = DEFAULT_CONFIG;
     return;
   }
   try {
-    const raw = readFileSync5(path, 'utf-8');
+    const raw = readFileSync4(path, 'utf-8');
     const parsed = YAML2.parse(raw);
     if (!parsed) {
       _cachedConfig = DEFAULT_CONFIG;
@@ -16456,14 +15078,1367 @@ function getDefaultBinary() {
   return config.claude_binary ?? 'claude';
 }
 var YAML2,
+  TTY_EXIT_INSTRUCTION = `
+
+When you are done, tell the user: "Exit this TTY (type /exit or Ctrl+C) to continue kautopilot."`,
   _cachedConfig = null;
 var init_agents = __esm(() => {
   init_types2();
   YAML2 = __toESM(require_dist(), 1);
 });
 
+// node_modules/sisteransi/src/index.js
+var require_src = __commonJS((exports, module) => {
+  var ESC = '\x1B';
+  var CSI = `${ESC}[`;
+  var beep = '\x07';
+  var cursor = {
+    to(x, y) {
+      if (!y) return `${CSI}${x + 1}G`;
+      return `${CSI}${y + 1};${x + 1}H`;
+    },
+    move(x, y) {
+      let ret = '';
+      if (x < 0) ret += `${CSI}${-x}D`;
+      else if (x > 0) ret += `${CSI}${x}C`;
+      if (y < 0) ret += `${CSI}${-y}A`;
+      else if (y > 0) ret += `${CSI}${y}B`;
+      return ret;
+    },
+    up: (count = 1) => `${CSI}${count}A`,
+    down: (count = 1) => `${CSI}${count}B`,
+    forward: (count = 1) => `${CSI}${count}C`,
+    backward: (count = 1) => `${CSI}${count}D`,
+    nextLine: (count = 1) => `${CSI}E`.repeat(count),
+    prevLine: (count = 1) => `${CSI}F`.repeat(count),
+    left: `${CSI}G`,
+    hide: `${CSI}?25l`,
+    show: `${CSI}?25h`,
+    save: `${ESC}7`,
+    restore: `${ESC}8`,
+  };
+  var scroll = {
+    up: (count = 1) => `${CSI}S`.repeat(count),
+    down: (count = 1) => `${CSI}T`.repeat(count),
+  };
+  var erase = {
+    screen: `${CSI}2J`,
+    up: (count = 1) => `${CSI}1J`.repeat(count),
+    down: (count = 1) => `${CSI}J`.repeat(count),
+    line: `${CSI}2K`,
+    lineEnd: `${CSI}K`,
+    lineStart: `${CSI}1K`,
+    lines(count) {
+      let clear = '';
+      for (let i = 0; i < count; i++) clear += this.line + (i < count - 1 ? cursor.up() : '');
+      if (count) clear += cursor.left;
+      return clear;
+    },
+  };
+  module.exports = { cursor, scroll, erase, beep };
+});
+
+// node_modules/picocolors/picocolors.js
+var require_picocolors = __commonJS((exports, module) => {
+  var p = process || {};
+  var argv = p.argv || [];
+  var env = p.env || {};
+  var isColorSupported =
+    !(!!env.NO_COLOR || argv.includes('--no-color')) &&
+    (!!env.FORCE_COLOR ||
+      argv.includes('--color') ||
+      p.platform === 'win32' ||
+      ((p.stdout || {}).isTTY && env.TERM !== 'dumb') ||
+      !!env.CI);
+  var formatter =
+    (open, close, replace = open) =>
+    input => {
+      let string = '' + input,
+        index = string.indexOf(close, open.length);
+      return ~index ? open + replaceClose(string, close, replace, index) + close : open + string + close;
+    };
+  var replaceClose = (string, close, replace, index) => {
+    let result = '',
+      cursor = 0;
+    do {
+      result += string.substring(cursor, index) + replace;
+      cursor = index + close.length;
+      index = string.indexOf(close, cursor);
+    } while (~index);
+    return result + string.substring(cursor);
+  };
+  var createColors = (enabled = isColorSupported) => {
+    let f = enabled ? formatter : () => String;
+    return {
+      isColorSupported: enabled,
+      reset: f('\x1B[0m', '\x1B[0m'),
+      bold: f('\x1B[1m', '\x1B[22m', '\x1B[22m\x1B[1m'),
+      dim: f('\x1B[2m', '\x1B[22m', '\x1B[22m\x1B[2m'),
+      italic: f('\x1B[3m', '\x1B[23m'),
+      underline: f('\x1B[4m', '\x1B[24m'),
+      inverse: f('\x1B[7m', '\x1B[27m'),
+      hidden: f('\x1B[8m', '\x1B[28m'),
+      strikethrough: f('\x1B[9m', '\x1B[29m'),
+      black: f('\x1B[30m', '\x1B[39m'),
+      red: f('\x1B[31m', '\x1B[39m'),
+      green: f('\x1B[32m', '\x1B[39m'),
+      yellow: f('\x1B[33m', '\x1B[39m'),
+      blue: f('\x1B[34m', '\x1B[39m'),
+      magenta: f('\x1B[35m', '\x1B[39m'),
+      cyan: f('\x1B[36m', '\x1B[39m'),
+      white: f('\x1B[37m', '\x1B[39m'),
+      gray: f('\x1B[90m', '\x1B[39m'),
+      bgBlack: f('\x1B[40m', '\x1B[49m'),
+      bgRed: f('\x1B[41m', '\x1B[49m'),
+      bgGreen: f('\x1B[42m', '\x1B[49m'),
+      bgYellow: f('\x1B[43m', '\x1B[49m'),
+      bgBlue: f('\x1B[44m', '\x1B[49m'),
+      bgMagenta: f('\x1B[45m', '\x1B[49m'),
+      bgCyan: f('\x1B[46m', '\x1B[49m'),
+      bgWhite: f('\x1B[47m', '\x1B[49m'),
+      blackBright: f('\x1B[90m', '\x1B[39m'),
+      redBright: f('\x1B[91m', '\x1B[39m'),
+      greenBright: f('\x1B[92m', '\x1B[39m'),
+      yellowBright: f('\x1B[93m', '\x1B[39m'),
+      blueBright: f('\x1B[94m', '\x1B[39m'),
+      magentaBright: f('\x1B[95m', '\x1B[39m'),
+      cyanBright: f('\x1B[96m', '\x1B[39m'),
+      whiteBright: f('\x1B[97m', '\x1B[39m'),
+      bgBlackBright: f('\x1B[100m', '\x1B[49m'),
+      bgRedBright: f('\x1B[101m', '\x1B[49m'),
+      bgGreenBright: f('\x1B[102m', '\x1B[49m'),
+      bgYellowBright: f('\x1B[103m', '\x1B[49m'),
+      bgBlueBright: f('\x1B[104m', '\x1B[49m'),
+      bgMagentaBright: f('\x1B[105m', '\x1B[49m'),
+      bgCyanBright: f('\x1B[106m', '\x1B[49m'),
+      bgWhiteBright: f('\x1B[107m', '\x1B[49m'),
+    };
+  };
+  module.exports = createColors();
+  module.exports.createColors = createColors;
+});
+
+// node_modules/@clack/core/dist/index.mjs
+import { stdin as j, stdout as M } from 'process';
+import * as g from 'readline';
+import O from 'readline';
+import { Writable as X } from 'stream';
+function DD({ onlyFirst: e = false } = {}) {
+  const t = [
+    '[\\u001B\\u009B][[\\]()#;?]*(?:(?:(?:(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]+)*|[a-zA-Z\\d]+(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]*)*)?(?:\\u0007|\\u001B\\u005C|\\u009C))',
+    '(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]))',
+  ].join('|');
+  return new RegExp(t, e ? undefined : 'g');
+}
+function P(e) {
+  if (typeof e != 'string') throw new TypeError(`Expected a \`string\`, got \`${typeof e}\``);
+  return e.replace(uD, '');
+}
+function L(e) {
+  return e && e.__esModule && Object.prototype.hasOwnProperty.call(e, 'default') ? e.default : e;
+}
+function p(e, u = {}) {
+  if (typeof e != 'string' || e.length === 0 || ((u = { ambiguousIsNarrow: true, ...u }), (e = P(e)), e.length === 0))
+    return 0;
+  e = e.replace(sD(), '  ');
+  const t = u.ambiguousIsNarrow ? 1 : 2;
+  let F = 0;
+  for (const s of e) {
+    const i = s.codePointAt(0);
+    if (i <= 31 || (i >= 127 && i <= 159) || (i >= 768 && i <= 879)) continue;
+    switch (eD.eastAsianWidth(s)) {
+      case 'F':
+      case 'W':
+        F += 2;
+        break;
+      case 'A':
+        F += t;
+        break;
+      default:
+        F += 1;
+    }
+  }
+  return F;
+}
+function rD() {
+  const e = new Map();
+  for (const [u, t] of Object.entries(r)) {
+    for (const [F, s] of Object.entries(t))
+      ((r[F] = { open: `\x1B[${s[0]}m`, close: `\x1B[${s[1]}m` }), (t[F] = r[F]), e.set(s[0], s[1]));
+    Object.defineProperty(r, u, { value: t, enumerable: false });
+  }
+  return (
+    Object.defineProperty(r, 'codes', { value: e, enumerable: false }),
+    (r.color.close = '\x1B[39m'),
+    (r.bgColor.close = '\x1B[49m'),
+    (r.color.ansi = N()),
+    (r.color.ansi256 = I()),
+    (r.color.ansi16m = R()),
+    (r.bgColor.ansi = N(w)),
+    (r.bgColor.ansi256 = I(w)),
+    (r.bgColor.ansi16m = R(w)),
+    Object.defineProperties(r, {
+      rgbToAnsi256: {
+        value: (u, t, F) =>
+          u === t && t === F
+            ? u < 8
+              ? 16
+              : u > 248
+                ? 231
+                : Math.round(((u - 8) / 247) * 24) + 232
+            : 16 + 36 * Math.round((u / 255) * 5) + 6 * Math.round((t / 255) * 5) + Math.round((F / 255) * 5),
+        enumerable: false,
+      },
+      hexToRgb: {
+        value: u => {
+          const t = /[a-f\d]{6}|[a-f\d]{3}/i.exec(u.toString(16));
+          if (!t) return [0, 0, 0];
+          let [F] = t;
+          F.length === 3 && (F = [...F].map(i => i + i).join(''));
+          const s = Number.parseInt(F, 16);
+          return [(s >> 16) & 255, (s >> 8) & 255, s & 255];
+        },
+        enumerable: false,
+      },
+      hexToAnsi256: { value: u => r.rgbToAnsi256(...r.hexToRgb(u)), enumerable: false },
+      ansi256ToAnsi: {
+        value: u => {
+          if (u < 8) return 30 + u;
+          if (u < 16) return 90 + (u - 8);
+          let t, F, s;
+          if (u >= 232) ((t = ((u - 232) * 10 + 8) / 255), (F = t), (s = t));
+          else {
+            u -= 16;
+            const C = u % 36;
+            ((t = Math.floor(u / 36) / 5), (F = Math.floor(C / 6) / 5), (s = (C % 6) / 5));
+          }
+          const i = Math.max(t, F, s) * 2;
+          if (i === 0) return 30;
+          let D = 30 + ((Math.round(s) << 2) | (Math.round(F) << 1) | Math.round(t));
+          return (i === 2 && (D += 60), D);
+        },
+        enumerable: false,
+      },
+      rgbToAnsi: { value: (u, t, F) => r.ansi256ToAnsi(r.rgbToAnsi256(u, t, F)), enumerable: false },
+      hexToAnsi: { value: u => r.ansi256ToAnsi(r.hexToAnsi256(u)), enumerable: false },
+    }),
+    r
+  );
+}
+function Y(e, u, t) {
+  return String(e)
+    .normalize()
+    .replace(
+      /\r\n/g,
+      `
+`,
+    )
+    .split(
+      `
+`,
+    )
+    .map(F => lD(F, u, t)).join(`
+`);
+}
+function $(e, u) {
+  if (typeof e == 'string') return B.aliases.get(e) === u;
+  for (const t of e) if (t !== undefined && $(t, u)) return true;
+  return false;
+}
+function BD(e, u) {
+  if (e === u) return;
+  const t = e.split(`
+`),
+    F = u.split(`
+`),
+    s = [];
+  for (let i = 0; i < Math.max(t.length, F.length); i++) t[i] !== F[i] && s.push(i);
+  return s;
+}
+function pD(e) {
+  return e === S;
+}
+function m(e, u) {
+  const t = e;
+  t.isTTY && t.setRawMode(u);
+}
+function fD({ input: e = j, output: u = M, overwrite: t = true, hideCursor: F = true } = {}) {
+  const s = g.createInterface({ input: e, output: u, prompt: '', tabSize: 1 });
+  (g.emitKeypressEvents(e, s), e.isTTY && e.setRawMode(true));
+  const i = (D, { name: C, sequence: n }) => {
+    const E = String(D);
+    if ($([E, C, n], 'cancel')) {
+      (F && u.write(import_sisteransi.cursor.show), process.exit(0));
+      return;
+    }
+    if (!t) return;
+    const a = C === 'return' ? 0 : -1,
+      o = C === 'return' ? -1 : 0;
+    g.moveCursor(u, a, o, () => {
+      g.clearLine(u, 1, () => {
+        e.once('keypress', i);
+      });
+    });
+  };
+  return (
+    F && u.write(import_sisteransi.cursor.hide),
+    e.once('keypress', i),
+    () => {
+      (e.off('keypress', i),
+        F && u.write(import_sisteransi.cursor.show),
+        e.isTTY && !AD && e.setRawMode(false),
+        (s.terminal = false),
+        s.close());
+    }
+  );
+}
+
+class x {
+  constructor(u, t = true) {
+    (h(this, 'input'),
+      h(this, 'output'),
+      h(this, '_abortSignal'),
+      h(this, 'rl'),
+      h(this, 'opts'),
+      h(this, '_render'),
+      h(this, '_track', false),
+      h(this, '_prevFrame', ''),
+      h(this, '_subscribers', new Map()),
+      h(this, '_cursor', 0),
+      h(this, 'state', 'initial'),
+      h(this, 'error', ''),
+      h(this, 'value'));
+    const { input: F = j, output: s = M, render: i, signal: D, ...C } = u;
+    ((this.opts = C),
+      (this.onKeypress = this.onKeypress.bind(this)),
+      (this.close = this.close.bind(this)),
+      (this.render = this.render.bind(this)),
+      (this._render = i.bind(this)),
+      (this._track = t),
+      (this._abortSignal = D),
+      (this.input = F),
+      (this.output = s));
+  }
+  unsubscribe() {
+    this._subscribers.clear();
+  }
+  setSubscriber(u, t) {
+    const F = this._subscribers.get(u) ?? [];
+    (F.push(t), this._subscribers.set(u, F));
+  }
+  on(u, t) {
+    this.setSubscriber(u, { cb: t });
+  }
+  once(u, t) {
+    this.setSubscriber(u, { cb: t, once: true });
+  }
+  emit(u, ...t) {
+    const F = this._subscribers.get(u) ?? [],
+      s = [];
+    for (const i of F) (i.cb(...t), i.once && s.push(() => F.splice(F.indexOf(i), 1)));
+    for (const i of s) i();
+  }
+  prompt() {
+    return new Promise((u, t) => {
+      if (this._abortSignal) {
+        if (this._abortSignal.aborted) return ((this.state = 'cancel'), this.close(), u(S));
+        this._abortSignal.addEventListener(
+          'abort',
+          () => {
+            ((this.state = 'cancel'), this.close());
+          },
+          { once: true },
+        );
+      }
+      const F = new X();
+      ((F._write = (s, i, D) => {
+        (this._track &&
+          ((this.value = this.rl?.line.replace(/\t/g, '')),
+          (this._cursor = this.rl?.cursor ?? 0),
+          this.emit('value', this.value)),
+          D());
+      }),
+        this.input.pipe(F),
+        (this.rl = O.createInterface({
+          input: this.input,
+          output: F,
+          tabSize: 2,
+          prompt: '',
+          escapeCodeTimeout: 50,
+          terminal: true,
+        })),
+        O.emitKeypressEvents(this.input, this.rl),
+        this.rl.prompt(),
+        this.opts.initialValue !== undefined && this._track && this.rl.write(this.opts.initialValue),
+        this.input.on('keypress', this.onKeypress),
+        m(this.input, true),
+        this.output.on('resize', this.render),
+        this.render(),
+        this.once('submit', () => {
+          (this.output.write(import_sisteransi.cursor.show),
+            this.output.off('resize', this.render),
+            m(this.input, false),
+            u(this.value));
+        }),
+        this.once('cancel', () => {
+          (this.output.write(import_sisteransi.cursor.show),
+            this.output.off('resize', this.render),
+            m(this.input, false),
+            u(S));
+        }));
+    });
+  }
+  onKeypress(u, t) {
+    if (
+      (this.state === 'error' && (this.state = 'active'),
+      t?.name &&
+        (!this._track && B.aliases.has(t.name) && this.emit('cursor', B.aliases.get(t.name)),
+        B.actions.has(t.name) && this.emit('cursor', t.name)),
+      u && (u.toLowerCase() === 'y' || u.toLowerCase() === 'n') && this.emit('confirm', u.toLowerCase() === 'y'),
+      u === '\t' &&
+        this.opts.placeholder &&
+        (this.value || (this.rl?.write(this.opts.placeholder), this.emit('value', this.opts.placeholder))),
+      u && this.emit('key', u.toLowerCase()),
+      t?.name === 'return')
+    ) {
+      if (this.opts.validate) {
+        const F = this.opts.validate(this.value);
+        F && ((this.error = F instanceof Error ? F.message : F), (this.state = 'error'), this.rl?.write(this.value));
+      }
+      this.state !== 'error' && (this.state = 'submit');
+    }
+    ($([u, t?.name, t?.sequence], 'cancel') && (this.state = 'cancel'),
+      (this.state === 'submit' || this.state === 'cancel') && this.emit('finalize'),
+      this.render(),
+      (this.state === 'submit' || this.state === 'cancel') && this.close());
+  }
+  close() {
+    (this.input.unpipe(),
+      this.input.removeListener('keypress', this.onKeypress),
+      this.output.write(`
+`),
+      m(this.input, false),
+      this.rl?.close(),
+      (this.rl = undefined),
+      this.emit(`${this.state}`, this.value),
+      this.unsubscribe());
+  }
+  restoreCursor() {
+    const u =
+      Y(this._prevFrame, process.stdout.columns, { hard: true }).split(`
+`).length - 1;
+    this.output.write(import_sisteransi.cursor.move(-999, u * -1));
+  }
+  render() {
+    const u = Y(this._render(this) ?? '', process.stdout.columns, { hard: true });
+    if (u !== this._prevFrame) {
+      if (this.state === 'initial') this.output.write(import_sisteransi.cursor.hide);
+      else {
+        const t = BD(this._prevFrame, u);
+        if ((this.restoreCursor(), t && t?.length === 1)) {
+          const F = t[0];
+          (this.output.write(import_sisteransi.cursor.move(0, F)), this.output.write(import_sisteransi.erase.lines(1)));
+          const s = u.split(`
+`);
+          (this.output.write(s[F]),
+            (this._prevFrame = u),
+            this.output.write(import_sisteransi.cursor.move(0, s.length - F - 1)));
+          return;
+        }
+        if (t && t?.length > 1) {
+          const F = t[0];
+          (this.output.write(import_sisteransi.cursor.move(0, F)), this.output.write(import_sisteransi.erase.down()));
+          const s = u
+            .split(
+              `
+`,
+            )
+            .slice(F);
+          (this.output.write(
+            s.join(`
+`),
+          ),
+            (this._prevFrame = u));
+          return;
+        }
+        this.output.write(import_sisteransi.erase.down());
+      }
+      (this.output.write(u), this.state === 'initial' && (this.state = 'active'), (this._prevFrame = u));
+    }
+  }
+}
+var import_sisteransi,
+  import_picocolors,
+  uD,
+  W,
+  tD,
+  eD,
+  FD = function () {
+    return /\uD83C\uDFF4\uDB40\uDC67\uDB40\uDC62(?:\uDB40\uDC77\uDB40\uDC6C\uDB40\uDC73|\uDB40\uDC73\uDB40\uDC63\uDB40\uDC74|\uDB40\uDC65\uDB40\uDC6E\uDB40\uDC67)\uDB40\uDC7F|(?:\uD83E\uDDD1\uD83C\uDFFF\u200D\u2764\uFE0F\u200D(?:\uD83D\uDC8B\u200D)?\uD83E\uDDD1|\uD83D\uDC69\uD83C\uDFFF\u200D\uD83E\uDD1D\u200D(?:\uD83D[\uDC68\uDC69]))(?:\uD83C[\uDFFB-\uDFFE])|(?:\uD83E\uDDD1\uD83C\uDFFE\u200D\u2764\uFE0F\u200D(?:\uD83D\uDC8B\u200D)?\uD83E\uDDD1|\uD83D\uDC69\uD83C\uDFFE\u200D\uD83E\uDD1D\u200D(?:\uD83D[\uDC68\uDC69]))(?:\uD83C[\uDFFB-\uDFFD\uDFFF])|(?:\uD83E\uDDD1\uD83C\uDFFD\u200D\u2764\uFE0F\u200D(?:\uD83D\uDC8B\u200D)?\uD83E\uDDD1|\uD83D\uDC69\uD83C\uDFFD\u200D\uD83E\uDD1D\u200D(?:\uD83D[\uDC68\uDC69]))(?:\uD83C[\uDFFB\uDFFC\uDFFE\uDFFF])|(?:\uD83E\uDDD1\uD83C\uDFFC\u200D\u2764\uFE0F\u200D(?:\uD83D\uDC8B\u200D)?\uD83E\uDDD1|\uD83D\uDC69\uD83C\uDFFC\u200D\uD83E\uDD1D\u200D(?:\uD83D[\uDC68\uDC69]))(?:\uD83C[\uDFFB\uDFFD-\uDFFF])|(?:\uD83E\uDDD1\uD83C\uDFFB\u200D\u2764\uFE0F\u200D(?:\uD83D\uDC8B\u200D)?\uD83E\uDDD1|\uD83D\uDC69\uD83C\uDFFB\u200D\uD83E\uDD1D\u200D(?:\uD83D[\uDC68\uDC69]))(?:\uD83C[\uDFFC-\uDFFF])|\uD83D\uDC68(?:\uD83C\uDFFB(?:\u200D(?:\u2764\uFE0F\u200D(?:\uD83D\uDC8B\u200D\uD83D\uDC68(?:\uD83C[\uDFFB-\uDFFF])|\uD83D\uDC68(?:\uD83C[\uDFFB-\uDFFF]))|\uD83E\uDD1D\u200D\uD83D\uDC68(?:\uD83C[\uDFFC-\uDFFF])|[\u2695\u2696\u2708]\uFE0F|\uD83C[\uDF3E\uDF73\uDF7C\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD]))?|(?:\uD83C[\uDFFC-\uDFFF])\u200D\u2764\uFE0F\u200D(?:\uD83D\uDC8B\u200D\uD83D\uDC68(?:\uD83C[\uDFFB-\uDFFF])|\uD83D\uDC68(?:\uD83C[\uDFFB-\uDFFF]))|\u200D(?:\u2764\uFE0F\u200D(?:\uD83D\uDC8B\u200D)?\uD83D\uDC68|(?:\uD83D[\uDC68\uDC69])\u200D(?:\uD83D\uDC66\u200D\uD83D\uDC66|\uD83D\uDC67\u200D(?:\uD83D[\uDC66\uDC67]))|\uD83D\uDC66\u200D\uD83D\uDC66|\uD83D\uDC67\u200D(?:\uD83D[\uDC66\uDC67])|\uD83C[\uDF3E\uDF73\uDF7C\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFF\u200D(?:\uD83E\uDD1D\u200D\uD83D\uDC68(?:\uD83C[\uDFFB-\uDFFE])|\uD83C[\uDF3E\uDF73\uDF7C\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFE\u200D(?:\uD83E\uDD1D\u200D\uD83D\uDC68(?:\uD83C[\uDFFB-\uDFFD\uDFFF])|\uD83C[\uDF3E\uDF73\uDF7C\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFD\u200D(?:\uD83E\uDD1D\u200D\uD83D\uDC68(?:\uD83C[\uDFFB\uDFFC\uDFFE\uDFFF])|\uD83C[\uDF3E\uDF73\uDF7C\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFC\u200D(?:\uD83E\uDD1D\u200D\uD83D\uDC68(?:\uD83C[\uDFFB\uDFFD-\uDFFF])|\uD83C[\uDF3E\uDF73\uDF7C\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|(?:\uD83C\uDFFF\u200D[\u2695\u2696\u2708]|\uD83C\uDFFE\u200D[\u2695\u2696\u2708]|\uD83C\uDFFD\u200D[\u2695\u2696\u2708]|\uD83C\uDFFC\u200D[\u2695\u2696\u2708]|\u200D[\u2695\u2696\u2708])\uFE0F|\u200D(?:(?:\uD83D[\uDC68\uDC69])\u200D(?:\uD83D[\uDC66\uDC67])|\uD83D[\uDC66\uDC67])|\uD83C\uDFFF|\uD83C\uDFFE|\uD83C\uDFFD|\uD83C\uDFFC)?|(?:\uD83D\uDC69(?:\uD83C\uDFFB\u200D\u2764\uFE0F\u200D(?:\uD83D\uDC8B\u200D(?:\uD83D[\uDC68\uDC69])|\uD83D[\uDC68\uDC69])|(?:\uD83C[\uDFFC-\uDFFF])\u200D\u2764\uFE0F\u200D(?:\uD83D\uDC8B\u200D(?:\uD83D[\uDC68\uDC69])|\uD83D[\uDC68\uDC69]))|\uD83E\uDDD1(?:\uD83C[\uDFFB-\uDFFF])\u200D\uD83E\uDD1D\u200D\uD83E\uDDD1)(?:\uD83C[\uDFFB-\uDFFF])|\uD83D\uDC69\u200D\uD83D\uDC69\u200D(?:\uD83D\uDC66\u200D\uD83D\uDC66|\uD83D\uDC67\u200D(?:\uD83D[\uDC66\uDC67]))|\uD83D\uDC69(?:\u200D(?:\u2764\uFE0F\u200D(?:\uD83D\uDC8B\u200D(?:\uD83D[\uDC68\uDC69])|\uD83D[\uDC68\uDC69])|\uD83C[\uDF3E\uDF73\uDF7C\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFF\u200D(?:\uD83C[\uDF3E\uDF73\uDF7C\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFE\u200D(?:\uD83C[\uDF3E\uDF73\uDF7C\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFD\u200D(?:\uD83C[\uDF3E\uDF73\uDF7C\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFC\u200D(?:\uD83C[\uDF3E\uDF73\uDF7C\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFB\u200D(?:\uD83C[\uDF3E\uDF73\uDF7C\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD]))|\uD83E\uDDD1(?:\u200D(?:\uD83E\uDD1D\u200D\uD83E\uDDD1|\uD83C[\uDF3E\uDF73\uDF7C\uDF84\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFF\u200D(?:\uD83C[\uDF3E\uDF73\uDF7C\uDF84\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFE\u200D(?:\uD83C[\uDF3E\uDF73\uDF7C\uDF84\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFD\u200D(?:\uD83C[\uDF3E\uDF73\uDF7C\uDF84\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFC\u200D(?:\uD83C[\uDF3E\uDF73\uDF7C\uDF84\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFB\u200D(?:\uD83C[\uDF3E\uDF73\uDF7C\uDF84\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD]))|\uD83D\uDC69\u200D\uD83D\uDC66\u200D\uD83D\uDC66|\uD83D\uDC69\u200D\uD83D\uDC69\u200D(?:\uD83D[\uDC66\uDC67])|\uD83D\uDC69\u200D\uD83D\uDC67\u200D(?:\uD83D[\uDC66\uDC67])|(?:\uD83D\uDC41\uFE0F\u200D\uD83D\uDDE8|\uD83E\uDDD1(?:\uD83C\uDFFF\u200D[\u2695\u2696\u2708]|\uD83C\uDFFE\u200D[\u2695\u2696\u2708]|\uD83C\uDFFD\u200D[\u2695\u2696\u2708]|\uD83C\uDFFC\u200D[\u2695\u2696\u2708]|\uD83C\uDFFB\u200D[\u2695\u2696\u2708]|\u200D[\u2695\u2696\u2708])|\uD83D\uDC69(?:\uD83C\uDFFF\u200D[\u2695\u2696\u2708]|\uD83C\uDFFE\u200D[\u2695\u2696\u2708]|\uD83C\uDFFD\u200D[\u2695\u2696\u2708]|\uD83C\uDFFC\u200D[\u2695\u2696\u2708]|\uD83C\uDFFB\u200D[\u2695\u2696\u2708]|\u200D[\u2695\u2696\u2708])|\uD83D\uDE36\u200D\uD83C\uDF2B|\uD83C\uDFF3\uFE0F\u200D\u26A7|\uD83D\uDC3B\u200D\u2744|(?:(?:\uD83C[\uDFC3\uDFC4\uDFCA]|\uD83D[\uDC6E\uDC70\uDC71\uDC73\uDC77\uDC81\uDC82\uDC86\uDC87\uDE45-\uDE47\uDE4B\uDE4D\uDE4E\uDEA3\uDEB4-\uDEB6]|\uD83E[\uDD26\uDD35\uDD37-\uDD39\uDD3D\uDD3E\uDDB8\uDDB9\uDDCD-\uDDCF\uDDD4\uDDD6-\uDDDD])(?:\uD83C[\uDFFB-\uDFFF])|\uD83D\uDC6F|\uD83E[\uDD3C\uDDDE\uDDDF])\u200D[\u2640\u2642]|(?:\u26F9|\uD83C[\uDFCB\uDFCC]|\uD83D\uDD75)(?:\uFE0F|\uD83C[\uDFFB-\uDFFF])\u200D[\u2640\u2642]|\uD83C\uDFF4\u200D\u2620|(?:\uD83C[\uDFC3\uDFC4\uDFCA]|\uD83D[\uDC6E\uDC70\uDC71\uDC73\uDC77\uDC81\uDC82\uDC86\uDC87\uDE45-\uDE47\uDE4B\uDE4D\uDE4E\uDEA3\uDEB4-\uDEB6]|\uD83E[\uDD26\uDD35\uDD37-\uDD39\uDD3D\uDD3E\uDDB8\uDDB9\uDDCD-\uDDCF\uDDD4\uDDD6-\uDDDD])\u200D[\u2640\u2642]|[\xA9\xAE\u203C\u2049\u2122\u2139\u2194-\u2199\u21A9\u21AA\u2328\u23CF\u23ED-\u23EF\u23F1\u23F2\u23F8-\u23FA\u24C2\u25AA\u25AB\u25B6\u25C0\u25FB\u25FC\u2600-\u2604\u260E\u2611\u2618\u2620\u2622\u2623\u2626\u262A\u262E\u262F\u2638-\u263A\u2640\u2642\u265F\u2660\u2663\u2665\u2666\u2668\u267B\u267E\u2692\u2694-\u2697\u2699\u269B\u269C\u26A0\u26A7\u26B0\u26B1\u26C8\u26CF\u26D1\u26D3\u26E9\u26F0\u26F1\u26F4\u26F7\u26F8\u2702\u2708\u2709\u270F\u2712\u2714\u2716\u271D\u2721\u2733\u2734\u2744\u2747\u2763\u27A1\u2934\u2935\u2B05-\u2B07\u3030\u303D\u3297\u3299]|\uD83C[\uDD70\uDD71\uDD7E\uDD7F\uDE02\uDE37\uDF21\uDF24-\uDF2C\uDF36\uDF7D\uDF96\uDF97\uDF99-\uDF9B\uDF9E\uDF9F\uDFCD\uDFCE\uDFD4-\uDFDF\uDFF5\uDFF7]|\uD83D[\uDC3F\uDCFD\uDD49\uDD4A\uDD6F\uDD70\uDD73\uDD76-\uDD79\uDD87\uDD8A-\uDD8D\uDDA5\uDDA8\uDDB1\uDDB2\uDDBC\uDDC2-\uDDC4\uDDD1-\uDDD3\uDDDC-\uDDDE\uDDE1\uDDE3\uDDE8\uDDEF\uDDF3\uDDFA\uDECB\uDECD-\uDECF\uDEE0-\uDEE5\uDEE9\uDEF0\uDEF3])\uFE0F|\uD83C\uDFF3\uFE0F\u200D\uD83C\uDF08|\uD83D\uDC69\u200D\uD83D\uDC67|\uD83D\uDC69\u200D\uD83D\uDC66|\uD83D\uDE35\u200D\uD83D\uDCAB|\uD83D\uDE2E\u200D\uD83D\uDCA8|\uD83D\uDC15\u200D\uD83E\uDDBA|\uD83E\uDDD1(?:\uD83C\uDFFF|\uD83C\uDFFE|\uD83C\uDFFD|\uD83C\uDFFC|\uD83C\uDFFB)?|\uD83D\uDC69(?:\uD83C\uDFFF|\uD83C\uDFFE|\uD83C\uDFFD|\uD83C\uDFFC|\uD83C\uDFFB)?|\uD83C\uDDFD\uD83C\uDDF0|\uD83C\uDDF6\uD83C\uDDE6|\uD83C\uDDF4\uD83C\uDDF2|\uD83D\uDC08\u200D\u2B1B|\u2764\uFE0F\u200D(?:\uD83D\uDD25|\uD83E\uDE79)|\uD83D\uDC41\uFE0F|\uD83C\uDFF3\uFE0F|\uD83C\uDDFF(?:\uD83C[\uDDE6\uDDF2\uDDFC])|\uD83C\uDDFE(?:\uD83C[\uDDEA\uDDF9])|\uD83C\uDDFC(?:\uD83C[\uDDEB\uDDF8])|\uD83C\uDDFB(?:\uD83C[\uDDE6\uDDE8\uDDEA\uDDEC\uDDEE\uDDF3\uDDFA])|\uD83C\uDDFA(?:\uD83C[\uDDE6\uDDEC\uDDF2\uDDF3\uDDF8\uDDFE\uDDFF])|\uD83C\uDDF9(?:\uD83C[\uDDE6\uDDE8\uDDE9\uDDEB-\uDDED\uDDEF-\uDDF4\uDDF7\uDDF9\uDDFB\uDDFC\uDDFF])|\uD83C\uDDF8(?:\uD83C[\uDDE6-\uDDEA\uDDEC-\uDDF4\uDDF7-\uDDF9\uDDFB\uDDFD-\uDDFF])|\uD83C\uDDF7(?:\uD83C[\uDDEA\uDDF4\uDDF8\uDDFA\uDDFC])|\uD83C\uDDF5(?:\uD83C[\uDDE6\uDDEA-\uDDED\uDDF0-\uDDF3\uDDF7-\uDDF9\uDDFC\uDDFE])|\uD83C\uDDF3(?:\uD83C[\uDDE6\uDDE8\uDDEA-\uDDEC\uDDEE\uDDF1\uDDF4\uDDF5\uDDF7\uDDFA\uDDFF])|\uD83C\uDDF2(?:\uD83C[\uDDE6\uDDE8-\uDDED\uDDF0-\uDDFF])|\uD83C\uDDF1(?:\uD83C[\uDDE6-\uDDE8\uDDEE\uDDF0\uDDF7-\uDDFB\uDDFE])|\uD83C\uDDF0(?:\uD83C[\uDDEA\uDDEC-\uDDEE\uDDF2\uDDF3\uDDF5\uDDF7\uDDFC\uDDFE\uDDFF])|\uD83C\uDDEF(?:\uD83C[\uDDEA\uDDF2\uDDF4\uDDF5])|\uD83C\uDDEE(?:\uD83C[\uDDE8-\uDDEA\uDDF1-\uDDF4\uDDF6-\uDDF9])|\uD83C\uDDED(?:\uD83C[\uDDF0\uDDF2\uDDF3\uDDF7\uDDF9\uDDFA])|\uD83C\uDDEC(?:\uD83C[\uDDE6\uDDE7\uDDE9-\uDDEE\uDDF1-\uDDF3\uDDF5-\uDDFA\uDDFC\uDDFE])|\uD83C\uDDEB(?:\uD83C[\uDDEE-\uDDF0\uDDF2\uDDF4\uDDF7])|\uD83C\uDDEA(?:\uD83C[\uDDE6\uDDE8\uDDEA\uDDEC\uDDED\uDDF7-\uDDFA])|\uD83C\uDDE9(?:\uD83C[\uDDEA\uDDEC\uDDEF\uDDF0\uDDF2\uDDF4\uDDFF])|\uD83C\uDDE8(?:\uD83C[\uDDE6\uDDE8\uDDE9\uDDEB-\uDDEE\uDDF0-\uDDF5\uDDF7\uDDFA-\uDDFF])|\uD83C\uDDE7(?:\uD83C[\uDDE6\uDDE7\uDDE9-\uDDEF\uDDF1-\uDDF4\uDDF6-\uDDF9\uDDFB\uDDFC\uDDFE\uDDFF])|\uD83C\uDDE6(?:\uD83C[\uDDE8-\uDDEC\uDDEE\uDDF1\uDDF2\uDDF4\uDDF6-\uDDFA\uDDFC\uDDFD\uDDFF])|[#\*0-9]\uFE0F\u20E3|\u2764\uFE0F|(?:\uD83C[\uDFC3\uDFC4\uDFCA]|\uD83D[\uDC6E\uDC70\uDC71\uDC73\uDC77\uDC81\uDC82\uDC86\uDC87\uDE45-\uDE47\uDE4B\uDE4D\uDE4E\uDEA3\uDEB4-\uDEB6]|\uD83E[\uDD26\uDD35\uDD37-\uDD39\uDD3D\uDD3E\uDDB8\uDDB9\uDDCD-\uDDCF\uDDD4\uDDD6-\uDDDD])(?:\uD83C[\uDFFB-\uDFFF])|(?:\u26F9|\uD83C[\uDFCB\uDFCC]|\uD83D\uDD75)(?:\uFE0F|\uD83C[\uDFFB-\uDFFF])|\uD83C\uDFF4|(?:[\u270A\u270B]|\uD83C[\uDF85\uDFC2\uDFC7]|\uD83D[\uDC42\uDC43\uDC46-\uDC50\uDC66\uDC67\uDC6B-\uDC6D\uDC72\uDC74-\uDC76\uDC78\uDC7C\uDC83\uDC85\uDC8F\uDC91\uDCAA\uDD7A\uDD95\uDD96\uDE4C\uDE4F\uDEC0\uDECC]|\uD83E[\uDD0C\uDD0F\uDD18-\uDD1C\uDD1E\uDD1F\uDD30-\uDD34\uDD36\uDD77\uDDB5\uDDB6\uDDBB\uDDD2\uDDD3\uDDD5])(?:\uD83C[\uDFFB-\uDFFF])|(?:[\u261D\u270C\u270D]|\uD83D[\uDD74\uDD90])(?:\uFE0F|\uD83C[\uDFFB-\uDFFF])|[\u270A\u270B]|\uD83C[\uDF85\uDFC2\uDFC7]|\uD83D[\uDC08\uDC15\uDC3B\uDC42\uDC43\uDC46-\uDC50\uDC66\uDC67\uDC6B-\uDC6D\uDC72\uDC74-\uDC76\uDC78\uDC7C\uDC83\uDC85\uDC8F\uDC91\uDCAA\uDD7A\uDD95\uDD96\uDE2E\uDE35\uDE36\uDE4C\uDE4F\uDEC0\uDECC]|\uD83E[\uDD0C\uDD0F\uDD18-\uDD1C\uDD1E\uDD1F\uDD30-\uDD34\uDD36\uDD77\uDDB5\uDDB6\uDDBB\uDDD2\uDDD3\uDDD5]|\uD83C[\uDFC3\uDFC4\uDFCA]|\uD83D[\uDC6E\uDC70\uDC71\uDC73\uDC77\uDC81\uDC82\uDC86\uDC87\uDE45-\uDE47\uDE4B\uDE4D\uDE4E\uDEA3\uDEB4-\uDEB6]|\uD83E[\uDD26\uDD35\uDD37-\uDD39\uDD3D\uDD3E\uDDB8\uDDB9\uDDCD-\uDDCF\uDDD4\uDDD6-\uDDDD]|\uD83D\uDC6F|\uD83E[\uDD3C\uDDDE\uDDDF]|[\u231A\u231B\u23E9-\u23EC\u23F0\u23F3\u25FD\u25FE\u2614\u2615\u2648-\u2653\u267F\u2693\u26A1\u26AA\u26AB\u26BD\u26BE\u26C4\u26C5\u26CE\u26D4\u26EA\u26F2\u26F3\u26F5\u26FA\u26FD\u2705\u2728\u274C\u274E\u2753-\u2755\u2757\u2795-\u2797\u27B0\u27BF\u2B1B\u2B1C\u2B50\u2B55]|\uD83C[\uDC04\uDCCF\uDD8E\uDD91-\uDD9A\uDE01\uDE1A\uDE2F\uDE32-\uDE36\uDE38-\uDE3A\uDE50\uDE51\uDF00-\uDF20\uDF2D-\uDF35\uDF37-\uDF7C\uDF7E-\uDF84\uDF86-\uDF93\uDFA0-\uDFC1\uDFC5\uDFC6\uDFC8\uDFC9\uDFCF-\uDFD3\uDFE0-\uDFF0\uDFF8-\uDFFF]|\uD83D[\uDC00-\uDC07\uDC09-\uDC14\uDC16-\uDC3A\uDC3C-\uDC3E\uDC40\uDC44\uDC45\uDC51-\uDC65\uDC6A\uDC79-\uDC7B\uDC7D-\uDC80\uDC84\uDC88-\uDC8E\uDC90\uDC92-\uDCA9\uDCAB-\uDCFC\uDCFF-\uDD3D\uDD4B-\uDD4E\uDD50-\uDD67\uDDA4\uDDFB-\uDE2D\uDE2F-\uDE34\uDE37-\uDE44\uDE48-\uDE4A\uDE80-\uDEA2\uDEA4-\uDEB3\uDEB7-\uDEBF\uDEC1-\uDEC5\uDED0-\uDED2\uDED5-\uDED7\uDEEB\uDEEC\uDEF4-\uDEFC\uDFE0-\uDFEB]|\uD83E[\uDD0D\uDD0E\uDD10-\uDD17\uDD1D\uDD20-\uDD25\uDD27-\uDD2F\uDD3A\uDD3F-\uDD45\uDD47-\uDD76\uDD78\uDD7A-\uDDB4\uDDB7\uDDBA\uDDBC-\uDDCB\uDDD0\uDDE0-\uDDFF\uDE70-\uDE74\uDE78-\uDE7A\uDE80-\uDE86\uDE90-\uDEA8\uDEB0-\uDEB6\uDEC0-\uDEC2\uDED0-\uDED6]|(?:[\u231A\u231B\u23E9-\u23EC\u23F0\u23F3\u25FD\u25FE\u2614\u2615\u2648-\u2653\u267F\u2693\u26A1\u26AA\u26AB\u26BD\u26BE\u26C4\u26C5\u26CE\u26D4\u26EA\u26F2\u26F3\u26F5\u26FA\u26FD\u2705\u270A\u270B\u2728\u274C\u274E\u2753-\u2755\u2757\u2795-\u2797\u27B0\u27BF\u2B1B\u2B1C\u2B50\u2B55]|\uD83C[\uDC04\uDCCF\uDD8E\uDD91-\uDD9A\uDDE6-\uDDFF\uDE01\uDE1A\uDE2F\uDE32-\uDE36\uDE38-\uDE3A\uDE50\uDE51\uDF00-\uDF20\uDF2D-\uDF35\uDF37-\uDF7C\uDF7E-\uDF93\uDFA0-\uDFCA\uDFCF-\uDFD3\uDFE0-\uDFF0\uDFF4\uDFF8-\uDFFF]|\uD83D[\uDC00-\uDC3E\uDC40\uDC42-\uDCFC\uDCFF-\uDD3D\uDD4B-\uDD4E\uDD50-\uDD67\uDD7A\uDD95\uDD96\uDDA4\uDDFB-\uDE4F\uDE80-\uDEC5\uDECC\uDED0-\uDED2\uDED5-\uDED7\uDEEB\uDEEC\uDEF4-\uDEFC\uDFE0-\uDFEB]|\uD83E[\uDD0C-\uDD3A\uDD3C-\uDD45\uDD47-\uDD78\uDD7A-\uDDCB\uDDCD-\uDDFF\uDE70-\uDE74\uDE78-\uDE7A\uDE80-\uDE86\uDE90-\uDEA8\uDEB0-\uDEB6\uDEC0-\uDEC2\uDED0-\uDED6])|(?:[#\*0-9\xA9\xAE\u203C\u2049\u2122\u2139\u2194-\u2199\u21A9\u21AA\u231A\u231B\u2328\u23CF\u23E9-\u23F3\u23F8-\u23FA\u24C2\u25AA\u25AB\u25B6\u25C0\u25FB-\u25FE\u2600-\u2604\u260E\u2611\u2614\u2615\u2618\u261D\u2620\u2622\u2623\u2626\u262A\u262E\u262F\u2638-\u263A\u2640\u2642\u2648-\u2653\u265F\u2660\u2663\u2665\u2666\u2668\u267B\u267E\u267F\u2692-\u2697\u2699\u269B\u269C\u26A0\u26A1\u26A7\u26AA\u26AB\u26B0\u26B1\u26BD\u26BE\u26C4\u26C5\u26C8\u26CE\u26CF\u26D1\u26D3\u26D4\u26E9\u26EA\u26F0-\u26F5\u26F7-\u26FA\u26FD\u2702\u2705\u2708-\u270D\u270F\u2712\u2714\u2716\u271D\u2721\u2728\u2733\u2734\u2744\u2747\u274C\u274E\u2753-\u2755\u2757\u2763\u2764\u2795-\u2797\u27A1\u27B0\u27BF\u2934\u2935\u2B05-\u2B07\u2B1B\u2B1C\u2B50\u2B55\u3030\u303D\u3297\u3299]|\uD83C[\uDC04\uDCCF\uDD70\uDD71\uDD7E\uDD7F\uDD8E\uDD91-\uDD9A\uDDE6-\uDDFF\uDE01\uDE02\uDE1A\uDE2F\uDE32-\uDE3A\uDE50\uDE51\uDF00-\uDF21\uDF24-\uDF93\uDF96\uDF97\uDF99-\uDF9B\uDF9E-\uDFF0\uDFF3-\uDFF5\uDFF7-\uDFFF]|\uD83D[\uDC00-\uDCFD\uDCFF-\uDD3D\uDD49-\uDD4E\uDD50-\uDD67\uDD6F\uDD70\uDD73-\uDD7A\uDD87\uDD8A-\uDD8D\uDD90\uDD95\uDD96\uDDA4\uDDA5\uDDA8\uDDB1\uDDB2\uDDBC\uDDC2-\uDDC4\uDDD1-\uDDD3\uDDDC-\uDDDE\uDDE1\uDDE3\uDDE8\uDDEF\uDDF3\uDDFA-\uDE4F\uDE80-\uDEC5\uDECB-\uDED2\uDED5-\uDED7\uDEE0-\uDEE5\uDEE9\uDEEB\uDEEC\uDEF0\uDEF3-\uDEFC\uDFE0-\uDFEB]|\uD83E[\uDD0C-\uDD3A\uDD3C-\uDD45\uDD47-\uDD78\uDD7A-\uDDCB\uDDCD-\uDDFF\uDE70-\uDE74\uDE78-\uDE7A\uDE80-\uDE86\uDE90-\uDEA8\uDEB0-\uDEB6\uDEC0-\uDEC2\uDED0-\uDED6])\uFE0F|(?:[\u261D\u26F9\u270A-\u270D]|\uD83C[\uDF85\uDFC2-\uDFC4\uDFC7\uDFCA-\uDFCC]|\uD83D[\uDC42\uDC43\uDC46-\uDC50\uDC66-\uDC78\uDC7C\uDC81-\uDC83\uDC85-\uDC87\uDC8F\uDC91\uDCAA\uDD74\uDD75\uDD7A\uDD90\uDD95\uDD96\uDE45-\uDE47\uDE4B-\uDE4F\uDEA3\uDEB4-\uDEB6\uDEC0\uDECC]|\uD83E[\uDD0C\uDD0F\uDD18-\uDD1F\uDD26\uDD30-\uDD39\uDD3C-\uDD3E\uDD77\uDDB5\uDDB6\uDDB8\uDDB9\uDDBB\uDDCD-\uDDCF\uDDD1-\uDDDD])/g;
+  },
+  sD,
+  w = 10,
+  N =
+    (e = 0) =>
+    u =>
+      `\x1B[${u + e}m`,
+  I =
+    (e = 0) =>
+    u =>
+      `\x1B[${38 + e};5;${u}m`,
+  R =
+    (e = 0) =>
+    (u, t, F) =>
+      `\x1B[${38 + e};2;${u};${t};${F}m`,
+  r,
+  iD,
+  CD,
+  ED,
+  d,
+  oD = 39,
+  y = '\x07',
+  V = '[',
+  nD = ']',
+  G = 'm',
+  _,
+  z = e => `${d.values().next().value}${V}${e}${G}`,
+  K = e => `${d.values().next().value}${_}${e}${y}`,
+  aD = e => e.split(' ').map(u => p(u)),
+  k = (e, u, t) => {
+    const F = [...u];
+    let s = false,
+      i = false,
+      D = p(P(e[e.length - 1]));
+    for (const [C, n] of F.entries()) {
+      const E = p(n);
+      if (
+        (D + E <= t ? (e[e.length - 1] += n) : (e.push(n), (D = 0)),
+        d.has(n) &&
+          ((s = true),
+          (i = F.slice(C + 1)
+            .join('')
+            .startsWith(_))),
+        s)
+      ) {
+        i ? n === y && ((s = false), (i = false)) : n === G && (s = false);
+        continue;
+      }
+      ((D += E), D === t && C < F.length - 1 && (e.push(''), (D = 0)));
+    }
+    !D && e[e.length - 1].length > 0 && e.length > 1 && (e[e.length - 2] += e.pop());
+  },
+  hD = e => {
+    const u = e.split(' ');
+    let t = u.length;
+    for (; t > 0 && !(p(u[t - 1]) > 0); ) t--;
+    return t === u.length ? e : u.slice(0, t).join(' ') + u.slice(t).join('');
+  },
+  lD = (e, u, t = {}) => {
+    if (t.trim !== false && e.trim() === '') return '';
+    let F = '',
+      s,
+      i;
+    const D = aD(e);
+    let C = [''];
+    for (const [E, a] of e.split(' ').entries()) {
+      t.trim !== false && (C[C.length - 1] = C[C.length - 1].trimStart());
+      let o = p(C[C.length - 1]);
+      if (
+        (E !== 0 &&
+          (o >= u && (t.wordWrap === false || t.trim === false) && (C.push(''), (o = 0)),
+          (o > 0 || t.trim === false) && ((C[C.length - 1] += ' '), o++)),
+        t.hard && D[E] > u)
+      ) {
+        const c2 = u - o,
+          f = 1 + Math.floor((D[E] - c2 - 1) / u);
+        (Math.floor((D[E] - 1) / u) < f && C.push(''), k(C, a, u));
+        continue;
+      }
+      if (o + D[E] > u && o > 0 && D[E] > 0) {
+        if (t.wordWrap === false && o < u) {
+          k(C, a, u);
+          continue;
+        }
+        C.push('');
+      }
+      if (o + D[E] > u && t.wordWrap === false) {
+        k(C, a, u);
+        continue;
+      }
+      C[C.length - 1] += a;
+    }
+    t.trim !== false && (C = C.map(E => hD(E)));
+    const n = [
+      ...C.join(`
+`),
+    ];
+    for (const [E, a] of n.entries()) {
+      if (((F += a), d.has(a))) {
+        const { groups: c2 } = new RegExp(`(?:\\${V}(?<code>\\d+)m|\\${_}(?<uri>.*)${y})`).exec(
+          n.slice(E).join(''),
+        ) || { groups: {} };
+        if (c2.code !== undefined) {
+          const f = Number.parseFloat(c2.code);
+          s = f === oD ? undefined : f;
+        } else c2.uri !== undefined && (i = c2.uri.length === 0 ? undefined : c2.uri);
+      }
+      const o = ED.codes.get(Number(s));
+      n[E + 1] ===
+      `
+`
+        ? (i && (F += K('')), s && o && (F += z(o)))
+        : a ===
+            `
+` && (s && o && (F += z(s)), i && (F += K(i)));
+    }
+    return F;
+  },
+  xD,
+  B,
+  AD,
+  S,
+  gD,
+  vD = (e, u, t) =>
+    u in e ? gD(e, u, { enumerable: true, configurable: true, writable: true, value: t }) : (e[u] = t),
+  h = (e, u, t) => (vD(e, typeof u != 'symbol' ? u + '' : u, t), t),
+  dD,
+  A,
+  OD,
+  PD = (e, u, t) =>
+    u in e ? OD(e, u, { enumerable: true, configurable: true, writable: true, value: t }) : (e[u] = t),
+  J = (e, u, t) => (PD(e, typeof u != 'symbol' ? u + '' : u, t), t),
+  LD,
+  RD;
+var init_dist = __esm(() => {
+  import_sisteransi = __toESM(require_src(), 1);
+  import_picocolors = __toESM(require_picocolors(), 1);
+  uD = DD();
+  W = { exports: {} };
+  (function (e) {
+    var u = {};
+    ((e.exports = u),
+      (u.eastAsianWidth = function (F) {
+        var s = F.charCodeAt(0),
+          i = F.length == 2 ? F.charCodeAt(1) : 0,
+          D = s;
+        return (
+          55296 <= s &&
+            s <= 56319 &&
+            56320 <= i &&
+            i <= 57343 &&
+            ((s &= 1023), (i &= 1023), (D = (s << 10) | i), (D += 65536)),
+          D == 12288 || (65281 <= D && D <= 65376) || (65504 <= D && D <= 65510)
+            ? 'F'
+            : D == 8361 ||
+                (65377 <= D && D <= 65470) ||
+                (65474 <= D && D <= 65479) ||
+                (65482 <= D && D <= 65487) ||
+                (65490 <= D && D <= 65495) ||
+                (65498 <= D && D <= 65500) ||
+                (65512 <= D && D <= 65518)
+              ? 'H'
+              : (4352 <= D && D <= 4447) ||
+                  (4515 <= D && D <= 4519) ||
+                  (4602 <= D && D <= 4607) ||
+                  (9001 <= D && D <= 9002) ||
+                  (11904 <= D && D <= 11929) ||
+                  (11931 <= D && D <= 12019) ||
+                  (12032 <= D && D <= 12245) ||
+                  (12272 <= D && D <= 12283) ||
+                  (12289 <= D && D <= 12350) ||
+                  (12353 <= D && D <= 12438) ||
+                  (12441 <= D && D <= 12543) ||
+                  (12549 <= D && D <= 12589) ||
+                  (12593 <= D && D <= 12686) ||
+                  (12688 <= D && D <= 12730) ||
+                  (12736 <= D && D <= 12771) ||
+                  (12784 <= D && D <= 12830) ||
+                  (12832 <= D && D <= 12871) ||
+                  (12880 <= D && D <= 13054) ||
+                  (13056 <= D && D <= 19903) ||
+                  (19968 <= D && D <= 42124) ||
+                  (42128 <= D && D <= 42182) ||
+                  (43360 <= D && D <= 43388) ||
+                  (44032 <= D && D <= 55203) ||
+                  (55216 <= D && D <= 55238) ||
+                  (55243 <= D && D <= 55291) ||
+                  (63744 <= D && D <= 64255) ||
+                  (65040 <= D && D <= 65049) ||
+                  (65072 <= D && D <= 65106) ||
+                  (65108 <= D && D <= 65126) ||
+                  (65128 <= D && D <= 65131) ||
+                  (110592 <= D && D <= 110593) ||
+                  (127488 <= D && D <= 127490) ||
+                  (127504 <= D && D <= 127546) ||
+                  (127552 <= D && D <= 127560) ||
+                  (127568 <= D && D <= 127569) ||
+                  (131072 <= D && D <= 194367) ||
+                  (177984 <= D && D <= 196605) ||
+                  (196608 <= D && D <= 262141)
+                ? 'W'
+                : (32 <= D && D <= 126) ||
+                    (162 <= D && D <= 163) ||
+                    (165 <= D && D <= 166) ||
+                    D == 172 ||
+                    D == 175 ||
+                    (10214 <= D && D <= 10221) ||
+                    (10629 <= D && D <= 10630)
+                  ? 'Na'
+                  : D == 161 ||
+                      D == 164 ||
+                      (167 <= D && D <= 168) ||
+                      D == 170 ||
+                      (173 <= D && D <= 174) ||
+                      (176 <= D && D <= 180) ||
+                      (182 <= D && D <= 186) ||
+                      (188 <= D && D <= 191) ||
+                      D == 198 ||
+                      D == 208 ||
+                      (215 <= D && D <= 216) ||
+                      (222 <= D && D <= 225) ||
+                      D == 230 ||
+                      (232 <= D && D <= 234) ||
+                      (236 <= D && D <= 237) ||
+                      D == 240 ||
+                      (242 <= D && D <= 243) ||
+                      (247 <= D && D <= 250) ||
+                      D == 252 ||
+                      D == 254 ||
+                      D == 257 ||
+                      D == 273 ||
+                      D == 275 ||
+                      D == 283 ||
+                      (294 <= D && D <= 295) ||
+                      D == 299 ||
+                      (305 <= D && D <= 307) ||
+                      D == 312 ||
+                      (319 <= D && D <= 322) ||
+                      D == 324 ||
+                      (328 <= D && D <= 331) ||
+                      D == 333 ||
+                      (338 <= D && D <= 339) ||
+                      (358 <= D && D <= 359) ||
+                      D == 363 ||
+                      D == 462 ||
+                      D == 464 ||
+                      D == 466 ||
+                      D == 468 ||
+                      D == 470 ||
+                      D == 472 ||
+                      D == 474 ||
+                      D == 476 ||
+                      D == 593 ||
+                      D == 609 ||
+                      D == 708 ||
+                      D == 711 ||
+                      (713 <= D && D <= 715) ||
+                      D == 717 ||
+                      D == 720 ||
+                      (728 <= D && D <= 731) ||
+                      D == 733 ||
+                      D == 735 ||
+                      (768 <= D && D <= 879) ||
+                      (913 <= D && D <= 929) ||
+                      (931 <= D && D <= 937) ||
+                      (945 <= D && D <= 961) ||
+                      (963 <= D && D <= 969) ||
+                      D == 1025 ||
+                      (1040 <= D && D <= 1103) ||
+                      D == 1105 ||
+                      D == 8208 ||
+                      (8211 <= D && D <= 8214) ||
+                      (8216 <= D && D <= 8217) ||
+                      (8220 <= D && D <= 8221) ||
+                      (8224 <= D && D <= 8226) ||
+                      (8228 <= D && D <= 8231) ||
+                      D == 8240 ||
+                      (8242 <= D && D <= 8243) ||
+                      D == 8245 ||
+                      D == 8251 ||
+                      D == 8254 ||
+                      D == 8308 ||
+                      D == 8319 ||
+                      (8321 <= D && D <= 8324) ||
+                      D == 8364 ||
+                      D == 8451 ||
+                      D == 8453 ||
+                      D == 8457 ||
+                      D == 8467 ||
+                      D == 8470 ||
+                      (8481 <= D && D <= 8482) ||
+                      D == 8486 ||
+                      D == 8491 ||
+                      (8531 <= D && D <= 8532) ||
+                      (8539 <= D && D <= 8542) ||
+                      (8544 <= D && D <= 8555) ||
+                      (8560 <= D && D <= 8569) ||
+                      D == 8585 ||
+                      (8592 <= D && D <= 8601) ||
+                      (8632 <= D && D <= 8633) ||
+                      D == 8658 ||
+                      D == 8660 ||
+                      D == 8679 ||
+                      D == 8704 ||
+                      (8706 <= D && D <= 8707) ||
+                      (8711 <= D && D <= 8712) ||
+                      D == 8715 ||
+                      D == 8719 ||
+                      D == 8721 ||
+                      D == 8725 ||
+                      D == 8730 ||
+                      (8733 <= D && D <= 8736) ||
+                      D == 8739 ||
+                      D == 8741 ||
+                      (8743 <= D && D <= 8748) ||
+                      D == 8750 ||
+                      (8756 <= D && D <= 8759) ||
+                      (8764 <= D && D <= 8765) ||
+                      D == 8776 ||
+                      D == 8780 ||
+                      D == 8786 ||
+                      (8800 <= D && D <= 8801) ||
+                      (8804 <= D && D <= 8807) ||
+                      (8810 <= D && D <= 8811) ||
+                      (8814 <= D && D <= 8815) ||
+                      (8834 <= D && D <= 8835) ||
+                      (8838 <= D && D <= 8839) ||
+                      D == 8853 ||
+                      D == 8857 ||
+                      D == 8869 ||
+                      D == 8895 ||
+                      D == 8978 ||
+                      (9312 <= D && D <= 9449) ||
+                      (9451 <= D && D <= 9547) ||
+                      (9552 <= D && D <= 9587) ||
+                      (9600 <= D && D <= 9615) ||
+                      (9618 <= D && D <= 9621) ||
+                      (9632 <= D && D <= 9633) ||
+                      (9635 <= D && D <= 9641) ||
+                      (9650 <= D && D <= 9651) ||
+                      (9654 <= D && D <= 9655) ||
+                      (9660 <= D && D <= 9661) ||
+                      (9664 <= D && D <= 9665) ||
+                      (9670 <= D && D <= 9672) ||
+                      D == 9675 ||
+                      (9678 <= D && D <= 9681) ||
+                      (9698 <= D && D <= 9701) ||
+                      D == 9711 ||
+                      (9733 <= D && D <= 9734) ||
+                      D == 9737 ||
+                      (9742 <= D && D <= 9743) ||
+                      (9748 <= D && D <= 9749) ||
+                      D == 9756 ||
+                      D == 9758 ||
+                      D == 9792 ||
+                      D == 9794 ||
+                      (9824 <= D && D <= 9825) ||
+                      (9827 <= D && D <= 9829) ||
+                      (9831 <= D && D <= 9834) ||
+                      (9836 <= D && D <= 9837) ||
+                      D == 9839 ||
+                      (9886 <= D && D <= 9887) ||
+                      (9918 <= D && D <= 9919) ||
+                      (9924 <= D && D <= 9933) ||
+                      (9935 <= D && D <= 9953) ||
+                      D == 9955 ||
+                      (9960 <= D && D <= 9983) ||
+                      D == 10045 ||
+                      D == 10071 ||
+                      (10102 <= D && D <= 10111) ||
+                      (11093 <= D && D <= 11097) ||
+                      (12872 <= D && D <= 12879) ||
+                      (57344 <= D && D <= 63743) ||
+                      (65024 <= D && D <= 65039) ||
+                      D == 65533 ||
+                      (127232 <= D && D <= 127242) ||
+                      (127248 <= D && D <= 127277) ||
+                      (127280 <= D && D <= 127337) ||
+                      (127344 <= D && D <= 127386) ||
+                      (917760 <= D && D <= 917999) ||
+                      (983040 <= D && D <= 1048573) ||
+                      (1048576 <= D && D <= 1114109)
+                    ? 'A'
+                    : 'N'
+        );
+      }),
+      (u.characterLength = function (F) {
+        var s = this.eastAsianWidth(F);
+        return s == 'F' || s == 'W' || s == 'A' ? 2 : 1;
+      }));
+    function t(F) {
+      return F.match(/[\uD800-\uDBFF][\uDC00-\uDFFF]|[^\uD800-\uDFFF]/g) || [];
+    }
+    ((u.length = function (F) {
+      for (var s = t(F), i = 0, D = 0; D < s.length; D++) i = i + this.characterLength(s[D]);
+      return i;
+    }),
+      (u.slice = function (F, s, i) {
+        ((textLen = u.length(F)), (s = s || 0), (i = i || 1), s < 0 && (s = textLen + s), i < 0 && (i = textLen + i));
+        for (var D = '', C = 0, n = t(F), E = 0; E < n.length; E++) {
+          var a = n[E],
+            o = u.length(a);
+          if (C >= s - (o == 2 ? 1 : 0))
+            if (C + o <= i) D += a;
+            else break;
+          C += o;
+        }
+        return D;
+      }));
+  })(W);
+  tD = W.exports;
+  eD = L(tD);
+  sD = L(FD);
+  r = {
+    modifier: {
+      reset: [0, 0],
+      bold: [1, 22],
+      dim: [2, 22],
+      italic: [3, 23],
+      underline: [4, 24],
+      overline: [53, 55],
+      inverse: [7, 27],
+      hidden: [8, 28],
+      strikethrough: [9, 29],
+    },
+    color: {
+      black: [30, 39],
+      red: [31, 39],
+      green: [32, 39],
+      yellow: [33, 39],
+      blue: [34, 39],
+      magenta: [35, 39],
+      cyan: [36, 39],
+      white: [37, 39],
+      blackBright: [90, 39],
+      gray: [90, 39],
+      grey: [90, 39],
+      redBright: [91, 39],
+      greenBright: [92, 39],
+      yellowBright: [93, 39],
+      blueBright: [94, 39],
+      magentaBright: [95, 39],
+      cyanBright: [96, 39],
+      whiteBright: [97, 39],
+    },
+    bgColor: {
+      bgBlack: [40, 49],
+      bgRed: [41, 49],
+      bgGreen: [42, 49],
+      bgYellow: [43, 49],
+      bgBlue: [44, 49],
+      bgMagenta: [45, 49],
+      bgCyan: [46, 49],
+      bgWhite: [47, 49],
+      bgBlackBright: [100, 49],
+      bgGray: [100, 49],
+      bgGrey: [100, 49],
+      bgRedBright: [101, 49],
+      bgGreenBright: [102, 49],
+      bgYellowBright: [103, 49],
+      bgBlueBright: [104, 49],
+      bgMagentaBright: [105, 49],
+      bgCyanBright: [106, 49],
+      bgWhiteBright: [107, 49],
+    },
+  };
+  Object.keys(r.modifier);
+  iD = Object.keys(r.color);
+  CD = Object.keys(r.bgColor);
+  [...iD, ...CD];
+  ED = rD();
+  d = new Set(['\x1B', '\x9B']);
+  _ = `${nD}8;;`;
+  xD = ['up', 'down', 'left', 'right', 'space', 'enter', 'cancel'];
+  B = {
+    actions: new Set(xD),
+    aliases: new Map([
+      ['k', 'up'],
+      ['j', 'down'],
+      ['h', 'left'],
+      ['l', 'right'],
+      ['\x03', 'cancel'],
+      ['escape', 'cancel'],
+    ]),
+  };
+  AD = globalThis.process.platform.startsWith('win');
+  S = Symbol('clack:cancel');
+  gD = Object.defineProperty;
+  dD = class dD extends x {
+    get cursor() {
+      return this.value ? 0 : 1;
+    }
+    get _value() {
+      return this.cursor === 0;
+    }
+    constructor(u) {
+      (super(u, false),
+        (this.value = !!u.initialValue),
+        this.on('value', () => {
+          this.value = this._value;
+        }),
+        this.on('confirm', t => {
+          (this.output.write(import_sisteransi.cursor.move(0, -1)),
+            (this.value = t),
+            (this.state = 'submit'),
+            this.close());
+        }),
+        this.on('cursor', () => {
+          this.value = !this.value;
+        }));
+    }
+  };
+  A = new WeakMap();
+  OD = Object.defineProperty;
+  LD = class LD extends x {
+    constructor(u) {
+      (super(u, false),
+        J(this, 'options'),
+        J(this, 'cursor', 0),
+        (this.options = u.options),
+        (this.cursor = this.options.findIndex(({ value: t }) => t === u.initialValue)),
+        this.cursor === -1 && (this.cursor = 0),
+        this.changeValue(),
+        this.on('cursor', t => {
+          switch (t) {
+            case 'left':
+            case 'up':
+              this.cursor = this.cursor === 0 ? this.options.length - 1 : this.cursor - 1;
+              break;
+            case 'down':
+            case 'right':
+              this.cursor = this.cursor === this.options.length - 1 ? 0 : this.cursor + 1;
+              break;
+          }
+          this.changeValue();
+        }));
+    }
+    get _value() {
+      return this.options[this.cursor];
+    }
+    changeValue() {
+      this.value = this._value.value;
+    }
+  };
+  RD = class RD extends x {
+    get valueWithCursor() {
+      if (this.state === 'submit') return this.value;
+      if (this.cursor >= this.value.length) return `${this.value}\u2588`;
+      const u = this.value.slice(0, this.cursor),
+        [t, ...F] = this.value.slice(this.cursor);
+      return `${u}${import_picocolors.default.inverse(t)}${F.join('')}`;
+    }
+    get cursor() {
+      return this._cursor;
+    }
+    constructor(u) {
+      (super(u),
+        this.on('finalize', () => {
+          this.value || (this.value = u.defaultValue);
+        }));
+    }
+  };
+});
+
+// node_modules/@clack/prompts/dist/index.mjs
+import y2 from 'process';
+function ce() {
+  return y2.platform !== 'win32'
+    ? y2.env.TERM !== 'linux'
+    : !!y2.env.CI ||
+        !!y2.env.WT_SESSION ||
+        !!y2.env.TERMINUS_SUBLIME ||
+        y2.env.ConEmuTask === '{cmd::Cmder}' ||
+        y2.env.TERM_PROGRAM === 'Terminus-Sublime' ||
+        y2.env.TERM_PROGRAM === 'vscode' ||
+        y2.env.TERM === 'xterm-256color' ||
+        y2.env.TERM === 'alacritty' ||
+        y2.env.TERMINAL_EMULATOR === 'JetBrains-JediTerm';
+}
+var import_picocolors2,
+  import_sisteransi2,
+  V2,
+  u = (t, n) => (V2 ? t : n),
+  le,
+  L2,
+  W2,
+  C,
+  ue,
+  o,
+  d2,
+  k2,
+  P2,
+  A2,
+  T,
+  F,
+  $e,
+  _2,
+  me,
+  de,
+  pe,
+  q,
+  D,
+  U,
+  K2,
+  b2 = t => {
+    switch (t) {
+      case 'initial':
+      case 'active':
+        return import_picocolors2.default.cyan(le);
+      case 'cancel':
+        return import_picocolors2.default.red(L2);
+      case 'error':
+        return import_picocolors2.default.yellow(W2);
+      case 'submit':
+        return import_picocolors2.default.green(C);
+    }
+  },
+  G2 = t => {
+    const { cursor: n, options: r2, style: i } = t,
+      s = t.maxItems ?? Number.POSITIVE_INFINITY,
+      c2 = Math.max(process.stdout.rows - 4, 0),
+      a = Math.min(c2, Math.max(s, 5));
+    let l2 = 0;
+    n >= l2 + a - 3 ? (l2 = Math.max(Math.min(n - a + 3, r2.length - a), 0)) : n < l2 + 2 && (l2 = Math.max(n - 2, 0));
+    const $2 = a < r2.length && l2 > 0,
+      g2 = a < r2.length && l2 + a < r2.length;
+    return r2.slice(l2, l2 + a).map((p2, v2, f) => {
+      const j2 = v2 === 0 && $2,
+        E = v2 === f.length - 1 && g2;
+      return j2 || E ? import_picocolors2.default.dim('...') : i(p2, v2 + l2 === n);
+    });
+  },
+  he = t =>
+    new RD({
+      validate: t.validate,
+      placeholder: t.placeholder,
+      defaultValue: t.defaultValue,
+      initialValue: t.initialValue,
+      render() {
+        const n = `${import_picocolors2.default.gray(o)}
+${b2(this.state)}  ${t.message}
+`,
+          r2 = t.placeholder
+            ? import_picocolors2.default.inverse(t.placeholder[0]) +
+              import_picocolors2.default.dim(t.placeholder.slice(1))
+            : import_picocolors2.default.inverse(import_picocolors2.default.hidden('_')),
+          i = this.value ? this.valueWithCursor : r2;
+        switch (this.state) {
+          case 'error':
+            return `${n.trim()}
+${import_picocolors2.default.yellow(o)}  ${i}
+${import_picocolors2.default.yellow(d2)}  ${import_picocolors2.default.yellow(this.error)}
+`;
+          case 'submit':
+            return `${n}${import_picocolors2.default.gray(o)}  ${import_picocolors2.default.dim(this.value || t.placeholder)}`;
+          case 'cancel':
+            return `${n}${import_picocolors2.default.gray(o)}  ${import_picocolors2.default.strikethrough(import_picocolors2.default.dim(this.value ?? ''))}${
+              this.value?.trim()
+                ? `
+${import_picocolors2.default.gray(o)}`
+                : ''
+            }`;
+          default:
+            return `${n}${import_picocolors2.default.cyan(o)}  ${i}
+${import_picocolors2.default.cyan(d2)}
+`;
+        }
+      },
+    }).prompt(),
+  ye = t => {
+    const n = t.active ?? 'Yes',
+      r2 = t.inactive ?? 'No';
+    return new dD({
+      active: n,
+      inactive: r2,
+      initialValue: t.initialValue ?? true,
+      render() {
+        const i = `${import_picocolors2.default.gray(o)}
+${b2(this.state)}  ${t.message}
+`,
+          s = this.value ? n : r2;
+        switch (this.state) {
+          case 'submit':
+            return `${i}${import_picocolors2.default.gray(o)}  ${import_picocolors2.default.dim(s)}`;
+          case 'cancel':
+            return `${i}${import_picocolors2.default.gray(o)}  ${import_picocolors2.default.strikethrough(import_picocolors2.default.dim(s))}
+${import_picocolors2.default.gray(o)}`;
+          default:
+            return `${i}${import_picocolors2.default.cyan(o)}  ${this.value ? `${import_picocolors2.default.green(k2)} ${n}` : `${import_picocolors2.default.dim(P2)} ${import_picocolors2.default.dim(n)}`} ${import_picocolors2.default.dim('/')} ${this.value ? `${import_picocolors2.default.dim(P2)} ${import_picocolors2.default.dim(r2)}` : `${import_picocolors2.default.green(k2)} ${r2}`}
+${import_picocolors2.default.cyan(d2)}
+`;
+        }
+      },
+    }).prompt();
+  },
+  ve = t => {
+    const n = (r2, i) => {
+      const s = r2.label ?? String(r2.value);
+      switch (i) {
+        case 'selected':
+          return `${import_picocolors2.default.dim(s)}`;
+        case 'active':
+          return `${import_picocolors2.default.green(k2)} ${s} ${r2.hint ? import_picocolors2.default.dim(`(${r2.hint})`) : ''}`;
+        case 'cancelled':
+          return `${import_picocolors2.default.strikethrough(import_picocolors2.default.dim(s))}`;
+        default:
+          return `${import_picocolors2.default.dim(P2)} ${import_picocolors2.default.dim(s)}`;
+      }
+    };
+    return new LD({
+      options: t.options,
+      initialValue: t.initialValue,
+      render() {
+        const r2 = `${import_picocolors2.default.gray(o)}
+${b2(this.state)}  ${t.message}
+`;
+        switch (this.state) {
+          case 'submit':
+            return `${r2}${import_picocolors2.default.gray(o)}  ${n(this.options[this.cursor], 'selected')}`;
+          case 'cancel':
+            return `${r2}${import_picocolors2.default.gray(o)}  ${n(this.options[this.cursor], 'cancelled')}
+${import_picocolors2.default.gray(o)}`;
+          default:
+            return `${r2}${import_picocolors2.default.cyan(o)}  ${G2({
+              cursor: this.cursor,
+              options: this.options,
+              maxItems: t.maxItems,
+              style: (i, s) => n(i, s ? 'active' : 'inactive'),
+            }).join(`
+${import_picocolors2.default.cyan(o)}  `)}
+${import_picocolors2.default.cyan(d2)}
+`;
+        }
+      },
+    }).prompt();
+  },
+  J2,
+  Y2 = ({ indicator: t = 'dots' } = {}) => {
+    const n = V2 ? ['\u25D2', '\u25D0', '\u25D3', '\u25D1'] : ['\u2022', 'o', 'O', '0'],
+      r2 = V2 ? 80 : 120,
+      i = process.env.CI === 'true';
+    let s,
+      c2,
+      a = false,
+      l2 = '',
+      $2,
+      g2 = performance.now();
+    const p2 = m2 => {
+        const h2 = m2 > 1 ? 'Something went wrong' : 'Canceled';
+        a && N2(h2, m2);
+      },
+      v2 = () => p2(2),
+      f = () => p2(1),
+      j2 = () => {
+        (process.on('uncaughtExceptionMonitor', v2),
+          process.on('unhandledRejection', v2),
+          process.on('SIGINT', f),
+          process.on('SIGTERM', f),
+          process.on('exit', p2));
+      },
+      E = () => {
+        (process.removeListener('uncaughtExceptionMonitor', v2),
+          process.removeListener('unhandledRejection', v2),
+          process.removeListener('SIGINT', f),
+          process.removeListener('SIGTERM', f),
+          process.removeListener('exit', p2));
+      },
+      B2 = () => {
+        if ($2 === undefined) return;
+        i &&
+          process.stdout.write(`
+`);
+        const m2 = $2.split(`
+`);
+        (process.stdout.write(import_sisteransi2.cursor.move(-999, m2.length - 1)),
+          process.stdout.write(import_sisteransi2.erase.down(m2.length)));
+      },
+      R2 = m2 => m2.replace(/\.+$/, ''),
+      O2 = m2 => {
+        const h2 = (performance.now() - m2) / 1000,
+          w2 = Math.floor(h2 / 60),
+          I2 = Math.floor(h2 % 60);
+        return w2 > 0 ? `[${w2}m ${I2}s]` : `[${I2}s]`;
+      },
+      H = (m2 = '') => {
+        ((a = true),
+          (s = fD()),
+          (l2 = R2(m2)),
+          (g2 = performance.now()),
+          process.stdout.write(`${import_picocolors2.default.gray(o)}
+`));
+        let h2 = 0,
+          w2 = 0;
+        (j2(),
+          (c2 = setInterval(() => {
+            if (i && l2 === $2) return;
+            (B2(), ($2 = l2));
+            const I2 = import_picocolors2.default.magenta(n[h2]);
+            if (i) process.stdout.write(`${I2}  ${l2}...`);
+            else if (t === 'timer') process.stdout.write(`${I2}  ${l2} ${O2(g2)}`);
+            else {
+              const z2 = '.'.repeat(Math.floor(w2)).slice(0, 3);
+              process.stdout.write(`${I2}  ${l2}${z2}`);
+            }
+            ((h2 = h2 + 1 < n.length ? h2 + 1 : 0), (w2 = w2 < n.length ? w2 + 0.125 : 0));
+          }, r2)));
+      },
+      N2 = (m2 = '', h2 = 0) => {
+        ((a = false), clearInterval(c2), B2());
+        const w2 =
+          h2 === 0
+            ? import_picocolors2.default.green(C)
+            : h2 === 1
+              ? import_picocolors2.default.red(L2)
+              : import_picocolors2.default.red(W2);
+        ((l2 = R2(m2 ?? l2)),
+          t === 'timer'
+            ? process.stdout.write(`${w2}  ${l2} ${O2(g2)}
+`)
+            : process.stdout.write(`${w2}  ${l2}
+`),
+          E(),
+          s());
+      };
+    return {
+      start: H,
+      stop: N2,
+      message: (m2 = '') => {
+        l2 = R2(m2 ?? l2);
+      },
+    };
+  };
+var init_dist2 = __esm(() => {
+  init_dist();
+  init_dist();
+  import_picocolors2 = __toESM(require_picocolors(), 1);
+  import_sisteransi2 = __toESM(require_src(), 1);
+  V2 = ce();
+  le = u('\u25C6', '*');
+  L2 = u('\u25A0', 'x');
+  W2 = u('\u25B2', 'x');
+  C = u('\u25C7', 'o');
+  ue = u('\u250C', 'T');
+  o = u('\u2502', '|');
+  d2 = u('\u2514', '\u2014');
+  k2 = u('\u25CF', '>');
+  P2 = u('\u25CB', ' ');
+  A2 = u('\u25FB', '[\u2022]');
+  T = u('\u25FC', '[+]');
+  F = u('\u25FB', '[ ]');
+  $e = u('\u25AA', '\u2022');
+  _2 = u('\u2500', '-');
+  me = u('\u256E', '+');
+  de = u('\u251C', '+');
+  pe = u('\u256F', '+');
+  q = u('\u25CF', '\u2022');
+  D = u('\u25C6', '*');
+  U = u('\u25B2', '!');
+  K2 = u('\u25A0', 'x');
+  J2 = `${import_picocolors2.default.gray(o)}  `;
+});
+
 // src/llm/spawn.ts
-import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync8, writeFileSync as writeFileSync4 } from 'fs';
+import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync7, writeFileSync as writeFileSync3 } from 'fs';
 var { spawn } = globalThis.Bun;
 function debugLog(...args) {
   if (DEBUG) console.error('[debug]', ...args);
@@ -16482,20 +16457,20 @@ function buildCommandString(args) {
 function createRunArtifacts(scope, executionType, binary, args, prompt, options) {
   const runNumber = nextRunNumber(scope);
   const runPath = runDir(scope, runNumber);
-  mkdirSync8(runPath, { recursive: true });
+  mkdirSync7(runPath, { recursive: true });
   const contextPath = runFilePath(scope, runNumber, 'context');
   const logsPath = runFilePath(scope, runNumber, 'logs');
   const commandPath = runFilePath(scope, runNumber, 'command');
   const promptPath = runFilePath(scope, runNumber, 'prompt.md');
-  writeFileSync4(promptPath, prompt);
-  writeFileSync4(
+  writeFileSync3(promptPath, prompt);
+  writeFileSync3(
     commandPath,
     `${buildCommandString(args)}
 `,
   );
-  writeFileSync4(logsPath, '');
+  writeFileSync3(logsPath, '');
   const startedAt = new Date().toISOString();
-  writeFileSync4(
+  writeFileSync3(
     contextPath,
     import_yaml2.stringify({
       run: runNumber,
@@ -16523,7 +16498,7 @@ function createRunArtifacts(scope, executionType, binary, args, prompt, options)
   };
 }
 function updateRunContext(info, data) {
-  writeFileSync4(info.contextPath, import_yaml2.stringify(data));
+  writeFileSync3(info.contextPath, import_yaml2.stringify(data));
 }
 function extractResultText(jsonlOutput) {
   const lines = jsonlOutput
@@ -16722,6 +16697,128 @@ var init_spawn = __esm(() => {
   import_yaml2 = __toESM(require_dist(), 1);
   DEBUG = !!process.env.KAUTOPILOT_DEBUG;
 });
+
+// src/core/zellij.ts
+function zellijSessionName(sessionId) {
+  return `kautopilot-${sessionId}`;
+}
+function isZellijSessionAlive(sessionId) {
+  const name = zellijSessionName(sessionId);
+  try {
+    const result = Bun.spawnSync(['zellij', 'list-sessions', '-n', '-s']);
+    if (result.exitCode !== 0) return false;
+    const sessions = result.stdout
+      .toString()
+      .trim()
+      .split(
+        `
+`,
+      )
+      .filter(Boolean);
+    return sessions.includes(name);
+  } catch {
+    return false;
+  }
+}
+function killZellijSession(sessionId) {
+  const name = zellijSessionName(sessionId);
+  try {
+    const result = Bun.spawnSync(['zellij', 'kill-session', name]);
+    return result.exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
+// src/core/lock.ts
+import {
+  existsSync as existsSync7,
+  mkdirSync as mkdirSync9,
+  readFileSync as readFileSync6,
+  unlinkSync as unlinkSync2,
+  writeFileSync as writeFileSync5,
+} from 'fs';
+import { dirname as dirname9 } from 'path';
+function lockPath(id) {
+  return `${process.env.HOME}/.kautopilot/${id}/lock.pid`;
+}
+function isProcessAlive2(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function acquireLock(id) {
+  const path = lockPath(id);
+  mkdirSync9(dirname9(path), { recursive: true });
+  if (existsSync7(path)) {
+    const existingPid = parseInt(readFileSync6(path, 'utf-8').trim(), 10);
+    if (isProcessAlive2(existingPid)) {
+      throw new Error(`Session is already running (PID ${existingPid}). Use \`kautopilot stop\` first.`);
+    }
+    console.warn(`Warning: Stale lock detected (PID ${existingPid} not alive). Auto-cleaning.`);
+    unlinkSync2(path);
+  }
+  writeFileSync5(path, String(process.pid));
+  const cleanup = () => {
+    try {
+      if (existsSync7(path)) {
+        const storedPid = readFileSync6(path, 'utf-8').trim();
+        if (storedPid === String(process.pid)) {
+          unlinkSync2(path);
+        }
+      }
+    } catch {}
+  };
+  process.on('SIGINT', () => {
+    cleanup();
+    process.exit(130);
+  });
+  process.on('SIGTERM', () => {
+    cleanup();
+    process.exit(143);
+  });
+  process.on('exit', cleanup);
+}
+function checkLock(id) {
+  const path = lockPath(id);
+  const zellijAlive = isZellijSessionAlive(id);
+  if (!existsSync7(path)) {
+    if (zellijAlive) {
+      console.warn(`Warning: Orphaned zellij session for ${id} (no PID). Reaping.`);
+      killZellijSession(id);
+    }
+    return { locked: false, pid: 0, alive: false, zellijAlive: false };
+  }
+  const pid = parseInt(readFileSync6(path, 'utf-8').trim(), 10);
+  const alive = isProcessAlive2(pid);
+  if (!alive) {
+    console.warn(`Warning: Stale lock detected (PID ${pid} not alive). Auto-cleaning.`);
+    try {
+      unlinkSync2(path);
+    } catch {}
+    if (zellijAlive) {
+      console.warn(`Warning: Orphaned zellij session for ${id}. Reaping.`);
+      killZellijSession(id);
+    }
+    return { locked: false, pid, alive: false, zellijAlive: false };
+  }
+  return { locked: true, pid, alive: true, zellijAlive };
+}
+function releaseLock(id) {
+  const path = lockPath(id);
+  try {
+    if (existsSync7(path)) {
+      const storedPid = readFileSync6(path, 'utf-8').trim();
+      if (storedPid === String(process.pid)) {
+        unlinkSync2(path);
+      }
+    }
+  } catch {}
+}
+var init_lock = () => {};
 
 // src/core/config.ts
 import {
@@ -17087,12 +17184,7 @@ var init_config = __esm(() => {
       reason: 'reason for resolve ("conflict" or "retry")',
       attempt: 'attempt number (1-indexed)',
     },
-    'agents.phase2.amend_plans': {
-      resolution_path: 'path to the resolution document written by resolve TTY',
-      task_spec_path: 'path to the task spec file',
-      plans_dir: 'path to the plans directory',
-      kloop_evidence: 'output from kloop describe',
-    },
+    'agents.phase2.rewrite_spec': {},
     'agents.phase3.eval': {
       spec_path: 'path to the task spec file',
       plan_paths: 'paths to plan files (newline-separated)',
@@ -17199,6 +17291,41 @@ var shortId;
 var init_id = __esm(() => {
   init_nanoid();
   shortId = customAlphabet('0123456789abcdefghijklmnopqrstuvwxyz', 8);
+});
+
+// src/llm/inquirer.ts
+var exports_inquirer = {};
+__export(exports_inquirer, {
+  textInput: () => textInput,
+  selectOption: () => selectOption,
+  confirmAction: () => confirmAction,
+});
+async function confirmAction(message, defaultValue = false) {
+  const result = await ye({ message, initialValue: defaultValue });
+  if (pD(result)) {
+    process.exit(0);
+  }
+  return result;
+}
+async function selectOption(message, options) {
+  const result = await ve({
+    message,
+    options,
+  });
+  if (pD(result) || typeof result !== 'string') {
+    process.exit(0);
+  }
+  return result;
+}
+async function textInput(message, placeholder) {
+  const result = await he({ message, placeholder });
+  if (pD(result)) {
+    process.exit(0);
+  }
+  return result;
+}
+var init_inquirer = __esm(() => {
+  init_dist2();
 });
 
 // src/core/init-types.ts
@@ -84412,7 +84539,7 @@ import {
   copyFileSync as copyFileSync3,
   existsSync as existsSync16,
   mkdirSync as mkdirSync15,
-  rmSync as rmSync3,
+  rmSync as rmSync2,
   writeFileSync as writeFileSync12,
 } from 'fs';
 function createInitCommand() {
@@ -84457,7 +84584,7 @@ async function runInit(ticketId, opts, cwd) {
       const oldSessionDir = sessionDir(existingSession.id);
       deleteSession(existingSession.id);
       if (existsSync16(oldSessionDir)) {
-        rmSync3(oldSessionDir, { recursive: true, force: true });
+        rmSync2(oldSessionDir, { recursive: true, force: true });
       }
       logOk(`Retired old session ${existingSession.id}. Starting fresh init.`);
     }
@@ -84634,10 +84761,10 @@ async function ghPrChecks(prNumber, cwd) {
     throw new Error(`gh pr checks failed: ${result.stderr}`);
   }
   const checks = parseJson(result.stdout, 'pr-checks');
-  return checks.map(c4 => {
-    const s = c4.state.toLowerCase();
+  return checks.map(c3 => {
+    const s = c3.state.toLowerCase();
     return {
-      name: c4.name,
+      name: c3.name,
       status: s === 'pass' || s === 'success' ? 'passing' : s === 'fail' || s === 'failure' ? 'failing' : 'pending',
     };
   });
@@ -84705,11 +84832,11 @@ async function ghReviewThreads(prNumber, cwd) {
       author: t.comments.nodes[0]?.author?.login || 'unknown',
       body: t.comments.nodes[0]?.body || '',
       firstCommentId: t.comments.nodes[0]?.id || '',
-      replies: t.comments.nodes.slice(1).map(c4 => ({
-        id: c4.id,
-        author: c4.author?.login || 'unknown',
-        body: c4.body,
-        isBot: c4.author?.login?.includes('[bot]') ?? false,
+      replies: t.comments.nodes.slice(1).map(c3 => ({
+        id: c3.id,
+        author: c3.author?.login || 'unknown',
+        body: c3.body,
+        isBot: c3.author?.login?.includes('[bot]') ?? false,
       })),
     }));
 }
@@ -84882,113 +85009,8 @@ var init_github = () => {};
 // src/index.ts
 init_esm();
 import { readFileSync as readFileSync19 } from 'fs';
-import { dirname as dirname15, join as join23 } from 'path';
+import { dirname as dirname15, join as join22 } from 'path';
 import { fileURLToPath } from 'url';
-
-// src/cli/delete.ts
-init_esm();
-init_artifacts();
-init_db();
-init_git();
-init_lock();
-init_inquirer();
-init_format();
-import { rmSync } from 'fs';
-function createDeleteCommand() {
-  return new Command('delete')
-    .alias('rm')
-    .argument('[id]', 'Session ID (omit to delete current worktree session)')
-    .option('-a, --all', 'Delete all stopped sessions')
-    .option('--force', 'Skip confirmation')
-    .option('--running', 'Also delete running sessions (stops them first)')
-    .action(async (id, opts) => {
-      try {
-        await runDelete(id, opts);
-      } catch (err) {
-        logError(err instanceof Error ? err.message : String(err));
-        process.exit(1);
-      }
-    });
-}
-async function stopAndCleanup(sessionId) {
-  const lockInfo = checkLock(sessionId);
-  if (lockInfo.locked) {
-    try {
-      process.kill(lockInfo.pid, 'SIGTERM');
-      for (let i = 0; i < 50; i++) {
-        await new Promise(r2 => setTimeout(r2, 100));
-        try {
-          process.kill(lockInfo.pid, 0);
-        } catch {
-          break;
-        }
-      }
-      try {
-        process.kill(lockInfo.pid, 'SIGKILL');
-      } catch {}
-    } catch {}
-    releaseLock(sessionId);
-  }
-  killZellijSession(sessionId);
-  return lockInfo.locked;
-}
-async function deleteSessionDir(sessionId) {
-  rmSync(sessionDir(sessionId), { recursive: true, force: true });
-  deleteSession(sessionId);
-}
-async function runDelete(id, opts) {
-  if (opts.all) {
-    const sessions = listSessions({ includeAll: true });
-    const toDelete = sessions.filter(s => opts.running || !checkLock(s.id).locked);
-    if (toDelete.length === 0) {
-      logOk('No sessions to delete.');
-      return;
-    }
-    if (!opts.force) {
-      const confirmed = await confirmAction(`Delete ${toDelete.length} session(s)?`, false);
-      if (!confirmed) return;
-    }
-    for (const s of toDelete) {
-      await stopAndCleanup(s.id);
-      deleteSessionDir(s.id);
-      logOk(`Deleted ${s.id}`);
-    }
-    return;
-  }
-  let session;
-  if (id) {
-    session = getSessionById(id);
-    if (!session) {
-      logError(`Session ${id} not found.`);
-      process.exit(1);
-    }
-  } else {
-    try {
-      const repoPath = getGitRoot();
-      const worktree = getWorktree();
-      session = getSessionByWorktree(repoPath, worktree);
-    } catch {
-      logError('No session found in this worktree.');
-      process.exit(1);
-    }
-    if (!session) {
-      logError('No session found in this worktree.');
-      process.exit(1);
-    }
-  }
-  const lockInfo = checkLock(session.id);
-  if (lockInfo.locked && !opts.running) {
-    logError(`Session ${session.id} is running. Use --running to stop and delete.`);
-    process.exit(1);
-  }
-  if (!opts.force && !id) {
-    const confirmed = await confirmAction(`Delete session ${session.id}?`, false);
-    if (!confirmed) return;
-  }
-  const wasRunning = await stopAndCleanup(session.id);
-  deleteSessionDir(session.id);
-  logOk(`Session ${session.id} deleted${wasRunning ? ' (was running)' : ''}.`);
-}
 
 // src/cli/describe.ts
 init_esm();
@@ -85013,10 +85035,10 @@ import { join as join7 } from 'path';
 
 // src/core/artifact-versioning.ts
 init_artifacts();
-import { existsSync as existsSync6, readdirSync as readdirSync2 } from 'fs';
+import { existsSync as existsSync5, readdirSync as readdirSync2 } from 'fs';
 function findNextSpecVersion(sessionId, epochVersion) {
   const artifactDir = snapshotPath(sessionId, epochVersion);
-  if (!existsSync6(artifactDir)) return 1;
+  if (!existsSync5(artifactDir)) return 1;
   const files = readdirSync2(artifactDir);
   const versions = files
     .filter(f => /^task-spec-(\d+)\.md$/.test(f))
@@ -85034,12 +85056,12 @@ function findLatestSpecPath(sessionId, epochVersion) {
 }
 function findNextPlansVersion(sessionId, epochVersion) {
   const artifactDir = snapshotPath(sessionId, epochVersion);
-  if (!existsSync6(artifactDir)) return 1;
+  if (!existsSync5(artifactDir)) return 1;
   const entries = readdirSync2(artifactDir, { withFileTypes: true });
   const versions = entries
-    .filter(e2 => e2.isDirectory() && /^plans-(\d+)$/.test(e2.name))
-    .map(e2 => {
-      const match = e2.name.match(/^plans-(\d+)$/);
+    .filter(e => e.isDirectory() && /^plans-(\d+)$/.test(e.name))
+    .map(e => {
+      const match = e.name.match(/^plans-(\d+)$/);
       return match ? parseInt(match[1], 10) : 0;
     });
   return versions.length > 0 ? Math.max(...versions) + 1 : 1;
@@ -85058,19 +85080,19 @@ init_artifacts();
 init_dist2();
 init_spawn();
 import {
-  existsSync as existsSync7,
-  mkdirSync as mkdirSync9,
-  readFileSync as readFileSync6,
-  writeFileSync as writeFileSync5,
+  existsSync as existsSync6,
+  mkdirSync as mkdirSync8,
+  readFileSync as readFileSync5,
+  writeFileSync as writeFileSync4,
 } from 'fs';
-import { dirname as dirname9, join as join5 } from 'path';
+import { dirname as dirname8, join as join5 } from 'path';
 var { spawn: spawn2 } = globalThis.Bun;
 var cache = new Map();
 var GLOBAL_CACHE_FILE = join5(process.env.HOME ?? '', '.kautopilot', 'binary-config-dirs.json');
 function loadPersistedConfigDirs() {
-  if (!existsSync7(GLOBAL_CACHE_FILE)) return false;
+  if (!existsSync6(GLOBAL_CACHE_FILE)) return false;
   try {
-    const data = JSON.parse(readFileSync6(GLOBAL_CACHE_FILE, 'utf-8'));
+    const data = JSON.parse(readFileSync5(GLOBAL_CACHE_FILE, 'utf-8'));
     for (const [binary, dir] of Object.entries(data)) {
       cache.set(binary, dir);
     }
@@ -85082,17 +85104,17 @@ function loadPersistedConfigDirs() {
 }
 function persistConfigDirs(binaries) {
   let existing = {};
-  if (existsSync7(GLOBAL_CACHE_FILE)) {
+  if (existsSync6(GLOBAL_CACHE_FILE)) {
     try {
-      existing = JSON.parse(readFileSync6(GLOBAL_CACHE_FILE, 'utf-8'));
+      existing = JSON.parse(readFileSync5(GLOBAL_CACHE_FILE, 'utf-8'));
     } catch {}
   }
   for (const binary of binaries) {
     const dir = cache.get(binary);
     if (dir) existing[binary] = dir;
   }
-  mkdirSync9(dirname9(GLOBAL_CACHE_FILE), { recursive: true });
-  writeFileSync5(GLOBAL_CACHE_FILE, JSON.stringify(existing, null, 2));
+  mkdirSync8(dirname8(GLOBAL_CACHE_FILE), { recursive: true });
+  writeFileSync4(GLOBAL_CACHE_FILE, JSON.stringify(existing, null, 2));
   debugLog(`[config-dir] Persisted ${Object.keys(existing).length} dirs to ${GLOBAL_CACHE_FILE}`);
 }
 async function probeConfigDir(binary) {
@@ -85215,7 +85237,7 @@ import {
   mkdirSync as mkdirSync10,
   readFileSync as readFileSync7,
   renameSync as renameSync2,
-  rmSync as rmSync2,
+  rmSync,
   writeFileSync as writeFileSync6,
 } from 'fs';
 import { dirname as dirname10, join as join6 } from 'path';
@@ -85223,25 +85245,6 @@ var CHECKPOINTS = {
   plan: new Set(['pull_ticket', 'write_spec', 'finalize_spec', 'finalize_plans']),
   implementation: new Set(['clear_loop', 'commit', 'next_plan', 'completed']),
   polish: new Set(['commit_pending', 'prereview', 'push', 'create_pr', 'poll', 'feedback_check', 'completed']),
-};
-var PHASE_STEPS = {
-  plan: ['pull_ticket', 'triage', 'write_spec', 'finalize_spec', 'write_plans', 'finalize_plans'],
-  implementation: ['clear_loop', 'setup_run', 'running', 'resolve', 'amend_plans', 'commit', 'next_plan', 'completed'],
-  polish: [
-    'commit_pending',
-    'prereview',
-    'push',
-    'create_pr',
-    'poll',
-    'ensure_branch',
-    'eval',
-    'act',
-    'tty_resolve',
-    'write_fix',
-    'run_fix',
-    'feedback_check',
-    'completed',
-  ],
 };
 function isCheckpoint(phase, state) {
   return CHECKPOINTS[phase]?.has(state) ?? false;
@@ -85295,18 +85298,6 @@ function initialStatus() {
     completedPlans: [],
     context: {},
     planRuns: {},
-    activePlan: null,
-    polishState: null,
-    allPlans: [],
-    phases: {
-      plan: { status: 'pending', currentStep: null },
-      implementation: {
-        status: 'pending',
-        currentStep: null,
-        planProgress: null,
-      },
-      polish: { status: 'pending', currentStep: null, pollState: null },
-    },
     stats: { totalReplies: 0, totalResolved: 0, pushCycles: 0 },
   };
 }
@@ -85315,66 +85306,19 @@ function applyEvent(status, entry, index) {
   status.walTimestamp = entry.ts;
   const { event } = entry;
   if (/^phase\d:started$/.test(event)) {
-    const newPhase = phaseFromEvent(event);
-    status.phase = newPhase;
+    status.phase = phaseFromEvent(event);
     status.version = entry.version ?? status.version;
     status.completedSteps = [];
     status.completedPlans = [];
     status.tasks = {};
     status.lastCheckpoint = null;
     status.checkpointRef = 0;
-    if (newPhase === 'plan') {
-      status.planRuns = {};
-      const deliveryKind = status.context.deliveryKind;
-      status.context = { deliveryKind };
-      status.activePlan = null;
-      status.polishState = null;
-    } else if (newPhase === 'implementation') {
-      status.context.rewriteDecision = undefined;
-      status.context.attempt = undefined;
-      status.activePlan = null;
-      status.polishState = null;
-    } else if (newPhase === 'polish') {
-      status.context.pushCycle = undefined;
-      status.context.prNumber = undefined;
-      status.context.prUrl = undefined;
-      status.context.ttyReason = undefined;
-      status.activePlan = null;
-      status.polishState = {
-        deliveryKind: status.context.deliveryKind ?? 'pr',
-        prNumber: null,
-        prUrl: null,
-        pushCycle: 0,
-        kloopRunId: null,
-        lastPollState: null,
-        lastPollAt: null,
-        lastEvalSummary: null,
-        ttyReason: null,
-      };
-    }
   }
   if (/^phase\d:completed$/.test(event)) {
-    const completedPhase = phaseFromEvent(event);
-    if (completedPhase === 'implementation') {
-      status.activePlan = null;
-    }
-    if (completedPhase === 'polish') {
-      status.polishState = null;
-    }
   }
   if (event === 'clear_loop:started' && entry.metadata?.planIndex != null) {
     status.completedSteps = [];
-    const planIndex = entry.metadata.planIndex;
-    status.context.planIndex = planIndex;
-    const maxPlans = status.context.maxPlans ?? 0;
-    status.activePlan = {
-      name: `plan-${planIndex + 1}`,
-      planIndex,
-      maxPlans,
-      kloopRunId: null,
-      rewriteDecision: null,
-      attempt: status.context.attempt ?? 1,
-    };
+    status.context.planIndex = entry.metadata.planIndex;
   }
   if (event === 'commit:completed' && status.context.planIndex != null) {
     if (!status.completedPlans.includes(status.context.planIndex)) {
@@ -85388,40 +85332,6 @@ function applyEvent(status, entry, index) {
       status.planRuns[plan] = [];
     }
     status.planRuns[plan].push(runId);
-    if (status.activePlan) {
-      if (status.activePlan.name === plan) {
-        status.activePlan.kloopRunId = runId;
-      }
-    } else {
-      const planIndex = status.context.planIndex ?? 0;
-      status.activePlan = {
-        name: plan,
-        planIndex,
-        maxPlans: status.context.maxPlans ?? 0,
-        kloopRunId: runId,
-        rewriteDecision: null,
-        attempt: status.context.attempt ?? 1,
-      };
-    }
-  }
-  if (event === 'running:completed' && status.activePlan) {
-    status.activePlan.kloopRunId = null;
-  }
-  if (event === 'resolve:completed' && entry.metadata?.rewriteDecision && status.activePlan) {
-    status.activePlan.rewriteDecision = entry.metadata.rewriteDecision;
-  }
-  if (event === 'next_plan:completed' && status.activePlan && entry.metadata?.to) {
-    const to = entry.metadata.to;
-    if (to !== 'done') {
-      const match = to.match(/^plan-(\d+)$/);
-      if (match) {
-        const newPlanIndex = parseInt(match[1], 10) - 1;
-        status.activePlan.planIndex = newPlanIndex;
-        status.activePlan.name = to;
-        status.activePlan.kloopRunId = null;
-        status.activePlan.rewriteDecision = null;
-      }
-    }
   }
   if (event.endsWith(':started') && !isLifecycleEvent(event)) {
     const name = event.replace(':started', '');
@@ -85490,44 +85400,12 @@ function applyEvent(status, entry, index) {
   if (event === 'context:updated' && entry.metadata) {
     const { task, parent, error, ...contextFields } = entry.metadata;
     Object.assign(status.context, contextFields);
-    if (status.polishState) {
-      if (contextFields.prNumber != null) status.polishState.prNumber = contextFields.prNumber;
-      if (contextFields.prUrl != null) status.polishState.prUrl = contextFields.prUrl;
-      if (contextFields.pushCycle != null) status.polishState.pushCycle = contextFields.pushCycle;
-      if (contextFields.ttyReason != null) status.polishState.ttyReason = contextFields.ttyReason;
-      if (contextFields.deliveryKind != null) status.polishState.deliveryKind = contextFields.deliveryKind;
-    }
-  }
-  if (event === 'poll:completed' && status.polishState) {
-    const pollState = entry.metadata?.pollState;
-    if (pollState) {
-      status.polishState.lastPollState = pollState;
-      status.polishState.lastPollAt = entry.ts;
-    }
-  }
-  if (event === 'eval:completed' && status.polishState) {
-    status.polishState.lastEvalSummary = {
-      autoResolved: entry.metadata?.autoResolved ?? 0,
-      totalEvalUnits: entry.metadata?.totalEvalUnits ?? 0,
-      replies: entry.metadata?.replies ?? 0,
-      resolves: entry.metadata?.resolves ?? 0,
-      codeFixes: entry.metadata?.codeFixes ?? 0,
-      ambiguous: entry.metadata?.ambiguous ?? 0,
-    };
-  }
-  if (event === 'write_fix:completed' && entry.metadata?.kloopRunId && status.polishState) {
-    status.polishState.kloopRunId = entry.metadata.kloopRunId;
-  }
-  if (event === 'run_fix:completed' && status.polishState) {
-    status.polishState.kloopRunId = null;
   }
   if (event === 'reset:completed' && entry.metadata?.checkpoint) {
     const checkpoint = entry.metadata.checkpoint;
     status.state = checkpoint;
     status.stateStatus = 'completed';
     status.tasks = {};
-    status.activePlan = null;
-    status.polishState = null;
     const idx = status.completedSteps.indexOf(checkpoint);
     if (idx >= 0) {
       status.completedSteps = status.completedSteps.slice(0, idx + 1);
@@ -85567,97 +85445,15 @@ function ensureStatus(sessionId) {
   const log = readLog(sessionId);
   const existing = readStatusYaml(sessionId);
   if (existing && existing.walCursor >= log.length) {
-    const status2 = { ...initialStatus(), ...existing };
-    computeDerivedFields(status2, sessionId);
-    return status2;
+    return { ...initialStatus(), ...existing };
   }
   const status = existing ? { ...initialStatus(), ...existing } : initialStatus();
   const startIdx = existing ? existing.walCursor : 0;
   for (let i = startIdx; i < log.length; i++) {
     applyEvent(status, log[i], i);
   }
-  computeDerivedFields(status, sessionId);
   writeStatusYaml(sessionId, status);
   return status;
-}
-function computeDerivedFields(status, sessionId) {
-  const manifest = readPlanManifest(sessionId, status.version);
-  if (manifest) {
-    status.allPlans = manifest.plans.map(p2 => ({
-      ordinal: p2.ordinal,
-      file: p2.file,
-      completed: p2.completed,
-      commitSha: p2.commitSha ?? null,
-    }));
-  } else {
-    status.allPlans = [];
-  }
-  const phaseOrder = ['plan', 'implementation', 'polish'];
-  const currentPhaseIdx = phaseOrder.indexOf(status.phase);
-  for (const p2 of phaseOrder) {
-    const pIdx = phaseOrder.indexOf(p2);
-    if (
-      pIdx < currentPhaseIdx ||
-      (pIdx === currentPhaseIdx && status.stateStatus === 'completed' && status.phase === p2)
-    ) {
-      if (p2 === 'implementation') {
-        status.phases.implementation = {
-          status: 'completed',
-          currentStep: null,
-          planProgress: null,
-        };
-      } else if (p2 === 'polish') {
-        status.phases.polish = {
-          status: 'completed',
-          currentStep: null,
-          pollState: null,
-        };
-      } else {
-        status.phases.plan = { status: 'completed', currentStep: null };
-      }
-    } else if (p2 === status.phase) {
-      const step = status.stateStatus === 'running' ? status.state : null;
-      if (p2 === 'implementation') {
-        const planProgress = status.activePlan
-          ? `${status.activePlan.planIndex + 1}/${status.activePlan.maxPlans}`
-          : status.context.maxPlans != null
-            ? `${(status.context.planIndex ?? 0) + 1}/${status.context.maxPlans}`
-            : null;
-        status.phases.implementation = {
-          status: 'active',
-          currentStep: step,
-          planProgress,
-        };
-      } else if (p2 === 'polish') {
-        status.phases.polish = {
-          status: 'active',
-          currentStep: step,
-          pollState: status.polishState?.lastPollState ?? null,
-        };
-      } else {
-        status.phases.plan = { status: 'active', currentStep: step };
-      }
-    } else {
-      if (p2 === 'implementation') {
-        status.phases.implementation = {
-          status: 'pending',
-          currentStep: null,
-          planProgress: null,
-        };
-      } else if (p2 === 'polish') {
-        status.phases.polish = {
-          status: 'pending',
-          currentStep: null,
-          pollState: null,
-        };
-      } else {
-        status.phases.plan = { status: 'pending', currentStep: null };
-      }
-    }
-  }
-}
-function getCurrentKloopRunId(status) {
-  return status.activePlan?.kloopRunId ?? status.polishState?.kloopRunId ?? null;
 }
 function updateUserTurn(sessionId, userTurn) {
   const raw = readStatusYaml(sessionId);
@@ -85671,7 +85467,7 @@ var CLEANUP = {
   gather_context: (_sid, v2, wt, tid) => {
     const dir = join6(wt, 'spec', tid, `v${v2}`, 'understanding');
     if (existsSync8(dir)) {
-      rmSync2(dir, { recursive: true });
+      rmSync(dir, { recursive: true });
       return [`removed ${dir}`];
     }
     return [];
@@ -85841,10 +85637,6 @@ function processEntry(ctx, entry) {
     }
     return next;
   }
-  if (type === 'system' && entry.subtype === 'turn_duration') {
-    next.state = 'user_turn';
-    return next;
-  }
   return next;
 }
 function createInitialContext() {
@@ -85906,12 +85698,6 @@ function watchTurn(jsonlPath, onChange) {
       });
     }
   }
-  let pollTimer = null;
-  const POLL_INTERVAL_MS = 2000;
-  function startPoll() {
-    if (closed) return;
-    pollTimer = setInterval(check, POLL_INTERVAL_MS);
-  }
   function startWatch() {
     if (closed) return;
     try {
@@ -85919,9 +85705,7 @@ function watchTurn(jsonlPath, onChange) {
       check();
     } catch {
       waitForFile();
-      return;
     }
-    startPoll();
   }
   function waitForFile() {
     let delay = 500;
@@ -85948,7 +85732,6 @@ function watchTurn(jsonlPath, onChange) {
     close: () => {
       closed = true;
       fileWatcher?.close();
-      if (pollTimer) clearInterval(pollTimer);
     },
   };
 }
@@ -86501,7 +86284,7 @@ async function runLogs(phase, opts) {
         'plans_approve',
         'approved',
       ],
-      implementation: ['clear_loop', 'setup_run', 'running', 'commit', 'next_plan', 'resolve', 'amend_plans'],
+      implementation: ['clear_loop', 'setup_run', 'running', 'commit', 'next_plan', 'resolve', 'rewrite_spec'],
       polish: [
         'commit_pending',
         'prereview',
@@ -86936,16 +86719,10 @@ init_esm();
 init_db();
 init_lock();
 init_format();
-var isTTY3 = process.stdout.isTTY;
-var c3 = {
-  reset: isTTY3 ? '\x1B[0m' : '',
-  green: isTTY3 ? '\x1B[32m' : '',
-  yellow: isTTY3 ? '\x1B[33m' : '',
-};
 function createPsCommand() {
   return new Command('ps')
     .option('--repo <origin>', 'Filter by git root (substring match)')
-    .option('-a, --all', 'Include stopped/completed sessions')
+    .option('--all', 'Include stopped/completed sessions')
     .option('--json', 'Machine-readable output')
     .action(async opts => {
       try {
@@ -86971,43 +86748,22 @@ async function runPs(opts) {
   const rows = runningRows.map(session => {
     const lockInfo = checkLock(session.id);
     const status = ensureStatus(session.id);
-    const { org, repo } = parseRepoHost(session.git_root_host);
     const elapsed = lockInfo.locked && status.startedAt ? Date.now() - new Date(status.startedAt).getTime() : 0;
-    const isRunning = lockInfo.locked;
-    const kloopRunId = getCurrentKloopRunId(status);
-    let planCol = '\u2014';
-    if (status.phase === 'implementation' && status.activePlan) {
-      planCol = `${status.activePlan.planIndex + 1}/${status.activePlan.maxPlans}`;
-    } else if (status.phase === 'implementation' && status.context.maxPlans) {
-      planCol = `${(status.context.planIndex ?? 0) + 1}/${status.context.maxPlans}`;
-    } else if (status.phase === 'polish' && status.polishState) {
-      if (status.polishState.prNumber) {
-        planCol = `PR#${status.polishState.prNumber}`;
-      } else {
-        planCol = status.polishState.deliveryKind;
-      }
-    }
-    const kloopCol = kloopRunId ? (kloopRunId.length > 8 ? kloopRunId.slice(0, 8) : kloopRunId) : '\u2014';
     return {
       id: session.id,
       ticketId: session.ticket_id || '\u2014',
-      org,
-      repo,
+      repo: session.git_root_host,
       branch: session.branch || '\u2014',
+      state: session.state,
       phase: status.phase,
       step: status.state,
+      stateStatus: status.stateStatus,
       stepType: status.stepType,
       userTurn: status.userTurn,
-      running: isRunning,
-      completed: !isRunning && status.phases.polish.status === 'completed',
+      running: lockInfo.locked,
+      checkpoint: status.lastCheckpoint,
       elapsed,
-      planCol,
-      kloopCol,
-      activePlan: status.activePlan,
-      polishState: status.polishState,
-      kloopRunId,
-      allPlans: status.allPlans,
-      phases: status.phases,
+      tasks: Object.fromEntries(Object.entries(status.tasks).map(([k3, v2]) => [k3, v2.status])),
     };
   });
   if (opts.json) {
@@ -87016,71 +86772,32 @@ async function runPs(opts) {
   }
   const cols = {
     session: 10,
-    ticket: 10,
-    org: 12,
-    repo: 16,
-    branch: 25,
+    ticket: 12,
+    repo: 32,
+    branch: 30,
     phase: 16,
-    step: 18,
-    plan: 7,
-    kloop: 9,
-    turn: 8,
+    status: 16,
   };
-  const ANSI_RE = /\x1b\[[0-9;]*m/gu;
-  const visWidth = s => {
-    const noAnsi = s.replace(ANSI_RE, '');
-    return [...noAnsi].length;
-  };
-  const p2 = (s, w2) => {
-    if (!s.includes('\x1B')) {
-      const chars = [...s];
-      if (chars.length > w2) {
-        const truncated = `${chars.slice(0, w2 - 1).join('')}\u2026`;
-        return truncated + ' '.repeat(Math.max(0, w2 - visWidth(truncated)));
-      }
-      return s + ' '.repeat(Math.max(0, w2 - chars.length));
-    }
-    return s + ' '.repeat(Math.max(0, w2 - visWidth(s)));
-  };
-  const header =
-    p2('SESSION', cols.session) +
-    p2('TICKET', cols.ticket) +
-    p2('ORG', cols.org) +
-    p2('REPO', cols.repo) +
-    p2('BRANCH', cols.branch) +
-    p2('PHASE', cols.phase) +
-    p2('STEP', cols.step) +
-    p2('PLAN', cols.plan) +
-    p2('KLOOP', cols.kloop) +
-    'TURN';
+  const header = [
+    'SESSION'.padEnd(cols.session),
+    'TICKET'.padEnd(cols.ticket),
+    'REPO'.padEnd(cols.repo),
+    'BRANCH'.padEnd(cols.branch),
+    'PHASE'.padEnd(cols.phase),
+    'STATUS'.padEnd(cols.status),
+  ].join(' ');
   console.log(header);
   for (const row of rows) {
-    const done = row.completed;
-    const phaseText = done ? `${c3.green}done${c3.reset}` : formatPhase(row.phase);
-    const stepText = done
-      ? `\u2713 ${row.step}`
-      : row.stepType
-        ? `${row.step} (${row.stepType})`
-        : row.step || '\u2014';
-    const turnText =
-      !done && row.stepType === 'tty'
-        ? row.userTurn === true
-          ? "user's"
-          : row.userTurn === false
-            ? "LLM's"
-            : '\u2014'
-        : '\u2014';
-    const line =
-      p2(row.id, cols.session) +
-      p2(row.ticketId, cols.ticket) +
-      p2(row.org, cols.org) +
-      p2(row.repo, cols.repo) +
-      p2(row.branch, cols.branch) +
-      p2(phaseText, cols.phase) +
-      p2(stepText, cols.step) +
-      p2(row.planCol, cols.plan) +
-      p2(row.kloopCol, cols.kloop) +
-      turnText.padEnd(cols.turn);
+    const _statusText =
+      row.state === 'init' ? 'init-incomplete' : row.running ? `running (${formatDuration(row.elapsed)})` : 'stopped';
+    const line = [
+      row.id.padEnd(cols.session),
+      row.ticketId.padEnd(cols.ticket),
+      row.repo.slice(0, cols.repo).padEnd(cols.repo),
+      row.branch.slice(0, cols.branch).padEnd(cols.branch),
+      formatPhase(row.phase),
+      formatStatus(row.state, row.running),
+    ].join(' ');
     console.log(line);
   }
 }
@@ -87374,10 +87091,10 @@ import { spawnSync as nodeSpawnSync } from 'child_process';
 import {
   existsSync as existsSync32,
   mkdirSync as mkdirSync25,
-  unlinkSync as unlinkSync4,
   writeFileSync as writeFileSync18,
+  unlinkSync as unlinkSync4,
 } from 'fs';
-import { join as join22 } from 'path';
+import { join as join21 } from 'path';
 init_db();
 init_git();
 init_lock();
@@ -87657,21 +87374,17 @@ function writeStepInit(sessionId, version, stepName, record) {
 
 // src/phases/phase1/triage.ts
 init_format();
-var TRIAGE_APPROVAL_GATE = `### Interaction Protocol \u2014 STRICT
+var TRIAGE_APPROVAL_GATE = `### User Approval Gate
 
-Follow this loop for the triage decision:
+After writing triage.md, you MUST present a summary to the user and wait for their explicit confirmation:
 
-1. **You suggest first.** Based on your analysis, propose a concrete triage assessment (delivery kind, complexity, key risks, files affected) \u2014 do not open with "what do you want to do?" The user hired you to be proactive.
-2. **Debate with the user.** They will push back, ask questions, suggest alternatives. Iterate until you both agree.
-3. **Confirm the final decision.** State clearly what you both agreed on so there is no ambiguity.
-4. **Wait for explicit approval.** The user must say "approve" (or a clear equivalent like "yes approve this"). Ambiguous acknowledgements like "ok", "sounds good", or "sure" are NOT approval \u2014 ask for explicit confirmation.
-5. **Only after approval**, run:
+1. Show the user: delivery kind, complexity, key risks, and files affected
+2. Ask: "Does this triage assessment look correct? (yes/no)"
+3. ONLY after the user confirms, write the approval event:
    \`kautopilot log-event triage:approved --metadata '{"deliveryKind": "pr|ticket", "complexity": "..."}'\`
-6. **Only after the event is logged**, tell the user: "All set \u2014 type /exit (or Ctrl+C) to continue kautopilot."
+4. THEN tell the user to /exit
 
-**DO NOT mention /exit before step 6.** Mentioning it earlier makes the user think the session is over before the event is committed. If they exit early, this step re-runs from scratch.
-
-**DO NOT log the event before step 4.** Explicit approval is the only gate.`;
+CRITICAL: Do NOT log the approval event or tell the user to /exit until they explicitly confirm the triage.`;
 function parseTriage(triagePath) {
   try {
     const content = readFileSync14(triagePath, 'utf-8');
@@ -87846,21 +87559,16 @@ import { existsSync as existsSync23, mkdirSync as mkdirSync21 } from 'fs';
 init_artifacts();
 init_log();
 init_format();
-var PLAN_APPROVAL_PROTOCOL = `### Interaction Protocol \u2014 STRICT
+var PLAN_APPROVAL_PROTOCOL = `### Approval Protocol
 
-Follow this loop for the plans approval:
-
-1. **You suggest first.** Based on your analysis, propose concrete plans \u2014 do not open with "what do you want to do?" The user hired you to be proactive.
-2. **Debate with the user.** They will push back, ask questions, suggest alternatives. Iterate until you both agree on the final plans.
-3. **Confirm the final decision.** State clearly what you both agreed on so there is no ambiguity.
-4. **Wait for explicit approval.** The user must say "approve" (or a clear equivalent like "yes approve this"). Ambiguous acknowledgements like "ok", "sounds good", or "sure" are NOT approval \u2014 ask for explicit confirmation.
-5. **Only after approval**, run:
+When the user approves the plans, you MUST do these things IN ORDER before exiting:
+1. Write the approval event by running this command:
    \`kautopilot log-event plans:approved\`
-6. **Only after the event is logged**, tell the user: "All set \u2014 type /exit (or Ctrl+C) to continue kautopilot."
+2. THEN tell the user to /exit
 
-**DO NOT mention /exit before step 6.** Mentioning it earlier makes the user think the session is over before the event is committed. If they exit early, this step re-runs from scratch.
-
-**DO NOT log the event before step 4.** Explicit approval is the only gate.`;
+**CRITICAL**: Do NOT tell the user to /exit before writing the approval event.
+If the session crashes or the user Ctrl+C's before the approval event is logged,
+the plans will NOT be considered approved and this step will re-run from scratch.`;
 var PLAN_MECHANICS = `## CRITICAL: Plan Writing & Approval Mechanics
 
 ### Working Copies
@@ -87906,12 +87614,8 @@ This step is COMPULSORY \u2014 do not skip it. It creates an audit trail of all 
 ### Spec Amendment Escalation
 
 If during plan writing you discover the spec is wrong or incomplete:
-1. **Suggest the escalation** \u2014 explain what's wrong with the spec and why plans can't proceed.
-2. **Debate with the user** until they agree the spec needs amendment.
-3. **Wait for explicit approval** \u2014 the user must say "approve" before you escalate.
-4. **Only after approval**, log: \`kautopilot log-event spec_amendment:requested --metadata '{"reason": "..."}'\`
-5. **Then** tell the user: "All set \u2014 type /exit (or Ctrl+C) to continue kautopilot."
-Do NOT write plans:approved when escalating.
+1. Log the issue: \`kautopilot log-event spec_amendment:requested --metadata '{"reason": "..."}'\`
+2. Tell the user to /exit \u2014 do NOT write plans:approved
 
 ${PLAN_APPROVAL_PROTOCOL}
 `;
@@ -88020,21 +87724,16 @@ init_artifacts();
 init_log();
 import { existsSync as existsSync24, mkdirSync as mkdirSync22 } from 'fs';
 init_format();
-var SPEC_APPROVAL_PROTOCOL = `### Interaction Protocol \u2014 STRICT
+var SPEC_APPROVAL_PROTOCOL = `### Approval Protocol
 
-Follow this loop for the spec approval:
-
-1. **You suggest first.** Based on your analysis, propose a concrete spec \u2014 do not open with "what do you want to do?" The user hired you to be proactive.
-2. **Debate with the user.** They will push back, ask questions, suggest alternatives. Iterate until you both agree on the final spec content.
-3. **Confirm the final decision.** State clearly what you both agreed on so there is no ambiguity.
-4. **Wait for explicit approval.** The user must say "approve" (or a clear equivalent like "yes approve this"). Ambiguous acknowledgements like "ok", "sounds good", or "sure" are NOT approval \u2014 ask for explicit confirmation.
-5. **Only after approval**, run:
+When the user approves the spec, you MUST do these things IN ORDER before exiting:
+1. Write the approval event by running this command:
    \`kautopilot log-event spec:approved\`
-6. **Only after the event is logged**, tell the user: "All set \u2014 type /exit (or Ctrl+C) to continue kautopilot."
+2. THEN tell the user to /exit
 
-**DO NOT mention /exit before step 6.** Mentioning it earlier makes the user think the session is over before the event is committed. If they exit early, this step re-runs from scratch.
-
-**DO NOT log the event before step 4.** Explicit approval is the only gate.`;
+**CRITICAL**: Do NOT tell the user to /exit before writing the approval event.
+If the session crashes or the user Ctrl+C's before the approval event is logged,
+the spec will NOT be considered approved and this step will re-run from scratch.`;
 var SPEC_MECHANICS = `## CRITICAL: Spec Writing & Approval Mechanics
 
 ### Working Copy
@@ -88346,8 +88045,8 @@ function devloopGetStatus(kloopRunId) {
     if (proc.exitCode === 0) {
       const output = proc.stdout.toString().trim();
       const data = JSON.parse(output);
-      if (data.exitReason === 'max_iterations') {
-        return { status: 'max_iterations' };
+      if (data.exitReason === 'max_iterations' || data.exitReason === 'max_situations') {
+        return { status: 'max_situations' };
       }
       return { status: 'completed' };
     }
@@ -88582,57 +88281,6 @@ function isRewriteDecision(value) {
 
 // src/phases/phase2/resolve.ts
 var MAX_RESTARTS = 5;
-var RESOLVE_MECHANICS = `## CRITICAL: Resolve Mechanics
-
-### Step 1: Propose a Strategy
-
-You MUST suggest one of these strategies based on the kloop evidence:
-
-1. **refine_local** \u2014 Current plan needs targeted fixes. Choose when kloop was close to passing.
-2. **patch_downstream** \u2014 Completed plans are fine, but downstream plans need updates. Choose when earlier plans changed the approach.
-3. **regenerate_remaining** \u2014 Fundamental shift; remaining plans should be rewritten from scratch.
-4. **revisit_spec** \u2014 The SPEC itself is the problem (contradiction/impossibility). Escalates to a full replan.
-5. **retry** \u2014 Transient/environmental failure; just re-run the loop.
-
-### Step 2: Write the Context Document
-
-This TTY does NOT edit plans directly. You write a CONTEXT DOCUMENT that the next TTY will use to do the actual editing.
-
-- For **retry**: no document needed, skip to the Interaction Protocol.
-- For **revisit_spec**: write feedback to {feedback_path} explaining what is wrong with the spec and what the next epoch needs to address. This file will be consumed by phase 1's write_spec TTY.
-- For **refine_local** / **patch_downstream** / **regenerate_remaining**: write a resolution document to {resolution_path} explaining:
-  - What went wrong (cite kloop evidence)
-  - What needs to change in plans
-  - Which plans are affected
-  - Any constraints the next TTY must respect
-  The resolution doc will be consumed by the amend_plans TTY.
-
-### Step 3: Snapshot
-
-- For **revisit_spec**: \`kautopilot snapshot spec\` (captures feedback.md)
-- For **refine_local** / **patch_downstream** / **regenerate_remaining**: \`kautopilot snapshot plans\` (captures resolution.md placed under plans/)
-- For **retry**: no snapshot needed.
-
-### Interaction Protocol \u2014 STRICT
-
-Follow this loop:
-
-1. **You suggest first.** Propose a strategy + draft the context doc content. Do not open with "what do you want to do?"
-2. **Debate with the user.** Iterate until you both agree on the strategy and document content.
-3. **Confirm the final decision.** State clearly what you both agreed on so there is no ambiguity.
-4. **Wait for explicit approval.** The user must say "approve" (or a clear equivalent like "yes approve this"). Ambiguous acknowledgements like "ok", "sounds good", or "sure" are NOT approval \u2014 ask for explicit confirmation.
-5. **Only after approval**, write the document (Step 2), snapshot (Step 3), then log the decision:
-   \`kautopilot log-event context:updated --metadata '{"rewriteDecision": "<choice>"}'\`
-6. **Only after the event is logged**, tell the user: "All set \u2014 type /exit (or Ctrl+C) to continue kautopilot."
-
-**DO NOT mention /exit before step 6.** Mentioning it earlier makes the user think the session is over before the event is committed. If they exit early, this step re-runs from scratch.
-
-**DO NOT log the event before step 4.** Explicit approval is the only gate.
-
-### Abandon
-
-If unsalvageable: \`kautopilot log-event resolve:abandoned\` then tell user to /exit.
-`;
 function getSnapshotType(decision) {
   return decision === 'revisit_spec' ? 'spec' : 'plans';
 }
@@ -88641,10 +88289,10 @@ function getResolveReason(sessionId, version, planName) {
     .filter(e2 => e2.event === 'running:completed' && e2.version === version && e2.plan === planName)
     .at(-1);
   const status = lastRunningCompleted?.metadata?.status;
-  return status === 'max_iterations' || status === 'conflict' ? status : 'conflict';
+  return status === 'max_situations' || status === 'conflict' ? status : 'conflict';
 }
 async function handleResolve(ctx) {
-  const { session, version, planIndex, attempt } = ctx;
+  const { session, version, planIndex, attempt, config } = ctx;
   const planName = `plan-${planIndex + 1}`;
   const reason = getResolveReason(session.id, version, planName);
   let kloopDescribeOutput = '';
@@ -88656,9 +88304,17 @@ async function handleResolve(ctx) {
   const worktreePlansDir = join17(worktreeSpecDir, 'plans');
   const worktreeSpecPath = join17(worktreeSpecDir, 'task-spec.md');
   const worktreeFeedbackPath = join17(worktreeSpecDir, 'feedback.md');
-  const worktreeResolutionPath = join17(worktreePlansDir, 'resolution.md');
   const activePlanPaths = resolveActivePlans(worktreePlansDir);
   const activePlanPath = activePlanPaths[planIndex] || '';
+  const planManifest = readPlanManifest(session.id, version);
+  const completedPlans = planManifest?.plans.filter(p2 => p2.completed) ?? [];
+  const incompletePlans = planManifest?.plans.filter(p2 => !p2.completed) ?? [];
+  const completedPlansList =
+    completedPlans.map(p2 => `- plan-${p2.ordinal} (completed)`).join(`
+`) || '(none)';
+  const incompletePlansList =
+    incompletePlans.map(p2 => `- plan-${p2.ordinal}`).join(`
+`) || '(none)';
   let restartCount = 0;
   while (true) {
     const fenceEvent = restartCount === 0 ? 'resolve:started' : 'resolve:restarted';
@@ -88670,24 +88326,17 @@ async function handleResolve(ctx) {
       attempt,
       metadata: { stepType: 'tty', reason },
     });
-    const userPrompt = loadPromptTemplate('phase2', 'resolve', {
+    const resolvePrompt = loadPromptTemplate('phase2', 'resolve', {
       task_spec_path: worktreeSpecPath,
       plan_path: activePlanPath,
       plans_dir: worktreePlansDir,
       kloop_evidence: kloopDescribeOutput || '(no evidence available)',
+      feedback_path: worktreeFeedbackPath,
       plan_name: planName,
-      reason,
-      attempt: String(attempt),
+      completed_plans_list: completedPlansList,
+      incomplete_plans_list: incompletePlansList,
+      planTemplate: config.templates.plan,
     });
-    const mechanics = RESOLVE_MECHANICS.replace(/\{feedback_path\}/g, worktreeFeedbackPath).replace(
-      /\{resolution_path\}/g,
-      worktreeResolutionPath,
-    );
-    const resolvePrompt =
-      mechanics +
-      `
-` +
-      userPrompt;
     const binary = getAgentBinary('phase2', 'resolve');
     writeStepInit(session.id, version, 'resolve', {
       prompt: resolvePrompt,
@@ -88695,8 +88344,10 @@ async function handleResolve(ctx) {
       type: 'tty_handoff',
     });
     logBanner('Resolving Plan', { Plan: planName, Reason: reason });
-    console.log(`Discuss the issue with Claude. Decide on a strategy, write the context document, and approve.`);
-    await spawnTTYWithTurnTracking(session.id, binary, resolvePrompt, {
+    console.log(
+      `Discuss the issue with Claude. Decide on a rewrite strategy, write the amendment, snapshot, and log the decision.`,
+    );
+    await spawnTTYWithTurnTracking(session.id, binary, resolvePrompt + TTY_EXIT_INSTRUCTION, {
       cwd: session.worktree,
       worktree: session.worktree,
     });
@@ -88738,7 +88389,7 @@ async function handleResolve(ctx) {
         attempt,
         metadata: { reason, rewriteDecision: decision },
       });
-      console.log(`[resolve] decision=retry \u2014 proceeding to clear_loop`);
+      console.log(`[resolve] decision=retry \u2014 skipping rewrite_spec, proceeding to clear_loop`);
       return 'clear_loop';
     }
     const expectedSnapshotType = getSnapshotType(decision);
@@ -88767,18 +88418,6 @@ async function handleResolve(ctx) {
         continue;
       }
     }
-    if (decision !== 'revisit_spec') {
-      if (!existsSync27(worktreeResolutionPath)) {
-        if (restartCount >= MAX_RESTARTS) {
-          throw new Error('Resolve TTY restarted too many times without resolution.md');
-        }
-        restartCount++;
-        console.log(
-          `[resolve] ${decision} chosen but no resolution.md \u2014 restarting TTY (attempt ${restartCount}/${MAX_RESTARTS})`,
-        );
-        continue;
-      }
-    }
     ctx.rewriteDecision = decision;
     appendEvent(session.id, {
       ts: new Date().toISOString(),
@@ -88791,170 +88430,137 @@ async function handleResolve(ctx) {
         rewriteDecision: decision,
       },
     });
-    if (decision === 'revisit_spec') {
-      console.log(`[resolve] decision=revisit_spec \u2014 escalating directly to phase 1`);
-      return 'revisit_spec';
-    }
-    console.log(`[resolve] decision=${decision} \u2014 proceeding to amend_plans`);
-    return 'amend_plans';
+    console.log(`[resolve] decision=${decision}, snapshot found \u2014 proceeding to rewrite_spec`);
+    return 'rewrite_spec';
   }
 }
 
-// src/phases/phase2/amend-plans.ts
+// src/phases/phase2/rewrite-spec.ts
 init_agents();
-import { join as join18 } from 'path';
 init_log();
 init_format();
 var MAX_RESTARTS2 = 5;
-var AMEND_PLANS_COMMON = `## CRITICAL: Amend Plans Mechanics
-
-### Context Document
-Read {resolution_path} first \u2014 it contains the decision context from the previous TTY. Do not re-debate the strategy; debate the IMPLEMENTATION of it.
-
-### Snapshot Workflow (COMPULSORY)
-After each edit cycle: \`kautopilot snapshot plans\`
-The epoch version is auto-detected. This step is COMPULSORY.
-
-### Interaction Protocol \u2014 STRICT
-
-1. **You suggest first.** Propose the plan edits based on the resolution doc \u2014 do not open with "what do you want to do?"
-2. **Debate with the user.** Iterate until you both agree on the final plan content.
-3. **Confirm the final decision.** State clearly what you both agreed on so there is no ambiguity.
-4. **Wait for explicit approval.** The user must say "approve" (or a clear equivalent like "yes approve this"). Ambiguous acknowledgements like "ok", "sounds good", or "sure" are NOT approval \u2014 ask for explicit confirmation.
-5. **Only after approval**, save, snapshot, and log:
-   \`kautopilot log-event rewrite_plans:approved\`
-6. **Only after the event is logged**, tell the user: "All set \u2014 type /exit (or Ctrl+C) to continue kautopilot."
-
-**DO NOT mention /exit before step 6.** Mentioning it earlier makes the user think the session is over before the event is committed. If they exit early, this step re-runs from scratch.
-
-**DO NOT log the event before step 4.** Explicit approval is the only gate.
-`;
-var REFINE_LOCAL_PROMPT =
-  `## Strategy: refine_local
-
-Rewrite ONLY {plan_name} at {plan_path}. Do not touch other plans.
-
-Each plan file MUST follow the template:
-{planTemplate}
-
-` + AMEND_PLANS_COMMON;
-var PATCH_DOWNSTREAM_PROMPT =
-  `## Strategy: patch_downstream
-
-Edit ONLY the incomplete plan files. Do not touch completed ones.
-
-Completed (do NOT edit):
-{completed_plans_list}
-
-Incomplete (to patch):
-{incomplete_plans_list}
-
-Each plan file MUST follow the template:
-{planTemplate}
-
-` + AMEND_PLANS_COMMON;
-var REGENERATE_REMAINING_PROMPT =
-  `## Strategy: regenerate_remaining
-
-Rewrite ALL incomplete plan files FROM SCRATCH based on the current spec plus learnings in the resolution doc.
-
-Completed (do NOT edit):
-{completed_plans_list}
-
-Incomplete (to regenerate):
-{incomplete_plans_list}
-
-Each plan file MUST follow the template:
-{planTemplate}
-
-` + AMEND_PLANS_COMMON;
-function getStrategyPrompt(decision) {
-  const prompts = {
-    refine_local: REFINE_LOCAL_PROMPT,
-    patch_downstream: PATCH_DOWNSTREAM_PROMPT,
-    regenerate_remaining: REGENERATE_REMAINING_PROMPT,
-  };
-  return prompts[decision];
-}
 function getDecisionTitle(decision) {
   const titles = {
     refine_local: 'Refine Local Plan',
     patch_downstream: 'Patch Downstream Plans',
     regenerate_remaining: 'Regenerate Remaining Plans',
+    revisit_spec: 'Revisit Spec',
+    retry: 'Retry',
   };
   return titles[decision];
 }
-async function handleAmendPlans(ctx) {
-  const { session, version, planIndex, config } = ctx;
+function getDecisionReviewSection(decision, vars) {
+  switch (decision) {
+    case 'refine_local':
+      return `The plan ${vars.planName} (${vars.planPath}) was rewritten to fix issues from the kloop run.
+Review the changes with the user. Iterate until satisfied.
+
+If further changes are needed:
+- Edit the plan file
+- Snapshot after each edit
+- Continue discussing with the user
+
+When approved, log the approval event and /exit.`;
+    case 'patch_downstream':
+      return `The incomplete plan files were patched to account for what was learned during execution.
+Review the changes with the user. Iterate until satisfied.
+
+If further changes are needed:
+- Edit the plan files
+- Snapshot after each edit
+- Continue discussing with the user
+
+When approved, log the approval event and /exit.`;
+    case 'regenerate_remaining':
+      return `The incomplete plan files were regenerated from scratch based on the current spec
+and what the completed plans produced.
+Review the new plans with the user. Iterate until satisfied.
+
+If further changes are needed:
+- Edit the plan files
+- Snapshot after each edit
+- Continue discussing with the user
+
+When approved, log the approval event and /exit.`;
+    case 'revisit_spec':
+      return `Feedback was written to ${vars.feedbackPath} explaining what's wrong with the spec and
+what changes are needed for the next epoch.
+Review the feedback with the user. Iterate until satisfied.
+
+If further changes are needed:
+- Edit feedback.md
+- Snapshot after each edit
+- Continue discussing with the user
+
+When approved, log the approval event and /exit.
+The session will escalate to a full replan with the feedback guiding the new epoch.`;
+    case 'retry':
+      throw new Error('retry decision should never reach rewrite_spec');
+  }
+}
+function getSnapshotType2(decision) {
+  return decision === 'revisit_spec' ? 'spec' : 'plans';
+}
+function getApprovalEvent(decision) {
+  return decision === 'revisit_spec' ? 'feedback:approved' : 'rewrite_plans:approved';
+}
+async function handleRewriteSpec(ctx) {
+  const { session, version, planIndex } = ctx;
   if (!ctx.rewriteDecision) {
     throw new Error('rewriteDecision not set on context \u2014 resolve must run first');
   }
   if (ctx.rewriteDecision === 'retry') {
-    throw new Error('retry decision should never reach amend_plans \u2014 resolve should return clear_loop directly');
-  }
-  if (ctx.rewriteDecision === 'revisit_spec') {
-    throw new Error(
-      'revisit_spec decision should never reach amend_plans \u2014 resolve should return revisit_spec directly',
-    );
+    throw new Error('retry decision should never reach rewrite_spec \u2014 resolve should return clear_loop directly');
   }
   const decision = ctx.rewriteDecision;
   const decisionTitle = getDecisionTitle(decision);
+  const snapshotType = getSnapshotType2(decision);
+  const approvalEvent = getApprovalEvent(decision);
   let kloopDescribeOutput = '';
   if (ctx.kloopRunId) {
     kloopDescribeOutput = devloopDescribe(ctx.kloopRunId);
   }
   const ticketId = session.ticket_id || 'local';
-  const worktreeSpecDir = join18(session.worktree, 'spec', ticketId, `v${version}`);
-  const worktreePlansDir = join18(worktreeSpecDir, 'plans');
-  const worktreeSpecPath = join18(worktreeSpecDir, 'task-spec.md');
-  const worktreeResolutionPath = join18(worktreePlansDir, 'resolution.md');
+  const worktreeSpecDir = `${session.worktree}/spec/${ticketId}/v${version}`;
+  const worktreePlansDir = `${worktreeSpecDir}/plans`;
+  const worktreeSpecPath = `${worktreeSpecDir}/task-spec.md`;
+  const worktreeFeedbackPath = `${worktreeSpecDir}/feedback.md`;
   const planName = `plan-${planIndex + 1}`;
   const activePlanPaths = resolveActivePlans(worktreePlansDir);
   const activePlanPath = activePlanPaths[planIndex] || '';
-  const planManifest = readPlanManifest(session.id, version);
-  const completedPlans = planManifest?.plans.filter(p2 => p2.completed) ?? [];
-  const incompletePlans = planManifest?.plans.filter(p2 => !p2.completed) ?? [];
-  const completedPlansList =
-    completedPlans.map(p2 => `- plan-${p2.ordinal} (completed)`).join(`
-`) || '(none)';
-  const incompletePlansList =
-    incompletePlans.map(p2 => `- plan-${p2.ordinal}`).join(`
-`) || '(none)';
   let restartCount = 0;
   while (true) {
-    const fenceEvent = restartCount === 0 ? 'amend_plans:started' : 'amend_plans:restarted';
+    const fenceEvent = restartCount === 0 ? 'rewrite_spec:started' : 'rewrite_spec:restarted';
     appendEvent(session.id, {
       ts: new Date().toISOString(),
       event: fenceEvent,
       version,
       metadata: { rewriteDecision: decision },
     });
-    const strategyPrompt = getStrategyPrompt(decision)
-      .replace(/\{plan_name\}/g, planName)
-      .replace(/\{plan_path\}/g, activePlanPath)
-      .replace(/\{planTemplate\}/g, config.templates.plan)
-      .replace(/\{completed_plans_list\}/g, completedPlansList)
-      .replace(/\{incomplete_plans_list\}/g, incompletePlansList)
-      .replace(/\{resolution_path\}/g, worktreeResolutionPath);
-    const userPrompt = loadPromptTemplate('phase2', 'amend_plans', {
-      resolution_path: worktreeResolutionPath,
+    const reviewSection = getDecisionReviewSection(decision, {
+      planName,
+      planPath: activePlanPath,
+      feedbackPath: worktreeFeedbackPath,
+    });
+    const prompt = loadPromptTemplate('phase2', 'rewrite_spec', {
+      decision_title: decisionTitle,
+      decision_specific_review_section: reviewSection,
+      kloop_evidence: kloopDescribeOutput || '(no evidence available)',
       task_spec_path: worktreeSpecPath,
       plans_dir: worktreePlansDir,
-      kloop_evidence: kloopDescribeOutput || '(no evidence available)',
+      snapshot_type: snapshotType,
+      approval_event: approvalEvent,
+      feedback_path: worktreeFeedbackPath,
     });
-    const prompt =
-      strategyPrompt +
-      `
-` +
-      userPrompt;
-    const binary = getAgentBinary('phase2', 'amend_plans');
-    writeStepInit(session.id, version, 'amend_plans', {
+    const binary = getAgentBinary('phase2', 'rewrite_spec');
+    writeStepInit(session.id, version, 'rewrite_spec', {
       prompt,
       command: `${binary} (TTY handoff)`,
       type: 'tty_handoff',
     });
-    logBanner('Amending Plans', { Strategy: decisionTitle });
-    await spawnTTYWithTurnTracking(session.id, binary, prompt, {
+    logBanner('Review Amendment', { Decision: decisionTitle });
+    await spawnTTYWithTurnTracking(session.id, binary, prompt + TTY_EXIT_INSTRUCTION, {
       cwd: session.worktree,
       worktree: session.worktree,
     });
@@ -88964,34 +88570,36 @@ async function handleAmendPlans(ctx) {
     if (eventsSince.some(e2 => e2.event === 'resolve:abandoned')) {
       return 'failed';
     }
-    const approved = eventsSince.some(e2 => e2.event === 'rewrite_plans:approved');
+    const approved = eventsSince.some(e2 => e2.event === approvalEvent);
     if (!approved) {
       if (restartCount >= MAX_RESTARTS2) {
-        throw new Error('Amend-plans TTY restarted too many times without approval');
+        throw new Error('Rewrite-spec TTY restarted too many times without approval');
       }
       restartCount++;
       console.log(
-        `[amend_plans] No rewrite_plans:approved found \u2014 restarting TTY (attempt ${restartCount}/${MAX_RESTARTS2})`,
+        `[rewrite_spec] No ${approvalEvent} found \u2014 restarting TTY (attempt ${restartCount}/${MAX_RESTARTS2})`,
       );
       continue;
     }
-    const snapshotEvents = eventsSince.filter(e2 => e2.event === 'snapshot:created' && e2.metadata?.type === 'plans');
+    const snapshotEvents = eventsSince.filter(
+      e2 => e2.event === 'snapshot:created' && e2.metadata?.type === snapshotType,
+    );
     const latestSnapshot = snapshotEvents.findLast(e2 => e2.metadata);
     const latestSnapshotMeta = latestSnapshot?.metadata;
     const latestSnapshotPath = latestSnapshotMeta?.path;
     if (!latestSnapshotPath) {
       if (restartCount >= MAX_RESTARTS2) {
-        throw new Error('Amend-plans TTY restarted too many times without a plans snapshot');
+        throw new Error('Rewrite-spec TTY restarted too many times without a snapshot');
       }
       restartCount++;
       console.log(
-        `[amend_plans] No plans snapshot found after approval \u2014 restarting TTY (attempt ${restartCount}/${MAX_RESTARTS2})`,
+        `[rewrite_spec] No ${snapshotType} snapshot found after approval \u2014 restarting TTY (attempt ${restartCount}/${MAX_RESTARTS2})`,
       );
       continue;
     }
     appendEvent(session.id, {
       ts: new Date().toISOString(),
-      event: 'amend_plans:completed',
+      event: 'rewrite_spec:completed',
       version,
       metadata: {
         rewriteDecision: decision,
@@ -88999,21 +88607,24 @@ async function handleAmendPlans(ctx) {
       },
     });
     switch (decision) {
+      case 'revisit_spec':
+        console.log('[rewrite_spec] revisit_spec approved \u2014 escalating to phase1');
+        return 'revisit_spec';
       case 'refine_local':
-        console.log('[amend_plans] refine_local approved \u2014 clear_loop at same planIndex');
+        console.log('[rewrite_spec] refine_local approved \u2014 clear_loop at same planIndex');
         return 'clear_loop';
       case 'patch_downstream':
       case 'regenerate_remaining': {
-        const freshManifest = readPlanManifest(session.id, version);
-        const firstIncomplete = freshManifest?.plans.find(p2 => !p2.completed);
+        const planManifest = readPlanManifest(session.id, version);
+        const firstIncomplete = planManifest?.plans.find(p2 => !p2.completed);
         if (firstIncomplete) {
           ctx.planIndex = firstIncomplete.ordinal - 1;
           console.log(
-            `[amend_plans] ${decision} approved \u2014 clear_loop at planIndex ${ctx.planIndex} (plan-${firstIncomplete.ordinal})`,
+            `[rewrite_spec] ${decision} approved \u2014 clear_loop at planIndex ${ctx.planIndex} (plan-${firstIncomplete.ordinal})`,
           );
         } else {
           console.log(
-            `[amend_plans] ${decision} approved \u2014 no incomplete plans found, clear_loop at current planIndex`,
+            `[rewrite_spec] ${decision} approved \u2014 no incomplete plans found, clear_loop at current planIndex`,
           );
         }
         return 'clear_loop';
@@ -89058,7 +88669,7 @@ async function handleRunning(ctx) {
     case 'completed':
       return 'commit';
     case 'conflict':
-    case 'max_iterations':
+    case 'max_situations':
       return 'resolve';
     case 'crash':
       ctx.crashRetryCount = (ctx.crashRetryCount ?? 0) + 1;
@@ -89127,7 +88738,7 @@ var phase2States = {
   setup_run: handleSetupRun,
   running: handleRunning,
   resolve: handleResolve,
-  amend_plans: handleAmendPlans,
+  rewrite_spec: handleRewriteSpec,
   commit: handleCommit,
   next_plan: handleNextPlan,
   completed: handleCompleted,
@@ -89670,7 +89281,7 @@ async function handleEval(ctx) {
     ghPrComments(prNumber, undefined, session.worktree).catch(() => []),
   ]);
   const crCheck = ctx.config.settings.coderabbit
-    ? checks.find(c4 => c4.name.toLowerCase().includes('coderabbit'))
+    ? checks.find(c3 => c3.name.toLowerCase().includes('coderabbit'))
     : undefined;
   const crStatus = crCheck
     ? crCheck.status === 'passing'
@@ -89701,7 +89312,7 @@ async function handleEval(ctx) {
     }
   }
   const needsEval = preFilterResults.filter(r2 => r2.category === 'needs_eval');
-  const failingChecks = checks.filter(c4 => c4.status === 'failing');
+  const failingChecks = checks.filter(c3 => c3.status === 'failing');
   const units = [];
   for (const check of failingChecks) {
     units.push({
@@ -89758,7 +89369,7 @@ ${r2.body}`,
   const codeFixes = evalResults.filter(r2 => r2.verdict === 'code_fix');
   const ambiguous = evalResults.filter(r2 => r2.ambiguous);
   console.log(
-    `[eval] Pre-filtered: ${autoResolved} auto-resolved, ${needsEval.length} + ${failingChecks.length} CI + ${prComments.filter(c4 => c4.author?.login && c4.author.login !== 'claude[bot]').length} comment units evaluated`,
+    `[eval] Pre-filtered: ${autoResolved} auto-resolved, ${needsEval.length} + ${failingChecks.length} CI + ${prComments.filter(c3 => c3.author?.login && c3.author.login !== 'claude[bot]').length} comment units evaluated`,
   );
   console.log(
     `[eval] Results: ${evalResults.filter(r2 => r2.verdict === 'reply').length} replies, ${evalResults.filter(r2 => r2.verdict === 'resolve').length} resolves, ${codeFixes.length} code fixes, ${ambiguous.length} ambiguous`,
@@ -89929,26 +89540,6 @@ init_log();
 init_scripts();
 init_inquirer();
 init_format();
-var MAX_RESTARTS3 = 5;
-var FEEDBACK_MECHANICS = `## CRITICAL: Feedback Mechanics
-
-### Output File
-Write the feedback to {feedback_path}. This file will be consumed by phase 1's write_spec TTY on the next epoch.
-
-### Interaction Protocol \u2014 STRICT
-
-1. **You suggest first.** Based on the PR state, propose what the feedback should say \u2014 do not open with "what do you want to do?"
-2. **Debate with the user.** Iterate until you both agree on the final feedback content.
-3. **Confirm the final decision.** State clearly what you both agreed on so there is no ambiguity.
-4. **Wait for explicit approval.** The user must say "approve" (or a clear equivalent like "yes approve this"). Ambiguous acknowledgements like "ok", "sounds good", or "sure" are NOT approval \u2014 ask for explicit confirmation.
-5. **Only after approval**, save the file and run:
-   \`kautopilot log-event feedback:approved\`
-6. **Only after the event is logged**, tell the user: "All set \u2014 type /exit (or Ctrl+C) to continue kautopilot."
-
-**DO NOT mention /exit before step 6.** Mentioning it earlier makes the user think the session is over before the event is committed. If they exit early, this step re-runs from scratch.
-
-**DO NOT save the file or log the event before step 4.** Explicit approval is the only gate.
-`;
 async function handleFeedbackCheck(ctx) {
   const { session, version, prNumber, prUrl, pushCycle } = ctx;
   appendEvent(session.id, {
@@ -90009,14 +89600,20 @@ async function handleFeedbackCheck(ctx) {
 }
 async function handleFeedback(ctx) {
   const { session, version, prNumber, prUrl } = ctx;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'feedback:started',
+    version,
+    metadata: { stepType: 'tty' },
+  });
   let checksStatus = 'unknown';
   let threadCount = 0;
   if (prNumber) {
     try {
       const checks = await ghPrChecks(prNumber, session.worktree);
-      const passing = checks.filter(c4 => c4.status === 'passing').length;
-      const failing = checks.filter(c4 => c4.status === 'failing').length;
-      const pending = checks.filter(c4 => c4.status === 'pending').length;
+      const passing = checks.filter(c3 => c3.status === 'passing').length;
+      const failing = checks.filter(c3 => c3.status === 'failing').length;
+      const pending = checks.filter(c3 => c3.status === 'pending').length;
       checksStatus = `${passing} passing, ${failing} failing, ${pending} pending`;
     } catch {
       checksStatus = 'unable to fetch';
@@ -90031,70 +89628,46 @@ async function handleFeedback(ctx) {
   const specPath = findLatestSpecPath(session.id, version);
   const plansDir = findLatestPlansPath(session.id, version);
   const feedbackPath = snapshotPath(session.id, version, 'feedback.md');
-  let restartCount = 0;
-  while (true) {
-    const fenceEvent = restartCount === 0 ? 'feedback:started' : 'feedback:restarted';
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: fenceEvent,
-      version,
-      metadata: { stepType: 'tty' },
-    });
-    const mechanics = FEEDBACK_MECHANICS.replace(/\{feedback_path\}/g, feedbackPath);
-    const userPrompt = loadPromptTemplate('phase3', 'feedback', {
-      task_spec_path: specPath || '(no spec found)',
-      plans_dir: plansDir || '(no plans found)',
-      pr_url: prUrl || `#${prNumber}`,
-      checks_status: checksStatus,
-      thread_count: String(threadCount),
-      feedback_path: feedbackPath,
-    });
-    const feedbackPrompt =
-      mechanics +
-      `
-` +
-      userPrompt;
-    const binary = getAgentBinary('phase3', 'feedback');
-    writeStepInit(session.id, version, 'feedback', {
-      prompt: feedbackPrompt,
-      command: `${binary} (TTY handoff)`,
-      type: 'tty_handoff',
-    });
-    logBanner('Collecting PR Feedback', {
-      PR: prUrl || `#${prNumber}`,
-      Checks: checksStatus,
-      Threads: String(threadCount),
-    });
-    await spawnTTYWithTurnTracking(session.id, binary, feedbackPrompt, {
-      cwd: session.worktree,
-      worktree: session.worktree,
-    });
-    const allEvents = readLog(session.id);
-    const fenceIdx = allEvents.findLastIndex(e2 => e2.event === fenceEvent);
-    const eventsSince = fenceIdx >= 0 ? allEvents.slice(fenceIdx + 1) : allEvents;
-    const approved = eventsSince.some(e2 => e2.event === 'feedback:approved');
-    const feedbackWritten = existsSync29(feedbackPath);
-    if (!approved || !feedbackWritten) {
-      if (restartCount >= MAX_RESTARTS3) {
-        throw new Error(
-          `Feedback TTY restarted too many times without ${!approved ? 'approval' : 'feedback.md'}. ` +
-            `Expected feedback:approved event and feedback.md at ${feedbackPath}.`,
-        );
-      }
-      restartCount++;
-      const missing = !approved ? 'feedback:approved event' : 'feedback.md';
-      console.log(`[feedback] No ${missing} found \u2014 restarting TTY (attempt ${restartCount}/${MAX_RESTARTS3})`);
-      continue;
-    }
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'feedback:completed',
-      version,
-      metadata: { hasFeedback: true },
-    });
-    console.log(`[feedback] feedback.md written and approved \u2014 returning revisit_spec`);
-    return 'revisit_spec';
+  const feedbackPrompt = loadPromptTemplate('phase3', 'feedback', {
+    task_spec_path: specPath || '(no spec found)',
+    plans_dir: plansDir || '(no plans found)',
+    pr_url: prUrl || `#${prNumber}`,
+    checks_status: checksStatus,
+    thread_count: String(threadCount),
+    feedback_path: feedbackPath,
+  });
+  const binary = getAgentBinary('phase3', 'feedback');
+  writeStepInit(session.id, version, 'feedback', {
+    prompt: feedbackPrompt,
+    command: `${binary} (TTY handoff)`,
+    type: 'tty_handoff',
+  });
+  logBanner('Collecting PR Feedback', {
+    PR: prUrl || `#${prNumber}`,
+    Checks: checksStatus,
+    Threads: String(threadCount),
+  });
+  console.log(`Discuss the PR with Claude. When ready, write feedback to ${feedbackPath}`);
+  await spawnTTYWithTurnTracking(session.id, binary, feedbackPrompt + TTY_EXIT_INSTRUCTION, {
+    cwd: session.worktree,
+    worktree: session.worktree,
+  });
+  const feedbackWritten = existsSync29(feedbackPath);
+  if (!feedbackWritten) {
+    throw new Error(
+      `feedback.md was not written at ${feedbackPath}. ` +
+        `The TTY must write actual feedback before returning revisit_spec. ` +
+        `Refusing to advance to new epoch without required artifact.`,
+    );
   }
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'feedback:completed',
+    version,
+    metadata: { hasFeedback: feedbackWritten },
+  });
+  console.log(`[feedback] feedback.md written \u2014 returning revisit_spec`);
+  return 'revisit_spec';
 }
 
 // src/phases/phase3/poll.ts
@@ -90110,8 +89683,8 @@ function computePollState(signals, _ctx) {
   if (signals.unresolvedThreads > 0) {
     return 'blocked';
   }
-  const failingChecks = signals.checks.filter(c4 => c4.status === 'failing');
-  const pendingChecks = signals.checks.filter(c4 => c4.status === 'pending');
+  const failingChecks = signals.checks.filter(c3 => c3.status === 'failing');
+  const pendingChecks = signals.checks.filter(c3 => c3.status === 'pending');
   if (failingChecks.length > 0) {
     return 'blocked';
   }
@@ -90199,7 +89772,7 @@ async function handlePoll(ctx) {
   if (!prView) {
     throw new Error('poll: could not fetch PR status');
   }
-  const failingChecks = checks.filter(c4 => c4.status === 'failing');
+  const failingChecks = checks.filter(c3 => c3.status === 'failing');
   if (failingChecks.length > 0) {
     const { ghPrRuns: ghPrRuns2 } = await Promise.resolve().then(() => (init_github(), exports_github));
     const runs = await ghPrRuns2(prView.headRefName, session.worktree).catch(() => []);
@@ -90227,7 +89800,7 @@ ${logs.slice(0, 1000)}`);
   const changesRequested = reviews.some(r2 => r2.state === 'CHANGES_REQUESTED');
   const approvals = reviews.filter(r2 => r2.state === 'APPROVED').length;
   const crCheck = config.settings.coderabbit
-    ? checks.find(c4 => c4.name.toLowerCase().includes('coderabbit'))
+    ? checks.find(c3 => c3.name.toLowerCase().includes('coderabbit'))
     : undefined;
   const crStatus = crCheck
     ? crCheck.status === 'passing'
@@ -90242,7 +89815,7 @@ ${logs.slice(0, 1000)}`);
     prState: prView.state,
     mergeable: prView.mergeable,
     mergeStateStatus: prView.mergeStateStatus,
-    checks: checks.map(c4 => ({ name: c4.name, status: c4.status })),
+    checks: checks.map(c3 => ({ name: c3.name, status: c3.status })),
     threads: threads.length,
     unresolvedThreads: threads.length,
     reviews: reviews.map(r2 => ({ author: r2.author.login, state: r2.state })),
@@ -90323,7 +89896,7 @@ ${logs.slice(0, 1000)}`);
         prState: signals.prState,
         mergeable: signals.mergeable,
         mergeStateStatus: signals.mergeStateStatus,
-        checks: signals.checks.map(c4 => c4.status),
+        checks: signals.checks.map(c3 => c3.status),
         threads: signals.threads,
         unresolvedThreads: signals.unresolvedThreads,
         changesRequested: signals.changesRequested,
@@ -90334,7 +89907,7 @@ ${logs.slice(0, 1000)}`);
     },
   });
   console.log(
-    `[poll] State: ${pollState} (checks: ${checks.filter(c4 => c4.status === 'passing').length}/${checks.length} passing, threads: ${threads.length}, approvals: ${approvals}, cr: ${crStatus})`,
+    `[poll] State: ${pollState} (checks: ${checks.filter(c3 => c3.status === 'passing').length}/${checks.length} passing, threads: ${threads.length}, approvals: ${approvals}, cr: ${crStatus})`,
   );
   switch (pollState) {
     case 'mergeable':
@@ -90560,8 +90133,8 @@ init_github();
 init_log();
 init_types2();
 init_spawn();
-import { existsSync as existsSync30, rmSync as rmSync4 } from 'fs';
-import { join as join19 } from 'path';
+import { existsSync as existsSync30, rmSync as rmSync3 } from 'fs';
+import { join as join18 } from 'path';
 async function handlePush(ctx) {
   const { session, version, pushCycle, baseBranch } = ctx;
   appendEvent(session.id, {
@@ -90577,9 +90150,9 @@ async function handlePush(ctx) {
   const branch = await $2`git branch --show-current`.cwd(session.worktree).quiet().text();
   const currentBranch = branch.trim();
   if (ctx.config.settings.removeSpecOnPush) {
-    const specDir = join19(session.worktree, 'spec');
+    const specDir = join18(session.worktree, 'spec');
     if (existsSync30(specDir)) {
-      rmSync4(specDir, { recursive: true, force: true });
+      rmSync3(specDir, { recursive: true, force: true });
       console.log('[push] Removed spec/ folder \u2014 delegating commit to agent');
       const contextSection = `### Context
 Removed spec/ folder before push. Commit the removal.`;
@@ -90727,7 +90300,7 @@ async function handleRunFix(ctx) {
     ctx.pushCycle++;
     return 'push';
   }
-  if (result.status === 'conflict' || result.status === 'max_iterations') {
+  if (result.status === 'conflict' || result.status === 'max_situations') {
     ctx.ttyReason = 'run_fix_failure';
     return 'tty_resolve';
   }
@@ -90740,7 +90313,7 @@ init_artifacts();
 init_log();
 init_spawn();
 import { existsSync as existsSync31, readFileSync as readFileSync16, writeFileSync as writeFileSync17 } from 'fs';
-import { join as join20 } from 'path';
+import { join as join19 } from 'path';
 async function handleTicketDraft(ctx) {
   const { session, version, ticketId } = ctx;
   appendEvent(session.id, {
@@ -90750,7 +90323,7 @@ async function handleTicketDraft(ctx) {
     metadata: { stepType: 'llm', deliveryKind: 'ticket' },
   });
   const specContent = resolveSpec(session.id, version);
-  const ticketPath = join20(`${process.env.HOME}/.kautopilot/${session.id}/artifacts`, 'ticket.md');
+  const ticketPath = join19(`${process.env.HOME}/.kautopilot/${session.id}/artifacts`, 'ticket.md');
   const ticketContent = existsSync31(ticketPath) ? readFileSync16(ticketPath, 'utf-8') : '';
   const binary = getAgentBinary('phase3', 'ticket_draft');
   const draftPrompt = `Generate ticket delivery artifacts based on the completed implementation.
@@ -90827,7 +90400,7 @@ ${draftOutput || specContent.slice(0, 2000)}`;
 init_artifacts();
 init_log();
 import { readdirSync as readdirSync7, readFileSync as readFileSync17 } from 'fs';
-import { join as join21 } from 'path';
+import { join as join20 } from 'path';
 init_scripts();
 init_format();
 init_markdown();
@@ -90851,7 +90424,7 @@ async function handleTicketPublish(ctx) {
       }
     }
   } catch {}
-  const scriptsDir = join21(sessionDir(session.id), 'scripts');
+  const scriptsDir = join20(sessionDir(session.id), 'scripts');
   for (const f of artifactFiles.sort()) {
     const content = readFileSync17(snapshotPath(session.id, version, f), 'utf-8');
     if (f.startsWith('tickets-1')) {
@@ -90879,7 +90452,7 @@ async function handleTicketPublish(ctx) {
     } else if (f.startsWith('report-')) {
       const mdPath = snapshotPath(session.id, version, f);
       let artifactPath2 = mdPath;
-      const pdfPath = join21(epochDir, f.replace(/\.md$/, '.pdf'));
+      const pdfPath = join20(epochDir, f.replace(/\.md$/, '.pdf'));
       const pdfResult = markdownToPdf(readFileSync17(mdPath, 'utf-8'), pdfPath, f.replace(/\.md$/, ''));
       if (pdfResult) {
         artifactPath2 = pdfResult;
@@ -91015,68 +90588,39 @@ async function handleTicketReview(ctx) {
 init_agents();
 init_artifacts();
 init_log();
-var MAX_RESTARTS4 = 5;
 var TTY_RESOLVE_MECHANICS = {
   ambiguous: `## Your Task
-Review each ambiguous item and decide:
+Review each ambiguous item and tell me:
 1. Should I reply to the reviewer? If so, what should I say?
 2. Should I make a code fix? If so, describe the fix.
 3. Should I skip the item?
 
-After resolving, apply any needed changes to the codebase.
-
-### Interaction Protocol \u2014 STRICT
-
-1. **You suggest first.** Propose how to handle each ambiguous item \u2014 do not open with "what do you want to do?"
-2. **Debate with the user.** Iterate until you both agree on the resolution.
-3. **Confirm the final decision.** State clearly what you both agreed on so there is no ambiguity.
-4. **Wait for explicit approval.** The user must say "approve" (or a clear equivalent like "yes approve this"). Ambiguous acknowledgements like "ok", "sounds good", or "sure" are NOT approval \u2014 ask for explicit confirmation.
-5. **Only after approval**, apply the changes and run:
-   \`kautopilot log-event tty_resolve:approved --metadata '{"reason": "ambiguous_eval"}'\`
-6. **Only after the event is logged**, tell the user: "All set \u2014 type /exit (or Ctrl+C) to continue kautopilot."
-
-**DO NOT mention /exit before step 6.** If the user exits early, this step re-runs from scratch.
-**DO NOT log the event before step 4.** Explicit approval is the only gate.`,
+After resolving, apply any needed changes to the codebase.`,
   conflict: `## Your Task
 1. Open the conflicted files and resolve the merge conflicts
 2. Stage the resolved files with \`git add\`
 3. Continue the rebase with \`git rebase --continue\`
 4. If the conflict cannot be resolved, run \`git rebase --abort\` and I will try an alternative approach
 
-### Interaction Protocol \u2014 STRICT
-
-1. **You suggest first.** Propose how to resolve each conflict \u2014 do not open with "what do you want to do?"
-2. **Debate with the user.** Iterate until you both agree on the resolution.
-3. **Confirm the final decision.** State clearly what you both agreed on so there is no ambiguity.
-4. **Wait for explicit approval.** The user must say "approve" (or a clear equivalent like "yes approve this"). Ambiguous acknowledgements like "ok", "sounds good", or "sure" are NOT approval \u2014 ask for explicit confirmation.
-5. **Only after approval**, apply the changes and run:
-   \`kautopilot log-event tty_resolve:approved --metadata '{"reason": "merge_conflict"}'\`
-6. **Only after the event is logged**, tell the user: "All set \u2014 type /exit (or Ctrl+C) to continue kautopilot."
-
-**DO NOT mention /exit before step 6.** If the user exits early, this step re-runs from scratch.
-**DO NOT log the event before step 4.** Explicit approval is the only gate.`,
+Please resolve the merge conflicts and continue the rebase.`,
   failure: `## Your Task
-Investigate the failure and help determine the next steps. Options:
+Investigate the failure and help me determine the next steps. Options:
 1. Fix the specific issue and retry
 2. Skip this fix and move on
 3. Escalate and stop
 
-### Interaction Protocol \u2014 STRICT
-
-1. **You suggest first.** Propose how to fix the failure \u2014 do not open with "what do you want to do?"
-2. **Debate with the user.** Iterate until you both agree on the resolution.
-3. **Confirm the final decision.** State clearly what you both agreed on so there is no ambiguity.
-4. **Wait for explicit approval.** The user must say "approve" (or a clear equivalent like "yes approve this"). Ambiguous acknowledgements like "ok", "sounds good", or "sure" are NOT approval \u2014 ask for explicit confirmation.
-5. **Only after approval**, apply the changes and run:
-   \`kautopilot log-event tty_resolve:approved --metadata '{"reason": "run_fix_failure"}'\`
-6. **Only after the event is logged**, tell the user: "All set \u2014 type /exit (or Ctrl+C) to continue kautopilot."
-
-**DO NOT mention /exit before step 6.** If the user exits early, this step re-runs from scratch.
-**DO NOT log the event before step 4.** Explicit approval is the only gate.`,
+Please review the situation and help me resolve the issue. Apply any needed changes.`,
 };
 async function handleTtyResolve(ctx) {
   const { session, version, ttyReason } = ctx;
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'tty_resolve:started',
+    version,
+    metadata: { stepType: 'tty', ttyReason: ttyReason || 'unknown' },
+  });
   const { $: $2 } = await Promise.resolve(globalThis.Bun);
+  const _ticketId = ctx.ticketId;
   const specPath = findLatestSpecPath(session.id, version) || snapshotPath(session.id, version, 'task-spec.md');
   const latestPlansDir = findLatestPlansPath(session.id, version) || snapshotPath(session.id, version, 'plans');
   const planPaths = resolveActivePlans(latestPlansDir);
@@ -91089,31 +90633,22 @@ async function handleTtyResolve(ctx) {
       : ttyReason === 'merge_conflict'
         ? 'tty_resolve_conflict'
         : 'tty_resolve_failure';
-  let restartCount = 0;
-  while (true) {
-    const fenceEvent = restartCount === 0 ? 'tty_resolve:started' : 'tty_resolve:restarted';
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: fenceEvent,
-      version,
-      metadata: { stepType: 'tty', ttyReason: ttyReason || 'unknown' },
-    });
-    const userPrompt = getAgentPrompt('phase3', agentName);
-    let ttyPrompt;
-    if (ttyReason === 'ambiguous_eval') {
-      const items = ctx.ttyResolveItems || [];
-      const itemsSection =
-        items.length > 0
-          ? items.map(
-              (item, i) => `### Item ${i + 1}: ${item.id}
+  const userPrompt = getAgentPrompt('phase3', agentName);
+  let ttyPrompt;
+  if (ttyReason === 'ambiguous_eval') {
+    const items = ctx.ttyResolveItems || [];
+    const itemsSection =
+      items.length > 0
+        ? items.map(
+            (item, i) => `### Item ${i + 1}: ${item.id}
 ${item.reasoning}
 
 Ambiguity: ${item.ambiguityReason || 'Unknown'}`,
-            ).join(`
+          ).join(`
 
 `)
-          : 'No specific items available \u2014 check the eval results in the log.';
-      ttyPrompt = `
+        : 'No specific items available \u2014 check the eval results in the log.';
+    ttyPrompt = `
 ${userPrompt}
 
 ## Context
@@ -91129,20 +90664,20 @@ Read at: ${feedbackPath}
 
 ${TTY_RESOLVE_MECHANICS.ambiguous}
 `.trim();
-    } else if (ttyReason === 'merge_conflict') {
-      const grepResult =
-        await $2`grep -rn '<<<<<<<' --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' || true`
-          .cwd(session.worktree)
-          .quiet()
-          .text();
-      const conflictFiles = grepResult
-        .trim()
-        .split(
-          `
+  } else if (ttyReason === 'merge_conflict') {
+    const grepResult =
+      await $2`grep -rn '<<<<<<<' --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' || true`
+        .cwd(session.worktree)
+        .quiet()
+        .text();
+    const conflictFiles = grepResult
+      .trim()
+      .split(
+        `
 `,
-        )
-        .filter(f => f.length > 0);
-      ttyPrompt = `
+      )
+      .filter(f => f.length > 0);
+    ttyPrompt = `
 ${userPrompt}
 
 ## Context
@@ -91163,8 +90698,8 @@ ${TTY_RESOLVE_MECHANICS.conflict}
 ## Previous Feedback
 Read at: ${feedbackPath}
 `.trim();
-    } else {
-      ttyPrompt = `
+  } else {
+    ttyPrompt = `
 ${userPrompt}
 
 ## Context
@@ -91177,64 +90712,49 @@ ${TTY_RESOLVE_MECHANICS.failure}
 ## Previous Feedback
 Read at: ${feedbackPath}
 `.trim();
-    }
-    const ttyBinary = getAgentBinary('phase3', agentName);
-    writeStepInit(session.id, version, `tty_resolve_${ttyReason || 'unknown'}`, {
-      prompt: ttyPrompt,
-      command: `${ttyBinary} (TTY handoff)`,
-      type: 'tty_handoff',
-    });
-    console.log(`[tty_resolve] Handing off to user for ${ttyReason}`);
-    await spawnTTYWithTurnTracking(session.id, ttyBinary, ttyPrompt, {
-      cwd: session.worktree,
-      worktree: session.worktree,
-    });
-    const allEvents = readLog(session.id);
-    const fenceIdx = allEvents.findLastIndex(e2 => e2.event === fenceEvent);
-    const eventsSince = fenceIdx >= 0 ? allEvents.slice(fenceIdx + 1) : allEvents;
-    const approved = eventsSince.some(e2 => e2.event === 'tty_resolve:approved');
-    if (!approved) {
-      if (restartCount >= MAX_RESTARTS4) {
-        throw new Error('TTY resolve restarted too many times without approval');
-      }
-      restartCount++;
-      console.log(
-        `[tty_resolve] No tty_resolve:approved found \u2014 restarting TTY (attempt ${restartCount}/${MAX_RESTARTS4})`,
-      );
-      continue;
-    }
-    const diffResult = await $2`git diff --name-only`.cwd(session.worktree).quiet().text();
-    const changedFiles = diffResult
-      .trim()
-      .split(
-        `
+  }
+  const ttyBinary = getAgentBinary('phase3', agentName);
+  writeStepInit(session.id, version, `tty_resolve_${ttyReason || 'unknown'}`, {
+    prompt: ttyPrompt,
+    command: `${ttyBinary} (TTY handoff)`,
+    type: 'tty_handoff',
+  });
+  console.log(`[tty_resolve] Handing off to user for ${ttyReason}`);
+  const _exitCode = await spawnTTYWithTurnTracking(session.id, ttyBinary, ttyPrompt + TTY_EXIT_INSTRUCTION, {
+    cwd: session.worktree,
+    worktree: session.worktree,
+  });
+  const diffResult = await $2`git diff --name-only`.cwd(session.worktree).quiet().text();
+  const changedFiles = diffResult
+    .trim()
+    .split(
+      `
 `,
-      )
-      .filter(f => f.length > 0);
-    if (changedFiles.length > 0) {
-      appendEvent(session.id, {
-        ts: new Date().toISOString(),
-        event: 'tty_resolve:completed',
-        version,
-        metadata: {
-          ttyReason,
-          result: 'fixes_applied',
-          filesChanged: changedFiles.length,
-        },
-      });
-      return 'write_fix';
-    }
+    )
+    .filter(f => f.length > 0);
+  if (changedFiles.length > 0) {
     appendEvent(session.id, {
       ts: new Date().toISOString(),
       event: 'tty_resolve:completed',
       version,
       metadata: {
         ttyReason,
-        result: 'no_fixes',
+        result: 'fixes_applied',
+        filesChanged: changedFiles.length,
       },
     });
-    return 'poll';
+    return 'write_fix';
   }
+  appendEvent(session.id, {
+    ts: new Date().toISOString(),
+    event: 'tty_resolve:completed',
+    version,
+    metadata: {
+      ttyReason,
+      result: 'no_fixes',
+    },
+  });
+  return 'poll';
 }
 
 // src/phases/phase3/write-fix.ts
@@ -91432,7 +90952,6 @@ function createStartCommand() {
   return new Command('start')
     .option('--phase <phaseOrStep>', 'Force start at specific phase or step')
     .option('--local', 'Local mode')
-    .option('--force', 'Bypass lock and running-state guard (use with caution)')
     .action(async opts => {
       try {
         await runStartZellij(opts);
@@ -91446,7 +90965,6 @@ function createInternalStartCommand() {
   return new Command('internal-start')
     .option('--phase <phaseOrStep>', 'Force start at specific phase or step')
     .option('--local', 'Local mode')
-    .option('--force', 'Bypass lock and running-state guard (use with caution)')
     .action(async opts => {
       try {
         await runStart(opts);
@@ -91507,10 +91025,9 @@ async function runStartZellij(opts) {
   const args = ['internal-start'];
   if (opts.phase) args.push('--phase', opts.phase);
   if (opts.local) args.push('--local');
-  if (opts.force) args.push('--force');
   const kautopilotBin = Bun.which('kautopilot') ?? 'kautopilot';
   const sDir = sessionDir(session.id);
-  const layoutPath = join22(sDir, 'zellij-layout.kdl');
+  const layoutPath = join21(sDir, 'zellij-layout.kdl');
   const escapedCwd = session.worktree.replace(/"/g, '\\"');
   const innerCmd = `${kautopilotBin} internal-start${args.length > 1 ? ` ${args.slice(1).join(' ')}` : ''}`;
   const escapedCmd = innerCmd.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
@@ -91521,7 +91038,7 @@ async function runStartZellij(opts) {
 }
 `;
   writeFileSync18(layoutPath, layoutContent);
-  const configPath2 = join22(sDir, 'zellij-config.kdl');
+  const configPath2 = join21(sDir, 'zellij-config.kdl');
   writeFileSync18(
     configPath2,
     `default_layout "${layoutPath}"
@@ -91574,23 +91091,10 @@ async function runStart(opts) {
     process.exit(1);
   }
   detectAndRecoverCrash(session.id, session.worktree, session.ticket_id || 'local');
-  if (!opts.force) {
-    const lockInfo = checkLock(session.id);
-    if (lockInfo.locked) {
-      logError(
-        `Session is already running (PID ${lockInfo.pid}). Use \`kautopilot stop\` first or \`kautopilot start --force\` to override.`,
-      );
-      process.exit(1);
-    }
-    const postRecoveryStatus = ensureStatus(session.id);
-    if (postRecoveryStatus.running) {
-      logError(
-        `Session ${session.id} status still shows running after crash recovery. This may indicate a race condition. Use \`kautopilot start --force\` to override.`,
-      );
-      process.exit(1);
-    }
-  } else {
-    logWarn('--force: bypassing lock and running-state guard');
+  const lockInfo = checkLock(session.id);
+  if (lockInfo.locked) {
+    logError(`Session is already running (PID ${lockInfo.pid}). Use \`kautopilot stop\` first.`);
+    process.exit(1);
   }
   const config = readConfig(session.id);
   if (!config) {
@@ -91684,7 +91188,7 @@ async function runStart(opts) {
         const nextVersion = oldVersion + 1;
         logInfo(`Revisit spec signal \u2014 escalating to plan for epoch v${nextVersion}`);
         supersedEpoch(session.id, oldVersion, nextVersion);
-        const newVersionDir = join22(sessionDir(session.id), 'artifacts', `v${nextVersion}`);
+        const newVersionDir = join21(sessionDir(session.id), 'artifacts', `v${nextVersion}`);
         mkdirSync25(newVersionDir, { recursive: true });
         appendEvent(session.id, {
           ts: new Date().toISOString(),
@@ -91762,88 +91266,6 @@ function createStatusCommand() {
       }
     });
 }
-function turnLabel(userTurn, stepType) {
-  if (!stepType || stepType === 'code') return '\u2014';
-  if (userTurn === true) return "user's turn";
-  if (userTurn === false) return "LLM's turn";
-  return '\u2014';
-}
-function stepDetail(stepType, userTurn) {
-  if (!stepType) return '';
-  const turn = turnLabel(userTurn, stepType);
-  return turn !== '\u2014' ? `(${stepType}, ${turn})` : `(${stepType})`;
-}
-function printPhaseProgress(phase, currentState, stepType, userTurn, completedSteps) {
-  const steps = PHASE_STEPS[phase];
-  if (!steps) return;
-  const phaseLabel = phase === 'plan' ? 'Plan' : phase === 'implementation' ? 'Implementation' : 'Polish';
-  logHeading(`${phaseLabel} Phase`);
-  console.log();
-  const completedSet = new Set(completedSteps);
-  let foundActive = false;
-  for (const step of steps) {
-    if (completedSet.has(step)) {
-      console.log(formatStepLine(step, 'done'));
-    } else if (step === currentState && !foundActive) {
-      console.log(formatStepLine(step, 'active', stepDetail(stepType, userTurn)));
-      foundActive = true;
-    } else {
-      console.log(formatStepLine(step, 'pending'));
-    }
-  }
-}
-function printPlanChecklist(activePlan, allPlans) {
-  if (allPlans.length === 0) return;
-  logHeading('Plans');
-  console.log();
-  for (const plan of allPlans) {
-    if (plan.completed) {
-      const sha = plan.commitSha ? ` (${plan.commitSha.slice(0, 7)})` : '';
-      console.log(formatStepLine(`plan-${plan.ordinal}${sha}`, 'done'));
-    } else if (activePlan && activePlan.planIndex === plan.ordinal - 1) {
-      const kloop = activePlan.kloopRunId ? `, kloop #${activePlan.kloopRunId}` : '';
-      const attempt = activePlan.attempt > 1 ? `, attempt ${activePlan.attempt}` : '';
-      console.log(formatStepLine(`plan-${plan.ordinal}`, 'active', `running${kloop}${attempt}`));
-    } else {
-      console.log(formatStepLine(`plan-${plan.ordinal}`, 'pending'));
-    }
-  }
-}
-function printPolishDetails(polishState) {
-  if (!polishState) return;
-  console.log();
-  logHeading('Delivery');
-  console.log();
-  logField('Kind', polishState.deliveryKind);
-  if (polishState.prNumber) {
-    logField('PR', `#${polishState.prNumber}`);
-  }
-  if (polishState.prUrl) {
-    logField('URL', polishState.prUrl);
-  }
-  logField('Push cycles', String(polishState.pushCycle));
-  if (polishState.lastPollState) {
-    const pollLabels = {
-      mergeable: 'Mergeable',
-      pending: 'Waiting for CI/reviews',
-      blocked: 'Blocked',
-    };
-    logField('Poll state', pollLabels[polishState.lastPollState] ?? polishState.lastPollState);
-  }
-  if (polishState.kloopRunId) {
-    logField('Kloop fix', polishState.kloopRunId);
-  }
-  if (polishState.lastEvalSummary) {
-    const s = polishState.lastEvalSummary;
-    logField(
-      'Eval',
-      `${s.totalEvalUnits} units: ${s.replies} reply, ${s.resolves} resolve, ${s.codeFixes} fix, ${s.ambiguous} ambiguous`,
-    );
-  }
-  if (polishState.ttyReason) {
-    logField('TTY reason', polishState.ttyReason);
-  }
-}
 async function runStatus(id, opts) {
   if (id) {
     const session2 = getSessionById(id);
@@ -91852,21 +91274,18 @@ async function runStatus(id, opts) {
       const lockInfo = checkLock(session2.id);
       const running = lockInfo.locked;
       const phaseElapsed = status.startedAt ? Date.now() - new Date(status.startedAt).getTime() : 0;
-      const { org, repo } = parseRepoHost(session2.git_root_host);
-      const kloopRunId = getCurrentKloopRunId(status);
       const data2 = {
         kind: 'session',
         session: session2.id,
         ticketId: session2.ticket_id,
         branch: session2.branch,
         repo: session2.git_root_host,
-        org,
+        org: session2.git_root_host.split('/')[1],
         local: session2.local === 1,
         phase: status.phase,
         state: status.state,
         stateStatus: status.stateStatus,
         running,
-        completed: !running && status.stateStatus === 'completed',
         stepType: status.stepType,
         userTurn: status.userTurn,
         checkpoint: status.lastCheckpoint,
@@ -91878,11 +91297,6 @@ async function runStatus(id, opts) {
         walCursor: status.walCursor,
         initAttempt: getInitAttemptByPromotedSessionId(session2.id)?.id ?? null,
         activeEpoch: status.version,
-        activePlan: status.activePlan,
-        allPlans: status.allPlans,
-        polishState: status.polishState,
-        kloopRunId,
-        phases: status.phases,
         currentPlans: (() => {
           const pm = readPlanManifest(session2.id, status.version);
           return (
@@ -91916,85 +91330,29 @@ async function runStatus(id, opts) {
       }
       logField('Session', session2.id);
       logField('Ticket', session2.ticket_id || '\u2014');
-      logField('Org/Repo', `${org}/${repo}`);
       logField('Branch', session2.branch || '\u2014');
-      if (data2.initAttempt) logField('Init', data2.initAttempt);
+      logField('Repo', session2.git_root_host);
+      logField('Local', session2.local === 1 ? 'yes' : 'no');
       console.log();
-      if (data2.completed) {
-        logOk('Completed');
-        const delivery = data2.delivery;
-        if (delivery) {
-          console.log();
-          logHeading('Delivery');
-          console.log();
-          logField('Kind', delivery.kind);
-          if (delivery.prNumber) logField('PR', `#${delivery.prNumber}`);
-          if (delivery.prUrl) logField('URL', delivery.prUrl);
-          if (delivery.publishedAt) logField('Published', delivery.publishedAt);
-        } else if (status.context.prNumber) {
-          console.log();
-          logField('PR', `#${status.context.prNumber}`);
-          if (status.context.prUrl) logField('URL', status.context.prUrl);
-        }
-        const allRunIds = Object.values(status.planRuns).flat();
-        if (allRunIds.length > 0) {
-          console.log();
-          logField('Kloop', allRunIds.join(', '));
-        }
-        if (status.allPlans.length > 0) {
-          console.log();
-          const completed = status.allPlans.filter(p2 => p2.completed).length;
-          logField('Plans', `${completed}/${status.allPlans.length} completed`);
-        }
-        console.log();
-        logHeading('Progress');
-        console.log();
-        logField('Duration', formatDuration(phaseElapsed));
-        logField('Version', String(status.version));
-        logField('Phase', status.phase);
-        logField('Step', status.state);
-        return;
-      }
-      printPhaseProgress(status.phase, status.state, status.stepType, status.userTurn, status.completedSteps);
-      if (status.phase === 'implementation') {
-        printPlanChecklist(status.activePlan, status.allPlans);
-        if (status.activePlan?.rewriteDecision && ['resolve', 'amend_plans'].includes(status.state)) {
-          console.log();
-          logField('Rewrite', status.activePlan.rewriteDecision);
-        }
-      }
-      if (status.phase === 'polish' && status.polishState) {
-        printPolishDetails(status.polishState);
-        const delivery = data2.delivery;
-        if (delivery && !status.polishState?.prNumber) {
-          if (delivery.prNumber) logField('PR', `#${delivery.prNumber}`);
-          if (delivery.prUrl) logField('URL', delivery.prUrl);
-        }
-      }
-      console.log();
-      logHeading('Progress');
-      console.log();
+      logField('Phase', status.phase);
+      const stepSuffix = status.stepType
+        ? ` (${status.stepType}${status.userTurn === true ? ", user's turn" : status.userTurn === false ? ", LLM's turn" : ''})`
+        : '';
+      logField('Step', (status.state || '\u2014') + stepSuffix);
+      logField('Status', running ? `running (${status.stateStatus})` : 'stopped');
       logField('Checkpoint', status.lastCheckpoint || '\u2014');
+      console.log();
       logField('Duration', formatDuration(phaseElapsed));
       logField('Version', String(status.version));
-      if (kloopRunId) {
-        logField('Kloop', kloopRunId);
-      }
+      logField('Init attempt', data2.initAttempt || '\u2014');
       const taskEntries = Object.entries(status.tasks);
       if (taskEntries.length > 0) {
         console.log();
-        logHeading('Tasks');
-        console.log();
+        logField('Tasks', '');
         for (const [name, task] of taskEntries) {
           logField(`  ${name}`, task.status);
         }
       }
-      console.log();
-      logHeading('Stats');
-      console.log();
-      logField('Replies', String(status.stats.totalReplies));
-      logField('Resolved', String(status.stats.totalResolved));
-      logField('Push cycles', String(status.stats.pushCycles));
       return;
     }
     const initAttempt = getInitAttemptById(id);
@@ -92059,7 +91417,7 @@ init_lock();
 init_log();
 init_inquirer();
 init_format();
-import { rmSync as rmSync5 } from 'fs';
+import { rmSync as rmSync4 } from 'fs';
 function createStopCommand() {
   return new Command('stop')
     .argument('[id]', 'Session ID (optional \u2014 defaults to local)')
@@ -92138,7 +91496,7 @@ async function runStop(id, opts) {
   if (isGlobal) {
     const doDelete = opts.force || (await confirmAction(`Delete session directory and index entry?`, false));
     if (doDelete) {
-      rmSync5(sessionDir(session.id), { recursive: true, force: true });
+      rmSync4(sessionDir(session.id), { recursive: true, force: true });
       deleteSession(session.id);
       logOk(`Session ${session.id} stopped and removed.`);
       return;
@@ -92149,7 +91507,7 @@ async function runStop(id, opts) {
 
 // src/index.ts
 var __dirname2 = dirname15(fileURLToPath(import.meta.url));
-var pkg = JSON.parse(readFileSync19(join23(__dirname2, '..', 'package.json'), 'utf-8'));
+var pkg = JSON.parse(readFileSync19(join22(__dirname2, '..', 'package.json'), 'utf-8'));
 var program2 = new Command();
 program2
   .name('kautopilot')
@@ -92161,7 +91519,6 @@ program2
   .addCommand(createInternalStartCommand(), { hidden: true })
   .addCommand(createStatusCommand())
   .addCommand(createDescribeCommand())
-  .addCommand(createDeleteCommand())
   .addCommand(createStopCommand())
   .addCommand(createLogsCommand())
   .addCommand(createPsCommand())
