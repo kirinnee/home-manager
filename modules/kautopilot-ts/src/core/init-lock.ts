@@ -104,7 +104,7 @@ export function acquireInitLock(id: string): void {
 export function checkInitLock(id: string): LockInfo {
   const path = initLockPath(id);
   if (!existsSync(path)) {
-    return { locked: false, pid: 0, alive: false };
+    return { locked: false, pid: 0, alive: false, zellijAlive: false };
   }
 
   const pid = parseInt(readFileSync(path, 'utf-8').trim(), 10);
@@ -116,10 +116,10 @@ export function checkInitLock(id: string): LockInfo {
     } catch {
       // Ignore
     }
-    return { locked: false, pid, alive: false };
+    return { locked: false, pid, alive: false, zellijAlive: false };
   }
 
-  return { locked: true, pid, alive: true };
+  return { locked: true, pid, alive: true, zellijAlive: false };
 }
 
 export function releaseInitLock(id: string): void {

@@ -277,6 +277,7 @@ rec {
       zenith
       stern
       google-cloud-sdk
+      syncthing
 
       tesseract
       age
@@ -330,7 +331,6 @@ rec {
       kloop
       kloop-dev
       kautopilot
-      kautopilot-dev
       atomi.clickup_cli
       grafana-loki
       prometheus.cli

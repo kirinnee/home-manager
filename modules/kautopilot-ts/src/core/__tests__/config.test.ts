@@ -29,7 +29,7 @@ describe('config', () => {
     expect(config?.claude_binary).toBe('claude');
     // commit agent uses shared COMMIT_AGENT_PROMPT (not in config.agents)
     expect(config?.agents.phase2.resolve).toBeDefined();
-    expect(config?.agents.phase2.resolve.prompt).toContain('revisit_spec');
+    expect(config?.agents.phase2.resolve.prompt).toContain('kloop failure');
     expect(config?.kloop.maxIterations).toBe(7);
     expect(config?.repo.baseBranch).toBe('main');
     expect(config?.repo.ticketSystem).toBeNull();

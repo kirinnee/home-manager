@@ -45,8 +45,7 @@ export async function handleRunning(ctx: Phase2Context): Promise<string | null> 
       return 'commit';
 
     case 'conflict':
-    case 'max_situations':
-      // Only conflict and max_situations trigger rewrite analysis (spec section 7.3)
+    case 'max_iterations':
       return 'resolve';
 
     case 'crash':

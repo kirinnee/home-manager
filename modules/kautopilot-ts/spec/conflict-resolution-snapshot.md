@@ -14,7 +14,7 @@ Both paths lead to the same outcome: new epoch v{N+1} with feedback.md.
 
 | Context                     | Phase   | Trigger                              | TTY        |
 | --------------------------- | ------- | ------------------------------------ | ---------- |
-| **Implementation conflict** | Phase 2 | kloop failure / max_situations       | `resolve`  |
+| **Implementation conflict** | Phase 2 | kloop failure / max_iterations       | `resolve`  |
 | **PR feedback**             | Phase 3 | User wants changes after merge-ready | `feedback` |
 
 ### Flow

@@ -61,8 +61,11 @@ const PROMPT_VARS: Record<string, Record<string, string>> = {
     reason: 'reason for resolve ("conflict" or "retry")',
     attempt: 'attempt number (1-indexed)',
   },
-  'agents.phase2.rewrite_spec': {
-    // No variable substitutions
+  'agents.phase2.amend_plans': {
+    resolution_path: 'path to the resolution document written by resolve TTY',
+    task_spec_path: 'path to the task spec file',
+    plans_dir: 'path to the plans directory',
+    kloop_evidence: 'output from kloop describe',
   },
   'agents.phase3.eval': {
     spec_path: 'path to the task spec file',

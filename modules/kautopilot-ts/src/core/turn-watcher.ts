@@ -136,7 +136,13 @@ export function processEntry(ctx: TurnMachineContext, entry: ParsedEntry): TurnM
     return next;
   }
 
-  // system, progress, file-history-snapshot, last-prompt, custom-title, agent-name — no change
+  if (type === 'system' && entry.subtype === 'turn_duration') {
+    // turn_duration is emitted when the LLM's turn completes — it's the user's turn now
+    next.state = 'user_turn';
+    return next;
+  }
+
+  // system (other), progress, file-history-snapshot, last-prompt, custom-title, agent-name — no change
   return next;
 }
 
@@ -242,6 +248,15 @@ export function watchTurn(jsonlPath: string, onChange: (state: TurnState) => voi
     }
   }
 
+  let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Periodic poll as fallback — fs.watch on macOS/APFS can silently drop events */
+  const POLL_INTERVAL_MS = 2_000;
+  function startPoll() {
+    if (closed) return;
+    pollTimer = setInterval(check, POLL_INTERVAL_MS);
+  }
+
   function startWatch() {
     if (closed) return;
     try {
@@ -250,7 +265,10 @@ export function watchTurn(jsonlPath: string, onChange: (state: TurnState) => voi
     } catch {
       // File may have vanished between check and watch — retry
       waitForFile();
+      return;
     }
+    // Always run polling as fallback for fs.watch reliability
+    startPoll();
   }
 
   /** Poll for file existence with exponential backoff: 500ms, 1s, 2s, 4s, ... max 8s */
@@ -286,6 +304,7 @@ export function watchTurn(jsonlPath: string, onChange: (state: TurnState) => voi
     close: () => {
       closed = true;
       fileWatcher?.close();
+      if (pollTimer) clearInterval(pollTimer);
     },
   };
 }

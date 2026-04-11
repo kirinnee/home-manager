@@ -38,7 +38,7 @@ export async function handleRunFix(ctx: Phase3Context): Promise<string | null> {
     return 'push';
   }
 
-  if (result.status === 'conflict' || result.status === 'max_situations') {
+  if (result.status === 'conflict' || result.status === 'max_iterations') {
     ctx.ttyReason = 'run_fix_failure';
     return 'tty_resolve';
   }
