@@ -8,7 +8,8 @@
   "scripts": {
     "dev": "bun run ./src/index.ts",
     "build": "bun build ./src/index.ts --outdir ./dist --target bun",
-    "test": "bun test"
+    "test": "bun test",
+    "check": "tsc --noEmit && knip && bun test"
   },
   "dependencies": {
     "@clack/prompts": "^0.11.0",
