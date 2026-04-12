@@ -41,7 +41,12 @@ Read CLAUDE.md and any project skills files if they exist.
 5. Capture evidence to {evidenceDir}/:
    - If the spec has a Definition of Done checklist, capture evidence for each item
    - If the spec has no checklist, figure out what checks are available (build, test, lint, type-check, etc.) and capture what you can
-6. Write learnings to {learningsFile}: roadblocks, workarounds, decisions made, and why
+6. **Document how you addressed previous reviews.** If there were reviews from a previous loop, write a file at {evidenceDir}/addressed-reviews.md. For each rejected reviewer's concern, document:
+   - **What** the reviewer flagged
+   - **What** you did in response (specific files changed, approaches taken)
+   - **Why** you chose that approach — this is critical when you disagree with the reviewer's suggestion. Explain your reasoning so future reviewers can evaluate the trade-off independently rather than re-raising the same point.
+   - If you intentionally chose NOT to follow a reviewer's suggestion, say so explicitly with your rationale. Silent disagreement looks like the concern was ignored.
+7. Write learnings to {learningsFile}: roadblocks, workarounds, decisions made, and why
 
 ## Git Safety - CRITICAL
 
@@ -74,6 +79,8 @@ Read CLAUDE.md and any project skills files if they exist.
 ## Previous Loop Reviews
 {archivedReviews}
 If previous reviews are available above, read the verdict JSONs to identify which reviewers REJECTED. For each rejected reviewer, specifically verify whether their concerns have been addressed. Do not let previous opinions override your own assessment — but ensure previously raised issues are no longer present.
+
+**Important**: Also check {evidenceDir}/addressed-reviews.md if it exists. The implementer documents there what they changed and why in response to each previous review concern. This is especially valuable when the implementer disagreed with a reviewer's suggestion — read their rationale and evaluate it on its merits rather than re-raising the same point without considering their reasoning.
 
 ## Your Task
 
