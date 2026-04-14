@@ -16,7 +16,6 @@
     "cli-table3": "^0.6.5",
     "commander": "^12.0.0",
     "date-fns": "^4.1.0",
-    "knip": "^6.3.0",
     "nanoid": "^5.0.0",
     "picocolors": "^1.1.1",
     "yaml": "^2.0.0",
@@ -24,6 +23,7 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "knip": "^6.3.0",
     "typescript": "^5.7.0"
   }
 }

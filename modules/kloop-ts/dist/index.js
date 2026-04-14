@@ -10934,6 +10934,8 @@ var paths = {
   loopReviewsPath: (runId, loopIndex) => path.join(getKloopHome(), runId, `loop-${loopIndex}`, 'reviews'),
   loopVerdictsPath: (runId, loopIndex) => path.join(getKloopHome(), runId, `loop-${loopIndex}`, 'verdicts'),
   loopCheckpointerPath: (runId, loopIndex) => path.join(getKloopHome(), runId, `loop-${loopIndex}`, 'checkpointer'),
+  loopSynthesisPath: (runId, loopIndex) => path.join(getKloopHome(), runId, `loop-${loopIndex}`, 'synthesis'),
+  loopReReviewPath: (runId, loopIndex) => path.join(getKloopHome(), runId, `loop-${loopIndex}`, 'rereview'),
 };
 
 class DefaultFsService {
@@ -11048,18 +11050,30 @@ Read CLAUDE.md and any project skills files if they exist.
 
 - Loop: {iteration}
 - Reviews from previous loop: {reviewsDir}/
+- Synthesized review summary (loop 2+): {reviewSummaryPath}
 - Learnings from previous loops: {learningsFile}
 
 ## Instructions
 
 1. Read and understand the specification completely \u2014 especially the Definition of Done checklist
 2. Before using any library, tool, or framework, research its current documentation and source code. Verify the version you are using matches the API signatures and configuration you are relying on. Do not rely on potentially outdated knowledge.
-3. Address any review feedback or learnings from above
-4. Implement the required changes
+3. **Focus on rejected reviews first.** If a synthesized review summary path is listed above, read it \u2014 it replaces raw individual reviews as your primary input. The summary deduplicates issues and prioritizes by severity (CRITICAL/HIGH/LOW). Otherwise, read the raw reviews from {reviewsDir}/. UNANIMOUS approval is required \u2014 every reviewer must pass. If any reviewer rejected, address their concerns before moving on to other work. Do NOT treat a minority rejection as optional.
+4. Implement the required changes, with special attention to addressing every rejected reviewer's concerns
 5. Capture evidence to {evidenceDir}/:
    - If the spec has a Definition of Done checklist, capture evidence for each item
    - If the spec has no checklist, figure out what checks are available (build, test, lint, type-check, etc.) and capture what you can
-6. Write learnings to {learningsFile}: roadblocks, workarounds, decisions made, and why
+6. **Self-review your changes** before marking as complete:
+   - Run \`git diff\` and \`git diff --staged\` to review ALL changes
+   - Check each change against the spec requirements
+   - Verify all evidence has been captured
+   - Write self-review findings to {evidenceDir}/self-review.md
+   - Only consider yourself done if all critical spec items are addressed
+7. **Document how you addressed previous reviews.** If there were reviews from a previous loop, write a file at {evidenceDir}/addressed-reviews.md. For each rejected reviewer's concern, document:
+   - **What** the reviewer flagged
+   - **What** you did in response (specific files changed, approaches taken)
+   - **Why** you chose that approach \u2014 this is critical when you disagree with the reviewer's suggestion. Explain your reasoning so future reviewers can evaluate the trade-off independently rather than re-raising the same point.
+   - If you intentionally chose NOT to follow a reviewer's suggestion, say so explicitly with your rationale. Silent disagreement looks like the concern was ignored.
+8. Write learnings to {learningsFile}: roadblocks, workarounds, decisions made, and why
 
 ## Git Safety - CRITICAL
 
@@ -11077,6 +11091,9 @@ Read CLAUDE.md and any project skills files if they exist.
 
 ## Previous Loop Reviews
 {archivedReviews}
+If previous reviews are available above, read the verdict JSONs to identify which reviewers REJECTED. For each rejected reviewer, specifically verify whether their concerns have been addressed. Do not let previous opinions override your own assessment \u2014 but ensure previously raised issues are no longer present.
+
+**Important**: Also check {evidenceDir}/addressed-reviews.md if it exists. The implementer documents there what they changed and why in response to each previous review concern. This is especially valuable when the implementer disagreed with a reviewer's suggestion \u2014 read their rationale and evaluate it on its merits rather than re-raising the same point without considering their reasoning.
 
 ## Your Task
 
@@ -11283,6 +11300,152 @@ Write to {checkpointResultFile}:
 
 If conflict_found, also write {conflictFile} with detailed conflict analysis.
 Do NOT edit {specPath} under any circumstances.`;
+var DEFAULT_SYNTHESIZER_PROMPT = `# Synthesis Task
+
+## Context
+
+You are a review synthesizer. Your job is to compact all raw reviews from loop {iteration} into a single structured summary that replaces the raw reviews as input for the next loop.
+
+## Specification
+
+Read the spec from: {specPath}
+
+## Your Task
+
+1. Read all raw reviews from {reviewsDir}/reviewer-*.md
+2. Read all verdicts from {verdictsDir}/reviewer-*.json
+3. If re-reviewer verdicts exist ({verdictsDir}/rereviewer-*.json), read them to capture issues found during re-review gate
+4. If a previous summary exists at {previousSummaryPath}, read it to track resolved issues
+5. Check {evidenceDir}/ for build/test evidence
+6. Read {learningsFile} for context on the implementer's decisions
+
+## Update Learnings
+
+After reading all reviews and verdicts, update {learningsFile} by:
+- Adding new insights about what works and what doesn't
+- Compressing/compacting previous learnings if the file is getting long
+- Recording patterns in reviewer feedback (e.g., "multiple reviewers flagged X", "issue Y resolved after Z approach")
+
+## Output
+
+Write a structured summary to {summaryOutputPath}/review-summary.md with the following format:
+
+### Confirmed Complete
+- List spec items that ALL reviewers agree are fully implemented (with reviewer attribution)
+
+### Issues Requiring Action
+Group by severity:
+- **CRITICAL**: Issues that block spec acceptance (missing features, broken tests, security issues)
+- **HIGH**: Significant issues that need fixing (incomplete implementation, poor quality)
+- **LOW**: Minor issues, suggestions, or style preferences
+
+For each issue, include:
+- Description of the issue
+- Which reviewer(s) flagged it
+- Specific file/line references where applicable
+
+### Resolved Since Previous Loop
+- Issues from the previous summary that are now resolved (with evidence)
+
+### Progress Estimate
+- Overall completion percentage
+- Brief assessment of remaining work
+
+## Rules
+
+- Deduplicate: if multiple reviewers flag the same issue, mention it once with all attributions
+- Be objective: only include issues with clear evidence
+- Preserve reviewer intent: don't soften a CRITICAL issue to HIGH just because other reviewers didn't notice it
+- If the implementer documented their rationale in {evidenceDir}/addressed-reviews.md, read it and consider their reasoning when evaluating issues`;
+var DEFAULT_RE_REVIEWER_PROMPT = `# Re-Review Task
+
+## Context
+
+You are Re-Reviewer {reReviewerIndex} for loop {iteration}. A previous loop produced a review summary with issues requiring action. Your job is to verify whether those issues have actually been fixed.
+
+## Specification
+
+Read the spec from: {specPath}
+
+## Your Task
+
+1. Read the previous review summary from {previousSummaryPath}
+2. Focus on the "Issues Requiring Action" section
+3. For each CRITICAL and HIGH issue:
+   a. Check the current code via \`git diff\` and \`git diff --staged\`
+   b. Check {evidenceDir}/ for build/test evidence
+   c. Check {evidenceDir}/addressed-reviews.md for the implementer's response
+   d. Determine if the issue is fixed or remains
+
+4. Write your verdict to {verdictsDir}/rereviewer-{reReviewerIndex}.json:
+\`\`\`json
+{
+  "approved": true/false,
+  "reasoning": "Your detailed reasoning here",
+  "issuesFixed": ["issue 1 description", "issue 2 description"],
+  "issuesRemaining": ["issue 3 description"]
+}
+\`\`\`
+
+## Verdict Criteria
+
+- **APPROVE** if all CRITICAL and HIGH issues are fixed (LOW issues remaining is OK)
+- **REJECT** if any CRITICAL issue remains unfixed
+- **APPROVE** if only LOW issues remain
+
+## Learnings
+
+Check {learningsFile} for context on the implementer's decisions this iteration.`;
+var DEFAULT_RE_SYNTHESIS_PROMPT = `# Re-Synthesis Task
+
+## Context
+
+You are a re-synthesizer for loop {iteration}. The re-review gate found that some issues from the previous loop's review summary remain unfixed. Your job is to produce an updated review summary that carries forward the previous summary's content plus the re-reviewers' findings.
+
+## Specification
+
+Read the spec from: {specPath}
+
+## Your Task
+
+1. Read the previous review summary from {previousSummaryPath}
+2. Read re-reviewer outputs from {rereviewDir}/rereviewer-*/
+3. Read re-reviewer verdicts from {verdictsDir}/rereviewer-*.json \u2014 these contain \`issuesFixed\` and \`issuesRemaining\` arrays
+4. Read {learningsFile} for context on the implementer's decisions
+
+## Output
+
+Write an updated summary to {summaryOutputPath}/review-summary.md with the same structure as the previous summary:
+
+### Confirmed Complete
+- Carry forward items from the previous summary
+- Add any items that re-reviewers confirmed as fixed
+
+### Issues Requiring Action
+Group by severity (CRITICAL/HIGH/LOW):
+- Carry forward issues that re-reviewers confirmed as still remaining
+- Remove issues that re-reviewers confirmed as fixed
+- If a re-reviewer found NEW issues not in the previous summary, add them
+
+### Resolved Since Previous Loop
+- Move issues from "Issues Requiring Action" that re-reviewers confirmed as fixed
+
+### Progress Estimate
+- Update the overall completion percentage based on re-reviewer findings
+- Brief assessment of remaining work
+
+## Update Learnings
+
+After processing, update {learningsFile} with:
+- Which issues were fixed vs which remain
+- Any patterns in what keeps failing
+
+## Rules
+
+- This is a LIGHTWEIGHT synthesis \u2014 you are merging structured data, not re-reading raw reviews
+- Preserve the previous summary's structure and severity levels
+- Only change issue status based on re-reviewer evidence, not speculation
+- If re-reviewers disagree on whether an issue is fixed, keep it in "Issues Requiring Action"`;
 
 // src/agents/default-config.ts
 function indent(text, spaces) {
@@ -11312,6 +11475,28 @@ compressSpec: false
 firstLoopFullReview: true
 previousReviewPropagation: 0.7
 
+# Synthesis: compact reviews into summary after each loop
+synthesis:
+  enabled: true
+
+# Re-review: cheap models verify previous issues were fixed (loop 2+)
+reReview:
+  enabled: false
+  phases:
+    - - claude-haiku:claude
+  timeout: 5              # minutes
+
+# Re-rank reviewers by trouble score after checkpoint
+rerankAfterCheckpoint: false
+
+# Implementer retry on crash (exit code 1)
+implementerRetry:
+  maxRetries: 2
+  backoffBaseMs: 5000       # ms, doubles each retry
+
+# Weight multiplier for ::i implementers on loop 1
+firstIterationWeightMultiplier: 2
+
 # Agent prompt templates \u2014 edit these to customize agent behavior.
 # All {placeholders} are substituted at build time with actual runtime paths.
 prompts:
@@ -11321,6 +11506,7 @@ prompts:
   #   {reviewsDir}        - path to reviews/ folder
   #   {evidenceDir}       - path to evidence/ folder
   #   {learningsFile}     - path to learnings.md
+  #   {reviewSummaryPath} - path to previous loop's review-summary.md (loop 2+)
   implementer: |
 ${indent(DEFAULT_IMPLEMENTER_PROMPT, 4)}
   # reviewer variables:
@@ -11347,6 +11533,38 @@ ${indent(CONFLICT_ONLY_CHECKPOINTER_PROMPT, 4)}
   #   {specBackupFile}         - path to spec-backup.md (used during compression)
   checkpointerFull: |
 ${indent(DEFAULT_CHECKPOINTER_PROMPT, 4)}
+  # synthesizer \u2014 compacts reviews into a structured summary
+  #   {specPath}              - path to spec file
+  #   {iteration}             - current loop number
+  #   {reviewsDir}            - path to reviews/ folder
+  #   {verdictsDir}           - path to verdicts/ folder
+  #   {previousSummaryPath}   - path to previous loop's review-summary.md
+  #   {summaryOutputPath}     - path to write review-summary.md
+  #   {learningsFile}         - path to learnings.md
+  #   {evidenceDir}           - path to evidence/ folder
+  synthesizer: |
+${indent(DEFAULT_SYNTHESIZER_PROMPT, 4)}
+  # reReviewer \u2014 cheap model validates previous issues were fixed
+  #   {specPath}              - path to spec file
+  #   {iteration}             - current loop number
+  #   {previousSummaryPath}   - path to previous loop's review-summary.md
+  #   {reviewsDir}            - path to reviews/ folder
+  #   {verdictsDir}           - path to verdicts/ folder
+  #   {evidenceDir}           - path to evidence/ folder
+  #   {learningsFile}         - path to learnings.md
+  #   {reReviewerIndex}       - which re-reviewer this is
+  reReviewer: |
+${indent(DEFAULT_RE_REVIEWER_PROMPT, 4)}
+  # reSynthesizer \u2014 merges previous synthesis + re-reviewer outputs on re-review fail
+  #   {specPath}              - path to spec file
+  #   {iteration}             - current loop number
+  #   {previousSummaryPath}   - path to previous loop's review-summary.md
+  #   {rereviewDir}           - path to rereview/ folder
+  #   {verdictsDir}           - path to verdicts/ folder
+  #   {summaryOutputPath}     - path to write review-summary.md
+  #   {learningsFile}         - path to learnings.md
+  reSynthesizer: |
+${indent(DEFAULT_RE_SYNTHESIS_PROMPT, 4)}
 `;
 }
 
@@ -15494,6 +15712,20 @@ var metricSampleSchema = exports_external.object({
   outputTokens: exports_external.number().int().nonnegative().optional(),
   error: exports_external.string().optional(),
 });
+var reReviewSchema = exports_external.object({
+  enabled: exports_external.boolean().default(false),
+  phases: exports_external
+    .array(exports_external.array(exports_external.string().min(1)).min(1))
+    .default([['claude-haiku:claude']]),
+  timeout: exports_external.number().min(0.001).max(120).default(5),
+});
+var implementerRetrySchema = exports_external.object({
+  maxRetries: exports_external.number().min(0).max(10).default(2),
+  backoffBaseMs: exports_external.number().min(0).default(5000),
+});
+var synthesisSchema = exports_external.object({
+  enabled: exports_external.boolean().default(true),
+});
 var configSchema = exports_external
   .object({
     implementers: exports_external
@@ -15510,12 +15742,20 @@ var configSchema = exports_external
     compressSpec: exports_external.boolean().default(false),
     firstLoopFullReview: exports_external.boolean().default(true),
     previousReviewPropagation: exports_external.number().min(0).max(1).default(0.7),
+    synthesis: synthesisSchema.optional(),
+    reReview: reReviewSchema.optional(),
+    rerankAfterCheckpoint: exports_external.boolean().default(false),
+    implementerRetry: implementerRetrySchema.optional(),
+    firstIterationWeightMultiplier: exports_external.number().min(1).max(10).default(2),
     prompts: exports_external
       .object({
         implementer: exports_external.string().optional(),
         reviewer: exports_external.string().optional(),
         checkpointer: exports_external.string().optional(),
         checkpointerFull: exports_external.string().optional(),
+        synthesizer: exports_external.string().optional(),
+        reReviewer: exports_external.string().optional(),
+        reSynthesizer: exports_external.string().optional(),
       })
       .optional(),
   })
@@ -15547,6 +15787,11 @@ var configSchema = exports_external
       compressSpec: data.compressSpec,
       firstLoopFullReview: data.firstLoopFullReview,
       previousReviewPropagation: data.previousReviewPropagation,
+      synthesis: data.synthesis ?? { enabled: true },
+      reReview: data.reReview ?? { enabled: false, phases: [['claude-haiku:claude']], timeout: 5 },
+      rerankAfterCheckpoint: data.rerankAfterCheckpoint ?? false,
+      implementerRetry: data.implementerRetry ?? { maxRetries: 2, backoffBaseMs: 5000 },
+      firstIterationWeightMultiplier: data.firstIterationWeightMultiplier ?? 2,
       prompts: data.prompts,
     };
   });
@@ -15561,12 +15806,27 @@ var resolvedConfigSchema = exports_external.object({
   compressSpec: exports_external.boolean(),
   firstLoopFullReview: exports_external.boolean(),
   previousReviewPropagation: exports_external.number().min(0).max(1),
+  synthesis: exports_external.object({ enabled: exports_external.boolean() }),
+  reReview: exports_external.object({
+    enabled: exports_external.boolean(),
+    phases: exports_external.array(exports_external.array(exports_external.string().min(1)).min(1)),
+    timeout: exports_external.number().min(0.001).max(120),
+  }),
+  rerankAfterCheckpoint: exports_external.boolean(),
+  implementerRetry: exports_external.object({
+    maxRetries: exports_external.number().min(0).max(10),
+    backoffBaseMs: exports_external.number().min(0),
+  }),
+  firstIterationWeightMultiplier: exports_external.number().min(1).max(10),
   prompts: exports_external
     .object({
       implementer: exports_external.string().optional(),
       reviewer: exports_external.string().optional(),
       checkpointer: exports_external.string().optional(),
       checkpointerFull: exports_external.string().optional(),
+      synthesizer: exports_external.string().optional(),
+      reReviewer: exports_external.string().optional(),
+      reSynthesizer: exports_external.string().optional(),
     })
     .optional(),
 });
@@ -15662,25 +15922,32 @@ function parseImplementerConfig(entry) {
   if (!trimmed) {
     throw new Error('Implementer config cannot be empty.');
   }
-  const colonCount = (trimmed.match(/:/g) || []).length;
-  if (colonCount > 1) {
-    throw new Error(`Invalid implementer config "${entry}": too many colons. Expected format: binary:harness`);
+  let firstIterationPreferred = false;
+  let working = trimmed;
+  if (working.endsWith('::i')) {
+    firstIterationPreferred = true;
+    working = working.slice(0, -3);
   }
-  const colonIndex = trimmed.indexOf(':');
+  const colonCount = (working.match(/:/g) || []).length;
+  if (colonCount > 1) {
+    throw new Error(`Invalid implementer config "${entry}": too many colons. Expected format: binary:harness[:i]`);
+  }
+  const colonIndex = working.indexOf(':');
   if (colonIndex === -1) {
-    return { binary: trimmed, harness: 'claude' };
+    return { binary: working, harness: 'claude', firstIterationPreferred };
   }
   if (colonIndex === 0) {
     throw new Error(`Invalid implementer config "${entry}": binary name cannot be empty.`);
   }
-  const binary = trimmed.slice(0, colonIndex);
-  const harnessValue = trimmed.slice(colonIndex + 1);
+  const binary = working.slice(0, colonIndex);
+  const harnessValue = working.slice(colonIndex + 1);
   if (!harnessValue) {
     throw new Error(`Invalid implementer config "${entry}": harness cannot be empty.`);
   }
   return {
     binary,
     harness: parseHarness(harnessValue),
+    firstIterationPreferred,
   };
 }
 function parseReviewerConfig(entry) {
@@ -15721,13 +15988,22 @@ function parseConflictCheckerConfig(entry) {
 function getPrimaryImplementer(config) {
   return Object.keys(config.implementers)[0];
 }
-function selectImplementer(config) {
+function selectImplementer(config, loopNum) {
   const entries = Object.entries(config.implementers);
-  const totalWeight = entries.reduce((sum, [, weight]) => sum + weight, 0);
+  const effectiveLoop = loopNum ?? 1;
+  const multiplier = config.firstIterationWeightMultiplier ?? 2;
+  const effectiveWeights = entries.map(([binary, weight]) => {
+    if (effectiveLoop === 1) {
+      const parsed = parseImplementerConfig(binary);
+      if (parsed.firstIterationPreferred) return weight * multiplier;
+    }
+    return weight;
+  });
+  const totalWeight = effectiveWeights.reduce((sum, w) => sum + w, 0);
   let rand = Math.random() * totalWeight;
-  for (const [binary, weight] of entries) {
-    rand -= weight;
-    if (rand <= 0) return binary;
+  for (let i = 0; i < entries.length; i++) {
+    rand -= effectiveWeights[i];
+    if (rand <= 0) return entries[i][0];
   }
   return entries[entries.length - 1][0];
 }
@@ -15759,10 +16035,17 @@ var EVENT_TYPES = {
   LOOP_START: 'loop_start',
   IMPLEMENTER_START: 'implementer_start',
   IMPLEMENTER_END: 'implementer_end',
+  IMPLEMENTER_RETRY: 'implementer_retry',
   REVIEW_PHASE_START: 'review_phase_start',
   REVIEWER_START: 'reviewer_start',
   REVIEWER_END: 'reviewer_end',
   REVIEW_PHASE_END: 'review_phase_end',
+  RE_REVIEW_PHASE_START: 're_review_phase_start',
+  RE_REVIEWER_START: 're_reviewer_start',
+  RE_REVIEWER_END: 're_reviewer_end',
+  RE_REVIEW_PHASE_END: 're_review_phase_end',
+  SYNTHESIS_START: 'synthesis_start',
+  SYNTHESIS_END: 'synthesis_end',
   CHECKPOINT: 'checkpoint',
   CHECKPOINT_START: 'checkpoint_start',
   CHECKPOINT_END: 'checkpoint_end',
@@ -15792,15 +16075,14 @@ function substitute(template, vars) {
   return template.replace(/{(\w+)}/g, (_, key) => vars[key] ?? `{${key}}`);
 }
 function buildImplementerPrompt(template, vars) {
-  return substitute(template ?? DEFAULT_IMPLEMENTER_PROMPT, vars);
+  return substitute(template ?? DEFAULT_IMPLEMENTER_PROMPT, {
+    ...vars,
+    reviewSummaryPath: vars.reviewSummaryPath ?? '',
+  });
 }
 function buildReviewerPrompt(template, vars) {
   let prompt = template ?? DEFAULT_REVIEWER_PROMPT;
-  const archivedSection =
-    vars.archivedReviews !== null
-      ? `Check the previous loop's completed reviews at ${vars.archivedReviews}/ for context on what reviewers found.
-(Read these for background only \u2014 do not let previous reviewers opinions override your own assessment of the spec and code.)`
-      : `No previous loop reviews available yet.`;
+  const archivedSection = vars.archivedReviews !== null ? vars.archivedReviews : '';
   prompt = substitute(prompt, { ...vars, archivedReviews: archivedSection });
   return prompt;
 }
@@ -15809,6 +16091,15 @@ function buildCheckpointerPrompt(conflictOnlyTemplate, fullTemplate, vars, compr
   if (template) return substitute(template, vars);
   const defaultTemplate = compressSpec ? DEFAULT_CHECKPOINTER_PROMPT : CONFLICT_ONLY_CHECKPOINTER_PROMPT;
   return substitute(defaultTemplate, vars);
+}
+function buildSynthesizerPrompt(template, vars) {
+  return substitute(template ?? DEFAULT_SYNTHESIZER_PROMPT, vars);
+}
+function buildReReviewerPrompt(template, vars) {
+  return substitute(template ?? DEFAULT_RE_REVIEWER_PROMPT, vars);
+}
+function buildReSynthesisPrompt(template, vars) {
+  return substitute(template ?? DEFAULT_RE_SYNTHESIS_PROMPT, vars);
 }
 
 // src/loop/iteration.ts
@@ -15819,12 +16110,14 @@ function buildIterationData(run, config, specPath, _specContent, runId, loopNum,
   const learningsFile = paths2.runLearnings(runId);
   const implReviewsDir =
     loopNum > 1 ? paths2.loopReviewsPath(runId, loopNum - 1) : paths2.loopReviewsPath(runId, loopNum);
+  const reviewSummaryPath = loopNum > 1 ? `${paths2.loopSynthesisPath(runId, loopNum - 1)}/review-summary.md` : null;
   const implVars = {
     specPath,
     iteration: String(run.iteration),
     reviewsDir: implReviewsDir,
     evidenceDir,
     learningsFile,
+    reviewSummaryPath: reviewSummaryPath ?? undefined,
   };
   const implementerPrompt = buildImplementerPrompt(config.prompts?.implementer, implVars);
   const allReviewers = config.reviewPhases.flat();
@@ -15854,6 +16147,7 @@ function buildIterationData(run, config, specPath, _specContent, runId, loopNum,
     learnings: run.learnings,
     implementerPrompt,
     reviewerPrompts,
+    reviewSummaryPath,
   };
 }
 
@@ -15870,6 +16164,8 @@ function parseVerdictFile(content) {
         verdict: parsed.approved ? 'approved' : 'rejected',
         reasoning: parsed.reasoning ?? '',
         completionEstimate: parsed.completionEstimate,
+        issuesFixed: parsed.issuesFixed,
+        issuesRemaining: parsed.issuesRemaining,
       };
     }
     return { verdict: null, reasoning: '' };
@@ -17616,7 +17912,18 @@ function formatMaxIterations(maxIterations) {
   console.log(import_picocolors3.default.yellow(`  max iterations reached (${maxIterations})`));
 }
 function formatAgentLaunch(role, label, binary, tmuxSession, logPath) {
-  const roleLabel = role === 'impl' ? 'implementer' : role === 'reviewer' ? label : 'checkpointer';
+  const roleLabel =
+    role === 'impl'
+      ? 'implementer'
+      : role === 'reviewer'
+        ? label
+        : role === 'synthesizer'
+          ? 'synthesizer'
+          : role === 'resynthesizer'
+            ? 'resynthesizer'
+            : role === 'rereviewer'
+              ? label
+              : 'checkpointer';
   console.log(`  \u25B8 ${import_picocolors3.default.cyan(roleLabel)}  ${import_picocolors3.default.bold(binary)}`);
   console.log(import_picocolors3.default.dim(`    tmux: ${tmuxSession}`));
   console.log(import_picocolors3.default.dim(`    log:  ${logPath}`));
@@ -17662,6 +17969,59 @@ function formatProgress(estimates, allResults) {
     import_picocolors3.default.green('\u2588'.repeat(filled)) + import_picocolors3.default.dim('\u2591'.repeat(empty));
   console.log(`  progress  ${bar} ${lowestEstimate}%${reviewerInfo}`);
 }
+function formatReReviewStart() {
+  console.log(import_picocolors3.default.dim('  \u25C6 re-review gate \u2014 checking previous issues...'));
+}
+function formatReReviewResult(passed, results) {
+  if (passed) {
+    console.log(
+      `  ${import_picocolors3.default.green('\u2713 re-review: passed')} \u2014 all previous issues resolved`,
+    );
+  } else {
+    const rejected = results.filter(r => r.verdict === 'rejected').map(r => r.binary);
+    console.log(`  ${import_picocolors3.default.red('\u2717 re-review: failed')} \u2014 ${rejected.join(', ')}`);
+  }
+}
+function formatSynthesisStart() {
+  console.log(import_picocolors3.default.dim('  \u25C6 synthesizing reviews...'));
+}
+function formatSynthesisResult(summaryCreated, durationMs) {
+  if (summaryCreated) {
+    console.log(
+      `  ${import_picocolors3.default.green('\u2713 synthesis')} \u2014 review-summary.md written  ${import_picocolors3.default.dim(formatDuration(durationMs))}`,
+    );
+  } else {
+    console.log(
+      `  ${import_picocolors3.default.red('\u2717 synthesis')} \u2014 failed to write summary  ${import_picocolors3.default.dim(formatDuration(durationMs))}`,
+    );
+  }
+}
+function formatReSynthesisStart() {
+  console.log(import_picocolors3.default.dim('  \u25C6 re-synthesizing from re-reviewer outputs...'));
+}
+function formatReSynthesisResult(summaryCreated, durationMs) {
+  if (summaryCreated) {
+    console.log(
+      `  ${import_picocolors3.default.green('\u2713 re-synthesis')} \u2014 review-summary.md updated  ${import_picocolors3.default.dim(formatDuration(durationMs))}`,
+    );
+  } else {
+    console.log(
+      `  ${import_picocolors3.default.red('\u2717 re-synthesis')} \u2014 failed to write summary  ${import_picocolors3.default.dim(formatDuration(durationMs))}`,
+    );
+  }
+}
+function formatImplementerRetry(attempt, maxRetries, backoffMs) {
+  const backoffSec = (backoffMs / 1000).toFixed(1);
+  console.log(
+    import_picocolors3.default.yellow(
+      `  \u21BB implementer retry ${attempt + 1}/${maxRetries} (backoff ${backoffSec}s)`,
+    ),
+  );
+}
+function formatDynamicOrdering(orderedPhases) {
+  const flat = orderedPhases.flat();
+  console.log(import_picocolors3.default.dim(`  \u25C6 reranked review phases: ${flat.join(', ')}`));
+}
 
 // src/agents/runner.ts
 var KLOOP_BIN = `bun run ${process.argv[1]}`;
@@ -17681,17 +18041,19 @@ class AgentRunner {
   reviewerBinaries;
   checkpointerBinary;
   checkpointerHarness;
-  constructor(tmux, state, config) {
+  pathsImpl;
+  constructor(tmux, state, config, pathsOverride) {
     this.tmux = tmux;
     this.state = state;
     this.config = config;
+    this.pathsImpl = pathsOverride ?? paths;
     this.reviewerBinaries = config.reviewPhases.flat();
     const checkpointerConfig = parseConflictCheckerConfig(config.conflictChecker ?? getPrimaryImplementer(config));
     this.checkpointerBinary = checkpointerConfig.binary;
     this.checkpointerHarness = checkpointerConfig.harness;
   }
-  selectImplementer() {
-    return selectImplementer(this.config);
+  selectImplementer(loopNum) {
+    return selectImplementer(this.config, loopNum);
   }
   getSelectedImplementer() {
     return getPrimaryImplementer(this.config);
@@ -17702,7 +18064,7 @@ class AgentRunner {
   }
   async runImplementer(params) {
     const { runId, iteration, dirHash, prompt, timeout, onStart } = params;
-    const implementerBinaryName = this.selectImplementer();
+    const implementerBinaryName = this.selectImplementer(iteration);
     const parsedImpl = parseImplementerConfig(implementerBinaryName);
     if (onStart) await onStart(parsedImpl.binary);
     const sessionId = generateId();
@@ -18018,6 +18380,214 @@ class AgentRunner {
       harnessSessionId: session.harnessSessionId,
     };
   }
+  async runSynthesizer(params) {
+    const { runId, iteration, dirHash, binary: overrideBinary, previousSummaryPath, timeout } = params;
+    const implBinaryName = overrideBinary ?? getPrimaryImplementer(this.config);
+    const parsed = parseImplementerConfig(implBinaryName);
+    const sessionId = generateId();
+    const tmuxSession = `kloop-${runId}-${iteration}-synth`;
+    const synthVars = {
+      specPath: this.pathsImpl.runSpec(runId),
+      iteration: String(iteration),
+      reviewsDir: this.pathsImpl.loopReviewsPath(runId, iteration),
+      verdictsDir: this.pathsImpl.loopVerdictsPath(runId, iteration),
+      previousSummaryPath: previousSummaryPath ?? '',
+      summaryOutputPath: this.pathsImpl.loopSynthesisPath(runId, iteration),
+      learningsFile: this.pathsImpl.runLearnings(runId),
+      evidenceDir: this.pathsImpl.loopEvidencePath(runId, iteration),
+    };
+    const prompt = buildSynthesizerPrompt(this.config.prompts?.synthesizer, synthVars);
+    const synthDir = this.pathsImpl.loopSynthesisPath(runId, iteration);
+    const logFile = await this.ensureAgentDir(synthDir);
+    await fs4.writeFile(path4.join(synthDir, 'prompt.md'), prompt, 'utf-8');
+    const promptFile = await this.writePromptFile(sessionId, prompt);
+    const command = buildAgentCommand({
+      binary: parsed.binary,
+      harness: parsed.harness,
+      promptFile,
+      sessionId,
+      logFile,
+    });
+    formatAgentLaunch('synthesizer', 'synthesizer', parsed.binary, tmuxSession, logFile);
+    const result = await this.tmux.runInSession({
+      sessionName: tmuxSession,
+      command,
+      cwd: process.cwd(),
+      timeoutMins: timeout,
+    });
+    await this.cleanupPromptFile(promptFile);
+    const summaryPath = path4.join(synthDir, 'review-summary.md');
+    const summaryExists = await this.safeFileExists(summaryPath);
+    const tokens = await extractTokensFromLog(logFile);
+    const harnessSessionId = await extractHarnessSessionId(logFile);
+    return {
+      sessionId,
+      tmuxSession,
+      durationMs: result.durationMs,
+      exitCode: result.exitCode,
+      timedOut: result.timedOut,
+      binary: parsed.binary,
+      harness: parsed.harness,
+      summaryPath: summaryExists ? summaryPath : undefined,
+      inputTokens: tokens.inputTokens,
+      outputTokens: tokens.outputTokens,
+      harnessSessionId,
+    };
+  }
+  async runReSynthesizer(params) {
+    const { runId, iteration, dirHash, binary: overrideBinary, previousSummaryPath, timeout } = params;
+    const implBinaryName = overrideBinary ?? getPrimaryImplementer(this.config);
+    const parsed = parseImplementerConfig(implBinaryName);
+    const sessionId = generateId();
+    const tmuxSession = `kloop-${runId}-${iteration}-resynth`;
+    const reSynthVars = {
+      specPath: this.pathsImpl.runSpec(runId),
+      iteration: String(iteration),
+      previousSummaryPath,
+      rereviewDir: this.pathsImpl.loopReReviewPath(runId, iteration),
+      verdictsDir: this.pathsImpl.loopVerdictsPath(runId, iteration),
+      summaryOutputPath: this.pathsImpl.loopSynthesisPath(runId, iteration),
+      learningsFile: this.pathsImpl.runLearnings(runId),
+    };
+    const prompt = buildReSynthesisPrompt(this.config.prompts?.reSynthesizer, reSynthVars);
+    const synthDir = this.pathsImpl.loopSynthesisPath(runId, iteration);
+    const logFile = await this.ensureAgentDir(synthDir);
+    await fs4.writeFile(path4.join(synthDir, 'prompt.md'), prompt, 'utf-8');
+    const promptFile = await this.writePromptFile(sessionId, prompt);
+    const command = buildAgentCommand({
+      binary: parsed.binary,
+      harness: parsed.harness,
+      promptFile,
+      sessionId,
+      logFile,
+    });
+    formatAgentLaunch('resynthesizer', 'resynthesizer', parsed.binary, tmuxSession, logFile);
+    const result = await this.tmux.runInSession({
+      sessionName: tmuxSession,
+      command,
+      cwd: process.cwd(),
+      timeoutMins: timeout,
+    });
+    await this.cleanupPromptFile(promptFile);
+    const summaryPath = path4.join(synthDir, 'review-summary.md');
+    const summaryExists = await this.safeFileExists(summaryPath);
+    const tokens = await extractTokensFromLog(logFile);
+    const harnessSessionId = await extractHarnessSessionId(logFile);
+    return {
+      sessionId,
+      tmuxSession,
+      durationMs: result.durationMs,
+      exitCode: result.exitCode,
+      timedOut: result.timedOut,
+      binary: parsed.binary,
+      harness: parsed.harness,
+      summaryPath: summaryExists ? summaryPath : undefined,
+      inputTokens: tokens.inputTokens,
+      outputTokens: tokens.outputTokens,
+      harnessSessionId,
+    };
+  }
+  async runReReviewerPhase(params) {
+    const { runId, iteration, dirHash, phaseIndex, reviewers, prompts, timeout, onReviewerEnd } = params;
+    console.log(`  re-review phase ${phaseIndex} \u2014 ${reviewers.map(r => r.binary).join(', ')}`);
+    const results = await Promise.all(
+      prompts.map(async (p, ordinal) => {
+        const reviewer = reviewers[ordinal] ?? reviewers[0];
+        const result = await this.runReReviewer({
+          runId,
+          iteration,
+          dirHash,
+          reviewerIndex: p.reviewerIndex,
+          binary: reviewer.binary,
+          harness: reviewer.harness,
+          prompt: p.prompt,
+          timeout,
+          phaseIndex,
+          ordinal: ordinal + 1,
+        });
+        if (onReviewerEnd) {
+          await onReviewerEnd(result);
+        }
+        return result;
+      }),
+    );
+    const approved = results.filter(r => r.verdict === 'approved').length;
+    const rejected = results.filter(r => r.verdict === 'rejected').length;
+    console.log(`Re-review phase ${phaseIndex} verdicts: ${approved} approved, ${rejected} rejected`);
+    return results;
+  }
+  async runReReviewer(params) {
+    const { runId, iteration, dirHash, reviewerIndex, binary, harness, prompt, timeout, phaseIndex, ordinal } = params;
+    const sessionId = generateId();
+    const tmuxSession = `kloop-${runId}-${iteration}-rerev-${reviewerIndex}`;
+    const promptFile = await this.writePromptFile(sessionId, prompt);
+    const rereviewDir = paths.loopReReviewPath(runId, iteration);
+    const reviewerDir = path4.join(rereviewDir, `rereviewer-${reviewerIndex}`);
+    const logFile = await this.ensureAgentDir(reviewerDir);
+    await fs4.writeFile(path4.join(reviewerDir, 'prompt.md'), prompt, 'utf-8');
+    const command = buildAgentCommand({
+      binary,
+      harness,
+      promptFile,
+      sessionId,
+      logFile,
+    });
+    formatAgentLaunch('rereviewer', `rerev-${reviewerIndex}`, binary, tmuxSession, logFile);
+    const result = await this.tmux.runInSession({
+      sessionName: tmuxSession,
+      command,
+      cwd: process.cwd(),
+      timeoutMins: timeout,
+    });
+    const verdictsDir = paths.loopVerdictsPath(runId, iteration);
+    const verdictContent = await this.safeReadFile(path4.join(verdictsDir, `rereviewer-${reviewerIndex}.json`));
+    let error;
+    let verdict = 'rejected';
+    let reasoning = '';
+    let issuesFixed;
+    let issuesRemaining;
+    if (verdictContent) {
+      const parsed = parseVerdictFile(verdictContent);
+      if (parsed.verdict) {
+        verdict = parsed.verdict;
+      }
+      reasoning = parsed.reasoning;
+      issuesFixed = parsed.issuesFixed;
+      issuesRemaining = parsed.issuesRemaining;
+    } else if (result.timedOut || result.exitCode !== 0) {
+      error = result.timedOut ? 'timeout' : `exit_code_${result.exitCode}`;
+    }
+    await this.cleanupPromptFile(promptFile);
+    const tokens = await extractTokensFromLog(logFile);
+    const harnessSessionId = await extractHarnessSessionId(logFile);
+    const icon = verdict === 'approved' ? '\u2713' : '\u2717';
+    console.log(
+      `  ${icon} Re-reviewer ${reviewerIndex} (${binary})${phaseIndex !== undefined ? ` (phase ${phaseIndex})` : ''}: ${verdict}`,
+    );
+    return {
+      sessionId,
+      tmuxSession,
+      durationMs: result.durationMs,
+      exitCode: result.exitCode,
+      timedOut: result.timedOut,
+      reviewerIndex,
+      binary,
+      harness,
+      verdict,
+      reasoning,
+      phaseIndex,
+      ordinal,
+      inputTokens: tokens.inputTokens,
+      outputTokens: tokens.outputTokens,
+      error,
+      issuesFixed,
+      issuesRemaining,
+      harnessSessionId,
+    };
+  }
+  getReReviewPhases() {
+    return this.config.reReview?.phases ?? [];
+  }
   determineReviewerVerdict(params) {
     const {
       verdictFileContent,
@@ -18072,6 +18642,14 @@ class AgentRunner {
       return null;
     }
   }
+  async safeFileExists(filePath) {
+    try {
+      await fs4.access(filePath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
   async copyReviewFiles(runId, iteration, reviewerIndex, reviewContent, verdictContent) {
     const reviewsDir = paths.loopReviewsPath(runId, iteration);
     const verdictsDir = paths.loopVerdictsPath(runId, iteration);
@@ -18120,6 +18698,17 @@ class AgentFailureError extends Error {
   }
 }
 
+class CrashedError extends Error {
+  binary;
+  attempts;
+  constructor(binary, attempts) {
+    super(`Implementer crashed after ${attempts} retries`);
+    this.binary = binary;
+    this.attempts = attempts;
+    this.name = 'CrashedError';
+  }
+}
+
 class LoopRunner {
   state;
   tmux;
@@ -18136,7 +18725,7 @@ class LoopRunner {
     const { appendFile } = await import('fs/promises');
     const configPath = this.paths.runConfig(runId);
     const configContent = await fs5.readFile(configPath, 'utf-8');
-    const config = YAML.parse(configContent);
+    const config = parseRawConfig(YAML.parse(configContent));
     const specPath = this.paths.runSpec(runId);
     let specContent;
     try {
@@ -18154,7 +18743,7 @@ class LoopRunner {
     let loopNum = 0;
     let consecutiveFailures = 0;
     let checkpointRan = false;
-    let learnings = [];
+    const specContentRef = { value: specContent };
     const run = {
       id: runId,
       spec: specPath,
@@ -18184,44 +18773,24 @@ class LoopRunner {
         const loopStartTime = Date.now();
         console.log('');
         formatIterationStart(loopNum, config.maxIterations);
+        await fs5.mkdir(this.paths.loopPath(runId, loopNum), { recursive: true });
+        await fs5.mkdir(this.paths.loopEvidencePath(runId, loopNum), { recursive: true });
         run.iteration = loopNum;
         run.phase = 'implementing';
-        const iterData = buildIterationData(run, config, specPath, specContent, runId, loopNum, this.paths);
-        const implResult = await agentRunner.runImplementer({
+        const iterData = buildIterationData(run, config, specPath, specContentRef.value, runId, loopNum, this.paths);
+        const implResult = await this.runImplementerWithRetry(
           runId,
-          iteration: loopNum,
+          loopNum,
           dirHash,
-          prompt: iterData.implementerPrompt,
-          timeout: config.implementerTimeout,
-          onStart: async binary => {
-            await writeEvent({
-              type: 'implementer_start',
-              timestamp: new Date().toISOString(),
-              loop: loopNum,
-              binary,
-              harness: parseImplementerConfig(binary).harness,
-            });
-          },
-        });
-        formatImplementerResult(implResult.binary, implResult.exitCode, implResult.durationMs);
-        const implError = implResult.timedOut
-          ? 'timeout'
-          : implResult.exitCode !== 0
-            ? `exit_code_${implResult.exitCode}`
-            : undefined;
-        await writeEvent({
-          type: 'implementer_end',
-          timestamp: new Date().toISOString(),
-          loop: loopNum,
-          binary: implResult.binary,
-          harness: implResult.harness,
-          exitCode: implResult.exitCode,
-          durationMs: implResult.durationMs,
-          ...(implError ? { error: implError } : {}),
-        });
+          iterData,
+          config,
+          agentRunner,
+          writeEvent,
+        );
+        await this.writeEvidence(runId, loopNum);
         if (implResult.timedOut || implResult.exitCode !== 0) {
-          const implError2 = implResult.timedOut ? 'timeout' : `exit_code_${implResult.exitCode}`;
-          formatImplementerFailure(implError2);
+          const implError = implResult.timedOut ? 'timeout' : `exit_code_${implResult.exitCode}`;
+          formatImplementerFailure(implError);
           const loopDurationMs2 = Date.now() - loopStartTime;
           await writeEvent({
             type: 'loop_end',
@@ -18233,70 +18802,94 @@ class LoopRunner {
           formatFailure(consecutiveFailures, config.conflictCheckThreshold);
           if (consecutiveFailures >= config.conflictCheckThreshold) {
             formatCheckpointStart();
-            checkpointRan = true;
-            const cpBinary = config.conflictChecker ?? implBinary;
-            const cpParsed = parseConflictCheckerConfig(cpBinary);
-            await writeEvent({
-              type: 'checkpoint_start',
-              timestamp: new Date().toISOString(),
-              loop: loopNum,
-              binary: cpParsed.binary,
-              harness: cpParsed.harness,
-            });
-            const checkpointResult = await agentRunner.runCheckpointer({
+            const cpResult = await this.runCheckpointGate(
               runId,
-              iteration: loopNum,
+              loopNum,
               dirHash,
-              specPath,
-              specContent,
-              timeout: config.reviewerTimeout,
-            });
-            await writeEvent({
-              type: 'checkpoint_end',
-              timestamp: new Date().toISOString(),
-              loop: loopNum,
-              outcome: checkpointResult.outcome,
-              summary: checkpointResult.summary,
-              progressPercent: checkpointResult.progressPercent,
-              durationMs: checkpointResult.durationMs,
-              exitCode: checkpointResult.exitCode,
-            });
-            switch (checkpointResult.outcome) {
-              case 'conflict_found':
-                await writeEvent({
-                  type: 'conflict',
-                  timestamp: new Date().toISOString(),
-                  exitCode: 2,
-                  summary: checkpointResult.summary,
-                });
-                await this.writeConflictMd(runId, checkpointResult.summary);
-                throw new ConflictError(checkpointResult.summary);
-              case 'spec_auto_fixed':
-              case 'spec_compressed':
-                if (!config.compressSpec) {
-                  break;
-                }
-                specContent = await fs5.readFile(specPath, 'utf-8');
-                await this.saveSpecVersion(runId, specContent);
-                break;
-              case 'no_action':
-                break;
-            }
-            formatCheckpointOutcome(checkpointResult.outcome, checkpointResult.summary);
+              specContentRef,
+              config,
+              implBinary,
+              writeEvent,
+              agentRunner,
+            );
+            checkpointRan = cpResult.checkpointRan;
+            consecutiveFailures = cpResult.consecutiveFailures;
           }
           continue;
         }
-        if (implResult.learnings) {
-          learnings.push(
-            ...implResult.learnings
-              .split(
-                `
-`,
-              )
-              .filter(l => l.trim()),
+        let reReviewPassed = true;
+        let reReviewResults = null;
+        if (config.reReview?.enabled && loopNum > 1) {
+          formatReReviewStart();
+          const reReviewResult = await this.runReReviewGate(
+            runId,
+            agentRunner,
+            config,
+            loopNum,
+            dirHash,
+            iterData,
+            writeEvent,
           );
+          reReviewPassed = reReviewResult.passed;
+          reReviewResults = reReviewResult.results;
+          if (!reReviewPassed) {
+            await this.writeEvidence(runId, loopNum);
+            let synthesisResult2 = null;
+            if (config.synthesis?.enabled !== false) {
+              synthesisResult2 = await this.runReSynthesisPhase(
+                runId,
+                agentRunner,
+                config,
+                loopNum,
+                dirHash,
+                iterData,
+                writeEvent,
+              );
+            }
+            const loopDurationMs2 = Date.now() - loopStartTime;
+            await writeEvent({
+              type: 'loop_end',
+              timestamp: new Date().toISOString(),
+              loop: loopNum,
+              durationMs: loopDurationMs2,
+            });
+            await this.writeLoopSummary(
+              runId,
+              loopNum,
+              implResult,
+              [],
+              loopDurationMs2,
+              config,
+              reReviewResults,
+              synthesisResult2,
+            );
+            await this.writeLoopMetrics(runId, loopNum, implResult, [], loopDurationMs2);
+            await this.writeLoopLearnings(runId, loopNum, implResult.learnings);
+            consecutiveFailures++;
+            formatFailure(consecutiveFailures, config.conflictCheckThreshold);
+            if (consecutiveFailures >= config.conflictCheckThreshold) {
+              formatCheckpointStart();
+              const cpResult = await this.runCheckpointGate(
+                runId,
+                loopNum,
+                dirHash,
+                specContentRef,
+                config,
+                implBinary,
+                writeEvent,
+                agentRunner,
+              );
+              checkpointRan = cpResult.checkpointRan;
+              consecutiveFailures = cpResult.consecutiveFailures;
+            }
+            continue;
+          }
         }
         run.phase = 'reviewing';
+        let reviewPhasesForRun = config.reviewPhases ?? [['claude-auto-zai']];
+        if (config.rerankAfterCheckpoint && checkpointRan) {
+          reviewPhasesForRun = this.getReorganizedPhases(config, runId, loopNum) ?? reviewPhasesForRun;
+        }
         const allReviewerResults = await this.runPhasedReviewsForKloop(
           runId,
           agentRunner,
@@ -18305,6 +18898,7 @@ class LoopRunner {
           dirHash,
           iterData,
           writeEvent,
+          reviewPhasesForRun,
         );
         const verdictsList = allReviewerResults.map(r => ({
           reviewerIndex: r.reviewerIndex,
@@ -18321,6 +18915,11 @@ class LoopRunner {
         formatConsensus(consensusResult.approved, verdictsList);
         const estimates = allReviewerResults.map(r => r.completionEstimate).filter(e => e !== undefined);
         formatProgress(estimates, allReviewerResults);
+        await this.writeEvidence(runId, loopNum);
+        let synthesisResult = null;
+        if (config.synthesis?.enabled !== false) {
+          synthesisResult = await this.runSynthesisPhase(runId, agentRunner, config, loopNum, dirHash, writeEvent);
+        }
         const loopDurationMs = Date.now() - loopStartTime;
         await writeEvent({
           type: 'loop_end',
@@ -18328,22 +18927,18 @@ class LoopRunner {
           loop: loopNum,
           durationMs: loopDurationMs,
         });
-        await this.writeLoopSummary(runId, loopNum, implResult, allReviewerResults, loopDurationMs, config);
+        await this.writeLoopSummary(
+          runId,
+          loopNum,
+          implResult,
+          allReviewerResults,
+          loopDurationMs,
+          config,
+          reReviewResults,
+          synthesisResult,
+        );
         await this.writeLoopMetrics(runId, loopNum, implResult, allReviewerResults, loopDurationMs);
-        await this.writeEvidence(runId, loopNum);
-        if (learnings.length > 0) {
-          const learningsContent = learnings.map(l => `- ${l}`).join(`
-`);
-          await fs5.writeFile(
-            this.paths.loopLearningMd(runId, loopNum),
-            `# Loop ${loopNum} Learnings
-
-${learningsContent}
-`,
-            'utf-8',
-          );
-          await fs5.writeFile(this.paths.runLearnings(runId), learningsContent, 'utf-8');
-        }
+        await this.writeLoopLearnings(runId, loopNum, implResult.learnings);
         if (consensusResult.approved) {
           await writeEvent({
             type: 'completed',
@@ -18363,69 +18958,18 @@ ${learningsContent}
         formatFailure(consecutiveFailures, config.conflictCheckThreshold);
         if (consecutiveFailures >= config.conflictCheckThreshold) {
           formatCheckpointStart();
-          checkpointRan = true;
-          const cpBinary = config.conflictChecker ?? implBinary;
-          await writeEvent({
-            type: 'checkpoint_start',
-            timestamp: new Date().toISOString(),
-            loop: loopNum,
-            binary: cpBinary,
-          });
-          const checkpointResult = await agentRunner.runCheckpointer({
+          const cpResult = await this.runCheckpointGate(
             runId,
-            iteration: loopNum,
+            loopNum,
             dirHash,
-            specPath,
-            specContent,
-            timeout: config.reviewerTimeout,
-          });
-          await writeEvent({
-            type: 'checkpoint_end',
-            timestamp: new Date().toISOString(),
-            loop: loopNum,
-            outcome: checkpointResult.outcome,
-            summary: checkpointResult.summary,
-            progressPercent: checkpointResult.progressPercent,
-            durationMs: checkpointResult.durationMs,
-            exitCode: checkpointResult.exitCode,
-          });
-          switch (checkpointResult.outcome) {
-            case 'conflict_found':
-              await writeEvent({
-                type: 'conflict',
-                timestamp: new Date().toISOString(),
-                exitCode: 2,
-                summary: checkpointResult.summary,
-              });
-              await this.writeConflictMd(runId, checkpointResult.summary);
-              throw new ConflictError(checkpointResult.summary);
-            case 'spec_auto_fixed':
-              if (!config.compressSpec) {
-                formatCheckpointOutcome('no_action');
-                consecutiveFailures = 0;
-                break;
-              }
-              formatCheckpointOutcome('spec_auto_fixed');
-              specContent = await fs5.readFile(specPath, 'utf-8');
-              await this.saveSpecVersion(runId, specContent);
-              consecutiveFailures = 0;
-              break;
-            case 'spec_compressed':
-              if (!config.compressSpec) {
-                formatCheckpointOutcome('no_action');
-                consecutiveFailures = 0;
-                break;
-              }
-              formatCheckpointOutcome('spec_compressed', `${checkpointResult.progressPercent}% progress`);
-              specContent = await fs5.readFile(specPath, 'utf-8');
-              await this.saveSpecVersion(runId, specContent);
-              consecutiveFailures = 0;
-              break;
-            case 'no_action':
-              formatCheckpointOutcome('no_action');
-              consecutiveFailures = 0;
-              break;
-          }
+            specContentRef,
+            config,
+            implBinary,
+            writeEvent,
+            agentRunner,
+          );
+          checkpointRan = cpResult.checkpointRan;
+          consecutiveFailures = cpResult.consecutiveFailures;
         }
       }
       await writeEvent({
@@ -18460,6 +19004,21 @@ ${learningsContent}
           checkpointRan,
         };
       }
+      if (error instanceof CrashedError) {
+        await writeEvent({
+          type: 'crashed',
+          timestamp: new Date().toISOString(),
+          exitCode: 1,
+          signal: 'exit_code_1',
+          message: error.message,
+        });
+        return {
+          status: 'crashed',
+          finalRun: run,
+          historyEntry: await this.buildHistoryEntryFromRun(run, config, 'failed', checkpointRan),
+          checkpointRan,
+        };
+      }
       await writeEvent({
         type: 'error',
         timestamp: new Date().toISOString(),
@@ -18474,11 +19033,144 @@ ${learningsContent}
       };
     }
   }
-  async runPhasedReviewsForKloop(runId, agentRunner, config, iterNum, dirHash, iterData, writeEvent) {
-    const allResults = [];
-    const reviewPhases = config.reviewPhases ?? [['claude-auto-zai']];
-    let globalReviewerIndex = 0;
+  async runPhasedReviewsForKloop(runId, agentRunner, config, iterNum, dirHash, iterData, writeEvent, overridePhases) {
+    const reviewPhases = overridePhases ?? config.reviewPhases ?? [['claude-auto-zai']];
     const specPath = this.paths.runSpec(runId);
+    if (iterNum === 1 && config.firstLoopFullReview && reviewPhases.length > 1) {
+      return this.runFlattenedReviews(runId, agentRunner, config, iterNum, dirHash, specPath, reviewPhases, writeEvent);
+    }
+    return this.runSequentialPhasedReviews(
+      runId,
+      agentRunner,
+      config,
+      iterNum,
+      dirHash,
+      specPath,
+      reviewPhases,
+      writeEvent,
+    );
+  }
+  async runFlattenedReviews(runId, agentRunner, config, iterNum, dirHash, specPath, reviewPhases, writeEvent) {
+    const allReviewers = [];
+    let globalIndex = 0;
+    for (let phaseIdx = 0; phaseIdx < reviewPhases.length; phaseIdx++) {
+      for (const entry of reviewPhases[phaseIdx] ?? []) {
+        allReviewers.push({ parsed: parseReviewerConfig(entry), originalPhase: phaseIdx, globalIndex });
+        globalIndex++;
+      }
+    }
+    const reviewersByPhase = new Map();
+    for (const r of allReviewers) {
+      if (!reviewersByPhase.has(r.originalPhase)) reviewersByPhase.set(r.originalPhase, []);
+      reviewersByPhase.get(r.originalPhase).push(r);
+    }
+    for (const [phase, reviewers] of [...reviewersByPhase.entries()].sort(([a], [b]) => a - b)) {
+      await writeEvent({
+        type: 'review_phase_start',
+        timestamp: new Date().toISOString(),
+        loop: iterNum,
+        phase,
+        reviewers: reviewers.map(r => r.parsed.binary),
+      });
+    }
+    const reviewsDir = this.paths.loopReviewsPath(runId, iterNum);
+    const verdictsDir = this.paths.loopVerdictsPath(runId, iterNum);
+    const evidenceDir = this.paths.loopEvidencePath(runId, iterNum);
+    const learningsFile = this.paths.runLearnings(runId);
+    const prevLoop = iterNum > 1 ? iterNum - 1 : null;
+    const allPrompts = allReviewers.map(({ globalIndex: idx }) => {
+      const seesPrevReviews = prevLoop !== null && Math.random() < (config.previousReviewPropagation ?? 0);
+      const archivedReviews = seesPrevReviews ? this.paths.loopReviewsPath(runId, prevLoop) : null;
+      return {
+        reviewerIndex: idx,
+        prompt: buildReviewerPrompt(config.prompts?.reviewer, {
+          specPath,
+          iteration: String(iterNum),
+          reviewerIndex: String(idx),
+          reviewsDir,
+          verdictsDir,
+          evidenceDir,
+          learningsFile,
+          archivedReviews,
+        }),
+        propagated: seesPrevReviews,
+      };
+    });
+    for (const { parsed, originalPhase } of allReviewers) {
+      await writeEvent({
+        type: 'reviewer_start',
+        timestamp: new Date().toISOString(),
+        loop: iterNum,
+        phase: originalPhase,
+        reviewer: parsed.binary,
+        harness: parsed.harness,
+      });
+    }
+    const allResults = await agentRunner.runReviewersPhase({
+      runId,
+      iteration: iterNum,
+      dirHash,
+      phaseIndex: 0,
+      reviewers: allReviewers.map(r => r.parsed),
+      prompts: allPrompts,
+      timeout: config.reviewerTimeout,
+      onReviewerEnd: async r => {
+        const promptMeta = allPrompts.find(p => p.reviewerIndex === r.reviewerIndex);
+        const propagated = promptMeta?.propagated ?? false;
+        r.propagated = propagated;
+        const entry = allReviewers.find(e => e.globalIndex === r.reviewerIndex);
+        const originalPhase = entry?.originalPhase ?? 0;
+        await writeEvent({
+          type: 'reviewer_end',
+          timestamp: new Date().toISOString(),
+          loop: iterNum,
+          phase: originalPhase,
+          reviewer: r.binary,
+          harness: r.harness,
+          exitCode: r.exitCode,
+          durationMs: r.durationMs,
+          error: r.error,
+          verdict: r.verdict,
+          completionEstimate: r.completionEstimate,
+          propagated,
+        });
+      },
+    });
+    for (const r of allResults) {
+      const entry = allReviewers.find(e => e.globalIndex === r.reviewerIndex);
+      if (entry) {
+        r.phaseIndex = entry.originalPhase;
+      }
+    }
+    const byPhase = new Map();
+    for (const r of allResults) {
+      const phase = r.phaseIndex ?? 0;
+      if (!byPhase.has(phase)) byPhase.set(phase, []);
+      byPhase.get(phase).push(r);
+    }
+    for (const [phase, results] of [...byPhase.entries()].sort(([a], [b]) => a - b)) {
+      formatReviewPhaseStart(
+        phase,
+        results.map(r => r.binary),
+      );
+      for (const r of results) {
+        formatReviewerResult(r.reviewerIndex, r.binary, r.verdict, r.completionEstimate, r.durationMs);
+      }
+    }
+    for (const phase of [...reviewersByPhase.keys()].sort((a, b) => a - b)) {
+      await writeEvent({
+        type: 'review_phase_end',
+        timestamp: new Date().toISOString(),
+        loop: iterNum,
+        phase,
+        shortCircuited: false,
+      });
+    }
+    return allResults;
+  }
+  async runSequentialPhasedReviews(runId, agentRunner, config, iterNum, dirHash, specPath, reviewPhases, writeEvent) {
+    const allResults = [];
+    let globalReviewerIndex = 0;
     for (let phaseIdx = 0; phaseIdx < reviewPhases.length; phaseIdx++) {
       const phaseReviewers = (reviewPhases[phaseIdx] ?? []).map(parseReviewerConfig);
       await writeEvent({
@@ -18567,16 +19259,356 @@ ${learningsContent}
         shortCircuited: anyRejected,
       });
       if (anyRejected) {
-        const skipShortCircuit = iterNum === 1 && config.firstLoopFullReview;
-        if (!skipShortCircuit) {
-          if (reviewPhases.length > 1) {
-            formatPhaseShortCircuit(phaseIdx, reviewPhases.length - phaseIdx - 1);
-          }
-          break;
+        if (reviewPhases.length > 1) {
+          formatPhaseShortCircuit(phaseIdx, reviewPhases.length - phaseIdx - 1);
         }
+        break;
       }
     }
     return allResults;
+  }
+  async runImplementerWithRetry(runId, loopNum, dirHash, iterData, config, agentRunner, writeEvent) {
+    const maxRetries = config.implementerRetry?.maxRetries ?? 2;
+    const backoffBaseMs = config.implementerRetry?.backoffBaseMs ?? 5000;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const implResult = await agentRunner.runImplementer({
+        runId,
+        iteration: loopNum,
+        dirHash,
+        prompt: iterData.implementerPrompt,
+        timeout: config.implementerTimeout,
+        onStart: async binary => {
+          await writeEvent({
+            type: 'implementer_start',
+            timestamp: new Date().toISOString(),
+            loop: loopNum,
+            binary,
+            harness: parseImplementerConfig(binary).harness,
+          });
+        },
+      });
+      formatImplementerResult(implResult.binary, implResult.exitCode, implResult.durationMs);
+      const implError = implResult.timedOut
+        ? 'timeout'
+        : implResult.exitCode !== 0
+          ? `exit_code_${implResult.exitCode}`
+          : undefined;
+      await writeEvent({
+        type: 'implementer_end',
+        timestamp: new Date().toISOString(),
+        loop: loopNum,
+        binary: implResult.binary,
+        harness: implResult.harness,
+        exitCode: implResult.exitCode,
+        durationMs: implResult.durationMs,
+        ...(implError ? { error: implError } : {}),
+        ...(maxRetries > 0 ? { retryAttempt: attempt, maxRetries } : {}),
+      });
+      if (implResult.exitCode === 0 && !implResult.timedOut) {
+        return implResult;
+      }
+      if (implResult.timedOut) {
+        return implResult;
+      }
+      if (implResult.exitCode !== 1) {
+        return implResult;
+      }
+      if (attempt >= maxRetries) {
+        throw new CrashedError(implResult.binary, attempt + 1);
+      }
+      const backoffMs = backoffBaseMs * Math.pow(2, attempt);
+      const newBinary = selectImplementer(config, loopNum);
+      formatImplementerRetry(attempt, maxRetries, backoffMs);
+      await writeEvent({
+        type: 'implementer_retry',
+        timestamp: new Date().toISOString(),
+        loop: loopNum,
+        attempt,
+        maxRetries,
+        previousBinary: implResult.binary,
+        newBinary,
+        backoffMs,
+      });
+      await new Promise(resolve3 => setTimeout(resolve3, backoffMs));
+    }
+    throw new CrashedError('unknown', maxRetries + 1);
+  }
+  async runReSynthesisPhase(runId, agentRunner, config, loopNum, dirHash, iterData, writeEvent) {
+    if (config.synthesis?.enabled === false) return null;
+    const previousSummaryPath =
+      iterData.reviewSummaryPath ?? `${this.paths.loopSynthesisPath(runId, loopNum - 1)}/review-summary.md`;
+    const binary = config.prompts?.reSynthesizer ? Object.keys(config.implementers)[0] : undefined;
+    const implParsed = parseImplementerConfig(binary ?? Object.keys(config.implementers)[0]);
+    await writeEvent({
+      type: 'synthesis_start',
+      timestamp: new Date().toISOString(),
+      loop: loopNum,
+      binary: implParsed.binary,
+      harness: implParsed.harness,
+    });
+    formatReSynthesisStart();
+    const result = await agentRunner.runReSynthesizer({
+      runId,
+      iteration: loopNum,
+      dirHash,
+      binary,
+      previousSummaryPath,
+      timeout: config.reviewerTimeout,
+    });
+    await writeEvent({
+      type: 'synthesis_end',
+      timestamp: new Date().toISOString(),
+      loop: loopNum,
+      binary: result.binary,
+      harness: result.harness,
+      exitCode: result.exitCode,
+      durationMs: result.durationMs,
+      error: result.timedOut ? 'timeout' : result.exitCode !== 0 ? `exit_code_${result.exitCode}` : undefined,
+      summaryPath: result.summaryPath,
+    });
+    formatReSynthesisResult(result.summaryPath !== undefined, result.durationMs);
+    return result;
+  }
+  async runReReviewGate(runId, agentRunner, config, iterNum, dirHash, iterData, writeEvent) {
+    const reReviewPhases = agentRunner.getReReviewPhases();
+    if (reReviewPhases.length === 0) return { passed: true, results: [] };
+    const specPath = this.paths.runSpec(runId);
+    const reviewsDir = this.paths.loopReviewsPath(runId, iterNum);
+    const verdictsDir = this.paths.loopVerdictsPath(runId, iterNum);
+    const evidenceDir = this.paths.loopEvidencePath(runId, iterNum);
+    const learningsFile = this.paths.runLearnings(runId);
+    const previousSummaryPath =
+      iterData.reviewSummaryPath ?? `${this.paths.loopSynthesisPath(runId, iterNum - 1)}/review-summary.md`;
+    let allResults = [];
+    let globalReviewerIndex = 0;
+    for (let phaseIdx = 0; phaseIdx < reReviewPhases.length; phaseIdx++) {
+      const phaseReviewers = (reReviewPhases[phaseIdx] ?? []).map(parseReviewerConfig);
+      await writeEvent({
+        type: 're_review_phase_start',
+        timestamp: new Date().toISOString(),
+        loop: iterNum,
+        phase: phaseIdx,
+        reviewers: phaseReviewers.map(r => r.binary),
+      });
+      const phasePrompts = phaseReviewers.map((_, i) => {
+        const vars = {
+          specPath,
+          iteration: String(iterNum),
+          previousSummaryPath,
+          reviewsDir,
+          verdictsDir,
+          evidenceDir,
+          learningsFile,
+          reReviewerIndex: String(globalReviewerIndex + i),
+        };
+        return {
+          reviewerIndex: globalReviewerIndex + i,
+          prompt: buildReReviewerPrompt(config.prompts?.reReviewer, vars),
+        };
+      });
+      for (const rc of phaseReviewers) {
+        await writeEvent({
+          type: 're_reviewer_start',
+          timestamp: new Date().toISOString(),
+          loop: iterNum,
+          phase: phaseIdx,
+          reviewer: rc.binary,
+          harness: rc.harness,
+        });
+      }
+      const phaseResults = await agentRunner.runReReviewerPhase({
+        runId,
+        iteration: iterNum,
+        dirHash,
+        phaseIndex: phaseIdx,
+        reviewers: phaseReviewers,
+        prompts: phasePrompts,
+        timeout: config.reReview?.timeout ?? 5,
+        onReviewerEnd: async r => {
+          await writeEvent({
+            type: 're_reviewer_end',
+            timestamp: new Date().toISOString(),
+            loop: iterNum,
+            phase: phaseIdx,
+            reviewer: r.binary,
+            harness: r.harness,
+            exitCode: r.exitCode,
+            durationMs: r.durationMs,
+            error: r.error,
+            verdict: r.verdict,
+          });
+        },
+      });
+      allResults.push(...phaseResults);
+      globalReviewerIndex += phaseReviewers.length;
+      const anyRejected = phaseResults.some(r => r.verdict === 'rejected');
+      await writeEvent({
+        type: 're_review_phase_end',
+        timestamp: new Date().toISOString(),
+        loop: iterNum,
+        phase: phaseIdx,
+        shortCircuited: anyRejected,
+      });
+      if (anyRejected) {
+        break;
+      }
+    }
+    const passed = allResults.length > 0 && allResults.every(r => r.verdict === 'approved');
+    formatReReviewResult(passed, allResults);
+    return { passed, results: allResults };
+  }
+  async runSynthesisPhase(runId, agentRunner, config, loopNum, dirHash, writeEvent) {
+    if (config.synthesis?.enabled === false) return null;
+    const previousSummaryPath =
+      loopNum > 1 ? `${this.paths.loopSynthesisPath(runId, loopNum - 1)}/review-summary.md` : null;
+    const binary = config.prompts?.synthesizer ? Object.keys(config.implementers)[0] : undefined;
+    const implParsed = parseImplementerConfig(binary ?? Object.keys(config.implementers)[0]);
+    await writeEvent({
+      type: 'synthesis_start',
+      timestamp: new Date().toISOString(),
+      loop: loopNum,
+      binary: implParsed.binary,
+      harness: implParsed.harness,
+    });
+    formatSynthesisStart();
+    const result = await agentRunner.runSynthesizer({
+      runId,
+      iteration: loopNum,
+      dirHash,
+      binary,
+      previousSummaryPath,
+      timeout: config.reviewerTimeout,
+    });
+    await writeEvent({
+      type: 'synthesis_end',
+      timestamp: new Date().toISOString(),
+      loop: loopNum,
+      binary: result.binary,
+      harness: result.harness,
+      exitCode: result.exitCode,
+      durationMs: result.durationMs,
+      error: result.timedOut ? 'timeout' : result.exitCode !== 0 ? `exit_code_${result.exitCode}` : undefined,
+      summaryPath: result.summaryPath,
+    });
+    formatSynthesisResult(result.summaryPath !== undefined, result.durationMs);
+    return result;
+  }
+  async runCheckpointGate(runId, loopNum, dirHash, specContentRef, config, implBinary, writeEvent, agentRunner) {
+    const cpBinary = config.conflictChecker ?? implBinary;
+    const cpParsed = parseConflictCheckerConfig(cpBinary);
+    await writeEvent({
+      type: 'checkpoint_start',
+      timestamp: new Date().toISOString(),
+      loop: loopNum,
+      binary: cpParsed.binary,
+      harness: cpParsed.harness,
+    });
+    const checkpointResult = await agentRunner.runCheckpointer({
+      runId,
+      iteration: loopNum,
+      dirHash,
+      specPath: this.paths.runSpec(runId),
+      specContent: specContentRef.value,
+      timeout: config.reviewerTimeout,
+    });
+    await writeEvent({
+      type: 'checkpoint_end',
+      timestamp: new Date().toISOString(),
+      loop: loopNum,
+      outcome: checkpointResult.outcome,
+      summary: checkpointResult.summary,
+      progressPercent: checkpointResult.progressPercent,
+      durationMs: checkpointResult.durationMs,
+      exitCode: checkpointResult.exitCode,
+    });
+    switch (checkpointResult.outcome) {
+      case 'conflict_found':
+        await writeEvent({
+          type: 'conflict',
+          timestamp: new Date().toISOString(),
+          exitCode: 2,
+          summary: checkpointResult.summary,
+        });
+        await this.writeConflictMd(runId, checkpointResult.summary);
+        throw new ConflictError(checkpointResult.summary);
+      case 'spec_auto_fixed':
+        if (!config.compressSpec) {
+          formatCheckpointOutcome('no_action');
+          break;
+        }
+        formatCheckpointOutcome('spec_auto_fixed');
+        specContentRef.value = await fs5.readFile(this.paths.runSpec(runId), 'utf-8');
+        await this.saveSpecVersion(runId, specContentRef.value);
+        break;
+      case 'spec_compressed':
+        if (!config.compressSpec) {
+          formatCheckpointOutcome('no_action');
+          break;
+        }
+        formatCheckpointOutcome('spec_compressed', `${checkpointResult.progressPercent}% progress`);
+        specContentRef.value = await fs5.readFile(this.paths.runSpec(runId), 'utf-8');
+        await this.saveSpecVersion(runId, specContentRef.value);
+        break;
+      case 'no_action':
+        formatCheckpointOutcome('no_action');
+        break;
+    }
+    return { checkpointRan: true, consecutiveFailures: 0 };
+  }
+  getReorganizedPhases(config, runId, currentLoopNum) {
+    if (!config.rerankAfterCheckpoint) return null;
+    if (currentLoopNum <= 1) return null;
+    const reviewPhases = config.reviewPhases ?? [['claude-auto-zai']];
+    const flatReviewers = reviewPhases.flat();
+    const reviewerStats = new Map();
+    for (let prevLoop = currentLoopNum - 1; prevLoop >= 1; prevLoop--) {
+      try {
+        const summaryPath = this.paths.loopSummaryJson(runId, prevLoop);
+        const summaryContent = __require('fs').readFileSync(summaryPath, 'utf-8');
+        const summary = JSON.parse(summaryContent);
+        if (summary.reviewPhases) {
+          for (const phase of summary.reviewPhases) {
+            for (const reviewer of phase.reviewers) {
+              const binaryName = reviewer.binary;
+              let stats = reviewerStats.get(binaryName);
+              if (!stats) {
+                stats = { rejections: 0, totalCompletion: 0, errors: 0, count: 0 };
+                reviewerStats.set(binaryName, stats);
+              }
+              if (reviewer.verdict === 'rejected') stats.rejections += 1;
+              if (reviewer.completionEstimate !== undefined) stats.totalCompletion += reviewer.completionEstimate;
+              if (reviewer.error) stats.errors += 1;
+              stats.count += 1;
+            }
+          }
+        }
+      } catch {}
+    }
+    if (reviewerStats.size === 0) return null;
+    const troubleScores = new Map();
+    for (const reviewerConfig of flatReviewers) {
+      const parsed = parseReviewerConfig(reviewerConfig);
+      const binaryName = parsed.binary;
+      const stats = reviewerStats.get(binaryName);
+      if (stats) {
+        const avgCompletion = stats.count > 0 ? stats.totalCompletion / stats.count : 100;
+        const score = stats.rejections * 10 + (100 - avgCompletion) + stats.errors * 5;
+        troubleScores.set(reviewerConfig, score);
+      }
+    }
+    const sorted = [...flatReviewers].sort((a, b) => {
+      const scoreA = troubleScores.get(a) ?? 0;
+      const scoreB = troubleScores.get(b) ?? 0;
+      return scoreB - scoreA;
+    });
+    const numPhases = reviewPhases.length;
+    const perPhase = Math.ceil(sorted.length / numPhases);
+    const newPhases = [];
+    for (let i = 0; i < numPhases; i++) {
+      newPhases.push(sorted.slice(i * perPhase, (i + 1) * perPhase));
+    }
+    formatDynamicOrdering(newPhases);
+    return newPhases;
   }
   async writeEvidence(runId, loopIndex) {
     const { execSync } = await import('child_process');
@@ -18618,7 +19650,33 @@ ${learningsContent}
       }
     } catch {}
   }
-  async writeLoopSummary(runId, loopIndex, implResult, reviewerResults, durationMs, config) {
+  async writeLoopLearnings(runId, loopIndex, fallbackContent) {
+    let learningsContent = fallbackContent;
+    try {
+      const currentLearnings = await fs5.readFile(this.paths.runLearnings(runId), 'utf-8');
+      learningsContent = currentLearnings;
+    } catch {}
+    if (!learningsContent?.trim()) return;
+    const normalized = learningsContent.trimEnd();
+    await fs5.writeFile(
+      this.paths.loopLearningMd(runId, loopIndex),
+      `# Loop ${loopIndex} Learnings
+
+${normalized}
+`,
+      'utf-8',
+    );
+  }
+  async writeLoopSummary(
+    runId,
+    loopIndex,
+    implResult,
+    reviewerResults,
+    durationMs,
+    config,
+    reReviewResults,
+    synthesisResult,
+  ) {
     const fsModule = await import('fs/promises');
     const summary = {
       loop: loopIndex,
@@ -18633,6 +19691,22 @@ ${learningsContent}
       },
       reviewPhases: this.groupReviewersByPhase(reviewerResults),
     };
+    if (reReviewResults && reReviewResults.length > 0) {
+      summary.reReviewPhases = this.groupReReviewersByPhase(reReviewResults);
+    }
+    if (synthesisResult) {
+      summary.synthesis = {
+        binary: synthesisResult.binary,
+        exitCode: synthesisResult.exitCode,
+        durationMs: synthesisResult.durationMs,
+        error: synthesisResult.timedOut
+          ? 'timeout'
+          : synthesisResult.exitCode !== 0
+            ? `exit_code_${synthesisResult.exitCode}`
+            : undefined,
+        summaryPath: synthesisResult.summaryPath,
+      };
+    }
     await fsModule.mkdir(this.paths.loopPath(runId, loopIndex), { recursive: true });
     await fsModule.writeFile(this.paths.loopSummaryJson(runId, loopIndex), JSON.stringify(summary, null, 2), 'utf-8');
     let md = `# Loop ${loopIndex} Summary
@@ -18722,6 +19796,31 @@ ${learningsContent}
         shortCircuited: reviewers.some(r => r.verdict === 'rejected'),
       }));
   }
+  groupReReviewersByPhase(results) {
+    const byPhase = new Map();
+    for (const r of results) {
+      const phase = r.phaseIndex ?? 0;
+      if (!byPhase.has(phase)) byPhase.set(phase, []);
+      byPhase.get(phase).push(r);
+    }
+    return Array.from(byPhase.entries())
+      .sort(([a], [b]) => a - b)
+      .map(([phase, reviewers]) => ({
+        phase,
+        reviewers: reviewers.map(r => ({
+          reviewerIndex: r.reviewerIndex,
+          binary: r.binary,
+          harness: r.harness,
+          exitCode: r.exitCode,
+          durationMs: r.durationMs,
+          verdict: r.verdict,
+          error: r.error,
+          issuesFixed: r.issuesFixed,
+          issuesRemaining: r.issuesRemaining,
+        })),
+        shortCircuited: reviewers.some(r => r.verdict === 'rejected'),
+      }));
+  }
   async buildHistoryEntryFromRun(run, config, status, checkpointRan) {
     return {
       id: run.id,
@@ -18768,9 +19867,9 @@ Loop ${info.loop}, iteration ${info.iteration}
 3. Fix any configuration issues
 4. Remove this file and restart: \`kloop run <id>\`
 `;
-    const { writeFile: writeFile6, mkdir: mkdir5 } = await import('fs/promises');
+    const { writeFile: writeFile6, mkdir: mkdir6 } = await import('fs/promises');
     const failurePath = runId ? path5.join(this.paths.runPath(runId), 'failure.md') : this.paths.failureMd;
-    await mkdir5(path5.dirname(failurePath), { recursive: true });
+    await mkdir6(path5.dirname(failurePath), { recursive: true });
     await writeFile6(failurePath, content, 'utf-8');
   }
 }
@@ -18884,6 +19983,7 @@ function applyEvent(status, event) {
           binary: event.implementer,
           status: 'pending',
         },
+        reReviewPhases: [],
         reviewPhases: [],
       };
       status.loops.push(loop);
@@ -18914,7 +20014,16 @@ function applyEvent(status, event) {
         if ('error' in event && event.error) {
           loop.implementer.error = event.error;
         }
+        if ('retryAttempt' in event && event.retryAttempt !== undefined) {
+          loop.implementer.retryAttempt = event.retryAttempt;
+        }
+        if ('maxRetries' in event && event.maxRetries !== undefined) {
+          loop.implementer.retryMax = event.maxRetries;
+        }
       }
+      break;
+    }
+    case EVENT_TYPES.IMPLEMENTER_RETRY: {
       break;
     }
     case EVENT_TYPES.REVIEW_PHASE_START: {
@@ -18962,6 +20071,80 @@ function applyEvent(status, event) {
       if (phase) {
         phase.completedAt = event.timestamp;
         phase.shortCircuited = event.shortCircuited;
+      }
+      break;
+    }
+    case EVENT_TYPES.RE_REVIEW_PHASE_START: {
+      const loop = findLoop(status, event.loop);
+      if (loop) {
+        const phase = {
+          phase: event.phase,
+          startedAt: event.timestamp,
+          reviewers: event.reviewers.map(binary => ({
+            binary,
+            status: 'pending',
+          })),
+        };
+        (loop.reReviewPhases ??= []).push(phase);
+      }
+      break;
+    }
+    case EVENT_TYPES.RE_REVIEWER_START: {
+      const reviewer = findReReviewer(status, event.loop, event.phase, event.reviewer);
+      if (reviewer) {
+        reviewer.status = 'running';
+        reviewer.startedAt = event.timestamp;
+        if ('harness' in event && event.harness) reviewer.harness = event.harness;
+      }
+      break;
+    }
+    case EVENT_TYPES.RE_REVIEWER_END: {
+      const reviewer = findReReviewer(status, event.loop, event.phase, event.reviewer);
+      if (reviewer) {
+        reviewer.status = event.exitCode === 0 ? 'completed' : 'error';
+        reviewer.completedAt = event.timestamp;
+        reviewer.exitCode = event.exitCode;
+        reviewer.durationMs = event.durationMs;
+        if (event.error) reviewer.error = event.error;
+        if (event.verdict) reviewer.verdict = event.verdict;
+        if ('harness' in event && event.harness) reviewer.harness = event.harness;
+      }
+      break;
+    }
+    case EVENT_TYPES.RE_REVIEW_PHASE_END: {
+      const loop = findLoop(status, event.loop);
+      const phase = loop?.reReviewPhases?.find(p => p.phase === event.phase);
+      if (phase) {
+        phase.completedAt = event.timestamp;
+        phase.shortCircuited = event.shortCircuited;
+      }
+      break;
+    }
+    case EVENT_TYPES.SYNTHESIS_START: {
+      const loop = findLoop(status, event.loop);
+      if (loop) {
+        loop.synthesis = {
+          status: 'running',
+          startedAt: event.timestamp,
+          binary: event.binary,
+        };
+      }
+      break;
+    }
+    case EVENT_TYPES.SYNTHESIS_END: {
+      const loop = findLoop(status, event.loop);
+      if (loop) {
+        const existing = loop.synthesis;
+        loop.synthesis = {
+          status: event.exitCode === 0 ? 'completed' : 'error',
+          startedAt: existing?.startedAt ?? event.timestamp,
+          completedAt: event.timestamp,
+          durationMs: event.durationMs,
+          exitCode: event.exitCode,
+          binary: existing?.binary ?? event.binary,
+          error: event.error,
+          summaryPath: event.summaryPath,
+        };
       }
       break;
     }
@@ -19074,6 +20257,18 @@ function markRunningAgentsInterrupted(status, timestamp) {
         loop.implementer.durationMs = new Date(timestamp).getTime() - new Date(loop.implementer.startedAt).getTime();
       }
     }
+    for (const phase of loop.reReviewPhases ?? []) {
+      for (const reviewer of phase.reviewers) {
+        if (reviewer.status === 'running' || reviewer.status === 'pending') {
+          reviewer.status = 'error';
+          reviewer.error = 'interrupted';
+          reviewer.completedAt = timestamp;
+          if (reviewer.startedAt) {
+            reviewer.durationMs = new Date(timestamp).getTime() - new Date(reviewer.startedAt).getTime();
+          }
+        }
+      }
+    }
     for (const phase of loop.reviewPhases) {
       for (const reviewer of phase.reviewers) {
         if (reviewer.status === 'running' || reviewer.status === 'pending') {
@@ -19085,6 +20280,11 @@ function markRunningAgentsInterrupted(status, timestamp) {
           }
         }
       }
+    }
+    if (loop.synthesis?.status === 'running') {
+      loop.synthesis.status = 'error';
+      loop.synthesis.completedAt = timestamp;
+      loop.synthesis.error = 'interrupted';
     }
     if (loop.checkpoint?.status === 'running') {
       loop.checkpoint.status = 'completed';
@@ -19102,6 +20302,11 @@ function findLoop(status, loopNum) {
 function findReviewer(status, loopNum, phaseNum, binary) {
   const loop = findLoop(status, loopNum);
   const phase = loop?.reviewPhases.find(p => p.phase === phaseNum);
+  return phase?.reviewers.find(r => r.binary === binary);
+}
+function findReReviewer(status, loopNum, phaseNum, binary) {
+  const loop = findLoop(status, loopNum);
+  const phase = loop?.reReviewPhases?.find(p => p.phase === phaseNum);
   return phase?.reviewers.find(r => r.binary === binary);
 }
 async function loadStatus(statusPath, runId, fs6) {
@@ -19153,8 +20358,12 @@ function toRunState(status) {
       currentPhase = 'completed';
     } else if (lastLoop.checkpoint?.status === 'running') {
       currentPhase = 'checkpointing';
+    } else if (lastLoop.synthesis?.status === 'running') {
+      currentPhase = 'synthesizing';
     } else if (lastLoop.reviewPhases.length > 0) {
       currentPhase = 'reviewing';
+    } else if ((lastLoop.reReviewPhases?.length ?? 0) > 0) {
+      currentPhase = 're-reviewing';
     } else if (lastLoop.implementer?.status === 'running' || lastLoop.implementer?.status === 'pending') {
       currentPhase = 'implementing';
     } else if (lastLoop.implementer?.status === 'completed' || lastLoop.implementer?.status === 'error') {
@@ -19374,8 +20583,8 @@ async function reapDeadRun(runId, eventLog, pidLock, tmux) {
 var runLogStream = null;
 async function startRunLogCapture(runId) {
   const logPath = paths.runLog(runId);
-  const { mkdir: mkdir5, open } = await import('fs/promises');
-  await mkdir5(paths.runPath(runId), { recursive: true });
+  const { mkdir: mkdir6, open } = await import('fs/promises');
+  await mkdir6(paths.runPath(runId), { recursive: true });
   runLogStream = await open(logPath, 'a');
 }
 async function writeRunLog(msg) {
@@ -19430,9 +20639,9 @@ async function handler3(runId, opts, deps) {
   if (prevStatus && eventLog.isTerminal(prevStatus.status)) {
     const oldId = runId;
     const newId = generateKloopRunId();
-    const { mkdir: mkdir5, copyFile, writeFile: writeFile6 } = await import('fs/promises');
+    const { mkdir: mkdir6, copyFile, writeFile: writeFile6 } = await import('fs/promises');
     const newRunDir = paths.runPath(newId);
-    await mkdir5(newRunDir, { recursive: true });
+    await mkdir6(newRunDir, { recursive: true });
     const oldConfigPath = paths.runConfig(oldId);
     const oldSpecPath = paths.runSpec(oldId);
     if (await deps.state.fs.exists(oldConfigPath)) {
@@ -19508,7 +20717,7 @@ async function handler3(runId, opts, deps) {
     try {
       const YAML2 = await Promise.resolve().then(() => __toESM(require_dist(), 1));
       const configContent = await deps.state.fs.readFile(configPath);
-      config = YAML2.parse(configContent);
+      config = parseRawConfig(YAML2.parse(configContent));
     } catch (err) {
       console.error(`Error: Failed to parse config.yaml: ${err.message}`);
       process.exit(1);
@@ -19759,6 +20968,10 @@ function renderLoop(loop, multiPhase, dimmed) {
   if (loop.implementer) {
     const impl = loop.implementer;
     const errNote = impl.error ? import_picocolors6.default.yellow(` ${impl.error}`) : '';
+    const retryNote =
+      impl.retryAttempt !== undefined && impl.retryAttempt > 0
+        ? import_picocolors6.default.yellow(` retry ${impl.retryAttempt}/${impl.retryMax ?? '?'}`)
+        : '';
     if (impl.status === 'running') {
       console.log(
         prefix(
@@ -19766,7 +20979,7 @@ function renderLoop(loop, multiPhase, dimmed) {
             'impl',
             agentLabel(impl),
             agentDuration(impl),
-            `${import_picocolors6.default.green('\u25CF')} running`,
+            `${import_picocolors6.default.green('\u25CF')} running${retryNote}`,
           ),
         ),
       );
@@ -19777,7 +20990,36 @@ function renderLoop(loop, multiPhase, dimmed) {
     } else {
       const dot =
         impl.exitCode === 0 ? import_picocolors6.default.green('\u25CF') : import_picocolors6.default.red('\u25CF');
-      console.log(prefix(fmtRow('impl', agentLabel(impl), agentDuration(impl), `${dot}${errNote}`)));
+      console.log(prefix(fmtRow('impl', agentLabel(impl), agentDuration(impl), `${dot}${errNote}${retryNote}`)));
+    }
+  }
+  for (const phase of loop.reReviewPhases ?? []) {
+    for (const r of phase.reviewers) {
+      const errNote = r.error ? import_picocolors6.default.yellow(` ${r.error}`) : '';
+      if (r.status === 'running' || r.status === 'pending') {
+        const elapsed = r.startedAt ? formatDuration3(Date.now() - new Date(r.startedAt).getTime()) : '';
+        console.log(
+          prefix(
+            fmtRow(
+              'rereview',
+              agentLabel(r),
+              elapsed,
+              `${import_picocolors6.default.dim(r.status)}${r.verdict ? `  ${verdictMark(r.verdict)}` : ''}${errNote}`,
+            ),
+          ),
+        );
+      } else {
+        console.log(
+          prefix(
+            fmtRow(
+              'rereview',
+              agentLabel(r),
+              agentDuration(r),
+              `${verdictMark(r.verdict)}  ${statusMark(agentOk(r))}${errNote}`,
+            ),
+          ),
+        );
+      }
     }
   }
   for (const phase of loop.reviewPhases) {
@@ -19811,6 +21053,22 @@ function renderLoop(loop, multiPhase, dimmed) {
           ),
         );
       }
+    }
+  }
+  if (loop.synthesis) {
+    const synth = loop.synthesis;
+    if (synth.status === 'running') {
+      console.log(prefix(`  synthesis: ${import_picocolors6.default.dim('running...')}`));
+    } else if (synth.status === 'completed') {
+      console.log(
+        prefix(
+          `  synthesis: ${import_picocolors6.default.green('done')}${synth.summaryPath ? ` \u2192 ${synth.summaryPath}` : ''}`,
+        ),
+      );
+    } else if (synth.status === 'error') {
+      console.log(
+        prefix(`  synthesis: ${import_picocolors6.default.red('failed')}${synth.error ? ` (${synth.error})` : ''}`),
+      );
     }
   }
   if (loop.checkpoint) {
@@ -19859,7 +21117,7 @@ async function handler5(id, opts, deps) {
     try {
       const YAML2 = await Promise.resolve().then(() => __toESM(require_dist(), 1));
       const configContent = await state.fs.readFile(paths.runConfig(runId));
-      config = YAML2.parse(configContent);
+      config = parseRawConfig(YAML2.parse(configContent));
     } catch {}
     if (opts.json) {
       const latestLoops = status.loops.slice(-2);
@@ -19871,6 +21129,11 @@ async function handler5(id, opts, deps) {
             loop: status.loops.length > 0 ? status.loops[status.loops.length - 1].loop : 0,
             maxIterations: config?.maxIterations,
             compressSpec: config?.compressSpec,
+            synthesis: config?.synthesis,
+            reReview: config?.reReview,
+            rerankAfterCheckpoint: config?.rerankAfterCheckpoint,
+            implementerRetry: config?.implementerRetry,
+            firstIterationWeightMultiplier: config?.firstIterationWeightMultiplier,
             startedAt: status.startedAt,
             elapsedMs,
             exitCode: status.exitCode,
@@ -19936,11 +21199,35 @@ async function handler5(id, opts, deps) {
       const phaseCount = phases?.length ?? 1;
       const revCount = phases?.flat().length ?? 0;
       const compressLabel = config.compressSpec ? 'on' : 'off';
+      const synthesisLabel = config.synthesis?.enabled !== false ? 'on' : 'off';
+      const reReviewLabel = config.reReview?.enabled ? 'on' : 'off';
+      const rerankLabel = config.rerankAfterCheckpoint ? 'on' : 'off';
+      const retryMax = config.implementerRetry?.maxRetries ?? 0;
       console.log(
         import_picocolors6.default.dim(
           `Impl: ${implStr}  |  ${revCount} reviewers in ${phaseCount} phase${phaseCount > 1 ? 's' : ''}  |  max ${config.maxIterations} loops  |  compress: ${compressLabel}`,
         ),
       );
+      console.log(
+        import_picocolors6.default.dim(
+          `synthesis: ${synthesisLabel}  |  re-review: ${reReviewLabel}  |  rerank: ${rerankLabel}  |  impl-retry: ${retryMax}`,
+        ),
+      );
+      for (let i = 0; i < phaseCount; i++) {
+        const phaseRevs = (phases[i] ?? []).map(r => shortBinary(r)).join(', ');
+        console.log(import_picocolors6.default.dim(`  phase ${i}: [${phaseRevs}]`));
+      }
+      if (config.rerankAfterCheckpoint && lastLoop && lastLoop.reviewPhases.length > 0) {
+        const actualPhases = lastLoop.reviewPhases.map(p => p.reviewers.map(r => shortBinary(r.binary)));
+        const configPhases = phases.map(p => p.map(r => shortBinary(r)));
+        const phasesChanged = JSON.stringify(actualPhases) !== JSON.stringify(configPhases);
+        if (phasesChanged) {
+          console.log(import_picocolors6.default.dim('  reranked:'));
+          for (let i = 0; i < actualPhases.length; i++) {
+            console.log(import_picocolors6.default.dim(`    phase ${i}: [${(actualPhases[i] ?? []).join(', ')}]`));
+          }
+        }
+      }
       console.log('');
     }
     const failColor =
@@ -19959,8 +21246,12 @@ async function handler5(id, opts, deps) {
       if (isRunning) {
         if (lastLoop.checkpoint?.status === 'running') {
           phaseLabel = import_picocolors6.default.dim('  checkpointing');
+        } else if (lastLoop.synthesis?.status === 'running') {
+          phaseLabel = import_picocolors6.default.dim('  synthesizing');
         } else if (lastLoop.reviewPhases.length > 0 && !lastLoop.completedAt) {
           phaseLabel = import_picocolors6.default.dim('  reviewing');
+        } else if ((lastLoop.reReviewPhases?.length ?? 0) > 0 && !lastLoop.completedAt) {
+          phaseLabel = import_picocolors6.default.dim('  re-reviewing');
         } else if (
           lastLoop.implementer &&
           (lastLoop.implementer.status === 'running' || lastLoop.implementer.status === 'pending')
@@ -20097,6 +21388,33 @@ function renderLoopFull(loop, multiPhase) {
       );
     }
   }
+  for (const phase of loop.reReviewPhases ?? []) {
+    const role = multiPhase ? `rerev ${phase.phase}` : 'rereview';
+    for (const r of phase.reviewers) {
+      const errNote = r.error ? import_picocolors7.default.yellow(` ${r.error}`) : '';
+      const tok = formatTokens(r.inputTokens, r.outputTokens);
+      if (r.status === 'running' || r.status === 'pending') {
+        const elapsed = r.startedAt ? formatDuration4(Date.now() - new Date(r.startedAt).getTime()) : '';
+        console.log(
+          fmtRow2(
+            role,
+            agentLabel2(r),
+            elapsed,
+            `${import_picocolors7.default.dim(r.status)}${r.verdict ? `  ${verdictMark2(r.verdict)}` : ''}`,
+          ),
+        );
+      } else {
+        console.log(
+          fmtRow2(
+            role,
+            agentLabel2(r),
+            agentDuration2(r),
+            `${verdictMark2(r.verdict)}  ${statusMark2(agentOk2(r))}${tok ? `  ${import_picocolors7.default.dim(tok + ' tok')}` : ''}${errNote}`,
+          ),
+        );
+      }
+    }
+  }
   for (const phase of loop.reviewPhases) {
     const role = multiPhase ? `phase ${phase.phase}` : 'review';
     for (const r of phase.reviewers) {
@@ -20123,6 +21441,18 @@ function renderLoopFull(loop, multiPhase) {
           ),
         );
       }
+    }
+  }
+  if (loop.synthesis) {
+    const synth = loop.synthesis;
+    if (synth.status === 'running') {
+      console.log(`  synthesis: ${import_picocolors7.default.dim('running...')}`);
+    } else if (synth.status === 'completed') {
+      console.log(
+        `  synthesis: ${import_picocolors7.default.green('completed')}${synth.summaryPath ? ` \u2192 ${synth.summaryPath}` : ''}`,
+      );
+    } else if (synth.status === 'error') {
+      console.log(`  synthesis: ${import_picocolors7.default.red('failed')}${synth.error ? ` (${synth.error})` : ''}`);
     }
   }
   if (loop.checkpoint) {
@@ -20170,7 +21500,7 @@ async function handler6(runId, opts, deps) {
     try {
       const YAML2 = await Promise.resolve().then(() => __toESM(require_dist(), 1));
       const configContent = await state.fs.readFile(paths.runConfig(runId));
-      config = YAML2.parse(configContent);
+      config = parseRawConfig(YAML2.parse(configContent));
     } catch {}
     if (opts.json) {
       console.log(
@@ -20182,6 +21512,11 @@ async function handler6(runId, opts, deps) {
             loop: status.loops.length > 0 ? status.loops[status.loops.length - 1].loop : 0,
             maxIterations: config?.maxIterations,
             compressSpec: config?.compressSpec,
+            synthesis: config?.synthesis,
+            reReview: config?.reReview,
+            rerankAfterCheckpoint: config?.rerankAfterCheckpoint,
+            implementerRetry: config?.implementerRetry,
+            firstIterationWeightMultiplier: config?.firstIterationWeightMultiplier,
             startedAt: status.startedAt,
             elapsedMs,
             exitCode: status.exitCode,
@@ -20262,8 +21597,16 @@ async function handler6(runId, opts, deps) {
         }
       }
       const compressLabel = config.compressSpec ? 'on' : 'off';
+      const reReviewLabel = config.reReview?.enabled ? 'on' : 'off';
+      const synthesisLabel = config.synthesis?.enabled !== false ? 'on' : 'off';
+      const rerankLabel = config.rerankAfterCheckpoint ? 'on' : 'off';
+      const retryMax = config.implementerRetry?.maxRetries ?? 0;
+      const weightMul = config.firstIterationWeightMultiplier ?? 2;
       console.log(
         `  Max: ${config.maxIterations} loops | Impl: ${config.implementerTimeout}m | Rev: ${config.reviewerTimeout}m | Compress: ${compressLabel}`,
+      );
+      console.log(
+        `  Synthesis: ${synthesisLabel} | Re-review: ${reReviewLabel} | Rerank: ${rerankLabel} | Impl-retry: ${retryMax} | ::i weight: ${weightMul}x`,
       );
       console.log('');
     }
@@ -20290,7 +21633,10 @@ async function handler6(runId, opts, deps) {
     }
     if (status.loops.length > 0 && !isRunning) {
       const lastLoop = status.loops[status.loops.length - 1];
-      const allApproved = lastLoop.reviewPhases.every(p => p.reviewers.every(r => r.verdict === 'approved'));
+      const hasReviewResults = lastLoop.reviewPhases.some(p => p.reviewers.length > 0);
+      const rejectedByReReviewGate =
+        !hasReviewResults && (lastLoop.reReviewPhases?.some(p => p.reviewers.length > 0) ?? false);
+      const approvedByConsensus = status.exitReason === 'consensus';
       const estimates = [];
       for (const phase of lastLoop.reviewPhases) {
         for (const r of phase.reviewers) {
@@ -20299,12 +21645,17 @@ async function handler6(runId, opts, deps) {
       }
       const avgCompletion =
         estimates.length > 0 ? Math.round(estimates.reduce((a, b) => a + b, 0) / estimates.length) : undefined;
-      if (allApproved) {
+      if (approvedByConsensus) {
         console.log(
           `Final verdict: ${import_picocolors7.default.green('APPROVED')}${avgCompletion !== undefined ? `  (avg ${avgCompletion}% completion)` : ''}`,
         );
       } else {
-        const verdictLabel = status.exitReason === 'max_iterations' ? 'REJECTED (max iterations)' : 'REJECTED';
+        const verdictLabel =
+          status.exitReason === 'max_iterations'
+            ? 'REJECTED (max iterations)'
+            : rejectedByReReviewGate
+              ? 'REJECTED (re-review gate)'
+              : 'REJECTED';
         console.log(
           `Final verdict: ${import_picocolors7.default.red(verdictLabel)}${avgCompletion !== undefined ? `  (avg ${avgCompletion}% completion)` : ''}`,
         );
@@ -23202,6 +24553,773 @@ function processLine(line) {
   return 'skip';
 }
 
+// src/cli/skill.ts
+var import_picocolors22 = __toESM(require_picocolors(), 1);
+import * as path12 from 'path';
+import * as fs11 from 'fs/promises';
+import * as os2 from 'os';
+var SKILL_CONTENT = `---
+name: kloop
+description: 'Spec-driven development with multi-reviewer consensus. Use when running /kloop to plan a spec, run the kloop loop, watch for conflicts, and resolve them interactively.'
+argument-hint: '[SPEC_FILE]'
+---
+
+# kloop \u2014 Spec-Driven Development with Multi-Reviewer Consensus
+
+Orchestrate a kloop run from spec planning through conflict resolution.
+
+## Reference: kloop CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| \`kloop setup\` | View or set user-level default config (\`--config <path>\` to import) |
+| \`kloop init\` | Create a new run directory (\`--spec\`, \`--config\`, \`--workspace\`) |
+| \`kloop run [id]\` | Start a run (\`-d\` for daemon mode) |
+| \`kloop ps\` | List active runs (\`-a\` for all, \`--workspace\`, \`--json\`) |
+| \`kloop status [id]\` | Current snapshot of a run (\`--json\`) |
+| \`kloop describe [id]\` | Full history: all loops, verdicts, exit code, timings (\`--json\`) |
+| \`kloop logs [id]\` | Show run log (\`-f\` follow, \`--since <duration>\`) |
+| \`kloop view [id] [loop] [role] [ordinal]\` | View agent logs (\`-f\` follow, \`--since\`) |
+| \`kloop review [id]\` | Show reviewer verdicts and reasoning |
+| \`kloop summary [id]\` | LLM-evaluated run summary (\`--force\` to regenerate) |
+| \`kloop metrics [query]\` | Query metrics (\`--run\`, \`--json\`) |
+| \`kloop cancel [id]\` | Cancel a running run |
+| \`kloop link [id]\` | Symlink run spec+config into CWD/.kloop/ for editing |
+| \`kloop attach [id]\` | Attach to run's tmux session |
+| \`kloop remove [ids...]\` | Delete run(s) (\`--force\`, supports prefix matching) |
+| \`kloop reset\` | Reset global config to defaults |
+
+If no run ID is provided, most commands resolve the run from the current workspace.
+
+## Workflow
+
+### Phase 1: Config Setup
+
+Read the current default config:
+
+\`\`\`bash
+kloop setup
+\`\`\`
+
+Show the user the default config output, then ask:
+
+**"Is this config acceptable?"**
+
+- If **yes**: skip to Phase 2. Let \`kloop init\` use the default config.
+- If **no**: proceed to generate a new config.
+
+#### Agent Detection (only if user rejects default)
+
+Run a shell command to detect available agent binaries:
+
+\`\`\`bash
+(compgen -c | grep -E '^(claude|gemini)' || true) | sort -u
+\`\`\`
+
+Also check for base binaries: \`command -v claude\` and \`command -v gemini\`.
+
+Categorize the found binaries:
+- **Claude agents**: \`claude\`, \`claude-auto-zai\`, \`claude-auto-mm\`, \`claude-auto-seed\`, \`claude-auto-anthropic\`, etc.
+- **Gemini agents**: \`gemini\`, \`gemini-auto\`, etc.
+
+Present the findings and ask the user to configure:
+
+1. **Implementers** (who writes code): which binaries and their weights (for weighted random selection)
+2. **Reviewers** (per phase): which binaries review the code. Multiple phases allowed.
+3. **Conflict checker**: which binary handles conflict detection
+
+Use AskUserQuestion to let the user pick. Generate a YAML config like:
+
+\`\`\`yaml
+implementers:
+  claude: 1
+  gemini-auto:gemini: 1
+
+reviewPhases:
+  - - claude
+    - gemini-auto:gemini:0
+
+maxIterations: 10
+implementerTimeout: 30
+reviewerTimeout: 15
+conflictCheckThreshold: 2
+firstLoopFullReview: false
+previousReviewPropagation: 0
+\`\`\`
+
+Write this config to a temp file and note the path for the init command. Also save it as the new default via \`kloop setup --config <tempfile>\`.
+
+**Important config format notes:**
+- Bare binary name (e.g. \`claude\`) defaults to Claude harness
+- Explicit format: \`binary:harness\` (e.g. \`gemini-auto:gemini\`)
+- Reviewer format: \`binary:harness:flag\` where flag is 0 or 1 (noVerdictAsFailure)
+- Only \`claude\` and \`gemini\` harnesses are supported
+
+### Phase 2: Spec Setup
+
+Ask the user for a spec file path, or let them type a spec description.
+
+- If they provide a file path: use \`--spec <path>\` when running init
+- If they type a description: write it to a temp file and use \`--spec <temp>\`
+- If they want the default template: don't pass \`--spec\` at all
+
+### Phase 3: Init
+
+Run the init command:
+
+\`\`\`bash
+kloop init [--spec <spec>] [--config <config>] [--workspace <path>]
+\`\`\`
+
+Capture the run ID from the output. Remember the run directory (\`~/.kloop/<runId>\`).
+
+### Phase 4: Run (Daemon Mode)
+
+\`\`\`bash
+kloop run -d <runId>
+\`\`\`
+
+### Phase 5: Watch Loop
+
+Poll the run status every 10 seconds:
+
+\`\`\`bash
+kloop status <runId>
+\`\`\`
+
+Continue polling while the status shows the run is active (running, implementing, reviewing, etc.).
+
+**On conflict detected:**
+1. Stop polling
+2. Read the conflict details from \`~/.kloop/<runId>/conflict.md\`
+3. **Verify the conflict**:
+   - A conflict is a spec defect where **no possible implementation can satisfy all requirements simultaneously**
+   - Apply the litmus test: "Imagine giving the implementer 10x intelligence and 10x more attempts. Could it eventually fulfil the spec? If NO, that is a conflict."
+   - Check for: contradictory constraints, circular dependencies, impossible environmental constraints, fundamentally ambiguous requirements
+   - **Important**: Reviewer disagreement alone is NOT a conflict \u2014 use reviewer feedback as a clue for *where to look*, not as evidence of a conflict
+   - If the analysis concludes this is NOT a real conflict (just implementation/review issues), tell the user and resume watching
+4. If it IS a real conflict, present the conflict to the user with:
+   - The exact conflicting spec requirements (quote the spec)
+   - Why they conflict
+   - Which reviewers flagged this
+5. Discuss resolution with the user \u2014 edit the spec together to resolve the conflict
+6. Once the spec is updated, resume: \`kloop run\` (uses the same run, picks up from the resolved conflict)
+
+**On successful completion:**
+- Report the final status (\`kloop describe <runId>\` for full history)
+- Show a summary if available (\`kloop summary <runId>\`)
+- Show review verdicts (\`kloop review <runId>\`)
+
+**On error/timeout/crash:**
+- Report the error
+- Suggest the user check logs (\`kloop logs <runId>\`) or attach to the session (\`kloop attach <runId>\`)
+
+### Cleanup
+
+After the run finishes (success or cancel), offer to:
+- View the full run history (\`kloop describe <runId>\`)
+- View the summary (\`kloop summary <runId>\`)
+- View review verdicts (\`kloop review <runId>\`)
+- View agent logs (\`kloop view <runId>\`)
+- Clean up the run (\`kloop remove <runId>\`)
+`;
+async function showHandler() {
+  console.log(SKILL_CONTENT);
+}
+async function installHandler() {
+  const homeDir = os2.homedir();
+  const skillDir = path12.join(homeDir, '.claude', 'skills', 'kloop');
+  const skillFile = path12.join(skillDir, 'SKILL.md');
+  try {
+    await fs11.mkdir(skillDir, { recursive: true });
+    await fs11.writeFile(skillFile, SKILL_CONTENT, 'utf-8');
+    console.log(import_picocolors22.default.green('kloop skill installed successfully!'));
+    console.log(import_picocolors22.default.dim(`  ${skillFile}`));
+    console.log('');
+    console.log('Use it in Claude Code with:');
+    console.log(import_picocolors22.default.bold('  /kloop'));
+  } catch (err) {
+    console.error(import_picocolors22.default.red(`Error: ${err.message}`));
+    process.exit(1);
+  }
+}
+
+// src/cli/show.ts
+var import_picocolors23 = __toESM(require_picocolors(), 1);
+var import_cli_table32 = __toESM(require_table(), 1);
+import * as fs12 from 'fs/promises';
+import * as path13 from 'path';
+async function resolveRunId(id, deps) {
+  if (id) {
+    const row2 = await deps.indexDb.getRun(id);
+    if (!row2) {
+      console.log(import_picocolors23.default.red(`Run not found: ${id}`));
+      return null;
+    }
+    return id;
+  }
+  const workspace = process.cwd();
+  const row = await deps.indexDb.getRunByWorkspace(workspace);
+  if (!row) {
+    console.log(import_picocolors23.default.yellow('No run found for this workspace.'));
+    return null;
+  }
+  return row.id;
+}
+async function resolveLoop(runId, loopArg, opts, deps) {
+  if (loopArg) return parseInt(loopArg, 10);
+  const summaries = await loadLoopSummaries(runId, deps.state.fs);
+  if (summaries.length === 0) {
+    console.log(import_picocolors23.default.yellow('No loop data found.'));
+    return null;
+  }
+  return summaries[summaries.length - 1].loop;
+}
+async function latestLoopNum(runId, deps) {
+  const summaries = await loadLoopSummaries(runId, deps.state.fs);
+  if (summaries.length === 0) return null;
+  return summaries[summaries.length - 1].loop;
+}
+function renderMarkdown(content, indent2 = '') {
+  const lines = content.split(`
+`);
+  let inCodeBlock = false;
+  for (const rawLine of lines) {
+    if (rawLine.trim().startsWith('```')) {
+      if (inCodeBlock) {
+        inCodeBlock = false;
+        console.log(`${indent2}${import_picocolors23.default.dim('\u2514\u2500\u2500')}`);
+      } else {
+        inCodeBlock = true;
+        const lang = rawLine.trim().slice(3);
+        console.log(
+          `${indent2}${import_picocolors23.default.dim('\u250C\u2500\u2500')}${lang ? import_picocolors23.default.dim(` ${lang}`) : ''}`,
+        );
+      }
+      continue;
+    }
+    if (inCodeBlock) {
+      console.log(`${indent2}${import_picocolors23.default.dim('\u2502')} ${import_picocolors23.default.dim(rawLine)}`);
+      continue;
+    }
+    const line = rawLine;
+    if (line.startsWith('### ')) {
+      console.log(`${indent2}${import_picocolors23.default.cyan(import_picocolors23.default.bold(line.slice(4)))}`);
+    } else if (line.startsWith('## ')) {
+      console.log('');
+      console.log(`${indent2}${import_picocolors23.default.bold(line.slice(3))}`);
+    } else if (line.startsWith('# ')) {
+      console.log('');
+      console.log(
+        indent2 +
+          import_picocolors23.default.bgCyan(
+            import_picocolors23.default.black(import_picocolors23.default.bold(' ' + line.slice(2) + ' ')),
+          ),
+      );
+      console.log('');
+    } else if (line.startsWith('---')) {
+      console.log(`${indent2}${import_picocolors23.default.dim('\u2500'.repeat(40))}`);
+    } else if (line.startsWith('> ')) {
+      console.log(
+        `${indent2}${import_picocolors23.default.dim('\u2502')} ${import_picocolors23.default.italic(line.slice(2))}`,
+      );
+    } else if (/^[-*] \[[ x]\]/.test(line)) {
+      const checked = line[3] === 'x';
+      const text = line.slice(5).replace(/\*\*/g, '');
+      const mark = checked ? import_picocolors23.default.green('\u25A0') : import_picocolors23.default.red('\u25A1');
+      console.log(`${indent2}  ${mark} ${text}`);
+    } else if (/^[-*] /.test(line)) {
+      const text = inlineFormat(line.slice(2));
+      console.log(`${indent2}  ${import_picocolors23.default.cyan('\u2022')} ${text}`);
+    } else if (/^\d+\. /.test(line)) {
+      const text = inlineFormat(line.replace(/^\d+\. /, ''));
+      const num = line.match(/^(\d+)\./)[1];
+      console.log(`${indent2}  ${import_picocolors23.default.dim(num + '.')} ${text}`);
+    } else if (line.trim() === '') {
+      console.log('');
+    } else {
+      console.log(`${indent2}${inlineFormat(line)}`);
+    }
+  }
+}
+function inlineFormat(text) {
+  text = text.replace(/\*\*(.+?)\*\*/g, (_3, t) => import_picocolors23.default.bold(t));
+  text = text.replace(/__(.+?)__/g, (_3, t) => import_picocolors23.default.bold(t));
+  text = text.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, (_3, t) => import_picocolors23.default.italic(t));
+  text = text.replace(/`([^`]+)`/g, (_3, t) => import_picocolors23.default.dim(import_picocolors23.default.white(t)));
+  text = text.replace(/\u2705/g, import_picocolors23.default.green('\u2713'));
+  text = text.replace(/\u274C/g, import_picocolors23.default.red('\u2717'));
+  text = text.replace(/\u26A0\uFE0F?/g, import_picocolors23.default.yellow('!'));
+  return text;
+}
+async function readFileSafe(p2) {
+  try {
+    return await fs12.readFile(p2, 'utf-8');
+  } catch {
+    return null;
+  }
+}
+async function readJsonSafe(p2) {
+  try {
+    const content = await fs12.readFile(p2, 'utf-8');
+    return JSON.parse(content);
+  } catch {
+    return null;
+  }
+}
+async function fileExists6(p2) {
+  try {
+    await fs12.access(p2);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function showReviews(id, loopArg, opts, deps) {
+  const runId = await resolveRunId(id, deps);
+  if (!runId) return;
+  const loopNum = await resolveLoop(runId, loopArg, opts, deps);
+  if (!loopNum) return;
+  const reviewsDir = paths.loopReviewsPath(runId, loopNum);
+  const verdictsDir = paths.loopVerdictsPath(runId, loopNum);
+  const summaries = await loadLoopSummaries(runId, deps.state.fs);
+  const loopSummary = summaries.find(s => s.loop === loopNum);
+  let reviewFiles = [];
+  try {
+    const entries = await fs12.readdir(reviewsDir);
+    reviewFiles = entries
+      .filter(e2 => e2.endsWith('.md'))
+      .sort((a, b3) => {
+        const numA = parseInt(a.replace('reviewer-', '').replace('.md', ''), 10);
+        const numB = parseInt(b3.replace('reviewer-', '').replace('.md', ''), 10);
+        return numA - numB;
+      });
+  } catch {}
+  if (reviewFiles.length === 0) {
+    console.log(import_picocolors23.default.yellow(`No reviews found for loop ${loopNum}.`));
+    return;
+  }
+  console.log(
+    import_picocolors23.default.bold(`Run ${runId} \u2014 Loop ${loopNum} Reviews
+`),
+  );
+  for (const file of reviewFiles) {
+    const match2 = file.match(/^reviewer-(\d+)\.md$/);
+    if (!match2) continue;
+    const revIdx = parseInt(match2[1], 10);
+    const verdict = await readJsonSafe(path13.join(verdictsDir, `reviewer-${revIdx}.json`));
+    const reviewerSummary = loopSummary?.reviewPhases
+      .flatMap(p2 => p2.reviewers)
+      .find(r2 => r2.reviewerIndex === revIdx);
+    const mark = verdict
+      ? verdictMark3(verdict.approved ? 'approved' : 'rejected')
+      : import_picocolors23.default.dim('\xB7');
+    const binary = reviewerSummary
+      ? shortBinary4(reviewerSummary.binary, reviewerSummary.harness)
+      : `reviewer-${revIdx}`;
+    const duration = reviewerSummary ? formatDurationHuman(reviewerSummary.durationMs) : '';
+    const comp = verdict?.completionEstimate !== undefined ? ` ${verdict.completionEstimate}%` : '';
+    const errNote = reviewerSummary?.timedOut
+      ? import_picocolors23.default.yellow(' (timed out)')
+      : reviewerSummary?.error
+        ? import_picocolors23.default.red(` (${reviewerSummary.error})`)
+        : '';
+    console.log(
+      import_picocolors23.default.bold(
+        `${mark} ${import_picocolors23.default.cyan(binary)}${comp}${errNote}  ${import_picocolors23.default.dim(duration)}`,
+      ),
+    );
+    console.log(import_picocolors23.default.dim('\u2500'.repeat(60)));
+    const content = await readFileSafe(path13.join(reviewsDir, file));
+    if (content) {
+      renderMarkdown(content, '  ');
+    }
+    if (verdict?.reasoning && !content) {
+      console.log(`  ${import_picocolors23.default.dim(verdict.reasoning.slice(0, 200))}`);
+    }
+    console.log('');
+  }
+}
+async function showPrompts(id, loopArg, opts, deps) {
+  const runId = await resolveRunId(id, deps);
+  if (!runId) return;
+  const loopNum = await resolveLoop(runId, loopArg, opts, deps);
+  if (!loopNum) return;
+  const loopDir = paths.loopPath(runId, loopNum);
+  console.log(
+    import_picocolors23.default.bold(`Run ${runId} \u2014 Loop ${loopNum} Prompts
+`),
+  );
+  const implPrompt = await readFileSafe(path13.join(loopDir, 'implementer', 'prompt.md'));
+  if (implPrompt) {
+    console.log(
+      import_picocolors23.default.bgCyan(
+        import_picocolors23.default.black(import_picocolors23.default.bold(' Implementer ')),
+      ),
+    );
+    console.log(import_picocolors23.default.dim('\u2500'.repeat(60)));
+    renderMarkdown(implPrompt, '');
+    console.log('');
+  }
+  let reviewerDirs = [];
+  try {
+    const entries = await fs12.readdir(loopDir);
+    reviewerDirs = entries
+      .filter(e2 => e2.startsWith('reviewer-'))
+      .sort((a, b3) => {
+        const numA = parseInt(a.replace('reviewer-', ''), 10);
+        const numB = parseInt(b3.replace('reviewer-', ''), 10);
+        return numA - numB;
+      });
+  } catch {}
+  for (const dir of reviewerDirs) {
+    const revPrompt = await readFileSafe(path13.join(loopDir, dir, 'prompt.md'));
+    if (revPrompt) {
+      console.log(
+        import_picocolors23.default.bgBlue(
+          import_picocolors23.default.black(import_picocolors23.default.bold(` ${dir} `)),
+        ),
+      );
+      console.log(import_picocolors23.default.dim('\u2500'.repeat(60)));
+      renderMarkdown(revPrompt, '');
+      console.log('');
+    }
+  }
+}
+async function showVerdicts(id, loopArg, opts, deps) {
+  const runId = await resolveRunId(id, deps);
+  if (!runId) return;
+  const loopNum = await resolveLoop(runId, loopArg, opts, deps);
+  if (!loopNum) return;
+  const summaries = await loadLoopSummaries(runId, deps.state.fs);
+  const loopSummary = summaries.find(s => s.loop === loopNum);
+  if (!loopSummary) {
+    console.log(import_picocolors23.default.yellow(`No summary found for loop ${loopNum}.`));
+    return;
+  }
+  console.log(
+    import_picocolors23.default.bold(`Run ${runId} \u2014 Loop ${loopNum} Verdicts
+`),
+  );
+  const impl = loopSummary.implementer;
+  const implTok = (impl.inputTokens ?? 0) + (impl.outputTokens ?? 0);
+  const implTokStr = implTok < 1000 ? `${implTok}` : `${(implTok / 1000).toFixed(1)}k`;
+  console.log(
+    `  ${import_picocolors23.default.dim('impl'.padEnd(12))}  ${shortBinary4(impl.binary, impl.harness).padEnd(22)}  ${import_picocolors23.default.green('\u25CF').padEnd(4)}  ${formatDurationHuman(impl.durationMs).padStart(8)}  ${import_picocolors23.default.dim(implTokStr + ' tok')}`,
+  );
+  console.log('');
+  const rows = [];
+  for (const phase of loopSummary.reviewPhases) {
+    for (const r2 of phase.reviewers) {
+      const tok = (r2.inputTokens ?? 0) + (r2.outputTokens ?? 0);
+      const tokStr = tok < 1000 ? `${tok}` : `${(tok / 1000).toFixed(1)}k`;
+      rows.push({
+        reviewer: shortBinary4(r2.binary, r2.harness),
+        phase: phase.phase,
+        verdict: r2.verdict ?? 'unknown',
+        completion: r2.completionEstimate,
+        duration: formatDurationHuman(r2.durationMs),
+        tokens: tokStr,
+        error: r2.timedOut ? 'timeout' : r2.error,
+      });
+    }
+  }
+  if (rows.length === 0) {
+    console.log(import_picocolors23.default.yellow('No reviewer verdicts found.'));
+    return;
+  }
+  const table = new import_cli_table32.default({
+    head: ['#', 'Reviewer', 'Verdict', 'Done', 'Time', 'Tokens', 'Error'].map(h2 =>
+      import_picocolors23.default.bold(import_picocolors23.default.dim(h2)),
+    ),
+    style: { head: [], border: ['grey'] },
+    colWidths: [4, 22, 10, 7, 8, 10, 12],
+  });
+  for (const row of rows) {
+    const vMark =
+      row.verdict === 'approved'
+        ? import_picocolors23.default.green('\u2713')
+        : import_picocolors23.default.red('\u2717');
+    const vText =
+      row.verdict === 'approved'
+        ? import_picocolors23.default.green('approved')
+        : import_picocolors23.default.red('rejected');
+    const comp = row.completion !== undefined ? `${row.completion}%` : '-';
+    const errStr = row.error ? import_picocolors23.default.yellow(row.error) : '';
+    table.push([
+      String(rows.indexOf(row)),
+      row.reviewer,
+      `${vMark} ${vText}`,
+      comp,
+      row.duration,
+      import_picocolors23.default.dim(row.tokens),
+      errStr,
+    ]);
+  }
+  console.log(table.toString());
+  console.log('');
+  console.log(import_picocolors23.default.bold('Reasoning:'));
+  const verdictsDir = paths.loopVerdictsPath(runId, loopNum);
+  for (const row of rows) {
+    const revIdx = loopSummary.reviewPhases
+      .flatMap(p2 => p2.reviewers)
+      .findIndex(r2 => shortBinary4(r2.binary, r2.harness) === row.reviewer);
+    if (revIdx === -1) continue;
+    const verdict = await readJsonSafe(path13.join(verdictsDir, `reviewer-${revIdx}.json`));
+    if (verdict?.reasoning) {
+      console.log(
+        `  ${import_picocolors23.default.cyan(row.reviewer)}: ${import_picocolors23.default.dim(verdict.reasoning.slice(0, 120))}${verdict.reasoning.length > 120 ? '...' : ''}`,
+      );
+    }
+  }
+}
+async function showEvidence(id, loopArg, opts, deps) {
+  const runId = await resolveRunId(id, deps);
+  if (!runId) return;
+  const loopNum = await resolveLoop(runId, loopArg, opts, deps);
+  if (!loopNum) return;
+  const evidenceDir = paths.loopEvidencePath(runId, loopNum);
+  if (!(await fileExists6(evidenceDir))) {
+    console.log(import_picocolors23.default.yellow(`No evidence found for loop ${loopNum}.`));
+    return;
+  }
+  console.log(
+    import_picocolors23.default.bold(`Run ${runId} \u2014 Loop ${loopNum} Evidence
+`),
+  );
+  const verification = await readFileSafe(path13.join(evidenceDir, 'verification.md'));
+  if (verification) {
+    console.log(
+      import_picocolors23.default.bgCyan(
+        import_picocolors23.default.black(import_picocolors23.default.bold(' Verification ')),
+      ),
+    );
+    console.log(import_picocolors23.default.dim('\u2500'.repeat(60)));
+    renderMarkdown(verification, '');
+    console.log('');
+  }
+  const diff = await readFileSafe(path13.join(evidenceDir, 'diff.patch'));
+  if (diff) {
+    console.log(
+      import_picocolors23.default.bgCyan(import_picocolors23.default.black(import_picocolors23.default.bold(' Diff '))),
+    );
+    const diffLines = diff.split(`
+`);
+    const added = diffLines.filter(l2 => l2.startsWith('+') && !l2.startsWith('+++')).length;
+    const removed = diffLines.filter(l2 => l2.startsWith('-') && !l2.startsWith('---')).length;
+    const files = diffLines.filter(l2 => l2.startsWith('diff --git')).length;
+    console.log(
+      `  ${import_picocolors23.default.green(`+${added}`)} ${import_picocolors23.default.red(`-${removed}`)} across ${files} file(s)`,
+    );
+    console.log('');
+  }
+  const filesJson = await readJsonSafe(path13.join(evidenceDir, 'files.json'));
+  if (filesJson && filesJson.length > 0) {
+    console.log(
+      import_picocolors23.default.bgCyan(
+        import_picocolors23.default.black(import_picocolors23.default.bold(' Changed Files ')),
+      ),
+    );
+    console.log('');
+    for (const f of filesJson) {
+      const icon = f.content !== null ? import_picocolors23.default.green('M') : import_picocolors23.default.red('D');
+      console.log(`  ${icon} ${f.path}`);
+    }
+    console.log(import_picocolors23.default.dim(`  ${filesJson.length} file(s) total`));
+  }
+}
+async function showLearnings(id, opts, deps) {
+  const runId = await resolveRunId(id, deps);
+  if (!runId) return;
+  const runLearnings = await readFileSafe(paths.runLearnings(runId));
+  if (runLearnings) {
+    console.log(
+      import_picocolors23.default.bold(`Run ${runId} \u2014 Learnings
+`),
+    );
+    renderMarkdown(runLearnings);
+    return;
+  }
+  const loopNum = await latestLoopNum(runId, deps);
+  if (loopNum) {
+    const loopLearnings = await readFileSafe(paths.loopLearningMd(runId, loopNum));
+    if (loopLearnings) {
+      console.log(
+        import_picocolors23.default.bold(`Run ${runId} \u2014 Loop ${loopNum} Learnings
+`),
+      );
+      renderMarkdown(loopLearnings);
+      return;
+    }
+  }
+  console.log(import_picocolors23.default.yellow('No learnings found for this run.'));
+}
+async function showSpec(id, opts, deps) {
+  const runId = await resolveRunId(id, deps);
+  if (!runId) return;
+  const runDir = paths.runPath(runId);
+  if (opts.versions) {
+    try {
+      const entries = await fs12.readdir(runDir);
+      const specVersions = entries.filter(e2 => /^spec-\d+\.md$/.test(e2)).sort();
+      if (specVersions.length === 0) {
+        console.log(import_picocolors23.default.yellow('No spec versions found.'));
+        return;
+      }
+      console.log(
+        import_picocolors23.default.bold(`Run ${runId} \u2014 Spec Versions
+`),
+      );
+      for (const v of specVersions) {
+        const num = v.replace('spec-', '').replace('.md', '');
+        const filePath = path13.join(runDir, v);
+        const stat3 = await fs12.stat(filePath).catch(() => null);
+        const size = stat3 ? `${(stat3.size / 1024).toFixed(1)}k` : '?';
+        console.log(`  spec-${import_picocolors23.default.bold(num)}.md  ${import_picocolors23.default.dim(size)}`);
+      }
+      console.log('');
+      console.log(`  ${import_picocolors23.default.cyan('spec.md')}  ${import_picocolors23.default.dim('(current)')}`);
+    } catch {
+      console.log(import_picocolors23.default.yellow('No spec versions found.'));
+    }
+    return;
+  }
+  if (opts.diff) {
+    const current = await readFileSafe(paths.runSpec(runId));
+    const prevNum = await findLatestSpecVersion(runId);
+    if (prevNum === null) {
+      console.log(import_picocolors23.default.yellow('No previous spec version to diff against.'));
+      return;
+    }
+    const prev = await readFileSafe(paths.runSpecVersioned(runId, prevNum));
+    if (!current || !prev) {
+      console.log(import_picocolors23.default.yellow('Could not read spec files.'));
+      return;
+    }
+    console.log(
+      import_picocolors23.default.bold(`Run ${runId} \u2014 Spec Diff (current vs spec-${prevNum}.md)
+`),
+    );
+    const currentLines = current.split(`
+`);
+    const prevLines = prev.split(`
+`);
+    const maxLen = Math.max(currentLines.length, prevLines.length);
+    for (let i = 0; i < maxLen; i++) {
+      const c = currentLines[i];
+      const p2 = prevLines[i];
+      if (c === p2) {
+        console.log(import_picocolors23.default.dim(` ${c}`));
+      } else if (p2 === undefined) {
+        console.log(import_picocolors23.default.green(`+${c}`));
+      } else if (c === undefined) {
+        console.log(import_picocolors23.default.red(`-${p2}`));
+      } else {
+        console.log(import_picocolors23.default.red(`-${p2}`));
+        console.log(import_picocolors23.default.green(`+${c}`));
+      }
+    }
+    return;
+  }
+  const spec = await readFileSafe(paths.runSpec(runId));
+  if (!spec) {
+    console.log(import_picocolors23.default.yellow('No spec found for this run.'));
+    return;
+  }
+  console.log(
+    import_picocolors23.default.bold(`Run ${runId} \u2014 Spec
+`),
+  );
+  renderMarkdown(spec);
+}
+async function findLatestSpecVersion(runId) {
+  try {
+    const entries = await fs12.readdir(paths.runPath(runId));
+    const versions = entries
+      .map(e2 => e2.match(/^spec-(\d+)\.md$/))
+      .filter(m2 => m2 !== null)
+      .map(m2 => parseInt(m2[1], 10))
+      .sort((a, b3) => b3 - a);
+    return versions.length > 0 ? versions[0] : null;
+  } catch {
+    return null;
+  }
+}
+async function showConfig(id, opts, deps) {
+  const runId = await resolveRunId(id, deps);
+  if (!runId) return;
+  const configPath = paths.runConfig(runId);
+  const content = await readFileSafe(configPath);
+  if (!content) {
+    console.log(import_picocolors23.default.yellow('No config found for this run.'));
+    return;
+  }
+  let config;
+  try {
+    const YAML2 = await Promise.resolve().then(() => __toESM(require_dist(), 1));
+    config = YAML2.parse(content);
+  } catch {
+    console.log(import_picocolors23.default.yellow('Failed to parse config.'));
+    return;
+  }
+  console.log(
+    import_picocolors23.default.bold(`Run ${runId} \u2014 Config
+`),
+  );
+  renderConfigValue(config, '');
+}
+function renderConfigValue(value, prefix) {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (Array.isArray(item)) {
+        console.log(`${prefix}${import_picocolors23.default.cyan('[')}`);
+        for (const subItem of item) {
+          console.log(
+            `${prefix}  ${import_picocolors23.default.white(typeof subItem === 'string' ? subItem : JSON.stringify(subItem))}`,
+          );
+        }
+        console.log(`${prefix}${import_picocolors23.default.cyan(']')}`);
+      } else {
+        console.log(
+          `${prefix}- ${import_picocolors23.default.white(typeof item === 'string' ? item : JSON.stringify(item))}`,
+        );
+      }
+    }
+  } else if (typeof value === 'object' && value !== null) {
+    for (const [key, val] of Object.entries(value)) {
+      if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
+        console.log(`${prefix}${import_picocolors23.default.cyan(key)}:`);
+        renderConfigValue(val, prefix + '  ');
+      } else if (Array.isArray(val)) {
+        console.log(`${prefix}${import_picocolors23.default.cyan(key)}:`);
+        renderConfigValue(val, prefix + '  ');
+      } else {
+        const formatted = formatConfigValue(key, val);
+        console.log(
+          `${prefix}${import_picocolors23.default.cyan(key)}: ${import_picocolors23.default.white(formatted)}`,
+        );
+      }
+    }
+  } else {
+    console.log(`${prefix}${import_picocolors23.default.white(String(value))}`);
+  }
+}
+function formatConfigValue(key, value) {
+  if (typeof value === 'boolean')
+    return value ? import_picocolors23.default.green('true') : import_picocolors23.default.red('false');
+  if (typeof value === 'number') {
+    if (
+      key.toLowerCase().includes('timeout') ||
+      key.toLowerCase().includes('max') ||
+      key.toLowerCase().includes('threshold')
+    ) {
+      return String(value);
+    }
+    return String(value);
+  }
+  return String(value);
+}
+
 // src/cli/index.ts
 import { readFileSync } from 'fs';
 var pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf-8'));
@@ -23299,6 +25417,55 @@ function createCli(deps) {
     .command('stream')
     .description('Process streaming JSON from stdin (internal use)')
     .action(async () => handler17());
+  const showCmd_ = new Command('show').description('View run artifacts (reviews, prompts, verdicts, evidence, etc.)');
+  showCmd_
+    .command('reviews [id] [loop]')
+    .description('Show formatted reviews for a loop')
+    .option('--run <id>', 'run ID (default: current workspace)')
+    .action(async (id, loop, opts) => showReviews(id, loop, opts, deps));
+  showCmd_
+    .command('prompts [id] [loop]')
+    .description('Show agent prompts for a loop')
+    .option('--run <id>', 'run ID (default: current workspace)')
+    .action(async (id, loop, opts) => showPrompts(id, loop, opts, deps));
+  showCmd_
+    .command('verdicts [id] [loop]')
+    .description('Show verdict dashboard for a loop')
+    .option('--run <id>', 'run ID (default: current workspace)')
+    .action(async (id, loop, opts) => showVerdicts(id, loop, opts, deps));
+  showCmd_
+    .command('evidence [id] [loop]')
+    .description('Show evidence (diff stats, verification, changed files)')
+    .option('--run <id>', 'run ID (default: current workspace)')
+    .action(async (id, loop, opts) => showEvidence(id, loop, opts, deps));
+  showCmd_
+    .command('learnings [id]')
+    .description('Show run learnings')
+    .option('--run <id>', 'run ID (default: current workspace)')
+    .action(async (id, opts) => showLearnings(id, opts, deps));
+  showCmd_
+    .command('spec [id]')
+    .description('Show current spec')
+    .option('--run <id>', 'run ID (default: current workspace)')
+    .option('--diff', 'diff current spec against previous version')
+    .option('--versions', 'list all spec versions')
+    .action(async (id, opts) => showSpec(id, opts, deps));
+  showCmd_
+    .command('config [id]')
+    .description('Show run config')
+    .option('--run <id>', 'run ID (default: current workspace)')
+    .action(async (id, opts) => showConfig(id, opts, deps));
+  program2.addCommand(showCmd_);
+  const skillCmd_ = new Command('skill').description('Claude Code skill management');
+  skillCmd_
+    .command('show')
+    .description('Print the kloop Claude Code skill to stdout')
+    .action(() => showHandler());
+  skillCmd_
+    .command('install')
+    .description('Install the kloop skill to ~/.claude/skills/kloop/')
+    .action(() => installHandler());
+  program2.addCommand(skillCmd_);
   return program2;
 }
 
@@ -23340,9 +25507,9 @@ function mergeConfig(partial, existing) {
 class StateService {
   paths;
   fs;
-  constructor(fs11, paths2) {
+  constructor(fs13, paths2) {
     this.paths = paths2;
-    this.fs = fs11;
+    this.fs = fs13;
   }
   async initProject(overrides = {}) {
     await this.fs.mkdir(this.paths.baseDir);
@@ -23746,12 +25913,12 @@ ${content}`);
 }
 
 // src/tmux/service.ts
-import * as fs11 from 'fs/promises';
-import * as path12 from 'path';
-import * as os2 from 'os';
+import * as fs13 from 'fs/promises';
+import * as path14 from 'path';
+import * as os3 from 'os';
 class TmuxServiceImpl {
   spawn;
-  statusDir = path12.join(os2.tmpdir(), 'kloop', 'status');
+  statusDir = path14.join(os3.tmpdir(), 'kloop', 'status');
   constructor(spawn = Bun.spawn.bind(Bun)) {
     this.spawn = spawn;
   }
@@ -23819,9 +25986,9 @@ class TmuxServiceImpl {
     const startTime = Date.now();
     const statusFile = this.getStatusFilePath(params.sessionName);
     try {
-      await fs11.unlink(statusFile);
+      await fs13.unlink(statusFile);
     } catch {}
-    await fs11.writeFile(statusFile, 'RUNNING', { mode: 384 });
+    await fs13.writeFile(statusFile, 'RUNNING', { mode: 384 });
     const wrappedCommand = `${buildTimeoutCommand(params.command, params.timeoutMins)}; echo $? > "${statusFile}"`;
     const cmd = buildNewSessionCommand({
       sessionName: params.sessionName,
@@ -23854,10 +26021,11 @@ class TmuxServiceImpl {
     let exitCode = 1;
     let timedOut = false;
     try {
-      const statusContent = await fs11.readFile(statusFile, 'utf-8');
+      const statusContent = await fs13.readFile(statusFile, 'utf-8');
       const trimmed = statusContent.trim();
       if (trimmed === 'RUNNING') {
         exitCode = 1;
+        timedOut = true;
       } else {
         const parsed = parseInt(trimmed, 10);
         if (Number.isFinite(parsed)) {
@@ -23867,7 +26035,7 @@ class TmuxServiceImpl {
       }
     } catch {}
     try {
-      await fs11.unlink(statusFile);
+      await fs13.unlink(statusFile);
     } catch {}
     return { exitCode, durationMs, timedOut };
   }
@@ -23878,11 +26046,11 @@ class TmuxServiceImpl {
     return parseSessionName(sessionName);
   }
   async ensureStatusDir() {
-    await fs11.mkdir(this.statusDir, { recursive: true, mode: 448 });
+    await fs13.mkdir(this.statusDir, { recursive: true, mode: 448 });
   }
   getStatusFilePath(sessionName) {
     const safeName = sessionName.replace(/[^a-zA-Z0-9_-]/g, '_');
-    return path12.join(this.statusDir, `${safeName}.status`);
+    return path14.join(this.statusDir, `${safeName}.status`);
   }
 }
 function createTmuxService(spawn) {
@@ -23890,13 +26058,13 @@ function createTmuxService(spawn) {
 }
 
 // src/logs/service.ts
-import * as path13 from 'path';
+import * as path15 from 'path';
 
 class LogsServiceImpl {
   fs;
   paths;
-  constructor(fs12, paths2) {
-    this.fs = fs12;
+  constructor(fs14, paths2) {
+    this.fs = fs14;
     this.paths = paths2;
   }
   async getCurrentRunId() {
@@ -23917,7 +26085,7 @@ class LogsServiceImpl {
     const runs = [];
     for (const entry of entries) {
       if (entry.startsWith('.') || entry.endsWith('.lock') || entry === 'index.db') continue;
-      const entryPath = path13.join(home, entry);
+      const entryPath = path15.join(home, entry);
       try {
         const subEntries = await this.fs.readdir(entryPath);
         if (subEntries.some(f => f.startsWith('loop-'))) {
@@ -23961,11 +26129,11 @@ class LogsServiceImpl {
       const loopMatch = entry.match(/^loop-(\d+)$/);
       if (!loopMatch) continue;
       const loopNum = parseInt(loopMatch[1], 10);
-      const loopDir = path13.join(runDir, entry);
+      const loopDir = path15.join(runDir, entry);
       try {
         const agentDirs = await this.fs.readdir(loopDir);
         for (const agentDir of agentDirs) {
-          const logPath = path13.join(loopDir, agentDir, 'log');
+          const logPath = path15.join(loopDir, agentDir, 'log');
           if (!(await this.fs.exists(logPath))) continue;
           const parsed = this.parseAgentDirName(agentDir, loopNum);
           if (parsed) {
@@ -24024,8 +26192,8 @@ class LogsServiceImpl {
     return null;
   }
 }
-function createLogsService(fs12, paths2) {
-  return new LogsServiceImpl(fs12, paths2);
+function createLogsService(fs14, paths2) {
+  return new LogsServiceImpl(fs14, paths2);
 }
 
 // src/index.ts

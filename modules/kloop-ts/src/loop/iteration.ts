@@ -10,6 +10,7 @@ export interface IterationData {
   learnings: string[];
   implementerPrompt: string;
   reviewerPrompts: Array<{ reviewerIndex: number; prompt: string }>;
+  reviewSummaryPath: string | null;
 }
 
 /**
@@ -34,12 +35,18 @@ export function buildIterationData(
   const implReviewsDir =
     loopNum > 1 ? paths.loopReviewsPath(runId, loopNum - 1) : paths.loopReviewsPath(runId, loopNum);
 
+  // Compute review summary path from previous loop's synthesis (needed for implVars)
+  const reviewSummaryPath = loopNum > 1 ? `${paths.loopSynthesisPath(runId, loopNum - 1)}/review-summary.md` : null;
+
+  // Implementer: always gets previous loop context (no roll).
+  // synthesis on → summary only; synthesis off → raw reviews folder
   const implVars: ImplementerPromptVars = {
     specPath,
     iteration: String(run.iteration),
-    reviewsDir: implReviewsDir,
+    reviewsDir: config.synthesis ? 'none (see synthesized summary above)' : implReviewsDir,
     evidenceDir,
     learningsFile,
+    reviewSummaryPath: reviewSummaryPath ?? undefined,
   };
 
   const implementerPrompt = buildImplementerPrompt(config.prompts?.implementer, implVars);
@@ -47,11 +54,11 @@ export function buildIterationData(
   // Flatten review phases to build prompts for all reviewers
   const allReviewers = config.reviewPhases.flat();
   const prevLoop = loopNum > 1 ? loopNum - 1 : null;
-  const reviewerPrompts = Array.from({ length: allReviewers.length }, (_, i) => {
-    // Per-reviewer probability roll for seeing previous loop's reviews
-    const seesPrevReviews = prevLoop !== null && Math.random() < (config.previousReviewPropagation ?? 0);
-    const archivedReviews = seesPrevReviews ? paths.loopReviewsPath(runId, prevLoop) : null;
 
+  // Reviewer: roll determines if they see ANY previous loop context.
+  // synthesis on + roll pass → summary only; synthesis off + roll pass → raw reviews folder; roll fail → nothing
+  const reviewerPrompts = Array.from({ length: allReviewers.length }, (_, i) => {
+    const seesPrev = prevLoop !== null && Math.random() < (config.previousReviewPropagation ?? 0);
     const revVars: ReviewerPromptVars = {
       specPath,
       iteration: String(run.iteration),
@@ -60,7 +67,8 @@ export function buildIterationData(
       verdictsDir,
       evidenceDir,
       learningsFile,
-      archivedReviews,
+      archivedReviews: seesPrev && !config.synthesis ? paths.loopReviewsPath(runId, prevLoop) : null,
+      previousSummaryPath: seesPrev && config.synthesis ? (reviewSummaryPath ?? undefined) : undefined,
     };
     return {
       reviewerIndex: i,
@@ -75,6 +83,7 @@ export function buildIterationData(
     learnings: run.learnings,
     implementerPrompt,
     reviewerPrompts,
+    reviewSummaryPath,
   };
 }
 

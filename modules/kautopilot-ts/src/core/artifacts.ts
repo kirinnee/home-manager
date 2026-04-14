@@ -64,7 +64,7 @@ export function runDir(scope: RunScope, runNumber: number): string {
 export function runFilePath(
   scope: RunScope,
   runNumber: number,
-  fileName: 'context' | 'logs' | 'command' | 'prompt.md',
+  fileName: 'context' | 'logs' | 'command' | 'prompt.md' | 'output.json',
 ): string {
   return join(runDir(scope, runNumber), fileName);
 }

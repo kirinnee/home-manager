@@ -157,7 +157,7 @@ export interface SessionStatus {
 
 export const CHECKPOINTS: Record<string, Set<string>> = {
   plan: new Set(['pull_ticket', 'write_spec', 'finalize_spec', 'finalize_plans']),
-  implementation: new Set(['clear_loop', 'commit', 'next_plan', 'completed']),
+  implementation: new Set(['clear_loop', 'running', 'commit', 'next_plan', 'completed']),
   polish: new Set(['commit_pending', 'prereview', 'push', 'create_pr', 'poll', 'feedback_check', 'completed']),
 };
 

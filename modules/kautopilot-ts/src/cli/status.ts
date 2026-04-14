@@ -24,8 +24,8 @@ export function createStatusCommand(): Command {
 }
 
 function turnLabel(userTurn: boolean | null, stepType: string | null): string {
-  if (!stepType || stepType === 'code') return '—';
   if (userTurn === true) return "user's turn";
+  if (!stepType || stepType === 'code') return '—';
   if (userTurn === false) return "LLM's turn";
   return '—';
 }
@@ -339,6 +339,7 @@ async function runStatus(id: string | undefined, opts: { json?: boolean }): Prom
       state: initStatus.state,
       stateStatus: initStatus.stateStatus,
       running: initStatus.running,
+      userTurn: initStatus.userTurn,
       context: initStatus.context,
       completedStates: initStatus.completedStates,
       elapsed,
@@ -357,6 +358,9 @@ async function runStatus(id: string | undefined, opts: { json?: boolean }): Prom
     console.log();
     logField('State', initStatus.state);
     logField('Status', initStatus.running ? `running (${initStatus.stateStatus})` : initStatus.stateStatus);
+    if (initStatus.running && initStatus.userTurn === true) {
+      logField('Turn', "user's turn");
+    }
     logField('Duration', formatDuration(elapsed));
     return;
   }

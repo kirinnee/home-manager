@@ -58,6 +58,9 @@ export interface InitStatus {
   running: boolean;
   startedAt: string | null;
 
+  // Turn tracking (updated live when blocking on user input)
+  userTurn: boolean | null;
+
   // Setup context (survives crash recovery)
   context: {
     systemName?: string;

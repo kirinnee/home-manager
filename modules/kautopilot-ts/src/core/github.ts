@@ -59,6 +59,9 @@ export async function ghPrChecks(prNumber: number, cwd?: string): Promise<CheckS
   const result = await gh(['pr', 'checks', String(prNumber), '--json', 'name,state'], cwd);
 
   if (result.exitCode !== 0) {
+    if (result.stderr.includes('no checks reported')) {
+      return [];
+    }
     throw new Error(`gh pr checks failed: ${result.stderr}`);
   }
 
@@ -68,7 +71,7 @@ export async function ghPrChecks(prNumber: number, cwd?: string): Promise<CheckS
     return {
       name: c.name,
       status:
-        s === 'pass' || s === 'success'
+        s === 'pass' || s === 'success' || s === 'skipping' || s === 'skipped'
           ? ('passing' as const)
           : s === 'fail' || s === 'failure'
             ? ('failing' as const)
@@ -120,6 +123,7 @@ interface GhReviewThreadsResponse {
             comments: {
               nodes: {
                 id: string;
+                databaseId: number;
                 author: { login: string | null };
                 body: string;
                 createdAt: string;
@@ -145,6 +149,7 @@ export async function ghReviewThreads(prNumber: number, cwd?: string): Promise<P
               comments(first: 100) {
                 nodes {
                   id
+                  databaseId
                   author { login }
                   body
                   createdAt
@@ -189,8 +194,10 @@ export async function ghReviewThreads(prNumber: number, cwd?: string): Promise<P
       author: t.comments.nodes[0]?.author?.login || 'unknown',
       body: t.comments.nodes[0]?.body || '',
       firstCommentId: t.comments.nodes[0]?.id || '',
+      firstCommentDatabaseId: t.comments.nodes[0]?.databaseId ?? null,
       replies: t.comments.nodes.slice(1).map(c => ({
         id: c.id,
+        databaseId: c.databaseId,
         author: c.author?.login || 'unknown',
         body: c.body,
         isBot: c.author?.login?.includes('[bot]') ?? false,
@@ -204,7 +211,7 @@ export async function ghReviewThreads(prNumber: number, cwd?: string): Promise<P
 
 interface GhReview {
   id: string;
-  author: { login: string };
+  author: { login: string } | null;
   state: string;
   body: string;
 }
@@ -262,7 +269,7 @@ export async function ghPrComment(prNumber: number, body: string, cwd?: string):
 // Reply to review thread
 // ============================================================================
 
-export async function ghReplyToThread(prNumber: number, commentId: string, body: string, cwd?: string): Promise<void> {
+export async function ghReplyToThread(prNumber: number, commentId: number, body: string, cwd?: string): Promise<void> {
   const repoInfo = await ghRepoInfo(cwd);
   const result = await gh(
     [

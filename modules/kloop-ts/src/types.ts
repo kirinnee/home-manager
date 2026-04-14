@@ -15,6 +15,22 @@ export const metricSampleSchema = z.object({
 
 export type MetricSample = z.infer<typeof metricSampleSchema>;
 
+// Implementer retry config
+const implementerRetrySchema = z.object({
+  maxRetries: z.number().min(0).max(10).default(2),
+  backoffBaseMs: z.number().min(0).default(5000),
+});
+
+// Backward compat: old nested shapes accepted as input aliases
+const legacyReReviewSchema = z.object({
+  enabled: z.boolean().optional(),
+  phases: z.array(z.array(z.string().min(1)).min(1)).optional(),
+  timeout: z.number().min(0.001).max(120).optional(),
+});
+const legacySynthesisSchema = z.object({
+  enabled: z.boolean().optional(),
+});
+
 const configSchema = z
   .object({
     // Binary names — new format: weighted implementers
@@ -37,7 +53,17 @@ const configSchema = z
     // Review behavior
     firstLoopFullReview: z.boolean().default(true),
     previousReviewPropagation: z.number().min(0).max(1).default(0.7),
-    // Per-reviewer consecutive failure cap — removed; checkpointing handles this
+    // Synthesis and verify (flat booleans + timeouts)
+    synthesis: z.union([z.boolean(), legacySynthesisSchema]).default(true),
+    synthesisTimeout: z.number().min(0.001).max(120).optional(),
+    verify: z.boolean().optional(),
+    verifyPhases: z.array(z.array(z.string().min(1)).min(1)).optional(),
+    verifyTimeout: z.number().min(0.001).max(120).optional(),
+    rerankAfterCheckpoint: z.boolean().default(true),
+    implementerRetry: implementerRetrySchema.optional(),
+    firstIterationWeightMultiplier: z.number().min(1).max(1000).default(2),
+    // Backward compat: old nested reReview shape
+    reReview: legacyReReviewSchema.optional(),
     // Agent prompt overrides
     prompts: z
       .object({
@@ -45,6 +71,10 @@ const configSchema = z
         reviewer: z.string().optional(),
         checkpointer: z.string().optional(),
         checkpointerFull: z.string().optional(),
+        synthesizer: z.string().optional(),
+        verifier: z.string().optional(),
+        reReviewer: z.string().optional(), // backward compat alias
+        reSynthesizer: z.string().optional(),
       })
       .optional(),
   })
@@ -67,8 +97,26 @@ const configSchema = z
       reviewPhases = [data.reviewers];
     }
     if (!reviewPhases) {
-      reviewPhases = [['claude-reviewer-zai']];
+      reviewPhases = [['claude:claude']];
     }
+
+    // Resolve synthesis: accept bool or old { enabled } shape
+    const synthRaw = data.synthesis;
+    const synthesis = typeof synthRaw === 'boolean' ? synthRaw : (synthRaw?.enabled ?? true);
+
+    // Resolve verify: accept flat fields or old reReview shape
+    const verify = data.verify ?? data.reReview?.enabled ?? true;
+    const verifyPhases = data.verifyPhases ?? data.reReview?.phases ?? [['claude:claude']];
+    const verifyTimeout = data.verifyTimeout ?? data.reReview?.timeout ?? 5;
+    const synthesisTimeout = data.synthesisTimeout ?? 15;
+
+    // Resolve prompts: accept verifier or old reReviewer alias
+    const prompts = data.prompts
+      ? {
+          ...data.prompts,
+          verifier: data.prompts.verifier ?? data.prompts.reReviewer,
+        }
+      : data.prompts;
 
     return {
       implementers,
@@ -77,15 +125,22 @@ const configSchema = z
       maxIterations: data.maxIterations,
       implementerTimeout: data.implementerTimeout,
       reviewerTimeout: data.reviewerTimeout,
+      synthesisTimeout,
       conflictCheckThreshold: data.conflictCheckThreshold,
       compressSpec: data.compressSpec,
       firstLoopFullReview: data.firstLoopFullReview,
       previousReviewPropagation: data.previousReviewPropagation,
-      prompts: data.prompts,
+      synthesis,
+      verify,
+      verifyPhases,
+      verifyTimeout,
+      rerankAfterCheckpoint: data.rerankAfterCheckpoint ?? true,
+      implementerRetry: data.implementerRetry ?? { maxRetries: 2, backoffBaseMs: 5000 },
+      firstIterationWeightMultiplier: data.firstIterationWeightMultiplier ?? 2,
+      prompts,
     };
   });
 
-// Resolved config (after transform — what the rest of the codebase uses)
 export const resolvedConfigSchema = z.object({
   implementers: z.record(z.string(), z.number().int().positive()),
   reviewPhases: z.array(z.array(z.string().min(1))).min(1),
@@ -93,16 +148,30 @@ export const resolvedConfigSchema = z.object({
   maxIterations: z.number().min(1).max(100),
   implementerTimeout: z.number().min(0.001).max(120),
   reviewerTimeout: z.number().min(0.001).max(120),
+  synthesisTimeout: z.number().min(0.001).max(120),
+  verifyTimeout: z.number().min(0.001).max(120),
   conflictCheckThreshold: z.number().min(1).max(100),
   compressSpec: z.boolean(),
   firstLoopFullReview: z.boolean(),
   previousReviewPropagation: z.number().min(0).max(1),
+  synthesis: z.boolean(),
+  verify: z.boolean(),
+  verifyPhases: z.array(z.array(z.string().min(1)).min(1)),
+  rerankAfterCheckpoint: z.boolean(),
+  implementerRetry: z.object({
+    maxRetries: z.number().min(0).max(10),
+    backoffBaseMs: z.number().min(0),
+  }),
+  firstIterationWeightMultiplier: z.number().min(1).max(1000),
   prompts: z
     .object({
       implementer: z.string().optional(),
       reviewer: z.string().optional(),
       checkpointer: z.string().optional(),
       checkpointerFull: z.string().optional(),
+      synthesizer: z.string().optional(),
+      verifier: z.string().optional(),
+      reSynthesizer: z.string().optional(),
     })
     .optional(),
 });
@@ -112,7 +181,6 @@ export type Config = z.infer<typeof resolvedConfigSchema>;
 const runStatusSchema = z.enum(['running', 'completed', 'cancelled', 'failed', 'conflict']);
 export const phaseSchema = z.enum(['implementing', 'reviewing', 'done']);
 const agentRoleSchema = z.enum(['implementer', 'reviewer', 'checkpointer']);
-const sessionStatusSchema = z.enum(['running', 'completed', 'error']);
 export const verdictSchema = z.enum(['approved', 'rejected']);
 
 // Run state stored in .kagent/current/run.json
@@ -130,23 +198,6 @@ export const runSchema = z.object({
 export type Phase = z.infer<typeof phaseSchema>;
 export type Verdict = z.infer<typeof verdictSchema>;
 export type Run = z.infer<typeof runSchema>;
-
-// Session stored in .kagent/current/sessions/{id}.json
-export const sessionSchema = z.object({
-  id: z.string().min(1), // session ID (full or short UUID)
-  iteration: z.number().int().positive(), // 1-based for sessions
-  role: agentRoleSchema,
-  reviewerIndex: z.number().int().nonnegative().optional(),
-  binary: z.string().optional(), // Which binary was used (e.g., "claude" or "claude-reviewer-zai")
-  tmuxSession: z.string(),
-  status: sessionStatusSchema,
-  verdict: verdictSchema.optional(),
-  startedAt: z.string().datetime(),
-  completedAt: z.string().datetime().optional(),
-  harnessSessionId: z.string().optional(), // Harness-native session ID (e.g., Gemini init.session_id)
-});
-
-export type Session = z.infer<typeof sessionSchema>;
 
 // Verdict file: loop-{L}/reviewer-{R}/verdict.json
 export const verdictFileSchema = z.object({
@@ -228,10 +279,12 @@ export type HarnessType = 'claude' | 'gemini';
 /**
  * Parsed binary config for implementers and conflict checker.
  * Format: binary:harness (e.g., "gemini-auto:gemini")
+ * Optional ::i suffix marks as preferred for loop 1.
  */
 export interface ParsedBinary {
   binary: string;
   harness: HarnessType;
+  firstIterationPreferred: boolean;
 }
 
 /**
@@ -256,9 +309,11 @@ function parseHarness(value: string): HarnessType {
 /**
  * Parse an implementer or conflictChecker config entry.
  * Supports both legacy format (bare binary name) and new format (binary:harness).
+ * Optional ::i suffix marks as preferred for loop 1.
  *
- * Legacy: "claude-auto-zai" -> { binary: "claude-auto-zai", harness: "claude" }
- * New: "gemini-auto:gemini" -> { binary: "gemini-auto", harness: "gemini" }
+ * Legacy: "claude-auto-zai" -> { binary: "claude-auto-zai", harness: "claude", firstIterationPreferred: false }
+ * New: "gemini-auto:gemini" -> { binary: "gemini-auto", harness: "gemini", firstIterationPreferred: false }
+ * Preferred: "claude-auto-opus::i" -> { binary: "claude-auto-opus", harness: "claude", firstIterationPreferred: true }
  */
 export function parseImplementerConfig(entry: string): ParsedBinary {
   const trimmed = entry.trim();
@@ -266,23 +321,31 @@ export function parseImplementerConfig(entry: string): ParsedBinary {
     throw new Error('Implementer config cannot be empty.');
   }
 
-  const colonCount = (trimmed.match(/:/g) || []).length;
-  if (colonCount > 1) {
-    throw new Error(`Invalid implementer config "${entry}": too many colons. Expected format: binary:harness`);
+  // Check for ::i suffix (first iteration preferred)
+  let firstIterationPreferred = false;
+  let working = trimmed;
+  if (working.endsWith('::i')) {
+    firstIterationPreferred = true;
+    working = working.slice(0, -3);
   }
 
-  const colonIndex = trimmed.indexOf(':');
+  const colonCount = (working.match(/:/g) || []).length;
+  if (colonCount > 1) {
+    throw new Error(`Invalid implementer config "${entry}": too many colons. Expected format: binary:harness[:i]`);
+  }
+
+  const colonIndex = working.indexOf(':');
   if (colonIndex === -1) {
     // Legacy format: bare binary name defaults to Claude harness
-    return { binary: trimmed, harness: 'claude' };
+    return { binary: working, harness: 'claude', firstIterationPreferred };
   }
 
   if (colonIndex === 0) {
     throw new Error(`Invalid implementer config "${entry}": binary name cannot be empty.`);
   }
 
-  const binary = trimmed.slice(0, colonIndex);
-  const harnessValue = trimmed.slice(colonIndex + 1);
+  const binary = working.slice(0, colonIndex);
+  const harnessValue = working.slice(colonIndex + 1);
 
   if (!harnessValue) {
     throw new Error(`Invalid implementer config "${entry}": harness cannot be empty.`);
@@ -291,6 +354,7 @@ export function parseImplementerConfig(entry: string): ParsedBinary {
   return {
     binary,
     harness: parseHarness(harnessValue),
+    firstIterationPreferred,
   };
 }
 
@@ -366,10 +430,18 @@ export const DEFAULT_CONFIG: Config = {
   maxIterations: 7,
   implementerTimeout: 30,
   reviewerTimeout: 15,
+  synthesisTimeout: 15,
+  verifyTimeout: 5,
   conflictCheckThreshold: 3,
   compressSpec: false,
   firstLoopFullReview: true,
   previousReviewPropagation: 0.7,
+  synthesis: true,
+  verify: true,
+  verifyPhases: [['claude:claude']],
+  rerankAfterCheckpoint: true,
+  implementerRetry: { maxRetries: 2, backoffBaseMs: 5000 },
+  firstIterationWeightMultiplier: 2,
 };
 
 // ============================================================================
@@ -385,6 +457,7 @@ export function getPrimaryImplementer(config: Config): string {
 
 /**
  * Select an implementer using weighted random selection.
+ * On loop 1, models with firstIterationPreferred get 2x weight.
  *
  * NOTE: This uses Math.random() and is non-deterministic — different runs
  * will select different binaries even with the same weights and config.
@@ -392,13 +465,25 @@ export function getPrimaryImplementer(config: Config): string {
  * "Weighted implementer selection is deterministic with a seed for
  * reproducibility (or documented as random)"
  */
-export function selectImplementer(config: Config): string {
+export function selectImplementer(config: Config, loopNum?: number): string {
   const entries = Object.entries(config.implementers);
-  const totalWeight = entries.reduce((sum, [, weight]) => sum + weight, 0);
+  const effectiveLoop = loopNum ?? 1;
+
+  // Build effective weights: on loop 1, firstIterationPreferred models get multiplied weight
+  const multiplier = config.firstIterationWeightMultiplier ?? 2;
+  const effectiveWeights = entries.map(([binary, weight]) => {
+    if (effectiveLoop === 1) {
+      const parsed = parseImplementerConfig(binary);
+      if (parsed.firstIterationPreferred) return weight * multiplier;
+    }
+    return weight;
+  });
+
+  const totalWeight = effectiveWeights.reduce((sum, w) => sum + w, 0);
   let rand = Math.random() * totalWeight;
-  for (const [binary, weight] of entries) {
-    rand -= weight;
-    if (rand <= 0) return binary;
+  for (let i = 0; i < entries.length; i++) {
+    rand -= effectiveWeights[i];
+    if (rand <= 0) return entries[i][0];
   }
   return entries[entries.length - 1][0]; // fallback to last
 }
@@ -415,10 +500,6 @@ export function parseRawConfig(data: unknown): Config {
 
 export function parseRun(data: unknown): Run {
   return runSchema.parse(data);
-}
-
-export function parseSession(data: unknown): Session {
-  return sessionSchema.parse(data);
 }
 
 export function parseHistoryEntry(data: unknown): HistoryEntry {
@@ -445,12 +526,23 @@ export const EVENT_TYPES = {
   LOOP_START: 'loop_start',
   IMPLEMENTER_START: 'implementer_start',
   IMPLEMENTER_END: 'implementer_end',
+  IMPLEMENTER_RETRY: 'implementer_retry',
 
   // Review phase lifecycle
   REVIEW_PHASE_START: 'review_phase_start',
   REVIEWER_START: 'reviewer_start',
   REVIEWER_END: 'reviewer_end',
   REVIEW_PHASE_END: 'review_phase_end',
+
+  // Verify phase lifecycle
+  VERIFY_PHASE_START: 'verify_phase_start',
+  VERIFIER_START: 'verifier_start',
+  VERIFIER_END: 'verifier_end',
+  VERIFY_PHASE_END: 'verify_phase_end',
+
+  // Synthesis
+  SYNTHESIS_START: 'synthesis_start',
+  SYNTHESIS_END: 'synthesis_end',
 
   // Checkpoint
   CHECKPOINT: 'checkpoint', // legacy alias for CHECKPOINT_END
@@ -539,6 +631,18 @@ export interface ImplementerEndEvent extends BaseEvent {
   exitCode: number;
   durationMs: number;
   error?: string; // 'timeout' | 'exit_code_N'
+  retryAttempt?: number; // 0-indexed: 0 = first try
+  maxRetries?: number;
+}
+
+export interface ImplementerRetryEvent extends BaseEvent {
+  type: typeof EVENT_TYPES.IMPLEMENTER_RETRY;
+  loop: number;
+  attempt: number; // 0-indexed attempt that just failed
+  maxRetries: number;
+  previousBinary: string;
+  newBinary: string;
+  backoffMs: number;
 }
 
 // Review phase lifecycle events
@@ -603,6 +707,60 @@ export interface CheckpointEndEvent extends BaseEvent {
   exitCode: number;
 }
 
+// Verify phase events
+export interface VerifyPhaseStartEvent extends BaseEvent {
+  type: typeof EVENT_TYPES.VERIFY_PHASE_START;
+  loop: number;
+  phase: number;
+  reviewers: string[];
+}
+
+export interface VerifierStartEvent extends BaseEvent {
+  type: typeof EVENT_TYPES.VERIFIER_START;
+  loop: number;
+  phase: number;
+  reviewer: string;
+  harness?: HarnessType;
+}
+
+export interface VerifierEndEvent extends BaseEvent {
+  type: typeof EVENT_TYPES.VERIFIER_END;
+  loop: number;
+  phase: number;
+  reviewer: string;
+  harness?: HarnessType;
+  exitCode: number;
+  durationMs: number;
+  error?: string;
+  verdict?: string;
+}
+
+export interface VerifyPhaseEndEvent extends BaseEvent {
+  type: typeof EVENT_TYPES.VERIFY_PHASE_END;
+  loop: number;
+  phase: number;
+  shortCircuited: boolean;
+}
+
+// Synthesis events
+export interface SynthesisStartEvent extends BaseEvent {
+  type: typeof EVENT_TYPES.SYNTHESIS_START;
+  loop: number;
+  binary: string;
+  harness?: HarnessType;
+}
+
+export interface SynthesisEndEvent extends BaseEvent {
+  type: typeof EVENT_TYPES.SYNTHESIS_END;
+  loop: number;
+  binary: string;
+  harness?: HarnessType;
+  exitCode: number;
+  durationMs: number;
+  error?: string;
+  summaryPath?: string;
+}
+
 // Loop end event
 export interface LoopEndEvent extends BaseEvent {
   type: typeof EVENT_TYPES.LOOP_END;
@@ -623,10 +781,17 @@ export type KloopEvent =
   | LoopStartEvent
   | ImplementerStartEvent
   | ImplementerEndEvent
+  | ImplementerRetryEvent
   | ReviewPhaseStartEvent
   | ReviewerStartEvent
   | ReviewerEndEvent
   | ReviewPhaseEndEvent
+  | VerifyPhaseStartEvent
+  | VerifierStartEvent
+  | VerifierEndEvent
+  | VerifyPhaseEndEvent
+  | SynthesisStartEvent
+  | SynthesisEndEvent
   | CheckpointEvent
   | CheckpointStartEvent
   | CheckpointEndEvent
@@ -685,6 +850,9 @@ export interface MaterializedAgentState {
   inputTokens?: number;
   outputTokens?: number;
   propagated?: boolean; // true if this reviewer received previous loop reviews
+  // Implementer retry tracking
+  retryAttempt?: number; // 0-indexed: 0 = first try
+  retryMax?: number;
 }
 
 export interface MaterializedReviewPhase {
@@ -693,6 +861,25 @@ export interface MaterializedReviewPhase {
   completedAt?: string;
   shortCircuited?: boolean;
   reviewers: MaterializedAgentState[];
+}
+
+export interface MaterializedVerifyPhase {
+  phase: number;
+  startedAt: string;
+  completedAt?: string;
+  shortCircuited?: boolean;
+  reviewers: MaterializedAgentState[];
+}
+
+export interface MaterializedSynthesis {
+  status: 'pending' | 'running' | 'completed' | 'error';
+  startedAt?: string;
+  completedAt?: string;
+  durationMs?: number;
+  exitCode?: number;
+  error?: string;
+  summaryPath?: string;
+  binary?: string;
 }
 
 export interface MaterializedCheckpoint {
@@ -713,11 +900,16 @@ export interface MaterializedLoop {
   completedAt?: string;
   durationMs?: number;
   implementer?: MaterializedAgentState;
+  verifyPhases?: MaterializedVerifyPhase[];
   reviewPhases: MaterializedReviewPhase[];
+  synthesis?: MaterializedSynthesis;
   checkpoint?: MaterializedCheckpoint;
 }
 
 export interface MaterializedStatus {
+  // Schema version — bumped to invalidate old status.yaml files
+  schemaVersion?: number;
+
   // WAL cursor — event count when last materialized
   lastEventIndex: number;
 
@@ -745,6 +937,7 @@ export interface MaterializedStatus {
 export interface LoopSummary {
   loop: number;
   durationMs: number;
+  implementerRetryAttempts?: number;
   implementer: {
     binary: string;
     harness?: HarnessType;
@@ -753,6 +946,21 @@ export interface LoopSummary {
     inputTokens?: number;
     outputTokens?: number;
   };
+  verifyPhases?: Array<{
+    phase: number;
+    reviewers: Array<{
+      reviewerIndex: number;
+      binary: string;
+      harness?: HarnessType;
+      exitCode: number;
+      durationMs: number;
+      verdict?: 'approved' | 'rejected';
+      error?: string;
+      issuesFixed?: string[];
+      issuesRemaining?: string[];
+    }>;
+    shortCircuited: boolean;
+  }>;
   reviewPhases: Array<{
     phase: number;
     reviewers: Array<{
@@ -771,6 +979,13 @@ export interface LoopSummary {
     }>;
     shortCircuited: boolean;
   }>;
+  synthesis?: {
+    binary?: string;
+    exitCode: number;
+    durationMs: number;
+    error?: string;
+    summaryPath?: string;
+  };
   checkpoint?: {
     outcome: string;
     summary: string;

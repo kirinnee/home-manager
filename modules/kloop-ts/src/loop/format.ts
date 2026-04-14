@@ -166,13 +166,24 @@ export function formatMaxIterations(maxIterations: number): void {
 }
 
 export function formatAgentLaunch(
-  role: 'impl' | 'reviewer' | 'checkpoint',
+  role: 'impl' | 'reviewer' | 'checkpoint' | 'synthesizer' | 'verifier' | 'resynthesizer',
   label: string,
   binary: string,
   tmuxSession: string,
   logPath: string,
 ): void {
-  const roleLabel = role === 'impl' ? 'implementer' : role === 'reviewer' ? label : 'checkpointer';
+  const roleLabel =
+    role === 'impl'
+      ? 'implementer'
+      : role === 'reviewer'
+        ? label
+        : role === 'synthesizer'
+          ? 'synthesizer'
+          : role === 'resynthesizer'
+            ? 'resynthesizer'
+            : role === 'verifier'
+              ? label
+              : 'checkpointer';
   console.log(`  ▸ ${pc.cyan(roleLabel)}  ${pc.bold(binary)}`);
   console.log(pc.dim(`    tmux: ${tmuxSession}`));
   console.log(pc.dim(`    log:  ${logPath}`));
@@ -211,4 +222,88 @@ export function formatProgress(
   const bar = pc.green('█'.repeat(filled)) + pc.dim('░'.repeat(empty));
 
   console.log(`  progress  ${bar} ${lowestEstimate}%${reviewerInfo}`);
+}
+
+// ============================================================================
+// Verify formatting
+// ============================================================================
+
+export function formatVerifyStart(): void {
+  console.log(pc.dim('  ◆ verify gate — checking previous issues...'));
+}
+
+export function formatVerifyResult(passed: boolean, results: Array<{ verdict: string; binary: string }>): void {
+  if (passed) {
+    console.log(`  ${pc.green('✓ verify: passed')} — all previous issues resolved`);
+  } else {
+    const rejected = results.filter(r => r.verdict === 'rejected').map(r => r.binary);
+    console.log(`  ${pc.red('✗ verify: failed')} — ${rejected.join(', ')}`);
+  }
+}
+
+// ============================================================================
+// Synthesis formatting
+// ============================================================================
+
+export function formatSynthesisStart(): void {
+  console.log(pc.dim('  ◆ synthesizing reviews...'));
+}
+
+export function formatSynthesisResult(summaryCreated: boolean, durationMs: number): void {
+  if (summaryCreated) {
+    console.log(`  ${pc.green('✓ synthesis')} — review-summary.md written  ${pc.dim(formatDuration(durationMs))}`);
+  } else {
+    console.log(`  ${pc.red('✗ synthesis')} — failed to write summary  ${pc.dim(formatDuration(durationMs))}`);
+  }
+}
+
+// ============================================================================
+// Re-synthesis formatting
+// ============================================================================
+
+export function formatReSynthesisStart(): void {
+  console.log(pc.dim('  ◆ re-synthesizing from verifier outputs...'));
+}
+
+export function formatReSynthesisResult(summaryCreated: boolean, durationMs: number): void {
+  if (summaryCreated) {
+    console.log(`  ${pc.green('✓ re-synthesis')} — review-summary.md updated  ${pc.dim(formatDuration(durationMs))}`);
+  } else {
+    console.log(`  ${pc.red('✗ re-synthesis')} — failed to write summary  ${pc.dim(formatDuration(durationMs))}`);
+  }
+}
+
+// ============================================================================
+// Implementer retry formatting
+// ============================================================================
+
+export function formatImplementerRetry(attempt: number, maxRetries: number, backoffMs: number): void {
+  const backoffSec = (backoffMs / 1000).toFixed(1);
+  console.log(pc.yellow(`  ↻ implementer retry ${attempt + 1}/${maxRetries} (backoff ${backoffSec}s)`));
+}
+
+// ============================================================================
+// Dynamic ordering formatting
+// ============================================================================
+
+export interface RerankScore {
+  reviewer: string;
+  score: number;
+  rejections: number;
+  avgCompletion: number;
+  errors: number;
+  loopsSampled: number;
+}
+
+export function formatDynamicOrdering(orderedPhases: string[][], scores: RerankScore[]): void {
+  const flat = orderedPhases.flat();
+  console.log(pc.dim(`  ◆ reranked review phases (highest trouble first):`));
+  for (const s of scores) {
+    console.log(
+      pc.dim(
+        `    ${s.reviewer}: score=${s.score} (rej:${s.rejections}×10=${s.rejections * 10} + comp:${s.avgCompletion.toFixed(0)}%→${((100 - s.avgCompletion) / 10).toFixed(1)} + err:${s.errors}×5=${s.errors * 5}) across ${s.loopsSampled} loop(s)`,
+      ),
+    );
+  }
+  console.log(pc.dim(`    → phases: ${flat.join(', ')}`));
 }

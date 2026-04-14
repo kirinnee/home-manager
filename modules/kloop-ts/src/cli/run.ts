@@ -5,7 +5,7 @@ import { LoopRunner } from '../loop/runner';
 import { AgentRunner } from '../agents/runner';
 import { IndexDb, EventLog, PidLock, killRunTmuxSessions } from '../index-db';
 import type { CliDeps } from './index';
-import { EVENT_TYPES, type KloopEvent } from '../types';
+import { EVENT_TYPES, parseRawConfig, type Config, type KloopEvent } from '../types';
 
 // ============================================================================
 // run.log capture — captures stdout/stderr to ~/.kloop/{runId}/run.log
@@ -185,11 +185,11 @@ export async function handler(runId: string | undefined, opts: { detach?: boolea
     }
 
     // Load config from global storage (YAML)
-    let config: any;
+    let config: Config;
     try {
       const YAML = await import('yaml');
       const configContent = await deps.state.fs.readFile(configPath);
-      config = YAML.parse(configContent);
+      config = parseRawConfig(YAML.parse(configContent));
     } catch (err) {
       console.error(`Error: Failed to parse config.yaml: ${(err as Error).message}`);
       process.exit(1);

@@ -207,7 +207,7 @@ export async function handlePoll(ctx: Phase3Context): Promise<string | null> {
     checks: checks.map(c => ({ name: c.name, status: c.status })),
     threads: threads.length,
     unresolvedThreads: threads.length, // all fetched threads are unresolved
-    reviews: reviews.map(r => ({ author: r.author.login, state: r.state })),
+    reviews: reviews.map(r => ({ author: r.author?.login ?? 'unknown', state: r.state })),
     prComments: prComments.length,
     changesRequested,
     approvals,

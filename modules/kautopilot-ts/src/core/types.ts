@@ -675,6 +675,7 @@ export const configSchema = z.object({
       maxPushCycles: z.number().min(1).max(20).default(10),
       pollInterval: z.number().min(1).max(300).default(5),
       defaultLlmTimeout: z.number().min(10).max(600).default(300),
+      evalTimeout: z.number().min(10).max(600).default(300),
       coderabbit: z.boolean().default(true),
       removeSpecOnPush: z.boolean().default(false),
     })
@@ -682,6 +683,7 @@ export const configSchema = z.object({
       maxPushCycles: 10,
       pollInterval: 5,
       defaultLlmTimeout: 300,
+      evalTimeout: 300,
       coderabbit: true,
       removeSpecOnPush: false,
     }),
@@ -1131,6 +1133,7 @@ Discuss the PR with the user. Figure out:
     maxPushCycles: 10,
     pollInterval: 60,
     defaultLlmTimeout: 300,
+    evalTimeout: 300,
     coderabbit: true,
     removeSpecOnPush: false,
   },
@@ -1173,11 +1176,13 @@ export interface PollThread {
   author: string;
   body: string;
   firstCommentId: string;
+  firstCommentDatabaseId: number | null;
   replies: PollReply[];
 }
 
 export interface PollReply {
   id: string;
+  databaseId: number;
   author: string;
   body: string;
   isBot: boolean;

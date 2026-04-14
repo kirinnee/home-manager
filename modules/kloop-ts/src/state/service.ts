@@ -1,22 +1,5 @@
-import type {
-  Config,
-  Run,
-  Session,
-  HistoryEntry,
-  Phase,
-  CheckpointResult,
-  IterationSummary,
-  MetricSample,
-  MetricsSummary,
-} from '../types';
-import {
-  parseRun,
-  parseSession,
-  parseHistoryEntry,
-  DEFAULT_CONFIG,
-  checkpointResultSchema,
-  parseRawConfig,
-} from '../types';
+import type { Config, Run, HistoryEntry, Phase, CheckpointResult, MetricSample } from '../types';
+import { parseRun, parseHistoryEntry, DEFAULT_CONFIG, checkpointResultSchema, parseRawConfig } from '../types';
 import type { FsService, Paths } from '../deps';
 import { generateRunId, getCurrentTimestamp, SPEC_TEMPLATE } from '../deps';
 import * as config from './config';
@@ -69,7 +52,6 @@ export class StateService {
 
   async createRun(specPath: string): Promise<Run> {
     await this.fs.mkdir(this.paths.currentDir);
-    await this.fs.mkdir(this.paths.sessionsDir);
     await this.fs.mkdir(this.paths.verdictsDir);
     await this.fs.mkdir(this.paths.evidenceDir);
 
@@ -135,62 +117,12 @@ export class StateService {
     await this.saveRun(run);
   }
 
-  async completeRun(
-    statusOrCheckpointRan?: Run['status'] | boolean,
-    checkpointRanFlag?: boolean,
-  ): Promise<HistoryEntry> {
-    const run = await this.loadRun();
-    if (!run) throw new Error('No active run');
-
-    // Handle multiple calling patterns:
-    // - completeRun(): use current status, checkpointRan=false
-    // - completeRun('completed'): set status, checkpointRan=false
-    // - completeRun(true): use current status, checkpointRan=true (old style)
-    // - completeRun('completed', true): set status, checkpointRan=true
-    let checkpointRan = false;
-    if (typeof statusOrCheckpointRan === 'string') {
-      run.status = statusOrCheckpointRan;
-      if (typeof checkpointRanFlag === 'boolean') {
-        checkpointRan = checkpointRanFlag;
-      }
-    } else if (typeof statusOrCheckpointRan === 'boolean') {
-      checkpointRan = statusOrCheckpointRan;
-    }
-    // If undefined, keep current status
-
-    run.phase = 'done';
-    await this.saveRun(run);
-    return await this.archiveRun(checkpointRan);
-  }
-
   async cancelRun(): Promise<void> {
     const run = await this.loadRun();
     if (!run) return;
     run.status = 'cancelled';
     run.phase = 'done';
     await this.saveRun(run);
-  }
-
-  // Session Management
-  async saveSession(session: Session): Promise<void> {
-    await this.fs.writeJson(this.paths.sessionFile(session.id), session);
-  }
-
-  async loadSessions(): Promise<Session[]> {
-    if (!(await this.fs.exists(this.paths.sessionsDir))) return [];
-
-    const files = await this.fs.readdir(this.paths.sessionsDir);
-    const sessions: Session[] = [];
-
-    for (const file of files.filter(f => f.endsWith('.json'))) {
-      try {
-        const content = await this.fs.readFile(`${this.paths.sessionsDir}/${file}`);
-        sessions.push(parseSession(JSON.parse(content)));
-      } catch (err) {
-        if (process.env.DEBUG) console.error(`Failed to parse session ${file}:`, err);
-      }
-    }
-    return sessions;
   }
 
   // Verdict Management
@@ -358,110 +290,6 @@ export class StateService {
       .filter(f => f.endsWith('.jsonl'))
       .map(f => f.replace(/\.jsonl$/, ''))
       .sort();
-  }
-
-  // History
-  async archiveRun(checkpointRan: boolean = false): Promise<HistoryEntry> {
-    const run = await this.loadRun();
-    if (!run) throw new Error('No run to archive');
-
-    const sessions = await this.loadSessions();
-    const cfg = await this.loadConfig();
-
-    // Compute metrics summary from samples
-    const metricsSummary = await this.computeMetricsSummary(run.id);
-
-    const entry: HistoryEntry = {
-      id: run.id,
-      spec: run.spec,
-      config: cfg,
-      status: run.status as 'completed' | 'cancelled' | 'failed' | 'conflict',
-      iterations: run.iteration,
-      startedAt: run.startedAt,
-      completedAt: getCurrentTimestamp(),
-      summary: await this.buildSummary(sessions, run.learnings),
-      checkpointRan,
-      metricsSummary,
-    };
-
-    await this.fs.writeJson(this.paths.historyEntry(run.id), entry);
-
-    // Clean up checkpoint result file (preserves spec-{runId}.md backups)
-    await this.clearCheckpointResult();
-
-    await this.fs.rm(this.paths.currentDir, { recursive: true });
-    return entry;
-  }
-
-  private async computeMetricsSummary(runId: string): Promise<MetricsSummary | undefined> {
-    const samples = await this.loadMetricSamples(runId);
-    if (samples.length === 0) return undefined;
-
-    let totalDurationMs = 0;
-    let totalInputTokens = 0;
-    let totalOutputTokens = 0;
-
-    for (const s of samples) {
-      totalDurationMs += s.durationMs;
-      totalInputTokens += s.inputTokens ?? 0;
-      totalOutputTokens += s.outputTokens ?? 0;
-    }
-
-    return { totalDurationMs, totalInputTokens, totalOutputTokens };
-  }
-
-  private async buildSummary(sessions: Session[], learnings: string[]) {
-    const byIteration = new Map<number, Session[]>();
-    for (const s of sessions) {
-      const list = byIteration.get(s.iteration) || [];
-      list.push(s);
-      byIteration.set(s.iteration, list);
-    }
-
-    const summaries = await Promise.all(
-      Array.from(byIteration.entries()).map(async ([iteration, iterSessions]) => {
-        const impl = iterSessions.find(s => s.role === 'implementer');
-        const reviewers = iterSessions.filter(s => s.role === 'reviewer');
-
-        // Check for checkpoint result for this iteration
-        let checkpointInfo: IterationSummary['checkpointInfo'] = undefined;
-        try {
-          const checkpointPath = `${this.paths.currentDir}/checkpoint-${iteration}.json`;
-          if (await this.fs.exists(checkpointPath)) {
-            const content = await this.fs.readFile(checkpointPath);
-            const result = checkpointResultSchema.parse(JSON.parse(content));
-            checkpointInfo = {
-              outcome: result.outcome,
-              summary: result.summary,
-              progressPercent: result.progressPercent,
-            };
-          }
-        } catch {
-          // Ignore errors reading checkpoint
-        }
-
-        return {
-          iteration,
-          implementerDuration:
-            impl?.completedAt && impl?.startedAt
-              ? new Date(impl.completedAt).getTime() - new Date(impl.startedAt).getTime()
-              : 0,
-          reviewerVerdicts: reviewers.map(r => ({
-            index: r.reviewerIndex ?? 0,
-            verdict: r.verdict ?? 'rejected',
-            binary: r.binary,
-          })),
-          learnings: learnings.filter((_, i) => i < iteration),
-          sessions: iterSessions.map(s => ({
-            role: s.role,
-            reviewerIndex: s.reviewerIndex,
-          })),
-          checkpointInfo,
-        };
-      }),
-    );
-
-    return summaries;
   }
 
   async listHistory(): Promise<HistoryEntry[]> {

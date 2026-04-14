@@ -4,6 +4,7 @@ import { paths as defaultPaths } from '../deps';
 import type {
   MaterializedStatus,
   MaterializedLoop,
+  MaterializedVerifyPhase,
   MaterializedReviewPhase,
   MaterializedAgentState,
   MaterializedCheckpoint,
@@ -12,6 +13,8 @@ import type {
   Config,
 } from '../types';
 import { EVENT_TYPES } from '../types';
+
+const SCHEMA_VERSION = 2;
 
 // ============================================================================
 // Materialize: WAL → status.yaml
@@ -163,7 +166,19 @@ export async function enrich(
 // Event Application (pure state fold)
 // ============================================================================
 
-function applyEvent(status: MaterializedStatus, event: KloopEvent): void {
+// Backward compat: normalize legacy event type strings from old events.jsonl files
+const LEGACY_EVENT_MAP: Record<string, string> = {
+  re_review_phase_start: 'verify_phase_start',
+  re_reviewer_start: 'verifier_start',
+  re_reviewer_end: 'verifier_end',
+  re_review_phase_end: 'verify_phase_end',
+};
+
+function applyEvent(status: MaterializedStatus, rawEvent: KloopEvent): void {
+  // Normalize legacy event types before processing
+  const event = LEGACY_EVENT_MAP[rawEvent.type]
+    ? ({ ...rawEvent, type: LEGACY_EVENT_MAP[rawEvent.type] } as KloopEvent)
+    : rawEvent;
   switch (event.type) {
     case EVENT_TYPES.RUN_START:
       status.status = 'running';
@@ -180,6 +195,7 @@ function applyEvent(status: MaterializedStatus, event: KloopEvent): void {
           binary: event.implementer,
           status: 'pending',
         },
+        verifyPhases: [],
         reviewPhases: [],
       };
       status.loops.push(loop);
@@ -212,7 +228,18 @@ function applyEvent(status: MaterializedStatus, event: KloopEvent): void {
         if ('error' in event && event.error) {
           loop.implementer.error = event.error;
         }
+        if ('retryAttempt' in event && event.retryAttempt !== undefined) {
+          loop.implementer.retryAttempt = event.retryAttempt;
+        }
+        if ('maxRetries' in event && event.maxRetries !== undefined) {
+          loop.implementer.retryMax = event.maxRetries;
+        }
       }
+      break;
+    }
+
+    case EVENT_TYPES.IMPLEMENTER_RETRY: {
+      // Informational — retry info is tracked via implementer_end retryAttempt/maxRetries
       break;
     }
 
@@ -264,6 +291,86 @@ function applyEvent(status: MaterializedStatus, event: KloopEvent): void {
       if (phase) {
         phase.completedAt = event.timestamp;
         phase.shortCircuited = event.shortCircuited;
+      }
+      break;
+    }
+
+    case EVENT_TYPES.VERIFY_PHASE_START: {
+      const loop = findLoop(status, event.loop);
+      if (loop) {
+        const phase: MaterializedVerifyPhase = {
+          phase: event.phase,
+          startedAt: event.timestamp,
+          reviewers: event.reviewers.map(binary => ({
+            binary,
+            status: 'pending',
+          })),
+        };
+        (loop.verifyPhases ??= []).push(phase);
+      }
+      break;
+    }
+
+    case EVENT_TYPES.VERIFIER_START: {
+      const reviewer = findVerifier(status, event.loop, event.phase, event.reviewer);
+      if (reviewer) {
+        reviewer.status = 'running';
+        reviewer.startedAt = event.timestamp;
+        if ('harness' in event && event.harness) reviewer.harness = event.harness;
+      }
+      break;
+    }
+
+    case EVENT_TYPES.VERIFIER_END: {
+      const reviewer = findVerifier(status, event.loop, event.phase, event.reviewer);
+      if (reviewer) {
+        reviewer.status = event.exitCode === 0 ? 'completed' : 'error';
+        reviewer.completedAt = event.timestamp;
+        reviewer.exitCode = event.exitCode;
+        reviewer.durationMs = event.durationMs;
+        if (event.error) reviewer.error = event.error;
+        if (event.verdict) reviewer.verdict = event.verdict;
+        if ('harness' in event && event.harness) reviewer.harness = event.harness;
+      }
+      break;
+    }
+
+    case EVENT_TYPES.VERIFY_PHASE_END: {
+      const loop = findLoop(status, event.loop);
+      const phase = loop?.verifyPhases?.find(p => p.phase === event.phase);
+      if (phase) {
+        phase.completedAt = event.timestamp;
+        phase.shortCircuited = event.shortCircuited;
+      }
+      break;
+    }
+
+    case EVENT_TYPES.SYNTHESIS_START: {
+      const loop = findLoop(status, event.loop);
+      if (loop) {
+        loop.synthesis = {
+          status: 'running',
+          startedAt: event.timestamp,
+          binary: event.binary,
+        };
+      }
+      break;
+    }
+
+    case EVENT_TYPES.SYNTHESIS_END: {
+      const loop = findLoop(status, event.loop);
+      if (loop) {
+        const existing = loop.synthesis;
+        loop.synthesis = {
+          status: event.exitCode === 0 ? 'completed' : 'error',
+          startedAt: existing?.startedAt ?? event.timestamp,
+          completedAt: event.timestamp,
+          durationMs: event.durationMs,
+          exitCode: event.exitCode,
+          binary: existing?.binary ?? event.binary,
+          error: event.error,
+          summaryPath: event.summaryPath,
+        };
       }
       break;
     }
@@ -402,6 +509,18 @@ function markRunningAgentsInterrupted(status: MaterializedStatus, timestamp: str
         loop.implementer.durationMs = new Date(timestamp).getTime() - new Date(loop.implementer.startedAt).getTime();
       }
     }
+    for (const phase of loop.verifyPhases ?? []) {
+      for (const reviewer of phase.reviewers) {
+        if (reviewer.status === 'running' || reviewer.status === 'pending') {
+          reviewer.status = 'error';
+          reviewer.error = 'interrupted';
+          reviewer.completedAt = timestamp;
+          if (reviewer.startedAt) {
+            reviewer.durationMs = new Date(timestamp).getTime() - new Date(reviewer.startedAt).getTime();
+          }
+        }
+      }
+    }
     for (const phase of loop.reviewPhases) {
       for (const reviewer of phase.reviewers) {
         if (reviewer.status === 'running' || reviewer.status === 'pending') {
@@ -413,6 +532,11 @@ function markRunningAgentsInterrupted(status: MaterializedStatus, timestamp: str
           }
         }
       }
+    }
+    if (loop.synthesis?.status === 'running') {
+      loop.synthesis.status = 'error';
+      loop.synthesis.completedAt = timestamp;
+      loop.synthesis.error = 'interrupted';
     }
     if (loop.checkpoint?.status === 'running') {
       loop.checkpoint.status = 'completed';
@@ -441,12 +565,23 @@ function findReviewer(
   return phase?.reviewers.find(r => r.binary === binary);
 }
 
+function findVerifier(
+  status: MaterializedStatus,
+  loopNum: number,
+  phaseNum: number,
+  binary: string,
+): MaterializedAgentState | undefined {
+  const loop = findLoop(status, loopNum);
+  const phase = loop?.verifyPhases?.find(p => p.phase === phaseNum);
+  return phase?.reviewers.find(r => r.binary === binary);
+}
+
 async function loadStatus(statusPath: string, runId: string, fs: FsService): Promise<MaterializedStatus> {
   try {
     if (await fs.exists(statusPath)) {
       const content = await fs.readFile(statusPath);
       const parsed = YAML.parse(content);
-      if (parsed && typeof parsed.lastEventIndex === 'number') {
+      if (parsed && typeof parsed.lastEventIndex === 'number' && parsed.schemaVersion === SCHEMA_VERSION) {
         return parsed as MaterializedStatus;
       }
     }
@@ -470,6 +605,7 @@ async function loadStatus(statusPath: string, runId: string, fs: FsService): Pro
 async function writeStatus(statusPath: string, status: MaterializedStatus, fs: FsService): Promise<void> {
   // Strip config — it's loaded from config.yaml on the fly by CLI commands
   const { config, ...rest } = status;
+  rest.schemaVersion = SCHEMA_VERSION;
   const content = YAML.stringify(rest, { lineWidth: 0 });
   await fs.writeFile(statusPath, content);
 }
@@ -509,8 +645,12 @@ export function toRunState(status: MaterializedStatus): {
       currentPhase = 'completed';
     } else if (lastLoop.checkpoint?.status === 'running') {
       currentPhase = 'checkpointing';
+    } else if (lastLoop.synthesis?.status === 'running') {
+      currentPhase = 'synthesizing';
     } else if (lastLoop.reviewPhases.length > 0) {
       currentPhase = 'reviewing';
+    } else if ((lastLoop.verifyPhases?.length ?? 0) > 0) {
+      currentPhase = 'verifying';
     } else if (lastLoop.implementer?.status === 'running' || lastLoop.implementer?.status === 'pending') {
       currentPhase = 'implementing';
     } else if (lastLoop.implementer?.status === 'completed' || lastLoop.implementer?.status === 'error') {

@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs/promises';
-import type { Config, Run, Session, HistoryEntry, CheckpointResult } from './types';
+import type { Config, Run, HistoryEntry, CheckpointResult } from './types';
 
 // ============================================================================
 // Dependency Interfaces
@@ -14,7 +14,6 @@ export interface Paths {
   readonly config: string;
   readonly currentDir: string;
   readonly runJson: string;
-  readonly sessionsDir: string;
   readonly verdictsDir: string;
   readonly evidenceDir: string;
   readonly evidenceMd: string;
@@ -26,7 +25,6 @@ export interface Paths {
   readonly failureMd: string;
   readonly historyEntry: (runId: string) => string;
   readonly verdictFile: (iteration: number, reviewerIndex: number) => string;
-  readonly sessionFile: (sessionId: string) => string;
   readonly runLogsDir: (runId: string) => string;
   readonly runReviewsDir: (runId: string) => string;
   readonly metricsFile: (runId: string) => string;
@@ -56,6 +54,8 @@ export interface Paths {
   readonly loopReviewsPath: (runId: string, loopIndex: number) => string;
   readonly loopVerdictsPath: (runId: string, loopIndex: number) => string;
   readonly loopCheckpointerPath: (runId: string, loopIndex: number) => string;
+  readonly loopSynthesisPath: (runId: string, loopIndex: number) => string;
+  readonly loopVerifyPath: (runId: string, loopIndex: number) => string;
 }
 
 export interface FsService {
@@ -113,15 +113,11 @@ export interface StateService {
   incrementConsecutiveFailures(): Promise<number>;
   resetConsecutiveFailures(): Promise<void>;
   addLearning(learning: string): Promise<void>;
-  completeRun(statusOrCheckpointRan?: Run['status'] | boolean, checkpointRanFlag?: boolean): Promise<HistoryEntry>;
   cancelRun(): Promise<void>;
-  saveSession(session: Session): Promise<void>;
-  loadSessions(): Promise<Session[]>;
   clearEvidence(): Promise<void>;
   clearVerdicts(iteration: number): Promise<void>;
   clearReviews(): Promise<void>;
   readLearnings(): Promise<string | null>;
-  archiveRun(checkpointRan?: boolean): Promise<HistoryEntry>;
   listHistory(): Promise<HistoryEntry[]>;
   clearCurrentRun(): Promise<void>;
   destroy(): Promise<void>;
@@ -166,7 +162,6 @@ export interface LogsService {
 
 const BASE_DIR = '.kagent';
 const CURRENT_DIR = `${BASE_DIR}/current`;
-const SESSIONS_DIR = `${CURRENT_DIR}/sessions`;
 const VERDICTS_DIR = `${CURRENT_DIR}/verdicts`;
 const EVIDENCE_DIR = `${CURRENT_DIR}/evidence`;
 const HISTORY_DIR = `${BASE_DIR}/history`;
@@ -186,7 +181,6 @@ export const paths: Paths = {
   config: `${BASE_DIR}/config.json`,
   currentDir: CURRENT_DIR,
   runJson: `${CURRENT_DIR}/run.json`,
-  sessionsDir: SESSIONS_DIR,
   verdictsDir: VERDICTS_DIR,
   evidenceDir: EVIDENCE_DIR,
   evidenceMd: `${EVIDENCE_DIR}/evidence.md`,
@@ -198,7 +192,6 @@ export const paths: Paths = {
   failureMd: `${BASE_DIR}/failure.md`,
   historyEntry: (runId: string) => `${HISTORY_DIR}/${runId}.json`,
   verdictFile: (iteration: number, reviewerIndex: number) => `${VERDICTS_DIR}/${iteration}-${reviewerIndex}.json`,
-  sessionFile: (sessionId: string) => `${SESSIONS_DIR}/${sessionId}.json`,
   runLogsDir: (runId: string) => `${LOGS_DIR}/${runId}`,
   runReviewsDir: (runId: string) => `${REVIEWS_DIR}/${runId}`,
   metricsFile: (runId: string) => `${METRICS_DIR}/${runId}.jsonl`,
@@ -240,6 +233,9 @@ export const paths: Paths = {
     path.join(getKloopHome(), runId, `loop-${loopIndex}`, 'verdicts'),
   loopCheckpointerPath: (runId: string, loopIndex: number) =>
     path.join(getKloopHome(), runId, `loop-${loopIndex}`, 'checkpointer'),
+  loopSynthesisPath: (runId: string, loopIndex: number) =>
+    path.join(getKloopHome(), runId, `loop-${loopIndex}`, 'synthesis'),
+  loopVerifyPath: (runId: string, loopIndex: number) => path.join(getKloopHome(), runId, `loop-${loopIndex}`, 'verify'),
 };
 
 // ============================================================================

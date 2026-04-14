@@ -79,7 +79,7 @@ export async function handlePush(ctx: Phase3Context): Promise<string | null> {
       let pushed = false;
 
       // Try 1: direct push
-      let result = await $`git push`.cwd(session.worktree).quiet();
+      let result = await $`git push`.cwd(session.worktree).quiet().nothrow();
       if (result.exitCode === 0) {
         pushed = true;
       }
@@ -87,9 +87,9 @@ export async function handlePush(ctx: Phase3Context): Promise<string | null> {
       // Try 2: pull --ff-only, then push
       if (!pushed) {
         console.log('[push] Push rejected, trying pull --ff-only...');
-        const pullResult = await $`git pull --ff-only`.cwd(session.worktree).quiet();
+        const pullResult = await $`git pull --ff-only`.cwd(session.worktree).quiet().nothrow();
         if (pullResult.exitCode === 0) {
-          result = await $`git push`.cwd(session.worktree).quiet();
+          result = await $`git push`.cwd(session.worktree).quiet().nothrow();
           if (result.exitCode === 0) pushed = true;
         }
       }
@@ -97,9 +97,9 @@ export async function handlePush(ctx: Phase3Context): Promise<string | null> {
       // Try 3: pull --rebase, then push
       if (!pushed) {
         console.log('[push] Fast-forward failed, trying pull --rebase...');
-        const rebaseResult = await $`git pull --rebase`.cwd(session.worktree).quiet();
+        const rebaseResult = await $`git pull --rebase`.cwd(session.worktree).quiet().nothrow();
         if (rebaseResult.exitCode === 0) {
-          result = await $`git push`.cwd(session.worktree).quiet();
+          result = await $`git push`.cwd(session.worktree).quiet().nothrow();
           if (result.exitCode === 0) pushed = true;
         } else if (hasUnmergedPaths(session.worktree)) {
           ctx.ttyReason = 'merge_conflict';

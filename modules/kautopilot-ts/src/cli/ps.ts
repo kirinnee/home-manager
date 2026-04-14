@@ -157,13 +157,11 @@ async function runPs(opts: { repo?: string; all?: boolean; json?: boolean }): Pr
     const phaseText = done ? `${c.green}done${c.reset}` : formatPhase(row.phase);
     const stepText = done ? `✓ ${row.step}` : row.stepType ? `${row.step} (${row.stepType})` : row.step || '—';
     const turnText =
-      !done && row.stepType === 'tty'
-        ? row.userTurn === true
-          ? "user's"
-          : row.userTurn === false
-            ? "LLM's"
-            : '—'
-        : '—';
+      !done && row.userTurn === true
+        ? "user's"
+        : !done && row.stepType === 'tty' && row.userTurn === false
+          ? "LLM's"
+          : '—';
 
     const line =
       p(row.id, cols.session) +

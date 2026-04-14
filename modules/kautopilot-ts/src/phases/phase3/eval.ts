@@ -12,7 +12,7 @@ import {
 } from '../../core/github';
 import { appendEvent } from '../../core/log';
 import { writeStepInit } from '../../core/step-init';
-import { spawnPrint } from '../../llm/spawn';
+import { spawnPrintToFile } from '../../llm/spawn';
 import { resolveActivePlans } from '../shared';
 import type { EvalResult, EvalUnit, Phase3Context, PollThread, PreFilterResult } from './types';
 
@@ -136,7 +136,7 @@ export async function handleEval(ctx: Phase3Context): Promise<string | null> {
       if (closing.templateReply) {
         const thread = threads.find(t => t.id === closing.threadId);
         if (thread && thread.replies.length > 0) {
-          await ghReplyToThread(prNumber, thread.replies[0].id, closing.templateReply, session.worktree);
+          await ghReplyToThread(prNumber, thread.replies[0].databaseId, closing.templateReply, session.worktree);
         }
       }
       await ghResolveThread(closing.threadId, session.worktree);
@@ -310,7 +310,7 @@ Return a JSON object:
 async function evalSingleUnit(unit: EvalUnit, ctx: Phase3Context, vars: Record<string, string>): Promise<EvalResult> {
   const prompt = buildEvalPrompt(ctx.ticketId, unit.content, vars);
 
-  const result = await spawnPrint<{
+  const result = await spawnPrintToFile<{
     verdict: string;
     reply?: string;
     codeFix?: string;
@@ -320,7 +320,7 @@ async function evalSingleUnit(unit: EvalUnit, ctx: Phase3Context, vars: Record<s
     ambiguousReason?: string;
   }>(getAgentBinary('phase3', 'eval'), prompt, {
     cwd: ctx.session.worktree,
-    timeout: ctx.config.kloop.reviewerTimeout,
+    timeout: ctx.config.settings.evalTimeout,
     sessionId: ctx.session.id,
     label: `eval-${unit.content.slice(0, 30).replace(/[^a-z0-9]/gi, '-')}`,
   });

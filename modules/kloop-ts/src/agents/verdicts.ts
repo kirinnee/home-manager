@@ -8,20 +8,27 @@ interface VerdictParseResult {
   verdict: Verdict | null;
   reasoning: string;
   completionEstimate?: number;
+  issuesFixed?: string[];
+  issuesRemaining?: string[];
 }
 
 /**
- * Parse verdict from verdict file content: { approved: true/false, reasoning, completionEstimate? }
+ * Parse verdict from verdict file content: { approved: true/false, reasoning, completionEstimate?, issuesFixed?, issuesRemaining? }
  */
 export function parseVerdictFile(content: string): VerdictParseResult {
   try {
-    const parsed = JSON.parse(content) as VerdictFile;
+    const parsed = JSON.parse(content) as VerdictFile & {
+      issuesFixed?: string[];
+      issuesRemaining?: string[];
+    };
 
     if (typeof parsed.approved === 'boolean') {
       return {
         verdict: parsed.approved ? 'approved' : 'rejected',
         reasoning: parsed.reasoning ?? '',
         completionEstimate: parsed.completionEstimate,
+        issuesFixed: parsed.issuesFixed,
+        issuesRemaining: parsed.issuesRemaining,
       };
     }
 
