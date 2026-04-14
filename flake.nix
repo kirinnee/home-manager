@@ -83,6 +83,9 @@
                 inherit pkgs;
                 modules = [
                   home-manager-modules.homeManagerModules.multi-claude
+                  home-manager-modules.homeManagerModules.multi-codex
+                  home-manager-modules.homeManagerModules.multi-gemini
+                  home-manager-modules.homeManagerModules.multi-opencode
                   home-manager-modules.homeManagerModules.multi-gh
                   home-manager-modules.homeManagerModules.multi-gws
                   ./home.nix
@@ -169,6 +172,9 @@
                     };
                     home-manager.sharedModules = [
                       home-manager-modules.homeManagerModules.multi-claude
+                      home-manager-modules.homeManagerModules.multi-codex
+                      home-manager-modules.homeManagerModules.multi-gemini
+                      home-manager-modules.homeManagerModules.multi-opencode
                       home-manager-modules.homeManagerModules.multi-gh
                       home-manager-modules.homeManagerModules.multi-gws
                     ];

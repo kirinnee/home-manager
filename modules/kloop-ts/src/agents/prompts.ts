@@ -7,6 +7,9 @@ import {
   DEFAULT_REVIEWER_PROMPT,
   DEFAULT_CHECKPOINTER_PROMPT,
   CONFLICT_ONLY_CHECKPOINTER_PROMPT,
+  DEFAULT_SYNTHESIZER_PROMPT,
+  DEFAULT_VERIFIER_PROMPT,
+  DEFAULT_RE_SYNTHESIS_PROMPT,
 } from './default-prompts';
 
 /**
@@ -28,10 +31,14 @@ export interface ImplementerPromptVars {
   reviewsDir: string;
   evidenceDir: string;
   learningsFile: string;
+  reviewSummaryPath?: string;
 }
 
 export function buildImplementerPrompt(template: string | undefined, vars: ImplementerPromptVars): string {
-  return substitute(template ?? DEFAULT_IMPLEMENTER_PROMPT, vars);
+  return substitute(template ?? DEFAULT_IMPLEMENTER_PROMPT, {
+    ...vars,
+    reviewSummaryPath: vars.reviewSummaryPath ?? '',
+  });
 }
 
 // ============================================================================
@@ -47,13 +54,17 @@ export interface ReviewerPromptVars {
   evidenceDir: string;
   learningsFile: string;
   archivedReviews: string | null; // path to previous loop's reviews, or null
+  previousSummaryPath?: string; // path to previous loop's review-summary.md
 }
 
 export function buildReviewerPrompt(template: string | undefined, vars: ReviewerPromptVars): string {
   let prompt = template ?? DEFAULT_REVIEWER_PROMPT;
-  // Handle the conditional archivedReviews section — path only, no inline instructions
   const archivedSection = vars.archivedReviews !== null ? vars.archivedReviews : '';
-  prompt = substitute(prompt, { ...vars, archivedReviews: archivedSection });
+  prompt = substitute(prompt, {
+    ...vars,
+    archivedReviews: archivedSection,
+    previousSummaryPath: vars.previousSummaryPath ?? '',
+  });
   return prompt;
 }
 
@@ -66,6 +77,7 @@ export interface CheckpointerPromptVars {
   iteration: string;
   reviewsDir: string;
   archivedReviewsPattern: string;
+  archivedSummariesPattern: string;
   conflictFile: string;
   checkpointResultFile: string;
 }
@@ -82,4 +94,60 @@ export function buildCheckpointerPrompt(
   // Fall back to built-in defaults based on compressSpec flag
   const defaultTemplate = compressSpec ? DEFAULT_CHECKPOINTER_PROMPT : CONFLICT_ONLY_CHECKPOINTER_PROMPT;
   return substitute(defaultTemplate, vars);
+}
+
+// ============================================================================
+// Synthesizer prompt
+// ============================================================================
+
+export interface SynthesizerPromptVars {
+  specPath: string;
+  iteration: string;
+  reviewsDir: string;
+  verdictsDir: string;
+  previousSummaryPath: string;
+  summaryOutputPath: string;
+  learningsFile: string;
+  evidenceDir: string;
+}
+
+export function buildSynthesizerPrompt(template: string | undefined, vars: SynthesizerPromptVars): string {
+  return substitute(template ?? DEFAULT_SYNTHESIZER_PROMPT, vars);
+}
+
+// ============================================================================
+// Verifier prompt
+// ============================================================================
+
+export interface VerifierPromptVars {
+  specPath: string;
+  iteration: string;
+  previousSummaryPath: string;
+  reviewsDir: string;
+  verdictsDir: string;
+  evidenceDir: string;
+  learningsFile: string;
+  verifierIndex: string;
+}
+
+export function buildVerifierPrompt(template: string | undefined, vars: VerifierPromptVars): string {
+  return substitute(template ?? DEFAULT_VERIFIER_PROMPT, vars);
+}
+
+// ============================================================================
+// Re-synthesizer prompt
+// ============================================================================
+
+export interface ReSynthesisPromptVars {
+  specPath: string;
+  iteration: string;
+  previousSummaryPath: string;
+  verifyDir: string;
+  verdictsDir: string;
+  summaryOutputPath: string;
+  learningsFile: string;
+}
+
+export function buildReSynthesisPrompt(template: string | undefined, vars: ReSynthesisPromptVars): string {
+  return substitute(template ?? DEFAULT_RE_SYNTHESIS_PROMPT, vars);
 }

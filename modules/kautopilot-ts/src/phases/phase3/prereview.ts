@@ -2,7 +2,7 @@ import { spawn } from 'bun';
 import { getAgentBinary, getAgentPrompt } from '../../core/agents';
 import { appendEvent } from '../../core/log';
 import { writeStepInit } from '../../core/step-init';
-import { spawnPrint, spawnPrintRaw } from '../../llm/spawn';
+import { spawnPrintRaw, spawnPrintToFile } from '../../llm/spawn';
 import type { Phase3Context } from './types';
 
 export async function handlePrereview(ctx: Phase3Context): Promise<string | null> {
@@ -127,7 +127,7 @@ Output a JSON array of objects with: action, file, description, fix (for "fix" i
 
   let findings: Finding[] = [];
   try {
-    findings = await spawnPrint<Finding[]>(classifyBinary, classifyPrompt, {
+    findings = await spawnPrintToFile<Finding[]>(classifyBinary, classifyPrompt, {
       cwd: session.worktree,
       timeout: 60,
       sessionId: session.id,

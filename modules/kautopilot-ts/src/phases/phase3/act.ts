@@ -72,16 +72,21 @@ export async function handleAct(ctx: Phase3Context): Promise<string | null> {
         const threads = await ghReviewThreads(prNumber, session.worktree);
         const thread = threads.find(t => t.id === threadId);
         if (thread && thread.replies.length > 0) {
-          await ghReplyToThread(prNumber, thread.replies[0].id, withBotSignature(result.reply), session.worktree);
+          await ghReplyToThread(
+            prNumber,
+            thread.replies[0].databaseId,
+            withBotSignature(result.reply),
+            session.worktree,
+          );
           repliesPosted++;
         } else if (thread) {
           // No replies yet — reply to the first comment
-          const firstCommentId = thread.firstCommentId;
-          if (firstCommentId) {
-            await ghReplyToThread(prNumber, firstCommentId, withBotSignature(result.reply), session.worktree);
+          const dbId = thread.firstCommentDatabaseId;
+          if (dbId) {
+            await ghReplyToThread(prNumber, dbId, withBotSignature(result.reply), session.worktree);
             repliesPosted++;
           } else {
-            console.warn(`[act] No first comment ID for thread ${threadId}`);
+            console.warn(`[act] No first comment database ID for thread ${threadId}`);
           }
         }
       }
@@ -109,11 +114,8 @@ export async function handleAct(ctx: Phase3Context): Promise<string | null> {
         const threads = await ghReviewThreads(prNumber, session.worktree);
         const thread = threads.find(t => t.id === threadId);
         if (thread && thread.replies.length > 0) {
-          const commentId = parseInt(thread.replies[0].id, 10);
-          if (!Number.isNaN(commentId)) {
-            await ghReact(commentId, '+1', session.worktree);
-            reactionsAdded++;
-          }
+          await ghReact(thread.replies[0].databaseId, '+1', session.worktree);
+          reactionsAdded++;
         }
       }
     } catch (err) {

@@ -21,6 +21,7 @@ function initialInitStatus(): InitStatus {
     pid: null,
     running: false,
     startedAt: null,
+    userTurn: null,
     context: {},
     completedStates: [],
     outcome: null,
@@ -178,6 +179,23 @@ export function ensureInitStatus(id: string): InitStatus {
 
   writeInitStatusYaml(id, status);
   return status;
+}
+
+// ============================================================================
+// Direct status mutations (for live updates outside the WAL)
+// ============================================================================
+
+/**
+ * Atomically update userTurn in init status.yaml.
+ * Called from inquirer turn updater when blocking on user input.
+ */
+export function updateInitUserTurn(initId: string, userTurn: boolean): void {
+  const raw = readInitStatusYaml(initId);
+  if (!raw) return;
+  const status = { ...initialInitStatus(), ...raw };
+  if (status.userTurn === userTurn) return; // no-op
+  status.userTurn = userTurn;
+  writeInitStatusYaml(initId, status);
 }
 
 // ============================================================================

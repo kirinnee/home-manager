@@ -1,4 +1,3 @@
-import { hasUnmergedPaths } from '../../core/git';
 import { appendEvent } from '../../core/log';
 import type { Phase3Context } from './types';
 
@@ -15,7 +14,7 @@ export async function handleEnsureBranch(ctx: Phase3Context): Promise<string | n
   const { $ } = await import('bun');
 
   // Check if branch is behind base
-  const fetchResult = await $`git fetch origin ${baseBranch}`.cwd(session.worktree).quiet();
+  const fetchResult = await $`git fetch origin ${baseBranch}`.cwd(session.worktree).quiet().nothrow();
   if (fetchResult.exitCode !== 0) {
     console.warn('[ensure_branch] Failed to fetch base branch:', fetchResult.stderr.toString());
   }
@@ -35,49 +34,14 @@ export async function handleEnsureBranch(ctx: Phase3Context): Promise<string | n
     return 'eval';
   }
 
-  console.log(`[ensure_branch] Branch is ${behindCount} commits behind ${baseBranch} — rebasing`);
-
-  // Try rebase
-  const rebaseResult = await $`git rebase origin/${baseBranch}`.cwd(session.worktree).quiet();
-  if (rebaseResult.exitCode === 0) {
-    console.log('[ensure_branch] Rebase succeeded');
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'ensure_branch:completed',
-      version,
-      metadata: { action: 'rebase', success: true },
-    });
-    return 'push';
-  }
-
-  // Rebase failed — check for merge conflicts
-  if (hasUnmergedPaths(session.worktree)) {
-    console.log('[ensure_branch] Merge conflicts detected — routing to tty_resolve');
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'ensure_branch:completed',
-      version,
-      metadata: { action: 'conflict', success: false },
-    });
-    ctx.ttyReason = 'merge_conflict';
-    return 'tty_resolve';
-  }
-
-  // Other rebase failure
-  console.error('[ensure_branch] Rebase failed:', rebaseResult.stderr.toString());
+  // Branch is behind — let handlePush deal with it via pull --rebase + push
+  // (avoids standalone rebase that rewrites history without a matching force-push)
+  console.log(`[ensure_branch] Branch is ${behindCount} commits behind ${baseBranch} — deferring to push`);
   appendEvent(session.id, {
     ts: new Date().toISOString(),
     event: 'ensure_branch:completed',
     version,
-    metadata: {
-      action: 'rebase',
-      success: false,
-      error: rebaseResult.stderr.toString(),
-    },
+    metadata: { action: 'deferred_to_push', behindCount },
   });
-
-  // Abort the failed rebase
-  await $`git rebase --abort`.cwd(session.worktree).quiet();
-
-  return 'eval';
+  return 'push';
 }

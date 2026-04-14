@@ -1,0 +1,22 @@
+- generic [ref=e3]:
+    - banner
+    - main [ref=e5]:
+        - main "Secret viewing page" [ref=e6]:
+            - contentinfo [ref=e17]:
+                - link "Visit Onetime Secret homepage" [ref=e19] [cursor=pointer]:
+                    - /url: https://ca.onetimesecret.com
+                    - text: Powered by Onetime Secret
+    - contentinfo "Site footer" [ref=e20]:
+        - generic [ref=e23]:
+            - button "Canada" [ref=e25]:
+                - img [ref=e26]
+                - generic [ref=e28]: Canada
+                - img [ref=e29]
+            - button "Toggle dark mode" [ref=e31]:
+                - img [ref=e32]
+            - button "Change language. Current language is English" [ref=e35]:
+                - img [ref=e36]
+            - generic "Provide feedback" [ref=e38]:
+                - button "Open feedback form" [ref=e39]:
+                    - generic [ref=e40]: Send feedback
+                    - img [ref=e41]

@@ -284,6 +284,7 @@ export function serializeConfigWithComments(config: Config): string {
   lines.push(`  maxPushCycles: ${config.settings.maxPushCycles}`);
   lines.push(`  pollInterval: ${config.settings.pollInterval}`);
   lines.push(`  defaultLlmTimeout: ${config.settings.defaultLlmTimeout}`);
+  lines.push(`  evalTimeout: ${config.settings.evalTimeout}`);
   lines.push(`  coderabbit: ${config.settings.coderabbit}`);
   lines.push(`  removeSpecOnPush: ${config.settings.removeSpecOnPush}`);
   lines.push('');

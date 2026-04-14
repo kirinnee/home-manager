@@ -1,12 +1,22 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import type { Config, Session, Verdict, HarnessType } from '../types';
+import type { Config, Verdict, HarnessType } from '../types';
 import { getPrimaryImplementer, selectImplementer } from '../types';
 import type { TmuxService, StateService } from '../deps';
 import { generateId, paths } from '../deps';
 import * as verdicts from './verdicts';
-import { buildCheckpointerPrompt } from './prompts';
-import type { CheckpointerPromptVars } from './prompts';
+import {
+  buildCheckpointerPrompt,
+  buildSynthesizerPrompt,
+  buildVerifierPrompt,
+  buildReSynthesisPrompt,
+} from './prompts';
+import type {
+  CheckpointerPromptVars,
+  SynthesizerPromptVars,
+  VerifierPromptVars,
+  ReSynthesisPromptVars,
+} from './prompts';
 import { extractTokensFromLog, extractHarnessSessionId } from '../stream/parse';
 import { formatAgentLaunch } from '../loop/format';
 import type { ParsedBinary, ReviewerBinary } from '../types';
@@ -64,6 +74,31 @@ interface CheckpointerResult extends AgentResult {
   harnessSessionId?: string;
 }
 
+export interface SynthesizerResult extends AgentResult {
+  binary: string;
+  harness: HarnessType;
+  summaryPath?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  harnessSessionId?: string;
+}
+
+export interface VerifierResult extends AgentResult {
+  reviewerIndex: number;
+  binary: string;
+  harness: HarnessType;
+  verdict: Verdict;
+  reasoning: string;
+  phaseIndex?: number;
+  ordinal?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  error?: string;
+  issuesFixed?: string[];
+  issuesRemaining?: string[];
+  harnessSessionId?: string;
+}
+
 // ============================================================================
 // Harness-aware command builder
 // ============================================================================
@@ -100,12 +135,15 @@ export class AgentRunner {
   private reviewerBinaries: string[]; // flat list from all phases
   private checkpointerBinary: string;
   private checkpointerHarness: HarnessType;
+  private pathsImpl: typeof paths;
 
   constructor(
     private tmux: TmuxService,
     private state: StateService,
     private config: Config,
+    pathsOverride?: typeof paths,
   ) {
+    this.pathsImpl = pathsOverride ?? paths;
     // Flatten reviewer binaries from all phases (keep raw strings for now, parse when running)
     this.reviewerBinaries = config.reviewPhases.flat();
     // Parse checkpointer binary and harness
@@ -118,8 +156,8 @@ export class AgentRunner {
    * Select an implementer binary using weighted random selection.
    * Called fresh before each implementer run so different iterations may use different binaries.
    */
-  private selectImplementer(): string {
-    return selectImplementer(this.config);
+  private selectImplementer(loopNum: number): string {
+    return selectImplementer(this.config, loopNum);
   }
 
   /**
@@ -152,25 +190,15 @@ export class AgentRunner {
     const { runId, iteration, dirHash, prompt, timeout, onStart } = params;
 
     // Select an implementer binary fresh for each run (weighted random)
-    const implementerBinaryName = this.selectImplementer();
+    const implementerBinaryName = this.selectImplementer(iteration);
     const parsedImpl = parseImplementerConfig(implementerBinaryName);
 
     // Notify caller of selected binary before launch
     if (onStart) await onStart(parsedImpl.binary);
 
-    // Create session record
+    // Runtime session identifiers
     const sessionId = generateId();
     const tmuxSession = `kloop-${runId}-${iteration}-impl`;
-
-    const session: Session = {
-      id: sessionId,
-      iteration,
-      role: 'implementer',
-      binary: parsedImpl.binary,
-      tmuxSession,
-      status: 'running',
-      startedAt: new Date().toISOString(),
-    };
 
     // Write prompt to temp file
     const promptFile = await this.writePromptFile(sessionId, prompt);
@@ -199,10 +227,6 @@ export class AgentRunner {
       timeoutMins: timeout,
     });
 
-    // Update session
-    session.status = result.timedOut ? 'error' : 'completed';
-    session.completedAt = new Date().toISOString();
-
     // Clean up prompt file
     await this.cleanupPromptFile(promptFile);
 
@@ -216,16 +240,8 @@ export class AgentRunner {
 
     // Extract token counts and harness session ID from log file
     const tokens = await extractTokensFromLog(logFile);
-    const harnessSessionId = await extractHarnessSessionId(logFile);
-    if (harnessSessionId) {
-      session.harnessSessionId = harnessSessionId;
-    } else if (parsedImpl.harness === 'claude') {
-      // For Claude, the harness session ID is the same as the internal session ID
-      session.harnessSessionId = sessionId;
-    }
-
-    // Persist session with harnessSessionId to disk
-    await this.state.saveSession(session);
+    const harnessSessionId =
+      (await extractHarnessSessionId(logFile)) ?? (parsedImpl.harness === 'claude' ? sessionId : undefined);
 
     return {
       sessionId,
@@ -238,7 +254,7 @@ export class AgentRunner {
       harness: parsedImpl.harness,
       inputTokens: tokens.inputTokens,
       outputTokens: tokens.outputTokens,
-      harnessSessionId: session.harnessSessionId,
+      harnessSessionId,
     };
   }
 
@@ -344,20 +360,9 @@ export class AgentRunner {
       noVerdictAsFailure,
     } = params;
 
-    // Create session record
+    // Runtime session identifiers
     const sessionId = generateId();
     const tmuxSession = `kloop-${runId}-${iteration}-rev-${reviewerIndex}`;
-
-    const session: Session = {
-      id: sessionId,
-      iteration,
-      role: 'reviewer',
-      reviewerIndex,
-      binary,
-      tmuxSession,
-      status: 'running',
-      startedAt: new Date().toISOString(),
-    };
 
     // Write prompt to temp file
     const promptFile = await this.writePromptFile(sessionId, prompt);
@@ -416,11 +421,6 @@ export class AgentRunner {
       completionEstimate = parsed.completionEstimate;
     }
 
-    // Update session
-    session.status = result.timedOut ? 'error' : 'completed';
-    session.completedAt = new Date().toISOString();
-    session.verdict = verdict;
-
     // Copy review files to persistent storage
     await this.copyReviewFiles(runId, iteration, reviewerIndex, reviewContent, verdictContent);
 
@@ -429,15 +429,7 @@ export class AgentRunner {
 
     // Extract token counts and harness session ID from log file
     const tokens = await extractTokensFromLog(logFile);
-    const harnessSessionId = await extractHarnessSessionId(logFile);
-    if (harnessSessionId) {
-      session.harnessSessionId = harnessSessionId;
-    } else if (harness === 'claude') {
-      session.harnessSessionId = sessionId;
-    }
-
-    // Persist session with harnessSessionId to disk
-    await this.state.saveSession(session);
+    const harnessSessionId = (await extractHarnessSessionId(logFile)) ?? (harness === 'claude' ? sessionId : undefined);
 
     const icon = verdict === 'approved' ? '✓' : '✗';
     console.log(
@@ -461,7 +453,7 @@ export class AgentRunner {
       inputTokens: tokens.inputTokens,
       outputTokens: tokens.outputTokens,
       error,
-      harnessSessionId: session.harnessSessionId,
+      harnessSessionId,
     };
   }
 
@@ -478,22 +470,12 @@ export class AgentRunner {
   }): Promise<CheckpointerResult> {
     const { runId, iteration, dirHash, specPath, timeout } = params;
 
-    // Create session record
+    // Runtime session identifiers
     const sessionId = generateId();
     const tmuxSession = `kloop-${runId}-${iteration}-checkpoint`;
 
     const binary = this.checkpointerBinary;
     const harness = this.checkpointerHarness;
-
-    const session: Session = {
-      id: sessionId,
-      iteration,
-      role: 'checkpointer',
-      binary,
-      tmuxSession,
-      status: 'running',
-      startedAt: new Date().toISOString(),
-    };
 
     // Build checkpointer prompt via template substitution
     const checkpointerVars: CheckpointerPromptVars = {
@@ -501,6 +483,7 @@ export class AgentRunner {
       iteration: String(iteration),
       reviewsDir: paths.loopReviewsPath(runId, iteration),
       archivedReviewsPattern: `${paths.runPath(runId)}/loop-*/reviews/reviewer-*.md`,
+      archivedSummariesPattern: `${paths.runPath(runId)}/loop-*/synthesis/review-summary.md`,
       conflictFile: `${paths.runPath(runId)}/conflict.md`,
       checkpointResultFile: `${paths.loopCheckpointerPath(runId, iteration)}/checkpoint-result.json`,
     };
@@ -570,20 +553,8 @@ export class AgentRunner {
       }
     }
 
-    // Update session
-    session.status = result.timedOut ? 'error' : 'completed';
-    session.completedAt = new Date().toISOString();
-
     // Extract harness session ID from log file
-    const harnessSessionId = await extractHarnessSessionId(logFile);
-    if (harnessSessionId) {
-      session.harnessSessionId = harnessSessionId;
-    } else if (harness === 'claude') {
-      session.harnessSessionId = sessionId;
-    }
-
-    // Persist session with harnessSessionId to disk
-    await this.state.saveSession(session);
+    const harnessSessionId = (await extractHarnessSessionId(logFile)) ?? (harness === 'claude' ? sessionId : undefined);
 
     // Clean up prompt file
     await this.cleanupPromptFile(promptFile);
@@ -611,8 +582,322 @@ export class AgentRunner {
       progressPercent,
       completedCriteria,
       remainingCriteria,
-      harnessSessionId: session.harnessSessionId,
+      harnessSessionId,
     };
+  }
+
+  /**
+   * Run the synthesizer agent to compact reviews into a summary.
+   */
+  async runSynthesizer(params: {
+    runId: string;
+    iteration: number;
+    dirHash: string;
+    binary?: string;
+    previousSummaryPath: string | null;
+    timeout: number;
+  }): Promise<SynthesizerResult> {
+    const { runId, iteration, dirHash, binary: overrideBinary, previousSummaryPath, timeout } = params;
+
+    // Use first implementer binary by default, or override
+    const implBinaryName = overrideBinary ?? getPrimaryImplementer(this.config);
+    const parsed = parseImplementerConfig(implBinaryName);
+
+    const sessionId = generateId();
+    const tmuxSession = `kloop-${runId}-${iteration}-synth`;
+
+    // Build prompt
+    const synthVars: SynthesizerPromptVars = {
+      specPath: this.pathsImpl.runSpec(runId),
+      iteration: String(iteration),
+      reviewsDir: this.pathsImpl.loopReviewsPath(runId, iteration),
+      verdictsDir: this.pathsImpl.loopVerdictsPath(runId, iteration),
+      previousSummaryPath: previousSummaryPath ?? '',
+      summaryOutputPath: this.pathsImpl.loopSynthesisPath(runId, iteration),
+      learningsFile: this.pathsImpl.runLearnings(runId),
+      evidenceDir: this.pathsImpl.loopEvidencePath(runId, iteration),
+    };
+
+    const prompt = buildSynthesizerPrompt(this.config.prompts?.synthesizer, synthVars);
+
+    // Ensure synthesis directory
+    const synthDir = this.pathsImpl.loopSynthesisPath(runId, iteration);
+    const logFile = await this.ensureAgentDir(synthDir);
+    await fs.writeFile(path.join(synthDir, 'prompt.md'), prompt, 'utf-8');
+
+    const promptFile = await this.writePromptFile(sessionId, prompt);
+
+    const command = buildAgentCommand({
+      binary: parsed.binary,
+      harness: parsed.harness,
+      promptFile,
+      sessionId,
+      logFile,
+    });
+
+    formatAgentLaunch('synthesizer', 'synthesizer', parsed.binary, tmuxSession, logFile);
+
+    const result = await this.tmux.runInSession({
+      sessionName: tmuxSession,
+      command,
+      cwd: process.cwd(),
+      timeoutMins: timeout,
+    });
+
+    await this.cleanupPromptFile(promptFile);
+
+    // Check if review-summary.md was created
+    const summaryPath = path.join(synthDir, 'review-summary.md');
+    const summaryExists = await this.safeFileExists(summaryPath);
+
+    const tokens = await extractTokensFromLog(logFile);
+    const harnessSessionId = await extractHarnessSessionId(logFile);
+
+    return {
+      sessionId,
+      tmuxSession,
+      durationMs: result.durationMs,
+      exitCode: result.exitCode,
+      timedOut: result.timedOut,
+      binary: parsed.binary,
+      harness: parsed.harness,
+      summaryPath: summaryExists ? summaryPath : undefined,
+      inputTokens: tokens.inputTokens,
+      outputTokens: tokens.outputTokens,
+      harnessSessionId,
+    };
+  }
+
+  /**
+   * Run re-synthesizer: merge previous synthesis + verifier outputs into updated summary.
+   * Used when verify gate fails — lighter than full synthesis.
+   */
+  async runReSynthesizer(params: {
+    runId: string;
+    iteration: number;
+    dirHash: string;
+    binary?: string;
+    previousSummaryPath: string;
+    timeout: number;
+  }): Promise<SynthesizerResult> {
+    const { runId, iteration, dirHash, binary: overrideBinary, previousSummaryPath, timeout } = params;
+
+    const implBinaryName = overrideBinary ?? getPrimaryImplementer(this.config);
+    const parsed = parseImplementerConfig(implBinaryName);
+
+    const sessionId = generateId();
+    const tmuxSession = `kloop-${runId}-${iteration}-versynth`;
+
+    const reSynthVars: ReSynthesisPromptVars = {
+      specPath: this.pathsImpl.runSpec(runId),
+      iteration: String(iteration),
+      previousSummaryPath,
+      verifyDir: this.pathsImpl.loopVerifyPath(runId, iteration),
+      verdictsDir: this.pathsImpl.loopVerdictsPath(runId, iteration),
+      summaryOutputPath: this.pathsImpl.loopSynthesisPath(runId, iteration),
+      learningsFile: this.pathsImpl.runLearnings(runId),
+    };
+
+    const prompt = buildReSynthesisPrompt(this.config.prompts?.reSynthesizer, reSynthVars);
+
+    const synthDir = this.pathsImpl.loopSynthesisPath(runId, iteration);
+    const logFile = await this.ensureAgentDir(synthDir);
+    await fs.writeFile(path.join(synthDir, 'prompt.md'), prompt, 'utf-8');
+
+    const promptFile = await this.writePromptFile(sessionId, prompt);
+
+    const command = buildAgentCommand({
+      binary: parsed.binary,
+      harness: parsed.harness,
+      promptFile,
+      sessionId,
+      logFile,
+    });
+
+    formatAgentLaunch('resynthesizer', 'resynthesizer', parsed.binary, tmuxSession, logFile);
+
+    const result = await this.tmux.runInSession({
+      sessionName: tmuxSession,
+      command,
+      cwd: process.cwd(),
+      timeoutMins: timeout,
+    });
+
+    await this.cleanupPromptFile(promptFile);
+
+    const summaryPath = path.join(synthDir, 'review-summary.md');
+    const summaryExists = await this.safeFileExists(summaryPath);
+
+    const tokens = await extractTokensFromLog(logFile);
+    const harnessSessionId = await extractHarnessSessionId(logFile);
+
+    return {
+      sessionId,
+      tmuxSession,
+      durationMs: result.durationMs,
+      exitCode: result.exitCode,
+      timedOut: result.timedOut,
+      binary: parsed.binary,
+      harness: parsed.harness,
+      summaryPath: summaryExists ? summaryPath : undefined,
+      inputTokens: tokens.inputTokens,
+      outputTokens: tokens.outputTokens,
+      harnessSessionId,
+    };
+  }
+
+  /**
+   * Run verify phases (cheap/fast models validate previous issues were fixed).
+   * Short-circuits on rejection.
+   */
+  async runVerifierPhase(params: {
+    runId: string;
+    iteration: number;
+    dirHash: string;
+    phaseIndex: number;
+    reviewers: ReviewerBinary[];
+    prompts: Array<{ reviewerIndex: number; prompt: string }>;
+    timeout: number;
+    onReviewerEnd?: (result: VerifierResult) => Promise<void>;
+  }): Promise<VerifierResult[]> {
+    const { runId, iteration, dirHash, phaseIndex, reviewers, prompts, timeout, onReviewerEnd } = params;
+
+    console.log(`  verify phase ${phaseIndex} — ${reviewers.map(r => r.binary).join(', ')}`);
+
+    const results = await Promise.all(
+      prompts.map(async (p, ordinal) => {
+        const reviewer = reviewers[ordinal] ?? reviewers[0];
+        const result = await this.runVerifier({
+          runId,
+          iteration,
+          dirHash,
+          reviewerIndex: p.reviewerIndex,
+          binary: reviewer.binary,
+          harness: reviewer.harness,
+          prompt: p.prompt,
+          timeout,
+          phaseIndex,
+          ordinal: ordinal + 1,
+        });
+        if (onReviewerEnd) {
+          await onReviewerEnd(result);
+        }
+        return result;
+      }),
+    );
+
+    const approved = results.filter(r => r.verdict === 'approved').length;
+    const rejected = results.filter(r => r.verdict === 'rejected').length;
+    console.log(`Verify phase ${phaseIndex} verdicts: ${approved} approved, ${rejected} rejected`);
+
+    return results;
+  }
+
+  /**
+   * Run a single verifier agent.
+   */
+  private async runVerifier(params: {
+    runId: string;
+    iteration: number;
+    dirHash: string;
+    reviewerIndex: number;
+    binary: string;
+    harness: HarnessType;
+    prompt: string;
+    timeout: number;
+    phaseIndex?: number;
+    ordinal?: number;
+  }): Promise<VerifierResult> {
+    const { runId, iteration, dirHash, reviewerIndex, binary, harness, prompt, timeout, phaseIndex, ordinal } = params;
+
+    const sessionId = generateId();
+    const tmuxSession = `kloop-${runId}-${iteration}-verify-${reviewerIndex}`;
+
+    // Write prompt to temp file
+    const promptFile = await this.writePromptFile(sessionId, prompt);
+
+    // Verifier writes to verify/ directory
+    const verifyDir = paths.loopVerifyPath(runId, iteration);
+    const reviewerDir = path.join(verifyDir, `verifier-${reviewerIndex}`);
+    const logFile = await this.ensureAgentDir(reviewerDir);
+    await fs.writeFile(path.join(reviewerDir, 'prompt.md'), prompt, 'utf-8');
+
+    const command = buildAgentCommand({
+      binary,
+      harness,
+      promptFile,
+      sessionId,
+      logFile,
+    });
+
+    formatAgentLaunch('verifier', `verify-${reviewerIndex}`, binary, tmuxSession, logFile);
+
+    const result = await this.tmux.runInSession({
+      sessionName: tmuxSession,
+      command,
+      cwd: process.cwd(),
+      timeoutMins: timeout,
+    });
+
+    // Read verdict from the verify verdicts dir
+    const verdictsDir = paths.loopVerdictsPath(runId, iteration);
+    const verdictContent = await this.safeReadFile(path.join(verdictsDir, `verifier-${reviewerIndex}.json`));
+
+    let error: string | undefined;
+    let verdict: Verdict = 'rejected';
+    let reasoning = '';
+    let issuesFixed: string[] | undefined;
+    let issuesRemaining: string[] | undefined;
+
+    if (verdictContent) {
+      const parsed = verdicts.parseVerdictFile(verdictContent);
+      if (parsed.verdict) {
+        verdict = parsed.verdict;
+      }
+      reasoning = parsed.reasoning;
+      issuesFixed = parsed.issuesFixed;
+      issuesRemaining = parsed.issuesRemaining;
+    } else if (result.timedOut || result.exitCode !== 0) {
+      error = result.timedOut ? 'timeout' : `exit_code_${result.exitCode}`;
+    }
+
+    await this.cleanupPromptFile(promptFile);
+
+    const tokens = await extractTokensFromLog(logFile);
+    const harnessSessionId = await extractHarnessSessionId(logFile);
+
+    const icon = verdict === 'approved' ? '\u2713' : '\u2717';
+    console.log(
+      `  ${icon} Verifier ${reviewerIndex} (${binary})${phaseIndex !== undefined ? ` (phase ${phaseIndex})` : ''}: ${verdict}`,
+    );
+
+    return {
+      sessionId,
+      tmuxSession,
+      durationMs: result.durationMs,
+      exitCode: result.exitCode,
+      timedOut: result.timedOut,
+      reviewerIndex,
+      binary,
+      harness,
+      verdict,
+      reasoning,
+      phaseIndex,
+      ordinal,
+      inputTokens: tokens.inputTokens,
+      outputTokens: tokens.outputTokens,
+      error,
+      issuesFixed,
+      issuesRemaining,
+      harnessSessionId,
+    };
+  }
+
+  /**
+   * Get the verify phases from config.
+   */
+  getVerifyPhases(): string[][] {
+    return this.config.verifyPhases ?? [];
   }
 
   // -----------------------------------------------------------------------
@@ -693,6 +978,15 @@ export class AgentRunner {
       return await fs.readFile(filePath, 'utf-8');
     } catch {
       return null;
+    }
+  }
+
+  private async safeFileExists(filePath: string): Promise<boolean> {
+    try {
+      await fs.access(filePath);
+      return true;
+    } catch {
+      return false;
     }
   }
 

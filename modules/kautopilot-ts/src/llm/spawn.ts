@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { spinner } from '@clack/prompts';
 import { spawn } from 'bun';
 import { stringify as stringifyYaml } from 'yaml';
@@ -153,7 +153,7 @@ async function spawnCore(
   binary: string,
   prompt: string,
   options?: SpawnPrintOptions,
-): Promise<{ stdout: string; stderr: string }> {
+): Promise<{ stdout: string; stderr: string; runInfo: RunArtifactInfo | null }> {
   const runScope = resolveRunScope(options);
   const logging = !!runScope;
   const args = [binary, '--print', '--dangerously-skip-permissions'];
@@ -250,10 +250,10 @@ async function spawnCore(
   // Tee JSONL to log file and extract result text
   if (logging) {
     const resultText = extractResultText(rawStdout);
-    return { stdout: resultText, stderr };
+    return { stdout: resultText, stderr, runInfo };
   }
 
-  return { stdout: rawStdout.trim(), stderr };
+  return { stdout: rawStdout.trim(), stderr, runInfo };
 }
 
 export async function spawnPrint<T = unknown>(binary: string, prompt: string, options?: SpawnPrintOptions): Promise<T> {
@@ -351,4 +351,54 @@ export async function spawnPrintRaw(binary: string, prompt: string, options?: Sp
   s?.stop(spinMsg ?? '');
 
   return stripCodeFences(stdout);
+}
+
+/**
+ * Spawn an LLM in --print mode, instructing it to write JSON to a file.
+ * The model can reason freely in stdout; the file is the canonical result.
+ * Requires sessionId or runScope so the output file lives in the run directory.
+ *
+ * The output path is injected into the prompt BEFORE spawnCore creates run
+ * artifacts, so both share the same run directory. We peek at the next run
+ * number (without creating the directory), then spawnCore's createRunArtifacts
+ * calls nextRunNumber again and gets the same value since no directory was
+ * created between the two calls. This is safe under Promise.all concurrency
+ * because the peek → createRunArtifacts path is fully synchronous (no awaits).
+ */
+export async function spawnPrintToFile<T = unknown>(
+  binary: string,
+  prompt: string,
+  options: (SpawnPrintOptions & { sessionId: string }) | (SpawnPrintOptions & { runScope: RunScope }),
+): Promise<T> {
+  // Peek at the run number spawnCore will use (it calls nextRunNumber internally)
+  const scope = resolveRunScope(options)!;
+  const nextRun = nextRunNumber(scope);
+  const outputPath = runFilePath(scope, nextRun, 'output.json');
+
+  const augmentedPrompt = `${prompt}
+
+## Output File — CRITICAL
+Write your JSON response to: ${outputPath}
+Use the Write tool or Bash tool to write the file. Do NOT print the JSON to stdout — write it to the file above.
+You may reason and analyze freely in your response, but the JSON MUST be written to the file.`;
+
+  const spinMsg = options?.spinnerMsg;
+  const s = spinMsg && process.stdout.isTTY ? spinner() : null;
+  s?.start(spinMsg as string);
+
+  await spawnCore(binary, augmentedPrompt, options);
+
+  s?.stop(spinMsg ?? '');
+
+  if (!existsSync(outputPath)) {
+    throw new Error(`LLM did not write output file: ${outputPath}`);
+  }
+
+  const raw = readFileSync(outputPath, 'utf-8');
+  try {
+    const cleaned = stripCodeFences(raw);
+    return JSON.parse(cleaned) as T;
+  } catch {
+    throw new Error(`LLM wrote invalid JSON to ${outputPath}: ${raw.slice(0, 200)}`);
+  }
 }

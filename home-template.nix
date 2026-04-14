@@ -18,6 +18,10 @@
 
 let
   modules = import ./modules/default.nix { nixpkgs = pkgs; };
+  imported = import ./modules/agent-config/default.nix;
+  auth = imported.auth;
+  personalDirs = [ "~" "~/.config/home-manager" "~/Workspace/personal" ];
+  workDirs = [ "~/Workspace/work" ];
 in
 
 ##################
@@ -126,52 +130,142 @@ rec {
       showActive = true;
     };
 
-    accounts =
-      let
-        imported = import ./modules/claude-config/default.nix;
-      in
-      let
-        inherit (imported)
-          userConfig
-          autoConfig
-          auth
-          ;
-        merge = lib.recursiveUpdate;
-      in
-      {
-        personal = merge userConfig {
-          directoryRules = [
-            "~"
-            "~/.config/home-manager"
-            "~/Workspace/personal"
-          ];
-          env = auth.zai;
-        };
+    accounts = {
+      personal = imported.mkClaudeAccount { provider = "zai"; directoryRules = personalDirs; };
+      liftoff = imported.mkClaudeAccount { provider = "anthropic"; directoryRules = workDirs; };
 
-        liftoff = merge userConfig {
-          directoryRules = [ "~/Workspace/work" ];
-          env = auth.anthropic;
-        };
+      codex = imported.mkClaudeAccount { provider = "openai"; };
+      zai = imported.mkClaudeAccount { provider = "zai"; };
+      cerebras = imported.mkClaudeAccount { provider = "cerebras"; };
+      kimi = imported.mkClaudeAccount { provider = "kimi"; };
+      fireworks = imported.mkClaudeAccount { provider = "fireworks"; };
+      friendli = imported.mkClaudeAccount { provider = "friendli"; };
+      seed = imported.mkClaudeAccount { provider = "seed"; };
+      mm = imported.mkClaudeAccount { provider = "mm"; };
 
-        codex = merge userConfig { env = auth.codex; };
-        zai = merge userConfig { env = auth.zai; };
-        cerebras = merge userConfig { env = auth.cerebras; };
-        fireworks = merge userConfig { env = auth.fireworks; };
-        friendli = merge userConfig { env = auth.friendli; };
-        kimi = merge userConfig { env = auth.kimi; };
-        seed = merge userConfig { env = auth.seed; };
-        mm = merge userConfig { env = auth.mm; };
+      auto-anthropic = imported.mkAutoClaudeAccount { provider = "anthropic"; };
+      auto-codex = imported.mkAutoClaudeAccount { provider = "openai"; };
+      auto-zai = imported.mkAutoClaudeAccount { provider = "zai"; };
+      auto-cerebras = imported.mkAutoClaudeAccount { provider = "cerebras"; };
+      auto-kimi = imported.mkAutoClaudeAccount { provider = "kimi"; };
+      auto-fireworks = imported.mkAutoClaudeAccount { provider = "fireworks"; };
+      auto-friendli = imported.mkAutoClaudeAccount { provider = "friendli"; };
+      auto-seed = imported.mkAutoClaudeAccount { provider = "seed"; };
+      auto-mm = imported.mkAutoClaudeAccount { provider = "mm"; };
+    };
+  };
 
-        auto-anthropic = merge autoConfig { env = auth.anthropic; };
-        auto-codex = merge autoConfig { env = auth.codex; };
-        auto-zai = merge autoConfig { env = auth.zai; };
-        auto-cerebras = merge autoConfig { env = auth.cerebras; };
-        auto-kimi = merge autoConfig { env = auth.kimi; };
-        auto-fireworks = merge autoConfig { env = auth.fireworks; };
-        auto-friendli = merge autoConfig { env = auth.friendli; };
-        auto-seed = merge autoConfig { env = auth.seed; };
-        auto-mm = merge autoConfig { env = auth.mm; };
+  # Codex multi-account configuration
+  programs.multi-codex = {
+    enable = true;
+    defaultPackage = (pkgs-llm.codex.overrideAttrs (old: {
+      nativeBuildInputs = old.nativeBuildInputs ++ [ pkgs.llvmPackages.libclang ];
+      env = (old.env or { }) // {
+        LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
       };
+    }));
+    defaultAccount = "personal";
+
+    smartWrapper.enable = true;
+
+    shellIntegration = {
+      functions = false;
+      showActive = true;
+    };
+
+    accounts = {
+      personal = imported.mkCodexAccount {
+        provider = "openai";
+        model = "gpt-5.4";
+        directoryRules = personalDirs;
+      };
+      work = imported.mkCodexAccount {
+        provider = "openai";
+        model = "gpt-5.4";
+        directoryRules = workDirs;
+      };
+
+      zai = imported.mkCodexAccount { provider = "zai"; model = auth.providers.zai.sonnet; };
+      cerebras = imported.mkCodexAccount { provider = "cerebras"; model = auth.providers.cerebras.sonnet; };
+      kimi = imported.mkCodexAccount { provider = "kimi"; model = auth.providers.kimi.sonnet; };
+      fireworks = imported.mkCodexAccount { provider = "fireworks"; model = auth.providers.fireworks.sonnet; };
+      friendli = imported.mkCodexAccount { provider = "friendli"; model = auth.providers.friendli.sonnet; };
+      seed = imported.mkCodexAccount { provider = "seed"; model = auth.providers.seed.sonnet; };
+      mm = imported.mkCodexAccount { provider = "mm"; model = auth.providers.mm.sonnet; };
+      codex = imported.mkCodexAccount { provider = "openai"; };
+
+      auto-anthropic = imported.mkCodexAutoAccount { provider = "anthropic"; model = auth.providers.anthropic.sonnet; };
+      auto-openai = imported.mkCodexAutoAccount { provider = "openai"; model = auth.providers.openai.sonnet; };
+      auto-zai = imported.mkCodexAutoAccount { provider = "zai"; model = auth.providers.zai.sonnet; };
+      auto-cerebras = imported.mkCodexAutoAccount { provider = "cerebras"; model = auth.providers.cerebras.sonnet; };
+      auto-kimi = imported.mkCodexAutoAccount { provider = "kimi"; model = auth.providers.kimi.sonnet; };
+      auto-fireworks = imported.mkCodexAutoAccount { provider = "fireworks"; model = auth.providers.fireworks.sonnet; };
+      auto-friendli = imported.mkCodexAutoAccount { provider = "friendli"; model = auth.providers.friendli.sonnet; };
+      auto-seed = imported.mkCodexAutoAccount { provider = "seed"; model = auth.providers.seed.sonnet; };
+      auto-mm = imported.mkCodexAutoAccount { provider = "mm"; model = auth.providers.mm.sonnet; };
+      auto-codex = imported.mkCodexAutoAccount { provider = "openai"; };
+    };
+  };
+
+  # Gemini multi-account configuration
+  programs.multi-gemini = {
+    enable = true;
+    defaultPackage = pkgs-llm.gemini-cli;
+    defaultAccount = "personal";
+
+    smartWrapper.enable = true;
+
+    shellIntegration = {
+      functions = false;
+      showActive = true;
+    };
+
+    accounts = {
+      personal = imported.mkGeminiAccount { directoryRules = personalDirs; };
+      work = imported.mkGeminiAccount { directoryRules = workDirs; };
+    };
+  };
+
+  # OpenCode multi-account configuration
+  programs.multi-opencode = {
+    enable = true;
+    defaultPackage = pkgs-llm.opencode;
+    defaultAccount = "personal";
+
+    smartWrapper.enable = true;
+
+    shellIntegration = {
+      functions = false;
+      showActive = true;
+    };
+
+    accounts = {
+      personal = imported.mkOpencodeAccount {
+        provider = "openai";
+        directoryRules = personalDirs;
+      };
+      work = imported.mkOpencodeAccount {
+        provider = "openai";
+        directoryRules = workDirs;
+      };
+
+      zai = imported.mkOpencodeAccount { provider = "zai"; };
+      cerebras = imported.mkOpencodeAccount { provider = "cerebras"; };
+      kimi = imported.mkOpencodeAccount { provider = "kimi"; };
+      fireworks = imported.mkOpencodeAccount { provider = "fireworks"; };
+      friendli = imported.mkOpencodeAccount { provider = "friendli"; };
+      seed = imported.mkOpencodeAccount { provider = "seed"; };
+      mm = imported.mkOpencodeAccount { provider = "mm"; };
+
+      auto-openai = imported.mkOpencodeAutoAccount { provider = "openai"; };
+      auto-zai = imported.mkOpencodeAutoAccount { provider = "zai"; };
+      auto-cerebras = imported.mkOpencodeAutoAccount { provider = "cerebras"; };
+      auto-kimi = imported.mkOpencodeAutoAccount { provider = "kimi"; };
+      auto-fireworks = imported.mkOpencodeAutoAccount { provider = "fireworks"; };
+      auto-friendli = imported.mkOpencodeAutoAccount { provider = "friendli"; };
+      auto-seed = imported.mkOpencodeAutoAccount { provider = "seed"; };
+      auto-mm = imported.mkOpencodeAutoAccount { provider = "mm"; };
+    };
   };
 
   programs.multi-gh = {
@@ -219,7 +313,7 @@ rec {
 
   # Claude Code statusline (prettified, version-controlled)
   home.file.".config/claude-statusline.zsh" = {
-    source = ./modules/claude-config/statusline.zsh;
+    source = ./modules/agent-config/statusline.zsh;
     executable = true;
   };
 
@@ -290,7 +384,6 @@ rec {
       # LLM friendly
       atomi.worktrunk
       atomi.ccc
-      pkgs-llm.gemini-cli
       pkgs-llm.coderabbit-cli
 
       # cncf
@@ -338,7 +431,6 @@ rec {
 
       # AI
       pkgs-unstable.rtk
-      pkgs-llm.opencode
 
 
       # liftoff
