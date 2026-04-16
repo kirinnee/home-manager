@@ -5,6 +5,11 @@
   forced_login_method = "api";
   model_reasoning_effort = "high";
   approval_policy = "on-request";
+  sandbox_mode = "workspace-write";
+
+  sandbox_workspace_write = {
+    network_access = true;
+  };
 
   model_providers = {
     proxy = {

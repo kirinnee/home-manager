@@ -2,6 +2,7 @@
 , pkgs
 , lib
 , pkgs-llm
+, codex118
 , pkgs-loctl
 , pkgs-240924
 , pkgs-stable
@@ -133,32 +134,13 @@ rec {
     accounts = {
       personal = imported.mkClaudeAccount { provider = "zai"; directoryRules = personalDirs; };
       liftoff = imported.mkClaudeAccount { provider = "anthropic"; directoryRules = workDirs; };
-
-      codex = imported.mkClaudeAccount { provider = "openai"; };
-      zai = imported.mkClaudeAccount { provider = "zai"; };
-      cerebras = imported.mkClaudeAccount { provider = "cerebras"; };
-      kimi = imported.mkClaudeAccount { provider = "kimi"; };
-      fireworks = imported.mkClaudeAccount { provider = "fireworks"; };
-      friendli = imported.mkClaudeAccount { provider = "friendli"; };
-      seed = imported.mkClaudeAccount { provider = "seed"; };
-      mm = imported.mkClaudeAccount { provider = "mm"; };
-
-      auto-anthropic = imported.mkAutoClaudeAccount { provider = "anthropic"; };
-      auto-codex = imported.mkAutoClaudeAccount { provider = "openai"; };
-      auto-zai = imported.mkAutoClaudeAccount { provider = "zai"; };
-      auto-cerebras = imported.mkAutoClaudeAccount { provider = "cerebras"; };
-      auto-kimi = imported.mkAutoClaudeAccount { provider = "kimi"; };
-      auto-fireworks = imported.mkAutoClaudeAccount { provider = "fireworks"; };
-      auto-friendli = imported.mkAutoClaudeAccount { provider = "friendli"; };
-      auto-seed = imported.mkAutoClaudeAccount { provider = "seed"; };
-      auto-mm = imported.mkAutoClaudeAccount { provider = "mm"; };
-    };
+    } // imported.mkAllProviderClaudeAccounts auth.providerNames;
   };
 
   # Codex multi-account configuration
   programs.multi-codex = {
     enable = true;
-    defaultPackage = (pkgs-llm.codex.overrideAttrs (old: {
+    defaultPackage = (codex118.overrideAttrs (old: {
       nativeBuildInputs = old.nativeBuildInputs ++ [ pkgs.llvmPackages.libclang ];
       env = (old.env or { }) // {
         LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
@@ -185,26 +167,20 @@ rec {
         directoryRules = workDirs;
       };
 
-      zai = imported.mkCodexAccount { provider = "zai"; model = auth.providers.zai.sonnet; };
-      cerebras = imported.mkCodexAccount { provider = "cerebras"; model = auth.providers.cerebras.sonnet; };
-      kimi = imported.mkCodexAccount { provider = "kimi"; model = auth.providers.kimi.sonnet; };
-      fireworks = imported.mkCodexAccount { provider = "fireworks"; model = auth.providers.fireworks.sonnet; };
-      friendli = imported.mkCodexAccount { provider = "friendli"; model = auth.providers.friendli.sonnet; };
-      seed = imported.mkCodexAccount { provider = "seed"; model = auth.providers.seed.sonnet; };
-      mm = imported.mkCodexAccount { provider = "mm"; model = auth.providers.mm.sonnet; };
-      codex = imported.mkCodexAccount { provider = "openai"; };
-
-      auto-anthropic = imported.mkCodexAutoAccount { provider = "anthropic"; model = auth.providers.anthropic.sonnet; };
-      auto-openai = imported.mkCodexAutoAccount { provider = "openai"; model = auth.providers.openai.sonnet; };
-      auto-zai = imported.mkCodexAutoAccount { provider = "zai"; model = auth.providers.zai.sonnet; };
-      auto-cerebras = imported.mkCodexAutoAccount { provider = "cerebras"; model = auth.providers.cerebras.sonnet; };
-      auto-kimi = imported.mkCodexAutoAccount { provider = "kimi"; model = auth.providers.kimi.sonnet; };
-      auto-fireworks = imported.mkCodexAutoAccount { provider = "fireworks"; model = auth.providers.fireworks.sonnet; };
-      auto-friendli = imported.mkCodexAutoAccount { provider = "friendli"; model = auth.providers.friendli.sonnet; };
-      auto-seed = imported.mkCodexAutoAccount { provider = "seed"; model = auth.providers.seed.sonnet; };
-      auto-mm = imported.mkCodexAutoAccount { provider = "mm"; model = auth.providers.mm.sonnet; };
-      auto-codex = imported.mkCodexAutoAccount { provider = "openai"; };
-    };
+      # ChatGPT OAuth-login accounts (run `codex-<name> auth login` after hms)
+      atomi1 = imported.mkCodexChatGPTAccount { };
+      atomi2 = imported.mkCodexChatGPTAccount { };
+      atomi3 = imported.mkCodexChatGPTAccount { };
+      atomi4 = imported.mkCodexChatGPTAccount { };
+      pro20 = imported.mkCodexChatGPTAccount { };
+      lwork = imported.mkCodexChatGPTAccount { directoryRules = workDirs; };
+      auto-atomi1 = imported.mkCodexChatGPTAutoAccount { };
+      auto-atomi2 = imported.mkCodexChatGPTAutoAccount { };
+      auto-atomi3 = imported.mkCodexChatGPTAutoAccount { };
+      auto-atomi4 = imported.mkCodexChatGPTAutoAccount { };
+      auto-pro20 = imported.mkCodexChatGPTAutoAccount { };
+      auto-lwork = imported.mkCodexChatGPTAutoAccount { directoryRules = workDirs; };
+    } // imported.mkAllProviderCodexAccounts auth.providerNames;
   };
 
   # Gemini multi-account configuration
@@ -248,24 +224,7 @@ rec {
         provider = "openai";
         directoryRules = workDirs;
       };
-
-      zai = imported.mkOpencodeAccount { provider = "zai"; };
-      cerebras = imported.mkOpencodeAccount { provider = "cerebras"; };
-      kimi = imported.mkOpencodeAccount { provider = "kimi"; };
-      fireworks = imported.mkOpencodeAccount { provider = "fireworks"; };
-      friendli = imported.mkOpencodeAccount { provider = "friendli"; };
-      seed = imported.mkOpencodeAccount { provider = "seed"; };
-      mm = imported.mkOpencodeAccount { provider = "mm"; };
-
-      auto-openai = imported.mkOpencodeAutoAccount { provider = "openai"; };
-      auto-zai = imported.mkOpencodeAutoAccount { provider = "zai"; };
-      auto-cerebras = imported.mkOpencodeAutoAccount { provider = "cerebras"; };
-      auto-kimi = imported.mkOpencodeAutoAccount { provider = "kimi"; };
-      auto-fireworks = imported.mkOpencodeAutoAccount { provider = "fireworks"; };
-      auto-friendli = imported.mkOpencodeAutoAccount { provider = "friendli"; };
-      auto-seed = imported.mkOpencodeAutoAccount { provider = "seed"; };
-      auto-mm = imported.mkOpencodeAutoAccount { provider = "mm"; };
-    };
+    } // imported.mkAllProviderOpencodeAccounts auth.providerNames;
   };
 
   programs.multi-gh = {

@@ -1,6 +1,6 @@
 ---
 name: liftoff-ops
-description: Use loctl when accessing infrastructure: Kubernetes, Mimir, Loki, Grafana, ArgoCD, Vault, AWS, Helm, Terraform. Use when investigating PE tickets, checking pod health, querying metrics/logs, or debugging production issues.
+description: 'Use loctl when accessing infrastructure: Kubernetes, Mimir, Loki, Grafana, ArgoCD, Vault, AWS, Helm, Terraform. Use when investigating PE tickets, checking pod health, querying metrics/logs, or debugging production issues.'
 ---
 
 # loctl -- Infrastructure Access
