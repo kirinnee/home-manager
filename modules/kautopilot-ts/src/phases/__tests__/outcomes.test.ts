@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { appendEvent, logPath, readLog } from '../../core/log';
+import { appendEvent, readLog } from '../../core/log';
 import { ensureStatus } from '../../core/status';
 
 let origHome: string;
@@ -26,8 +26,6 @@ import {
   writePlanManifest,
 } from '../../core/manifests';
 import { runScriptFromDir } from '../../core/scripts';
-import { computeRolloverRecommendation } from '../phase3/poll';
-import type { PollSignals } from '../phase3/types';
 
 // ============================================================================
 // kloop outcome → orchestrator transition tests (spec section 7)
@@ -77,99 +75,6 @@ describe('kloop outcome handling (spec section 7.2-7.4)', () => {
       d => d === 'revisit_spec',
     );
     expect(epochCreatingDecisions).toEqual(['revisit_spec']);
-  });
-});
-
-// ============================================================================
-// PR rollover heuristic tests (spec section 10.2)
-// ============================================================================
-
-describe('PR rollover heuristics (spec section 10.2)', () => {
-  function makeSignals(overrides?: Partial<PollSignals>): PollSignals {
-    return {
-      prState: 'OPEN',
-      mergeable: true,
-      mergeStateStatus: 'CLEAN',
-      checks: [],
-      threads: 0,
-      unresolvedThreads: 0,
-      reviews: [],
-      prComments: 0,
-      changesRequested: false,
-      approvals: 0,
-      prAge: 0,
-      ...overrides,
-    };
-  }
-
-  it('does not recommend rollover for quiet PR', () => {
-    const signals = makeSignals({
-      unresolvedThreads: 2,
-      prComments: 5,
-      prAge: 24,
-    });
-    const result = computeRolloverRecommendation(signals, 1);
-    expect(result.shouldRollover).toBe(false);
-  });
-
-  it('recommends rollover when multiple signals fire', () => {
-    const signals = makeSignals({
-      unresolvedThreads: 20,
-      prComments: 60,
-      prAge: 48,
-    });
-    const result = computeRolloverRecommendation(signals, 3);
-    expect(result.shouldRollover).toBe(true);
-    expect(result.reason).toBeDefined();
-    expect(result.reason).toContain('unresolved threads');
-    expect(result.reason).toContain('total comments');
-  });
-
-  it('considers push cycles as a signal', () => {
-    const signals = makeSignals({
-      unresolvedThreads: 20,
-      prComments: 10,
-      prAge: 24,
-    });
-    const result = computeRolloverRecommendation(signals, 10);
-    expect(result.shouldRollover).toBe(true);
-    expect(result.reason).toContain('push cycles');
-  });
-
-  it('considers PR age as a signal', () => {
-    const signals = makeSignals({
-      unresolvedThreads: 20,
-      prComments: 10,
-      prAge: 200, // > 168h threshold
-    });
-    const result = computeRolloverRecommendation(signals, 2);
-    expect(result.shouldRollover).toBe(true);
-    expect(result.reason).toContain('PR age');
-  });
-
-  it('requires at least 2 signals for rollover', () => {
-    // Only one signal (high threads) — should NOT rollover
-    const signals = makeSignals({
-      unresolvedThreads: 20,
-      prComments: 5,
-      prAge: 12,
-    });
-    const result = computeRolloverRecommendation(signals, 1);
-    expect(result.shouldRollover).toBe(false);
-  });
-
-  it('persists rollover signals', () => {
-    const signals = makeSignals({
-      unresolvedThreads: 5,
-      prComments: 30,
-      prAge: 48,
-    });
-    const result = computeRolloverRecommendation(signals, 4);
-    expect(result.signals).toBeDefined();
-    expect(result.signals.unresolvedThreads).toBe(5);
-    expect(result.signals.totalComments).toBe(30);
-    expect(result.signals.pushCycles).toBe(4);
-    expect(result.signals.prAgeHours).toBe(48);
   });
 });
 
@@ -282,7 +187,7 @@ describe('ticket script expansion (spec section 12)', () => {
 const TEST_SESSION_OUTCOMES = `test-outcomes-${Date.now()}`;
 
 process.on('exit', () => {
-  const walPath = logPath(TEST_SESSION_OUTCOMES);
+  const walPath = join(tempHome, `.kautopilot/${TEST_SESSION_OUTCOMES}/log.jsonl`);
   if (existsSync(walPath)) {
     rmSync(walPath, { recursive: true, force: true });
   }

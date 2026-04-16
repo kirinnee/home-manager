@@ -159,7 +159,7 @@ export async function handleFeedback(ctx: Phase3Context): Promise<string | null>
       feedback_path: feedbackPath,
     });
 
-    const feedbackPrompt = mechanics + '\n' + userPrompt;
+    const feedbackPrompt = `${mechanics}\n${userPrompt}`;
 
     // Record step init
     const binary = getAgentBinary('phase3', 'feedback');

@@ -40,11 +40,11 @@ export function initDir(id: string): string {
   return `${process.env.HOME}/.kautopilot/init/${id}`;
 }
 
-export function scopeDir(scope: RunScope): string {
+function scopeDir(scope: RunScope): string {
   return scope.kind === 'init' ? initDir(scope.id) : sessionDir(scope.id);
 }
 
-export function runsDir(scope: RunScope): string {
+function runsDir(scope: RunScope): string {
   return join(scopeDir(scope), 'runs');
 }
 

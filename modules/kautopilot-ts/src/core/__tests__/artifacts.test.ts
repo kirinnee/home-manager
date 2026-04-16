@@ -54,15 +54,9 @@ describe('artifacts', () => {
     expect(dir).toBe(join(tempDir, '.kautopilot/init/init123'));
   });
 
-  it('runsDir resolves session and init roots correctly', () => {
-    const { runsDir } = require('../artifacts') as typeof import('../artifacts');
-    expect(runsDir({ kind: 'session', id: 'abc123' })).toBe(join(tempDir, '.kautopilot/abc123/runs'));
-    expect(runsDir({ kind: 'init', id: 'init123' })).toBe(join(tempDir, '.kautopilot/init/init123/runs'));
-  });
-
   it('nextRunNumber increments numeric run directories only', () => {
-    const { runsDir, nextRunNumber } = require('../artifacts') as typeof import('../artifacts');
-    const dir = runsDir({ kind: 'session', id: 'abc123' });
+    const { nextRunNumber } = require('../artifacts') as typeof import('../artifacts');
+    const dir = join(tempDir, '.kautopilot/abc123/runs');
     mkdirSync(join(dir, '1'), { recursive: true });
     mkdirSync(join(dir, '2'), { recursive: true });
     mkdirSync(join(dir, 'notes'), { recursive: true });

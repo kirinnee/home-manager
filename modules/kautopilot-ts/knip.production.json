@@ -1,7 +1,8 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
-  "project": ["src/**/*.ts", "!src/**/*.d.ts"],
+  "project": ["src/**/*.ts", "!src/**/*.d.ts", "!src/**/*.test.ts", "!src/**/__tests__/**"],
   "ignoreDependencies": ["typescript-language-server"],
   "ignoreBinaries": ["tsc"],
-  "exclude": ["exports", "types"]
+  "exclude": ["types"],
+  "bun": false
 }

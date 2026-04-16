@@ -46,7 +46,7 @@ export interface TriageResult {
 /**
  * Parse the triage.md to extract deliveryKind, complexity, and verification flags.
  */
-export function parseTriage(triagePath: string): TriageResult | null {
+function parseTriage(triagePath: string): TriageResult | null {
   try {
     const content = readFileSync(triagePath, 'utf-8');
     const deliveryMatch = content.match(/^## Delivery Kind\s*$/m);

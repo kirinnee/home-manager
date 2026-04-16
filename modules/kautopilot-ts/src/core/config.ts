@@ -433,7 +433,7 @@ export function ensureGlobalConfig(): void {
  * Pick which config file to use (only one wins, not merged).
  * Priority: --config flag > org config > global config
  */
-export function pickConfig(org?: string, configPathOverride?: string): string | null {
+function pickConfig(org?: string, configPathOverride?: string): string | null {
   if (configPathOverride) return configPathOverride;
   if (org) {
     const orgPath = orgConfigPath(org);

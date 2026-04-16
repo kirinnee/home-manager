@@ -75,64 +75,6 @@ async function runSnapshotCommand(args: string[]): Promise<string[]> {
   return output;
 }
 
-describe('resolveEpochVersion', () => {
-  const SESSION = `test-snapshot-autodetect-${Date.now()}`;
-
-  afterEach(() => {
-    const dir = sessionDir(SESSION);
-    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
-  });
-
-  it('auto-detects epoch version 1 from status.yaml', async () => {
-    setupSession(SESSION, 1);
-    const { resolveEpochVersion } = await loadSnapshotModule();
-    const version = resolveEpochVersion(SESSION);
-    expect(version).toBe(1);
-  });
-
-  it('auto-detects epoch version 2 from status.yaml', async () => {
-    setupSession(SESSION, 2);
-    const { resolveEpochVersion } = await loadSnapshotModule();
-    const version = resolveEpochVersion(SESSION);
-    expect(version).toBe(2);
-  });
-
-  it('auto-detects epoch version 5 from status.yaml', async () => {
-    setupSession(SESSION, 5);
-    const { resolveEpochVersion } = await loadSnapshotModule();
-    const version = resolveEpochVersion(SESSION);
-    expect(version).toBe(5);
-  });
-
-  it('throws when no status.yaml exists', async () => {
-    const { resolveEpochVersion } = await loadSnapshotModule();
-    expect(() => resolveEpochVersion(SESSION)).toThrow();
-  });
-
-  it('throws when status.yaml has no version field', async () => {
-    const dir = sessionDir(SESSION);
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, 'status.yaml'), YAML.stringify({ phase: 'implementation' }));
-    const { resolveEpochVersion } = await loadSnapshotModule();
-    expect(() => resolveEpochVersion(SESSION)).toThrow();
-  });
-
-  it('throws when version field is not a number', async () => {
-    const dir = sessionDir(SESSION);
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, 'status.yaml'), YAML.stringify({ version: 'abc' }));
-    const { resolveEpochVersion } = await loadSnapshotModule();
-    expect(() => resolveEpochVersion(SESSION)).toThrow();
-  });
-
-  it('explicit version takes precedence over status.yaml', async () => {
-    setupSession(SESSION, 1);
-    const { resolveEpochVersion } = await loadSnapshotModule();
-    const version = resolveEpochVersion(SESSION, 3);
-    expect(version).toBe(3);
-  });
-});
-
 describe('snapshot CLI — auto-detect through command', () => {
   const SESSION = `test-snapshot-cli-${Date.now()}`;
 

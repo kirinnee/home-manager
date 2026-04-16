@@ -9,7 +9,9 @@
     "dev": "bun run ./src/index.ts",
     "build": "bun build ./src/index.ts --outdir ./dist --target bun",
     "test": "bun test",
-    "check": "biome check . && knip && tsc --noEmit"
+    "knip": "knip",
+    "knip:production": "knip --config knip.production.json",
+    "check": "biome check . && knip && knip --config knip.production.json && tsc --noEmit"
   },
   "dependencies": {
     "@clack/prompts": "^0.11.0",

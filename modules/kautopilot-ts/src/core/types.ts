@@ -289,6 +289,9 @@ const kloopPromptsSchema = z
     reviewer: z.string().optional(),
     checkpointer: z.string().optional(),
     checkpointerFull: z.string().optional(),
+    synthesizer: z.string().optional(),
+    verifier: z.string().optional(),
+    reSynthesizer: z.string().optional(),
   })
   .optional();
 
@@ -303,6 +306,11 @@ export interface KloopConfig {
   compressSpec: boolean;
   firstLoopFullReview: boolean;
   previousReviewPropagation: number;
+  synthesis: boolean;
+  synthesisTimeout: number;
+  verify: boolean;
+  verifyPhases: string[][];
+  verifyTimeout: number;
   prompts?: KloopPrompts;
 }
 
@@ -318,6 +326,11 @@ const kloopConfigSchema = z
     compressSpec: z.boolean().default(false),
     firstLoopFullReview: z.boolean().default(true),
     previousReviewPropagation: z.number().min(0).max(1).default(0.7),
+    synthesis: z.boolean().default(true),
+    synthesisTimeout: z.number().min(0.001).max(120).default(15),
+    verify: z.boolean().default(true),
+    verifyPhases: z.array(z.array(z.string())).default([['claude:claude']]),
+    verifyTimeout: z.number().min(0.001).max(120).default(5),
     prompts: kloopPromptsSchema,
   })
   .default({});
@@ -1122,6 +1135,11 @@ Discuss the PR with the user. Figure out:
     compressSpec: false,
     firstLoopFullReview: true,
     previousReviewPropagation: 0.7,
+    synthesis: true,
+    synthesisTimeout: 15,
+    verify: true,
+    verifyPhases: [['claude:claude']],
+    verifyTimeout: 5,
     prompts: {
       implementer: DEFAULT_KLOOP_IMPLEMENTER_PROMPT,
       reviewer: DEFAULT_KLOOP_REVIEWER_PROMPT,

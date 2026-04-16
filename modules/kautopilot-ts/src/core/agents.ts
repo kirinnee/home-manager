@@ -7,12 +7,6 @@ import { DEFAULT_CONFIG } from './types';
 // TTY exit instruction — appended to all TTY agent prompts
 // ============================================================================
 
-/**
- * TTY exit instruction — kept as empty string for call-site compatibility.
- * Each TTY's approval protocol now owns its own post-approval exit instruction.
- */
-export const TTY_EXIT_INSTRUCTION = '';
-
 // ============================================================================
 // Session agent cache
 // ============================================================================
@@ -134,11 +128,4 @@ export function getDefaultBinary(): string {
   const config = _cachedConfig ?? DEFAULT_CONFIG;
   if (process.env.CLAUDE_BINARY) return process.env.CLAUDE_BINARY;
   return config.claude_binary ?? 'claude';
-}
-
-/**
- * Get the raw default agents map (for testing/inspection).
- */
-export function getDefaultAgents(): Config['agents'] {
-  return { ...DEFAULT_CONFIG.agents };
 }

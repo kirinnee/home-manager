@@ -29,6 +29,7 @@ reviewPhases:
   - - claude
 
 conflictChecker: claude
+synthesizer: claude
 
 verifyPhases:
   - - claude-auto-zai

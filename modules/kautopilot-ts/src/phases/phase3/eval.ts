@@ -31,7 +31,7 @@ const GHOSTED_REPLY = withBotSignature(
   'The CI checks triggered by my previous change have now completed. Marking as resolved.',
 );
 
-export function preFilterThreads(
+function preFilterThreads(
   threads: ThreadWithReplies[],
   crStatus: 'passing' | 'failing' | 'running' | 'none',
 ): PreFilterResult[] {

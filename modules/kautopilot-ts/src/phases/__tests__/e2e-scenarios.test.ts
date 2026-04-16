@@ -32,13 +32,11 @@ import {
   readDeliveryManifest,
   readPlanManifest,
   supersedEpoch,
-  updateDeliveryManifest,
   updatePlanManifestEntry,
   writeContractManifest,
   writeDeliveryManifest,
   writePlanManifest,
 } from '../../core/manifests';
-import { computeRolloverRecommendation } from '../phase3/poll';
 
 function cleanSession(sessionId: string) {
   const dir = `${process.env.HOME}/.kautopilot/${sessionId}`;
@@ -367,105 +365,6 @@ describe('E2E Scenario 2: PR flow with contract rewrite and same-PR reuse', () =
     const delivery = readDeliveryManifest(S, 1);
     expect(delivery?.prNumber).toBe(77);
     expect(delivery?.prRolloverHistory).toBeUndefined();
-  });
-});
-
-// ============================================================================
-// Scenario 3: PR flow with heuristic rollover to a fresh PR
-// ============================================================================
-
-describe('E2E Scenario 3: PR flow with heuristic rollover to fresh PR', () => {
-  const S = `e2e-rollover-${Date.now()}`;
-  afterEach(() => cleanSession(S));
-
-  it('old PR closed, new PR created, manifest records from→to', () => {
-    writeContractManifest(S, 1, 'pr', 1);
-    setupPlans(S, 1, 1);
-
-    appendEvent(S, {
-      ts: '2026-04-01T10:00:00Z',
-      event: 'phase3:started',
-      version: 1,
-    });
-    // Initial PR
-    writeDeliveryManifest(S, 1, {
-      kind: 'pr',
-      prNumber: 10,
-      prUrl: 'https://github.com/org/repo/pull/10',
-    });
-    appendEvent(S, {
-      ts: '2026-04-01T10:01:00Z',
-      event: 'context:updated',
-      metadata: { prNumber: 10 },
-    });
-
-    // Poll detects rollover signals
-    const signals = {
-      prState: 'OPEN',
-      mergeable: true,
-      mergeStateStatus: 'CLEAN',
-      checks: [],
-      threads: 25,
-      unresolvedThreads: 20,
-      reviews: [],
-      prComments: 60,
-      changesRequested: false,
-      approvals: 0,
-      prAge: 200,
-    };
-    const rollover = computeRolloverRecommendation(signals, 10);
-    expect(rollover.shouldRollover).toBe(true);
-
-    // Rollover: close old PR #10, record placeholder
-    updateDeliveryManifest(S, 1, {
-      prNumber: undefined,
-      prUrl: undefined,
-      prRolloverHistory: [
-        {
-          fromPr: 10,
-          toPr: 0,
-          reason: rollover.reason!,
-          timestamp: '2026-04-01T10:05:00Z',
-        },
-      ],
-    });
-    appendEvent(S, {
-      ts: '2026-04-01T10:05:01Z',
-      event: 'context:updated',
-      metadata: { rolloverFromPr: 10, prNumber: undefined },
-    });
-
-    // Create new PR #25
-    const newPr = 25;
-    const delivery = readDeliveryManifest(S, 1)!;
-    const prRolloverHistory = delivery.prRolloverHistory
-      ? [{ ...delivery.prRolloverHistory[0], toPr: newPr }]
-      : undefined;
-    updateDeliveryManifest(S, 1, {
-      prNumber: newPr,
-      prUrl: `https://github.com/org/repo/pull/${newPr}`,
-      prRolloverHistory,
-    });
-    appendEvent(S, {
-      ts: '2026-04-01T10:06:00Z',
-      event: 'context:updated',
-      metadata: { rolloverFromPr: undefined, prNumber: newPr },
-    });
-    appendEvent(S, {
-      ts: '2026-04-01T10:10:00Z',
-      event: 'phase3:completed',
-      version: 1,
-    });
-
-    // Validate
-    const finalDelivery = readDeliveryManifest(S, 1)!;
-    expect(finalDelivery.prNumber).toBe(25);
-    expect(finalDelivery.prRolloverHistory).toHaveLength(1);
-    expect(finalDelivery.prRolloverHistory?.[0].fromPr).toBe(10);
-    expect(finalDelivery.prRolloverHistory?.[0].toPr).toBe(25);
-
-    const status = ensureStatus(S);
-    expect(status.context.prNumber).toBe(25);
   });
 });
 

@@ -80,7 +80,7 @@ function writeInitArtifactJson(initId: string, filename: string, data: unknown):
 // State: identify
 // ============================================================================
 
-export const identify: InitStateHandler = async ctx => {
+const identify: InitStateHandler = async ctx => {
   const { initId, org, workDir } = ctx;
   setCachedConfig(ctx.config);
 
@@ -201,7 +201,7 @@ export const identify: InitStateHandler = async ctx => {
 // State: research
 // ============================================================================
 
-export const research: InitStateHandler = async ctx => {
+const research: InitStateHandler = async ctx => {
   const { initId } = ctx;
 
   appendInitEvent(initId, {
@@ -318,7 +318,7 @@ ${researchDoc || '(no research output)'}
 // State: detect
 // ============================================================================
 
-export const detect: InitStateHandler = async ctx => {
+const detect: InitStateHandler = async ctx => {
   const { initId } = ctx;
 
   appendInitEvent(initId, {
@@ -407,7 +407,7 @@ export const detect: InitStateHandler = async ctx => {
 // State: gather_context
 // ============================================================================
 
-export const gather_context: InitStateHandler = async ctx => {
+const gather_context: InitStateHandler = async ctx => {
   const { initId } = ctx;
 
   appendInitEvent(initId, {
@@ -508,7 +508,7 @@ export const gather_context: InitStateHandler = async ctx => {
 // State: normalize
 // ============================================================================
 
-export const normalize: InitStateHandler = async ctx => {
+const normalize: InitStateHandler = async ctx => {
   const { initId } = ctx;
 
   appendInitEvent(initId, {
@@ -626,7 +626,7 @@ export const normalize: InitStateHandler = async ctx => {
 // State: generate
 // ============================================================================
 
-export const generate: InitStateHandler = async ctx => {
+const generate: InitStateHandler = async ctx => {
   const { initId, workDir, org } = ctx;
 
   appendInitEvent(initId, {
@@ -809,7 +809,7 @@ export const generate: InitStateHandler = async ctx => {
 // State: verify
 // ============================================================================
 
-export const verify: InitStateHandler = async ctx => {
+const verify: InitStateHandler = async ctx => {
   const { initId, workDir } = ctx;
 
   appendInitEvent(initId, {
@@ -958,7 +958,7 @@ export const verify: InitStateHandler = async ctx => {
 // State: promote
 // ============================================================================
 
-export const promote: InitStateHandler = async ctx => {
+const promote: InitStateHandler = async ctx => {
   const { initId, config, workDir, gitRootPath, worktree, remoteUrl, gitRootHost, org, ticketIdArg } = ctx;
 
   appendInitEvent(initId, {
@@ -1102,7 +1102,7 @@ export const promote: InitStateHandler = async ctx => {
 // State: downgrade_local
 // ============================================================================
 
-export const downgrade_local: InitStateHandler = async ctx => {
+const downgrade_local: InitStateHandler = async ctx => {
   const { initId, config, workDir, gitRootPath, worktree, remoteUrl, gitRootHost, org } = ctx;
 
   appendInitEvent(initId, {
@@ -1245,7 +1245,7 @@ export const downgrade_local: InitStateHandler = async ctx => {
 // Terminal states (no-op handlers)
 // ============================================================================
 
-export const failed: InitStateHandler = async ctx => {
+const failed: InitStateHandler = async ctx => {
   const { initId } = ctx;
   appendInitEvent(initId, {
     ts: new Date().toISOString(),
@@ -1257,7 +1257,7 @@ export const failed: InitStateHandler = async ctx => {
   return null;
 };
 
-export const cancelled: InitStateHandler = async ctx => {
+const cancelled: InitStateHandler = async ctx => {
   const { initId } = ctx;
   appendInitEvent(initId, {
     ts: new Date().toISOString(),

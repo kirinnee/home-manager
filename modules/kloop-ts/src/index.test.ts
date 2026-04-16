@@ -15,9 +15,18 @@ import {
   buildSynthesizerPrompt,
   buildVerifierPrompt,
 } from './agents/prompts';
-import { parseRawConfig, parseImplementerConfig, selectImplementer, DEFAULT_CONFIG, EVENT_TYPES } from './types';
+import {
+  parseRawConfig,
+  parseImplementerConfig,
+  parseReviewerConfig,
+  parseConflictCheckerConfig,
+  selectImplementer,
+  DEFAULT_CONFIG,
+  EVENT_TYPES,
+} from './types';
 import type { Config, ImplementerRetryEvent, ImplementerEndEvent } from './types';
 import { DEFAULT_RE_SYNTHESIS_PROMPT, DEFAULT_IMPLEMENTER_PROMPT } from './agents/default-prompts';
+import { tryParseJson } from './stream/parse';
 
 describe('Placeholder', () => {
   it('should pass basic verification', () => {
@@ -190,6 +199,24 @@ describe('::i implementer suffix parsing', () => {
 
   it('throws on too many colons', () => {
     expect(() => parseImplementerConfig('a:b:c')).toThrow('too many colons');
+  });
+
+  it('parses codex implementer config', () => {
+    const result = parseImplementerConfig('codex-personal:codex');
+    expect(result).toEqual({
+      binary: 'codex-personal',
+      harness: 'codex',
+      firstIterationPreferred: false,
+    });
+  });
+
+  it('parses codex implementer config with ::i suffix', () => {
+    const result = parseImplementerConfig('codex-personal:codex::i');
+    expect(result).toEqual({
+      binary: 'codex-personal',
+      harness: 'codex',
+      firstIterationPreferred: true,
+    });
   });
 });
 
@@ -520,5 +547,137 @@ describe('Config validation edge cases', () => {
     const config = parseRawConfig({});
     expect(config.synthesis).toBe(true);
     expect(config.synthesisTimeout).toBe(15);
+  });
+
+  it('synthesizer binary defaults to undefined', () => {
+    const config = parseRawConfig({});
+    expect(config.synthesizer).toBeUndefined();
+  });
+
+  it('synthesizer binary can be explicitly set', () => {
+    const config = parseRawConfig({ synthesizer: 'gemini:gemini' });
+    expect(config.synthesizer).toBe('gemini:gemini');
+  });
+});
+
+// ============================================================================
+// Codex harness config parsing
+// ============================================================================
+
+describe('Codex config parsing', () => {
+  it('parseReviewerConfig parses codex reviewer with flag 0', () => {
+    const result = parseReviewerConfig('codex-personal:codex:0');
+    expect(result).toEqual({
+      binary: 'codex-personal',
+      harness: 'codex',
+      firstIterationPreferred: false,
+      noVerdictAsFailure: false,
+    });
+  });
+
+  it('parseReviewerConfig parses codex reviewer with flag 1', () => {
+    const result = parseReviewerConfig('codex-personal:codex:1');
+    expect(result).toEqual({
+      binary: 'codex-personal',
+      harness: 'codex',
+      firstIterationPreferred: false,
+      noVerdictAsFailure: true,
+    });
+  });
+
+  it('parseConflictCheckerConfig parses codex conflict checker', () => {
+    const result = parseConflictCheckerConfig('codex-personal:codex');
+    expect(result).toEqual({
+      binary: 'codex-personal',
+      harness: 'codex',
+      firstIterationPreferred: false,
+    });
+  });
+
+  it('rejects invalid harness type', () => {
+    expect(() => parseImplementerConfig('foo:unknown')).toThrow('Invalid harness type');
+    expect(() => parseImplementerConfig('foo:unknown')).toThrow('"codex"');
+  });
+
+  it('rejects invalid reviewer flag for codex', () => {
+    expect(() => parseReviewerConfig('codex-personal:codex:2')).toThrow('reviewer flag must be 0 or 1');
+  });
+});
+
+// ============================================================================
+// Codex stream normalization
+// ============================================================================
+
+describe('Codex stream normalization', () => {
+  it('normalizes thread.started to system init', () => {
+    const event = tryParseJson('{"type":"thread.started","thread_id":"thread_abc123","created_at":1234567890}');
+    expect(event).not.toBeNull();
+    expect(event!.type).toBe('system');
+    if (event!.type === 'system') {
+      expect(event!.subtype).toBe('init');
+      expect(event!.session_id).toBe('thread_abc123');
+    }
+  });
+
+  it('normalizes item.completed agent_message to assistant', () => {
+    const event = tryParseJson('{"type":"item.completed","item_type":"agent_message","content":"hello world"}');
+    expect(event).not.toBeNull();
+    expect(event!.type).toBe('assistant');
+    if (event!.type === 'assistant') {
+      expect(event!.message.content).toEqual([{ type: 'text', text: 'hello world' }]);
+    }
+  });
+
+  it('normalizes turn.completed to result with tokens', () => {
+    const event = tryParseJson(
+      '{"type":"turn.completed","turn_id":0,"usage":{"input_tokens":1000,"output_tokens":500,"total_tokens":1500}}',
+    );
+    expect(event).not.toBeNull();
+    expect(event!.type).toBe('result');
+    if (event!.type === 'result') {
+      expect(event!.result.input_tokens).toBe(1000);
+      expect(event!.result.output_tokens).toBe(500);
+    }
+  });
+
+  it('normalizes turn.failed to error', () => {
+    const event = tryParseJson(
+      '{"type":"turn.failed","turn_id":0,"error":{"type":"Error","message":"API rate limited"}}',
+    );
+    expect(event).not.toBeNull();
+    expect(event!.type).toBe('error');
+    if (event!.type === 'error') {
+      expect(event!.error.message).toBe('API rate limited');
+    }
+  });
+
+  it('suppresses item.started events as unknown', () => {
+    const event = tryParseJson('{"type":"item.started","item_id":"msg_001","item_type":"agent_message"}');
+    expect(event).not.toBeNull();
+    expect(event!.type).toBe('unknown');
+  });
+
+  it('suppresses item.updated events as unknown', () => {
+    const event = tryParseJson(
+      '{"type":"item.updated","item_id":"msg_001","item_type":"agent_message","content":"partial..."}',
+    );
+    expect(event).not.toBeNull();
+    expect(event!.type).toBe('unknown');
+  });
+
+  it('does not break Claude system events', () => {
+    const event = tryParseJson('{"type":"system","message":"hello"}');
+    expect(event).not.toBeNull();
+    expect(event!.type).toBe('system');
+  });
+
+  it('does not break Gemini init events', () => {
+    const event = tryParseJson('{"type":"init","session_id":"gemini-123","model":"gemini-pro"}');
+    expect(event).not.toBeNull();
+    expect(event!.type).toBe('system');
+    if (event!.type === 'system') {
+      expect(event!.subtype).toBe('init');
+      expect(event!.session_id).toBe('gemini-123');
+    }
   });
 });

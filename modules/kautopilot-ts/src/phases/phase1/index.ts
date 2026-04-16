@@ -15,8 +15,7 @@ import type { Phase1Context, Phase1StateMap } from './types';
 import { handleWritePlans } from './write-plans';
 import { handleWriteSpec } from './write-spec';
 
-// Re-export shared utilities for external use
-export { discoverPlans } from '../shared';
+// discoverPlans removed from export — now private to ../shared
 
 /**
  * Copy triage.md from old version to new version directory so it carries forward

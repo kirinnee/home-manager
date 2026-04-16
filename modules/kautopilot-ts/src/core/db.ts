@@ -1,7 +1,7 @@
 import { Database } from 'bun:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { SessionRow, SessionState } from './types';
+import type { SessionRow } from './types';
 
 const DB_PATH = `${process.env.HOME}/.kautopilot/index.db`;
 
@@ -72,11 +72,6 @@ function getDb(): Database {
 export function upsertSession(row: SessionRow): void {
   const d = getDb();
   d.query(UPSERT_SQL).run(...rowToParams(row));
-}
-
-export function updateSessionState(id: string, state: SessionState): void {
-  const d = getDb();
-  d.query('UPDATE sessions SET state = $1, updated_at = $2 WHERE id = $3').run(state, new Date().toISOString(), id);
 }
 
 export function getSessionById(id: string): SessionRow | null {

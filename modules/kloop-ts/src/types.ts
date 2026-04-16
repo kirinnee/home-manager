@@ -42,6 +42,7 @@ const configSchema = z
     // Backwards compat: flat reviewers array
     reviewers: z.array(z.string().min(1)).optional(),
     conflictChecker: z.string().min(1).optional(), // defaults to implementer binary
+    synthesizer: z.string().min(1).optional(), // defaults to first implementer binary
     // Counts and limits
     maxIterations: z.number().min(1).max(100).default(7),
     implementerTimeout: z.number().min(0.001).max(120).default(30),
@@ -122,6 +123,7 @@ const configSchema = z
       implementers,
       reviewPhases,
       conflictChecker: data.conflictChecker,
+      synthesizer: data.synthesizer ?? Object.keys(implementers)[0],
       maxIterations: data.maxIterations,
       implementerTimeout: data.implementerTimeout,
       reviewerTimeout: data.reviewerTimeout,
@@ -145,6 +147,7 @@ export const resolvedConfigSchema = z.object({
   implementers: z.record(z.string(), z.number().int().positive()),
   reviewPhases: z.array(z.array(z.string().min(1))).min(1),
   conflictChecker: z.string().min(1).optional(),
+  synthesizer: z.string().min(1).optional(),
   maxIterations: z.number().min(1).max(100),
   implementerTimeout: z.number().min(0.001).max(120),
   reviewerTimeout: z.number().min(0.001).max(120),
@@ -214,7 +217,7 @@ const sessionSummarySchema = z.object({
   reviewerIndex: z.number().int().nonnegative().optional(),
 });
 
-export const iterationSummarySchema = z.object({
+const iterationSummarySchema = z.object({
   iteration: z.number().int().positive(),
   implementerDuration: z.number().nonnegative().optional(),
   reviewerVerdicts: z.array(
@@ -235,13 +238,11 @@ export const iterationSummarySchema = z.object({
     .optional(),
 });
 
-export const metricsSummarySchema = z.object({
+const metricsSummarySchema = z.object({
   totalDurationMs: z.number().nonnegative(),
   totalInputTokens: z.number().int().nonnegative(),
   totalOutputTokens: z.number().int().nonnegative(),
 });
-
-export type MetricsSummary = z.infer<typeof metricsSummarySchema>;
 
 export const historyEntrySchema = z.object({
   id: z.string().min(1), // run ID (short UUID)
@@ -256,7 +257,6 @@ export const historyEntrySchema = z.object({
   metricsSummary: metricsSummarySchema.optional(),
 });
 
-export type IterationSummary = z.infer<typeof iterationSummarySchema>;
 export type HistoryEntry = z.infer<typeof historyEntrySchema>;
 
 // Checkpoint result type - outcome of running the checkpointer agent
@@ -274,7 +274,7 @@ export type CheckpointResult = z.infer<typeof checkpointResultSchema>;
 // Harness Types (Claude vs Gemini)
 // ============================================================================
 
-export type HarnessType = 'claude' | 'gemini';
+export type HarnessType = 'claude' | 'gemini' | 'codex';
 
 /**
  * Parsed binary config for implementers and conflict checker.
@@ -297,13 +297,13 @@ export interface ReviewerBinary extends ParsedBinary {
 
 /**
  * Validate a harness type string.
- * @throws if the harness value is not 'claude' or 'gemini'
+ * @throws if the harness value is not 'claude', 'gemini', or 'codex'
  */
 function parseHarness(value: string): HarnessType {
-  if (value === 'claude' || value === 'gemini') {
+  if (value === 'claude' || value === 'gemini' || value === 'codex') {
     return value;
   }
-  throw new Error(`Invalid harness type: "${value}". Must be "claude" or "gemini".`);
+  throw new Error(`Invalid harness type: "${value}". Must be "claude", "gemini", or "codex".`);
 }
 
 /**

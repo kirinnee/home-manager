@@ -1,4 +1,6 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
-  "ignoreFiles": [".claude/**"]
+  "project": ["src/**/*.ts"],
+  "includeEntryExports": true,
+  "ignoreExportsUsedInFile": false
 }
