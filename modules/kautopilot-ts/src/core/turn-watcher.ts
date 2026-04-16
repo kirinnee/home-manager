@@ -40,7 +40,7 @@ function userTurnFromState(state: MachineState): boolean {
   return state === 'user_turn' || state === 'user_interactive';
 }
 
-export function readAppendedRaw(path: string, startOffset: number, endOffset: number): string {
+function readAppendedRaw(path: string, startOffset: number, endOffset: number): string {
   if (endOffset <= startOffset) {
     return '';
   }
@@ -59,15 +59,11 @@ export function readAppendedRaw(path: string, startOffset: number, endOffset: nu
   }
 }
 
-export function readAppendedLines(path: string, startOffset: number, endOffset: number): string[] {
-  return readAppendedRaw(path, startOffset, endOffset).split('\n').filter(Boolean);
-}
-
 /**
  * Process a single parsed JSONL entry and return the updated context.
  * Pure function — no I/O, fully testable.
  */
-export function processEntry(ctx: TurnMachineContext, entry: ParsedEntry): TurnMachineContext {
+function processEntry(ctx: TurnMachineContext, entry: ParsedEntry): TurnMachineContext {
   const next = { ...ctx };
   const ts = entry.timestamp ?? ctx.lastTs;
   next.lastTs = ts;
@@ -146,18 +142,7 @@ export function processEntry(ctx: TurnMachineContext, entry: ParsedEntry): TurnM
   return next;
 }
 
-/**
- * Process multiple entries in sequence and return the final context.
- */
-export function processEntries(ctx: TurnMachineContext, entries: ParsedEntry[]): TurnMachineContext {
-  let current = ctx;
-  for (const entry of entries) {
-    current = processEntry(current, entry);
-  }
-  return current;
-}
-
-export function createInitialContext(): TurnMachineContext {
+function createInitialContext(): TurnMachineContext {
   return {
     cursor: 0,
     state: 'user_turn',
@@ -187,7 +172,7 @@ export function createInitialContext(): TurnMachineContext {
  * Waits for the JSONL file to appear with exponential backoff (the Claude session
  * may not have created it yet when the watcher starts).
  */
-export function watchTurn(jsonlPath: string, onChange: (state: TurnState) => void): { close: () => void } {
+function watchTurn(jsonlPath: string, onChange: (state: TurnState) => void): { close: () => void } {
   let ctx = createInitialContext();
   let closed = false;
   let fileWatcher: ReturnType<typeof watch> | null = null;

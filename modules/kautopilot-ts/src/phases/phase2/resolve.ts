@@ -134,7 +134,7 @@ export async function handleResolve(ctx: Phase2Context): Promise<string | null> 
       worktreeResolutionPath,
     );
 
-    const resolvePrompt = mechanics + '\n' + userPrompt;
+    const resolvePrompt = `${mechanics}\n${userPrompt}`;
 
     // Record step init
     const binary = getAgentBinary('phase2', 'resolve');

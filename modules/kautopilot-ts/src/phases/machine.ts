@@ -1,6 +1,6 @@
 import { appendEvent } from '../core/log';
 import { ensureStatus, updateUserTurn } from '../core/status';
-import type { Config, LogEntry, SessionRow } from '../core/types';
+import type { Config, SessionRow } from '../core/types';
 import { setTurnUpdater } from '../llm/inquirer';
 import { logDim, stateIcon } from '../util/format';
 
@@ -13,14 +13,6 @@ export interface PhaseContext {
 
 export type StateHandler = (ctx: PhaseContext) => Promise<string | null>;
 export type StateMap = Record<string, StateHandler>;
-
-/**
- * Find the last event matching a pattern.
- * Kept as helper for callers that still need raw log access.
- */
-export function findLastEvent(log: LogEntry[], eventPattern: string): LogEntry | undefined {
-  return log.filter(e => e.event.startsWith(eventPattern)).pop();
-}
 
 /**
  * Run a state machine for a given phase.

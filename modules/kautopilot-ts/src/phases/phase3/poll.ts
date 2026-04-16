@@ -16,7 +16,7 @@ import type { Phase3Context, PollSignals, RolloverRecommendation } from './types
 /**
  * Compute poll state from GitHub signals and merge policy.
  */
-export function computePollState(signals: PollSignals, _ctx: Phase3Context): PollState {
+function computePollState(signals: PollSignals, _ctx: Phase3Context): PollState {
   // PR closed externally
   if (signals.prState === 'CLOSED') {
     throw new Error('PR was closed externally');
@@ -66,7 +66,7 @@ export function computePollState(signals: PollSignals, _ctx: Phase3Context): Pol
  * Compute PR rollover recommendation from heuristic signals.
  * Spec section 10.2: evaluate whether the current PR is still a good reasoning surface.
  */
-export function computeRolloverRecommendation(signals: PollSignals, pushCycles: number): RolloverRecommendation {
+function computeRolloverRecommendation(signals: PollSignals, pushCycles: number): RolloverRecommendation {
   const result: RolloverRecommendation = {
     shouldRollover: false,
     signals: {
@@ -207,7 +207,10 @@ export async function handlePoll(ctx: Phase3Context): Promise<string | null> {
     checks: checks.map(c => ({ name: c.name, status: c.status })),
     threads: threads.length,
     unresolvedThreads: threads.length, // all fetched threads are unresolved
-    reviews: reviews.map(r => ({ author: r.author?.login ?? 'unknown', state: r.state })),
+    reviews: reviews.map(r => ({
+      author: r.author?.login ?? 'unknown',
+      state: r.state,
+    })),
     prComments: prComments.length,
     changesRequested,
     approvals,

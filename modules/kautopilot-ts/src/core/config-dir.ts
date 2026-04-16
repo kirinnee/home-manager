@@ -14,7 +14,7 @@ const GLOBAL_CACHE_FILE = join(process.env.HOME ?? '', '.kautopilot', 'binary-co
  * Load persisted binary config dirs from the global cache into memory.
  * Returns true if cache was loaded (probing can be skipped).
  */
-export function loadPersistedConfigDirs(): boolean {
+function loadPersistedConfigDirs(): boolean {
   if (!existsSync(GLOBAL_CACHE_FILE)) return false;
 
   try {
@@ -57,7 +57,7 @@ function persistConfigDirs(binaries: Iterable<string>): void {
  * Probe a Claude binary to discover its CLAUDE_CONFIG_DIR.
  * Spawns: `{binary} --print --dangerously-skip-permissions 'Run: echo $CLAUDE_CONFIG_DIR. Output ONLY the path.'`
  */
-export async function probeConfigDir(binary: string): Promise<string> {
+async function probeConfigDir(binary: string): Promise<string> {
   const cached = cache.get(binary);
   if (cached) return cached;
 

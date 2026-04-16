@@ -38,18 +38,16 @@ The epoch version is auto-detected. This step is COMPULSORY.
 **DO NOT log the event before step 4.** Explicit approval is the only gate.
 `;
 
-const REFINE_LOCAL_PROMPT =
-  `## Strategy: refine_local
+const REFINE_LOCAL_PROMPT = `## Strategy: refine_local
 
 Rewrite ONLY {plan_name} at {plan_path}. Do not touch other plans.
 
 Each plan file MUST follow the template:
 {planTemplate}
 
-` + AMEND_PLANS_COMMON;
+${AMEND_PLANS_COMMON}`;
 
-const PATCH_DOWNSTREAM_PROMPT =
-  `## Strategy: patch_downstream
+const PATCH_DOWNSTREAM_PROMPT = `## Strategy: patch_downstream
 
 Edit ONLY the incomplete plan files. Do not touch completed ones.
 
@@ -62,10 +60,9 @@ Incomplete (to patch):
 Each plan file MUST follow the template:
 {planTemplate}
 
-` + AMEND_PLANS_COMMON;
+${AMEND_PLANS_COMMON}`;
 
-const REGENERATE_REMAINING_PROMPT =
-  `## Strategy: regenerate_remaining
+const REGENERATE_REMAINING_PROMPT = `## Strategy: regenerate_remaining
 
 Rewrite ALL incomplete plan files FROM SCRATCH based on the current spec plus learnings in the resolution doc.
 
@@ -78,7 +75,7 @@ Incomplete (to regenerate):
 Each plan file MUST follow the template:
 {planTemplate}
 
-` + AMEND_PLANS_COMMON;
+${AMEND_PLANS_COMMON}`;
 
 function getStrategyPrompt(decision: Exclude<RewriteDecision, 'retry' | 'revisit_spec'>): string {
   const prompts: Record<typeof decision, string> = {
@@ -172,7 +169,7 @@ export async function handleAmendPlans(ctx: Phase2Context): Promise<string | nul
       kloop_evidence: kloopDescribeOutput || '(no evidence available)',
     });
 
-    const prompt = strategyPrompt + '\n' + userPrompt;
+    const prompt = `${strategyPrompt}\n${userPrompt}`;
 
     // Record step init
     const binary = getAgentBinary('phase2', 'amend_plans');

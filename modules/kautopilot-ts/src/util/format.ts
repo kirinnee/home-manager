@@ -150,16 +150,6 @@ export function stateIcon(state: string): string {
   return STATE_ICONS[state] ?? '●';
 }
 
-// ============================================================================
-// Status formatting
-// ============================================================================
-
-export function formatStatus(state: string, running: boolean): string {
-  if (state === 'init') return `${c.yellow}init-incomplete${c.reset}`;
-  if (running) return `${c.green}running${c.reset}`;
-  return `${c.dim}stopped${c.reset}`;
-}
-
 export function formatPhase(phase: string): string {
   if (!phase || phase === 'none') return `${c.dim}—${c.reset}`;
   return `${c.magenta}${phase}${c.reset}`;
@@ -186,7 +176,11 @@ export function formatStepLine(step: string, status: 'done' | 'active' | 'pendin
 // Repo parsing
 // ============================================================================
 
-export function parseRepoHost(gitRootHost: string): { platform: string; org: string; repo: string } {
+export function parseRepoHost(gitRootHost: string): {
+  platform: string;
+  org: string;
+  repo: string;
+} {
   // Format: github-{platform}/{org}/{repo}
   const match = gitRootHost.match(/^(github-[^/]+)\/(.+)\/(.+)$/);
   if (!match) return { platform: gitRootHost, org: '?', repo: '?' };

@@ -43,13 +43,19 @@ export function tryParseJson(line: string): StreamEvent | null {
 }
 
 /**
- * Normalize Claude and Gemini stream events into kloop's internal event shapes.
+ * Normalize Claude, Gemini, and Codex stream events into kloop's internal event shapes.
  *
  * Gemini event shapes (per spec):
  * - {type: "init", timestamp, session_id, model} -> system init
  * - {type: "message", timestamp, role: "user"|"model", content} -> user/assistant
  * - {type: "result", timestamp, status: "success", stats: {total_tokens, input_tokens, output_tokens, duration_ms}} -> result
  * - {type: "result", timestamp, status: "error", error: {type, message}, stats} -> error
+ *
+ * Codex event shapes (per spec):
+ * - {type: "thread.started", thread_id} -> system init
+ * - {type: "item.completed", item_type: "agent_message", content} -> assistant
+ * - {type: "turn.completed", usage: {input_tokens, output_tokens}} -> result
+ * - {type: "turn.failed", error: {message}} -> error
  */
 function normalizeEvent(obj: unknown): StreamEvent {
   if (!obj || typeof obj !== 'object') {
@@ -144,6 +150,46 @@ function normalizeEvent(obj: unknown): StreamEvent {
     };
   }
 
+  // === Codex error: turn failed ===
+  if (o.type === 'turn.failed' && o.error) {
+    const error = o.error as { message?: string };
+    return { type: 'error', error: { message: error.message ?? 'Unknown error' } };
+  }
+
+  // === Codex session start -> system init ===
+  if (o.type === 'thread.started' && typeof o.thread_id === 'string') {
+    return {
+      type: 'system',
+      subtype: 'init',
+      session_id: o.thread_id,
+      tools: [],
+    };
+  }
+
+  // === Codex assistant message (final only) -> assistant ===
+  if (o.type === 'item.completed' && o.item_type === 'agent_message' && o.content) {
+    return {
+      type: 'assistant',
+      message: {
+        content:
+          typeof o.content === 'string' ? [{ type: 'text', text: o.content }] : (o.content as Array<ContentBlock>),
+      },
+    };
+  }
+
+  // === Codex turn result -> result ===
+  if (o.type === 'turn.completed' && o.usage) {
+    const usage = o.usage as Record<string, unknown>;
+    return {
+      type: 'result',
+      result: {
+        duration_ms: o.duration_ms as number | undefined,
+        input_tokens: usage.input_tokens as number | undefined,
+        output_tokens: usage.output_tokens as number | undefined,
+      },
+    };
+  }
+
   return { type: 'unknown', raw: obj };
 }
 
@@ -187,6 +233,7 @@ export async function extractHarnessSessionId(logFilePath: string): Promise<stri
 /**
  * Parse log content for the harness-native session ID.
  * Gemini emits: {"type":"init","session_id":"..."}
+ * Codex emits: {"type":"thread.started","thread_id":"..."}
  */
 function extractHarnessSessionIdFromContent(content: string): string | undefined {
   for (const line of content.split('\n')) {
@@ -197,6 +244,10 @@ function extractHarnessSessionIdFromContent(content: string): string | undefined
       // Gemini init event
       if (parsed.type === 'init' && typeof parsed.session_id === 'string') {
         return parsed.session_id;
+      }
+      // Codex session ID: thread.started event with thread_id
+      if (parsed.type === 'thread.started' && typeof parsed.thread_id === 'string') {
+        return parsed.thread_id;
       }
     } catch {
       // Skip malformed lines
@@ -221,7 +272,7 @@ export async function extractTokensFromLog(logFilePath: string): Promise<TokenCo
 
 /**
  * Parse log content for the result event and extract token counts.
- * Supports both Claude (usage.*) and Gemini (stats.*) token formats.
+ * Supports Claude (usage.*), Gemini (stats.*), and Codex (turn.completed.usage.*) token formats.
  */
 function extractTokensFromContent(content: string): TokenCounts {
   const result: TokenCounts = {};
@@ -263,6 +314,17 @@ function extractTokensFromContent(content: string): TokenCounts {
 
         // Found the result event, no need to continue
         break;
+      }
+
+      // Codex token format: turn.completed event with usage.input_tokens / usage.output_tokens
+      if (parsed.type === 'turn.completed' && parsed.usage) {
+        const usage = parsed.usage;
+        if (typeof usage.input_tokens === 'number' && result.inputTokens === undefined) {
+          result.inputTokens = usage.input_tokens;
+        }
+        if (typeof usage.output_tokens === 'number' && result.outputTokens === undefined) {
+          result.outputTokens = usage.output_tokens;
+        }
       }
     } catch {
       // Skip malformed lines

@@ -7,6 +7,10 @@
   approval_policy = "on-request";
   sandbox_mode = "workspace-write";
 
+  features = {
+    codex_hooks = true;
+  };
+
   sandbox_workspace_write = {
     network_access = true;
   };

@@ -949,7 +949,7 @@ export class LoopRunner {
 
     const previousSummaryPath =
       iterData.reviewSummaryPath ?? `${this.paths.loopSynthesisPath(runId, loopNum - 1)}/review-summary.md`;
-    const binary = config.prompts?.reSynthesizer ? Object.keys(config.implementers)[0] : undefined;
+    const binary = config.synthesizer;
 
     // Write synthesis_start event (reuses same event type)
     const implParsed = parseImplementerConfig(binary ?? Object.keys(config.implementers)[0]);
@@ -1116,7 +1116,7 @@ export class LoopRunner {
 
     const previousSummaryPath =
       loopNum > 1 ? `${this.paths.loopSynthesisPath(runId, loopNum - 1)}/review-summary.md` : null;
-    const binary = config.prompts?.synthesizer ? Object.keys(config.implementers)[0] : undefined;
+    const binary = config.synthesizer;
 
     // Write synthesis_start event
     const implParsed = parseImplementerConfig(binary ?? Object.keys(config.implementers)[0]);

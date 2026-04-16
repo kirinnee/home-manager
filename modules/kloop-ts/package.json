@@ -9,7 +9,8 @@
     "dev": "bun run ./src/index.ts",
     "build": "bun build ./src/index.ts --outdir ./dist --target bun",
     "test": "bun test",
-    "check": "tsc --noEmit && knip && bun test"
+    "deadcode": "knip --production --use-tsconfig-files",
+    "check": "tsc --noEmit && knip && knip --production --use-tsconfig-files && bun test"
   },
   "dependencies": {
     "@clack/prompts": "^0.11.0",

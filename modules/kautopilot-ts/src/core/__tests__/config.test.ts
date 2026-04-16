@@ -108,25 +108,6 @@ describe('config', () => {
     expect(config.kloop.maxIterations).toBe(7);
   });
 
-  it('pickConfig returns org config when org is set', () => {
-    const { writeFileSync, mkdirSync } = require('node:fs') as typeof import('node:fs');
-    const { pickConfig } = require('../config') as typeof import('../config');
-
-    // Create org config
-    const orgDir = join(tempDir, '.kautopilot/orgs/myorg');
-    mkdirSync(orgDir, { recursive: true });
-    writeFileSync(join(orgDir, 'config.yaml'), 'claude_binary: org-claude\n');
-
-    const result = pickConfig('myorg');
-    expect(result).toContain('myorg');
-  });
-
-  it('pickConfig returns configPathOverride when provided', () => {
-    const { pickConfig } = require('../config') as typeof import('../config');
-    const result = pickConfig('myorg', '/some/custom/path.yaml');
-    expect(result).toBe('/some/custom/path.yaml');
-  });
-
   it('migrates legacy kloop fields from settings when kloop is absent', () => {
     const { writeFileSync, mkdirSync } = require('node:fs') as typeof import('node:fs');
     const { readConfig } = require('../config') as typeof import('../config');

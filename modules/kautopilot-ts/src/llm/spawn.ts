@@ -5,7 +5,7 @@ import { stringify as stringifyYaml } from 'yaml';
 import { nextRunNumber, type RunScope, runDir, runFilePath } from '../core/artifacts';
 
 /** Whether debug logging is enabled (KAUTOPILOT_DEBUG=1). */
-export const DEBUG = !!process.env.KAUTOPILOT_DEBUG;
+const DEBUG = !!process.env.KAUTOPILOT_DEBUG;
 
 /** Debug log — only prints when KAUTOPILOT_DEBUG is set. */
 export function debugLog(...args: unknown[]): void {
@@ -153,7 +153,11 @@ async function spawnCore(
   binary: string,
   prompt: string,
   options?: SpawnPrintOptions,
-): Promise<{ stdout: string; stderr: string; runInfo: RunArtifactInfo | null }> {
+): Promise<{
+  stdout: string;
+  stderr: string;
+  runInfo: RunArtifactInfo | null;
+}> {
   const runScope = resolveRunScope(options);
   const logging = !!runScope;
   const args = [binary, '--print', '--dangerously-skip-permissions'];
@@ -254,23 +258,6 @@ async function spawnCore(
   }
 
   return { stdout: rawStdout.trim(), stderr, runInfo };
-}
-
-export async function spawnPrint<T = unknown>(binary: string, prompt: string, options?: SpawnPrintOptions): Promise<T> {
-  const spinMsg = options?.spinnerMsg;
-  const s = spinMsg && process.stdout.isTTY ? spinner() : null;
-  s?.start(spinMsg as string);
-
-  const { stdout } = await spawnCore(binary, prompt, options);
-
-  s?.stop(spinMsg ?? '');
-
-  try {
-    const cleaned = stripCodeFences(stdout);
-    return JSON.parse(cleaned) as T;
-  } catch {
-    throw new Error(`LLM returned invalid JSON: ${stdout.slice(0, 200)}`);
-  }
 }
 
 export interface SpawnTTYOptions {

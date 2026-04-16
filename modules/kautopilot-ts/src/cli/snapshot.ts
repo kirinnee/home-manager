@@ -139,7 +139,7 @@ function copyDirRecursive(src: string, dest: string): void {
 /**
  * Resolve epoch version: explicit argument > session status.yaml > error.
  */
-export function resolveEpochVersion(sessionId: string, explicitVersion?: number): number {
+function resolveEpochVersion(sessionId: string, explicitVersion?: number): number {
   if (explicitVersion !== undefined) return explicitVersion;
 
   const statusPath = join(sessionDir(sessionId), 'status.yaml');

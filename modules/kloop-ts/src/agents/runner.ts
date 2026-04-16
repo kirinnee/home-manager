@@ -108,6 +108,7 @@ export interface VerifierResult extends AgentResult {
  *
  * Claude: cat "${promptFile}" | claude-auto-zai --dangerously-skip-permissions --verbose --print --session-id "${sessionId}" --output-format stream-json 2>&1 | tee "${logFile}" | kloop stream
  * Gemini: gemini-auto --yolo --output-format stream-json -p "$(cat "${promptFile}")" 2>&1 | tee "${logFile}" | kloop stream
+ * Codex:  cat "${promptFile}" | codex-auto exec --full-auto --json --ephemeral --skip-git-repo-check -c sandbox_workspace_write.network_access=true 2>&1 | tee "${logFile}" | kloop stream
  */
 function buildAgentCommand(params: {
   binary: string;
@@ -121,6 +122,12 @@ function buildAgentCommand(params: {
   if (harness === 'claude') {
     // Claude: injects kloop session ID as --session-id
     return `cat "${promptFile}" | ${binary} --dangerously-skip-permissions --verbose --print --session-id "${sessionId}" --output-format stream-json 2>&1 | tee "${logFile}" | ${KLOOP_BIN} stream`;
+  } else if (harness === 'codex') {
+    // Codex: exec subcommand, --full-auto, --json, --ephemeral, stdin prompt
+    // --skip-git-repo-check: kloop workspaces may not be git repos
+    // -c sandbox_workspace_write.network_access=true: keep workspace-write FS
+    // sandbox but allow network so installs (bun/npm/pip/etc.) work
+    return `cat "${promptFile}" | ${binary} exec --full-auto --json --ephemeral --skip-git-repo-check -c sandbox_workspace_write.network_access=true 2>&1 | tee "${logFile}" | ${KLOOP_BIN} stream`;
   } else {
     // Gemini: no session ID injection, pipe prompt via stdin (avoids shell arg length limits)
     return `cat "${promptFile}" | ${binary} --yolo --output-format stream-json -p "" 2>&1 | tee "${logFile}" | ${KLOOP_BIN} stream`;
@@ -599,8 +606,8 @@ export class AgentRunner {
   }): Promise<SynthesizerResult> {
     const { runId, iteration, dirHash, binary: overrideBinary, previousSummaryPath, timeout } = params;
 
-    // Use first implementer binary by default, or override
-    const implBinaryName = overrideBinary ?? getPrimaryImplementer(this.config);
+    // Use synthesizer binary from config, first implementer as fallback, or override
+    const implBinaryName = overrideBinary ?? this.config.synthesizer ?? getPrimaryImplementer(this.config);
     const parsed = parseImplementerConfig(implBinaryName);
 
     const sessionId = generateId();
@@ -682,7 +689,7 @@ export class AgentRunner {
   }): Promise<SynthesizerResult> {
     const { runId, iteration, dirHash, binary: overrideBinary, previousSummaryPath, timeout } = params;
 
-    const implBinaryName = overrideBinary ?? getPrimaryImplementer(this.config);
+    const implBinaryName = overrideBinary ?? this.config.synthesizer ?? getPrimaryImplementer(this.config);
     const parsed = parseImplementerConfig(implBinaryName);
 
     const sessionId = generateId();

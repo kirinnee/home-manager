@@ -7,17 +7,17 @@ import type { LogEntry } from './types';
 // Directory-based log operations
 // ============================================================================
 
-export function logPathForDir(dir: string): string {
+function logPathForDir(dir: string): string {
   return join(dir, 'log.jsonl');
 }
 
-export function appendEventToDir(dir: string, entry: LogEntry): void {
+function appendEventToDir(dir: string, entry: LogEntry): void {
   const path = logPathForDir(dir);
   mkdirSync(dirname(path), { recursive: true });
   appendFileSync(path, `${JSON.stringify(entry)}\n`);
 }
 
-export function readLogFromDir(dir: string): LogEntry[] {
+function readLogFromDir(dir: string): LogEntry[] {
   const path = logPathForDir(dir);
   if (!existsSync(path)) return [];
   const raw = readFileSync(path, 'utf-8');
@@ -32,14 +32,6 @@ export function readLogFromDir(dir: string): LogEntry[] {
     }
   }
   return entries;
-}
-
-// ============================================================================
-// Session log operations (backward compatible)
-// ============================================================================
-
-export function logPath(id: string): string {
-  return logPathForDir(sessionDir(id));
 }
 
 export function appendEvent(id: string, entry: LogEntry): void {
