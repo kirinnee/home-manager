@@ -57,6 +57,14 @@ describe('devloop helpers', () => {
         compressSpec: false,
         firstLoopFullReview: false,
         previousReviewPropagation: 0,
+        synthesis: true,
+        synthesisTimeout: 15,
+        verify: true,
+        verifyPhases: [['claude:claude']],
+        verifyTimeout: 5,
+        rerankAfterCheckpoint: true,
+        implementerRetry: { maxRetries: 2, backoffBaseMs: 5000 },
+        firstIterationWeightMultiplier: 2,
       });
       expect(existsSync(configPath)).toBe(true);
       const content = readFileSync(configPath, 'utf-8');
@@ -82,6 +90,14 @@ describe('devloop helpers', () => {
         compressSpec: false,
         firstLoopFullReview: false,
         previousReviewPropagation: 0,
+        synthesis: true,
+        synthesisTimeout: 15,
+        verify: true,
+        verifyPhases: [['claude:claude']],
+        verifyTimeout: 5,
+        rerankAfterCheckpoint: true,
+        implementerRetry: { maxRetries: 2, backoffBaseMs: 5000 },
+        firstIterationWeightMultiplier: 2,
         prompts: {
           implementer: 'Custom implementer prompt',
           reviewer: 'Custom reviewer prompt',

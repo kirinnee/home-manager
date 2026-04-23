@@ -79,20 +79,36 @@ export function writeKloopConfig(kautopilotSessionId: string, kloopConfig: Kloop
   const implementers = resolveDefaultBinary(kloopConfig.implementers, binary);
   const reviewPhases = kloopConfig.reviewPhases.map(phase => phase.map(r => (r === 'claude' ? binary : r)));
 
+  const verifyPhases = kloopConfig.verifyPhases.map(phase =>
+    phase.map(r => (r === 'claude' ? binary : r === 'claude:claude' ? `${binary}:claude` : r)),
+  );
+
   const yamlObj: Record<string, unknown> = {
     implementers,
     reviewPhases,
     maxIterations: kloopConfig.maxIterations,
     implementerTimeout: kloopConfig.implementerTimeout,
     reviewerTimeout: kloopConfig.reviewerTimeout,
+    synthesisTimeout: kloopConfig.synthesisTimeout,
+    verifyTimeout: kloopConfig.verifyTimeout,
     conflictCheckThreshold: kloopConfig.conflictCheckThreshold,
     compressSpec: kloopConfig.compressSpec,
     firstLoopFullReview: kloopConfig.firstLoopFullReview,
     previousReviewPropagation: kloopConfig.previousReviewPropagation,
+    synthesis: kloopConfig.synthesis,
+    verify: kloopConfig.verify,
+    verifyPhases,
+    rerankAfterCheckpoint: kloopConfig.rerankAfterCheckpoint,
+    implementerRetry: kloopConfig.implementerRetry,
+    firstIterationWeightMultiplier: kloopConfig.firstIterationWeightMultiplier,
   };
 
   if (kloopConfig.conflictChecker) {
     yamlObj.conflictChecker = kloopConfig.conflictChecker;
+  }
+
+  if (kloopConfig.synthesizer) {
+    yamlObj.synthesizer = kloopConfig.synthesizer;
   }
 
   if (kloopConfig.prompts) {

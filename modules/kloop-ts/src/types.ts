@@ -299,10 +299,11 @@ export interface ReviewerBinary extends ParsedBinary {
  * Validate a harness type string.
  * @throws if the harness value is not 'claude', 'gemini', or 'codex'
  */
-function parseHarness(value: string): HarnessType {
+function parseHarness(value: string, fallback = false): HarnessType {
   if (value === 'claude' || value === 'gemini' || value === 'codex') {
     return value;
   }
+  if (fallback) return 'claude';
   throw new Error(`Invalid harness type: "${value}". Must be "claude", "gemini", or "codex".`);
 }
 
@@ -336,8 +337,10 @@ export function parseImplementerConfig(entry: string): ParsedBinary {
 
   const colonIndex = working.indexOf(':');
   if (colonIndex === -1) {
-    // Legacy format: bare binary name defaults to Claude harness
-    return { binary: working, harness: 'claude', firstIterationPreferred };
+    // No explicit harness — guess from first segment of binary name
+    const prefix = working.split('-')[0] ?? '';
+    const harness = parseHarness(prefix, true);
+    return { binary: working, harness, firstIterationPreferred };
   }
 
   if (colonIndex === 0) {

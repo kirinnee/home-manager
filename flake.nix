@@ -26,7 +26,7 @@
 
     home-manager-modules.url = "github:kirinnee/home-manager-modules";
     llm-agents.url = "github:numtide/llm-agents.nix";
-    llm-agents-codex118.url = "github:numtide/llm-agents.nix/119a47fd760dd951fd102f7ea9d1d682953b4e03";
+    claude-code.url = "github:sadjow/claude-code-nix";
     loctl.url = "path:/Users/erng/Workspace/work/vungle/loctl";
   };
 
@@ -45,7 +45,7 @@
     , nix-homebrew
     , home-manager-modules
     , llm-agents
-    , llm-agents-codex118
+    , claude-code
     , loctl
     ,
     }@inputs:
@@ -74,7 +74,7 @@
               pre-commit-lib = pre-commit-hooks.lib.${system};
               atomi = atomipkgs.packages.${system};
               pkgs-llm = llm-agents.packages.${system};
-              codex118 = llm-agents-codex118.packages.${system}.codex;
+              claude-code-pkg = claude-code.packages.${system}.claude-code;
               pkgs-loctl = loctl.packages.${system};
             in
             let
@@ -97,7 +97,7 @@
                   inherit
                     atomi
                     pkgs-llm
-                    codex118
+                    claude-code-pkg
                     pkgs-loctl
                     profile
                     pkgs-240924
@@ -131,7 +131,7 @@
               };
               atomi = atomipkgs.packages.${system};
               pkgs-llm = llm-agents.packages.${system};
-              codex118 = llm-agents-codex118.packages.${system}.codex;
+              claude-code-pkg = claude-code.packages.${system}.claude-code;
               pkgs-loctl = loctl.packages.${system};
             in
             let
@@ -168,7 +168,7 @@
                       inherit
                         atomi
                         pkgs-llm
-                        codex118
+                        claude-code-pkg
                         pkgs-loctl
                         profile
                         pkgs-240924

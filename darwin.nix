@@ -8,7 +8,8 @@
 
   homebrew = {
     enable = true;
-    brews = [ ];
+    taps = [ "tuannvm/mcp" ];
+    brews = [ "tuannvm/mcp/clotch-agent" "zeroclaw" ];
     casks = [
       "firefox"
       "cursor"
@@ -36,6 +37,7 @@
       "microsoft-edge"
       "finicky"
       "clickup"
+      "tuannvm/mcp/clotch"
     ];
     masApps = { };
   };

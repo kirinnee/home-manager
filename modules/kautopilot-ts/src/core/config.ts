@@ -120,8 +120,10 @@ const KLOOP_PROMPT_VARS: Record<string, Record<string, string>> = {
     specPath: 'path to the spec file',
     iteration: 'current loop number',
     reviewsDir: "path to previous loop's reviews/ folder (empty for loop 1)",
+    reviewSummaryPath: "path to previous loop's review-summary.md (loop 2+)",
     evidenceDir: 'path to evidence/ folder',
     learningsFile: 'path to learnings.md',
+    scratchDir: "path to .kloop/scratch/ in agent's CWD",
   },
   reviewer: {
     specPath: 'path to the spec file',
@@ -131,24 +133,60 @@ const KLOOP_PROMPT_VARS: Record<string, Record<string, string>> = {
     verdictsDir: 'path to verdicts/ folder (write verdict .json here)',
     evidenceDir: 'path to evidence/ folder',
     learningsFile: 'path to learnings.md',
-    archivedReviews: 'conditional block for previous loop reviews',
+    previousSummaryPath: "path to previous loop's review-summary.md (loop 2+)",
+    scratchDir: "path to .kloop/scratch/ in agent's CWD",
   },
   checkpointer: {
     specPath: 'path to the spec file',
     iteration: 'current loop number',
     reviewsDir: "path to current loop's reviews/",
     archivedReviewsPattern: 'glob pattern for all previous loop reviews',
+    archivedSummariesPattern: 'glob pattern for all loop synthesis summaries',
     conflictFile: 'path to run-level conflict.md',
     checkpointResultFile: 'path to checkpoint-result.json',
+    scratchDir: "path to .kloop/scratch/ in agent's CWD",
   },
   checkpointerFull: {
     specPath: 'path to the spec file',
     iteration: 'current loop number',
     reviewsDir: "path to current loop's reviews/",
     archivedReviewsPattern: 'glob pattern for all previous loop reviews',
+    archivedSummariesPattern: 'glob pattern for all loop synthesis summaries',
     conflictFile: 'path to run-level conflict.md',
     checkpointResultFile: 'path to checkpoint-result.json',
-    specBackupFile: 'path to spec-backup.md (used during compression)',
+    scratchDir: "path to .kloop/scratch/ in agent's CWD",
+  },
+  synthesizer: {
+    specPath: 'path to the spec file',
+    iteration: 'current loop number',
+    reviewsDir: 'path to reviews/ folder',
+    verdictsDir: 'path to verdicts/ folder',
+    previousSummaryPath: "path to previous loop's review-summary.md",
+    summaryOutputPath: 'path to write review-summary.md',
+    learningsFile: 'path to learnings.md',
+    evidenceDir: 'path to evidence/ folder',
+    scratchDir: "path to .kloop/scratch/ in agent's CWD",
+  },
+  verifier: {
+    specPath: 'path to the spec file',
+    iteration: 'current loop number',
+    previousSummaryPath: "path to previous loop's review-summary.md",
+    reviewsDir: 'path to reviews/ folder',
+    verdictsDir: 'path to verdicts/ folder',
+    evidenceDir: 'path to evidence/ folder',
+    learningsFile: 'path to learnings.md',
+    verifierIndex: 'which verifier this is',
+    scratchDir: "path to .kloop/scratch/ in agent's CWD",
+  },
+  reSynthesizer: {
+    specPath: 'path to the spec file',
+    iteration: 'current loop number',
+    previousSummaryPath: "path to previous loop's review-summary.md",
+    verifyDir: 'path to verify/ folder',
+    verdictsDir: 'path to verdicts/ folder',
+    summaryOutputPath: 'path to write review-summary.md',
+    learningsFile: 'path to learnings.md',
+    scratchDir: "path to .kloop/scratch/ in agent's CWD",
   },
 };
 
@@ -173,7 +211,9 @@ export function serializeConfigWithComments(config: Config): string {
       for (const agent of ['triage', 'spec_writer', 'plan_writer'] as const) {
         const path = `agents.phase1.${agent}`;
         lines.push(`    ${agent}:`);
-        lines.push(createPromptBlock(path, (p1[agent] as { prompt: string }).prompt, 6));
+        const cfg = p1[agent] as { prompt: string; binary?: string };
+        if (cfg.binary) lines.push(`      binary: ${cfg.binary}`);
+        lines.push(createPromptBlock(path, cfg.prompt, 6));
       }
       // spec_reviewers
       lines.push('    spec_reviewers:');
@@ -181,6 +221,12 @@ export function serializeConfigWithComments(config: Config): string {
         const path = 'agents.phase1.spec_reviewers.*';
         lines.push(`      ${name}:`);
         lines.push(`        desc: ${JSON.stringify(reviewer.desc)}`);
+        if (reviewer.binaries && reviewer.binaries.length > 0) {
+          lines.push(`        binaries: [${reviewer.binaries.join(', ')}]`);
+        }
+        if (reviewer.timeout !== undefined) {
+          lines.push(`        timeout: ${reviewer.timeout}`);
+        }
         const varComments = buildVarComments(path);
         // Variable comments go BEFORE prompt: as YAML comments
         if (varComments) {
@@ -195,6 +241,12 @@ export function serializeConfigWithComments(config: Config): string {
         const path = 'agents.phase1.plan_reviewers.*';
         lines.push(`      ${name}:`);
         lines.push(`        desc: ${JSON.stringify(reviewer.desc)}`);
+        if (reviewer.binaries && reviewer.binaries.length > 0) {
+          lines.push(`        binaries: [${reviewer.binaries.join(', ')}]`);
+        }
+        if (reviewer.timeout !== undefined) {
+          lines.push(`        timeout: ${reviewer.timeout}`);
+        }
         const varComments = buildVarComments(path);
         // Variable comments go BEFORE prompt: as YAML comments
         if (varComments) {
@@ -204,28 +256,32 @@ export function serializeConfigWithComments(config: Config): string {
         lines.push(indentLines(reviewer.prompt, 10));
       }
     } else if (phaseKey === 'phase2' || phaseKey === 'phase3') {
-      for (const [agentName, agentConfig] of Object.entries(phaseAgents as Record<string, { prompt: string }>) as [
-        string,
-        { prompt: string },
-      ][]) {
+      for (const [agentName, agentConfig] of Object.entries(
+        phaseAgents as Record<string, { prompt: string; binary?: string }>,
+      ) as [string, { prompt: string; binary?: string }][]) {
         const path = `agents.${phaseKey}.${agentName}`;
         lines.push(`    ${agentName}:`);
+        if (agentConfig.binary) lines.push(`      binary: ${agentConfig.binary}`);
         lines.push(createPromptBlock(path, agentConfig.prompt, 6));
       }
     } else if (phaseKey === 'init') {
-      for (const [agentName, agentConfig] of Object.entries(phaseAgents as Record<string, { prompt: string }>) as [
-        string,
-        { prompt: string },
-      ][]) {
+      for (const [agentName, agentConfig] of Object.entries(
+        phaseAgents as Record<string, { prompt: string; binary?: string }>,
+      ) as [string, { prompt: string; binary?: string }][]) {
         const path = `agents.init.${agentName}`;
         lines.push(`    ${agentName}:`);
+        if (agentConfig.binary) lines.push(`      binary: ${agentConfig.binary}`);
         lines.push(createPromptBlock(path, agentConfig.prompt, 6));
       }
     } else if (phaseKey === 'generic') {
       const genericAgents = phaseAgents as Config['agents']['generic'];
-      for (const [agentName, agentConfig] of Object.entries(genericAgents) as [string, { prompt: string }][]) {
+      for (const [agentName, agentConfig] of Object.entries(genericAgents) as [
+        string,
+        { prompt: string; binary?: string },
+      ][]) {
         const path = `agents.generic.${agentName}`;
         lines.push(`    ${agentName}:`);
+        if (agentConfig.binary) lines.push(`      binary: ${agentConfig.binary}`);
         lines.push(createPromptBlock(path, agentConfig.prompt, 6));
       }
     }
@@ -253,13 +309,29 @@ export function serializeConfigWithComments(config: Config): string {
   if (config.kloop.conflictChecker) {
     lines.push(`  conflictChecker: ${config.kloop.conflictChecker}`);
   }
+  if (config.kloop.synthesizer) {
+    lines.push(`  synthesizer: ${config.kloop.synthesizer}`);
+  }
   lines.push(`  maxIterations: ${config.kloop.maxIterations}`);
   lines.push(`  implementerTimeout: ${config.kloop.implementerTimeout}`);
   lines.push(`  reviewerTimeout: ${config.kloop.reviewerTimeout}`);
+  lines.push(`  synthesisTimeout: ${config.kloop.synthesisTimeout}`);
+  lines.push(`  verifyTimeout: ${config.kloop.verifyTimeout}`);
   lines.push(`  conflictCheckThreshold: ${config.kloop.conflictCheckThreshold}`);
   lines.push(`  compressSpec: ${config.kloop.compressSpec}`);
   lines.push(`  firstLoopFullReview: ${config.kloop.firstLoopFullReview}`);
   lines.push(`  previousReviewPropagation: ${config.kloop.previousReviewPropagation}`);
+  lines.push(`  synthesis: ${config.kloop.synthesis}`);
+  lines.push(`  verify: ${config.kloop.verify}`);
+  lines.push(`  verifyPhases:`);
+  for (const phase of config.kloop.verifyPhases) {
+    lines.push(`    - [${phase.join(', ')}]`);
+  }
+  lines.push(`  rerankAfterCheckpoint: ${config.kloop.rerankAfterCheckpoint}`);
+  lines.push(`  implementerRetry:`);
+  lines.push(`    maxRetries: ${config.kloop.implementerRetry.maxRetries}`);
+  lines.push(`    backoffBaseMs: ${config.kloop.implementerRetry.backoffBaseMs}`);
+  lines.push(`  firstIterationWeightMultiplier: ${config.kloop.firstIterationWeightMultiplier}`);
   // Kloop prompts section — uses raw string values, not nested objects
   if (config.kloop.prompts) {
     lines.push('  prompts:');
@@ -294,7 +366,14 @@ export function serializeConfigWithComments(config: Config): string {
   if (config.repo.org) lines.push(`  org: ${config.repo.org}`);
   lines.push(`  baseBranch: ${config.repo.baseBranch}`);
   lines.push(`  ticketSystem: ${config.repo.ticketSystem ?? 'null'}`);
-  lines.push(`  prComment: ${config.repo.prComment ?? 'null'}`);
+  if (config.repo.prComment == null) {
+    lines.push('  prComment: null');
+  } else if (config.repo.prComment.includes('\n')) {
+    lines.push('  prComment: |');
+    lines.push(indentLines(config.repo.prComment.replace(/\n+$/, ''), 4));
+  } else {
+    lines.push(`  prComment: ${JSON.stringify(config.repo.prComment)}`);
+  }
 
   return `${lines.join('\n')}\n`;
 }

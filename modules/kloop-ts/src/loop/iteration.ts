@@ -40,6 +40,7 @@ export function buildIterationData(
 
   // Implementer: always gets previous loop context (no roll).
   // synthesis on → summary only; synthesis off → raw reviews folder
+  const scratchDir = paths.scratchDir(process.cwd());
   const implVars: ImplementerPromptVars = {
     specPath,
     iteration: String(run.iteration),
@@ -47,6 +48,7 @@ export function buildIterationData(
     evidenceDir,
     learningsFile,
     reviewSummaryPath: reviewSummaryPath ?? undefined,
+    scratchDir,
   };
 
   const implementerPrompt = buildImplementerPrompt(config.prompts?.implementer, implVars);
@@ -69,6 +71,7 @@ export function buildIterationData(
       learningsFile,
       archivedReviews: seesPrev && !config.synthesis ? paths.loopReviewsPath(runId, prevLoop) : null,
       previousSummaryPath: seesPrev && config.synthesis ? (reviewSummaryPath ?? undefined) : undefined,
+      scratchDir,
     };
     return {
       reviewerIndex: i,
