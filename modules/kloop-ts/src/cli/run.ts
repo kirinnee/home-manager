@@ -204,6 +204,17 @@ export async function handler(runId: string | undefined, opts: { detach?: boolea
       if (cleanedUp) return;
       cleanedUp = true;
       try {
+        // Force-promote pending scratch files before exit
+        const scratchDir = path.join(process.cwd(), '.kloop', 'scratch');
+        const fsPromises = await import('fs/promises');
+        try {
+          await fsPromises.access(scratchDir);
+          console.log(`Received ${signal}, force-promoting scratch files before exit`);
+          await agentRunner.promoteScratchFiles({ scratchDir });
+        } catch {
+          // No scratch dir — nothing to promote
+        }
+
         // Kill tmux sessions linked to this run
         await killRunTmuxSessions(tmux, runId);
         await eventLog.append(runId, {

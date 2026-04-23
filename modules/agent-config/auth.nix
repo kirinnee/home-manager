@@ -23,7 +23,7 @@ rec {
       sonnet = "claude-sonnet-4-6";
       haiku = "claude-haiku-4-5-20251001";
       models = [
-        { id = "claude-opus-4-6"; name = "opus46"; }
+        { id = "claude-opus-4-7"; name = "opus47"; }
         { id = "claude-sonnet-4-6"; name = "sonnet46"; }
         { id = "claude-haiku-4-5-20251001"; name = "haiku45"; }
       ];

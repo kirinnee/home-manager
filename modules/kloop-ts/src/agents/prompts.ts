@@ -32,6 +32,7 @@ export interface ImplementerPromptVars {
   evidenceDir: string;
   learningsFile: string;
   reviewSummaryPath?: string;
+  scratchDir: string;
 }
 
 export function buildImplementerPrompt(template: string | undefined, vars: ImplementerPromptVars): string {
@@ -55,6 +56,7 @@ export interface ReviewerPromptVars {
   learningsFile: string;
   archivedReviews: string | null; // path to previous loop's reviews, or null
   previousSummaryPath?: string; // path to previous loop's review-summary.md
+  scratchDir: string;
 }
 
 export function buildReviewerPrompt(template: string | undefined, vars: ReviewerPromptVars): string {
@@ -80,6 +82,7 @@ export interface CheckpointerPromptVars {
   archivedSummariesPattern: string;
   conflictFile: string;
   checkpointResultFile: string;
+  scratchDir: string;
 }
 
 export function buildCheckpointerPrompt(
@@ -109,6 +112,7 @@ export interface SynthesizerPromptVars {
   summaryOutputPath: string;
   learningsFile: string;
   evidenceDir: string;
+  scratchDir: string;
 }
 
 export function buildSynthesizerPrompt(template: string | undefined, vars: SynthesizerPromptVars): string {
@@ -128,6 +132,7 @@ export interface VerifierPromptVars {
   evidenceDir: string;
   learningsFile: string;
   verifierIndex: string;
+  scratchDir: string;
 }
 
 export function buildVerifierPrompt(template: string | undefined, vars: VerifierPromptVars): string {
@@ -146,6 +151,7 @@ export interface ReSynthesisPromptVars {
   verdictsDir: string;
   summaryOutputPath: string;
   learningsFile: string;
+  scratchDir: string;
 }
 
 export function buildReSynthesisPrompt(template: string | undefined, vars: ReSynthesisPromptVars): string {

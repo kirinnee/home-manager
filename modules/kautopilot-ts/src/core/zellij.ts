@@ -19,8 +19,11 @@ export function isZellijSessionAlive(sessionId: string): boolean {
 export function killZellijSession(sessionId: string): boolean {
   const name = zellijSessionName(sessionId);
   try {
-    const result = Bun.spawnSync(['zellij', 'kill-session', name]);
-    return result.exitCode === 0;
+    const kill = Bun.spawnSync(['zellij', 'kill-session', name]);
+    if (kill.exitCode === 0) return true;
+    // Session may be EXITED (serialized) — needs delete-session instead
+    const del = Bun.spawnSync(['zellij', 'delete-session', name]);
+    return del.exitCode === 0;
   } catch {
     return false;
   }

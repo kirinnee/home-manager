@@ -2,7 +2,7 @@
 , pkgs
 , lib
 , pkgs-llm
-, codex118
+, claude-code-pkg
 , pkgs-loctl
 , pkgs-240924
 , pkgs-stable
@@ -116,7 +116,7 @@ rec {
   # Claude multi-account configuration
   programs.claude-multi = {
     enable = true;
-    defaultPackage = pkgs-llm.claude-code;
+    defaultPackage = claude-code-pkg;
     defaultAccount = "personal";
 
     smartWrapper.enable = true;
@@ -128,7 +128,7 @@ rec {
 
     shellIntegration = {
       functions = false;
-      showActive = true;
+      showActive = false;
     };
 
     accounts = {
@@ -140,7 +140,7 @@ rec {
   # Codex multi-account configuration
   programs.multi-codex = {
     enable = true;
-    defaultPackage = (codex118.overrideAttrs (old: {
+    defaultPackage = (pkgs-llm.codex.overrideAttrs (old: {
       nativeBuildInputs = old.nativeBuildInputs ++ [ pkgs.llvmPackages.libclang ];
       env = (old.env or { }) // {
         LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
@@ -152,7 +152,7 @@ rec {
 
     shellIntegration = {
       functions = false;
-      showActive = true;
+      showActive = false;
     };
 
     accounts = {
@@ -193,7 +193,7 @@ rec {
 
     shellIntegration = {
       functions = false;
-      showActive = true;
+      showActive = false;
     };
 
     accounts = {
@@ -212,7 +212,7 @@ rec {
 
     shellIntegration = {
       functions = false;
-      showActive = true;
+      showActive = false;
     };
 
     accounts = {

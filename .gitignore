@@ -6,3 +6,4 @@ secrets.yaml
 result
 .kagent/
 **/node_modules/
+.playwright-mcp/

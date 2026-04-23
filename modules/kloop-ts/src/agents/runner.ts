@@ -3,7 +3,7 @@ import * as path from 'path';
 import type { Config, Verdict, HarnessType } from '../types';
 import { getPrimaryImplementer, selectImplementer } from '../types';
 import type { TmuxService, StateService } from '../deps';
-import { generateId, paths } from '../deps';
+import { generateId, paths, getKloopHome } from '../deps';
 import * as verdicts from './verdicts';
 import {
   buildCheckpointerPrompt,
@@ -25,6 +25,26 @@ import { parseImplementerConfig, parseReviewerConfig, parseConflictCheckerConfig
 // Path to kloop binary — use process.argv[1] (the running script) instead of
 // import.meta.dir so it survives nix store path changes after rebuilds.
 const KLOOP_BIN = `bun run ${process.argv[1]}`;
+
+// ============================================================================
+// Scratch Artifact Protocol types
+// ============================================================================
+
+export interface ScratchMeta {
+  artifact: string;
+  role: string;
+  index?: number;
+  runId: string;
+  loop: number;
+  phase?: number;
+  timestamp: string;
+}
+
+export interface PromotionResult {
+  promoted: number;
+  skipped: number;
+  errors: number;
+}
 
 // ============================================================================
 // Agent Result types
@@ -237,6 +257,10 @@ export class AgentRunner {
     // Clean up prompt file
     await this.cleanupPromptFile(promptFile);
 
+    // Promote any scratch files from the implementer (learnings, evidence)
+    const scratchDir = path.join(process.cwd(), '.kloop', 'scratch');
+    await this.promoteScratchFiles({ scratchDir });
+
     // Read learnings from global run dir
     let learnings = '';
     try {
@@ -399,6 +423,10 @@ export class AgentRunner {
       timeoutMins: timeout,
     });
 
+    // Promote any scratch files from this reviewer (verdict, review)
+    const scratchDir = path.join(process.cwd(), '.kloop', 'scratch');
+    await this.promoteScratchFiles({ scratchDir });
+
     // Determine verdict — read from verdicts/ directory
     const verdictsDir = paths.loopVerdictsPath(runId, iteration);
     const verdictContent = await this.safeReadFile(path.join(verdictsDir, `reviewer-${reviewerIndex}.json`));
@@ -493,6 +521,7 @@ export class AgentRunner {
       archivedSummariesPattern: `${paths.runPath(runId)}/loop-*/synthesis/review-summary.md`,
       conflictFile: `${paths.runPath(runId)}/conflict.md`,
       checkpointResultFile: `${paths.loopCheckpointerPath(runId, iteration)}/checkpoint-result.json`,
+      scratchDir: paths.scratchDir(process.cwd()),
     };
 
     const prompt = buildCheckpointerPrompt(
@@ -528,6 +557,10 @@ export class AgentRunner {
       cwd: process.cwd(),
       timeoutMins: timeout,
     });
+
+    // Promote any scratch files from the checkpointer (checkpoint-result, conflict)
+    const scratchDir = path.join(process.cwd(), '.kloop', 'scratch');
+    await this.promoteScratchFiles({ scratchDir });
 
     // Read checkpoint result file from checkpointer directory
     const checkpointResultPath = `${checkpointerDir}/checkpoint-result.json`;
@@ -623,6 +656,7 @@ export class AgentRunner {
       summaryOutputPath: this.pathsImpl.loopSynthesisPath(runId, iteration),
       learningsFile: this.pathsImpl.runLearnings(runId),
       evidenceDir: this.pathsImpl.loopEvidencePath(runId, iteration),
+      scratchDir: paths.scratchDir(process.cwd()),
     };
 
     const prompt = buildSynthesizerPrompt(this.config.prompts?.synthesizer, synthVars);
@@ -652,6 +686,10 @@ export class AgentRunner {
     });
 
     await this.cleanupPromptFile(promptFile);
+
+    // Promote any scratch files from the synthesizer (review-summary)
+    const scratchDir = path.join(process.cwd(), '.kloop', 'scratch');
+    await this.promoteScratchFiles({ scratchDir });
 
     // Check if review-summary.md was created
     const summaryPath = path.join(synthDir, 'review-summary.md');
@@ -703,6 +741,7 @@ export class AgentRunner {
       verdictsDir: this.pathsImpl.loopVerdictsPath(runId, iteration),
       summaryOutputPath: this.pathsImpl.loopSynthesisPath(runId, iteration),
       learningsFile: this.pathsImpl.runLearnings(runId),
+      scratchDir: paths.scratchDir(process.cwd()),
     };
 
     const prompt = buildReSynthesisPrompt(this.config.prompts?.reSynthesizer, reSynthVars);
@@ -731,6 +770,10 @@ export class AgentRunner {
     });
 
     await this.cleanupPromptFile(promptFile);
+
+    // Promote any scratch files from the re-synthesizer (review-summary)
+    const reSynthScratchDir = path.join(process.cwd(), '.kloop', 'scratch');
+    await this.promoteScratchFiles({ scratchDir: reSynthScratchDir });
 
     const summaryPath = path.join(synthDir, 'review-summary.md');
     const summaryExists = await this.safeFileExists(summaryPath);
@@ -846,6 +889,10 @@ export class AgentRunner {
       timeoutMins: timeout,
     });
 
+    // Promote any scratch files from the verifier (verdict)
+    const scratchDir = path.join(process.cwd(), '.kloop', 'scratch');
+    await this.promoteScratchFiles({ scratchDir });
+
     // Read verdict from the verify verdicts dir
     const verdictsDir = paths.loopVerdictsPath(runId, iteration);
     const verdictContent = await this.safeReadFile(path.join(verdictsDir, `verifier-${reviewerIndex}.json`));
@@ -905,6 +952,113 @@ export class AgentRunner {
    */
   getVerifyPhases(): string[][] {
     return this.config.verifyPhases ?? [];
+  }
+
+  // -----------------------------------------------------------------------
+  // Scratch Artifact Protocol
+  // -----------------------------------------------------------------------
+
+  /**
+   * Promote scratch files from .kloop/scratch/ to their correct global paths.
+   * Only promotes files that have a valid .meta companion (signals completion).
+   */
+  async promoteScratchFiles(params: { scratchDir: string }): Promise<PromotionResult> {
+    const { scratchDir } = params;
+    let promoted = 0,
+      skipped = 0,
+      errors = 0;
+
+    // 1. List all .meta files in scratch dir
+    const entries = await fs.readdir(scratchDir).catch(() => [] as string[]);
+    const metaFiles = entries.filter(e => e.endsWith('.meta'));
+
+    for (const metaFile of metaFiles) {
+      const metaPath = path.join(scratchDir, metaFile);
+      const contentFile = metaPath.replace(/\.meta$/, '');
+
+      // 2. Read and validate metadata
+      const metaContent = await this.safeReadFile(metaPath);
+      if (!metaContent) {
+        skipped++;
+        continue;
+      }
+
+      let meta: ScratchMeta;
+      try {
+        meta = JSON.parse(metaContent);
+      } catch {
+        errors++;
+        continue;
+      }
+
+      // 3. Check content file exists (incomplete writes have no content yet)
+      const contentExists = await this.safeFileExists(contentFile);
+      if (!contentExists) {
+        skipped++;
+        continue;
+      }
+
+      // 4. Resolve destination path from metadata + content filename
+      const contentBasename = path.basename(contentFile);
+      const destPath = this.resolveScratchDestination(meta, contentBasename);
+      if (!destPath) {
+        errors++;
+        continue;
+      }
+
+      // 5. Ensure destination directory exists and copy
+      try {
+        await fs.mkdir(path.dirname(destPath), { recursive: true });
+        await fs.copyFile(contentFile, destPath);
+        promoted++;
+      } catch (err) {
+        errors++;
+        console.log(`Warning: failed to promote scratch file ${contentFile}: ${err}`);
+      }
+    }
+
+    if (promoted > 0 || errors > 0) {
+      console.log(`  scratch: promoted ${promoted}, skipped ${skipped}, errors ${errors}`);
+    }
+
+    return { promoted, skipped, errors };
+  }
+
+  /**
+   * Resolve the destination path for a scratch file based on its metadata and filename.
+   */
+  private resolveScratchDestination(meta: ScratchMeta, contentBasename: string): string | null {
+    const { artifact, role, index, runId, loop } = meta;
+    const home = getKloopHome();
+
+    if (artifact === 'verdict' && role === 'reviewer') {
+      return path.join(home, runId, `loop-${loop}`, 'verdicts', `reviewer-${index ?? 0}.json`);
+    }
+    if (artifact === 'verdict' && role === 'verifier') {
+      return path.join(home, runId, `loop-${loop}`, 'verdicts', `verifier-${index ?? 0}.json`);
+    }
+    if (artifact === 'review' && role === 'reviewer') {
+      return path.join(home, runId, `loop-${loop}`, 'reviews', `reviewer-${index ?? 0}.md`);
+    }
+    if (artifact === 'evidence' && role === 'implementer') {
+      // Derive qualifier from content filename: evidence-self-review.md -> self-review.md
+      const qualifier = contentBasename.replace(/^evidence-/, '');
+      return path.join(home, runId, `loop-${loop}`, 'evidence', qualifier);
+    }
+    if (artifact === 'learnings' && role === 'implementer') {
+      return path.join(home, runId, 'learnings.md');
+    }
+    if (artifact === 'synthesis' && role === 'synthesizer') {
+      return path.join(home, runId, `loop-${loop}`, 'synthesis', 'review-summary.md');
+    }
+    if (artifact === 'checkpoint' && role === 'checkpointer') {
+      return path.join(home, runId, `loop-${loop}`, 'checkpointer', 'checkpoint-result.json');
+    }
+    if (artifact === 'conflict' && role === 'checkpointer') {
+      return path.join(home, runId, 'conflict.md');
+    }
+
+    return null;
   }
 
   // -----------------------------------------------------------------------

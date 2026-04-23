@@ -36,18 +36,45 @@ Read CLAUDE.md and any project skills files if they exist.
 
 - Loop: {iteration}
 - Reviews from previous loop: {reviewsDir}/
+- Synthesized review summary (loop 2+): {reviewSummaryPath}
 - Learnings from previous loops: {learningsFile}
+
+## Output Protocol
+
+Write all output files to {scratchDir}/ with the naming convention:
+  {artifactType}-{qualifier}.{ext}        (content file)
+  {artifactType}-{qualifier}.{ext}.meta   (metadata file)
+
+The metadata file must be a single-line JSON object:
+  {"artifact":"<type>","role":"<role>","runId":"<runId>","loop":{loop},"timestamp":"<ISO-8601>"}
+
+Include "index" and "phase" fields when applicable. Write the .meta file LAST —
+it signals that the content file is complete.
 
 ## Instructions
 
 1. Read and understand the specification completely — especially the Definition of Done checklist
 2. Before using any library, tool, or framework, research its current documentation and source code. Verify the version you are using matches the API signatures and configuration you are relying on. Do not rely on potentially outdated knowledge.
-3. **Focus on rejected reviews first.** Read the reviews from the previous loop at {reviewsDir}/. UNANIMOUS approval is required — every reviewer must pass. If any reviewer rejected, address their concerns before moving on to other work. Do NOT treat a minority rejection as optional.
+3. **Focus on rejected reviews first.** If a synthesized review summary path is listed above, read it — it replaces raw individual reviews as your primary input. The summary deduplicates issues and prioritizes by severity (CRITICAL/HIGH/LOW). Otherwise, read the raw reviews from {reviewsDir}/. UNANIMOUS approval is required — every reviewer must pass. If any reviewer rejected, address their concerns before moving on to other work. Do NOT treat a minority rejection as optional.
 4. Implement the required changes, with special attention to addressing every rejected reviewer's concerns
-5. Capture evidence to {evidenceDir}/:
+5. Capture evidence to {scratchDir}/:
    - If the spec has a Definition of Done checklist, capture evidence for each item
    - If the spec has no checklist, figure out what checks are available (build, test, lint, type-check, etc.) and capture what you can
-6. Write learnings to {learningsFile}: roadblocks, workarounds, decisions made, and why
+   - Write self-review findings to {scratchDir}/evidence-self-review.md
+   - Create metadata at {scratchDir}/evidence-self-review.md.meta: {"artifact":"evidence","role":"implementer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
+6. **Self-review your changes** before marking as complete:
+   - Run \`git diff\` and \`git diff --staged\` to review ALL changes
+   - Check each change against the spec requirements
+   - Verify all evidence has been captured
+   - Only consider yourself done if all critical spec items are addressed
+7. **Document how you addressed previous reviews.** If there were reviews from a previous loop, write a file at {scratchDir}/evidence-addressed-reviews.md. For each rejected reviewer's concern, document:
+   - **What** the reviewer flagged
+   - **What** you did in response (specific files changed, approaches taken)
+   - **Why** you chose that approach — this is critical when you disagree with the reviewer's suggestion. Explain your reasoning so future reviewers can evaluate the trade-off independently rather than re-raising the same point.
+   - If you intentionally chose NOT to follow a reviewer's suggestion, say so explicitly with your rationale. Silent disagreement looks like the concern was ignored.
+   - Create metadata at {scratchDir}/evidence-addressed-reviews.md.meta: {"artifact":"evidence","role":"implementer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
+8. Write learnings to {scratchDir}/learnings.md: roadblocks, workarounds, decisions made, and why
+   - Create metadata at {scratchDir}/learnings.md.meta: {"artifact":"learnings","role":"implementer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
 
 ## Git Safety - CRITICAL
 
@@ -64,9 +91,24 @@ const DEFAULT_KLOOP_REVIEWER_PROMPT = `# Code Review Task
 Read the spec from: {specPath}
 Read CLAUDE.md and any project skills files if they exist.
 
-## Previous Loop Reviews
-{archivedReviews}
-If previous reviews are available above, read the verdict JSONs to identify which reviewers REJECTED. For each rejected reviewer, specifically verify whether their concerns have been addressed. Do not let previous opinions override your own assessment — but ensure previously raised issues are no longer present.
+## Previous Loop Context
+- Synthesized review summary (loop 2+): {previousSummaryPath}
+
+If a synthesized review summary path is listed above, read it — it contains a deduplicated, severity-prioritized summary of all previous reviews (CRITICAL/HIGH/LOW). Use it to understand which issues were previously flagged and verify they have been addressed. Do not let previous opinions override your own assessment — but ensure previously raised issues are no longer present.
+
+**Important**: Also check {evidenceDir}/addressed-reviews.md if it exists. The implementer documents there what they changed and why in response to each previous review concern. This is especially valuable when the implementer disagreed with a reviewer's suggestion — read their rationale and evaluate it on its merits rather than re-raising the same point without considering their reasoning.
+
+## Output Protocol
+
+Write all output files to {scratchDir}/ with the naming convention:
+  {artifactType}-{qualifier}.{ext}        (content file)
+  {artifactType}-{qualifier}.{ext}.meta   (metadata file)
+
+The metadata file must be a single-line JSON object:
+  {"artifact":"<type>","role":"<role>","runId":"<runId>","loop":{loop},"timestamp":"<ISO-8601>"}
+
+Include "index" and "phase" fields when applicable. Write the .meta file LAST —
+it signals that the content file is complete.
 
 ## Your Task
 
@@ -79,8 +121,10 @@ You are Reviewer {reviewerIndex} for loop {iteration}. Be strict and thorough.
 5. **Validate evidence** — check {evidenceDir}/ for output logs
    - If the spec has a Definition of Done checklist, be strict: every required evidence item must be present and passing. Reject if anything is missing.
    - If the spec has no checklist, use judgment: check what is reasonable for this project. Don't reject for missing evidence that the spec never asked for.
-6. Write your review to {reviewsDir}/reviewer-{reviewerIndex}.md — include any issues found and evidence gaps
-7. Write your verdict to {verdictsDir}/reviewer-{reviewerIndex}.json:
+6. Write your review to {scratchDir}/review-reviewer-{reviewerIndex}.md — include any issues found and evidence gaps
+   Create metadata at {scratchDir}/review-reviewer-{reviewerIndex}.md.meta:
+   {"artifact":"review","role":"reviewer","index":{reviewerIndex},"runId":"<runId>","loop":{loop},"phase":0,"timestamp":"<ISO>"}
+7. Write your verdict to {scratchDir}/verdict-reviewer-{reviewerIndex}.json:
    \`\`\`json
    {
      "approved": true,
@@ -88,6 +132,8 @@ You are Reviewer {reviewerIndex} for loop {iteration}. Be strict and thorough.
      "completionEstimate": 0-100 (be conservative, 100% only if ALL acceptance criteria are met)
    }
    \`\`\`
+   Create metadata at {scratchDir}/verdict-reviewer-{reviewerIndex}.json.meta:
+   {"artifact":"verdict","role":"reviewer","index":{reviewerIndex},"runId":"<runId>","loop":{loop},"phase":0,"timestamp":"<ISO>"}
 
 ## Learnings
 
@@ -118,9 +164,20 @@ You must NOT modify the spec. You must NOT compress the spec.
 
 Read the spec from: {specPath}
 
+## Output Protocol
+
+Write all output files to {scratchDir}/ with the naming convention:
+  {artifactType}-{qualifier}.{ext}        (content file)
+  {artifactType}-{qualifier}.{ext}.meta   (metadata file)
+
+The metadata file must be a single-line JSON object:
+  {"artifact":"<type>","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO-8601>"}
+
+Write the .meta file LAST — it signals that the content file is complete.
+
 ## Your Task
 
-1. Read ALL reviews: current ({reviewsDir}/reviewer-*.md) and archived ({archivedReviewsPattern})
+1. Read the synthesized review summaries first ({archivedSummariesPattern}) — these contain deduplicated, severity-prioritized findings from each loop. If summaries are not available, fall back to raw reviews: current ({reviewsDir}/reviewer-*.md) and archived ({archivedReviewsPattern})
 2. Read ALL verdicts from the review JSON files alongside the reviews
 3. Cross-reference the spec's acceptance criteria / Definition of Done against every reviewer's findings
 4. Determine if the spec contains a fundamental conflict that makes it impossible to implement
@@ -164,21 +221,24 @@ Only report conflicts at MEDIUM or higher confidence. If only LOW, report no_act
 
 ### conflict_found
 The spec contains impossible, contradictory, or fundamentally ambiguous requirements.
-- Write {conflictFile} with:
+- Write {scratchDir}/conflict.md with:
   1. The exact conflicting requirements (quote the spec)
   2. Why they conflict
   3. Which reviewers flagged this (with quotes)
   4. Suggested resolution (if obvious)
-- Write checkpoint result to {checkpointResultFile} with \`"outcome": "conflict_found"\`
+- Create metadata at {scratchDir}/conflict.md.meta: {"artifact":"conflict","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
+- Write checkpoint result to {scratchDir}/checkpoint-result.json with \`"outcome": "conflict_found"\`
+- Create metadata at {scratchDir}/checkpoint-result.json.meta: {"artifact":"checkpoint","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
 
 ### no_action
 No spec-level conflict detected. The spec is sound — failures are due to implementation/review issues.
-- Write checkpoint result with \`"outcome": "no_action"\`
+- Write checkpoint result to {scratchDir}/checkpoint-result.json with \`"outcome": "no_action"\`
+- Create metadata at {scratchDir}/checkpoint-result.json.meta: {"artifact":"checkpoint","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
 - Do NOT edit {specPath}
 
 ## Checkpoint Result JSON
 
-Write to {checkpointResultFile}:
+Write to {scratchDir}/checkpoint-result.json:
 \`\`\`json
 {
   "outcome": "conflict_found" | "no_action",
@@ -190,7 +250,7 @@ Write to {checkpointResultFile}:
 }
 \`\`\`
 
-If conflict_found, also write {conflictFile} with detailed conflict analysis.
+If conflict_found, also write {scratchDir}/conflict.md with detailed conflict analysis.
 Do NOT edit {specPath} under any circumstances.`;
 
 const DEFAULT_KLOOP_CHECKPOINTER_FULL_PROMPT = `# Checkpointer Task
@@ -207,9 +267,20 @@ The dev loop has failed to reach consensus after {iteration} iterations. Your ta
 
 Read the spec from: {specPath}
 
+## Output Protocol
+
+Write all output files to {scratchDir}/ with the naming convention:
+  {artifactType}-{qualifier}.{ext}        (content file)
+  {artifactType}-{qualifier}.{ext}.meta   (metadata file)
+
+The metadata file must be a single-line JSON object:
+  {"artifact":"<type>","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO-8601>"}
+
+Write the .meta file LAST — it signals that the content file is complete.
+
 ## Your Task
 
-1. Read ALL reviews: current ({reviewsDir}/reviewer-*.md) and archived ({archivedReviewsPattern})
+1. Read the synthesized review summaries first ({archivedSummariesPattern}) — these contain deduplicated, severity-prioritized findings from each loop. If summaries are not available, fall back to raw reviews: current ({reviewsDir}/reviewer-*.md) and archived ({archivedReviewsPattern})
 2. Analyze reviews against the spec to determine what criteria are complete vs remaining
 3. Check for conflicts (see below)
 4. Check for auto-fixable issues (e.g., typos) — ONLY if completely unambiguous
@@ -242,27 +313,32 @@ Conflicts are often subtle — the spec may look reasonable at a glance, but bec
 
 ### conflict_found
 Spec has impossible/contradictory requirements.
-- Write {conflictFile} with details
-- Write checkpoint result to {checkpointResultFile} with \`"outcome": "conflict_found"\`
+- Write conflict analysis to {scratchDir}/conflict.md
+- Create metadata at {scratchDir}/conflict.md.meta: {"artifact":"conflict","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
+- Write checkpoint result to {scratchDir}/checkpoint-result.json with \`"outcome": "conflict_found"\`
+- Create metadata at {scratchDir}/checkpoint-result.json.meta: {"artifact":"checkpoint","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
 
 ### spec_auto_fixed
 Found an unambiguous mistake and fixed it.
 - Edit {specPath} directly
-- Write checkpoint result with \`"outcome": "spec_auto_fixed"\`
+- Write checkpoint result to {scratchDir}/checkpoint-result.json with \`"outcome": "spec_auto_fixed"\`
+- Create metadata at {scratchDir}/checkpoint-result.json.meta: {"artifact":"checkpoint","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
 
 ### spec_compressed
 No conflict, no fix needed, progress > 60%.
 - Compress spec to remaining work: remove completed items, keep partial/incomplete ones
 - Update {specPath} with compressed spec
-- Write checkpoint result with \`"outcome": "spec_compressed"\`
+- Write checkpoint result to {scratchDir}/checkpoint-result.json with \`"outcome": "spec_compressed"\`
+- Create metadata at {scratchDir}/checkpoint-result.json.meta: {"artifact":"checkpoint","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
 
 ### no_action
 No conflict, no fix, progress <= 60%.
-- Write checkpoint result with \`"outcome": "no_action"\`
+- Write checkpoint result to {scratchDir}/checkpoint-result.json with \`"outcome": "no_action"\`
+- Create metadata at {scratchDir}/checkpoint-result.json.meta: {"artifact":"checkpoint","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
 
 ## Checkpoint Result JSON
 
-Write to {checkpointResultFile}:
+Write to {scratchDir}/checkpoint-result.json:
 \`\`\`json
 {
   "outcome": "conflict_found" | "spec_auto_fixed" | "spec_compressed" | "no_action",
@@ -273,14 +349,203 @@ Write to {checkpointResultFile}:
 }
 \`\`\`
 
-If conflict_found, also write {conflictFile} with conflict analysis details.
+If conflict_found, also write {scratchDir}/conflict.md with conflict analysis details.
 If spec_auto_fixed or spec_compressed, edit {specPath} directly.`;
+
+const DEFAULT_KLOOP_SYNTHESIZER_PROMPT = `# Synthesis Task
+
+## Context
+
+You are a review synthesizer. Your job is to compact all raw reviews from loop {iteration} into a single structured summary that replaces the raw reviews as input for the next loop.
+
+## Specification
+
+Read the spec from: {specPath}
+
+## Your Task
+
+1. Read all raw reviews from {reviewsDir}/reviewer-*.md
+2. Read all verdicts from {verdictsDir}/reviewer-*.json
+3. If verifier verdicts exist ({verdictsDir}/verifier-*.json), read them to capture issues found during verify gate
+4. If a previous summary exists at {previousSummaryPath}, read it to track resolved issues
+5. Check {evidenceDir}/ for build/test evidence
+6. Read {learningsFile} for context on the implementer's decisions
+
+## Update Learnings
+
+After reading all reviews and verdicts, update {learningsFile} by:
+- Adding new insights about what works and what doesn't
+- Compressing/compacting previous learnings if the file is getting long
+- Recording patterns in reviewer feedback (e.g., "multiple reviewers flagged X", "issue Y resolved after Z approach")
+
+## Output
+
+Write all output files to {scratchDir}/ with the naming convention:
+  {artifactType}-{qualifier}.{ext}        (content file)
+  {artifactType}-{qualifier}.{ext}.meta   (metadata file)
+
+The metadata file must be a single-line JSON object:
+  {"artifact":"<type>","role":"synthesizer","runId":"<runId>","loop":{loop},"timestamp":"<ISO-8601>"}
+
+Write the .meta file LAST — it signals that the content file is complete.
+
+Write a structured summary to {scratchDir}/synthesis-review-summary.md with the following format:
+
+### Confirmed Complete
+- List spec items that ALL reviewers agree are fully implemented (with reviewer attribution)
+
+### Issues Requiring Action
+Group by severity:
+- **CRITICAL**: Issues that block spec acceptance (missing features, broken tests, security issues)
+- **HIGH**: Significant issues that need fixing (incomplete implementation, poor quality)
+- **LOW**: Minor issues, suggestions, or style preferences
+
+For each issue, include:
+- Description of the issue
+- Which reviewer(s) flagged it
+- Specific file/line references where applicable
+
+### Resolved Since Previous Loop
+- Issues from the previous summary that are now resolved (with evidence)
+
+### Progress Estimate
+- Overall completion percentage
+- Brief assessment of remaining work
+
+## Rules
+
+- Deduplicate: if multiple reviewers flag the same issue, mention it once with all attributions
+- Be objective: only include issues with clear evidence
+- Preserve reviewer intent: don't soften a CRITICAL issue to HIGH just because other reviewers didn't notice it
+- If the implementer documented their rationale in {evidenceDir}/addressed-reviews.md, read it and consider their reasoning when evaluating issues
+
+Create metadata at {scratchDir}/synthesis-review-summary.md.meta:
+{"artifact":"synthesis","role":"synthesizer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}`;
+
+const DEFAULT_KLOOP_VERIFIER_PROMPT = `# Verify Task
+
+## Context
+
+You are Verifier {verifierIndex} for loop {iteration}. A previous loop produced a review summary with issues requiring action. Your job is to verify whether those issues have actually been fixed.
+
+## Specification
+
+Read the spec from: {specPath}
+
+## Output Protocol
+
+Write all output files to {scratchDir}/ with the naming convention:
+  {artifactType}-{qualifier}.{ext}        (content file)
+  {artifactType}-{qualifier}.{ext}.meta   (metadata file)
+
+The metadata file must be a single-line JSON object:
+  {"artifact":"<type>","role":"verifier","index":{verifierIndex},"runId":"<runId>","loop":{loop},"timestamp":"<ISO-8601>"}
+
+Write the .meta file LAST — it signals that the content file is complete.
+
+## Your Task
+
+1. Read the previous review summary from {previousSummaryPath}
+2. Focus on the "Issues Requiring Action" section
+3. For each CRITICAL and HIGH issue:
+   a. Check the current code via \`git diff\` and \`git diff --staged\`
+   b. Check {evidenceDir}/ for build/test evidence
+   c. Check {evidenceDir}/addressed-reviews.md for the implementer's response
+   d. Determine if the issue is fixed or remains
+
+4. Write your verdict to {scratchDir}/verdict-verifier-{verifierIndex}.json:
+\`\`\`json
+{
+  "approved": true/false,
+  "reasoning": "Your detailed reasoning here",
+  "issuesFixed": ["issue 1 description", "issue 2 description"],
+  "issuesRemaining": ["issue 3 description"]
+}
+\`\`\`
+Create metadata at {scratchDir}/verdict-verifier-{verifierIndex}.json.meta:
+{"artifact":"verdict","role":"verifier","index":{verifierIndex},"runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
+
+## Verdict Criteria
+
+- **APPROVE** if all CRITICAL and HIGH issues are fixed (LOW issues remaining is OK)
+- **REJECT** if any CRITICAL issue remains unfixed
+- **APPROVE** if only LOW issues remain
+
+## Learnings
+
+Check {learningsFile} for context on the implementer's decisions this iteration.`;
+
+const DEFAULT_KLOOP_RE_SYNTHESIS_PROMPT = `# Re-Synthesis Task
+
+## Context
+
+You are a re-synthesizer for loop {iteration}. The verify gate found that some issues from the previous loop's review summary remain unfixed. Your job is to produce an updated review summary that carries forward the previous summary's content plus the verifiers' findings.
+
+## Specification
+
+Read the spec from: {specPath}
+
+## Your Task
+
+1. Read the previous review summary from {previousSummaryPath}
+2. Read verifier outputs from {verifyDir}/verifier-*/
+3. Read verifier verdicts from {verdictsDir}/verifier-*.json — these contain \`issuesFixed\` and \`issuesRemaining\` arrays
+4. Read {learningsFile} for context on the implementer's decisions
+
+## Output
+
+Write all output files to {scratchDir}/ with the naming convention:
+  {artifactType}-{qualifier}.{ext}        (content file)
+  {artifactType}-{qualifier}.{ext}.meta   (metadata file)
+
+The metadata file must be a single-line JSON object:
+  {"artifact":"<type>","role":"synthesizer","runId":"<runId>","loop":{loop},"timestamp":"<ISO-8601>"}
+
+Write the .meta file LAST — it signals that the content file is complete.
+
+Write an updated summary to {scratchDir}/synthesis-review-summary.md with the same structure as the previous summary:
+
+### Confirmed Complete
+- Carry forward items from the previous summary
+- Add any items that verifiers confirmed as fixed
+
+### Issues Requiring Action
+Group by severity (CRITICAL/HIGH/LOW):
+- Carry forward issues that verifiers confirmed as still remaining
+- Remove issues that verifiers confirmed as fixed
+- If a verifier found NEW issues not in the previous summary, add them
+
+### Resolved Since Previous Loop
+- Move issues from "Issues Requiring Action" that verifiers confirmed as fixed
+
+### Progress Estimate
+- Update the overall completion percentage based on verifier findings
+- Brief assessment of remaining work
+
+## Update Learnings
+
+After processing, update {learningsFile} with:
+- Which issues were fixed vs which remain
+- Any patterns in what keeps failing
+
+## Rules
+
+- This is a LIGHTWEIGHT synthesis — you are merging structured data, not re-reading raw reviews
+- Preserve the previous summary's structure and severity levels
+- Only change issue status based on verifier evidence, not speculation
+
+Create metadata at {scratchDir}/synthesis-review-summary.md.meta:
+{"artifact":"synthesis","role":"synthesizer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
+- If verifiers disagree on whether an issue is fixed, keep it in "Issues Requiring Action"`;
 
 export interface KloopPrompts {
   implementer?: string;
   reviewer?: string;
   checkpointer?: string;
   checkpointerFull?: string;
+  synthesizer?: string;
+  verifier?: string;
+  reSynthesizer?: string;
 }
 
 const kloopPromptsSchema = z
@@ -295,6 +560,11 @@ const kloopPromptsSchema = z
   })
   .optional();
 
+export interface KloopImplementerRetry {
+  maxRetries: number;
+  backoffBaseMs: number;
+}
+
 export interface KloopConfig {
   implementers: Record<string, number>;
   reviewPhases: string[][];
@@ -306,11 +576,15 @@ export interface KloopConfig {
   compressSpec: boolean;
   firstLoopFullReview: boolean;
   previousReviewPropagation: number;
+  synthesizer?: string;
   synthesis: boolean;
   synthesisTimeout: number;
   verify: boolean;
   verifyPhases: string[][];
   verifyTimeout: number;
+  rerankAfterCheckpoint: boolean;
+  implementerRetry: KloopImplementerRetry;
+  firstIterationWeightMultiplier: number;
   prompts?: KloopPrompts;
 }
 
@@ -326,11 +600,20 @@ const kloopConfigSchema = z
     compressSpec: z.boolean().default(false),
     firstLoopFullReview: z.boolean().default(true),
     previousReviewPropagation: z.number().min(0).max(1).default(0.7),
+    synthesizer: z.string().min(1).optional(),
     synthesis: z.boolean().default(true),
     synthesisTimeout: z.number().min(0.001).max(120).default(15),
     verify: z.boolean().default(true),
     verifyPhases: z.array(z.array(z.string())).default([['claude:claude']]),
     verifyTimeout: z.number().min(0.001).max(120).default(5),
+    rerankAfterCheckpoint: z.boolean().default(true),
+    implementerRetry: z
+      .object({
+        maxRetries: z.number().min(0).max(10).default(2),
+        backoffBaseMs: z.number().min(0).default(5000),
+      })
+      .default({ maxRetries: 2, backoffBaseMs: 5000 }),
+    firstIterationWeightMultiplier: z.number().min(1).max(1000).default(2),
     prompts: kloopPromptsSchema,
   })
   .default({});
@@ -1135,16 +1418,23 @@ Discuss the PR with the user. Figure out:
     compressSpec: false,
     firstLoopFullReview: true,
     previousReviewPropagation: 0.7,
+    synthesizer: 'claude',
     synthesis: true,
     synthesisTimeout: 15,
     verify: true,
     verifyPhases: [['claude:claude']],
     verifyTimeout: 5,
+    rerankAfterCheckpoint: true,
+    implementerRetry: { maxRetries: 2, backoffBaseMs: 5000 },
+    firstIterationWeightMultiplier: 2,
     prompts: {
       implementer: DEFAULT_KLOOP_IMPLEMENTER_PROMPT,
       reviewer: DEFAULT_KLOOP_REVIEWER_PROMPT,
       checkpointer: DEFAULT_KLOOP_CHECKPOINTER_PROMPT,
       checkpointerFull: DEFAULT_KLOOP_CHECKPOINTER_FULL_PROMPT,
+      synthesizer: DEFAULT_KLOOP_SYNTHESIZER_PROMPT,
+      verifier: DEFAULT_KLOOP_VERIFIER_PROMPT,
+      reSynthesizer: DEFAULT_KLOOP_RE_SYNTHESIS_PROMPT,
     },
   },
   settings: {

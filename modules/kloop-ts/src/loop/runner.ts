@@ -87,6 +87,37 @@ export class LoopRunner {
   ) {}
 
   /**
+   * Prepare the loop workspace: promote any pending scratch files (crash recovery),
+   * wipe the entire .kloop/ directory, then recreate .kloop/scratch/ for the
+   * upcoming agent step.
+   */
+  private async prepareLoopWorkspace(runId: string): Promise<void> {
+    const cwd = process.cwd();
+    const kloopDir = path.join(cwd, '.kloop');
+    const scratchDir = path.join(kloopDir, 'scratch');
+
+    // 1. Recover: promote any pending scratch files (from a prior crash)
+    if (await this.safeFileExists(scratchDir)) {
+      await this.agentRunner.promoteScratchFiles({ scratchDir });
+    }
+
+    // 2. Wipe: delete the entire .kloop/ folder for a clean slate
+    await fs.rm(kloopDir, { recursive: true, force: true });
+
+    // 3. Recreate scratch dir for the upcoming agent step
+    await fs.mkdir(scratchDir, { recursive: true });
+  }
+
+  private async safeFileExists(filePath: string): Promise<boolean> {
+    try {
+      await fs.access(filePath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Run with explicit run ID (for kloop global storage).
    * This is the entry point for `kloop run <id>`.
    *
@@ -151,6 +182,9 @@ export class LoopRunner {
     try {
       while (loopNum < config.maxIterations) {
         loopNum++;
+
+        // Prepare loop workspace: promote pending scratch + wipe + recreate
+        await this.prepareLoopWorkspace(runId);
 
         // Write loop_start event
         await writeEvent({
@@ -589,6 +623,7 @@ export class LoopRunner {
     const evidenceDir = this.paths.loopEvidencePath(runId, iterNum);
     const learningsFile = this.paths.runLearnings(runId);
     const prevLoop = iterNum > 1 ? iterNum - 1 : null;
+    const scratchDir = this.paths.scratchDir(process.cwd());
 
     const prevSummaryPath =
       prevLoop !== null ? `${this.paths.loopSynthesisPath(runId, prevLoop)}/review-summary.md` : undefined;
@@ -608,6 +643,7 @@ export class LoopRunner {
             learningsFile,
             archivedReviews: seesPrev && !config.synthesis ? this.paths.loopReviewsPath(runId, prevLoop) : null,
             previousSummaryPath: seesPrev && config.synthesis ? prevSummaryPath : undefined,
+            scratchDir,
           }),
           propagated: seesPrev,
         };
@@ -736,6 +772,7 @@ export class LoopRunner {
       const prevLoop = iterNum > 1 ? iterNum - 1 : null;
       const prevSummary =
         prevLoop !== null ? `${this.paths.loopSynthesisPath(runId, prevLoop)}/review-summary.md` : undefined;
+      const seqScratchDir = this.paths.scratchDir(process.cwd());
       const phasePrompts: Array<{ reviewerIndex: number; prompt: string; propagated: boolean }> = phaseReviewers.map(
         (_, i) => {
           const seesPrev = prevLoop !== null && Math.random() < (config.previousReviewPropagation ?? 0);
@@ -751,6 +788,7 @@ export class LoopRunner {
               learningsFile,
               archivedReviews: seesPrev && !config.synthesis ? this.paths.loopReviewsPath(runId, prevLoop) : null,
               previousSummaryPath: seesPrev && config.synthesis ? prevSummary : undefined,
+              scratchDir: seqScratchDir,
             }),
             propagated: seesPrev,
           };
@@ -1034,6 +1072,7 @@ export class LoopRunner {
           evidenceDir,
           learningsFile,
           verifierIndex: String(globalReviewerIndex + i),
+          scratchDir: this.paths.scratchDir(process.cwd()),
         };
         return {
           reviewerIndex: globalReviewerIndex + i,
