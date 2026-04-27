@@ -15,6 +15,14 @@
     network_access = true;
   };
 
+  tui = {
+    status_line = [
+      "model-with-reasoning"
+      "context-used"
+      "current-dir"
+    ];
+  };
+
   model_providers = {
     proxy = {
       name = "Proxy";

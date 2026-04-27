@@ -50,7 +50,6 @@ let
     settings = codexSettings;
     mcpServers = baseMcp;
     memory.text = sharedMemory;
-    skillsDir = sharedSkills;
     env = baseEnv;
     hooksConfig = codexHooksConfig;
     hooksDir = codexHooksDir;
@@ -60,7 +59,6 @@ let
     settings = codexSettings;
     mcpServers = baseMcp;
     memory.text = autoMemory;
-    skillsDir = sharedSkills;
     env = baseEnv;
     hooksConfig = codexAutoHooksConfig;
     hooksDir = codexHooksDir;

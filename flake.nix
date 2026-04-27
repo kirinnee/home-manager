@@ -27,6 +27,7 @@
     home-manager-modules.url = "github:kirinnee/home-manager-modules";
     llm-agents.url = "github:numtide/llm-agents.nix";
     claude-code.url = "github:sadjow/claude-code-nix";
+    codex-cli.url = "github:sadjow/codex-cli-nix";
     loctl.url = "path:/Users/erng/Workspace/work/vungle/loctl";
   };
 
@@ -46,6 +47,7 @@
     , home-manager-modules
     , llm-agents
     , claude-code
+    , codex-cli
     , loctl
     ,
     }@inputs:
@@ -75,6 +77,7 @@
               atomi = atomipkgs.packages.${system};
               pkgs-llm = llm-agents.packages.${system};
               claude-code-pkg = claude-code.packages.${system}.claude-code;
+              codex-pkg = codex-cli.packages.${system}.default;
               pkgs-loctl = loctl.packages.${system};
             in
             let
@@ -98,6 +101,7 @@
                     atomi
                     pkgs-llm
                     claude-code-pkg
+                    codex-pkg
                     pkgs-loctl
                     profile
                     pkgs-240924
@@ -132,6 +136,7 @@
               atomi = atomipkgs.packages.${system};
               pkgs-llm = llm-agents.packages.${system};
               claude-code-pkg = claude-code.packages.${system}.claude-code;
+              codex-pkg = codex-cli.packages.${system}.default;
               pkgs-loctl = loctl.packages.${system};
             in
             let
@@ -169,6 +174,7 @@
                         atomi
                         pkgs-llm
                         claude-code-pkg
+                        codex-pkg
                         pkgs-loctl
                         profile
                         pkgs-240924
