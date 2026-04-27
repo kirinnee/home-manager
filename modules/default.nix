@@ -5,6 +5,9 @@ rec {
   backup-folder = import ./backup-folder/default.nix { inherit nixpkgs trivialBuilders; };
   setup-pcloud-remote = import ./setup-pcloud-remote/default.nix { inherit nixpkgs trivialBuilders; };
   k8s-update = import ./k8s-update/default.nix { inherit nixpkgs trivialBuilders; };
+  k8s-merge = import ./k8s-merge/default.nix { inherit nixpkgs trivialBuilders; };
+  oci-k8s-update = import ./oci-k8s-update/default.nix { inherit nixpkgs trivialBuilders; };
+  oci-oke-allow-my-ip = import ./oci-oke-allow-my-ip/default.nix { inherit nixpkgs trivialBuilders; };
   load-secrets = import ./load-secrets/default.nix { inherit nixpkgs trivialBuilders; };
   gawt = import ./gawt/default.nix { inherit nixpkgs trivialBuilders; };
   speak = import ./speak/default.nix { inherit trivialBuilders nixpkgs; };

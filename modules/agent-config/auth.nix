@@ -38,6 +38,15 @@ rec {
         { id = "gpt-5.4-mini"; name = "gpt54mini"; }
       ];
     };
+    deepseek = {
+      opus = "deepseek-v4-pro";
+      sonnet = "deepseek-v4-pro";
+      haiku = "deepseek-v4-flash";
+      models = [
+        { id = "deepseek-v4-pro"; name = "dsv4p"; }
+        { id = "deepseek-v4-flash"; name = "dsv4f"; }
+      ];
+    };
     kimi = {
       opus = "kimi-k2.5";
       sonnet = "kimi-k2.5";

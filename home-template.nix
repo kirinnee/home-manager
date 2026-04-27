@@ -3,6 +3,7 @@
 , lib
 , pkgs-llm
 , claude-code-pkg
+, codex-pkg
 , pkgs-loctl
 , pkgs-240924
 , pkgs-stable
@@ -134,18 +135,15 @@ rec {
     accounts = {
       personal = imported.mkClaudeAccount { provider = "zai"; directoryRules = personalDirs; };
       liftoff = imported.mkClaudeAccount { provider = "anthropic"; directoryRules = workDirs; };
+      auto-personal = imported.mkAutoClaudeAccount { provider = "zai"; directoryRules = personalDirs; };
+      auto-liftoff = imported.mkAutoClaudeAccount { provider = "anthropic"; directoryRules = workDirs; };
     } // imported.mkAllProviderClaudeAccounts auth.providerNames;
   };
 
   # Codex multi-account configuration
   programs.multi-codex = {
     enable = true;
-    defaultPackage = (pkgs-llm.codex.overrideAttrs (old: {
-      nativeBuildInputs = old.nativeBuildInputs ++ [ pkgs.llvmPackages.libclang ];
-      env = (old.env or { }) // {
-        LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-      };
-    }));
+    defaultPackage = codex-pkg;
     defaultAccount = "personal";
 
     smartWrapper.enable = true;
@@ -166,20 +164,18 @@ rec {
         model = "gpt-5.4";
         directoryRules = workDirs;
       };
+      gpt55 = imported.mkCodexAccount {
+        provider = "openai";
+        model = "gpt-5.5";
+      };
+      auto-gpt55 = imported.mkCodexAutoAccount {
+        provider = "openai";
+        model = "gpt-5.5";
+      };
 
       # ChatGPT OAuth-login accounts (run `codex-<name> auth login` after hms)
-      atomi1 = imported.mkCodexChatGPTAccount { };
-      atomi2 = imported.mkCodexChatGPTAccount { };
-      atomi3 = imported.mkCodexChatGPTAccount { };
-      atomi4 = imported.mkCodexChatGPTAccount { };
       pro20 = imported.mkCodexChatGPTAccount { };
-      lwork = imported.mkCodexChatGPTAccount { directoryRules = workDirs; };
-      auto-atomi1 = imported.mkCodexChatGPTAutoAccount { };
-      auto-atomi2 = imported.mkCodexChatGPTAutoAccount { };
-      auto-atomi3 = imported.mkCodexChatGPTAutoAccount { };
-      auto-atomi4 = imported.mkCodexChatGPTAutoAccount { };
       auto-pro20 = imported.mkCodexChatGPTAutoAccount { };
-      auto-lwork = imported.mkCodexChatGPTAutoAccount { directoryRules = workDirs; };
     } // imported.mkAllProviderCodexAccounts auth.providerNames;
   };
 
@@ -288,6 +284,12 @@ rec {
   # Worktrunk config
   xdg.configFile."worktrunk/config.toml".source = ./worktrunk/config.toml;
 
+  # OCI CLI defaults
+  home.file.".oci/oci_cli_rc".text = ''
+    [DEFAULT]
+    compartment-id = ocid1.compartment.oc1..aaaaaaaaqcssiaa6caj3wc4p64r4kdko5szck4kkak2tajgslduij4kzeyhq
+  '';
+
   # Finicky config
   home.file.".finicky.js" = {
     source = ./finicky/config.js;
@@ -331,6 +333,7 @@ rec {
       stern
       google-cloud-sdk
       syncthing
+      tailscale
 
       tesseract
       age
@@ -358,7 +361,7 @@ rec {
       devenv
       nodejs
       pkgs-unstable.cloudflared
-      zellij
+      pkgs-unstable.zellij
 
       # tooling
       mmv-go
@@ -380,6 +383,9 @@ rec {
       load-secrets
       speak
       hms
+      k8s-merge
+      oci-k8s-update
+      oci-oke-allow-my-ip
       kloop
       kloop-dev
       kautopilot
@@ -397,6 +403,9 @@ rec {
       pkgs-unstable.acli
       gimme-aws-creds
       ssm-session-manager-plugin
+
+      # oracle cloud
+      oci-cli
 
       # claude-code is now managed by claude-multi module
 
@@ -424,6 +433,12 @@ rec {
     EDITOR = "nano";
     VAULT_ADDR = "https://vault.ops.vungle.io";
     CU_TEAM_ID = "9018863174";
+    OCI_CLI_AUTH = "security_token";
+    OCI_CLI_REGION = "us-ashburn-1";
+    COMPARTMENT_ID = "ocid1.compartment.oc1..aaaaaaaaqcssiaa6caj3wc4p64r4kdko5szck4kkak2tajgslduij4kzeyhq";
+    K8S_EKS_EXTRA_CLUSTER_SPECS = "us-east-1:eks-llm-us-east-1";
+    OCI_OKE_ENDPOINT = "PUBLIC_ENDPOINT";
+    OCI_OKE_CONTROL_PLANE_NSG_ID = "ocid1.networksecuritygroup.oc1.iad.aaaaaaaa2zqs4wmn6h7wl4mux3zqbwukb6ya3cxq6i76mdhxpxqyfbnepydq";
   };
 
   ##################
@@ -724,6 +739,7 @@ rec {
         kctx = "kubectx";
         kns = "kubens";
         kdbg = "kubectl debug -it --image nicolaka/netshoot";
+        ooami = "oci-oke-allow-my-ip";
 
         fixgpg = "gpgconf --kill gpg-agent";
         vaultlogin = "export VAULT_TOKEN=$(vault login -path=oktaoidc -token-only -method=oidc role=admin)";
