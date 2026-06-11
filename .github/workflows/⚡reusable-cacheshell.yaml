@@ -52,7 +52,7 @@ jobs:
     runs-on: ${{ matrix.platform.os }}
     steps:
       # Setup
-      - uses: AtomiCloud/actions.setup-nix@v2
+      - uses: AtomiCloud/actions.setup-nix@v3
         if: ${{ matrix.platform.enabled }}
         with:
           namespacelabs: ${{ matrix.platform.namespacelabs }}
