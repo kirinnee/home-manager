@@ -28,11 +28,11 @@ export const composeTemplatePath = join(repoProxyDir, 'docker-compose.yml');
 // Runtime (host-local, gitignored) state.
 export const stateDir = process.env.KHOST_STATE_DIR ?? join(home, '.local/state/khost');
 export const proxyState = join(stateDir, 'proxy');
-export const tunnelState = join(stateDir, 'tunnel');
+const tunnelState = join(stateDir, 'tunnel');
 export const proxyRuntimeConfig = join(proxyState, 'config.yaml');
 export const proxyRuntimeCompose = join(proxyState, 'docker-compose.yml');
+// Legacy: path of the old detached-cloudflared pidfile; tunnelUp cleans it up.
 export const tunnelPidfile = join(tunnelState, 'cloudflared.pid');
-export const tunnelLog = join(tunnelState, 'cloudflared.log');
 
 export const proxyPort = 8317;
 export const proxyContainer = 'khost-cli-proxy-api';
