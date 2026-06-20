@@ -121,10 +121,12 @@ For the whole list:
    browser SSH rendering is to be confirmed at implementation time against the live API
    (Zero Trust "Browser rendering: SSH").
 5. **Access policy (only-me).** Maintain one **reusable** account policy
-   `only-ernest`, gated by email **and require Gateway** (WARP enrolled + logged
-   into the org): `require: [{ device_posture: { integration_uid } }]` — the
-   account's gateway posture; built-in `gateway`/`warp` rules 500 in this
-   account. Toggle via `KHOST_REQUIRE_GATEWAY` / `KHOST_GATEWAY_POSTURE_UID`.
+   `only-ernest`, gated by email **and require the WARP device posture** (device
+   enrolled in the org): `require: [{ device_posture: { integration_uid } }]`.
+   Use the **"Warp"** posture (`55971cbe…`, enrolled) — the **"Gateway"** posture
+   (`4f62bf6f…`, proxy-mode) blocks browser/mobile sessions. Built-in
+   `gateway`/`warp` policy rules 500 in this account, hence the posture
+   integration. Toggle via `KHOST_REQUIRE_WARP` / `KHOST_WARP_POSTURE_UID`.
    (`decision: "allow", include: [{ email: { email } }, …]` from
    `KHOST_ACCESS_EMAILS`); ensure each app references it via the app's `policies: [id]`.
    Reusable policy (not app-scoped) because Cloudflare deprecated app-scoped policy

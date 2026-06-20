@@ -10,12 +10,12 @@ import { z } from 'zod';
 import {
   accessEmails,
   accessPolicyName,
-  gatewayPostureUid,
   ownerComment,
   ownerTag,
-  requireGateway,
+  requireWarp,
   routesFile,
   tunnelName,
+  warpPostureUid,
 } from './deps';
 import { die, log, need, ok, warn } from './exec';
 import {
@@ -131,14 +131,10 @@ export async function routeSync(opts: SyncOpts = {}): Promise<void> {
   let policyId: string | null = null;
   if (accessOk && !dry) {
     await ensureAccessTag(ownerTag);
-    policyId = await ensureReusablePolicy(
-      accessPolicyName,
-      accessEmails,
-      requireGateway ? gatewayPostureUid : undefined,
-    );
+    policyId = await ensureReusablePolicy(accessPolicyName, accessEmails, requireWarp ? warpPostureUid : undefined);
   }
   if (accessOk) {
-    plan.push(`policy → ${accessPolicyName} (${accessEmails.join(', ')})${requireGateway ? ' + require Gateway' : ''}`);
+    plan.push(`policy → ${accessPolicyName} (${accessEmails.join(', ')})${requireWarp ? ' + require WARP' : ''}`);
   }
 
   // 2/3. Per-route DNS + Access.
