@@ -41,6 +41,10 @@ export const proxyContainer = 'khost-cli-proxy-api';
 // so the tunnel reaches it via loopback and the LAN cannot. Default 2222.
 export const sshPort = Number(process.env.KHOST_SSH_PORT ?? 2222);
 
+// cloudflared edge protocol. Default http2 because QUIC (UDP/7844) to the edge
+// is unreliable here (e.g. WARP interference / UDP blocks). Override via env.
+export const tunnelProtocol = process.env.KHOST_TUNNEL_PROTOCOL ?? 'http2';
+
 // Tunnel name is derived from the current user (one tunnel per host identity).
 export const tunnelName = `khost-${process.env.USER ?? 'host'}`;
 
