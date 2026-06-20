@@ -66,12 +66,14 @@ export const accessEmails = (process.env.KHOST_ACCESS_EMAILS ?? 'ernest@atomi.cl
   .filter(Boolean);
 export const accessPolicyName = 'only-ernest';
 
-// Require Gateway (WARP enrolled + logged into the AtomiCloud org) on the
-// only-me policy. Cloudflare's built-in gateway/warp rules 500 in this account,
-// so we gate via the account's device-posture integration (the same one
-// ssh.kirinnee uses for "Require Gateway"). Override or disable via env.
-export const requireGateway = (process.env.KHOST_REQUIRE_GATEWAY ?? 'false') === 'true';
-export const gatewayPostureUid = process.env.KHOST_GATEWAY_POSTURE_UID ?? '4f62bf6f-35b9-4537-83e0-e820b0eaa869';
+// Require the WARP device posture (device enrolled in the AtomiCloud org) on the
+// only-me policy. Cloudflare's built-in gateway/warp policy rules 500 in this
+// account, so we gate via a device-posture integration. The "Gateway" posture
+// (proxy-mode) blocks browser/mobile sessions, so we use the "Warp" (enrolled)
+// posture by default — that's "WARP + signed into the org" without proxy-mode.
+// Override/disable via env. (Gateway posture uid: 4f62bf6f-35b9-4537-83e0-e820b0eaa869.)
+export const requireWarp = (process.env.KHOST_REQUIRE_WARP ?? 'true') === 'true';
+export const warpPostureUid = process.env.KHOST_WARP_POSTURE_UID ?? '55971cbe-2ddf-4c30-b504-abbb901a0600';
 
 // Ownership markers: khost only ever modifies/deletes resources carrying these.
 // DNS records get the comment; Access apps get the tag (+ a "khost: " name).
