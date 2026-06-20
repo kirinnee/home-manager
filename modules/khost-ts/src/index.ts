@@ -20,7 +20,7 @@ import {
   proxyUpdate,
 } from './proxy';
 import { tunnelDown, tunnelStatus, tunnelUp } from './tunnel';
-import { sshEnable, sshHarden, sshSetup, sshStatus } from './ssh';
+import { sshDown, sshSetup, sshStatus } from './ssh';
 import { routeLs, routeSync } from './routes';
 import { doctor } from './doctor';
 
@@ -113,10 +113,9 @@ route
   .option('--dry-run', 'print the plan, change nothing')
   .action((opts: { prune?: boolean; dryRun?: boolean }) => routeSync({ prune: opts.prune, dryRun: opts.dryRun }));
 
-const ssh = program.command('ssh').description('manage SSH (Remote Login + hardening)');
-ssh.command('setup').description('enable + harden SSH (one-shot)').action(sshSetup);
-ssh.command('enable').action(sshEnable);
-ssh.command('harden').action(sshHarden);
+const ssh = program.command('ssh').description('manage the loopback sshd for the tunnel');
+ssh.command('setup').description('install + start loopback sshd on 127.0.0.1').action(sshSetup);
+ssh.command('down').description('stop + remove the loopback sshd').action(sshDown);
 ssh.command('status').action(sshStatus);
 
 program.parseAsync(process.argv);

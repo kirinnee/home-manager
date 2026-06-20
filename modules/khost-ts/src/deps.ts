@@ -37,6 +37,10 @@ export const tunnelLog = join(tunnelState, 'cloudflared.log');
 export const proxyPort = 8317;
 export const proxyContainer = 'khost-cli-proxy-api';
 
+// khost runs its own sshd bound to 127.0.0.1:<sshPort> (not macOS Remote Login),
+// so the tunnel reaches it via loopback and the LAN cannot. Default 2222.
+export const sshPort = Number(process.env.KHOST_SSH_PORT ?? 2222);
+
 // Tunnel name is derived from the current user (one tunnel per host identity).
 export const tunnelName = `khost-${process.env.USER ?? 'host'}`;
 
@@ -61,6 +65,13 @@ export const accessEmails = (process.env.KHOST_ACCESS_EMAILS ?? 'ernest@atomi.cl
   .map(s => s.trim())
   .filter(Boolean);
 export const accessPolicyName = 'only-ernest';
+
+// Require Gateway (WARP enrolled + logged into the AtomiCloud org) on the
+// only-me policy. Cloudflare's built-in gateway/warp rules 500 in this account,
+// so we gate via the account's device-posture integration (the same one
+// ssh.kirinnee uses for "Require Gateway"). Override or disable via env.
+export const requireGateway = (process.env.KHOST_REQUIRE_GATEWAY ?? 'false') === 'true';
+export const gatewayPostureUid = process.env.KHOST_GATEWAY_POSTURE_UID ?? '4f62bf6f-35b9-4537-83e0-e820b0eaa869';
 
 // Ownership markers: khost only ever modifies/deletes resources carrying these.
 // DNS records get the comment; Access apps get the tag (+ a "khost: " name).
