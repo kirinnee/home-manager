@@ -1,7 +1,7 @@
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { sessionDir } from '../core/artifacts';
-import type { RepoEntry, SessionMeta } from '../core/session-meta';
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { sessionDir } from "../core/artifacts";
+import type { RepoEntry, SessionMeta } from "../core/session-meta";
 
 // ============================================================================
 // Prompt assembly helpers for the host-driven steps. Every yielded prompt is
@@ -20,26 +20,29 @@ export const SHARED_APPROVAL_GATE = `### Interaction Protocol — STRICT
 
 /** Session-store paths shared across plan/feedback steps. */
 export function ticketPath(sessionId: string): string {
-  return join(sessionDir(sessionId), 'ticket.md');
+	return join(sessionDir(sessionId), "ticket.md");
 }
 
 /** Per-repo rules.md path (worktree), or null when no worktree/rules yet. */
 export function rulesPath(repo: RepoEntry | null): string | null {
-  if (!repo?.worktree) return null;
-  const p = join(repo.worktree, 'rules.md');
-  return existsSync(p) ? p : null;
+	if (!repo?.worktree) return null;
+	const p = join(repo.worktree, "rules.md");
+	return existsSync(p) ? p : null;
 }
 
 /** Substitute `{name}` placeholders with values (null → empty string). */
-export function substitute(template: string, vars: Record<string, string | null>): string {
-  let out = template;
-  for (const [k, v] of Object.entries(vars)) {
-    out = out.replace(new RegExp(`\\{${k}\\}`, 'g'), v ?? '');
-  }
-  return out;
+export function substitute(
+	template: string,
+	vars: Record<string, string | null>,
+): string {
+	let out = template;
+	for (const [k, v] of Object.entries(vars)) {
+		out = out.replace(new RegExp(`\\{${k}\\}`, "g"), v ?? "");
+	}
+	return out;
 }
 
 /** Convenience: ticketId from meta, defaulting to a stable placeholder. */
 export function ticketId(meta: SessionMeta): string {
-  return meta.ticketId || 'local';
+	return meta.ticketId || "local";
 }

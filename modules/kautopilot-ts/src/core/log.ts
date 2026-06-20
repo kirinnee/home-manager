@@ -1,45 +1,47 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { sessionDir } from './artifacts';
-import type { LogEntry } from './types';
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { sessionDir } from "./artifacts";
+import type { LogEntry } from "./types";
 
 // ============================================================================
 // Directory-based log operations
 // ============================================================================
 
 function logPathForDir(dir: string): string {
-  return join(dir, 'log.jsonl');
+	return join(dir, "log.jsonl");
 }
 
 function appendEventToDir(dir: string, entry: LogEntry): void {
-  const path = logPathForDir(dir);
-  mkdirSync(dirname(path), { recursive: true });
-  appendFileSync(path, `${JSON.stringify(entry)}\n`);
+	const path = logPathForDir(dir);
+	mkdirSync(dirname(path), { recursive: true });
+	appendFileSync(path, `${JSON.stringify(entry)}\n`);
 }
 
 function readLogFromDir(dir: string): LogEntry[] {
-  const path = logPathForDir(dir);
-  if (!existsSync(path)) return [];
-  const raw = readFileSync(path, 'utf-8');
-  const entries: LogEntry[] = [];
-  for (const line of raw.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      entries.push(JSON.parse(trimmed));
-    } catch {
-      console.warn(`Warning: skipping malformed log line: ${trimmed.slice(0, 80)}`);
-    }
-  }
-  return entries;
+	const path = logPathForDir(dir);
+	if (!existsSync(path)) return [];
+	const raw = readFileSync(path, "utf-8");
+	const entries: LogEntry[] = [];
+	for (const line of raw.split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		try {
+			entries.push(JSON.parse(trimmed));
+		} catch {
+			console.warn(
+				`Warning: skipping malformed log line: ${trimmed.slice(0, 80)}`,
+			);
+		}
+	}
+	return entries;
 }
 
 export function appendEvent(id: string, entry: LogEntry): void {
-  appendEventToDir(sessionDir(id), entry);
+	appendEventToDir(sessionDir(id), entry);
 }
 
 export function readLog(id: string): LogEntry[] {
-  return readLogFromDir(sessionDir(id));
+	return readLogFromDir(sessionDir(id));
 }
 
 // reconstructState() has been replaced by ensureStatus() in ./status.ts

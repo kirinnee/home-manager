@@ -1,8 +1,14 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
-import YAML from 'yaml';
-import { readLog } from './log';
-import type { LogEntry } from './types';
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	renameSync,
+	writeFileSync,
+} from "node:fs";
+import { dirname } from "node:path";
+import YAML from "yaml";
+import { readLog } from "./log";
+import type { LogEntry } from "./types";
 
 // ============================================================================
 // Types
@@ -10,91 +16,91 @@ import type { LogEntry } from './types';
 
 /** Active plan context during implementation phase */
 export interface ActivePlan {
-  name: string;
-  planIndex: number;
-  maxPlans: number;
-  kloopRunId: string | null;
-  attempt: number;
+	name: string;
+	planIndex: number;
+	maxPlans: number;
+	kloopRunId: string | null;
+	attempt: number;
 }
 
 /** Polish phase state for PR delivery visibility */
 export interface PolishState {
-  prNumber: number | null;
-  prUrl: string | null;
-  pushCycle: number;
-  lastEvalSummary: {
-    replies: number;
-    resolves: number;
-    codeFixes: number;
-    ambiguous: number;
-  } | null;
-  ttyReason: string | null;
+	prNumber: number | null;
+	prUrl: string | null;
+	pushCycle: number;
+	lastEvalSummary: {
+		replies: number;
+		resolves: number;
+		codeFixes: number;
+		ambiguous: number;
+	} | null;
+	ttyReason: string | null;
 }
 
 /** Per-phase summary for overall progress visibility */
 export interface PhaseSummary {
-  status: 'pending' | 'active' | 'completed';
-  currentStep: string | null;
+	status: "pending" | "active" | "completed";
+	currentStep: string | null;
 }
 
 /** Implementation phase summary with plan progress */
 export interface ImplPhaseSummary extends PhaseSummary {
-  planProgress: string | null;
+	planProgress: string | null;
 }
 
 export interface SessionStatus {
-  // Replay metadata
-  walCursor: number;
-  walTimestamp: string;
+	// Replay metadata
+	walCursor: number;
+	walTimestamp: string;
 
-  // Current position
-  phase: string;
-  version: number;
-  state: string;
-  stateStatus: 'pending' | 'running' | 'completed' | 'failed';
+	// Current position
+	phase: string;
+	version: number;
+	state: string;
+	stateStatus: "pending" | "running" | "completed" | "failed";
 
-  // Checkpoint
-  lastCheckpoint: string | null;
+	// Checkpoint
+	lastCheckpoint: string | null;
 
-  // Process
-  pid: number | null;
-  running: boolean;
-  startedAt: string | null;
+	// Process
+	pid: number | null;
+	running: boolean;
+	startedAt: string | null;
 
-  // Step execution type and turn tracking. The flat driver emits `def.kind`
-  // (interactive | agent | code); `interactive` is the user's turn.
-  stepType: 'interactive' | 'agent' | 'code' | null;
-  userTurn: boolean | null;
+	// Step execution type and turn tracking. The flat driver emits `def.kind`
+	// (interactive | agent | code); `interactive` is the user's turn.
+	stepType: "interactive" | "agent" | "code" | null;
+	userTurn: boolean | null;
 
-  // Completed steps for current cycle (resume logic)
-  completedSteps: string[];
+	// Completed steps for current cycle (resume logic)
+	completedSteps: string[];
 
-  // Phase-specific context (survives crash recovery)
-  context: {
-    planIndex?: number;
-    maxPlans?: number;
-    prNumber?: number;
-    prUrl?: string;
-    pushCycle?: number;
-    attempt?: number;
-    ttyReason?: string;
-  };
+	// Phase-specific context (survives crash recovery)
+	context: {
+		planIndex?: number;
+		maxPlans?: number;
+		prNumber?: number;
+		prUrl?: string;
+		pushCycle?: number;
+		attempt?: number;
+		ttyReason?: string;
+	};
 
-  // Kloop run IDs per plan (plan name -> list of run IDs)
-  planRuns: Record<string, string[]>;
+	// Kloop run IDs per plan (plan name -> list of run IDs)
+	planRuns: Record<string, string[]>;
 
-  // Active plan context (implementation phase)
-  activePlan: ActivePlan | null;
+	// Active plan context (implementation phase)
+	activePlan: ActivePlan | null;
 
-  // Polish phase state
-  polishState: PolishState | null;
+	// Polish phase state
+	polishState: PolishState | null;
 
-  // Per-phase summary
-  phases: {
-    plan: PhaseSummary;
-    implementation: ImplPhaseSummary;
-    polish: PhaseSummary;
-  };
+	// Per-phase summary
+	phases: {
+		plan: PhaseSummary;
+		implementation: ImplPhaseSummary;
+		polish: PhaseSummary;
+	};
 }
 
 // ============================================================================
@@ -105,60 +111,80 @@ export interface SessionStatus {
 // phase3→polish); feedback steps fold into the plan phase (driver maps
 // feedback→phase1). Step names are the flat machine's actual step names.
 const CHECKPOINTS: Record<string, Set<string>> = {
-  plan: new Set(['fetch_ticket', 'triage', 'write_spec', 'write_plans', 'finalize_plans']),
-  implementation: new Set(['seed', 'clear_loop', 'running', 'commit', 'next_plan']),
-  polish: new Set(['commit_pending', 'prereview', 'push', 'create_pr', 'poll', 'feedback_check', 'cleanup']),
+	plan: new Set([
+		"fetch_ticket",
+		"triage",
+		"write_spec",
+		"write_plans",
+		"finalize_plans",
+	]),
+	implementation: new Set([
+		"seed",
+		"clear_loop",
+		"running",
+		"commit",
+		"next_plan",
+	]),
+	polish: new Set([
+		"commit_pending",
+		"prereview",
+		"push",
+		"create_pr",
+		"poll",
+		"feedback_check",
+		"cleanup",
+	]),
 };
 
 /** Ordered step names per phase for display purposes (flat machine step names). */
 export const PHASE_STEPS: Record<string, string[]> = {
-  plan: [
-    'resolve_org',
-    'brainstorm',
-    'create_ticket',
-    'fetch_ticket',
-    'triage',
-    'write_spec',
-    'spec_review',
-    'write_plans',
-    'plan_review',
-    'finalize_plans',
-    // Feedback phase folds into phase1 (plan) per the driver's marker mapping.
-    'feedback_check',
-    'feedback',
-    'cleanup',
-  ],
-  implementation: [
-    'seed',
-    'clear_loop',
-    'setup_run',
-    'running',
-    'running_subagent',
-    'resolve',
-    'amend_plans',
-    'commit',
-    'next_plan',
-    'failed',
-  ],
-  polish: [
-    'commit_pending',
-    'prereview',
-    'push',
-    'create_pr',
-    'poll',
-    'ensure_branch',
-    'eval',
-    'act',
-    'tty_resolve',
-    'write_fix',
-    'run_fix',
-    'verify_fixes',
-    'repo_ready',
-  ],
+	plan: [
+		"resolve_org",
+		"brainstorm",
+		"create_ticket",
+		"fetch_ticket",
+		"triage",
+		"write_spec",
+		"spec_review",
+		"write_plans",
+		"plan_review",
+		"finalize_plans",
+		// Feedback phase folds into phase1 (plan) per the driver's marker mapping.
+		"feedback_check",
+		"feedback",
+		"cleanup",
+	],
+	implementation: [
+		"seed",
+		"clear_loop",
+		"setup_run",
+		"running",
+		"running_subagent",
+		"resolve",
+		"amend_plans",
+		"commit",
+		"next_plan",
+		"failed",
+	],
+	polish: [
+		"commit_pending",
+		"prereview",
+		"push",
+		"create_pr",
+		"poll",
+		"ensure_branch",
+		"eval",
+		"act",
+		"tty_resolve",
+		"write_fix",
+		"run_fix",
+		"verify_fixes",
+		"repo_ready",
+	],
 };
 
 function isCheckpoint(phase: string, state: string): boolean {
-  return CHECKPOINTS[phase]?.has(state) ?? false;
+	return CHECKPOINTS[phase]?.has(state) ?? false;
 }
 
 // ============================================================================
@@ -166,15 +192,15 @@ function isCheckpoint(phase: string, state: string): boolean {
 // ============================================================================
 
 const LIFECYCLE_EVENTS = new Set([
-  'start:started',
-  'start:completed',
-  'stop:started',
-  'stop:completed',
-  'context:updated',
+	"start:started",
+	"start:completed",
+	"stop:started",
+	"stop:completed",
+	"context:updated",
 ]);
 
 function isLifecycleEvent(event: string): boolean {
-  return LIFECYCLE_EVENTS.has(event);
+	return LIFECYCLE_EVENTS.has(event);
 }
 
 // ============================================================================
@@ -182,10 +208,10 @@ function isLifecycleEvent(event: string): boolean {
 // ============================================================================
 
 function phaseFromEvent(event: string): string {
-  if (event.startsWith('phase1')) return 'plan';
-  if (event.startsWith('phase2')) return 'implementation';
-  if (event.startsWith('phase3')) return 'polish';
-  return 'none';
+	if (event.startsWith("phase1")) return "plan";
+	if (event.startsWith("phase2")) return "implementation";
+	if (event.startsWith("phase3")) return "polish";
+	return "none";
 }
 
 // ============================================================================
@@ -193,224 +219,237 @@ function phaseFromEvent(event: string): string {
 // ============================================================================
 
 function initialStatus(): SessionStatus {
-  return {
-    walCursor: 0,
-    walTimestamp: '',
-    phase: 'none',
-    version: 0,
-    state: 'none',
-    stateStatus: 'pending',
-    lastCheckpoint: null,
-    pid: null,
-    running: false,
-    startedAt: null,
-    stepType: null,
-    userTurn: null,
-    completedSteps: [],
-    context: {},
-    planRuns: {},
-    activePlan: null,
-    polishState: null,
-    phases: {
-      plan: { status: 'pending', currentStep: null },
-      implementation: {
-        status: 'pending',
-        currentStep: null,
-        planProgress: null,
-      },
-      polish: { status: 'pending', currentStep: null },
-    },
-  };
+	return {
+		walCursor: 0,
+		walTimestamp: "",
+		phase: "none",
+		version: 0,
+		state: "none",
+		stateStatus: "pending",
+		lastCheckpoint: null,
+		pid: null,
+		running: false,
+		startedAt: null,
+		stepType: null,
+		userTurn: null,
+		completedSteps: [],
+		context: {},
+		planRuns: {},
+		activePlan: null,
+		polishState: null,
+		phases: {
+			plan: { status: "pending", currentStep: null },
+			implementation: {
+				status: "pending",
+				currentStep: null,
+				planProgress: null,
+			},
+			polish: { status: "pending", currentStep: null },
+		},
+	};
 }
 
 // ============================================================================
 // applyEvent reducer
 // ============================================================================
 
-function applyEvent(status: SessionStatus, entry: LogEntry, index: number): void {
-  status.walCursor = index + 1;
-  status.walTimestamp = entry.ts;
+function applyEvent(
+	status: SessionStatus,
+	entry: LogEntry,
+	index: number,
+): void {
+	status.walCursor = index + 1;
+	status.walTimestamp = entry.ts;
 
-  const { event } = entry;
+	const { event } = entry;
 
-  // Phase start
-  if (/^phase\d:started$/.test(event)) {
-    const newPhase = phaseFromEvent(event);
-    status.phase = newPhase;
-    status.version = entry.version ?? status.version;
-    status.completedSteps = [];
-    status.lastCheckpoint = null;
+	// Phase start
+	if (/^phase\d:started$/.test(event)) {
+		const newPhase = phaseFromEvent(event);
+		status.phase = newPhase;
+		status.version = entry.version ?? status.version;
+		status.completedSteps = [];
+		status.lastCheckpoint = null;
 
-    // Bug fix #1: Reset phase-specific context fields on phase transitions
-    if (newPhase === 'plan') {
-      // Bug fix #6: Clear planRuns on new epoch (revisit_spec / amend_spec)
-      status.planRuns = {};
-      // Bug fix #7: Clear ALL context on revisit_spec
-      status.context = {};
-      status.activePlan = null;
-      status.polishState = null;
-    } else if (newPhase === 'implementation') {
-      // Reset phase2-specific context
-      status.context.attempt = undefined;
-      status.activePlan = null;
-      status.polishState = null;
-    } else if (newPhase === 'polish') {
-      // Reset phase3-specific context
-      status.context.pushCycle = undefined;
-      status.context.prNumber = undefined;
-      status.context.prUrl = undefined;
-      status.context.ttyReason = undefined;
-      status.activePlan = null;
-      // Initialize polishState
-      status.polishState = {
-        prNumber: null,
-        prUrl: null,
-        pushCycle: 0,
-        lastEvalSummary: null,
-        ttyReason: null,
-      };
-    }
-  }
+		// Bug fix #1: Reset phase-specific context fields on phase transitions
+		if (newPhase === "plan") {
+			// Bug fix #6: Clear planRuns on new epoch (revisit_spec / amend_spec)
+			status.planRuns = {};
+			// Bug fix #7: Clear ALL context on revisit_spec
+			status.context = {};
+			status.activePlan = null;
+			status.polishState = null;
+		} else if (newPhase === "implementation") {
+			// Reset phase2-specific context
+			status.context.attempt = undefined;
+			status.activePlan = null;
+			status.polishState = null;
+		} else if (newPhase === "polish") {
+			// Reset phase3-specific context
+			status.context.pushCycle = undefined;
+			status.context.prNumber = undefined;
+			status.context.prUrl = undefined;
+			status.context.ttyReason = undefined;
+			status.activePlan = null;
+			// Initialize polishState
+			status.polishState = {
+				prNumber: null,
+				prUrl: null,
+				pushCycle: 0,
+				lastEvalSummary: null,
+				ttyReason: null,
+			};
+		}
+	}
 
-  // Phase complete — clear ephemeral state
-  if (/^phase\d:completed$/.test(event)) {
-    const completedPhase = phaseFromEvent(event);
-    if (completedPhase === 'implementation') {
-      status.activePlan = null;
-    }
-    if (completedPhase === 'polish') {
-      status.polishState = null;
-    }
-  }
+	// Phase complete — clear ephemeral state
+	if (/^phase\d:completed$/.test(event)) {
+		const completedPhase = phaseFromEvent(event);
+		if (completedPhase === "implementation") {
+			status.activePlan = null;
+		}
+		if (completedPhase === "polish") {
+			status.polishState = null;
+		}
+	}
 
-  // Per-plan cycle reset (phase2 loops per plan)
-  if (event === 'clear_loop:started' && entry.metadata?.planIndex != null) {
-    status.completedSteps = [];
-    const planIndex = entry.metadata.planIndex as number;
-    status.context.planIndex = planIndex;
-    const maxPlans = status.context.maxPlans ?? 0;
-    status.activePlan = {
-      name: `plan-${planIndex + 1}`,
-      planIndex,
-      maxPlans,
-      kloopRunId: null,
-      attempt: (status.context.attempt as number) ?? 1,
-    };
-  }
+	// Per-plan cycle reset (phase2 loops per plan)
+	if (event === "clear_loop:started" && entry.metadata?.planIndex != null) {
+		status.completedSteps = [];
+		const planIndex = entry.metadata.planIndex as number;
+		status.context.planIndex = planIndex;
+		const maxPlans = status.context.maxPlans ?? 0;
+		status.activePlan = {
+			name: `plan-${planIndex + 1}`,
+			planIndex,
+			maxPlans,
+			kloopRunId: null,
+			attempt: (status.context.attempt as number) ?? 1,
+		};
+	}
 
-  // Track kloop run IDs per plan
-  if (event === 'setup_run:completed' && entry.metadata?.kloopRunId) {
-    const plan = (entry.plan as string) ?? `plan-${(status.context.planIndex ?? 0) + 1}`;
-    const runId = entry.metadata.kloopRunId as string;
-    if (!status.planRuns[plan]) {
-      status.planRuns[plan] = [];
-    }
-    status.planRuns[plan].push(runId);
-    // Update activePlan kloopRunId (create if missing, e.g. after crash recovery)
-    if (status.activePlan) {
-      if (status.activePlan.name === plan) {
-        status.activePlan.kloopRunId = runId;
-      }
-    } else {
-      const planIndex = status.context.planIndex ?? 0;
-      status.activePlan = {
-        name: plan,
-        planIndex,
-        maxPlans: (status.context.maxPlans as number) ?? 0,
-        kloopRunId: runId,
-        attempt: (status.context.attempt as number) ?? 1,
-      };
-    }
-  }
+	// Track kloop run IDs per plan
+	if (event === "setup_run:completed" && entry.metadata?.kloopRunId) {
+		const plan =
+			(entry.plan as string) ?? `plan-${(status.context.planIndex ?? 0) + 1}`;
+		const runId = entry.metadata.kloopRunId as string;
+		if (!status.planRuns[plan]) {
+			status.planRuns[plan] = [];
+		}
+		status.planRuns[plan].push(runId);
+		// Update activePlan kloopRunId (create if missing, e.g. after crash recovery)
+		if (status.activePlan) {
+			if (status.activePlan.name === plan) {
+				status.activePlan.kloopRunId = runId;
+			}
+		} else {
+			const planIndex = status.context.planIndex ?? 0;
+			status.activePlan = {
+				name: plan,
+				planIndex,
+				maxPlans: (status.context.maxPlans as number) ?? 0,
+				kloopRunId: runId,
+				attempt: (status.context.attempt as number) ?? 1,
+			};
+		}
+	}
 
-  // Update activePlan when running completes (kloop finished)
-  if (event === 'running:completed' && status.activePlan) {
-    status.activePlan.kloopRunId = null;
-  }
+	// Update activePlan when running completes (kloop finished)
+	if (event === "running:completed" && status.activePlan) {
+		status.activePlan.kloopRunId = null;
+	}
 
-  // Update activePlan on next_plan
-  if (event === 'next_plan:completed' && status.activePlan && entry.metadata?.to) {
-    const to = entry.metadata.to as string;
-    if (to !== 'done') {
-      const match = to.match(/^plan-(\d+)$/);
-      if (match) {
-        const newPlanIndex = parseInt(match[1], 10) - 1;
-        status.activePlan.planIndex = newPlanIndex;
-        status.activePlan.name = to;
-        status.activePlan.kloopRunId = null;
-      }
-    }
-  }
+	// Update activePlan on next_plan
+	if (
+		event === "next_plan:completed" &&
+		status.activePlan &&
+		entry.metadata?.to
+	) {
+		const to = entry.metadata.to as string;
+		if (to !== "done") {
+			const match = to.match(/^plan-(\d+)$/);
+			if (match) {
+				const newPlanIndex = parseInt(match[1], 10) - 1;
+				status.activePlan.planIndex = newPlanIndex;
+				status.activePlan.name = to;
+				status.activePlan.kloopRunId = null;
+			}
+		}
+	}
 
-  // State started (skip lifecycle/meta events)
-  if (event.endsWith(':started') && !isLifecycleEvent(event)) {
-    const name = event.replace(':started', '');
-    status.state = name;
-    status.stateStatus = 'running';
-    // Set stepType from metadata, derive initial userTurn. The driver emits
-    // def.kind (interactive | agent | code); interactive is the user's turn.
-    const st = (entry.metadata?.stepType as string) ?? null;
-    status.stepType = st as SessionStatus['stepType'];
-    status.userTurn = st === 'interactive' ? true : st ? false : null;
-  }
+	// State started (skip lifecycle/meta events)
+	if (event.endsWith(":started") && !isLifecycleEvent(event)) {
+		const name = event.replace(":started", "");
+		status.state = name;
+		status.stateStatus = "running";
+		// Set stepType from metadata, derive initial userTurn. The driver emits
+		// def.kind (interactive | agent | code); interactive is the user's turn.
+		const st = (entry.metadata?.stepType as string) ?? null;
+		status.stepType = st as SessionStatus["stepType"];
+		status.userTurn = st === "interactive" ? true : st ? false : null;
+	}
 
-  // State completed (skip lifecycle/meta events)
-  if (event.endsWith(':completed') && !isLifecycleEvent(event)) {
-    const name = event.replace(':completed', '');
-    if (name === status.state) {
-      status.stateStatus = 'completed';
-    }
-    status.stepType = null;
-    status.userTurn = null;
-    if (!status.completedSteps.includes(name)) {
-      status.completedSteps.push(name);
-    }
-    if (isCheckpoint(status.phase, name)) {
-      status.lastCheckpoint = name;
-    }
-  }
+	// State completed (skip lifecycle/meta events)
+	if (event.endsWith(":completed") && !isLifecycleEvent(event)) {
+		const name = event.replace(":completed", "");
+		if (name === status.state) {
+			status.stateStatus = "completed";
+		}
+		status.stepType = null;
+		status.userTurn = null;
+		if (!status.completedSteps.includes(name)) {
+			status.completedSteps.push(name);
+		}
+		if (isCheckpoint(status.phase, name)) {
+			status.lastCheckpoint = name;
+		}
+	}
 
-  // Session run start
-  if (event === 'start:started') {
-    status.running = true;
-    status.pid = (entry.metadata?.pid as number) ?? null;
-    status.startedAt = entry.ts;
-    if (entry.metadata?.phase) {
-      status.phase = entry.metadata.phase as string;
-    }
-  }
+	// Session run start
+	if (event === "start:started") {
+		status.running = true;
+		status.pid = (entry.metadata?.pid as number) ?? null;
+		status.startedAt = entry.ts;
+		if (entry.metadata?.phase) {
+			status.phase = entry.metadata.phase as string;
+		}
+	}
 
-  // Session run end
-  if (event === 'start:completed' || event === 'stop:completed') {
-    status.running = false;
-    status.pid = null;
-    status.stepType = null;
-    status.userTurn = null;
-  }
+	// Session run end
+	if (event === "start:completed" || event === "stop:completed") {
+		status.running = false;
+		status.pid = null;
+		status.stepType = null;
+		status.userTurn = null;
+	}
 
-  // Context updates — also track polish-specific fields
-  if (event === 'context:updated' && entry.metadata) {
-    const { task, parent, error, ...contextFields } = entry.metadata;
-    Object.assign(status.context, contextFields);
+	// Context updates — also track polish-specific fields
+	if (event === "context:updated" && entry.metadata) {
+		const { task, parent, error, ...contextFields } = entry.metadata;
+		Object.assign(status.context, contextFields);
 
-    // Update polishState from context changes
-    if (status.polishState) {
-      if (contextFields.prNumber != null) status.polishState.prNumber = contextFields.prNumber as number;
-      if (contextFields.prUrl != null) status.polishState.prUrl = contextFields.prUrl as string;
-      if (contextFields.pushCycle != null) status.polishState.pushCycle = contextFields.pushCycle as number;
-      if (contextFields.ttyReason != null) status.polishState.ttyReason = contextFields.ttyReason as string;
-    }
-  }
+		// Update polishState from context changes
+		if (status.polishState) {
+			if (contextFields.prNumber != null)
+				status.polishState.prNumber = contextFields.prNumber as number;
+			if (contextFields.prUrl != null)
+				status.polishState.prUrl = contextFields.prUrl as string;
+			if (contextFields.pushCycle != null)
+				status.polishState.pushCycle = contextFields.pushCycle as number;
+			if (contextFields.ttyReason != null)
+				status.polishState.ttyReason = contextFields.ttyReason as string;
+		}
+	}
 
-  // Track polish eval summary from eval:completed
-  if (event === 'eval:completed' && status.polishState) {
-    status.polishState.lastEvalSummary = {
-      replies: (entry.metadata?.replies as number) ?? 0,
-      resolves: (entry.metadata?.resolves as number) ?? 0,
-      codeFixes: (entry.metadata?.codeFixes as number) ?? 0,
-      ambiguous: (entry.metadata?.ambiguous as number) ?? 0,
-    };
-  }
+	// Track polish eval summary from eval:completed
+	if (event === "eval:completed" && status.polishState) {
+		status.polishState.lastEvalSummary = {
+			replies: (entry.metadata?.replies as number) ?? 0,
+			resolves: (entry.metadata?.resolves as number) ?? 0,
+			codeFixes: (entry.metadata?.codeFixes as number) ?? 0,
+			ambiguous: (entry.metadata?.ambiguous as number) ?? 0,
+		};
+	}
 }
 
 // ============================================================================
@@ -418,37 +457,37 @@ function applyEvent(status: SessionStatus, entry: LogEntry, index: number): void
 // ============================================================================
 
 function statusPath(sessionId: string): string {
-  return `${process.env.HOME}/.kautopilot/${sessionId}/status.yaml`;
+	return `${process.env.HOME}/.kautopilot/${sessionId}/status.yaml`;
 }
 
 function readStatusYaml(sessionId: string): SessionStatus | null {
-  const path = statusPath(sessionId);
-  if (!existsSync(path)) return null;
-  try {
-    const raw = readFileSync(path, 'utf-8');
-    return YAML.parse(raw) as SessionStatus;
-  } catch {
-    return null;
-  }
+	const path = statusPath(sessionId);
+	if (!existsSync(path)) return null;
+	try {
+		const raw = readFileSync(path, "utf-8");
+		return YAML.parse(raw) as SessionStatus;
+	} catch {
+		return null;
+	}
 }
 
 function writeStatusYaml(sessionId: string, status: SessionStatus): void {
-  const path = statusPath(sessionId);
-  try {
-    mkdirSync(dirname(path), { recursive: true });
-    const content = YAML.stringify(status, { lineWidth: 120 });
-    // Atomic write: temp file + rename
-    const tmp = `${path}.tmp`;
-    writeFileSync(tmp, content);
-    renameSync(tmp, path);
-  } catch (err) {
-    // The status.yaml is a recomputable cache; on a read-only store (e.g. the
-    // `serve` web viewer's docker bind mount) writing it is impossible and we
-    // fall back to recomputing from log.jsonl each call. Swallow only EROFS/
-    // EACCES; rethrow anything else so genuine write bugs stay visible.
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code !== 'EROFS' && code !== 'EACCES') throw err;
-  }
+	const path = statusPath(sessionId);
+	try {
+		mkdirSync(dirname(path), { recursive: true });
+		const content = YAML.stringify(status, { lineWidth: 120 });
+		// Atomic write: temp file + rename
+		const tmp = `${path}.tmp`;
+		writeFileSync(tmp, content);
+		renameSync(tmp, path);
+	} catch (err) {
+		// The status.yaml is a recomputable cache; on a read-only store (e.g. the
+		// `serve` web viewer's docker bind mount) writing it is impossible and we
+		// fall back to recomputing from log.jsonl each call. Swallow only EROFS/
+		// EACCES; rethrow anything else so genuine write bugs stay visible.
+		const code = (err as NodeJS.ErrnoException).code;
+		if (code !== "EROFS" && code !== "EACCES") throw err;
+	}
 }
 
 // ============================================================================
@@ -456,28 +495,30 @@ function writeStatusYaml(sessionId: string, status: SessionStatus): void {
 // ============================================================================
 
 export function ensureStatus(sessionId: string): SessionStatus {
-  const log = readLog(sessionId);
-  const existing = readStatusYaml(sessionId);
+	const log = readLog(sessionId);
+	const existing = readStatusYaml(sessionId);
 
-  if (existing && existing.walCursor >= log.length) {
-    const status = { ...initialStatus(), ...existing };
-    computeDerivedFields(status);
-    return status;
-  }
+	if (existing && existing.walCursor >= log.length) {
+		const status = { ...initialStatus(), ...existing };
+		computeDerivedFields(status);
+		return status;
+	}
 
-  // Incremental replay from cursor, or full replay if missing
-  // Merge with initialStatus() so new fields get their defaults when
-  // reading status.yaml from a session created before those fields existed.
-  const status = existing ? { ...initialStatus(), ...existing } : initialStatus();
-  const startIdx = existing ? existing.walCursor : 0;
+	// Incremental replay from cursor, or full replay if missing
+	// Merge with initialStatus() so new fields get their defaults when
+	// reading status.yaml from a session created before those fields existed.
+	const status = existing
+		? { ...initialStatus(), ...existing }
+		: initialStatus();
+	const startIdx = existing ? existing.walCursor : 0;
 
-  for (let i = startIdx; i < log.length; i++) {
-    applyEvent(status, log[i], i);
-  }
+	for (let i = startIdx; i < log.length; i++) {
+		applyEvent(status, log[i], i);
+	}
 
-  computeDerivedFields(status);
-  writeStatusYaml(sessionId, status);
-  return status;
+	computeDerivedFields(status);
+	writeStatusYaml(sessionId, status);
+	return status;
 }
 
 // ============================================================================
@@ -488,71 +529,79 @@ export function ensureStatus(sessionId: string): SessionStatus {
  * Compute summary views of the replayed state (phases summary).
  */
 function computeDerivedFields(status: SessionStatus): void {
-  // phases summary
-  const phaseOrder: Array<'plan' | 'implementation' | 'polish'> = ['plan', 'implementation', 'polish'];
-  const currentPhaseIdx = phaseOrder.indexOf(status.phase as 'plan' | 'implementation' | 'polish');
+	// phases summary
+	const phaseOrder: Array<"plan" | "implementation" | "polish"> = [
+		"plan",
+		"implementation",
+		"polish",
+	];
+	const currentPhaseIdx = phaseOrder.indexOf(
+		status.phase as "plan" | "implementation" | "polish",
+	);
 
-  for (const p of phaseOrder) {
-    const pIdx = phaseOrder.indexOf(p);
-    if (
-      pIdx < currentPhaseIdx ||
-      (pIdx === currentPhaseIdx && status.stateStatus === 'completed' && status.phase === p)
-    ) {
-      // Completed phase
-      if (p === 'implementation') {
-        status.phases.implementation = {
-          status: 'completed',
-          currentStep: null,
-          planProgress: null,
-        };
-      } else if (p === 'polish') {
-        status.phases.polish = {
-          status: 'completed',
-          currentStep: null,
-        };
-      } else {
-        status.phases.plan = { status: 'completed', currentStep: null };
-      }
-    } else if (p === status.phase) {
-      // Active phase
-      const step = status.stateStatus === 'running' ? status.state : null;
-      if (p === 'implementation') {
-        const planProgress = status.activePlan
-          ? `${status.activePlan.planIndex + 1}/${status.activePlan.maxPlans}`
-          : status.context.maxPlans != null
-            ? `${(status.context.planIndex ?? 0) + 1}/${status.context.maxPlans}`
-            : null;
-        status.phases.implementation = {
-          status: 'active',
-          currentStep: step,
-          planProgress,
-        };
-      } else if (p === 'polish') {
-        status.phases.polish = {
-          status: 'active',
-          currentStep: step,
-        };
-      } else {
-        status.phases.plan = { status: 'active', currentStep: step };
-      }
-    } else {
-      // Pending phase
-      if (p === 'implementation') {
-        status.phases.implementation = {
-          status: 'pending',
-          currentStep: null,
-          planProgress: null,
-        };
-      } else if (p === 'polish') {
-        status.phases.polish = {
-          status: 'pending',
-          currentStep: null,
-        };
-      } else {
-        status.phases.plan = { status: 'pending', currentStep: null };
-      }
-    }
-  }
+	for (const p of phaseOrder) {
+		const pIdx = phaseOrder.indexOf(p);
+		if (
+			pIdx < currentPhaseIdx ||
+			(pIdx === currentPhaseIdx &&
+				status.stateStatus === "completed" &&
+				status.phase === p)
+		) {
+			// Completed phase
+			if (p === "implementation") {
+				status.phases.implementation = {
+					status: "completed",
+					currentStep: null,
+					planProgress: null,
+				};
+			} else if (p === "polish") {
+				status.phases.polish = {
+					status: "completed",
+					currentStep: null,
+				};
+			} else {
+				status.phases.plan = { status: "completed", currentStep: null };
+			}
+		} else if (p === status.phase) {
+			// Active phase
+			const step = status.stateStatus === "running" ? status.state : null;
+			if (p === "implementation") {
+				const planProgress = status.activePlan
+					? `${status.activePlan.planIndex + 1}/${status.activePlan.maxPlans}`
+					: status.context.maxPlans != null
+						? `${(status.context.planIndex ?? 0) + 1}/${status.context.maxPlans}`
+						: null;
+				status.phases.implementation = {
+					status: "active",
+					currentStep: step,
+					planProgress,
+				};
+			} else if (p === "polish") {
+				status.phases.polish = {
+					status: "active",
+					currentStep: step,
+				};
+			} else {
+				status.phases.plan = { status: "active", currentStep: step };
+			}
+		} else {
+			// Pending phase
+			if (p === "implementation") {
+				status.phases.implementation = {
+					status: "pending",
+					currentStep: null,
+					planProgress: null,
+				};
+			} else if (p === "polish") {
+				status.phases.polish = {
+					status: "pending",
+					currentStep: null,
+				};
+			} else {
+				status.phases.plan = { status: "pending", currentStep: null };
+			}
+		}
+	}
 }
 
 /**
@@ -560,5 +609,5 @@ function computeDerivedFields(status: SessionStatus): void {
  * Convenience accessor for CLI commands.
  */
 export function getCurrentKloopRunId(status: SessionStatus): string | null {
-  return status.activePlan?.kloopRunId ?? null;
+	return status.activePlan?.kloopRunId ?? null;
 }
