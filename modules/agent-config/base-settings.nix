@@ -3,6 +3,7 @@
 
 {
   model = "opus";
+  defaultMode = "bypassPermissions";
   theme = "dark";
   alwaysThinkingEnabled = true;
   includeCoAuthoredBy = false;

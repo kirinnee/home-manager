@@ -265,6 +265,8 @@ export class LoopRunner {
             consecutiveFailures = cpResult.consecutiveFailures;
           }
 
+          if (config.snapshot) await this.snapshotLoop(runId, loopNum);
+
           continue;
         }
 
@@ -344,6 +346,8 @@ export class LoopRunner {
               consecutiveFailures = cpResult.consecutiveFailures;
             }
 
+            if (config.snapshot) await this.snapshotLoop(runId, loopNum);
+
             continue;
           }
         }
@@ -421,6 +425,8 @@ export class LoopRunner {
         await this.writeLoopMetrics(runId, loopNum, implResult, allReviewerResults, loopDurationMs);
 
         await this.writeLoopLearnings(runId, loopNum, implResult.learnings);
+
+        if (config.snapshot) await this.snapshotLoop(runId, loopNum);
 
         if (consensusResult.approved) {
           // Write completed event
@@ -1683,6 +1689,21 @@ ${summary}
     await fs.writeFile(this.paths.runSpecVersioned(runId, version), specContent, 'utf-8');
     // Keep spec.md as the latest copy
     await fs.writeFile(this.paths.runSpec(runId), specContent, 'utf-8');
+  }
+
+  /**
+   * Snapshot the working directory to archive for debugging.
+   * Copies the entire workspace (minus node_modules, .git, .kloop) to archive/loop-{N}/.
+   */
+  private async snapshotLoop(runId: string, loopNum: number): Promise<void> {
+    const archiveDir = this.paths.loopArchivePath(runId, loopNum);
+    const cwd = process.cwd();
+
+    await fs.mkdir(archiveDir, { recursive: true });
+
+    await fs.cp(cwd, archiveDir, { recursive: true });
+
+    fmt.formatSnapshot(loopNum, archiveDir);
   }
 
   /**

@@ -43,7 +43,7 @@ ORCHESTRATOR (you = team lead)
 │   └── clear-loop (haiku) — kloop ps/cancel, remove stale files
 │
 ├── TEAM AGENTS (spawned via Task tool):
-│   ├── setup-agent (haiku) — mode + branch + .gitignore + bootstrap state
+│   ├── setup-agent (haiku) — mode + worktrunk worktree/branch + .gitignore + bootstrap state
 │   ├── repo-setup-agent (sonnet) — org detection, ticket, repoConfig
 │   ├── setup-run-agent (haiku) — copy plan → spec, init kloop
 │   ├── runner-agent (sonnet) — execute kloop, report exit code
@@ -318,10 +318,11 @@ After poller returns, resolvers are dispatched from `polish/steps/resolve.md`:
 25. **Never use `gh pr watch`** — use inline `gh api graphql` polling instead
 26. **Three-wave execution** — immediate actions → code fixes (merged) → post-push actions
 27. **One combined spec** — merge all resolver fixes into ONE spec before kloop
-28. **Priority merging** — CI(1) > Review(2) > CodeRabbit(3), drop lower priority overlaps
-29. **Push back on CodeRabbit reasonably** — evaluate critically but professionally
-30. **Never close threads without note** — always post explanation with signature first
-31. **Bot signature** — all resolver replies include `"By Claude Code Kagent Autopilot 🤖"`
+28. **Use worktrunk for new task worktrees** — when starting from `main` or `master`, setup must use `wt switch --create ...`, report the resulting `WORKDIR`, and all later steps must use that reported worktree. Never use `git checkout -b` for task setup.
+29. **Priority merging** — CI(1) > Review(2) > CodeRabbit(3), drop lower priority overlaps
+30. **Push back on CodeRabbit reasonably** — evaluate critically but professionally
+31. **Never close threads without note** — always post explanation with signature first
+32. **Bot signature** — all resolver replies include `"By Claude Code Kagent Autopilot 🤖"`
 
 ## Prerequisites
 

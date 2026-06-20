@@ -16,6 +16,15 @@ let rtk = builtins.readFile ./RTK.md; in
 let sharedMemory = builtins.readFile ./CLAUDE.md + "\n" + rtk; in
 let autoMemory = builtins.readFile ./CLAUDE-autonomous.md + "\n" + rtk; in
 let sharedSkills = ./skills; in
+# Skills as an attrset (name => path) so consumers can materialize them via
+  # home.file symlinks instead of an imperative activation script.
+let
+  sharedSkillsAttrs =
+    let entries = builtins.readDir sharedSkills; in
+    builtins.listToAttrs (map
+      (name: { inherit name; value = sharedSkills + "/${name}"; })
+      (builtins.filter (n: entries.${n} == "directory") (builtins.attrNames entries)));
+in
 
 let
   # --- Claude ---
@@ -35,10 +44,12 @@ let
     env = baseEnv;
   };
 
-  mkClaudeAccount = { provider ? "zai", opus ? null, sonnet ? null, haiku ? null, ... }@attrs:
+  # manualAuth = true: inject no proxy auth env, so the account logs in
+  # manually via `claude /login` (real Anthropic OAuth / subscription).
+  mkClaudeAccount = { provider ? "zai", opus ? null, sonnet ? null, haiku ? null, manualAuth ? false, ... }@attrs:
     claudeUserConfig // {
-      env = claudeUserConfig.env // (auth.mkClaudeEnv provider { inherit opus sonnet haiku; });
-    } // (removeAttrs attrs [ "provider" "opus" "sonnet" "haiku" ]);
+      env = claudeUserConfig.env // (if manualAuth then { } else auth.mkClaudeEnv provider { inherit opus sonnet haiku; });
+    } // (removeAttrs attrs [ "provider" "opus" "sonnet" "haiku" "manualAuth" ]);
 
   mkAutoClaudeAccount = { provider ? "zai", opus ? null, sonnet ? null, haiku ? null, ... }@attrs:
     claudeAutoConfig // {
@@ -46,38 +57,56 @@ let
     } // (removeAttrs attrs [ "provider" "opus" "sonnet" "haiku" ]);
 
   # --- Codex ---
+  codexAutoSettings = builtins.removeAttrs codexSettings [ "service_tier" ];
+
+  # Proxy/API-key variants authenticate via the local proxy and cannot use the
+  # ChatGPT-only apps connectors. Disable `apps` to avoid the codex_apps MCP
+  # startup failure (and the wasted per-home plugin downloads). The ChatGPT
+  # OAuth accounts keep apps enabled via codexChatGPTSettings below.
+  codexProxySettings = codexSettings // { features = codexSettings.features // { apps = false; }; };
+  codexProxyAutoSettings = codexAutoSettings // { features = codexAutoSettings.features // { apps = false; }; };
+
   codexUserConfig = {
-    settings = codexSettings;
+    settings = codexProxySettings;
     mcpServers = baseMcp;
     memory.text = sharedMemory;
+    # `skills` (attrset) routes through home.file symlinks; `skillsDir` would use
+    # an activation script. Keep these activation-free.
+    skills = sharedSkillsAttrs;
     env = baseEnv;
     hooksConfig = codexHooksConfig;
     hooksDir = codexHooksDir;
   };
 
   codexAutoConfig = {
-    settings = codexSettings;
+    settings = codexProxyAutoSettings;
     mcpServers = baseMcp;
     memory.text = autoMemory;
+    skills = sharedSkillsAttrs;
     env = baseEnv;
     hooksConfig = codexAutoHooksConfig;
     hooksDir = codexHooksDir;
   };
 
-  mkCodexAccount = { provider ? "openai", model ? null, ... }@attrs:
+  mkCodexAccount = { provider ? "openai", model ? null, settings ? { }, ... }@attrs:
     codexUserConfig // {
       env = codexUserConfig.env // (auth.mkCodexEnv provider);
-    } // (removeAttrs attrs [ "provider" "model" ])
-    // (if model != null then { settings = codexSettings // { inherit model; }; } else { });
+    } // (removeAttrs attrs [ "provider" "model" "settings" ])
+    // (if model != null || settings != { } then {
+      settings = codexProxySettings // settings // (if model != null then { inherit model; } else { });
+    } else { });
 
-  mkCodexAutoAccount = { provider ? "openai", model ? null, ... }@attrs:
+  mkCodexAutoAccount = { provider ? "openai", model ? null, settings ? { }, ... }@attrs:
     codexAutoConfig // {
       env = codexAutoConfig.env // (auth.mkCodexEnv provider);
-    } // (removeAttrs attrs [ "provider" "model" ])
-    // (if model != null then { settings = codexSettings // { inherit model; }; } else { });
+    } // (removeAttrs attrs [ "provider" "model" "settings" ])
+    // (if model != null || settings != { } then {
+      settings = codexProxyAutoSettings // settings // (if model != null then { inherit model; } else { });
+    } else { });
 
   # ChatGPT OAuth login variant (no proxy, no forced API key)
   codexChatGPTSettings = builtins.removeAttrs codexSettings [ "forced_login_method" "model_provider" "model_providers" ];
+  codexChatGPTAutoSettings = builtins.removeAttrs codexChatGPTSettings [ "service_tier" ];
 
   mkCodexChatGPTAccount = { ... }@attrs:
     codexUserConfig // {
@@ -87,7 +116,7 @@ let
 
   mkCodexChatGPTAutoAccount = { ... }@attrs:
     codexAutoConfig // {
-      settings = codexChatGPTSettings;
+      settings = codexChatGPTAutoSettings;
       env = baseEnv;
     } // (removeAttrs attrs [ ]);
 
@@ -206,7 +235,11 @@ let
         let m = builtins.elemAt p.models i;
         in {
           name = m.name;
-          value = mkCodexAccount { inherit provider; model = m.id; };
+          value = mkCodexAccount {
+            inherit provider;
+            model = m.id;
+            settings = m.codexSettings or { };
+          };
         }
       )
       (builtins.length p.models));
@@ -218,7 +251,11 @@ let
         let m = builtins.elemAt p.models i;
         in {
           name = "auto-" + m.name;
-          value = mkCodexAutoAccount { inherit provider; model = m.id; };
+          value = mkCodexAutoAccount {
+            inherit provider;
+            model = m.id;
+            settings = m.codexSettings or { };
+          };
         }
       )
       (builtins.length p.models));

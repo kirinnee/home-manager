@@ -19,10 +19,23 @@ interface RunEntry {
   endedAt?: string;
 }
 
-export async function handler(opts: { all: boolean; workspace?: string; json: boolean }, deps: CliDeps): Promise<void> {
+export async function handler(
+  opts: { all: boolean; workspace?: string; json: boolean; limit?: string; order?: string },
+  deps: CliDeps,
+): Promise<void> {
   try {
     const { indexDb, eventLog, pidLock, tmux } = deps;
-    const runs = await listRuns(indexDb, eventLog, pidLock, tmux, opts.all, opts.workspace);
+    const limit = opts.limit ? Number.parseInt(opts.limit, 10) : undefined;
+    if (opts.limit && Number.isNaN(limit!)) {
+      console.error(pc.red('Error: --limit must be a valid integer'));
+      process.exit(1);
+    }
+    if (limit !== undefined && limit < 1) {
+      console.error(pc.red('Error: --limit must be a positive integer'));
+      process.exit(1);
+    }
+    const order = opts.order;
+    const runs = await listRuns(indexDb, eventLog, pidLock, tmux, opts.all, opts.workspace, { limit, order });
 
     if (opts.json) {
       console.log(JSON.stringify(runs, null, 2));
@@ -111,6 +124,7 @@ async function listRuns(
   tmux: TmuxService,
   includeAll: boolean,
   workspace?: string,
+  sort?: { limit?: number; order?: string },
 ): Promise<RunEntry[]> {
   const rows = await indexDb.listRuns(workspace);
   const runs: RunEntry[] = [];
@@ -152,5 +166,6 @@ async function listRuns(
     });
   }
 
-  return runs.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+  const sorted = runs.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+  return sort?.limit != null ? sorted.slice(0, sort.limit) : sorted;
 }

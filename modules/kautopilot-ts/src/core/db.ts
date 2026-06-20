@@ -3,7 +3,10 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { SessionRow } from './types';
 
-const DB_PATH = `${process.env.HOME}/.kautopilot/index.db`;
+/** Resolved lazily so tests that swap $HOME get an isolated index. */
+function dbPath(): string {
+  return `${process.env.HOME}/.kautopilot/index.db`;
+}
 
 const UPSERT_SQL = `
   INSERT INTO sessions (id, repo_path, worktree, git_root, git_root_host, ticket_id, branch, local, state, created_at, updated_at)
@@ -37,11 +40,19 @@ function rowToParams(row: SessionRow): (string | number | null)[] {
 }
 
 let db: Database | null = null;
+let dbOpenedPath: string | null = null;
 
 function getDb(): Database {
+  const path = dbPath();
+  // Reopen if $HOME changed (e.g. between tests with isolated temp homes).
+  if (db && dbOpenedPath !== path) {
+    db.close();
+    db = null;
+  }
   if (!db) {
-    mkdirSync(dirname(DB_PATH), { recursive: true });
-    db = new Database(DB_PATH);
+    mkdirSync(dirname(path), { recursive: true });
+    db = new Database(path);
+    dbOpenedPath = path;
     db.exec(`
       CREATE TABLE IF NOT EXISTS sessions (
         id             TEXT PRIMARY KEY,

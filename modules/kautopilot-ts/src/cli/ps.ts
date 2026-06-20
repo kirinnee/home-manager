@@ -1,8 +1,30 @@
 import { Command } from 'commander';
 import { listSessions } from '../core/db';
 import { checkLock } from '../core/lock';
+import { type Lpsm, readSessionMeta } from '../core/session-meta';
 import { ensureStatus, getCurrentKloopRunId } from '../core/status';
 import { formatPhase, parseRepoHost } from '../util/format';
+
+/**
+ * Does a session match all the given query tags? A query tag matches when its
+ * value (case-insensitive) equals — or, failing exact, is a substring of — ANY
+ * of the haystack values: the structured LPSM fields
+ * (landscape/cluster/platform/service/module) OR any of the session's free-form
+ * `tags[]`. With multiple query tags, ALL must match somewhere.
+ *
+ * @public Exported for unit tests; used internally by `runPs`.
+ */
+export function matchesTags(lpsm: Lpsm | undefined, freeTags: string[] | undefined, queryTags: string[]): boolean {
+  if (queryTags.length === 0) return true;
+  const lpsmValues = lpsm ? [lpsm.landscape, lpsm.cluster, lpsm.platform, lpsm.service, lpsm.module] : [];
+  const values = [...lpsmValues, ...(freeTags ?? [])].filter((v): v is string => Boolean(v)).map(v => v.toLowerCase());
+  if (values.length === 0) return false;
+  return queryTags.every(tag => {
+    const t = tag.toLowerCase();
+    if (values.some(v => v === t)) return true;
+    return values.some(v => v.includes(t));
+  });
+}
 
 const isTTY = process.stdout.isTTY;
 const c = {
@@ -15,8 +37,14 @@ export function createPsCommand(): Command {
   return new Command('ps')
     .option('--repo <origin>', 'Filter by git root (substring match)')
     .option('-a, --all', 'Include stopped/completed sessions')
+    .option(
+      '--tag <value>',
+      'Filter by AtomiCloud LPSM tag (repeatable; all must match)',
+      (value: string, prev: string[]) => [...prev, value],
+      [] as string[],
+    )
     .option('--json', 'Machine-readable output')
-    .action(async (opts: { repo?: string; all?: boolean; json?: boolean }) => {
+    .action(async (opts: { repo?: string; all?: boolean; tag?: string[]; json?: boolean }) => {
       try {
         await runPs(opts);
       } catch (err) {
@@ -26,8 +54,10 @@ export function createPsCommand(): Command {
     });
 }
 
-async function runPs(opts: { repo?: string; all?: boolean; json?: boolean }): Promise<void> {
+async function runPs(opts: { repo?: string; all?: boolean; tag?: string[]; json?: boolean }): Promise<void> {
   const sessions = listSessions({ includeAll: true });
+  const tags = opts.tag ?? [];
+  const tagging = tags.length > 0;
 
   // Filter by repo
   let filtered = sessions;
@@ -36,17 +66,29 @@ async function runPs(opts: { repo?: string; all?: boolean; json?: boolean }): Pr
     filtered = sessions.filter(s => s.git_root_host.includes(repoFilter));
   }
 
-  const runningRows = filtered.filter(session => opts.all || checkLock(session.id).locked);
+  // Tag-filtering implies considering all sessions, not just running ones.
+  const runningRows = filtered.filter(session => opts.all || tagging || checkLock(session.id).locked);
 
-  if (runningRows.length === 0) {
+  // Apply tag filter: matches against structured LPSM fields OR free-form tags.
+  const taggedRows = tagging
+    ? runningRows.filter(session => {
+        const meta = readSessionMeta(session.id);
+        return matchesTags(meta?.lpsm, meta?.tags, tags);
+      })
+    : runningRows;
+
+  if (taggedRows.length === 0) {
     console.log('No sessions found.');
     return;
   }
 
-  const rows = runningRows.map(session => {
+  const rows = taggedRows.map(session => {
     const lockInfo = checkLock(session.id);
     const status = ensureStatus(session.id);
     const { org, repo } = parseRepoHost(session.git_root_host);
+    const meta = readSessionMeta(session.id);
+    const lpsm = meta?.lpsm;
+    const tags = meta?.tags ?? null;
 
     const elapsed = lockInfo.locked && status.startedAt ? Date.now() - new Date(status.startedAt).getTime() : 0;
 
@@ -63,7 +105,7 @@ async function runPs(opts: { repo?: string; all?: boolean; json?: boolean }): Pr
       if (status.polishState.prNumber) {
         planCol = `PR#${status.polishState.prNumber}`;
       } else {
-        planCol = status.polishState.deliveryKind;
+        planCol = 'pr';
       }
     }
 
@@ -75,6 +117,8 @@ async function runPs(opts: { repo?: string; all?: boolean; json?: boolean }): Pr
       ticketId: session.ticket_id || '—',
       org,
       repo,
+      lpsm: lpsm ?? null,
+      tags,
       branch: session.branch || '—',
       phase: status.phase,
       step: status.state,
@@ -89,7 +133,6 @@ async function runPs(opts: { repo?: string; all?: boolean; json?: boolean }): Pr
       activePlan: status.activePlan,
       polishState: status.polishState,
       kloopRunId,
-      allPlans: status.allPlans,
       phases: status.phases,
     };
   });
@@ -156,12 +199,8 @@ async function runPs(opts: { repo?: string; all?: boolean; json?: boolean }): Pr
 
     const phaseText = done ? `${c.green}done${c.reset}` : formatPhase(row.phase);
     const stepText = done ? `✓ ${row.step}` : row.stepType ? `${row.step} (${row.stepType})` : row.step || '—';
-    const turnText =
-      !done && row.userTurn === true
-        ? "user's"
-        : !done && row.stepType === 'tty' && row.userTurn === false
-          ? "LLM's"
-          : '—';
+    // interactive = user's turn; agent = LLM's turn; code = no turn.
+    const turnText = !done && row.userTurn === true ? "user's" : !done && row.stepType === 'agent' ? "LLM's" : '—';
 
     const line =
       p(row.id, cols.session) +

@@ -11,30 +11,17 @@ curl -L https://raw.githubusercontent.com/kirinnee/home-manager/main/scripts/set
 
 ## AutoBackup CLI
 
-Within this home-manager, I created 2 CLI that helps me backup folders to pCloud itself.
+Within this home-manager, I created a CLI that helps me backup folders to pCloud itself.
 
-1. `setup-rclone-pcloud`
-   On a computer with **browser access** and **rclone CLI**, run the following command to obtain a JSON token:
-
-   ```bash
-   rclone authorize "pcloud"
-   ```
-
-   Run the rclone pcloud setup and paste the token in:
-
-   ```bash
-   setup-rclone-pcloud
-   ```
-
-2. `backup-pcloud`
-   With `setup-rclone-pcloud` completed, you can backup any directory to pCloud's Backup folder:
+1. `backup-pcloud`
+   With an rclone `pcloud` remote configured, you can backup any directory to pCloud's Backup folder:
 
    ```bash
    backup-pcloud backup ./Workspace desktop1 # => tarballs ./Workspace and send to pClouds's Backup/desktop1 folder
    backup-pcloud backup /home/kirin remote/devbox1 # => tarball /home/kirin and send to pCloud's Backup/remote/devbox1 folder
    ```
 
-3. Restoring
+2. Restoring
    If you have backed up before, you can easily restore the latest backup with the follow command:
    ```bash
    backup-pcloud restore ./Workspace desktop1 # restores the first commnad previously

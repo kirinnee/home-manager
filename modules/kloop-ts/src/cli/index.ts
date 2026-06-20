@@ -66,6 +66,8 @@ export function createCli(deps: CliDeps): Command {
     .option('-a, --all', 'list all runs (running + completed)')
     .option('--workspace <path>', 'filter by workspace')
     .option('--json', 'machine-readable output')
+    .option('--limit <n>', 'return at most N runs')
+    .option('--order <field>', 'sort order: "recent" (default when --limit is set)')
     .action(async opts => psCmd.handler(opts, deps));
 
   program

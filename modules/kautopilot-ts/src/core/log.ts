@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { initDir, sessionDir } from './artifacts';
+import { sessionDir } from './artifacts';
 import type { LogEntry } from './types';
 
 // ============================================================================
@@ -40,18 +40,6 @@ export function appendEvent(id: string, entry: LogEntry): void {
 
 export function readLog(id: string): LogEntry[] {
   return readLogFromDir(sessionDir(id));
-}
-
-// ============================================================================
-// Init log operations
-// ============================================================================
-
-export function appendInitEvent(id: string, entry: LogEntry): void {
-  appendEventToDir(initDir(id), entry);
-}
-
-export function readInitLog(id: string): LogEntry[] {
-  return readLogFromDir(initDir(id));
 }
 
 // reconstructState() has been replaced by ensureStatus() in ./status.ts

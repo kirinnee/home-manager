@@ -17,8 +17,6 @@
     "@clack/prompts": "^0.11.0",
     "commander": "^12.0.0",
     "knip": "^6.3.0",
-    "marked": "^15.0.12",
-    "marked-terminal": "^7.3.0",
     "nanoid": "^5.0.0",
     "typescript-language-server": "^5.1.3",
     "yaml": "^2.0.0",

@@ -43,6 +43,7 @@ export function mergeConfig(partial: Record<string, unknown>, existing?: Config)
   if (partial.firstLoopFullReview !== undefined) raw.firstLoopFullReview = partial.firstLoopFullReview;
   if (partial.previousReviewPropagation !== undefined)
     raw.previousReviewPropagation = partial.previousReviewPropagation;
+  if (partial.snapshot !== undefined) raw.snapshot = partial.snapshot;
   if (partial.prompts) raw.prompts = partial.prompts;
 
   return parseRawConfig(raw);

@@ -10,6 +10,7 @@ green=$'\e[32m'
 yellow=$'\e[33m'
 blue=$'\e[34m'
 magenta=$'\e[35m'
+red=$'\e[31m'
 dim=$'\e[2m'
 reset=$'\e[0m'
 
@@ -18,11 +19,25 @@ model_display=$(echo "$input" | jq -r '.model.display_name // empty')
 model_id=$(echo "$input" | jq -r '.model.id // empty')
 current_dir=$(echo "$input" | jq -r '.workspace.current_dir // empty')
 project_dir=$(echo "$input" | jq -r '.workspace.project_dir // empty')
-context_remaining=$(echo "$input" | jq -r '.context_window.remaining_percentage // empty')
+context_used=$(echo "$input" | jq -r '.context_window.used_percentage // empty')
+context_size=$(echo "$input" | jq -r '.context_window.context_window_size // empty')
 
 # Token usage for cost estimation
 input_tokens=$(echo "$input" | jq -r '.context_window.total_input_tokens // 0')
 output_tokens=$(echo "$input" | jq -r '.context_window.total_output_tokens // 0')
+
+# Logged-in account (the statusline stdin JSON doesn't carry this, so read
+# it from ~/.claude.json). Prefer the email address, fall back to display name.
+account=""
+if [[ -f "$HOME/.claude.json" ]]; then
+  account=$(jq -r '.oauthAccount.emailAddress // .oauthAccount.displayName // empty' "$HOME/.claude.json" 2>/dev/null)
+  # Keep only the local part of an email (drop the @domain)
+  account="${account%%@*}"
+fi
+
+# Rate-limit usage (0-100). seven_day is the weekly limit.
+five_hour_pct=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty')
+weekly_pct=$(echo "$input" | jq -r '.rate_limits.seven_day.used_percentage // empty')
 
 # Shorten directory path for display
 if [[ -n "$current_dir" ]]; then
@@ -152,16 +167,46 @@ calculate_duration() {
   fi
 }
 
+# Color a usage percentage: green < 50, yellow < 80, red >= 80
+usage_color() {
+  local pct=${1%.*}
+  if (( pct >= 80 )); then
+    echo "$red"
+  elif (( pct >= 50 )); then
+    echo "$yellow"
+  else
+    echo "$green"
+  fi
+}
+
+# Human-readable token count: 200000 -> 200k, 1000000 -> 1M, 1500000 -> 1.5M
+human_tokens() {
+  local n=$1
+  if (( n >= 1000000 )); then
+    awk -v n="$n" 'BEGIN { v = n / 1000000; if (v == int(v)) printf "%dM", v; else printf "%.1fM", v }'
+  elif (( n >= 1000 )); then
+    printf '%dk' $(( n / 1000 ))
+  else
+    printf '%d' "$n"
+  fi
+}
+
 estimated_cost=$(estimate_cost "$model_id" "$input_tokens" "$output_tokens")
 session_duration=$(calculate_duration)
 
-# Build the statusline (two lines)
+# Build the statusline (three lines)
 sep="${dim}│${reset}"
 line1=""
 line2=""
+line3=""
 
-# Line 1: model, directory, git branch, PR
+# Line 1: account, model, directory, git branch, PR
+if [[ -n "$account" ]]; then
+  line1+="${magenta}👤 ${account}${reset}"
+fi
+
 if [[ -n "$model_display" ]]; then
+  [[ -n "$line1" ]] && line1+=" ${sep} "
   line1+="${cyan}🤖 ${model_display}${reset}"
 fi
 
@@ -182,9 +227,19 @@ if [[ -n "$session_duration" ]]; then
   line2+="${dim}⏱ ${session_duration}${reset}"
 fi
 
-if [[ -n "$context_remaining" ]] && (( context_remaining < 90 )); then
+# Context usage against the actual detected window size (200k, or 1M extended)
+ctx_size=${context_size:-200000}
+used_tokens=$(( input_tokens + output_tokens ))
+if [[ -n "$context_used" || -n "$context_size" ]] || (( used_tokens > 0 )); then
+  if [[ -n "$context_used" ]]; then
+    ctx_pct=$(printf '%.0f' "$context_used")
+  elif (( ctx_size > 0 )); then
+    ctx_pct=$(( used_tokens * 100 / ctx_size ))
+  else
+    ctx_pct=0
+  fi
   [[ -n "$line2" ]] && line2+=" ${sep} "
-  line2+="${blue}📊 ${context_remaining}%${reset}"
+  line2+="$(usage_color "$ctx_pct")📊 ${ctx_pct}% ($(human_tokens "$used_tokens")/$(human_tokens "$ctx_size"))${reset}"
 fi
 
 if [[ -n "$estimated_cost" ]]; then
@@ -192,6 +247,21 @@ if [[ -n "$estimated_cost" ]]; then
   line2+="${magenta}💰 ${estimated_cost}${reset}"
 fi
 
+# Line 3: rate-limit usage (5-hour and weekly)
+if [[ -n "$five_hour_pct" ]]; then
+  fh_int=$(printf '%.0f' "$five_hour_pct")
+  line3+="$(usage_color "$fh_int")⏳ 5h ${fh_int}%${reset}"
+fi
+
+if [[ -n "$weekly_pct" ]]; then
+  wk_int=$(printf '%.0f' "$weekly_pct")
+  [[ -n "$line3" ]] && line3+=" ${sep} "
+  line3+="$(usage_color "$wk_int")📅 wk ${wk_int}%${reset}"
+fi
+
 # Output - each echo produces a separate row in Claude Code's status area
 echo -e "$line1"
 [[ -n "$line2" ]] && echo -e "$line2"
+[[ -n "$line3" ]] && echo -e "$line3"
+
+exit 0

@@ -307,3 +307,7 @@ export function formatDynamicOrdering(orderedPhases: string[][], scores: RerankS
   }
   console.log(pc.dim(`    → phases: ${flat.join(', ')}`));
 }
+
+export function formatSnapshot(loopNum: number, archiveDir: string): void {
+  console.log(pc.dim(`  ◆ snapshot loop ${loopNum} → ${archiveDir}`));
+}

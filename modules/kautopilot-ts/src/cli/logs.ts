@@ -32,31 +32,39 @@ async function runLogs(phase: string | undefined, opts: { tail: string; json?: b
 
   // Filter by phase
   if (phase) {
+    // Flat machine step names per phase (interactive|agent|code steps). Feedback
+    // steps fold into the plan phase (the driver maps feedback→phase1).
     const phaseMap: Record<string, string[]> = {
       plan: [
+        'resolve_org',
+        'brainstorm',
+        'create_ticket',
+        'fetch_ticket',
+        'triage',
         'write_spec',
         'spec_review',
-        'spec_feedback',
-        'spec_approve',
         'write_plans',
-        'plans_review',
-        'plans_feedback',
-        'plans_approve',
-        'approved',
+        'plan_review',
+        'finalize_plans',
+        'feedback_check',
+        'feedback',
+        'cleanup',
       ],
-      implementation: ['clear_loop', 'setup_run', 'running', 'commit', 'next_plan', 'resolve', 'amend_plans'],
+      implementation: ['seed', 'clear_loop', 'setup_run', 'running', 'resolve', 'amend_plans', 'commit', 'next_plan'],
       polish: [
         'commit_pending',
         'prereview',
         'push',
         'create_pr',
         'poll',
+        'ensure_branch',
         'eval',
         'act',
         'tty_resolve',
         'write_fix',
         'run_fix',
-        'feedback_check',
+        'verify_fixes',
+        'repo_ready',
       ],
     };
     const phaseSteps = phaseMap[phase.toLowerCase()];

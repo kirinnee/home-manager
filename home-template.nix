@@ -1,14 +1,10 @@
-{ config
-, pkgs
+{ pkgs
 , lib
 , pkgs-llm
 , claude-code-pkg
 , codex-pkg
 , pkgs-loctl
-, pkgs-240924
-, pkgs-stable
 , pkgs-unstable
-, pkgs-casks
 , atomi
 , profile
 , ...
@@ -24,6 +20,20 @@ let
   auth = imported.auth;
   personalDirs = [ "~" "~/.config/home-manager" "~/Workspace/personal" ];
   workDirs = [ "~/Workspace/work" ];
+  # The Codex desktop app always reads ~/.codex, which the multi-codex module
+  # cannot target (it hard-prefixes `.codex-`). Share the CLI's instructions,
+  # skills, and hooks with the desktop app without replacing app-owned files.
+  codexShared = imported.codexUserConfig;
+  # Link each bundled skill individually into ~/.codex/skills so the parent dir
+  # stays a real, writable directory the Codex desktop app can write .system/
+  # into. Per-skill home.file leaves give us this without an activation script:
+  # home-manager creates the parent as a real dir and handles stale-link cleanup.
+  codexSkillLinks = lib.mapAttrs'
+    (name: src: {
+      name = ".codex/skills/${name}";
+      value.source = src;
+    })
+    codexShared.skills;
 in
 
 ##################
@@ -58,6 +68,9 @@ with modules;
 rec {
   imports = [
     ./modules/workspace
+    # Inline module: merges per-skill ~/.codex/skills symlinks into home.file
+    # without conflicting with the dotted home.file.* entries below.
+    { home.file = codexSkillLinks; }
   ];
 
   # Nix configuration
@@ -118,13 +131,13 @@ rec {
   programs.claude-multi = {
     enable = true;
     defaultPackage = claude-code-pkg;
-    defaultAccount = "personal";
+    defaultAccount = "kirin";
 
     smartWrapper.enable = true;
 
     aliases = {
       "yolo" = "--dangerously-skip-permissions";
-      "ap" = "--dangerously-skip-permissions '/kagent-autopilot'";
+      "crc" = "--dangerously-skip-permissions --chrome --rc";
     };
 
     shellIntegration = {
@@ -133,10 +146,35 @@ rec {
     };
 
     accounts = {
-      personal = imported.mkClaudeAccount { provider = "zai"; directoryRules = personalDirs; };
-      liftoff = imported.mkClaudeAccount { provider = "anthropic"; directoryRules = workDirs; };
-      auto-personal = imported.mkAutoClaudeAccount { provider = "zai"; directoryRules = personalDirs; };
-      auto-liftoff = imported.mkAutoClaudeAccount { provider = "anthropic"; directoryRules = workDirs; };
+      kirin = imported.mkClaudeAccount {
+        provider = "anthropic";
+        manualAuth = true;
+        directoryRules = personalDirs;
+      };
+      liftoff = imported.mkClaudeAccount {
+        provider = "anthropic";
+        manualAuth = true;
+        directoryRules = workDirs;
+      };
+      atomi = imported.mkClaudeAccount {
+        provider = "anthropic";
+        manualAuth = true;
+        directoryRules = [ "~/Workspace/atomi" ];
+      };
+      market = imported.mkClaudeAccount {
+        provider = "anthropic";
+      };
+      auto-kirin = imported.mkAutoClaudeAccount {
+        provider = "anthropic";
+        directoryRules = personalDirs;
+      };
+      auto-liftoff = imported.mkAutoClaudeAccount {
+        provider = "anthropic";
+        directoryRules = workDirs;
+      };
+      auto-market = imported.mkAutoClaudeAccount {
+        provider = "anthropic";
+      };
     } // imported.mkAllProviderClaudeAccounts auth.providerNames;
   };
 
@@ -144,9 +182,12 @@ rec {
   programs.multi-codex = {
     enable = true;
     defaultPackage = codex-pkg;
-    defaultAccount = "personal";
+    defaultAccount = "pro20";
 
-    smartWrapper.enable = true;
+    # Raw `codex` is NOT hijacked to auto-route by directory. It's the plain
+    # binary on the default ~/.codex home (shared with the Codex desktop app).
+    # The per-account `codex-<name>` wrappers are still installed for the fleet.
+    smartWrapper.enable = false;
 
     shellIntegration = {
       functions = false;
@@ -154,28 +195,19 @@ rec {
     };
 
     accounts = {
-      personal = imported.mkCodexAccount {
-        provider = "openai";
-        model = "gpt-5.4";
+      # ChatGPT OAuth-login accounts (run `codex-<name> auth login` after hms)
+      pro20 = imported.mkCodexChatGPTAccount {
         directoryRules = personalDirs;
       };
-      work = imported.mkCodexAccount {
-        provider = "openai";
-        model = "gpt-5.4";
-        directoryRules = workDirs;
+      atomi = imported.mkCodexChatGPTAccount {
+        directoryRules = [ "~/Workspace/atomi" ];
       };
-      gpt55 = imported.mkCodexAccount {
-        provider = "openai";
-        model = "gpt-5.5";
+      auto-pro20 = imported.mkCodexChatGPTAutoAccount {
+        directoryRules = personalDirs;
       };
-      auto-gpt55 = imported.mkCodexAutoAccount {
-        provider = "openai";
-        model = "gpt-5.5";
+      auto-atomi = imported.mkCodexChatGPTAutoAccount {
+        directoryRules = [ "~/Workspace/atomi" ];
       };
-
-      # ChatGPT OAuth-login accounts (run `codex-<name> auth login` after hms)
-      pro20 = imported.mkCodexChatGPTAccount { };
-      auto-pro20 = imported.mkCodexChatGPTAutoAccount { };
     } // imported.mkAllProviderCodexAccounts auth.providerNames;
   };
 
@@ -296,6 +328,20 @@ rec {
     executable = false;
   };
 
+  # --- Codex desktop app (~/.codex) ---
+  # Nix-manage only the files the desktop app never writes, so it shares the
+  # CLI's instructions + hooks. config.toml and auth.json are left app-owned and
+  # writable so plugins, marketplaces, browser/computer-use, project trust, and
+  # desktop UI settings keep working. Bundled skills are linked per-skill via the
+  # codexSkillLinks inline module in `imports`, which keeps ~/.codex/skills a real
+  # writable dir so Codex can still write skills/.system at runtime.
+  # To actually run the hooks, add
+  # `[features]\nhooks = true` to ~/.codex/config.toml manually (it must stay
+  # app-owned, so Nix can't inject it without breaking the rest of the file).
+  home.file.".codex/AGENTS.md".text = codexShared.memory.text;
+  home.file.".codex/hooks.json".text = builtins.toJSON codexShared.hooksConfig;
+  home.file.".codex/hooks".source = codexShared.hooksDir;
+
   home.activation.load-secrets = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
     export SECRETS_FILE="${./secrets.enc.yaml}"
     ${modules.load-secrets}/bin/load-secrets
@@ -310,6 +356,10 @@ rec {
   home.packages = (
     [
       pkgs-loctl.loctl-wrapper
+
+      # Raw `codex` (plain binary, default ~/.codex home shared with the desktop
+      # app). The `codex-<name>` multi-account wrappers come from programs.multi-codex.
+      codex-pkg
 
       # system
       coreutils
@@ -350,7 +400,7 @@ rec {
 
       # cncf
       kubectl
-      docker
+      pkgs-unstable.docker # stable's docker_28 is flagged insecure; unstable's is not
       kubectx
       k9s
       krew
@@ -378,13 +428,10 @@ rec {
 
       #custom modules
       backup-folder
-      setup-pcloud-remote
       k8s-update
       load-secrets
-      speak
       hms
       k8s-merge
-      oci-k8s-update
       oci-oke-allow-my-ip
       kloop
       kloop-dev
@@ -418,10 +465,14 @@ rec {
       else
         [
           pinentry_mac
-          xcbuild
           nerd-fonts.jetbrains-mono
         ]
     )
+    # Host-exposure suite (SSH + CLIProxyAPI over Cloudflare Tunnel). Only the
+    # designated tunnel host gets the `khost` controller; inert everywhere else.
+    ++ lib.optionals (profile.tunnelHost or false) [
+      khost
+    ]
   );
 
   ###################################
@@ -433,7 +484,6 @@ rec {
     EDITOR = "nano";
     VAULT_ADDR = "https://vault.ops.vungle.io";
     CU_TEAM_ID = "9018863174";
-    OCI_CLI_AUTH = "security_token";
     OCI_CLI_REGION = "us-ashburn-1";
     COMPARTMENT_ID = "ocid1.compartment.oc1..aaaaaaaaqcssiaa6caj3wc4p64r4kdko5szck4kkak2tajgslduij4kzeyhq";
     K8S_EKS_EXTRA_CLUSTER_SPECS = "us-east-1:eks-llm-us-east-1";
@@ -603,7 +653,9 @@ rec {
 
     direnv = {
       enable = true;
-      package = pkgs-unstable.direnv;
+      package = pkgs-unstable.direnv.overrideAttrs (_: {
+        doCheck = false;
+      });
       stdlib = ''
         : "''${XDG_CACHE_HOME:="''${HOME}/.cache"}"
         declare -A direnv_layout_dirs
@@ -644,6 +696,41 @@ rec {
           '';
           zshConfig = lib.mkOrder 1000 ''
             unalias grep
+
+            awsp() {
+              local profile
+
+              profile="$(
+                awk -F'[][]' '/^\[/{print $2}' "$HOME/.aws/credentials" \
+                  | fzf --prompt='AWS profile> '
+              )" || return
+
+              if [ -n "$profile" ]; then
+                export AWS_PROFILE="$profile"
+                echo "AWS_PROFILE=$AWS_PROFILE"
+              fi
+            }
+
+            awsl() {
+              unset AWS_PROFILE
+
+              if [ "$#" -gt 0 ]; then
+                gimme-aws-creds --profile "$1" || return
+              else
+                gimme-aws-creds || return
+                gimme-aws-creds --profile awspayer || return
+              fi
+
+              awsp
+            }
+
+            awspayer() {
+              unset AWS_PROFILE
+              gimme-aws-creds --profile awspayer || return
+              export AWS_PROFILE=awspayer
+              echo "AWS_PROFILE=$AWS_PROFILE"
+              aws sts get-caller-identity
+            }
           '';
           wtShell = lib.mkOrder 5000 ''
             if command -v wt >/dev/null 2>&1; then eval "$(command wt config shell init zsh)"; fi
@@ -722,6 +809,10 @@ rec {
         hmg = "home-manager generations";
         ns = "nix shell";
 
+        # zellij
+        zla = "zellij a";
+        zls = "zellij -s";
+
         # kubernetes
         kg = "kubectl get";
         kc = "kubectl create";
@@ -746,7 +837,6 @@ rec {
 
         nix-housekeep = "sudo nix-collect-garbage && sudo nix-collect-garbage --delete-old && nix-collect-garbage -d";
 
-        awsp = "export AWS_PROFILE=$(grep '\\[' ~/.aws/credentials | tr -d '[]' | fzf)";
         aec2ls = "aws ec2 describe-instances --filters \"Name=instance-state-name,Values=running\" --query \"Reservations[].Instances[].[InstanceId, Tags[?Key=='Name'].Value | [0]]\" --output text --region us-east-1";
         aec2eti = "aws ssm start-session --target";
         aec2del = "aws ec2 terminate-instances --instance-ids";
@@ -759,7 +849,6 @@ rec {
         wtrm = "wt remove";
 
         # liftoff
-        awsl = "unset AWS_PROFILE && gimme-aws-creds && awsp";
         tfi = "tfswitch && tf init && vaultlogin";
 
         # kautopilot

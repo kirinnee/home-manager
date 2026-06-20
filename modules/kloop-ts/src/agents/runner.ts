@@ -127,7 +127,7 @@ export interface VerifierResult extends AgentResult {
  * Build the agent command for a given harness type.
  *
  * Claude: cat "${promptFile}" | claude-auto-zai --dangerously-skip-permissions --verbose --print --session-id "${sessionId}" --output-format stream-json 2>&1 | tee "${logFile}" | kloop stream
- * Gemini: gemini-auto --yolo --output-format stream-json -p "$(cat "${promptFile}")" 2>&1 | tee "${logFile}" | kloop stream
+ * Gemini: cat "${promptFile}" | GEMINI_CLI_TRUST_WORKSPACE=true gemini-auto --yolo --output-format stream-json -p "" 2>&1 | tee "${logFile}" | kloop stream
  * Codex:  cat "${promptFile}" | codex-auto exec --full-auto --json --ephemeral --skip-git-repo-check -c sandbox_workspace_write.network_access=true 2>&1 | tee "${logFile}" | kloop stream
  */
 function buildAgentCommand(params: {
@@ -150,7 +150,8 @@ function buildAgentCommand(params: {
     return `cat "${promptFile}" | ${binary} exec --full-auto --json --ephemeral --skip-git-repo-check -c sandbox_workspace_write.network_access=true 2>&1 | tee "${logFile}" | ${KLOOP_BIN} stream`;
   } else {
     // Gemini: no session ID injection, pipe prompt via stdin (avoids shell arg length limits)
-    return `cat "${promptFile}" | ${binary} --yolo --output-format stream-json -p "" 2>&1 | tee "${logFile}" | ${KLOOP_BIN} stream`;
+    // GEMINI_CLI_TRUST_WORKSPACE=true bypasses the trust-folder prompt for headless runs
+    return `cat "${promptFile}" | GEMINI_CLI_TRUST_WORKSPACE=true ${binary} --yolo --output-format stream-json -p "" 2>&1 | tee "${logFile}" | ${KLOOP_BIN} stream`;
   }
 }
 

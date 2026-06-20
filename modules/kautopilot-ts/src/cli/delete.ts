@@ -3,8 +3,7 @@ import { Command } from 'commander';
 import { sessionDir } from '../core/artifacts';
 import { deleteSession, getSessionById, getSessionByWorktree, listSessions } from '../core/db';
 import { getGitRoot, getWorktree } from '../core/git';
-import { checkLock, releaseLock } from '../core/lock';
-import { killZellijSession } from '../core/zellij';
+import { checkLock, listLockKeys, releaseLock } from '../core/lock';
 import { confirmAction } from '../llm/inquirer';
 import { logError, logOk } from '../util/format';
 
@@ -25,27 +24,39 @@ export function createDeleteCommand(): Command {
     });
 }
 
+/** Is ANY scope lock (session timeline or a repo driver) currently live? (MAJOR-1) */
+function isSessionRunning(sessionId: string): boolean {
+  return listLockKeys(sessionId).some(key => checkLock(key).locked);
+}
+
+/**
+ * Kill + release EVERY live scope lock for a session — the session timeline lock
+ * plus each per-repo driver lock — so a delete never wipes the session dir out
+ * from under a running `next --repo <r>` process. (MAJOR-1)
+ */
 async function stopAndCleanup(sessionId: string): Promise<boolean> {
-  const lockInfo = checkLock(sessionId);
-  if (lockInfo.locked) {
-    try {
-      process.kill(lockInfo.pid, 'SIGTERM');
-      for (let i = 0; i < 50; i++) {
-        await new Promise(r => setTimeout(r, 100));
-        try {
-          process.kill(lockInfo.pid, 0);
-        } catch {
-          break;
-        }
-      }
+  const liveKeys = listLockKeys(sessionId).filter(key => checkLock(key).locked);
+  for (const key of liveKeys) {
+    const lockInfo = checkLock(key);
+    if (lockInfo.locked) {
       try {
-        process.kill(lockInfo.pid, 'SIGKILL');
+        process.kill(lockInfo.pid, 'SIGTERM');
+        for (let i = 0; i < 50; i++) {
+          await new Promise(r => setTimeout(r, 100));
+          try {
+            process.kill(lockInfo.pid, 0);
+          } catch {
+            break;
+          }
+        }
+        try {
+          process.kill(lockInfo.pid, 'SIGKILL');
+        } catch {}
       } catch {}
-    } catch {}
-    releaseLock(sessionId);
+    }
+    releaseLock(key);
   }
-  killZellijSession(sessionId);
-  return lockInfo.locked;
+  return liveKeys.length > 0;
 }
 
 async function deleteSessionDir(sessionId: string): Promise<void> {
@@ -59,7 +70,7 @@ async function runDelete(
 ): Promise<void> {
   if (opts.all) {
     const sessions = listSessions({ includeAll: true });
-    const toDelete = sessions.filter(s => opts.running || !checkLock(s.id).locked);
+    const toDelete = sessions.filter(s => opts.running || !isSessionRunning(s.id));
 
     if (toDelete.length === 0) {
       logOk('No sessions to delete.');
@@ -103,13 +114,14 @@ async function runDelete(
     }
   }
 
-  const lockInfo = checkLock(session.id);
-  if (lockInfo.locked && !opts.running) {
+  if (isSessionRunning(session.id) && !opts.running) {
     logError(`Session ${session.id} is running. Use --running to stop and delete.`);
     process.exit(1);
   }
 
-  if (!opts.force && !id) {
+  // Confirm a single delete unless --force — for an explicit id too (deleting a
+  // session by id is destructive and must not happen silently).
+  if (!opts.force) {
     const confirmed = await confirmAction(`Delete session ${session.id}?`, false);
     if (!confirmed) return;
   }

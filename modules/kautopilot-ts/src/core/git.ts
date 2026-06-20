@@ -32,29 +32,6 @@ export function hasUnmergedPaths(cwd?: string): boolean {
   return result.stdout.length > 0;
 }
 
-export function getRemoteUrl(cwd?: string): string {
-  const result = gitSync(['remote', 'get-url', 'origin'], cwd);
-  if (result.exitCode !== 0) throw new Error('No remote "origin" found.');
-  return result.stdout;
-}
-
-export function normalizeGitRoot(url: string): string {
-  return url
-    .replace(/^git@/, '')
-    .replace(/^https?:\/\//, '')
-    .replace(/\.git$/, '')
-    .replace(/^([^/]+):/, '$1/') // SSH: host:path → host/path
-    .toLowerCase();
-}
-
-export function extractOrg(gitRootHost: string | undefined | null): string {
-  // github.com/atomi/api-server → atomi
-  if (!gitRootHost) return 'default';
-  const parts = gitRootHost.split('/');
-  if (parts.length >= 2) return parts[1];
-  return gitRootHost;
-}
-
 export function getCurrentBranch(cwd?: string): string {
   const result = gitSync(['branch', '--show-current'], cwd);
   if (result.exitCode !== 0) throw new Error('Could not determine current branch.');

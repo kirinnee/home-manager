@@ -3,9 +3,8 @@ import { Command } from 'commander';
 import { sessionDir } from '../core/artifacts';
 import { deleteSession, getSessionById, getSessionByWorktree } from '../core/db';
 import { getGitRoot, getWorktree } from '../core/git';
-import { checkLock, releaseLock } from '../core/lock';
+import { checkLock, listLockKeys, releaseLock } from '../core/lock';
 import { appendEvent } from '../core/log';
-import { killZellijSession } from '../core/zellij';
 import { confirmAction } from '../llm/inquirer';
 import { logError, logOk } from '../util/format';
 
@@ -21,6 +20,44 @@ export function createStopCommand(): Command {
         process.exit(1);
       }
     });
+}
+
+/**
+ * SIGTERM (then SIGKILL after a grace period) the process holding `lockKey`.
+ * Returns the number of kill signals delivered (for the stop:completed metadata).
+ */
+async function killLockKey(lockKey: string): Promise<number> {
+  const lockInfo = checkLock(lockKey);
+  if (!lockInfo.locked) return 0;
+  const pid = lockInfo.pid;
+  let killed = 0;
+  try {
+    process.kill(pid, 'SIGTERM');
+    killed++;
+
+    // Wait up to 5 seconds for graceful shutdown
+    for (let i = 0; i < 50; i++) {
+      await new Promise(r => setTimeout(r, 100));
+      try {
+        process.kill(pid, 0);
+      } catch {
+        // Process is dead
+        break;
+      }
+    }
+
+    // Force kill if still alive
+    try {
+      process.kill(pid, 0);
+      process.kill(pid, 'SIGKILL');
+      killed++;
+    } catch {
+      // Already dead
+    }
+  } catch {
+    // Kill failed
+  }
+  return killed;
 }
 
 async function runStop(id: string | undefined, opts: { force?: boolean }): Promise<void> {
@@ -48,9 +85,12 @@ async function runStop(id: string | undefined, opts: { force?: boolean }): Promi
     }
   }
 
-  // Check lock
-  const lockInfo = checkLock(session.id);
-  if (!lockInfo.locked) {
+  // Check EVERY scope lock for the session — the session timeline lock
+  // (`lock.pid`) plus any per-repo driver locks (`lock-<repo>.pid`). A running
+  // `next --repo <r>` holds only its repo lock, so checking the session lock
+  // alone would miss it. (MAJOR-1)
+  const liveKeys = listLockKeys(session.id).filter(key => checkLock(key).locked);
+  if (liveKeys.length === 0) {
     logOk('Session is not running.');
     return;
   }
@@ -67,42 +107,12 @@ async function runStop(id: string | undefined, opts: { force?: boolean }): Promi
     event: 'stop:started',
   });
 
-  // Kill processes
+  // Kill + release every live scope lock (session + repo drivers).
   let processesKilled = 0;
-  const pid = lockInfo.pid;
-
-  try {
-    process.kill(pid, 'SIGTERM');
-    processesKilled++;
-
-    // Wait up to 5 seconds for graceful shutdown
-    for (let i = 0; i < 50; i++) {
-      await new Promise(r => setTimeout(r, 100));
-      try {
-        process.kill(pid, 0);
-      } catch {
-        // Process is dead
-        break;
-      }
-    }
-
-    // Force kill if still alive
-    try {
-      process.kill(pid, 0);
-      process.kill(pid, 'SIGKILL');
-      processesKilled++;
-    } catch {
-      // Already dead
-    }
-  } catch {
-    // Kill failed
+  for (const key of liveKeys) {
+    processesKilled += await killLockKey(key);
+    releaseLock(key);
   }
-
-  // Release lock
-  releaseLock(session.id);
-
-  // Kill zellij session if it exists
-  killZellijSession(session.id);
 
   // Log stop completed BEFORE any deletion
   appendEvent(session.id, {

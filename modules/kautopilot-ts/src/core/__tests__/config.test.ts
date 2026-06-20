@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as YAML from 'yaml';
 
 // Override HOME to temp dir for config tests
 const origHome = process.env.HOME;
@@ -26,13 +27,27 @@ describe('config', () => {
 
     const config = readConfig('testid');
     expect(config).not.toBeNull();
-    expect(config?.claude_binary).toBe('claude');
-    // commit agent uses shared COMMIT_AGENT_PROMPT (not in config.agents)
+    // Trimmed top-level shape: agents, templates, settings, orgs — no kloop/binary.
+    expect(Object.keys(config as object).sort()).toEqual(['agents', 'orgs', 'settings', 'templates']);
+    expect((config as Record<string, unknown>).kloop).toBeUndefined();
+    expect((config as Record<string, unknown>).claude_binary).toBeUndefined();
+    // commit agent prompt is configurable via agents.generic.commit (resolved by getAgentPrompt)
+    expect(config?.agents.generic.commit.prompt).toContain('committing code changes');
     expect(config?.agents.phase2.resolve).toBeDefined();
     expect(config?.agents.phase2.resolve.prompt).toContain('kloop failure');
-    expect(config?.kloop.maxIterations).toBe(7);
-    expect(config?.repo.baseBranch).toBe('main');
-    expect(config?.repo.ticketSystem).toBeNull();
+    expect(config?.settings.maxParallelRepos).toBe(2);
+    expect(config?.settings.runMode).toBe('current-session');
+    expect(config?.settings.execMode).toBe('kloop');
+    expect(config?.orgs.liftoff).toEqual({
+      ticketSystem: 'jira',
+      commitSpec: false,
+      baseBranch: 'master',
+    });
+    expect(config?.orgs.atomicloud).toEqual({
+      ticketSystem: 'clickup',
+      commitSpec: true,
+      baseBranch: 'main',
+    });
 
     expect(existsSync(join(tempDir, '.kautopilot/testid/config.yaml'))).toBe(true);
   });
@@ -49,8 +64,8 @@ describe('config', () => {
     writeConfig('testid', { ...DEFAULT_CONFIG });
     const config = readConfig('testid');
     expect(config).not.toBeNull();
-    expect(config?.claude_binary).toBe('claude');
-    expect(config?.kloop.maxIterations).toBe(7);
+    expect(config?.settings.maxPushCycles).toBe(10);
+    expect(config?.orgs.atomicloud.baseBranch).toBe('main');
   });
 
   it('writeConfig persists changes', () => {
@@ -59,19 +74,20 @@ describe('config', () => {
     writeConfig('testid', { ...DEFAULT_CONFIG });
 
     const config = readConfig('testid')!;
-    config.repo.baseBranch = 'develop';
-    config.kloop.maxIterations = 20;
+    config.orgs.atomicloud.baseBranch = 'develop';
+    config.settings.maxPushCycles = 5;
     writeConfig('testid', config);
 
     const reloaded = readConfig('testid')!;
-    expect(reloaded.repo.baseBranch).toBe('develop');
-    expect(reloaded.kloop.maxIterations).toBe(20);
+    expect(reloaded.orgs.atomicloud.baseBranch).toBe('develop');
+    expect(reloaded.settings.maxPushCycles).toBe(5);
   });
 
   it('ensureGlobalConfig creates ~/.kautopilot/config.yaml', () => {
-    const { ensureGlobalConfig } = require('../config') as typeof import('../config');
+    const { ensureGlobalConfig, resolveConfig } = require('../config') as typeof import('../config');
     ensureGlobalConfig();
     expect(existsSync(join(tempDir, '.kautopilot/config.yaml'))).toBe(true);
+    expect(resolveConfig().settings.maxPushCycles).toBe(10);
   });
 
   it('ensureGlobalConfig does not overwrite existing config', () => {
@@ -92,84 +108,122 @@ describe('config', () => {
     expect(content).toContain('my-custom-binary');
   });
 
-  it('resolveConfig merges with built-in defaults', () => {
+  it('resolveConfig rejects incomplete config files', () => {
     const { writeFileSync, mkdirSync } = require('node:fs') as typeof import('node:fs');
     const { resolveConfig } = require('../config') as typeof import('../config');
 
-    // Create a minimal config
     const globalDir = join(tempDir, '.kautopilot');
     mkdirSync(globalDir, { recursive: true });
     writeFileSync(join(globalDir, 'config.yaml'), 'claude_binary: custom-claude\n');
 
-    const config = resolveConfig();
-    expect(config.claude_binary).toBe('custom-claude');
-    // Defaults should still be present
-    expect(config.agents.phase2.resolve).toBeDefined();
-    expect(config.kloop.maxIterations).toBe(7);
+    expect(() => resolveConfig()).toThrow('Invalid config');
   });
 
-  it('migrates legacy kloop fields from settings when kloop is absent', () => {
+  it('resolveConfig reads a complete config without default overlay', () => {
     const { writeFileSync, mkdirSync } = require('node:fs') as typeof import('node:fs');
-    const { readConfig } = require('../config') as typeof import('../config');
-    const sessionDir = join(tempDir, '.kautopilot/testid');
-    mkdirSync(sessionDir, { recursive: true });
-    writeFileSync(
-      join(sessionDir, 'config.yaml'),
-      ['settings:', '  maxIterations: 21', '  implementerTimeout: 44', '  reviewerTimeout: 11'].join('\n'),
-    );
+    const { resolveConfig } = require('../config') as typeof import('../config');
+    const { DEFAULT_CONFIG } = require('../types') as typeof import('../types');
+    const globalDir = join(tempDir, '.kautopilot');
+    mkdirSync(globalDir, { recursive: true });
 
-    const config = readConfig('testid')!;
-    expect(config.kloop.maxIterations).toBe(21);
-    expect(config.kloop.implementerTimeout).toBe(44);
-    expect(config.kloop.reviewerTimeout).toBe(11);
+    const config = {
+      ...DEFAULT_CONFIG,
+      settings: {
+        ...DEFAULT_CONFIG.settings,
+        maxPushCycles: 11,
+      },
+    };
+    writeFileSync(join(globalDir, 'config.yaml'), YAML.stringify(config));
+
+    const resolved = resolveConfig();
+    expect(resolved.settings.maxPushCycles).toBe(11);
   });
 
-  it('backfills missing kloop fields from legacy settings', () => {
+  it('resolveConfig parses a legacy config with top-level binary and kloop section', () => {
     const { writeFileSync, mkdirSync } = require('node:fs') as typeof import('node:fs');
-    const { readConfig } = require('../config') as typeof import('../config');
-    const sessionDir = join(tempDir, '.kautopilot/testid');
-    mkdirSync(sessionDir, { recursive: true });
-    writeFileSync(
-      join(sessionDir, 'config.yaml'),
-      [
-        'kloop:',
-        '  maxIterations: 25',
-        'settings:',
-        '  maxIterations: 21',
-        '  implementerTimeout: 44',
-        '  reviewerTimeout: 11',
-      ].join('\n'),
-    );
+    const { resolveConfig } = require('../config') as typeof import('../config');
+    const { DEFAULT_CONFIG } = require('../types') as typeof import('../types');
+    const globalDir = join(tempDir, '.kautopilot');
+    mkdirSync(globalDir, { recursive: true });
 
-    const config = readConfig('testid')!;
-    expect(config.kloop.maxIterations).toBe(25);
-    expect(config.kloop.implementerTimeout).toBe(44);
-    expect(config.kloop.reviewerTimeout).toBe(11);
+    // Legacy file carries a top-level binary + a kloop section on the old schema.
+    // Both are dropped by normalizeConfigInput; the rest parses cleanly.
+    const config = {
+      ...DEFAULT_CONFIG,
+      binary: 'legacy-claude',
+      kloop: { binary: 'legacy-claude', maxIterations: 11 },
+    } as typeof DEFAULT_CONFIG & { binary: string; kloop: unknown };
+    writeFileSync(join(globalDir, 'config.yaml'), YAML.stringify(config));
+
+    const resolved = resolveConfig();
+    expect((resolved as Record<string, unknown>).kloop).toBeUndefined();
+    expect((resolved as Record<string, unknown>).binary).toBeUndefined();
+    expect(resolved.orgs.atomicloud.baseBranch).toBe('main');
   });
 
-  it('prefers explicit kloop values over legacy settings', () => {
-    const { writeFileSync, mkdirSync } = require('node:fs') as typeof import('node:fs');
-    const { readConfig } = require('../config') as typeof import('../config');
-    const sessionDir = join(tempDir, '.kautopilot/testid');
-    mkdirSync(sessionDir, { recursive: true });
-    writeFileSync(
-      join(sessionDir, 'config.yaml'),
-      [
-        'kloop:',
-        '  maxIterations: 25',
-        '  implementerTimeout: 33',
-        '  reviewerTimeout: 9',
-        'settings:',
-        '  maxIterations: 21',
-        '  implementerTimeout: 44',
-        '  reviewerTimeout: 11',
-      ].join('\n'),
-    );
+  it('resolveOrgPolicy reads from config orgs map', () => {
+    const { ensureGlobalConfig } = require('../config') as typeof import('../config');
+    const { resolveOrgPolicy } = require('../session-meta') as typeof import('../session-meta');
+    ensureGlobalConfig();
+    expect(resolveOrgPolicy('liftoff')).toEqual({
+      org: 'liftoff',
+      ticketSystem: 'jira',
+      commitSpec: false,
+      baseBranch: 'master',
+    });
+    expect(resolveOrgPolicy('atomicloud')).toEqual({
+      org: 'atomicloud',
+      ticketSystem: 'clickup',
+      commitSpec: true,
+      baseBranch: 'main',
+    });
+  });
 
-    const config = readConfig('testid')!;
-    expect(config.kloop.maxIterations).toBe(25);
-    expect(config.kloop.implementerTimeout).toBe(33);
-    expect(config.kloop.reviewerTimeout).toBe(9);
+  it('resolveOrgPolicy honors config overrides for an org', () => {
+    const { ensureGlobalConfig, readConfig, writeFileSync } = {
+      ...(require('../config') as typeof import('../config')),
+      ...(require('node:fs') as typeof import('node:fs')),
+    };
+    const { resolveOrgPolicy } = require('../session-meta') as typeof import('../session-meta');
+    ensureGlobalConfig();
+    const config = readConfig('');
+    if (!config) throw new Error('expected global config');
+    config.orgs.liftoff.baseBranch = 'trunk';
+    config.orgs.liftoff.commitSpec = true;
+    writeFileSync(join(tempDir, '.kautopilot/config.yaml'), YAML.stringify(config));
+    expect(resolveOrgPolicy('liftoff')).toEqual({
+      org: 'liftoff',
+      ticketSystem: 'jira',
+      commitSpec: true,
+      baseBranch: 'trunk',
+    });
+  });
+
+  it('resolveOrgPolicy falls back to ORG_DEFAULTS when org absent from config', () => {
+    const { ensureGlobalConfig, readConfig, writeFileSync } = {
+      ...(require('../config') as typeof import('../config')),
+      ...(require('node:fs') as typeof import('node:fs')),
+    };
+    const { resolveOrgPolicy } = require('../session-meta') as typeof import('../session-meta');
+    ensureGlobalConfig();
+    const config = readConfig('');
+    if (!config) throw new Error('expected global config');
+    // Remove orgs from config so resolveOrgPolicy must use built-in ORG_DEFAULTS.
+    config.orgs = {};
+    writeFileSync(join(tempDir, '.kautopilot/config.yaml'), YAML.stringify(config));
+    // Built-in fallback values (must match ORG_DEFAULTS in session-meta.ts).
+    expect(resolveOrgPolicy('liftoff')).toEqual({
+      org: 'liftoff',
+      ticketSystem: 'jira',
+      commitSpec: false,
+      baseBranch: 'master',
+    });
+    expect(resolveOrgPolicy('atomicloud')).toEqual({
+      org: 'atomicloud',
+      ticketSystem: 'clickup',
+      commitSpec: true,
+      baseBranch: 'main',
+    });
   });
 
   it('config has no roles or steps', () => {

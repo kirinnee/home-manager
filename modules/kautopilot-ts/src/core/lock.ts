@@ -1,10 +1,60 @@
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { LockInfo } from './types';
-import { isZellijSessionAlive, killZellijSession, zellijSessionName } from './zellij';
 
+/**
+ * A lock key is either a bare session id (`k7f3a9`, the session-timeline scope) or
+ * a scoped key `sessionId:scope` (e.g. `k7f3a9:api`). The lock FILE always lives
+ * inside the session dir so a scoped key never spawns a bogus directory: the
+ * session scope uses `lock.pid`; a repo scope uses `lock-<scope>.pid`.
+ */
 function lockPath(id: string): string {
-  return `${process.env.HOME}/.kautopilot/${id}/lock.pid`;
+  const sep = id.indexOf(':');
+  if (sep === -1) {
+    return `${process.env.HOME}/.kautopilot/${id}/lock.pid`;
+  }
+  const sessionId = id.slice(0, sep);
+  const scope = id.slice(sep + 1);
+  return `${process.env.HOME}/.kautopilot/${sessionId}/lock-${scope}.pid`;
+}
+
+/**
+ * Compose a per-scope lock key from a session id and the `--repo` arg. `next`/
+ * `complete` lock on this so two repo drivers (`--repo api` / `--repo infra`) run
+ * concurrently and a blocking session-timeline `poll` doesn't block them — each
+ * scope gets its own lock file. Read-only commands (`status`/`diff`) never
+ * acquire it, so they stay responsive during a repo's blocking poll. (CLI-CONTRACT §12)
+ */
+export function scopeLockKey(sessionId: string, repo?: string | null): string {
+  return repo ? `${sessionId}:${repo}` : sessionId;
+}
+
+/**
+ * Every lock KEY currently present on disk for a session: the bare session id
+ * (if `lock.pid` exists) plus a scoped key `sessionId:<scope>` for each
+ * `lock-<scope>.pid` repo lock file in the session dir. The returned keys are
+ * exactly what `checkLock`/`acquireLock`/`releaseLock` consume, so `stop`/`delete`
+ * can enumerate and act on every running scope (session timeline + repo drivers),
+ * not just the session lock. (MAJOR-1)
+ */
+export function listLockKeys(sessionId: string): string[] {
+  const dir = `${process.env.HOME}/.kautopilot/${sessionId}`;
+  const keys: string[] = [];
+  let files: string[];
+  try {
+    files = readdirSync(dir);
+  } catch {
+    return keys;
+  }
+  for (const file of files) {
+    if (file === 'lock.pid') {
+      keys.push(sessionId);
+    } else {
+      const m = /^lock-(.+)\.pid$/.exec(file);
+      if (m) keys.push(scopeLockKey(sessionId, m[1]));
+    }
+  }
+  return keys;
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -61,15 +111,9 @@ export function acquireLock(id: string): void {
 
 export function checkLock(id: string): LockInfo {
   const path = lockPath(id);
-  const zellijAlive = isZellijSessionAlive(id);
 
   if (!existsSync(path)) {
-    // No lock file — reap orphaned zellij if present, unless we're inside it
-    if (zellijAlive && process.env.ZELLIJ_SESSION_NAME !== zellijSessionName(id)) {
-      console.warn(`Warning: Orphaned zellij session for ${id} (no PID). Reaping.`);
-      killZellijSession(id);
-    }
-    return { locked: false, pid: 0, alive: false, zellijAlive };
+    return { locked: false, pid: 0, alive: false };
   }
 
   const pid = parseInt(readFileSync(path, 'utf-8').trim(), 10);
@@ -83,15 +127,10 @@ export function checkLock(id: string): LockInfo {
     } catch {
       // Ignore
     }
-    // Reap orphaned zellij if PID is dead, unless we're inside it
-    if (zellijAlive && process.env.ZELLIJ_SESSION_NAME !== zellijSessionName(id)) {
-      console.warn(`Warning: Orphaned zellij session for ${id}. Reaping.`);
-      killZellijSession(id);
-    }
-    return { locked: false, pid, alive: false, zellijAlive };
+    return { locked: false, pid, alive: false };
   }
 
-  return { locked: true, pid, alive: true, zellijAlive };
+  return { locked: true, pid, alive: true };
 }
 
 export function releaseLock(id: string): void {
