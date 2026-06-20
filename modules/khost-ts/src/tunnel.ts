@@ -54,16 +54,19 @@ export async function tunnelUp(): Promise<void> {
 
   await killOldDetached();
 
-  if (osKind() === 'darwin' && existsSync(SERVICE_PLIST)) {
-    ok('cloudflared already installed as a persistent service — "khost tunnel down" then "up" to refresh its token');
-    return;
+  // Idempotent + self-healing: clear any existing (possibly stale/not-running)
+  // service, then install fresh with the current token. `cloudflared service
+  // install` also boots the service, so it's running on success.
+  if (osKind() === 'darwin' ? existsSync(SERVICE_PLIST) : true) {
+    log('Clearing any existing cloudflared service (sudo)');
+    await run(['sudo', 'cloudflared', 'service', 'uninstall'], { interactive: true }); // ignore if none
   }
 
   const token = await tunnelToken(tun.id);
   log('Installing cloudflared as a persistent service (sudo)');
   const r = await run(['sudo', 'cloudflared', 'service', 'install', token], { interactive: true });
-  if (r.code !== 0) die('cloudflared service install failed (already installed? run "khost tunnel down" first)');
-  ok('tunnel up — persistent service installed (survives reboot)');
+  if (r.code !== 0) die('cloudflared service install failed');
+  ok('tunnel up — persistent service installed + started (survives reboot)');
 }
 
 export async function tunnelDown(): Promise<void> {
