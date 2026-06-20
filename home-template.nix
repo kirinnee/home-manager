@@ -119,7 +119,7 @@ rec {
     '';
   };
   # Let Home Manager install and manage itself.
-  home.stateVersion = "25.11";
+  home.stateVersion = "26.05";
   home.username = "${profile.user}";
   home.homeDirectory =
     if profile.kernel == "linux" then "/home/${profile.user}" else "/Users/${profile.user}";
@@ -364,7 +364,7 @@ rec {
       # system
       coreutils
       uutils-coreutils
-      dogdns
+      doggo
       jq
       yq-go
       ripgrep
@@ -415,7 +415,7 @@ rec {
 
       # tooling
       mmv-go
-      neofetch
+      fastfetch
       rclone
       tokei
       cachix
@@ -448,7 +448,9 @@ rec {
       # liftoff
       awscli2
       pkgs-unstable.acli
-      gimme-aws-creds
+      # gimme-aws-creds 2.8.2 test phase is broken against okta 3.1.0 in 26.05
+      # (tests/test_main.py: cannot import APIClient); runtime is fine, so skip checks.
+      (gimme-aws-creds.overridePythonAttrs (_: { doCheck = false; }))
       ssm-session-manager-plugin
 
       # oracle cloud

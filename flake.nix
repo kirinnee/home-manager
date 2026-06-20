@@ -7,19 +7,19 @@
     treefmt-nix.url = "github:numtide/treefmt-nix";
     pre-commit-hooks.url = "github:cachix/pre-commit-hooks.nix";
 
-    # Darwin Config - use release-25.11 to match nixpkgs-2511
-    darwin.url = "github:lnl7/nix-darwin/nix-darwin-25.11";
+    # Darwin Config - use release-26.05 to match nixpkgs-2605
+    darwin.url = "github:lnl7/nix-darwin/nix-darwin-26.05";
     darwin.inputs.nixpkgs.follows = "nixpkgs-stable";
     nix-homebrew.url = "github:zhaofengli/nix-homebrew";
 
     # Specify the source of Home Manager and Nixpkgs.
     nixpkgs-unstable.url = "github:nixos/nixpkgs/nixos-unstable";
-    nixpkgs-stable.url = "github:nixos/nixpkgs/nixos-25.11";
+    nixpkgs-stable.url = "github:nixos/nixpkgs/nixos-26.05";
 
-    atomipkgs.url = "github:AtomiCloud/nix-registry/v2";
+    atomipkgs.url = "github:AtomiCloud/nix-registry/v3";
 
     home-manager = {
-      url = "github:nix-community/home-manager/release-25.11";
+      url = "github:nix-community/home-manager/release-26.05";
       inputs.nixpkgs.follows = "nixpkgs-stable";
     };
 
