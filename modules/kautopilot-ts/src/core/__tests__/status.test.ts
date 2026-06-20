@@ -107,70 +107,6 @@ describe('ensureStatus', () => {
     expect(status.stateStatus).toBe('completed');
   });
 
-  it('tracks parallel subtasks', () => {
-    appendEvent(TEST_SESSION, {
-      ts: '2026-03-24T10:00:00Z',
-      event: 'phase1:started',
-      version: 1,
-    });
-    appendEvent(TEST_SESSION, {
-      ts: '2026-03-24T10:00:01Z',
-      event: 'gather_context:started',
-      version: 1,
-    });
-    appendEvent(TEST_SESSION, {
-      ts: '2026-03-24T10:00:02Z',
-      event: 'subtask:started',
-      metadata: { task: 'codebase', parent: 'gather_context' },
-    });
-    appendEvent(TEST_SESSION, {
-      ts: '2026-03-24T10:00:03Z',
-      event: 'subtask:started',
-      metadata: { task: 'docs', parent: 'gather_context' },
-    });
-    appendEvent(TEST_SESSION, {
-      ts: '2026-03-24T10:00:10Z',
-      event: 'subtask:completed',
-      metadata: { task: 'codebase', parent: 'gather_context' },
-    });
-
-    const status = ensureStatus(TEST_SESSION);
-    expect(status.tasks.codebase.status).toBe('completed');
-    expect(status.tasks.docs.status).toBe('running');
-  });
-
-  it('clears tasks when parent state completes', () => {
-    appendEvent(TEST_SESSION, {
-      ts: '2026-03-24T10:00:00Z',
-      event: 'phase1:started',
-      version: 1,
-    });
-    appendEvent(TEST_SESSION, {
-      ts: '2026-03-24T10:00:01Z',
-      event: 'gather_context:started',
-      version: 1,
-    });
-    appendEvent(TEST_SESSION, {
-      ts: '2026-03-24T10:00:02Z',
-      event: 'subtask:started',
-      metadata: { task: 'codebase', parent: 'gather_context' },
-    });
-    appendEvent(TEST_SESSION, {
-      ts: '2026-03-24T10:00:10Z',
-      event: 'subtask:completed',
-      metadata: { task: 'codebase', parent: 'gather_context' },
-    });
-    appendEvent(TEST_SESSION, {
-      ts: '2026-03-24T10:00:11Z',
-      event: 'gather_context:completed',
-      version: 1,
-    });
-
-    const status = ensureStatus(TEST_SESSION);
-    expect(Object.keys(status.tasks)).toEqual([]);
-    expect(status.completedSteps).toContain('gather_context');
-  });
-
   it('handles context:updated events', () => {
     appendEvent(TEST_SESSION, {
       ts: '2026-03-24T10:00:00Z',
@@ -180,72 +116,11 @@ describe('ensureStatus', () => {
     appendEvent(TEST_SESSION, {
       ts: '2026-03-24T10:00:01Z',
       event: 'context:updated',
-      metadata: { deliveryKind: 'ticket' },
+      metadata: { maxPlans: 3 },
     });
 
     const status = ensureStatus(TEST_SESSION);
-    expect(status.context.deliveryKind).toBe('ticket');
-  });
-
-  it('handles reset:completed — rolls back to checkpoint', () => {
-    appendEvent(TEST_SESSION, {
-      ts: '2026-03-24T10:00:00Z',
-      event: 'start:started',
-      metadata: { phase: 'plan' },
-    });
-    appendEvent(TEST_SESSION, {
-      ts: '2026-03-24T10:00:01Z',
-      event: 'phase1:started',
-      version: 1,
-    });
-    appendEvent(TEST_SESSION, {
-      ts: '2026-03-24T10:00:02Z',
-      event: 'pull_ticket:started',
-      version: 1,
-    });
-    appendEvent(TEST_SESSION, {
-      ts: '2026-03-24T10:00:03Z',
-      event: 'pull_ticket:completed',
-      version: 1,
-    });
-    appendEvent(TEST_SESSION, {
-      ts: '2026-03-24T10:00:04Z',
-      event: 'write_spec:started',
-      version: 1,
-    });
-    appendEvent(TEST_SESSION, {
-      ts: '2026-03-24T10:00:05Z',
-      event: 'write_spec:completed',
-      version: 1,
-    });
-    appendEvent(TEST_SESSION, {
-      ts: '2026-03-24T10:00:06Z',
-      event: 'finalize_spec:started',
-      version: 1,
-    });
-    appendEvent(TEST_SESSION, {
-      ts: '2026-03-24T10:00:07Z',
-      event: 'subtask:started',
-      metadata: { task: 'codebase', parent: 'finalize_spec' },
-    });
-    // Crash here, then reset
-    appendEvent(TEST_SESSION, {
-      ts: '2026-03-24T10:01:00Z',
-      event: 'crash:detected',
-      metadata: { state: 'finalize_spec', checkpoint: 'write_spec' },
-    });
-    appendEvent(TEST_SESSION, {
-      ts: '2026-03-24T10:01:01Z',
-      event: 'reset:completed',
-      metadata: { checkpoint: 'write_spec' },
-    });
-
-    const status = ensureStatus(TEST_SESSION);
-    expect(status.state).toBe('write_spec');
-    expect(status.stateStatus).toBe('completed');
-    expect(status.completedSteps).toEqual(['pull_ticket', 'write_spec']);
-    expect(Object.keys(status.tasks)).toEqual([]);
-    expect(status.running).toBe(false);
+    expect(status.context.maxPlans).toBe(3);
   });
 
   it('incremental replay — only processes new events', () => {
@@ -302,7 +177,7 @@ describe('ensureStatus', () => {
     expect(content).toContain('walCursor: 1');
   });
 
-  it('tracks per-plan cycle with completedPlans', () => {
+  it('tracks per-plan cycle', () => {
     appendEvent(TEST_SESSION, {
       ts: '2026-03-24T10:00:00Z',
       event: 'phase2:started',
@@ -357,37 +232,7 @@ describe('ensureStatus', () => {
     });
 
     const status = ensureStatus(TEST_SESSION);
-    expect(status.completedPlans).toEqual([0]);
     expect(status.context.planIndex).toBe(1);
     expect(status.completedSteps).toEqual([]); // reset for plan 1
-  });
-
-  it('extracts stats from metadata', () => {
-    appendEvent(TEST_SESSION, {
-      ts: '2026-03-24T10:00:00Z',
-      event: 'poll:completed',
-      metadata: { replies: 5, resolved: 3, pushCycle: 2 },
-    });
-
-    const status = ensureStatus(TEST_SESSION);
-    expect(status.stats.totalReplies).toBe(5);
-    expect(status.stats.totalResolved).toBe(3);
-    expect(status.stats.pushCycles).toBe(2);
-  });
-
-  it('persists reported failed run ids from context updates', () => {
-    appendEvent(TEST_SESSION, {
-      ts: '2026-03-24T10:00:00Z',
-      event: 'phase3:started',
-      version: 1,
-    });
-    appendEvent(TEST_SESSION, {
-      ts: '2026-03-24T10:00:01Z',
-      event: 'context:updated',
-      metadata: { reportedFailedRunIds: [12, 34] },
-    });
-
-    const status = ensureStatus(TEST_SESSION);
-    expect(status.context.reportedFailedRunIds).toEqual([12, 34]);
   });
 });

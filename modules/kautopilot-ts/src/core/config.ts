@@ -2,38 +2,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import * as YAML from 'yaml';
 import type { Config } from './types';
-import { DEFAULT_CONFIG } from './types';
+import { configSchema, DEFAULT_CONFIG } from './types';
 
 // ============================================================================
 // Variable descriptions for generated config comments
 // ============================================================================
 
 const PROMPT_VARS: Record<string, Record<string, string>> = {
-  'agents.init.localInit': {
-    sessionId: 'the kautopilot session ID',
-  },
-  'agents.init.researchTicketSystem': {
-    taskSystem: 'the ticket system name (e.g., "jira", "linear", "clickup")',
-    detectedInfo: 'detected CLI tools on the system',
-  },
-  'agents.init.researchSetup': {
-    taskSystem: 'the ticket system name',
-    accessMethod: 'user-provided access hint',
-  },
-  'agents.init.createScripts': {
-    taskSystem: 'the ticket system name',
-    accessMethod: 'the chosen access method',
-    stateMapping: 'JSON mapping of ticket states',
-    transitionNoOp: 'comment if a transition is a no-op',
-    branch: 'current git branch name',
-    scriptsDir: 'path to the scripts directory',
-    quirks: 'any system-specific quirks',
-    setupAssessment: 'result of setup assessment',
-    researchDoc: 'the research document content',
-    detectedInfo: 'detected CLI tools',
-    scriptList: 'required scripts to create',
-    optionalScripts: 'optional scripts to create',
-  },
   'agents.phase1.triage': {
     ticket: 'path to the ticket file',
   },
@@ -113,93 +88,11 @@ function buildVarComments(path: string): string {
 }
 
 /**
- * Kloop prompt variable descriptions.
- */
-const KLOOP_PROMPT_VARS: Record<string, Record<string, string>> = {
-  implementer: {
-    specPath: 'path to the spec file',
-    iteration: 'current loop number',
-    reviewsDir: "path to previous loop's reviews/ folder (empty for loop 1)",
-    reviewSummaryPath: "path to previous loop's review-summary.md (loop 2+)",
-    evidenceDir: 'path to evidence/ folder',
-    learningsFile: 'path to learnings.md',
-    scratchDir: "path to .kloop/scratch/ in agent's CWD",
-  },
-  reviewer: {
-    specPath: 'path to the spec file',
-    iteration: 'current loop number',
-    reviewerIndex: 'which reviewer this is',
-    reviewsDir: 'path to reviews/ folder (write review .md here)',
-    verdictsDir: 'path to verdicts/ folder (write verdict .json here)',
-    evidenceDir: 'path to evidence/ folder',
-    learningsFile: 'path to learnings.md',
-    previousSummaryPath: "path to previous loop's review-summary.md (loop 2+)",
-    scratchDir: "path to .kloop/scratch/ in agent's CWD",
-  },
-  checkpointer: {
-    specPath: 'path to the spec file',
-    iteration: 'current loop number',
-    reviewsDir: "path to current loop's reviews/",
-    archivedReviewsPattern: 'glob pattern for all previous loop reviews',
-    archivedSummariesPattern: 'glob pattern for all loop synthesis summaries',
-    conflictFile: 'path to run-level conflict.md',
-    checkpointResultFile: 'path to checkpoint-result.json',
-    scratchDir: "path to .kloop/scratch/ in agent's CWD",
-  },
-  checkpointerFull: {
-    specPath: 'path to the spec file',
-    iteration: 'current loop number',
-    reviewsDir: "path to current loop's reviews/",
-    archivedReviewsPattern: 'glob pattern for all previous loop reviews',
-    archivedSummariesPattern: 'glob pattern for all loop synthesis summaries',
-    conflictFile: 'path to run-level conflict.md',
-    checkpointResultFile: 'path to checkpoint-result.json',
-    scratchDir: "path to .kloop/scratch/ in agent's CWD",
-  },
-  synthesizer: {
-    specPath: 'path to the spec file',
-    iteration: 'current loop number',
-    reviewsDir: 'path to reviews/ folder',
-    verdictsDir: 'path to verdicts/ folder',
-    previousSummaryPath: "path to previous loop's review-summary.md",
-    summaryOutputPath: 'path to write review-summary.md',
-    learningsFile: 'path to learnings.md',
-    evidenceDir: 'path to evidence/ folder',
-    scratchDir: "path to .kloop/scratch/ in agent's CWD",
-  },
-  verifier: {
-    specPath: 'path to the spec file',
-    iteration: 'current loop number',
-    previousSummaryPath: "path to previous loop's review-summary.md",
-    reviewsDir: 'path to reviews/ folder',
-    verdictsDir: 'path to verdicts/ folder',
-    evidenceDir: 'path to evidence/ folder',
-    learningsFile: 'path to learnings.md',
-    verifierIndex: 'which verifier this is',
-    scratchDir: "path to .kloop/scratch/ in agent's CWD",
-  },
-  reSynthesizer: {
-    specPath: 'path to the spec file',
-    iteration: 'current loop number',
-    previousSummaryPath: "path to previous loop's review-summary.md",
-    verifyDir: 'path to verify/ folder',
-    verdictsDir: 'path to verdicts/ folder',
-    summaryOutputPath: 'path to write review-summary.md',
-    learningsFile: 'path to learnings.md',
-    scratchDir: "path to .kloop/scratch/ in agent's CWD",
-  },
-};
-
-/**
  * Serialize config to YAML with variable comments for prompts.
  * This ensures users know what variables are available.
  */
 export function serializeConfigWithComments(config: Config): string {
-  const lines: string[] = ['# kautopilot global config', '# Edit these to customize agent behavior and binary.', ''];
-
-  // Claude binary (single line)
-  lines.push(`claude_binary: ${config.claude_binary}`);
-  lines.push('');
+  const lines: string[] = ['# kautopilot global config', '# Edit these to customize agent behavior.', ''];
 
   // Agents section
   lines.push('agents:');
@@ -211,8 +104,7 @@ export function serializeConfigWithComments(config: Config): string {
       for (const agent of ['triage', 'spec_writer', 'plan_writer'] as const) {
         const path = `agents.phase1.${agent}`;
         lines.push(`    ${agent}:`);
-        const cfg = p1[agent] as { prompt: string; binary?: string };
-        if (cfg.binary) lines.push(`      binary: ${cfg.binary}`);
+        const cfg = p1[agent] as { prompt: string };
         lines.push(createPromptBlock(path, cfg.prompt, 6));
       }
       // spec_reviewers
@@ -221,12 +113,6 @@ export function serializeConfigWithComments(config: Config): string {
         const path = 'agents.phase1.spec_reviewers.*';
         lines.push(`      ${name}:`);
         lines.push(`        desc: ${JSON.stringify(reviewer.desc)}`);
-        if (reviewer.binaries && reviewer.binaries.length > 0) {
-          lines.push(`        binaries: [${reviewer.binaries.join(', ')}]`);
-        }
-        if (reviewer.timeout !== undefined) {
-          lines.push(`        timeout: ${reviewer.timeout}`);
-        }
         const varComments = buildVarComments(path);
         // Variable comments go BEFORE prompt: as YAML comments
         if (varComments) {
@@ -241,12 +127,6 @@ export function serializeConfigWithComments(config: Config): string {
         const path = 'agents.phase1.plan_reviewers.*';
         lines.push(`      ${name}:`);
         lines.push(`        desc: ${JSON.stringify(reviewer.desc)}`);
-        if (reviewer.binaries && reviewer.binaries.length > 0) {
-          lines.push(`        binaries: [${reviewer.binaries.join(', ')}]`);
-        }
-        if (reviewer.timeout !== undefined) {
-          lines.push(`        timeout: ${reviewer.timeout}`);
-        }
         const varComments = buildVarComments(path);
         // Variable comments go BEFORE prompt: as YAML comments
         if (varComments) {
@@ -256,32 +136,19 @@ export function serializeConfigWithComments(config: Config): string {
         lines.push(indentLines(reviewer.prompt, 10));
       }
     } else if (phaseKey === 'phase2' || phaseKey === 'phase3') {
-      for (const [agentName, agentConfig] of Object.entries(
-        phaseAgents as Record<string, { prompt: string; binary?: string }>,
-      ) as [string, { prompt: string; binary?: string }][]) {
+      for (const [agentName, agentConfig] of Object.entries(phaseAgents as Record<string, { prompt: string }>) as [
+        string,
+        { prompt: string },
+      ][]) {
         const path = `agents.${phaseKey}.${agentName}`;
         lines.push(`    ${agentName}:`);
-        if (agentConfig.binary) lines.push(`      binary: ${agentConfig.binary}`);
-        lines.push(createPromptBlock(path, agentConfig.prompt, 6));
-      }
-    } else if (phaseKey === 'init') {
-      for (const [agentName, agentConfig] of Object.entries(
-        phaseAgents as Record<string, { prompt: string; binary?: string }>,
-      ) as [string, { prompt: string; binary?: string }][]) {
-        const path = `agents.init.${agentName}`;
-        lines.push(`    ${agentName}:`);
-        if (agentConfig.binary) lines.push(`      binary: ${agentConfig.binary}`);
         lines.push(createPromptBlock(path, agentConfig.prompt, 6));
       }
     } else if (phaseKey === 'generic') {
       const genericAgents = phaseAgents as Config['agents']['generic'];
-      for (const [agentName, agentConfig] of Object.entries(genericAgents) as [
-        string,
-        { prompt: string; binary?: string },
-      ][]) {
+      for (const [agentName, agentConfig] of Object.entries(genericAgents) as [string, { prompt: string }][]) {
         const path = `agents.generic.${agentName}`;
         lines.push(`    ${agentName}:`);
-        if (agentConfig.binary) lines.push(`      binary: ${agentConfig.binary}`);
         lines.push(createPromptBlock(path, agentConfig.prompt, 6));
       }
     }
@@ -296,83 +163,24 @@ export function serializeConfigWithComments(config: Config): string {
   }
   lines.push('');
 
-  // Kloop section
-  lines.push('kloop:');
-  lines.push(`  implementers:`);
-  for (const [k, v] of Object.entries(config.kloop.implementers)) {
-    lines.push(`    ${k}: ${v}`);
-  }
-  lines.push(`  reviewPhases:`);
-  for (const phase of config.kloop.reviewPhases) {
-    lines.push(`    - [${phase.join(', ')}]`);
-  }
-  if (config.kloop.conflictChecker) {
-    lines.push(`  conflictChecker: ${config.kloop.conflictChecker}`);
-  }
-  if (config.kloop.synthesizer) {
-    lines.push(`  synthesizer: ${config.kloop.synthesizer}`);
-  }
-  lines.push(`  maxIterations: ${config.kloop.maxIterations}`);
-  lines.push(`  implementerTimeout: ${config.kloop.implementerTimeout}`);
-  lines.push(`  reviewerTimeout: ${config.kloop.reviewerTimeout}`);
-  lines.push(`  synthesisTimeout: ${config.kloop.synthesisTimeout}`);
-  lines.push(`  verifyTimeout: ${config.kloop.verifyTimeout}`);
-  lines.push(`  conflictCheckThreshold: ${config.kloop.conflictCheckThreshold}`);
-  lines.push(`  compressSpec: ${config.kloop.compressSpec}`);
-  lines.push(`  firstLoopFullReview: ${config.kloop.firstLoopFullReview}`);
-  lines.push(`  previousReviewPropagation: ${config.kloop.previousReviewPropagation}`);
-  lines.push(`  synthesis: ${config.kloop.synthesis}`);
-  lines.push(`  verify: ${config.kloop.verify}`);
-  lines.push(`  verifyPhases:`);
-  for (const phase of config.kloop.verifyPhases) {
-    lines.push(`    - [${phase.join(', ')}]`);
-  }
-  lines.push(`  rerankAfterCheckpoint: ${config.kloop.rerankAfterCheckpoint}`);
-  lines.push(`  implementerRetry:`);
-  lines.push(`    maxRetries: ${config.kloop.implementerRetry.maxRetries}`);
-  lines.push(`    backoffBaseMs: ${config.kloop.implementerRetry.backoffBaseMs}`);
-  lines.push(`  firstIterationWeightMultiplier: ${config.kloop.firstIterationWeightMultiplier}`);
-  // Kloop prompts section — uses raw string values, not nested objects
-  if (config.kloop.prompts) {
-    lines.push('  prompts:');
-    for (const [name, prompt] of Object.entries(config.kloop.prompts)) {
-      if (prompt) {
-        const vars = KLOOP_PROMPT_VARS[name];
-        // Variable comments go BEFORE the key (as regular YAML comments)
-        if (vars) {
-          for (const [v, desc] of Object.entries(vars)) {
-            lines.push(`    # {${v}} - ${desc}`);
-          }
-        }
-        lines.push(`    ${name}: |`);
-        lines.push(indentLines(prompt, 6));
-      }
-    }
-  }
-  lines.push('');
-
   // Settings section
   lines.push('settings:');
   lines.push(`  maxPushCycles: ${config.settings.maxPushCycles}`);
   lines.push(`  pollInterval: ${config.settings.pollInterval}`);
-  lines.push(`  defaultLlmTimeout: ${config.settings.defaultLlmTimeout}`);
-  lines.push(`  evalTimeout: ${config.settings.evalTimeout}`);
   lines.push(`  coderabbit: ${config.settings.coderabbit}`);
-  lines.push(`  removeSpecOnPush: ${config.settings.removeSpecOnPush}`);
+  lines.push(`  maxParallelRepos: ${config.settings.maxParallelRepos}`);
+  lines.push(`  runMode: ${config.settings.runMode}`);
+  lines.push(`  execMode: ${config.settings.execMode}`);
   lines.push('');
 
-  // Repo section
-  lines.push('repo:');
-  if (config.repo.org) lines.push(`  org: ${config.repo.org}`);
-  lines.push(`  baseBranch: ${config.repo.baseBranch}`);
-  lines.push(`  ticketSystem: ${config.repo.ticketSystem ?? 'null'}`);
-  if (config.repo.prComment == null) {
-    lines.push('  prComment: null');
-  } else if (config.repo.prComment.includes('\n')) {
-    lines.push('  prComment: |');
-    lines.push(indentLines(config.repo.prComment.replace(/\n+$/, ''), 4));
-  } else {
-    lines.push(`  prComment: ${JSON.stringify(config.repo.prComment)}`);
+  // Orgs section — per-org policy (the single source of truth).
+  lines.push('# Per-org policy. Org is always asked, never auto-detected.');
+  lines.push('orgs:');
+  for (const [org, policy] of Object.entries(config.orgs)) {
+    lines.push(`  ${org}:`);
+    lines.push(`    ticketSystem: ${policy.ticketSystem}`);
+    lines.push(`    commitSpec: ${policy.commitSpec}`);
+    lines.push(`    baseBranch: ${policy.baseBranch}`);
   }
 
   return `${lines.join('\n')}\n`;
@@ -409,69 +217,38 @@ function configPath(id: string): string {
   return `${process.env.HOME}/.kautopilot/${id}/config.yaml`;
 }
 
+function normalizeConfigInput(input: unknown): unknown {
+  if (input && typeof input === 'object' && !Array.isArray(input)) {
+    const raw = { ...(input as Record<string, unknown>) };
+    // Legacy: a binary lived at the top level (`claude_binary` or `binary`) and a
+    // `kloop:` section held kloop's native config. kautopilot no longer owns any
+    // binary or kloop config (kloop runs on its own native config), so drop them.
+    // Zod strips remaining unknown keys; explicitly removing these keeps the parse
+    // of older config files clean.
+    raw.claude_binary = undefined;
+    raw.binary = undefined;
+    raw.kloop = undefined;
+    return raw;
+  }
+  return input;
+}
+
+function parseConfigYaml(raw: string, source: string): Config {
+  const parsed = normalizeConfigInput(YAML.parse(raw) as unknown);
+  const result = configSchema.safeParse(parsed);
+  if (!result.success) {
+    throw new Error(`Invalid config at ${source}: ${result.error.message}`);
+  }
+  return result.data;
+}
+
 export function readConfig(id: string): Config | null {
   const path = configPath(id);
   if (!existsSync(path)) {
     return null;
   }
   const raw = readFileSync(path, 'utf-8');
-  const parsed = YAML.parse(raw) as Partial<Config> | undefined;
-  if (!parsed) return DEFAULT_CONFIG;
-  // Legacy migration: hoist old settings fields into kloop
-  const legacySettings = parsed.settings as Record<string, unknown> | undefined;
-  const migratedKloop = { ...(parsed.kloop ?? {}) } as Record<string, unknown>;
-  if (legacySettings) {
-    if (migratedKloop.maxIterations == null && legacySettings.maxIterations != null)
-      migratedKloop.maxIterations = legacySettings.maxIterations;
-    if (migratedKloop.implementerTimeout == null && legacySettings.implementerTimeout != null)
-      migratedKloop.implementerTimeout = legacySettings.implementerTimeout;
-    if (migratedKloop.reviewerTimeout == null && legacySettings.reviewerTimeout != null)
-      migratedKloop.reviewerTimeout = legacySettings.reviewerTimeout;
-  }
-
-  return {
-    claude_binary: parsed.claude_binary ?? DEFAULT_CONFIG.claude_binary,
-    agents: {
-      init: { ...DEFAULT_CONFIG.agents.init, ...parsed.agents?.init },
-      phase1: {
-        triage: {
-          ...DEFAULT_CONFIG.agents.phase1.triage,
-          ...parsed.agents?.phase1?.triage,
-        },
-        spec_writer: {
-          ...DEFAULT_CONFIG.agents.phase1.spec_writer,
-          ...parsed.agents?.phase1?.spec_writer,
-        },
-        plan_writer: {
-          ...DEFAULT_CONFIG.agents.phase1.plan_writer,
-          ...parsed.agents?.phase1?.plan_writer,
-        },
-        spec_reviewers: {
-          ...DEFAULT_CONFIG.agents.phase1.spec_reviewers,
-          ...parsed.agents?.phase1?.spec_reviewers,
-        },
-        plan_reviewers: {
-          ...DEFAULT_CONFIG.agents.phase1.plan_reviewers,
-          ...parsed.agents?.phase1?.plan_reviewers,
-        },
-      },
-      phase2: { ...DEFAULT_CONFIG.agents.phase2, ...parsed.agents?.phase2 },
-      phase3: { ...DEFAULT_CONFIG.agents.phase3, ...parsed.agents?.phase3 },
-      generic: { ...DEFAULT_CONFIG.agents.generic, ...parsed.agents?.generic },
-    },
-    templates: { ...DEFAULT_CONFIG.templates, ...parsed.templates },
-    kloop: {
-      ...DEFAULT_CONFIG.kloop,
-      ...migratedKloop,
-      // Deep merge prompts
-      prompts: {
-        ...DEFAULT_CONFIG.kloop.prompts,
-        ...(migratedKloop.prompts as Record<string, string> | undefined),
-      },
-    },
-    settings: { ...DEFAULT_CONFIG.settings, ...parsed.settings },
-    repo: { ...DEFAULT_CONFIG.repo, ...parsed.repo },
-  };
+  return parseConfigYaml(raw, path);
 }
 
 export function writeConfig(id: string, config: Config): void {
@@ -492,13 +269,10 @@ function orgConfigPath(org: string): string {
   return `${process.env.HOME}/.kautopilot/orgs/${org}/config.yaml`;
 }
 
-export function resolvedConfigPath(org?: string, configPathOverride?: string): string | null {
-  return pickConfig(org, configPathOverride);
-}
-
 /**
  * Ensure ~/.kautopilot/config.yaml exists with built-in defaults.
- * Called on first init or org init.
+ * Called on first init or org init. Runtime loading does not merge these
+ * defaults into user/org/session config files.
  */
 export function ensureGlobalConfig(): void {
   const path = globalConfigPath();
@@ -522,70 +296,15 @@ function pickConfig(org?: string, configPathOverride?: string): string | null {
 }
 
 /**
- * Resolve final config: merge built-in defaults with the picked config file.
- * One config file wins — no multi-layer merging at init time.
+ * Resolve final config. One complete config file wins — no multi-layer merging
+ * and no built-in default overlay at init time.
  */
 export function resolveConfig(org?: string, configPathOverride?: string): Config {
   const picked = pickConfig(org, configPathOverride);
-  if (!picked || !existsSync(picked)) return { ...DEFAULT_CONFIG };
-
-  const raw = readFileSync(picked, 'utf-8');
-  const parsed = YAML.parse(raw) as Partial<Config> | undefined;
-  if (!parsed) return { ...DEFAULT_CONFIG };
-
-  // Legacy migration: hoist old settings fields into kloop
-  const legacySettings = parsed.settings as Record<string, unknown> | undefined;
-  const migratedKloop = { ...(parsed.kloop ?? {}) } as Record<string, unknown>;
-  if (legacySettings) {
-    if (migratedKloop.maxIterations == null && legacySettings.maxIterations != null)
-      migratedKloop.maxIterations = legacySettings.maxIterations;
-    if (migratedKloop.implementerTimeout == null && legacySettings.implementerTimeout != null)
-      migratedKloop.implementerTimeout = legacySettings.implementerTimeout;
-    if (migratedKloop.reviewerTimeout == null && legacySettings.reviewerTimeout != null)
-      migratedKloop.reviewerTimeout = legacySettings.reviewerTimeout;
+  if (!picked || !existsSync(picked)) {
+    throw new Error(`Config file not found: ${picked ?? '(none)'}`);
   }
 
-  return {
-    claude_binary: parsed.claude_binary ?? DEFAULT_CONFIG.claude_binary,
-    agents: {
-      init: { ...DEFAULT_CONFIG.agents.init, ...parsed.agents?.init },
-      phase1: {
-        triage: {
-          ...DEFAULT_CONFIG.agents.phase1.triage,
-          ...parsed.agents?.phase1?.triage,
-        },
-        spec_writer: {
-          ...DEFAULT_CONFIG.agents.phase1.spec_writer,
-          ...parsed.agents?.phase1?.spec_writer,
-        },
-        plan_writer: {
-          ...DEFAULT_CONFIG.agents.phase1.plan_writer,
-          ...parsed.agents?.phase1?.plan_writer,
-        },
-        spec_reviewers: {
-          ...DEFAULT_CONFIG.agents.phase1.spec_reviewers,
-          ...parsed.agents?.phase1?.spec_reviewers,
-        },
-        plan_reviewers: {
-          ...DEFAULT_CONFIG.agents.phase1.plan_reviewers,
-          ...parsed.agents?.phase1?.plan_reviewers,
-        },
-      },
-      phase2: { ...DEFAULT_CONFIG.agents.phase2, ...parsed.agents?.phase2 },
-      phase3: { ...DEFAULT_CONFIG.agents.phase3, ...parsed.agents?.phase3 },
-      generic: { ...DEFAULT_CONFIG.agents.generic, ...parsed.agents?.generic },
-    },
-    templates: { ...DEFAULT_CONFIG.templates, ...parsed.templates },
-    kloop: {
-      ...DEFAULT_CONFIG.kloop,
-      ...migratedKloop,
-      // Deep merge prompts
-      prompts: {
-        ...DEFAULT_CONFIG.kloop.prompts,
-        ...(migratedKloop.prompts as Record<string, string> | undefined),
-      },
-    },
-    settings: { ...DEFAULT_CONFIG.settings, ...parsed.settings },
-    repo: { ...DEFAULT_CONFIG.repo, ...parsed.repo },
-  };
+  const raw = readFileSync(picked, 'utf-8');
+  return parseConfigYaml(raw, picked);
 }

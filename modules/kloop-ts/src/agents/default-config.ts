@@ -51,6 +51,7 @@ previousReviewPropagation: 0.7
 synthesis: true
 verify: true
 rerankAfterCheckpoint: true
+snapshot: false
 
 implementerRetry:
   maxRetries: 2

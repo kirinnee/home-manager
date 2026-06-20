@@ -25,13 +25,13 @@
 
 ## Step Dispatch
 
-| Step          | Agent             | Model  | Type | File                        | Description                                                        |
-| ------------- | ----------------- | ------ | ---- | --------------------------- | ------------------------------------------------------------------ |
-| `setup`       | setup-agent       | haiku  | team | `plan/steps/setup.md`       | Mode, branch, .gitignore, create task-state.json (bootstrap)       |
-| `repo_setup`  | repo-setup-agent  | sonnet | team | `plan/steps/repo-setup.md`  | Org detection, ticket fetch, parent walking, populate repoConfig   |
-| `feedback`    | feedback-agent    | haiku  | team | `plan/steps/feedback.md`    | v2+: capture feedback, create new spec version, merge specs        |
-| `write_spec`  | write-spec-agent  | haiku  | team | `plan/steps/write-spec.md`  | Read step content, challenge user, research codebase, write spec   |
-| `write_plans` | write-plans-agent | haiku  | team | `plan/steps/write-plans.md` | Read step content, write plans, discover binaries, config approval |
+| Step          | Agent             | Model  | Type | File                        | Description                                                                     |
+| ------------- | ----------------- | ------ | ---- | --------------------------- | ------------------------------------------------------------------------------- |
+| `setup`       | setup-agent       | haiku  | team | `plan/steps/setup.md`       | Mode, worktrunk worktree/branch, .gitignore, create task-state.json (bootstrap) |
+| `repo_setup`  | repo-setup-agent  | sonnet | team | `plan/steps/repo-setup.md`  | Org detection, ticket fetch, parent walking, populate repoConfig                |
+| `feedback`    | feedback-agent    | haiku  | team | `plan/steps/feedback.md`    | v2+: capture feedback, create new spec version, merge specs                     |
+| `write_spec`  | write-spec-agent  | haiku  | team | `plan/steps/write-spec.md`  | Read step content, challenge user, research codebase, write spec                |
+| `write_plans` | write-plans-agent | haiku  | team | `plan/steps/write-plans.md` | Read step content, write plans, discover binaries, config approval              |
 
 ## Step Dispatch Logic
 
@@ -71,5 +71,7 @@ Task(
     )
 )
 ```
+
+After setup-agent reports `WORKDIR`, use that reported worktree path for every later phase/step. This may differ from the original working directory when setup created a new worktrunk worktree from `main` or `master`.
 
 Note: For steps that need user interaction (feedback, write_spec), use haiku since they user may have questions and handle complex decisions. For logic is they use sonnet or opus for deeper reasoning.

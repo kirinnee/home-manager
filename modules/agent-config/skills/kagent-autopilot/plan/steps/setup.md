@@ -11,42 +11,66 @@
 RESULT: <completed|error>
 MODE: <autopilot>
 BRANCH: <branch name>
+WORKDIR: <absolute worktree path for subsequent steps>
 ERROR: <error message if any>
 ```
 
 ## Task
 
-Bootstrap the kagent-autopilot session: detect mode, set up branch, configure .gitignore, and create initial state files.
+Bootstrap the kagent-autopilot session: detect mode, set up the task worktree/branch, configure .gitignore, and create initial state files.
 
-## Step 1: Ensure .kagent Directory
+## Step 1: Worktree and Branch Setup
 
-```bash
-mkdir -p .kagent
-```
-
-## Step 2: Configure .gitignore
-
-Ensure `.kagent/` is gitignored:
-
-```bash
-grep -q '^\.kagent/' .gitignore 2>/dev/null || echo '.kagent/' >> .gitignore
-```
-
-## Step 3: Branch Setup
-
-Check current branch:
+Determine the current branch:
 
 ```bash
 git branch --show-current
 ```
 
-If on main/master, create a feature branch:
+Determine the current repository root:
 
 ```bash
-git checkout -b feature/{ticketId or descriptive-name}
+git rev-parse --show-toplevel
 ```
 
-If already on a feature branch, use it as-is.
+If already on a feature/task branch, use the current worktree as-is.
+
+If on `main` or `master`, derive the target branch from `rawArgument` when it contains a ticket ID, otherwise use a concise descriptive task name. Then create/switch through worktrunk. Do not use `git checkout -b`; it creates a branch in-place and bypasses worktrunk's path template and hooks.
+
+```bash
+wt switch --create "{ticketId or descriptive-name}" --no-cd
+```
+
+After worktrunk creates/switches the worktree, resolve the actual worktree path for the branch:
+
+```bash
+git worktree list --porcelain | awk -v branch="refs/heads/{ticketId or descriptive-name}" '
+  /^worktree / { wt = substr($0, 10) }
+  /^branch / && $2 == branch { print wt; exit }
+'
+```
+
+Use that resolved path as `session_workdir` for every remaining setup command and report it as `WORKDIR`. If worktrunk reports the branch already exists, run `wt switch "{ticketId or descriptive-name}" --no-cd`, then resolve `session_workdir` the same way.
+
+## Step 2: Ensure .kagent Directory
+
+```bash
+mkdir -p "$session_workdir/.kagent"
+```
+
+## Step 3: Configure .gitignore
+
+Ensure `.kagent/` is gitignored in the session worktree:
+
+```bash
+grep -q '^\.kagent/' "$session_workdir/.gitignore" 2>/dev/null || echo '.kagent/' >> "$session_workdir/.gitignore"
+```
+
+Confirm the final branch from the session worktree:
+
+```bash
+git -C "$session_workdir" branch --show-current
+```
 
 ## Step 4: Parse Argument
 
@@ -62,6 +86,7 @@ Parse `rawArgument` to determine starting phase:
 ## Step 5: Create task-state.json (Bootstrap)
 
 **This is the only step that creates task-state.json directly (bootstrap exception).**
+Write this file to `$session_workdir/.kagent/task-state.json`.
 
 ```json
 {
@@ -97,6 +122,8 @@ Parse `rawArgument` to determine starting phase:
 If `--phase impl` or `--phase polish`, set `currentPhase` accordingly.
 
 ## Step 6: Create plan-state.json
+
+Write this file to `$session_workdir/.kagent/plan-state.json`.
 
 ```json
 {

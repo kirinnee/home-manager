@@ -56,6 +56,7 @@ export interface Paths {
   readonly loopCheckpointerPath: (runId: string, loopIndex: number) => string;
   readonly loopSynthesisPath: (runId: string, loopIndex: number) => string;
   readonly loopVerifyPath: (runId: string, loopIndex: number) => string;
+  readonly loopArchivePath: (runId: string, loopIndex: number) => string;
   readonly scratchDir: (cwd: string) => string;
 }
 
@@ -237,6 +238,8 @@ export const paths: Paths = {
   loopSynthesisPath: (runId: string, loopIndex: number) =>
     path.join(getKloopHome(), runId, `loop-${loopIndex}`, 'synthesis'),
   loopVerifyPath: (runId: string, loopIndex: number) => path.join(getKloopHome(), runId, `loop-${loopIndex}`, 'verify'),
+  loopArchivePath: (runId: string, loopIndex: number) =>
+    path.join(getKloopHome(), runId, 'archive', `loop-${loopIndex}`),
   scratchDir: (cwd: string) => path.join(cwd, '.kloop', 'scratch'),
 };
 

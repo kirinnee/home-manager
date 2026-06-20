@@ -40,14 +40,14 @@ prompts:
 
 All three prompts support these variables, resolved at runtime:
 
-| Variable     | Resolves to                                  |
-| ------------ | -------------------------------------------- |
-| `{ticket}`   | `{worktree}/spec/ticket.md`                  |
-| `{spec}`     | `{worktree}/spec/v{version}/task-spec.md`    |
-| `{specDir}`  | `{worktree}/spec/v{version}`                 |
-| `{plans}`    | `{worktree}/spec/v{version}/plans`           |
-| `{worktree}` | absolute worktree path                       |
-| `{triage}`   | `{worktree}/spec/v{version}/triage.md` (new) |
+| Variable     | Resolves to                               |
+| ------------ | ----------------------------------------- |
+| `{ticket}`   | `{worktree}/spec/ticket.md`               |
+| `{spec}`     | `{worktree}/spec/v{version}/task-spec.md` |
+| `{specDir}`  | `{worktree}/spec/v{version}`              |
+| `{plans}`    | `{worktree}/spec/v{version}/plans`        |
+| `{worktree}` | absolute worktree path                    |
+| `{triage}`   | `{worktree}/spec/{ticket}/triage.md`      |
 
 ---
 
@@ -96,7 +96,7 @@ A TTY session that reads the ticket and does **lightweight** codebase exploratio
 | `moderate`        | Some exploration needed, manageable scope | Spec writer does moderate discussion                |
 | `complex`         | Large scope, many unknowns, high risk     | Spec writer does thorough debate and de-ambiguation |
 
-**Written artifact:** `{specDir}/triage.md`
+**Written artifact:** `{triage}` (session-level, not epoch-scoped)
 
 ### 5.4 Loop contract
 
@@ -121,7 +121,9 @@ Same pattern as SPEC_MECHANICS and PLAN_MECHANICS — always prepended by the ru
 
 ### Output File
 
-Write your triage assessment to: {specDir}/triage.md
+Write your triage assessment to: {triage}
+
+Do not write triage.md under an epoch directory like {specDir}/triage.md.
 
 The triage document MUST include these sections:
 

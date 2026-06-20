@@ -3,22 +3,34 @@
 {
   model_provider = "proxy";
   forced_login_method = "api";
+  service_tier = "fast";
   model_reasoning_effort = "high";
-  approval_policy = "on-request";
-  sandbox_mode = "workspace-write";
+  approval_policy = "never";
+  sandbox_mode = "danger-full-access";
 
   features = {
-    codex_hooks = true;
+    hooks = true;
   };
 
   sandbox_workspace_write = {
     network_access = true;
   };
 
+  projects = {
+    "/Users/erng/.config/home-manager" = {
+      trust_level = "trusted";
+    };
+    "/Users/erng/Workspace/atomi/runbook/platforms/nitroso/tin" = {
+      trust_level = "trusted";
+    };
+  };
+
   tui = {
     status_line = [
       "model-with-reasoning"
       "context-used"
+      "five-hour-limit"
+      "weekly-limit"
       "current-dir"
     ];
   };

@@ -61,6 +61,7 @@ const configSchema = z
     verifyPhases: z.array(z.array(z.string().min(1)).min(1)).optional(),
     verifyTimeout: z.number().min(0.001).max(120).optional(),
     rerankAfterCheckpoint: z.boolean().default(true),
+    snapshot: z.boolean().default(false),
     implementerRetry: implementerRetrySchema.optional(),
     firstIterationWeightMultiplier: z.number().min(1).max(1000).default(2),
     // Backward compat: old nested reReview shape
@@ -137,6 +138,7 @@ const configSchema = z
       verifyPhases,
       verifyTimeout,
       rerankAfterCheckpoint: data.rerankAfterCheckpoint ?? true,
+      snapshot: data.snapshot ?? false,
       implementerRetry: data.implementerRetry ?? { maxRetries: 2, backoffBaseMs: 5000 },
       firstIterationWeightMultiplier: data.firstIterationWeightMultiplier ?? 2,
       prompts,
@@ -161,6 +163,7 @@ export const resolvedConfigSchema = z.object({
   verify: z.boolean(),
   verifyPhases: z.array(z.array(z.string().min(1)).min(1)),
   rerankAfterCheckpoint: z.boolean(),
+  snapshot: z.boolean(),
   implementerRetry: z.object({
     maxRetries: z.number().min(0).max(10),
     backoffBaseMs: z.number().min(0),
@@ -443,6 +446,7 @@ export const DEFAULT_CONFIG: Config = {
   verify: true,
   verifyPhases: [['claude:claude']],
   rerankAfterCheckpoint: true,
+  snapshot: false,
   implementerRetry: { maxRetries: 2, backoffBaseMs: 5000 },
   firstIterationWeightMultiplier: 2,
 };

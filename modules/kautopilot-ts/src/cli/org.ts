@@ -1,8 +1,9 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { Command } from 'commander';
-import { ensureGlobalConfig } from '../core/config';
-import { ALL_SCRIPTS, loadOrgScripts, promptSaveOrg, promptSetupScripts, showScripts } from '../core/scripts';
+import { setCachedConfig } from '../core/agents';
+import { ensureGlobalConfig, resolveConfig } from '../core/config';
+import { ALL_SCRIPTS, loadOrgScripts, promptSaveOrg, showScripts } from '../core/scripts';
 import { logError, logField, logInfo } from '../util/format';
 
 const ORGS_DIR = `${process.env.HOME}/.kautopilot/orgs`;
@@ -48,29 +49,21 @@ async function runOrgInit(name: string): Promise<void> {
     copyFileSync(globalConfigPath, orgConfigPath);
     logField('Config', `${orgConfigPath} (copied from global)`);
   }
+  setCachedConfig(resolveConfig(name, orgConfigPath));
 
   logField('Org', name);
 
-  // 2. Setup scripts — try loading from org (self), then LLM for missing
+  // 2. Load any existing ticket scripts from the org (best-effort; ticket ops are
+  // harness-side now, so missing scripts are not fatal — they are simply noted).
   const scriptsDir = orgDir;
   const { missing } = loadOrgScripts(scriptsDir, name);
-
-  // 3. If any scripts are missing, run the interactive setup flow
   if (missing.length > 0) {
-    const ok = await promptSetupScripts(scriptsDir, missing, name);
-    if (!ok) {
-      logInfo('Script setup cancelled.');
-      return;
-    }
+    logInfo(`No scripts for: ${missing.join(', ')} (ticket ops run harness-side — optional).`);
   }
 
-  // 4. Show all scripts
+  // 3. Show whatever scripts are present, then offer to persist them as org config.
   showScripts(scriptsDir, ALL_SCRIPTS);
-
-  // 5. Offer to save scripts as org config (same flow as init)
-  if (missing.length > 0) {
-    await promptSaveOrg(scriptsDir, name);
-  }
+  await promptSaveOrg(scriptsDir, name);
 }
 
 function createOrgLsCommand(): Command {

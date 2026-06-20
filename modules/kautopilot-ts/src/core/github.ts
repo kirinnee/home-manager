@@ -7,6 +7,9 @@ import type { CheckStatus, PollThread } from './types';
 
 const BOT_SIGNATURE = '\n\nBy Claude Code Kautopilot';
 
+/** Substring that identifies a comment authored by this tool (our own replies). */
+export const BOT_SIGNATURE_MARKER = 'By Claude Code Kautopilot';
+
 export function withBotSignature(body: string): string {
   return body + BOT_SIGNATURE;
 }

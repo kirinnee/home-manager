@@ -10,6 +10,8 @@ export interface LogEntry {
   version?: number;
   attempt?: number;
   plan?: string;
+  /** Repo this event is scoped to (execution/polish steps); absent for shared steps. */
+  repo?: string;
   result?: string;
   metadata?: Record<string, unknown>;
 }
@@ -18,609 +20,7 @@ export interface LogEntry {
 // Session Status — re-exported from status.ts
 // ============================================================================
 
-export type { SessionStatus, TaskStatus } from './status';
-
-// ============================================================================
-// Kloop Config
-// ============================================================================
-
-// Default kloop prompt templates (inlined from kloop)
-const DEFAULT_KLOOP_IMPLEMENTER_PROMPT = `# Implementation Task
-
-## Specification
-
-Read the spec from: {specPath}
-Read CLAUDE.md and any project skills files if they exist.
-
-## Context
-
-- Loop: {iteration}
-- Reviews from previous loop: {reviewsDir}/
-- Synthesized review summary (loop 2+): {reviewSummaryPath}
-- Learnings from previous loops: {learningsFile}
-
-## Output Protocol
-
-Write all output files to {scratchDir}/ with the naming convention:
-  {artifactType}-{qualifier}.{ext}        (content file)
-  {artifactType}-{qualifier}.{ext}.meta   (metadata file)
-
-The metadata file must be a single-line JSON object:
-  {"artifact":"<type>","role":"<role>","runId":"<runId>","loop":{loop},"timestamp":"<ISO-8601>"}
-
-Include "index" and "phase" fields when applicable. Write the .meta file LAST —
-it signals that the content file is complete.
-
-## Instructions
-
-1. Read and understand the specification completely — especially the Definition of Done checklist
-2. Before using any library, tool, or framework, research its current documentation and source code. Verify the version you are using matches the API signatures and configuration you are relying on. Do not rely on potentially outdated knowledge.
-3. **Focus on rejected reviews first.** If a synthesized review summary path is listed above, read it — it replaces raw individual reviews as your primary input. The summary deduplicates issues and prioritizes by severity (CRITICAL/HIGH/LOW). Otherwise, read the raw reviews from {reviewsDir}/. UNANIMOUS approval is required — every reviewer must pass. If any reviewer rejected, address their concerns before moving on to other work. Do NOT treat a minority rejection as optional.
-4. Implement the required changes, with special attention to addressing every rejected reviewer's concerns
-5. Capture evidence to {scratchDir}/:
-   - If the spec has a Definition of Done checklist, capture evidence for each item
-   - If the spec has no checklist, figure out what checks are available (build, test, lint, type-check, etc.) and capture what you can
-   - Write self-review findings to {scratchDir}/evidence-self-review.md
-   - Create metadata at {scratchDir}/evidence-self-review.md.meta: {"artifact":"evidence","role":"implementer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
-6. **Self-review your changes** before marking as complete:
-   - Run \`git diff\` and \`git diff --staged\` to review ALL changes
-   - Check each change against the spec requirements
-   - Verify all evidence has been captured
-   - Only consider yourself done if all critical spec items are addressed
-7. **Document how you addressed previous reviews.** If there were reviews from a previous loop, write a file at {scratchDir}/evidence-addressed-reviews.md. For each rejected reviewer's concern, document:
-   - **What** the reviewer flagged
-   - **What** you did in response (specific files changed, approaches taken)
-   - **Why** you chose that approach — this is critical when you disagree with the reviewer's suggestion. Explain your reasoning so future reviewers can evaluate the trade-off independently rather than re-raising the same point.
-   - If you intentionally chose NOT to follow a reviewer's suggestion, say so explicitly with your rationale. Silent disagreement looks like the concern was ignored.
-   - Create metadata at {scratchDir}/evidence-addressed-reviews.md.meta: {"artifact":"evidence","role":"implementer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
-8. Write learnings to {scratchDir}/learnings.md: roadblocks, workarounds, decisions made, and why
-   - Create metadata at {scratchDir}/learnings.md.meta: {"artifact":"learnings","role":"implementer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
-
-## Git Safety - CRITICAL
-
-- NEVER use \`git push --force\` or \`git push -f\`
-- NEVER push to any branch other than the current task branch
-- NEVER push to main, master, or any protected branch
-- NEVER delete branches or rebase pushed commits
-- Do NOT commit changes — the run will commit on successful completion`;
-
-const DEFAULT_KLOOP_REVIEWER_PROMPT = `# Code Review Task
-
-## Specification
-
-Read the spec from: {specPath}
-Read CLAUDE.md and any project skills files if they exist.
-
-## Previous Loop Context
-- Synthesized review summary (loop 2+): {previousSummaryPath}
-
-If a synthesized review summary path is listed above, read it — it contains a deduplicated, severity-prioritized summary of all previous reviews (CRITICAL/HIGH/LOW). Use it to understand which issues were previously flagged and verify they have been addressed. Do not let previous opinions override your own assessment — but ensure previously raised issues are no longer present.
-
-**Important**: Also check {evidenceDir}/addressed-reviews.md if it exists. The implementer documents there what they changed and why in response to each previous review concern. This is especially valuable when the implementer disagreed with a reviewer's suggestion — read their rationale and evaluate it on its merits rather than re-raising the same point without considering their reasoning.
-
-## Output Protocol
-
-Write all output files to {scratchDir}/ with the naming convention:
-  {artifactType}-{qualifier}.{ext}        (content file)
-  {artifactType}-{qualifier}.{ext}.meta   (metadata file)
-
-The metadata file must be a single-line JSON object:
-  {"artifact":"<type>","role":"<role>","runId":"<runId>","loop":{loop},"timestamp":"<ISO-8601>"}
-
-Include "index" and "phase" fields when applicable. Write the .meta file LAST —
-it signals that the content file is complete.
-
-## Your Task
-
-You are Reviewer {reviewerIndex} for loop {iteration}. Be strict and thorough.
-
-1. Run \`git diff\` and \`git diff --staged\` to see all changes
-2. Review every changed file against the specification — not just a summary
-3. Before using any library, tool, or framework referenced in the code, research its current documentation and source code. Verify the version being used matches the actual API signature and configuration. Flag any usage of outdated or non-existent features.
-4. Check {evidenceDir}/ for build, test, and other output logs — trust these as accurate to save time
-5. **Validate evidence** — check {evidenceDir}/ for output logs
-   - If the spec has a Definition of Done checklist, be strict: every required evidence item must be present and passing. Reject if anything is missing.
-   - If the spec has no checklist, use judgment: check what is reasonable for this project. Don't reject for missing evidence that the spec never asked for.
-6. Write your review to {scratchDir}/review-reviewer-{reviewerIndex}.md — include any issues found and evidence gaps
-   Create metadata at {scratchDir}/review-reviewer-{reviewerIndex}.md.meta:
-   {"artifact":"review","role":"reviewer","index":{reviewerIndex},"runId":"<runId>","loop":{loop},"phase":0,"timestamp":"<ISO>"}
-7. Write your verdict to {scratchDir}/verdict-reviewer-{reviewerIndex}.json:
-   \`\`\`json
-   {
-     "approved": true,
-     "reasoning": "Your detailed reasoning here",
-     "completionEstimate": 0-100 (be conservative, 100% only if ALL acceptance criteria are met)
-   }
-   \`\`\`
-   Create metadata at {scratchDir}/verdict-reviewer-{reviewerIndex}.json.meta:
-   {"artifact":"verdict","role":"reviewer","index":{reviewerIndex},"runId":"<runId>","loop":{loop},"phase":0,"timestamp":"<ISO>"}
-
-## Learnings
-
-Check {learningsFile} for context on the implementer's decisions this iteration.
-
-## Verdict
-
-- **APPROVE** if all spec requirements are met and all required evidence is present
-- **REJECT** for any clear issue: missing spec requirements, failing evidence, outdated library usage, security vulnerabilities, or CLAUDE.md violations
-
-## Git Safety - CRITICAL
-
-- NEVER use \`git push --force\` or \`git push -f\`
-- NEVER push to any branch other than the current task branch
-- NEVER push to main, master, or any protected branch
-- NEVER delete branches or rebase pushed commits
-- Reject if you see any evidence of unsafe git operations`;
-
-const DEFAULT_KLOOP_CHECKPOINTER_PROMPT = `# Conflict Detection Task
-
-## Context
-
-The dev loop has failed to reach consensus after {iteration} iterations.
-You are a **conflict detector** — your ONLY job is to determine if the spec itself is the problem.
-You must NOT modify the spec. You must NOT compress the spec.
-
-## Specification
-
-Read the spec from: {specPath}
-
-## Output Protocol
-
-Write all output files to {scratchDir}/ with the naming convention:
-  {artifactType}-{qualifier}.{ext}        (content file)
-  {artifactType}-{qualifier}.{ext}.meta   (metadata file)
-
-The metadata file must be a single-line JSON object:
-  {"artifact":"<type>","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO-8601>"}
-
-Write the .meta file LAST — it signals that the content file is complete.
-
-## Your Task
-
-1. Read the synthesized review summaries first ({archivedSummariesPattern}) — these contain deduplicated, severity-prioritized findings from each loop. If summaries are not available, fall back to raw reviews: current ({reviewsDir}/reviewer-*.md) and archived ({archivedReviewsPattern})
-2. Read ALL verdicts from the review JSON files alongside the reviews
-3. Cross-reference the spec's acceptance criteria / Definition of Done against every reviewer's findings
-4. Determine if the spec contains a fundamental conflict that makes it impossible to implement
-
-## What IS a Conflict
-
-A conflict is a spec defect where **no possible implementation can satisfy all requirements simultaneously**, regardless of how intelligent or persistent the implementer is.
-
-**The litmus test:** Imagine giving the implementer 10x intelligence and 10x more attempts. Could it eventually fulfil the spec? If the answer is NO, that is a conflict.
-
-Conflicts are often subtle — the spec may look reasonable at a glance, but becomes impossible after implementation reveals ground truth:
-
-- **Contradictory constraints**: Two or more acceptance criteria that cannot coexist. Example: "Do not modify any files in \`src/\`" combined with "Achieve 100% test coverage" — if \`src/\` contains dead code paths that are unreachable, the implementer cannot cover them without modifying \`src/\`. No amount of intelligence or retries solves this.
-- **Circular dependencies**: Criterion A requires B done first, but B requires A done first.
-- **Impossible environmental constraints**: Spec requires something the environment cannot provide (e.g., a file path that doesn't exist, a library version that lacks the specified API, a Node 14 requirement for a Node 18+ API).
-- **Fundamentally ambiguous requirements**: Requirements so vague that reasonable implementers would produce fundamentally different solutions (e.g., "make it fast" with no metric, "improve UX" with no design spec).
-
-**Important**: Reviewer disagreement — even across multiple loops — is NOT a conflict by itself. Use reviewer feedback as a clue for *where to look*, not as evidence of a conflict. Only flag a conflict if you can point to specific spec text that is self-contradictory or impossible to satisfy.
-
-## What is NOT a Conflict
-
-- **Reviewer disagreement**: Reviewers disagree on quality, approach, or interpretation — this is normal and expected
-- **Persistent reviewer disagreement**: Even if reviewers keep rejecting across multiple loops, this only means the implementation needs more work, NOT that the spec is broken
-- **Incomplete implementation**: The implementer didn't finish, but the spec is achievable
-- **Bugs or errors**: Implementation has bugs, but the spec is sound
-- **Missing tests/evidence**: Implementation lacks proof, but the spec is achievable
-- **Style preferences**: Reviewers have different opinions on code style
-- **Hard but possible**: The spec is difficult but achievable with enough effort
-
-## Conflict Confidence Levels
-
-When analyzing, assign a confidence level:
-
-- **HIGH**: Found clear textual contradiction in the spec (quote both parts)
-- **MEDIUM**: Cross-referencing reviews reveals systematic impossibility that isn't obvious from the spec alone
-- **LOW**: Suspicion based on patterns but could be implementation issues
-
-Only report conflicts at MEDIUM or higher confidence. If only LOW, report no_action.
-
-## Outcomes
-
-### conflict_found
-The spec contains impossible, contradictory, or fundamentally ambiguous requirements.
-- Write {scratchDir}/conflict.md with:
-  1. The exact conflicting requirements (quote the spec)
-  2. Why they conflict
-  3. Which reviewers flagged this (with quotes)
-  4. Suggested resolution (if obvious)
-- Create metadata at {scratchDir}/conflict.md.meta: {"artifact":"conflict","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
-- Write checkpoint result to {scratchDir}/checkpoint-result.json with \`"outcome": "conflict_found"\`
-- Create metadata at {scratchDir}/checkpoint-result.json.meta: {"artifact":"checkpoint","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
-
-### no_action
-No spec-level conflict detected. The spec is sound — failures are due to implementation/review issues.
-- Write checkpoint result to {scratchDir}/checkpoint-result.json with \`"outcome": "no_action"\`
-- Create metadata at {scratchDir}/checkpoint-result.json.meta: {"artifact":"checkpoint","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
-- Do NOT edit {specPath}
-
-## Checkpoint Result JSON
-
-Write to {scratchDir}/checkpoint-result.json:
-\`\`\`json
-{
-  "outcome": "conflict_found" | "no_action",
-  "summary": "Brief description of what was found (or why no conflict)",
-  "progressPercent": 75,
-  "completedCriteria": ["criterion 1"],
-  "remainingCriteria": ["criterion 2"],
-  "conflictConfidence": "HIGH" | "MEDIUM" | "LOW"
-}
-\`\`\`
-
-If conflict_found, also write {scratchDir}/conflict.md with detailed conflict analysis.
-Do NOT edit {specPath} under any circumstances.`;
-
-const DEFAULT_KLOOP_CHECKPOINTER_FULL_PROMPT = `# Checkpointer Task
-
-## Context
-
-The dev loop has failed to reach consensus after {iteration} iterations. Your task is to:
-
-1. **Detect spec-level conflicts** that block progress → if found, exit with conflict status
-2. **Auto-fix unambiguous spec mistakes** (like typos) → if fixed, continue loop with corrected spec
-3. **Compress the spec** if no conflict AND progress > 60% → focus on remaining work
-
-## Specification
-
-Read the spec from: {specPath}
-
-## Output Protocol
-
-Write all output files to {scratchDir}/ with the naming convention:
-  {artifactType}-{qualifier}.{ext}        (content file)
-  {artifactType}-{qualifier}.{ext}.meta   (metadata file)
-
-The metadata file must be a single-line JSON object:
-  {"artifact":"<type>","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO-8601>"}
-
-Write the .meta file LAST — it signals that the content file is complete.
-
-## Your Task
-
-1. Read the synthesized review summaries first ({archivedSummariesPattern}) — these contain deduplicated, severity-prioritized findings from each loop. If summaries are not available, fall back to raw reviews: current ({reviewsDir}/reviewer-*.md) and archived ({archivedReviewsPattern})
-2. Analyze reviews against the spec to determine what criteria are complete vs remaining
-3. Check for conflicts (see below)
-4. Check for auto-fixable issues (e.g., typos) — ONLY if completely unambiguous
-
-## What IS a Conflict
-
-A conflict is a spec defect where **no possible implementation can satisfy all requirements simultaneously**, regardless of how intelligent or persistent the implementer is.
-
-**The litmus test:** Imagine giving the implementer 10x intelligence and 10x more attempts. Could it eventually fulfil the spec? If the answer is NO, that is a conflict.
-
-Conflicts are often subtle — the spec may look reasonable at a glance, but becomes impossible after implementation reveals ground truth:
-
-- **Contradictory constraints**: Two or more acceptance criteria that cannot coexist. Example: "Do not modify any files in \`src/\`" combined with "Achieve 100% test coverage" — if \`src/\` contains dead code paths that are unreachable, the implementer cannot cover them without modifying \`src/\`. No amount of intelligence or retries solves this.
-- **Circular dependencies**: Criterion A requires B done first, but B requires A done first.
-- **Impossible environmental constraints**: Spec requires something the environment cannot provide (e.g., a file path that doesn't exist, a library version that lacks the specified API, a Node 14 requirement for a Node 18+ API).
-- **Fundamentally ambiguous requirements**: Requirements so vague that reasonable implementers would produce fundamentally different solutions (e.g., "make it fast" with no metric, "improve UX" with no design spec).
-
-**Important**: Reviewer disagreement — even across multiple loops — is NOT a conflict by itself. Use reviewer feedback as a clue for *where to look*, not as evidence of a conflict. Only flag a conflict if you can point to specific spec text that is self-contradictory or impossible to satisfy.
-
-## What is NOT a Conflict
-
-- **Reviewer disagreement**: Reviewers disagree on quality, approach, or interpretation — this is normal
-- **Persistent reviewer rejection**: Even across many loops, this means the implementation needs more work
-- **Incomplete implementation**: The implementer didn't finish, but the spec is achievable
-- **Bugs or errors**: Implementation has bugs, but the spec is sound
-- **Missing tests/evidence**: Implementation lacks proof, but the spec is achievable
-- **Hard but possible**: The spec is difficult but achievable with enough effort
-
-## Outcomes
-
-### conflict_found
-Spec has impossible/contradictory requirements.
-- Write conflict analysis to {scratchDir}/conflict.md
-- Create metadata at {scratchDir}/conflict.md.meta: {"artifact":"conflict","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
-- Write checkpoint result to {scratchDir}/checkpoint-result.json with \`"outcome": "conflict_found"\`
-- Create metadata at {scratchDir}/checkpoint-result.json.meta: {"artifact":"checkpoint","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
-
-### spec_auto_fixed
-Found an unambiguous mistake and fixed it.
-- Edit {specPath} directly
-- Write checkpoint result to {scratchDir}/checkpoint-result.json with \`"outcome": "spec_auto_fixed"\`
-- Create metadata at {scratchDir}/checkpoint-result.json.meta: {"artifact":"checkpoint","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
-
-### spec_compressed
-No conflict, no fix needed, progress > 60%.
-- Compress spec to remaining work: remove completed items, keep partial/incomplete ones
-- Update {specPath} with compressed spec
-- Write checkpoint result to {scratchDir}/checkpoint-result.json with \`"outcome": "spec_compressed"\`
-- Create metadata at {scratchDir}/checkpoint-result.json.meta: {"artifact":"checkpoint","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
-
-### no_action
-No conflict, no fix, progress <= 60%.
-- Write checkpoint result to {scratchDir}/checkpoint-result.json with \`"outcome": "no_action"\`
-- Create metadata at {scratchDir}/checkpoint-result.json.meta: {"artifact":"checkpoint","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
-
-## Checkpoint Result JSON
-
-Write to {scratchDir}/checkpoint-result.json:
-\`\`\`json
-{
-  "outcome": "conflict_found" | "spec_auto_fixed" | "spec_compressed" | "no_action",
-  "summary": "Brief description",
-  "progressPercent": 75,
-  "completedCriteria": ["criterion 1"],
-  "remainingCriteria": ["criterion 2"]
-}
-\`\`\`
-
-If conflict_found, also write {scratchDir}/conflict.md with conflict analysis details.
-If spec_auto_fixed or spec_compressed, edit {specPath} directly.`;
-
-const DEFAULT_KLOOP_SYNTHESIZER_PROMPT = `# Synthesis Task
-
-## Context
-
-You are a review synthesizer. Your job is to compact all raw reviews from loop {iteration} into a single structured summary that replaces the raw reviews as input for the next loop.
-
-## Specification
-
-Read the spec from: {specPath}
-
-## Your Task
-
-1. Read all raw reviews from {reviewsDir}/reviewer-*.md
-2. Read all verdicts from {verdictsDir}/reviewer-*.json
-3. If verifier verdicts exist ({verdictsDir}/verifier-*.json), read them to capture issues found during verify gate
-4. If a previous summary exists at {previousSummaryPath}, read it to track resolved issues
-5. Check {evidenceDir}/ for build/test evidence
-6. Read {learningsFile} for context on the implementer's decisions
-
-## Update Learnings
-
-After reading all reviews and verdicts, update {learningsFile} by:
-- Adding new insights about what works and what doesn't
-- Compressing/compacting previous learnings if the file is getting long
-- Recording patterns in reviewer feedback (e.g., "multiple reviewers flagged X", "issue Y resolved after Z approach")
-
-## Output
-
-Write all output files to {scratchDir}/ with the naming convention:
-  {artifactType}-{qualifier}.{ext}        (content file)
-  {artifactType}-{qualifier}.{ext}.meta   (metadata file)
-
-The metadata file must be a single-line JSON object:
-  {"artifact":"<type>","role":"synthesizer","runId":"<runId>","loop":{loop},"timestamp":"<ISO-8601>"}
-
-Write the .meta file LAST — it signals that the content file is complete.
-
-Write a structured summary to {scratchDir}/synthesis-review-summary.md with the following format:
-
-### Confirmed Complete
-- List spec items that ALL reviewers agree are fully implemented (with reviewer attribution)
-
-### Issues Requiring Action
-Group by severity:
-- **CRITICAL**: Issues that block spec acceptance (missing features, broken tests, security issues)
-- **HIGH**: Significant issues that need fixing (incomplete implementation, poor quality)
-- **LOW**: Minor issues, suggestions, or style preferences
-
-For each issue, include:
-- Description of the issue
-- Which reviewer(s) flagged it
-- Specific file/line references where applicable
-
-### Resolved Since Previous Loop
-- Issues from the previous summary that are now resolved (with evidence)
-
-### Progress Estimate
-- Overall completion percentage
-- Brief assessment of remaining work
-
-## Rules
-
-- Deduplicate: if multiple reviewers flag the same issue, mention it once with all attributions
-- Be objective: only include issues with clear evidence
-- Preserve reviewer intent: don't soften a CRITICAL issue to HIGH just because other reviewers didn't notice it
-- If the implementer documented their rationale in {evidenceDir}/addressed-reviews.md, read it and consider their reasoning when evaluating issues
-
-Create metadata at {scratchDir}/synthesis-review-summary.md.meta:
-{"artifact":"synthesis","role":"synthesizer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}`;
-
-const DEFAULT_KLOOP_VERIFIER_PROMPT = `# Verify Task
-
-## Context
-
-You are Verifier {verifierIndex} for loop {iteration}. A previous loop produced a review summary with issues requiring action. Your job is to verify whether those issues have actually been fixed.
-
-## Specification
-
-Read the spec from: {specPath}
-
-## Output Protocol
-
-Write all output files to {scratchDir}/ with the naming convention:
-  {artifactType}-{qualifier}.{ext}        (content file)
-  {artifactType}-{qualifier}.{ext}.meta   (metadata file)
-
-The metadata file must be a single-line JSON object:
-  {"artifact":"<type>","role":"verifier","index":{verifierIndex},"runId":"<runId>","loop":{loop},"timestamp":"<ISO-8601>"}
-
-Write the .meta file LAST — it signals that the content file is complete.
-
-## Your Task
-
-1. Read the previous review summary from {previousSummaryPath}
-2. Focus on the "Issues Requiring Action" section
-3. For each CRITICAL and HIGH issue:
-   a. Check the current code via \`git diff\` and \`git diff --staged\`
-   b. Check {evidenceDir}/ for build/test evidence
-   c. Check {evidenceDir}/addressed-reviews.md for the implementer's response
-   d. Determine if the issue is fixed or remains
-
-4. Write your verdict to {scratchDir}/verdict-verifier-{verifierIndex}.json:
-\`\`\`json
-{
-  "approved": true/false,
-  "reasoning": "Your detailed reasoning here",
-  "issuesFixed": ["issue 1 description", "issue 2 description"],
-  "issuesRemaining": ["issue 3 description"]
-}
-\`\`\`
-Create metadata at {scratchDir}/verdict-verifier-{verifierIndex}.json.meta:
-{"artifact":"verdict","role":"verifier","index":{verifierIndex},"runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
-
-## Verdict Criteria
-
-- **APPROVE** if all CRITICAL and HIGH issues are fixed (LOW issues remaining is OK)
-- **REJECT** if any CRITICAL issue remains unfixed
-- **APPROVE** if only LOW issues remain
-
-## Learnings
-
-Check {learningsFile} for context on the implementer's decisions this iteration.`;
-
-const DEFAULT_KLOOP_RE_SYNTHESIS_PROMPT = `# Re-Synthesis Task
-
-## Context
-
-You are a re-synthesizer for loop {iteration}. The verify gate found that some issues from the previous loop's review summary remain unfixed. Your job is to produce an updated review summary that carries forward the previous summary's content plus the verifiers' findings.
-
-## Specification
-
-Read the spec from: {specPath}
-
-## Your Task
-
-1. Read the previous review summary from {previousSummaryPath}
-2. Read verifier outputs from {verifyDir}/verifier-*/
-3. Read verifier verdicts from {verdictsDir}/verifier-*.json — these contain \`issuesFixed\` and \`issuesRemaining\` arrays
-4. Read {learningsFile} for context on the implementer's decisions
-
-## Output
-
-Write all output files to {scratchDir}/ with the naming convention:
-  {artifactType}-{qualifier}.{ext}        (content file)
-  {artifactType}-{qualifier}.{ext}.meta   (metadata file)
-
-The metadata file must be a single-line JSON object:
-  {"artifact":"<type>","role":"synthesizer","runId":"<runId>","loop":{loop},"timestamp":"<ISO-8601>"}
-
-Write the .meta file LAST — it signals that the content file is complete.
-
-Write an updated summary to {scratchDir}/synthesis-review-summary.md with the same structure as the previous summary:
-
-### Confirmed Complete
-- Carry forward items from the previous summary
-- Add any items that verifiers confirmed as fixed
-
-### Issues Requiring Action
-Group by severity (CRITICAL/HIGH/LOW):
-- Carry forward issues that verifiers confirmed as still remaining
-- Remove issues that verifiers confirmed as fixed
-- If a verifier found NEW issues not in the previous summary, add them
-
-### Resolved Since Previous Loop
-- Move issues from "Issues Requiring Action" that verifiers confirmed as fixed
-
-### Progress Estimate
-- Update the overall completion percentage based on verifier findings
-- Brief assessment of remaining work
-
-## Update Learnings
-
-After processing, update {learningsFile} with:
-- Which issues were fixed vs which remain
-- Any patterns in what keeps failing
-
-## Rules
-
-- This is a LIGHTWEIGHT synthesis — you are merging structured data, not re-reading raw reviews
-- Preserve the previous summary's structure and severity levels
-- Only change issue status based on verifier evidence, not speculation
-
-Create metadata at {scratchDir}/synthesis-review-summary.md.meta:
-{"artifact":"synthesis","role":"synthesizer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
-- If verifiers disagree on whether an issue is fixed, keep it in "Issues Requiring Action"`;
-
-export interface KloopPrompts {
-  implementer?: string;
-  reviewer?: string;
-  checkpointer?: string;
-  checkpointerFull?: string;
-  synthesizer?: string;
-  verifier?: string;
-  reSynthesizer?: string;
-}
-
-const kloopPromptsSchema = z
-  .object({
-    implementer: z.string().optional(),
-    reviewer: z.string().optional(),
-    checkpointer: z.string().optional(),
-    checkpointerFull: z.string().optional(),
-    synthesizer: z.string().optional(),
-    verifier: z.string().optional(),
-    reSynthesizer: z.string().optional(),
-  })
-  .optional();
-
-export interface KloopImplementerRetry {
-  maxRetries: number;
-  backoffBaseMs: number;
-}
-
-export interface KloopConfig {
-  implementers: Record<string, number>;
-  reviewPhases: string[][];
-  conflictChecker?: string;
-  maxIterations: number;
-  implementerTimeout: number;
-  reviewerTimeout: number;
-  conflictCheckThreshold: number;
-  compressSpec: boolean;
-  firstLoopFullReview: boolean;
-  previousReviewPropagation: number;
-  synthesizer?: string;
-  synthesis: boolean;
-  synthesisTimeout: number;
-  verify: boolean;
-  verifyPhases: string[][];
-  verifyTimeout: number;
-  rerankAfterCheckpoint: boolean;
-  implementerRetry: KloopImplementerRetry;
-  firstIterationWeightMultiplier: number;
-  prompts?: KloopPrompts;
-}
-
-const kloopConfigSchema = z
-  .object({
-    implementers: z.record(z.string(), z.number()).default({ claude: 1 }),
-    reviewPhases: z.array(z.array(z.string())).default([['claude']]),
-    conflictChecker: z.string().optional(),
-    maxIterations: z.number().min(1).max(100).default(7),
-    implementerTimeout: z.number().min(1).max(120).default(30),
-    reviewerTimeout: z.number().min(1).max(120).default(15),
-    conflictCheckThreshold: z.number().min(1).max(10).default(3),
-    compressSpec: z.boolean().default(false),
-    firstLoopFullReview: z.boolean().default(true),
-    previousReviewPropagation: z.number().min(0).max(1).default(0.7),
-    synthesizer: z.string().min(1).optional(),
-    synthesis: z.boolean().default(true),
-    synthesisTimeout: z.number().min(0.001).max(120).default(15),
-    verify: z.boolean().default(true),
-    verifyPhases: z.array(z.array(z.string())).default([['claude:claude']]),
-    verifyTimeout: z.number().min(0.001).max(120).default(5),
-    rerankAfterCheckpoint: z.boolean().default(true),
-    implementerRetry: z
-      .object({
-        maxRetries: z.number().min(0).max(10).default(2),
-        backoffBaseMs: z.number().min(0).default(5000),
-      })
-      .default({ maxRetries: 2, backoffBaseMs: 5000 }),
-    firstIterationWeightMultiplier: z.number().min(1).max(1000).default(2),
-    prompts: kloopPromptsSchema,
-  })
-  .default({});
-
-// ============================================================================
-// Config
-// ============================================================================
+export type { SessionStatus } from './status';
 
 // ============================================================================
 // Reviewer Schema
@@ -629,8 +29,6 @@ const kloopConfigSchema = z
 export const reviewerSchema = z.object({
   desc: z.string(),
   prompt: z.string(),
-  binaries: z.array(z.string()).optional(),
-  timeout: z.number().optional(),
 });
 
 export type ReviewerConfig = z.infer<typeof reviewerSchema>;
@@ -641,7 +39,6 @@ export type ReviewerConfig = z.infer<typeof reviewerSchema>;
 
 const agentSchema = z.object({
   prompt: z.string(),
-  binary: z.string().optional(),
 });
 
 // ============================================================================
@@ -650,20 +47,28 @@ const agentSchema = z.object({
 
 const DEFAULT_TRIAGE_TEMPLATE = `# Triage: {title}
 
-## Delivery Kind
-pr | ticket
-
 ## Complexity
 straightforward | moderate | complex
+
+## Repo Set & Dependency Order
+[Which repos this task touches and their order, e.g. "api, infra (infra depends on api)", or "single repo"]
 
 ## Assessment
 [2-5 sentence summary of what needs to happen]
 
+## Things to Check
+[Checklist for the spec/plan phase — files/areas to read and confirm, dependencies/usages
+ to trace, tests that may break, shared state touched. List them; do NOT resolve them here.]
+
+## Open Questions
+[Ambiguities or decisions the ticket leaves open, for the user / spec phase to answer.
+ List them — do NOT answer them here. Or "None — the ticket is unambiguous."]
+
 ## Clarifications
-[Any points clarified with the user, or "None needed"]
+[Any points already clarified with the user during triage, or "None needed"]
 
 ## Risks
-[Risk factors with specific evidence, or "Low risk" with justification]
+[Likely risk factors to confirm, or "Low risk" with justification]
 
 ## Verification
 
@@ -829,28 +234,31 @@ const DEFAULT_PLAN_TEMPLATE = `# Plan {N}: {title}
 // Default prompt constants for Phase 1
 // ============================================================================
 
-const DEFAULT_TRIAGE_PROMPT = `You are triaging a ticket for kautopilot. Read the ticket at {ticket} and do **thorough** codebase exploration to assess scope and risk.
+const DEFAULT_TRIAGE_PROMPT = `You are triaging a ticket for kautopilot. Read the ticket at {ticket} and take a quick look at the codebase — only enough to scope and classify it.
 
-Your job is to classify this ticket, NOT to solve it or write implementation details.
+Your job is to CLASSIFY and SCOPE this ticket, and to LIST what must be checked and what questions remain. You do NOT solve it, investigate deeply, verify assumptions, or answer the open questions yourself — the spec and plan phases (and the user) do that. Triage outputs a checklist and a question list, not findings.
 
-## Research Before Assessing
+## Scope & classify (quick assessment — do NOT investigate deeply)
 
-Do NOT guess at risk or complexity. Before writing your assessment:
-- **Read the relevant code** — find the files that will be touched, understand the current implementation
-- **Trace dependencies** — grep for usages of functions/types/configs being changed; understand blast radius
-- **Check for tests** — are there existing tests covering the affected code? Will they break?
-- **Look at recent changes** — git log the affected files to understand velocity and stability
-- **Identify shared state** — does this touch database schemas, API contracts, shared configs, or public interfaces?
+Name the files/areas you SUSPECT are involved (from the ticket plus a light look) and flag them for the spec phase to confirm. Do not exhaustively read code, trace every usage, or run tools.
+- **Complexity** — straightforward | moderate | complex; rough count of moving parts / files likely touched.
+- **Repo set + dependency order** — which repos this touches and their order.
+- **Parallelizability** — can this split into independent streams of work.
+- **Risk factors** — likely blast radius, backward compatibility, data migration (to be confirmed later).
+- **Manual work** — infra changes, config deployments, manual verification likely needed.
 
-## Evaluate (with evidence)
+## Things to Check (LIST them — do NOT perform the checks)
 
-For each evaluation point, cite specific files, functions, or patterns you found:
-- **Complexity** — how many moving parts, how many files likely touched. Name the files.
-- **Parallelizability** — can this be split into independent streams of work
-- **Risk factors** — blast radius, backward compatibility, data migration. Be specific: "changing X in file Y affects Z callers"
-- **Manual work** — infra changes, config deployments, manual verification needed
-- **Known/unknown ratio** — is the approach clear or does it need research first
-- **Disambiguate with user** — if the ticket is vague or under-specified, firm it up through conversation. If you are unsure about the risk level, ASK the user for input rather than defaulting to low risk.
+Every item here is work for the spec/plan phase, not for you now:
+- Files/areas to read and confirm are in scope.
+- Dependencies/usages whose blast radius must be traced.
+- Tests that may be affected — do they exist, will they break?
+- Shared state possibly touched — DB schemas, API contracts, shared configs, public interfaces.
+- Recent-change / stability concerns worth a git-log check.
+
+## Open Questions (LIST them — do NOT answer them)
+
+List every ambiguity, decision, or unknown the ticket leaves open. Surface them — do not resolve them yourself. Raise the blocking ones with the user during this triage; defer the rest to the spec phase.
 
 ## Risk Assessment Guidelines
 
@@ -884,16 +292,16 @@ it MUST be. Describe what to validate, not how.
 ## User Approval
 
 After writing your triage assessment to the file, present a clear summary to the user showing:
-1. The delivery kind and complexity you chose
-2. Key risks identified (or why you believe risk is low)
-3. Ask the user to confirm before you log the approval event. Do NOT auto-approve.`;
+1. The complexity you chose
+2. The repo set + dependency order
+3. Key risks identified (or why you believe risk is low)
+Ask the user to confirm before approval. Do NOT auto-approve.`;
 
 const DEFAULT_SPEC_WRITER_PROMPT = `You are writing a spec for a kautopilot task. Read the ticket at {ticket} and the triage assessment at {triage}.
 
 Based on the triage assessment:
 - **If triage says "straightforward"**: write a focused, concise spec. No heavy debate. Cover what to change, acceptance criteria, and proof of completion.
 - **If triage says "moderate" or "complex"**: do thorough exploration and debate. Walk through requirements, identify hidden assumptions, conflicts, and risks. Clarify until nothing is ambiguous.
-- **If delivery kind is "ticket"**: spec the research or decomposition, NOT the implementation.
 
 Explore the codebase to ground your spec in reality. Reference actual files, functions, and patterns.
 
@@ -945,56 +353,40 @@ const phase1AgentsSchema = z.object({
   triage: agentSchema,
   spec_writer: agentSchema,
   plan_writer: agentSchema,
-  spec_reviewers: z.record(z.string(), reviewerSchema).default({}),
-  plan_reviewers: z.record(z.string(), reviewerSchema).default({}),
+  spec_reviewers: z.record(z.string(), reviewerSchema),
+  plan_reviewers: z.record(z.string(), reviewerSchema),
 });
 
 export const configSchema = z.object({
-  claude_binary: z.string().default('claude'),
   agents: z.object({
-    init: z.record(z.string(), agentSchema).default({}),
     phase1: phase1AgentsSchema,
-    phase2: z.record(z.string(), agentSchema).default({}),
-    phase3: z.record(z.string(), agentSchema).default({}),
-    generic: z.record(z.string(), agentSchema).default({}),
+    phase2: z.record(z.string(), agentSchema),
+    phase3: z.record(z.string(), agentSchema),
+    generic: z.record(z.string(), agentSchema),
   }),
-  templates: z
-    .object({
-      triage: z.string().default(DEFAULT_TRIAGE_TEMPLATE),
-      spec: z.string().default(DEFAULT_SPEC_TEMPLATE),
-      plan: z.string().default(DEFAULT_PLAN_TEMPLATE),
-    })
+  templates: z.object({
+    triage: z.string(),
+    spec: z.string(),
+    plan: z.string(),
+  }),
+  settings: z.object({
+    maxPushCycles: z.number().min(1).max(20),
+    pollInterval: z.number().min(1).max(300),
+    coderabbit: z.boolean(),
+    maxParallelRepos: z.number().min(1).max(10).default(2),
+    runMode: z.enum(['current-session', 'sub-agent']).default('current-session'),
+    execMode: z.enum(['kloop', 'sub-agent']).default('kloop'),
+  }),
+  orgs: z
+    .record(
+      z.string(),
+      z.object({
+        ticketSystem: z.enum(['jira', 'clickup', 'none']),
+        commitSpec: z.boolean(),
+        baseBranch: z.string(),
+      }),
+    )
     .default({}),
-  kloop: kloopConfigSchema,
-  settings: z
-    .object({
-      maxPushCycles: z.number().min(1).max(20).default(10),
-      pollInterval: z.number().min(1).max(300).default(5),
-      defaultLlmTimeout: z.number().min(10).max(600).default(300),
-      evalTimeout: z.number().min(10).max(600).default(300),
-      coderabbit: z.boolean().default(true),
-      removeSpecOnPush: z.boolean().default(false),
-    })
-    .default({
-      maxPushCycles: 10,
-      pollInterval: 5,
-      defaultLlmTimeout: 300,
-      evalTimeout: 300,
-      coderabbit: true,
-      removeSpecOnPush: false,
-    }),
-  repo: z
-    .object({
-      org: z.string().optional(),
-      baseBranch: z.string().default('main'),
-      ticketSystem: z.string().nullable().default(null),
-      prComment: z.string().nullable().default(null),
-    })
-    .default({
-      baseBranch: 'main',
-      ticketSystem: null,
-      prComment: null,
-    }),
 });
 
 export type Config = z.infer<typeof configSchema>;
@@ -1002,111 +394,6 @@ export type Config = z.infer<typeof configSchema>;
 // ============================================================================
 // Default prompt strings (extracted from hardcoded values)
 // ============================================================================
-
-const DEFAULT_LOCAL_INIT_PROMPT = `You are setting up a task for kautopilot. Please:
-1. Understand what this project needs (look at the codebase)
-2. Write the ticket description to ~/.kautopilot/{sessionId}/artifacts/ticket.md
-3. Write the task spec to ~/.kautopilot/{sessionId}/artifacts/v1/task-spec.md
-4. Write implementation plans to ~/.kautopilot/{sessionId}/artifacts/v1/plans/plan-1.md
-
-The ticket.md should describe the problem. The task-spec should describe the solution. Plans should be concrete steps.`;
-
-const DEFAULT_RESEARCH_TICKET_SYSTEM_PROMPT = `Research this task/ticket system: "{taskSystem}"
-
-Generate a concise research doc covering:
-
-a) What is it? (brief description)
-
-b) Access methods — does it have:
-   - A CLI tool? (name, install method)
-   - A REST/GraphQL API? (base URL, auth method)
-   - An MCP server? (package name, setup)
-   - What is the standard/recommended way to interact with it programmatically?
-   List ALL options with their pros/cons.
-
-c) Structure/hierarchy:
-   - How is work organized? (spaces → folders → lists, or projects → epics → stories, etc.)
-   - What is the typical ticket/task hierarchy?
-
-d) Ticket transitions:
-   - How do status transitions work?
-   - Are they simple (just set status) or complex (must follow workflow, use transition IDs)?
-   - What are the typical states?
-   - Are there restrictions on which transitions are valid?
-
-Detected CLI tools on this system:
-{detectedInfo}
-
-Keep it factual and concise. Output as markdown.`;
-
-const DEFAULT_RESEARCH_SETUP_PROMPT = `The user needs to set up access to "{taskSystem}" but it may be partially configured or not authenticated yet.
-
-Access hint from the user: {accessMethod}
-
-Based on the research above, propose the simplest setup path.
-
-1. What is the recommended access method? (CLI, API token, MCP server)
-2. Give step-by-step setup instructions
-3. How to verify it works (test command)
-4. If the user already has the CLI installed, include auth/context checks before assuming it works
-
-Keep it concise and actionable.`;
-
-const DEFAULT_CREATE_SCRIPTS_PROMPT = `You are creating ticket integration scripts for kautopilot.
-
-## Context
-Ticketing system: {taskSystem}
-Access method: {accessMethod}
-State mapping: {stateMapping}
-{transitionNoOp}
-Current branch: {branch}
-Scripts dir: {scriptsDir}
-{quirks}
-Setup assessment: {setupAssessment}
-
-## Research Doc (from earlier research)
-{researchDoc}
-
-Detected CLI tools:
-{detectedInfo}
-
-## Create Scripts
-
-Create these scripts:
-{scriptList}
-{optionalScripts}
-
-Script requirements:
-- All scripts must be executable bash scripts (#!/usr/bin/env bash)
-- Use set -euo pipefail for robustness
-- extract-ticket: parse branch name to extract ticket ID
-  - Current branch: "{branch}"
-- get-ticket: output markdown content of the ticket
-- Transition scripts:
-  - Research how transitions work for this specific system
-  - If transitions are complex (e.g., Jira workflows), use the correct transition IDs
-  - Verify auth and project/site context are working before using API/CLI calls
-  - For Jira/Atlassian CLI, do not guess workflow names or transition IDs; discover them first or fall back to a clear no-op with explanation
-
-## Test
-
-IMPORTANT: Test each script for real.
-
-1. Test extract-ticket:
-   echo "{branch}" | {scriptsDir}/extract-ticket
-2. Test get-ticket with the extracted ID:
-   {scriptsDir}/get-ticket <ticket-id>
-3. Test transition scripts (if not no-ops):
-   - Transition the ticket, verify it moved, then revert it back
-   - Do NOT leave tickets in a wrong state
-
-## Report
-
-Output a SUMMARY with:
-- Script name, Status (CREATED / NO-OP / FAILED), what you tried, test result
-- If failed: why and how the user can fix it
-
-NEVER leave a broken script — either it works or it is a no-op.`;
 
 // ============================================================================
 // Shared Commit Agent Prompt
@@ -1138,30 +425,8 @@ const DEFAULT_COMMIT_PROMPT = `You are committing code changes in a repository. 
 
 {context}`;
 
-// Legacy export for backward compatibility - prefer getAgentPrompt('generic', 'commit')
-export const COMMIT_AGENT_PROMPT = DEFAULT_COMMIT_PROMPT;
-
 export const DEFAULT_CONFIG: Config = {
-  claude_binary: 'claude',
   agents: {
-    init: {
-      localInit: {
-        // Available vars: {sessionId}
-        prompt: DEFAULT_LOCAL_INIT_PROMPT,
-      },
-      researchTicketSystem: {
-        // Available vars: {taskSystem}, {detectedInfo}
-        prompt: DEFAULT_RESEARCH_TICKET_SYSTEM_PROMPT,
-      },
-      researchSetup: {
-        // Available vars: {taskSystem}, {accessMethod}
-        prompt: DEFAULT_RESEARCH_SETUP_PROMPT,
-      },
-      createScripts: {
-        // Available vars: {taskSystem}, {accessMethod}, {stateMapping}, {transitionNoOp}, {branch}, {scriptsDir}, {quirks}, {setupAssessment}, {researchDoc}, {detectedInfo}, {scriptList}, {optionalScripts}
-        prompt: DEFAULT_CREATE_SCRIPTS_PROMPT,
-      },
-    },
     phase1: {
       // Available vars: {ticket} — file path, NOT inlined content
       // Mechanics prepended by handler: TRIAGE_MECHANICS (output file, approval gate)
@@ -1318,8 +583,6 @@ Read these to understand the original intent before proposing a strategy.`,
 
 {kloop_evidence}`,
       },
-      // NOTE: 'commit' uses shared COMMIT_AGENT_PROMPT directly (not in config)
-      // Handlers import COMMIT_AGENT_PROMPT and build prompt with {context} var
     },
     phase3: {
       eval: {
@@ -1334,8 +597,6 @@ Mark items as ambiguous when you're unsure rather than guessing.`,
 Deduplicate overlapping fixes on the same file.
 Output the complete spec (not just the changes).`,
       },
-      // NOTE: 'commit_pending' uses shared COMMIT_AGENT_PROMPT directly (not in config)
-      // Handlers import COMMIT_AGENT_PROMPT and build prompt with {context} var
       prereview_classify: {
         // Available vars: none — content is prepended by handler
         prompt: `Classify CodeRabbit findings as fix/comment/ignore.
@@ -1407,48 +668,21 @@ Discuss the PR with the user. Figure out:
     spec: DEFAULT_SPEC_TEMPLATE,
     plan: DEFAULT_PLAN_TEMPLATE,
   },
-  kloop: {
-    implementers: { claude: 1 },
-    reviewPhases: [['claude']],
-    conflictChecker: 'claude',
-    maxIterations: 7,
-    implementerTimeout: 30,
-    reviewerTimeout: 15,
-    conflictCheckThreshold: 3,
-    compressSpec: false,
-    firstLoopFullReview: true,
-    previousReviewPropagation: 0.7,
-    synthesizer: 'claude',
-    synthesis: true,
-    synthesisTimeout: 15,
-    verify: true,
-    verifyPhases: [['claude:claude']],
-    verifyTimeout: 5,
-    rerankAfterCheckpoint: true,
-    implementerRetry: { maxRetries: 2, backoffBaseMs: 5000 },
-    firstIterationWeightMultiplier: 2,
-    prompts: {
-      implementer: DEFAULT_KLOOP_IMPLEMENTER_PROMPT,
-      reviewer: DEFAULT_KLOOP_REVIEWER_PROMPT,
-      checkpointer: DEFAULT_KLOOP_CHECKPOINTER_PROMPT,
-      checkpointerFull: DEFAULT_KLOOP_CHECKPOINTER_FULL_PROMPT,
-      synthesizer: DEFAULT_KLOOP_SYNTHESIZER_PROMPT,
-      verifier: DEFAULT_KLOOP_VERIFIER_PROMPT,
-      reSynthesizer: DEFAULT_KLOOP_RE_SYNTHESIS_PROMPT,
-    },
-  },
   settings: {
     maxPushCycles: 10,
     pollInterval: 60,
-    defaultLlmTimeout: 300,
-    evalTimeout: 300,
     coderabbit: true,
-    removeSpecOnPush: false,
+    maxParallelRepos: 2,
+    runMode: 'current-session',
+    execMode: 'kloop',
   },
-  repo: {
-    baseBranch: 'main',
-    ticketSystem: null,
-    prComment: null,
+  orgs: {
+    liftoff: { ticketSystem: 'jira', commitSpec: false, baseBranch: 'master' },
+    atomicloud: {
+      ticketSystem: 'clickup',
+      commitSpec: true,
+      baseBranch: 'main',
+    },
   },
 };
 
@@ -1502,58 +736,10 @@ export interface CheckStatus {
 }
 
 // ============================================================================
-// Delivery Kind & Contract Model
-// ============================================================================
-
-export type DeliveryKind = 'pr' | 'ticket';
-
-export interface ContractManifest {
-  version: number;
-  deliveryKind: DeliveryKind;
-  specFile: string;
-  planCount: number;
-  createdAt: string;
-  supersededBy?: number;
-  supersededAt?: string;
-}
-
-export interface PlanManifest {
-  plans: Array<{
-    ordinal: number;
-    activeRewrite: number;
-    file: string;
-    completed: boolean;
-    commitSha?: string;
-  }>;
-}
-
-export interface DeliveryManifest {
-  kind: DeliveryKind;
-  prNumber?: number;
-  prUrl?: string;
-  prRolloverHistory?: Array<{
-    fromPr: number;
-    toPr: number;
-    reason: string;
-    timestamp: string;
-  }>;
-  ticketArtifacts?: string[];
-  publishedAt?: string;
-}
-
-// ============================================================================
 // Phase Constants
 // ============================================================================
 
-export const PHASES = ['plan', 'implementation', 'polish'] as const;
-export type Phase = (typeof PHASES)[number];
-
-export const PHASE_ALIASES: Record<string, Phase> = {
-  plan: 'plan',
-  impl: 'implementation',
-  implementation: 'implementation',
-  polish: 'polish',
-};
+export type Phase = 'plan' | 'implementation' | 'polish';
 
 // ============================================================================
 // Lock File
@@ -1563,5 +749,4 @@ export interface LockInfo {
   locked: boolean;
   pid: number;
   alive: boolean;
-  zellijAlive: boolean;
 }

@@ -12,6 +12,10 @@ trivialBuilders.writeShellApplication {
     [
       awscli2
       coreutils
+      gnused
+      jq
+      oci-cli
+      tailscale
       yq-go
     ]
   ) ++ [ k8s-merge ];

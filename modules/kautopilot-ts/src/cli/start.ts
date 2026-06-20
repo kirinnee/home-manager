@@ -1,430 +1,176 @@
-import { spawnSync as nodeSpawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { isCancel, select } from '@clack/prompts';
 import { Command } from 'commander';
-import { sessionDir } from '../core/artifacts';
-import { readConfig } from '../core/config';
-import { discoverConfigDirs } from '../core/config-dir';
-import { getSessionByWorktree } from '../core/db';
 import { getGitRoot, getWorktree } from '../core/git';
-import { acquireLock, checkLock, releaseLock } from '../core/lock';
-import { appendEvent } from '../core/log';
-import { supersedEpoch } from '../core/manifests';
-import { detectAndRecoverCrash, ensureStatus } from '../core/status';
-import type { Phase } from '../core/types';
-import { PHASE_ALIASES } from '../core/types';
-import { zellijSessionName } from '../core/zellij';
-import { type PhaseResult, runPhase } from '../phases/runner';
-import { logError, logField, logInfo, logWarn } from '../util/format';
+import { createSession } from '../core/session-create';
+import { detectOrgFromTicket, type ExecMode, isOrg, type Lpsm, ORGS, type Org } from '../core/session-meta';
+import { logError, logField, logInfo } from '../util/format';
 
-/** Map internal phase names to canonical WAL event names */
-const PHASE_EVENT_NAME: Record<Phase, string> = {
-  plan: 'phase1',
-  implementation: 'phase2',
-  polish: 'phase3',
-};
+// ============================================================================
+// `kautopilot start [TICKET_ID | "request"]` — thin convenience. It resolves the
+// org (--org → ticket → ask), creates the host-driven session, and hands off to
+// the controller (the /kautopilot skill drives `next`/`complete`). There is NO
+// self-driving loop and NO `claude -p` / TTY spawn from the binary. (SPEC §13 #2)
+// ============================================================================
 
 export function createStartCommand(): Command {
   return new Command('start')
-    .option('--phase <phaseOrStep>', 'Force start at specific phase or step')
-    .option('--local', 'Local mode')
-    .option('--force', 'Bypass lock and running-state guard (use with caution)')
-    .action(async (opts: { phase?: string; local?: boolean; force?: boolean }) => {
-      try {
-        await runStartZellij(opts);
-      } catch (err) {
-        logError(err instanceof Error ? err.message : String(err));
-        process.exit(1);
-      }
-    });
+    .description('Initialize a host-driven session (ticket or free-form request)')
+    .argument('[task]', 'Ticket id (e.g. PE-1234) or a free-form request in quotes')
+    .option('--org <org>', 'Org: liftoff | atomicloud')
+    .option('--exec <mode>', 'Execution mode: kloop | sub-agent')
+    .option('--max-repos <n>', 'Max parallel repos', v => Number.parseInt(v, 10))
+    .option('--landscape <l>', 'AtomiCloud LPSM landscape/environment (atomicloud-only)')
+    .option('--cluster <c>', 'AtomiCloud LPSM cluster (atomicloud-only)')
+    .option('--platform <p>', 'AtomiCloud LPSM platform/namespace (atomicloud-only)')
+    .option('--service <s>', 'AtomiCloud LPSM service/repo (atomicloud-only)')
+    .option('--module <m>', 'AtomiCloud LPSM module (atomicloud-only)')
+    .option(
+      '--tag <t>',
+      'Free-form session tag (repeatable)',
+      (v: string, acc: string[]) => [...acc, v],
+      [] as string[],
+    )
+    .action(
+      async (
+        task: string | undefined,
+        opts: {
+          org?: string;
+          exec?: string;
+          maxRepos?: number;
+          landscape?: string;
+          cluster?: string;
+          platform?: string;
+          service?: string;
+          module?: string;
+          tag?: string[];
+        },
+      ) => {
+        try {
+          await runStart(task, opts);
+        } catch (err) {
+          logError(err instanceof Error ? err.message : String(err));
+          process.exit(1);
+        }
+      },
+    );
 }
 
-export function createInternalStartCommand(): Command {
-  return new Command('internal-start')
-    .option('--phase <phaseOrStep>', 'Force start at specific phase or step')
-    .option('--local', 'Local mode')
-    .option('--force', 'Bypass lock and running-state guard (use with caution)')
-    .action(async (opts: { phase?: string; local?: boolean; force?: boolean }) => {
-      try {
-        await runStart(opts);
-      } catch (err) {
-        logError(err instanceof Error ? err.message : String(err));
-        process.exit(1);
-      }
-    });
+function looksLikeTicketId(task: string): boolean {
+  // A short token with no spaces is treated as a ticket id; quoted prose is a request.
+  return !/\s/.test(task) && task.length <= 40;
 }
 
-async function runStartZellij(opts: { phase?: string; local?: boolean; force?: boolean }): Promise<void> {
-  // Check if zellij is available
-  const which = Bun.spawnSync(['which', 'zellij']);
-  if (which.exitCode !== 0) {
-    logWarn('zellij not found — running directly without session management');
-    await runStart(opts);
-    return;
+async function resolveOrg(ticketId: string | null, orgArg?: string): Promise<Org> {
+  if (orgArg) {
+    if (!isOrg(orgArg)) throw new Error(`Unknown org: ${orgArg}. Use liftoff | atomicloud.`);
+    return orgArg;
+  }
+  if (ticketId) {
+    const detected = detectOrgFromTicket(ticketId);
+    if (detected) {
+      logInfo(`Detected org '${detected}' from ticket ${ticketId}.`);
+      return detected;
+    }
+  }
+  if (!process.stdout.isTTY) {
+    throw new Error('Org could not be resolved. Pass --org liftoff|atomicloud.');
+  }
+  const picked = await select({
+    message: 'Which org is this task for? (Determines the ticket system and commit-spec policy.)',
+    options: ORGS.map(o => ({ value: o, label: o })),
+  });
+  if (isCancel(picked)) throw new Error('Cancelled.');
+  return picked as Org;
+}
+
+/** Build an LPSM object from whichever flags are set, or undefined if none. */
+function buildLpsm(opts: {
+  landscape?: string;
+  cluster?: string;
+  platform?: string;
+  service?: string;
+  module?: string;
+}): Lpsm | undefined {
+  const lpsm: Lpsm = {};
+  if (opts.landscape) lpsm.landscape = opts.landscape;
+  if (opts.cluster) lpsm.cluster = opts.cluster;
+  if (opts.platform) lpsm.platform = opts.platform;
+  if (opts.service) lpsm.service = opts.service;
+  if (opts.module) lpsm.module = opts.module;
+  return Object.keys(lpsm).length > 0 ? lpsm : undefined;
+}
+
+async function runStart(
+  task: string | undefined,
+  opts: {
+    org?: string;
+    exec?: string;
+    maxRepos?: number;
+    landscape?: string;
+    cluster?: string;
+    platform?: string;
+    service?: string;
+    module?: string;
+    tag?: string[];
+  },
+): Promise<void> {
+  const ticketId = task && looksLikeTicketId(task) ? task : null;
+  const org = await resolveOrg(ticketId, opts.org);
+
+  let execMode: ExecMode | undefined;
+  if (opts.exec !== undefined) {
+    if (opts.exec !== 'kloop' && opts.exec !== 'sub-agent') {
+      throw new Error(`Unknown exec mode: ${opts.exec}. Use kloop | sub-agent.`);
+    }
+    execMode = opts.exec;
   }
 
-  // Look up session (auto-init if needed, before zellij so init prompts work)
+  if (opts.maxRepos !== undefined && !Number.isInteger(opts.maxRepos)) {
+    throw new Error('--max-repos must be a positive integer.');
+  }
+  if (opts.maxRepos !== undefined && opts.maxRepos < 1) {
+    throw new Error('--max-repos must be at least 1.');
+  }
+
   const repoPath = getGitRoot();
   const worktree = getWorktree();
-  let session = getSessionByWorktree(repoPath, worktree);
+  const lpsm = buildLpsm(opts);
 
-  if (!session) {
-    logInfo('No session found. Initializing...');
-    const { runInit } = await import('./init');
-    await runInit(undefined, { local: opts.local });
-    session = getSessionByWorktree(repoPath, worktree);
-    if (!session) {
-      logError('Init completed but session not found. Something went wrong.');
-      process.exit(1);
-    }
-  }
-
-  if (session.state === 'init') {
-    logError(
-      `Session ${session.id} has incomplete initialization. ` +
-        `Run \`kautopilot init\` to start a fresh init attempt or \`kautopilot init --reset\` to re-initialize.`,
-    );
-    process.exit(1);
-  }
-
-  const zellijName = zellijSessionName(session.id);
-
-  // Check if zellij session already exists
-  const listResult = Bun.spawnSync(['zellij', 'list-sessions', '-n', '-s']);
-  const zellijSessions = listResult.stdout.toString().trim().split('\n').filter(Boolean);
-  const zellijExists = zellijSessions.includes(zellijName);
-
-  if (zellijExists) {
-    // Check if the internal process is still alive
-    const lockInfo = checkLock(session.id);
-    if (lockInfo.locked) {
-      // PID alive + zellij alive → attach normally
-      logInfo(`Attaching to existing zellij session: ${zellijName}`);
-      const result = nodeSpawnSync('zellij', ['attach', zellijName], {
-        stdio: 'inherit',
-      });
-      process.exit(result.status ?? 1);
-    }
-    // PID dead + zellij alive → checkLock already reaped the orphaned zellij
-    // Fall through to create a fresh session
-    logWarn('Previous session process died — starting fresh.');
-  }
-
-  // Build internal-start args
-  const args = ['internal-start'];
-  if (opts.phase) args.push('--phase', opts.phase);
-  if (opts.local) args.push('--local');
-  if (opts.force) args.push('--force');
-
-  // Write a temporary KDL layout that runs kautopilot internal-start
-  // Use full binary path — zellij panes may not resolve bare commands from PATH
-  const kautopilotBin = Bun.which('kautopilot') ?? 'kautopilot';
-  const sDir = sessionDir(session.id);
-  const layoutPath = join(sDir, 'zellij-layout.kdl');
-  const escapedCwd = session.worktree.replace(/"/g, '\\"');
-  // Wrap in bash so the pane always exists (zellij can't apply close_on_exit if the
-  // command binary itself is not found). bash -c also gives us a visible error on failure.
-  const innerCmd = `${kautopilotBin} internal-start${args.length > 1 ? ` ${args.slice(1).join(' ')}` : ''}`;
-  const escapedCmd = innerCmd.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-  // No session_name in layout — session name is set by `zellij attach <name>`
-  const layoutContent = `layout {\n  pane command="bash" cwd="${escapedCwd}" close_on_exit=false {\n    args "-c" "${escapedCmd}"\n  }\n}\n`;
-  writeFileSync(layoutPath, layoutContent);
-
-  // Write a temporary config that uses our layout as the default
-  // This lets `zellij attach --create-background` pick up the layout
-  const configPath = join(sDir, 'zellij-config.kdl');
-  writeFileSync(configPath, `default_layout "${layoutPath}"\n`);
-
-  // Delete any dead/serialized zellij session with the same name
-  Bun.spawnSync(['zellij', 'delete-session', zellijName], {
-    stdout: 'ignore',
-    stderr: 'ignore',
+  const meta = createSession({
+    ticketId,
+    // Persist the free-form one-liner when this is an ad-hoc (no-ticket) request,
+    // so brainstorm/create_ticket prompts can reference it (vars.request).
+    request: ticketId ? undefined : (task ?? undefined),
+    org,
+    repoPath,
+    worktree,
+    execMode,
+    maxParallelRepos: opts.maxRepos,
+    lpsm,
+    tags: opts.tag,
   });
 
-  // Create session in background (no TTY needed — server-only)
-  logInfo(`Creating zellij session: ${zellijName}`);
-  const createResult = Bun.spawnSync(['zellij', '-c', configPath, 'attach', zellijName, '--create-background'], {
-    cwd: session.worktree,
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-
-  // Clean up temp files
-  try {
-    unlinkSync(configPath);
-  } catch {}
-  try {
-    unlinkSync(layoutPath);
-  } catch {}
-
-  if (createResult.exitCode !== 0) {
-    const stderr = createResult.stderr.toString().trim();
-    logError(`Failed to create zellij session: ${stderr || `exit ${createResult.exitCode}`}`);
-    process.exit(1);
+  logField('Session', meta.sessionId);
+  logField('Org', `${meta.org} (${meta.ticketSystem}, commitSpec=${meta.commitSpec})`);
+  logField('Task', ticketId ?? `(ad-hoc) ${task ?? ''}`);
+  if (meta.lpsm) {
+    const parts = (
+      [
+        ['L', meta.lpsm.landscape],
+        ['C', meta.lpsm.cluster],
+        ['P', meta.lpsm.platform],
+        ['S', meta.lpsm.service],
+        ['M', meta.lpsm.module],
+      ] as const
+    )
+      .filter(([, v]) => v)
+      .map(([k, v]) => `${k}=${v}`);
+    logField('LPSM', parts.join(' '));
   }
-
-  // Attach to the session — use node:child_process for proper TTY passthrough
-  // (Bun.spawnSync does not correctly forward TTY to interactive programs like zellij)
-  const attachResult = nodeSpawnSync('zellij', ['attach', zellijName], {
-    stdio: 'inherit',
-  });
-  process.exit(attachResult.status ?? 1);
-}
-
-async function runStart(opts: { phase?: string; local?: boolean; force?: boolean }): Promise<void> {
-  const repoPath = getGitRoot();
-  const worktree = getWorktree();
-  let session = getSessionByWorktree(repoPath, worktree);
-
-  if (!session) {
-    // Auto-init
-    logInfo('No session found. Initializing...');
-    const { runInit } = await import('./init');
-    await runInit(undefined, { local: opts.local });
-    // Reload session after init
-    session = getSessionByWorktree(repoPath, worktree);
-    if (!session) {
-      logError('Init completed but session not found. Something went wrong.');
-      process.exit(1);
-    }
+  if (meta.tags && meta.tags.length > 0) {
+    logField('Tags', meta.tags.join(' '));
   }
-
-  // Guard against incomplete init — runtime sessions with state='init' are stale
-  // (the new init lifecycle stores init attempts separately under ~/.kautopilot/init/)
-  if (session.state === 'init') {
-    logError(
-      `Session ${session.id} has incomplete initialization. ` +
-        `Run \`kautopilot init\` to start a fresh init attempt or \`kautopilot init --reset\` to re-initialize.`,
-    );
-    process.exit(1);
-  }
-
-  // Crash recovery — detect dead process before checking lock
-  detectAndRecoverCrash(session.id, session.worktree, session.ticket_id || 'local');
-
-  // Check lock (unless --force)
-  if (!opts.force) {
-    const lockInfo = checkLock(session.id);
-    if (lockInfo.locked) {
-      logError(
-        `Session is already running (PID ${lockInfo.pid}). Use \`kautopilot stop\` first or \`kautopilot start --force\` to override.`,
-      );
-      process.exit(1);
-    }
-
-    // Re-verify status after crash recovery — ensure status no longer shows running
-    const postRecoveryStatus = ensureStatus(session.id);
-    if (postRecoveryStatus.running) {
-      logError(
-        `Session ${session.id} status still shows running after crash recovery. ` +
-          `This may indicate a race condition. Use \`kautopilot start --force\` to override.`,
-      );
-      process.exit(1);
-    }
-  } else {
-    logWarn('--force: bypassing lock and running-state guard');
-  }
-
-  // Load config
-  const config = readConfig(session.id);
-  if (!config) {
-    logError(`Session ${session.id} has no config. This can happen if init was interrupted or the config was deleted.`);
-    logInfo('Run `kautopilot init --reset` to re-initialize this worktree.');
-    process.exit(1);
-  }
-
-  // Validate prerequisites: config.yaml must exist
-  const sDir = sessionDir(session.id);
-  if (!existsSync(`${sDir}/config.yaml`)) {
-    logError('Config file missing. Run `kautopilot init` first.');
-    process.exit(1);
-  }
-
-  // Determine starting phase
-  let phase: Phase;
-  let forceStartState: string | undefined;
-
-  if (opts.phase) {
-    const normalized = opts.phase.toLowerCase();
-
-    // Parse phase:state syntax (e.g., "impl:setup_run", "plan:spec_review")
-    const colonMatch = normalized.match(/^(\w+):(\w+)$/);
-    if (colonMatch) {
-      const [_, phasePart, statePart] = colonMatch;
-      if (phasePart in PHASE_ALIASES) {
-        phase = PHASE_ALIASES[phasePart];
-        forceStartState = statePart;
-      } else {
-        logError(`Unknown phase: ${phasePart}. Valid phases: plan, impl(ementation), polish`);
-        process.exit(1);
-      }
-    } else if (normalized in PHASE_ALIASES) {
-      phase = PHASE_ALIASES[normalized];
-    } else {
-      logError(
-        `Unknown phase: ${opts.phase}. Valid phases: plan, impl(ementation), polish, or phase:state (e.g., impl:setup_run)`,
-      );
-      process.exit(1);
-    }
-
-    // Validate prerequisites for forced phase using session artifacts only
-    if (phase === 'implementation' || phase === 'polish') {
-      const hasSpec = existsSync(`${sDir}/artifacts`);
-      if (!hasSpec) {
-        logError(`Cannot start ${phase}: no spec artifacts found. Run phase 'plan' first.`);
-        process.exit(1);
-      }
-    }
-    if (phase === 'polish') {
-      const hasPlans = existsSync(`${sDir}/artifacts`);
-      if (!hasPlans) {
-        logError(`Cannot start polish: no plan artifacts found. Run phase 'implementation' first.`);
-        process.exit(1);
-      }
-    }
-
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'phase_start:forced',
-      metadata: { to: phase, reason: 'user_start_phase', forceStartState },
-    });
-
-    logField('Session', session.id);
-    logInfo(`Jumping to ${phase}${forceStartState ? `:${forceStartState}` : ''} (user-specified)`);
-  } else {
-    // Resume from WAL-materialized status
-    const status = ensureStatus(session.id);
-
-    if (status.phase === 'none' || status.phase === '') {
-      phase = 'plan';
-    } else {
-      phase = status.phase as Phase;
-
-      // Validate prerequisites for resumed phase using session artifacts only
-      if (phase === 'implementation' || phase === 'polish') {
-        const artifactsDir = `${sDir}/artifacts`;
-        if (!existsSync(artifactsDir)) {
-          logWarn(`Cannot resume ${phase}: no session artifacts found. Restarting from plan.`);
-          phase = 'plan';
-        }
-      }
-    }
-
-    logInfo(`Starting phase: ${phase}`);
-  }
-
-  // Acquire lock
-  acquireLock(session.id);
-
-  try {
-    // Discover config dirs for all binaries (loads from disk cache on resume, probes on first run)
-    await discoverConfigDirs(config);
-
-    // Log start
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'start:started',
-      metadata: { phase, pid: process.pid },
-    });
-
-    // Execute phases — auto-advance from starting phase through completion
-    const PHASE_ORDER: Phase[] = ['plan', 'implementation', 'polish'];
-    const startIdx = PHASE_ORDER.indexOf(phase);
-    for (let i = startIdx; i < PHASE_ORDER.length; i++) {
-      const currentPhase = PHASE_ORDER[i];
-      if (i > startIdx) {
-        logInfo(`Advancing to phase: ${currentPhase}`);
-      }
-
-      const result: PhaseResult = await runPhase(
-        currentPhase,
-        session,
-        config,
-        i === startIdx ? { forceStartState } : {},
-      );
-
-      // Handle revisit_spec — cross-phase reset to phase1 with feedback
-      if (result === 'revisit_spec') {
-        const status = ensureStatus(session.id);
-        const oldVersion = status.version;
-        const nextVersion = oldVersion + 1;
-
-        logInfo(`Revisit spec signal — escalating to plan for epoch v${nextVersion}`);
-
-        // Mark old epoch as superseded
-        supersedEpoch(session.id, oldVersion, nextVersion);
-
-        // Create new epoch directory (spec Part 5 step 4)
-        const newVersionDir = join(sessionDir(session.id), 'artifacts', `v${nextVersion}`);
-        mkdirSync(newVersionDir, { recursive: true });
-
-        // Log version superseded event
-        appendEvent(session.id, {
-          ts: new Date().toISOString(),
-          event: 'version:superseded',
-          version: oldVersion,
-          metadata: {
-            supersededBy: nextVersion,
-            reason: 'revisit_spec',
-            fromPhase: currentPhase,
-          },
-        });
-
-        // Log phase completion for the interrupted phase (canonical WAL name)
-        appendEvent(session.id, {
-          ts: new Date().toISOString(),
-          event: `${PHASE_EVENT_NAME[currentPhase]}:completed`,
-          version: oldVersion,
-          metadata: { reason: 'revisit_spec' },
-        });
-
-        // Emit phase1:started with required metadata for new epoch
-        // (machine.ts won't emit because hasCompletedWork=true from prior phase1 work)
-        appendEvent(session.id, {
-          ts: new Date().toISOString(),
-          event: 'phase1:started',
-          version: nextVersion,
-          metadata: {
-            previousVersion: oldVersion,
-            reason: 'revisit_spec',
-          },
-        });
-
-        // Re-run plan phase with new version
-        const replanned = await runPhase('plan', session, config, {
-          versionOverride: nextVersion,
-          suppressPhaseStarted: true,
-        });
-
-        if (replanned !== true && replanned !== 'revisit_spec' && replanned !== 'amend_spec') {
-          logInfo('Phase plan interrupted — run `kautopilot start` to resume');
-          break;
-        }
-
-        // Handle chained revisit_spec or amend_spec from plan phase
-        if (replanned === 'revisit_spec' || replanned === 'amend_spec') {
-          logInfo('Plan phase also returned a signal — run `kautopilot start` to resume');
-          break;
-        }
-
-        // Re-enter implementation phase for the new epoch
-        i = PHASE_ORDER.indexOf('implementation') - 1; // -1 so loop increments to 'implementation'
-        continue;
-      }
-
-      if (!result) {
-        logInfo(`Phase ${currentPhase} interrupted — run \`kautopilot start\` to resume`);
-        break;
-      }
-    }
-
-    // Log completion
-    appendEvent(session.id, {
-      ts: new Date().toISOString(),
-      event: 'start:completed',
-      metadata: { phase: 'all' },
-    });
-  } finally {
-    releaseLock(session.id);
-  }
+  logInfo(
+    'Drive it with the /kautopilot skill, or manually: `kautopilot next --json` then `kautopilot complete <step>`.',
+  );
 }

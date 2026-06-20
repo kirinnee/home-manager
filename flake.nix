@@ -1,7 +1,7 @@
 {
   description = "Home Manager configuration for Ernest";
 
-  inputs = rec {
+  inputs = {
     # util
     flake-utils.url = "github:numtide/flake-utils";
     treefmt-nix.url = "github:numtide/treefmt-nix";
@@ -15,7 +15,6 @@
     # Specify the source of Home Manager and Nixpkgs.
     nixpkgs-unstable.url = "github:nixos/nixpkgs/nixos-unstable";
     nixpkgs-stable.url = "github:nixos/nixpkgs/nixos-25.11";
-    nixpkgs-240924.url = "github:nixos/nixpkgs/babc25a577c3310cce57c72d5bed70f4c3c3843a";
 
     atomipkgs.url = "github:AtomiCloud/nix-registry/v2";
 
@@ -38,7 +37,6 @@
     , treefmt-nix
     , pre-commit-hooks
     , nixpkgs-unstable
-    , nixpkgs-240924
     , nixpkgs-stable
     , atomipkgs
     , home-manager
@@ -50,7 +48,7 @@
     , codex-cli
     , loctl
     ,
-    }@inputs:
+    }:
     let
       profiles = import ./profiles.nix;
     in
@@ -69,11 +67,6 @@
                 inherit system;
                 config.allowUnfree = true;
               };
-              pkgs-240924 = import nixpkgs-240924 {
-                inherit system;
-                config.allowUnfree = true;
-              };
-              pre-commit-lib = pre-commit-hooks.lib.${system};
               atomi = atomipkgs.packages.${system};
               pkgs-llm = llm-agents.packages.${system};
               claude-code-pkg = claude-code.packages.${system}.claude-code;
@@ -104,7 +97,6 @@
                     codex-pkg
                     pkgs-loctl
                     profile
-                    pkgs-240924
                     pkgs-stable
                     pkgs-unstable
                     ;
@@ -129,10 +121,6 @@
                 inherit system;
                 config.allowUnfree = true;
               };
-              pkgs-240924 = import nixpkgs-240924 {
-                inherit system;
-                config.allowUnfree = true;
-              };
               atomi = atomipkgs.packages.${system};
               pkgs-llm = llm-agents.packages.${system};
               claude-code-pkg = claude-code.packages.${system}.claude-code;
@@ -150,7 +138,6 @@
                   inherit
                     atomi
                     profile
-                    pkgs-240924
                     pkgs-stable
                     pkgs-unstable
                     self
@@ -177,7 +164,6 @@
                         codex-pkg
                         pkgs-loctl
                         profile
-                        pkgs-240924
                         pkgs-stable
                         pkgs-unstable
                         ;
@@ -213,7 +199,6 @@
         };
         pre-commit-lib = pre-commit-hooks.lib.${system};
         atomi = atomipkgs.packages.${system};
-        attic = attic.packages.${system};
       in
       let
         pkgs = pkgs-stable;

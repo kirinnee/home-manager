@@ -1,2 +1,2 @@
-[post-create]
+[pre-start]
 direnv = "direnv allow"

@@ -68,6 +68,29 @@ describe('lock', () => {
     expect(existsSync(join(lockDir, 'lock.pid'))).toBe(false);
   });
 
+  it('listLockKeys returns the session key plus every repo scope key', () => {
+    const { acquireLock, listLockKeys, scopeLockKey, releaseLock } = require('../lock') as typeof import('../lock');
+
+    // No lock files yet → empty.
+    expect(listLockKeys('sess').sort()).toEqual([]);
+
+    // Session timeline lock only.
+    acquireLock('sess');
+    expect(listLockKeys('sess')).toEqual(['sess']);
+
+    // Add two repo-scoped locks.
+    acquireLock(scopeLockKey('sess', 'api'));
+    acquireLock(scopeLockKey('sess', 'infra'));
+    expect(listLockKeys('sess').sort()).toEqual(['sess', 'sess:api', 'sess:infra']);
+
+    // Releasing the session lock leaves the repo scopes discoverable.
+    releaseLock('sess');
+    expect(listLockKeys('sess').sort()).toEqual(['sess:api', 'sess:infra']);
+
+    releaseLock(scopeLockKey('sess', 'api'));
+    releaseLock(scopeLockKey('sess', 'infra'));
+  });
+
   it('acquireLock throws when session already locked', () => {
     const { acquireLock, releaseLock } = require('../lock') as typeof import('../lock');
     acquireLock('testlock');

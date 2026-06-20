@@ -22,6 +22,9 @@
     apps = true;
     arch = "aarch64";
     kernel = "darwin";
+    # Designated host-exposure host: gets the `khost` suite (SSH + CLIProxyAPI
+    # over Cloudflare Tunnel). Absent/false on all other profiles -> suite inert.
+    tunnelHost = true;
   }
   {
     user = "ernest-liftoff";

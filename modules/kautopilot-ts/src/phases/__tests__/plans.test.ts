@@ -14,35 +14,6 @@ describe('plan file resolution (spec section 5.3)', () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('parsePlanFilename parses spec convention (plan-N-M.md)', () => {
-    const { parsePlanFilename } = require('../shared');
-    expect(parsePlanFilename('plan-1-1.md')).toEqual({
-      ordinal: 1,
-      rewrite: 1,
-    });
-    expect(parsePlanFilename('plan-2-3.md')).toEqual({
-      ordinal: 2,
-      rewrite: 3,
-    });
-    expect(parsePlanFilename('plan-10-5.md')).toEqual({
-      ordinal: 10,
-      rewrite: 5,
-    });
-  });
-
-  it('parsePlanFilename parses legacy flat convention (plan-N.md)', () => {
-    const { parsePlanFilename } = require('../shared');
-    expect(parsePlanFilename('plan-1.md')).toEqual({ ordinal: 1, rewrite: 1 });
-    expect(parsePlanFilename('plan-5.md')).toEqual({ ordinal: 5, rewrite: 1 });
-  });
-
-  it('parsePlanFilename rejects non-plan files', () => {
-    const { parsePlanFilename } = require('../shared');
-    expect(parsePlanFilename('manifest.json')).toBeNull();
-    expect(parsePlanFilename('plan-draft-1.md')).toBeNull();
-    expect(parsePlanFilename('readme.md')).toBeNull();
-  });
-
   it('resolveActivePlans returns highest rewrite per ordinal', () => {
     const { resolveActivePlans } = require('../shared');
     // Create plan files with multiple rewrites

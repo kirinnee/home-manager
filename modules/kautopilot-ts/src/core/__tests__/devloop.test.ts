@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { writeKloopConfig, writeKloopSpec } from '../devloop';
+import { writeKloopSpec } from '../devloop';
 
 let origHome: string;
 let tempHome: string;
@@ -40,72 +40,6 @@ describe('devloop helpers', () => {
       cleanup();
       const specPath = writeKloopSpec('__test_devloop__', 'content', 'plan-1-spec.md');
       expect(specPath).toContain('plan-1-spec.md');
-      cleanup();
-    });
-  });
-
-  describe('writeKloopConfig', () => {
-    it('writes full config yaml to session tmp dir', () => {
-      cleanup();
-      const configPath = writeKloopConfig('__test_devloop__', {
-        implementers: { claude: 1 },
-        reviewPhases: [['claude']],
-        maxIterations: 5,
-        implementerTimeout: 20,
-        reviewerTimeout: 10,
-        conflictCheckThreshold: 2,
-        compressSpec: false,
-        firstLoopFullReview: false,
-        previousReviewPropagation: 0,
-        synthesis: true,
-        synthesisTimeout: 15,
-        verify: true,
-        verifyPhases: [['claude:claude']],
-        verifyTimeout: 5,
-        rerankAfterCheckpoint: true,
-        implementerRetry: { maxRetries: 2, backoffBaseMs: 5000 },
-        firstIterationWeightMultiplier: 2,
-      });
-      expect(existsSync(configPath)).toBe(true);
-      const content = readFileSync(configPath, 'utf-8');
-      expect(content).toContain('maxIterations: 5');
-      expect(content).toContain('implementerTimeout: 20');
-      expect(content).toContain('reviewerTimeout: 10');
-      expect(content).toContain('conflictCheckThreshold: 2');
-      expect(content).toContain('compressSpec: false');
-      expect(content).toContain('firstLoopFullReview: false');
-      expect(content).toContain('previousReviewPropagation: 0');
-      cleanup();
-    });
-
-    it('passes prompts when configured', () => {
-      cleanup();
-      const configPath = writeKloopConfig('__test_devloop__', {
-        implementers: { claude: 1 },
-        reviewPhases: [['claude']],
-        maxIterations: 10,
-        implementerTimeout: 30,
-        reviewerTimeout: 15,
-        conflictCheckThreshold: 2,
-        compressSpec: false,
-        firstLoopFullReview: false,
-        previousReviewPropagation: 0,
-        synthesis: true,
-        synthesisTimeout: 15,
-        verify: true,
-        verifyPhases: [['claude:claude']],
-        verifyTimeout: 5,
-        rerankAfterCheckpoint: true,
-        implementerRetry: { maxRetries: 2, backoffBaseMs: 5000 },
-        firstIterationWeightMultiplier: 2,
-        prompts: {
-          implementer: 'Custom implementer prompt',
-          reviewer: 'Custom reviewer prompt',
-        },
-      });
-      const content = readFileSync(configPath, 'utf-8');
-      expect(content).toContain('Custom implementer prompt');
-      expect(content).toContain('Custom reviewer prompt');
       cleanup();
     });
   });
