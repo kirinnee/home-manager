@@ -50,6 +50,12 @@ const STYLE = `
 	--accent-border: #d4d8f4;
 	--code-bg: #f5f5f6;
 	--code-border: #e4e4e7;
+	/* prose emphasis — restrained, distinct hues for scannability */
+	--bold: #312e81;            /* indigo ink — heavier than the link accent */
+	--italic: #0e7490;          /* muted teal */
+	--inline-code: #b03060;     /* rose */
+	--inline-code-bg: #fbeef2;
+	--inline-code-border: #f1d6df;
 	--ring: rgba(79, 91, 213, 0.4);
 	/* semantic status — muted, low-saturation */
 	--ok: #3f7e52; --ok-bg: #eef4f0; --ok-border: #cfe2d6;
@@ -84,6 +90,11 @@ const STYLE = `
 		--accent-border: #353560;
 		--code-bg: #141416;
 		--code-border: #2a2a2e;
+		--bold: #c7ccf8;            /* light indigo */
+		--italic: #6cc6d4;          /* light teal */
+		--inline-code: #f0a2bf;     /* light rose */
+		--inline-code-bg: #241820;
+		--inline-code-border: #3a2630;
 		--ring: rgba(139, 147, 232, 0.5);
 		--ok: #6fae82; --ok-bg: #14241a; --ok-border: #234630;
 		--warn: #c79a52; --warn-bg: #241d11; --warn-border: #463719;
@@ -302,7 +313,8 @@ details.toc li.lvl3 a { padding-left: var(--s-4); font-size: 12px; color: var(--
 .prose li::marker { color: var(--muted); }
 .prose a { font-weight: 500; }
 .prose a:hover { text-decoration: underline; }
-.prose strong { color: var(--fg); font-weight: 600; }
+.prose strong { color: var(--bold); font-weight: 700; }
+.prose em { color: var(--italic); font-style: italic; }
 .prose hr { border: none; border-top: 1px solid var(--border); margin: 1.6em 0; }
 .prose blockquote {
 	margin: 1em 0; padding: 0.4em 1em; color: var(--muted);
@@ -312,8 +324,8 @@ details.toc li.lvl3 a { padding-left: var(--s-4); font-size: 12px; color: var(--
 .prose blockquote p { margin: 0.4em 0; }
 .prose code {
 	font-family: var(--font-mono); font-size: 0.85em;
-	background: var(--code-bg); border: 1px solid var(--border-soft);
-	padding: 0.1em 0.4em; border-radius: 5px; color: var(--fg);
+	background: var(--inline-code-bg); border: 1px solid var(--inline-code-border);
+	padding: 0.1em 0.4em; border-radius: 5px; color: var(--inline-code);
 }
 .prose pre {
 	background: var(--code-bg); border: 1px solid var(--code-border);
