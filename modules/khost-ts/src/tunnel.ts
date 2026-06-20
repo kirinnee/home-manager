@@ -1,10 +1,15 @@
 // Cloudflare Tunnel lifecycle — Level 2 self-provision (config_src: cloudflare).
+// The tunnel runs as a persistent OS service (`cloudflared service install`) so
+// it survives reboot — launchd on macOS, systemd on Linux. (Earlier khost ran
+// cloudflared as a detached process; tunnelUp migrates off that.)
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { openSync } from 'node:fs';
-import { tunnelLog, tunnelName, tunnelPidfile, tunnelState } from './deps';
-import { die, log, need, ok, warn } from './exec';
+import { readFile, rm } from 'node:fs/promises';
+import { osKind, tunnelName, tunnelPidfile } from './deps';
+import { die, log, need, ok, run, warn } from './exec';
 import { cfConfigured, createTunnel, findTunnel, tunnelToken, verifyAccount, verifyToken } from './cloudflare';
+
+// `cloudflared service install` writes this on macOS; presence = installed.
+const SERVICE_PLIST = '/Library/LaunchDaemons/com.cloudflare.cloudflared.plist';
 
 function requireCf(): boolean {
   if (cfConfigured()) return true;
@@ -17,16 +22,19 @@ function requireCf(): boolean {
   return false;
 }
 
-async function pidRunning(): Promise<number | null> {
-  if (!existsSync(tunnelPidfile)) return null;
+/** Migrate off the old model: kill a detached cloudflared from a stale pidfile. */
+async function killOldDetached(): Promise<void> {
+  if (!existsSync(tunnelPidfile)) return;
   const pid = Number.parseInt((await readFile(tunnelPidfile, 'utf8')).trim(), 10);
-  if (!Number.isFinite(pid)) return null;
-  try {
-    process.kill(pid, 0); // signal 0 = liveness probe
-    return pid;
-  } catch {
-    return null;
+  if (Number.isFinite(pid)) {
+    try {
+      process.kill(pid);
+      log(`Stopped old detached cloudflared (pid ${pid})`);
+    } catch {
+      /* already gone */
+    }
   }
+  await rm(tunnelPidfile, { force: true });
 }
 
 export async function tunnelUp(): Promise<void> {
@@ -40,47 +48,38 @@ export async function tunnelUp(): Promise<void> {
   if (!acct.ok) die(`Cloudflare account check failed: ${acct.detail}\n  run 'khost doctor' for details`);
   ok('Cloudflare credentials verified');
 
-  await mkdir(tunnelState, { recursive: true });
-
-  const existing = await pidRunning();
-  if (existing) {
-    ok(`tunnel already running (pid ${existing})`);
-    return;
-  }
-
   const found = await findTunnel(tunnelName);
   const tun = found ?? (log(`Creating remotely-managed tunnel ${tunnelName}`), await createTunnel(tunnelName));
   log(`Tunnel ${tunnelName} = ${tun.id}`);
 
+  await killOldDetached();
+
+  if (osKind() === 'darwin' && existsSync(SERVICE_PLIST)) {
+    ok('cloudflared already installed as a persistent service — "khost tunnel down" then "up" to refresh its token');
+    return;
+  }
+
   const token = await tunnelToken(tun.id);
-  log('Starting cloudflared (background)');
-  const fd = openSync(tunnelLog, 'a');
-  const proc = Bun.spawn(['cloudflared', 'tunnel', 'run', '--token', token], {
-    stdin: 'ignore',
-    stdout: fd,
-    stderr: fd,
-  });
-  proc.unref();
-  await writeFile(tunnelPidfile, String(proc.pid));
-  ok(`tunnel up (pid ${proc.pid}) — logs: ${tunnelLog}`);
+  log('Installing cloudflared as a persistent service (sudo)');
+  const r = await run(['sudo', 'cloudflared', 'service', 'install', token], { interactive: true });
+  if (r.code !== 0) die('cloudflared service install failed (already installed? run "khost tunnel down" first)');
+  ok('tunnel up — persistent service installed (survives reboot)');
 }
 
 export async function tunnelDown(): Promise<void> {
-  const pid = await pidRunning();
-  if (pid) {
-    process.kill(pid);
-    await rm(tunnelPidfile, { force: true });
-    ok('tunnel stopped');
-  } else {
-    warn('tunnel not running');
-    await rm(tunnelPidfile, { force: true });
-  }
+  await killOldDetached();
+  const r = await run(['sudo', 'cloudflared', 'service', 'uninstall'], { interactive: true });
+  if (r.code === 0) ok('tunnel service removed');
+  else warn('no tunnel service to remove (or uninstall failed)');
 }
 
 export async function tunnelStatus(): Promise<void> {
-  const pid = await pidRunning();
-  if (pid) ok(`tunnel running (pid ${pid})`);
-  else warn('tunnel not running');
+  if (osKind() === 'darwin') {
+    console.log(existsSync(SERVICE_PLIST) ? `  service : installed (${SERVICE_PLIST})` : '  service : not installed');
+  } else {
+    const a = await run(['systemctl', 'is-active', 'cloudflared']);
+    console.log(`  service : ${a.stdout.trim() || 'unknown'}`);
+  }
   if (cfConfigured()) {
     const found = await findTunnel(tunnelName).catch(() => null);
     console.log(`  cloudflare tunnel: ${tunnelName} (${found?.id ?? 'none'})`);
