@@ -1,15 +1,19 @@
-// Cloudflare Tunnel lifecycle — Level 2 self-provision (config_src: cloudflare).
-// The tunnel runs as a persistent OS service (`cloudflared service install`) so
-// it survives reboot — launchd on macOS, systemd on Linux. (Earlier khost ran
-// cloudflared as a detached process; tunnelUp migrates off that.)
+// Cloudflare Tunnel lifecycle — runs cloudflared as a persistent service that
+// survives reboot. On macOS we hand-roll a launchd daemon so we can pass
+// --protocol (QUIC/UDP to the edge is unreliable here — e.g. WARP interference —
+// so we default to http2). On Linux we use cloudflared's own service manager.
 import { existsSync } from 'node:fs';
 import { readFile, rm } from 'node:fs/promises';
-import { osKind, tunnelName, tunnelPidfile } from './deps';
+import { homedir } from 'node:os';
+import { osKind, tunnelName, tunnelPidfile, tunnelProtocol } from './deps';
 import { die, log, need, ok, run, warn } from './exec';
 import { cfConfigured, createTunnel, findTunnel, tunnelToken, verifyAccount, verifyToken } from './cloudflare';
 
-// `cloudflared service install` writes this on macOS; presence = installed.
-const SERVICE_PLIST = '/Library/LaunchDaemons/com.cloudflare.cloudflared.plist';
+const CFD_PLIST = '/Library/LaunchDaemons/cloud.atomi.khost.cloudflared.plist';
+const CFD_LABEL = 'cloud.atomi.khost.cloudflared';
+const CFD_LOG = '/Library/Logs/cloud.atomi.khost.cloudflared.log';
+// cloudflared's own `service install` writes this; we replace it with our plist.
+const LEGACY_PLIST = '/Library/LaunchDaemons/com.cloudflare.cloudflared.plist';
 
 function requireCf(): boolean {
   if (cfConfigured()) return true;
@@ -37,11 +41,44 @@ async function killOldDetached(): Promise<void> {
   await rm(tunnelPidfile, { force: true });
 }
 
+/** Prefer the stable nix-profile symlink (updates on hms) over a pinned store path. */
+async function cloudflaredBin(): Promise<string> {
+  const profile = `${homedir()}/.nix-profile/bin/cloudflared`;
+  if (existsSync(profile)) return profile;
+  return (await run(['sh', '-c', 'command -v cloudflared'])).stdout.trim();
+}
+
+function cfdPlist(bin: string, token: string): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${CFD_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${bin}</string>
+    <string>tunnel</string><string>run</string>
+    <string>--protocol</string><string>${tunnelProtocol}</string>
+    <string>--token</string><string>${token}</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>StandardOutPath</key><string>${CFD_LOG}</string>
+  <key>StandardErrorPath</key><string>${CFD_LOG}</string>
+</dict>
+</plist>
+`;
+}
+
+async function writeRoot(path: string, content: string): Promise<void> {
+  if ((await run(['sudo', 'tee', path], { input: content })).code !== 0) die(`failed to write ${path}`);
+}
+
 export async function tunnelUp(): Promise<void> {
   if (!requireCf()) return; // graceful no-op; suite up still succeeds
   await need('cloudflared');
 
-  // Preflight: fail clearly on a bad token/account before any provisioning.
   const tok = await verifyToken();
   if (!tok.ok) die(`Cloudflare token check failed: ${tok.detail}\n  run 'khost doctor' for details`);
   const acct = await verifyAccount();
@@ -51,34 +88,51 @@ export async function tunnelUp(): Promise<void> {
   const found = await findTunnel(tunnelName);
   const tun = found ?? (log(`Creating remotely-managed tunnel ${tunnelName}`), await createTunnel(tunnelName));
   log(`Tunnel ${tunnelName} = ${tun.id}`);
-
+  const token = await tunnelToken(tun.id);
   await killOldDetached();
 
-  // Idempotent + self-healing: clear any existing (possibly stale/not-running)
-  // service, then install fresh with the current token. `cloudflared service
-  // install` also boots the service, so it's running on success.
-  if (osKind() === 'darwin' ? existsSync(SERVICE_PLIST) : true) {
-    log('Clearing any existing cloudflared service (sudo)');
-    await run(['sudo', 'cloudflared', 'service', 'uninstall'], { interactive: true }); // ignore if none
+  if (osKind() === 'linux') {
+    await run(['sudo', 'cloudflared', 'service', 'uninstall']); // ignore if none
+    if ((await run(['sudo', 'cloudflared', 'service', 'install', token], { interactive: true })).code !== 0) {
+      die('cloudflared service install failed');
+    }
+    ok('tunnel up — systemd service (survives reboot)');
+    return;
   }
 
-  const token = await tunnelToken(tun.id);
-  log('Installing cloudflared as a persistent service (sudo)');
-  const r = await run(['sudo', 'cloudflared', 'service', 'install', token], { interactive: true });
-  if (r.code !== 0) die('cloudflared service install failed');
-  ok('tunnel up — persistent service installed + started (survives reboot)');
+  // darwin: replace any cloudflared-managed service, then install our launchd
+  // daemon with the chosen --protocol.
+  if (existsSync(LEGACY_PLIST)) {
+    log('Removing cloudflared-managed service (sudo)');
+    await run(['sudo', 'cloudflared', 'service', 'uninstall']);
+  }
+  const bin = await cloudflaredBin();
+  log(`Installing cloudflared launchd daemon (sudo): ${CFD_PLIST} [protocol=${tunnelProtocol}]`);
+  await writeRoot(CFD_PLIST, cfdPlist(bin, token));
+  await run(['sudo', 'chown', 'root:wheel', CFD_PLIST]);
+  await run(['sudo', 'chmod', '644', CFD_PLIST]);
+  await run(['sudo', 'launchctl', 'bootout', `system/${CFD_LABEL}`]); // no-op if not loaded
+  if ((await run(['sudo', 'launchctl', 'bootstrap', 'system', CFD_PLIST], { interactive: true })).code !== 0) {
+    die('launchctl bootstrap failed');
+  }
+  ok(`tunnel up — persistent service (protocol=${tunnelProtocol}, survives reboot) — logs: ${CFD_LOG}`);
 }
 
 export async function tunnelDown(): Promise<void> {
   await killOldDetached();
-  const r = await run(['sudo', 'cloudflared', 'service', 'uninstall'], { interactive: true });
-  if (r.code === 0) ok('tunnel service removed');
-  else warn('no tunnel service to remove (or uninstall failed)');
+  if (osKind() === 'darwin') {
+    await run(['sudo', 'launchctl', 'bootout', `system/${CFD_LABEL}`]);
+    await run(['sudo', 'rm', '-f', CFD_PLIST]);
+    await run(['sudo', 'cloudflared', 'service', 'uninstall']); // clean any legacy install too
+  } else {
+    await run(['sudo', 'cloudflared', 'service', 'uninstall']);
+  }
+  ok('tunnel service removed');
 }
 
 export async function tunnelStatus(): Promise<void> {
   if (osKind() === 'darwin') {
-    console.log(existsSync(SERVICE_PLIST) ? `  service : installed (${SERVICE_PLIST})` : '  service : not installed');
+    console.log(existsSync(CFD_PLIST) ? `  service : installed (${CFD_PLIST})` : '  service : not installed');
   } else {
     const a = await run(['systemctl', 'is-active', 'cloudflared']);
     console.log(`  service : ${a.stdout.trim() || 'unknown'}`);
