@@ -127,9 +127,11 @@ matching session(s):
 - **`code`** — never appears. The binary ran it (including all detection/waiting).
 - **`interactive`** (triage, write_spec, write_plans, resolve, tty_resolve, feedback) —
   run **inline** in the main session. Be a **devil's advocate**: propose first, debate,
-  surface conflicts; never open with "what do you want to do?" Only `complete` after
-  **explicit** approval ("approve" — not "ok/sure"). Spawn `Explore` subagents for heavy
-  research so the conversation stays lean.
+  surface conflicts; never open with "what do you want to do?" Run the
+  **per-revision review loop** below — re-present + re-ask after EVERY update and
+  only `complete` once feedback is exhausted and the user **explicitly** approves
+  ("approve" — not "ok/sure"). Spawn `Explore` subagents for heavy research so the
+  conversation stays lean.
 - **`agent`** (create_ticket, fetch_ticket, commit, eval, create_pr, prereview,
   write_fix, amend_plans, reviewers, per-repo implement) — **always** a fresh isolated
   `Task` subagent, never inline.
@@ -179,6 +181,34 @@ what's under review):
 - The viewer must be running (`kautopilot dash up`) for the link to load.
 
 Revisions are machine-local and never committed.
+
+## The per-revision review loop (don't just move on)
+
+Every interactive writer artifact (brainstorm, triage, spec, plans, feedback) is
+**iterated until the user has no more feedback** — never auto-advance after one
+draft. A new version is NOT approval; it's the start of another review round.
+For a single artifact step, loop like this and do **not** `complete` (which lets
+the binary move to the next step) until step 5:
+
+1. **Write / update** the artifact (the writer produces the new version — v1, then
+   v2 after feedback, then v3, …).
+2. **Present it — don't move on.** In chat, post:
+   - the **viewer link** to the new version (the doc link for v1; the `/diff` link
+     once a prior version exists, so they see exactly what changed),
+   - a **2–4 line summary** of what this version says / what changed since the last,
+   - a short **TODO / open-items list**: anything unresolved, decisions still
+     needed, and which pieces of the user's last feedback this version addressed
+     (and any it did NOT, with why).
+3. **Ask** for feedback or approval.
+4. **Any feedback = not approved.** Address it → that produces the next version →
+   go back to step 2. Re-present (new link/diff + summary + updated open-items) and
+   re-ask **every** round. Keep looping: v2 ok? → feedback → v3 ok? → feedback → …
+5. **Only when the user has no further feedback AND explicitly approves**, and the
+   open-items list is empty (all feedback addressed) → `complete` the step. The
+   binary then advances to the next step.
+
+So: v1 presented → feedback → v2 — you do **not** silently jump to v2 and proceed;
+you present v2, ask if v2 is OK, and so on until there's nothing left to change.
 
 ## Feedback → `rules.md`
 
