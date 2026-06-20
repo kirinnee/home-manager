@@ -22,7 +22,7 @@ loop:
       run d.prompt inline, converse with the user, satisfy d.contract   # approval gate
   else: # agent
       spawn an isolated Task subagent with d.prompt; it writes d.contract.outputFile
-  kautopilot complete d.step --output d.contract.outputFile [--metadata {…}] [--repo <repo>]
+  kautopilot complete --output d.contract.outputFile [--metadata {…}] [--repo <repo>]   # no step name — binary owns the cursor
 ```
 
 `code` steps are **never yielded** — the binary runs them inline (snapshot, finalize,
@@ -110,13 +110,16 @@ until the step's `completionEvent` is logged. **This is the resume story.**
 ## 3. `kautopilot complete`
 
 ```
-kautopilot complete <step> [--output <path>] [--metadata <json>] [--repo <repo>] [--session <id>]
+kautopilot complete [step] [--output <path>] [--metadata <json>] [--repo <repo>] [--session <id>]
 ```
 
 The binary:
 
-1. **Validates the step** matches the pending step for that scope (session, or the
-   `--repo`); else error (stale call).
+1. **Owns which step.** `step` is **optional** — omit it and the binary completes
+   whatever step is pending for that scope (the WAL cursor is the source of truth).
+   If `step` IS given it is only an **assertion**: when it doesn't match the pending
+   step the call fails as stale (the caller is out of sync — re-run `next`). The
+   harness should drive without naming the step so it can never overwrite the cursor.
 2. **Validates the contract**: `contract.outputFile` exists; the **written file is the
    source of truth** — `complete` re-parses it; `--metadata` must match the parsed
    values and any `completionMetadataSchema`.
@@ -194,7 +197,7 @@ dependsOn[], prUrl, status }`. There is no per-repo WAL.
 ```
 kautopilot start [TICKET_ID | "request"] [--org liftoff|atomicloud]   # convenience: init session + invoke default harness
 kautopilot next [--repo <repo>] [--json]                              # the driver (§2)
-kautopilot complete <step> [--repo <repo>] …                          # advance (§3)
+kautopilot complete [step] [--repo <repo>] …                          # advance; step optional (§3)
 kautopilot diff <artifact> …                                          # revision diffs (§5)
 kautopilot status [--json]                                            # session + every repo's per-repo state
 kautopilot ps [--json]                                                # sessions table (unchanged shape + ticketId/org)
