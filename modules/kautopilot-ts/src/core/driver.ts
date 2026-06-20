@@ -297,7 +297,7 @@ export interface CompleteResult {
 export async function runComplete(
 	sessionId: string,
 	config: Config,
-	step: string,
+	step: string | undefined,
 	opts: {
 		output?: string;
 		metadata?: Record<string, unknown>;
@@ -311,14 +311,24 @@ export async function runComplete(
 	// overrides) instead of the built-in DEFAULT_CONFIG.
 	setCachedConfig(config);
 
+	// The binary owns "which step" — the WAL cursor is the source of truth, so we
+	// complete whatever step is actually pending for this scope, never a name the
+	// caller remembered. `step` is an OPTIONAL assertion: if supplied and it does
+	// not match the pending step, reject as stale (the caller is out of sync, e.g.
+	// driving from memory) rather than silently completing the wrong thing.
 	const repoArg = opts.repo ?? null;
 	const pending = pendingStep(sessionId, repoArg, meta.epoch);
-	if (pending !== step) {
+	if (pending == null) {
+		return { ok: false, error: "no pending step to complete for this scope" };
+	}
+	if (step != null && pending !== step) {
 		return {
 			ok: false,
-			error: `stale step: pending=${pending ?? "none"}, got=${step}`,
+			error: `stale step: pending=${pending}, got=${step} (re-run \`next\` to re-sync — do not track steps yourself)`,
 		};
 	}
+	// From here on, the pending step is authoritative regardless of what was passed.
+	step = pending;
 
 	const def = getStep(step);
 	if (!def) return { ok: false, error: `unknown step: ${step}` };

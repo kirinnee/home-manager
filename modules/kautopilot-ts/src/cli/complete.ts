@@ -18,7 +18,10 @@ import { resolveSession } from "./resolve-session";
 export function createCompleteCommand(): Command {
 	return new Command("complete")
 		.description("Record completion of a yielded step and advance the machine")
-		.argument("<step>", "The step being completed")
+		.argument(
+			"[step]",
+			"Optional assertion of the step being completed; if omitted, the binary completes whatever step is pending (the WAL cursor is the source of truth). If given and it does not match, the command fails as stale.",
+		)
 		.option("--output <path>", "Path to the artifact the step produced")
 		.option(
 			"--metadata <json>",
@@ -28,7 +31,7 @@ export function createCompleteCommand(): Command {
 		.option("--session <id>", "Target session id")
 		.action(
 			async (
-				step: string,
+				step: string | undefined,
 				opts: {
 					output?: string;
 					metadata?: string;

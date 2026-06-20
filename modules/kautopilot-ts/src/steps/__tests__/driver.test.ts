@@ -85,6 +85,18 @@ describe("host-driven driver: next/complete", () => {
 		expect(res.error).toContain("stale");
 	});
 
+	it("completes the pending step when no step name is passed", async () => {
+		const id = newSession();
+		const dir = sessionDir(id);
+		await runNext(id, config); // pending = fetch_ticket
+		writeFile(join(dir, "ticket.md"), "# PE-1234\nDo the thing.");
+		const res = await runComplete(id, config, undefined, {
+			output: join(dir, "ticket.md"),
+		});
+		expect(res.ok).toBe(true);
+		expect(res.recorded).toBe("fetch_ticket:done");
+	});
+
 	it("walks the plan phase to execution, seeding repos from triage metadata", async () => {
 		const id = newSession();
 		const dir = sessionDir(id);

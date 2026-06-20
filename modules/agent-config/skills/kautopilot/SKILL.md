@@ -26,14 +26,25 @@ loop:
       run d.prompt INLINE, conversing with the user; satisfy d.contract (approval gate)
   else:  # d.kind == "agent"
       spawn a fresh isolated Task subagent with d.prompt; it writes d.contract.outputFile
-  kautopilot complete d.step --output d.contract.outputFile [--metadata {…}] [--repo <repo>]
+  kautopilot complete --output d.contract.outputFile [--metadata {…}] [--repo <repo>]
 ```
 
+**The binary owns the sequence — you never track it.** Do NOT name the step on
+`complete`: omit it and the binary completes whatever step is actually pending
+(the WAL cursor is the source of truth). Do **not** remember "what step I'm on",
+infer the next step, or skip ahead — that is exactly how the loop corrupts
+itself. The ONLY way to learn the current step is `kautopilot next`; the ONLY way
+to advance is `kautopilot complete`.
+
 **Do whatever `next` says.** The descriptor's `prompt` is fully resolved (paths
-substituted). Never invent steps or skip ahead — the binary sequences and resumes.
-`next` **blocks** while the binary watches the world (CI, threads); there is no
-`pending` — just wait for it to return a step or `done`. If the session dies, call `next`
-again; it returns the same pending step until its `completionEvent` is logged.
+substituted). `next` **blocks** while the binary watches the world (CI, threads);
+there is no `pending` — just wait for it to return a step or `done`. If the
+session dies, or you lose track, or a `complete` comes back with
+`ok:false`/`stale step`, **STOP and call `next` again** — it returns the exact
+pending step until its `completionEvent` is logged. Re-sync from `next`; never
+guess. (You may still pass the step name as an assertion, e.g. `complete spec`,
+if you want the binary to confirm you're where you think — but a mismatch is an
+error, not an override.)
 
 ### Reading `done` — a `{done:true}` is not always "finished"
 
