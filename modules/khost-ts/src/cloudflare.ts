@@ -258,10 +258,21 @@ export async function listIdps(): Promise<Array<{ type: string; name?: string }>
 
 const policySchema = z.object({ id: z.string(), name: z.string() });
 
-/** Maintain one reusable "allow only these emails" policy; returns its id. */
-export async function ensureReusablePolicy(name: string, emails: string[]): Promise<string> {
+/** Maintain one reusable "allow only these emails" policy; returns its id. When
+ *  gatewayPostureUid is set, also require that device-posture (i.e. require
+ *  Gateway: WARP enrolled + logged into the org). */
+export async function ensureReusablePolicy(
+  name: string,
+  emails: string[],
+  gatewayPostureUid?: string,
+): Promise<string> {
   const list = await cfFetch('GET', '/access/policies?per_page=100', z.array(policySchema).nullable());
-  const body = { name, decision: 'allow', include: emails.map(email => ({ email: { email } })) };
+  const body = {
+    name,
+    decision: 'allow',
+    include: emails.map(email => ({ email: { email } })),
+    require: gatewayPostureUid ? [{ device_posture: { integration_uid: gatewayPostureUid } }] : [],
+  };
   const existing = (list ?? []).find(p => p.name === name);
   if (existing) {
     await cfFetch('PUT', `/access/policies/${existing.id}`, policySchema, body);

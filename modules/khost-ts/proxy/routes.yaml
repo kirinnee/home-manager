@@ -10,4 +10,4 @@ routes:
     service: http://localhost:47317 # kautopilot
 
   - hostname: ssh.ernest.atomi.cloud
-    service: ssh://localhost:22 # SSH (browser-rendered via Access)
+    service: ssh://localhost:2222 # khost loopback sshd (browser-rendered via Access)

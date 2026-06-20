@@ -7,7 +7,16 @@ import { readFile } from 'node:fs/promises';
 import pc from 'picocolors';
 import { parse } from 'yaml';
 import { z } from 'zod';
-import { accessEmails, accessPolicyName, ownerComment, ownerTag, routesFile, tunnelName } from './deps';
+import {
+  accessEmails,
+  accessPolicyName,
+  gatewayPostureUid,
+  ownerComment,
+  ownerTag,
+  requireGateway,
+  routesFile,
+  tunnelName,
+} from './deps';
 import { die, log, need, ok, warn } from './exec';
 import {
   cfConfigured,
@@ -122,7 +131,14 @@ export async function routeSync(opts: SyncOpts = {}): Promise<void> {
   let policyId: string | null = null;
   if (accessOk && !dry) {
     await ensureAccessTag(ownerTag);
-    policyId = await ensureReusablePolicy(accessPolicyName, accessEmails);
+    policyId = await ensureReusablePolicy(
+      accessPolicyName,
+      accessEmails,
+      requireGateway ? gatewayPostureUid : undefined,
+    );
+  }
+  if (accessOk) {
+    plan.push(`policy → ${accessPolicyName} (${accessEmails.join(', ')})${requireGateway ? ' + require Gateway' : ''}`);
   }
 
   // 2/3. Per-route DNS + Access.
