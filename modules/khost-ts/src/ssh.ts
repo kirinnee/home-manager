@@ -13,10 +13,12 @@ export async function sshHarden(): Promise<void> {
   const user = currentUser();
   if (!user) die('could not determine current user for AllowUsers');
   log(`Writing hardened sshd drop-in (sudo): ${SSHD_DROPIN}`);
-  const body = `# Managed by khost. Key-only, no root, single user.
-PasswordAuthentication no
-KbdInteractiveAuthentication no
-ChallengeResponseAuthentication no
+  // Password auth is ON so Cloudflare browser-rendered SSH can log in without a
+  // short-lived-cert CA. Remote reach is only via the Access-gated tunnel; root
+  // is off and access is limited to the single owner user.
+  const body = `# Managed by khost. Password auth ON (for Cloudflare browser SSH), no root, single user.
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
 PermitRootLogin no
 AllowUsers ${user}
 `;

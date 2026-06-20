@@ -141,11 +141,44 @@ the **synthesize** sub-agent into one numbered list, feed it back into the inter
 writer. Gate = **all reviewers approve** — withhold `complete` until they do, unless the
 user overrides (`complete … --metadata '{"reviewOverride": true}'`).
 
-## Show diffs, not whole docs
+## Review = send the viewer link, not the file
 
-For triage/spec/plans/feedback debates, after each approved version show the **diff** via
-`kautopilot diff <artifact>` (e.g. `kautopilot diff spec`, `kautopilot diff plan:<repo>`),
-not the full document. Revisions are machine-local and never committed.
+Artifacts live in a live web viewer. Whenever you ask the user to **review or
+approve** any artifact (brainstorm, triage, spec, plans, feedback, ticket), do
+**not** paste the file contents or raw `kautopilot diff` output into chat.
+Instead give them a **clickable link** to that artifact in the viewer — it
+renders markdown, mermaid, and colored diffs, and is mobile-friendly — then wait
+for their explicit approval.
+
+**Viewer base URL** (configured for this machine — change here if it moves):
+
+```
+https://kauto.ernest.atomi.cloud
+```
+
+Build `<base> + path`. `<id>` is the session id. The viewer always shows the
+session's **current epoch** for epoch-scoped artifacts, so the epoch is
+implicit — you only choose the **version** (omit it for the latest, which is
+what's under review):
+
+| Artifact   | Link                                |
+| ---------- | ----------------------------------- |
+| Ticket     | `<base>/sessions/<id>/ticket`       |
+| Brainstorm | `<base>/sessions/<id>/brainstorm`   |
+| Triage     | `<base>/sessions/<id>/triage`       |
+| Spec       | `<base>/sessions/<id>/spec`         |
+| Feedback   | `<base>/sessions/<id>/feedback`     |
+| Plans      | `<base>/sessions/<id>/plans/<repo>` |
+
+- **Pin a version** with `/v<n>` (e.g. `…/spec/v3`); omit `/v<n>` for the latest.
+- **Show what changed**: append `/diff` (`…/spec/diff`, `…/plans/<repo>/diff`).
+  Use the diff link on every revision after the first instead of pasting
+  `kautopilot diff` text.
+- Present it as a real clickable link with a short label, e.g.
+  `Review the spec → https://kauto.ernest.atomi.cloud/sessions/ab12cd34/spec/diff`.
+- The viewer must be running (`kautopilot dash up`) for the link to load.
+
+Revisions are machine-local and never committed.
 
 ## Feedback → `rules.md`
 
