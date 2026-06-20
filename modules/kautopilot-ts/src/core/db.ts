@@ -1,11 +1,11 @@
-import { Database } from 'bun:sqlite';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
-import type { SessionRow } from './types';
+import { Database } from "bun:sqlite";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import type { SessionRow } from "./types";
 
 /** Resolved lazily so tests that swap $HOME get an isolated index. */
 function dbPath(): string {
-  return `${process.env.HOME}/.kautopilot/index.db`;
+	return `${process.env.HOME}/.kautopilot/index.db`;
 }
 
 const UPSERT_SQL = `
@@ -24,36 +24,36 @@ const UPSERT_SQL = `
 `;
 
 function rowToParams(row: SessionRow): (string | number | null)[] {
-  return [
-    row.id,
-    row.repo_path,
-    row.worktree,
-    row.git_root,
-    row.git_root_host,
-    row.ticket_id,
-    row.branch,
-    row.local,
-    row.state,
-    row.created_at,
-    row.updated_at,
-  ];
+	return [
+		row.id,
+		row.repo_path,
+		row.worktree,
+		row.git_root,
+		row.git_root_host,
+		row.ticket_id,
+		row.branch,
+		row.local,
+		row.state,
+		row.created_at,
+		row.updated_at,
+	];
 }
 
 let db: Database | null = null;
 let dbOpenedPath: string | null = null;
 
 function getDb(): Database {
-  const path = dbPath();
-  // Reopen if $HOME changed (e.g. between tests with isolated temp homes).
-  if (db && dbOpenedPath !== path) {
-    db.close();
-    db = null;
-  }
-  if (!db) {
-    mkdirSync(dirname(path), { recursive: true });
-    db = new Database(path);
-    dbOpenedPath = path;
-    db.exec(`
+	const path = dbPath();
+	// Reopen if $HOME changed (e.g. between tests with isolated temp homes).
+	if (db && dbOpenedPath !== path) {
+		db.close();
+		db = null;
+	}
+	if (!db) {
+		mkdirSync(dirname(path), { recursive: true });
+		db = new Database(path);
+		dbOpenedPath = path;
+		db.exec(`
       CREATE TABLE IF NOT EXISTS sessions (
         id             TEXT PRIMARY KEY,
         repo_path      TEXT NOT NULL,
@@ -69,44 +69,53 @@ function getDb(): Database {
       );
       CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_worktree ON sessions(repo_path, worktree);
     `);
-    // Migrate: add state column if missing (existing DBs)
-    try {
-      db.exec("ALTER TABLE sessions ADD COLUMN state TEXT NOT NULL DEFAULT 'init'");
-    } catch {
-      // Column already exists — ignore
-    }
-    db.exec('PRAGMA journal_mode=WAL');
-  }
-  return db;
+		// Migrate: add state column if missing (existing DBs)
+		try {
+			db.exec(
+				"ALTER TABLE sessions ADD COLUMN state TEXT NOT NULL DEFAULT 'init'",
+			);
+		} catch {
+			// Column already exists — ignore
+		}
+		db.exec("PRAGMA journal_mode=WAL");
+	}
+	return db;
 }
 
 export function upsertSession(row: SessionRow): void {
-  const d = getDb();
-  d.query(UPSERT_SQL).run(...rowToParams(row));
+	const d = getDb();
+	d.query(UPSERT_SQL).run(...rowToParams(row));
 }
 
 export function getSessionById(id: string): SessionRow | null {
-  const d = getDb();
-  return d.query('SELECT * FROM sessions WHERE id = $1').get(id) as SessionRow | null;
+	const d = getDb();
+	return d
+		.query("SELECT * FROM sessions WHERE id = $1")
+		.get(id) as SessionRow | null;
 }
 
-export function getSessionByWorktree(repoPath: string, worktree: string): SessionRow | null {
-  const d = getDb();
-  return d
-    .query('SELECT * FROM sessions WHERE repo_path = $1 AND worktree = $2')
-    .get(repoPath, worktree) as SessionRow | null;
+export function getSessionByWorktree(
+	repoPath: string,
+	worktree: string,
+): SessionRow | null {
+	const d = getDb();
+	return d
+		.query("SELECT * FROM sessions WHERE repo_path = $1 AND worktree = $2")
+		.get(repoPath, worktree) as SessionRow | null;
 }
 
 export function listSessions(options?: { includeAll?: boolean }): SessionRow[] {
-  const d = getDb();
-  const sessions = d.query('SELECT * FROM sessions ORDER BY created_at DESC').all() as SessionRow[];
-  if (options?.includeAll) {
-    return sessions;
-  }
-  return sessions.filter(s => s.state === 'running');
+	const d = getDb();
+	const sessions = d
+		.query("SELECT * FROM sessions ORDER BY created_at DESC")
+		.all() as SessionRow[];
+	if (options?.includeAll) {
+		return sessions;
+	}
+	return sessions.filter((s) => s.state === "running");
 }
 
 export function deleteSession(id: string): void {
-  const d = getDb();
-  d.query('DELETE FROM sessions WHERE id = $1').run(id);
+	const d = getDb();
+	d.query("DELETE FROM sessions WHERE id = $1").run(id);
 }

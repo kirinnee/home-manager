@@ -1,15 +1,15 @@
-import { ensureGlobalConfig, resolveConfig, writeConfig } from './config';
-import { upsertSession } from './db';
-import { generateSessionId } from './id';
+import { ensureGlobalConfig, resolveConfig, writeConfig } from "./config";
+import { upsertSession } from "./db";
+import { generateSessionId } from "./id";
 import {
-  type ExecMode,
-  type Lpsm,
-  type Org,
-  type RunMode,
-  resolveOrgPolicy,
-  type SessionMeta,
-  writeSessionMeta,
-} from './session-meta';
+	type ExecMode,
+	type Lpsm,
+	type Org,
+	type RunMode,
+	resolveOrgPolicy,
+	type SessionMeta,
+	writeSessionMeta,
+} from "./session-meta";
 
 // ============================================================================
 // Create a host-driven session: DB row + resolved config + session.json. Org is
@@ -18,67 +18,68 @@ import {
 // ============================================================================
 
 export interface CreateSessionInput {
-  ticketId: string | null;
-  /** The raw free-form request when there's no ticket id (ad-hoc flow). */
-  request?: string;
-  org: Org;
-  repoPath: string;
-  worktree: string;
-  gitRoot?: string;
-  gitRootHost?: string;
-  runMode?: RunMode;
-  execMode?: ExecMode;
-  maxParallelRepos?: number;
-  /** AtomiCloud service-tree tags (atomicloud-only; omit for liftoff). */
-  lpsm?: Lpsm;
-  /** Arbitrary user-supplied free-form tags, distinct from the structured lpsm. */
-  tags?: string[];
+	ticketId: string | null;
+	/** The raw free-form request when there's no ticket id (ad-hoc flow). */
+	request?: string;
+	org: Org;
+	repoPath: string;
+	worktree: string;
+	gitRoot?: string;
+	gitRootHost?: string;
+	runMode?: RunMode;
+	execMode?: ExecMode;
+	maxParallelRepos?: number;
+	/** AtomiCloud service-tree tags (atomicloud-only; omit for liftoff). */
+	lpsm?: Lpsm;
+	/** Arbitrary user-supplied free-form tags, distinct from the structured lpsm. */
+	tags?: string[];
 }
 
 export function createSession(input: CreateSessionInput): SessionMeta {
-  const sessionId = generateSessionId();
-  const policy = resolveOrgPolicy(input.org);
+	const sessionId = generateSessionId();
+	const policy = resolveOrgPolicy(input.org);
 
-  ensureGlobalConfig();
-  const config = resolveConfig(input.org);
-  writeConfig(sessionId, config);
+	ensureGlobalConfig();
+	const config = resolveConfig(input.org);
+	writeConfig(sessionId, config);
 
-  const now = new Date().toISOString();
-  upsertSession({
-    id: sessionId,
-    repo_path: input.repoPath,
-    worktree: input.worktree,
-    git_root: input.gitRoot ?? input.repoPath,
-    git_root_host: input.gitRootHost ?? input.repoPath,
-    ticket_id: input.ticketId,
-    branch: null,
-    local: input.ticketId ? 0 : 1,
-    state: 'running',
-    created_at: now,
-    updated_at: now,
-  });
+	const now = new Date().toISOString();
+	upsertSession({
+		id: sessionId,
+		repo_path: input.repoPath,
+		worktree: input.worktree,
+		git_root: input.gitRoot ?? input.repoPath,
+		git_root_host: input.gitRootHost ?? input.repoPath,
+		ticket_id: input.ticketId,
+		branch: null,
+		local: input.ticketId ? 0 : 1,
+		state: "running",
+		created_at: now,
+		updated_at: now,
+	});
 
-  const meta: SessionMeta = {
-    sessionId,
-    worktree: input.worktree,
-    repoPath: input.repoPath,
-    ticketId: input.ticketId ?? '',
-    // Persist the raw request only for the ad-hoc (no-ticket) flow.
-    ...(input.request ? { request: input.request } : {}),
-    org: input.org,
-    ticketSystem: policy.ticketSystem,
-    commitSpec: policy.commitSpec,
-    baseBranch: policy.baseBranch,
-    epoch: 1,
-    runMode: input.runMode ?? config.settings.runMode,
-    execMode: input.execMode ?? config.settings.execMode,
-    maxParallelRepos: input.maxParallelRepos ?? config.settings.maxParallelRepos,
-    repos: [],
-    // Only set lpsm when provided — liftoff leaves it undefined.
-    ...(input.lpsm ? { lpsm: input.lpsm } : {}),
-    // Only set free-form tags when non-empty.
-    ...(input.tags && input.tags.length > 0 ? { tags: input.tags } : {}),
-  };
-  writeSessionMeta(meta);
-  return meta;
+	const meta: SessionMeta = {
+		sessionId,
+		worktree: input.worktree,
+		repoPath: input.repoPath,
+		ticketId: input.ticketId ?? "",
+		// Persist the raw request only for the ad-hoc (no-ticket) flow.
+		...(input.request ? { request: input.request } : {}),
+		org: input.org,
+		ticketSystem: policy.ticketSystem,
+		commitSpec: policy.commitSpec,
+		baseBranch: policy.baseBranch,
+		epoch: 1,
+		runMode: input.runMode ?? config.settings.runMode,
+		execMode: input.execMode ?? config.settings.execMode,
+		maxParallelRepos:
+			input.maxParallelRepos ?? config.settings.maxParallelRepos,
+		repos: [],
+		// Only set lpsm when provided — liftoff leaves it undefined.
+		...(input.lpsm ? { lpsm: input.lpsm } : {}),
+		// Only set free-form tags when non-empty.
+		...(input.tags && input.tags.length > 0 ? { tags: input.tags } : {}),
+	};
+	writeSessionMeta(meta);
+	return meta;
 }
