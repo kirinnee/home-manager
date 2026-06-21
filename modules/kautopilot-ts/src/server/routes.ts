@@ -5,7 +5,11 @@ import {
 	getPlan,
 	getSessionDetail,
 	isDocKind,
+	kloopDescribe,
+	listKloopDir,
+	listKloopRuns,
 	listSessionSummaries,
+	readKloopFile,
 	storeFingerprint,
 } from "./data";
 import { SHELL_HTML } from "./page";
@@ -100,6 +104,30 @@ function handleApi(parts: string[], url: URL): Response | null {
 	// /api/events — SSE live-reload stream.
 	if (parts.length === 2 && parts[1] === "events") {
 		return eventsStream();
+	}
+
+	// /api/kloop/* — the kloop run viewer (proxies the local kloop CLI + ~/.kloop).
+	if (parts[1] === "kloop") {
+		// /api/kloop/runs
+		if (parts.length === 3 && parts[2] === "runs") {
+			return json(listKloopRuns());
+		}
+		// /api/kloop/runs/:id — structured describe
+		if (parts.length === 4 && parts[2] === "runs") {
+			const detail = kloopDescribe(decodeURIComponent(parts[3]));
+			return detail ? json(detail) : notFoundJson();
+		}
+		// /api/kloop/file?path=<rel> — raw file under ~/.kloop
+		if (parts.length === 3 && parts[2] === "file") {
+			const rel = url.searchParams.get("path") ?? "";
+			return json({ content: readKloopFile(rel) });
+		}
+		// /api/kloop/dir?path=<rel> — directory listing under ~/.kloop
+		if (parts.length === 3 && parts[2] === "dir") {
+			const rel = url.searchParams.get("path") ?? "";
+			return json(listKloopDir(rel));
+		}
+		return notFoundJson();
 	}
 	// /api/sessions
 	if (parts.length === 2 && parts[1] === "sessions") {
