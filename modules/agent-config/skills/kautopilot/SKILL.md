@@ -139,6 +139,11 @@ matching session(s):
 - **Serialize interaction.** A repo's `next --repo` may yield an `interactive` step — a
   sub-agent can't talk to the user, so **return it to the main chat** and handle it
   inline there, one at a time, while other repos keep progressing on mechanical work.
+- **Bad repo path → stop, don't no-op.** Since kautopilot can launch outside any repo,
+  each repo's worktree is created from the path triage recorded. If `seed` can't create
+  a real worktree it logs a `seed:no_worktree` event (visible in `kautopilot logs`/
+  `status`). If you see it, **stop that repo and tell the user the path is wrong** —
+  fix it / re-triage; do NOT let the repo run on to a PR with no actual work.
 
 ## Per-`kind` execution
 

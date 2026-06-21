@@ -173,7 +173,7 @@ function provisionWorktree(
 	repoPath: string,
 	name: string,
 	fallback: string,
-): { worktree: string; branch: string } {
+): { worktree: string; branch: string; provisioned: boolean } {
 	const resolveByName = (): string | null => {
 		try {
 			const list = Bun.spawnSync({
@@ -209,7 +209,7 @@ function provisionWorktree(
 			});
 		}
 		const wt = resolveByName();
-		if (wt) return { worktree: wt, branch: name };
+		if (wt) return { worktree: wt, branch: name, provisioned: true };
 	} catch {
 		// wt not installed — fall through
 	}
@@ -229,12 +229,14 @@ function provisionWorktree(
 				stderr: "pipe",
 			});
 		}
-		if (existsSync(fallback)) return { worktree: fallback, branch: name };
+		if (existsSync(fallback))
+			return { worktree: fallback, branch: name, provisioned: true };
 	} catch {
 		// no git
 	}
-	// 3. sandbox / no-VCS — a bare deterministic path.
-	return { worktree: fallback, branch: name };
+	// 3. sandbox / no-VCS — a bare deterministic path. NOT a real worktree: the
+	// caller must surface this (repoPath wasn't a usable git repo).
+	return { worktree: fallback, branch: name, provisioned: false };
 }
 
 // --- seed (code, repo) ------------------------------------------------------
@@ -271,6 +273,27 @@ const seed: StepDef = {
 			const repoPath = repo.repoPath ?? ctx.meta.repoPath;
 			const fallback = join(dirname(ctx.meta.worktree), name);
 			const prov = provisionWorktree(repoPath, name, fallback);
+			// kautopilot can launch outside any repo, so a repo's path comes from
+			// triage. If no REAL worktree could be created, the path was missing or
+			// not a git repo — surface it loudly (don't let the repo silently no-op
+			// its way to a PR with no work). Diagnosable via the WAL/status; the bare
+			// path is still set so the sandbox/tests proceed deterministically.
+			if (!prov.provisioned) {
+				appendEvent(ctx.sessionId, {
+					ts: new Date().toISOString(),
+					event: "seed:no_worktree",
+					version: ctx.version,
+					repo: repo.repo,
+					metadata: {
+						repoPath,
+						reason:
+							"could not create a worktree — repo path missing or not a git repo (triage must provide each repo's path)",
+					},
+				});
+				console.warn(
+					`[seed] repo "${repo.repo}": no worktree created at "${repoPath}" — triage must provide a valid git repo path.`,
+				);
+			}
 			updateSessionMeta(ctx.sessionId, (m) => {
 				const entry = m.repos.find((r) => r.repo === repo.repo);
 				if (entry) {

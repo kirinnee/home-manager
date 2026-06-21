@@ -21,6 +21,13 @@ const implementerRetrySchema = z.object({
   backoffBaseMs: z.number().min(0).default(5000),
 });
 
+// Reviewer retry config — retries a reviewer that produced NO parseable verdict
+// (transport failure, crash, timeout). A real approve/reject verdict is never retried.
+const reviewerRetrySchema = z.object({
+  maxRetries: z.number().min(0).max(10).default(2),
+  backoffBaseMs: z.number().min(0).default(5000),
+});
+
 // Backward compat: old nested shapes accepted as input aliases
 const legacyReReviewSchema = z.object({
   enabled: z.boolean().optional(),
@@ -63,6 +70,7 @@ const configSchema = z
     rerankAfterCheckpoint: z.boolean().default(true),
     snapshot: z.boolean().default(false),
     implementerRetry: implementerRetrySchema.optional(),
+    reviewerRetry: reviewerRetrySchema.optional(),
     firstIterationWeightMultiplier: z.number().min(1).max(1000).default(2),
     // Backward compat: old nested reReview shape
     reReview: legacyReReviewSchema.optional(),
@@ -140,6 +148,7 @@ const configSchema = z
       rerankAfterCheckpoint: data.rerankAfterCheckpoint ?? true,
       snapshot: data.snapshot ?? false,
       implementerRetry: data.implementerRetry ?? { maxRetries: 2, backoffBaseMs: 5000 },
+      reviewerRetry: data.reviewerRetry ?? { maxRetries: 2, backoffBaseMs: 5000 },
       firstIterationWeightMultiplier: data.firstIterationWeightMultiplier ?? 2,
       prompts,
     };
@@ -165,6 +174,10 @@ export const resolvedConfigSchema = z.object({
   rerankAfterCheckpoint: z.boolean(),
   snapshot: z.boolean(),
   implementerRetry: z.object({
+    maxRetries: z.number().min(0).max(10),
+    backoffBaseMs: z.number().min(0),
+  }),
+  reviewerRetry: z.object({
     maxRetries: z.number().min(0).max(10),
     backoffBaseMs: z.number().min(0),
   }),
@@ -448,6 +461,7 @@ export const DEFAULT_CONFIG: Config = {
   rerankAfterCheckpoint: true,
   snapshot: false,
   implementerRetry: { maxRetries: 2, backoffBaseMs: 5000 },
+  reviewerRetry: { maxRetries: 2, backoffBaseMs: 5000 },
   firstIterationWeightMultiplier: 2,
 };
 
