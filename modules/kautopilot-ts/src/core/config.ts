@@ -23,7 +23,8 @@ const PROMPT_VARS: Record<string, Record<string, string>> = {
 	"agents.phase1.spec_reviewers.*": {
 		spec: "path to the spec file",
 		ticket: "path to the ticket file",
-		triage: "path to the triage file (for verification_evidence reviewer)",
+		triage:
+			"path to the triage file (for the high_level / grounding reviewers)",
 	},
 	"agents.phase1.plan_reviewers.*": {
 		plans: "path to the plans directory",
