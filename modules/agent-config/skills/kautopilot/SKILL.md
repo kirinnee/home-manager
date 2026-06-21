@@ -23,7 +23,8 @@ loop:
   if d.done:                 # see "Reading `done`" — NOT always session-complete
       handle(d); break/continue accordingly
   if d.kind == "interactive":
-      run d.prompt INLINE, conversing with the user; satisfy d.contract (approval gate)
+      run d.prompt INLINE; for WRITER steps run the per-revision loop below
+      (reviewers → `kautopilot revise` to mint+present each version → user feedback)
   else:  # d.kind == "agent"
       spawn a fresh isolated Task subagent with d.prompt; it writes d.contract.outputFile
   kautopilot complete --output d.contract.outputFile [--metadata {…}] [--repo <repo>]
@@ -147,21 +148,32 @@ matching session(s):
   write_fix, amend_plans, reviewers, per-repo implement) — **always** a fresh isolated
   `Task` subagent, never inline.
 
-## Review steps (fan-out)
+## Reviewers run BEFORE you present (fan-out)
 
-When a descriptor carries `review`: spawn **every reviewer** as a parallel sub-agent, run
-the **synthesize** sub-agent into one numbered list, feed it back into the interactive
-writer. Gate = **all reviewers approve** — withhold `complete` until they do, unless the
-user overrides (`complete … --metadata '{"reviewOverride": true}'`).
+When the writer descriptor (write_spec / write_plans) carries `review`, run the
+reviewers **before** you present a version to the user — so every version the user
+sees is already review-checked. On your working draft: spawn **every reviewer** as
+a parallel sub-agent, run the **synthesize** sub-agent into one numbered list, and
+fix the draft until **all reviewers approve** (or the user overrides via
+`complete … --metadata '{"reviewOverride": true}'`). **Reviewer rounds are NOT
+versioned** — they refine the draft in place. Only once it's review-clean do you
+mint the version (`revise`, below) and present it. There is no separate
+`spec_review` / `plan_review` step.
 
-## Review = send the viewer link, not the file
+## Each user presentation = a new version (`revise`)
 
-Artifacts live in a live web viewer. Whenever you ask the user to **review or
-approve** any artifact (brainstorm, triage, spec, plans, feedback, ticket), do
-**not** paste the file contents or raw `kautopilot diff` output into chat.
-Instead give them a **clickable link** to that artifact in the viewer — it
-renders markdown, mermaid, and colored diffs, and is mobile-friendly — then wait
-for their explicit approval.
+A version is a **snapshot the user was shown.** Every time you present a writer
+artifact (brainstorm, triage, spec, plans, feedback) to the user, it must be a
+**new version** — never silently overwrite what they already saw. The binary mints
+versions; you never pick numbers or hand-build URLs:
+
+1. To present, run **`kautopilot revise [--repo <repo>]`**. It copies the latest
+   version forward (`vN → vN+1`), and returns `{version, path, url, diffUrl}`.
+2. Edit the returned **`path`** to address the user's latest feedback (reviewer
+   rounds first, per above — those don't mint versions).
+3. **Present the link**, not the file: prefix the configured base URL to the
+   returned `url` (or `diffUrl` to show what changed) and post it as a clickable
+   link. Never construct a version URL yourself — always use what `revise` returns.
 
 **Viewer base URL** (configured for this machine — change here if it moves):
 
@@ -169,57 +181,34 @@ for their explicit approval.
 https://kauto.ernest.atomi.cloud
 ```
 
-Build `<base> + path`. `<id>` is the session id. The viewer always shows the
-session's **current epoch** for epoch-scoped artifacts, so the epoch is
-implicit — you only choose the **version** (omit it for the latest, which is
-what's under review):
-
-| Artifact   | Link                                |
-| ---------- | ----------------------------------- |
-| Ticket     | `<base>/sessions/<id>/ticket`       |
-| Brainstorm | `<base>/sessions/<id>/brainstorm`   |
-| Triage     | `<base>/sessions/<id>/triage`       |
-| Spec       | `<base>/sessions/<id>/spec`         |
-| Feedback   | `<base>/sessions/<id>/feedback`     |
-| Plans      | `<base>/sessions/<id>/plans/<repo>` |
-
-- **Pin a version** with `/v<n>` (e.g. `…/spec/v3`); omit `/v<n>` for the latest.
-- **Show what changed**: append `/diff` (`…/spec/diff`, `…/plans/<repo>/diff`).
-  Use the diff link on every revision after the first instead of pasting
-  `kautopilot diff` text.
-- Present it as a real clickable link with a short label, e.g.
-  `Review the spec → https://kauto.ernest.atomi.cloud/sessions/ab12cd34/spec/diff`.
-- The viewer must be running (`kautopilot dash up`) for the link to load.
-
-Revisions are machine-local and never committed.
+(The ticket, which is unversioned, has no `revise`: link it directly as
+`<base>/sessions/<id>/ticket`.) The viewer must be running (`kautopilot dash up`)
+for links to load; it always shows the session's current epoch. Revisions are
+machine-local and never committed.
 
 ## The per-revision review loop (don't just move on)
 
-Every interactive writer artifact (brainstorm, triage, spec, plans, feedback) is
-**iterated until the user has no more feedback** — never auto-advance after one
-draft. A new version is NOT approval; it's the start of another review round.
-For a single artifact step, loop like this and do **not** `complete` (which lets
-the binary move to the next step) until step 5:
+Every interactive writer artifact is **iterated until the user has no more
+feedback** — never auto-advance after one draft. A new version is NOT approval;
+it's the start of another review round. For a single artifact step, loop like this
+and do **not** `complete` (which lets the binary move to the next step) until the
+user explicitly approves:
 
-1. **Write / update** the artifact (the writer produces the new version — v1, then
-   v2 after feedback, then v3, …).
-2. **Present it — don't move on.** In chat, post:
-   - the **viewer link** to the new version (the doc link for v1; the `/diff` link
-     once a prior version exists, so they see exactly what changed),
-   - a **2–4 line summary** of what this version says / what changed since the last,
-   - a short **TODO / open-items list**: anything unresolved, decisions still
-     needed, and which pieces of the user's last feedback this version addressed
-     (and any it did NOT, with why).
+1. **Draft / update** the working version, then run the **reviewers** (above) and
+   fix until review-clean — these rounds are not versioned.
+2. **Mint + present.** Run `kautopilot revise` to snapshot this as the next version,
+   then post: the **viewer link** it returned (the `diffUrl` once a prior version
+   exists, so they see exactly what changed); a **2–4 line summary** of what changed;
+   and a short **TODO / open-items** list (what's unresolved, and which of the user's
+   last feedback this version did / did NOT address).
 3. **Ask** for feedback or approval.
-4. **Any feedback = not approved.** Address it → that produces the next version →
-   go back to step 2. Re-present (new link/diff + summary + updated open-items) and
-   re-ask **every** round. Keep looping: v2 ok? → feedback → v3 ok? → feedback → …
-5. **Only when the user has no further feedback AND explicitly approves**, and the
-   open-items list is empty (all feedback addressed) → `complete` the step. The
-   binary then advances to the next step.
+4. **Any feedback = not approved.** Address it → `revise` again → that's the next
+   version → go back to step 2. Keep looping: v2 ok? → feedback → v3 ok? → …
+5. **Only when the user has no further feedback AND explicitly approves**, with the
+   open-items empty → `kautopilot complete`. The binary advances to the next step.
 
-So: v1 presented → feedback → v2 — you do **not** silently jump to v2 and proceed;
-you present v2, ask if v2 is OK, and so on until there's nothing left to change.
+So: v1 presented → feedback → `revise` → v2 — you do **not** silently overwrite v1;
+you mint v2, present it, ask if v2 is OK, and so on until there's nothing left.
 
 ## Feedback → `rules.md`
 
