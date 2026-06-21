@@ -161,8 +161,19 @@ async function runStart(
 		throw new Error("--max-repos must be at least 1.");
 	}
 
-	const repoPath = getGitRoot();
-	const worktree = getWorktree();
+	// kautopilot can launch from ANYWHERE — even outside a git repo (a hub from
+	// which triage decides which repos to touch). When the cwd isn't a repo, it's
+	// just a bookkeeping location; each repo's real path comes from triage and its
+	// worktree is created on demand by `seed` via worktrunk.
+	let repoPath: string;
+	let worktree: string;
+	try {
+		repoPath = getGitRoot();
+		worktree = getWorktree();
+	} catch {
+		repoPath = process.cwd();
+		worktree = process.cwd();
+	}
 	const lpsm = buildLpsm(opts);
 
 	const meta = createSession({

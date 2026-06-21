@@ -77,6 +77,12 @@ shapes mean different things — branch on `phase`:
 
 Org is `liftoff` or `atomicloud`, resolved by `--org` → detect-from-ticket → ask.
 
+**Launch from anywhere.** kautopilot need NOT be started inside a repo — the cwd can
+be any directory (a hub) with access to many repos. **Triage** decides which repos the
+task touches and records each repo's absolute path (`repoPaths`); the execution `seed`
+step then creates each repo's worktree on demand via worktrunk. So you don't pre-pick a
+repo at start; triage does, and it must locate (or clone, with the user's OK) each repo.
+
 ### LPSM service-tree tags (atomicloud only)
 
 At start, for **atomicloud only**, derive the AtomiCloud LPSM service-tree from the

@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { getSessionByWorktree } from "../core/db";
+import { getSessionByWorktree, listSessions } from "../core/db";
 import { getGitRoot, getWorktree } from "../core/git";
 import { readLog } from "../core/log";
 import { logDim, logError } from "../util/format";
@@ -28,11 +28,20 @@ async function runLogs(
 	phase: string | undefined,
 	opts: { tail: string; json?: boolean },
 ): Promise<void> {
-	const repoPath = getGitRoot();
-	const worktree = getWorktree();
-	const session = getSessionByWorktree(repoPath, worktree);
+	// Tolerate launching outside a git repo (the hub case): try the cwd's
+	// worktree, else fall back to the single running session.
+	let session = null;
+	try {
+		session = getSessionByWorktree(getGitRoot(), getWorktree());
+	} catch {
+		// not in a repo
+	}
 	if (!session) {
-		logError("No session found in this worktree.");
+		const running = listSessions();
+		if (running.length === 1) session = running[0];
+	}
+	if (!session) {
+		logError("No session here. Pass --session <id> (or run inside its repo).");
 		process.exit(1);
 	}
 
