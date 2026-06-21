@@ -18,7 +18,7 @@ function createTestDb(): Database {
       created_at     TEXT NOT NULL,
       updated_at     TEXT NOT NULL
     );
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_worktree ON sessions(repo_path, worktree);
+    CREATE INDEX IF NOT EXISTS idx_sessions_worktree ON sessions(repo_path, worktree);
   `);
 	return db;
 }
@@ -234,5 +234,28 @@ describe("Database operations", () => {
 			.all("/repo") as SessionRow[];
 		expect(results).toHaveLength(2);
 		expect(results.map((r) => r.worktree)).toEqual(["/repo", "/repo-wt"]);
+	});
+
+	it("allows multiple sessions in the SAME worktree (no 1-per-folder limit)", () => {
+		const base = (id: string): SessionRow => ({
+			id,
+			repo_path: "/repo",
+			worktree: "/repo",
+			git_root: "x",
+			git_root_host: "x",
+			ticket_id: null,
+			branch: null,
+			local: 0,
+			state: "running",
+			created_at: "2026-03-24T10:00:00Z",
+			updated_at: "2026-03-24T10:00:00Z",
+		});
+		db.query(UPSERT_SQL).run(...rowToParams(base("s1")));
+		// Second session, same repo_path + worktree — must NOT throw.
+		db.query(UPSERT_SQL).run(...rowToParams(base("s2")));
+		const results = db
+			.query("SELECT * FROM sessions WHERE repo_path = $1 AND worktree = $2")
+			.all("/repo", "/repo") as SessionRow[];
+		expect(results).toHaveLength(2);
 	});
 });

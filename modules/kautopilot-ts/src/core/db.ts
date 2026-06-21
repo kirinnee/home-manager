@@ -67,7 +67,6 @@ function getDb(): Database {
         created_at     TEXT NOT NULL,
         updated_at     TEXT NOT NULL
       );
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_worktree ON sessions(repo_path, worktree);
     `);
 		// Migrate: add state column if missing (existing DBs)
 		try {
@@ -77,6 +76,17 @@ function getDb(): Database {
 		} catch {
 			// Column already exists — ignore
 		}
+		// A worktree is NOT unique to a session: many sessions can run in the same
+		// folder. Drop the legacy UNIQUE index and replace it with a plain lookup
+		// index. (DROP first so existing DBs lose the old uniqueness constraint.)
+		try {
+			db.exec("DROP INDEX IF EXISTS idx_sessions_worktree");
+		} catch {
+			// no such index — ignore
+		}
+		db.exec(
+			"CREATE INDEX IF NOT EXISTS idx_sessions_worktree ON sessions(repo_path, worktree)",
+		);
 		db.exec("PRAGMA journal_mode=WAL");
 	}
 	return db;
@@ -94,14 +104,34 @@ export function getSessionById(id: string): SessionRow | null {
 		.get(id) as SessionRow | null;
 }
 
+/**
+ * The single most relevant session in a worktree: a running one wins, else the
+ * most recently created. Since a worktree can now host multiple sessions, this
+ * is a best-effort convenience for commands that operate on "the session here"
+ * (status/logs/stop/delete); the critical next/complete path uses
+ * {@link getSessionsByWorktree} to detect ambiguity instead of guessing.
+ */
 export function getSessionByWorktree(
 	repoPath: string,
 	worktree: string,
 ): SessionRow | null {
 	const d = getDb();
 	return d
-		.query("SELECT * FROM sessions WHERE repo_path = $1 AND worktree = $2")
+		.query(
+			"SELECT * FROM sessions WHERE repo_path = $1 AND worktree = $2 ORDER BY (state = 'running') DESC, created_at DESC",
+		)
 		.get(repoPath, worktree) as SessionRow | null;
+}
+
+/** Every session registered in a worktree (a folder may host several). */
+export function getSessionsByWorktree(
+	repoPath: string,
+	worktree: string,
+): SessionRow[] {
+	const d = getDb();
+	return d
+		.query("SELECT * FROM sessions WHERE repo_path = $1 AND worktree = $2")
+		.all(repoPath, worktree) as SessionRow[];
 }
 
 export function listSessions(options?: { includeAll?: boolean }): SessionRow[] {
