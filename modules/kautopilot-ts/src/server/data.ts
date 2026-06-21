@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { sessionDir } from "../core/artifacts";
 import {
 	type ArtifactKind,
@@ -328,4 +328,72 @@ export function getDiff(
 		fromMarkdown: from >= 1 ? read(from) : "",
 		toMarkdown: read(to),
 	};
+}
+
+// ============================================================================
+// Kloop run viewer — proxies the local `kloop` CLI for structured JSON
+// (ps/describe) and reads raw files under ~/.kloop/<runId>/ for logs/evidence/
+// specs. Best-effort: when kloop is absent (e.g. the dockerized dashboard) these
+// return empty/null so the rest of the UI still works.
+// ============================================================================
+
+function kloopRoot(): string {
+	return `${process.env.HOME}/.kloop`;
+}
+
+/** Run a kloop subcommand and parse its JSON stdout; null on any failure. */
+function kloopJson(args: string[]): unknown {
+	try {
+		const proc = Bun.spawnSync({
+			cmd: ["kloop", ...args],
+			stdout: "pipe",
+			stderr: "pipe",
+			env: { ...(process.env as Record<string, string>), NO_COLOR: "1" },
+		});
+		if (proc.exitCode !== 0) return null;
+		return JSON.parse((proc.stdout?.toString() ?? "").trim());
+	} catch {
+		return null;
+	}
+}
+
+/** All kloop runs (newest first per kloop), via `kloop ps -a --json`. */
+export function listKloopRuns(): unknown[] {
+	const d = kloopJson(["ps", "-a", "--json"]);
+	return Array.isArray(d) ? d : [];
+}
+
+/** Structured run detail (loops/implementer/reviewers/verdicts) via `describe`. */
+export function kloopDescribe(id: string): unknown {
+	return kloopJson(["describe", id, "--json"]);
+}
+
+/** Resolve a path under ~/.kloop, refusing traversal outside it. */
+function safeKloopPath(rel: string): string | null {
+	const root = kloopRoot();
+	const p = resolve(root, rel);
+	if (p !== root && !p.startsWith(`${root}/`)) return null;
+	return p;
+}
+
+/** Raw contents of a file under ~/.kloop (logs, evidence, specs); null if absent. */
+export function readKloopFile(rel: string): string | null {
+	const p = safeKloopPath(rel);
+	if (!p || !existsSync(p)) return null;
+	try {
+		return readFileSync(p, "utf-8");
+	} catch {
+		return null;
+	}
+}
+
+/** Directory listing under ~/.kloop (to discover loops/agents/evidence files). */
+export function listKloopDir(rel: string): string[] {
+	const p = safeKloopPath(rel);
+	if (!p || !existsSync(p)) return [];
+	try {
+		return readdirSync(p);
+	} catch {
+		return [];
+	}
 }

@@ -366,6 +366,27 @@ details.toc li.lvl3 a { padding-left: var(--s-4); font-size: 12px; color: var(--
 .diff-pane-h { font-family: var(--font-mono); font-size: 0.76rem; padding: 4px 10px; background: var(--surface-2); border-bottom: 1px solid var(--border); color: var(--muted); }
 .diff-pane .prose { font-size: 13.5px; padding: var(--s-4); }
 @media (max-width: 720px) { .diff-side { grid-template-columns: 1fr; } }
+
+/* ── kloop run viewer ─────────────────────────────────────────────────── */
+.klist { display: flex; flex-direction: column; gap: var(--s-2); }
+.krow { display: flex; align-items: center; gap: var(--s-3); padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); }
+.krow:hover { background: var(--surface-2); text-decoration: none; }
+.krow .kid { font-family: var(--font-mono); font-weight: 600; color: var(--fg); }
+.krow .kws { color: var(--fg-soft); }
+.krow .kmeta, .kmeta { color: var(--muted); font-size: 0.82rem; margin-left: auto; }
+.khero { padding: var(--s-4); border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); margin-bottom: var(--s-5); }
+.khero .kid { font-family: var(--font-mono); font-weight: 700; }
+.khero .kws { font-family: var(--font-mono); font-size: 0.8rem; color: var(--muted); margin-top: 4px; word-break: break-all; }
+.khero .kmeta { margin-left: 0; margin-top: 6px; }
+.kbanner { margin-top: 10px; padding: 6px 10px; border-radius: var(--r-sm); background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn-border); font-size: 0.85rem; }
+.kcard { border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); padding: var(--s-3) var(--s-4); margin-bottom: var(--s-3); }
+.kcard-h { font-weight: 600; font-size: 0.9rem; margin-bottom: 6px; display: flex; align-items: center; gap: var(--s-2); }
+.kline { font-size: 0.85rem; color: var(--fg-soft); padding: 2px 0; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.kerr { color: var(--err); font-size: 0.82rem; margin-top: 4px; white-space: pre-wrap; }
+.kmuted { color: var(--muted); font-size: 0.82rem; }
+.hbadge { font-size: 0.7rem; padding: 1px 6px; border-radius: var(--r-full); background: var(--surface-2); border: 1px solid var(--border); color: var(--muted); }
+.kbtns { display: flex; gap: var(--s-2); flex-wrap: wrap; margin-top: 4px; }
+.klog { background: var(--code-bg); border: 1px solid var(--code-border); border-radius: var(--r-sm); padding: var(--s-3); overflow-x: auto; font-size: 0.78rem; line-height: 1.5; max-height: 480px; overflow-y: auto; white-space: pre-wrap; }
 .diff-wrap {
 	border: 1px solid var(--code-border); border-radius: var(--r-md);
 	background: var(--code-bg); overflow-x: auto; -webkit-overflow-scrolling: touch;
@@ -618,7 +639,7 @@ const CLIENT_SCRIPT = [
 	'  app.innerHTML = "";',
 	"  main.classList.remove('prose-page');",
 	'  const head = el("div", "page-head");',
-	'  head.innerHTML = \'<h1 class="page-title">Sessions</h1><div class="meta-row">kautopilot autopilot runs</div>\';',
+	'  head.innerHTML = \'<h1 class="page-title">Sessions</h1><div class="meta-row">kautopilot autopilot runs · <a href="/kloop">Kloop runs →</a></div>\';',
 	"  app.appendChild(head);",
 	"  if (!sessions || sessions.length === 0) {",
 	"    app.appendChild(el('div', 'empty', '<h1>No sessions yet</h1><p>Start an autopilot run and it will show up here.</p>'));",
@@ -785,11 +806,63 @@ const CLIENT_SCRIPT = [
 	"  main.classList.remove('prose-page');",
 	"  app.innerHTML = '<div class=\"empty\"><h1>Not found</h1><p>No session <code>' + esc(id) + '</code>.</p><p><a href=\"/\">← Back to sessions</a></p></div>';",
 	"}",
+	"// ── Kloop run viewer (adapted from vibe-dash; proxies the kloop CLI) ───",
+	"function fmtDur(ms) { if (ms == null) return ''; const s = Math.round(ms / 1000); if (s < 60) return s + 's'; const m = Math.floor(s / 60); if (m < 60) return m + 'm ' + (s % 60) + 's'; const h = Math.floor(m / 60); return h + 'h ' + (m % 60) + 'm'; }",
+	"function kbadge(status) { return '<span class=\"badge ' + tone(status) + '\"><span class=\"pip\"></span>' + esc(status) + '</span>'; }",
+	"function kpill(text, t) { return '<span class=\"badge ' + t + '\">' + esc(text) + '</span>'; }",
+	"function hbadge(h) { return h ? '<span class=\"hbadge\">' + esc(h) + '</span>' : ''; }",
+	"async function renderKloop() {",
+	"  crumbs([{ text: 'Sessions', href: '/' }, { text: 'Kloop' }]);",
+	"  showSkeleton(4);",
+	"  const runs = (await api('/kloop/runs')) || [];",
+	"  app.innerHTML = ''; main.classList.remove('prose-page');",
+	"  if (!runs.length) { app.appendChild(el('div', 'empty', 'No kloop runs. (Use `kautopilot serve` directly — kloop data is not in the docker dashboard.)')); return; }",
+	"  runs.sort((a, b) => { const ar = a.status === 'running' ? 0 : 1, br = b.status === 'running' ? 0 : 1; if (ar !== br) return ar - br; return String(b.startedAt || '').localeCompare(String(a.startedAt || '')); });",
+	"  const list = el('div', 'klist');",
+	"  for (const r of runs) {",
+	"    const a = el('a', 'krow'); a.href = '/kloop/' + encodeURIComponent(r.id);",
+	"    const ws = String(r.workspace || '').split('/').pop() || '';",
+	"    a.innerHTML = kbadge(r.status) + '<span class=\"kid\">' + esc(r.id) + '</span><span class=\"kws\">' + esc(ws) + '</span><span class=\"kmeta\">loop ' + esc(r.loop != null ? r.loop : '?') + (r.elapsedMs != null ? ' · ' + esc(fmtDur(r.elapsedMs)) : '') + (r.exitReason ? ' · ' + esc(r.exitReason) : '') + '</span>';",
+	"    list.appendChild(a);",
+	"  }",
+	"  app.appendChild(list);",
+	"}",
+	"async function renderKloopRun(id) {",
+	"  crumbs([{ text: 'Sessions', href: '/' }, { text: 'Kloop', href: '/kloop' }, { text: id }]);",
+	"  showSkeleton(3);",
+	"  const d = await api('/kloop/runs/' + encodeURIComponent(id));",
+	"  app.innerHTML = ''; main.classList.remove('prose-page');",
+	"  if (!d) { app.appendChild(el('div', 'empty', 'Run not found (or kloop unavailable).')); return; }",
+	"  const hero = el('div', 'khero');",
+	"  hero.innerHTML = kbadge(d.status) + ' <span class=\"kid\">' + esc(d.id) + '</span>' + '<div class=\"kws\">' + esc(d.workspace || '') + '</div>' + '<div class=\"kmeta\">loop ' + esc(d.loop) + '/' + esc(d.maxIterations != null ? d.maxIterations : '?') + (d.elapsedMs != null ? ' · ' + esc(fmtDur(d.elapsedMs)) : '') + (d.synthesis ? ' · synthesis' : '') + (d.verify ? ' · verify' : '') + '</div>' + (d.exitReason ? '<div class=\"kbanner\">' + esc(d.exitReason) + '</div>' : '');",
+	"  app.appendChild(hero);",
+	"  const loops = d.loops || [];",
+	"  if (!loops.length) { app.appendChild(el('div', 'empty', 'No loops yet.')); return; }",
+	"  const chips = el('div', 'toolbar'); app.appendChild(chips);",
+	"  const detail = el('div'); app.appendChild(detail);",
+	"  const loadFile = async (rel, title) => { const r = await api('/kloop/file?path=' + encodeURIComponent(rel)); const box = el('div', 'kcard'); box.appendChild(el('div', 'kcard-h', esc(title))); const pre = el('pre', 'klog'); pre.textContent = (r && r.content) || '(empty / not found)'; box.appendChild(pre); detail.appendChild(box); };",
+	"  const renderLoop = (i) => {",
+	"    chips.innerHTML = '';",
+	"    loops.forEach((lp, idx) => { const c = el('button', 'chip' + (idx === i ? ' active' : '')); c.textContent = 'Loop ' + (lp.loop != null ? lp.loop : idx + 1); c.onclick = () => { renderLoop(idx); }; chips.appendChild(c); });",
+	"    const lp = loops[i]; detail.innerHTML = '';",
+	"    if (lp.implementer) { const im = lp.implementer; const card = el('div', 'kcard'); card.innerHTML = '<div class=\"kcard-h\">Implementer ' + kbadge(im.status) + '</div><div class=\"kline\">' + esc(im.binary || '') + ' ' + hbadge(im.harness) + (im.durationMs != null ? ' · ' + esc(fmtDur(im.durationMs)) : '') + (im.inputTokens != null ? ' · ' + esc(im.inputTokens) + '→' + esc(im.outputTokens) + ' tok' : '') + '</div>' + (im.error ? '<div class=\"kerr\">' + esc(im.error) + '</div>' : ''); detail.appendChild(card); }",
+	"    for (const ph of (lp.reviewPhases || [])) { const card = el('div', 'kcard'); let h = '<div class=\"kcard-h\">Review phase ' + esc(ph.phase) + (ph.shortCircuited ? ' ' + hbadge('short-circuited') : '') + '</div>'; for (const rv of (ph.reviewers || [])) { h += '<div class=\"kline\">' + esc(rv.binary || '') + ' ' + hbadge(rv.harness) + ' ' + (rv.verdict ? kpill(rv.verdict, tone(rv.verdict)) : '') + (rv.completionEstimate != null ? ' <span class=\"kmuted\">' + esc(rv.completionEstimate) + '%</span>' : '') + (rv.propagated ? ' ' + hbadge('propagated') : '') + (rv.durationMs != null ? ' · ' + esc(fmtDur(rv.durationMs)) : '') + '</div>'; } card.innerHTML = h; detail.appendChild(card); }",
+	"    for (const ph of (lp.verifyPhases || [])) { if (!(ph.reviewers || []).length) continue; const card = el('div', 'kcard'); let h = '<div class=\"kcard-h\">Verify phase ' + esc(ph.phase) + '</div>'; for (const rv of (ph.reviewers || [])) { h += '<div class=\"kline\">' + esc(rv.binary || '') + ' ' + hbadge(rv.harness) + ' ' + (rv.verdict ? kpill(rv.verdict, tone(rv.verdict)) : '') + (rv.durationMs != null ? ' · ' + esc(fmtDur(rv.durationMs)) : '') + '</div>'; } card.innerHTML = h; detail.appendChild(card); }",
+	"    if (lp.synthesis) { const sy = lp.synthesis; const card = el('div', 'kcard'); card.innerHTML = '<div class=\"kcard-h\">Synthesis ' + kbadge(sy.status) + '</div>' + (sy.error ? '<div class=\"kerr\">' + esc(sy.error) + '</div>' : ''); detail.appendChild(card); }",
+	"    const ev = el('div', 'kcard'); ev.innerHTML = '<div class=\"kcard-h\">Evidence & logs</div>'; const btns = el('div', 'kbtns');",
+	"    const evb = el('button', 'seg'); evb.textContent = 'Evidence files'; evb.onclick = async () => { const files = (await api('/kloop/dir?path=' + encodeURIComponent(id + '/loop-' + lp.loop + '/evidence'))) || []; if (!files.length) { detail.appendChild(el('div', 'kmuted', '(no evidence files)')); return; } for (const f of files) await loadFile(id + '/loop-' + lp.loop + '/evidence/' + f, 'evidence/' + f); };",
+	"    const ib = el('button', 'seg'); ib.textContent = 'Implementer log'; ib.onclick = () => loadFile(id + '/loop-' + lp.loop + '/implementer/log', 'implementer log');",
+	"    const rb = el('button', 'seg'); rb.textContent = 'Run log'; rb.onclick = () => loadFile(id + '/run.log', 'run.log');",
+	"    btns.append(evb, ib, rb); ev.appendChild(btns); detail.appendChild(ev);",
+	"  };",
+	"  renderLoop(loops.length - 1);",
+	"}",
 	"async function route() {",
 	"  const path = window.location.pathname;",
 	"  const parts = path.split('/').filter(Boolean);",
 	"  try {",
 	"    if (parts.length === 0) return renderIndex();",
+	"    if (parts[0] === 'kloop') return parts[1] ? renderKloopRun(decodeURIComponent(parts[1])) : renderKloop();",
 	"    if (parts[0] !== 'sessions') return renderIndex();",
 	"    const id = decodeURIComponent(parts[1] || '');",
 	"    if (!id) return renderIndex();",
