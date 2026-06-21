@@ -326,8 +326,10 @@ function applyEvent(
 		};
 	}
 
-	// Track kloop run IDs per plan
-	if (event === "setup_run:completed" && entry.metadata?.kloopRunId) {
+	// Track kloop run IDs per plan. The `running` agent step records the run id via
+	// a `context:updated` event (recordRepoState) once the babysitter reports it;
+	// `clear_loop` records `kloopRunId: null` (skipped by the truthy guard).
+	if (event === "context:updated" && entry.metadata?.kloopRunId) {
 		const plan =
 			(entry.plan as string) ?? `plan-${(status.context.planIndex ?? 0) + 1}`;
 		const runId = entry.metadata.kloopRunId as string;
