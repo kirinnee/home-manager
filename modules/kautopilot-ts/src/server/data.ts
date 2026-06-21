@@ -3,7 +3,6 @@ import { join } from "node:path";
 import { sessionDir } from "../core/artifacts";
 import {
 	type ArtifactKind,
-	diffRevisions,
 	listPlanSetVersions,
 	listRevisions,
 	listRevisionsWithEpoch,
@@ -286,15 +285,47 @@ export function storeFingerprint(): number {
 	return max;
 }
 
-/** Unified diff between two revisions of a doc/plan artifact. */
+export interface DiffView {
+	kind: string;
+	fromVersion: number;
+	toVersion: number;
+	/** Raw markdown of each side — the client renders a markdown REDLINE (ins/del). */
+	fromMarkdown: string;
+	toMarkdown: string;
+}
+
+/**
+ * The two version texts to diff (default vN-1 → vN). The client renders a
+ * markdown redline (rendered prose with inline insertions/deletions), NOT a
+ * code-style line diff — so raw markdown is returned, not a unified diff string.
+ */
 export function getDiff(
 	id: string,
 	kind: ArtifactKind,
 	opts: { from?: number; to?: number; repo?: string | null },
-): { diff: string } | null {
+): DiffView | null {
 	const meta = readSessionMeta(id);
 	if (meta == null) return null;
 	// Epoch-scoped kinds diff within the current epoch; brainstorm is global.
 	const epoch = kind === "brainstorm" ? null : meta.epoch;
-	return { diff: diffRevisions(id, kind, { ...opts, epoch }) };
+	const planSet = kind === "plans" && opts.repo != null;
+	const repo = opts.repo ?? "default";
+	const versions = planSet
+		? listPlanSetVersions(id, epoch ?? 1, repo)
+		: listRevisions(id, kind, { epoch });
+	const latest = versions.length ? Math.max(...versions) : 0;
+	if (latest <= 0) return null;
+	const to = opts.to ?? latest;
+	const from = opts.from ?? to - 1;
+	const read = (n: number): string =>
+		planSet
+			? readPlanSet(id, epoch ?? 1, repo, n)
+			: readRevision(id, kind, n, { epoch });
+	return {
+		kind,
+		fromVersion: from,
+		toVersion: to,
+		fromMarkdown: from >= 1 ? read(from) : "",
+		toMarkdown: read(to),
+	};
 }
