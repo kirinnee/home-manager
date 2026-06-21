@@ -57,6 +57,12 @@ implementerRetry:
   maxRetries: 2
   backoffBaseMs: 5000       # ms, doubles each retry
 
+# Retry a reviewer that produced NO parseable verdict (transport failure, crash,
+# timeout). A real approve/reject verdict is never retried.
+reviewerRetry:
+  maxRetries: 2
+  backoffBaseMs: 5000       # ms, doubles each retry
+
 firstIterationWeightMultiplier: 2
 
 # ── Prompt Templates ─────────────────────────────────────────────────────────

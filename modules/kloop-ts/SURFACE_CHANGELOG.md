@@ -1,5 +1,40 @@
 # Surface Area Changelog
 
+Spec: revert-scratch-promotion-direct-global-writes
+Date: 2026-06-21
+
+## Summary
+
+Reverted the scratch-artifact protocol. Agents now write their outputs **directly** to
+the global store (`~/.kloop/{runId}/...`) instead of writing to a per-workspace
+`.kloop/scratch/` dir with `.meta` companions that the host runner promoted afterward.
+Codex agents (workspace-write sandbox) are granted write access to the global store via
+`--add-dir`. Also adds reviewer retry-on-transport-failure.
+
+## Breaking Changes
+
+| Category     | Symbol                              | Before                                           | After                                                                    |
+| ------------ | ----------------------------------- | ------------------------------------------------ | ------------------------------------------------------------------------ |
+| Paths        | `Paths.scratchDir(cwd)`             | `{cwd}/.kloop/scratch`                           | Removed — no scratch dir; agents write straight to global paths          |
+| Agent runner | `AgentRunner.promoteScratchFiles()` | method (scratch → global promotion)              | Removed                                                                  |
+| Types        | `ScratchMeta`                       | exported interface                               | Removed                                                                  |
+| Types        | `PromotionResult`                   | exported interface                               | Removed                                                                  |
+| Prompt vars  | `*PromptVars.scratchDir`            | field on all 6 prompt-var interfaces             | Removed                                                                  |
+| Loop runner  | `prepareLoopWorkspace()`            | method (promote-recover + wipe `.kloop/scratch`) | Removed                                                                  |
+| Prompts      | Output Protocol / `.meta` blocks    | agents wrote `{artifact}.{ext}` + `.meta` twins  | Removed — prompts name the exact global destination path for each output |
+| Codex cmd    | `codex exec --full-auto …`          | workspace-write sandbox, no global write         | adds `--add-dir "{kloopHome}"` so codex can write to `~/.kloop`          |
+
+## New Exports
+
+### Config Fields
+
+| Field                         | Type     | Default | Notes                                                                               |
+| ----------------------------- | -------- | ------- | ----------------------------------------------------------------------------------- |
+| `reviewerRetry.maxRetries`    | `number` | `2`     | Retry a reviewer that produced NO parseable verdict (transport/crash/timeout), 0-10 |
+| `reviewerRetry.backoffBaseMs` | `number` | `5000`  | Base backoff delay, doubles each retry, min 0                                       |
+
+---
+
 Spec: synthesis-verify-dynamic-ordering
 Date: 2026-04-13
 

@@ -19,7 +19,6 @@
  *   {reviewSummaryPath}   - path to previous loop's review-summary.md (empty for loop 1)
  *   {evidenceDir}         - path to evidence/ folder
  *   {learningsFile}       - path to learnings.md
- *   {scratchDir}          - path to .kloop/scratch/ in agent's CWD
  */
 export const DEFAULT_IMPLEMENTER_PROMPT = `# Implementation Task
 
@@ -35,46 +34,31 @@ Read CLAUDE.md and any project skills files if they exist.
 - Synthesized review summary (loop 2+): {reviewSummaryPath}
 - Learnings from previous loops: {learningsFile}
 
-## Output Protocol
-
-Write all output files to {scratchDir}/ with the naming convention:
-  {artifactType}-{qualifier}.{ext}        (content file)
-  {artifactType}-{qualifier}.{ext}.meta   (metadata file)
-
-The metadata file must be a single-line JSON object:
-  {"artifact":"<type>","role":"<role>","runId":"<runId>","loop":{loop},"timestamp":"<ISO-8601>"}
-
-Include "index" and "phase" fields when applicable. Write the .meta file LAST —
-it signals that the content file is complete.
-
 ## Instructions
 
 1. Read and understand the specification completely — especially the Definition of Done checklist
 2. Before using any library, tool, or framework, research its current documentation and source code. Verify the version you are using matches the API signatures and configuration you are relying on. Do not rely on potentially outdated knowledge.
 3. **Focus on rejected reviews first.** If a synthesized review summary path is listed above, read it — it replaces raw individual reviews as your primary input. The summary deduplicates issues and prioritizes by severity (CRITICAL/HIGH/LOW). Otherwise, read the raw reviews from {reviewsDir}/. UNANIMOUS approval is required — every reviewer must pass. If any reviewer rejected, address their concerns before moving on to other work. Do NOT treat a minority rejection as optional.
 4. Implement the required changes, with special attention to addressing every rejected reviewer's concerns
-5. **Capture command evidence — MANDATORY.** Every verification command you run to prove a requirement is met MUST have its FULL output piped to an evidence log in {scratchDir}/, so reviewers can confirm from the evidence folder instead of re-running everything. A check counts as "done" ONLY if there is an evidence log proving it passed.
+5. **Capture command evidence — MANDATORY.** Every verification command you run to prove a requirement is met MUST have its FULL output piped to an evidence log in {evidenceDir}/, so reviewers can confirm from the evidence folder instead of re-running everything. A check counts as "done" ONLY if there is an evidence log proving it passed.
    - Pipe each command's stdout+stderr to a log and record its exit code:
-     \`<command> 2>&1 | tee {scratchDir}/evidence-<check>.log; echo "exit: \${PIPESTATUS[0]}" >> {scratchDir}/evidence-<check>.log\`
-   - Run and capture EVERY verification gate the project has — at minimum, whichever of these exist: **build**, **lint**, **format / pre-commit hooks**, **type-check**, and **tests**. Use clear names, e.g. evidence-build.log, evidence-lint.log, evidence-precommit.log, evidence-typecheck.log, evidence-test.log.
-   - If the spec has a Definition of Done checklist, capture a command-output log for EACH item (evidence-<item>.log). Do not mark an item done without its log.
+     \`<command> 2>&1 | tee {evidenceDir}/<check>.log; echo "exit: \${PIPESTATUS[0]}" >> {evidenceDir}/<check>.log\`
+   - Run and capture EVERY verification gate the project has — at minimum, whichever of these exist: **build**, **lint**, **format / pre-commit hooks**, **type-check**, and **tests**. Use clear names, e.g. build.log, lint.log, precommit.log, typecheck.log, test.log.
+   - If the spec has a Definition of Done checklist, capture a command-output log for EACH item (<item>.log). Do not mark an item done without its log.
    - If the spec has no checklist, still capture every available check above.
    - Do NOT claim a check passed unless its evidence log shows a clean run (exit 0). Never fabricate or summarize away the output — pipe the real command output.
-   - Write a self-review summary to {scratchDir}/evidence-self-review.md that lists each requirement / DoD item and names the evidence-*.log that proves it (with the exit code).
-   - Create metadata at {scratchDir}/evidence-self-review.md.meta: {"artifact":"evidence","role":"implementer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
+   - Write a self-review summary to {evidenceDir}/self-review.md that lists each requirement / DoD item and names the <check>.log that proves it (with the exit code).
 6. **Self-review your changes** before marking as complete:
    - Run \`git diff\` and \`git diff --staged\` to review ALL changes
    - Check each change against the spec requirements
    - Verify all evidence has been captured
    - Only consider yourself done if all critical spec items are addressed
-7. **Document how you addressed previous reviews.** If there were reviews from a previous loop, write a file at {scratchDir}/evidence-addressed-reviews.md. For each rejected reviewer's concern, document:
+7. **Document how you addressed previous reviews.** If there were reviews from a previous loop, write a file at {evidenceDir}/addressed-reviews.md. For each rejected reviewer's concern, document:
    - **What** the reviewer flagged
    - **What** you did in response (specific files changed, approaches taken)
    - **Why** you chose that approach — this is critical when you disagree with the reviewer's suggestion. Explain your reasoning so future reviewers can evaluate the trade-off independently rather than re-raising the same point.
    - If you intentionally chose NOT to follow a reviewer's suggestion, say so explicitly with your rationale. Silent disagreement looks like the concern was ignored.
-   - Create metadata at {scratchDir}/evidence-addressed-reviews.md.meta: {"artifact":"evidence","role":"implementer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
-8. Write learnings to {scratchDir}/learnings.md: roadblocks, workarounds, decisions made, and why
-   - Create metadata at {scratchDir}/learnings.md.meta: {"artifact":"learnings","role":"implementer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
+8. Write learnings to {learningsFile}: roadblocks, workarounds, decisions made, and why
 
 ## Git Safety - CRITICAL
 
@@ -97,7 +81,6 @@ it signals that the content file is complete.
  *   {learningsFile}         - path to learnings.md
  *   {previousSummaryPath}   - path to previous loop's synthesized review-summary.md (empty for loop 1)
  *   {archivedReviews}       - (legacy) path to previous loop's raw reviews
- *   {scratchDir}            - path to .kloop/scratch/ in agent's CWD
  */
 export const DEFAULT_REVIEWER_PROMPT = `# Code Review Task
 
@@ -113,18 +96,6 @@ If a synthesized review summary path is listed above, read it — it contains a 
 
 **Important**: Also check {evidenceDir}/addressed-reviews.md if it exists. The implementer documents there what they changed and why in response to each previous review concern. This is especially valuable when the implementer disagreed with a reviewer's suggestion — read their rationale and evaluate it on its merits rather than re-raising the same point without considering their reasoning.
 
-## Output Protocol
-
-Write all output files to {scratchDir}/ with the naming convention:
-  {artifactType}-{qualifier}.{ext}        (content file)
-  {artifactType}-{qualifier}.{ext}.meta   (metadata file)
-
-The metadata file must be a single-line JSON object:
-  {"artifact":"<type>","role":"<role>","runId":"<runId>","loop":{loop},"timestamp":"<ISO-8601>"}
-
-Include "index" and "phase" fields when applicable. Write the .meta file LAST —
-it signals that the content file is complete.
-
 ## Your Task
 
 You are Reviewer {reviewerIndex} for loop {iteration}. Be strict and thorough.
@@ -137,10 +108,8 @@ You are Reviewer {reviewerIndex} for loop {iteration}. Be strict and thorough.
    - Every verification gate the project has (build, lint, format/pre-commit, type-check, tests) must have a captured evidence log in {evidenceDir}/ showing a clean run (exit 0). If the implementer claims a check passed but there is no log proving it — or the log shows a failure/non-zero exit — REJECT. Do not take "it passes" on faith.
    - If the spec has a Definition of Done checklist, be strict: every required item must have a present, passing evidence log. Reject if anything is missing.
    - If the spec has no checklist, use judgment: check what is reasonable for this project. Don't reject for missing evidence that the spec never asked for.
-6. Write your review to {scratchDir}/review-reviewer-{reviewerIndex}.md — include any issues found and evidence gaps
-   Create metadata at {scratchDir}/review-reviewer-{reviewerIndex}.md.meta:
-   {"artifact":"review","role":"reviewer","index":{reviewerIndex},"runId":"<runId>","loop":{loop},"phase":0,"timestamp":"<ISO>"}
-7. Write your verdict to {scratchDir}/verdict-reviewer-{reviewerIndex}.json:
+6. Write your review to {reviewsDir}/reviewer-{reviewerIndex}.md — include any issues found and evidence gaps
+7. Write your verdict to {verdictsDir}/reviewer-{reviewerIndex}.json:
    \`\`\`json
    {
      "approved": true,
@@ -148,8 +117,6 @@ You are Reviewer {reviewerIndex} for loop {iteration}. Be strict and thorough.
      "completionEstimate": 0-100 (be conservative, 100% only if ALL acceptance criteria are met)
    }
    \`\`\`
-   Create metadata at {scratchDir}/verdict-reviewer-{reviewerIndex}.json.meta:
-   {"artifact":"verdict","role":"reviewer","index":{reviewerIndex},"runId":"<runId>","loop":{loop},"phase":0,"timestamp":"<ISO>"}
 
 ## Learnings
 
@@ -179,7 +146,6 @@ Check {learningsFile} for context on the implementer's decisions this iteration.
  *   {archivedSummariesPattern}  - glob pattern for all loop synthesis summaries
  *   {conflictFile}              - path to run-level conflict.md
  *   {checkpointResultFile}      - path to checkpointer/checkpoint-result.json
- *   {scratchDir}                - path to .kloop/scratch/ in agent's CWD
  */
 export const DEFAULT_CHECKPOINTER_PROMPT = `# Checkpointer Task
 
@@ -194,17 +160,6 @@ The dev loop has failed to reach consensus after {iteration} iterations. Your ta
 ## Specification
 
 Read the spec from: {specPath}
-
-## Output Protocol
-
-Write all output files to {scratchDir}/ with the naming convention:
-  {artifactType}-{qualifier}.{ext}        (content file)
-  {artifactType}-{qualifier}.{ext}.meta   (metadata file)
-
-The metadata file must be a single-line JSON object:
-  {"artifact":"<type>","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO-8601>"}
-
-Write the .meta file LAST — it signals that the content file is complete.
 
 ## Your Task
 
@@ -241,32 +196,27 @@ Conflicts are often subtle — the spec may look reasonable at a glance, but bec
 
 ### conflict_found
 Spec has impossible/contradictory requirements.
-- Write conflict analysis to {scratchDir}/conflict.md
-- Create metadata at {scratchDir}/conflict.md.meta: {"artifact":"conflict","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
-- Write checkpoint result to {scratchDir}/checkpoint-result.json with \`"outcome": "conflict_found"\`
-- Create metadata at {scratchDir}/checkpoint-result.json.meta: {"artifact":"checkpoint","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
+- Write conflict analysis to {conflictFile}
+- Write checkpoint result to {checkpointResultFile} with \`"outcome": "conflict_found"\`
 
 ### spec_auto_fixed
 Found an unambiguous mistake and fixed it.
 - Edit {specPath} directly
-- Write checkpoint result to {scratchDir}/checkpoint-result.json with \`"outcome": "spec_auto_fixed"\`
-- Create metadata at {scratchDir}/checkpoint-result.json.meta: {"artifact":"checkpoint","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
+- Write checkpoint result to {checkpointResultFile} with \`"outcome": "spec_auto_fixed"\`
 
 ### spec_compressed
 No conflict, no fix needed, progress > 60%.
 - Compress spec to remaining work: remove completed items, keep partial/incomplete ones
 - Update {specPath} with compressed spec
-- Write checkpoint result to {scratchDir}/checkpoint-result.json with \`"outcome": "spec_compressed"\`
-- Create metadata at {scratchDir}/checkpoint-result.json.meta: {"artifact":"checkpoint","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
+- Write checkpoint result to {checkpointResultFile} with \`"outcome": "spec_compressed"\`
 
 ### no_action
 No conflict, no fix, progress <= 60%.
-- Write checkpoint result to {scratchDir}/checkpoint-result.json with \`"outcome": "no_action"\`
-- Create metadata at {scratchDir}/checkpoint-result.json.meta: {"artifact":"checkpoint","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
+- Write checkpoint result to {checkpointResultFile} with \`"outcome": "no_action"\`
 
 ## Checkpoint Result JSON
 
-Write to {scratchDir}/checkpoint-result.json:
+Write to {checkpointResultFile}:
 \`\`\`json
 {
   "outcome": "conflict_found" | "spec_auto_fixed" | "spec_compressed" | "no_action",
@@ -277,7 +227,7 @@ Write to {scratchDir}/checkpoint-result.json:
 }
 \`\`\`
 
-If conflict_found, also write {scratchDir}/conflict.md with conflict analysis details.
+If conflict_found, also write {conflictFile} with conflict analysis details.
 If spec_auto_fixed or spec_compressed, edit {specPath} directly.`;
 
 /**
@@ -292,7 +242,6 @@ If spec_auto_fixed or spec_compressed, edit {specPath} directly.`;
  *   {archivedSummariesPattern}  - glob pattern for all loop synthesis summaries
  *   {conflictFile}              - path to run-level conflict.md
  *   {checkpointResultFile}      - path to checkpointer/checkpoint-result.json
- *   {scratchDir}                - path to .kloop/scratch/ in agent's CWD
  */
 export const CONFLICT_ONLY_CHECKPOINTER_PROMPT = `# Conflict Detection Task
 
@@ -305,17 +254,6 @@ You must NOT modify the spec. You must NOT compress the spec.
 ## Specification
 
 Read the spec from: {specPath}
-
-## Output Protocol
-
-Write all output files to {scratchDir}/ with the naming convention:
-  {artifactType}-{qualifier}.{ext}        (content file)
-  {artifactType}-{qualifier}.{ext}.meta   (metadata file)
-
-The metadata file must be a single-line JSON object:
-  {"artifact":"<type>","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO-8601>"}
-
-Write the .meta file LAST — it signals that the content file is complete.
 
 ## Your Task
 
@@ -363,24 +301,21 @@ Only report conflicts at MEDIUM or higher confidence. If only LOW, report no_act
 
 ### conflict_found
 The spec contains impossible, contradictory, or fundamentally ambiguous requirements.
-- Write {scratchDir}/conflict.md with:
+- Write {conflictFile} with:
   1. The exact conflicting requirements (quote the spec)
   2. Why they conflict
   3. Which reviewers flagged this (with quotes)
   4. Suggested resolution (if obvious)
-- Create metadata at {scratchDir}/conflict.md.meta: {"artifact":"conflict","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
-- Write checkpoint result to {scratchDir}/checkpoint-result.json with \`"outcome": "conflict_found"\`
-- Create metadata at {scratchDir}/checkpoint-result.json.meta: {"artifact":"checkpoint","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
+- Write checkpoint result to {checkpointResultFile} with \`"outcome": "conflict_found"\`
 
 ### no_action
 No spec-level conflict detected. The spec is sound — failures are due to implementation/review issues.
-- Write checkpoint result to {scratchDir}/checkpoint-result.json with \`"outcome": "no_action"\`
-- Create metadata at {scratchDir}/checkpoint-result.json.meta: {"artifact":"checkpoint","role":"checkpointer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
+- Write checkpoint result to {checkpointResultFile} with \`"outcome": "no_action"\`
 - Do NOT edit {specPath}
 
 ## Checkpoint Result JSON
 
-Write to {scratchDir}/checkpoint-result.json:
+Write to {checkpointResultFile}:
 \`\`\`json
 {
   "outcome": "conflict_found" | "no_action",
@@ -392,7 +327,7 @@ Write to {scratchDir}/checkpoint-result.json:
 }
 \`\`\`
 
-If conflict_found, also write {scratchDir}/conflict.md with detailed conflict analysis.
+If conflict_found, also write {conflictFile} with detailed conflict analysis.
 Do NOT edit {specPath} under any circumstances.`;
 
 /**
@@ -407,7 +342,6 @@ Do NOT edit {specPath} under any circumstances.`;
  *   {summaryOutputPath}     - path to write this loop's review-summary.md
  *   {learningsFile}         - path to learnings.md
  *   {evidenceDir}           - path to evidence/ folder
- *   {scratchDir}            - path to .kloop/scratch/ in agent's CWD
  */
 export const DEFAULT_SYNTHESIZER_PROMPT = `# Synthesis Task
 
@@ -437,16 +371,7 @@ After reading all reviews and verdicts, update {learningsFile} by:
 
 ## Output
 
-Write all output files to {scratchDir}/ with the naming convention:
-  {artifactType}-{qualifier}.{ext}        (content file)
-  {artifactType}-{qualifier}.{ext}.meta   (metadata file)
-
-The metadata file must be a single-line JSON object:
-  {"artifact":"<type>","role":"synthesizer","runId":"<runId>","loop":{loop},"timestamp":"<ISO-8601>"}
-
-Write the .meta file LAST — it signals that the content file is complete.
-
-Write a structured summary to {scratchDir}/synthesis-review-summary.md with the following format:
+Write a structured summary to {summaryOutputPath} with the following format:
 
 ### Confirmed Complete
 - List spec items that ALL reviewers agree are fully implemented (with reviewer attribution)
@@ -474,10 +399,7 @@ For each issue, include:
 - Deduplicate: if multiple reviewers flag the same issue, mention it once with all attributions
 - Be objective: only include issues with clear evidence
 - Preserve reviewer intent: don't soften a CRITICAL issue to HIGH just because other reviewers didn't notice it
-- If the implementer documented their rationale in {evidenceDir}/addressed-reviews.md, read it and consider their reasoning when evaluating issues
-
-Create metadata at {scratchDir}/synthesis-review-summary.md.meta:
-{"artifact":"synthesis","role":"synthesizer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}`;
+- If the implementer documented their rationale in {evidenceDir}/addressed-reviews.md, read it and consider their reasoning when evaluating issues`;
 
 /**
  * Default prompt template for the verifier agent.
@@ -491,7 +413,6 @@ Create metadata at {scratchDir}/synthesis-review-summary.md.meta:
  *   {evidenceDir}           - path to evidence/ folder
  *   {learningsFile}         - path to learnings.md
  *   {verifierIndex}         - which verifier this is
- *   {scratchDir}            - path to .kloop/scratch/ in agent's CWD
  */
 export const DEFAULT_VERIFIER_PROMPT = `# Verify Task
 
@@ -503,17 +424,6 @@ You are Verifier {verifierIndex} for loop {iteration}. A previous loop produced 
 
 Read the spec from: {specPath}
 
-## Output Protocol
-
-Write all output files to {scratchDir}/ with the naming convention:
-  {artifactType}-{qualifier}.{ext}        (content file)
-  {artifactType}-{qualifier}.{ext}.meta   (metadata file)
-
-The metadata file must be a single-line JSON object:
-  {"artifact":"<type>","role":"verifier","index":{verifierIndex},"runId":"<runId>","loop":{loop},"timestamp":"<ISO-8601>"}
-
-Write the .meta file LAST — it signals that the content file is complete.
-
 ## Your Task
 
 1. Read the previous review summary from {previousSummaryPath}
@@ -524,7 +434,7 @@ Write the .meta file LAST — it signals that the content file is complete.
    c. Check {evidenceDir}/addressed-reviews.md for the implementer's response
    d. Determine if the issue is fixed or remains
 
-4. Write your verdict to {scratchDir}/verdict-verifier-{verifierIndex}.json:
+4. Write your verdict to {verdictsDir}/verifier-{verifierIndex}.json:
 \`\`\`json
 {
   "approved": true/false,
@@ -533,8 +443,6 @@ Write the .meta file LAST — it signals that the content file is complete.
   "issuesRemaining": ["issue 3 description"]
 }
 \`\`\`
-Create metadata at {scratchDir}/verdict-verifier-{verifierIndex}.json.meta:
-{"artifact":"verdict","role":"verifier","index":{verifierIndex},"runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
 
 ## Verdict Criteria
 
@@ -560,7 +468,6 @@ Check {learningsFile} for context on the implementer's decisions this iteration.
  *   {verdictsDir}           - path to current loop's verdicts/ folder
  *   {summaryOutputPath}     - path to write this loop's review-summary.md
  *   {learningsFile}         - path to learnings.md
- *   {scratchDir}            - path to .kloop/scratch/ in agent's CWD
  */
 export const DEFAULT_RE_SYNTHESIS_PROMPT = `# Re-Synthesis Task
 
@@ -581,16 +488,7 @@ Read the spec from: {specPath}
 
 ## Output
 
-Write all output files to {scratchDir}/ with the naming convention:
-  {artifactType}-{qualifier}.{ext}        (content file)
-  {artifactType}-{qualifier}.{ext}.meta   (metadata file)
-
-The metadata file must be a single-line JSON object:
-  {"artifact":"<type>","role":"synthesizer","runId":"<runId>","loop":{loop},"timestamp":"<ISO-8601>"}
-
-Write the .meta file LAST — it signals that the content file is complete.
-
-Write an updated summary to {scratchDir}/synthesis-review-summary.md with the same structure as the previous summary:
+Write an updated summary to {summaryOutputPath} with the same structure as the previous summary:
 
 ### Confirmed Complete
 - Carry forward items from the previous summary
@@ -620,7 +518,4 @@ After processing, update {learningsFile} with:
 - This is a LIGHTWEIGHT synthesis — you are merging structured data, not re-reading raw reviews
 - Preserve the previous summary's structure and severity levels
 - Only change issue status based on verifier evidence, not speculation
-
-Create metadata at {scratchDir}/synthesis-review-summary.md.meta:
-{"artifact":"synthesis","role":"synthesizer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
 - If verifiers disagree on whether an issue is fixed, keep it in "Issues Requiring Action"`;

@@ -57,7 +57,6 @@ export interface Paths {
   readonly loopSynthesisPath: (runId: string, loopIndex: number) => string;
   readonly loopVerifyPath: (runId: string, loopIndex: number) => string;
   readonly loopArchivePath: (runId: string, loopIndex: number) => string;
-  readonly scratchDir: (cwd: string) => string;
 }
 
 export interface FsService {
@@ -240,7 +239,6 @@ export const paths: Paths = {
   loopVerifyPath: (runId: string, loopIndex: number) => path.join(getKloopHome(), runId, `loop-${loopIndex}`, 'verify'),
   loopArchivePath: (runId: string, loopIndex: number) =>
     path.join(getKloopHome(), runId, 'archive', `loop-${loopIndex}`),
-  scratchDir: (cwd: string) => path.join(cwd, '.kloop', 'scratch'),
 };
 
 // ============================================================================
