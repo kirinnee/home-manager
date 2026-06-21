@@ -1,14 +1,13 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { getAgentPrompt } from "../core/agents";
 import type { PreparedStep, StepContext, StepDef } from "../core/descriptor";
 import {
 	devloopCancel,
 	devloopDescribe,
-	devloopInit,
-	devloopRun,
 	devloopStatus,
-	writeKloopSpec,
+	devloopVerify,
+	type KloopOutcome,
 } from "../core/devloop";
 import {
 	createBranch,
@@ -30,8 +29,11 @@ import { SHARED_APPROVAL_GATE, substitute, ticketId } from "./prompt-helpers";
 // EXECUTION phase (per repo) — `kautopilot next --repo <repo>`.
 //
 // seed → clear_loop → setup_run → (running | running_subagent)
-//   running    [kloop]   : completed→commit · conflict|max_iterations→resolve ·
-//                          crash→setup_run (≤2) then failed
+//   running   [agent]    : the main agent spawns a babysitter that runs kloop
+//                          (init + run -d + poll) and reports the runId. The BINARY
+//                          then verifies the outcome via `kloop status` (decision A)
+//                          and routes: completed→commit · conflict|max_iter→resolve ·
+//                          crash→clear_loop (≤2 retries) then failed.
 //   running_subagent      : implements the plan directly (no kloop) → commit
 //   resolve    [interactive] : strategy picker → amend_plans | clear_loop |
 //                              write_spec (new epoch) | failed
@@ -484,7 +486,7 @@ const clearLoop: StepDef = {
 	},
 };
 
-// --- setup_run (code, repo) -------------------------------------------------
+// --- setup_run (code, repo) — exec-mode router ------------------------------
 
 const setupRun: StepDef = {
 	name: "setup_run",
@@ -493,112 +495,96 @@ const setupRun: StepDef = {
 	scope: "repo",
 	run: async (ctx) => {
 		const repo = requireRepo(ctx);
-		const planIndex = currentPlanIndex(ctx);
-		const planName = planNameFor(planIndex);
-
-		appendEvent(ctx.sessionId, {
-			ts: new Date().toISOString(),
-			event: "setup_run:started",
-			version: ctx.version,
-			repo: repo.repo,
-			plan: planName,
-			metadata: { stepType: "code" },
-		});
-
-		// Sub-agent exec mode skips kloop init entirely — the agent step does the work.
-		if (isSubAgentExec(ctx)) {
-			appendEvent(ctx.sessionId, {
-				ts: new Date().toISOString(),
-				event: "setup_run:completed",
-				version: ctx.version,
-				repo: repo.repo,
-				plan: planName,
-				metadata: { execMode: "sub-agent" },
-			});
-			return "running_subagent";
-		}
-
-		const plans = repoPlanPaths(ctx);
-		const planPath = plans[planIndex];
-
-		// In a sandbox the plan file / kloop may be missing — degrade to running,
-		// which will itself tolerate the absence and route forward.
-		if (planPath && existsSync(planPath)) {
-			try {
-				const planContent = readFileSync(planPath, "utf-8");
-				const specPath = writeKloopSpec(
-					ctx.sessionId,
-					planContent,
-					`${planName}-spec.md`,
-				);
-				const kloopRunId = devloopInit(requireWorktree(ctx), specPath);
-				recordRepoState(ctx, { kloopRunId });
-			} catch (err) {
-				console.warn(
-					`[setup_run] kloop init skipped: ${(err as Error).message}`,
-				);
-			}
-		}
-
+		const planName = planNameFor(currentPlanIndex(ctx));
+		const subAgent = isSubAgentExec(ctx);
 		appendEvent(ctx.sessionId, {
 			ts: new Date().toISOString(),
 			event: "setup_run:completed",
 			version: ctx.version,
 			repo: repo.repo,
 			plan: planName,
-			metadata: { kloopRunId: currentKloopRunId(ctx) ?? null },
+			metadata: { execMode: subAgent ? "sub-agent" : "kloop" },
 		});
-
-		return "running";
+		// kloop init/run is no longer driven in-binary — the `running` agent step
+		// spawns a babysitter that runs kloop; this just routes by exec mode.
+		return subAgent ? "running_subagent" : "running";
 	},
 };
 
-// --- running (code, repo) — kloop exec mode ---------------------------------
+// --- running (agent, repo) — the main agent babysits kloop ------------------
+
+const RUNNING_MECHANICS = `## Run the dev loop (kloop) for this plan — babysit it
+
+Drive kloop for ONE plan in this repo's worktree, keeping its verbose output OUT of
+the main conversation (run it in this isolated sub-agent; kloop's own logs hold the detail).
+
+- Worktree:        {worktree}
+- Plan (= kloop spec): {plan_path}
+
+Steps:
+1. \`kloop init --workspace {worktree} --spec {plan_path}\` — note the printed Run ID.
+2. \`kloop run -d <runId>\` — daemon mode, so output goes to kloop's logs, not your context.
+3. Babysit: poll \`kloop status <runId> --json\` until status is no longer "running";
+   surface brief progress (loop/phase). You may \`kloop logs -f <runId>\` to watch.
+4. When it stops, read \`kloop describe <runId>\` once for a short summary.
+
+Then complete with metadata \`{ "kloopRunId": "<runId>" }\`. **You do NOT decide the
+outcome** — the binary re-checks kloop's own status and routes (commit / resolve /
+retry). Do NOT resolve conflicts and do NOT commit here: if kloop conflicts or stalls,
+just report — the controller drives an interactive resolve in the main session.`;
 
 const running: StepDef = {
 	name: "running",
 	phase: "execution",
-	kind: "code",
+	kind: "agent",
 	scope: "repo",
-	run: async (ctx) => {
-		const repo = requireRepo(ctx);
+	prepare: async (ctx) => {
 		const planIndex = currentPlanIndex(ctx);
 		const planName = planNameFor(planIndex);
+		const plans = repoPlanPaths(ctx);
+		const planPath =
+			plans[planIndex] ?? join(worktreePlansDir(ctx), `${planName}.md`);
+		const vars: Record<string, string | null> = {
+			worktree: requireRepo(ctx).worktree ?? "(worktree not provisioned)",
+			plan_name: planName,
+			plan_path: planPath,
+		};
+		return {
+			prompt: substitute(RUNNING_MECHANICS, vars),
+			vars,
+			contract: {
+				completionEvent: "running:completed",
+				completionMetadataSchema: { kloopRunId: "string?" },
+			},
+		} satisfies PreparedStep;
+	},
+	finalize: async (ctx) => {
+		const repo = requireRepo(ctx);
+		const planName = planNameFor(currentPlanIndex(ctx));
+		const runId = ctx.metadata?.kloopRunId as string | undefined;
+		if (runId) recordRepoState(ctx, { kloopRunId: runId });
 
-		appendEvent(ctx.sessionId, {
-			ts: new Date().toISOString(),
-			event: "running:started",
-			version: ctx.version,
-			repo: repo.repo,
-			plan: planName,
-			metadata: { stepType: "code" },
-		});
+		// Decision A — the BINARY verifies the outcome from kloop itself; it never
+		// trusts that the agent's report of "done" means kloop actually completed.
+		const verdict: KloopOutcome = runId ? devloopVerify(runId) : "unavailable";
+		// kloop still running → the agent reported early; babysit again (idempotent).
+		if (verdict === "running") return "running";
+		// `unavailable` = no run / no kloop (sandbox) → advance deterministically.
+		const status: "completed" | "max_iterations" | "conflict" | "crash" =
+			verdict === "unavailable" ? "completed" : verdict;
 
-		const kloopRunId = currentKloopRunId(ctx);
-
-		// No kloop run id (sandbox / init was skipped) — treat as completed so the
-		// machine advances deterministically to commit.
-		let status: "completed" | "max_iterations" | "conflict" | "crash" =
-			"completed";
-		if (kloopRunId) {
-			try {
-				const result = await devloopRun(kloopRunId);
-				status = result.status;
-			} catch (err) {
-				console.warn(
-					`[running] kloop run failed to start: ${(err as Error).message}`,
-				);
-				status = "crash";
-			}
-		}
-
+		// Record the VERIFIED status (non-cursor) for `resolve` to read.
 		appendEvent(ctx.sessionId, {
 			ts: new Date().toISOString(),
 			event: "running:completed",
 			version: ctx.version,
 			repo: repo.repo,
 			plan: planName,
-			metadata: { status, runId: kloopRunId ?? null },
+			metadata: {
+				status,
+				runId: runId ?? null,
+				verified: verdict !== "unavailable",
+			},
 		});
 
 		switch (status) {
@@ -622,7 +608,7 @@ const running: StepDef = {
 							maxRetries: MAX_CRASH_RETRIES,
 						},
 					});
-					return "setup_run";
+					return "clear_loop";
 				}
 				return "failed";
 			}
