@@ -1,11 +1,65 @@
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { sessionDir } from "./artifacts";
-
 export interface DevloopRunResult {
 	exitCode: number;
 	status: "completed" | "max_iterations" | "conflict" | "crash";
 	runId?: string;
+}
+
+/**
+ * Authoritative kloop outcome derived from kloop's OWN state — the binary uses
+ * this to verify what an agent reported (it never trusts the agent's claim that
+ * a run "completed"). `unavailable` = kloop/status couldn't be queried (test
+ * sandbox); `running` = not finished yet.
+ */
+export type KloopOutcome =
+	| "completed"
+	| "max_iterations"
+	| "conflict"
+	| "crash"
+	| "running"
+	| "unavailable";
+
+/** Strip ANSI color escapes so a colorized `Run ID:` line still parses. */
+function stripAnsi(s: string): string {
+	const esc = String.fromCharCode(27);
+	return s.replaceAll(new RegExp(`${esc}\\[[0-9;]*m`, "g"), "");
+}
+
+/** kloop spawn env with color forced off (so piped output is plain). */
+function plainEnv(): Record<string, string> {
+	return { ...(process.env as Record<string, string>), NO_COLOR: "1" };
+}
+
+/**
+ * Verify a kloop run's outcome by querying `kloop status <id> --json` — the
+ * binary's source of truth for routing (completed→commit, conflict/max_iter→
+ * resolve, crash→retry). Returns `unavailable` when kloop can't be reached.
+ */
+export function devloopVerify(kloopRunId: string): KloopOutcome {
+	let proc: ReturnType<typeof Bun.spawnSync>;
+	try {
+		proc = Bun.spawnSync({
+			cmd: ["kloop", "status", kloopRunId, "--json"],
+			stdout: "pipe",
+			stderr: "pipe",
+			env: plainEnv(),
+		});
+	} catch {
+		return "unavailable"; // kloop binary missing (sandbox)
+	}
+	if (proc.exitCode !== 0) return "crash"; // a reported run that kloop can't find = real failure
+	try {
+		const data = JSON.parse((proc.stdout?.toString() ?? "").trim());
+		const status = String(data.status ?? "");
+		if (data.exitReason === "max_iterations") return "max_iterations";
+		if (status === "running") return "running";
+		if (status === "conflict") return "conflict";
+		if (status === "completed") return "completed";
+		if (status === "failed" || status === "cancelled") return "crash";
+		// Unknown / pending / empty — do NOT fake success.
+		return "crash";
+	} catch {
+		return "unavailable";
+	}
 }
 
 export interface DevloopStatus {
@@ -28,6 +82,7 @@ export function devloopInit(workspace: string, specPath: string): string {
 		cmd: args,
 		stdout: "pipe",
 		stderr: "pipe",
+		env: plainEnv(),
 	});
 
 	if (proc.exitCode !== 0) {
@@ -35,30 +90,15 @@ export function devloopInit(workspace: string, specPath: string): string {
 		throw new Error(`kloop init failed (exit ${proc.exitCode}): ${stderr}`);
 	}
 
-	// Parse runId from kloop init output (looks for "Run ID:     <id>")
-	const stdout = proc.stdout.toString();
+	// Parse runId from kloop init output (looks for "Run ID:     <id>"); strip any
+	// ANSI color so a colorized id doesn't leak escape codes into the run id.
+	const stdout = stripAnsi(proc.stdout.toString());
 	const match = stdout.match(/Run ID:\s+(\S+)/);
 	if (!match) {
 		throw new Error(`Could not parse kloop run ID from output: ${stdout}`);
 	}
 
 	return match[1];
-}
-
-/**
- * Write a spec file to a temp location inside the kautopilot session dir,
- * suitable for passing to kloop init --spec.
- */
-export function writeKloopSpec(
-	kautopilotSessionId: string,
-	content: string,
-	name: string = "kloop-spec.md",
-): string {
-	const dir = join(sessionDir(kautopilotSessionId), "tmp");
-	mkdirSync(dir, { recursive: true });
-	const specPath = join(dir, name);
-	writeFileSync(specPath, content);
-	return specPath;
 }
 
 /**

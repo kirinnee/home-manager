@@ -137,16 +137,33 @@ matching session(s):
 ## Per-`kind` execution
 
 - **`code`** — never appears. The binary ran it (including all detection/waiting).
-- **`interactive`** (triage, write_spec, write_plans, resolve, tty_resolve, feedback) —
+- **`interactive`** (triage, write_spec, write_plans, resolve, amend_plans, tty_resolve, feedback) —
   run **inline** in the main session. Be a **devil's advocate**: propose first, debate,
   surface conflicts; never open with "what do you want to do?" Run the
   **per-revision review loop** below — re-present + re-ask after EVERY update and
   only `complete` once feedback is exhausted and the user **explicitly** approves
   ("approve" — not "ok/sure"). Spawn `Explore` subagents for heavy research so the
   conversation stays lean.
-- **`agent`** (create_ticket, fetch_ticket, commit, eval, create_pr, prereview,
-  write_fix, amend_plans, reviewers, per-repo implement) — **always** a fresh isolated
-  `Task` subagent, never inline.
+- **`agent`** (create_ticket, fetch_ticket, **running** (kloop), commit, eval,
+  create_pr, prereview, write_fix, reviewers, per-repo implement) — **always** a fresh
+  isolated `Task` subagent, never inline.
+
+### `running` — babysitting kloop (the execution dev loop)
+
+The execution-phase `running` step is an `agent` step: spawn a subagent that **drives
+kloop for one plan** in the repo's worktree and keeps its noisy output out of the
+conversation:
+
+1. `kloop init --workspace <worktree> --spec <plan>` → note the Run ID.
+2. `kloop run -d <id>` (**daemon** — output goes to kloop's logs, not your context).
+3. Poll `kloop status <id> --json` until it's no longer `running`; surface brief
+   progress (and you can `kloop logs -f <id>` to watch).
+4. Read `kloop describe <id>` once, then `complete` with `--metadata '{"kloopRunId":"<id>"}'`.
+
+**You do not decide the outcome** — the binary re-checks `kloop status <id>` itself and
+routes (completed→commit, conflict/max_iter→`resolve`, crash→retry). The babysitter
+**never resolves conflicts and never commits**; on a conflict it just reports, and the
+binary yields an interactive `resolve` step back in the **main session**.
 
 ## Reviewers run BEFORE you present (fan-out)
 

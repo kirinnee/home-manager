@@ -518,40 +518,38 @@ rec {
     ssh = {
       enable = true;
       enableDefaultConfig = false;
-      matchBlocks = {
+      settings = {
         "*" = {
-          forwardAgent = false;
-          identitiesOnly = false;
+          ForwardAgent = false;
+          IdentitiesOnly = false;
         };
         "github-personal" = {
-          hostname = "github.com";
-          user = "git";
-          identitiesOnly = true;
-          identityFile = "~/.ssh/id_ed25519_kirin";
+          HostName = "github.com";
+          User = "git";
+          IdentitiesOnly = true;
+          IdentityFile = "~/.ssh/id_ed25519_kirin";
         };
         "github-liftoff" = {
-          hostname = "github.com";
-          user = "git";
-          identitiesOnly = true;
-          identityFile = "~/.ssh/id_ed25519_vungle";
+          HostName = "github.com";
+          User = "git";
+          IdentitiesOnly = true;
+          IdentityFile = "~/.ssh/id_ed25519_vungle";
         };
         "github-atomi" = {
-          hostname = "github.com";
-          user = "git";
-          identitiesOnly = true;
-          identityFile = "~/.ssh/id_ed25519_adelphi";
+          HostName = "github.com";
+          User = "git";
+          IdentitiesOnly = true;
+          IdentityFile = "~/.ssh/id_ed25519_adelphi";
         };
         "*.liftoff.io" = {
-          user = "ubuntu";
-          forwardAgent = true;
-          extraOptions = {
-            PasswordAuthentication = "no";
-            SendEnv = "LIFTOFF_USER";
-            StrictHostKeyChecking = "no";
-            UserKnownHostsFile = "/dev/null";
-            LogLevel = "ERROR";
-            AddKeysToAgent = "yes";
-          };
+          User = "ubuntu";
+          ForwardAgent = true;
+          PasswordAuthentication = "no";
+          SendEnv = "LIFTOFF_USER";
+          StrictHostKeyChecking = "no";
+          UserKnownHostsFile = "/dev/null";
+          LogLevel = "ERROR";
+          AddKeysToAgent = "yes";
         };
       };
     };

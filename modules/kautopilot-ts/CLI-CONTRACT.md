@@ -26,8 +26,11 @@ loop:
 ```
 
 `code` steps are **never yielded** — the binary runs them inline (snapshot, finalize,
-kloop init, seed-commit, push, poll, WAL writes, version/epoch bookkeeping, **and all
-blocking detection**) and advances.
+worktree provisioning via `wt`, seed-commit, push, poll, WAL writes, version/epoch
+bookkeeping, **and outcome verification** — e.g. re-checking `kloop status` / git / gh)
+and advances. kloop itself is **not** run by the binary: the execution `running` step is
+an `agent` step whose babysitter sub-agent runs `kloop init`/`run -d`, and the binary
+then verifies the result via `kloop status`.
 
 **Driving the phases.** Bare `kautopilot next` advances the **shared phases** (plan,
 feedback). `kautopilot next --repo <repo>` drives **one repo's** execution/polish loop —
@@ -101,9 +104,9 @@ until the step's `completionEvent` is logged. **This is the resume story.**
 
 | kind          | Who runs it                            | Examples                                                                                                                                       |
 | ------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `code`        | the binary, inline (**never yielded**) | finalize_spec, seed-commit, kloop init, push, poll, act, ensure_branch, verify_fixes, next_plan, cleanup                                       |
-| `interactive` | harness, **inline**, serialized        | brainstorm (ad-hoc), triage, write_spec, write_plans, resolve, tty_resolve, feedback                                                           |
-| `agent`       | harness, **isolated sub-agent**        | create_ticket, fetch_ticket, commit, eval, create_pr, prereview, write_fix, amend_plans, reviewers, per-repo implement (exec mode `sub-agent`) |
+| `code`        | the binary, inline (**never yielded**) | seed (wt worktree), setup_run, push, poll, act, ensure_branch, verify_fixes, next_plan, cleanup, + outcome verification (kloop status / git / gh) |
+| `interactive` | harness, **inline**, serialized        | brainstorm (ad-hoc), triage, write_spec, write_plans, resolve, amend_plans, tty_resolve, feedback                                              |
+| `agent`       | harness, **isolated sub-agent**        | create_ticket, fetch_ticket, running (kloop babysitter), commit, eval, create_pr, prereview, write_fix, reviewers, per-repo implement (exec mode `sub-agent`) |
 
 ---
 
