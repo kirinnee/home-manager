@@ -27,9 +27,9 @@ import {
 } from "../core/github";
 import { appendEvent, readLog } from "../core/log";
 import {
+	currentRevisionPath,
 	diffRevisions,
 	latestRevisionOnDisk,
-	nextRevisionPath,
 } from "../core/revisions";
 import type { RepoEntry } from "../core/session-meta";
 import { findRepo, updateSessionMeta } from "../core/session-meta";
@@ -1033,7 +1033,7 @@ const feedback: StepDef = {
 	kind: "interactive",
 	scope: "session",
 	prepare: async (ctx) => {
-		const { path } = nextRevisionPath(ctx.sessionId, "feedback", {
+		const { path } = currentRevisionPath(ctx.sessionId, "feedback", {
 			epoch: ctx.version,
 		});
 		const epochDir = join(

@@ -1,3 +1,4 @@
+import { authoringRepoName } from "../phases/shared";
 import { getStep } from "../steps/registry";
 import { setCachedConfig } from "./agents";
 import type {
@@ -9,6 +10,11 @@ import type {
 	StepPhase,
 } from "./descriptor";
 import { appendEvent, readLog } from "./log";
+import {
+	type ArtifactKind,
+	copyPlanSetToNext,
+	copyToNextRevision,
+} from "./revisions";
 import {
 	findRepo,
 	type RepoEntry,
@@ -287,6 +293,81 @@ export interface CompleteResult {
 	ok: boolean;
 	recorded?: string;
 	error?: string;
+}
+
+/** Which versioned artifact each interactive writer step authors. */
+const STEP_ARTIFACT: Record<string, ArtifactKind> = {
+	brainstorm: "brainstorm",
+	triage: "triage",
+	write_spec: "spec",
+	write_plans: "plans",
+	feedback: "feedback",
+};
+
+export interface ReviseResult {
+	ok: boolean;
+	error?: string;
+	/** New version number that was minted. */
+	version?: number;
+	/** File (or plans dir) the agent should now edit for this new version. */
+	path?: string;
+	/** Viewer path for the new version (prefix with the configured base URL). */
+	url?: string;
+	/** Viewer path for the diff vs the previous version. */
+	diffUrl?: string;
+}
+
+/**
+ * `kautopilot revise` — mint the next version of the CURRENT interactive writer
+ * artifact by copying the latest forward (file-based numbering). Each user-facing
+ * presentation calls this: copy `vN → vN+1`, then the agent edits the returned
+ * path, then presents the returned viewer link. Only writer steps (brainstorm,
+ * triage, write_spec, write_plans, feedback) are revisable. Returns viewer PATHS
+ * (the harness prefixes the configured base URL) so links are never hand-built.
+ */
+export async function runRevise(
+	sessionId: string,
+	config: Config,
+	repoArg: string | null = null,
+): Promise<ReviseResult> {
+	const meta = readSessionMeta(sessionId);
+	if (!meta) throw new Error(`No session.json for session ${sessionId}`);
+	setCachedConfig(config);
+
+	const step = pendingStep(sessionId, repoArg, meta.epoch);
+	if (step == null) return { ok: false, error: "no pending step to revise" };
+	const kind = STEP_ARTIFACT[step];
+	if (!kind) {
+		return {
+			ok: false,
+			error: `step ${step} is not a versioned writer step (nothing to revise)`,
+		};
+	}
+
+	const epoch = meta.epoch;
+	if (kind === "plans") {
+		const repo = repoArg ?? authoringRepoName(meta);
+		const { n, dir } = copyPlanSetToNext(sessionId, epoch, repo);
+		const base = `/sessions/${sessionId}/plans/${encodeURIComponent(repo)}`;
+		return {
+			ok: true,
+			version: n,
+			path: dir,
+			url: `${base}/v${n}`,
+			diffUrl: `${base}/diff?from=${Math.max(1, n - 1)}&to=${n}`,
+		};
+	}
+
+	const ref = kind === "brainstorm" ? {} : { epoch };
+	const { n, path } = copyToNextRevision(sessionId, kind, ref);
+	const base = `/sessions/${sessionId}/${kind}`;
+	return {
+		ok: true,
+		version: n,
+		path,
+		url: `${base}/v${n}`,
+		diffUrl: `${base}/diff?from=${Math.max(1, n - 1)}&to=${n}`,
+	};
 }
 
 /**

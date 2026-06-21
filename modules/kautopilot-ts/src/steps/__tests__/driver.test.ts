@@ -23,8 +23,8 @@ afterAll(() => {
 });
 
 import { sessionDir } from "../../core/artifacts";
-import { runComplete, runNext } from "../../core/driver";
-import { diffRevisions } from "../../core/revisions";
+import { runComplete, runNext, runRevise } from "../../core/driver";
+import { diffRevisions, readRevision } from "../../core/revisions";
 import { createSession } from "../../core/session-create";
 import { readSessionMeta } from "../../core/session-meta";
 import type { Config } from "../../core/types";
@@ -136,10 +136,13 @@ describe("host-driven driver: next/complete", () => {
 		const meta = readSessionMeta(id);
 		expect(meta?.repos.map((r) => r.repo)).toContain("default");
 
-		// write_spec
+		// write_spec — carries its reviewer fan-out so reviewers run BEFORE the
+		// version is presented (no separate spec_review step).
 		const s = await runNext(id, config);
 		if (s.done) throw new Error("unexpected done");
 		expect(s.step).toBe("write_spec");
+		expect(s.review?.reviewers.length ?? 0).toBeGreaterThan(0);
+		expect(s.review?.gate).toBe("all_approve");
 		writeFile(join(dir, "epoch", "1", "spec", "v1.md"), "# Spec v1");
 		expect(
 			(
@@ -149,24 +152,11 @@ describe("host-driven driver: next/complete", () => {
 			).ok,
 		).toBe(true);
 
-		// spec_review (agent fan-out, carries review payload)
-		const sr = await runNext(id, config);
-		if (sr.done) throw new Error("unexpected done");
-		expect(sr.step).toBe("spec_review");
-		expect(sr.review?.reviewers.length).toBeGreaterThan(0);
-		expect(sr.review?.gate).toBe("all_approve");
-		expect(
-			(
-				await runComplete(id, config, "spec_review", {
-					metadata: { approved: true },
-				})
-			).ok,
-		).toBe(true);
-
-		// write_plans
+		// write_plans — also carries its reviewer fan-out.
 		const p = await runNext(id, config);
 		if (p.done) throw new Error("unexpected done");
 		expect(p.step).toBe("write_plans");
+		expect(p.review?.reviewers.length ?? 0).toBeGreaterThan(0);
 		writeFile(
 			join(dir, "epoch", "1", "plans", "default", "plan-1", "v1.md"),
 			"repo: default\n# Plan 1",
@@ -175,18 +165,6 @@ describe("host-driven driver: next/complete", () => {
 			(
 				await runComplete(id, config, "write_plans", {
 					output: join(dir, "epoch", "1", "plans", "default"),
-				})
-			).ok,
-		).toBe(true);
-
-		// plan_review
-		const pr = await runNext(id, config);
-		if (pr.done) throw new Error("unexpected done");
-		expect(pr.step).toBe("plan_review");
-		expect(
-			(
-				await runComplete(id, config, "plan_review", {
-					metadata: { approved: true },
 				})
 			).ok,
 		).toBe(true);
@@ -209,7 +187,7 @@ describe("host-driven driver: next/complete", () => {
 		);
 	});
 
-	it("spec_review not approved loops back to write_spec and bumps the revision", async () => {
+	it("revise mints a new version per user presentation (copy v1 → v2)", async () => {
 		const id = newSession();
 		const dir = sessionDir(id);
 		await runNext(id, config);
@@ -223,29 +201,42 @@ describe("host-driven driver: next/complete", () => {
 			output: join(dir, "epoch", "1", "triage", "v1.md"),
 			metadata: { repos: ["default"] },
 		});
-		await runNext(id, config);
+
+		// write_spec: the writer edits the CURRENT version (v1).
+		const s = await runNext(id, config);
+		if (s.done) throw new Error("unexpected done");
+		expect(s.step).toBe("write_spec");
+		expect(s.contract.outputFile).toContain("v1.md");
 		writeFile(join(dir, "epoch", "1", "spec", "v1.md"), "# Spec v1\nline");
-		await runComplete(id, config, "write_spec", {
-			output: join(dir, "epoch", "1", "spec", "v1.md"),
-		});
-		await runNext(id, config); // spec_review
-		await runComplete(id, config, "spec_review", {
-			metadata: { approved: false },
-		});
-		const back = await runNext(id, config);
-		if (back.done) throw new Error("unexpected done");
-		expect(back.step).toBe("write_spec");
-		// second revision path
-		expect(back.contract.outputFile).toContain("v2.md");
+
+		// A user-feedback round: `revise` copies v1 → v2 and returns the new file
+		// + viewer links. No new version appears from re-running `next` alone.
+		const r = await runRevise(id, config);
+		expect(r.ok).toBe(true);
+		expect(r.version).toBe(2);
+		expect(r.path).toContain("v2.md");
+		expect(r.url).toContain("/spec/v2");
+		expect(r.diffUrl).toContain("from=1&to=2");
+		// v2 is a copy of v1 until edited.
+		expect(readRevision(id, "spec", 2, { epoch: 1 })).toBe("# Spec v1\nline");
 		writeFile(
 			join(dir, "epoch", "1", "spec", "v2.md"),
 			"# Spec v2\nline changed",
 		);
-		await runComplete(id, config, "write_spec", {
-			output: join(dir, "epoch", "1", "spec", "v2.md"),
-		});
 		const d = diffRevisions(id, "spec", { from: 1, to: 2 });
 		expect(d).toContain("v1 → v2");
+
+		// Approve the latest (v2) — completes whatever step is pending.
+		expect(
+			(
+				await runComplete(id, config, undefined, {
+					output: join(dir, "epoch", "1", "spec", "v2.md"),
+				})
+			).ok,
+		).toBe(true);
+		const next = await runNext(id, config);
+		if (next.done) throw new Error("unexpected done");
+		expect(next.step).toBe("write_plans");
 	});
 });
 
@@ -253,9 +244,6 @@ describe("host-driven driver: next/complete", () => {
 
 function metaFor(step: string): Record<string, unknown> {
 	switch (step) {
-		case "spec_review":
-		case "plan_review":
-			return { approved: true };
 		case "feedback_check":
 			return { choice: "done", fullyMerged: false };
 		default:
@@ -279,17 +267,13 @@ async function drivePlan(id: string, repos: string[]): Promise<void> {
 		output: join(dir, "epoch", "1", "triage", "v1.md"),
 		metadata: { complexity: "moderate", repos, dependsOn: {} },
 	});
-	// write_spec → spec_review
+	// write_spec (reviewers ride on the writer step).
 	await runNext(id, config);
 	writeFile(join(dir, "epoch", "1", "spec", "v1.md"), "# Spec");
 	await runComplete(id, config, "write_spec", {
 		output: join(dir, "epoch", "1", "spec", "v1.md"),
 	});
-	await runNext(id, config);
-	await runComplete(id, config, "spec_review", {
-		metadata: { approved: true },
-	});
-	// write_plans (one plan per repo, tagged) → plan_review. The writer authors
+	// write_plans (one plan per repo, tagged) → finalize_plans. The writer authors
 	// every plan folder under epoch/<E>/plans/<authoringRepo>/<plan>/v<M>.md.
 	await runNext(id, config);
 	// Plans are authored under the primary (first-registered) repo's bucket.
@@ -302,9 +286,6 @@ async function drivePlan(id: string, repos: string[]): Promise<void> {
 	});
 	await runComplete(id, config, "write_plans", { output: plansDir });
 	await runNext(id, config);
-	await runComplete(id, config, "plan_review", {
-		metadata: { approved: true },
-	});
 }
 
 /** Drive one repo's execution/polish timeline to completion (ready-to-merge). */

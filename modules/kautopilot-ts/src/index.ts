@@ -20,6 +20,7 @@ import { createNextCommand } from "./cli/next";
 import { createOrgCommand } from "./cli/org";
 import { createPsCommand } from "./cli/ps";
 import { createResetCommand } from "./cli/reset";
+import { createReviseCommand } from "./cli/revise";
 import { createServeCommand } from "./cli/serve";
 import { createStartCommand } from "./cli/start";
 import { createStatusCommand } from "./cli/status";
@@ -36,6 +37,7 @@ program
 	.addCommand(createStartCommand())
 	.addCommand(createNextCommand())
 	.addCommand(createCompleteCommand())
+	.addCommand(createReviseCommand())
 	.addCommand(createDiffCommand())
 	.addCommand(createStatusCommand())
 	.addCommand(createDeleteCommand())

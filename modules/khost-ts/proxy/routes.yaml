@@ -11,3 +11,7 @@ routes:
 
   - hostname: ssh.ernest.atomi.cloud
     service: ssh://localhost:2222 # khost loopback sshd (browser-rendered via Access)
+
+  - hostname: blog.ernest.atomi.cloud
+    service: http://localhost:4321 # azide-boron blog dev server (Astro)
+    access: true # gated to only-ernest
