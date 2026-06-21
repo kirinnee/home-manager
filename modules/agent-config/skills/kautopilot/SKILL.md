@@ -137,7 +137,7 @@ matching session(s):
 ## Per-`kind` execution
 
 - **`code`** — never appears. The binary ran it (including all detection/waiting).
-- **`interactive`** (triage, write_spec, write_plans, resolve, amend_plans, tty_resolve, feedback) —
+- **`interactive`** (brainstorm, triage, write_spec, write_plans, resolve, amend_plans, tty_resolve, feedback_check, feedback) —
   run **inline** in the main session. Be a **devil's advocate**: propose first, debate,
   surface conflicts; never open with "what do you want to do?" Run the
   **per-revision review loop** below — re-present + re-ask after EVERY update and
@@ -145,8 +145,9 @@ matching session(s):
   ("approve" — not "ok/sure"). Spawn `Explore` subagents for heavy research so the
   conversation stays lean.
 - **`agent`** (create_ticket, fetch_ticket, **running** (kloop), commit, eval,
-  create_pr, prereview, write_fix, reviewers, per-repo implement) — **always** a fresh
-  isolated `Task` subagent, never inline.
+  create_pr, prereview, write_fix, running_subagent) — **always** a fresh isolated
+  `Task` subagent, never inline. (The reviewer fan-out isn't a step — it rides on the
+  write_spec/write_plans interactive steps and you spawn each reviewer as a subagent.)
 
 ### `running` — babysitting kloop (the execution dev loop)
 

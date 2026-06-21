@@ -140,13 +140,11 @@ export function copyPlanSetToNext(
 	const next = latest === 0 ? 1 : latest + 1;
 	for (const plan of readdirSync(dir)) {
 		const planDir = join(dir, plan);
-		let isDir: boolean;
 		try {
-			isDir = readdirSync(planDir).length >= 0;
+			readdirSync(planDir); // skip non-directory entries (throws → continue)
 		} catch {
-			continue; // not a directory
+			continue;
 		}
-		if (!isDir) continue;
 		const from = join(planDir, `v${latest}.md`);
 		const to = join(planDir, `v${next}.md`);
 		if (latest > 0 && existsSync(from) && !existsSync(to))

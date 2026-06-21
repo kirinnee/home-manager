@@ -105,8 +105,8 @@ until the step's `completionEvent` is logged. **This is the resume story.**
 | kind          | Who runs it                            | Examples                                                                                                                                       |
 | ------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `code`        | the binary, inline (**never yielded**) | seed (wt worktree), setup_run, push, poll, act, ensure_branch, verify_fixes, next_plan, cleanup, + outcome verification (kloop status / git / gh) |
-| `interactive` | harness, **inline**, serialized        | brainstorm (ad-hoc), triage, write_spec, write_plans, resolve, amend_plans, tty_resolve, feedback                                              |
-| `agent`       | harness, **isolated sub-agent**        | create_ticket, fetch_ticket, running (kloop babysitter), commit, eval, create_pr, prereview, write_fix, reviewers, per-repo implement (exec mode `sub-agent`) |
+| `interactive` | harness, **inline**, serialized        | brainstorm (ad-hoc), triage, write_spec, write_plans, resolve, amend_plans, tty_resolve, feedback_check, feedback                              |
+| `agent`       | harness, **isolated sub-agent**        | create_ticket, fetch_ticket, running (kloop babysitter), commit, eval, create_pr, prereview, write_fix, running_subagent (exec mode `sub-agent`). The reviewer fan-out is not a step — it rides on write_spec/write_plans. |
 
 ---
 
