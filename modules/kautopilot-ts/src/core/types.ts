@@ -382,19 +382,22 @@ Check: does the spec address every requirement in the ticket?
 List any requirements that are missing or insufficiently addressed.
 Output ONLY the problems found — one per line. If none, output "No issues found."`,
 				},
-				docs_accuracy: {
-					desc: "Referenced tool/lib versions and interfaces are correct",
+				grounding: {
+					desc: "Claims about the current situation are grounded, not hallucinated",
 					prompt: `Read the spec at {spec} and the ticket at {ticket}.
-Check: are all referenced tool versions, API interfaces, and method signatures accurate?
-Cross-reference with the codebase — grep for referenced functions, check package versions.
-Flag anything that looks hallucinated or version-incorrect.
+The spec is high-level (goals/intent, no code). Check that its claims about the CURRENT
+situation, motivation, and context are accurate and grounded — explore the system enough to
+confirm. Flag anything that looks hallucinated, assumed, or contradicted by reality.
+Do NOT demand file paths, function names, version numbers, or code citations — that detail
+belongs in the plans, not the spec.
 Output ONLY the problems found — one per line. If none, output "No issues found."`,
 				},
 				generalization: {
-					desc: "Extends existing patterns rather than inventing new ones",
-					prompt: `Read the spec at {spec}. Explore the codebase.
-Check: does the spec propose new patterns, paths, or abstractions when existing ones could be extended?
-Flag any "reinventing the wheel" — new utilities when similar ones exist, new conventions when the codebase already has one.
+					desc: "Direction reuses existing approaches rather than reinventing",
+					prompt: `Read the spec at {spec}. Explore the system at a high level.
+Check: does the proposed DIRECTION reinvent something the org/codebase already provides
+(an existing service, pattern, or convention) when reusing it would be simpler? Judge at
+the level of approach and intent — not concrete code.
 Output ONLY the problems found — one per line. If none, output "No issues found."`,
 				},
 				complexity: {
@@ -412,34 +415,36 @@ Check for security concerns: injection risks, auth/authz gaps, secrets handling,
 Only flag genuine issues, not theoretical concerns in internal code paths.
 Output ONLY the problems found — one per line. If none, output "No issues found."`,
 				},
-				proof_of_completion: {
-					desc: "Spec includes testable acceptance criteria",
+				success_criteria: {
+					desc: "Success criteria are observable outcomes",
 					prompt: `Read the spec at {spec}.
-Check: does the spec include an "Acceptance Criteria" section with concrete, testable criteria?
-Good criteria: test commands, API calls, grep assertions, build commands, measurable conditions.
-Bad criteria: "manually verify", "visually check", vague assertions, unmeasurable claims.
+Check: does the spec have a "Success Criteria" section, and is each criterion an OBSERVABLE
+OUTCOME — something you could later confirm is true (a behavior, a result, a measurable
+condition)? Flag vague/unmeasurable criteria ("works well", "is fast"). Do NOT require test
+commands, grep assertions, or build steps — the concrete verification approach is decided in
+the plans, not the spec.
 Output ONLY the problems found — one per line. If none, output "No issues found."`,
 				},
-				nonfunctional_checklist: {
-					desc: "All non-functional checklist items evaluated",
+				risks_and_scope: {
+					desc: "Open questions, risks, and scope boundaries are surfaced",
 					prompt: `Read the spec at {spec}.
-Check: has every item in the non-functional checklist been evaluated?
-The checklist has 12 standard items (linting, building, unit testing, integration testing,
-E2E testing, documentation, observability, invariant checking, security, performance,
-backwards compatibility, accessibility). For each item, the spec must state whether it
-applies and why.
-Flag any items that are missing, skipped without justification, or dismissed too quickly.
-Also check: did the spec add domain-specific non-functional items beyond the checklist?
+Check: does the spec surface the main RISKS and OPEN QUESTIONS (decisions still to make,
+assumptions to confirm) and state its NON-GOALS / out-of-scope boundaries? A spec that
+claims zero risks or open questions for a non-trivial change is suspect.
+Flag missing or hand-wavy risk/scope sections. Keep it about direction and intent, not
+implementation mechanics.
 Output ONLY the problems found — one per line. If none, output "No issues found."`,
 				},
-				verification_evidence: {
-					desc: "All triage assumptions have verification evidence",
-					prompt: `Read the spec at {spec} and the triage at {triage}.
-Check: if the triage listed assumptions to verify, does the spec provide verification
-evidence for each one? Evidence must include a concrete source (doc URL, file path,
-command output, live query result).
-Flag any assumptions that are unaddressed or claimed as verified without evidence.
-Flag any "UNVERIFIED" items and assess whether they are blocking.
+				high_level: {
+					desc: "Spec stays at goals/intent — no leaked implementation detail",
+					prompt: `Read the spec at {spec}.
+The spec must align on high-level GOALS and IDEAS. Flag any leaked implementation detail
+that belongs in the plans, not here: specific file paths, function/class names, code
+snippets, schemas, config keys, or exact test/command mechanics. Also flag goals or
+requirements that are too ambiguous to act on.
+Carry-over from triage: if the triage raised assumptions, the spec should at least NOTE the
+ones that affect the goals (under Open Questions & Risks) — but it need not prove them; the
+plan phase verifies.
 Output ONLY the problems found — one per line. If none, output "No issues found."`,
 				},
 			},

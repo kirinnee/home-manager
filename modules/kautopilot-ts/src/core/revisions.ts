@@ -1,7 +1,13 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import {
+	copyFileSync,
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { sessionDir } from "./artifacts";
-import { readLog } from "./log";
 
 // ============================================================================
 // Versioned working artifacts (§8). triage / spec / plans / feedback / brainstorm
@@ -25,15 +31,6 @@ export type ArtifactKind =
 	| "plans"
 	| "feedback"
 	| "brainstorm";
-
-/** Canonical approval event per artifact — revision count is derived from it. */
-const APPROVAL_EVENT: Record<ArtifactKind, string> = {
-	triage: "triage:approved",
-	spec: "spec:approved",
-	plans: "plans:approved",
-	feedback: "feedback:approved",
-	brainstorm: "brainstorm:approved",
-};
 
 /** brainstorm is epoch-agnostic; every other kind is scoped to an epoch. */
 function isEpochless(kind: ArtifactKind): boolean {
@@ -81,41 +78,81 @@ export function plansRepoDir(
 }
 
 /**
- * The number of already-approved revisions of an artifact, derived from the WAL
- * (idempotent — independent of files on disk or re-yields). Numbering is global
- * for brainstorm and PER-EPOCH for every other kind (only approval events whose
- * WAL `version` matches the ref epoch count). For plans, also scoped by repo.
+ * The version the WRITER currently edits: the latest on-disk revision, or v1
+ * (seeded empty) when none exists. Versioning is FILE-BASED and minted explicitly
+ * via {@link copyToNextRevision} on each user-facing presentation — NOT derived
+ * from approval count — so a new version appears only when the agent calls
+ * `revise`, never as a side effect of re-running `next`.
  */
-export function approvedRevisionCount(
-	sessionId: string,
-	kind: ArtifactKind,
-	ref: ArtifactRef = {},
-): number {
-	const event = APPROVAL_EVENT[kind];
-	const epoch = ref.epoch ?? 1;
-	return readLog(sessionId).filter((e) => {
-		if (e.event !== event) return false;
-		if (!isEpochless(kind) && (e.version ?? 1) !== epoch) return false;
-		if (kind === "plans" && ref.repo != null)
-			return (e.repo ?? e.metadata?.repo) === ref.repo;
-		return true;
-	}).length;
-}
-
-/**
- * Path the writer should produce for the NEXT (in-progress) revision — always a
- * `vN.md` file. N = approvedCount + 1 (idempotent). The containing directory is
- * created (for plans, `epoch/<E>/plans/<repo>/<plan>/`).
- */
-export function nextRevisionPath(
+export function currentRevisionPath(
 	sessionId: string,
 	kind: ArtifactKind,
 	ref: ArtifactRef = {},
 ): { n: number; path: string } {
-	const n = approvedRevisionCount(sessionId, kind, ref) + 1;
 	const dir = artifactDir(sessionId, kind, ref);
 	mkdirSync(dir, { recursive: true });
-	return { n, path: join(dir, `v${n}.md`) };
+	const latest = latestRevisionOnDisk(sessionId, kind, ref);
+	const n = latest === 0 ? 1 : latest;
+	const path = join(dir, `v${n}.md`);
+	if (latest === 0 && !existsSync(path)) writeFileSync(path, "");
+	return { n, path };
+}
+
+/**
+ * Mint the next revision of a single-doc artifact by copying the latest version
+ * forward (`vN → vN+1`), returning the new number + path. This is what
+ * `kautopilot revise` calls for brainstorm/triage/spec/feedback: copy, then the
+ * agent edits the new file, then presents it. Creates v1 (empty) when none exists.
+ */
+export function copyToNextRevision(
+	sessionId: string,
+	kind: ArtifactKind,
+	ref: ArtifactRef = {},
+): { n: number; path: string } {
+	const dir = artifactDir(sessionId, kind, ref);
+	mkdirSync(dir, { recursive: true });
+	const latest = latestRevisionOnDisk(sessionId, kind, ref);
+	if (latest === 0) {
+		const path = join(dir, "v1.md");
+		if (!existsSync(path)) writeFileSync(path, "");
+		return { n: 1, path };
+	}
+	const next = latest + 1;
+	copyFileSync(join(dir, `v${latest}.md`), join(dir, `v${next}.md`));
+	return { n: next, path: join(dir, `v${next}.md`) };
+}
+
+/**
+ * Mint the next plan-SET version for a repo: copy every plan folder's latest
+ * version forward to one shared `v{N+1}`, returning the new set version + the repo
+ * plans dir. (Plans are a set of folders sharing a version — `revise` advances the
+ * whole set at once.) Creates v1 across existing plan folders when none exists.
+ */
+export function copyPlanSetToNext(
+	sessionId: string,
+	epoch: number,
+	repo: string,
+): { n: number; dir: string } {
+	const dir = plansRepoDir(sessionId, epoch, repo);
+	mkdirSync(dir, { recursive: true });
+	const versions = listPlanSetVersions(sessionId, epoch, repo);
+	const latest = versions.length ? Math.max(...versions) : 0;
+	const next = latest === 0 ? 1 : latest + 1;
+	for (const plan of readdirSync(dir)) {
+		const planDir = join(dir, plan);
+		let isDir: boolean;
+		try {
+			isDir = readdirSync(planDir).length >= 0;
+		} catch {
+			continue; // not a directory
+		}
+		if (!isDir) continue;
+		const from = join(planDir, `v${latest}.md`);
+		const to = join(planDir, `v${next}.md`);
+		if (latest > 0 && existsSync(from) && !existsSync(to))
+			copyFileSync(from, to);
+	}
+	return { n: next, dir };
 }
 
 /** Path of revision n (no creation). */

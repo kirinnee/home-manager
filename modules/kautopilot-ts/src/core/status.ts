@@ -145,9 +145,7 @@ export const PHASE_STEPS: Record<string, string[]> = {
 		"fetch_ticket",
 		"triage",
 		"write_spec",
-		"spec_review",
 		"write_plans",
-		"plan_review",
 		"finalize_plans",
 		// Feedback phase folds into phase1 (plan) per the driver's marker mapping.
 		"feedback_check",

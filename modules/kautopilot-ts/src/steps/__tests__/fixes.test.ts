@@ -46,14 +46,9 @@ function writeFile(p: string, body: string): void {
 	writeFileSync(p, body);
 }
 
-function metaFor(step: string): Record<string, unknown> {
-	switch (step) {
-		case "spec_review":
-		case "plan_review":
-			return { approved: true };
-		default:
-			return {};
-	}
+/** Completion metadata for a generically-driven repo step (none needed today). */
+function metaFor(_step: string): Record<string, unknown> {
+	return {};
 }
 
 /** Drive the shared plan phase to the await_repos handoff, registering `repos`. */
@@ -70,15 +65,13 @@ async function drivePlan(id: string, repos: string[]): Promise<void> {
 		output: join(dir, "epoch", "1", "triage", "v1.md"),
 		metadata: { complexity: "moderate", repos, dependsOn: {} },
 	});
+	// write_spec (reviewers ride on the writer step; no separate review step).
 	await runNext(id, config);
 	writeFile(join(dir, "epoch", "1", "spec", "v1.md"), "# Master spec");
 	await runComplete(id, config, "write_spec", {
 		output: join(dir, "epoch", "1", "spec", "v1.md"),
 	});
-	await runNext(id, config);
-	await runComplete(id, config, "spec_review", {
-		metadata: { approved: true },
-	});
+	// write_plans → finalize_plans → await_repos.
 	await runNext(id, config);
 	const plansDir = join(dir, "epoch", "1", "plans", repos[0] ?? "default");
 	repos.forEach((r, i) => {
@@ -89,10 +82,6 @@ async function drivePlan(id: string, repos: string[]): Promise<void> {
 	});
 	await runComplete(id, config, "write_plans", { output: plansDir });
 	await runNext(id, config);
-	await runComplete(id, config, "plan_review", {
-		metadata: { approved: true },
-	});
-	void metaFor;
 }
 
 // --- C2: epoch/<E>/ is the single source of truth; seed copies from it -------

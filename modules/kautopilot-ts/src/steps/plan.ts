@@ -11,11 +11,10 @@ import type {
 } from "../core/descriptor";
 import type { ArtifactKind, ArtifactRef } from "../core/revisions";
 import {
-	approvedRevisionCount,
+	currentRevisionPath,
 	diffRevisions,
 	latestRevisionOnDisk,
 	listPlanSetVersions,
-	nextRevisionPath,
 	plansRepoDir,
 	revisionPath,
 } from "../core/revisions";
@@ -33,7 +32,13 @@ import {
 // ============================================================================
 // PLAN phase — `kautopilot next` (session-scoped, repo-agnostic for spec).
 // resolve_org → [brainstorm → create_ticket] → fetch_ticket → triage →
-// write_spec → spec_review → write_plans → plan_review → finalize_plans
+// write_spec → write_plans → finalize_plans
+//
+// write_spec and write_plans each CARRY their reviewer fan-out (spec_reviewers /
+// plan_reviewers) so reviewers run BEFORE the version is presented to the user —
+// every version the user sees is already review-checked. There is no separate
+// spec_review / plan_review step. Versions are file-based: the writer edits the
+// current version; `kautopilot revise` mints the next one per user presentation.
 // ============================================================================
 
 const REVIEW_SYNTHESIZE_PROMPT = `You are a review summarizer. Below are the outputs from multiple independent reviewers analyzing the same document.
@@ -141,7 +146,7 @@ const brainstorm: StepDef = {
 	kind: "interactive",
 	scope: "session",
 	prepare: async (ctx) => {
-		const { path } = nextRevisionPath(ctx.sessionId, "brainstorm");
+		const { path } = currentRevisionPath(ctx.sessionId, "brainstorm");
 		const vars = {
 			...planVars(ctx),
 			brainstorm: path,
@@ -257,7 +262,7 @@ const triage: StepDef = {
 	kind: "interactive",
 	scope: "session",
 	prepare: async (ctx) => {
-		const { path } = nextRevisionPath(ctx.sessionId, "triage", {
+		const { path } = currentRevisionPath(ctx.sessionId, "triage", {
 			epoch: ctx.version,
 		});
 		const vars = {
@@ -342,7 +347,10 @@ const writeSpec: StepDef = {
 	kind: "interactive",
 	scope: "session",
 	prepare: async (ctx) => {
-		const { path } = nextRevisionPath(ctx.sessionId, "spec", {
+		// File-based versioning: the writer edits the CURRENT version (latest on
+		// disk, or v1). A NEW version is minted only when the agent calls
+		// `kautopilot revise` to present a fresh draft to the user.
+		const { path } = currentRevisionPath(ctx.sessionId, "spec", {
 			epoch: ctx.version,
 		});
 		const summaryFile = join(
@@ -350,6 +358,7 @@ const writeSpec: StepDef = {
 			"tmp",
 			"spec-review-summary.md",
 		);
+		mkdirSync(join(sessionDir(ctx.sessionId), "tmp"), { recursive: true });
 		const triagePath = latestTriagePath(ctx);
 		const vars = {
 			...planVars(ctx),
@@ -366,6 +375,14 @@ const writeSpec: StepDef = {
 			"spec_writer",
 			vars as Record<string, string>,
 		);
+		// The reviewer fan-out is carried ON the writer step so reviewers run
+		// BEFORE each version is presented to the user — every version the user
+		// sees is already review-checked. (Reviewer rounds are not versioned.)
+		const review = buildReview(
+			ctx.config.agents.phase1.spec_reviewers,
+			vars,
+			summaryFile,
+		);
 		return {
 			prompt: `${substitute(SPEC_MECHANICS, vars)}\n\n${SHARED_APPROVAL_GATE}\n\n${body}`,
 			vars,
@@ -373,56 +390,10 @@ const writeSpec: StepDef = {
 				outputFile: path,
 				completionEvent: "spec:approved",
 			},
-		} satisfies PreparedStep;
-	},
-	finalize: async () => "spec_review",
-};
-
-// --- spec_review (agent fan-out) --------------------------------------------
-
-const specReview: StepDef = {
-	name: "spec_review",
-	phase: "plan",
-	kind: "agent",
-	scope: "session",
-	prepare: async (ctx) => {
-		const specPath = latestSpecPath(ctx);
-		const triagePath = latestTriagePath(ctx);
-		const summaryFile = join(
-			sessionDir(ctx.sessionId),
-			"tmp",
-			"spec-review-summary.md",
-		);
-		mkdirSync(join(sessionDir(ctx.sessionId), "tmp"), { recursive: true });
-		const vars = { ...planVars(ctx), spec: specPath, triage: triagePath };
-		const review = buildReview(
-			ctx.config.agents.phase1.spec_reviewers,
-			vars,
-			summaryFile,
-		);
-		return {
-			prompt:
-				"Run the spec review fan-out. Spawn each reviewer below as an isolated sub-agent in parallel, " +
-				"synthesize their findings into one numbered problem list, and decide approval. " +
-				"Gate: EVERY reviewer must approve (or the user overrides). Report metadata " +
-				'{ "approved": <bool>, "reviewOverride"?: <bool> }.',
-			vars,
-			contract: {
-				outputFile: summaryFile,
-				completionEvent: "spec_review:done",
-				completionMetadataSchema: {
-					approved: "boolean",
-					reviewOverride: "boolean",
-				},
-			},
 			review,
 		} satisfies PreparedStep;
 	},
-	finalize: async (ctx) => {
-		const approved =
-			ctx.metadata?.approved === true || ctx.metadata?.reviewOverride === true;
-		return approved ? "write_plans" : "write_spec";
-	},
+	finalize: async () => "write_plans",
 };
 
 function latestSpecVersion(ctx: StepContext): number {
@@ -483,14 +454,18 @@ const writePlans: StepDef = {
 	scope: "session",
 	prepare: async (ctx) => {
 		const repo = authoringRepo(ctx);
-		// Plan-set version M for this epoch+repo (all plan folders share v{M}).
-		const version =
-			approvedRevisionCount(ctx.sessionId, "plans", {
-				epoch: ctx.version,
-				repo,
-			}) + 1;
+		// File-based plan-set version: the writer edits the CURRENT set (latest on
+		// disk, or v1). A new set version is minted only via `kautopilot revise`.
+		const versions = listPlanSetVersions(ctx.sessionId, ctx.version, repo);
+		const version = versions.length ? Math.max(...versions) : 1;
 		const plansDir = plansRepoDir(ctx.sessionId, ctx.version, repo);
 		mkdirSync(plansDir, { recursive: true });
+		const summaryFile = join(
+			sessionDir(ctx.sessionId),
+			"tmp",
+			"plan-review-summary.md",
+		);
+		mkdirSync(join(sessionDir(ctx.sessionId), "tmp"), { recursive: true });
 		const vars = {
 			...planVars(ctx),
 			plans: plansDir,
@@ -505,6 +480,13 @@ const writePlans: StepDef = {
 			"plan_writer",
 			vars as Record<string, string>,
 		);
+		// Reviewers run BEFORE each version is presented (carried on the writer
+		// step), so every plan set the user sees is already review-checked.
+		const review = buildReview(
+			ctx.config.agents.phase1.plan_reviewers,
+			vars,
+			summaryFile,
+		);
 		return {
 			prompt: `${substitute(PLAN_MECHANICS, vars)}\n\n${SHARED_APPROVAL_GATE}\n\n${body}`,
 			vars,
@@ -516,6 +498,7 @@ const writePlans: StepDef = {
 					reason: "string?",
 				},
 			},
+			review,
 		} satisfies PreparedStep;
 	},
 	finalize: async (ctx) => {
@@ -529,57 +512,7 @@ const writePlans: StepDef = {
 			});
 			return "write_spec";
 		}
-		return "plan_review";
-	},
-};
-
-// --- plan_review (agent fan-out) --------------------------------------------
-
-const planReview: StepDef = {
-	name: "plan_review",
-	phase: "plan",
-	kind: "agent",
-	scope: "session",
-	prepare: async (ctx) => {
-		const plansDir = plansRepoDir(
-			ctx.sessionId,
-			ctx.version,
-			authoringRepo(ctx),
-		);
-		const specPath = latestSpecPath(ctx);
-		const summaryFile = join(
-			sessionDir(ctx.sessionId),
-			"tmp",
-			"plan-review-summary.md",
-		);
-		mkdirSync(join(sessionDir(ctx.sessionId), "tmp"), { recursive: true });
-		const vars = { ...planVars(ctx), plans: plansDir, spec: specPath };
-		const review = buildReview(
-			ctx.config.agents.phase1.plan_reviewers,
-			vars,
-			summaryFile,
-		);
-		return {
-			prompt:
-				"Run the plan review fan-out. Spawn each reviewer below as an isolated sub-agent in parallel, " +
-				"synthesize their findings, and decide approval. Gate: EVERY reviewer must approve " +
-				'(or the user overrides). Report metadata { "approved": <bool>, "reviewOverride"?: <bool> }.',
-			vars,
-			contract: {
-				outputFile: summaryFile,
-				completionEvent: "plan_review:done",
-				completionMetadataSchema: {
-					approved: "boolean",
-					reviewOverride: "boolean",
-				},
-			},
-			review,
-		} satisfies PreparedStep;
-	},
-	finalize: async (ctx) => {
-		const approved =
-			ctx.metadata?.approved === true || ctx.metadata?.reviewOverride === true;
-		return approved ? "finalize_plans" : "write_plans";
+		return "finalize_plans";
 	},
 };
 
@@ -646,8 +579,6 @@ export const PLAN_STEPS: StepDef[] = [
 	fetchTicket,
 	triage,
 	writeSpec,
-	specReview,
 	writePlans,
-	planReview,
 	finalizePlans,
 ];
