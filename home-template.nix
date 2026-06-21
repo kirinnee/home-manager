@@ -3,7 +3,6 @@
 , pkgs-llm
 , claude-code-pkg
 , codex-pkg
-, pkgs-loctl
 , pkgs-unstable
 , atomi
 , profile
@@ -355,7 +354,7 @@ rec {
 
   home.packages = (
     [
-      pkgs-loctl.loctl-wrapper
+      loctl
 
       # Raw `codex` (plain binary, default ~/.codex home shared with the desktop
       # app). The `codex-<name>` multi-account wrappers come from programs.multi-codex.
@@ -434,7 +433,6 @@ rec {
       k8s-merge
       oci-oke-allow-my-ip
       kloop
-      kloop-dev
       kautopilot
       atomi.clickup_cli
       grafana-loki

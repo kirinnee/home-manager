@@ -14,6 +14,13 @@ nixpkgs.stdenv.mkDerivation {
   buildPhase = ''
     export HOME=$TMPDIR
     bun install --frozen-lockfile
+
+    # Defensive: kloop runs the .ts sources directly via Bun. A bare path src (./.)
+    # copies untracked files into the store, so strip any stray compiled artifacts —
+    # a locally-emitted .js must never shadow its .ts sibling in the packaged source
+    # (a partially-regenerated default-prompts.js once leaked an unsubstituted
+    # {scratchDir} into prompts and broke verdict detection).
+    find src \( -name '*.js' -o -name '*.d.ts' -o -name '*.d.ts.map' \) -delete
   '';
 
   installPhase = ''
