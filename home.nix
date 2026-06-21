@@ -1,5 +1,5 @@
-{ lib, pkgs, pkgs-llm, claude-code-pkg, codex-pkg, pkgs-loctl, pkgs-unstable, atomi, profile, ... }:
+{ lib, pkgs, pkgs-llm, claude-code-pkg, codex-pkg, pkgs-unstable, atomi, profile, ... }:
 
 import ./home-template.nix {
-  inherit lib pkgs pkgs-llm claude-code-pkg codex-pkg pkgs-loctl pkgs-unstable atomi profile;
+  inherit lib pkgs pkgs-llm claude-code-pkg codex-pkg pkgs-unstable atomi profile;
 }

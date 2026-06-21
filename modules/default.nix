@@ -9,12 +9,23 @@ rec {
   load-secrets = import ./load-secrets/default.nix { inherit nixpkgs trivialBuilders; };
   khost = import ./khost-ts/default.nix { inherit nixpkgs; };
   hms = import ./hms/default.nix { inherit trivialBuilders nixpkgs; };
-  kloop = import ./kloop-ts/default.nix { inherit nixpkgs; };
-  kloop-dev = nixpkgs.writeShellScriptBin "kloop-dev" ''
+  # Run-from-source (dynamic): a thin wrapper that execs `bun run` against the
+  # in-repo source, so edits take effect immediately with no rebuild. Building it
+  # as a derivation with `src = ./.` would copy kloop-ts (incl. node_modules) into
+  # the store on every eval — slow. node_modules is installed locally via `bun install`.
+  kloop = nixpkgs.writeShellScriptBin "kloop" ''
     exec ${nixpkgs.bun}/bin/bun run ~/.config/home-manager/modules/kloop-ts/src/index.ts "$@"
   '';
   # kautopilot = import ./kautopilot-ts/default.nix { inherit nixpkgs; };
   kautopilot = nixpkgs.writeShellScriptBin "kautopilot" ''
     exec ${nixpkgs.bun}/bin/bun run ~/.config/home-manager/modules/kautopilot-ts/src/index.ts "$@"
+  '';
+  # loctl: run-from-source wrapper (matches the old `loctl-wrapper` package, which
+  # bundled no extra tools and relied on host PATH). Replaces the `loctl` flake
+  # input — a `path:` input copied the whole 328MB checkout (node_modules + compiled
+  # binaries) into the store on every eval. node_modules lives at the loctl checkout,
+  # so bun resolves deps there; assets.ts resolves assets from the source tree.
+  loctl = nixpkgs.writeShellScriptBin "loctl" ''
+    exec ${nixpkgs.bun}/bin/bun run /Users/erng/Workspace/work/vungle/loctl/src/index.ts "$@"
   '';
 }

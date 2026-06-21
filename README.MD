@@ -2,6 +2,27 @@
 
 My personal [home-manager](https://github.com/nix-community/home-manager) configurations, which include ZSH plugins, configurations and basic binaries used for development.
 
+## Bun CLIs run dynamically (`bun run` from source)
+
+The in-repo Bun CLIs — **`kautopilot`** (`modules/kautopilot-ts`), **`kloop`**
+(`modules/kloop-ts`), **`khost`** (`modules/khost-ts`) — and the external
+**`loctl`** are installed as thin `bun run` wrappers that execute the
+TypeScript source directly. None of them are built into Nix.
+
+Why: each app's `node_modules` (~280 MB total) was being copied into the Nix
+store on every `hms`, and `loctl` was a `path:` flake input that copied its
+whole 328 MB checkout. That pushed rebuilds to ~2.5 min. Running from source
+dropped eval to ~25s.
+
+Rules to keep it fast:
+
+- ⚠️ **Never commit or leave a `node_modules/` inside any of these app dirs.**
+  Bun auto-installs deps into its global cache (`~/.bun/install/cache`) on first
+  run. If you `bun install` for local tooling, delete `node_modules` afterward.
+- Source edits take effect immediately — no rebuild needed.
+- `loctl` is run from its checkout at `/Users/erng/Workspace/work/vungle/loctl`
+  (no longer a flake input).
+
 ## Setup New Box
 
 Install Basic Dependencies: Nix, Home Manager, and basic applications
