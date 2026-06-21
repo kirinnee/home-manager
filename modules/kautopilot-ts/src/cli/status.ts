@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { getSessionById, getSessionByWorktree } from "../core/db";
+import { getSessionById, getSessionByWorktree, listSessions } from "../core/db";
 import { getGitRoot, getWorktree } from "../core/git";
 import { checkLock } from "../core/lock";
 import { readSessionMeta } from "../core/session-meta";
@@ -242,11 +242,20 @@ async function runStatus(
 		process.exit(1);
 	}
 
-	const repoPath = getGitRoot();
-	const worktree = getWorktree();
-	const session = getSessionByWorktree(repoPath, worktree);
+	// Tolerate launching outside a git repo (the hub case): try the cwd's
+	// worktree, else fall back to the single running session.
+	let session = null;
+	try {
+		session = getSessionByWorktree(getGitRoot(), getWorktree());
+	} catch {
+		// not in a repo
+	}
 	if (!session) {
-		logError("No session found in this worktree.");
+		const running = listSessions();
+		if (running.length === 1) session = running[0];
+	}
+	if (!session) {
+		logError("No session here. Pass --session <id> (or run inside its repo).");
 		process.exit(1);
 	}
 

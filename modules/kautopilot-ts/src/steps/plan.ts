@@ -246,12 +246,18 @@ Write your triage assessment to: {triage}
 The triage document MUST follow this template structure:
 {triageTemplate}
 
-### Repo Set & Dependency Order
-Triage also decides WHICH repos this task touches and their order:
+### Repo Set, Paths & Dependency Order
+Triage decides WHICH repos this task touches, WHERE each lives on disk, and their order:
 - Explore candidate repos (spawn Explore subagents for breadth).
 - Propose the repo set and dependencies, e.g. "touches \`api\` and \`infra\`; \`infra\` depends on \`api\`'s contract." Confirm with the user.
+- **Report each repo's absolute filesystem path** in the \`repoPaths\` metadata
+  (\`{ "<repo>": "/abs/path/to/repo", … }\`). kautopilot may have been launched from
+  ANYWHERE — possibly NOT inside any repo — so there is no implicit repo to fall back
+  to. Locate each repo on disk (and clone it, with the user's OK, if it isn't present);
+  confirm the path. \`seed\` creates each repo's worktree on demand (via worktrunk) from
+  this path — a wrong/missing path means that repo can't be worked on.
 - All repos must share one org / ticket system — reject cross-org tasks.
-The confirmed repo set + dependsOn seed session.json repos[].
+The confirmed repo set + dependsOn + repoPaths seed session.json repos[].
 
 ### Previous revision diff (if any)
 {lastDiff}`;
