@@ -146,20 +146,34 @@ prompt:
 }
 ```
 
-The controller spawns reviewers as parallel isolated sub-agents, runs **synthesize**
-into one numbered problem list, and feeds it back into the interactive writer
-(`write_spec`/`write_plans`). The gate is **harness-enforced**: withhold `complete` on
-the writer until **every reviewer approves**, unless the user overrides
-(`--metadata '{"reviewOverride": true}'`). `kautopilot spec-review` / `plan-review`
-remain for manual one-shot use.
+The `review` payload is carried **on the writer step** (`write_spec`/`write_plans`),
+so reviewers run **before each version is presented to the user** — every version the
+user sees is already review-checked. The controller spawns reviewers as parallel
+isolated sub-agents on the working draft, runs **synthesize** into one numbered problem
+list, and refines the draft until **every reviewer approves** (or the user overrides via
+`--metadata '{"reviewOverride": true}'`). Reviewer rounds are **not versioned** — only a
+user-facing `revise` (§5) mints a version. There is no separate `spec_review` /
+`plan_review` step.
 
 ---
 
-## 5. Versioned artifacts & diffs
+## 5. Versioned artifacts, `revise` & diffs
 
-triage / spec / plans / feedback are each iterated through many **versions**; every
-proposed version is snapshotted into the session store and diffed against the previous,
-so the user reviews **what changed**, not the whole doc.
+brainstorm / triage / spec / plans / feedback are each iterated through many
+**versions**. A version is a **snapshot the user was shown** — numbering is
+**file-based** (`vN.md` on disk) and a new version is minted **only** by `revise`,
+once per user-facing presentation. Re-running `next` never mints a version; reviewer
+rounds (§4) refine the current version in place and are not versioned.
+
+```
+kautopilot revise [--repo <repo>] [--session <id>]
+```
+
+- Copies the latest version forward (`vN → vN+1`) and prints
+  `{ "ok": true, "version": N, "path": "<file to edit>", "url": "/sessions/…/spec/vN", "diffUrl": "/sessions/…/spec/diff?from=…&to=…" }`.
+- The harness edits `path`, then presents `url`/`diffUrl` (prefixed with the
+  configured viewer base URL) — it never hand-builds a version URL.
+- Only valid on an interactive writer step; otherwise `{ ok: false }`.
 
 ```
 kautopilot diff <artifact> [--from <n>] [--to <n>] [--session <id>]
@@ -167,11 +181,12 @@ kautopilot diff <artifact> [--from <n>] [--to <n>] [--session <id>]
    default: latest two versions (n-1 → n)
 ```
 
-- Revisions live at `~/.kautopilot/<sessionId>/revisions/{triage,spec,plans/<repo>,feedback}/`.
-- A `code` snapshot fires automatically inside `complete` when the descriptor carries
-  `contract.snapshot`; `next` may include the latest diff inline (`vars.lastDiff`).
+- Revisions live at `~/.kautopilot/<sessionId>/{brainstorm,epoch/<E>/{triage,spec,feedback,plans/<repo>/<plan>}}/vN.md`.
+- The web viewer renders the diff as a **markdown redline** (rendered prose with inline
+  insertions/deletions), not a code-style line diff; `next` may include the latest diff
+  inline (`vars.lastDiff`).
 - **Machine-local, never committed.** Only the final approved version is committed (§ on
-  commit policy below). Reuses the existing `snapshot` / `artifact-versioning` machinery.
+  commit policy below).
 
 ---
 
@@ -198,6 +213,7 @@ dependsOn[], prUrl, status }`. There is no per-repo WAL.
 kautopilot start [TICKET_ID | "request"] [--org liftoff|atomicloud]   # convenience: init session + invoke default harness
 kautopilot next [--repo <repo>] [--json]                              # the driver (§2)
 kautopilot complete [step] [--repo <repo>] …                          # advance; step optional (§3)
+kautopilot revise [--repo <repo>] …                                   # mint next version + return link (§5)
 kautopilot diff <artifact> …                                          # revision diffs (§5)
 kautopilot status [--json]                                            # session + every repo's per-repo state
 kautopilot ps [--json]                                                # sessions table (unchanged shape + ticketId/org)
