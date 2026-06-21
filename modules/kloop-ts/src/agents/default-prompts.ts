@@ -53,10 +53,14 @@ it signals that the content file is complete.
 2. Before using any library, tool, or framework, research its current documentation and source code. Verify the version you are using matches the API signatures and configuration you are relying on. Do not rely on potentially outdated knowledge.
 3. **Focus on rejected reviews first.** If a synthesized review summary path is listed above, read it — it replaces raw individual reviews as your primary input. The summary deduplicates issues and prioritizes by severity (CRITICAL/HIGH/LOW). Otherwise, read the raw reviews from {reviewsDir}/. UNANIMOUS approval is required — every reviewer must pass. If any reviewer rejected, address their concerns before moving on to other work. Do NOT treat a minority rejection as optional.
 4. Implement the required changes, with special attention to addressing every rejected reviewer's concerns
-5. Capture evidence to {scratchDir}/:
-   - If the spec has a Definition of Done checklist, capture evidence for each item
-   - If the spec has no checklist, figure out what checks are available (build, test, lint, type-check, etc.) and capture what you can
-   - Write self-review findings to {scratchDir}/evidence-self-review.md
+5. **Capture command evidence — MANDATORY.** Every verification command you run to prove a requirement is met MUST have its FULL output piped to an evidence log in {scratchDir}/, so reviewers can confirm from the evidence folder instead of re-running everything. A check counts as "done" ONLY if there is an evidence log proving it passed.
+   - Pipe each command's stdout+stderr to a log and record its exit code:
+     \`<command> 2>&1 | tee {scratchDir}/evidence-<check>.log; echo "exit: \${PIPESTATUS[0]}" >> {scratchDir}/evidence-<check>.log\`
+   - Run and capture EVERY verification gate the project has — at minimum, whichever of these exist: **build**, **lint**, **format / pre-commit hooks**, **type-check**, and **tests**. Use clear names, e.g. evidence-build.log, evidence-lint.log, evidence-precommit.log, evidence-typecheck.log, evidence-test.log.
+   - If the spec has a Definition of Done checklist, capture a command-output log for EACH item (evidence-<item>.log). Do not mark an item done without its log.
+   - If the spec has no checklist, still capture every available check above.
+   - Do NOT claim a check passed unless its evidence log shows a clean run (exit 0). Never fabricate or summarize away the output — pipe the real command output.
+   - Write a self-review summary to {scratchDir}/evidence-self-review.md that lists each requirement / DoD item and names the evidence-*.log that proves it (with the exit code).
    - Create metadata at {scratchDir}/evidence-self-review.md.meta: {"artifact":"evidence","role":"implementer","runId":"<runId>","loop":{loop},"timestamp":"<ISO>"}
 6. **Self-review your changes** before marking as complete:
    - Run \`git diff\` and \`git diff --staged\` to review ALL changes
@@ -130,7 +134,8 @@ You are Reviewer {reviewerIndex} for loop {iteration}. Be strict and thorough.
 3. Before using any library, tool, or framework referenced in the code, research its current documentation and source code. Verify the version being used matches the actual API signature and configuration. Flag any usage of outdated or non-existent features.
 4. Check {evidenceDir}/ for build, test, and other output logs — trust these as accurate to save time
 5. **Validate evidence** — check {evidenceDir}/ for output logs
-   - If the spec has a Definition of Done checklist, be strict: every required evidence item must be present and passing. Reject if anything is missing.
+   - Every verification gate the project has (build, lint, format/pre-commit, type-check, tests) must have a captured evidence log in {evidenceDir}/ showing a clean run (exit 0). If the implementer claims a check passed but there is no log proving it — or the log shows a failure/non-zero exit — REJECT. Do not take "it passes" on faith.
+   - If the spec has a Definition of Done checklist, be strict: every required item must have a present, passing evidence log. Reject if anything is missing.
    - If the spec has no checklist, use judgment: check what is reasonable for this project. Don't reject for missing evidence that the spec never asked for.
 6. Write your review to {scratchDir}/review-reviewer-{reviewerIndex}.md — include any issues found and evidence gaps
    Create metadata at {scratchDir}/review-reviewer-{reviewerIndex}.md.meta:
