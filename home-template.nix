@@ -19,20 +19,6 @@ let
   auth = imported.auth;
   personalDirs = [ "~" "~/.config/home-manager" "~/Workspace/personal" ];
   workDirs = [ "~/Workspace/work" ];
-  # The Codex desktop app always reads ~/.codex, which the multi-codex module
-  # cannot target (it hard-prefixes `.codex-`). Share the CLI's instructions,
-  # skills, and hooks with the desktop app without replacing app-owned files.
-  codexShared = imported.codexUserConfig;
-  # Link each bundled skill individually into ~/.codex/skills so the parent dir
-  # stays a real, writable directory the Codex desktop app can write .system/
-  # into. Per-skill home.file leaves give us this without an activation script:
-  # home-manager creates the parent as a real dir and handles stale-link cleanup.
-  codexSkillLinks = lib.mapAttrs'
-    (name: src: {
-      name = ".codex/skills/${name}";
-      value.source = src;
-    })
-    codexShared.skills;
 in
 
 ##################
@@ -67,9 +53,6 @@ with modules;
 rec {
   imports = [
     ./modules/workspace
-    # Inline module: merges per-skill ~/.codex/skills symlinks into home.file
-    # without conflicting with the dotted home.file.* entries below.
-    { home.file = codexSkillLinks; }
   ];
 
   # Nix configuration
@@ -171,6 +154,10 @@ rec {
         provider = "anthropic";
         directoryRules = workDirs;
       };
+      auto-atomi = imported.mkAutoClaudeAccount {
+        provider = "anthropic";
+        directoryRules = [ "~/Workspace/atomi" ];
+      };
       auto-market = imported.mkAutoClaudeAccount {
         provider = "anthropic";
       };
@@ -181,7 +168,7 @@ rec {
   programs.multi-codex = {
     enable = true;
     defaultPackage = codex-pkg;
-    defaultAccount = "pro20";
+    defaultAccount = "kirin";
 
     # Raw `codex` is NOT hijacked to auto-route by directory. It's the plain
     # binary on the default ~/.codex home (shared with the Codex desktop app).
@@ -195,13 +182,32 @@ rec {
 
     accounts = {
       # ChatGPT OAuth-login accounts (run `codex-<name> auth login` after hms)
-      pro20 = imported.mkCodexChatGPTAccount {
+      # lo* = liftoff (loai / loio).
+      loai = imported.mkCodexChatGPTAccount {
+        directoryRules = workDirs;
+      };
+      loio = imported.mkCodexChatGPTAccount {
+        directoryRules = workDirs;
+      };
+      ernest = imported.mkCodexChatGPTAccount {
+        directoryRules = workDirs;
+      };
+      kirin = imported.mkCodexChatGPTAccount {
         directoryRules = personalDirs;
       };
       atomi = imported.mkCodexChatGPTAccount {
         directoryRules = [ "~/Workspace/atomi" ];
       };
-      auto-pro20 = imported.mkCodexChatGPTAutoAccount {
+      auto-loai = imported.mkCodexChatGPTAutoAccount {
+        directoryRules = workDirs;
+      };
+      auto-loio = imported.mkCodexChatGPTAutoAccount {
+        directoryRules = workDirs;
+      };
+      auto-ernest = imported.mkCodexChatGPTAutoAccount {
+        directoryRules = workDirs;
+      };
+      auto-kirin = imported.mkCodexChatGPTAutoAccount {
         directoryRules = personalDirs;
       };
       auto-atomi = imported.mkCodexChatGPTAutoAccount {
@@ -326,20 +332,6 @@ rec {
     source = ./finicky/config.js;
     executable = false;
   };
-
-  # --- Codex desktop app (~/.codex) ---
-  # Nix-manage only the files the desktop app never writes, so it shares the
-  # CLI's instructions + hooks. config.toml and auth.json are left app-owned and
-  # writable so plugins, marketplaces, browser/computer-use, project trust, and
-  # desktop UI settings keep working. Bundled skills are linked per-skill via the
-  # codexSkillLinks inline module in `imports`, which keeps ~/.codex/skills a real
-  # writable dir so Codex can still write skills/.system at runtime.
-  # To actually run the hooks, add
-  # `[features]\nhooks = true` to ~/.codex/config.toml manually (it must stay
-  # app-owned, so Nix can't inject it without breaking the rest of the file).
-  home.file.".codex/AGENTS.md".text = codexShared.memory.text;
-  home.file.".codex/hooks.json".text = builtins.toJSON codexShared.hooksConfig;
-  home.file.".codex/hooks".source = codexShared.hooksDir;
 
   home.activation.load-secrets = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
     export SECRETS_FILE="${./secrets.enc.yaml}"
