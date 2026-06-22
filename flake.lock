@@ -1245,11 +1245,11 @@
         "nixpkgs": "nixpkgs_29"
       },
       "locked": {
-        "lastModified": 1776363440,
-        "narHash": "sha256-y80enB07m86mtI52NCquXH2yJNJti12jpJRgexP/PmA=",
+        "lastModified": 1782103666,
+        "narHash": "sha256-RLWM0uD6VANn82i/8SA92W6oOfUNvqQc3sEitm3QJsA=",
         "owner": "kirinnee",
         "repo": "home-manager-modules",
-        "rev": "ecf5a7ff60a0369d87de89fad24eebd6db0adbf5",
+        "rev": "da638a33ab625175e48f4fdbea57d3d29d995c99",
         "type": "github"
       },
       "original": {

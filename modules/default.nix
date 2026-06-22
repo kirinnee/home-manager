@@ -16,7 +16,6 @@ rec {
   kloop = nixpkgs.writeShellScriptBin "kloop" ''
     exec ${nixpkgs.bun}/bin/bun run ~/.config/home-manager/modules/kloop-ts/src/index.ts "$@"
   '';
-  # kautopilot = import ./kautopilot-ts/default.nix { inherit nixpkgs; };
   kautopilot = nixpkgs.writeShellScriptBin "kautopilot" ''
     exec ${nixpkgs.bun}/bin/bun run ~/.config/home-manager/modules/kautopilot-ts/src/index.ts "$@"
   '';
