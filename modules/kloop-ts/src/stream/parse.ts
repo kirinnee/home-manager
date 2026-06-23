@@ -277,6 +277,16 @@ export async function extractTokensFromLog(logFilePath: string): Promise<TokenCo
 function extractTokensFromContent(content: string): TokenCounts {
   const result: TokenCounts = {};
 
+  // Interactive (Claude TUI) transcripts have no top-level {type:"result"} event; per-turn
+  // usage lives under each assistant entry's message.usage. Accumulate those as a fallback so
+  // interactive runs still report token counts. Only applied if no result/turn.completed wins.
+  // Claude Code transcripts write MULTIPLE JSONL records per assistant message (one per
+  // streaming chunk / content block), each repeating the SAME message.id and the SAME usage
+  // block. Summing every line multiplies counts by the duplicate factor, so dedupe by
+  // message.id and keep one usage value per id (last write wins) before summing at the end.
+  const transcriptUsageById = new Map<string, { input: number; output: number }>();
+  let sawTranscriptUsage = false;
+
   for (const line of content.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -326,9 +336,48 @@ function extractTokensFromContent(content: string): TokenCounts {
           result.outputTokens = usage.output_tokens;
         }
       }
+
+      // Interactive transcript: per-turn usage under assistant entries' message.usage.
+      // Dedupe by message.id since the transcript repeats the same usage across the message's
+      // streamed records; last write per id wins (the records carry identical usage anyway).
+      if (parsed.type === 'assistant' && parsed.message && parsed.message.usage) {
+        const usage = parsed.message.usage;
+        const id = typeof parsed.message.id === 'string' ? parsed.message.id : undefined;
+        // Real Claude Code transcripts carry the bulk of input under cache fields; plain
+        // input_tokens is tiny. Fold cache creation/read into input so we don't undercount.
+        const hasCacheCreation = typeof usage.cache_creation_input_tokens === 'number';
+        const hasCacheRead = typeof usage.cache_read_input_tokens === 'number';
+        const hasInput = typeof usage.input_tokens === 'number' || hasCacheCreation || hasCacheRead;
+        const hasOutput = typeof usage.output_tokens === 'number';
+        if (hasInput || hasOutput) {
+          const input =
+            (typeof usage.input_tokens === 'number' ? usage.input_tokens : 0) +
+            (hasCacheCreation ? usage.cache_creation_input_tokens : 0) +
+            (hasCacheRead ? usage.cache_read_input_tokens : 0);
+          // Records lacking an id can't be deduped; key them uniquely so each still counts once.
+          const key = id ?? `__noid__${transcriptUsageById.size}`;
+          transcriptUsageById.set(key, {
+            input: hasInput ? input : 0,
+            output: hasOutput ? usage.output_tokens : 0,
+          });
+          sawTranscriptUsage = true;
+        }
+      }
     } catch {
       // Skip malformed lines
     }
+  }
+
+  // Fall back to aggregated transcript usage only when no result/turn.completed supplied counts.
+  if (sawTranscriptUsage) {
+    let transcriptInput = 0;
+    let transcriptOutput = 0;
+    for (const { input, output } of transcriptUsageById.values()) {
+      transcriptInput += input;
+      transcriptOutput += output;
+    }
+    if (result.inputTokens === undefined) result.inputTokens = transcriptInput;
+    if (result.outputTokens === undefined) result.outputTokens = transcriptOutput;
   }
 
   return result;

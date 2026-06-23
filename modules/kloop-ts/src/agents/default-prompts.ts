@@ -40,14 +40,14 @@ Read CLAUDE.md and any project skills files if they exist.
 2. Before using any library, tool, or framework, research its current documentation and source code. Verify the version you are using matches the API signatures and configuration you are relying on. Do not rely on potentially outdated knowledge.
 3. **Focus on rejected reviews first.** If a synthesized review summary path is listed above, read it — it replaces raw individual reviews as your primary input. The summary deduplicates issues and prioritizes by severity (CRITICAL/HIGH/LOW). Otherwise, read the raw reviews from {reviewsDir}/. UNANIMOUS approval is required — every reviewer must pass. If any reviewer rejected, address their concerns before moving on to other work. Do NOT treat a minority rejection as optional.
 4. Implement the required changes, with special attention to addressing every rejected reviewer's concerns
-5. **Capture command evidence — MANDATORY.** Every verification command you run to prove a requirement is met MUST have its FULL output piped to an evidence log in {evidenceDir}/, so reviewers can confirm from the evidence folder instead of re-running everything. A check counts as "done" ONLY if there is an evidence log proving it passed.
-   - Pipe each command's stdout+stderr to a log and record its exit code:
-     \`<command> 2>&1 | tee {evidenceDir}/<check>.log; echo "exit: \${PIPESTATUS[0]}" >> {evidenceDir}/<check>.log\`
-   - Run and capture EVERY verification gate the project has — at minimum, whichever of these exist: **build**, **lint**, **format / pre-commit hooks**, **type-check**, and **tests**. Use clear names, e.g. build.log, lint.log, precommit.log, typecheck.log, test.log.
-   - If the spec has a Definition of Done checklist, capture a command-output log for EACH item (<item>.log). Do not mark an item done without its log.
-   - If the spec has no checklist, still capture every available check above.
-   - Do NOT claim a check passed unless its evidence log shows a clean run (exit 0). Never fabricate or summarize away the output — pipe the real command output.
-   - Write a self-review summary to {evidenceDir}/self-review.md that lists each requirement / DoD item and names the <check>.log that proves it (with the exit code).
+5. **Capture evidence for every acceptance criterion — MANDATORY.** The spec's Acceptance Criteria / Definition of Done each carry an **Evidence** line of one of two kinds. Produce that evidence — ALL of it lands in {evidenceDir}/, which is the only place reviewers look. There is no separate sidecar file.
+   - **Type 1 — automated proof (PREFERRED).** The criterion names an exact command. RUN it and capture its full output as the evidence artifact — the captured stdout/stderr + exit code IS the proof a reviewer reads, not a claim that it works. The command must exercise the REAL behavior (a genuine test, lint, build, HTTP response, metric, grep assertion), NEVER a hollow \`echo done\` / \`assert true\` / a command that does not actually test the outcome. Capture each with:
+     \`<command> 2>&1 | tee {evidenceDir}/<criterion>.log; echo "exit: \${PIPESTATUS[0]}" >> {evidenceDir}/<criterion>.log\`
+   - **Type 2 — code-review proof.** Only when no command can demonstrate the outcome (a pure refactor, a removed dead path, a structural change). There is no log to capture — instead make the diff unambiguous and record, in self-review.md below, the EXACT files / functions / diff hunks the reviewer must inspect to confirm it.
+   - **Prefer Type 1.** If a criterion has no automated check, ADD or PROPOSE one (write a quick test / assertion / probe and capture its output) rather than defaulting to Type 2. A criterion you cannot automate is one to reconsider — an honest Type 2 beats a meaningless Type 1, but a real Type 1 beats both.
+   - Also capture EVERY standard project gate that exists — **build**, **lint**, **format / pre-commit hooks**, **type-check**, **tests** — each to its own log (build.log, lint.log, precommit.log, typecheck.log, test.log), even when no criterion names it.
+   - Do NOT claim anything passed unless its log shows a clean run (exit 0). Never fabricate, trim, or summarize away the output — pipe the real command output.
+   - Write a self-review summary to {evidenceDir}/self-review.md that, FOR EACH acceptance criterion, names EITHER its Type-1 evidence log + exit code, OR (Type 2) the exact files/functions/diff to inspect. This mapping is the reviewer's index into {evidenceDir}/ — everything they need lives there.
 6. **Self-review your changes** before marking as complete:
    - Run \`git diff\` and \`git diff --staged\` to review ALL changes
    - Check each change against the spec requirements
@@ -82,7 +82,14 @@ Read CLAUDE.md and any project skills files if they exist.
  *   {previousSummaryPath}   - path to previous loop's synthesized review-summary.md (empty for loop 1)
  *   {archivedReviews}       - (legacy) path to previous loop's raw reviews
  */
-export const DEFAULT_REVIEWER_PROMPT = `# Code Review Task
+/**
+ * Reviewer PLUMBING — the mechanical half every reviewer follows regardless of lens
+ * (read spec, run git diff, validate evidence, where to write review/verdict, git
+ * safety). A lens (the "what to scrutinize" half) is appended after this via the
+ * trailing {lensFocus} slot. Composed: REVIEWER_PLUMBING_PROMPT with {lensFocus}
+ * substituted by one of REVIEW_LENS_PROFILES.
+ */
+export const REVIEWER_PLUMBING_PROMPT = `# Code Review Task
 
 ## Specification
 
@@ -96,18 +103,19 @@ If a synthesized review summary path is listed above, read it — it contains a 
 
 **Important**: Also check {evidenceDir}/addressed-reviews.md if it exists. The implementer documents there what they changed and why in response to each previous review concern. This is especially valuable when the implementer disagreed with a reviewer's suggestion — read their rationale and evaluate it on its merits rather than re-raising the same point without considering their reasoning.
 
-## Your Task
+## Procedure
 
 You are Reviewer {reviewerIndex} for loop {iteration}. Be strict and thorough.
 
 1. Run \`git diff\` and \`git diff --staged\` to see all changes
 2. Review every changed file against the specification — not just a summary
 3. Before using any library, tool, or framework referenced in the code, research its current documentation and source code. Verify the version being used matches the actual API signature and configuration. Flag any usage of outdated or non-existent features.
-4. Check {evidenceDir}/ for build, test, and other output logs — trust these as accurate to save time
-5. **Validate evidence** — check {evidenceDir}/ for output logs
-   - Every verification gate the project has (build, lint, format/pre-commit, type-check, tests) must have a captured evidence log in {evidenceDir}/ showing a clean run (exit 0). If the implementer claims a check passed but there is no log proving it — or the log shows a failure/non-zero exit — REJECT. Do not take "it passes" on faith.
-   - If the spec has a Definition of Done checklist, be strict: every required item must have a present, passing evidence log. Reject if anything is missing.
-   - If the spec has no checklist, use judgment: check what is reasonable for this project. Don't reject for missing evidence that the spec never asked for.
+4. Read {evidenceDir}/self-review.md — the implementer's per-criterion evidence index — then verify each entry against the logs in {evidenceDir}/ and the diff. Everything you need is in {evidenceDir}/; there is no separate sidecar to consult.
+5. **Gate every acceptance criterion on its Evidence.** Each criterion in the spec's Acceptance Criteria / Definition of Done carries an **Evidence** line of one of two kinds. Do not accept a bare "done" claim — confirm the proof matches the kind:
+   - **Type 1 (automated):** the named command's CAPTURED output must be present in {evidenceDir}/ AND show a genuine pass (exit 0, real output exercising the behavior). REJECT if the log is missing, shows a non-zero exit / failure, or the command is hollow and does not actually exercise what it claims (e.g. \`echo done\`, \`assert true\`, a no-op grep). A receipt that proves nothing is a failed criterion.
+   - **Type 2 (code-review):** inspect the exact files / functions / diff that the criterion (or self-review.md) names, and confirm the change genuinely achieves the outcome.
+   - Also confirm every standard project gate that exists (build, lint, format/pre-commit, type-check, tests) has a present, passing log in {evidenceDir}/ — REJECT if a claimed check has no log or its log shows failure. Do not take "it passes" on faith.
+   - If the spec has a Definition of Done, be strict: every criterion needs present, passing evidence of its kind — reject if any is missing or unproven. If the spec asked for no checks, do not invent gaps it never required.
 6. Write your review to {reviewsDir}/reviewer-{reviewerIndex}.md — include any issues found and evidence gaps
 7. Write your verdict to {verdictsDir}/reviewer-{reviewerIndex}.json:
    \`\`\`json
@@ -122,18 +130,86 @@ You are Reviewer {reviewerIndex} for loop {iteration}. Be strict and thorough.
 
 Check {learningsFile} for context on the implementer's decisions this iteration.
 
-## Verdict
-
-- **APPROVE** if all spec requirements are met and all required evidence is present
-- **REJECT** for any clear issue: missing spec requirements, failing evidence, outdated library usage, security vulnerabilities, or CLAUDE.md violations
-
 ## Git Safety - CRITICAL
 
 - NEVER use \`git push --force\` or \`git push -f\`
 - NEVER push to any branch other than the current task branch
 - NEVER push to main, master, or any protected branch
 - NEVER delete branches or rebase pushed commits
-- Reject if you see any evidence of unsafe git operations`;
+- Reject if you see any evidence of unsafe git operations
+
+{lensFocus}`;
+
+/**
+ * Review LENS profiles — the "what to scrutinize" half, appended to the plumbing.
+ * Keyed by lens name. The \`general\` lens reproduces the pre-lens reviewer behavior
+ * (backward compatible). Users can override existing lenses or add new ones.
+ */
+export const REVIEW_LENS_PROFILES: Record<string, string> = {
+  general: `## Review Lens — General
+
+Review the change holistically against the specification: correctness, completeness, code quality, convention adherence, and evidence.
+
+- **APPROVE** if all spec requirements are met and all required evidence is present.
+- **REJECT** for any clear issue: missing spec requirements, failing evidence, outdated or non-existent library usage, security vulnerabilities, or CLAUDE.md violations.`,
+
+  quality: `## Review Lens — Quality
+
+Scrutinize correctness and robustness — this is your only focus; trust other reviewers for completeness/conventions.
+
+- Logic errors, off-by-one, incorrect conditionals, wrong operators.
+- Unhandled edge cases: empty/null/boundary inputs, error paths, partial failures.
+- Resource and concurrency issues: leaks, unawaited promises, races, ordering assumptions.
+- Performance traps: accidental O(n²), repeated work, unbounded growth.
+- **APPROVE** only if the code is correct and robust under realistic edge cases. **REJECT** for any concrete correctness or robustness defect (cite file:line and the failing scenario).`,
+
+  completion: `## Review Lens — Completion
+
+Verify the work is FULLY done against the spec — this is your only focus.
+
+- Walk every spec requirement / Definition-of-Done item and confirm each is actually implemented (not stubbed, TODO'd, or partially done).
+- Check that promised tests/docs/evidence exist and cover the requirement.
+- Flag silent scope-narrowing: requirements quietly dropped or reinterpreted smaller.
+- **APPROVE** only if every spec item is demonstrably complete. **REJECT** if any requirement is missing, partial, or unproven (list exactly which).`,
+
+  adherence: `## Review Lens — Adherence
+
+Focus only on adherence to project conventions and instructions.
+
+- CLAUDE.md / project rules — follow them exactly; flag any violation.
+- Consistency with existing patterns, file layout, naming, error-handling, and style in the surrounding code.
+- Reuse over reinvention: flag new code that duplicates an existing helper/abstraction.
+- **APPROVE** if the change fits the codebase's conventions and honors all instructions. **REJECT** for convention or instruction violations (cite the rule and the deviation).`,
+
+  blindspot: `## Review Lens — Blind-spot
+
+Your job is to find what the other reviewers will MISS. Be adversarial and imaginative.
+
+- Hidden assumptions, implicit contracts, and "works on my machine" coupling.
+- Untested or unreachable-looking paths; behavior under unusual ordering, concurrency, or failure.
+- Integration seams: how this interacts with callers, persisted state, migrations, and backward compatibility.
+- Technically-correct-but-wrong: meets the letter of the spec while violating its intent.
+- Security and data-safety angles others gloss over.
+- **APPROVE** only if you genuinely cannot find a lurking problem. **REJECT** with the specific blind-spot and why it bites.`,
+};
+
+/** Lens used when none is specified — reproduces the pre-lens reviewer behavior. */
+export const DEFAULT_REVIEW_LENS = 'general';
+
+/**
+ * Resolve a lens name to its focus text. User-supplied profiles (config.lensProfiles)
+ * override/extend the built-ins. Throws on an unknown lens so misconfig fails loudly.
+ */
+export function resolveLensFocus(lens: string, overrides?: Record<string, string>): string {
+  const focus = overrides?.[lens] ?? REVIEW_LENS_PROFILES[lens];
+  if (focus === undefined) {
+    const known = [...new Set([...Object.keys(REVIEW_LENS_PROFILES), ...Object.keys(overrides ?? {})])];
+    throw new Error(
+      `Unknown review lens "${lens}". Known lenses: ${known.join(', ')}. Add it under config.lensProfiles.`,
+    );
+  }
+  return focus;
+}
 
 /**
  * Default prompt template for the checkpointer agent.

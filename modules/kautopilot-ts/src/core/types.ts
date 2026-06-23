@@ -109,20 +109,28 @@ concrete decisions belong in the plans.
  the current situation, the motivation, relevant prior decisions.]
 
 ## Goals
-[The high-level objectives this work must achieve. What does success look like
- from the user's / stakeholder's point of view? Each goal is an outcome or an
- intent — never a description of how the code will be written.]
+[The high-level objectives ("the main") this work must achieve — there may be ONE
+ or several. This is the heart of the spec: align on these FIRST. Give each goal a
+ stable id and state it as an outcome / intent from the user's or stakeholder's
+ point of view — never how the code will be written. Every requirement below must
+ trace back to one of these goals.]
+- **G1** — [the primary outcome we want to be true]
+- **G2** — [another goal, if any]
 
 ## Approach (high level)
 [The agreed direction at a conceptual level — the shape of the solution and the
  key ideas behind it. Describe WHAT we intend to do and WHY. Stay above the
  code: no file/function/API specifics (the plans turn this into changes).]
 
-## Requirements
-[What the solution must deliver, as outcomes and behavior from the user's or
- caller's perspective. Write each as a clear, verifiable statement of intent,
- covering the important cases and what should happen when things go wrong —
- at the level of "what should be true", not "which function does it".]
+## Requirements (derived from the Goals)
+[Each requirement is a DERIVATION of a goal — a verifiable outcome that helps
+ achieve it. Number them and have EACH cite the goal it completes (→ G1). Write
+ at the level of "what must be true" (not "which function does it"), covering the
+ important cases and what happens when things go wrong. Every goal must be covered
+ by at least one requirement.]
+- **FR1** (→ G1) — [a verifiable outcome that advances G1]
+- **FR2** (→ G1) — [another, for G1]
+- **FR3** (→ G2) — [an outcome that advances G2]
 
 ## Non-Goals / Out of Scope
 [What this change explicitly does NOT address, to prevent scope creep during
@@ -154,24 +162,48 @@ const DEFAULT_PLAN_TEMPLATE = `# Plan {N}: {title}
 
 ## Acceptance Criteria
 
+Each criterion below is a Definition-of-Done item, and EVERY criterion MUST carry an
+**Evidence** line — the concrete way a reviewer confirms it is done. Evidence is one of
+two kinds; PREFER type 1 wherever the criterion can be settled by a command:
+- **Type 1 — automated proof (preferred):** the exact command plus the captured output
+  (stdout / exit code / log / HTTP response / metric) that proves the check actually RAN
+  and PASSED. This is the receipt for the reviewer — not a claim that it works, but the
+  artifact showing it was run. The command's output must EXERCISE the behavior, not just
+  print success (a test that asserts the real outcome, not \`echo done\`). E.g.
+  "\`bun test src/foo.test.ts\` → all pass (paste the summary)",
+  "\`curl -s localhost:3000/health\` → \`200\` + \`{\\"ok\\":true}\`",
+  "\`playwright test login.spec.ts\` → run log shows the scenario green".
+- **Type 2 — code-review proof:** for outcomes no command can demonstrate (a refactor, a
+  removed dead path, a structural change). There is no command — write "reviewer inspects
+  the diff" and name the exact file/function/change to look at. Do NOT invent a hollow
+  command to fake a type-1 receipt; an honest type 2 beats a meaningless type 1.
+Shape criteria so AS MANY AS POSSIBLE are type 1 (automated, capturable); fall back to
+type 2 only when nothing can prove it but reading the code.
+
 ### Functional Checks
 [What observable behavior proves this plan is correctly implemented.
  Each check should be concrete enough for the dev loop to implement as
  an automated test. Reference specific inputs, outputs, and state changes.]
+- [ ] **AC1** — [observable behavior / outcome that must hold]
+  - **Evidence (type 1):** [command → captured output that proves AC1 ran + passed]
+    *(or **type 2:** reviewer inspects \`path/to/file\` — when no command can prove it)*
 
 ### Non-Functional Checks
 [Which non-functional concerns apply to this plan (linting, build, tests,
- security, performance, compatibility, observability, etc.) and how each will
- be verified. Derive them from the spec's goals + the triage testing level.
+ security, performance, compatibility, observability, etc.). Derive them from
+ the spec's goals + the triage testing level.
  Examples: "lint passes on new files", "unit tests cover the new parser",
  "API response time stays under 200ms for N=1000".]
+- [ ] **NFC1** — [non-functional concern + its threshold/expectation]
+  - **Evidence (type 1):** [command → output/measurement showing it met]
 
 ## Validation Approach
 [From the triage's validation matrix, what applies to this plan?
  - Immediate automated checks: what the dev loop should verify
  - Post-release checks: what to verify after deployment
  - Manual checks: what a human must review
- Describe the general approach — the dev loop will implement the scripts.]`;
+ Describe the general approach — the dev loop implements the type-1 commands and
+ captures their output as each criterion's Evidence above.]`;
 
 // ============================================================================
 // Default prompt constants for Phase 1
@@ -254,13 +286,15 @@ Explore enough context to ground the goals in reality, but describe outcomes and
 
 Check the triage at {triage} for its open questions and assumptions. Carry the ones that affect the goals or direction into the spec's "Open Questions & Risks", and resolve the blocking ones with the user now. Note how each open assumption could be confirmed, but leave the detailed verification to the plan phase — don't turn the spec into an evidence log.
 
-Write each requirement as a clear statement of intended behavior or outcome, not a code-level instruction.`;
+Align the **Goals** with the user FIRST (before writing the spec body); if the goals change, re-align before rewriting. Structure the spec around explicit Goals — give each a stable id (G1, G2, …) — and write each requirement as a **derivation of a goal that cites it** (→ G1): a clear statement of intended behavior or outcome, never a code-level instruction. Every goal must be covered by at least one requirement.`;
 
 const DEFAULT_PLAN_WRITER_PROMPT = `You are writing implementation plans for a kautopilot task. Read the spec at {spec} and the triage assessment at {triage}.
 
 Rules:
-- Plans must be vertically split (by domain/feature, not by layer)
-- Each plan is one isolated, committable unit of work
+- FIRST propose the breakdown (per repo: plan titles + ~1-line scope each) in chat and get the user to approve the granularity — do NOT write any plan files until they approve the split.
+- Plans are vertical slices split by domain/feature, never by layer or phase.
+- Each plan stands on its own: it PREPS + IMPLEMENTS + VERIFIES its own change, ending in a single commit that builds, passes its own verification, and is independently revertable.
+- Anti-patterns to AVOID: a "prep"/"scaffold"/"foundation" plan, or "add types"/"write tests"/"verify" as a standalone plan (horizontal phases); and "1 small change = 1 plan" (too granular — group with the surrounding work that makes it verifiable on its own).
 - For "ticket" delivery: plans describe investigation steps or ticket creation, not code changes
 - Reference actual files and functions from the codebase
 
@@ -275,6 +309,22 @@ appropriate for this project's stack. Front-load automated testing aggressively.
 
 For the validation matrix: describe the general approach in each plan. The dev loop will
 implement concrete scripts. Keep it concise — ideas, not implementations.
+
+### Evidence for every acceptance criterion
+Each plan's Acceptance Criteria are the Definition of Done, and EVERY criterion must state
+its **Evidence** — how a reviewer confirms it was actually done (not merely claimed). There
+are two kinds of evidence; design criteria so as many as possible are type 1:
+- **Type 1 — automated proof (preferred):** the criterion is settled by a command
+  whose captured output (test stdout, lint output, an HTTP response, a benchmark number)
+  shows it ran and passed. Write the exact command and what its output should show. This
+  captured output is the artifact reviewers read to confirm the work — prefer it whenever a
+  command CAN prove the outcome, and shape the criterion so a command can.
+- **Type 2 — code-review proof:** only when no command can demonstrate the outcome (a pure
+  refactor, a deleted code path, a structural change). State "reviewer inspects the diff"
+  and name the exact files/functions/change to look at — do NOT invent a hollow command.
+Bias hard toward type 1: a criterion you can't make automated is a criterion to reconsider.
+The dev loop runs the type-1 commands and captures their output as the evidence; reviewers
+gate on that captured evidence (type 1) or the named diff (type 2).
 
 ## Spec Adherence
 
@@ -312,6 +362,12 @@ export const configSchema = z.object({
 			.enum(["current-session", "sub-agent"])
 			.default("current-session"),
 		execMode: z.enum(["kloop", "sub-agent"]).default("kloop"),
+		// Public base URL of THIS (kautopilot) viewer, for shareable artifact links.
+		viewerBaseUrl: z.string().default("https://kauto.ernest.atomi.cloud"),
+		// Public base URL of the kloop viewer — sessions link to their kloop runs.
+		kloopBaseUrl: z.string().default("https://kloop.ernest.atomi.cloud"),
+		// Local port the kautopilot dashboard serves on.
+		viewerPort: z.number().min(1).max(65535).default(47317),
 	}),
 	orgs: z
 		.record(
@@ -380,6 +436,17 @@ export const DEFAULT_CONFIG: Config = {
 					prompt: `Read the spec at {spec} and the ticket at {ticket}.
 Check: does the spec address every requirement in the ticket?
 List any requirements that are missing or insufficiently addressed.
+Output ONLY the problems found — one per line. If none, output "No issues found."`,
+				},
+				goal_trace: {
+					desc: "Goals are explicit (with ids) and every requirement derives from a goal",
+					prompt: `Read the spec at {spec}.
+Check the GOALS / REQUIREMENTS structure: (1) is there an explicit "Goals" section with one or
+more goals, EACH given a stable id (G1, G2, …)? (2) is each requirement (FR) a derivation of a
+goal that CITES the goal it completes (e.g. "→ G1")? (3) is every goal covered by at least one
+requirement, and does every requirement trace to a real goal?
+Flag: a missing Goals section, goals without ids, requirements that don't reference a goal, a
+goal with no requirement, or a requirement that doesn't actually advance the goal it cites.
 Output ONLY the problems found — one per line. If none, output "No issues found."`,
 				},
 				grounding: {
@@ -465,11 +532,16 @@ Flag any circular or incorrect dependency ordering.
 Output ONLY the problems found — one per line. If none, output "No issues found."`,
 				},
 				vertical_split: {
-					desc: "Plans split by domain/feature, not by layer",
+					desc: "Plans are self-standing vertical slices, not horizontal phases",
 					prompt: `Read the plans at {plans}.
-Check: are plans split vertically by domain/feature (each plan = complete slice with types+logic+tests)?
-Flag any plan that is a horizontal layer (e.g., "add types" or "write tests" as standalone plans).
-Each plan should produce an isolated working commit.
+Check: is each plan a self-standing VERTICAL slice — prepped + implemented + verified within the
+SAME plan, producing ONE commit that stands on its own (builds, passes its own verification,
+independently revertable)? Flag these anti-patterns:
+- Horizontal phases: a "prep"/"scaffold"/"foundation" plan, or "add types" / "write tests" /
+  "verify" as a standalone plan that doesn't deliver a working change on its own.
+- Over-granular: a plan that is a single trivial change with no self-contained value.
+- Over-merged (the OPPOSITE): a plan so large it bundles unrelated features/domains that should be separate committable slices.
+- A plan whose verification or prep lives in a DIFFERENT plan (it must be self-contained).
 Output ONLY the problems found — one per line. If none, output "No issues found."`,
 				},
 				cost: {
@@ -616,6 +688,9 @@ Discuss the PR with the user. Figure out:
 		maxParallelRepos: 2,
 		runMode: "current-session",
 		execMode: "kloop",
+		viewerBaseUrl: "https://kauto.ernest.atomi.cloud",
+		kloopBaseUrl: "https://kloop.ernest.atomi.cloud",
+		viewerPort: 47317,
 	},
 	orgs: {
 		liftoff: { ticketSystem: "jira", commitSpec: false, baseBranch: "master" },
@@ -635,12 +710,9 @@ export type SessionState = "init" | "ready" | "running" | "done";
 
 export interface SessionRow {
 	id: string;
-	repo_path: string;
-	worktree: string;
-	git_root: string;
-	git_root_host: string;
+	/** The folder this session is associated with (where `kautopilot start` ran). */
+	folder: string;
 	ticket_id: string | null;
-	branch: string | null;
 	local: number;
 	state: SessionState;
 	created_at: string;

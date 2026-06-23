@@ -1,7 +1,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import type { Config, Verdict, HarnessType } from '../types';
-import { getPrimaryImplementer, selectImplementer } from '../types';
+import { getPrimaryImplementer, selectImplementer, selectRoleAccount } from '../types';
 import type { TmuxService, StateService } from '../deps';
 import { generateId, paths, getKloopHome } from '../deps';
 import * as verdicts from './verdicts';
@@ -10,6 +10,7 @@ import {
   buildSynthesizerPrompt,
   buildVerifierPrompt,
   buildReSynthesisPrompt,
+  buildSentinelInstruction,
 } from './prompts';
 import type {
   CheckpointerPromptVars,
@@ -19,12 +20,21 @@ import type {
 } from './prompts';
 import { extractTokensFromLog, extractHarnessSessionId } from '../stream/parse';
 import { formatAgentLaunch } from '../loop/format';
-import type { ParsedBinary, ReviewerBinary } from '../types';
-import { parseImplementerConfig, parseReviewerConfig, parseConflictCheckerConfig } from '../types';
+import type { ParsedBinary, ReviewerBinary, ReviewTypeEntry } from '../types';
+import {
+  parseImplementerConfig,
+  parseReviewerConfig,
+  parseConflictCheckerConfig,
+  selectFromPool,
+  reviewTypeLabel,
+} from '../types';
 
 // Path to kloop binary — use process.argv[1] (the running script) instead of
 // import.meta.dir so it survives nix store path changes after rebuilds.
 const KLOOP_BIN = `bun run ${process.argv[1]}`;
+
+// Marker file an interactive-mode agent touches when fully done (per-agent dir).
+const SENTINEL_NAME = '.kloop-done';
 
 // ============================================================================
 // Agent Result types
@@ -155,10 +165,12 @@ export class AgentRunner {
     pathsOverride?: typeof paths,
   ) {
     this.pathsImpl = pathsOverride ?? paths;
-    // Flatten reviewer binaries from all phases (keep raw strings for now, parse when running)
-    this.reviewerBinaries = config.reviewPhases.flat();
+    // Flatten reviewer type labels from all phases (display only)
+    this.reviewerBinaries = config.reviewPhases.flat().map(e => reviewTypeLabel(e, config.poolProfiles));
     // Parse checkpointer binary and harness
-    const checkpointerConfig = parseConflictCheckerConfig(config.conflictChecker ?? getPrimaryImplementer(config));
+    const checkpointerConfig = parseConflictCheckerConfig(
+      selectRoleAccount(config.conflictChecker, config.poolProfiles) ?? getPrimaryImplementer(config),
+    );
     this.checkpointerBinary = checkpointerConfig.binary;
     this.checkpointerHarness = checkpointerConfig.harness;
   }
@@ -184,7 +196,65 @@ export class AgentRunner {
    */
   private async ensureAgentDir(agentDirPath: string): Promise<string> {
     await fs.mkdir(agentDirPath, { recursive: true });
-    return path.join(agentDirPath, 'log');
+    const logFile = path.join(agentDirPath, 'log');
+    // A prior interactive run may have left `log` as a SYMLINK to Claude's own session
+    // transcript (see service.ts updateInteractiveLog). Print-mode `tee "${logFile}"` would
+    // follow that link and write the stream-json straight into the unrelated transcript,
+    // corrupting it. Remove any stale link/file first (force: does not follow symlinks) so
+    // tee always creates a fresh regular file.
+    await fs.rm(logFile, { force: true });
+    return logFile;
+  }
+
+  /** True when this run drives claude agents as interactive TUIs. Only claude harnesses. */
+  private isInteractive(harness: HarnessType): boolean {
+    return this.config.interactive === true && harness === 'claude';
+  }
+
+  /**
+   * Dispatch a single agent into tmux — interactive (TUI + sentinel) or print (one-shot
+   * pipeline). The print `command` is always passed and used only on the non-interactive
+   * path. Centralizes the branch so every role behaves identically.
+   */
+  private async launch(p: {
+    interactive: boolean;
+    sentinelFile?: string;
+    tmuxSession: string;
+    binary: string;
+    promptFile: string;
+    sessionId: string;
+    logFile: string;
+    timeout: number;
+    command: string;
+    // Interactive-only fallback: if the agent produced this output file but never touched the
+    // completion sentinel (so the session idled to timeout / died), the work IS done. Treat the
+    // run as successful instead of failing/retrying — mirrors the reviewer's verdict-file fallback.
+    outputFile?: string;
+  }): Promise<{ exitCode: number; durationMs: number; timedOut: boolean }> {
+    if (p.interactive && p.sentinelFile) {
+      const result = await this.tmux.runInteractiveSession({
+        sessionName: p.tmuxSession,
+        binary: p.binary,
+        promptFile: p.promptFile,
+        sessionId: p.sessionId,
+        cwd: process.cwd(),
+        timeoutMins: p.timeout,
+        sentinelFile: p.sentinelFile,
+        logFile: p.logFile,
+      });
+      // Sentinel-independent completion: a missing sentinel but a real output file means the
+      // agent finished its work and just skipped the final `touch`. Don't misclassify as failure.
+      if ((result.timedOut || result.exitCode !== 0) && p.outputFile && (await this.safeFileExists(p.outputFile))) {
+        return { exitCode: 0, durationMs: result.durationMs, timedOut: false };
+      }
+      return result;
+    }
+    return this.tmux.runInSession({
+      sessionName: p.tmuxSession,
+      command: p.command,
+      cwd: process.cwd(),
+      timeoutMins: p.timeout,
+    });
   }
 
   /**
@@ -211,15 +281,20 @@ export class AgentRunner {
     const sessionId = generateId();
     const tmuxSession = `kloop-${runId}-${iteration}-impl`;
 
-    // Write prompt to temp file
-    const promptFile = await this.writePromptFile(sessionId, prompt);
-
-    // Ensure implementer directory and write prompt.md
+    // Ensure implementer directory (needed for the interactive sentinel + prompt.md)
     const implDir = paths.loopImplementerPath(runId, iteration);
     const logFile = await this.ensureAgentDir(implDir);
-    await fs.writeFile(path.join(implDir, 'prompt.md'), prompt, 'utf-8');
 
-    // Build harness-aware command
+    // In interactive mode, append the completion-sentinel instruction to the prompt.
+    const interactive = this.isInteractive(parsedImpl.harness);
+    const sentinelFile = interactive ? path.join(implDir, SENTINEL_NAME) : undefined;
+    const finalPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
+
+    // Write prompt to temp file + human-readable prompt.md
+    const promptFile = await this.writePromptFile(sessionId, finalPrompt);
+    await fs.writeFile(path.join(implDir, 'prompt.md'), finalPrompt, 'utf-8');
+
+    // Build harness-aware command (used only on the print-mode path)
     const command = buildAgentCommand({
       binary: parsedImpl.binary,
       harness: parsedImpl.harness,
@@ -228,14 +303,19 @@ export class AgentRunner {
       logFile,
     });
 
-    // Run in tmux
+    // Run in tmux (interactive TUI or print pipeline)
     formatAgentLaunch('impl', 'implementer', parsedImpl.binary, tmuxSession, logFile);
 
-    const result = await this.tmux.runInSession({
-      sessionName: tmuxSession,
+    const result = await this.launch({
+      interactive,
+      sentinelFile,
+      tmuxSession,
+      binary: parsedImpl.binary,
+      promptFile,
+      sessionId,
+      logFile,
+      timeout,
       command,
-      cwd: process.cwd(),
-      timeoutMins: timeout,
     });
 
     // Clean up prompt file
@@ -329,7 +409,10 @@ export class AgentRunner {
     timeout: number;
   }): Promise<ReviewerResult[]> {
     const { runId, iteration, dirHash, prompts, timeout } = params;
-    const allReviewers = this.config.reviewPhases.flat().map(parseReviewerConfig);
+    // Legacy flat path (no lens matrix): one account per type, pool-selected.
+    const allReviewers = this.config.reviewPhases
+      .flat()
+      .map(e => parseReviewerConfig(selectFromPool(e, this.config.poolProfiles)));
     return this.runReviewersPhase({
       runId,
       iteration,
@@ -374,11 +457,16 @@ export class AgentRunner {
     // Stable paths across retries
     const reviewsDir = paths.loopReviewsPath(runId, iteration);
     const reviewerDir = path.join(reviewsDir, `reviewer-${reviewerIndex}`);
-    await fs.mkdir(reviewerDir, { recursive: true }).catch(() => {});
-    await fs.writeFile(path.join(reviewerDir, 'prompt.md'), prompt, 'utf-8');
+    await fs.mkdir(reviewerDir, { recursive: true });
+
+    // Interactive mode: append the completion-sentinel instruction (stable across retries).
+    const interactive = this.isInteractive(harness);
+    const sentinelFile = interactive ? path.join(reviewerDir, SENTINEL_NAME) : undefined;
+    const launchPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
+    await fs.writeFile(path.join(reviewerDir, 'prompt.md'), launchPrompt, 'utf-8');
 
     const verdictsDir = paths.loopVerdictsPath(runId, iteration);
-    await fs.mkdir(verdictsDir, { recursive: true }).catch(() => {});
+    await fs.mkdir(verdictsDir, { recursive: true });
     const verdictFilePath = path.join(verdictsDir, `reviewer-${reviewerIndex}.json`);
     const reviewFilePath = path.join(reviewsDir, `reviewer-${reviewerIndex}.md`);
 
@@ -400,13 +488,19 @@ export class AgentRunner {
     let reviewContent: string | null = null;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      // Clean slate: remove any pre-existing verdict/review at the target paths so a
+      // stale file (from a re-entered run or a prior crashed attempt) can never be
+      // misread as this attempt's output.
+      await fs.rm(verdictFilePath, { force: true });
+      await fs.rm(reviewFilePath, { force: true });
+
       // Fresh runtime identifiers per attempt
       sessionId = generateId();
       tmuxSession = `kloop-${runId}-${iteration}-rev-${reviewerIndex}${attempt > 0 ? `-r${attempt}` : ''}`;
-      promptFile = await this.writePromptFile(sessionId, prompt);
+      promptFile = await this.writePromptFile(sessionId, launchPrompt);
       logFile = await this.ensureAgentDir(reviewerDir);
 
-      // Build harness-aware command
+      // Build harness-aware command (used only on the print-mode path)
       const command = buildAgentCommand({
         binary,
         harness,
@@ -415,14 +509,20 @@ export class AgentRunner {
         logFile,
       });
 
-      // Run in tmux
+      // Run in tmux (interactive TUI or print pipeline)
       formatAgentLaunch('reviewer', `rev-${reviewerIndex}`, binary, tmuxSession, logFile);
 
-      result = await this.tmux.runInSession({
-        sessionName: tmuxSession,
+      result = await this.launch({
+        interactive,
+        sentinelFile,
+        tmuxSession,
+        binary,
+        promptFile,
+        sessionId,
+        logFile,
+        outputFile: verdictFilePath,
+        timeout,
         command,
-        cwd: process.cwd(),
-        timeoutMins: timeout,
       });
 
       // Read verdict + review from their persistent directories
@@ -475,9 +575,6 @@ export class AgentRunner {
       reasoning = parsed.reasoning;
       completionEstimate = parsed.completionEstimate;
     }
-
-    // Copy review files to persistent storage
-    await this.copyReviewFiles(runId, iteration, reviewerIndex, reviewContent, verdictContent);
 
     // Clean up prompt file
     await this.cleanupPromptFile(promptFile);
@@ -550,15 +647,25 @@ export class AgentRunner {
       this.config.compressSpec,
     );
 
-    // Write prompt to temp file
-    const promptFile = await this.writePromptFile(sessionId, prompt);
-
-    // Ensure checkpointer directory and write prompt.md
+    // Ensure checkpointer directory (needed for the interactive sentinel + prompt.md)
     const checkpointerDir = paths.loopCheckpointerPath(runId, iteration);
     const logFile = await this.ensureAgentDir(checkpointerDir);
-    await fs.writeFile(path.join(checkpointerDir, 'prompt.md'), prompt, 'utf-8');
 
-    // Build harness-aware command
+    // Interactive mode: append the completion-sentinel instruction.
+    const interactive = this.isInteractive(harness);
+    const sentinelFile = interactive ? path.join(checkpointerDir, SENTINEL_NAME) : undefined;
+    const finalPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
+
+    // Write prompt to temp file + human-readable prompt.md
+    const promptFile = await this.writePromptFile(sessionId, finalPrompt);
+    await fs.writeFile(path.join(checkpointerDir, 'prompt.md'), finalPrompt, 'utf-8');
+
+    // Clean slate: remove any pre-existing result so a stale file (from a re-entered run) can't
+    // be misread as this run's output — required for the interactive sentinel-independent fallback.
+    const checkpointResultPath = `${checkpointerDir}/checkpoint-result.json`;
+    await fs.rm(checkpointResultPath, { force: true });
+
+    // Build harness-aware command (used only on the print-mode path)
     const command = buildAgentCommand({
       binary,
       harness,
@@ -567,18 +674,23 @@ export class AgentRunner {
       logFile,
     });
 
-    // Run in tmux
+    // Run in tmux (interactive TUI or print pipeline)
     formatAgentLaunch('checkpoint', 'checkpoint', binary, tmuxSession, logFile);
 
-    const result = await this.tmux.runInSession({
-      sessionName: tmuxSession,
+    const result = await this.launch({
+      interactive,
+      sentinelFile,
+      tmuxSession,
+      binary,
+      promptFile,
+      sessionId,
+      logFile,
+      outputFile: checkpointResultPath,
+      timeout,
       command,
-      cwd: process.cwd(),
-      timeoutMins: timeout,
     });
 
     // Read checkpoint result file from checkpointer directory
-    const checkpointResultPath = `${checkpointerDir}/checkpoint-result.json`;
     const checkpointResultContent = await this.safeReadFile(checkpointResultPath);
 
     let outcome: CheckpointerOutcome = 'no_action';
@@ -655,7 +767,10 @@ export class AgentRunner {
     const { runId, iteration, dirHash, binary: overrideBinary, previousSummaryPath, timeout } = params;
 
     // Use synthesizer binary from config, first implementer as fallback, or override
-    const implBinaryName = overrideBinary ?? this.config.synthesizer ?? getPrimaryImplementer(this.config);
+    const implBinaryName =
+      overrideBinary ??
+      selectRoleAccount(this.config.synthesizer, this.config.poolProfiles) ??
+      getPrimaryImplementer(this.config);
     const parsed = parseImplementerConfig(implBinaryName);
 
     const sessionId = generateId();
@@ -678,9 +793,19 @@ export class AgentRunner {
     // Ensure synthesis directory
     const synthDir = this.pathsImpl.loopSynthesisPath(runId, iteration);
     const logFile = await this.ensureAgentDir(synthDir);
-    await fs.writeFile(path.join(synthDir, 'prompt.md'), prompt, 'utf-8');
 
-    const promptFile = await this.writePromptFile(sessionId, prompt);
+    // Interactive mode: append the completion-sentinel instruction.
+    const interactive = this.isInteractive(parsed.harness);
+    const sentinelFile = interactive ? path.join(synthDir, SENTINEL_NAME) : undefined;
+    const finalPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
+    await fs.writeFile(path.join(synthDir, 'prompt.md'), finalPrompt, 'utf-8');
+
+    const promptFile = await this.writePromptFile(sessionId, finalPrompt);
+
+    // Clean slate: remove any pre-existing summary so a stale file (from a re-entered run) can't
+    // be misread as this run's output — required for the interactive sentinel-independent fallback.
+    const summaryPath = path.join(synthDir, 'review-summary.md');
+    await fs.rm(summaryPath, { force: true });
 
     const command = buildAgentCommand({
       binary: parsed.binary,
@@ -692,17 +817,22 @@ export class AgentRunner {
 
     formatAgentLaunch('synthesizer', 'synthesizer', parsed.binary, tmuxSession, logFile);
 
-    const result = await this.tmux.runInSession({
-      sessionName: tmuxSession,
+    const result = await this.launch({
+      interactive,
+      sentinelFile,
+      tmuxSession,
+      binary: parsed.binary,
+      promptFile,
+      sessionId,
+      logFile,
+      outputFile: summaryPath,
+      timeout,
       command,
-      cwd: process.cwd(),
-      timeoutMins: timeout,
     });
 
     await this.cleanupPromptFile(promptFile);
 
     // Check if review-summary.md was created
-    const summaryPath = path.join(synthDir, 'review-summary.md');
     const summaryExists = await this.safeFileExists(summaryPath);
 
     const tokens = await extractTokensFromLog(logFile);
@@ -737,7 +867,10 @@ export class AgentRunner {
   }): Promise<SynthesizerResult> {
     const { runId, iteration, dirHash, binary: overrideBinary, previousSummaryPath, timeout } = params;
 
-    const implBinaryName = overrideBinary ?? this.config.synthesizer ?? getPrimaryImplementer(this.config);
+    const implBinaryName =
+      overrideBinary ??
+      selectRoleAccount(this.config.synthesizer, this.config.poolProfiles) ??
+      getPrimaryImplementer(this.config);
     const parsed = parseImplementerConfig(implBinaryName);
 
     const sessionId = generateId();
@@ -757,9 +890,20 @@ export class AgentRunner {
 
     const synthDir = this.pathsImpl.loopSynthesisPath(runId, iteration);
     const logFile = await this.ensureAgentDir(synthDir);
-    await fs.writeFile(path.join(synthDir, 'prompt.md'), prompt, 'utf-8');
 
-    const promptFile = await this.writePromptFile(sessionId, prompt);
+    // Interactive mode: append the completion-sentinel instruction.
+    const interactive = this.isInteractive(parsed.harness);
+    const sentinelFile = interactive ? path.join(synthDir, SENTINEL_NAME) : undefined;
+    const finalPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
+    await fs.writeFile(path.join(synthDir, 'prompt.md'), finalPrompt, 'utf-8');
+
+    const promptFile = await this.writePromptFile(sessionId, finalPrompt);
+
+    // Clean slate: remove any pre-existing summary so a stale file (from a re-entered run) can't
+    // be misread as this run's output — required for the interactive sentinel-independent fallback.
+    // (previousSummaryPath comes from a prior loop's dir, so this never deletes the input.)
+    const summaryPath = path.join(synthDir, 'review-summary.md');
+    await fs.rm(summaryPath, { force: true });
 
     const command = buildAgentCommand({
       binary: parsed.binary,
@@ -771,16 +915,21 @@ export class AgentRunner {
 
     formatAgentLaunch('resynthesizer', 'resynthesizer', parsed.binary, tmuxSession, logFile);
 
-    const result = await this.tmux.runInSession({
-      sessionName: tmuxSession,
+    const result = await this.launch({
+      interactive,
+      sentinelFile,
+      tmuxSession,
+      binary: parsed.binary,
+      promptFile,
+      sessionId,
+      logFile,
+      outputFile: summaryPath,
+      timeout,
       command,
-      cwd: process.cwd(),
-      timeoutMins: timeout,
     });
 
     await this.cleanupPromptFile(promptFile);
 
-    const summaryPath = path.join(synthDir, 'review-summary.md');
     const summaryExists = await this.safeFileExists(summaryPath);
 
     const tokens = await extractTokensFromLog(logFile);
@@ -868,16 +1017,27 @@ export class AgentRunner {
     const sessionId = generateId();
     const tmuxSession = `kloop-${runId}-${iteration}-verify-${reviewerIndex}`;
 
-    // Write prompt to temp file
-    const promptFile = await this.writePromptFile(sessionId, prompt);
-
     // Verifier writes to verify/ directory
     const verifyDir = paths.loopVerifyPath(runId, iteration);
     const reviewerDir = path.join(verifyDir, `verifier-${reviewerIndex}`);
     const logFile = await this.ensureAgentDir(reviewerDir);
-    await fs.writeFile(path.join(reviewerDir, 'prompt.md'), prompt, 'utf-8');
+
+    // Interactive mode: append the completion-sentinel instruction.
+    const interactive = this.isInteractive(harness);
+    const sentinelFile = interactive ? path.join(reviewerDir, SENTINEL_NAME) : undefined;
+    const finalPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
+
+    // Write prompt to temp file + human-readable prompt.md
+    const promptFile = await this.writePromptFile(sessionId, finalPrompt);
+    await fs.writeFile(path.join(reviewerDir, 'prompt.md'), finalPrompt, 'utf-8');
     // Ensure the verdicts dir exists — the verifier writes its verdict JSON there directly
-    await fs.mkdir(paths.loopVerdictsPath(runId, iteration), { recursive: true }).catch(() => {});
+    const verdictsDir = paths.loopVerdictsPath(runId, iteration);
+    await fs.mkdir(verdictsDir, { recursive: true });
+
+    // Clean slate: remove any pre-existing verdict at the target path so a stale file
+    // (from a re-entered run) can never be misread as this verifier's output.
+    const verdictPath = path.join(verdictsDir, `verifier-${reviewerIndex}.json`);
+    await fs.rm(verdictPath, { force: true });
 
     const command = buildAgentCommand({
       binary,
@@ -889,16 +1049,21 @@ export class AgentRunner {
 
     formatAgentLaunch('verifier', `verify-${reviewerIndex}`, binary, tmuxSession, logFile);
 
-    const result = await this.tmux.runInSession({
-      sessionName: tmuxSession,
+    const result = await this.launch({
+      interactive,
+      sentinelFile,
+      tmuxSession,
+      binary,
+      promptFile,
+      sessionId,
+      logFile,
+      outputFile: verdictPath,
+      timeout,
       command,
-      cwd: process.cwd(),
-      timeoutMins: timeout,
     });
 
     // Read verdict from the verify verdicts dir
-    const verdictsDir = paths.loopVerdictsPath(runId, iteration);
-    const verdictContent = await this.safeReadFile(path.join(verdictsDir, `verifier-${reviewerIndex}.json`));
+    const verdictContent = await this.safeReadFile(verdictPath);
 
     let error: string | undefined;
     let verdict: Verdict = 'rejected';
@@ -953,7 +1118,7 @@ export class AgentRunner {
   /**
    * Get the verify phases from config.
    */
-  getVerifyPhases(): string[][] {
+  getVerifyPhases(): ReviewTypeEntry[][] {
     return this.config.verifyPhases ?? [];
   }
 
@@ -1050,25 +1215,4 @@ export class AgentRunner {
   /**
    * Copy review files to their proper directories (reviews/ and verdicts/)
    */
-  private async copyReviewFiles(
-    runId: string,
-    iteration: number,
-    reviewerIndex: number,
-    reviewContent: string | null,
-    verdictContent: string | null,
-  ): Promise<void> {
-    const reviewsDir = paths.loopReviewsPath(runId, iteration);
-    const verdictsDir = paths.loopVerdictsPath(runId, iteration);
-
-    await fs.mkdir(reviewsDir, { recursive: true });
-    await fs.mkdir(verdictsDir, { recursive: true });
-
-    if (reviewContent) {
-      await fs.writeFile(path.join(reviewsDir, `reviewer-${reviewerIndex}.md`), reviewContent, 'utf-8');
-    }
-
-    if (verdictContent) {
-      await fs.writeFile(path.join(verdictsDir, `reviewer-${reviewerIndex}.json`), verdictContent, 'utf-8');
-    }
-  }
 }

@@ -272,6 +272,99 @@ export function readPlanSet(
 		.join("\n\n");
 }
 
+/** Path of the HTML infographic sibling of a revision (vN.md → vN.html). */
+function htmlRevisionPath(
+	sessionId: string,
+	kind: ArtifactKind,
+	n: number,
+	ref: ArtifactRef = {},
+): string {
+	return revisionPath(sessionId, kind, n, ref).replace(/\.md$/, ".html");
+}
+
+/** Whether a revision's HTML infographic sibling (vN.html) exists. */
+export function htmlRevisionExists(
+	sessionId: string,
+	kind: ArtifactKind,
+	n: number,
+	ref: ArtifactRef = {},
+): boolean {
+	return existsSync(htmlRevisionPath(sessionId, kind, n, ref));
+}
+
+/** Raw HTML of a revision's infographic sibling (vN.html), or null if absent. */
+export function readHtmlRevision(
+	sessionId: string,
+	kind: ArtifactKind,
+	n: number,
+	ref: ArtifactRef = {},
+): string | null {
+	const p = htmlRevisionPath(sessionId, kind, n, ref);
+	try {
+		return existsSync(p) ? readFileSync(p, "utf-8") : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Path of a single plan's HTML infographic (`<plan>/vN.html`) — a sibling to that
+ * plan's `vN.md`. Each plan in a repo's set gets its OWN visual (not merged), exactly
+ * like single-file artifacts.
+ */
+function planHtmlPath(
+	sessionId: string,
+	epoch: number,
+	repo: string,
+	plan: string,
+	n: number,
+): string {
+	return join(plansRepoDir(sessionId, epoch, repo), plan, `v${n}.html`);
+}
+
+/** Raw HTML of a single plan's infographic (`<plan>/vN.html`), or null if absent. */
+export function readPlanHtml(
+	sessionId: string,
+	epoch: number,
+	repo: string,
+	plan: string,
+	n: number,
+): string | null {
+	const p = planHtmlPath(sessionId, epoch, repo, plan, n);
+	try {
+		return existsSync(p) ? readFileSync(p, "utf-8") : null;
+	} catch {
+		return null;
+	}
+}
+
+/** Each plan in a repo's set, individually (for the tabbed plan viewer). */
+export function readPlanList(
+	sessionId: string,
+	epoch: number,
+	repo: string,
+	n: number,
+): { name: string; markdown: string; htmlAvailable: boolean }[] {
+	const dir = plansRepoDir(sessionId, epoch, repo);
+	if (!existsSync(dir)) return [];
+	return readdirSync(dir)
+		.sort()
+		.map((plan) => {
+			const p = join(dir, plan, `v${n}.md`);
+			return existsSync(p)
+				? {
+						name: plan,
+						markdown: readFileSync(p, "utf-8"),
+						htmlAvailable: existsSync(join(dir, plan, `v${n}.html`)),
+					}
+				: null;
+		})
+		.filter(
+			(x): x is { name: string; markdown: string; htmlAvailable: boolean } =>
+				x !== null,
+		);
+}
+
 /** Markdown content of revision n. */
 export function readRevision(
 	sessionId: string,

@@ -28,10 +28,50 @@ const reviewerRetrySchema = z.object({
   backoffBaseMs: z.number().min(0).default(5000),
 });
 
+// True if `account` parses as a reviewer binary (binary[:harness[:flag]]). Used to
+// reject malformed type/pool accounts at config load instead of mid-run/at display.
+// parseReviewerConfig is a hoisted function declaration, so referencing it here is safe.
+function accountParses(account: string): boolean {
+  try {
+    parseReviewerConfig(account);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function implementerParses(binary: string): boolean {
+  try {
+    parseImplementerConfig(binary);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// A reviewer/verifier "type" entry within a phase. Either a single binary string
+// (back-compat) or a weighted pool of interchangeable accounts ({ binary: weight })
+// that load-balances per invocation (a separate concept from implementer type-rotation).
+// Pools must be non-empty with parseable account names and positive weights — fail at
+// config load, not mid-run or at display time.
+const ACCOUNT_FORMAT_MSG = 'Invalid account name (expected binary[:harness[:flag]]).';
+// A weighted account pool: { binary: weight }, non-empty, parseable accounts, positive weights.
+const poolSchema = z
+  .record(z.string().min(1), z.number().positive())
+  .refine(pool => Object.keys(pool).length > 0, { message: 'Account pool cannot be empty.' })
+  .refine(pool => Object.keys(pool).every(accountParses), { message: ACCOUNT_FORMAT_MSG });
+// A type entry: a single binary string OR a profile NAME (resolved via poolProfiles at
+// runtime) OR an inline weighted pool. A plain string that isn't a defined profile is
+// treated as a bare binary, so it must be a valid binary-format name.
+const typeEntrySchema = z.union([z.string().min(1).refine(accountParses, { message: ACCOUNT_FORMAT_MSG }), poolSchema]);
+// Named, reusable pools referenceable by name from reviewPhases/verifyPhases entries and
+// implementer keys.
+const poolProfilesSchema = z.record(z.string().min(1), poolSchema);
+
 // Backward compat: old nested shapes accepted as input aliases
 const legacyReReviewSchema = z.object({
   enabled: z.boolean().optional(),
-  phases: z.array(z.array(z.string().min(1)).min(1)).optional(),
+  phases: z.array(z.array(typeEntrySchema).min(1)).optional(),
   timeout: z.number().min(0.001).max(120).optional(),
 });
 const legacySynthesisSchema = z.object({
@@ -40,16 +80,34 @@ const legacySynthesisSchema = z.object({
 
 const configSchema = z
   .object({
+    // Config-file format version (for the additive migration). Optional for back-compat.
+    configVersion: z.number().int().nonnegative().optional(),
     // Binary names — new format: weighted implementers
-    implementers: z.record(z.string(), z.number().int().positive()).optional(),
+    implementers: z
+      .record(z.string(), z.number().int().positive())
+      .refine(rec => Object.keys(rec).length > 0, { message: 'implementers cannot be empty.' })
+      .refine(rec => Object.keys(rec).every(implementerParses), { message: ACCOUNT_FORMAT_MSG })
+      .optional(),
     // Backwards compat: singular implementer
-    implementer: z.string().min(1).optional(),
-    // Review phases — new format: array of arrays
-    reviewPhases: z.array(z.array(z.string().min(1)).min(1)).optional(),
+    implementer: z.string().min(1).refine(implementerParses, { message: ACCOUNT_FORMAT_MSG }).optional(),
+    // Review phases — array of phases; each phase is an array of TYPES (binary string
+    // or a weighted account pool). Reviews = reviewLenses × types.
+    reviewPhases: z.array(z.array(typeEntrySchema).min(1)).optional(),
+    // Review lenses (the prompt focus each type reviews through). Default: ['general'].
+    reviewLenses: z.array(z.string().min(1)).optional(),
+    // Lens focus overrides/additions, merged over the built-in REVIEW_LENS_PROFILES.
+    lensProfiles: z.record(z.string(), z.string()).optional(),
+    // Named reusable account pools, referenceable by name from review/verify type entries
+    // and implementer keys.
+    poolProfiles: poolProfilesSchema.optional(),
     // Backwards compat: flat reviewers array
     reviewers: z.array(z.string().min(1)).optional(),
-    conflictChecker: z.string().min(1).optional(), // defaults to implementer binary
-    synthesizer: z.string().min(1).optional(), // defaults to first implementer binary
+    // Single account, an inline weighted pool, or a pool-profile NAME (load-balanced per
+    // invocation via selectFromPool). Defaults to the implementer binary when unset.
+    conflictChecker: typeEntrySchema.optional(),
+    // Single account, an inline weighted pool, or a pool-profile NAME. Defaults to the first
+    // implementer binary when unset.
+    synthesizer: typeEntrySchema.optional(),
     // Counts and limits
     maxIterations: z.number().min(1).max(100).default(7),
     implementerTimeout: z.number().min(0.001).max(120).default(30),
@@ -65,10 +123,14 @@ const configSchema = z
     synthesis: z.union([z.boolean(), legacySynthesisSchema]).default(true),
     synthesisTimeout: z.number().min(0.001).max(120).optional(),
     verify: z.boolean().optional(),
-    verifyPhases: z.array(z.array(z.string().min(1)).min(1)).optional(),
+    verifyPhases: z.array(z.array(typeEntrySchema).min(1)).optional(),
     verifyTimeout: z.number().min(0.001).max(120).optional(),
     rerankAfterCheckpoint: z.boolean().default(true),
     snapshot: z.boolean().default(false),
+    // Run claude-harness agents as interactive TUIs (no --print). kloop injects the prompt
+    // via tmux, detects completion via a marker file the agent touches, then sends /exit.
+    // Non-claude harnesses (gemini/codex) ignore this and always run --print.
+    interactive: z.boolean().default(false),
     implementerRetry: implementerRetrySchema.optional(),
     reviewerRetry: reviewerRetrySchema.optional(),
     firstIterationWeightMultiplier: z.number().min(1).max(1000).default(2),
@@ -129,10 +191,17 @@ const configSchema = z
       : data.prompts;
 
     return {
+      configVersion: data.configVersion,
       implementers,
       reviewPhases,
+      reviewLenses: data.reviewLenses ?? ['general'],
+      lensProfiles: data.lensProfiles,
+      poolProfiles: data.poolProfiles,
       conflictChecker: data.conflictChecker,
-      synthesizer: data.synthesizer ?? Object.keys(implementers)[0],
+      // Leave undefined when unset — every consumer falls back to the primary implementer
+      // at usage (`config.synthesizer ?? getPrimaryImplementer(...)`). Eagerly resolving it
+      // here would also make the v1→v2 migration persist a synthesizer the user never chose.
+      synthesizer: data.synthesizer,
       maxIterations: data.maxIterations,
       implementerTimeout: data.implementerTimeout,
       reviewerTimeout: data.reviewerTimeout,
@@ -147,6 +216,7 @@ const configSchema = z
       verifyTimeout,
       rerankAfterCheckpoint: data.rerankAfterCheckpoint ?? true,
       snapshot: data.snapshot ?? false,
+      interactive: data.interactive ?? false,
       implementerRetry: data.implementerRetry ?? { maxRetries: 2, backoffBaseMs: 5000 },
       reviewerRetry: data.reviewerRetry ?? { maxRetries: 2, backoffBaseMs: 5000 },
       firstIterationWeightMultiplier: data.firstIterationWeightMultiplier ?? 2,
@@ -155,10 +225,17 @@ const configSchema = z
   });
 
 export const resolvedConfigSchema = z.object({
-  implementers: z.record(z.string(), z.number().int().positive()),
-  reviewPhases: z.array(z.array(z.string().min(1))).min(1),
-  conflictChecker: z.string().min(1).optional(),
-  synthesizer: z.string().min(1).optional(),
+  configVersion: z.number().int().nonnegative().optional(),
+  implementers: z
+    .record(z.string(), z.number().int().positive())
+    .refine(rec => Object.keys(rec).length > 0, { message: 'implementers cannot be empty.' })
+    .refine(rec => Object.keys(rec).every(implementerParses), { message: ACCOUNT_FORMAT_MSG }),
+  reviewPhases: z.array(z.array(typeEntrySchema)).min(1),
+  reviewLenses: z.array(z.string().min(1)).min(1),
+  lensProfiles: z.record(z.string(), z.string()).optional(),
+  poolProfiles: poolProfilesSchema.optional(),
+  conflictChecker: typeEntrySchema.optional(),
+  synthesizer: typeEntrySchema.optional(),
   maxIterations: z.number().min(1).max(100),
   implementerTimeout: z.number().min(0.001).max(120),
   reviewerTimeout: z.number().min(0.001).max(120),
@@ -170,9 +247,10 @@ export const resolvedConfigSchema = z.object({
   previousReviewPropagation: z.number().min(0).max(1),
   synthesis: z.boolean(),
   verify: z.boolean(),
-  verifyPhases: z.array(z.array(z.string().min(1)).min(1)),
+  verifyPhases: z.array(z.array(typeEntrySchema).min(1)),
   rerankAfterCheckpoint: z.boolean(),
   snapshot: z.boolean(),
+  interactive: z.boolean().default(false),
   implementerRetry: z.object({
     maxRetries: z.number().min(0).max(10),
     backoffBaseMs: z.number().min(0),
@@ -294,8 +372,9 @@ export type HarnessType = 'claude' | 'gemini' | 'codex';
 
 /**
  * Parsed binary config for implementers and conflict checker.
- * Format: binary:harness (e.g., "gemini-auto:gemini")
- * Optional ::i suffix marks as preferred for loop 1.
+ * Format: binary[:harness][*]  — harness is guessed from the binary's first word when
+ * omitted (e.g. "claude-auto-x" → claude). Trailing `*` marks first-iteration preferred
+ * (legacy `::i` still accepted).
  */
 export interface ParsedBinary {
   binary: string;
@@ -304,8 +383,9 @@ export interface ParsedBinary {
 }
 
 /**
- * Parsed binary config for reviewers (which have an additional noVerdictAsFailure flag).
- * Format: binary:harness:flag (e.g., "gemini-auto:gemini:0" or "gemini-auto:gemini:1")
+ * Parsed binary config for reviewers (which add a noVerdictAsFailure flag).
+ * Format: binary[:harness][*][!]  — trailing `!` IGNORES a no-verdict (treats it as a
+ * pass); without `!` a no-verdict FAILS (rejects). Legacy `:0`/`:1` flag still accepted.
  */
 export interface ReviewerBinary extends ParsedBinary {
   noVerdictAsFailure: boolean;
@@ -332,23 +412,49 @@ function parseHarness(value: string, fallback = false): HarnessType {
  * New: "gemini-auto:gemini" -> { binary: "gemini-auto", harness: "gemini", firstIterationPreferred: false }
  * Preferred: "claude-auto-opus::i" -> { binary: "claude-auto-opus", harness: "claude", firstIterationPreferred: true }
  */
+/**
+ * Strip the trailing flag suffixes from a binary spec, in any order:
+ *   *   → first-iteration preferred (new form of the legacy ::i)
+ *   !   → no-verdict is IGNORED (treated as pass) instead of failing (reviewer-only)
+ *   ::i → legacy first-iteration preferred
+ * Returns the bare `base` plus the flags found.
+ */
+function stripFlagSuffixes(s: string): { base: string; firstIter: boolean; noVerdictAsFailure?: boolean } {
+  let firstIter = false;
+  let noVerdictAsFailure: boolean | undefined;
+  for (;;) {
+    if (s.endsWith('::i')) {
+      firstIter = true;
+      s = s.slice(0, -3);
+    } else if (s.endsWith('*')) {
+      firstIter = true;
+      s = s.slice(0, -1);
+    } else if (s.endsWith('!')) {
+      noVerdictAsFailure = false;
+      s = s.slice(0, -1);
+    } else {
+      break;
+    }
+  }
+  return { base: s, firstIter, noVerdictAsFailure };
+}
+
 export function parseImplementerConfig(entry: string): ParsedBinary {
   const trimmed = entry.trim();
   if (!trimmed) {
     throw new Error('Implementer config cannot be empty.');
   }
 
-  // Check for ::i suffix (first iteration preferred)
-  let firstIterationPreferred = false;
-  let working = trimmed;
-  if (working.endsWith('::i')) {
-    firstIterationPreferred = true;
-    working = working.slice(0, -3);
+  // Strip trailing flag suffixes (* / ::i first-iteration; ! is reviewer-only and ignored here).
+  const { base: working, firstIter: firstIterationPreferred } = stripFlagSuffixes(trimmed);
+
+  if (!working) {
+    throw new Error(`Invalid implementer config "${entry}": binary name cannot be empty.`);
   }
 
   const colonCount = (working.match(/:/g) || []).length;
   if (colonCount > 1) {
-    throw new Error(`Invalid implementer config "${entry}": too many colons. Expected format: binary:harness[:i]`);
+    throw new Error(`Invalid implementer config "${entry}": too many colons. Expected format: binary[:harness][*]`);
   }
 
   const colonIndex = working.indexOf(':');
@@ -391,44 +497,37 @@ export function parseReviewerConfig(entry: string): ReviewerBinary {
     throw new Error('Reviewer config cannot be empty.');
   }
 
-  const colonCount = (trimmed.match(/:/g) || []).length;
+  // New suffix flags first: * (first-iteration), ! (no-verdict is IGNORED instead of
+  // failing). `base` is then binary[:harness], possibly with a legacy :0/:1 flag.
+  const { base, firstIter, noVerdictAsFailure: noVerdFromBang } = stripFlagSuffixes(trimmed);
+
+  const colonCount = (base.match(/:/g) || []).length;
   if (colonCount > 2) {
-    throw new Error(
-      `Invalid reviewer config "${entry}": too many colons. Expected format: binary:harness:flag or binary:flag`,
-    );
+    throw new Error(`Invalid reviewer config "${entry}": too many colons. Expected format: binary[:harness][!]`);
   }
 
-  // Find the last colon (separates the flag if present)
-  const lastColonIndex = trimmed.lastIndexOf(':');
-
-  if (lastColonIndex === -1) {
-    // No flag: "binary" or "binary:harness" (no flag defaults to noVerdictAsFailure: true)
-    return { ...parseImplementerConfig(trimmed), noVerdictAsFailure: true };
-  }
-
-  // Check if the part after last colon is a valid flag (0 or 1)
-  const potentialFlag = trimmed.slice(lastColonIndex + 1);
-
-  // If the flag segment looks numeric but isn't 0 or 1, reject explicitly
-  if (potentialFlag.length > 0 && /^\d+$/.test(potentialFlag) && potentialFlag !== '0' && potentialFlag !== '1') {
-    throw new Error(`Invalid reviewer config "${entry}": reviewer flag must be 0 or 1, got "${potentialFlag}".`);
-  }
-
-  if (potentialFlag === '0' || potentialFlag === '1') {
-    // There is a flag: parse the binary:harness part and apply the flag
-    const binaryPart = trimmed.slice(0, lastColonIndex);
-    if (!binaryPart) {
-      throw new Error(`Invalid reviewer config "${entry}": binary name cannot be empty.`);
+  // Legacy numeric flag (:0 = ignore no-verdict, :1 = fail). Detected on the last colon.
+  let binaryHarness = base;
+  let legacyFlag: boolean | undefined;
+  const lastColonIndex = base.lastIndexOf(':');
+  if (lastColonIndex !== -1) {
+    const potentialFlag = base.slice(lastColonIndex + 1);
+    if (potentialFlag.length > 0 && /^\d+$/.test(potentialFlag) && potentialFlag !== '0' && potentialFlag !== '1') {
+      throw new Error(`Invalid reviewer config "${entry}": reviewer flag must be 0 or 1, got "${potentialFlag}".`);
     }
-    const parsed = parseImplementerConfig(binaryPart);
-    return {
-      ...parsed,
-      noVerdictAsFailure: potentialFlag === '1',
-    };
+    if (potentialFlag === '0' || potentialFlag === '1') {
+      binaryHarness = base.slice(0, lastColonIndex);
+      if (!binaryHarness) {
+        throw new Error(`Invalid reviewer config "${entry}": binary name cannot be empty.`);
+      }
+      legacyFlag = potentialFlag === '1';
+    }
   }
 
-  // Not a valid flag (0 or 1), so it's binary:harness with no flag
-  return { ...parseImplementerConfig(trimmed), noVerdictAsFailure: true };
+  const parsed = parseImplementerConfig(binaryHarness);
+  // Precedence: explicit ! wins, else legacy :0/:1, else default (fail on no verdict).
+  const noVerdictAsFailure = noVerdFromBang ?? legacyFlag ?? true;
+  return { ...parsed, noVerdictAsFailure, firstIterationPreferred: parsed.firstIterationPreferred || firstIter };
 }
 
 /**
@@ -445,6 +544,7 @@ export function parseConflictCheckerConfig(entry: string): ParsedBinary {
 export const DEFAULT_CONFIG: Config = {
   implementers: { claude: 1 },
   reviewPhases: [['claude']],
+  reviewLenses: ['general'],
   conflictChecker: 'claude',
   maxIterations: 7,
   implementerTimeout: 30,
@@ -460,6 +560,7 @@ export const DEFAULT_CONFIG: Config = {
   verifyPhases: [['claude:claude']],
   rerankAfterCheckpoint: true,
   snapshot: false,
+  interactive: false,
   implementerRetry: { maxRetries: 2, backoffBaseMs: 5000 },
   reviewerRetry: { maxRetries: 2, backoffBaseMs: 5000 },
   firstIterationWeightMultiplier: 2,
@@ -502,19 +603,304 @@ export function selectImplementer(config: Config, loopNum?: number): string {
 
   const totalWeight = effectiveWeights.reduce((sum, w) => sum + w, 0);
   let rand = Math.random() * totalWeight;
+  let pickedKey = entries.length > 0 ? entries[entries.length - 1][0] : ''; // fallback to last
   for (let i = 0; i < entries.length; i++) {
     rand -= effectiveWeights[i];
-    if (rand <= 0) return entries[i][0];
+    if (rand <= 0) {
+      pickedKey = entries[i][0];
+      break;
+    }
   }
-  return entries[entries.length - 1][0]; // fallback to last
+  // An implementer key may name a pool profile — load-balance within it. The suffix
+  // flags (* / ::i first-iteration, ! ) only affect the weighted pick above, not the
+  // account, so strip them for the profile lookup.
+  const base = stripFlagSuffixes(pickedKey).base;
+  if (config.poolProfiles && Object.prototype.hasOwnProperty.call(config.poolProfiles, base)) {
+    return selectFromPool(base, config.poolProfiles);
+  }
+  return pickedKey;
+}
+
+// ============================================================================
+// Reviewer/verifier TYPE + POOL helpers
+// ============================================================================
+
+/**
+ * A reviewer/verifier "type" within a phase: a single binary string, a poolProfile
+ * NAME (resolved via PoolProfiles), or an inline weighted pool ({ binary: weight }).
+ */
+export type ReviewTypeEntry = string | Record<string, number>;
+
+/** Named, reusable account pools. */
+export type PoolProfiles = Record<string, Record<string, number>>;
+
+/** True if `entry` is a string that names a defined pool profile. */
+function isProfileRef(entry: ReviewTypeEntry, profiles?: PoolProfiles): entry is string {
+  return typeof entry === 'string' && !!profiles && Object.prototype.hasOwnProperty.call(profiles, entry);
+}
+
+/**
+ * Resolve a type entry to a concrete account pool, expanding a profile NAME via
+ * poolProfiles. A bare string becomes { binary: 1 }; an inline pool is returned as-is.
+ */
+export function resolvePool(entry: ReviewTypeEntry, profiles?: PoolProfiles): Record<string, number> {
+  if (isProfileRef(entry, profiles)) return profiles![entry];
+  if (typeof entry === 'string') return { [entry]: 1 };
+  return entry;
+}
+
+/** Normalize a type entry to a weighted pool (no profile resolution). */
+export function normalizeReviewType(entry: ReviewTypeEntry): Record<string, number> {
+  if (typeof entry === 'string') return { [entry]: 1 };
+  return entry;
+}
+
+/**
+ * A short, stable display label for a type. A profile reference shows the profile name;
+ * otherwise the parsed binary name(s) (harness/flag stripped), joined "a+b+c".
+ */
+export function reviewTypeLabel(entry: ReviewTypeEntry, profiles?: PoolProfiles): string {
+  if (isProfileRef(entry, profiles)) return entry; // show the profile name
+  // Never throw — display-only. Fall back to the raw account if it doesn't parse.
+  return Object.keys(normalizeReviewType(entry))
+    .map(account => {
+      try {
+        return parseReviewerConfig(account).binary;
+      } catch {
+        return account;
+      }
+    })
+    .join('+');
+}
+
+/**
+ * Pick one account from a type's pool, weighted-random — for LOAD DISTRIBUTION across
+ * interchangeable accounts of the same type (distinct from implementer type-rotation).
+ * Resolves a profile name via `profiles`. Stateless; picked per invocation.
+ */
+export function selectFromPool(entry: ReviewTypeEntry, profiles?: PoolProfiles): string {
+  const pool = Object.entries(resolvePool(entry, profiles));
+  if (pool.length === 0) throw new Error('Reviewer type pool cannot be empty.');
+  if (pool.length === 1) return pool[0][0];
+  const total = pool.reduce((sum, [, w]) => sum + w, 0);
+  if (!Number.isFinite(total) || total <= 0) return pool[0][0]; // degenerate/overflow weights
+  let rand = Math.random() * total;
+  for (const [binary, weight] of pool) {
+    rand -= weight;
+    if (rand <= 0) return binary;
+  }
+  return pool[pool.length - 1][0];
+}
+
+/**
+ * Resolve a single-account role entry (synthesizer / conflict checker) to a concrete
+ * account — pool-aware: expands an inline pool or a pool-profile NAME and load-balances
+ * per call (same machinery as reviewer/verifier types). Returns undefined when the entry
+ * is unset, so each caller keeps its own fallback (primary implementer / loop implementer).
+ */
+export function selectRoleAccount(entry: ReviewTypeEntry | undefined, profiles?: PoolProfiles): string | undefined {
+  return entry != null ? selectFromPool(entry, profiles) : undefined;
+}
+
+// ============================================================================
+// Nested config input layer (role blocks → flat Config)
+// ============================================================================
+//
+// The on-disk config is organized into role blocks (implementer / reviewer /
+// verifier / synthesizer / checkpointer), a top-level `pools` registry, and a
+// `settings` block. Internally kloop uses a FLAT Config, so this flattens the
+// nested input into the flat keys the schema expects.
+//
+// Back-compat: an OLD flat config passes through unchanged. A nested block is only
+// recognized when its key holds an OBJECT — the legacy flat `implementer` and
+// `synthesizer` keys are STRINGS, so they are left untouched. Nested-derived values
+// overwrite any same-named flat key (an explicit block wins).
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+/**
+ * Flatten a nested role-block config into the flat key set the schema consumes.
+ * Idempotent on already-flat configs (no block keys hold objects → no-op).
+ */
+export function flattenNestedConfig(raw: unknown): unknown {
+  if (!isPlainObject(raw)) return raw;
+  const d = raw;
+  const out: Record<string, unknown> = { ...d };
+
+  // pools registry → poolProfiles
+  if (isPlainObject(d.pools)) {
+    out.poolProfiles = d.pools;
+    delete out.pools;
+  }
+
+  // implementer block → flat implementer fields (a STRING here is the legacy
+  // singular implementer — leave it for the schema's back-compat transform).
+  if (isPlainObject(d.implementer)) {
+    const im = d.implementer;
+    delete out.implementer;
+    if (im.pools !== undefined) out.implementers = im.pools;
+    if (im.timeout !== undefined) out.implementerTimeout = im.timeout;
+    if (im.firstIterationWeightMultiplier !== undefined)
+      out.firstIterationWeightMultiplier = im.firstIterationWeightMultiplier;
+    if (im.retry !== undefined) out.implementerRetry = im.retry;
+  }
+
+  // reviewer block
+  if (isPlainObject(d.reviewer)) {
+    const rv = d.reviewer;
+    delete out.reviewer;
+    if (rv.phases !== undefined) out.reviewPhases = rv.phases;
+    if (rv.lenses !== undefined) out.reviewLenses = rv.lenses;
+    if (rv.lensProfiles !== undefined) out.lensProfiles = rv.lensProfiles;
+    if (rv.timeout !== undefined) out.reviewerTimeout = rv.timeout;
+    if (rv.firstLoopFullReview !== undefined) out.firstLoopFullReview = rv.firstLoopFullReview;
+    if (rv.retry !== undefined) out.reviewerRetry = rv.retry;
+  }
+
+  // verifier block
+  if (isPlainObject(d.verifier)) {
+    const vf = d.verifier;
+    delete out.verifier;
+    if (vf.phases !== undefined) out.verifyPhases = vf.phases;
+    if (vf.timeout !== undefined) out.verifyTimeout = vf.timeout;
+    if (vf.enabled !== undefined) out.verify = vf.enabled;
+  }
+
+  // synthesizer block → flat. A STRING here is the legacy synthesizer binary, and a bare
+  // inline pool ({ binary: weight }) is a flat synthesizer value — both pass through. Only a
+  // block carrying recognized keys (pool/timeout/enabled) is unwrapped here. Without this
+  // guard an inline pool would be mistaken for a block and silently dropped (it has no `.pool`).
+  if (
+    isPlainObject(d.synthesizer) &&
+    ('pool' in d.synthesizer || 'timeout' in d.synthesizer || 'enabled' in d.synthesizer)
+  ) {
+    const sy = d.synthesizer;
+    delete out.synthesizer;
+    if (sy.pool !== undefined) out.synthesizer = sy.pool;
+    if (sy.timeout !== undefined) out.synthesisTimeout = sy.timeout;
+    if (sy.enabled !== undefined) out.synthesis = sy.enabled;
+  }
+
+  // checkpointer block
+  if (isPlainObject(d.checkpointer)) {
+    const cp = d.checkpointer;
+    delete out.checkpointer;
+    if (cp.pool !== undefined) out.conflictChecker = cp.pool;
+    if (cp.threshold !== undefined) out.conflictCheckThreshold = cp.threshold;
+  }
+
+  // settings block
+  if (isPlainObject(d.settings)) {
+    const st = d.settings;
+    delete out.settings;
+    if (st.synthesis !== undefined) out.synthesis = st.synthesis;
+    if (st.verify !== undefined) out.verify = st.verify;
+    if (st.rerankAfterCheckpoint !== undefined) out.rerankAfterCheckpoint = st.rerankAfterCheckpoint;
+    if (st.previousReviewPropagation !== undefined) out.previousReviewPropagation = st.previousReviewPropagation;
+    if (st.compressSpec !== undefined) out.compressSpec = st.compressSpec;
+    if (st.snapshot !== undefined) out.snapshot = st.snapshot;
+    if (st.interactive !== undefined) out.interactive = st.interactive;
+  }
+
+  return out;
+}
+
+/**
+ * Re-nest a flat config into the role-block layout (inverse of flattenNestedConfig).
+ * Used by the v1→v2 migration to rewrite an on-disk config into the new structure.
+ * Only emits a block / key when the corresponding flat value is present.
+ */
+export function nestFlatConfig(flat: Record<string, unknown>): Record<string, unknown> {
+  const d = flat;
+  const out: Record<string, unknown> = {};
+
+  // Top-level essentials first (configVersion, then the one knob that matters most).
+  if (d.configVersion !== undefined) out.configVersion = d.configVersion;
+  if (d.maxIterations !== undefined) out.maxIterations = d.maxIterations;
+
+  // PROFILES section: pools registry + lens definitions (grouped together, top-level).
+  if (d.poolProfiles !== undefined) out.pools = d.poolProfiles;
+  if (d.lensProfiles !== undefined) out.lensProfiles = d.lensProfiles;
+
+  // implementer
+  const implementers = d.implementers ?? (typeof d.implementer === 'string' ? { [d.implementer]: 1 } : undefined);
+  const implementer: Record<string, unknown> = {};
+  if (implementers !== undefined) implementer.pools = implementers;
+  if (d.implementerTimeout !== undefined) implementer.timeout = d.implementerTimeout;
+  if (d.firstIterationWeightMultiplier !== undefined)
+    implementer.firstIterationWeightMultiplier = d.firstIterationWeightMultiplier;
+  if (d.implementerRetry !== undefined) implementer.retry = d.implementerRetry;
+  if (Object.keys(implementer).length > 0) out.implementer = implementer;
+
+  // reviewer
+  const reviewer: Record<string, unknown> = {};
+  if (d.reviewPhases !== undefined) reviewer.phases = d.reviewPhases;
+  if (d.reviewLenses !== undefined) reviewer.lenses = d.reviewLenses;
+  // lensProfiles is emitted top-level in the PROFILES section above (not nested here).
+  if (d.reviewerTimeout !== undefined) reviewer.timeout = d.reviewerTimeout;
+  if (d.firstLoopFullReview !== undefined) reviewer.firstLoopFullReview = d.firstLoopFullReview;
+  if (d.reviewerRetry !== undefined) reviewer.retry = d.reviewerRetry;
+  if (Object.keys(reviewer).length > 0) out.reviewer = reviewer;
+
+  // verifier
+  const verifier: Record<string, unknown> = {};
+  if (d.verifyPhases !== undefined) verifier.phases = d.verifyPhases;
+  if (d.verifyTimeout !== undefined) verifier.timeout = d.verifyTimeout;
+  if (Object.keys(verifier).length > 0) out.verifier = verifier;
+
+  // synthesizer
+  const synthesizer: Record<string, unknown> = {};
+  if (d.synthesizer !== undefined) synthesizer.pool = d.synthesizer;
+  if (d.synthesisTimeout !== undefined) synthesizer.timeout = d.synthesisTimeout;
+  if (Object.keys(synthesizer).length > 0) out.synthesizer = synthesizer;
+
+  // checkpointer
+  const checkpointer: Record<string, unknown> = {};
+  if (d.conflictChecker !== undefined) checkpointer.pool = d.conflictChecker;
+  if (d.conflictCheckThreshold !== undefined) checkpointer.threshold = d.conflictCheckThreshold;
+  if (Object.keys(checkpointer).length > 0) out.checkpointer = checkpointer;
+
+  // settings
+  const settings: Record<string, unknown> = {};
+  if (d.synthesis !== undefined) settings.synthesis = d.synthesis;
+  if (d.verify !== undefined) settings.verify = d.verify;
+  if (d.rerankAfterCheckpoint !== undefined) settings.rerankAfterCheckpoint = d.rerankAfterCheckpoint;
+  if (d.previousReviewPropagation !== undefined) settings.previousReviewPropagation = d.previousReviewPropagation;
+  if (d.compressSpec !== undefined) settings.compressSpec = d.compressSpec;
+  if (d.snapshot !== undefined) settings.snapshot = d.snapshot;
+  if (d.interactive !== undefined) settings.interactive = d.interactive;
+  if (Object.keys(settings).length > 0) out.settings = settings;
+
+  // prompts (top-level in both layouts)
+  if (d.prompts !== undefined) out.prompts = d.prompts;
+
+  return out;
 }
 
 export function parseRawConfig(data: unknown): Config {
+  // Flatten the nested role-block layout into flat keys first (old flat configs are a
+  // no-op here). Everything below operates on the flattened object.
+  const flat = flattenNestedConfig(data);
+  // Reject dangerous poolProfiles key names before Zod's z.record silently strips them
+  // (a profile literally named __proto__/constructor/prototype would otherwise vanish and
+  // its references would resolve to a bogus binary). Checked on the flattened input.
+  if (flat && typeof flat === 'object') {
+    const pp = (flat as Record<string, unknown>).poolProfiles;
+    if (pp && typeof pp === 'object') {
+      for (const reserved of ['__proto__', 'constructor', 'prototype']) {
+        if (Object.prototype.hasOwnProperty.call(pp, reserved)) {
+          throw new Error(`poolProfiles name "${reserved}" is reserved — choose a different name.`);
+        }
+      }
+    }
+  }
   // Parse with the schema that handles backwards compat transform
-  const result = configSchema.safeParse(data);
+  const result = configSchema.safeParse(flat);
   if (!result.success) {
     // Fallback: try the resolved schema directly
-    return resolvedConfigSchema.parse(data);
+    return resolvedConfigSchema.parse(flat);
   }
   return resolvedConfigSchema.parse(result.data);
 }
@@ -680,6 +1066,9 @@ export interface ReviewerStartEvent extends BaseEvent {
   phase: number;
   reviewer: string;
   harness?: HarnessType;
+  reviewerIndex?: number; // global reviewer index in the loop (matrix slot identity)
+  lens?: string; // review lens (e.g. quality, completion) — omitted for legacy single-lens
+  reviewType?: string; // type label (the account pool this reviewer was drawn from)
 }
 
 export interface ReviewerEndEvent extends BaseEvent {
@@ -694,6 +1083,9 @@ export interface ReviewerEndEvent extends BaseEvent {
   verdict?: string; // 'approved' | 'rejected'
   completionEstimate?: number;
   propagated?: boolean; // true if this reviewer received previous loop reviews
+  reviewerIndex?: number; // global reviewer index in the loop (matrix slot identity)
+  lens?: string; // review lens
+  reviewType?: string; // type label (account pool)
 }
 
 export interface ReviewPhaseEndEvent extends BaseEvent {
@@ -871,6 +1263,9 @@ export interface MaterializedAgentState {
   inputTokens?: number;
   outputTokens?: number;
   propagated?: boolean; // true if this reviewer received previous loop reviews
+  // Matrix review: which lens this reviewer applied + which type (account pool) it belongs to
+  lens?: string;
+  reviewType?: string;
   // Implementer retry tracking
   retryAttempt?: number; // 0-indexed: 0 = first try
   retryMax?: number;

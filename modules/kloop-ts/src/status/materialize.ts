@@ -14,7 +14,9 @@ import type {
 } from '../types';
 import { EVENT_TYPES } from '../types';
 
-const SCHEMA_VERSION = 2;
+// Bumped to 3 for the LENS × TYPE matrix: invalidates cached status.yaml so every run
+// re-materializes from events and picks up reviewer lens/reviewType fields.
+const SCHEMA_VERSION = 3;
 
 // ============================================================================
 // Materialize: WAL → status.yaml
@@ -260,17 +262,21 @@ function applyEvent(status: MaterializedStatus, rawEvent: KloopEvent): void {
     }
 
     case EVENT_TYPES.REVIEWER_START: {
-      const reviewer = findReviewer(status, event.loop, event.phase, event.reviewer);
+      const reviewer = findReviewer(status, event.loop, event.phase, event.reviewer, event.reviewerIndex);
       if (reviewer) {
         reviewer.status = 'running';
         reviewer.startedAt = event.timestamp;
         if ('harness' in event && event.harness) reviewer.harness = event.harness;
+        // Pool can pick a different account than the phase_start placeholder — record the actual one.
+        if (event.reviewer) reviewer.binary = event.reviewer;
+        if (event.lens) reviewer.lens = event.lens;
+        if (event.reviewType) reviewer.reviewType = event.reviewType;
       }
       break;
     }
 
     case EVENT_TYPES.REVIEWER_END: {
-      const reviewer = findReviewer(status, event.loop, event.phase, event.reviewer);
+      const reviewer = findReviewer(status, event.loop, event.phase, event.reviewer, event.reviewerIndex);
       if (reviewer) {
         reviewer.status = event.exitCode === 0 ? 'completed' : 'error';
         reviewer.completedAt = event.timestamp;
@@ -281,6 +287,9 @@ function applyEvent(status: MaterializedStatus, rawEvent: KloopEvent): void {
         if (event.completionEstimate !== undefined) reviewer.completionEstimate = event.completionEstimate;
         if (event.propagated !== undefined) reviewer.propagated = event.propagated;
         if ('harness' in event && event.harness) reviewer.harness = event.harness;
+        if (event.reviewer) reviewer.binary = event.reviewer;
+        if (event.lens) reviewer.lens = event.lens;
+        if (event.reviewType) reviewer.reviewType = event.reviewType;
       }
       break;
     }
@@ -559,9 +568,25 @@ function findReviewer(
   loopNum: number,
   phaseNum: number,
   binary: string,
+  reviewerIndex?: number,
 ): MaterializedAgentState | undefined {
   const loop = findLoop(status, loopNum);
-  const phase = loop?.reviewPhases.find(p => p.phase === phaseNum);
+  if (!loop) return undefined;
+  // Prefer the global reviewer index (matrix can repeat a binary across lens slots).
+  // Walk phases in array order — the same order the runner assigned indices and the
+  // enrichment pass uses.
+  if (reviewerIndex !== undefined) {
+    let i = 0;
+    for (const phase of loop.reviewPhases) {
+      for (const reviewer of phase.reviewers) {
+        if (i === reviewerIndex) return reviewer;
+        i++;
+      }
+    }
+    return undefined;
+  }
+  // Legacy events (no index): match by binary within the phase.
+  const phase = loop.reviewPhases.find(p => p.phase === phaseNum);
   return phase?.reviewers.find(r => r.binary === binary);
 }
 
@@ -607,7 +632,13 @@ async function writeStatus(statusPath: string, status: MaterializedStatus, fs: F
   const { config, ...rest } = status;
   rest.schemaVersion = SCHEMA_VERSION;
   const content = YAML.stringify(rest, { lineWidth: 0 });
-  await fs.writeFile(statusPath, content);
+  try {
+    await fs.writeFile(statusPath, content);
+  } catch {
+    // status.yaml is a cache. The read-only dashboard (`kloop dash` mounts ~/.kloop
+    // read-only) can't persist it — that's fine; materialization still returns fresh
+    // data. Never fail a read because the cache couldn't be written.
+  }
 }
 
 async function readEventLines(eventsPath: string, fs: FsService): Promise<string[]> {

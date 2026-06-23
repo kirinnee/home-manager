@@ -5,6 +5,7 @@ import pc from 'picocolors';
 import Table from 'cli-table3';
 import type { CliDeps } from './index';
 import { paths } from '../deps';
+import { flattenNestedConfig } from '../types';
 import { formatDurationHuman } from '../loop/format';
 import { shortBinary, loadLoopSummaries, verdictMark } from './shared';
 
@@ -302,6 +303,7 @@ export async function showPrompts(
 // ---- verdicts ----
 
 interface VerdictRow {
+  index: number; // global reviewer index — keys the verdict file (reviewer-{index}.json)
   reviewer: string;
   phase: number;
   verdict: string;
@@ -341,13 +343,17 @@ export async function showVerdicts(
   );
   console.log('');
 
-  // Review phases
+  // Review phases. Reviewers are emitted in global-index order; fall back to a running
+  // counter if a summary lacks reviewerIndex (legacy). The matrix can repeat a binary
+  // across lenses, so the verdict file MUST be keyed by index, never by binary.
   const rows: VerdictRow[] = [];
+  let flatIdx = 0;
   for (const phase of loopSummary.reviewPhases) {
     for (const r of phase.reviewers) {
       const tok = (r.inputTokens ?? 0) + (r.outputTokens ?? 0);
       const tokStr = tok < 1000 ? `${tok}` : `${(tok / 1000).toFixed(1)}k`;
       rows.push({
+        index: r.reviewerIndex ?? flatIdx,
         reviewer: shortBinary(r.binary, r.harness),
         phase: phase.phase,
         verdict: r.verdict ?? 'unknown',
@@ -356,6 +362,7 @@ export async function showVerdicts(
         tokens: tokStr,
         error: r.timedOut ? 'timeout' : r.error,
       });
+      flatIdx++;
     }
   }
 
@@ -375,15 +382,7 @@ export async function showVerdicts(
     const vText = row.verdict === 'approved' ? pc.green('approved') : pc.red('rejected');
     const comp = row.completion !== undefined ? `${row.completion}%` : '-';
     const errStr = row.error ? pc.yellow(row.error) : '';
-    table.push([
-      String(rows.indexOf(row)),
-      row.reviewer,
-      `${vMark} ${vText}`,
-      comp,
-      row.duration,
-      pc.dim(row.tokens),
-      errStr,
-    ]);
+    table.push([String(row.index), row.reviewer, `${vMark} ${vText}`, comp, row.duration, pc.dim(row.tokens), errStr]);
   }
 
   console.log(table.toString());
@@ -393,11 +392,7 @@ export async function showVerdicts(
   console.log(pc.bold('Reasoning:'));
   const verdictsDir = paths.loopVerdictsPath(runId, loopNum);
   for (const row of rows) {
-    const revIdx = loopSummary.reviewPhases
-      .flatMap(p => p.reviewers)
-      .findIndex(r => shortBinary(r.binary, r.harness) === row.reviewer);
-    if (revIdx === -1) continue;
-    const verdict = await readJsonSafe<{ reasoning: string }>(path.join(verdictsDir, `reviewer-${revIdx}.json`));
+    const verdict = await readJsonSafe<{ reasoning: string }>(path.join(verdictsDir, `reviewer-${row.index}.json`));
     if (verdict?.reasoning) {
       console.log(
         `  ${pc.cyan(row.reviewer)}: ${pc.dim(verdict.reasoning.slice(0, 120))}${verdict.reasoning.length > 120 ? '...' : ''}`,
@@ -603,11 +598,12 @@ export async function showConfig(id: string | undefined, opts: { run?: string },
     return;
   }
 
-  // Parse and pretty-print
+  // Parse and pretty-print. Flatten the nested v2 role-block layout to the flat key
+  // view (matches `kloop describe`/`status`); old flat files pass through unchanged.
   let config: Record<string, unknown>;
   try {
     const YAML = await import('yaml');
-    config = YAML.parse(content) as Record<string, unknown>;
+    config = flattenNestedConfig(YAML.parse(content)) as Record<string, unknown>;
   } catch {
     console.log(pc.yellow('Failed to parse config.'));
     return;

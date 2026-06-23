@@ -94,26 +94,36 @@ Use `gh` / `gh api graphql` — **never `gh pr watch`**. Gather:
    check/test to confirm.
 3. Commit (clear message) and re-push (§1.2). Back to (a).
 
-### d. Triage + answer review feedback
+### d. Triage + answer review feedback — every thread ends RESOLVED or RAISED
 
-For **each** unresolved thread / actionable comment, first decide if it's a
-**genuine issue or a false positive** before acting. A false positive
-contradicts the intent, is already satisfied, is out of scope, or is pure style
-preference. Then pick one:
+Each unresolved thread MUST reach exactly one terminal state: **resolved by you**, or
+**raised to the user** (§4). Never leave a thread open-and-unaddressed, and never resolve
+away something that genuinely needs a human call. For **each** thread, work through these
+in order and stop at the first that fits:
 
-- **reply** — post your reasoning or an acknowledgement. (For a false positive,
-  explain _why_ you're not changing it.)
-- **resolve** — resolve the thread once it's genuinely addressed / N/A
-  (`addPullRequestReviewThread` resolve mutation, or resolve via the thread id).
-- **code_fix** — make the change in the worktree, run checks, **commit + push**
-  (§1.2), then reply/resolve the thread.
-- **ambiguous** — if you're unsure or the call is the user's to make, **stop and
-  ask the user** (§4) rather than guessing.
+1. **Outdated** — the code the comment points at has changed (the thread is marked
+   outdated, or the lines no longer exist): **resolve** with a one-line "superseded by …"
+   note. It no longer applies.
+2. **Genuine, fixable issue** → **code_fix**: change it in the worktree, run checks,
+   **commit + push** (§1.2), then reply + **resolve**.
+3. **False positive** (contradicts intent / already satisfied / out of scope / pure
+   style) → **reply** explaining _why_ you're not changing it. Do **not** resolve on this
+   pass — give them one cycle to counter.
+4. **Ghosted (bot reviewers only)** — for a **bot** reviewer's thread (e.g. CodeRabbit)
+   where the latest comment is **your own** (bot-signed) reply and it's still open on the
+   next cycle (no counter came): **resolve** with a brief closing note — stop re-fighting a
+   settled bot thread, **never loop on it**. **Never** ghost-resolve a **human's** thread
+   this way → that's (5).
+5. **Needs a human decision** — a product / scope / priority call, a genuinely ambiguous
+   requirement, a security or correctness trade-off you're unsure of, or **any human
+   change-request you replied to that they haven't conceded** → **raise to the user** (§4).
+   Human threads **outrank (4)**: if a human is waiting, raise it — never guess, never
+   auto-resolve.
 
-Apply the GitHub side-effects yourself (reply/resolve/react) — don't assume a
-sub-agent did the I/O. **Sign every reply** with a trailing line:
-`By Claude Code 🤖`. After acting, **re-verify**: re-poll the threads to confirm
-your resolves actually landed before treating them as done. Back to (a).
+Apply the GitHub side-effects yourself (reply/resolve/react) — don't assume a sub-agent
+did the I/O. **Sign every reply** `By Claude Code 🤖` (this is also how you recognize your
+own prior replies when judging "ghosted"). After acting, **re-verify**: re-poll the
+threads to confirm your resolves actually landed before treating them as done. Back to (a).
 
 ### e. Keep the branch current
 
@@ -123,21 +133,26 @@ resolve cleanly → ask the user (§4).
 
 ## 3. Ready — report and stop
 
-When CI is green, no changes are requested, and every thread is resolved:
+When CI is green, no changes are requested, and **every thread is resolved** (none left
+open, none awaiting a user decision):
 
 - Report: PR URL, check status, that all threads are resolved.
 - **Do not merge.** Hand back to the user; the merge is theirs.
 
-## 4. Stuck — ask, don't spin
+## 4. Raise to the user — don't spin, don't guess
 
-Stop the loop and ask the user when you hit any of:
+When something needs the user's call, **don't loop on it** — collect it and raise it.
+Triggers:
 
 - a merge/rebase conflict you can't resolve with confidence,
-- review feedback that's genuinely ambiguous or a product/scope decision,
+- a thread that needs a human decision (§2d.5),
 - CI that keeps failing for a cause you can't fix (after a real attempt),
 - CI stuck pending well past a reasonable wait.
 
-Explain what you tried, what's blocking, and the options — then wait.
+Gather **all** such items into **one** message and present them together — for each: the
+thread/PR link, the specific question, and **your recommendation**. Then **stop and wait**.
+Do not declare the PR ready while any item awaits a decision, and never guess a resolution
+just to make the loop finish.
 
 ## Hard rules
 
@@ -148,3 +163,6 @@ Explain what you tried, what's blocking, and the options — then wait.
    ask the user.
 5. **Sign replies** `By Claude Code 🤖`.
 6. **Keep the branch current** with base before pushing and before declaring ready.
+7. **Every thread ends resolved or raised** — never silently left open, and never
+   spun on. A thread you've pushed back on and been ghosted → resolve it (§2d.4); a
+   genuine human-decision thread → raise it (§4).

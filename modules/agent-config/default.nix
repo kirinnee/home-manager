@@ -51,10 +51,10 @@ let
       env = claudeUserConfig.env // (if manualAuth then { } else auth.mkClaudeEnv provider { inherit opus sonnet haiku; });
     } // (removeAttrs attrs [ "provider" "opus" "sonnet" "haiku" "manualAuth" ]);
 
-  mkAutoClaudeAccount = { provider ? "zai", opus ? null, sonnet ? null, haiku ? null, ... }@attrs:
+  mkAutoClaudeAccount = { provider ? "zai", opus ? null, sonnet ? null, haiku ? null, manualAuth ? false, ... }@attrs:
     claudeAutoConfig // {
-      env = claudeAutoConfig.env // (auth.mkClaudeEnv provider { inherit opus sonnet haiku; });
-    } // (removeAttrs attrs [ "provider" "opus" "sonnet" "haiku" ]);
+      env = claudeAutoConfig.env // (if manualAuth then { } else auth.mkClaudeEnv provider { inherit opus sonnet haiku; });
+    } // (removeAttrs attrs [ "provider" "opus" "sonnet" "haiku" "manualAuth" ]);
 
   # --- Codex ---
   codexAutoSettings = builtins.removeAttrs codexSettings [ "service_tier" ];

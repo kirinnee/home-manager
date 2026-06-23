@@ -178,6 +178,9 @@ export function serializeConfigWithComments(config: Config): string {
 	lines.push(`  maxParallelRepos: ${config.settings.maxParallelRepos}`);
 	lines.push(`  runMode: ${config.settings.runMode}`);
 	lines.push(`  execMode: ${config.settings.execMode}`);
+	lines.push(`  viewerBaseUrl: ${config.settings.viewerBaseUrl}`);
+	lines.push(`  kloopBaseUrl: ${config.settings.kloopBaseUrl}`);
+	lines.push(`  viewerPort: ${config.settings.viewerPort}`);
 	lines.push("");
 
 	// Orgs section — per-org policy (the single source of truth).

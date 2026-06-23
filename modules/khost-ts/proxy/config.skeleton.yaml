@@ -134,16 +134,42 @@ oauth-model-alias:
 payload:
   override:
     - models:
-        - name: 'qwen-3-*'
-          protocol: 'openai'
-        - name: 'zai-glm-*'
-          protocol: 'openai'
-        - name: 'gpt-oss-*'
-          protocol: 'openai'
-        - name: 'llama*'
-          protocol: 'openai'
+        - name: qwen-3-*
+          protocol: openai
+          headers: {}
+          from-protocol: ''
+          match: []
+          not-match: []
+          exist: []
+          not-exist: []
+        - name: zai-glm-*
+          protocol: openai
+          headers: {}
+          from-protocol: ''
+          match: []
+          not-match: []
+          exist: []
+          not-exist: []
+        - name: gpt-oss-*
+          protocol: openai
+          headers: {}
+          from-protocol: ''
+          match: []
+          not-match: []
+          exist: []
+          not-exist: []
+        - name: llama*
+          protocol: openai
+          headers: {}
+          from-protocol: ''
+          match: []
+          not-match: []
+          exist: []
+          not-exist: []
       params:
-        'reasoning_effort': 'none'
+        reasoning_effort: none
+redis-usage-queue-retention-seconds: 60
+
 # Gemini API keys
 # gemini-api-key:
 #   - api-key: "AIzaSy...01"

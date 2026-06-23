@@ -2,7 +2,7 @@ import pc from 'picocolors';
 import { format } from 'date-fns';
 import type { CliDeps } from './index';
 import type { MaterializedStatus, MaterializedLoop, MaterializedAgentState, Config } from '../types';
-import { parseReviewerConfig, parseRawConfig } from '../types';
+import { reviewTypeLabel, parseRawConfig } from '../types';
 import { paths } from '../deps';
 import { formatDurationHuman, formatAgeHuman } from '../loop/format';
 
@@ -305,18 +305,16 @@ export async function handler(runId: string | undefined, opts: { json: boolean }
           console.log(`    ${shortBinary(binary)} (weight: ${weight})`);
         }
       }
-      const phases = config.reviewPhases as string[][];
-      const fmtReviewer = (raw: string) => {
-        const p = parseReviewerConfig(raw);
-        return shortBinary(p.binary, p.harness);
-      };
+      const phases = config.reviewPhases;
       if (phases?.length === 1) {
-        console.log(`  Reviewers:   ${phases[0].map(fmtReviewer).join(', ')}`);
+        console.log(`  Types:       ${phases[0].map(e => reviewTypeLabel(e, config.poolProfiles)).join(', ')}`);
       } else if (phases) {
         for (let i = 0; i < phases.length; i++) {
-          console.log(`    Phase ${i}:    ${phases[i].map(fmtReviewer).join(', ')}`);
+          console.log(`    Phase ${i}:    ${phases[i].map(e => reviewTypeLabel(e, config.poolProfiles)).join(', ')}`);
         }
       }
+      const lenses = config.reviewLenses ?? ['general'];
+      console.log(`  Lenses:      ${lenses.join(', ')}`);
       const compressLabel = config.compressSpec ? 'on' : 'off';
       const verifyLabel = config.verify ? 'on' : 'off';
       const synthesisLabel = config.synthesis ? 'on' : 'off';

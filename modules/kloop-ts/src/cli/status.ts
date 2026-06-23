@@ -9,7 +9,7 @@ import type {
   MaterializedReviewPhase,
   Config,
 } from '../types';
-import { parseRawConfig } from '../types';
+import { parseRawConfig, reviewTypeLabel } from '../types';
 import { paths } from '../deps';
 import { formatDurationHuman, formatAgeHuman } from '../loop/format';
 
@@ -124,6 +124,8 @@ function renderLoop(loop: MaterializedLoop, multiPhase: boolean, dimmed: boolean
     for (const r of phase.reviewers) {
       const pct = r.completionEstimate !== undefined ? `${r.completionEstimate}%` : '';
       const errNote = r.error ? pc.yellow(` ${r.error}`) : '';
+      // Matrix: prefix the label with the lens so each lens × type review is distinct.
+      const label = r.lens ? `${pc.cyan(r.lens)} ${agentLabel(r)}` : agentLabel(r);
 
       if (r.status === 'running' || r.status === 'pending') {
         const elapsed = r.startedAt ? formatDuration(Date.now() - new Date(r.startedAt).getTime()) : '';
@@ -132,7 +134,7 @@ function renderLoop(loop: MaterializedLoop, multiPhase: boolean, dimmed: boolean
           prefix(
             fmtRow(
               role,
-              agentLabel(r),
+              label,
               elapsed,
               `${pc.dim(r.status)}${r.verdict ? `  ${verdictMark(r.verdict)}` : ''}${pct ? `  ${pct}` : ''}${propMark ? `  ${propMark}` : ''}`,
             ),
@@ -144,7 +146,7 @@ function renderLoop(loop: MaterializedLoop, multiPhase: boolean, dimmed: boolean
           prefix(
             fmtRow(
               role,
-              agentLabel(r),
+              label,
               agentDuration(r),
               `${verdictMark(r.verdict)}  ${statusMark(agentOk(r))}${pct ? `  ${pc.dim(pct)}` : ''}${errNote}${propMark ? `  ${propMark}` : ''}`,
             ),
@@ -279,7 +281,7 @@ export async function handler(id: string | undefined, opts: { json: boolean }, d
     const lastLoop = status.loops[status.loops.length - 1];
     const currentLoop1 = lastLoop?.loop ?? 0;
     const maxLoop = config?.maxIterations ?? '?';
-    const multiPhase = (config?.reviewPhases as string[][])?.length > 1;
+    const multiPhase = (config?.reviewPhases?.length ?? 0) > 1;
 
     // Header
     const startedDate = new Date(status.startedAt);
@@ -314,9 +316,12 @@ export async function handler(id: string | undefined, opts: { json: boolean }, d
     if (config) {
       const impls = Object.entries(config.implementers as Record<string, number>);
       const implStr = impls.map(([b, w]) => (w > 1 ? `${shortBinary(b)}:${w}` : shortBinary(b))).join(', ');
-      const phases = config.reviewPhases as string[][];
+      const phases = config.reviewPhases;
       const phaseCount = phases?.length ?? 1;
-      const revCount = phases?.flat().length ?? 0;
+      const numTypes = phases?.flat().length ?? 0;
+      const numLenses = config.reviewLenses?.length ?? 1;
+      const revCount = numTypes * numLenses;
+      const lensSuffix = numLenses > 1 ? ` (${numTypes} types × ${numLenses} lenses)` : '';
       const compressLabel = config.compressSpec ? 'on' : 'off';
       const synthesisLabel = config.synthesis ? 'on' : 'off';
       const verifyLabel = config.verify ? 'on' : 'off';
@@ -324,7 +329,7 @@ export async function handler(id: string | undefined, opts: { json: boolean }, d
       const retryMax = config.implementerRetry?.maxRetries ?? 0;
       console.log(
         pc.dim(
-          `Impl: ${implStr}  |  ${revCount} reviewers in ${phaseCount} phase${phaseCount > 1 ? 's' : ''}  |  max ${config.maxIterations} loops  |  compress: ${compressLabel}`,
+          `Impl: ${implStr}  |  ${revCount} reviews${lensSuffix} in ${phaseCount} phase${phaseCount > 1 ? 's' : ''}  |  max ${config.maxIterations} loops  |  compress: ${compressLabel}`,
         ),
       );
       console.log(
@@ -332,15 +337,17 @@ export async function handler(id: string | undefined, opts: { json: boolean }, d
           `synthesis: ${synthesisLabel}  |  verify: ${verifyLabel}  |  rerank: ${rerankLabel}  |  impl-retry: ${retryMax}`,
         ),
       );
-      // Show config review phases
+      // Show config review phases (types, pool-safe)
       for (let i = 0; i < phaseCount; i++) {
-        const phaseRevs = (phases[i] ?? []).map(r => shortBinary(r)).join(', ');
+        const phaseRevs = (phases[i] ?? []).map(e => reviewTypeLabel(e, config.poolProfiles)).join(', ');
         console.log(pc.dim(`  phase ${i}: [${phaseRevs}]`));
       }
-      // Show reranked phases if different from config (reconstruct from latest loop)
+      // Show reranked phases if the distinct TYPES per phase differ from config
       if (config.rerankAfterCheckpoint && lastLoop && lastLoop.reviewPhases.length > 0) {
-        const actualPhases = lastLoop.reviewPhases.map(p => p.reviewers.map(r => shortBinary(r.binary)));
-        const configPhases = phases.map(p => p.map(r => shortBinary(r)));
+        const actualPhases = lastLoop.reviewPhases.map(p => [
+          ...new Set(p.reviewers.map(r => r.reviewType ?? shortBinary(r.binary))),
+        ]);
+        const configPhases = phases.map(p => p.map(e => reviewTypeLabel(e, config.poolProfiles)));
         const phasesChanged = JSON.stringify(actualPhases) !== JSON.stringify(configPhases);
         if (phasesChanged) {
           console.log(pc.dim('  reranked:'));

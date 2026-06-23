@@ -1,13 +1,13 @@
 import { readConfig } from "../core/config";
-import { getSessionsByWorktree, listSessions } from "../core/db";
-import { getGitRoot, getWorktree } from "../core/git";
+import { getSessionsByFolder, listSessions } from "../core/db";
 import { readSessionMeta, type SessionMeta } from "../core/session-meta";
+import { isSessionActive } from "../core/status";
 import type { Config } from "../core/types";
 
 // ============================================================================
-// Resolve which session a `next`/`complete`/`diff` call targets. A worktree can
+// Resolve which session a `next`/`complete`/`diff` call targets. A folder can
 // host MANY sessions, so cwd resolution only auto-picks when it's unambiguous.
-// Precedence: --session <id> → the cwd worktree's single (running) session →
+// Precedence: --session <id> → the cwd folder's single (running) session →
 // the single running session anywhere. Ambiguous → require --session.
 // ============================================================================
 
@@ -35,19 +35,16 @@ export function resolveSession(sessionIdArg?: string): ResolvedSession {
 }
 
 function resolveFromContext(): string | null {
-	try {
-		const repoPath = getGitRoot();
-		const worktree = getWorktree();
-		const here = getSessionsByWorktree(repoPath, worktree);
-		// Prefer a single running session in this worktree; else a single session
-		// total here. If the folder hosts several, don't guess — fall through.
-		const runningHere = here.filter((s) => s.state === "running");
-		if (runningHere.length === 1) return runningHere[0].id;
-		if (runningHere.length === 0 && here.length === 1) return here[0].id;
-	} catch {
-		// not in a git worktree
-	}
-	const running = listSessions();
-	if (running.length === 1) return running[0].id;
+	const here = getSessionsByFolder(process.cwd());
+	// Prefer the single ACTIVE (in-progress) session in this folder; else, if there's
+	// only one session here at all, use it. If the folder hosts several active ones,
+	// don't guess — fall through. ("Active" is materialized status, not the dead DB
+	// `state` column — see isSessionActive.)
+	const activeHere = here.filter((s) => isSessionActive(s.id));
+	if (activeHere.length === 1) return activeHere[0].id;
+	if (activeHere.length === 0 && here.length === 1) return here[0].id;
+
+	const active = listSessions().filter((s) => isSessionActive(s.id));
+	if (active.length === 1) return active[0].id;
 	return null;
 }

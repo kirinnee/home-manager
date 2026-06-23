@@ -54,6 +54,29 @@ function recordRepoState(
 	});
 }
 
+/**
+ * Read a single `context:updated` value for this repo+epoch, scanning for the
+ * latest event that actually CARRIES the key. recordRepoState writes keys
+ * conditionally (e.g. `act` may record `{expectedResolves}` and later steps record
+ * `{kloopRunId}`), so the very latest event often lacks the key you want — an
+ * unfiltered `lastEventMetadata` read would return the wrong event's metadata (and
+ * thus a missing/0 value). Mirrors execution.ts `readRepoState`.
+ */
+function readRepoStateValue<T>(ctx: StepContext, key: string): T | undefined {
+	const repo = repoOf(ctx).repo;
+	const last = readLog(ctx.sessionId)
+		.filter(
+			(e) =>
+				e.event === "context:updated" &&
+				(e.repo ?? e.metadata?.repo ?? null) === repo &&
+				(e.version ?? 0) === ctx.version &&
+				e.metadata != null &&
+				key in e.metadata,
+		)
+		.at(-1);
+	return last?.metadata?.[key] as T | undefined;
+}
+
 // ============================================================================
 // POLISH phase (per repo) — `kautopilot next --repo <repo>` (phase: polish).
 //
@@ -86,10 +109,15 @@ function epochDir(ctx: StepContext): string | null {
 	return join(wt, "spec", ticketId(ctx.meta), `v${ctx.version}`);
 }
 
-/** Absolute path to the master spec inside the worktree, or a stable placeholder. */
+/**
+ * Absolute path to the master spec inside the worktree, or a stable placeholder.
+ * seed writes the master spec as `task-spec.md` (execution.ts), and only when the
+ * org opts in via `commitSpec` — so this file may legitimately be absent; prompts
+ * must treat it as read-if-present.
+ */
 function specPathOf(ctx: StepContext): string {
 	const dir = epochDir(ctx);
-	return dir ? join(dir, "spec.md") : "(no spec — repo not seeded)";
+	return dir ? join(dir, "task-spec.md") : "(no spec — repo not seeded)";
 }
 
 /** Plan paths assigned to this repo inside the worktree (newline-joined), or placeholder. */
@@ -97,7 +125,8 @@ function planPathsOf(ctx: StepContext): string {
 	const dir = epochDir(ctx);
 	const plans = ctx.repo?.plans ?? [];
 	if (!dir || plans.length === 0) return "(no plans — repo not seeded)";
-	return plans.map((p) => join(dir, "plans", p)).join("\n");
+	// seed writes each plan into the worktree as `plans/<plan>.md` (execution.ts).
+	return plans.map((p) => join(dir, "plans", `${p}.md`)).join("\n");
 }
 
 /** Feedback doc path for this epoch inside the worktree. */
@@ -116,14 +145,19 @@ function polishVars(ctx: StepContext): Record<string, string | null> {
 	};
 }
 
-/** Run a synchronous git command, swallowing all errors (returns trimmed stdout or null). */
-function gitTry(args: string[], cwd: string): string | null {
+/**
+ * Run a synchronous git command, swallowing all errors (returns trimmed stdout or null).
+ * Pass `timeout` (ms) for network ops (fetch/pull) so a wedged remote can't block a code
+ * step holding the run-lock indefinitely.
+ */
+function gitTry(args: string[], cwd: string, timeout?: number): string | null {
 	try {
 		const proc = Bun.spawnSync({
 			cmd: ["git", ...args],
 			cwd,
 			stdout: "pipe",
 			stderr: "pipe",
+			timeout,
 		});
 		if (proc.exitCode !== 0) return null;
 		return proc.stdout.toString().trim();
@@ -131,6 +165,9 @@ function gitTry(args: string[], cwd: string): string | null {
 		return null;
 	}
 }
+
+/** Bound for network git ops in cleanup (fetch/pull) — keeps the run-lock from wedging. */
+const GIT_NET_TIMEOUT_MS = 120_000;
 
 // --- generic.commit mechanics (Appendix C) ----------------------------------
 
@@ -186,6 +223,10 @@ const prereviewClassify: StepDef = {
 		);
 		const prompt = [
 			"Run CodeRabbit over the pending changes and process its findings in two passes.",
+			"Use the `coderabbit` CLI in agent mode: `coderabbit review --agent` (emits " +
+				"structured findings for agents; add `--base <branch>` to scope to this branch's " +
+				"changes). `cr` is an alias. Run `coderabbit auth login` / `coderabbit doctor` " +
+				"first if it reports it isn't authenticated/ready.",
 			"",
 			"## Pass 1 — classify",
 			classify,
@@ -541,29 +582,68 @@ You have access to these files to understand the original intent and determine i
 - Plans: {plan_paths}
 Read these files. They define what was INTENDED. Compare against the feedback to determine if it's a genuine issue or a false positive.
 
-## How to Detect False Positives
-1. Read the spec — what was the stated requirement? Does the feedback conflict with the spec?
-2. Read the plan — what was the implementation approach? Does the feedback misunderstand the design?
-3. Check the code — verify the actual state matches the spec/plan
-4. Consider context — is the reviewer missing information? Are they applying a generic rule that doesn't fit?
-
-A false positive is when the feedback asks for something that:
+## Detecting false positives
+Compare each piece of feedback against the spec / plans / code. A false positive asks for something that:
 - Contradicts the spec (spec says X, reviewer wants Y)
-- Is already satisfied (reviewer missed it)
+- Is already satisfied (the reviewer missed it)
 - Is out of scope (reviewer scope creep)
-- Is stylistic preference vs. correctness issue
+- Is stylistic preference, not a correctness issue
+
+## Every thread ends RESOLVED or RAISED — never silently left open
+Pick a terminal state for EACH unresolved thread. Work through them in this order:
+1. **Outdated** — the code the comment points at has since changed (the thread is marked
+   \`isOutdated\`, or the referenced lines no longer exist): "resolve" with a one-line
+   "superseded by …" note. The comment no longer applies.
+2. **Genuine, fixable issue**: "code_fix" with fix instructions — the change is applied, then
+   the thread is replied to and resolved.
+3. **False positive**: "reply" explaining WHY you are not changing it. Do NOT resolve on this
+   pass — give them one cycle to counter.
+4. **Ghosted (bot reviewers only)** — for a BOT reviewer's thread (e.g. CodeRabbit) where the LAST
+   comment is your OWN reply and it is still open a cycle later (no counter came): "resolve" with a
+   brief closing note. This is how you stop re-fighting a settled bot thread — never loop on it.
+   NEVER ghost-resolve a HUMAN's thread this way — see 5.
+5. **Needs a human decision** — a product / scope / priority call, a genuinely ambiguous
+   requirement, a security or correctness trade-off you are unsure of, or ANY human reviewer's
+   change-request you replied to that they have not conceded: set "ambiguous" with a crisp
+   \`ambiguousReason\` (state the question AND your recommendation). The binary raises these to the
+   user — they are NEVER auto-resolved or guessed. Human threads OUTRANK rule 4: if a human is
+   waiting, raise it, don't ghost-resolve it.
+
+Your own prior replies end with the exact line "${BOT_SIGNATURE_MARKER}" — match on that literal to
+recognize them when judging "ghosted". A bot summary/overview comment and your own already-posted
+replies are not, on their own, actionable.
 
 ## Possible Actions
-- "reply": Post a reply explaining your position or acknowledging the feedback
-- "resolve": Resolve the thread (addressed, not actionable, or no longer relevant)
-- "code_fix": The feedback requires code changes — provide fix instructions
-- "ambiguous": You are unsure — mark it for the user rather than guessing
-
-Outdated/ghosted bot replies (OUTDATED_REPLY / GHOSTED_REPLY) are bot-signed.
+- "reply": post your reasoning or acknowledgement
+- "resolve": resolve the thread (fixed, N/A, outdated, or ghosted-after-pushback)
+- "code_fix": the feedback needs code changes — provide fix instructions
+- "ambiguous": needs the user — mark it (with reason); never guess
 
 ## Output Format
-For each feedback unit return a JSON object:
-{ "verdict": "reply"|"resolve"|"code_fix", "reply": "string", "codeFix": "string", "resolveThread": bool, "reactThumbsUp": bool, "ambiguous": bool, "ambiguousReason": "string" }`;
+Complete with metadata containing an **\`actions\`** array — ONE entry per thread you acted
+on — plus rollup counts. The binary (\`act\`) applies these deterministically, so you MUST
+echo the thread/comment ids EXACTLY as given in the feedback list above; without them your
+replies and resolves cannot be posted to GitHub.
+
+{
+  "actions": [
+    {
+      "kind": "reply" | "resolve" | "code_fix" | "ambiguous",
+      "threadId": "<review-thread id — REQUIRED for kind=resolve>",
+      "commentId": <inline review-comment id — for a threaded reply / 👍 reaction>,
+      "body": "<reply or comment text; omit for pure code_fix/ambiguous>",
+      "reactThumbsUp": false,
+      "prLevel": false,
+      "inReplyTo": <issue-comment id — only when prLevel>,
+      "codeFix": "<fix instructions — for kind=code_fix>",
+      "ambiguousReason": "<the question + your recommendation — for kind=ambiguous>"
+    }
+  ],
+  "replies": <number of kind=reply>,
+  "resolves": <number of kind=resolve>,
+  "codeFixes": <number of kind=code_fix>,
+  "ambiguous": <number of kind=ambiguous>
+}`;
 
 const evalStep: StepDef = {
 	name: "eval",
@@ -888,6 +968,32 @@ const writeFix: StepDef = {
 	},
 };
 
+// --- commit_fix (agent) — commit the applied fixes; kloop NEVER commits -------
+// Without this, write_fix → run_fix leaves the fixes as uncommitted working-tree
+// changes and `push` publishes nothing (the thread re-appears unaddressed). Mirrors
+// the execution phase's `completed → commit → next_plan`.
+const commitFix: StepDef = {
+	name: "commit_fix",
+	phase: "polish",
+	kind: "agent",
+	scope: "repo",
+	prepare: async (ctx) => {
+		const vars = { ...polishVars(ctx), context: COMMIT_CONTEXT_EMPTY };
+		const prompt = getAgentPrompt("generic", "commit", {
+			context: COMMIT_CONTEXT_EMPTY,
+		});
+		return {
+			prompt,
+			vars,
+			contract: {
+				completionEvent: "commit_fix:completed",
+				completionMetadataSchema: { commitSha: "string?", skipped: "boolean?" },
+			},
+		} satisfies PreparedStep;
+	},
+	finalize: async () => "verify_fixes",
+};
+
 // --- run_fix (code = kloop fix run; kloop NEVER commits) ----------------------
 
 const runFix: StepDef = {
@@ -897,20 +1003,18 @@ const runFix: StepDef = {
 	scope: "repo",
 	run: async (ctx) => {
 		// `run_fix` is a `code` step and gets no metadata — the kloop fix run id was
-		// persisted to the WAL by `write_fix.finalize` (M1). Read it back.
-		const runId = lastEventMetadata(
-			ctx.sessionId,
-			"context:updated",
-			repoOf(ctx).repo,
-			ctx.version,
-		)?.kloopRunId as string | undefined;
+		// persisted to the WAL by `write_fix.finalize` (M1). Read it back, key-filtered
+		// so a later `context:updated` event that lacks `kloopRunId` can't shadow it.
+		const runId = readRepoStateValue<string>(ctx, "kloopRunId");
 		if (!runId) {
-			// No kloop run to drive (test sandbox) — treat as completed and re-verify.
+			// No kloop run to drive (test sandbox) — nothing was applied, so nothing to
+			// commit; re-verify directly.
 			return "verify_fixes";
 		}
 		try {
 			const result = await devloopRun(runId);
-			if (result.status === "completed") return "verify_fixes";
+			// kloop applied code but NEVER commits — commit before verify/push.
+			if (result.status === "completed") return "commit_fix";
 			if (result.status === "conflict" || result.status === "max_iterations") {
 				// Hand to the interactive resolver as a run-fix failure. (M3)
 				recordRepoState(ctx, { ttyReason: "run_fix_failure" });
@@ -918,7 +1022,8 @@ const runFix: StepDef = {
 			}
 			return "failed";
 		} catch {
-			return "verify_fixes";
+			// May have partially applied changes — commit (skips cleanly if none).
+			return "commit_fix";
 		}
 	},
 };
@@ -938,16 +1043,12 @@ const verifyFixes: StepDef = {
 
 		try {
 			// `verify_fixes` is a code step (no metadata) — read the expected non-code
-			// resolve count `act` persisted to the WAL (M2). Re-pull the thread list and
-			// confirm those fixes actually landed (threads resolved) before we push. The
-			// binary never trusts an "I applied it" report.
+			// resolve count `act` persisted to the WAL (M2). Key-filtered: a later
+			// `context:updated` (e.g. write_fix's `{kloopRunId}`) must NOT shadow `act`'s
+			// `{expectedResolves}`, or the gate silently sees 0 and pushes on faith.
+			// Re-pull the thread list and confirm those fixes actually landed before push.
 			const expected = Number(
-				lastEventMetadata(
-					ctx.sessionId,
-					"context:updated",
-					repo.repo,
-					ctx.version,
-				)?.expectedResolves ?? 0,
+				readRepoStateValue<number>(ctx, "expectedResolves") ?? 0,
 			);
 			const threads = await ghReviewThreads(repo.prNumber, wt).catch(
 				() => null,
@@ -985,7 +1086,8 @@ const feedbackCheck: StepDef = {
 			"- feedback: there is something to improve; we re-enter the plan phase next epoch.",
 			"",
 			"If you choose 'done', also tell me whether the PR has been FULLY MERGED yet — " +
-				"the controller only tears down worktrees once you confirm a merge.",
+				"only on a confirmed merge does wrap-up run: move the ticket to done, tear " +
+				"down the worktrees, and pull the merged work into each repo's base branch.",
 			"",
 			SHARED_APPROVAL_GATE,
 		].join("\n");
@@ -1006,7 +1108,14 @@ const feedbackCheck: StepDef = {
 		if (choice === "feedback") return "feedback";
 		// choice === 'done'
 		const fullyMerged = ctx.metadata?.fullyMerged === true;
-		return fullyMerged ? "cleanup" : null; // session complete; worktrees kept.
+		if (!fullyMerged) return null; // done now; keep worktrees so the user can still merge
+		// Merged: move a REAL ticket to done first, then tear down + pull base. An ad-hoc
+		// session (ticketSystem "none", or a synthetic `local-…` id) has nothing to
+		// transition → straight to cleanup.
+		const id = ctx.meta.ticketId;
+		const hasRealTicket =
+			ctx.meta.ticketSystem !== "none" && !!id && !id.startsWith("local-");
+		return hasRealTicket ? "close_ticket" : "cleanup";
 	},
 };
 
@@ -1021,8 +1130,10 @@ Distill the user's feedback into candidate RULES, reasoning about scope:
 - task-specific vs repo-specific?
 - a rule for WRITING CODE, or for THINKING about big-picture solutions?
 Suggest a few candidate rules. Confirm with AskUserQuestion (show a rules.md diff).
-The controller appends confirmed rules to each involved repo's rules.md and links it from
-CLAUDE.md / AGENTS.md. Curated, deduped, terse — nothing added unconfirmed.
+Curated, deduped, terse — nothing added unconfirmed.
+**You MUST pass the confirmed rules back as completion metadata \`{ "rules": ["…", …] }\`** —
+the binary appends them to each involved repo's rules.md (linked from CLAUDE.md / AGENTS.md)
+ONLY from that metadata. If you omit it, no rule is recorded and this step is a no-op.
 
 ### Previous revision diff (if any)
 {lastDiff}`;
@@ -1048,7 +1159,11 @@ const feedback: StepDef = {
 				.join(", ") || "(no PR)";
 		const vars: Record<string, string | null> = {
 			feedback_doc: path,
-			task_spec_path: join(epochDir, "spec"),
+			// The latest spec revision FILE (not the spec/ dir) so the prompt's "read
+			// the spec" points at a readable file.
+			task_spec_path: currentRevisionPath(ctx.sessionId, "spec", {
+				epoch: ctx.version,
+			}).path,
 			plans_dir: join(epochDir, "plans"),
 			pr_url: prUrls,
 			checks_status: "(ready to merge)",
@@ -1107,6 +1222,43 @@ const feedback: StepDef = {
 	},
 };
 
+// --- close_ticket (agent) ---------------------------------------------------
+
+const CLOSE_TICKET_MECHANICS = `All PRs for this task are merged. Move ticket {ticketId} to a DONE/closed status in {ticketSystem}.
+
+- jira → use \`acli\` to transition the issue to its terminal Done status.
+- clickup → use the \`cup\` CLI to set the task's status to its done/closed status.
+
+Statuses are project-specific — inspect the available statuses and pick the correct
+terminal one (Done / Closed / Complete). Verify the ticket reads as done afterward. If you
+CAN'T transition it (missing permission, unknown status, CLI unavailable), report why and
+continue — do NOT block; the session is finishing regardless.
+
+Output metadata { "ticketClosed": <true|false> }.`;
+
+const closeTicket: StepDef = {
+	name: "close_ticket",
+	phase: "feedback",
+	// agent: a CLI transition (acli/cup), no user interaction — runs as a sub-agent.
+	kind: "agent",
+	scope: "session",
+	prepare: async (ctx) => {
+		const vars = {
+			ticketId: ctx.meta.ticketId,
+			ticketSystem: ctx.meta.ticketSystem,
+		};
+		return {
+			prompt: substitute(CLOSE_TICKET_MECHANICS, vars),
+			vars,
+			contract: {
+				completionEvent: "close_ticket:completed",
+				completionMetadataSchema: { ticketClosed: "boolean?" },
+			},
+		} satisfies PreparedStep;
+	},
+	finalize: async () => "cleanup",
+};
+
 // --- cleanup (code) ---------------------------------------------------------
 
 const cleanup: StepDef = {
@@ -1115,24 +1267,37 @@ const cleanup: StepDef = {
 	kind: "code",
 	scope: "session",
 	run: async (ctx) => {
-		// Remove this session's worktrunk worktrees (best-effort). The binary never
-		// merges — it only tears down worktrees the user already merged.
+		// Reached only once the user confirms every PR is merged. The binary never
+		// merges — it just tears down the worktrees the user already merged, then brings
+		// each repo's primary checkout back to base and pulls the now-merged work.
+		const base = ctx.meta.baseBranch;
+		const syncedMain = new Set<string>();
 		for (const r of ctx.meta.repos) {
 			const wt = r.worktree;
-			if (!wt) continue;
-			try {
-				// Detach the git worktree registration from its repo, then drop the dir.
-				if (r.repoPath)
-					gitTry(["worktree", "remove", "--force", wt], r.repoPath);
-				if (existsSync(wt)) {
-					// Only remove a directory that still looks like a worktree.
-					const entries = readdirSync(wt);
-					if (entries.length === 0 || entries.includes(".git")) {
-						rmSync(wt, { recursive: true, force: true });
+			if (wt) {
+				try {
+					// Detach the worktrunk worktree from its repo, then drop the dir.
+					if (r.repoPath)
+						gitTry(["worktree", "remove", "--force", wt], r.repoPath);
+					if (existsSync(wt)) {
+						// Only remove a directory that still looks like a worktree.
+						const entries = readdirSync(wt);
+						if (entries.length === 0 || entries.includes(".git")) {
+							rmSync(wt, { recursive: true, force: true });
+						}
 					}
+				} catch {
+					// best-effort teardown.
 				}
-			} catch {
-				// best-effort teardown.
+			}
+			// Update the repo's main: switch the primary checkout to base and pull the
+			// merged work (so local <base> is current). Best-effort, once per repo path,
+			// and ff-only so cleanup never creates a merge commit. The pull is
+			// network-bounded so it can't wedge the run-lock.
+			if (r.repoPath && !syncedMain.has(r.repoPath)) {
+				syncedMain.add(r.repoPath);
+				gitTry(["checkout", base], r.repoPath);
+				gitTry(["pull", "--ff-only"], r.repoPath, GIT_NET_TIMEOUT_MS);
 			}
 		}
 		return null; // session done.
@@ -1172,10 +1337,12 @@ export const POLISH_STEPS: StepDef[] = [
 	act,
 	ttyResolve,
 	writeFix,
+	commitFix,
 	runFix,
 	verifyFixes,
 	repoReady,
 	feedbackCheck,
 	feedback,
+	closeTicket,
 	cleanup,
 ];

@@ -22,10 +22,8 @@ export interface CreateSessionInput {
 	/** The raw free-form request when there's no ticket id (ad-hoc flow). */
 	request?: string;
 	org: Org;
-	repoPath: string;
-	worktree: string;
-	gitRoot?: string;
-	gitRootHost?: string;
+	/** The folder this session is associated with (where `kautopilot start` ran). */
+	folder: string;
 	runMode?: RunMode;
 	execMode?: ExecMode;
 	maxParallelRepos?: number;
@@ -46,12 +44,8 @@ export function createSession(input: CreateSessionInput): SessionMeta {
 	const now = new Date().toISOString();
 	upsertSession({
 		id: sessionId,
-		repo_path: input.repoPath,
-		worktree: input.worktree,
-		git_root: input.gitRoot ?? input.repoPath,
-		git_root_host: input.gitRootHost ?? input.repoPath,
+		folder: input.folder,
 		ticket_id: input.ticketId,
-		branch: null,
 		local: input.ticketId ? 0 : 1,
 		state: "running",
 		created_at: now,
@@ -60,8 +54,7 @@ export function createSession(input: CreateSessionInput): SessionMeta {
 
 	const meta: SessionMeta = {
 		sessionId,
-		worktree: input.worktree,
-		repoPath: input.repoPath,
+		folder: input.folder,
 		ticketId: input.ticketId ?? "",
 		// Persist the raw request only for the ad-hoc (no-ticket) flow.
 		...(input.request ? { request: input.request } : {}),

@@ -70,6 +70,64 @@ describe("ps --tag matching (matchesTags)", () => {
 	});
 });
 
+describe("psDisplayFields derives org/repo/branch from session.json meta", () => {
+	const { psDisplayFields } = require("../ps") as typeof import("../ps");
+	type SessionMeta = import("../../core/session-meta").SessionMeta;
+
+	const repoEntry = (repo: string, branch: string | null) =>
+		({
+			repo,
+			repoPath: null,
+			worktree: null,
+			branch,
+			plans: [],
+			dependsOn: [],
+			prNumber: null,
+			prUrl: null,
+			status: "pending" as const,
+		}) as unknown as SessionMeta["repos"][number];
+
+	const metaWith = (org: string, repos: SessionMeta["repos"]): SessionMeta =>
+		({ org, repos }) as unknown as SessionMeta;
+
+	it("prefers meta.org over the unparseable filesystem git_root_host", () => {
+		const meta = metaWith("liftoff", [
+			repoEntry("portal", "kirinnee/PE-1234-dark-mode"),
+		]);
+		const f = psDisplayFields(meta, "/Users/me/code/portal");
+		expect(f.org).toBe("liftoff");
+		expect(f.repo).toBe("portal");
+		// branch comes from the per-repo registry, NOT the always-null DB column.
+		expect(f.branch).toBe("kirinnee/PE-1234-dark-mode");
+	});
+
+	it("joins multiple repo names and finds the shared branch on any repo", () => {
+		const meta = metaWith("atomicloud", [
+			repoEntry("api", null),
+			repoEntry("infra", "kirinnee/CU-9-multi"),
+		]);
+		const f = psDisplayFields(meta, "/tmp/hub");
+		expect(f.repo).toBe("api,infra");
+		expect(f.branch).toBe("kirinnee/CU-9-multi");
+	});
+
+	it("falls back to em-dash for a meta with no repos and an unparseable host", () => {
+		const meta = metaWith("atomicloud", []);
+		const f = psDisplayFields(meta, "/tmp/hub");
+		expect(f.org).toBe("atomicloud");
+		expect(f.repo).toBe("—");
+		expect(f.branch).toBe("—");
+	});
+
+	it("falls back to the parsed folder for org/repo when there is no meta", () => {
+		const f = psDisplayFields(null, "github-com/acme/portal");
+		expect(f.org).toBe("acme");
+		expect(f.repo).toBe("portal");
+		// No meta → no per-repo branch; branch is em-dash (there is no DB branch).
+		expect(f.branch).toBe("—");
+	});
+});
+
 describe("createSession persists lpsm + tags; ps tag filtering end-to-end", () => {
 	let tempDir: string;
 
@@ -92,15 +150,13 @@ describe("createSession persists lpsm + tags; ps tag filtering end-to-end", () =
 		const withLpsm = createSession({
 			ticketId: "cu-abc123",
 			org: "atomicloud",
-			repoPath: "/tmp/repo",
-			worktree: "/tmp/repo",
+			folder: "/tmp/repo",
 			lpsm: { platform: "nitrite", service: "neon" },
 		});
 		const withoutLpsm = createSession({
 			ticketId: "PE-1234",
 			org: "liftoff",
-			repoPath: "/tmp/repo2",
-			worktree: "/tmp/repo2",
+			folder: "/tmp/repo2",
 		});
 
 		expect(readSessionMeta(withLpsm.sessionId)?.lpsm).toEqual({
@@ -119,16 +175,14 @@ describe("createSession persists lpsm + tags; ps tag filtering end-to-end", () =
 		const tagged = createSession({
 			ticketId: "cu-tag001",
 			org: "atomicloud",
-			repoPath: "/tmp/tagged",
-			worktree: "/tmp/tagged",
+			folder: "/tmp/tagged",
 			lpsm: { platform: "nitrite" },
 			tags: ["urgent", "spike"],
 		});
 		const empty = createSession({
 			ticketId: "cu-empty1",
 			org: "atomicloud",
-			repoPath: "/tmp/empty",
-			worktree: "/tmp/empty",
+			folder: "/tmp/empty",
 			tags: [],
 		});
 
@@ -149,22 +203,19 @@ describe("createSession persists lpsm + tags; ps tag filtering end-to-end", () =
 		const neon = createSession({
 			ticketId: "cu-neon01",
 			org: "atomicloud",
-			repoPath: "/tmp/a",
-			worktree: "/tmp/a",
+			folder: "/tmp/a",
 			lpsm: { platform: "nitrite", service: "neon" },
 		});
 		const carbon = createSession({
 			ticketId: "cu-carb01",
 			org: "atomicloud",
-			repoPath: "/tmp/b",
-			worktree: "/tmp/b",
+			folder: "/tmp/b",
 			lpsm: { platform: "nitrite", service: "carbon" },
 		});
 		const free = createSession({
 			ticketId: "cu-free01",
 			org: "atomicloud",
-			repoPath: "/tmp/c",
-			worktree: "/tmp/c",
+			folder: "/tmp/c",
 			lpsm: { platform: "nitrite" },
 			tags: ["urgent", "spike"],
 		});

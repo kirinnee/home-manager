@@ -29,7 +29,14 @@ async function runHttpServer({
 }): Promise<never> {
 	let server: ReturnType<typeof Bun.serve>;
 	try {
-		server = Bun.serve({ port, hostname: host, fetch: handleRequest });
+		// idleTimeout must exceed the SSE heartbeat (15s) — Bun's default 10s
+		// otherwise kills the live-reload stream and slow requests. Max is 255s.
+		server = Bun.serve({
+			port,
+			hostname: host,
+			fetch: handleRequest,
+			idleTimeout: 240,
+		});
 	} catch (err) {
 		// The most common bootstrap failure is the port already being in use.
 		const code = (err as NodeJS.ErrnoException).code;

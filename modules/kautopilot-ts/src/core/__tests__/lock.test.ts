@@ -74,6 +74,64 @@ describe("lock", () => {
 		expect(existsSync(join(lockDir, "lock.pid"))).toBe(false);
 	});
 
+	it("a legacy one-line lock with a live PID stays held (PID-only staleness)", () => {
+		const { writeFileSync, mkdirSync } = require("node:fs");
+		const lockDir = join(tempDir, ".kautopilot/legacy");
+		mkdirSync(lockDir, { recursive: true });
+		// Old format: just the PID, no heartbeat line. Owned by this (alive) process.
+		writeFileSync(join(lockDir, "lock.pid"), String(process.pid));
+
+		const { checkLock } = require("../lock") as typeof import("../lock");
+		const info = checkLock("legacy");
+		expect(info.locked).toBe(true); // no heartbeat → judged by PID liveness only
+		expect(info.pid).toBe(process.pid);
+		expect(existsSync(join(lockDir, "lock.pid"))).toBe(true);
+	});
+
+	it("acquireLock writes the two-line pid+heartbeat format", () => {
+		const { acquireLock, releaseLock } =
+			require("../lock") as typeof import("../lock");
+		const { readFileSync } = require("node:fs");
+		acquireLock("hb");
+		const [pidLine, hbLine] = readFileSync(
+			join(tempDir, ".kautopilot/hb/lock.pid"),
+			"utf-8",
+		).split("\n");
+		expect(Number(pidLine)).toBe(process.pid);
+		expect(Number.isFinite(Number(hbLine))).toBe(true);
+		releaseLock("hb");
+	});
+
+	it("a live lock with an expired heartbeat is reclaimed (TTL backstop)", () => {
+		const { writeFileSync, mkdirSync } = require("node:fs");
+		const lockDir = join(tempDir, ".kautopilot/wedged");
+		mkdirSync(lockDir, { recursive: true });
+		// Owned by THIS (alive) process, but the heartbeat is an hour old > 30min TTL.
+		const stale = Date.now() - 60 * 60 * 1000;
+		writeFileSync(join(lockDir, "lock.pid"), `${process.pid}\n${stale}`);
+
+		const { checkLock } = require("../lock") as typeof import("../lock");
+		const info = checkLock("wedged");
+		expect(info.locked).toBe(false); // reclaimed despite the PID being alive
+		expect(existsSync(join(lockDir, "lock.pid"))).toBe(false);
+	});
+
+	it("touchLock refreshes the heartbeat so the lock stays held", () => {
+		const { writeFileSync, mkdirSync } = require("node:fs");
+		const lockDir = join(tempDir, ".kautopilot/beat");
+		mkdirSync(lockDir, { recursive: true });
+		const stale = Date.now() - 60 * 60 * 1000;
+		writeFileSync(join(lockDir, "lock.pid"), `${process.pid}\n${stale}`);
+
+		const { touchLock, checkLock, releaseLock } =
+			require("../lock") as typeof import("../lock");
+		touchLock("beat"); // we own it → heartbeat refreshed to now
+		const info = checkLock("beat");
+		expect(info.locked).toBe(true);
+		expect(info.alive).toBe(true);
+		releaseLock("beat");
+	});
+
 	it("listLockKeys returns the session key plus every repo scope key", () => {
 		const { acquireLock, listLockKeys, scopeLockKey, releaseLock } =
 			require("../lock") as typeof import("../lock");

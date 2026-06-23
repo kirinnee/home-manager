@@ -67,10 +67,13 @@ export interface RepoEntry {
 
 export interface SessionMeta {
 	sessionId: string;
-	/** The primary worktree where `start` ran (the single repo's worktree in Phase 1). */
-	worktree: string;
-	/** Git root of the primary repo — the default base for `wt` worktree provisioning. */
-	repoPath: string;
+	/**
+	 * The folder this session is associated with — the directory `kautopilot start`
+	 * ran in. A session is NOT tied to any git repo or worktree: the repos it touches
+	 * are decided by triage (`repos[]`), and each repo owns its own worktree. This is
+	 * purely the bookkeeping location used to find a session again (`ps`/`continue`).
+	 */
+	folder: string;
 	ticketId: string;
 	/** The raw free-form request (ad-hoc, no ticket id). Drives brainstorm/create_ticket. */
 	request?: string;

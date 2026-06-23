@@ -46,20 +46,35 @@ export function latestPlanFiles(
 
 /**
  * Parse plan filename into { ordinal, rewrite } or null if not a valid plan file.
- * Supports both conventions:
- *   plan-1-1.md → ordinal=1, rewrite=1  (spec convention)
- *   plan-1.md   → ordinal=1, rewrite=1  (legacy flat convention)
+ * Supports three conventions — all keyed by a leading numeric ordinal:
+ *   plan-1-1.md          → ordinal=1, rewrite=1  (spec convention: ordinal-rewrite)
+ *   plan-1.md            → ordinal=1, rewrite=1  (legacy flat convention)
+ *   plan-1-foundation.md → ordinal=1, rewrite=1  (descriptive: author-chosen slug)
+ *
+ * The descriptive form matters for the seed→running round-trip: `write_plans` lets the
+ * author name a plan folder descriptively (e.g. `plan-1-foundation/`), and `seed` copies
+ * it into the worktree as `plan-1-foundation.md`. Without descriptive parsing this file
+ * was silently dropped here, so `running` fell back to a reconstructed `plan-1.md` that
+ * was never written and `kloop init --spec …/plan-1.md` failed. The ordinal embedded in
+ * the name is the single source of truth, so resolution stays correct for ≥10 plans (we
+ * sort by the parsed numeric ordinal, not the filename).
  */
 function parsePlanFilename(
 	filename: string,
 ): { ordinal: number; rewrite: number } | null {
-	// Spec convention: plan-{ordinal}-{rewrite}.md
+	// Spec convention: plan-{ordinal}-{rewrite}.md — both segments numeric.
 	const suffixed = filename.match(/^plan-(\d+)-(\d+)\.md$/);
 	if (suffixed) {
 		return {
 			ordinal: parseInt(suffixed[1], 10),
 			rewrite: parseInt(suffixed[2], 10),
 		};
+	}
+	// Descriptive: plan-{ordinal}-{slug}.md — slug is any non-numeric-only suffix (a
+	// numeric-only suffix is the rewrite form handled above). Treated as rewrite 1.
+	const descriptive = filename.match(/^plan-(\d+)-.+\.md$/);
+	if (descriptive) {
+		return { ordinal: parseInt(descriptive[1], 10), rewrite: 1 };
 	}
 	// Legacy: plan-{ordinal}.md (treated as rewrite 1)
 	const flat = filename.match(/^plan-(\d+)\.md$/);

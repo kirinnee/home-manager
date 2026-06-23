@@ -1,5 +1,6 @@
 import pc from 'picocolors';
 import { format } from 'date-fns';
+import type { ReviewTypeEntry } from '../types';
 
 // ============================================================================
 // Formatting helpers for run loop output
@@ -67,16 +68,19 @@ export function formatAgeHuman(date: Date): string {
 
 export function formatHeader(
   runId: string,
-  config: { implementers?: Record<string, number>; reviewPhases?: string[][] },
+  config: { implementers?: Record<string, number>; reviewPhases?: ReviewTypeEntry[][]; reviewLenses?: string[] },
   workspace: string,
 ): void {
   const implBinary = config.implementers ? Object.keys(config.implementers)[0] : 'claude';
-  const totalReviewers = config.reviewPhases?.reduce((sum: number, phase: string[]) => sum + phase.length, 0) ?? 0;
+  const numTypes = config.reviewPhases?.reduce((sum: number, phase) => sum + phase.length, 0) ?? 0;
+  const numLenses = config.reviewLenses?.length ?? 1;
+  const totalReviews = numTypes * numLenses;
   const phaseInfo = (config.reviewPhases?.length ?? 0) > 1 ? ` in ${config.reviewPhases!.length} phases` : '';
+  const lensInfo = numLenses > 1 ? ` (${numTypes} types × ${numLenses} lenses)` : '';
 
   console.log('');
   console.log(`  ${pc.bold(pc.cyan(`kloop ${runId}`))}  ${pc.green('●')}  ${pc.green('running')}`);
-  console.log(pc.dim(`  implementer: ${implBinary}  │  ${totalReviewers} reviewers${phaseInfo}`));
+  console.log(pc.dim(`  implementer: ${implBinary}  │  ${totalReviews} reviews${lensInfo}${phaseInfo}`));
   console.log(pc.dim(`  workspace: ${workspace}`));
   console.log('');
 }

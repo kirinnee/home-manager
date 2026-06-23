@@ -9,6 +9,7 @@ import { existsSync } from 'node:fs';
 import { ok } from './exec';
 import {
   proxyAuth,
+  proxyCapture,
   proxyDown,
   proxyEdit,
   proxyImport,
@@ -97,6 +98,12 @@ proxy
   .argument('[config.yaml]')
   .description('split a live config.yaml into skeleton + sops fragment')
   .action((src?: string) => proxyImport(src));
+proxy
+  .command('capture')
+  .description('fold live control-panel edits back into the skeleton + sops fragment')
+  .action(async () => {
+    await proxyCapture();
+  });
 proxy.command('edit').description('sops-edit the secret fragment').action(proxyEdit);
 
 const tunnel = program.command('tunnel').description('manage the Cloudflare Tunnel');

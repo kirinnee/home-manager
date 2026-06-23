@@ -94,4 +94,58 @@ describe("plan file resolution (spec section 5.3)", () => {
 		// plan-1-2.md has rewrite=2 which is higher than plan-1.md (rewrite=1)
 		expect(plans[0]).toEndWith("plan-1-2.md");
 	});
+
+	// --- BUG 1 regression: descriptive plan folder names (author-chosen) ---------
+	// `write_plans` lets the author name a plan folder `plan-1-foundation/`, which
+	// `seed` copies into the worktree as `plan-1-foundation.md`. These used to be
+	// dropped here (matched neither the `plan-N-N` nor `plan-N` regex), so `running`
+	// resolved a reconstructed `plan-1.md` that was never written → kloop init failed.
+	it("descriptive plan names resolve by their leading ordinal", () => {
+		const { resolveActivePlans } = require("../shared");
+		writeFileSync(join(tempDir, "plan-1-foundation.md"), "# Foundation");
+		writeFileSync(join(tempDir, "plan-2-formatting.md"), "# Formatting");
+		writeFileSync(join(tempDir, "plan-3-translation.md"), "# Translation");
+
+		const plans = resolveActivePlans(tempDir);
+		expect(plans).toHaveLength(3);
+		expect(plans[0]).toEndWith("plan-1-foundation.md");
+		expect(plans[1]).toEndWith("plan-2-formatting.md");
+		expect(plans[2]).toEndWith("plan-3-translation.md");
+	});
+
+	it("descriptive names sort by NUMERIC ordinal, not lexically (>= 10 plans)", () => {
+		const { resolveActivePlans } = require("../shared");
+		writeFileSync(join(tempDir, "plan-2-b.md"), "# 2");
+		writeFileSync(join(tempDir, "plan-10-j.md"), "# 10");
+		writeFileSync(join(tempDir, "plan-1-a.md"), "# 1");
+
+		const plans = resolveActivePlans(tempDir);
+		expect(plans).toHaveLength(3);
+		expect(plans[0]).toEndWith("plan-1-a.md");
+		expect(plans[1]).toEndWith("plan-2-b.md");
+		expect(plans[2]).toEndWith("plan-10-j.md"); // not before plan-2 (lexical would)
+	});
+
+	it("a numeric second segment is still the rewrite, not a descriptive slug", () => {
+		const { resolveActivePlans } = require("../shared");
+		// plan-1-foundation (rewrite 1, descriptive) vs plan-1-2 (rewrite 2) — the
+		// numeric-rewrite form wins for the same ordinal.
+		writeFileSync(join(tempDir, "plan-1-foundation.md"), "# desc r1");
+		writeFileSync(join(tempDir, "plan-1-2.md"), "# rewrite 2");
+
+		const plans = resolveActivePlans(tempDir);
+		expect(plans).toHaveLength(1);
+		expect(plans[0]).toEndWith("plan-1-2.md");
+	});
+
+	it("non-plan files are ignored", () => {
+		const { resolveActivePlans } = require("../shared");
+		writeFileSync(join(tempDir, "plan-1-foundation.md"), "# Foundation");
+		writeFileSync(join(tempDir, "resolution.md"), "# not a plan");
+		writeFileSync(join(tempDir, "README.md"), "# nope");
+
+		const plans = resolveActivePlans(tempDir);
+		expect(plans).toHaveLength(1);
+		expect(plans[0]).toEndWith("plan-1-foundation.md");
+	});
 });

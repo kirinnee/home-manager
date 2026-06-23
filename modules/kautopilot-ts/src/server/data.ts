@@ -1,11 +1,15 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { sessionDir } from "../core/artifacts";
 import {
 	type ArtifactKind,
+	htmlRevisionExists,
 	listPlanSetVersions,
 	listRevisions,
 	listRevisionsWithEpoch,
+	readHtmlRevision,
+	readPlanHtml,
+	readPlanList,
 	readPlanSet,
 	readRevision,
 } from "../core/revisions";
@@ -152,11 +156,15 @@ export interface SessionDetail {
 	state: string;
 	artifacts: {
 		ticket: boolean;
+		/** ticket-draft.md (ad-hoc sessions that brainstormed before a ticket). */
+		ticketDraft: boolean;
 		brainstorm: RevisionInfo[];
 		triage: RevisionInfo[];
 		spec: RevisionInfo[];
 		feedback: RevisionInfo[];
 		plans: Record<string, RevisionInfo[]>;
+		/** Kloop run ids spawned by this session's execution (newest first). */
+		kloopRuns: string[];
 	};
 }
 
@@ -171,17 +179,28 @@ export function getSessionDetail(id: string): SessionDetail | null {
 	for (const repo of planRepos(id, epoch)) {
 		plans[repo] = planRevisions(id, repo, epoch);
 	}
+	// Flatten the per-plan kloop run history into a deduped, newest-first list so
+	// the session page can link straight to the kloop run viewer.
+	const kloopRuns: string[] = [];
+	for (const list of Object.values(status.planRuns ?? {})) {
+		for (const runId of list) {
+			if (runId && !kloopRuns.includes(runId)) kloopRuns.push(runId);
+		}
+	}
+	kloopRuns.reverse();
 	return {
 		meta,
 		phase: status.phase,
 		state: status.state,
 		artifacts: {
 			ticket: existsSync(join(sessionDir(id), "ticket.md")),
+			ticketDraft: existsSync(join(sessionDir(id), "ticket-draft.md")),
 			brainstorm: brainstormRevisions(id),
 			triage: listRevisionsWithEpoch(id, "triage", { epoch }),
 			spec: listRevisionsWithEpoch(id, "spec", { epoch }),
 			feedback: listRevisionsWithEpoch(id, "feedback", { epoch }),
 			plans,
+			kloopRuns,
 		},
 	};
 }
@@ -191,18 +210,26 @@ export interface DocView {
 	version: number | null;
 	/** Each available version tagged with its approval epoch (for grouping). */
 	versions: RevisionInfo[];
+	/**
+	 * For plans: each plan individually, so the viewer can tab between them. Each
+	 * carries its own `htmlAvailable` — plans get one infographic PER plan, not merged.
+	 */
+	plans?: { name: string; markdown: string; htmlAvailable: boolean }[];
+	/** Whether a sibling HTML infographic (vN.html) exists (single-file artifacts). */
+	htmlAvailable?: boolean;
 }
 
 /** Read the ticket (unversioned) or a versioned doc artifact. */
 export function getDoc(
 	id: string,
-	kind: "ticket" | ArtifactKind,
+	kind: "ticket" | "ticket-draft" | ArtifactKind,
 	version?: number,
 ): DocView | null {
 	const meta = readSessionMeta(id);
 	if (meta == null) return null;
-	if (kind === "ticket") {
-		const p = join(sessionDir(id), "ticket.md");
+	if (kind === "ticket" || kind === "ticket-draft") {
+		const file = kind === "ticket" ? "ticket.md" : "ticket-draft.md";
+		const p = join(sessionDir(id), file);
 		const markdown = existsSync(p) ? readFileSync(p, "utf-8") : "";
 		return { markdown, version: null, versions: [] };
 	}
@@ -216,7 +243,32 @@ export function getDoc(
 	const v = version ?? versions[versions.length - 1].version;
 	if (!versions.some((r) => r.version === v)) return null;
 	const ref = kind === "brainstorm" ? {} : { epoch };
-	return { markdown: readRevision(id, kind, v, ref), version: v, versions };
+	return {
+		markdown: readRevision(id, kind, v, ref),
+		version: v,
+		versions,
+		htmlAvailable: htmlRevisionExists(id, kind, v, ref),
+	};
+}
+
+/** Raw HTML infographic for a doc artifact version (vN.html), or null. */
+export function getHtmlDoc(
+	id: string,
+	kind: ArtifactKind,
+	version?: number,
+): string | null {
+	const meta = readSessionMeta(id);
+	if (meta == null) return null;
+	const epoch = meta.epoch;
+	const versions =
+		kind === "brainstorm"
+			? brainstormRevisions(id)
+			: listRevisionsWithEpoch(id, kind, { epoch });
+	if (versions.length === 0) return null;
+	const v = version ?? versions[versions.length - 1].version;
+	if (!versions.some((r) => r.version === v)) return null;
+	const ref = kind === "brainstorm" ? {} : { epoch };
+	return readHtmlRevision(id, kind, v, ref);
 }
 
 /** Read a repo's plan set, latest or a specific plan-set version (current epoch). */
@@ -237,7 +289,28 @@ export function getPlan(
 		markdown: readPlanSet(id, epoch, repo, v),
 		version: v,
 		versions,
+		plans: readPlanList(id, epoch, repo, v),
 	};
+}
+
+/**
+ * Raw HTML infographic for a SINGLE plan (repo + plan + version). Resolves the
+ * version exactly like getPlan, then reads that plan's `<plan>/vN.html`.
+ */
+export function getPlanHtml(
+	id: string,
+	repo: string,
+	plan: string,
+	version?: number,
+): string | null {
+	const meta = readSessionMeta(id);
+	if (meta == null) return null;
+	const epoch = meta.epoch;
+	const versions = planRevisions(id, repo, epoch);
+	if (versions.length === 0) return null;
+	const v = version ?? versions[versions.length - 1].version;
+	if (!versions.some((r) => r.version === v)) return null;
+	return readPlanHtml(id, epoch, repo, plan, v);
 }
 
 /**
@@ -292,6 +365,8 @@ export interface DiffView {
 	/** Raw markdown of each side — the client renders a markdown REDLINE (ins/del). */
 	fromMarkdown: string;
 	toMarkdown: string;
+	/** All available version numbers (ascending) — for the from/to pickers. */
+	versions: number[];
 }
 
 /**
@@ -327,73 +402,6 @@ export function getDiff(
 		toVersion: to,
 		fromMarkdown: from >= 1 ? read(from) : "",
 		toMarkdown: read(to),
+		versions: [...versions].sort((a, b) => a - b),
 	};
-}
-
-// ============================================================================
-// Kloop run viewer — proxies the local `kloop` CLI for structured JSON
-// (ps/describe) and reads raw files under ~/.kloop/<runId>/ for logs/evidence/
-// specs. Best-effort: when kloop is absent (e.g. the dockerized dashboard) these
-// return empty/null so the rest of the UI still works.
-// ============================================================================
-
-function kloopRoot(): string {
-	return `${process.env.HOME}/.kloop`;
-}
-
-/** Run a kloop subcommand and parse its JSON stdout; null on any failure. */
-function kloopJson(args: string[]): unknown {
-	try {
-		const proc = Bun.spawnSync({
-			cmd: ["kloop", ...args],
-			stdout: "pipe",
-			stderr: "pipe",
-			env: { ...(process.env as Record<string, string>), NO_COLOR: "1" },
-		});
-		if (proc.exitCode !== 0) return null;
-		return JSON.parse((proc.stdout?.toString() ?? "").trim());
-	} catch {
-		return null;
-	}
-}
-
-/** All kloop runs (newest first per kloop), via `kloop ps -a --json`. */
-export function listKloopRuns(): unknown[] {
-	const d = kloopJson(["ps", "-a", "--json"]);
-	return Array.isArray(d) ? d : [];
-}
-
-/** Structured run detail (loops/implementer/reviewers/verdicts) via `describe`. */
-export function kloopDescribe(id: string): unknown {
-	return kloopJson(["describe", id, "--json"]);
-}
-
-/** Resolve a path under ~/.kloop, refusing traversal outside it. */
-function safeKloopPath(rel: string): string | null {
-	const root = kloopRoot();
-	const p = resolve(root, rel);
-	if (p !== root && !p.startsWith(`${root}/`)) return null;
-	return p;
-}
-
-/** Raw contents of a file under ~/.kloop (logs, evidence, specs); null if absent. */
-export function readKloopFile(rel: string): string | null {
-	const p = safeKloopPath(rel);
-	if (!p || !existsSync(p)) return null;
-	try {
-		return readFileSync(p, "utf-8");
-	} catch {
-		return null;
-	}
-}
-
-/** Directory listing under ~/.kloop (to discover loops/agents/evidence files). */
-export function listKloopDir(rel: string): string[] {
-	const p = safeKloopPath(rel);
-	if (!p || !existsSync(p)) return [];
-	try {
-		return readdirSync(p);
-	} catch {
-		return [];
-	}
 }

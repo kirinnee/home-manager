@@ -1,12 +1,12 @@
 import { Command } from "commander";
-import { getSessionById, getSessionByWorktree, listSessions } from "../core/db";
-import { getGitRoot, getWorktree } from "../core/git";
+import { getSessionByFolder, getSessionById, listSessions } from "../core/db";
 import { checkLock } from "../core/lock";
 import { readSessionMeta } from "../core/session-meta";
 import type { PolishState } from "../core/status";
 import {
 	ensureStatus,
 	getCurrentKloopRunId,
+	isSessionActive,
 	PHASE_STEPS,
 } from "../core/status";
 import {
@@ -16,41 +16,45 @@ import {
 	logField,
 	logHeading,
 	logOk,
-	parseRepoHost,
 } from "../util/format";
 
 export function createStatusCommand(): Command {
 	return new Command("status")
-		.argument("[id]", "Session ID (optional — defaults to local worktree)")
+		.argument(
+			"[id]",
+			"Session ID (optional — defaults to this folder's session)",
+		)
 		.option("--json", "Machine-readable JSON output")
-		.action(async (id: string | undefined, opts: { json?: boolean }) => {
-			try {
-				await runStatus(id, opts);
-			} catch (err) {
-				logError(err instanceof Error ? err.message : String(err));
-				process.exit(1);
-			}
-		});
+		.option(
+			"--session <id>",
+			"Target session id (alias for the positional id; matches next/complete)",
+		)
+		.action(
+			async (
+				id: string | undefined,
+				opts: { json?: boolean; session?: string },
+			) => {
+				try {
+					// Accept `--session <id>` for parity with next/complete (the skill drives
+					// a specific session in hub mode where the cwd isn't its worktree). The
+					// positional id still works; --session wins when both are given.
+					await runStatus(opts.session ?? id, opts);
+				} catch (err) {
+					logError(err instanceof Error ? err.message : String(err));
+					process.exit(1);
+				}
+			},
+		);
 }
 
-function turnLabel(userTurn: boolean | null, stepType: string | null): string {
-	if (userTurn === true) return "user's turn";
-	if (!stepType || stepType === "code") return "—";
-	if (userTurn === false) return "LLM's turn";
-	return "—";
-}
-
-function stepDetail(stepType: string | null, userTurn: boolean | null): string {
-	if (!stepType) return "";
-	const turn = turnLabel(userTurn, stepType);
-	return turn !== "—" ? `(${stepType}, ${turn})` : `(${stepType})`;
+function stepDetail(stepType: string | null): string {
+	return stepType ? `(${stepType})` : "";
 }
 
 function printPhaseProgress(
 	phase: string,
 	currentState: string,
 	stepType: string | null,
-	userTurn: boolean | null,
 	completedSteps: string[],
 ): void {
 	const steps = PHASE_STEPS[phase];
@@ -72,9 +76,7 @@ function printPhaseProgress(
 		if (completedSet.has(step)) {
 			console.log(formatStepLine(step, "done"));
 		} else if (step === currentState && !foundActive) {
-			console.log(
-				formatStepLine(step, "active", stepDetail(stepType, userTurn)),
-			);
+			console.log(formatStepLine(step, "active", stepDetail(stepType)));
 			foundActive = true;
 		} else {
 			console.log(formatStepLine(step, "pending"));
@@ -124,17 +126,23 @@ async function runStatus(
 			const phaseElapsed = status.startedAt
 				? Date.now() - new Date(status.startedAt).getTime()
 				: 0;
-			const { org, repo } = parseRepoHost(session.git_root_host);
 			const kloopRunId = getCurrentKloopRunId(status);
-			// Host-driven per-repo registry (session.json) — CLI-CONTRACT §7.
+			// Host-driven per-repo registry (session.json) — CLI-CONTRACT §7. A session
+			// is tied to a folder, not a repo: org/repo/branch come from meta (repos[]).
 			const meta = readSessionMeta(session.id);
+			const org = meta?.org ?? "—";
+			const repo =
+				meta && meta.repos.length > 0
+					? meta.repos.map((r) => r.repo).join(",")
+					: "—";
+			const branch = meta?.repos.find((r) => r.branch)?.branch ?? "—";
 			const data = {
 				kind: "session",
 				session: session.id,
 				ticketId: meta?.ticketId ?? session.ticket_id,
-				branch: session.branch,
-				repo: session.git_root_host,
-				org: meta?.org ?? org,
+				branch,
+				folder: session.folder,
+				org,
 				ticketSystem: meta?.ticketSystem ?? null,
 				epoch: meta?.epoch ?? status.version,
 				maxParallelRepos: meta?.maxParallelRepos ?? null,
@@ -148,7 +156,6 @@ async function runStatus(
 				running,
 				completed: !running && status.stateStatus === "completed",
 				stepType: status.stepType,
-				userTurn: status.userTurn,
 				checkpoint: status.lastCheckpoint,
 				version: status.version,
 				context: status.context,
@@ -171,7 +178,7 @@ async function runStatus(
 			logField("Session", session.id);
 			logField("Ticket", data.ticketId || "—");
 			logField("Org/Repo", `${org}/${repo}`);
-			logField("Branch", session.branch || "—");
+			logField("Branch", branch);
 			if (data.repos.length > 0) {
 				logField(
 					"Repos",
@@ -214,7 +221,6 @@ async function runStatus(
 				status.phase,
 				status.state,
 				status.stepType,
-				status.userTurn,
 				status.completedSteps,
 			);
 
@@ -242,20 +248,14 @@ async function runStatus(
 		process.exit(1);
 	}
 
-	// Tolerate launching outside a git repo (the hub case): try the cwd's
-	// worktree, else fall back to the single running session.
-	let session = null;
-	try {
-		session = getSessionByWorktree(getGitRoot(), getWorktree());
-	} catch {
-		// not in a repo
+	// Try the cwd folder's session, else fall back to the single active session.
+	let session = getSessionByFolder(process.cwd());
+	if (!session) {
+		const active = listSessions().filter((s) => isSessionActive(s.id));
+		if (active.length === 1) session = active[0];
 	}
 	if (!session) {
-		const running = listSessions();
-		if (running.length === 1) session = running[0];
-	}
-	if (!session) {
-		logError("No session here. Pass --session <id> (or run inside its repo).");
+		logError("No session here. Pass --session <id> (or run from its folder).");
 		process.exit(1);
 	}
 

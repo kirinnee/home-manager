@@ -1,12 +1,7 @@
 import { rmSync } from "node:fs";
 import { Command } from "commander";
 import { sessionDir } from "../core/artifacts";
-import {
-	deleteSession,
-	getSessionById,
-	getSessionByWorktree,
-} from "../core/db";
-import { getGitRoot, getWorktree } from "../core/git";
+import { deleteSession, getSessionByFolder, getSessionById } from "../core/db";
 import { checkLock, listLockKeys, releaseLock } from "../core/lock";
 import { appendEvent } from "../core/log";
 import { confirmAction } from "../llm/inquirer";
@@ -78,16 +73,9 @@ async function runStop(
 			process.exit(1);
 		}
 	} else {
-		try {
-			const repoPath = getGitRoot();
-			const worktree = getWorktree();
-			session = getSessionByWorktree(repoPath, worktree);
-		} catch {
-			logError("No session found in this worktree.");
-			process.exit(1);
-		}
+		session = getSessionByFolder(process.cwd());
 		if (!session) {
-			logError("No session found in this worktree.");
+			logError("No session found in this folder.");
 			process.exit(1);
 		}
 	}

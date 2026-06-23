@@ -61,6 +61,75 @@ function deepMerge(a: unknown, b: unknown): unknown {
   }
   return b === undefined ? a : b;
 }
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((x, i) => deepEqual(x, b[i]));
+  }
+  if (isObj(a) && isObj(b)) {
+    const ka = Object.keys(a);
+    const kb = Object.keys(b);
+    return ka.length === kb.length && ka.every(k => k in b && deepEqual(a[k], b[k]));
+  }
+  return false;
+}
+
+// --- secret split helpers (shared by import + capture) --------------------
+
+/** Pull the secret subtrees (+ remote-management.secret-key) out of a parsed
+ *  config into the fragment object. */
+function buildFragment(full: Record<string, unknown>): Record<string, unknown> {
+  const fragment: Record<string, unknown> = {};
+  for (const p of secretPaths) if (p in full) fragment[p] = full[p];
+  const rm = full['remote-management'];
+  if (isObj(rm) && 'secret-key' in rm) fragment['remote-management'] = { 'secret-key': rm['secret-key'] };
+  return fragment;
+}
+
+/** A deep clone of `full` with every secret subtree removed — the non-secret
+ *  view that belongs in the plaintext skeleton. */
+function stripSecrets(full: Record<string, unknown>): Record<string, unknown> {
+  const out = JSON.parse(JSON.stringify(full)) as Record<string, unknown>;
+  for (const p of secretPaths) delete out[p];
+  if (isObj(out['remote-management'])) delete (out['remote-management'] as Record<string, unknown>)['secret-key'];
+  return out;
+}
+
+/** Apply only the changed/added/removed keys of `next` onto an existing yaml
+ *  Document, recursing into maps so untouched nodes keep their comments. */
+function applyDiff(
+  doc: ReturnType<typeof parseDocument>,
+  path: string[],
+  base: Record<string, unknown>,
+  next: Record<string, unknown>,
+): boolean {
+  let changed = false;
+  for (const [k, v] of Object.entries(next)) {
+    const bp = [...path, k];
+    if (isObj(v) && isObj(base[k])) {
+      if (applyDiff(doc, bp, base[k] as Record<string, unknown>, v)) changed = true;
+    } else if (!deepEqual(base[k], v)) {
+      doc.setIn(bp, v);
+      changed = true;
+    }
+  }
+  for (const k of Object.keys(base)) {
+    if (!(k in next)) {
+      doc.deleteIn([...path, k]);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/** Assert no known secret leaked into the skeleton text before writing it. */
+function assertNoLeak(skeletonText: string): void {
+  const skel = parse(skeletonText) as Record<string, unknown>;
+  const leaked =
+    secretPaths.some(p => p in skel) ||
+    (isObj(skel['remote-management']) && 'secret-key' in (skel['remote-management'] as object));
+  if (leaked) die('refusing to write skeleton: secret data still present after split');
+}
 
 /** One-time migration: split a live config.yaml into committed skeleton +
  *  sops-encrypted fragment, and seed auths/. */
@@ -74,12 +143,7 @@ export async function proxyImport(srcArg?: string): Promise<void> {
   const full = parse(await readFile(src, 'utf8')) as Record<string, unknown>;
 
   // Fragment: only the secret subtrees (+ remote-management.secret-key).
-  const fragment: Record<string, unknown> = {};
-  for (const p of secretPaths) if (p in full) fragment[p] = full[p];
-  const rmFull = full['remote-management'];
-  if (isObj(rmFull) && 'secret-key' in rmFull) {
-    fragment['remote-management'] = { 'secret-key': rmFull['secret-key'] };
-  }
+  const fragment = buildFragment(full);
 
   // Skeleton: full config minus the secret subtrees (preserve comments).
   const skelDoc = parseDocument(await readFile(src, 'utf8'));
@@ -90,11 +154,7 @@ export async function proxyImport(srcArg?: string): Promise<void> {
   }
 
   // Safety: assert no known secret remains in the skeleton before writing.
-  const skelCheck = parse(skelDoc.toString()) as Record<string, unknown>;
-  const leaked =
-    secretPaths.some(p => p in skelCheck) ||
-    (isObj(skelCheck['remote-management']) && 'secret-key' in (skelCheck['remote-management'] as object));
-  if (leaked) die('refusing to write skeleton: secret data still present after split');
+  assertNoLeak(skelDoc.toString());
 
   const header =
     '# CLIProxyAPI non-secret configuration skeleton (committed plaintext).\n' +
@@ -118,6 +178,63 @@ export async function proxyImport(srcArg?: string): Promise<void> {
   log("Next: git add the skeleton+fragment, then 'khost proxy up'");
 }
 
+/** Fold live edits (made via the CLIProxyAPI control panel / management API)
+ *  from the runtime config.yaml back into the committed skeleton + sops
+ *  fragment, so they survive the next `khost proxy up` re-render.
+ *
+ *  Idempotent: writes nothing when the runtime config already matches what
+ *  skeleton+fragment render to. Secret subtrees go to the encrypted fragment;
+ *  everything else is diffed onto the skeleton in place (comments preserved).
+ *
+ *  In `auto` mode (called from up/down) it never throws or aborts the caller —
+ *  missing state or a sops hiccup just skips the capture with a warning. */
+export async function proxyCapture(opts: { auto?: boolean } = {}): Promise<boolean> {
+  const auto = opts.auto ?? false;
+  const bail = (msg: string): boolean => {
+    if (auto) {
+      warn(`auto-capture skipped: ${msg}`);
+      return false;
+    }
+    die(msg);
+  };
+
+  if (!existsSync(proxyRuntimeConfig)) return bail(`no runtime config: ${proxyRuntimeConfig} (run: khost proxy up)`);
+  if (!existsSync(skeletonPath) || !existsSync(fragmentPath))
+    return bail('skeleton/fragment missing (run: khost proxy import)');
+  await need('sops');
+
+  const live = (parse(await readFile(proxyRuntimeConfig, 'utf8')) ?? {}) as Record<string, unknown>;
+
+  // Secrets -> fragment (only rewrite + re-encrypt when they actually changed,
+  // since sops ciphertext is non-deterministic and would churn every run).
+  const newFragment = buildFragment(live);
+  const curFragment = (parse(await sopsDecrypt(fragmentPath)) ?? {}) as Record<string, unknown>;
+  const fragmentChanged = !deepEqual(curFragment, newFragment);
+
+  // Non-secret -> skeleton (apply only the diff to keep the doc comments).
+  const skelDoc = parseDocument(await readFile(skeletonPath, 'utf8'));
+  const curSkel = (parse(skelDoc.toString()) ?? {}) as Record<string, unknown>;
+  const skeletonChanged = applyDiff(skelDoc, [], curSkel, stripSecrets(live));
+
+  if (!fragmentChanged && !skeletonChanged) {
+    if (!auto) ok('proxy config already in sync — nothing to capture');
+    return false;
+  }
+
+  if (skeletonChanged) {
+    assertNoLeak(skelDoc.toString());
+    await writeFile(skeletonPath, skelDoc.toString());
+  }
+  if (fragmentChanged) await writeFile(fragmentPath, await sopsEncrypt(stringify(newFragment)));
+
+  const what = [skeletonChanged ? 'skeleton' : null, fragmentChanged ? 'fragment (sops)' : null]
+    .filter(Boolean)
+    .join(' + ');
+  ok(`captured live proxy edits → ${what}`);
+  if (!auto) log(`Review & commit: git add ${repoProxyDir}`);
+  return true;
+}
+
 // --- compose rendering + lifecycle ----------------------------------------
 
 async function renderCompose(): Promise<void> {
@@ -137,6 +254,9 @@ async function runningImage(): Promise<string> {
  *  but doesn't churn a healthy container. Binds 127.0.0.1 only. */
 export async function proxyUp(): Promise<void> {
   await need('docker');
+  // Absorb any live control-panel edits back into the repo BEFORE re-rendering,
+  // otherwise skeleton+fragment would clobber them. No-ops when already in sync.
+  await proxyCapture({ auto: true });
   const before = existsSync(proxyRuntimeConfig) ? await readFile(proxyRuntimeConfig, 'utf8') : '';
   await renderConfig();
   await renderCompose();
@@ -154,6 +274,8 @@ export async function proxyDown(): Promise<void> {
     warn('no runtime compose; nothing to stop');
     return;
   }
+  // Persist any live control-panel edits before tearing the container down.
+  await proxyCapture({ auto: true });
   await dockerCompose(['down'], { cwd: proxyState, interactive: true });
   ok('proxy down');
 }
