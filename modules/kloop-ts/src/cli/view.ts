@@ -2,8 +2,8 @@ import * as p from '@clack/prompts';
 import pc from 'picocolors';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
-import { createReadStream, existsSync, statSync } from 'fs';
-import * as readline from 'readline';
+import { existsSync, statSync } from 'fs';
+import { createHash } from 'crypto';
 import * as path from 'path';
 import { paths } from '../deps';
 import type { CliDeps } from './index';
@@ -314,53 +314,112 @@ async function followLog(agent: AgentEntry, opts: { since?: string }): Promise<v
     }
   }
 
-  // Create readline interface starting from the offset
-  const stream = createReadStream(agent.logPath, {
-    start: startOffset,
-    encoding: 'utf-8',
-  });
-  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-
-  // Process existing lines first
-  for await (const line of rl) {
-    formatLine(line);
-  }
-
-  // Now watch for new content appended to the file
-  // We use a polling approach: periodically stat the file and read new bytes
+  // We watch for new content appended to the file via polling: periodically stat the file and
+  // read new bytes.
   let lastSize = 0;
+  // Fingerprint the bytes already consumed up to `lastSize`, so we can detect when the file's
+  // existing content was REPLACED (not just appended to) and the byte offset is stale.
+  let prefixFingerprint = '';
+  // Hash a bounded LEADING window plus the consumed length, not the whole region. We only need
+  // to detect REPLACEMENT of the file (pane snapshot -> unrelated transcript copy), and a
+  // replacement changes the leading bytes — so a bounded prefix hash detects it. Hashing the
+  // full consumed region would re-read + SHA-1 the ENTIRE file every 300ms tick during the
+  // append-only transcript phase (the file keeps growing), which is O(n) per tick.
+  const FINGERPRINT_WINDOW = 64 * 1024;
+  // Hash a window anchored at the END of the consumed region ([len-window, len)), not the start.
+  // The pane-snapshot phase REWRITES the whole file each tick: when a snapshot grows but keeps
+  // identical leading bytes (stable banner/header), a leading-window hash over min(currentSize,
+  // lastSize) bytes is unchanged, so a full rewrite is mistaken for an append and we slice the
+  // new snapshot mid-line. A rewrite to a longer snapshot changes the bytes immediately before
+  // the old EOF (lastSize), so anchoring the window at the tail of the consumed region detects it.
+  const fingerprint = (fd: number, len: number): string => {
+    if (len <= 0) return '';
+    const window = Math.min(len, FINGERPRINT_WINDOW);
+    const start = len - window;
+    const buf = Buffer.alloc(window);
+    fsSync.readSync(fd, buf, 0, window, start);
+    return `${len}:${createHash('sha1').update(buf).digest('hex')}`;
+  };
+
+  // Drain the existing content and capture lastSize/prefixFingerprint from the SAME snapshot,
+  // BEFORE the poll loop starts. The interactive log is replaced in place (atomic rename) the
+  // moment updateInteractiveLog swaps the pane snapshot for a copy of Claude's transcript. If
+  // lastSize were captured AFTER a separate streaming drain, a replacement landing in that window
+  // would print the OLD snapshot bytes but seed lastSize from the NEW (larger) transcript — the
+  // poll loop would then only show bytes appended past the transcript's attach-time size, silently
+  // dropping the bulk of the conversation. Reading [startOffset, size) from one opened fd and
+  // fingerprinting that same fd closes the window: any replacement after this point changes the
+  // tail fingerprint and is caught by the poll loop's replacement check, which re-reads from 0.
   try {
-    lastSize = statSync(agent.logPath).size;
+    const fd = fsSync.openSync(agent.logPath, 'r');
+    try {
+      lastSize = statSync(agent.logPath).size;
+      if (lastSize > startOffset) {
+        const buf = Buffer.alloc(lastSize - startOffset);
+        fsSync.readSync(fd, buf, 0, buf.length, startOffset);
+        for (const line of buf.toString('utf-8').split('\n')) {
+          if (line.trim()) formatLine(line);
+        }
+      }
+      prefixFingerprint = fingerprint(fd, lastSize);
+    } finally {
+      fsSync.closeSync(fd);
+    }
   } catch {}
 
   const pollInterval = setInterval(async () => {
     try {
       const currentSize = statSync(agent.logPath).size;
-      if (currentSize <= lastSize) return;
-
-      // Read only the new portion
+      // The interactive log is NOT a stable append-only stream: it starts as a pane snapshot
+      // (rewritten in place each tick) and is later swapped to a copy of Claude's transcript,
+      // whose content is unrelated to the prior snapshot — and crucially can be LARGER. Tracking
+      // size alone would then read bytes [snapshotSize, transcriptSize) of the transcript,
+      // slicing a record mid-line and emitting garbage. So detect a content REPLACEMENT (not
+      // just shrink): compare a fingerprint of the bytes we already consumed against what's now
+      // on disk. If the tail of the consumed region changed, the file was rewritten — reset and
+      // re-read whole. (Tail-anchored so a longer rewrite with identical leading bytes is caught.)
       const fd = fsSync.openSync(agent.logPath, 'r');
-      const buf = Buffer.alloc(currentSize - lastSize);
-      fsSync.readSync(fd, buf, 0, buf.length, lastSize);
-      fsSync.closeSync(fd);
-      lastSize = currentSize;
+      let buf: Buffer;
+      try {
+        const currentPrefix = fingerprint(fd, Math.min(currentSize, lastSize));
+        if (currentSize < lastSize || (lastSize > 0 && currentPrefix !== prefixFingerprint)) {
+          lastSize = 0;
+        }
+        if (currentSize <= lastSize) return;
+
+        // Read only the new portion
+        buf = Buffer.alloc(currentSize - lastSize);
+        fsSync.readSync(fd, buf, 0, buf.length, lastSize);
+        lastSize = currentSize;
+        // Refresh the fingerprint over everything now consumed.
+        prefixFingerprint = fingerprint(fd, lastSize);
+      } finally {
+        fsSync.closeSync(fd);
+      }
 
       const newContent = buf.toString('utf-8');
       for (const line of newContent.split('\n')) {
         const trimmed = line.trim();
-        if (trimmed) formatLine(trimmed);
+        if (!trimmed) continue;
+        // The interactive log can be REPLACED mid-follow (pane snapshot -> transcript copy), in
+        // which case we reset lastSize=0 and re-read the WHOLE new file here. The initial
+        // --since offset no longer applies to those bytes, so re-apply the cutoff per line
+        // (same rule as filterJsonLogSince: drop JSON lines older than cutoff, keep the rest).
+        if (cutoff && !lineSinceCutoff(trimmed, cutoff)) continue;
+        formatLine(trimmed);
       }
     } catch {
-      // File might have been rotated — re-open
-      lastSize = 0;
+      // Transient stat/open error (e.g. EMFILE, a stat hiccup). Do NOT reset lastSize: the
+      // atomic-rename writer never leaves the file actually missing, so a real rotation can't
+      // occur here, and zeroing would re-dump the WHOLE log (every already-shown line) on the
+      // next tick. Leave the offset; resume from it. Genuine content REPLACEMENT is still caught
+      // by the fingerprint/shrink check above, which re-reads from 0 only when the prefix changed.
     }
   }, 300);
 
   // Clean up on Ctrl+C
   const cleanup = () => {
     clearInterval(pollInterval);
-    rl.close();
-    stream.destroy();
     process.exit(0);
   };
   process.on('SIGINT', () => cleanup());
@@ -392,7 +451,7 @@ interface ContentBlock {
 
 interface Message {
   role?: string;
-  content?: ContentBlock[];
+  content?: ContentBlock[] | string;
 }
 
 interface LogEntry {
@@ -424,6 +483,23 @@ function displayFormattedLog(content: string): void {
   }
 }
 
+// Bookkeeping line types in Claude Code's interactive session transcript that carry no
+// conversational content — skipped silently so an interactive run's `view` isn't drowned
+// in `[mode]`/`[attachment]`/… placeholders. (Print-mode stream-json never emits these.)
+const SESSION_NOISE_TYPES = new Set([
+  'mode',
+  'permission-mode',
+  'file-history-snapshot',
+  'attachment',
+  'ai-title',
+  'last-prompt',
+  'summary',
+  'progress',
+  'queue-operation',
+  'hook_progress',
+  'waiting_for_task',
+]);
+
 function formatLogEntry(entry: LogEntry): void {
   switch (entry.type) {
     case 'system':
@@ -439,7 +515,7 @@ function formatLogEntry(entry: LogEntry): void {
       formatFinalResult(entry);
       break;
     default:
-      console.log(pc.dim(`[${entry.type}]`));
+      if (!SESSION_NOISE_TYPES.has(entry.type)) console.log(pc.dim(`[${entry.type}]`));
   }
 }
 
@@ -457,10 +533,20 @@ function formatSystemEntry(entry: LogEntry): void {
 }
 
 function formatAssistantEntry(entry: LogEntry): void {
-  const message = entry.message as Message | undefined;
-  if (!message?.content) return;
+  const content = (entry.message as Message | undefined)?.content;
+  if (typeof content === 'string') {
+    if (!content) return;
+    console.log('');
+    console.log(pc.green('┌─ AGENT ──────────────────────────────────────────────────────'));
+    for (const line of content.split('\n')) {
+      console.log(pc.green('│ ') + line);
+    }
+    console.log(pc.green('└──────────────────────────────────────────────────────────────'));
+    return;
+  }
+  if (!Array.isArray(content)) return;
 
-  for (const block of message.content) {
+  for (const block of content) {
     if (block.type === 'text' && block.text) {
       console.log('');
       console.log(pc.green('┌─ AGENT ──────────────────────────────────────────────────────'));
@@ -482,10 +568,20 @@ function formatAssistantEntry(entry: LogEntry): void {
 }
 
 function formatUserEntry(entry: LogEntry): void {
-  const message = entry.message as Message | undefined;
-  if (!message?.content) return;
+  const content = (entry.message as Message | undefined)?.content;
+  if (typeof content === 'string') {
+    if (!content) return;
+    console.log('');
+    console.log(pc.cyan('┌─ USER ───────────────────────────────────────────────────────'));
+    for (const line of content.split('\n')) {
+      console.log(pc.cyan('│ ') + line);
+    }
+    console.log(pc.cyan('└──────────────────────────────────────────────────────────────'));
+    return;
+  }
+  if (!Array.isArray(content)) return;
 
-  for (const block of message.content) {
+  for (const block of content) {
     if (block.type === 'tool_result' || block.type === 'tool_use_result') {
       let resultContent = block.content || '';
       let filePath: string | undefined;
@@ -586,21 +682,27 @@ function formatToolInput(toolName: string, input: Record<string, unknown>): stri
 // --since filtering
 // ============================================================================
 
+// Whether a single log line is at/after the --since cutoff: JSON lines with a timestamp must be
+// >= cutoff; lines without a timestamp or non-JSON lines are kept (can't be aged out).
+function lineSinceCutoff(trimmed: string, cutoff: Date): boolean {
+  try {
+    const obj = JSON.parse(trimmed);
+    const ts = obj.timestamp ?? obj.ts;
+    if (ts) {
+      return new Date(ts).getTime() >= cutoff.getTime();
+    }
+    return true; // Keep entries without timestamps
+  } catch {
+    return true; // Keep non-JSON lines
+  }
+}
+
 function filterJsonLogSince(content: string, cutoff: Date): string {
   const lines = content.split('\n');
   const filtered = lines.filter(line => {
     const trimmed = line.trim();
     if (!trimmed) return false;
-    try {
-      const obj = JSON.parse(trimmed);
-      const ts = obj.timestamp ?? obj.ts;
-      if (ts) {
-        return new Date(ts).getTime() >= cutoff.getTime();
-      }
-      return true; // Keep entries without timestamps
-    } catch {
-      return true; // Keep non-JSON lines
-    }
+    return lineSinceCutoff(trimmed, cutoff);
   });
   return filtered.join('\n');
 }

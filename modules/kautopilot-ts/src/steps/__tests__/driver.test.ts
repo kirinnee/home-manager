@@ -24,7 +24,11 @@ afterAll(() => {
 
 import { sessionDir } from "../../core/artifacts";
 import { runComplete, runNext, runRevise } from "../../core/driver";
-import { diffRevisions, readRevision } from "../../core/revisions";
+import {
+	diffRevisions,
+	latestRevisionOnDisk,
+	readRevision,
+} from "../../core/revisions";
 import { createSession } from "../../core/session-create";
 import { readSessionMeta } from "../../core/session-meta";
 import type { Config } from "../../core/types";
@@ -39,8 +43,7 @@ function newSession(ticketId: string | null = "PE-1234"): string {
 	const meta = createSession({
 		ticketId,
 		org: "liftoff",
-		repoPath: wt,
-		worktree: wt,
+		folder: wt,
 	});
 	return meta.sessionId;
 }
@@ -187,7 +190,7 @@ describe("host-driven driver: next/complete", () => {
 		);
 	});
 
-	it("revise mints a new version per user presentation (copy v1 → v2)", async () => {
+	it("first revise presents the working copy (v1); a later revise mints v2", async () => {
 		const id = newSession();
 		const dir = sessionDir(id);
 		await runNext(id, config);
@@ -209,8 +212,18 @@ describe("host-driven driver: next/complete", () => {
 		expect(s.contract.outputFile).toContain("v1.md");
 		writeFile(join(dir, "epoch", "1", "spec", "v1.md"), "# Spec v1\nline");
 
-		// A user-feedback round: `revise` copies v1 → v2 and returns the new file
-		// + viewer links. No new version appears from re-running `next` alone.
+		// First presentation: `revise` returns the working copy (v1) as-is — it does
+		// NOT copy forward (that would make a redundant, empty-diff v2 == v1).
+		const r1 = await runRevise(id, config);
+		expect(r1.ok).toBe(true);
+		expect(r1.version).toBe(1);
+		expect(r1.path).toContain("v1.md");
+		expect(r1.url).toContain("/spec/v1");
+		// No v2 was created by the first revise.
+		expect(latestRevisionOnDisk(id, "spec", { epoch: 1 })).toBe(1);
+
+		// A user-feedback round: `revise` now copies v1 → v2 (preserving the shown v1)
+		// and returns the new file + viewer links.
 		const r = await runRevise(id, config);
 		expect(r.ok).toBe(true);
 		expect(r.version).toBe(2);
@@ -354,8 +367,7 @@ describe("multi-repo: identical flat flow, serialized interaction", () => {
 		const meta = createSession({
 			ticketId: "PE-3000",
 			org: "liftoff",
-			repoPath: wt,
-			worktree: wt,
+			folder: wt,
 			maxParallelRepos: 1,
 		});
 		const id = meta.sessionId;

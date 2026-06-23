@@ -68,20 +68,76 @@ shapes mean different things — branch on `phase`:
 ## Start
 
 ```
-/kautopilot PE-1234                     → org detected from the ticket; resume or start
+/kautopilot PE-1234                     → NEW session for this ticket (org detected from it)
 /kautopilot "add dark mode to portal"   → ad-hoc: brainstorm (superpowers-style) → create_ticket first
 /kautopilot --org liftoff "…"           → org passed explicitly (else detected from ticket, else asked)
-/kautopilot                             → resume in-progress session, else ask what to build
+/kautopilot                             → NEW session — ask what to build
+/kautopilot continue                    → pick a session for THIS folder to resume (see below)
 /kautopilot --diff spec                 → kautopilot diff spec  (what changed between versions)
 ```
 
+**Default = a brand-new session. Only "continue" resumes.** Unless the user's message
+says **continue** (or `--session <id>` is given), **always start a fresh session** — do
+NOT auto-resume an in-progress one, even if one exists for this folder/ticket. When the
+user **does** say "continue", resume per **"Continue (this folder)"** below.
+
 Org is `liftoff` or `atomicloud`, resolved by `--org` → detect-from-ticket → ask.
+
+### Continue (this folder)
+
+When the user says **continue** (with no explicit `--session <id>`), find the sessions
+associated with the **current folder** and let them choose:
+
+1. List candidates: **`kautopilot ps -a --folder "$(pwd)" --json`** — a session is tied to
+   the **folder** it was started in (never a repo/worktree); `-a` includes stopped/completed,
+   and `--folder` substring-matches each session's associated folder against the current
+   directory (so a hub dir also catches sessions started in subfolders under it). If that
+   yields nothing, fall back to `kautopilot ps -a --json` and match the current path yourself.
+2. **0 matches** → tell the user there's nothing to continue here, and offer to start a new
+   session instead.
+3. **exactly 1 match** → confirm it (ticket + repo + phase), then resume: drive
+   `kautopilot next --session <id>` per the normal loop.
+4. **multiple** → present them via `AskUserQuestion` — one option per session showing its
+   **id, ticket, repo, and phase** — and resume the chosen one with `--session <id>`.
+
+(If the user said "continue" AND gave LPSM/tag words, use **"Resume (atomicloud LPSM)"**
+below instead — that's the tag-filtered variant of the same pick-and-resume flow.)
 
 **Launch from anywhere.** kautopilot need NOT be started inside a repo — the cwd can
 be any directory (a hub) with access to many repos. **Triage** decides which repos the
 task touches and records each repo's absolute path (`repoPaths`); the execution `seed`
 step then creates each repo's worktree on demand via worktrunk. So you don't pre-pick a
 repo at start; triage does, and it must locate (or clone, with the user's OK) each repo.
+
+### After triage: confirm repos + paths, name the branch (REQUIRED)
+
+Triage is interactive — before you `kautopilot complete` it, you MUST:
+
+1. **Confirm the repo set + each path with the user.** Show, via `AskUserQuestion`, the
+   exact list triage produced: every repo and its **absolute filesystem path** (the
+   `repoPaths` you'll pass). The user must confirm these are the repos/paths to work on
+   before any worktree is seeded — a wrong/missing path otherwise seeds a no-op repo.
+   Fix or re-triage anything they correct.
+2. **Propose a branch name.** Derive an **apt, short** slug from the ticket title (you
+   choose it — concise and descriptive, e.g. ticket "Add dark mode to portal" →
+   `dark-mode`). Confirm it in the same question. The binary builds the final branch as
+   **`<git-user>/<ticket-id>-<slug>`** (e.g. `kirinnee/PE-1234-dark-mode`), the **same
+   branch across all the task's repos**; `seed` creates each repo's worktree on that branch
+   via worktrunk (`wt`). You only supply the slug — the binary fills in the `<git-user>/`
+   prefix and the **`<ticket-id>`** automatically. When you show the proposed branch to the
+   user, make clear that **the `<ticket-id>` part is the session's ticket reference** (the
+   variable prefix, e.g. `PE-1234`), not a literal word — so e.g. `PE-1234-i18n`, with only
+   `i18n` being the slug they're choosing. (No ticket id → it falls back to a literal
+   `ticket-` prefix.)
+
+Then complete triage passing the confirmed values, including the slug:
+
+```
+kautopilot complete --output <triage> --metadata '{"repos":[…],"repoPaths":{…},"dependsOn":{…},"branchSlug":"dark-mode"}'
+```
+
+`branchSlug` is optional in the schema, but for a normal ticket-to-PR run you should
+always supply it; omitting it falls back to the legacy `<repo>-<ticketId>` branch name.
 
 ### LPSM service-tree tags (atomicloud only)
 
@@ -144,18 +200,40 @@ matching session(s):
   a real worktree it logs a `seed:no_worktree` event (visible in `kautopilot logs`/
   `status`). If you see it, **stop that repo and tell the user the path is wrong** —
   fix it / re-triage; do NOT let the repo run on to a PR with no actual work.
+- **Run `next` in the FOREGROUND with stderr visible — never backgrounded with stderr
+  suppressed.** A `next` invocation can spend real time inside the binary's inline `code`
+  steps (notably `seed`, which provisions a worktree: `wt switch` → bun install →
+  secrets sync). The binary now bounds those sub-steps with a timeout and emits
+  `seed:provision_worktree:started`/`:completed` progress events, and the run-lock has a
+  heartbeat TTL so a wedged run can't hold it forever — but you only SEE any of that if
+  you run `next` in the foreground and watch its stderr. If a repo's `next` seems to hang,
+  **don't background it and move on** — check `kautopilot logs --repo <repo>`/`status` for
+  the last `seed:*` event, and if it timed out (`seed:no_worktree` with `timedOut:true`)
+  the lock is already released, so just re-run `kautopilot next --repo <repo>`. A long
+  `running`/poll step is babysat by its own sub-agent (below), not by a backgrounded `next`.
 
 ## Per-`kind` execution
 
 - **`code`** — never appears. The binary ran it (including all detection/waiting).
-- **`interactive`** (brainstorm, triage, write_spec, write_plans, resolve, amend_plans, tty_resolve, feedback_check, feedback) —
+- **`interactive`** (brainstorm, triage, write_spec, write_plans, resolve, amend_plans, tty_resolve, feedback_check, feedback, **create_ticket**) —
   run **inline** in the main session. Be a **devil's advocate**: propose first, debate,
-  surface conflicts; never open with "what do you want to do?" Run the
-  **per-revision review loop** below — re-present + re-ask after EVERY update and
+  surface conflicts; never open with "what do you want to do?" For the **writer artifacts**
+  run the **per-revision review loop** below — re-present + re-ask after EVERY update and
   only `complete` once feedback is exhausted and the user **explicitly** approves
   ("approve" — not "ok/sure"). Spawn `Explore` subagents for heavy research so the
   conversation stays lean.
-- **`agent`** (create_ticket, fetch_ticket, **running** (kloop), commit, eval,
+  - **`create_ticket`** is interactive but NOT a revise-loop artifact: its prompt says to
+    **draft the ticket, show it, and get explicit confirmation before creating** — do that
+    inline (a subagent can't talk to the user), then run the creation command and `complete`
+    with the `ticketId`. (Don't spawn a subagent for it.)
+  - **`write_plans`** writes one FOLDER per plan. Every plan folder MUST be named
+    `plan-<N>` or `plan-<N>-<short-slug>` (the literal **`plan-<N>` prefix is required**,
+    e.g. `plan-1`, `plan-2-api`). That ordinal is what execution (`seed` → `running` →
+    `kloop init --spec`) uses to find each plan's spec file — a folder missing the prefix
+    (e.g. `auth/` or `1-auth/`) won't be located and the dev loop will fail to init. If the
+    plan-writer proposes a breakdown with non-conforming folder names, correct it before
+    approving.
+- **`agent`** (fetch_ticket, **running** (kloop), commit, eval,
   create_pr, prereview, write_fix, running_subagent) — **always** a fresh isolated
   `Task` subagent, never inline. (The reviewer fan-out isn't a step — it rides on the
   write_spec/write_plans interactive steps and you spawn each reviewer as a subagent.)
@@ -196,24 +274,119 @@ artifact (brainstorm, triage, spec, plans, feedback) to the user, it must be a
 **new version** — never silently overwrite what they already saw. The binary mints
 versions; you never pick numbers or hand-build URLs:
 
-1. To present, run **`kautopilot revise [--repo <repo>]`**. It copies the latest
-   version forward (`vN → vN+1`), and returns `{version, path, url, diffUrl}`.
+1. To present, run **`kautopilot revise [--repo <repo>]`**. It returns
+   `{version, path, url, diffUrl, visualUrl}`. The binary handles version numbers: the
+   **first** call presents the step's working copy as-is (**v1** — no redundant duplicate);
+   each **later** call (after the user's feedback) copies the last-shown version forward
+   (`vN → vN+1`) so the version they already saw is preserved. So: just run `revise` once
+   per presentation round and trust the `version`/`url`/`visualUrl` it hands back.
 2. Edit the returned **`path`** to address the user's latest feedback (reviewer
    rounds first, per above — those don't mint versions).
-3. **Present the link**, not the file: prefix the configured base URL to the
-   returned `url` (or `diffUrl` to show what changed) and post it as a clickable
-   link. Never construct a version URL yourself — always use what `revise` returns.
+3. **Generate the visual** for THIS version — see "Generate the visual" below —
+   BEFORE presenting. This is a **required, non-skippable step**: confirm the HTML file(s)
+   exist before you present, or the **Visual** link will 404. Applies to **every** artifact:
+   brainstorm / triage / spec / feedback get one `vN.html` next to the `vN.md` (one
+   sub-agent); **plans** get one `vN.html` **per plan** (`<plan>/vN.html`) — spawn **one
+   sub-agent per plan**, not merged.
+4. **Present the link(s)**, not the file — the **Read** (markdown) and the **Visual**
+   (infographic):
+   - **Read**: the returned `url` (or `diffUrl` to show what changed).
+   - **Visual** (single-file artifacts): the returned **`visualUrl`** — a standalone
+     full-page infographic that links back to the Read view.
+   - **Plans**: present just the **Read** link (`url`). `revise` returns no `visualUrl` for
+     plans — each plan has its own infographic, reachable from a **"View visual"** link on
+     that plan's tab in the dashboard.
+     Never construct a version URL yourself — always use exactly what `revise` returns.
 
-**Viewer base URL** (configured for this machine — change here if it moves):
+**Viewer base URLs** — configured in `settings` (see `kautopilot config`), don't
+hardcode a domain:
 
-```
-https://kauto.ernest.atomi.cloud
-```
+- `viewerBaseUrl` — this dashboard (default `https://kauto.ernest.atomi.cloud`)
+- `kloopBaseUrl` — the **kloop** dashboard (default `https://kloop.ernest.atomi.cloud`)
 
-(The ticket, which is unversioned, has no `revise`: link it directly as
-`<base>/sessions/<id>/ticket`.) The viewer must be running (`kautopilot dash up`)
-for links to load; it always shows the session's current epoch. Revisions are
-machine-local and never committed.
+**Give the FULL link for EACH artifact type, not just the session.** Every artifact
+has its own shareable URL — when you present links (incl. the end-of-message summary
+table, see "End every message with a links table"), list the full per-artifact URLs
+that apply:
+
+- ticket → `<viewerBaseUrl>/sessions/<id>/ticket`
+- ticket-draft (ad-hoc, after brainstorm) → `<viewerBaseUrl>/sessions/<id>/ticket-draft`
+- brainstorm / triage / spec / feedback → use the `revise` `url`/`diffUrl` (current version)
+- plans → `<viewerBaseUrl>/sessions/<id>/plans/<repo>`
+- a kloop run → **`<kloopBaseUrl>/kloop/<runId>`** (the kloop dashboard, NOT kautopilot)
+
+The viewer must be running (`kautopilot dash up` / `kloop dash up`) for links to load;
+it shows the session's current epoch. Revisions are machine-local and never committed.
+
+### Generate the visual (HTML infographic) — a sub-agent, every version
+
+Before presenting **each** artifact version, spawn a fresh isolated `Task` sub-agent to
+produce a **visual, infographic-style** HTML version of the same content. Single-file
+artifacts need **one** sub-agent; **plans need one sub-agent per plan** (each plan is a
+separate file — see "Plans" below) — spawn those in parallel. The audience is **ADHD +
+dyslexic**, so the HTML must be scannable and visual, NOT a wall of text. For **v1** the
+sub-agent has free rein on the _layout_ — clarity beats fidelity; jarring-but-clear is OK —
+but the **bright-mode + Claude design style** and **completeness** rules below always apply.
+For **v2+** it should instead **keep the previous version's design** and edit it (see
+"Reuse the prior design" below), so versions look like siblings.
+
+Spawn it with the `Task` tool (`subagent_type: general-purpose`), and tell it to **use the
+`frontend-design` skill if available** — and if that skill isn't installed, to apply the
+same accessible visual-design principles directly (don't fail). Pass it these explicit
+inputs in the prompt: the `path` that `revise` returned, and the Read URL (`revise`'s
+returned `url`) to use verbatim as the source link. The brief:
+
+- **Cover every segment (completeness).** **Every** section/segment of the source markdown
+  must be reflected in the visual — do not drop, merge-away, or silently summarize content
+  out. Reshaping a wall of text into scannable cards/callouts is the goal, but the
+  information from each original section must still be present.
+- **Bright mode + Claude design style.** Always render in **bright (light) mode** using the
+  **Claude design style** — warm off-white/cream background, dark high-contrast text, Claude's
+  coral/terracotta accent for highlights, generous whitespace, rounded cards. Never dark mode.
+- **Reuse the prior design (v2+ — do this FIRST).** When a previous HTML exists
+  (`v{N-1}.html`, the **same path** the new file goes — for single-file that's next to the
+  `.md`; for plans it's that plan's own `<plan>/v{N-1}.html`), **start by copying it to
+  `vN.html`**, then **edit only the parts the markdown changed** — keep the
+  same CSS, colors, layout, and components so the look-and-feel stays consistent and the diff
+  is cheap (you edit snippets, not regenerate the whole page). Refresh the **"What changed"**
+  callout each time. **Before reusing, sanity-check** the copied file still meets the
+  Output-format and Mobile constraints below (no JS, no remote resources, responsive); if it
+  doesn't (e.g. an old file predating these rules), fix those bits or regenerate. **Escape
+  hatch:** if the markdown changed shape so drastically that editing the old layout is more
+  work than starting over, regenerate from scratch instead. (For **v1**, or when no prior
+  HTML exists, generate from scratch.)
+- **Input & output location** depends on the artifact:
+  - **Single-file** (brainstorm, triage, spec, feedback) — `path` is a `vN.md`. Write a
+    sibling **`vN.html`** in the **same directory, same basename** (just `.md` → `.html`).
+    For **v2+**, also read the previous version (`v{N-1}.md` in the same dir) and, at the
+    **TOP**, show a short **"What changed"** callout summarizing the diff (key changes only).
+  - **Plans** — `path` is the repo's **plans dir**, which contains one subfolder per plan,
+    each with a `vN.md`. Treat each plan exactly like a single-file artifact: **spawn one
+    sub-agent per plan**, and each writes a sibling **`<plan>/vN.html`** next to that plan's
+    `<plan>/vN.md`. **Do NOT merge** plans into one file — one infographic per plan. Pass each
+    sub-agent only its own plan's `vN.md` path. For **v2+**, each compares against its own
+    `<plan>/v{N-1}.md` and adds the "What changed" callout at the top of that plan's page.
+    The dashboard shows a **"View visual"** link on each plan's tab.
+- **Output format** — a **standalone** HTML file: fully self-contained inline CSS, no build
+  step, **no JavaScript** (it is served with a script-blocking CSP — any JS is silently
+  dropped, so the page must work with zero scripts). **No remote resources** either: the CSP
+  blocks all external hosts, so use a **system font stack** (no Google Fonts / CDN `<link>` /
+  `@import`) and embed any images as inline SVG or `data:` URIs. Design for dyslexia:
+  generous spacing, high contrast, sans-serif, left-aligned (never justified), short lines,
+  icons/cards/callouts, strong visual hierarchy.
+- **Mobile-friendly / responsive** — it WILL be viewed on phones. Include
+  `<meta name="viewport" content="width=device-width, initial-scale=1">`; use a fluid,
+  single-column-on-narrow layout (e.g. CSS flex/grid that wraps, `max-width` containers,
+  relative units, `@media` breakpoints); never rely on fixed pixel widths or horizontal
+  scrolling; tap targets and text must stay comfortably readable on a small screen.
+- **Cross-link back to source** — put a clear **"← View source (markdown)"** link near the
+  top of the HTML. Use the **Read URL you were handed** (`revise`'s `url`) verbatim as the
+  `href` (add `target="_top"` — harmless full-page navigation). Do NOT hand-construct this
+  URL — use the one passed in. The dashboard's "View visual" link is the reverse direction.
+- Do this for **every** version of **every** artifact before you present that version. The
+  dashboard auto-detects each HTML sibling and shows a **"View visual"** link that opens the
+  full-page infographic — on the Read page for single-file artifacts, and on each plan's tab
+  for plans.
 
 ## The per-revision review loop (don't just move on)
 
@@ -225,27 +398,99 @@ user explicitly approves:
 
 1. **Draft / update** the working version, then run the **reviewers** (above) and
    fix until review-clean — these rounds are not versioned.
-2. **Mint + present.** Run `kautopilot revise` to snapshot this as the next version,
-   then post: the **viewer link** it returned (the `diffUrl` once a prior version
-   exists, so they see exactly what changed); a **2–4 line summary** of what changed;
-   and a short **TODO / open-items** list (what's unresolved, and which of the user's
-   last feedback this version did / did NOT address).
+2. **Mint + generate visual + present.** Run `kautopilot revise` to snapshot this as
+   the next version, generate the `vN.html` visual(s) (above), then post: **Read** (the
+   returned `url`/`diffUrl` so they see what changed) and — for single-file artifacts —
+   **Visual** (the returned `visualUrl`); for **plans**, present just the Read link (each
+   plan's visual is on its tab, no `visualUrl`). Add a **2–4 line summary** of what changed
+   and a short **TODO / open-items** list (what's unresolved, and which of the user's last
+   feedback this version did / did NOT address).
 3. **Ask** for feedback or approval.
 4. **Any feedback = not approved.** Address it → `revise` again → that's the next
    version → go back to step 2. Keep looping: v2 ok? → feedback → v3 ok? → …
-5. **Only when the user has no further feedback AND explicitly approves**, with the
-   open-items empty → `kautopilot complete`. The binary advances to the next step.
+5. **Only advance on an explicit "approve".** Move to the next step (`kautopilot
+complete`) ONLY after the user literally says **"approve"** (that specific word) for
+   the CURRENT version, with open-items empty. Anything short of that — silence, "looks
+   good", "nice", a new question — is **not** approval; stay in the loop.
+
+**Re-present after EVERY interaction — including `AskUserQuestion`.** Any time you turn
+back to the user mid-artifact — even to ask a clarifying question via the question tool —
+you must **re-present the current version** (both Read + Visual links + summary) in that
+same message. Never ask a question without the live version in front of them, and never
+treat a question's answer as approval. Only the explicit word "approve" advances the step.
 
 So: v1 presented → feedback → `revise` → v2 — you do **not** silently overwrite v1;
-you mint v2, present it, ask if v2 is OK, and so on until there's nothing left.
+you mint v2, present it (both links), ask if v2 is OK, and so on until the user says
+**"approve"**.
+
+**Don't assume a later revision's content propagates.** The next step consumes the
+artifact at a **specific path** the binary picks (usually the latest version). Before you
+`complete`, make sure the **approved content actually lives where the next step will read
+it** — if you edited a higher version (e.g. v2) but the next step is wired to read an
+earlier one, the downstream step silently uses stale content. When in doubt, confirm the
+latest version holds the approved text.
 
 ## Feedback → `rules.md`
 
 At `feedback` (a versioned artifact), don't apply feedback literally. Distill candidate
 **rules**, reasoning about scope (task- vs repo-specific; code-writing vs
 solution-thinking) and generalizing; confirm with `AskUserQuestion` (show a `rules.md`
-diff); the binary appends confirmed rules to each repo's `rules.md` + links it from
-`CLAUDE.md`/`AGENTS.md`. These inject into future runs.
+diff). Then you **must `complete` the step with metadata `{ "rules": ["…", …] }`** — the
+binary appends rules to each repo's `rules.md` (linked from `CLAUDE.md`/`AGENTS.md`) ONLY
+from that metadata. Omit it and nothing is recorded. These inject into future runs.
+
+## End every message with a links table
+
+**End EVERY message that presents artifacts with one SIMPLE, FLAT summary table of
+ALL the session's shareable links** — so every live artifact, plan, and run is in
+one place, one click away, easy to scan and keep track of. The audience is **ADHD +
+dyslexic**, so this table must be **minimal and uniform**: ONE row per thing, never a
+two-column **Read | Visual** layout. (Keep the inline per-artifact **Read**/**Visual**
+guidance from the body above — that's for presenting the artifact in the message; this
+end-of-message table is a single flat index of links, the one source of truth for the
+summary.)
+
+**Exact layout — one flat table, one row per link:**
+
+| Artifact | Link |
+| -------- | ---- |
+
+Use **`viewerBaseUrl`** / **`kloopBaseUrl`** (from `settings` / `kautopilot config`, defaults
+`https://kauto.ernest.atomi.cloud` / `https://kloop.ernest.atomi.cloud`) — **never hardcode a
+domain**. Build it from what the binary gives you; **never hand-construct version URLs** — use
+the exact `url`/`diffUrl` `revise` handed back for the current versioned artifacts.
+
+**Rows to include** (only the ones that apply, one row each):
+
+- **Each current versioned artifact** — spec, triage, brainstorm, feedback — using the
+  latest `revise` `url` (or `diffUrl` once a prior version exists, so they see what changed).
+- **Ticket** → `<viewerBaseUrl>/sessions/<id>/ticket` (or `…/ticket-draft` for an ad-hoc
+  draft after brainstorm).
+- **One row PER REPO that has plans** → `<viewerBaseUrl>/sessions/<id>/plans/<repo>`. The
+  plans link is **per-repo, not per-plan** — that one page tabs between all of that repo's
+  plans, and there is **no per-plan URL**. So give each _repo's_ plans a row (label it, e.g.
+  `Plans — api`); do NOT emit one row per plan with the same repo link (duplicate hrefs).
+- **One row PER kloop run** → **`<kloopBaseUrl>/kloop/<runId>`** — the kloop "plink"/permalink
+  on the **kloop** dashboard (NOT the kautopilot viewer). One row per run.
+- **PR(s)** — each repo's PR URL, **only once that repo has an open PR** (one row per repo,
+  labelled by repo); omit the row when there's no PR yet.
+
+**Concrete example** (sample rows — yours reflect the actual session state):
+
+| Artifact        | Link                                        |
+| --------------- | ------------------------------------------- |
+| Spec            | `<viewerBaseUrl>/sessions/abc123/spec/v3`   |
+| Triage          | `<viewerBaseUrl>/sessions/abc123/triage/v2` |
+| Plans — api     | `<viewerBaseUrl>/sessions/abc123/plans/api` |
+| Plans — web     | `<viewerBaseUrl>/sessions/abc123/plans/web` |
+| kloop run (api) | `<kloopBaseUrl>/kloop/run-9f2c`             |
+| PR — api        | `https://github.com/org/api/pull/42`        |
+
+(The `spec/v3` / `triage/v2` hrefs are illustrative — use the exact `url`/`diffUrl` from
+`revise`, don't build version paths by hand.)
+
+If there is genuinely nothing to link yet (e.g. the very first turn, before any
+artifact/ticket exists), say so in one line instead of an empty table.
 
 ## Rules
 
@@ -262,9 +507,16 @@ diff); the binary appends confirmed rules to each repo's `rules.md` + links it f
    `next`/`complete`/`diff`/`status`.
 8. **Never commit or create worktrees yourself.** Commits are the binary's `commit`
    sub-agent / seed-commit; worktrees (worktrunk `wt`) and cleanup are binary `code`
-   steps. You only run what `next` yields.
+   steps. You only run what `next` yields. **Wrap-up is automatic:** at the final
+   `feedback_check`, when the user confirms every PR is **fully merged**, the binary runs
+   `close_ticket` (an agent step — moves the ticket to done via `acli`/`cup`; skipped for
+   ad-hoc/`none` tickets) then `cleanup` (removes all the worktrunk worktrees AND pulls the
+   merged work into each repo's base branch). You don't move the ticket, remove worktrees,
+   or pull main by hand — just run the `close_ticket` agent step `next` yields.
 
 ## Prerequisites
 
 - `kautopilot` + `gh` CLI in PATH and authenticated; `kloop` for the default exec mode.
-- Jira: `acli` authenticated. ClickUp: MCP configured (also used to create ad-hoc tickets).
+- Jira: `acli` authenticated. ClickUp: the **`cup` CLI** (`ClickUp CLI for AI agents`) —
+  prefer it over any ClickUp MCP for reading/creating tickets (`cup task <id>`, `cup create`,
+  `cup subtasks`/`cup activity`).

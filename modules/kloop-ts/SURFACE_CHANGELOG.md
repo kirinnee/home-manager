@@ -1,5 +1,184 @@
 # Surface Area Changelog
 
+Spec: interactive-tui-harness
+Date: 2026-06-23
+
+## Summary
+
+New `settings.interactive` toggle (default `false`). When `true`, **claude-harness**
+agents (all roles) run as INTERACTIVE TUIs instead of `--print`. kloop launches the TUI
+detached in tmux, pastes the prompt via bracketed paste, then watches for a marker file
+the agent touches when done, captures the pane transcript, and sends `/exit`. Timeout
+still applies. Gemini/codex harnesses are unaffected (always `--print`).
+
+```yaml
+settings:
+  interactive: false # run claude agents as interactive TUIs (no --print)
+```
+
+Completion is detected via a `.kloop-done` marker the agent is instructed (prompt suffix)
+to `touch` as its last action. Exit-code mapping: marker seen → success; session died
+first → crash (retried); deadline hit → timeout.
+
+**Live logs.** Interactive mode has no stream-json to `tee`, so the per-agent `log` is
+sourced two ways: during startup the tmux pane is snapshotted to it each tick (so a failed
+launch is visible, not dead air); once Claude Code's own session transcript appears
+(`~/.claude*/projects/<cwd>/<sessionId>.jsonl`, found via the kloop-supplied `--session-id`
+— the `.claude*` glob also covers wrappers with a custom `CLAUDE_CONFIG_DIR`), the `log` is
+replaced with a symlink to it. That transcript is the same JSON shape `kloop view` renders,
+and since Claude only appends, `kloop view -f` byte-tailing works. `view` now also skips
+Claude's bookkeeping line types (`mode`, `attachment`, …).
+
+Trade-off: still **no token counts** in interactive mode (the session transcript has no
+`--print`-style `result` summary). For true real-time, `tmux attach -t <agent-session>`
+shows the live TUI.
+
+---
+
+Spec: nested-config-role-blocks
+Date: 2026-06-21
+
+## Summary
+
+The on-disk config moved from a FLAT layout to a NESTED role-block layout
+(`configVersion` bumped 1 → 2). `pools` is now the central registry; every role
+references pools by name.
+
+```yaml
+configVersion: 2
+maxIterations: 7
+# ── PROFILES (reusable definitions) ──
+pools:                         # the registry (was: poolProfiles)
+  claude: { claude: 1 }
+lensProfiles: { ... }          # top-level, grouped with pools (was: under reviewer)
+# ── PER-PHASE CONFIGS ──
+implementer:                   # was: implementers / implementerTimeout / implementerRetry / firstIterationWeightMultiplier
+  pools: { claude: 1 }
+  timeout: 30
+  firstIterationWeightMultiplier: 2
+  retry: { maxRetries: 2, backoffBaseMs: 5000 }
+reviewer:                      # was: reviewPhases / reviewLenses / reviewerTimeout / firstLoopFullReview / reviewerRetry
+  phases: [[ claude ]]
+  lenses: [ general ]
+  timeout: 15
+  firstLoopFullReview: true
+  retry: { maxRetries: 2, backoffBaseMs: 5000 }
+verifier:    { phases: [[ claude ]], timeout: 5 }   # was: verifyPhases / verifyTimeout / verify
+synthesizer: { pool: claude, timeout: 15 }          # was: synthesizer / synthesisTimeout / synthesis
+checkpointer:{ pool: claude, threshold: 3 }         # was: conflictChecker / conflictCheckThreshold
+# ── SETTINGS ──
+settings:                      # was: top-level flat toggles
+  synthesis: true
+  verify: true
+  rerankAfterCheckpoint: true
+  previousReviewPropagation: 0.7
+  compressSpec: false
+  snapshot: false
+prompts: { ... }               # unchanged (top-level)
+```
+
+The default template (`buildDefaultConfigYaml`) groups keys under banner-commented
+sections: **PROFILES** (pools + lensProfiles) · **PER-PHASE CONFIGS** (implementer /
+reviewer / verifier / synthesizer / checkpointer) · **SETTINGS** · **PROMPTS**.
+`lensProfiles` is top-level (grouped with pools); `flattenNestedConfig` still accepts the
+old `reviewer.lensProfiles` placement for back-compat.
+
+Internally the resolved `Config` stays FLAT — a `flattenNestedConfig` input layer
+(`src/types.ts`) maps the nested blocks to flat keys, and `nestFlatConfig` does the
+inverse for migration. Fully backward compatible: OLD flat configs (and the legacy
+`implementer`/`synthesizer` strings, `reviewers`, `reReview`, `synthesis:{enabled}`,
+`prompts.reReviewer` aliases) still parse. `migrateConfigObject` restructures a v1 file
+into v2 on load (preserving all user values + custom prompts) and persists it. Consumers
+that read config raw (dashboard `data.ts`, `kloop show config`) now flatten first.
+
+---
+
+Spec: binary-spec-suffix-syntax
+Date: 2026-06-21
+
+## Summary
+
+New trailing-suffix syntax for binary/account specs (reviewers, implementers, types):
+
+| Flag            | New     | Legacy (still parsed) | Meaning                                                                      |
+| --------------- | ------- | --------------------- | ---------------------------------------------------------------------------- |
+| First-iteration | `bin*`  | `bin::i`              | Preferred on loop 1 (gets `firstIterationWeightMultiplier`)                  |
+| Harness         | `bin:h` | `bin:h`               | Explicit harness; guessed from the binary's first word if omitted            |
+| No-verdict      | `bin!`  | `bin:0` / `bin:1`     | `!` = IGNORE a no-verdict (pass); no `!` = FAIL (reject) — default unchanged |
+
+Combos in any order: `codex-auto-gpt55:codex*!`. Fully backward compatible — all legacy
+forms (`::i`, `:0`, `:1`) still parse. Implemented in `parseImplementerConfig` /
+`parseReviewerConfig` via a shared suffix stripper; the dashboard `klBin` strips the new
+suffixes for display.
+
+---
+
+Spec: named-pool-profiles
+Date: 2026-06-21
+
+## Summary
+
+Added **named, reusable account pools** (`poolProfiles`). A reviewer/verifier type entry
+or an `implementers` key may now be a **profile name** that resolves to its pool — in
+addition to a bare binary or inline pool. Weights stay as map values (no `:` weight
+suffix). Implementers resolve a profile by load-balancing within it after the weighted
+type-rotation pick. Fully backward compatible.
+
+## New Config Fields
+
+| Field          | Type                                               | Notes                                                                                 |
+| -------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `poolProfiles` | `Record<string, Record<string,number>>` (optional) | Named pools, referenced by name from review/verify type entries and implementer keys. |
+
+## New / Changed Exports
+
+| Symbol                              | Kind     | Notes                                                           |
+| ----------------------------------- | -------- | --------------------------------------------------------------- |
+| `PoolProfiles`                      | type     | `Record<string, Record<string, number>>`                        |
+| `resolvePool(entry, profiles?)`     | function | Resolve a type entry (profile name / binary / inline) to a pool |
+| `selectFromPool(entry, profiles?)`  | function | Now takes optional `profiles` to resolve a profile name         |
+| `reviewTypeLabel(entry, profiles?)` | function | A profile reference now displays as the profile name            |
+| `selectImplementer`                 | function | A profile-name implementer key resolves to a pool account       |
+
+---
+
+Spec: matrix-reviews-lens-type-pool
+Date: 2026-06-21
+
+## Summary
+
+Reviews are now a **LENS × TYPE** matrix. A _type_ (a `reviewPhases` entry) may be a
+single binary or a weighted account **pool** that load-balances per invocation
+(separate from implementer type-rotation). A _lens_ is the review focus prompt; the
+reviewer prompt is now **plumbing (mechanics) + lens (focus)**. Every type runs every
+lens. Fully backward compatible: no `reviewLenses` ⇒ single `general` lens; a string
+type ⇒ single-account pool.
+
+## New Config Fields
+
+| Field                    | Type                               | Default       | Notes                                                |
+| ------------------------ | ---------------------------------- | ------------- | ---------------------------------------------------- |
+| `reviewLenses`           | `string[]`                         | `['general']` | Which lenses run (rows of the matrix).               |
+| `lensProfiles`           | `Record<string,string>` (optional) | —             | Override/add lens focus text; merged over built-ins. |
+| `reviewPhases[][]` entry | `string \| Record<string,number>`  | —             | A type entry may now be a weighted account pool.     |
+| `verifyPhases[][]` entry | `string \| Record<string,number>`  | —             | Verify types may be pools too (no lenses).           |
+
+## New Exports
+
+| Symbol                                                                                           | Kind       | Notes                                          |
+| ------------------------------------------------------------------------------------------------ | ---------- | ---------------------------------------------- |
+| `ReviewTypeEntry`                                                                                | type       | `string \| Record<string, number>`             |
+| `normalizeReviewType` / `reviewTypeLabel`/`selectFromPool`                                       | functions  | Pool helpers (weighted-random per invocation). |
+| `REVIEWER_PLUMBING_PROMPT` / `REVIEW_LENS_PROFILES` / `resolveLensFocus` / `DEFAULT_REVIEW_LENS` | prompt API | Reviewer prompt = plumbing + lens.             |
+
+## Behavior / Events
+
+- `reviewer_start` / `reviewer_end` events gain `reviewerIndex`, `lens`, `reviewType`.
+- `MaterializedAgentState` gains `lens`, `reviewType`; dashboards (web + CLI status) show them.
+- `buildReviewerPrompt` composes `REVIEWER_PLUMBING_PROMPT` + the lens focus (via `{lensFocus}`); a custom `prompts.reviewer` is still used verbatim.
+
+---
+
 Spec: revert-scratch-promotion-direct-global-writes
 Date: 2026-06-21
 

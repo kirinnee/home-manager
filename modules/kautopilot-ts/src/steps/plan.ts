@@ -9,6 +9,7 @@ import type {
 	StepContext,
 	StepDef,
 } from "../core/descriptor";
+import { branchTicketRef, gitUserSlug, slugifyBranch } from "../core/git";
 import type { ArtifactKind, ArtifactRef } from "../core/revisions";
 import {
 	currentRevisionPath,
@@ -171,17 +172,22 @@ const CREATE_TICKET_MECHANICS = `Create a ticket for this task in {ticketSystem}
 
 1. From the brainstorm output \`{brainstorm}\` (or, if none, the user's one-liner: "{request}"), draft a clear title and description (problem, desired outcome, any constraints). Keep it tight.
 2. Show the draft and get explicit confirmation before creating anything.
-3. Create the ticket: jira → \`acli\`; clickup → the ClickUp MCP; none → propose a local id of the form \`local-<slug>\`.
+3. Create the ticket: jira → \`acli\`; clickup → the \`cup\` CLI (\`cup create\`); none → propose a local id of the form \`local-<slug>\`.
 4. Output the created ticket id as metadata { "ticketId": "..." }. This id becomes the session key. If a ticket was already created for this task (stored id present), reuse it — never create a duplicate.`;
 
 const createTicket: StepDef = {
 	name: "create_ticket",
 	phase: "plan",
-	kind: "agent",
+	// interactive, NOT agent: the prompt requires showing the draft and getting
+	// explicit user confirmation before creating the ticket — a fresh isolated
+	// sub-agent can't talk to the user, so this must run inline in the main chat.
+	kind: "interactive",
 	scope: "session",
 	prepare: async (ctx) => {
 		const draft = join(sessionDir(ctx.sessionId), "ticket-draft.md");
-		const brainstorm = revisionPath(ctx.sessionId, "brainstorm", 1);
+		// Use the LATEST approved brainstorm, not a hardcoded v1 — the user may have
+		// revised it (e.g. v1→v2 after changing direction); the ticket must reflect that.
+		const brainstorm = currentRevisionPath(ctx.sessionId, "brainstorm").path;
 		const vars = {
 			...planVars(ctx),
 			brainstorm,
@@ -212,7 +218,7 @@ const createTicket: StepDef = {
 
 const FETCH_TICKET_MECHANICS = `Fetch ticket {ticketId} from {ticketSystem} and write it to {ticket}.
 
-- jira → use \`acli\` to read the issue; clickup → the ClickUp MCP; none → the ticket.md is the drafted title/description from create_ticket.
+- jira → use \`acli\` to read the issue; clickup → the \`cup\` CLI (\`cup task <id>\`; \`cup subtasks\`/\`cup activity\` for parent/child context); none → the ticket.md is the drafted title/description from create_ticket.
 - Walk parent/epic links when they exist and include the hierarchy for context.
 - Write the full ticket (title, description, parents) to {ticket}. Do not summarize away detail the spec writer will need.`;
 
@@ -293,6 +299,7 @@ const triage: StepDef = {
 					repos: "string[]",
 					dependsOn: "object",
 					repoPaths: "object",
+					branchSlug: "string?",
 				},
 			},
 		} satisfies PreparedStep;
@@ -305,15 +312,26 @@ const triage: StepDef = {
 		// each repo's git root (defaults to the session's primary repo otherwise).
 		const repoPaths =
 			(ctx.metadata?.repoPaths as Record<string, string> | undefined) ?? {};
+		// Branch name: `<git-user>/<ticket-id>-<slug>` (e.g. `kirinnee/PE-1234-i18n`)
+		// from the controller's apt slug (confirmed with the user post-triage). The
+		// ticket id is the variable prefix; when there's no ticket id we fall back to a
+		// literal `ticket-`. Same branch across all the task's repos. Null when no slug
+		// was supplied → seed falls back to `<repo>-<id>`.
+		const branchSlug = ctx.metadata?.branchSlug as string | undefined;
+		const slug = branchSlug ? slugifyBranch(branchSlug) : "";
 		if (repos.length > 0) {
 			updateSessionMeta(ctx.sessionId, (m) => {
+				const ticketRef = branchTicketRef(m.ticketId);
+				const branch = slug
+					? `${gitUserSlug()}/${ticketRef ? `${ticketRef}-` : "ticket-"}${slug}`
+					: null;
 				for (const repo of repos) {
 					if (!m.repos.some((r) => r.repo === repo)) {
 						m.repos.push({
 							repo,
-							repoPath: repoPaths[repo] ?? m.repoPath,
+							repoPath: repoPaths[repo] ?? m.folder,
 							worktree: null,
-							branch: null,
+							branch,
 							plans: [],
 							dependsOn: dependsOn[repo] ?? [],
 							prNumber: null,
@@ -331,6 +349,14 @@ const triage: StepDef = {
 // --- write_spec (interactive) ------------------------------------------------
 
 const SPEC_MECHANICS = `## CRITICAL: Spec Writing & Approval Mechanics
+
+### Align the GOALS first
+Before writing the spec body, align with the user on the **top-level goals** ("the
+main") — there may be ONE or several. Propose the goals, get agreement, and ONLY then
+write the spec around them. The goals are the heart of the spec; everything else
+derives from them. Give each goal a stable id (G1, G2, …). Every requirement (FR) must
+be a derivation of a goal and must cite the goal it completes (→ G1). Keep the spec
+implementation-free: minimal/no code, file paths, or function names — that's the plans.
 
 ### Working Copy
 Write the master spec to: {spec}
@@ -432,14 +458,43 @@ function latestSpecPath(ctx: StepContext): string {
 
 const PLAN_MECHANICS = `## CRITICAL: Plan Writing & Approval Mechanics
 
+### Propose the breakdown FIRST (before writing any plan bodies)
+Do NOT jump straight into writing plan files. FIRST propose the breakdown and get the user to
+approve the GRANULARITY:
+- For each repo, list the plans as **titles + a ~1-line scope each** (e.g. "repo X: 1) …, 2) …,
+  3) …") — the split only, **in chat. Do NOT create any plan files yet** (no bodies, no stubs).
+- Apply the vertical-slice rules below; the right granularity is subjective (too fine vs too
+  coarse depends on the user) — this proposal is where you ALIGN on it.
+- Only AFTER the user approves the breakdown do you write the full plan bodies for the agreed
+  set. If they change the split, re-propose before writing.
+
 ### Working Copies
 Each plan is a FOLDER of versions under the plans directory. Write each plan file to
 \`{plans}/<plan-name>/v{version}.md\`, one folder per slice, TAGGED BY REPO:
 - {plans}/plan-1/v{version}.md   (repo: <repoA>)
 - {plans}/plan-2/v{version}.md   (repo: <repoB>)
+**REQUIRED folder-naming convention:** every plan folder MUST be named \`plan-<N>\` or
+\`plan-<N>-<short-slug>\` where \`<N>\` is the plan's 1-based ordinal (\`plan-1\`,
+\`plan-2\`, … or \`plan-1-auth\`, \`plan-2-api\`). The literal \`plan-\` prefix followed by the
+number is mandatory — that ordinal is what downstream execution (\`seed\` → \`running\` →
+\`kloop init\`) uses to locate the plan's spec file. A folder missing the \`plan-<N>\` prefix
+(e.g. \`auth/\`, \`foundation/\`, or \`1-auth/\`) will NOT be found at execution time. Put any
+descriptive title in the plan body, not in place of the \`plan-<N>\` prefix.
 Every plan written in THIS round shares the same v{version} (the plan-set version).
 Each plan declares which repo it belongs to (front-matter \`repo:\` or a header line).
 Plans are vertical, committable slices — the repo tag is an additional axis.
+
+### Each plan is a self-standing VERTICAL slice
+Every plan must stand on its own: its change is PREPPED + IMPLEMENTED + VERIFIED within the
+SAME plan, ending in a single commit that stands alone (builds, passes its own verification,
+and is independently reviewable/revertable). Split by domain/feature (vertical), never by
+layer or phase. ANTI-PATTERNS — reject these:
+- ❌ Horizontal phases: plan 1 = prep/scaffold, plan 2 = implement, plan 3 = verify. There is
+  NO "foundation"/prep-only plan — each plan does its own prep AND its own verification.
+- ❌ Over-granular: "1 small change = 1 plan". Group a change with the surrounding work that
+  makes it meaningful and verifiable on its own.
+If a plan can't be committed and verified on its own, it is split wrong.
+
 Each version MUST be a complete, standalone set. Follow this template:
 {planTemplate}
 

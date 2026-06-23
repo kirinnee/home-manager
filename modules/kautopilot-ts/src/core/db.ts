@@ -9,29 +9,21 @@ function dbPath(): string {
 }
 
 const UPSERT_SQL = `
-  INSERT INTO sessions (id, repo_path, worktree, git_root, git_root_host, ticket_id, branch, local, state, created_at, updated_at)
-  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+  INSERT INTO sessions (id, folder, ticket_id, local, state, created_at, updated_at)
+  VALUES ($1, $2, $3, $4, $5, $6, $7)
   ON CONFLICT(id) DO UPDATE SET
-    repo_path = $2,
-    worktree = $3,
-    git_root = $4,
-    git_root_host = $5,
-    ticket_id = $6,
-    branch = $7,
-    local = $8,
-    state = $9,
-    updated_at = $11
+    folder = $2,
+    ticket_id = $3,
+    local = $4,
+    state = $5,
+    updated_at = $7
 `;
 
 function rowToParams(row: SessionRow): (string | number | null)[] {
 	return [
 		row.id,
-		row.repo_path,
-		row.worktree,
-		row.git_root,
-		row.git_root_host,
+		row.folder,
 		row.ticket_id,
-		row.branch,
 		row.local,
 		row.state,
 		row.created_at,
@@ -53,43 +45,73 @@ function getDb(): Database {
 		mkdirSync(dirname(path), { recursive: true });
 		db = new Database(path);
 		dbOpenedPath = path;
+		// A session is associated with a FOLDER (where `kautopilot start` ran), never
+		// a repo/worktree — those are per-repo details inside session.json. Fresh DBs
+		// get this schema directly; legacy DBs are migrated below.
 		db.exec(`
       CREATE TABLE IF NOT EXISTS sessions (
-        id             TEXT PRIMARY KEY,
-        repo_path      TEXT NOT NULL,
-        worktree       TEXT NOT NULL,
-        git_root       TEXT NOT NULL,
-        git_root_host  TEXT NOT NULL,
-        ticket_id      TEXT,
-        branch         TEXT,
-        local          INTEGER NOT NULL DEFAULT 0,
-        state          TEXT NOT NULL DEFAULT 'init',
-        created_at     TEXT NOT NULL,
-        updated_at     TEXT NOT NULL
+        id          TEXT PRIMARY KEY,
+        folder      TEXT NOT NULL,
+        ticket_id   TEXT,
+        local       INTEGER NOT NULL DEFAULT 0,
+        state       TEXT NOT NULL DEFAULT 'init',
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
       );
     `);
-		// Migrate: add state column if missing (existing DBs)
-		try {
-			db.exec(
-				"ALTER TABLE sessions ADD COLUMN state TEXT NOT NULL DEFAULT 'init'",
-			);
-		} catch {
-			// Column already exists — ignore
-		}
-		// A worktree is NOT unique to a session: many sessions can run in the same
-		// folder. Drop the legacy UNIQUE index and replace it with a plain lookup
-		// index. (DROP first so existing DBs lose the old uniqueness constraint.)
-		try {
-			db.exec("DROP INDEX IF EXISTS idx_sessions_worktree");
-		} catch {
-			// no such index — ignore
-		}
+		migrateLegacyToFolder(db);
+		// A folder hosts MANY sessions — a plain lookup index, never unique.
+		db.exec("DROP INDEX IF EXISTS idx_sessions_worktree");
 		db.exec(
-			"CREATE INDEX IF NOT EXISTS idx_sessions_worktree ON sessions(repo_path, worktree)",
+			"CREATE INDEX IF NOT EXISTS idx_sessions_folder ON sessions(folder)",
 		);
 		db.exec("PRAGMA journal_mode=WAL");
 	}
 	return db;
+}
+
+/**
+ * Migrate a legacy `sessions` table (repo_path/worktree/git_root/git_root_host/branch
+ * columns) to the folder-based schema. The session's folder is backfilled from the old
+ * `repo_path` (the cwd `start` ran in, for hub launches) — falling back to `worktree`.
+ * Idempotent: a no-op once the table already has `folder` and no `repo_path`.
+ */
+function migrateLegacyToFolder(d: Database): void {
+	const cols = d.query("PRAGMA table_info(sessions)").all() as {
+		name: string;
+	}[];
+	const names = new Set(cols.map((c) => c.name));
+	if (names.has("folder") && !names.has("repo_path")) return; // already migrated
+	if (!names.has("repo_path")) return; // unknown shape — leave it alone
+
+	d.exec("BEGIN");
+	try {
+		// Self-heal: a prior migration hard-killed between RENAME and COMMIT could
+		// leave an orphan sessions_legacy; drop it so the RENAME below doesn't collide.
+		d.exec("DROP TABLE IF EXISTS sessions_legacy");
+		d.exec("ALTER TABLE sessions RENAME TO sessions_legacy");
+		d.exec(`
+      CREATE TABLE sessions (
+        id          TEXT PRIMARY KEY,
+        folder      TEXT NOT NULL,
+        ticket_id   TEXT,
+        local       INTEGER NOT NULL DEFAULT 0,
+        state       TEXT NOT NULL DEFAULT 'init',
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+      );
+    `);
+		d.exec(`
+      INSERT INTO sessions (id, folder, ticket_id, local, state, created_at, updated_at)
+      SELECT id, COALESCE(repo_path, worktree), ticket_id, local, state, created_at, updated_at
+      FROM sessions_legacy
+    `);
+		d.exec("DROP TABLE sessions_legacy");
+		d.exec("COMMIT");
+	} catch (err) {
+		d.exec("ROLLBACK");
+		throw err;
+	}
 }
 
 export function upsertSession(row: SessionRow): void {
@@ -105,44 +127,39 @@ export function getSessionById(id: string): SessionRow | null {
 }
 
 /**
- * The single most relevant session in a worktree: a running one wins, else the
- * most recently created. Since a worktree can now host multiple sessions, this
- * is a best-effort convenience for commands that operate on "the session here"
+ * The single most relevant session in a folder: a running one wins, else the
+ * most recently created. Since a folder hosts multiple sessions, this is a
+ * best-effort convenience for commands that operate on "the session here"
  * (status/logs/stop/delete); the critical next/complete path uses
- * {@link getSessionsByWorktree} to detect ambiguity instead of guessing.
+ * {@link getSessionsByFolder} to detect ambiguity instead of guessing.
  */
-export function getSessionByWorktree(
-	repoPath: string,
-	worktree: string,
-): SessionRow | null {
+export function getSessionByFolder(folder: string): SessionRow | null {
 	const d = getDb();
+	// Most-recent wins. (The `state` column is not a liveness signal — see
+	// isSessionActive in core/status.ts; callers needing "the live one" filter on that.)
 	return d
-		.query(
-			"SELECT * FROM sessions WHERE repo_path = $1 AND worktree = $2 ORDER BY (state = 'running') DESC, created_at DESC",
-		)
-		.get(repoPath, worktree) as SessionRow | null;
+		.query("SELECT * FROM sessions WHERE folder = $1 ORDER BY created_at DESC")
+		.get(folder) as SessionRow | null;
 }
 
-/** Every session registered in a worktree (a folder may host several). */
-export function getSessionsByWorktree(
-	repoPath: string,
-	worktree: string,
-): SessionRow[] {
+/** Every session associated with a folder (a folder may host several). */
+export function getSessionsByFolder(folder: string): SessionRow[] {
 	const d = getDb();
 	return d
-		.query("SELECT * FROM sessions WHERE repo_path = $1 AND worktree = $2")
-		.all(repoPath, worktree) as SessionRow[];
+		.query("SELECT * FROM sessions WHERE folder = $1")
+		.all(folder) as SessionRow[];
 }
 
-export function listSessions(options?: { includeAll?: boolean }): SessionRow[] {
+/**
+ * Every session, most-recent first. Liveness is NOT filtered here — the DB `state`
+ * column is dead in the thin-controller model (always "running"). Callers that want
+ * only in-progress sessions filter with `isSessionActive` (core/status.ts).
+ */
+export function listSessions(): SessionRow[] {
 	const d = getDb();
-	const sessions = d
+	return d
 		.query("SELECT * FROM sessions ORDER BY created_at DESC")
 		.all() as SessionRow[];
-	if (options?.includeAll) {
-		return sessions;
-	}
-	return sessions.filter((s) => s.state === "running");
 }
 
 export function deleteSession(id: string): void {

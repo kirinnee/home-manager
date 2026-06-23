@@ -2,7 +2,17 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { parseRawConfig } from '../types';
 import type { Config, Run, HistoryEntry } from '../types';
-import { parseReviewerConfig, parseConflictCheckerConfig, parseImplementerConfig, selectImplementer } from '../types';
+import {
+  parseReviewerConfig,
+  parseConflictCheckerConfig,
+  parseImplementerConfig,
+  selectImplementer,
+  selectFromPool,
+  selectRoleAccount,
+  reviewTypeLabel,
+  resolvePool,
+} from '../types';
+import type { ReviewTypeEntry, PoolProfiles } from '../types';
 import type { StateService, TmuxService, Paths } from '../deps';
 import { getDirHash, paths as defaultPaths, nextSpecVersion } from '../deps';
 import * as consensus from './consensus';
@@ -10,7 +20,53 @@ import * as iteration from './iteration';
 import * as agents from '../agents/runner';
 import * as fmt from './format';
 import { buildVerifierPrompt } from '../agents/prompts';
+import { resolveLensFocus } from '../agents/default-prompts';
+import { migrateConfigYamlText } from '../agents/default-config';
 import type { VerifierPromptVars } from '../agents/prompts';
+
+/** One expanded reviewer invocation in the LENS × TYPE matrix. */
+interface ExpandedReviewer {
+  parsed: ReturnType<typeof parseReviewerConfig>; // the account picked from the type's pool
+  lens: string;
+  lensFocus: string;
+  reviewType: string; // type label (the account pool)
+  originalPhase: number;
+  globalIndex: number;
+}
+
+/**
+ * Expand a phase's TYPE entries into the LENS × TYPE matrix of reviewer invocations.
+ * For each type, for each lens: pick one account from the type's pool (weighted-random,
+ * load distribution) and resolve the lens focus. Backward compatible: a single
+ * 'general' lens + string types reproduces today's one-review-per-entry behavior.
+ */
+function expandPhaseReviewers(
+  phaseEntries: ReviewTypeEntry[],
+  lenses: string[],
+  lensProfiles: Record<string, string> | undefined,
+  phaseIdx: number,
+  startGlobalIndex: number,
+  poolProfiles: PoolProfiles | undefined,
+): ExpandedReviewer[] {
+  const out: ExpandedReviewer[] = [];
+  let globalIndex = startGlobalIndex;
+  for (const typeEntry of phaseEntries) {
+    const reviewType = reviewTypeLabel(typeEntry, poolProfiles);
+    for (const lens of lenses) {
+      const account = selectFromPool(typeEntry, poolProfiles);
+      out.push({
+        parsed: parseReviewerConfig(account),
+        lens,
+        lensFocus: resolveLensFocus(lens, lensProfiles),
+        reviewType,
+        originalPhase: phaseIdx,
+        globalIndex,
+      });
+      globalIndex++;
+    }
+  }
+  return out;
+}
 
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`;
@@ -97,10 +153,55 @@ export class LoopRunner {
     const YAML = await import('yaml');
     const { appendFile } = await import('fs/promises');
 
-    // Load config from global storage (YAML)
+    // Load config from global storage (YAML). Additively migrate it to the current
+    // config format (fills in explicit lens/prompt sections) and persist the upgrade.
     const configPath = this.paths.runConfig(runId);
-    const configContent = await fs.readFile(configPath, 'utf-8');
+    const rawConfigContent = await fs.readFile(configPath, 'utf-8');
+    const { text: configContent, changed: configMigrated } = migrateConfigYamlText(rawConfigContent);
+    if (configMigrated) {
+      await fs.writeFile(configPath, configContent, 'utf-8');
+    }
     const config = parseRawConfig(YAML.parse(configContent));
+
+    // Fail loud up front (before spending an implementer iteration) if a configured
+    // review lens is unknown — resolveLensFocus throws a clear, listing error.
+    for (const lens of config.reviewLenses) {
+      resolveLensFocus(lens, config.lensProfiles);
+    }
+
+    // Warn if a custom reviewer template has no {lensFocus} slot but multiple lenses are
+    // configured — the lens text can't be spliced in, so every lens would run the SAME
+    // prompt (N identical reviewers). Built-in plumbing always has the slot.
+    if (
+      config.reviewLenses.length > 1 &&
+      config.prompts?.reviewer !== undefined &&
+      !config.prompts.reviewer.includes('{lensFocus}')
+    ) {
+      console.warn(
+        `⚠ config.prompts.reviewer has no {lensFocus} slot but ${config.reviewLenses.length} lenses are configured — ` +
+          `lenses cannot be applied and every lens would run an identical reviewer. ` +
+          `Add {lensFocus} to the reviewer prompt, or set reviewLenses to a single lens.`,
+      );
+    }
+
+    // When poolProfiles is in use, surface string review/verify entries and implementer
+    // keys that DON'T match a defined profile — they're launched as bare binaries, so a
+    // typo'd or renamed profile reference shows here instead of failing opaquely mid-run.
+    const profileNames = new Set(Object.keys(config.poolProfiles ?? {}));
+    if (profileNames.size > 0) {
+      const stringEntries = [
+        ...config.reviewPhases.flat(),
+        ...config.verifyPhases.flat(),
+        ...Object.keys(config.implementers),
+      ].filter((e): e is string => typeof e === 'string');
+      const asBinaries = [...new Set(stringEntries)].filter(e => !profileNames.has(e.replace(/::i$/, '')));
+      if (asBinaries.length > 0) {
+        console.warn(
+          `ℹ poolProfiles is set; these entries are treated as binaries (not profiles): ${asBinaries.join(', ')}. ` +
+            `If any is a typo of a profile name, fix it — otherwise this is expected.`,
+        );
+      }
+    }
 
     // Load spec from global storage
     const specPath = this.paths.runSpec(runId);
@@ -520,7 +621,7 @@ export class LoopRunner {
     dirHash: string,
     iterData: iteration.IterationData,
     writeEvent: (event: Record<string, unknown>) => Promise<void>,
-    overridePhases?: string[][],
+    overridePhases?: ReviewTypeEntry[][],
   ): Promise<agents.ReviewerResult[]> {
     const reviewPhases = overridePhases ?? config.reviewPhases ?? [['claude-auto-zai']];
     const specPath = this.paths.runSpec(runId);
@@ -555,26 +656,29 @@ export class LoopRunner {
     iterNum: number,
     dirHash: string,
     specPath: string,
-    reviewPhases: string[][],
+    reviewPhases: ReviewTypeEntry[][],
     writeEvent: (event: Record<string, unknown>) => Promise<void>,
   ): Promise<agents.ReviewerResult[]> {
-    const allReviewers: Array<{
-      parsed: ReturnType<typeof parseReviewerConfig>;
-      originalPhase: number;
-      globalIndex: number;
-    }> = [];
+    // Expand every phase into the LENS × TYPE matrix (pool account picked per invocation).
+    const allReviewers: ExpandedReviewer[] = [];
     let globalIndex = 0;
-
     for (let phaseIdx = 0; phaseIdx < reviewPhases.length; phaseIdx++) {
-      for (const entry of reviewPhases[phaseIdx] ?? []) {
-        allReviewers.push({ parsed: parseReviewerConfig(entry), originalPhase: phaseIdx, globalIndex });
-        globalIndex++;
-      }
+      const expanded = expandPhaseReviewers(
+        reviewPhases[phaseIdx] ?? [],
+        config.reviewLenses,
+        config.lensProfiles,
+        phaseIdx,
+        globalIndex,
+        config.poolProfiles,
+      );
+      allReviewers.push(...expanded);
+      globalIndex += expanded.length;
     }
+    const byIndex = new Map<number, ExpandedReviewer>(allReviewers.map(r => [r.globalIndex, r]));
 
     // Write review_phase_start events for each original phase so the
     // materializer creates phase records that reviewer events can attach to.
-    const reviewersByPhase = new Map<number, typeof allReviewers>();
+    const reviewersByPhase = new Map<number, ExpandedReviewer[]>();
     for (const r of allReviewers) {
       if (!reviewersByPhase.has(r.originalPhase)) reviewersByPhase.set(r.originalPhase, []);
       reviewersByPhase.get(r.originalPhase)!.push(r);
@@ -600,7 +704,7 @@ export class LoopRunner {
       prevLoop !== null ? `${this.paths.loopSynthesisPath(runId, prevLoop)}/review-summary.md` : undefined;
 
     const allPrompts: Array<{ reviewerIndex: number; prompt: string; propagated: boolean }> = allReviewers.map(
-      ({ globalIndex: idx }) => {
+      ({ globalIndex: idx, lensFocus }) => {
         const seesPrev = prevLoop !== null && Math.random() < (config.previousReviewPropagation ?? 0);
         return {
           reviewerIndex: idx,
@@ -614,6 +718,7 @@ export class LoopRunner {
             learningsFile,
             archivedReviews: seesPrev && !config.synthesis ? this.paths.loopReviewsPath(runId, prevLoop) : null,
             previousSummaryPath: seesPrev && config.synthesis ? prevSummaryPath : undefined,
+            lensFocus,
           }),
           propagated: seesPrev,
         };
@@ -621,7 +726,7 @@ export class LoopRunner {
     );
 
     // Write reviewer_start events for all reviewers
-    for (const { parsed, originalPhase } of allReviewers) {
+    for (const { parsed, originalPhase, lens, reviewType, globalIndex: rvIndex } of allReviewers) {
       await writeEvent({
         type: 'reviewer_start',
         timestamp: new Date().toISOString(),
@@ -629,6 +734,9 @@ export class LoopRunner {
         phase: originalPhase,
         reviewer: parsed.binary,
         harness: parsed.harness,
+        reviewerIndex: rvIndex,
+        lens,
+        reviewType,
       });
     }
 
@@ -646,13 +754,12 @@ export class LoopRunner {
         const propagated = promptMeta?.propagated ?? false;
         r.propagated = propagated;
         // Use originalPhase for the event so downstream grouping is correct
-        const entry = allReviewers.find(e => e.globalIndex === r.reviewerIndex);
-        const originalPhase = entry?.originalPhase ?? 0;
+        const entry = byIndex.get(r.reviewerIndex);
         await writeEvent({
           type: 'reviewer_end',
           timestamp: new Date().toISOString(),
           loop: iterNum,
-          phase: originalPhase,
+          phase: entry?.originalPhase ?? 0,
           reviewer: r.binary,
           harness: r.harness,
           exitCode: r.exitCode,
@@ -661,13 +768,16 @@ export class LoopRunner {
           verdict: r.verdict,
           completionEstimate: r.completionEstimate,
           propagated,
+          reviewerIndex: r.reviewerIndex,
+          lens: entry?.lens,
+          reviewType: entry?.reviewType,
         });
       },
     });
 
     // Stamp each result with its original phase for correct grouping downstream
     for (const r of allResults) {
-      const entry = allReviewers.find(e => e.globalIndex === r.reviewerIndex);
+      const entry = byIndex.get(r.reviewerIndex);
       if (entry) {
         r.phaseIndex = entry.originalPhase;
       }
@@ -716,14 +826,23 @@ export class LoopRunner {
     iterNum: number,
     dirHash: string,
     specPath: string,
-    reviewPhases: string[][],
+    reviewPhases: ReviewTypeEntry[][],
     writeEvent: (event: Record<string, unknown>) => Promise<void>,
   ): Promise<agents.ReviewerResult[]> {
     const allResults: agents.ReviewerResult[] = [];
     let globalReviewerIndex = 0;
 
     for (let phaseIdx = 0; phaseIdx < reviewPhases.length; phaseIdx++) {
-      const phaseReviewers = (reviewPhases[phaseIdx] ?? []).map(parseReviewerConfig);
+      // Expand this phase into the LENS × TYPE matrix (pool account picked per invocation).
+      const phaseReviewers = expandPhaseReviewers(
+        reviewPhases[phaseIdx] ?? [],
+        config.reviewLenses,
+        config.lensProfiles,
+        phaseIdx,
+        globalReviewerIndex,
+        config.poolProfiles,
+      );
+      const byIndex = new Map<number, ExpandedReviewer>(phaseReviewers.map(r => [r.globalIndex, r]));
 
       // Write review_phase_start event
       await writeEvent({
@@ -731,7 +850,7 @@ export class LoopRunner {
         timestamp: new Date().toISOString(),
         loop: iterNum,
         phase: phaseIdx,
-        reviewers: phaseReviewers.map(r => r.binary),
+        reviewers: phaseReviewers.map(r => r.parsed.binary),
       });
 
       // Build prompts — roll determines if reviewer sees any previous loop context
@@ -743,20 +862,21 @@ export class LoopRunner {
       const prevSummary =
         prevLoop !== null ? `${this.paths.loopSynthesisPath(runId, prevLoop)}/review-summary.md` : undefined;
       const phasePrompts: Array<{ reviewerIndex: number; prompt: string; propagated: boolean }> = phaseReviewers.map(
-        (_, i) => {
+        rv => {
           const seesPrev = prevLoop !== null && Math.random() < (config.previousReviewPropagation ?? 0);
           return {
-            reviewerIndex: globalReviewerIndex + i,
+            reviewerIndex: rv.globalIndex,
             prompt: iteration.buildReviewerPrompt(config.prompts?.reviewer, {
               specPath,
               iteration: String(iterNum),
-              reviewerIndex: String(globalReviewerIndex + i),
+              reviewerIndex: String(rv.globalIndex),
               reviewsDir,
               verdictsDir,
               evidenceDir,
               learningsFile,
               archivedReviews: seesPrev && !config.synthesis ? this.paths.loopReviewsPath(runId, prevLoop) : null,
               previousSummaryPath: seesPrev && config.synthesis ? prevSummary : undefined,
+              lensFocus: rv.lensFocus,
             }),
             propagated: seesPrev,
           };
@@ -764,14 +884,17 @@ export class LoopRunner {
       );
 
       // Write reviewer_start events for all reviewers before launching
-      for (const rc of phaseReviewers) {
+      for (const rv of phaseReviewers) {
         await writeEvent({
           type: 'reviewer_start',
           timestamp: new Date().toISOString(),
           loop: iterNum,
           phase: phaseIdx,
-          reviewer: rc.binary,
-          harness: rc.harness,
+          reviewer: rv.parsed.binary,
+          harness: rv.parsed.harness,
+          reviewerIndex: rv.globalIndex,
+          lens: rv.lens,
+          reviewType: rv.reviewType,
         });
       }
 
@@ -781,7 +904,7 @@ export class LoopRunner {
         iteration: iterNum,
         dirHash,
         phaseIndex: phaseIdx,
-        reviewers: phaseReviewers,
+        reviewers: phaseReviewers.map(r => r.parsed),
         prompts: phasePrompts,
         timeout: config.reviewerTimeout,
         onReviewerEnd: async (r: agents.ReviewerResult) => {
@@ -789,6 +912,7 @@ export class LoopRunner {
           const promptMeta = phasePrompts.find(p => p.reviewerIndex === r.reviewerIndex);
           const propagated = promptMeta?.propagated ?? false;
           r.propagated = propagated;
+          const entry = byIndex.get(r.reviewerIndex);
           await writeEvent({
             type: 'reviewer_end',
             timestamp: new Date().toISOString(),
@@ -802,6 +926,9 @@ export class LoopRunner {
             verdict: r.verdict,
             completionEstimate: r.completionEstimate,
             propagated,
+            reviewerIndex: r.reviewerIndex,
+            lens: entry?.lens,
+            reviewType: entry?.reviewType,
           });
         },
       });
@@ -812,7 +939,7 @@ export class LoopRunner {
       // Print reviewer results
       fmt.formatReviewPhaseStart(
         phaseIdx,
-        phaseReviewers.map(r => r.binary),
+        phaseReviewers.map(r => r.parsed.binary),
       );
       for (const r of phaseResults) {
         fmt.formatReviewerResult(r.reviewerIndex, r.binary, r.verdict, r.completionEstimate, r.durationMs);
@@ -955,7 +1082,7 @@ export class LoopRunner {
 
     const previousSummaryPath =
       iterData.reviewSummaryPath ?? `${this.paths.loopSynthesisPath(runId, loopNum - 1)}/review-summary.md`;
-    const binary = config.synthesizer;
+    const binary = selectRoleAccount(config.synthesizer, config.poolProfiles);
 
     // Write synthesis_start event (reuses same event type)
     const implParsed = parseImplementerConfig(binary ?? Object.keys(config.implementers)[0]);
@@ -1020,7 +1147,11 @@ export class LoopRunner {
     let globalReviewerIndex = 0;
 
     for (let phaseIdx = 0; phaseIdx < verifyPhases.length; phaseIdx++) {
-      const phaseReviewers = (verifyPhases[phaseIdx] ?? []).map(parseReviewerConfig);
+      // Verify types support account pools (load distribution) but no lenses — one
+      // verifier per type. Pick one account from each type's pool per invocation.
+      const phaseReviewers = (verifyPhases[phaseIdx] ?? []).map(entry =>
+        parseReviewerConfig(selectFromPool(entry, config.poolProfiles)),
+      );
 
       await writeEvent({
         type: 'verify_phase_start',
@@ -1122,7 +1253,7 @@ export class LoopRunner {
 
     const previousSummaryPath =
       loopNum > 1 ? `${this.paths.loopSynthesisPath(runId, loopNum - 1)}/review-summary.md` : null;
-    const binary = config.synthesizer;
+    const binary = selectRoleAccount(config.synthesizer, config.poolProfiles);
 
     // Write synthesis_start event
     const implParsed = parseImplementerConfig(binary ?? Object.keys(config.implementers)[0]);
@@ -1178,7 +1309,7 @@ export class LoopRunner {
     writeEvent: (event: Record<string, unknown>) => Promise<void>,
     agentRunner: agents.AgentRunner,
   ): Promise<{ checkpointRan: boolean; consecutiveFailures: number }> {
-    const cpBinary = config.conflictChecker ?? implBinary;
+    const cpBinary = selectRoleAccount(config.conflictChecker, config.poolProfiles) ?? implBinary;
     const cpParsed = parseConflictCheckerConfig(cpBinary);
     await writeEvent({
       type: 'checkpoint_start',
@@ -1252,12 +1383,12 @@ export class LoopRunner {
    * Reviewers with highest trouble scores (rejections*10 + (100-avgCompletion)/10 + errors*5) go first.
    * Called only after a checkpoint has run; uses previous loop summaries for scoring.
    */
-  private getReorganizedPhases(config: Config, runId: string, currentLoopNum: number): string[][] | null {
+  private getReorganizedPhases(config: Config, runId: string, currentLoopNum: number): ReviewTypeEntry[][] | null {
     if (!config.rerankAfterCheckpoint) return null;
     if (currentLoopNum <= 1) return null;
 
     const reviewPhases = config.reviewPhases ?? [['claude-auto-zai']];
-    const flatReviewers = reviewPhases.flat();
+    const flatReviewers: ReviewTypeEntry[] = reviewPhases.flat();
 
     // Build trouble scores from previous loop summaries
     // Map: binary name -> { rejections, totalCompletion, errors, count }
@@ -1295,47 +1426,57 @@ export class LoopRunner {
 
     if (reviewerStats.size === 0) return null;
 
-    // Map from config string (e.g., "claude:claude:1") to trouble score
-    const troubleScores = new Map<string, number>();
-    const scoreDetails: fmt.RerankScore[] = [];
-    for (const reviewerConfig of flatReviewers) {
-      // Extract binary name from config string to match summary binary names
-      const parsed = parseReviewerConfig(reviewerConfig);
-      const binaryName = parsed.binary;
-      const stats = reviewerStats.get(binaryName);
-      if (stats) {
-        const avgCompletion = stats.count > 0 ? stats.totalCompletion / stats.count : 100;
-        const score = stats.rejections * 10 + (100 - avgCompletion) / 10 + stats.errors * 5;
-        troubleScores.set(reviewerConfig, score);
-        scoreDetails.push({
-          reviewer: reviewerConfig,
-          score: Math.round(score),
-          rejections: stats.rejections,
-          avgCompletion,
-          errors: stats.errors,
-          loopsSampled: stats.count,
-        });
+    // Score each TYPE by aggregating the trouble stats of all accounts in its pool
+    // (the summary records per-account binary names). Keep entries as units so pooled
+    // types move between phases intact.
+    const scored = flatReviewers.map(entry => {
+      const accounts = Object.keys(resolvePool(entry, config.poolProfiles));
+      let rejections = 0;
+      let totalCompletion = 0;
+      let errors = 0;
+      let count = 0;
+      for (const account of accounts) {
+        const binaryName = parseReviewerConfig(account).binary;
+        const stats = reviewerStats.get(binaryName);
+        if (stats) {
+          rejections += stats.rejections;
+          totalCompletion += stats.totalCompletion;
+          errors += stats.errors;
+          count += stats.count;
+        }
       }
-    }
-
-    // Sort reviewers by trouble score descending
-    const sorted = [...flatReviewers].sort((a, b) => {
-      const scoreA = troubleScores.get(a) ?? 0;
-      const scoreB = troubleScores.get(b) ?? 0;
-      return scoreB - scoreA;
+      const avgCompletion = count > 0 ? totalCompletion / count : 100;
+      const score = count > 0 ? rejections * 10 + (100 - avgCompletion) / 10 + errors * 5 : 0;
+      return { entry, score, rejections, avgCompletion, errors, count };
     });
 
-    // Distribute into same number of phases as original
+    // No type had any stats — nothing to rerank on.
+    if (scored.every(s => s.count === 0)) return null;
+
+    // Sort types by trouble score descending, then redistribute into the same #phases.
+    const sorted = [...scored].sort((a, b) => b.score - a.score);
     const numPhases = reviewPhases.length;
     const perPhase = Math.ceil(sorted.length / numPhases);
-    const newPhases: string[][] = [];
+    const newPhases: ReviewTypeEntry[][] = [];
     for (let i = 0; i < numPhases; i++) {
-      newPhases.push(sorted.slice(i * perPhase, (i + 1) * perPhase));
+      const slice = sorted.slice(i * perPhase, (i + 1) * perPhase).map(s => s.entry);
+      if (slice.length > 0) newPhases.push(slice); // never emit an empty phase
     }
 
-    // Sort score details to match final ordering
-    scoreDetails.sort((a, b) => b.score - a.score);
-    fmt.formatDynamicOrdering(newPhases, scoreDetails);
+    const scoreDetails: fmt.RerankScore[] = sorted
+      .filter(s => s.count > 0)
+      .map(s => ({
+        reviewer: reviewTypeLabel(s.entry, config.poolProfiles),
+        score: Math.round(s.score),
+        rejections: s.rejections,
+        avgCompletion: s.avgCompletion,
+        errors: s.errors,
+        loopsSampled: s.count,
+      }));
+    fmt.formatDynamicOrdering(
+      newPhases.map(p => p.map(e => reviewTypeLabel(e, config.poolProfiles))),
+      scoreDetails,
+    );
 
     return newPhases;
   }

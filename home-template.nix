@@ -148,14 +148,17 @@ rec {
       };
       auto-kirin = imported.mkAutoClaudeAccount {
         provider = "anthropic";
+        manualAuth = true;
         directoryRules = personalDirs;
       };
       auto-liftoff = imported.mkAutoClaudeAccount {
         provider = "anthropic";
+        manualAuth = true;
         directoryRules = workDirs;
       };
       auto-atomi = imported.mkAutoClaudeAccount {
         provider = "anthropic";
+        manualAuth = true;
         directoryRules = [ "~/Workspace/atomi" ];
       };
       auto-market = imported.mkAutoClaudeAccount {
@@ -438,9 +441,16 @@ rec {
       # liftoff
       awscli2
       pkgs-unstable.acli
-      # gimme-aws-creds 2.8.2 test phase is broken against okta 3.1.0 in 26.05
-      # (tests/test_main.py: cannot import APIClient); runtime is fine, so skip checks.
-      (gimme-aws-creds.overridePythonAttrs (_: { doCheck = false; }))
+      # gimme-aws-creds 2.8.2 requires okta >=2.9.0,<3.0.0, but nixpkgs 26.05
+      # ships okta 3.1.0 (APIClient -> ApiClient, restructured SDK), which breaks
+      # it at runtime. Rebuild it against a pinned okta 2.9.13. See nix/okta-2.9.13.nix.
+      ((gimme-aws-creds.override {
+        python3 = pkgs.python3.override {
+          packageOverrides = pyfinal: pyprev: {
+            okta = pyfinal.callPackage ./nix/okta-2.9.13.nix { };
+          };
+        };
+      }).overridePythonAttrs (_: { doCheck = false; }))
       ssm-session-manager-plugin
 
       # oracle cloud
@@ -496,6 +506,26 @@ rec {
   # Background services #
   #######################
   services = (if profile.kernel == "linux" then linuxService else { });
+
+  ###########################################
+  # kloop dashboard (native, always-on)     #
+  ###########################################
+  # Run `kloop serve` natively under launchd instead of the dockerized `kloop dash`.
+  # The viewer's crash detection calls process.kill(pid, 0); inside the dash container
+  # the host PID is invisible (separate PID namespace, and on macOS the container lives
+  # in a Linux VM), so every running run shows as "crashed". Serving natively keeps the
+  # PID check on the same host, so status is correct. KeepAlive = always-on + auto-restart.
+  launchd.agents.kloop-serve = lib.mkIf (profile.kernel == "darwin") {
+    enable = true;
+    config = {
+      ProgramArguments = [ "${kloop}/bin/kloop" "serve" "--port" "47316" ];
+      RunAtLoad = true;
+      KeepAlive = true;
+      # ~/Library/Logs always exists; launchd does not create missing parent dirs.
+      StandardOutPath = "${home.homeDirectory}/Library/Logs/kloop-serve.out.log";
+      StandardErrorPath = "${home.homeDirectory}/Library/Logs/kloop-serve.err.log";
+    };
+  };
 
   ##########################
   # Program Configurations #

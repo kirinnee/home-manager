@@ -1,18 +1,34 @@
+import { resolveConfig } from "../core/config";
 import type { ArtifactKind } from "../core/revisions";
 import {
 	getDiff,
 	getDoc,
+	getHtmlDoc,
 	getPlan,
+	getPlanHtml,
 	getSessionDetail,
 	isDocKind,
-	kloopDescribe,
-	listKloopDir,
-	listKloopRuns,
 	listSessionSummaries,
-	readKloopFile,
 	storeFingerprint,
 } from "./data";
 import { SHELL_HTML } from "./page";
+
+// The SPA shell with the configured kloop dashboard base URL injected, so
+// session→kloop-run links target the configured `settings.kloopBaseUrl` (D3).
+// Cached: config changes take effect on server restart.
+let _shell: string | null = null;
+function servedShell(): string {
+	if (_shell == null) {
+		let base = "https://kloop.ernest.atomi.cloud";
+		try {
+			base = resolveConfig().settings.kloopBaseUrl;
+		} catch {
+			// no config file yet — fall back to the default domain
+		}
+		_shell = SHELL_HTML.replace("__KLOOP_BASE__", JSON.stringify(base));
+	}
+	return _shell;
+}
 
 // ============================================================================
 // The request router for `kautopilot serve`. /api/* returns JSON read fresh
@@ -37,6 +53,20 @@ function html(body: string, status = 200): Response {
 		headers: {
 			"content-type": "text/html; charset=utf-8",
 			"cache-control": "no-store",
+		},
+	});
+}
+
+// Serve a machine-generated infographic full-page. It's served same-origin (no
+// iframe sandbox anymore), so block scripts via CSP to keep the "no JS" guarantee
+// — the generated HTML is inline-CSS only and must never execute script.
+function visualHtml(body: string): Response {
+	return new Response(body, {
+		headers: {
+			"content-type": "text/html; charset=utf-8",
+			"cache-control": "no-store",
+			"content-security-policy":
+				"default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; script-src 'none'",
 		},
 	});
 }
@@ -98,7 +128,6 @@ function eventsStream(): Response {
 		},
 	});
 }
-
 /** Route the /api/* surface. Returns null when the path is not an API route. */
 function handleApi(parts: string[], url: URL): Response | null {
 	// /api/events — SSE live-reload stream.
@@ -106,29 +135,6 @@ function handleApi(parts: string[], url: URL): Response | null {
 		return eventsStream();
 	}
 
-	// /api/kloop/* — the kloop run viewer (proxies the local kloop CLI + ~/.kloop).
-	if (parts[1] === "kloop") {
-		// /api/kloop/runs
-		if (parts.length === 3 && parts[2] === "runs") {
-			return json(listKloopRuns());
-		}
-		// /api/kloop/runs/:id — structured describe
-		if (parts.length === 4 && parts[2] === "runs") {
-			const detail = kloopDescribe(decodeURIComponent(parts[3]));
-			return detail ? json(detail) : notFoundJson();
-		}
-		// /api/kloop/file?path=<rel> — raw file under ~/.kloop
-		if (parts.length === 3 && parts[2] === "file") {
-			const rel = url.searchParams.get("path") ?? "";
-			return json({ content: readKloopFile(rel) });
-		}
-		// /api/kloop/dir?path=<rel> — directory listing under ~/.kloop
-		if (parts.length === 3 && parts[2] === "dir") {
-			const rel = url.searchParams.get("path") ?? "";
-			return json(listKloopDir(rel));
-		}
-		return notFoundJson();
-	}
 	// /api/sessions
 	if (parts.length === 2 && parts[1] === "sessions") {
 		return json(listSessionSummaries());
@@ -147,8 +153,8 @@ function handleApi(parts: string[], url: URL): Response | null {
 	// /api/sessions/:id/doc/:kind[/v/:n]
 	if (section === "doc") {
 		const kind = parts[4];
-		if (kind === "ticket") {
-			const doc = getDoc(id, "ticket");
+		if (kind === "ticket" || kind === "ticket-draft") {
+			const doc = getDoc(id, kind);
 			return doc ? json(doc) : notFoundJson();
 		}
 		if (!kind || !isDocKind(kind)) return notFoundJson();
@@ -156,6 +162,32 @@ function handleApi(parts: string[], url: URL): Response | null {
 			parts[5] === "v" && parts[6] ? Number.parseInt(parts[6], 10) : undefined;
 		const doc = getDoc(id, kind, version);
 		return doc ? json(doc) : notFoundJson();
+	}
+
+	// /api/sessions/:id/html/:kind[/v/:n] — the raw HTML infographic full page.
+	// Plans variant: /api/sessions/:id/html/plans/:repo/:plan[/v/:n] (one per plan).
+	if (section === "html") {
+		const kind = parts[4];
+		if (kind === "plans") {
+			const repo = parts[5] ? decodeURIComponent(parts[5]) : "";
+			const plan = parts[6] ? decodeURIComponent(parts[6]) : "";
+			if (!repo || !plan) return notFoundJson();
+			const version =
+				parts[7] === "v" && parts[8]
+					? Number.parseInt(parts[8], 10)
+					: undefined;
+			const content = getPlanHtml(id, repo, plan, version);
+			return content
+				? visualHtml(content)
+				: new Response("No visual version yet", { status: 404 });
+		}
+		if (!kind || !isDocKind(kind)) return notFoundJson();
+		const version =
+			parts[5] === "v" && parts[6] ? Number.parseInt(parts[6], 10) : undefined;
+		const content = getHtmlDoc(id, kind as ArtifactKind, version);
+		return content
+			? visualHtml(content)
+			: new Response("No visual version yet", { status: 404 });
 	}
 
 	// /api/sessions/:id/plans/:repo[/v/:n]
@@ -203,7 +235,7 @@ export function handleRequest(req: Request): Response {
 			return handleApi(parts, url) ?? notFoundJson();
 		}
 		// Every other path returns the SPA shell (stable, reload-safe URLs).
-		return html(SHELL_HTML);
+		return html(servedShell());
 	} catch (err) {
 		// A thrown error mid-request (e.g. a transient fs error reading
 		// ~/.kautopilot) must return a 500 rather than crash the server process.

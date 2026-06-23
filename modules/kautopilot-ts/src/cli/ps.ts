@@ -1,9 +1,42 @@
 import { Command } from "commander";
 import { listSessions } from "../core/db";
 import { checkLock } from "../core/lock";
-import { type Lpsm, readSessionMeta } from "../core/session-meta";
-import { ensureStatus, getCurrentKloopRunId } from "../core/status";
+import {
+	type Lpsm,
+	readSessionMeta,
+	type SessionMeta,
+} from "../core/session-meta";
+import {
+	ensureStatus,
+	getCurrentKloopRunId,
+	isSessionActive,
+} from "../core/status";
 import { formatPhase, parseRepoHost } from "../util/format";
+
+/**
+ * Derive the org / repo / branch display fields for a session row. A session is
+ * associated with a FOLDER, not a repo — the real org/repo/branch live in
+ * session.json (`meta`): org on the session, repo names + branch per entry in
+ * `meta.repos`. The `folder` path is only a weak fallback for `org`/`repo` when a
+ * session has no meta yet (parseRepoHost of a filesystem path is usually "?").
+ *
+ * @public Exported for unit tests; used internally by `runPs`.
+ */
+export function psDisplayFields(
+	meta: SessionMeta | null,
+	folder: string,
+): { org: string; repo: string; branch: string } {
+	const parsed = parseRepoHost(folder);
+	const org = meta?.org ?? parsed.org;
+	const repo =
+		meta && meta.repos.length > 0
+			? meta.repos.map((r) => r.repo).join(",")
+			: parsed.repo === "?"
+				? "—"
+				: parsed.repo;
+	const branch = meta?.repos.find((r) => r.branch)?.branch ?? "—";
+	return { org, repo, branch };
+}
 
 /**
  * Does a session match all the given query tags? A query tag matches when its
@@ -43,7 +76,7 @@ const c = {
 
 export function createPsCommand(): Command {
 	return new Command("ps")
-		.option("--repo <origin>", "Filter by git root (substring match)")
+		.option("--folder <path>", "Filter by associated folder (substring match)")
 		.option("-a, --all", "Include stopped/completed sessions")
 		.option(
 			"--tag <value>",
@@ -54,7 +87,7 @@ export function createPsCommand(): Command {
 		.option("--json", "Machine-readable output")
 		.action(
 			async (opts: {
-				repo?: string;
+				folder?: string;
 				all?: boolean;
 				tag?: string[];
 				json?: boolean;
@@ -70,34 +103,39 @@ export function createPsCommand(): Command {
 }
 
 async function runPs(opts: {
-	repo?: string;
+	folder?: string;
 	all?: boolean;
 	tag?: string[];
 	json?: boolean;
 }): Promise<void> {
-	const sessions = listSessions({ includeAll: true });
+	const sessions = listSessions();
 	const tags = opts.tag ?? [];
 	const tagging = tags.length > 0;
 
-	// Filter by repo
+	// Filter by folder (substring match — catches a hub dir and anything under it)
 	let filtered = sessions;
-	if (opts.repo) {
-		const repoFilter = opts.repo.toLowerCase();
-		filtered = sessions.filter((s) => s.git_root_host.includes(repoFilter));
+	if (opts.folder) {
+		const folderFilter = opts.folder.toLowerCase();
+		filtered = sessions.filter((s) =>
+			s.folder.toLowerCase().includes(folderFilter),
+		);
 	}
 
-	// Tag-filtering implies considering all sessions, not just running ones.
-	const runningRows = filtered.filter(
-		(session) => opts.all || tagging || checkLock(session.id).locked,
+	// Default view = ACTIVE (in-progress) sessions — `isSessionActive` reads the real
+	// materialized status, not the dead DB `state` column, and not just the
+	// held-this-instant lock (a thin-controller session rarely holds the lock). `-a`
+	// or tag-filtering widens to all sessions.
+	const visibleRows = filtered.filter(
+		(session) => opts.all || tagging || isSessionActive(session.id),
 	);
 
 	// Apply tag filter: matches against structured LPSM fields OR free-form tags.
 	const taggedRows = tagging
-		? runningRows.filter((session) => {
+		? visibleRows.filter((session) => {
 				const meta = readSessionMeta(session.id);
 				return matchesTags(meta?.lpsm, meta?.tags, tags);
 			})
-		: runningRows;
+		: visibleRows;
 
 	if (taggedRows.length === 0) {
 		console.log("No sessions found.");
@@ -107,8 +145,8 @@ async function runPs(opts: {
 	const rows = taggedRows.map((session) => {
 		const lockInfo = checkLock(session.id);
 		const status = ensureStatus(session.id);
-		const { org, repo } = parseRepoHost(session.git_root_host);
 		const meta = readSessionMeta(session.id);
+		const { org, repo, branch } = psDisplayFields(meta, session.folder);
 		const lpsm = meta?.lpsm;
 		const tags = meta?.tags ?? null;
 
@@ -148,11 +186,10 @@ async function runPs(opts: {
 			repo,
 			lpsm: lpsm ?? null,
 			tags,
-			branch: session.branch || "—",
+			branch,
 			phase: status.phase,
 			step: status.state,
 			stepType: status.stepType,
-			userTurn: status.userTurn,
 			running: isRunning,
 			completed: !isRunning && status.phases.polish.status === "completed",
 			elapsed,
@@ -182,7 +219,6 @@ async function runPs(opts: {
 		step: 18,
 		plan: 7,
 		kloop: 9,
-		turn: 8,
 	};
 
 	// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional ANSI escape stripping
@@ -218,8 +254,7 @@ async function runPs(opts: {
 		p("PHASE", cols.phase) +
 		p("STEP", cols.step) +
 		p("PLAN", cols.plan) +
-		p("KLOOP", cols.kloop) +
-		"TURN";
+		"KLOOP";
 
 	console.log(header);
 
@@ -234,13 +269,6 @@ async function runPs(opts: {
 			: row.stepType
 				? `${row.step} (${row.stepType})`
 				: row.step || "—";
-		// interactive = user's turn; agent = LLM's turn; code = no turn.
-		const turnText =
-			!done && row.userTurn === true
-				? "user's"
-				: !done && row.stepType === "agent"
-					? "LLM's"
-					: "—";
 
 		const line =
 			p(row.id, cols.session) +
@@ -251,8 +279,7 @@ async function runPs(opts: {
 			p(phaseText, cols.phase) +
 			p(stepText, cols.step) +
 			p(row.planCol, cols.plan) +
-			p(row.kloopCol, cols.kloop) +
-			turnText.padEnd(cols.turn);
+			row.kloopCol;
 
 		console.log(line);
 	}

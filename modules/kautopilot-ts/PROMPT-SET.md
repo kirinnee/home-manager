@@ -845,9 +845,11 @@ The full verbatim bodies are large and unchanged from `src/core/types.ts`:
 Vars: `{specPath}`, `{iteration}`, `{loop}`, `{reviewsDir}`, `{reviewSummaryPath}`,
 `{learningsFile}`, `{scratchDir}`, `{evidenceDir}`, `{verdictsDir}`, `{verifyDir}`,
 `{reviewerIndex}`, `{verifierIndex}`, `{previousSummaryPath}`, `{archivedReviewsPattern}`,
-`{archivedSummariesPattern}`. Each enforces the same Output Protocol (`.meta` written
-last) and Git-Safety block. These are pass-through to kloop and are **not** reproduced
-again here — they live verbatim in `src/core/types.ts` and move with the binary unchanged.
+`{archivedSummariesPattern}`. Each enforces the same evidence protocol (all evidence —
+Type-1 captured command output and Type-2 diff pointers — lands in `{evidenceDir}/`, indexed
+by `self-review.md`; no sidecar) and Git-Safety block. kautopilot runs `kloop init` and lets
+kloop use its own native prompts (`kloop-ts/src/agents/default-prompts.ts`); it does not
+inject these, so they are not reproduced here.
 
 ---
 

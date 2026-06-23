@@ -1,6 +1,5 @@
 import { isCancel, select } from "@clack/prompts";
 import { Command } from "commander";
-import { getGitRoot, getWorktree } from "../core/git";
 import { createSession } from "../core/session-create";
 import {
 	detectOrgFromTicket,
@@ -161,19 +160,11 @@ async function runStart(
 		throw new Error("--max-repos must be at least 1.");
 	}
 
-	// kautopilot can launch from ANYWHERE — even outside a git repo (a hub from
-	// which triage decides which repos to touch). When the cwd isn't a repo, it's
-	// just a bookkeeping location; each repo's real path comes from triage and its
-	// worktree is created on demand by `seed` via worktrunk.
-	let repoPath: string;
-	let worktree: string;
-	try {
-		repoPath = getGitRoot();
-		worktree = getWorktree();
-	} catch {
-		repoPath = process.cwd();
-		worktree = process.cwd();
-	}
+	// kautopilot can launch from ANYWHERE. The session is associated with the FOLDER
+	// you ran `start` in — the exact cwd, NOT the enclosing git root. It's purely a
+	// bookkeeping location to find the session again; each repo's real path comes from
+	// triage and its worktree is created on demand by `seed` via worktrunk.
+	const folder = process.cwd();
 	const lpsm = buildLpsm(opts);
 
 	const meta = createSession({
@@ -182,8 +173,7 @@ async function runStart(
 		// so brainstorm/create_ticket prompts can reference it (vars.request).
 		request: ticketId ? undefined : (task ?? undefined),
 		org,
-		repoPath,
-		worktree,
+		folder,
 		execMode,
 		maxParallelRepos: opts.maxRepos,
 		lpsm,

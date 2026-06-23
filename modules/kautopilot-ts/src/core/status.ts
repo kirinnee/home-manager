@@ -67,10 +67,8 @@ export interface SessionStatus {
 	running: boolean;
 	startedAt: string | null;
 
-	// Step execution type and turn tracking. The flat driver emits `def.kind`
-	// (interactive | agent | code); `interactive` is the user's turn.
+	// Step execution type. The flat driver emits `def.kind` (interactive | agent | code).
 	stepType: "interactive" | "agent" | "code" | null;
-	userTurn: boolean | null;
 
 	// Completed steps for current cycle (resume logic)
 	completedSteps: string[];
@@ -150,6 +148,7 @@ export const PHASE_STEPS: Record<string, string[]> = {
 		// Feedback phase folds into phase1 (plan) per the driver's marker mapping.
 		"feedback_check",
 		"feedback",
+		"close_ticket",
 		"cleanup",
 	],
 	implementation: [
@@ -229,7 +228,6 @@ function initialStatus(): SessionStatus {
 		running: false,
 		startedAt: null,
 		stepType: null,
-		userTurn: null,
 		completedSteps: [],
 		context: {},
 		planRuns: {},
@@ -382,11 +380,9 @@ function applyEvent(
 		const name = event.replace(":started", "");
 		status.state = name;
 		status.stateStatus = "running";
-		// Set stepType from metadata, derive initial userTurn. The driver emits
-		// def.kind (interactive | agent | code); interactive is the user's turn.
+		// Set stepType from metadata. The driver emits def.kind (interactive | agent | code).
 		const st = (entry.metadata?.stepType as string) ?? null;
 		status.stepType = st as SessionStatus["stepType"];
-		status.userTurn = st === "interactive" ? true : st ? false : null;
 	}
 
 	// State completed (skip lifecycle/meta events)
@@ -396,7 +392,6 @@ function applyEvent(
 			status.stateStatus = "completed";
 		}
 		status.stepType = null;
-		status.userTurn = null;
 		if (!status.completedSteps.includes(name)) {
 			status.completedSteps.push(name);
 		}
@@ -420,7 +415,6 @@ function applyEvent(
 		status.running = false;
 		status.pid = null;
 		status.stepType = null;
-		status.userTurn = null;
 	}
 
 	// Context updates — also track polish-specific fields
@@ -519,6 +513,16 @@ export function ensureStatus(sessionId: string): SessionStatus {
 	computeDerivedFields(status);
 	writeStatusYaml(sessionId, status);
 	return status;
+}
+
+/**
+ * Whether a session is still in progress (vs finished). The DB `state` column is a
+ * dead signal in the thin-controller model — it's "running" from creation and never
+ * updated. The real signal is the materialized status: a session is done once its
+ * polish phase completes. Used to list/auto-resolve the live session(s) for a folder.
+ */
+export function isSessionActive(sessionId: string): boolean {
+	return ensureStatus(sessionId).phases.polish.status !== "completed";
 }
 
 // ============================================================================

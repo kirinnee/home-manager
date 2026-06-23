@@ -4,7 +4,9 @@
 
 import {
   DEFAULT_IMPLEMENTER_PROMPT,
-  DEFAULT_REVIEWER_PROMPT,
+  REVIEWER_PLUMBING_PROMPT,
+  REVIEW_LENS_PROFILES,
+  DEFAULT_REVIEW_LENS,
   DEFAULT_CHECKPOINTER_PROMPT,
   CONFLICT_ONLY_CHECKPOINTER_PROMPT,
   DEFAULT_SYNTHESIZER_PROMPT,
@@ -19,6 +21,37 @@ import {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function substitute(template: string, vars: any): string {
   return template.replace(/{(\w+)}/g, (_, key) => vars[key] ?? `{${key}}`);
+}
+
+// ============================================================================
+// Interactive-mode completion sentinel
+// ============================================================================
+
+/**
+ * Instruction appended to an agent's prompt when running in interactive (non --print)
+ * mode. The agent runs in a persistent TUI that never exits on its own, so kloop watches
+ * for this marker file to know the work is done — then it sends /exit and closes the
+ * session. The agent MUST create it as its final action (and only when truly finished).
+ */
+export function buildSentinelInstruction(sentinelFile: string): string {
+  return `
+
+---
+## ⛔ SESSION COMPLETION SIGNAL (interactive mode — READ THIS)
+
+You are running in an INTERACTIVE session that does NOT exit on its own. kloop is watching
+for a marker file to know you have finished.
+
+When — and ONLY when — you have completely finished ALL work described above AND written
+every required output file (verdict / review / learnings / spec / summary, as applicable),
+create the marker file by running EXACTLY:
+
+    touch "${sentinelFile}"
+
+Rules:
+- Create it as your VERY LAST action. Never create it early or speculatively.
+- After creating it, stop working. kloop will close the session for you.
+- Do all other required file writes BEFORE touching the marker.`;
 }
 
 // ============================================================================
@@ -55,17 +88,21 @@ export interface ReviewerPromptVars {
   learningsFile: string;
   archivedReviews: string | null; // path to previous loop's reviews, or null
   previousSummaryPath?: string; // path to previous loop's review-summary.md
+  lensFocus?: string; // the lens's "what to scrutinize" text; defaults to the general lens
 }
 
 export function buildReviewerPrompt(template: string | undefined, vars: ReviewerPromptVars): string {
-  let prompt = template ?? DEFAULT_REVIEWER_PROMPT;
+  // Default reviewer prompt = plumbing (mechanics) with the lens focus appended via
+  // {lensFocus}. A custom template (config.prompts.reviewer) is used verbatim; if it
+  // contains {lensFocus} it gets the lens too, otherwise that token is simply absent.
+  const prompt = template ?? REVIEWER_PLUMBING_PROMPT;
   const archivedSection = vars.archivedReviews !== null ? vars.archivedReviews : '';
-  prompt = substitute(prompt, {
+  return substitute(prompt, {
     ...vars,
     archivedReviews: archivedSection,
     previousSummaryPath: vars.previousSummaryPath ?? '',
+    lensFocus: vars.lensFocus ?? REVIEW_LENS_PROFILES[DEFAULT_REVIEW_LENS],
   });
-  return prompt;
 }
 
 // ============================================================================

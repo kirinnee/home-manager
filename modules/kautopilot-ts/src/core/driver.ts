@@ -9,11 +9,16 @@ import type {
 	StepDescriptor,
 	StepPhase,
 } from "./descriptor";
+import { scopeLockKey, touchLock } from "./lock";
 import { appendEvent, readLog } from "./log";
 import {
 	type ArtifactKind,
 	copyPlanSetToNext,
 	copyToNextRevision,
+	latestRevisionOnDisk,
+	listPlanSetVersions,
+	plansRepoDir,
+	revisionPath,
 } from "./revisions";
 import {
 	findRepo,
@@ -199,7 +204,11 @@ export async function runNext(
 
 	// Run code steps inline until we hit an interactive/agent step or finish.
 	// Bounded to guard against a mis-wired transition cycle.
+	const lockKey = scopeLockKey(sessionId, repoArg);
 	for (let guard = 0; guard < 1000; guard++) {
+		// Heartbeat: each completed inline step proves progress so the lock's TTL
+		// backstop doesn't reclaim a healthy long run (see touchLock / lockTtlMs).
+		touchLock(lockKey);
 		const freshMetaPre = readSessionMeta(sessionId) ?? meta;
 		const stepName = pendingStep(sessionId, repoArg, freshMetaPre.epoch);
 		if (stepName == null) {
@@ -315,15 +324,54 @@ export interface ReviseResult {
 	url?: string;
 	/** Viewer path for the diff vs the previous version. */
 	diffUrl?: string;
+	/** Path to the standalone HTML infographic page (prefix with the base URL). */
+	visualUrl?: string;
 }
 
 /**
- * `kautopilot revise` — mint the next version of the CURRENT interactive writer
- * artifact by copying the latest forward (file-based numbering). Each user-facing
- * presentation calls this: copy `vN → vN+1`, then the agent edits the returned
- * path, then presents the returned viewer link. Only writer steps (brainstorm,
- * triage, write_spec, write_plans, feedback) are revisable. Returns viewer PATHS
- * (the harness prefixes the configured base URL) so links are never hand-built.
+ * Has the current working version (`latest`) of an artifact already been presented?
+ * The writer step mints v1 as the working copy BEFORE the agent has shown anything,
+ * so the FIRST `revise` must present that working copy as-is — copying it forward
+ * there would create a redundant, empty-diff duplicate (v2 == v1). We record a
+ * `revise:present` event per (scope, version); a later `revise` (after feedback)
+ * sees that marker and copies forward to preserve the version already shown.
+ */
+function alreadyPresented(
+	sessionId: string,
+	scope: string,
+	version: number,
+): boolean {
+	if (version < 1) return false;
+	return readLog(sessionId).some(
+		(e) =>
+			e.event === "revise:present" &&
+			e.version === version &&
+			e.metadata?.scope === scope,
+	);
+}
+
+function markPresented(
+	sessionId: string,
+	scope: string,
+	version: number,
+): void {
+	appendEvent(sessionId, {
+		ts: new Date().toISOString(),
+		event: "revise:present",
+		version,
+		metadata: { scope },
+	});
+}
+
+/**
+ * `kautopilot revise` — return the version to present for the CURRENT interactive
+ * writer artifact. The FIRST call presents the working copy the step already minted
+ * (v1) as-is; every later call (after the user gave feedback) copies the last-shown
+ * version forward (`vN → vN+1`) so the earlier version is never overwritten. The
+ * agent edits the returned path, then presents the returned viewer link. Only writer
+ * steps (brainstorm, triage, write_spec, write_plans, feedback) are revisable.
+ * Returns viewer PATHS (the harness prefixes the configured base URL) so links are
+ * never hand-built.
  */
 export async function runRevise(
 	sessionId: string,
@@ -334,7 +382,13 @@ export async function runRevise(
 	if (!meta) throw new Error(`No session.json for session ${sessionId}`);
 	setCachedConfig(config);
 
-	const step = pendingStep(sessionId, repoArg, meta.epoch);
+	// Every revisable writer step (brainstorm/triage/write_spec/write_plans/feedback)
+	// is SESSION-scoped, so the pending step always lives on the shared timeline —
+	// resolve it with null. A `--repo` arg is only the plan-bucket selector (used
+	// below for `kind === "plans"`); passing it to pendingStep would walk the repo
+	// timeline (which has no pending step until plans are approved) and wrongly report
+	// "nothing to revise" for `revise --repo` during the plan phase.
+	const step = pendingStep(sessionId, null, meta.epoch);
 	if (step == null) return { ok: false, error: "no pending step to revise" };
 	const kind = STEP_ARTIFACT[step];
 	if (!kind) {
@@ -347,8 +401,21 @@ export async function runRevise(
 	const epoch = meta.epoch;
 	if (kind === "plans") {
 		const repo = repoArg ?? authoringRepoName(meta);
-		const { n, dir } = copyPlanSetToNext(sessionId, epoch, repo);
+		const scope = `plans@${epoch}:${repo}`;
+		const versions = listPlanSetVersions(sessionId, epoch, repo);
+		const latest = versions.length ? Math.max(...versions) : 0;
+		let n: number;
+		let dir: string;
+		if (latest >= 1 && !alreadyPresented(sessionId, scope, latest)) {
+			n = latest;
+			dir = plansRepoDir(sessionId, epoch, repo);
+		} else {
+			({ n, dir } = copyPlanSetToNext(sessionId, epoch, repo));
+		}
+		markPresented(sessionId, scope, n);
 		const base = `/sessions/${sessionId}/plans/${encodeURIComponent(repo)}`;
+		// No single `visualUrl` for plans: each plan has its OWN infographic, surfaced
+		// per-plan in the dashboard's plan tabs (one `<plan>/vN.html` each).
 		return {
 			ok: true,
 			version: n,
@@ -359,7 +426,18 @@ export async function runRevise(
 	}
 
 	const ref = kind === "brainstorm" ? {} : { epoch };
-	const { n, path } = copyToNextRevision(sessionId, kind, ref);
+	const scope = kind === "brainstorm" ? "brainstorm" : `${kind}@${epoch}`;
+	const latest = latestRevisionOnDisk(sessionId, kind, ref);
+	let n: number;
+	let path: string;
+	if (latest >= 1 && !alreadyPresented(sessionId, scope, latest)) {
+		// First presentation: show the step's working copy as-is (no redundant copy).
+		n = latest;
+		path = revisionPath(sessionId, kind, n, ref);
+	} else {
+		({ n, path } = copyToNextRevision(sessionId, kind, ref));
+	}
+	markPresented(sessionId, scope, n);
 	const base = `/sessions/${sessionId}/${kind}`;
 	return {
 		ok: true,
@@ -367,6 +445,7 @@ export async function runRevise(
 		path,
 		url: `${base}/v${n}`,
 		diffUrl: `${base}/diff?from=${Math.max(1, n - 1)}&to=${n}`,
+		visualUrl: `/api/sessions/${sessionId}/html/${kind}/v/${n}`,
 	};
 }
 

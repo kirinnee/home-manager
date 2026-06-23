@@ -1,16 +1,17 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { Command } from "commander";
 import { logError, logInfo, logOk } from "../util/format";
 
 // ============================================================================
-// `kautopilot dash <up|down|logs>` — a dockerized, always-on dashboard for
+// `kautopilot dash <up|down|restart|logs>` — a dockerized, always-on dashboard for
 // ~/.kautopilot. It runs a stock `oven/bun:1` container (visible in
 // `docker ps`) that bind-mounts the module root and the host's ~/.kautopilot
-// (read-only) and runs `kautopilot serve` inside. Live reload works over the
-// bind mount: the SSE /api/events endpoint polls the store fingerprint by
-// mtime, so host edits propagate into the read-only-mounted container.
+// (read-only) and runs `kautopilot serve` inside. (The kloop run viewer is a
+// separate binary — `kloop dash`.) Live reload works over the bind mount: the
+// SSE /api/events endpoint polls the store fingerprint by mtime, so host edits
+// propagate into the read-only-mounted container.
 //
 // For a quick foreground server without Docker, use `kautopilot serve`.
 // ============================================================================
@@ -48,7 +49,10 @@ function dockerAvailable(): boolean {
 function writeComposeFile(port: number, host?: string): string {
 	const home = homedir();
 	mkdirSync(serveDir(), { recursive: true });
-	const portMapping = host ? `${host}:${port}:${port}` : `${port}:${port}`;
+	// G5: bind the published port to localhost unless an explicit --host is given.
+	const portMapping = host
+		? `${host}:${port}:${port}`
+		: `127.0.0.1:${port}:${port}`;
 	const yaml = `services:
   viewer:
     image: oven/bun:1
@@ -62,6 +66,7 @@ function writeComposeFile(port: number, host?: string): string {
       - "${home}/.kautopilot:/data/.kautopilot:ro"
     command: ["bun","run","/app/src/index.ts","serve","--host","0.0.0.0","--port","${port}"]
     restart: unless-stopped
+    stop_grace_period: 1s
 `;
 	const file = composePath();
 	writeFileSync(file, yaml);
@@ -104,8 +109,9 @@ async function dashUp(opts: { port?: number; host?: string }): Promise<void> {
 
 	logOk(`kautopilot dashboard on http://localhost:${port}`);
 	logInfo(`container: ${CONTAINER_NAME}`);
-	logInfo("kautopilot dash logs   follow logs");
-	logInfo("kautopilot dash down   stop and remove");
+	logInfo("kautopilot dash logs      follow logs");
+	logInfo("kautopilot dash restart   restart server (pick up edited src/)");
+	logInfo("kautopilot dash down      stop and remove");
 }
 
 export function createDashCommand(): Command {
@@ -132,7 +138,50 @@ export function createDashCommand(): Command {
 		.description("Stop and remove the dashboard container")
 		.action(async () => {
 			try {
-				await dockerCompose(["-p", PROJECT, "-f", composePath(), "down"]);
+				// `-t 1`: the viewer is a stateless read-only server, so don't wait the
+				// default 10s SIGTERM grace period — stop it (almost) immediately.
+				await dockerCompose([
+					"-p",
+					PROJECT,
+					"-f",
+					composePath(),
+					"down",
+					"-t",
+					"1",
+				]);
+			} catch (err) {
+				logError(err instanceof Error ? err.message : String(err));
+				process.exit(1);
+			}
+		});
+
+	dash
+		.command("restart")
+		.description(
+			"Restart the dashboard server (picks up edited src/ — graceful, no recreate)",
+		)
+		.action(async () => {
+			try {
+				if (!existsSync(composePath())) {
+					logError(
+						"no dashboard running — start it with `kautopilot dash up`.",
+					);
+					process.exit(1);
+				}
+				const code = await dockerCompose([
+					"-p",
+					PROJECT,
+					"-f",
+					composePath(),
+					"restart",
+					"-t",
+					"1",
+				]);
+				if (code !== 0) {
+					logError("docker compose restart failed");
+					process.exit(code);
+				}
+				logOk("dashboard restarted");
 			} catch (err) {
 				logError(err instanceof Error ? err.message : String(err));
 				process.exit(1);

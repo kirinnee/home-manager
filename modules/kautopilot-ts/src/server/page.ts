@@ -12,7 +12,7 @@
 // Design system: a compact, professional engineering tool (Linear / GitHub /
 // Vercel density). CSS custom properties drive a neutral zinc palette with a
 // single understated indigo accent and muted semantic status colors, hand-tuned
-// light + dark themes (via prefers-color-scheme), Inter for UI text and
+// light + dark themes (via data-theme — toggle or OS default), Inter for UI text and
 // JetBrains Mono for code (loaded from a CDN with system fallbacks). Components:
 // a slim hairline sticky top bar with breadcrumb + a small static SSE live
 // indicator, a dense session list/table, flat semantic phase/status badges, a
@@ -64,16 +64,16 @@ const STYLE = `
 	--err: #a14040; --err-bg: #f7eded; --err-border: #e6cfcf;
 	--block: #98532f; --block-bg: #f6efe9; --block-border: #e3d3c5;
 	/* diff — muted */
-	--add: #3f7e52; --add-bg: #eef5f0; --add-gutter: #d3e6d9;
-	--del: #a14040; --del-bg: #f6edee; --del-gutter: #e7d0d0;
+	--add: #3f7e52; --add-bg: #eef5f0; --add-gutter: #d3e6d9; --add-word: #a9deb9;
+	--del: #a14040; --del-bg: #f6edee; --del-gutter: #e7d0d0; --del-word: #f1b9b9;
 	/* elevation — flat hairline + very subtle */
 	--sh-sm: 0 1px 1px rgba(24,24,27,0.04);
 	--sh-md: 0 1px 2px rgba(24,24,27,0.06), 0 2px 6px rgba(24,24,27,0.05);
 	--sh-lg: 0 4px 16px rgba(24,24,27,0.1);
 	--bar-bg: rgba(251,251,252,0.85);
 }
-@media (prefers-color-scheme: dark) {
-	:root {
+/* dark theme — applied via data-theme (set by JS from saved pref or OS) */
+:root[data-theme="dark"] {
 		/* deep neutral bg, slightly lighter raised surfaces, soft borders */
 		--bg: #0a0a0b;
 		--surface: #141416;
@@ -101,14 +101,13 @@ const STYLE = `
 		--pend: #9b9ba3; --pend-bg: #1b1b1e; --pend-border: #2e2e33;
 		--err: #cc7d7d; --err-bg: #251616; --err-border: #482a2a;
 		--block: #c08a5e; --block-bg: #241a11; --block-border: #463219;
-		--add: #6fae82; --add-bg: #112318; --add-gutter: #1f3d29;
-		--del: #cc7d7d; --del-bg: #231516; --del-gutter: #3f2424;
+		--add: #6fae82; --add-bg: #15391f; --add-gutter: #1f3d29; --add-word: #2f6b46;
+		--del: #cc7d7d; --del-bg: #3d1a1d; --del-gutter: #3f2424; --del-word: #7a3739;
 		--sh-sm: 0 1px 1px rgba(0,0,0,0.4);
 		--sh-md: 0 1px 2px rgba(0,0,0,0.45), 0 2px 8px rgba(0,0,0,0.3);
 		--sh-lg: 0 6px 24px rgba(0,0,0,0.55);
 		--bar-bg: rgba(10,10,11,0.85);
 	}
-}
 
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; scroll-padding-top: 56px; }
@@ -152,6 +151,9 @@ header.bar {
 .crumb a:hover { color: var(--accent); text-decoration: none; background: var(--accent-soft); }
 .crumb .cur { color: var(--fg); font-weight: 600; padding: 1px 4px; }
 .crumb .sep { margin: 0 1px; opacity: 0.4; }
+/* theme toggle */
+.themebtn { background: transparent; border: none; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; padding: 3px 6px; border-radius: var(--r-sm); flex-shrink: 0; }
+.themebtn:hover { color: var(--accent); background: var(--accent-soft); }
 /* live indicator — small, static, subtle (no pulse/glow) */
 .live { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; line-height: 1; color: var(--muted); flex-shrink: 0; user-select: none; }
 .live .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--pend); transition: background 0.25s; }
@@ -316,8 +318,8 @@ details.toc li.lvl3 a { padding-left: var(--s-4); font-size: 12px; color: var(--
 .prose strong { color: var(--bold); font-weight: 700; }
 .prose em { color: var(--italic); font-style: italic; }
 /* markdown redline (rendered diff): inline insertions / deletions */
-.prose ins.d-ins { text-decoration: none; background: var(--add-bg); color: var(--add); border-radius: 3px; padding: 0 2px; box-shadow: inset 0 -1.5px 0 var(--add-gutter); }
-.prose del.d-del { text-decoration: line-through; text-decoration-color: var(--del); background: var(--del-bg); color: var(--del); border-radius: 3px; padding: 0 2px; }
+.prose ins.d-ins { text-decoration: none; background: var(--add-word); color: var(--fg); font-weight: 600; border-radius: 3px; padding: 0 2px; }
+.prose del.d-del { text-decoration: line-through; text-decoration-color: var(--del); background: var(--del-word); color: var(--fg); border-radius: 3px; padding: 0 2px; }
 .prose hr { border: none; border-top: 1px solid var(--border); margin: 1.6em 0; }
 .prose blockquote {
 	margin: 1em 0; padding: 0.4em 1em; color: var(--muted);
@@ -364,29 +366,46 @@ details.toc li.lvl3 a { padding-left: var(--s-4); font-size: 12px; color: var(--
 .diff-side { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-4); }
 .diff-pane { border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; min-width: 0; }
 .diff-pane-h { font-family: var(--font-mono); font-size: 0.76rem; padding: 4px 10px; background: var(--surface-2); border-bottom: 1px solid var(--border); color: var(--muted); }
+/* line-aligned, MARKDOWN-rendered diff (OLD → NEW, word-level highlight) */
+.diff-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; font-size: 0.84rem; line-height: 1.5; }
+.diff-h { padding: 4px 10px; background: var(--surface-2); color: var(--muted); font-weight: 600; font-family: var(--font-mono); font-size: 0.76rem; position: sticky; top: 0; z-index: 1; }
+.diff-grid .diff-h:first-child { border-right: 1px solid var(--border); }
+.diff-grid .diff-h { border-bottom: 1px solid var(--border); }
+.dl { min-width: 0; min-height: 1.6em; border-top: 1px solid var(--border-soft); }
+.diff-grid .dl:nth-child(2n) { border-left: 1px solid var(--border); }
+.dl-del { background: var(--del-bg); }
+.dl-add { background: var(--add-bg); }
+.dl-mod { background: var(--surface-2); }
+/* inline (unified): left accent bar so add/del lines read clearly */
+.diff-uni .dl-del { border-left: 3px solid var(--del); }
+.diff-uni .dl-add { border-left: 3px solid var(--add); }
+/* compact prose inside a diff cell — tight margins keep left/right rows aligned */
+.prose-diff { padding: 1px 10px; min-width: 0; overflow-x: auto; }
+.prose-diff > :first-child { margin-top: 2px; } .prose-diff > :last-child { margin-bottom: 2px; }
+.prose-diff h1, .prose-diff h2, .prose-diff h3, .prose-diff h4 { margin: 2px 0; font-size: 1em; }
+.prose-diff p, .prose-diff ul, .prose-diff ol, .prose-diff pre, .prose-diff blockquote { margin: 2px 0; }
+.diff-uni { border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; font-size: 0.84rem; line-height: 1.5; }
+/* version pickers */
+.diff-vers { display: inline-flex; align-items: center; gap: var(--s-2); }
+.diff-sel { font: inherit; font-size: 0.78rem; padding: 3px 6px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface); color: var(--fg); cursor: pointer; }
+.diff-sel-l { font-size: 0.66rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+.diff-arrow { color: var(--muted); }
+/* plan tabs — one page per plan */
+.plan-tabs { display: flex; gap: 2px; flex-wrap: wrap; border-bottom: 1px solid var(--border); margin-bottom: var(--s-4); overflow-x: auto; }
+.plan-tab { background: transparent; border: none; border-bottom: 2px solid transparent; color: var(--muted); font: inherit; font-size: 0.86rem; font-weight: 600; padding: 7px 12px; cursor: pointer; white-space: nowrap; }
+.plan-tab:hover { color: var(--fg); }
+.plan-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+/* Link out to the standalone HTML infographic (opens full-page, not inlined) */
+.view-toggle { margin-bottom: var(--s-4); }
+.visual-link { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--raised); color: var(--accent); font-weight: 600; font-size: 0.9rem; text-decoration: none; }
+.visual-link:hover { border-color: var(--accent); background: var(--accent-soft, var(--raised)); }
 .diff-pane .prose { font-size: 13.5px; padding: var(--s-4); }
 @media (max-width: 720px) { .diff-side { grid-template-columns: 1fr; } }
 
-/* ── kloop run viewer ─────────────────────────────────────────────────── */
-.klist { display: flex; flex-direction: column; gap: var(--s-2); }
-.krow { display: flex; align-items: center; gap: var(--s-3); padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); }
-.krow:hover { background: var(--surface-2); text-decoration: none; }
-.krow .kid { font-family: var(--font-mono); font-weight: 600; color: var(--fg); }
-.krow .kws { color: var(--fg-soft); }
-.krow .kmeta, .kmeta { color: var(--muted); font-size: 0.82rem; margin-left: auto; }
-.khero { padding: var(--s-4); border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); margin-bottom: var(--s-5); }
-.khero .kid { font-family: var(--font-mono); font-weight: 700; }
-.khero .kws { font-family: var(--font-mono); font-size: 0.8rem; color: var(--muted); margin-top: 4px; word-break: break-all; }
-.khero .kmeta { margin-left: 0; margin-top: 6px; }
-.kbanner { margin-top: 10px; padding: 6px 10px; border-radius: var(--r-sm); background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn-border); font-size: 0.85rem; }
-.kcard { border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); padding: var(--s-3) var(--s-4); margin-bottom: var(--s-3); }
-.kcard-h { font-weight: 600; font-size: 0.9rem; margin-bottom: 6px; display: flex; align-items: center; gap: var(--s-2); }
-.kline { font-size: 0.85rem; color: var(--fg-soft); padding: 2px 0; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.kerr { color: var(--err); font-size: 0.82rem; margin-top: 4px; white-space: pre-wrap; }
-.kmuted { color: var(--muted); font-size: 0.82rem; }
-.hbadge { font-size: 0.7rem; padding: 1px 6px; border-radius: var(--r-full); background: var(--surface-2); border: 1px solid var(--border); color: var(--muted); }
-.kbtns { display: flex; gap: var(--s-2); flex-wrap: wrap; margin-top: 4px; }
-.klog { background: var(--code-bg); border: 1px solid var(--code-border); border-radius: var(--r-sm); padding: var(--s-3); overflow-x: auto; font-size: 0.78rem; line-height: 1.5; max-height: 480px; overflow-y: auto; white-space: pre-wrap; }
+/* session → kloop run links */
+.krunlinks { display: flex; gap: var(--s-2); flex-wrap: wrap; margin: 2px 0 var(--s-3); }
+.krunlink { display: inline-flex; align-items: center; gap: 5px; font-size: 0.76rem; font-family: var(--font-mono); padding: 2px 9px; border-radius: var(--r-full); background: var(--accent-soft); border: 1px solid var(--accent-border); color: var(--accent); }
+.krunlink:hover { text-decoration: none; background: var(--accent); color: var(--accent-fg); }
 .diff-wrap {
 	border: 1px solid var(--code-border); border-radius: var(--r-md);
 	background: var(--code-bg); overflow-x: auto; -webkit-overflow-scrolling: touch;
@@ -432,15 +451,13 @@ details.toc li.lvl3 a { padding-left: var(--s-4); font-size: 12px; color: var(--
 	* { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; scroll-behavior: auto; }
 }
 `;
-
-// The browser-side module. A plain single-quoted/escaped string so it can hold
-// backticks, markup and the mermaid keyword without breaking TypeScript parsing.
 const CLIENT_SCRIPT = [
-	'import { marked } from "https://cdn.jsdelivr.net/npm/marked/lib/marked.esm.js";',
+	'import { marked } from "https://cdn.jsdelivr.net/npm/marked@15.0.6/lib/marked.esm.js";',
+	'import DOMPurify from "https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.es.mjs";',
 	'import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";',
 	'import hljs from "https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/es/highlight.min.js";',
-	'const dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;',
-	'mermaid.initialize({ startOnLoad: false, theme: dark ? "dark" : "default", securityLevel: "loose", fontFamily: "inherit" });',
+	'const dark = document.documentElement.dataset.theme === "dark";',
+	'mermaid.initialize({ startOnLoad: false, theme: dark ? "dark" : "default", securityLevel: "strict", fontFamily: "inherit" });',
 	"// highlight.js theme: a github-style theme per scheme, loaded as a <link> at runtime (no bundler).",
 	'const hlHref = "https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/" + (dark ? "github-dark" : "github") + ".min.css";',
 	'{ const l = document.createElement("link"); l.rel = "stylesheet"; l.href = hlHref; document.head.appendChild(l); }',
@@ -500,7 +517,7 @@ const CLIENT_SCRIPT = [
 	"// scroll, upgrade fenced mermaid blocks to themed cards, syntax-highlight code,",
 	"// give headings ids, and build a collapsible table of contents for long docs.",
 	"// Pure markdown -> HTML string.",
-	"function renderMd(md) { return (md && md.trim()) ? marked.parse(md) : ''; }",
+	"function renderMd(md) { return (md && md.trim()) ? DOMPurify.sanitize(marked.parse(md)) : ''; }",
 	"// Upgrade an already-rendered .prose container in place: wrap tables, mermaid",
 	"// cards, syntax-highlight code, give headings ids, run mermaid. (No TOC/append.)",
 	"async function upgradeProse(div) {",
@@ -587,17 +604,26 @@ const CLIENT_SCRIPT = [
 	"  for (const seg of diff) { if (!cur || seg.t !== cur.t) { cur = { t: seg.t, s: '' }; runs.push(cur); } cur.s += seg.s; }",
 	"  return runs;",
 	"}",
-	"const insTag = (s) => !s ? '' : '<ins class=\"d-ins\">' + s + '</ins>';",
-	"const delTag = (s) => !s ? '' : '<del class=\"d-del\">' + s + '</del>';",
-	"// Inline redline: one rendered doc with insertions + deletions woven in.",
-	"function redlineInline(runs) {",
-	"  return runs.map(r => r.t === 'ins' ? insTag(r.s) : r.t === 'del' ? delTag(r.s) : r.s).join('');",
+	"// Word-level highlight of one OLD→NEW line pair → escaped {l,r} HTML.",
+	"// Word-level highlight of one OLD→NEW line as MARKDOWN source with inline",
+	"// <ins>/<del> woven in (NOT escaped — renderMd parses it; marked passes the",
+	"// tags through and DOMPurify keeps ins/del, so highlight survives rendering).",
+	"function wordCells(oldLine, newLine) {",
+	"  const runs = diffRuns(oldLine, newLine, 'word'); let l = '', r = '';",
+	"  for (const x of runs) { if (x.t === 'eq') { l += x.s; r += x.s; } else if (x.t === 'del') l += '<del class=\"d-del\">' + x.s + '</del>'; else r += '<ins class=\"d-ins\">' + x.s + '</ins>'; }",
+	"  return { l: l, r: r };",
 	"}",
-	"// Side-by-side: left = original (deletions marked), right = new (insertions marked).",
-	"function redlineSides(runs) {",
-	"  let L = '', R = '';",
-	"  for (const r of runs) { if (r.t === 'eq') { L += r.s; R += r.s; } else if (r.t === 'del') { L += delTag(r.s); } else { R += insTag(r.s); } }",
-	"  return { left: L, right: R };",
+	"// Line-aligned diff (OLD→NEW): rows [{type, l, r}] where l/r are MARKDOWN source",
+	"// (the cells are rendered with renderMd). Line-level LCS keeps left/right parity;",
+	"// modified lines carry word-level inline highlight.",
+	"function diffRows(oldMd, newMd) {",
+	"  const segs = lcsDiff(String(oldMd).split('\\n'), String(newMd).split('\\n'));",
+	"  const rows = [];",
+	"  for (let i = 0; i < segs.length; i++) { const s = segs[i];",
+	"    if (s.t === 'eq') { rows.push({ type: 'eq', l: s.s, r: s.s }); }",
+	"    else if (s.t === 'del') { if (i + 1 < segs.length && segs[i + 1].t === 'ins') { const c = wordCells(s.s, segs[i + 1].s); rows.push({ type: 'mod', l: c.l, r: c.r }); i++; } else rows.push({ type: 'del', l: s.s, r: '' }); }",
+	"    else { rows.push({ type: 'add', l: '', r: s.s }); } }",
+	"  return rows;",
 	"}",
 	"// The version switcher. When revisions carry epochs, chips are grouped +",
 	"// labelled by epoch, e.g. `Epoch 1: v1 v2 · Epoch 2: v3`. When the epochs are",
@@ -642,7 +668,7 @@ const CLIENT_SCRIPT = [
 	'  app.innerHTML = "";',
 	"  main.classList.remove('prose-page');",
 	'  const head = el("div", "page-head");',
-	'  head.innerHTML = \'<h1 class="page-title">Sessions</h1><div class="meta-row">kautopilot autopilot runs · <a href="/kloop">Kloop runs →</a></div>\';',
+	'  head.innerHTML = \'<h1 class="page-title">Sessions</h1><div class="meta-row">kautopilot autopilot runs</div>\';',
 	"  app.appendChild(head);",
 	"  if (!sessions || sessions.length === 0) {",
 	"    app.appendChild(el('div', 'empty', '<h1>No sessions yet</h1><p>Start an autopilot run and it will show up here.</p>'));",
@@ -685,6 +711,9 @@ const CLIENT_SCRIPT = [
 	"  const repos = (m.repos || []).map(repoChip).join('');",
 	"  if (repos) head.innerHTML += '<div class=\"repos\" style=\"margin-top:10px\">' + repos + '</div>';",
 	"  app.appendChild(head);",
+	"  // ── kloop runs spawned by this session (link straight to the run viewer) ──",
+	"  const kruns = (d.artifacts && d.artifacts.kloopRuns) || [];",
+	"  if (kruns.length) { const kbase = (window.__kloopBase || 'https://kloop.ernest.atomi.cloud'); const kl = el('div', 'krunlinks'); for (const rid of kruns) { const ka = el('a', 'krunlink'); ka.href = kbase + '/kloop/' + encodeURIComponent(rid); ka.target = '_blank'; ka.innerHTML = '🔁 ' + esc(rid); kl.appendChild(ka); } app.appendChild(kl); }",
 	"  // ── artifacts ──",
 	"  app.appendChild(el('div', 'section-title', 'Artifacts'));",
 	'  const list = el("div", "art-list");',
@@ -711,6 +740,7 @@ const CLIENT_SCRIPT = [
 	"    return row;",
 	"  };",
 	"  if (a.ticket) list.appendChild(artRow('/sessions/' + encodeURIComponent(id) + '/ticket', 'Ticket', null, null));",
+	"  if (a.ticketDraft && a.brainstorm && a.brainstorm.length) list.appendChild(artRow('/sessions/' + encodeURIComponent(id) + '/ticket-draft', 'Ticket draft', null, null));",
 	'  for (const kind of ["brainstorm", "triage", "spec", "feedback"]) {',
 	"    if (a[kind] && a[kind].length) {",
 	"      const base = '/sessions/' + encodeURIComponent(id) + '/' + kind;",
@@ -745,6 +775,21 @@ const CLIENT_SCRIPT = [
 	"  const baseHref = isPlan ? '/sessions/' + encodeURIComponent(id) + '/plans/' + encodeURIComponent(repo) : '/sessions/' + encodeURIComponent(id) + '/' + kind;",
 	"  const diffHref = baseHref + '/diff';",
 	'  versionToolbar(baseHref, d.version, d.versions || [], kind === "ticket" ? null : diffHref);',
+	"  // When a sibling HTML infographic exists, link out to it (full page, not inlined).",
+	"  // The infographic carries its own 'View source' link back to this markdown view.",
+	"  // Single-file artifacts have one repo-level link; plans link per-plan (in tabs).",
+	"  if (!isPlan && d.htmlAvailable) {",
+	"    const htmlUrl = '/api/sessions/' + encodeURIComponent(id) + '/html/' + kind + (d.version ? '/v/' + d.version : '');",
+	"    const bar = el('div', 'view-toggle'); const a = el('a', 'visual-link'); a.href = htmlUrl; a.textContent = '\\uD83D\\uDCCA View visual infographic \\u2192'; bar.appendChild(a); app.appendChild(bar);",
+	"  }",
+	"  // Plans: one tab per plan (1 page each) so you switch instead of scrolling. Each",
+	"  // plan has its OWN infographic — a per-plan 'View visual' link sits atop its pane.",
+	"  if (isPlan && d.plans && d.plans.length) {",
+	"    const tabs = el('div', 'plan-tabs'); const pane = el('div'); app.appendChild(tabs); app.appendChild(pane);",
+	"    const show = async (i) => { for (const b of tabs.children) b.classList.toggle('active', Number(b.dataset.i) === i); const p = d.plans[i]; pane.innerHTML = ''; if (p.htmlAvailable) { const bar = el('div', 'view-toggle'); const a = el('a', 'visual-link'); a.href = '/api/sessions/' + encodeURIComponent(id) + '/html/plans/' + encodeURIComponent(repo) + '/' + encodeURIComponent(p.name) + (d.version ? '/v/' + d.version : ''); a.textContent = '\\uD83D\\uDCCA View visual infographic \\u2192'; bar.appendChild(a); pane.appendChild(bar); } const body = el('div', 'prose'); body.innerHTML = renderMd(p.markdown); pane.appendChild(body); await upgradeProse(body); };",
+	"    d.plans.forEach((p, i) => { const b = el('button', 'plan-tab'); b.dataset.i = String(i); b.textContent = p.name; b.onclick = () => show(i); tabs.appendChild(b); });",
+	"    await show(0); return;",
+	"  }",
 	"  await renderMarkdown(d.markdown);",
 	"}",
 	"async function renderDiffView(id, kind, isPlan, repo) {",
@@ -766,41 +811,35 @@ const CLIENT_SCRIPT = [
 	"  app.appendChild(head);",
 	"  // Controls: word/line granularity + inline/side-by-side (side-by-side hidden on mobile).",
 	"  const mobile = window.matchMedia('(max-width: 720px)').matches;",
-	"  let gran = localStorage.getItem('diffGran') || 'word';",
-	"  let layout = mobile ? 'inline' : (localStorage.getItem('diffLayout') || 'inline');",
+	"  let layout = mobile ? 'inline' : (localStorage.getItem('diffLayout') || 'side');",
 	"  const controls = el('div', 'diff-controls'); app.appendChild(controls);",
 	"  const body = el('div', 'diff-body'); app.appendChild(body);",
 	"  const seg = (label2, val, cur, set) => { const b = el('button', 'seg' + (val === cur ? ' on' : '')); b.textContent = label2; b.onclick = () => set(val); return b; };",
+	"  // Pick a different version pair: rewrite ?from=&to= and re-run (re-fetches).",
+	"  function setVersions(from, to) { history.replaceState(null, '', window.location.pathname + '?from=' + from + '&to=' + to); renderDiffView(id, kind, isPlan, repo); }",
 	"  function paint() {",
 	"    controls.innerHTML = '';",
-	"    const g = el('div', 'seg-group');",
-	"    g.append(seg('Word', 'word', gran, v => { gran = v; localStorage.setItem('diffGran', v); render(); }),",
-	"             seg('Line', 'line', gran, v => { gran = v; localStorage.setItem('diffGran', v); render(); }));",
-	"    controls.appendChild(g);",
-	"    if (!mobile) {",
-	"      const l = el('div', 'seg-group');",
-	"      l.append(seg('Inline', 'inline', layout, v => { layout = v; localStorage.setItem('diffLayout', v); render(); }),",
-	"               seg('Side-by-side', 'side', layout, v => { layout = v; localStorage.setItem('diffLayout', v); render(); }));",
-	"      controls.appendChild(l);",
+	"    const vers = d.versions || [];",
+	"    if (vers.length > 1) {",
+	"      const mkSel = (cur, onPick) => { const s = el('select', 'diff-sel'); for (const v of vers) { const o = document.createElement('option'); o.value = v; o.textContent = 'v' + v; if (v === cur) o.selected = true; s.appendChild(o); } s.onchange = () => onPick(Number(s.value)); return s; };",
+	"      const vbar = el('div', 'diff-vers');",
+	"      vbar.append(el('span', 'diff-sel-l', 'old'), mkSel(d.fromVersion, v => setVersions(v, d.toVersion)), el('span', 'diff-arrow', '→'), el('span', 'diff-sel-l', 'new'), mkSel(d.toVersion, v => setVersions(d.fromVersion, v)));",
+	"      controls.appendChild(vbar);",
 	"    }",
+	"    if (!mobile) { const l = el('div', 'seg-group'); l.append(seg('Side-by-side', 'side', layout, v => { layout = v; localStorage.setItem('diffLayout', v); render(); }), seg('Inline', 'inline', layout, v => { layout = v; localStorage.setItem('diffLayout', v); render(); })); controls.appendChild(l); }",
 	"  }",
-	"  async function render() {",
+	"  function render() {",
 	"    paint();",
-	"    const runs = diffRuns(d.fromMarkdown || '', d.toMarkdown || '', gran);",
-	"    body.innerHTML = '';",
+	"    const rows = diffRows(d.fromMarkdown || '', d.toMarkdown || '');",
+	"    const cell = (md, type) => '<div class=\"dl dl-' + type + '\"><div class=\"prose prose-diff\">' + (renderMd(md) || '&nbsp;') + '</div></div>';",
 	"    if (layout === 'side') {",
-	"      const sides = redlineSides(runs);",
-	"      const grid = el('div', 'diff-side');",
-	"      const lp = el('div', 'diff-pane'); const rp = el('div', 'diff-pane');",
-	"      lp.innerHTML = '<div class=\"diff-pane-h\">v' + esc(d.fromVersion || '') + '</div>';",
-	"      rp.innerHTML = '<div class=\"diff-pane-h\">v' + esc(d.toVersion || '') + '</div>';",
-	"      const lc = el('div', 'prose'); const rc = el('div', 'prose');",
-	"      lc.innerHTML = renderMd(sides.left); rc.innerHTML = renderMd(sides.right);",
-	"      lp.appendChild(lc); rp.appendChild(rc); grid.append(lp, rp); body.appendChild(grid);",
-	"      await upgradeProse(lc); await upgradeProse(rc);",
+	"      let h = '<div class=\"diff-grid\"><div class=\"diff-h\">v' + esc(d.fromVersion || '?') + ' · old</div><div class=\"diff-h\">v' + esc(d.toVersion || '?') + ' · new</div>';",
+	"      for (const row of rows) h += cell(row.l, row.type) + cell(row.r, row.type);",
+	"      body.innerHTML = h + '</div>';",
 	"    } else {",
-	"      const div = el('div', 'prose'); div.innerHTML = renderMd(redlineInline(runs));",
-	"      body.appendChild(div); await upgradeProse(div);",
+	"      let h = '<div class=\"diff-uni\">';",
+	"      for (const row of rows) { if (row.type === 'eq') h += cell(row.l, 'eq'); else if (row.type === 'del') h += cell(row.l, 'del'); else if (row.type === 'add') h += cell(row.r, 'add'); else { h += cell(row.l, 'del'); h += cell(row.r, 'add'); } }",
+	"      body.innerHTML = h + '</div>';",
 	"    }",
 	"  }",
 	"  await render();",
@@ -809,63 +848,11 @@ const CLIENT_SCRIPT = [
 	"  main.classList.remove('prose-page');",
 	"  app.innerHTML = '<div class=\"empty\"><h1>Not found</h1><p>No session <code>' + esc(id) + '</code>.</p><p><a href=\"/\">← Back to sessions</a></p></div>';",
 	"}",
-	"// ── Kloop run viewer (adapted from vibe-dash; proxies the kloop CLI) ───",
-	"function fmtDur(ms) { if (ms == null) return ''; const s = Math.round(ms / 1000); if (s < 60) return s + 's'; const m = Math.floor(s / 60); if (m < 60) return m + 'm ' + (s % 60) + 's'; const h = Math.floor(m / 60); return h + 'h ' + (m % 60) + 'm'; }",
-	"function kbadge(status) { return '<span class=\"badge ' + tone(status) + '\"><span class=\"pip\"></span>' + esc(status) + '</span>'; }",
-	"function kpill(text, t) { return '<span class=\"badge ' + t + '\">' + esc(text) + '</span>'; }",
-	"function hbadge(h) { return h ? '<span class=\"hbadge\">' + esc(h) + '</span>' : ''; }",
-	"async function renderKloop() {",
-	"  crumbs([{ text: 'Sessions', href: '/' }, { text: 'Kloop' }]);",
-	"  showSkeleton(4);",
-	"  const runs = (await api('/kloop/runs')) || [];",
-	"  app.innerHTML = ''; main.classList.remove('prose-page');",
-	"  if (!runs.length) { app.appendChild(el('div', 'empty', 'No kloop runs. (Use `kautopilot serve` directly — kloop data is not in the docker dashboard.)')); return; }",
-	"  runs.sort((a, b) => { const ar = a.status === 'running' ? 0 : 1, br = b.status === 'running' ? 0 : 1; if (ar !== br) return ar - br; return String(b.startedAt || '').localeCompare(String(a.startedAt || '')); });",
-	"  const list = el('div', 'klist');",
-	"  for (const r of runs) {",
-	"    const a = el('a', 'krow'); a.href = '/kloop/' + encodeURIComponent(r.id);",
-	"    const ws = String(r.workspace || '').split('/').pop() || '';",
-	"    a.innerHTML = kbadge(r.status) + '<span class=\"kid\">' + esc(r.id) + '</span><span class=\"kws\">' + esc(ws) + '</span><span class=\"kmeta\">loop ' + esc(r.loop != null ? r.loop : '?') + (r.elapsedMs != null ? ' · ' + esc(fmtDur(r.elapsedMs)) : '') + (r.exitReason ? ' · ' + esc(r.exitReason) : '') + '</span>';",
-	"    list.appendChild(a);",
-	"  }",
-	"  app.appendChild(list);",
-	"}",
-	"async function renderKloopRun(id) {",
-	"  crumbs([{ text: 'Sessions', href: '/' }, { text: 'Kloop', href: '/kloop' }, { text: id }]);",
-	"  showSkeleton(3);",
-	"  const d = await api('/kloop/runs/' + encodeURIComponent(id));",
-	"  app.innerHTML = ''; main.classList.remove('prose-page');",
-	"  if (!d) { app.appendChild(el('div', 'empty', 'Run not found (or kloop unavailable).')); return; }",
-	"  const hero = el('div', 'khero');",
-	"  hero.innerHTML = kbadge(d.status) + ' <span class=\"kid\">' + esc(d.id) + '</span>' + '<div class=\"kws\">' + esc(d.workspace || '') + '</div>' + '<div class=\"kmeta\">loop ' + esc(d.loop) + '/' + esc(d.maxIterations != null ? d.maxIterations : '?') + (d.elapsedMs != null ? ' · ' + esc(fmtDur(d.elapsedMs)) : '') + (d.synthesis ? ' · synthesis' : '') + (d.verify ? ' · verify' : '') + '</div>' + (d.exitReason ? '<div class=\"kbanner\">' + esc(d.exitReason) + '</div>' : '');",
-	"  app.appendChild(hero);",
-	"  const loops = d.loops || [];",
-	"  if (!loops.length) { app.appendChild(el('div', 'empty', 'No loops yet.')); return; }",
-	"  const chips = el('div', 'toolbar'); app.appendChild(chips);",
-	"  const detail = el('div'); app.appendChild(detail);",
-	"  const loadFile = async (rel, title) => { const r = await api('/kloop/file?path=' + encodeURIComponent(rel)); const box = el('div', 'kcard'); box.appendChild(el('div', 'kcard-h', esc(title))); const pre = el('pre', 'klog'); pre.textContent = (r && r.content) || '(empty / not found)'; box.appendChild(pre); detail.appendChild(box); };",
-	"  const renderLoop = (i) => {",
-	"    chips.innerHTML = '';",
-	"    loops.forEach((lp, idx) => { const c = el('button', 'chip' + (idx === i ? ' active' : '')); c.textContent = 'Loop ' + (lp.loop != null ? lp.loop : idx + 1); c.onclick = () => { renderLoop(idx); }; chips.appendChild(c); });",
-	"    const lp = loops[i]; detail.innerHTML = '';",
-	"    if (lp.implementer) { const im = lp.implementer; const card = el('div', 'kcard'); card.innerHTML = '<div class=\"kcard-h\">Implementer ' + kbadge(im.status) + '</div><div class=\"kline\">' + esc(im.binary || '') + ' ' + hbadge(im.harness) + (im.durationMs != null ? ' · ' + esc(fmtDur(im.durationMs)) : '') + (im.inputTokens != null ? ' · ' + esc(im.inputTokens) + '→' + esc(im.outputTokens) + ' tok' : '') + '</div>' + (im.error ? '<div class=\"kerr\">' + esc(im.error) + '</div>' : ''); detail.appendChild(card); }",
-	"    for (const ph of (lp.reviewPhases || [])) { const card = el('div', 'kcard'); let h = '<div class=\"kcard-h\">Review phase ' + esc(ph.phase) + (ph.shortCircuited ? ' ' + hbadge('short-circuited') : '') + '</div>'; for (const rv of (ph.reviewers || [])) { h += '<div class=\"kline\">' + esc(rv.binary || '') + ' ' + hbadge(rv.harness) + ' ' + (rv.verdict ? kpill(rv.verdict, tone(rv.verdict)) : '') + (rv.completionEstimate != null ? ' <span class=\"kmuted\">' + esc(rv.completionEstimate) + '%</span>' : '') + (rv.propagated ? ' ' + hbadge('propagated') : '') + (rv.durationMs != null ? ' · ' + esc(fmtDur(rv.durationMs)) : '') + '</div>'; } card.innerHTML = h; detail.appendChild(card); }",
-	"    for (const ph of (lp.verifyPhases || [])) { if (!(ph.reviewers || []).length) continue; const card = el('div', 'kcard'); let h = '<div class=\"kcard-h\">Verify phase ' + esc(ph.phase) + '</div>'; for (const rv of (ph.reviewers || [])) { h += '<div class=\"kline\">' + esc(rv.binary || '') + ' ' + hbadge(rv.harness) + ' ' + (rv.verdict ? kpill(rv.verdict, tone(rv.verdict)) : '') + (rv.durationMs != null ? ' · ' + esc(fmtDur(rv.durationMs)) : '') + '</div>'; } card.innerHTML = h; detail.appendChild(card); }",
-	"    if (lp.synthesis) { const sy = lp.synthesis; const card = el('div', 'kcard'); card.innerHTML = '<div class=\"kcard-h\">Synthesis ' + kbadge(sy.status) + '</div>' + (sy.error ? '<div class=\"kerr\">' + esc(sy.error) + '</div>' : ''); detail.appendChild(card); }",
-	"    const ev = el('div', 'kcard'); ev.innerHTML = '<div class=\"kcard-h\">Evidence & logs</div>'; const btns = el('div', 'kbtns');",
-	"    const evb = el('button', 'seg'); evb.textContent = 'Evidence files'; evb.onclick = async () => { const files = (await api('/kloop/dir?path=' + encodeURIComponent(id + '/loop-' + lp.loop + '/evidence'))) || []; if (!files.length) { detail.appendChild(el('div', 'kmuted', '(no evidence files)')); return; } for (const f of files) await loadFile(id + '/loop-' + lp.loop + '/evidence/' + f, 'evidence/' + f); };",
-	"    const ib = el('button', 'seg'); ib.textContent = 'Implementer log'; ib.onclick = () => loadFile(id + '/loop-' + lp.loop + '/implementer/log', 'implementer log');",
-	"    const rb = el('button', 'seg'); rb.textContent = 'Run log'; rb.onclick = () => loadFile(id + '/run.log', 'run.log');",
-	"    btns.append(evb, ib, rb); ev.appendChild(btns); detail.appendChild(ev);",
-	"  };",
-	"  renderLoop(loops.length - 1);",
-	"}",
 	"async function route() {",
 	"  const path = window.location.pathname;",
 	"  const parts = path.split('/').filter(Boolean);",
 	"  try {",
 	"    if (parts.length === 0) return renderIndex();",
-	"    if (parts[0] === 'kloop') return parts[1] ? renderKloopRun(decodeURIComponent(parts[1])) : renderKloop();",
 	"    if (parts[0] !== 'sessions') return renderIndex();",
 	"    const id = decodeURIComponent(parts[1] || '');",
 	"    if (!id) return renderIndex();",
@@ -924,6 +911,9 @@ const CLIENT_SCRIPT = [
 	"    es.onerror = () => { setLive(false); /* EventSource auto-reconnects */ };",
 	"  } catch (_e) { /* live reload unavailable; static view still works */ }",
 	"}",
+	"// Theme toggle — persist the choice and reload so the boot script + hljs/mermaid pick it up.",
+	"function applyTheme(t) { try { localStorage.setItem('theme', t); } catch (e) {} location.reload(); }",
+	"{ const tb = document.getElementById('themebtn'); if (tb) { const d = document.documentElement.dataset.theme === 'dark'; tb.textContent = d ? '\\u2600' : '\\u263E'; tb.onclick = () => applyTheme(d ? 'light' : 'dark'); } }",
 	"startLiveReload();",
 ].join("\n");
 
@@ -931,17 +921,20 @@ export const SHELL_HTML = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<script>try{document.documentElement.dataset.theme=localStorage.getItem('theme')||(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light')}catch(e){}</script>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>kautopilot</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <style>${STYLE}</style>
+<script>window.__kloopBase=__KLOOP_BASE__;</script>
 </head>
 <body>
 <div id="progress"></div>
 <header class="bar"><div class="bar-inner">
 <nav class="crumb" id="crumb"><a href="/">Sessions</a></nav>
+<button class="themebtn" id="themebtn" type="button" aria-label="Toggle light/dark" title="Toggle light/dark"></button>
 <span class="live" id="live"><span class="dot"></span><span class="txt">live</span></span>
 </div></header>
 <main id="main"><div id="app"><div class="skel"><div class="skel-card"></div><div class="skel-card"></div><div class="skel-card"></div></div></div></main>

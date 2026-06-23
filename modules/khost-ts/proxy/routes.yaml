@@ -7,7 +7,10 @@
 # localhost-only for local agents.
 routes:
   - hostname: kauto.ernest.atomi.cloud
-    service: http://localhost:47317 # kautopilot
+    service: http://localhost:47317 # kautopilot dashboard
+
+  - hostname: kloop.ernest.atomi.cloud
+    service: http://localhost:47316 # kloop dashboard
 
   - hostname: ssh.ernest.atomi.cloud
     service: ssh://localhost:2222 # khost loopback sshd (browser-rendered via Access)

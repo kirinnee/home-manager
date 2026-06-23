@@ -3,11 +3,10 @@ import { Command } from "commander";
 import { sessionDir } from "../core/artifacts";
 import {
 	deleteSession,
+	getSessionByFolder,
 	getSessionById,
-	getSessionByWorktree,
 	listSessions,
 } from "../core/db";
-import { getGitRoot, getWorktree } from "../core/git";
 import { checkLock, listLockKeys, releaseLock } from "../core/lock";
 import { confirmAction } from "../llm/inquirer";
 import { logError, logOk } from "../util/format";
@@ -81,7 +80,7 @@ async function runDelete(
 	opts: { all?: boolean; force?: boolean; running?: boolean },
 ): Promise<void> {
 	if (opts.all) {
-		const sessions = listSessions({ includeAll: true });
+		const sessions = listSessions();
 		const toDelete = sessions.filter(
 			(s) => opts.running || !isSessionRunning(s.id),
 		);
@@ -117,16 +116,9 @@ async function runDelete(
 			process.exit(1);
 		}
 	} else {
-		try {
-			const repoPath = getGitRoot();
-			const worktree = getWorktree();
-			session = getSessionByWorktree(repoPath, worktree);
-		} catch {
-			logError("No session found in this worktree.");
-			process.exit(1);
-		}
+		session = getSessionByFolder(process.cwd());
 		if (!session) {
-			logError("No session found in this worktree.");
+			logError("No session found in this folder.");
 			process.exit(1);
 		}
 	}

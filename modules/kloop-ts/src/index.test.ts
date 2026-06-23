@@ -21,12 +21,25 @@ import {
   parseReviewerConfig,
   parseConflictCheckerConfig,
   selectImplementer,
+  selectRoleAccount,
+  flattenNestedConfig,
+  nestFlatConfig,
   DEFAULT_CONFIG,
   EVENT_TYPES,
 } from './types';
+import { buildDefaultConfigYaml } from './agents/default-config';
+import YAML from 'yaml';
 import type { Config, ImplementerRetryEvent, ImplementerEndEvent } from './types';
-import { DEFAULT_RE_SYNTHESIS_PROMPT, DEFAULT_IMPLEMENTER_PROMPT } from './agents/default-prompts';
-import { tryParseJson } from './stream/parse';
+import {
+  DEFAULT_RE_SYNTHESIS_PROMPT,
+  DEFAULT_IMPLEMENTER_PROMPT,
+  REVIEWER_PLUMBING_PROMPT,
+} from './agents/default-prompts';
+import { tryParseJson, extractTokensFromLog } from './stream/parse';
+import { AgentRunner } from './agents/runner';
+import * as fsp from 'fs/promises';
+import * as nodeOs from 'os';
+import * as nodePath from 'path';
 
 describe('Placeholder', () => {
   it('should pass basic verification', () => {
@@ -126,6 +139,31 @@ describe('Config parsing', () => {
       prompts: { reReviewer: 'old prompt' },
     });
     expect(config.prompts?.verifier).toBe('old prompt');
+  });
+
+  it('interactive defaults to false', () => {
+    expect(parseRawConfig({}).interactive).toBe(false);
+    expect(DEFAULT_CONFIG.interactive).toBe(false);
+  });
+
+  it('parses flat interactive flag', () => {
+    expect(parseRawConfig({ interactive: true }).interactive).toBe(true);
+  });
+
+  it('parses interactive from nested settings block', () => {
+    expect(parseRawConfig({ settings: { interactive: true } }).interactive).toBe(true);
+  });
+
+  it('round-trips interactive through nest → flatten (persist path)', () => {
+    const nested = nestFlatConfig({ interactive: true }) as { settings?: { interactive?: boolean } };
+    expect(nested.settings?.interactive).toBe(true);
+    const flat = flattenNestedConfig(nested) as { interactive?: boolean };
+    expect(flat.interactive).toBe(true);
+  });
+
+  it('default config YAML carries interactive: false', () => {
+    const config = parseRawConfig(YAML.parse(buildDefaultConfigYaml()));
+    expect(config.interactive).toBe(false);
   });
 
   it('defaults match DEFAULT_CONFIG', () => {
@@ -378,6 +416,31 @@ describe('Default prompt templates', () => {
     const addressedIdx = DEFAULT_IMPLEMENTER_PROMPT.indexOf('Document how you addressed');
     expect(selfReviewIdx).toBeLessThan(addressedIdx);
   });
+
+  it('implementer prompt defines the Type 1 / Type 2 evidence model', () => {
+    expect(DEFAULT_IMPLEMENTER_PROMPT).toContain('Type 1');
+    expect(DEFAULT_IMPLEMENTER_PROMPT).toContain('Type 2');
+    expect(DEFAULT_IMPLEMENTER_PROMPT).toContain('automated proof');
+    expect(DEFAULT_IMPLEMENTER_PROMPT).toContain('code-review proof');
+    // Type-1 capture still pipes real command output into the evidence folder.
+    expect(DEFAULT_IMPLEMENTER_PROMPT).toContain('{evidenceDir}/<criterion>.log');
+    // Hollow commands are explicitly disallowed.
+    expect(DEFAULT_IMPLEMENTER_PROMPT).toContain('assert true');
+  });
+
+  it('reviewer prompt gates each criterion on its evidence type', () => {
+    expect(REVIEWER_PLUMBING_PROMPT).toContain('Type 1');
+    expect(REVIEWER_PLUMBING_PROMPT).toContain('Type 2');
+    expect(REVIEWER_PLUMBING_PROMPT).toContain('self-review.md');
+    expect(REVIEWER_PLUMBING_PROMPT).toContain('hollow');
+    // Reads evidence from the evidence folder, not a sidecar.
+    expect(REVIEWER_PLUMBING_PROMPT).toContain('{evidenceDir}/');
+  });
+
+  it('no prompt requires a .meta sidecar', () => {
+    expect(DEFAULT_IMPLEMENTER_PROMPT).not.toContain('.meta');
+    expect(REVIEWER_PLUMBING_PROMPT).not.toContain('.meta');
+  });
 });
 
 // ============================================================================
@@ -558,6 +621,36 @@ describe('Config validation edge cases', () => {
     const config = parseRawConfig({ synthesizer: 'gemini:gemini' });
     expect(config.synthesizer).toBe('gemini:gemini');
   });
+
+  it('synthesizer accepts an inline weighted pool', () => {
+    const config = parseRawConfig({ synthesizer: { 'a:claude': 1, 'b:claude': 1 } });
+    expect(config.synthesizer).toEqual({ 'a:claude': 1, 'b:claude': 1 });
+  });
+
+  it('conflictChecker accepts an inline weighted pool', () => {
+    const config = parseRawConfig({ conflictChecker: { 'a:claude': 1, 'b:claude': 1 } });
+    expect(config.conflictChecker).toEqual({ 'a:claude': 1, 'b:claude': 1 });
+  });
+});
+
+describe('selectRoleAccount (synthesizer / checkpointer pool resolution)', () => {
+  it('returns undefined when the entry is unset (caller keeps its fallback)', () => {
+    expect(selectRoleAccount(undefined)).toBeUndefined();
+  });
+
+  it('returns a plain account string unchanged', () => {
+    expect(selectRoleAccount('gemini:gemini')).toBe('gemini:gemini');
+  });
+
+  it('expands a pool-profile NAME via poolProfiles', () => {
+    const picked = selectRoleAccount('fast', { fast: { 'only:claude': 1 } });
+    expect(picked).toBe('only:claude');
+  });
+
+  it('picks from an inline pool (load distribution)', () => {
+    const picked = selectRoleAccount({ 'a:claude': 1, 'b:claude': 1 });
+    expect(['a:claude', 'b:claude']).toContain(picked);
+  });
 });
 
 // ============================================================================
@@ -679,5 +772,129 @@ describe('Codex stream normalization', () => {
       expect(event!.subtype).toBe('init');
       expect(event!.session_id).toBe('gemini-123');
     }
+  });
+});
+
+describe('extractTokensFromLog — interactive transcript', () => {
+  async function writeTmp(content: string): Promise<string> {
+    const file = nodePath.join(await fsp.mkdtemp(nodePath.join(nodeOs.tmpdir(), 'kloop-tok-')), 'session.jsonl');
+    await fsp.writeFile(file, content);
+    return file;
+  }
+
+  it('aggregates per-turn message.usage when there is no result event', async () => {
+    // Claude TUI session transcript: assistant entries carry usage, no {type:"result"}.
+    const content = [
+      '{"type":"system","subtype":"init","session_id":"s1"}',
+      '{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":100,"output_tokens":20}}}',
+      '{"type":"user","message":{"role":"user"}}',
+      '{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":150,"output_tokens":35}}}',
+    ].join('\n');
+    const file = await writeTmp(content);
+    const tokens = await extractTokensFromLog(file);
+    expect(tokens.inputTokens).toBe(250);
+    expect(tokens.outputTokens).toBe(55);
+  });
+
+  it('prefers the result event over transcript aggregation when present', async () => {
+    const content = [
+      '{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":100,"output_tokens":20}}}',
+      '{"type":"result","usage":{"input_tokens":999,"output_tokens":888}}',
+    ].join('\n');
+    const file = await writeTmp(content);
+    const tokens = await extractTokensFromLog(file);
+    expect(tokens.inputTokens).toBe(999);
+    expect(tokens.outputTokens).toBe(888);
+  });
+
+  it('deduplicates repeated assistant records by message.id (one usage per message)', async () => {
+    // Claude Code writes multiple JSONL records per assistant message (one per streaming
+    // chunk), each repeating the same message.id and the same usage. Summing every line would
+    // multiply the counts; dedupe by id so each unique message counts exactly once.
+    const content = [
+      '{"type":"assistant","message":{"id":"m1","role":"assistant","usage":{"input_tokens":3143,"output_tokens":777}}}',
+      '{"type":"assistant","message":{"id":"m1","role":"assistant","usage":{"input_tokens":3143,"output_tokens":777}}}',
+      '{"type":"assistant","message":{"id":"m1","role":"assistant","usage":{"input_tokens":3143,"output_tokens":777}}}',
+      '{"type":"user","message":{"role":"user"}}',
+      '{"type":"assistant","message":{"id":"m2","role":"assistant","usage":{"input_tokens":50,"output_tokens":10}}}',
+      '{"type":"assistant","message":{"id":"m2","role":"assistant","usage":{"input_tokens":50,"output_tokens":10}}}',
+    ].join('\n');
+    const file = await writeTmp(content);
+    const tokens = await extractTokensFromLog(file);
+    expect(tokens.inputTokens).toBe(3193); // 3143 + 50, not multiplied by record count
+    expect(tokens.outputTokens).toBe(787); // 777 + 10
+  });
+
+  it('folds cache_creation/cache_read tokens into input (real transcripts put the bulk there)', async () => {
+    // In real Claude Code session JSONL, input_tokens is tiny and the bulk of the input lives in
+    // cache_creation_input_tokens / cache_read_input_tokens. Summing only input_tokens would
+    // massively undercount.
+    const content = [
+      '{"type":"assistant","message":{"id":"m1","role":"assistant","usage":{"input_tokens":2,"cache_creation_input_tokens":34102,"cache_read_input_tokens":1000,"output_tokens":50}}}',
+      '{"type":"assistant","message":{"id":"m2","role":"assistant","usage":{"input_tokens":3,"cache_read_input_tokens":34104,"output_tokens":60}}}',
+    ].join('\n');
+    const file = await writeTmp(content);
+    const tokens = await extractTokensFromLog(file);
+    expect(tokens.inputTokens).toBe(69211); // (2+34102+1000) + (3+34104)
+    expect(tokens.outputTokens).toBe(110); // 50 + 60
+  });
+});
+
+// ============================================================================
+// Interactive launch: sentinel-independent completion fallback
+// ============================================================================
+
+describe('AgentRunner.launch — interactive sentinel-independent fallback', () => {
+  // A stub TmuxService whose interactive session always "times out" (sentinel never seen).
+  function makeRunner(opts: { exitCode: number; timedOut: boolean }) {
+    const tmux = {
+      runInteractiveSession: async () => ({ exitCode: opts.exitCode, durationMs: 1, timedOut: opts.timedOut }),
+      runInSession: async () => ({ exitCode: 0, durationMs: 1, timedOut: false }),
+    } as unknown as import('./deps').TmuxService;
+    const config = parseRawConfig({ implementers: { claude: 1 } });
+    const runner = new AgentRunner(tmux, {} as unknown as import('./deps').StateService, config);
+    return runner as unknown as {
+      launch(p: Record<string, unknown>): Promise<{ exitCode: number; durationMs: number; timedOut: boolean }>;
+    };
+  }
+
+  it('treats a timeout (missing sentinel) as success when the output file exists', async () => {
+    const dir = await fsp.mkdtemp(nodePath.join(nodeOs.tmpdir(), 'kloop-launch-'));
+    const outputFile = nodePath.join(dir, 'review-summary.md');
+    await fsp.writeFile(outputFile, 'done');
+    const runner = makeRunner({ exitCode: 124, timedOut: true });
+    const result = await runner.launch({
+      interactive: true,
+      sentinelFile: nodePath.join(dir, '.kloop-done'),
+      tmuxSession: 't',
+      binary: 'claude',
+      promptFile: 'p',
+      sessionId: 's',
+      logFile: nodePath.join(dir, 'log'),
+      timeout: 1,
+      command: 'noop',
+      outputFile,
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.timedOut).toBe(false);
+  });
+
+  it('keeps the failing exit code when the output file is absent', async () => {
+    const dir = await fsp.mkdtemp(nodePath.join(nodeOs.tmpdir(), 'kloop-launch-'));
+    const runner = makeRunner({ exitCode: 124, timedOut: true });
+    const result = await runner.launch({
+      interactive: true,
+      sentinelFile: nodePath.join(dir, '.kloop-done'),
+      tmuxSession: 't',
+      binary: 'claude',
+      promptFile: 'p',
+      sessionId: 's',
+      logFile: nodePath.join(dir, 'log'),
+      timeout: 1,
+      command: 'noop',
+      outputFile: nodePath.join(dir, 'missing.md'),
+    });
+    expect(result.exitCode).toBe(124);
+    expect(result.timedOut).toBe(true);
   });
 });

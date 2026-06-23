@@ -37,8 +37,7 @@ let seq = 0;
 function newSession(ticketId: string | null = "PE-1234"): string {
 	seq += 1;
 	const wt = `/tmp/fixes-repo-${seq}`;
-	return createSession({ ticketId, org: "liftoff", repoPath: wt, worktree: wt })
-		.sessionId;
+	return createSession({ ticketId, org: "liftoff", folder: wt }).sessionId;
 }
 
 function writeFile(p: string, body: string): void {
@@ -353,5 +352,90 @@ describe("M5: revisit_spec escalation bumps the epoch and re-runs the plan phase
 		if (back.done) return;
 		expect(back.step).toBe("write_spec");
 		expect(back.version).toBe(2);
+	});
+});
+
+// --- BUG 1: seed→running round-trip with a non-canonical (descriptive) plan ----
+
+/**
+ * Drive the shared plan phase authoring ONE descriptively-named plan folder for
+ * `repo` (e.g. `plan-1-foundation/`), then stop at the await_repos handoff. Mirrors
+ * `drivePlan` but lets the caller pick the folder name to exercise the seed→running
+ * filename round-trip.
+ */
+async function drivePlanWithFolder(
+	id: string,
+	repo: string,
+	folder: string,
+): Promise<void> {
+	const dir = sessionDir(id);
+	await runNext(id, config);
+	writeFile(join(dir, "ticket.md"), "# ticket");
+	await runComplete(id, config, "fetch_ticket", {
+		output: join(dir, "ticket.md"),
+	});
+	await runNext(id, config);
+	writeFile(join(dir, "epoch", "1", "triage", "v1.md"), "moderate triage");
+	await runComplete(id, config, "triage", {
+		output: join(dir, "epoch", "1", "triage", "v1.md"),
+		metadata: { complexity: "moderate", repos: [repo], dependsOn: {} },
+	});
+	await runNext(id, config);
+	writeFile(join(dir, "epoch", "1", "spec", "v1.md"), "# Master spec");
+	await runComplete(id, config, "write_spec", {
+		output: join(dir, "epoch", "1", "spec", "v1.md"),
+	});
+	await runNext(id, config);
+	const plansDir = join(dir, "epoch", "1", "plans", repo);
+	writeFile(join(plansDir, folder, "v1.md"), `repo: ${repo}\n# ${folder}`);
+	await runComplete(id, config, "write_plans", { output: plansDir });
+	await runNext(id, config); // finalize_plans → await_repos
+}
+
+describe("BUG 1: descriptive plan folder round-trips through seed to running", () => {
+	it("running resolves plan_path to the seeded file, not a reconstructed plan-1.md", async () => {
+		const id = newSession();
+		await drivePlanWithFolder(id, "default", "plan-1-foundation");
+
+		// A real on-disk worktree so seed actually copies plans (the sandbox default
+		// worktree doesn't exist, so the copy would otherwise be skipped).
+		const wt = mkdtempSync(join(tmpdir(), "kautopilot-bug1-wt-"));
+		updateSessionMeta(id, (m) => {
+			const e = m.repos.find((r) => r.repo === "default");
+			if (e) {
+				e.worktree = wt;
+				e.status = "active";
+			}
+		});
+
+		try {
+			// seed/clear_loop/setup_run are inline code steps; the first yielded step is
+			// the agent `running` (or `running_subagent`). Drive a few steps defensively.
+			let plan_path: string | undefined;
+			for (let i = 0; i < 10; i++) {
+				const d = await runNext(id, config, "default");
+				if (d.done) break;
+				if (d.step === "running" || d.step === "running_subagent") {
+					plan_path = d.vars.plan_path as string | undefined;
+					break;
+				}
+				if (d.contract.outputFile) writeFile(d.contract.outputFile, "x");
+				await runComplete(id, config, d.step, {
+					repo: "default",
+					output: d.contract.outputFile,
+					metadata: {},
+				});
+			}
+
+			// The bug: plan_path pointed at a never-written plan-1.md. The fix: it points
+			// at the actual seeded descriptive file, which must exist on disk.
+			expect(plan_path).toBeTruthy();
+			expect(plan_path as string).toEndWith("plan-1-foundation.md");
+			expect(existsSync(plan_path as string)).toBe(true);
+			// And the broken reconstructed path must NOT be what we resolved.
+			expect(plan_path as string).not.toEndWith("plans/plan-1.md");
+		} finally {
+			rmSync(wt, { recursive: true, force: true });
+		}
 	});
 });

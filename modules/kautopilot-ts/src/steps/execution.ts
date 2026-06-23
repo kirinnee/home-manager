@@ -23,7 +23,12 @@ import {
 	latestPlanFiles,
 	resolveActivePlans,
 } from "../phases/shared";
-import { SHARED_APPROVAL_GATE, substitute, ticketId } from "./prompt-helpers";
+import {
+	SHARED_APPROVAL_GATE,
+	substitute,
+	ticketId,
+	ticketPath,
+} from "./prompt-helpers";
 
 // ============================================================================
 // EXECUTION phase (per repo) — `kautopilot next --repo <repo>`.
@@ -164,16 +169,50 @@ function planNameFor(index: number): string {
 }
 
 /**
+ * Per-subprocess timeout for seed provisioning. `wt switch --create` runs worktree
+ * creation, `bun install`, and secrets sync inside one opaque command — any of which
+ * can wedge (network, a secrets prompt). Without a timeout `Bun.spawnSync` blocks
+ * forever, `next`'s `finally { releaseLock }` never runs, and the run-lock is held
+ * indefinitely (observed as an ~8h stall). A bounded timeout turns a wedge into a
+ * clean step failure that releases the lock. Override with `KAUTOPILOT_SEED_STEP_TIMEOUT_MS`.
+ *
+ * Bounds EVERY seed subprocess: worktree provisioning (provisionWorktree) AND the
+ * branch checkout + seed commit (ensureFeatureBranch/seedCommit). Coupled with the
+ * run-lock heartbeat TTL (see `lockTtlMs` in core/lock.ts): seed runs several of these
+ * back-to-back with no heartbeat between them, so keep `KAUTOPILOT_LOCK_TTL_MS`
+ * comfortably above their worst-case sum. If you raise this, raise the lock TTL too.
+ */
+function seedStepTimeoutMs(): number {
+	const raw = Number(process.env.KAUTOPILOT_SEED_STEP_TIMEOUT_MS);
+	return Number.isFinite(raw) && raw > 0 ? raw : 8 * 60 * 1000;
+}
+
+/** Bun kills a timed-out child (SIGTERM) → exitCode is null. Detect that case. */
+function spawnTimedOut(r: { exitCode: number | null }): boolean {
+	return r.exitCode === null;
+}
+
+/**
  * Provision a worktrunk worktree for a repo via `wt switch --create <name>` (the
  * /rc-session mechanism). Resolves the created worktree path from `git worktree
  * list --porcelain`. Degrades to `git worktree add`, then to a bare path so unit
- * tests (no git/wt) and sandboxes still proceed deterministically.
+ * tests (no git/wt) and sandboxes still proceed deterministically. Every subprocess
+ * is bounded by `seedStepTimeoutMs()`; on a timeout we don't retry the SAME tool
+ * (the retry would just wedge again) — we fall through to the next strategy, and
+ * report `timedOut` so the caller can surface it instead of stalling forever.
  */
 function provisionWorktree(
 	repoPath: string,
 	name: string,
 	fallback: string,
-): { worktree: string; branch: string; provisioned: boolean } {
+): {
+	worktree: string;
+	branch: string;
+	provisioned: boolean;
+	timedOut: boolean;
+} {
+	const timeout = seedStepTimeoutMs();
+	let timedOut = false;
 	const resolveByName = (): string | null => {
 		try {
 			const list = Bun.spawnSync({
@@ -181,11 +220,18 @@ function provisionWorktree(
 				cwd: repoPath,
 				stdout: "pipe",
 				stderr: "pipe",
+				timeout,
 			});
 			if (list.exitCode !== 0) return null;
 			for (const block of list.stdout.toString().split("\n\n")) {
-				const m = /^worktree (.+)$/m.exec(block);
-				if (m && basename(m[1].trim()) === name) return m[1].trim();
+				const w = /^worktree (.+)$/m.exec(block);
+				if (!w) continue;
+				// Match by branch ref first (so slashed names like `user/ticket-x`
+				// resolve — their worktree dir basename won't equal the branch), then
+				// fall back to dir-basename for plain names.
+				const b = /^branch refs\/heads\/(.+)$/m.exec(block);
+				if ((b && b[1].trim() === name) || basename(w[1].trim()) === name)
+					return w[1].trim();
 			}
 		} catch {
 			// no git
@@ -199,17 +245,26 @@ function provisionWorktree(
 			cwd: repoPath,
 			stdout: "pipe",
 			stderr: "pipe",
+			timeout,
 		});
-		if (created.exitCode !== 0) {
-			Bun.spawnSync({
-				cmd: ["wt", "switch", name, "--no-cd"],
-				cwd: repoPath,
-				stdout: "pipe",
-				stderr: "pipe",
-			});
+		// On timeout, don't retry `wt` — it would just wedge again. Fall through to git.
+		if (spawnTimedOut(created)) {
+			timedOut = true;
+		} else {
+			if (created.exitCode !== 0) {
+				const sw = Bun.spawnSync({
+					cmd: ["wt", "switch", name, "--no-cd"],
+					cwd: repoPath,
+					stdout: "pipe",
+					stderr: "pipe",
+					timeout,
+				});
+				if (spawnTimedOut(sw)) timedOut = true;
+			}
+			const wt = resolveByName();
+			if (wt)
+				return { worktree: wt, branch: name, provisioned: true, timedOut };
 		}
-		const wt = resolveByName();
-		if (wt) return { worktree: wt, branch: name, provisioned: true };
 	} catch {
 		// wt not installed — fall through
 	}
@@ -220,23 +275,29 @@ function provisionWorktree(
 			cwd: repoPath,
 			stdout: "pipe",
 			stderr: "pipe",
+			timeout,
 		});
-		if (add.exitCode !== 0) {
-			Bun.spawnSync({
+		if (spawnTimedOut(add)) {
+			timedOut = true;
+		} else if (add.exitCode !== 0) {
+			const addExisting = Bun.spawnSync({
 				cmd: ["git", "worktree", "add", fallback, name],
 				cwd: repoPath,
 				stdout: "pipe",
 				stderr: "pipe",
+				timeout,
 			});
+			if (spawnTimedOut(addExisting)) timedOut = true;
 		}
 		if (existsSync(fallback))
-			return { worktree: fallback, branch: name, provisioned: true };
+			return { worktree: fallback, branch: name, provisioned: true, timedOut };
 	} catch {
 		// no git
 	}
 	// 3. sandbox / no-VCS — a bare deterministic path. NOT a real worktree: the
-	// caller must surface this (repoPath wasn't a usable git repo).
-	return { worktree: fallback, branch: name, provisioned: false };
+	// caller must surface this (repoPath wasn't a usable git repo, or every
+	// provisioning subprocess timed out).
+	return { worktree: fallback, branch: name, provisioned: false, timedOut };
 }
 
 // --- seed (code, repo) ------------------------------------------------------
@@ -270,29 +331,50 @@ const seed: StepDef = {
 		if (!repo.worktree) {
 			const id = ticketId(ctx.meta);
 			const name = repo.branch ?? `${repo.repo}-${id}`;
-			const repoPath = repo.repoPath ?? ctx.meta.repoPath;
-			const fallback = join(dirname(ctx.meta.worktree), name);
+			// A repo's path comes from triage; the session folder is only a fallback
+			// (and the deterministic base for the sandbox worktree path).
+			const repoPath = repo.repoPath ?? ctx.meta.folder;
+			// Worktree dir can't contain the branch's slashes (e.g. user/ticket-x).
+			const fallback = join(dirname(ctx.meta.folder), name.replace(/\//g, "-"));
+			// Progress marker so `kautopilot logs`/`status` show where seed is during
+			// the long, opaque `wt switch` (worktree + bun install + secrets). Without
+			// this the WAL was silent for the whole provisioning window.
+			appendEvent(ctx.sessionId, {
+				ts: new Date().toISOString(),
+				event: "seed:provision_worktree:started",
+				version: ctx.version,
+				repo: repo.repo,
+				metadata: { repoPath, name, timeoutMs: seedStepTimeoutMs() },
+			});
 			const prov = provisionWorktree(repoPath, name, fallback);
+			appendEvent(ctx.sessionId, {
+				ts: new Date().toISOString(),
+				event: "seed:provision_worktree:completed",
+				version: ctx.version,
+				repo: repo.repo,
+				metadata: {
+					worktree: prov.worktree,
+					provisioned: prov.provisioned,
+					timedOut: prov.timedOut,
+				},
+			});
 			// kautopilot can launch outside any repo, so a repo's path comes from
 			// triage. If no REAL worktree could be created, the path was missing or
 			// not a git repo — surface it loudly (don't let the repo silently no-op
 			// its way to a PR with no work). Diagnosable via the WAL/status; the bare
 			// path is still set so the sandbox/tests proceed deterministically.
 			if (!prov.provisioned) {
+				const reason = prov.timedOut
+					? `worktree provisioning timed out (> ${seedStepTimeoutMs()}ms) — \`wt\`/\`git worktree\` wedged (network, secrets, or bun install). Lock released; re-run \`kautopilot next --repo ${repo.repo}\` to retry.`
+					: "could not create a worktree — repo path missing or not a git repo (triage must provide each repo's path)";
 				appendEvent(ctx.sessionId, {
 					ts: new Date().toISOString(),
 					event: "seed:no_worktree",
 					version: ctx.version,
 					repo: repo.repo,
-					metadata: {
-						repoPath,
-						reason:
-							"could not create a worktree — repo path missing or not a git repo (triage must provide each repo's path)",
-					},
+					metadata: { repoPath, reason, timedOut: prov.timedOut },
 				});
-				console.warn(
-					`[seed] repo "${repo.repo}": no worktree created at "${repoPath}" — triage must provide a valid git repo path.`,
-				);
+				console.warn(`[seed] repo "${repo.repo}": ${reason}`);
 			}
 			updateSessionMeta(ctx.sessionId, (m) => {
 				const entry = m.repos.find((r) => r.repo === repo.repo);
@@ -338,6 +420,9 @@ const seed: StepDef = {
 					);
 				}
 
+				// Copy the ticket (unversioned) so the dev loop has the original ask.
+				copyIfPresent(ticketPath(ctx.sessionId), join(specDir, "ticket.md"));
+
 				// Copy each of this repo's plans from epoch/<E>/plans/<repo>/<plan>/vN.md
 				// into the worktree as plans/<plan>.md (latest version of each folder).
 				const planFolders = latestPlanFiles(
@@ -346,8 +431,13 @@ const seed: StepDef = {
 					authoringRepoName(ctx.meta),
 				);
 				const wanted = new Set(repo.plans);
+				// A repo with no matched plans means "give it everything" ONLY in the
+				// single-repo case (the legacy one-repo fallback). With multiple repos a
+				// zero-plan repo must copy NOTHING — otherwise it pulls in every other
+				// repo's plans and next_plan drives them into the wrong worktree/PR.
+				const copyAll = repo.plans.length === 0 && ctx.meta.repos.length <= 1;
 				for (const { plan, file } of planFolders) {
-					if (repo.plans.length > 0 && !wanted.has(plan)) continue;
+					if (!copyAll && !wanted.has(plan)) continue;
 					copyIfPresent(file, join(plansDir, `${plan}.md`));
 				}
 
@@ -403,6 +493,7 @@ function ensureFeatureBranch(
 	baseBranch: string,
 ): void {
 	if (!branch) return;
+	const timeout = seedStepTimeoutMs();
 	try {
 		getGitRoot(worktree);
 		// Already on the target branch → nothing to do.
@@ -415,13 +506,17 @@ function ensureFeatureBranch(
 				cwd: worktree,
 				stdout: "pipe",
 				stderr: "pipe",
+				timeout,
 			}).exitCode === 0;
 		if (exists) {
+			// Bounded: a `git checkout` wedged on a stale index.lock must not hold the
+			// run-lock past its TTL (see lockTtlMs) — the heartbeat can't refresh mid-step.
 			Bun.spawnSync({
 				cmd: ["git", "checkout", branch],
 				cwd: worktree,
 				stdout: "pipe",
 				stderr: "pipe",
+				timeout,
 			});
 			return;
 		}
@@ -432,6 +527,7 @@ function ensureFeatureBranch(
 			cwd: worktree,
 			stdout: "pipe",
 			stderr: "pipe",
+			timeout,
 		});
 		createBranch(branch, worktree);
 	} catch {
@@ -440,20 +536,25 @@ function ensureFeatureBranch(
 }
 
 function seedCommit(worktree: string, message: string): void {
+	const timeout = seedStepTimeoutMs();
 	try {
 		// Only attempt git operations when the worktree is actually a git repo.
 		getGitRoot(worktree);
+		// Bounded like the rest of seed: a wedged `git add`/`commit` (index.lock,
+		// fsmonitor, credential helper) must not hold the run-lock past its TTL.
 		Bun.spawnSync({
 			cmd: ["git", "add", "spec"],
 			cwd: worktree,
 			stdout: "pipe",
 			stderr: "pipe",
+			timeout,
 		});
 		Bun.spawnSync({
 			cmd: ["git", "commit", "--no-verify", "-m", message],
 			cwd: worktree,
 			stdout: "pipe",
 			stderr: "pipe",
+			timeout,
 		});
 	} catch {
 		// No git repo (test sandbox) — seed-commit is a no-op.
@@ -645,7 +746,9 @@ const RUNNING_SUBAGENT_MECHANICS = `## Implement This Plan Directly
 
 You are implementing a single plan for the repository — no kloop, no review loop.
 
-- Read the plan at {plan_path} and the task spec at {task_spec_path} for context.
+- Read the plan at {plan_path} — it is the **source of truth** for this change. If a task
+  spec is present at {task_spec_path}, read it too for extra context (it may be absent —
+  some orgs don't seed the master spec; don't block on it).
 - Implement the plan end-to-end in the worktree: write the code, add/adjust tests,
   and make the change actually work. Follow the repo's existing conventions.
 - Do NOT commit — a separate commit step owns committing. Just leave a clean, working

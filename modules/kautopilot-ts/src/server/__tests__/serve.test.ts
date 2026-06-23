@@ -25,8 +25,7 @@ describe("serve", () => {
 		mkdirSync(join(dir, "brainstorm"), { recursive: true });
 		const meta = {
 			sessionId: id,
-			worktree: "/tmp/wt",
-			repoPath: "/tmp/repo",
+			folder: "/tmp/hub",
 			ticketId: "PE-9999",
 			org: "liftoff",
 			ticketSystem: "jira",

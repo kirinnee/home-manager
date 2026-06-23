@@ -20,6 +20,8 @@ import * as resetCmd from './reset';
 import * as streamCmd from './stream';
 import * as skillCmd from './skill';
 import * as showCmd from './show';
+import * as serveCmd from './serve';
+import { createDashCommand } from './dash';
 import { readFileSync } from 'fs';
 
 // Read version from package.json at runtime
@@ -199,6 +201,15 @@ export function createCli(deps: CliDeps): Command {
     .description('Install the kloop skill to ~/.claude/skills/kloop/')
     .action(() => skillCmd.installHandler());
   program.addCommand(skillCmd_);
+
+  program
+    .command('serve')
+    .description('Start the kloop web viewer (foreground)')
+    .option('--port <n>', 'port to listen on (default 47316)')
+    .option('--host <h>', 'host to bind (default 127.0.0.1)')
+    .action(async opts => serveCmd.handler(opts, deps));
+
+  program.addCommand(createDashCommand());
 
   return program;
 }

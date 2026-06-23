@@ -17,10 +17,7 @@ export class IndexDb {
   ) {
     // Use dynamic import for bun:sqlite
     const { Database } = require('bun:sqlite') as { Database: any };
-    // Ensure parent directory exists
-    this.fs.mkdir(path.dirname(this.paths.indexDb));
-    this.db = new Database(this.paths.indexDb, { create: true });
-    this.db.exec(`
+    const schema = `
       CREATE TABLE IF NOT EXISTS runs (
         id          TEXT PRIMARY KEY,
         workspace   TEXT NOT NULL,
@@ -28,9 +25,42 @@ export class IndexDb {
       );
       CREATE INDEX IF NOT EXISTS idx_runs_workspace ON runs(workspace);
       CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at DESC);
-    `);
-    // Enable WAL mode for better concurrent read performance
-    this.db.exec('PRAGMA journal_mode=WAL');
+    `;
+    try {
+      // Normal (writable) path: ensure dir, create/open, init schema + WAL.
+      this.fs.mkdir(path.dirname(this.paths.indexDb));
+      this.db = new Database(this.paths.indexDb, { create: true });
+      this.db.exec(schema);
+      this.db.exec('PRAGMA journal_mode=WAL'); // better concurrent reads
+    } catch {
+      // Read-only store — `kloop dash` mounts ~/.kloop read-only, so mkdir/create/WAL
+      // all fail. Open read-only WITHOUT touching the -wal/-shm sidecars. SQLite defers
+      // the sidecar-access error to the first query, so we must PROBE before trusting a
+      // handle; if every read-only open fails its probe, degrade to an empty in-memory
+      // DB so the dashboard returns an empty list instead of 500-ing every request.
+      this.db = this.openReadOnly(Database, schema);
+    }
+  }
+
+  private openReadOnly(Database: any, schema: string): any {
+    const candidates = [
+      // immutable=1 reads the main DB as a frozen snapshot, skipping -wal/-shm entirely
+      // (works on a read-only FS even when the sidecars are absent).
+      () => new Database(`file:${this.paths.indexDb}?immutable=1`, { readonly: true }),
+      () => new Database(this.paths.indexDb, { readonly: true }),
+    ];
+    for (const open of candidates) {
+      try {
+        const db = open();
+        db.prepare('SELECT id FROM runs LIMIT 0').all(); // probe — surfaces deferred errors now
+        return db;
+      } catch {
+        /* try the next strategy */
+      }
+    }
+    const mem = new Database(':memory:');
+    mem.exec(schema);
+    return mem;
   }
 
   // --- CRUD ---

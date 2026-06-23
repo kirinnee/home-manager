@@ -54,8 +54,21 @@ export const cfAccountId = process.env.CLOUDFLARE_ACCOUNT_ID ?? '';
 export const cfApiBase = 'https://api.cloudflare.com/client/v4';
 
 // The secret subtrees split out into the sops fragment; everything else is the
-// non-secret skeleton. Keep in sync with proxy `import`.
-export const secretPaths = ['api-keys', 'claude-api-key', 'openai-compatibility'] as const;
+// non-secret skeleton. Keep in sync with proxy `import` / `capture`.
+// Every top-level section that can carry a credential lives here so that
+// `khost proxy capture` never writes a secret into the committed plaintext
+// skeleton. Sections that mix secret + non-secret fields (kiro, ampcode) are
+// captured wholesale into the encrypted fragment — over-encrypting is safe.
+export const secretPaths = [
+  'api-keys',
+  'claude-api-key',
+  'openai-compatibility',
+  'gemini-api-key',
+  'codex-api-key',
+  'vertex-api-key',
+  'kiro',
+  'ampcode',
+] as const;
 
 // --- route-manager config -------------------------------------------------
 // Declarative list of public hostnames that route to this host through the

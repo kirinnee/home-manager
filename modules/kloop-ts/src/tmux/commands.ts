@@ -172,3 +172,56 @@ export function buildKillSessionCommand(sessionName: string): string[] {
 export function buildTimeoutCommand(command: string, timeoutMins: number): string {
   return `timeout ${timeoutMins}m ${command}`;
 }
+
+// ============================================================================
+// Interactive (non --print) session primitives
+// ============================================================================
+
+/**
+ * Build the tmux command to launch a claude TUI detached (NO --print). The prompt is
+ * NOT passed here — it's pasted in after the TUI is ready. CLAUDECODE is scrubbed the
+ * same way as the print-mode launcher to avoid nested-session inheritance.
+ */
+export function buildInteractiveLaunchCommand(params: {
+  sessionName: string;
+  cwd: string;
+  binary: string;
+  sessionId: string;
+}): string[] {
+  const { sessionName, cwd, binary, sessionId } = params;
+  return [
+    'tmux',
+    'new-session',
+    '-d',
+    '-s',
+    sessionName,
+    '-c',
+    cwd,
+    '-e',
+    'CLAUDECODE=',
+    'env',
+    '-u',
+    'CLAUDECODE',
+    binary,
+    '--dangerously-skip-permissions',
+    '--session-id',
+    sessionId,
+  ];
+}
+
+/** Capture the visible pane (or full scrollback with `full`) as plain text. */
+export function buildCapturePaneCommand(sessionName: string, full = false): string[] {
+  return full
+    ? ['tmux', 'capture-pane', '-p', '-S', '-', '-t', sessionName]
+    : ['tmux', 'capture-pane', '-p', '-t', sessionName];
+}
+
+/**
+ * Send keys to a session. With `literal`, the keys are sent verbatim (-l) — use this for
+ * text like "/exit". Without it, key names like "Enter"/"Escape" are interpreted.
+ */
+export function buildSendKeysCommand(sessionName: string, keys: string[], literal = false): string[] {
+  return literal
+    ? ['tmux', 'send-keys', '-t', sessionName, '-l', ...keys]
+    : ['tmux', 'send-keys', '-t', sessionName, ...keys];
+}
