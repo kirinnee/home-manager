@@ -117,6 +117,10 @@ rec {
 
     smartWrapper.enable = true;
 
+    # Pre-trust the launch directory so the "Do you trust the files in this
+    # folder?" dialog never appears (across all accounts / launch paths).
+    autoTrust = true;
+
     aliases = {
       "yolo" = "--dangerously-skip-permissions";
       "crc" = "--dangerously-skip-permissions --chrome --rc";
@@ -429,6 +433,7 @@ rec {
       oci-oke-allow-my-ip
       kloop
       kautopilot
+      klaude
       atomi.clickup_cli
       grafana-loki
       prometheus.cli
@@ -886,6 +891,8 @@ rec {
         kps = "kloop status";
         kpc = "kloop cancel";
         kpl = "kloop logs";
+        # Restart the always-on `kloop serve` launchd agent (picks up edited src/).
+        kpsr = "launchctl kickstart -k gui/$(id -u)/org.nix-community.home.kloop-serve";
         klg = "tail -f ./.kagent/run.log";
         vpr = "gh pr view --web";
 

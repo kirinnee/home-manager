@@ -75,6 +75,36 @@ function notFoundJson(): Response {
 	return json({ error: "not found" }, 404);
 }
 
+/**
+ * Serve a full-page HTML infographic. `rest` is the path parts AFTER `html`:
+ *   <kind>[/v/<n>]                         — single-file artifact
+ *   plans/<repo>/<plan>[/v/<n>]            — one plan's infographic
+ * Served at a CLEAN, non-`/api` URL (`/sessions/:id/html/…`) since it returns a
+ * standalone page, not JSON — `/api/*` is the JSON data surface. (The `/api/…/html/…`
+ * path still resolves here too, for any older links.)
+ */
+function serveVisualHtml(id: string, rest: string[]): Response {
+	const kind = rest[0];
+	if (kind === "plans") {
+		const repo = rest[1] ? decodeURIComponent(rest[1]) : "";
+		const plan = rest[2] ? decodeURIComponent(rest[2]) : "";
+		if (!repo || !plan) return notFoundJson();
+		const version =
+			rest[3] === "v" && rest[4] ? Number.parseInt(rest[4], 10) : undefined;
+		const content = getPlanHtml(id, repo, plan, version);
+		return content
+			? visualHtml(content)
+			: new Response("No visual version yet", { status: 404 });
+	}
+	if (!kind || !isDocKind(kind)) return notFoundJson();
+	const version =
+		rest[1] === "v" && rest[2] ? Number.parseInt(rest[2], 10) : undefined;
+	const content = getHtmlDoc(id, kind as ArtifactKind, version);
+	return content
+		? visualHtml(content)
+		: new Response("No visual version yet", { status: 404 });
+}
+
 const POLL_MS = 1000;
 const HEARTBEAT_MS = 15000;
 
@@ -164,30 +194,9 @@ function handleApi(parts: string[], url: URL): Response | null {
 		return doc ? json(doc) : notFoundJson();
 	}
 
-	// /api/sessions/:id/html/:kind[/v/:n] — the raw HTML infographic full page.
-	// Plans variant: /api/sessions/:id/html/plans/:repo/:plan[/v/:n] (one per plan).
+	// /api/sessions/:id/html/… — legacy alias; the clean URL is /sessions/:id/html/…
 	if (section === "html") {
-		const kind = parts[4];
-		if (kind === "plans") {
-			const repo = parts[5] ? decodeURIComponent(parts[5]) : "";
-			const plan = parts[6] ? decodeURIComponent(parts[6]) : "";
-			if (!repo || !plan) return notFoundJson();
-			const version =
-				parts[7] === "v" && parts[8]
-					? Number.parseInt(parts[8], 10)
-					: undefined;
-			const content = getPlanHtml(id, repo, plan, version);
-			return content
-				? visualHtml(content)
-				: new Response("No visual version yet", { status: 404 });
-		}
-		if (!kind || !isDocKind(kind)) return notFoundJson();
-		const version =
-			parts[5] === "v" && parts[6] ? Number.parseInt(parts[6], 10) : undefined;
-		const content = getHtmlDoc(id, kind as ArtifactKind, version);
-		return content
-			? visualHtml(content)
-			: new Response("No visual version yet", { status: 404 });
+		return serveVisualHtml(id, parts.slice(4));
 	}
 
 	// /api/sessions/:id/plans/:repo[/v/:n]
@@ -233,6 +242,11 @@ export function handleRequest(req: Request): Response {
 		const parts = url.pathname.split("/").filter(Boolean);
 		if (parts[0] === "api") {
 			return handleApi(parts, url) ?? notFoundJson();
+		}
+		// Visual infographic at a clean, non-/api URL: /sessions/:id/html/… — a
+		// standalone page (served before the SPA fallback; `html` is not a client route).
+		if (parts[0] === "sessions" && parts.length >= 3 && parts[2] === "html") {
+			return serveVisualHtml(decodeURIComponent(parts[1]), parts.slice(3));
 		}
 		// Every other path returns the SPA shell (stable, reload-safe URLs).
 		return html(servedShell());

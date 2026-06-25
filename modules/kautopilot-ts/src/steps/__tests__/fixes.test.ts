@@ -70,6 +70,12 @@ async function drivePlan(id: string, repos: string[]): Promise<void> {
 	await runComplete(id, config, "write_spec", {
 		output: join(dir, "epoch", "1", "spec", "v1.md"),
 	});
+	// write_master_plan (orchestration artifact) → write_plans.
+	await runNext(id, config);
+	writeFile(join(dir, "epoch", "1", "master_plan", "v1.md"), "# Master plan");
+	await runComplete(id, config, "write_master_plan", {
+		output: join(dir, "epoch", "1", "master_plan", "v1.md"),
+	});
 	// write_plans → finalize_plans → await_repos.
 	await runNext(id, config);
 	const plansDir = join(dir, "epoch", "1", "plans", repos[0] ?? "default");
@@ -384,6 +390,11 @@ async function drivePlanWithFolder(
 	writeFile(join(dir, "epoch", "1", "spec", "v1.md"), "# Master spec");
 	await runComplete(id, config, "write_spec", {
 		output: join(dir, "epoch", "1", "spec", "v1.md"),
+	});
+	await runNext(id, config);
+	writeFile(join(dir, "epoch", "1", "master_plan", "v1.md"), "# Master plan");
+	await runComplete(id, config, "write_master_plan", {
+		output: join(dir, "epoch", "1", "master_plan", "v1.md"),
 	});
 	await runNext(id, config);
 	const plansDir = join(dir, "epoch", "1", "plans", repo);

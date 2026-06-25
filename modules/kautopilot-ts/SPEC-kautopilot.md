@@ -166,7 +166,7 @@ enforces _artifact presence_, not consent.
 
 ### 7.1 plan (interactive; versioned artifacts) — runs once, repo-agnostic for spec
 
-`resolve_org → [brainstorm? → create_ticket?] → fetch_ticket → triage → spec → plans`
+`resolve_org → [brainstorm? → create_ticket?] → fetch_ticket → triage → spec → master_plan → plans`
 
 - **resolve_org** (bootstrap): pick the org (`liftoff` | `atomicloud`) by precedence —
   `--org` arg → else **detect from the ticket** when a ticket id is passed (its
@@ -191,8 +191,18 @@ enforces _artifact presence_, not consent.
   the asked org). Repo set + `dependsOn` seed `session.json.repos[]`. Versioned artifact.
 - **spec** (interactive): one **master spec** — top-level, repo-agnostic. Versioned.
   Followed by **spec review** (agent fan-out; every reviewer must approve, §7.4).
-- **plans** (interactive): plans written from the master spec, **tagged by repo** (each
-  repo gets ≥1 plan), still vertical slices. Versioned. Followed by **plan review**.
+- **master_plan** (interactive): the **orchestration layer**, approved **before** the
+  per-repo plans so the order of execution is locked first. It lays out (a) the **PR/branch
+  layout** — each PR with its repo, branch, title, and the plans it ships (a repo may open
+  **several PRs on several branches**); (b) the **dependency DAG with gate levels** — each
+  edge gates a downstream plan on an upstream reaching `completed` | `merged` | `released`
+  (edges may span repos); and (c) a **mermaid graph** for the dashboard. Versioned artifact.
+  On approval the binary freezes it into `orchestration.yaml` (§5b / §11) — the resumable
+  record that also tracks each plan's exec status + kloop run. See §7.5 for how gates are
+  enforced and §13 #22 for the merge policy.
+- **plans** (interactive): the per-repo plan bodies, written for the master plan's agreed
+  `plan-<N>` nodes, **tagged by repo**, still vertical slices. Versioned. Followed by
+  **plan review**.
 
 Each of triage/spec/plans is an interactive debate producing **multiple versions**
 (§8). Escalation `amend_spec` (plans found the spec wrong) bumps the epoch and re-runs
@@ -249,10 +259,23 @@ sub-agents, runs synthesize into one numbered problem list, feeds it back into t
 interactive writer. **Gate: every reviewer must approve** (harness-enforced — withhold
 `complete` on the writer) unless the user explicitly overrides.
 
-### 7.5 Epoch end (ready-to-merge gate)
+### 7.5 Epoch end (ready-to-merge gate) + cross-repo gate enforcement
 
 - The epoch **ends when every PR — for every repo the plans touched — is ready to
-  merge.** No cross-repo merge-gating; the user merges, on their own time.
+  merge.** Ready-to-merge (CI green + threads resolved, human approval excluded) is always
+  the floor.
+- **Cross-repo merge/release gating (master plan).** When the master plan's DAG has
+  `merged`/`released` edges, a downstream repo is **not driven** until its upstream PRs reach
+  the required gate. Before `next --repo R`, the binary **reconciles** the merge/release state
+  of upstream PRs (a `code` step against `gh`) and returns a `blocked on gate dependencies`
+  done-result while any of R's plans still wait — so R's worktree is always cut off a base that
+  already contains the upstream work. Progress (`pr_open → merged → released`) is tracked in
+  `orchestration.yaml`.
+- **Merge policy `mergeMode` (per session, §13 #22).** `manual` | `auto`, set at `start`
+  (`--merge`) and confirmable in the master plan. Either way the binary reaches ready-to-merge;
+  then `auto` **merges the PR itself** (to clear downstream gates) while `manual` leaves the
+  merge to the user (the skill asks). A `released` gate further waits for the upstream repo's
+  semantic releaser to publish its newest release with all release CI/CD green.
 - **feedback_check** (interactive gate): ask the user — feedback, or done?
   - **No feedback** → ask whether the PRs are **fully merged**. If the user confirms
     **"fully merged,"** run **cleanup** (a `code` step): remove this session's worktrunk
@@ -352,9 +375,10 @@ the lock is **released during internal blocking waits** so `status`/`diff` stay 
     ├── log.jsonl               # the WAL
     ├── status.yaml             # materialized status
     ├── config.yaml             # resolved (org) config
-    ├── session.json            # ticketId, org, epoch, runMode, execMode, repos[]
+    ├── session.json            # ticketId, org, epoch, runMode, execMode, mergeMode, repos[]
+    ├── orchestration.yaml      # master plan (PRs/branches + gate DAG) + per-plan exec status + kloop run (§5b)
     ├── ticket.md               # fetched ticket (epoch-agnostic working copy)
-    ├── revisions/{triage,spec,plans/<repo>,feedback}/   # versioned working artifacts (uncommitted)
+    ├── revisions/{triage,spec,master_plan,plans/<repo>,feedback}/   # versioned working artifacts (uncommitted)
     ├── artifacts/v<epoch>/     # frozen snapshots (existing scheme)
     └── tmp/kloop.pid
 ```
@@ -420,8 +444,10 @@ worktree (§9).
 17. **`verify_fixes` reliability gate.** Before pushing fixes, a `code` step re-pulls
     thread/CI state to confirm the (at least non-code) fixes landed; unverified actions
     loop back. Codified detection re-verifies every harness-reported action.
-18. **PRs are NEVER merged** by any agent, kloop, or the binary; `gh pr merge` is
-    forbidden. Ready-to-merge is the finish line; the user merges.
+18. **Merge policy is per-session (`mergeMode`, see #22).** Ready-to-merge (CI green +
+    threads resolved) is always reached first, and no agent/kloop ever merges. In `manual`
+    (default) the binary does NOT merge either — the user merges. ONLY in `auto` does the
+    binary itself run `gh pr merge` (squash), and only on a ready PR, to clear downstream gates.
 19. **Worktrunk worktrees + cleanup.** Each repo gets its own `wt` (worktrunk) worktree
     (the `/rc-session` mechanism). When the user reports **fully merged** with no feedback,
     a `cleanup` code step removes the worktrees; otherwise the worktrees are kept.
@@ -431,6 +457,28 @@ worktree (§9).
 21. **Epochs 2+ reuse the same branch + PR** per repo (no new PR/branch); fresh seed-commit
     per epoch on the existing branch, `create_pr` updates the existing PR; worktrees persist
     until the final fully-merged cleanup.
+22. **Master plan + multi-repo/multi-PR orchestration.** A `master_plan` interactive step
+    sits between `write_spec` and `write_plans`: it is approved FIRST and lays out the
+    **PR/branch layout** (a repo may open several PRs on several branches), the **dependency
+    DAG with gate levels** (`completed | merged | released`, edges may span repos), and a
+    mermaid graph. It is frozen into `orchestration.yaml` (a resumable companion record that
+    also tracks each plan's exec status + kloop run; the WAL stays the cursor's source of
+    truth). The binary **reconciles + enforces** gates between drives (a downstream repo is
+    blocked until its upstream PRs reach the required gate, so its worktree is cut off an
+    updated base), and `mergeMode ∈ manual | auto` (set via `start --merge`) decides whether
+    the binary merges ready PRs itself. `released` gates wait for the upstream repo's semantic
+    releaser to publish + all release CI/CD to finish.
+23. **Execution is agent-driven via a DAG scheduler (`schedule`/`record`); the binary is a
+    record-keeper, not a kloop driver.** After the master plan is approved, the agent runs
+    kloop, resolves conflicts, provisions worktrees, and opens + merges PRs, **recording**
+    each transition (`started`/`implemented`/`pr-opened`/`merged`/`released`/`failed`) via
+    `kautopilot record`. `kautopilot schedule` reads `orchestration.yaml` and returns the
+    runnable frontier — which plans can run now (deps satisfied), which PRs must merge to
+    unblock a downstream, what's blocked/in-flight, and `allReady`/`done`. This is fully
+    resumable (the frontier is recomputed from the ledger) and is how **multi-PR-per-repo is
+    actually executed** (the agent opens exactly the master plan's PrPlans, recorded by
+    `pr-<n>` id). The legacy per-repo `next --repo` step machine remains for sessions with no
+    master plan. (Replaces the binary-driven seed→running→commit→poll execution loop.)
 
 ## 14. Skill (thin controller)
 
