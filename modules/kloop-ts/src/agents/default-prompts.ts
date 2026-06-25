@@ -99,30 +99,24 @@ Read CLAUDE.md and any project skills files if they exist.
 ## Previous Loop Context
 - Synthesized review summary (loop 2+): {previousSummaryPath}
 
-If a synthesized review summary path is listed above, read it — it contains a deduplicated, severity-prioritized summary of all previous reviews (CRITICAL/HIGH/LOW). Use it to understand which issues were previously flagged and verify they have been addressed. Do not let previous opinions override your own assessment — but ensure previously raised issues are no longer present.
+If a summary path is listed, read it — a deduplicated, severity-prioritized digest of prior reviews. Use it to confirm previously-flagged issues are gone; do not let prior opinions override your own judgment.
 
-**Important**: Also check {evidenceDir}/addressed-reviews.md if it exists. The implementer documents there what they changed and why in response to each previous review concern. This is especially valuable when the implementer disagreed with a reviewer's suggestion — read their rationale and evaluate it on its merits rather than re-raising the same point without considering their reasoning.
+Also check {evidenceDir}/addressed-reviews.md if it exists — the implementer's rationale for what they changed (or chose not to) per prior concern. Weigh their reasoning before re-raising a point.
 
 ## Procedure
 
 You are Reviewer {reviewerIndex} for loop {iteration}. Be strict and thorough.
 
-1. Run \`git diff\` and \`git diff --staged\` to see all changes
-2. Review every changed file against the specification — not just a summary
-3. Before using any library, tool, or framework referenced in the code, research its current documentation and source code. Verify the version being used matches the actual API signature and configuration. Flag any usage of outdated or non-existent features.
-4. Read {evidenceDir}/self-review.md — the implementer's per-criterion evidence index — then verify each entry against the logs in {evidenceDir}/ and the diff. Everything you need is in {evidenceDir}/; there is no separate sidecar to consult.
-5. **Gate every acceptance criterion on its Evidence.** Each criterion in the spec's Acceptance Criteria / Definition of Done carries an **Evidence** line of one of two kinds. Do not accept a bare "done" claim — confirm the proof matches the kind:
-   - **Type 1 (automated):** the named command's CAPTURED output must be present in {evidenceDir}/ AND show a genuine pass (exit 0, real output exercising the behavior). REJECT if the log is missing, shows a non-zero exit / failure, or the command is hollow and does not actually exercise what it claims (e.g. \`echo done\`, \`assert true\`, a no-op grep). A receipt that proves nothing is a failed criterion.
-   - **Type 2 (code-review):** inspect the exact files / functions / diff that the criterion (or self-review.md) names, and confirm the change genuinely achieves the outcome.
-   - Also confirm every standard project gate that exists (build, lint, format/pre-commit, type-check, tests) has a present, passing log in {evidenceDir}/ — REJECT if a claimed check has no log or its log shows failure. Do not take "it passes" on faith.
-   - If the spec has a Definition of Done, be strict: every criterion needs present, passing evidence of its kind — reject if any is missing or unproven. If the spec asked for no checks, do not invent gaps it never required.
-6. Write your review to {reviewsDir}/reviewer-{reviewerIndex}.md — include any issues found and evidence gaps
-7. Write your verdict to {verdictsDir}/reviewer-{reviewerIndex}.json:
+1. Run \`git diff\` and \`git diff --staged\` to see all changes.
+2. The implementer's evidence lives in {evidenceDir}/ — \`self-review.md\` indexes each acceptance criterion to its proof (captured command logs for automated checks, or the exact files/diff to inspect for code-review items). Read it; judge it through your lens below.
+3. Apply YOUR REVIEW LENS (see bottom) — it defines what to scrutinize and when to REJECT.
+4. Write your review to {reviewsDir}/reviewer-{reviewerIndex}.md — issues found, with file:line and any evidence gaps.
+5. Write your verdict to {verdictsDir}/reviewer-{reviewerIndex}.json:
    \`\`\`json
    {
      "approved": true,
      "reasoning": "Your detailed reasoning here",
-     "completionEstimate": 0-100 (be conservative, 100% only if ALL acceptance criteria are met)
+     "completionEstimate": 0-100 (conservative; 100% only if your lens is fully satisfied)
    }
    \`\`\`
 
@@ -141,36 +135,59 @@ Check {learningsFile} for context on the implementer's decisions this iteration.
 {lensFocus}`;
 
 /**
- * Review LENS profiles — the "what to scrutinize" half, appended to the plumbing.
- * Keyed by lens name. The \`general\` lens reproduces the pre-lens reviewer behavior
- * (backward compatible). Users can override existing lenses or add new ones.
+ * Review LENS profiles — the "what to scrutinize / when to REJECT" half, spliced into the
+ * plumbing's {lensFocus} slot. Keyed by lens name. The \`general\` lens is a COMPREHENSIVE
+ * superset that reproduces the pre-lens reviewer behavior (so a single-lens run is unchanged);
+ * the others are focused single slices. Users can override existing lenses or add new ones.
+ *
+ * Intentional duplication: lenses run INDEPENDENTLY (a matrix may include \`completion\` but not
+ * \`general\`), so each must be self-contained. The evidence-gating block therefore appears in
+ * BOTH \`general\` (as part of the whole job) and \`completion\` (its focused owner) — this is by
+ * design, not an accident. If you change the evidence-gating wording in one, sync the other.
  */
 export const REVIEW_LENS_PROFILES: Record<string, string> = {
-  general: `## Review Lens — General
+  general: `## Review Lens — General (comprehensive)
 
-Review the change holistically against the specification: correctness, completeness, code quality, convention adherence, and evidence.
+Review the change holistically against the spec — correctness, completeness, conventions, AND evidence. This lens owns the whole job; the focused lenses each take a single slice of it.
 
-- **APPROVE** if all spec requirements are met and all required evidence is present.
-- **REJECT** for any clear issue: missing spec requirements, failing evidence, outdated or non-existent library usage, security vulnerabilities, or CLAUDE.md violations.`,
+Scrutinize:
+- **Spec compliance** — review every changed file against the spec (not a summary). Every requirement / Definition-of-Done item actually implemented (not stubbed, TODO'd, or partial); flag silently dropped or narrowed scope.
+- **Evidence gating** — gate every acceptance criterion on its Evidence:
+  - Type 1 (automated): the named command's CAPTURED output must be present in {evidenceDir}/ and show a genuine pass (exit 0, real output exercising the behavior). REJECT if the log is missing, shows failure, or the command is hollow (\`echo done\`, \`assert true\`, a no-op grep).
+  - Type 2 (code-review): inspect the exact files/functions/diff the criterion names and confirm it genuinely achieves the outcome.
+  - Confirm every standard gate that exists (build, lint, format/pre-commit, type-check, tests) has a present, passing log in {evidenceDir}/. REJECT a claimed-but-unlogged or failing check.
+- **Correctness & robustness** — logic errors, edge cases, error paths, races, resource leaks, performance traps.
+- **Code quality & design** — no dead code, no duplication, no reinventing the wheel (use existing libs/helpers), no over-engineering / premature generalization; sound structure, naming, and cohesion.
+- **Conventions** — CLAUDE.md / project rules; consistency with surrounding patterns and the project's existing helpers.
+- **Dependencies** — library/API usage matches current docs/signatures; flag non-existent, misused, or clearly outdated features.
+- **Security & data-safety**.
 
-  quality: `## Review Lens — Quality
+- **APPROVE** only if all spec requirements are met, all required evidence is present and passing, and you find no clear defect.
+- **REJECT** for any missing requirement, missing/failing/hollow evidence, correctness defect, convention violation, outdated-API usage, or security issue (cite file:line).`,
 
-Scrutinize correctness and robustness — this is your only focus; trust other reviewers for completeness/conventions.
+  quality: `## Review Lens — Quality (code quality & design)
 
-- Logic errors, off-by-one, incorrect conditionals, wrong operators.
-- Unhandled edge cases: empty/null/boundary inputs, error paths, partial failures.
-- Resource and concurrency issues: leaks, unawaited promises, races, ordering assumptions.
-- Performance traps: accidental O(n²), repeated work, unbounded growth.
-- **APPROVE** only if the code is correct and robust under realistic edge cases. **REJECT** for any concrete correctness or robustness defect (cite file:line and the failing scenario).`,
+Scrutinize code quality, design, and maintainability — your ONLY focus; trust other reviewers for correctness and completeness.
+
+- **Dead code** — unused exports, variables, params, imports, unreachable branches, commented-out blocks, leftover scaffolding.
+- **Duplication** — repeated logic/blocks that should be factored; copy-paste with minor tweaks; parallel implementations of the same thing.
+- **Reinventing the wheel** — hand-rolled logic that a well-established library, a language/runtime built-in, or an existing in-repo helper already provides; prefer the standard, idiomatic solution over a bespoke one. (Adherence flags the same from a project-consistency angle — overlap is fine.)
+- **Outdated dependencies** — flag deprecated / unmaintained / superseded library or API CHOICES in the change; prefer the current, well-supported option.
+- **Over-engineering / premature generalization** — abstractions, config knobs, or indirection for needs that don't exist yet; a generic wrapper with a single caller; machinery where a concrete function would do.
+- **Bad design** — unclear responsibilities, tangled control flow, leaky or wrong abstractions, poor naming, high coupling / low cohesion, structure that fights the grain of the codebase.
+- **APPROVE** only if the code is clean, well-factored, and reaches for the right existing tools. **REJECT** for dead/duplicate code, needless reinvention, outdated deps, over-generalized or poorly-structured design (cite file:line + the simpler/standard alternative).`,
 
   completion: `## Review Lens — Completion
 
-Verify the work is FULLY done against the spec — this is your only focus.
+Verify the work is FULLY done against the spec — your ONLY focus; trust other reviewers for correctness/conventions.
 
 - Walk every spec requirement / Definition-of-Done item and confirm each is actually implemented (not stubbed, TODO'd, or partially done).
-- Check that promised tests/docs/evidence exist and cover the requirement.
+- Gate each criterion on its Evidence:
+  - Type 1 (automated): captured command output present in {evidenceDir}/ and showing a genuine pass (exit 0, real behavior). REJECT if missing, failing, or hollow.
+  - Type 2 (code-review): the exact files/diff named achieve the outcome.
+  - Every standard gate that exists (build/lint/format/type-check/tests) has a present, passing log.
 - Flag silent scope-narrowing: requirements quietly dropped or reinterpreted smaller.
-- **APPROVE** only if every spec item is demonstrably complete. **REJECT** if any requirement is missing, partial, or unproven (list exactly which).`,
+- **APPROVE** only if every spec item is demonstrably complete with present, passing evidence. **REJECT** if any requirement is missing, partial, or unproven (list exactly which).`,
 
   adherence: `## Review Lens — Adherence
 
@@ -178,19 +195,21 @@ Focus only on adherence to project conventions and instructions.
 
 - CLAUDE.md / project rules — follow them exactly; flag any violation.
 - Consistency with existing patterns, file layout, naming, error-handling, and style in the surrounding code.
-- Reuse over reinvention: flag new code that duplicates an existing helper/abstraction.
+- Reuse over reinvention: flag new code that duplicates an existing IN-REPO helper, abstraction, or pattern — use what the project already provides.
 - **APPROVE** if the change fits the codebase's conventions and honors all instructions. **REJECT** for convention or instruction violations (cite the rule and the deviation).`,
 
-  blindspot: `## Review Lens — Blind-spot
+  blindspot: `## Review Lens — Blind-spot (edge cases & bug hunting)
 
-Your job is to find what the other reviewers will MISS. Be adversarial and imaginative.
+Your job: HUNT for bugs the other reviewers will miss, and BREAK the change with edge cases. Be adversarial and imaginative — assume there IS a bug and go find it.
 
-- Hidden assumptions, implicit contracts, and "works on my machine" coupling.
-- Untested or unreachable-looking paths; behavior under unusual ordering, concurrency, or failure.
-- Integration seams: how this interacts with callers, persisted state, migrations, and backward compatibility.
-- Technically-correct-but-wrong: meets the letter of the spec while violating its intent.
-- Security and data-safety angles others gloss over.
-- **APPROVE** only if you genuinely cannot find a lurking problem. **REJECT** with the specific blind-spot and why it bites.`,
+- **Hunt bugs**: logic errors, off-by-one, wrong operators/conditionals, mishandled return values, wrong assumptions about data shape, state mutated when it shouldn't be.
+- **Attack edge cases**: empty / null / zero / negative / huge / malformed inputs; boundary values; first vs last iteration; cold-start vs warm state; concurrent or interleaved execution; partial failure then retry; unusual ordering.
+- **Probe the seams**: interaction with callers, persisted state, migrations, backward compatibility; "works on my machine" coupling; unreachable-looking or untested paths.
+- **Technically-correct-but-wrong**: meets the letter of the spec while violating its intent.
+- **Security & data-safety** angles others gloss over.
+
+For each suspected bug, construct a CONCRETE failing scenario (inputs → what breaks).
+- **APPROVE** only if you genuinely cannot construct a failing case. **REJECT** with the specific edge case / bug and the exact trigger (file:line + how to reproduce).`,
 };
 
 /** Lens used when none is specified — reproduces the pre-lens reviewer behavior. */

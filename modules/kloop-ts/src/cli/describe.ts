@@ -14,7 +14,15 @@ function shortBinary(binary: string, harness?: string): string {
 }
 
 function agentLabel(agent: MaterializedAgentState): string {
-  return shortBinary(agent.binary, agent.harness);
+  const base = shortBinary(agent.binary, agent.harness);
+  return agent.model ? `${base} ${pc.dim(`(${agent.model})`)}` : base;
+}
+
+// Label for roles whose state isn't a MaterializedAgentState (synthesis, checkpoint).
+function binModelTag(binary?: string, harness?: string, model?: string): string {
+  if (!binary) return '';
+  const base = shortBinary(binary, harness);
+  return model ? `${base} ${pc.dim(`(${model})`)}` : base;
 }
 
 function formatDuration(ms: number): string {
@@ -145,20 +153,26 @@ function renderLoopFull(loop: MaterializedLoop, multiPhase: boolean): void {
   // Synthesis
   if (loop.synthesis) {
     const synth = loop.synthesis;
+    const synthTag = binModelTag(synth.binary, synth.harness, synth.model);
+    const synthSuffix = synthTag ? ` ${synthTag}` : '';
     if (synth.status === 'running') {
-      console.log(`  synthesis: ${pc.dim('running...')}`);
+      console.log(`  synthesis:${synthSuffix} ${pc.dim('running...')}`);
     } else if (synth.status === 'completed') {
-      console.log(`  synthesis: ${pc.green('completed')}${synth.summaryPath ? ` → ${synth.summaryPath}` : ''}`);
+      console.log(
+        `  synthesis:${synthSuffix} ${pc.green('completed')}${synth.summaryPath ? ` → ${synth.summaryPath}` : ''}`,
+      );
     } else if (synth.status === 'error') {
-      console.log(`  synthesis: ${pc.red('failed')}${synth.error ? ` (${synth.error})` : ''}`);
+      console.log(`  synthesis:${synthSuffix} ${pc.red('failed')}${synth.error ? ` (${synth.error})` : ''}`);
     }
   }
 
   // Checkpoint
   if (loop.checkpoint) {
     const ck = loop.checkpoint;
+    const ckTag = binModelTag(ck.binary, ck.harness, ck.model);
+    const ckSuffix = ckTag ? ` ${ckTag}` : '';
     if (ck.status === 'running') {
-      console.log(`  checkpoint: ${pc.dim('running...')}`);
+      console.log(`  checkpoint:${ckSuffix} ${pc.dim('running...')}`);
     } else if (ck.outcome) {
       const ckColor =
         ck.outcome === 'conflict_found'
@@ -169,7 +183,7 @@ function renderLoopFull(loop: MaterializedLoop, multiPhase: boolean): void {
               ? pc.blue
               : pc.dim;
       console.log(
-        `  checkpoint: ${ckColor(ck.outcome)}${ck.progressPercent !== undefined ? ` (${ck.progressPercent}%)` : ''}`,
+        `  checkpoint:${ckSuffix} ${ckColor(ck.outcome)}${ck.progressPercent !== undefined ? ` (${ck.progressPercent}%)` : ''}`,
       );
       if (ck.summary) console.log(`    ${ckColor(ck.summary)}`);
     }

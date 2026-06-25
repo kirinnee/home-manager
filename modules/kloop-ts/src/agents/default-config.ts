@@ -102,15 +102,30 @@ verifier:
   phases:
     - - claude
   timeout: 5                      # minutes
+  # Retry a verifier that produced NO parseable verdict (transport failure, crash,
+  # timeout). A real approve/reject verdict is never retried.
+  retry:
+    maxRetries: 2
+    backoffBaseMs: 5000
 
 synthesizer:
   pool: claude
   timeout: 15                     # minutes
+  # Retry a synthesizer that produced NO summary file (transport failure, crash,
+  # timeout). Applies to both synthesis and re-synthesis.
+  retry:
+    maxRetries: 2
+    backoffBaseMs: 5000
 
 checkpointer:
   # Detects spec conflicts / progress. (Also the conflict checker.)
   pool: claude
   threshold: 3                    # consecutive failures before a checkpoint runs
+  # Retry a checkpointer that produced NO parseable result JSON (transport failure,
+  # crash, timeout). A real outcome is never retried.
+  retry:
+    maxRetries: 2
+    backoffBaseMs: 5000
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║ SETTINGS — behavior toggles that don't belong to a single role             ║

@@ -762,6 +762,7 @@ export class LoopRunner {
           phase: entry?.originalPhase ?? 0,
           reviewer: r.binary,
           harness: r.harness,
+          model: r.model,
           exitCode: r.exitCode,
           durationMs: r.durationMs,
           error: r.error,
@@ -797,7 +798,7 @@ export class LoopRunner {
         results.map(r => r.binary),
       );
       for (const r of results) {
-        fmt.formatReviewerResult(r.reviewerIndex, r.binary, r.verdict, r.completionEstimate, r.durationMs);
+        fmt.formatReviewerResult(r.reviewerIndex, r.binary, r.verdict, r.completionEstimate, r.durationMs, r.model);
       }
     }
 
@@ -920,6 +921,7 @@ export class LoopRunner {
             phase: phaseIdx,
             reviewer: r.binary,
             harness: r.harness,
+            model: r.model,
             exitCode: r.exitCode,
             durationMs: r.durationMs,
             error: r.error,
@@ -942,7 +944,7 @@ export class LoopRunner {
         phaseReviewers.map(r => r.parsed.binary),
       );
       for (const r of phaseResults) {
-        fmt.formatReviewerResult(r.reviewerIndex, r.binary, r.verdict, r.completionEstimate, r.durationMs);
+        fmt.formatReviewerResult(r.reviewerIndex, r.binary, r.verdict, r.completionEstimate, r.durationMs, r.model);
       }
 
       // Write review_phase_end event
@@ -1006,7 +1008,7 @@ export class LoopRunner {
         },
       });
 
-      fmt.formatImplementerResult(implResult.binary, implResult.exitCode, implResult.durationMs);
+      fmt.formatImplementerResult(implResult.binary, implResult.exitCode, implResult.durationMs, implResult.model);
 
       // Write implementer_end event with retry info
       const implError = implResult.timedOut
@@ -1020,6 +1022,7 @@ export class LoopRunner {
         loop: loopNum,
         binary: implResult.binary,
         harness: implResult.harness,
+        ...(implResult.model ? { model: implResult.model } : {}),
         exitCode: implResult.exitCode,
         durationMs: implResult.durationMs,
         ...(implError ? { error: implError } : {}),
@@ -1112,13 +1115,14 @@ export class LoopRunner {
       loop: loopNum,
       binary: result.binary,
       harness: result.harness,
+      model: result.model,
       exitCode: result.exitCode,
       durationMs: result.durationMs,
       error: result.timedOut ? 'timeout' : result.exitCode !== 0 ? `exit_code_${result.exitCode}` : undefined,
       summaryPath: result.summaryPath,
     });
 
-    fmt.formatReSynthesisResult(result.summaryPath !== undefined, result.durationMs);
+    fmt.formatReSynthesisResult(result.summaryPath !== undefined, result.durationMs, result.binary, result.model);
 
     return result;
   }
@@ -1206,6 +1210,7 @@ export class LoopRunner {
             phase: phaseIdx,
             reviewer: r.binary,
             harness: r.harness,
+            model: r.model,
             exitCode: r.exitCode,
             durationMs: r.durationMs,
             error: r.error,
@@ -1283,13 +1288,14 @@ export class LoopRunner {
       loop: loopNum,
       binary: result.binary,
       harness: result.harness,
+      model: result.model,
       exitCode: result.exitCode,
       durationMs: result.durationMs,
       error: result.timedOut ? 'timeout' : result.exitCode !== 0 ? `exit_code_${result.exitCode}` : undefined,
       summaryPath: result.summaryPath,
     });
 
-    fmt.formatSynthesisResult(result.summaryPath !== undefined, result.durationMs);
+    fmt.formatSynthesisResult(result.summaryPath !== undefined, result.durationMs, result.binary, result.model);
 
     return result;
   }
@@ -1332,6 +1338,9 @@ export class LoopRunner {
       type: 'checkpoint_end',
       timestamp: new Date().toISOString(),
       loop: loopNum,
+      binary: checkpointResult.binary,
+      harness: checkpointResult.harness,
+      model: checkpointResult.model,
       outcome: checkpointResult.outcome,
       summary: checkpointResult.summary,
       progressPercent: checkpointResult.progressPercent,
@@ -1577,6 +1586,7 @@ export class LoopRunner {
       implementer: {
         binary: implResult.binary,
         harness: implResult.harness,
+        model: implResult.model,
         exitCode: implResult.exitCode,
         durationMs: implResult.durationMs,
         inputTokens: implResult.inputTokens,
@@ -1594,6 +1604,8 @@ export class LoopRunner {
     if (synthesisResult) {
       summary.synthesis = {
         binary: synthesisResult.binary,
+        harness: synthesisResult.harness,
+        model: synthesisResult.model,
         exitCode: synthesisResult.exitCode,
         durationMs: synthesisResult.durationMs,
         error: synthesisResult.timedOut
@@ -1710,6 +1722,7 @@ export class LoopRunner {
       reviewerIndex: number;
       binary: string;
       harness?: string;
+      model?: string;
       exitCode: number;
       durationMs: number;
       verdict?: 'approved' | 'rejected';
@@ -1734,6 +1747,7 @@ export class LoopRunner {
           reviewerIndex: r.reviewerIndex,
           binary: r.binary,
           harness: r.harness,
+          model: r.model,
           exitCode: r.exitCode,
           durationMs: r.durationMs,
           verdict: r.verdict,

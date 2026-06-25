@@ -93,10 +93,13 @@ export function formatIterationStart(loopNum: number, maxIterations: number): vo
   );
 }
 
-export function formatImplementerResult(binary: string, exitCode: number, durationMs: number): void {
+export function formatImplementerResult(binary: string, exitCode: number, durationMs: number, model?: string): void {
   const icon = exitCode === 0 ? pc.green('✓') : pc.red('✗');
   const color = exitCode === 0 ? pc.green : pc.red;
-  console.log(`  ${icon} impl  ${binary}     ${color(`exit ${exitCode}`)}   ${pc.dim(formatDuration(durationMs))}`);
+  const modelStr = model ? pc.dim(` (${model})`) : '';
+  console.log(
+    `  ${icon} impl  ${binary}${modelStr}     ${color(`exit ${exitCode}`)}   ${pc.dim(formatDuration(durationMs))}`,
+  );
 }
 
 export function formatReviewPhaseStart(phaseIdx: number, reviewers: string[]): void {
@@ -110,13 +113,15 @@ export function formatReviewerResult(
   verdict: string | undefined,
   completionEstimate: number | undefined,
   durationMs: number,
+  model?: string,
 ): void {
   const approved = verdict === 'approved';
   const icon = approved ? pc.green('✓') : pc.red('✗');
   const verdictColor = approved ? pc.green('approved') : pc.red('rejected');
   const completion = completionEstimate !== undefined ? `${String(completionEstimate).padStart(3)}%` : '    ';
+  const modelStr = model ? pc.dim(` (${model})`) : '';
   console.log(
-    `  ${icon} rev-${reviewerIndex}  ${binary}    ${verdictColor}  ${pc.dim(completion)}  ${pc.dim(formatDuration(durationMs))}`,
+    `  ${icon} rev-${reviewerIndex}  ${binary}${modelStr}    ${verdictColor}  ${pc.dim(completion)}  ${pc.dim(formatDuration(durationMs))}`,
   );
 }
 
@@ -253,11 +258,19 @@ export function formatSynthesisStart(): void {
   console.log(pc.dim('  ◆ synthesizing reviews...'));
 }
 
-export function formatSynthesisResult(summaryCreated: boolean, durationMs: number): void {
+export function formatSynthesisResult(
+  summaryCreated: boolean,
+  durationMs: number,
+  binary?: string,
+  model?: string,
+): void {
+  const tag = binary ? ` ${pc.dim(`${binary}${model ? ` (${model})` : ''}`)}` : '';
   if (summaryCreated) {
-    console.log(`  ${pc.green('✓ synthesis')} — review-summary.md written  ${pc.dim(formatDuration(durationMs))}`);
+    console.log(
+      `  ${pc.green('✓ synthesis')}${tag} — review-summary.md written  ${pc.dim(formatDuration(durationMs))}`,
+    );
   } else {
-    console.log(`  ${pc.red('✗ synthesis')} — failed to write summary  ${pc.dim(formatDuration(durationMs))}`);
+    console.log(`  ${pc.red('✗ synthesis')}${tag} — failed to write summary  ${pc.dim(formatDuration(durationMs))}`);
   }
 }
 
@@ -269,11 +282,19 @@ export function formatReSynthesisStart(): void {
   console.log(pc.dim('  ◆ re-synthesizing from verifier outputs...'));
 }
 
-export function formatReSynthesisResult(summaryCreated: boolean, durationMs: number): void {
+export function formatReSynthesisResult(
+  summaryCreated: boolean,
+  durationMs: number,
+  binary?: string,
+  model?: string,
+): void {
+  const tag = binary ? ` ${pc.dim(`${binary}${model ? ` (${model})` : ''}`)}` : '';
   if (summaryCreated) {
-    console.log(`  ${pc.green('✓ re-synthesis')} — review-summary.md updated  ${pc.dim(formatDuration(durationMs))}`);
+    console.log(
+      `  ${pc.green('✓ re-synthesis')}${tag} — review-summary.md updated  ${pc.dim(formatDuration(durationMs))}`,
+    );
   } else {
-    console.log(`  ${pc.red('✗ re-synthesis')} — failed to write summary  ${pc.dim(formatDuration(durationMs))}`);
+    console.log(`  ${pc.red('✗ re-synthesis')}${tag} — failed to write summary  ${pc.dim(formatDuration(durationMs))}`);
   }
 }
 

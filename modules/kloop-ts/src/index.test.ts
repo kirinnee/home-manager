@@ -34,6 +34,7 @@ import {
   DEFAULT_RE_SYNTHESIS_PROMPT,
   DEFAULT_IMPLEMENTER_PROMPT,
   REVIEWER_PLUMBING_PROMPT,
+  REVIEW_LENS_PROFILES,
 } from './agents/default-prompts';
 import { tryParseJson, extractTokensFromLog } from './stream/parse';
 import { AgentRunner } from './agents/runner';
@@ -429,11 +430,14 @@ describe('Default prompt templates', () => {
   });
 
   it('reviewer prompt gates each criterion on its evidence type', () => {
-    expect(REVIEWER_PLUMBING_PROMPT).toContain('Type 1');
-    expect(REVIEWER_PLUMBING_PROMPT).toContain('Type 2');
+    // Evidence gating lives in the LENS now (general carries the whole job; completion owns
+    // it as its focused slice) — the plumbing is lens-neutral mechanics.
+    expect(REVIEW_LENS_PROFILES.general).toContain('Type 1');
+    expect(REVIEW_LENS_PROFILES.general).toContain('Type 2');
+    expect(REVIEW_LENS_PROFILES.general).toContain('hollow');
+    expect(REVIEW_LENS_PROFILES.completion).toContain('Type 1');
+    // The plumbing still points reviewers at the evidence folder + the self-review index.
     expect(REVIEWER_PLUMBING_PROMPT).toContain('self-review.md');
-    expect(REVIEWER_PLUMBING_PROMPT).toContain('hollow');
-    // Reads evidence from the evidence folder, not a sidecar.
     expect(REVIEWER_PLUMBING_PROMPT).toContain('{evidenceDir}/');
   });
 

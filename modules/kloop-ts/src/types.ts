@@ -28,6 +28,27 @@ const reviewerRetrySchema = z.object({
   backoffBaseMs: z.number().min(0).default(5000),
 });
 
+// Synthesizer retry config — retries a synthesizer that produced NO summary file
+// (transport failure, crash, timeout). Applies to both synthesis and re-synthesis.
+const synthesizerRetrySchema = z.object({
+  maxRetries: z.number().min(0).max(10).default(2),
+  backoffBaseMs: z.number().min(0).default(5000),
+});
+
+// Verifier retry config — retries a verifier that produced NO parseable verdict.
+// Mirrors reviewerRetry semantics: a real approve/reject verdict is never retried.
+const verifierRetrySchema = z.object({
+  maxRetries: z.number().min(0).max(10).default(2),
+  backoffBaseMs: z.number().min(0).default(5000),
+});
+
+// Checkpointer retry config — retries a checkpointer that produced NO parseable
+// result JSON (transport failure, crash, timeout). A real outcome is never retried.
+const checkpointerRetrySchema = z.object({
+  maxRetries: z.number().min(0).max(10).default(2),
+  backoffBaseMs: z.number().min(0).default(5000),
+});
+
 // True if `account` parses as a reviewer binary (binary[:harness[:flag]]). Used to
 // reject malformed type/pool accounts at config load instead of mid-run/at display.
 // parseReviewerConfig is a hoisted function declaration, so referencing it here is safe.
@@ -133,6 +154,9 @@ const configSchema = z
     interactive: z.boolean().default(false),
     implementerRetry: implementerRetrySchema.optional(),
     reviewerRetry: reviewerRetrySchema.optional(),
+    synthesizerRetry: synthesizerRetrySchema.optional(),
+    verifierRetry: verifierRetrySchema.optional(),
+    checkpointerRetry: checkpointerRetrySchema.optional(),
     firstIterationWeightMultiplier: z.number().min(1).max(1000).default(2),
     // Backward compat: old nested reReview shape
     reReview: legacyReReviewSchema.optional(),
@@ -219,6 +243,9 @@ const configSchema = z
       interactive: data.interactive ?? false,
       implementerRetry: data.implementerRetry ?? { maxRetries: 2, backoffBaseMs: 5000 },
       reviewerRetry: data.reviewerRetry ?? { maxRetries: 2, backoffBaseMs: 5000 },
+      synthesizerRetry: data.synthesizerRetry ?? { maxRetries: 2, backoffBaseMs: 5000 },
+      verifierRetry: data.verifierRetry ?? { maxRetries: 2, backoffBaseMs: 5000 },
+      checkpointerRetry: data.checkpointerRetry ?? { maxRetries: 2, backoffBaseMs: 5000 },
       firstIterationWeightMultiplier: data.firstIterationWeightMultiplier ?? 2,
       prompts,
     };
@@ -256,6 +283,18 @@ export const resolvedConfigSchema = z.object({
     backoffBaseMs: z.number().min(0),
   }),
   reviewerRetry: z.object({
+    maxRetries: z.number().min(0).max(10),
+    backoffBaseMs: z.number().min(0),
+  }),
+  synthesizerRetry: z.object({
+    maxRetries: z.number().min(0).max(10),
+    backoffBaseMs: z.number().min(0),
+  }),
+  verifierRetry: z.object({
+    maxRetries: z.number().min(0).max(10),
+    backoffBaseMs: z.number().min(0),
+  }),
+  checkpointerRetry: z.object({
     maxRetries: z.number().min(0).max(10),
     backoffBaseMs: z.number().min(0),
   }),
@@ -563,6 +602,9 @@ export const DEFAULT_CONFIG: Config = {
   interactive: false,
   implementerRetry: { maxRetries: 2, backoffBaseMs: 5000 },
   reviewerRetry: { maxRetries: 2, backoffBaseMs: 5000 },
+  synthesizerRetry: { maxRetries: 2, backoffBaseMs: 5000 },
+  verifierRetry: { maxRetries: 2, backoffBaseMs: 5000 },
+  checkpointerRetry: { maxRetries: 2, backoffBaseMs: 5000 },
   firstIterationWeightMultiplier: 2,
 };
 
@@ -766,6 +808,7 @@ export function flattenNestedConfig(raw: unknown): unknown {
     if (vf.phases !== undefined) out.verifyPhases = vf.phases;
     if (vf.timeout !== undefined) out.verifyTimeout = vf.timeout;
     if (vf.enabled !== undefined) out.verify = vf.enabled;
+    if (vf.retry !== undefined) out.verifierRetry = vf.retry;
   }
 
   // synthesizer block → flat. A STRING here is the legacy synthesizer binary, and a bare
@@ -774,13 +817,14 @@ export function flattenNestedConfig(raw: unknown): unknown {
   // guard an inline pool would be mistaken for a block and silently dropped (it has no `.pool`).
   if (
     isPlainObject(d.synthesizer) &&
-    ('pool' in d.synthesizer || 'timeout' in d.synthesizer || 'enabled' in d.synthesizer)
+    ('pool' in d.synthesizer || 'timeout' in d.synthesizer || 'enabled' in d.synthesizer || 'retry' in d.synthesizer)
   ) {
     const sy = d.synthesizer;
     delete out.synthesizer;
     if (sy.pool !== undefined) out.synthesizer = sy.pool;
     if (sy.timeout !== undefined) out.synthesisTimeout = sy.timeout;
     if (sy.enabled !== undefined) out.synthesis = sy.enabled;
+    if (sy.retry !== undefined) out.synthesizerRetry = sy.retry;
   }
 
   // checkpointer block
@@ -789,6 +833,7 @@ export function flattenNestedConfig(raw: unknown): unknown {
     delete out.checkpointer;
     if (cp.pool !== undefined) out.conflictChecker = cp.pool;
     if (cp.threshold !== undefined) out.conflictCheckThreshold = cp.threshold;
+    if (cp.retry !== undefined) out.checkpointerRetry = cp.retry;
   }
 
   // settings block
@@ -848,18 +893,21 @@ export function nestFlatConfig(flat: Record<string, unknown>): Record<string, un
   const verifier: Record<string, unknown> = {};
   if (d.verifyPhases !== undefined) verifier.phases = d.verifyPhases;
   if (d.verifyTimeout !== undefined) verifier.timeout = d.verifyTimeout;
+  if (d.verifierRetry !== undefined) verifier.retry = d.verifierRetry;
   if (Object.keys(verifier).length > 0) out.verifier = verifier;
 
   // synthesizer
   const synthesizer: Record<string, unknown> = {};
   if (d.synthesizer !== undefined) synthesizer.pool = d.synthesizer;
   if (d.synthesisTimeout !== undefined) synthesizer.timeout = d.synthesisTimeout;
+  if (d.synthesizerRetry !== undefined) synthesizer.retry = d.synthesizerRetry;
   if (Object.keys(synthesizer).length > 0) out.synthesizer = synthesizer;
 
   // checkpointer
   const checkpointer: Record<string, unknown> = {};
   if (d.conflictChecker !== undefined) checkpointer.pool = d.conflictChecker;
   if (d.conflictCheckThreshold !== undefined) checkpointer.threshold = d.conflictCheckThreshold;
+  if (d.checkpointerRetry !== undefined) checkpointer.retry = d.checkpointerRetry;
   if (Object.keys(checkpointer).length > 0) out.checkpointer = checkpointer;
 
   // settings
@@ -1035,6 +1083,7 @@ export interface ImplementerEndEvent extends BaseEvent {
   loop: number;
   binary: string;
   harness: HarnessType;
+  model?: string; // harness-reported model actually used (e.g. claude-opus-4-8)
   exitCode: number;
   durationMs: number;
   error?: string; // 'timeout' | 'exit_code_N'
@@ -1077,6 +1126,7 @@ export interface ReviewerEndEvent extends BaseEvent {
   phase: number;
   reviewer: string;
   harness?: HarnessType;
+  model?: string; // harness-reported model actually used (e.g. claude-opus-4-8)
   exitCode: number;
   durationMs: number;
   error?: string; // 'timeout' | 'no_verdict' | 'exit_code_N'
@@ -1113,6 +1163,9 @@ export interface CheckpointStartEvent extends BaseEvent {
 export interface CheckpointEndEvent extends BaseEvent {
   type: typeof EVENT_TYPES.CHECKPOINT_END;
   loop: number;
+  binary?: string;
+  harness?: HarnessType;
+  model?: string; // harness-reported model actually used (e.g. claude-opus-4-8)
   outcome: 'conflict_found' | 'spec_auto_fixed' | 'spec_compressed' | 'no_action';
   summary: string;
   progressPercent?: number;
@@ -1142,6 +1195,7 @@ export interface VerifierEndEvent extends BaseEvent {
   phase: number;
   reviewer: string;
   harness?: HarnessType;
+  model?: string; // harness-reported model actually used (e.g. claude-opus-4-8)
   exitCode: number;
   durationMs: number;
   error?: string;
@@ -1168,6 +1222,7 @@ export interface SynthesisEndEvent extends BaseEvent {
   loop: number;
   binary: string;
   harness?: HarnessType;
+  model?: string; // harness-reported model actually used (e.g. claude-opus-4-8)
   exitCode: number;
   durationMs: number;
   error?: string;
@@ -1251,6 +1306,7 @@ export type MaterializedAgentStatus = 'pending' | 'running' | 'completed' | 'err
 export interface MaterializedAgentState {
   binary: string;
   harness?: HarnessType;
+  model?: string; // harness-reported model actually used (e.g. claude-opus-4-8)
   status: MaterializedAgentStatus;
   startedAt?: string;
   completedAt?: string;
@@ -1296,10 +1352,14 @@ export interface MaterializedSynthesis {
   error?: string;
   summaryPath?: string;
   binary?: string;
+  harness?: HarnessType;
+  model?: string; // harness-reported model actually used (e.g. claude-opus-4-8)
 }
 
 export interface MaterializedCheckpoint {
   binary?: string;
+  harness?: HarnessType;
+  model?: string; // harness-reported model actually used (e.g. claude-opus-4-8)
   status: 'running' | 'completed';
   startedAt?: string;
   completedAt?: string;
@@ -1357,6 +1417,7 @@ export interface LoopSummary {
   implementer: {
     binary: string;
     harness?: HarnessType;
+    model?: string;
     exitCode: number;
     durationMs: number;
     inputTokens?: number;
@@ -1368,6 +1429,7 @@ export interface LoopSummary {
       reviewerIndex: number;
       binary: string;
       harness?: HarnessType;
+      model?: string;
       exitCode: number;
       durationMs: number;
       verdict?: 'approved' | 'rejected';
@@ -1383,6 +1445,7 @@ export interface LoopSummary {
       reviewerIndex: number;
       binary: string;
       harness?: HarnessType;
+      model?: string;
       exitCode: number;
       durationMs: number;
       timedOut?: boolean;
@@ -1397,6 +1460,8 @@ export interface LoopSummary {
   }>;
   synthesis?: {
     binary?: string;
+    harness?: HarnessType;
+    model?: string;
     exitCode: number;
     durationMs: number;
     error?: string;

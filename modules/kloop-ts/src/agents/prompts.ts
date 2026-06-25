@@ -101,7 +101,9 @@ export function buildReviewerPrompt(template: string | undefined, vars: Reviewer
     ...vars,
     archivedReviews: archivedSection,
     previousSummaryPath: vars.previousSummaryPath ?? '',
-    lensFocus: vars.lensFocus ?? REVIEW_LENS_PROFILES[DEFAULT_REVIEW_LENS],
+    // Resolve placeholders INSIDE the lens text too — substitute() is single-pass and does
+    // not re-scan inserted text, so a lens may reference {evidenceDir}, {reviewsDir}, etc.
+    lensFocus: substitute(vars.lensFocus ?? REVIEW_LENS_PROFILES[DEFAULT_REVIEW_LENS], vars),
   });
 }
 
