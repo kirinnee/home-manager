@@ -16,6 +16,7 @@ import {
 	getGitRoot,
 } from "../core/git";
 import { appendEvent, readLog } from "../core/log";
+import { recordPlanProgress } from "../core/orchestration";
 import { latestRevisionOnDisk, revisionPath } from "../core/revisions";
 import { type RepoEntry, updateSessionMeta } from "../core/session-meta";
 import {
@@ -166,6 +167,24 @@ function repoPlanPaths(ctx: StepContext): string[] {
 
 function planNameFor(index: number): string {
 	return `plan-${index + 1}`;
+}
+
+/**
+ * The plan id to key ORCHESTRATION/gate progress on: the GLOBAL plan-folder
+ * ordinal assigned to this repo (`repo.plans[index]`), which is what
+ * `finalize_plans` partitioned, what `polish` records `pr_open` under, and what
+ * the master-plan nodes/deps reference. This is NOT `planNameFor(index)` — that's
+ * the per-repo positional label (`plan-1` for every repo's first plan), which
+ * drifts from the global id for any non-first repo (e.g. web's first plan is the
+ * global `plan-2`). Keying progress on the per-repo label would split a plan's
+ * progress across two ids and leave the master-plan node stuck `pending`, silently
+ * breaking merge/release gates for non-first repos. Falls back to the positional
+ * label when the repo has no recorded plan list (legacy single-repo flow).
+ */
+function orchestrationPlanName(ctx: StepContext): string {
+	const repo = requireRepo(ctx);
+	const index = currentPlanIndex(ctx);
+	return repo.plans[index] ?? planNameFor(index);
 }
 
 /**
@@ -687,6 +706,13 @@ const running: StepDef = {
 		const planName = planNameFor(currentPlanIndex(ctx));
 		const runId = ctx.metadata?.kloopRunId as string | undefined;
 		if (runId) recordRepoState(ctx, { kloopRunId: runId });
+		// Orchestration tracking: link this plan to its kloop run (resume + UI). Key on
+		// the GLOBAL plan id (orchestrationPlanName), NOT the per-repo label, so it lines
+		// up with polish + the master-plan node for non-first repos.
+		recordPlanProgress(ctx.sessionId, repo.repo, orchestrationPlanName(ctx), {
+			status: "running",
+			...(runId ? { kloopRunId: runId } : {}),
+		});
 
 		// Decision A — the BINARY verifies the outcome from kloop itself; it never
 		// trusts that the agent's report of "done" means kloop actually completed.
@@ -1075,7 +1101,16 @@ const commit: StepDef = {
 			},
 		} satisfies PreparedStep;
 	},
-	finalize: async () => "next_plan",
+	finalize: async (ctx) => {
+		// The plan's work is committed on its branch → `implemented` (satisfies a
+		// `completed` gate for any downstream plan that depends on it). Key on the global
+		// plan id so non-first repos line up with the master-plan node.
+		const repo = requireRepo(ctx);
+		recordPlanProgress(ctx.sessionId, repo.repo, orchestrationPlanName(ctx), {
+			status: "implemented",
+		});
+		return "next_plan";
+	},
 };
 
 // --- next_plan (code, repo) -------------------------------------------------

@@ -6,6 +6,7 @@ import {
 	type ExecMode,
 	isOrg,
 	type Lpsm,
+	type MergeMode,
 	ORGS,
 	type Org,
 } from "../core/session-meta";
@@ -29,6 +30,10 @@ export function createStartCommand(): Command {
 		)
 		.option("--org <org>", "Org: liftoff | atomicloud")
 		.option("--exec <mode>", "Execution mode: kloop | sub-agent")
+		.option(
+			"--merge <mode>",
+			"Merge policy: manual (ask before merging) | auto (merge ready PRs)",
+		)
 		.option("--max-repos <n>", "Max parallel repos", (v) =>
 			Number.parseInt(v, 10),
 		)
@@ -55,6 +60,7 @@ export function createStartCommand(): Command {
 				opts: {
 					org?: string;
 					exec?: string;
+					merge?: string;
 					maxRepos?: number;
 					landscape?: string;
 					cluster?: string;
@@ -131,6 +137,7 @@ async function runStart(
 	opts: {
 		org?: string;
 		exec?: string;
+		merge?: string;
 		maxRepos?: number;
 		landscape?: string;
 		cluster?: string;
@@ -151,6 +158,14 @@ async function runStart(
 			);
 		}
 		execMode = opts.exec;
+	}
+
+	let mergeMode: MergeMode | undefined;
+	if (opts.merge !== undefined) {
+		if (opts.merge !== "manual" && opts.merge !== "auto") {
+			throw new Error(`Unknown merge mode: ${opts.merge}. Use manual | auto.`);
+		}
+		mergeMode = opts.merge;
 	}
 
 	if (opts.maxRepos !== undefined && !Number.isInteger(opts.maxRepos)) {
@@ -175,6 +190,7 @@ async function runStart(
 		org,
 		folder,
 		execMode,
+		mergeMode,
 		maxParallelRepos: opts.maxRepos,
 		lpsm,
 		tags: opts.tag,
@@ -186,6 +202,7 @@ async function runStart(
 		`${meta.org} (${meta.ticketSystem}, commitSpec=${meta.commitSpec})`,
 	);
 	logField("Task", ticketId ?? `(ad-hoc) ${task ?? ""}`);
+	logField("Merge", meta.mergeMode);
 	if (meta.lpsm) {
 		const parts = (
 			[

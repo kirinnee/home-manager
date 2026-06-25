@@ -9,8 +9,10 @@ import type {
 	StepDescriptor,
 	StepPhase,
 } from "./descriptor";
+import { reconcileGates, repoGateBlockers } from "./gate-runner";
 import { scopeLockKey, touchLock } from "./lock";
 import { appendEvent, readLog } from "./log";
+import { readOrchestration } from "./orchestration";
 import {
 	type ArtifactKind,
 	copyPlanSetToNext,
@@ -20,6 +22,7 @@ import {
 	plansRepoDir,
 	revisionPath,
 } from "./revisions";
+import { computeSchedule } from "./scheduler";
 import {
 	findRepo,
 	type RepoEntry,
@@ -185,6 +188,29 @@ export async function runNext(
 	// overrides) instead of the built-in DEFAULT_CONFIG.
 	setCachedConfig(config);
 
+	// Master-plan gate (multi-repo, multi-PR): reconcile merge/release state of any
+	// upstream PRs, then block a repo whose plans still wait on an unsatisfied
+	// merge/released gate — so its worktree is never cut off a base that lacks the
+	// upstream work. Best-effort; a session with no orchestration.yaml is unaffected.
+	if (repoArg != null) {
+		const orch = await reconcileGates(meta).catch(() => null);
+		// Gate only BEFORE the repo goes active (i.e. before `seed`). Once active its
+		// worktree is seeded and its own per-plan sequencing + polish take over, so the
+		// gate must not stall in-flight commit/PR work; we re-evaluate only at the seed
+		// boundary of each (epoch's) drive.
+		const entry = findRepo(meta, repoArg);
+		if (orch && (entry == null || entry.status === "pending")) {
+			const blockers = repoGateBlockers(orch, repoArg);
+			if (blockers.length > 0) {
+				return doneResult(
+					meta,
+					"execution",
+					`repo ${repoArg} is blocked on gate dependencies: ${blockers.join("; ")} — retry once the upstream PR(s) merge/release`,
+				);
+			}
+		}
+	}
+
 	// Bound concurrency (SPEC §11): a not-yet-started repo is queued while
 	// `maxParallelRepos` others are already in progress, capping token use. A repo
 	// already in progress (status 'active') is never blocked — it just continues.
@@ -218,19 +244,44 @@ export async function runNext(
 			return doneResult(meta, "done", "session complete");
 		}
 
-		// Driver-special gate: bare `next` after plan approval waits for every repo
-		// to reach ready-to-merge (driven via `next --repo`), then runs feedback.
+		// Driver-special gate after plan approval. Two models:
+		//  • DAG model (a master plan was approved → orchestration.yaml exists): the
+		//    AGENT drives the work via `kautopilot schedule`/`record`; the binary does
+		//    NOT drive kloop. Bare `next` just reports the DAG state — still in progress
+		//    (point at schedule/record) until every plan is ready-to-merge, then feedback.
+		//  • Legacy per-repo model (no master plan): wait for every repo's status==='ready'
+		//    driven via `next --repo`, then feedback.
 		if (stepName === AWAIT_REPOS) {
-			const notReady = freshMetaPre.repos.filter((r) => r.status !== "ready");
-			if (freshMetaPre.repos.length === 0 || notReady.length > 0) {
-				const drive = notReady
-					.map((r) => `kautopilot next --repo ${r.repo}`)
-					.join("; ");
-				return doneResult(
-					meta,
-					"execution",
-					`Plan approved — drive each repo to ready-to-merge: ${drive || "(no repos registered)"}`,
-				);
+			const orch = readOrchestration(sessionId);
+			if (orch) {
+				const sched = computeSchedule(orch);
+				if (!sched.allReady) {
+					const hint =
+						sched.ready.length > 0
+							? `ready: ${sched.ready.map((p) => `${p.repo}/${p.plan}`).join(", ")}`
+							: sched.toMerge.length > 0
+								? `merge to unblock: ${sched.toMerge.map((m) => m.pr).join(", ")}`
+								: sched.running.length > 0
+									? `running: ${sched.running.map((p) => `${p.repo}/${p.plan}`).join(", ")}`
+									: "see `kautopilot schedule`";
+					return doneResult(
+						meta,
+						"execution",
+						`Plan approved — drive the DAG with \`kautopilot schedule\`/\`record\` (binary no longer drives kloop). Frontier: ${hint}`,
+					);
+				}
+			} else {
+				const notReady = freshMetaPre.repos.filter((r) => r.status !== "ready");
+				if (freshMetaPre.repos.length === 0 || notReady.length > 0) {
+					const drive = notReady
+						.map((r) => `kautopilot next --repo ${r.repo}`)
+						.join("; ");
+					return doneResult(
+						meta,
+						"execution",
+						`Plan approved — drive each repo to ready-to-merge: ${drive || "(no repos registered)"}`,
+					);
+				}
 			}
 			appendEvent(sessionId, {
 				ts: new Date().toISOString(),
@@ -309,6 +360,7 @@ const STEP_ARTIFACT: Record<string, ArtifactKind> = {
 	brainstorm: "brainstorm",
 	triage: "triage",
 	write_spec: "spec",
+	write_master_plan: "master_plan",
 	write_plans: "plans",
 	feedback: "feedback",
 };
@@ -445,7 +497,7 @@ export async function runRevise(
 		path,
 		url: `${base}/v${n}`,
 		diffUrl: `${base}/diff?from=${Math.max(1, n - 1)}&to=${n}`,
-		visualUrl: `/api/sessions/${sessionId}/html/${kind}/v/${n}`,
+		visualUrl: `/sessions/${sessionId}/html/${kind}/v/${n}`,
 	};
 }
 

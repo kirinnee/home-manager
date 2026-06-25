@@ -11,6 +11,8 @@ rec {
       haiku = "glm-4.5-air";
       models = [
         { id = "glm-5.2"; name = "glm52"; sonnet = "glm-5-turbo"; haiku = "glm-4.7"; }
+        { id = "glm-5.2a"; name = "glm52a"; sonnet = "glm-5-turbo"; haiku = "glm-4.7"; }
+        { id = "glm-5.2b"; name = "glm52b"; sonnet = "glm-5-turbo"; haiku = "glm-4.7"; }
       ];
     };
     anthropic = {

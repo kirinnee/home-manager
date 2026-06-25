@@ -4,6 +4,7 @@ import { generateSessionId } from "./id";
 import {
 	type ExecMode,
 	type Lpsm,
+	type MergeMode,
 	type Org,
 	type RunMode,
 	resolveOrgPolicy,
@@ -26,6 +27,8 @@ export interface CreateSessionInput {
 	folder: string;
 	runMode?: RunMode;
 	execMode?: ExecMode;
+	/** Per-session merge policy (default `manual` — ask before merging). */
+	mergeMode?: MergeMode;
 	maxParallelRepos?: number;
 	/** AtomiCloud service-tree tags (atomicloud-only; omit for liftoff). */
 	lpsm?: Lpsm;
@@ -65,6 +68,7 @@ export function createSession(input: CreateSessionInput): SessionMeta {
 		epoch: 1,
 		runMode: input.runMode ?? config.settings.runMode,
 		execMode: input.execMode ?? config.settings.execMode,
+		mergeMode: input.mergeMode ?? "manual",
 		maxParallelRepos:
 			input.maxParallelRepos ?? config.settings.maxParallelRepos,
 		repos: [],

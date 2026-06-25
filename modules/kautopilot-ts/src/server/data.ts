@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { sessionDir } from "../core/artifacts";
+import { readOrchestration, toMermaid } from "../core/orchestration";
 import {
 	type ArtifactKind,
 	htmlRevisionExists,
@@ -52,6 +53,7 @@ function listSessionIds(): string[] {
 const DOC_KINDS = new Set<ArtifactKind>([
 	"triage",
 	"spec",
+	"master_plan",
 	"feedback",
 	"brainstorm",
 ]);
@@ -150,6 +152,20 @@ function planRevisions(
 	}));
 }
 
+/** The orchestration DAG + live exec progress, surfaced for the dashboard. */
+export interface DagView {
+	/** Mermaid `graph TD` source for the dependency DAG. */
+	mermaid: string;
+	mergeMode: string;
+	progress: {
+		plan: string;
+		repo: string;
+		status: string;
+		kloopRunId?: string | null;
+		prUrl?: string | null;
+	}[];
+}
+
 export interface SessionDetail {
 	meta: SessionMeta;
 	phase: string;
@@ -161,11 +177,14 @@ export interface SessionDetail {
 		brainstorm: RevisionInfo[];
 		triage: RevisionInfo[];
 		spec: RevisionInfo[];
+		masterPlan: RevisionInfo[];
 		feedback: RevisionInfo[];
 		plans: Record<string, RevisionInfo[]>;
 		/** Kloop run ids spawned by this session's execution (newest first). */
 		kloopRuns: string[];
 	};
+	/** Master-plan DAG + progress, or null when no master plan was approved. */
+	dag: DagView | null;
 }
 
 /** Full detail for one session, or null when it has no session.json. */
@@ -188,6 +207,24 @@ export function getSessionDetail(id: string): SessionDetail | null {
 		}
 	}
 	kloopRuns.reverse();
+	// Master-plan DAG (multi-repo, multi-PR orchestration). Prefer the agent-authored
+	// mermaid; fall back to a derived graph so the dashboard always has one to render.
+	const orch = readOrchestration(id);
+	const dag: DagView | null = orch
+		? {
+				mermaid: orch.master.mermaid?.trim()
+					? orch.master.mermaid
+					: toMermaid(orch.master),
+				mergeMode: orch.mergeMode,
+				progress: orch.progress.map((p) => ({
+					plan: p.plan,
+					repo: p.repo,
+					status: p.status,
+					kloopRunId: p.kloopRunId ?? null,
+					prUrl: p.prUrl ?? null,
+				})),
+			}
+		: null;
 	return {
 		meta,
 		phase: status.phase,
@@ -198,10 +235,12 @@ export function getSessionDetail(id: string): SessionDetail | null {
 			brainstorm: brainstormRevisions(id),
 			triage: listRevisionsWithEpoch(id, "triage", { epoch }),
 			spec: listRevisionsWithEpoch(id, "spec", { epoch }),
+			masterPlan: listRevisionsWithEpoch(id, "master_plan", { epoch }),
 			feedback: listRevisionsWithEpoch(id, "feedback", { epoch }),
 			plans,
 			kloopRuns,
 		},
+		dag,
 	};
 }
 

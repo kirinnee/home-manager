@@ -28,6 +28,7 @@ import { sessionDir } from "./artifacts";
 export type ArtifactKind =
 	| "triage"
 	| "spec"
+	| "master_plan"
 	| "plans"
 	| "feedback"
 	| "brainstorm";

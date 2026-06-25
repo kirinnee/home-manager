@@ -1,9 +1,10 @@
-// SSH over the khost tunnel. macOS Remote Login socket-activates sshd on ALL
-// interfaces (launchd owns the socket → LAN-exposed, ListenAddress ignored). So
-// instead khost runs its OWN sshd bound to 127.0.0.1:<sshPort> as a LaunchDaemon.
-// The tunnel reaches it via loopback; the LAN cannot — which makes password auth
-// safe (only the Access-gated tunnel can connect). Linux uses a config drop-in
-// (sshd there isn't socket-activated, so ListenAddress works directly).
+// SSH for khost. macOS Remote Login socket-activates sshd on ALL interfaces
+// (launchd owns the socket → LAN-exposed, ListenAddress ignored). So instead khost
+// runs its OWN sshd as a LaunchDaemon, bound to two PRIVATE paths: 127.0.0.1 (the
+// Cloudflare tunnel + break-glass) and the WARP mesh endpoint 172.16.0.2 (so
+// `ssh user@<mesh-ip>` works device-to-device). Neither is reachable from the LAN,
+// which keeps password auth safe. Linux uses a config drop-in (sshd there isn't
+// socket-activated, so ListenAddress works directly).
 import { existsSync } from 'node:fs';
 import { osKind, sshPort } from './deps';
 import { die, log, ok, run, warn } from './exec';
@@ -13,17 +14,30 @@ const PLIST = '/Library/LaunchDaemons/cloud.atomi.khost.sshd.plist';
 const LABEL = 'cloud.atomi.khost.sshd';
 const LINUX_DROPIN = '/etc/ssh/sshd_config.d/100-khost.conf';
 
+// WARP-to-WARP mesh listener. Inbound mesh traffic (to this device's mesh IP) is
+// delivered to the local WARP endpoint, 172.16.0.2 by default. Binding sshd there
+// makes it reachable over the mesh (`ssh user@<mesh-ip> -p <sshPort>`) while the
+// LAN still cannot reach it (172.16.0.2 is the point-to-point WARP address; no LAN
+// route exists). The loopback listener (127.0.0.1) stays as the tunnel path AND a
+// break-glass fallback. Set KHOST_MESH_LISTEN="" to disable the mesh listener.
+// NOTE: if WARP isn't up when sshd starts (boot ordering), sshd binds 127.0.0.1
+// and skips the mesh address — re-run `khost ssh setup` (or reload) once WARP is
+// connected to pick it up. Boot-time WARP-up reload is a follow-up.
+const meshListen = process.env.KHOST_MESH_LISTEN ?? '172.16.0.2';
+
 function currentUser(): string {
   return process.env.SUDO_USER ?? process.env.USER ?? '';
 }
 
 function sshdConfig(user: string): string {
-  return `# Managed by khost — loopback-only sshd for the Cloudflare tunnel.
-# Bound to 127.0.0.1 so only the tunnel (and local user) can reach it; the LAN
-# cannot. Password auth is ON for Cloudflare browser-rendered SSH.
+  const meshLine = meshListen ? `ListenAddress ${meshListen}\n` : '';
+  return `# Managed by khost — private sshd reachable via two paths, both unreachable
+# from the LAN: the Cloudflare tunnel (127.0.0.1, break-glass) and the WARP mesh
+# (${meshListen || 'disabled'}). Password auth is ON for browser-rendered SSH; the
+# mesh path uses native ssh. ListenAddress lines without a port use Port below.
 Port ${sshPort}
 ListenAddress 127.0.0.1
-PasswordAuthentication yes
+${meshLine}PasswordAuthentication yes
 KbdInteractiveAuthentication yes
 PermitRootLogin no
 AllowUsers ${user}

@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { spawn } from "bun";
 import type { CheckStatus, PollThread } from "./types";
 
@@ -628,4 +630,138 @@ export async function ghPrRuns(branch: string, cwd?: string): Promise<GhRun[]> {
 	}
 
 	return parseJson<GhRun[]>(result.stdout, "run-list");
+}
+
+// ============================================================================
+// Merge + release gating (multi-PR orchestration)
+//
+// Used by the gate runner (core/gate-runner.ts) to advance merge-/release-gated
+// dependencies. The binary only ever merges in `auto` sessions; in `manual` it
+// just OBSERVES the merge state the user produced. Release-gating waits for a
+// repo's semantic release to be published AND its release CI/CD to finish.
+// ============================================================================
+
+/** Is the PR merged? Returns false (not throws) when gh is unavailable. */
+export async function ghIsPrMerged(
+	prNumber: number,
+	cwd?: string,
+): Promise<boolean> {
+	const result = await gh(
+		["pr", "view", String(prNumber), "--json", "state,mergedAt"],
+		cwd,
+	);
+	if (result.exitCode !== 0) return false;
+	const data = parseJson<{ state: string; mergedAt: string | null }>(
+		result.stdout,
+		"pr-merged",
+	);
+	return data.state === "MERGED" || data.mergedAt != null;
+}
+
+/**
+ * Merge a PR (auto mode only). Squash by default. Returns true on success,
+ * false on any failure (never throws) so the caller degrades cleanly.
+ */
+export async function ghMergePr(
+	prNumber: number,
+	cwd?: string,
+	method: "squash" | "merge" | "rebase" = "squash",
+): Promise<boolean> {
+	const result = await gh(
+		["pr", "merge", String(prNumber), `--${method}`],
+		cwd,
+	);
+	return result.exitCode === 0;
+}
+
+/**
+ * Best-effort detection of a SEMANTIC releaser in the repo: a semantic-release
+ * config, a release-please manifest, or a GoReleaser config. Used to decide
+ * whether a `released` gate must wait for a published release at all. Returns
+ * false when the path isn't readable.
+ */
+export function hasSemanticReleaser(repoPath: string): boolean {
+	const candidates = [
+		".releaserc",
+		".releaserc.json",
+		".releaserc.yaml",
+		".releaserc.yml",
+		".releaserc.js",
+		".releaserc.cjs",
+		"release.config.js",
+		"release.config.cjs",
+		"release-please-config.json",
+		".release-please-manifest.json",
+		".goreleaser.yml",
+		".goreleaser.yaml",
+	];
+	try {
+		if (candidates.some((c) => existsSync(join(repoPath, c)))) return true;
+		// semantic-release listed in package.json (dep or `release` block).
+		const pkgPath = join(repoPath, "package.json");
+		if (existsSync(pkgPath)) {
+			const pkg = readFileSync(pkgPath, "utf-8");
+			if (/semantic-release|release-please/.test(pkg)) return true;
+		}
+	} catch {
+		// unreadable path — treat as no releaser.
+	}
+	return false;
+}
+
+/**
+ * Is the repo's newest release fully published AND all of its CI/CD runs finished
+ * successfully? Returns false when there is no release yet, a run is still in
+ * progress, any run failed, or gh is unavailable — i.e. a `released` gate stays
+ * closed until everything is genuinely green.
+ */
+export async function ghLatestReleaseComplete(cwd?: string): Promise<boolean> {
+	const rel = await gh(
+		["release", "view", "--json", "tagName,isDraft,publishedAt"],
+		cwd,
+	);
+	if (rel.exitCode !== 0) return false;
+	let release: {
+		tagName: string;
+		isDraft: boolean;
+		publishedAt: string | null;
+	};
+	try {
+		release = parseJson(rel.stdout, "release-view");
+	} catch {
+		return false;
+	}
+	if (release.isDraft || !release.publishedAt) return false;
+
+	// Every workflow run for the release tag must have completed successfully.
+	// `gh run list` has no `--tag` flag, so we filter by `--branch <tag>`: for a
+	// tag-triggered workflow the run's head ref IS the tag, so this matches the
+	// release's CI/CD. A published, non-draft release is the precondition above; if
+	// no tag-scoped runs are queryable we take that published release as complete.
+	const runs = await gh(
+		[
+			"run",
+			"list",
+			"--branch",
+			release.tagName,
+			"--json",
+			"status,conclusion",
+			"--limit",
+			"20",
+		],
+		cwd,
+	);
+	if (runs.exitCode !== 0) {
+		return true;
+	}
+	let list: { status: string; conclusion: string | null }[];
+	try {
+		list = parseJson(runs.stdout, "release-runs");
+	} catch {
+		return true;
+	}
+	if (list.length === 0) return true;
+	return list.every(
+		(r) => r.status === "completed" && r.conclusion === "success",
+	);
 }

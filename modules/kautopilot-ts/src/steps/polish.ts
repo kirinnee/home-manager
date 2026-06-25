@@ -26,6 +26,7 @@ import {
 	withBotSignature,
 } from "../core/github";
 import { appendEvent, readLog } from "../core/log";
+import { recordPlanProgress } from "../core/orchestration";
 import {
 	currentRevisionPath,
 	diffRevisions,
@@ -362,6 +363,20 @@ const createPr: StepDef = {
 					entry.prUrl = prUrl ?? entry.prUrl;
 				}
 			});
+
+			// Orchestration tracking: every plan that ships in this repo is now in an
+			// open PR (`pr_open`) — the gate runner promotes these to merged/released as
+			// the world catches up, clearing downstream merge/release gates. `repo.plans`
+			// are the `plan-<N>` ids write_plans authored, which are the SAME ids the
+			// master plan's nodes/deps reference (write_plans follows the approved master
+			// plan), so these progress keys line up with the gate DAG.
+			for (const plan of repo.plans) {
+				recordPlanProgress(ctx.sessionId, repo.repo, plan, {
+					status: "pr_open",
+					prNumber,
+					...(prUrl ? { prUrl } : {}),
+				});
+			}
 
 			// PR rollover: close any OTHER open PRs on this branch (never the one we
 			// keep, and never a merge). Best-effort; degrades when gh is absent.

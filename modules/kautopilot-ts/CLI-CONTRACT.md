@@ -104,8 +104,8 @@ until the step's `completionEvent` is logged. **This is the resume story.**
 
 | kind          | Who runs it                            | Examples                                                                                                                                       |
 | ------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `code`        | the binary, inline (**never yielded**) | seed (wt worktree), setup_run, push, poll, act, ensure_branch, verify_fixes, next_plan, cleanup, + outcome verification (kloop status / git / gh) |
-| `interactive` | harness, **inline**, serialized        | brainstorm (ad-hoc), triage, write_spec, write_plans, resolve, amend_plans, tty_resolve, feedback_check, feedback                              |
+| `code`        | the binary, inline (**never yielded**) | seed (wt worktree), setup_run, push, poll, act, ensure_branch, verify_fixes, next_plan, cleanup, + outcome verification (kloop status / git / gh) + gate reconciliation (merge/release) |
+| `interactive` | harness, **inline**, serialized        | brainstorm (ad-hoc), triage, write_spec, **write_master_plan**, write_plans, resolve, amend_plans, tty_resolve, feedback_check, feedback           |
 | `agent`       | harness, **isolated sub-agent**        | create_ticket, fetch_ticket, running (kloop babysitter), commit, eval, create_pr, prereview, write_fix, running_subagent (exec mode `sub-agent`). The reviewer fan-out is not a step — it rides on write_spec/write_plans. |
 
 ---
@@ -191,6 +191,103 @@ kautopilot diff <artifact> [--from <n>] [--to <n>] [--session <id>]
 - **Machine-local, never committed.** Only the final approved version is committed (§ on
   commit policy below).
 
+`master_plan` (§5b) is also a versioned writer artifact — same `revise`/`diff` mechanics,
+approved **before** `write_plans`.
+
+---
+
+## 5b. Master plan + orchestration (multi-repo, multi-PR)
+
+The plan phase yields a **`master_plan`** interactive step **between `write_spec` and
+`write_plans`** — the orchestration layer, approved *first* so the per-repo sub-plans are
+written against an agreed shape. It captures:
+
+- **PR/branch layout** — each PR (`pr-<n>`) with its repo, branch, title, and the plans it
+  ships. A repo may have **several PRs on several branches**; in the DAG execution model (§5c)
+  the agent opens exactly these PRs and records them by `pr-<n>` id, so multi-PR-per-repo is
+  executed, not just recorded.
+- **The dependency DAG with gate levels** — each edge: `{ plan, repo, dependsOn,
+  dependsOnRepo, gate }` where `gate ∈ completed | merged | released`:
+  - `completed` — upstream plan's code is committed on its branch.
+  - `merged` — upstream PR merged into base (then the downstream worktree is cut off updated base).
+  - `released` — upstream repo's semantic release fully published AND all release CI/CD green.
+  - Edges may span repos.
+- A **mermaid `graph TD`** for the dashboard (the binary derives one if the agent omits it).
+
+On `master_plan:approved` the harness passes the structured plan as `--metadata` (`{ mergeMode?,
+prs[], nodes[], deps[] }`); the binary freezes it into **`~/.kautopilot/<sessionId>/orchestration.yaml`**
+— a human-readable, resumable record that ALSO tracks each plan's **exec status** (`pending →
+running → implemented → pr_open → merged → released`) and the **kloop run id** that built it.
+It's a companion view over the WAL + `session.json`, never the cursor's source of truth.
+
+**Gate enforcement.** Before driving a repo (`next --repo R`), the binary reconciles
+merge/release state of upstream PRs (a `code` reconciliation) and **blocks** R while any of
+its plans still wait on an unsatisfied `merged`/`released` gate, returning a `done` result
+with `phase:"execution"` and a "blocked on gate dependencies" reason. The downstream worktree
+is therefore always cut off a base that already contains the upstream work.
+
+### Merge policy (per session)
+
+`session.json.mergeMode ∈ manual | auto` (set at `start` via `--merge`, confirmable in the
+master plan). Either way the binary drives every PR to **ready-to-merge**. Then:
+
+- `manual` — the binary **never** merges; it observes the merge the user performs (and the
+  `feedback_check`/skill asks the user to merge).
+- `auto` — the binary **merges a ready PR itself** (`gh pr merge --squash`) to clear
+  downstream `merged`/`released` gates.
+
+`released` gates additionally require the upstream repo's semantic releaser (detected from
+`.releaserc*`/release-please/GoReleaser/`semantic-release` in package.json) to have published
+its newest release with all release CI/CD finished before the gate opens.
+
+---
+
+## 5c. DAG execution — `schedule` + `record` (kautopilot is a record-keeper, not a kloop driver)
+
+Once the master plan is approved, **the agent drives the work** (kloop, conflict resolution,
+worktrees, opening + merging PRs) and **records** each transition; **kautopilot does not run or
+watch kloop**. The binary's job in execution is to track progress and answer scheduling
+questions over the DAG. Bare `next` after plan approval returns a `phase:"execution"` done-result
+telling the agent to drive via `schedule`/`record`; when every plan is ready-to-merge it advances
+to feedback.
+
+```
+kautopilot schedule [--json] [--session <id>]
+```
+
+Reads `orchestration.yaml` and returns the runnable frontier:
+
+```jsonc
+{
+  "ok": true,
+  "mergeMode": "manual",
+  "ready":   [ { "repo": "api", "plan": "plan-1", "pr": "pr-1" } ],   // deps satisfied → run now
+  "running": [ { "repo": "…", "plan": "…", "kloopRunId": "…" } ],     // in flight
+  "blocked": [ { "repo": "web", "plan": "plan-2",
+                 "waitingOn": [ { "repo": "api", "plan": "plan-1", "gate": "merged" } ] } ],
+  "toMerge": [ { "pr": "pr-1", "repo": "api", "branch": "…", "prNumber": 42,
+                 "unblocks": ["web/plan-2"] } ],   // open PRs gating a downstream (gate-clearing first)
+  "allReady": false,   // every plan pr_open/merged/released → time for feedback
+  "done": false        // every plan merged/released → DAG delivered
+}
+```
+
+```
+kautopilot record <event> [--repo <r> --plan <p> | --pr <prId>] [--kloop <id>] [--number <n>] [--url <u>]
+   event ∈ started | implemented | pr-opened | merged | released | failed
+```
+
+Updates the plan(s)' status in `orchestration.yaml`. `--pr <prId>` marks **every plan in that
+PrPlan** (how multi-PR-per-repo is recorded — one PR at a time). `schedule` recomputes purely
+from what's recorded, so the model is **fully resumable**: a killed/auto-resumed session just
+calls `schedule` again and continues from the frontier. The status ladder is `pending → running
+→ implemented → pr_open → merged → released` (plus terminal `failed`); a `merged`/`released`
+record clears the matching downstream gate so newly-runnable plans appear in the next `schedule`.
+
+(Legacy: a session with **no** master plan still uses the per-repo `next --repo` execution/polish
+step machine + the `await_repos` gate on `repos[].status`. The DAG model above is the path for any
+ticket-to-PR run with a master plan.)
+
 ---
 
 ## 6. State, WAL & resume (reused — one session)
@@ -201,7 +298,8 @@ kautopilot diff <artifact> [--from <n>] [--to <n>] [--session <id>]
 - **Replay**: `ensureStatus` lazy incremental replay (`walCursor` in `status.yaml`)
   materializes `phase/step/version/context` and per-repo progress.
 - **Per-repo state** lives in `session.json.repos[] = { repo, worktree, branch, plans[],
-dependsOn[], prUrl, status }`. There is no per-repo WAL.
+dependsOn[], prNumber, prUrl, status }`. There is no per-repo WAL. The multi-PR/branch
+  layout + per-plan gate deps + exec progress live in `orchestration.yaml` (§5b), not here.
 - **Describe-mode** uses **split handlers**: `prepare(ctx) → StepDescriptor | null`
   builds the prompt + emits `:started`; `finalize(ctx) → nextStep` runs inside
   `complete`, deterministically.
@@ -213,10 +311,12 @@ dependsOn[], prUrl, status }`. There is no per-repo WAL.
 ## 7. Session & repo commands
 
 ```
-kautopilot start [TICKET_ID | "request"] [--org liftoff|atomicloud]   # convenience: init session + invoke default harness
+kautopilot start [TICKET_ID | "request"] [--org liftoff|atomicloud] [--merge manual|auto]   # convenience: init session + invoke default harness
 kautopilot next [--repo <repo>] [--json]                              # the driver (§2)
 kautopilot complete [step] [--repo <repo>] …                          # advance; step optional (§3)
 kautopilot revise [--repo <repo>] …                                   # mint next version + return link (§5)
+kautopilot schedule [--json]                                          # DAG frontier: ready plans / PRs to merge (§5c)
+kautopilot record <event> …                                           # log a plan/PR lifecycle event (§5c)
 kautopilot diff <artifact> …                                          # revision diffs (§5)
 kautopilot status [--json]                                            # session + every repo's per-repo state
 kautopilot ps [--json]                                                # sessions table (unchanged shape + ticketId/org)

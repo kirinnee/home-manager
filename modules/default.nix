@@ -19,6 +19,13 @@ rec {
   kautopilot = nixpkgs.writeShellScriptBin "kautopilot" ''
     exec ${nixpkgs.bun}/bin/bun run ~/.config/home-manager/modules/kautopilot-ts/src/index.ts "$@"
   '';
+  # klaude: run-from-source wrapper. Wraps crc-kirin (Claude remote-control) in a
+  # persistent zellij session. zellij is put on PATH; crc-kirin/fzf come from the
+  # host PATH (claude-multi `crc` alias + user tooling).
+  klaude = nixpkgs.writeShellScriptBin "klaude" ''
+    export PATH="${nixpkgs.lib.makeBinPath [ nixpkgs.zellij ]}:$PATH"
+    exec ${nixpkgs.bun}/bin/bun run ~/.config/home-manager/modules/klaude-ts/src/index.ts "$@"
+  '';
   # loctl: run-from-source wrapper (matches the old `loctl-wrapper` package, which
   # bundled no extra tools and relied on host PATH). Replaces the `loctl` flake
   # input — a `path:` input copied the whole 328MB checkout (node_modules + compiled

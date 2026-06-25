@@ -30,6 +30,14 @@ export type RunMode = "current-session" | "sub-agent";
 export type ExecMode = "kloop" | "sub-agent";
 
 /**
+ * Per-session merge policy. Either way the binary always drives each PR to
+ * ready-to-merge (CI green + threads resolved); `mergeMode` only decides what
+ * happens THEN: `manual` asks the user before merging, `auto` merges itself. It
+ * gates merge-/release-dependent downstream plans (see core/orchestration.ts).
+ */
+export type MergeMode = "manual" | "auto";
+
+/**
  * AtomiCloud LPSM service-tree tags (atomicloud-only). Each tier has its own
  * naming theme: Landscape=environment (Pokémon), Cluster=Gemstone,
  * Platform=product/namespace (Functional Group; a ClickUp Space == a Platform),
@@ -86,6 +94,8 @@ export interface SessionMeta {
 	epoch: number;
 	runMode: RunMode;
 	execMode: ExecMode;
+	/** Whether the binary may merge a ready PR itself (`auto`) or must ask (`manual`). */
+	mergeMode: MergeMode;
 	maxParallelRepos: number;
 	repos: RepoEntry[];
 	/** AtomiCloud service-tree tags (atomicloud-only; undefined for liftoff). */

@@ -24,6 +24,7 @@ afterAll(() => {
 
 import { sessionDir } from "../../core/artifacts";
 import { runComplete, runNext, runRevise } from "../../core/driver";
+import { readOrchestration } from "../../core/orchestration";
 import {
 	diffRevisions,
 	latestRevisionOnDisk,
@@ -155,6 +156,19 @@ describe("host-driven driver: next/complete", () => {
 			).ok,
 		).toBe(true);
 
+		// write_master_plan — orchestration artifact, approved BEFORE sub-plans.
+		const mp = await runNext(id, config);
+		if (mp.done) throw new Error("unexpected done");
+		expect(mp.step).toBe("write_master_plan");
+		writeFile(join(dir, "epoch", "1", "master_plan", "v1.md"), "# Master plan");
+		expect(
+			(
+				await runComplete(id, config, "write_master_plan", {
+					output: join(dir, "epoch", "1", "master_plan", "v1.md"),
+				})
+			).ok,
+		).toBe(true);
+
 		// write_plans — also carries its reviewer fan-out.
 		const p = await runNext(id, config);
 		if (p.done) throw new Error("unexpected done");
@@ -249,7 +263,9 @@ describe("host-driven driver: next/complete", () => {
 		).toBe(true);
 		const next = await runNext(id, config);
 		if (next.done) throw new Error("unexpected done");
-		expect(next.step).toBe("write_plans");
+		// After the spec is approved the next writer step is the master plan
+		// (orchestration), which is approved before the per-repo sub-plans.
+		expect(next.step).toBe("write_master_plan");
 	});
 });
 
@@ -285,6 +301,12 @@ async function drivePlan(id: string, repos: string[]): Promise<void> {
 	writeFile(join(dir, "epoch", "1", "spec", "v1.md"), "# Spec");
 	await runComplete(id, config, "write_spec", {
 		output: join(dir, "epoch", "1", "spec", "v1.md"),
+	});
+	// write_master_plan (orchestration artifact, approved before sub-plans).
+	await runNext(id, config);
+	writeFile(join(dir, "epoch", "1", "master_plan", "v1.md"), "# Master plan");
+	await runComplete(id, config, "write_master_plan", {
+		output: join(dir, "epoch", "1", "master_plan", "v1.md"),
 	});
 	// write_plans (one plan per repo, tagged) → finalize_plans. The writer authors
 	// every plan folder under epoch/<E>/plans/<authoringRepo>/<plan>/v<M>.md.
@@ -394,5 +416,146 @@ describe("multi-repo: identical flat flow, serialized interaction", () => {
 		expect(c.done).toBe(false);
 		if (c.done) return;
 		expect(c.repo).toBe("beta");
+	});
+});
+
+// --- master plan → orchestration.yaml ----------------------------------------
+
+describe("master plan freezes orchestration.yaml + gates a downstream repo", () => {
+	it("write_master_plan metadata seeds the DAG, mergeMode, and blocks the gated repo", async () => {
+		const id = newSession("PE-4000");
+		const dir = sessionDir(id);
+		// fetch_ticket
+		await runNext(id, config);
+		writeFile(join(dir, "ticket.md"), "# t");
+		await runComplete(id, config, "fetch_ticket", {
+			output: join(dir, "ticket.md"),
+		});
+		// triage: two repos, web depends on api.
+		await runNext(id, config);
+		writeFile(join(dir, "epoch", "1", "triage", "v1.md"), "moderate");
+		await runComplete(id, config, "triage", {
+			output: join(dir, "epoch", "1", "triage", "v1.md"),
+			metadata: { repos: ["api", "web"], dependsOn: { web: ["api"] } },
+		});
+		// write_spec
+		await runNext(id, config);
+		writeFile(join(dir, "epoch", "1", "spec", "v1.md"), "# Spec");
+		await runComplete(id, config, "write_spec", {
+			output: join(dir, "epoch", "1", "spec", "v1.md"),
+		});
+		// write_master_plan — structured orchestration metadata with a `merged` gate.
+		const mp = await runNext(id, config);
+		if (mp.done) throw new Error("unexpected done");
+		expect(mp.step).toBe("write_master_plan");
+		writeFile(join(dir, "epoch", "1", "master_plan", "v1.md"), "# Master plan");
+		const res = await runComplete(id, config, "write_master_plan", {
+			output: join(dir, "epoch", "1", "master_plan", "v1.md"),
+			metadata: {
+				mergeMode: "auto",
+				prs: [
+					{
+						id: "pr-1",
+						repo: "api",
+						branch: "u/api",
+						title: "API",
+						plans: ["plan-1"],
+					},
+					{
+						id: "pr-2",
+						repo: "web",
+						branch: "u/web",
+						title: "Web",
+						plans: ["plan-1"],
+					},
+				],
+				nodes: [
+					{ plan: "plan-1", repo: "api", pr: "pr-1" },
+					{ plan: "plan-1", repo: "web", pr: "pr-2" },
+				],
+				deps: [
+					{
+						plan: "plan-1",
+						repo: "web",
+						dependsOn: "plan-1",
+						dependsOnRepo: "api",
+						gate: "merged",
+					},
+				],
+			},
+		});
+		expect(res.ok).toBe(true);
+
+		// The master plan is frozen into orchestration.yaml with the gate + progress.
+		const orch = readOrchestration(id);
+		expect(orch?.mergeMode).toBe("auto");
+		expect(orch?.master.deps[0]?.gate).toBe("merged");
+		expect(orch?.progress).toHaveLength(2);
+		expect(orch?.progress.every((p) => p.status === "pending")).toBe(true);
+		// The session's mergeMode was updated from the confirmed master plan.
+		expect(readSessionMeta(id)?.mergeMode).toBe("auto");
+	});
+
+	it("execution keys orchestration progress on the GLOBAL plan id (no drift for non-first repos)", async () => {
+		const id = newSession("PE-4100");
+		const dir = sessionDir(id);
+		await runNext(id, config);
+		writeFile(join(dir, "ticket.md"), "# t");
+		await runComplete(id, config, "fetch_ticket", {
+			output: join(dir, "ticket.md"),
+		});
+		await runNext(id, config);
+		writeFile(join(dir, "epoch", "1", "triage", "v1.md"), "moderate");
+		await runComplete(id, config, "triage", {
+			output: join(dir, "epoch", "1", "triage", "v1.md"),
+			metadata: { repos: ["api", "web"], dependsOn: {} },
+		});
+		await runNext(id, config);
+		writeFile(join(dir, "epoch", "1", "spec", "v1.md"), "# Spec");
+		await runComplete(id, config, "write_spec", {
+			output: join(dir, "epoch", "1", "spec", "v1.md"),
+		});
+		// Master plan: api owns global plan-1, web owns global plan-2 (NO gate, so web
+		// isn't blocked and we can drive it straight into execution).
+		await runNext(id, config);
+		writeFile(join(dir, "epoch", "1", "master_plan", "v1.md"), "# MP");
+		await runComplete(id, config, "write_master_plan", {
+			output: join(dir, "epoch", "1", "master_plan", "v1.md"),
+			metadata: {
+				nodes: [
+					{ plan: "plan-1", repo: "api", pr: "pr-1" },
+					{ plan: "plan-2", repo: "web", pr: "pr-2" },
+				],
+				deps: [],
+			},
+		});
+		// write_plans: plan-1 tagged api, plan-2 tagged web (authored under api's bucket).
+		await runNext(id, config);
+		const plansDir = join(dir, "epoch", "1", "plans", "api");
+		writeFile(join(plansDir, "plan-1", "v1.md"), "repo: api\n# Plan 1");
+		writeFile(join(plansDir, "plan-2", "v1.md"), "repo: web\n# Plan 2");
+		await runComplete(id, config, "write_plans", { output: plansDir });
+		await runNext(id, config); // finalize_plans → await_repos
+
+		// Drive web (the NON-first repo) until it records a `running` orchestration entry.
+		for (let i = 0; i < 12; i++) {
+			const d = await runNext(id, config, "web");
+			if (d.done) break;
+			if (d.contract?.outputFile) writeFile(d.contract.outputFile, "x");
+			await runComplete(id, config, d.step, {
+				repo: "web",
+				output: d.contract?.outputFile,
+				metadata: d.step === "running" ? { kloopRunId: "r1" } : {},
+			});
+			if (d.step === "running") break;
+		}
+		// web's global plan id is plan-2 — execution must record progress under THAT,
+		// matching the master-plan node + polish, never the per-repo label `plan-1`.
+		const orch = readOrchestration(id);
+		const webKeys = (orch?.progress ?? [])
+			.filter((p) => p.repo === "web")
+			.map((p) => p.plan);
+		expect(webKeys).toContain("plan-2");
+		expect(webKeys).not.toContain("plan-1");
 	});
 });

@@ -10,6 +10,15 @@ import type {
 	StepDef,
 } from "../core/descriptor";
 import { branchTicketRef, gitUserSlug, slugifyBranch } from "../core/git";
+import {
+	type GateLevel,
+	initOrchestration,
+	isGateLevel,
+	type MasterPlan,
+	type PlanDependency,
+	type PlanNode,
+	type PrPlan,
+} from "../core/orchestration";
 import type { ArtifactKind, ArtifactRef } from "../core/revisions";
 import {
 	currentRevisionPath,
@@ -425,7 +434,7 @@ const writeSpec: StepDef = {
 			review,
 		} satisfies PreparedStep;
 	},
-	finalize: async () => "write_plans",
+	finalize: async () => "write_master_plan",
 };
 
 function latestSpecVersion(ctx: StepContext): number {
@@ -454,9 +463,177 @@ function latestSpecPath(ctx: StepContext): string {
 	});
 }
 
+/** Path of the latest master-plan revision for the current epoch (or v1). */
+function latestMasterPlanPath(ctx: StepContext): string {
+	const n =
+		latestRevisionOnDisk(ctx.sessionId, "master_plan", {
+			epoch: ctx.version,
+		}) || 1;
+	return revisionPath(ctx.sessionId, "master_plan", n, { epoch: ctx.version });
+}
+
+// --- write_master_plan (interactive) ----------------------------------------
+
+const MASTER_PLAN_MECHANICS = `## CRITICAL: Master Plan & Approval Mechanics
+
+The **master plan** is the ORCHESTRATION layer for a multi-repo, multi-PR task. You
+write and get it APPROVED **before** any per-repo sub-plans (write_plans) — it locks the
+ORDER OF EXECUTION first, so the detailed plans are written against an agreed shape.
+
+### Working Copy
+Write the master plan to: {master_plan}
+Each version MUST be a complete, standalone document (NOT a changelog). It must cover:
+
+1. **The repos & the PR/branch layout.** List every repo and, for each, the PRs it will
+   open — a repo MAY open SEVERAL PRs on SEVERAL branches. For each PR give a stable id
+   (\`pr-1\`, \`pr-2\`, …), its repo, its branch name, a title, and which plans land in it.
+2. **The plan breakdown as nodes.** List each plan (\`plan-<N>\`, repo-tagged) and the PR
+   it ships in. (The detailed bodies come later in write_plans — here it's just the nodes
+   and their order.)
+3. **The dependency DAG with GATE LEVELS.** For each cross-plan dependency, state the
+   upstream plan, the downstream plan, and the GATE LEVEL the upstream must reach before
+   the downstream may START:
+   - \`completed\` — upstream code is implemented/committed on its branch.
+   - \`merged\` — upstream PR is merged into base (then the downstream worktree is cut off
+     the updated base).
+   - \`released\` — the upstream repo's semantic RELEASE is fully published AND all release
+     CI/CD has finished, THEN base is pulled. Use this when the downstream consumes the
+     upstream's PUBLISHED artifact (a released package/image), not just merged source.
+   Dependencies MAY span repos.
+4. **A mermaid \`graph TD\`** of the DAG (nodes = repo/plan grouped per PR, edges labelled
+   with the gate level) so the dashboard can render it.
+
+### Confirm the merge policy
+Confirm with the user whether this session should MERGE ready PRs itself (\`auto\`) or ASK
+first (\`manual\`). Either way the binary always drives PRs to ready-to-merge; the mode only
+decides what happens then, and it is what makes \`merged\`/\`released\` gates progress.
+
+### Previous revision diff (if any)
+{lastDiff}
+
+### Completion metadata (REQUIRED)
+On approval you MUST pass the structured master plan as completion metadata so the binary
+can freeze it into \`orchestration.yaml\` (the resumable record that also tracks each plan's
+exec status + kloop run):
+{
+  "mergeMode": "manual" | "auto",
+  "prs":   [ { "id": "pr-1", "repo": "<repo>", "branch": "<branch>", "title": "…", "plans": ["plan-1"] } ],
+  "nodes": [ { "plan": "plan-1", "repo": "<repo>", "pr": "pr-1", "title": "…" } ],
+  "deps":  [ { "plan": "plan-2", "repo": "<repoB>", "dependsOn": "plan-1", "dependsOnRepo": "<repoA>", "gate": "merged" } ]
+}`;
+
+const writeMasterPlan: StepDef = {
+	name: "write_master_plan",
+	phase: "plan",
+	kind: "interactive",
+	scope: "session",
+	prepare: async (ctx) => {
+		const { path } = currentRevisionPath(ctx.sessionId, "master_plan", {
+			epoch: ctx.version,
+		});
+		const vars = {
+			...planVars(ctx),
+			master_plan: path,
+			spec: latestSpecPath(ctx),
+			triage: latestTriagePath(ctx),
+			mergeMode: ctx.meta.mergeMode,
+			lastDiff: lastDiff(ctx.sessionId, "master_plan", { epoch: ctx.version }),
+		};
+		return {
+			prompt: `${substitute(MASTER_PLAN_MECHANICS, vars)}\n\n${SHARED_APPROVAL_GATE}`,
+			vars,
+			contract: {
+				outputFile: path,
+				completionEvent: "master_plan:approved",
+				completionMetadataSchema: {
+					mergeMode: "manual|auto?",
+					prs: "Array<{id,repo,branch,title,plans}>",
+					nodes: "Array<{plan,repo,pr,title?}>",
+					deps: "Array<{plan,repo,dependsOn,dependsOnRepo,gate}>",
+				},
+			},
+		} satisfies PreparedStep;
+	},
+	finalize: async (ctx) => {
+		const master = parseMasterPlanMetadata(ctx.metadata);
+		// Confirmed merge policy (optional override) is persisted on the session.
+		const mergeMode = ctx.metadata?.mergeMode;
+		if (mergeMode === "manual" || mergeMode === "auto") {
+			updateSessionMeta(ctx.sessionId, (m) => {
+				m.mergeMode = mergeMode;
+			});
+		}
+		const effectiveMerge =
+			mergeMode === "manual" || mergeMode === "auto"
+				? mergeMode
+				: ctx.meta.mergeMode;
+		// Freeze the agreed master plan into orchestration.yaml (resumable record).
+		if (master.nodes.length > 0 || master.prs.length > 0) {
+			initOrchestration(ctx.sessionId, ctx.version, effectiveMerge, master);
+		}
+		return "write_plans";
+	},
+};
+
+/**
+ * Parse the structured master plan from `master_plan:approved` completion metadata
+ * into a {@link MasterPlan}, tolerating missing/extra fields. Unknown gate levels
+ * default to `completed` (the weakest gate) so a typo never silently strengthens
+ * sequencing into a release-wait.
+ */
+function parseMasterPlanMetadata(
+	metadata: Record<string, unknown> | undefined,
+): MasterPlan {
+	const prsRaw = Array.isArray(metadata?.prs) ? metadata.prs : [];
+	const nodesRaw = Array.isArray(metadata?.nodes) ? metadata.nodes : [];
+	const depsRaw = Array.isArray(metadata?.deps) ? metadata.deps : [];
+	const prs: PrPlan[] = prsRaw.map((p) => {
+		const o = p as Record<string, unknown>;
+		return {
+			id: String(o.id ?? ""),
+			repo: String(o.repo ?? ""),
+			branch: String(o.branch ?? ""),
+			title: String(o.title ?? ""),
+			plans: Array.isArray(o.plans) ? o.plans.map(String) : [],
+		};
+	});
+	const nodes: PlanNode[] = nodesRaw.map((n) => {
+		const o = n as Record<string, unknown>;
+		return {
+			plan: String(o.plan ?? ""),
+			repo: String(o.repo ?? ""),
+			pr: String(o.pr ?? ""),
+			...(o.title ? { title: String(o.title) } : {}),
+		};
+	});
+	const deps: PlanDependency[] = depsRaw
+		.map((d) => {
+			const o = d as Record<string, unknown>;
+			const gate: GateLevel = isGateLevel(o.gate) ? o.gate : "completed";
+			return {
+				plan: String(o.plan ?? ""),
+				repo: String(o.repo ?? ""),
+				dependsOn: String(o.dependsOn ?? ""),
+				// No fallback to `o.repo`: an omitted upstream repo must NOT silently
+				// become a same-repo edge pointing at the wrong plan. A malformed edge
+				// (any of the four endpoints empty) is dropped below rather than wired wrong.
+				dependsOnRepo: String(o.dependsOnRepo ?? ""),
+				gate,
+			};
+		})
+		.filter((d) => d.plan && d.repo && d.dependsOn && d.dependsOnRepo);
+	return { prs, nodes, deps };
+}
+
 // --- write_plans (interactive) ----------------------------------------------
 
 const PLAN_MECHANICS = `## CRITICAL: Plan Writing & Approval Mechanics
+
+### Follow the approved master plan
+The orchestration was already agreed in the master plan: {master_plan}. The plan ids,
+repo/PR layout, and the execution-order DAG come from there — write the per-repo plan
+bodies for THOSE plans (use the same \`plan-<N>\` ids). If you find the master plan's
+breakdown is wrong, raise it rather than silently diverging.
 
 ### Propose the breakdown FIRST (before writing any plan bodies)
 Do NOT jump straight into writing plan files. FIRST propose the breakdown and get the user to
@@ -533,6 +710,7 @@ const writePlans: StepDef = {
 			version: String(version),
 			spec: latestSpecPath(ctx),
 			triage: latestTriagePath(ctx),
+			master_plan: latestMasterPlanPath(ctx),
 			planTemplate: ctx.config.templates.plan,
 			lastDiff: lastDiff(ctx.sessionId, "plans", { epoch: ctx.version, repo }),
 		};
@@ -640,6 +818,7 @@ export const PLAN_STEPS: StepDef[] = [
 	fetchTicket,
 	triage,
 	writeSpec,
+	writeMasterPlan,
 	writePlans,
 	finalizePlans,
 ];
