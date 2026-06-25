@@ -18,7 +18,7 @@ import type {
   VerifierPromptVars,
   ReSynthesisPromptVars,
 } from './prompts';
-import { extractTokensFromLog, extractHarnessSessionId } from '../stream/parse';
+import { extractTokensFromLog, extractHarnessSessionId, extractModelFromLog } from '../stream/parse';
 import { formatAgentLaunch } from '../loop/format';
 import type { ParsedBinary, ReviewerBinary, ReviewTypeEntry } from '../types';
 import {
@@ -52,6 +52,7 @@ export interface ImplementerResult extends AgentResult {
   learnings: string | null;
   binary: string;
   harness: HarnessType;
+  model?: string; // harness-reported model actually used (e.g. claude-opus-4-8)
   inputTokens?: number;
   outputTokens?: number;
   harnessSessionId?: string;
@@ -61,6 +62,7 @@ export interface ReviewerResult extends AgentResult {
   reviewerIndex: number;
   binary: string;
   harness: HarnessType;
+  model?: string; // harness-reported model actually used (e.g. claude-opus-4-8)
   verdict: Verdict;
   reasoning: string;
   completionEstimate?: number;
@@ -76,6 +78,9 @@ export interface ReviewerResult extends AgentResult {
 type CheckpointerOutcome = 'conflict_found' | 'spec_auto_fixed' | 'spec_compressed' | 'no_action';
 
 interface CheckpointerResult extends AgentResult {
+  binary: string;
+  harness: HarnessType;
+  model?: string; // harness-reported model actually used (e.g. claude-opus-4-8)
   outcome: CheckpointerOutcome;
   summary: string;
   progressPercent?: number;
@@ -87,6 +92,7 @@ interface CheckpointerResult extends AgentResult {
 export interface SynthesizerResult extends AgentResult {
   binary: string;
   harness: HarnessType;
+  model?: string; // harness-reported model actually used (e.g. claude-opus-4-8)
   summaryPath?: string;
   inputTokens?: number;
   outputTokens?: number;
@@ -97,6 +103,7 @@ export interface VerifierResult extends AgentResult {
   reviewerIndex: number;
   binary: string;
   harness: HarnessType;
+  model?: string; // harness-reported model actually used (e.g. claude-opus-4-8)
   verdict: Verdict;
   reasoning: string;
   phaseIndex?: number;
@@ -145,6 +152,26 @@ function buildAgentCommand(params: {
     // Gemini: no session ID injection, pipe prompt via stdin (avoids shell arg length limits)
     // GEMINI_CLI_TRUST_WORKSPACE=true bypasses the trust-folder prompt for headless runs
     return `cat "${promptFile}" | GEMINI_CLI_TRUST_WORKSPACE=true ${binary} --yolo --output-format stream-json -p "" 2>&1 | tee "${logFile}" | ${KLOOP_BIN} stream`;
+  }
+}
+
+/**
+ * True when `content` is a checkpoint-result file with a recognized outcome — i.e. the
+ * checkpointer produced a real result. Used to decide whether to retry: a missing or
+ * unparseable file (transport failure / crash) is retried; a real result never is.
+ */
+function isParseableCheckpointResult(content: string | null): boolean {
+  if (!content) return false;
+  try {
+    const parsed = JSON.parse(content);
+    return (
+      parsed?.outcome === 'conflict_found' ||
+      parsed?.outcome === 'spec_auto_fixed' ||
+      parsed?.outcome === 'spec_compressed' ||
+      parsed?.outcome === 'no_action'
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -329,10 +356,11 @@ export class AgentRunner {
       // No learnings yet
     }
 
-    // Extract token counts and harness session ID from log file
+    // Extract token counts, harness session ID, and model from log file
     const tokens = await extractTokensFromLog(logFile);
     const harnessSessionId =
       (await extractHarnessSessionId(logFile)) ?? (parsedImpl.harness === 'claude' ? sessionId : undefined);
+    const model = await extractModelFromLog(logFile);
 
     return {
       sessionId,
@@ -343,6 +371,7 @@ export class AgentRunner {
       learnings,
       binary: parsedImpl.binary,
       harness: parsedImpl.harness,
+      model,
       inputTokens: tokens.inputTokens,
       outputTokens: tokens.outputTokens,
       harnessSessionId,
@@ -579,9 +608,10 @@ export class AgentRunner {
     // Clean up prompt file
     await this.cleanupPromptFile(promptFile);
 
-    // Extract token counts and harness session ID from log file
+    // Extract token counts, harness session ID, and model from log file
     const tokens = await extractTokensFromLog(logFile);
     const harnessSessionId = (await extractHarnessSessionId(logFile)) ?? (harness === 'claude' ? sessionId : undefined);
+    const model = await extractModelFromLog(logFile);
 
     const icon = verdict === 'approved' ? '✓' : '✗';
     console.log(
@@ -597,6 +627,7 @@ export class AgentRunner {
       reviewerIndex,
       binary,
       harness,
+      model,
       verdict,
       reasoning,
       completionEstimate,
@@ -622,14 +653,10 @@ export class AgentRunner {
   }): Promise<CheckpointerResult> {
     const { runId, iteration, dirHash, specPath, timeout } = params;
 
-    // Runtime session identifiers
-    const sessionId = generateId();
-    const tmuxSession = `kloop-${runId}-${iteration}-checkpoint`;
-
     const binary = this.checkpointerBinary;
     const harness = this.checkpointerHarness;
 
-    // Build checkpointer prompt via template substitution
+    // Build checkpointer prompt via template substitution (stable across retries)
     const checkpointerVars: CheckpointerPromptVars = {
       specPath,
       iteration: String(iteration),
@@ -649,49 +676,92 @@ export class AgentRunner {
 
     // Ensure checkpointer directory (needed for the interactive sentinel + prompt.md)
     const checkpointerDir = paths.loopCheckpointerPath(runId, iteration);
-    const logFile = await this.ensureAgentDir(checkpointerDir);
 
-    // Interactive mode: append the completion-sentinel instruction.
+    // Interactive mode: append the completion-sentinel instruction (stable across retries).
     const interactive = this.isInteractive(harness);
     const sentinelFile = interactive ? path.join(checkpointerDir, SENTINEL_NAME) : undefined;
     const finalPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
 
-    // Write prompt to temp file + human-readable prompt.md
-    const promptFile = await this.writePromptFile(sessionId, finalPrompt);
+    // Human-readable prompt.md (stable across retries)
+    await fs.mkdir(checkpointerDir, { recursive: true });
     await fs.writeFile(path.join(checkpointerDir, 'prompt.md'), finalPrompt, 'utf-8');
 
-    // Clean slate: remove any pre-existing result so a stale file (from a re-entered run) can't
-    // be misread as this run's output — required for the interactive sentinel-independent fallback.
     const checkpointResultPath = `${checkpointerDir}/checkpoint-result.json`;
-    await fs.rm(checkpointResultPath, { force: true });
 
-    // Build harness-aware command (used only on the print-mode path)
-    const command = buildAgentCommand({
-      binary,
-      harness,
-      promptFile,
-      sessionId,
-      logFile,
-    });
+    // Retry policy — ONLY retries when no parseable result JSON is produced (transport
+    // failure, crash, timeout). A real outcome is never retried.
+    const maxRetries = this.config.checkpointerRetry?.maxRetries ?? 2;
+    const backoffBaseMs = this.config.checkpointerRetry?.backoffBaseMs ?? 5000;
 
-    // Run in tmux (interactive TUI or print pipeline)
-    formatAgentLaunch('checkpoint', 'checkpoint', binary, tmuxSession, logFile);
+    let sessionId = '';
+    let tmuxSession = '';
+    let logFile = '';
+    let promptFile = '';
+    let result: { exitCode: number; durationMs: number; timedOut: boolean } = {
+      exitCode: 0,
+      durationMs: 0,
+      timedOut: false,
+    };
+    let checkpointResultContent: string | null = null;
 
-    const result = await this.launch({
-      interactive,
-      sentinelFile,
-      tmuxSession,
-      binary,
-      promptFile,
-      sessionId,
-      logFile,
-      outputFile: checkpointResultPath,
-      timeout,
-      command,
-    });
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      // Clean slate: remove any pre-existing result so a stale file (from a re-entered run
+      // or a prior crashed attempt) can't be misread as this attempt's output.
+      await fs.rm(checkpointResultPath, { force: true });
 
-    // Read checkpoint result file from checkpointer directory
-    const checkpointResultContent = await this.safeReadFile(checkpointResultPath);
+      sessionId = generateId();
+      tmuxSession = `kloop-${runId}-${iteration}-checkpoint${attempt > 0 ? `-r${attempt}` : ''}`;
+      promptFile = await this.writePromptFile(sessionId, finalPrompt);
+      logFile = await this.ensureAgentDir(checkpointerDir);
+
+      // Build harness-aware command (used only on the print-mode path)
+      const command = buildAgentCommand({
+        binary,
+        harness,
+        promptFile,
+        sessionId,
+        logFile,
+      });
+
+      // Run in tmux (interactive TUI or print pipeline)
+      formatAgentLaunch('checkpoint', 'checkpoint', binary, tmuxSession, logFile);
+
+      result = await this.launch({
+        interactive,
+        sentinelFile,
+        tmuxSession,
+        binary,
+        promptFile,
+        sessionId,
+        logFile,
+        outputFile: checkpointResultPath,
+        timeout,
+        command,
+      });
+
+      // Read checkpoint result file from checkpointer directory
+      checkpointResultContent = await this.safeReadFile(checkpointResultPath);
+
+      // Did the checkpointer produce a parseable result with a recognized outcome?
+      const resultProduced = isParseableCheckpointResult(checkpointResultContent);
+
+      if (resultProduced || attempt >= maxRetries) {
+        break;
+      }
+
+      // No usable result — almost always a transport failure. Back off and retry.
+      await this.cleanupPromptFile(promptFile);
+      const backoffMs = backoffBaseMs * Math.pow(2, attempt);
+      const reason = result.timedOut
+        ? 'timed out'
+        : result.exitCode !== 0
+          ? `exited ${result.exitCode}`
+          : 'produced no result';
+      console.log(
+        `  ↻ checkpointer (${binary}) ${reason} — retry ${attempt + 1}/${maxRetries} (backoff ${Math.round(backoffMs / 1000)}s)`,
+      );
+      await new Promise(resolve => setTimeout(resolve, backoffMs));
+    }
 
     let outcome: CheckpointerOutcome = 'no_action';
     let summary = 'Unable to determine checkpoint status';
@@ -720,8 +790,9 @@ export class AgentRunner {
       }
     }
 
-    // Extract harness session ID from log file
+    // Extract harness session ID and model from log file
     const harnessSessionId = (await extractHarnessSessionId(logFile)) ?? (harness === 'claude' ? sessionId : undefined);
+    const model = await extractModelFromLog(logFile);
 
     // Clean up prompt file
     await this.cleanupPromptFile(promptFile);
@@ -734,7 +805,7 @@ export class AgentRunner {
     };
 
     console.log(
-      `Checkpoint: ${outcomeDisplay[outcome]}${progressPercent !== undefined ? ` (${progressPercent}% progress)` : ''}`,
+      `Checkpoint (${binary})${model ? ` [${model}]` : ''}: ${outcomeDisplay[outcome]}${progressPercent !== undefined ? ` (${progressPercent}% progress)` : ''}`,
     );
     console.log(`  Summary: ${summary}`);
 
@@ -744,6 +815,9 @@ export class AgentRunner {
       durationMs: result.durationMs,
       exitCode: result.exitCode,
       timedOut: result.timedOut,
+      binary,
+      harness,
+      model,
       outcome,
       summary,
       progressPercent,
@@ -773,10 +847,7 @@ export class AgentRunner {
       getPrimaryImplementer(this.config);
     const parsed = parseImplementerConfig(implBinaryName);
 
-    const sessionId = generateId();
-    const tmuxSession = `kloop-${runId}-${iteration}-synth`;
-
-    // Build prompt
+    // Build prompt (stable across retries)
     const synthVars: SynthesizerPromptVars = {
       specPath: this.pathsImpl.runSpec(runId),
       iteration: String(iteration),
@@ -792,51 +863,92 @@ export class AgentRunner {
 
     // Ensure synthesis directory
     const synthDir = this.pathsImpl.loopSynthesisPath(runId, iteration);
-    const logFile = await this.ensureAgentDir(synthDir);
 
-    // Interactive mode: append the completion-sentinel instruction.
+    // Interactive mode: append the completion-sentinel instruction (stable across retries).
     const interactive = this.isInteractive(parsed.harness);
     const sentinelFile = interactive ? path.join(synthDir, SENTINEL_NAME) : undefined;
     const finalPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
+    await fs.mkdir(synthDir, { recursive: true });
     await fs.writeFile(path.join(synthDir, 'prompt.md'), finalPrompt, 'utf-8');
 
-    const promptFile = await this.writePromptFile(sessionId, finalPrompt);
-
-    // Clean slate: remove any pre-existing summary so a stale file (from a re-entered run) can't
-    // be misread as this run's output — required for the interactive sentinel-independent fallback.
     const summaryPath = path.join(synthDir, 'review-summary.md');
-    await fs.rm(summaryPath, { force: true });
 
-    const command = buildAgentCommand({
-      binary: parsed.binary,
-      harness: parsed.harness,
-      promptFile,
-      sessionId,
-      logFile,
-    });
+    // Retry policy — ONLY retries when no summary file is produced (transport failure,
+    // crash, timeout). A successfully written summary is never retried.
+    const maxRetries = this.config.synthesizerRetry?.maxRetries ?? 2;
+    const backoffBaseMs = this.config.synthesizerRetry?.backoffBaseMs ?? 5000;
 
-    formatAgentLaunch('synthesizer', 'synthesizer', parsed.binary, tmuxSession, logFile);
+    let sessionId = '';
+    let tmuxSession = '';
+    let logFile = '';
+    let promptFile = '';
+    let result: { exitCode: number; durationMs: number; timedOut: boolean } = {
+      exitCode: 0,
+      durationMs: 0,
+      timedOut: false,
+    };
+    let summaryExists = false;
 
-    const result = await this.launch({
-      interactive,
-      sentinelFile,
-      tmuxSession,
-      binary: parsed.binary,
-      promptFile,
-      sessionId,
-      logFile,
-      outputFile: summaryPath,
-      timeout,
-      command,
-    });
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      // Clean slate: remove any pre-existing summary so a stale file (from a re-entered run
+      // or a prior crashed attempt) can't be misread as this attempt's output.
+      await fs.rm(summaryPath, { force: true });
+
+      // Fresh runtime identifiers per attempt
+      sessionId = generateId();
+      tmuxSession = `kloop-${runId}-${iteration}-synth${attempt > 0 ? `-r${attempt}` : ''}`;
+      promptFile = await this.writePromptFile(sessionId, finalPrompt);
+      logFile = await this.ensureAgentDir(synthDir);
+
+      const command = buildAgentCommand({
+        binary: parsed.binary,
+        harness: parsed.harness,
+        promptFile,
+        sessionId,
+        logFile,
+      });
+
+      formatAgentLaunch('synthesizer', 'synthesizer', parsed.binary, tmuxSession, logFile);
+
+      result = await this.launch({
+        interactive,
+        sentinelFile,
+        tmuxSession,
+        binary: parsed.binary,
+        promptFile,
+        sessionId,
+        logFile,
+        outputFile: summaryPath,
+        timeout,
+        command,
+      });
+
+      // Did the synthesizer write a summary file?
+      summaryExists = await this.safeFileExists(summaryPath);
+
+      if (summaryExists || attempt >= maxRetries) {
+        break;
+      }
+
+      // No summary — almost always a transport failure. Back off and retry.
+      await this.cleanupPromptFile(promptFile);
+      const backoffMs = backoffBaseMs * Math.pow(2, attempt);
+      const reason = result.timedOut
+        ? 'timed out'
+        : result.exitCode !== 0
+          ? `exited ${result.exitCode}`
+          : 'produced no summary';
+      console.log(
+        `  ↻ synthesizer (${parsed.binary}) ${reason} — retry ${attempt + 1}/${maxRetries} (backoff ${Math.round(backoffMs / 1000)}s)`,
+      );
+      await new Promise(resolve => setTimeout(resolve, backoffMs));
+    }
 
     await this.cleanupPromptFile(promptFile);
 
-    // Check if review-summary.md was created
-    const summaryExists = await this.safeFileExists(summaryPath);
-
     const tokens = await extractTokensFromLog(logFile);
     const harnessSessionId = await extractHarnessSessionId(logFile);
+    const model = await extractModelFromLog(logFile);
 
     return {
       sessionId,
@@ -846,6 +958,7 @@ export class AgentRunner {
       timedOut: result.timedOut,
       binary: parsed.binary,
       harness: parsed.harness,
+      model,
       summaryPath: summaryExists ? summaryPath : undefined,
       inputTokens: tokens.inputTokens,
       outputTokens: tokens.outputTokens,
@@ -873,9 +986,6 @@ export class AgentRunner {
       getPrimaryImplementer(this.config);
     const parsed = parseImplementerConfig(implBinaryName);
 
-    const sessionId = generateId();
-    const tmuxSession = `kloop-${runId}-${iteration}-versynth`;
-
     const reSynthVars: ReSynthesisPromptVars = {
       specPath: this.pathsImpl.runSpec(runId),
       iteration: String(iteration),
@@ -889,51 +999,90 @@ export class AgentRunner {
     const prompt = buildReSynthesisPrompt(this.config.prompts?.reSynthesizer, reSynthVars);
 
     const synthDir = this.pathsImpl.loopSynthesisPath(runId, iteration);
-    const logFile = await this.ensureAgentDir(synthDir);
 
-    // Interactive mode: append the completion-sentinel instruction.
+    // Interactive mode: append the completion-sentinel instruction (stable across retries).
     const interactive = this.isInteractive(parsed.harness);
     const sentinelFile = interactive ? path.join(synthDir, SENTINEL_NAME) : undefined;
     const finalPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
-    await fs.writeFile(path.join(synthDir, 'prompt.md'), finalPrompt, 'utf-8');
+    await fs.mkdir(synthDir, { recursive: true });
+    // Re-synthesis shares synthDir with synthesis; use a distinct prompt filename so it
+    // doesn't overwrite the synthesizer's prompt.md (both are surfaced in the dashboard).
+    await fs.writeFile(path.join(synthDir, 'prompt.re-synthesis.md'), finalPrompt, 'utf-8');
 
-    const promptFile = await this.writePromptFile(sessionId, finalPrompt);
-
-    // Clean slate: remove any pre-existing summary so a stale file (from a re-entered run) can't
-    // be misread as this run's output — required for the interactive sentinel-independent fallback.
-    // (previousSummaryPath comes from a prior loop's dir, so this never deletes the input.)
+    // (previousSummaryPath comes from a prior loop's dir, so clearing this never deletes the input.)
     const summaryPath = path.join(synthDir, 'review-summary.md');
-    await fs.rm(summaryPath, { force: true });
 
-    const command = buildAgentCommand({
-      binary: parsed.binary,
-      harness: parsed.harness,
-      promptFile,
-      sessionId,
-      logFile,
-    });
+    // Retry policy — ONLY retries when no summary file is produced (transport failure,
+    // crash, timeout). A successfully written summary is never retried.
+    const maxRetries = this.config.synthesizerRetry?.maxRetries ?? 2;
+    const backoffBaseMs = this.config.synthesizerRetry?.backoffBaseMs ?? 5000;
 
-    formatAgentLaunch('resynthesizer', 'resynthesizer', parsed.binary, tmuxSession, logFile);
+    let sessionId = '';
+    let tmuxSession = '';
+    let logFile = '';
+    let promptFile = '';
+    let result: { exitCode: number; durationMs: number; timedOut: boolean } = {
+      exitCode: 0,
+      durationMs: 0,
+      timedOut: false,
+    };
+    let summaryExists = false;
 
-    const result = await this.launch({
-      interactive,
-      sentinelFile,
-      tmuxSession,
-      binary: parsed.binary,
-      promptFile,
-      sessionId,
-      logFile,
-      outputFile: summaryPath,
-      timeout,
-      command,
-    });
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      await fs.rm(summaryPath, { force: true });
+
+      sessionId = generateId();
+      tmuxSession = `kloop-${runId}-${iteration}-versynth${attempt > 0 ? `-r${attempt}` : ''}`;
+      promptFile = await this.writePromptFile(sessionId, finalPrompt);
+      logFile = await this.ensureAgentDir(synthDir);
+
+      const command = buildAgentCommand({
+        binary: parsed.binary,
+        harness: parsed.harness,
+        promptFile,
+        sessionId,
+        logFile,
+      });
+
+      formatAgentLaunch('resynthesizer', 'resynthesizer', parsed.binary, tmuxSession, logFile);
+
+      result = await this.launch({
+        interactive,
+        sentinelFile,
+        tmuxSession,
+        binary: parsed.binary,
+        promptFile,
+        sessionId,
+        logFile,
+        outputFile: summaryPath,
+        timeout,
+        command,
+      });
+
+      summaryExists = await this.safeFileExists(summaryPath);
+
+      if (summaryExists || attempt >= maxRetries) {
+        break;
+      }
+
+      await this.cleanupPromptFile(promptFile);
+      const backoffMs = backoffBaseMs * Math.pow(2, attempt);
+      const reason = result.timedOut
+        ? 'timed out'
+        : result.exitCode !== 0
+          ? `exited ${result.exitCode}`
+          : 'produced no summary';
+      console.log(
+        `  ↻ re-synthesizer (${parsed.binary}) ${reason} — retry ${attempt + 1}/${maxRetries} (backoff ${Math.round(backoffMs / 1000)}s)`,
+      );
+      await new Promise(resolve => setTimeout(resolve, backoffMs));
+    }
 
     await this.cleanupPromptFile(promptFile);
 
-    const summaryExists = await this.safeFileExists(summaryPath);
-
     const tokens = await extractTokensFromLog(logFile);
     const harnessSessionId = await extractHarnessSessionId(logFile);
+    const model = await extractModelFromLog(logFile);
 
     return {
       sessionId,
@@ -943,6 +1092,7 @@ export class AgentRunner {
       timedOut: result.timedOut,
       binary: parsed.binary,
       harness: parsed.harness,
+      model,
       summaryPath: summaryExists ? summaryPath : undefined,
       inputTokens: tokens.inputTokens,
       outputTokens: tokens.outputTokens,
@@ -1014,56 +1164,95 @@ export class AgentRunner {
   }): Promise<VerifierResult> {
     const { runId, iteration, dirHash, reviewerIndex, binary, harness, prompt, timeout, phaseIndex, ordinal } = params;
 
-    const sessionId = generateId();
-    const tmuxSession = `kloop-${runId}-${iteration}-verify-${reviewerIndex}`;
-
     // Verifier writes to verify/ directory
     const verifyDir = paths.loopVerifyPath(runId, iteration);
     const reviewerDir = path.join(verifyDir, `verifier-${reviewerIndex}`);
-    const logFile = await this.ensureAgentDir(reviewerDir);
 
-    // Interactive mode: append the completion-sentinel instruction.
+    // Interactive mode: append the completion-sentinel instruction (stable across retries).
     const interactive = this.isInteractive(harness);
     const sentinelFile = interactive ? path.join(reviewerDir, SENTINEL_NAME) : undefined;
     const finalPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
 
-    // Write prompt to temp file + human-readable prompt.md
-    const promptFile = await this.writePromptFile(sessionId, finalPrompt);
+    // Human-readable prompt.md (stable across retries)
+    await fs.mkdir(reviewerDir, { recursive: true });
     await fs.writeFile(path.join(reviewerDir, 'prompt.md'), finalPrompt, 'utf-8');
     // Ensure the verdicts dir exists — the verifier writes its verdict JSON there directly
     const verdictsDir = paths.loopVerdictsPath(runId, iteration);
     await fs.mkdir(verdictsDir, { recursive: true });
-
-    // Clean slate: remove any pre-existing verdict at the target path so a stale file
-    // (from a re-entered run) can never be misread as this verifier's output.
     const verdictPath = path.join(verdictsDir, `verifier-${reviewerIndex}.json`);
-    await fs.rm(verdictPath, { force: true });
 
-    const command = buildAgentCommand({
-      binary,
-      harness,
-      promptFile,
-      sessionId,
-      logFile,
-    });
+    // Retry policy — ONLY retries when no parseable verdict is produced (transport failure,
+    // crash, timeout). A real approve/reject verdict is never retried.
+    const maxRetries = this.config.verifierRetry?.maxRetries ?? 2;
+    const backoffBaseMs = this.config.verifierRetry?.backoffBaseMs ?? 5000;
 
-    formatAgentLaunch('verifier', `verify-${reviewerIndex}`, binary, tmuxSession, logFile);
+    let sessionId = '';
+    let tmuxSession = '';
+    let logFile = '';
+    let promptFile = '';
+    let result: { exitCode: number; durationMs: number; timedOut: boolean } = {
+      exitCode: 0,
+      durationMs: 0,
+      timedOut: false,
+    };
+    let verdictContent: string | null = null;
 
-    const result = await this.launch({
-      interactive,
-      sentinelFile,
-      tmuxSession,
-      binary,
-      promptFile,
-      sessionId,
-      logFile,
-      outputFile: verdictPath,
-      timeout,
-      command,
-    });
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      // Clean slate: remove any pre-existing verdict so a stale file (from a re-entered run
+      // or a prior crashed attempt) can never be misread as this attempt's output.
+      await fs.rm(verdictPath, { force: true });
 
-    // Read verdict from the verify verdicts dir
-    const verdictContent = await this.safeReadFile(verdictPath);
+      sessionId = generateId();
+      tmuxSession = `kloop-${runId}-${iteration}-verify-${reviewerIndex}${attempt > 0 ? `-r${attempt}` : ''}`;
+      promptFile = await this.writePromptFile(sessionId, finalPrompt);
+      logFile = await this.ensureAgentDir(reviewerDir);
+
+      const command = buildAgentCommand({
+        binary,
+        harness,
+        promptFile,
+        sessionId,
+        logFile,
+      });
+
+      formatAgentLaunch('verifier', `verify-${reviewerIndex}`, binary, tmuxSession, logFile);
+
+      result = await this.launch({
+        interactive,
+        sentinelFile,
+        tmuxSession,
+        binary,
+        promptFile,
+        sessionId,
+        logFile,
+        outputFile: verdictPath,
+        timeout,
+        command,
+      });
+
+      // Read verdict from the verify verdicts dir
+      verdictContent = await this.safeReadFile(verdictPath);
+
+      // Did the verifier produce a real, parseable verdict?
+      const verdictProduced = verdictContent !== null && verdicts.parseVerdictFile(verdictContent).verdict !== null;
+
+      if (verdictProduced || attempt >= maxRetries) {
+        break;
+      }
+
+      // No verdict — almost always a transport failure. Back off and retry.
+      await this.cleanupPromptFile(promptFile);
+      const backoffMs = backoffBaseMs * Math.pow(2, attempt);
+      const reason = result.timedOut
+        ? 'timed out'
+        : result.exitCode !== 0
+          ? `exited ${result.exitCode}`
+          : 'produced no verdict';
+      console.log(
+        `  ↻ verifier ${reviewerIndex} (${binary})${phaseIndex !== undefined ? ` (phase ${phaseIndex})` : ''} ${reason} — retry ${attempt + 1}/${maxRetries} (backoff ${Math.round(backoffMs / 1000)}s)`,
+      );
+      await new Promise(resolve => setTimeout(resolve, backoffMs));
+    }
 
     let error: string | undefined;
     let verdict: Verdict = 'rejected';
@@ -1087,10 +1276,11 @@ export class AgentRunner {
 
     const tokens = await extractTokensFromLog(logFile);
     const harnessSessionId = await extractHarnessSessionId(logFile);
+    const model = await extractModelFromLog(logFile);
 
     const icon = verdict === 'approved' ? '\u2713' : '\u2717';
     console.log(
-      `  ${icon} Verifier ${reviewerIndex} (${binary})${phaseIndex !== undefined ? ` (phase ${phaseIndex})` : ''}: ${verdict}`,
+      `  ${icon} Verifier ${reviewerIndex} (${binary})${model ? ` [${model}]` : ''}${phaseIndex !== undefined ? ` (phase ${phaseIndex})` : ''}: ${verdict}`,
     );
 
     return {
@@ -1102,6 +1292,7 @@ export class AgentRunner {
       reviewerIndex,
       binary,
       harness,
+      model,
       verdict,
       reasoning,
       phaseIndex,

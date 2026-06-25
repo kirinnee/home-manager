@@ -318,8 +318,11 @@ h1.page-title a:hover { color: var(--accent); text-decoration: none; }
 .kbarfill { height: 100%; background: var(--accent); }
 /* agent log viewer */
 .klog-bar { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; margin-bottom: var(--s-3); }
-.klog-pills { display: flex; gap: 4px; flex-wrap: wrap; }
-.klog-pill { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-full); color: var(--fg-soft); font: inherit; font-size: 0.74rem; padding: 3px 10px; cursor: pointer; }
+/* Agent chips: one tidy uniform grid so impl / reviewer-0 / reviewer-1 / … line up
+   at equal width instead of a ragged, differently-sized wrap. Long labels ellipsize
+   (full text in the title tooltip). Shared by the Logs and Prompts tabs. */
+.klog-pills { flex: 1 1 100%; display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 6px; }
+.klog-pill { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-sm); color: var(--fg-soft); font: inherit; font-size: 0.74rem; padding: 5px 10px; cursor: pointer; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: border-color 0.12s, color 0.12s, background 0.12s; }
 .klog-pill:hover { border-color: var(--accent-border); color: var(--accent); }
 .klog-pill.active { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 .klog-content { max-height: 72vh; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); padding: var(--s-3); }
@@ -434,6 +437,7 @@ function fmtDur(ms) { if (ms == null) return ''; const s = Math.round(ms / 1000)
 function klBadge(status) { return '<span class="badge ' + tone(status) + '"><span class="pip"></span>' + esc(status) + '</span>'; }
 function klPill(text, t) { return '<span class="badge ' + t + '">' + esc(text) + '</span>'; }
 function klHarness(h) { if (!h) return ''; const k = String(h).toLowerCase(); return '<span class="kharness ' + esc(k) + '">' + esc(h) + '</span>'; }
+function klModel(m) { if (!m) return ''; return ' <span class="kmuted">(' + esc(m) + ')</span>'; }
 function klVerdict(v) { if (!v) return ''; return '<span class="kverdict ' + tone(v) + '">' + esc(v) + '</span>'; }
 function klOnOff(v) { return v ? '<span class="kverdict ok">on</span>' : '<span class="kverdict pend">off</span>'; }
 function klStopPoll() { if (window.__klTimer) { clearInterval(window.__klTimer); window.__klTimer = null; } if (window.__klES) { try { window.__klES.close(); } catch (_e) { /* already closed */ } window.__klES = null; } }
@@ -519,11 +523,11 @@ function klOverviewConfig(cfg) {
 // ── per-loop card builders (shared by Overview history) ──
 function klFlatReviewers(phases) { const out = []; for (const ph of (phases || [])) for (const rv of (ph.reviewers || [])) out.push(rv); return out; }
 function klAppendLoopCards(host, lp) {
-  if (lp.implementer) { const im = lp.implementer; const card = el('div', 'kcard'); card.innerHTML = '<div class="kcard-h">Implementer ' + klBadge(im.status) + '</div><div class="kline">' + esc(im.binary || '') + ' ' + klHarness(im.harness) + (im.durationMs != null ? ' · ' + fmtDur(im.durationMs) : '') + (im.inputTokens != null ? ' · ' + esc(im.inputTokens) + '→' + esc(im.outputTokens) + ' tok' : '') + (im.retryAttempt ? ' · retry ' + esc(im.retryAttempt) : '') + '</div>' + (im.error ? '<div class="kerr">' + esc(im.error) + '</div>' : ''); host.appendChild(card); }
-  for (const ph of (lp.reviewPhases || [])) { const card = el('div', 'kcard'); let h = '<div class="kcard-h">Review phase ' + esc(ph.phase) + (ph.shortCircuited ? ' ' + klPill('short-circuited', 'warn') : '') + '</div>'; for (const rv of (ph.reviewers || [])) { h += '<div class="kline">' + (rv.lens ? klPill(rv.lens, 'accent') + ' ' : '') + esc(rv.binary || '') + (rv.reviewType && rv.reviewType !== rv.binary ? ' <span class="kmuted">[' + esc(rv.reviewType) + ']</span>' : '') + ' ' + klHarness(rv.harness) + ' ' + klVerdict(rv.verdict) + (rv.completionEstimate != null ? ' <span class="kmuted">' + esc(rv.completionEstimate) + '%</span>' : '') + (rv.propagated ? ' ' + klPill('propagated', 'accent') : '') + (rv.durationMs != null ? ' · ' + fmtDur(rv.durationMs) : '') + (rv.inputTokens != null ? ' · ' + esc(rv.inputTokens) + '→' + esc(rv.outputTokens) + ' tok' : '') + '</div>' + (rv.error ? '<div class="kerr">' + esc(rv.error) + '</div>' : ''); } card.innerHTML = h; host.appendChild(card); }
-  for (const ph of (lp.verifyPhases || [])) { if (!(ph.reviewers || []).length) continue; const card = el('div', 'kcard'); let h = '<div class="kcard-h">Verify phase ' + esc(ph.phase) + '</div>'; for (const rv of (ph.reviewers || [])) { h += '<div class="kline">' + esc(rv.binary || '') + ' ' + klHarness(rv.harness) + ' ' + klVerdict(rv.verdict) + (rv.durationMs != null ? ' · ' + fmtDur(rv.durationMs) : '') + '</div>'; } card.innerHTML = h; host.appendChild(card); }
-  if (lp.synthesis) { const sy = lp.synthesis; const card = el('div', 'kcard'); card.innerHTML = '<div class="kcard-h">Synthesis ' + klBadge(sy.status) + '</div>' + (sy.binary ? '<div class="kline">' + esc(sy.binary) + ' ' + klHarness(sy.harness) + (sy.durationMs != null ? ' · ' + fmtDur(sy.durationMs) : '') + '</div>' : '') + (sy.error ? '<div class="kerr">' + esc(sy.error) + '</div>' : ''); host.appendChild(card); }
-  if (lp.checkpoint) { const cp = lp.checkpoint; const card = el('div', 'kcard'); card.innerHTML = '<div class="kcard-h">Checkpoint ' + klBadge(cp.status || cp.outcome || '') + '</div>' + (cp.summary ? '<div class="kline">' + esc(cp.summary) + '</div>' : ''); host.appendChild(card); }
+  if (lp.implementer) { const im = lp.implementer; const card = el('div', 'kcard'); card.innerHTML = '<div class="kcard-h">Implementer ' + klBadge(im.status) + '</div><div class="kline">' + esc(im.binary || '') + ' ' + klHarness(im.harness) + klModel(im.model) + (im.durationMs != null ? ' · ' + fmtDur(im.durationMs) : '') + (im.inputTokens != null ? ' · ' + esc(im.inputTokens) + '→' + esc(im.outputTokens) + ' tok' : '') + (im.retryAttempt ? ' · retry ' + esc(im.retryAttempt) : '') + '</div>' + (im.error ? '<div class="kerr">' + esc(im.error) + '</div>' : ''); host.appendChild(card); }
+  for (const ph of (lp.reviewPhases || [])) { const card = el('div', 'kcard'); let h = '<div class="kcard-h">Review phase ' + esc(ph.phase) + (ph.shortCircuited ? ' ' + klPill('short-circuited', 'warn') : '') + '</div>'; for (const rv of (ph.reviewers || [])) { h += '<div class="kline">' + (rv.lens ? klPill(rv.lens, 'accent') + ' ' : '') + esc(rv.binary || '') + (rv.reviewType && rv.reviewType !== rv.binary ? ' <span class="kmuted">[' + esc(rv.reviewType) + ']</span>' : '') + ' ' + klHarness(rv.harness) + klModel(rv.model) + ' ' + klVerdict(rv.verdict) + (rv.completionEstimate != null ? ' <span class="kmuted">' + esc(rv.completionEstimate) + '%</span>' : '') + (rv.propagated ? ' ' + klPill('propagated', 'accent') : '') + (rv.durationMs != null ? ' · ' + fmtDur(rv.durationMs) : '') + (rv.inputTokens != null ? ' · ' + esc(rv.inputTokens) + '→' + esc(rv.outputTokens) + ' tok' : '') + '</div>' + (rv.error ? '<div class="kerr">' + esc(rv.error) + '</div>' : ''); } card.innerHTML = h; host.appendChild(card); }
+  for (const ph of (lp.verifyPhases || [])) { if (!(ph.reviewers || []).length) continue; const card = el('div', 'kcard'); let h = '<div class="kcard-h">Verify phase ' + esc(ph.phase) + '</div>'; for (const rv of (ph.reviewers || [])) { h += '<div class="kline">' + esc(rv.binary || '') + ' ' + klHarness(rv.harness) + klModel(rv.model) + ' ' + klVerdict(rv.verdict) + (rv.durationMs != null ? ' · ' + fmtDur(rv.durationMs) : '') + '</div>'; } card.innerHTML = h; host.appendChild(card); }
+  if (lp.synthesis) { const sy = lp.synthesis; const card = el('div', 'kcard'); card.innerHTML = '<div class="kcard-h">Synthesis ' + klBadge(sy.status) + '</div>' + (sy.binary ? '<div class="kline">' + esc(sy.binary) + ' ' + klHarness(sy.harness) + klModel(sy.model) + (sy.durationMs != null ? ' · ' + fmtDur(sy.durationMs) : '') + '</div>' : '') + (sy.error ? '<div class="kerr">' + esc(sy.error) + '</div>' : ''); host.appendChild(card); }
+  if (lp.checkpoint) { const cp = lp.checkpoint; const card = el('div', 'kcard'); card.innerHTML = '<div class="kcard-h">Checkpoint ' + klBadge(cp.status || cp.outcome || '') + '</div>' + (cp.binary ? '<div class="kline">' + esc(cp.binary) + ' ' + klHarness(cp.harness) + klModel(cp.model) + '</div>' : '') + (cp.summary ? '<div class="kline">' + esc(cp.summary) + '</div>' : ''); host.appendChild(card); }
 }
 function klLoopSummary(lp) {
   let parts = '';
@@ -595,7 +599,7 @@ async function klLogs(pane, d, id, state) {
   let curModel = '';
   function paintHead(a) { head.innerHTML = '<span class="klog-ah-bin">' + esc(a.binary || a.label) + '</span>' + klHarness(a.harness) + (curModel ? '<span class="klog-ah-model">model: ' + esc(curModel) + '</span>' : ''); }
   function open(a) { active = a.key; state.agent = a.key; for (const x of pills.children) x.classList.toggle('active', x.__key === a.key); klStopPoll(); curModel = ''; paintHead(a); klLogStream(content, a, isLive, (md) => { if (md && md !== curModel) { curModel = md; paintHead(a); } }); }
-  agents.forEach((a) => { const b = el('button', 'klog-pill'); b.__key = a.key; b.textContent = a.label; b.onclick = () => open(a); pills.appendChild(b); });
+  agents.forEach((a) => { const b = el('button', 'klog-pill'); b.__key = a.key; b.textContent = a.label; b.title = a.label; b.onclick = () => open(a); pills.appendChild(b); });
   pane.appendChild(head); pane.appendChild(bar); pane.appendChild(content);
   open(agents.find((a) => a.key === active) || agents[0]);
 }
@@ -607,6 +611,56 @@ function klRunLog(pane, d, id) {
   const content = el('div', 'klog-content');
   pane.appendChild(bar); pane.appendChild(content);
   klLogStream(content, { kind: 'raw', path: id + '/run.log' }, isLive, null);
+}
+// ── Prompts tab (per loop: the EXACT prompt.md passed to each agent) ──
+async function klPrompts(pane, d, id, state) {
+  klStopPoll(); pane.innerHTML = '';
+  const loops = d.loops || [];
+  if (!loops.length) { pane.appendChild(el('div', 'empty', 'No loops yet.')); return; }
+  const lp = loops[state.loop] || loops[loops.length - 1];
+  const ln = lp.loop != null ? lp.loop : state.loop + 1;
+  const reviewers = klFlatReviewers(lp.reviewPhases);
+  const verifiers = klFlatReviewers(lp.verifyPhases);
+  const base = id + '/loop-' + ln;
+  const agents = [{ key: 'impl', label: 'implementer', path: base + '/implementer/prompt.md', binary: lp.implementer && lp.implementer.binary, harness: lp.implementer && lp.implementer.harness, model: lp.implementer && lp.implementer.model }];
+  const revDirs = ((await api('/kloop/dir?path=' + enc(base + '/reviews'))) || []).filter((x) => /^reviewer-\d+$/.test(x)).sort();
+  revDirs.forEach((r) => { const k = parseInt((r.match(/(\d+)/) || [])[1], 10); const rv = reviewers[k] || {}; agents.push({ key: r, label: rv.lens ? r + ' · ' + rv.lens : r, path: base + '/reviews/' + r + '/prompt.md', binary: rv.binary, harness: rv.harness, model: rv.model }); });
+  const loopDir = (await api('/kloop/dir?path=' + enc(base))) || [];
+  if (loopDir.indexOf('synthesis') >= 0) {
+    const synFiles = (await api('/kloop/dir?path=' + enc(base + '/synthesis'))) || [];
+    const sy = lp.synthesis || {};
+    if (synFiles.indexOf('prompt.md') >= 0) agents.push({ key: 'syn', label: 'synthesis', path: base + '/synthesis/prompt.md', binary: sy.binary, harness: sy.harness, model: sy.model });
+    if (synFiles.indexOf('prompt.re-synthesis.md') >= 0) agents.push({ key: 'resyn', label: 're-synthesis', path: base + '/synthesis/prompt.re-synthesis.md', file: 'prompt.re-synthesis.md', binary: sy.binary, harness: sy.harness, model: sy.model });
+  }
+  if (loopDir.indexOf('verify') >= 0) { const vd = ((await api('/kloop/dir?path=' + enc(base + '/verify'))) || []).filter((x) => /^verifier-\d+$/.test(x)).sort(); vd.forEach((v) => { const k = parseInt((v.match(/(\d+)/) || [])[1], 10); const rv = verifiers[k] || {}; agents.push({ key: v, label: v, path: base + '/verify/' + v + '/prompt.md', binary: rv.binary, harness: rv.harness, model: rv.model }); }); }
+  if (loopDir.indexOf('checkpointer') >= 0) agents.push({ key: 'ckpt', label: 'checkpointer', path: base + '/checkpointer/prompt.md', binary: lp.checkpoint && lp.checkpoint.binary, harness: lp.checkpoint && lp.checkpoint.harness, model: lp.checkpoint && lp.checkpoint.model });
+
+  let active = (state.pagent && agents.find((a) => a.key === state.pagent)) ? state.pagent : 'impl';
+  const head = el('div', 'klog-agenthead');
+  const bar = el('div', 'klog-bar'); const pills = el('div', 'klog-pills'); bar.appendChild(pills);
+  const content = el('div', 'klog-content');
+  function paintHead(a) { head.innerHTML = '<span class="klog-ah-bin">' + esc(a.binary || a.label) + '</span>' + klHarness(a.harness) + (a.model ? '<span class="klog-ah-model">model: ' + esc(a.model) + '</span>' : '') + '<span class="kmuted"> · ' + esc(a.file || 'prompt.md') + '</span>'; }
+  let reqId = 0;
+  async function open(a) {
+    active = a.key; state.pagent = a.key;
+    const my = ++reqId;
+    for (const x of pills.children) x.classList.toggle('active', x.__key === a.key);
+    paintHead(a);
+    content.innerHTML = '';
+    const r = await api('/kloop/file?path=' + enc(a.path));
+    if (my !== reqId) return; // a newer pill click superseded this fetch
+    if (r && r.content) {
+      const body = el('div', 'prose');
+      body.innerHTML = renderMd(r.content);
+      content.appendChild(body);
+      await upgradeProse(body);
+    } else {
+      content.appendChild(el('div', 'empty', 'No prompt recorded for this agent yet.'));
+    }
+  }
+  agents.forEach((a) => { const b = el('button', 'klog-pill'); b.__key = a.key; b.textContent = a.label; b.title = a.label; b.onclick = () => open(a); pills.appendChild(b); });
+  pane.appendChild(head); pane.appendChild(bar); pane.appendChild(content);
+  open(agents.find((a) => a.key === active) || agents[0]);
 }
 // ── Reviews tab (per loop: reviewer markdown + verdicts + synthesis summary) ──
 async function klReviews(pane, d, id, state) {
@@ -694,11 +748,11 @@ async function renderKloopRun(id) {
   const tabs = el('div', 'ksubtabs');
   const loopBar = el('div', 'toolbar kloopbar');
   const pane = el('div', 'kpane');
-  const state = { tab: 'overview', loop: Math.max(0, loops.length - 1), agent: null };
-  const perLoop = { logs: 1, reviews: 1, evidence: 1, learnings: 1 };
-  const defs = [['overview', 'Overview'], ['logs', 'Logs'], ['reviews', 'Reviews'], ['evidence', 'Evidence'], ['learnings', 'Learnings'], ['runlog', 'Run log'], ['spec', 'Spec'], ['config', 'Config']];
-  function drawPane() { klStopPoll(); const t = state.tab; if (t === 'overview') klOverview(pane, d, id); else if (t === 'logs') klLogs(pane, d, id, state); else if (t === 'reviews') klReviews(pane, d, id, state); else if (t === 'evidence') klEvidence(pane, d, id, state); else if (t === 'learnings') klLearnings(pane, d, id, state); else if (t === 'runlog') klRunLog(pane, d, id); else if (t === 'spec') klSpec(pane, id); else klConfig(pane, id); }
-  function buildLoopBar() { loopBar.innerHTML = ''; if (!perLoop[state.tab] || loops.length <= 1) { loopBar.style.display = 'none'; return; } loopBar.style.display = ''; loopBar.appendChild(el('span', 'label', 'Loop')); loops.forEach((lp, idx) => { const c = el('button', 'chip' + (idx === state.loop ? ' active' : '')); c.textContent = (lp.loop != null ? lp.loop : idx + 1); c.onclick = () => { state.loop = idx; for (const x of loopBar.querySelectorAll('button')) x.classList.remove('active'); c.classList.add('active'); drawPane(); }; loopBar.appendChild(c); }); }
+  const state = { tab: 'overview', loop: Math.max(0, loops.length - 1), agent: null, pagent: null };
+  const perLoop = { logs: 1, prompts: 1, reviews: 1, evidence: 1, learnings: 1 };
+  const defs = [['overview', 'Overview'], ['logs', 'Logs'], ['prompts', 'Prompts'], ['reviews', 'Reviews'], ['evidence', 'Evidence'], ['learnings', 'Learnings'], ['runlog', 'Run log'], ['spec', 'Spec'], ['config', 'Config']];
+  function drawPane() { klStopPoll(); const t = state.tab; if (t === 'overview') klOverview(pane, d, id); else if (t === 'logs') klLogs(pane, d, id, state); else if (t === 'prompts') klPrompts(pane, d, id, state); else if (t === 'reviews') klReviews(pane, d, id, state); else if (t === 'evidence') klEvidence(pane, d, id, state); else if (t === 'learnings') klLearnings(pane, d, id, state); else if (t === 'runlog') klRunLog(pane, d, id); else if (t === 'spec') klSpec(pane, id); else klConfig(pane, id); }
+  function buildLoopBar() { loopBar.innerHTML = ''; if (!perLoop[state.tab]) { loopBar.style.display = 'none'; return; } loopBar.style.display = ''; loopBar.appendChild(el('span', 'label', 'Loop')); if (!loops.length) { loopBar.appendChild(el('span', 'kmuted', 'none yet')); return; } loops.forEach((lp, idx) => { const c = el('button', 'chip' + (idx === state.loop ? ' active' : '')); c.textContent = (lp.loop != null ? lp.loop : idx + 1); c.onclick = () => { state.loop = idx; for (const x of loopBar.querySelectorAll('button')) x.classList.remove('active'); c.classList.add('active'); drawPane(); }; loopBar.appendChild(c); }); }
   function draw() { buildLoopBar(); drawPane(); }
   for (const def of defs) { const b = el('button', 'ksubtab' + (def[0] === 'overview' ? ' active' : '')); b.textContent = def[1]; b.onclick = () => { state.tab = def[0]; for (const x of tabs.children) x.classList.toggle('active', x === b); draw(); }; tabs.appendChild(b); }
   app.appendChild(tabs); app.appendChild(loopBar); app.appendChild(pane);

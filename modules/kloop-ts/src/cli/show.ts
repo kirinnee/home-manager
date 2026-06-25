@@ -224,6 +224,7 @@ export async function showReviews(
     const binary = reviewerSummary
       ? shortBinary(reviewerSummary.binary, reviewerSummary.harness)
       : `reviewer-${revIdx}`;
+    const modelStr = reviewerSummary?.model ? pc.dim(` (${reviewerSummary.model})`) : '';
     const duration = reviewerSummary ? formatDurationHuman(reviewerSummary.durationMs) : '';
     const comp = verdict?.completionEstimate !== undefined ? ` ${verdict.completionEstimate}%` : '';
     const errNote = reviewerSummary?.timedOut
@@ -232,7 +233,7 @@ export async function showReviews(
         ? pc.red(` (${reviewerSummary.error})`)
         : '';
 
-    console.log(pc.bold(`${mark} ${pc.cyan(binary)}${comp}${errNote}  ${pc.dim(duration)}`));
+    console.log(pc.bold(`${mark} ${pc.cyan(binary)}${modelStr}${comp}${errNote}  ${pc.dim(duration)}`));
     console.log(pc.dim('─'.repeat(60)));
 
     // Render review markdown
@@ -305,6 +306,7 @@ export async function showPrompts(
 interface VerdictRow {
   index: number; // global reviewer index — keys the verdict file (reviewer-{index}.json)
   reviewer: string;
+  model?: string;
   phase: number;
   verdict: string;
   completion?: number;
@@ -338,8 +340,9 @@ export async function showVerdicts(
   const impl = loopSummary.implementer;
   const implTok = (impl.inputTokens ?? 0) + (impl.outputTokens ?? 0);
   const implTokStr = implTok < 1000 ? `${implTok}` : `${(implTok / 1000).toFixed(1)}k`;
+  const implModelStr = impl.model ? pc.dim(` (${impl.model})`) : '';
   console.log(
-    `  ${pc.dim('impl'.padEnd(12))}  ${shortBinary(impl.binary, impl.harness).padEnd(22)}  ${pc.green('●').padEnd(4)}  ${formatDurationHuman(impl.durationMs).padStart(8)}  ${pc.dim(implTokStr + ' tok')}`,
+    `  ${pc.dim('impl'.padEnd(12))}  ${shortBinary(impl.binary, impl.harness).padEnd(22)}${implModelStr}  ${pc.green('●').padEnd(4)}  ${formatDurationHuman(impl.durationMs).padStart(8)}  ${pc.dim(implTokStr + ' tok')}`,
   );
   console.log('');
 
@@ -355,6 +358,7 @@ export async function showVerdicts(
       rows.push({
         index: r.reviewerIndex ?? flatIdx,
         reviewer: shortBinary(r.binary, r.harness),
+        model: r.model,
         phase: phase.phase,
         verdict: r.verdict ?? 'unknown',
         completion: r.completionEstimate,
@@ -372,9 +376,9 @@ export async function showVerdicts(
   }
 
   const table = new Table({
-    head: ['#', 'Reviewer', 'Verdict', 'Done', 'Time', 'Tokens', 'Error'].map(h => pc.bold(pc.dim(h))),
+    head: ['#', 'Reviewer', 'Model', 'Verdict', 'Done', 'Time', 'Tokens', 'Error'].map(h => pc.bold(pc.dim(h))),
     style: { head: [], border: ['grey'] },
-    colWidths: [4, 22, 10, 7, 8, 10, 12],
+    colWidths: [4, 22, 18, 10, 7, 8, 10, 12],
   });
 
   for (const row of rows) {
@@ -382,7 +386,16 @@ export async function showVerdicts(
     const vText = row.verdict === 'approved' ? pc.green('approved') : pc.red('rejected');
     const comp = row.completion !== undefined ? `${row.completion}%` : '-';
     const errStr = row.error ? pc.yellow(row.error) : '';
-    table.push([String(row.index), row.reviewer, `${vMark} ${vText}`, comp, row.duration, pc.dim(row.tokens), errStr]);
+    table.push([
+      String(row.index),
+      row.reviewer,
+      row.model ? pc.dim(row.model) : pc.dim('—'),
+      `${vMark} ${vText}`,
+      comp,
+      row.duration,
+      pc.dim(row.tokens),
+      errStr,
+    ]);
   }
 
   console.log(table.toString());

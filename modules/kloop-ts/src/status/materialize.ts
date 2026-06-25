@@ -227,6 +227,9 @@ function applyEvent(status: MaterializedStatus, rawEvent: KloopEvent): void {
         if ('harness' in event && event.harness) {
           loop.implementer.harness = event.harness;
         }
+        if ('model' in event && event.model) {
+          loop.implementer.model = event.model;
+        }
         if ('error' in event && event.error) {
           loop.implementer.error = event.error;
         }
@@ -287,6 +290,7 @@ function applyEvent(status: MaterializedStatus, rawEvent: KloopEvent): void {
         if (event.completionEstimate !== undefined) reviewer.completionEstimate = event.completionEstimate;
         if (event.propagated !== undefined) reviewer.propagated = event.propagated;
         if ('harness' in event && event.harness) reviewer.harness = event.harness;
+        if (event.model) reviewer.model = event.model;
         if (event.reviewer) reviewer.binary = event.reviewer;
         if (event.lens) reviewer.lens = event.lens;
         if (event.reviewType) reviewer.reviewType = event.reviewType;
@@ -340,6 +344,7 @@ function applyEvent(status: MaterializedStatus, rawEvent: KloopEvent): void {
         if (event.error) reviewer.error = event.error;
         if (event.verdict) reviewer.verdict = event.verdict;
         if ('harness' in event && event.harness) reviewer.harness = event.harness;
+        if (event.model) reviewer.model = event.model;
       }
       break;
     }
@@ -361,6 +366,7 @@ function applyEvent(status: MaterializedStatus, rawEvent: KloopEvent): void {
           status: 'running',
           startedAt: event.timestamp,
           binary: event.binary,
+          harness: 'harness' in event ? event.harness : undefined,
         };
       }
       break;
@@ -377,6 +383,8 @@ function applyEvent(status: MaterializedStatus, rawEvent: KloopEvent): void {
           durationMs: event.durationMs,
           exitCode: event.exitCode,
           binary: existing?.binary ?? event.binary,
+          harness: ('harness' in event ? event.harness : undefined) ?? existing?.harness,
+          model: event.model ?? existing?.model,
           error: event.error,
           summaryPath: event.summaryPath,
         };
@@ -389,6 +397,7 @@ function applyEvent(status: MaterializedStatus, rawEvent: KloopEvent): void {
       if (loop) {
         loop.checkpoint = {
           binary: event.binary,
+          harness: 'harness' in event ? event.harness : undefined,
           status: 'running',
           startedAt: event.timestamp,
         };
@@ -403,7 +412,9 @@ function applyEvent(status: MaterializedStatus, rawEvent: KloopEvent): void {
       if (loop) {
         const existing = loop.checkpoint;
         loop.checkpoint = {
-          binary: existing?.binary,
+          binary: ('binary' in event && event.binary) || existing?.binary,
+          harness: ('harness' in event ? event.harness : undefined) ?? existing?.harness,
+          model: ('model' in event && event.model) || existing?.model,
           status: 'completed',
           startedAt: existing?.startedAt ?? event.timestamp,
           completedAt: event.timestamp,

@@ -38,8 +38,9 @@ export async function handler(id: string | undefined, opts: { run?: string }, de
 
       const impl = summary.implementer;
       const implStatus = impl.exitCode === 0 ? pc.green('success') : pc.red(`exit ${impl.exitCode}`);
+      const implModel = impl.model ? pc.dim(` (${impl.model})`) : '';
       console.log(
-        `  ${pc.dim('impl')}  ${shortBinary(impl.binary)}  ${implStatus}  ${formatDurationHuman(impl.durationMs)}`,
+        `  ${pc.dim('impl')}  ${shortBinary(impl.binary)}${implModel}  ${implStatus}  ${formatDurationHuman(impl.durationMs)}`,
       );
 
       for (const phase of summary.reviewPhases) {
@@ -47,8 +48,9 @@ export async function handler(id: string | undefined, opts: { run?: string }, de
           const mark = verdictMark(r.verdict);
           const comp = r.completionEstimate !== undefined ? ` ${r.completionEstimate}% done` : '';
           const note = r.timedOut ? pc.yellow(' (timed out)') : r.error ? pc.red(` (${r.error})`) : '';
+          const revModel = r.model ? pc.dim(` (${r.model})`) : '';
           console.log(
-            `  ${mark} ${pc.dim('rev')}  ${shortBinary(r.binary)}  ${formatDurationHuman(r.durationMs)}${comp}${note}`,
+            `  ${mark} ${pc.dim('rev')}  ${shortBinary(r.binary)}${revModel}  ${formatDurationHuman(r.durationMs)}${comp}${note}`,
           );
           if (r.reasoning) {
             const lines = r.reasoning.split('\n');

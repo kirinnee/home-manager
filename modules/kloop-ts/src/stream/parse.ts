@@ -257,6 +257,53 @@ function extractHarnessSessionIdFromContent(content: string): string | undefined
 }
 
 /**
+ * Extract the harness-reported model actually used (e.g. "claude-opus-4-8") from a log file.
+ * Best-effort across harnesses; returns undefined if not found.
+ */
+export async function extractModelFromLog(logFilePath: string): Promise<string | undefined> {
+  try {
+    const { readFile } = await import('fs/promises');
+    const content = await readFile(logFilePath, 'utf-8');
+    return extractModelFromContent(content);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Parse log content for the model id the harness reported.
+ * Claude print/stream: {"type":"system","subtype":"init",...,"model":"claude-..."}
+ * Claude (any mode):   {"type":"assistant","message":{"model":"claude-...",...}}
+ * Gemini:              {"type":"init",...,"model":"..."}
+ * Codex:               {"type":"thread.started",...,"model":"..."} (when present)
+ * Returns the first model string found scanning top-to-bottom.
+ */
+function extractModelFromContent(content: string): string | undefined {
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed = JSON.parse(trimmed);
+      // Claude/Gemini/Codex init or system events carry a top-level model string.
+      if (
+        (parsed.type === 'system' || parsed.type === 'init' || parsed.type === 'thread.started') &&
+        typeof parsed.model === 'string' &&
+        parsed.model.length > 0
+      ) {
+        return parsed.model;
+      }
+      // Claude assistant messages carry message.model (covers interactive transcripts too).
+      if (parsed.type === 'assistant' && typeof parsed.message?.model === 'string' && parsed.message.model.length > 0) {
+        return parsed.message.model;
+      }
+    } catch {
+      // Skip malformed lines
+    }
+  }
+  return undefined;
+}
+
+/**
  * Parse a log file for the result event and extract token counts.
  * Best-effort: returns undefined fields if not found or unparseable.
  */
