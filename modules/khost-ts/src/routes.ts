@@ -1,19 +1,16 @@
-// Route-manager: a declarative list of public hostnames (routes.yaml) reconciled
-// onto the khost Cloudflare Tunnel — tunnel ingress + DNS CNAME + only-me Access.
-// No state file: the live API is the truth; ownership is marked per resource
-// (DNS comment, Access tag) so prune only ever touches khost's own resources.
-import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+// Route-manager: the `routes` list from ~/.khost/config.yaml reconciled onto the
+// khost Cloudflare Tunnel — tunnel ingress + DNS CNAME + only-me Access. No state
+// file: the live API is the truth; ownership is marked per resource (DNS comment,
+// Access tag) so prune only ever touches khost's own resources.
 import pc from 'picocolors';
-import { parse } from 'yaml';
-import { z } from 'zod';
+import { config, type Route } from './config';
 import {
   accessEmails,
   accessPolicyName,
+  machineId,
   ownerComment,
   ownerTag,
   requireWarp,
-  routesFile,
   tunnelName,
   warpPostureUid,
 } from './deps';
@@ -38,21 +35,17 @@ import {
   verifyToken,
 } from './cloudflare';
 
-const routeSchema = z.object({
-  hostname: z.string().min(1),
-  service: z.string().min(1),
-  access: z.boolean().default(true),
-});
-const routesFileSchema = z.object({ routes: z.array(routeSchema).default([]) });
-export type Route = z.infer<typeof routeSchema>;
+export type { Route };
 
-async function loadRoutes(): Promise<Route[]> {
-  if (!existsSync(routesFile)) return [];
-  const parsed = routesFileSchema.safeParse(parse(await readFile(routesFile, 'utf8')) ?? {});
-  if (!parsed.success) {
-    die(`invalid ${routesFile}: ${parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
-  }
-  return parsed.data.routes;
+/** Expand the `{machine}` token in route hostnames so config.yaml stays
+ *  machine-agnostic and a clone on a new box namespaces its hostnames under
+ *  that box's id. Pure (machine passed in) so it's unit-testable. */
+export function expandMachine(routes: Route[], machine: string): Route[] {
+  return routes.map(r => ({ ...r, hostname: r.hostname.replaceAll('{machine}', machine) }));
+}
+
+function loadRoutes(): Route[] {
+  return expandMachine(config.routes, machineId);
 }
 
 /** Build the cloudflared ingress array: managed routes first, then any manual
@@ -69,12 +62,12 @@ export interface SyncOpts {
   dryRun?: boolean;
 }
 
-/** Reconcile live Cloudflare state to routes.yaml. Self-guards: no-op when no
+/** Reconcile live Cloudflare state to config.yaml routes. Self-guards: no-op when no
  *  routes or no Cloudflare creds, so it's safe to call from `khost up`. */
 export async function routeSync(opts: SyncOpts = {}): Promise<void> {
   const routes = await loadRoutes();
   if (routes.length === 0) {
-    log('no routes defined (routes.yaml) — nothing to sync');
+    log('no routes defined (config.yaml) — nothing to sync');
     return;
   }
   if (!cfConfigured()) {
@@ -190,10 +183,10 @@ export async function routeSync(opts: SyncOpts = {}): Promise<void> {
   }
 }
 
-/** Show desired routes (routes.yaml) vs the live tunnel ingress. */
+/** Show desired routes (config.yaml) vs the live tunnel ingress. */
 export async function routeLs(): Promise<void> {
   const routes = await loadRoutes();
-  console.log(pc.bold('routes.yaml (desired):'));
+  console.log(pc.bold('config routes (desired):'));
   if (routes.length === 0) console.log('  (none)');
   for (const r of routes) console.log(`  ${r.hostname} → ${r.service}${r.access ? '' : '  (no access)'}`);
 

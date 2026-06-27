@@ -1,7 +1,10 @@
 ---
 name: {skill-name}
-description: {What this skill does}. Use when {specific trigger conditions that tell Claude when to activate this skill}.
-allowed-tools: {optional - Read, Write, Edit, Bash, Glob, Grep, etc.}
+description: {What this skill does}. Use when {specific trigger conditions that tell the agent when to activate this skill}.
+# Optional, harness-specific (other harnesses ignore them — omit for portability):
+#   argument-hint: '{Claude slash-command arg hint}'
+#   allowed-tools: {Claude-only — Read, Write, Edit, Bash, …}
+#   metadata: { short-description: {Codex UI label} }
 ---
 
 # {Skill Title}

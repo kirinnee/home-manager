@@ -1,8 +1,20 @@
-// Preflight checks: tooling, secrets, and Cloudflare credentials. Run on demand
-// (`khost doctor`) and reused by `tunnel up` to fail clearly before provisioning.
+// Preflight checks: tooling, secrets, Cloudflare credentials, and Alloy. Run on
+// demand (`khost doctor`) and reused by `tunnel up` to fail clearly before
+// provisioning.
 import { existsSync } from 'node:fs';
 import pc from 'picocolors';
-import { cfAccountId, cfApiToken, fragmentPath, osKind, skeletonPath } from './deps';
+import {
+  alloyConfigFile,
+  alloyRemoteWritePassword,
+  alloyRemoteWriteUrl,
+  alloyRemoteWriteUsername,
+  cfAccountId,
+  cfApiToken,
+  configFile,
+  machineId,
+  osKind,
+  tunnelName,
+} from './deps';
 import { run } from './exec';
 import { cfConfigured, verifyAccount, verifyToken } from './cloudflare';
 
@@ -18,6 +30,13 @@ async function onPath(bin: string): Promise<boolean> {
   return (await run(['sh', '-c', `command -v ${bin}`])).code === 0;
 }
 
+// sshd usually lives in /usr/sbin (not on a non-root PATH), so check the common
+// absolute locations too before declaring it missing.
+async function sshdPresent(): Promise<boolean> {
+  if (await onPath('sshd')) return true;
+  return ['/usr/sbin/sshd', '/usr/bin/sshd', '/sbin/sshd'].some(p => existsSync(p));
+}
+
 /** Run the Cloudflare credential checks (token verify + account access). */
 async function cloudflareChecks(): Promise<Check[]> {
   const checks: Check[] = [];
@@ -26,7 +45,7 @@ async function cloudflareChecks(): Promise<Check[]> {
       label: 'cloudflare creds',
       ok: false,
       required: false,
-      detail: 'CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID not set (tunnel disabled)',
+      detail: 'cloudflare.account_id / api_token not set in config.yaml (tunnel disabled)',
     });
     return checks;
   }
@@ -43,30 +62,76 @@ async function cloudflareChecks(): Promise<Check[]> {
 export async function doctor(): Promise<boolean> {
   const checks: Check[] = [];
 
-  // Tooling.
-  for (const bin of ['docker', 'sops', 'cloudflared']) {
-    const present = await onPath(bin);
+  // Machine identity (informational): the tunnel/route namespace for this box.
+  checks.push({
+    label: 'machine id',
+    ok: true,
+    required: false,
+    detail: `${machineId} (tunnel: ${tunnelName})`,
+  });
+
+  // Tooling. docker runs the alloy container; sshd backs the loopback SSH
+  // listener; cloudflared is only for the tunnel.
+  const tools: { bin: string; required: boolean; note: string }[] = [
+    { bin: 'bun', required: true, note: 'runtime' },
+    { bin: 'docker', required: true, note: 'alloy container' },
+    { bin: 'cloudflared', required: false, note: 'only for the tunnel' },
+  ];
+  for (const t of tools) {
+    const present = await onPath(t.bin);
     checks.push({
-      label: `tool: ${bin}`,
+      label: `tool: ${t.bin}`,
       ok: present,
-      required: bin !== 'cloudflared', // cloudflared only needed for the tunnel
-      detail: present ? 'on PATH' : 'missing',
+      required: t.required,
+      detail: present ? 'on PATH' : `missing — ${t.note}`,
     });
   }
+  const sshd = await sshdPresent();
+  checks.push({
+    label: 'tool: sshd',
+    ok: sshd,
+    required: true,
+    detail: sshd ? 'present' : 'missing — install openssh-server (loopback SSH listener)',
+  });
 
-  // Config / secrets.
+  // Config files (~/.khost).
   checks.push({
-    label: 'proxy skeleton',
-    ok: existsSync(skeletonPath),
-    required: true,
-    detail: existsSync(skeletonPath) ? skeletonPath : "missing — run 'khost proxy import'",
+    label: 'config.yaml',
+    ok: existsSync(configFile),
+    required: false,
+    detail: existsSync(configFile) ? configFile : `missing — run 'khost init' (using defaults)`,
   });
   checks.push({
-    label: 'secret fragment',
-    ok: existsSync(fragmentPath),
-    required: true,
-    detail: existsSync(fragmentPath) ? fragmentPath : "missing — run 'khost proxy import'",
+    label: 'alloy.alloy',
+    ok: existsSync(alloyConfigFile),
+    required: false,
+    detail: existsSync(alloyConfigFile) ? alloyConfigFile : `missing — run 'khost init' (Alloy metrics disabled)`,
   });
+
+  // Alloy remote_write (optional): if a url is configured, the token must be too,
+  // else metrics scrape locally but never ship.
+  if (alloyRemoteWriteUrl) {
+    // The token (password) is the gate. Username is only needed for basic_auth
+    // (e.g. Grafana Cloud); bearer/no-auth setups leave it blank — so note a
+    // missing username rather than failing on it.
+    const hasToken = Boolean(alloyRemoteWritePassword);
+    const noUser = hasToken && !alloyRemoteWriteUsername ? ' (no username — ok for bearer/no-auth)' : '';
+    checks.push({
+      label: 'alloy remote_write',
+      ok: hasToken,
+      required: false,
+      detail: hasToken
+        ? `configured → ${alloyRemoteWriteUrl}${noUser}`
+        : `url set but token missing — set ALLOY_REMOTE_WRITE_PASSWORD (or alloy.remote_write.password)`,
+    });
+  } else {
+    checks.push({
+      label: 'alloy remote_write',
+      ok: true,
+      required: false,
+      detail: 'not set — Alloy scrapes locally only (no remote_write)',
+    });
+  }
 
   // Cloudflare.
   checks.push(...(await cloudflareChecks()));

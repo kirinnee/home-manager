@@ -1136,6 +1136,8 @@ export interface ReviewerEndEvent extends BaseEvent {
   reviewerIndex?: number; // global reviewer index in the loop (matrix slot identity)
   lens?: string; // review lens
   reviewType?: string; // type label (account pool)
+  retryAttempt?: number; // 0-indexed attempt that produced this result (0 = first try)
+  maxRetries?: number; // configured retry budget for this role
 }
 
 export interface ReviewPhaseEndEvent extends BaseEvent {
@@ -1171,6 +1173,8 @@ export interface CheckpointEndEvent extends BaseEvent {
   progressPercent?: number;
   durationMs: number;
   exitCode: number;
+  retryAttempt?: number; // 0-indexed attempt that produced this result (0 = first try)
+  maxRetries?: number; // configured retry budget for this role
 }
 
 // Verify phase events
@@ -1200,6 +1204,8 @@ export interface VerifierEndEvent extends BaseEvent {
   durationMs: number;
   error?: string;
   verdict?: string;
+  retryAttempt?: number; // 0-indexed attempt that produced this result (0 = first try)
+  maxRetries?: number; // configured retry budget for this role
 }
 
 export interface VerifyPhaseEndEvent extends BaseEvent {
@@ -1227,6 +1233,8 @@ export interface SynthesisEndEvent extends BaseEvent {
   durationMs: number;
   error?: string;
   summaryPath?: string;
+  retryAttempt?: number; // 0-indexed attempt that produced this result (0 = first try)
+  maxRetries?: number; // configured retry budget for this role
 }
 
 // Loop end event
@@ -1354,6 +1362,8 @@ export interface MaterializedSynthesis {
   binary?: string;
   harness?: HarnessType;
   model?: string; // harness-reported model actually used (e.g. claude-opus-4-8)
+  retryAttempt?: number; // 0-indexed attempt that produced this result (0 = first try)
+  retryMax?: number; // configured retry budget for this role
 }
 
 export interface MaterializedCheckpoint {
@@ -1368,6 +1378,8 @@ export interface MaterializedCheckpoint {
   progressPercent?: number;
   durationMs?: number;
   exitCode?: number;
+  retryAttempt?: number; // 0-indexed attempt that produced this result (0 = first try)
+  retryMax?: number; // configured retry budget for this role
 }
 
 export interface MaterializedLoop {

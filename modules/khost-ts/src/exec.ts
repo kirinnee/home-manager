@@ -44,15 +44,6 @@ export async function run(cmd: string[], opts: RunOpts = {}): Promise<RunResult>
   return { code, stdout, stderr };
 }
 
-/** Run a command, throwing with stderr on non-zero. Returns stdout. */
-export async function runOrThrow(cmd: string[], opts: RunOpts = {}): Promise<string> {
-  const r = await run(cmd, opts);
-  if (r.code !== 0) {
-    throw new Error(`command failed (${r.code}): ${cmd.join(' ')}\n${r.stderr.trim()}`);
-  }
-  return r.stdout;
-}
-
 /** True if a binary is resolvable on PATH. */
 async function have(bin: string): Promise<boolean> {
   return (await run(['sh', '-c', `command -v ${bin}`])).code === 0;

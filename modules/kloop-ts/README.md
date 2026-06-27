@@ -119,6 +119,18 @@ The `dev-loop logs` command reads Claude's session files to show conversation hi
 
 **Note**: Session files are only created when Claude runs in interactive mode. In `--print` mode (used for automation), session persistence may be disabled. Live inspection via `tmux attach` is the recommended way to observe agent behavior.
 
+## Metrics
+
+`kloop serve` exposes Prometheus metrics at `/metrics` (computed from the run
+index — no LLM calls):
+
+- `kloop_runs_running` — runs currently running.
+- `kloop_runs{status}` — runs by status (completed/crashed/cancelled/…).
+- `kloop_agent_failures{binary,reason}` — failed agent attempts across recent
+  runs, by binary and reason (`exit_code_N`, `timeout`, `no_verdict`,
+  `interrupted`). Reads the implementer + every review/verify-phase reviewer +
+  synthesis + checkpoint of each loop; cached ~60s (bounded scan of recent runs).
+
 ## Why Bun?
 
 This project uses Bun-native APIs for performance and security:

@@ -182,6 +182,23 @@ export async function putTunnelIngress(tunnelId: string, ingress: IngressRule[])
   await cfFetch('PUT', `/cfd_tunnel/${tunnelId}/configurations`, z.unknown(), { config: { ingress } });
 }
 
+// --- tunnel health (for metrics) ------------------------------------------
+
+const tunnelDetailSchema = z.object({ status: z.string().optional() }).nullable();
+
+/** Cloudflare's view of a tunnel's health: "healthy" | "degraded" | "down" |
+ *  "inactive" (or "unknown" if absent). */
+export async function getTunnelStatus(id: string): Promise<string> {
+  const r = await cfFetch('GET', `/cfd_tunnel/${id}`, tunnelDetailSchema);
+  return r?.status ?? 'unknown';
+}
+
+/** Count of active connector connections for a tunnel. */
+export async function getTunnelConnections(id: string): Promise<number> {
+  const r = await cfFetch('GET', `/cfd_tunnel/${id}/connections`, z.array(z.unknown()).nullable());
+  return (r ?? []).length;
+}
+
 // --- DNS ------------------------------------------------------------------
 
 const dnsRecordSchema = z.object({

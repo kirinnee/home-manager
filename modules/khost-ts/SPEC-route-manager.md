@@ -47,14 +47,14 @@ Running `khost up` brings the live Cloudflare state in line with the committed l
 
 ## 3. Configuration
 
-### 3.1 `modules/khost-ts/proxy/routes.yaml` (committed, non-secret)
+### 3.1 `~/.khost/config.yaml` → `routes:` (plaintext, in your home dir)
 
 ```yaml
 # Declarative list of public hostnames that route to this host through the
 # khost Cloudflare Tunnel. Reconciled by `khost route sync` / `khost up`.
 routes:
-  - hostname: proxy.ernest.atomi.cloud
-    service: http://localhost:8317 # the CLIProxyAPI LLM proxy
+  - hostname: kloop.ernest.atomi.cloud
+    service: http://localhost:47316 # the kloop dashboard
   - hostname: ssh.ernest.atomi.cloud
     service: ssh://localhost:22 # SSH over the tunnel (browser-rendered)
   # - hostname: foo.ernest.atomi.cloud

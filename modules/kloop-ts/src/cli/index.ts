@@ -22,6 +22,7 @@ import * as skillCmd from './skill';
 import * as showCmd from './show';
 import * as serveCmd from './serve';
 import { createDashCommand } from './dash';
+import { createServiceCommand } from './service';
 import { readFileSync } from 'fs';
 
 // Read version from package.json at runtime
@@ -210,6 +211,7 @@ export function createCli(deps: CliDeps): Command {
     .action(async opts => serveCmd.handler(opts, deps));
 
   program.addCommand(createDashCommand());
+  program.addCommand(createServiceCommand());
 
   return program;
 }

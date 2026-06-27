@@ -19,11 +19,11 @@ import { SHELL_HTML } from "./page";
 let _shell: string | null = null;
 function servedShell(): string {
 	if (_shell == null) {
-		let base = "https://kloop.ernest.atomi.cloud";
+		let base = "http://localhost:47316";
 		try {
 			base = resolveConfig().settings.kloopBaseUrl;
 		} catch {
-			// no config file yet — fall back to the default domain
+			// no config file yet — fall back to the local kloop port
 		}
 		_shell = SHELL_HTML.replace("__KLOOP_BASE__", JSON.stringify(base));
 	}
@@ -233,12 +233,56 @@ function handleApi(parts: string[], url: URL): Response | null {
 }
 
 /** The Bun.serve fetch handler. */
+// Phases that mean "work in progress" (plan → implementation → polish); "none"
+// and "done" are not active. See core/status.ts.
+const ACTIVE_PHASES = new Set(["plan", "implementation", "polish"]);
+
+/** Prometheus exposition of kautopilot's own session stats. Read per-scrape from
+ *  the store (cheap — no LLM calls). */
+function metricsResponse(): Response {
+	const sessions = listSessionSummaries();
+	const byPhase = new Map<string, number>();
+	const byRepoStatus = new Map<string, number>();
+	for (const s of sessions) {
+		byPhase.set(s.phase, (byPhase.get(s.phase) ?? 0) + 1);
+		for (const r of s.repos)
+			byRepoStatus.set(r.status, (byRepoStatus.get(r.status) ?? 0) + 1);
+	}
+	const active = sessions.filter((s) => ACTIVE_PHASES.has(s.phase)).length;
+	const esc = (v: string) => v.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+	const lines = [
+		"# HELP kautopilot_sessions_total Total kautopilot sessions in the store.",
+		"# TYPE kautopilot_sessions_total gauge",
+		`kautopilot_sessions_total ${sessions.length}`,
+		"# HELP kautopilot_sessions_active Sessions in an in-progress phase (plan/implementation/polish).",
+		"# TYPE kautopilot_sessions_active gauge",
+		`kautopilot_sessions_active ${active}`,
+		"# HELP kautopilot_sessions Sessions by phase.",
+		"# TYPE kautopilot_sessions gauge",
+		...[...byPhase]
+			.sort(([a], [b]) => a.localeCompare(b))
+			.map(([p, n]) => `kautopilot_sessions{phase="${esc(p)}"} ${n}`),
+		"# HELP kautopilot_session_repos Per-repo work items by status.",
+		"# TYPE kautopilot_session_repos gauge",
+		...[...byRepoStatus]
+			.sort(([a], [b]) => a.localeCompare(b))
+			.map(([s, n]) => `kautopilot_session_repos{status="${esc(s)}"} ${n}`),
+	];
+	return new Response(`${lines.join("\n")}\n`, {
+		headers: {
+			"content-type": "text/plain; version=0.0.4; charset=utf-8",
+			"cache-control": "no-store",
+		},
+	});
+}
+
 export function handleRequest(req: Request): Response {
 	try {
 		const url = new URL(req.url);
 		if (req.method !== "GET" && req.method !== "HEAD") {
 			return new Response("Method Not Allowed", { status: 405 });
 		}
+		if (url.pathname === "/metrics") return metricsResponse();
 		const parts = url.pathname.split("/").filter(Boolean);
 		if (parts[0] === "api") {
 			return handleApi(parts, url) ?? notFoundJson();

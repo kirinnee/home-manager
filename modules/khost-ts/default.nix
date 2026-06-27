@@ -4,13 +4,12 @@
 # a thin wrapper that execs `bun run` against the in-repo source. node_modules
 # is installed locally with `bun install`; config is read from the live repo.
 #
-# Runtime tools khost shells out to (sops, age, cloudflared, coreutils) are put
-# on PATH here; docker comes from OrbStack on the host PATH.
+# Runtime tools khost shells out to (cloudflared, coreutils) are put on PATH
+# here; docker comes from OrbStack on the host PATH. Config + secrets are
+# plaintext in ~/.khost — no sops/age needed.
 let
   runtimeDeps = with nixpkgs; [
     bun
-    sops
-    age
     cloudflared
     coreutils
   ];

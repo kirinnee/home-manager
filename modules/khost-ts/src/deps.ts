@@ -1,6 +1,8 @@
-// Shared paths, constants, and OS detection for khost.
+// Shared constants + OS detection. Everything configurable is sourced from
+// ~/.khost/config.yaml (see config.ts); this module just derives named exports.
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { alloyConfigFile, config, configDir, configFile, machineId } from './config';
 
 export type OsKind = 'darwin' | 'linux' | 'unknown';
 
@@ -17,82 +19,58 @@ export function osKind(): OsKind {
 
 const home = homedir();
 
-// Repo location of the editable config (skeleton + sops fragment + compose
-// template). KHOST_REPO_DIR overrides if the repo lives elsewhere.
-const repoDir = process.env.KHOST_REPO_DIR ?? join(home, '.config/home-manager');
-export const repoProxyDir = join(repoDir, 'modules/khost-ts/proxy');
-export const skeletonPath = join(repoProxyDir, 'config.skeleton.yaml');
-export const fragmentPath = join(repoProxyDir, 'config.secrets.enc.yaml');
-export const composeTemplatePath = join(repoProxyDir, 'docker-compose.yml');
+export { configDir, configFile, alloyConfigFile, machineId };
 
-// Runtime (host-local, gitignored) state.
+// Runtime (host-local) state — regenerable, separate from config.
 export const stateDir = process.env.KHOST_STATE_DIR ?? join(home, '.local/state/khost');
-export const proxyState = join(stateDir, 'proxy');
 const tunnelState = join(stateDir, 'tunnel');
-export const proxyRuntimeConfig = join(proxyState, 'config.yaml');
-export const proxyRuntimeCompose = join(proxyState, 'docker-compose.yml');
 // Legacy: path of the old detached-cloudflared pidfile; tunnelUp cleans it up.
 export const tunnelPidfile = join(tunnelState, 'cloudflared.pid');
 
-export const proxyPort = 8317;
-export const proxyContainer = 'khost-cli-proxy-api';
+// Grafana Alloy (observability collector) — an editable config copied into
+// runtime state, then `docker compose up`.
+export const alloyState = join(stateDir, 'alloy');
+export const alloyRuntimeConfig = join(alloyState, 'config.alloy');
+export const alloyRuntimeCompose = join(alloyState, 'docker-compose.yml');
+export const alloyPort = config.alloy.port;
+export const alloyContainer = config.alloy.container;
+export const alloyImage = config.alloy.image;
+
+// khost self-metrics exporter port (`khost metrics serve`).
+export const metricsPort = config.metrics.port;
+
+// Alloy remote_write creds: env wins (keep the token out of plaintext
+// config.yaml), fall back to config.alloy.remote_write. khost injects these into
+// the Alloy container as ALLOY_REMOTE_WRITE_* so the config reads them via
+// sys.env(...) — no secret is written into the generated compose file.
+export const alloyRemoteWriteUrl = process.env.ALLOY_REMOTE_WRITE_URL || config.alloy.remote_write.url;
+export const alloyRemoteWriteUsername = process.env.ALLOY_REMOTE_WRITE_USERNAME || config.alloy.remote_write.username;
+export const alloyRemoteWritePassword = process.env.ALLOY_REMOTE_WRITE_PASSWORD || config.alloy.remote_write.password;
 
 // khost runs its own sshd bound to 127.0.0.1:<sshPort> (not macOS Remote Login),
-// so the tunnel reaches it via loopback and the LAN cannot. Default 2222.
-export const sshPort = Number(process.env.KHOST_SSH_PORT ?? 2222);
+// so the tunnel reaches it via loopback and the LAN cannot.
+export const sshPort = config.ssh.port;
+// Optional extra bind address (WARP mesh IP); '' = loopback only.
+export const meshListen = config.ssh.mesh_listen ?? '';
 
-// cloudflared edge protocol. Default http2 because QUIC (UDP/7844) to the edge
-// is unreliable here (e.g. WARP interference / UDP blocks). Override via env.
-export const tunnelProtocol = process.env.KHOST_TUNNEL_PROTOCOL ?? 'http2';
+// cloudflared edge protocol. http2 by default; QUIC (UDP/7844) can be unreliable.
+export const tunnelProtocol = config.tunnel.protocol;
 
-// Tunnel name is derived from the current user (one tunnel per host identity).
-export const tunnelName = `khost-${process.env.USER ?? 'host'}`;
+// Tunnel name is derived from the machine identity (one tunnel per machine).
+export const tunnelName = `khost-${machineId}`;
 
-// Cloudflare credentials come from the shell env (populated by ~/.secrets via sops).
-export const cfApiToken = process.env.CLOUDFLARE_API_TOKEN ?? '';
-export const cfAccountId = process.env.CLOUDFLARE_ACCOUNT_ID ?? '';
-export const cfApiBase = 'https://api.cloudflare.com/client/v4';
+// Cloudflare credentials. Prefer the environment (e.g. home-manager's ~/.secrets)
+// so secrets need not sit in plaintext; fall back to config.yaml for standalone
+// boxes. Zones are auto-discovered from the account.
+export const cfApiToken = process.env.CLOUDFLARE_API_TOKEN || config.cloudflare.api_token;
+export const cfAccountId = process.env.CLOUDFLARE_ACCOUNT_ID || config.cloudflare.account_id;
+export const cfApiBase = config.cloudflare.api_base;
 
-// The secret subtrees split out into the sops fragment; everything else is the
-// non-secret skeleton. Keep in sync with proxy `import` / `capture`.
-// Every top-level section that can carry a credential lives here so that
-// `khost proxy capture` never writes a secret into the committed plaintext
-// skeleton. Sections that mix secret + non-secret fields (kiro, ampcode) are
-// captured wholesale into the encrypted fragment — over-encrypting is safe.
-export const secretPaths = [
-  'api-keys',
-  'claude-api-key',
-  'openai-compatibility',
-  'gemini-api-key',
-  'codex-api-key',
-  'vertex-api-key',
-  'kiro',
-  'ampcode',
-] as const;
-
-// --- route-manager config -------------------------------------------------
-// Declarative list of public hostnames that route to this host through the
-// tunnel. KHOST_ROUTES_FILE overrides the committed default.
-export const routesFile = process.env.KHOST_ROUTES_FILE ?? join(repoProxyDir, 'routes.yaml');
-
-// Allow-list for the reusable "only-me" Access policy. Comma-separated, from
-// the env (sops), defaulting to the owner.
-export const accessEmails = (process.env.KHOST_ACCESS_EMAILS ?? 'ernest@atomi.cloud')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
-export const accessPolicyName = 'only-ernest';
-
-// Require the WARP device posture on the only-me policy. DEFAULT OFF as of the
-// mesh migration: WARP is now connectivity-only (Traffic-only + include-mode for
-// the mesh), so traffic to the public-hostname dashboards bypasses WARP — the edge
-// sees WARP=off and the posture check 403s every request. So the public dashboards
-// are gated by IDENTITY (SSO) only; "require WARP" for a resource is now achieved
-// by putting it on the mesh (private IP, reachable only by enrolled devices), not
-// by this posture. Set KHOST_REQUIRE_WARP=true to re-enable (only useful if WARP
-// goes back to full-tunnel / Gateway mode). (Gateway posture uid: 4f62bf6f-35b9-4537-83e0-e820b0eaa869.)
-export const requireWarp = (process.env.KHOST_REQUIRE_WARP ?? 'false') === 'true';
-export const warpPostureUid = process.env.KHOST_WARP_POSTURE_UID ?? '55971cbe-2ddf-4c30-b504-abbb901a0600';
+// Access (only-me) policy settings.
+export const accessEmails = config.access.emails;
+export const accessPolicyName = config.access.policy_name;
+export const requireWarp = config.access.require_warp;
+export const warpPostureUid = config.access.warp_posture_uid;
 
 // Ownership markers: khost only ever modifies/deletes resources carrying these.
 // DNS records get the comment; Access apps get the tag (+ a "khost: " name).

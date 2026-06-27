@@ -26,9 +26,25 @@ loop:
       run d.prompt INLINE; for WRITER steps run the per-revision loop below
       (reviewers → `kautopilot revise` to mint+present each version → user feedback)
   else:  # d.kind == "agent"
-      spawn a fresh isolated Task subagent with d.prompt; it writes d.contract.outputFile
+      run d.prompt in a FRESH context that writes d.contract.outputFile (see "Agent steps — by harness")
   kautopilot complete --output d.contract.outputFile [--metadata {…}] [--repo <repo>]
 ```
+
+**Agent steps & reviewer fan-out — by harness.** The binary loop above is
+harness-agnostic; only _how you run a fresh-context step/reviewer_ differs:
+
+- **Claude Code:** spawn an isolated `Task` subagent (`Agent` tool) per agent-step
+  and per reviewer (parallel fan-out), as described throughout this doc.
+- **Codex:** use codex's **native subagents via explicit delegation** for the
+  agent-step and the reviewer fan-out — delegate each with its own prompt; the
+  agent-step subagent writes `d.contract.outputFile`. (Equivalently, a
+  **`codex exec "<d.prompt>"`** subprocess is a fresh context that writes the
+  output file; reviewer fan-out = parallel `codex exec` background jobs.)
+  Interactive (`d.kind == "interactive"`) steps run inline either way.
+
+Wherever this doc says "spawn a `Task`/`Agent`/`Explore` subagent", read it as
+"start a fresh-context run" — `Task`/`Agent` on Claude, a delegated subagent (or
+`codex exec`) on Codex.
 
 **The binary owns the sequence — you never track it.** Do NOT name the step on
 `complete`: omit it and the binary completes whatever step is actually pending

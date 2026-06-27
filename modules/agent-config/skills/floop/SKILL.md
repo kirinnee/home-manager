@@ -72,7 +72,12 @@ If the user's scope implies extra concerns (e.g. "perf", "API compat"), add a le
 
 ## Step 2: Spawn Reviewers (one round)
 
-Spawn all lens reviewers **in a single message** (parallel) using the `Agent` tool with `subagent_type: "Explore"` (read-only — reviewers must not edit).
+**Spawning a fresh-context reviewer — harness-specific:**
+
+- **Claude Code:** spawn all lens reviewers **in a single message** (parallel) using the `Agent` tool with `subagent_type: "Explore"` (read-only — reviewers must not edit).
+- **Codex:** spawn one **subagent per lens via explicit delegation** (codex's native subagents — say which agents to spawn, how to split the work, and the output shape); codex fans them out in parallel and collects results. Equivalently, run one **`codex exec "<reviewer prompt>"`** subprocess per lens as parallel background jobs (`… &` then `wait`). Either is a fresh read-only context = the codex analog of an Explore subagent.
+
+Either way, each reviewer gets the same prompt + strict output contract below, and only the orchestrator (you) edits.
 
 Each reviewer prompt must include:
 

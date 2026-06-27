@@ -73,6 +73,8 @@ export interface ReviewerResult extends AgentResult {
   error?: string; // "timeout", "no_verdict", "exit_code_N"
   propagated?: boolean; // true if reviewer received previous loop reviews
   harnessSessionId?: string;
+  retryAttempt?: number; // 0-indexed attempt that produced this result (0 = first try)
+  retryMax?: number; // configured retry budget
 }
 
 type CheckpointerOutcome = 'conflict_found' | 'spec_auto_fixed' | 'spec_compressed' | 'no_action';
@@ -87,6 +89,8 @@ interface CheckpointerResult extends AgentResult {
   completedCriteria?: string[];
   remainingCriteria?: string[];
   harnessSessionId?: string;
+  retryAttempt?: number; // 0-indexed attempt that produced this result (0 = first try)
+  retryMax?: number; // configured retry budget
 }
 
 export interface SynthesizerResult extends AgentResult {
@@ -97,6 +101,8 @@ export interface SynthesizerResult extends AgentResult {
   inputTokens?: number;
   outputTokens?: number;
   harnessSessionId?: string;
+  retryAttempt?: number; // 0-indexed attempt that produced this result (0 = first try)
+  retryMax?: number; // configured retry budget
 }
 
 export interface VerifierResult extends AgentResult {
@@ -114,6 +120,8 @@ export interface VerifierResult extends AgentResult {
   issuesFixed?: string[];
   issuesRemaining?: string[];
   harnessSessionId?: string;
+  retryAttempt?: number; // 0-indexed attempt that produced this result (0 = first try)
+  retryMax?: number; // configured retry budget
 }
 
 // ============================================================================
@@ -208,6 +216,18 @@ export class AgentRunner {
    */
   private selectImplementer(loopNum: number): string {
     return selectImplementer(this.config, loopNum);
+  }
+
+  /**
+   * Re-pick an account from a pool entry for a retry (plain weighted-random, may repeat).
+   * For a single-account entry this returns that same account. Returns the resolved binary
+   * and its harness so a rerolled account with a different harness is launched correctly.
+   * Returns null when no pool entry is available (caller keeps the current account).
+   */
+  private rerollAccount(entry: ReviewTypeEntry | undefined): { binary: string; harness: HarnessType } | null {
+    if (entry == null) return null;
+    const parsed = parseReviewerConfig(selectFromPool(entry, this.config.poolProfiles));
+    return { binary: parsed.binary, harness: parsed.harness };
   }
 
   /**
@@ -386,7 +406,7 @@ export class AgentRunner {
     iteration: number;
     dirHash: string;
     phaseIndex: number;
-    reviewers: ReviewerBinary[];
+    reviewers: Array<ReviewerBinary & { pool?: ReviewTypeEntry }>;
     prompts: Array<{ reviewerIndex: number; prompt: string }>;
     timeout: number;
     onReviewerEnd?: (result: ReviewerResult) => Promise<void>;
@@ -409,6 +429,7 @@ export class AgentRunner {
           timeout,
           phaseIndex,
           ordinal: ordinal + 1,
+          pool: reviewer.pool,
           noVerdictAsFailure: reviewer.noVerdictAsFailure,
         });
         // Notify caller as soon as this reviewer finishes (real-time event emission)
@@ -438,10 +459,11 @@ export class AgentRunner {
     timeout: number;
   }): Promise<ReviewerResult[]> {
     const { runId, iteration, dirHash, prompts, timeout } = params;
-    // Legacy flat path (no lens matrix): one account per type, pool-selected.
+    // Legacy flat path (no lens matrix): one account per type, pool-selected. Carry the
+    // type entry so a retry can re-roll a different account from the same pool.
     const allReviewers = this.config.reviewPhases
       .flat()
-      .map(e => parseReviewerConfig(selectFromPool(e, this.config.poolProfiles)));
+      .map(e => ({ ...parseReviewerConfig(selectFromPool(e, this.config.poolProfiles)), pool: e }));
     return this.runReviewersPhase({
       runId,
       iteration,
@@ -468,6 +490,7 @@ export class AgentRunner {
     phaseIndex?: number;
     ordinal?: number;
     noVerdictAsFailure?: boolean;
+    pool?: ReviewTypeEntry; // when set, retries re-roll a (possibly different) account from this pool
   }): Promise<ReviewerResult> {
     const {
       runId,
@@ -481,18 +504,13 @@ export class AgentRunner {
       phaseIndex,
       ordinal,
       noVerdictAsFailure,
+      pool,
     } = params;
 
     // Stable paths across retries
     const reviewsDir = paths.loopReviewsPath(runId, iteration);
     const reviewerDir = path.join(reviewsDir, `reviewer-${reviewerIndex}`);
     await fs.mkdir(reviewerDir, { recursive: true });
-
-    // Interactive mode: append the completion-sentinel instruction (stable across retries).
-    const interactive = this.isInteractive(harness);
-    const sentinelFile = interactive ? path.join(reviewerDir, SENTINEL_NAME) : undefined;
-    const launchPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
-    await fs.writeFile(path.join(reviewerDir, 'prompt.md'), launchPrompt, 'utf-8');
 
     const verdictsDir = paths.loopVerdictsPath(runId, iteration);
     await fs.mkdir(verdictsDir, { recursive: true });
@@ -504,10 +522,14 @@ export class AgentRunner {
     const maxRetries = this.config.reviewerRetry?.maxRetries ?? 2;
     const backoffBaseMs = this.config.reviewerRetry?.backoffBaseMs ?? 5000;
 
+    // Account in use — may change between attempts when a pool re-roll lands elsewhere.
+    let curBinary = binary;
+    let curHarness = harness;
     let sessionId = '';
     let tmuxSession = '';
     let logFile = '';
     let promptFile = '';
+    let attemptUsed = 0;
     let result: { exitCode: number; durationMs: number; timedOut: boolean } = {
       exitCode: 0,
       durationMs: 0,
@@ -517,6 +539,14 @@ export class AgentRunner {
     let reviewContent: string | null = null;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      attemptUsed = attempt;
+      // Per-attempt setup keyed off the CURRENT account: a re-rolled account can use a
+      // different harness, which changes interactive mode + the sentinel instruction.
+      const interactive = this.isInteractive(curHarness);
+      const sentinelFile = interactive ? path.join(reviewerDir, SENTINEL_NAME) : undefined;
+      const launchPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
+      await fs.writeFile(path.join(reviewerDir, 'prompt.md'), launchPrompt, 'utf-8');
+
       // Clean slate: remove any pre-existing verdict/review at the target paths so a
       // stale file (from a re-entered run or a prior crashed attempt) can never be
       // misread as this attempt's output.
@@ -531,21 +561,21 @@ export class AgentRunner {
 
       // Build harness-aware command (used only on the print-mode path)
       const command = buildAgentCommand({
-        binary,
-        harness,
+        binary: curBinary,
+        harness: curHarness,
         promptFile,
         sessionId,
         logFile,
       });
 
       // Run in tmux (interactive TUI or print pipeline)
-      formatAgentLaunch('reviewer', `rev-${reviewerIndex}`, binary, tmuxSession, logFile);
+      formatAgentLaunch('reviewer', `rev-${reviewerIndex}`, curBinary, tmuxSession, logFile);
 
       result = await this.launch({
         interactive,
         sentinelFile,
         tmuxSession,
-        binary,
+        binary: curBinary,
         promptFile,
         sessionId,
         logFile,
@@ -576,8 +606,15 @@ export class AgentRunner {
         : result.exitCode !== 0
           ? `exited ${result.exitCode}`
           : 'produced no verdict';
+      // Re-roll the account for the next attempt (plain weighted; a single-account pool
+      // or no pool keeps the same account).
+      const next = this.rerollAccount(pool);
+      if (next) {
+        curBinary = next.binary;
+        curHarness = next.harness;
+      }
       console.log(
-        `  ↻ reviewer ${reviewerIndex} (${binary})${phaseIndex !== undefined ? ` (phase ${phaseIndex})` : ''} ${reason} — retry ${attempt + 1}/${maxRetries} (backoff ${Math.round(backoffMs / 1000)}s)`,
+        `  ↻ reviewer ${reviewerIndex} (${curBinary})${phaseIndex !== undefined ? ` (phase ${phaseIndex})` : ''} ${reason} — retry ${attempt + 1}/${maxRetries} (backoff ${Math.round(backoffMs / 1000)}s)`,
       );
       await new Promise(resolve => setTimeout(resolve, backoffMs));
     }
@@ -588,7 +625,7 @@ export class AgentRunner {
       reviewFileContent: reviewContent,
       exitCode: result.exitCode,
       timedOut: result.timedOut,
-      reviewerBinary: binary,
+      reviewerBinary: curBinary,
       phaseIndex,
       noVerdictAsFailure: noVerdictAsFailure ?? true,
       onError: msg => {
@@ -610,12 +647,13 @@ export class AgentRunner {
 
     // Extract token counts, harness session ID, and model from log file
     const tokens = await extractTokensFromLog(logFile);
-    const harnessSessionId = (await extractHarnessSessionId(logFile)) ?? (harness === 'claude' ? sessionId : undefined);
+    const harnessSessionId =
+      (await extractHarnessSessionId(logFile)) ?? (curHarness === 'claude' ? sessionId : undefined);
     const model = await extractModelFromLog(logFile);
 
     const icon = verdict === 'approved' ? '✓' : '✗';
     console.log(
-      `  ${icon} Reviewer ${reviewerIndex} (${binary})${phaseIndex !== undefined ? ` (phase ${phaseIndex})` : ''}: ${verdict}${completionEstimate !== undefined ? ` (${completionEstimate}%)` : ''}`,
+      `  ${icon} Reviewer ${reviewerIndex} (${curBinary})${phaseIndex !== undefined ? ` (phase ${phaseIndex})` : ''}: ${verdict}${completionEstimate !== undefined ? ` (${completionEstimate}%)` : ''}`,
     );
 
     return {
@@ -625,8 +663,8 @@ export class AgentRunner {
       exitCode: result.exitCode,
       timedOut: result.timedOut,
       reviewerIndex,
-      binary,
-      harness,
+      binary: curBinary,
+      harness: curHarness,
       model,
       verdict,
       reasoning,
@@ -637,6 +675,8 @@ export class AgentRunner {
       outputTokens: tokens.outputTokens,
       error,
       harnessSessionId,
+      retryAttempt: attemptUsed,
+      retryMax: maxRetries,
     };
   }
 
@@ -652,9 +692,6 @@ export class AgentRunner {
     timeout: number;
   }): Promise<CheckpointerResult> {
     const { runId, iteration, dirHash, specPath, timeout } = params;
-
-    const binary = this.checkpointerBinary;
-    const harness = this.checkpointerHarness;
 
     // Build checkpointer prompt via template substitution (stable across retries)
     const checkpointerVars: CheckpointerPromptVars = {
@@ -676,15 +713,7 @@ export class AgentRunner {
 
     // Ensure checkpointer directory (needed for the interactive sentinel + prompt.md)
     const checkpointerDir = paths.loopCheckpointerPath(runId, iteration);
-
-    // Interactive mode: append the completion-sentinel instruction (stable across retries).
-    const interactive = this.isInteractive(harness);
-    const sentinelFile = interactive ? path.join(checkpointerDir, SENTINEL_NAME) : undefined;
-    const finalPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
-
-    // Human-readable prompt.md (stable across retries)
     await fs.mkdir(checkpointerDir, { recursive: true });
-    await fs.writeFile(path.join(checkpointerDir, 'prompt.md'), finalPrompt, 'utf-8');
 
     const checkpointResultPath = `${checkpointerDir}/checkpoint-result.json`;
 
@@ -693,10 +722,14 @@ export class AgentRunner {
     const maxRetries = this.config.checkpointerRetry?.maxRetries ?? 2;
     const backoffBaseMs = this.config.checkpointerRetry?.backoffBaseMs ?? 5000;
 
+    // Account in use — may change between attempts when a pool re-roll lands elsewhere.
+    let curBinary = this.checkpointerBinary;
+    let curHarness = this.checkpointerHarness;
     let sessionId = '';
     let tmuxSession = '';
     let logFile = '';
     let promptFile = '';
+    let attemptUsed = 0;
     let result: { exitCode: number; durationMs: number; timedOut: boolean } = {
       exitCode: 0,
       durationMs: 0,
@@ -705,6 +738,14 @@ export class AgentRunner {
     let checkpointResultContent: string | null = null;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      attemptUsed = attempt;
+      // Per-attempt setup keyed off the CURRENT account: a re-rolled account can use a
+      // different harness, which changes interactive mode + the sentinel instruction.
+      const interactive = this.isInteractive(curHarness);
+      const sentinelFile = interactive ? path.join(checkpointerDir, SENTINEL_NAME) : undefined;
+      const finalPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
+      await fs.writeFile(path.join(checkpointerDir, 'prompt.md'), finalPrompt, 'utf-8');
+
       // Clean slate: remove any pre-existing result so a stale file (from a re-entered run
       // or a prior crashed attempt) can't be misread as this attempt's output.
       await fs.rm(checkpointResultPath, { force: true });
@@ -716,21 +757,21 @@ export class AgentRunner {
 
       // Build harness-aware command (used only on the print-mode path)
       const command = buildAgentCommand({
-        binary,
-        harness,
+        binary: curBinary,
+        harness: curHarness,
         promptFile,
         sessionId,
         logFile,
       });
 
       // Run in tmux (interactive TUI or print pipeline)
-      formatAgentLaunch('checkpoint', 'checkpoint', binary, tmuxSession, logFile);
+      formatAgentLaunch('checkpoint', 'checkpoint', curBinary, tmuxSession, logFile);
 
       result = await this.launch({
         interactive,
         sentinelFile,
         tmuxSession,
-        binary,
+        binary: curBinary,
         promptFile,
         sessionId,
         logFile,
@@ -757,8 +798,15 @@ export class AgentRunner {
         : result.exitCode !== 0
           ? `exited ${result.exitCode}`
           : 'produced no result';
+      // Re-roll the account for the next attempt (plain weighted; a single-account pool
+      // or no pool keeps the same account).
+      const next = this.rerollAccount(this.config.conflictChecker);
+      if (next) {
+        curBinary = next.binary;
+        curHarness = next.harness;
+      }
       console.log(
-        `  ↻ checkpointer (${binary}) ${reason} — retry ${attempt + 1}/${maxRetries} (backoff ${Math.round(backoffMs / 1000)}s)`,
+        `  ↻ checkpointer (${curBinary}) ${reason} — retry ${attempt + 1}/${maxRetries} (backoff ${Math.round(backoffMs / 1000)}s)`,
       );
       await new Promise(resolve => setTimeout(resolve, backoffMs));
     }
@@ -791,7 +839,8 @@ export class AgentRunner {
     }
 
     // Extract harness session ID and model from log file
-    const harnessSessionId = (await extractHarnessSessionId(logFile)) ?? (harness === 'claude' ? sessionId : undefined);
+    const harnessSessionId =
+      (await extractHarnessSessionId(logFile)) ?? (curHarness === 'claude' ? sessionId : undefined);
     const model = await extractModelFromLog(logFile);
 
     // Clean up prompt file
@@ -805,7 +854,7 @@ export class AgentRunner {
     };
 
     console.log(
-      `Checkpoint (${binary})${model ? ` [${model}]` : ''}: ${outcomeDisplay[outcome]}${progressPercent !== undefined ? ` (${progressPercent}% progress)` : ''}`,
+      `Checkpoint (${curBinary})${model ? ` [${model}]` : ''}: ${outcomeDisplay[outcome]}${progressPercent !== undefined ? ` (${progressPercent}% progress)` : ''}`,
     );
     console.log(`  Summary: ${summary}`);
 
@@ -815,8 +864,8 @@ export class AgentRunner {
       durationMs: result.durationMs,
       exitCode: result.exitCode,
       timedOut: result.timedOut,
-      binary,
-      harness,
+      binary: curBinary,
+      harness: curHarness,
       model,
       outcome,
       summary,
@@ -824,6 +873,8 @@ export class AgentRunner {
       completedCriteria,
       remainingCriteria,
       harnessSessionId,
+      retryAttempt: attemptUsed,
+      retryMax: maxRetries,
     };
   }
 
@@ -863,13 +914,7 @@ export class AgentRunner {
 
     // Ensure synthesis directory
     const synthDir = this.pathsImpl.loopSynthesisPath(runId, iteration);
-
-    // Interactive mode: append the completion-sentinel instruction (stable across retries).
-    const interactive = this.isInteractive(parsed.harness);
-    const sentinelFile = interactive ? path.join(synthDir, SENTINEL_NAME) : undefined;
-    const finalPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
     await fs.mkdir(synthDir, { recursive: true });
-    await fs.writeFile(path.join(synthDir, 'prompt.md'), finalPrompt, 'utf-8');
 
     const summaryPath = path.join(synthDir, 'review-summary.md');
 
@@ -877,11 +922,17 @@ export class AgentRunner {
     // crash, timeout). A successfully written summary is never retried.
     const maxRetries = this.config.synthesizerRetry?.maxRetries ?? 2;
     const backoffBaseMs = this.config.synthesizerRetry?.backoffBaseMs ?? 5000;
+    // Re-roll source: the synthesizer pool, unless a fixed binary was forced (overrideBinary).
+    const rerollEntry = overrideBinary == null ? this.config.synthesizer : undefined;
 
+    // Account in use — may change between attempts when a pool re-roll lands elsewhere.
+    let curBinary = parsed.binary;
+    let curHarness = parsed.harness;
     let sessionId = '';
     let tmuxSession = '';
     let logFile = '';
     let promptFile = '';
+    let attemptUsed = 0;
     let result: { exitCode: number; durationMs: number; timedOut: boolean } = {
       exitCode: 0,
       durationMs: 0,
@@ -890,6 +941,14 @@ export class AgentRunner {
     let summaryExists = false;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      attemptUsed = attempt;
+      // Per-attempt setup keyed off the CURRENT account: a re-rolled account can use a
+      // different harness, which changes interactive mode + the sentinel instruction.
+      const interactive = this.isInteractive(curHarness);
+      const sentinelFile = interactive ? path.join(synthDir, SENTINEL_NAME) : undefined;
+      const finalPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
+      await fs.writeFile(path.join(synthDir, 'prompt.md'), finalPrompt, 'utf-8');
+
       // Clean slate: remove any pre-existing summary so a stale file (from a re-entered run
       // or a prior crashed attempt) can't be misread as this attempt's output.
       await fs.rm(summaryPath, { force: true });
@@ -901,20 +960,20 @@ export class AgentRunner {
       logFile = await this.ensureAgentDir(synthDir);
 
       const command = buildAgentCommand({
-        binary: parsed.binary,
-        harness: parsed.harness,
+        binary: curBinary,
+        harness: curHarness,
         promptFile,
         sessionId,
         logFile,
       });
 
-      formatAgentLaunch('synthesizer', 'synthesizer', parsed.binary, tmuxSession, logFile);
+      formatAgentLaunch('synthesizer', 'synthesizer', curBinary, tmuxSession, logFile);
 
       result = await this.launch({
         interactive,
         sentinelFile,
         tmuxSession,
-        binary: parsed.binary,
+        binary: curBinary,
         promptFile,
         sessionId,
         logFile,
@@ -938,8 +997,15 @@ export class AgentRunner {
         : result.exitCode !== 0
           ? `exited ${result.exitCode}`
           : 'produced no summary';
+      // Re-roll the account for the next attempt (plain weighted; a single-account pool,
+      // no pool, or a forced override keeps the same account).
+      const next = this.rerollAccount(rerollEntry);
+      if (next) {
+        curBinary = next.binary;
+        curHarness = next.harness;
+      }
       console.log(
-        `  ↻ synthesizer (${parsed.binary}) ${reason} — retry ${attempt + 1}/${maxRetries} (backoff ${Math.round(backoffMs / 1000)}s)`,
+        `  ↻ synthesizer (${curBinary}) ${reason} — retry ${attempt + 1}/${maxRetries} (backoff ${Math.round(backoffMs / 1000)}s)`,
       );
       await new Promise(resolve => setTimeout(resolve, backoffMs));
     }
@@ -956,13 +1022,15 @@ export class AgentRunner {
       durationMs: result.durationMs,
       exitCode: result.exitCode,
       timedOut: result.timedOut,
-      binary: parsed.binary,
-      harness: parsed.harness,
+      binary: curBinary,
+      harness: curHarness,
       model,
       summaryPath: summaryExists ? summaryPath : undefined,
       inputTokens: tokens.inputTokens,
       outputTokens: tokens.outputTokens,
       harnessSessionId,
+      retryAttempt: attemptUsed,
+      retryMax: maxRetries,
     };
   }
 
@@ -999,15 +1067,7 @@ export class AgentRunner {
     const prompt = buildReSynthesisPrompt(this.config.prompts?.reSynthesizer, reSynthVars);
 
     const synthDir = this.pathsImpl.loopSynthesisPath(runId, iteration);
-
-    // Interactive mode: append the completion-sentinel instruction (stable across retries).
-    const interactive = this.isInteractive(parsed.harness);
-    const sentinelFile = interactive ? path.join(synthDir, SENTINEL_NAME) : undefined;
-    const finalPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
     await fs.mkdir(synthDir, { recursive: true });
-    // Re-synthesis shares synthDir with synthesis; use a distinct prompt filename so it
-    // doesn't overwrite the synthesizer's prompt.md (both are surfaced in the dashboard).
-    await fs.writeFile(path.join(synthDir, 'prompt.re-synthesis.md'), finalPrompt, 'utf-8');
 
     // (previousSummaryPath comes from a prior loop's dir, so clearing this never deletes the input.)
     const summaryPath = path.join(synthDir, 'review-summary.md');
@@ -1016,11 +1076,17 @@ export class AgentRunner {
     // crash, timeout). A successfully written summary is never retried.
     const maxRetries = this.config.synthesizerRetry?.maxRetries ?? 2;
     const backoffBaseMs = this.config.synthesizerRetry?.backoffBaseMs ?? 5000;
+    // Re-roll source: the synthesizer pool, unless a fixed binary was forced (overrideBinary).
+    const rerollEntry = overrideBinary == null ? this.config.synthesizer : undefined;
 
+    // Account in use — may change between attempts when a pool re-roll lands elsewhere.
+    let curBinary = parsed.binary;
+    let curHarness = parsed.harness;
     let sessionId = '';
     let tmuxSession = '';
     let logFile = '';
     let promptFile = '';
+    let attemptUsed = 0;
     let result: { exitCode: number; durationMs: number; timedOut: boolean } = {
       exitCode: 0,
       durationMs: 0,
@@ -1029,6 +1095,15 @@ export class AgentRunner {
     let summaryExists = false;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      attemptUsed = attempt;
+      // Per-attempt setup keyed off the CURRENT account (a re-rolled account may use a
+      // different harness). Re-synthesis shares synthDir with synthesis; use a distinct
+      // prompt filename so it doesn't overwrite the synthesizer's prompt.md.
+      const interactive = this.isInteractive(curHarness);
+      const sentinelFile = interactive ? path.join(synthDir, SENTINEL_NAME) : undefined;
+      const finalPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
+      await fs.writeFile(path.join(synthDir, 'prompt.re-synthesis.md'), finalPrompt, 'utf-8');
+
       await fs.rm(summaryPath, { force: true });
 
       sessionId = generateId();
@@ -1037,20 +1112,20 @@ export class AgentRunner {
       logFile = await this.ensureAgentDir(synthDir);
 
       const command = buildAgentCommand({
-        binary: parsed.binary,
-        harness: parsed.harness,
+        binary: curBinary,
+        harness: curHarness,
         promptFile,
         sessionId,
         logFile,
       });
 
-      formatAgentLaunch('resynthesizer', 'resynthesizer', parsed.binary, tmuxSession, logFile);
+      formatAgentLaunch('resynthesizer', 'resynthesizer', curBinary, tmuxSession, logFile);
 
       result = await this.launch({
         interactive,
         sentinelFile,
         tmuxSession,
-        binary: parsed.binary,
+        binary: curBinary,
         promptFile,
         sessionId,
         logFile,
@@ -1072,8 +1147,15 @@ export class AgentRunner {
         : result.exitCode !== 0
           ? `exited ${result.exitCode}`
           : 'produced no summary';
+      // Re-roll the account for the next attempt (plain weighted; a single-account pool,
+      // no pool, or a forced override keeps the same account).
+      const next = this.rerollAccount(rerollEntry);
+      if (next) {
+        curBinary = next.binary;
+        curHarness = next.harness;
+      }
       console.log(
-        `  ↻ re-synthesizer (${parsed.binary}) ${reason} — retry ${attempt + 1}/${maxRetries} (backoff ${Math.round(backoffMs / 1000)}s)`,
+        `  ↻ re-synthesizer (${curBinary}) ${reason} — retry ${attempt + 1}/${maxRetries} (backoff ${Math.round(backoffMs / 1000)}s)`,
       );
       await new Promise(resolve => setTimeout(resolve, backoffMs));
     }
@@ -1090,13 +1172,15 @@ export class AgentRunner {
       durationMs: result.durationMs,
       exitCode: result.exitCode,
       timedOut: result.timedOut,
-      binary: parsed.binary,
-      harness: parsed.harness,
+      binary: curBinary,
+      harness: curHarness,
       model,
       summaryPath: summaryExists ? summaryPath : undefined,
       inputTokens: tokens.inputTokens,
       outputTokens: tokens.outputTokens,
       harnessSessionId,
+      retryAttempt: attemptUsed,
+      retryMax: maxRetries,
     };
   }
 
@@ -1109,7 +1193,7 @@ export class AgentRunner {
     iteration: number;
     dirHash: string;
     phaseIndex: number;
-    reviewers: ReviewerBinary[];
+    reviewers: Array<ReviewerBinary & { pool?: ReviewTypeEntry }>;
     prompts: Array<{ reviewerIndex: number; prompt: string }>;
     timeout: number;
     onReviewerEnd?: (result: VerifierResult) => Promise<void>;
@@ -1132,6 +1216,7 @@ export class AgentRunner {
           timeout,
           phaseIndex,
           ordinal: ordinal + 1,
+          pool: reviewer.pool,
         });
         if (onReviewerEnd) {
           await onReviewerEnd(result);
@@ -1161,21 +1246,15 @@ export class AgentRunner {
     timeout: number;
     phaseIndex?: number;
     ordinal?: number;
+    pool?: ReviewTypeEntry; // when set, retries re-roll a (possibly different) account from this pool
   }): Promise<VerifierResult> {
-    const { runId, iteration, dirHash, reviewerIndex, binary, harness, prompt, timeout, phaseIndex, ordinal } = params;
+    const { runId, iteration, dirHash, reviewerIndex, binary, harness, prompt, timeout, phaseIndex, ordinal, pool } =
+      params;
 
     // Verifier writes to verify/ directory
     const verifyDir = paths.loopVerifyPath(runId, iteration);
     const reviewerDir = path.join(verifyDir, `verifier-${reviewerIndex}`);
-
-    // Interactive mode: append the completion-sentinel instruction (stable across retries).
-    const interactive = this.isInteractive(harness);
-    const sentinelFile = interactive ? path.join(reviewerDir, SENTINEL_NAME) : undefined;
-    const finalPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
-
-    // Human-readable prompt.md (stable across retries)
     await fs.mkdir(reviewerDir, { recursive: true });
-    await fs.writeFile(path.join(reviewerDir, 'prompt.md'), finalPrompt, 'utf-8');
     // Ensure the verdicts dir exists — the verifier writes its verdict JSON there directly
     const verdictsDir = paths.loopVerdictsPath(runId, iteration);
     await fs.mkdir(verdictsDir, { recursive: true });
@@ -1186,10 +1265,14 @@ export class AgentRunner {
     const maxRetries = this.config.verifierRetry?.maxRetries ?? 2;
     const backoffBaseMs = this.config.verifierRetry?.backoffBaseMs ?? 5000;
 
+    // Account in use — may change between attempts when a pool re-roll lands elsewhere.
+    let curBinary = binary;
+    let curHarness = harness;
     let sessionId = '';
     let tmuxSession = '';
     let logFile = '';
     let promptFile = '';
+    let attemptUsed = 0;
     let result: { exitCode: number; durationMs: number; timedOut: boolean } = {
       exitCode: 0,
       durationMs: 0,
@@ -1198,6 +1281,14 @@ export class AgentRunner {
     let verdictContent: string | null = null;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      attemptUsed = attempt;
+      // Per-attempt setup keyed off the CURRENT account: a re-rolled account can use a
+      // different harness, which changes interactive mode + the sentinel instruction.
+      const interactive = this.isInteractive(curHarness);
+      const sentinelFile = interactive ? path.join(reviewerDir, SENTINEL_NAME) : undefined;
+      const finalPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
+      await fs.writeFile(path.join(reviewerDir, 'prompt.md'), finalPrompt, 'utf-8');
+
       // Clean slate: remove any pre-existing verdict so a stale file (from a re-entered run
       // or a prior crashed attempt) can never be misread as this attempt's output.
       await fs.rm(verdictPath, { force: true });
@@ -1208,20 +1299,20 @@ export class AgentRunner {
       logFile = await this.ensureAgentDir(reviewerDir);
 
       const command = buildAgentCommand({
-        binary,
-        harness,
+        binary: curBinary,
+        harness: curHarness,
         promptFile,
         sessionId,
         logFile,
       });
 
-      formatAgentLaunch('verifier', `verify-${reviewerIndex}`, binary, tmuxSession, logFile);
+      formatAgentLaunch('verifier', `verify-${reviewerIndex}`, curBinary, tmuxSession, logFile);
 
       result = await this.launch({
         interactive,
         sentinelFile,
         tmuxSession,
-        binary,
+        binary: curBinary,
         promptFile,
         sessionId,
         logFile,
@@ -1248,8 +1339,15 @@ export class AgentRunner {
         : result.exitCode !== 0
           ? `exited ${result.exitCode}`
           : 'produced no verdict';
+      // Re-roll the account for the next attempt (plain weighted; a single-account pool
+      // or no pool keeps the same account).
+      const next = this.rerollAccount(pool);
+      if (next) {
+        curBinary = next.binary;
+        curHarness = next.harness;
+      }
       console.log(
-        `  ↻ verifier ${reviewerIndex} (${binary})${phaseIndex !== undefined ? ` (phase ${phaseIndex})` : ''} ${reason} — retry ${attempt + 1}/${maxRetries} (backoff ${Math.round(backoffMs / 1000)}s)`,
+        `  ↻ verifier ${reviewerIndex} (${curBinary})${phaseIndex !== undefined ? ` (phase ${phaseIndex})` : ''} ${reason} — retry ${attempt + 1}/${maxRetries} (backoff ${Math.round(backoffMs / 1000)}s)`,
       );
       await new Promise(resolve => setTimeout(resolve, backoffMs));
     }
@@ -1280,7 +1378,7 @@ export class AgentRunner {
 
     const icon = verdict === 'approved' ? '\u2713' : '\u2717';
     console.log(
-      `  ${icon} Verifier ${reviewerIndex} (${binary})${model ? ` [${model}]` : ''}${phaseIndex !== undefined ? ` (phase ${phaseIndex})` : ''}: ${verdict}`,
+      `  ${icon} Verifier ${reviewerIndex} (${curBinary})${model ? ` [${model}]` : ''}${phaseIndex !== undefined ? ` (phase ${phaseIndex})` : ''}: ${verdict}`,
     );
 
     return {
@@ -1290,8 +1388,8 @@ export class AgentRunner {
       exitCode: result.exitCode,
       timedOut: result.timedOut,
       reviewerIndex,
-      binary,
-      harness,
+      binary: curBinary,
+      harness: curHarness,
       model,
       verdict,
       reasoning,
@@ -1303,6 +1401,8 @@ export class AgentRunner {
       issuesFixed,
       issuesRemaining,
       harnessSessionId,
+      retryAttempt: attemptUsed,
+      retryMax: maxRetries,
     };
   }
 

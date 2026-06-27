@@ -13,7 +13,7 @@ import { logError, logInfo } from "../util/format";
 // whose container runs this same `serve` command internally.
 // ============================================================================
 
-const DEFAULT_PORT = 47317;
+export const DEFAULT_PORT = 47317;
 const DEFAULT_HOST = "127.0.0.1";
 
 /**

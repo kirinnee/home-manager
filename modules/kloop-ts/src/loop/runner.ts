@@ -27,6 +27,7 @@ import type { VerifierPromptVars } from '../agents/prompts';
 /** One expanded reviewer invocation in the LENS × TYPE matrix. */
 interface ExpandedReviewer {
   parsed: ReturnType<typeof parseReviewerConfig>; // the account picked from the type's pool
+  typeEntry: ReviewTypeEntry; // the raw pool entry — lets a retry re-roll a different account
   lens: string;
   lensFocus: string;
   reviewType: string; // type label (the account pool)
@@ -56,6 +57,7 @@ function expandPhaseReviewers(
       const account = selectFromPool(typeEntry, poolProfiles);
       out.push({
         parsed: parseReviewerConfig(account),
+        typeEntry,
         lens,
         lensFocus: resolveLensFocus(lens, lensProfiles),
         reviewType,
@@ -746,7 +748,7 @@ export class LoopRunner {
       iteration: iterNum,
       dirHash,
       phaseIndex: 0,
-      reviewers: allReviewers.map(r => r.parsed),
+      reviewers: allReviewers.map(r => ({ ...r.parsed, pool: r.typeEntry })),
       prompts: allPrompts,
       timeout: config.reviewerTimeout,
       onReviewerEnd: async (r: agents.ReviewerResult) => {
@@ -772,6 +774,8 @@ export class LoopRunner {
           reviewerIndex: r.reviewerIndex,
           lens: entry?.lens,
           reviewType: entry?.reviewType,
+          retryAttempt: r.retryAttempt,
+          maxRetries: r.retryMax,
         });
       },
     });
@@ -905,7 +909,7 @@ export class LoopRunner {
         iteration: iterNum,
         dirHash,
         phaseIndex: phaseIdx,
-        reviewers: phaseReviewers.map(r => r.parsed),
+        reviewers: phaseReviewers.map(r => ({ ...r.parsed, pool: r.typeEntry })),
         prompts: phasePrompts,
         timeout: config.reviewerTimeout,
         onReviewerEnd: async (r: agents.ReviewerResult) => {
@@ -931,6 +935,8 @@ export class LoopRunner {
             reviewerIndex: r.reviewerIndex,
             lens: entry?.lens,
             reviewType: entry?.reviewType,
+            retryAttempt: r.retryAttempt,
+            maxRetries: r.retryMax,
           });
         },
       });
@@ -1120,6 +1126,8 @@ export class LoopRunner {
       durationMs: result.durationMs,
       error: result.timedOut ? 'timeout' : result.exitCode !== 0 ? `exit_code_${result.exitCode}` : undefined,
       summaryPath: result.summaryPath,
+      retryAttempt: result.retryAttempt,
+      maxRetries: result.retryMax,
     });
 
     fmt.formatReSynthesisResult(result.summaryPath !== undefined, result.durationMs, result.binary, result.model);
@@ -1152,10 +1160,12 @@ export class LoopRunner {
 
     for (let phaseIdx = 0; phaseIdx < verifyPhases.length; phaseIdx++) {
       // Verify types support account pools (load distribution) but no lenses — one
-      // verifier per type. Pick one account from each type's pool per invocation.
-      const phaseReviewers = (verifyPhases[phaseIdx] ?? []).map(entry =>
-        parseReviewerConfig(selectFromPool(entry, config.poolProfiles)),
-      );
+      // verifier per type. Pick one account from each type's pool per invocation; carry
+      // the entry so a retry can re-roll a different account from the same pool.
+      const phaseReviewers = (verifyPhases[phaseIdx] ?? []).map(entry => ({
+        ...parseReviewerConfig(selectFromPool(entry, config.poolProfiles)),
+        pool: entry,
+      }));
 
       await writeEvent({
         type: 'verify_phase_start',
@@ -1215,6 +1225,8 @@ export class LoopRunner {
             durationMs: r.durationMs,
             error: r.error,
             verdict: r.verdict,
+            retryAttempt: r.retryAttempt,
+            maxRetries: r.retryMax,
           });
         },
       });
@@ -1293,6 +1305,8 @@ export class LoopRunner {
       durationMs: result.durationMs,
       error: result.timedOut ? 'timeout' : result.exitCode !== 0 ? `exit_code_${result.exitCode}` : undefined,
       summaryPath: result.summaryPath,
+      retryAttempt: result.retryAttempt,
+      maxRetries: result.retryMax,
     });
 
     fmt.formatSynthesisResult(result.summaryPath !== undefined, result.durationMs, result.binary, result.model);
@@ -1346,6 +1360,8 @@ export class LoopRunner {
       progressPercent: checkpointResult.progressPercent,
       durationMs: checkpointResult.durationMs,
       exitCode: checkpointResult.exitCode,
+      retryAttempt: checkpointResult.retryAttempt,
+      maxRetries: checkpointResult.retryMax,
     });
 
     switch (checkpointResult.outcome) {
