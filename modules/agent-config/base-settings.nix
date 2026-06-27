@@ -8,6 +8,9 @@
   alwaysThinkingEnabled = true;
   includeCoAuthoredBy = false;
   skipDangerousModePermissionPrompt = true;
+  # Pin the terminal UI renderer ("default" = classic). Setting `tui` at all is
+  # what suppresses the "try the new fullscreen renderer?" upsell prompt.
+  tui = "default";
 
   # Statusline configuration - shows model, duration, and estimated cost
   # Inspired by p10k: model | dir git | duration | cost

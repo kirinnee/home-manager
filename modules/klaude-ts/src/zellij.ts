@@ -25,14 +25,16 @@ export async function sessionExists(name: string): Promise<boolean> {
  * path) with `args` in `cwd`, and attach this terminal to it. The command is
  * written into a generated KDL layout — printing the args as quoted strings so
  * spaces/apostrophes (e.g. a ticket-title display name) can't break the layout.
+ * All args go on a SINGLE `args` node: zellij honors only one `args` node per
+ * pane, so splitting them across lines silently drops every arg but the first
+ * (which left `-n` with no value, swallowing the next flag as the name).
  * Blocks until the session is detached or exits; returns zellij's exit code.
  */
 export async function startSession(name: string, cwd: string, cmd: string, args: string[]): Promise<number> {
-  const argLines = args.map(a => `        args ${quoteKdl(a)}`).join('\n');
+  const argLine = args.length ? `        args ${args.map(quoteKdl).join(' ')}\n` : '';
   const layout = `layout {
     pane command=${quoteKdl(cmd)} cwd=${quoteKdl(cwd)} {
-${argLines}
-        close_on_exit true
+${argLine}        close_on_exit true
     }
 }
 `;

@@ -294,6 +294,8 @@ function applyEvent(status: MaterializedStatus, rawEvent: KloopEvent): void {
         if (event.reviewer) reviewer.binary = event.reviewer;
         if (event.lens) reviewer.lens = event.lens;
         if (event.reviewType) reviewer.reviewType = event.reviewType;
+        if (event.retryAttempt !== undefined) reviewer.retryAttempt = event.retryAttempt;
+        if (event.maxRetries !== undefined) reviewer.retryMax = event.maxRetries;
       }
       break;
     }
@@ -345,6 +347,8 @@ function applyEvent(status: MaterializedStatus, rawEvent: KloopEvent): void {
         if (event.verdict) reviewer.verdict = event.verdict;
         if ('harness' in event && event.harness) reviewer.harness = event.harness;
         if (event.model) reviewer.model = event.model;
+        if (event.retryAttempt !== undefined) reviewer.retryAttempt = event.retryAttempt;
+        if (event.maxRetries !== undefined) reviewer.retryMax = event.maxRetries;
       }
       break;
     }
@@ -387,6 +391,8 @@ function applyEvent(status: MaterializedStatus, rawEvent: KloopEvent): void {
           model: event.model ?? existing?.model,
           error: event.error,
           summaryPath: event.summaryPath,
+          retryAttempt: 'retryAttempt' in event ? event.retryAttempt : existing?.retryAttempt,
+          retryMax: 'maxRetries' in event ? event.maxRetries : existing?.retryMax,
         };
       }
       break;
@@ -423,6 +429,8 @@ function applyEvent(status: MaterializedStatus, rawEvent: KloopEvent): void {
           progressPercent: 'progressPercent' in event ? event.progressPercent : undefined,
           durationMs: 'durationMs' in event ? event.durationMs : undefined,
           exitCode: 'exitCode' in event ? event.exitCode : undefined,
+          retryAttempt: 'retryAttempt' in event ? event.retryAttempt : existing?.retryAttempt,
+          retryMax: 'maxRetries' in event ? event.maxRetries : existing?.retryMax,
         };
       }
       break;

@@ -15,10 +15,6 @@
 
 let
   modules = import ./modules/default.nix { nixpkgs = pkgs; };
-  imported = import ./modules/agent-config/default.nix;
-  auth = imported.auth;
-  personalDirs = [ "~" "~/.config/home-manager" "~/Workspace/personal" ];
-  workDirs = [ "~/Workspace/work" ];
 in
 
 ##################
@@ -109,164 +105,6 @@ rec {
   # Workspace directories setup
   workspace.enable = true;
 
-  # Claude multi-account configuration
-  programs.claude-multi = {
-    enable = true;
-    defaultPackage = claude-code-pkg;
-    defaultAccount = "kirin";
-
-    smartWrapper.enable = true;
-
-    # Pre-trust the launch directory so the "Do you trust the files in this
-    # folder?" dialog never appears (across all accounts / launch paths).
-    autoTrust = true;
-
-    aliases = {
-      "yolo" = "--dangerously-skip-permissions";
-      "crc" = "--dangerously-skip-permissions --chrome --rc";
-    };
-
-    shellIntegration = {
-      functions = false;
-      showActive = false;
-    };
-
-    accounts = {
-      kirin = imported.mkClaudeAccount {
-        provider = "anthropic";
-        manualAuth = true;
-        directoryRules = personalDirs;
-      };
-      liftoff = imported.mkClaudeAccount {
-        provider = "anthropic";
-        manualAuth = true;
-        directoryRules = workDirs;
-      };
-      atomi = imported.mkClaudeAccount {
-        provider = "anthropic";
-        manualAuth = true;
-        directoryRules = [ "~/Workspace/atomi" ];
-      };
-      market = imported.mkClaudeAccount {
-        provider = "anthropic";
-      };
-      auto-kirin = imported.mkAutoClaudeAccount {
-        provider = "anthropic";
-        manualAuth = true;
-        directoryRules = personalDirs;
-      };
-      auto-liftoff = imported.mkAutoClaudeAccount {
-        provider = "anthropic";
-        manualAuth = true;
-        directoryRules = workDirs;
-      };
-      auto-atomi = imported.mkAutoClaudeAccount {
-        provider = "anthropic";
-        manualAuth = true;
-        directoryRules = [ "~/Workspace/atomi" ];
-      };
-      auto-market = imported.mkAutoClaudeAccount {
-        provider = "anthropic";
-      };
-    } // imported.mkAllProviderClaudeAccounts auth.providerNames;
-  };
-
-  # Codex multi-account configuration
-  programs.multi-codex = {
-    enable = true;
-    defaultPackage = codex-pkg;
-    defaultAccount = "kirin";
-
-    # Raw `codex` is NOT hijacked to auto-route by directory. It's the plain
-    # binary on the default ~/.codex home (shared with the Codex desktop app).
-    # The per-account `codex-<name>` wrappers are still installed for the fleet.
-    smartWrapper.enable = false;
-
-    shellIntegration = {
-      functions = false;
-      showActive = false;
-    };
-
-    accounts = {
-      # ChatGPT OAuth-login accounts (run `codex-<name> auth login` after hms)
-      # lo* = liftoff (loai / loio).
-      loai = imported.mkCodexChatGPTAccount {
-        directoryRules = workDirs;
-      };
-      loio = imported.mkCodexChatGPTAccount {
-        directoryRules = workDirs;
-      };
-      ernest = imported.mkCodexChatGPTAccount {
-        directoryRules = workDirs;
-      };
-      kirin = imported.mkCodexChatGPTAccount {
-        directoryRules = personalDirs;
-      };
-      atomi = imported.mkCodexChatGPTAccount {
-        directoryRules = [ "~/Workspace/atomi" ];
-      };
-      auto-loai = imported.mkCodexChatGPTAutoAccount {
-        directoryRules = workDirs;
-      };
-      auto-loio = imported.mkCodexChatGPTAutoAccount {
-        directoryRules = workDirs;
-      };
-      auto-ernest = imported.mkCodexChatGPTAutoAccount {
-        directoryRules = workDirs;
-      };
-      auto-kirin = imported.mkCodexChatGPTAutoAccount {
-        directoryRules = personalDirs;
-      };
-      auto-atomi = imported.mkCodexChatGPTAutoAccount {
-        directoryRules = [ "~/Workspace/atomi" ];
-      };
-    } // imported.mkAllProviderCodexAccounts auth.providerNames;
-  };
-
-  # Gemini multi-account configuration
-  programs.multi-gemini = {
-    enable = true;
-    defaultPackage = pkgs-llm.gemini-cli;
-    defaultAccount = "personal";
-
-    smartWrapper.enable = true;
-
-    shellIntegration = {
-      functions = false;
-      showActive = false;
-    };
-
-    accounts = {
-      personal = imported.mkGeminiAccount { directoryRules = personalDirs; };
-      work = imported.mkGeminiAccount { directoryRules = workDirs; };
-    };
-  };
-
-  # OpenCode multi-account configuration
-  programs.multi-opencode = {
-    enable = true;
-    defaultPackage = pkgs-llm.opencode;
-    defaultAccount = "personal";
-
-    smartWrapper.enable = true;
-
-    shellIntegration = {
-      functions = false;
-      showActive = false;
-    };
-
-    accounts = {
-      personal = imported.mkOpencodeAccount {
-        provider = "openai";
-        directoryRules = personalDirs;
-      };
-      work = imported.mkOpencodeAccount {
-        provider = "openai";
-        directoryRules = workDirs;
-      };
-    } // imported.mkAllProviderOpencodeAccounts auth.providerNames;
-  };
-
   programs.multi-gh = {
     enable = true;
     defaultAccount = "personal";
@@ -355,8 +193,10 @@ rec {
     [
       loctl
 
-      # Raw `codex` (plain binary, default ~/.codex home shared with the desktop
-      # app). The `codex-<name>` multi-account wrappers come from programs.multi-codex.
+      # AI agent CLIs. These provide the underlying `claude`/`codex` binaries on
+      # PATH; the per-account wrappers in ~/.kfleet/bin (claude-<name>,
+      # codex-<name>, …), generated by `kfleet` from ~/.kfleet/config.yaml, exec them.
+      claude-code-pkg
       codex-pkg
 
       # system
@@ -434,6 +274,7 @@ rec {
       kloop
       kautopilot
       klaude
+      kfleet
       atomi.clickup_cli
       grafana-loki
       prometheus.cli
@@ -461,7 +302,6 @@ rec {
       # oracle cloud
       oci-cli
 
-      # claude-code is now managed by claude-multi module
 
     ]
     ++ (
@@ -496,12 +336,14 @@ rec {
     K8S_EKS_EXTRA_CLUSTER_SPECS = "us-east-1:eks-llm-us-east-1";
     OCI_OKE_ENDPOINT = "PUBLIC_ENDPOINT";
     OCI_OKE_CONTROL_PLANE_NSG_ID = "ocid1.networksecuritygroup.oc1.iad.aaaaaaaa2zqs4wmn6h7wl4mux3zqbwukb6ya3cxq6i76mdhxpxqyfbnepydq";
+
   };
 
   ##################
   # Addtional PATH #
   ##################
   home.sessionPath = [
+    "$HOME/.kfleet/bin" # kfleet-generated agent wrappers (claude-<name>, codex-<name>, …)
     "$HOME/.local/bin"
     "$HOME/bin"
     "$HOME/.npm-global/bin"
@@ -512,25 +354,10 @@ rec {
   #######################
   services = (if profile.kernel == "linux" then linuxService else { });
 
-  ###########################################
-  # kloop dashboard (native, always-on)     #
-  ###########################################
-  # Run `kloop serve` natively under launchd instead of the dockerized `kloop dash`.
-  # The viewer's crash detection calls process.kill(pid, 0); inside the dash container
-  # the host PID is invisible (separate PID namespace, and on macOS the container lives
-  # in a Linux VM), so every running run shows as "crashed". Serving natively keeps the
-  # PID check on the same host, so status is correct. KeepAlive = always-on + auto-restart.
-  launchd.agents.kloop-serve = lib.mkIf (profile.kernel == "darwin") {
-    enable = true;
-    config = {
-      ProgramArguments = [ "${kloop}/bin/kloop" "serve" "--port" "47316" ];
-      RunAtLoad = true;
-      KeepAlive = true;
-      # ~/Library/Logs always exists; launchd does not create missing parent dirs.
-      StandardOutPath = "${home.homeDirectory}/Library/Logs/kloop-serve.out.log";
-      StandardErrorPath = "${home.homeDirectory}/Library/Logs/kloop-serve.err.log";
-    };
-  };
+  # NOTE: the kloop/kautopilot dashboards are no longer managed here. They run as
+  # self-installed per-user services (launchd on macOS, systemd --user on Linux)
+  # via the binaries themselves: `kloop service install` / `kautopilot service
+  # install`. Nix only distributes the binaries; it does not own the daemon.
 
   ##########################
   # Program Configurations #
@@ -718,6 +545,12 @@ rec {
             fi
             if [ -e $HOME/.nix-profile/etc/profile.d/nix.sh ]; then . $HOME/.nix-profile/etc/profile.d/nix.sh; fi
             if [ -e $HOME/.secrets ]; then . $HOME/.secrets; fi
+
+            # Keep zsh-autocomplete's live menus, but make redraws less aggressive
+            # around multi-line prompts.
+            zstyle ':autocomplete:*' delay 0.12
+            zstyle ':autocomplete:list-choices:*' list-lines 8
+            zstyle ':autocomplete:history-incremental-search-backward:*' list-lines 6
           '';
           zshConfig = lib.mkOrder 1000 ''
             unalias grep
@@ -776,7 +609,6 @@ rec {
           "kubectl"
           "dotnet"
           "golang"
-          "fd"
           "helm"
           "node"
           "git"
@@ -891,8 +723,8 @@ rec {
         kps = "kloop status";
         kpc = "kloop cancel";
         kpl = "kloop logs";
-        # Restart the always-on `kloop serve` launchd agent (picks up edited src/).
-        kpsr = "launchctl kickstart -k gui/$(id -u)/org.nix-community.home.kloop-serve";
+        # Restart the self-installed kloop dashboard service (picks up edited src/).
+        kpsr = "kloop service restart";
         klg = "tail -f ./.kagent/run.log";
         vpr = "gh pr view --web";
 

@@ -363,9 +363,11 @@ export const configSchema = z.object({
 			.default("current-session"),
 		execMode: z.enum(["kloop", "sub-agent"]).default("kloop"),
 		// Public base URL of THIS (kautopilot) viewer, for shareable artifact links.
-		viewerBaseUrl: z.string().default("https://kauto.ernest.atomi.cloud"),
+		// Defaults to the local serve port; set a public domain in config.yaml when
+		// exposing it (e.g. through a tunnel).
+		viewerBaseUrl: z.string().default("http://localhost:47317"),
 		// Public base URL of the kloop viewer — sessions link to their kloop runs.
-		kloopBaseUrl: z.string().default("https://kloop.ernest.atomi.cloud"),
+		kloopBaseUrl: z.string().default("http://localhost:47316"),
 		// Local port the kautopilot dashboard serves on.
 		viewerPort: z.number().min(1).max(65535).default(47317),
 	}),
@@ -688,8 +690,8 @@ Discuss the PR with the user. Figure out:
 		maxParallelRepos: 2,
 		runMode: "current-session",
 		execMode: "kloop",
-		viewerBaseUrl: "https://kauto.ernest.atomi.cloud",
-		kloopBaseUrl: "https://kloop.ernest.atomi.cloud",
+		viewerBaseUrl: "http://localhost:47317",
+		kloopBaseUrl: "http://localhost:47316",
 		viewerPort: 47317,
 	},
 	orgs: {

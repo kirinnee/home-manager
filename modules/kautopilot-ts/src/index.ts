@@ -24,6 +24,7 @@ import { createResetCommand } from "./cli/reset";
 import { createReviseCommand } from "./cli/revise";
 import { createScheduleCommand } from "./cli/schedule";
 import { createServeCommand } from "./cli/serve";
+import { createServiceCommand } from "./cli/service";
 import { createStartCommand } from "./cli/start";
 import { createStatusCommand } from "./cli/status";
 import { createStopCommand } from "./cli/stop";
@@ -52,6 +53,7 @@ program
 	.addCommand(createLogEventCommand())
 	.addCommand(createResetCommand())
 	.addCommand(createServeCommand())
+	.addCommand(createServiceCommand())
 	.addCommand(createDashCommand());
 
 program

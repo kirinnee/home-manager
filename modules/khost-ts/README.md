@@ -1,6 +1,6 @@
 # khost-ts
 
-Host-exposure suite: CLIProxyAPI `:8317` + SSH over Cloudflare Tunnel.
+Host-exposure suite: SSH over a Cloudflare Tunnel + Grafana Alloy metrics.
 
 ## Runtime: dynamic (`bun run` from source)
 
@@ -15,27 +15,33 @@ that runs `bun run …/khost-ts/src/index.ts`, so:
   run `bun install`, delete `node_modules` afterward — the global cache stays
   warm, so the app keeps working.
 
-## Proxy config: declarative skeleton + sops fragment
+## Config: `~/.khost/` (standalone, no monorepo, no sops)
 
-The runtime config (`~/.local/state/khost/proxy/config.yaml`) is **regenerated
-on every `khost proxy up`** by merging two committed files:
+All config lives under `~/.khost/` — khost reads nothing from this repo at
+runtime. Override the dir with `KHOST_CONFIG_DIR`.
 
-- `proxy/config.skeleton.yaml` — non-secret config (plaintext, comments preserved).
-- `proxy/config.secrets.enc.yaml` — secret subtrees (API keys, tokens, etc.),
-  sops-encrypted.
+```sh
+khost init     # scaffold ~/.khost/config.yaml + alloy.alloy
+khost doctor   # preflight: tools, sshd, config, Cloudflare, Alloy
+khost up       # bring up ssh + alloy + tunnel + routes
+```
 
-Because `up` re-renders, **edits made through the CLIProxyAPI control panel /
-management API are not durable on their own** — the next re-render would
-overwrite them. `khost proxy capture` folds them back into the two committed
-files so they survive:
-
-- `khost proxy up` / `khost proxy down` run capture **automatically** first, so
-  panel edits are absorbed, not lost. (No-op when already in sync — sops is only
-  re-encrypted when a secret actually changed, so there's no git churn.)
-- Run `khost proxy capture` manually anytime to pull the live config into the
-  repo, then **commit** `proxy/config.skeleton.yaml` + `proxy/config.secrets.enc.yaml`.
-- Prefer editing secrets directly with `khost proxy edit` (sops) when you don't
-  need the panel.
-
-Secret sections (see `secretPaths` in `src/deps.ts`) always go to the encrypted
-fragment — capture never writes a credential into the plaintext skeleton.
+- **`~/.khost/config.yaml`** — everything: `machine`, `ssh`, `tunnel`,
+  `cloudflare` (account_id + api_token), `access`, `routes`, `alloy`, `metrics`.
+  Plaintext (it's in your home dir, never a repo).
+- **`~/.khost/alloy.alloy`** — the full Grafana Alloy config. `khost alloy up`
+  copies it into the runtime state dir and runs docker compose (UI on `:12345`).
+  Scrapes the local kloop/kautopilot/kfleet exporters by default. To ship metrics
+  out, uncomment the `remote_write` block (it reads `sys.env(...)`) and set the
+  destination in `config.yaml`'s `alloy.remote_write` (url/username/password) —
+  **the token: env wins** (`ALLOY_REMOTE_WRITE_PASSWORD`), so it can stay out of
+  plaintext. khost injects these into the container at `up` time; the generated
+  compose file holds no secret. `khost alloy edit` opens the config.
+- **`khost metrics`** — khost's own Prometheus exporter (`khost metrics serve`,
+  port 47319): ssh-into-self (loopback + mesh), alloy/docker up, Cloudflare
+  tunnel health + connections, route drift, and credential validity. Run it as a
+  background service with `khost metrics service install` (launchd/systemd).
+- **Machine identity** = `config.machine` (else the sanitized short hostname).
+  It drives the tunnel name (`khost-<machine>`) and the `{machine}` route token.
+- **No secrets infra:** Cloudflare creds are plaintext in `~/.khost` (env wins for
+  the Alloy remote_write token). No sops/age. Zones are auto-discovered.

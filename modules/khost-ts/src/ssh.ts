@@ -6,7 +6,7 @@
 // which keeps password auth safe. Linux uses a config drop-in (sshd there isn't
 // socket-activated, so ListenAddress works directly).
 import { existsSync } from 'node:fs';
-import { osKind, sshPort } from './deps';
+import { meshListen, osKind, sshPort } from './deps';
 import { die, log, ok, run, warn } from './exec';
 
 const SSHD_CONFIG = '/etc/ssh/khost_sshd_config';
@@ -23,7 +23,7 @@ const LINUX_DROPIN = '/etc/ssh/sshd_config.d/100-khost.conf';
 // NOTE: if WARP isn't up when sshd starts (boot ordering), sshd binds 127.0.0.1
 // and skips the mesh address — re-run `khost ssh setup` (or reload) once WARP is
 // connected to pick it up. Boot-time WARP-up reload is a follow-up.
-const meshListen = process.env.KHOST_MESH_LISTEN ?? '172.16.0.2';
+// Configured via ssh.mesh_listen in ~/.khost/config.yaml ('' disables it).
 
 function currentUser(): string {
   return process.env.SUDO_USER ?? process.env.USER ?? '';

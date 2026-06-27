@@ -21,10 +21,18 @@ rec {
   '';
   # klaude: run-from-source wrapper. Wraps crc-kirin (Claude remote-control) in a
   # persistent zellij session. zellij is put on PATH; crc-kirin/fzf come from the
-  # host PATH (claude-multi `crc` alias + user tooling).
+  # host PATH (crc-kirin is now a kfleet-generated command in ~/.kfleet/bin + user tooling).
   klaude = nixpkgs.writeShellScriptBin "klaude" ''
     export PATH="${nixpkgs.lib.makeBinPath [ nixpkgs.zellij ]}:$PATH"
     exec ${nixpkgs.bun}/bin/bun run ~/.config/home-manager/modules/klaude-ts/src/index.ts "$@"
+  '';
+  # kfleet: run-from-source wrapper. Generates the claude/codex/gemini/opencode
+  # account wrappers + config dirs from ~/.kfleet/config.yaml (replaces the old
+  # Nix multi-* agent modules). Also generates `commands` (flag-prepended
+  # executables like crc-kirin/yolo-kirin) into ~/.kfleet/bin. `kfleet apply`
+  # after editing the config.
+  kfleet = nixpkgs.writeShellScriptBin "kfleet" ''
+    exec ${nixpkgs.bun}/bin/bun run ~/.config/home-manager/modules/kfleet-ts/src/index.ts "$@"
   '';
   # loctl: run-from-source wrapper (matches the old `loctl-wrapper` package, which
   # bundled no extra tools and relied on host PATH). Replaces the `loctl` flake

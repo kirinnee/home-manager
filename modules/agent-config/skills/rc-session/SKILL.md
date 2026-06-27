@@ -17,6 +17,20 @@ The launched command is:
 yolo-<harness> --rc --name "<session name>" --chrome
 ```
 
+**Harness note.** `--rc` (remote-control, phone-driveable via claude.ai) and the
+`yolo-*`/`crc` wrappers are **Claude Code** features. On **Codex** there is no
+remote-control, so the codex equivalent is a _detached local_ session: launch the
+codex wrapper inside zellij directly and attach to it locally —
+
+```bash
+zellij --session "<slug>" --new-session-with-layout <(printf 'layout { pane command="codex-<account>" { cwd "%s" } }' "$PWD")
+# later: zellij attach "<slug>"
+```
+
+i.e. it survives this session and is attachable, but is **not** phone-driveable
+(no `--rc`). Everything else below (worktree creation, naming, category routing)
+is identical for both harnesses.
+
 ## Order of Operations
 
 1. **Gather information** from the user (category, ticket, names).

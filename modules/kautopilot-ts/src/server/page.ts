@@ -713,7 +713,7 @@ const CLIENT_SCRIPT = [
 	"  app.appendChild(head);",
 	"  // ── kloop runs spawned by this session (link straight to the run viewer) ──",
 	"  const kruns = (d.artifacts && d.artifacts.kloopRuns) || [];",
-	"  if (kruns.length) { const kbase = (window.__kloopBase || 'https://kloop.ernest.atomi.cloud'); const kl = el('div', 'krunlinks'); for (const rid of kruns) { const ka = el('a', 'krunlink'); ka.href = kbase + '/kloop/' + encodeURIComponent(rid); ka.target = '_blank'; ka.innerHTML = '🔁 ' + esc(rid); kl.appendChild(ka); } app.appendChild(kl); }",
+	"  if (kruns.length) { const kbase = (window.__kloopBase || ''); const kl = el('div', 'krunlinks'); for (const rid of kruns) { const ka = el('a', 'krunlink'); ka.href = kbase + '/kloop/' + encodeURIComponent(rid); ka.target = '_blank'; ka.innerHTML = '🔁 ' + esc(rid); kl.appendChild(ka); } app.appendChild(kl); }",
 	"  // ── artifacts ──",
 	"  app.appendChild(el('div', 'section-title', 'Artifacts'));",
 	'  const list = el("div", "art-list");',

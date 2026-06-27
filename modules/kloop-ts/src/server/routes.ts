@@ -216,6 +216,98 @@ async function handleApi(data: KloopData, parts: string[], url: URL): Promise<Re
   return notFoundJson();
 }
 
+const metricEsc = (s: string): string => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
+
+// Failed-agent aggregation is heavier (it materializes per-run status), so cache
+// it and only scan the most-recent runs. `reason` is the recorded error string
+// ("exit_code_N", "timeout", "no_verdict", "interrupted").
+const FAILURES_TTL_MS = 60_000;
+const FAILURES_SCAN = 50;
+let failuresCache: { at: number; lines: string[] } = { at: 0, lines: [] };
+
+/** Collect error-status agent attempts ({binary, reason}) from one materialized
+ *  loop. A timed-out agent is status:'error' with error:'timeout' (the status
+ *  enum is only pending/running/completed/error), so this captures timeouts too.
+ *  Reviewers live under reviewPhases[]/verifyPhases[], not a flat list. */
+function loopErrors(loop: unknown): { binary: string; reason: string }[] {
+  const out: { binary: string; reason: string }[] = [];
+  const add = (a: unknown): void => {
+    if (a && typeof a === 'object') {
+      const o = a as { status?: string; binary?: string; error?: string };
+      if (o.status === 'error' && typeof o.binary === 'string') {
+        out.push({ binary: o.binary, reason: typeof o.error === 'string' && o.error ? o.error : 'error' });
+      }
+    }
+  };
+  const l = loop as {
+    implementer?: unknown;
+    synthesis?: unknown;
+    checkpoint?: unknown;
+    reviewPhases?: { reviewers?: unknown[] }[];
+    verifyPhases?: { reviewers?: unknown[] }[];
+  };
+  add(l.implementer);
+  add(l.synthesis);
+  add(l.checkpoint);
+  for (const phase of l.reviewPhases ?? []) for (const r of phase.reviewers ?? []) add(r);
+  for (const phase of l.verifyPhases ?? []) for (const r of phase.reviewers ?? []) add(r);
+  return out;
+}
+
+async function refreshFailures(data: KloopData): Promise<void> {
+  const runs = (await data.listRuns()) as { id: string }[];
+  const counts = new Map<string, number>();
+  for (const r of runs.slice(0, FAILURES_SCAN)) {
+    const detail = (await data.runDetail(r.id)) as { loops?: unknown[] } | null;
+    for (const loop of detail?.loops ?? []) {
+      for (const e of loopErrors(loop)) {
+        const key = `${e.binary}\u0000${e.reason}`;
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+    }
+  }
+  const lines = [
+    '# HELP kloop_agent_failures Failed agent attempts (exit≠0 / timeout / no_verdict) by binary+reason, across recent runs.',
+    '# TYPE kloop_agent_failures gauge',
+    ...[...counts]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, n]) => {
+        const [binary, reason] = key.split('\u0000');
+        return `kloop_agent_failures{binary="${metricEsc(binary!)}",reason="${metricEsc(reason!)}"} ${n}`;
+      }),
+  ];
+  failuresCache = { at: Date.now(), lines };
+}
+
+/** Prometheus exposition of kloop's own run stats. Run counts are computed
+ *  per-scrape (cheap); failed-agent counts come from a cached, bounded scan. */
+async function metricsResponse(data: KloopData): Promise<Response> {
+  const runs = (await data.listRuns()) as { status?: string }[];
+  const byStatus = new Map<string, number>();
+  for (const r of runs) byStatus.set(r.status ?? 'unknown', (byStatus.get(r.status ?? 'unknown') ?? 0) + 1);
+  const lines = [
+    '# HELP kloop_runs_running Number of currently running kloop runs.',
+    '# TYPE kloop_runs_running gauge',
+    `kloop_runs_running ${byStatus.get('running') ?? 0}`,
+    '# HELP kloop_runs Number of kloop runs by status.',
+    '# TYPE kloop_runs gauge',
+    ...[...byStatus]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([s, n]) => `kloop_runs{status="${metricEsc(s)}"} ${n}`),
+  ];
+  if (Date.now() - failuresCache.at > FAILURES_TTL_MS) {
+    try {
+      await refreshFailures(data);
+    } catch {
+      /* keep the previous failure snapshot on a transient read error */
+    }
+  }
+  lines.push(...failuresCache.lines);
+  return new Response(`${lines.join('\n')}\n`, {
+    headers: { 'content-type': 'text/plain; version=0.0.4; charset=utf-8', 'cache-control': 'no-store' },
+  });
+}
+
 /** Build the Bun.serve fetch handler bound to a deps-backed data layer. */
 export function createFetch(deps: CliDeps): (req: Request) => Promise<Response> {
   const data = makeKloopData(deps);
@@ -225,6 +317,7 @@ export function createFetch(deps: CliDeps): (req: Request) => Promise<Response> 
       if (req.method !== 'GET' && req.method !== 'HEAD') {
         return new Response('Method Not Allowed', { status: 405 });
       }
+      if (url.pathname === '/metrics') return metricsResponse(data);
       const parts = url.pathname.split('/').filter(Boolean);
       if (parts[0] === 'api') {
         return (await handleApi(data, parts, url)) ?? notFoundJson();

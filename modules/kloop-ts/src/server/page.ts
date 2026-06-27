@@ -378,6 +378,50 @@ h1.page-title a:hover { color: var(--accent); text-decoration: none; }
 .kreview > summary, .kev > summary { cursor: pointer; padding: 8px 12px; font-size: 0.86rem; display: flex; align-items: center; gap: 8px; }
 .kreview > .prose, .kev > .prose { padding: 0 14px 10px; }
 .kev > .kconfig { margin: 0 12px 12px; }
+/* review matrix (pool × lens) — Overview history (static) + Reviews tab (interactive).
+   Never scrolls horizontally: if a matrix is too wide for its column to fit, JS adds
+   .kmx-stack (see klFitWrap) and it reflows to stacked full-width cards instead. */
+.kmx-wrap { overflow: hidden; margin: 4px 0 2px; padding-bottom: 2px; }
+.kmx { display: inline-grid; gap: 4px; min-width: max-content; align-items: stretch; }
+.kmx-corner { }
+.kmx-ch { padding: 2px 4px; text-align: center; display: flex; justify-content: center; align-items: center; }
+.kmx-rh { display: flex; align-items: center; font-family: var(--font-mono); font-size: 0.72rem; color: var(--fg-soft); padding: 2px 8px 2px 2px; white-space: nowrap; }
+.kmx-cell { border: 1px solid var(--border-soft); border-radius: var(--r-sm); background: var(--surface); padding: 5px 7px; display: flex; flex-direction: column; gap: 3px; align-items: flex-start; }
+.kmx-cell.empty { color: var(--muted); align-items: center; justify-content: center; background: var(--surface-2); border-style: dashed; }
+.kmx-cell.ok { border-color: var(--ok-border); } .kmx-cell.err { border-color: var(--err-border); }
+.kmx-cell.warn { border-color: var(--warn-border); } .kmx-cell.block { border-color: var(--err-border); }
+.kmx-head { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.kmx-meta { font-family: var(--font-mono); font-size: 0.66rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.kmx-pct { font-size: 0.66rem; color: var(--muted); }
+/* retry badge — an agent that needed ≥1 retry (account re-rolled from its pool each time) */
+.kretry { display: inline-flex; align-items: center; font-size: 0.66rem; font-weight: 600; padding: 1px 5px; border-radius: var(--r-full); background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn-border); white-space: nowrap; }
+/* interactive cells (Reviews tab) are buttons that load the reviewer's markdown */
+button.kmx-cell { cursor: pointer; font: inherit; text-align: left; transition: border-color 0.12s, box-shadow 0.12s; }
+button.kmx-cell:hover { border-color: var(--accent-border); }
+button.kmx-cell.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+button.kmx-cell.disabled { opacity: 0.45; cursor: default; }
+button.kmx-cell.disabled:hover { border-color: var(--border-soft); }
+.kmx-phase { font-size: 0.66rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin: 10px 0 4px; }
+.kreview-content { margin: var(--s-3) 0; }
+.kreview-content:empty { display: none; }
+.kreview-content > .prose { border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); padding: 2px 14px 10px; }
+/* collapsible matrix wrapper (Reviews tab + Overview review phases) */
+.kmx-fold { border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); margin-bottom: var(--s-3); padding: 0 10px 8px; }
+.kmx-fold[open] { padding-bottom: 10px; }
+.kmx-foldh { cursor: pointer; padding: 8px 2px; font-size: 0.86rem; font-weight: 600; list-style-position: inside; }
+.kmx-foldh .kmuted { font-weight: 400; font-size: 0.78rem; }
+details.kcard.kmx-fold { background: var(--surface); }
+details.kcard.kmx-fold > .kmx-foldh { padding: 4px 2px; }
+/* per-cell pool·lens caption — only shown once the grid reflows to stacked cards */
+.kmx-cell-label { display: none; }
+/* ── stacked layout: labelled full-width cards, no horizontal scroll. Toggled by JS
+   (klFitWrap) whenever the grid would overflow — covers both mobile and wide matrices
+   that don't fit on desktop. ── */
+.kmx-wrap.kmx-stack .kmx { display: flex !important; flex-direction: column; gap: 6px; min-width: 0; grid-template-columns: none !important; }
+.kmx-wrap.kmx-stack .kmx-corner, .kmx-wrap.kmx-stack .kmx-ch, .kmx-wrap.kmx-stack .kmx-rh { display: none; }
+.kmx-wrap.kmx-stack .kmx-cell { width: 100%; box-sizing: border-box; min-width: 0; }
+.kmx-wrap.kmx-stack .kmx-cell.empty { display: none; }
+.kmx-wrap.kmx-stack .kmx-cell-label { display: block; font-family: var(--font-mono); font-size: 0.68rem; color: var(--muted); margin-bottom: 1px; }
 /* logs live tag */
 .klog-livetag { font-size: 0.72rem; font-weight: 600; color: var(--muted); }
 .klog-livetag.on { color: var(--ok); }
@@ -520,14 +564,114 @@ function klOverviewConfig(cfg) {
   if (!cards) return null;
   const wrap = el('details', 'kcfg'); wrap.open = true; wrap.innerHTML = '<summary>Configuration</summary><div class="kcfg-grid">' + cards + '</div>'; return wrap;
 }
+// ── review matrix (pool × lens) — shared by Overview history + Reviews tab ──
+// A reviewer in the matrix is identified by (reviewType = account pool) × (lens). Build
+// ordered axis lists + a cell lookup keyed "pool lens". indices, when given, carries
+// each reviewer's global flat index (for mapping back to reviewer-N.md in the Reviews tab).
+function klBuildMatrix(reviewers, indices) {
+  const lenses = [], pools = [], seenL = {}, seenP = {}, cells = {};
+  (reviewers || []).forEach((rv, i) => {
+    const lens = rv.lens || 'general';
+    const pool = rv.reviewType || rv.binary || 'review';
+    if (!seenL[lens]) { seenL[lens] = 1; lenses.push(lens); }
+    if (!seenP[pool]) { seenP[pool] = 1; pools.push(pool); }
+    cells[pool + ' ' + lens] = { rv: rv, idx: indices ? indices[i] : i };
+  });
+  return { lenses: lenses, pools: pools, cells: cells };
+}
+// Retry badge: shown only when an agent needed ≥1 retry (each retry re-rolls the account
+// from its pool). retryAttempt is the 0-indexed attempt that produced the result.
+function klRetry(o) {
+  if (!o || !o.retryAttempt) return '';
+  const title = 'retried ' + o.retryAttempt + (o.retryMax != null ? ' of ' + o.retryMax : '') + '× (account re-rolled from the pool each retry)';
+  return ' <span class="kretry" title="' + esc(title) + '">↻' + esc(o.retryAttempt) + '</span>';
+}
+// Compact cell contents: verdict (or live status) + completion% + propagated + retry flag,
+// with a muted meta line (harness · model · duration). Errors render in the error tone.
+function klCellInner(rv) {
+  if (!rv) return '<span class="kmuted">·</span>';
+  const head = (klVerdict(rv.verdict) || klBadge(rv.status || 'pending'))
+    + (rv.completionEstimate != null ? ' <span class="kmx-pct">' + esc(rv.completionEstimate) + '%</span>' : '')
+    + (rv.propagated ? ' ' + klPill('prop', 'accent') : '')
+    + klRetry(rv);
+  const bits = [];
+  if (rv.harness) bits.push(String(rv.harness));
+  if (rv.model) bits.push(String(rv.model));
+  if (rv.durationMs != null) bits.push(fmtDur(rv.durationMs));
+  const meta = bits.length ? '<div class="kmx-meta">' + esc(bits.join(' · ')) + '</div>' : '';
+  const err = rv.error ? '<div class="kmx-meta" style="color:var(--err)">' + esc(rv.error) + '</div>' : '';
+  return '<div class="kmx-head">' + head + '</div>' + meta + err;
+}
+// Full per-reviewer detail, for the cell's hover tooltip.
+function klCellTitle(rv, pool, lens) {
+  const p = ['lens: ' + (lens || rv.lens || 'general'), 'pool: ' + (pool || rv.reviewType || '')];
+  if (rv.binary) p.push('account: ' + rv.binary);
+  if (rv.harness) p.push('harness: ' + rv.harness);
+  if (rv.model) p.push('model: ' + rv.model);
+  if (rv.verdict) p.push('verdict: ' + rv.verdict);
+  if (rv.completionEstimate != null) p.push('completion: ' + rv.completionEstimate + '%');
+  if (rv.retryAttempt) p.push('retries: ' + rv.retryAttempt + (rv.retryMax != null ? '/' + rv.retryMax : ''));
+  if (rv.propagated) p.push('propagated');
+  if (rv.durationMs != null) p.push('duration: ' + fmtDur(rv.durationMs));
+  if (rv.inputTokens != null) p.push('tokens: ' + rv.inputTokens + ' → ' + rv.outputTokens);
+  if (rv.error) p.push('error: ' + rv.error);
+  return p.join('\n');
+}
+// Per-cell "pool · lens" caption — hidden on desktop (the row/col headers carry it),
+// shown when the grid reflows to a stacked single column on narrow screens.
+function klCellLabel(pool, lens) { return '<span class="kmx-cell-label">' + esc(pool) + ' · ' + esc(lens) + '</span>'; }
+// Static matrix HTML (Overview loop history): pool rows × lens columns, verdict-coloured.
+function klMatrixStatic(reviewers) {
+  if (!reviewers || !reviewers.length) return '<div class="kline kmuted">no reviewers</div>';
+  const m = klBuildMatrix(reviewers, null);
+  const cols = 'auto repeat(' + m.lenses.length + ', minmax(110px, 1fr))';
+  let h = '<div class="kmx-wrap"><div class="kmx" style="grid-template-columns:' + cols + '">';
+  h += '<div class="kmx-corner"></div>';
+  for (const l of m.lenses) h += '<div class="kmx-ch">' + klPill(l, 'accent') + '</div>';
+  for (const p of m.pools) {
+    h += '<div class="kmx-rh" title="' + esc(p) + '">' + esc(p) + '</div>';
+    for (const l of m.lenses) {
+      const c = m.cells[p + ' ' + l];
+      if (!c) { h += '<div class="kmx-cell empty">·</div>'; continue; }
+      h += '<div class="kmx-cell ' + tone(c.rv.verdict || c.rv.status) + '" title="' + esc(klCellTitle(c.rv, p, l)) + '">' + klCellLabel(p, l) + klCellInner(c.rv) + '</div>';
+    }
+  }
+  h += '</div></div>';
+  return h;
+}
+// Decide per-matrix whether to stack: drop the class, let the grid take its natural
+// (max-content) width, and if that overflows the wrapper, switch to stacked cards. So the
+// matrix never scrolls horizontally — it reflows to one column per cell instead.
+function klFitWrap(wrap) {
+  wrap.classList.remove('kmx-stack');
+  const grid = wrap.firstElementChild;
+  if (!grid) return;
+  if (grid.scrollWidth - wrap.clientWidth > 1) wrap.classList.add('kmx-stack');
+}
+// Fit every currently-visible matrix under root (hidden ones — inside a collapsed
+// <details> — measure 0 and are skipped; they get fitted when their section opens).
+function klFitMatrices(root) {
+  for (const w of (root || document).querySelectorAll('.kmx-wrap')) { if (w.clientWidth > 0) klFitWrap(w); }
+}
+// Bind the global re-fit triggers once: viewport resize, and any collapsible opening
+// (the 'toggle' event doesn't bubble, so listen in the capture phase). A rAF coalesces
+// bursts. ResizeObserver is intentionally avoided — it's throttled when the tab isn't
+// painting, which made stacking unreliable.
+function klBindMatrixFit() {
+  if (window.__klFitBound) return; window.__klFitBound = true;
+  let raf = 0;
+  const sched = () => { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; klFitMatrices(document); }); };
+  window.addEventListener('resize', sched);
+  document.addEventListener('toggle', sched, true);
+}
 // ── per-loop card builders (shared by Overview history) ──
 function klFlatReviewers(phases) { const out = []; for (const ph of (phases || [])) for (const rv of (ph.reviewers || [])) out.push(rv); return out; }
 function klAppendLoopCards(host, lp) {
   if (lp.implementer) { const im = lp.implementer; const card = el('div', 'kcard'); card.innerHTML = '<div class="kcard-h">Implementer ' + klBadge(im.status) + '</div><div class="kline">' + esc(im.binary || '') + ' ' + klHarness(im.harness) + klModel(im.model) + (im.durationMs != null ? ' · ' + fmtDur(im.durationMs) : '') + (im.inputTokens != null ? ' · ' + esc(im.inputTokens) + '→' + esc(im.outputTokens) + ' tok' : '') + (im.retryAttempt ? ' · retry ' + esc(im.retryAttempt) : '') + '</div>' + (im.error ? '<div class="kerr">' + esc(im.error) + '</div>' : ''); host.appendChild(card); }
-  for (const ph of (lp.reviewPhases || [])) { const card = el('div', 'kcard'); let h = '<div class="kcard-h">Review phase ' + esc(ph.phase) + (ph.shortCircuited ? ' ' + klPill('short-circuited', 'warn') : '') + '</div>'; for (const rv of (ph.reviewers || [])) { h += '<div class="kline">' + (rv.lens ? klPill(rv.lens, 'accent') + ' ' : '') + esc(rv.binary || '') + (rv.reviewType && rv.reviewType !== rv.binary ? ' <span class="kmuted">[' + esc(rv.reviewType) + ']</span>' : '') + ' ' + klHarness(rv.harness) + klModel(rv.model) + ' ' + klVerdict(rv.verdict) + (rv.completionEstimate != null ? ' <span class="kmuted">' + esc(rv.completionEstimate) + '%</span>' : '') + (rv.propagated ? ' ' + klPill('propagated', 'accent') : '') + (rv.durationMs != null ? ' · ' + fmtDur(rv.durationMs) : '') + (rv.inputTokens != null ? ' · ' + esc(rv.inputTokens) + '→' + esc(rv.outputTokens) + ' tok' : '') + '</div>' + (rv.error ? '<div class="kerr">' + esc(rv.error) + '</div>' : ''); } card.innerHTML = h; host.appendChild(card); }
-  for (const ph of (lp.verifyPhases || [])) { if (!(ph.reviewers || []).length) continue; const card = el('div', 'kcard'); let h = '<div class="kcard-h">Verify phase ' + esc(ph.phase) + '</div>'; for (const rv of (ph.reviewers || [])) { h += '<div class="kline">' + esc(rv.binary || '') + ' ' + klHarness(rv.harness) + klModel(rv.model) + ' ' + klVerdict(rv.verdict) + (rv.durationMs != null ? ' · ' + fmtDur(rv.durationMs) : '') + '</div>'; } card.innerHTML = h; host.appendChild(card); }
-  if (lp.synthesis) { const sy = lp.synthesis; const card = el('div', 'kcard'); card.innerHTML = '<div class="kcard-h">Synthesis ' + klBadge(sy.status) + '</div>' + (sy.binary ? '<div class="kline">' + esc(sy.binary) + ' ' + klHarness(sy.harness) + klModel(sy.model) + (sy.durationMs != null ? ' · ' + fmtDur(sy.durationMs) : '') + '</div>' : '') + (sy.error ? '<div class="kerr">' + esc(sy.error) + '</div>' : ''); host.appendChild(card); }
-  if (lp.checkpoint) { const cp = lp.checkpoint; const card = el('div', 'kcard'); card.innerHTML = '<div class="kcard-h">Checkpoint ' + klBadge(cp.status || cp.outcome || '') + '</div>' + (cp.binary ? '<div class="kline">' + esc(cp.binary) + ' ' + klHarness(cp.harness) + klModel(cp.model) + '</div>' : '') + (cp.summary ? '<div class="kline">' + esc(cp.summary) + '</div>' : ''); host.appendChild(card); }
+  for (const ph of (lp.reviewPhases || [])) { const revs = ph.reviewers || []; const ok = revs.filter((r) => tone(r.verdict) === 'ok').length; const det = el('details', 'kcard kmx-fold'); det.open = true; det.innerHTML = '<summary class="kmx-foldh">Review phase ' + esc(ph.phase) + (ph.shortCircuited ? ' ' + klPill('short-circuited', 'warn') : '') + ' <span class="kmuted">' + ok + '/' + revs.length + ' ok</span></summary>' + klMatrixStatic(revs); host.appendChild(det); }
+  for (const ph of (lp.verifyPhases || [])) { if (!(ph.reviewers || []).length) continue; const card = el('div', 'kcard'); let h = '<div class="kcard-h">Verify phase ' + esc(ph.phase) + '</div>'; for (const rv of (ph.reviewers || [])) { h += '<div class="kline">' + esc(rv.binary || '') + ' ' + klHarness(rv.harness) + klModel(rv.model) + ' ' + klVerdict(rv.verdict) + (rv.durationMs != null ? ' · ' + fmtDur(rv.durationMs) : '') + klRetry(rv) + '</div>'; } card.innerHTML = h; host.appendChild(card); }
+  if (lp.synthesis) { const sy = lp.synthesis; const card = el('div', 'kcard'); card.innerHTML = '<div class="kcard-h">Synthesis ' + klBadge(sy.status) + klRetry(sy) + '</div>' + (sy.binary ? '<div class="kline">' + esc(sy.binary) + ' ' + klHarness(sy.harness) + klModel(sy.model) + (sy.durationMs != null ? ' · ' + fmtDur(sy.durationMs) : '') + '</div>' : '') + (sy.error ? '<div class="kerr">' + esc(sy.error) + '</div>' : ''); host.appendChild(card); }
+  if (lp.checkpoint) { const cp = lp.checkpoint; const card = el('div', 'kcard'); card.innerHTML = '<div class="kcard-h">Checkpoint ' + klBadge(cp.status || cp.outcome || '') + klRetry(cp) + '</div>' + (cp.binary ? '<div class="kline">' + esc(cp.binary) + ' ' + klHarness(cp.harness) + klModel(cp.model) + '</div>' : '') + (cp.summary ? '<div class="kline">' + esc(cp.summary) + '</div>' : ''); host.appendChild(card); }
 }
 function klLoopSummary(lp) {
   let parts = '';
@@ -553,6 +697,7 @@ function klOvDraw(pane, d, id) {
   if (!loops.length) { pane.appendChild(el('div', 'empty', 'No loops yet.')); return; }
   pane.appendChild(el('div', 'section-title', 'Loop history'));
   for (let i = loops.length - 1; i >= 0; i--) { const lp = loops[i]; const ln = lp.loop != null ? lp.loop : i + 1; const det = el('details', 'kloophist'); if (i === loops.length - 1) det.open = true; det.innerHTML = '<summary>Loop ' + esc(ln) + ' ' + klLoopSummary(lp) + '</summary>'; const body = el('div', 'kloophist-b'); klAppendLoopCards(body, lp); det.appendChild(body); pane.appendChild(det); }
+  klBindMatrixFit(); klFitMatrices(pane);
 }
 function klOverview(pane, d, id) {
   klStopPoll(); klOvDraw(pane, d, id);
@@ -662,20 +807,72 @@ async function klPrompts(pane, d, id, state) {
   pane.appendChild(head); pane.appendChild(bar); pane.appendChild(content);
   open(agents.find((a) => a.key === active) || agents[0]);
 }
-// ── Reviews tab (per loop: reviewer markdown + verdicts + synthesis summary) ──
+// ── Reviews tab (per loop: pool × lens matrix → reviewer markdown + synthesis) ──
+// The matrix doubles as a filter: each cell is a reviewer (one account pool × one lens);
+// click it to load that reviewer's markdown into the shared pane below. Multiple review
+// phases each get their own matrix (a re-review phase may run only a subset of cells).
 async function klReviews(pane, d, id, state) {
   klStopPoll(); pane.innerHTML = '';
   const loops = d.loops || [];
   if (!loops.length) { pane.appendChild(el('div', 'empty', 'No loops yet.')); return; }
   const lp = loops[state.loop] || loops[loops.length - 1];
   const ln = lp.loop != null ? lp.loop : state.loop + 1;
-  const files = ((await api('/kloop/dir?path=' + enc(id + '/loop-' + ln + '/reviews'))) || []).filter((x) => /^reviewer-\d+\.md$/.test(x)).sort();
-  const synDir = (await api('/kloop/dir?path=' + enc(id + '/loop-' + ln + '/synthesis'))) || [];
+  const base = id + '/loop-' + ln;
+  const files = ((await api('/kloop/dir?path=' + enc(base + '/reviews'))) || []).filter((x) => /^reviewer-\d+\.md$/.test(x));
+  const fileSet = {}; for (const f of files) fileSet[f] = 1;
+  const synDir = (await api('/kloop/dir?path=' + enc(base + '/synthesis'))) || [];
   const hasSyn = synDir.indexOf('review-summary.md') >= 0;
   if (!files.length && !hasSyn) { pane.appendChild(el('div', 'empty', 'No reviews for this loop yet.')); return; }
-  const rvs = klFlatReviewers(lp.reviewPhases); // matrix reviewers (carry lens/reviewType), indexed by global reviewer index
-  for (const f of files) { const idx = (f.match(/(\d+)/) || [])[1]; const rv = rvs[parseInt(idx, 10)] || {}; let verdict = ''; const vr = await api('/kloop/file?path=' + enc(id + '/loop-' + ln + '/verdicts/reviewer-' + idx + '.json')); if (vr && vr.content) { try { const j = JSON.parse(vr.content); verdict = j.verdict || j.decision || (j.approved === true ? 'approved' : j.approved === false ? 'rejected' : ''); } catch (_e) { /* ignore */ } } const det = el('details', 'kreview'); det.innerHTML = '<summary><b>' + esc(f) + '</b> ' + (rv.lens ? klPill(rv.lens, 'accent') + ' ' : '') + (rv.reviewType && rv.reviewType !== rv.binary ? '<span class="kmuted">[' + esc(rv.reviewType) + ']</span> ' : '') + klVerdict(verdict) + '</summary>'; const body = el('div', 'prose'); const r = await api('/kloop/file?path=' + enc(id + '/loop-' + ln + '/reviews/' + f)); body.innerHTML = renderMd((r && r.content) || ''); det.appendChild(body); pane.appendChild(det); await upgradeProse(body); }
-  if (hasSyn) { const det = el('details', 'kreview'); det.open = true; det.innerHTML = '<summary><b>synthesis · review-summary.md</b></summary>'; const body = el('div', 'prose'); const r = await api('/kloop/file?path=' + enc(id + '/loop-' + ln + '/synthesis/review-summary.md')); body.innerHTML = renderMd((r && r.content) || ''); det.appendChild(body); pane.appendChild(det); await upgradeProse(body); }
+
+  const content = el('div', 'kreview-content'); // shared pane: the selected reviewer's md
+  let activeBtn = null;
+  async function openReviewer(btn, idx) {
+    if (activeBtn) activeBtn.classList.remove('active');
+    activeBtn = btn; btn.classList.add('active');
+    content.innerHTML = '';
+    const r = await api('/kloop/file?path=' + enc(base + '/reviews/reviewer-' + idx + '.md'));
+    if (btn !== activeBtn) return; // a newer click superseded this fetch
+    const body = el('div', 'prose'); body.innerHTML = renderMd((r && r.content) || '*(no review written)*');
+    content.appendChild(body); await upgradeProse(body);
+  }
+
+  const phases = (lp.reviewPhases || []).filter((ph) => (ph.reviewers || []).length);
+  const multi = phases.length > 1;
+  const allRevs = klFlatReviewers(lp.reviewPhases);
+  const okCount = allRevs.filter((r) => tone(r.verdict) === 'ok').length;
+  // The whole matrix is collapsible — fold it away after picking a cell (handy on mobile).
+  const fold = el('details', 'kmx-fold'); fold.open = true;
+  fold.appendChild(el('summary', 'kmx-foldh', 'Reviewers <span class="kmuted">' + okCount + '/' + allRevs.length + ' ok · tap a cell to read</span>'));
+  let flat = 0, firstBtn = null;
+  for (const ph of (lp.reviewPhases || [])) {
+    const reviewers = ph.reviewers || [];
+    const indices = reviewers.map((_rv, i) => flat + i);
+    flat += reviewers.length;
+    if (!reviewers.length) continue;
+    if (multi) fold.appendChild(el('div', 'kmx-phase', 'Review phase ' + (ph.phase != null ? ph.phase : '') + (ph.shortCircuited ? ' · short-circuited' : '')));
+    const m = klBuildMatrix(reviewers, indices);
+    const grid = el('div', 'kmx'); grid.style.gridTemplateColumns = 'auto repeat(' + m.lenses.length + ', minmax(120px, 1fr))';
+    grid.appendChild(el('div', 'kmx-corner'));
+    for (const l of m.lenses) grid.appendChild(el('div', 'kmx-ch', klPill(l, 'accent')));
+    for (const p of m.pools) {
+      grid.appendChild(el('div', 'kmx-rh', esc(p)));
+      for (const l of m.lenses) {
+        const c = m.cells[p + ' ' + l];
+        if (!c) { grid.appendChild(el('div', 'kmx-cell empty', '·')); continue; }
+        const has = fileSet['reviewer-' + c.idx + '.md'];
+        const btn = el('button', 'kmx-cell ' + tone(c.rv.verdict || c.rv.status) + (has ? '' : ' disabled'), klCellLabel(p, l) + klCellInner(c.rv));
+        btn.title = klCellTitle(c.rv, p, l);
+        if (has) { const idx = c.idx; btn.onclick = () => openReviewer(btn, idx); if (!firstBtn) firstBtn = btn; }
+        grid.appendChild(btn);
+      }
+    }
+    const wrap = el('div', 'kmx-wrap'); wrap.appendChild(grid); fold.appendChild(wrap);
+  }
+  pane.appendChild(fold);
+  pane.appendChild(content);
+  klBindMatrixFit(); klFitMatrices(pane);
+  if (hasSyn) { const det = el('details', 'kreview'); det.open = true; det.innerHTML = '<summary><b>synthesis · review-summary.md</b></summary>'; const body = el('div', 'prose'); const r = await api('/kloop/file?path=' + enc(base + '/synthesis/review-summary.md')); body.innerHTML = renderMd((r && r.content) || ''); det.appendChild(body); pane.appendChild(det); await upgradeProse(body); }
+  if (firstBtn) firstBtn.click(); // auto-open the first reviewer so the pane isn't blank
 }
 // ── Evidence tab (per loop: diff.patch, files.json, self-review.md, …) ──
 async function klEvidence(pane, d, id, state) {
