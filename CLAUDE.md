@@ -1,5 +1,11 @@
 <!-- rtk-instructions v2 -->
 
+## Agent rules
+
+- Never use Python for ad hoc scripting, file edits, or JSON/text munging. Use `bun` for scripts that need a real language; otherwise use shell tools (`rg`, `sed`, `awk`, `jq`), repo-native commands, or `apply_patch`.
+- The AI agent fleet (per-account `claude-<name>` / `codex-<name>` wrappers + their settings/memory/skills/hooks) is managed by **`kfleet`**. Home Manager owns the source assets in this repo under `kfleet/` and links them into `~/.kfleet/`; edit `kfleet/config.yaml`, `kfleet/CLAUDE.md`, `kfleet/CLAUDE.auto.md`, `kfleet/templates/`, `kfleet/skills/`, `kfleet/skills-codex/`, or `kfleet/hooks/`, then run `hms` (which runs `kfleet apply`) or run `kfleet apply` for asset-only refreshes. Do NOT edit generated homes like `~/.claude-<name>/`, `~/.codex-<name>/`, or generated wrappers under `~/.kfleet/bin/`. `modules/agent-config` is deprecated legacy seed material; do not use it as the source of truth. Only `multi-gh`/`multi-gws` accounts are still Nix-managed in `home-template.nix`.
+- **When a command needs `sudo`** (e.g. `hms`, which runs `sudo darwin-rebuild`), the Bash tool has no tty to type a password into. Don't hand it back — give `sudo` an **askpass helper** that pops a macOS `osascript` dialog, and run with `sudo -A` (run the build as a background job since it takes minutes). The dialog must state the **agent** (claude/codex + name), **repo**, **folder path**, **worktree**, and **purpose**. Do NOT use the `sudo -S -v` timestamp-prime trick — `tty_tickets` defeats it. Full pattern in `kfleet/CLAUDE.md` → "Elevated commands (sudo via osascript askpass)".
+
 # RTK (Rust Token Killer) - Token-Optimized Commands
 
 ## Golden Rule
