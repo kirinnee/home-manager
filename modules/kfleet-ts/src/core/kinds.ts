@@ -15,12 +15,19 @@ interface Asset {
   type: 'file' | 'dir';
   /** link = symlink to the ~/.kfleet source; copy = independent file the tool may rewrite */
   mode: 'link' | 'copy';
+  /** structured-config format. When set, the field is a layered settings list:
+   *  layers (file paths + inline objects) deep-merge then serialize to `dest`.
+   *  A single file-path layer is emitted verbatim per `mode` (no parse → comments
+   *  and formatting preserved). */
+  format?: 'toml' | 'json';
 }
 
 interface KindSpec {
   bin: string;
   /** absolute config dir for an agent of this kind */
   configDir: (name: string) => string;
+  /** absolute config dir used by the bare upstream CLI for this kind */
+  defaultConfigDir: string;
   /** wrapper env that points the binary at its config dir (name, dir) -> exports */
   wrapperEnv: (name: string, dir: string) => Record<string, string>;
   assets: Asset[];
@@ -32,10 +39,11 @@ export const KIND_SPECS: Record<Kind, KindSpec> = {
   claude: {
     bin: 'claude',
     configDir: n => path.join(home, `.claude-${n}`),
+    defaultConfigDir: path.join(home, '.claude'),
     wrapperEnv: (_n, dir) => ({ CLAUDE_CONFIG_DIR: dir }),
     autotrust: true,
     assets: [
-      { field: 'settings', dest: ['settings.json'], type: 'file', mode: 'link' },
+      { field: 'settings', dest: ['settings.json'], type: 'file', mode: 'link', format: 'json' },
       { field: 'memory', dest: ['CLAUDE.md'], type: 'file', mode: 'link' },
       { field: 'skills', dest: ['skills'], type: 'dir', mode: 'link' },
       { field: 'mcp', dest: ['.mcp.json'], type: 'file', mode: 'link' },
@@ -44,10 +52,11 @@ export const KIND_SPECS: Record<Kind, KindSpec> = {
   codex: {
     bin: 'codex',
     configDir: n => path.join(home, `.codex-${n}`),
+    defaultConfigDir: path.join(home, '.codex'),
     wrapperEnv: (_n, dir) => ({ CODEX_HOME: dir }),
     assets: [
       // codex rewrites config.toml at runtime, so copy rather than symlink.
-      { field: 'settings', dest: ['config.toml'], type: 'file', mode: 'copy' },
+      { field: 'settings', dest: ['config.toml'], type: 'file', mode: 'copy', format: 'toml' },
       { field: 'memory', dest: ['AGENTS.md'], type: 'file', mode: 'link' },
       { field: 'hooks', dest: ['hooks.json'], type: 'file', mode: 'link' },
       { field: 'hooksDir', dest: ['hooks'], type: 'dir', mode: 'link' },

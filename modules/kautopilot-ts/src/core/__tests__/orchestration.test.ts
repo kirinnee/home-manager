@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import YAML from "yaml";
 
 let origHome: string;
 let tempHome: string;
@@ -25,6 +26,8 @@ import {
 	toMermaid,
 	unsatisfiedDeps,
 } from "../orchestration";
+import { sessionDir } from "../artifacts";
+import { computeSchedule } from "../scheduler";
 
 let seq = 0;
 function newId(): string {
@@ -77,6 +80,87 @@ describe("orchestration: init + progress round-trip", () => {
 		const read = readOrchestration(id);
 		expect(read?.mergeMode).toBe("manual");
 		expect(read?.master.deps[0]?.gate).toBe("merged");
+	});
+
+	it("normalizes legacy records without prProgress using old pr_open-as-ready semantics", () => {
+		const id = newId();
+		const legacy = {
+			sessionId: id,
+			epoch: 1,
+			mergeMode: "manual",
+			master: sampleMaster("merged"),
+			progress: [
+				{
+					plan: "plan-1",
+					repo: "api",
+					status: "pr_open",
+					prNumber: 7,
+					prUrl: "u7",
+				},
+				{ plan: "plan-1", repo: "web", status: "pending" },
+			],
+		};
+		const dir = sessionDir(id);
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "orchestration.yaml"), YAML.stringify(legacy));
+
+		const read = readOrchestration(id);
+		expect(read?.prProgress?.find((p) => p.pr === "pr-1")).toMatchObject({
+			status: "ready",
+			prNumber: 7,
+			prUrl: "u7",
+		});
+		expect(read?.progress.find((p) => p.repo === "api")?.status).toBe(
+			"pr_ready",
+		);
+		expect(computeSchedule(read as Orchestration).toMerge[0]?.pr).toBe("pr-1");
+		expect(computeSchedule(read as Orchestration).toPolish).toHaveLength(0);
+	});
+
+	it("normalizes mixed legacy pr_open/merged PRs as ready, not back to polish", () => {
+		const id = newId();
+		const master: MasterPlan = {
+			prs: [
+				{
+					id: "pr-1",
+					repo: "api",
+					branch: "u/T-1-api",
+					title: "API",
+					plans: ["plan-1", "plan-2"],
+				},
+			],
+			nodes: [
+				{ plan: "plan-1", repo: "api", pr: "pr-1", title: "one" },
+				{ plan: "plan-2", repo: "api", pr: "pr-1", title: "two" },
+			],
+			deps: [],
+		};
+		const legacy = {
+			sessionId: id,
+			epoch: 1,
+			mergeMode: "manual",
+			master,
+			progress: [
+				{
+					plan: "plan-1",
+					repo: "api",
+					status: "pr_open",
+					prNumber: 7,
+				},
+				{ plan: "plan-2", repo: "api", status: "merged" },
+			],
+		};
+		const dir = sessionDir(id);
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "orchestration.yaml"), YAML.stringify(legacy));
+
+		const read = readOrchestration(id) as Orchestration;
+		expect(read.progress.find((p) => p.plan === "plan-1")?.status).toBe(
+			"pr_ready",
+		);
+		const s = computeSchedule(read);
+		expect(s.toPolish).toHaveLength(0);
+		expect(s.toMerge.map((m) => m.pr)).toEqual(["pr-1"]);
 	});
 
 	it("recordPlanProgress updates status + kloop run id, preserved on re-read", () => {

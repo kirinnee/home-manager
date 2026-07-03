@@ -6,8 +6,9 @@
 // which keeps password auth safe. Linux uses a config drop-in (sshd there isn't
 // socket-activated, so ListenAddress works directly).
 import { existsSync } from 'node:fs';
-import { meshListen, osKind, sshPort } from './deps';
+import { meshListenConfig, osKind, sshPort } from './deps';
 import { die, log, ok, run, warn } from './exec';
+import { resolveMeshListen } from './mesh';
 
 const SSHD_CONFIG = '/etc/ssh/khost_sshd_config';
 const PLIST = '/Library/LaunchDaemons/cloud.atomi.khost.sshd.plist';
@@ -29,7 +30,7 @@ function currentUser(): string {
   return process.env.SUDO_USER ?? process.env.USER ?? '';
 }
 
-function sshdConfig(user: string): string {
+function sshdConfig(user: string, meshListen: string): string {
   const meshLine = meshListen ? `ListenAddress ${meshListen}\n` : '';
   return `# Managed by khost — private sshd reachable via two paths, both unreachable
 # from the LAN: the Cloudflare tunnel (127.0.0.1, break-glass) and the WARP mesh
@@ -73,9 +74,9 @@ async function writeRoot(path: string, content: string): Promise<void> {
   if ((await run(['sudo', 'tee', path], { input: content })).code !== 0) die(`failed to write ${path}`);
 }
 
-async function setupDarwin(user: string): Promise<void> {
+async function setupDarwin(user: string, meshListen: string): Promise<void> {
   log(`Writing loopback sshd config (sudo): ${SSHD_CONFIG}`);
-  await writeRoot(SSHD_CONFIG, sshdConfig(user));
+  await writeRoot(SSHD_CONFIG, sshdConfig(user, meshListen));
   if ((await run(['sudo', '/usr/sbin/sshd', '-t', '-f', SSHD_CONFIG])).code !== 0) {
     die(`sshd config invalid: ${SSHD_CONFIG}`);
   }
@@ -87,15 +88,16 @@ async function setupDarwin(user: string): Promise<void> {
   if ((await run(['sudo', 'launchctl', 'bootstrap', 'system', PLIST], { interactive: true })).code !== 0) {
     die('launchctl bootstrap failed');
   }
-  ok(`khost sshd up on 127.0.0.1:${sshPort} (LaunchDaemon ${LABEL}) — LAN cannot reach it`);
+  const meshNote = meshListen ? ` + mesh ${meshListen}:${sshPort}` : '';
+  ok(`khost sshd up on 127.0.0.1:${sshPort}${meshNote} (LaunchDaemon ${LABEL}) — LAN cannot reach it`);
   warn('If browser SSH fails to authenticate, grant Full Disk Access to /usr/sbin/sshd');
   warn('  in System Settings > Privacy & Security > Full Disk Access, then re-run.');
 }
 
-async function setupLinux(user: string): Promise<void> {
+async function setupLinux(user: string, meshListen: string): Promise<void> {
   log(`Writing sshd drop-in (sudo): ${LINUX_DROPIN}`);
   await run(['sudo', 'mkdir', '-p', '/etc/ssh/sshd_config.d'], { interactive: true });
-  await writeRoot(LINUX_DROPIN, sshdConfig(user));
+  await writeRoot(LINUX_DROPIN, sshdConfig(user, meshListen));
   if ((await run(['sudo', 'sshd', '-t'])).code !== 0) {
     warn(`sshd -t failed; drop-in written but NOT reloaded — review ${LINUX_DROPIN}`);
     return;
@@ -105,12 +107,13 @@ async function setupLinux(user: string): Promise<void> {
   ok(`khost sshd on 127.0.0.1:${sshPort} (drop-in) — LAN cannot reach it`);
 }
 
-/** Install + start a loopback-only sshd for the tunnel (idempotent). */
+/** Install + start the private sshd (loopback + resolved WARP mesh) (idempotent). */
 export async function sshSetup(): Promise<void> {
   const user = currentUser();
   if (!user) die('could not determine current user for AllowUsers');
-  if (osKind() === 'darwin') return setupDarwin(user);
-  if (osKind() === 'linux') return setupLinux(user);
+  const meshListen = await resolveMeshListen(meshListenConfig);
+  if (osKind() === 'darwin') return setupDarwin(user, meshListen);
+  if (osKind() === 'linux') return setupLinux(user, meshListen);
   die('unsupported OS for ssh setup');
 }
 
@@ -130,6 +133,10 @@ export async function sshDown(): Promise<void> {
 export async function sshStatus(): Promise<void> {
   console.log(`  os        : ${osKind()}`);
   console.log(`  endpoint  : 127.0.0.1:${sshPort} (khost loopback sshd)`);
+  const mesh = await resolveMeshListen(meshListenConfig);
+  console.log(
+    `  mesh      : ${mesh ? `${mesh}:${sshPort}` : 'disabled'}${meshListenConfig === 'auto' ? ' (auto)' : ''}`,
+  );
   const configPath = osKind() === 'darwin' ? PLIST : LINUX_DROPIN;
   console.log(
     existsSync(configPath) ? `  config    : present (${configPath})` : `  config    : absent — run "khost ssh setup"`,

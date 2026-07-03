@@ -152,6 +152,14 @@ const configSchema = z
     // via tmux, detects completion via a marker file the agent touches, then sends /exit.
     // Non-claude harnesses (gemini/codex) ignore this and always run --print.
     interactive: z.boolean().default(false),
+    // Usage-aware account selection. When true, kloop only draws from the weighted
+    // pools accounts that still have usage left (queried from kfleet's /usage), and
+    // blocks until reset when the implementer pool is fully exhausted. Off by default.
+    requireUsageLeft: z.boolean().default(false),
+    // Where to fetch the usage snapshot (kfleet serve's /usage endpoint).
+    usageEndpoint: z.string().min(1).optional(),
+    // 5h hard gate: skip an account when its 5-hour window has < this % left (default 3).
+    usageFiveHourFloorPercent: z.number().min(0).max(100).optional(),
     implementerRetry: implementerRetrySchema.optional(),
     reviewerRetry: reviewerRetrySchema.optional(),
     synthesizerRetry: synthesizerRetrySchema.optional(),
@@ -241,6 +249,9 @@ const configSchema = z
       rerankAfterCheckpoint: data.rerankAfterCheckpoint ?? true,
       snapshot: data.snapshot ?? false,
       interactive: data.interactive ?? false,
+      requireUsageLeft: data.requireUsageLeft ?? false,
+      usageEndpoint: data.usageEndpoint,
+      usageFiveHourFloorPercent: data.usageFiveHourFloorPercent,
       implementerRetry: data.implementerRetry ?? { maxRetries: 2, backoffBaseMs: 5000 },
       reviewerRetry: data.reviewerRetry ?? { maxRetries: 2, backoffBaseMs: 5000 },
       synthesizerRetry: data.synthesizerRetry ?? { maxRetries: 2, backoffBaseMs: 5000 },
@@ -278,6 +289,9 @@ export const resolvedConfigSchema = z.object({
   rerankAfterCheckpoint: z.boolean(),
   snapshot: z.boolean(),
   interactive: z.boolean().default(false),
+  requireUsageLeft: z.boolean().default(false),
+  usageEndpoint: z.string().optional(),
+  usageFiveHourFloorPercent: z.number().min(0).max(100).optional(),
   implementerRetry: z.object({
     maxRetries: z.number().min(0).max(10),
     backoffBaseMs: z.number().min(0),
@@ -600,6 +614,7 @@ export const DEFAULT_CONFIG: Config = {
   rerankAfterCheckpoint: true,
   snapshot: false,
   interactive: false,
+  requireUsageLeft: false,
   implementerRetry: { maxRetries: 2, backoffBaseMs: 5000 },
   reviewerRetry: { maxRetries: 2, backoffBaseMs: 5000 },
   synthesizerRetry: { maxRetries: 2, backoffBaseMs: 5000 },
@@ -629,7 +644,7 @@ export function getPrimaryImplementer(config: Config): string {
  * "Weighted implementer selection is deterministic with a seed for
  * reproducibility (or documented as random)"
  */
-export function selectImplementer(config: Config, loopNum?: number): string {
+export function selectImplementer(config: Config, loopNum?: number, usageWeight?: UsageWeight): string {
   const entries = Object.entries(config.implementers);
   const effectiveLoop = loopNum ?? 1;
 
@@ -643,24 +658,66 @@ export function selectImplementer(config: Config, loopNum?: number): string {
     return weight;
   });
 
-  const totalWeight = effectiveWeights.reduce((sum, w) => sum + w, 0);
-  let rand = Math.random() * totalWeight;
-  let pickedKey = entries.length > 0 ? entries[entries.length - 1][0] : ''; // fallback to last
-  for (let i = 0; i < entries.length; i++) {
-    rand -= effectiveWeights[i];
-    if (rand <= 0) {
-      pickedKey = entries[i][0];
-      break;
+  // Usage-aware: scale each key by its usage weight (0 ⇒ gated out, fraction ⇒ less likely
+  // by weekly headroom). If that zeroes EVERY key (all exhausted), leave weights as-is —
+  // the caller is responsible for blocking until reset before getting here.
+  if (usageWeight) {
+    const keyW = entries.map(([key]) => implementerKeyWeight(key, config.poolProfiles, usageWeight));
+    if (keyW.some(w => w > 0)) {
+      for (let i = 0; i < effectiveWeights.length; i++) effectiveWeights[i] *= keyW[i];
     }
+  }
+
+  const totalWeight = effectiveWeights.reduce((sum, w) => sum + w, 0);
+  // Fallback to the LAST key with a positive weight (never a zeroed-out / exhausted one).
+  let pickedKey = '';
+  for (let i = 0; i < entries.length; i++) if (effectiveWeights[i] > 0) pickedKey = entries[i][0];
+  if (totalWeight > 0) {
+    let rand = Math.random() * totalWeight;
+    for (let i = 0; i < entries.length; i++) {
+      rand -= effectiveWeights[i];
+      if (effectiveWeights[i] > 0 && rand <= 0) {
+        pickedKey = entries[i][0];
+        break;
+      }
+    }
+  } else if (entries.length > 0) {
+    pickedKey = entries[entries.length - 1][0]; // degenerate (all weights 0): last key
   }
   // An implementer key may name a pool profile — load-balance within it. The suffix
   // flags (* / ::i first-iteration, ! ) only affect the weighted pick above, not the
   // account, so strip them for the profile lookup.
   const base = stripFlagSuffixes(pickedKey).base;
   if (config.poolProfiles && Object.prototype.hasOwnProperty.call(config.poolProfiles, base)) {
-    return selectFromPool(base, config.poolProfiles);
+    return selectFromPool(base, config.poolProfiles, usageWeight);
   }
   return pickedKey;
+}
+
+/** The usage-weight multiplier for an implementer key. A key naming a pool profile takes
+ *  the BEST (max) member weight (so a profile with one fresh account stays selectable; the
+ *  inner selectFromPool then weights per-account); otherwise the key's own bare binary. */
+function implementerKeyWeight(key: string, profiles: PoolProfiles | undefined, usageWeight: UsageWeight): number {
+  const base = stripFlagSuffixes(key).base;
+  if (profiles && Object.prototype.hasOwnProperty.call(profiles, base)) {
+    return Math.max(0, ...Object.keys(profiles[base]).map(account => usageWeight(accountBinary(account))));
+  }
+  return usageWeight(accountBinary(base));
+}
+
+/** Every distinct bare binary an implementer selection could resolve to (pool profiles
+ *  expanded). Used to know which accounts to wait on when blocking until reset. */
+export function implementerCandidates(config: Config): string[] {
+  const out = new Set<string>();
+  for (const key of Object.keys(config.implementers)) {
+    const base = stripFlagSuffixes(key).base;
+    if (config.poolProfiles && Object.prototype.hasOwnProperty.call(config.poolProfiles, base)) {
+      for (const account of Object.keys(config.poolProfiles[base])) out.add(accountBinary(account));
+    } else {
+      out.add(accountBinary(base));
+    }
+  }
+  return [...out];
 }
 
 // ============================================================================
@@ -715,14 +772,43 @@ export function reviewTypeLabel(entry: ReviewTypeEntry, profiles?: PoolProfiles)
     .join('+');
 }
 
+/** The bare wrapper name of a pool account (harness/flags stripped); raw on parse failure. */
+function accountBinary(account: string): string {
+  try {
+    return parseReviewerConfig(account).binary;
+  } catch {
+    return account;
+  }
+}
+
+/**
+ * A per-account WEIGHT MULTIPLIER (≥ 0), keyed by bare binary name. Threaded into pool
+ * selection so kloop scales each configured weight by live usage: 0 ⇒ exclude (5h-gated /
+ * not logged in / weekly-maxed), a fraction ⇒ proportionally less likely (weekly headroom),
+ * 1 ⇒ full configured weight (fresh / unmeasurable).
+ */
+export type UsageWeight = (binary: string) => number;
+
 /**
  * Pick one account from a type's pool, weighted-random — for LOAD DISTRIBUTION across
  * interchangeable accounts of the same type (distinct from implementer type-rotation).
  * Resolves a profile name via `profiles`. Stateless; picked per invocation.
+ *
+ * When `usageWeight` is given, each account's pool weight is MULTIPLIED by its usage
+ * weight before the draw (so weekly headroom biases the pick and 0-weight accounts drop
+ * out). If that zeroes the whole pool (all gated/exhausted), the FULL pool with its
+ * original weights is used instead — weighting never makes selection fail; blocking-
+ * until-reset is handled by the caller.
  */
-export function selectFromPool(entry: ReviewTypeEntry, profiles?: PoolProfiles): string {
-  const pool = Object.entries(resolvePool(entry, profiles));
-  if (pool.length === 0) throw new Error('Reviewer type pool cannot be empty.');
+export function selectFromPool(entry: ReviewTypeEntry, profiles?: PoolProfiles, usageWeight?: UsageWeight): string {
+  const all = Object.entries(resolvePool(entry, profiles));
+  if (all.length === 0) throw new Error('Reviewer type pool cannot be empty.');
+  let pool = all;
+  if (usageWeight) {
+    const scaled = all.map(([account, w]) => [account, w * usageWeight(accountBinary(account))] as [string, number]);
+    const nonzero = scaled.filter(([, w]) => w > 0);
+    pool = nonzero.length > 0 ? nonzero : all; // all gated → fall back to full pool (caller blocks)
+  }
   if (pool.length === 1) return pool[0][0];
   const total = pool.reduce((sum, [, w]) => sum + w, 0);
   if (!Number.isFinite(total) || total <= 0) return pool[0][0]; // degenerate/overflow weights
@@ -740,8 +826,12 @@ export function selectFromPool(entry: ReviewTypeEntry, profiles?: PoolProfiles):
  * per call (same machinery as reviewer/verifier types). Returns undefined when the entry
  * is unset, so each caller keeps its own fallback (primary implementer / loop implementer).
  */
-export function selectRoleAccount(entry: ReviewTypeEntry | undefined, profiles?: PoolProfiles): string | undefined {
-  return entry != null ? selectFromPool(entry, profiles) : undefined;
+export function selectRoleAccount(
+  entry: ReviewTypeEntry | undefined,
+  profiles?: PoolProfiles,
+  usageWeight?: UsageWeight,
+): string | undefined {
+  return entry != null ? selectFromPool(entry, profiles, usageWeight) : undefined;
 }
 
 // ============================================================================
@@ -847,6 +937,9 @@ export function flattenNestedConfig(raw: unknown): unknown {
     if (st.compressSpec !== undefined) out.compressSpec = st.compressSpec;
     if (st.snapshot !== undefined) out.snapshot = st.snapshot;
     if (st.interactive !== undefined) out.interactive = st.interactive;
+    if (st.requireUsageLeft !== undefined) out.requireUsageLeft = st.requireUsageLeft;
+    if (st.usageEndpoint !== undefined) out.usageEndpoint = st.usageEndpoint;
+    if (st.usageFiveHourFloorPercent !== undefined) out.usageFiveHourFloorPercent = st.usageFiveHourFloorPercent;
   }
 
   return out;
@@ -919,6 +1012,9 @@ export function nestFlatConfig(flat: Record<string, unknown>): Record<string, un
   if (d.compressSpec !== undefined) settings.compressSpec = d.compressSpec;
   if (d.snapshot !== undefined) settings.snapshot = d.snapshot;
   if (d.interactive !== undefined) settings.interactive = d.interactive;
+  if (d.requireUsageLeft !== undefined) settings.requireUsageLeft = d.requireUsageLeft;
+  if (d.usageEndpoint !== undefined) settings.usageEndpoint = d.usageEndpoint;
+  if (d.usageFiveHourFloorPercent !== undefined) settings.usageFiveHourFloorPercent = d.usageFiveHourFloorPercent;
   if (Object.keys(settings).length > 0) out.settings = settings;
 
   // prompts (top-level in both layouts)

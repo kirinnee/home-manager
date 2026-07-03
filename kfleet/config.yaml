@@ -1,0 +1,166 @@
+# Account usage/login probing (kfleet usage + the `kfleet serve` background loop).
+usage:
+  interval: 300 # seconds between background re-probes (every 5 min, ±jitter)
+
+profiles:
+  claude:
+    settings: ./templates/claude/settings.json
+    skills: ./skills
+  codex:
+    settings: ./templates/codex/chatgpt.toml # base config.toml (layers merge on top)
+    hooks: ./templates/codex/hooks.json
+    hooksDir: ./hooks
+    skills: ./skills-codex
+    # kfleet ships its own (vetted) hooks, so trust them without the per-project
+    # trust prompt — required for the non-interactive auto wrappers.
+    flags: ['--dangerously-bypass-hook-trust']
+  zai-a:
+    env:
+      ANTHROPIC_AUTH_TOKEN: $ZAI_API_KEY_A
+      ANTHROPIC_BASE_URL: https://api.z.ai/api/anthropic
+  zai-b:
+    env:
+      ANTHROPIC_AUTH_TOKEN: $ZAI_API_KEY_B
+      ANTHROPIC_BASE_URL: https://api.z.ai/api/anthropic
+  minimax:
+    env:
+      ANTHROPIC_AUTH_TOKEN: $MINIMAX_API_KEY
+      ANTHROPIC_BASE_URL: https://api.minimax.io/anthropic
+  deepseek:
+    env:
+      ANTHROPIC_AUTH_TOKEN: $DEEPSEEK_API_KEY
+      ANTHROPIC_BASE_URL: https://api.deepseek.com/anthropic
+  loge:
+    env:
+      ANTHROPIC_API_KEY: loge-internal
+      ANTHROPIC_BASE_URL: https://loge.tailb7bc.ts.net/anthropic
+    settings:
+      model: fable-5
+  # Fable-default settings overlay for the f5-* agents (Anthropic OAuth accounts
+  # only — fable is claude-only, so no codex/provider agents use this).
+  fable:
+    settings:
+      model: fable
+variants:
+  default:
+    memory: ./CLAUDE.md
+    # Interactive codex runs on the "fast" service tier; the auto variant omits it
+    # (codex default tier). Inline override deep-merges onto the codex profile's
+    # base config.toml; kind-scoped so it never touches claude wrappers.
+    codex:
+      settings:
+        service_tier: fast
+  auto:
+    memory: ./CLAUDE.auto.md
+defaultHomes:
+  claude: kirin
+  codex: personal
+agents:
+  - name: kirin
+    kind: claude
+    profiles:
+      - claude
+  - name: liftoff
+    kind: claude
+    profiles:
+      - claude
+  - name: atomi
+    kind: claude
+    profiles:
+      - claude
+  # f5-* = same accounts with Fable as the default model. Modeled as agents (not
+  # a variant) so only these three get f5 wrappers; the auto variant still clones
+  # them, yielding claude-f5-<n> (interactive) + claude-auto-f5-<n> (autonomous).
+  - name: f5-kirin
+    kind: claude
+    profiles:
+      - claude
+      - fable
+  - name: f5-liftoff
+    kind: claude
+    profiles:
+      - claude
+      - fable
+  - name: f5-atomi
+    kind: claude
+    profiles:
+      - claude
+      - fable
+  - name: glm52a
+    kind: claude
+    profiles:
+      - claude
+      - zai-a
+    env: &a1
+      ANTHROPIC_DEFAULT_OPUS_MODEL: glm-5.2
+      ANTHROPIC_DEFAULT_SONNET_MODEL: glm-5-turbo
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: glm-4.7
+      ANTHROPIC_DEFAULT_FABLE_MODEL: glm-5.2
+  - name: glm52b
+    kind: claude
+    profiles:
+      - claude
+      - zai-b
+    env: *a1
+  - name: mm3
+    kind: claude
+    profiles:
+      - claude
+      - minimax
+    env:
+      ANTHROPIC_DEFAULT_OPUS_MODEL: MiniMax-M3
+      ANTHROPIC_DEFAULT_SONNET_MODEL: MiniMax-M3
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: MiniMax-M3
+      ANTHROPIC_DEFAULT_FABLE_MODEL: MiniMax-M3
+  - name: dsv4p
+    kind: claude
+    profiles:
+      - claude
+      - deepseek
+    env:
+      ANTHROPIC_DEFAULT_FABLE_MODEL: deepseek-v4-pro
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: deepseek-v4-flash
+      ANTHROPIC_DEFAULT_OPUS_MODEL: deepseek-v4-pro
+      ANTHROPIC_DEFAULT_SONNET_MODEL: deepseek-v4-flash
+  - name: dsv4f
+    kind: claude
+    profiles:
+      - claude
+      - deepseek
+    env:
+      ANTHROPIC_DEFAULT_FABLE_MODEL: deepseek-v4-pro
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: deepseek-v4-flash
+      ANTHROPIC_DEFAULT_OPUS_MODEL: deepseek-v4-flash
+      ANTHROPIC_DEFAULT_SONNET_MODEL: deepseek-v4-flash
+  - name: loge
+    kind: claude
+    profiles:
+      - claude
+      - loge
+  - name: loai
+    kind: codex
+    profiles:
+      - codex
+  - name: loio
+    kind: codex
+    profiles:
+      - codex
+  - name: ernest
+    kind: codex
+    profiles:
+      - codex
+  - name: kirin
+    kind: codex
+    profiles:
+      - codex
+  - name: atomi
+    kind: codex
+    profiles:
+      - codex
+  - name: personal
+    kind: codex
+    profiles:
+      - codex
+aliases:
+  crc:
+    claude: --dangerously-skip-permissions --chrome --rc

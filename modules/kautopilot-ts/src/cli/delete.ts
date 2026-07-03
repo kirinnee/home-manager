@@ -33,15 +33,14 @@ export function createDeleteCommand(): Command {
 		);
 }
 
-/** Is ANY scope lock (session timeline or a repo driver) currently live? (MAJOR-1) */
+/** Is any current or legacy scope lock currently live? (MAJOR-1) */
 function isSessionRunning(sessionId: string): boolean {
 	return listLockKeys(sessionId).some((key) => checkLock(key).locked);
 }
 
 /**
- * Kill + release EVERY live scope lock for a session — the session timeline lock
- * plus each per-repo driver lock — so a delete never wipes the session dir out
- * from under a running `next --repo <r>` process. (MAJOR-1)
+ * Kill + release every live scope lock for a session so delete never wipes the
+ * session dir out from under a running process. Legacy scoped locks are included.
  */
 async function stopAndCleanup(sessionId: string): Promise<boolean> {
 	const liveKeys = listLockKeys(sessionId).filter(

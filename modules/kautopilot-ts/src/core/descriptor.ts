@@ -10,7 +10,7 @@ import type { Config } from "./types";
 // ============================================================================
 
 /** Phase of the one flat session machine. */
-export type StepPhase = "plan" | "execution" | "polish" | "feedback";
+export type StepPhase = "plan" | "execution" | "feedback";
 
 /**
  * Who runs a step.
@@ -59,7 +59,7 @@ export interface StepDescriptor {
 	phase: StepPhase;
 	step: string;
 	kind: Exclude<StepKind, "code">;
-	/** Set when the step is repo-scoped (execution/polish); null for plan/feedback. */
+	/** Always null for yielded steps; execution/polish are driven via schedule/record. */
 	repo: string | null;
 	/** Epoch version. */
 	version: number;

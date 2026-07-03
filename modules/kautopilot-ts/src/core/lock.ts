@@ -26,11 +26,9 @@ function lockPath(id: string): string {
 }
 
 /**
- * Compose a per-scope lock key from a session id and the `--repo` arg. `next`/
- * `complete` lock on this so two repo drivers (`--repo api` / `--repo infra`) run
- * concurrently and a blocking session-timeline `poll` doesn't block them — each
- * scope gets its own lock file. Read-only commands (`status`/`diff`) never
- * acquire it, so they stay responsive during a repo's blocking poll. (CLI-CONTRACT §12)
+ * Compose a lock key from a session id and optional legacy scope. Current `next`/
+ * `complete` use only the bare session key; scoped keys remain so stop/delete can
+ * clean up stale lock files from older repo-driver sessions.
  */
 export function scopeLockKey(sessionId: string, repo?: string | null): string {
 	return repo ? `${sessionId}:${repo}` : sessionId;
@@ -39,9 +37,9 @@ export function scopeLockKey(sessionId: string, repo?: string | null): string {
 /**
  * Every lock KEY currently present on disk for a session: the bare session id
  * (if `lock.pid` exists) plus a scoped key `sessionId:<scope>` for each
- * `lock-<scope>.pid` repo lock file in the session dir. The returned keys are
+ * `lock-<scope>.pid` legacy scoped lock file in the session dir. The returned keys are
  * exactly what `checkLock`/`acquireLock`/`releaseLock` consume, so `stop`/`delete`
- * can enumerate and act on every running scope (session timeline + repo drivers),
+ * can enumerate and act on every running/stale scope,
  * not just the session lock. (MAJOR-1)
  */
 export function listLockKeys(sessionId: string): string[] {

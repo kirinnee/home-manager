@@ -27,7 +27,6 @@ export function createCompleteCommand(): Command {
 			"--metadata <json>",
 			"JSON metadata (must match the parsed file and schema)",
 		)
-		.option("--repo <repo>", "Repo scope for the step")
 		.option("--session <id>", "Target session id")
 		.action(
 			async (
@@ -35,7 +34,6 @@ export function createCompleteCommand(): Command {
 				opts: {
 					output?: string;
 					metadata?: string;
-					repo?: string;
 					session?: string;
 				},
 			) => {
@@ -50,14 +48,10 @@ export function createCompleteCommand(): Command {
 							process.exit(1);
 						}
 					}
-					// Per-scope lock matching `next` — a repo's `complete` only contends
-					// with that repo's driver, not the session timeline or other repos. (§12)
-					const lockKey = scopeLockKey(sessionId, opts.repo ?? null);
+					const lockKey = scopeLockKey(sessionId, null);
 					const lock = checkLock(lockKey);
 					if (lock.locked) {
-						logError(
-							`Session ${sessionId}${opts.repo ? ` (repo ${opts.repo})` : ""} is busy (PID ${lock.pid}).`,
-						);
+						logError(`Session ${sessionId} is busy (PID ${lock.pid}).`);
 						process.exit(1);
 					}
 					acquireLock(lockKey);
@@ -66,7 +60,6 @@ export function createCompleteCommand(): Command {
 						result = await runComplete(sessionId, config, step, {
 							output: opts.output,
 							metadata,
-							repo: opts.repo ?? null,
 						});
 					} finally {
 						releaseLock(lockKey);

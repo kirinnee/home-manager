@@ -13,21 +13,22 @@ const CONFIG_TEMPLATE = `# khost — per-box config. Plaintext (this dir lives i
 
 ssh:
   port: 2222
-  mesh_listen: 172.16.0.2   # also bind sshd to this WARP-mesh IP; "" = loopback only
+  mesh_listen: auto         # auto = detect live WARP mesh IP; or pin an IP; "" = loopback only
 
 tunnel:
   protocol: http2           # http2 | quic
 
 # Required for the tunnel. Env wins if set (CLOUDFLARE_API_TOKEN /
 # CLOUDFLARE_ACCOUNT_ID) — leave blank here to keep secrets out of plaintext.
-# Token needs Tunnel:Edit, Zone:Read, DNS:Edit, Access:Edit.
+# Token needs Tunnel:Edit, Zone:Read, DNS:Edit, Access: Apps and Policies Write.
 cloudflare:
   account_id: ""
   api_token: ""
 
-access:                     # the only-me Access policy gating the dashboards
-  emails: []                # e.g. [you@example.com]
-  policy_name: only-me
+access:
+  # Externally-managed reusable Access policy to attach to protected apps.
+  # khost looks it up by exact name; it never creates/updates/deletes it.
+  policy: primordial-ernestOnly
 
 # Public hostnames routed through the tunnel. {machine} expands to the id above.
 routes: []

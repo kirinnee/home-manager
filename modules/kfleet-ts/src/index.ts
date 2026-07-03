@@ -8,6 +8,7 @@ import { createHealthCommand } from './cli/health';
 import { createInitCommand } from './cli/init';
 import { createServeCommand } from './cli/serve';
 import { createServiceCommand } from './cli/service';
+import { createUsageCommand } from './cli/usage';
 
 const program = new Command();
 program
@@ -19,6 +20,7 @@ program
   .addCommand(createPruneCommand())
   .addCommand(createDoctorCommand())
   .addCommand(createHealthCommand())
+  .addCommand(createUsageCommand())
   .addCommand(createServeCommand())
   .addCommand(createServiceCommand());
 

@@ -10,6 +10,7 @@ import {
 	ensureStatus,
 	getCurrentKloopRunId,
 	isSessionActive,
+	isSessionTerminal,
 } from "../core/status";
 import { formatPhase, parseRepoHost } from "../util/format";
 
@@ -156,15 +157,16 @@ async function runPs(opts: {
 				: 0;
 
 		const isRunning = lockInfo.locked;
+		const isTerminal = isSessionTerminal(session.id);
 		const kloopRunId = getCurrentKloopRunId(status);
 
 		// Compute plan column
 		let planCol = "—";
-		if (status.phase === "implementation" && status.activePlan) {
+		if (status.phase === "execution" && status.activePlan) {
 			planCol = `${status.activePlan.planIndex + 1}/${status.activePlan.maxPlans}`;
-		} else if (status.phase === "implementation" && status.context.maxPlans) {
+		} else if (status.phase === "execution" && status.context.maxPlans) {
 			planCol = `${(status.context.planIndex ?? 0) + 1}/${status.context.maxPlans}`;
-		} else if (status.phase === "polish" && status.polishState) {
+		} else if (status.phase === "feedback" && status.polishState) {
 			if (status.polishState.prNumber) {
 				planCol = `PR#${status.polishState.prNumber}`;
 			} else {
@@ -191,7 +193,7 @@ async function runPs(opts: {
 			step: status.state,
 			stepType: status.stepType,
 			running: isRunning,
-			completed: !isRunning && status.phases.polish.status === "completed",
+			completed: !isRunning && isTerminal,
 			elapsed,
 			planCol,
 			kloopCol,

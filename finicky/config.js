@@ -28,6 +28,14 @@ export default {
       },
     },
     {
+      // Durian profile (DurianCloud)
+      match: ({ urlString }) => /durian/i.test(urlString),
+      browser: {
+        name: 'Microsoft Edge',
+        profile: 'Profile 5',
+      },
+    },
+    {
       // Personal profile (Kirin)
       match: ({ urlString }) => /kirin/i.test(urlString),
       browser: {

@@ -6,6 +6,7 @@ import * as setupCmd from './setup';
 import * as runCmd from './run';
 import * as psCmd from './ps';
 import * as statusCmd from './status';
+import * as waitCmd from './wait';
 import * as describeCmd from './describe';
 import * as metricsCmd from './metrics';
 import * as attachCmd from './attach';
@@ -78,6 +79,15 @@ export function createCli(deps: CliDeps): Command {
     .description('Current snapshot of a run (derived from events.jsonl)')
     .option('--json', 'machine-readable output')
     .action(async (id, opts) => statusCmd.handler(id, opts, deps));
+
+  program
+    .command('wait [id]')
+    .description(
+      'Block until a run is terminal, streaming one event per status/phase change (poll→stream; for Monitor / cheap-subagent waits)',
+    )
+    .option('--json', 'emit NDJSON status events')
+    .option('--interval <sec>', 'max seconds between status checks (crash-detection safety net)', '10')
+    .action(async (id, opts) => waitCmd.handler(id, opts, deps));
 
   program
     .command('describe [id]')

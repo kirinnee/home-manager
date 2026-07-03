@@ -67,11 +67,11 @@ What's done:
 - Updated 4 call sites + added tests (all green)
 
 Need from you:
-- Review the PR, then say if I should merge or wait
+- Review the PR, then merge it yourself when happy
 - One open question: keep the old `/login` route as a redirect? (y/n)
 ```
 
 ## Notes
 
-- Accuracy first: a fast recap that's wrong is worse than a slightly longer one that's right. Check real state (git status, what you actually changed) before claiming "done".
+- Accuracy first: a fast recap that's wrong is worse than a slightly longer one that's right. Check real state (`rtk git status`, what you actually changed) before claiming "done".
 - This format applies to the recap only — it does not change commit messages, code, or file contents.

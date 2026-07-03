@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "type": "module",
   "bin": {
-    "klaude": "./src/index.ts"
+    "klaude": "./src/index.ts",
+    "kodex": "./src/index.ts"
   },
   "scripts": {
     "dev": "bun run ./src/index.ts",

@@ -1,7 +1,7 @@
 // Fleet operations: apply (generate), list, prune.
 import { Command } from 'commander';
 import { loadConfig } from '../core/config';
-import { apply, expandAliases, prune, wrapperName } from '../core/generate';
+import { apply, expandAliases, prune, resolveDefaultHomeTargets, wrapperName } from '../core/generate';
 import { KIND_SPECS } from '../core/kinds';
 import { resolveAll } from '../core/merge';
 import type { Config, ResolvedAgent } from '../core/types';
@@ -22,8 +22,9 @@ export function createApplyCommand(): Command {
       const config = loadOrDie(() => loadConfig());
       const agents = loadOrDie(() => resolveAll(config));
       const commands = allCommands(config, agents);
-      const res = loadOrDie(() => apply(agents, commands));
-      logOk(`applied ${res.agents} agents + ${res.commands} commands → ~/.kfleet/bin`);
+      const res = loadOrDie(() => apply(agents, commands, config.defaultHomes));
+      const defaults = res.defaultHomes ? ` + ${res.defaultHomes} default homes` : '';
+      logOk(`applied ${res.agents} agents + ${res.commands} commands${defaults} → ~/.kfleet/bin`);
       if (opts.prune) {
         const removed = prune(agents, commands);
         logInfo(removed.length ? `pruned ${removed.length}: ${removed.join(', ')}` : 'nothing to prune');
@@ -45,6 +46,9 @@ export function createListCommand(): Command {
       }
       for (const c of commands) {
         console.log(`  ${c.name.padEnd(24)} → ${c.target} ${c.flags.join(' ')}`);
+      }
+      for (const d of loadOrDie(() => resolveDefaultHomeTargets(config.defaultHomes, agents))) {
+        console.log(`  ${`${d.kind} default`.padEnd(24)} ${d.dir} → ${wrapperName(d.agent)}`);
       }
       const variants = Object.keys({ default: 0, ...config.variants }).length;
       logDim(

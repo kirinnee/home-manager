@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { apply, expandAliases, renderCommand, renderWrapper, wrapperName } from './generate';
+import { apply, expandAliases, renderCommand, renderWrapper, resolveDefaultHomeTargets, wrapperName } from './generate';
 
 describe('renderWrapper', () => {
   test('claude: config-dir env, autotrust, exec with flags, $ left unescaped', () => {
@@ -78,5 +78,25 @@ describe('apply', () => {
         ],
       ),
     ).toThrow(/duplicate command name/);
+  });
+
+  test('rejects unknown default home targets before fs writes', () => {
+    expect(() => apply([], [], { codex: 'personal' })).toThrow(/defaultHomes\.codex: unknown target "personal"/);
+  });
+});
+
+describe('resolveDefaultHomeTargets', () => {
+  test('accepts resolved agent names and wrapper names', () => {
+    const targets = resolveDefaultHomeTargets({ claude: 'kirin', codex: 'codex-personal' }, [
+      { name: 'kirin', kind: 'claude' },
+      { name: 'personal', kind: 'codex' },
+    ]);
+
+    expect(targets.map(t => [t.kind, wrapperName(t.agent)])).toEqual([
+      ['claude', 'claude-kirin'],
+      ['codex', 'codex-personal'],
+    ]);
+    expect(targets.find(t => t.kind === 'claude')?.dir.endsWith('/.claude')).toBe(true);
+    expect(targets.find(t => t.kind === 'codex')?.dir.endsWith('/.codex')).toBe(true);
   });
 });

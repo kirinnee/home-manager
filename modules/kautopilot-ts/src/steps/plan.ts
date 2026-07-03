@@ -653,10 +653,9 @@ Each plan is a FOLDER of versions under the plans directory. Write each plan fil
 **REQUIRED folder-naming convention:** every plan folder MUST be named \`plan-<N>\` or
 \`plan-<N>-<short-slug>\` where \`<N>\` is the plan's 1-based ordinal (\`plan-1\`,
 \`plan-2\`, … or \`plan-1-auth\`, \`plan-2-api\`). The literal \`plan-\` prefix followed by the
-number is mandatory — that ordinal is what downstream execution (\`seed\` → \`running\` →
-\`kloop init\`) uses to locate the plan's spec file. A folder missing the \`plan-<N>\` prefix
-(e.g. \`auth/\`, \`foundation/\`, or \`1-auth/\`) will NOT be found at execution time. Put any
-descriptive title in the plan body, not in place of the \`plan-<N>\` prefix.
+number is mandatory — that stable id is what \`kautopilot schedule\` and
+\`kautopilot record --plan <id>\` use to track execution. Put any descriptive title in
+the plan body, not in place of the \`plan-<N>\` prefix.
 Every plan written in THIS round shares the same v{version} (the plan-set version).
 Each plan declares which repo it belongs to (front-matter \`repo:\` or a header line).
 Plans are vertical, committable slices — the repo tag is an additional axis.
@@ -804,10 +803,149 @@ const finalizePlans: StepDef = {
 			}
 		});
 
-		// Plans approved → hand off to the per-repo execution/polish loops, each
-		// driven by `kautopilot next --repo <repo>`. The shared timeline waits at
-		// `await_repos` until every repo is ready, then runs the feedback phase.
+		// Plans approved → hand execution to the skill. The binary waits at
+		// `await_repos` while the skill drives `kautopilot schedule`/`record`.
 		return "await_repos";
+	},
+};
+
+// --- feedback_check (interactive) -------------------------------------------
+
+const feedbackCheck: StepDef = {
+	name: "feedback_check",
+	phase: "feedback",
+	kind: "interactive",
+	scope: "session",
+	prepare: async (ctx) => {
+		const prRef =
+			ctx.meta.repos
+				.map((r) => r.prUrl ?? (r.prNumber ? `#${r.prNumber}` : null))
+				.filter(Boolean)
+				.join(", ") || "(PRs tracked in orchestration.yaml)";
+		const prompt = [
+			`The execution DAG is clear for this epoch (${prRef}).`,
+			"",
+			"Confirm the next step:",
+			"- done: no further changes for this session.",
+			"- feedback: capture changes for a new planning epoch.",
+			"",
+			"Only choose done after scheduled PR merge/release work is already recorded.",
+		].join("\n");
+		return {
+			prompt,
+			vars: {},
+			contract: {
+				completionEvent: "feedback_check:completed",
+				completionMetadataSchema: { choice: "feedback|done" },
+			},
+		} satisfies PreparedStep;
+	},
+	finalize: async (ctx) => {
+		return ctx.metadata?.choice === "feedback" ? "feedback" : null;
+	},
+};
+
+// --- feedback (interactive) --------------------------------------------------
+
+const FEEDBACK_MECHANICS = `## CRITICAL: Feedback Mechanics
+### Output File
+Write the feedback to {feedback_doc}. It is consumed by the next planning epoch.
+
+### Capture the change request
+- Identify what was wrong, missing, or newly desired.
+- Keep the feedback concrete enough for the next spec/plans pass.
+- If the feedback implies durable agent guidance, propose concise candidate rules.
+
+### Completion metadata
+Pass confirmed durable rules as { "rules": ["..."] }. Omit rules when there are none.
+
+### Previous revision diff (if any)
+{lastDiff}`;
+
+const feedback: StepDef = {
+	name: "feedback",
+	phase: "feedback",
+	kind: "interactive",
+	scope: "session",
+	prepare: async (ctx) => {
+		const { path } = currentRevisionPath(ctx.sessionId, "feedback", {
+			epoch: ctx.version,
+		});
+		const epochDir = join(
+			sessionDir(ctx.sessionId),
+			"epoch",
+			String(ctx.version),
+		);
+		const prUrls =
+			ctx.meta.repos
+				.map((r) => r.prUrl)
+				.filter((u): u is string => !!u)
+				.join(", ") || "(PRs tracked in orchestration.yaml)";
+		const vars: Record<string, string | null> = {
+			feedback_doc: path,
+			task_spec_path: latestSpecPath(ctx),
+			plans_dir: join(epochDir, "plans"),
+			pr_url: prUrls,
+			checks_status: "(recorded ready/merged/released in orchestration.yaml)",
+			thread_count: "0",
+			lastDiff: lastDiff(ctx.sessionId, "feedback", { epoch: ctx.version }),
+		};
+		const body = getAgentPrompt(
+			"phase3",
+			"feedback",
+			vars as Record<string, string>,
+		);
+		return {
+			prompt: `${substitute(FEEDBACK_MECHANICS, vars)}\n\n${SHARED_APPROVAL_GATE}\n\n${body}`,
+			vars,
+			contract: {
+				outputFile: path,
+				completionEvent: "feedback:approved",
+				completionMetadataSchema: { rules: "string[]" },
+			},
+		} satisfies PreparedStep;
+	},
+	finalize: async (ctx) => {
+		const rules = (ctx.metadata?.rules as string[] | undefined) ?? [];
+		if (rules.length > 0) {
+			let written = 0;
+			for (const r of ctx.meta.repos) {
+				// In the DAG model the binary never seeds worktrees (`worktree` stays
+				// null), so fall back to the repo's recorded git root from triage.
+				const dir = r.worktree ?? r.repoPath;
+				if (!dir || !existsSync(dir)) continue;
+				try {
+					const rulesFile = join(dir, "rules.md");
+					const prev = existsSync(rulesFile)
+						? readFileSync(rulesFile, "utf-8")
+						: "";
+					const additions = rules.map((line) => `- ${line}`).join("\n");
+					const next = prev
+						? `${prev.replace(/\s*$/, "")}\n${additions}\n`
+						: `# Rules\n\n${additions}\n`;
+					await Bun.write(rulesFile, next);
+					written += 1;
+				} catch {
+					// Best-effort per repo; surfaced below if NOTHING landed.
+				}
+			}
+			if (written === 0) {
+				// Never silently drop user-confirmed rules: fail the complete (no
+				// completion event is appended, the step stays pending) so the
+				// controller can write rules.md itself and retry.
+				throw new Error(
+					"confirmed rules could not be written to any repo's rules.md " +
+						"(no repo has a usable worktree/repoPath). Write the rules into " +
+						"each repo's rules.md yourself, then re-run `kautopilot complete` " +
+						"without the rules metadata.",
+				);
+			}
+		}
+		updateSessionMeta(ctx.sessionId, (m) => {
+			m.epoch += 1;
+			for (const r of m.repos) r.status = "pending";
+		});
+		return "write_spec";
 	},
 };
 
@@ -821,4 +959,6 @@ export const PLAN_STEPS: StepDef[] = [
 	writeMasterPlan,
 	writePlans,
 	finalizePlans,
+	feedbackCheck,
+	feedback,
 ];

@@ -47,7 +47,7 @@ export function isGateLevel(v: unknown): v is GateLevel {
 	return typeof v === "string" && (GATE_LEVELS as string[]).includes(v);
 }
 
-/** Per-session policy: does the binary merge a ready PR itself, or ask the user? */
+/** Per-session policy: user merge only, or controller may merge scheduled ready PRs. */
 export type MergeMode = "manual" | "auto";
 
 /**
@@ -110,7 +110,8 @@ export type PlanExecStatus =
 	| "pending" // not started
 	| "running" // kloop / sub-agent is implementing it
 	| "implemented" // code committed on its branch
-	| "pr_open" // its PR is open (ready-to-merge once polished)
+	| "pr_open" // its PR exists; PR-level polish may still be running
+	| "pr_ready" // its PR is ready-to-merge after CI + review-thread polish
 	| "merged" // its PR has been merged into base
 	| "released" // the release containing it is fully published
 	| "failed"; // the agent reported it could not be completed
@@ -126,6 +127,23 @@ export interface PlanProgress {
 	updatedAt?: string;
 }
 
+export type PrLifecycleStatus =
+	| "pending" // not opened yet
+	| "open" // PR exists; polish/CI/review-thread loop is still pending
+	| "ready" // CI green + actionable review threads resolved
+	| "merged" // PR merged into base
+	| "released" // release containing the PR is complete
+	| "failed";
+
+export interface PrProgress {
+	/** Stable PrPlan id from the master plan (e.g. `pr-1`). */
+	pr: string;
+	status: PrLifecycleStatus;
+	prNumber?: number | null;
+	prUrl?: string | null;
+	updatedAt?: string;
+}
+
 /** The full resumable orchestration record persisted to `orchestration.yaml`. */
 export interface Orchestration {
 	sessionId: string;
@@ -133,6 +151,8 @@ export interface Orchestration {
 	mergeMode: MergeMode;
 	master: MasterPlan;
 	progress: PlanProgress[];
+	/** PR-level lifecycle; polish belongs here, not on individual plan readiness. */
+	prProgress?: PrProgress[];
 }
 
 // ----------------------------------------------------------------------------
@@ -155,10 +175,112 @@ export function readOrchestration(sessionId: string): Orchestration | null {
 		parsed.master.nodes ??= [];
 		parsed.master.deps ??= [];
 		parsed.progress ??= [];
+		const missingPrProgress = !parsed.prProgress;
+		if (missingPrProgress) normalizeLegacyPrOpenProgress(parsed);
+		parsed.prProgress = normalizePrProgress(parsed, missingPrProgress);
 		return parsed;
 	} catch {
 		return null;
 	}
+}
+
+function normalizeLegacyPrOpenProgress(orch: Orchestration): void {
+	for (const pr of orch.master.prs) {
+		const planNodes = orch.master.nodes.filter((n) => n.pr === pr.id);
+		const progresses = planNodes
+			.map((n) =>
+				orch.progress.find((p) => p.repo === n.repo && p.plan === n.plan),
+			)
+			.filter((p): p is PlanProgress => !!p);
+		const legacyReady =
+			progresses.length > 0 &&
+			progresses.every(
+				(p) =>
+					p.status === "pr_open" ||
+					p.status === "pr_ready" ||
+					p.status === "merged" ||
+					p.status === "released",
+			);
+		if (legacyReady) {
+			for (const p of progresses) {
+				if (p.status === "pr_open") p.status = "pr_ready";
+			}
+		}
+	}
+}
+
+function normalizePrProgress(
+	orch: Orchestration,
+	legacyMissingPrProgress = false,
+): PrProgress[] {
+	const existing = new Map((orch.prProgress ?? []).map((p) => [p.pr, p]));
+	return orch.master.prs.map((pr) => {
+		const found = existing.get(pr.id);
+		if (found) return found;
+		return derivePrProgress(orch, pr.id, {
+			legacyPrOpenIsReady: legacyMissingPrProgress,
+		});
+	});
+}
+
+export function derivePrProgress(
+	orch: Orchestration,
+	prId: string,
+	opts: { legacyPrOpenIsReady?: boolean } = {},
+): PrProgress {
+	const planNodes = orch.master.nodes.filter((n) => n.pr === prId);
+	const progresses = planNodes
+		.map((n) =>
+			orch.progress.find((p) => p.repo === n.repo && p.plan === n.plan),
+		)
+		.filter((p): p is PlanProgress => !!p);
+	const statuses = progresses.map((p) => p.status);
+	let status: PrLifecycleStatus = "pending";
+	if (statuses.length > 0 && statuses.every((s) => s === "released")) {
+		status = "released";
+	} else if (
+		statuses.length > 0 &&
+		statuses.every((s) => s === "merged" || s === "released")
+	) {
+		status = "merged";
+	} else if (
+		opts.legacyPrOpenIsReady &&
+		statuses.length > 0 &&
+		statuses.every(
+			(s) =>
+				s === "pr_open" ||
+				s === "pr_ready" ||
+				s === "merged" ||
+				s === "released",
+		)
+	) {
+		status = "ready";
+	} else if (
+		statuses.length > 0 &&
+		statuses.every(
+			(s) => s === "pr_ready" || s === "merged" || s === "released",
+		)
+	) {
+		status = "ready";
+	} else if (
+		statuses.some(
+			(s) =>
+				s === "pr_open" ||
+				s === "pr_ready" ||
+				s === "merged" ||
+				s === "released",
+		)
+	) {
+		status = "open";
+	} else if (statuses.some((s) => s === "failed")) {
+		status = "failed";
+	}
+	return {
+		pr: prId,
+		status,
+		prNumber: progresses.find((p) => p.prNumber != null)?.prNumber ?? null,
+		prUrl: progresses.find((p) => p.prUrl)?.prUrl ?? null,
+	};
 }
 
 function writeOrchestration(orch: Orchestration): void {
@@ -217,6 +339,16 @@ export function initOrchestration(
 		mergeMode,
 		master,
 		progress,
+		prProgress: master.prs.map((pr) => {
+			const carried = prior?.prProgress?.find((p) => p.pr === pr.id);
+			return (
+				carried ??
+				derivePrProgress(
+					{ sessionId, epoch, mergeMode, master, progress, prProgress: [] },
+					pr.id,
+				)
+			);
+		}),
 	};
 	writeOrchestration(orch);
 	return orch;
@@ -260,6 +392,23 @@ export function recordPlanProgress(
 	});
 }
 
+/** Set one PR's lifecycle fields, creating the entry if it is missing. */
+export function recordPrProgress(
+	sessionId: string,
+	pr: string,
+	patch: Partial<Omit<PrProgress, "pr">>,
+): Orchestration | null {
+	return updateOrchestration(sessionId, (orch) => {
+		orch.prProgress ??= normalizePrProgress(orch);
+		let entry = orch.prProgress.find((p) => p.pr === pr);
+		if (!entry) {
+			entry = { pr, status: "pending", prNumber: null, prUrl: null };
+			orch.prProgress.push(entry);
+		}
+		Object.assign(entry, patch, { updatedAt: new Date().toISOString() });
+	});
+}
+
 // ----------------------------------------------------------------------------
 // Gate evaluation
 // ----------------------------------------------------------------------------
@@ -271,8 +420,9 @@ const STATUS_RANK: Record<PlanExecStatus, number> = {
 	running: 1,
 	implemented: 2,
 	pr_open: 3,
-	merged: 4,
-	released: 5,
+	pr_ready: 4,
+	merged: 5,
+	released: 6,
 };
 
 /** The minimum status rank that satisfies each gate level. */

@@ -13,6 +13,7 @@ in
     home.activation.setupWorkspaceDirectories = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
       mkdir -p ~/Workspace/work
       mkdir -p ~/Workspace/atomi
+      mkdir -p ~/Workspace/durian
       mkdir -p ~/Workspace/personal
     '';
 

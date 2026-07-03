@@ -6,7 +6,13 @@ import {
 	expect,
 	it,
 } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -24,7 +30,11 @@ afterAll(() => {
 
 import { sessionDir } from "../../core/artifacts";
 import { runComplete, runNext, runRevise } from "../../core/driver";
-import { readOrchestration } from "../../core/orchestration";
+import {
+	readOrchestration,
+	recordPlanProgress,
+	recordPrProgress,
+} from "../../core/orchestration";
 import {
 	diffRevisions,
 	latestRevisionOnDisk,
@@ -165,6 +175,19 @@ describe("host-driven driver: next/complete", () => {
 			(
 				await runComplete(id, config, "write_master_plan", {
 					output: join(dir, "epoch", "1", "master_plan", "v1.md"),
+					metadata: {
+						prs: [
+							{
+								id: "pr-1",
+								repo: "default",
+								branch: "u/default",
+								title: "Default",
+								plans: ["plan-1"],
+							},
+						],
+						nodes: [{ plan: "plan-1", repo: "default", pr: "pr-1" }],
+						deps: [],
+					},
 				})
 			).ok,
 		).toBe(true);
@@ -187,21 +210,17 @@ describe("host-driven driver: next/complete", () => {
 		).toBe(true);
 
 		// finalize_plans (code) → await_repos gate: bare next stops and tells the
-		// controller to drive each repo via `next --repo`.
+		// controller to drive the DAG with schedule/record.
 		const afterPlan = await runNext(id, config);
 		expect(afterPlan.done).toBe(true);
 		if (!afterPlan.done) return;
-		expect(afterPlan.reason).toContain("next --repo default");
+		expect(afterPlan.reason).toContain("kautopilot schedule");
+		expect(afterPlan.reason).toContain("record");
 		const m2 = readSessionMeta(id);
 		expect(m2?.repos[0]?.plans).toContain("plan-1");
 
-		// `next --repo default` drives that repo's execution/polish timeline.
-		const repoStep = await runNext(id, config, "default");
-		if (repoStep.done) throw new Error("repo timeline should not be done yet");
-		expect(repoStep.repo).toBe("default");
-		expect(repoStep.phase === "execution" || repoStep.phase === "polish").toBe(
-			true,
-		);
+		// Repo-scoped next is gone; execution/polish is driven by schedule/record.
+		await expect(runNext(id, config, "default")).rejects.toThrow("schedule");
 	});
 
 	it("first revise presents the working copy (v1); a later revise mints v2", async () => {
@@ -232,7 +251,11 @@ describe("host-driven driver: next/complete", () => {
 		expect(r1.ok).toBe(true);
 		expect(r1.version).toBe(1);
 		expect(r1.path).toContain("v1.md");
-		expect(r1.url).toContain("/spec/v1");
+		// `revise` returns FULL viewer URLs: the configured viewerBaseUrl is prefixed
+		// here so the harness never has to guess a host or hand-build a version URL.
+		expect(r1.url).toBe(
+			`${config.settings.viewerBaseUrl}/sessions/${id}/spec/v1`,
+		);
 		// No v2 was created by the first revise.
 		expect(latestRevisionOnDisk(id, "spec", { epoch: 1 })).toBe(1);
 
@@ -242,8 +265,14 @@ describe("host-driven driver: next/complete", () => {
 		expect(r.ok).toBe(true);
 		expect(r.version).toBe(2);
 		expect(r.path).toContain("v2.md");
-		expect(r.url).toContain("/spec/v2");
+		expect(r.url).toBe(
+			`${config.settings.viewerBaseUrl}/sessions/${id}/spec/v2`,
+		);
+		expect(r.diffUrl).toContain(config.settings.viewerBaseUrl);
 		expect(r.diffUrl).toContain("from=1&to=2");
+		expect(r.visualUrl).toBe(
+			`${config.settings.viewerBaseUrl}/sessions/${id}/html/spec/v/2`,
+		);
 		// v2 is a copy of v1 until edited.
 		expect(readRevision(id, "spec", 2, { epoch: 1 })).toBe("# Spec v1\nline");
 		writeFile(
@@ -269,19 +298,12 @@ describe("host-driven driver: next/complete", () => {
 	});
 });
 
-// --- multi-repo (Phase 4) ----------------------------------------------------
-
-function metaFor(step: string): Record<string, unknown> {
-	switch (step) {
-		case "feedback_check":
-			return { choice: "done", fullyMerged: false };
-		default:
-			return {};
-	}
-}
-
 /** Drive the shared plan phase to the await_repos handoff, registering `repos`. */
-async function drivePlan(id: string, repos: string[]): Promise<void> {
+async function drivePlan(
+	id: string,
+	repos: string[],
+	repoPaths?: Record<string, string>,
+): Promise<void> {
 	const dir = sessionDir(id);
 	// fetch_ticket
 	await runNext(id, config);
@@ -294,7 +316,12 @@ async function drivePlan(id: string, repos: string[]): Promise<void> {
 	writeFile(join(dir, "epoch", "1", "triage", "v1.md"), "moderate");
 	await runComplete(id, config, "triage", {
 		output: join(dir, "epoch", "1", "triage", "v1.md"),
-		metadata: { complexity: "moderate", repos, dependsOn: {} },
+		metadata: {
+			complexity: "moderate",
+			repos,
+			dependsOn: {},
+			...(repoPaths ? { repoPaths } : {}),
+		},
 	});
 	// write_spec (reviewers ride on the writer step).
 	await runNext(id, config);
@@ -307,6 +334,21 @@ async function drivePlan(id: string, repos: string[]): Promise<void> {
 	writeFile(join(dir, "epoch", "1", "master_plan", "v1.md"), "# Master plan");
 	await runComplete(id, config, "write_master_plan", {
 		output: join(dir, "epoch", "1", "master_plan", "v1.md"),
+		metadata: {
+			prs: repos.map((repo, i) => ({
+				id: `pr-${i + 1}`,
+				repo,
+				branch: `u/${repo}`,
+				title: repo,
+				plans: [`plan-${i + 1}`],
+			})),
+			nodes: repos.map((repo, i) => ({
+				plan: `plan-${i + 1}`,
+				repo,
+				pr: `pr-${i + 1}`,
+			})),
+			deps: [],
+		},
 	});
 	// write_plans (one plan per repo, tagged) → finalize_plans. The writer authors
 	// every plan folder under epoch/<E>/plans/<authoringRepo>/<plan>/v<M>.md.
@@ -322,102 +364,6 @@ async function drivePlan(id: string, repos: string[]): Promise<void> {
 	await runComplete(id, config, "write_plans", { output: plansDir });
 	await runNext(id, config);
 }
-
-/** Drive one repo's execution/polish timeline to completion (ready-to-merge). */
-async function driveRepo(id: string, repo: string): Promise<void> {
-	for (let i = 0; i < 80; i++) {
-		const d = await runNext(id, config, repo);
-		if (d.done) return;
-		expect(d.repo).toBe(repo);
-		if (d.contract.outputFile) writeFile(d.contract.outputFile, "artifact");
-		const res = await runComplete(id, config, d.step, {
-			repo,
-			output: d.contract.outputFile,
-			metadata: metaFor(d.step),
-		});
-		expect(res.ok).toBe(true);
-	}
-	throw new Error(`repo ${repo} timeline did not finish`);
-}
-
-describe("multi-repo: identical flat flow, serialized interaction", () => {
-	it("a two-repo ticket runs two independent repo timelines, then one feedback gate", async () => {
-		const id = newSession("PE-2000");
-		await drivePlan(id, ["api", "infra"]);
-
-		// Bare next now gates on the repos.
-		const gate = await runNext(id, config);
-		expect(gate.done).toBe(true);
-		if (!gate.done) return;
-		expect(gate.reason).toContain("next --repo api");
-		expect(gate.reason).toContain("next --repo infra");
-
-		// Each repo is registered with its own plan partition.
-		const meta = readSessionMeta(id);
-		expect(meta?.repos.map((r) => r.repo).sort()).toEqual(["api", "infra"]);
-
-		// The two repo timelines are independent: drive api fully; infra is untouched.
-		await driveRepo(id, "api");
-		const mid = readSessionMeta(id);
-		expect(mid?.repos.find((r) => r.repo === "api")?.status).toBe("ready");
-		expect(mid?.repos.find((r) => r.repo === "infra")?.status).toBe("pending");
-
-		// Bare next still gates (infra not ready) — feedback is not reached yet.
-		const stillGated = await runNext(id, config);
-		expect(stillGated.done).toBe(true);
-
-		// Drive infra; now both are ready.
-		await driveRepo(id, "infra");
-		const after = readSessionMeta(id);
-		expect(after?.repos.every((r) => r.status === "ready")).toBe(true);
-
-		// Distinct worktrees per repo (the "two worktrees" DoD).
-		const wts = after?.repos.map((r) => r.worktree) ?? [];
-		expect(new Set(wts).size).toBe(2);
-
-		// With every repo ready, bare next advances the shared timeline to feedback.
-		const fb = await runNext(id, config);
-		expect(fb.done).toBe(false);
-		if (fb.done) return;
-		expect(fb.step).toBe("feedback_check");
-		expect(fb.phase).toBe("feedback");
-	});
-
-	it("bounds concurrency to maxParallelRepos — extra repos are queued", async () => {
-		seq += 1;
-		const wt = `/tmp/mp-${seq}`;
-		const meta = createSession({
-			ticketId: "PE-3000",
-			org: "liftoff",
-			folder: wt,
-			maxParallelRepos: 1,
-		});
-		const id = meta.sessionId;
-		await drivePlan(id, ["alpha", "beta"]);
-		// Bare next runs finalize_plans → await_repos (approving plans for the epoch).
-		await runNext(id, config);
-
-		// First repo starts and becomes active (0 < cap of 1).
-		const a = await runNext(id, config, "alpha");
-		expect(a.done).toBe(false);
-		expect(
-			readSessionMeta(id)?.repos.find((r) => r.repo === "alpha")?.status,
-		).toBe("active");
-
-		// Second repo is queued while the first is in progress (cap = 1).
-		const b = await runNext(id, config, "beta");
-		expect(b.done).toBe(true);
-		if (!b.done) return;
-		expect(b.reason).toContain("queued");
-
-		// Once the first reaches ready-to-merge, the queued repo may proceed.
-		await driveRepo(id, "alpha");
-		const c = await runNext(id, config, "beta");
-		expect(c.done).toBe(false);
-		if (c.done) return;
-		expect(c.repo).toBe("beta");
-	});
-});
 
 // --- master plan → orchestration.yaml ----------------------------------------
 
@@ -496,66 +442,145 @@ describe("master plan freezes orchestration.yaml + gates a downstream repo", () 
 		expect(readSessionMeta(id)?.mergeMode).toBe("auto");
 	});
 
-	it("execution keys orchestration progress on the GLOBAL plan id (no drift for non-first repos)", async () => {
+	it("after plan approval, execution is delegated to schedule/record", async () => {
 		const id = newSession("PE-4100");
-		const dir = sessionDir(id);
-		await runNext(id, config);
-		writeFile(join(dir, "ticket.md"), "# t");
-		await runComplete(id, config, "fetch_ticket", {
-			output: join(dir, "ticket.md"),
-		});
-		await runNext(id, config);
-		writeFile(join(dir, "epoch", "1", "triage", "v1.md"), "moderate");
-		await runComplete(id, config, "triage", {
-			output: join(dir, "epoch", "1", "triage", "v1.md"),
-			metadata: { repos: ["api", "web"], dependsOn: {} },
-		});
-		await runNext(id, config);
-		writeFile(join(dir, "epoch", "1", "spec", "v1.md"), "# Spec");
-		await runComplete(id, config, "write_spec", {
-			output: join(dir, "epoch", "1", "spec", "v1.md"),
-		});
-		// Master plan: api owns global plan-1, web owns global plan-2 (NO gate, so web
-		// isn't blocked and we can drive it straight into execution).
-		await runNext(id, config);
-		writeFile(join(dir, "epoch", "1", "master_plan", "v1.md"), "# MP");
-		await runComplete(id, config, "write_master_plan", {
-			output: join(dir, "epoch", "1", "master_plan", "v1.md"),
-			metadata: {
-				nodes: [
-					{ plan: "plan-1", repo: "api", pr: "pr-1" },
-					{ plan: "plan-2", repo: "web", pr: "pr-2" },
-				],
-				deps: [],
-			},
-		});
-		// write_plans: plan-1 tagged api, plan-2 tagged web (authored under api's bucket).
-		await runNext(id, config);
-		const plansDir = join(dir, "epoch", "1", "plans", "api");
-		writeFile(join(plansDir, "plan-1", "v1.md"), "repo: api\n# Plan 1");
-		writeFile(join(plansDir, "plan-2", "v1.md"), "repo: web\n# Plan 2");
-		await runComplete(id, config, "write_plans", { output: plansDir });
-		await runNext(id, config); // finalize_plans → await_repos
+		await drivePlan(id, ["api", "web"]);
+		const gate = await runNext(id, config);
+		expect(gate.done).toBe(true);
+		if (!gate.done) return;
+		expect(gate.reason).toContain("kautopilot schedule");
+		await expect(runNext(id, config, "web")).rejects.toThrow("removed");
+		const res = await runComplete(id, config, "running", { repo: "web" });
+		expect(res.ok).toBe(false);
+		expect(res.error).toContain("removed");
+	});
 
-		// Drive web (the NON-first repo) until it records a `running` orchestration entry.
-		for (let i = 0; i < 12; i++) {
-			const d = await runNext(id, config, "web");
-			if (d.done) break;
-			if (d.contract?.outputFile) writeFile(d.contract.outputFile, "x");
-			await runComplete(id, config, d.step, {
-				repo: "web",
-				output: d.contract?.outputFile,
-				metadata: d.step === "running" ? { kloopRunId: "r1" } : {},
+	it("enters feedback only after the schedule/record DAG is clear", async () => {
+		const id = newSession("PE-4101");
+		await drivePlan(id, ["api", "web"]);
+		recordPlanProgress(id, "api", "plan-1", { status: "merged" });
+		recordPrProgress(id, "pr-1", { status: "merged" });
+		recordPlanProgress(id, "web", "plan-2", { status: "merged" });
+		recordPrProgress(id, "pr-2", { status: "merged" });
+
+		const feedback = await runNext(id, config);
+		expect(feedback.done).toBe(false);
+		if (feedback.done) return;
+		expect(feedback.step).toBe("feedback_check");
+		expect(feedback.phase).toBe("feedback");
+
+		const completed = await runComplete(id, config, "feedback_check", {
+			metadata: { choice: "done" },
+		});
+		expect(completed.ok).toBe(true);
+		const done = await runNext(id, config);
+		expect(done.done).toBe(true);
+		if (!done.done) return;
+		expect(done.phase).toBe("done");
+	});
+});
+
+// --- feedback_check choice gate + feedback rules persistence -------------------
+
+/** Drive plan + record the single pr-1/plan-1 as merged so next → feedback_check. */
+async function driveToFeedbackCheck(
+	id: string,
+	repoPaths?: Record<string, string>,
+): Promise<void> {
+	await drivePlan(id, ["api"], repoPaths);
+	recordPlanProgress(id, "api", "plan-1", { status: "merged" });
+	recordPrProgress(id, "pr-1", { status: "merged" });
+	const fc = await runNext(id, config);
+	expect(fc.done).toBe(false);
+	if (!fc.done) expect(fc.step).toBe("feedback_check");
+}
+
+describe("feedback_check requires an explicit choice", () => {
+	it("rejects complete without metadata (never silently ends the session)", async () => {
+		const id = newSession("PE-4200");
+		await driveToFeedbackCheck(id);
+		const res = await runComplete(id, config, undefined, {});
+		expect(res.ok).toBe(false);
+		expect(res.error).toContain('"choice"');
+		// The step is still pending — nothing was recorded.
+		const again = await runNext(id, config);
+		expect(again.done).toBe(false);
+		if (!again.done) expect(again.step).toBe("feedback_check");
+	});
+
+	it("rejects an invalid choice value", async () => {
+		const id = newSession("PE-4201");
+		await driveToFeedbackCheck(id);
+		const res = await runComplete(id, config, undefined, {
+			metadata: { choice: "maybe" },
+		});
+		expect(res.ok).toBe(false);
+		expect(res.error).toContain("invalid metadata");
+		const again = await runNext(id, config);
+		expect(again.done).toBe(false);
+		if (!again.done) expect(again.step).toBe("feedback_check");
+	});
+
+	it("choice=feedback advances to the feedback step", async () => {
+		const id = newSession("PE-4202");
+		await driveToFeedbackCheck(id);
+		const res = await runComplete(id, config, undefined, {
+			metadata: { choice: "feedback" },
+		});
+		expect(res.ok).toBe(true);
+		const fb = await runNext(id, config);
+		expect(fb.done).toBe(false);
+		if (!fb.done) expect(fb.step).toBe("feedback");
+	});
+});
+
+describe("feedback rules persistence", () => {
+	it("appends confirmed rules to rules.md in each repo's repoPath (worktree null)", async () => {
+		const repoDir = mkdtempSync(join(tmpdir(), "kautopilot-rules-"));
+		try {
+			const id = newSession("PE-4210");
+			await driveToFeedbackCheck(id, { api: repoDir });
+			await runComplete(id, config, undefined, {
+				metadata: { choice: "feedback" },
 			});
-			if (d.step === "running") break;
+			const fb = await runNext(id, config);
+			if (fb.done) throw new Error("unexpected done");
+			expect(fb.step).toBe("feedback");
+			const out = fb.contract.outputFile as string;
+			writeFile(out, "# Feedback\nchange X");
+			const res = await runComplete(id, config, "feedback", {
+				output: out,
+				metadata: { rules: ["Always use bun, never python"] },
+			});
+			expect(res.ok).toBe(true);
+			const rules = readFileSync(join(repoDir, "rules.md"), "utf-8");
+			expect(rules).toContain("- Always use bun, never python");
+		} finally {
+			rmSync(repoDir, { recursive: true, force: true });
 		}
-		// web's global plan id is plan-2 — execution must record progress under THAT,
-		// matching the master-plan node + polish, never the per-repo label `plan-1`.
-		const orch = readOrchestration(id);
-		const webKeys = (orch?.progress ?? [])
-			.filter((p) => p.repo === "web")
-			.map((p) => p.plan);
-		expect(webKeys).toContain("plan-2");
-		expect(webKeys).not.toContain("plan-1");
+	});
+
+	it("fails loudly (step stays pending) when no repo path is writable", async () => {
+		const id = newSession("PE-4211");
+		await driveToFeedbackCheck(id, {
+			api: join(tempHome, "nope", "missing-repo"),
+		});
+		await runComplete(id, config, undefined, {
+			metadata: { choice: "feedback" },
+		});
+		const fb = await runNext(id, config);
+		if (fb.done) throw new Error("unexpected done");
+		const out = fb.contract.outputFile as string;
+		writeFile(out, "# Feedback");
+		await expect(
+			runComplete(id, config, "feedback", {
+				output: out,
+				metadata: { rules: ["some rule"] },
+			}),
+		).rejects.toThrow("rules.md");
+		// No completion event was appended — feedback is still the pending step.
+		const again = await runNext(id, config);
+		expect(again.done).toBe(false);
+		if (!again.done) expect(again.step).toBe("feedback");
 	});
 });

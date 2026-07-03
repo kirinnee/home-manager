@@ -19,7 +19,7 @@ a detail, not a separate concept. See `CLI-CONTRACT.md` / `SPEC-kautopilot.md` i
 
 ```
 loop:
-  d = json(`kautopilot next --json [--repo <repo>]`)
+  d = json(`kautopilot next --json`)
   if d.done:                 # see "Reading `done`" — NOT always session-complete
       handle(d); break/continue accordingly
   if d.kind == "interactive":
@@ -27,7 +27,7 @@ loop:
       (reviewers → `kautopilot revise` to mint+present each version → user feedback)
   else:  # d.kind == "agent"
       run d.prompt in a FRESH context that writes d.contract.outputFile (see "Agent steps — by harness")
-  kautopilot complete --output d.contract.outputFile [--metadata {…}] [--repo <repo>]
+  kautopilot complete --output d.contract.outputFile [--metadata {…}]
 ```
 
 **Agent steps & reviewer fan-out — by harness.** The binary loop above is
@@ -35,16 +35,15 @@ harness-agnostic; only _how you run a fresh-context step/reviewer_ differs:
 
 - **Claude Code:** spawn an isolated `Task` subagent (`Agent` tool) per agent-step
   and per reviewer (parallel fan-out), as described throughout this doc.
-- **Codex:** use codex's **native subagents via explicit delegation** for the
-  agent-step and the reviewer fan-out — delegate each with its own prompt; the
-  agent-step subagent writes `d.contract.outputFile`. (Equivalently, a
-  **`codex exec "<d.prompt>"`** subprocess is a fresh context that writes the
-  output file; reviewer fan-out = parallel `codex exec` background jobs.)
+- **Codex:** ask Codex to start native subagents via explicit delegation for the
+  agent-step and reviewer fan-out. Delegate each with its own prompt; the agent-step
+  subagent writes `d.contract.outputFile`. Do not shell out to Codex for these if
+  native subagents are available.
   Interactive (`d.kind == "interactive"`) steps run inline either way.
 
 Wherever this doc says "spawn a `Task`/`Agent`/`Explore` subagent", read it as
-"start a fresh-context run" — `Task`/`Agent` on Claude, a delegated subagent (or
-`codex exec`) on Codex.
+"start a fresh-context run" — `Task`/`Agent` on Claude, a delegated native subagent
+on Codex.
 
 **The binary owns the sequence — you never track it.** Do NOT name the step on
 `complete`: omit it and the binary completes whatever step is actually pending
@@ -71,15 +70,13 @@ shapes mean different things — branch on `phase`:
 - **bare `next` → `phase:"execution"`** = the **plan→DAG handoff**. The master plan is
   approved; now **drive the DAG with `kautopilot schedule`/`record`** (see "Driving the
   DAG"). The reason string includes the current frontier. Do **not** stop and do **not**
-  call `next --repo` — that's the legacy per-repo path. When `schedule` reports `allReady`,
-  call bare `next` again — it advances to feedback.
+  try repo-scoped `next` — that path has been removed. When `schedule` reports `allReady`
+  with no `toMerge` entries, call bare `next` again — it advances to feedback.
 - **bare `next` → `phase:"feedback"` step** (e.g. `feedback_check`) — handle normally.
 - **bare `next` → `phase:"done"`** = the session is truly complete. Report and stop.
 
-(Legacy: for a session with **no** master plan, bare `next` instead asks you to drive each
-repo via `next --repo <repo>` to `ready`, and you may see per-repo `queued` / `blocked on
-gate` / `ready to merge` done-results. New ticket-to-PR runs always have a master plan and
-use the `schedule`/`record` DAG model above.)
+(If a session has no master plan/orchestration, fix that plan artifact first. New
+ticket-to-PR runs use the `schedule`/`record` DAG model.)
 
 ## Start
 
@@ -99,8 +96,8 @@ user **does** say "continue", resume per **"Continue (this folder)"** below.
 
 Org is `liftoff` or `atomicloud`, resolved by `--org` → detect-from-ticket → ask.
 
-**Merge policy (per session).** `mergeMode` is `manual` (default — the binary drives PRs to
-ready-to-merge and the user merges) or `auto` (the binary merges ready PRs itself to clear
+**Merge policy (per session).** `mergeMode` is `manual` (default — drive PRs to
+ready-to-merge and the user merges) or `auto` (the controller merges scheduled ready PRs to clear
 downstream gates). Set it at start with `kautopilot start … --merge auto|manual`, or confirm
 it in the master plan. Either way ready-to-merge is always reached; `auto` is what lets
 cross-repo `merged`/`released` gates progress without a human merge in between.
@@ -127,8 +124,8 @@ below instead — that's the tag-filtered variant of the same pick-and-resume fl
 
 **Launch from anywhere.** kautopilot need NOT be started inside a repo — the cwd can
 be any directory (a hub) with access to many repos. **Triage** decides which repos the
-task touches and records each repo's absolute path (`repoPaths`); the execution `seed`
-step then creates each repo's worktree on demand via worktrunk. So you don't pre-pick a
+task touches and records each repo's absolute path (`repoPaths`). During execution, you
+create or locate each repo's worktree on demand via worktrunk. So you don't pre-pick a
 repo at start; triage does, and it must locate (or clone, with the user's OK) each repo.
 
 ### After triage: confirm repos + paths, name the branch (REQUIRED)
@@ -144,8 +141,8 @@ Triage is interactive — before you `kautopilot complete` it, you MUST:
    choose it — concise and descriptive, e.g. ticket "Add dark mode to portal" →
    `dark-mode`). Confirm it in the same question. The binary builds the final branch as
    **`<git-user>/<ticket-id>-<slug>`** (e.g. `kirinnee/PE-1234-dark-mode`), the **same
-   branch across all the task's repos**; `seed` creates each repo's worktree on that branch
-   via worktrunk (`wt`). You only supply the slug — the binary fills in the `<git-user>/`
+   branch across all the task's repos**; you create each repo's worktree on that branch via
+   worktrunk (`wt`) when `schedule` makes a plan ready. You only supply the slug — the binary fills in the `<git-user>/`
    prefix and the **`<ticket-id>`** automatically. When you show the proposed branch to the
    user, make clear that **the `<ticket-id>` part is the session's ticket reference** (the
    variable prefix, e.g. `PE-1234`), not a literal word — so e.g. `PE-1234-i18n`, with only
@@ -212,9 +209,9 @@ matching session(s):
 - **Execution (the DAG)** — once the master plan is approved, bare `next` hands off with
   `phase:"execution"` and tells you to **drive the DAG yourself with `kautopilot
 schedule`/`record`**. **kautopilot does NOT drive kloop** anymore — it's a record-keeper +
-  scheduler. YOU run kloop, resolve conflicts, open + merge PRs, and **record** each
+  scheduler. YOU run kloop, resolve conflicts, open/merge PRs per `mergeMode`, and **record** each
   transition. See "Driving the DAG" below.
-- When `schedule` reports every plan is ready-to-merge (`allReady`), call bare
+- When `schedule` reports the execution frontier is clear (`allReady`), call bare
   `kautopilot next` again — it advances to the **feedback** phase.
 
 ## Driving the DAG (execution + PRs) — `schedule` + `record`
@@ -225,7 +222,9 @@ edges. You drive it; the binary tells you what's runnable and tracks progress. L
 ```
 loop:
   s = json(`kautopilot schedule --json`)
-  if s.done: break                       # every plan merged/released
+  if s.done or s.allReady:
+      `kautopilot next --json`           # → feedback_check
+      break
   # 1. RUN ready plans (deps satisfied), up to maxParallelRepos at once.
   for plan in s.ready:
       provision/locate the repo's worktree off the LATEST base (worktrunk `wt`)
@@ -234,23 +233,33 @@ loop:
       on success: commit (the commit sub-agent), then
       `kautopilot record implemented --repo <r> --plan <p>`
       (on an unrecoverable failure: `kautopilot record failed --repo <r> --plan <p>`)
-  # 2. OPEN PRs per the master plan's PR/branch layout (a repo may have several).
-  when every plan in a PR (PrPlan) is implemented:
-      open that PR on its planned branch; babysit it to ready-to-merge (CI + threads)
-      `kautopilot record pr-opened --pr <prId> --number <n> --url <u>`
-  # 3. MERGE the PRs the schedule says are gating a downstream (s.toMerge[].unblocks).
+  # 2. POLISH PRs from the schedule's PR frontier.
+  for p in s.toPolish:
+      if p.status == pending:
+          open that PR on p.branch
+          `kautopilot record pr-opened --pr <p.pr> --number <n> --url <u>`
+      babysit the PR to ready-to-merge (CI green + all actionable review threads resolved)
+      `kautopilot record pr-ready --pr <p.pr>`
+  # 3. MERGE the PRs the schedule says must merge before feedback.
   for m in s.toMerge:
-      if mergeMode == auto OR the user approves (manual): merge PR m, then
-      `kautopilot record merged --pr <m.pr>`
-      for a `released` gate: wait for the release to publish + CI/CD, then
-      `kautopilot record released --pr <m.pr>`
+      if m.gate == "merged":
+          if mergeMode == auto, merge PR m; if manual, ask/wait for the user merge; then
+          `kautopilot record merged --pr <m.pr>`
+      if m.gate == "released":
+          wait for the release to publish + CI/CD, then
+          `kautopilot record released --pr <m.pr>`
   # recording a merge/release re-opens the frontier → next loop runs newly-ready plans
-when s.allReady: `kautopilot next`   # → feedback phase
+when s.allReady: `kautopilot next`   # → feedback phase; s.toMerge is empty
 ```
 
-- **`schedule --json` returns** `{ ready[], running[], blocked[], toMerge[], allReady,
-done, mergeMode }`. `ready` = run now. `toMerge[].unblocks` = which downstream a merge
-  frees (gate-clearing merges are listed first). `blocked[].waitingOn` = why a plan waits.
+- **`schedule --json` returns** `{ ready[], running[], blocked[], toPolish[], toMerge[],
+allReady, done, mergeMode }`. `ready` = run now. `toPolish[]` = PRs whose plans are
+  implemented and whose PR polish is not complete (`pending` means open the PR; `open`
+  means keep fighting CI/CodeRabbit/review threads). `toMerge[].gate` = `merged` or
+  `released`; `toMerge[].unblocks` = which downstream plans that gate frees (gate-clearing
+  entries are listed first; terminal ready PRs may also appear). `allReady` is true only
+  after no scheduled merge/release remains. `blocked[].waitingOn`
+  = why a plan waits.
 - **Parallelism** — run up to `maxParallelRepos` ready plans at once (each as a sub-agent
   driver); the rest wait. **Serialize user interaction** to the main chat (a conflict that
   needs a human decision comes back inline, one at a time).
@@ -259,14 +268,16 @@ done, mergeMode }`. `ready` = run now. `toMerge[].unblocks` = which downstream a
   only makes it `ready` after the upstream is merged/released, so the base already contains
   the upstream work. Bad/missing repo path → stop and tell the user; don't run on nothing.
 - **Multi-PR per repo is real here** — open exactly the PRs the master plan lays out
-  (`record pr-opened --pr <id>` per PrPlan), not one-per-repo. Merge them per their gate.
+  (`record pr-opened --pr <id>` per PrPlan), then run the PR polish loop inside that PR
+  and record `pr-ready` only after CI is green and actionable review threads are resolved.
+  Merge them per their gate after `schedule` lists them in `toMerge`.
 - **Resumable any time** — `schedule` recomputes purely from what you've `record`ed, so a
   killed/auto-resumed session just calls `schedule` again and continues from the frontier.
 
 ## Per-`kind` execution
 
 - **`code`** — never appears. The binary ran it (including all detection/waiting).
-- **`interactive`** (brainstorm, triage, write_spec, **write_master_plan**, write_plans, resolve, amend_plans, tty_resolve, feedback_check, feedback, **create_ticket**) —
+- **`interactive`** (brainstorm, triage, write_spec, **write_master_plan**, write_plans, feedback_check, feedback, **create_ticket**) —
   run **inline** in the main session. Be a **devil's advocate**: propose first, debate,
   surface conflicts; never open with "what do you want to do?" For the **writer artifacts**
   run the **per-revision review loop** below — re-present + re-ask after EVERY update and
@@ -290,15 +301,15 @@ done, mergeMode }`. `ready` = run now. `toMerge[].unblocks` = which downstream a
     run). The `plan-<N>` ids you choose here are the ids `write_plans` then writes bodies for.
   - **`write_plans`** writes one FOLDER per plan. Every plan folder MUST be named
     `plan-<N>` or `plan-<N>-<short-slug>` (the literal **`plan-<N>` prefix is required**,
-    e.g. `plan-1`, `plan-2-api`). That ordinal is what execution (`seed` → `running` →
-    `kloop init --spec`) uses to find each plan's spec file — a folder missing the prefix
-    (e.g. `auth/` or `1-auth/`) won't be located and the dev loop will fail to init. If the
+    e.g. `plan-1`, `plan-2-api`). That ordinal is what the schedule/record execution loop
+    uses to find each plan's spec file — a folder missing the prefix (e.g. `auth/` or
+    `1-auth/`) won't be located and the dev loop will fail to init. If the
     plan-writer proposes a breakdown with non-conforming folder names, correct it before
     approving.
-- **`agent`** (fetch_ticket, **running** (kloop), commit, eval,
-  create_pr, prereview, write_fix, running_subagent) — **always** a fresh isolated
-  `Task` subagent, never inline. (The reviewer fan-out isn't a step — it rides on the
-  write_spec/write_plans interactive steps and you spawn each reviewer as a subagent.)
+- **`agent`** (fetch_ticket, plus the skill-owned kloop/commit/PR-polish subagents you spawn
+  from `schedule`) — **always** a fresh isolated `Task` subagent, never inline. (The
+  reviewer fan-out isn't a step — it rides on the write_spec/write_plans interactive steps
+  and you spawn each reviewer as a subagent.)
 
 ### Running kloop for a ready plan (you drive it)
 
@@ -363,11 +374,16 @@ versions; you never pick numbers or hand-build URLs:
      that plan's tab in the dashboard.
      Never construct a version URL yourself — always use exactly what `revise` returns.
 
-**Viewer base URLs** — configured in `settings` (see `kautopilot config`), don't
-hardcode a domain:
+**Viewer base URLs** — `revise` already returns FULL URLs (host included), so use its
+`url`/`diffUrl`/`visualUrl` verbatim. For the links you DO build by hand (ticket, plans
+listing, kloop run), read the configured host — **never hardcode a domain**:
 
-- `viewerBaseUrl` — this dashboard (default `https://kauto.ernest.atomi.cloud`)
-- `kloopBaseUrl` — the **kloop** dashboard (default `https://kloop.ernest.atomi.cloud`)
+- `kautopilot config --field viewerBaseUrl` → this dashboard's base URL
+- `kautopilot config --field kloopBaseUrl` → the **kloop** dashboard's base URL
+
+(`kautopilot config` with no flag prints the whole resolved config as JSON. The binary's
+fallback defaults are `http://localhost:47317` / `http://localhost:47316` — but the user
+runs a public domain set in `~/.kautopilot/config.yaml`, so always read it, don't guess.)
 
 **Give the FULL link for EACH artifact type, not just the session.** Every artifact
 has its own shareable URL — when you present links (incl. the end-of-message summary
@@ -376,7 +392,7 @@ that apply:
 
 - ticket → `<viewerBaseUrl>/sessions/<id>/ticket`
 - ticket-draft (ad-hoc, after brainstorm) → `<viewerBaseUrl>/sessions/<id>/ticket-draft`
-- brainstorm / triage / spec / master_plan / feedback → use the `revise` `url`/`diffUrl` (current version)
+- brainstorm / triage / spec / master_plan / feedback → use the `revise` `url`/`diffUrl` (current version, full URL)
 - plans → `<viewerBaseUrl>/sessions/<id>/plans/<repo>`
 - a kloop run → **`<kloopBaseUrl>/kloop/<runId>`** (the kloop dashboard, NOT kautopilot)
 
@@ -524,10 +540,10 @@ separate "Link" column and do NOT paste raw URLs — the visible text IS the lin
 | [Spec](url)        |
 | [Plans — api](url) |
 
-Use **`viewerBaseUrl`** / **`kloopBaseUrl`** (from `settings` / `kautopilot config`, defaults
-`https://kauto.ernest.atomi.cloud` / `https://kloop.ernest.atomi.cloud`) — **never hardcode a
-domain**. Build it from what the binary gives you; **never hand-construct version URLs** — use
-the exact `url`/`diffUrl` `revise` handed back for the current versioned artifacts.
+Read **`viewerBaseUrl`** / **`kloopBaseUrl`** from `kautopilot config --field viewerBaseUrl` /
+`--field kloopBaseUrl` — **never hardcode a domain** (the host is the user's public domain, not a
+guess). Build the hand-made links from that; **never hand-construct version URLs** — use the exact
+`url`/`diffUrl` `revise` handed back (already full URLs) for the current versioned artifacts.
 
 **Rows to include** (only the ones that apply, one row each, label hyperlinked):
 
@@ -547,15 +563,15 @@ the exact `url`/`diffUrl` `revise` handed back for the current versioned artifac
 **Concrete example** (sample rows — yours reflect the actual session state; labels are the
 links, no second column):
 
-| Links                                                                          |
-| ------------------------------------------------------------------------------ |
-| [Spec](https://kauto.ernest.atomi.cloud/sessions/abc123/spec/v3)               |
-| [Master plan](https://kauto.ernest.atomi.cloud/sessions/abc123/master_plan/v2) |
-| [Triage](https://kauto.ernest.atomi.cloud/sessions/abc123/triage/v2)           |
-| [Plans — api](https://kauto.ernest.atomi.cloud/sessions/abc123/plans/api)      |
-| [Plans — web](https://kauto.ernest.atomi.cloud/sessions/abc123/plans/web)      |
-| [kloop run — api](https://kloop.ernest.atomi.cloud/kloop/run-9f2c)             |
-| [PR — api](https://github.com/org/api/pull/42)                                 |
+| Links                                                         |
+| ------------------------------------------------------------- |
+| [Spec](<viewerBaseUrl>/sessions/abc123/spec/v3)               |
+| [Master plan](<viewerBaseUrl>/sessions/abc123/master_plan/v2) |
+| [Triage](<viewerBaseUrl>/sessions/abc123/triage/v2)           |
+| [Plans — api](<viewerBaseUrl>/sessions/abc123/plans/api)      |
+| [Plans — web](<viewerBaseUrl>/sessions/abc123/plans/web)      |
+| [kloop run — api](<kloopBaseUrl>/kloop/run-9f2c)              |
+| [PR — api](https://github.com/org/api/pull/42)                |
 
 (The `spec/v3` / `master_plan/v2` hrefs are illustrative — use the exact `url`/`diffUrl` from
 `revise`, don't build version paths by hand.)
@@ -565,11 +581,12 @@ artifact/ticket exists), say so in one line instead of an empty table.
 
 ## Rules
 
-1. **You never merge by hand.** Ready-to-merge (CI green + all threads resolved, excluding
-   human-review approval) is always the floor, and the epoch ends when **every** repo's PR is
-   ready. Merging is the **binary's** job, gated by `mergeMode`: in `manual` nobody merges
-   except the user; in `auto` the **binary** merges a ready PR itself to clear downstream
-   gates. Either way, **you (the controller) never run `gh pr merge`** — let the binary do it.
+1. **Only merge when scheduled.** Ready-to-merge (CI green + all actionable threads resolved,
+   excluding human-review approval) is always the floor, and the epoch ends when **every** PR
+   is ready. `mergeMode` decides ownership: in `manual`, ask/wait for the user merge; in
+   `auto`, the controller may merge only PRs returned by `schedule.toMerge`. Always record the
+   result with `kautopilot record merged --pr <prId>`. If `toMerge[].gate` is `released`,
+   wait for the release boundary and record `kautopilot record released --pr <prId>`.
 2. **Never push to `main`/`master`;** never force-push except `--force-with-lease`.
 3. **Poll with `gh api graphql`**, never `gh pr watch` (the binary does detection anyway).
 4. **Ask before cloning** a repo.
@@ -580,13 +597,10 @@ artifact/ticket exists), say so in one line instead of an empty table.
    `record` (and drive via `next`/`complete`/`schedule`); read via `diff`/`status`/`schedule`.
 8. **You drive the work; the binary records it.** In the DAG model YOU provision worktrees
    (worktrunk `wt`), run kloop, resolve conflicts, open PRs, and merge them — and `record`
-   each transition (`started`/`implemented`/`pr-opened`/`merged`/`released`/`failed`).
-   **You never commit by hand** (the commit sub-agent / kloop's commit does that). **Wrap-up
-   is automatic:** at the final `feedback_check`, when the user confirms every PR is **fully
-   merged**, the binary runs `close_ticket` (agent step — moves the ticket to done via
-   `acli`/`cup`; skipped for ad-hoc/`none` tickets) then `cleanup` (removes worktrunk
-   worktrees + pulls merged work into each repo's base). Just run the `close_ticket` step
-   `next` yields — don't move the ticket or tear down worktrees by hand.
+   each transition (`started`/`implemented`/`pr-opened`/`pr-ready`/`merged`/`released`/`failed`).
+   **You never commit by hand**; use the commit subagent after kloop completes. Wrap-up is
+   skill-owned: after final `feedback_check` says `done`, close the ticket and clean up
+   worktrees yourself if appropriate. The binary no longer yields `close_ticket` or `cleanup`.
 
 ## Prerequisites
 

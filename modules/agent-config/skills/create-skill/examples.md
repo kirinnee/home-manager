@@ -207,7 +207,7 @@ Summarize:
 - Key patterns
 - Dependencies
 
-```
+````
 
 ---
 
@@ -216,18 +216,19 @@ Summarize:
 A skill that includes helper scripts:
 
 ### Directory Structure
-```
+```text
 
 .claude/skills/data-processor/
 ├── SKILL.md
 └── scripts/
-├── validate.py
-└── transform.py
+    ├── validate.ts
+    └── transform.ts
 
 ````
 
 ### SKILL.md
-```markdown
+
+````markdown
 ---
 name: data-processor
 description: Process and transform data files. Use when transforming CSV, JSON, or processing data.
@@ -239,43 +240,53 @@ Transform and validate data files.
 
 ## Prerequisites
 
-- Python 3.8+
-- pandas: `pip install pandas`
+- Bun
 
 ## Instructions
 
 ### Step 1: Validate Data
 
 ```bash
-python .claude/skills/data-processor/scripts/validate.py input.csv
-````
+bun .claude/skills/data-processor/scripts/validate.ts input.csv
+```
 
 ### Step 2: Transform Data
 
 ```bash
-python .claude/skills/data-processor/scripts/transform.py input.csv output.csv
+bun .claude/skills/data-processor/scripts/transform.ts input.csv output.csv
+```
+````
+
+### scripts/validate.ts
+
+```typescript
+#!/usr/bin/env bun
+
+const file = Bun.argv[2];
+if (!file) throw new Error('usage: bun validate.ts <input.csv>');
+
+const text = await Bun.file(file).text();
+const rows = text.trim().split(/\r?\n/);
+if (rows.length < 2) throw new Error('expected a header row and at least one data row');
+
+console.log(`Validated ${rows.length - 1} rows`);
 ```
 
-````
+### scripts/transform.ts
 
-### scripts/validate.py
-```python
-#!/usr/bin/env python3
-import sys
-import pandas as pd
+```typescript
+#!/usr/bin/env bun
 
-def validate(filepath):
-    df = pd.read_csv(filepath)
-    # Validation logic
-    print(f"Validated {len(df)} rows")
-    return True
+const [input, output] = Bun.argv.slice(2);
+if (!input || !output) throw new Error('usage: bun transform.ts <input.csv> <output.csv>');
 
-if __name__ == "__main__":
-    validate(sys.argv[1])
-````
+const text = await Bun.file(input).text();
+await Bun.write(output, text.trim().toUpperCase() + '\n');
+console.log(`Wrote ${output}`);
+```
 
 **Note:** Ensure scripts have execute permissions:
 
 ```bash
-chmod +x .claude/skills/data-processor/scripts/*.py
+chmod +x .claude/skills/data-processor/scripts/*.ts
 ```

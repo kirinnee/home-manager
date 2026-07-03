@@ -1,5 +1,9 @@
 # kautopilot-ts
 
+## Agent rules
+
+- Never use Python for ad hoc scripting, file edits, or JSON/text munging. Use `bun` for scripts that need a real language; otherwise use shell tools (`rg`, `sed`, `awk`, `jq`), repo-native commands, or `apply_patch`.
+
 ## Runtime: dynamic (`bun run` from source)
 
 This app is **not built into Nix**. Home Manager installs only a thin wrapper

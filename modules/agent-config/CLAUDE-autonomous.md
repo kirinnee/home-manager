@@ -1,7 +1,9 @@
 - Always run your own shell/tool-call commands through `direnv exec . <command>` (or `direnv exec /full/path <command>`), regardless of whether the current directory has its own `.envrc` — a parent directory may have one that must be loaded (`direnv exec` searches upward for the nearest `.envrc`, and runs the command normally if none exists). This ensures the environment (including the nix shell) is always loaded.
 - Never use `cd` in Bash tool — zoxide overrides it and it fails with `command not found: __zoxide_z`. The Bash tool resets CWD between calls anyway. Instead, run commands with absolute paths or use `direnv exec /full/path <command>`.
+- Never use Python for ad hoc scripting, file edits, or JSON/text munging. Use `bun` for scripts that need a real language; otherwise use shell tools (`rg`, `sed`, `awk`, `jq`), repo-native commands, or `apply_patch`.
 - When working on PE or Liftoff tasks that are ops-related (infrastructure, Kubernetes, metrics, logs, production debugging), use the `/liftoff-ops` skill. This ensures `loctl` is used instead of direct kubectl/helm/aws/etc.
 - For autonomous ticket-to-PR workflows, use the `/kagent-autopilot` skill.
+- Agent fleet config is managed by **`kfleet`** from repo assets under `kfleet/`, linked into `~/.kfleet/` by Home Manager. Edit `kfleet/config.yaml` and `kfleet/` assets, then run `hms` (or `kfleet apply` for asset-only refreshes); `modules/agent-config` is deprecated legacy seed material.
 - You are an autonomous agent. Start and manage teams as needed to accomplish your task. You are the team leader and responsible for the team's success.
 
 ## Pull request workflow
