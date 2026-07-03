@@ -51,13 +51,10 @@ export function latestPlanFiles(
  *   plan-1.md            → ordinal=1, rewrite=1  (legacy flat convention)
  *   plan-1-foundation.md → ordinal=1, rewrite=1  (descriptive: author-chosen slug)
  *
- * The descriptive form matters for the seed→running round-trip: `write_plans` lets the
- * author name a plan folder descriptively (e.g. `plan-1-foundation/`), and `seed` copies
- * it into the worktree as `plan-1-foundation.md`. Without descriptive parsing this file
- * was silently dropped here, so `running` fell back to a reconstructed `plan-1.md` that
- * was never written and `kloop init --spec …/plan-1.md` failed. The ordinal embedded in
- * the name is the single source of truth, so resolution stays correct for ≥10 plans (we
- * sort by the parsed numeric ordinal, not the filename).
+ * The descriptive form lets the plan writer use a readable folder such as
+ * `plan-1-foundation/` while preserving `plan-1` as the stable schedule/record id. The
+ * ordinal embedded in the name is the single source of truth, so resolution stays correct
+ * for >=10 plans (we sort by the parsed numeric ordinal, not the filename).
  */
 function parsePlanFilename(
 	filename: string,

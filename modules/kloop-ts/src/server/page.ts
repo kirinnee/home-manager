@@ -825,10 +825,18 @@ async function klReviews(pane, d, id, state) {
   if (!files.length && !hasSyn) { pane.appendChild(el('div', 'empty', 'No reviews for this loop yet.')); return; }
 
   const content = el('div', 'kreview-content'); // shared pane: the selected reviewer's md
+  // A reviewer's markdown can run long, pushing the synthesis far below the fold. Wrap the
+  // pane in a collapsible card with its own summary so it can be folded away to read the
+  // synthesis without scrolling past the whole review.
+  const contentFold = el('details', 'kreview'); contentFold.open = true;
+  const contentSum = el('summary', null, '<b>current reviewer</b>');
+  contentFold.appendChild(contentSum); contentFold.appendChild(content);
   let activeBtn = null;
-  async function openReviewer(btn, idx) {
+  async function openReviewer(btn, idx, label) {
     if (activeBtn) activeBtn.classList.remove('active');
     activeBtn = btn; btn.classList.add('active');
+    contentFold.open = true; // a fresh selection always opens the pane
+    contentSum.innerHTML = '<b>current reviewer</b>' + (label ? ' <span class="kmuted">· ' + esc(label) + '</span>' : '');
     content.innerHTML = '';
     const r = await api('/kloop/file?path=' + enc(base + '/reviews/reviewer-' + idx + '.md'));
     if (btn !== activeBtn) return; // a newer click superseded this fetch
@@ -862,14 +870,14 @@ async function klReviews(pane, d, id, state) {
         const has = fileSet['reviewer-' + c.idx + '.md'];
         const btn = el('button', 'kmx-cell ' + tone(c.rv.verdict || c.rv.status) + (has ? '' : ' disabled'), klCellLabel(p, l) + klCellInner(c.rv));
         btn.title = klCellTitle(c.rv, p, l);
-        if (has) { const idx = c.idx; btn.onclick = () => openReviewer(btn, idx); if (!firstBtn) firstBtn = btn; }
+        if (has) { const idx = c.idx; const lbl = p + ' · ' + l; btn.onclick = () => openReviewer(btn, idx, lbl); if (!firstBtn) firstBtn = btn; }
         grid.appendChild(btn);
       }
     }
     const wrap = el('div', 'kmx-wrap'); wrap.appendChild(grid); fold.appendChild(wrap);
   }
   pane.appendChild(fold);
-  pane.appendChild(content);
+  pane.appendChild(contentFold);
   klBindMatrixFit(); klFitMatrices(pane);
   if (hasSyn) { const det = el('details', 'kreview'); det.open = true; det.innerHTML = '<summary><b>synthesis · review-summary.md</b></summary>'; const body = el('div', 'prose'); const r = await api('/kloop/file?path=' + enc(base + '/synthesis/review-summary.md')); body.innerHTML = renderMd((r && r.content) || ''); det.appendChild(body); pane.appendChild(det); await upgradeProse(body); }
   if (firstBtn) firstBtn.click(); // auto-open the first reviewer so the pane isn't blank

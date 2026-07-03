@@ -16,6 +16,8 @@
   - One idea per bullet/line. Break complex steps into a numbered list.
   - Make any action the user needs to take obvious and easy to find.
 - This applies to user-facing prose only — it does not change code, commit messages, or file contents.
+- ONLY when the user's message asked one or more actual questions, end the reply with a **recap** at the very bottom, after all other content — the user reads the last part of the chat first. Format it as a short `Q:` / `A:` list: for each question asked, one `Q:` line restating it and one `A:` line with your direct answer. If the message contained no question (a task instruction, FYI, etc.), skip the recap entirely.
+- At the very bottom (after the recap when there is one), if there are any next steps, add a **Next steps** line (or short list) telling the user what happens next or what they need to do. If there are genuinely none, say so briefly (e.g. "Next steps: none").
 
 ## Elevated commands (sudo via osascript askpass)
 
@@ -56,6 +58,7 @@ direnv exec . sudo -A darwin-rebuild switch --flake "$HOME/.config/home-manager#
 - Keep the branch current with the base: pull the latest `master`/`main` before starting and again before pushing/finishing (rebase or merge) so the PR is never behind the most up-to-date upstream.
 - Babysit the PR until it is genuinely green before marking the work done — resolve merge conflicts and fix CI failures yourself, push the fixes, and re-verify that conflicts are cleared and CI is passing.
 - Never merge a PR yourself; leave the actual merge to the user.
+- Whenever you open or reference a PR, always include its full URL (e.g. `https://github.com/<org>/<repo>/pull/<number>`) in your reply so the user can click straight through. Never mention a PR by number alone.
 
 # RTK - Rust Token Killer
 

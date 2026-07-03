@@ -29,6 +29,9 @@ khost up       # bring up ssh + alloy + tunnel + routes
 - **`~/.khost/config.yaml`** — everything: `machine`, `ssh`, `tunnel`,
   `cloudflare` (account_id + api_token), `access`, `routes`, `alloy`, `metrics`.
   Plaintext (it's in your home dir, never a repo).
+- **Access policy ownership:** `access.policy` names an externally-managed
+  reusable Cloudflare Access policy. khost looks it up by exact name and attaches
+  it to owned apps; it does not create, update, or delete reusable policies.
 - **`~/.khost/alloy.alloy`** — the full Grafana Alloy config. `khost alloy up`
   copies it into the runtime state dir and runs docker compose (UI on `:12345`).
   Scrapes the local kloop/kautopilot/kfleet exporters by default. To ship metrics

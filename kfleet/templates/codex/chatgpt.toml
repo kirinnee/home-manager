@@ -1,0 +1,33 @@
+approval_policy = "never"
+model_reasoning_effort = "high"
+sandbox_mode = "danger-full-access"
+# service_tier "fast" is merged in only for the interactive (default) variant via
+# a codex-scoped settings override in config.yaml; the auto variant runs on codex's
+# default tier. NOTE: when an override merges onto this file the result is
+# re-serialized (TOML round-trip), so comments here survive only on the verbatim
+# (no-override) path — keep durable docs in config.yaml.
+
+[features]
+hooks = true
+# ChatGPT Apps/connectors off by default for the fleet — automation doesn't need
+# connector-backed tools and they add session/startup overhead. Re-enable per-agent
+# with a codex-scoped settings override in config.yaml if a wrapper needs them.
+apps = false
+
+[projects."/Users/erng/.config/home-manager"]
+trust_level = "trusted"
+
+[projects."/Users/erng/Workspace/atomi/runbook/platforms/nitroso/tin"]
+trust_level = "trusted"
+
+[sandbox_workspace_write]
+network_access = true
+
+[tui]
+status_line = ["model-with-reasoning", "context-used", "five-hour-limit", "weekly-limit", "current-dir"]
+
+[projects."/Users/erng/Workspace"]
+trust_level = "trusted"
+
+[projects."/Users/erng"]
+trust_level = "trusted"

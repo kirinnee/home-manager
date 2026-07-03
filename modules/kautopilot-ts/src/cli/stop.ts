@@ -80,10 +80,8 @@ async function runStop(
 		}
 	}
 
-	// Check EVERY scope lock for the session — the session timeline lock
-	// (`lock.pid`) plus any per-repo driver locks (`lock-<repo>.pid`). A running
-	// `next --repo <r>` holds only its repo lock, so checking the session lock
-	// alone would miss it. (MAJOR-1)
+	// Check every current or legacy scope lock for the session, not just the
+	// session lock. (MAJOR-1)
 	const liveKeys = listLockKeys(session.id).filter(
 		(key) => checkLock(key).locked,
 	);
@@ -104,7 +102,7 @@ async function runStop(
 		event: "stop:started",
 	});
 
-	// Kill + release every live scope lock (session + repo drivers).
+	// Kill + release every live scope lock.
 	let processesKilled = 0;
 	for (const key of liveKeys) {
 		processesKilled += await killLockKey(key);

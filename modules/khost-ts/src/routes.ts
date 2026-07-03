@@ -1,26 +1,17 @@
 // Route-manager: the `routes` list from ~/.khost/config.yaml reconciled onto the
-// khost Cloudflare Tunnel — tunnel ingress + DNS CNAME + only-me Access. No state
+// khost Cloudflare Tunnel — tunnel ingress + DNS CNAME + Access apps. No state
 // file: the live API is the truth; ownership is marked per resource (DNS comment,
 // Access tag) so prune only ever touches khost's own resources.
 import pc from 'picocolors';
 import { config, type Route } from './config';
-import {
-  accessEmails,
-  accessPolicyName,
-  machineId,
-  ownerComment,
-  ownerTag,
-  requireWarp,
-  tunnelName,
-  warpPostureUid,
-} from './deps';
+import { accessPolicyName, machineId, ownerComment, ownerTag, tunnelName } from './deps';
 import { die, log, need, ok, warn } from './exec';
 import {
   cfConfigured,
   deleteAccessApp,
   deleteDns,
   ensureAccessTag,
-  ensureReusablePolicy,
+  findReusablePolicyByName,
   findTunnel,
   findZoneForHostname,
   getTunnelIngress,
@@ -46,6 +37,14 @@ export function expandMachine(routes: Route[], machine: string): Route[] {
 
 function loadRoutes(): Route[] {
   return expandMachine(config.routes, machineId);
+}
+
+function accessEnabled(access: Route['access']): boolean {
+  return access !== false;
+}
+
+function policyNameForRoute(route: Route): string {
+  return typeof route.access === 'string' ? route.access : accessPolicyName;
 }
 
 /** Build the cloudflared ingress array: managed routes first, then any manual
@@ -90,7 +89,7 @@ export async function routeSync(opts: SyncOpts = {}): Promise<void> {
   const tunnelTarget = `${tunnel.id}.cfargotunnel.com`;
 
   // Access needs an IdP; warn+skip if none (routes + DNS still apply).
-  let accessOk = routes.some(r => r.access);
+  let accessOk = routes.some(r => accessEnabled(r.access));
   if (accessOk && (await listIdps()).length === 0) {
     warn('no Access identity provider configured — skipping Access apps (routes + DNS still applied)');
     accessOk = false;
@@ -120,14 +119,19 @@ export async function routeSync(opts: SyncOpts = {}): Promise<void> {
     return zone;
   };
 
-  // Shared only-me policy + ownership tag (once, before the per-route loop).
-  let policyId: string | null = null;
-  if (accessOk && !dry) {
-    await ensureAccessTag(ownerTag);
-    policyId = await ensureReusablePolicy(accessPolicyName, accessEmails, requireWarp ? warpPostureUid : undefined);
+  // Shared externally-managed policy lookup + ownership tag (once, before the
+  // per-route loop). Per-route string overrides can name a different reusable
+  // policy; all lookups remain read-only.
+  const policyIds = new Map<string, string>();
+  if (accessOk) {
+    if (!dry) await ensureAccessTag(ownerTag);
+    for (const name of new Set(routes.filter(r => accessEnabled(r.access)).map(policyNameForRoute))) {
+      policyIds.set(name, await findReusablePolicyByName(name));
+    }
   }
   if (accessOk) {
-    plan.push(`policy → ${accessPolicyName} (${accessEmails.join(', ')})${requireWarp ? ' + require WARP' : ''}`);
+    const names = [...new Set(routes.filter(r => accessEnabled(r.access)).map(policyNameForRoute))];
+    plan.push(`policy → ${names.join(', ')}`);
   }
 
   // 2/3. Per-route DNS + Access.
@@ -138,11 +142,11 @@ export async function routeSync(opts: SyncOpts = {}): Promise<void> {
       const { action } = await upsertCname(zone.id, r.hostname, tunnelTarget, ownerComment);
       ok(`dns ${action}: ${r.hostname}`);
     }
-    if (r.access && accessOk) {
+    if (accessEnabled(r.access) && accessOk) {
+      const policyName = policyNameForRoute(r);
       const appType = r.service.startsWith('ssh://') ? 'ssh' : 'self_hosted';
-      plan.push(
-        `access → ${appType === 'ssh' ? 'browser-SSH' : 'app'} ${r.hostname} (${accessPolicyName}: ${accessEmails.join(', ')})`,
-      );
+      plan.push(`access → ${appType === 'ssh' ? 'browser-SSH' : 'app'} ${r.hostname} (${policyName})`);
+      const policyId = policyIds.get(policyName);
       if (!dry && policyId) {
         const { created } = await upsertAccessApp(r.hostname, `khost: ${r.hostname}`, policyId, ownerTag, appType);
         ok(`access ${created ? 'created' : 'ok'}: ${r.hostname} (${appType})`);
@@ -188,7 +192,10 @@ export async function routeLs(): Promise<void> {
   const routes = await loadRoutes();
   console.log(pc.bold('config routes (desired):'));
   if (routes.length === 0) console.log('  (none)');
-  for (const r of routes) console.log(`  ${r.hostname} → ${r.service}${r.access ? '' : '  (no access)'}`);
+  for (const r of routes) {
+    const access = accessEnabled(r.access) ? `  (access: ${policyNameForRoute(r)})` : '  (no access)';
+    console.log(`  ${r.hostname} → ${r.service}${access}`);
+  }
 
   if (!cfConfigured()) {
     warn('Cloudflare not configured — cannot show live state');

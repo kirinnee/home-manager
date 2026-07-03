@@ -30,7 +30,7 @@ afterAll(() => {
 });
 
 import { appendEvent } from "../log";
-import { ensureStatus } from "../status";
+import { ensureStatus, isSessionActive, isSessionTerminal } from "../status";
 
 const TEST_SESSION = `test-status-${Date.now()}`;
 function sessionDir() {
@@ -135,6 +135,30 @@ describe("ensureStatus", () => {
 
 		const status = ensureStatus(TEST_SESSION);
 		expect(status.context.maxPlans).toBe(3);
+	});
+
+	it("treats feedback_check done as the terminal session cursor", () => {
+		appendEvent(TEST_SESSION, {
+			ts: "2026-03-24T10:00:00Z",
+			event: "feedback_check:completed",
+			version: 1,
+			metadata: { step: "feedback_check", to: "done" },
+		});
+
+		expect(isSessionTerminal(TEST_SESSION)).toBe(true);
+		expect(isSessionActive(TEST_SESSION)).toBe(false);
+	});
+
+	it("keeps feedback_check feedback choice active", () => {
+		appendEvent(TEST_SESSION, {
+			ts: "2026-03-24T10:00:00Z",
+			event: "feedback_check:completed",
+			version: 1,
+			metadata: { step: "feedback_check", to: "feedback" },
+		});
+
+		expect(isSessionTerminal(TEST_SESSION)).toBe(false);
+		expect(isSessionActive(TEST_SESSION)).toBe(true);
 	});
 
 	it("incremental replay — only processes new events", () => {

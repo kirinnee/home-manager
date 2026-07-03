@@ -39,10 +39,12 @@ Running `khost up` brings the live Cloudflare state in line with the committed l
   SAML, so an email allow-list works with no extra setup.
 - **Token:** the `cfut_…` "khost token" in sops has all required scopes (verified). See the
   memory note `khost-cloudflare-token` for the roll procedure.
-- **Scope:** khost manages **both routes AND the "who can access" Access policy** (only-me).
-- **Config-driven:** no hostnames or emails hardcoded in the repo. Hostnames come from a
-  committed `routes.yaml`; emails come from env (`KHOST_ACCESS_EMAILS`), sourced via sops
-  like the existing `CLOUDFLARE_*` creds.
+- **Scope:** khost manages routes, DNS, and Access applications. It **does not**
+  manage reusable account-level Access policies; those are externally managed and
+  looked up by exact name.
+- **Config-driven:** no hostnames or policy contents are hardcoded in the repo.
+  Hostnames come from `~/.khost/config.yaml`; the Access policy name comes from
+  `access.policy`.
 - **Tailscale is out:** it cannot run alongside company Cloudflare WARP.
 
 ## 3. Configuration
@@ -59,25 +61,26 @@ routes:
     service: ssh://localhost:22 # SSH over the tunnel (browser-rendered)
   # - hostname: foo.ernest.atomi.cloud
   #   service: http://localhost:3000
-  #   access: false                  # opt out of the only-me Access app (rare)
+  #   access: false                  # opt out of an Access app (rare)
+  # - hostname: admin.ernest.atomi.cloud
+  #   service: http://localhost:3001
+  #   access: other-reusable-policy  # per-route policy override
 ```
 
 Per-route fields:
 
-| field      | required | default | meaning                                                             |
-| ---------- | -------- | ------- | ------------------------------------------------------------------- |
-| `hostname` | yes      | —       | FQDN; its zone must exist in the tunnel's account                   |
-| `service`  | yes      | —       | cloudflared service URL (`http://`, `https://`, `ssh://`, `tcp://`) |
-| `access`   | no       | `true`  | when true, create the only-me Access app+policy on this hostname    |
+| field      | required | default | meaning                                                                                        |
+| ---------- | -------- | ------- | ---------------------------------------------------------------------------------------------- |
+| `hostname` | yes      | —       | FQDN; its zone must exist in the tunnel's account                                              |
+| `service`  | yes      | —       | cloudflared service URL (`http://`, `https://`, `ssh://`, `tcp://`)                            |
+| `access`   | no       | `true`  | `true` attaches `access.policy`; `false` skips Access; string names a reusable policy override |
 
 ### 3.2 Environment (via sops `~/.secrets`)
 
-| env var                 | required | default              | meaning                                                                             |
-| ----------------------- | -------- | -------------------- | ----------------------------------------------------------------------------------- |
-| `CLOUDFLARE_API_TOKEN`  | yes      | —                    | **expanded** token (see §6)                                                         |
-| `CLOUDFLARE_ACCOUNT_ID` | yes      | —                    | unchanged                                                                           |
-| `KHOST_ACCESS_EMAILS`   | no       | `ernest@atomi.cloud` | comma-separated allow-list for the `only-ernest` policy (verified via One-time PIN) |
-| `KHOST_ROUTES_FILE`     | no       | repo `routes.yaml`   | override path for the routes list                                                   |
+| env var                 | required | default | meaning                     |
+| ----------------------- | -------- | ------- | --------------------------- |
+| `CLOUDFLARE_API_TOKEN`  | yes      | —       | **expanded** token (see §6) |
+| `CLOUDFLARE_ACCOUNT_ID` | yes      | —       | unchanged                   |
 
 ## 4. CLI surface
 
@@ -97,8 +100,10 @@ Preconditions (fail fast with actionable messages):
 
 - Cloudflare creds present + token verifies (reuse `verifyToken` / `verifyAccount`).
 - Tunnel exists (reuse `findTunnel`); else tell the user to run `khost tunnel up`.
-- At least one Access IdP exists in the account (else only-me policy can't bind) — warn,
+- At least one Access IdP exists in the account (else Access apps cannot bind) — warn,
   and skip the Access step rather than hard-fail, so routes+DNS still apply.
+- The configured reusable Access policy exists by exact name. khost only reads it
+  and attaches the returned id to owned apps.
 
 For the whole list:
 
@@ -120,17 +125,10 @@ For the whole list:
    terminal opens in-browser (no client `cloudflared` needed). The exact app field for
    browser SSH rendering is to be confirmed at implementation time against the live API
    (Zero Trust "Browser rendering: SSH").
-5. **Access policy (only-me).** Maintain one **reusable** account policy
-   `only-ernest`, gated by email **and require the WARP device posture** (device
-   enrolled in the org): `require: [{ device_posture: { integration_uid } }]`.
-   Use the **"Warp"** posture (`55971cbe…`, enrolled) — the **"Gateway"** posture
-   (`4f62bf6f…`, proxy-mode) blocks browser/mobile sessions. Built-in
-   `gateway`/`warp` policy rules 500 in this account, hence the posture
-   integration. Toggle via `KHOST_REQUIRE_WARP` / `KHOST_WARP_POSTURE_UID`.
-   (`decision: "allow", include: [{ email: { email } }, …]` from
-   `KHOST_ACCESS_EMAILS`); ensure each app references it via the app's `policies: [id]`.
-   Reusable policy (not app-scoped) because Cloudflare deprecated app-scoped policy
-   creation.
+5. **Access policy attachment.** Look up the configured externally-managed
+   reusable policy by exact name (`GET /access/policies`) and attach its id to
+   each Access app via `policies: [id]`. khost must never create, update, or
+   delete reusable Access policies during normal reconcile.
 
 Idempotency: every step is GET-then-(PUT|POST) keyed by a stable identifier
 (hostname / app domain / policy name), so re-running converges and never duplicates.
@@ -160,21 +158,21 @@ before this exists; it only blocks the live `route sync`.**
 - DNS: `GET|POST /zones/{z}/dns_records`, `PUT|DELETE /zones/{z}/dns_records/{id}`
 - Tunnel config: `GET|PUT /accounts/{a}/cfd_tunnel/{t}/configurations`
 - Access apps: `GET|POST /accounts/{a}/access/apps`, `PUT|DELETE …/{appId}`
-- Access policies: `GET|POST /accounts/{a}/access/policies`, `PUT …/{policyId}`
+- Access policies: `GET /accounts/{a}/access/policies` (lookup only)
 - IdPs: `GET /accounts/{a}/access/identity_providers`
 
 All wrapped via the existing typed `cfFetch` (zod-validated envelopes) in `cloudflare.ts`.
 
 ## 8. Code layout
 
-| file                           | change                                                                                                                                                     |
-| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
-| `proxy/routes.yaml`            | **new** — committed routes list (with examples)                                                                                                            |
-| `src/deps.ts`                  | add `routesFile`, `accessEmails`, derived helpers                                                                                                          |
-| `src/cloudflare.ts`            | add `findZoneForHostname`, `getTunnelConfig`, `putTunnelConfig`, `upsertDns`, `pruneDns`, `upsertAccessApp`, `ensureOnlyMePolicy`, `listIdentityProviders` |
-| `src/routes.ts`                | **new** — load+validate routes.yaml (zod), the reconcile engine, `routeLs`/`routeSync`                                                                     |
-| `src/index.ts`                 | wire `khost route ls                                                                                                                                       | sync`(+ flags), call`routeSync`from`up` |
-| `src/__tests__/routes.test.ts` | **new** — zone-suffix matching, ingress array build, prune diff, dry-run plan                                                                              |
+| file                           | change                                                                                                                                                           |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `proxy/routes.yaml`            | **new** — committed routes list (with examples)                                                                                                                  |
+| `src/deps.ts`                  | expose configured Access policy name                                                                                                                             |
+| `src/cloudflare.ts`            | add `findZoneForHostname`, `getTunnelConfig`, `putTunnelConfig`, `upsertDns`, `pruneDns`, `upsertAccessApp`, `findReusablePolicyByName`, `listIdentityProviders` |
+| `src/routes.ts`                | **new** — load+validate routes.yaml (zod), the reconcile engine, `routeLs`/`routeSync`                                                                           |
+| `src/index.ts`                 | wire `khost route ls` / `khost route sync` (+ flags), call `routeSync` from `up`                                                                                 |
+| `src/__tests__/routes.test.ts` | **new** — zone-suffix matching, ingress array build, prune diff, dry-run plan                                                                                    |
 
 No new runtime deps (`yaml` + `zod` already present; `cloudflared` already on PATH).
 
@@ -184,7 +182,7 @@ No new runtime deps (`yaml` + `zod` already present; `cloudflared` already on PA
 - **Catch-all** `http_status:404` always last in ingress (cloudflared requirement).
 - **SSH route (v1 = web SSH):** ingress `ssh://localhost:22`; the Access app has
   **browser-rendered SSH** enabled, so the user opens `ssh.example.com` in a browser, logs
-  in via Access, and gets a terminal — **no client `cloudflared` required**. The only-me
+  in via Access, and gets a terminal — **no client `cloudflared` required**. The configured
   Access policy still applies. (`cloudflared access ssh` from a native client also works
   against the same route, but is not required.)
 - **`--dry-run`** prints a per-resource plan (create/update/delete/no-op) and exits 0.
@@ -210,5 +208,6 @@ No new runtime deps (`yaml` + `zod` already present; `cloudflared` already on PA
   account app, `ssh.kirinnee.atomi.cloud`). khost sets `type: "ssh"` for `ssh://` routes
   (in-browser terminal) and `type: "self_hosted"` for HTTP routes; both pass
   `self_hosted_domains: [hostname]`.
-- **Policy shape** — ✅ reusable account policy (`only-ernest`) referenced from each app's
-  `policies: [id]` array.
+- **Policy shape** — ✅ externally-managed reusable account policy referenced from
+  each app's `policies: [id]` array. Normal khost reconcile is read-only for
+  reusable Access policies.

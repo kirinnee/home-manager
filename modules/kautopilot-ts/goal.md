@@ -2,7 +2,7 @@
 
 Extend kautopilot to support **multi-repo, multi-PR, dependency-sequenced** workflows.
 The work spans the binary (`SPEC-kautopilot.md`, `CLI-CONTRACT.md`, `src/`) and the
-`/kautopilot` skill (`modules/agent-config/skills/kautopilot/SKILL.md`).
+`/kautopilot` skill (`kfleet/skills-codex/kautopilot/SKILL.md`).
 
 ## 1. Master plan artifact (new — in the plan phase, BEFORE sub-plans)
 

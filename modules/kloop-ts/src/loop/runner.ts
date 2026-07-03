@@ -12,7 +12,7 @@ import {
   reviewTypeLabel,
   resolvePool,
 } from '../types';
-import type { ReviewTypeEntry, PoolProfiles } from '../types';
+import type { ReviewTypeEntry, PoolProfiles, UsageWeight } from '../types';
 import type { StateService, TmuxService, Paths } from '../deps';
 import { getDirHash, paths as defaultPaths, nextSpecVersion } from '../deps';
 import * as consensus from './consensus';
@@ -48,13 +48,14 @@ function expandPhaseReviewers(
   phaseIdx: number,
   startGlobalIndex: number,
   poolProfiles: PoolProfiles | undefined,
+  usageWeight?: UsageWeight,
 ): ExpandedReviewer[] {
   const out: ExpandedReviewer[] = [];
   let globalIndex = startGlobalIndex;
   for (const typeEntry of phaseEntries) {
     const reviewType = reviewTypeLabel(typeEntry, poolProfiles);
     for (const lens of lenses) {
-      const account = selectFromPool(typeEntry, poolProfiles);
+      const account = selectFromPool(typeEntry, poolProfiles, usageWeight);
       out.push({
         parsed: parseReviewerConfig(account),
         typeEntry,
@@ -672,6 +673,7 @@ export class LoopRunner {
         phaseIdx,
         globalIndex,
         config.poolProfiles,
+        agentRunner.gate.weight,
       );
       allReviewers.push(...expanded);
       globalIndex += expanded.length;
@@ -846,6 +848,7 @@ export class LoopRunner {
         phaseIdx,
         globalReviewerIndex,
         config.poolProfiles,
+        agentRunner.gate.weight,
       );
       const byIndex = new Map<number, ExpandedReviewer>(phaseReviewers.map(r => [r.globalIndex, r]));
 
@@ -1052,7 +1055,7 @@ export class LoopRunner {
 
       // Retry with backoff
       const backoffMs = backoffBaseMs * Math.pow(2, attempt);
-      const newBinary = selectImplementer(config, loopNum);
+      const newBinary = selectImplementer(config, loopNum, agentRunner.gate.weight);
       fmt.formatImplementerRetry(attempt, maxRetries, backoffMs);
 
       await writeEvent({
@@ -1091,7 +1094,7 @@ export class LoopRunner {
 
     const previousSummaryPath =
       iterData.reviewSummaryPath ?? `${this.paths.loopSynthesisPath(runId, loopNum - 1)}/review-summary.md`;
-    const binary = selectRoleAccount(config.synthesizer, config.poolProfiles);
+    const binary = selectRoleAccount(config.synthesizer, config.poolProfiles, agentRunner.gate.weight);
 
     // Write synthesis_start event (reuses same event type)
     const implParsed = parseImplementerConfig(binary ?? Object.keys(config.implementers)[0]);
@@ -1163,7 +1166,7 @@ export class LoopRunner {
       // verifier per type. Pick one account from each type's pool per invocation; carry
       // the entry so a retry can re-roll a different account from the same pool.
       const phaseReviewers = (verifyPhases[phaseIdx] ?? []).map(entry => ({
-        ...parseReviewerConfig(selectFromPool(entry, config.poolProfiles)),
+        ...parseReviewerConfig(selectFromPool(entry, config.poolProfiles, agentRunner.gate.weight)),
         pool: entry,
       }));
 
@@ -1270,7 +1273,7 @@ export class LoopRunner {
 
     const previousSummaryPath =
       loopNum > 1 ? `${this.paths.loopSynthesisPath(runId, loopNum - 1)}/review-summary.md` : null;
-    const binary = selectRoleAccount(config.synthesizer, config.poolProfiles);
+    const binary = selectRoleAccount(config.synthesizer, config.poolProfiles, agentRunner.gate.weight);
 
     // Write synthesis_start event
     const implParsed = parseImplementerConfig(binary ?? Object.keys(config.implementers)[0]);
@@ -1329,7 +1332,8 @@ export class LoopRunner {
     writeEvent: (event: Record<string, unknown>) => Promise<void>,
     agentRunner: agents.AgentRunner,
   ): Promise<{ checkpointRan: boolean; consecutiveFailures: number }> {
-    const cpBinary = selectRoleAccount(config.conflictChecker, config.poolProfiles) ?? implBinary;
+    const cpBinary =
+      selectRoleAccount(config.conflictChecker, config.poolProfiles, agentRunner.gate.weight) ?? implBinary;
     const cpParsed = parseConflictCheckerConfig(cpBinary);
     await writeEvent({
       type: 'checkpoint_start',
@@ -1346,6 +1350,7 @@ export class LoopRunner {
       specPath: this.paths.runSpec(runId),
       specContent: specContentRef.value,
       timeout: config.reviewerTimeout,
+      binary: cpBinary,
     });
 
     await writeEvent({

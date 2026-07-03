@@ -41,8 +41,8 @@ describe("config", () => {
 		expect(config?.agents.generic.commit.prompt).toContain(
 			"committing code changes",
 		);
-		expect(config?.agents.phase2.resolve).toBeDefined();
-		expect(config?.agents.phase2.resolve.prompt).toContain("kloop failure");
+		expect((config?.agents as Record<string, unknown>).phase2).toBeUndefined();
+		expect((config?.agents as Record<string, unknown>).phase3).toBeUndefined();
 		expect(config?.settings.maxParallelRepos).toBe(2);
 		expect(config?.settings.runMode).toBe("current-session");
 		expect(config?.settings.execMode).toBe("kloop");

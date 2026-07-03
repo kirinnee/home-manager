@@ -50,8 +50,10 @@ export const alloyRemoteWritePassword = process.env.ALLOY_REMOTE_WRITE_PASSWORD 
 // khost runs its own sshd bound to 127.0.0.1:<sshPort> (not macOS Remote Login),
 // so the tunnel reaches it via loopback and the LAN cannot.
 export const sshPort = config.ssh.port;
-// Optional extra bind address (WARP mesh IP); '' = loopback only.
-export const meshListen = config.ssh.mesh_listen ?? '';
+// Configured mesh bind: 'auto' (detect live WARP IP), a literal IP, or '' (loopback
+// only). Resolve to a concrete address with mesh.ts:resolveMeshListen — never bind
+// this raw value, since 'auto' is a sentinel, not an address.
+export const meshListenConfig = config.ssh.mesh_listen ?? '';
 
 // cloudflared edge protocol. http2 by default; QUIC (UDP/7844) can be unreliable.
 export const tunnelProtocol = config.tunnel.protocol;
@@ -66,11 +68,9 @@ export const cfApiToken = process.env.CLOUDFLARE_API_TOKEN || config.cloudflare.
 export const cfAccountId = process.env.CLOUDFLARE_ACCOUNT_ID || config.cloudflare.account_id;
 export const cfApiBase = config.cloudflare.api_base;
 
-// Access (only-me) policy settings.
-export const accessEmails = config.access.emails;
-export const accessPolicyName = config.access.policy_name;
-export const requireWarp = config.access.require_warp;
-export const warpPostureUid = config.access.warp_posture_uid;
+// Externally-managed reusable Access policy. khost only looks this up by name
+// and attaches it to owned apps; it never creates/updates/deletes this policy.
+export const accessPolicyName = config.access.policy;
 
 // Ownership markers: khost only ever modifies/deletes resources carrying these.
 // DNS records get the comment; Access apps get the tag (+ a "khost: " name).

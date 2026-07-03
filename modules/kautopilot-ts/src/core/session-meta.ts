@@ -26,7 +26,7 @@ export type TicketSystem = "jira" | "clickup" | "none";
 /** Where the controller loop runs (§6). No detached-Claude / `claude -p` path. */
 export type RunMode = "current-session" | "sub-agent";
 
-/** How a repo's plan is implemented at the `running` step (§6). */
+/** How the skill-owned plan driver implements a ready plan (§6). */
 export type ExecMode = "kloop" | "sub-agent";
 
 /**
@@ -53,7 +53,7 @@ export interface Lpsm {
 
 /** A repo is a detail of the session — one (worktree, branch, plans[], PR, status). */
 export interface RepoEntry {
-	/** Logical repo name (also the key used by `next --repo <repo>`). */
+	/** Logical repo name used by schedule/record and plan artifacts. */
 	repo: string;
 	/** Git root / remote the worktree derives from. */
 	repoPath: string | null;

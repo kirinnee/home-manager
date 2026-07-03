@@ -1,8 +1,9 @@
 # kautopilot Prompt Set — The Whole Prompt, Per Yielded Step
 
-What `kautopilot next` (and `next --repo`) actually hands the harness, fully assembled, for
-the inverted (host-driven) model. Pairs with `CLI-CONTRACT.md` (the command/JSON
-surface) and `SPEC-kautopilot.md` (the architecture).
+What `kautopilot next` hands the harness for plan/feedback steps, fully assembled, for
+the inverted (host-driven) model. Execution and PR polish are driven by the skill through
+`schedule`/`record`, not yielded as binary prompts. Pairs with `CLI-CONTRACT.md` (the
+command/JSON surface) and `SPEC-kautopilot.md` (the architecture).
 
 Every prompt = **mechanics** (binary-owned, hard-coded contract) + **configurable
 body** (`DEFAULT_CONFIG.agents.*`, per-org overridable) + **resolved vars** (absolute
@@ -22,9 +23,9 @@ satisfied. So three things change uniformly:
 1. **No `/exit`, no `log-event`.** The interactive agent debates to approval and stops;
    the controller calls `complete <step> --output <file> [--metadata …]`, which appends
    the canonical `completionEvent`.
-2. **Session-store paths** for plan/feedback steps (`~/.kautopilot/<sessionId>/…`,
-   versioned under `revisions/`); in-worktree paths for repo (execution/polish) steps
-   (`{worktree}/spec/{ticketId}/v{N}/…`).
+2. **Session-store paths** for yielded plan/feedback steps (`~/.kautopilot/<sessionId>/…`,
+   versioned under `revisions/`). Execution/PR polish paths are skill-owned and are not
+   yielded as binary prompts.
 3. **`{rules}` var injected** (each repo's `rules.md`) into triage/spec/plan/implementer
    prompts when present.
 4. **Org resolved first** (`--org` → detect-from-ticket → ask: `liftoff`|`atomicloud`);
@@ -384,408 +385,22 @@ synthesizer in **Appendix A**.
 
 Snapshots the approved master spec + per-repo plans into the session store and records
 the plan→repo partition in `session.json.repos[].plans`. No git commit here; the per-repo
-first commit happens at **repo seed**. Emits `finalize_plans:done`.
+first commit is skill-owned when a ready plan creates/locates its repo worktree. Emits
+`finalize_plans:done`.
 
 ---
 
-# Repo seed (a `code` step inside `next --repo`)
-
-The first time `kautopilot next --repo <repo>` runs, the binary ensures the worktree
-(**asking before cloning** a missing remote — a one-line interactive confirm), then
-copies `triage.md` + that repo's **own** plans into `{worktree}/spec/{ticketId}/v1/…`,
-and the **whole** master spec **only when the org's `commitSpec` is true** (atomicloud
-yes, liftoff no). It commits them as the **first commit** on the repo branch, then
-proceeds — the binary sees Phase-1 artifacts present and starts at `setup_run`.
-
----
-
-# Execution steps (per repo) — `kautopilot next --repo <repo>` (phase: execution)
-
-| step          | kind                                       | prompt source                                   |
-| ------------- | ------------------------------------------ | ----------------------------------------------- |
-| `clear_loop`  | code                                       | — (cancel stale kloop)                          |
-| `setup_run`   | code                                       | — (write kloop spec/config, `kloop init`)       |
-| `running`     | code (kloop) / agent (sub-agent exec mode) | kloop bundle (Appendix B), or the plan directly |
-| `resolve`     | interactive                                | below                                           |
-| `amend_plans` | interactive                                | below                                           |
-| `commit`      | agent                                      | `generic.commit` (Appendix C)                   |
-| `next_plan`   | code                                       | —                                               |
-
-Exit-code branching after `running` (unchanged): `completed`→`commit`;
-`conflict`/`max_iterations`→`resolve`; `crash`→`setup_run` retry (≤2) then `failed`.
-
-**Execution mode**: default `kloop` (the `running` step is `code`; the binary runs kloop
-via the Appendix-B bundle). When exec mode = `sub-agent`, `running` is instead yielded as
-an `agent` step whose prompt is the plan + "implement this plan directly; no kloop,"
-writing the same completion contract.
-
-## `running` (kloop) — the kloop prompt bundle
-
-When exec mode is `kloop`, the binary inits a kloop run seeded with `DEFAULT_CONFIG.kloop.prompts`
-(implementer / reviewer / checkpointer / checkpointerFull / synthesizer / verifier /
-reSynthesizer) — all verbatim in **Appendix B**. The harness just runs `kloop run`.
-
-## `resolve` — kind: `interactive`
-
-Mechanics (describe-mode; from `RESOLVE_MECHANICS`, log-event/exit removed):
-
-```
-## CRITICAL: Resolve Mechanics
-
-### Step 1: Propose a Strategy
-Suggest one, based on the kloop evidence:
-1. refine_local — current plan needs targeted fixes (kloop was close).
-2. patch_downstream — completed plans fine, downstream plans need updates.
-3. regenerate_remaining — fundamental shift; rewrite remaining plans from scratch.
-4. revisit_spec — the SPEC is the problem; escalate to a full replan.
-5. retry — transient/environmental failure; just re-run.
-
-### Step 2: Write the Context Document
-This step does NOT edit plans; it writes a context doc the next step uses.
-- retry: no document.
-- revisit_spec: write {feedback_path} (what's wrong with the spec; what the next epoch
-  must address) — consumed by phase-1 write_spec.
-- refine_local / patch_downstream / regenerate_remaining: write {resolution_path}
-  (what went wrong w/ kloop evidence; what must change; which plans; constraints) —
-  consumed by amend_plans.
-```
-
-`+ Shared Approval Gate`. Controller records the choice via
-`complete resolve --metadata '{"rewriteDecision":"<choice>"}'` (or `--metadata
-'{"rewriteDecision":"revisit_spec"}'`/`'{"abandon":true}'`). Snapshotting of the context
-doc is done by the binary on `complete`.
-
-- **vars**: `{task_spec_path}`, `{plan_path}`, `{plans_dir}`, `{kloop_evidence}`, `{plan_name}`, `{reason}`, `{attempt}`, `{feedback_path}`, `{resolution_path}`
-- **configurable body** (`agents.phase2.resolve`, verbatim):
-
-```
-You are helping the user resolve a kloop failure for {plan_name}.
-
-## What Happened
-
-{kloop_evidence}
-
-## Context
-- Task spec: {task_spec_path}
-- Current plan: {plan_path}
-- Plans directory: {plans_dir}
-
-Read these to understand the original intent before proposing a strategy.
-```
-
-Next: `retry`→`clear_loop`; `revisit_spec`→cross-phase reset to phase-1 (new epoch);
-`refine_local`/`patch_downstream`/`regenerate_remaining`→`amend_plans`; abandon→`failed`.
-
-## `amend_plans` — kind: `interactive`
-
-Mechanics = one of three **strategy headers** (verbatim) + `AMEND_PLANS_COMMON` +
-Shared Approval Gate. Controller: `complete amend_plans` (records
-`rewrite_plans:approved`).
-
-```
-## Strategy: refine_local
-Rewrite ONLY {plan_name} at {plan_path}. Do not touch other plans.
-Each plan file MUST follow the template:
-{planTemplate}
-```
-
-```
-## Strategy: patch_downstream
-Edit ONLY the incomplete plan files. Do not touch completed ones.
-Completed (do NOT edit):
-{completed_plans_list}
-Incomplete (to patch):
-{incomplete_plans_list}
-Each plan file MUST follow the template:
-{planTemplate}
-```
-
-```
-## Strategy: regenerate_remaining
-Rewrite ALL incomplete plan files FROM SCRATCH based on the current spec plus learnings in the resolution doc.
-Completed (do NOT edit):
-{completed_plans_list}
-Incomplete (to regenerate):
-{incomplete_plans_list}
-Each plan file MUST follow the template:
-{planTemplate}
-```
-
-`AMEND_PLANS_COMMON` (the shared tail — read {resolution_path} first; don't re-debate
-strategy, debate the implementation; snapshot is handled on complete) precedes the gate.
-
-- **configurable body** (`agents.phase2.amend_plans`, verbatim):
-
-```
-You are amending plans for the current epoch. Read the resolution document at {resolution_path}
-— the previous TTY wrote it to explain what went wrong and what needs to change.
-
-## Context
-- Task spec: {task_spec_path}
-- Plans directory: {plans_dir}
-
-## Kloop Evidence
-
-{kloop_evidence}
-```
-
-## `commit` — kind: `agent`
-
-`generic.commit` (Appendix C) with `{context}` = `### Plan Context\nRead the plan at: {planPath}`.
-Output: commit SHA. Contract `completionEvent: "commit:completed"`,
-`completionMetadataSchema: { commitSha: "string" }`.
-
----
-
-# Polish steps (per repo) — `kautopilot next --repo <repo>` (phase: polish)
-
-| step             | kind         | prompt source                                                         |
-| ---------------- | ------------ | --------------------------------------------------------------------- |
-| `commit_pending` | agent        | `generic.commit` (Appendix C), `{context}`=""                         |
-| `prereview`      | agent        | `prereview_classify` + `prereview_fix` (below) — only if `coderabbit` |
-| `push`           | code         | —                                                                     |
-| `create_pr`      | agent        | `create_pr` (below)                                                   |
-| `poll`           | code         | — (ready-to-merge / rollover branching)                               |
-| `ensure_branch`  | code         | —                                                                     |
-| `eval`           | agent        | `eval` + `EVAL_MECHANICS` (below)                                     |
-| `act`            | code         | —                                                                     |
-| `tty_resolve`    | interactive  | reason-variant (below)                                                |
-| `write_fix`      | agent        | `write_fix` + `WRITE_FIX_MECHANICS` (below)                           |
-| `run_fix`        | code (kloop) | kloop bundle (Appendix B) — **kloop never commits**                   |
-| `verify_fixes`   | code         | — (re-pull threads/CI; confirm non-code fixes landed before push)     |
-| `feedback_check` | interactive  | done/feedback/fully-merged gate (below)                               |
-| `feedback`       | interactive  | `feedback` + `FEEDBACK_MECHANICS` (below) → `rules.md`                |
-| `cleanup`        | code         | — (remove worktrunk worktrees once user confirms fully merged)        |
-
-`poll` resolves to `mergeable` (= **ready to merge**: CI green + all threads resolved,
-excluding human-review approval) → `feedback_check`; `blocked`→`ensure_branch`;
-`pending`→re-poll (cap `maxPushCycles`); rollover→`create_pr`. The controller **never
-merges**.
-
-**`verify_fixes` (code).** After `act`/`run_fix`, the next `next` re-pulls the thread list
-
-- CI and confirms the applied fixes actually landed — at least the **non-code** CodeRabbit
-  fixes (replies posted, threads resolved) — _before_ committing/pushing. Unverified actions
-  loop back to `eval`/`act`; the binary never trusts "I applied it."
-
-**`feedback_check` (interactive).** Ask: feedback, or done? **Has feedback** → `feedback`.
-**No feedback** → ask if the PRs are **fully merged**; if the user confirms, → `cleanup`
-(remove this session's worktrunk worktrees) → `completed`; if not yet merged, → `completed`
-keeping the worktrees. **Commit ownership:** only the `commit`/`commit_pending` sub-agent
-(or the binary's seed-commit) ever commits — the main agent and kloop never do.
-
-## `prereview` — kind: `agent` (only when `settings.coderabbit`)
-
-Two configurable bodies, run in sequence over CodeRabbit CLI output:
-
-`agents.phase3.prereview_classify` (verbatim):
-
-```
-Classify CodeRabbit findings as fix/comment/ignore.
-Be conservative — only mark as "fix" if it's a genuine issue.
-```
-
-`agents.phase3.prereview_fix` (verbatim):
-
-```
-Apply the classified fixes to the codebase.
-Be precise and minimal — only change what's needed.
-```
-
-Fix commit message uses `generic.commit`. Skips emit `prereview:completed {skipped,reason}`.
-
-## `create_pr` — kind: `agent`
-
-Mechanics (`CREATE_PR_MECHANICS`, verbatim) + body:
-
-```
-## Spec Context
-Read the spec at: {spec_path}
-The spec contains what was implemented. Use it for PR body context.
-```
-
-- **configurable body** (`agents.phase3.create_pr`, verbatim):
-
-```
-You are creating a GitHub Pull Request. Your task:
-
-1. Discover PR conventions:
-   - Check for PR templates: .github/PULL_REQUEST_TEMPLATE.md, .github/pull_request_template.md, or any template in .github/PULL_REQUEST_TEMPLATE/
-   - Check CONTRIBUTING.md for PR guidelines
-   - Look at recent merged PRs for title/body style: gh pr list --state merged --limit 5 --json title,body
-
-2. Create a PR against the "{baseBranch}" branch using gh pr create:
-   - Title must start with "[{ticketId}]" followed by a concise summary of what was implemented
-   - Body should follow the discovered template/conventions, or include a summary, what changed, and how to test
-   - For multi-repo tasks, cross-link sibling PRs in the body: "Part of {ticketId}: <repo#pr>, …"
-
-3. Output ONLY a JSON object with the PR number and URL:
-   {"number": <int>, "url": "<string>"}
-```
-
-- **contract**: `completionEvent: "create_pr:completed", completionMetadataSchema: { prNumber: "number", prUrl: "string" }`
-- **Epoch 2+**: a PR already exists for the branch → `create_pr` **reuses/updates the
-  existing PR** rather than opening a new one (same branch + PR across epochs).
-
-## `eval` — kind: `agent` (fan-out, one per feedback unit)
-
-Mechanics (`EVAL_MECHANICS`, verbatim) prepended per unit:
-
-```
-## Context Paths
-You have access to these files to understand the original intent and determine if feedback is valid:
-- Spec: {spec_path}
-- Plans: {plan_paths}
-Read these files. They define what was INTENDED. Compare against the feedback to determine if it's a genuine issue or a false positive.
-
-## How to Detect False Positives
-1. Read the spec — what was the stated requirement? Does the feedback conflict with the spec?
-2. Read the plan — what was the implementation approach? Does the feedback misunderstand the design?
-3. Check the code — verify the actual state matches the spec/plan
-4. Consider context — is the reviewer missing information? Are they applying a generic rule that doesn't fit?
-
-A false positive is when the feedback asks for something that:
-- Contradicts the spec (spec says X, reviewer wants Y)
-- Is already satisfied (reviewer missed it)
-- Is out of scope (reviewer scope creep)
-- Is stylistic preference vs. correctness issue
-```
-
-Plus inline "Possible Actions" + JSON output schema (`reply`/`resolve`/`code_fix`/
-`ambiguous`). Bot replies `OUTDATED_REPLY` / `GHOSTED_REPLY` are bot-signed.
-
-- **configurable body** (`agents.phase3.eval`, verbatim):
-
-```
-Analyze PR feedback and decide what action to take.
-Be precise: only suggest code_fix for genuine issues.
-Mark items as ambiguous when you're unsure rather than guessing.
-```
-
-## `tty_resolve` — kind: `interactive` (reason-selected variant)
-
-One of three mechanics variants (`ambiguous` / `conflict` / `failure`, verbatim tasks
-below) + Shared Approval Gate. Controller records `tty_resolve:approved` with the reason.
-
-`ambiguous`:
-
-```
-## Your Task
-Review each ambiguous item and decide: reply / code fix / skip. Apply any needed changes.
-```
-
-`conflict`:
-
-```
-## Your Task
-1. Open the conflicted files and resolve the merge conflicts
-2. `git add` the resolved files
-3. `git rebase --continue`
-4. If unresolvable, `git rebase --abort` and I will try an alternative approach
-```
-
-`failure`:
-
-```
-## Your Task
-Investigate the failure and help decide next steps:
-1. Fix the issue and retry  2. Skip and move on  3. Escalate and stop
-```
-
-- **configurable bodies** (verbatim): `tty_resolve_ambiguous` ("Help resolve ambiguous
-  items from the PR review. For each item, decide: reply, code fix, or skip."),
-  `tty_resolve_conflict` ("Help resolve merge conflicts from the rebase. Resolve
-  conflicts while preserving the intent of both changes."), `tty_resolve_failure`
-  ("The dev-loop execution failed. Help investigate and determine next steps. Options:
-  fix the issue and retry, skip and move on, or escalate.").
-- Next: files changed → `write_fix`; none → `poll`.
-
-## `write_fix` — kind: `agent`
-
-Mechanics (`WRITE_FIX_MECHANICS`, verbatim) + body:
-
-```
-## Context Paths
-- Spec: {spec_path}
-- Plans: {plan_paths}
-- Previous feedback: {feedback_path}
-Read these files to understand the original context.
-
-## Fixes
-{fixes_section}
-
-## Output Format
-Write a structured implementation spec for each fix:
-### Fix N: [Title]
-**File**: [path] · **Issue**: [what's wrong, from PR feedback]
-**Changes**: - [change 1] - [change 2]
-**Definition of Done**: - [ ] [verifiable 1] - [ ] [verifiable 2]
-Output ALL fixes in this format, one per section. Deduplicate overlapping fixes on the same file.
-```
-
-- **configurable body** (`agents.phase3.write_fix`, verbatim):
-
-```
-Merge all pending code fixes into a single coherent implementation spec.
-Deduplicate overlapping fixes on the same file.
-Output the complete spec (not just the changes).
-```
-
-Then the binary inits a kloop fix run (`code`); `run_fix` executes it (Appendix B).
-
-## `feedback_check` — kind: `interactive`
-
-A simple done/feedback gate. "Ready to merge — done, or do you have feedback that should
-shape the next epoch?" `done` → transition ticket to review + `completed`. `feedback` →
-`feedback`.
-
-## `feedback` — kind: `interactive` → `rules.md` evolution
-
-Mechanics (`FEEDBACK_MECHANICS`, describe-mode) + the evolution rule:
-
-```
-## CRITICAL: Feedback Mechanics
-### Output File
-Write the feedback to {feedback_path} (consumed by phase-1 write_spec next epoch).
-
-### Evolution → rules.md (do NOT apply feedback literally)
-Distill the user's feedback into candidate RULES, reasoning about scope:
-- task-specific vs repo-specific?
-- a rule for WRITING CODE, or for THINKING about big-picture solutions?
-Suggest a few candidate rules. Confirm with AskUserQuestion (show a rules.md diff).
-The binary appends confirmed rules to each involved repo's rules.md and links it from
-CLAUDE.md / AGENTS.md. Curated, deduped, terse — nothing added unconfirmed.
-```
-
-`+ Shared Approval Gate`. Controller: `complete feedback --output {feedback_path}
---metadata '{"rules":[…confirmed…]}'`.
-
-- **configurable body** (`agents.phase3.feedback`, verbatim):
-
-```
-## Context Paths
-- Task spec: {task_spec_path}
-- Plans directory: {plans_dir}
-
-Read these files to understand the original intent.
-
-## PR State
-- URL: {pr_url}
-- Checks status: {checks_status}
-- Open threads: {thread_count}
-
-Discuss the PR with the user. Figure out:
-1. What needs improvement?
-2. Implementation issue or spec issue?
-3. What spec changes would address it?
-```
-
-This is the **feedback / evolution phase** (only entered when the user has feedback).
-Next: bump epoch → phase-1 (plan), seeded from `feedback.md` + the new `rules.md`. **From
-epoch 2 on, each repo stays on the SAME branch + PR** (no new PR); worktrees persist —
-cleanup runs only when the user reports fully merged with no feedback.
-
----
+# Execution + PR polish prompts — owned by the skill
+
+The old repo-scoped binary step machine (repo worktree setup, execution, commit, PR polish,
+CodeRabbit/eval/write_fix loops) has been removed. After the plan phase, the binary
+only exposes the DAG frontier through `kautopilot schedule` and records lifecycle
+transitions through `kautopilot record`.
+
+The skill/controller owns worktree setup, kloop or subagent execution, commits, PR
+opening, CodeRabbit/CI review-thread polish, and merge/release observation. Fresh
+agent contexts are started by the harness as native subagents; the binary no longer
+yields repo-scoped prompts for those phases.
 
 # Appendix A — Reviewer & summarizer bodies (verbatim)
 
@@ -831,8 +446,8 @@ Output ONLY the numbered problem list. If no real issues, output "No issues foun
 
 # Appendix B — kloop prompt bundle (`DEFAULT_CONFIG.kloop.prompts`, verbatim)
 
-These seed the kloop run at the `running` / `run_fix` steps (execution mode `kloop`).
-The full verbatim bodies are large and unchanged from `src/core/types.ts`:
+These seed kloop runs owned by the skill/controller. The full verbatim bodies are large
+and unchanged from `src/core/types.ts`:
 
 - `implementer` (`DEFAULT_KLOOP_IMPLEMENTER_PROMPT`, types.ts 28–85)
 - `reviewer` (`DEFAULT_KLOOP_REVIEWER_PROMPT`, 87–153)
@@ -847,16 +462,15 @@ Vars: `{specPath}`, `{iteration}`, `{loop}`, `{reviewsDir}`, `{reviewSummaryPath
 `{reviewerIndex}`, `{verifierIndex}`, `{previousSummaryPath}`, `{archivedReviewsPattern}`,
 `{archivedSummariesPattern}`. Each enforces the same evidence protocol (all evidence —
 Type-1 captured command output and Type-2 diff pointers — lands in `{evidenceDir}/`, indexed
-by `self-review.md`; no sidecar) and Git-Safety block. kautopilot runs `kloop init` and lets
-kloop use its own native prompts (`kloop-ts/src/agents/default-prompts.ts`); it does not
-inject these, so they are not reproduced here.
+by `self-review.md`; no sidecar) and Git-Safety block. The skill-owned plan driver runs
+`kloop init` and lets kloop use its own native prompts (`kloop-ts/src/agents/default-prompts.ts`);
+the kautopilot binary does not inject these, so they are not reproduced here.
 
 ---
 
 # Appendix C — `generic.commit` (verbatim)
 
-Shared by `commit`, `commit_pending`, prereview-fix, and spec-removal commits. `{context}`
-varies per caller.
+Shared by skill-owned commit subagents. `{context}` varies per caller.
 
 ```
 You are committing code changes in a repository. Your task:

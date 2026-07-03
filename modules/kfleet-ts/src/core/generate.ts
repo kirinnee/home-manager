@@ -16,7 +16,8 @@ import {
 import path from 'node:path';
 import { binDir, home, resolveAsset } from '../deps';
 import { KIND_SPECS } from './kinds';
-import type { AliasMap, CommandDef, ResolvedAgent } from './types';
+import { type SettingsOutput, resolveSettings } from './settings';
+import type { AliasMap, CommandDef, DefaultHomeMap, Kind, ResolvedAgent, SettingsLayer } from './types';
 
 /** Marker line so prune can tell kfleet-owned wrappers from anything else. */
 const MARKER = '# kfleet-managed — do not edit (regenerate with `kfleet apply`)';
@@ -78,15 +79,34 @@ function replaceWith(dest: string, make: () => void): void {
 }
 
 /** Materialize one agent's config dir assets. Returns the dest paths written. */
-function materializeAgent(r: ResolvedAgent): string[] {
+function materializeAgent(r: ResolvedAgent, dirOverride?: string): string[] {
   const spec = KIND_SPECS[r.kind];
-  const dir = spec.configDir(r.name);
+  const dir = dirOverride ?? spec.configDir(r.name);
   mkdirSync(dir, { recursive: true });
 
   const written: string[] = [];
   for (const asset of spec.assets) {
     const ref = r[asset.field];
-    if (typeof ref !== 'string') continue; // asset not provided by this agent
+    if (ref === undefined) continue; // asset not provided by this agent
+
+    // Structured-config assets (settings) are a layered list: deep-merge + emit.
+    if (asset.format) {
+      const layers = (Array.isArray(ref) ? ref : [ref]) as SettingsLayer[];
+      const dest = path.join(dir, asset.dest[0]);
+      let out: SettingsOutput;
+      try {
+        out = resolveSettings(layers, asset.format, asset.mode);
+      } catch (e) {
+        throw new Error(`agent "${r.name}": ${(e as Error).message}`);
+      }
+      if (out.kind === 'write') replaceWith(dest, () => writeFileSync(dest, out.content));
+      else if (out.kind === 'copy') replaceWith(dest, () => copyFileSync(out.src, dest));
+      else replaceWith(dest, () => symlinkSync(out.src, dest));
+      written.push(dest);
+      continue;
+    }
+
+    if (typeof ref !== 'string') continue; // non-settings fields are plain paths
     const src = resolveAsset(ref);
     if (!existsSync(src)) throw new Error(`agent "${r.name}": ${asset.field} source not found: ${src}`);
     for (const name of asset.dest) {
@@ -100,6 +120,27 @@ function materializeAgent(r: ResolvedAgent): string[] {
     }
   }
   return written;
+}
+
+export interface DefaultHomeTarget {
+  kind: Kind;
+  target: string;
+  agent: ResolvedAgent;
+  dir: string;
+}
+
+/** Resolve configured default homes to concrete agents before any fs writes. */
+export function resolveDefaultHomeTargets(defaultHomes: DefaultHomeMap, agents: ResolvedAgent[]): DefaultHomeTarget[] {
+  const out: DefaultHomeTarget[] = [];
+  for (const [kind, target] of Object.entries(defaultHomes) as [Kind, string | undefined][]) {
+    if (!target) continue;
+    const agent = agents.find(a => a.kind === kind && (a.name === target || wrapperName(a) === target));
+    if (!agent) {
+      throw new Error(`defaultHomes.${kind}: unknown target "${target}"`);
+    }
+    out.push({ kind, target, agent, dir: KIND_SPECS[kind].defaultConfigDir });
+  }
+  return out;
 }
 
 /** Write one agent's wrapper script (executable). */
@@ -156,7 +197,11 @@ export function expandAliases(aliases: AliasMap, agents: ResolvedAgent[]): Comma
 }
 
 /** Generate wrappers + config dirs for every agent, then command wrappers. */
-export function apply(agents: ResolvedAgent[], commands: CommandDef[] = []): { agents: number; commands: number } {
+export function apply(
+  agents: ResolvedAgent[],
+  commands: CommandDef[] = [],
+  defaultHomes: DefaultHomeMap = {},
+): { agents: number; commands: number; defaultHomes: number } {
   // Two (agent × variant) pairs can collide — e.g. an agent literally named
   // `auto-kirin` (default variant) and `kirin` under an `auto` variant both map
   // to `claude-auto-kirin`. Catch it instead of silently overwriting.
@@ -178,12 +223,14 @@ export function apply(agents: ResolvedAgent[], commands: CommandDef[] = []): { a
     if (seen.has(c.name)) throw new Error(`duplicate command name "${c.name}"`);
     seen.add(c.name);
   }
+  const defaultHomeTargets = resolveDefaultHomeTargets(defaultHomes, agents);
   for (const r of agents) {
     materializeAgent(r);
     writeWrapper(r);
   }
+  for (const d of defaultHomeTargets) materializeAgent(d.agent, d.dir);
   for (const c of commands) writeCommand(c);
-  return { agents: agents.length, commands: commands.length };
+  return { agents: agents.length, commands: commands.length, defaultHomes: defaultHomeTargets.length };
 }
 
 /** Remove managed wrappers no longer backed by an agent or command. Returns removed names. */

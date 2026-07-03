@@ -26,7 +26,6 @@
     home-manager-modules.url = "github:kirinnee/home-manager-modules";
     llm-agents.url = "github:numtide/llm-agents.nix";
     claude-code.url = "github:sadjow/claude-code-nix";
-    codex-cli.url = "github:sadjow/codex-cli-nix";
   };
 
   outputs =
@@ -44,7 +43,6 @@
     , home-manager-modules
     , llm-agents
     , claude-code
-    , codex-cli
     ,
     }:
     let
@@ -68,7 +66,6 @@
               atomi = atomipkgs.packages.${system};
               pkgs-llm = llm-agents.packages.${system};
               claude-code-pkg = claude-code.packages.${system}.claude-code;
-              codex-pkg = codex-cli.packages.${system}.default;
             in
             let
               pkgs = pkgs-stable;
@@ -90,7 +87,6 @@
                     atomi
                     pkgs-llm
                     claude-code-pkg
-                    codex-pkg
                     profile
                     pkgs-stable
                     pkgs-unstable
@@ -119,7 +115,6 @@
               atomi = atomipkgs.packages.${system};
               pkgs-llm = llm-agents.packages.${system};
               claude-code-pkg = claude-code.packages.${system}.claude-code;
-              codex-pkg = codex-cli.packages.${system}.default;
             in
             let
               pkgs = pkgs-stable;
@@ -155,7 +150,6 @@
                         atomi
                         pkgs-llm
                         claude-code-pkg
-                        codex-pkg
                         profile
                         pkgs-stable
                         pkgs-unstable

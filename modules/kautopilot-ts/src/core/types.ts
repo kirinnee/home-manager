@@ -344,8 +344,6 @@ const phase1AgentsSchema = z.object({
 export const configSchema = z.object({
 	agents: z.object({
 		phase1: phase1AgentsSchema,
-		phase2: z.record(z.string(), agentSchema),
-		phase3: z.record(z.string(), agentSchema),
 		generic: z.record(z.string(), agentSchema),
 	}),
 	templates: z.object({
@@ -566,113 +564,6 @@ Output ONLY the problems found — one per line. If none, output "No issues foun
 				},
 			},
 		},
-		phase2: {
-			resolve: {
-				// Available vars: {task_spec_path}, {plan_path}, {plans_dir}, {kloop_evidence},
-				//   {plan_name}, {reason}, {attempt}
-				// Mechanics (strategy list, context doc writing, approval protocol) are hardcoded in resolve.ts
-				prompt: `You are helping the user resolve a kloop failure for {plan_name}.
-
-## What Happened
-
-{kloop_evidence}
-
-## Context
-- Task spec: {task_spec_path}
-- Current plan: {plan_path}
-- Plans directory: {plans_dir}
-
-Read these to understand the original intent before proposing a strategy.`,
-			},
-			amend_plans: {
-				// Available vars: {resolution_path}, {task_spec_path}, {plans_dir}, {kloop_evidence}
-				// Mechanics (per-strategy prompts, approval protocol) are hardcoded in amend-plans.ts
-				prompt: `You are amending plans for the current epoch. Read the resolution document at {resolution_path}
-— the previous TTY wrote it to explain what went wrong and what needs to change.
-
-## Context
-- Task spec: {task_spec_path}
-- Plans directory: {plans_dir}
-
-## Kloop Evidence
-
-{kloop_evidence}`,
-			},
-		},
-		phase3: {
-			eval: {
-				// Available vars: {spec_path}, {plan_paths} — file paths, NOT inlined content
-				prompt: `Analyze PR feedback and decide what action to take.
-Be precise: only suggest code_fix for genuine issues.
-Mark items as ambiguous when you're unsure rather than guessing.`,
-			},
-			write_fix: {
-				// Available vars: none — context is prepended by handler
-				prompt: `Merge all pending code fixes into a single coherent implementation spec.
-Deduplicate overlapping fixes on the same file.
-Output the complete spec (not just the changes).`,
-			},
-			prereview_classify: {
-				// Available vars: none — content is prepended by handler
-				prompt: `Classify CodeRabbit findings as fix/comment/ignore.
-Be conservative — only mark as "fix" if it's a genuine issue.`,
-			},
-			prereview_fix: {
-				// Available vars: none — content is prepended by handler
-				prompt: `Apply the classified fixes to the codebase.
-Be precise and minimal — only change what's needed.`,
-			},
-			create_pr: {
-				// Available vars: {baseBranch}, {ticketId}, {spec_path} — file path, NOT inlined content
-				prompt: `You are creating a GitHub Pull Request. Your task:
-
-1. Discover PR conventions:
-   - Check for PR templates: .github/PULL_REQUEST_TEMPLATE.md, .github/pull_request_template.md, or any template in .github/PULL_REQUEST_TEMPLATE/
-   - Check CONTRIBUTING.md for PR guidelines
-   - Look at recent merged PRs for title/body style: gh pr list --state merged --limit 5 --json title,body
-
-2. Create a PR against the "{baseBranch}" branch using gh pr create:
-   - Title must start with "[{ticketId}]" followed by a concise summary of what was implemented
-   - Body should follow the discovered template/conventions, or include a summary, what changed, and how to test
-
-3. Output ONLY a JSON object with the PR number and URL:
-   {"number": <int>, "url": "<string>"}`,
-			},
-			tty_resolve_ambiguous: {
-				// Available vars: none — context is prepended by handler
-				prompt: `Help resolve ambiguous items from the PR review.
-For each item, decide: reply, code fix, or skip.`,
-			},
-			tty_resolve_conflict: {
-				// Available vars: none — context is prepended by handler
-				prompt: `Help resolve merge conflicts from the rebase.
-Resolve conflicts while preserving the intent of both changes.`,
-			},
-			tty_resolve_failure: {
-				// Available vars: none — context is prepended by handler
-				prompt: `The dev-loop execution failed. Help investigate and determine next steps.
-Options: fix the issue and retry, skip and move on, or escalate.`,
-			},
-			feedback: {
-				// Available vars: {task_spec_path}, {plans_dir}, {pr_url}, {checks_status}, {thread_count}, {feedback_path}
-				// Mechanics (approval protocol, file writing, restart loop) are hardcoded in feedback-check.ts
-				prompt: `## Context Paths
-- Task spec: {task_spec_path}
-- Plans directory: {plans_dir}
-
-Read these files to understand the original intent.
-
-## PR State
-- URL: {pr_url}
-- Checks status: {checks_status}
-- Open threads: {thread_count}
-
-Discuss the PR with the user. Figure out:
-1. What needs improvement?
-2. Implementation issue or spec issue?
-3. What spec changes would address it?`,
-			},
-		},
 		generic: {
 			// Available vars: {context} — optional context (e.g., plan path, reason for commit)
 			commit: { prompt: DEFAULT_COMMIT_PROMPT },
@@ -722,7 +613,7 @@ export interface SessionRow {
 }
 
 // ============================================================================
-// Phase 3 Types
+// GitHub polling types
 // ============================================================================
 
 export type PollState = "pending" | "blocked" | "mergeable";
@@ -754,7 +645,7 @@ export interface CheckStatus {
 // Phase Constants
 // ============================================================================
 
-export type Phase = "plan" | "implementation" | "polish";
+export type Phase = "plan" | "execution" | "feedback";
 
 // ============================================================================
 // Lock File

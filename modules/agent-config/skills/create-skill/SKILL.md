@@ -98,10 +98,13 @@ executable). Reference them from the body so they're loaded on demand.
 
 ## Where skills live
 
-The kfleet fleet's shared skills are in `modules/agent-config/skills/`. `kfleet apply`
-deploys the full set to claude (`~/.claude-<name>/skills/`) and a codex-safe subset
-to codex (`~/.codex-<name>/skills/`). Per-project skills can also live in
-`.claude/skills/` (Claude) or `.agents/skills/` (Codex).
+The kfleet fleet's shared skill sources live in this repo under `kfleet/skills/`
+and `kfleet/skills-codex/`. Home Manager links them into `~/.kfleet/skills/`
+and `~/.kfleet/skills-codex/`, where `kfleet apply` deploys them to claude
+(`~/.claude-<name>/skills/`) and codex (`~/.codex-<name>/skills/`).
+Per-project skills can also live in `.claude/skills/` (Claude) or
+`.agents/skills/` (Codex). `modules/agent-config/skills/` is deprecated legacy
+seed material.
 
 ## Best practices
 

@@ -6,7 +6,7 @@ import { logDim, logError } from "../util/format";
 
 export function createLogsCommand(): Command {
 	return new Command("logs")
-		.argument("[phase]", "Filter by phase (plan, implementation, polish)")
+		.argument("[phase]", "Filter by phase (plan, execution, feedback)")
 		.option("--tail <N>", "Show last N entries", "50")
 		.option("--json", "Raw JSONL output")
 		.action(
@@ -57,33 +57,9 @@ async function runLogs(
 				"finalize_plans",
 				"feedback_check",
 				"feedback",
-				"cleanup",
 			],
-			implementation: [
-				"seed",
-				"clear_loop",
-				"setup_run",
-				"running",
-				"resolve",
-				"amend_plans",
-				"commit",
-				"next_plan",
-			],
-			polish: [
-				"commit_pending",
-				"prereview",
-				"push",
-				"create_pr",
-				"poll",
-				"ensure_branch",
-				"eval",
-				"act",
-				"tty_resolve",
-				"write_fix",
-				"run_fix",
-				"verify_fixes",
-				"repo_ready",
-			],
+			execution: ["await_repos"],
+			feedback: ["feedback_check", "feedback"],
 		};
 		const phaseSteps = phaseMap[phase.toLowerCase()];
 		if (phaseSteps) {

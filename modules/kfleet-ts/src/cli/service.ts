@@ -24,6 +24,30 @@ const UNIT = 'kfleet-serve.service'; // systemd unit name (Linux)
 const BUN = process.execPath;
 const ENTRY = path.resolve(import.meta.dir, '../index.ts');
 
+/** The user's secret env file, sourced by the interactive shell. */
+const SECRETS_FILE = path.join(homedir(), '.secrets');
+
+/** A PATH for the background service: the per-user nix profile (claude/codex live
+ *  here, needed by the relogin spawns) + the usual system dirs (/usr/bin for
+ *  `security`/keychain). The service env is otherwise minimal under launchd/systemd. */
+const SERVICE_PATH = [
+  path.join(homedir(), '.nix-profile', 'bin'),
+  '/run/current-system/sw/bin',
+  '/usr/bin',
+  '/bin',
+].join(':');
+
+/** The launch argv for `serve`. We go through `/bin/sh -c` so we can source the user's
+ *  `~/.secrets` first — that's how the interactive shell loads the API-key env
+ *  ($ZAI_API_KEY_* / $MINIMAX_API_KEY / …) needed to probe the API-key providers
+ *  (z.ai/minimax), WITHOUT baking any secret into the unit file. OAuth providers
+ *  (claude/codex) read keychain/auth.json and work even without it. */
+function serveArgv(port: number): string[] {
+  const run = `exec ${sysQuote(BUN)} ${sysQuote(ENTRY)} serve --port ${port}`;
+  const cmd = existsSync(SECRETS_FILE) ? `. ${sysQuote(SECRETS_FILE)} 2>/dev/null; ${run}` : run;
+  return ['/bin/sh', '-c', cmd];
+}
+
 function die(m: string): never {
   console.error(pc.red(`✗ ${m}`));
   process.exit(1);
@@ -66,7 +90,7 @@ const plistPath = (): string => path.join(homedir(), 'Library', 'LaunchAgents', 
 function macInstall(port: number): void {
   const home = homedir();
   const logDir = path.join(home, 'Library', 'Logs');
-  const argv = [BUN, ENTRY, 'serve', '--port', String(port)];
+  const argv = serveArgv(port);
   const argXml = argv.map(a => `      <string>${xml(a)}</string>`).join('\n');
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -82,6 +106,7 @@ ${argXml}
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key><string>${xml(home)}</string>
+    <key>PATH</key><string>${xml(SERVICE_PATH)}</string>
   </dict>
   <key>StandardOutPath</key><string>${xml(path.join(logDir, `${TOOL}-serve.out.log`))}</string>
   <key>StandardErrorPath</key><string>${xml(path.join(logDir, `${TOOL}-serve.err.log`))}</string>
@@ -119,12 +144,15 @@ const unitPath = (): string => path.join(homedir(), '.config', 'systemd', 'user'
 function linuxInstall(port: number): void {
   // systemd requires the first token of ExecStart to be an UNQUOTED absolute
   // path; quote only the remaining args (in case ENTRY sits under a spacey path).
-  const exec = `${BUN} ${sysQuote(ENTRY)} serve --port ${port}`;
+  const [head, ...rest] = serveArgv(port);
+  const exec = `${head} ${rest.map(sysQuote).join(' ')}`;
   const unit = `[Unit]
 Description=${TOOL} fleet-health metrics (serve)
 After=default.target
 
 [Service]
+Environment=HOME=${homedir()}
+Environment=PATH=${SERVICE_PATH}
 ExecStart=${exec}
 Restart=always
 RestartSec=2

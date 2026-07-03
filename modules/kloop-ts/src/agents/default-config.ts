@@ -140,6 +140,11 @@ settings:
   interactive: false              # run claude agents as interactive TUIs (no --print);
                                   # kloop pastes the prompt via tmux, waits for a done-marker
                                   # file the agent touches, then sends /exit. gemini/codex ignore this.
+  requireUsageLeft: false         # usage-aware selection: only draw from the weighted pools
+                                  # accounts that still have usage left (queried from kfleet's
+                                  # /usage), and block before the implementer runs until an
+                                  # exhausted pool resets. Needs "kfleet serve" running.
+  # usageEndpoint: http://127.0.0.1:47318/usage  # where to fetch the usage snapshot (default)
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║ PROMPTS — full agent prompts (config is source of truth; edit freely)      ║

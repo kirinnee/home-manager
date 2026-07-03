@@ -7,6 +7,7 @@ import {
 	ensureStatus,
 	getCurrentKloopRunId,
 	isSessionActive,
+	isSessionTerminal,
 	PHASE_STEPS,
 } from "../core/status";
 import {
@@ -63,9 +64,9 @@ function printPhaseProgress(
 	const phaseLabel =
 		phase === "plan"
 			? "Plan"
-			: phase === "implementation"
-				? "Implementation"
-				: "Polish";
+			: phase === "execution"
+				? "Execution"
+				: "Feedback";
 	logHeading(`${phaseLabel} Phase`);
 	console.log();
 
@@ -146,15 +147,14 @@ async function runStatus(
 				ticketSystem: meta?.ticketSystem ?? null,
 				epoch: meta?.epoch ?? status.version,
 				maxParallelRepos: meta?.maxParallelRepos ?? null,
-				// Each repo's {repo, status, prNumber, prUrl, worktree, branch} — the
-				// controller enumerates these to drive `next --repo <repo>` loops.
+				// Each repo's {repo, status, prNumber, prUrl, worktree, branch}.
 				repos: meta?.repos ?? [],
 				local: session.local === 1,
 				phase: status.phase,
 				state: status.state,
 				stateStatus: status.stateStatus,
 				running,
-				completed: !running && status.stateStatus === "completed",
+				completed: !running && isSessionTerminal(session.id),
 				stepType: status.stepType,
 				checkpoint: status.lastCheckpoint,
 				version: status.version,
@@ -224,8 +224,8 @@ async function runStatus(
 				status.completedSteps,
 			);
 
-			// Polish phase details
-			if (status.phase === "polish" && status.polishState) {
+			// Feedback phase details
+			if (status.phase === "feedback" && status.polishState) {
 				printPolishDetails(status.polishState);
 			}
 

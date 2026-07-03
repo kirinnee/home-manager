@@ -11,6 +11,7 @@ const pkg = JSON.parse(
 );
 
 import { createCompleteCommand } from "./cli/complete";
+import { createConfigCommand } from "./cli/config";
 import { createDashCommand } from "./cli/dash";
 import { createDeleteCommand } from "./cli/delete";
 import { createDiffCommand } from "./cli/diff";
@@ -51,6 +52,7 @@ program
 	.addCommand(createPsCommand())
 	.addCommand(createOrgCommand())
 	.addCommand(createLogEventCommand())
+	.addCommand(createConfigCommand())
 	.addCommand(createResetCommand())
 	.addCommand(createServeCommand())
 	.addCommand(createServiceCommand())

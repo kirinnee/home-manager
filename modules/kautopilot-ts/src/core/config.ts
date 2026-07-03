@@ -30,46 +30,6 @@ const PROMPT_VARS: Record<string, Record<string, string>> = {
 		plans: "path to the plans directory",
 		spec: "path to the spec file",
 	},
-	"agents.phase2.resolve": {
-		plan: 'name of the current plan (e.g., "plan-1")',
-		spec: "path to the current plan file",
-		taskSpec: "path to the task spec file",
-		reason: 'reason for resolve ("conflict" or "retry")',
-		attempt: "attempt number (1-indexed)",
-	},
-	"agents.phase2.amend_plans": {
-		resolution_path: "path to the resolution document written by resolve TTY",
-		task_spec_path: "path to the task spec file",
-		plans_dir: "path to the plans directory",
-		kloop_evidence: "output from kloop describe",
-	},
-	"agents.phase3.eval": {
-		spec_path: "path to the task spec file",
-		plan_paths: "paths to plan files (newline-separated)",
-	},
-	"agents.phase3.write_fix": {
-		// Context prepended by handler, not user-configurable
-	},
-	"agents.phase3.create_pr": {
-		baseBranch: 'the base branch name (e.g., "main")',
-		ticketId: "the ticket ID",
-		spec_path: "path to the spec file",
-	},
-	"agents.phase3.prereview_classify": {
-		// Content prepended by handler
-	},
-	"agents.phase3.prereview_fix": {
-		// Content prepended by handler
-	},
-	"agents.phase3.tty_resolve_ambiguous": {
-		// Context prepended by handler
-	},
-	"agents.phase3.tty_resolve_conflict": {
-		// Context prepended by handler
-	},
-	"agents.phase3.tty_resolve_failure": {
-		// Context prepended by handler
-	},
 	"agents.generic.commit": {
 		context: "optional context (e.g., plan path, reason for commit)",
 	},
@@ -139,14 +99,6 @@ export function serializeConfigWithComments(config: Config): string {
 				}
 				lines.push(`        prompt: |`);
 				lines.push(indentLines(reviewer.prompt, 10));
-			}
-		} else if (phaseKey === "phase2" || phaseKey === "phase3") {
-			for (const [agentName, agentConfig] of Object.entries(
-				phaseAgents as Record<string, { prompt: string }>,
-			) as [string, { prompt: string }][]) {
-				const path = `agents.${phaseKey}.${agentName}`;
-				lines.push(`    ${agentName}:`);
-				lines.push(createPromptBlock(path, agentConfig.prompt, 6));
 			}
 		} else if (phaseKey === "generic") {
 			const genericAgents = phaseAgents as Config["agents"]["generic"];

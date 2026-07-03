@@ -5,11 +5,9 @@ import type {
 	DoneDescriptor,
 	NextResult,
 	StepContext,
-	StepDef,
 	StepDescriptor,
 	StepPhase,
 } from "./descriptor";
-import { reconcileGates, repoGateBlockers } from "./gate-runner";
 import { scopeLockKey, touchLock } from "./lock";
 import { appendEvent, readLog } from "./log";
 import { readOrchestration } from "./orchestration";
@@ -23,12 +21,7 @@ import {
 	revisionPath,
 } from "./revisions";
 import { computeSchedule } from "./scheduler";
-import {
-	findRepo,
-	type RepoEntry,
-	readSessionMeta,
-	type SessionMeta,
-} from "./session-meta";
+import { readSessionMeta, type SessionMeta } from "./session-meta";
 import type { Config } from "./types";
 
 // ============================================================================
@@ -41,9 +34,6 @@ import type { Config } from "./types";
 /** Entry step of the shared (session) timeline. */
 const ENTRY_STEP = "resolve_org";
 
-/** Entry step of a repo's execution/polish timeline (once plans are approved). */
-const REPO_ENTRY = "seed";
-
 /** Driver-special session gate: after plans approved, wait for every repo to be ready. */
 const AWAIT_REPOS = "await_repos";
 
@@ -51,8 +41,7 @@ const AWAIT_REPOS = "await_repos";
 const PHASE_MARKER: Record<StepPhase, string> = {
 	plan: "phase1",
 	execution: "phase2",
-	polish: "phase3",
-	feedback: "phase1",
+	feedback: "phase3",
 };
 
 /**
@@ -65,77 +54,31 @@ function isCursorEvent(
 	return !!meta && typeof meta.step === "string" && typeof meta.to === "string";
 }
 
-/** Whether this epoch's plans have been approved (gates repo timelines). */
-function planApprovedThisEpoch(
-	log: ReturnType<typeof readLog>,
-	epoch: number,
-): boolean {
-	return log.some(
-		(e) =>
-			isCursorEvent(e.metadata) &&
-			e.metadata.step === "finalize_plans" &&
-			(e.metadata.repo ?? null) === null &&
-			(e.version ?? 0) === epoch,
-	);
-}
-
 /**
  * Compute the pending step name from the WAL — scope-aware (SPEC §13 #1, #11).
  * - Shared timeline (`repo == null`): only session-scoped cursor events (plan +
  *   feedback). Entry: `resolve_org`.
- * - Repo timeline (`repo == <name>`): only THIS epoch's events tagged with that
- *   repo. Entry: `seed`, available only once this epoch's plans are approved.
  * Recomputed every call → `next` is idempotent and resumes exactly.
  */
-function pendingStep(
-	sessionId: string,
-	repo: string | null,
-	epoch: number,
-): string | null {
+function pendingStep(sessionId: string): string | null {
 	const log = readLog(sessionId);
-	let pending: string | null =
-		repo == null
-			? ENTRY_STEP
-			: planApprovedThisEpoch(log, epoch)
-				? REPO_ENTRY
-				: null;
+	let pending: string | null = ENTRY_STEP;
 	for (const entry of log) {
 		if (!isCursorEvent(entry.metadata)) continue;
 		const evRepo = (entry.metadata.repo ?? null) as string | null;
-		if (repo == null) {
-			if (evRepo !== null) continue; // shared timeline: session-scoped only
-		} else {
-			if (evRepo !== repo) continue; // this repo only
-			if ((entry.version ?? 0) !== epoch) continue; // this epoch only
-		}
+		if (evRepo !== null) continue; // shared timeline: session-scoped only
 		const to = entry.metadata.to as string;
 		pending = to === "done" ? null : to;
 	}
 	return pending;
 }
 
-function resolveRepo(
-	meta: SessionMeta,
-	def: StepDef,
-	repoArg: string | null,
-): RepoEntry | null {
-	if (def.scope === "session") return null;
-	if (repoArg) return findRepo(meta, repoArg);
-	// Phase-1 one-repo flow: repo steps operate on the single registered repo.
-	return meta.repos[0] ?? null;
-}
-
-function buildContext(
-	meta: SessionMeta,
-	config: Config,
-	def: StepDef,
-	repoArg: string | null,
-): StepContext {
+function buildContext(meta: SessionMeta, config: Config): StepContext {
 	return {
 		sessionId: meta.sessionId,
 		meta,
 		config,
-		repo: resolveRepo(meta, def, repoArg),
+		repo: null,
 		version: meta.epoch,
 	};
 }
@@ -181,6 +124,11 @@ export async function runNext(
 	config: Config,
 	repoArg: string | null = null,
 ): Promise<NextResult> {
+	if (repoArg != null) {
+		throw new Error(
+			"`kautopilot next --repo` has been removed. Use `kautopilot schedule` and `kautopilot record` for execution/polish.",
+		);
+	}
 	const meta = readSessionMeta(sessionId);
 	if (!meta) throw new Error(`No session.json for session ${sessionId}`);
 
@@ -188,69 +136,21 @@ export async function runNext(
 	// overrides) instead of the built-in DEFAULT_CONFIG.
 	setCachedConfig(config);
 
-	// Master-plan gate (multi-repo, multi-PR): reconcile merge/release state of any
-	// upstream PRs, then block a repo whose plans still wait on an unsatisfied
-	// merge/released gate — so its worktree is never cut off a base that lacks the
-	// upstream work. Best-effort; a session with no orchestration.yaml is unaffected.
-	if (repoArg != null) {
-		const orch = await reconcileGates(meta).catch(() => null);
-		// Gate only BEFORE the repo goes active (i.e. before `seed`). Once active its
-		// worktree is seeded and its own per-plan sequencing + polish take over, so the
-		// gate must not stall in-flight commit/PR work; we re-evaluate only at the seed
-		// boundary of each (epoch's) drive.
-		const entry = findRepo(meta, repoArg);
-		if (orch && (entry == null || entry.status === "pending")) {
-			const blockers = repoGateBlockers(orch, repoArg);
-			if (blockers.length > 0) {
-				return doneResult(
-					meta,
-					"execution",
-					`repo ${repoArg} is blocked on gate dependencies: ${blockers.join("; ")} — retry once the upstream PR(s) merge/release`,
-				);
-			}
-		}
-	}
-
-	// Bound concurrency (SPEC §11): a not-yet-started repo is queued while
-	// `maxParallelRepos` others are already in progress, capping token use. A repo
-	// already in progress (status 'active') is never blocked — it just continues.
-	if (repoArg != null) {
-		const r = findRepo(meta, repoArg);
-		if (r && r.status === "pending") {
-			const active = meta.repos.filter((x) => x.status === "active").length;
-			if (active >= meta.maxParallelRepos) {
-				return doneResult(
-					meta,
-					"execution",
-					`repo ${repoArg} is queued — ${active}/${meta.maxParallelRepos} repos already in progress; retry once one reaches ready-to-merge`,
-				);
-			}
-		}
-	}
-
 	// Run code steps inline until we hit an interactive/agent step or finish.
 	// Bounded to guard against a mis-wired transition cycle.
-	const lockKey = scopeLockKey(sessionId, repoArg);
+	const lockKey = scopeLockKey(sessionId, null);
 	for (let guard = 0; guard < 1000; guard++) {
 		// Heartbeat: each completed inline step proves progress so the lock's TTL
 		// backstop doesn't reclaim a healthy long run (see touchLock / lockTtlMs).
 		touchLock(lockKey);
 		const freshMetaPre = readSessionMeta(sessionId) ?? meta;
-		const stepName = pendingStep(sessionId, repoArg, freshMetaPre.epoch);
+		const stepName = pendingStep(sessionId);
 		if (stepName == null) {
-			if (repoArg != null) {
-				return doneResult(meta, "polish", `repo ${repoArg} is ready to merge`);
-			}
 			return doneResult(meta, "done", "session complete");
 		}
 
-		// Driver-special gate after plan approval. Two models:
-		//  • DAG model (a master plan was approved → orchestration.yaml exists): the
-		//    AGENT drives the work via `kautopilot schedule`/`record`; the binary does
-		//    NOT drive kloop. Bare `next` just reports the DAG state — still in progress
-		//    (point at schedule/record) until every plan is ready-to-merge, then feedback.
-		//  • Legacy per-repo model (no master plan): wait for every repo's status==='ready'
-		//    driven via `next --repo`, then feedback.
+		// Driver-special gate after plan approval: the skill drives execution via
+		// `kautopilot schedule`/`record`. The binary does not run kloop or PR polish.
 		if (stepName === AWAIT_REPOS) {
 			const orch = readOrchestration(sessionId);
 			if (orch) {
@@ -270,18 +170,12 @@ export async function runNext(
 						`Plan approved — drive the DAG with \`kautopilot schedule\`/\`record\` (binary no longer drives kloop). Frontier: ${hint}`,
 					);
 				}
-			} else {
-				const notReady = freshMetaPre.repos.filter((r) => r.status !== "ready");
-				if (freshMetaPre.repos.length === 0 || notReady.length > 0) {
-					const drive = notReady
-						.map((r) => `kautopilot next --repo ${r.repo}`)
-						.join("; ");
-					return doneResult(
-						meta,
-						"execution",
-						`Plan approved — drive each repo to ready-to-merge: ${drive || "(no repos registered)"}`,
-					);
-				}
+			} else if (freshMetaPre.repos.length > 0) {
+				return doneResult(
+					meta,
+					"execution",
+					"Plan approved, but no orchestration.yaml exists. Re-run/approve the master plan so execution can be driven with `kautopilot schedule`/`record`.",
+				);
 			}
 			appendEvent(sessionId, {
 				ts: new Date().toISOString(),
@@ -297,7 +191,7 @@ export async function runNext(
 
 		const freshMeta = freshMetaPre;
 		maybeEmitPhaseMarker(sessionId, def.phase, freshMeta.epoch);
-		const ctx = buildContext(freshMeta, config, def, repoArg);
+		const ctx = buildContext(freshMeta, config);
 
 		if (def.kind === "code") {
 			if (!def.run) throw new Error(`code step ${stepName} has no run()`);
@@ -372,12 +266,21 @@ export interface ReviseResult {
 	version?: number;
 	/** File (or plans dir) the agent should now edit for this new version. */
 	path?: string;
-	/** Viewer path for the new version (prefix with the configured base URL). */
+	/** Full viewer URL for the new version (host already prefixed). */
 	url?: string;
-	/** Viewer path for the diff vs the previous version. */
+	/** Full viewer URL for the diff vs the previous version. */
 	diffUrl?: string;
-	/** Path to the standalone HTML infographic page (prefix with the base URL). */
+	/** Full viewer URL of the standalone HTML infographic page. */
 	visualUrl?: string;
+}
+
+/**
+ * The configured public viewer base URL, with any trailing slash trimmed so
+ * it can be joined to `/sessions/...` paths. Defaults to the local serve port
+ * unless a public domain is set in config.yaml.
+ */
+function viewerBase(config: Config): string {
+	return config.settings.viewerBaseUrl.replace(/\/+$/, "");
 }
 
 /**
@@ -422,8 +325,8 @@ function markPresented(
  * version forward (`vN → vN+1`) so the earlier version is never overwritten. The
  * agent edits the returned path, then presents the returned viewer link. Only writer
  * steps (brainstorm, triage, write_spec, write_plans, feedback) are revisable.
- * Returns viewer PATHS (the harness prefixes the configured base URL) so links are
- * never hand-built.
+ * Returns FULL viewer URLs (the configured `viewerBaseUrl` is prefixed here) so the
+ * harness presents them verbatim and never hand-builds a host or version.
  */
 export async function runRevise(
 	sessionId: string,
@@ -434,13 +337,9 @@ export async function runRevise(
 	if (!meta) throw new Error(`No session.json for session ${sessionId}`);
 	setCachedConfig(config);
 
-	// Every revisable writer step (brainstorm/triage/write_spec/write_plans/feedback)
-	// is SESSION-scoped, so the pending step always lives on the shared timeline —
-	// resolve it with null. A `--repo` arg is only the plan-bucket selector (used
-	// below for `kind === "plans"`); passing it to pendingStep would walk the repo
-	// timeline (which has no pending step until plans are approved) and wrongly report
-	// "nothing to revise" for `revise --repo` during the plan phase.
-	const step = pendingStep(sessionId, null, meta.epoch);
+	// Every revisable writer step is session-scoped. A `revise --repo` arg is only
+	// the plan-bucket selector below for `kind === "plans"`.
+	const step = pendingStep(sessionId);
 	if (step == null) return { ok: false, error: "no pending step to revise" };
 	const kind = STEP_ARTIFACT[step];
 	if (!kind) {
@@ -465,7 +364,8 @@ export async function runRevise(
 			({ n, dir } = copyPlanSetToNext(sessionId, epoch, repo));
 		}
 		markPresented(sessionId, scope, n);
-		const base = `/sessions/${sessionId}/plans/${encodeURIComponent(repo)}`;
+		const viewer = viewerBase(config);
+		const base = `${viewer}/sessions/${sessionId}/plans/${encodeURIComponent(repo)}`;
 		// No single `visualUrl` for plans: each plan has its OWN infographic, surfaced
 		// per-plan in the dashboard's plan tabs (one `<plan>/vN.html` each).
 		return {
@@ -490,14 +390,15 @@ export async function runRevise(
 		({ n, path } = copyToNextRevision(sessionId, kind, ref));
 	}
 	markPresented(sessionId, scope, n);
-	const base = `/sessions/${sessionId}/${kind}`;
+	const viewer = viewerBase(config);
+	const base = `${viewer}/sessions/${sessionId}/${kind}`;
 	return {
 		ok: true,
 		version: n,
 		path,
 		url: `${base}/v${n}`,
 		diffUrl: `${base}/diff?from=${Math.max(1, n - 1)}&to=${n}`,
-		visualUrl: `/sessions/${sessionId}/html/${kind}/v/${n}`,
+		visualUrl: `${viewer}/sessions/${sessionId}/html/${kind}/v/${n}`,
 	};
 }
 
@@ -516,6 +417,13 @@ export async function runComplete(
 		repo?: string | null;
 	},
 ): Promise<CompleteResult> {
+	if (opts.repo != null) {
+		return {
+			ok: false,
+			error:
+				"`kautopilot complete --repo` has been removed. Use `kautopilot schedule` and `kautopilot record` for execution/polish.",
+		};
+	}
 	const meta = readSessionMeta(sessionId);
 	if (!meta) throw new Error(`No session.json for session ${sessionId}`);
 
@@ -528,8 +436,7 @@ export async function runComplete(
 	// caller remembered. `step` is an OPTIONAL assertion: if supplied and it does
 	// not match the pending step, reject as stale (the caller is out of sync, e.g.
 	// driving from memory) rather than silently completing the wrong thing.
-	const repoArg = opts.repo ?? null;
-	const pending = pendingStep(sessionId, repoArg, meta.epoch);
+	const pending = pendingStep(sessionId);
 	if (pending == null) {
 		return { ok: false, error: "no pending step to complete for this scope" };
 	}
@@ -552,7 +459,7 @@ export async function runComplete(
 	if (!def.finalize) throw new Error(`step ${step} has no finalize()`);
 
 	const ctx: StepContext = {
-		...buildContext(meta, config, def, repoArg),
+		...buildContext(meta, config),
 		output: opts.output,
 		metadata: opts.metadata,
 	};
@@ -567,9 +474,38 @@ export async function runComplete(
 		}
 	}
 	if (contract?.completionMetadataSchema) {
-		for (const key of Object.keys(contract.completionMetadataSchema)) {
-			// presence is advisory; missing optional keys are tolerated by finalize.
-			void key;
+		for (const [key, spec] of Object.entries(
+			contract.completionMetadataSchema,
+		)) {
+			// Only plain enum specs (e.g. "feedback|done", "manual|auto?") are
+			// machine-checkable here; array/object/free-form shapes stay advisory
+			// and are tolerated by finalize.
+			const bare = spec.endsWith("?") ? spec.slice(0, -1) : spec;
+			if (!/^[a-z_]+(\|[a-z_]+)+$/.test(bare)) continue;
+			const allowed = bare.split("|");
+			const value = opts.metadata?.[key];
+			if (value === undefined || value === null) {
+				// Missing keys stay tolerated for most steps (finalize handles the
+				// omission) — EXCEPT feedback_check, whose finalize would default a
+				// missing choice to "done" and silently end the session. Demand an
+				// explicit choice instead.
+				if (step === "feedback_check") {
+					return {
+						ok: false,
+						error:
+							`feedback_check requires an explicit choice: pass --metadata '{"choice":"feedback"}' ` +
+							`to start a new planning epoch or --metadata '{"choice":"done"}' to end the session. ` +
+							`Omitting it is NOT treated as done.`,
+					};
+				}
+				continue;
+			}
+			if (typeof value !== "string" || !allowed.includes(value)) {
+				return {
+					ok: false,
+					error: `invalid metadata "${key}": expected one of ${allowed.join("|")}, got ${JSON.stringify(value)}`,
+				};
+			}
 		}
 	}
 

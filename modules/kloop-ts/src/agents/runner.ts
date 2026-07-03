@@ -27,7 +27,9 @@ import {
   parseConflictCheckerConfig,
   selectFromPool,
   reviewTypeLabel,
+  implementerCandidates,
 } from '../types';
+import { UsageGate } from '../usage/gate';
 
 // Path to kloop binary — use process.argv[1] (the running script) instead of
 // import.meta.dir so it survives nix store path changes after rebuilds.
@@ -192,14 +194,19 @@ export class AgentRunner {
   private checkpointerBinary: string;
   private checkpointerHarness: HarnessType;
   private pathsImpl: typeof paths;
+  /** Usage-aware account selection (no-op unless config.requireUsageLeft). Shared with
+   *  LoopRunner so reviewer/synth/checkpoint pools filter against the same snapshot. */
+  readonly gate: UsageGate;
 
   constructor(
     private tmux: TmuxService,
     private state: StateService,
     private config: Config,
     pathsOverride?: typeof paths,
+    gate?: UsageGate,
   ) {
     this.pathsImpl = pathsOverride ?? paths;
+    this.gate = gate ?? UsageGate.fromConfig(config);
     // Flatten reviewer type labels from all phases (display only)
     this.reviewerBinaries = config.reviewPhases.flat().map(e => reviewTypeLabel(e, config.poolProfiles));
     // Parse checkpointer binary and harness
@@ -215,7 +222,7 @@ export class AgentRunner {
    * Called fresh before each implementer run so different iterations may use different binaries.
    */
   private selectImplementer(loopNum: number): string {
-    return selectImplementer(this.config, loopNum);
+    return selectImplementer(this.config, loopNum, this.gate.weight);
   }
 
   /**
@@ -226,7 +233,7 @@ export class AgentRunner {
    */
   private rerollAccount(entry: ReviewTypeEntry | undefined): { binary: string; harness: HarnessType } | null {
     if (entry == null) return null;
-    const parsed = parseReviewerConfig(selectFromPool(entry, this.config.poolProfiles));
+    const parsed = parseReviewerConfig(selectFromPool(entry, this.config.poolProfiles, this.gate.weight));
     return { binary: parsed.binary, harness: parsed.harness };
   }
 
@@ -317,7 +324,11 @@ export class AgentRunner {
   }): Promise<ImplementerResult> {
     const { runId, iteration, dirHash, prompt, timeout, onStart } = params;
 
-    // Select an implementer binary fresh for each run (weighted random)
+    // Usage-aware selection: refresh the snapshot and, if every candidate implementer
+    // account is at its usage limit, block until one resets (no-op unless enabled).
+    await this.gate.awaitCapacity(implementerCandidates(this.config));
+
+    // Select an implementer binary fresh for each run (weighted random, usage-filtered)
     const implementerBinaryName = this.selectImplementer(iteration);
     const parsedImpl = parseImplementerConfig(implementerBinaryName);
 
@@ -463,7 +474,7 @@ export class AgentRunner {
     // type entry so a retry can re-roll a different account from the same pool.
     const allReviewers = this.config.reviewPhases
       .flat()
-      .map(e => ({ ...parseReviewerConfig(selectFromPool(e, this.config.poolProfiles)), pool: e }));
+      .map(e => ({ ...parseReviewerConfig(selectFromPool(e, this.config.poolProfiles, this.gate.weight)), pool: e }));
     return this.runReviewersPhase({
       runId,
       iteration,
@@ -690,6 +701,7 @@ export class AgentRunner {
     specPath: string;
     specContent: string;
     timeout: number;
+    binary?: string;
   }): Promise<CheckpointerResult> {
     const { runId, iteration, dirHash, specPath, timeout } = params;
 
@@ -723,8 +735,9 @@ export class AgentRunner {
     const backoffBaseMs = this.config.checkpointerRetry?.backoffBaseMs ?? 5000;
 
     // Account in use — may change between attempts when a pool re-roll lands elsewhere.
-    let curBinary = this.checkpointerBinary;
-    let curHarness = this.checkpointerHarness;
+    const initial = params.binary ? parseConflictCheckerConfig(params.binary) : undefined;
+    let curBinary = initial?.binary ?? this.checkpointerBinary;
+    let curHarness = initial?.harness ?? this.checkpointerHarness;
     let sessionId = '';
     let tmuxSession = '';
     let logFile = '';

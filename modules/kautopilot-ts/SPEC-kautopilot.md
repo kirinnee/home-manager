@@ -34,12 +34,10 @@ step. Consequences:
 
 1. **Invert control.** The binary yields step descriptors; the harness runs them
    in-session and reports back. No `claude -p` / TTY spawns from the binary.
-2. **Codify everything deterministic — including detection.** State machine, replay,
-   WAL, versioning/epochs, snapshot validation, artifact paths, prompt config + org
-   overrides, kloop init, **and all watching/detection** (pulling PR conversations,
-   CI/ready checks, polling, rebase-detection) stay in the binary at zero token cost.
-   These run _inside_ `next`, which **blocks** while watching — there is no "pending"
-   surfaced to the harness.
+2. **Codify deterministic state.** State machine, replay, WAL, versioning/epochs,
+   snapshot validation, artifact paths, and prompt config + org overrides stay in the
+   binary at zero token cost. Execution and PR polish actions are skill-owned through
+   `schedule`/`record`.
 3. **One flat session; repos are details.** No group/member two-level model. A session
    is a ticket; it may touch N repos; each repo's implement/PR loop is a mechanical
    `sub-agent`/`kloop` job under the same loop. Parallel ordering allowed.
@@ -63,16 +61,15 @@ CONTROLLER  (Claude — thin loop; judgment + interaction; no codified state)
 │         else (agent):             run as an isolated sub-agent
 │         `kautopilot complete <step> --output … [--metadata …]`
 │
-│   ONE flat session (= ticket). Phases run in order; repos fan out inside execution/polish:
+│   ONE flat session (= ticket). Phases run in order; the skill drives plans/PR polish:
 │     plan:       triage → spec → plans(per repo)         (interactive, versioned artifacts)
-│     execution:  per repo, parallel: implement plans via kloop | sub-agent → commit
-│     polish:     per repo, parallel: PR → ready-to-merge  (CI green + threads resolved)
-│     feedback:   (if feedback) full evolution phase → per-repo rules.md → next epoch (same PR)
+│     execution:  schedule/record frontier: run plans, PR polish, merge/release gates
+│     feedback:   optional evolution phase → per-repo rules.md → next epoch (same PR)
 ▼
 BINARY  (codified, zero tokens — one session, one WAL)
    next (BLOCKS on detection/watch) · complete · diff · runStateMachine resume · WAL ·
-   snapshots/versioning/epochs · detection (poll/threads/ready/rebase) · artifact paths ·
-   prompt config + org overrides · kloop init · per-repo registry in session state
+   snapshots/versioning/epochs · artifact paths · prompt config + org overrides ·
+   orchestration/schedule/record state
 ```
 
 ## 4. Core concepts (keep distinct)
@@ -90,7 +87,7 @@ BINARY  (codified, zero tokens — one session, one WAL)
   into per-repo `rules.md`).
 - **Epochs share the branch + PR.** Epoch 1 opens each repo's branch + PR; **epochs 2+
   continue on the same branch + PR** (fresh commit per epoch, updated PR) — never a new
-  PR. Worktrees persist across epochs; cleanup happens only at the final fully-merged.
+  PR. Worktree cleanup is skill-owned after the binary session is done.
 - **Repo is not a concept of its own** — no per-repo session/WAL. The one session tracks
   every repo's worktree/branch/plans/PR/status in `session.json`.
 
@@ -106,8 +103,8 @@ and stops at the first `interactive` or `agent` step, printing a **StepDescripto
 
 ```jsonc
 { "done": false, "sessionId": "…", "ticketId": "PE-1234",
-  "phase": "execution", "step": "resolve", "kind": "interactive",
-  "repo": "infra",                 // set when the step is repo-scoped; null for plan/feedback
+  "phase": "plan", "step": "write_spec", "kind": "interactive",
+  "repo": null,                    // repo-scoped yielded steps were removed
   "version": 2,
   "prompt": "…fully-resolved mechanics + configurable body…",
   "vars": { "ticket":"…", "triage":"…", "spec":"…", "plans":"…", "rules":"…", "worktree":"…" },
@@ -123,24 +120,23 @@ re-calling it resumes the same wait (the WAL is unchanged). `next` is idempotent
 yields the same descriptor until the step's `completionEvent` is logged. **This is the
 resume story.**
 
-**Driving N repos.** Bare `kautopilot next` advances the shared phases (plan, feedback).
-`kautopilot next --repo <repo>` drives one repo's execution/polish loop — so the
-controller runs repos in parallel (bounded by `maxParallelRepos`), each in its own
-sub-agent driver, reporting via `complete … --repo <repo>`. A repo driver that hits an
-`interactive` step **returns it upward to the main chat**, which serializes such prompts
-to the one user; other repos keep progressing on mechanical work meanwhile.
+**Driving the execution DAG.** Bare `kautopilot next` advances shared phases and hands
+approved master-plan execution to `schedule`/`record`. The controller runs bounded ready
+plans from `schedule.ready[]`, opens or continues PRs from `schedule.toPolish[]`, and
+merges only scheduled ready PRs from `schedule.toMerge[]`. Repo-scoped `next` has been
+removed; execution is only `schedule`/`record`.
 
 `kind` ∈:
 
 - **`code`** — deterministic plumbing + all detection. **Never yielded**; the binary
   runs it (and blocks on watch loops) and moves on.
-- **`interactive`** — needs the user (triage, spec, plans, resolve, tty_resolve,
-  feedback). Run **inline**; serialized to the user (§7.2).
-- **`agent`** — needs an LLM, not the user (reviewers, commit, eval, prereview,
-  create_pr, write_fix, amend_plans, and per-repo implement when exec mode = sub-agent).
-  **Always a fresh isolated sub-agent.**
+- **`interactive`** — needs the user (brainstorm, create_ticket, triage, spec, master
+  plan, plans, feedback_check, feedback). Run **inline**; serialized to the user (§7.2).
+- **`agent`** — needs an LLM, not the user (create_ticket, fetch_ticket, reviewers).
+  Execution, commit, PR creation, and review polish are run by the skill through native
+  subagents and recorded with `schedule`/`record`.
 
-### `kautopilot complete <step> [--output <path>] [--metadata <json>] [--repo <repo>]`
+### `kautopilot complete <step> [--output <path>] [--metadata <json>]`
 
 Validates the step is the pending one, validates the contract (output file exists; the
 written file is the source of truth; `--metadata` must match the parsed file and any
@@ -154,13 +150,13 @@ enforces _artifact presence_, not consent.
 - **Run mode** — where the controller loop runs: `current-session` (default) |
   `sub-agent` (a sub-agent **inside this same Claude** drives the loop; not a detached
   Claude — there is no separate-Claude / `claude -p` path).
-- **Execution mode** — how each repo's plan is implemented at the `running` step:
-  `kloop` (default — multi-reviewer consensus loop) | `sub-agent` (implement the plan
-  directly as one isolated sub-agent; lighter, for straightforward plans). Default
-  `kloop`; per-invocation override; per-plan opt-in to `sub-agent` when triage tags the
-  plan straightforward. Recorded in `session.json`.
-- **Parallelism** — `maxParallelRepos` (default small, e.g. 2): at most N repo loops run
-  concurrently; the rest queue. Bounds token consumption. Per-invocation override.
+- **Execution mode** — how the skill-owned plan driver implements a ready plan:
+  `kloop` (default — multi-reviewer consensus loop) | direct isolated subagent
+  (lighter, for straightforward plans). The binary does not yield a `running` step; it
+  records `started`/`implemented`/`failed`.
+- **Parallelism** — `maxParallelRepos` (default small, e.g. 2): at most N ready-plan
+  drivers from `schedule.ready[]` run concurrently; the rest queue. Plans in different PRs
+  can run at the same time when their gates are satisfied. Per-invocation override.
 
 ## 7. Phases (one flat machine)
 
@@ -208,48 +204,38 @@ Each of triage/spec/plans is an interactive debate producing **multiple versions
 (§8). Escalation `amend_spec` (plans found the spec wrong) bumps the epoch and re-runs
 spec.
 
-### 7.2 execution (per repo, parallel; interaction queued serially)
+### 7.2 execution (DAG plans, PR waves; interaction queued serially)
 
-When plans are approved, the controller **seeds each repo** (a `code` step): create a
-fresh **worktrunk worktree** for that repo (via `wt` — the same mechanism `/rc-session`
-uses; one worktree per repo/"sub"), and commit `triage.md` + that repo's **own plans**
-(+ the **whole master spec** when the org's `commitSpec` is true) as the **first commit**
-on the repo branch. Then, for each repo (dependency order; independents in parallel),
-drive its implement loop:
+When plans are approved, bare `next` hands execution to the controller as a DAG frontier.
+The controller calls `schedule`, runs pending plans from `ready[]`, records each lifecycle
+transition, opens/continues PRs from `toPolish[]`, and merges only scheduled PRs from
+`toMerge[]` under `mergeMode`.
 
-`clear_loop → setup_run → running → (resolve?) → (amend_plans?) → commit → next_plan`
+For each ready plan, the controller creates or locates a **worktrunk worktree** for that repo
+(via `wt`, the same mechanism `/rc-session` uses), then spawns a subagent to run kloop for
+that one plan. Ready plans are dispatched in parallel up to `maxParallelRepos`; plans in
+different PRs can run concurrently when their gates are satisfied.
 
-- `running` is `kloop` (default) or a direct `sub-agent` (exec mode). Mechanical.
-- These per-repo loops are dispatched as **parallel sub-agent/kloop jobs**, bounded by
-  `maxParallelRepos`. They progress independently on `code`/`agent` work. The moment one
-  needs an **interactive** step
-  (`resolve`, `tty_resolve`) it is **queued**; the **main chat** drains the queue one at
-  a time with the user, while other repos keep going. No two interactive prompts compete.
-- **Who commits — only the dedicated `commit` sub-agent.** The **main controller agent
-  never commits**, and **kloop never commits** (it implements/reviews only). After
-  `running`/`run_fix` succeeds, the isolated
-  **`commit` agent** does the commit (convention discovery + hook-repair). The binary's
-  deterministic **seed-commit** (`code`) is the only non-agent commit. Mechanical
-  push/rebase-detection is `code`. No LLM other than the `commit` sub-agent ever commits.
+- The controller records `started`, `implemented`, or `failed` with `kautopilot record`.
+- Any genuine human decision is queued back to the main chat; no two interactive prompts
+  compete.
+- **Who commits — only the dedicated commit subagent.** The **main controller agent never
+  commits**, and **kloop never commits** (it implements/reviews only). After kloop succeeds,
+  the isolated commit subagent commits, then the controller records `implemented`.
 
-### 7.3 polish (per repo, parallel → ready-to-merge)
+### 7.3 polish (PR-scoped → ready-to-merge)
 
-Per repo: `commit_pending → (prereview?) → push → create_pr → poll ⇄ (eval → act →
-tty_resolve?/write_fix → run_fix → verify_fixes) → …`
+In the DAG model, polish is **per PR**, not per repo or per plan. A PR enters polish once
+every plan assigned to that PrPlan is implemented. `schedule` reports that frontier as
+`toPolish[]`: `pending` means open the PR and record `pr-opened`; `open` means continue the
+CodeRabbit/CI/review-thread loop. When CI is green and all actionable review threads are
+resolved, record `pr-ready`. The PR is never listed in `toMerge` before that point.
 
-- All detection is codified and **blocks inside `next`**: `poll` pulls CI status +
-  conversation threads and decides readiness; `eval` (agent) judges each thread for
-  false positives; `act` (code) applies replies/resolves; `write_fix`/`run_fix` drive a
-  kloop fix cycle; `tty_resolve` (interactive, queued) handles conflicts/ambiguity.
-- **`verify_fixes` (code) — reliability gate before pushing.** After fixes are applied,
-  the next `next` **re-pulls the thread list / CI and re-checks that the applied fixes
-  actually landed** — at least the **non-code** CodeRabbit fixes (replies posted, threads
-  resolved) — _before_ committing/pushing. Reported-but-unverified actions **loop back**
-  (re-`eval`/`act`) instead of pushing on faith. General principle: **codified detection
-  re-verifies every harness-reported action — the binary never trusts "I applied it."**
-- **Ready-to-merge** = CI green **and all conversations resolved**, **excluding**
-  human-review approval. **PRs are NEVER merged** — `gh pr merge` is forbidden for every
-  agent, kloop, and the binary. The user merges, always.
+The binary no longer owns a repo-scoped polish step machine. The skill/controller opens
+or continues each PR from `toPolish[]`, handles CI and CodeRabbit/human review threads,
+and records `pr-ready` only after CI is green and all actionable conversations are
+resolved. **Ready-to-merge** excludes human-review approval. Merge/release happens only
+after `pr-ready`, and only when `schedule.toMerge[]` asks for that PR/gate.
 
 ### 7.4 Review fan-out (spec & plans)
 
@@ -259,29 +245,27 @@ sub-agents, runs synthesize into one numbered problem list, feeds it back into t
 interactive writer. **Gate: every reviewer must approve** (harness-enforced — withhold
 `complete` on the writer) unless the user explicitly overrides.
 
-### 7.5 Epoch end (ready-to-merge gate) + cross-repo gate enforcement
+### 7.5 Epoch end + cross-repo gate enforcement
 
-- The epoch **ends when every PR — for every repo the plans touched — is ready to
-  merge.** Ready-to-merge (CI green + threads resolved, human approval excluded) is always
-  the floor.
+- The epoch **can advance to feedback only when no ready/running/polish work and no
+  scheduled merge/release remains.** Ready-to-merge (CI green + threads resolved, human
+  approval excluded) is the floor before any PR can enter `toMerge`.
 - **Cross-repo merge/release gating (master plan).** When the master plan's DAG has
-  `merged`/`released` edges, a downstream repo is **not driven** until its upstream PRs reach
-  the required gate. Before `next --repo R`, the binary **reconciles** the merge/release state
-  of upstream PRs (a `code` step against `gh`) and returns a `blocked on gate dependencies`
-  done-result while any of R's plans still wait — so R's worktree is always cut off a base that
-  already contains the upstream work. Progress (`pr_open → merged → released`) is tracked in
-  `orchestration.yaml`.
+  `merged`/`released` edges, a downstream plan is **not driven** until its upstream PRs
+  reach the required gate. The skill/controller observes merge/release state, records each
+  transition, and only then the scheduler exposes downstream work. Plan progress
+  (`pr_open → pr_ready → merged → released`) and PR lifecycle progress
+  (`open → ready → merged → released`) are tracked in `orchestration.yaml`.
 - **Merge policy `mergeMode` (per session, §13 #22).** `manual` | `auto`, set at `start`
-  (`--merge`) and confirmable in the master plan. Either way the binary reaches ready-to-merge;
-  then `auto` **merges the PR itself** (to clear downstream gates) while `manual` leaves the
-  merge to the user (the skill asks). A `released` gate further waits for the upstream repo's
-  semantic releaser to publish its newest release with all release CI/CD green.
+  (`--merge`) and confirmable in the master plan. Either way the PR reaches ready-to-merge
+  first; then `auto` lets the controller merge scheduled ready PRs while `manual` leaves the
+  merge to the user (the skill asks/waits). A `released` gate waits for the upstream repo's
+  semantic releaser to publish its newest release with all release CI/CD green when a releaser
+  is configured; without a releaser, the merged PR is the release boundary.
 - **feedback_check** (interactive gate): ask the user — feedback, or done?
   - **No feedback** → ask whether the PRs are **fully merged**. If the user confirms
-    **"fully merged,"** run **cleanup** (a `code` step): remove this session's worktrunk
-    worktrees (the binary never merges — it only tears down worktrees the user has already
-    merged), then `completed`. If not yet merged, go `completed` but **keep the worktrees**
-    (cleanup deferred until the user merges).
+  **"done,"** the binary session ends. Ticket close and worktree cleanup are skill-owned
+    follow-up actions, not `next`-yielded steps.
   - **Has feedback** → enter the **feedback / evolution phase** (§7.6).
 
 ### 7.6 feedback / evolution (a full phase — only when there is feedback)
@@ -300,8 +284,8 @@ A first-class phase that runs the evolution loop, then rolls into the next epoch
 3. **Next epoch.** Bump to `v{N+1}` and reset to **plan**, seeded by the prior spec +
    feedback. **From epoch 2 onward, each repo continues on the SAME branch + PR** — never a
    new PR/branch. The new epoch's seed-commit is a fresh commit on the existing branch, and
-   polish's `create_pr` **updates the existing PR**. Worktrees persist across epochs
-   (cleanup only at the final fully-merged).
+   the existing PR is updated. Worktree cleanup is skill-owned after the binary session is
+   done.
 
 ## 8. Versioned artifacts & diffs (reviewability, decoupled from git)
 
@@ -325,7 +309,7 @@ machinery, extended to the session store.
 ## 9. What gets committed, where
 
 - Working/versioned artifacts + WAL + status live **only** in `~/.kautopilot/<sessionId>/`.
-- On repo **seed**, each involved repo's worktree gets, as its first branch commit:
+- When the skill creates a repo branch/worktree, each involved repo should get:
   - `spec/<ticketId>/ticket.md` — the ticket (epoch-agnostic).
   - `spec/<ticketId>/<epoch>/triage.md` — **one copy per repo**.
   - `spec/<ticketId>/<epoch>/task-spec.md` — the **whole** master spec — **only when the
@@ -389,8 +373,8 @@ worktree (§9).
 ## 13. Binary changes (resolved decisions — these govern)
 
 1. **One flat session machine.** Remove the group/member two-level design entirely.
-   Repos are entries in `session.json.repos[]`; execution/polish steps are repo-scoped
-   (descriptor carries `repo`). No `group` CLI namespace, no per-member session/WAL.
+   Repos are entries in `session.json.repos[]`, but execution/polish are no longer
+   binary-yielded repo steps. No `group` CLI namespace, no per-member session/WAL.
 2. **Invert via split handlers** (`prepare`/`finalize`); `complete` runs `finalize`.
    Delete `spawnTTY*` / `spawnPrint*` / `src/llm/spawn.ts` and the zellij wrapper. "Zero
    `claude -p`" is literal. `start` becomes a thin convenience that invokes the default
@@ -416,69 +400,66 @@ worktree (§9).
 9. **Commit to each repo's PR**: triage + that repo's **own** plans as the first branch
    commit; the **whole** master spec too **only when the org's `commitSpec` is true**
    (atomicloud commits it, liftoff does not). Replaces the blanket `removeSpecOnPush`.
-   `commit`/`commit_pending` stay **agent** steps; the rest of push/poll/act/rebase is `code`.
-10. **Epoch ends when every PR (for every repo the plans touched) is ready to merge** —
-    CI green + all threads resolved, **excluding human review**. No merge-gating between
-    repos. Never merge.
-11. **Parallel repos, serialized interaction.** Per-repo loops run in parallel as
+   Commits are skill-owned through isolated commit subagents.
+10. **Epoch feedback waits for a clear execution frontier** — no ready/running plan work,
+    no PR polish, and no scheduled merges. `merged` and `released` gates are explicit DAG
+    edges; merges happen only for PRs returned by `schedule.toMerge`, under the session's
+    `mergeMode`.
+11. **Parallel ready plans, serialized interaction.** Ready-plan drivers run in parallel as
     sub-agent/kloop jobs, **bounded by `maxParallelRepos`** (default small) to cap token
-    use; a repo driver returns interactive steps upward to the main chat, which **queues
-    and drains them one at a time** with the user.
+    use; any interactive resolution returns upward to the main chat, which **queues and
+    drains prompts one at a time** with the user.
 12. **feedback → per-repo `rules.md`**: distilled, generalized, scope-reasoned,
     user-confirmed; linked from `CLAUDE.md`/`AGENTS.md`; injected into that repo's future
     prompts (`vars.rules`).
 13. **Drop the ticket-delivery path** (`deliveryKind`, `ticket_draft/review/publish`).
     Every task is build → PR(s). Drop per-step run-artifact/transcript logging — git +
     the PR are the record.
-14. **What stays as-is**: `runStateMachine` resume/replay, WAL reducer, versioning/epochs,
-    `amend_spec`/`revisit_spec`, snapshot validation, artifact paths, `buildPromptVars` +
-    per-org prompt overrides, kloop init/config. Only spawn call sites and the
-    group/member + init machinery change.
+14. **What stays as-is**: WAL reducer, versioning/epochs, snapshot validation, artifact
+    paths, `buildPromptVars` + per-org prompt overrides. Kloop init/run is skill-owned.
 15. **Brainstorm before ticket (ad-hoc only).** The no-ticket flow inserts an interactive
     `brainstorm` step (superpowers methodology: one question at a time, multiple-choice,
     explore the problem before solutions, 2–3 approaches with trade-offs) → `brainstorm.md`
     seeds `create_ticket`. Versioned. Skipped when a ticket is given.
-16. **Only the `commit` sub-agent commits.** The main controller agent never commits, and
-    **kloop never commits** (it implements/reviews only). Commits come from the isolated
-    `commit`/`commit_pending` agent or the binary's deterministic seed-commit — nothing else.
-17. **`verify_fixes` reliability gate.** Before pushing fixes, a `code` step re-pulls
-    thread/CI state to confirm the (at least non-code) fixes landed; unverified actions
-    loop back. Codified detection re-verifies every harness-reported action.
+16. **Only the commit subagent commits.** The main controller agent never commits, and
+    **kloop never commits** (it implements/reviews only). Commits come from isolated
+    skill-owned commit subagents.
+17. **PR polish is skill-owned.** The skill handles CI, CodeRabbit, human review threads,
+    and fix loops inside the PR construct, then records `pr-ready` only after the PR is
+    genuinely ready to merge.
 18. **Merge policy is per-session (`mergeMode`, see #22).** Ready-to-merge (CI green +
-    threads resolved) is always reached first, and no agent/kloop ever merges. In `manual`
-    (default) the binary does NOT merge either — the user merges. ONLY in `auto` does the
-    binary itself run `gh pr merge` (squash), and only on a ready PR, to clear downstream gates.
+    threads resolved) is always reached first, and kloop never merges. In `manual`
+    (default) the user merges. In `auto`, the controller may merge only ready PRs returned by
+    `schedule.toMerge`, to clear downstream gates.
 19. **Worktrunk worktrees + cleanup.** Each repo gets its own `wt` (worktrunk) worktree
-    (the `/rc-session` mechanism). When the user reports **fully merged** with no feedback,
-    a `cleanup` code step removes the worktrees; otherwise the worktrees are kept.
+    (the `/rc-session` mechanism). Cleanup is skill-owned after the binary session is done.
 20. **Feedback / evolution is a full phase** — entered only when the user has feedback:
     feedback artifact → generalized per-repo `rules.md` → bump epoch → next epoch. With no
-    feedback, the session completes (cleanup if fully merged).
+    feedback, the binary session completes.
 21. **Epochs 2+ reuse the same branch + PR** per repo (no new PR/branch); fresh seed-commit
-    per epoch on the existing branch, `create_pr` updates the existing PR; worktrees persist
-    until the final fully-merged cleanup.
+    per epoch on the existing branch; worktrees persist until skill-owned cleanup.
 22. **Master plan + multi-repo/multi-PR orchestration.** A `master_plan` interactive step
     sits between `write_spec` and `write_plans`: it is approved FIRST and lays out the
     **PR/branch layout** (a repo may open several PRs on several branches), the **dependency
     DAG with gate levels** (`completed | merged | released`, edges may span repos), and a
     mermaid graph. It is frozen into `orchestration.yaml` (a resumable companion record that
     also tracks each plan's exec status + kloop run; the WAL stays the cursor's source of
-    truth). The binary **reconciles + enforces** gates between drives (a downstream repo is
-    blocked until its upstream PRs reach the required gate, so its worktree is cut off an
-    updated base), and `mergeMode ∈ manual | auto` (set via `start --merge`) decides whether
-    the binary merges ready PRs itself. `released` gates wait for the upstream repo's semantic
-    releaser to publish + all release CI/CD to finish.
+    truth). The scheduler enforces gates from recorded state (a downstream repo is blocked
+    until its upstream PRs reach the required gate, so its worktree is cut off an updated
+    base), and `mergeMode ∈ manual | auto` (set via `start --merge`) decides whether the
+    controller may merge scheduled ready PRs itself. `released` gates wait for the upstream
+    repo's semantic releaser to publish + all release CI/CD to finish when a releaser exists;
+    otherwise the merged PR is the release boundary.
 23. **Execution is agent-driven via a DAG scheduler (`schedule`/`record`); the binary is a
     record-keeper, not a kloop driver.** After the master plan is approved, the agent runs
     kloop, resolves conflicts, provisions worktrees, and opens + merges PRs, **recording**
-    each transition (`started`/`implemented`/`pr-opened`/`merged`/`released`/`failed`) via
+    each transition (`started`/`implemented`/`pr-opened`/`pr-ready`/`merged`/`released`/`failed`) via
     `kautopilot record`. `kautopilot schedule` reads `orchestration.yaml` and returns the
     runnable frontier — which plans can run now (deps satisfied), which PRs must merge to
     unblock a downstream, what's blocked/in-flight, and `allReady`/`done`. This is fully
     resumable (the frontier is recomputed from the ledger) and is how **multi-PR-per-repo is
     actually executed** (the agent opens exactly the master plan's PrPlans, recorded by
-    `pr-<n>` id). The legacy per-repo `next --repo` step machine remains for sessions with no
-    master plan. (Replaces the binary-driven seed→running→commit→poll execution loop.)
+    `pr-<n>` id). This replaces the binary-driven seed→running→commit→poll execution loop.
 
 ## 14. Skill (thin controller)
 
@@ -520,8 +501,8 @@ Split each handler into `prepare(ctx) → StepDescriptor | null` (build prompt, 
 spawn path (`src/llm/spawn.ts`, `spawnTTY*`/`spawnPrint*`, zellij wrapper, self-driving
 `start`) and the **init** machine (`src/phases/init/*`, `init-{db,status,types,lock}.ts`,
 script-gen in `scripts.ts`, `agents.init`, `src/cli/init.ts`). Drive one repo through
-`resolve_org → fetch_ticket → triage → spec → plans → seed(worktrunk) → execution(kloop)
-→ polish → ready-to-merge`.
+`resolve_org → fetch_ticket → triage → spec → master_plan → plans`, then hand execution to
+`schedule`/`record` until feedback.
 
 **Phase 2 — artifacts, diffs, org/ticket.** `revisions/` snapshots for
 triage/spec/plans/feedback + `kautopilot diff`; org config `liftoff|atomicloud` with
@@ -529,17 +510,17 @@ triage/spec/plans/feedback + `kautopilot diff`; org config `liftoff|atomicloud` 
 (`jira|clickup|none`); drop `deliveryKind`/ticket-delivery and `removeSpecOnPush`.
 
 **Phase 3 — quality + evolution.** Reviewer fan-out (all-approve) + synthesize;
-`brainstorm` step (no-ticket, superpowers methodology); `verify_fixes` reliability gate;
-feedback/evolution full phase → generalized per-repo `rules.md`; commits only via the
-`commit` sub-agent / seed-commit; never merge.
+`brainstorm` step (no-ticket, superpowers methodology); feedback/evolution full phase →
+generalized per-repo `rules.md`; commits only via commit subagents; merge only via
+`mergeMode` and `schedule.toMerge`.
 
-**Phase 4 — multi-repo.** `next --repo`, `session.json.repos[]`, `maxParallelRepos`,
-worktrunk worktrees, queued/serialized interaction, epochs 2+ reuse the same branch + PR,
-`cleanup` on fully-merged.
+**Phase 4 — multi-repo.** `schedule`/`record` DAG execution, `session.json.repos[]`,
+`maxParallelRepos`, worktrunk worktrees, queued/serialized interaction, epochs 2+ reuse
+the same branch + PR, skill-owned cleanup after completion.
 
 **Tests.** Remove init/spawn-path tests; add coverage for `next`/`complete` describe-mode,
 resume-after-kill idempotency, `create_ticket` dedupe, blocking-`next` detection,
-versioned-artifact diff, and multi-repo `next --repo` + parallelism. Net suite green.
+versioned-artifact diff, and multi-repo DAG scheduling + parallelism. Net suite green.
 
 **Completion bar = §13 (all 21 resolved decisions) + §15 (every DoD bullet).** Done only
 when all are implemented and the verify gate is green.

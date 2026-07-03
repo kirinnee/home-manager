@@ -7,9 +7,10 @@ import { resolveSession } from "./resolve-session";
 // ============================================================================
 // `kautopilot schedule [--json]` — the DAG scheduler. Reads orchestration.yaml
 // and reports the runnable frontier so the AGENT can drive the work: which plans
-// can run NOW, which PRs must merge to unblock a downstream, what's blocked/in
-// flight, and whether the epoch is ready for feedback or fully done. kautopilot
-// does NOT drive kloop — it only records (via `record`) and schedules (here).
+// can run NOW, which PRs need polish, which PRs must merge to unblock a downstream,
+// what's blocked/in flight, and whether the epoch is ready for feedback or fully
+// done. kautopilot does NOT drive kloop — it only records (via `record`) and
+// schedules (here).
 // ============================================================================
 
 export function createScheduleCommand(): Command {
@@ -58,7 +59,7 @@ function printHuman(s: ReturnType<typeof computeSchedule>): void {
 		return;
 	}
 	logInfo(
-		`merge mode: ${s.mergeMode}${s.allReady ? "  ·  every PR is ready-to-merge → feedback" : ""}`,
+		`merge mode: ${s.mergeMode}${s.allReady ? "  ·  execution DAG clear → feedback" : ""}`,
 	);
 	if (s.ready.length) {
 		console.log("\nREADY to run now:");
@@ -72,11 +73,20 @@ function printHuman(s: ReturnType<typeof computeSchedule>): void {
 				`  • ${p.repo}/${p.plan}${p.kloopRunId ? ` (kloop ${p.kloopRunId})` : ""}`,
 			);
 	}
+	if (s.toPolish.length) {
+		console.log("\nPRs to POLISH:");
+		for (const p of s.toPolish)
+			console.log(
+				`  • ${p.pr} (${p.repo} ${p.branch}${p.prNumber != null ? ` #${p.prNumber}` : ""})` +
+					(p.status === "pending" ? " — open PR" : " — continue polish"),
+			);
+	}
 	if (s.toMerge.length) {
 		console.log("\nPRs to MERGE:");
 		for (const m of s.toMerge)
 			console.log(
 				`  • ${m.pr} (${m.repo} ${m.branch}${m.prNumber != null ? ` #${m.prNumber}` : ""})` +
+					` — clear ${m.gate} gate` +
 					(m.unblocks.length
 						? ` → unblocks ${m.unblocks.join(", ")}`
 						: " (terminal)"),
@@ -92,6 +102,7 @@ function printHuman(s: ReturnType<typeof computeSchedule>): void {
 	if (
 		!s.ready.length &&
 		!s.running.length &&
+		!s.toPolish.length &&
 		!s.toMerge.length &&
 		!s.blocked.length
 	) {

@@ -96,8 +96,8 @@ export interface SessionStatus {
 	// Per-phase summary
 	phases: {
 		plan: PhaseSummary;
-		implementation: ImplPhaseSummary;
-		polish: PhaseSummary;
+		execution: ImplPhaseSummary;
+		feedback: PhaseSummary;
 	};
 }
 
@@ -105,9 +105,7 @@ export interface SessionStatus {
 // Checkpoint Definitions
 // ============================================================================
 
-// Phase keys here are the reducer's (phase1→plan, phase2→implementation,
-// phase3→polish); feedback steps fold into the plan phase (driver maps
-// feedback→phase1). Step names are the flat machine's actual step names.
+// Phase keys here are the public flat-machine phases.
 const CHECKPOINTS: Record<string, Set<string>> = {
 	plan: new Set([
 		"fetch_ticket",
@@ -116,22 +114,8 @@ const CHECKPOINTS: Record<string, Set<string>> = {
 		"write_plans",
 		"finalize_plans",
 	]),
-	implementation: new Set([
-		"seed",
-		"clear_loop",
-		"running",
-		"commit",
-		"next_plan",
-	]),
-	polish: new Set([
-		"commit_pending",
-		"prereview",
-		"push",
-		"create_pr",
-		"poll",
-		"feedback_check",
-		"cleanup",
-	]),
+	execution: new Set(["await_repos"]),
+	feedback: new Set(["feedback_check"]),
 };
 
 /** Ordered step names per phase for display purposes (flat machine step names). */
@@ -145,39 +129,9 @@ export const PHASE_STEPS: Record<string, string[]> = {
 		"write_spec",
 		"write_plans",
 		"finalize_plans",
-		// Feedback phase folds into phase1 (plan) per the driver's marker mapping.
-		"feedback_check",
-		"feedback",
-		"close_ticket",
-		"cleanup",
 	],
-	implementation: [
-		"seed",
-		"clear_loop",
-		"setup_run",
-		"running",
-		"running_subagent",
-		"resolve",
-		"amend_plans",
-		"commit",
-		"next_plan",
-		"failed",
-	],
-	polish: [
-		"commit_pending",
-		"prereview",
-		"push",
-		"create_pr",
-		"poll",
-		"ensure_branch",
-		"eval",
-		"act",
-		"tty_resolve",
-		"write_fix",
-		"run_fix",
-		"verify_fixes",
-		"repo_ready",
-	],
+	execution: ["await_repos"],
+	feedback: ["feedback_check", "feedback"],
 };
 
 function isCheckpoint(phase: string, state: string): boolean {
@@ -206,8 +160,8 @@ function isLifecycleEvent(event: string): boolean {
 
 function phaseFromEvent(event: string): string {
 	if (event.startsWith("phase1")) return "plan";
-	if (event.startsWith("phase2")) return "implementation";
-	if (event.startsWith("phase3")) return "polish";
+	if (event.startsWith("phase2")) return "execution";
+	if (event.startsWith("phase3")) return "feedback";
 	return "none";
 }
 
@@ -235,12 +189,12 @@ function initialStatus(): SessionStatus {
 		polishState: null,
 		phases: {
 			plan: { status: "pending", currentStep: null },
-			implementation: {
+			execution: {
 				status: "pending",
 				currentStep: null,
 				planProgress: null,
 			},
-			polish: { status: "pending", currentStep: null },
+			feedback: { status: "pending", currentStep: null },
 		},
 	};
 }
@@ -301,10 +255,10 @@ function applyEvent(
 	// Phase complete — clear ephemeral state
 	if (/^phase\d:completed$/.test(event)) {
 		const completedPhase = phaseFromEvent(event);
-		if (completedPhase === "implementation") {
+		if (completedPhase === "execution") {
 			status.activePlan = null;
 		}
-		if (completedPhase === "polish") {
+		if (completedPhase === "feedback") {
 			status.polishState = null;
 		}
 	}
@@ -516,13 +470,22 @@ export function ensureStatus(sessionId: string): SessionStatus {
 }
 
 /**
- * Whether a session is still in progress (vs finished). The DB `state` column is a
- * dead signal in the thin-controller model — it's "running" from creation and never
- * updated. The real signal is the materialized status: a session is done once its
- * polish phase completes. Used to list/auto-resolve the live session(s) for a folder.
+ * Whether the flat binary session reached its terminal cursor. The DB `state`
+ * column is a dead signal in the thin-controller model — it's "running" from
+ * creation and never updated.
  */
+export function isSessionTerminal(sessionId: string): boolean {
+	for (const entry of [...readLog(sessionId)].reverse()) {
+		if (entry.event === "feedback_check:completed") {
+			return entry.metadata?.to === "done";
+		}
+	}
+	return false;
+}
+
+/** Whether a session is still in progress (vs finished). */
 export function isSessionActive(sessionId: string): boolean {
-	return ensureStatus(sessionId).phases.polish.status !== "completed";
+	return !isSessionTerminal(sessionId);
 }
 
 // ============================================================================
@@ -534,13 +497,13 @@ export function isSessionActive(sessionId: string): boolean {
  */
 function computeDerivedFields(status: SessionStatus): void {
 	// phases summary
-	const phaseOrder: Array<"plan" | "implementation" | "polish"> = [
+	const phaseOrder: Array<"plan" | "execution" | "feedback"> = [
 		"plan",
-		"implementation",
-		"polish",
+		"execution",
+		"feedback",
 	];
 	const currentPhaseIdx = phaseOrder.indexOf(
-		status.phase as "plan" | "implementation" | "polish",
+		status.phase as "plan" | "execution" | "feedback",
 	);
 
 	for (const p of phaseOrder) {
@@ -552,14 +515,14 @@ function computeDerivedFields(status: SessionStatus): void {
 				status.phase === p)
 		) {
 			// Completed phase
-			if (p === "implementation") {
-				status.phases.implementation = {
+			if (p === "execution") {
+				status.phases.execution = {
 					status: "completed",
 					currentStep: null,
 					planProgress: null,
 				};
-			} else if (p === "polish") {
-				status.phases.polish = {
+			} else if (p === "feedback") {
+				status.phases.feedback = {
 					status: "completed",
 					currentStep: null,
 				};
@@ -569,19 +532,19 @@ function computeDerivedFields(status: SessionStatus): void {
 		} else if (p === status.phase) {
 			// Active phase
 			const step = status.stateStatus === "running" ? status.state : null;
-			if (p === "implementation") {
+			if (p === "execution") {
 				const planProgress = status.activePlan
 					? `${status.activePlan.planIndex + 1}/${status.activePlan.maxPlans}`
 					: status.context.maxPlans != null
 						? `${(status.context.planIndex ?? 0) + 1}/${status.context.maxPlans}`
 						: null;
-				status.phases.implementation = {
+				status.phases.execution = {
 					status: "active",
 					currentStep: step,
 					planProgress,
 				};
-			} else if (p === "polish") {
-				status.phases.polish = {
+			} else if (p === "feedback") {
+				status.phases.feedback = {
 					status: "active",
 					currentStep: step,
 				};
@@ -590,14 +553,14 @@ function computeDerivedFields(status: SessionStatus): void {
 			}
 		} else {
 			// Pending phase
-			if (p === "implementation") {
-				status.phases.implementation = {
+			if (p === "execution") {
+				status.phases.execution = {
 					status: "pending",
 					currentStep: null,
 					planProgress: null,
 				};
-			} else if (p === "polish") {
-				status.phases.polish = {
+			} else if (p === "feedback") {
+				status.phases.feedback = {
 					status: "pending",
 					currentStep: null,
 				};

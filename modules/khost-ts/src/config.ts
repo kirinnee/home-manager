@@ -32,7 +32,7 @@ export function resolveMachineId(configMachine: string | undefined, host: string
 const routeSchema = z.object({
   hostname: z.string().min(1),
   service: z.string().min(1),
-  access: z.boolean().default(true),
+  access: z.union([z.boolean(), z.string().min(1)]).default(true),
 });
 export type Route = z.infer<typeof routeSchema>;
 
@@ -43,7 +43,9 @@ const configSchema = z.object({
     .object({
       port: z.number().default(2222),
       // mesh IP to also bind sshd to; null/"" = loopback only.
-      mesh_listen: z.string().nullable().default('172.16.0.2'),
+      // 'auto' = detect the live WARP virtual IP (survives re-enrollment); a literal
+      // IP pins it; '' / null binds loopback only. See mesh.ts:resolveMeshListen.
+      mesh_listen: z.string().nullable().default('auto'),
     })
     .default({}),
   tunnel: z.object({ protocol: z.string().default('http2') }).default({}),
@@ -56,10 +58,7 @@ const configSchema = z.object({
     .default({}),
   access: z
     .object({
-      emails: z.array(z.string()).default([]),
-      policy_name: z.string().default('only-me'),
-      require_warp: z.boolean().default(false),
-      warp_posture_uid: z.string().default(''),
+      policy: z.string().default('primordial-ernestOnly'),
     })
     .default({}),
   routes: z.array(routeSchema).default([]),

@@ -11,12 +11,13 @@ import {
   cfAccountId,
   cfApiToken,
   configFile,
+  accessPolicyName,
   machineId,
   osKind,
   tunnelName,
 } from './deps';
 import { run } from './exec';
-import { cfConfigured, verifyAccount, verifyToken } from './cloudflare';
+import { cfConfigured, findReusablePolicyByName, verifyAccount, verifyToken } from './cloudflare';
 
 interface Check {
   label: string;
@@ -54,6 +55,14 @@ async function cloudflareChecks(): Promise<Check[]> {
   if (tok.ok) {
     const acct = await verifyAccount();
     checks.push({ label: 'cloudflare account', ok: acct.ok, required: true, detail: acct.detail });
+    if (acct.ok) {
+      try {
+        const id = await findReusablePolicyByName(accessPolicyName);
+        checks.push({ label: 'access policy', ok: true, required: true, detail: `${accessPolicyName} (${id})` });
+      } catch (e) {
+        checks.push({ label: 'access policy', ok: false, required: true, detail: (e as Error).message });
+      }
+    }
   }
   return checks;
 }

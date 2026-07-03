@@ -1,5 +1,5 @@
 // Thin wrappers around the zellij CLI: list/inspect sessions, start a new
-// session running a command, and attach to an existing one.
+// session running a command, start one detached, and attach to an existing one.
 import { run, runInteractive } from './exec';
 
 /**
@@ -20,32 +20,59 @@ export async function sessionExists(name: string): Promise<boolean> {
   return (await listSessions()).includes(name);
 }
 
-/**
- * Start a fresh zellij session named `name`, running `cmd` (already an absolute
- * path) with `args` in `cwd`, and attach this terminal to it. The command is
- * written into a generated KDL layout — printing the args as quoted strings so
- * spaces/apostrophes (e.g. a ticket-title display name) can't break the layout.
- * All args go on a SINGLE `args` node: zellij honors only one `args` node per
- * pane, so splitting them across lines silently drops every arg but the first
- * (which left `-n` with no value, swallowing the next flag as the name).
- * Blocks until the session is detached or exits; returns zellij's exit code.
- */
-export async function startSession(name: string, cwd: string, cmd: string, args: string[]): Promise<number> {
+export function sessionLayout(cwd: string, cmd: string, args: string[]): string {
   const argLine = args.length ? `        args ${args.map(quoteKdl).join(' ')}\n` : '';
-  const layout = `layout {
+  return `layout {
     pane command=${quoteKdl(cmd)} cwd=${quoteKdl(cwd)} {
 ${argLine}        close_on_exit true
     }
 }
 `;
-  const file = `${process.env.TMPDIR ?? '/tmp'}/klaude-${name}-${process.pid}.kdl`;
-  await Bun.write(file, layout);
+}
+
+/**
+ * Start a fresh zellij session named `name`, running `cmd` (already an absolute
+ * path) with `args` in `cwd`, and attach this terminal to it. The command is
+ * written into a generated KDL layout. All args go on a SINGLE `args` node:
+ * zellij honors only one `args` node per pane.
+ */
+export async function startSession(name: string, cwd: string, cmd: string, args: string[]): Promise<number> {
+  const file = await writeLayout(name, cwd, cmd, args);
   try {
     return await runInteractive(['zellij', '--session', name, '--new-session-with-layout', file]);
   } finally {
-    await Bun.file(file)
-      .unlink()
-      .catch(() => {});
+    await unlink(file);
+  }
+}
+
+/**
+ * Start a zellij session in the background. zellij needs a PTY for startup, so
+ * use a short-lived detached tmux session as the bootstrap client, wait for the
+ * zellij session to appear, then remove the bootstrap client.
+ */
+export async function startDetachedSession(name: string, cwd: string, cmd: string, args: string[]): Promise<void> {
+  const file = await writeLayout(name, cwd, cmd, args);
+  const boot = `klaude-boot-${name}`;
+  try {
+    await run(['tmux', 'kill-session', '-t', boot]);
+    const start = await run([
+      'tmux',
+      'new-session',
+      '-d',
+      '-s',
+      boot,
+      `zellij --session ${quoteShell(name)} --new-session-with-layout ${quoteShell(file)}`,
+    ]);
+    if (start.code !== 0) throw new Error(start.stderr.trim() || `tmux failed to start bootstrap session "${boot}"`);
+
+    for (let i = 0; i < 30; i++) {
+      if (await sessionExists(name)) return;
+      await Bun.sleep(500);
+    }
+    throw new Error(`zellij session "${name}" did not come up in time`);
+  } finally {
+    await run(['tmux', 'kill-session', '-t', boot]);
+    await unlink(file);
   }
 }
 
@@ -57,4 +84,20 @@ export async function attachSession(name: string): Promise<number> {
 /** Quote a value as a KDL string literal (the args/command can contain spaces). */
 function quoteKdl(s: string): string {
   return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+function quoteShell(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+async function writeLayout(name: string, cwd: string, cmd: string, args: string[]): Promise<string> {
+  const file = `${process.env.TMPDIR ?? '/tmp'}/klaude-${name}-${process.pid}.kdl`;
+  await Bun.write(file, sessionLayout(cwd, cmd, args));
+  return file;
+}
+
+async function unlink(file: string): Promise<void> {
+  await Bun.file(file)
+    .unlink()
+    .catch(() => {});
 }

@@ -274,29 +274,48 @@ export async function listIdps(): Promise<Array<{ type: string; name?: string }>
 }
 
 const policySchema = z.object({ id: z.string(), name: z.string() });
+const policyListSchema = z.array(policySchema).nullable();
+const policyListEnvelopeSchema = envelope(policyListSchema).extend({
+  result_info: z.object({ page: z.number(), total_pages: z.number().optional() }).optional(),
+});
 
-/** Maintain one reusable "allow only these emails" policy; returns its id. When
- *  posturePostureUid is set, also require that device-posture (e.g. WARP enrolled
- *  in the org). */
-export async function ensureReusablePolicy(
-  name: string,
-  emails: string[],
-  posturePostureUid?: string,
-): Promise<string> {
-  const list = await cfFetch('GET', '/access/policies?per_page=100', z.array(policySchema).nullable());
-  const body = {
-    name,
-    decision: 'allow',
-    include: emails.map(email => ({ email: { email } })),
-    require: posturePostureUid ? [{ device_posture: { integration_uid: posturePostureUid } }] : [],
-  };
-  const existing = (list ?? []).find(p => p.name === name);
-  if (existing) {
-    await cfFetch('PUT', `/access/policies/${existing.id}`, policySchema, body);
-    return existing.id;
+/** Look up an externally-managed reusable Access policy by exact name. Read-only:
+ *  khost must never create/update/delete reusable policies it does not own. */
+export async function findReusablePolicyByName(name: string): Promise<string> {
+  let page = 1;
+  for (;;) {
+    const path = `/access/policies?per_page=100&page=${page}`;
+    const res = await fetch(`${cfApiBase}/accounts/${cfAccountId}${path}`, {
+      headers: { Authorization: `Bearer ${cfApiToken}` },
+    });
+    const json = await res.json().catch(() => ({}));
+    const parsed = policyListEnvelopeSchema.safeParse(json);
+    if (!parsed.success) {
+      throw new Error(`Cloudflare API GET ${path} -> unexpected response: ${JSON.stringify(json)}`);
+    }
+    const data = parsed.data;
+    if (!data.success) {
+      const msg = data.errors?.map(e => e.message).join('; ') ?? 'unknown error';
+      throw new Error(`Cloudflare API GET ${path} failed: ${msg}`);
+    }
+    const hit = (data.result ?? []).find(p => p.name === name);
+    if (hit) return hit.id;
+    const totalPages = data.result_info?.total_pages ?? page;
+    if (page >= totalPages) break;
+    page += 1;
   }
-  const created = await cfFetch('POST', '/access/policies', policySchema, body);
-  return created.id;
+  throw new Error(`policy ${name} not found in account — it is externally managed, ensure it exists`);
+}
+
+// --- WARP device registrations (for mesh IP auto-detection) ----------------
+
+const registrationSchema = z.object({ id: z.string(), virtual_ipv4: z.string().optional() });
+
+/** This device's assigned WARP virtual IPv4 (the mesh address), matched by the
+ *  registration id from `warp-cli registration show`. null if not found. */
+export async function findDeviceVirtualIp(deviceId: string): Promise<string | null> {
+  const list = await cfFetch('GET', '/devices/registrations', z.array(registrationSchema).nullable());
+  return (list ?? []).find(r => r.id === deviceId)?.virtual_ipv4 ?? null;
 }
 
 const accessAppSchema = z.object({ id: z.string(), name: z.string().optional(), domain: z.string().optional() });

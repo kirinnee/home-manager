@@ -303,7 +303,7 @@ let
 
 in
 
-{
+builtins.warn "modules/agent-config/default.nix is deprecated. Manage agent accounts with ~/.kfleet/config.yaml and run `kfleet apply`; this file remains only for legacy imports while migration finishes." {
   inherit claudeUserConfig claudeAutoConfig auth;
   inherit codexUserConfig codexAutoConfig geminiUserConfig opencodeUserConfig opencodeAutoConfig;
   inherit mkClaudeAccount mkAutoClaudeAccount;

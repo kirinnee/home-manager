@@ -23,7 +23,8 @@ import {
   verifyToken,
 } from './cloudflare';
 import { config } from './config';
-import { alloyContainer, alloyPort, machineId, meshListen, metricsPort, sshPort, tunnelName } from './deps';
+import { alloyContainer, alloyPort, machineId, meshListenConfig, metricsPort, sshPort, tunnelName } from './deps';
+import { resolveMeshListen } from './mesh';
 import { die, ok, run } from './exec';
 import { expandMachine } from './routes';
 
@@ -152,7 +153,7 @@ async function refreshCf(c: CfCache): Promise<void> {
 const esc = (s: string): string => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
 async function render(cf: CfCache): Promise<string> {
-  const meshHost = meshListen || null;
+  const meshHost = (await resolveMeshListen(meshListenConfig)) || null;
   const [sshLoop, sshMesh, alloyRun, alloyHttp, dockerOk, alloyRe] = await Promise.all([
     sshProbe('127.0.0.1', sshPort),
     meshHost ? sshProbe(meshHost, sshPort) : Promise.resolve(null),
