@@ -48,9 +48,9 @@ tasks:
     cmds:
       - ./scripts/box/replicate.sh {{.CLI_ARGS}}
   box:login:
-    desc: "Agent OAuth on the box: forwards codex's localhost callback (1455) over ssh — open the printed URL in YOUR browser"
+    desc: "Agent OAuth on the box — open the printed URL in YOUR browser (the `box` ssh alias always forwards codex's 1455 callback)"
     cmds:
-      - ssh -t -L 1455:localhost:1455 box 'export PATH="$HOME/.nix-profile/bin:/nix/var/nix/profiles/default/bin:$PATH"; kfleet login'
+      - ssh -t box 'export PATH="$HOME/.nix-profile/bin:/nix/var/nix/profiles/default/bin:$PATH"; kfleet login'
   box:backup:
     desc: Trigger a backup on the box now (nightly timer runs it at 03:00 anyway)
     cmds:
