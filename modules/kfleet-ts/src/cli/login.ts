@@ -62,7 +62,12 @@ export function createLoginCommand(): Command {
           `${id.kind}-${id.base}: interactive login — approve in the browser, then quit the CLI to continue` +
             (id.kind === 'claude' ? ' (Ctrl+C twice after "/login" finishes)' : ''),
         );
-        await interactiveLogin(id);
+        try {
+          await interactiveLogin(id);
+        } catch (e) {
+          logWarn(`${id.kind}-${id.base}: ${e instanceof Error ? e.message : String(e)} — skipped`);
+          continue;
+        }
         // Re-scan just this identity and fan the fresh credential out.
         const [rescanned] = await scanIdentities(
           agents.filter(a => a.kind === id.kind && (a.identity ?? a.base ?? a.name) === id.base),

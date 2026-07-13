@@ -32,6 +32,23 @@ export async function readKeychain(service: string, timeoutMs: number): Promise<
   }
 }
 
+/** Read the Claude Code OAuth credential blob for a config dir, wherever this
+ *  platform stores it: macOS keeps it in the Keychain (`Claude Code-credentials-
+ *  <suffix>`), Linux in `<configDir>/.credentials.json`. */
+export async function readClaudeCred(configDir: string, timeoutMs: number): Promise<string | null> {
+  if (process.platform === 'darwin') {
+    return readKeychain(`Claude Code-credentials-${keychainSuffix(configDir)}`, timeoutMs);
+  }
+  try {
+    const file = Bun.file(`${configDir}/.credentials.json`);
+    if (!(await file.exists())) return null;
+    const text = (await file.text()).trim();
+    return text.length ? text : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Decode a JWT's `exp` (seconds → epoch ms) without verifying the signature. */
 export function jwtExpMs(token: string | undefined): number | undefined {
   if (!token) return undefined;

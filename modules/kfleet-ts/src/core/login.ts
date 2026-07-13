@@ -14,7 +14,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { KIND_SPECS } from './kinds';
-import { jwtExpMs, keychainSuffix, readKeychain } from './creds';
+import { jwtExpMs, keychainSuffix, readClaudeCred } from './creds';
 import type { Kind, ResolvedAgent } from './types';
 
 const KEYCHAIN_TIMEOUT_MS = 5_000;
@@ -58,7 +58,7 @@ export async function credStatus(
   now = Date.now(),
 ): Promise<Omit<MemberStatus, 'name' | 'variant' | 'dir'>> {
   if (kind === 'claude') {
-    const blob = await readKeychain(claudeService(dir), KEYCHAIN_TIMEOUT_MS);
+    const blob = await readClaudeCred(dir, KEYCHAIN_TIMEOUT_MS);
     if (!blob) return { state: 'missing' };
     try {
       const parsed = JSON.parse(blob) as Record<string, unknown>;
@@ -160,11 +160,20 @@ export async function syncIdentity(identity: Identity, donor: MemberStatus): Pro
   if (!targets.length) return [];
   const synced: string[] = [];
   if (identity.kind === 'claude') {
-    const blob = await readKeychain(claudeService(donor.dir), KEYCHAIN_TIMEOUT_MS);
+    const blob = await readClaudeCred(donor.dir, KEYCHAIN_TIMEOUT_MS);
     if (!blob) return [];
-    const account = await keychainAccount(claudeService(donor.dir));
-    for (const t of targets) {
-      if (await writeKeychain(claudeService(t.dir), account, blob)) {
+    if (process.platform === 'darwin') {
+      const account = await keychainAccount(claudeService(donor.dir));
+      for (const t of targets) {
+        if (await writeKeychain(claudeService(t.dir), account, blob)) {
+          syncOauthAccount(donor.dir, t.dir);
+          synced.push(t.name);
+        }
+      }
+    } else {
+      // Linux: Claude Code keeps the blob as a plain file in the config dir.
+      for (const t of targets) {
+        writeFileSync(path.join(t.dir, '.credentials.json'), blob, { mode: 0o600 });
         syncOauthAccount(donor.dir, t.dir);
         synced.push(t.name);
       }
@@ -192,7 +201,12 @@ export async function interactiveLogin(identity: Identity): Promise<MemberStatus
   const member = identity.members.find(m => m.variant === 'default') ?? identity.members[0];
   if (!member) throw new Error(`identity "${identity.base}": no members`);
   const spec = KIND_SPECS[identity.kind];
-  const bin = Bun.which(spec.bin) ?? spec.bin;
+  const bin = Bun.which(spec.bin);
+  if (!bin) {
+    throw new Error(
+      `the "${spec.bin}" CLI is not installed on this machine — install it (or log this account in on a machine that has it and re-run \`kfleet login\` to sync)`,
+    );
+  }
   const cmd = identity.kind === 'claude' ? [bin, '/login'] : [bin, 'login'];
   const proc = Bun.spawn({
     cmd,

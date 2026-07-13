@@ -11,7 +11,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { jwtExpMs, keychainSuffix, readKeychain } from './creds';
+import { jwtExpMs, readClaudeCred } from './creds';
 import { KIND_SPECS } from './kinds';
 import { type Identity, isOAuth, pickDonor, scanIdentities, syncIdentity } from './login';
 import { resolveAll } from './merge';
@@ -121,11 +121,12 @@ export function oauthTokenUsable(
 // Per-provider probes
 // ---------------------------------------------------------------------------
 
-/** Anthropic subscription (OAuth). Token lives in the macOS Keychain keyed by the
- *  config dir; both windows come back from one GET /api/oauth/usage. */
+/** Anthropic subscription (OAuth). Token lives in the macOS Keychain / Linux
+ *  .credentials.json keyed by the config dir; both windows come back from one
+ *  GET /api/oauth/usage. */
 async function probeAnthropic(configDir: string, timeoutMs: number): Promise<Windows> {
-  const blob = await readKeychain(`Claude Code-credentials-${keychainSuffix(configDir)}`, timeoutMs);
-  if (!blob) return { ok: false, error: 'no keychain credential', authOk: false };
+  const blob = await readClaudeCred(configDir, timeoutMs);
+  if (!blob) return { ok: false, error: 'not logged in (no stored credential)', authOk: false };
   let creds: Record<string, unknown>;
   try {
     const parsed = JSON.parse(blob) as Record<string, unknown>;
@@ -314,7 +315,7 @@ const DEFAULT_RELOGIN_TIMEOUT_MS = 30_000;
  *  (a durable refresh token is present). Zero-network — reads only local creds. */
 async function oauthNeedsRefresh(kind: Kind, configDir: string, now: number, timeoutMs: number): Promise<boolean> {
   if (kind === 'claude') {
-    const blob = await readKeychain(`Claude Code-credentials-${keychainSuffix(configDir)}`, timeoutMs);
+    const blob = await readClaudeCred(configDir, timeoutMs);
     if (!blob) return false;
     try {
       const parsed = JSON.parse(blob) as Record<string, unknown>;
