@@ -1,9 +1,10 @@
 #cloud-config
 
 # Shared first-boot config for every box cloud (AWS / DigitalOcean / OCI).
-# Creates the login user with the sops-provided SSH public key; everything
-# else (Nix, home-manager, secrets, repos) is layered on afterwards by
-# scripts/box/replicate.sh.
+# Creates the login user AND bootstraps Nix + home-manager on first boot, so
+# a bare `box:up` (no --replicate) already converges the full environment.
+# Secrets are skipped until an age key is seeded (load-secrets no-ops
+# without it); scripts/box/replicate.sh layers key + repos + backups on top.
 
 users:
   - name: ${user}
@@ -13,3 +14,27 @@ users:
     lock_passwd: true
     ssh_authorized_keys:
       - ${ssh_public_key}
+
+packages:
+  - curl
+
+# System layer lives HERE (daemon installs, systemd grants); the user layer
+# (packages, zsh, backup timer, terminfo) is all declared in home-manager.
+runcmd:
+  # tailscaled is a SYSTEM daemon — the nix CLI alone can't provide it.
+  # Install only; joining a tailnet stays manual (sudo tailscale up).
+  - [
+      bash,
+      -c,
+      "curl -fsSL https://tailscale.com/install.sh | sh >> /var/log/hm-bootstrap.log 2>&1 || true",
+    ]
+  # Let the user's systemd units (home-manager's box-backup.timer) run
+  # without an active login session.
+  - [bash, -c, "loginctl enable-linger ${user} || true"]
+  # Bootstrap Nix + home-manager. Secrets are skipped until the age key is
+  # seeded (load-secrets no-ops without it).
+  - [
+      bash,
+      -c,
+      "sudo -iu ${user} bash -c 'curl -fsSL https://raw.githubusercontent.com/kirinnee/home-manager/main/scripts/setup.sh | bash -s -- ${user}' >> /var/log/hm-bootstrap.log 2>&1",
+    ]

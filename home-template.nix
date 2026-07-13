@@ -205,6 +205,13 @@ rec {
       source = ./finicky/config.js;
       executable = false;
     };
+
+    # Nightly backup runner (Linux boxes; unit files further below)
+    ".local/bin/box-backup" = {
+      enable = profile.kernel == "linux";
+      source = ./scripts/box/backup.sh;
+      executable = true;
+    };
   };
 
   # On darwin, home-manager's nix module is suppressed when embedded in nix-darwin,
@@ -219,14 +226,66 @@ rec {
   # Worktrunk config
   xdg.configFile."worktrunk/config.toml".source = ./worktrunk/config.toml;
 
+  # Nightly restic backup of ~/Workspace -> R2 (Linux boxes only; inert on
+  # darwin). The runner derives everything from sops at runtime, so the unit
+  # is static. Retention: keep 7 daily (scripts/box/backup.sh). Lingering is
+  # granted by cloud-init (system layer), activation below enables the timer.
+  xdg.configFile."systemd/user/box-backup.service" = {
+    enable = profile.kernel == "linux";
+    text = ''
+      [Unit]
+      Description=Restic backup of ~/Workspace to R2
+
+      [Service]
+      Type=oneshot
+      ExecStart=%h/.local/bin/box-backup
+    '';
+  };
+  xdg.configFile."systemd/user/box-backup.timer" = {
+    enable = profile.kernel == "linux";
+    text = ''
+      [Unit]
+      Description=Nightly restic backup (keep 7 days)
+
+      [Timer]
+      OnCalendar=*-*-* 03:00:00
+      Persistent=true
+      RandomizedDelaySec=15m
+
+      [Install]
+      WantedBy=timers.target
+    '';
+  };
+
   home.activation.load-secrets = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
     export SECRETS_FILE="${./secrets.enc.yaml}"
     ${modules.load-secrets}/bin/load-secrets
   '';
 
+  # Compile repo-shipped terminfo entries (modules/terminfo/*.terminfo) into
+  # ~/.terminfo — the ONE directory every ncurses (Ubuntu's, nix's, macOS's)
+  # searches. Fixes terminals absent from stock DBs (Ghostty's xterm-ghostty:
+  # dead backspace, tput errors, zle key lookups) on every OS declaratively.
+  home.activation.install-terminfo = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+    for tf in ${./modules/terminfo}/*.terminfo; do
+      ${pkgs.ncurses}/bin/tic -x -o "$HOME/.terminfo" "$tf" 2>/dev/null \
+        || echo "⚠️  tic failed for $tf"
+    done
+  '';
+
   home.activation.kfleet-apply = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
     ${modules.kfleet}/bin/kfleet apply
   '';
+
+  home.activation.enable-backup-timer = lib.hm.dag.entryAfter [ "writeBoundary" ] (
+    lib.optionalString (profile.kernel == "linux") ''
+      export XDG_RUNTIME_DIR="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+      if [ -d "$XDG_RUNTIME_DIR" ]; then
+        systemctl --user daemon-reload || true
+        systemctl --user enable --now box-backup.timer || true
+      fi
+    ''
+  );
 
   programs.home-manager.enable = true;
 
