@@ -3,6 +3,16 @@
 set -eou pipefail
 
 export SOPS_AGE_KEY_FILE="$HOME/.config/sops/age/keys.txt"
+
+# No age key yet (e.g. cloud-init bootstrapped home-manager before the key was
+# seeded): skip gracefully — the switch must still succeed so the box gets its
+# environment. Secrets materialize on the next switch once the key exists
+# (scripts/box/replicate.sh seeds it and re-runs the switch).
+if [ ! -f "$SOPS_AGE_KEY_FILE" ]; then
+  echo "⚠️  load-secrets: no age key at $SOPS_AGE_KEY_FILE — skipping secrets materialization."
+  exit 0
+fi
+
 yaml=$(sops -d "${SECRETS_FILE}")
 
 # general secrets
