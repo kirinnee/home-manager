@@ -85,8 +85,10 @@ if [ -f "$ROOT/secrets.yaml" ]; then
       continue
     fi
     echo "🔄 $src -> $dest"
+    # </dev/null: ssh must NOT inherit the loop's stdin or it swallows the
+    # remaining .box.sync_dirs lines and the loop stops after one item.
     # shellcheck disable=SC2029  # $dest expands locally by design
-    "${SSH[@]}" "mkdir -p ~/Workspace/$(dirname "$dest")"
+    "${SSH[@]}" "mkdir -p ~/Workspace/$(dirname "$dest")" </dev/null
     rsync -az --delete \
       --exclude node_modules --exclude .direnv --exclude .terraform \
       --exclude target --exclude dist --exclude .next --exclude result \
