@@ -10,13 +10,17 @@ users:
   - name: ${user}
     sudo: ALL=(ALL) NOPASSWD:ALL
     groups: users
-    shell: /bin/bash
+    # System zsh as the login shell from first boot (installed below — nix
+    # isn't there yet at user creation). It reads the same home-manager
+    # ~/.zshrc once the bootstrap converges.
+    shell: /usr/bin/zsh
     lock_passwd: true
     ssh_authorized_keys:
       - ${ssh_public_key}
 
 packages:
   - curl
+  - zsh
 
 # System layer lives HERE (daemon installs, systemd grants); the user layer
 # (packages, zsh, backup timer, terminfo) is all declared in home-manager.
