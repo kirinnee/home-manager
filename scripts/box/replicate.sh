@@ -92,6 +92,7 @@ if [ -f "$ROOT/secrets.yaml" ]; then
     rsync -az --delete \
       --exclude node_modules --exclude .direnv --exclude .terraform \
       --exclude target --exclude dist --exclude .next --exclude result \
+      --exclude build --exclude .gradle --exclude .dart_tool \
       -e "ssh ${SSH_OPTS:-}" \
       "$HOME/Workspace/$src/" "$TARGET:Workspace/$dest/"
   done < <(yq -r '.box.sync_dirs[]? | .src + "\t" + .dest' "$ROOT/secrets.yaml")
