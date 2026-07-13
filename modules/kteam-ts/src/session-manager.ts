@@ -260,7 +260,10 @@ export class SessionManager implements KTeamService {
     await this.transition(id, { status: 'starting', startedAt: now(), health: 'healthy' }, 'session.starting');
     try {
       await this.tmux.launch(config);
-      await this.tmux.inject(config.tmuxSession, this.promptInstruction(id, 1));
+      // send() re-verifies prompt readiness right before typing — launch()'s
+      // readiness can go stale if a late startup splash repaints the pane,
+      // and a prompt injected into a booting TUI lands as a no-op turn.
+      await this.tmux.send(config, this.promptInstruction(id, 1));
       await this.transition(
         id,
         {
@@ -485,7 +488,7 @@ export class SessionManager implements KTeamService {
       );
       try {
         await this.tmux.launch(config);
-        await this.tmux.inject(config.tmuxSession, this.promptInstruction(id, turn));
+        await this.tmux.send(config, this.promptInstruction(id, turn));
         this.autoContinued.delete(id);
         await this.transition(
           id,
@@ -1079,8 +1082,8 @@ export class SessionManager implements KTeamService {
                 { reason: 'automode returned to input without a done marker' },
                 'watcher',
               );
-              await this.tmux.inject(
-                view.config.tmuxSession,
+              await this.tmux.send(
+                view.config,
                 'Automode: do not wait for user input. Make the best reasonable decision, continue the task, and write the required done marker when complete.',
               );
               await this.transition(
