@@ -12,10 +12,23 @@ const claude = (name: string, env?: Record<string, string>): ResolvedAgent => ({
 const codex = (name: string, env?: Record<string, string>): ResolvedAgent => ({ name, kind: 'codex', env });
 
 describe('classifyAgent', () => {
-  test('claude with no base url → anthropic OAuth, keychain-suffix credId', () => {
+  test('claude with no base url → anthropic OAuth, identity-keyed credId', () => {
     const c = classifyAgent(claude('auto-opus48'), {});
     expect(c?.provider).toBe('anthropic');
-    expect(c?.credId).toMatch(/^anthropic:[0-9a-f]{8}$/);
+    expect(c?.credId).toBe('anthropic:id:auto-opus48'); // no base/identity ⇒ own name
+  });
+
+  test('anthropic: variants and identity-linked agents share ONE credId (one quota probe per account)', () => {
+    const a = classifyAgent({ name: 'kirin', kind: 'claude', base: 'kirin', variant: 'default' }, {});
+    const b = classifyAgent({ name: 'auto-kirin', kind: 'claude', base: 'kirin', variant: 'auto' }, {});
+    const c = classifyAgent({ name: 'f5-kirin', kind: 'claude', base: 'f5-kirin', identity: 'kirin' }, {});
+    expect(a?.credId).toBe('anthropic:id:kirin');
+    expect(b?.credId).toBe(a!.credId);
+    expect(c?.credId).toBe(a!.credId);
+    // a different account stays separate
+    expect(classifyAgent({ name: 'liftoff', kind: 'claude', base: 'liftoff' }, {})?.credId).toBe(
+      'anthropic:id:liftoff',
+    );
   });
 
   test('claude with explicit anthropic.com base url → anthropic', () => {

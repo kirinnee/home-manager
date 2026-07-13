@@ -17,7 +17,7 @@ import { type Identity, isOAuth, pickDonor, scanIdentities, syncIdentity } from 
 import { resolveAll } from './merge';
 import type { Config, Kind, ResolvedAgent } from './types';
 
-export { jwtExpMs, keychainSuffix, readKeychain } from './creds';
+export { jwtExpMs } from './creds'; // re-export: existing consumers/tests import it from here
 
 export type UsageProvider = 'anthropic' | 'codex' | 'zai' | 'minimax';
 
@@ -457,7 +457,7 @@ interface CredTarget {
 /** The login identity a resolved agent belongs to: all its variants (and any
  *  agent pointing at it via `identity:`) share one provider account — and thus
  *  ONE quota window, so OAuth usage probes dedupe on this. */
-export const identityOf = (agent: ResolvedAgent): string => agent.identity ?? agent.base ?? agent.name;
+const identityOf = (agent: ResolvedAgent): string => agent.identity ?? agent.base ?? agent.name;
 
 /** Decide an agent's usage provider + credential identity, or null if untracked.
  *  Exported for tests. */
