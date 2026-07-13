@@ -669,6 +669,18 @@ rec {
             }
 
           '';
+          # zsh-autocomplete rebinds Up/Down to its async history MENU, which is
+          # the widget that deadlocks the whole shell on big histories. Rebind
+          # the arrows (both CSI and SS3 encodings) to zsh's builtin prefix
+          # history search — cannot hang — and leave the plugin's menus on
+          # Tab/PgUp-PgDn. Runs late (after plugin + OMZ init) so it wins.
+          keybindShell = lib.mkOrder 4500 ''
+            () {
+              local key
+              for key in '^[[A' '^[OA'; do bindkey "$key" up-line-or-search; done
+              for key in '^[[B' '^[OB'; do bindkey "$key" down-line-or-search; done
+            }
+          '';
           wtShell = lib.mkOrder 5000 ''
             if command -v wt >/dev/null 2>&1; then eval "$(command wt config shell init zsh)"; fi
           '';
@@ -693,6 +705,7 @@ rec {
         lib.mkMerge [
           initExtraFirst
           zshConfig
+          keybindShell
           wtShell
           zoxideShell
         ];
@@ -854,15 +867,18 @@ rec {
           src = ./p10k-config;
           file = ".p10k.zsh";
         }
-        # live autocomplete
+        # live autocomplete — track a recent rev: the 2023 pin had the
+        # notorious deadlocks (Up-arrow hangs, spurious INT prompt status,
+        # "_autocomplete__is_glob not found" when mixed with OMZ's compinit)
+        # that upstream fixed over 2024-2026.
         {
           name = "zsh-autocomplete";
           file = "zsh-autocomplete.plugin.zsh";
           src = pkgs.fetchFromGitHub {
             owner = "marlonrichert";
             repo = "zsh-autocomplete";
-            rev = "6d059a3634c4880e8c9bb30ae565465601fb5bd2";
-            sha256 = "sha256-0NW0TI//qFpUA2Hdx6NaYdQIIUpRSd0Y4NhwBbdssCs=";
+            rev = "20f6c34f20270084b21211428afb6d2534aae8e9";
+            sha256 = "sha256-M8gWOg/9ohkG2NiLVSGERINcmHJCfoES5IG2GBllrRo=";
           };
         }
         {
