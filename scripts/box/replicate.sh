@@ -57,6 +57,15 @@ echo "🔑 [1/3] Seeding age key..."
 "${SCP[@]}" "$AGE_KEY_FILE" "$TARGET:.config/sops/age/keys.txt"
 "${SSH[@]}" 'chmod 600 ~/.config/sops/age/keys.txt'
 
+# Teach the box this machine's terminal type (e.g. Ghostty's xterm-ghostty is
+# absent from Ubuntu's terminfo DB — without it tput fails, zle key lookups
+# break, and backspace/Tab misbehave in zsh). User-level ~/.terminfo is
+# honored by both Ubuntu's and nix's ncurses. Best-effort: skip unknown TERM.
+if [ -n "${TERM:-}" ] && infocmp -x "$TERM" >/dev/null 2>&1; then
+  echo "⌨️  Syncing terminfo for '$TERM'..."
+  infocmp -x "$TERM" | "${SSH[@]}" 'mkdir -p ~/.terminfo && tic -x - 2>/dev/null || true'
+fi
+
 echo "🏗  [2/3] Bootstrapping Nix + home-manager (this takes a while)..."
 "${SCP[@]}" "$ROOT/scripts/setup.sh" "$TARGET:/tmp/hm-setup.sh"
 "${SSH[@]}" "bash /tmp/hm-setup.sh '$PROFILE'"
