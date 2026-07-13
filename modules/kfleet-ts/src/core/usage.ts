@@ -11,9 +11,13 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
+import { jwtExpMs, keychainSuffix, readKeychain } from './creds';
 import { KIND_SPECS } from './kinds';
+import { type Identity, pickDonor, scanIdentities, syncIdentity } from './login';
 import { resolveAll } from './merge';
 import type { Config, Kind, ResolvedAgent } from './types';
+
+export { jwtExpMs, keychainSuffix, readKeychain } from './creds';
 
 export type UsageProvider = 'anthropic' | 'codex' | 'zai' | 'minimax';
 
@@ -63,12 +67,6 @@ function expandEnv(value: string | undefined, env: NodeJS.ProcessEnv): string | 
 function envRefName(value: string | undefined): string | undefined {
   if (!value) return undefined;
   return /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(value.trim())?.[1];
-}
-
-/** First 8 hex of sha256(absolute config-dir path) — the suffix Claude Code uses
- *  for its keychain item name `Claude Code-credentials-<suffix>`. */
-export function keychainSuffix(configDir: string): string {
-  return createHash('sha256').update(configDir).digest('hex').slice(0, 8);
 }
 
 /** Parse an ISO-8601 timestamp to epoch ms, or undefined. */
