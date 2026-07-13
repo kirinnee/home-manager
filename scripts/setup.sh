@@ -39,7 +39,38 @@ echo "✅ Synced!"
 PROFILE="${1:-$USER}"
 echo "👤 Using profile: $PROFILE"
 
-# 4. Bootstrap based on platform
+# 4. Age key BEFORE the switch, so the load-secrets activation materializes
+# secrets in the same pass (it no-ops when no key exists). `curl | bash`
+# occupies stdin with the script itself, so prompt via /dev/tty instead of
+# relying on [ -t 0 ] — that's why the old post-switch prompt never fired.
+AGE_KEY_FILE="$HOME/.config/sops/age/keys.txt"
+if [ -f "$AGE_KEY_FILE" ]; then
+  echo "🔑 Age key already exists — secrets will materialize during the switch."
+elif [ -n "${AGE_KEY:-}" ]; then
+  echo "🔑 Using AGE_KEY from environment..."
+  mkdir -p "$(dirname "$AGE_KEY_FILE")"
+  echo "$AGE_KEY" >"$AGE_KEY_FILE"
+  chmod 0600 "$AGE_KEY_FILE"
+  echo "✅ Age key installed!"
+else
+  age_key=""
+  if [ -e /dev/tty ]; then
+    printf "🔑 Paste your age PRIVATE key (AGE-SECRET-KEY-..., Enter to skip): " >/dev/tty || true
+    read -r age_key </dev/tty 2>/dev/null || age_key=""
+  fi
+  if [ -n "$age_key" ]; then
+    mkdir -p "$(dirname "$AGE_KEY_FILE")"
+    echo "$age_key" >"$AGE_KEY_FILE"
+    chmod 0600 "$AGE_KEY_FILE"
+    echo "✅ Age key installed — secrets will materialize during the switch."
+  else
+    echo "⚠️  No age key — the switch still succeeds, but secrets are SKIPPED."
+    echo "   Later: put the key at $AGE_KEY_FILE (or run scripts/box/replicate.sh"
+    echo "   from your main machine), then re-run: home-manager switch"
+  fi
+fi
+
+# 5. Bootstrap based on platform
 if [ "$KERNEL" = "Darwin" ]; then
   echo "🍎 Setting up nix-darwin..."
 
@@ -88,33 +119,6 @@ else
     home-manager switch --flake ".#$PROFILE" -b hm-backup
   fi
   echo "✅ Home Manager switched!"
-fi
-
-# 5. Handle age key (only if not exists)
-AGE_KEY_FILE="$HOME/.config/sops/age/keys.txt"
-if [ -f "$AGE_KEY_FILE" ]; then
-  echo "🔑 Age key already exists, skipping..."
-elif [ -n "${AGE_KEY:-}" ]; then
-  echo "🔑 Using AGE_KEY from environment..."
-  mkdir -p "$(dirname "$AGE_KEY_FILE")"
-  echo "$AGE_KEY" >"$AGE_KEY_FILE"
-  chmod 0600 "$AGE_KEY_FILE"
-  echo "✅ Age key installed!"
-elif [ -t 0 ]; then
-  # Only prompt if running interactively (tty)
-  echo "🔑 Enter your age key (or press Enter to skip):"
-  read -r age_key
-  if [ -n "$age_key" ]; then
-    mkdir -p "$(dirname "$AGE_KEY_FILE")"
-    echo "$age_key" >"$AGE_KEY_FILE"
-    chmod 0600 "$AGE_KEY_FILE"
-    echo "✅ Age key installed!"
-  else
-    echo "⚠️  Age key skipped. You can add it later."
-  fi
-else
-  echo "⚠️  Non-interactive environment, skipping age key setup."
-  echo "   Set AGE_KEY environment variable to provide it."
 fi
 
 echo ""
