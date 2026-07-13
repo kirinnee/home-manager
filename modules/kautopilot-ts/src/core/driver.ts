@@ -23,6 +23,7 @@ import {
 import { computeSchedule } from "./scheduler";
 import { readSessionMeta, type SessionMeta } from "./session-meta";
 import type { Config } from "./types";
+import { stepExecution } from "./writer/mode";
 
 // ============================================================================
 // Host-driven driver — `next` (block on code/detection, yield first
@@ -60,7 +61,7 @@ function isCursorEvent(
  *   feedback). Entry: `resolve_org`.
  * Recomputed every call → `next` is idempotent and resumes exactly.
  */
-function pendingStep(sessionId: string): string | null {
+export function pendingStep(sessionId: string): string | null {
 	const log = readLog(sessionId);
 	let pending: string | null = ENTRY_STEP;
 	for (const entry of log) {
@@ -224,6 +225,7 @@ export async function runNext(
 				repo: ctx.repo?.repo ?? null,
 			},
 		});
+		const execution = stepExecution(stepName, freshMeta, config);
 		const descriptor: StepDescriptor = {
 			done: false,
 			sessionId,
@@ -237,7 +239,24 @@ export async function runNext(
 			vars: prepared.vars,
 			contract: prepared.contract,
 			review: prepared.review ?? null,
+			execution,
 		};
+		// Deferred steps yield a LIGHTWEIGHT descriptor: the full prompt (with the
+		// writer gate), review payload, and heavy vars (templates, inline diff text)
+		// travel via the writer session's message.md — never through the main
+		// context. Only cheap path-like vars survive. (spec §3)
+		if (execution === "deferred") {
+			descriptor.prompt =
+				`This step is DEFERRED to the writer session. Do NOT run it inline — ` +
+				`drive it with \`kautopilot relay\` per the kautopilot skill's relay.md. ` +
+				`The binary sends the full step prompt to the writer itself.`;
+			descriptor.review = null;
+			descriptor.vars = Object.fromEntries(
+				Object.entries(prepared.vars).filter(
+					([, v]) => v == null || (!v.includes("\n") && v.length <= 256),
+				),
+			);
+		}
 		return descriptor;
 	}
 	throw new Error("next: step transition guard tripped (possible cycle)");
@@ -250,7 +269,7 @@ export interface CompleteResult {
 }
 
 /** Which versioned artifact each interactive writer step authors. */
-const STEP_ARTIFACT: Record<string, ArtifactKind> = {
+export const STEP_ARTIFACT: Record<string, ArtifactKind> = {
 	brainstorm: "brainstorm",
 	triage: "triage",
 	write_spec: "spec",
@@ -291,7 +310,7 @@ function viewerBase(config: Config): string {
  * `revise:present` event per (scope, version); a later `revise` (after feedback)
  * sees that marker and copies forward to preserve the version already shown.
  */
-function alreadyPresented(
+export function alreadyPresented(
 	sessionId: string,
 	scope: string,
 	version: number,
@@ -305,7 +324,7 @@ function alreadyPresented(
 	);
 }
 
-function markPresented(
+export function markPresented(
 	sessionId: string,
 	scope: string,
 	version: number,
@@ -316,6 +335,87 @@ function markPresented(
 		version,
 		metadata: { scope },
 	});
+}
+
+/**
+ * The revise scope string for an artifact — the key `revise:present` events are
+ * recorded under, and (identically) the deferred writer's phaseKey. (spec §1)
+ */
+export function artifactScope(
+	kind: ArtifactKind,
+	epoch: number,
+	repo?: string | null,
+): string {
+	if (kind === "brainstorm") return "brainstorm";
+	if (kind === "plans") return `plans@${epoch}:${repo ?? "default"}`;
+	return `${kind}@${epoch}`;
+}
+
+/**
+ * Mint-or-reuse the working version of an artifact WITHOUT marking it presented:
+ * reuse the latest version when it hasn't been shown to the user yet (the step's
+ * v1 seed, or a copy left by a failed/Q&A relay turn), else copy vN→vN+1. Shared
+ * by `runRevise` (which then marks presented immediately) and the relay's version
+ * prep (which marks presented only when an accepted turn says `revised: true`).
+ */
+export function mintOrReuseWorkingVersion(
+	sessionId: string,
+	kind: ArtifactKind,
+	epoch: number,
+	repo?: string | null,
+): { n: number; path: string; scope: string } {
+	const scope = artifactScope(kind, epoch, repo);
+	if (kind === "plans") {
+		const r = repo ?? "default";
+		const versions = listPlanSetVersions(sessionId, epoch, r);
+		const latest = versions.length ? Math.max(...versions) : 0;
+		if (latest >= 1 && !alreadyPresented(sessionId, scope, latest)) {
+			return { n: latest, path: plansRepoDir(sessionId, epoch, r), scope };
+		}
+		const { n, dir } = copyPlanSetToNext(sessionId, epoch, r);
+		return { n, path: dir, scope };
+	}
+	const ref = kind === "brainstorm" ? {} : { epoch };
+	const latest = latestRevisionOnDisk(sessionId, kind, ref);
+	if (latest >= 1 && !alreadyPresented(sessionId, scope, latest)) {
+		// First presentation: show the step's working copy as-is (no redundant copy).
+		return {
+			n: latest,
+			path: revisionPath(sessionId, kind, latest, ref),
+			scope,
+		};
+	}
+	const { n, path } = copyToNextRevision(sessionId, kind, ref);
+	return { n, path, scope };
+}
+
+/**
+ * FULL viewer URLs for version n of an artifact (host prefixed from config) —
+ * the single URL constructor: `runRevise` and the relay's enrichment both use it
+ * so the harness never hand-builds a version URL. Plans have no single visualUrl
+ * (each plan carries its own `<plan>/vN.html`, surfaced in the dashboard tabs).
+ */
+export function artifactUrls(
+	config: Config,
+	sessionId: string,
+	kind: ArtifactKind,
+	n: number,
+	repo?: string | null,
+): { url: string; diffUrl: string; visualUrl?: string } {
+	const viewer = viewerBase(config);
+	if (kind === "plans") {
+		const base = `${viewer}/sessions/${sessionId}/plans/${encodeURIComponent(repo ?? "default")}`;
+		return {
+			url: `${base}/v${n}`,
+			diffUrl: `${base}/diff?from=${Math.max(1, n - 1)}&to=${n}`,
+		};
+	}
+	const base = `${viewer}/sessions/${sessionId}/${kind}`;
+	return {
+		url: `${base}/v${n}`,
+		diffUrl: `${base}/diff?from=${Math.max(1, n - 1)}&to=${n}`,
+		visualUrl: `${viewer}/sessions/${sessionId}/html/${kind}/v/${n}`,
+	};
 }
 
 /**
@@ -348,58 +448,27 @@ export async function runRevise(
 			error: `step ${step} is not a versioned writer step (nothing to revise)`,
 		};
 	}
-
-	const epoch = meta.epoch;
-	if (kind === "plans") {
-		const repo = repoArg ?? authoringRepoName(meta);
-		const scope = `plans@${epoch}:${repo}`;
-		const versions = listPlanSetVersions(sessionId, epoch, repo);
-		const latest = versions.length ? Math.max(...versions) : 0;
-		let n: number;
-		let dir: string;
-		if (latest >= 1 && !alreadyPresented(sessionId, scope, latest)) {
-			n = latest;
-			dir = plansRepoDir(sessionId, epoch, repo);
-		} else {
-			({ n, dir } = copyPlanSetToNext(sessionId, epoch, repo));
-		}
-		markPresented(sessionId, scope, n);
-		const viewer = viewerBase(config);
-		const base = `${viewer}/sessions/${sessionId}/plans/${encodeURIComponent(repo)}`;
-		// No single `visualUrl` for plans: each plan has its OWN infographic, surfaced
-		// per-plan in the dashboard's plan tabs (one `<plan>/vN.html` each).
+	// Deferred phases are version-managed by `kautopilot relay` — a main session
+	// running `revise` out of habit would skew the relay's bookkeeping (mark a
+	// version presented the relay never handled). (spec §3)
+	if (stepExecution(step, meta, config) === "deferred") {
 		return {
-			ok: true,
-			version: n,
-			path: dir,
-			url: `${base}/v${n}`,
-			diffUrl: `${base}/diff?from=${Math.max(1, n - 1)}&to=${n}`,
+			ok: false,
+			error: `step ${step} is deferred to the writer session — versions are minted by \`kautopilot relay\`, not \`revise\``,
 		};
 	}
 
-	const ref = kind === "brainstorm" ? {} : { epoch };
-	const scope = kind === "brainstorm" ? "brainstorm" : `${kind}@${epoch}`;
-	const latest = latestRevisionOnDisk(sessionId, kind, ref);
-	let n: number;
-	let path: string;
-	if (latest >= 1 && !alreadyPresented(sessionId, scope, latest)) {
-		// First presentation: show the step's working copy as-is (no redundant copy).
-		n = latest;
-		path = revisionPath(sessionId, kind, n, ref);
-	} else {
-		({ n, path } = copyToNextRevision(sessionId, kind, ref));
-	}
+	const epoch = meta.epoch;
+	const repo = kind === "plans" ? (repoArg ?? authoringRepoName(meta)) : null;
+	const { n, path, scope } = mintOrReuseWorkingVersion(
+		sessionId,
+		kind,
+		epoch,
+		repo,
+	);
 	markPresented(sessionId, scope, n);
-	const viewer = viewerBase(config);
-	const base = `${viewer}/sessions/${sessionId}/${kind}`;
-	return {
-		ok: true,
-		version: n,
-		path,
-		url: `${base}/v${n}`,
-		diffUrl: `${base}/diff?from=${Math.max(1, n - 1)}&to=${n}`,
-		visualUrl: `${viewer}/sessions/${sessionId}/html/${kind}/v/${n}`,
-	};
+	const urls = artifactUrls(config, sessionId, kind, n, repo);
+	return { ok: true, version: n, path, ...urls };
 }
 
 /**

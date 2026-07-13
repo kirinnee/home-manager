@@ -17,6 +17,7 @@ import type { StateService, TmuxService, Paths } from '../deps';
 import { getDirHash, paths as defaultPaths, nextSpecVersion } from '../deps';
 import * as consensus from './consensus';
 import * as iteration from './iteration';
+import { StallMonitor } from './stall';
 import * as agents from '../agents/runner';
 import * as fmt from './format';
 import { buildVerifierPrompt } from '../agents/prompts';
@@ -1000,22 +1001,41 @@ export class LoopRunner {
     const backoffBaseMs = config.implementerRetry?.backoffBaseMs ?? 5000;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      const implResult = await agentRunner.runImplementer({
+      // Stall detection: watch the implementer's tmux pane + log/evidence mtimes
+      // while it runs, so a frozen confirm dialog surfaces as an event instead of
+      // hours of silent "running — impl". Armed on implementer_start, disarmed in
+      // finally (an open stall closes as agent-exit). (src/loop/stall.ts)
+      const stallMonitor = new StallMonitor({
         runId,
-        iteration: loopNum,
-        dirHash,
-        prompt: iterData.implementerPrompt,
-        timeout: config.implementerTimeout,
-        onStart: async binary => {
-          await writeEvent({
-            type: 'implementer_start',
-            timestamp: new Date().toISOString(),
-            loop: loopNum,
-            binary,
-            harness: parseImplementerConfig(binary).harness,
-          });
-        },
+        loop: loopNum,
+        tmuxSession: `kloop-${runId}-${loopNum}-impl`,
+        activityFiles: [],
+        activityDirs: [this.paths.loopImplementerPath(runId, loopNum), this.paths.loopEvidencePath(runId, loopNum)],
+        config: config.stall,
+        writeEvent,
       });
+      let implResult: agents.ImplementerResult;
+      try {
+        implResult = await agentRunner.runImplementer({
+          runId,
+          iteration: loopNum,
+          dirHash,
+          prompt: iterData.implementerPrompt,
+          timeout: config.implementerTimeout,
+          onStart: async binary => {
+            await writeEvent({
+              type: 'implementer_start',
+              timestamp: new Date().toISOString(),
+              loop: loopNum,
+              binary,
+              harness: parseImplementerConfig(binary).harness,
+            });
+            stallMonitor.start();
+          },
+        });
+      } finally {
+        await stallMonitor.stop();
+      }
 
       fmt.formatImplementerResult(implResult.binary, implResult.exitCode, implResult.durationMs, implResult.model);
 

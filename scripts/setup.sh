@@ -67,16 +67,15 @@ if [ "$KERNEL" = "Darwin" ]; then
 else
   echo "🐧 Setting up home-manager (standalone)..."
 
-  # Install home-manager if not present
-  if ! command -v home-manager >/dev/null 2>&1; then
-    echo "⏬ Installing Home Manager..."
-    nix run home-manager/release-25.11 -- init --switch
-    echo "✅ Home Manager installed!"
-  fi
-
   echo "🔄 Switching home-manager configuration..."
   cd "$CONFIG_DIR"
-  home-manager switch --flake ".#$PROFILE"
+  # -b hm-backup: a fresh cloud image ships stock ~/.bashrc / ~/.profile that
+  # home-manager would otherwise refuse to clobber on first switch.
+  if ! command -v home-manager >/dev/null 2>&1; then
+    nix run home-manager/release-26.05 -- switch --flake ".#$PROFILE" -b hm-backup
+  else
+    home-manager switch --flake ".#$PROFILE" -b hm-backup
+  fi
   echo "✅ Home Manager switched!"
 fi
 

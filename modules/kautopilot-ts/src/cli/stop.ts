@@ -4,6 +4,10 @@ import { sessionDir } from "../core/artifacts";
 import { deleteSession, getSessionByFolder, getSessionById } from "../core/db";
 import { checkLock, listLockKeys, releaseLock } from "../core/lock";
 import { appendEvent } from "../core/log";
+import {
+	killWriterSessions,
+	markWritersInterrupted,
+} from "../core/writer/relay";
 import { confirmAction } from "../llm/inquirer";
 import { logError, logOk } from "../util/format";
 
@@ -86,7 +90,16 @@ async function runStop(
 		(key) => checkLock(key).locked,
 	);
 	if (liveKeys.length === 0) {
-		logOk("Session is not running.");
+		// No live controller — but a SIGKILLed relay may have orphaned writer tmux
+		// sessions (its try/finally never ran). Clean those up even here: they hold
+		// a real Claude conversation and burn quota.
+		const orphans = await killWriterSessions(session.id);
+		markWritersInterrupted(session.id);
+		logOk(
+			orphans > 0
+				? `Session is not running (cleaned ${orphans} orphaned writer tmux session(s)).`
+				: "Session is not running.",
+		);
 		return;
 	}
 
@@ -108,6 +121,13 @@ async function runStop(
 		processesKilled += await killLockKey(key);
 		releaseLock(key);
 	}
+
+	// SIGKILL skips the relay's try/finally tmux cleanup — kill any writer tmux
+	// sessions ourselves, and mark running writers interrupted (re-attachable,
+	// NOT terminal: the next `relay` re-attaches per the recovery matrix).
+	const writersKilled = await killWriterSessions(session.id);
+	markWritersInterrupted(session.id);
+	if (writersKilled > 0) processesKilled += writersKilled;
 
 	// Log stop completed BEFORE any deletion
 	appendEvent(session.id, {

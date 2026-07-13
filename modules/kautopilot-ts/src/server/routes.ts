@@ -1,5 +1,7 @@
 import { resolveConfig } from "../core/config";
 import type { ArtifactKind } from "../core/revisions";
+import { discussionPhases, readDiscussion } from "../core/writer/relay";
+import { phaseKeySafe } from "../core/writer/scratch";
 import {
 	getDiff,
 	getDoc,
@@ -207,6 +209,17 @@ function handleApi(parts: string[], url: URL): Response | null {
 			parts[5] === "v" && parts[6] ? Number.parseInt(parts[6], 10) : undefined;
 		const doc = getPlan(id, repo, version);
 		return doc ? json(doc) : notFoundJson();
+	}
+
+	// /api/sessions/:id/discussion — phases with a writer discussion.
+	// /api/sessions/:id/discussion/:phaseKey — the turn list for one phase.
+	// (Deferred-writer capture surface, specs/deferred-writer-relay.md §7.)
+	if (section === "discussion") {
+		if (parts.length === 4) return json(discussionPhases(id));
+		const phaseKey = decodeURIComponent(parts[4] ?? "");
+		if (!phaseKey) return notFoundJson();
+		const d = readDiscussion(id, phaseKeySafe(phaseKey));
+		return d.writer || d.turns.length > 0 ? json(d) : notFoundJson();
 	}
 
 	// /api/sessions/:id/diff/:kind  and  /api/sessions/:id/diff/plans/:repo

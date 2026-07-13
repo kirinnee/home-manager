@@ -63,13 +63,21 @@ export interface StepDescriptor {
 	repo: string | null;
 	/** Epoch version. */
 	version: number;
-	/** Fully-resolved prompt: mechanics + configurable body + substituted vars. */
+	/** Fully-resolved prompt: mechanics + configurable body + substituted vars.
+	 *  For `execution: "deferred"` steps this is a short stub — the full prompt
+	 *  only ever enters the writer session's message.md (keeps `next --json`
+	 *  cheap in the main context). */
 	prompt: string;
-	/** Absolute paths already substituted into `prompt`. */
+	/** Absolute paths already substituted into `prompt`. Trimmed to cheap path
+	 *  entries for deferred steps (no templates / inline diff text). */
 	vars: Record<string, string | null>;
 	contract: StepContract;
-	/** Present only on review fan-out steps. */
+	/** Present only on review fan-out steps. Always null for deferred steps —
+	 *  the writer session owns the fan-out (payload travels via message.md). */
 	review: ReviewDescriptor | null;
+	/** How the harness runs this step: think inline, or relay to the writer
+	 *  session via `kautopilot relay`. (specs/deferred-writer-relay.md §3) */
+	execution: "inline" | "deferred";
 }
 
 /** Terminal shape from `next` when the session (or a repo loop) is finished. */

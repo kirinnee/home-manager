@@ -27,6 +27,9 @@ export interface CreateSessionInput {
 	folder: string;
 	runMode?: RunMode;
 	execMode?: ExecMode;
+	/** Writer-step execution (default from config.writer.mode). Pinned here so
+	 *  later config flips never affect an in-flight session. */
+	writerMode?: "inline" | "deferred";
 	/** Per-session merge policy (default `manual` — ask before merging). */
 	mergeMode?: MergeMode;
 	maxParallelRepos?: number;
@@ -68,6 +71,7 @@ export function createSession(input: CreateSessionInput): SessionMeta {
 		epoch: 1,
 		runMode: input.runMode ?? config.settings.runMode,
 		execMode: input.execMode ?? config.settings.execMode,
+		writerMode: input.writerMode ?? config.writer.mode,
 		mergeMode: input.mergeMode ?? "manual",
 		maxParallelRepos:
 			input.maxParallelRepos ?? config.settings.maxParallelRepos,

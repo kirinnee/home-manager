@@ -32,8 +32,8 @@ import { updateSessionMeta } from "../core/session-meta";
 import type { ReviewerConfig } from "../core/types";
 import { authoringRepoName, latestPlanFiles } from "../phases/shared";
 import {
+	approvalGate,
 	rulesPath,
-	SHARED_APPROVAL_GATE,
 	substitute,
 	ticketId,
 	ticketPath,
@@ -164,7 +164,7 @@ const brainstorm: StepDef = {
 			lastDiff: lastDiff(ctx.sessionId, "brainstorm"),
 		};
 		return {
-			prompt: `${substitute(BRAINSTORM_MECHANICS, vars)}\n\n${SHARED_APPROVAL_GATE}`,
+			prompt: `${substitute(BRAINSTORM_MECHANICS, vars)}\n\n${approvalGate(ctx, "brainstorm")}`,
 			vars,
 			contract: {
 				outputFile: path,
@@ -298,7 +298,7 @@ const triage: StepDef = {
 			vars as Record<string, string>,
 		);
 		return {
-			prompt: `${substitute(TRIAGE_MECHANICS, vars)}\n\n${SHARED_APPROVAL_GATE}\n\n${body}`,
+			prompt: `${substitute(TRIAGE_MECHANICS, vars)}\n\n${approvalGate(ctx, "triage")}\n\n${body}`,
 			vars,
 			contract: {
 				outputFile: path,
@@ -425,7 +425,7 @@ const writeSpec: StepDef = {
 			summaryFile,
 		);
 		return {
-			prompt: `${substitute(SPEC_MECHANICS, vars)}\n\n${SHARED_APPROVAL_GATE}\n\n${body}`,
+			prompt: `${substitute(SPEC_MECHANICS, vars)}\n\n${approvalGate(ctx, "write_spec")}\n\n${body}`,
 			vars,
 			contract: {
 				outputFile: path,
@@ -480,13 +480,28 @@ The **master plan** is the ORCHESTRATION layer for a multi-repo, multi-PR task. 
 write and get it APPROVED **before** any per-repo sub-plans (write_plans) — it locks the
 ORDER OF EXECUTION first, so the detailed plans are written against an agreed shape.
 
+### DEFAULT: one PR, one plan per repo
+Modern coding agents (kloop) implement a substantial, coherent change in a single pass, so
+**bias HARD toward ONE PR containing ONE plan per repo.** Do not decompose for its own sake —
+every extra plan/PR adds gates, worktrees, and review overhead. Split into multiple plans or
+PRs ONLY when a concrete reason forces it:
+- **separate repos** — each repo is its own PR (inherent to multi-repo work);
+- **a real ordering gate** — part B genuinely cannot start until part A is \`merged\`/\`released\`
+  (a true dependency, not merely 'related' work);
+- **a change too large for one kloop run** to implement + self-review reliably;
+- **independently releasable / risky units** where splitting materially cuts blast radius or
+  lets one part ship first.
+If none of these apply, it is ONE plan in ONE PR. When in doubt, DON'T split — prefer the
+smallest DAG that satisfies the real constraints; a reviewer can always request a follow-up.
+
 ### Working Copy
 Write the master plan to: {master_plan}
 Each version MUST be a complete, standalone document (NOT a changelog). It must cover:
 
-1. **The repos & the PR/branch layout.** List every repo and, for each, the PRs it will
-   open — a repo MAY open SEVERAL PRs on SEVERAL branches. For each PR give a stable id
-   (\`pr-1\`, \`pr-2\`, …), its repo, its branch name, a title, and which plans land in it.
+1. **The repos & the PR/branch layout.** List every repo and, for each, the PR(s) it will
+   open — **one PR per repo by default**; only list several PRs for a repo when a reason
+   above forces it. For each PR give a stable id (\`pr-1\`, \`pr-2\`, …), its repo, its branch
+   name, a title, and which plans land in it.
 2. **The plan breakdown as nodes.** List each plan (\`plan-<N>\`, repo-tagged) and the PR
    it ships in. (The detailed bodies come later in write_plans — here it's just the nodes
    and their order.)
@@ -540,7 +555,7 @@ const writeMasterPlan: StepDef = {
 			lastDiff: lastDiff(ctx.sessionId, "master_plan", { epoch: ctx.version }),
 		};
 		return {
-			prompt: `${substitute(MASTER_PLAN_MECHANICS, vars)}\n\n${SHARED_APPROVAL_GATE}`,
+			prompt: `${substitute(MASTER_PLAN_MECHANICS, vars)}\n\n${approvalGate(ctx, "write_master_plan")}`,
 			vars,
 			contract: {
 				outputFile: path,
@@ -726,7 +741,7 @@ const writePlans: StepDef = {
 			summaryFile,
 		);
 		return {
-			prompt: `${substitute(PLAN_MECHANICS, vars)}\n\n${SHARED_APPROVAL_GATE}\n\n${body}`,
+			prompt: `${substitute(PLAN_MECHANICS, vars)}\n\n${approvalGate(ctx, "write_plans")}\n\n${body}`,
 			vars,
 			contract: {
 				outputFile: plansDir,
@@ -896,7 +911,7 @@ const feedback: StepDef = {
 			vars as Record<string, string>,
 		);
 		return {
-			prompt: `${substitute(FEEDBACK_MECHANICS, vars)}\n\n${SHARED_APPROVAL_GATE}\n\n${body}`,
+			prompt: `${substitute(FEEDBACK_MECHANICS, vars)}\n\n${approvalGate(ctx, "feedback")}\n\n${body}`,
 			vars,
 			contract: {
 				outputFile: path,

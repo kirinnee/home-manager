@@ -1,0 +1,6 @@
+#!/bin/sh
+export CLAUDE_CONFIG_DIR="$KTEAM_HOME/fake-claude"
+printf '>\n'
+IFS= read -r task
+printf 'received and now stalled: %s\n' "$task"
+while :; do sleep 1; done

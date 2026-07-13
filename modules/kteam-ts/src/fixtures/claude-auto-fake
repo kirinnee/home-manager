@@ -1,0 +1,9 @@
+#!/bin/sh
+export CLAUDE_CONFIG_DIR="$KTEAM_HOME/fake-claude"
+printf '>\n'
+IFS= read -r task
+printf 'received: %s\n' "$task"
+mkdir -p "$KTEAM_HOME/$KTEAM_SESSION_ID/markers"
+printf 'fake teammate completed\n' > "$KTEAM_HOME/$KTEAM_SESSION_ID/summary.md"
+printf '{"type":"done","source":"fake-interactive"}\n' > "$KTEAM_HOME/$KTEAM_SESSION_ID/markers/done.json"
+while :; do sleep 1; done

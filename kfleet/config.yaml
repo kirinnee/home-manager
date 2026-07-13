@@ -36,6 +36,17 @@ profiles:
       ANTHROPIC_BASE_URL: https://loge.tailb7bc.ts.net/anthropic
     settings:
       model: fable-5
+  loge-codex:
+    env:
+      OPENAI_API_KEY: loge-internal
+    settings:
+      model: gpt-5.6-sol
+      model_provider: loge
+      model_providers:
+        loge:
+          name: Loge
+          base_url: https://loge.tailb7bc.ts.net/v1
+          env_key: OPENAI_API_KEY
   # Fable-default settings overlay for the f5-* agents (Anthropic OAuth accounts
   # only — fable is claude-only, so no codex/provider agents use this).
   fable:
@@ -55,6 +66,13 @@ variants:
 defaultHomes:
   claude: kirin
   codex: personal
+# Cross-account session sharing: session state (transcripts, prompt history,
+# checkpoints, plans) is pooled under ~/.kfleet/shared/<kind> and symlinked into
+# every account home, so any account can `--resume` any session. Auth stays
+# per-account. Existing history migrates into the pool on the next apply.
+sharedHistory:
+  claude: true
+  codex: true
 agents:
   - name: kirin
     kind: claude
@@ -73,16 +91,19 @@ agents:
   # them, yielding claude-f5-<n> (interactive) + claude-auto-f5-<n> (autonomous).
   - name: f5-kirin
     kind: claude
+    identity: kirin # same claude.ai account as kirin — kfleet login syncs creds
     profiles:
       - claude
       - fable
   - name: f5-liftoff
     kind: claude
+    identity: liftoff
     profiles:
       - claude
       - fable
   - name: f5-atomi
     kind: claude
+    identity: atomi
     profiles:
       - claude
       - fable
@@ -137,6 +158,11 @@ agents:
     profiles:
       - claude
       - loge
+  - name: loge
+    kind: codex
+    profiles:
+      - codex
+      - loge-codex
   - name: loai
     kind: codex
     profiles:

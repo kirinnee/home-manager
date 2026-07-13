@@ -1,0 +1,23 @@
+#!/bin/sh
+export CLAUDE_CONFIG_DIR="$KTEAM_HOME/fake-claude"
+session=""
+previous=""
+for argument in "$@"; do
+  if [ "$previous" = "--session-id" ] || [ "$previous" = "--resume" ]; then session="$argument"; fi
+  previous="$argument"
+done
+if [ -z "$session" ]; then exit 2; fi
+project=$(pwd | sed 's/[^A-Za-z0-9]/-/g')
+transcript="$CLAUDE_CONFIG_DIR/projects/$project/$session.jsonl"
+mkdir -p "$(dirname "$transcript")"
+printf '>\n'
+IFS= read -r task
+timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+printf '{"type":"assistant","sessionId":"%s","timestamp":"%s","uuid":"assistant-q","message":{"id":"message-q","role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_question","name":"AskUserQuestion","input":{"questions":[{"question":"Which framework?","header":"Framework","options":[{"label":"React","description":"Use React"},{"label":"Vue","description":"Use Vue"}],"multiSelect":false}]}}]}}\n' "$session" "$timestamp" >> "$transcript"
+printf 'Which framework?\n> React\n  Vue\n  Other\n'
+IFS= read -r answer
+printf '{"type":"user","sessionId":"%s","timestamp":"%s","uuid":"user-result","parentUuid":"assistant-q","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_question","content":"React"}]}}\n' "$session" "$timestamp" >> "$transcript"
+root="$KTEAM_HOME/$KTEAM_SESSION_ID"
+printf 'question answered and completed\n' > "$root/summary.md"
+printf '{"type":"done","source":"fake-question"}\n' > "$root/markers/done.json"
+while :; do sleep 1; done

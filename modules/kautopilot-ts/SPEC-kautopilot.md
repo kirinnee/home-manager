@@ -157,6 +157,15 @@ enforces _artifact presence_, not consent.
 - **Parallelism** — `maxParallelRepos` (default small, e.g. 2): at most N ready-plan
   drivers from `schedule.ready[]` run concurrently; the rest queue. Plans in different PRs
   can run at the same time when their gates are satisfied. Per-invocation override.
+- **Writer mode** — how interactive writer steps execute: `inline` (default —
+  the main harness session thinks/drafts itself) | `deferred` (the step is
+  relayed to a separate, resumable **writer session** on a fleet account via
+  `kautopilot relay`; the main session only presents summary + questions +
+  links per turn). Pinned per session at `start --writer …`; staged per step via
+  `config.writer.steps`. Full design: `specs/deferred-writer-relay.md`;
+  command surface: CLI-CONTRACT §5d. (The "no `claude -p` from the binary" rule
+  still holds — the writer session is an interactive tmux TUI driven with
+  `--session-id`/`--resume`, kloop-style, never `--print`.)
 
 ## 7. Phases (one flat machine)
 

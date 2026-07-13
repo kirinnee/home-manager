@@ -23,10 +23,12 @@ yq -r '.ssh_keys | to_entries[] | .key' <<<"$yaml" | while read -r key; do
   chmod 0644 "$HOME/.ssh/$key.pub"
 done
 
-# load gpg keys
+# load gpg keys — batch/loopback so secret-key import also works headless:
+# over ssh there is no tty, and gpg-agent's pinentry would otherwise die with
+# "Inappropriate ioctl for device" and fail the whole activation
 yq -r '.gpg_keys | to_entries[] | .key' <<<"$yaml" | while read -r key; do
-  yq -r ".gpg_keys.\"$key\"" <<<"$yaml" | gpg --import
+  yq -r ".gpg_keys.\"$key\"" <<<"$yaml" | gpg --batch --no-tty --pinentry-mode loopback --import
   fpr=$(gpg --with-colons --fingerprint "$key" | awk -F: '/^pub/ {getline; if ($1 == "fpr") print $10}')
   echo "Imported GPG key: $fpr"
-  echo "$fpr:6:" | gpg --import-ownertrust
+  echo "$fpr:6:" | gpg --batch --no-tty --import-ownertrust
 done

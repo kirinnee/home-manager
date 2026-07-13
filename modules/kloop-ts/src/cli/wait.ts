@@ -35,7 +35,11 @@ function describe(s: MaterializedStatus): string {
   if (last.implementer && last.implementer.status === 'running') phase = 'impl';
   else if (last.completedAt) phase = 'loop-done';
   else phase = 'review';
-  return `loop ${last.loop} ${phase}`;
+  // Stall is part of the descriptor so a stall begin/end CHANGES the line and
+  // streams as an event — external monitors park on `wait`; a silent stall
+  // would be indistinguishable from progress.
+  const stall = s.stalled ? ` STALLED (${s.stallReason ?? 'idle'})` : '';
+  return `loop ${last.loop} ${phase}${stall}`;
 }
 
 /** Resolve once: wakes on the next fs change to `target`, or after `timeoutMs`. */
@@ -124,6 +128,9 @@ export async function handler(
             terminal,
             exitCode: s.exitCode,
             exitReason: s.exitReason,
+            // Stall surfacing: emitted on every change line so the begin/end
+            // transitions stream as discrete events.
+            ...(s.stalled ? { stalled: true, stalledSinceMs: s.stalledSinceMs, stallReason: s.stallReason } : {}),
           }),
         );
       } else {

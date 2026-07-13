@@ -341,6 +341,122 @@ const phase1AgentsSchema = z.object({
 	plan_reviewers: z.record(z.string(), reviewerSchema),
 });
 
+// ============================================================================
+// Deferred-writer config (specs/deferred-writer-relay.md §2). The `writer` key
+// carries a top-level .default() so config files written before this section
+// existed still parse unchanged.
+// ============================================================================
+
+const WRITER_STEP_NAMES = [
+	"brainstorm",
+	"triage",
+	"write_spec",
+	"write_master_plan",
+	"write_plans",
+	"feedback",
+] as const;
+
+type WriterStepName = (typeof WRITER_STEP_NAMES)[number];
+
+const WRITER_DEFAULTS = {
+	mode: "inline" as const,
+	steps: [...WRITER_STEP_NAMES] as WriterStepName[],
+	// The plain `claude` binary — same neutral default as kloop's pool. Point
+	// this at account wrappers (e.g. claude-auto-<name>) in config.yaml.
+	pool: { claude: 1 } as Record<string, number>,
+	reviewerModel: null as string | null,
+	turnTimeoutMins: 30,
+	maxTurnRetries: 2,
+	visualBriefPath: "~/.kfleet/skills/kautopilot/visual.md",
+};
+
+const writerConfigSchema = z
+	.object({
+		// Default execution for writer steps in NEW sessions (pinned into
+		// session.json.writerMode at `start`; later config flips never affect an
+		// in-flight session).
+		mode: z.enum(["inline", "deferred"]).default("inline"),
+		// Which writer steps defer when the session is in deferred mode — staged
+		// rollout knob (e.g. [write_spec] to soak one phase first).
+		steps: z.array(z.enum(WRITER_STEP_NAMES)).default([...WRITER_STEP_NAMES]),
+		// kloop-style weighted account map of claude wrapper binaries on PATH
+		// (single entry = fixed account). Consulted only when a phase's writer
+		// session doesn't exist yet (and on rebootstrap).
+		pool: z
+			.record(z.string(), z.number().positive())
+			.default({ ...WRITER_DEFAULTS.pool }),
+		// Optional model hint for the writer's reviewer-fan-out subagents.
+		reviewerModel: z.string().nullable().default(null),
+		// Sentinel wait per (re)spawn attempt, minutes.
+		turnTimeoutMins: z.number().min(1).max(300).default(30),
+		// Corrective respawns per turn (invalid envelope → retry in-conversation).
+		maxTurnRetries: z.number().min(0).max(10).default(2),
+		// Binary-readable visual-infographic brief handed to the writer.
+		visualBriefPath: z.string().default(WRITER_DEFAULTS.visualBriefPath),
+	})
+	.default({ ...WRITER_DEFAULTS });
+
+export type WriterConfig = z.infer<typeof writerConfigSchema>;
+
+// ============================================================================
+// Relay envelope — what the writer session writes as turn-N/reply.json.
+// Validated by the binary; caps are mobile-first. (spec §6)
+// ============================================================================
+
+export const envelopeSchema = z.object({
+	/** 2-4 lines: what changed this round. */
+	summary: z.string().min(1).max(600),
+	/** Answers to the user's previous questions. */
+	answers: z
+		.array(z.object({ question: z.string(), answer: z.string().max(2000) }))
+		.default([]),
+	/** Questions that genuinely need the USER (not spikeable). */
+	questions: z
+		.array(
+			z.object({
+				id: z.string(),
+				text: z.string().max(2000),
+				options: z.array(z.string()).optional(),
+			}),
+		)
+		.max(5)
+		.default([]),
+	/** Unresolved items, incl. risks. */
+	openItems: z.array(z.string().max(200)).max(10).default([]),
+	artifact: z.object({
+		kind: z.string(),
+		/** The working version handed out this turn. */
+		version: z.number().int().min(1),
+		/** Did this turn edit/present the artifact? Pure Q&A turns say false. */
+		revised: z.boolean(),
+	}),
+	/** Reviewer fan-out result — only for steps WITH a reviewer payload. */
+	reviews: z
+		.object({
+			clean: z.boolean(),
+			rounds: z.number().int().min(0),
+			unresolved: z.array(z.string()).default([]),
+		})
+		.optional(),
+	/** Writer's draft of the step's completion --metadata; the MAIN session
+	 *  confirms it with the user before `kautopilot complete`. */
+	proposedCompletionMetadata: z.record(z.string(), z.unknown()).optional(),
+});
+
+export type Envelope = z.infer<typeof envelopeSchema>;
+
+/** Binary-added enrichment; never written by the writer. */
+export interface EnrichedEnvelope extends Envelope {
+	links: {
+		read: string | null;
+		diff: string | null;
+		visual: string | null;
+	};
+	turn: number;
+	phaseKey: string;
+	account: string;
+}
+
 export const configSchema = z.object({
 	agents: z.object({
 		phase1: phase1AgentsSchema,
@@ -379,6 +495,7 @@ export const configSchema = z.object({
 			}),
 		)
 		.default({}),
+	writer: writerConfigSchema,
 });
 
 export type Config = z.infer<typeof configSchema>;
@@ -592,6 +709,15 @@ Output ONLY the problems found — one per line. If none, output "No issues foun
 			commitSpec: true,
 			baseBranch: "main",
 		},
+	},
+	writer: {
+		mode: "inline",
+		steps: [...WRITER_STEP_NAMES],
+		pool: { ...WRITER_DEFAULTS.pool },
+		reviewerModel: null,
+		turnTimeoutMins: 30,
+		maxTurnRetries: 2,
+		visualBriefPath: WRITER_DEFAULTS.visualBriefPath,
 	},
 };
 

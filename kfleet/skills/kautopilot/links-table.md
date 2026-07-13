@@ -9,6 +9,14 @@ guidance from SKILL.md — that's for presenting the artifact in the message bod
 end-of-message table is a single flat index of links, the one source of truth for the
 summary.)
 
+## NEVER print a raw URL — anywhere (hard rule)
+
+This applies to the table AND to every inline link in the message body: the
+visible text is always a **short name**, hyperlinked — never the URL itself.
+Viewer URLs are long; a pasted URL is unreadable on mobile. Name links by
+artifact + version: `[spec v3](…)`, `[triage v2](…)`, `[plan 1 v1](…)`,
+`[spec v2→v3 diff](…)`, `[visual](…)`.
+
 ## Exact layout — ONE column
 
 Each row is the label, hyperlinked to its URL. Do NOT use a

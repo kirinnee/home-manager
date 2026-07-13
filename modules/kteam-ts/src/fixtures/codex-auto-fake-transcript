@@ -1,0 +1,16 @@
+#!/bin/sh
+export CODEX_HOME="$KTEAM_HOME/fake-codex"
+session="11111111-2222-4333-8444-555555555555"
+transcript="$CODEX_HOME/sessions/2026/07/11/rollout-2026-07-11T00-00-00-$session.jsonl"
+mkdir -p "$(dirname "$transcript")"
+printf '>\n'
+IFS= read -r task
+timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+printf '{"timestamp":"%s","type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$timestamp" "$session" "$(pwd)" >> "$transcript"
+printf '{"timestamp":"%s","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"%s"}]}}\n' "$timestamp" "$task" >> "$transcript"
+printf '{"timestamp":"%s","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"working"}]}}\n' "$timestamp" >> "$transcript"
+printf '{"timestamp":"%s","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"finished fake Codex transcript work"}]}}\n' "$timestamp" >> "$transcript"
+root="$KTEAM_HOME/$KTEAM_SESSION_ID"
+printf 'fake Codex transcript teammate completed\n' > "$root/summary.md"
+printf '{"type":"done","source":"fake-codex-transcript"}\n' > "$root/markers/done.json"
+while :; do sleep 1; done

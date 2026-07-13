@@ -1,0 +1,4 @@
+interface:
+  display_name: 'KTeam'
+  short_description: 'Coordinate full-strength detached AI teammates'
+  default_prompt: 'Use $kteam to recommend and coordinate detached Claude or Codex teammates.'

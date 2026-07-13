@@ -8,6 +8,7 @@ import {
 	listSessions,
 } from "../core/db";
 import { checkLock, listLockKeys, releaseLock } from "../core/lock";
+import { killWriterSessions } from "../core/writer/relay";
 import { confirmAction } from "../llm/inquirer";
 import { logError, logOk } from "../util/format";
 
@@ -70,6 +71,9 @@ async function stopAndCleanup(sessionId: string): Promise<boolean> {
 }
 
 async function deleteSessionDir(sessionId: string): Promise<void> {
+	// Writer tmux sessions would otherwise outlive the session dir (holding a
+	// real Claude session); scratch/ is removed with the dir itself.
+	await killWriterSessions(sessionId);
 	rmSync(sessionDir(sessionId), { recursive: true, force: true });
 	deleteSession(sessionId);
 }

@@ -15,12 +15,14 @@ import { createConfigCommand } from "./cli/config";
 import { createDashCommand } from "./cli/dash";
 import { createDeleteCommand } from "./cli/delete";
 import { createDiffCommand } from "./cli/diff";
+import { createDiscussionCommand } from "./cli/discussion";
 import { createLogEventCommand } from "./cli/log-event";
 import { createLogsCommand } from "./cli/logs";
 import { createNextCommand } from "./cli/next";
 import { createOrgCommand } from "./cli/org";
 import { createPsCommand } from "./cli/ps";
 import { createRecordCommand } from "./cli/record";
+import { createRelayCommand } from "./cli/relay";
 import { createResetCommand } from "./cli/reset";
 import { createReviseCommand } from "./cli/revise";
 import { createScheduleCommand } from "./cli/schedule";
@@ -42,6 +44,8 @@ program
 	.addCommand(createNextCommand())
 	.addCommand(createCompleteCommand())
 	.addCommand(createReviseCommand())
+	.addCommand(createRelayCommand())
+	.addCommand(createDiscussionCommand())
 	.addCommand(createScheduleCommand())
 	.addCommand(createRecordCommand())
 	.addCommand(createDiffCommand())

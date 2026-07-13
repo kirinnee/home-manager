@@ -272,6 +272,7 @@ rec {
       tesseract
       age
       sops
+      restic # box nightly backups -> R2 (scripts/box/backup.sh)
       nil
       atomi.cyanprint
       atomi.attic
@@ -320,10 +321,13 @@ rec {
       oci-oke-allow-my-ip
       kloop
       kautopilot
+      kteam
+      kteamd
       klaude
       kodex
       kfleet
       atomi.clickup_cli
+      atomi.nsc
       grafana-loki
       prometheus.cli
       grafanactl
@@ -418,6 +422,10 @@ rec {
     ssh = {
       enable = true;
       enableDefaultConfig = false;
+      # Machine-local host entries (nix config is read-only): scripts/box/up.sh
+      # writes ~/.ssh/config.d/box.conf ("Host box" -> the provisioned box) so
+      # `ssh box` / `zed ssh://box/...` work. Glob: no files -> silently ignored.
+      includes = [ "~/.ssh/config.d/*.conf" ];
       settings = {
         "*" = {
           ForwardAgent = false;
@@ -660,25 +668,6 @@ rec {
               aws sts get-caller-identity
             }
 
-            codex() {
-              case "''${1:-}" in
-                "")
-                  command codex --remote unix:// resume --all
-                  ;;
-                resume|fork|archive|delete|unarchive)
-                  command codex --remote unix:// "$@"
-                  ;;
-                exec|e|review|login|logout|mcp|plugin|mcp-server|app-server|remote-control|app|completion|update|doctor|sandbox|debug|apply|a|archive|delete|unarchive|cloud|exec-server|features|help|-h|--help|-V|--version)
-                  command codex "$@"
-                  ;;
-                --remote|--remote-auth-token-env)
-                  command codex "$@"
-                  ;;
-                *)
-                  command codex --remote unix:// "$@"
-                  ;;
-              esac
-            }
           '';
           wtShell = lib.mkOrder 5000 ''
             if command -v wt >/dev/null 2>&1; then eval "$(command wt config shell init zsh)"; fi
@@ -688,6 +677,17 @@ rec {
           # the end of the shell config.
           zoxideShell = lib.mkOrder 5500 ''
             eval "$(zoxide init zsh --cmd cd)"
+
+            # Agent shells can restore chpwd_functions from a pre-init snapshot,
+            # removing zoxide's hook after .zshrc has loaded. Repair the missing
+            # hook on the next zoxide-powered cd instead of emitting the generic
+            # "initialize zoxide at the end" warning (it is already last here).
+            __zoxide_doctor() {
+              typeset -ga chpwd_functions
+              if (( ''${chpwd_functions[(Ie)__zoxide_hook]:-0} == 0 )); then
+                chpwd_functions+=(__zoxide_hook)
+              fi
+            }
           '';
         in
         lib.mkMerge [
@@ -814,6 +814,11 @@ rec {
         kapst = "kautopilot status";
         kapps = "kautopilot ps";
         kapx = "kautopilot stop";
+
+        # kteam
+        kt = "kteam";
+        ktps = "kteam ps";
+        ktr = "kteam recommend";
 
         # kloop
         kp = "kloop";

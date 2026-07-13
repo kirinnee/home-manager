@@ -41,6 +41,14 @@
     masApps = { };
   };
 
+  # nix-darwin includes the default Nix profile even when it has no terminfo
+  # database. Codex Doctor treats any missing TERMINFO_DIRS entry as fatal.
+  environment.variables.TERMINFO_DIRS = lib.mkForce (lib.concatStringsSep ":" [
+    "$HOME/.nix-profile/share/terminfo"
+    "/run/current-system/sw/share/terminfo"
+    "/usr/share/terminfo"
+  ]);
+
   # ============================================================
   # System Packages (installed to /run/current-system/sw)
   # ============================================================

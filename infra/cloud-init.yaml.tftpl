@@ -1,0 +1,15 @@
+#cloud-config
+
+# Shared first-boot config for every box cloud (AWS / DigitalOcean / OCI).
+# Creates the login user with the sops-provided SSH public key; everything
+# else (Nix, home-manager, secrets, repos) is layered on afterwards by
+# scripts/box/replicate.sh.
+
+users:
+  - name: ${user}
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: users
+    shell: /bin/bash
+    lock_passwd: true
+    ssh_authorized_keys:
+      - ${ssh_public_key}

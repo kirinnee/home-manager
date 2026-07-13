@@ -144,6 +144,29 @@ export function serializeConfigWithComments(config: Config): string {
 		lines.push(`    commitSpec: ${policy.commitSpec}`);
 		lines.push(`    baseBranch: ${policy.baseBranch}`);
 	}
+	lines.push("");
+
+	// Writer section — deferred-writer (relay) settings.
+	lines.push(
+		"# Deferred writer: run writer steps (triage/spec/plans/…) in a separate",
+	);
+	lines.push(
+		"# resumable Claude session on a fleet account instead of inline. `mode` is",
+	);
+	lines.push(
+		"# the default for NEW sessions (pinned at start); `steps` stages the rollout.",
+	);
+	lines.push("writer:");
+	lines.push(`  mode: ${config.writer.mode}`);
+	lines.push(`  steps: [${config.writer.steps.join(", ")}]`);
+	lines.push("  pool:");
+	for (const [account, weight] of Object.entries(config.writer.pool)) {
+		lines.push(`    ${account}: ${weight}`);
+	}
+	lines.push(`  reviewerModel: ${config.writer.reviewerModel ?? "null"}`);
+	lines.push(`  turnTimeoutMins: ${config.writer.turnTimeoutMins}`);
+	lines.push(`  maxTurnRetries: ${config.writer.maxTurnRetries}`);
+	lines.push(`  visualBriefPath: ${config.writer.visualBriefPath}`);
 
 	return `${lines.join("\n")}\n`;
 }

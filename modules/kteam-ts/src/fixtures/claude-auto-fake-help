@@ -1,0 +1,16 @@
+#!/bin/sh
+export CLAUDE_CONFIG_DIR="$KTEAM_HOME/fake-claude"
+printf '>\n'
+IFS= read -r task
+printf 'received: %s\n' "$task"
+root="$KTEAM_HOME/$KTEAM_SESSION_ID"
+mkdir -p "$root/markers" "$root/channel"
+printf '{"type":"question","message":"choose a color"}\n' >> "$root/channel/outbox.jsonl"
+printf '{"type":"question","message":"choose a color"}\n' > "$root/markers/needs-help.json"
+printf 'waiting for user input\n>\n'
+IFS= read -r reply
+printf 'received reply: %s\n' "$reply"
+rm -f "$root/markers/needs-help.json"
+printf 'interactive fake teammate completed\n' > "$root/summary.md"
+printf '{"type":"done","source":"fake-interactive-send"}\n' > "$root/markers/done.json"
+while :; do sleep 1; done

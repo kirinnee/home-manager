@@ -96,6 +96,13 @@ export interface SessionMeta {
 	execMode: ExecMode;
 	/** Whether the binary may merge a ready PR itself (`auto`) or must ask (`manual`). */
 	mergeMode: MergeMode;
+	/**
+	 * How writer steps execute for THIS session — pinned at `start` (flag → config
+	 * default) so later config flips never affect an in-flight session. Absent
+	 * (pre-feature sessions) means inline. Mutable only via the explicit
+	 * `relay --fallback-inline` escape hatch. (specs/deferred-writer-relay.md §2)
+	 */
+	writerMode?: "inline" | "deferred";
 	maxParallelRepos: number;
 	repos: RepoEntry[];
 	/** AtomiCloud service-tree tags (atomicloud-only; undefined for liftoff). */

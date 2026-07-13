@@ -11,6 +11,11 @@ import { getDirHash } from '../deps';
 
 class TmuxServiceImpl implements TmuxService {
   private statusDir = path.join(os.tmpdir(), 'kloop', 'status');
+  /** Last pane snapshot written per session — dedupes identical fallback
+   *  snapshots so the log's mtime only advances on REAL pane changes (the
+   *  stall monitor treats that mtime as an activity heartbeat). Entries are
+   *  cleared when the session is killed. */
+  private lastPaneSnapshot = new Map<string, string>();
 
   constructor(private spawn: typeof Bun.spawn = Bun.spawn.bind(Bun)) {}
 
@@ -63,6 +68,7 @@ class TmuxServiceImpl implements TmuxService {
       stderr: 'ignore',
     });
     const exitCode = await proc.exited;
+    this.lastPaneSnapshot.delete(sessionName);
     return exitCode === 0;
   }
 
@@ -495,7 +501,17 @@ class TmuxServiceImpl implements TmuxService {
     // Transcript not found (or copy failed) this tick. If we'd already been copying it, keep
     // the last good copy rather than clobbering it with a stale pane snapshot.
     if (wasCopying) return { copying: true, offset: copyOffset };
-    await this.snapshotPane(sessionName, logFile);
+    // Skip the write when the pane hasn't changed since the last snapshot: an
+    // unconditional rewrite advances the log's mtime every 2s, which reads as
+    // "activity" to the implementer stall monitor and would mask a frozen
+    // confirm dialog in this fallback mode.
+    try {
+      const pane = await this.capturePane(sessionName, true);
+      if (pane && pane !== this.lastPaneSnapshot.get(sessionName)) {
+        await this.writeLogFile(logFile, pane);
+        this.lastPaneSnapshot.set(sessionName, pane);
+      }
+    } catch {}
     return { copying: false, offset: copyOffset };
   }
 

@@ -20,7 +20,8 @@ a detail, not a separate concept. Full contract:
 
 Supporting files (same folder as this skill): [`visual.md`](visual.md) — the full
 HTML-infographic design brief; [`links-table.md`](links-table.md) — the exact
-end-of-message links-table spec.
+end-of-message links-table spec; [`relay.md`](relay.md) — the **deferred-writer
+relay loop** (used when a descriptor carries `execution: "deferred"`).
 
 ## The loop
 
@@ -29,7 +30,14 @@ loop:
   d = json(`kautopilot next --json`)
   if d.done:                 # see "Reading `done`" — NOT always session-complete
       handle(d); break/continue accordingly
-  if d.kind == "interactive":
+  if d.execution == "deferred":   # deferred writer step — do NOT run d.prompt
+      follow relay.md VERBATIM: drive turns with `kautopilot relay` (parked in
+      the background), present each envelope, complete after approval. The
+      reviewer fan-out, visuals, spikes, and `revise` are the WRITER's job in
+      this mode — never yours. Deferred mode needs **NO context reset** — the
+      writer session holds the heavy context, so the main session stays lean;
+      just continue the loop after the relay approval flow completes.
+  elif d.kind == "interactive":
       run d.prompt INLINE; for WRITER steps run the per-revision loop below
       (reviewers → `kautopilot revise` to mint+present each version → user feedback)
   else:  # d.kind == "agent"
@@ -43,6 +51,31 @@ loop:
   else:
       continue the loop.
 ```
+
+### Push a notification EVERY time you need the user (hard rule)
+
+kautopilot sessions run long and the user steps away (often to their phone).
+**Whenever the session transitions to WAITING ON THE USER — for anything at
+all — send a push notification** (Claude: the `PushNotification` tool; Codex:
+whatever notify mechanism the harness offers, else skip) in the SAME turn you
+present the ask. One line, lead with what they must do. This includes (not
+exhaustive — the rule is "any human input or human-relevant milestone"):
+
+- a relay envelope lands with **questions** or a new **version to review/approve**
+  (e.g. `spec v3 ready — 2 questions`)
+- an inline writer version is presented for review/approval
+- triage repo/path/branch confirmation, metadata confirmation, `feedback_check`
+- a **kloop run finishes** (completed OR conflict/failed — e.g. `kloop api/plan-1
+done — commit next` / `kloop conflict in web/plan-2 — needs your call`)
+- a **conflict or decision** comes back from any sub-agent/driver
+- **PR babysitting hits a problem** you can't fix (blocked CI, human-review
+  thread, permissions) or a PR reaches **ready-to-merge** in `manual` mode
+- a **merge/release gate** waits on the user; **feedback** is requested
+- any error/remediation choice (e.g. deferred-writer failure options)
+
+Don't push for things that need nothing from them (routine progress, a step you
+immediately continue past). If in doubt whether they're waiting on you or you're
+waiting on them — if it's the latter, push.
 
 ### By harness — subagents + tool-name translation
 
@@ -129,8 +162,10 @@ you `complete`, confirm the agreed direction + open-items/assumptions are writte
 the artifact file (the writer prompt already requires this) — anything that lived only
 in the conversation is gone after `/clear`.
 
-(Agent steps, the `code` steps, and the DAG `schedule`/`record` loop do **not** stop
-for a reset — only the interactive approval gates do.)
+(Agent steps, the `code` steps, the DAG `schedule`/`record` loop, and **deferred
+writer steps** do **not** stop for a reset — only the _inline_ interactive approval
+gates do. Deferred mode keeps the main session lean by construction — the writer
+holds the heavy context — so its approval gates need no `/clear` + resume.)
 
 ### Reading `done` — a `{done:true}` is not always "finished"
 
@@ -328,8 +363,8 @@ loop:
       break
   # 1. RUN ready plans (deps satisfied), up to maxParallelRepos at once.
   for plan in s.ready:
-      provision/locate the repo's worktree off the LATEST base (worktrunk `wt`)
-      `kloop init --workspace <worktree> --spec <plan>`      # prints the Run ID
+      provision/locate the repo's worktree off the LATEST base (worktrunk `wt`); keep its ABSOLUTE path
+      `kloop init --workspace <ABS-worktree> --spec <plan>`  # ABSOLUTE path, never CWD-relative; prints the Run ID
       `kautopilot record started --repo <r> --plan <p> --kloop <runId>`
       `kloop run -d <runId>`; park on `kloop wait`; RESOLVE CONFLICTS yourself
       on success: commit (the commit sub-agent), then
@@ -395,8 +430,10 @@ allReady, done, mergeMode }` — or `{ ok:false, error }` (still **exit 0**, e.g
   - **`write_master_plan`** is the **orchestration artifact**, presented and approved
     **before** `write_plans` (it locks the order of execution first). Run the normal
     per-revision loop (revise → visual → present → approve). It must lay out: the **PR/branch
-    layout** (a repo MAY open several PRs on several branches — give each PR an id, repo,
-    branch, title, and the `plan-<N>`s it ships); the **dependency DAG with gate levels**
+    layout** (**default ONE PR + ONE plan per repo** — kloop handles a substantial change in
+    one pass; split into more plans/PRs only for separate repos, a real merge/release ordering
+    gate, a change too big for one kloop run, or independently-releasable units — give each PR
+    an id, repo, branch, title, and the `plan-<N>`s it ships); the **dependency DAG with gate levels**
     (`completed` | `merged` | `released`, edges may span repos); and a **mermaid `graph TD`**
     of the DAG (the dashboard renders it). Confirm the **merge policy** (`manual` asks before
     merging / `auto` merges ready PRs — see the ⚠️ in "Start") here too. On approval,
@@ -419,11 +456,29 @@ allReady, done, mergeMode }` — or `{ ok:false, error }` (still **exit 0**, e.g
 
 ### Running kloop for a ready plan (you drive it)
 
-In the DAG model the binary does **not** run or watch kloop. For each `ready` plan from
-`kautopilot schedule`, spawn a sub-agent that **drives kloop for that one plan** in the
-repo's worktree (off the latest base) and keeps its noisy output out of the conversation:
+In the DAG model the binary does **not** run or watch kloop — YOU drive it. **Do NOT bury the
+whole run inside one subagent** (the classic mistake: a subagent blocks on `kloop wait` and
+dies at the Bash ~10-min cap, orphaning the daemon and recording nothing). `kloop init` /
+`record started` / `kloop run -d` are all **instant** — `run -d` is a daemon that returns
+immediately and logs to its own files, so there is **nothing noisy to hide**. So: the **main
+thread runs steps 1–3 directly**, then **parks on the wait** (step 4), and only the **commit /
+PR-polish are subagents** (step 5). For each `ready` plan from `kautopilot schedule`, in the
+repo's worktree (off the latest base):
 
-1. `kloop init --workspace <worktree> --spec <plan>` → note the Run ID it prints.
+> ⚠️ **`--workspace` MUST be an ABSOLUTE path.** This bug has burned us many times.
+> `kloop init` falls back to the current directory when `--workspace` is missing OR
+> relative (`path.resolve(opts.workspace ?? process.cwd())`), and the Bash CWD is the
+> session's launch/hub dir that **resets between calls** — so a relative/omitted workspace
+> inits the run in the HUB, not the repo, and the whole plan runs on the wrong tree.
+> **`direnv exec <dir>` does NOT help** — it loads that dir's env but does not change the
+> working directory. Capture the absolute path `wt` prints and pass it verbatim — an
+> absolute `--workspace` makes CWD irrelevant. (`cd` works, but CWD resets between Bash
+> calls, so relying on it is fragile — the absolute path is the robust fix.)
+
+1. `kloop init --workspace <ABS-worktree> --spec <plan>` → note the Run ID it prints.
+   `<ABS-worktree>` = the **absolute** path `wt` printed for this repo; confirm it exists
+   (`test -d`) before init. If you only have a relative path, make it absolute first —
+   never pass a bare/relative workspace.
 2. `kautopilot record started --repo <r> --plan <p> --kloop <runId>`.
 3. `kloop run -d <runId>` (**daemon** — output goes to kloop's logs, not your context).
 4. **Wait for the run WITHOUT polling.** `kloop wait <runId>` blocks until the run is
@@ -435,10 +490,13 @@ repo's worktree (off the latest base) and keeps its noisy output out of the conv
      per phase change, and the monitor **ends itself** when the run goes terminal. Keep
      working (hand other `ready` plans off in parallel); the terminal event wakes you. Use
      a long `timeout_ms` (kloop runs take many minutes) or `persistent: true`.
-   - **Codex:** delegate a **cheap, fast subagent** (pick the smallest/cheapest model the
-     harness offers) whose only job is to run `kloop wait <runId>` and return the final
-     status line. The **main thread blocks on that subagent** — parked, not polling — and
-     resumes when it returns. A cheap model is fine: it only relays kloop's terminal state.
+   - **Codex (no `Monitor`):** delegate a **cheap, fast subagent** (smallest/cheapest model)
+     whose only job is to run `kloop wait <runId>` and return the final status line — the
+     **main thread parks on that subagent** (not polling), resuming when it returns. A cheap
+     model is fine; it only relays kloop's terminal state. **For parallelism** (several
+     `ready` plans at once), delegate one wait-subagent per run **in parallel** via Codex's
+     native multi-agent delegation and resume as each returns — don't serialize the waits
+     unless you want to.
 
    Once `kloop wait` returns terminal, read `kloop describe <id>` once for a summary.
 
