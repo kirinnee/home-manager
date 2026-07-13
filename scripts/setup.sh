@@ -67,6 +67,17 @@ if [ "$KERNEL" = "Darwin" ]; then
 else
   echo "🐧 Setting up home-manager (standalone)..."
 
+  # Trust this user in the nix daemon (Determinate keeps custom config in
+  # nix.custom.conf). Without this the daemon IGNORES the substituters set by
+  # the home-manager-generated ~/.config/nix/nix.conf — the effective cache
+  # list becomes empty and every switch after the first compiles the world
+  # from source. Needs passwordless sudo (cloud-init grants it).
+  if sudo -n true 2>/dev/null && ! sudo grep -qs "extra-trusted-users.*$USER" /etc/nix/nix.custom.conf; then
+    echo "extra-trusted-users = $USER" | sudo tee -a /etc/nix/nix.custom.conf >/dev/null
+    sudo systemctl restart nix-daemon 2>/dev/null || true
+    echo "🔐 Nix daemon now trusts $USER (substituters honored)."
+  fi
+
   echo "🔄 Switching home-manager configuration..."
   cd "$CONFIG_DIR"
   # -b hm-backup: a fresh cloud image ships stock ~/.bashrc / ~/.profile that
