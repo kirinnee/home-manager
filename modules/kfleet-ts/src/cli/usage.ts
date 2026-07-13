@@ -52,14 +52,23 @@ export function createUsageCommand(): Command {
     .option('--json', 'machine-readable output')
     .option('--all', 'include untracked (non usage-based) accounts')
     .option('--no-relogin', 'skip the pre-probe token-free refresh of expired OAuth tokens')
+    .option('--no-sync', 'skip the pre-probe credential heal (clone a valid sibling cred onto dead dirs)')
     .option('--concurrency <n>', 'how many credentials to probe at once', v => Number.parseInt(v, 10))
     .option('--timeout <sec>', 'per-probe HTTP timeout in seconds', v => Number.parseInt(v, 10))
     .action(
-      async (opts: { json?: boolean; all?: boolean; relogin?: boolean; concurrency?: number; timeout?: number }) => {
+      async (opts: {
+        json?: boolean;
+        all?: boolean;
+        relogin?: boolean;
+        sync?: boolean;
+        concurrency?: number;
+        timeout?: number;
+      }) => {
         const config = loadOrDie(() => loadConfig());
         const u = config.usage;
-        // --no-relogin forces it off; otherwise follow config.usage.relogin.
+        // --no-relogin/--no-sync force off; otherwise follow config.usage.*.
         const relogin = opts.relogin === false ? false : u.relogin;
+        const sync = opts.sync === false ? false : u.sync;
         if (!opts.json)
           logDim(
             `probing subscription accounts (read-only, does not use quota)${relogin ? '; refreshing expired tokens first' : ''}…`,
@@ -69,6 +78,7 @@ export function createUsageCommand(): Command {
           timeoutMs: (opts.timeout ?? u.timeout) * 1000,
           atLimitPercent: u.atLimitPercent,
           relogin,
+          sync,
         });
 
         if (opts.json) {

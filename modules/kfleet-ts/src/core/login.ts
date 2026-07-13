@@ -20,7 +20,7 @@ import type { Kind, ResolvedAgent } from './types';
 const KEYCHAIN_TIMEOUT_MS = 5_000;
 const EXPIRY_SKEW_MS = 60_000; // a token this close to expiry counts as expired
 
-export type CredState = 'valid' | 'refreshable' | 'missing';
+type CredState = 'valid' | 'refreshable' | 'missing';
 
 export interface MemberStatus {
   /** resolved (variant-infixed) agent name, e.g. "auto-kirin" */

@@ -153,6 +153,7 @@ const usageSchema = z
     timeout: z.number().min(1).default(15), // seconds per HTTP probe before it's an error
     atLimitPercent: z.number().min(1).max(100).default(100), // 5h OR weekly ≥ this ⇒ at limit
     relogin: z.boolean().default(true), // pre-probe token-free re-login for expired OAuth accounts
+    sync: z.boolean().default(true), // pre-probe heal: clone a valid sibling credential onto dead dirs of the same identity
   })
   .default({});
 

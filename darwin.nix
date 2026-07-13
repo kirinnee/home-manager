@@ -6,6 +6,11 @@
   # ============================================================
   nix.enable = false;
 
+  # sudo via Touch ID (writes pam_tid into /etc/pam.d/sudo_local, which
+  # survives macOS updates). Interactive sudo — hms, terminal — prompts the
+  # fingerprint sensor instead of a password.
+  security.pam.services.sudo_local.touchIdAuth = true;
+
   homebrew = {
     enable = true;
     taps = [ ];

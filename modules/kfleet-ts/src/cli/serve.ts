@@ -73,7 +73,7 @@ function renderMetrics(cache: Cache): string {
 function renderUsageMetrics(cache: UsageCache): string {
   const lines: string[] = [];
   const lbl = (r: AccountUsage): string =>
-    `binary="${esc(r.binary)}",kind="${esc(r.kind)}",provider="${esc(r.provider ?? '')}"`;
+    `binary="${esc(r.binary)}",kind="${esc(r.kind)}",provider="${esc(r.provider ?? '')}",account="${esc(r.account ?? '')}"`;
 
   lines.push('# HELP kfleet_account_usage_based Whether the account is a usage-windowed subscription (1) or not (0).');
   lines.push('# TYPE kfleet_account_usage_based gauge');
@@ -138,6 +138,7 @@ async function refreshUsage(cache: UsageCache): Promise<void> {
       timeoutMs: cfg.usage.timeout * 1000,
       atLimitPercent: cfg.usage.atLimitPercent,
       relogin: cfg.usage.relogin,
+      sync: cfg.usage.sync,
     });
     cache.at = Date.now();
   } catch {
