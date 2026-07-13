@@ -322,8 +322,15 @@ program
   .command('wait')
   .argument('<id>')
   .option('--json')
-  .action(async (id, options: { json?: boolean }) => {
+  .option('--timeout <seconds>', 'give up after this many seconds (exit code 124, prints the current state)')
+  .action(async (id, options: { json?: boolean; timeout?: string }) => {
     const api = await client();
+    const timeoutSec = options.timeout === undefined ? undefined : Number(options.timeout);
+    if (timeoutSec !== undefined && (!Number.isFinite(timeoutSec) || timeoutSec <= 0)) {
+      console.error(`invalid --timeout: ${options.timeout}`);
+      process.exit(2);
+    }
+    const deadline = timeoutSec === undefined ? undefined : Date.now() + timeoutSec * 1000;
     while (true) {
       const view = await api.get(id);
       if (
@@ -336,6 +343,12 @@ program
         if (options.json) console.log(JSON.stringify(view.state, null, 2));
         else printView(view);
         return;
+      }
+      if (deadline !== undefined && Date.now() >= deadline) {
+        if (options.json) console.log(JSON.stringify(view.state, null, 2));
+        else printView(view);
+        console.error(`kteam wait: timed out after ${timeoutSec}s (session still ${view.state.status})`);
+        process.exit(124);
       }
       await Bun.sleep(1000);
     }

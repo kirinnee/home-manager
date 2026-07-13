@@ -186,6 +186,32 @@ export class TmuxController {
       '-e',
       'CLAUDECODE=',
     ];
+    // Forward the daemon's environment into the pane. `tmux new-session`
+    // attaches to a possibly pre-existing tmux server whose global env lacks
+    // the wrapper secrets (MINIMAX_API_KEY, ANTHROPIC_*, ...); without this a
+    // token-based wrapper exports an EMPTY auth token and the TUI silently
+    // boots logged-out while `kteam status` keeps saying "running".
+    const managedEnv = new Set([
+      'PATH',
+      'KTEAM_HOME',
+      'KTEAM_SESSION_ID',
+      'KTEAM_URL',
+      'CLAUDECODE',
+      'TMUX',
+      'TMUX_PANE',
+      'TERM',
+      'TERM_PROGRAM',
+      'TERM_PROGRAM_VERSION',
+      'TERM_SESSION_ID',
+      'PWD',
+      'OLDPWD',
+      'SHLVL',
+      '_',
+    ]);
+    for (const [key, value] of Object.entries(process.env)) {
+      if (value === undefined || managedEnv.has(key)) continue;
+      env.push('-e', `${key}=${value}`);
+    }
     const result = await run([
       'tmux',
       'new-session',
