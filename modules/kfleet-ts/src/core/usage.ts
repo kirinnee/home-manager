@@ -13,7 +13,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { jwtExpMs, keychainSuffix, readKeychain } from './creds';
 import { KIND_SPECS } from './kinds';
-import { type Identity, pickDonor, scanIdentities, syncIdentity } from './login';
+import { type Identity, isOAuth, pickDonor, scanIdentities, syncIdentity } from './login';
 import { resolveAll } from './merge';
 import type { Config, Kind, ResolvedAgent } from './types';
 
@@ -26,6 +26,7 @@ export interface AccountUsage {
   binary: string; // e.g. "claude-auto-opus48"
   kind: Kind;
   name: string; // resolved name, e.g. "auto-opus48"
+  account?: string; // login identity (base agent) this binary belongs to, e.g. "kirin"
   provider: UsageProvider | null; // null = not a tracked/usage-windowed account
   usageBased: boolean; // true iff provider !== null
   ok: boolean; // probe attempted AND succeeded
@@ -74,30 +75,6 @@ function isoToMs(s: unknown): number | undefined {
   if (typeof s !== 'string') return undefined;
   const t = Date.parse(s);
   return Number.isNaN(t) ? undefined : t;
-}
-
-/** Read a macOS Keychain generic-password secret by service name (-w = raw). Bounded
- *  by `timeoutMs` so a locked/stalled Keychain can't hang the whole probe cycle. */
-export async function readKeychain(service: string, timeoutMs: number): Promise<string | null> {
-  try {
-    const proc = Bun.spawn({
-      cmd: ['security', 'find-generic-password', '-s', service, '-w'],
-      stdout: 'pipe',
-      stderr: 'ignore',
-      stdin: 'ignore',
-    });
-    const timer = setTimeout(() => proc.kill(), timeoutMs);
-    try {
-      const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-      if (code !== 0) return null;
-      const trimmed = out.trim();
-      return trimmed.length ? trimmed : null;
-    } finally {
-      clearTimeout(timer);
-    }
-  } catch {
-    return null;
-  }
 }
 
 /** GET with a timeout; returns the parsed JSON body or throws. HTTP errors carry a
@@ -333,20 +310,6 @@ const secToMs = (v: unknown): number | undefined =>
 const REFRESH_SKEW_MS = 5 * 60_000; // refresh when within this of expiry
 const DEFAULT_RELOGIN_TIMEOUT_MS = 30_000;
 
-/** Decode a JWT's `exp` (seconds → epoch ms) without verifying the signature.
- *  Exported for tests. */
-export function jwtExpMs(token: string | undefined): number | undefined {
-  if (!token) return undefined;
-  const payload = token.split('.')[1];
-  if (!payload) return undefined;
-  try {
-    const json = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as { exp?: number };
-    return typeof json.exp === 'number' ? json.exp * 1000 : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 /** Whether an OAuth account's access token is expired/near-expiry AND refreshable
  *  (a durable refresh token is present). Zero-network — reads only local creds. */
 async function oauthNeedsRefresh(kind: Kind, configDir: string, now: number, timeoutMs: number): Promise<boolean> {
@@ -448,20 +411,17 @@ async function reloginExpiredOAuth(
   const timeoutMs = opts.timeoutMs ?? DEFAULT_RELOGIN_TIMEOUT_MS;
   const concurrency = Math.max(1, opts.concurrency ?? 4);
 
-  // One representative agent per OAuth credential (dedup so we never refresh the
-  // same rotating refresh token twice in a cycle).
+  // One refresh per CONFIG DIR (not per identity credId): every dir keeps its own
+  // token copy that expires independently, so each needs its own refresh pass.
   const seen = new Set<string>();
   const targets: { kind: Kind; configDir: string; binary: string }[] = [];
   for (const agent of resolveAll(config)) {
     const cls = classifyAgent(agent, env);
     if (!cls || (cls.provider !== 'anthropic' && cls.provider !== 'codex')) continue;
-    if (seen.has(cls.credId)) continue;
-    seen.add(cls.credId);
-    targets.push({
-      kind: agent.kind,
-      configDir: KIND_SPECS[agent.kind].configDir(agent.name),
-      binary: `${agent.kind}-${agent.name}`,
-    });
+    const configDir = KIND_SPECS[agent.kind].configDir(agent.name);
+    if (seen.has(configDir)) continue;
+    seen.add(configDir);
+    targets.push({ kind: agent.kind, configDir, binary: `${agent.kind}-${agent.name}` });
   }
 
   // The local credential read (keychain/auth.json) is fast — cap it short, independent
@@ -491,8 +451,13 @@ interface CredTarget {
   credId: string;
   provider: UsageProvider;
   run: (timeoutMs: number) => Promise<Windows>;
-  members: { binary: string; kind: Kind; name: string }[];
+  members: { binary: string; kind: Kind; name: string; account: string; configDir: string }[];
 }
+
+/** The login identity a resolved agent belongs to: all its variants (and any
+ *  agent pointing at it via `identity:`) share one provider account — and thus
+ *  ONE quota window, so OAuth usage probes dedupe on this. */
+export const identityOf = (agent: ResolvedAgent): string => agent.identity ?? agent.base ?? agent.name;
 
 /** Decide an agent's usage provider + credential identity, or null if untracked.
  *  Exported for tests. */
@@ -526,8 +491,10 @@ export function classifyAgent(
     // No base-url override (or an explicit anthropic host) ⇒ a real Anthropic
     // subscription account authenticated via the OAuth keychain. Any OTHER base
     // url (minimax/deepseek/…) is a non-windowed API-key account: untracked.
+    // Keyed by IDENTITY (not config dir): the quota window is account-level, so
+    // every variant dir of one account shares a single probe.
     if (!baseUrl || baseUrl.includes('anthropic.com')) {
-      return { provider: 'anthropic', credId: `anthropic:${keychainSuffix(configDir)}` };
+      return { provider: 'anthropic', credId: `anthropic:id:${identityOf(agent)}` };
     }
     return null;
   }
@@ -537,10 +504,10 @@ export function classifyAgent(
   try {
     const auth = JSON.parse(readFileSync(authPath, 'utf8')) as { auth_mode?: string; tokens?: { account_id?: string } };
     if (auth.auth_mode === 'chatgpt' && auth.tokens?.account_id) {
-      // Keyed per CONFIG DIR, not per account_id: each codex dir keeps its OWN token
-      // copy that expires/refreshes independently, so auth_ok + relogin must be per dir
-      // (two dirs of the same ChatGPT account can have one fresh and one dead token).
-      return { provider: 'codex', credId: `codex:${keychainSuffix(configDir)}` };
+      // Keyed by IDENTITY: quota is account-level, so one probe covers every dir.
+      // Each dir still keeps its OWN token copy that expires/refreshes independently
+      // — auth_ok and relogin stay per DIR (see probeUsage's per-member override).
+      return { provider: 'codex', credId: `codex:id:${identityOf(agent)}` };
     }
   } catch {
     /* unreadable auth.json — treat as untracked */
@@ -548,26 +515,32 @@ export function classifyAgent(
   return null;
 }
 
-/** Build the dedup list of credentials to probe from the resolved fleet. */
-function planTargets(config: Config, env: NodeJS.ProcessEnv): { targets: CredTarget[]; agents: ResolvedAgent[] } {
-  const agents = resolveAll(config);
+/** Build the dedup list of credentials to probe from the resolved fleet. OAuth
+ *  targets probe through the identity's DONOR dir (freshest credential) when one
+ *  is known — quota is account-level, so any valid member's token answers for all. */
+function planTargets(
+  agents: ResolvedAgent[],
+  env: NodeJS.ProcessEnv,
+  donorDirs: Map<string, string> = new Map(),
+): CredTarget[] {
   const byCred = new Map<string, CredTarget>();
   for (const agent of agents) {
     const cls = classifyAgent(agent, env);
     if (!cls) continue;
+    const configDir = KIND_SPECS[agent.kind].configDir(agent.name);
     const binary = `${agent.kind}-${agent.name}`;
-    const member = { binary, kind: agent.kind, name: agent.name };
+    const member = { binary, kind: agent.kind, name: agent.name, account: identityOf(agent), configDir };
     const existing = byCred.get(cls.credId);
     if (existing) {
       existing.members.push(member);
       continue;
     }
-    const configDir = KIND_SPECS[agent.kind].configDir(agent.name);
+    const probeDir = donorDirs.get(cls.credId) ?? configDir;
     const run: CredTarget['run'] =
       cls.provider === 'anthropic'
-        ? t => probeAnthropic(configDir, t)
+        ? t => probeAnthropic(probeDir, t)
         : cls.provider === 'codex'
-          ? t => probeCodex(configDir, t)
+          ? t => probeCodex(probeDir, t)
           : cls.missingToken
             ? async () => ({
                 ok: false,
@@ -580,7 +553,7 @@ function planTargets(config: Config, env: NodeJS.ProcessEnv): { targets: CredTar
               : t => probeZai(expandEnv(agent.env?.ANTHROPIC_AUTH_TOKEN, env)!, t);
     byCred.set(cls.credId, { credId: cls.credId, provider: cls.provider, run, members: [member] });
   }
-  return { targets: [...byCred.values()], agents };
+  return [...byCred.values()];
 }
 
 /** Probe `targets` with bounded concurrency. */
@@ -597,6 +570,32 @@ async function runProbes(targets: CredTarget[], concurrency: number, timeoutMs: 
   return out;
 }
 
+/** Scan OAuth identities post-relogin; optionally heal dead member dirs from a
+ *  valid sibling (credential sync). Returns donor probe dirs per credId and the
+ *  per-binary auth verdict (its OWN credential copy usable, not the donor's). */
+async function scanOAuthAuth(
+  agents: ResolvedAgent[],
+  heal: boolean,
+): Promise<{ donorDirs: Map<string, string>; authByBinary: Map<string, boolean> }> {
+  const donorDirs = new Map<string, string>();
+  const authByBinary = new Map<string, boolean>();
+  // isOAuth (not classifyAgent): a codex dir with NO auth.json yet is untracked
+  // for probing but still belongs to its identity — heal can materialize it.
+  const identities: Identity[] = await scanIdentities(agents.filter(isOAuth));
+  for (const id of identities) {
+    const donor = pickDonor(id.members);
+    if (donor && heal) {
+      const synced = await syncIdentity(id, donor); // skips already-valid members
+      for (const m of id.members) if (synced.includes(m.name)) m.state = donor.state;
+    }
+    if (donor) donorDirs.set(`${id.kind === 'claude' ? 'anthropic' : 'codex'}:id:${id.base}`, donor.dir);
+    // auth_ok mirrors oauthTokenUsable semantics: only a currently-VALID token
+    // counts — relogin (and heal) already had their chance to fix it.
+    for (const m of id.members) authByBinary.set(`${id.kind}-${m.name}`, m.state === 'valid');
+  }
+  return { donorDirs, authByBinary };
+}
+
 /** Probe the whole fleet's usage. Returns one AccountUsage per resolved agent —
  *  untracked agents get usageBased=false and no window data. */
 export async function probeUsage(
@@ -607,6 +606,8 @@ export async function probeUsage(
     atLimitPercent?: number;
     env?: NodeJS.ProcessEnv;
     relogin?: boolean;
+    /** heal dead credential copies from a valid sibling before probing (default on) */
+    sync?: boolean;
   } = {},
 ): Promise<AccountUsage[]> {
   const env = opts.env ?? process.env;
@@ -622,15 +623,25 @@ export async function probeUsage(
     await reloginExpiredOAuth(config, { concurrency, env, timeoutMs: Math.max(timeoutMs, DEFAULT_RELOGIN_TIMEOUT_MS) });
   }
 
-  const { targets, agents } = planTargets(config, env);
+  const agents = resolveAll(config);
+  // Per-dir auth verdicts + donor dirs for the identity-grouped OAuth probes,
+  // healing dead copies from valid siblings first unless disabled.
+  const { donorDirs, authByBinary } = await scanOAuthAuth(agents, opts.sync !== false);
+
+  const targets = planTargets(agents, env, donorDirs);
   const results = await runProbes(targets, concurrency, timeoutMs);
 
-  // Map each credential's windows back onto its member binaries.
+  // Map each credential's windows back onto its member binaries. Quota numbers
+  // fan out identically (account-level window); auth_ok is overridden per member
+  // so a dir whose own token copy is dead is never reported as logged in.
   const byBinary = new Map<string, AccountUsage>();
   for (const t of targets) {
     const w = results.get(t.credId) ?? { ok: false, error: 'no result' };
     for (const m of t.members) {
-      byBinary.set(m.binary, windowsToUsage(m, t.provider, w, atLimitPercent));
+      const usage = windowsToUsage(m, t.provider, w, atLimitPercent);
+      const memberAuth = authByBinary.get(m.binary);
+      if (memberAuth !== undefined) usage.authOk = memberAuth;
+      byBinary.set(m.binary, usage);
     }
   }
 
@@ -643,6 +654,7 @@ export async function probeUsage(
           binary,
           kind: a.kind,
           name: a.name,
+          account: identityOf(a),
           provider: null,
           usageBased: false,
           ok: false,
@@ -654,7 +666,7 @@ export async function probeUsage(
 }
 
 function windowsToUsage(
-  m: { binary: string; kind: Kind; name: string },
+  m: { binary: string; kind: Kind; name: string; account: string },
   provider: UsageProvider,
   w: Windows,
   atLimitPercent: number,
@@ -664,6 +676,7 @@ function windowsToUsage(
     binary: m.binary,
     kind: m.kind,
     name: m.name,
+    account: m.account,
     provider,
     usageBased: true,
     ok: w.ok,

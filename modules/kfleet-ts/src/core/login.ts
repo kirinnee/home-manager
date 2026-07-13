@@ -14,7 +14,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { KIND_SPECS } from './kinds';
-import { jwtExpMs, keychainSuffix, readKeychain } from './usage';
+import { jwtExpMs, keychainSuffix, readKeychain } from './creds';
 import type { Kind, ResolvedAgent } from './types';
 
 const KEYCHAIN_TIMEOUT_MS = 5_000;
