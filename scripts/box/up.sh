@@ -54,6 +54,11 @@ Host box
   IdentityFile $BOX_SSH_PRIVATE_KEY_PATH
   IdentitiesOnly yes
   StrictHostKeyChecking accept-new
+  # codex OAuth callback: \`codex login\` / \`kfleet login\` on the box listen on
+  # ITS localhost:1455; this forward lets the browser redirect on THIS machine
+  # reach it, so logins work from any plain \`ssh box\` terminal. (Extra
+  # concurrent sessions just print a harmless bind warning.)
+  LocalForward 1455 localhost:1455
 EOF
 echo "🔗 Wrote ~/.ssh/config.d/box.conf — connect with: ssh box | zed ssh://box/~/Workspace"
 
