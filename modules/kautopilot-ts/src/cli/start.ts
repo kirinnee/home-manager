@@ -31,6 +31,10 @@ export function createStartCommand(): Command {
 		.option("--org <org>", "Org: liftoff | atomicloud")
 		.option("--exec <mode>", "Execution mode: kloop | sub-agent")
 		.option(
+			"--writer <mode>",
+			"Writer-step execution: inline | deferred (defaults from config.writer.mode; pinned into the session)",
+		)
+		.option(
 			"--merge <mode>",
 			"Merge policy: manual (ask before merging) | auto (merge ready PRs)",
 		)
@@ -60,6 +64,7 @@ export function createStartCommand(): Command {
 				opts: {
 					org?: string;
 					exec?: string;
+					writer?: string;
 					merge?: string;
 					maxRepos?: number;
 					landscape?: string;
@@ -137,6 +142,7 @@ async function runStart(
 	opts: {
 		org?: string;
 		exec?: string;
+		writer?: string;
 		merge?: string;
 		maxRepos?: number;
 		landscape?: string;
@@ -158,6 +164,18 @@ async function runStart(
 			);
 		}
 		execMode = opts.exec;
+	}
+
+	// Writer mode: flag → config default. Pinned into session.json so later
+	// config flips never affect this session. (specs/deferred-writer-relay.md §2)
+	let writerMode: "inline" | "deferred" | undefined;
+	if (opts.writer !== undefined) {
+		if (opts.writer !== "inline" && opts.writer !== "deferred") {
+			throw new Error(
+				`Unknown writer mode: ${opts.writer}. Use inline | deferred.`,
+			);
+		}
+		writerMode = opts.writer;
 	}
 
 	let mergeMode: MergeMode | undefined;
@@ -190,6 +208,7 @@ async function runStart(
 		org,
 		folder,
 		execMode,
+		writerMode,
 		mergeMode,
 		maxParallelRepos: opts.maxRepos,
 		lpsm,
@@ -203,6 +222,7 @@ async function runStart(
 	);
 	logField("Task", ticketId ?? `(ad-hoc) ${task ?? ""}`);
 	logField("Merge", meta.mergeMode);
+	logField("Writer", meta.writerMode ?? "inline");
 	if (meta.lpsm) {
 		const parts = (
 			[

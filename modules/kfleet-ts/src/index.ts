@@ -6,6 +6,7 @@ import { createDoctorCommand } from './cli/doctor';
 import { createApplyCommand, createListCommand, createPruneCommand } from './cli/fleet';
 import { createHealthCommand } from './cli/health';
 import { createInitCommand } from './cli/init';
+import { createLoginCommand } from './cli/login';
 import { createServeCommand } from './cli/serve';
 import { createServiceCommand } from './cli/service';
 import { createUsageCommand } from './cli/usage';
@@ -18,6 +19,7 @@ program
   .addCommand(createApplyCommand())
   .addCommand(createListCommand())
   .addCommand(createPruneCommand())
+  .addCommand(createLoginCommand())
   .addCommand(createDoctorCommand())
   .addCommand(createHealthCommand())
   .addCommand(createUsageCommand())

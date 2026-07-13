@@ -22,9 +22,14 @@ export function createApplyCommand(): Command {
       const config = loadOrDie(() => loadConfig());
       const agents = loadOrDie(() => resolveAll(config));
       const commands = allCommands(config, agents);
-      const res = loadOrDie(() => apply(agents, commands, config.defaultHomes));
+      const res = loadOrDie(() => apply(agents, commands, config.defaultHomes, config.sharedHistory));
       const defaults = res.defaultHomes ? ` + ${res.defaultHomes} default homes` : '';
       logOk(`applied ${res.agents} agents + ${res.commands} commands${defaults} → ~/.kfleet/bin`);
+      if (config.sharedHistory.claude || config.sharedHistory.codex) {
+        const { migrated, conflicts } = res.shared;
+        const detail = migrated || conflicts ? `migrated ${migrated} entries, ${conflicts} conflicts` : 'up to date';
+        logInfo(`shared history (${detail}) → ~/.kfleet/shared`);
+      }
       if (opts.prune) {
         const removed = prune(agents, commands);
         logInfo(removed.length ? `pruned ${removed.length}: ${removed.join(', ')}` : 'nothing to prune');

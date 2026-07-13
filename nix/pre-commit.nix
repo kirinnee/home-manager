@@ -16,6 +16,19 @@ pre-commit-lib.run {
       enable = false;
     };
 
+    a-secrets-sync = {
+      enable = true;
+      name = "Secrets sync";
+      description = "Block commits when secrets.yaml has edits not re-encrypted into secrets.enc.yaml";
+      # Runs on every commit (default files regex matches anything staged):
+      # drift between the decrypted working copy and the committed ciphertext
+      # must never slip past a commit. Skips age-key-free when secrets.yaml
+      # is absent (CI / fresh checkout).
+      entry = "./scripts/secrets/check.sh";
+      language = "system";
+      pass_filenames = false;
+    };
+
     a-infisical = {
       enable = true;
       name = "Secrets Scanning";

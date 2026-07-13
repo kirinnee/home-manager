@@ -22,6 +22,16 @@ rec {
   kautopilot = nixpkgs.writeShellScriptBin "kautopilot" ''
     exec ${nixpkgs.bun}/bin/bun run ~/.config/home-manager/modules/kautopilot-ts/src/index.ts "$@"
   '';
+  # kteam: detached, resumable Claude/Codex teammates. Every harness runs in
+  # tmux while kteamd watches it and stores its protocol under ~/.kteam.
+  kteam = nixpkgs.writeShellScriptBin "kteam" ''
+    export PATH="${nixpkgs.lib.makeBinPath [ nixpkgs.tmux ]}:$PATH"
+    exec ${nixpkgs.bun}/bin/bun run ~/.config/home-manager/modules/kteam-ts/src/index.ts "$@"
+  '';
+  kteamd = nixpkgs.writeShellScriptBin "kteamd" ''
+    export PATH="${nixpkgs.lib.makeBinPath [ nixpkgs.tmux ]}:$PATH"
+    exec ${nixpkgs.bun}/bin/bun run ~/.config/home-manager/modules/kteam-ts/src/daemon-entry.ts "$@"
+  '';
   # klaude/kodex: run-from-source wrappers. Wrap crc-kirin/Codex in persistent
   # zellij sessions. zellij/tmux are put on PATH; agent binaries/fzf come from
   # the host PATH (crc-kirin is a kfleet-generated command in ~/.kfleet/bin).

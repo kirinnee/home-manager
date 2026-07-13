@@ -49,6 +49,25 @@ const checkpointerRetrySchema = z.object({
   backoffBaseMs: z.number().min(0).default(5000),
 });
 
+// Implementer stall detection — the "frozen on a confirm dialog for 2.5h" fix.
+// Activity = implementer log/evidence mtimes + a hash of the pane tail (the pane
+// changes while the agent streams/thinks even when the JSONL log is quiet for
+// 10+ minutes, so long generation stretches don't false-alarm).
+const stallConfigSchema = z.object({
+  // Master switch — everything below is inert when false.
+  enabled: z.boolean().default(false),
+  // No activity for this long → run the stuck-prompt check / flag idle.
+  idleThresholdSec: z.number().min(30).max(7200).default(600),
+  // How often the daemon samples activity while the implementer runs.
+  checkIntervalSec: z.number().min(5).max(3600).default(60),
+  // off   = detect + surface only (default).
+  // safe  = auto-answer KNOWN confirm dialogs (send "1"), log the intervention.
+  // all   = also auto-answer generic prompts ending at ❯ (send Enter). Risky.
+  // YAML-1.1 leniency: a bare `off` may parse as boolean false — accept it.
+  autoAnswer: z.preprocess(v => (v === false ? 'off' : v), z.enum(['off', 'safe', 'all'])).default('off'),
+});
+export type StallConfig = z.infer<typeof stallConfigSchema>;
+
 // True if `account` parses as a reviewer binary (binary[:harness[:flag]]). Used to
 // reject malformed type/pool accounts at config load instead of mid-run/at display.
 // parseReviewerConfig is a hoisted function declaration, so referencing it here is safe.
@@ -93,7 +112,7 @@ const poolProfilesSchema = z.record(z.string().min(1), poolSchema);
 const legacyReReviewSchema = z.object({
   enabled: z.boolean().optional(),
   phases: z.array(z.array(typeEntrySchema).min(1)).optional(),
-  timeout: z.number().min(0.001).max(120).optional(),
+  timeout: z.number().min(0.001).max(300).optional(),
 });
 const legacySynthesisSchema = z.object({
   enabled: z.boolean().optional(),
@@ -131,8 +150,8 @@ const configSchema = z
     synthesizer: typeEntrySchema.optional(),
     // Counts and limits
     maxIterations: z.number().min(1).max(100).default(7),
-    implementerTimeout: z.number().min(0.001).max(120).default(30),
-    reviewerTimeout: z.number().min(0.001).max(120).default(15),
+    implementerTimeout: z.number().min(0.001).max(300).default(30),
+    reviewerTimeout: z.number().min(0.001).max(300).default(15),
     // Conflict detection
     conflictCheckThreshold: z.number().min(1).max(100).default(3),
     // Checkpoint behavior
@@ -142,10 +161,10 @@ const configSchema = z
     previousReviewPropagation: z.number().min(0).max(1).default(0.7),
     // Synthesis and verify (flat booleans + timeouts)
     synthesis: z.union([z.boolean(), legacySynthesisSchema]).default(true),
-    synthesisTimeout: z.number().min(0.001).max(120).optional(),
+    synthesisTimeout: z.number().min(0.001).max(300).optional(),
     verify: z.boolean().optional(),
     verifyPhases: z.array(z.array(typeEntrySchema).min(1)).optional(),
-    verifyTimeout: z.number().min(0.001).max(120).optional(),
+    verifyTimeout: z.number().min(0.001).max(300).optional(),
     rerankAfterCheckpoint: z.boolean().default(true),
     snapshot: z.boolean().default(false),
     // Run claude-harness agents as interactive TUIs (no --print). kloop injects the prompt
@@ -160,6 +179,11 @@ const configSchema = z
     usageEndpoint: z.string().min(1).optional(),
     // 5h hard gate: skip an account when its 5-hour window has < this % left (default 3).
     usageFiveHourFloorPercent: z.number().min(0).max(100).optional(),
+    // Implementer stall detection: notice a frozen implementer (e.g. stuck on a
+    // Claude Code confirm dialog that fires even with bypass-permissions) and
+    // surface it in status/wait/ps. Detection only by default; autoAnswer can
+    // unblock known-safe confirm dialogs by sending "1" to the pane.
+    stall: stallConfigSchema.optional(),
     implementerRetry: implementerRetrySchema.optional(),
     reviewerRetry: reviewerRetrySchema.optional(),
     synthesizerRetry: synthesizerRetrySchema.optional(),
@@ -252,6 +276,12 @@ const configSchema = z
       requireUsageLeft: data.requireUsageLeft ?? false,
       usageEndpoint: data.usageEndpoint,
       usageFiveHourFloorPercent: data.usageFiveHourFloorPercent,
+      stall: data.stall ?? {
+        enabled: false,
+        idleThresholdSec: 600,
+        checkIntervalSec: 60,
+        autoAnswer: 'off' as const,
+      },
       implementerRetry: data.implementerRetry ?? { maxRetries: 2, backoffBaseMs: 5000 },
       reviewerRetry: data.reviewerRetry ?? { maxRetries: 2, backoffBaseMs: 5000 },
       synthesizerRetry: data.synthesizerRetry ?? { maxRetries: 2, backoffBaseMs: 5000 },
@@ -275,10 +305,10 @@ export const resolvedConfigSchema = z.object({
   conflictChecker: typeEntrySchema.optional(),
   synthesizer: typeEntrySchema.optional(),
   maxIterations: z.number().min(1).max(100),
-  implementerTimeout: z.number().min(0.001).max(120),
-  reviewerTimeout: z.number().min(0.001).max(120),
-  synthesisTimeout: z.number().min(0.001).max(120),
-  verifyTimeout: z.number().min(0.001).max(120),
+  implementerTimeout: z.number().min(0.001).max(300),
+  reviewerTimeout: z.number().min(0.001).max(300),
+  synthesisTimeout: z.number().min(0.001).max(300),
+  verifyTimeout: z.number().min(0.001).max(300),
   conflictCheckThreshold: z.number().min(1).max(100),
   compressSpec: z.boolean(),
   firstLoopFullReview: z.boolean(),
@@ -292,6 +322,12 @@ export const resolvedConfigSchema = z.object({
   requireUsageLeft: z.boolean().default(false),
   usageEndpoint: z.string().optional(),
   usageFiveHourFloorPercent: z.number().min(0).max(100).optional(),
+  stall: stallConfigSchema.default({
+    enabled: false,
+    idleThresholdSec: 600,
+    checkIntervalSec: 60,
+    autoAnswer: 'off',
+  }),
   implementerRetry: z.object({
     maxRetries: z.number().min(0).max(10),
     backoffBaseMs: z.number().min(0),
@@ -615,6 +651,7 @@ export const DEFAULT_CONFIG: Config = {
   snapshot: false,
   interactive: false,
   requireUsageLeft: false,
+  stall: { enabled: false, idleThresholdSec: 600, checkIntervalSec: 60, autoAnswer: 'off' },
   implementerRetry: { maxRetries: 2, backoffBaseMs: 5000 },
   reviewerRetry: { maxRetries: 2, backoffBaseMs: 5000 },
   synthesizerRetry: { maxRetries: 2, backoffBaseMs: 5000 },
@@ -940,6 +977,7 @@ export function flattenNestedConfig(raw: unknown): unknown {
     if (st.requireUsageLeft !== undefined) out.requireUsageLeft = st.requireUsageLeft;
     if (st.usageEndpoint !== undefined) out.usageEndpoint = st.usageEndpoint;
     if (st.usageFiveHourFloorPercent !== undefined) out.usageFiveHourFloorPercent = st.usageFiveHourFloorPercent;
+    if (st.stall !== undefined) out.stall = st.stall;
   }
 
   return out;
@@ -1015,6 +1053,7 @@ export function nestFlatConfig(flat: Record<string, unknown>): Record<string, un
   if (d.requireUsageLeft !== undefined) settings.requireUsageLeft = d.requireUsageLeft;
   if (d.usageEndpoint !== undefined) settings.usageEndpoint = d.usageEndpoint;
   if (d.usageFiveHourFloorPercent !== undefined) settings.usageFiveHourFloorPercent = d.usageFiveHourFloorPercent;
+  if (d.stall !== undefined) settings.stall = d.stall;
   if (Object.keys(settings).length > 0) out.settings = settings;
 
   // prompts (top-level in both layouts)
@@ -1099,6 +1138,11 @@ export const EVENT_TYPES = {
   CHECKPOINT: 'checkpoint', // legacy alias for CHECKPOINT_END
   CHECKPOINT_START: 'checkpoint_start',
   CHECKPOINT_END: 'checkpoint_end',
+
+  // Implementer stall detection (specs/implementer-stall-detection)
+  IMPLEMENTER_STALL: 'implementer_stall',
+  IMPLEMENTER_STALL_END: 'implementer_stall_end',
+  IMPLEMENTER_STALL_AUTOANSWERED: 'implementer_stall_autoanswered',
 
   // Loop end
   LOOP_END: 'loop_end',
@@ -1340,6 +1384,36 @@ export interface LoopEndEvent extends BaseEvent {
   durationMs: number;
 }
 
+// Implementer stall detection — a stall MUST produce an event: `kloop wait`
+// parks on events.jsonl, and silence is indistinguishable from progress.
+export interface ImplementerStallEvent extends BaseEvent {
+  type: typeof EVENT_TYPES.IMPLEMENTER_STALL;
+  loop: number;
+  /** Why the stall fired. */
+  reason: 'confirm-dialog' | 'idle';
+  /** Ms of no observed activity when the stall fired. */
+  idleMs: number;
+  /** Captured dialog/pane tail text (for confirm-dialog: the dialog itself). */
+  dialogText?: string;
+}
+
+export interface ImplementerStallEndEvent extends BaseEvent {
+  type: typeof EVENT_TYPES.IMPLEMENTER_STALL_END;
+  loop: number;
+  /** How the stall cleared: activity resumed, auto-answered, or the agent finished. */
+  resolution: 'activity' | 'autoanswer' | 'agent-exit';
+  stalledForMs: number;
+}
+
+export interface ImplementerStallAutoAnsweredEvent extends BaseEvent {
+  type: typeof EVENT_TYPES.IMPLEMENTER_STALL_AUTOANSWERED;
+  loop: number;
+  /** The keys sent to the pane (e.g. "1"). */
+  answer: string;
+  /** The dialog text that was auto-answered — the run record must show the intervention. */
+  dialogText: string;
+}
+
 // Union type for all events
 export type KloopEvent =
   | RunStartEvent
@@ -1367,6 +1441,9 @@ export type KloopEvent =
   | CheckpointEvent
   | CheckpointStartEvent
   | CheckpointEndEvent
+  | ImplementerStallEvent
+  | ImplementerStallEndEvent
+  | ImplementerStallAutoAnsweredEvent
   | LoopEndEvent;
 
 // Run status derived from events
@@ -1389,6 +1466,10 @@ export interface KloopRunState {
   exitReason?: string;
   currentLoop: number;
   currentPhase?: string;
+  /** Implementer stall detection — present only while stalled. */
+  stalled?: boolean;
+  stallReason?: 'confirm-dialog' | 'idle';
+  stalledSinceMs?: number;
   startedAt: string;
   lastEventAt: string;
   config?: Config;
@@ -1508,6 +1589,14 @@ export interface MaterializedStatus {
   config?: Config;
   consecutiveFailures: number;
   failureThreshold: number;
+
+  // Implementer stall detection (run-level: at most one implementer runs at a
+  // time, and consumers — wait/ps/status — want it without digging into loops).
+  stalled?: boolean;
+  stalledSinceMs?: number;
+  stallReason?: 'confirm-dialog' | 'idle';
+  /** Captured dialog/pane tail from the stall event. */
+  stallDialogText?: string;
 
   // Per-loop state
   loops: MaterializedLoop[];

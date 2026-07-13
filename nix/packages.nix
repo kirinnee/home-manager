@@ -21,6 +21,9 @@ let
         inherit
           gomplate
           infisical
+          sops
+          age
+          opentofu
 
           git
           gitlint

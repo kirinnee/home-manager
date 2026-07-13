@@ -17,6 +17,9 @@ interface RunEntry {
   startedAt: string;
   elapsedMs: number;
   endedAt?: string;
+  /** Implementer stall detection — present only while stalled. */
+  stalled?: boolean;
+  stallReason?: string;
 }
 
 export async function handler(
@@ -107,7 +110,8 @@ export async function handler(
         workspace = '…' + workspace.slice(-19);
       }
 
-      table.push([run.id, workspace, statusColor(run.status), loopStr, verdictStr, ageStr, durationStr]);
+      const statusCell = run.stalled ? pc.red(`${run.status} ⚠STALLED`) : statusColor(run.status);
+      table.push([run.id, workspace, statusCell, loopStr, verdictStr, ageStr, durationStr]);
     }
 
     console.log(table.toString());
@@ -163,6 +167,7 @@ async function listRuns(
       startedAt: row.started_at,
       elapsedMs,
       endedAt: isTerminal ? state.lastEventAt : undefined,
+      ...(state.stalled ? { stalled: true, stallReason: state.stallReason } : {}),
     });
   }
 

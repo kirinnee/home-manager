@@ -13,17 +13,45 @@ tasks:
     desc: Update Beekeeper Studio
     cmds:
       - ./scripts/updates/beekeeper-studio.sh
+  # Secrets workflow: work on the DECRYPTED secrets.yaml (gitignored) —
+  # decrypt only when it doesn't exist, re-encrypt only before committing.
+  # The a-secrets-sync pre-commit hook blocks commits with unencrypted edits.
   secret:edit:
-    desc: Edit secrets
-    env:
-      EDITOR: zed
+    desc: Edit the decrypted secrets working copy (decrypts first if missing)
     cmds:
-      - sops edit ./secrets.enc.yaml
+      - ./scripts/secrets/decrypt.sh
+      - '${EDITOR:-zed} ./secrets.yaml'
+      - 'echo "Remember: pls secret:encrypt before committing"'
   secret:decrypt:
-    desc: Decrypt secrets
+    desc: Decrypt secrets.enc.yaml -> secrets.yaml (only if it doesn't exist)
     cmds:
-      - sops --decrypt ./secrets.enc.yaml > ./secrets.yaml
+      - ./scripts/secrets/decrypt.sh
   secret:encrypt:
-    desc: Encrypt secrets
+    desc: Re-encrypt secrets.yaml -> secrets.enc.yaml (skips when already in step)
     cmds:
-      - sops --encrypt ./secrets.yaml > ./secrets.enc.yaml
+      - ./scripts/secrets/encrypt.sh
+  secret:check:
+    desc: Verify secrets.enc.yaml is in step with secrets.yaml (pre-commit check)
+    cmds:
+      - ./scripts/secrets/check.sh
+
+  box:up:
+    desc: 'Provision a box (creds from sops) and optionally replicate: pls box:up -- <aws|digitalocean|oci> [--replicate] [profile]'
+    cmds:
+      - ./scripts/box/up.sh {{.CLI_ARGS}}
+  box:down:
+    desc: 'Destroy the provisioned box: pls box:down -- <aws|digitalocean|oci>'
+    cmds:
+      - ./scripts/box/down.sh {{.CLI_ARGS}}
+  box:replicate:
+    desc: 'Replicate this home-manager + Workspace repos onto a box: pls box:replicate -- user@host [profile]'
+    cmds:
+      - ./scripts/box/replicate.sh {{.CLI_ARGS}}
+  box:backup:
+    desc: Trigger a backup on the box now (nightly timer runs it at 03:00 anyway)
+    cmds:
+      - ssh box '~/.local/bin/box-backup'
+  box:gen-repos:
+    desc: Regenerate the box clone manifest (.box.repos in secrets.yaml) from ~/Workspace
+    cmds:
+      - ./scripts/box/gen-repos.sh

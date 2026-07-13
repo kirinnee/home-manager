@@ -1,0 +1,21 @@
+#!/bin/sh
+export CLAUDE_CONFIG_DIR="$KTEAM_HOME/fake-claude"
+session=""
+previous=""
+for argument in "$@"; do
+  if [ "$previous" = "--session-id" ] || [ "$previous" = "--resume" ]; then session="$argument"; fi
+  previous="$argument"
+done
+if [ -z "$session" ]; then exit 2; fi
+project=$(pwd | sed 's/[^A-Za-z0-9]/-/g')
+transcript="$CLAUDE_CONFIG_DIR/projects/$project/$session.jsonl"
+mkdir -p "$(dirname "$transcript")"
+printf '>\n'
+IFS= read -r task
+timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+printf '{"type":"user","sessionId":"%s","timestamp":"%s","uuid":"user-1","message":{"role":"user","content":[{"type":"text","text":"task accepted"}]}}\n' "$session" "$timestamp" >> "$transcript"
+printf '{"type":"assistant","sessionId":"%s","timestamp":"%s","uuid":"assistant-1","parentUuid":"user-1","message":{"id":"message-1","role":"assistant","stop_reason":null,"content":[{"type":"thinking","thinking":"working"},{"type":"text","text":"finished fake transcript work"}]}}\n' "$session" "$timestamp" >> "$transcript"
+root="$KTEAM_HOME/$KTEAM_SESSION_ID"
+printf 'fake transcript teammate completed\n' > "$root/summary.md"
+printf '{"type":"done","source":"fake-transcript"}\n' > "$root/markers/done.json"
+while :; do sleep 1; done

@@ -420,6 +420,18 @@ details.toc li.lvl3 a { padding-left: var(--s-4); font-size: 12px; color: var(--
 .diff-wrap .del .gutter { background: var(--del-gutter); color: var(--del); opacity: 1; }
 .diff-wrap .meta { color: var(--muted); }
 
+/* ── deferred-writer discussion (chat timeline) ──────────────────────── */
+.disc-turn { margin: var(--s-3) 0; display: grid; gap: var(--s-2); }
+.disc-msg { max-width: 720px; padding: var(--s-3) var(--s-4); border-radius: var(--r-md); border: 1px solid var(--border); font-size: 0.9rem; line-height: 1.55; }
+.disc-user { background: var(--accent-soft); border-color: var(--accent-border); justify-self: end; }
+.disc-writer { background: var(--surface); justify-self: start; }
+.disc-meta { font-size: 0.72rem; color: var(--muted); margin-bottom: 4px; display: flex; gap: 8px; align-items: center; }
+.disc-q { margin: 6px 0 0; padding-left: 18px; }
+.disc-q li { margin: 2px 0; }
+.disc-chips { display: flex; gap: var(--s-2); flex-wrap: wrap; margin-top: 8px; }
+.disc-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 0.74rem; padding: 2px 9px; border-radius: var(--r-full); background: var(--accent-soft); border: 1px solid var(--accent-border); color: var(--accent); }
+.disc-status { display: inline-flex; align-items: center; gap: 6px; }
+
 /* ── states ──────────────────────────────────────────────────────────── */
 .muted { color: var(--muted); }
 .empty {
@@ -757,6 +769,76 @@ const CLIENT_SCRIPT = [
 	"  }",
 	"  if (!list.children.length) app.appendChild(el('div', 'empty', 'No artifacts yet.'));",
 	"  else app.appendChild(list);",
+	"  // ── deferred-writer discussions (one row per phase with a writer session) ──",
+	"  const phases = await api('/sessions/' + encodeURIComponent(id) + '/discussion');",
+	"  if (phases && phases.length) {",
+	"    app.appendChild(el('div', 'section-title', 'Discussion'));",
+	"    const dl = el('div', 'art-list');",
+	"    for (const ph of phases) {",
+	"      const row = el('div', 'art-row');",
+	"      row.innerHTML = '<span class=\"a-name\"><a href=\"/sessions/' + esc(id) + '/discussion/' + esc(ph) + '\">' + esc(ph.replace(/_/g, ' ')) + '</a></span>';",
+	"      dl.appendChild(row);",
+	"    }",
+	"    app.appendChild(dl);",
+	"  }",
+	"}",
+	"async function renderDiscussion(id, phaseKey) {",
+	"  showSkeleton(3);",
+	"  const d = await api('/sessions/' + encodeURIComponent(id) + '/discussion/' + encodeURIComponent(phaseKey));",
+	"  app.innerHTML = '';",
+	"  main.classList.remove('prose-page');",
+	'  crumbs([{ text: "Sessions", href: "/" }, { text: id, href: "/sessions/" + encodeURIComponent(id) }, { text: "Discussion · " + phaseKey }]);',
+	"  if (!d) { notFound(id); return; }",
+	"  const head = el('div', 'page-head');",
+	"  const w = d.writer;",
+	"  // Status badge: writing… (running) / waiting for you (last turn replied) / failed.",
+	"  let badge = '';",
+	"  const lastT = d.turns.length ? d.turns[d.turns.length - 1] : null;",
+	"  if (w && (w.status === 'running' || (lastT && lastT.state === 'running'))) {",
+	"    const prog = lastT && lastT.lastProgress ? ' — ' + esc(lastT.lastProgress) : '';",
+	"    badge = '<span class=\"badge warn disc-status\"><span class=\"pip\"></span>writing\\u2026' + prog + '</span>';",
+	"  } else if (lastT && lastT.state === 'replied') {",
+	'    badge = \'<span class="badge ok disc-status"><span class="pip"></span>waiting for you</span>\';',
+	"  } else if (w && w.status === 'failed') {",
+	'    badge = \'<span class="badge err disc-status"><span class="pip"></span>failed</span>\';',
+	"  }",
+	'  head.innerHTML = \'<h1 class="page-title">Discussion <span class="muted" style="font-weight:500;font-size:0.7em">\' + esc(phaseKey) + \'</span></h1>\' +',
+	"    '<div class=\"meta-row\">' + (w ? esc(w.account) + '<span class=\"dotsep\">·</span>' + esc(w.turns) + ' turns' + (badge ? '<span class=\"dotsep\">·</span>' + badge : '') : 'no writer yet') + '</div>';",
+	"  app.appendChild(head);",
+	"  if (!d.turns.length) { app.appendChild(el('div', 'empty', 'No turns yet.')); return; }",
+	"  for (const t of d.turns) {",
+	"    const wrap = el('div', 'disc-turn');",
+	"    const env = t.envelope;",
+	"    const mins = t.elapsedMs != null ? Math.round(t.elapsedMs / 60000) + 'm' : '';",
+	"    // User bubble first (the message that started this turn).",
+	"    if (t.userMessage || t.approval) {",
+	"      const um = el('div', 'disc-msg disc-user');",
+	"      um.innerHTML = '<div class=\"disc-meta\">turn ' + esc(t.turn) + ' · you' + (t.approval ? ' · approval' : '') + '</div><div>' + esc(t.userMessage || '(approved — final consistency check)') + '</div>';",
+	"      wrap.appendChild(um);",
+	"    }",
+	"    if (env) {",
+	"      const wm = el('div', 'disc-msg disc-writer');",
+	"      let inner = '<div class=\"disc-meta\">turn ' + esc(t.turn) + ' · writer' + (mins ? ' · ' + esc(mins) : '') + (t.attempts > 1 ? ' · ' + esc(t.attempts) + ' attempts' : '') + '</div>';",
+	"      inner += '<div>' + renderMd(env.summary || '') + '</div>';",
+	"      if (env.answers && env.answers.length) inner += '<ul class=\"disc-q\">' + env.answers.map((a) => '<li><strong>' + esc(a.question) + '</strong> — ' + esc(a.answer) + '</li>').join('') + '</ul>';",
+	"      if (env.questions && env.questions.length) inner += '<div class=\"disc-meta\" style=\"margin-top:8px\">questions for you</div><ul class=\"disc-q\">' + env.questions.map((q) => '<li>' + esc(q.text) + '</li>').join('') + '</ul>';",
+	"      // Version chips: named links only (never raw URLs).",
+	"      const chips = [];",
+	"      const L = env.links || {};",
+	"      if (L.read) chips.push('<a class=\"disc-chip\" href=\"' + esc(L.read) + '\">\\uD83D\\uDCC4 ' + esc(env.artifact ? env.artifact.kind + ' v' + env.artifact.version : 'read') + '</a>');",
+	"      if (L.diff) chips.push('<a class=\"disc-chip\" href=\"' + esc(L.diff) + '\">\\u00B1 diff</a>');",
+	"      if (L.visual) chips.push('<a class=\"disc-chip\" href=\"' + esc(L.visual) + '\">\\uD83D\\uDCCA visual</a>');",
+	"      if (chips.length) inner += '<div class=\"disc-chips\">' + chips.join('') + '</div>';",
+	"      wm.innerHTML = inner;",
+	"      wrap.appendChild(wm);",
+	"    } else {",
+	"      const wm = el('div', 'disc-msg disc-writer');",
+	"      const prog = t.lastProgress ? esc(t.lastProgress) : t.state;",
+	"      wm.innerHTML = '<div class=\"disc-meta\">turn ' + esc(t.turn) + ' · ' + esc(t.state) + (mins ? ' · ' + esc(mins) : '') + '</div><div class=\"muted\">' + prog + '</div>';",
+	"      wrap.appendChild(wm);",
+	"    }",
+	"    app.appendChild(wrap);",
+	"  }",
 	"}",
 	"async function renderDoc(id, kind, version, isPlan, repo) {",
 	"  const apiPath = isPlan",
@@ -857,6 +939,11 @@ const CLIENT_SCRIPT = [
 	"    const id = decodeURIComponent(parts[1] || '');",
 	"    if (!id) return renderIndex();",
 	"    if (parts.length === 2) return renderSession(id);",
+	"    if (parts[2] === 'discussion') {",
+	"      const phaseKey = decodeURIComponent(parts[3] || '');",
+	"      if (phaseKey) return renderDiscussion(id, phaseKey);",
+	"      return renderSession(id);",
+	"    }",
 	"    if (parts[2] === 'plans') {",
 	"      const repo = decodeURIComponent(parts[3] || '');",
 	"      if (parts[4] === 'diff') return renderDiffView(id, null, true, repo);",

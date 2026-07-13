@@ -12,7 +12,37 @@ import {
 	isSessionActive,
 	isSessionTerminal,
 } from "../core/status";
+import { discussionPhases, readDiscussion } from "../core/writer/relay";
 import { formatPhase, parseRepoHost } from "../util/format";
+
+/**
+ * Deferred-writer status for a session, for the `--json` surface: the most
+ * recently active phase's writer + in-flight turn, or null when the session
+ * has no writer discussions. (specs/deferred-writer-relay.md §7)
+ */
+function writerInfo(sessionId: string): {
+	phaseKey: string;
+	account: string;
+	status: string;
+	turn: number;
+	elapsedMs: number | null;
+	lastProgress: string | null;
+} | null {
+	const phases = discussionPhases(sessionId);
+	if (phases.length === 0) return null;
+	const phaseKey = phases[phases.length - 1];
+	const d = readDiscussion(sessionId, phaseKey);
+	if (!d.writer) return null;
+	const last = d.turns.length ? d.turns[d.turns.length - 1] : null;
+	return {
+		phaseKey,
+		account: d.writer.account,
+		status: d.writer.status,
+		turn: last?.turn ?? d.writer.turns,
+		elapsedMs: last && last.state === "running" ? last.elapsedMs : null,
+		lastProgress: last?.lastProgress ?? null,
+	};
+}
 
 /**
  * Derive the org / repo / branch display fields for a session row. A session is
@@ -202,6 +232,8 @@ async function runPs(opts: {
 			polishState: status.polishState,
 			kloopRunId,
 			phases: status.phases,
+			// Deferred-writer state (null when the session has no writer phases).
+			writer: writerInfo(session.id),
 		};
 	});
 

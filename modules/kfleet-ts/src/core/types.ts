@@ -61,6 +61,10 @@ const agentSchema = z
   .object({
     name: z.string().min(1),
     kind: kindSchema,
+    // Login identity: the base agent whose provider account this agent shares
+    // (e.g. f5-kirin → kirin). Defaults to the agent's own name. `kfleet login`
+    // groups and credential-syncs by (kind × identity).
+    identity: z.string().min(1).optional(),
     profiles: z.array(z.string()).optional(),
     ...profileFields,
   })
@@ -100,6 +104,21 @@ const defaultHomesSchema = z
   .strict()
   .default({});
 export type DefaultHomeMap = z.infer<typeof defaultHomesSchema>;
+
+// Cross-account session sharing (per kind). When ON for a kind, every account's
+// session state (transcripts, prompt history, checkpoints — see the kind's
+// sharedState list in core/kinds.ts) is pooled under ~/.kfleet/shared/<kind> and
+// symlinked back, so ANY account can --resume ANY session. Auth/identity files
+// stay per-account. Existing per-account history is migrated into the pool on
+// the first `kfleet apply` after enabling.
+const sharedHistorySchema = z
+  .object({
+    claude: z.boolean().default(false),
+    codex: z.boolean().default(false),
+  })
+  .strict()
+  .default({});
+export type SharedHistoryMap = z.infer<typeof sharedHistorySchema>;
 
 // Fleet health probing (`kfleet health` / the `kfleet serve` background loop).
 // `enabled` is OFF by default: each probe is a real LLM call, so the background
@@ -157,6 +176,7 @@ export const configSchema = z
     commands: z.array(commandSchema).default([]),
     aliases: aliasesSchema.default({}),
     defaultHomes: defaultHomesSchema,
+    sharedHistory: sharedHistorySchema,
     health: healthSchema,
     usage: usageSchema,
   })
@@ -164,7 +184,12 @@ export const configSchema = z
 export type Config = z.infer<typeof configSchema>;
 
 /** An agent with base + profiles fully merged down into one flat profile.
- *  `settings` is normalized to an ordered list of layers (see core/merge.ts). */
-export type ResolvedAgent = { name: string; kind: Kind } & Omit<Profile, 'settings'> & {
+ *  `settings` is normalized to an ordered list of layers (see core/merge.ts).
+ *  `base`/`variant` identify the (agent × variant) pair behind the flat name;
+ *  `identity` is the base agent whose provider login this one shares. */
+export type ResolvedAgent = { name: string; kind: Kind; base?: string; variant?: string; identity?: string } & Omit<
+  Profile,
+  'settings'
+> & {
     settings?: SettingsLayer[];
   };

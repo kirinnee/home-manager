@@ -212,9 +212,7 @@ describe("scheduler: frontier", () => {
 			unblocks: ["web/plan-2"],
 		});
 		expect(s.ready).toHaveLength(0);
-		expect(s.blocked.map((b) => `${b.repo}/${b.plan}`)).toEqual([
-			"web/plan-2",
-		]);
+		expect(s.blocked.map((b) => `${b.repo}/${b.plan}`)).toEqual(["web/plan-2"]);
 	});
 
 	it("keeps the strongest gate when one downstream has merged and released deps from a PR", () => {

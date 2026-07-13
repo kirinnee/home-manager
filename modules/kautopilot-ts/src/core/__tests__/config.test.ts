@@ -28,12 +28,13 @@ describe("config", () => {
 
 		const config = readConfig("testid");
 		expect(config).not.toBeNull();
-		// Trimmed top-level shape: agents, templates, settings, orgs — no kloop/binary.
+		// Trimmed top-level shape: agents, templates, settings, orgs, writer — no kloop/binary.
 		expect(Object.keys(config as object).sort()).toEqual([
 			"agents",
 			"orgs",
 			"settings",
 			"templates",
+			"writer",
 		]);
 		expect((config as Record<string, unknown>).kloop).toBeUndefined();
 		expect((config as Record<string, unknown>).claude_binary).toBeUndefined();

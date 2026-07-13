@@ -67,7 +67,7 @@ function envRefName(value: string | undefined): string | undefined {
 
 /** First 8 hex of sha256(absolute config-dir path) — the suffix Claude Code uses
  *  for its keychain item name `Claude Code-credentials-<suffix>`. */
-function keychainSuffix(configDir: string): string {
+export function keychainSuffix(configDir: string): string {
   return createHash('sha256').update(configDir).digest('hex').slice(0, 8);
 }
 
@@ -80,7 +80,7 @@ function isoToMs(s: unknown): number | undefined {
 
 /** Read a macOS Keychain generic-password secret by service name (-w = raw). Bounded
  *  by `timeoutMs` so a locked/stalled Keychain can't hang the whole probe cycle. */
-async function readKeychain(service: string, timeoutMs: number): Promise<string | null> {
+export async function readKeychain(service: string, timeoutMs: number): Promise<string | null> {
   try {
     const proc = Bun.spawn({
       cmd: ['security', 'find-generic-password', '-s', service, '-w'],

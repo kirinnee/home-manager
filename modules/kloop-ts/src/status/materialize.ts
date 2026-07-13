@@ -14,9 +14,9 @@ import type {
 } from '../types';
 import { EVENT_TYPES } from '../types';
 
-// Bumped to 3 for the LENS × TYPE matrix: invalidates cached status.yaml so every run
-// re-materializes from events and picks up reviewer lens/reviewType fields.
-const SCHEMA_VERSION = 3;
+// Bumped to 4 for implementer stall detection: invalidates cached status.yaml so
+// every run re-materializes from events and picks up the stall fields.
+const SCHEMA_VERSION = 4;
 
 // ============================================================================
 // Materialize: WAL → status.yaml
@@ -76,8 +76,14 @@ export async function materialize(
 
   // 4. Consistency: if run is terminal, ensure no agents are still marked running
   // (handles stale status.yaml from before markRunningAgentsInterrupted existed)
+  // and no stall lingers (a terminal run is never stalled — covers the PID-death
+  // branch above, where no terminal EVENT exists to clear it).
   if (status.status !== 'running' && status.status !== 'pending') {
     markRunningAgentsInterrupted(status, status.lastEventAt);
+    status.stalled = false;
+    status.stalledSinceMs = undefined;
+    status.stallReason = undefined;
+    status.stallDialogText = undefined;
   }
 
   return status;
@@ -218,6 +224,12 @@ function applyEvent(status: MaterializedStatus, rawEvent: KloopEvent): void {
     }
 
     case EVENT_TYPES.IMPLEMENTER_END: {
+      // Backstop: an ended implementer is by definition not stalled (the monitor's
+      // stop() normally emits stall_end first, but a SIGKILLed daemon can't).
+      status.stalled = false;
+      status.stalledSinceMs = undefined;
+      status.stallReason = undefined;
+      status.stallDialogText = undefined;
       const loop = findLoop(status, event.loop);
       if (loop?.implementer) {
         loop.implementer.status = event.exitCode === 0 ? 'completed' : 'error';
@@ -245,6 +257,28 @@ function applyEvent(status: MaterializedStatus, rawEvent: KloopEvent): void {
 
     case EVENT_TYPES.IMPLEMENTER_RETRY: {
       // Informational — retry info is tracked via implementer_end retryAttempt/maxRetries
+      break;
+    }
+
+    case EVENT_TYPES.IMPLEMENTER_STALL: {
+      status.stalled = true;
+      status.stalledSinceMs = new Date(event.timestamp).getTime();
+      status.stallReason = event.reason;
+      status.stallDialogText = event.dialogText;
+      break;
+    }
+
+    case EVENT_TYPES.IMPLEMENTER_STALL_END: {
+      status.stalled = false;
+      status.stalledSinceMs = undefined;
+      status.stallReason = undefined;
+      status.stallDialogText = undefined;
+      break;
+    }
+
+    case EVENT_TYPES.IMPLEMENTER_STALL_AUTOANSWERED: {
+      // The intervention is recorded in events.jsonl; stall clearing arrives via
+      // the paired implementer_stall_end. Nothing to materialize here.
       break;
     }
 
@@ -499,6 +533,13 @@ function applyEvent(status: MaterializedStatus, rawEvent: KloopEvent): void {
   ];
   if (terminalTypes.includes(event.type)) {
     markRunningAgentsInterrupted(status, event.timestamp);
+    // A terminal run is never stalled — a SIGKILLed/cancelled daemon can't emit
+    // stall_end, so clear here or `kloop status` would show ⚠ STALLED (with an
+    // "attach to answer it" hint pointing at a dead tmux session) forever.
+    status.stalled = false;
+    status.stalledSinceMs = undefined;
+    status.stallReason = undefined;
+    status.stallDialogText = undefined;
   }
 
   // Track consecutive failures: reset on LOOP_END if loop was approved,
@@ -686,6 +727,9 @@ export function toRunState(status: MaterializedStatus): {
   startedAt: string;
   lastEventAt: string;
   config?: Config;
+  stalled?: boolean;
+  stallReason?: 'confirm-dialog' | 'idle';
+  stalledSinceMs?: number;
 } {
   const lastLoop = status.loops[status.loops.length - 1];
   let currentPhase: string | undefined;
@@ -725,5 +769,9 @@ export function toRunState(status: MaterializedStatus): {
     startedAt: status.startedAt,
     lastEventAt: status.lastEventAt,
     config: status.config,
+    // Stall only matters while running — terminal states clear it upstream anyway.
+    ...(status.status === 'running' && status.stalled
+      ? { stalled: true, stallReason: status.stallReason, stalledSinceMs: status.stalledSinceMs }
+      : {}),
   };
 }

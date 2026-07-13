@@ -1,0 +1,22 @@
+{
+  "name": "kteam",
+  "version": "0.2.0",
+  "type": "module",
+  "bin": {
+    "kteam": "./src/index.ts",
+    "kteamd": "./src/daemon-entry.ts"
+  },
+  "scripts": {
+    "dev": "bun run ./src/index.ts",
+    "build": "bun build ./src/index.ts ./src/daemon-entry.ts --outdir ./dist --target bun",
+    "test": "bun test",
+    "check": "tsc --noEmit && bun test"
+  },
+  "dependencies": {
+    "commander": "^12.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  }
+}

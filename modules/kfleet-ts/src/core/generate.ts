@@ -17,7 +17,16 @@ import path from 'node:path';
 import { binDir, home, resolveAsset } from '../deps';
 import { KIND_SPECS } from './kinds';
 import { type SettingsOutput, resolveSettings } from './settings';
-import type { AliasMap, CommandDef, DefaultHomeMap, Kind, ResolvedAgent, SettingsLayer } from './types';
+import { type SharedResult, materializeSharedHistory } from './shared-history';
+import type {
+  AliasMap,
+  CommandDef,
+  DefaultHomeMap,
+  Kind,
+  ResolvedAgent,
+  SettingsLayer,
+  SharedHistoryMap,
+} from './types';
 
 /** Marker line so prune can tell kfleet-owned wrappers from anything else. */
 const MARKER = '# kfleet-managed — do not edit (regenerate with `kfleet apply`)';
@@ -201,7 +210,8 @@ export function apply(
   agents: ResolvedAgent[],
   commands: CommandDef[] = [],
   defaultHomes: DefaultHomeMap = {},
-): { agents: number; commands: number; defaultHomes: number } {
+  sharedHistory: Partial<SharedHistoryMap> = {},
+): { agents: number; commands: number; defaultHomes: number; shared: SharedResult } {
   // Two (agent × variant) pairs can collide — e.g. an agent literally named
   // `auto-kirin` (default variant) and `kirin` under an `auto` variant both map
   // to `claude-auto-kirin`. Catch it instead of silently overwriting.
@@ -224,13 +234,24 @@ export function apply(
     seen.add(c.name);
   }
   const defaultHomeTargets = resolveDefaultHomeTargets(defaultHomes, agents);
+  const shared: SharedResult = { migrated: 0, conflicts: 0 };
+  const shareInto = (kind: Kind, dir: string): void => {
+    if (!sharedHistory[kind]) return;
+    const r = materializeSharedHistory(kind, dir);
+    shared.migrated += r.migrated;
+    shared.conflicts += r.conflicts;
+  };
   for (const r of agents) {
     materializeAgent(r);
     writeWrapper(r);
+    shareInto(r.kind, KIND_SPECS[r.kind].configDir(r.name));
   }
-  for (const d of defaultHomeTargets) materializeAgent(d.agent, d.dir);
+  for (const d of defaultHomeTargets) {
+    materializeAgent(d.agent, d.dir);
+    shareInto(d.kind, d.dir); // the bare CLI's home joins the pool too
+  }
   for (const c of commands) writeCommand(c);
-  return { agents: agents.length, commands: commands.length, defaultHomes: defaultHomeTargets.length };
+  return { agents: agents.length, commands: commands.length, defaultHomes: defaultHomeTargets.length, shared };
 }
 
 /** Remove managed wrappers no longer backed by an agent or command. Returns removed names. */

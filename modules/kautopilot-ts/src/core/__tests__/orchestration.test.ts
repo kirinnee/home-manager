@@ -16,6 +16,7 @@ afterAll(() => {
 	rmSync(tempHome, { recursive: true, force: true });
 });
 
+import { sessionDir } from "../artifacts";
 import {
 	initOrchestration,
 	isGateLevel,
@@ -26,7 +27,6 @@ import {
 	toMermaid,
 	unsatisfiedDeps,
 } from "../orchestration";
-import { sessionDir } from "../artifacts";
 import { computeSchedule } from "../scheduler";
 
 let seq = 0;

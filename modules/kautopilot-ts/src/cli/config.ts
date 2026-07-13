@@ -21,25 +21,23 @@ export function createConfigCommand(): Command {
 			"--field <name>",
 			"Print a single settings value (e.g. viewerBaseUrl)",
 		)
-		.action(
-			async (opts: { org?: string; config?: string; field?: string }) => {
-				try {
-					const config = resolveConfig(opts.org, opts.config);
-					if (opts.field) {
-						const settings = config.settings as Record<string, unknown>;
-						if (!(opts.field in settings)) {
-							logError(`Unknown settings field: ${opts.field}`);
-							process.exit(1);
-						}
-						process.stdout.write(`${String(settings[opts.field])}\n`);
-						process.exit(0);
+		.action(async (opts: { org?: string; config?: string; field?: string }) => {
+			try {
+				const config = resolveConfig(opts.org, opts.config);
+				if (opts.field) {
+					const settings = config.settings as Record<string, unknown>;
+					if (!(opts.field in settings)) {
+						logError(`Unknown settings field: ${opts.field}`);
+						process.exit(1);
 					}
-					process.stdout.write(`${JSON.stringify(config, null, 2)}\n`);
+					process.stdout.write(`${String(settings[opts.field])}\n`);
 					process.exit(0);
-				} catch (err) {
-					logError(err instanceof Error ? err.message : String(err));
-					process.exit(1);
 				}
-			},
-		);
+				process.stdout.write(`${JSON.stringify(config, null, 2)}\n`);
+				process.exit(0);
+			} catch (err) {
+				logError(err instanceof Error ? err.message : String(err));
+				process.exit(1);
+			}
+		});
 }

@@ -7,6 +7,13 @@ import type { Kind, Profile } from './types';
 
 type Field = keyof Profile;
 
+/** One session-state entry poolable across accounts (see core/shared-history.ts). */
+export interface SharedEntry {
+  /** entry name inside the config dir (and inside the per-kind pool) */
+  name: string;
+  type: 'dir' | 'file';
+}
+
 interface Asset {
   /** which resolved-profile field supplies the source path */
   field: Field;
@@ -33,6 +40,9 @@ interface KindSpec {
   assets: Asset[];
   /** claude-only: bake the auto-accept-trust shell snippet into the wrapper */
   autotrust?: boolean;
+  /** session-state entries pooled across accounts when sharedHistory is on.
+   *  Everything `--resume`/`--continue` needs; identity/auth stays per-account. */
+  sharedState: SharedEntry[];
 }
 
 export const KIND_SPECS: Record<Kind, KindSpec> = {
@@ -48,6 +58,20 @@ export const KIND_SPECS: Record<Kind, KindSpec> = {
       { field: 'skills', dest: ['skills'], type: 'dir', mode: 'link' },
       { field: 'mcp', dest: ['.mcp.json'], type: 'file', mode: 'link' },
     ],
+    // Session transcripts + everything a resumed session references. NOT shared:
+    // .claude.json (OAuth/auth/trust), settings, plugins, cache, telemetry.
+    sharedState: [
+      { name: 'projects', type: 'dir' }, // transcripts (<cwd>/<session-id>.jsonl) + per-project memory
+      { name: 'sessions', type: 'dir' }, // per-session working dirs (workflow scripts, scratch)
+      { name: 'session-env', type: 'dir' },
+      { name: 'file-history', type: 'dir' }, // checkpoints / rewind
+      { name: 'plans', type: 'dir' },
+      { name: 'tasks', type: 'dir' },
+      { name: 'todos', type: 'dir' },
+      { name: 'shell-snapshots', type: 'dir' }, // referenced by transcripts at resume
+      { name: 'paste-cache', type: 'dir' }, // pasted content referenced by transcripts
+      { name: 'history.jsonl', type: 'file' }, // up-arrow prompt history
+    ],
   },
   codex: {
     bin: 'codex',
@@ -61,6 +85,12 @@ export const KIND_SPECS: Record<Kind, KindSpec> = {
       { field: 'hooks', dest: ['hooks.json'], type: 'file', mode: 'link' },
       { field: 'hooksDir', dest: ['hooks'], type: 'dir', mode: 'link' },
       { field: 'skills', dest: ['skills'], type: 'dir', mode: 'link' },
+    ],
+    // Rollout files + prompt history. NOT shared: auth.json, config.toml, sqlite state.
+    sharedState: [
+      { name: 'sessions', type: 'dir' }, // rollout transcripts (what `codex resume` reads)
+      { name: 'archived_sessions', type: 'dir' },
+      { name: 'history.jsonl', type: 'file' },
     ],
   },
 };

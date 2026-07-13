@@ -206,7 +206,9 @@ function backend(): Backend {
 			installed: linuxInstalled,
 			port: linuxPort,
 		};
-	return die(`unsupported platform: ${os} (only macOS and Linux are supported)`);
+	return die(
+		`unsupported platform: ${os} (only macOS and Linux are supported)`,
+	);
 }
 
 function report(b: Backend, port: number): void {
@@ -251,7 +253,9 @@ export function createServiceCommand(): Command {
 		.action(() => {
 			const b = backend();
 			if (!b.installed())
-				die(`${TOOL} service is not installed — run \`${TOOL} service install\` first`);
+				die(
+					`${TOOL} service is not installed — run \`${TOOL} service install\` first`,
+				);
 			if (!b.restart()) die(`${TOOL} service restart failed`);
 			logOk(`${TOOL} service restarted`);
 		});

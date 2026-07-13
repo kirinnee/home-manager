@@ -1,10 +1,10 @@
 import {
+	derivePrProgress,
 	type GateLevel,
 	type MergeMode,
 	type Orchestration,
 	type PlanNode,
 	type PlanProgress,
-	derivePrProgress,
 	unsatisfiedDeps,
 } from "./orchestration";
 

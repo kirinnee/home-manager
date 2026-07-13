@@ -145,6 +145,13 @@ settings:
                                   # /usage), and block before the implementer runs until an
                                   # exhausted pool resets. Needs "kfleet serve" running.
   # usageEndpoint: http://127.0.0.1:47318/usage  # where to fetch the usage snapshot (default)
+  stall:                          # implementer stall detection: notice a frozen implementer
+    enabled: false                # (e.g. stuck on a Claude Code confirm dialog that fires even
+    idleThresholdSec: 600         # with bypass-permissions) via log/evidence mtimes + a tmux
+    checkIntervalSec: 60          # pane-tail hash, and surface it in status/wait/ps.
+    autoAnswer: "off"             # off = detect only | safe = auto-answer known confirm dialogs
+                                  # (sends "1", logged as implementer_stall_autoanswered) | all =
+                                  # also answer generic ❯ prompts with Enter (risky).
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║ PROMPTS — full agent prompts (config is source of truth; edit freely)      ║

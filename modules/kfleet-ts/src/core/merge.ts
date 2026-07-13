@@ -52,7 +52,7 @@ export function resolveAll(config: Config): ResolvedAgent[] {
 
   const out: ResolvedAgent[] = [];
   for (const agent of config.agents) {
-    const { name, kind, profiles: aProfiles = [], ...aInline } = agent;
+    const { name, kind, identity, profiles: aProfiles = [], ...aInline } = agent;
     for (const [vName, variant] of Object.entries(variants)) {
       const { profiles: vProfiles = [], ...vInline } = variant;
       const who = `agent "${name}" (variant "${vName}")`;
@@ -62,7 +62,15 @@ export function resolveAll(config: Config): ResolvedAgent[] {
       acc = mergeBase(acc, flatten(aInline, kind)); // agent inline wins
       const fullName = vName === 'default' ? name : `${vName}-${name}`;
       // settings is already a layer list at runtime; normalize the static type too.
-      out.push({ name: fullName, kind, ...acc, settings: asLayers(acc.settings) });
+      out.push({
+        name: fullName,
+        kind,
+        base: name,
+        variant: vName,
+        identity,
+        ...acc,
+        settings: asLayers(acc.settings),
+      });
     }
   }
   return out;

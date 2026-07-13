@@ -256,6 +256,15 @@ export async function handler(id: string | undefined, opts: { json: boolean }, d
             exitReason: status.exitReason,
             failures: status.consecutiveFailures,
             failureThreshold: status.failureThreshold,
+            // Implementer stall detection (absent unless currently stalled)
+            ...(status.stalled
+              ? {
+                  stalled: true,
+                  stalledSinceMs: status.stalledSinceMs,
+                  stallReason: status.stallReason,
+                  stallDialogText: status.stallDialogText,
+                }
+              : {}),
             loops: latestLoops,
           },
           null,
@@ -295,6 +304,19 @@ export async function handler(id: string | undefined, opts: { json: boolean }, d
       console.log(pc.bold(`Run: ${runId}  ${statusColor(`[${status.status.toUpperCase()}]`)}`));
       console.log(`  started ${format(startedDate, 'MMM dd, HH:mm')}`);
       console.log(`  ran for ${durStr}${completedAge ? pc.dim(`  completed ${completedAge}`) : ''}`);
+    }
+    if (status.stalled) {
+      const stalledFor = status.stalledSinceMs ? formatDurationHuman(Date.now() - status.stalledSinceMs) : '?';
+      console.log(pc.red(`  ⚠ STALLED (${status.stallReason ?? 'idle'}) for ${stalledFor}`));
+      if (status.stallDialogText) {
+        for (const line of status.stallDialogText.split('\n').slice(-6)) {
+          console.log(pc.dim(`  │ ${line}`));
+        }
+      }
+      const implSession = lastLoop ? `kloop-${runId}-${lastLoop.loop}-impl` : null;
+      if (implSession) {
+        console.log(pc.dim(`  Answer it: tmux attach -t ${implSession}`));
+      }
     }
     if (status.status === 'conflict') {
       console.log(pc.red(`  CONFLICT: ${status.exitReason ?? 'unknown'}`));

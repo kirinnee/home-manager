@@ -85,8 +85,16 @@ and stops at the first `interactive` or `agent` step, printing a **StepDescripto
     "snapshot": { "type": "plans", "diffAgainstPrevious": true }, // omit if none
   },
   "review": null, // present only on review steps — §4
+  "execution": "inline", // inline | deferred — deferred writer steps are driven
+                         // via `kautopilot relay` (§5d), never run inline
 }
 ```
+
+**Deferred descriptors are lightweight**: when `execution: "deferred"` the
+`prompt` is a short stub (the full prompt travels to the writer session via the
+relay), `review` is null (the writer owns the fan-out), and `vars` is trimmed to
+cheap path entries. `contract` is intact — the harness still needs it for
+`complete`.
 
 For yielded steps `repo`/`worktree` are null and paths point at the session store. Execution
 and PR polish are no longer yielded by `next`; the skill drives them through
@@ -300,6 +308,61 @@ record clears the matching downstream gate so newly-runnable plans appear in the
 
 (If a session has no master plan/orchestration, fix or re-approve the master plan. The
 DAG model above is the only execution path.)
+
+## 5d. Deferred writer — `relay` + `discussion`
+
+When `session.json.writerMode == "deferred"` (set at `start --writer deferred`,
+default from `config.writer.mode`; **pinned per session** against config flips),
+the six writer steps (brainstorm, triage, write_spec, write_master_plan,
+write_plans, feedback) that are enabled in `config.writer.steps` yield
+`execution: "deferred"`. The harness then drives the step through a **writer
+session** — a Claude conversation on a fleet account (`config.writer.pool`,
+pinned per phase in `scratch/<phaseKey>/writer.json`) that the binary runs
+turn-by-turn via tmux (`--session-id` on turn 1, `--resume` after; never
+`--print`).
+
+```
+kautopilot relay [--message <text> | --message-file <path>] [--approval]
+                 [--fallback-inline] [--session <id>]
+```
+
+One call = one writer turn. The binary composes `scratch/<phaseKey>/turn-N/
+message.md` (turn 1 carries the full step prompt + reviewer payload + visual
+brief + envelope contract; each turn re-states the contract), mints/reuses the
+working artifact version itself (the writer NEVER runs kautopilot commands),
+spawns the tmux TUI, waits for the writer's sentinel, validates `reply.json`
+(schema + on-disk side effects: revised turns must have the vN.md + vN.html),
+retries correctively in the same conversation (max `writer.maxTurnRetries`),
+then enriches with viewer URLs and prints the envelope on stdout. **Exit is the
+wake signal** — callers run it in the background (it can block ~30 min/attempt)
+and read stdout; `reply.json` is rewritten mid-flight and must not be watched.
+
+- Idempotent: re-running with no message (or the same message) returns the last
+  accepted envelope; a half-done turn is re-attached (`--resume` + nudge); a
+  finished-on-disk turn (controller died) is adopted without respawn.
+- `--approval` = the final consistency turn (no version prep; the writer must
+  not revise). `--fallback-inline` flips `session.json.writerMode` to inline for
+  the rest of the session (the escape hatch; irreversible per session).
+- Failures print `{ok:false, error, remediation[], paneSnapshotPath,
+  tmuxSession}`; fatal pane signatures (rate limit / auth / resume-lost) fail
+  fast instead of burning the timeout. A lost harness conversation auto-
+  rebootstraps onto another pool account with a catch-up message.
+- WAL events (`relay:sent|reply|invalid|failed|rebootstrap|fallback_inline`)
+  are observability-only — never cursor events.
+- `kautopilot revise` is rejected on deferred steps (the relay owns version
+  bookkeeping).
+
+```
+kautopilot discussion [--phase <phaseKey|kind>] [--session <id>] [--json]
+```
+
+The capture surface: the phase's writer state + turn list (state, attempts,
+elapsed, last progress.log line, accepted envelopes). Also served at
+`GET /api/sessions/:id/discussion[/:phaseKey]` and rendered as a Discussion
+timeline in the dashboard. `stop` kills `kap-<sessionId>-*` tmux sessions and
+marks running writers `interrupted` (re-attachable); `delete` also removes them.
+
+---
 
 ---
 
