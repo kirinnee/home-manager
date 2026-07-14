@@ -39,6 +39,13 @@ Rules of thumb:
 - Do not route to the `claude-auto-f5-*` wrappers: they are the same accounts as the base wrappers with a Fable default. Use the base wrapper + `--model fable` instead, and never run `f5-x` and `x` together (one quota pool).
 - Quota: `glm52a`/`glm52b` are separate keys (parallel-safe); each `f5-x` shares with `x`.
 
+### Then pick the account
+
+- NEVER route kteam work to `claude-auto-kirin` or `codex-auto-personal` — those are the user's personal daily-driver accounts.
+- Loosely bias ~70% of TOKEN SPEND (not session count) to the loge wrappers (`claude-auto-loge`, `codex-auto-loge`) and ~30% to the remaining OpenAI/Anthropic accounts (`claude-auto-{liftoff,atomi}`, `codex-auto-{loai,loio,ernest,kirin,atomi}`). Grade tasks by difficulty — difficulty ≈ expected token burn — and send the heavy ones to loge; one monster task on loge can satisfy the split on its own.
+- `claude-auto-loge` serves the whole Anthropic lineup through the kloge proxy — pass real model ids (`claude-fable-5` default, `claude-opus-4-8`, `claude-sonnet-5`), not aliases.
+- GLM / MiniMax / DeepSeek accounts sit outside the 70/30 split — use them whenever the model table points there.
+
 ## Launch and supervise
 
 Start one approved teammate per task:
