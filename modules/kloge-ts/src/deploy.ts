@@ -90,18 +90,33 @@ export async function push(opts: PushOpts): Promise<void> {
   await need('ssh');
   requireRendered();
 
-  // Ensure the remote dir exists (rsync -R would need it; be explicit).
-  const mk = await run(['ssh', opts.host, `mkdir -p ${shq(opts.remoteDir)}/auth`]);
-  if (mk.code !== 0) die(`ssh mkdir failed on ${opts.host}:\n${mk.stderr.trim()}`);
+  // ClearAllForwardings stops the user's ssh-config LocalForwards (e.g. a
+  // :1455 that's often already bound) from failing/polluting our commands.
+  const SSH = ['ssh', '-o', 'ClearAllForwardings=yes'];
+
+  // Ensure the remote dir exists, and best-effort fix ownership: the container
+  // runs as root, so any files it wrote into the mounted auth dir (rotated
+  // token files, logs/) become root-owned and would block rsync's update/delete
+  // as the login user. `sudo -n` never prompts, and `|| true` keeps this a
+  // no-op on boxes without passwordless sudo.
+  const prep =
+    `mkdir -p ${shq(opts.remoteDir)}/auth; ` +
+    `sudo -n chown -R "$(id -un)":"$(id -gn)" ${shq(opts.remoteDir)} 2>/dev/null || true`;
+  const mk = await run([...SSH, opts.host, prep]);
+  if (mk.code !== 0) die(`ssh prep failed on ${opts.host}:\n${mk.stderr.trim()}`);
 
   log(`syncing ${dataDir}/ -> ${opts.host}:${opts.remoteDir}/`);
   // Trailing slash on source copies contents. --delete keeps the box a mirror
-  // (removed creds vanish there too). Preserve the 0600/0700 perms.
+  // (removed creds vanish there too), but EXCLUDE logs/ — those are per-host
+  // container runtime, not credentials, and are what --delete chokes on.
   const sync = await run([
     'rsync',
     '-az',
     '--delete',
+    '--exclude=logs/',
     '--chmod=D700,F600',
+    '-e',
+    'ssh -o ClearAllForwardings=yes',
     `${dataDir}/`,
     `${opts.host}:${opts.remoteDir}/`,
   ]);
@@ -124,7 +139,7 @@ export async function push(opts: PushOpts): Promise<void> {
     `if docker compose version >/dev/null 2>&1; then docker compose up -d; ` +
     `elif command -v docker-compose >/dev/null 2>&1; then docker-compose up -d; ` +
     `else echo "docker not found on ${opts.host} (need docker + compose)" >&2; exit 127; fi`;
-  const startr = await run(['ssh', opts.host, remoteCmd]);
+  const startr = await run([...SSH, opts.host, remoteCmd]);
   if (startr.code !== 0) die(`remote start failed:\n${startr.stderr.trim() || startr.stdout.trim()}`);
   ok(`started on ${opts.host} — reachable there at ${localUrl()} (bound to the box's 127.0.0.1)`);
   log(`from here you could tunnel it: ssh -N -L ${resolvePort()}:127.0.0.1:${resolvePort()} ${opts.host}`);
