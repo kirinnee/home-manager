@@ -17,6 +17,9 @@ users:
     lock_passwd: true
     ssh_authorized_keys:
       - ${ssh_public_key}
+      # Extra operator keys that may SSH into every box (public keys — safe to
+      # commit; the private half never leaves the device).
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKTN4Mmx9FAv1zeyhko8LY2TQTdn94t6dUd4RLtAsuxZ iPad Air
 
 packages:
   - curl
