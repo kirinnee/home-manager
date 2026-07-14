@@ -90,3 +90,14 @@ Also reconfirmed the earlier note: the statusline shows "Not logged in" + "0% (0
    logged-out-boot cause is gone.
 
 All 42 kteam-ts tests pass post-change.
+
+## 2026-07-13T22:35Z — resolution notes (nitroso session)
+
+mrjrutsz (mm3 locale stall): `kteam resume` fixed it — turn 2 authenticated fine and completed; work verified good (i18n catalog check passed 1432 keys x 3 locales downstream). Net: mm3 TUI auth flake is recoverable via resume, cost ~15 min.
+No other kteam problems this session: 5 sessions total, 4 completed cleanly on turn 1 (codex-auto-loge zinc land, claude-auto-loge argon ship, 2x mm3), waits/status/snapshots all behaved. Cross-teammate file gating (loge polling for mm3's locale keys before committing in the SAME worktree) worked as instructed.
+
+## 2026-07-14T02:54Z — mm3 login-wall RECURRENCE (mrk1xfkz radon bump + mrk1y9qk argon promo)
+
+Both claude-auto-mm3 sessions started within ~1 min of each other came up "Not logged in · Please run /login" and froze (chat.jsonl static at 1589B for 90s+, prompts bouncing). Same failure as mrjrutsz earlier today. Pattern so far: mm3 works via -p probes and SOMETIMES in kteam TUIs (mrjsed3l, mrjs1pb1 fine), but fresh TUI launches intermittently miss credentials — possibly a credential-sync race in the wrapper when multiple mm3 TUIs spawn near-simultaneously. kteamd's stall detector takes 900s to flag it; a login-state check at session start would catch this in seconds. Workaround again: kteam resume (fresh TUI usually authenticates).
+Addendum: `kteam resume` refuses on a login-walled session because state is still 'running' (stall flag takes 900s) — had to `kteam stop` + `kteam resume`. A `kteam restart <id>` (or resume --force) would make the workaround one step; better yet, detect the login-wall reply and fail fast.
+Addendum 2 (03:02Z): resume did NOT fix the recurrence — both mm3 sessions came back login-walled again (transcripts frozen after restart too). Differs from the morning incident where one resume recovered. Suspect the mm3 credential/token itself expired since (~4h between working and broken). Escalation path used: stop both, reassign tasks to codex-auto-loge. Suggest: kteam start should probe the TUI for the login-wall reply within ~30s and fail the session immediately with a distinct 'auth' status instead of burning the 900s stall timer (twice, if you resume).
