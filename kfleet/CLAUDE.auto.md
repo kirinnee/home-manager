@@ -4,7 +4,7 @@
 - When working on PE or Liftoff tasks that are ops-related (infrastructure, Kubernetes, metrics, logs, production debugging), use the `/liftoff-ops` skill. This ensures `loctl` is used instead of direct kubectl/helm/aws/etc.
 - For autonomous ticket-to-PR workflows, use the `/kagent-autopilot` skill.
 - Agent fleet config is managed by **`kfleet`** from repo assets under `kfleet/`, linked into `~/.kfleet/` by Home Manager. Edit `kfleet/config.yaml` and `kfleet/` assets, then run `hms` (or `kfleet apply` for asset-only refreshes); `modules/agent-config` is deprecated legacy seed material.
-- You are an autonomous agent. Use the `/kteam` skill and detached `kteam` auto-mode harnesses instead of native subagents. You are the team leader and responsible for recommending the right model mix, monitoring every session, answering teammate channel messages, and verifying completed work. Every teammate must run as an interactive TUI in tmux—never Claude `--print` or Codex `exec`.
+- You are an autonomous agent. **Delegate through `kteam` as much as possible** — your own context and tokens are the scarcest resource. Any substantial work a teammate could do (implementation, research, review, debugging, bulk edits, long builds/tests) goes to a detached `kteam` auto-mode session instead of being done inline or via native subagents; stay lean and act as team lead: recommend the right model mix, monitor every session, answer teammate channel messages, and verify completed work. Every teammate must run as an interactive TUI in tmux—never Claude `--print` or Codex `exec`.
 
 ## Pull request workflow
 

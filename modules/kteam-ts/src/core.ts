@@ -80,7 +80,9 @@ export function recommendAgents(task: string, agents: string[]): Recommendation[
   add(
     [
       /codex-auto-(atomi|loge|loai|loio|kirin|ernest|personal)$/,
-      /claude-auto-f5-(atomi|liftoff|kirin)$/,
+      // f5-* wrappers are the same accounts as the base ones (shared quota);
+      // recommend the base wrapper and reach Fable via `--model fable` instead.
+      /claude-auto-(kirin|liftoff|atomi)$/,
       /claude-auto-loge$/,
     ],
     out.length ? 'independent reviewer' : 'primary implementer',
