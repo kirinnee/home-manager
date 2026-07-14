@@ -40,10 +40,6 @@ let
       source = kfleetAssets + "/CLAUDE.auto.md";
       force = true;
     };
-    ".kfleet/hooks" = {
-      source = kfleetAssets + "/hooks";
-      force = true;
-    };
     ".kfleet/templates" = {
       source = kfleetAssets + "/templates";
       force = true;

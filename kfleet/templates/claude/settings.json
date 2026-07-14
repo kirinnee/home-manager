@@ -10,10 +10,6 @@
           {
             "type": "command",
             "command": "loctl hook-check"
-          },
-          {
-            "type": "command",
-            "command": "$HOME/.kfleet/hooks/rtk-rewrite.sh"
           }
         ]
       }
