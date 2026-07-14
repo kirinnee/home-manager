@@ -79,6 +79,30 @@ let
       cp -rv $src/* $out/
     '';
   };
+
+  # Pinned zsh-autocomplete source, bound here so both the plugin entry AND the
+  # compdump cache key below reference the SAME store path (no drift).
+  zshAutocompleteSrc = pkgs.fetchFromGitHub {
+    owner = "marlonrichert";
+    repo = "zsh-autocomplete";
+    rev = "20f6c34f20270084b21211428afb6d2534aae8e9";
+    sha256 = "sha256-M8gWOg/9ohkG2NiLVSGERINcmHJCfoES5IG2GBllrRo=";
+  };
+
+  # compinit caches autoload paths (incl. zsh-autocomplete's Completions/ helpers)
+  # into ~/.zcompdump by ABSOLUTE nix-store path. If those paths change but the
+  # dump is reused, autoload breaks ("_autocomplete__…: command not found"). So
+  # key the dump filename to a hash of every completion-providing input: the file
+  # name changes iff one of these changes, giving precise cache invalidation (warm
+  # cache across unrelated switches, automatic fresh dump on any plugin bump) —
+  # instead of nuking the dump on every switch.
+  zshCompdumpKey = builtins.substring 0 16 (builtins.hashString "sha256"
+    (lib.concatStringsSep ":" [
+      (toString zshAutocompleteSrc)
+      (toString pkgs.zsh-you-should-use)
+      (toString pkgs.zsh-powerlevel10k)
+      (toString pkgs.oh-my-zsh)
+    ]));
 in
 with pkgs;
 with modules;
@@ -263,16 +287,6 @@ rec {
     ${modules.load-secrets}/bin/load-secrets
   '';
 
-  # zsh-autocomplete keeps helper functions (e.g. _autocomplete__should_add_space)
-  # in its Completions/ dir, which compinit indexes into ~/.zcompdump by absolute
-  # nix-store path. When the plugin's store path changes (ANY rev bump / rebuild),
-  # the cached dump keeps autoloading from the OLD, now-deleted path and the shell
-  # breaks with "_autocomplete__…: command not found". Purge the dump (and its
-  # stale .lock dirs / .zwc / temp files) on every switch so the next shell
-  # rebuilds it against the current fpath. Cheap: one dump rebuild per switch.
-  home.activation.freshZshCompdump = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-    rm -rf "$HOME"/.zcompdump* 2>/dev/null || true
-  '';
 
   # Compile repo-shipped terminfo entries (modules/terminfo/*.terminfo) into
   # ~/.terminfo — the ONE directory every ncurses (Ubuntu's, nix's, macOS's)
@@ -781,6 +795,18 @@ rec {
         enable = true;
         extraConfig = ''
           ZSH_CUSTOM="${customDir}"
+
+          # Redirect compinit's dump to a cache file keyed to the plugin-input
+          # hash (see zshCompdumpKey) + the running zsh version. Set BEFORE
+          # oh-my-zsh.sh runs compinit so OMZ honours it. When plugins are
+          # unchanged the name is stable (warm cache); a plugin bump yields a new
+          # name (auto-fresh dump). Prune superseded dumps so the dir can't grow.
+          ZSH_COMPDUMP="$HOME/.cache/zsh/zcompdump-${zshCompdumpKey}-$ZSH_VERSION"
+          [[ -d $HOME/.cache/zsh ]] || mkdir -p $HOME/.cache/zsh
+          for _f in $HOME/.cache/zsh/zcompdump-*(N); do
+            [[ $_f == $ZSH_COMPDUMP* ]] || rm -f -- $_f
+          done
+          unset _f
         '';
         plugins = [
           "kubectl"
@@ -945,12 +971,7 @@ rec {
         {
           name = "zsh-autocomplete";
           file = "zsh-autocomplete.plugin.zsh";
-          src = pkgs.fetchFromGitHub {
-            owner = "marlonrichert";
-            repo = "zsh-autocomplete";
-            rev = "20f6c34f20270084b21211428afb6d2534aae8e9";
-            sha256 = "sha256-M8gWOg/9ohkG2NiLVSGERINcmHJCfoES5IG2GBllrRo=";
-          };
+          src = zshAutocompleteSrc;
         }
         {
           name = "you-should-use";
