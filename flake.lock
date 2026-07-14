@@ -521,11 +521,11 @@
         "nixpkgs": "nixpkgs_9"
       },
       "locked": {
-        "lastModified": 1782324000,
-        "narHash": "sha256-iTgUsIGPKi5ptuevhAw+bjIH1daQnRMvkDA7pWdVGNo=",
+        "lastModified": 1784004851,
+        "narHash": "sha256-coJTS7WYO7tMl0W0rI8d4RRSvxqYxrqNK8qX8J+kAmQ=",
         "owner": "kirinnee",
         "repo": "home-manager-modules",
-        "rev": "bda0ce2dda598eeb3c65cfa563d71c826753b986",
+        "rev": "a053df7462f894016e107fc0e8a6aeb5defd3db7",
         "type": "github"
       },
       "original": {
