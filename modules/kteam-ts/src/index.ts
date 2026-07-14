@@ -183,10 +183,15 @@ program
 program
   .command('ps')
   .option('--json')
-  .action(async (options: { json?: boolean }) => {
-    const sessions = await (await client()).list();
+  .option('-a, --all', 'include terminal sessions (completed/failed/stalled/stopped); default shows only running')
+  .action(async (options: { json?: boolean; all?: boolean }) => {
+    const all = await (await client()).list();
+    // Default to running only — same "running" semantic as the status counts:
+    // any session not in a terminal state. `-a` shows everything.
+    const sessions = options.all ? all : all.filter(view => !terminal.includes(view.state.status));
     if (options.json) return console.log(JSON.stringify(sessions, null, 2));
-    if (!sessions.length) return console.log('no kteam sessions');
+    if (!sessions.length)
+      return console.log(all.length ? 'no running kteam sessions (use -a to show all)' : 'no kteam sessions');
     for (const view of sessions)
       console.log(
         `${view.config.id.padEnd(24)} ${view.state.status.padEnd(18)} ${view.config.binary.padEnd(28)} ${view.config.mode.padEnd(11)} ${view.config.name}`,
