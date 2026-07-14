@@ -58,6 +58,33 @@ profiles:
           name: Loge
           base_url: https://loge.tailb7bc.ts.net/v1
           env_key: OPENAI_API_KEY
+  # loge-local: the same pool, but served by a local CLIProxyAPI (see `kloge`)
+  # at 127.0.0.1:8317 — no gateway, no tailnet. This raw CLIProxyAPI does NOT
+  # alias model names, so real upstream IDs are used (claude-fable-5, not fable-5).
+  loge-local:
+    env:
+      ANTHROPIC_API_KEY: loge-internal
+      ANTHROPIC_BASE_URL: http://127.0.0.1:8317
+      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-4-8
+      ANTHROPIC_DEFAULT_SONNET_MODEL: claude-sonnet-5
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-4-5-20251001
+      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5
+      # raw CLIProxyAPI has no aliases, so kteam must feed a real ID, not "opus"
+      KTEAM_MODEL: claude-fable-5
+    settings:
+      model: claude-fable-5
+  loge-local-codex:
+    env:
+      OPENAI_API_KEY: loge-internal
+      KTEAM_MODEL: gpt-5.6-sol
+    settings:
+      model: gpt-5.6-sol
+      model_provider: loge-local
+      model_providers:
+        loge-local:
+          name: Loge Local
+          base_url: http://127.0.0.1:8317/v1
+          env_key: OPENAI_API_KEY
   # Fable-default settings overlay for the f5-* agents (Anthropic OAuth accounts
   # only — fable is claude-only, so no codex/provider agents use this).
   fable:
@@ -176,6 +203,16 @@ agents:
     profiles:
       - codex
       - loge-codex
+  - name: loge-local
+    kind: claude
+    profiles:
+      - claude
+      - loge-local
+  - name: loge-local
+    kind: codex
+    profiles:
+      - codex
+      - loge-local-codex
   - name: loai
     kind: codex
     profiles:

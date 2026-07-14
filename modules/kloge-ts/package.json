@@ -1,0 +1,21 @@
+{
+  "name": "kloge",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "kloge": "./src/index.ts"
+  },
+  "scripts": {
+    "dev": "bun run ./src/index.ts",
+    "test": "bun test",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "commander": "^12.0.0",
+    "picocolors": "^1.1.1"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  }
+}
