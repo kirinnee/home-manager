@@ -893,6 +893,10 @@ rec {
         kapps = "kautopilot ps";
         kapx = "kautopilot stop";
 
+        # klaude
+        kat = "klaude at";
+        kn = "klaude -n";
+
         # kteam
         kt = "kteam";
         ktps = "kteam ps";
