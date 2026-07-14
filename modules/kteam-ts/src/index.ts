@@ -136,6 +136,7 @@ program
   .requiredOption('-a, --agent <binary>')
   .addOption(new Option('--mode <mode>').choices(['auto', 'interactive']).default('auto'))
   .option('--name <name>')
+  .option('--model <model>', 'override the model (alias or full id); defaults to the wrapper KTEAM_MODEL')
   .option('--cwd <dir>', '', process.cwd())
   .option(
     '-i, --image <file>',
@@ -166,6 +167,7 @@ program
       prompt: parts.join(' '),
       agent: String(options.agent),
       name: options.name as string | undefined,
+      model: options.model as string | undefined,
       cwd: String(options.cwd),
       mode: options.mode as 'auto' | 'interactive',
       intervalSeconds: options.interval as number | undefined,

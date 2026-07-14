@@ -25,6 +25,10 @@ export interface SessionConfig {
   binary: string;
   harness: Harness;
   modelHint: string;
+  /** Model passed to the harness via `--model`. User `--model` overrides the
+   *  kfleet default (KTEAM_MODEL exported by the wrapper); undefined => omit the
+   *  flag and let the wrapper keep its own default. */
+  model?: string;
   mode: InteractionMode;
   cwd: string;
   createdAt: string;
@@ -104,6 +108,9 @@ export interface StartSessionRequest {
   name?: string;
   cwd?: string;
   mode?: InteractionMode;
+  /** Override the model. When omitted, kteam feeds the wrapper's kfleet default
+   *  (KTEAM_MODEL); when that too is absent, no `--model` flag is passed. */
+  model?: string;
   intervalSeconds?: number;
   stallSeconds?: number;
   timeoutSeconds?: number;

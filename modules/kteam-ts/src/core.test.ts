@@ -2,12 +2,13 @@ import { describe, expect, test } from 'bun:test';
 import { inferHarness, interactiveHarnessArgs, recommendAgents } from './core';
 import type { SessionConfig } from './types';
 
-const config = (harness: 'claude' | 'codex', turn = 1): SessionConfig => ({
+const config = (harness: 'claude' | 'codex', turn = 1, model?: string): SessionConfig => ({
   id: 'abc',
   name: 'test',
   binary: `${harness}-auto-test`,
   harness,
   modelHint: 'test',
+  model,
   cwd: '/tmp',
   mode: 'auto',
   createdAt: '',
@@ -35,6 +36,27 @@ describe('harness support', () => {
     expect(interactiveHarnessArgs(config('claude', 2))).not.toContain('--print');
     expect(interactiveHarnessArgs(config('codex', 2))[0]).toBe('resume');
     expect(interactiveHarnessArgs(config('codex', 1))).not.toContain('exec');
+  });
+
+  test('omits --model when no model is set', () => {
+    expect(interactiveHarnessArgs(config('claude', 1))).not.toContain('--model');
+    expect(interactiveHarnessArgs(config('codex', 1))).not.toContain('--model');
+    expect(interactiveHarnessArgs(config('codex', 2))).not.toContain('--model');
+  });
+
+  test('injects --model for both harnesses when set', () => {
+    const claudeArgs = interactiveHarnessArgs(config('claude', 1, 'opus'));
+    expect(claudeArgs).toContain('--model');
+    expect(claudeArgs[claudeArgs.indexOf('--model') + 1]).toBe('opus');
+
+    // codex fresh start: --model is a top-level option
+    const codexNew = interactiveHarnessArgs(config('codex', 1, 'terra'));
+    expect(codexNew[codexNew.indexOf('--model') + 1]).toBe('terra');
+
+    // codex resume: `resume` subcommand stays first, then --model
+    const codexResume = interactiveHarnessArgs(config('codex', 2, 'terra'));
+    expect(codexResume[0]).toBe('resume');
+    expect(codexResume[codexResume.indexOf('--model') + 1]).toBe('terra');
   });
 });
 

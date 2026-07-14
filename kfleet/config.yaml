@@ -6,6 +6,13 @@ profiles:
   claude:
     settings: ./templates/claude/settings.json
     skills: ./skills
+    # KTEAM_MODEL is the default model kteam feeds via `--model` when a session is
+    # started without an explicit override. Exported into every wrapper; inert for
+    # normal CLI use (claude/codex ignore it), read only by kteam. Provider accounts
+    # (glm52/mm3/deepseek) resolve the `opus` alias through their
+    # ANTHROPIC_DEFAULT_OPUS_MODEL, so the alias stays correct per-account.
+    env:
+      KTEAM_MODEL: opus
   codex:
     settings: ./templates/codex/chatgpt.toml # base config.toml (layers merge on top)
     hooks: ./templates/codex/hooks.json
@@ -14,6 +21,8 @@ profiles:
     # kfleet ships its own (vetted) hooks, so trust them without the per-project
     # trust prompt — required for the non-interactive auto wrappers.
     flags: ['--dangerously-bypass-hook-trust']
+    env:
+      KTEAM_MODEL: terra
   zai-a:
     env:
       ANTHROPIC_AUTH_TOKEN: $ZAI_API_KEY_A
@@ -34,11 +43,13 @@ profiles:
     env:
       ANTHROPIC_API_KEY: loge-internal
       ANTHROPIC_BASE_URL: https://loge.tailb7bc.ts.net/anthropic
+      KTEAM_MODEL: fable-5 # loge is an F5/frontier account -> fable-5, not opus
     settings:
       model: fable-5
   loge-codex:
     env:
       OPENAI_API_KEY: loge-internal
+      KTEAM_MODEL: gpt-5.6-sol # frontier codex keeps its pinned model, not terra
     settings:
       model: gpt-5.6-sol
       model_provider: loge
@@ -52,6 +63,8 @@ profiles:
   fable:
     settings:
       model: fable
+    env:
+      KTEAM_MODEL: fable-5 # F5 accounts default to fable-5 under kteam
 variants:
   default:
     memory: ./CLAUDE.md

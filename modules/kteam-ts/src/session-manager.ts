@@ -13,7 +13,14 @@ import {
   type CodexTranscriptWatcher,
 } from './codex-transcript';
 import { discoverAutoAgents, inferHarness, modelHint, shellSafeSessionName } from './core';
-import { discoverCodexSession, codexSessionIds, resolveBinary, wrapperHome, claudeTranscriptPath } from './harness';
+import {
+  discoverCodexSession,
+  codexSessionIds,
+  resolveBinary,
+  wrapperHome,
+  wrapperModel,
+  claudeTranscriptPath,
+} from './harness';
 import { atomicJson, now, run } from './io';
 import type { KTeamPaths } from './paths';
 import { configFile, markerFile, sessionDir, stateFile, turnLog, turnPrompt } from './paths';
@@ -176,6 +183,10 @@ export class SessionManager implements KTeamService {
         `could not determine ${harness === 'claude' ? 'CLAUDE_CONFIG_DIR' : 'CODEX_HOME'} from ${wrapper}`,
       );
     const harnessSessionBaseline = harness === 'codex' ? await codexSessionIds(harnessHome) : undefined;
+    // Model resolution: explicit request wins, else the wrapper's kfleet default
+    // (KTEAM_MODEL). A default is always fed in when kfleet declares one, so the
+    // per-account default model can't silently drift; undefined => no --model.
+    const model = request.model?.trim() || (await wrapperModel(wrapper));
 
     const id = `${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
     const directory = sessionDir(this.paths, id);
@@ -211,6 +222,7 @@ export class SessionManager implements KTeamService {
       binary,
       harness,
       modelHint: modelHint(binary),
+      model,
       mode,
       cwd,
       createdAt,
