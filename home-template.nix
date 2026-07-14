@@ -388,6 +388,7 @@ rec {
       klaude
       kodex
       kfleet
+      kloge
       atomi.clickup_cli
       atomi.nsc
       grafana-loki

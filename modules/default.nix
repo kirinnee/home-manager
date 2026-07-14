@@ -32,6 +32,13 @@ rec {
     export PATH="${nixpkgs.lib.makeBinPath [ nixpkgs.tmux ]}:$PATH"
     exec ${nixpkgs.bun}/bin/bun run ~/.config/home-manager/modules/kteam-ts/src/daemon-entry.ts "$@"
   '';
+  # kloge: pull the loge credential pool out of the LLM cluster and run
+  # CLIProxyAPI in Docker (locally or pushed to a box). docker comes from
+  # OrbStack on the host PATH; rsync/ssh/curl/coreutils are bundled here.
+  kloge = nixpkgs.writeShellScriptBin "kloge" ''
+    export PATH="${nixpkgs.lib.makeBinPath [ nixpkgs.rsync nixpkgs.openssh nixpkgs.curl nixpkgs.coreutils ]}:$PATH"
+    exec ${nixpkgs.bun}/bin/bun run ~/.config/home-manager/modules/kloge-ts/src/index.ts "$@"
+  '';
   # klaude/kodex: run-from-source wrappers. Wrap crc-kirin/Codex in persistent
   # zellij sessions. zellij/tmux are put on PATH; agent binaries/fzf come from
   # the host PATH (crc-kirin is a kfleet-generated command in ~/.kfleet/bin).
