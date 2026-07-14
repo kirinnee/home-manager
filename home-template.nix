@@ -59,6 +59,10 @@ let
       enableSshSupport = true;
       enableExtraSocket = true;
       pinentry.package = if profile.kernel == "linux" then pkgs.pinentry-all else pkgs.pinentry_mac;
+      # Cache signing passphrases for 1 month (in-memory; cleared on agent
+      # restart/reboot) so headless agents aren't blocked on pinentry.
+      defaultCacheTtl = 2592000;
+      maxCacheTtl = 2592000;
     };
   };
 in
