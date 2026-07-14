@@ -263,6 +263,17 @@ rec {
     ${modules.load-secrets}/bin/load-secrets
   '';
 
+  # zsh-autocomplete keeps helper functions (e.g. _autocomplete__should_add_space)
+  # in its Completions/ dir, which compinit indexes into ~/.zcompdump by absolute
+  # nix-store path. When the plugin's store path changes (ANY rev bump / rebuild),
+  # the cached dump keeps autoloading from the OLD, now-deleted path and the shell
+  # breaks with "_autocomplete__…: command not found". Purge the dump (and its
+  # stale .lock dirs / .zwc / temp files) on every switch so the next shell
+  # rebuilds it against the current fpath. Cheap: one dump rebuild per switch.
+  home.activation.freshZshCompdump = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+    rm -rf "$HOME"/.zcompdump* 2>/dev/null || true
+  '';
+
   # Compile repo-shipped terminfo entries (modules/terminfo/*.terminfo) into
   # ~/.terminfo — the ONE directory every ncurses (Ubuntu's, nix's, macOS's)
   # searches. Fixes terminals absent from stock DBs (Ghostty's xterm-ghostty:
@@ -738,18 +749,6 @@ rec {
             }
 
           '';
-          # zsh-autocomplete rebinds Up/Down to its async history MENU, which is
-          # the widget that deadlocks the whole shell on big histories. Rebind
-          # the arrows (both CSI and SS3 encodings) to zsh's builtin prefix
-          # history search — cannot hang — and leave the plugin's menus on
-          # Tab/PgUp-PgDn. Runs late (after plugin + OMZ init) so it wins.
-          keybindShell = lib.mkOrder 4500 ''
-            () {
-              local key
-              for key in '^[[A' '^[OA'; do bindkey "$key" up-line-or-search; done
-              for key in '^[[B' '^[OB'; do bindkey "$key" down-line-or-search; done
-            }
-          '';
           wtShell = lib.mkOrder 5000 ''
             if command -v wt >/dev/null 2>&1; then eval "$(command wt config shell init zsh)"; fi
           '';
@@ -774,7 +773,6 @@ rec {
         lib.mkMerge [
           initExtraFirst
           zshConfig
-          keybindShell
           wtShell
           zoxideShell
         ];
