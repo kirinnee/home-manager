@@ -101,17 +101,22 @@ export function recommendAgents(task: string, agents: string[]): Recommendation[
 }
 
 export function interactiveHarnessArgs(config: SessionConfig): string[] {
+  // Both harnesses take `--model <alias|id>`. When set it's the user override or
+  // the wrapper's kfleet default (KTEAM_MODEL); when unset, omit it entirely.
+  const model = config.model ? ['--model', config.model] : [];
+
   if (config.harness === 'claude') {
     const sessionFlag = config.turn === 1 ? '--session-id' : '--resume';
-    const args = ['--dangerously-skip-permissions', sessionFlag, config.harnessSessionId];
+    const args = ['--dangerously-skip-permissions', sessionFlag, config.harnessSessionId, ...model];
     if (config.mode === 'auto') args.push('--disallowedTools', 'AskUserQuestion');
     return args;
   }
 
   if (config.turn === 1) {
-    return ['--dangerously-bypass-approvals-and-sandbox', '--no-alt-screen'];
+    return [...model, '--dangerously-bypass-approvals-and-sandbox', '--no-alt-screen'];
   }
-  return ['resume', '--dangerously-bypass-approvals-and-sandbox', '--no-alt-screen', config.harnessSessionId];
+  // `resume` is a subcommand and must stay first; the model flag follows it.
+  return ['resume', ...model, '--dangerously-bypass-approvals-and-sandbox', '--no-alt-screen', config.harnessSessionId];
 }
 
 export function shellSafeSessionName(id: string, suffix: string): string {

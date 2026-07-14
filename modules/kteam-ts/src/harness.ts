@@ -26,6 +26,14 @@ export async function wrapperHome(wrapper: string, harness: Harness): Promise<st
     .replace(/^~(?=\/|$)/, HOME);
 }
 
+/** The kfleet-configured default model for a wrapper, read from its
+ *  `export KTEAM_MODEL="…"` line (set per profile/agent in kfleet config.yaml).
+ *  Undefined when the wrapper declares no default. */
+export async function wrapperModel(wrapper: string): Promise<string | undefined> {
+  const source = await readFile(wrapper, 'utf8').catch(() => '');
+  return source.match(/export\s+KTEAM_MODEL=["']?([^"'\n]+)["']?/)?.[1];
+}
+
 async function walkJsonl(dir: string): Promise<string[]> {
   const out: string[] = [];
   for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
