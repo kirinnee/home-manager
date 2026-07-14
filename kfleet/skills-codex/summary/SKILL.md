@@ -73,5 +73,5 @@ Need from you:
 
 ## Notes
 
-- Accuracy first: a fast recap that's wrong is worse than a slightly longer one that's right. Check real state (`rtk git status`, what you actually changed) before claiming "done".
+- Accuracy first: a fast recap that's wrong is worse than a slightly longer one that's right. Check real state (`git status`, what you actually changed) before claiming "done".
 - This format applies to the recap only — it does not change commit messages, code, or file contents.

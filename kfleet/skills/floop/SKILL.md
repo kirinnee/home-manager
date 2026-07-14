@@ -50,13 +50,13 @@ Determine the diff to review:
 
 ```bash
 # Always: surface untracked (new) files first — they're in scope too
-rtk git status --porcelain
+git status --porcelain
 
 # Default: working tree vs HEAD
-rtk git diff HEAD
+git diff HEAD
 
 # If scope names a base branch (e.g. "vs main"):
-rtk git diff main...HEAD
+git diff main...HEAD
 ```
 
 **Untracked files are part of the scope.** `git diff HEAD` never shows them, so either
