@@ -53,15 +53,23 @@ const shQuote = (v: string): string => `"${v.replace(/\\/g, '\\\\').replace(/"/g
 export const wrapperName = (a: { kind: string; name: string }): string => `${a.kind}-${a.name}`;
 const wrapperPath = (a: { kind: string; name: string }): string => path.join(binDir, wrapperName(a));
 
+// Seed the one-time-prompt flags Claude Code tracks in .claude.json so fresh
+// config dirs (new account, new machine/box) never stop to ask. These are
+// runtime state, NOT settings.json, so kfleet has to write them itself:
+//   - per-project hasTrustDialogAccepted -> skip the folder-trust prompt
+//   - hasCompletedOnboarding             -> skip the theme/"let's get started" flow
+//   - hasCompletedClaudeInChromeOnboarding -> skip the "Chrome extension detected" prompt
+// Runs on every launch (guarded so it's a no-op once all flags are set), which
+// self-heals any dir regardless of how it was created. Toggle with CLAUDE_AUTOTRUST=0.
 const AUTOTRUST = `if [ "\${CLAUDE_AUTOTRUST:-1}" = "1" ]; then
   _ct_cfg="$CLAUDE_CONFIG_DIR/.claude.json"
-  if command -v jq >/dev/null 2>&1 && ! jq -e --arg d "$PWD" '(.projects[$d].hasTrustDialogAccepted) == true' "$_ct_cfg" >/dev/null 2>&1; then
+  if command -v jq >/dev/null 2>&1 && ! jq -e --arg d "$PWD" '((.projects[$d].hasTrustDialogAccepted) == true) and (.hasCompletedOnboarding == true) and (.hasCompletedClaudeInChromeOnboarding == true)' "$_ct_cfg" >/dev/null 2>&1; then
     mkdir -p "$CLAUDE_CONFIG_DIR"
     _ct_tmp="$(mktemp)"
     if [ -f "$_ct_cfg" ]; then
-      _ct_ok=$(jq --arg d "$PWD" '.projects[$d].hasTrustDialogAccepted = true' "$_ct_cfg" > "$_ct_tmp" 2>/dev/null && echo y)
+      _ct_ok=$(jq --arg d "$PWD" '.projects[$d].hasTrustDialogAccepted = true | .hasCompletedOnboarding = true | .hasCompletedClaudeInChromeOnboarding = true' "$_ct_cfg" > "$_ct_tmp" 2>/dev/null && echo y)
     else
-      _ct_ok=$(jq -n --arg d "$PWD" '{projects: {($d): {hasTrustDialogAccepted: true}}}' > "$_ct_tmp" 2>/dev/null && echo y)
+      _ct_ok=$(jq -n --arg d "$PWD" '{projects: {($d): {hasTrustDialogAccepted: true}}, hasCompletedOnboarding: true, hasCompletedClaudeInChromeOnboarding: true}' > "$_ct_tmp" 2>/dev/null && echo y)
     fi
     if [ "$_ct_ok" = y ]; then mv "$_ct_tmp" "$_ct_cfg"; else rm -f "$_ct_tmp"; fi
   fi
