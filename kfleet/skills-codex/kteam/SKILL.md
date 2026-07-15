@@ -31,13 +31,27 @@ Model choice is driven by the task: how much thinking it needs, how confident yo
 | DeepSeek V4 Flash                 | very well-scoped tasks only — no blindspots, everything written out; pure mechanical                                                                                                                                  | fast    | `claude-auto-dsv4f` (default)                                                               |
 | Haiku 4.5 / GLM-4.7 / GLM-5-Turbo | trivial mechanical work only                                                                                                                                                                                          | fastest | Anthropic accounts + `--model haiku`; `glm52{a,b}` + `--model sonnet`/`--model haiku`       |
 
-Rules of thumb:
+### Handoff chain (main thread → planner → implementer → reviewer)
 
-- Standard flow: Fable 5 plans and maps blindspots → Opus 4.8 / GLM-5.2 implement → terra / GPT-5.5 reviews. Escalate implementation to sol@ultra only when the work is genuinely hard AND critical — it is VERY expensive.
+The standard chain: **main thread (Fable) → planner session → implementer session(s) → reviewer**.
+
+- The main thread stays team lead and judges complexity, but OFFLOADS the planning itself: send it to a kteam **Fable** session. For simpler, low-ambiguity plans the planner can be **GPT-5.6-sol or Opus 4.8** instead.
+- A planner session may spawn its own implementer teammates — ideally **Opus 4.8, GPT-5.6-terra, or GLM-5.2** — for generic to mid-high difficulty tasks.
+- Implementer selection:
+  - **GPT-5.6-sol** — long, big workloads with many checkpoints/checklists, and the hardest critical implementations. VERY expensive; don't spend it on small tasks.
+  - **Opus 4.8 / GPT-5.6-terra** — generic to mid-high difficulty.
+  - **GLM-5.2** — mechanical or frontend work; use sparingly.
+- **GPT-5.6-terra / GPT-5.5 may implement ONLY when a smarter model (Fable, sol, or Opus) wrote the plan.** Never let terra plan-and-implement nontrivial work on its own.
+- **Product-facing work: NEVER MiniMax M3 or DeepSeek V4** — too weak; GLM-5.2 sparingly.
+- **GLM-5.2 and MiniMax M3 are the mass-chore tier**: divide-and-conquer jobs, 1 file = 1 agent style. That is their only broad-use niche.
+- **Big-context tasks need at least Opus 4.8 or GPT-5.6-terra — and if a big-context task is being IMPLEMENTED, the implementer must be GPT-5.6-sol or Fable** (Fable implementing is fine there).
+
+Other rules of thumb:
+
 - The less scoped and more ambiguous a task, the higher up the table; fully written-out mechanical work goes to the bottom.
 - Do NOT use `claude-auto-dsv4p` (DeepSeek V4 Pro): too expensive for what it gives.
-- Do not route to the `claude-auto-f5-*` wrappers: they are the same accounts as the base wrappers with a Fable default. Use the base wrapper + `--model fable` instead, and never run `f5-x` and `x` together (one quota pool).
-- Quota: `glm52a`/`glm52b` are separate keys (parallel-safe); each `f5-x` shares with `x`.
+- For Fable on the OAuth accounts use the base wrapper + `--model fable` (the old `f5-*` wrappers were removed).
+- Quota: `glm52a`/`glm52b` are separate keys (parallel-safe).
 
 ### Then pick the account
 
