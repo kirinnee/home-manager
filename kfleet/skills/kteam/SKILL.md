@@ -16,6 +16,17 @@ Use `kteam` instead of harness-native subagents. Keep the current conversation a
 3. Wait for approval before consuming account quota, unless the user already named the exact wrappers or established a standing preference.
 4. Start only independent, clearly bounded tasks. Avoid two teammates editing the same files.
 
+### Always show the assignment table
+
+Whenever you use kteam (one member or many) — both when proposing the team AND after launching it — list the assignments to the user as a 3-column table: which CLI wrapper, which model it will actually run, and the task it was given.
+
+| CLI                 | Model           | Task                              |
+| ------------------- | --------------- | --------------------------------- |
+| `codex-auto-loge`   | gpt-5.6-sol     | implement the migration checklist |
+| `claude-auto-atomi` | claude-opus-4-8 | fix the flaky session tests       |
+
+Fill the Model column with the resolved model (the wrapper's `KTEAM_MODEL` default, or the `--model` override you passed) — never leave it implied.
+
 ### Pick the MODEL first, then the account
 
 Model choice is driven by the task: how much thinking it needs, how confident you must be in correctness, and how fast/cheap it should run. Wrappers default to their kfleet `KTEAM_MODEL`; `--model <alias|id>` selects any other model the account serves (Claude aliases `opus`/`sonnet`/`haiku`/`fable` resolve per account).
