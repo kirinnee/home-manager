@@ -66,13 +66,6 @@ profiles:
           name: Loge
           base_url: http://127.0.0.1:8317/v1
           env_key: OPENAI_API_KEY
-  # Fable-default settings overlay for the f5-* agents (Anthropic OAuth accounts
-  # only — fable is claude-only, so no codex/provider agents use this).
-  fable:
-    settings:
-      model: fable
-    env:
-      KTEAM_MODEL: fable-5 # F5 accounts default to fable-5 under kteam
 variants:
   default:
     memory: ./CLAUDE.md
@@ -107,27 +100,6 @@ agents:
     kind: claude
     profiles:
       - claude
-  # f5-* = same accounts with Fable as the default model. Modeled as agents (not
-  # a variant) so only these three get f5 wrappers; the auto variant still clones
-  # them, yielding claude-f5-<n> (interactive) + claude-auto-f5-<n> (autonomous).
-  - name: f5-kirin
-    kind: claude
-    identity: kirin # same claude.ai account as kirin — kfleet login syncs creds
-    profiles:
-      - claude
-      - fable
-  - name: f5-liftoff
-    kind: claude
-    identity: liftoff
-    profiles:
-      - claude
-      - fable
-  - name: f5-atomi
-    kind: claude
-    identity: atomi
-    profiles:
-      - claude
-      - fable
   - name: glm52a
     kind: claude
     profiles:
