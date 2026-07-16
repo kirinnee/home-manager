@@ -220,3 +220,20 @@ Addendum 2 (03:02Z): resume did NOT fix the recurrence — both mm3 sessions cam
   client-side retry mixing shells; will re-log with evidence if it recurs now that flaps are fixed.
 
 All 51 kteam-ts tests pass post-change (`bun test`), tsc clean.
+
+## 2026-07-16 addendum — mm3 login-wall TRUE ROOT CAUSE found and fixed
+
+Smoke-testing the launch.sh change exposed it: when kteamd runs as a SERVICE (launchd on the Mac,
+systemd on the box), its environment is only KTEAM*HOME+PATH — the wrapper API keys
+(MINIMAX_API_KEY etc., loaded by interactive shells from ~/.secrets) are NOT in the daemon env, so
+"forward the daemon's env to the pane" (the 07-13 fix) forwards no keys at all when the daemon is
+service-managed. That's why mm3 TUIs were INTERMITTENTLY login-walled: sessions worked only while
+the tmux server (or daemon) happened to be started from a user shell, and broke after a
+reboot/service restart. Fix: the generated launch.sh now sources ~/.secrets at pane start (fresh
+file beats stale daemon copy; KTEAM*\*/PATH still pinned after it). Verified: claude-auto-mm3
+smoke session under the launchd daemon booted authenticated, did real work, wrote the done marker,
+completed. (src/tmux-controller.ts launch())
+
+Also observed while smoke-testing (glm52a): the new inject() verification correctly failed fast
+with "the prompt was typed but the harness never started the turn" on a login-walled TUI —
+previously this sat "running" for 900s.
