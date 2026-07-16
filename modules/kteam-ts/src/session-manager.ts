@@ -22,6 +22,7 @@ import {
   claudeTranscriptPath,
 } from './harness';
 import { atomicJson, now, run } from './io';
+import { NAME_WINDOW_MS, pickTeammateName } from './names';
 import type { KTeamPaths } from './paths';
 import { configFile, markerFile, sessionDir, stateFile, turnLog, turnPrompt } from './paths';
 import type { AttachmentView, KTeamService, SessionView } from './service';
@@ -149,6 +150,7 @@ export class SessionManager implements KTeamService {
   }
 
   async get(id: string): Promise<SessionView> {
+    id = this.resolveRef(id);
     try {
       const [config, state] = await Promise.all([
         this.store.readConfig<SessionConfig>(id),
@@ -158,6 +160,40 @@ export class SessionManager implements KTeamService {
     } catch {
       throw new Error(`unknown kteam session "${id}"`);
     }
+  }
+
+  /** Canonicalize a session reference: an exact id passes through; otherwise try
+   *  it as a teammate name (case-insensitive) among sessions created within the
+   *  name window — most recent wins. Unknown refs pass through so the caller's
+   *  own "unknown session" error fires. */
+  private resolveRef(ref: string): string {
+    const sessions = this.store.listSessions();
+    if (sessions.some(item => (item.config as SessionConfig | undefined)?.id === ref)) return ref;
+    const needle = ref.trim().toLowerCase();
+    const cutoff = Date.now() - NAME_WINDOW_MS;
+    const match = sessions
+      .flatMap(item => {
+        const config = item.config as SessionConfig | undefined;
+        return config?.teammate?.toLowerCase() === needle && Date.parse(config.createdAt) >= cutoff ? [config] : [];
+      })
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
+    return match?.id ?? ref;
+  }
+
+  /** Assign a fresh teammate callsign, avoiding names used within the window. */
+  private assignTeammateName(): string {
+    const recent: string[] = [];
+    const lastUsedAt = new Map<string, number>();
+    const cutoff = Date.now() - NAME_WINDOW_MS;
+    for (const item of this.store.listSessions()) {
+      const config = item.config as SessionConfig | undefined;
+      if (!config?.teammate) continue;
+      const name = config.teammate.toLowerCase();
+      const created = Date.parse(config.createdAt) || 0;
+      if (created >= cutoff) recent.push(name);
+      lastUsedAt.set(name, Math.max(lastUsedAt.get(name) ?? 0, created));
+    }
+    return pickTeammateName(recent, lastUsedAt);
   }
 
   async start(request: StartSessionRequest): Promise<SessionView> {
@@ -219,6 +255,7 @@ export class SessionManager implements KTeamService {
     const config: SessionConfig = {
       id,
       name: (request.name ?? prompt.split(/\s+/).slice(0, 5).join('-')).replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 48),
+      teammate: this.assignTeammateName(),
       binary,
       harness,
       modelHint: modelHint(binary),
@@ -317,6 +354,7 @@ export class SessionManager implements KTeamService {
   }
 
   async send(id: string, request: SendRequest): Promise<SessionView> {
+    id = this.resolveRef(id);
     return await this.serialized(id, async () => {
       const view = await this.get(id);
       const paneState = await this.tmux.state(view.config.tmuxSession);
@@ -373,6 +411,7 @@ export class SessionManager implements KTeamService {
   }
 
   async answer(id: string, labels: string[], other?: string, responses?: string[]): Promise<SessionView> {
+    id = this.resolveRef(id);
     return await this.serialized(id, async () => {
       const view = await this.get(id);
       if (view.state.status !== 'awaiting_question') throw new Error('session is not waiting on a structured question');
@@ -401,6 +440,7 @@ export class SessionManager implements KTeamService {
   }
 
   async interrupt(id: string): Promise<SessionView> {
+    id = this.resolveRef(id);
     return await this.serialized(id, async () => {
       const view = await this.get(id);
       await this.emit(id, 'control.interrupt.requested', {}, 'client');
@@ -415,6 +455,7 @@ export class SessionManager implements KTeamService {
   }
 
   async stop(id: string, reason = 'stopped by client'): Promise<SessionView> {
+    id = this.resolveRef(id);
     this.cancelRetry(id);
     void this.cancelQuotaWaiter(id);
     return await this.serialized(id, async () => {
@@ -436,6 +477,7 @@ export class SessionManager implements KTeamService {
   }
 
   async resume(id: string, message?: string, guard?: ResumeGuard): Promise<SessionView> {
+    id = this.resolveRef(id);
     if (!guard) this.cancelRetry(id);
     let startMonitorAfterUnlock = false;
     const resumed = await this.serialized(id, async () => {
@@ -561,6 +603,7 @@ export class SessionManager implements KTeamService {
   }
 
   async remove(id: string, purge = false, force = false): Promise<void> {
+    id = this.resolveRef(id);
     if (this.deleting.has(id)) throw new Error('session deletion is already in progress');
     this.deleting.add(id);
     this.cancelRetry(id);
@@ -596,6 +639,7 @@ export class SessionManager implements KTeamService {
   }
 
   async signal(id: string, kind: 'done' | 'help', message?: string): Promise<SessionView> {
+    id = this.resolveRef(id);
     this.cancelRetry(id);
     return await this.serialized(id, async () => {
       const view = await this.get(id);
@@ -651,14 +695,17 @@ export class SessionManager implements KTeamService {
   }
 
   async snapshot(id: string): Promise<string> {
+    id = this.resolveRef(id);
     return await this.serialized(id, async () => await this.tmux.snapshot((await this.get(id)).config, true));
   }
   async logs(id: string, turn?: number): Promise<string> {
+    id = this.resolveRef(id);
     const view = await this.get(id);
     return await readFile(turnLog(this.paths, id, turn ?? view.config.turn), 'utf8').catch(() => '');
   }
 
   async replay(id: string | undefined, after: number, limit = 1000): Promise<KTeamEvent[]> {
+    if (id !== undefined) id = this.resolveRef(id);
     if (!Number.isSafeInteger(after) || after < 0) throw new Error('after must be a non-negative integer');
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000)
       throw new Error('limit must be between 1 and 10000');
@@ -689,6 +736,7 @@ export class SessionManager implements KTeamService {
   }
 
   async addAttachment(id: string, filename: string, mime: string, bytes: Uint8Array): Promise<AttachmentView> {
+    id = this.resolveRef(id);
     return await this.serialized(id, async () => {
       await this.get(id);
       const stored = await this.attachments.upload(id, bytes, { filename, mime: mime || undefined });
@@ -699,6 +747,7 @@ export class SessionManager implements KTeamService {
   }
 
   async getAttachment(id: string, attachmentId: string): Promise<{ attachment: AttachmentView; bytes: Uint8Array }> {
+    id = this.resolveRef(id);
     await this.get(id);
     const stored = await this.attachments.get(id, attachmentId);
     return {
