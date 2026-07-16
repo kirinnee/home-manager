@@ -10,9 +10,17 @@ import { resolveBinary } from './harness';
 import { createPaths } from './paths';
 import type { KTeamEvent, SessionStatus } from './types';
 
-const VERSION = '0.2.0';
+const VERSION = '0.2.1';
 const paths = createPaths();
 process.env.PATH = [paths.kfleetBin, process.env.PATH ?? ''].join(path.delimiter);
+// Background/automation shells sometimes carry HTTP(S)_PROXY vars the
+// interactive shell doesn't; a proxy in front of 127.0.0.1 makes the daemon
+// look dead even though it never went down. Loopback must never be proxied.
+for (const key of ['NO_PROXY', 'no_proxy']) {
+  const entries = new Set((process.env[key] ?? '').split(',').filter(Boolean));
+  entries.add('127.0.0.1').add('localhost').add('::1');
+  process.env[key] = [...entries].join(',');
+}
 
 const client = async () => await ApiClient.connect(paths);
 const daemonBinary = process.env.KTEAMD_BIN ?? resolveBinary('kteamd') ?? 'kteamd';
@@ -35,6 +43,11 @@ function printView(view: Awaited<ReturnType<ApiClient['get']>>): void {
     `${view.config.teammate ?? '-'} (${view.config.id})  ${view.state.status}  ${view.config.binary}  model=${view.config.model ?? 'default'}  ${view.config.mode}  turn ${view.state.turn}`,
   );
   console.log(`  ${view.config.cwd}`);
+  const vitals = [
+    view.state.contextPercent !== undefined ? `context ${view.state.contextPercent}% used` : '',
+    view.state.lastToolStartedAt ? `last tool started ${view.state.lastToolStartedAt}` : '',
+  ].filter(Boolean);
+  if (vitals.length) console.log(`  ${vitals.join('  ')}`);
   if (view.state.reason) console.log(`  ${view.state.reason}`);
   for (const question of view.state.pendingQuestion?.questions ?? []) {
     console.log(`  question: ${question.question}`);
@@ -260,6 +273,16 @@ program
   .argument('<id>')
   .argument('[message...]')
   .action(async (id, parts: string[]) => printView(await (await client()).resume(id, parts.join(' ') || undefined)));
+program
+  .command('restart')
+  .description('stop the session (even while "running") and resume it in a fresh TUI')
+  .argument('<id>')
+  .argument('[message...]')
+  .action(async (id, parts: string[]) => {
+    const api = await client();
+    await api.stop(id, 'restarted by client');
+    printView(await api.resume(id, parts.join(' ') || undefined));
+  });
 program
   .command('delete')
   .argument('<id>')

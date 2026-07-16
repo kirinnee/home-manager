@@ -84,6 +84,11 @@ export interface SessionState {
   transcriptOffset?: number;
   lastTranscriptAt?: string;
   lastPaneAt?: string;
+  /** Context-window usage (percent used) parsed from the TUI statusline. */
+  contextPercent?: number;
+  /** When the most recent tool started, from the transcript — distinguishes
+   *  real work from a wedged hook that both render as "Working". */
+  lastToolStartedAt?: string;
   quota?: {
     atLimit?: boolean;
     fiveHourPercent?: number;
