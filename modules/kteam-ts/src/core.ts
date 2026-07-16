@@ -94,11 +94,13 @@ export function recommendAgents(task: string, agents: string[]): Recommendation[
 
   // A useful team is implementer + reviewer + one more perspective. Keyword
   // rules above only fire for matching tasks, so generic prompts must still be
-  // filled from the remaining pool — prefer the other harness family first so
-  // validation comes from an independent model.
-  const fillers = [...frontier, /codex-auto-/, /claude-auto-(?!.*(mm3|glm52|dsv4))/, /claude-auto-/];
+  // filled from the remaining pool — preferring the harness family NOT yet on
+  // the team, so validation comes from an independent model.
+  const fillers = [...frontier, /codex-auto-/, /claude-auto-/];
   while (out.length < Math.min(3, agents.length)) {
-    const binary = find(agents, fillers, used);
+    const lastHarness = out.at(-1)?.binary.includes('codex-') ? 'codex' : 'claude';
+    const other = lastHarness === 'codex' ? /^claude-auto-(?!.*(mm3|glm52|dsv4))/ : /codex-auto-/;
+    const binary = find(agents, [other, ...fillers], used);
     if (!binary) break;
     used.add(binary);
     out.push({
