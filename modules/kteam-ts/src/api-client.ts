@@ -19,14 +19,27 @@ export class ApiClient {
   }
 
   async request<T>(path: string, init: RequestInit = {}): Promise<T> {
-    let response: Response;
-    try {
-      response = await fetch(`${this.baseUrl}${path}`, {
-        ...init,
-        headers: { authorization: `Bearer ${this.token}`, ...init.headers },
-      });
-    } catch {
-      throw new Error(`kteam daemon is unavailable at ${this.baseUrl}; run \`kteam daemon start\``);
+    // One transient socket error must not fail an otherwise-healthy call
+    // (background/automation shells hit this constantly while the daemon is
+    // demonstrably up), so retry briefly before declaring the daemon
+    // unavailable.
+    const options: RequestInit = {
+      ...init,
+      headers: { authorization: `Bearer ${this.token}`, ...init.headers },
+    };
+    let response: Response | undefined;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3 && !response; attempt++) {
+      if (attempt > 0) await Bun.sleep(250 * attempt);
+      try {
+        response = await fetch(`${this.baseUrl}${path}`, options);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (!response) {
+      const detail = lastError instanceof Error ? ` (${lastError.message})` : '';
+      throw new Error(`kteam daemon is unavailable at ${this.baseUrl}${detail}; run \`kteam daemon start\``);
     }
     if (!response.ok) {
       const payload = (await response.json().catch(() => ({ error: response.statusText }))) as { error?: string };

@@ -69,3 +69,20 @@ test('recommends mm3 for frontend plus an independent reviewer', () => {
   expect(result[0]?.binary).toBe('claude-auto-mm3');
   expect(result.some(item => item.binary === 'codex-auto-atomi')).toBe(true);
 });
+
+test('fills a generic task to at least three distinct teammates', () => {
+  const result = recommendAgents('Implement the new billing reconciliation service', [
+    'claude-auto-kirin',
+    'claude-auto-loge',
+    'claude-auto-mm3',
+    'codex-auto-atomi',
+    'codex-auto-loge',
+  ]);
+  expect(result.length).toBeGreaterThanOrEqual(3);
+  expect(new Set(result.map(item => item.binary)).size).toBe(result.length);
+});
+
+test('never recommends more teammates than there are wrappers', () => {
+  const result = recommendAgents('fix a typo', ['claude-auto-loge']);
+  expect(result).toHaveLength(1);
+});

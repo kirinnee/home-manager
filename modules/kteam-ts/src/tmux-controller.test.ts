@@ -3,7 +3,7 @@ import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createPaths } from './paths';
-import { parsePaneMetadata, startupDialogAction, TmuxController } from './tmux-controller';
+import { contextPercentUsed, parsePaneMetadata, startupDialogAction, TmuxController } from './tmux-controller';
 import type { SessionConfig } from './types';
 
 const temporaryDirectories: string[] = [];
@@ -99,6 +99,29 @@ describe('startup dialog handling', () => {
 
   test('does not answer unknown dialogs', () => {
     expect(startupDialogAction('Proceed with deleting everything?\n› 1. Yes\n  2. No')).toBeUndefined();
+  });
+
+  test('accepts the custom api key confirmation which defaults to No', () => {
+    expect(
+      startupDialogAction(
+        [
+          'Detected a custom API key in your environment',
+          'Do you want to use this API key?',
+          '  1. Yes',
+          '❯ 2. No (recommended)',
+        ].join('\n'),
+      ),
+    ).toEqual({ kind: 'api-key', keys: ['Up', 'Enter'] });
+  });
+});
+
+describe('context percent parsing', () => {
+  test('parses codex, claude-left, and ratio statuslines', () => {
+    expect(contextPercentUsed('gpt-5.6-sol high · Context 42% used')).toBe(42);
+    expect(contextPercentUsed('❯\n  30% context left')).toBe(70);
+    expect(contextPercentUsed('Context left until auto-compact: 8%')).toBe(92);
+    expect(contextPercentUsed('97% (194k/200k)')).toBe(97);
+    expect(contextPercentUsed('no statusline here')).toBeUndefined();
   });
 });
 

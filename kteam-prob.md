@@ -101,3 +101,122 @@ No other kteam problems this session: 5 sessions total, 4 completed cleanly on t
 Both claude-auto-mm3 sessions started within ~1 min of each other came up "Not logged in · Please run /login" and froze (chat.jsonl static at 1589B for 90s+, prompts bouncing). Same failure as mrjrutsz earlier today. Pattern so far: mm3 works via -p probes and SOMETIMES in kteam TUIs (mrjsed3l, mrjs1pb1 fine), but fresh TUI launches intermittently miss credentials — possibly a credential-sync race in the wrapper when multiple mm3 TUIs spawn near-simultaneously. kteamd's stall detector takes 900s to flag it; a login-state check at session start would catch this in seconds. Workaround again: kteam resume (fresh TUI usually authenticates).
 Addendum: `kteam resume` refuses on a login-walled session because state is still 'running' (stall flag takes 900s) — had to `kteam stop` + `kteam resume`. A `kteam restart <id>` (or resume --force) would make the workaround one step; better yet, detect the login-wall reply and fail fast.
 Addendum 2 (03:02Z): resume did NOT fix the recurrence — both mm3 sessions came back login-walled again (transcripts frozen after restart too). Differs from the morning incident where one resume recovered. Suspect the mm3 credential/token itself expired since (~4h between working and broken). Escalation path used: stop both, reassign tasks to codex-auto-loge. Suggest: kteam start should probe the TUI for the login-wall reply within ~30s and fail the session immediately with a distinct 'auth' status instead of burning the 900s stall timer (twice, if you resume).
+
+## Session 2026-07-14..16 (PE-8837 labelling trace + PE-8838 alloy, ~11 sessions across claude/codex wrappers)
+
+- DAEMON FLAPS FOR BACKGROUND SHELLS: `kteam` calls run from the harness's background shells
+  frequently fail with `kteam daemon is unavailable at http://127.0.0.1:7337` while the SAME
+  command succeeds in a foreground shell seconds later. `kteam daemon status` shows ok/pid stable
+  throughout — the daemon never actually died. Suspect an env/proxy variable difference in
+  background shells (HTTP_PROXY?) or a localhost resolution issue. Effect: `kteam send`/`stop`/`ps`
+  are unreliable from automation; had to fall back to raw `tmux send-keys`/`capture-pane`.
+
+- INITIAL TASK PROMPT NOT INJECTED (recurring, both harness types): sessions reach the TUI but the
+  turn-001 task prompt never arrives. Seen on: claude sessions sitting at the splash with 0% context
+  and only `turn-001.md` on disk, and codex sessions stuck at the `Do you trust this directory?`
+  prompt (kteam injects before/without answering it, prompt is lost). Fix each time was manual:
+  `tmux send-keys` the trust-accept Enter, then send "Read turns/turn-001.md and follow it".
+  Suggestions: (1) kteamd should answer the codex trust prompt (or launch codex with the trust
+  flag); (2) verify the prompt actually landed (snapshot grep) and retry injection; (3) surface
+  "TUI idle at 0% context after N minutes" as a distinct state, not `starting`/`running`.
+
+- `kteam start --cwd` LANDED IN WRONG DIRECTORY once under daemon flap: requested cwd
+  PE-label-ernest, session came up in pe-llm (previous session's cwd) on wrapper claude-auto-mm3
+  (not the requested claude-auto-loge either). Looks like a daemon-side race when a start request
+  is retried/queued during a flap. Effect: wasted session + manual kill; task re-sent to the
+  original session via tmux instead.
+
+- WRAPPER AUTH/QUOTA NOT VALIDATED AT START: three launches burned sessions on dead accounts —
+  glm52a and glm52b both `Not logged in · Run /login`, codex-auto-ernest at `weekly 0% left`
+  (usage exhausted; TUI opens but any turn would fail). kteam start returns success for all of
+  these. Suggestion: preflight auth + remaining quota at `kteam start` and fail fast with a clear
+  error naming the wrapper.
+
+- DUPLICATE SESSIONS FROM RETRIES: retrying `kteam start` after an apparent daemon-unavailable
+  error produced two live sessions for the same task twice (mrl9syj3/mrl9t9mz, mrny4vo3/mrny4hxg).
+  The first request had actually succeeded server-side despite the client error. Suggestion:
+  idempotency key on start (e.g. hash of cwd+prompt) or a `--replace-existing` flag.
+
+- `kteam stop` UNRELIABLE UNDER FLAP: repeatedly returned daemon-unavailable; had to
+  `tmux kill-session` directly, which leaves kteamd state stale (`ps` kept showing the session as
+  `starting` afterwards).
+
+- API-KEY CONFIRMATION PROMPT BLOCKS loge WRAPPER: claude-auto-loge sessions stop at Claude Code's
+  "Detected a custom API key ... Do you want to use this API key?" dialog (defaults to No). kteamd
+  does not answer it; session sits idle and any pre-injected prompt queues behind it. Had to tmux
+  Up+Enter manually. Suggestion: wrapper should set the key via settings (apiKeyHelper) or kteamd
+  should handle this known dialog.
+
+- CONTEXT EXHAUSTION NOT SURFACED: the ernest trace session hit 100%+ context (274k/200k shown) and
+  went effectively unresponsive to new prompts (queued but never processed) while kteam still
+  reported `running`. A "context ≥ N%" health signal (it's in the TUI status bar, parseable) would
+  let the lead rotate sessions before they wedge.
+
+- Codex TUI status line ambiguity: sol sessions show `Working (13m ...)` for both real work and
+  hook stalls (`Running PreToolUse hook`). Only tmux capture distinguishes them. A parsed
+  "last-tool-started-at" in `kteam status` would help stall detection.
+
+## 2026-07-16 — RESOLUTIONS (claude-kirin main session, kteam 0.2.1)
+
+1. ✅ DAEMON FLAPS / `stop` UNRELIABLE FROM BACKGROUND SHELLS: the client now (a) force-adds
+   127.0.0.1/localhost/::1 to NO_PROXY at startup (background shells carried HTTP(S)\_PROXY vars
+   that proxied loopback and made the healthy daemon look dead) and (b) retries each API request
+   3x with backoff before declaring the daemon unavailable; the error now includes the underlying
+   fetch failure message instead of a generic banner. (src/index.ts, src/api-client.ts)
+
+2. ✅ "command too long" LAUNCH FAILURES (the 3 failed sol sessions on the box, 2026-07-15): the
+   env-propagation fix from 07-13 forwarded the daemon's ENTIRE environment as `tmux new-session -e`
+   flags, which blows tmux's command length limit on real machines. The pane env + harness argv now
+   travel via a generated `launch.sh` (mode 0700, in the session dir) — same env guarantee, no
+   length limit. (src/tmux-controller.ts launch())
+
+3. ✅ INITIAL PROMPT NOT INJECTED / codex trust prompt / api-key dialog: `send()` now runs the
+   startup-dialog handler (trust prompts, onboarding, permission-bypass) at injection time too, not
+   only at launch; a new `api-key` dialog kind answers Claude Code's "Detected a custom API key ...
+   Do you want to use this API key?" (defaults to No — kteam navigates to Yes). `inject()` now also
+   verifies the turn actually STARTED after pressing Enter (pane leaves the idle prompt or the text
+   clears), re-pressing Enter up to 3x — a typed-but-unsubmitted prompt can no longer sit idle at
+   0% context. (src/tmux-controller.ts)
+
+4. ✅ LOGIN-WALL / LOST-PROMPT FAIL-FAST (mm3 recurrence + "TUI idle at 0% after N minutes"): the
+   monitor now tracks whether ANY transcript record landed since the current turn started. If the
+   pane is idle at the input box with zero transcript progress, it re-injects the turn prompt once
+   at 120s, and at 360s kills the session with a distinct reason — "harness authentication failed:
+   TUI is login-walled ..." when the pane shows the login wall, else "turn never started ..." — via
+   a `session.turn_never_started` event, instead of burning the 900s stall timer (twice, if you
+   resume). (src/session-manager.ts monitorLoop)
+
+5. ✅ `kteam restart <id>`: one-step stop+resume for wedged sessions (works while state is still
+   'running'); replaces the manual `kteam stop` + `kteam resume` dance. (src/index.ts)
+
+6. ✅ WRAPPER QUOTA NOT VALIDATED AT START: `kteam start` now preflights the quota service and
+   fails fast with the wrapper named ("wrapper X is at its usage limit (resets ...)") when the
+   account is exhausted. Auth preflight beyond quota remains covered by fix #4's fast fail (the
+   statusline "Not logged in" banner is cosmetic on token wrappers and cannot be trusted at start).
+   (src/session-manager.ts start())
+
+7. ✅ DUPLICATE SESSIONS FROM RETRIES: `kteam start` rejects a start when an identical
+   (binary, cwd, prompt) session is already live and was created <10 min ago — a client retry after
+   a transient error now surfaces the existing session id instead of double-launching.
+   (src/session-manager.ts start())
+
+8. ✅ CONTEXT EXHAUSTION NOT SURFACED: the monitor parses context usage from the TUI statusline
+   (Codex "Context N% used", Claude "N% context left"/ratio forms) into `state.contextPercent`,
+   shown by `kteam status`, and emits a one-shot `context.high` event when it crosses 85% so the
+   lead can rotate the teammate before it wedges. (src/tmux-controller.ts, src/session-manager.ts)
+
+9. ✅ Codex "Working" AMBIGUITY: `state.lastToolStartedAt` is now recorded from transcript
+   tool.use events and shown in `kteam status` — a "Working (13m)" with a 13-minute-old last tool
+   start is a hook stall, not progress.
+
+10. ✅ `kteam recommend` ONLY GAVE 2 RECOMMENDATIONS: the recommender only topped up to 2
+    teammates when no keyword rule fired. It now fills to min(3, available) from the frontier pool
+    (preferring the other harness family for independent validation) and caps at 4.
+    (src/core.ts recommendAgents)
+
+- NOT DONE (on purpose): daemon-side idempotency keys for start (the 10-min duplicate guard covers
+  the observed failure); `--cwd` landing in the wrong directory under flap was not reproducible
+  from the code (start resolves cwd per-request with no shared mutable state) — most plausibly a
+  client-side retry mixing shells; will re-log with evidence if it recurs now that flaps are fixed.
+
+All 51 kteam-ts tests pass post-change (`bun test`), tsc clean.

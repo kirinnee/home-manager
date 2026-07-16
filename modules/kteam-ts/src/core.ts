@@ -77,29 +77,41 @@ export function recommendAgents(task: string, agents: string[]): Recommendation[
     );
   }
 
+  const frontier = [
+    /codex-auto-(atomi|loge|loai|loio|kirin|ernest|personal)$/,
+    // f5-* wrappers are the same accounts as the base ones (shared quota);
+    // recommend the base wrapper and reach Fable via `--model fable` instead.
+    /claude-auto-(kirin|liftoff|atomi)$/,
+    /claude-auto-loge$/,
+  ];
   add(
-    [
-      /codex-auto-(atomi|loge|loai|loio|kirin|ernest|personal)$/,
-      // f5-* wrappers are the same accounts as the base ones (shared quota);
-      // recommend the base wrapper and reach Fable via `--model fable` instead.
-      /claude-auto-(kirin|liftoff|atomi)$/,
-      /claude-auto-loge$/,
-    ],
+    frontier,
     out.length ? 'independent reviewer' : 'primary implementer',
     out.length
       ? 'use an independent frontier account to review correctness and completion'
       : 'use a frontier account for difficult implementation work',
   );
 
-  if (out.length < 2) {
-    add(
-      [/claude-auto-mm3$/, /claude-auto-glm52[ab]$/, /codex-auto-/, /claude-auto-/],
-      'second perspective',
-      'add a different harness or model family for independent validation',
-    );
+  // A useful team is implementer + reviewer + one more perspective. Keyword
+  // rules above only fire for matching tasks, so generic prompts must still be
+  // filled from the remaining pool — prefer the other harness family first so
+  // validation comes from an independent model.
+  const fillers = [...frontier, /codex-auto-/, /claude-auto-(?!.*(mm3|glm52|dsv4))/, /claude-auto-/];
+  while (out.length < Math.min(3, agents.length)) {
+    const binary = find(agents, fillers, used);
+    if (!binary) break;
+    used.add(binary);
+    out.push({
+      binary,
+      role: out.length === 0 ? 'primary implementer' : out.length === 1 ? 'independent reviewer' : 'second implementer',
+      reason:
+        out.length <= 1
+          ? 'independent frontier account for implementation and review'
+          : 'parallel implementer or extra validation from a different account',
+    });
   }
 
-  return out.slice(0, 3);
+  return out.slice(0, 4);
 }
 
 export function interactiveHarnessArgs(config: SessionConfig): string[] {

@@ -27,7 +27,7 @@ import type { KTeamPaths } from './paths';
 import { configFile, markerFile, sessionDir, stateFile, turnLog, turnPrompt } from './paths';
 import type { AttachmentView, KTeamService, SessionView } from './service';
 import { EventStore, type JsonValue, type SessionEvent } from './storage';
-import { TmuxController } from './tmux-controller';
+import { contextPercentUsed, TmuxController } from './tmux-controller';
 import type { KTeamEvent, SendRequest, SessionConfig, SessionState, SessionStatus, StartSessionRequest } from './types';
 
 interface MonitorHandle {
@@ -223,6 +223,32 @@ export class SessionManager implements KTeamService {
     // (KTEAM_MODEL). A default is always fed in when kfleet declares one, so the
     // per-account default model can't silently drift; undefined => no --model.
     const model = request.model?.trim() || (await wrapperModel(wrapper));
+
+    // Preflight 1 — duplicate guard: a client retrying start after a transient
+    // error must not spawn a second live session for the same work. An
+    // identical (binary, cwd, prompt) session started in the last 10 minutes
+    // that is still live IS that earlier request succeeding server-side.
+    for (const existing of await this.list()) {
+      if (
+        existing.config.binary === binary &&
+        existing.config.cwd === cwd &&
+        !terminalStatuses.includes(existing.state.status) &&
+        Date.now() - Date.parse(existing.config.createdAt) < 600_000 &&
+        (await readFile(existing.config.originalPromptFile, 'utf8').catch(() => '')).trim() === prompt
+      ) {
+        throw new Error(
+          `an identical session is already live: ${existing.config.id} (${existing.state.status}); ` +
+            'the earlier start succeeded — use it, or stop it first',
+        );
+      }
+    }
+    // Preflight 2 — quota: launching on an exhausted account burns a session
+    // that can only no-op. Fail fast with the wrapper named.
+    const preflightQuota = await this.fetchQuota({ binary } as SessionConfig);
+    if (preflightQuota?.atLimit === true) {
+      const reset = preflightQuota.resetAt ? ` (resets ${new Date(preflightQuota.resetAt).toISOString()})` : '';
+      throw new Error(`wrapper ${binary} is at its usage limit${reset}; pick another account`);
+    }
 
     const id = `${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
     const directory = sessionDir(this.paths, id);
@@ -931,6 +957,7 @@ export class SessionManager implements KTeamService {
     let promptStable = 0;
     let lastDurableActivity = Date.now();
     let lastQuotaCheck = 0;
+    let reinjectedTurn = -1;
     try {
       while (!signal.aborted && !this.closed) {
         let sleepSeconds = this.options.healthIntervalSeconds;
@@ -1065,12 +1092,16 @@ export class SessionManager implements KTeamService {
             paneHash = nextPaneHash;
             await this.tmux.snapshot(view.config);
             await writeFile(turnLog(this.paths, id, view.config.turn), pane.pane, { mode: 0o600 });
+            const contextPercent = contextPercentUsed(pane.visiblePane);
+            const contextTurnedHigh =
+              contextPercent !== undefined && contextPercent >= 85 && (view.state.contextPercent ?? 0) < 85;
             await this.transition(
               id,
               {
                 lastActivityAt: now(),
                 lastPaneAt: now(),
                 promptReady: pane.promptReady,
+                ...(contextPercent !== undefined ? { contextPercent } : {}),
                 health: waitingStatuses.includes(view.state.status)
                   ? 'waiting'
                   : view.state.status === 'thinking'
@@ -1078,8 +1109,15 @@ export class SessionManager implements KTeamService {
                     : 'healthy',
               },
               'terminal.frame',
-              { hash: paneHash, promptReady: pane.promptReady },
+              {
+                hash: paneHash,
+                promptReady: pane.promptReady,
+                ...(contextPercent !== undefined ? { contextPercent } : {}),
+              },
             );
+            // Sessions past ~85% context wedge silently (prompts queue, never
+            // process). Surface it once so the lead can rotate the teammate.
+            if (contextTurnedHigh) await this.emit(id, 'context.high', { contextPercent }, 'watcher');
             view = await this.get(id);
           }
 
@@ -1198,6 +1236,54 @@ export class SessionManager implements KTeamService {
             );
             return;
           }
+          // A healthy turn writes its first transcript record within seconds of
+          // the prompt landing. Zero transcript bytes minutes into a turn means
+          // the prompt was lost or the TUI booted logged-out — both previously
+          // burned the full stall timer while `status` said "running". Nudge
+          // once, then fail fast with a distinct reason.
+          const turnStartedAt = view.state.startedAt
+            ? Date.parse(view.state.startedAt)
+            : Date.parse(view.config.createdAt);
+          const transcriptProgress =
+            view.state.lastTranscriptAt !== undefined && Date.parse(view.state.lastTranscriptAt) >= turnStartedAt;
+          // promptStable gates this: a busy pane (e.g. a working Codex whose
+          // rollout file hasn't been correlated yet) must never be treated as
+          // a lost prompt; only an idle input box with zero transcript is.
+          if (!waiting && !transcriptProgress && promptStable >= 2 && !protectedStatuses.includes(view.state.status)) {
+            const sinceTurnStart = Date.now() - turnStartedAt;
+            if (sinceTurnStart >= 120_000 && reinjectedTurn !== view.config.turn) {
+              reinjectedTurn = view.config.turn;
+              await this.emit(
+                id,
+                'turn.reinjected',
+                { reason: 'no transcript activity 120s after turn start; re-sending the prompt' },
+                'watcher',
+              );
+              await this.tmux
+                .send(view.config, this.promptInstruction(id, view.config.turn))
+                .catch(error =>
+                  this.emit(id, 'turn.reinject_failed', { message: String(error) }, 'watcher').catch(() => undefined),
+                );
+            } else if (sinceTurnStart >= 360_000) {
+              const pane = await this.tmux.snapshot(view.config, true);
+              const loginWalled = /not logged in|please run \/login|invalid api key|unauthorized/i.test(pane);
+              await this.stopTmuxWithEvidence(view.config, 'no transcript activity after turn start');
+              await this.transition(
+                id,
+                {
+                  status: 'failed',
+                  health: 'crashed',
+                  reason: loginWalled
+                    ? 'harness authentication failed: TUI is login-walled and produced no transcript activity'
+                    : 'turn never started: no transcript activity within 360s of the prompt (lost prompt or dead harness)',
+                  finishedAt: now(),
+                  promptReady: false,
+                },
+                'session.turn_never_started',
+              );
+              return;
+            }
+          }
           if (!waiting && Date.now() - effectiveActivity >= view.config.stallSeconds * 1000) {
             await this.tmux.snapshot(view.config, true);
             await atomicJson(path.join(view.directory, 'kill.json'), {
@@ -1287,11 +1373,13 @@ export class SessionManager implements KTeamService {
         let status: SessionStatus = current.status;
         let pendingQuestion = current.pendingQuestion;
         let turnCompleted = current.turnCompleted ?? false;
+        let lastToolStartedAt = current.lastToolStartedAt;
         for (const event of events) {
           if (event.type === 'tool.use') {
             openTools.add(event.data.toolUseId);
             status = 'tool_running';
             turnCompleted = false;
+            lastToolStartedAt = now();
           } else if (event.type === 'tool.result') {
             openTools.delete(event.data.toolUseId);
             if (pendingQuestion?.toolUseId === event.data.toolUseId) pendingQuestion = undefined;
@@ -1330,6 +1418,7 @@ export class SessionManager implements KTeamService {
           openTools: [...openTools],
           pendingQuestion,
           turnCompleted,
+          lastToolStartedAt,
           transcriptOffset: Math.max(current.transcriptOffset ?? 0, offset),
           retryAttempt: madeProgress ? 0 : current.retryAttempt,
           lastTranscriptAt: now(),
@@ -1389,6 +1478,7 @@ export class SessionManager implements KTeamService {
         let status: SessionStatus = current.status;
         let pendingQuestion = current.pendingQuestion;
         let turnCompleted = current.turnCompleted ?? false;
+        let lastToolStartedAt = current.lastToolStartedAt;
         for (const event of events) {
           if (event.type === 'turn.started') {
             turnCompleted = false;
@@ -1404,6 +1494,7 @@ export class SessionManager implements KTeamService {
             openTools.add(event.data.toolUseId);
             status = 'tool_running';
             turnCompleted = false;
+            lastToolStartedAt = now();
           } else if (event.type === 'tool.result') {
             openTools.delete(event.data.toolUseId);
             if (pendingQuestion?.toolUseId === event.data.toolUseId) pendingQuestion = undefined;
@@ -1434,6 +1525,7 @@ export class SessionManager implements KTeamService {
           openTools: [...openTools],
           pendingQuestion,
           turnCompleted,
+          lastToolStartedAt,
           transcriptOffset: Math.max(current.transcriptOffset ?? 0, offset),
           retryAttempt: madeProgress ? 0 : current.retryAttempt,
           lastTranscriptAt: now(),
