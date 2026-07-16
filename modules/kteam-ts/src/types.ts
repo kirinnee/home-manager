@@ -22,6 +22,9 @@ export type SessionStatus =
 export interface SessionConfig {
   id: string;
   name: string;
+  /** Auto-assigned human callsign (e.g. "mordecai") — accepted anywhere an id
+   *  is; unique only among sessions created in the last 5 days. */
+  teammate?: string;
   binary: string;
   harness: Harness;
   modelHint: string;

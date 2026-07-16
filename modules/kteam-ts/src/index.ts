@@ -32,7 +32,7 @@ async function waitForDaemon(): Promise<Record<string, unknown>> {
 
 function printView(view: Awaited<ReturnType<ApiClient['get']>>): void {
   console.log(
-    `${view.config.id}  ${view.state.status}  ${view.config.binary}  ${view.config.mode}  turn ${view.state.turn}`,
+    `${view.config.teammate ?? '-'} (${view.config.id})  ${view.state.status}  ${view.config.binary}  model=${view.config.model ?? 'default'}  ${view.config.mode}  turn ${view.state.turn}`,
   );
   console.log(`  ${view.config.cwd}`);
   if (view.state.reason) console.log(`  ${view.state.reason}`);
@@ -194,7 +194,7 @@ program
       return console.log(all.length ? 'no running kteam sessions (use -a to show all)' : 'no kteam sessions');
     for (const view of sessions)
       console.log(
-        `${view.config.id.padEnd(24)} ${view.state.status.padEnd(18)} ${view.config.binary.padEnd(28)} ${view.config.mode.padEnd(11)} ${view.config.name}`,
+        `${(view.config.teammate ?? '-').padEnd(12)} ${view.config.id.padEnd(24)} ${view.state.status.padEnd(18)} ${(view.config.model ?? 'default').padEnd(20)} ${view.config.binary.padEnd(28)} ${view.config.mode.padEnd(11)} ${view.config.name}`,
       );
   });
 
