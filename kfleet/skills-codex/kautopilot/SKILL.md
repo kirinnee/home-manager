@@ -83,21 +83,24 @@ Don't push for things that need nothing from them (routine progress, a step you
 immediately continue past). If in doubt whether they're waiting on you or you're
 waiting on them — if it's the latter, push.
 
-### By harness — subagents + tool-name translation
+### How to run a fresh-context step/reviewer — kteam first
 
-The binary loop above is harness-agnostic; only _how you run a fresh-context
-step/reviewer_ differs:
+The binary loop above is harness-agnostic. **Default to kteam** for every
+fresh-context run (agent-steps, reviewer fan-out): each is a detached
+`kteam start` session on an auto-mode fleet wrapper, prompted to write
+`d.contract.outputFile` and `kteam signal done`. Pick wrappers with
+`kteam recommend` (usage-aware); fan out reviewers as parallel kteam sessions
+and park on `kteam wait <id> --timeout ...`. This keeps the main thread lean,
+survives harness restarts, and gets kteamd's auth/quota preflight and
+stall/login-wall fail-fast for free.
 
-- **Claude Code:** spawn an isolated `Task` subagent (`Agent` tool) per agent-step
-  and per reviewer (parallel fan-out), as described throughout this doc.
-- **Codex:** ask Codex to start native subagents via explicit delegation for the
-  agent-step and reviewer fan-out. Delegate each with its own prompt; the agent-step
-  subagent writes `d.contract.outputFile`. Do not shell out to Codex for these if
-  native subagents are available.
-  For visual HTML generation, explicitly request a **Sonnet 5** subagent; if the
-  harness cannot pin models for subagents, still delegate to the strongest available
-  visual/code-writing subagent and continue.
-  Interactive (`d.kind == "interactive"`) steps run inline either way.
+Fall back to a delegated native subagent only when kteamd is unavailable or the
+step is too small to justify a session (single quick read/summarize); the
+subagent then writes `d.contract.outputFile` itself.
+For visual HTML generation, prefer a wrapper whose model is strong at visual
+work (e.g. `claude-auto-mm3`); with native subagents, request the strongest
+available visual/code-writing subagent and continue.
+Interactive (`d.kind == "interactive"`) steps run inline either way.
 
 Wherever this doc names a Claude-only tool, translate:
 
@@ -458,10 +461,11 @@ allReady, done, mergeMode }` — or `{ ok:false, error }` (still **exit 0**, e.g
     master plan, so `schedule`/`record` reject it and the dev loop fails to init. If the
     plan-writer proposes a breakdown with non-conforming folder names, correct it before
     approving.
-- **`agent`** (fetch_ticket, plus the skill-owned kloop/commit/PR-polish subagents you spawn
-  from `schedule`) — **always** a fresh isolated `Task` subagent, never inline. (The
-  reviewer fan-out isn't a step — it rides on the write_spec/write_plans interactive steps
-  and you spawn each reviewer as a subagent.)
+- **`agent`** (fetch_ticket, plus the skill-owned kloop/commit/PR-polish agents you spawn
+  from `schedule`) — **always** a fresh isolated run, never inline: a detached kteam
+  session by default, delegated native subagent as fallback. (The reviewer fan-out isn't
+  a step — it rides on the write_spec/write_plans interactive steps and you spawn each
+  reviewer as its own kteam session.)
 
 ### Running kloop for a ready plan (you drive it)
 
