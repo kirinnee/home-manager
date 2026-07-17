@@ -265,9 +265,15 @@ export class AgentRunner {
     return this.config.interactive === true && harness === 'claude';
   }
 
-  /** A binary kteamd can manage: a kfleet auto wrapper (claude-auto-… or codex-auto-…). */
+  /** A binary kteamd can manage: a kfleet auto wrapper (claude-auto-… or codex-auto-…).
+   *  `interactive: true` opts out — that mode's sentinel/TUI contract is the legacy tmux
+   *  path's, and its sentinel prompt instructions are meaningless inside a kteam session. */
   private kteamEligible(binary: string): boolean {
-    return this.config.agentBackend === 'kteam' && /^(claude|codex)-auto-/.test(path.basename(binary));
+    return (
+      this.config.agentBackend === 'kteam' &&
+      this.config.interactive !== true &&
+      /^(claude|codex)-auto-/.test(path.basename(binary))
+    );
   }
 
   /**
@@ -318,9 +324,22 @@ export class AgentRunner {
     if (started.exitCode !== 0) {
       throw new Error(`kteam start failed for ${p.binary}: ${(started.stderr || started.stdout).trim()}`);
     }
-    const view = JSON.parse(started.stdout) as { config: { id: string } };
-    const id = view.config.id;
+    let id: string;
+    try {
+      const view = JSON.parse(started.stdout) as { config?: { id?: string } };
+      if (!view.config?.id) throw new Error('missing config.id');
+      id = view.config.id;
+    } catch (error) {
+      throw new Error(
+        `kteam start returned unexpected JSON for ${p.binary} (${String(error)}): ${started.stdout.trim().slice(0, 300)}`,
+      );
+    }
     const deadlineMs = startTime + p.timeout * 60_000 + 120_000;
+    // kteam wait also returns on waiting/awaiting_user/awaiting_question —
+    // NON-terminal states (kloop sessions run in auto mode, where kteamd
+    // auto-continues an idle prompt). Only genuinely terminal states end the
+    // poll; everything else keeps polling until the deadline.
+    const terminalStates = new Set(['completed', 'failed', 'stalled', 'stopped', 'kill_failed']);
     let status = 'running';
     while (Date.now() < deadlineMs) {
       const waited = await kteam(['wait', id, '--json', '--timeout', '60'], 90_000);
@@ -336,7 +355,7 @@ export class AgentRunner {
       // harness session id, `kloop view`) keeps working under kteam.
       const chat = await kteam(['logs', id], 30_000);
       if (chat.exitCode === 0 && chat.stdout) await fs.writeFile(p.logFile, chat.stdout, 'utf-8').catch(() => {});
-      if (waited.exitCode !== 124 && status !== 'running' && status !== 'starting') break;
+      if (terminalStates.has(status)) break;
     }
     const durationMs = Date.now() - startTime;
     if (status === 'completed') return { exitCode: 0, durationMs, timedOut: false };
