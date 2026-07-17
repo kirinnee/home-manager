@@ -265,10 +265,93 @@ export class AgentRunner {
     return this.config.interactive === true && harness === 'claude';
   }
 
+  /** A binary kteamd can manage: a kfleet auto wrapper (claude-auto-… or codex-auto-…). */
+  private kteamEligible(binary: string): boolean {
+    return this.config.agentBackend === 'kteam' && /^(claude|codex)-auto-/.test(path.basename(binary));
+  }
+
   /**
-   * Dispatch a single agent into tmux — interactive (TUI + sentinel) or print (one-shot
-   * pipeline). The print `command` is always passed and used only on the non-interactive
-   * path. Centralizes the branch so every role behaves identically.
+   * Dispatch one agent through a detached kteam session and block until it
+   * reaches a terminal state. kteamd owns the TUI (auth/quota preflight,
+   * startup dialogs, prompt-landing verification, stall + login-wall
+   * fail-fast); kloop keeps its own contract: the agent still writes kloop's
+   * output/sentinel files, and the harness transcript is mirrored to logFile.
+   */
+  private async launchViaKteam(p: {
+    binary: string;
+    promptFile: string;
+    logFile: string;
+    timeout: number;
+    tmuxSession: string;
+    outputFile?: string;
+  }): Promise<{ exitCode: number; durationMs: number; timedOut: boolean }> {
+    const startTime = Date.now();
+    const prompt = await fs.readFile(p.promptFile, 'utf-8');
+    const { CLAUDECODE: _, ...env } = process.env;
+    const kteam = async (args: string[], timeoutMs: number) => {
+      const proc = Bun.spawn(['kteam', ...args], { stdout: 'pipe', stderr: 'pipe', env });
+      const killer = setTimeout(() => proc.kill(), timeoutMs);
+      const [exitCode, stdout, stderr] = await Promise.all([
+        proc.exited,
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
+      clearTimeout(killer);
+      return { exitCode, stdout, stderr };
+    };
+    const started = await kteam(
+      [
+        'start',
+        '--json',
+        '-a',
+        p.binary,
+        '--name',
+        p.tmuxSession.slice(0, 48),
+        '--cwd',
+        process.cwd(),
+        '--timeout',
+        String(Math.max(60, Math.round(p.timeout * 60))),
+        prompt,
+      ],
+      180_000,
+    );
+    if (started.exitCode !== 0) {
+      throw new Error(`kteam start failed for ${p.binary}: ${(started.stderr || started.stdout).trim()}`);
+    }
+    const view = JSON.parse(started.stdout) as { config: { id: string } };
+    const id = view.config.id;
+    const deadlineMs = startTime + p.timeout * 60_000 + 120_000;
+    let status = 'running';
+    while (Date.now() < deadlineMs) {
+      const waited = await kteam(['wait', id, '--json', '--timeout', '60'], 90_000);
+      const state = (() => {
+        try {
+          return JSON.parse(waited.stdout.trim().split('\n').at(-1) ?? '{}') as { status?: string };
+        } catch {
+          return {};
+        }
+      })();
+      status = state.status ?? status;
+      // Mirror the durable chat log so kloop's log tooling (tokens, model,
+      // harness session id, `kloop view`) keeps working under kteam.
+      const chat = await kteam(['logs', id], 30_000);
+      if (chat.exitCode === 0 && chat.stdout) await fs.writeFile(p.logFile, chat.stdout, 'utf-8').catch(() => {});
+      if (waited.exitCode !== 124 && status !== 'running' && status !== 'starting') break;
+    }
+    const durationMs = Date.now() - startTime;
+    if (status === 'completed') return { exitCode: 0, durationMs, timedOut: false };
+    // An output file on disk trumps the session verdict (mirrors the sentinel
+    // fallback on the tmux path): the work happened even if the wrap-up died.
+    if (p.outputFile && (await this.safeFileExists(p.outputFile))) return { exitCode: 0, durationMs, timedOut: false };
+    if (status === 'stopped' || Date.now() >= deadlineMs) return { exitCode: 124, durationMs, timedOut: true };
+    return { exitCode: 1, durationMs, timedOut: false };
+  }
+
+  /**
+   * Dispatch a single agent — via kteam (default: kteamd-managed detached session),
+   * interactive tmux (TUI + sentinel), or print (one-shot pipeline). The print
+   * `command` is always passed and used only on the non-interactive tmux path.
+   * Centralizes the branch so every role behaves identically.
    */
   private async launch(p: {
     interactive: boolean;
@@ -285,6 +368,16 @@ export class AgentRunner {
     // run as successful instead of failing/retrying — mirrors the reviewer's verdict-file fallback.
     outputFile?: string;
   }): Promise<{ exitCode: number; durationMs: number; timedOut: boolean }> {
+    if (this.kteamEligible(p.binary)) {
+      return this.launchViaKteam({
+        binary: p.binary,
+        promptFile: p.promptFile,
+        logFile: p.logFile,
+        timeout: p.timeout,
+        tmuxSession: p.tmuxSession,
+        outputFile: p.outputFile,
+      });
+    }
     if (p.interactive && p.sentinelFile) {
       const result = await this.tmux.runInteractiveSession({
         sessionName: p.tmuxSession,

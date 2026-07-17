@@ -137,9 +137,13 @@ settings:
   previousReviewPropagation: 0.7
   compressSpec: false
   snapshot: false
-  interactive: false              # run claude agents as interactive TUIs (no --print);
-                                  # kloop pastes the prompt via tmux, waits for a done-marker
-                                  # file the agent touches, then sends /exit. gemini/codex ignore this.
+  agentBackend: kteam             # kteam (default): dispatch fleet-wrapper agents through kteamd
+                                  # detached sessions (auth/quota preflight, dialog handling,
+                                  # stall/login-wall fail-fast). tmux: legacy self-managed path.
+                                  # Non-fleet binaries (bare claude) always use tmux.
+  interactive: false              # tmux backend only: run claude agents as interactive TUIs
+                                  # (no --print); kloop pastes the prompt via tmux, waits for a
+                                  # done-marker file, then sends /exit. gemini/codex ignore this.
   requireUsageLeft: false         # usage-aware selection: only draw from the weighted pools
                                   # accounts that still have usage left (queried from kfleet's
                                   # /usage), and block before the implementer runs until an

@@ -171,6 +171,12 @@ const configSchema = z
     // via tmux, detects completion via a marker file the agent touches, then sends /exit.
     // Non-claude harnesses (gemini/codex) ignore this and always run --print.
     interactive: z.boolean().default(false),
+    // Who runs the agents. 'kteam' (default) dispatches every role through kteamd
+    // detached sessions (auth/quota preflight, dialog handling, stall/login-wall
+    // fail-fast, transcript-based health). 'tmux' is kloop's legacy self-managed
+    // tmux path. kteam requires the wrapper to be a claude-auto-*/codex-auto-*
+    // fleet binary; non-fleet binaries (bare `claude`) fall back to tmux.
+    agentBackend: z.enum(['tmux', 'kteam']).default('kteam'),
     // Usage-aware account selection. When true, kloop only draws from the weighted
     // pools accounts that still have usage left (queried from kfleet's /usage), and
     // blocks until reset when the implementer pool is fully exhausted. Off by default.
@@ -273,6 +279,7 @@ const configSchema = z
       rerankAfterCheckpoint: data.rerankAfterCheckpoint ?? true,
       snapshot: data.snapshot ?? false,
       interactive: data.interactive ?? false,
+      agentBackend: data.agentBackend ?? 'kteam',
       requireUsageLeft: data.requireUsageLeft ?? false,
       usageEndpoint: data.usageEndpoint,
       usageFiveHourFloorPercent: data.usageFiveHourFloorPercent,
@@ -319,6 +326,7 @@ export const resolvedConfigSchema = z.object({
   rerankAfterCheckpoint: z.boolean(),
   snapshot: z.boolean(),
   interactive: z.boolean().default(false),
+  agentBackend: z.enum(['tmux', 'kteam']).default('kteam'),
   requireUsageLeft: z.boolean().default(false),
   usageEndpoint: z.string().optional(),
   usageFiveHourFloorPercent: z.number().min(0).max(100).optional(),
@@ -650,6 +658,7 @@ export const DEFAULT_CONFIG: Config = {
   rerankAfterCheckpoint: true,
   snapshot: false,
   interactive: false,
+  agentBackend: 'kteam',
   requireUsageLeft: false,
   stall: { enabled: false, idleThresholdSec: 600, checkIntervalSec: 60, autoAnswer: 'off' },
   implementerRetry: { maxRetries: 2, backoffBaseMs: 5000 },
