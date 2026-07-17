@@ -91,6 +91,7 @@ export interface SessionState {
   lastToolStartedAt?: string;
   quota?: {
     atLimit?: boolean;
+    authOk?: boolean;
     fiveHourPercent?: number;
     weeklyPercent?: number;
     resetAt?: number;

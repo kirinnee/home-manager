@@ -242,12 +242,15 @@ export class SessionManager implements KTeamService {
         );
       }
     }
-    // Preflight 2 — quota: launching on an exhausted account burns a session
-    // that can only no-op. Fail fast with the wrapper named.
+    // Preflight 2 — quota/auth: launching on an exhausted or logged-out
+    // account burns a session that can only no-op. Fail fast, wrapper named.
     const preflightQuota = await this.fetchQuota({ binary } as SessionConfig);
     if (preflightQuota?.atLimit === true) {
       const reset = preflightQuota.resetAt ? ` (resets ${new Date(preflightQuota.resetAt).toISOString()})` : '';
       throw new Error(`wrapper ${binary} is at its usage limit${reset}; pick another account`);
+    }
+    if (preflightQuota?.authOk === false) {
+      throw new Error(`wrapper ${binary} is not logged in (kfleet usage reports auth failure); run kfleet login`);
     }
 
     const id = `${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
@@ -1708,6 +1711,7 @@ export class SessionManager implements KTeamService {
         accounts?: Array<{
           binary?: string;
           atLimit?: boolean;
+          authOk?: boolean;
           fiveHourPercent?: number;
           weeklyPercent?: number;
           fiveHourResetAt?: number;
@@ -1721,6 +1725,7 @@ export class SessionManager implements KTeamService {
       );
       return {
         atLimit: account.atLimit,
+        authOk: account.authOk,
         fiveHourPercent: account.fiveHourPercent,
         weeklyPercent: account.weeklyPercent,
         ...(resets.length ? { resetAt: Math.min(...resets) } : {}),
