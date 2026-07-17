@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { inferHarness, interactiveHarnessArgs, recommendAgents } from './core';
+import { inferHarness, interactiveHarnessArgs, recommendAgents, usableAgent, usageScore } from './core';
 import type { SessionConfig } from './types';
 
 const config = (harness: 'claude' | 'codex', turn = 1, model?: string): SessionConfig => ({
@@ -85,4 +85,37 @@ test('fills a generic task to at least three distinct teammates', () => {
 test('never recommends more teammates than there are wrappers', () => {
   const result = recommendAgents('fix a typo', ['claude-auto-loge']);
   expect(result).toHaveLength(1);
+});
+
+describe('usage-aware recommendations', () => {
+  test('excludes at-limit and logged-out binaries entirely', () => {
+    const result = recommendAgents(
+      'implement the feature',
+      ['claude-auto-kirin', 'claude-auto-loge', 'codex-auto-atomi'],
+      [
+        { binary: 'claude-auto-kirin', atLimit: true },
+        { binary: 'codex-auto-atomi', authOk: false },
+      ],
+    );
+    expect(result.map(item => item.binary)).toEqual(['claude-auto-loge']);
+  });
+
+  test('prefers the least-used same-tier account 70% of the time', () => {
+    const usage = [
+      { binary: 'codex-auto-atomi', fiveHourPercent: 80, weeklyPercent: 10 },
+      { binary: 'codex-auto-loge', fiveHourPercent: 5, weeklyPercent: 5 },
+    ];
+    const agents = ['codex-auto-atomi', 'codex-auto-loge'];
+    const primary = (roll: number) => recommendAgents('implement it', agents, usage, () => roll)[0]?.binary;
+    expect(primary(0.9)).toBe('codex-auto-loge'); // 70% branch: least used
+    expect(primary(0.1)).toBe('codex-auto-atomi'); // 30% branch: runner-up
+  });
+
+  test('usage score uses the tighter of the 5h and weekly windows', () => {
+    expect(usageScore({ binary: 'x', fiveHourPercent: 10, weeklyPercent: 90 })).toBe(90);
+    expect(usageScore(undefined)).toBe(0);
+    expect(usableAgent({ binary: 'x', atLimit: true })).toBe(false);
+    expect(usableAgent({ binary: 'x', authOk: false })).toBe(false);
+    expect(usableAgent(undefined)).toBe(true);
+  });
 });

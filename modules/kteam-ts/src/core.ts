@@ -33,21 +33,61 @@ export function discoverAutoAgents(binDir: string): string[] {
     .sort();
 }
 
-function find(agents: string[], patterns: RegExp[], used: Set<string>): string | undefined {
+/** Per-binary account health from `kfleet usage` (the kfleet serve /usage feed). */
+export interface AgentUsage {
+  binary: string;
+  atLimit?: boolean;
+  authOk?: boolean;
+  fiveHourPercent?: number;
+  weeklyPercent?: number;
+}
+
+/** How "spent" an account is: the tighter of its 5h and weekly windows. */
+export function usageScore(usage: AgentUsage | undefined): number {
+  if (!usage) return 0;
+  return Math.max(usage.fiveHourPercent ?? 0, usage.weeklyPercent ?? 0);
+}
+
+export function usableAgent(usage: AgentUsage | undefined): boolean {
+  return usage?.atLimit !== true && usage?.authOk !== false;
+}
+
+/** Pattern precedence picks the tier; usage load-balances within it: 70% the
+ *  least-used candidate, 30% the runner-up, so parallel teams spread across
+ *  same-tier accounts instead of hammering whichever sorts first. */
+function find(
+  agents: string[],
+  patterns: RegExp[],
+  used: Set<string>,
+  usageByBinary: Map<string, AgentUsage>,
+  rng: () => number,
+): string | undefined {
   for (const pattern of patterns) {
-    const match = agents.find(agent => !used.has(agent) && pattern.test(agent));
-    if (match) return match;
+    const matches = agents
+      .filter(agent => !used.has(agent) && pattern.test(agent))
+      .sort((a, b) => usageScore(usageByBinary.get(a)) - usageScore(usageByBinary.get(b)));
+    if (matches.length === 0) continue;
+    if (matches.length > 1 && rng() < 0.3) return matches[1];
+    return matches[0];
   }
   return undefined;
 }
 
-/** Recommend a small, complementary team. This never launches anything. */
-export function recommendAgents(task: string, agents: string[]): Recommendation[] {
+/** Recommend a small, complementary team. This never launches anything.
+ *  Binaries that are at their usage limit or logged out are excluded up front. */
+export function recommendAgents(
+  task: string,
+  agents: string[],
+  usage: AgentUsage[] = [],
+  rng: () => number = Math.random,
+): Recommendation[] {
   const text = task.toLowerCase();
+  const usageByBinary = new Map(usage.map(item => [item.binary, item]));
+  agents = agents.filter(agent => usableAgent(usageByBinary.get(agent)));
   const used = new Set<string>();
   const out: Recommendation[] = [];
   const add = (patterns: RegExp[], role: string, reason: string) => {
-    const binary = find(agents, patterns, used);
+    const binary = find(agents, patterns, used, usageByBinary, rng);
     if (!binary) return;
     used.add(binary);
     out.push({ binary, role, reason });
@@ -100,7 +140,7 @@ export function recommendAgents(task: string, agents: string[]): Recommendation[
   while (out.length < Math.min(3, agents.length)) {
     const lastHarness = out.at(-1)?.binary.includes('codex-') ? 'codex' : 'claude';
     const other = lastHarness === 'codex' ? /^claude-auto-(?!.*(mm3|glm52|dsv4))/ : /codex-auto-/;
-    const binary = find(agents, [other, ...fillers], used);
+    const binary = find(agents, [other, ...fillers], used, usageByBinary, rng);
     if (!binary) break;
     used.add(binary);
     out.push({

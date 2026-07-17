@@ -4,7 +4,7 @@ import { Command, Option } from 'commander';
 import { readFile } from 'fs/promises';
 import path from 'path';
 import { ApiClient } from './api-client';
-import { discoverAutoAgents, recommendAgents } from './core';
+import { discoverAutoAgents, recommendAgents, usableAgent, type AgentUsage } from './core';
 import { DaemonService } from './daemon-service';
 import { resolveBinary } from './harness';
 import { createPaths } from './paths';
@@ -130,17 +130,43 @@ daemonCommand
     } else process.stdout.write(await readFile(paths.daemonLog, 'utf8').catch(() => ''));
   });
 
+/** Account usage from kfleet: the serve endpoint when it's up (fast, cached),
+ *  else one `kfleet usage --json` probe. Empty on total failure — recommend
+ *  still works, just without usage-based exclusion/balancing. */
+async function fetchAgentUsage(): Promise<AgentUsage[]> {
+  try {
+    const response = await fetch(process.env.KTEAM_QUOTA_URL ?? 'http://127.0.0.1:47318/usage', {
+      signal: AbortSignal.timeout(3_000),
+    });
+    if (response.ok) {
+      const payload = (await response.json()) as { accounts?: AgentUsage[] };
+      if (payload.accounts?.length) return payload.accounts;
+    }
+  } catch {}
+  try {
+    const probe = Bun.spawnSync(['kfleet', 'usage', '--json', '--no-relogin'], { timeout: 60_000 });
+    if (probe.exitCode === 0) return JSON.parse(probe.stdout.toString()) as AgentUsage[];
+  } catch {}
+  return [];
+}
+
 program
   .command('recommend')
   .argument('[task...]')
   .option('--json')
-  .action(async (parts: string[], options: { json?: boolean }) => {
+  .option('--no-usage', 'skip the kfleet usage probe (no exclusion or load balancing)')
+  .action(async (parts: string[], options: { json?: boolean; usage?: boolean }) => {
     const task = parts.join(' ').trim();
     const available = discoverAutoAgents(paths.kfleetBin);
-    const recommendations = recommendAgents(task, available);
-    if (options.json) return console.log(JSON.stringify({ task, available, recommendations }, null, 2));
+    const usage = options.usage === false ? [] : await fetchAgentUsage();
+    const recommendations = recommendAgents(task, available, usage);
+    const excluded = usage
+      .filter(item => available.includes(item.binary) && !usableAgent(item))
+      .map(item => `${item.binary} (${item.atLimit ? 'at usage limit' : 'not logged in'})`);
+    if (options.json) return console.log(JSON.stringify({ task, available, excluded, recommendations }, null, 2));
     console.log('Suggested team (review with the user before launching):');
     for (const item of recommendations) console.log(`  ${item.binary} — ${item.role}: ${item.reason}`);
+    if (excluded.length) console.log(`Excluded: ${excluded.join(', ')}`);
   });
 
 program
