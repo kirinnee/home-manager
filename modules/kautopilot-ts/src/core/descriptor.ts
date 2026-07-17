@@ -17,7 +17,9 @@ export type StepPhase = "plan" | "execution" | "feedback";
  * - `code`        — deterministic plumbing + all detection. Never yielded; the
  *                   binary runs it inline and (for watch loops) blocks.
  * - `interactive` — needs the user. Run inline by the harness; serialized.
- * - `agent`       — needs an LLM, not the user. Always a fresh isolated sub-agent.
+ * - `agent`       — needs an LLM, not the user. Always a fresh isolated run:
+ *                   a detached kteam session by default, native sub-agent as
+ *                   fallback (see the /kautopilot skill).
  */
 export type StepKind = "code" | "interactive" | "agent";
 
