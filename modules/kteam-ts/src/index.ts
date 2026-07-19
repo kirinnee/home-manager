@@ -41,7 +41,7 @@ async function waitForDaemon(): Promise<Record<string, unknown>> {
 
 function printView(view: Awaited<ReturnType<ApiClient['get']>>): void {
   console.log(
-    `${view.config.teammate ?? '-'} (${view.config.id})  ${view.state.status}  ${view.config.binary}  model=${view.config.model ?? 'default'}  ${view.config.mode}  turn ${view.state.turn}`,
+    `${view.config.teammate ?? '-'} (${view.config.id})  ${view.state.status}  ${view.config.binary}  model=${view.config.model ?? 'default'}${view.config.label ? `  label=${view.config.label}` : ''}  ${view.config.mode}  turn ${view.state.turn}`,
   );
   console.log(`  ${view.config.cwd}`);
   const vitals = [
@@ -172,10 +172,12 @@ program
 
 program
   .command('start')
-  .argument('<prompt...>')
+  .argument('[prompt...]')
   .requiredOption('-a, --agent <binary>')
   .addOption(new Option('--mode <mode>').choices(['auto', 'interactive']).default('auto'))
-  .option('--name <name>')
+  .option('--name <name>', 'succinct summary of what this session is supposed to do (shown in ps)')
+  .option('--label <label>', 'ownership label (lead session/repo/ticket slug); filter later with `kteam ps --label`')
+  .option('--prompt-file <file>', 'read the task prompt from a file instead of the command line (use for long prompts)')
   .option('--model <model>', 'override the model (alias or full id); defaults to the wrapper KTEAM_MODEL')
   .option('--cwd <dir>', '', process.cwd())
   .option(
@@ -201,12 +203,20 @@ program
         };
       }),
     );
+    const filePrompt = options.promptFile ? (await readFile(String(options.promptFile), 'utf8')).trim() : '';
+    const argPrompt = parts.join(' ').trim();
+    const prompt = [argPrompt, filePrompt].filter(Boolean).join('\n\n');
+    if (!prompt) {
+      console.error('provide a prompt (arguments and/or --prompt-file)');
+      process.exit(2);
+    }
     const view = await (
       await client()
     ).start({
-      prompt: parts.join(' '),
+      prompt,
       agent: String(options.agent),
       name: options.name as string | undefined,
+      label: options.label as string | undefined,
       model: options.model as string | undefined,
       cwd: String(options.cwd),
       mode: options.mode as 'auto' | 'interactive',
@@ -224,17 +234,46 @@ program
   .command('ps')
   .option('--json')
   .option('-a, --all', 'include terminal sessions (completed/failed/stalled/stopped); default shows only running')
-  .action(async (options: { json?: boolean; all?: boolean }) => {
-    const all = await (await client()).list();
+  .option('-l, --label <label>', 'only sessions started with this ownership label')
+  .action(async (options: { json?: boolean; all?: boolean; label?: string }) => {
+    const everything = await (await client()).list();
     // Default to running only — same "running" semantic as the status counts:
     // any session not in a terminal state. `-a` shows everything.
+    const all = options.label ? everything.filter(view => view.config.label === options.label) : everything;
     const sessions = options.all ? all : all.filter(view => !terminal.includes(view.state.status));
     if (options.json) return console.log(JSON.stringify(sessions, null, 2));
     if (!sessions.length)
-      return console.log(all.length ? 'no running kteam sessions (use -a to show all)' : 'no kteam sessions');
+      return console.log(
+        all.length
+          ? 'no running kteam sessions (use -a to show all)'
+          : options.label
+            ? `no kteam sessions with label "${options.label}"`
+            : 'no kteam sessions',
+      );
+    const row = (
+      teammate: string,
+      id: string,
+      status: string,
+      model: string,
+      agent: string,
+      mode: string,
+      label: string,
+      task: string,
+    ) =>
+      `${teammate.padEnd(12)} ${id.padEnd(24)} ${status.padEnd(14)} ${model.padEnd(20)} ${agent.padEnd(26)} ${mode.padEnd(11)} ${label.padEnd(14)} ${task}`;
+    console.log(row('TEAMMATE', 'ID', 'STATUS', 'MODEL', 'AGENT', 'MODE', 'LABEL', 'TASK'));
     for (const view of sessions)
       console.log(
-        `${(view.config.teammate ?? '-').padEnd(12)} ${view.config.id.padEnd(24)} ${view.state.status.padEnd(18)} ${(view.config.model ?? 'default').padEnd(20)} ${view.config.binary.padEnd(28)} ${view.config.mode.padEnd(11)} ${view.config.name}`,
+        row(
+          view.config.teammate ?? '-',
+          view.config.id,
+          view.state.status,
+          view.config.model ?? 'default',
+          view.config.binary,
+          view.config.mode,
+          view.config.label ?? '-',
+          view.config.name,
+        ),
       );
   });
 
@@ -253,12 +292,15 @@ program
   .argument('<id>')
   .argument('[message...]')
   .option('-i, --image <file>', 'attach image; repeatable', (value, values: string[]) => [...values, value], [])
+  .option('--message-file <file>', 'read the message from a file (use for long messages)')
   .option('--now', 'immediate-or-fail: refuse a busy session instead of queueing for the next turn boundary')
-  .action(async (id: string, parts: string[], options: { image: string[]; now?: boolean }) => {
+  .action(async (id: string, parts: string[], options: { image: string[]; messageFile?: string; now?: boolean }) => {
     const api = await client();
+    const fileMessage = options.messageFile ? (await readFile(options.messageFile, 'utf8')).trim() : '';
+    const message = [parts.join(' ').trim(), fileMessage].filter(Boolean).join('\n\n');
     const attachments = await Promise.all(options.image.map(file => api.upload(id, file)));
     const view = await api.send(id, {
-      message: parts.join(' '),
+      message,
       attachmentIds: attachments.map(item => item.id),
       now: options.now === true,
     });
