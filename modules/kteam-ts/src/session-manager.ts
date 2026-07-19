@@ -291,6 +291,7 @@ export class SessionManager implements KTeamService {
       id,
       name: (request.name ?? prompt.split(/\s+/).slice(0, 5).join('-')).replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 48),
       teammate: this.assignTeammateName(),
+      label: request.label?.trim() || undefined,
       binary,
       harness,
       modelHint: modelHint(binary),

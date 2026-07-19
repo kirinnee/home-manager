@@ -73,18 +73,20 @@ Other rules of thumb:
 
 ## Launch and supervise
 
-Start one approved teammate per task:
+Start one approved teammate per task. ALWAYS pass `--name` (a succinct summary of what the session is supposed to do) and `--label` (an ownership slug for YOUR batch — e.g. your session/repo/ticket identifier) so you can later list just your own teammates with `kteam ps --label <label>`:
 
 ```bash
-kteam start --agent claude-auto-mm3 --mode auto --cwd "$PWD" --image reference.png "Build the requested frontend and verify it"
-kteam start --agent codex-auto-atomi --mode interactive --cwd "$PWD" "Review the current diff with me"
+kteam start --agent claude-auto-mm3 --mode auto --cwd "$PWD" --name build-claims-frontend --label tesla-infographic --image reference.png "Build the requested frontend and verify it"
+kteam start --agent codex-auto-atomi --mode interactive --cwd "$PWD" --name review-current-diff --label tesla-infographic "Review the current diff with me"
 ```
+
+For LONG prompts (more than a few sentences), write the brief to a file and pass `--prompt-file <file>` instead of inlining it on the command line (`kteam send` takes `--message-file` for the same reason); command-line and file content are combined when both are given. The daemon already delivers every prompt to the TUI via a turn file, so file-based briefs lose nothing.
 
 Each wrapper already carries its own default model (kfleet's `KTEAM_MODEL`: `opus` for standard Claude accounts, `fable-5` for F5/frontier, `terra` for Codex), so you normally omit the model. Override only when a task needs a specific one with `--model <alias|id>`, e.g. `kteam start --agent claude-auto-kirin --model sonnet --cwd "$PWD" "…"`. Leave it off to keep the account default.
 
 Every session gets an auto-assigned teammate NAME (e.g. mordecai) plus its model, both shown by `kteam ps` and `kteam status`. Always refer to teammates by NAME when reporting to the user — never by raw session ID — and present the team as a three-column table: Name | Model | Task. Names resolve anywhere an id is accepted (`kteam send mordecai "…"`), matched against sessions from the last 5 days, most recent wins.
 
-Record each teammate name (ids also work). Use `kteam ps`, `kteam status <id>`, `kteam stream <id>`, and `kteam wait <id>` to supervise. `kteamd` is the external watcher; do not create another watcher.
+Record each teammate name (ids also work). Use `kteam ps` (header row: TEAMMATE, ID, STATUS, MODEL, AGENT, MODE, LABEL, TASK; `--label <label>` filters to your batch, `-a` includes finished sessions), `kteam status <id>`, `kteam stream <id>`, and `kteam wait <id>` to supervise. `kteamd` is the external watcher; do not create another watcher.
 
 Each session stores its complete protocol under `~/.kteam/<id>/`, including configuration, prompts, JSONL channels, snapshots, heartbeat/diff checks, logs, summary, markers, and kill diagnostics.
 

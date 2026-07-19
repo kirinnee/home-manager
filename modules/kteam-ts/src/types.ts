@@ -25,6 +25,9 @@ export interface SessionConfig {
   /** Auto-assigned human callsign (e.g. "mordecai") — accepted anywhere an id
    *  is; unique only among sessions created in the last 5 days. */
   teammate?: string;
+  /** Caller-supplied ownership label (e.g. the lead session/repo/ticket slug)
+   *  so a lead can list only its own teammates: `kteam ps --label <label>`. */
+  label?: string;
   binary: string;
   harness: Harness;
   modelHint: string;
@@ -115,6 +118,7 @@ export interface StartSessionRequest {
   prompt: string;
   agent: string;
   name?: string;
+  label?: string;
   cwd?: string;
   mode?: InteractionMode;
   /** Override the model. When omitted, kteam feeds the wrapper's kfleet default
