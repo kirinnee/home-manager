@@ -80,7 +80,7 @@ kteam start --agent claude-auto-mm3 --mode auto --cwd "$PWD" --image reference.p
 kteam start --agent codex-auto-atomi --mode interactive --cwd "$PWD" "Review the current diff with me"
 ```
 
-Each wrapper already carries its own default model (kfleet's `KTEAM_MODEL`: `opus` for standard Claude accounts, `fable-5` for F5/frontier, `terra` for Codex), so you normally omit the model. Override only when a task needs a specific one with `--model <alias|id>`, e.g. `kteam start --agent claude-auto-kirin --model sonnet --cwd "$PWD" "…"`. Leave it off to keep the account default.
+Each wrapper already carries its own default model (kfleet's `KTEAM_MODEL`: `opus` for standard Claude accounts, `fable-5` for F5/frontier, `gpt-5.6-terra` for Codex — ChatGPT codex accounts serve real IDs only: `gpt-5.6-terra`, `gpt-5.6-sol`, `gpt-5.6-luna`, `gpt-5.5`; bare aliases like `terra` are rejected), so you normally omit the model. Override only when a task needs a specific one with `--model <alias|id>`, e.g. `kteam start --agent claude-auto-kirin --model sonnet --cwd "$PWD" "…"`. Leave it off to keep the account default.
 
 Every session gets an auto-assigned teammate NAME (e.g. mordecai) plus its model, both shown by `kteam ps` and `kteam status`. Always refer to teammates by NAME when reporting to the user — never by raw session ID — and present the team as a three-column table: Name | Model | Task. Names resolve anywhere an id is accepted (`kteam send mordecai "…"`), matched against sessions from the last 5 days, most recent wins.
 
@@ -100,7 +100,7 @@ When a session enters `waiting`, `awaiting_user`, or `awaiting_question`:
 kteam send <id> "The decision or missing context"
 ```
 
-Use `kteam send <id> "…"` for an interactive user turn, `kteam answer <id> <labels...>` for structured questions, and `kteam answer <id> --other "free-form answer"` for Other. For multiple questions, repeat `--response` once per question in order. Use `kteam interrupt <id>` to steer a busy turn. Use `kteam resume` only after a stopped/dead TUI; it preserves the Claude/Codex conversation.
+Use `kteam send <id> "…"` for an interactive user turn — sending to a BUSY session queues the message and the daemon delivers it at the next turn boundary (add `--now` to fail instead of queueing); sending to a finished/stopped session automatically revives it with the message as the next turn. Use `kteam answer <id> <labels...>` for structured questions, and `kteam answer <id> --other "free-form answer"` for Other; for multiple questions, repeat `--response` once per question in order. `kteam interrupt <id>` is safe and idempotent (Escape, never C-c; a no-op on idle or already-interrupted panes) — but prefer queued `kteam send` for steering; interrupt only to abandon the current approach. Use `kteam resume` only after a stopped/dead TUI; it preserves the Claude/Codex conversation. Gate on deliverables with `kteam wait <id> --until-marker <file>` — a bare `completed` status is not proof the output files exist.
 
 Attach initial images with `kteam start ... --image <file> "…"`; send follow-up images with `kteam send <id> --image <file> "…"`. The client uploads the bytes to the daemon, which validates and stores them under the session, then injects daemon-local absolute paths through tmux.
 

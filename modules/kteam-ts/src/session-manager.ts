@@ -422,7 +422,25 @@ export class SessionManager implements KTeamService {
         view.state.status !== 'interrupted' &&
         view.state.promptReady !== true
       ) {
-        throw new Error(`session is ${view.state.status}; interrupt it before sending`);
+        // F5: a busy session QUEUES the message by default — the monitor
+        // delivers it at the next genuine prompt-ready turn boundary through
+        // the normal inject path. `--now` restores immediate-or-fail. The old
+        // unconditional refusal is what pushed operators to the destructive
+        // interrupt as a live-steer channel.
+        if (request.now === true) throw new Error(`session is ${view.state.status}; interrupt it before sending`);
+        const queuedMessage = request.message?.trim();
+        if (!queuedMessage && !request.attachmentIds?.length) throw new Error('message or attachment is required');
+        await appendFile(
+          path.join(view.directory, 'channel', 'pending-sends.jsonl'),
+          `${JSON.stringify({ id: crypto.randomUUID(), at: now(), message: queuedMessage, attachmentIds: request.attachmentIds ?? [] })}\n`,
+        );
+        await this.emit(
+          id,
+          'control.send_queued',
+          { message: queuedMessage, attachmentIds: request.attachmentIds ?? [] },
+          'client',
+        );
+        return await this.get(id);
       }
       const message = request.message?.trim();
       if (!message && !request.attachmentIds?.length) throw new Error('message or attachment is required');
@@ -465,48 +483,110 @@ export class SessionManager implements KTeamService {
     });
   }
 
+  /** Deliver queued busy-time sends at a prompt-ready turn boundary. Entries
+   *  are marked delivered BEFORE injection (at-most-once); if the session went
+   *  busy again mid-delivery, send() re-queues the combined message itself. */
+  private async deliverPendingSends(id: string, directory: string): Promise<boolean> {
+    const file = path.join(directory, 'channel', 'pending-sends.jsonl');
+    const raw = await readFile(file, 'utf8').catch(() => '');
+    const entries = raw
+      .split('\n')
+      .filter(Boolean)
+      .flatMap(line => {
+        try {
+          return [JSON.parse(line) as { id: string; at: string; message?: string; attachmentIds?: string[] }];
+        } catch {
+          return [];
+        }
+      });
+    if (entries.length === 0) return false;
+    await writeFile(file, '', { mode: 0o600 });
+    await appendFile(
+      path.join(directory, 'channel', 'delivered-sends.jsonl'),
+      `${entries.map(entry => JSON.stringify({ ...entry, deliveredAt: now() })).join('\n')}\n`,
+    );
+    await this.emit(id, 'control.send_dequeued', { count: entries.length }, 'daemon');
+    const message = entries
+      .map(entry => entry.message)
+      .filter(Boolean)
+      .join('\n\n---\n\n');
+    const attachmentIds = entries.flatMap(entry => entry.attachmentIds ?? []);
+    await this.send(id, { message, attachmentIds });
+    return true;
+  }
+
+  /** F4 auto-revive guard: if a control action left the pane DEAD (e.g. a
+   *  keystroke the TUI interpreted as quit), recover it once through the
+   *  normal resume path and record that it happened. Runs OUTSIDE the session
+   *  lock — resume() takes it itself. */
+  private async withAutoRevive(
+    id: string,
+    action: string,
+    operation: () => Promise<SessionView>,
+    reviveMessage?: string,
+  ): Promise<SessionView> {
+    try {
+      return await operation();
+    } catch (error) {
+      const view = await this.get(id).catch(() => undefined);
+      if (view) {
+        const pane = await this.tmux.state(view.config.tmuxSession);
+        if (!pane.alive || pane.dead) {
+          await this.emit(id, 'control.autorevive', { action, error: String(error) }, 'daemon').catch(() => undefined);
+          return await this.resume(id, reviveMessage);
+        }
+      }
+      throw error;
+    }
+  }
+
   async answer(id: string, labels: string[], other?: string, responses?: string[]): Promise<SessionView> {
     id = this.resolveRef(id);
-    return await this.serialized(id, async () => {
-      const view = await this.get(id);
-      if (view.state.status !== 'awaiting_question') throw new Error('session is not waiting on a structured question');
-      await this.emit(
-        id,
-        'interaction.answer',
-        { toolUseId: view.state.pendingQuestion?.toolUseId, labels, other, responses },
-        'client',
-      );
-      await this.tmux.answerQuestion(view.config, view.state, labels, other, responses);
-      await this.transition(
-        id,
-        {
-          status: 'running',
-          health: 'healthy',
-          pendingQuestion: undefined,
-          promptReady: false,
-          startedAt: now(),
-          lastActivityAt: now(),
-          turnCompleted: false,
-        },
-        'turn.resumed',
-      );
-      return await this.get(id);
-    });
+    return await this.withAutoRevive(id, 'answer', () =>
+      this.serialized(id, async () => {
+        const view = await this.get(id);
+        if (view.state.status !== 'awaiting_question')
+          throw new Error('session is not waiting on a structured question');
+        await this.emit(
+          id,
+          'interaction.answer',
+          { toolUseId: view.state.pendingQuestion?.toolUseId, labels, other, responses },
+          'client',
+        );
+        await this.tmux.answerQuestion(view.config, view.state, labels, other, responses);
+        await this.transition(
+          id,
+          {
+            status: 'running',
+            health: 'healthy',
+            pendingQuestion: undefined,
+            promptReady: false,
+            startedAt: now(),
+            lastActivityAt: now(),
+            turnCompleted: false,
+          },
+          'turn.resumed',
+        );
+        return await this.get(id);
+      }),
+    );
   }
 
   async interrupt(id: string): Promise<SessionView> {
     id = this.resolveRef(id);
-    return await this.serialized(id, async () => {
-      const view = await this.get(id);
-      await this.emit(id, 'control.interrupt.requested', {}, 'client');
-      await this.tmux.interrupt(view.config);
-      await this.transition(
-        id,
-        { status: 'interrupted', health: 'idle', promptReady: true, reason: 'interrupted by client' },
-        'control.interrupted',
-      );
-      return await this.get(id);
-    });
+    return await this.withAutoRevive(id, 'interrupt', () =>
+      this.serialized(id, async () => {
+        const view = await this.get(id);
+        await this.emit(id, 'control.interrupt.requested', {}, 'client');
+        await this.tmux.interrupt(view.config);
+        await this.transition(
+          id,
+          { status: 'interrupted', health: 'idle', promptReady: true, reason: 'interrupted by client' },
+          'control.interrupted',
+        );
+        return await this.get(id);
+      }),
+    );
   }
 
   async stop(id: string, reason = 'stopped by client'): Promise<SessionView> {
@@ -990,6 +1070,11 @@ export class SessionManager implements KTeamService {
     let lastDurableActivity = Date.now();
     let lastQuotaCheck = 0;
     let reinjectedTurn = -1;
+    // F6: the last turn whose pane visibly showed active work. A turn that
+    // demonstrably RAN but produced no correlated transcript (e.g. GLM canary,
+    // 2026-07-19) is a transcript-correlation gap, not a lost prompt — it must
+    // not be reinjected or failed as turn-never-started.
+    let activeWorkTurn = -1;
     try {
       while (!signal.aborted && !this.closed) {
         let sleepSeconds = this.options.healthIntervalSeconds;
@@ -1198,6 +1283,24 @@ export class SessionManager implements KTeamService {
             view = await this.get(id);
           }
 
+          // F5: deliver queued busy-time sends at the turn boundary, before
+          // idle handling can park the session in awaiting_user or nudge it.
+          if (
+            pane.promptReady &&
+            !protectedStatuses.includes(view.state.status) &&
+            view.state.status !== 'awaiting_question' &&
+            view.state.status !== 'rate_limited' &&
+            (['waiting', 'awaiting_user', 'interrupted'].includes(view.state.status) || view.state.promptReady === true)
+          ) {
+            const delivered = await this.deliverPendingSends(id, view.directory).catch(error =>
+              this.emit(id, 'control.send_dequeue_failed', { message: String(error) }, 'daemon').then(() => false),
+            );
+            if (delivered) {
+              promptStable = 0;
+              view = await this.get(id);
+            }
+          }
+
           if (pane.promptReady) promptStable++;
           else promptStable = 0;
           const transcriptBusy =
@@ -1300,7 +1403,14 @@ export class SessionManager implements KTeamService {
           // promptStable gates this: a busy pane (e.g. a working Codex whose
           // rollout file hasn't been correlated yet) must never be treated as
           // a lost prompt; only an idle input box with zero transcript is.
-          if (!waiting && !transcriptProgress && promptStable >= 2 && !protectedStatuses.includes(view.state.status)) {
+          if (paneShowsActiveWork(pane.visiblePane)) activeWorkTurn = view.config.turn;
+          if (
+            !waiting &&
+            !transcriptProgress &&
+            promptStable >= 2 &&
+            activeWorkTurn !== view.config.turn &&
+            !protectedStatuses.includes(view.state.status)
+          ) {
             const sinceTurnStart = Date.now() - turnStartedAt;
             if (sinceTurnStart >= 120_000 && reinjectedTurn !== view.config.turn) {
               reinjectedTurn = view.config.turn;

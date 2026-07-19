@@ -134,6 +134,9 @@ export interface StartSessionRequest {
 export interface SendRequest {
   message: string;
   attachmentIds?: string[];
+  /** Immediate-or-fail: refuse busy sessions instead of queueing the message
+   *  for delivery at the next prompt-ready turn boundary. */
+  now?: boolean;
 }
 
 export interface Recommendation {

@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "loctl hook-check --codex"
+            "command": "sh -c 'command -v loctl >/dev/null 2>&1 || exit 0; loctl hook-check --codex; c=$?; [ $c -eq 2 ] && exit 2; exit 0'"
           }
         ]
       }

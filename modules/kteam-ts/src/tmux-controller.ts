@@ -50,7 +50,16 @@ const STARTUP_BLOCKERS = [
   'log in',
 ];
 
-const BUSY_BLOCKERS = ['esc to interrupt', 'ctrl+c to interrupt', 'background terminal running'];
+// NOTE: 'background terminal running' is NOT busy evidence — codex prints that
+// footer line permanently WHILE IDLE whenever any background terminal exists;
+// treating it as busy poisoned waitReady, inject turn-start proof, and
+// interrupt gating for such sessions (2026-07-19 incident).
+const BUSY_BLOCKERS = ['esc to interrupt', 'ctrl+c to interrupt'];
+
+// Codex's post-interrupt banner: the turn is stopped and the prompt is
+// editable — this screen is READY, and another interrupt keystroke would
+// quit the TUI entirely.
+const INTERRUPTED_BANNER = 'tell the model what to do differently';
 
 /** Active-turn evidence in the VISIBLE pane: harness spinners, token counters,
  *  and elapsed-time indicators. Ground truth for "the harness is working" — a
@@ -163,6 +172,9 @@ export class TmuxController {
     // Spinners/token counters can render ABOVE an idle-looking input box (slow
     // models mid-turn) — an actively-working pane is never prompt-ready.
     if (paneShowsActiveWork(pane)) return false;
+    // The codex interrupted banner means the turn is stopped and the prompt is
+    // editable — ready, regardless of how the input row renders around it.
+    if (lower.includes(INTERRUPTED_BANNER)) return true;
     const lines = pane.split('\n');
     if (cursorY !== undefined && cursorY >= 0 && cursorY < lines.length) {
       const cursorLine = lines[cursorY]!;
@@ -383,9 +395,18 @@ export class TmuxController {
   }
 
   async interrupt(config: SessionConfig): Promise<void> {
-    const result = await run(['tmux', 'send-keys', '-t', config.tmuxSession, 'C-c']);
+    const name = config.tmuxSession;
+    const before = await this.state(name);
+    if (!before.alive || before.dead) throw new Error('session pane is dead; use resume');
+    // Idempotent: an idle pane (or the codex interrupted banner) has nothing
+    // to stop — sending another keystroke is what QUITS a codex TUI.
+    if (!paneShowsActiveWork(before.visiblePane)) return;
+    // Escape is the safe stop-current-turn key in BOTH harness TUIs; C-c is
+    // the quit path (codex exits on C-c at an idle prompt). Exactly one
+    // keystroke per call — no internal retries.
+    const result = await run(['tmux', 'send-keys', '-t', name, 'Escape']);
     if (result.code !== 0) throw new Error(result.stderr.trim() || 'tmux interrupt failed');
-    await this.waitReady(config.tmuxSession, 30_000);
+    await this.waitReady(name, 30_000);
   }
 
   async answerQuestion(
