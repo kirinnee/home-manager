@@ -27,7 +27,7 @@ import type { KTeamPaths } from './paths';
 import { configFile, markerFile, sessionDir, stateFile, turnLog, turnPrompt } from './paths';
 import type { AttachmentView, KTeamService, SessionView } from './service';
 import { EventStore, type JsonValue, type SessionEvent } from './storage';
-import { contextPercentUsed, TmuxController } from './tmux-controller';
+import { contextPercentUsed, paneShowsActiveWork, TmuxController } from './tmux-controller';
 import type { KTeamEvent, SendRequest, SessionConfig, SessionState, SessionStatus, StartSessionRequest } from './types';
 
 interface MonitorHandle {
@@ -84,6 +84,12 @@ export class SessionManager implements KTeamService {
   private readonly queues = new Map<string, Promise<void>>();
   private readonly deleting = new Set<string>();
   private readonly autoContinued = new Set<string>();
+  /** One-shot flags for done-markers deferred while the pane is still working. */
+  private readonly doneDeferred = new Set<string>();
+  /** TUI bootstrap (launch + first inject) serialized ACROSS sessions: rapid
+   *  concurrent starts race the injector — only the first survives, the rest
+   *  land typed-but-never-started. */
+  private bootstrapChain: Promise<void> = Promise.resolve();
   private readonly quotaWaiters = new Map<string, QuotaWaiter>();
   private readonly retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private globalSequence = 0;
@@ -337,11 +343,13 @@ export class SessionManager implements KTeamService {
     }
     await this.transition(id, { status: 'starting', startedAt: now(), health: 'healthy' }, 'session.starting');
     try {
-      await this.tmux.launch(config);
       // send() re-verifies prompt readiness right before typing — launch()'s
       // readiness can go stale if a late startup splash repaints the pane,
       // and a prompt injected into a booting TUI lands as a no-op turn.
-      await this.tmux.send(config, this.promptInstruction(id, 1));
+      await this.serializedBootstrap(async () => {
+        await this.tmux.launch(config);
+        await this.tmux.send(config, this.promptInstruction(id, 1));
+      });
       await this.transition(
         id,
         {
@@ -384,10 +392,27 @@ export class SessionManager implements KTeamService {
 
   async send(id: string, request: SendRequest): Promise<SessionView> {
     id = this.resolveRef(id);
+    {
+      // Atomic revive+send: a finished/stopped session accepts a follow-up
+      // message directly — resume() relaunches the TUI and injects it as the
+      // next turn under the session lock (and if the pane turns out to be
+      // alive by then, resume() delivers it as a plain send). This removes the
+      // unwinnable client-side send⇄resume status ping-pong.
+      const probe = await this.get(id);
+      const paneProbe = await this.tmux.state(probe.config.tmuxSession);
+      if (!paneProbe.alive || paneProbe.dead) {
+        const message = request.message?.trim();
+        const attachmentBlock = await this.attachments.buildImageReferenceBlock(id, request.attachmentIds ?? []);
+        const complete = [message, attachmentBlock].filter(Boolean).join('\n\n');
+        if (!complete) throw new Error('message or attachment is required');
+        return await this.resume(id, complete);
+      }
+    }
     return await this.serialized(id, async () => {
       const view = await this.get(id);
       const paneState = await this.tmux.state(view.config.tmuxSession);
-      if (!paneState.alive || paneState.dead) throw new Error('session is stopped; use resume');
+      if (!paneState.alive || paneState.dead)
+        throw new Error('session stopped while sending; retry `kteam send` (it revives stopped sessions)');
       if (view.state.status === 'awaiting_question')
         throw new Error('answer the structured question with `kteam answer`');
       // promptReady means the TUI input box is demonstrably idle even when the
@@ -418,6 +443,7 @@ export class SessionManager implements KTeamService {
       await this.emit(id, 'control.send', { message, attachmentIds: request.attachmentIds ?? [] }, 'client', turn);
       await this.tmux.send(config, this.promptInstruction(id, turn));
       this.autoContinued.delete(id);
+      this.doneDeferred.delete(id);
       await this.transition(
         id,
         {
@@ -570,9 +596,12 @@ export class SessionManager implements KTeamService {
         'session.resuming',
       );
       try {
-        await this.tmux.launch(config);
-        await this.tmux.send(config, this.promptInstruction(id, turn));
+        await this.serializedBootstrap(async () => {
+          await this.tmux.launch(config);
+          await this.tmux.send(config, this.promptInstruction(id, turn));
+        });
         this.autoContinued.delete(id);
+        this.doneDeferred.delete(id);
         await this.transition(
           id,
           {
@@ -973,20 +1002,39 @@ export class SessionManager implements KTeamService {
             view = await this.get(id);
           }
           if (existsSync(markerFile(this.paths, id, 'done'))) {
-            await this.tmux.snapshot(view.config, true);
-            await this.stopTmuxWithEvidence(view.config, 'done marker');
-            await this.transition(
-              id,
-              {
-                status: 'completed',
-                health: 'idle',
-                reason: 'done marker written',
-                finishedAt: now(),
-                promptReady: false,
-              },
-              'session.completed',
-            );
-            return;
+            // A done marker written while the pane still shows an ACTIVE turn
+            // (spinner/token counter) means the teammate declared victory
+            // early — deliverables may not exist yet. Defer completion until
+            // the pane actually idles; killing mid-turn produced sessions
+            // marked completed whose files were never written.
+            const donePane = await this.tmux.state(view.config.tmuxSession);
+            if (donePane.alive && !donePane.dead && paneShowsActiveWork(donePane.visiblePane)) {
+              if (!this.doneDeferred.has(id)) {
+                this.doneDeferred.add(id);
+                await this.emit(
+                  id,
+                  'session.done_deferred',
+                  { reason: 'done marker present but the pane still shows an active turn; waiting for it to idle' },
+                  'watcher',
+                );
+              }
+            } else {
+              this.doneDeferred.delete(id);
+              await this.tmux.snapshot(view.config, true);
+              await this.stopTmuxWithEvidence(view.config, 'done marker');
+              await this.transition(
+                id,
+                {
+                  status: 'completed',
+                  health: 'idle',
+                  reason: 'done marker written',
+                  finishedAt: now(),
+                  promptReady: false,
+                },
+                'session.completed',
+              );
+              return;
+            }
           }
           if (existsSync(markerFile(this.paths, id, 'needs-help')) && !waitingStatuses.includes(view.state.status)) {
             const marker = (await readFile(markerFile(this.paths, id, 'needs-help'), 'utf8')
@@ -1917,6 +1965,16 @@ export class SessionManager implements KTeamService {
         ? [view.config.harnessSessionId]
         : [],
     );
+  }
+
+  /** Run a TUI bootstrap (launch + first inject) exclusively — see bootstrapChain. */
+  private async serializedBootstrap<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.bootstrapChain.then(operation, operation);
+    this.bootstrapChain = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return await result;
   }
 
   private async serialized<T>(id: string, operation: () => Promise<T>): Promise<T> {

@@ -300,3 +300,51 @@ Claude-side wrapper misbehaved. All items below reproduced on daemon-managed ses
 - Reminder from earlier session (still applies, memory-documented): claude-auto-loge first start
   stalls on the custom-API-key approval dialog unless loge-internal is pre-approved in its
   .claude.json — belongs in the kfleet template so `kfleet apply` bakes it into generated homes.
+
+## 2026-07-19 — RESOLUTIONS (claude-kirin main session, kteam 0.2.1)
+
+1. ✅ CLAUDE-WRAPPER INJECTION STALL (typed prompt vanishes, turn never starts): root
+   cause found in `inject()` — a probe that disappeared from the input box was treated as
+   "instant turn — done" even when the pane was back at an IDLE prompt, so a TUI that
+   swallowed the text during a repaint passed as submitted. inject() now requires positive
+   turn-start evidence (spinner/token counter via the new `paneShowsActiveWork()`, or a
+   non-idle pane); a vanished-but-idle probe is retyped from scratch (4 attempts), and
+   polling per submit is 3x longer for slow models. (src/tmux-controller.ts)
+
+2. ✅ RAPID SEQUENTIAL STARTS RACE: TUI bootstrap (launch + first inject) is now
+   serialized ACROSS sessions through a daemon-side queue — concurrent `kteam start`s
+   can no longer race the injector. Applies to start() and resume(). (src/session-manager.ts)
+
+3. ✅ FALSE TERMINAL STATES, both directions:
+   (a) completed-while-working: a done marker with the pane still showing an active turn
+   defers completion until the pane idles (one-shot `session.done_deferred` event) instead
+   of killing tmux mid-turn with deliverables unwritten.
+   (b) failed-while-working: `promptReady()` now returns false whenever the pane shows
+   active work (spinner glyphs "✻ Lollygagging…", token counters, Codex "Working (6m…"),
+   so promptStable can't accumulate on slow models and the 360s turn-never-started fail
+   can't fire while work is visibly happening. (src/tmux-controller.ts, src/session-manager.ts)
+
+4. ✅ SEND/STOP RACE: `kteam send` now atomically revives finished/stopped sessions —
+   dead pane ⇒ send delegates to resume(id, message), which relaunches the TUI and
+   injects the message as the next turn under the session lock (and delivers as a plain
+   send if the pane turns out to be alive). The send⇄resume ping-pong is gone; no new
+   verb needed. (src/session-manager.ts)
+
+5. ✅ `kteam wait --until-marker <file>`: waits for the deliverable file itself;
+   completed without the marker keeps waiting (bounded by --timeout), failed/stalled/
+   stopped exits 1 ("marker never appeared"), waiting/awaiting states return so the lead
+   can respond. `completed` alone is no longer trusted as proof of deliverables.
+   (src/index.ts)
+
+6. ✅ loge CUSTOM-API-KEY DIALOG: kfleet wrappers now pre-approve the wrapper's own
+   ANTHROPIC_API_KEY in .claude.json (customApiKeyResponses.approved, verbatim ≤20 chars
+   else last-20 tail) at launch, same self-healing pattern as autotrust — the "Detected a
+   custom API key" dialog can never stall a session again. Verified idempotent; applied
+   to all generated homes. (modules/kfleet-ts/src/core/generate.ts)
+
+NOT bugs (filtered out, no action): codex-auto-loai terra HTTP 400 + codex-auto-atomi
+usage-limit (account/provider), glm52a/b login walls (expired creds), ernest weekly 0%
+(quota), mm3 recurrence (token expiry; env-propagation root cause fixed 07-16).
+
+All 57 kteam-ts tests + 70 kfleet-ts tests pass, tsc clean; daemon restarted on the new
+code, wrappers regenerated (`kfleet apply`).
