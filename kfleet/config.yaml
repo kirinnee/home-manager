@@ -20,8 +20,11 @@ profiles:
     # kfleet ships its own (vetted) hooks, so trust them without the per-project
     # trust prompt — required for the non-interactive auto wrappers.
     flags: ['--dangerously-bypass-hook-trust']
+    # ChatGPT-backed codex has NO model aliases — bare "terra" 400s with
+    # "model is not supported". Real catalog IDs on these accounts:
+    # gpt-5.6-terra / gpt-5.6-sol / gpt-5.6-luna (+ gpt-5.5, gpt-5.4).
     env:
-      KTEAM_MODEL: terra
+      KTEAM_MODEL: gpt-5.6-terra
   zai-a:
     env:
       ANTHROPIC_AUTH_TOKEN: $ZAI_API_KEY_A
@@ -77,6 +80,13 @@ variants:
         service_tier: fast
   auto:
     memory: ./CLAUDE.auto.md
+    # The server now marks default_service_tier=priority ("Fast", 1.5x speed,
+    # increased usage) on some accounts' model catalogs, so merely omitting
+    # service_tier no longer keeps auto lanes off the Fast tier. Pin them to
+    # standard so fleet work doesn't silently burn increased usage.
+    codex:
+      settings:
+        service_tier: standard
 defaultHomes:
   claude: kirin
   codex: personal

@@ -92,6 +92,58 @@ describe('pane active-work detection', () => {
     expect(paneShowsActiveWork('Done. Wrote 3 files.\n> ')).toBe(false);
     expect(paneShowsActiveWork('  gpt-5.6-sol high · Context 2% used')).toBe(false);
   });
+
+  test('background terminal footer alone is NOT busy evidence (F3)', () => {
+    const idleWithFooter = ['› ', '', '1 background terminal running', '  Context 12% used'].join('\n');
+    expect(paneShowsActiveWork(idleWithFooter)).toBe(false);
+    const controller = new TmuxController(createPaths('/tmp/kteam-f3-test'), 'http://127.0.0.1:7337');
+    expect(controller.promptReady(idleWithFooter, 0, 2)).toBe(true);
+  });
+
+  test('codex interrupted banner counts as promptReady (F3)', () => {
+    const controller = new TmuxController(createPaths('/tmp/kteam-f3-test'), 'http://127.0.0.1:7337');
+    const banner = ['■ Conversation interrupted - tell the model what to do differently', '', '› ', ''].join('\n');
+    expect(controller.promptReady(banner)).toBe(true);
+    expect(paneShowsActiveWork(banner)).toBe(false);
+  });
+});
+
+describe('safe interrupt (F1/F2)', () => {
+  const paths = createPaths('/tmp/kteam-interrupt-test');
+  const config = { tmuxSession: 'kteam-x-agent' } as SessionConfig;
+
+  function controllerWith(visiblePane: string, sent: string[][]): TmuxController {
+    const controller = new TmuxController(paths, 'http://127.0.0.1:7337');
+    (controller as unknown as { state: () => Promise<unknown> }).state = async () => ({
+      alive: true,
+      dead: false,
+      promptReady: !paneShowsActiveWork(visiblePane),
+      pane: visiblePane,
+      visiblePane,
+    });
+    (controller as unknown as { waitReady: () => Promise<void> }).waitReady = async () => undefined;
+    return controller;
+  }
+
+  test('idle pane: no keystroke is sent (idempotent)', async () => {
+    const sent: string[][] = [];
+    const controller = controllerWith('❯ \n? for shortcuts', sent);
+    await controller.interrupt(config);
+    expect(sent).toEqual([]);
+  });
+
+  test('interrupted banner: no keystroke is sent (second interrupt is a no-op)', async () => {
+    const sent: string[][] = [];
+    const controller = controllerWith('■ Conversation interrupted - tell the model what to do differently\n› ', sent);
+    await controller.interrupt(config);
+    expect(sent).toEqual([]);
+  });
+
+  test('the interrupt keystroke is Escape, never C-c', () => {
+    const source = TmuxController.prototype.interrupt.toString();
+    expect(source).toContain('Escape');
+    expect(source).not.toContain('C-c');
+  });
 });
 
 describe('startup dialog handling', () => {

@@ -253,10 +253,18 @@ program
   .argument('<id>')
   .argument('[message...]')
   .option('-i, --image <file>', 'attach image; repeatable', (value, values: string[]) => [...values, value], [])
-  .action(async (id: string, parts: string[], options: { image: string[] }) => {
+  .option('--now', 'immediate-or-fail: refuse a busy session instead of queueing for the next turn boundary')
+  .action(async (id: string, parts: string[], options: { image: string[]; now?: boolean }) => {
     const api = await client();
     const attachments = await Promise.all(options.image.map(file => api.upload(id, file)));
-    const view = await api.send(id, { message: parts.join(' '), attachmentIds: attachments.map(item => item.id) });
+    const view = await api.send(id, {
+      message: parts.join(' '),
+      attachmentIds: attachments.map(item => item.id),
+      now: options.now === true,
+    });
+    // Busy session + default mode = the daemon queued it for the turn boundary.
+    const busy = !['waiting', 'awaiting_user', 'interrupted'].includes(view.state.status) && !view.state.promptReady;
+    if (!options.now && busy) console.error('kteam send: session is busy — message queued for the next turn boundary');
     printView(view);
   });
 program

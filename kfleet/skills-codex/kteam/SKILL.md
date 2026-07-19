@@ -100,7 +100,7 @@ When a session enters `waiting`, `awaiting_user`, or `awaiting_question`:
 kteam send <id> "The decision or missing context"
 ```
 
-Use `kteam send <id> "…"` for an interactive user turn, `kteam answer <id> <labels...>` for structured questions, and `kteam answer <id> --other "free-form answer"` for Other. For multiple questions, repeat `--response` once per question in order. Use `kteam interrupt <id>` to steer a busy turn. Use `kteam resume` only after a stopped/dead TUI; it preserves the Claude/Codex conversation.
+Use `kteam send <id> "…"` for an interactive user turn — sending to a BUSY session queues the message and the daemon delivers it at the next turn boundary (add `--now` to fail instead of queueing); sending to a finished/stopped session automatically revives it with the message as the next turn. Use `kteam answer <id> <labels...>` for structured questions, and `kteam answer <id> --other "free-form answer"` for Other; for multiple questions, repeat `--response` once per question in order. `kteam interrupt <id>` is safe and idempotent (Escape, never C-c; a no-op on idle or already-interrupted panes) — but prefer queued `kteam send` for steering; interrupt only to abandon the current approach. Use `kteam resume` only after a stopped/dead TUI; it preserves the Claude/Codex conversation. Gate on deliverables with `kteam wait <id> --until-marker <file>` — a bare `completed` status is not proof the output files exist.
 
 Attach initial images with `kteam start ... --image <file> "…"`; send follow-up images with `kteam send <id> --image <file> "…"`. The client uploads the bytes to the daemon, which validates and stores them under the session, then injects daemon-local absolute paths through tmux.
 
