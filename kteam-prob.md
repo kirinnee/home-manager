@@ -237,3 +237,66 @@ completed. (src/tmux-controller.ts launch())
 Also observed while smoke-testing (glm52a): the new inject() verification correctly failed fast
 with "the prompt was typed but the harness never started the turn" on a login-walled TUI —
 previously this sat "running" for 900s.
+
+## Session 2026-07-17→19 (diene env-round docs + STEP-6 wave 5, main session c89153f8)
+
+Context: heavy multi-session use — 8-page site conversion fan-out, doc synthesis, plus the
+step-6 execution fleet. Codex-auto-loge was the only fully reliable lane all session; every
+Claude-side wrapper misbehaved. All items below reproduced on daemon-managed sessions.
+
+- CLAUDE-WRAPPER INJECTION STALL (systemic, the big one). Affected claude-auto-loge (twice,
+  logged as RB-20/RB-21 in the diene build), claude-auto-liftoff, claude-auto-atomi,
+  claude-auto-glm52a, claude-auto-glm52b, claude-auto-mm3. Pattern: `kteam start` reports
+  "the prompt was typed but the harness never started the turn"; session dir + TUI exist; the
+  input box is EMPTY (typed prompt vanished entirely — not sitting unsubmitted); status=failed.
+  `kteam resume` re-injects successfully and the session starts real work — but several then ran
+  one partial turn (read the brief + sources, 26–42k ctx consumed) and went idle again without
+  producing output; a second resume did not recover them and they were rerouted to codex.
+  Suggestion: readiness-gated injection exists but is still insufficient on these TUIs —
+  verify TURN START (spinner/tokens moving), not just typed text, and auto-retry injection
+  N times before declaring failure; also investigate why a started turn silently ends after
+  the first few tool calls on Claude wrappers (harness-side?), since resume alone doesn't fix it.
+
+- RAPID SEQUENTIAL STARTS RACE: launching several sessions in quick succession (one shell call,
+  3s sleeps), only the FIRST `kteam start` per batch succeeded; the rest all hit the
+  typed-but-never-started failure. Spacing to ~1 launch per Bash invocation didn't help on the
+  Claude side either (a standalone claude-auto-atomi start failed identically). Suggestion:
+  serialize/queue session bootstrap in kteamd so concurrent starts can't race the injector.
+
+- FALSE TERMINAL STATES (both directions):
+  (a) status=completed while the TUI showed an ACTIVE turn ("Working (6m52s)", plan checklist
+  mid-flight) — `kteam wait` returned, deliverable files not yet written (codex-auto-loge session
+  mrphq5jc). The session later genuinely stalled mid-plan and needed resume to finish.
+  (b) status=failed while snapshots showed live work (GLM "Lollygagging…", Sonnet "Mustering…",
+  tokens counting) right after resume — the watcher gave up before slow models emitted first output.
+  Suggestion: derive state from the pane (spinner/token counters/input-box presence), not from
+  the injection watcher's timeout; treat "active spinner" as running unconditionally.
+
+- SEND/STOP RACE — no reliable way to give a follow-up task to a finished session:
+  `kteam send <id>` → "session is stopped; use resume"; `kteam resume <id>` then
+  `kteam send` → "session is running; interrupt it before sending"; by the next idle poll it is
+  "stopped" again. Hit on mrphq5jc (ida) and mrpzwwa9 (olive); both times the workaround was a
+  brand-new session re-reading all context (expensive). Suggestion: a single verb that revives a
+  completed session and injects a new turn atomically (send --revive), with the race handled daemon-side.
+
+- kteam wait: returns on the (unreliable, see above) completed state; combined with (a) it fires
+  before deliverables exist. Watching output files by hand was the workaround. Suggestion: optional
+  `kteam wait --until-marker <file>` or wait-on-done-marker semantics.
+
+- codex-auto-loai / codex-auto-atomi: terra model returned HTTP 400 at session start (RB-01,
+  session lincoln) / usage-limit rejections. Both accounts effectively unusable this session;
+  100% of implement/verify load fell on codex-auto-loge (quota single-point-of-failure).
+  Needs: re-auth or model-config fix + a cheap preflight (see next).
+
+- WISH: `kteam doctor` / start-time preflight — one canary turn per wrapper validating (1) auth,
+  (2) model availability, (3) injection round-trip, emitting a green/red table. Would have saved
+  ~10 dead launches and hours of snapshot forensics this session.
+
+- Orchestrator ergonomics: the 4h session ceiling + harness ending turns early forced an external
+  watchdog loop (bash) that respawns fresh orchestrators reading STATUS.md. Works, but native
+  support (kteam-managed long-running orchestration with auto-resume/respawn policy) would remove
+  a whole class of babysitting.
+
+- Reminder from earlier session (still applies, memory-documented): claude-auto-loge first start
+  stalls on the custom-API-key approval dialog unless loge-internal is pre-approved in its
+  .claude.json — belongs in the kfleet template so `kfleet apply` bakes it into generated homes.
