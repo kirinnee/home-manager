@@ -78,6 +78,27 @@ const AUTOTRUST = `if [ "\${CLAUDE_AUTOTRUST:-1}" = "1" ]; then
     fi
     if [ "$_ct_ok" = y ]; then mv "$_ct_tmp" "$_ct_cfg"; else rm -f "$_ct_tmp"; fi
   fi
+fi
+
+# Pre-approve the wrapper's own API key: Claude Code's "Detected a custom API
+# key … use it?" dialog defaults to No and stalls headless/kteam sessions until
+# someone answers it. The wrapper exports the key on purpose, so record it as
+# approved (verbatim for short keys, last-20 tail for long ones — matching how
+# Claude Code stores an interactive approval) before the TUI ever asks.
+if [ "\${CLAUDE_AUTOTRUST:-1}" = "1" ] && [ -n "\${ANTHROPIC_API_KEY:-}" ] && command -v jq >/dev/null 2>&1; then
+  _ck_cfg="$CLAUDE_CONFIG_DIR/.claude.json"
+  _ck_key="$ANTHROPIC_API_KEY"
+  [ "\${#_ck_key}" -gt 20 ] && _ck_key=$(printf %s "$_ck_key" | tail -c 20)
+  if ! jq -e --arg k "$_ck_key" '(.customApiKeyResponses.approved // []) | index($k) != null' "$_ck_cfg" >/dev/null 2>&1; then
+    mkdir -p "$CLAUDE_CONFIG_DIR"
+    _ck_tmp="$(mktemp)"
+    if [ -f "$_ck_cfg" ]; then
+      _ck_ok=$(jq --arg k "$_ck_key" '.customApiKeyResponses.approved = (((.customApiKeyResponses.approved // []) + [$k]) | unique)' "$_ck_cfg" > "$_ck_tmp" 2>/dev/null && echo y)
+    else
+      _ck_ok=$(jq -n --arg k "$_ck_key" '{customApiKeyResponses: {approved: [$k]}}' > "$_ck_tmp" 2>/dev/null && echo y)
+    fi
+    if [ "$_ck_ok" = y ]; then mv "$_ck_tmp" "$_ck_cfg"; else rm -f "$_ck_tmp"; fi
+  fi
 fi`;
 
 /** Render the wrapper shell script for one resolved agent. */

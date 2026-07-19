@@ -3,7 +3,13 @@ import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createPaths } from './paths';
-import { contextPercentUsed, parsePaneMetadata, startupDialogAction, TmuxController } from './tmux-controller';
+import {
+  contextPercentUsed,
+  paneShowsActiveWork,
+  parsePaneMetadata,
+  startupDialogAction,
+  TmuxController,
+} from './tmux-controller';
 import type { SessionConfig } from './types';
 
 const temporaryDirectories: string[] = [];
@@ -61,6 +67,30 @@ describe('tmux prompt detection', () => {
       '  gpt-5.6-sol high · Context 2% used',
     ].join('\n');
     expect(controller.promptReady(pane, 2, 2)).toBe(false);
+  });
+
+  test('treats spinner/token evidence above an idle input box as busy', () => {
+    const slowModel = ['✻ Lollygagging… (34s · 2.1k tokens)', '', '❯ ', '────────'].join('\n');
+    expect(controller.promptReady(slowModel, 2)).toBe(false);
+    const codexClipped = ['• Working (6m52s', '', '› ', ''].join('\n');
+    expect(controller.promptReady(codexClipped, 2)).toBe(false);
+  });
+});
+
+describe('pane active-work detection', () => {
+  test('detects both harness spinner and counter styles', () => {
+    expect(paneShowsActiveWork('• Working (6m52s • Esc to interrupt)')).toBe(true);
+    expect(paneShowsActiveWork('• Working (12s')).toBe(true);
+    expect(paneShowsActiveWork('✻ Lollygagging… (34s · 2.1k tokens)')).toBe(true);
+    expect(paneShowsActiveWork('· Mustering… (5s · esc to interrupt)')).toBe(true);
+    expect(paneShowsActiveWork('✳ Reticulating…')).toBe(true);
+    expect(paneShowsActiveWork('1.2k tokens · thinking')).toBe(true);
+  });
+
+  test('does not fire on idle panes or plain output', () => {
+    expect(paneShowsActiveWork('❯ \n────────\n? for shortcuts')).toBe(false);
+    expect(paneShowsActiveWork('Done. Wrote 3 files.\n> ')).toBe(false);
+    expect(paneShowsActiveWork('  gpt-5.6-sol high · Context 2% used')).toBe(false);
   });
 });
 

@@ -52,6 +52,23 @@ const STARTUP_BLOCKERS = [
 
 const BUSY_BLOCKERS = ['esc to interrupt', 'ctrl+c to interrupt', 'background terminal running'];
 
+/** Active-turn evidence in the VISIBLE pane: harness spinners, token counters,
+ *  and elapsed-time indicators. Ground truth for "the harness is working" — a
+ *  pane showing these must never be treated as idle, completed, or failed. */
+export function paneShowsActiveWork(pane: string): boolean {
+  const lower = pane.toLowerCase();
+  if (BUSY_BLOCKERS.some(marker => lower.includes(marker))) return true;
+  // Codex: "Working (6m52s • Esc to interrupt)" — the interrupt hint can be
+  // clipped by narrow panes, so match the elapsed-time form on its own.
+  if (/\bworking\s*\(\s*\d+[ms]/.test(lower)) return true;
+  // Claude-family: "(12s · ⚒ 3.4k tokens" / "3.4k tokens · esc" counters.
+  if (/\(\s*\d+m?s\s*[·•∙]/.test(lower)) return true;
+  if (/[\d.,]+k?\s*tokens\s*[·•∙]/.test(lower)) return true;
+  // Spinner glyph + animated verb ellipsis: "✻ Lollygagging…", "· Mustering…".
+  if (/[✻✳✶✽∗⏺]\s*\S+…/u.test(pane)) return true;
+  return false;
+}
+
 function navigationToAffirmative(pane: string): string[] {
   const options = pane.split('\n').flatMap(line => {
     const match = line.match(/^\s*([>›❯])?\s*(\d+)[.)]\s+(.+)$/u);
@@ -143,7 +160,9 @@ export class TmuxController {
   promptReady(pane: string, cursorY?: number, cursorX?: number): boolean {
     const lower = pane.toLowerCase();
     if (STARTUP_BLOCKERS.some(marker => lower.includes(marker))) return false;
-    if (BUSY_BLOCKERS.some(marker => lower.includes(marker))) return false;
+    // Spinners/token counters can render ABOVE an idle-looking input box (slow
+    // models mid-turn) — an actively-working pane is never prompt-ready.
+    if (paneShowsActiveWork(pane)) return false;
     const lines = pane.split('\n');
     if (cursorY !== undefined && cursorY >= 0 && cursorY < lines.length) {
       const cursorLine = lines[cursorY]!;
@@ -307,34 +326,52 @@ export class TmuxController {
   async inject(name: string, text: string): Promise<void> {
     const normalize = (value: string) => value.replace(/\s+/g, '');
     const probe = normalize(text).slice(0, 50);
+    // The turn STARTED only with positive busy evidence (spinner/token counter)
+    // or a demonstrably non-idle pane. A probe that merely vanished from an
+    // otherwise idle input box is a swallowed prompt, NOT an instant turn —
+    // that misread caused the systemic "typed but vanished, session idle"
+    // stalls across Claude wrappers.
+    const turnStarted = (current: PaneState): boolean =>
+      !current.alive || current.dead || paneShowsActiveWork(current.visiblePane) || !current.promptReady;
+    let everLanded = false;
     for (let attempt = 0; attempt < 4; attempt++) {
       if (attempt > 0) {
         await run(['tmux', 'send-keys', '-t', name, 'C-u']);
-        await Bun.sleep(200);
+        await Bun.sleep(200 * attempt);
       }
       const sent = await run(['tmux', 'send-keys', '-t', name, '-l', text]);
       if (sent.code !== 0) throw new Error(sent.stderr.trim() || 'tmux send failed');
       await Bun.sleep(400);
       if (!normalize(await this.captureVisible(name)).includes(probe)) continue;
-      // Enter can be swallowed while the TUI repaints; verify the harness left
-      // the idle prompt (busy state) before trusting that the turn started —
-      // otherwise the prompt sits typed-but-unsubmitted and the session
-      // silently idles at 0% context until the stall timer fires.
-      for (let submit = 0; submit < 3; submit++) {
+      everLanded = true;
+      // Enter can be swallowed while the TUI repaints; press again while the
+      // typed text is still sitting unsubmitted in the input box.
+      submits: for (let submit = 0; submit < 3; submit++) {
         const enter = await run(['tmux', 'send-keys', '-t', name, 'Enter']);
         if (enter.code !== 0) throw new Error(enter.stderr.trim() || 'tmux submit failed');
-        for (let poll = 0; poll < 6; poll++) {
+        for (let poll = 0; poll < 12; poll++) {
           await Bun.sleep(500);
           const current = await this.state(name);
-          if (!current.alive || current.dead) return;
-          if (!current.promptReady) return;
-          // The input box emptied without going busy: an instant turn — done.
-          if (!normalize(current.visiblePane).includes(probe)) return;
+          if (turnStarted(current)) return;
+          if (!normalize(current.visiblePane).includes(probe)) {
+            // Text left the input box without busy evidence yet. Slow models
+            // take a beat to render the spinner — grant a short grace, then
+            // treat it as swallowed and retype from scratch.
+            for (let grace = 0; grace < 8; grace++) {
+              await Bun.sleep(500);
+              if (turnStarted(await this.state(name))) return;
+            }
+            break submits;
+          }
         }
       }
-      throw new Error('the prompt was typed but the harness never started the turn');
+      // Fall through to retype (C-u clears any stale residue first).
     }
-    throw new Error('text did not land in the interactive input box');
+    throw new Error(
+      everLanded
+        ? 'the prompt was typed but the harness never started the turn'
+        : 'text did not land in the interactive input box',
+    );
   }
 
   async send(config: SessionConfig, text: string): Promise<void> {

@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { Command, Option } from 'commander';
+import { existsSync } from 'fs';
 import { readFile } from 'fs/promises';
 import path from 'path';
 import { ApiClient } from './api-client';
@@ -379,30 +380,62 @@ program
   .argument('<id>')
   .option('--json')
   .option('--timeout <seconds>', 'give up after this many seconds (exit code 124, prints the current state)')
-  .action(async (id, options: { json?: boolean; timeout?: string }) => {
+  .option(
+    '--until-marker <file>',
+    'only return once this file exists (deliverable gate) — `completed` alone is not trusted; non-completed terminal states exit 1',
+  )
+  .action(async (id, options: { json?: boolean; timeout?: string; untilMarker?: string }) => {
     const api = await client();
     const timeoutSec = options.timeout === undefined ? undefined : Number(options.timeout);
     if (timeoutSec !== undefined && (!Number.isFinite(timeoutSec) || timeoutSec <= 0)) {
       console.error(`invalid --timeout: ${options.timeout}`);
       process.exit(2);
     }
+    const marker = options.untilMarker === undefined ? undefined : path.resolve(options.untilMarker);
     const deadline = timeoutSec === undefined ? undefined : Date.now() + timeoutSec * 1000;
+    let notedMissingMarker = false;
     while (true) {
       const view = await api.get(id);
-      if (
+      const print = () => {
+        if (options.json) console.log(JSON.stringify(view.state, null, 2));
+        else printView(view);
+      };
+      if (marker !== undefined) {
+        if (existsSync(marker)) {
+          print();
+          return;
+        }
+        // The deliverable is the ground truth. A completed status without the
+        // marker keeps waiting (bounded by --timeout); a failed/stalled/
+        // stopped session will never produce it — surface that as failure.
+        if (['failed', 'stalled', 'stopped', 'kill_failed'].includes(view.state.status)) {
+          print();
+          console.error(`kteam wait: session is ${view.state.status} and the marker never appeared: ${marker}`);
+          process.exit(1);
+        }
+        if (view.state.status === 'completed' && !notedMissingMarker) {
+          notedMissingMarker = true;
+          console.error(`kteam wait: session completed but marker not present yet; still waiting for ${marker}`);
+        }
+        // A session waiting on the lead can never produce the marker on its
+        // own — hand control back so the question/help gets answered.
+        if (['waiting', 'awaiting_user', 'awaiting_question'].includes(view.state.status)) {
+          print();
+          console.error('kteam wait: session needs attention before the marker can appear');
+          return;
+        }
+      } else if (
         terminal.includes(view.state.status) ||
         view.state.status === 'kill_failed' ||
         view.state.status === 'waiting' ||
         view.state.status === 'awaiting_user' ||
         view.state.status === 'awaiting_question'
       ) {
-        if (options.json) console.log(JSON.stringify(view.state, null, 2));
-        else printView(view);
+        print();
         return;
       }
       if (deadline !== undefined && Date.now() >= deadline) {
-        if (options.json) console.log(JSON.stringify(view.state, null, 2));
-        else printView(view);
+        print();
         console.error(`kteam wait: timed out after ${timeoutSec}s (session still ${view.state.status})`);
         process.exit(124);
       }
