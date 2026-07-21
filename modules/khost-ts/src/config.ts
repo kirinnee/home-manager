@@ -45,13 +45,15 @@ const configSchema = z.object({
   // sub-fields and crashes first use on a host without that config section.
   ssh: z
     .object({
-      port: z.number().default(2222),
+      // darwin default 2222 (private khost sshd); linux resolves to the system
+      // sshd port (22) in deps.ts when unset.
+      port: z.number().optional(),
       // mesh IP to also bind sshd to; null/"" = loopback only.
       // 'auto' = detect the live WARP virtual IP (survives re-enrollment); a literal
       // IP pins it; '' / null binds loopback only. See mesh.ts:resolveMeshListen.
       mesh_listen: z.string().nullable().default('auto'),
     })
-    .default({ port: 2222, mesh_listen: 'auto' }),
+    .default({ mesh_listen: 'auto' }),
   tunnel: z.object({ protocol: z.string().default('http2') }).default({ protocol: 'http2' }),
   cloudflare: z
     .object({

@@ -12,8 +12,9 @@ const CONFIG_TEMPLATE = `# khost — per-box config. Plaintext (this dir lives i
 # machine: lombp
 
 ssh:
-  port: 2222
-  mesh_listen: auto         # auto = detect live WARP mesh IP; or pin an IP; "" = loopback only
+  # port: darwin defaults to 2222 (private khost sshd); linux uses the system
+  # sshd port (22). Set only to override.
+  mesh_listen: auto         # darwin only: auto = detect live WARP mesh IP; "" = loopback only
 
 tunnel:
   protocol: http2           # http2 | quic

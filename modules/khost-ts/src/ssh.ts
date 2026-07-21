@@ -49,6 +49,24 @@ PidFile /var/run/khost_sshd.pid
 `;
 }
 
+// Linux boxes are NOT private (only the MacBook is): the SYSTEM sshd keeps its
+// default listeners (port 22, all interfaces) so direct/public SSH keeps
+// working. The drop-in must not contain Port/ListenAddress/AllowUsers — any of
+// those REPLACE sshd's defaults and would cut off existing access paths (a
+// remote box's only way in). It only enables password auth for TUNNEL-LOCAL
+// (loopback) connections, which browser-rendered SSH needs; public port 22
+// keeps the distro's key-only policy.
+function linuxDropin(): string {
+  return `# Managed by khost — system sshd untouched (default listeners stay).
+# Password auth is enabled ONLY for loopback connections (the Cloudflare
+# tunnel's browser-rendered SSH terminates locally); public SSH keeps the
+# distro default (key-only).
+Match Address 127.0.0.1,::1
+  PasswordAuthentication yes
+  KbdInteractiveAuthentication yes
+`;
+}
+
 function plist(): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -94,49 +112,55 @@ async function setupDarwin(user: string, meshListen: string): Promise<void> {
   warn('  in System Settings > Privacy & Security > Full Disk Access, then re-run.');
 }
 
-async function setupLinux(user: string, meshListen: string): Promise<void> {
+async function setupLinux(): Promise<void> {
   log(`Writing sshd drop-in (sudo): ${LINUX_DROPIN}`);
   await run(['sudo', 'mkdir', '-p', '/etc/ssh/sshd_config.d'], { interactive: true });
-  await writeRoot(LINUX_DROPIN, sshdConfig(user, meshListen));
+  await writeRoot(LINUX_DROPIN, linuxDropin());
   if ((await run(['sudo', 'sshd', '-t'])).code !== 0) {
     warn(`sshd -t failed; drop-in written but NOT reloaded — review ${LINUX_DROPIN}`);
     return;
   }
-  const reload = await run(['sudo', 'systemctl', 'restart', 'ssh']);
-  if (reload.code !== 0) await run(['sudo', 'systemctl', 'restart', 'sshd']);
-  ok(`khost sshd on 127.0.0.1:${sshPort} (drop-in) — LAN cannot reach it`);
+  const reload = await run(['sudo', 'systemctl', 'reload', 'ssh']);
+  if (reload.code !== 0) await run(['sudo', 'systemctl', 'reload', 'sshd']);
+  ok(`system sshd unchanged (port ${sshPort}, all interfaces); loopback password auth enabled for the tunnel`);
 }
 
-/** Install + start the private sshd (loopback + resolved WARP mesh) (idempotent). */
+/** Install + start the sshd exposure (darwin: private loopback+mesh daemon;
+ *  linux: system sshd untouched, loopback-only password-auth drop-in). */
 export async function sshSetup(): Promise<void> {
   const user = currentUser();
   if (!user) die('could not determine current user for AllowUsers');
+  if (osKind() === 'linux') return setupLinux();
   const meshListen = await resolveMeshListen(meshListenConfig);
   if (osKind() === 'darwin') return setupDarwin(user, meshListen);
-  if (osKind() === 'linux') return setupLinux(user, meshListen);
   die('unsupported OS for ssh setup');
 }
 
-/** Stop + remove the loopback sshd. */
+/** Remove khost's sshd footprint (darwin: the private daemon; linux: the drop-in). */
 export async function sshDown(): Promise<void> {
   if (osKind() === 'darwin') {
     await run(['sudo', 'launchctl', 'bootout', `system/${LABEL}`]);
     await run(['sudo', 'rm', '-f', PLIST, SSHD_CONFIG]);
-  } else {
-    await run(['sudo', 'rm', '-f', LINUX_DROPIN]);
-    const r = await run(['sudo', 'systemctl', 'restart', 'ssh']);
-    if (r.code !== 0) await run(['sudo', 'systemctl', 'restart', 'sshd']);
+    ok('khost sshd removed');
+    return;
   }
-  ok('khost sshd removed');
+  await run(['sudo', 'rm', '-f', LINUX_DROPIN]);
+  const r = await run(['sudo', 'systemctl', 'reload', 'ssh']);
+  if (r.code !== 0) await run(['sudo', 'systemctl', 'reload', 'sshd']);
+  ok('khost sshd drop-in removed (system sshd untouched)');
 }
 
 export async function sshStatus(): Promise<void> {
   console.log(`  os        : ${osKind()}`);
-  console.log(`  endpoint  : 127.0.0.1:${sshPort} (khost loopback sshd)`);
-  const mesh = await resolveMeshListen(meshListenConfig);
-  console.log(
-    `  mesh      : ${mesh ? `${mesh}:${sshPort}` : 'disabled'}${meshListenConfig === 'auto' ? ' (auto)' : ''}`,
-  );
+  if (osKind() === 'linux') {
+    console.log(`  endpoint  : system sshd, port ${sshPort} (all interfaces — not privatized)`);
+  } else {
+    console.log(`  endpoint  : 127.0.0.1:${sshPort} (khost loopback sshd)`);
+    const mesh = await resolveMeshListen(meshListenConfig);
+    console.log(
+      `  mesh      : ${mesh ? `${mesh}:${sshPort}` : 'disabled'}${meshListenConfig === 'auto' ? ' (auto)' : ''}`,
+    );
+  }
   const configPath = osKind() === 'darwin' ? PLIST : LINUX_DROPIN;
   console.log(
     existsSync(configPath) ? `  config    : present (${configPath})` : `  config    : absent — run "khost ssh setup"`,

@@ -47,9 +47,11 @@ export const alloyRemoteWriteUrl = process.env.ALLOY_REMOTE_WRITE_URL || config.
 export const alloyRemoteWriteUsername = process.env.ALLOY_REMOTE_WRITE_USERNAME || config.alloy.remote_write.username;
 export const alloyRemoteWritePassword = process.env.ALLOY_REMOTE_WRITE_PASSWORD || config.alloy.remote_write.password;
 
-// khost runs its own sshd bound to 127.0.0.1:<sshPort> (not macOS Remote Login),
-// so the tunnel reaches it via loopback and the LAN cannot.
-export const sshPort = config.ssh.port;
+// darwin: khost runs its own sshd bound to 127.0.0.1:<sshPort> (not macOS
+// Remote Login), so the tunnel reaches it via loopback and the LAN cannot.
+// linux: the SYSTEM sshd is used as-is (default port 22, all interfaces) —
+// only the MacBook needs the private treatment.
+export const sshPort = config.ssh.port ?? (osKind() === 'linux' ? 22 : 2222);
 // Configured mesh bind: 'auto' (detect live WARP IP), a literal IP, or '' (loopback
 // only). Resolve to a concrete address with mesh.ts:resolveMeshListen — never bind
 // this raw value, since 'auto' is a sentinel, not an address.
