@@ -92,8 +92,8 @@ export async function tunnelUp(): Promise<void> {
   await killOldDetached();
 
   if (osKind() === 'linux') {
-    await run(['sudo', 'cloudflared', 'service', 'uninstall']); // ignore if none
-    if ((await run(['sudo', 'cloudflared', 'service', 'install', token], { interactive: true })).code !== 0) {
+    await run(['sudo', await cloudflaredBin(), 'service', 'uninstall']); // ignore if none
+    if ((await run(['sudo', await cloudflaredBin(), 'service', 'install', token], { interactive: true })).code !== 0) {
       die('cloudflared service install failed');
     }
     ok('tunnel up — systemd service (survives reboot)');
@@ -104,7 +104,7 @@ export async function tunnelUp(): Promise<void> {
   // daemon with the chosen --protocol.
   if (existsSync(LEGACY_PLIST)) {
     log('Removing cloudflared-managed service (sudo)');
-    await run(['sudo', 'cloudflared', 'service', 'uninstall']);
+    await run(['sudo', await cloudflaredBin(), 'service', 'uninstall']);
   }
   const bin = await cloudflaredBin();
   log(`Installing cloudflared launchd daemon (sudo): ${CFD_PLIST} [protocol=${tunnelProtocol}]`);
@@ -123,9 +123,9 @@ export async function tunnelDown(): Promise<void> {
   if (osKind() === 'darwin') {
     await run(['sudo', 'launchctl', 'bootout', `system/${CFD_LABEL}`]);
     await run(['sudo', 'rm', '-f', CFD_PLIST]);
-    await run(['sudo', 'cloudflared', 'service', 'uninstall']); // clean any legacy install too
+    await run(['sudo', await cloudflaredBin(), 'service', 'uninstall']); // clean any legacy install too
   } else {
-    await run(['sudo', 'cloudflared', 'service', 'uninstall']);
+    await run(['sudo', await cloudflaredBin(), 'service', 'uninstall']);
   }
   ok('tunnel service removed');
 }
