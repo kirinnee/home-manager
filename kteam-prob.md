@@ -243,3 +243,40 @@ consumer must parse the whole stdout, not the last line.
 **Fix (kloop side):** parse the full stdout (`JSON.parse(waited.stdout.trim())`);
 added a test whose fake `kteam` returns pretty-printed JSON so the regression can't
 return. Verified: fresh smoke run 8ayooxsb → completed/consensus, out.txt=DONE.
+
+## 2026-07-21 — teammate creates root-level package.json (guardrail violation + kteam CLI breakage)
+
+**Session:** mruyefig-29a6f557 (hailey, claude-auto-mm3, kteam-chat-ui, fix-round turn 4)
+
+**Problem:** Hailey needed to add `react-virtuoso` to `modules/kteam-ts/ui/`. Instead of
+running `bun add react-virtuoso` from inside `ui/`, the session ran `bun add` at the
+repo root. Bun created `/home/kirin/.config/home-manager/package.json` and
+`/home/kirin/.config/home-manager/bun.lock`, and installed `react/react-dom/react-virtuoso`
+into `/home/kirin/.config/home-manager/node_modules/`. These paths are OUTSIDE hailey's
+allowed scope (`modules/kteam-ts/ui/`, `ui-dist/`, `.gitignore`).
+
+**Collateral breakage:** The kteam binary (`/home/kirin/.nix-profile/bin/kteam`) runs
+`bun run ~/.config/home-manager/modules/kteam-ts/src/index.ts`. Bun's package resolution
+walks up from the source file; since `modules/kteam-ts/` has no `node_modules`, it found
+the root `node_modules/` which only contained react/react-dom/react-virtuoso. `commander`
+(required by kteam-ts) was absent → `kteam status` / `kteam snapshot` / all kteam CLI
+commands threw "Cannot find package 'commander'" and were fully broken during the session.
+
+**Evidence:** `kteam status mruyefig-29a6f557` → `error: Cannot find package 'commander'
+from '.../modules/kteam-ts/src/index.ts'`. `ls /home/kirin/.config/home-manager/package.json`
+confirmed the new file. `ls node_modules/` showed only react/react-dom/react-virtuoso/scheduler.
+
+**Suspected code path:** Agent ran `bun add react-virtuoso` from the repo root CWD (not from
+`ui/`). Bun initialized a package.json at the CWD when none existed. The kteam-ts binary
+reads packages relative to the source path, not a bundled binary, so any ancestor package.json
+that captures the resolution first can shadow the correct deps.
+
+**Workaround (babysitter):** `rm -f package.json bun.lock && rm -rf node_modules/` at the
+repo root. kteam CLI restored immediately. Hailey's `ui/` already listed `react-virtuoso`
+in `ui/package.json` (the correct location), and `ui/node_modules/` had it installed, so
+no functionality was lost.
+
+**Suggested kteam fix / guardrail:** Document in the teammate prompt that `bun add` must
+always be run from the package dir (pass an absolute path or `cd` first), never from the
+repo root. Optionally add a babysitter check: if `package.json` appears at the repo root
+mid-session, treat it as a guardrail violation and immediately clean it up.
