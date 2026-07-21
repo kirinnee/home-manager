@@ -1,6 +1,7 @@
 import pc from 'picocolors';
 import { format } from 'date-fns';
 import { reapDeadRun } from '../index-db';
+import { daemonReachable, DAEMON_UNAVAILABLE_STATUS_LINE } from '../kteam';
 import type { CliDeps } from './index';
 import type {
   MaterializedStatus,
@@ -215,7 +216,7 @@ export async function handler(id: string | undefined, opts: { json: boolean }, d
     const matStatus = await eventLog.materializeStatus(runId, lock?.pid);
 
     if (matStatus.status === 'crashed') {
-      await reapDeadRun(runId, deps.eventLog, deps.pidLock, deps.tmux);
+      await reapDeadRun(runId, deps.eventLog, deps.pidLock);
     }
 
     // Enrich with verdict files and summary data
@@ -234,6 +235,16 @@ export async function handler(id: string | undefined, opts: { json: boolean }, d
 
     // --json: output latest 2 loops
     if (opts.json) {
+      // Every agent runs under kteamd. If the run hasn't finished AND the daemon
+      // is unreachable, kloop genuinely can't determine or continue it — emit a
+      // non-JSON diagnostic (exit 0) so a consumer's JSON.parse fails and the run
+      // reads as 'unavailable' (infra problem), NOT 'crash'. Terminal runs are on
+      // disk and always print real JSON, so history works with the daemon down.
+      if (!eventLog.isTerminal(status.status) && !daemonReachable()) {
+        console.log(DAEMON_UNAVAILABLE_STATUS_LINE);
+        console.error('kloop status: kteam daemon is unreachable; start it with `kteam daemon start`');
+        return;
+      }
       const latestLoops = status.loops.slice(-2);
       console.log(
         JSON.stringify(

@@ -1,7 +1,6 @@
 import pc from 'picocolors';
 import Table from 'cli-table3';
 import type { IndexDb, EventLog, PidLock } from '../index-db';
-import type { TmuxService } from '../deps';
 import { reapDeadRun } from '../index-db';
 import type { CliDeps } from './index';
 import { formatDurationHuman, formatAgeHuman } from '../loop/format';
@@ -27,7 +26,7 @@ export async function handler(
   deps: CliDeps,
 ): Promise<void> {
   try {
-    const { indexDb, eventLog, pidLock, tmux } = deps;
+    const { indexDb, eventLog, pidLock } = deps;
     const limit = opts.limit ? Number.parseInt(opts.limit, 10) : undefined;
     if (opts.limit && Number.isNaN(limit!)) {
       console.error(pc.red('Error: --limit must be a valid integer'));
@@ -38,7 +37,7 @@ export async function handler(
       process.exit(1);
     }
     const order = opts.order;
-    const runs = await listRuns(indexDb, eventLog, pidLock, tmux, opts.all, opts.workspace, { limit, order });
+    const runs = await listRuns(indexDb, eventLog, pidLock, opts.all, opts.workspace, { limit, order });
 
     if (opts.json) {
       console.log(JSON.stringify(runs, null, 2));
@@ -125,7 +124,6 @@ async function listRuns(
   indexDb: IndexDb,
   eventLog: EventLog,
   pidLock: PidLock,
-  tmux: TmuxService,
   includeAll: boolean,
   workspace?: string,
   sort?: { limit?: number; order?: string },
@@ -141,7 +139,7 @@ async function listRuns(
     // If we detected a crash, reap the dead run and re-derive status
     let finalStatus = state.status;
     if (state.status === 'crashed') {
-      await reapDeadRun(row.id, eventLog, pidLock, tmux);
+      await reapDeadRun(row.id, eventLog, pidLock);
       const updated = await eventLog.deriveStatus(row.id);
       if (updated) finalStatus = updated.status;
     }

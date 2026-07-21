@@ -5,7 +5,7 @@ import { reapDeadRun } from '../index-db';
 
 export async function handler(ids: string[], opts: { force: boolean }, deps: CliDeps): Promise<void> {
   try {
-    const { indexDb, eventLog, pidLock, tmux, state } = deps;
+    const { indexDb, eventLog, pidLock, state } = deps;
 
     // If no args, resolve from CWD
     if (ids.length === 0) {
@@ -58,9 +58,9 @@ export async function handler(ids: string[], opts: { force: boolean }, deps: Cli
       const lock = await pidLock.read(runId);
       const runState = await eventLog.deriveStatus(runId, lock?.pid);
 
-      // If crashed, reap it first (kill tmux, write event, release lock)
+      // If crashed, reap it first (write crashed event, release lock)
       if (runState?.status === 'crashed') {
-        await reapDeadRun(runId, eventLog, pidLock, tmux);
+        await reapDeadRun(runId, eventLog, pidLock);
         // Re-derive status after reaping
         const updatedState = await eventLog.deriveStatus(runId);
         if (updatedState && !eventLog.isTerminal(updatedState.status) && !opts.force) {

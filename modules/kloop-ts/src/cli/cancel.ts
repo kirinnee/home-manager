@@ -4,11 +4,11 @@ import * as path from 'path';
 import type { CliDeps } from './index';
 import { EVENT_TYPES } from '../types';
 import type { KloopEvent } from '../types';
-import { paths } from '../deps';
+import { stopRunSessions } from '../kteam';
 
 export async function handler(id: string | undefined, deps: CliDeps): Promise<void> {
   try {
-    const { tmux, indexDb, eventLog, pidLock, state } = deps;
+    const { indexDb, eventLog, pidLock } = deps;
 
     // Resolve run ID: use explicit ID if provided, otherwise find current workspace's run
     let runId: string;
@@ -49,21 +49,8 @@ export async function handler(id: string | undefined, deps: CliDeps): Promise<vo
       reason: 'user requested',
     } as KloopEvent);
 
-    // Kill tmux sessions (deduplicate — avoid double-killing)
-    const sessions = await tmux.listSessions();
-    let killed = 0;
-    for (const session of sessions) {
-      const parsed = tmux.parseSessionName(session);
-      if ((parsed && parsed.runId === runId) || session.includes(`kloop-${runId}`)) {
-        if (await tmux.killSession(session)) {
-          killed++;
-        }
-      }
-    }
-
-    if (killed > 0) {
-      console.log(`Killed ${killed} tmux session(s)`);
-    }
+    // Stop this run's kteam agent sessions (label kloop-<runId>).
+    stopRunSessions(runId);
 
     // Release lock
     await pidLock.release(runId);

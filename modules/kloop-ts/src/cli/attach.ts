@@ -1,73 +1,51 @@
-import * as p from '@clack/prompts';
 import pc from 'picocolors';
-import type { TmuxService } from '../deps';
-import { parseSessionName } from '../tmux/commands';
+import type { CliDeps } from './index';
 
-interface SessionChoice {
-  value: string;
-  label: string;
-  hint?: string;
-}
-
-function formatSessionChoice(sessionName: string): SessionChoice {
-  const parsed = parseSessionName(sessionName);
-
-  if (!parsed) {
-    return { value: sessionName, label: sessionName };
-  }
-
-  const { iteration, role, reviewerIndex } = parsed;
-  const roleLabel = role === 'impl' ? '🔨 Implementer' : `🔍 Reviewer ${reviewerIndex ?? 0}`;
-
-  return {
-    value: sessionName,
-    label: `Iteration ${iteration} - ${roleLabel}`,
-    hint: sessionName,
-  };
-}
-
-export async function handler(id: string | undefined, tmux: TmuxService): Promise<void> {
+/**
+ * List a run's kteam agent sessions. Agents now run as detached kteamd TUI
+ * sessions (label `kloop-<runId>`), so "attaching" means picking one and running
+ * `kteam attach <id>` — kloop just surfaces the sessions and the command.
+ */
+export async function handler(id: string | undefined, deps: CliDeps): Promise<void> {
   try {
-    // If id provided, try to attach directly to kloop-{id} session
-    if (id) {
-      const sessionName = `kloop-${id}`;
-      const sessions = await tmux.listSessions();
-      if (sessions.includes(sessionName)) {
-        const { execSync } = await import('child_process');
-        execSync(`tmux attach -t "${sessionName}"`, { stdio: 'inherit' });
-        return;
+    let runId = id;
+    if (!runId) {
+      const row = await deps.indexDb.getRunByWorkspace(process.cwd());
+      if (!row) {
+        console.error(pc.red('No run found for this workspace. Pass a run id or run `kloop init` first.'));
+        process.exit(1);
       }
-      // If no exact match, try to find by runId
-      console.log(pc.yellow(`Session "${sessionName}" not found.`));
+      runId = row.id;
     }
 
-    // Otherwise show session picker
-    const sessions = await tmux.listSessions();
+    const proc = Bun.spawnSync(['kteam', 'ps', '--all', '--label', `kloop-${runId}`, '--json'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    if (proc.exitCode !== 0) {
+      console.error(pc.red('Could not query kteam (is the daemon running? `kteam daemon start`).'));
+      console.error(pc.dim((proc.stderr.toString() || proc.stdout.toString()).trim()));
+      process.exit(1);
+    }
+
+    const sessions = JSON.parse(proc.stdout.toString().trim() || '[]') as Array<{
+      config?: { id?: string; name?: string; binary?: string };
+      state?: { status?: string };
+    }>;
 
     if (sessions.length === 0) {
-      console.log(pc.yellow('No running agent sessions.'));
+      console.log(pc.yellow(`No kteam agent sessions for run ${runId}.`));
       return;
     }
 
-    p.intro(pc.bgCyan(pc.black(' Attach to Session ')));
-
-    const choices = sessions.map(formatSessionChoice);
-
-    const selected = await p.select({
-      message: 'Select a session to attach:',
-      options: choices,
-    });
-
-    if (p.isCancel(selected)) {
-      p.cancel('Cancelled.');
-      process.exit(0);
+    console.log(pc.bold(`kteam agent sessions for run ${runId}:`));
+    for (const s of sessions) {
+      const sid = s.config?.id ?? '-';
+      console.log(
+        `  ${pc.cyan(sid)}  ${(s.state?.status ?? '-').padEnd(12)} ${s.config?.binary ?? ''}  ${pc.dim(s.config?.name ?? '')}`,
+      );
     }
-
-    p.outro(`Attaching to ${pc.cyan(selected as string)}...`);
-
-    // Use execSync to replace process with tmux attach
-    const { execSync } = await import('child_process');
-    execSync(`tmux attach -t "${selected}"`, { stdio: 'inherit' });
+    console.log(pc.dim('\nAttach with: kteam attach <id>'));
   } catch (err) {
     console.error(pc.red(`Error: ${(err as Error).message}`));
     process.exit(1);

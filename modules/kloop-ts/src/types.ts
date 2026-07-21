@@ -167,16 +167,6 @@ const configSchema = z
     verifyTimeout: z.number().min(0.001).max(300).optional(),
     rerankAfterCheckpoint: z.boolean().default(true),
     snapshot: z.boolean().default(false),
-    // Run claude-harness agents as interactive TUIs (no --print). kloop injects the prompt
-    // via tmux, detects completion via a marker file the agent touches, then sends /exit.
-    // Non-claude harnesses (gemini/codex) ignore this and always run --print.
-    interactive: z.boolean().default(false),
-    // Who runs the agents. 'kteam' (default) dispatches every role through kteamd
-    // detached sessions (auth/quota preflight, dialog handling, stall/login-wall
-    // fail-fast, transcript-based health). 'tmux' is kloop's legacy self-managed
-    // tmux path. kteam requires the wrapper to be a claude-auto-*/codex-auto-*
-    // fleet binary; non-fleet binaries (bare `claude`) fall back to tmux.
-    agentBackend: z.enum(['tmux', 'kteam']).default('kteam'),
     // Usage-aware account selection. When true, kloop only draws from the weighted
     // pools accounts that still have usage left (queried from kfleet's /usage), and
     // blocks until reset when the implementer pool is fully exhausted. Off by default.
@@ -278,8 +268,6 @@ const configSchema = z
       verifyTimeout,
       rerankAfterCheckpoint: data.rerankAfterCheckpoint ?? true,
       snapshot: data.snapshot ?? false,
-      interactive: data.interactive ?? false,
-      agentBackend: data.agentBackend ?? 'kteam',
       requireUsageLeft: data.requireUsageLeft ?? false,
       usageEndpoint: data.usageEndpoint,
       usageFiveHourFloorPercent: data.usageFiveHourFloorPercent,
@@ -325,8 +313,6 @@ export const resolvedConfigSchema = z.object({
   verifyPhases: z.array(z.array(typeEntrySchema).min(1)),
   rerankAfterCheckpoint: z.boolean(),
   snapshot: z.boolean(),
-  interactive: z.boolean().default(false),
-  agentBackend: z.enum(['tmux', 'kteam']).default('kteam'),
   requireUsageLeft: z.boolean().default(false),
   usageEndpoint: z.string().optional(),
   usageFiveHourFloorPercent: z.number().min(0).max(100).optional(),
@@ -657,8 +643,6 @@ export const DEFAULT_CONFIG: Config = {
   verifyPhases: [['claude:claude']],
   rerankAfterCheckpoint: true,
   snapshot: false,
-  interactive: false,
-  agentBackend: 'kteam',
   requireUsageLeft: false,
   stall: { enabled: false, idleThresholdSec: 600, checkIntervalSec: 60, autoAnswer: 'off' },
   implementerRetry: { maxRetries: 2, backoffBaseMs: 5000 },
@@ -982,7 +966,6 @@ export function flattenNestedConfig(raw: unknown): unknown {
     if (st.previousReviewPropagation !== undefined) out.previousReviewPropagation = st.previousReviewPropagation;
     if (st.compressSpec !== undefined) out.compressSpec = st.compressSpec;
     if (st.snapshot !== undefined) out.snapshot = st.snapshot;
-    if (st.interactive !== undefined) out.interactive = st.interactive;
     if (st.requireUsageLeft !== undefined) out.requireUsageLeft = st.requireUsageLeft;
     if (st.usageEndpoint !== undefined) out.usageEndpoint = st.usageEndpoint;
     if (st.usageFiveHourFloorPercent !== undefined) out.usageFiveHourFloorPercent = st.usageFiveHourFloorPercent;
@@ -1058,7 +1041,6 @@ export function nestFlatConfig(flat: Record<string, unknown>): Record<string, un
   if (d.previousReviewPropagation !== undefined) settings.previousReviewPropagation = d.previousReviewPropagation;
   if (d.compressSpec !== undefined) settings.compressSpec = d.compressSpec;
   if (d.snapshot !== undefined) settings.snapshot = d.snapshot;
-  if (d.interactive !== undefined) settings.interactive = d.interactive;
   if (d.requireUsageLeft !== undefined) settings.requireUsageLeft = d.requireUsageLeft;
   if (d.usageEndpoint !== undefined) settings.usageEndpoint = d.usageEndpoint;
   if (d.usageFiveHourFloorPercent !== undefined) settings.usageFiveHourFloorPercent = d.usageFiveHourFloorPercent;

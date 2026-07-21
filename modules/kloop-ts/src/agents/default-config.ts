@@ -57,10 +57,15 @@ maxIterations: 7                  # most important knob: max implement→review 
 # pools: the account registry. A pool is a named set of interchangeable accounts that
 # load-balances per invocation to spread rate limits (single account = alias). Every
 # role below may reference a pool BY NAME. Weights are the map values.
+#
+# Accounts MUST be kfleet auto-wrappers (claude-auto-* / codex-auto-*) — every agent
+# runs through kteamd, which only launches auto-mode fleet wrappers. Bare names like
+# "claude" are rejected. List yours with "ls ~/.kfleet/bin" or "kteam recommend".
 pools:
-  claude: { claude: 1 }
-# fast-codex:  { codex-auto-gpt55: 5, codex-auto-gpt54: 1 }
-# claude-pair: { claude-auto-opus48: 1, claude-auto-glm52: 1 }
+  claude: { claude-auto-liftoff: 1 }
+  codex: { codex-auto-loio: 1 }
+# claude-pair: { claude-auto-liftoff: 1, claude-auto-kirin: 1 }
+# fast-codex:  { codex-auto-loio: 5, codex-auto-kirin: 1 }
 
 # lensProfiles: the "what to scrutinize" text for each review lens (the matrix rows). The
 # full reviewer prompt is prompts.reviewer with the matching lens spliced in at {lensFocus}.
@@ -85,8 +90,9 @@ reviewer:
   # Reviews run as a matrix: reviews = lenses × phase-types. Each phase is an array of
   # types run in parallel; a type is a pool name, an inline { binary: weight } pool, or a
   # bare binary. Append ! to a type to ignore its no-verdicts (e.g. flaky-codex!).
+  # A cross-harness reviewer (codex here vs a claude implementer) diversifies review.
   phases:
-    - - claude
+    - - codex
   lenses:
     - general                     # add quality, completion, adherence, blindspot for the full matrix
   timeout: 15                     # minutes
@@ -100,7 +106,7 @@ reviewer:
 verifier:
   # Re-review of fixes. Types support pools (load distribution); lenses do not apply.
   phases:
-    - - claude
+    - - codex
   timeout: 5                      # minutes
   # Retry a verifier that produced NO parseable verdict (transport failure, crash,
   # timeout). A real approve/reject verdict is never retried.
@@ -137,25 +143,15 @@ settings:
   previousReviewPropagation: 0.7
   compressSpec: false
   snapshot: false
-  agentBackend: kteam             # kteam (default): dispatch fleet-wrapper agents through kteamd
-                                  # detached sessions (auth/quota preflight, dialog handling,
-                                  # stall/login-wall fail-fast). tmux: legacy self-managed path.
-                                  # Non-fleet binaries (bare claude) always use tmux.
-  interactive: false              # tmux backend only: run claude agents as interactive TUIs
-                                  # (no --print); kloop pastes the prompt via tmux, waits for a
-                                  # done-marker file, then sends /exit. gemini/codex ignore this.
+  # Every agent runs through kteamd detached sessions (auth/quota preflight, dialog
+  # handling, stall/login-wall fail-fast). Agents MUST be kfleet auto-wrappers
+  # (claude-auto-* / codex-auto-*); the gemini harness is no longer supported. Run
+  # "kteam daemon start" before a run — kloop refuses to start without it.
   requireUsageLeft: false         # usage-aware selection: only draw from the weighted pools
                                   # accounts that still have usage left (queried from kfleet's
                                   # /usage), and block before the implementer runs until an
                                   # exhausted pool resets. Needs "kfleet serve" running.
   # usageEndpoint: http://127.0.0.1:47318/usage  # where to fetch the usage snapshot (default)
-  stall:                          # implementer stall detection: notice a frozen implementer
-    enabled: false                # (e.g. stuck on a Claude Code confirm dialog that fires even
-    idleThresholdSec: 600         # with bypass-permissions) via log/evidence mtimes + a tmux
-    checkIntervalSec: 60          # pane-tail hash, and surface it in status/wait/ps.
-    autoAnswer: "off"             # off = detect only | safe = auto-answer known confirm dialogs
-                                  # (sends "1", logged as implementer_stall_autoanswered) | all =
-                                  # also answer generic ❯ prompts with Enter (risky).
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║ PROMPTS — full agent prompts (config is source of truth; edit freely)      ║

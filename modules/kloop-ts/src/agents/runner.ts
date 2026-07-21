@@ -2,15 +2,14 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import type { Config, Verdict, HarnessType } from '../types';
 import { getPrimaryImplementer, selectImplementer, selectRoleAccount } from '../types';
-import type { TmuxService, StateService } from '../deps';
-import { generateId, paths, getKloopHome } from '../deps';
+import type { StateService } from '../deps';
+import { generateId, paths } from '../deps';
 import * as verdicts from './verdicts';
 import {
   buildCheckpointerPrompt,
   buildSynthesizerPrompt,
   buildVerifierPrompt,
   buildReSynthesisPrompt,
-  buildSentinelInstruction,
 } from './prompts';
 import type {
   CheckpointerPromptVars,
@@ -18,9 +17,8 @@ import type {
   VerifierPromptVars,
   ReSynthesisPromptVars,
 } from './prompts';
-import { extractTokensFromLog, extractHarnessSessionId, extractModelFromLog } from '../stream/parse';
 import { formatAgentLaunch } from '../loop/format';
-import type { ParsedBinary, ReviewerBinary, ReviewTypeEntry } from '../types';
+import type { ReviewerBinary, ReviewTypeEntry } from '../types';
 import {
   parseImplementerConfig,
   parseReviewerConfig,
@@ -28,15 +26,120 @@ import {
   selectFromPool,
   reviewTypeLabel,
   implementerCandidates,
+  resolvePool,
 } from '../types';
 import { UsageGate } from '../usage/gate';
 
-// Path to kloop binary — use process.argv[1] (the running script) instead of
-// import.meta.dir so it survives nix store path changes after rebuilds.
-const KLOOP_BIN = `bun run ${process.argv[1]}`;
+/**
+ * Fail loud, before spending an iteration, when a configured agent can't run
+ * under kteam:
+ *  - the gemini harness is gone (kfleet/kteam have no gemini wrapper);
+ *  - a fleet-wrapper name (claude-auto- / codex-auto- prefix) isn't installed.
+ * `installedWrappers` empty ⇒ skip the install check (dev/test env). Bare
+ * non-fleet names (e.g. "claude") are left to fail at `kteam start` with its own
+ * clear error rather than being rejected here.
+ */
+export function validateAgentsOrThrow(config: Config, installedWrappers: string[] = []): void {
+  const seen: Array<{ account: string; binary: string; harness: HarnessType }> = [];
+  const addImpl = (acc: string) => {
+    const p = parseImplementerConfig(acc);
+    seen.push({ account: acc, binary: p.binary, harness: p.harness });
+  };
+  const addRev = (acc: string) => {
+    const p = parseReviewerConfig(acc);
+    seen.push({ account: acc, binary: p.binary, harness: p.harness });
+  };
+  for (const key of Object.keys(config.implementers)) addImpl(key);
+  for (const entry of config.reviewPhases.flat())
+    for (const acc of Object.keys(resolvePool(entry, config.poolProfiles))) addRev(acc);
+  for (const entry of (config.verifyPhases ?? []).flat())
+    for (const acc of Object.keys(resolvePool(entry, config.poolProfiles))) addRev(acc);
+  if (config.conflictChecker)
+    for (const acc of Object.keys(resolvePool(config.conflictChecker, config.poolProfiles))) addImpl(acc);
+  if (config.synthesizer)
+    for (const acc of Object.keys(resolvePool(config.synthesizer, config.poolProfiles))) addImpl(acc);
 
-// Marker file an interactive-mode agent touches when fully done (per-agent dir).
-const SENTINEL_NAME = '.kloop-done';
+  const gemini = [...new Set(seen.filter(s => s.harness === 'gemini').map(s => s.account))];
+  if (gemini.length > 0) {
+    throw new Error(
+      `kloop no longer supports the gemini harness (kfleet/kteam have no gemini wrapper). ` +
+        `Remove these agents from config.yaml: ${gemini.join(', ')}`,
+    );
+  }
+
+  if (installedWrappers.length > 0) {
+    const have = new Set(installedWrappers);
+    // Only enforce for names that clearly mean to be fleet wrappers.
+    const missing = [...new Set(seen.map(s => s.binary))].filter(b => /^(claude|codex)-auto-/.test(b) && !have.has(b));
+    if (missing.length > 0) {
+      throw new Error(
+        `configured agents are not installed kfleet wrappers (check ~/.kfleet/bin): ${missing.join(', ')}. ` +
+          `Installed: ${installedWrappers.join(', ')}`,
+      );
+    }
+  }
+}
+
+// ============================================================================
+// kteam dispatch — every agent runs as a detached kteamd TUI session
+// ============================================================================
+
+/** Result of shelling out to the `kteam` CLI. */
+export interface KteamExecResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+/** Injectable `kteam` runner (default spawns the real binary). Tests pass a fake. */
+export type KteamExec = (args: string[], timeoutMs: number) => Promise<KteamExecResult>;
+
+/**
+ * Thrown when kteamd itself is unreachable (daemon down / token missing). kloop
+ * maps this to kautopilot's 'unavailable' outcome — NOT a crash — because the
+ * run never actually executed. See cli/run.ts + cli/status.ts.
+ */
+export class DaemonUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DaemonUnavailableError';
+  }
+}
+
+/** kteam terminal session statuses (mirror of kteam-ts `terminal` + kill_failed). */
+const KTEAM_TERMINAL = new Set(['completed', 'failed', 'stalled', 'stopped', 'kill_failed']);
+
+/** True when a failed `kteam` invocation was caused by the daemon being unreachable. */
+function isDaemonUnavailable(r: KteamExecResult): boolean {
+  const text = `${r.stderr}\n${r.stdout}`;
+  return /daemon is unavailable|daemon token is missing|ECONNREFUSED|fetch failed|connect(ion)? refused/i.test(text);
+}
+
+/** Default `kteam` executor: spawn the CLI with a hard timeout, capture output. */
+const defaultKteamExec: KteamExec = async (args, timeoutMs) => {
+  // CLAUDECODE leaks the parent Claude session into the child harness; strip it.
+  const { CLAUDECODE: _drop, ...env } = process.env;
+  const proc = Bun.spawn(['kteam', ...args], { stdout: 'pipe', stderr: 'pipe', env });
+  const killer = setTimeout(() => proc.kill(), timeoutMs);
+  const [exitCode, stdout, stderr] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  clearTimeout(killer);
+  return { exitCode, stdout, stderr };
+};
+
+/** Outcome of a single kteam-backed agent launch. */
+interface LaunchResult {
+  exitCode: number;
+  durationMs: number;
+  timedOut: boolean;
+  /** Harness-reported model (from the kteam SessionView), when known. */
+  model?: string;
+  /** Harness session id (from the kteam SessionView), when known. */
+  harnessSessionId?: string;
+}
 
 // ============================================================================
 // Agent Result types
@@ -126,45 +229,6 @@ export interface VerifierResult extends AgentResult {
   retryMax?: number; // configured retry budget
 }
 
-// ============================================================================
-// Harness-aware command builder
-// ============================================================================
-
-/**
- * Build the agent command for a given harness type.
- *
- * Claude: cat "${promptFile}" | claude-auto-zai --dangerously-skip-permissions --verbose --print --session-id "${sessionId}" --output-format stream-json 2>&1 | tee "${logFile}" | kloop stream
- * Gemini: cat "${promptFile}" | GEMINI_CLI_TRUST_WORKSPACE=true gemini-auto --yolo --output-format stream-json -p "" 2>&1 | tee "${logFile}" | kloop stream
- * Codex:  cat "${promptFile}" | codex-auto exec --full-auto --json --ephemeral --skip-git-repo-check -c sandbox_workspace_write.network_access=true 2>&1 | tee "${logFile}" | kloop stream
- */
-function buildAgentCommand(params: {
-  binary: string;
-  harness: HarnessType;
-  promptFile: string;
-  sessionId: string;
-  logFile: string;
-}): string {
-  const { binary, harness, promptFile, sessionId, logFile } = params;
-
-  if (harness === 'claude') {
-    // Claude: injects kloop session ID as --session-id
-    return `cat "${promptFile}" | ${binary} --dangerously-skip-permissions --verbose --print --session-id "${sessionId}" --output-format stream-json 2>&1 | tee "${logFile}" | ${KLOOP_BIN} stream`;
-  } else if (harness === 'codex') {
-    // Codex: exec subcommand, --full-auto, --json, --ephemeral, stdin prompt
-    // --skip-git-repo-check: kloop workspaces may not be git repos
-    // --add-dir "${getKloopHome()}": make the global kloop store writable so the
-    // agent can write verdicts/reviews/evidence directly to ~/.kloop/{runId}/...
-    // (the workspace-write sandbox otherwise blocks writes outside CWD)
-    // -c sandbox_workspace_write.network_access=true: keep workspace-write FS
-    // sandbox but allow network so installs (bun/npm/pip/etc.) work
-    return `cat "${promptFile}" | ${binary} exec --full-auto --add-dir "${getKloopHome()}" --json --ephemeral --skip-git-repo-check -c sandbox_workspace_write.network_access=true 2>&1 | tee "${logFile}" | ${KLOOP_BIN} stream`;
-  } else {
-    // Gemini: no session ID injection, pipe prompt via stdin (avoids shell arg length limits)
-    // GEMINI_CLI_TRUST_WORKSPACE=true bypasses the trust-folder prompt for headless runs
-    return `cat "${promptFile}" | GEMINI_CLI_TRUST_WORKSPACE=true ${binary} --yolo --output-format stream-json -p "" 2>&1 | tee "${logFile}" | ${KLOOP_BIN} stream`;
-  }
-}
-
 /**
  * True when `content` is a checkpoint-result file with a recognized outcome — i.e. the
  * checkpointer produced a real result. Used to decide whether to retry: a missing or
@@ -194,19 +258,21 @@ export class AgentRunner {
   private checkpointerBinary: string;
   private checkpointerHarness: HarnessType;
   private pathsImpl: typeof paths;
+  private kteamExec: KteamExec;
   /** Usage-aware account selection (no-op unless config.requireUsageLeft). Shared with
    *  LoopRunner so reviewer/synth/checkpoint pools filter against the same snapshot. */
   readonly gate: UsageGate;
 
   constructor(
-    private tmux: TmuxService,
     private state: StateService,
     private config: Config,
     pathsOverride?: typeof paths,
     gate?: UsageGate,
+    kteamExec?: KteamExec,
   ) {
     this.pathsImpl = pathsOverride ?? paths;
     this.gate = gate ?? UsageGate.fromConfig(config);
+    this.kteamExec = kteamExec ?? defaultKteamExec;
     // Flatten reviewer type labels from all phases (display only)
     this.reviewerBinaries = config.reviewPhases.flat().map(e => reviewTypeLabel(e, config.poolProfiles));
     // Parse checkpointer binary and harness
@@ -251,73 +317,70 @@ export class AgentRunner {
   private async ensureAgentDir(agentDirPath: string): Promise<string> {
     await fs.mkdir(agentDirPath, { recursive: true });
     const logFile = path.join(agentDirPath, 'log');
-    // A prior interactive run may have left `log` as a SYMLINK to Claude's own session
-    // transcript (see service.ts updateInteractiveLog). Print-mode `tee "${logFile}"` would
-    // follow that link and write the stream-json straight into the unrelated transcript,
-    // corrupting it. Remove any stale link/file first (force: does not follow symlinks) so
-    // tee always creates a fresh regular file.
+    // Remove any stale log so the mirrored kteam transcript always starts fresh.
     await fs.rm(logFile, { force: true });
     return logFile;
   }
 
-  /** True when this run drives claude agents as interactive TUIs. Only claude harnesses. */
-  private isInteractive(harness: HarnessType): boolean {
-    return this.config.interactive === true && harness === 'claude';
-  }
-
-  /** A binary kteamd can manage: a kfleet auto wrapper (claude-auto-… or codex-auto-…).
-   *  `interactive: true` opts out — that mode's sentinel/TUI contract is the legacy tmux
-   *  path's, and its sentinel prompt instructions are meaningless inside a kteam session. */
-  private kteamEligible(binary: string): boolean {
-    return (
-      this.config.agentBackend === 'kteam' &&
-      this.config.interactive !== true &&
-      /^(claude|codex)-auto-/.test(path.basename(binary))
-    );
+  /** Run a `kteam` command; throw DaemonUnavailableError if the daemon is unreachable. */
+  private async kteam(args: string[], timeoutMs: number): Promise<KteamExecResult> {
+    const result = await this.kteamExec(args, timeoutMs);
+    if (result.exitCode !== 0 && isDaemonUnavailable(result)) {
+      throw new DaemonUnavailableError(
+        `kteam daemon is unreachable (${(result.stderr || result.stdout).trim().slice(0, 200)}); start it with: kteam daemon start`,
+      );
+    }
+    return result;
   }
 
   /**
-   * Dispatch one agent through a detached kteam session and block until it
-   * reaches a terminal state. kteamd owns the TUI (auth/quota preflight,
-   * startup dialogs, prompt-landing verification, stall + login-wall
-   * fail-fast); kloop keeps its own contract: the agent still writes kloop's
-   * output/sentinel files, and the harness transcript is mirrored to logFile.
+   * Dispatch a single agent through a detached kteamd session and block until it
+   * reaches a terminal state (or produces its deliverable). kteamd owns the TUI:
+   * auth/quota preflight, startup dialogs, prompt-landing, stall + login-wall
+   * fail-fast, auto-revive. kloop keeps its contract: the agent writes kloop's
+   * output files, and the kteam transcript is mirrored to logFile for `kloop view`.
    */
-  private async launchViaKteam(p: {
+  private async launch(p: {
     binary: string;
     promptFile: string;
     logFile: string;
-    timeout: number;
-    tmuxSession: string;
+    timeout: number; // minutes
+    runId: string;
+    name: string; // kteam session --name (role + short task), shown in `kteam ps`
+    // If the agent produced this deliverable file, the run succeeded even if the
+    // wrap-up died — the deliverable is the ground truth (mirrors the verdict-file flow).
     outputFile?: string;
-  }): Promise<{ exitCode: number; durationMs: number; timedOut: boolean }> {
+  }): Promise<LaunchResult> {
     const startTime = Date.now();
-    const prompt = await fs.readFile(p.promptFile, 'utf-8');
-    const { CLAUDECODE: _, ...env } = process.env;
-    const kteam = async (args: string[], timeoutMs: number) => {
-      const proc = Bun.spawn(['kteam', ...args], { stdout: 'pipe', stderr: 'pipe', env });
-      const killer = setTimeout(() => proc.kill(), timeoutMs);
-      const [exitCode, stdout, stderr] = await Promise.all([
-        proc.exited,
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-      ]);
-      clearTimeout(killer);
-      return { exitCode, stdout, stderr };
-    };
-    const started = await kteam(
+    const timeoutSec = Math.max(60, Math.round(p.timeout * 60));
+
+    // ONE kteam session per agent INVOCATION (role × iteration × retry) — a fresh
+    // `kteam start`, not a reused session fed by `kteam send`. This is deliberate
+    // (lead-approved): kloop re-selects the account weighted-random EACH iteration
+    // (selectImplementer / pool re-rolls), so successive iterations frequently run a
+    // DIFFERENT binary/model — there is no single long-lived agent whose context a
+    // `send` could keep warm. Within one invocation kteamd already auto-revives a
+    // dying session, so warmth isn't lost mid-agent. Future optimization: when an
+    // iteration happens to re-pick the SAME binary as the prior one, reuse that
+    // session via `kteam send --message-file` to preserve its context.
+    const started = await this.kteam(
       [
         'start',
         '--json',
         '-a',
         p.binary,
+        '--mode',
+        'auto',
         '--name',
-        p.tmuxSession.slice(0, 48),
+        p.name.slice(0, 48),
+        '--label',
+        `kloop-${p.runId}`,
         '--cwd',
         process.cwd(),
+        '--prompt-file',
+        p.promptFile,
         '--timeout',
-        String(Math.max(60, Math.round(p.timeout * 60))),
-        prompt,
+        String(timeoutSec),
       ],
       180_000,
     );
@@ -325,102 +388,64 @@ export class AgentRunner {
       throw new Error(`kteam start failed for ${p.binary}: ${(started.stderr || started.stdout).trim()}`);
     }
     let id: string;
+    let model: string | undefined;
+    let harnessSessionId: string | undefined;
     try {
-      const view = JSON.parse(started.stdout) as { config?: { id?: string } };
+      const view = JSON.parse(started.stdout) as {
+        config?: { id?: string; model?: string; harnessSessionId?: string };
+      };
       if (!view.config?.id) throw new Error('missing config.id');
       id = view.config.id;
+      model = view.config.model || undefined;
+      harnessSessionId = view.config.harnessSessionId || undefined;
     } catch (error) {
       throw new Error(
         `kteam start returned unexpected JSON for ${p.binary} (${String(error)}): ${started.stdout.trim().slice(0, 300)}`,
       );
     }
-    const deadlineMs = startTime + p.timeout * 60_000 + 120_000;
-    // kteam wait also returns on waiting/awaiting_user/awaiting_question —
-    // NON-terminal states (kloop sessions run in auto mode, where kteamd
-    // auto-continues an idle prompt). Only genuinely terminal states end the
-    // poll; everything else keeps polling until the deadline.
-    const terminalStates = new Set(['completed', 'failed', 'stalled', 'stopped', 'kill_failed']);
+
+    // Poll to a terminal state (or the deliverable). `kteam wait --until-marker`
+    // is deliverable-gated: `completed` alone is not trusted. In auto mode kteamd
+    // auto-continues idle/awaiting prompts, so a non-terminal return just re-loops.
+    const deadlineMs = startTime + timeoutSec * 1000 + 120_000;
     let status = 'running';
     while (Date.now() < deadlineMs) {
-      const waited = await kteam(['wait', id, '--json', '--timeout', '60'], 90_000);
+      const waitArgs = ['wait', id, '--json', '--timeout', '60'];
+      if (p.outputFile) waitArgs.push('--until-marker', p.outputFile);
+      const waited = await this.kteam(waitArgs, 90_000);
+      // `kteam wait --json` prints the state as a pretty-printed (multi-line) JSON
+      // object, so parse the WHOLE stdout — never just the last line (that would be
+      // the lone closing brace and never yield a status, hanging the poll loop).
       const state = (() => {
         try {
-          return JSON.parse(waited.stdout.trim().split('\n').at(-1) ?? '{}') as { status?: string };
+          return JSON.parse(waited.stdout.trim() || '{}') as { status?: string };
         } catch {
           return {};
         }
       })();
       status = state.status ?? status;
-      // Mirror the durable chat log so kloop's log tooling (tokens, model,
-      // harness session id, `kloop view`) keeps working under kteam.
-      const chat = await kteam(['logs', id], 30_000);
+      // Mirror the durable chat log so `kloop view` / `kloop logs` keep working.
+      const chat = await this.kteam(['logs', id], 30_000);
       if (chat.exitCode === 0 && chat.stdout) await fs.writeFile(p.logFile, chat.stdout, 'utf-8').catch(() => {});
-      if (terminalStates.has(status)) break;
-    }
-    const durationMs = Date.now() - startTime;
-    if (status === 'completed') return { exitCode: 0, durationMs, timedOut: false };
-    // An output file on disk trumps the session verdict (mirrors the sentinel
-    // fallback on the tmux path): the work happened even if the wrap-up died.
-    if (p.outputFile && (await this.safeFileExists(p.outputFile))) return { exitCode: 0, durationMs, timedOut: false };
-    if (status === 'stopped' || Date.now() >= deadlineMs) return { exitCode: 124, durationMs, timedOut: true };
-    return { exitCode: 1, durationMs, timedOut: false };
-  }
-
-  /**
-   * Dispatch a single agent — via kteam (default: kteamd-managed detached session),
-   * interactive tmux (TUI + sentinel), or print (one-shot pipeline). The print
-   * `command` is always passed and used only on the non-interactive tmux path.
-   * Centralizes the branch so every role behaves identically.
-   */
-  private async launch(p: {
-    interactive: boolean;
-    sentinelFile?: string;
-    tmuxSession: string;
-    binary: string;
-    promptFile: string;
-    sessionId: string;
-    logFile: string;
-    timeout: number;
-    command: string;
-    // Interactive-only fallback: if the agent produced this output file but never touched the
-    // completion sentinel (so the session idled to timeout / died), the work IS done. Treat the
-    // run as successful instead of failing/retrying — mirrors the reviewer's verdict-file fallback.
-    outputFile?: string;
-  }): Promise<{ exitCode: number; durationMs: number; timedOut: boolean }> {
-    if (this.kteamEligible(p.binary)) {
-      return this.launchViaKteam({
-        binary: p.binary,
-        promptFile: p.promptFile,
-        logFile: p.logFile,
-        timeout: p.timeout,
-        tmuxSession: p.tmuxSession,
-        outputFile: p.outputFile,
-      });
-    }
-    if (p.interactive && p.sentinelFile) {
-      const result = await this.tmux.runInteractiveSession({
-        sessionName: p.tmuxSession,
-        binary: p.binary,
-        promptFile: p.promptFile,
-        sessionId: p.sessionId,
-        cwd: process.cwd(),
-        timeoutMins: p.timeout,
-        sentinelFile: p.sentinelFile,
-        logFile: p.logFile,
-      });
-      // Sentinel-independent completion: a missing sentinel but a real output file means the
-      // agent finished its work and just skipped the final `touch`. Don't misclassify as failure.
-      if ((result.timedOut || result.exitCode !== 0) && p.outputFile && (await this.safeFileExists(p.outputFile))) {
-        return { exitCode: 0, durationMs: result.durationMs, timedOut: false };
+      if (p.outputFile && (await this.safeFileExists(p.outputFile))) {
+        status = 'completed';
+        break;
       }
-      return result;
+      if (KTEAM_TERMINAL.has(status)) break;
     }
-    return this.tmux.runInSession({
-      sessionName: p.tmuxSession,
-      command: p.command,
-      cwd: process.cwd(),
-      timeoutMins: p.timeout,
-    });
+
+    const durationMs = Date.now() - startTime;
+    // Deliverable on disk trumps the session verdict.
+    if (p.outputFile && (await this.safeFileExists(p.outputFile)))
+      return { exitCode: 0, durationMs, timedOut: false, model, harnessSessionId };
+    // Map kteam terminal status → kloop's {exitCode,timedOut} outcome model.
+    if (status === 'completed') return { exitCode: 0, durationMs, timedOut: false, model, harnessSessionId };
+    if (status === 'stalled') return { exitCode: 1, durationMs, timedOut: true, model, harnessSessionId };
+    if (status === 'stopped') return { exitCode: 124, durationMs, timedOut: true, model, harnessSessionId };
+    if (status === 'failed' || status === 'kill_failed')
+      return { exitCode: 1, durationMs, timedOut: false, model, harnessSessionId };
+    // Deadline elapsed without a terminal state.
+    return { exitCode: 124, durationMs, timedOut: true, model, harnessSessionId };
   }
 
   /**
@@ -451,41 +476,23 @@ export class AgentRunner {
     const sessionId = generateId();
     const tmuxSession = `kloop-${runId}-${iteration}-impl`;
 
-    // Ensure implementer directory (needed for the interactive sentinel + prompt.md)
+    // Ensure implementer directory (holds the log + prompt.md)
     const implDir = paths.loopImplementerPath(runId, iteration);
     const logFile = await this.ensureAgentDir(implDir);
 
-    // In interactive mode, append the completion-sentinel instruction to the prompt.
-    const interactive = this.isInteractive(parsedImpl.harness);
-    const sentinelFile = interactive ? path.join(implDir, SENTINEL_NAME) : undefined;
-    const finalPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
-
     // Write prompt to temp file + human-readable prompt.md
-    const promptFile = await this.writePromptFile(sessionId, finalPrompt);
-    await fs.writeFile(path.join(implDir, 'prompt.md'), finalPrompt, 'utf-8');
+    const promptFile = await this.writePromptFile(sessionId, prompt);
+    await fs.writeFile(path.join(implDir, 'prompt.md'), prompt, 'utf-8');
 
-    // Build harness-aware command (used only on the print-mode path)
-    const command = buildAgentCommand({
-      binary: parsedImpl.binary,
-      harness: parsedImpl.harness,
-      promptFile,
-      sessionId,
-      logFile,
-    });
-
-    // Run in tmux (interactive TUI or print pipeline)
     formatAgentLaunch('impl', 'implementer', parsedImpl.binary, tmuxSession, logFile);
 
     const result = await this.launch({
-      interactive,
-      sentinelFile,
-      tmuxSession,
       binary: parsedImpl.binary,
       promptFile,
-      sessionId,
       logFile,
       timeout,
-      command,
+      runId,
+      name: tmuxSession,
     });
 
     // Clean up prompt file
@@ -499,11 +506,7 @@ export class AgentRunner {
       // No learnings yet
     }
 
-    // Extract token counts, harness session ID, and model from log file
-    const tokens = await extractTokensFromLog(logFile);
-    const harnessSessionId =
-      (await extractHarnessSessionId(logFile)) ?? (parsedImpl.harness === 'claude' ? sessionId : undefined);
-    const model = await extractModelFromLog(logFile);
+    const harnessSessionId = result.harnessSessionId ?? (parsedImpl.harness === 'claude' ? sessionId : undefined);
 
     return {
       sessionId,
@@ -514,9 +517,9 @@ export class AgentRunner {
       learnings,
       binary: parsedImpl.binary,
       harness: parsedImpl.harness,
-      model,
-      inputTokens: tokens.inputTokens,
-      outputTokens: tokens.outputTokens,
+      model: result.model,
+      inputTokens: undefined,
+      outputTokens: undefined,
       harnessSessionId,
     };
   }
@@ -653,22 +656,13 @@ export class AgentRunner {
     let logFile = '';
     let promptFile = '';
     let attemptUsed = 0;
-    let result: { exitCode: number; durationMs: number; timedOut: boolean } = {
-      exitCode: 0,
-      durationMs: 0,
-      timedOut: false,
-    };
+    let result: LaunchResult = { exitCode: 0, durationMs: 0, timedOut: false };
     let verdictContent: string | null = null;
     let reviewContent: string | null = null;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       attemptUsed = attempt;
-      // Per-attempt setup keyed off the CURRENT account: a re-rolled account can use a
-      // different harness, which changes interactive mode + the sentinel instruction.
-      const interactive = this.isInteractive(curHarness);
-      const sentinelFile = interactive ? path.join(reviewerDir, SENTINEL_NAME) : undefined;
-      const launchPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
-      await fs.writeFile(path.join(reviewerDir, 'prompt.md'), launchPrompt, 'utf-8');
+      await fs.writeFile(path.join(reviewerDir, 'prompt.md'), prompt, 'utf-8');
 
       // Clean slate: remove any pre-existing verdict/review at the target paths so a
       // stale file (from a re-entered run or a prior crashed attempt) can never be
@@ -679,32 +673,19 @@ export class AgentRunner {
       // Fresh runtime identifiers per attempt
       sessionId = generateId();
       tmuxSession = `kloop-${runId}-${iteration}-rev-${reviewerIndex}${attempt > 0 ? `-r${attempt}` : ''}`;
-      promptFile = await this.writePromptFile(sessionId, launchPrompt);
+      promptFile = await this.writePromptFile(sessionId, prompt);
       logFile = await this.ensureAgentDir(reviewerDir);
 
-      // Build harness-aware command (used only on the print-mode path)
-      const command = buildAgentCommand({
-        binary: curBinary,
-        harness: curHarness,
-        promptFile,
-        sessionId,
-        logFile,
-      });
-
-      // Run in tmux (interactive TUI or print pipeline)
       formatAgentLaunch('reviewer', `rev-${reviewerIndex}`, curBinary, tmuxSession, logFile);
 
       result = await this.launch({
-        interactive,
-        sentinelFile,
-        tmuxSession,
         binary: curBinary,
         promptFile,
-        sessionId,
         logFile,
         outputFile: verdictFilePath,
         timeout,
-        command,
+        runId,
+        name: tmuxSession,
       });
 
       // Read verdict + review from their persistent directories
@@ -720,8 +701,8 @@ export class AgentRunner {
         break;
       }
 
-      // No verdict — almost always a transport failure (stream disconnect / crash /
-      // timeout). Back off and retry rather than scoring it as a rejection.
+      // No verdict — almost always a transport failure (crash / timeout). Back off and
+      // retry rather than scoring it as a rejection.
       await this.cleanupPromptFile(promptFile);
       const backoffMs = backoffBaseMs * Math.pow(2, attempt);
       const reason = result.timedOut
@@ -768,11 +749,7 @@ export class AgentRunner {
     // Clean up prompt file
     await this.cleanupPromptFile(promptFile);
 
-    // Extract token counts, harness session ID, and model from log file
-    const tokens = await extractTokensFromLog(logFile);
-    const harnessSessionId =
-      (await extractHarnessSessionId(logFile)) ?? (curHarness === 'claude' ? sessionId : undefined);
-    const model = await extractModelFromLog(logFile);
+    const harnessSessionId = result.harnessSessionId ?? (curHarness === 'claude' ? sessionId : undefined);
 
     const icon = verdict === 'approved' ? '✓' : '✗';
     console.log(
@@ -788,14 +765,14 @@ export class AgentRunner {
       reviewerIndex,
       binary: curBinary,
       harness: curHarness,
-      model,
+      model: result.model,
       verdict,
       reasoning,
       completionEstimate,
       phaseIndex,
       ordinal,
-      inputTokens: tokens.inputTokens,
-      outputTokens: tokens.outputTokens,
+      inputTokens: undefined,
+      outputTokens: undefined,
       error,
       harnessSessionId,
       retryAttempt: attemptUsed,
@@ -835,7 +812,7 @@ export class AgentRunner {
       this.config.compressSpec,
     );
 
-    // Ensure checkpointer directory (needed for the interactive sentinel + prompt.md)
+    // Ensure checkpointer directory (holds the log + prompt.md)
     const checkpointerDir = paths.loopCheckpointerPath(runId, iteration);
     await fs.mkdir(checkpointerDir, { recursive: true });
 
@@ -855,21 +832,12 @@ export class AgentRunner {
     let logFile = '';
     let promptFile = '';
     let attemptUsed = 0;
-    let result: { exitCode: number; durationMs: number; timedOut: boolean } = {
-      exitCode: 0,
-      durationMs: 0,
-      timedOut: false,
-    };
+    let result: LaunchResult = { exitCode: 0, durationMs: 0, timedOut: false };
     let checkpointResultContent: string | null = null;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       attemptUsed = attempt;
-      // Per-attempt setup keyed off the CURRENT account: a re-rolled account can use a
-      // different harness, which changes interactive mode + the sentinel instruction.
-      const interactive = this.isInteractive(curHarness);
-      const sentinelFile = interactive ? path.join(checkpointerDir, SENTINEL_NAME) : undefined;
-      const finalPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
-      await fs.writeFile(path.join(checkpointerDir, 'prompt.md'), finalPrompt, 'utf-8');
+      await fs.writeFile(path.join(checkpointerDir, 'prompt.md'), prompt, 'utf-8');
 
       // Clean slate: remove any pre-existing result so a stale file (from a re-entered run
       // or a prior crashed attempt) can't be misread as this attempt's output.
@@ -877,32 +845,19 @@ export class AgentRunner {
 
       sessionId = generateId();
       tmuxSession = `kloop-${runId}-${iteration}-checkpoint${attempt > 0 ? `-r${attempt}` : ''}`;
-      promptFile = await this.writePromptFile(sessionId, finalPrompt);
+      promptFile = await this.writePromptFile(sessionId, prompt);
       logFile = await this.ensureAgentDir(checkpointerDir);
 
-      // Build harness-aware command (used only on the print-mode path)
-      const command = buildAgentCommand({
-        binary: curBinary,
-        harness: curHarness,
-        promptFile,
-        sessionId,
-        logFile,
-      });
-
-      // Run in tmux (interactive TUI or print pipeline)
       formatAgentLaunch('checkpoint', 'checkpoint', curBinary, tmuxSession, logFile);
 
       result = await this.launch({
-        interactive,
-        sentinelFile,
-        tmuxSession,
         binary: curBinary,
         promptFile,
-        sessionId,
         logFile,
         outputFile: checkpointResultPath,
         timeout,
-        command,
+        runId,
+        name: tmuxSession,
       });
 
       // Read checkpoint result file from checkpointer directory
@@ -963,10 +918,7 @@ export class AgentRunner {
       }
     }
 
-    // Extract harness session ID and model from log file
-    const harnessSessionId =
-      (await extractHarnessSessionId(logFile)) ?? (curHarness === 'claude' ? sessionId : undefined);
-    const model = await extractModelFromLog(logFile);
+    const harnessSessionId = result.harnessSessionId ?? (curHarness === 'claude' ? sessionId : undefined);
 
     // Clean up prompt file
     await this.cleanupPromptFile(promptFile);
@@ -979,7 +931,7 @@ export class AgentRunner {
     };
 
     console.log(
-      `Checkpoint (${curBinary})${model ? ` [${model}]` : ''}: ${outcomeDisplay[outcome]}${progressPercent !== undefined ? ` (${progressPercent}% progress)` : ''}`,
+      `Checkpoint (${curBinary})${result.model ? ` [${result.model}]` : ''}: ${outcomeDisplay[outcome]}${progressPercent !== undefined ? ` (${progressPercent}% progress)` : ''}`,
     );
     console.log(`  Summary: ${summary}`);
 
@@ -991,7 +943,7 @@ export class AgentRunner {
       timedOut: result.timedOut,
       binary: curBinary,
       harness: curHarness,
-      model,
+      model: result.model,
       outcome,
       summary,
       progressPercent,
@@ -1058,21 +1010,12 @@ export class AgentRunner {
     let logFile = '';
     let promptFile = '';
     let attemptUsed = 0;
-    let result: { exitCode: number; durationMs: number; timedOut: boolean } = {
-      exitCode: 0,
-      durationMs: 0,
-      timedOut: false,
-    };
+    let result: LaunchResult = { exitCode: 0, durationMs: 0, timedOut: false };
     let summaryExists = false;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       attemptUsed = attempt;
-      // Per-attempt setup keyed off the CURRENT account: a re-rolled account can use a
-      // different harness, which changes interactive mode + the sentinel instruction.
-      const interactive = this.isInteractive(curHarness);
-      const sentinelFile = interactive ? path.join(synthDir, SENTINEL_NAME) : undefined;
-      const finalPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
-      await fs.writeFile(path.join(synthDir, 'prompt.md'), finalPrompt, 'utf-8');
+      await fs.writeFile(path.join(synthDir, 'prompt.md'), prompt, 'utf-8');
 
       // Clean slate: remove any pre-existing summary so a stale file (from a re-entered run
       // or a prior crashed attempt) can't be misread as this attempt's output.
@@ -1081,30 +1024,19 @@ export class AgentRunner {
       // Fresh runtime identifiers per attempt
       sessionId = generateId();
       tmuxSession = `kloop-${runId}-${iteration}-synth${attempt > 0 ? `-r${attempt}` : ''}`;
-      promptFile = await this.writePromptFile(sessionId, finalPrompt);
+      promptFile = await this.writePromptFile(sessionId, prompt);
       logFile = await this.ensureAgentDir(synthDir);
-
-      const command = buildAgentCommand({
-        binary: curBinary,
-        harness: curHarness,
-        promptFile,
-        sessionId,
-        logFile,
-      });
 
       formatAgentLaunch('synthesizer', 'synthesizer', curBinary, tmuxSession, logFile);
 
       result = await this.launch({
-        interactive,
-        sentinelFile,
-        tmuxSession,
         binary: curBinary,
         promptFile,
-        sessionId,
         logFile,
         outputFile: summaryPath,
         timeout,
-        command,
+        runId,
+        name: tmuxSession,
       });
 
       // Did the synthesizer write a summary file?
@@ -1137,9 +1069,7 @@ export class AgentRunner {
 
     await this.cleanupPromptFile(promptFile);
 
-    const tokens = await extractTokensFromLog(logFile);
-    const harnessSessionId = await extractHarnessSessionId(logFile);
-    const model = await extractModelFromLog(logFile);
+    const harnessSessionId = result.harnessSessionId;
 
     return {
       sessionId,
@@ -1149,10 +1079,10 @@ export class AgentRunner {
       timedOut: result.timedOut,
       binary: curBinary,
       harness: curHarness,
-      model,
+      model: result.model,
       summaryPath: summaryExists ? summaryPath : undefined,
-      inputTokens: tokens.inputTokens,
-      outputTokens: tokens.outputTokens,
+      inputTokens: undefined,
+      outputTokens: undefined,
       harnessSessionId,
       retryAttempt: attemptUsed,
       retryMax: maxRetries,
@@ -1212,51 +1142,32 @@ export class AgentRunner {
     let logFile = '';
     let promptFile = '';
     let attemptUsed = 0;
-    let result: { exitCode: number; durationMs: number; timedOut: boolean } = {
-      exitCode: 0,
-      durationMs: 0,
-      timedOut: false,
-    };
+    let result: LaunchResult = { exitCode: 0, durationMs: 0, timedOut: false };
     let summaryExists = false;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       attemptUsed = attempt;
-      // Per-attempt setup keyed off the CURRENT account (a re-rolled account may use a
-      // different harness). Re-synthesis shares synthDir with synthesis; use a distinct
-      // prompt filename so it doesn't overwrite the synthesizer's prompt.md.
-      const interactive = this.isInteractive(curHarness);
-      const sentinelFile = interactive ? path.join(synthDir, SENTINEL_NAME) : undefined;
-      const finalPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
-      await fs.writeFile(path.join(synthDir, 'prompt.re-synthesis.md'), finalPrompt, 'utf-8');
+      // Re-synthesis shares synthDir with synthesis; use a distinct prompt filename so it
+      // doesn't overwrite the synthesizer's prompt.md.
+      await fs.writeFile(path.join(synthDir, 'prompt.re-synthesis.md'), prompt, 'utf-8');
 
       await fs.rm(summaryPath, { force: true });
 
       sessionId = generateId();
       tmuxSession = `kloop-${runId}-${iteration}-versynth${attempt > 0 ? `-r${attempt}` : ''}`;
-      promptFile = await this.writePromptFile(sessionId, finalPrompt);
+      promptFile = await this.writePromptFile(sessionId, prompt);
       logFile = await this.ensureAgentDir(synthDir);
-
-      const command = buildAgentCommand({
-        binary: curBinary,
-        harness: curHarness,
-        promptFile,
-        sessionId,
-        logFile,
-      });
 
       formatAgentLaunch('resynthesizer', 'resynthesizer', curBinary, tmuxSession, logFile);
 
       result = await this.launch({
-        interactive,
-        sentinelFile,
-        tmuxSession,
         binary: curBinary,
         promptFile,
-        sessionId,
         logFile,
         outputFile: summaryPath,
         timeout,
-        command,
+        runId,
+        name: tmuxSession,
       });
 
       summaryExists = await this.safeFileExists(summaryPath);
@@ -1287,9 +1198,7 @@ export class AgentRunner {
 
     await this.cleanupPromptFile(promptFile);
 
-    const tokens = await extractTokensFromLog(logFile);
-    const harnessSessionId = await extractHarnessSessionId(logFile);
-    const model = await extractModelFromLog(logFile);
+    const harnessSessionId = result.harnessSessionId;
 
     return {
       sessionId,
@@ -1299,10 +1208,10 @@ export class AgentRunner {
       timedOut: result.timedOut,
       binary: curBinary,
       harness: curHarness,
-      model,
+      model: result.model,
       summaryPath: summaryExists ? summaryPath : undefined,
-      inputTokens: tokens.inputTokens,
-      outputTokens: tokens.outputTokens,
+      inputTokens: undefined,
+      outputTokens: undefined,
       harnessSessionId,
       retryAttempt: attemptUsed,
       retryMax: maxRetries,
@@ -1398,21 +1307,12 @@ export class AgentRunner {
     let logFile = '';
     let promptFile = '';
     let attemptUsed = 0;
-    let result: { exitCode: number; durationMs: number; timedOut: boolean } = {
-      exitCode: 0,
-      durationMs: 0,
-      timedOut: false,
-    };
+    let result: LaunchResult = { exitCode: 0, durationMs: 0, timedOut: false };
     let verdictContent: string | null = null;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       attemptUsed = attempt;
-      // Per-attempt setup keyed off the CURRENT account: a re-rolled account can use a
-      // different harness, which changes interactive mode + the sentinel instruction.
-      const interactive = this.isInteractive(curHarness);
-      const sentinelFile = interactive ? path.join(reviewerDir, SENTINEL_NAME) : undefined;
-      const finalPrompt = sentinelFile ? prompt + buildSentinelInstruction(sentinelFile) : prompt;
-      await fs.writeFile(path.join(reviewerDir, 'prompt.md'), finalPrompt, 'utf-8');
+      await fs.writeFile(path.join(reviewerDir, 'prompt.md'), prompt, 'utf-8');
 
       // Clean slate: remove any pre-existing verdict so a stale file (from a re-entered run
       // or a prior crashed attempt) can never be misread as this attempt's output.
@@ -1420,30 +1320,19 @@ export class AgentRunner {
 
       sessionId = generateId();
       tmuxSession = `kloop-${runId}-${iteration}-verify-${reviewerIndex}${attempt > 0 ? `-r${attempt}` : ''}`;
-      promptFile = await this.writePromptFile(sessionId, finalPrompt);
+      promptFile = await this.writePromptFile(sessionId, prompt);
       logFile = await this.ensureAgentDir(reviewerDir);
-
-      const command = buildAgentCommand({
-        binary: curBinary,
-        harness: curHarness,
-        promptFile,
-        sessionId,
-        logFile,
-      });
 
       formatAgentLaunch('verifier', `verify-${reviewerIndex}`, curBinary, tmuxSession, logFile);
 
       result = await this.launch({
-        interactive,
-        sentinelFile,
-        tmuxSession,
         binary: curBinary,
         promptFile,
-        sessionId,
         logFile,
         outputFile: verdictPath,
         timeout,
-        command,
+        runId,
+        name: tmuxSession,
       });
 
       // Read verdict from the verify verdicts dir
@@ -1497,13 +1386,11 @@ export class AgentRunner {
 
     await this.cleanupPromptFile(promptFile);
 
-    const tokens = await extractTokensFromLog(logFile);
-    const harnessSessionId = await extractHarnessSessionId(logFile);
-    const model = await extractModelFromLog(logFile);
+    const harnessSessionId = result.harnessSessionId;
 
-    const icon = verdict === 'approved' ? '\u2713' : '\u2717';
+    const icon = verdict === 'approved' ? '✓' : '✗';
     console.log(
-      `  ${icon} Verifier ${reviewerIndex} (${curBinary})${model ? ` [${model}]` : ''}${phaseIndex !== undefined ? ` (phase ${phaseIndex})` : ''}: ${verdict}`,
+      `  ${icon} Verifier ${reviewerIndex} (${curBinary})${result.model ? ` [${result.model}]` : ''}${phaseIndex !== undefined ? ` (phase ${phaseIndex})` : ''}: ${verdict}`,
     );
 
     return {
@@ -1515,13 +1402,13 @@ export class AgentRunner {
       reviewerIndex,
       binary: curBinary,
       harness: curHarness,
-      model,
+      model: result.model,
       verdict,
       reasoning,
       phaseIndex,
       ordinal,
-      inputTokens: tokens.inputTokens,
-      outputTokens: tokens.outputTokens,
+      inputTokens: undefined,
+      outputTokens: undefined,
       error,
       issuesFixed,
       issuesRemaining,
@@ -1587,12 +1474,12 @@ export class AgentRunner {
     // No verdict found — determine behavior based on reviewer config
     if (noVerdictAsFailure) {
       const reason = timedOut ? 'timed out' : exitCode !== 0 ? `exited with code ${exitCode}` : 'produced no verdict';
-      console.log(`\u26a0 Reviewer "${reviewerBinary}"${phaseStr} ${reason} \u2014 treating as rejection`);
+      console.log(`⚠ Reviewer "${reviewerBinary}"${phaseStr} ${reason} — treating as rejection`);
       onError(timedOut ? 'timeout' : exitCode !== 0 ? `exit_code_${exitCode}` : 'no_verdict');
       return 'rejected';
     } else {
       const reason = timedOut ? 'timed out' : exitCode !== 0 ? `exited with code ${exitCode}` : 'produced no verdict';
-      console.log(`\u26a0 Reviewer "${reviewerBinary}"${phaseStr} ${reason} \u2014 treating as approval`);
+      console.log(`⚠ Reviewer "${reviewerBinary}"${phaseStr} ${reason} — treating as approval`);
       return 'approved';
     }
   }
@@ -1627,8 +1514,4 @@ export class AgentRunner {
       return false;
     }
   }
-
-  /**
-   * Copy review files to their proper directories (reviews/ and verdicts/)
-   */
 }

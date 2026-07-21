@@ -142,7 +142,7 @@ export async function handler(
     if (terminal) {
       if (st === 'crashed') {
         try {
-          await reapDeadRun(runId, deps.eventLog, deps.pidLock, deps.tmux);
+          await reapDeadRun(runId, deps.eventLog, deps.pidLock);
         } catch {
           /* best-effort */
         }
