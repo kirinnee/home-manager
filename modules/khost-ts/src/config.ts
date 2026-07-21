@@ -39,6 +39,10 @@ export type Route = z.infer<typeof routeSchema>;
 const configSchema = z.object({
   // Drives the tunnel name (khost-<machine>) and the {machine} route token.
   machine: z.string().optional(),
+  // NOTE: every object-level .default(...) must be the FULLY-POPULATED value,
+  // not {} — zod returns object defaults verbatim (inner field defaults are NOT
+  // applied to an absent section), so `.default({})` yields undefined
+  // sub-fields and crashes first use on a host without that config section.
   ssh: z
     .object({
       port: z.number().default(2222),
@@ -47,27 +51,27 @@ const configSchema = z.object({
       // IP pins it; '' / null binds loopback only. See mesh.ts:resolveMeshListen.
       mesh_listen: z.string().nullable().default('auto'),
     })
-    .default({}),
-  tunnel: z.object({ protocol: z.string().default('http2') }).default({}),
+    .default({ port: 2222, mesh_listen: 'auto' }),
+  tunnel: z.object({ protocol: z.string().default('http2') }).default({ protocol: 'http2' }),
   cloudflare: z
     .object({
       account_id: z.string().default(''),
       api_token: z.string().default(''),
       api_base: z.string().default('https://api.cloudflare.com/client/v4'),
     })
-    .default({}),
+    .default({ account_id: '', api_token: '', api_base: 'https://api.cloudflare.com/client/v4' }),
   access: z
     .object({
       policy: z.string().default('primordial-ernestOnly'),
     })
-    .default({}),
+    .default({ policy: 'primordial-ernestOnly' }),
   routes: z.array(routeSchema).default([]),
   // khost's own Prometheus self-metrics exporter (`khost metrics serve`).
   metrics: z
     .object({
       port: z.number().default(47319),
     })
-    .default({}),
+    .default({ port: 47319 }),
   alloy: z
     .object({
       // Grafana Alloy UI / HTTP port (also where Alloy's own metrics live).
@@ -83,9 +87,14 @@ const configSchema = z.object({
           username: z.string().default(''),
           password: z.string().default(''),
         })
-        .default({}),
+        .default({ url: '', username: '', password: '' }),
     })
-    .default({}),
+    .default({
+      port: 12345,
+      container: 'khost-alloy',
+      image: 'grafana/alloy:latest',
+      remote_write: { url: '', username: '', password: '' },
+    }),
 });
 export type KhostConfig = z.infer<typeof configSchema>;
 

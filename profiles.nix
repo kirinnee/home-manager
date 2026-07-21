@@ -6,6 +6,8 @@
     apps = false;
     arch = "x86_64";
     kernel = "linux";
+    # kirin-box exposes SSH/routes via khost too (config in ~/.khost, per-host).
+    tunnelHost = true;
   }
   {
     user = "ernest";
