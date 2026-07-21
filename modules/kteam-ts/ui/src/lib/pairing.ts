@@ -48,13 +48,13 @@ export function pairRecordsToBubbles(records: ChatRecord[]): Bubble[] {
     if (r.type === 'chat.assistant.text') {
       const group: ChatRecord[] = [r];
       i++;
-      // Attach subsequent non-boundary records to the same bubble. A bare
-      // tool.use lands in `attachments` (rendered as a card); a bare
-      // tool.result too. Tool.use+i+1=tool.result[id match] is paired below.
+      // Attach subsequent records to the same bubble. We do NOT break on a
+      // subsequent `chat.assistant.text` — consecutive text blocks within the
+      // same turn collapse into one bubble. We DO break on user / interaction
+      // / turn-boundary records so the next chunk starts a new bubble.
       while (i < n) {
         const next = records[i]!;
         if (
-          next.type === 'chat.assistant.text' ||
           next.type === 'chat.user' ||
           next.type === 'interaction.question' ||
           next.type === 'interaction.answer' ||

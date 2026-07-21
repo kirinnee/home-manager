@@ -13,7 +13,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
-import { ArrowDown, Pause, Play, StopCircle, ZapOff, ChevronLeft } from 'lucide-react';
+import { ArrowDown, Pause, Play, StopCircle, ZapOff, ChevronLeft, Rows3, Maximize2 } from 'lucide-react';
 import { api, ApiError, HAS_TOKEN } from '../lib/api';
 import { openEventStream } from '../lib/ws';
 import type { SessionView, ChatRecord, KTeamEvent } from '../types';
@@ -25,6 +25,7 @@ import { Composer } from '../components/Composer';
 import { QuestionForm } from '../components/QuestionForm';
 import { PaneSnapshotDrawer } from '../components/Question';
 import { pairRecordsToBubbles, latestPendingQuestion } from '../lib/pairing';
+import { useDensity } from '../hooks/useDensity';
 import { TERMINAL_STATUSES, WAITING_STATUSES, fmtAbsolute, isBusy, toneFor } from '../lib/utils';
 
 const PAGE_SIZE = 200;
@@ -45,6 +46,7 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
   const [draft, setDraft] = useState('');
   const [showJump, setShowJump] = useState(false);
   const [actionNotice, setActionNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  const [density, toggleDensity] = useDensity();
 
   // react-virtuoso expects a stable sequential firstItemIndex when data
   // pre-pends so internal offsets stay correct.
@@ -326,6 +328,19 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
         />
         ws {liveStatus}
       </span>
+      <Button
+        size="sm"
+        variant="ghost"
+        onClick={toggleDensity}
+        title={
+          density === 'compact'
+            ? 'Showing compact view (titles + chips only) — click for full bodies'
+            : 'Showing comfortable view (full bodies) — click to compact'
+        }
+      >
+        {density === 'compact' ? <Rows3 size={12} /> : <Maximize2 size={12} />}
+        {density === 'compact' ? 'compact' : 'comfortable'}
+      </Button>
       <ActionGroup className="ml-2">
         {!isTerminal && HAS_TOKEN && (
           <Button size="sm" variant="outline" onClick={interrupt} title="Interrupt the active turn">
@@ -408,7 +423,7 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
             atBottomStateChange={onAtBottomChange}
             startReached={() => void loadOlder()}
             increaseViewportBy={{ top: 600, bottom: 600 }}
-            itemContent={(_, bubble) => <BubbleRow bubble={bubble} />}
+            itemContent={(_, bubble) => <BubbleRow bubble={bubble} density={density} />}
             components={{ Header: () => <>{headerSlot}</>, Footer: () => <>{footerSlot}</> }}
             className="flex-1 min-h-0"
             style={{ height: '100%' }}
@@ -463,8 +478,14 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
   );
 }
 
-function BubbleRow({ bubble }: { bubble: ReturnType<typeof pairRecordsToBubbles>[number] }) {
-  return <MessageBubble bubble={bubble} />;
+function BubbleRow({
+  bubble,
+  density,
+}: {
+  bubble: ReturnType<typeof pairRecordsToBubbles>[number];
+  density: 'comfortable' | 'compact';
+}) {
+  return <MessageBubble bubble={bubble} density={density} />;
 }
 
 function ThreadSkeleton() {

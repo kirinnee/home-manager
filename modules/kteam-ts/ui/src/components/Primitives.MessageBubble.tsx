@@ -1,22 +1,22 @@
-// One chat bubble — markdown body + optional collapsible thinking +
-// (paired or standalone) tool call cards. The pairing is done by
-// `pairRecordsToBubbles` (see pairing.ts); this component is purely
-// presentational. The first record drives the markdown body; the rest
-// render in order as attachments.
+// One chat bubble — markdown body + thinking + (paired or standalone) tool
+// cards. The pairing is done by `pairRecordsToBubbles`; this component is
+// purely presentational. It also handles the "turn prompt" first-user card
+// and the "long user message" collapse, plus the thin turn divider.
 
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import type { ReactNode } from 'react';
-// Highlight.js uses our own themed CSS (see src/highlight.css) — no CDN import.
 import { ThinkingBlock } from './Primitives.ThinkingBlock';
-import { ToolCallCard } from './Primitives.ToolCallCard';
+import { ToolCard } from './ToolCard';
+import { LongUserCard, TurnPromptCard, isTurnProtocolWall } from './TurnPromptCard';
 import type { ChatRecord } from '../types';
 import type { Bubble } from '../lib/pairing';
-import { cn, fmtClock } from '../lib/utils';
+import { cn, fmtClock, fmtRelative } from '../lib/utils';
 
 interface Props {
   bubble: Bubble;
+  density?: 'comfortable' | 'compact';
 }
 
 type ToolUseData = {
@@ -33,11 +33,73 @@ type ToolResultData = {
   [k: string]: unknown;
 };
 
-export function MessageBubble({ bubble }: Props) {
-  const primary = bubble.primary;
-  const text = extractText(primary);
-  const isUser = bubble.isUser;
+const LONG_USER_LINE_THRESHOLD = 15;
 
+export function MessageBubble({ bubble, density = 'comfortable' }: Props) {
+  const primary = bubble.primary;
+
+  // The "thin labeled divider" case for turn.started/completed/aborted.
+  if (primary.type === 'turn.started' || primary.type === 'turn.completed' || primary.type === 'turn.aborted') {
+    return (
+      <div className="my-4 flex items-center gap-2 text-[11px] text-muted">
+        <span className="h-px flex-1 bg-border" />
+        <span className="uppercase tracking-wider font-semibold">
+          {primary.type.replace('turn.', '')}
+          {primary.timestamp && (
+            <>
+              {' · '}
+              <span className="mono normal-case tracking-normal">{fmtClock(primary.timestamp)}</span>
+            </>
+          )}
+        </span>
+        <span className="h-px flex-1 bg-border" />
+      </div>
+    );
+  }
+
+  // Unknown / system records → one-line muted row.
+  if (
+    primary.type !== 'chat.user' &&
+    primary.type !== 'chat.assistant.text' &&
+    primary.type !== 'tool.use' &&
+    primary.type !== 'tool.result' &&
+    primary.type !== 'chat.assistant.thinking' &&
+    primary.type !== 'chat.assistant.reasoning'
+  ) {
+    const label = primary.type === 'unknown' ? 'system' : primary.type;
+    return (
+      <div className="my-1 px-2 text-[11.5px] text-muted truncate" title={JSON.stringify(primary.data)}>
+        <span className="mono">{label}</span>
+      </div>
+    );
+  }
+
+  const text = extractText(primary);
+
+  // Turn prompt / long user message collapse: for chat.user only.
+  if (primary.type === 'chat.user' && text) {
+    const lines = text.split('\n');
+    if (isTurnProtocolWall(text)) {
+      return (
+        <div className="flex justify-end">
+          <div className="max-w-[min(720px,85%)]">
+            <TurnPromptCard text={text} />
+          </div>
+        </div>
+      );
+    }
+    if (lines.length > LONG_USER_LINE_THRESHOLD) {
+      return (
+        <div className="flex justify-end">
+          <div className="max-w-[min(720px,85%)]">
+            <LongUserCard text={text} />
+          </div>
+        </div>
+      );
+    }
+  }
+
+  const isUser = bubble.isUser;
   return (
     <div className={cn('flex', isUser ? 'justify-end' : 'justify-start')}>
       <div
@@ -46,10 +108,7 @@ export function MessageBubble({ bubble }: Props) {
           isUser ? 'bg-accent-soft border-accent-border text-fg' : 'bg-surface border-border text-fg',
         )}
       >
-        <div className="mb-1 flex items-center gap-2 text-[10.5px] text-muted">
-          <span className="font-semibold uppercase tracking-wider">{primary.source ?? 'system'}</span>
-          {primary.timestamp && <span className="mono">{fmtClock(primary.timestamp)}</span>}
-        </div>
+        <HeaderLine primary={primary} />
         {text && (
           <div className="prose-sm text-[13.5px] leading-relaxed break-words">
             <div className="markdown-body">
@@ -97,12 +156,16 @@ export function MessageBubble({ bubble }: Props) {
             </div>
           </div>
         )}
-        {/* Render a paired tool.use + tool.result as ONE ToolCallCard. */}
         {primary.type === 'tool.use' && bubble.pairedResult && (
-          <ToolCallCard use={primary.data as ToolUseData} result={bubble.pairedResult.data as ToolResultData} />
+          <ToolCard
+            use={primary.data as ToolUseData}
+            result={bubble.pairedResult.data as ToolResultData}
+            compact={density === 'compact'}
+          />
         )}
-        {primary.type === 'tool.use' && !bubble.pairedResult && <ToolCallCard use={primary.data as ToolUseData} />}
-        {/* Attachments under the markdown body. */}
+        {primary.type === 'tool.use' && !bubble.pairedResult && (
+          <ToolCard use={primary.data as ToolUseData} compact={density === 'compact'} />
+        )}
         {bubble.attachments.length > 0 && (
           <div>
             {bubble.attachments.map((rec, i) => {
@@ -112,14 +175,9 @@ export function MessageBubble({ bubble }: Props) {
                 return <ThinkingBlock key={i} text={t ?? ''} />;
               }
               if (rec.type === 'tool.use') {
-                // Inside the same bubble as the assistant text, an unpaired
-                // tool.use still renders as a card (no result yet, OR the
-                // result lives in the next bubble if the harness interleaved
-                // text in between).
-                return <ToolCallCard key={i} use={rec.data as ToolUseData} />;
+                return <ToolCard key={i} use={rec.data as ToolUseData} compact={density === 'compact'} />;
               }
               if (rec.type === 'tool.result') {
-                // Bare tool.result (no pair found) — render standalone.
                 const d = rec.data as ToolResultData | undefined;
                 const txt = typeof d?.text === 'string' ? d.text : 'tool result';
                 return (
@@ -135,17 +193,31 @@ export function MessageBubble({ bubble }: Props) {
                 return null;
               }
               if (rec.type === 'turn.started' || rec.type === 'turn.completed' || rec.type === 'turn.aborted') {
-                return (
-                  <div key={i} className="my-1 text-[10.5px] uppercase tracking-wider text-muted">
-                    {rec.type.replace('turn.', '')}
-                  </div>
-                );
+                // Inside an assistant turn we already drew the divider at the
+                // bubble level; ignore the duplicate record.
+                return null;
               }
               return null;
             })}
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function HeaderLine({ primary }: { primary: ChatRecord }) {
+  const ts = primary.timestamp;
+  const absolute = ts ? fmtClock(ts) : '';
+  const relative = ts ? fmtRelative(ts) : '';
+  return (
+    <div className="mb-1 flex items-center gap-2 text-[10px] text-muted">
+      <span className="font-semibold uppercase tracking-wider opacity-70">{primary.source ?? 'system'}</span>
+      {ts && (
+        <span className="mono" title={relative}>
+          {absolute}
+        </span>
+      )}
     </div>
   );
 }
