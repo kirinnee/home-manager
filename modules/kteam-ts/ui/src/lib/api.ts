@@ -11,6 +11,9 @@ declare global {
   }
 }
 
+// `?? ''` also covers a page served BEFORE the daemon's substitution fix
+// (where the global itself was renamed) — undefined must read as no-token,
+// never as the string "undefined".
 export const TOKEN = typeof window !== 'undefined' ? (window.__KTEAM_TOKEN__ ?? '') : '';
 export const HAS_TOKEN = TOKEN.length > 0;
 
@@ -22,15 +25,29 @@ export class ApiError extends Error {
   }
 }
 
+// A 401 while we HOLD a token means the token is stale (page served across a
+// daemon token change or the old substitution bug) — a fresh page load embeds
+// the current one. Reload ONCE per tab session; the guard prevents loops when
+// the daemon genuinely rejects us.
+function recoverFromStaleToken(): void {
+  if (typeof window === 'undefined' || !HAS_TOKEN) return;
+  if (sessionStorage.getItem('kteam-token-reload') === '1') return;
+  sessionStorage.setItem('kteam-token-reload', '1');
+  window.location.reload();
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (TOKEN) headers.set('authorization', `Bearer ${TOKEN}`);
   if (init?.body && !headers.has('content-type')) headers.set('content-type', 'application/json');
   const res = await fetch(path, { ...init, headers });
+  if (res.status === 401) recoverFromStaleToken();
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new ApiError(res.status, body.error ?? `HTTP ${res.status}`);
   }
+  // Any success re-arms the one-shot stale-token recovery.
+  if (typeof window !== 'undefined') sessionStorage.removeItem('kteam-token-reload');
   if (res.status === 204) return undefined as T;
   const ct = res.headers.get('content-type') ?? '';
   return ct.includes('application/json') ? ((await res.json()) as T) : ((await res.text()) as unknown as T);
