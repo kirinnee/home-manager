@@ -262,6 +262,24 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
     }
   }
 
+  // Interrupt the running turn (safe Escape daemon-side), then deliver the
+  // draft immediately — the composer's explicit alternative to queueing.
+  async function interruptAndSend() {
+    if (!draft.trim() || !HAS_TOKEN) return;
+    const msg = draft.trim();
+    setDraft('');
+    setActionNotice(null);
+    try {
+      await api.interrupt(sessionId);
+      const next = await api.send(sessionId, msg);
+      setView(next);
+      setActionNotice({ kind: 'ok', text: 'Turn interrupted — message delivered.' });
+    } catch (e) {
+      setDraft(msg); // never eat the draft on failure
+      setActionNotice({ kind: 'err', text: e instanceof ApiError ? e.message : String(e) });
+    }
+  }
+
   async function interrupt() {
     setActionNotice(null);
     try {
@@ -448,6 +466,7 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
             draft={draft}
             onDraftChange={setDraft}
             onSubmit={() => void send()}
+            onInterruptAndSend={() => void interruptAndSend()}
             disabled={!view || loadingInitial}
             busy={busy}
           />
