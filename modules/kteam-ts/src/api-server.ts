@@ -1,6 +1,12 @@
 import type { Server, ServerWebSocket } from 'bun';
+import { existsSync } from 'node:fs';
+import { join, normalize } from 'node:path';
 import type { KTeamService } from './service';
 import { renderShell } from './ui';
+
+// Built chat UI (Vite output, committed): served when present; the legacy
+// single-file shell remains the fallback so the daemon never 404s its own UI.
+const UI_DIST = new URL('../ui-dist', import.meta.url).pathname;
 
 interface SocketData {
   sessionId?: string;
@@ -66,10 +72,27 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
       // embeds the daemon token (loopback only) and passes it as a query
       // parameter; ordinary HTTP API calls remain bearer-authenticated.
       const websocketToken = isWebSocket && loopback ? url.searchParams.get('token') : undefined;
-      if (request.method === 'GET' && !url.pathname.startsWith('/v1/'))
+      if (request.method === 'GET' && !url.pathname.startsWith('/v1/')) {
+        const distIndex = join(UI_DIST, 'index.html');
+        if (existsSync(distIndex)) {
+          // Static assets (hashed filenames → cacheable). Path is confined to
+          // the dist dir; anything escaping it falls through to index.html.
+          const assetPath = normalize(join(UI_DIST, url.pathname));
+          if (url.pathname !== '/' && assetPath.startsWith(`${UI_DIST}/`) && existsSync(assetPath)) {
+            return new Response(Bun.file(assetPath), {
+              headers: { 'cache-control': 'public, max-age=31536000, immutable' },
+            });
+          }
+          // SPA shell for every client-side route; token only for loopback.
+          const html = (await Bun.file(distIndex).text()).replaceAll('__KTEAM_TOKEN__', loopback ? options.token : '');
+          return new Response(html, {
+            headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
+          });
+        }
         return new Response(renderShell(loopback ? options.token : ''), {
           headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
         });
+      }
       if (bearer !== options.token && websocketToken !== options.token) return json({ error: 'unauthorized' }, 401);
 
       try {
@@ -131,6 +154,11 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           return new Response(await (live ? options.service.snapshot(id) : options.service.lastSnapshot(id)), {
             headers: { 'content-type': 'text/plain; charset=utf-8' },
           });
+        }
+        if (action === 'chat' && request.method === 'GET') {
+          const before = url.searchParams.has('before') ? Number(url.searchParams.get('before')) : undefined;
+          const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : undefined;
+          return json(await options.service.chatHistory(id, before, limit));
         }
         if (action === 'logs' && request.method === 'GET') {
           const turn = url.searchParams.has('turn') ? Number(url.searchParams.get('turn')) : undefined;

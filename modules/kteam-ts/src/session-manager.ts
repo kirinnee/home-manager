@@ -27,7 +27,7 @@ import type { KTeamPaths } from './paths';
 import { configFile, markerFile, sessionDir, stateFile, turnLog, turnPrompt } from './paths';
 import type { AttachmentView, KTeamService, SessionView } from './service';
 import { EventStore, type JsonValue, type SessionEvent } from './storage';
-import { contextPercentUsed, paneShowsActiveWork, TmuxController } from './tmux-controller';
+import { contextPercentUsed, paneActivityLine, paneShowsActiveWork, TmuxController } from './tmux-controller';
 import type { KTeamEvent, SendRequest, SessionConfig, SessionState, SessionStatus, StartSessionRequest } from './types';
 
 interface MonitorHandle {
@@ -846,6 +846,29 @@ export class SessionManager implements KTeamService {
     // made the web UI (polling it every few seconds) feel broken.
     return await readFile(path.join(sessionDir(this.paths, id), 'last-snapshot.txt'), 'utf8').catch(() => '');
   }
+
+  async chatHistory(
+    id: string,
+    before?: number,
+    limit = 200,
+  ): Promise<{ total: number; offset: number; records: unknown[] }> {
+    id = this.resolveRef(id);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error('limit must be 1..1000');
+    const raw = await readFile(path.join(sessionDir(this.paths, id), 'chat.jsonl'), 'utf8').catch(() => '');
+    const records = raw
+      .split('\n')
+      .filter(Boolean)
+      .flatMap(line => {
+        try {
+          return [JSON.parse(line) as unknown];
+        } catch {
+          return [];
+        }
+      });
+    const end = before === undefined ? records.length : Math.max(0, Math.min(before, records.length));
+    const offset = Math.max(0, end - limit);
+    return { total: records.length, offset, records: records.slice(offset, end) };
+  }
   async logs(id: string, turn?: number): Promise<string> {
     id = this.resolveRef(id);
     const view = await this.get(id);
@@ -1242,12 +1265,16 @@ export class SessionManager implements KTeamService {
             const contextPercent = contextPercentUsed(pane.visiblePane);
             const contextTurnedHigh =
               contextPercent !== undefined && contextPercent >= 85 && (view.state.contextPercent ?? 0) < 85;
+            // The harness's own spinner line ("✻ Lollygagging… (34s · 2.1k
+            // tokens)") — the chat UI's received-and-thinking indicator.
+            const activity = paneActivityLine(pane.visiblePane);
             await this.transition(
               id,
               {
                 lastActivityAt: now(),
                 lastPaneAt: now(),
                 promptReady: pane.promptReady,
+                activity,
                 ...(contextPercent !== undefined ? { contextPercent } : {}),
                 health: waitingStatuses.includes(view.state.status)
                   ? 'waiting'
@@ -1259,6 +1286,7 @@ export class SessionManager implements KTeamService {
               {
                 hash: paneHash,
                 promptReady: pane.promptReady,
+                ...(activity !== undefined ? { activity } : {}),
                 ...(contextPercent !== undefined ? { contextPercent } : {}),
               },
             );

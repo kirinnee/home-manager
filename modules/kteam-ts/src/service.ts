@@ -32,6 +32,14 @@ export interface KTeamService {
   /** The monitor's most recent pane snapshot, read from disk — no tmux capture,
    *  no session lock. The UI polls this; snapshot() stays for live captures. */
   lastSnapshot(id: string): Promise<string>;
+  /** Paginated read of the session's normalized chat.jsonl (both harnesses).
+   *  Tail-first: no `before` returns the LAST `limit` records; `before` = the
+   *  record index below which to page backwards. */
+  chatHistory(
+    id: string,
+    before?: number,
+    limit?: number,
+  ): Promise<{ total: number; offset: number; records: unknown[] }>;
   logs(id: string, turn?: number): Promise<string>;
   replay(id: string | undefined, after: number, limit?: number): Promise<KTeamEvent[]>;
   subscribe(listener: (event: KTeamEvent) => void): () => void;

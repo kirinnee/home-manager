@@ -131,6 +131,26 @@ export function contextPercentUsed(pane: string): number | undefined {
   return undefined;
 }
 
+/** The harness's own activity line from the visible pane — "✻ Lollygagging…
+ *  (34s · 2.1k tokens)", "• Working (6m52s • Esc to interrupt)" — so the UI can
+ *  show a received-and-thinking indicator with the harness's wording between
+ *  transcript flushes. Undefined when no active turn is visible. */
+export function paneActivityLine(pane: string): string | undefined {
+  for (const line of pane.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.length > 160) continue;
+    if (
+      /^[✻✳✶✽∗·•⏺]\s*\S+…/u.test(trimmed) ||
+      /^\S+…\s*\(\d/u.test(trimmed) ||
+      /\bworking\s*\(\s*\d+[ms]/i.test(trimmed)
+    ) {
+      // Strip the interrupt hint noise; keep verb + elapsed + token count.
+      return trimmed.replace(/\s*[·•∙]?\s*(esc|ctrl\+c) to interrupt.*$/i, '').trim();
+    }
+  }
+  return undefined;
+}
+
 export function parsePaneMetadata(value: string): PaneMetadata {
   const [dead, exit, cursorX, cursorY, paneHeight, paneWidth] = value.replace(/\n$/, '').split('|');
   const optionalNumber = (field?: string) =>
