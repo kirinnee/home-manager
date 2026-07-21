@@ -129,6 +129,12 @@ describe('kteam daemon API', () => {
     const response = await fetch(`http://127.0.0.1:${server.port}/`);
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')).toContain('text/html');
-    expect(await response.text()).toContain('const TOKEN = "secret"');
+    const body = await response.text();
+    // Served shell is the built dist app when ui-dist exists, else the legacy
+    // single-file shell — both must embed the token for loopback requesters,
+    // and the dist path must NOT rename the __KTEAM_TOKEN__ global.
+    expect(body).toContain('"secret"');
+    expect(body).not.toContain('window.secret');
+    expect(body).not.toContain('"__KTEAM_TOKEN__"');
   });
 });

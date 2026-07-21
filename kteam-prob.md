@@ -188,3 +188,58 @@ babysitters: for spaced monitoring cycles, use a FOREGROUND polling loop (`for i
 do sleep 30; check; done` or `until <cond>; do sleep 10; done`) — a backgrounded sleep
 does not pace your turn, and its notification may arrive much later. No kteam-ts code path
 involved; nothing to fix in modules/kteam-ts.
+
+## 2026-07-21 — kteam UX: `kteam daemon status` misleads reachability checks in non-systemd contexts
+
+**Session:** mrv0xcjs-17341a08 (ashley, claude-auto-loge, kloop→kteam migration)
+
+**Problem:** Inside a running kteamd session (or any context where kteamd was started by the
+TUI harness rather than systemd), `kteam daemon status` reports "kteamd is stopped" (exit 1)
+even though the HTTP API at 127.0.0.1:7337 is fully up and serving requests. This is because
+`daemon status` interrogates the systemd service manager, not the actual API socket.
+
+**Evidence:** Ashley's initial `daemonReachable()` used `kteam daemon status` exit code.
+During smoke-test preflight, `kteam daemon status` returned "kteamd is stopped" / exit 1
+while ashley was actively running as a kteam session (proving the API is up).
+
+**Suspected code path:** `modules/kteam-ts/src/index.ts` — `daemonCommand.command('status')`
+calls `daemon.status()` which checks the systemd unit, not an HTTP probe.
+
+**Workaround (applied by ashley):** Changed `daemonReachable()` to use `kteam ps --json`
+(exit 0 = API reachable, non-zero = daemon down) instead of `kteam daemon status`. Fixed in
+`modules/kloop-ts/src/kteam.ts`.
+
+**Suggested kteam fix:** `kteam daemon status` should probe the HTTP API (GET /status or
+similar) and report "running" if it responds, regardless of whether systemd is involved.
+The systemd unit-file check should be a separate flag or a secondary display.
+
+---
+
+## 2026-07-21 — lesson (NOT a kteam bug): commit backend work before launching teammates
+
+During session mruyefig-29a6f557 (hailey, kteam-chat-ui) the babysitter found 6 modified
+daemon src files in the working tree and briefly misattributed them to the teammate as a
+guardrail violation. They were the lead's own uncommitted backend work (committed after
+the fact as 5d95328). Lesson: the lead should commit (or stash) their own work BEFORE
+launching teammates, so `git status` attribution of working-tree changes to the teammate
+is unambiguous and guardrail checks stay trivial. No kteam-ts code path involved.
+
+## 2026-07-21 — `kteam wait --json` emits multi-line JSON (integration gotcha, consumer-side)
+
+**Problem:** kloop's new kteam-backed agent runner polled `kteam wait <id> --json`
+and parsed the status with `waited.stdout.trim().split('\n').at(-1)`. `kteam wait
+--json` prints `state` as **pretty-printed** (multi-line) JSON, so `.at(-1)` is the
+lone `}` → `JSON.parse` throws → status never updates → kloop's poll loop never
+sees `completed` and spins until the deadline (smoke run f7tmpiu4 hung ~19:44).
+
+**Evidence:** babysitter caught the smoke run stuck re-polling; implementer kteam
+session was `completed` while kloop still showed `running — impl`.
+
+**Suspected code path:** consumer bug in `modules/kloop-ts/src/agents/runner.ts`
+`launch()`, NOT kteamd. But worth recording: `kteam wait --json` (kteam-ts
+`src/index.ts` prints `JSON.stringify(view.state, null, 2)`) is multi-line — any
+consumer must parse the whole stdout, not the last line.
+
+**Fix (kloop side):** parse the full stdout (`JSON.parse(waited.stdout.trim())`);
+added a test whose fake `kteam` returns pretty-printed JSON so the regression can't
+return. Verified: fresh smoke run 8ayooxsb → completed/consensus, out.txt=DONE.
