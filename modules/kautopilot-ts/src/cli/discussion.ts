@@ -101,7 +101,7 @@ function printHuman(d: ReturnType<typeof readDiscussion>): void {
 			t.elapsedMs != null ? ` ${Math.round(t.elapsedMs / 60000)}m` : "";
 		const progress = t.lastProgress ? ` — ${t.lastProgress}` : "";
 		console.log(
-			`  turn ${t.turn}: ${t.state}${elapsed} (attempts: ${t.attempts})${progress}${t.state === "running" && t.tmuxSession ? ` [watch: tmux attach -r -t ${t.tmuxSession}]` : ""}`,
+			`  turn ${t.turn}: ${t.state}${elapsed} (attempts: ${t.attempts})${progress}${t.state === "running" && t.kteamSessionId ? ` [watch: kteam attach ${t.kteamSessionId}]` : ""}`,
 		);
 		const env = t.envelope as { summary?: string } | null;
 		if (env?.summary) console.log(`    ${env.summary.split("\n")[0]}`);

@@ -13,29 +13,37 @@ import { sessionDir } from "../artifacts";
 // ============================================================================
 // The deferred-writer scratch mailbox (specs/deferred-writer-relay.md §1):
 //   ~/.kautopilot/<sessionId>/scratch/<phaseKey>/
-//     writer.json                     — pinned account + harness session id + status
-//     turn-000N/{message.md, reply.json, meta.json, progress.log, done}
+//     writer.json                     — pinned account + kteam session id + status
+//     turn-000N/{message.md, reply.json, meta.json, progress.log}
 // All JSON writes are temp-file + rename (atomic) — the dashboard/`discussion`
-// read them live.
+// read them live. reply.json doubles as the turn's completion marker (kteam
+// `wait --until-marker`), so there is no separate `done` sentinel.
 // ============================================================================
 
 export type WriterStatus = "idle" | "running" | "interrupted" | "failed";
 
+/** On-disk writer.json schema version. 1 = the pre-kteam (tmux) harness era
+ *  (`harnessSessionId` + `started`, no kteam session); 2 = the kteam harness.
+ *  Stamped on every write so a legacy file is never silently misread as fresh.
+ *  Module-private: callers ask via `isLegacyWriterState`, not the raw number. */
+const WRITER_SCHEMA_VERSION = 2;
+
 export interface WriterState {
+	/** Schema version (see WRITER_SCHEMA_VERSION). Absent on tmux-era files. */
+	schemaVersion?: number;
 	phaseKey: string;
-	/** Concrete claude wrapper binary — pinned at turn 1 (resume requires it). */
+	/** Concrete claude wrapper binary — pinned at turn 1 (the pool is consulted
+	 *  once per phase; kteam owns any later account failover). */
 	account: string;
-	/** Harness session uuid minted by kautopilot; --session-id then --resume. */
-	harnessSessionId: string;
-	/** Where the writer TUI is launched (session.json.folder — the hub dir). */
+	/** The kteam session id for this phase — minted by `kteam start` on turn 1,
+	 *  then `kteam send`-driven for every later turn. Undefined until turn 1
+	 *  actually starts (the start-vs-send switch). */
+	kteamSessionId?: string;
+	/** Where the writer session runs (session.json.folder — the hub dir). */
 	cwd: string;
 	status: WriterStatus;
 	/** Last completed (accepted) turn. */
 	turns: number;
-	/** True once the harness conversation is known to exist (first attempt got
-	 *  past input delivery) — the launch flag switch: false → `--session-id`,
-	 *  true → `--resume`. */
-	started: boolean;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -63,14 +71,16 @@ export interface TurnMeta {
 	/** SHA-256 of the working artifact at compose time (single-file kinds) —
 	 *  best-effort "revised:false must be untouched" check. */
 	artifactHashAtSend?: string;
-	tmuxSession?: string;
-	/** Pane scrollback captured on failure (diagnostic). */
-	paneSnapshot?: string;
+	/** The kteam session that ran this turn (for the discussion watch hint). */
+	kteamSessionId?: string;
+	/** kteam snapshot captured on failure (the diagnostic that replaced the old
+	 *  tmux pane scrollback). */
+	snapshot?: string;
 	/** True once the reply passed validation AND enrichment/bookkeeping ran. */
 	accepted?: boolean;
 }
 
-/** phaseKey → a tmux-/filesystem-safe slug. */
+/** phaseKey → a filesystem-safe slug. */
 export function phaseKeySafe(phaseKey: string): string {
 	return phaseKey.replace(/[^a-zA-Z0-9_-]/g, "_");
 }
@@ -94,7 +104,6 @@ export function turnPaths(sessionId: string, phaseKey: string, turn: number) {
 		reply: join(dir, "reply.json"),
 		meta: join(dir, "meta.json"),
 		progress: join(dir, "progress.log"),
-		sentinel: join(dir, "done"),
 	};
 }
 
@@ -116,7 +125,7 @@ function readJson<T>(path: string): T | null {
 
 // --- writer.json --------------------------------------------------------------
 
-function writerJsonPath(sessionId: string, phaseKey: string): string {
+export function writerJsonPath(sessionId: string, phaseKey: string): string {
 	return join(phaseDir(sessionId, phaseKey), "writer.json");
 }
 
@@ -127,10 +136,27 @@ export function readWriterState(
 	return readJson<WriterState>(writerJsonPath(sessionId, phaseKey));
 }
 
+/**
+ * True when a writer.json was written by the pre-kteam (tmux) harness: it lacks
+ * the current `schemaVersion` AND carries a tmux-era field (`harnessSessionId`
+ * or `started`) the kteam shape never writes. The relay uses this to REFUSE
+ * starting a competing writer over an in-flight legacy session (which the new
+ * label-based cleanup can't see or stop). A fresh kteam writer.json — even
+ * before turn 1, when `kteamSessionId` is still absent — is never legacy: it
+ * carries `schemaVersion`.
+ */
+export function isLegacyWriterState(state: WriterState | null): boolean {
+	if (!state) return false;
+	const raw = state as unknown as Record<string, unknown>;
+	if (raw.schemaVersion === WRITER_SCHEMA_VERSION) return false;
+	return "harnessSessionId" in raw || "started" in raw;
+}
+
 export function writeWriterState(sessionId: string, state: WriterState): void {
 	mkdirSync(phaseDir(sessionId, state.phaseKey), { recursive: true });
 	writeJsonAtomic(writerJsonPath(sessionId, state.phaseKey), {
 		...state,
+		schemaVersion: WRITER_SCHEMA_VERSION,
 		updatedAt: new Date().toISOString(),
 	});
 }
@@ -222,26 +248,27 @@ export function lastProgress(
 	return lines.length ? lines[lines.length - 1] : null;
 }
 
-/** Unlink a turn's sentinel — REQUIRED before every (re)spawn: a stale marker
- *  from a prior attempt must never read as this attempt's completion. */
-export function clearSentinel(
+/** Delete a turn's reply.json — REQUIRED before every (re)send: reply.json is
+ *  the `kteam wait --until-marker` completion marker, so a stale one from a
+ *  prior attempt must never read as this attempt's envelope. */
+export function clearReply(
 	sessionId: string,
 	phaseKey: string,
 	turn: number,
 ): void {
 	try {
-		unlinkSync(turnPaths(sessionId, phaseKey, turn).sentinel);
+		unlinkSync(turnPaths(sessionId, phaseKey, turn).reply);
 	} catch {
 		// absent is fine
 	}
 }
 
-export function sentinelExists(
+export function replyExists(
 	sessionId: string,
 	phaseKey: string,
 	turn: number,
 ): boolean {
-	return existsSync(turnPaths(sessionId, phaseKey, turn).sentinel);
+	return existsSync(turnPaths(sessionId, phaseKey, turn).reply);
 }
 
 export function hashMessage(message: string): string {

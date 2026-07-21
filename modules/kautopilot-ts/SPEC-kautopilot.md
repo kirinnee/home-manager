@@ -164,8 +164,9 @@ enforces _artifact presence_, not consent.
   links per turn). Pinned per session at `start --writer …`; staged per step via
   `config.writer.steps`. Full design: `specs/deferred-writer-relay.md`;
   command surface: CLI-CONTRACT §5d. (The "no `claude -p` from the binary" rule
-  still holds — the writer session is an interactive tmux TUI driven with
-  `--session-id`/`--resume`, kloop-style, never `--print`.)
+  still holds — the writer session is a persistent **kteamd** session, `kteam
+  start`/`send`-driven, kloop-style, never `--print`. kteamd owns the TUI,
+  resume/crash-recovery, and account failover.)
 
 ## 7. Phases (one flat machine)
 

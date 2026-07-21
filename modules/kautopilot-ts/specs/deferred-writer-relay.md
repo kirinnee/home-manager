@@ -3,6 +3,35 @@
 Revision 3 — after floop rounds 1 (correctness, blindspot, feasibility) and 2
 (correctness/consistency, operational/UX).
 
+> **Revision 4 — HARNESS MIGRATED TO kteam (2026-07).** The writer session is no
+> longer driven by kautopilot's own tmux machinery. It now runs as a **persistent
+> kteamd session** (chain: kautopilot → kloop → kteam → kfleet), reusing kloop's
+> patterns (`src/core/writer/kteam.ts`, mirroring kloop-ts `src/agents/runner.ts`).
+> The **envelope protocol is unchanged** (reply.json schema + validation,
+> binary-owns-locks, writer-never-runs-kautopilot, relay-only main session). What
+> changed — every block below tagged **[SUPERSEDED → kteam]** is the OLD tmux
+> design, kept for provenance:
+> - **Harness:** turn 1 = `kteam start -a <acct> --mode auto --name writer-<kind>
+>   --label kauto-<sessionId> --cwd <cwd> --prompt-file <turn1>`; later turns /
+>   corrective retries / re-attach = `kteam send <id> --message-file <turnN>`
+>   (a finished session auto-revives on send). No `--session-id`/`--resume`,
+>   send-keys, pane-readiness, or `remain-on-exit` — kteamd owns the TUI.
+> - **Turn completion:** `reply.json` IS the completion marker, gated by
+>   `kteam wait <id> --until-marker <reply.json> --timeout <n>`. The separate
+>   `done` sentinel is gone (§1); the relay rotates reply.json before each attempt.
+> - **Failure model:** the fatal-pane-signature scan (rate_limit/auth/resume_lost/
+>   session_exists) is replaced by mapping kteam statuses — `failed`/`stalled`/
+>   `stopped` (wait exit 1) → failed; `awaiting_*`/`waiting` without a marker →
+>   needs-attention; our deadline → timeout. All three nudge-and-`send`-retry
+>   within `maxTurnRetries`. The **auto-rebootstrap** machinery (§4) collapses
+>   into `kteam send` auto-revive + kteam-owned account failover (the pool is
+>   consulted once, at phase start).
+> - **Daemon down:** fail loudly with a `kteam daemon start` hint, WITHOUT
+>   corrupting turn state (the turn stays re-attachable).
+> - **Diagnostics:** `meta.json.snapshot` holds a `kteam snapshot` (was
+>   `paneSnapshot`); `writer.json` stores `kteamSessionId` (was the minted
+>   `harnessSessionId` + `started`); the watch hint is `kteam attach <id>`.
+
 ## Problem
 
 Interactive writer steps (brainstorm, triage, write_spec, write_master_plan,
@@ -74,6 +103,12 @@ scratch/
                               # binary before EVERY (re)spawn — stale-marker hazard)
     turn-0002/ …
 ```
+
+> **[SUPERSEDED → kteam]** There is no `done` file. `reply.json` itself is the
+> `kteam wait --until-marker` completion marker; the relay rotates (deletes)
+> reply.json before each attempt (same stale-marker hygiene, one fewer file).
+> `meta.json` carries `snapshot` (kteam snapshot) instead of `paneSnapshot`, and
+> the tmux-session field is now `kteamSessionId`.
 
 - `phaseKey` = the same scope strings `runRevise` uses for `alreadyPresented`:
   `brainstorm`, `<kind>@<epoch>`, and `plans@<epoch>:<repo>` (repo via
@@ -187,6 +222,12 @@ One call = one writer turn. Flow:
    mechanics as `next`'s inline code steps). The writer never contends for this
    lock (it runs no kautopilot commands).
 3. **Recovery / idempotency** (checked in order, before composing anything):
+   > **[SUPERSEDED → kteam]** Step (0) below (orphaned-but-alive tmux `/exit`+kill)
+   > is gone — kautopilot no longer owns the session's lifecycle. Its useful half
+   > survives as **adoption-from-disk**: on re-attach, if reply.json exists and
+   > validates, accept the turn without re-sending. The rest of the matrix
+   > (idempotent accepted-return, in-flight refusal, re-attach) is unchanged;
+   > re-attach is now a `kteam send` nudge to the persistent session.
    - **(0) Orphaned-but-alive tmux**: if `meta.json` records a tmux session that is
      still alive (controller was killed; try/finally never ran): when the sentinel
      is present and `reply.json` validates → **adopt** the turn (send `/exit`, kill,
@@ -226,6 +267,13 @@ One call = one writer turn. Flow:
      leave a phantom unpresented version behind at phase end; the working artifact
      for `complete --output` is the last presented version.
 5. **Spawn tmux** (ported kloop mechanics + a new resume path):
+   > **[SUPERSEDED → kteam]** This entire step is replaced by
+   > `WriterKteam.runTurn`: `kteam start` (turn 1) or `kteam send` (later turns);
+   > then poll `kteam wait --until-marker <reply.json>` in ≤60s slices,
+   > heartbeating the lock, until the marker / a terminal status / the per-turn
+   > deadline. No launch flags, readiness, inject, `/exit`, kill backstop, or
+   > fatal-pane scan — kteamd owns all of it. The resume-replay soak concern below
+   > is moot (kteam manages resume).
    - Turn 1: `<account> --dangerously-skip-permissions --session-id <uuid>`
    - Turn ≥2: `<account> --dangerously-skip-permissions --resume <uuid>`
    - Always: unlink sentinel → launch → waitForPaneReady → inject bootstrap line
@@ -287,6 +335,13 @@ full writer workload (prompt + reviewers + visuals) on THIS account and context 
 the cost deferred mode exists to avoid — and cannot be switched back this session."
 Discussion history stays on disk either way.
 
+> **[SUPERSEDED → kteam]** Auto-rebootstrap is gone. kteamd owns crash recovery
+> (auto-revive on `send`) and account failover, so there is no uuid re-mint,
+> pool re-pick, or catch-up-message rebuild. `relay:rebootstrap` is no longer
+> emitted. The pool is consulted exactly once (at phase start, `pickAccount`);
+> the terminal-failure remediation now points at "re-run relay to re-attach" and
+> `--fallback-inline`, not rebootstrap.
+
 **Auto-rebootstrap** (resume launch fails on 2 consecutive attempts, or the
 harness home lost the conversation): mint a new uuid, re-pick from the pool
 (**excluding** the failed account when alternatives exist; a single-account pool
@@ -324,9 +379,11 @@ Binary-owned block in `src/steps/prompt-helpers.ts`, used in place of
 - **Progress markers:** append one short line to `<turn dir>/progress.log` at each
   phase change (`drafting`, `reviewers 3/8`, `fixing findings`, `visual`,
   `finalizing`) so the user has a live status.
-- End EVERY turn by writing `<turn dir>/reply.json` per the schema (inlined), then
-  `touch <turn dir>/done` as the very last action. A pure Q&A turn sets
-  `revised: false` and leaves the artifact untouched.
+- End EVERY turn by writing `<turn dir>/reply.json` per the schema (inlined) as
+  the very last action, written atomically (temp file + rename) so the relay's
+  `kteam wait --until-marker` never reads a partial file. **[SUPERSEDED → kteam]**
+  the old "then `touch <turn dir>/done`" step is gone — reply.json is the marker.
+  A pure Q&A turn sets `revised: false` and leaves the artifact untouched.
 - Populate `proposedCompletionMetadata` from the artifact once the phase looks
   approvable (shape from the step's `completionMetadataSchema`, provided in the
   message) — the main session confirms it with the user; you never decide approval.
@@ -481,7 +538,7 @@ links table alike.
 | `src/core/session-meta.ts` | `writerMode?: "inline"\|"deferred"` on SessionMeta |
 | `src/core/descriptor.ts` | `execution` field |
 | `src/core/driver.ts` | compute `execution`; lightweight deferred descriptors; expose revise internals (mint-or-reuse, markPresented, alreadyPresented, URL construction) for the relay; `runRevise` rejects on deferred steps |
-| `src/core/writer/` (new) | `scratch.ts`, `pool.ts`, `tmux.ts` (kloop port + NEW resume path + fatal-signature scan), `relay.ts` (turn engine §4), `envelope.ts` (validate/verify/enrich/caps) |
+| `src/core/writer/` | `scratch.ts`, `pool.ts`, `kteam.ts` (**Rev 4** — WriterKteam: start/send + `wait --until-marker`; replaced `tmux.ts`), `relay.ts` (turn engine §4), `envelope.ts` (validate/verify/enrich/caps) |
 | `src/cli/relay.ts` (new) | command, lock+heartbeat, `--message/--message-file/--fallback-inline` |
 | `src/cli/discussion.ts` (new) | turn list |
 | `src/cli/start.ts` | `--writer inline\|deferred`; persist `writerMode` |
@@ -497,6 +554,14 @@ links table alike.
 Skill side: `kfleet/skills/kautopilot/{SKILL.md,links-table.md,relay.md(new)}` and
 the `skills-codex` mirror.
 
+> **[SUPERSEDED → kteam]** The tmux-port notes below no longer apply — no
+> waitForPaneReady/injectLine/bypass-gate/sentinel-poll/`/exit`, no per-attempt
+> `kap-…` tmux names (kteam owns naming; kautopilot uses the `--label
+> kauto-<sessionId>` and `--name writer-<kind>` for `ps`/cleanup). The
+> injectable seam is now `KteamExec` (a fake `kteam` runner) — the turn engine is
+> unit-tested with a fake `WriterKteam`. CLAUDECODE is still scrubbed (in
+> `defaultKteamExec`).
+
 tmux port notes: copy waitForPaneReady, injectLine, bypass-gate dismissal, sentinel
 poll, /exit + kill backstop, CLAUDECODE scrub; add the fatal-signature pane scan
 and the resume-replay-tolerant readiness/inject probing. Skip transcript copying
@@ -507,20 +572,27 @@ kloop) so the turn engine is unit-testable with a fake tmux.
 
 ## 10. Testing
 
-- Unit (fake tmux via the spawn seam): envelope validation incl. caps + side-effect
-  checks (revised true/false paths); scratch layout/turn indexing/idempotent
-  re-read/messageHash-equality dedupe; the §4.3 recovery matrix incl. alive-tmux
-  adoption and idempotent acceptance re-run; Q&A turns don't burn presentations;
-  pool weighted pick (seeded) + rebootstrap account exclusion; phaseKey derivation
-  incl. `plans@E:repo`; descriptor `execution` + lightweight deferred shape;
-  `runRevise` deferred rejection; WAL events non-cursor; fatal-signature
-  classification.
-- Integration (local/manual, skipped when `tmux` absent — CI runs no bun tests):
-  fake "claude" shell script through real tmux, 3 turns incl. one corrective retry
-  and one Q&A turn.
+- Unit (fake `WriterKteam` / `KteamExec` seam): envelope validation incl. caps +
+  side-effect checks (revised true/false paths); scratch layout/turn indexing/
+  idempotent re-read/messageHash-equality dedupe; the §4.3 recovery matrix incl.
+  adoption-from-disk and idempotent acceptance re-run; Q&A turns don't burn
+  presentations; pool weighted pick (seeded); phaseKey derivation incl.
+  `plans@E:repo`; descriptor `execution` + lightweight deferred shape;
+  `runRevise` deferred rejection; WAL events non-cursor; kteam outcome mapping
+  (done / needs-attention / failed / timeout); daemon-down loud non-corrupting
+  failure; start→send session-id reuse; and start-then-daemon-down persisting the
+  id before the wait (no orphaned session).
+- **[SUPERSEDED → kteam]** Integration is no longer a fake-claude-through-real-tmux
+  script. The kteam smoke drives `WriterKteam.runTurn` against a real kteam
+  session on a cheap wrapper (`claude-auto-dsv4f`): turn 1 prompt → the agent
+  writes reply.json → the `--until-marker` gate returns `done`; the labelled
+  session (`kauto-<sessionId>`) is visible in `kteam ps`. (Driver:
+  `smoke-writer-kteam.ts`, run ad-hoc from the module dir — not committed.)
 - **Manual soak (required before enabling deferred for real work):** real claude
-  account, one spec phase, ≥3 turns — validates the `--resume` launch path,
-  readiness under transcript replay, envelope quality, and the latency claims.
+  account, one spec phase, ≥3 turns — validates persistent-session context across
+  `kteam send` turns, auto-revive after a completed turn, envelope quality, and
+  the latency claims. (The `--resume`/transcript-replay concerns are moot — kteam
+  owns resume.)
 
 ## 11. Rollout
 

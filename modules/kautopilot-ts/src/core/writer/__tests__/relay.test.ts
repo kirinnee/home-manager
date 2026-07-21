@@ -1,11 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { sessionDir } from "../../artifacts";
 import {
 	alreadyPresented,
 	artifactScope,
-	markPresented,
 	mintOrReuseWorkingVersion,
 } from "../../driver";
 import { readLog } from "../../log";
@@ -15,15 +14,17 @@ import { readDiscussion, runRelay } from "../relay";
 import {
 	hashMessage,
 	turnPaths,
+	writerJsonPath,
 	writeTurnMeta,
 	writeTurnReply,
 	writeWriterState,
 } from "../scratch";
 
 // ============================================================================
-// Relay engine tests with a FAKE tmux (no real tmux server, no real claude).
-// The fake simulates the writer by materializing the reply/sentinel per a
-// scripted behavior when runTurn is called.
+// Relay engine tests with a FAKE kteam harness (no daemon, no real claude). The
+// fake simulates the writer by materializing reply.json (the completion marker)
+// per a scripted behavior when runTurn is called, and mints/reuses a kteam
+// session id the way `kteam start`/`send` would.
 // ============================================================================
 
 const SID = "test-relay-unit";
@@ -76,75 +77,82 @@ const CONFIG = {
 	},
 };
 
-type FakeOutcome =
-	| "done"
-	| "died"
-	| "timeout"
-	| { outcome: "fatal"; fatalKind: string; delivered?: boolean };
+type FakeOutcome = "done" | "needs_attention" | "failed" | "timeout";
 
-/** A fake WriterTmux whose runTurn executes a scripted behavior. */
-function fakeTmux(
+interface FakeCall {
+	kteamSessionId?: string;
+	messageFile: string;
+	account: string;
+	label: string;
+	name: string;
+}
+
+/** A fake WriterKteam whose runTurn executes a scripted behavior and mints/reuses
+ *  a kteam session id (start when none was passed, send otherwise). */
+function fakeKteam(
 	behavior: (params: {
-		sentinelFile: string;
+		markerFile: string;
 		messageFile: string;
-		resume: boolean;
-		harnessSessionId: string;
-		binary: string;
+		kteamSessionId?: string;
+		account: string;
 	}) => Promise<FakeOutcome>,
+	opts: { daemonReachable?: boolean } = {},
 ) {
-	const calls: Array<{
-		resume: boolean;
-		messageFile: string;
-		harnessSessionId: string;
-		binary: string;
-	}> = [];
+	const calls: FakeCall[] = [];
+	let idCounter = 0;
+	let minted: string | undefined;
 	return {
 		calls,
-		isSessionAlive: async () => false,
-		killSession: async () => {},
-		gracefulClose: async () => {},
-		killSessionsWithPrefix: async () => 0,
+		daemonReachable: async () => opts.daemonReachable ?? true,
+		stopByLabel: async () => 0,
+		stop: async () => {},
+		snapshot: async () => "fake snapshot",
 		runTurn: async (params: {
-			sessionName: string;
-			binary: string;
-			harnessSessionId: string;
-			resume: boolean;
+			kteamSessionId?: string;
+			account: string;
+			name: string;
+			label: string;
 			cwd: string;
 			messageFile: string;
-			sentinelFile: string;
+			markerFile: string;
 			timeoutMins: number;
+			onSessionCreated?: (id: string) => void;
+			onTick?: () => void;
 		}) => {
 			calls.push({
-				resume: params.resume,
+				kteamSessionId: params.kteamSessionId,
 				messageFile: params.messageFile,
-				harnessSessionId: params.harnessSessionId,
-				binary: params.binary,
+				account: params.account,
+				label: params.label,
+				name: params.name,
 			});
-			const res = await behavior(params);
-			if (typeof res === "object") {
-				return {
-					outcome: "fatal" as const,
-					fatalKind: res.fatalKind,
-					pane: "fake fatal pane",
-					delivered: res.delivered ?? false,
-					durationMs: 1,
-				};
+			// start (no id) mints one; send reuses the passed id.
+			if (!params.kteamSessionId && !minted) {
+				idCounter += 1;
+				minted = `kt-${idCounter}`;
 			}
+			const id = params.kteamSessionId ?? (minted as string);
+			// Mirror the real harness: a fresh start persists the id BEFORE the wait.
+			if (!params.kteamSessionId) params.onSessionCreated?.(id);
+			// `behavior` may throw (e.g. DaemonUnavailableError during the wait) —
+			// AFTER onSessionCreated, exactly like the real runTurn ordering.
+			const outcome = await behavior(params);
 			return {
-				outcome: res,
-				pane: res === "done" ? "" : "fake pane",
-				delivered: res !== "died",
+				outcome,
+				kteamSessionId: id,
+				status: outcome === "done" ? "completed" : "stalled",
+				snapshot: outcome === "done" ? undefined : "fake snapshot",
 				durationMs: 1,
 			};
 		},
 	};
 }
 
-/** Writer-side simulation: write a valid spec revision + visual + reply.
- *  `version` = the working version the relay handed out for this turn. */
+/** Writer-side simulation: write a valid spec revision + visual + reply.json
+ *  (the marker). `version` = the working version the relay handed out. */
 function writerProducesValidReply(turn: number, revised = true, version = 1) {
 	const specDir = join(sessionDir(SID), "epoch", "1", "spec");
-	return async (params: { sentinelFile: string }) => {
+	return async () => {
 		if (revised) {
 			mkdirSync(specDir, { recursive: true });
 			writeFileSync(
@@ -160,7 +168,6 @@ function writerProducesValidReply(turn: number, revised = true, version = 1) {
 			openItems: [],
 			artifact: { kind: "spec", version, revised },
 		});
-		writeFileSync(params.sentinelFile, "");
 		return "done" as const;
 	};
 }
@@ -181,24 +188,122 @@ describe("runRelay", () => {
 		});
 		const result = await runRelay(SID, CONFIG, {
 			message: "go",
-			tmux: fakeTmux(async () => "done") as never,
+			harness: fakeKteam(async () => "done") as never,
 		});
 		expect(result.ok).toBe(false);
 		expect(result.error).toContain("not deferred");
 	});
 
-	test("turn 1: pins the account, launches with --session-id (resume=false), accepts a valid revised reply, marks presented, enriches links", async () => {
-		const tmux = fakeTmux(writerProducesValidReply(1));
+	test("daemon down: fails loudly without writing turn state", async () => {
 		const result = await runRelay(SID, CONFIG, {
 			message: "",
-			tmux: tmux as never,
+			harness: fakeKteam(async () => "done", {
+				daemonReachable: false,
+			}) as never,
+		});
+		expect(result.ok).toBe(false);
+		expect(result.error?.toLowerCase()).toContain("daemon");
+		expect(result.remediation?.join(" ")).toContain("kteam daemon start");
+		// No turn was composed (state uncorrupted).
+		const d = readDiscussion(SID, "spec@1");
+		expect(d.turns.length).toBe(0);
+	});
+
+	test("start succeeds then daemon down during wait: id persisted before the wait, turn stays re-attachable (no orphan)", async () => {
+		const { DaemonUnavailableError } =
+			require("../kteam") as typeof import("../kteam");
+		// The session is created (onSessionCreated fires), then the wait dies.
+		const kteam = fakeKteam(async () => {
+			throw new DaemonUnavailableError(
+				"kteam daemon is unreachable; start it with: kteam daemon start",
+			);
+		});
+		const result = await runRelay(SID, CONFIG, {
+			message: "",
+			harness: kteam as never,
+		});
+		expect(result.ok).toBe(false);
+		expect(result.error?.toLowerCase()).toContain("daemon");
+		const { readWriterState, readTurnMeta } =
+			require("../scratch") as typeof import("../scratch");
+		// The just-created id was persisted BEFORE the failing wait — a re-attach
+		// (kteam send) targets the SAME session instead of starting a rival.
+		const w = readWriterState(SID, "spec@1");
+		expect(w?.kteamSessionId).toBe("kt-1");
+		expect(w?.status).toBe("interrupted");
+		// The turn is left re-attachable ("sent"), never marked "failed".
+		expect(readTurnMeta(SID, "spec@1", 1)?.state).toBe("sent");
+		// A follow-up relay with no message re-attaches to kt-1 (send, not start).
+		const kteam2 = fakeKteam(writerProducesValidReply(1));
+		const again = await runRelay(SID, CONFIG, { harness: kteam2 as never });
+		expect(again.ok).toBe(true);
+		expect(kteam2.calls[0].kteamSessionId).toBe("kt-1");
+	});
+
+	test("old-format (tmux-era) writer.json: refuses to start a competing writer (migration required)", async () => {
+		// A pre-kteam writer.json: harnessSessionId + started, NO schemaVersion.
+		// Written raw (bypassing writeWriterState, which would stamp schemaVersion).
+		const statePath = writerJsonPath(SID, "spec@1");
+		mkdirSync(dirname(statePath), { recursive: true });
+		writeFileSync(
+			statePath,
+			JSON.stringify({
+				phaseKey: "spec@1",
+				account: "claude-auto-writer",
+				harnessSessionId: "uuid-old",
+				cwd: "/tmp",
+				status: "running",
+				turns: 0,
+				started: true,
+				createdAt: new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
+			}),
+		);
+		// …with an in-flight turn from the old harness.
+		const paths = turnPaths(SID, "spec@1", 1);
+		mkdirSync(paths.dir, { recursive: true });
+		writeFileSync(paths.message, "old turn");
+		writeTurnMeta(SID, "spec@1", {
+			turn: 1,
+			state: "running",
+			sentAt: new Date().toISOString(),
+			attempts: 1,
+			userMessageHash: hashMessage("old turn"),
+			userMessage: "old turn",
+			workingVersion: 1,
+		});
+
+		const kteam = fakeKteam(writerProducesValidReply(1));
+		const result = await runRelay(SID, CONFIG, {
+			message: "",
+			harness: kteam as never,
+		});
+		expect(result.ok).toBe(false);
+		expect(result.error).toContain("pre-kteam");
+		// Remediation names the concrete state path so the operator can act.
+		expect(result.remediation?.join("\n")).toContain(statePath);
+		// Never started a competing writer.
+		expect(kteam.calls.length).toBe(0);
+	});
+
+	test("turn 1: pins account, starts a fresh kteam session (no prior id), accepts a valid revised reply, marks presented, enriches links", async () => {
+		const kteam = fakeKteam(writerProducesValidReply(1));
+		const result = await runRelay(SID, CONFIG, {
+			message: "",
+			harness: kteam as never,
 		});
 		expect(result.ok).toBe(true);
-		expect(tmux.calls[0].resume).toBe(false);
+		expect(kteam.calls[0].kteamSessionId).toBeUndefined(); // start, not send
+		expect(kteam.calls[0].label).toBe(`kauto-${SID}`);
+		expect(kteam.calls[0].name).toBe("writer-spec");
 		expect(result.envelope?.links.read).toContain(`/sessions/${SID}/spec/v1`);
 		expect(result.envelope?.links.diff).toBeNull(); // v1 has no diff
 		expect(result.envelope?.account).toBe("fake-claude");
 		expect(alreadyPresented(SID, artifactScope("spec", 1, null), 1)).toBe(true);
+		// The kteam session id is persisted for later turns.
+		const { readWriterState } =
+			require("../scratch") as typeof import("../scratch");
+		expect(readWriterState(SID, "spec@1")?.kteamSessionId).toBe("kt-1");
 		// WAL: relay events present and non-cursor (pendingStep still write_spec).
 		const events = readLog(SID).map((e) => e.event);
 		expect(events).toContain("relay:sent");
@@ -208,39 +313,54 @@ describe("runRelay", () => {
 		expect(pendingStep(SID)).toBe("write_spec");
 	});
 
-	test("idempotent re-invoke: same/no message returns the accepted reply without spawning", async () => {
-		const tmux1 = fakeTmux(writerProducesValidReply(1));
-		await runRelay(SID, CONFIG, { message: "", tmux: tmux1 as never });
-		const tmux2 = fakeTmux(async () => "done");
-		const again = await runRelay(SID, CONFIG, { tmux: tmux2 as never });
+	test("turn 2 reuses the same kteam session via send (not a new start)", async () => {
+		await runRelay(SID, CONFIG, {
+			message: "",
+			harness: fakeKteam(writerProducesValidReply(1)) as never,
+		});
+		const kteam = fakeKteam(writerProducesValidReply(2, false, 2));
+		const result = await runRelay(SID, CONFIG, {
+			message: "answering A",
+			harness: kteam as never,
+		});
+		expect(result.ok).toBe(true);
+		expect(result.turn).toBe(2);
+		// Reused the turn-1 session (send), never started a second one.
+		expect(kteam.calls[0].kteamSessionId).toBe("kt-1");
+	});
+
+	test("idempotent re-invoke: same/no message returns the accepted reply without re-sending", async () => {
+		const kteam1 = fakeKteam(writerProducesValidReply(1));
+		await runRelay(SID, CONFIG, { message: "", harness: kteam1 as never });
+		const kteam2 = fakeKteam(async () => "done");
+		const again = await runRelay(SID, CONFIG, { harness: kteam2 as never });
 		expect(again.ok).toBe(true);
 		expect(again.turn).toBe(1);
-		expect(tmux2.calls.length).toBe(0); // no respawn
+		expect(kteam2.calls.length).toBe(0); // no re-send
 	});
 
 	test("idempotent re-invoke with the SAME user message never composes a duplicate turn", async () => {
-		// Turn 1 (kickoff), then turn 2 with a real message.
 		await runRelay(SID, CONFIG, {
 			message: "",
-			tmux: fakeTmux(writerProducesValidReply(1)) as never,
+			harness: fakeKteam(writerProducesValidReply(1)) as never,
 		});
 		await runRelay(SID, CONFIG, {
 			message: "my answer",
-			tmux: fakeTmux(writerProducesValidReply(2, false, 2)) as never,
+			harness: fakeKteam(writerProducesValidReply(2, false, 2)) as never,
 		});
 		// Skill crashed before recording — re-sends the identical message.
-		const tmux = fakeTmux(async () => "done");
+		const kteam = fakeKteam(async () => "done");
 		const again = await runRelay(SID, CONFIG, {
 			message: "my answer",
-			tmux: tmux as never,
+			harness: kteam as never,
 		});
 		expect(again.ok).toBe(true);
 		expect(again.turn).toBe(2); // returned, not re-composed as turn 3
-		expect(tmux.calls.length).toBe(0);
+		expect(kteam.calls.length).toBe(0);
 		// A DIFFERENT message does compose turn 3.
 		const next = await runRelay(SID, CONFIG, {
 			message: "a new different answer",
-			tmux: fakeTmux(writerProducesValidReply(3, false, 2)) as never,
+			harness: fakeKteam(writerProducesValidReply(3, false, 2)) as never,
 		});
 		expect(next.ok).toBe(true);
 		expect(next.turn).toBe(3);
@@ -250,20 +370,19 @@ describe("runRelay", () => {
 		// Presented v1.
 		await runRelay(SID, CONFIG, {
 			message: "",
-			tmux: fakeTmux(writerProducesValidReply(1)) as never,
+			harness: fakeKteam(writerProducesValidReply(1)) as never,
 		});
-		// Approval turn 2 crashes mid-wait (simulate: meta stays unaccepted).
-		const dying = fakeTmux(async () => "died");
+		// Approval turn 2 crashes mid-turn (harness returns failed, no reply).
 		const crashed = await runRelay(SID, CONFIG, {
 			message: "the user approved",
 			approval: true,
-			tmux: dying as never,
+			harness: fakeKteam(async () => "failed") as never,
 		});
 		expect(crashed.ok).toBe(false);
 		// Recovery per relay.md: re-run with NO flags. Must still be an approval
 		// turn (workingVersion pinned to presented v1, no v2 minted).
 		const result = await runRelay(SID, CONFIG, {
-			tmux: fakeTmux(writerProducesValidReply(2, false, 1)) as never,
+			harness: fakeKteam(writerProducesValidReply(2, false, 1)) as never,
 		});
 		expect(result.ok).toBe(true);
 		const { latestRevisionOnDisk } =
@@ -275,12 +394,12 @@ describe("runRelay", () => {
 		// Turn 1: revised.
 		await runRelay(SID, CONFIG, {
 			message: "",
-			tmux: fakeTmux(writerProducesValidReply(1)) as never,
+			harness: fakeKteam(writerProducesValidReply(1)) as never,
 		});
 		// Turn 2: pure Q&A (working version is the freshly-minted, unpresented v2).
 		const result = await runRelay(SID, CONFIG, {
 			message: "answering your question: A",
-			tmux: fakeTmux(writerProducesValidReply(2, false, 2)) as never,
+			harness: fakeKteam(writerProducesValidReply(2, false, 2)) as never,
 		});
 		expect(result.ok).toBe(true);
 		// The Q&A turn minted a working v2 but did not present it.
@@ -310,23 +429,22 @@ describe("runRelay", () => {
 		writeWriterState(SID, {
 			phaseKey: "spec@1",
 			account: "fake-claude",
-			harnessSessionId: "uuid",
+			kteamSessionId: "kt-1",
 			cwd: "/tmp",
 			status: "running",
 			turns: 0,
-			started: true,
 			createdAt: new Date().toISOString(),
 			updatedAt: new Date().toISOString(),
 		});
 		const result = await runRelay(SID, CONFIG, {
 			message: "a different new message",
-			tmux: fakeTmux(async () => "done") as never,
+			harness: fakeKteam(async () => "done") as never,
 		});
 		expect(result.ok).toBe(false);
 		expect(result.error).toContain("in flight");
 	});
 
-	test("adoption: finished-on-disk turn is accepted without respawning", async () => {
+	test("adoption: finished-on-disk turn is accepted without re-sending", async () => {
 		// Simulate: controller died after the writer finished turn 1.
 		const paths = turnPaths(SID, "spec@1", 1);
 		mkdirSync(paths.dir, { recursive: true });
@@ -343,15 +461,14 @@ describe("runRelay", () => {
 		writeWriterState(SID, {
 			phaseKey: "spec@1",
 			account: "fake-claude",
-			harnessSessionId: "uuid",
+			kteamSessionId: "kt-1",
 			cwd: "/tmp",
 			status: "running",
 			turns: 0,
-			started: true,
 			createdAt: new Date().toISOString(),
 			updatedAt: new Date().toISOString(),
 		});
-		// Writer's output is on disk.
+		// Writer's output is on disk (reply.json = the marker).
 		const specDir = join(sessionDir(SID), "epoch", "1", "spec");
 		mkdirSync(specDir, { recursive: true });
 		writeFileSync(
@@ -363,140 +480,73 @@ describe("runRelay", () => {
 			summary: "Done while you were away.",
 			artifact: { kind: "spec", version: 1, revised: true },
 		});
-		writeFileSync(paths.sentinel, "");
 
-		const tmux = fakeTmux(async () => "done");
-		const result = await runRelay(SID, CONFIG, { tmux: tmux as never });
+		const kteam = fakeKteam(async () => "done");
+		const result = await runRelay(SID, CONFIG, { harness: kteam as never });
 		expect(result.ok).toBe(true);
 		expect(result.turn).toBe(1);
-		expect(tmux.calls.length).toBe(0); // adopted, not respawned
+		expect(kteam.calls.length).toBe(0); // adopted, not re-sent
 		expect(alreadyPresented(SID, artifactScope("spec", 1, null), 1)).toBe(true);
 	});
 
-	test("invalid reply → corrective retry with an addendum; failure after retries", async () => {
+	test("invalid reply → corrective retry via send (addendum); failure after retries", async () => {
 		let attempt = 0;
-		const tmux = fakeTmux(async (params) => {
+		const kteam = fakeKteam(async () => {
 			attempt++;
 			// Always writes an INVALID reply (missing artifact fields).
 			writeTurnReply(SID, "spec@1", 1, { summary: "bad" });
-			writeFileSync(params.sentinelFile, "");
 			return "done";
 		});
 		const result = await runRelay(SID, CONFIG, {
 			message: "",
-			tmux: tmux as never,
+			harness: kteam as never,
 		});
 		expect(result.ok).toBe(false);
 		expect(attempt).toBe(2); // 1 + maxTurnRetries(1)
-		// Second attempt got the corrective addendum, not the original message.
-		expect(tmux.calls[1].messageFile).toContain("addendum");
+		// Attempt 1 started (no id); attempt 2 sent the corrective addendum.
+		expect(kteam.calls[0].kteamSessionId).toBeUndefined();
+		expect(kteam.calls[1].kteamSessionId).toBe("kt-1");
+		expect(kteam.calls[1].messageFile).toContain("addendum");
 		expect(result.remediation?.length).toBeGreaterThan(0);
 		const events = readLog(SID).map((e) => e.event);
 		expect(events).toContain("relay:invalid");
 		expect(events).toContain("relay:failed");
 	});
 
+	test("timeout/needs-attention → nudge + retry via send, then fails with remediation", async () => {
+		let attempt = 0;
+		const kteam = fakeKteam(async () => {
+			attempt++;
+			return attempt === 1 ? "timeout" : "needs_attention";
+		});
+		const result = await runRelay(SID, CONFIG, {
+			message: "",
+			harness: kteam as never,
+		});
+		expect(result.ok).toBe(false);
+		expect(attempt).toBe(2); // 1 + maxTurnRetries(1)
+		expect(kteam.calls[1].messageFile).toContain("addendum");
+		expect(result.remediation?.length).toBeGreaterThan(0);
+		// Failure snapshot is persisted (points at meta.json).
+		expect(result.snapshotPath).toBeDefined();
+		expect(readLog(SID).map((e) => e.event)).toContain("relay:failed");
+	});
+
 	test("approval turn skips version prep (no phantom trailing version)", async () => {
 		await runRelay(SID, CONFIG, {
 			message: "",
-			tmux: fakeTmux(writerProducesValidReply(1)) as never,
+			harness: fakeKteam(writerProducesValidReply(1)) as never,
 		});
 		const result = await runRelay(SID, CONFIG, {
 			message: "approve",
 			approval: true,
-			tmux: fakeTmux(writerProducesValidReply(2, false)) as never,
+			harness: fakeKteam(writerProducesValidReply(2, false)) as never,
 		});
 		expect(result.ok).toBe(true);
 		// No v2 was minted by the approval turn.
 		const { latestRevisionOnDisk } =
 			require("../../revisions") as typeof import("../../revisions");
 		expect(latestRevisionOnDisk(SID, "spec", { epoch: 1 })).toBe(1);
-	});
-
-	test("session_exists on --session-id flips to --resume and retries", async () => {
-		let call = 0;
-		const specDir = join(sessionDir(SID), "epoch", "1", "spec");
-		const tmux = fakeTmux(async (params) => {
-			call++;
-			if (call === 1) {
-				// First attempt (resume=false): conversation already exists.
-				expect(params.resume).toBe(false);
-				return { outcome: "fatal", fatalKind: "session_exists" };
-			}
-			// Second attempt must resume the SAME uuid.
-			expect(params.resume).toBe(true);
-			mkdirSync(specDir, { recursive: true });
-			writeFileSync(
-				join(specDir, "v1.md"),
-				"# Spec: enough real content to clear the blank-artifact check.",
-			);
-			writeFileSync(join(specDir, "v1.html"), "<html/>");
-			writeTurnReply(SID, "spec@1", 1, {
-				summary: "Recovered.",
-				artifact: { kind: "spec", version: 1, revised: true },
-			});
-			writeFileSync(params.sentinelFile, "");
-			return "done";
-		});
-		const result = await runRelay(SID, CONFIG, {
-			message: "",
-			tmux: tmux as never,
-		});
-		expect(result.ok).toBe(true);
-		expect(tmux.calls.length).toBe(2);
-		expect(tmux.calls[0].harnessSessionId).toBe(tmux.calls[1].harnessSessionId);
-	});
-
-	test("resume_lost rebootstraps: new uuid, full-contract message, pinned working version", async () => {
-		// Turn 1 presented v1.
-		await runRelay(SID, CONFIG, {
-			message: "",
-			tmux: fakeTmux(writerProducesValidReply(1)) as never,
-		});
-		const specDir = join(sessionDir(SID), "epoch", "1", "spec");
-		let call = 0;
-		const uuids: string[] = [];
-		const tmux = fakeTmux(async (params) => {
-			call++;
-			uuids.push(params.harnessSessionId);
-			if (call === 1) {
-				// writer.started=true → first resume_lost is retried once…
-				return { outcome: "fatal", fatalKind: "resume_lost", delivered: false };
-			}
-			if (call === 2) {
-				// …second consecutive loss triggers the rebootstrap.
-				return { outcome: "fatal", fatalKind: "resume_lost", delivered: false };
-			}
-			// Post-rebootstrap attempt: fresh uuid, working version still v2.
-			const message = readFileSync(params.messageFile, "utf-8");
-			expect(message).toContain("REBOOTSTRAP");
-			expect(message).toContain("Reply contract");
-			writeFileSync(
-				join(specDir, "v2.md"),
-				"# Spec v2: enough real content to clear the blank-artifact check.",
-			);
-			writeFileSync(join(specDir, "v2.html"), "<html/>");
-			writeTurnReply(SID, "spec@1", 2, {
-				summary: "Continued after rebootstrap.",
-				artifact: { kind: "spec", version: 2, revised: true },
-			});
-			writeFileSync(params.sentinelFile, "");
-			return "done";
-		});
-		const result = await runRelay(
-			SID,
-			{
-				...CONFIG,
-				writer: { ...CONFIG.writer, maxTurnRetries: 3 },
-			},
-			{
-				message: "please revise per my feedback",
-				tmux: tmux as never,
-			},
-		);
-		expect(result.ok).toBe(true);
-		expect(uuids[2]).not.toBe(uuids[0]); // rebootstrap minted a new uuid
-		expect(readLog(SID).map((e) => e.event)).toContain("relay:rebootstrap");
 	});
 
 	test("fallback-inline flips writerMode and records the WAL event", async () => {
@@ -511,7 +561,7 @@ describe("runRelay", () => {
 	test("discussion surfaces accepted envelopes only", async () => {
 		await runRelay(SID, CONFIG, {
 			message: "",
-			tmux: fakeTmux(writerProducesValidReply(1)) as never,
+			harness: fakeKteam(writerProducesValidReply(1)) as never,
 		});
 		const d = readDiscussion(SID, "spec@1");
 		expect(d.turns.length).toBe(1);

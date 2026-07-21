@@ -1,16 +1,16 @@
 // ============================================================================
 // Writer account pool — kloop-style weighted map of claude wrapper binaries on
 // PATH (`claude-auto-<name>`; each owns its own CLAUDE_CONFIG_DIR). Consulted
-// only when a phase's writer session doesn't exist yet, and on rebootstrap
-// (excluding the failed account when alternatives exist). (spec §2)
+// once per phase, at phase start, to pin the writer's kteam session account
+// (kteam owns any later account failover — there is no rebootstrap re-pick). (spec §2)
 // ============================================================================
 
 /**
- * Weighted random pick from the pool. `exclude` drops named accounts first
- * (rebootstrap: never re-pick the account that just failed) — but when
- * exclusion would empty the pool, the full pool is used (a single-account pool
- * has nothing better to offer; the caller surfaces that in its remediation).
- * `rand` is injectable for deterministic tests.
+ * Weighted random pick from the pool. `exclude` drops named accounts first —
+ * but when exclusion would empty the pool, the full pool is used (a
+ * single-account pool has nothing better to offer). `rand` is injectable for
+ * deterministic tests. (`exclude` is retained for callers that want to avoid a
+ * known-bad account; the relay itself pins once and lets kteam handle failover.)
  */
 export function pickAccount(
 	pool: Record<string, number>,

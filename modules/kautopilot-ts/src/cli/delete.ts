@@ -71,7 +71,7 @@ async function stopAndCleanup(sessionId: string): Promise<boolean> {
 }
 
 async function deleteSessionDir(sessionId: string): Promise<void> {
-	// Writer tmux sessions would otherwise outlive the session dir (holding a
+	// Writer kteam sessions would otherwise outlive the session dir (holding a
 	// real Claude session); scratch/ is removed with the dir itself.
 	await killWriterSessions(sessionId);
 	rmSync(sessionDir(sessionId), { recursive: true, force: true });
