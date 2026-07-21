@@ -124,7 +124,11 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           return json(await options.service.signal(id, input.kind, input.message));
         }
         if (action === 'snapshot' && request.method === 'GET') {
-          return new Response(await options.service.snapshot(id), {
+          // Default = the monitor's on-disk frame (fast, lock-free). ?live=true
+          // forces a fresh tmux capture under the session lock (CLI behavior) —
+          // that path can block for seconds on a busy session.
+          const live = url.searchParams.get('live') === 'true';
+          return new Response(await (live ? options.service.snapshot(id) : options.service.lastSnapshot(id)), {
             headers: { 'content-type': 'text/plain; charset=utf-8' },
           });
         }

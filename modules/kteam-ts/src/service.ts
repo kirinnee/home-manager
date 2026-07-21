@@ -29,6 +29,9 @@ export interface KTeamService {
   remove(id: string, purge?: boolean, force?: boolean): Promise<void>;
   signal(id: string, kind: 'done' | 'help', message?: string): Promise<SessionView>;
   snapshot(id: string): Promise<string>;
+  /** The monitor's most recent pane snapshot, read from disk — no tmux capture,
+   *  no session lock. The UI polls this; snapshot() stays for live captures. */
+  lastSnapshot(id: string): Promise<string>;
   logs(id: string, turn?: number): Promise<string>;
   replay(id: string | undefined, after: number, limit?: number): Promise<KTeamEvent[]>;
   subscribe(listener: (event: KTeamEvent) => void): () => void;
