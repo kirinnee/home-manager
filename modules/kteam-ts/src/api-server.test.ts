@@ -121,4 +121,12 @@ describe('kteam daemon API', () => {
     });
     expect(received.map(event => event.sequence)).toEqual([1, 2]);
   });
+  test('serves the browser shell with the daemon token embedded', async () => {
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service: new FakeService() });
+    servers.push(server);
+    const response = await fetch(`http://127.0.0.1:${server.port}/`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('text/html');
+    expect(await response.text()).toContain('const TOKEN = "secret"');
+  });
 });

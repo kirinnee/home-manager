@@ -164,3 +164,27 @@ Escape-not-C-c, background-terminal ready, interrupted-banner ready, single auto
 event, at-most-once queued delivery), tsc clean. Deployed: hms + kfleet apply + kteamd
 restart. NOT yet done: the spec's live scratch-codex verification (interrupt mid-turn,
 queued-send delivery on a real TUI) — run during the next real kteam session and log here.
+
+## 2026-07-21 — babysitter note (NOT a kteam bug): background-sleep timing misread; corrected
+
+**Session watched:** mru8rq2b-d4dd3081 (kristin, codex-auto-loio, kteam-ui review)
+
+**What happened:** The babysitter initially logged "background `sleep` completes early" —
+that diagnosis was WRONG and is corrected here. The background `sleep 120/180/240` jobs ran
+their FULL duration; their outputs (read after the fact) show correct post-sleep state
+(e.g. the 2-min job saw kristin already `completed` at 06:00+). Two things caused the
+misread:
+
+1. `run_in_background: true` does not block the babysitter's turn, so the babysitter kept
+   polling inline in near-real-time while thinking it was "waiting between cycles" — the
+   compressed `date -u` timestamps were the babysitter's own back-to-back inline checks,
+   not broken sleeps.
+2. Background-task completion notifications are only delivered at turn boundaries, so they
+   all arrived AFTER the babysitting work finished; reading the output files mid-sleep
+   returned empty files, which was mistaken for premature completion.
+
+**Impact:** None on the watched session (kristin completed cleanly). Lesson for future
+babysitters: for spaced monitoring cycles, use a FOREGROUND polling loop (`for i in ...;
+do sleep 30; check; done` or `until <cond>; do sleep 10; done`) — a backgrounded sleep
+does not pace your turn, and its notification may arrive much later. No kteam-ts code path
+involved; nothing to fix in modules/kteam-ts.
