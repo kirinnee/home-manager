@@ -12,9 +12,10 @@ import { resolveSession } from "./resolve-session";
 
 // ============================================================================
 // `kautopilot relay` — one writer-session turn for the current deferred writer
-// step: send the user's message, park on the sentinel, validate + enrich the
-// envelope, print it. The relay can block for many minutes (turnTimeoutMins ×
-// retries) — the caller runs it in the background and wakes on process exit.
+// step: send the user's message to the writer's kteam session, park on the
+// envelope marker (reply.json), validate + enrich the envelope, print it. The
+// relay can block for many minutes (turnTimeoutMins × retries) — the caller
+// runs it in the background and wakes on process exit.
 // (specs/deferred-writer-relay.md §4)
 // ============================================================================
 

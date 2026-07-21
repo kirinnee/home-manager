@@ -280,3 +280,34 @@ no functionality was lost.
 always be run from the package dir (pass an absolute path or `cd` first), never from the
 repo root. Optionally add a babysitter check: if `package.json` appears at the repo root
 mid-session, treat it as a guardrail violation and immediately clean it up.
+
+## 2026-07-21 — transient "daemon unavailable" on kteam snapshot while daemon stayed up
+
+**Session:** mrv5kamb-1888cad7 (geoffrey, claude-auto-loge, kauto-migration, turn 3)
+
+**Problem:** A babysitter `kteam snapshot geoffrey` at ~22:19Z failed with
+`kteam: kteam daemon is unavailable at http://127.0.0.1:7337 (The socket connection
+was closed unexpectedly...); run "kteam daemon start"` — but the daemon process
+(pid 2933989, `bun run modules/kteam-ts/src/daemon-entry.ts`) had been up since
+20:49:46 and never restarted (verified via `ps -o lstart`). A `kteam status` retry
+~60s later succeeded; the next `kteam snapshot` also succeeded. The geoffrey session
+itself was unaffected (kept editing files throughout).
+
+**Evidence:** snapshot error output captured at ~22:19Z; `ps -o pid,lstart,etime -p
+2933989` → `STARTED Tue Jul 21 20:49:46 2026, ELAPSED 01:24:02` (spans the incident).
+Possibly related: events.jsonl shows a mid-turn `session.resuming` (22:11:23Z) →
+`session.resumed` (22:11:52Z) pair right after turn-003 was queued, while the previous
+turn's tool stream was still emitting — the TUI/daemon connection appears to have been
+re-established rather than the daemon restarting.
+
+**Suspected code path:** the daemon's HTTP handler for `snapshot` (modules/kteam-ts,
+daemon side) dropped/closed the socket mid-request — likely a long-running snapshot
+capture (tmux capture-pane) racing a busy event loop, or a connection-reuse/keep-alive
+close in the bun fetch client. The client (`src/` CLI fetch wrapper) reports any socket
+close as "daemon unavailable", which is misleading when the daemon is alive.
+
+**Workaround:** retry after ~60s — recovered on its own. No restart needed.
+
+**Suggested kteam fix:** CLI should retry once on socket-close before declaring the
+daemon unavailable, and distinguish "connection dropped mid-request" from "nothing
+listening on the port" in the error message.

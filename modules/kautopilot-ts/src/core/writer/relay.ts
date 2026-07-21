@@ -1,6 +1,5 @@
-import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { authoringRepoName } from "../../phases/shared";
 import { getStep } from "../../steps/registry";
 import { setCachedConfig } from "../agents";
@@ -17,7 +16,7 @@ import {
 import { scopeLockKey, touchLock } from "../lock";
 import { appendEvent, readLog } from "../log";
 import type { ArtifactKind } from "../revisions";
-import { plansRepoDir, revisionPath } from "../revisions";
+import { revisionPath } from "../revisions";
 import {
 	readSessionMeta,
 	type SessionMeta,
@@ -25,35 +24,45 @@ import {
 } from "../session-meta";
 import type { Config, EnrichedEnvelope, Envelope } from "../types";
 import { validateEnvelope } from "./envelope";
+import {
+	DaemonUnavailableError,
+	WriterKteam,
+	writerLabel,
+	writerSessionName,
+} from "./kteam";
 import { stepExecution } from "./mode";
 import { hasAlternative, pickAccount } from "./pool";
 import {
-	clearSentinel,
+	clearReply,
 	hashMessage,
+	isLegacyWriterState,
 	lastProgress,
 	lastTurn,
 	listPhases,
 	listTurns,
-	phaseKeySafe,
 	readTurnMessage,
 	readTurnMeta,
 	readTurnReplyRaw,
 	readWriterState,
-	sentinelExists,
+	replyExists,
 	type TurnMeta,
 	turnPaths,
 	type WriterState,
+	writerJsonPath,
 	writeTurnMessage,
 	writeTurnMeta,
 	writeTurnReply,
 	writeWriterState,
 } from "./scratch";
-import { WriterTmux, writerTmuxName, writerTmuxPrefix } from "./tmux";
 
 // ============================================================================
-// The relay turn engine: one `kautopilot relay` call = one writer-session turn.
-// Recovery matrix, version prep (binary-minted), tmux spawn (+ corrective
-// retries in the same conversation), envelope validation, enrichment, WAL.
+// The relay turn engine: one `kautopilot relay` call = one writer-session turn,
+// now driven through a PERSISTENT kteamd session (WriterKteam) instead of
+// kautopilot's own tmux. Recovery matrix, version prep (binary-minted),
+// envelope validation, enrichment, and WAL are unchanged; the harness is
+// kteam start/send + `wait --until-marker <reply.json>`. kteam owns the TUI,
+// resume/crash-recovery, and account failover — so the spec's rebootstrap,
+// fatal-pane scanning, and `--session-id`/`--resume` machinery are gone.
 // (specs/deferred-writer-relay.md §4)
 // ============================================================================
 
@@ -63,8 +72,10 @@ export interface RelayResult {
 	envelope?: EnrichedEnvelope;
 	phaseKey?: string;
 	turn?: number;
-	tmuxSession?: string;
-	paneSnapshotPath?: string;
+	/** The kteam session that ran (or would run) the turn — the watch handle. */
+	kteamSession?: string;
+	/** Path to the meta.json holding the failure snapshot, when one was captured. */
+	snapshotPath?: string;
 	remediation?: string[];
 }
 
@@ -106,8 +117,10 @@ function resolvePhase(
 
 const ENVELOPE_CONTRACT = `## Reply contract (EVERY turn)
 
-Write \`{replyPath}\` as JSON matching EXACTLY this shape, then \`touch {sentinelPath}\`
-as your VERY LAST action (the relay only reads the reply after the sentinel appears):
+Write \`{replyPath}\` as JSON matching EXACTLY this shape. It is your VERY LAST
+action of the turn — the relay watches for this file and reads it the instant it
+appears, so write it atomically (write a temp file, then rename it into place) and
+never leave a half-written file:
 
 \`\`\`jsonc
 {
@@ -132,7 +145,6 @@ as your VERY LAST action (the relay only reads the reply after the sentinel appe
 
 function envelopeContract(vars: {
 	replyPath: string;
-	sentinelPath: string;
 	progressPath: string;
 	kind: string;
 	workingVersion: number;
@@ -260,9 +272,9 @@ function readVisualBrief(config: Config): string | null {
  * Compose turn-N/message.md. ORDER MATTERS on turn 1: `prepare()` runs FIRST
  * (its {lastDiff}/currentRevisionPath must see the pre-mint state), THEN version
  * prep mints/reuses the working version. Approval turns skip version prep
- * entirely (no phantom trailing versions at phase end).
- * `fullContract` forces turn-1-style assembly (rebootstrap) without re-minting
- * (pass `fixedWorkingVersion`) and without the turn-1 kickoff framing.
+ * entirely (no phantom trailing versions at phase end). Turn ≥2 lives in the
+ * resumed kteam conversation, so it carries only the user's message + a
+ * self-sufficient contract reminder (auto-compaction must never lose it).
  */
 async function composeMessage(params: {
 	sessionId: string;
@@ -276,8 +288,6 @@ async function composeMessage(params: {
 	paths: ReturnType<typeof turnPaths>;
 	userMessage: string;
 	approval: boolean;
-	fullContract?: boolean;
-	fixedWorkingVersion?: number;
 }): Promise<{ message: string; workingVersion: number }> {
 	const {
 		sessionId,
@@ -293,7 +303,7 @@ async function composeMessage(params: {
 		approval,
 	} = params;
 	const parts: string[] = [];
-	const turnOneStyle = turn === 1 || (params.fullContract ?? false);
+	const turnOneStyle = turn === 1;
 
 	// 1. prepare() — turn 1 only (later turns live in the resumed conversation).
 	let preparedPrompt: string | null = null;
@@ -320,24 +330,11 @@ async function composeMessage(params: {
 		}
 	}
 
-	// 2. Version prep — AFTER prepare; skipped on approval turns; pinned when the
-	// caller already knows the version (rebootstrap re-compose must not re-mint).
+	// 2. Version prep — AFTER prepare; skipped on approval turns (they must not
+	// leave a phantom unpresented version behind at phase end).
 	let workingVersion: number;
 	let workingPath: string | null = null;
-	if (params.fixedWorkingVersion != null) {
-		workingVersion = params.fixedWorkingVersion;
-		if (!approval) {
-			workingPath =
-				kind === "plans"
-					? plansRepoDir(sessionId, epoch, repo ?? "default")
-					: revisionPath(
-							sessionId,
-							kind,
-							workingVersion,
-							kind === "brainstorm" ? {} : { epoch },
-						);
-		}
-	} else if (approval) {
+	if (approval) {
 		workingVersion = lastPresentedVersion(sessionId, kind, epoch, repo) ?? 1;
 	} else {
 		const minted = mintOrReuseWorkingVersion(sessionId, kind, epoch, repo);
@@ -361,7 +358,6 @@ async function composeMessage(params: {
 	parts.push(
 		envelopeContract({
 			replyPath: paths.reply,
-			sentinelPath: paths.sentinel,
 			progressPath: paths.progress,
 			kind,
 			workingVersion,
@@ -385,7 +381,7 @@ async function composeMessage(params: {
 	}
 	if (userMessage) {
 		parts.push(`## Message from the user (turn ${turn})\n\n${userMessage}`);
-	} else if (turn === 1 && !params.fullContract) {
+	} else if (turn === 1) {
 		parts.push(
 			`## Kickoff\n\nThis is turn 1 — begin the step's work now, then reply per the contract.`,
 		);
@@ -458,7 +454,7 @@ function failTurn(
 	turn: number,
 	turnMeta: TurnMeta,
 	writer: WriterState,
-	params: { error: string; tmuxSession?: string; config: Config },
+	params: { error: string; kteamSession?: string; config: Config },
 ): RelayResult {
 	turnMeta.state = "failed";
 	writeTurnMeta(sessionId, phaseKey, turnMeta);
@@ -468,12 +464,12 @@ function failTurn(
 		error: params.error,
 	});
 	const remediation = [
-		"Re-run `kautopilot relay` with no message to re-attach (cheapest — e.g. after a rate-limit window resets).",
+		"Re-run `kautopilot relay` with no message to re-attach — `kteam send` auto-revives the writer session (cheapest; e.g. after a rate-limit window resets).",
 	];
 	remediation.push(
 		hasAlternative(params.config.writer.pool, writer.account)
-			? "If the harness conversation itself is lost, an automatic rebootstrap onto another pool account runs on the next re-attach."
-			: "The pool has no alternative account — waiting is the only automatic recovery.",
+			? "kteam handles account failover within the session; the pool's other accounts are used automatically if the daemon rotates."
+			: "The pool has a single account — waiting for it to recover is the only automatic path.",
 	);
 	remediation.push(
 		"`kautopilot relay --fallback-inline` flips the REST of the session to inline. ⚠️ That runs the full writer workload (prompt + reviewers + visuals) in the MAIN session/account and cannot be undone this session — confirm with the user first.",
@@ -483,120 +479,54 @@ function failTurn(
 		error: params.error,
 		phaseKey,
 		turn,
-		tmuxSession: params.tmuxSession,
-		paneSnapshotPath: turnMeta.paneSnapshot
+		kteamSession: params.kteamSession,
+		snapshotPath: turnMeta.snapshot
 			? turnPaths(sessionId, phaseKey, turn).meta
 			: undefined,
 		remediation,
 	};
 }
 
-// --- rebootstrap ------------------------------------------------------------------
-
-/** Rebootstrap catch-up: the last 3 turns' summaries, plus open questions/items
- *  from EVERY prior turn (an early unresolved question must survive). */
-function buildCatchUp(
+/** Loud refusal when a phase's writer.json predates the kteam harness (tmux
+ *  era). Starting a fresh kteam writer would leave the old tmux writer running
+ *  (invisible to label-based cleanup) to race on reply.json, so we start
+ *  nothing and point the operator at the stale state to finish or delete. */
+function migrationRequiredResult(
 	sessionId: string,
 	phaseKey: string,
-	turn: number,
-): string {
-	const lines: string[] = [];
-	for (let t = 1; t < turn; t++) {
-		const raw = readTurnReplyRaw(
-			sessionId,
-			phaseKey,
-			t,
-		) as Partial<EnrichedEnvelope> | null;
-		if (!raw?.summary) continue;
-		if (t >= turn - 3) lines.push(`- turn ${t}: ${raw.summary}`);
-		for (const q of raw.questions ?? [])
-			lines.push(`  - open question (turn ${t}): ${q.text}`);
-		for (const o of raw.openItems ?? [])
-			lines.push(`  - open item (turn ${t}): ${o}`);
-	}
-	return lines.length
-		? `Prior discussion (last turns):\n${lines.join("\n")}\n`
-		: "";
+): RelayResult {
+	const statePath = writerJsonPath(sessionId, phaseKey);
+	const scratchDir = dirname(statePath);
+	return {
+		ok: false,
+		error: `writer.json for phase ${phaseKey} is from the pre-kteam (tmux) harness — refusing to start a competing writer that could race the old session on reply.json.`,
+		phaseKey,
+		remediation: [
+			`Finish or stop the old deferred writer session, then retry. Its state file: ${statePath}`,
+			`To discard it and start fresh on kteam, delete the phase scratch dir: ${scratchDir}`,
+			`(An old tmux writer is not tracked by the new \`kteam ps --label kauto-<sessionId>\` cleanup — check \`tmux ls\` for a stray \`kap-${sessionId}-*\` session and kill it too.)`,
+		],
+	};
 }
 
-/**
- * The harness home lost the conversation: mint a new uuid, re-pick the account
- * (excluding the failed one when alternatives exist — a lost HOME on the same
- * account is still re-bootstrappable, so a single-account pool retries itself),
- * and rewrite THIS turn's message as a full turn-1-style contract + catch-up.
- * Turn numbering continues in the same scratch dir.
- */
-async function rebootstrap(params: {
-	sessionId: string;
-	meta: SessionMeta;
-	config: Config;
-	step: string;
-	kind: ArtifactKind;
-	epoch: number;
-	repo: string | null;
-	phaseKey: string;
-	turn: number;
-	paths: ReturnType<typeof turnPaths>;
-	writer: WriterState;
-	userMessage: string;
-	approval: boolean;
-	workingVersion: number;
-}): Promise<WriterState> {
-	const {
-		sessionId,
-		meta,
-		config,
-		step,
-		kind,
-		epoch,
-		repo,
+/** Loud, non-corrupting failure when kteamd is unreachable: the turn stays
+ *  re-attachable (state reverted to "sent", writer "interrupted"), never marked
+ *  failed — the next `relay` re-attaches once the daemon is back. */
+function daemonDownResult(
+	phaseKey: string | undefined,
+	turn: number | undefined,
+	message: string,
+): RelayResult {
+	return {
+		ok: false,
+		error: message,
 		phaseKey,
 		turn,
-		paths,
-		writer,
-		userMessage,
-		approval,
-	} = params;
-	const account = pickAccount(config.writer.pool, [writer.account]);
-	const next: WriterState = {
-		...writer,
-		account,
-		harnessSessionId: randomUUID(),
-		status: "idle",
-		started: false,
+		remediation: [
+			"Start the daemon: `kteam daemon start` (or `kteam daemon status` to check it).",
+			"Then re-run `kautopilot relay` with no message to re-attach — no turn state was lost.",
+		],
 	};
-	writeWriterState(sessionId, next);
-	// Full turn-1-style message (contract + prompt + review + brief) + catch-up.
-	// The working version is PINNED to what this turn already handed out — a
-	// rebootstrap must never re-mint (the crashed turn's version may already be
-	// presented, and a re-derive would copy it forward).
-	const { message } = await composeMessage({
-		sessionId,
-		meta,
-		config,
-		step,
-		kind,
-		epoch,
-		repo,
-		turn,
-		paths,
-		userMessage,
-		approval,
-		fullContract: true,
-		fixedWorkingVersion: params.workingVersion,
-	});
-	const catchUp = buildCatchUp(sessionId, phaseKey, turn);
-	writeTurnMessage(
-		sessionId,
-		phaseKey,
-		turn,
-		`${message}\n\n---\n\n## REBOOTSTRAP\n\nYour previous conversation was lost — you are a FRESH session continuing this phase mid-flight (this is turn ${turn}).\n${catchUp}Continue from the artifact as it exists on disk. Finish turn ${turn}: write ${paths.reply}, then touch ${paths.sentinel}.`,
-	);
-	relayEvent(sessionId, "relay:rebootstrap", phaseKey, turn, {
-		from: writer.account,
-		to: account,
-	});
-	return next;
 }
 
 // ============================================================================
@@ -610,7 +540,7 @@ export async function runRelay(
 		message?: string;
 		approval?: boolean;
 		fallbackInline?: boolean;
-		tmux?: WriterTmux;
+		harness?: WriterKteam;
 	},
 ): Promise<RelayResult> {
 	const meta = readSessionMeta(sessionId);
@@ -643,22 +573,37 @@ export async function runRelay(
 	const phase = resolvePhase(sessionId, meta, config);
 	if ("error" in phase) return { ok: false, error: phase.error };
 	const { step, kind, epoch, repo, phaseKey } = phase;
-	const tmux = opts.tmux ?? new WriterTmux();
+	const harness = opts.harness ?? new WriterKteam();
 	const lockKey = scopeLockKey(sessionId, null);
 	const msg = opts.message?.trim() ?? "";
 	const msgHash = msg ? hashMessage(msg) : null;
 
+	// --- legacy-state guard: NEVER start a competing writer over a tmux-era session
+	// (its process is invisible to the new label-based cleanup and would race on
+	// reply.json). Refuse loudly and tell the operator to finish/delete it.
+	const existing = readWriterState(sessionId, phaseKey);
+	if (isLegacyWriterState(existing)) {
+		return migrationRequiredResult(sessionId, phaseKey);
+	}
+
+	// --- daemon-down guard (spec §4.4): fail loudly BEFORE touching turn state ---
+	if (!(await harness.daemonReachable())) {
+		return daemonDownResult(
+			phaseKey,
+			undefined,
+			"kteam daemon is unreachable — the deferred writer runs on kteamd, which is not responding.",
+		);
+	}
+
 	// --- writer session (pin the account at phase start) -------------------------
-	let writer = readWriterState(sessionId, phaseKey);
+	let writer = existing;
 	if (!writer) {
 		writer = {
 			phaseKey,
 			account: pickAccount(config.writer.pool),
-			harnessSessionId: randomUUID(),
 			cwd: meta.folder,
 			status: "idle",
 			turns: 0,
-			started: false,
 			createdAt: new Date().toISOString(),
 			updatedAt: new Date().toISOString(),
 		};
@@ -670,21 +615,9 @@ export async function runRelay(
 	const lastMeta = last > 0 ? readTurnMeta(sessionId, phaseKey, last) : null;
 
 	if (lastMeta) {
-		// (0) Orphaned-but-alive tmux from a killed controller: /exit it gracefully
-		// (lets the harness persist the conversation), then kill — a finished
-		// writer left it idle; a half-done one gets re-attached with a fresh spawn
-		// below, and two processes must never share the session.
-		if (
-			lastMeta.tmuxSession &&
-			!lastMeta.accepted &&
-			(await tmux.isSessionAlive(lastMeta.tmuxSession))
-		) {
-			await tmux.gracefulClose(lastMeta.tmuxSession);
-		}
 		// Accepted reply + no message OR the same user message (retry after the
 		// envelope printed but before the skill recorded it) → return idempotently.
-		// Hashes compare RAW user messages (userMessageHash), like for like. An
-		// --approval invocation is a NEW turn even without a message — never
+		// An --approval invocation is a NEW turn even without a message — never
 		// swallowed by the idempotent return (unless the last turn WAS the approval).
 		if (
 			lastMeta.accepted &&
@@ -742,8 +675,8 @@ export async function runRelay(
 			sentAt: new Date().toISOString(),
 			attempts: 0,
 			userMessageHash: msgHash ?? "",
-			// Stored in full: recovery recompose + rebootstrap rebuild the turn from
-			// this copy (message.md may not exist yet on a mid-compose crash).
+			// Stored in full: recovery recompose rebuilds the turn from this copy
+			// (message.md may not exist yet on a mid-compose crash).
 			userMessage: msg || undefined,
 			approval,
 			workingVersion: 0, // filled in right below, post-compose
@@ -817,111 +750,115 @@ export async function runRelay(
 		}
 	}
 
-	// --- spawn / retry loop ----------------------------------------------------------
+	// --- send / retry loop ----------------------------------------------------------
 	const maxAttempts = 1 + config.writer.maxTurnRetries;
-	let nudgeFile: string | null = null;
-	if (reattach) {
-		// ADOPTION fast-path: the writer finished (sentinel + reply on disk) while
-		// the controller was dead — accept from disk without respawning. Acceptance
-		// is idempotently re-runnable (markPresented skips when already marked), so
-		// a crash between validation and enrichment lands here too.
-		if (turnFinishedOnDisk(sessionId, phaseKey, turn)) {
-			const raw = readTurnReplyRaw(sessionId, phaseKey, turn);
-			const check = validateEnvelope({
-				raw,
+	// On a re-attach, the first message is a nudge (not the original) — the writer
+	// is mid-turn in its kteam session and just needs to finish + emit reply.json.
+	let nudgeFile: string | null = reattach
+		? writeNudge(
+				paths.dir,
+				turnMeta.attempts + 1,
+				`You were sent turn ${turn} at ${turnMeta.sentAt} but the controller lost track of you. Re-read ${paths.message}, finish the turn, then write ${paths.reply} (atomically) as your last action.`,
+			)
+		: null;
+
+	// ADOPTION fast-path: the writer finished (reply.json on disk) while the
+	// controller was dead — accept from disk without re-sending. Acceptance is
+	// idempotently re-runnable (markPresented skips when already marked), so a
+	// crash between validation and enrichment lands here too.
+	if (reattach && turnFinishedOnDisk(sessionId, phaseKey, turn)) {
+		const raw = readTurnReplyRaw(sessionId, phaseKey, turn);
+		const check = validateEnvelope({
+			raw,
+			sessionId,
+			kind,
+			epoch,
+			repo,
+			workingVersion,
+		});
+		if (check.ok && check.envelope) {
+			return acceptTurn({
 				sessionId,
+				config,
 				kind,
 				epoch,
 				repo,
-				workingVersion,
+				phaseKey,
+				turn,
+				envelope: check.envelope,
+				writer,
+				turnMeta,
 			});
-			if (check.ok && check.envelope) {
-				return acceptTurn({
-					sessionId,
-					config,
-					kind,
-					epoch,
-					repo,
-					phaseKey,
-					turn,
-					envelope: check.envelope,
-					writer,
-					turnMeta,
-				});
-			}
-			// Invalid on disk → fall through to a corrective respawn.
 		}
-		nudgeFile = writeNudge(
-			paths.dir,
-			turnMeta.attempts + 1,
-			`You were sent turn ${turn} at ${turnMeta.sentAt} but the controller lost track of you. Re-read ${paths.message}, finish the turn, write ${paths.reply}, then touch ${paths.sentinel}.`,
-		);
+		// Invalid on disk → fall through to a corrective re-send.
 	}
-	let resumeLossStreak = 0;
 
 	while (turnMeta.attempts < maxAttempts) {
 		turnMeta.attempts++;
 		const attempt = turnMeta.attempts;
-		const tmuxName = writerTmuxName(
-			sessionId,
-			phaseKeySafe(phaseKey),
-			turn,
-			attempt,
-		);
-		turnMeta.tmuxSession = tmuxName;
 		turnMeta.state = "running";
 		writeTurnMeta(sessionId, phaseKey, turnMeta);
 		writer.status = "running";
 		writeWriterState(sessionId, writer);
 		// Spawn notice on stderr (stdout stays pure JSON): the live-watch line the
 		// skill relays to the user.
+		const watch = writer.kteamSessionId
+			? `kteam attach ${writer.kteamSessionId}`
+			: `kteam ps -l ${writerLabel(sessionId)}`;
 		process.stderr.write(
-			`writer turn ${turn} (attempt ${attempt}) on ${writer.account} — watch live: tmux attach -r -t ${tmuxName}\n`,
+			`writer turn ${turn} (attempt ${attempt}) on ${writer.account} — watch live: ${watch}\n`,
 		);
 
-		// Stale-marker hazard: a sentinel from a prior attempt must never read as
-		// this attempt's completion.
-		clearSentinel(sessionId, phaseKey, turn);
+		// Marker hygiene: a reply.json from a prior attempt must never read as this
+		// attempt's completion.
+		clearReply(sessionId, phaseKey, turn);
 
 		touchLock(lockKey);
-		const result = await tmux.runTurn({
-			sessionName: tmuxName,
-			binary: writer.account,
-			harnessSessionId: writer.harnessSessionId,
-			resume: writer.started,
-			cwd: writer.cwd,
-			messageFile: nudgeFile ?? paths.message,
-			sentinelFile: paths.sentinel,
-			timeoutMins: config.writer.turnTimeoutMins,
-			// Heartbeat during the (possibly 30-min) sentinel wait — without it
-			// the lock TTL (default 30 min) would reclaim a healthy long turn.
-			onTick: () => touchLock(lockKey),
-		});
+		let result: Awaited<ReturnType<WriterKteam["runTurn"]>>;
+		try {
+			result = await harness.runTurn({
+				kteamSessionId: writer.kteamSessionId,
+				account: writer.account,
+				name: writerSessionName(kind),
+				label: writerLabel(sessionId),
+				cwd: writer.cwd,
+				messageFile: nudgeFile ?? paths.message,
+				markerFile: paths.reply,
+				timeoutMins: config.writer.turnTimeoutMins,
+				// Persist the freshly-minted kteam id SYNCHRONOUSLY, before the first
+				// wait — so a daemon failure mid-wait leaves a re-attachable turn
+				// pointing at the real session, never orphans it into a rival start.
+				onSessionCreated: (id) => {
+					writer.kteamSessionId = id;
+					writeWriterState(sessionId, writer);
+				},
+				// Heartbeat during the (possibly 30-min) turn — without it the lock
+				// TTL (default 30 min) would reclaim a healthy long turn.
+				onTick: () => touchLock(lockKey),
+			});
+		} catch (err) {
+			if (err instanceof DaemonUnavailableError) {
+				// Daemon went down mid-turn: leave the turn re-attachable, don't fail it.
+				turnMeta.state = "sent";
+				turnMeta.attempts = Math.max(0, turnMeta.attempts - 1);
+				writeTurnMeta(sessionId, phaseKey, turnMeta);
+				writer.status = "interrupted";
+				writeWriterState(sessionId, writer);
+				return daemonDownResult(phaseKey, turn, err.message);
+			}
+			throw err;
+		}
 		touchLock(lockKey);
 		nudgeFile = null;
 
-		if (result.delivered && !writer.started) {
-			writer.started = true;
+		// `onSessionCreated` already persisted a freshly-minted id before the wait;
+		// this is a belt-and-suspenders sync for any path that didn't (a no-op on
+		// the send path, where the id was already known).
+		if (result.kteamSessionId !== writer.kteamSessionId) {
+			writer.kteamSessionId = result.kteamSessionId;
 			writeWriterState(sessionId, writer);
 		}
-
-		// A `--session-id` launch that finds the conversation already exists (the
-		// controller was killed mid-turn-1 AFTER delivery but before `started` was
-		// persisted): flip to resume mode and retry — the conversation is real.
-		if (result.outcome === "fatal" && result.fatalKind === "session_exists") {
-			if (!writer.started) {
-				writer.started = true;
-				writeWriterState(sessionId, writer);
-				continue;
-			}
-			// Already resuming and still "in use"? — treat as a died attempt.
-			nudgeFile = writeNudge(
-				paths.dir,
-				attempt + 1,
-				`Your previous attempt at turn ${turn} could not launch (session busy). Re-read ${paths.message}, finish the turn, write ${paths.reply}, then touch ${paths.sentinel}.`,
-			);
-			continue;
-		}
+		turnMeta.kteamSessionId = result.kteamSessionId;
 
 		if (result.outcome === "done") {
 			const raw = readTurnReplyRaw(sessionId, phaseKey, turn);
@@ -962,7 +899,7 @@ export async function runRelay(
 					turnMeta,
 				});
 			}
-			// Invalid → corrective retry in the same conversation.
+			// Invalid → corrective retry in the SAME kteam session (a `send`).
 			turnMeta.state = "invalid";
 			writeTurnMeta(sessionId, phaseKey, turnMeta);
 			relayEvent(sessionId, "relay:invalid", phaseKey, turn, {
@@ -975,64 +912,39 @@ export async function runRelay(
 					.map((e) => `- ${e}`)
 					.join(
 						"\n",
-					)}\nFix the problems, re-write ${paths.reply}, then touch ${paths.sentinel} again.`,
+					)}\nFix the problems, then re-write ${paths.reply} (atomically) as your last action.`,
 			);
 			continue;
 		}
 
-		// died / timeout / fatal — persist the pane and classify.
-		if (result.pane) turnMeta.paneSnapshot = result.pane;
+		// needs_attention / failed / timeout — persist the snapshot + classify.
+		if (result.snapshot) turnMeta.snapshot = result.snapshot;
 		writeTurnMeta(sessionId, phaseKey, turnMeta);
-
-		if (result.outcome === "fatal" && result.fatalKind === "resume_lost") {
-			resumeLossStreak++;
-			if (resumeLossStreak >= 2 || !writer.started) {
-				writer = await rebootstrap({
-					sessionId,
-					meta,
-					config,
-					step,
-					kind,
-					epoch,
-					repo,
-					phaseKey,
-					turn,
-					paths,
-					writer,
-					userMessage: turnMeta.userMessage ?? msg,
-					approval,
-					workingVersion,
-				});
-				resumeLossStreak = 0;
-				continue;
-			}
-			// One-off resume glitch: retry the same conversation once first.
-			continue;
-		}
-		if (result.outcome === "fatal") {
-			return failTurn(sessionId, phaseKey, turn, turnMeta, writer, {
-				error: `writer session hit a fatal ${result.fatalKind} error — see the pane snapshot in meta.json`,
-				tmuxSession: tmuxName,
-				config,
-			});
-		}
-		// died / timeout → nudge + retry (same conversation).
+		// kteam owns crash recovery + account failover, so these are transient from
+		// the relay's view: nudge + re-send (auto-revives a finished session), up to
+		// the retry budget.
+		const why =
+			result.outcome === "timeout"
+				? "timed out"
+				: result.outcome === "failed"
+					? `ended without an envelope (kteam status: ${result.status ?? "unknown"})`
+					: `handed control back without an envelope (kteam status: ${result.status ?? "unknown"})`;
 		nudgeFile = writeNudge(
 			paths.dir,
 			attempt + 1,
-			`Your previous attempt at turn ${turn} ${result.outcome === "timeout" ? "timed out" : "exited early"}. Re-read ${paths.message}, finish the turn, write ${paths.reply}, then touch ${paths.sentinel}.`,
+			`Your previous attempt at turn ${turn} ${why}. Re-read ${paths.message}, finish the turn, then write ${paths.reply} (atomically) as your last action.`,
 		);
 	}
 
 	return failTurn(sessionId, phaseKey, turn, turnMeta, writer, {
 		error: `turn ${turn} failed after ${maxAttempts} attempts`,
-		tmuxSession: turnMeta.tmuxSession,
+		kteamSession: writer.kteamSessionId,
 		config,
 	});
 }
 
-/** Corrective/nudge messages ride in a small addendum file (the bootstrap line
- *  points the writer at it instead of the full message.md). */
+/** Corrective/nudge messages ride in a small addendum file, delivered via
+ *  `kteam send`; the writer still has the full message.md in its context. */
 function writeNudge(dir: string, attempt: number, text: string): string {
 	const file = join(dir, `addendum-a${attempt}.md`);
 	writeFileSync(file, text);
@@ -1065,12 +977,13 @@ function hashWorkingArtifact(
 // stop/delete + discussion surfaces
 // ============================================================================
 
-/** Kill every writer tmux session for a kautopilot session (stop/delete). */
+/** Stop every live writer kteam session for a kautopilot session (stop/delete),
+ *  found by its ownership label. */
 export async function killWriterSessions(
 	sessionId: string,
-	tmux: WriterTmux = new WriterTmux(),
+	harness: WriterKteam = new WriterKteam(),
 ): Promise<number> {
-	return tmux.killSessionsWithPrefix(writerTmuxPrefix(sessionId));
+	return harness.stopByLabel(writerLabel(sessionId));
 }
 
 /** Mark running writers interrupted (stop — re-attachable, NOT terminal). */
@@ -1092,7 +1005,8 @@ export interface DiscussionTurn {
 	attempts: number;
 	elapsedMs: number | null;
 	lastProgress: string | null;
-	tmuxSession?: string;
+	/** The kteam session that ran this turn (the watch handle). */
+	kteamSessionId?: string;
 	/** The user's raw message for this turn (the chat timeline's user bubble). */
 	userMessage: string | null;
 	approval: boolean;
@@ -1115,7 +1029,7 @@ export function readDiscussion(
 	for (const t of listTurns(sessionId, phaseKey)) {
 		const meta = readTurnMeta(sessionId, phaseKey, t);
 		const accepted = meta?.accepted ?? false;
-		// A turn whose sentinel is present but meta hasn't caught up is still
+		// A turn whose reply.json is present but meta hasn't caught up is still
 		// in-progress from the reader's perspective — only accepted turns expose
 		// their (validated + enriched) envelope.
 		turns.push({
@@ -1129,7 +1043,7 @@ export function readDiscussion(
 					new Date(meta.sentAt).getTime()
 				: null,
 			lastProgress: lastProgress(sessionId, phaseKey, t),
-			tmuxSession: meta?.tmuxSession,
+			kteamSessionId: meta?.kteamSessionId,
 			userMessage: meta?.userMessage ?? null,
 			approval: meta?.approval ?? false,
 			envelope: accepted ? readTurnReplyRaw(sessionId, phaseKey, t) : null,
@@ -1150,14 +1064,14 @@ export function discussionPhases(sessionId: string): string[] {
 		.map((p) => p.phase);
 }
 
-/** Whether a sentinel/tmux adoption is possible — used by tests. */
+/** Whether reply.json (the completion marker) is present + readable for a turn. */
 function turnFinishedOnDisk(
 	sessionId: string,
 	phaseKey: string,
 	turn: number,
 ): boolean {
 	return (
-		sentinelExists(sessionId, phaseKey, turn) &&
+		replyExists(sessionId, phaseKey, turn) &&
 		readTurnReplyRaw(sessionId, phaseKey, turn) != null
 	);
 }

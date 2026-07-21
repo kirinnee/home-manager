@@ -1,27 +1,29 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { sessionDir } from "../../artifacts";
 import { artifactScope } from "../../driver";
 import { DEFAULT_CONFIG, envelopeSchema } from "../../types";
 import { validateEnvelope } from "../envelope";
+import { writerLabel, writerSessionName } from "../kteam";
 import { isWriterStep, stepExecution } from "../mode";
 import { hasAlternative, pickAccount } from "../pool";
 import {
-	clearSentinel,
+	clearReply,
 	hashMessage,
+	isLegacyWriterState,
 	lastTurn,
 	listPhases,
 	listTurns,
 	phaseKeySafe,
 	readTurnMeta,
 	readWriterState,
-	sentinelExists,
+	replyExists,
 	turnPaths,
+	type WriterState,
 	writeTurnMeta,
 	writeWriterState,
 } from "../scratch";
-import { classifyFatal, writerTmuxName, writerTmuxPrefix } from "../tmux";
 
 const SID = "test-writer-unit";
 
@@ -143,17 +145,58 @@ describe("scratch", () => {
 		writeWriterState(SID, {
 			phaseKey: "spec@1",
 			account: "claude-auto-writer",
-			harnessSessionId: "uuid-1",
+			kteamSessionId: "kt-abc",
 			cwd: "/tmp",
 			status: "idle",
 			turns: 0,
-			started: false,
 			createdAt: new Date().toISOString(),
 			updatedAt: new Date().toISOString(),
 		});
 		const state = readWriterState(SID, "spec@1");
 		expect(state?.account).toBe("claude-auto-writer");
+		expect(state?.kteamSessionId).toBe("kt-abc");
+		expect(state?.schemaVersion).toBe(2); // stamped on write
 		expect(listPhases(SID)).toEqual(["spec_1"]);
+	});
+
+	test("isLegacyWriterState detects tmux-era state, not fresh kteam state", () => {
+		// tmux era: harnessSessionId + started, no schemaVersion.
+		const legacy = {
+			phaseKey: "spec@1",
+			account: "claude-auto-writer",
+			harnessSessionId: "uuid",
+			cwd: "/tmp",
+			status: "running",
+			turns: 0,
+			started: true,
+			createdAt: "",
+			updatedAt: "",
+		} as unknown as WriterState;
+		expect(isLegacyWriterState(legacy)).toBe(true);
+		// A written (schemaVersion-stamped) state is never legacy.
+		writeWriterState(SID, {
+			phaseKey: "spec@1",
+			account: "claude-auto-writer",
+			cwd: "/tmp",
+			status: "idle",
+			turns: 0,
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
+		});
+		expect(isLegacyWriterState(readWriterState(SID, "spec@1"))).toBe(false);
+		// A fresh kteam state before turn 1 (no kteamSessionId yet) is NOT legacy.
+		const fresh = {
+			schemaVersion: 2,
+			phaseKey: "spec@1",
+			account: "claude-auto-writer",
+			cwd: "/tmp",
+			status: "idle" as const,
+			turns: 0,
+			createdAt: "",
+			updatedAt: "",
+		};
+		expect(isLegacyWriterState(fresh)).toBe(false);
+		expect(isLegacyWriterState(null)).toBe(false);
 	});
 
 	test("turn indexing + meta round-trip", () => {
@@ -174,14 +217,20 @@ describe("scratch", () => {
 		);
 	});
 
-	test("sentinel hygiene: clear + exists", () => {
+	test("reply-marker hygiene: clear + exists", () => {
 		const paths = turnPaths(SID, "spec@1", 1);
 		mkdirSync(paths.dir, { recursive: true });
-		writeFileSync(paths.sentinel, "");
-		expect(sentinelExists(SID, "spec@1", 1)).toBe(true);
-		clearSentinel(SID, "spec@1", 1);
-		expect(sentinelExists(SID, "spec@1", 1)).toBe(false);
-		clearSentinel(SID, "spec@1", 1); // idempotent
+		writeFileSync(paths.reply, "{}");
+		expect(replyExists(SID, "spec@1", 1)).toBe(true);
+		clearReply(SID, "spec@1", 1);
+		expect(replyExists(SID, "spec@1", 1)).toBe(false);
+		clearReply(SID, "spec@1", 1); // idempotent
+	});
+
+	test("turnPaths has no `done` sentinel (reply.json is the marker)", () => {
+		const paths = turnPaths(SID, "spec@1", 1);
+		expect(paths.reply.endsWith("reply.json")).toBe(true);
+		expect(paths).not.toHaveProperty("sentinel");
 	});
 });
 
@@ -344,54 +393,18 @@ describe("envelope validation", () => {
 });
 
 // ---------------------------------------------------------------------------
-// tmux naming — safe from kloop's cleanup filters
+// kteam naming — ownership label + session name (safe from kloop filters)
 // ---------------------------------------------------------------------------
 
-describe("writer tmux naming", () => {
-	test("prefix is kap- (never kloop-/devloop-)", () => {
-		expect(writerTmuxPrefix("abc123")).toBe("kap-abc123-");
-		const name = writerTmuxName("abc123", "spec_1", 3, 2);
-		expect(name).toBe("kap-abc123-spec_1-t3-a2");
-		expect(name.startsWith("kloop-")).toBe(false);
-		expect(name.startsWith("devloop-")).toBe(false);
-	});
-});
-
-// ---------------------------------------------------------------------------
-// fatal pane classification — anchored to the pane TAIL, not writer prose
-// ---------------------------------------------------------------------------
-
-describe("classifyFatal", () => {
-	test("matches CLI error banners at the pane bottom", () => {
-		expect(classifyFatal("some output\nUsage limit reached — resets 3pm")).toBe(
-			"rate_limit",
-		);
-		expect(classifyFatal("boot\nInvalid API key. Please run /login")).toBe(
-			"auth",
-		);
-		expect(classifyFatal("x\nNo conversation found with session ID abc")).toBe(
-			"resume_lost",
-		);
-		// The REAL CLI shape puts the uuid between "ID" and "is".
-		expect(
-			classifyFatal(
-				"x\nError: Session ID 0b0f7f37-6b2c-4d3e-9a1f-2c3d4e5f6a7b is already in use.",
-			),
-		).toBe("session_exists");
-		expect(classifyFatal("x\nError: session ID already in use")).toBe(
-			"session_exists",
-		);
+describe("writer kteam naming", () => {
+	test("label is kauto-<sessionId> (never a kloop label)", () => {
+		expect(writerLabel("abc123")).toBe("kauto-abc123");
+		expect(writerLabel("abc123").startsWith("kloop-")).toBe(false);
 	});
 
-	test("ignores signature words buried in writer prose above the tail", () => {
-		const prose = Array.from(
-			{ length: 40 },
-			(_, i) =>
-				`line ${i}: the spec covers API rate limit handling and authentication_error retries`,
-		);
-		// The matching words are ONLY above the last-15-line tail.
-		const pane = `${prose.join("\n")}\n${Array.from({ length: 16 }, (_, i) => `working… step ${i}`).join("\n")}`;
-		expect(classifyFatal(pane)).toBeNull();
+	test("session name is writer-<kind>", () => {
+		expect(writerSessionName("spec")).toBe("writer-spec");
+		expect(writerSessionName("plans")).toBe("writer-plans");
 	});
 });
 

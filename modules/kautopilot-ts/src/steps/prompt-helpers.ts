@@ -27,7 +27,7 @@ const SHARED_APPROVAL_GATE = `### Interaction Protocol — STRICT
  * \`kautopilot relay\`) that never talks to the user and never runs kautopilot
  * commands. The two protocols are mutually exclusive; \`approvalGate(ctx)\` picks
  * exactly one. Turn-specific details (working-version path, reply.json path,
- * sentinel path, visual brief) are appended per-turn by the relay engine.
+ * progress.log path, visual brief) are appended per-turn by the relay engine.
  * (specs/deferred-writer-relay.md §5)
  */
 const WRITER_SESSION_GATE = `### Writer-Session Protocol — STRICT
@@ -53,7 +53,9 @@ and the user — you never talk to the user directly, and you NEVER run any
 6. Append one short line to the turn's progress.log at each phase change
    (drafting / reviewers 3/8 / fixing findings / visual / finalizing).
 7. End EVERY turn by writing the turn's reply.json exactly per the envelope
-   schema, then touch the turn's done file as your VERY LAST action. A pure Q&A
+   schema as your VERY LAST action — write it atomically (write a temp file, then
+   rename it into place) so the relay never reads a half-written file. The relay
+   watches for reply.json to appear and reads it the instant it does. A pure Q&A
    turn sets artifact.revised=false and leaves the artifact untouched.
 8. Once the phase looks approvable, fill proposedCompletionMetadata from the
    artifact (shape provided) — the main session confirms it with the user; you

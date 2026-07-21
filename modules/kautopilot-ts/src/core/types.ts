@@ -380,16 +380,17 @@ const writerConfigSchema = z
 		// rollout knob (e.g. [write_spec] to soak one phase first).
 		steps: z.array(z.enum(WRITER_STEP_NAMES)).default([...WRITER_STEP_NAMES]),
 		// kloop-style weighted account map of claude wrapper binaries on PATH
-		// (single entry = fixed account). Consulted only when a phase's writer
-		// session doesn't exist yet (and on rebootstrap).
+		// (single entry = fixed account). Consulted once, at phase start, to pin
+		// the writer's kteam session account; kteam owns any later failover.
 		pool: z
 			.record(z.string(), z.number().positive())
 			.default({ ...WRITER_DEFAULTS.pool }),
 		// Optional model hint for the writer's reviewer-fan-out subagents.
 		reviewerModel: z.string().nullable().default(null),
-		// Sentinel wait per (re)spawn attempt, minutes.
+		// Per-turn wait cap, minutes (the `kteam wait --until-marker` deadline).
 		turnTimeoutMins: z.number().min(1).max(300).default(30),
-		// Corrective respawns per turn (invalid envelope → retry in-conversation).
+		// Corrective retries per turn (invalid envelope → re-sent to the same
+		// kteam session via `kteam send`).
 		maxTurnRetries: z.number().min(0).max(10).default(2),
 		// Binary-readable visual-infographic brief handed to the writer.
 		visualBriefPath: z.string().default(WRITER_DEFAULTS.visualBriefPath),
