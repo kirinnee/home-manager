@@ -84,7 +84,14 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
             });
           }
           // SPA shell for every client-side route; token only for loopback.
-          const html = (await Bun.file(distIndex).text()).replaceAll('__KTEAM_TOKEN__', loopback ? options.token : '');
+          // Replace ONLY the quoted placeholder VALUE — a bare replaceAll also
+          // rewrites the `window.__KTEAM_TOKEN__` property NAME, silently
+          // renaming the global the SPA reads (observed as a false "no local
+          // token" read-only banner).
+          const html = (await Bun.file(distIndex).text()).replaceAll(
+            '"__KTEAM_TOKEN__"',
+            JSON.stringify(loopback ? options.token : ''),
+          );
           return new Response(html, {
             headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
           });

@@ -95,15 +95,20 @@ daemonCommand.command('restart').action(async () => {
   console.log(`kteamd restarted (pid ${String(health.pid)})`);
 });
 daemonCommand.command('status').action(async () => {
+  // The live HTTP API is the ground truth for reachability — the unit/pid
+  // check alone false-negatives ("stopped") when the daemon runs outside the
+  // service manager, which broke consumers probing reachability (kloop).
+  try {
+    console.log(JSON.stringify(await (await client()).health(), null, 2));
+    return;
+  } catch {}
   const status = await daemon.status();
   if (!status.running) {
     console.log('kteamd is stopped');
     process.exitCode = 1;
     return;
   }
-  try {
-    console.log(JSON.stringify(await (await client()).health(), null, 2));
-  } catch {
+  {
     console.log(`kteamd process exists${status.pid ? ` (pid ${status.pid})` : ''}, but API is unavailable`);
     process.exitCode = 1;
   }
@@ -447,7 +452,9 @@ program
     while (true) {
       const view = await api.get(id);
       const print = () => {
-        if (options.json) console.log(JSON.stringify(view.state, null, 2));
+        // Single-line by design: consumers (kloop) parse this from a pipe —
+        // pretty-printed multi-line JSON broke line-oriented readers.
+        if (options.json) console.log(JSON.stringify(view.state));
         else printView(view);
       };
       if (marker !== undefined) {
