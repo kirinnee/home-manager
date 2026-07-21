@@ -133,8 +133,9 @@ describe('kteam daemon API', () => {
     // Served shell is the built dist app when ui-dist exists, else the legacy
     // single-file shell — both must embed the token for loopback requesters,
     // and the dist path must NOT rename the __KTEAM_TOKEN__ global.
-    expect(body).toContain('"secret"');
+    expect(body).toContain('secret');
     expect(body).not.toContain('window.secret');
     expect(body).not.toContain('"__KTEAM_TOKEN__"');
+    expect(body).not.toContain("'__KTEAM_TOKEN__'");
   });
 });

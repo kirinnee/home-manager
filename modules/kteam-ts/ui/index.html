@@ -9,7 +9,10 @@
     <!-- Daemon substitutes the real token at serve time (loopback only). For
          non-loopback requests this stays empty and the UI shows a read-only
          banner (the daemon refuses to embed the token for remote peers). -->
-    <script>
+    <!-- data-cfasync=false: Cloudflare Rocket Loader must NOT defer this —
+         the app module reads the global at boot, and a deferred assignment
+         loses the race behind the tunnel. -->
+    <script data-cfasync="false">
       window.__KTEAM_TOKEN__ = '__KTEAM_TOKEN__';
     </script>
   </head>
