@@ -461,6 +461,12 @@ export class SessionManager implements KTeamService {
       await rm(markerFile(this.paths, id, 'needs-help'), { force: true });
       await this.emit(id, 'control.send', { message, attachmentIds: request.attachmentIds ?? [] }, 'client', turn);
       await this.tmux.send(config, this.promptInstruction(id, turn));
+      // Markers written while this injection was GATED on a busy pane belong
+      // to the PREVIOUS turn (e.g. the agent's `signal done` for work that
+      // finished during the wait) — clear them now that the new turn's prompt
+      // has actually landed, else the monitor reports a false `completed` for
+      // a turn that is just starting (observed live: geoffrey, 2026-07-21).
+      await Promise.all(['done', 'needs-help'].map(name => rm(markerFile(this.paths, id, name), { force: true })));
       this.autoContinued.delete(id);
       this.doneDeferred.delete(id);
       await this.transition(

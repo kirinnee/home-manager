@@ -311,3 +311,38 @@ close as "daemon unavailable", which is misleading when the daemon is alive.
 **Suggested kteam fix:** CLI should retry once on socket-close before declaring the
 daemon unavailable, and distinguish "connection dropped mid-request" from "nothing
 listening on the port" in the error message.
+
+## 2026-07-21 22:20 — stale done marker across gated injection (false `completed` while new turn runs)
+
+**Problem:** After `kteam send` to a busy auto session, the daemon clears markers and
+bumps the turn at QUEUE time, but gated injection delivers the prompt only when the
+pane goes idle. If the agent runs `kteam signal done` (for its previous work) inside
+that gap, the done marker is written under the NEW turn number and never re-cleared at
+delivery. `kteam status`/`kteam wait` then report `completed` + "done marker written"
+for a turn the agent is actively working on.
+
+**Evidence (session mrv5kamb-1888cad7, geoffrey/claude-auto-loge):**
+
+- ~22:16Z: lead `kteam send` (turn-003) while agent was still finishing turn-2 checks;
+  status flipped to `turn 3` immediately, injection gated (pane busy).
+- 22:18:17Z: agent `kteam signal done` (meant for turn 2) → markers/done.json written.
+- 22:18:19Z: `kteam wait`/`status` → `completed, turn 3, done marker written`.
+- 22:18:36Z+: turn-003.md actually read by the agent; tool events (Read scratch.ts,
+  Edits) continue at 22:18:49–22:19:02+ while status still says `completed`.
+
+**Suspected code path (modules/kteam-ts/src/session-manager.ts):** `send()` clears
+`['done','needs-help','process-exit']` markers and bumps `turn` before the gated
+injection actually delivers (marker rm at ~line 655). `signal()` (~line 780-794)
+writes `markers/done.json` unconditionally — no check that the queued turn's prompt
+has been delivered. The monitor loop (~line 1123) treats marker presence as
+completion of the CURRENT turn. The existing `doneDeferred` set (line 88) defers
+done-markers while the pane is working, but doesn't cover the queued-undelivered-turn
+window.
+
+**Workaround (babysitter):** Don't trust `completed` right after a send. Cross-check
+`markers/done.json` mtime against the turn's injection time (agent's Read of
+`turns/turn-NNN.md` in events.jsonl) and confirm tool events have quiesced.
+
+**Suggested kteam fix:** Re-clear (or turn-stamp) markers at injection-DELIVERY time,
+or make `signal done` refuse/warn when a queued turn prompt exists that has not yet
+been injected (marker would then attribute to the correct turn).
