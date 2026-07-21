@@ -1,5 +1,5 @@
 import * as path from 'path';
-import type { FsService, Paths, TmuxService } from './deps';
+import type { FsService, Paths } from './deps';
 import type { RunIndexRow, KloopRunState, KloopEvent, KloopRunStatus, MaterializedStatus } from './types';
 import { EVENT_TYPES } from './types';
 import { materialize, enrich, toRunState } from './status/materialize';
@@ -249,38 +249,9 @@ export class PidLock {
 // Shared cleanup helpers
 // ============================================================================
 
-/** Kill all tmux sessions linked to a run */
-export async function killRunTmuxSessions(tmux: TmuxService, runId: string): Promise<number> {
-  const sessions = await tmux.listSessions();
-  let killed = 0;
-  for (const session of sessions) {
-    const parsed = tmux.parseSessionName(session);
-    if ((parsed && parsed.runId === runId) || session.includes(`kloop-${runId}`)) {
-      if (await tmux.killSession(session)) {
-        killed++;
-      }
-    }
-  }
-  return killed;
-}
-
-/** Fully reap a dead run: write crashed event, kill tmux sessions, release lock */
-export async function reapDeadRun(
-  runId: string,
-  eventLog: EventLog,
-  pidLock: PidLock,
-  tmux: TmuxService,
-): Promise<void> {
-  // Kill tmux sessions
-  try {
-    const killed = await killRunTmuxSessions(tmux, runId);
-    if (killed > 0) {
-      console.log(`  Cleaned up ${killed} stale tmux session(s)`);
-    }
-  } catch {
-    // tmux may not be available
-  }
-
+/** Fully reap a dead run: write crashed event + release lock. (Agent sessions
+ *  live in kteamd now — its own health/stall machinery reaps those.) */
+export async function reapDeadRun(runId: string, eventLog: EventLog, pidLock: PidLock): Promise<void> {
   // Write crashed event (idempotent — safe if already written)
   try {
     await eventLog.append(runId, {

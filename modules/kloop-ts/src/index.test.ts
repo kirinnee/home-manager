@@ -22,12 +22,11 @@ import {
   parseConflictCheckerConfig,
   selectImplementer,
   selectRoleAccount,
-  flattenNestedConfig,
-  nestFlatConfig,
   DEFAULT_CONFIG,
   EVENT_TYPES,
 } from './types';
 import { buildDefaultConfigYaml } from './agents/default-config';
+import { DAEMON_UNAVAILABLE_STATUS_LINE } from './kteam';
 import YAML from 'yaml';
 import type { Config, ImplementerRetryEvent, ImplementerEndEvent } from './types';
 import {
@@ -36,8 +35,7 @@ import {
   REVIEWER_PLUMBING_PROMPT,
   REVIEW_LENS_PROFILES,
 } from './agents/default-prompts';
-import { tryParseJson, extractTokensFromLog } from './stream/parse';
-import { AgentRunner } from './agents/runner';
+import { AgentRunner, DaemonUnavailableError, validateAgentsOrThrow, type KteamExec } from './agents/runner';
 import * as fsp from 'fs/promises';
 import * as nodeOs from 'os';
 import * as nodePath from 'path';
@@ -142,29 +140,18 @@ describe('Config parsing', () => {
     expect(config.prompts?.verifier).toBe('old prompt');
   });
 
-  it('interactive defaults to false', () => {
-    expect(parseRawConfig({}).interactive).toBe(false);
-    expect(DEFAULT_CONFIG.interactive).toBe(false);
-  });
-
-  it('parses flat interactive flag', () => {
-    expect(parseRawConfig({ interactive: true }).interactive).toBe(true);
-  });
-
-  it('parses interactive from nested settings block', () => {
-    expect(parseRawConfig({ settings: { interactive: true } }).interactive).toBe(true);
-  });
-
-  it('round-trips interactive through nest → flatten (persist path)', () => {
-    const nested = nestFlatConfig({ interactive: true }) as { settings?: { interactive?: boolean } };
-    expect(nested.settings?.interactive).toBe(true);
-    const flat = flattenNestedConfig(nested) as { interactive?: boolean };
-    expect(flat.interactive).toBe(true);
-  });
-
-  it('default config YAML carries interactive: false', () => {
+  it('default config YAML parses under the kteam-only schema', () => {
+    // The generated default config no longer carries interactive/agentBackend.
     const config = parseRawConfig(YAML.parse(buildDefaultConfigYaml()));
-    expect(config.interactive).toBe(false);
+    expect((config as Record<string, unknown>).agentBackend).toBeUndefined();
+    expect((config as Record<string, unknown>).interactive).toBeUndefined();
+  });
+
+  it('strips removed interactive/agentBackend fields from old configs', () => {
+    // Extra (now-removed) keys are dropped by zod rather than breaking the parse.
+    const config = parseRawConfig({ interactive: true, agentBackend: 'tmux' } as any);
+    expect((config as Record<string, unknown>).interactive).toBeUndefined();
+    expect((config as Record<string, unknown>).agentBackend).toBeUndefined();
   });
 
   it('defaults match DEFAULT_CONFIG', () => {
@@ -702,203 +689,246 @@ describe('Codex config parsing', () => {
 });
 
 // ============================================================================
-// Codex stream normalization
+// kteam dispatch: outcome mapping + session-per-agent lifecycle (mocked kteam)
 // ============================================================================
 
-describe('Codex stream normalization', () => {
-  it('normalizes thread.started to system init', () => {
-    const event = tryParseJson('{"type":"thread.started","thread_id":"thread_abc123","created_at":1234567890}');
-    expect(event).not.toBeNull();
-    expect(event!.type).toBe('system');
-    if (event!.type === 'system') {
-      expect(event!.subtype).toBe('init');
-      expect(event!.session_id).toBe('thread_abc123');
+type LaunchArgs = {
+  binary: string;
+  promptFile: string;
+  logFile: string;
+  timeout: number;
+  runId: string;
+  name: string;
+  outputFile?: string;
+};
+type LaunchResult = {
+  exitCode: number;
+  durationMs: number;
+  timedOut: boolean;
+  model?: string;
+  harnessSessionId?: string;
+};
+
+/**
+ * A fake `kteam` CLI. Records every invocation; `start` returns a SessionView,
+ * `wait` returns the scripted terminal status, `logs` returns a line. `onStart`
+ * lets a test simulate the agent writing its deliverable file. `daemonDown`
+ * makes every call fail with the daemon-unavailable signature.
+ */
+function makeKteam(opts: {
+  status: string;
+  model?: string;
+  daemonDown?: boolean;
+  onStart?: (args: string[]) => void | Promise<void>;
+}): { exec: KteamExec; calls: string[][] } {
+  const calls: string[][] = [];
+  const exec: KteamExec = async args => {
+    calls.push(args);
+    if (opts.daemonDown) {
+      return {
+        exitCode: 1,
+        stdout: '',
+        stderr: 'kteam daemon is unavailable at http://127.0.0.1:7337; run `kteam daemon start`',
+      };
     }
-  });
-
-  it('normalizes item.completed agent_message to assistant', () => {
-    const event = tryParseJson('{"type":"item.completed","item_type":"agent_message","content":"hello world"}');
-    expect(event).not.toBeNull();
-    expect(event!.type).toBe('assistant');
-    if (event!.type === 'assistant') {
-      expect(event!.message.content).toEqual([{ type: 'text', text: 'hello world' }]);
+    if (args[0] === 'start') {
+      if (opts.onStart) await opts.onStart(args);
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({ config: { id: 'sess-1', model: opts.model, harnessSessionId: 'harness-1' } }),
+        stderr: '',
+      };
     }
-  });
+    // kteam wait --json prints the state as PRETTY-PRINTED (multi-line) JSON —
+    // mirror that so the runner's full-stdout parse is exercised (a last-line
+    // parse would only ever see the closing brace and hang the poll loop).
+    if (args[0] === 'wait')
+      return { exitCode: 0, stdout: JSON.stringify({ status: opts.status }, null, 2), stderr: '' };
+    if (args[0] === 'logs') return { exitCode: 0, stdout: 'transcript line\n', stderr: '' };
+    return { exitCode: 0, stdout: '', stderr: '' };
+  };
+  return { exec, calls };
+}
 
-  it('normalizes turn.completed to result with tokens', () => {
-    const event = tryParseJson(
-      '{"type":"turn.completed","turn_id":0,"usage":{"input_tokens":1000,"output_tokens":500,"total_tokens":1500}}',
-    );
-    expect(event).not.toBeNull();
-    expect(event!.type).toBe('result');
-    if (event!.type === 'result') {
-      expect(event!.result.input_tokens).toBe(1000);
-      expect(event!.result.output_tokens).toBe(500);
-    }
-  });
+function makeRunner(exec: KteamExec) {
+  const config = parseRawConfig({ implementers: { 'claude-auto-x': 1 } });
+  const runner = new AgentRunner({} as unknown as import('./deps').StateService, config, undefined, undefined, exec);
+  return runner as unknown as { launch(p: LaunchArgs): Promise<LaunchResult> };
+}
 
-  it('normalizes turn.failed to error', () => {
-    const event = tryParseJson(
-      '{"type":"turn.failed","turn_id":0,"error":{"type":"Error","message":"API rate limited"}}',
-    );
-    expect(event).not.toBeNull();
-    expect(event!.type).toBe('error');
-    if (event!.type === 'error') {
-      expect(event!.error.message).toBe('API rate limited');
-    }
-  });
-
-  it('suppresses item.started events as unknown', () => {
-    const event = tryParseJson('{"type":"item.started","item_id":"msg_001","item_type":"agent_message"}');
-    expect(event).not.toBeNull();
-    expect(event!.type).toBe('unknown');
-  });
-
-  it('suppresses item.updated events as unknown', () => {
-    const event = tryParseJson(
-      '{"type":"item.updated","item_id":"msg_001","item_type":"agent_message","content":"partial..."}',
-    );
-    expect(event).not.toBeNull();
-    expect(event!.type).toBe('unknown');
-  });
-
-  it('does not break Claude system events', () => {
-    const event = tryParseJson('{"type":"system","message":"hello"}');
-    expect(event).not.toBeNull();
-    expect(event!.type).toBe('system');
-  });
-
-  it('does not break Gemini init events', () => {
-    const event = tryParseJson('{"type":"init","session_id":"gemini-123","model":"gemini-pro"}');
-    expect(event).not.toBeNull();
-    expect(event!.type).toBe('system');
-    if (event!.type === 'system') {
-      expect(event!.subtype).toBe('init');
-      expect(event!.session_id).toBe('gemini-123');
-    }
-  });
-});
-
-describe('extractTokensFromLog — interactive transcript', () => {
-  async function writeTmp(content: string): Promise<string> {
-    const file = nodePath.join(await fsp.mkdtemp(nodePath.join(nodeOs.tmpdir(), 'kloop-tok-')), 'session.jsonl');
-    await fsp.writeFile(file, content);
-    return file;
-  }
-
-  it('aggregates per-turn message.usage when there is no result event', async () => {
-    // Claude TUI session transcript: assistant entries carry usage, no {type:"result"}.
-    const content = [
-      '{"type":"system","subtype":"init","session_id":"s1"}',
-      '{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":100,"output_tokens":20}}}',
-      '{"type":"user","message":{"role":"user"}}',
-      '{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":150,"output_tokens":35}}}',
-    ].join('\n');
-    const file = await writeTmp(content);
-    const tokens = await extractTokensFromLog(file);
-    expect(tokens.inputTokens).toBe(250);
-    expect(tokens.outputTokens).toBe(55);
-  });
-
-  it('prefers the result event over transcript aggregation when present', async () => {
-    const content = [
-      '{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":100,"output_tokens":20}}}',
-      '{"type":"result","usage":{"input_tokens":999,"output_tokens":888}}',
-    ].join('\n');
-    const file = await writeTmp(content);
-    const tokens = await extractTokensFromLog(file);
-    expect(tokens.inputTokens).toBe(999);
-    expect(tokens.outputTokens).toBe(888);
-  });
-
-  it('deduplicates repeated assistant records by message.id (one usage per message)', async () => {
-    // Claude Code writes multiple JSONL records per assistant message (one per streaming
-    // chunk), each repeating the same message.id and the same usage. Summing every line would
-    // multiply the counts; dedupe by id so each unique message counts exactly once.
-    const content = [
-      '{"type":"assistant","message":{"id":"m1","role":"assistant","usage":{"input_tokens":3143,"output_tokens":777}}}',
-      '{"type":"assistant","message":{"id":"m1","role":"assistant","usage":{"input_tokens":3143,"output_tokens":777}}}',
-      '{"type":"assistant","message":{"id":"m1","role":"assistant","usage":{"input_tokens":3143,"output_tokens":777}}}',
-      '{"type":"user","message":{"role":"user"}}',
-      '{"type":"assistant","message":{"id":"m2","role":"assistant","usage":{"input_tokens":50,"output_tokens":10}}}',
-      '{"type":"assistant","message":{"id":"m2","role":"assistant","usage":{"input_tokens":50,"output_tokens":10}}}',
-    ].join('\n');
-    const file = await writeTmp(content);
-    const tokens = await extractTokensFromLog(file);
-    expect(tokens.inputTokens).toBe(3193); // 3143 + 50, not multiplied by record count
-    expect(tokens.outputTokens).toBe(787); // 777 + 10
-  });
-
-  it('folds cache_creation/cache_read tokens into input (real transcripts put the bulk there)', async () => {
-    // In real Claude Code session JSONL, input_tokens is tiny and the bulk of the input lives in
-    // cache_creation_input_tokens / cache_read_input_tokens. Summing only input_tokens would
-    // massively undercount.
-    const content = [
-      '{"type":"assistant","message":{"id":"m1","role":"assistant","usage":{"input_tokens":2,"cache_creation_input_tokens":34102,"cache_read_input_tokens":1000,"output_tokens":50}}}',
-      '{"type":"assistant","message":{"id":"m2","role":"assistant","usage":{"input_tokens":3,"cache_read_input_tokens":34104,"output_tokens":60}}}',
-    ].join('\n');
-    const file = await writeTmp(content);
-    const tokens = await extractTokensFromLog(file);
-    expect(tokens.inputTokens).toBe(69211); // (2+34102+1000) + (3+34104)
-    expect(tokens.outputTokens).toBe(110); // 50 + 60
-  });
-});
-
-// ============================================================================
-// Interactive launch: sentinel-independent completion fallback
-// ============================================================================
-
-describe('AgentRunner.launch — interactive sentinel-independent fallback', () => {
-  // A stub TmuxService whose interactive session always "times out" (sentinel never seen).
-  function makeRunner(opts: { exitCode: number; timedOut: boolean }) {
-    const tmux = {
-      runInteractiveSession: async () => ({ exitCode: opts.exitCode, durationMs: 1, timedOut: opts.timedOut }),
-      runInSession: async () => ({ exitCode: 0, durationMs: 1, timedOut: false }),
-    } as unknown as import('./deps').TmuxService;
-    const config = parseRawConfig({ implementers: { claude: 1 } });
-    const runner = new AgentRunner(tmux, {} as unknown as import('./deps').StateService, config);
-    return runner as unknown as {
-      launch(p: Record<string, unknown>): Promise<{ exitCode: number; durationMs: number; timedOut: boolean }>;
-    };
-  }
-
-  it('treats a timeout (missing sentinel) as success when the output file exists', async () => {
+describe('AgentRunner.launch — kteam outcome mapping', () => {
+  async function launchWith(opts: Parameters<typeof makeKteam>[0], outputFile?: string) {
     const dir = await fsp.mkdtemp(nodePath.join(nodeOs.tmpdir(), 'kloop-launch-'));
-    const outputFile = nodePath.join(dir, 'review-summary.md');
-    await fsp.writeFile(outputFile, 'done');
-    const runner = makeRunner({ exitCode: 124, timedOut: true });
+    const { exec, calls } = makeKteam(opts);
+    const runner = makeRunner(exec);
     const result = await runner.launch({
-      interactive: true,
-      sentinelFile: nodePath.join(dir, '.kloop-done'),
-      tmuxSession: 't',
-      binary: 'claude',
-      promptFile: 'p',
-      sessionId: 's',
+      binary: 'claude-auto-x',
+      promptFile: nodePath.join(dir, 'prompt.txt'),
       logFile: nodePath.join(dir, 'log'),
       timeout: 1,
-      command: 'noop',
+      runId: 'run1',
+      name: 'kloop-run1-1-impl',
+      outputFile,
+    });
+    return { result, calls, dir };
+  }
+
+  it('maps kteam completed → exit 0', async () => {
+    const { result } = await launchWith({ status: 'completed', model: 'claude-opus-4-8' });
+    expect(result.exitCode).toBe(0);
+    expect(result.timedOut).toBe(false);
+    expect(result.model).toBe('claude-opus-4-8');
+    expect(result.harnessSessionId).toBe('harness-1');
+  });
+
+  it('maps kteam failed → exit 1 (crash, retryable)', async () => {
+    const { result } = await launchWith({ status: 'failed' });
+    expect(result.exitCode).toBe(1);
+    expect(result.timedOut).toBe(false);
+  });
+
+  it('maps kteam stalled → exit 1 + timedOut (kteamd owns stall)', async () => {
+    const { result } = await launchWith({ status: 'stalled' });
+    expect(result.exitCode).toBe(1);
+    expect(result.timedOut).toBe(true);
+  });
+
+  it('maps kteam stopped → exit 124 timeout', async () => {
+    const { result } = await launchWith({ status: 'stopped' });
+    expect(result.exitCode).toBe(124);
+    expect(result.timedOut).toBe(true);
+  });
+
+  it('deliverable on disk trumps a non-completed session verdict', async () => {
+    const dir = await fsp.mkdtemp(nodePath.join(nodeOs.tmpdir(), 'kloop-launch-'));
+    const outputFile = nodePath.join(dir, 'verdict.json');
+    // The fake agent writes its deliverable during `start`, even though the session ends 'failed'.
+    const { exec } = makeKteam({ status: 'failed', onStart: () => fsp.writeFile(outputFile, '{"approved":true}') });
+    const runner = makeRunner(exec);
+    const result = await runner.launch({
+      binary: 'claude-auto-x',
+      promptFile: nodePath.join(dir, 'p'),
+      logFile: nodePath.join(dir, 'log'),
+      timeout: 1,
+      runId: 'run1',
+      name: 'rev',
       outputFile,
     });
     expect(result.exitCode).toBe(0);
     expect(result.timedOut).toBe(false);
   });
 
-  it('keeps the failing exit code when the output file is absent', async () => {
-    const dir = await fsp.mkdtemp(nodePath.join(nodeOs.tmpdir(), 'kloop-launch-'));
-    const runner = makeRunner({ exitCode: 124, timedOut: true });
-    const result = await runner.launch({
-      interactive: true,
-      sentinelFile: nodePath.join(dir, '.kloop-done'),
-      tmuxSession: 't',
-      binary: 'claude',
-      promptFile: 'p',
-      sessionId: 's',
-      logFile: nodePath.join(dir, 'log'),
-      timeout: 1,
-      command: 'noop',
-      outputFile: nodePath.join(dir, 'missing.md'),
+  it('throws DaemonUnavailableError when the daemon is unreachable', async () => {
+    const { exec } = makeKteam({ status: 'completed', daemonDown: true });
+    const runner = makeRunner(exec);
+    await expect(
+      runner.launch({
+        binary: 'claude-auto-x',
+        promptFile: '/tmp/p',
+        logFile: '/tmp/kloop-daemon-down.log',
+        timeout: 1,
+        runId: 'run1',
+        name: 'impl',
+      }),
+    ).rejects.toBeInstanceOf(DaemonUnavailableError);
+  });
+
+  it('starts a session-per-agent with --mode auto, the kloop label, and the prompt file', async () => {
+    const { calls } = await launchWith({ status: 'completed' });
+    const start = calls.find(c => c[0] === 'start');
+    expect(start).toBeDefined();
+    expect(start).toContain('--mode');
+    expect(start![start!.indexOf('--mode') + 1]).toBe('auto');
+    expect(start).toContain('--label');
+    expect(start![start!.indexOf('--label') + 1]).toBe('kloop-run1');
+    expect(start).toContain('--prompt-file');
+    expect(start).toContain('-a');
+    expect(start![start!.indexOf('-a') + 1]).toBe('claude-auto-x');
+    // The transcript is mirrored to the log file (kteam logs called).
+    expect(calls.some(c => c[0] === 'logs')).toBe(true);
+  });
+});
+
+// ============================================================================
+// Agent validation: gemini dropped + kfleet wrapper existence
+// ============================================================================
+
+describe('validateAgentsOrThrow', () => {
+  it('rejects a configured gemini-harness agent', () => {
+    const config = parseRawConfig({ implementers: { 'gemini-auto:gemini': 1 } });
+    expect(() => validateAgentsOrThrow(config, ['claude-auto-x'])).toThrow(/gemini/i);
+  });
+
+  it('rejects a fleet-wrapper name that is not installed', () => {
+    const config = parseRawConfig({ implementers: { 'claude-auto-missing': 1 } });
+    expect(() => validateAgentsOrThrow(config, ['claude-auto-x'])).toThrow(/not installed/i);
+  });
+
+  it('passes when configured wrappers are installed', () => {
+    const config = parseRawConfig({
+      implementers: { 'claude-auto-x': 1 },
+      reviewPhases: [['claude-auto-y']],
     });
-    expect(result.exitCode).toBe(124);
-    expect(result.timedOut).toBe(true);
+    expect(() => validateAgentsOrThrow(config, ['claude-auto-x', 'claude-auto-y'])).not.toThrow();
+  });
+
+  it('skips the install check when no wrappers are discoverable (dev/test env)', () => {
+    const config = parseRawConfig({ implementers: { 'claude-auto-x': 1 } });
+    expect(() => validateAgentsOrThrow(config, [])).not.toThrow();
+  });
+
+  it('the generated default config validates against its real fleet wrappers', () => {
+    // Regression: default `kloop init` must not seed bare non-fleet names that pass
+    // kloop validation then fail at `kteam start`. The template now uses real wrappers.
+    const config = parseRawConfig(YAML.parse(buildDefaultConfigYaml()));
+    expect(() => validateAgentsOrThrow(config, ['claude-auto-liftoff', 'codex-auto-loio'])).not.toThrow();
+  });
+});
+
+// ============================================================================
+// Daemon-unavailable → kautopilot 'unavailable' (not 'crash') contract
+// ============================================================================
+
+/**
+ * Replica of kautopilot's `devloopVerify` classification
+ * (modules/kautopilot-ts/src/core/devloop.ts — which kloop must NOT edit). It reads
+ * `kloop status --json` and routes on (exitCode, stdout). Pinned here so kloop's
+ * daemon-down emission is proven to land on 'unavailable', not 'crash'.
+ */
+function devloopVerifyOutcome(exitCode: number, stdout: string): string {
+  if (exitCode !== 0) return 'crash';
+  try {
+    const data = JSON.parse(stdout.trim()) as { status?: string; exitReason?: string };
+    const status = String(data.status ?? '');
+    if (data.exitReason === 'max_iterations') return 'max_iterations';
+    if (status === 'running') return 'running';
+    if (status === 'conflict') return 'conflict';
+    if (status === 'completed') return 'completed';
+    if (status === 'failed' || status === 'cancelled') return 'crash';
+    return 'crash';
+  } catch {
+    return 'unavailable';
+  }
+}
+
+describe('daemon-unavailable → kautopilot unavailable contract', () => {
+  it('kloop status daemon-down line (exit 0, non-JSON) classifies as unavailable — never crash', () => {
+    // This is what `kloop status --json` prints for a non-terminal run when kteamd is down.
+    expect(() => JSON.parse(DAEMON_UNAVAILABLE_STATUS_LINE)).toThrow(); // deliberately NOT valid JSON
+    expect(devloopVerifyOutcome(0, DAEMON_UNAVAILABLE_STATUS_LINE)).toBe('unavailable');
+  });
+
+  it('leaves the existing status→outcome contract unchanged', () => {
+    expect(devloopVerifyOutcome(0, JSON.stringify({ status: 'completed', exitReason: 'consensus' }))).toBe('completed');
+    expect(devloopVerifyOutcome(0, JSON.stringify({ status: 'completed', exitReason: 'max_iterations' }))).toBe(
+      'max_iterations',
+    );
+    expect(devloopVerifyOutcome(0, JSON.stringify({ status: 'conflict' }))).toBe('conflict');
+    expect(devloopVerifyOutcome(0, JSON.stringify({ status: 'running' }))).toBe('running');
+    expect(devloopVerifyOutcome(0, JSON.stringify({ status: 'failed' }))).toBe('crash');
+  });
+
+  it('a run kloop cannot find (nonzero exit) is crash, distinct from daemon-unavailable', () => {
+    expect(devloopVerifyOutcome(1, '')).toBe('crash');
   });
 });

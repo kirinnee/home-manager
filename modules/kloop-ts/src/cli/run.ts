@@ -2,8 +2,9 @@ import * as path from 'path';
 import pc from 'picocolors';
 import { paths, generateKloopRunId } from '../deps';
 import { LoopRunner } from '../loop/runner';
-import { AgentRunner } from '../agents/runner';
-import { IndexDb, EventLog, PidLock, killRunTmuxSessions } from '../index-db';
+import { AgentRunner, DaemonUnavailableError } from '../agents/runner';
+import { IndexDb, EventLog, PidLock } from '../index-db';
+import { daemonReachable, stopRunSessions } from '../kteam';
 import type { CliDeps } from './index';
 import { EVENT_TYPES, parseRawConfig, type Config, type KloopEvent } from '../types';
 
@@ -54,7 +55,7 @@ function unpatchConsole(): void {
 }
 
 export async function handler(runId: string | undefined, opts: { detach?: boolean }, deps: CliDeps): Promise<void> {
-  const { state, tmux, indexDb, eventLog, pidLock } = deps;
+  const { state, indexDb, eventLog, pidLock } = deps;
   const workspace = process.cwd();
 
   // Resolve run ID if not provided
@@ -73,6 +74,24 @@ export async function handler(runId: string | undefined, opts: { detach?: boolea
   if (lock && (await pidLock.isPidAlive(lock.pid))) {
     console.error(pc.red(`Run ${runId} is still ${prevStatus?.status ?? 'running'}.`));
     console.error(pc.dim('Cancel it first: kloop cancel'));
+    process.exit(1);
+  }
+
+  // Every agent runs through kteamd. If the daemon is unreachable we refuse to
+  // start — crucially BEFORE writing run_start, so the run stays non-terminal.
+  //
+  // Contract shared with `kloop status` (kautopilot compatibility): a
+  // daemon-unavailable run must resolve to kautopilot's 'unavailable' outcome,
+  // never 'crash'. The AUTHORITATIVE signal is `devloopVerify` → `kloop status
+  // --json`, which for a non-terminal run with the daemon down prints a non-JSON
+  // diagnostic and exits 0 → JSON.parse fails → 'unavailable'. We keep this run's
+  // state non-terminal (no run_start, no terminal/error event) so that authoritative
+  // check reads 'unavailable'. `kloop run`'s own non-zero exit is only a local
+  // signal (devloopRun has no 'unavailable' exit code); devloopVerify is the source
+  // of truth. Same applies to a daemon death mid-run (see the catch below).
+  if (!daemonReachable()) {
+    console.error(pc.red('kteam daemon is not running — kloop needs it to run agents.'));
+    console.error(pc.dim('Start it with: kteam daemon start'));
     process.exit(1);
   }
 
@@ -116,34 +135,24 @@ export async function handler(runId: string | undefined, opts: { detach?: boolea
     runId = newId;
   }
 
-  // Daemon mode: use tmux session as the persistent background process
+  // Daemon mode: spawn a detached background `kloop run` process (agents run in
+  // their own kteamd sessions, so kloop itself no longer needs tmux). The
+  // PID-lock check above already rejects a second concurrent run for this id.
   if (opts.detach) {
-    const daemonSession = `kloop-${runId}-daemon`;
-
-    // Check if a daemon session already exists
-    if (await tmux.isSessionAlive(daemonSession)) {
-      console.error(pc.red(`Daemon session ${daemonSession} already exists.`));
-      console.error(pc.dim('Cancel or attach first: kloop cancel / kloop attach'));
-      process.exit(1);
-    }
-
     const entryPoint = process.argv[1];
-    const command = `bun run "${entryPoint}" run ${runId}`;
-
-    // Create a detached tmux session running the kloop command.
-    // Use child_process.spawn with detached:true so the tmux process
-    // survives when the parent bun process exits.
     const { spawn } = await import('child_process');
-    const child = spawn('tmux', ['new-session', '-d', '-s', daemonSession, '-c', workspace, command], {
+    const child = spawn('bun', ['run', entryPoint, 'run', runId], {
+      cwd: workspace,
       detached: true,
       stdio: 'ignore',
+      env: process.env,
     });
     child.unref();
 
     console.log(pc.green(`Detached: ${runId}`));
     console.log(pc.dim(`  kloop status   — check progress`));
     console.log(pc.dim(`  kloop logs     — view run log`));
-    console.log(pc.dim(`  kloop attach   — jump into tmux`));
+    console.log(pc.dim(`  kteam ps -l kloop-${runId}  — the run's agent sessions`));
     process.exitCode = 0;
     return;
   }
@@ -155,14 +164,6 @@ export async function handler(runId: string | undefined, opts: { detach?: boolea
   try {
     // Remove local .kloop/ symlinks if present (created by kloop link)
     await unlinkLocalKloop();
-
-    // Check if tmux is available
-    const available = await tmux.isAvailable();
-    if (!available) {
-      console.error('Error: tmux is not installed');
-      console.error('Install with: brew install tmux (macOS) or apt install tmux (Linux)');
-      process.exit(1);
-    }
 
     // Validate run directory exists
     const runDir = paths.runPath(runId);
@@ -204,8 +205,8 @@ export async function handler(runId: string | undefined, opts: { detach?: boolea
       if (cleanedUp) return;
       cleanedUp = true;
       try {
-        // Kill tmux sessions linked to this run
-        await killRunTmuxSessions(tmux, runId);
+        // Stop the run's kteam agent sessions, then log the cancellation.
+        stopRunSessions(runId);
         await eventLog.append(runId, {
           type: EVENT_TYPES.CANCEL,
           timestamp: new Date().toISOString(),
@@ -232,10 +233,10 @@ export async function handler(runId: string | undefined, opts: { detach?: boolea
     console.log(`KLOOP [${runId}]: Starting run in ${workspace}`);
 
     // Create agent runner with configured binaries
-    const agentRunner = new AgentRunner(tmux, state, config);
+    const agentRunner = new AgentRunner(state, config);
 
     // Create loop runner
-    const loopRunner = new LoopRunner(state, tmux, agentRunner, paths);
+    const loopRunner = new LoopRunner(state, agentRunner, paths);
 
     // Run the loop with explicit run ID
     const result = await loopRunner.runWithId(runId);
@@ -269,6 +270,23 @@ export async function handler(runId: string | undefined, opts: { detach?: boolea
     }
   } catch (err) {
     const error = err as Error & { name: string };
+
+    // Daemon died mid-run: do NOT record a terminal error event. Leaving the run
+    // non-terminal lets `kloop status --json` map it to kautopilot's 'unavailable'
+    // (infra problem), not 'crash' (the code failed).
+    if (error instanceof DaemonUnavailableError) {
+      try {
+        await pidLock.release(runId);
+      } catch {
+        // Ignore
+      }
+      unpatchConsole();
+      await stopRunLogCapture();
+      process.removeAllListeners('SIGINT');
+      process.removeAllListeners('SIGTERM');
+      console.error(`Error: ${error.message}`);
+      process.exit(1);
+    }
 
     // Write error event if possible
     try {

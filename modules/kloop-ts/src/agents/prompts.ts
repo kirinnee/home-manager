@@ -26,35 +26,6 @@ function substitute(template: string, vars: any): string {
 // ============================================================================
 // Interactive-mode completion sentinel
 // ============================================================================
-
-/**
- * Instruction appended to an agent's prompt when running in interactive (non --print)
- * mode. The agent runs in a persistent TUI that never exits on its own, so kloop watches
- * for this marker file to know the work is done — then it sends /exit and closes the
- * session. The agent MUST create it as its final action (and only when truly finished).
- */
-export function buildSentinelInstruction(sentinelFile: string): string {
-  return `
-
----
-## ⛔ SESSION COMPLETION SIGNAL (interactive mode — READ THIS)
-
-You are running in an INTERACTIVE session that does NOT exit on its own. kloop is watching
-for a marker file to know you have finished.
-
-When — and ONLY when — you have completely finished ALL work described above AND written
-every required output file (verdict / review / learnings / spec / summary, as applicable),
-create the marker file by running EXACTLY:
-
-    touch "${sentinelFile}"
-
-Rules:
-- Create it as your VERY LAST action. Never create it early or speculatively.
-- After creating it, stop working. kloop will close the session for you.
-- Do all other required file writes BEFORE touching the marker.`;
-}
-
-// ============================================================================
 // Implementer prompt
 // ============================================================================
 

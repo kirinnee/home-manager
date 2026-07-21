@@ -71,50 +71,6 @@ export interface FsService {
   rm(path: string, options?: { recursive?: boolean }): Promise<void>;
 }
 
-export interface TmuxService {
-  isAvailable(): Promise<boolean>;
-  isSessionAlive(sessionName: string): Promise<boolean>;
-  listSessions(): Promise<string[]>;
-  killSession(sessionName: string): Promise<boolean>;
-  killAllSessions(): Promise<number>;
-  runInSession(params: {
-    sessionName: string;
-    command: string;
-    cwd: string;
-    timeoutMins: number;
-  }): Promise<{ exitCode: number; durationMs: number; timedOut: boolean }>;
-  /**
-   * Run a claude agent in INTERACTIVE (non --print) mode: launch the TUI, paste the
-   * prompt, then poll for the agent to touch `sentinelFile`. On detect, send /exit and
-   * close the session. Exit code: 0 = sentinel seen, 124 = timeout, 1 = session died
-   * before signalling done (treated as a crash by the caller's retry logic).
-   */
-  runInteractiveSession(params: {
-    sessionName: string;
-    binary: string;
-    promptFile: string;
-    sessionId: string;
-    cwd: string;
-    timeoutMins: number;
-    sentinelFile: string;
-    logFile: string;
-  }): Promise<{ exitCode: number; durationMs: number; timedOut: boolean }>;
-  generateSessionName(params: {
-    dirHash: string;
-    runId: string;
-    iteration: number;
-    role: 'impl' | 'rev';
-    reviewerIndex?: number;
-  }): string;
-  parseSessionName(sessionName: string): {
-    dirHash: string;
-    runId: string;
-    iteration: number;
-    role: 'impl' | 'rev';
-    reviewerIndex?: number;
-  } | null;
-}
-
 export interface StateService {
   fs: FsService;
   initProject(config?: Partial<Config>): Promise<void>;

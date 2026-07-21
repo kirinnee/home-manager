@@ -1,5 +1,5 @@
 import { Command } from 'commander';
-import type { StateService, TmuxService, LogsService } from '../deps';
+import type { StateService, LogsService } from '../deps';
 import type { IndexDb, EventLog, PidLock } from '../index-db';
 import * as initCmd from './init';
 import * as setupCmd from './setup';
@@ -18,7 +18,6 @@ import * as removeCmd from './remove';
 import * as reviewCmd from './review';
 import * as summaryCmd from './summary';
 import * as resetCmd from './reset';
-import * as streamCmd from './stream';
 import * as skillCmd from './skill';
 import * as showCmd from './show';
 import * as serveCmd from './serve';
@@ -31,7 +30,6 @@ const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.ur
 
 export interface CliDeps {
   state: StateService;
-  tmux: TmuxService;
   logs: LogsService;
   indexDb: IndexDb;
   eventLog: EventLog;
@@ -114,8 +112,8 @@ export function createCli(deps: CliDeps): Command {
 
   program
     .command('attach [id]')
-    .description("Attach to run's tmux session (name: kloop-{runId})")
-    .action(async id => attachCmd.handler(id, deps.tmux));
+    .description("Show the run's kteam agent sessions (attach with `kteam attach <id>`)")
+    .action(async id => attachCmd.handler(id, deps));
 
   program
     .command('metrics [query]')
@@ -155,11 +153,6 @@ export function createCli(deps: CliDeps): Command {
     .command('reset')
     .description('Reset global config (~/.kloop/config.yaml) to defaults')
     .action(async () => resetCmd.handler());
-
-  program
-    .command('stream')
-    .description('Process streaming JSON from stdin (internal use)')
-    .action(async () => streamCmd.handler());
 
   // show subcommand group
   const showCmd_ = new Command('show').description('View run artifacts (reviews, prompts, verdicts, evidence, etc.)');
