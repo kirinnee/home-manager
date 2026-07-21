@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" href="data:," />
+    <title>Kteam</title>
+    <!-- Daemon substitutes the real token at serve time (loopback only). For
+         non-loopback requests this stays empty and the UI shows a read-only
+         banner (the daemon refuses to embed the token for remote peers). -->
+    <script>
+      window.__KTEAM_TOKEN__ = '__KTEAM_TOKEN__';
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
