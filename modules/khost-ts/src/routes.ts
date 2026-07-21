@@ -154,9 +154,22 @@ export async function routeSync(opts: SyncOpts = {}): Promise<void> {
     }
   }
 
-  // 4. Prune (only resources carrying khost's markers).
+  // 4. Prune (only resources carrying khost's markers AND belonging to THIS
+  // machine). The 'khost: ' app-name marker is shared by every khost host, so
+  // Access pruning must additionally be scoped to domains whose DNS points at
+  // THIS machine's tunnel — otherwise one host's prune strips the Access apps
+  // off every other machine's routes (observed live: kirin-box's prune deleted
+  // the lombp dashboards' apps, leaving those routes unprotected).
   if (prune) {
     const desiredHosts = new Set(routes.map(r => r.hostname));
+    // Domains this machine owns = khost-marked DNS records targeting THIS
+    // tunnel. Collect BEFORE deleting so just-pruned names still qualify.
+    const ownedNames = new Set<string>();
+    for (const [, zone] of zoneCache) {
+      for (const rec of await listCnames(zone.id)) {
+        if (rec.comment === ownerComment && rec.content === tunnelTarget) ownedNames.add(rec.name);
+      }
+    }
     for (const [, zone] of zoneCache) {
       for (const rec of await listCnames(zone.id)) {
         if (rec.comment === ownerComment && rec.content === tunnelTarget && !desiredHosts.has(rec.name)) {
@@ -169,7 +182,12 @@ export async function routeSync(opts: SyncOpts = {}): Promise<void> {
       }
     }
     for (const app of await listAccessApps()) {
-      if (app.name?.startsWith('khost: ') && app.domain && !desiredHosts.has(app.domain)) {
+      if (
+        app.name?.startsWith('khost: ') &&
+        app.domain &&
+        ownedNames.has(app.domain) &&
+        !desiredHosts.has(app.domain)
+      ) {
         plan.push(`PRUNE access → ${app.domain}`);
         if (!dry) {
           await deleteAccessApp(app.id);
