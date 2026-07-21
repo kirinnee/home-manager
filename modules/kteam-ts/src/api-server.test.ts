@@ -53,6 +53,7 @@ class FakeService implements KTeamService {
   remove = async () => {};
   signal = async () => view;
   snapshot = async () => 'pane';
+  lastSnapshot = async () => 'pane (cached)';
   logs = async () => 'log';
   replay = async () => [this.event];
   subscribe = (listener: (event: KTeamEvent) => void) => {
