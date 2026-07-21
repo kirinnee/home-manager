@@ -89,6 +89,10 @@ export interface SessionState {
   lastPaneAt?: string;
   /** Context-window usage (percent used) parsed from the TUI statusline. */
   contextPercent?: number;
+  /** The harness's live activity/spinner line ("✻ Lollygagging… (34s · 2.1k
+   *  tokens)") parsed from the pane — the UI's received-and-thinking signal.
+   *  Cleared when the pane goes idle. */
+  activity?: string;
   /** When the most recent tool started, from the transcript — distinguishes
    *  real work from a wedged hook that both render as "Working". */
   lastToolStartedAt?: string;
