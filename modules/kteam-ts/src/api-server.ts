@@ -78,20 +78,27 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           // Static assets (hashed filenames → cacheable). Path is confined to
           // the dist dir; anything escaping it falls through to index.html.
           const assetPath = normalize(join(UI_DIST, url.pathname));
-          if (url.pathname !== '/' && assetPath.startsWith(`${UI_DIST}/`) && existsSync(assetPath)) {
+          // index.html must NEVER take the raw-static path — it would leak the
+          // unsubstituted placeholder to the browser.
+          if (
+            url.pathname !== '/' &&
+            !assetPath.endsWith('/index.html') &&
+            assetPath.startsWith(`${UI_DIST}/`) &&
+            existsSync(assetPath)
+          ) {
             return new Response(Bun.file(assetPath), {
               headers: { 'cache-control': 'public, max-age=31536000, immutable' },
             });
           }
           // SPA shell for every client-side route; token only for loopback.
-          // Replace ONLY the quoted placeholder VALUE — a bare replaceAll also
-          // rewrites the `window.__KTEAM_TOKEN__` property NAME, silently
-          // renaming the global the SPA reads (observed as a false "no local
-          // token" read-only banner).
-          const html = (await Bun.file(distIndex).text()).replaceAll(
-            '"__KTEAM_TOKEN__"',
-            JSON.stringify(loopback ? options.token : ''),
-          );
+          // Replace ONLY the quoted placeholder VALUE (either quote style —
+          // prettier rewrites the inline script to single quotes): a bare
+          // replaceAll also rewrites the `window.__KTEAM_TOKEN__` property
+          // NAME, silently renaming the global the SPA reads.
+          const tokenJson = JSON.stringify(loopback ? options.token : '');
+          const html = (await Bun.file(distIndex).text())
+            .replaceAll('"__KTEAM_TOKEN__"', tokenJson)
+            .replaceAll("'__KTEAM_TOKEN__'", tokenJson);
           return new Response(html, {
             headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
           });
