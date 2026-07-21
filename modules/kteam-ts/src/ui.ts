@@ -167,9 +167,15 @@ async function loadList() {
   showSkeleton(4);
   const sessions = await api('/v1/sessions');
   renderList(sessions);
-  const socket = openSocket('', async () => {
-    try { renderList(await api('/v1/sessions')); } catch (_) {}
-  });
+  // Every session emits frame events every few seconds — refetching the full
+  // list per event hammered the API; a trailing debounce batches the storm.
+  let listTimer = null;
+  // after=-1: live pings only — the initial table comes from /v1/sessions, so
+  // replaying the entire multi-session journal here was pure startup cost.
+  const socket = openSocket('', () => {
+    if (listTimer) return;
+    listTimer = setTimeout(async () => { listTimer = null; try { renderList(await api('/v1/sessions')); } catch (_) {} }, 1500);
+  }, -1);
   window.__kteamSocket = socket;
 }
 function renderVitals(view) {
@@ -239,9 +245,28 @@ async function renderDetail(id) {
     }
     const snapshotCard = el('div', 'card'); snapshotCard.innerHTML = '<div class="section-title">Latest pane snapshot</div>'; const pre = el('pre', 'snapshot'); pre.textContent = snapshot || '(no snapshot yet)'; snapshotCard.appendChild(pre); app.appendChild(snapshotCard);
     const eventsCard = el('div', 'card'); eventsCard.innerHTML = '<div class="section-title">Live event stream</div>'; const eventHost = el('div', 'events'); eventHost.innerHTML = events.length ? events.map(eventLine).join('') : '<span class="muted">Waiting for events…</span>'; eventsCard.appendChild(eventHost); app.appendChild(eventsCard);
-    if (socket) socket.close(); socket = openSocket(id, (event) => { events.push(event); if (events.length > 500) events.shift(); eventHost.innerHTML = events.map(eventLine).join(''); eventHost.scrollTop = eventHost.scrollHeight; void refresh(false); }, events.length ? events.at(-1).sequence : 0); window.__kteamSocket = socket;
+    // First connect asks for the last 200 events (negative after = tail) —
+    // replaying a long session's full history froze the initial load.
+    if (socket) socket.close(); socket = openSocket(id, (event) => { events.push(event); if (events.length > 500) events.shift(); eventHost.innerHTML = events.map(eventLine).join(''); eventHost.scrollTop = eventHost.scrollHeight; scheduleRefresh(); }, events.length ? events.at(-1).sequence : -200); window.__kteamSocket = socket;
   };
-  const refresh = async (redraw) => { view = await api('/v1/sessions/' + encodeURIComponent(id)); snapshot = await api('/v1/sessions/' + encodeURIComponent(id) + '/snapshot').catch(() => snapshot); if (redraw !== false) draw(); };
+  // Single-flight + change-detection: view and snapshot fetch in PARALLEL, and
+  // the DOM only redraws when the payload actually changed. Event storms funnel
+  // through a trailing debounce instead of issuing one fetch pair per event.
+  let refreshing = false; let lastPayload = '';
+  const refresh = async (redraw) => {
+    if (refreshing) return; refreshing = true;
+    try {
+      const [nextView, nextSnapshot] = await Promise.all([
+        api('/v1/sessions/' + encodeURIComponent(id)),
+        api('/v1/sessions/' + encodeURIComponent(id) + '/snapshot').catch(() => snapshot),
+      ]);
+      view = nextView; snapshot = nextSnapshot;
+      const payload = JSON.stringify(view) + '::SNAP::' + snapshot;
+      if (redraw !== false && payload !== lastPayload) { lastPayload = payload; draw(); }
+    } finally { refreshing = false; }
+  };
+  let refreshTimer = null;
+  const scheduleRefresh = () => { if (refreshTimer) return; refreshTimer = setTimeout(() => { refreshTimer = null; void refresh(); }, 1200); };
   draw();
   const poll = setInterval(() => { if (location.pathname !== '/session/' + encodeURIComponent(id)) { clearInterval(poll); socket && socket.close(); return; } void refresh(); }, 5000);
 }

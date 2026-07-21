@@ -90,7 +90,9 @@ export class ApiClient {
     });
   }
   snapshot(id: string) {
-    return this.request<string>(`/v1/sessions/${encodeURIComponent(id)}/snapshot`);
+    // CLI semantics stay LIVE (fresh tmux capture); the web UI uses the cached
+    // default route instead.
+    return this.request<string>(`/v1/sessions/${encodeURIComponent(id)}/snapshot?live=true`);
   }
   logs(id: string, turn?: number) {
     return this.request<string>(`/v1/sessions/${encodeURIComponent(id)}/logs${turn ? `?turn=${turn}` : ''}`);

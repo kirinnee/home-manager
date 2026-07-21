@@ -837,6 +837,15 @@ export class SessionManager implements KTeamService {
     id = this.resolveRef(id);
     return await this.serialized(id, async () => await this.tmux.snapshot((await this.get(id)).config, true));
   }
+
+  async lastSnapshot(id: string): Promise<string> {
+    id = this.resolveRef(id);
+    // Read the monitor's last written frame straight from disk. snapshot()
+    // captures live tmux UNDER THE SESSION LOCK — on a busy session that
+    // queues behind monitor/injection work for tens of seconds, which is what
+    // made the web UI (polling it every few seconds) feel broken.
+    return await readFile(path.join(sessionDir(this.paths, id), 'last-snapshot.txt'), 'utf8').catch(() => '');
+  }
   async logs(id: string, turn?: number): Promise<string> {
     id = this.resolveRef(id);
     const view = await this.get(id);
@@ -845,17 +854,18 @@ export class SessionManager implements KTeamService {
 
   async replay(id: string | undefined, after: number, limit = 1000): Promise<KTeamEvent[]> {
     if (id !== undefined) id = this.resolveRef(id);
-    if (!Number.isSafeInteger(after) || after < 0) throw new Error('after must be a non-negative integer');
+    // Negative `after` = tail semantics: the last |after| events. Long sessions
+    // accumulate thousands of events; the UI's live view only needs the recent
+    // window, not a full-history replay on every WebSocket connect.
+    if (!Number.isSafeInteger(after) || after < -10_000) throw new Error('after must be a safe integer >= -10000');
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000)
       throw new Error('limit must be between 1 and 10000');
     const events = id
       ? this.replayCompleteJournal(id)
       : this.store.listSessions().flatMap(session => this.replayCompleteJournal(session.id));
-    return events
-      .map(event => this.fromStored(event))
-      .filter(event => event.sequence > after)
-      .sort((a, b) => a.sequence - b.sequence)
-      .slice(0, limit);
+    const ordered = events.map(event => this.fromStored(event)).sort((a, b) => a.sequence - b.sequence);
+    if (after < 0) return ordered.slice(after);
+    return ordered.filter(event => event.sequence > after).slice(0, limit);
   }
 
   private replayCompleteJournal(id: string): SessionEvent[] {
