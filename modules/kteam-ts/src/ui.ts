@@ -222,6 +222,19 @@ async function renderDetail(id) {
   let events = await api('/v1/sessions/' + encodeURIComponent(id) + '/events?limit=500').catch(() => []);
   let socket;
   const draw = () => {
+    // Preserve reading position across full redraws: pane scrolls only follow
+    // the live tail when the user was ALREADY at the bottom (sticky-scroll);
+    // a reader scrolled up stays exactly where they are. Page scroll restores.
+    const atBottom = (node) => !node || node.scrollTop + node.clientHeight >= node.scrollHeight - 40;
+    const prevEvents = app.querySelector('.events');
+    const stickEvents = atBottom(prevEvents);
+    const prevEventsTop = prevEvents ? prevEvents.scrollTop : 0;
+    const prevSnap = app.querySelector('.snapshot');
+    const prevSnapTop = prevSnap ? prevSnap.scrollTop : 0;
+    const prevDraft = app.querySelector('.send textarea');
+    const draft = prevDraft ? prevDraft.value : '';
+    const draftFocused = prevDraft && document.activeElement === prevDraft;
+    const pageY = window.scrollY;
     main.classList.remove('prose-page'); app.innerHTML = '';
     const hero = el('div', 'hero'); hero.innerHTML = '<div><h1>' + esc(view.config.teammate || view.config.name || id) + '</h1><div class="mono muted">' + esc(id) + ' · ' + esc(fmtModel(view)) + ' · ' + esc(view.config.binary) + '</div></div><div>' + statusBadge(view.state.status) + '</div>';
     const actions = el('div', 'actions');
@@ -238,16 +251,29 @@ async function renderDetail(id) {
     if (view.state.status !== 'awaiting_question') {
       const sendCard = el('div', 'card'); sendCard.innerHTML = '<div class="section-title">Send message</div>';
       const send = el('div', 'send'); const textarea = el('textarea'); textarea.placeholder = 'Send a message to this teammate…'; const button = el('button', 'btn primary', 'Send');
+      // A redraw must never eat a message being typed.
+      textarea.value = draft; if (draftFocused) setTimeout(() => textarea.focus(), 0);
       send.append(textarea, button); sendCard.appendChild(send);
       const busy = isBusy(view); if (busy) { const notice = el('div', 'notice', 'Session is busy — this message will be queued for the next turn boundary.'); sendCard.appendChild(notice); }
       button.onclick = async () => { const message = textarea.value.trim(); if (!message) return; button.disabled = true; try { const next = await jsonApi('/v1/sessions/' + encodeURIComponent(id) + '/send', 'POST', { message }); if (busy || isBusy(next)) showNotice(sendCard, 'Message queued for the next turn boundary.'); textarea.value = ''; await refresh(); } catch (error) { showNotice(sendCard, error, true); } finally { button.disabled = false; } };
       app.appendChild(sendCard);
     }
     const snapshotCard = el('div', 'card'); snapshotCard.innerHTML = '<div class="section-title">Latest pane snapshot</div>'; const pre = el('pre', 'snapshot'); pre.textContent = snapshot || '(no snapshot yet)'; snapshotCard.appendChild(pre); app.appendChild(snapshotCard);
+    pre.scrollTop = prevSnapTop;
     const eventsCard = el('div', 'card'); eventsCard.innerHTML = '<div class="section-title">Live event stream</div>'; const eventHost = el('div', 'events'); eventHost.innerHTML = events.length ? events.map(eventLine).join('') : '<span class="muted">Waiting for events…</span>'; eventsCard.appendChild(eventHost); app.appendChild(eventsCard);
+    eventHost.scrollTop = stickEvents ? eventHost.scrollHeight : prevEventsTop;
+    window.scrollTo(0, pageY);
     // First connect asks for the last 200 events (negative after = tail) —
     // replaying a long session's full history froze the initial load.
-    if (socket) socket.close(); socket = openSocket(id, (event) => { events.push(event); if (events.length > 500) events.shift(); eventHost.innerHTML = events.map(eventLine).join(''); eventHost.scrollTop = eventHost.scrollHeight; scheduleRefresh(); }, events.length ? events.at(-1).sequence : -200); window.__kteamSocket = socket;
+    if (socket) socket.close(); socket = openSocket(id, (event) => {
+      events.push(event); if (events.length > 500) events.shift();
+      // Sticky tail: follow new events only when already at the bottom.
+      const stick = eventHost.scrollTop + eventHost.clientHeight >= eventHost.scrollHeight - 40;
+      const keep = eventHost.scrollTop;
+      eventHost.innerHTML = events.map(eventLine).join('');
+      eventHost.scrollTop = stick ? eventHost.scrollHeight : keep;
+      scheduleRefresh();
+    }, events.length ? events.at(-1).sequence : -200); window.__kteamSocket = socket;
   };
   // Single-flight + change-detection: view and snapshot fetch in PARALLEL, and
   // the DOM only redraws when the payload actually changed. Event storms funnel
