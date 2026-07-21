@@ -1,5 +1,6 @@
 import type { Server, ServerWebSocket } from 'bun';
 import type { KTeamService } from './service';
+import { renderShell } from './ui';
 
 interface SocketData {
   sessionId?: string;
@@ -51,11 +52,28 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
     port: options.port,
     async fetch(request, serverInstance) {
       const url = new URL(request.url);
+      const isWebSocket =
+        url.pathname === '/v1/events' && request.headers.get('upgrade')?.toLowerCase() === 'websocket';
       const bearer = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
-      if (bearer !== options.token) return json({ error: 'unauthorized' }, 401);
+      // Loopback requesters may already read the token file, so serving them
+      // the token grants nothing new. NON-loopback requesters (KTEAM_HOST set,
+      // reverse proxy, forwarded port) must never receive it — they get a
+      // token-less shell (the SPA surfaces the 401s) and their WS query-param
+      // token is ignored so the token never travels in a loggable URL.
+      const remoteAddress = serverInstance.requestIP(request)?.address ?? '';
+      const loopback = remoteAddress === '127.0.0.1' || remoteAddress === '::1' || remoteAddress === '::ffff:127.0.0.1';
+      // Browser WebSocket constructors cannot set Authorization headers. The UI
+      // embeds the daemon token (loopback only) and passes it as a query
+      // parameter; ordinary HTTP API calls remain bearer-authenticated.
+      const websocketToken = isWebSocket && loopback ? url.searchParams.get('token') : undefined;
+      if (request.method === 'GET' && !url.pathname.startsWith('/v1/'))
+        return new Response(renderShell(loopback ? options.token : ''), {
+          headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
+        });
+      if (bearer !== options.token && websocketToken !== options.token) return json({ error: 'unauthorized' }, 401);
 
       try {
-        if (url.pathname === '/v1/events' && request.headers.get('upgrade')?.toLowerCase() === 'websocket') {
+        if (isWebSocket) {
           const upgraded = serverInstance.upgrade(request, {
             data: {
               sessionId: url.searchParams.get('sessionId') ?? undefined,
