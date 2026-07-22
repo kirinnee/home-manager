@@ -514,3 +514,67 @@ never in G1–G6 scope:
 
 Collateral: jasmine (kteam-warden, mrwi358q) failed due to the retest restart;
 anomalies it was spawned for were purged canaries — no revive needed.
+
+## 2026-07-22 ~20:36 — stall detector KILLS a healthy long-thinking Fable session (P1, new class)
+
+Session mrwirdnf-9f80826f (melanie, claude-auto-loge, Fable 5 [1m], hardening round 2,
+turn 1). Timeline from `~/.kteam/mrwirdnf-9f80826f/{events.jsonl,state.json,last-snapshot.txt}`:
+
+- 20:20:18 last tool start (fixture capture for A5); harness then entered a LONG
+  thinking stretch — pane spinner alive and animating the whole time ("Fixing A5 loge
+  readiness… 23m 38s · almost done thinking"), terminal.frame events every ~5 s with
+  CHANGING hashes and health=healthy up to 20:36:23.678.
+- 20:36:23.816 `session.stalled` ("no durable transcript progress for 900s") — and the
+  daemon then killed the pane: `session-manager.ts` ~1708–1726 marks stalled AND calls
+  `stopTmuxWithEvidence(config, 'stalled')`. With default `retry.stalledAttempts: 0`
+  there is no retry, and 'stalled' is in `terminalStatuses` (line 85) → session dead.
+- The pane was the ONLY session on the default tmux server, so the server exited too.
+
+Problem: "durable transcript progress" = chat.jsonl/transcript records only. Extended
+thinking streams write NOTHING durable, so a model thinking >stallSeconds is
+indistinguishable from a hang — and the daemon's response to "maybe stalled" is to
+EXECUTE the pane it just captured as healthy, discarding an in-flight API turn (~24k
+tokens down, 23 min of thinking). Frame-hash activity (spinner) was available as a
+liveness signal and ignored.
+
+Suspected code path: `session-manager.ts` stall branch (~1708: `Date.now() -
+effectiveActivity >= stallSeconds*1000` → snapshot, stopTmux, terminal 'stalled').
+`effectiveActivity` should incorporate pane/frame-hash activity or spinner detection,
+or stall-on-thinking should nudge/wait instead of kill; at minimum stalledAttempts
+default > 0 for auto sessions.
+
+Secondary papercuts observed while diagnosing:
+
+- `kteam snapshot` on a session whose pane/tmux server is gone prints EMPTY (or stale
+  cached) output with rc=0 instead of an error — masks pane death.
+- `kteam status` kept showing plain "stalled" with no hint the daemon itself killed
+  the pane; only code reading revealed stopTmuxWithEvidence ran (no `session.*` kill
+  event after seq 368 either — the stop is not journaled as its own event).
+
+Workaround applied: `kteam resume mrwirdnf-9f80826f` with reorientation (worked; turn 2
+running, prior work preserved via harness session resume). Advised the teammate to
+interleave tool calls during long reasoning so durable progress exists.
+
+Attribution note: NOT an OOM (cgroup oom_kill=0) and NOT the lead — daemon self-kill
+per code path above.
+
+## 2026-07-22 20:36 — P1: stall detector kills healthy long-thinking sessions
+
+**Problem:** melanie (mrwirdnf-9f80826f, fable-5[1m]) was stall-stopped mid-turn while
+VISIBLY working: final snapshot shows an active "Fixing A5 loge readiness… (23m 38s ·
+almost done thinking)" spinner. The monitor's stall rule ("no durable transcript
+progress for 900s") counts transcript bytes only; a long extended-thinking block emits
+none, so a healthy session was executed at exactly 900 s. Deep irony: she was killed
+while fixing the sibling readiness-misclassification bug (A5).
+
+**Evidence:** state.json stalled/finishedAt 20:36:23; snapshots/…-final.txt shows the
+live spinner + 11% context; last tool 20:20:18 (16 min gap = one thinking block).
+
+**Suspected code path:** monitor loop stall branch in `session-manager.ts` — it does
+not consult `paneShowsActiveWork()`/activity line before declaring a stall.
+
+**Workaround:** revive-send (worked); teammate told to emit a cheap tool call every
+~10 min during long reasoning until fixed.
+
+**Fix (assigned to melanie as A6):** stall only when transcript is silent AND the pane
+shows no active work across consecutive polls; spinner-frame fixture tests.
