@@ -77,6 +77,9 @@ Type=simple
 ExecStart=${systemdQuote(this.daemonBinary)}
 Restart=always
 RestartSec=2
+# EXIT_ALREADY_RUNNING (daemon-boot.ts): a healthy daemon owns the port — do
+# not re-spawn against it every RestartSec.
+RestartPreventExitStatus=78
 Environment=${systemdQuote(`KTEAM_HOME=${this.paths.home}`)}
 Environment=${systemdQuote(`PATH=${process.env.PATH ?? ''}`)}
 StandardOutput=${systemdQuote(`append:${this.paths.daemonLog}`)}

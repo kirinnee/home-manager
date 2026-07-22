@@ -1,28 +1,28 @@
 #!/usr/bin/env bun
 
 import { mkdir, readFile, rm, writeFile } from 'fs/promises';
-import { existsSync } from 'fs';
 import { startApiServer } from './api-server';
+import { EXIT_ALREADY_RUNNING, bindWithRetry, probeExistingDaemon } from './daemon-boot';
 import { ensureDaemonToken, ensureWardenToken, loadDaemonConfig } from './daemon-config';
 import { createPaths } from './paths';
 import { SessionManager } from './session-manager';
 
 const paths = createPaths();
 await mkdir(paths.daemon, { recursive: true, mode: 0o700 });
+const config = await loadDaemonConfig(paths);
 
-if (existsSync(paths.pid)) {
-  const previous = Number((await readFile(paths.pid, 'utf8').catch(() => '')).trim());
-  if (Number.isFinite(previous) && previous > 1) {
-    try {
-      process.kill(previous, 0);
-      console.error(`kteamd is already running (pid ${previous})`);
-      process.exit(1);
-    } catch {}
-  }
+// The PORT is the real single-instance lock (the old pid-file check was TOCTOU
+// and let concurrent starters race the bind — see daemon-boot.ts). A live
+// responder on the configured address means a daemon is already serving.
+const probeToken = (await readFile(paths.token, 'utf8').catch(() => '')).trim() || undefined;
+if (await probeExistingDaemon({ url: `http://${config.host}:${config.port}`, token: probeToken })) {
+  console.error(`kteamd is already running at http://${config.host}:${config.port}`);
+  // Distinct exit status: the systemd unit lists it in RestartPreventExitStatus
+  // so Restart=always does not re-spawn every RestartSec against a healthy
+  // standalone daemon that legitimately owns the port.
+  process.exit(EXIT_ALREADY_RUNNING);
 }
 
-await writeFile(paths.pid, `${process.pid}\n`, { mode: 0o600 });
-const config = await loadDaemonConfig(paths);
 const token = await ensureDaemonToken(paths);
 const wardenToken = await ensureWardenToken(paths);
 const manager = await SessionManager.create(paths, {
@@ -32,7 +32,17 @@ const manager = await SessionManager.create(paths, {
   publicUrl: config.publicUrl,
   warden: config.warden,
 });
-const server = startApiServer({ host: config.host, port: config.port, token, wardenToken, service: manager });
+// Retry EADDRINUSE: a dying predecessor (service-manager restart) can hold the
+// port for seconds while it drains; give it up to 30 s before failing.
+const server = await bindWithRetry(() =>
+  startApiServer({ host: config.host, port: config.port, token, wardenToken, service: manager }),
+).catch(async error => {
+  await manager.close();
+  throw error;
+});
+// Write the pid file only AFTER the bind succeeded — a loser of the bind race
+// must never overwrite the live daemon's pid.
+await writeFile(paths.pid, `${process.pid}\n`, { mode: 0o600 });
 console.log(`kteamd listening on http://${config.host}:${server.port} (pid ${process.pid})`);
 
 let stopping = false;

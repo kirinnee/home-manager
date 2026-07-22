@@ -2,8 +2,10 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { createPaths } from './paths';
 import { SessionManager } from './session-manager';
 import type { SessionView } from './service';
+import type { SessionConfig } from './types';
 
 // Fixture-level tests over prototype instances: the real SessionManager wires a
 // daemon, tmux, and event store — these tests exercise the control-path logic
@@ -272,6 +274,115 @@ describe('migrate — cross-account continuation', () => {
     expect(events).toContain('session.migrating');
     expect(transitions.at(-1)?.status).toBe('failed');
     expect(transitions.at(-1)?.reason).toContain('restored to claude-auto-glm52a');
+  });
+});
+
+describe('boot reconciliation honors the done marker (G4)', () => {
+  async function recoverInto(markerJson?: string): Promise<Array<{ status?: string }>> {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-recover-'));
+    temporaryDirectories.push(home);
+    const paths = createPaths(home);
+    if (markerJson) {
+      await mkdir(path.join(home, 's1', 'markers'), { recursive: true });
+      await writeFile(path.join(home, 's1', 'markers', 'done.json'), `${markerJson}\n`);
+    }
+    const transitions: Array<{ status?: string }> = [];
+    const manager = bareManager();
+    manager.paths = paths;
+    manager.list = async () => [
+      {
+        directory: path.join(home, 's1'),
+        config: { id: 's1', tmuxSession: 'kteam-s1-agent', retry: { waitForQuotaReset: true } },
+        state: { id: 's1', status: 'running', turn: 2 },
+      },
+    ];
+    manager.tmux = { state: async () => ({ alive: false, dead: true, promptReady: false }) };
+    manager.transition = async (_id: string, patch: { status?: string }) => {
+      transitions.push(patch);
+    };
+    await (manager as unknown as { recover: () => Promise<void> }).recover();
+    return transitions;
+  }
+
+  test('a dead session with a current-turn done marker reconciles to completed, not failed', async () => {
+    const transitions = await recoverInto('{"type":"done","turn":2}');
+    expect(transitions).toHaveLength(1);
+    expect(transitions[0]!.status).toBe('completed');
+  });
+
+  test('a done marker from an OLDER turn is stale evidence — the session still fails', async () => {
+    // send bumps the persisted turn at queue time; if the daemon dies before the
+    // gated injection clears markers, turn-1 evidence must not complete turn 2.
+    const transitions = await recoverInto('{"type":"done","turn":1}');
+    expect(transitions).toHaveLength(1);
+    expect(transitions[0]!.status).toBe('failed');
+  });
+
+  test('a pre-upgrade marker without a turn is treated as stale, not current', async () => {
+    const transitions = await recoverInto('{"type":"done"}');
+    expect(transitions).toHaveLength(1);
+    expect(transitions[0]!.status).toBe('failed');
+  });
+
+  test('a dead session without a done marker still fails as before', async () => {
+    const transitions = await recoverInto(undefined);
+    expect(transitions).toHaveLength(1);
+    expect(transitions[0]!.status).toBe('failed');
+  });
+});
+
+describe('launchWithRetry (G5)', () => {
+  const config = { id: 's1', tmuxSession: 'kteam-s1-agent' } as SessionConfig;
+  const call = (manager: Loose) =>
+    (manager as unknown as { launchWithRetry: (config: SessionConfig) => Promise<void> }).launchWithRetry(config);
+
+  test('startup timeout relaunches once and emits control.launch_retry', async () => {
+    const manager = bareManager();
+    const events: string[] = [];
+    let launches = 0;
+    let stops = 0;
+    manager.tmux = {
+      launch: async () => {
+        launches++;
+        if (launches === 1) throw new Error('interactive harness did not become ready within 90s');
+      },
+      stop: async () => void stops++,
+    };
+    manager.emit = async (_id: string, type: string) => void events.push(type);
+    await call(manager);
+    expect(launches).toBe(2);
+    expect(stops).toBe(1);
+    expect(events).toEqual(['control.launch_retry']);
+  });
+
+  test('a second startup timeout fails the launch (single retry only)', async () => {
+    const manager = bareManager();
+    let launches = 0;
+    manager.tmux = {
+      launch: async () => {
+        launches++;
+        throw new Error('interactive harness did not become ready within 90s');
+      },
+      stop: async () => undefined,
+    };
+    manager.emit = async () => undefined;
+    await expect(call(manager)).rejects.toThrow(/did not become ready/);
+    expect(launches).toBe(2);
+  });
+
+  test('non-timeout launch failures are not retried', async () => {
+    const manager = bareManager();
+    let launches = 0;
+    manager.tmux = {
+      launch: async () => {
+        launches++;
+        throw new Error('interactive harness exited (1)');
+      },
+      stop: async () => undefined,
+    };
+    manager.emit = async () => undefined;
+    await expect(call(manager)).rejects.toThrow(/exited/);
+    expect(launches).toBe(1);
   });
 });
 

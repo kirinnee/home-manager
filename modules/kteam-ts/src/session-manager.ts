@@ -1,5 +1,5 @@
 import { appendFile, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'fs/promises';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import path from 'path';
 import { AttachmentStore, type StoredAttachment } from './attachments';
 import {
@@ -412,7 +412,7 @@ export class SessionManager implements KTeamService {
       // readiness can go stale if a late startup splash repaints the pane,
       // and a prompt injected into a booting TUI lands as a no-op turn.
       await this.serializedBootstrap(async () => {
-        await this.tmux.launch(config);
+        await this.launchWithRetry(config);
         await this.tmux.send(config, this.promptInstruction(id, 1));
       });
       await this.transition(
@@ -748,7 +748,7 @@ export class SessionManager implements KTeamService {
       );
       try {
         await this.serializedBootstrap(async () => {
-          await this.tmux.launch(config);
+          await this.launchWithRetry(config);
           await this.tmux.send(config, this.promptInstruction(id, turn));
         });
         this.autoContinued.delete(id);
@@ -961,6 +961,18 @@ export class SessionManager implements KTeamService {
     }
   }
 
+  /** True only when markers/done.json certifies the given CURRENT turn. A
+   *  marker without a turn (pre-upgrade) or from an older turn is stale
+   *  evidence and must not complete newer work. */
+  private doneMarkerForTurn(id: string, turn: number | undefined): boolean {
+    try {
+      const marker = JSON.parse(readFileSync(markerFile(this.paths, id, 'done'), 'utf8')) as { turn?: number };
+      return typeof marker.turn === 'number' && marker.turn === turn;
+    } catch {
+      return false;
+    }
+  }
+
   async signal(id: string, kind: 'done' | 'help', message?: string): Promise<SessionView> {
     id = this.resolveRef(id);
     this.cancelRetry(id);
@@ -975,7 +987,15 @@ export class SessionManager implements KTeamService {
             'Task completed; inspect chat and repository diff.\n',
             { mode: 0o600 },
           );
-        await atomicJson(markerFile(this.paths, id, 'done'), { at: now(), type: 'done' });
+        // The marker carries the turn it certifies: a marker from an OLDER turn
+        // must never complete a NEWER turn (send bumps the persisted turn at
+        // queue time, so a daemon death in the queue→delivery window would
+        // otherwise let stale evidence complete work that never ran).
+        await atomicJson(markerFile(this.paths, id, 'done'), {
+          at: now(),
+          type: 'done',
+          turn: view.state.turn ?? view.config.turn,
+        });
         await this.tmux.snapshot(view.config, true);
         await this.stopManagedSession(view.config, 'completion');
         await this.transition(
@@ -1165,6 +1185,23 @@ export class SessionManager implements KTeamService {
         this.scheduleQuotaWaiter(session.config.id);
       } else if (session.state.status === 'retrying' && (session.state.retryAttempt ?? 0) > 0) {
         this.scheduleTransientRetry(session.config.id, session.state.retryAttempt!);
+      } else if (this.doneMarkerForTurn(session.config.id, session.state.turn ?? session.config.turn)) {
+        // The teammate signalled done for THIS turn but the pane died before
+        // the status flipped (or the daemon restart interleaved). The work
+        // FINISHED — marking it failed here would invite the warden to resume
+        // a completed session and make it redo the turn. A marker from an
+        // older turn deliberately falls through to `failed`.
+        await this.transition(
+          session.config.id,
+          {
+            status: 'completed',
+            health: 'idle',
+            reason: 'done marker written (reconciled after daemon restart)',
+            finishedAt: now(),
+            promptReady: false,
+          },
+          'session.completed',
+        );
       } else {
         await this.transition(
           session.config.id,
@@ -2324,7 +2361,10 @@ export class SessionManager implements KTeamService {
       config.mode === 'interactive'
         ? '7. If blocked without a structured question tool, run: kteam signal help "your precise question"'
         : '7. Never signal help or wait for a reply in automode.';
-    return `# kteam teammate contract\n\n${interaction}\n\nYour durable coordination directory is ${directory}.\n\nRules:\n1. Work only on the assigned task and respect repository instructions.\n2. Do not manage tmux or the daemon.\n3. Keep useful session-only artifacts under the coordination directory.\n4. When the assigned task is genuinely complete, write ${directory}/summary.md and run: kteam signal done\n5. Never claim completion without the done marker.\n6. Preserve unrelated user changes.\n${helpRule}\n`;
+    // Rule 8 exists because a teammate once ran `bun add` at a repo root: bun
+    // created a root package.json/node_modules that shadowed a nested package's
+    // deps and broke tooling fleet-wide until a human cleaned it up.
+    return `# kteam teammate contract\n\n${interaction}\n\nYour durable coordination directory is ${directory}.\n\nRules:\n1. Work only on the assigned task and respect repository instructions.\n2. Do not manage tmux or the daemon.\n3. Keep useful session-only artifacts under the coordination directory.\n4. When the assigned task is genuinely complete, write ${directory}/summary.md and run: kteam signal done\n5. Never claim completion without the done marker.\n6. Preserve unrelated user changes.\n${helpRule}\n8. Run \`bun add\`/\`bun install\` (and other package-manager installs) ONLY from inside the target package directory — cd there in the same command or use absolute paths. NEVER run them at the repository root: that creates a root package.json/node_modules that shadows nested packages and breaks their tooling.\n`;
   }
 
   private promptInstruction(id: string, turn: number): string {
@@ -2358,6 +2398,28 @@ export class SessionManager implements KTeamService {
         ? [view.config.harnessSessionId]
         : [],
     );
+  }
+
+  /** Launch the TUI, relaunching ONCE when it never reaches a ready prompt.
+   *  Codex TUIs occasionally wedge at the startup banner (observed during the
+   *  2026-07-22 daemon flap: promptReady=false for the full 90 s window) and a
+   *  single fresh pane reliably recovers — without this, the whole session
+   *  fails on a boot hiccup. Only the startup-timeout shape retries; a dead
+   *  pane or tmux error stays fatal on the first attempt. */
+  private async launchWithRetry(config: SessionConfig): Promise<void> {
+    try {
+      await this.tmux.launch(config);
+    } catch (error) {
+      if (!/did not become ready/i.test(String(error))) throw error;
+      await this.tmux.stop(config.tmuxSession).catch(() => undefined);
+      await this.emit(
+        config.id,
+        'control.launch_retry',
+        { reason: String(error instanceof Error ? error.message : error) },
+        'daemon',
+      ).catch(() => undefined);
+      await this.tmux.launch(config);
+    }
   }
 
   /** Run a TUI bootstrap (launch + first inject) exclusively — see bootstrapChain. */
@@ -2437,6 +2499,7 @@ export class SessionManager implements KTeamService {
       config: view.config,
       state: view.state,
       hasLiveMonitor: this.monitors.has(view.config.id),
+      hasDoneMarker: this.doneMarkerForTurn(view.config.id, view.state.turn ?? view.config.turn),
     }));
     // One knob (`unattendedMinutes`) drives both the idle-question threshold and
     // the recent-terminal-wreckage window — an old failure that nobody handled

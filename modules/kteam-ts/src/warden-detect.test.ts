@@ -40,13 +40,19 @@ function state(status: SessionStatus, overrides: Partial<SessionState> = {}): Se
 
 function view(
   status: SessionStatus,
-  opts: { hasLiveMonitor?: boolean; config?: Partial<SessionConfig>; state?: Partial<SessionState> } = {},
+  opts: {
+    hasLiveMonitor?: boolean;
+    hasDoneMarker?: boolean;
+    config?: Partial<SessionConfig>;
+    state?: Partial<SessionState>;
+  } = {},
 ): WardenSessionView {
   const cfg = config({ id: opts.config?.id ?? 'sess-1', ...opts.config });
   return {
     config: cfg,
     state: state(status, { id: cfg.id, ...opts.state }),
     hasLiveMonitor: opts.hasLiveMonitor ?? true,
+    ...(opts.hasDoneMarker !== undefined ? { hasDoneMarker: opts.hasDoneMarker } : {}),
   };
 }
 
@@ -105,6 +111,32 @@ describe('warden anomaly detection', () => {
     const result = detectAnomalies([view('stalled', { state: { finishedAt: iso(1 * 60_000) } })], NOW, OPTIONS);
     expect(result.anomalies).toHaveLength(1);
     expect(result.anomalies[0]!.kind).toBe('abandoned_wreckage');
+  });
+
+  test('does NOT flag failed wreckage whose current-turn done marker exists (finished work)', () => {
+    const result = detectAnomalies(
+      [view('failed', { hasDoneMarker: true, state: { finishedAt: iso(10 * 60_000), reason: 'daemon restarted' } })],
+      NOW,
+      OPTIONS,
+    );
+    expect(result.anomalies).toHaveLength(0);
+  });
+
+  test('still flags failed wreckage when hasDoneMarker is explicitly false or omitted', () => {
+    const explicit = detectAnomalies(
+      [view('failed', { hasDoneMarker: false, state: { finishedAt: iso(10 * 60_000) } })],
+      NOW,
+      OPTIONS,
+    );
+    expect(explicit.anomalies).toHaveLength(1);
+    const omitted = detectAnomalies([view('stalled', { state: { finishedAt: iso(10 * 60_000) } })], NOW, OPTIONS);
+    expect(omitted.anomalies).toHaveLength(1);
+  });
+
+  test('a done marker does not suppress OTHER anomaly classes', () => {
+    const result = detectAnomalies([view('running', { hasDoneMarker: true, hasLiveMonitor: false })], NOW, OPTIONS);
+    expect(result.anomalies).toHaveLength(1);
+    expect(result.anomalies[0]!.kind).toBe('dead_monitor');
   });
 
   test('does NOT flag terminal wreckage older than the window', () => {
