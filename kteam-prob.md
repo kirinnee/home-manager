@@ -346,3 +346,17 @@ window.
 **Suggested kteam fix:** Re-clear (or turn-stamp) markers at injection-DELIVERY time,
 or make `signal done` refuse/warn when a queued turn prompt exists that has not yet
 been injected (marker would then attribute to the correct turn).
+
+## 2026-07-22 — process note: babysitter misattribution (NOT a kteam bug, no teammate fault)
+
+A babysitter watching the warden-build session (mindy, mrwcnn1u-c8b1979e) attributed
+the LEAD's own post-review actions to the teammate: the ship commits (8dc1104,
+e5a0aff) and the activation `kteam daemon restart` were performed by the lead after
+mindy completed; mindy honored all constraints. Two erroneous entries logged here on
+that basis were removed. Lesson for babysitters: when the lead operates on the same
+repo/daemon during a watch, correlate actions by ACTOR evidence (session event logs,
+commit authorship timing vs teammate transcript) before attributing; when unsure,
+report "actor unknown". Secondary observation kept for the record: sessions whose
+work is finished can be reclassified failed ("daemon restarted but the interactive
+tmux session no longer exists") after a daemon restart — the maiden warden run is
+observing how this class gets handled; refine the detector if it proves noisy.
