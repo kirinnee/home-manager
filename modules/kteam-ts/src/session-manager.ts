@@ -225,6 +225,12 @@ export class SessionManager implements KTeamService {
         `could not determine ${harness === 'claude' ? 'CLAUDE_CONFIG_DIR' : 'CODEX_HOME'} from ${wrapper}`,
       );
     const harnessSessionBaseline = harness === 'codex' ? await codexSessionIds(harnessHome) : undefined;
+    // Parent capture: teammates starting teammates form a tree. Resolve the
+    // caller-supplied parent ref (id or teammate name) to a real session; a
+    // dangling ref is dropped rather than stored broken. Children inherit the
+    // parent's label when none is given, so whole trees group in ps/UI.
+    const parentRef = request.parent?.trim();
+    const parentView = parentRef ? await this.get(parentRef).catch(() => undefined) : undefined;
     // Model resolution: explicit request wins, else the wrapper's kfleet default
     // (KTEAM_MODEL). A default is always fed in when kfleet declares one, so the
     // per-account default model can't silently drift; undefined => no --model.
@@ -291,7 +297,8 @@ export class SessionManager implements KTeamService {
       id,
       name: (request.name ?? prompt.split(/\s+/).slice(0, 5).join('-')).replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 48),
       teammate: this.assignTeammateName(),
-      label: request.label?.trim() || undefined,
+      label: request.label?.trim() || parentView?.config.label || undefined,
+      parent: parentView?.config.id,
       binary,
       harness,
       modelHint: modelHint(binary),

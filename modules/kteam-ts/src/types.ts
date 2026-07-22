@@ -28,6 +28,9 @@ export interface SessionConfig {
   /** Caller-supplied ownership label (e.g. the lead session/repo/ticket slug)
    *  so a lead can list only its own teammates: `kteam ps --label <label>`. */
   label?: string;
+  /** The kteam session that STARTED this one (auto-captured from the caller's
+   *  KTEAM_SESSION_ID pane env) — teammates spawning teammates form a tree. */
+  parent?: string;
   binary: string;
   harness: Harness;
   modelHint: string;
@@ -123,6 +126,9 @@ export interface StartSessionRequest {
   agent: string;
   name?: string;
   label?: string;
+  /** Parent kteam session id — auto-filled by the CLI from KTEAM_SESSION_ID
+   *  when a teammate starts a teammate. */
+  parent?: string;
   cwd?: string;
   mode?: InteractionMode;
   /** Override the model. When omitted, kteam feeds the wrapper's kfleet default

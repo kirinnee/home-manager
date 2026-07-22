@@ -41,7 +41,7 @@ async function waitForDaemon(): Promise<Record<string, unknown>> {
 
 function printView(view: Awaited<ReturnType<ApiClient['get']>>): void {
   console.log(
-    `${view.config.teammate ?? '-'} (${view.config.id})  ${view.state.status}  ${view.config.binary}  model=${view.config.model ?? 'default'}${view.config.label ? `  label=${view.config.label}` : ''}  ${view.config.mode}  turn ${view.state.turn}`,
+    `${view.config.teammate ?? '-'} (${view.config.id})  ${view.state.status}  ${view.config.binary}  model=${view.config.model ?? 'default'}${view.config.label ? `  label=${view.config.label}` : ''}${view.config.parent ? `  parent=${view.config.parent}` : ''}  ${view.config.mode}  turn ${view.state.turn}`,
   );
   console.log(`  ${view.config.cwd}`);
   const vitals = [
@@ -182,6 +182,7 @@ program
   .addOption(new Option('--mode <mode>').choices(['auto', 'interactive']).default('auto'))
   .option('--name <name>', 'succinct summary of what this session is supposed to do (shown in ps)')
   .option('--label <label>', 'ownership label (lead session/repo/ticket slug); filter later with `kteam ps --label`')
+  .option('--parent <id>', 'parent session (defaults to KTEAM_SESSION_ID when started from inside a teammate)')
   .option('--prompt-file <file>', 'read the task prompt from a file instead of the command line (use for long prompts)')
   .option('--model <model>', 'override the model (alias or full id); defaults to the wrapper KTEAM_MODEL')
   .option('--cwd <dir>', '', process.cwd())
@@ -222,6 +223,9 @@ program
       agent: String(options.agent),
       name: options.name as string | undefined,
       label: options.label as string | undefined,
+      // A teammate's pane carries its own session id — starting a session from
+      // inside one automatically records the parent (teammate trees).
+      parent: (options.parent as string | undefined) ?? process.env.KTEAM_SESSION_ID,
       model: options.model as string | undefined,
       cwd: String(options.cwd),
       mode: options.mode as 'auto' | 'interactive',
