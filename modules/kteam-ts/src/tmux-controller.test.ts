@@ -6,9 +6,11 @@ import { createPaths } from './paths';
 import {
   contextPercentUsed,
   paneShowsActiveWork,
+  paneWorkCounters,
   parsePaneMetadata,
   startupDialogAction,
   TmuxController,
+  workCountersAdvanced,
 } from './tmux-controller';
 import type { SessionConfig } from './types';
 
@@ -33,6 +35,22 @@ describe('tmux prompt detection', () => {
     expect(controller.promptReady(pane, 1, 2)).toBe(true);
     expect(controller.promptReady(pane, 3, 2)).toBe(false);
     expect(controller.promptReady(pane, 1, 18)).toBe(false);
+  });
+
+  test('recognizes the codex-auto-loge ready frame (» prompt glyph + warning banner lines)', async () => {
+    // Captured live from ~/.kfleet/bin/codex-auto-loge (Codex v0.145.0): the
+    // loge flavor renders its prompt with » (U+00BB) instead of ›/❯ and prints
+    // two ⚠ warning lines (hook trust bypass, unadvertised service tier) above
+    // the composer. The old glyph class rejected this frame forever —
+    // "promptReady=false, cursor=2:18" launch failures (2026-07-22).
+    const pane = await Bun.file(path.join(import.meta.dir, 'fixtures', 'codex-loge-ready.txt')).text();
+    expect(controller.promptReady(pane, 18, 2)).toBe(true);
+    // Fallback path (no cursor metadata): trailing blank rows and the codex
+    // footer statusline must not hide the composer from the tail window.
+    expect(controller.promptReady(pane)).toBe(true);
+    expect(paneShowsActiveWork(pane)).toBe(false);
+    // A numbered selector rendered with » must still not read as an input row.
+    expect(controller.promptReady('choose\n» 1. Yes, continue\n  2. No, quit\n', 1, 2)).toBe(false);
   });
 
   test('recognizes the real Claude prompt despite its rich footer', () => {
@@ -105,6 +123,45 @@ describe('pane active-work detection', () => {
     const banner = ['■ Conversation interrupted - tell the model what to do differently', '', '› ', ''].join('\n');
     expect(controller.promptReady(banner)).toBe(true);
     expect(paneShowsActiveWork(banner)).toBe(false);
+  });
+});
+
+describe('pane work counters (A6 stall liveness)', () => {
+  const frame = (name: string) => Bun.file(path.join(import.meta.dir, 'fixtures', name)).text();
+
+  test('parses elapsed clock and token count from a real thinking frame pair', async () => {
+    // Captured from a live Fable session WRONGLY stall-killed mid-thinking
+    // (2026-07-22): the spinner clock advanced 5m45s → 5m50s while the
+    // transcript stayed silent — that advance is full liveness.
+    const a = paneWorkCounters(await frame('claude-thinking-frame-a.txt'));
+    const b = paneWorkCounters(await frame('claude-thinking-frame-b.txt'));
+    expect(a).toEqual({ elapsedSeconds: 345, tokens: 17_200 });
+    expect(b).toEqual({ elapsedSeconds: 350, tokens: 17_200 });
+    expect(workCountersAdvanced(a, b!)).toBe(true);
+  });
+
+  test('parses codex working counters and multi-word claude spinner lines', () => {
+    expect(paneWorkCounters('• Working (6m52s • Esc to interrupt)')).toEqual({ elapsedSeconds: 412 });
+    expect(paneWorkCounters('✻ Lollygagging… (34s · 2.1k tokens)')).toEqual({ elapsedSeconds: 34, tokens: 2_100 });
+    expect(paneShowsActiveWork('✢ Fixing A6 stall detection… (5m 45s · ↓ 17.2k tokens)')).toBe(true);
+    expect(paneWorkCounters('✽ Thinking… (23m 38s · ↓ 24.6k tokens · thinking)')).toEqual({
+      elapsedSeconds: 1_418,
+      tokens: 24_600,
+    });
+  });
+
+  test('an idle pane yields no counters even when numbers are on screen', () => {
+    expect(paneWorkCounters('❯ \n  13% (134k/1M) │ 💰 $0.13\n? for shortcuts')).toBeUndefined();
+    expect(paneWorkCounters('Done. Wrote 3 files in 12s.\n> ')).toBeUndefined();
+  });
+
+  test('frozen or restarted counters earn no liveness credit', () => {
+    const at = (s: number) => ({ elapsedSeconds: s, tokens: 500 });
+    expect(workCountersAdvanced(at(60), at(60))).toBe(false); // wedged TUI repaint
+    expect(workCountersAdvanced(at(60), at(5))).toBe(false); // new turn restart
+    expect(workCountersAdvanced(undefined, at(60))).toBe(false); // first sighting
+    expect(workCountersAdvanced(at(60), at(65))).toBe(true);
+    expect(workCountersAdvanced({ tokens: 100 }, { tokens: 150 })).toBe(true);
   });
 });
 

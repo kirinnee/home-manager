@@ -45,6 +45,10 @@ describe('Linux systemd user service', () => {
     // re-spawn the unit forever (EXIT_ALREADY_RUNNING from daemon-boot.ts).
     expect(unit).toContain('RestartSec=2');
     expect(unit).toContain('RestartPreventExitStatus=78');
+    // A1: the tmux server (and every teammate pane) lives in this unit's
+    // cgroup; only KillMode=process keeps a daemon restart from erasing the
+    // whole fleet.
+    expect(unit).toContain('KillMode=process');
     expect(calls).toEqual([
       ['systemctl', '--user', 'daemon-reload'],
       ['systemctl', '--user', 'enable', 'kteamd.service'],
@@ -98,7 +102,11 @@ describe('macOS launchd service', () => {
 
     await service.install();
     const plist = path.join(home, 'Library', 'LaunchAgents', 'com.kirin.kteamd.plist');
-    expect(await readFile(plist, 'utf8')).toContain('<string>/usr/local/bin/kteamd</string>');
+    const xml = await readFile(plist, 'utf8');
+    expect(xml).toContain('<string>/usr/local/bin/kteamd</string>');
+    // A1 (launchd equivalent of KillMode=process): without AbandonProcessGroup
+    // a bootout kills the tmux server spawned from the daemon.
+    expect(xml).toContain('<key>AbandonProcessGroup</key><true/>');
     await service.start();
 
     expect(calls.some(argv => argv[0] === 'launchctl' && argv[1] === 'bootstrap')).toBe(true);

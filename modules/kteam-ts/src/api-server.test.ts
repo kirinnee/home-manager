@@ -54,6 +54,7 @@ class FakeService implements KTeamService {
   migrate = async (_id: string, _agent: string, _model?: string) => view;
   remove = async () => {};
   signal = async () => view;
+  wardenMayStop = (_wardenId: string, _targetId: string) => false;
   snapshot = async () => 'pane';
   chatHistory = async () => ({ total: 0, offset: 0, records: [] });
   lastSnapshot = async () => 'pane (cached)';
@@ -80,6 +81,10 @@ class FakeService implements KTeamService {
       intervalMinutes: 5,
       unattendedMinutes: 30,
       minSpawnGapMinutes: 60,
+      susThinkingSeconds: 900,
+      susSubprocessSeconds: 900,
+      maxAssignedWardens: 3,
+      assignedCooldownMinutes: 30,
     },
     anomalies: [],
     fingerprint: '',
@@ -337,6 +342,31 @@ describe('warden-scoped token authorization', () => {
     expect((await post('/v1/warden/run')).status).toBe(403);
     expect((await fetch(`${base}/v1/sessions/s1`, { method: 'DELETE', headers: scoped })).status).toBe(403);
     expect((await fetch(`${base}/v1/warden/status`, { headers: scoped })).status).toBe(403);
+  });
+
+  test('an ASSIGNED warden may stop exactly its assigned target, by capability (A6 sus list)', async () => {
+    class AssignedService extends FakeService {
+      wardenMayStop = (capability: string, targetId: string) => capability === 'cap-secret-9' && targetId === 's1';
+    }
+    const base = scopedServer(new AssignedService());
+    const stop = (target: string, capability?: string) =>
+      fetch(`${base}/v1/sessions/${target}/stop`, {
+        method: 'POST',
+        headers: { ...scoped, ...(capability ? { 'x-kteam-stop-capability': capability } : {}) },
+        body: '{}',
+      });
+    expect((await stop('s1', 'cap-secret-9')).status).toBe(200); // its assignment
+    expect((await stop('s1', 'cap-guessed')).status).toBe(403); // wrong capability
+    expect((await stop('s1')).status).toBe(403); // no capability at all
+    // A client-chosen identity header is NEVER authority (the old spoof hole).
+    const spoofed = await fetch(`${base}/v1/sessions/s1/stop`, {
+      method: 'POST',
+      headers: { ...scoped, 'x-kteam-session-id': 'warden-9' },
+      body: '{}',
+    });
+    expect(spoofed.status).toBe(403);
+    // A different target under the same capability stays forbidden.
+    expect((await stop('s2', 'cap-secret-9')).status).toBe(403);
   });
 
   test('signal is gated to warden-labelled sessions only', async () => {

@@ -10,6 +10,13 @@ export async function atomicJson(file: string, value: unknown): Promise<void> {
   await rename(temp, file);
 }
 
+export async function writeTextAtomic(file: string, text: string): Promise<void> {
+  await mkdir(path.dirname(file), { recursive: true });
+  const temp = `${file}.tmp.${process.pid}.${crypto.randomUUID()}`;
+  await writeFile(temp, text, { mode: 0o600 });
+  await rename(temp, file);
+}
+
 export async function readJson<T>(file: string): Promise<T> {
   return JSON.parse(await readFile(file, 'utf8')) as T;
 }

@@ -48,9 +48,23 @@ export interface SessionConfig {
   harnessSessionBaseline?: string[];
   tmuxSession: string;
   watcherSession: string;
+  /** Assigned-warden stop capability: an unguessable secret minted when this
+   *  (warden) session was spawned for a sus target, exported into its pane as
+   *  KTEAM_STOP_CAPABILITY, and required by the api-server to authorize
+   *  `stop` on the assigned target. Same-user filesystem access is the
+   *  accepted threat-model exception (documented in daemon-config.ts). */
+  stopCapability?: string;
   intervalSeconds: number;
+  /** Legacy stall knob — superseded by nudgeAfterSeconds/killAfterSeconds but
+   *  kept on old configs; the monitor falls back to it when the new knobs are
+   *  absent (nudge at 3/5 of it, kill at it). */
   stallSeconds: number;
   timeoutSeconds: number;
+  /** A6 reflex: zero life-signs (no transcript growth, no pane change, no
+   *  subprocess) this long → one nudge (interrupt + continue message). */
+  nudgeAfterSeconds?: number;
+  /** A6 reflex: zero life-signs this long (nudge didn't revive any) → kill. */
+  killAfterSeconds?: number;
   maxSnapshots: number;
   systemPromptFile: string;
   originalPromptFile: string;
@@ -97,8 +111,25 @@ export interface SessionState {
     }>;
   };
   transcriptOffset?: number;
+  /** Liveness ledger (A6, see liveness.ts): explicit per-life-sign timestamps.
+   *  Reflex life-signs = transcript growth + ANY pane change + subprocess;
+   *  counterAdvance powers the sus_thinking classifier. */
   lastTranscriptAt?: string;
   lastPaneAt?: string;
+  /** Recognized work vocabulary whose counters (elapsed clock / token count)
+   *  ADVANCED across polls — proof of silent thinking. */
+  lastCounterAdvanceAt?: string;
+  /** The TOKEN count specifically climbed (token exemption: certain progress,
+   *  never sus). Only harnesses that render one (claude); codex has none. */
+  lastTokenAdvanceAt?: string;
+  /** A harness tool/subprocess was running (open tool.use with a live child
+   *  process under the pane, or a codex background terminal). */
+  lastSubprocessAt?: string;
+  /** Start of the current continuous subprocess episode (sus_subprocess). */
+  subprocessSince?: string;
+  /** When the reflex layer nudged this zero-life-signs episode (one nudge per
+   *  episode; cleared when any life-sign returns). */
+  nudgedAt?: string;
   /** Context-window usage (percent used) parsed from the TUI statusline. */
   contextPercent?: number;
   /** The harness's live activity/spinner line ("✻ Lollygagging… (34s · 2.1k
@@ -146,6 +177,13 @@ export interface StartSessionRequest {
   intervalSeconds?: number;
   stallSeconds?: number;
   timeoutSeconds?: number;
+  nudgeAfterSeconds?: number;
+  killAfterSeconds?: number;
+  /** Internal (daemon-minted): assigned-warden stop capability to embed in
+   *  the new session's config/pane env. Harmless if a client sets it — the
+   *  authorization check compares against the capability recorded in the
+   *  daemon's own assignment record, never against this field. */
+  stopCapability?: string;
   maxSnapshots?: number;
   initialAttachments?: Array<{
     filename: string;

@@ -3,7 +3,12 @@ import { detectAnomalies, fingerprintAnomalies, WARDEN_LABEL, type WardenSession
 import type { SessionConfig, SessionState, SessionStatus } from './types';
 
 const NOW = Date.parse('2026-07-22T12:00:00.000Z');
-const OPTIONS = { unattendedMs: 30 * 60_000, terminalWindowMs: 30 * 60_000 };
+const OPTIONS = {
+  unattendedMs: 30 * 60_000,
+  terminalWindowMs: 30 * 60_000,
+  susThinkingSeconds: 900,
+  susSubprocessSeconds: 900,
+};
 
 function iso(msAgo: number): string {
   return new Date(NOW - msAgo).toISOString();
@@ -283,5 +288,123 @@ describe('warden fingerprint', () => {
   test('empty anomaly set fingerprints to the empty string', () => {
     expect(fingerprintAnomalies([])).toBe('');
     expect(detectAnomalies([view('running', { hasLiveMonitor: true })], NOW, OPTIONS).fingerprint).toBe('');
+  });
+});
+
+describe('A6 sus list (alive but weird — assigned-warden anomalies)', () => {
+  test('sus_thinking: counters active, transcript silent > threshold, tokens flat', () => {
+    const result = detectAnomalies(
+      [
+        view('thinking', {
+          hasLiveMonitor: true,
+          state: {
+            startedAt: iso(3 * 60 * 60_000),
+            lastTranscriptAt: iso(20 * 60_000),
+            lastCounterAdvanceAt: iso(10_000),
+            lastPaneAt: iso(10_000),
+          },
+        }),
+      ],
+      NOW,
+      OPTIONS,
+    );
+    expect(result.anomalies).toHaveLength(1);
+    const anomaly = result.anomalies[0]!;
+    expect(anomaly.kind).toBe('sus_thinking');
+    expect(anomaly.assignedWarden).toBe(true);
+    expect(anomaly.idleMinutes).toBe(20);
+    expect(anomaly.ledger).toMatchObject({ lastTranscriptAt: iso(20 * 60_000) });
+  });
+
+  test('token exemption: climbing tokens are certain progress — never sus', () => {
+    const result = detectAnomalies(
+      [
+        view('thinking', {
+          hasLiveMonitor: true,
+          state: {
+            startedAt: iso(3 * 60 * 60_000),
+            lastTranscriptAt: iso(2 * 60 * 60_000), // silent for 2 h
+            lastCounterAdvanceAt: iso(10_000),
+            lastTokenAdvanceAt: iso(10_000), // but tokens keep climbing
+            lastPaneAt: iso(10_000),
+          },
+        }),
+      ],
+      NOW,
+      OPTIONS,
+    );
+    expect(result.anomalies).toHaveLength(0);
+  });
+
+  test('sus_subprocess: a continuous background episode past the threshold', () => {
+    const result = detectAnomalies(
+      [
+        view('tool_running', {
+          hasLiveMonitor: true,
+          state: {
+            startedAt: iso(60 * 60_000),
+            lastTranscriptAt: iso(5_000),
+            lastSubprocessAt: iso(5_000),
+            subprocessSince: iso(20 * 60_000),
+            lastPaneAt: iso(5_000),
+          },
+        }),
+      ],
+      NOW,
+      OPTIONS,
+    );
+    expect(result.anomalies).toHaveLength(1);
+    expect(result.anomalies[0]!.kind).toBe('sus_subprocess');
+    expect(result.anomalies[0]!.assignedWarden).toBe(true);
+    expect(result.anomalies[0]!.idleMinutes).toBe(20);
+  });
+
+  test('all-fresh signals produce no sus anomaly', () => {
+    const result = detectAnomalies(
+      [
+        view('running', {
+          hasLiveMonitor: true,
+          state: {
+            startedAt: iso(3 * 60 * 60_000),
+            lastTranscriptAt: iso(5_000),
+            lastCounterAdvanceAt: iso(5_000),
+            lastSubprocessAt: iso(5_000),
+            subprocessSince: iso(60_000),
+          },
+        }),
+      ],
+      NOW,
+      OPTIONS,
+    );
+    expect(result.anomalies).toHaveLength(0);
+  });
+
+  test('a young turn is never sus (anchor floors the signals)', () => {
+    const result = detectAnomalies(
+      [view('running', { hasLiveMonitor: true, state: { startedAt: iso(60_000) } })],
+      NOW,
+      OPTIONS,
+    );
+    expect(result.anomalies).toHaveLength(0);
+  });
+
+  test('a waiting session is never sus (only active statuses classify)', () => {
+    const result = detectAnomalies(
+      [
+        view('awaiting_user', {
+          hasLiveMonitor: true,
+          state: {
+            startedAt: iso(3 * 60 * 60_000),
+            lastTranscriptAt: iso(60_000),
+            lastCounterAdvanceAt: iso(10_000),
+            lastActivityAt: iso(60_000),
+          },
+          config: { mode: 'interactive' },
+        }),
+      ],
+      NOW,
+      OPTIONS,
+    );
+    expect(result.anomalies.filter(item => item.kind.startsWith('sus_'))).toHaveLength(0);
   });
 });

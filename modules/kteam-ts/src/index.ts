@@ -49,6 +49,18 @@ function printView(view: Awaited<ReturnType<ApiClient['get']>>): void {
     view.state.lastToolStartedAt ? `last tool started ${view.state.lastToolStartedAt}` : '',
   ].filter(Boolean);
   if (vitals.length) console.log(`  ${vitals.join('  ')}`);
+  // A6 liveness ledger: seconds since each life-sign. Pane change is
+  // visibility only; the reflex MIN rule runs over the first three.
+  const age = (value?: string) =>
+    value ? `${Math.max(0, Math.floor((Date.now() - Date.parse(value)) / 1000))}s` : '-';
+  const ledger = [
+    `transcript ${age(view.state.lastTranscriptAt)}`,
+    `counters ${age(view.state.lastCounterAdvanceAt)}`,
+    `tokens ${age(view.state.lastTokenAdvanceAt)}`,
+    `subprocess ${age(view.state.lastSubprocessAt)}`,
+    `pane ${age(view.state.lastPaneAt)}`,
+  ];
+  console.log(`  liveness: ${ledger.join('  ')}${view.state.nudgedAt ? '  ⚠ nudged' : ''}`);
   if (view.state.reason) console.log(`  ${view.state.reason}`);
   for (const question of view.state.pendingQuestion?.questions ?? []) {
     console.log(`  question: ${question.question}`);
@@ -195,6 +207,8 @@ program
   .option('--interval <seconds>', '', Number)
   .option('--stall <seconds>', '', Number)
   .option('--timeout <seconds>', '', Number)
+  .option('--nudge-after <seconds>', 'zero life-signs this long earns a continue nudge (default 180)', Number)
+  .option('--kill-after <seconds>', 'zero life-signs this long is a stall kill (default 300)', Number)
   .option('--max-snapshots <count>', '', Number)
   .option('--json')
   .action(async (parts: string[], options: Record<string, string | number | boolean | undefined>) => {
@@ -232,6 +246,8 @@ program
       intervalSeconds: options.interval as number | undefined,
       stallSeconds: options.stall as number | undefined,
       timeoutSeconds: options.timeout as number | undefined,
+      nudgeAfterSeconds: options.nudgeAfter as number | undefined,
+      killAfterSeconds: options.killAfter as number | undefined,
       maxSnapshots: options.maxSnapshots as number | undefined,
       initialAttachments,
     });

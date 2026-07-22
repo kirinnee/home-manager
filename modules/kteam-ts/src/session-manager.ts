@@ -22,7 +22,7 @@ import {
   claudeTranscriptPath,
 } from './harness';
 import type { WardenConfig } from './daemon-config';
-import { atomicJson, now, readJson, run } from './io';
+import { atomicJson, now, readJson, run, writeTextAtomic } from './io';
 import { NAME_WINDOW_MS, pickTeammateName } from './names';
 import type { KTeamPaths } from './paths';
 import { configFile, markerFile, sessionDir, stateFile, turnLog, turnPrompt } from './paths';
@@ -31,13 +31,25 @@ import { detectAnomalies, WARDEN_LABEL, type WardenAnomaly, type WardenSessionVi
 import { rankFailoverCandidates, selectFailoverCandidate } from './failover';
 import type { AgentUsage } from './core';
 import { EventStore, type JsonValue, type SessionEvent } from './storage';
-import { contextPercentUsed, paneActivityLine, paneShowsActiveWork, TmuxController } from './tmux-controller';
+import {
+  contextPercentUsed,
+  backgroundTerminalCount,
+  foldStallLiveness,
+  paneActivityLine,
+  paneShowsActiveWork,
+  TmuxController,
+  type StallLivenessState,
+} from './tmux-controller';
+import { reflexAssess, renderLivenessYaml, susFindings, type LivenessLedger } from './liveness';
 import type { KTeamEvent, SendRequest, SessionConfig, SessionState, SessionStatus, StartSessionRequest } from './types';
 
 interface MonitorHandle {
   abort: AbortController;
   transcript?: ClaudeTranscriptWatcher | CodexTranscriptWatcher;
   loop?: Promise<void>;
+  /** Interrupts the loop's current sleep so a freshly queued send is
+   *  considered immediately instead of after the full tick. */
+  wake?: () => void;
 }
 interface StoredEnvelope {
   source?: KTeamEvent['source'];
@@ -65,6 +77,15 @@ interface WardenRuntimeState {
   lastFingerprint?: string;
   /** Bumped every time the fleet goes from having anomalies to having none. */
   recoveryGeneration?: number;
+  /** Live assigned-warden records, keyed by TARGET session id. The api-server
+   *  consults these (via wardenMayStop) to let the warden token stop ONLY
+   *  sessions under an active assignment. `capability` is the unguessable
+   *  secret minted at spawn and exported only into that warden's pane —
+   *  authorization compares capabilities, never client-chosen identities. */
+  assignments?: Record<string, { wardenId: string; spawnedAt: string; capability: string }>;
+  /** Per-target cooldown after an assigned warden finished (verdict given):
+   *  no respawn for the same session within assignedCooldownMinutes. */
+  assignedCooldowns?: Record<string, string>;
 }
 interface WardenSweep {
   at: string;
@@ -86,7 +107,11 @@ const terminalStatuses: SessionStatus[] = ['completed', 'failed', 'stalled', 'st
 const protectedStatuses: SessionStatus[] = [...terminalStatuses, 'kill_failed'];
 const waitingStatuses: SessionStatus[] = ['waiting', 'awaiting_question', 'awaiting_user', 'rate_limited'];
 
-async function interruptibleSleep(milliseconds: number, signal: AbortSignal): Promise<void> {
+async function interruptibleSleep(
+  milliseconds: number,
+  signal: AbortSignal,
+  register?: (wake: () => void) => void,
+): Promise<void> {
   if (signal.aborted) return;
   await new Promise<void>(resolve => {
     const timer = setTimeout(done, milliseconds);
@@ -97,6 +122,7 @@ async function interruptibleSleep(milliseconds: number, signal: AbortSignal): Pr
       resolve();
     }
     signal.addEventListener('abort', abort, { once: true });
+    register?.(done);
   });
 }
 
@@ -139,12 +165,20 @@ export class SessionManager implements KTeamService {
 
   static async create(paths: KTeamPaths, options: SessionManagerOptions): Promise<SessionManager> {
     await mkdir(paths.daemon, { recursive: true, mode: 0o700 });
-    const store = await EventStore.open({ home: paths.home, databasePath: paths.database });
-    const manager = new SessionManager(paths, store, options);
-    await manager.initializeGlobalSequence();
-    await manager.recover();
-    await manager.startWarden();
-    return manager;
+    // Open WITHOUT the disk import: the journal scan (even incremental) must
+    // never hold the API bind hostage. bootstrap() runs it after listen.
+    const store = await EventStore.open({ home: paths.home, databasePath: paths.database, importExisting: false });
+    return new SessionManager(paths, store, options);
+  }
+
+  /** Index journals, reconcile survivors, and arm the warden. Runs AFTER the
+   *  API socket is listening — early requests see a possibly-partial index
+   *  (which only grows) rather than a connection refused. */
+  async bootstrap(): Promise<void> {
+    await this.store.importFromDisk();
+    await this.initializeGlobalSequence();
+    await this.recover();
+    await this.startWarden();
   }
 
   async close(): Promise<void> {
@@ -373,7 +407,10 @@ export class SessionManager implements KTeamService {
       intervalSeconds: this.number(request.intervalSeconds, this.options.healthIntervalSeconds, 2, 'intervalSeconds'),
       stallSeconds: this.number(request.stallSeconds, 900, 10, 'stallSeconds'),
       timeoutSeconds: this.number(request.timeoutSeconds, 14_400, 30, 'timeoutSeconds'),
+      nudgeAfterSeconds: this.number(request.nudgeAfterSeconds, 180, 30, 'nudgeAfterSeconds'),
+      killAfterSeconds: this.number(request.killAfterSeconds, 300, 60, 'killAfterSeconds'),
       maxSnapshots: this.number(request.maxSnapshots, 200, 1, 'maxSnapshots'),
+      ...(request.stopCapability ? { stopCapability: request.stopCapability } : {}),
       systemPromptFile: path.join(directory, 'system.md'),
       originalPromptFile: path.join(directory, 'prompt.md'),
       retry: { transientAttempts: 3, stalledAttempts: 0, waitForQuotaReset: true, allowAccountFailover: false },
@@ -406,7 +443,11 @@ export class SessionManager implements KTeamService {
     for (const stored of initialAttachments) {
       await this.emit(id, 'attachment.created', this.attachmentView(stored), 'client', 1);
     }
-    await this.transition(id, { status: 'starting', startedAt: now(), health: 'healthy' }, 'session.starting');
+    await this.transition(
+      id,
+      { status: 'starting', startedAt: now(), health: 'healthy', nudgedAt: undefined },
+      'session.starting',
+    );
     try {
       // send() re-verifies prompt readiness right before typing — launch()'s
       // readiness can go stale if a late startup splash repaints the pane,
@@ -505,6 +546,10 @@ export class SessionManager implements KTeamService {
           { message: queuedMessage, attachmentIds: request.attachmentIds ?? [] },
           'client',
         );
+        // Cut the monitor's current sleep short: the queued message should be
+        // delivered within seconds of the prompt turning ready, not after the
+        // remainder of a 30 s tick.
+        this.monitors.get(id)?.wake?.();
         return await this.get(id);
       }
       const message = request.message?.trim();
@@ -547,6 +592,10 @@ export class SessionManager implements KTeamService {
           reason: undefined,
           lastActivityAt: now(),
           turnCompleted: false,
+          // A new turn is a new liveness episode: a stale nudge from the
+          // previous turn must never let the reflex cold-kill this one
+          // without nudging it first (review P1).
+          nudgedAt: undefined,
         },
         'turn.started',
       );
@@ -635,6 +684,7 @@ export class SessionManager implements KTeamService {
             startedAt: now(),
             lastActivityAt: now(),
             turnCompleted: false,
+            nudgedAt: undefined,
           },
           'turn.resumed',
         );
@@ -738,6 +788,7 @@ export class SessionManager implements KTeamService {
           reason: undefined,
           finishedAt: undefined,
           exitCode: undefined,
+          nudgedAt: undefined,
           retryAttempt: automaticRetry ? view.state.retryAttempt : 0,
           openTools: [],
           pendingQuestion: undefined,
@@ -1039,7 +1090,21 @@ export class SessionManager implements KTeamService {
 
   async snapshot(id: string): Promise<string> {
     id = this.resolveRef(id);
-    return await this.serialized(id, async () => await this.tmux.snapshot((await this.get(id)).config, true));
+    return await this.serialized(id, async () => {
+      const view = await this.get(id);
+      const state = await this.tmux.state(view.config.tmuxSession);
+      // A dead pane used to yield an EMPTY capture with rc=0, indistinguishable
+      // from a blank-but-healthy screen — callers scripting around `kteam
+      // snapshot` read that as "fine". Fail loudly and point at the stored
+      // final frame instead.
+      if (!state.alive || state.dead) {
+        throw new Error(
+          `pane dead: session ${id} has no live tmux pane (status ${view.state.status}); ` +
+            'the final frame is preserved in last-snapshot.txt (kteam snapshot reads live panes only)',
+        );
+      }
+      return await this.tmux.snapshot(view.config, true);
+    });
   }
 
   async lastSnapshot(id: string): Promise<string> {
@@ -1166,10 +1231,15 @@ export class SessionManager implements KTeamService {
         continue;
       }
       if (paneState.alive && !paneState.dead) {
+        // A1: with KillMode=process the tmux server (and this pane) survives a
+        // daemon restart — RE-ADOPT it: keep the session's status, restart its
+        // monitor, and record the adoption. Never snapshot-and-kill a live,
+        // healthy pane here.
         await this.transition(
           session.config.id,
           { status: session.state.status === 'starting' ? 'running' : session.state.status, health: 'healthy' },
-          'daemon.recovered',
+          'daemon.readopted',
+          { promptReady: paneState.promptReady },
         );
         await this.startMonitor(session.config.id);
         if (session.state.status === 'rate_limited' && session.config.retry?.waitForQuotaReset !== false) {
@@ -1322,7 +1392,6 @@ export class SessionManager implements KTeamService {
     let paneHash = '';
     let diffHash = '';
     let promptStable = 0;
-    let lastDurableActivity = Date.now();
     let lastQuotaCheck = 0;
     let reinjectedTurn = -1;
     // F6: the last turn whose pane visibly showed active work. A turn that
@@ -1330,6 +1399,12 @@ export class SessionManager implements KTeamService {
     // 2026-07-19) is a transcript-correlation gap, not a lost prompt — it must
     // not be reinjected or failed as turn-never-started.
     let activeWorkTurn = -1;
+    // A6: recognized work vocabulary with advancing counters across polls is
+    // full liveness — a long silent thinking block writes no transcript bytes
+    // for many minutes while the spinner clock keeps climbing, and the stall
+    // reflex must not flag it (2026-07-22: two healthy Fable sessions were
+    // stall-killed mid-thinking this way).
+    let liveness: StallLivenessState = { lastWorkAdvanceAt: 0 };
     try {
       while (!signal.aborted && !this.closed) {
         let sleepSeconds = this.options.healthIntervalSeconds;
@@ -1619,14 +1694,38 @@ export class SessionManager implements KTeamService {
             view = await this.get(id);
           }
 
-          const transcriptTime = view.state.lastTranscriptAt ? Date.parse(view.state.lastTranscriptAt) : 0;
-          const paneTime = view.state.lastPaneAt ? Date.parse(view.state.lastPaneAt) : 0;
-          lastDurableActivity = Math.max(lastDurableActivity, transcriptTime);
-          const paneGraceMs = Math.min(60_000, Math.max(5_000, view.config.stallSeconds * 100));
-          const effectiveActivity = Math.max(
-            lastDurableActivity,
-            Math.min(paneTime, lastDurableActivity + paneGraceMs),
-          );
+          // A6 liveness ledger: record explicit per-life-sign timestamps.
+          // Counter advance (recognized work vocabulary whose elapsed/token
+          // counters strictly increased across polls) proves silent thinking
+          // and powers sus_thinking; a live child process under the pane is
+          // both a reflex life-sign and, via subprocessSince episode tracking,
+          // the sus_subprocess input.
+          const previousLiveness = liveness;
+          liveness = foldStallLiveness(liveness, pane.visiblePane, Date.now());
+          const counterAdvanced = liveness.lastWorkAdvanceAt > previousLiveness.lastWorkAdvanceAt;
+          // Token exemption input: the token count SPECIFICALLY climbed
+          // (claude renders one; codex has no token field so this never fires
+          // there and its long thinks stay sus-eligible).
+          const tokensAdvanced =
+            liveness.lastTokenAdvanceAt !== undefined &&
+            liveness.lastTokenAdvanceAt !== previousLiveness.lastTokenAdvanceAt;
+          // Subprocess life-sign, two sources: a live child under the pane
+          // while a tool.use is open (gated — harness TUIs keep idle helper
+          // children), or the codex "N background terminal(s) running" footer.
+          const subprocessAlive =
+            ((view.state.openTools?.length ?? 0) > 0 && (await this.tmux.subprocessAlive(view.config.tmuxSession))) ||
+            backgroundTerminalCount(pane.visiblePane) > 0;
+          if (counterAdvanced || tokensAdvanced || subprocessAlive || view.state.subprocessSince !== undefined) {
+            await this.store.updateState<SessionState>(id, current => ({
+              ...current,
+              ...(counterAdvanced ? { lastCounterAdvanceAt: now() } : {}),
+              ...(tokensAdvanced ? { lastTokenAdvanceAt: now() } : {}),
+              ...(subprocessAlive
+                ? { lastSubprocessAt: now(), subprocessSince: current.subprocessSince ?? now() }
+                : { subprocessSince: undefined }),
+            }));
+            view = await this.get(id);
+          }
           const waiting = waitingStatuses.includes(view.state.status) || view.state.status === 'interrupted';
           const startedAt = view.state.startedAt ? Date.parse(view.state.startedAt) : Date.parse(view.config.createdAt);
           if (!waiting && Date.now() - startedAt >= view.config.timeoutSeconds * 1000) {
@@ -1705,12 +1804,71 @@ export class SessionManager implements KTeamService {
               return;
             }
           }
-          if (!waiting && Date.now() - effectiveActivity >= view.config.stallSeconds * 1000) {
+          // A6 reflex rule (locked): life-signs at this layer are transcript
+          // growth, ANY pane change, and subprocess activity — it only catches
+          // totally-frozen agents. Zero life-signs for nudgeAfterSeconds → one
+          // nudge per episode (interrupt + continue message); still zero at
+          // killAfterSeconds → kill. Alive-but-weird cases (long silent think,
+          // long background task) are the warden sweep's sus list, not ours.
+          const ledger: LivenessLedger = {
+            lastTranscriptAt: view.state.lastTranscriptAt,
+            lastCounterAdvanceAt: view.state.lastCounterAdvanceAt,
+            lastTokenAdvanceAt: view.state.lastTokenAdvanceAt,
+            lastSubprocessAt: view.state.lastSubprocessAt,
+            lastPaneChangeAt: view.state.lastPaneAt,
+            subprocessSince: view.state.subprocessSince,
+          };
+          const nudgeAfter = view.config.nudgeAfterSeconds ?? 180;
+          const killAfter = Math.max(view.config.killAfterSeconds ?? 300, nudgeAfter + 30);
+          const assessment = reflexAssess({
+            ledger,
+            nowMs: Date.now(),
+            anchorMs: turnStartedAt,
+            tickSeconds: view.config.intervalSeconds,
+            nudgeAfterSeconds: nudgeAfter,
+            killAfterSeconds: killAfter,
+            nudgedAtMs: view.state.nudgedAt ? Date.parse(view.state.nudgedAt) : undefined,
+          });
+          const secondsSince = Object.fromEntries(
+            Object.entries(assessment.secondsSince).map(([key, value]) => [
+              key,
+              Number.isFinite(value) ? Math.floor(value) : null,
+            ]),
+          );
+          if (waiting || assessment.verdict === 'alive') {
+            // Only a returning STRONG life-sign ends the nudge episode. The
+            // nudge's own injected text repaints the pane, so pane flicker
+            // must never re-arm the nudge (that made a frozen agent loop
+            // through endless nudges and never reach the kill).
+            if (view.state.nudgedAt !== undefined && assessment.strongSeconds < nudgeAfter) {
+              await this.store.updateState<SessionState>(id, current => ({ ...current, nudgedAt: undefined }));
+              view = await this.get(id);
+            }
+          } else if (assessment.verdict === 'nudge') {
+            await this.store.updateState<SessionState>(id, current => ({ ...current, nudgedAt: now() }));
+            await this.emit(
+              id,
+              'session.nudged',
+              { reason: `zero life-signs for ${Math.floor(assessment.zeroSeconds)}s`, ledger, secondsSince },
+              'watcher',
+            );
+            // Escape stops a wedged turn without quitting either TUI; the
+            // queued message lands once (if) the prompt becomes editable.
+            await run(['tmux', 'send-keys', '-t', view.config.tmuxSession, 'Escape']);
+            await this.tmux
+              .send(
+                view.config,
+                'Liveness check: no output, pane change, or subprocess activity has been observed for several minutes. If you are alive, continue the task now.',
+              )
+              .catch(() => undefined);
+            view = await this.get(id);
+          } else {
+            // kill: the nudge revived nothing.
             await this.tmux.snapshot(view.config, true);
             await atomicJson(path.join(view.directory, 'kill.json'), {
               at: now(),
               reason: 'stalled',
-              evidence: { paneHash, diffHash, lastTranscriptAt: view.state.lastTranscriptAt },
+              evidence: { ledger, secondsSince, nudgedAt: view.state.nudgedAt },
               lastSnapshot: 'last-snapshot.txt',
             });
             await this.stopTmuxWithEvidence(view.config, 'stalled');
@@ -1719,11 +1877,17 @@ export class SessionManager implements KTeamService {
               {
                 status: 'stalled',
                 health: 'stalled',
-                reason: `no durable transcript progress for ${view.config.stallSeconds}s`,
+                reason: `zero life-signs for ${Math.floor(assessment.strongSeconds)}s (nudged, no revival)`,
                 finishedAt: now(),
                 promptReady: false,
               },
               'session.stalled',
+            );
+            await this.emit(
+              id,
+              'session.killed',
+              { reason: 'stalled', tmuxSession: view.config.tmuxSession },
+              'daemon',
             );
             return;
           }
@@ -1734,9 +1898,30 @@ export class SessionManager implements KTeamService {
             paneHash,
             diffHash,
             transcriptOffset: view.state.transcriptOffset ?? 0,
-            durableIdleSeconds: Math.floor((Date.now() - lastDurableActivity) / 1000),
-            effectiveIdleSeconds: Math.floor((Date.now() - effectiveActivity) / 1000),
+            liveness: { secondsSince, zeroSeconds: Math.floor(assessment.zeroSeconds), health: view.state.health },
           });
+          // The always-fresh human-readable ledger view. Sus reflects the
+          // sweep classifiers evaluated with the daemon's thresholds.
+          const susNow =
+            !waiting &&
+            susFindings(ledger, Date.now(), {
+              susThinkingSeconds: Math.max(60, this.options.warden.susThinkingSeconds),
+              susSubprocessSeconds: Math.max(60, this.options.warden.susSubprocessSeconds),
+              tickSeconds: view.config.intervalSeconds,
+              anchorMs: turnStartedAt,
+            }).length > 0;
+          await writeTextAtomic(
+            path.join(view.directory, 'liveness.yaml'),
+            renderLivenessYaml({
+              updatedAt: now(),
+              secondsSince: assessment.secondsSince,
+              triggers: {
+                nudge: !waiting && assessment.verdict === 'nudge',
+                kill: !waiting && assessment.verdict === 'kill',
+                sus: susNow,
+              },
+            }),
+          );
         } catch (error) {
           await this.emit(
             id,
@@ -1745,7 +1930,17 @@ export class SessionManager implements KTeamService {
             'watcher',
           ).catch(() => undefined);
         }
-        await interruptibleSleep(sleepSeconds * 1000, signal);
+        // A queued busy-time send must not wait out the full 30 s tick: while
+        // pending-sends exist, poll fast so delivery lands within seconds of
+        // the prompt turning ready (review P2 — the tick change would have
+        // made queued steers and automode continuation up to 6x slower).
+        const pendingSends = await stat(path.join(sessionDir(this.paths, id), 'channel', 'pending-sends.jsonl'))
+          .then(info => info.size > 0)
+          .catch(() => false);
+        await interruptibleSleep((pendingSends ? Math.min(sleepSeconds, 2) : sleepSeconds) * 1000, signal, wake => {
+          const monitor = this.monitors.get(id);
+          if (monitor && monitor.abort.signal === signal) monitor.wake = wake;
+        });
       }
     } finally {
       const monitor = this.monitors.get(id);
@@ -2065,6 +2260,7 @@ export class SessionManager implements KTeamService {
         startedAt: now(),
         lastActivityAt: now(),
         turnCompleted: false,
+        nudgedAt: undefined,
       },
       'turn.started',
     );
@@ -2505,7 +2701,12 @@ export class SessionManager implements KTeamService {
     // the recent-terminal-wreckage window — an old failure that nobody handled
     // within the window ages out rather than nagging forever.
     const unattendedMs = Math.max(60_000, this.options.warden.unattendedMinutes * 60_000);
-    const result = detectAnomalies(views, Date.now(), { unattendedMs, terminalWindowMs: unattendedMs });
+    const result = detectAnomalies(views, Date.now(), {
+      unattendedMs,
+      terminalWindowMs: unattendedMs,
+      susThinkingSeconds: Math.max(60, this.options.warden.susThinkingSeconds),
+      susSubprocessSeconds: Math.max(60, this.options.warden.susSubprocessSeconds),
+    });
     const at = now();
     this.lastSweep = { at, anomalies: result.anomalies, fingerprint: result.fingerprint };
     this.wardenState.lastSweepAt = at;
@@ -2536,8 +2737,159 @@ export class SessionManager implements KTeamService {
           anomalies: result.anomalies,
         });
     }
-    const escalation = await this.maybeEscalate(result.anomalies, result.fingerprint, sessions, forceEscalation);
-    return { sweptAt: at, anomalies: result.anomalies, ...escalation };
+    // Sus anomalies (alive but weird) get ONE assigned warden each; everything
+    // else goes through the shared fleet-triage escalation below.
+    const assigned = await this.spawnAssignedWardens(
+      result.anomalies.filter(item => item.assignedWarden === true),
+      sessions,
+      forceEscalation,
+    );
+    const triage = result.anomalies.filter(item => item.assignedWarden !== true);
+    const escalation = await this.maybeEscalate(triage, result.fingerprint, sessions, forceEscalation);
+    return {
+      sweptAt: at,
+      anomalies: result.anomalies,
+      ...escalation,
+      ...(assigned.length ? { assignedWardens: assigned } : {}),
+    };
+  }
+
+  /** Reconcile + spawn per-session assigned wardens for sus anomalies. Caps
+   *  concurrency, dedupes against live assignments, and applies a per-target
+   *  cooldown after a finished assignment. Returns spawned warden ids. */
+  private async spawnAssignedWardens(
+    susAnomalies: WardenAnomaly[],
+    sessions: SessionView[],
+    force: boolean,
+  ): Promise<string[]> {
+    const warden = this.options.warden;
+    if (susAnomalies.length === 0) return [];
+    if (!force && !warden.enabled) return [];
+    const byId = new Map(sessions.map(view => [view.config.id, view]));
+    // Reconcile: drop assignments whose warden session is gone/terminal, and
+    // start the cooldown clock for the target at that moment.
+    const assignments = { ...(this.wardenState.assignments ?? {}) };
+    const cooldowns = { ...(this.wardenState.assignedCooldowns ?? {}) };
+    for (const [targetId, record] of Object.entries(assignments)) {
+      const wardenView = byId.get(record.wardenId);
+      if (!wardenView || protectedStatuses.includes(wardenView.state.status)) {
+        delete assignments[targetId];
+        cooldowns[targetId] = now();
+      }
+    }
+    const cooldownMs = Math.max(0, warden.assignedCooldownMinutes * 60_000);
+    const spawned: string[] = [];
+    for (const anomaly of susAnomalies) {
+      // `assignments` already includes wardens spawned earlier in THIS loop,
+      // so its size alone is the live count — adding spawned.length again
+      // double-counted them and underfilled the cap (review P3).
+      if (Object.keys(assignments).length >= Math.max(1, warden.maxAssignedWardens)) break;
+      const targetId = anomaly.sessionId;
+      if (assignments[targetId]) continue; // a warden for it is already live
+      const cooledAt = cooldowns[targetId] ? Date.parse(cooldowns[targetId]!) : 0;
+      if (!force && cooledAt && Date.now() - cooledAt < cooldownMs) continue;
+      const target = byId.get(targetId);
+      if (!target || protectedStatuses.includes(target.state.status)) continue;
+      const at = now();
+      const reportPath = path.join(this.paths.wardenReports, `${at.replace(/[:.]/g, '-')}-${targetId}.md`);
+      await mkdir(this.paths.wardenReports, { recursive: true, mode: 0o700 });
+      // Unguessable per-assignment capability: exported only into THIS
+      // warden's pane; the api-server authorizes `stop <target>` by comparing
+      // capabilities, so another warden holding the shared scoped token
+      // cannot spoof its way to someone else's target (review P1).
+      const capability = `${crypto.randomUUID()}${crypto.randomUUID().replaceAll('-', '')}`;
+      try {
+        const view = await this.start({
+          prompt: this.buildAssignedWardenPrompt(anomaly, target, reportPath),
+          agent: warden.wrapper,
+          mode: 'auto',
+          label: WARDEN_LABEL,
+          name: `warden:${target.config.teammate ?? targetId}`,
+          cwd: this.paths.home,
+          stopCapability: capability,
+        });
+        assignments[targetId] = { wardenId: view.config.id, spawnedAt: at, capability };
+        spawned.push(view.config.id);
+        this.emitTransient('fleet.warden_assigned', {
+          wardenId: view.config.id,
+          targetId,
+          kind: anomaly.kind,
+          reportPath,
+        });
+      } catch (error) {
+        cooldowns[targetId] = at; // broken wrapper: don't retry every sweep
+        this.emitTransient('fleet.warden_spawn_failed', {
+          targetId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    this.wardenState.assignments = assignments;
+    this.wardenState.assignedCooldowns = cooldowns;
+    await this.saveWardenState();
+    return spawned;
+  }
+
+  /** True when `capability` matches the secret minted for `targetId`'s
+   *  active assignment — the ONLY case the warden-scoped token may stop a
+   *  session. Capabilities are unguessable and exported only into the
+   *  assigned warden's pane, so possession IS the authorization; a
+   *  client-chosen identity header is never trusted. */
+  wardenMayStop(capability: string, targetId: string): boolean {
+    const expected = this.wardenState.assignments?.[targetId]?.capability;
+    return typeof expected === 'string' && expected.length > 0 && expected === capability;
+  }
+
+  private buildAssignedWardenPrompt(anomaly: WardenAnomaly, target: SessionView, reportPath: string): string {
+    const kindHelp =
+      anomaly.kind === 'sus_thinking'
+        ? [
+            'The session APPEARS to be thinking (work counters advancing) but its transcript has not grown for a long time.',
+            'Judge whether that is legitimate: is the task complex enough to warrant a very long think? Are tokens actually',
+            'flowing (counter values increasing between two snapshots)? Could it be a usage limit, a network wedge, or a',
+            'crashed inference stream repainting a frozen spinner?',
+          ]
+        : anomaly.kind === 'sus_subprocess'
+          ? [
+              'The session has had a background subprocess running continuously for a long time.',
+              'Judge whether that is expected for the task (build, test suite, long migration…) and whether the process is',
+              'actually PROGRESSING: is its output growing (turn logs, files in the cwd), is it consuming CPU (`ps`), are',
+              'artifacts appearing? A legitimate long task should show movement between two looks a minute apart.',
+            ]
+          : [
+              'The session has been waiting on an unanswered question for a long time.',
+              'Read its pending question and its own chat.jsonl/turns: answer with `kteam answer` ONLY when the answer is',
+              'unambiguous from its own context; otherwise state precisely what a human must decide in the report.',
+            ];
+    return [
+      `You are an ASSIGNED kteam warden for exactly one session: ${target.config.id} (teammate ${target.config.teammate ?? '-'}).`,
+      'It was flagged sus (alive but weird) by the fleet sweep. Investigate THIS session only and deliver one verdict.',
+      '',
+      '## The anomaly',
+      '```json',
+      JSON.stringify(anomaly, null, 2),
+      '```',
+      '',
+      '## What to understand first',
+      `- The live liveness ledger: ${target.directory}/liveness.yaml (rewritten every monitor tick — seconds since conversation/tokens/thinking/subprocess/pane life-signs plus the current nudge/kill/sus triggers). Read it twice a minute apart.`,
+      `- The task and conversation so far: read ${target.directory}/prompt.md, chat.jsonl, and turns/ + logs/.`,
+      `- Live pane: \`kteam snapshot ${target.config.id}\` (twice, a minute apart — compare).`,
+      `- Recent events: \`kteam events ${target.config.id} --after -50\`.`,
+      `- The workspace: read-only \`git -C ${target.config.cwd} diff --stat\` and file timestamps.`,
+      ...kindHelp.map(line => `- ${line}`),
+      '',
+      '## Verdict (exactly one; state it and the evidence in the report)',
+      '- LEAVE — the long operation is expected and progressing; no action.',
+      `- NUDGE — \`kteam send ${target.config.id} <message>\` if it looks wedged but recoverable.`,
+      `- RESUME — \`kteam resume ${target.config.id}\` if the turn is dead but the session should continue.`,
+      `- KILL — \`kteam stop ${target.config.id}\` ONLY if the session is demonstrably burning time/tokens with no progress.`,
+      '  (Your token can stop only this assigned session.)',
+      '',
+      '## Rules',
+      '- Do NOT touch any other session. No git writes, no repository edits, no new non-warden sessions.',
+      `- Write your report to EXACTLY: ${reportPath}`,
+      '- Then run: kteam signal done',
+    ].join('\n');
   }
 
   private async maybeEscalate(
@@ -2663,6 +3015,7 @@ export class SessionManager implements KTeamService {
       `- Write a report to EXACTLY this path: ${reportPath}`,
       '  It must state: what you found, what you did (per session), and what still needs a human.',
       '- When the sweep is done, run: `kteam signal done`.',
+      '',
       '',
       '## Anomalies (deterministic detector output)',
       '```json',

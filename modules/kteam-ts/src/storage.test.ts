@@ -1,5 +1,6 @@
+import { Database } from 'bun:sqlite';
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { EventStore, readJsonFile, writeJsonAtomic } from './storage';
@@ -156,6 +157,163 @@ describe('filesystem import and SQLite rebuild', () => {
     const next = await store.append('imported', 'session.resumed', {});
     expect(next.sequence).toBe(3);
     expect(store.replay('imported').map(event => event.sequence)).toEqual([1, 2, 3]);
+    store.close();
+  });
+});
+
+describe('pointer index (A2)', () => {
+  test('sqlite stores byte offsets, never event payloads', async () => {
+    const home = await temporaryHome();
+    const store = await EventStore.open({ home });
+    const payload = { marker: 'payload-must-not-live-in-sqlite', blob: 'x'.repeat(5_000) };
+    await store.append('session-a', 'tool.result', payload);
+    expect(store.replay('session-a')).toMatchObject([{ sequence: 1, type: 'tool.result', data: payload }]);
+    store.close();
+
+    const raw = await readFile(path.join(home, 'daemon', 'kteam.sqlite'));
+    expect(raw.includes('payload-must-not-live-in-sqlite')).toBe(false);
+    const db = new Database(path.join(home, 'daemon', 'kteam.sqlite'), { readonly: true });
+    const row = db.query("SELECT byte_offset, byte_length FROM events WHERE session_id = 'session-a'").get() as {
+      byte_offset: number;
+      byte_length: number;
+    };
+    db.close();
+    const journal = await readFile(path.join(home, 'session-a', 'events.jsonl'), 'utf8');
+    const line = journal.slice(row.byte_offset, row.byte_offset + row.byte_length);
+    expect(JSON.parse(line)).toMatchObject({ sequence: 1, data: payload });
+  });
+
+  test('warm reopen skips unchanged journals (incremental import)', async () => {
+    const home = await temporaryHome();
+    let store = await EventStore.open({ home });
+    await store.append('session-a', 'session.created', { n: 1 });
+    await store.append('session-a', 'chat.message', { n: 2 });
+    await store.append('session-b', 'session.created', { n: 1 });
+    store.close();
+
+    // Reopen with untouched journals: import must scan zero events.
+    store = await EventStore.open({ home, importExisting: false });
+    const warm = await store.importFromDisk();
+    expect(warm).toMatchObject({ sessionCount: 2, eventCount: 0 });
+    expect(store.replay('session-a').map(event => event.sequence)).toEqual([1, 2]);
+
+    // Externally-appended tail: only the delta is scanned.
+    const journal = path.join(home, 'session-a', 'events.jsonl');
+    const extra = {
+      schemaVersion: 1,
+      sequence: 3,
+      sessionId: 'session-a',
+      time: '2026-07-22T00:00:00.000Z',
+      type: 'chat.message',
+      data: { n: 3 },
+    };
+    await writeFile(journal, `${await readFile(journal, 'utf8')}${JSON.stringify(extra)}\n`);
+    const delta = await store.importFromDisk();
+    expect(delta).toMatchObject({ eventCount: 1 });
+    expect(store.replay('session-a').map(event => event.sequence)).toEqual([1, 2, 3]);
+    store.close();
+  });
+
+  test('refuses a database from another schema generation (fresh-slate ship: no auto-migration)', async () => {
+    const home = await temporaryHome();
+    const databasePath = path.join(home, 'daemon', 'kteam.sqlite');
+    await mkdir(path.dirname(databasePath), { recursive: true });
+    const legacy = new Database(databasePath, { create: true });
+    legacy.exec(`
+      CREATE TABLE events (session_id TEXT NOT NULL, sequence INTEGER NOT NULL, time TEXT NOT NULL,
+        type TEXT NOT NULL, event_json TEXT NOT NULL, PRIMARY KEY (session_id, sequence));
+    `);
+    legacy.close();
+    expect(EventStore.open({ home })).rejects.toThrow(/schema generation 0, expected 2.*delete the old database/s);
+  });
+
+  test('replay detects a rewritten journal (valid-but-different events) and re-indexes instead of serving them', async () => {
+    const home = await temporaryHome();
+    const store = await EventStore.open({ home });
+    await store.append('session-a', 'chat.message', { n: 1 });
+    await store.append('session-a', 'chat.message', { n: 2 });
+    // Rewrite the journal IN PLACE while the store serves: same shape, valid
+    // JSON, but different events at the recorded offsets (compaction shifted
+    // everything). No reopen, no importFromDisk — replay itself must notice.
+    const journal = path.join(home, 'session-a', 'events.jsonl');
+    const rewritten = [
+      {
+        schemaVersion: 1,
+        sequence: 1,
+        sessionId: 'session-a',
+        time: '2026-07-22T00:00:00.000Z',
+        type: 'chat.message',
+        data: { rewritten: 'one' },
+      },
+      {
+        schemaVersion: 1,
+        sequence: 2,
+        sessionId: 'session-a',
+        time: '2026-07-22T00:00:01.000Z',
+        type: 'chat.message',
+        data: { rewritten: 'two-with-a-much-longer-payload' },
+      },
+    ];
+    await writeFile(journal, rewritten.map(event => JSON.stringify(event)).join('\n') + '\n');
+    const replayed = store.replay('session-a');
+    expect(replayed).toMatchObject([
+      { sequence: 1, data: { rewritten: 'one' } },
+      { sequence: 2, data: { rewritten: 'two-with-a-much-longer-payload' } },
+    ]);
+    // And appends continue cleanly after the self-heal.
+    const next = await store.append('session-a', 'chat.message', { n: 3 });
+    expect(next.sequence).toBe(3);
+    store.close();
+  });
+
+  test('replay degrades to empty when the journal file is gone (archived session)', async () => {
+    const home = await temporaryHome();
+    const store = await EventStore.open({ home });
+    await store.writeConfig('session-a', { id: 'session-a', createdAt: '2026-07-22T00:00:00.000Z' });
+    await store.append('session-a', 'session.created', {});
+    await rm(path.join(home, 'session-a', 'events.jsonl'), { force: true });
+    expect(store.replay('session-a')).toEqual([]);
+    // Metadata stays browsable even without the journal.
+    expect(store.getSession('session-a')).toMatchObject({ id: 'session-a' });
+    store.close();
+  });
+
+  test('appends after a truncated (no trailing newline) journal still index correctly', async () => {
+    const home = await temporaryHome();
+    let store = await EventStore.open({ home });
+    await store.append('session-a', 'session.created', { n: 1 });
+    store.close();
+    const journal = path.join(home, 'session-a', 'events.jsonl');
+    const raw = await readFile(journal, 'utf8');
+    await writeFile(journal, raw.trimEnd()); // simulate torn trailing newline
+    store = await EventStore.open({ home });
+    await store.append('session-a', 'chat.message', { n: 2 });
+    expect(store.replay('session-a').map(event => [event.sequence, event.type])).toEqual([
+      [1, 'session.created'],
+      [2, 'chat.message'],
+    ]);
+    store.close();
+  });
+
+  test('a rewritten (shrunk) journal triggers a full rescan, not a stale tail', async () => {
+    const home = await temporaryHome();
+    let store = await EventStore.open({ home });
+    await store.append('session-a', 'session.created', { n: 1 });
+    await store.append('session-a', 'chat.message', { n: 2 });
+    store.close();
+    const journal = path.join(home, 'session-a', 'events.jsonl');
+    const one = {
+      schemaVersion: 1,
+      sequence: 1,
+      sessionId: 'session-a',
+      time: '2026-07-22T00:00:00.000Z',
+      type: 'session.created',
+      data: { rewritten: true },
+    };
+    await writeFile(journal, `${JSON.stringify(one)}\n`);
+    store = await EventStore.open({ home });
+    expect(store.replay('session-a')).toMatchObject([{ sequence: 1, data: { rewritten: true } }]);
+    expect((await stat(journal)).size).toBeGreaterThan(0);
     store.close();
   });
 });

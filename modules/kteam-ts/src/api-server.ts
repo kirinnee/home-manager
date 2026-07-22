@@ -38,8 +38,16 @@ const WARDEN_ALLOWED_ACTIONS = new Set(['send', 'answer', 'resume', 'migrate']);
 /** Decide whether the warden-scoped token may perform this request. Returns a
  *  403 Response when denied, or undefined when allowed. Reads (GET) are allowed
  *  except the warden oversight routes; the only permitted writes are the
- *  safe-recovery actions plus self-completion via `signal`. */
-async function wardenScopeDenial(method: string, url: URL, service: KTeamService): Promise<Response | undefined> {
+ *  safe-recovery actions, self-completion via `signal`, and `stop` on the ONE
+ *  session the calling warden is assigned to — authorized by an unguessable
+ *  per-assignment capability minted at spawn (see SessionManager.wardenMayStop),
+ *  never by a client-chosen identity. */
+async function wardenScopeDenial(
+  method: string,
+  url: URL,
+  service: KTeamService,
+  stopCapability: string | undefined,
+): Promise<Response | undefined> {
   const forbidden = (what: string) => json({ error: `the warden-scoped token may not ${what}` }, 403);
   const pathname = url.pathname;
   if (pathname.startsWith('/v1/warden/')) return forbidden('use the warden oversight routes');
@@ -58,6 +66,19 @@ async function wardenScopeDenial(method: string, url: URL, service: KTeamService
       const target = await service.get(id).catch(() => undefined);
       if (target?.config.label === WARDEN_LABEL) return undefined;
       return forbidden('signal a non-warden session');
+    }
+    if (action === 'stop') {
+      // ASSIGNED wardens may stop exactly their assigned session, proven by
+      // the per-assignment capability minted at spawn and exported only into
+      // that warden's pane. Possession is the authorization — a different
+      // warden holding the same shared scoped token has no way to fabricate
+      // it. Aliases can't bypass this: the capability is checked against the
+      // RAW path segment here, and stop() resolves refs only afterwards, so
+      // an alias that resolves to the target would still need the target's
+      // own capability recorded under the alias — which never exists.
+      const targetId = decodeURIComponent(match[1]!);
+      if (stopCapability && service.wardenMayStop(stopCapability, targetId)) return undefined;
+      return forbidden('stop that session (only its assigned warden holds the stop capability)');
     }
     return forbidden(`perform the "${action ?? 'stop'}" action`);
   }
@@ -205,7 +226,12 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
       // Warden-scoped token: enforce the capability allowlist before routing.
       // (An admin token that also happens to match is never scoped.)
       if (authedWarden && !authedAdmin) {
-        const denial = await wardenScopeDenial(request.method, url, options.service);
+        const denial = await wardenScopeDenial(
+          request.method,
+          url,
+          options.service,
+          request.headers.get('x-kteam-stop-capability') ?? undefined,
+        );
         if (denial) return denial;
       }
 

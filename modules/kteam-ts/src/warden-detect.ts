@@ -1,10 +1,17 @@
+import { susFindings, type LivenessLedger } from './liveness';
 import type { SessionConfig, SessionState, SessionStatus } from './types';
 
 /** Label that marks a fleet-warden session. Warden sessions are excluded from
  *  every anomaly class so the warden can never escalate against itself. */
 export const WARDEN_LABEL = 'kteam-warden';
 
-export type WardenAnomalyKind = 'dead_monitor' | 'unattended_question' | 'abandoned_wreckage' | 'quota_reset_passed';
+export type WardenAnomalyKind =
+  | 'dead_monitor'
+  | 'unattended_question'
+  | 'abandoned_wreckage'
+  | 'quota_reset_passed'
+  | 'sus_thinking'
+  | 'sus_subprocess';
 
 export interface WardenAnomaly {
   kind: WardenAnomalyKind;
@@ -18,6 +25,12 @@ export interface WardenAnomaly {
   since?: string;
   /** Whole minutes the session has been in the anomalous state, when known. */
   idleMinutes?: number;
+  /** Sus anomalies get ONE assigned warden each (rather than the shared
+   *  fleet-triage session); the assigned warden may stop ONLY this session. */
+  assignedWarden?: boolean;
+  /** A6 liveness ledger snapshot for sus anomalies — the warden's
+   *  investigation starting point. */
+  ledger?: LivenessLedger;
 }
 
 export interface WardenDetectResult {
@@ -49,6 +62,10 @@ export interface WardenDetectOptions {
   /** A failed/stalled session that entered its terminal state within this window
    *  is fresh wreckage worth flagging; older terminal sessions are ignored. */
   terminalWindowMs: number;
+  /** Sus list: thinking with no transcript growth this long (seconds). */
+  susThinkingSeconds: number;
+  /** Sus list: a continuous subprocess episode this long (seconds). */
+  susSubprocessSeconds: number;
 }
 
 /** Statuses that MUST have a live monitor handle — a session claiming to be
@@ -138,6 +155,9 @@ export function detectAnomalies(
           detail: `${state.status} with no activity for ${idleMinutes ?? '∞'}m — a question nobody answered`,
           since: anchor ? new Date(anchor).toISOString() : undefined,
           idleMinutes,
+          // Sus reason (c) in the normative spec: an unattended question gets
+          // its own assigned warden like the other sus classes.
+          assignedWarden: true,
         });
       }
     }
@@ -153,6 +173,36 @@ export function detectAnomalies(
           kind: 'abandoned_wreckage',
           detail: `${state.status} within the sweep window and never resumed or stopped${state.reason ? `: ${state.reason}` : ''}`,
           since: new Date(finishedMs).toISOString(),
+        });
+      }
+    }
+
+    // A6 sus list: alive-but-weird sessions the dumb reflex must not touch —
+    // a long silent think (counters advancing, no transcript) or a long
+    // continuous background subprocess. Each gets ONE assigned warden that
+    // investigates the actual work and verdicts leave/nudge/resume/kill.
+    if (ACTIVE_MONITORED.includes(state.status)) {
+      const ledger: LivenessLedger = {
+        lastTranscriptAt: state.lastTranscriptAt,
+        lastCounterAdvanceAt: state.lastCounterAdvanceAt,
+        lastTokenAdvanceAt: state.lastTokenAdvanceAt,
+        lastSubprocessAt: state.lastSubprocessAt,
+        lastPaneChangeAt: state.lastPaneAt,
+        subprocessSince: state.subprocessSince,
+      };
+      for (const finding of susFindings(ledger, nowMs, {
+        susThinkingSeconds: options.susThinkingSeconds,
+        susSubprocessSeconds: options.susSubprocessSeconds,
+        tickSeconds: config.intervalSeconds,
+        anchorMs: parseMs(state.startedAt),
+      })) {
+        anomalies.push({
+          ...base,
+          kind: finding.kind,
+          detail: `${finding.detail} — assign a warden to investigate`,
+          idleMinutes: Math.floor(finding.forSeconds / 60),
+          assignedWarden: true,
+          ledger,
         });
       }
     }
