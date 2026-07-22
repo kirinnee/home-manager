@@ -2802,6 +2802,7 @@ export class SessionManager implements KTeamService {
         const view = await this.start({
           prompt: this.buildAssignedWardenPrompt(anomaly, target, reportPath),
           agent: warden.wrapper,
+          model: warden.model,
           mode: 'auto',
           label: WARDEN_LABEL,
           name: `warden:${target.config.teammate ?? targetId}`,
@@ -2924,6 +2925,7 @@ export class SessionManager implements KTeamService {
       const view = await this.start({
         prompt,
         agent: warden.wrapper,
+        model: warden.model,
         mode: 'auto',
         label: WARDEN_LABEL,
         name: 'warden-sweep',

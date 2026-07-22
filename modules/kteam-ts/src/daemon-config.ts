@@ -9,6 +9,10 @@ export interface WardenConfig {
   /** Auto-mode wrapper warden sessions run under (judgment work — use an
    *  Opus-class account, not a mass-chore model). */
   wrapper: string;
+  /** Optional model override for warden session starts (e.g. run the loge
+   *  wrapper but pin wardens to claude-opus-4-8[1m] instead of the wrapper's
+   *  KTEAM_MODEL default). */
+  model?: string;
   /** Fleet sweep cadence, minutes. */
   intervalMinutes: number;
   /** A waiting session idle this long is an unanswered question. */
