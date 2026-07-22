@@ -152,4 +152,83 @@ describe('kteam daemon API', () => {
     expect(body).not.toContain('"__KTEAM_TOKEN__"');
     expect(body).not.toContain("'__KTEAM_TOKEN__'");
   });
+
+  test('rejects malformed action inputs with 400', async () => {
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service: new FakeService() });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}`;
+    const admin = { authorization: 'Bearer secret', 'content-type': 'application/json' };
+    const migrate = await fetch(`${base}/v1/sessions/s1/migrate`, { method: 'POST', headers: admin, body: '{}' });
+    expect(migrate.status).toBe(400);
+    expect(((await migrate.json()) as { error: string }).error).toBe('agent is required');
+    const signal = await fetch(`${base}/v1/sessions/s1/signal`, {
+      method: 'POST',
+      headers: admin,
+      body: JSON.stringify({ kind: 'nope' }),
+    });
+    expect(signal.status).toBe(400);
+    expect(((await signal.json()) as { error: string }).error).toBe('kind must be done or help');
+  });
+});
+
+describe('warden-scoped token authorization', () => {
+  const scoped = { authorization: 'Bearer warden', 'content-type': 'application/json' };
+
+  function scopedServer(service: KTeamService = new FakeService()): string {
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', wardenToken: 'warden', service });
+    servers.push(server);
+    return `http://127.0.0.1:${server.port}`;
+  }
+
+  test('permits reads and the safe-recovery writes', async () => {
+    const base = scopedServer();
+    expect((await fetch(`${base}/v1/sessions`, { headers: scoped })).status).toBe(200);
+    expect((await fetch(`${base}/v1/sessions/s1`, { headers: scoped })).status).toBe(200);
+    const send = await fetch(`${base}/v1/sessions/s1/send`, {
+      method: 'POST',
+      headers: scoped,
+      body: JSON.stringify({ message: 'steer' }),
+    });
+    expect(send.status).toBe(200);
+    const migrate = await fetch(`${base}/v1/sessions/s1/migrate`, {
+      method: 'POST',
+      headers: scoped,
+      body: JSON.stringify({ agent: 'claude-auto-glm52b' }),
+    });
+    expect(migrate.status).toBe(200);
+  });
+
+  test('rejects start, stop, interrupt, remove, and the warden oversight routes with 403', async () => {
+    const base = scopedServer();
+    const post = (path: string) => fetch(`${base}${path}`, { method: 'POST', headers: scoped, body: '{}' });
+    expect((await post('/v1/sessions')).status).toBe(403); // start
+    expect((await post('/v1/sessions/s1/stop')).status).toBe(403);
+    expect((await post('/v1/sessions/s1/interrupt')).status).toBe(403);
+    expect((await post('/v1/warden/run')).status).toBe(403);
+    expect((await fetch(`${base}/v1/sessions/s1`, { method: 'DELETE', headers: scoped })).status).toBe(403);
+    expect((await fetch(`${base}/v1/warden/status`, { headers: scoped })).status).toBe(403);
+  });
+
+  test('signal is gated to warden-labelled sessions only', async () => {
+    // Default FakeService session carries no warden label → self-completion denied.
+    const unlabelled = scopedServer();
+    const denied = await fetch(`${unlabelled}/v1/sessions/s1/signal`, {
+      method: 'POST',
+      headers: scoped,
+      body: JSON.stringify({ kind: 'done' }),
+    });
+    expect(denied.status).toBe(403);
+
+    // A warden-labelled session may signal itself done.
+    class WardenLabelledService extends FakeService {
+      get = async () => ({ ...view, config: { ...view.config, label: WARDEN_LABEL } }) as SessionView;
+    }
+    const wardenBase = scopedServer(new WardenLabelledService());
+    const allowed = await fetch(`${wardenBase}/v1/sessions/s1/signal`, {
+      method: 'POST',
+      headers: scoped,
+      body: JSON.stringify({ kind: 'done' }),
+    });
+    expect(allowed.status).toBe(200);
+  });
 });
