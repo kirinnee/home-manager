@@ -360,3 +360,82 @@ report "actor unknown". Secondary observation kept for the record: sessions whos
 work is finished can be reclassified failed ("daemon restarted but the interactive
 tmux session no longer exists") after a daemon restart — the maiden warden run is
 observing how this class gets handled; refine the detector if it proves noisy.
+
+## 2026-07-22 18:19Z — first live warden run (mrwepljs-1097553d / paige / claude-auto-glm52a)
+
+### Observation: mindy NOT a false positive — confirmed mid-work, correctly resumed
+
+**Problem observed:** The pre-run note for this warden watch predicted mindy
+(mrwcnn1u-c8b1979e, label `kteam-warden-build`) was "completed before daemon restart"
+and might be a false-positive reclassification. Evidence contradicts this.
+
+**Evidence:** mindy's `state.json` showed `turn: 3, turnCompleted: false`. The
+`summary.md` (turn-2 completion artifact) was present from turn 2 (written ~17:46Z),
+but a turn 3 was explicitly started at 17:52Z with a separate `turn-003.md` containing
+a FIX-FIRST review pass (P1 security items: scoped auth token enforcement, ancestry
+recursion guard, auto-failover gate, migration atomicity with rollback). The session
+was actively executing tool calls at 18:16Z (transcriptOffset grew from start-of-turn
+to 3,301,452 bytes) when the daemon restart killed it at 18:17Z. Last snapshot showed
+the agent mid-implementation of test helpers. No `REVIEW-warden.md` deliverable on
+disk (which turn-3 was supposed to read). No done marker for turn 3.
+
+**Conclusion:** The abandoned_wreckage classification was CORRECT for mindy — the session
+was genuinely mid-work-in-turn-3. The completed-session-reclassified-as-failed pattern
+does exist but did NOT fire here. The detector correctly omitted a done-marker or
+turn-3 completion as the "finished" evidence, relying instead on `turnCompleted: false`.
+
+**Suspected code path (if pattern does fire):** `modules/kteam-ts/src/warden-detect.ts`
+— the `abandoned_wreckage` detector checks `turnCompleted` (which is set on signal
+done). If a session signals done but the tmux pane then dies before the status
+transitions to `completed`, the daemon restart marks the session `failed` but
+`markers/done.json` still exists. Future detector versions should check for a done
+marker before classifying `abandoned_wreckage`, to avoid resuming a session whose work
+was already complete (would cause it to re-do turn N or start turn N+1 prematurely).
+
+**Workaround for warden:** before resuming any `kteam-warden-build` or similar labeled
+session, read `markers/` directory for `done.json` AND cross-check `turnCompleted` in
+state.json. The warden paige did this correctly (read summary.md, turn-003.md, state).
+
+### Observation: daemon restart flap (EADDRINUSE) — root cause of 4 anomalies
+
+**Problem:** All 4 anomalies this sweep were caused by a single infra event: kteamd
+entered a restart loop where multiple daemon processes tried to bind port 7337.
+
+**Evidence:** `daemon.log` shows `error: Failed to start server. Is port 7337 in use?
+… EADDRINUSE` and `kteamd is already running (pid …)` with distinct pids (309645,
+315185, 320208, 3877570, 3896181). The restart killed the live tmux panes for jenny and
+mindy (Claude sessions). The Codex sessions (pauline, callie) had a separate but
+coincident failure: 90 s startup timeout at TUI banner (`promptReady=false, cursor=2:18`)
+which may be caused by the overloaded event loop during the daemon flap.
+
+**Suspected code path:** `modules/kteam-ts/src/daemon-entry.ts` launch guard /
+`bin/kteamd` invocation. The pid file check or SIGTERM/SIGKILL on restart may race
+when multiple processes fire concurrently (e.g., systemd restart policy + manual
+trigger + warden watchdog). The EADDRINUSE is the symptom; the root cause is multiple
+kteamd processes starting before the previous one fully exits.
+
+**Workaround:** stabilize the daemon (single `pkill kteamd && sleep 2 && kteamd &`)
+before launching more sessions. The warden correctly flagged this for human attention
+and did NOT attempt to touch the daemon.
+
+**Suggested fix:** daemon entry should acquire a file lock (or check and SIGKILL the
+stale pid) rather than just read the pid file before starting.
+
+### Observation: scoped warden token — enforcement confirmed wired, NOT stress-tested
+
+**Evidence:** `launch.sh` for the warden session (mrwepljs-1097553d) sets
+`KTEAM_TOKEN` to the value in `~/.kteam/daemon/warden.token`, which is distinct from
+the admin token in `~/.kteam/daemon/token`. The `api-server.ts` `wardenScopeDenial`
+function gates stop/remove/start/warden-route writes to 403. The warden made no
+attempt to use any forbidden action, so the 403 path was NOT exercised in this run.
+
+**Remaining gap:** The scoped token is correctly injected at launch time. However,
+the warden agent can still read `~/.kteam/daemon/token` (the admin token file) from
+disk if it chooses to, since file-system isolation is noted as out of scope in the
+code comments (`api-server.ts`). A sufficiently adversarial or prompt-injected warden
+could bypass the scope by reading the admin token directly. This is a known design
+limitation documented in the source; the scoped token is an audit boundary, not a
+hard OS-level sandbox.
+
+**No action needed now** — the bounds held in practice. Log this as a known gap for
+future hardening if warden prompts ever handle untrusted payloads from teammate output.
