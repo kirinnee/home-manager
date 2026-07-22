@@ -55,6 +55,15 @@ export interface SessionConfig {
   systemPromptFile: string;
   originalPromptFile: string;
   transcriptFile?: string;
+  /** Staged migration intent, written BEFORE the old pane is stopped and cleared
+   *  once the new account relaunches. A non-empty value on a stopped/failed
+   *  session means a migration was interrupted mid-flight — the config was rolled
+   *  back to `from` and the failure reason records what happened. */
+  migration?: {
+    from: string;
+    to: string;
+    at: string;
+  };
   retry?: {
     transientAttempts: number;
     stalledAttempts: number;

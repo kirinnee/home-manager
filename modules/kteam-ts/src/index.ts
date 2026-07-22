@@ -259,31 +259,25 @@ program
             ? `no kteam sessions with label "${options.label}"`
             : 'no kteam sessions',
       );
-    const row = (
-      teammate: string,
-      id: string,
-      status: string,
-      model: string,
-      agent: string,
-      mode: string,
-      label: string,
-      task: string,
-    ) =>
-      `${teammate.padEnd(12)} ${id.padEnd(24)} ${status.padEnd(14)} ${model.padEnd(20)} ${agent.padEnd(26)} ${mode.padEnd(11)} ${label.padEnd(14)} ${task}`;
-    console.log(row('TEAMMATE', 'ID', 'STATUS', 'MODEL', 'AGENT', 'MODE', 'LABEL', 'TASK'));
-    for (const view of sessions)
-      console.log(
-        row(
-          view.config.teammate ?? '-',
-          view.config.id,
-          view.state.status,
-          view.config.model ?? 'default',
-          view.config.binary,
-          view.config.mode,
-          view.config.label ?? '-',
-          view.config.name,
-        ),
-      );
+    // Column widths are measured from the DATA (fixed widths misalign the
+    // moment any value outgrows them). Variable-length columns (TASK, LABEL)
+    // sit at the end; the final column is never padded.
+    const header = ['TEAMMATE', 'ID', 'STATUS', 'MODEL', 'AGENT', 'MODE', 'TASK', 'LABEL'];
+    const rows = sessions.map(view => [
+      view.config.teammate ?? '-',
+      view.config.id,
+      view.state.status,
+      view.config.model ?? 'default',
+      view.config.binary,
+      view.config.mode,
+      view.config.name,
+      view.config.label ?? '-',
+    ]);
+    const widths = header.map((title, column) => Math.max(title.length, ...rows.map(cells => cells[column]!.length)));
+    const render = (cells: string[]) =>
+      cells.map((cell, column) => (column === cells.length - 1 ? cell : cell.padEnd(widths[column]!))).join('  ');
+    console.log(render(header));
+    for (const cells of rows) console.log(render(cells));
   });
 
 program
@@ -359,6 +353,15 @@ program
   .argument('<id>')
   .argument('[message...]')
   .action(async (id, parts: string[]) => printView(await (await client()).resume(id, parts.join(' ') || undefined)));
+program
+  .command('migrate')
+  .description('continue a session on another same-kind account (new wrapper); relaunches under it')
+  .argument('<id>')
+  .requiredOption('-a, --agent <binary>', 'the auto-mode wrapper to move the session onto (same harness kind)')
+  .option('--model <model>', 'override the model on the new account; defaults to the new wrapper KTEAM_MODEL')
+  .action(async (id, options: { agent: string; model?: string }) =>
+    printView(await (await client()).migrate(id, options.agent, options.model)),
+  );
 program
   .command('restart')
   .description('stop the session (even while "running") and resume it in a fresh TUI')
@@ -515,6 +518,48 @@ program
     });
     process.exitCode = await proc.exited;
   });
+const wardenCommand = program.command('warden').description('fleet-level watchdog (layer-3 oversight)');
+wardenCommand
+  .command('status')
+  .option('--json')
+  .action(async (options: { json?: boolean }) => {
+    const status = await (await client()).wardenStatus();
+    if (options.json) return console.log(JSON.stringify(status, null, 2));
+    const w = status.config;
+    console.log(
+      `warden: escalation ${w.enabled ? 'ENABLED' : 'disabled'}  wrapper=${w.wrapper}  interval=${w.intervalMinutes}m  unattended=${w.unattendedMinutes}m  gap=${w.minSpawnGapMinutes}m`,
+    );
+    console.log(`last sweep: ${status.lastSweepAt ?? 'never'}`);
+    if (status.liveWarden) console.log(`live warden session: ${status.liveWarden}`);
+    if (status.lastSpawnAt) console.log(`last escalation spawn: ${status.lastSpawnAt}`);
+    if (!status.anomalies.length) console.log('anomalies: none');
+    else {
+      console.log(`anomalies (${status.anomalies.length}):`);
+      for (const anomaly of status.anomalies)
+        console.log(`  ${anomaly.kind}  ${anomaly.teammate ?? '-'} (${anomaly.sessionId})  ${anomaly.detail}`);
+    }
+    if (status.lastReport) {
+      console.log(`last report: ${status.lastReport.path}`);
+      for (const line of status.lastReport.head.split('\n')) console.log(`  | ${line}`);
+    }
+  });
+wardenCommand
+  .command('run')
+  .description('force a fleet sweep now')
+  .option('--spawn', 'force LLM escalation past the enabled flag, spawn gap, and unchanged-anomaly suppression')
+  .option('--json')
+  .action(async (options: { spawn?: boolean; json?: boolean }) => {
+    const result = await (await client()).wardenRun(options.spawn === true);
+    if (options.json) return console.log(JSON.stringify(result, null, 2));
+    console.log(
+      `swept ${result.sweptAt}: ${result.anomalies.length} anomal${result.anomalies.length === 1 ? 'y' : 'ies'}`,
+    );
+    for (const anomaly of result.anomalies)
+      console.log(`  ${anomaly.kind}  ${anomaly.teammate ?? '-'} (${anomaly.sessionId})  ${anomaly.detail}`);
+    if (result.spawned) console.log(`escalated: spawned warden session ${result.spawned}`);
+    else if (result.message) console.log(`no escalation: ${result.message}`);
+  });
+
 program.command('doctor').action(async () => {
   const tmux = Bun.spawnSync(['tmux', '-V']);
   const agents = discoverAutoAgents(paths.kfleetBin);

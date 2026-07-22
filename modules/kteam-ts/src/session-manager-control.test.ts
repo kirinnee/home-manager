@@ -72,6 +72,209 @@ describe('withAutoRevive (F4)', () => {
   });
 });
 
+describe('migrate — cross-account continuation', () => {
+  const claudeSession = {
+    directory: '/tmp/kteam/s1',
+    config: {
+      id: 's1',
+      name: 'work',
+      teammate: 'mordecai',
+      label: 'lead-abc',
+      parent: 'p0',
+      binary: 'claude-auto-glm52a',
+      harness: 'claude',
+      modelHint: 'GLM-5.2',
+      model: 'glm-5.2',
+      mode: 'auto',
+      cwd: '/repo',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+      turn: 3,
+      harnessSessionId: 'sess-keep-me',
+      harnessHome: '/old/home',
+      tmuxSession: 'kteam-s1-agent',
+      watcherSession: 'kteam-s1-watch',
+      intervalSeconds: 5,
+      stallSeconds: 900,
+      timeoutSeconds: 3600,
+      maxSnapshots: 20,
+      systemPromptFile: '/tmp/system',
+      originalPromptFile: '/tmp/prompt',
+    },
+    state: { id: 's1', status: 'rate_limited', turn: 3 },
+  } as unknown as SessionView;
+
+  function migrateManager(over: Partial<Loose> = {}): Loose {
+    const manager = bareManager();
+    manager.store = { listSessions: () => [] };
+    manager.paths = { kfleetBin: '/nonexistent-kfleet-bin' };
+    manager.cancelRetry = () => undefined;
+    manager.cancelQuotaWaiter = async () => undefined;
+    manager.get = async () => claudeSession;
+    return Object.assign(manager, over);
+  }
+
+  const callMigrate = (manager: Loose, id: string, agent: string, model?: string) =>
+    (manager as unknown as { migrate: (id: string, agent: string, model?: string) => Promise<SessionView> }).migrate(
+      id,
+      agent,
+      model,
+    );
+
+  test('rejects cross-harness migration', async () => {
+    const manager = migrateManager();
+    await expect(callMigrate(manager, 's1', 'codex-auto-loge')).rejects.toThrow(/cross-harness/);
+  });
+
+  test('rejects an unknown wrapper', async () => {
+    const manager = migrateManager();
+    await expect(callMigrate(manager, 's1', 'claude-auto-doesnotexist')).rejects.toThrow(/wrapper not found/);
+  });
+
+  test('rejects a non-auto-mode wrapper', async () => {
+    const manager = migrateManager();
+    await expect(callMigrate(manager, 's1', 'claude-interactive')).rejects.toThrow(/auto-mode fleet wrappers/);
+  });
+
+  test('rewrites binary/home/model, keeps identity, emits session.migrated, then resumes', async () => {
+    const wrapperDir = await mkdtemp(path.join(os.tmpdir(), 'kteam-migrate-'));
+    temporaryDirectories.push(wrapperDir);
+    const wrapper = path.join(wrapperDir, 'claude-auto-glm52b');
+    await writeFile(
+      wrapper,
+      '#!/usr/bin/env bash\nexport CLAUDE_CONFIG_DIR="/new/home"\nexport KTEAM_MODEL="glm-5.2-air"\nexec claude "$@"\n',
+      { mode: 0o755 },
+    );
+
+    let current = { ...(claudeSession.config as unknown as Loose) };
+    const configUpdates: Loose[] = [];
+    const events: Array<{ type: string; payload: Loose }> = [];
+    let resumedWith: string | undefined;
+
+    const manager = migrateManager({
+      paths: { kfleetBin: wrapperDir },
+      store: {
+        listSessions: () => [],
+        updateConfig: async (_id: string, mutate: (c: Loose) => Loose) => {
+          current = mutate(current);
+          configUpdates.push(current);
+          return current;
+        },
+      },
+      stopMonitor: async () => undefined,
+      tmux: { state: async () => ({ alive: false, dead: true, promptReady: false }) },
+      stopTmuxWithEvidence: async () => undefined,
+      emit: async (_id: string, type: string, payload: Loose) => {
+        events.push({ type, payload });
+        return {} as unknown;
+      },
+      resume: async (_id: string, message?: string) => {
+        resumedWith = message;
+        return claudeSession;
+      },
+    });
+
+    await callMigrate(manager, 's1', 'claude-auto-glm52b');
+
+    // Config rewritten to the new account…
+    expect(current.binary).toBe('claude-auto-glm52b');
+    expect(current.harness).toBe('claude');
+    expect(current.modelHint).toBe('GLM-5.2');
+    expect(current.model).toBe('glm-5.2-air'); // new wrapper's KTEAM_MODEL
+    expect(current.harnessHome).toBe('/new/home');
+    // …while identity is preserved.
+    expect(current.harnessSessionId).toBe('sess-keep-me');
+    expect(current.teammate).toBe('mordecai');
+    expect(current.label).toBe('lead-abc');
+    expect(current.parent).toBe('p0');
+    // Transcript repointed under the new home (claude).
+    expect(String(current.transcriptFile)).toContain('/new/home/projects/');
+
+    const migrated = events.find(event => event.type === 'session.migrated');
+    expect(migrated?.payload).toMatchObject({ from: 'claude-auto-glm52a', to: 'claude-auto-glm52b' });
+    expect(resumedWith).toMatch(/migrated to a different account/);
+  });
+
+  test('explicit --model overrides the new wrapper default', async () => {
+    const wrapperDir = await mkdtemp(path.join(os.tmpdir(), 'kteam-migrate-'));
+    temporaryDirectories.push(wrapperDir);
+    const wrapper = path.join(wrapperDir, 'claude-auto-glm52b');
+    await writeFile(wrapper, 'export CLAUDE_CONFIG_DIR="/new/home"\nexport KTEAM_MODEL="glm-5.2-air"\n', {
+      mode: 0o755,
+    });
+
+    let current = { ...(claudeSession.config as unknown as Loose) };
+    const manager = migrateManager({
+      paths: { kfleetBin: wrapperDir },
+      store: {
+        listSessions: () => [],
+        updateConfig: async (_id: string, mutate: (c: Loose) => Loose) => {
+          current = mutate(current);
+          return current;
+        },
+      },
+      stopMonitor: async () => undefined,
+      tmux: { state: async () => ({ alive: false, dead: true, promptReady: false }) },
+      stopTmuxWithEvidence: async () => undefined,
+      emit: async () => ({}) as unknown,
+      resume: async () => claudeSession,
+    });
+
+    await callMigrate(manager, 's1', 'claude-auto-glm52b', 'fable');
+    expect(current.model).toBe('fable');
+  });
+
+  test('rolls the config back to the original account and fails the session when the relaunch throws', async () => {
+    const wrapperDir = await mkdtemp(path.join(os.tmpdir(), 'kteam-migrate-'));
+    temporaryDirectories.push(wrapperDir);
+    const wrapper = path.join(wrapperDir, 'claude-auto-glm52b');
+    await writeFile(wrapper, 'export CLAUDE_CONFIG_DIR="/new/home"\nexport KTEAM_MODEL="glm-5.2-air"\n', {
+      mode: 0o755,
+    });
+
+    let current = { ...(claudeSession.config as unknown as Loose) };
+    const events: string[] = [];
+    const transitions: Array<{ status?: string; reason?: string }> = [];
+    const manager = migrateManager({
+      paths: { kfleetBin: wrapperDir },
+      store: {
+        listSessions: () => [],
+        updateConfig: async (_id: string, mutate: (c: Loose) => Loose) => {
+          current = mutate(current);
+          return current;
+        },
+      },
+      stopMonitor: async () => undefined,
+      tmux: { state: async () => ({ alive: false, dead: true, promptReady: false }) },
+      stopTmuxWithEvidence: async () => undefined,
+      emit: async (_id: string, type: string) => {
+        events.push(type);
+        return {} as unknown;
+      },
+      transition: async (_id: string, patch: { status?: string; reason?: string }) => {
+        transitions.push(patch);
+      },
+      resume: async () => {
+        throw new Error('pane never became ready');
+      },
+    });
+
+    await expect(callMigrate(manager, 's1', 'claude-auto-glm52b')).rejects.toThrow(
+      'migration to claude-auto-glm52b failed: pane never became ready; session restored to claude-auto-glm52a (stopped)',
+    );
+    // Config rolled back to the original account — never left on the wrapper that
+    // never launched.
+    expect(current.binary).toBe('claude-auto-glm52a');
+    expect(current.harnessHome).toBe('/old/home');
+    expect(current.model).toBe('glm-5.2');
+    expect(current.migration).toBeUndefined();
+    // Intent was journaled BEFORE stopping, then the session was marked failed.
+    expect(events).toContain('session.migrating');
+    expect(transitions.at(-1)?.status).toBe('failed');
+    expect(transitions.at(-1)?.reason).toContain('restored to claude-auto-glm52a');
+  });
+});
+
 describe('deliverPendingSends (F5)', () => {
   async function sessionDirectory(): Promise<string> {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'kteam-f5-'));

@@ -21,11 +21,15 @@ import {
   wrapperModel,
   claudeTranscriptPath,
 } from './harness';
-import { atomicJson, now, run } from './io';
+import type { WardenConfig } from './daemon-config';
+import { atomicJson, now, readJson, run } from './io';
 import { NAME_WINDOW_MS, pickTeammateName } from './names';
 import type { KTeamPaths } from './paths';
 import { configFile, markerFile, sessionDir, stateFile, turnLog, turnPrompt } from './paths';
-import type { AttachmentView, KTeamService, SessionView } from './service';
+import type { AttachmentView, KTeamService, SessionView, WardenRunView, WardenStatusView } from './service';
+import { detectAnomalies, WARDEN_LABEL, type WardenAnomaly, type WardenSessionView } from './warden-detect';
+import { rankFailoverCandidates, selectFailoverCandidate } from './failover';
+import type { AgentUsage } from './core';
 import { EventStore, type JsonValue, type SessionEvent } from './storage';
 import { contextPercentUsed, paneActivityLine, paneShowsActiveWork, TmuxController } from './tmux-controller';
 import type { KTeamEvent, SendRequest, SessionConfig, SessionState, SessionStatus, StartSessionRequest } from './types';
@@ -46,6 +50,26 @@ interface SessionManagerOptions {
   quotaUrl: string;
   transcriptReconcileSeconds: number;
   publicUrl: string;
+  warden: WardenConfig;
+}
+interface WardenRuntimeState {
+  lastSweepAt?: string;
+  lastSpawnAt?: string;
+  /** The escalation-suppression key of the last spawn: the anomaly fingerprint
+   *  qualified by `recoveryGeneration` (`<gen>:<fingerprint>`). Qualifying by the
+   *  generation means an anomaly set that RECURS after a clean recovery escalates
+   *  again instead of being suppressed as "unchanged". */
+  lastSpawnFingerprint?: string;
+  /** Fingerprint of the most recent sweep — used to detect the non-empty→empty
+   *  transition that marks a recovery. */
+  lastFingerprint?: string;
+  /** Bumped every time the fleet goes from having anomalies to having none. */
+  recoveryGeneration?: number;
+}
+interface WardenSweep {
+  at: string;
+  anomalies: WardenAnomaly[];
+  fingerprint: string;
 }
 interface ResumeGuard {
   status: SessionStatus;
@@ -95,6 +119,14 @@ export class SessionManager implements KTeamService {
   private globalSequence = 0;
   private globalEventQueue: Promise<void> = Promise.resolve();
   private closed = false;
+  /** Fleet warden (layer-3 oversight): a periodic deterministic sweep plus,
+   *  when enabled, rate-limited LLM escalation. */
+  private wardenTimer?: ReturnType<typeof setInterval>;
+  private wardenState: WardenRuntimeState = {};
+  private lastSweep?: WardenSweep;
+  private lastEmittedFingerprint = '';
+  /** Serializes sweeps so a forced `warden run` never races the interval. */
+  private wardenSweepChain: Promise<unknown> = Promise.resolve();
 
   private constructor(
     readonly paths: KTeamPaths,
@@ -111,11 +143,14 @@ export class SessionManager implements KTeamService {
     const manager = new SessionManager(paths, store, options);
     await manager.initializeGlobalSequence();
     await manager.recover();
+    await manager.startWarden();
     return manager;
   }
 
   async close(): Promise<void> {
     this.closed = true;
+    if (this.wardenTimer) clearInterval(this.wardenTimer);
+    await this.wardenSweepChain.catch(() => undefined);
     for (const timer of this.retryTimers.values()) clearTimeout(timer);
     this.retryTimers.clear();
     const stopping: Promise<unknown>[] = [];
@@ -202,6 +237,21 @@ export class SessionManager implements KTeamService {
     return pickTeammateName(recent, lastUsedAt);
   }
 
+  /** Walk a parent chain (by id); true if the session or any ancestor carries
+   *  the warden label. Cycle-guarded. */
+  private async hasWardenAncestor(startId: string | undefined): Promise<boolean> {
+    const seen = new Set<string>();
+    let current = startId;
+    while (current && !seen.has(current)) {
+      seen.add(current);
+      const view = await this.get(current).catch(() => undefined);
+      if (!view) return false;
+      if (view.config.label === WARDEN_LABEL) return true;
+      current = view.config.parent;
+    }
+    return false;
+  }
+
   async start(request: StartSessionRequest): Promise<SessionView> {
     const prompt = request.prompt?.trim();
     if (!prompt) throw new Error('prompt is required');
@@ -231,6 +281,13 @@ export class SessionManager implements KTeamService {
     // parent's label when none is given, so whole trees group in ps/UI.
     const parentRef = request.parent?.trim();
     const parentView = parentRef ? await this.get(parentRef).catch(() => undefined) : undefined;
+    // Recursion guard: a session anywhere below a warden in the parent tree is
+    // FORCE-labelled kteam-warden regardless of the requested/inherited label, so
+    // the detector's lineage exclusion covers it and a warden can never spawn an
+    // escalatable (non-warden) session. (The warden-scoped token also 403s the
+    // start route outright — this is the server-side backstop.)
+    const forcedWarden = await this.hasWardenAncestor(parentView?.config.id);
+    const label = forcedWarden ? WARDEN_LABEL : request.label?.trim() || parentView?.config.label || undefined;
     // Model resolution: explicit request wins, else the wrapper's kfleet default
     // (KTEAM_MODEL). A default is always fed in when kfleet declares one, so the
     // per-account default model can't silently drift; undefined => no --model.
@@ -297,7 +354,7 @@ export class SessionManager implements KTeamService {
       id,
       name: (request.name ?? prompt.split(/\s+/).slice(0, 5).join('-')).replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 48),
       teammate: this.assignTeammateName(),
-      label: request.label?.trim() || parentView?.config.label || undefined,
+      label,
       parent: parentView?.config.id,
       binary,
       harness,
@@ -752,6 +809,120 @@ export class SessionManager implements KTeamService {
       return await this.get(id);
     }
     return resumed;
+  }
+
+  /** Continue an existing session on a DIFFERENT same-kind account. kfleet pools
+   *  harness session state across accounts of one kind (~/.kfleet/shared/<kind>),
+   *  so any claude wrapper can `--resume` a conversation another claude wrapper
+   *  started (same for codex↔codex). We validate the target, stop the old pane,
+   *  rewrite the config to the new wrapper (binary/home/model — keeping the
+   *  harnessSessionId, teammate, label, parent), then relaunch through the normal
+   *  resume path under the new wrapper. Cross-KIND migration is unsupported. */
+  async migrate(id: string, agent: string, model?: string): Promise<SessionView> {
+    id = this.resolveRef(id);
+    this.cancelRetry(id);
+    // Abort (never drain) the quota waiter: failover calls migrate from INSIDE
+    // that waiter's own promise, so draining would self-deadlock. The waiter's
+    // status guard turns any stale wake into a no-op once we relaunch.
+    await this.cancelQuotaWaiter(id);
+    const view = await this.get(id);
+    const from = view.config.binary;
+    const harness = inferHarness(agent);
+    if (harness !== view.config.harness)
+      throw new Error(
+        `cannot migrate a ${view.config.harness} session to ${harness} wrapper "${agent}"; ` +
+          'cross-harness migration is not supported (v2: restart from a chat.jsonl digest)',
+      );
+    if (agent.includes(path.sep))
+      throw new Error('migrate target must be a bare fleet wrapper name (no path), e.g. claude-auto-glm52b');
+    if (!agent.startsWith(`${harness}-auto-`)) throw new Error('kteam only migrates to auto-mode fleet wrappers');
+    // Resolve ONLY within the kfleet bin (the discoverAutoAgents source) — never
+    // the daemon's $PATH — so a caller (incl. a warden) cannot migrate a session
+    // onto an arbitrary wrapper that merely happens to be on PATH.
+    const wrapper = resolveBinary(agent, this.paths.kfleetBin);
+    if (!wrapper) throw new Error(`wrapper not found: ${agent}; run kfleet apply`);
+    if (agent === from && !model?.trim()) throw new Error(`session ${id} is already on ${agent}`);
+    const harnessHome = await wrapperHome(wrapper, harness);
+    if (!harnessHome)
+      throw new Error(
+        `could not determine ${harness === 'claude' ? 'CLAUDE_CONFIG_DIR' : 'CODEX_HOME'} from ${wrapper}`,
+      );
+    // Model: explicit arg > the new wrapper's kfleet default (KTEAM_MODEL) > keep.
+    const nextModel = model?.trim() || (await wrapperModel(wrapper)) || view.config.model;
+    const at = now();
+    // Snapshot the ORIGINAL account so a failed relaunch can be rolled back —
+    // the config must never be left pointing at a wrapper that never launched.
+    const original = {
+      binary: view.config.binary,
+      harness: view.config.harness,
+      modelHint: view.config.modelHint,
+      model: view.config.model,
+      harnessHome: view.config.harnessHome,
+      transcriptFile: view.config.transcriptFile,
+    };
+    // Journal the intent BEFORE stopping the pane: a crash between here and a
+    // successful relaunch leaves a durable `migration` marker (plus this event)
+    // rather than a silently half-migrated config.
+    await this.store.updateConfig<SessionConfig>(id, current => ({ ...current, migration: { from, to: agent, at } }));
+    await this.emit(id, 'session.migrating', { from, to: agent, model: nextModel, at }, 'daemon');
+    // Stop the old pane and its monitor before relaunching under the new account.
+    await this.stopMonitor(id, true);
+    const paneState = await this.tmux.state(view.config.tmuxSession);
+    if (paneState.alive) await this.stopTmuxWithEvidence(view.config, `migrate ${from} -> ${agent}`);
+    const migrated = await this.store.updateConfig<SessionConfig>(id, current => ({
+      ...current,
+      binary: agent,
+      harness,
+      modelHint: modelHint(agent),
+      model: nextModel,
+      harnessHome,
+      updatedAt: now(),
+    }));
+    // Claude transcripts live under the new home; repoint the watched file so the
+    // monitor tails the right JSONL after relaunch (codex rediscovers on resume).
+    if (migrated.harness === 'claude') {
+      const transcriptFile = claudeTranscriptPath(migrated);
+      await this.store.updateConfig<SessionConfig>(id, current => ({ ...current, transcriptFile }));
+    }
+    await this.emit(id, 'session.migrated', { from, to: agent, model: nextModel }, 'daemon');
+    try {
+      const resumed = await this.resume(
+        id,
+        'You have been migrated to a different account mid-task due to quota/auth issues on the previous one. ' +
+          'Re-read your latest turn file and continue exactly where you left off.',
+      );
+      // Relaunch succeeded — the transition is complete, clear the staged marker.
+      await this.store.updateConfig<SessionConfig>(id, current => ({ ...current, migration: undefined }));
+      return resumed;
+    } catch (error) {
+      if (error instanceof ResumeCancelled) {
+        // A newer operation superseded this relaunch and now owns the config;
+        // just drop our staged marker and let it proceed.
+        await this.store
+          .updateConfig<SessionConfig>(id, current => ({ ...current, migration: undefined }))
+          .catch(() => undefined);
+        throw error;
+      }
+      // Relaunch failed: roll the config back to the original account so the
+      // session never points at a wrapper that never launched, and record the
+      // full story in the failure reason.
+      const detail = error instanceof Error ? error.message : String(error);
+      await this.store
+        .updateConfig<SessionConfig>(id, current => ({
+          ...current,
+          ...original,
+          migration: undefined,
+          updatedAt: now(),
+        }))
+        .catch(() => undefined);
+      const reason = `migration to ${agent} failed: ${detail}; session restored to ${from} (stopped)`;
+      await this.transition(
+        id,
+        { status: 'failed', reason, finishedAt: now(), health: 'crashed' },
+        'session.failed',
+      ).catch(() => undefined);
+      throw new Error(reason);
+    }
   }
 
   async remove(id: string, purge = false, force = false): Promise<void> {
@@ -1945,9 +2116,69 @@ export class SessionManager implements KTeamService {
     }
   }
 
+  /** The full per-account usage feed (same endpoint as fetchQuota), used to pick
+   *  a failover target. Empty on any failure — failover then just no-ops and the
+   *  session keeps waiting for its own quota to reset. */
+  private async fetchUsageAccounts(signal?: AbortSignal): Promise<AgentUsage[]> {
+    try {
+      const timeout = AbortSignal.timeout(3_000);
+      const response = await fetch(this.options.quotaUrl, {
+        signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+      });
+      if (!response.ok) return [];
+      const payload = (await response.json()) as { accounts?: AgentUsage[] };
+      return payload.accounts ?? [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** When `retry.allowAccountFailover` is on and a rate-limited session's quota
+   *  reset is FAR out (>30 min), migrate it to a usable same-kind wrapper instead
+   *  of idling until reset. Returns true when a migration was launched; false
+   *  falls back to the normal quota wait. */
+  private async attemptFailover(id: string, signal: AbortSignal): Promise<boolean> {
+    const view = await this.get(id).catch(() => undefined);
+    if (!view || view.state.status !== 'rate_limited') return false;
+    if (view.config.retry?.allowAccountFailover !== true) return false;
+    const resetAt = view.state.quota?.resetAt;
+    if (typeof resetAt !== 'number' || resetAt - Date.now() < 30 * 60_000) return false;
+    const usage = await this.fetchUsageAccounts(signal);
+    if (signal.aborted || this.deleting.has(id)) return false;
+    // Positive-confirmation gate: automatic failover happens with no human in the
+    // loop, so it must NOT fire on a mere rate_limited status. Require the usage
+    // feed to confirm the CURRENT account is genuinely at its limit, and only
+    // migrate to a candidate with confirmed headroom. Absent/unknown usage data
+    // (empty feed, account not scored) is treated as "not confirmed" → no
+    // failover, and the session keeps waiting for its own quota to reset.
+    const currentUsage = usage.find(item => item.binary === view.config.binary);
+    if (currentUsage?.atLimit !== true) return false;
+    const candidate = selectFailoverCandidate({
+      currentBinary: view.config.binary,
+      harness: view.config.harness,
+      agents: discoverAutoAgents(this.paths.kfleetBin),
+      usage,
+      requireConfirmedUsage: true,
+    });
+    if (!candidate) return false;
+    await this.emit(id, 'account.failover', { from: view.config.binary, to: candidate, resetAt }, 'watcher').catch(
+      () => undefined,
+    );
+    try {
+      await this.migrate(id, candidate);
+      return true;
+    } catch (error) {
+      await this.emit(id, 'account.failover.failed', { to: candidate, message: String(error) }, 'watcher').catch(
+        () => undefined,
+      );
+      return false;
+    }
+  }
+
   private async waitForQuotaAndResume(id: string, signal: AbortSignal): Promise<void> {
     while (!this.closed && !signal.aborted) {
       if (this.deleting.has(id)) return;
+      if (await this.attemptFailover(id, signal)) return;
       const view = await this.get(id).catch(() => undefined);
       if (!view || view.state.status !== 'rate_limited') return;
       const quota = await this.fetchQuota(view.config, signal);
@@ -2167,5 +2398,293 @@ export class SessionManager implements KTeamService {
       }
     }
     this.globalSequence = maximum;
+  }
+
+  // ── Fleet warden (layer 3) ────────────────────────────────────────────────
+
+  /** Load durable warden state and arm the periodic deterministic sweep. The
+   *  detection sweep is always-on and free; LLM escalation inside it is gated on
+   *  warden.enabled. */
+  private async startWarden(): Promise<void> {
+    this.wardenState = await readJson<WardenRuntimeState>(this.paths.wardenState).catch(() => ({}));
+    const intervalMs = Math.max(60_000, this.options.warden.intervalMinutes * 60_000);
+    this.wardenTimer = setInterval(() => {
+      void this.runSweep(false).catch(() => undefined);
+    }, intervalMs);
+    // A boot-time sweep so anomalies.json and `warden status` are populated
+    // without waiting a full interval; escalation still respects its own gate.
+    void this.runSweep(false).catch(() => undefined);
+  }
+
+  /** Run a sweep exclusively (serialized against the interval and other forced
+   *  runs). `forceEscalation` bypasses the enabled flag, spawn gap, and
+   *  fingerprint-unchanged suppression for a manual `warden run --spawn`. */
+  private async runSweep(forceEscalation: boolean): Promise<WardenRunView> {
+    const operation = this.wardenSweepChain.then(
+      () => this.sweepOnce(forceEscalation),
+      () => this.sweepOnce(forceEscalation),
+    );
+    this.wardenSweepChain = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return await operation;
+  }
+
+  private async sweepOnce(forceEscalation: boolean): Promise<WardenRunView> {
+    const sessions = await this.list();
+    const views: WardenSessionView[] = sessions.map(view => ({
+      config: view.config,
+      state: view.state,
+      hasLiveMonitor: this.monitors.has(view.config.id),
+    }));
+    // One knob (`unattendedMinutes`) drives both the idle-question threshold and
+    // the recent-terminal-wreckage window — an old failure that nobody handled
+    // within the window ages out rather than nagging forever.
+    const unattendedMs = Math.max(60_000, this.options.warden.unattendedMinutes * 60_000);
+    const result = detectAnomalies(views, Date.now(), { unattendedMs, terminalWindowMs: unattendedMs });
+    const at = now();
+    this.lastSweep = { at, anomalies: result.anomalies, fingerprint: result.fingerprint };
+    this.wardenState.lastSweepAt = at;
+    // Recovery generation: bump when the fleet transitions from having anomalies
+    // to having none. Escalation suppression is keyed by generation, so an
+    // anomaly set that reappears AFTER a clean recovery is treated as new and
+    // re-escalates rather than being silenced as "unchanged since last spawn".
+    const previousFingerprint = this.wardenState.lastFingerprint ?? '';
+    if (previousFingerprint !== '' && result.fingerprint === '') {
+      this.wardenState.recoveryGeneration = (this.wardenState.recoveryGeneration ?? 0) + 1;
+    }
+    this.wardenState.lastFingerprint = result.fingerprint;
+    await mkdir(this.paths.wardenDir, { recursive: true, mode: 0o700 });
+    await atomicJson(this.paths.wardenAnomalies, {
+      at,
+      count: result.anomalies.length,
+      fingerprint: result.fingerprint,
+      anomalies: result.anomalies,
+    });
+    await this.saveWardenState();
+    if (result.fingerprint !== this.lastEmittedFingerprint) {
+      this.lastEmittedFingerprint = result.fingerprint;
+      if (result.anomalies.length > 0)
+        this.emitTransient('fleet.anomaly', {
+          at,
+          count: result.anomalies.length,
+          fingerprint: result.fingerprint,
+          anomalies: result.anomalies,
+        });
+    }
+    const escalation = await this.maybeEscalate(result.anomalies, result.fingerprint, sessions, forceEscalation);
+    return { sweptAt: at, anomalies: result.anomalies, ...escalation };
+  }
+
+  private async maybeEscalate(
+    anomalies: WardenAnomaly[],
+    fingerprint: string,
+    sessions: SessionView[],
+    force: boolean,
+  ): Promise<{ spawned?: string; message?: string }> {
+    const warden = this.options.warden;
+    if (!force && !warden.enabled) return { message: 'escalation disabled (warden.enabled=false)' };
+    if (anomalies.length === 0) return { message: 'no anomalies to escalate' };
+    // "Live" excludes protected statuses (terminal + kill_failed): a warden whose
+    // pane could not be killed must NOT block escalation forever — the spawn gap
+    // below still rate-limits fresh wardens, so a wedged warden ages out.
+    const live = sessions.find(
+      view => view.config.label === WARDEN_LABEL && !protectedStatuses.includes(view.state.status),
+    );
+    if (live) return { message: `a warden session is already live (${live.config.id})` };
+    const lastSpawnMs = this.wardenState.lastSpawnAt ? Date.parse(this.wardenState.lastSpawnAt) : 0;
+    const gapMs = Math.max(0, warden.minSpawnGapMinutes * 60_000);
+    if (!force && lastSpawnMs && Date.now() - lastSpawnMs < gapMs)
+      return { message: `spawn gap not elapsed (last spawn ${this.wardenState.lastSpawnAt})` };
+    // Suppression key qualified by the recovery generation (see sweepOnce).
+    const spawnKey = `${this.wardenState.recoveryGeneration ?? 0}:${fingerprint}`;
+    if (!force && spawnKey === this.wardenState.lastSpawnFingerprint)
+      return { message: 'anomaly set unchanged since the last escalation' };
+    const at = now();
+    const reportPath = path.join(this.paths.wardenReports, `${at.replace(/[:.]/g, '-')}.md`);
+    await mkdir(this.paths.wardenReports, { recursive: true, mode: 0o700 });
+    const prompt = await this.buildWardenPrompt(anomalies, sessions, reportPath, at);
+    try {
+      const view = await this.start({
+        prompt,
+        agent: warden.wrapper,
+        mode: 'auto',
+        label: WARDEN_LABEL,
+        name: 'warden-sweep',
+        cwd: this.paths.home,
+      });
+      this.wardenState.lastSpawnAt = at;
+      this.wardenState.lastSpawnFingerprint = spawnKey;
+      await this.saveWardenState();
+      this.emitTransient('fleet.warden_spawned', { sessionId: view.config.id, count: anomalies.length, reportPath });
+      return { spawned: view.config.id };
+    } catch (error) {
+      // A FAILED launch still consumes the spawn gap (record lastSpawnAt) so a
+      // persistently-broken wrapper can't be retried every sweep — but do NOT
+      // record the suppression key, so a changed anomaly set (or the same set in
+      // a later generation) can still escalate once the gap elapses.
+      this.wardenState.lastSpawnAt = at;
+      await this.saveWardenState();
+      const message = `warden spawn failed: ${error instanceof Error ? error.message : String(error)}`;
+      this.emitTransient('fleet.warden_spawn_failed', { message });
+      return { message };
+    }
+  }
+
+  private async buildWardenPrompt(
+    anomalies: WardenAnomaly[],
+    sessions: SessionView[],
+    reportPath: string,
+    at: string,
+  ): Promise<string> {
+    const anomalousIds = new Set(anomalies.map(item => item.sessionId));
+    const perSession = sessions
+      .filter(view => anomalousIds.has(view.config.id))
+      .map(view => ({
+        id: view.config.id,
+        teammate: view.config.teammate,
+        label: view.config.label,
+        binary: view.config.binary,
+        mode: view.config.mode,
+        status: view.state.status,
+        reason: view.state.reason,
+        turn: view.state.turn,
+        cwd: view.config.cwd,
+        directory: view.directory,
+        lastActivityAt: view.state.lastActivityAt,
+        finishedAt: view.state.finishedAt,
+        quota: view.state.quota,
+      }));
+    // For quota/rate-limited anomalies, precompute the usable same-kind failover
+    // targets so the warden can `kteam migrate` without guessing which account is
+    // free. Only probe usage when at least one such session is present.
+    const quotaKinds = new Set<WardenAnomaly['kind']>(['quota_reset_passed']);
+    const quotaViews = sessions.filter(
+      view =>
+        anomalousIds.has(view.config.id) &&
+        (view.state.status === 'rate_limited' ||
+          anomalies.some(item => item.sessionId === view.config.id && quotaKinds.has(item.kind))),
+    );
+    let migrateCandidates: Array<{ id: string; currentBinary: string; candidates: string[] }> = [];
+    if (quotaViews.length > 0) {
+      const usage = await this.fetchUsageAccounts();
+      const agents = discoverAutoAgents(this.paths.kfleetBin);
+      migrateCandidates = quotaViews.map(view => ({
+        id: view.config.id,
+        currentBinary: view.config.binary,
+        candidates: rankFailoverCandidates({
+          currentBinary: view.config.binary,
+          harness: view.config.harness,
+          agents,
+          usage,
+        }).slice(0, 5),
+      }));
+    }
+    return [
+      'You are the kteam FLEET WARDEN — layer-3 oversight for a team of autonomous coding agents.',
+      `A deterministic sweep at ${at} found the anomalies below. Triage them and take only the SAFE, obvious recovery actions.`,
+      '',
+      '## ALLOWED actions',
+      '- `kteam resume <id> [message]` a stalled/failed session whose failure reason is clearly transient (network, connection, timeout, overloaded, a dropped harness process). Read the session chat/turn files first.',
+      '- `kteam send <id> <nudge>` a session that looks wedged but recoverable.',
+      '- `kteam migrate <id> -a <wrapper>` a QUOTA/rate-limited session onto a usable same-kind account. Only pick a wrapper from that session\'s "Migrate candidates" list below (never guess) — the session keeps its conversation and continues on the new account.',
+      "- Answer a question ONLY when its answer is unambiguous from that session's OWN chat.jsonl / turns/ files. If you must guess, do not answer.",
+      '',
+      '## FORBIDDEN — never do these',
+      '- Do NOT stop or remove (`kteam stop`/`kteam delete`) any session.',
+      '- Do NOT run any git operations, and do NOT edit any repository files.',
+      '- Do NOT start any non-warden session.',
+      '',
+      '## Required output',
+      `- Write a report to EXACTLY this path: ${reportPath}`,
+      '  It must state: what you found, what you did (per session), and what still needs a human.',
+      '- When the sweep is done, run: `kteam signal done`.',
+      '',
+      '## Anomalies (deterministic detector output)',
+      '```json',
+      JSON.stringify(anomalies, null, 2),
+      '```',
+      '',
+      '## Per-session status for the anomalous sessions',
+      '```json',
+      JSON.stringify(perSession, null, 2),
+      '```',
+      ...(migrateCandidates.length
+        ? [
+            '',
+            '## Migrate candidates (usable same-kind accounts for quota/rate-limited sessions)',
+            'If a candidate list is empty, do NOT migrate that session — leave it to wait for its quota reset.',
+            '```json',
+            JSON.stringify(migrateCandidates, null, 2),
+            '```',
+          ]
+        : []),
+      '',
+      `The full anomaly file is at ${this.paths.wardenAnomalies}. Each session's durable directory (chat.jsonl, turns/, logs/) is listed above — read it before acting.`,
+    ].join('\n');
+  }
+
+  private async saveWardenState(): Promise<void> {
+    await atomicJson(this.paths.wardenState, this.wardenState);
+  }
+
+  /** Broadcast a fleet-level (non-session) event to live listeners without
+   *  persisting it — transient by design (the anomaly file is the durable copy). */
+  private emitTransient(type: string, payload: unknown): void {
+    const event: KTeamEvent = {
+      sequence: ++this.globalSequence,
+      time: now(),
+      sessionId: 'fleet',
+      turn: 0,
+      type,
+      source: 'daemon',
+      data: payload,
+    };
+    for (const listener of this.listeners) listener(event);
+  }
+
+  private async latestReport(): Promise<{ path: string; head: string } | undefined> {
+    const files = await readdir(this.paths.wardenReports).catch(() => [] as string[]);
+    const latest = files
+      .filter(name => name.endsWith('.md'))
+      .sort()
+      .at(-1);
+    if (!latest) return undefined;
+    const file = path.join(this.paths.wardenReports, latest);
+    const text = await readFile(file, 'utf8').catch(() => '');
+    return { path: file, head: text.split('\n').slice(0, 12).join('\n') };
+  }
+
+  async wardenStatus(): Promise<WardenStatusView> {
+    let anomalies = this.lastSweep?.anomalies ?? [];
+    let fingerprint = this.lastSweep?.fingerprint ?? '';
+    let lastSweepAt = this.lastSweep?.at ?? this.wardenState.lastSweepAt;
+    if (!this.lastSweep) {
+      const disk = await readJson<{ at?: string; fingerprint?: string; anomalies?: WardenAnomaly[] }>(
+        this.paths.wardenAnomalies,
+      ).catch(() => undefined);
+      if (disk) {
+        anomalies = disk.anomalies ?? [];
+        fingerprint = disk.fingerprint ?? '';
+        lastSweepAt = disk.at ?? lastSweepAt;
+      }
+    }
+    const liveWarden = (await this.list()).find(
+      view => view.config.label === WARDEN_LABEL && !protectedStatuses.includes(view.state.status),
+    )?.config.id;
+    return {
+      config: this.options.warden,
+      lastSweepAt,
+      anomalies,
+      fingerprint,
+      liveWarden,
+      lastSpawnAt: this.wardenState.lastSpawnAt,
+      lastReport: await this.latestReport(),
+    };
+  }
+
+  async wardenRun(spawn = false): Promise<WardenRunView> {
+    return await this.runSweep(spawn);
   }
 }

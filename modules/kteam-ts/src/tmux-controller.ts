@@ -1,10 +1,11 @@
-import { mkdir, readdir, rm, writeFile } from 'fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'fs/promises';
 import path from 'path';
 import { interactiveHarnessArgs } from './core';
 import { now, run } from './io';
 import type { KTeamPaths } from './paths';
 import { sessionDir } from './paths';
 import type { SessionConfig, SessionState } from './types';
+import { WARDEN_LABEL } from './warden-detect';
 
 export interface PaneState {
   alive: boolean;
@@ -256,6 +257,10 @@ export class TmuxController {
     // ("failed to launch tmux: command too long") on real machines.
     const managedEnv = new Set([
       'CLAUDECODE',
+      // Never copy a bearer token out of the daemon's own env into a pane —
+      // the pane's KTEAM_TOKEN is set explicitly below (scoped for wardens,
+      // unset otherwise so the CLI reads the admin token file as before).
+      'KTEAM_TOKEN',
       'TMUX',
       'TMUX_PANE',
       'TERM',
@@ -276,6 +281,18 @@ export class TmuxController {
     pane.KTEAM_SESSION_ID = config.id;
     pane.KTEAM_URL = this.daemonUrl;
     pane.PATH = process.env.PATH ?? '';
+    // Warden panes run under the capability-scoped token (api-client prefers
+    // $KTEAM_TOKEN over the admin token file). If the scoped token is missing we
+    // FAIL rather than silently fall back to the admin file — a warden must never
+    // launch with full privileges. (A determined prompt-injection could still
+    // read the admin token off disk; that residual risk is documented in
+    // daemon-config.ts — the scoped token is an authorization/audit boundary,
+    // not OS isolation.)
+    if (config.label === WARDEN_LABEL) {
+      const scoped = (await readFile(this.paths.wardenToken, 'utf8').catch(() => '')).trim();
+      if (!scoped) throw new Error('warden-scoped token is missing; cannot launch a warden pane un-scoped');
+      pane.KTEAM_TOKEN = scoped;
+    }
     const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
     const launcher = path.join(sessionDir(this.paths, config.id), 'launch.sh');
     await mkdir(path.dirname(launcher), { recursive: true, mode: 0o700 });
@@ -291,7 +308,9 @@ export class TmuxController {
         // after the daemon env (fresh file beats a stale daemon copy), before
         // the KTEAM_*/PATH pins below.
         '[ -e "$HOME/.secrets" ] && . "$HOME/.secrets"',
-        ...['KTEAM_HOME', 'KTEAM_SESSION_ID', 'KTEAM_URL', 'PATH'].map(key => `export ${key}=${quote(pane[key]!)}`),
+        ...['KTEAM_HOME', 'KTEAM_SESSION_ID', 'KTEAM_URL', 'PATH', ...(pane.KTEAM_TOKEN ? ['KTEAM_TOKEN'] : [])].map(
+          key => `export ${key}=${quote(pane[key]!)}`,
+        ),
         'unset CLAUDECODE',
         `exec ${[config.binary, ...interactiveHarnessArgs(config)].map(quote).join(' ')}`,
         '',

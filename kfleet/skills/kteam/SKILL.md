@@ -118,3 +118,13 @@ kteam snapshot <id>
 kteam attach <id>
 kteam stop <id> --reason "why it was stopped"
 ```
+
+## Fleet warden
+
+The daemon runs a layer-3 fleet warden: every few minutes it deterministically scans all sessions for anomalies (dead monitors, unanswered questions idle past `unattendedMinutes`, fresh unhandled failed/stalled wreckage, rate-limited sessions whose quota has reset) and writes them to `~/.kteam/daemon/warden/anomalies.json`; check it with `kteam warden status` or force a scan with `kteam warden run`. When `warden.enabled` is set in `~/.kteam/daemon/config.json`, an anomaly spawns a rate-limited, cheap read-only warden session that triages and writes a report — it may resume/nudge but never stops, deletes, or edits anything.
+
+Parents are auto-captured: a teammate that starts another teammate is recorded as its `parent` (from `KTEAM_SESSION_ID`), so whole teammate trees group in `ps`/UI and inherit the lead's label.
+
+## Move a session to another account
+
+`kteam migrate <id> -a <wrapper> [--model m]` continues a session on a different same-kind account (any claude wrapper can resume a claude session; codex↔codex likewise — cross-kind is not supported). It keeps the conversation, teammate, label, and parent, then relaunches under the new wrapper. Set `retry.allowAccountFailover: true` and a session that hits a quota limit with a far-off reset auto-migrates to a usable same-kind account on its own.

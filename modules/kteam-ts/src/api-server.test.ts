@@ -3,6 +3,7 @@ import type { Server } from 'bun';
 import { startApiServer } from './api-server';
 import type { AttachmentView, KTeamService, SessionView } from './service';
 import type { KTeamEvent, SendRequest, StartSessionRequest } from './types';
+import { WARDEN_LABEL } from './warden-detect';
 
 const view: SessionView = {
   directory: '/tmp/kteam/s1',
@@ -50,6 +51,7 @@ class FakeService implements KTeamService {
   interrupt = async () => view;
   stop = async () => view;
   resume = async () => view;
+  migrate = async (_id: string, _agent: string, _model?: string) => view;
   remove = async () => {};
   signal = async () => view;
   snapshot = async () => 'pane';
@@ -71,6 +73,18 @@ class FakeService implements KTeamService {
     createdAt: '2026-01-01T00:00:00Z',
   });
   getAttachment = async () => ({ attachment: await this.addAttachment(), bytes: new Uint8Array([1, 2]) });
+  wardenStatus = async () => ({
+    config: {
+      enabled: false,
+      wrapper: 'claude-auto-glm52a',
+      intervalMinutes: 5,
+      unattendedMinutes: 30,
+      minSpawnGapMinutes: 60,
+    },
+    anomalies: [],
+    fingerprint: '',
+  });
+  wardenRun = async (_spawn?: boolean) => ({ sweptAt: '2026-01-01T00:00:00Z', anomalies: [], message: 'no anomalies' });
 }
 
 const servers: Server<unknown>[] = [];

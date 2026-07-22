@@ -3,7 +3,7 @@
 import { mkdir, readFile, rm, writeFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import { startApiServer } from './api-server';
-import { ensureDaemonToken, loadDaemonConfig } from './daemon-config';
+import { ensureDaemonToken, ensureWardenToken, loadDaemonConfig } from './daemon-config';
 import { createPaths } from './paths';
 import { SessionManager } from './session-manager';
 
@@ -24,13 +24,15 @@ if (existsSync(paths.pid)) {
 await writeFile(paths.pid, `${process.pid}\n`, { mode: 0o600 });
 const config = await loadDaemonConfig(paths);
 const token = await ensureDaemonToken(paths);
+const wardenToken = await ensureWardenToken(paths);
 const manager = await SessionManager.create(paths, {
   healthIntervalSeconds: config.healthIntervalSeconds,
   quotaUrl: config.quotaUrl,
   transcriptReconcileSeconds: config.transcriptReconcileSeconds,
   publicUrl: config.publicUrl,
+  warden: config.warden,
 });
-const server = startApiServer({ host: config.host, port: config.port, token, service: manager });
+const server = startApiServer({ host: config.host, port: config.port, token, wardenToken, service: manager });
 console.log(`kteamd listening on http://${config.host}:${server.port} (pid ${process.pid})`);
 
 let stopping = false;

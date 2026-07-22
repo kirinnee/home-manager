@@ -52,6 +52,14 @@ export function usableAgent(usage: AgentUsage | undefined): boolean {
   return usage?.atLimit !== true && usage?.authOk !== false;
 }
 
+/** Stricter than `usableAgent`: requires POSITIVELY confirmed headroom. Absent or
+ *  unknown usage (undefined `atLimit`) is NOT confirmed-usable, so automatic
+ *  account failover — which acts without a human in the loop — only ever targets
+ *  an account the usage feed says is genuinely below its limit and logged in. */
+export function confirmedUsableAgent(usage: AgentUsage | undefined): boolean {
+  return usage?.atLimit === false && usage?.authOk !== false;
+}
+
 /** Pattern precedence picks the tier; usage load-balances within it: 70% the
  *  least-used candidate, 30% the runner-up, so parallel teams spread across
  *  same-tier accounts instead of hammering whichever sorts first. */

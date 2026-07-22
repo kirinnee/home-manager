@@ -1,5 +1,5 @@
 import { readFile } from 'fs/promises';
-import type { AttachmentView, SessionView } from './service';
+import type { AttachmentView, SessionView, WardenRunView, WardenStatusView } from './service';
 import type { KTeamEvent, SendRequest, StartSessionRequest } from './types';
 import type { KTeamPaths } from './paths';
 import { loadDaemonConfig } from './daemon-config';
@@ -53,6 +53,16 @@ export class ApiClient {
   health() {
     return this.request<Record<string, unknown>>('/v1/health');
   }
+  wardenStatus() {
+    return this.request<WardenStatusView>('/v1/warden/status');
+  }
+  wardenRun(spawn = false) {
+    return this.request<WardenRunView>('/v1/warden/run', {
+      method: 'POST',
+      body: JSON.stringify({ spawn }),
+      headers: { 'content-type': 'application/json' },
+    });
+  }
   list() {
     return this.request<SessionView[]>('/v1/sessions');
   }
@@ -80,6 +90,9 @@ export class ApiClient {
   }
   resume(id: string, message?: string) {
     return this.post<SessionView>(id, 'resume', { message });
+  }
+  migrate(id: string, agent: string, model?: string) {
+    return this.post<SessionView>(id, 'migrate', { agent, model });
   }
   signal(id: string, kind: 'done' | 'help', message?: string) {
     return this.post<SessionView>(id, 'signal', { kind, message });
