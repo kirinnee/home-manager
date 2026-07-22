@@ -327,6 +327,14 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
         <ChevronLeft size={14} /> Sessions
       </Link>
       <h1 className="text-[1.3rem] tracking-tight m-0">{view.config.teammate || view.config.name || sessionId}</h1>
+      {/* The TASK is the whole point of the session — keep it visible next to
+          the callsign, with the label chip for grouping context. */}
+      {view.config.teammate && view.config.name && (
+        <span className="text-[13px] text-fg-soft truncate max-w-[28rem]" title={view.config.name}>
+          {view.config.name}
+        </span>
+      )}
+      {view.config.label && <Badge tone="accent">{view.config.label}</Badge>}
       <Badge tone={toneFor(view.state.status)}>{view.state.status}</Badge>
       <span className="mono text-[11.5px] text-muted">
         {view.config.model || view.config.modelHint || 'default'} · turn {view.state.turn}
