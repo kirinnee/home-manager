@@ -485,3 +485,32 @@ since G1, the bind is the single-instance lock and must come after the probe).
 
 **Suggested fix:** scale the CLI wait window (or poll until the pid dies), and/or
 archive terminal sessions out of the hot store so init doesn't scan ~1000 dirs.
+
+## 2026-07-22 ~19:56 — diene retest findings validated (post G1–G6 gaps)
+
+External retest (`~/Workspace/atomi/diene/design/supervision/kteam-retest-2026-07-22.md`)
+verified against journal/code/live state — its "still broken" list is REAL and was
+never in G1–G6 scope:
+
+- **Daemon restart still kills every pane** (top catastrophic mode). journalctl:
+  restart 19:53:55; warden session jasmine (spawned 19:53:50) died mid-launch and
+  failed — independent confirmation. tmux server lives in kteamd's systemd cgroup;
+  stop kills the cgroup. Fix: KillMode=process or launch tmux outside the unit
+  (systemd-run scope) — `tmux-controller.ts` + `daemon-service.ts`.
+- **Boot ~80 s** confirmed twice (19:27 → 85 s, 19:53 → 79 s). Likely dominant
+  cause: `~/.kteam/daemon/kteam.sqlite` is 1.5 GB + 317 MB WAL, full reimport at
+  boot (`storage.ts` — retest names "event-store.ts", file does not exist; concept
+  correct). Needs retention/pruning + incremental boot. Supersedes the earlier
+  "scan of ~1000 session dirs" guess in the cold-init papercut entry.
+- **codex-auto-loge unlaunchable**: same signature as pauline/callie
+  (`promptReady=false, cursor=2:18` with a visibly ready composer). So the earlier
+  "daemon flap" attribution was WRONG for loge — it is a deterministic readiness
+  misclassification (loge flavor prints an extra service-tier warning line), and
+  the G5 relaunch retry cannot help a deterministic misread. `tmux-controller.ts`
+  promptReady/frame classification must learn this frame.
+- Minor valid notes: no WatchdogSec on the unit; `kteam start --timeout` is a
+  session KILL timer (killed a healthy 300 s forensics session), not a readiness
+  wait — naming footgun.
+
+Collateral: jasmine (kteam-warden, mrwi358q) failed due to the retest restart;
+anomalies it was spawned for were purged canaries — no revive needed.
