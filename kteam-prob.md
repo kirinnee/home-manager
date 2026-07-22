@@ -439,3 +439,29 @@ hard OS-level sandbox.
 
 **No action needed now** — the bounds held in practice. Log this as a known gap for
 future hardening if warden prompts ever handle untrusted payloads from teammate output.
+
+## 2026-07-22 — RESOLUTIONS: foundation hardening G1–G6 shipped
+
+All open problem-log items closed in one hardening round (implemented by dana
+mrwfjk1b-589deaf3/Fable 5, adversarially reviewed by weston mrwgiyl8-1cd021e6/terra
+verdict FIX-FIRST, review fixes applied by the lead):
+
+- **EADDRINUSE restart flap** → `daemon-boot.ts`: port is the single-instance lock
+  (health-probe first, bind-with-retry ~30 s, pid file written only after bind).
+  "Already running" exits 78 and the systemd unit sets RestartPreventExitStatus=78
+  so Restart=always cannot flood against a healthy standalone daemon.
+- **Transient socket-close / revive-send client timeouts** → root cause was
+  Bun.serve's DEFAULT 10 s idleTimeout killing 30 s+ requests; now set explicitly.
+- **Client retry double-delivery risk** → x-kteam-request-id idempotency:
+  per-session LRU (with promotion) + shared in-flight promise so concurrent
+  duplicate retries never re-apply (weston P1 fixed).
+- **Done-marker blind spot** → markers now carry the turn they certify; boot
+  reconciliation and the warden feed only honor a CURRENT-turn marker (stale or
+  pre-upgrade markers fall through to failed — weston P1 fixed).
+- **Codex 90 s startup banner timeout** → one pane relaunch (control.launch_retry)
+  before the session fails.
+- **Root package.json guardrail** → teammate contract rule 8: package-manager
+  installs only inside the target package dir.
+
+130 tests green, tsc clean. Warden false-positive class ("completed reclassified
+failed after restart") is now structurally closed by the turn-scoped markers.

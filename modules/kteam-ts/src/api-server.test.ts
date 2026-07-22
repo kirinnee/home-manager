@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { Server } from 'bun';
-import { startApiServer } from './api-server';
+import { RecentRequestIds, startApiServer } from './api-server';
 import type { AttachmentView, KTeamService, SessionView } from './service';
 import type { KTeamEvent, SendRequest, StartSessionRequest } from './types';
 import { WARDEN_LABEL } from './warden-detect';
@@ -168,6 +168,136 @@ describe('kteam daemon API', () => {
     });
     expect(signal.status).toBe(400);
     expect(((await signal.json()) as { error: string }).error).toBe('kind must be done or help');
+  });
+});
+
+describe('request-id idempotency for retried mutations', () => {
+  const admin = (requestId?: string) => ({
+    authorization: 'Bearer secret',
+    'content-type': 'application/json',
+    ...(requestId ? { 'x-kteam-request-id': requestId } : {}),
+  });
+
+  test('a duplicate request id does not re-apply a send; the current view is returned', async () => {
+    const service = new FakeService();
+    let sends = 0;
+    service.send = async () => {
+      sends++;
+      return view;
+    };
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const request = () =>
+      fetch(`http://127.0.0.1:${server.port}/v1/sessions/s1/send`, {
+        method: 'POST',
+        headers: admin('req-1'),
+        body: JSON.stringify({ message: 'continue' }),
+      });
+    const first = await request();
+    expect(first.status).toBe(200);
+    const retry = await request();
+    expect(retry.status).toBe(200);
+    expect(((await retry.json()) as SessionView).config.id).toBe('s1');
+    expect(sends).toBe(1);
+  });
+
+  test('distinct request ids and id-less requests both apply', async () => {
+    const service = new FakeService();
+    let sends = 0;
+    service.send = async () => {
+      sends++;
+      return view;
+    };
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}`;
+    const body = JSON.stringify({ message: 'continue' });
+    await fetch(`${base}/v1/sessions/s1/send`, { method: 'POST', headers: admin('req-a'), body });
+    await fetch(`${base}/v1/sessions/s1/send`, { method: 'POST', headers: admin('req-b'), body });
+    await fetch(`${base}/v1/sessions/s1/send`, { method: 'POST', headers: admin(), body });
+    expect(sends).toBe(3);
+  });
+
+  test('a failed attempt stays retryable under the same id', async () => {
+    const service = new FakeService();
+    let calls = 0;
+    service.resume = async () => {
+      calls++;
+      if (calls === 1) throw new Error('session is already running');
+      return view;
+    };
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const request = () =>
+      fetch(`http://127.0.0.1:${server.port}/v1/sessions/s1/resume`, {
+        method: 'POST',
+        headers: admin('req-r'),
+        body: '{}',
+      });
+    expect((await request()).status).toBe(409);
+    expect((await request()).status).toBe(200);
+    expect(calls).toBe(2);
+  });
+
+  test('a concurrent duplicate shares the in-flight application instead of re-applying', async () => {
+    const service = new FakeService();
+    let sends = 0;
+    let release: () => void = () => {};
+    const gate = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    service.send = async () => {
+      sends++;
+      await gate; // hold the first application open until both requests are in flight
+      return view;
+    };
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const request = () =>
+      fetch(`http://127.0.0.1:${server.port}/v1/sessions/s1/send`, {
+        method: 'POST',
+        headers: admin('req-dup'),
+        body: JSON.stringify({ message: 'continue' }),
+      });
+    const first = request();
+    const second = request();
+    // Both requests are on the wire while service.send is still pending — the
+    // exact socket-retry overlap G3 exists for. Only one application may run.
+    await Bun.sleep(50);
+    release();
+    const [a, b] = await Promise.all([first, second]);
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    expect(sends).toBe(1);
+    // And a later retry of the same id still answers from the recorded window.
+    expect((await request()).status).toBe(200);
+    expect(sends).toBe(1);
+  });
+
+  test('RecentRequestIds evicts oldest ids beyond capacity, per session', () => {
+    const lru = new RecentRequestIds(2);
+    lru.record('s1', 'a');
+    lru.record('s1', 'b');
+    lru.record('s1', 'c');
+    expect(lru.seen('s1', 'a')).toBe(false);
+    expect(lru.seen('s1', 'b')).toBe(true);
+    expect(lru.seen('s1', 'c')).toBe(true);
+    // Sessions do not share windows.
+    expect(lru.seen('s2', 'b')).toBe(false);
+    lru.record('s2', 'b');
+    expect(lru.seen('s2', 'b')).toBe(true);
+    expect(lru.seen('s1', 'b')).toBe(true);
+  });
+
+  test('a seen() hit promotes the id — an actively retried id outlives colder ones', () => {
+    const lru = new RecentRequestIds(2);
+    lru.record('s1', 'a');
+    lru.record('s1', 'b');
+    expect(lru.seen('s1', 'a')).toBe(true); // promote a over b
+    lru.record('s1', 'c'); // evicts b (now coldest), not a
+    expect(lru.seen('s1', 'a')).toBe(true);
+    expect(lru.seen('s1', 'b')).toBe(false);
+    expect(lru.seen('s1', 'c')).toBe(true);
   });
 });
 

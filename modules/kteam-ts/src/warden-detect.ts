@@ -35,6 +35,12 @@ export interface WardenSessionView {
   config: SessionConfig;
   state: SessionState;
   hasLiveMonitor: boolean;
+  /** True when markers/done.json exists for the session's CURRENT turn — the
+   *  teammate declared its work finished even if the status never flipped to
+   *  `completed` (pane died before the transition, daemon restarted, …). Such
+   *  a session must never be classified as resumable wreckage: resuming it
+   *  would make a finished teammate redo its turn. */
+  hasDoneMarker?: boolean;
 }
 
 export interface WardenDetectOptions {
@@ -136,7 +142,10 @@ export function detectAnomalies(
       }
     }
 
-    if (state.status === 'failed' || state.status === 'stalled') {
+    // A done marker for the current turn means the work FINISHED — the failed
+    // status is a bookkeeping gap (pane died before the completed transition),
+    // not wreckage. Resuming it would make the teammate redo a finished turn.
+    if ((state.status === 'failed' || state.status === 'stalled') && view.hasDoneMarker !== true) {
       const finishedMs = latestMs(state.finishedAt, state.lastActivityAt, config.updatedAt);
       if (finishedMs && nowMs - finishedMs <= options.terminalWindowMs) {
         anomalies.push({

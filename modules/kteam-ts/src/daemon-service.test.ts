@@ -41,6 +41,10 @@ describe('Linux systemd user service', () => {
     expect(unit).toContain('ExecStart="/opt/K Team/kteamd%%canary"');
     expect(unit).toContain(`Environment="KTEAM_HOME=${teamHome.replace('%', '%%')}"`);
     expect(unit).toContain(`StandardOutput="append:${path.join(teamHome, 'daemon', 'daemon.log').replace('%', '%%')}"`);
+    // A healthy standalone daemon owning the port must not make Restart=always
+    // re-spawn the unit forever (EXIT_ALREADY_RUNNING from daemon-boot.ts).
+    expect(unit).toContain('RestartSec=2');
+    expect(unit).toContain('RestartPreventExitStatus=78');
     expect(calls).toEqual([
       ['systemctl', '--user', 'daemon-reload'],
       ['systemctl', '--user', 'enable', 'kteamd.service'],

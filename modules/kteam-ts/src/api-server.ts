@@ -2,6 +2,7 @@ import type { Server, ServerWebSocket } from 'bun';
 import { existsSync } from 'node:fs';
 import { join, normalize } from 'node:path';
 import type { KTeamService } from './service';
+import type { SendRequest } from './types';
 import { WARDEN_LABEL } from './warden-detect';
 import { renderShell } from './ui';
 
@@ -65,6 +66,40 @@ async function wardenScopeDenial(method: string, url: URL, service: KTeamService
 
 const json = (value: unknown, status = 200) => Response.json(value, { status });
 
+/** Mutating session actions the client may retry on a socket error. A retry
+ *  reuses the original x-kteam-request-id, so a duplicate id here means the
+ *  first attempt already applied server-side — re-applying would duplicate the
+ *  message/turn. */
+const DEDUPED_ACTIONS = new Set(['send', 'answer', 'signal', 'resume', 'migrate']);
+
+/** Per-session LRU of recently APPLIED request ids. Ids are recorded only after
+ *  the mutation succeeds: a failed attempt stays retryable, while a retry of a
+ *  success (whose response the client never saw) returns the current session
+ *  view instead of applying twice. A hit PROMOTES the id (true LRU): an id the
+ *  client is actively retrying must outlive colder ids when capacity evicts. */
+export class RecentRequestIds {
+  /** sessionRef → insertion-ordered id set (Set preserves insertion order). */
+  private readonly sessions = new Map<string, Set<string>>();
+
+  constructor(private readonly capacity = 100) {}
+
+  seen(sessionRef: string, requestId: string): boolean {
+    const ids = this.sessions.get(sessionRef);
+    if (!ids?.has(requestId)) return false;
+    ids.delete(requestId);
+    ids.add(requestId);
+    return true;
+  }
+
+  record(sessionRef: string, requestId: string): void {
+    let ids = this.sessions.get(sessionRef);
+    if (!ids) this.sessions.set(sessionRef, (ids = new Set()));
+    ids.delete(requestId);
+    ids.add(requestId);
+    while (ids.size > this.capacity) ids.delete(ids.values().next().value!);
+  }
+}
+
 async function body<T>(request: Request): Promise<T> {
   try {
     return (await request.json()) as T;
@@ -84,6 +119,12 @@ class HttpError extends Error {
 
 export function startApiServer(options: ApiServerOptions): Server<SocketData> {
   const sockets = new Set<ServerWebSocket<SocketData>>();
+  const recentRequests = new RecentRequestIds();
+  /** `${sessionRef}\n${requestId}` → the pending application. A duplicate that
+   *  arrives while the first application is still awaited must NOT re-apply —
+   *  it shares the original promise (and its error, so a failure stays
+   *  retryable for both callers). */
+  const inFlightRequests = new Map<string, Promise<unknown>>();
   const unsubscribe = options.service.subscribe(event => {
     const encoded = JSON.stringify(event);
     for (const socket of sockets) {
@@ -97,6 +138,16 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
   const server = Bun.serve<SocketData>({
     hostname: options.host,
     port: options.port,
+    // Bun's default HTTP idleTimeout is 10 s and counts while the HANDLER is
+    // still working: revive+send, resume, and live snapshots legitimately hold
+    // a request open for 30 s+ (tmux relaunch + readiness + injection under the
+    // session lock). At the default, Bun closed the socket mid-operation while
+    // the daemon kept working — the CLI reported "daemon unavailable" for calls
+    // that actually succeeded (and its blind retry then duplicated sends).
+    // 255 is Bun's documented maximum; WebSocket connections are unaffected
+    // (they use the separate websocket.idleTimeout, default 120 s, reset by
+    // every message/ping).
+    idleTimeout: 255,
     async fetch(request, serverInstance) {
       const url = new URL(request.url);
       const isWebSocket =
@@ -185,6 +236,31 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
         if (!match) return json({ error: 'not found' }, 404);
         const id = decodeURIComponent(match[1]!);
         const action = match[2];
+        // Idempotency for retried mutations: apply once per request id, and
+        // answer a duplicate with the current session view (the first apply
+        // already happened — its response was lost on the wire).
+        const requestId = request.headers.get('x-kteam-request-id') ?? undefined;
+        const dedupe = action !== undefined && DEDUPED_ACTIONS.has(action) && requestId !== undefined;
+        const applyOnce = async (operation: () => Promise<unknown>): Promise<Response> => {
+          if (!dedupe) return json(await operation());
+          if (recentRequests.seen(id, requestId!)) return json(await options.service.get(id));
+          const key = `${id}\n${requestId!}`;
+          const pending = inFlightRequests.get(key);
+          // Concurrent duplicate (retry overlapping the still-awaited first
+          // attempt): share the original application and its outcome.
+          if (pending) return json(await pending);
+          const attempt = (async () => {
+            const result = await operation();
+            recentRequests.record(id, requestId!);
+            return result;
+          })();
+          inFlightRequests.set(key, attempt);
+          try {
+            return json(await attempt);
+          } finally {
+            inFlightRequests.delete(key);
+          }
+        };
 
         if (!action && request.method === 'GET') return json(await options.service.get(id));
         if (!action && request.method === 'DELETE') {
@@ -195,11 +271,13 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           );
           return new Response(null, { status: 204 });
         }
-        if (action === 'send' && request.method === 'POST')
-          return json(await options.service.send(id, await body(request)));
+        if (action === 'send' && request.method === 'POST') {
+          const input = await body<SendRequest>(request);
+          return await applyOnce(() => options.service.send(id, input));
+        }
         if (action === 'answer' && request.method === 'POST') {
           const input = await body<{ labels?: string[]; other?: string; responses?: string[] }>(request);
-          return json(await options.service.answer(id, input.labels ?? [], input.other, input.responses));
+          return await applyOnce(() => options.service.answer(id, input.labels ?? [], input.other, input.responses));
         }
         if (action === 'interrupt' && request.method === 'POST') return json(await options.service.interrupt(id));
         if (action === 'stop' && request.method === 'POST') {
@@ -208,17 +286,17 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
         }
         if (action === 'resume' && request.method === 'POST') {
           const input = await body<{ message?: string }>(request);
-          return json(await options.service.resume(id, input.message));
+          return await applyOnce(() => options.service.resume(id, input.message));
         }
         if (action === 'migrate' && request.method === 'POST') {
           const input = await body<{ agent?: string; model?: string }>(request);
           if (!input.agent) throw new HttpError(400, 'agent is required');
-          return json(await options.service.migrate(id, input.agent, input.model));
+          return await applyOnce(() => options.service.migrate(id, input.agent!, input.model));
         }
         if (action === 'signal' && request.method === 'POST') {
           const input = await body<{ kind: 'done' | 'help'; message?: string }>(request);
           if (input.kind !== 'done' && input.kind !== 'help') throw new HttpError(400, 'kind must be done or help');
-          return json(await options.service.signal(id, input.kind, input.message));
+          return await applyOnce(() => options.service.signal(id, input.kind, input.message));
         }
         if (action === 'snapshot' && request.method === 'GET') {
           // Default = the monitor's on-disk frame (fast, lock-free). ?live=true

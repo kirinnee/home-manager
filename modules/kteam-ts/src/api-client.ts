@@ -22,10 +22,17 @@ export class ApiClient {
     // One transient socket error must not fail an otherwise-healthy call
     // (background/automation shells hit this constantly while the daemon is
     // demonstrably up), so retry briefly before declaring the daemon
-    // unavailable.
+    // unavailable. One requestId spans ALL attempts of this logical call: if
+    // the socket died AFTER the daemon applied a mutation, the retry carries
+    // the same id and the daemon returns the current view instead of applying
+    // the mutation twice (duplicate-send guard, see api-server dedup).
     const options: RequestInit = {
       ...init,
-      headers: { authorization: `Bearer ${this.token}`, ...init.headers },
+      headers: {
+        authorization: `Bearer ${this.token}`,
+        'x-kteam-request-id': crypto.randomUUID(),
+        ...init.headers,
+      },
     };
     let response: Response | undefined;
     let lastError: unknown;
