@@ -49,13 +49,16 @@ profiles:
     env:
       ANTHROPIC_API_KEY: loge-internal
       ANTHROPIC_BASE_URL: http://127.0.0.1:8317
-      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-4-8
+      # Fable + Opus run with the 1M-token context beta (the `[1m]` model
+      # suffix; verified end-to-end through CLIProxyAPI on 2026-07-22).
+      # Sonnet/Haiku stay at their native windows.
+      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-4-8[1m]
       ANTHROPIC_DEFAULT_SONNET_MODEL: claude-sonnet-5
       ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-4-5-20251001
-      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5
-      KTEAM_MODEL: claude-fable-5 # real ID: raw CLIProxyAPI has no aliases
+      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5[1m]
+      KTEAM_MODEL: claude-fable-5[1m] # real ID: raw CLIProxyAPI has no aliases
     settings:
-      model: claude-fable-5
+      model: claude-fable-5[1m]
   loge-codex:
     env:
       OPENAI_API_KEY: loge-internal
@@ -98,18 +101,27 @@ sharedHistory:
   claude: true
   codex: true
 agents:
+  # Anthropic-backed OAuth accounts: resolve the opus/fable aliases to the
+  # 1M-context beta variants (`[1m]` suffix — verified live 2026-07-22).
+  # Scoped per-agent, NOT on the shared claude profile, so provider-backed
+  # accounts (glm52/mm3/deepseek) never see the suffix their APIs would 400 on.
   - name: kirin
     kind: claude
     profiles:
       - claude
+    env: &anthropic-1m
+      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-4-8[1m]
+      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5[1m]
   - name: liftoff
     kind: claude
     profiles:
       - claude
+    env: *anthropic-1m
   - name: atomi
     kind: claude
     profiles:
       - claude
+    env: *anthropic-1m
   - name: glm52a
     kind: claude
     profiles:
