@@ -24,8 +24,10 @@ export interface WardenStatusView {
 export interface WardenRunView {
   sweptAt: string;
   anomalies: WardenAnomaly[];
-  /** Session id of a warden spawned by this run, when escalation fired. */
+  /** Session id of a fleet-triage warden spawned by this run, when escalation fired. */
   spawned?: string;
+  /** Session ids of per-session ASSIGNED wardens spawned for sus anomalies. */
+  assignedWardens?: string[];
   /** Why escalation did not spawn (disabled, gap, no anomalies, live warden…). */
   message?: string;
 }
@@ -72,6 +74,10 @@ export interface KTeamService {
   subscribe(listener: (event: KTeamEvent) => void): () => void;
   addAttachment(id: string, filename: string, mime: string, bytes: Uint8Array): Promise<AttachmentView>;
   getAttachment(id: string, attachmentId: string): Promise<{ attachment: AttachmentView; bytes: Uint8Array }>;
+  /** True when `capability` matches the per-assignment secret minted for
+   *  `targetId`'s active warden assignment — the only case the warden token
+   *  may stop a session. */
+  wardenMayStop(capability: string, targetId: string): boolean;
   /** Fleet-warden status: config, last sweep, current anomalies, last report. */
   wardenStatus(): Promise<WardenStatusView>;
   /** Force a fleet sweep now; `spawn` forces escalation past the gap/enabled. */

@@ -74,6 +74,141 @@ describe('withAutoRevive (F4)', () => {
   });
 });
 
+describe('assigned-warden stop scope (A6)', () => {
+  test('wardenMayStop matches only the exact per-assignment capability', () => {
+    const manager = bareManager();
+    manager.wardenState = {
+      assignments: {
+        'target-1': { wardenId: 'warden-1', spawnedAt: '2026-07-22T12:00:00.000Z', capability: 'cap-1' },
+        'target-2': { wardenId: 'warden-2', spawnedAt: '2026-07-22T12:00:00.000Z', capability: 'cap-2' },
+      },
+    };
+    const mayStop = (capability: string, targetId: string) =>
+      (manager as unknown as { wardenMayStop: (c: string, t: string) => boolean }).wardenMayStop(capability, targetId);
+    expect(mayStop('cap-1', 'target-1')).toBe(true);
+    expect(mayStop('cap-1', 'target-2')).toBe(false); // another warden's target
+    expect(mayStop('cap-2', 'target-1')).toBe(false); // cross-capability spoof
+    expect(mayStop('warden-1', 'target-1')).toBe(false); // an identity is not a capability
+    expect(mayStop('', 'target-1')).toBe(false); // empty never matches
+  });
+
+  test('no assignments means no stop permission at all', () => {
+    const manager = bareManager();
+    manager.wardenState = {};
+    expect((manager as unknown as { wardenMayStop: (c: string, t: string) => boolean }).wardenMayStop('cap', 't')).toBe(
+      false,
+    );
+  });
+});
+
+describe('assigned-warden capacity (A6 fix round)', () => {
+  function capacityManager(maxAssignedWardens: number) {
+    const started: string[] = [];
+    const manager = bareManager();
+    manager.options = {
+      warden: { enabled: true, wrapper: 'claude-auto-x', maxAssignedWardens, assignedCooldownMinutes: 30 },
+    };
+    manager.wardenState = {};
+    manager.paths = { wardenReports: '/tmp/kteam-capacity-test-reports' };
+    manager.saveWardenState = async () => undefined;
+    manager.emitTransient = () => undefined;
+    manager.buildAssignedWardenPrompt = () => 'investigate';
+    let counter = 0;
+    manager.start = async () => {
+      const id = `warden-${++counter}`;
+      started.push(id);
+      return { config: { id, teammate: id }, state: { status: 'running' }, directory: `/x/${id}` };
+    };
+    return { manager, started };
+  }
+
+  const sus = (id: string) => ({ kind: 'sus_thinking', sessionId: id, status: 'running', detail: 'x' });
+  const target = (id: string) => ({
+    config: { id, teammate: id, cwd: '/repo' },
+    state: { status: 'running' },
+    directory: `/x/${id}`,
+  });
+
+  test('fills the cap exactly: 3 sus sessions => 3 assigned wardens at max 3 (the double-count bug)', async () => {
+    const { manager, started } = capacityManager(3);
+    const spawned = await (
+      manager as unknown as {
+        spawnAssignedWardens: (a: unknown[], s: unknown[], f: boolean) => Promise<string[]>;
+      }
+    ).spawnAssignedWardens(
+      [sus('t1'), sus('t2'), sus('t3'), sus('t4')],
+      [target('t1'), target('t2'), target('t3'), target('t4')],
+      false,
+    );
+    expect(spawned).toHaveLength(3);
+    expect(started).toHaveLength(3);
+    const assignments = (manager.wardenState as { assignments: Record<string, { capability: string }> }).assignments;
+    expect(Object.keys(assignments).sort()).toEqual(['t1', 't2', 't3']);
+    // Each assignment carries its own unguessable capability.
+    const capabilities = Object.values(assignments).map(record => record.capability);
+    expect(new Set(capabilities).size).toBe(3);
+    for (const capability of capabilities) expect(capability.length).toBeGreaterThanOrEqual(32);
+  });
+
+  test('dedupes a target that already has a live warden', async () => {
+    const { manager, started } = capacityManager(3);
+    manager.wardenState = {
+      assignments: { t1: { wardenId: 'warden-live', spawnedAt: '2026-07-22T12:00:00.000Z', capability: 'cap' } },
+    };
+    await (
+      manager as unknown as {
+        spawnAssignedWardens: (a: unknown[], s: unknown[], f: boolean) => Promise<string[]>;
+      }
+    ).spawnAssignedWardens(
+      [sus('t1'), sus('t2')],
+      [{ config: { id: 'warden-live' }, state: { status: 'running' }, directory: '/x/w' }, target('t1'), target('t2')],
+      false,
+    );
+    expect(started).toHaveLength(1); // only t2 got a new warden
+  });
+});
+
+describe('nudgedAt is turn-scoped (A6 fix round)', () => {
+  test('every turn-committing transition clears nudgedAt so a new turn is nudged before any kill', async () => {
+    // Source-level guard across all five turn-start sites: send, answer,
+    // resume/relaunch, session start, and auto-continue. Each transition that
+    // sets a fresh startedAt must also reset the nudge episode.
+    const source = await Bun.file(path.join(import.meta.dir, 'session-manager.ts')).text();
+    const turnStarts = source.split('startedAt: now()').length - 1;
+    const nudgeResets = source.split('nudgedAt: undefined').length - 1;
+    expect(turnStarts).toBe(5);
+    expect(nudgeResets).toBeGreaterThanOrEqual(5);
+  });
+});
+
+describe('snapshot of a dead pane (A6)', () => {
+  test('rejects loudly instead of returning an empty capture', async () => {
+    const manager = bareManager();
+    manager.resolveRef = (id: string) => id;
+    manager.serialized = async (_id: string, work: () => Promise<string>) => await work();
+    manager.get = async () => ({ config: { tmuxSession: 'kteam-x-agent' }, state: { status: 'stalled' } });
+    manager.tmux = {
+      state: async () => ({ alive: false, dead: true, promptReady: false }),
+      snapshot: async () => '',
+    };
+    await expect((manager as unknown as { snapshot: (id: string) => Promise<string> }).snapshot('x')).rejects.toThrow(
+      /pane dead/,
+    );
+  });
+
+  test('captures normally while the pane is alive', async () => {
+    const manager = bareManager();
+    manager.resolveRef = (id: string) => id;
+    manager.serialized = async (_id: string, work: () => Promise<string>) => await work();
+    manager.get = async () => ({ config: { tmuxSession: 'kteam-x-agent' }, state: { status: 'running' } });
+    manager.tmux = {
+      state: async () => ({ alive: true, dead: false, promptReady: true }),
+      snapshot: async () => 'frame\n',
+    };
+    expect(await (manager as unknown as { snapshot: (id: string) => Promise<string> }).snapshot('x')).toBe('frame\n');
+  });
+});
+
 describe('migrate — cross-account continuation', () => {
   const claudeSession = {
     directory: '/tmp/kteam/s1',
@@ -274,6 +409,69 @@ describe('migrate — cross-account continuation', () => {
     expect(events).toContain('session.migrating');
     expect(transitions.at(-1)?.status).toBe('failed');
     expect(transitions.at(-1)?.reason).toContain('restored to claude-auto-glm52a');
+  });
+});
+
+describe('boot recovery re-adopts live panes (A1)', () => {
+  test('a running session whose pane survived the restart is re-adopted, not killed', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-readopt-'));
+    temporaryDirectories.push(home);
+    const events: Array<{ type: string; patch: { status?: string; health?: string } }> = [];
+    let kills = 0;
+    let monitors = 0;
+    const manager = bareManager();
+    manager.paths = createPaths(home);
+    manager.list = async () => [
+      {
+        directory: path.join(home, 's1'),
+        config: { id: 's1', tmuxSession: 'kteam-s1-agent', retry: {} },
+        state: { id: 's1', status: 'running', turn: 3 },
+      },
+    ];
+    manager.tmux = {
+      state: async () => ({ alive: true, dead: false, promptReady: true }),
+      snapshot: async () => 'frame\n',
+    };
+    manager.stopTmuxWithEvidence = async () => {
+      kills++;
+    };
+    manager.transition = async (_id: string, patch: { status?: string; health?: string }, type: string) => {
+      events.push({ type, patch });
+    };
+    manager.startMonitor = async () => {
+      monitors++;
+    };
+    await (manager as unknown as { recover: () => Promise<void> }).recover();
+    expect(kills).toBe(0);
+    expect(monitors).toBe(1);
+    expect(events).toHaveLength(1);
+    expect(events[0]!.type).toBe('daemon.readopted');
+    expect(events[0]!.patch).toEqual({ status: 'running', health: 'healthy' });
+  });
+
+  test('a starting session with a live pane is adopted as running', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-readopt-'));
+    temporaryDirectories.push(home);
+    const events: Array<{ patch: { status?: string } }> = [];
+    const manager = bareManager();
+    manager.paths = createPaths(home);
+    manager.list = async () => [
+      {
+        directory: path.join(home, 's1'),
+        config: { id: 's1', tmuxSession: 'kteam-s1-agent', retry: {} },
+        state: { id: 's1', status: 'starting', turn: 1 },
+      },
+    ];
+    manager.tmux = { state: async () => ({ alive: true, dead: false, promptReady: false }) };
+    manager.stopTmuxWithEvidence = async () => {
+      throw new Error('must not kill a live pane during recovery');
+    };
+    manager.transition = async (_id: string, patch: { status?: string }) => {
+      events.push({ patch });
+    };
+    manager.startMonitor = async () => undefined;
+    await (manager as unknown as { recover: () => Promise<void> }).recover();
+    expect(events[0]!.patch.status).toBe('running');
   });
 });
 

@@ -80,6 +80,11 @@ RestartSec=2
 # EXIT_ALREADY_RUNNING (daemon-boot.ts): a healthy daemon owns the port — do
 # not re-spawn against it every RestartSec.
 RestartPreventExitStatus=78
+# The tmux server hosting every teammate pane is spawned from this unit and
+# therefore lives in its cgroup. The default control-group kill made every
+# daemon restart erase the whole fleet (2026-07-22 forensics). Signal only
+# kteamd; panes survive and boot recovery re-adopts them.
+KillMode=process
 Environment=${systemdQuote(`KTEAM_HOME=${this.paths.home}`)}
 Environment=${systemdQuote(`PATH=${process.env.PATH ?? ''}`)}
 StandardOutput=${systemdQuote(`append:${this.paths.daemonLog}`)}
@@ -107,6 +112,7 @@ WantedBy=default.target
 <key>Label</key><string>${LABEL}</string>
 <key>ProgramArguments</key><array><string>${xmlEscape(this.daemonBinary)}</string></array>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+<key>AbandonProcessGroup</key><true/>
 <key>StandardOutPath</key><string>${xmlEscape(this.paths.daemonLog)}</string>
 <key>StandardErrorPath</key><string>${xmlEscape(this.paths.daemonLog)}</string>
 <key>EnvironmentVariables</key><dict><key>KTEAM_HOME</key><string>${xmlEscape(this.paths.home)}</string><key>PATH</key><string>${xmlEscape(process.env.PATH ?? '')}</string></dict>

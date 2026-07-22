@@ -71,12 +71,99 @@ export function paneShowsActiveWork(pane: string): boolean {
   // Codex: "Working (6m52s • Esc to interrupt)" — the interrupt hint can be
   // clipped by narrow panes, so match the elapsed-time form on its own.
   if (/\bworking\s*\(\s*\d+[ms]/.test(lower)) return true;
-  // Claude-family: "(12s · ⚒ 3.4k tokens" / "3.4k tokens · esc" counters.
-  if (/\(\s*\d+m?s\s*[·•∙]/.test(lower)) return true;
+  // Claude-family elapsed counters: "(12s · ⚒ 3.4k tokens", "(5m 45s · ↓
+  // 17.2k tokens" — minutes and seconds may be space-separated.
+  if (/\(\s*(?:\d+\s*h\s*)?(?:\d+\s*m\s*)?\d+\s*s\s*[·•∙]/.test(lower)) return true;
   if (/[\d.,]+k?\s*tokens\s*[·•∙]/.test(lower)) return true;
-  // Spinner glyph + animated verb ellipsis: "✻ Lollygagging…", "· Mustering…".
-  if (/[✻✳✶✽∗⏺]\s*\S+…/u.test(pane)) return true;
+  // Spinner glyph + animated verb ellipsis: "✻ Lollygagging…", "✢ Fixing A6
+  // stall detection…" — the verb phrase can span several words, but only for
+  // glyphs the spinner animation owns exclusively. ⏺ also prefixes tool-result
+  // lines whose truncation ellipses must not read as busy, so it keeps the
+  // strict single-word form.
+  if (/[✻✳✶✽✢∗][^\n…]{1,120}…/u.test(pane)) return true;
+  if (/⏺\s*\S+…/u.test(pane)) return true;
   return false;
+}
+
+export interface PaneWorkCounters {
+  elapsedSeconds?: number;
+  tokens?: number;
+}
+
+/** Elapsed-time / token counters from an ACTIVE-work frame ("✢ Fixing…
+ *  (5m 45s · ↓ 17.2k tokens)", "Working (6m52s"). Undefined when the pane
+ *  shows no active-work indicator at all — a bare number elsewhere on screen
+ *  must not read as work progress. */
+export function paneWorkCounters(pane: string): PaneWorkCounters | undefined {
+  if (!paneShowsActiveWork(pane)) return undefined;
+  const counters: PaneWorkCounters = {};
+  const elapsed = pane.match(/\(\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(\d+)\s*s\b/);
+  if (elapsed) {
+    counters.elapsedSeconds = Number(elapsed[1] ?? 0) * 3600 + Number(elapsed[2] ?? 0) * 60 + Number(elapsed[3]);
+  }
+  const tokens = pane.toLowerCase().match(/([\d.,]+)\s*(k?)\s*tokens/);
+  if (tokens) {
+    const scale = tokens[2] === 'k' ? 1000 : 1;
+    counters.tokens = Math.round(Number.parseFloat(tokens[1]!.replaceAll(',', '')) * scale);
+  }
+  return counters.elapsedSeconds !== undefined || counters.tokens !== undefined ? counters : undefined;
+}
+
+/** True when a later frame's work counters PROVE the harness advanced: the
+ *  elapsed clock or the token count strictly increased. Equal counters are a
+ *  frozen spinner (wedged TUI repainting cosmetics) and earn no credit; a
+ *  decrease is a new turn's counter restarting and also earns none. */
+export function workCountersAdvanced(previous: PaneWorkCounters | undefined, current: PaneWorkCounters): boolean {
+  if (!previous) return false;
+  const elapsedAdvanced =
+    previous.elapsedSeconds !== undefined &&
+    current.elapsedSeconds !== undefined &&
+    current.elapsedSeconds > previous.elapsedSeconds;
+  const tokensAdvanced =
+    previous.tokens !== undefined && current.tokens !== undefined && current.tokens > previous.tokens;
+  return elapsedAdvanced || tokensAdvanced;
+}
+
+/** Codex footer: "1 background terminal running" / "2 background terminals
+ *  running" — rendered permanently while any background terminal exists.
+ *  Feeds the subprocess ledger clock for harnesses whose children aren't
+ *  visible under the pane pid. */
+export function backgroundTerminalCount(pane: string): number {
+  const match = pane.toLowerCase().match(/(\d+)\s+background\s+terminals?\s+running/);
+  return match ? Number(match[1]) : 0;
+}
+
+export interface StallLivenessState {
+  /** Counters from the last frame that showed a recognized work indicator. */
+  lastWorkCounters?: PaneWorkCounters;
+  /** Wall-clock ms of the last PROVEN advance (elapsed clock or token count
+   *  strictly increased). */
+  lastWorkAdvanceAt: number;
+  /** Wall-clock ms of the last TOKEN advance specifically — certain progress
+   *  (claude renders a token counter; codex has none, so this never moves
+   *  there and the sus classifier treats the session as token-blind). */
+  lastTokenAdvanceAt?: number;
+}
+
+/** A6 counter-advance fold: feed each poll's visible frame; when the frame
+ *  shows recognized work vocabulary whose counters strictly advanced since the
+ *  last recognized frame, `lastWorkAdvanceAt` moves to now — and
+ *  `lastTokenAdvanceAt` too when the TOKEN count specifically climbed (the
+ *  token exemption: climbing tokens = certain progress, never sus). A
+ *  repainting frame WITHOUT advancing counters moves nothing, so a wedged TUI
+ *  still goes stale. Pure so fixture-pair tests drive it. */
+export function foldStallLiveness(state: StallLivenessState, visiblePane: string, nowMs: number): StallLivenessState {
+  const counters = paneWorkCounters(visiblePane);
+  if (!counters) return state;
+  const tokensAdvanced =
+    state.lastWorkCounters?.tokens !== undefined &&
+    counters.tokens !== undefined &&
+    counters.tokens > state.lastWorkCounters.tokens;
+  return {
+    lastWorkCounters: counters,
+    lastWorkAdvanceAt: workCountersAdvanced(state.lastWorkCounters, counters) ? nowMs : state.lastWorkAdvanceAt,
+    lastTokenAdvanceAt: tokensAdvanced ? nowMs : state.lastTokenAdvanceAt,
+  };
 }
 
 function navigationToAffirmative(pane: string): string[] {
@@ -199,19 +286,25 @@ export class TmuxController {
     const lines = pane.split('\n');
     if (cursorY !== undefined && cursorY >= 0 && cursorY < lines.length) {
       const cursorLine = lines[cursorY]!;
-      if (/^\s*[│|]?\s*[>›❯]\s*\d+[.)]/u.test(cursorLine)) return false;
-      return (cursorX === undefined || cursorX <= 2) && /^\s*[│|]?\s*[>›❯](?:[\s\u00a0].*)?$/u.test(cursorLine);
+      if (/^\s*[│|]?\s*[>›❯»]\s*\d+[.)]/u.test(cursorLine)) return false;
+      return (cursorX === undefined || cursorX <= 2) && /^\s*[│|]?\s*[>›❯»](?:[\s\u00a0].*)?$/u.test(cursorLine);
     }
 
-    const tail = lines.slice(-30);
-    const promptIndex = tail.findLastIndex(line => /^\s*[│|]?\s*[>›❯](?:[\s\u00a0].*)?$/u.test(line));
+    // A full-height visible capture carries dozens of blank rows below the
+    // composer; drop them so the 30-line window actually covers the prompt.
+    let lastContent = lines.length - 1;
+    while (lastContent >= 0 && lines[lastContent]!.trim() === '') lastContent--;
+    const tail = lines.slice(0, lastContent + 1).slice(-30);
+    const promptIndex = tail.findLastIndex(line => /^\s*[│|]?\s*[>›❯»](?:[\s\u00a0].*)?$/u.test(line));
     if (promptIndex < 0) return false;
     return tail.slice(promptIndex + 1).every(line => {
       const value = line.trim().toLowerCase();
       return (
         value === '' ||
         /^[─━═_┄┅┈┉┊┋│|╭╰╮╯┌┐└┘]+$/.test(value) ||
-        /^(\?|shift\+tab|tab |esc |ctrl\+|\/ for|[0-9]+% context|context left)/.test(value)
+        /^(\?|shift\+tab|tab |esc |ctrl\+|\/ for|[0-9]+% context|context left)/.test(value) ||
+        // Codex footer statusline: "gpt-5.6-sol ultra · Context 0% used · /tmp"
+        /context [0-9]+% used/.test(value)
       );
     });
   }
@@ -243,6 +336,27 @@ export class TmuxController {
       paneHeight: metadata.paneHeight,
       paneWidth: metadata.paneWidth,
     };
+  }
+
+  /** A6 subprocess life-sign: true when the pane's harness process has at
+   *  least one live child (a running tool subprocess). The pane launcher
+   *  `exec`s the harness, so the pane pid IS the harness and its children are
+   *  tool processes. */
+  async subprocessAlive(name: string): Promise<boolean> {
+    const result = await run(['tmux', 'display-message', '-p', '-t', name, '#{pane_pid}']);
+    const panePid = Number(result.stdout.trim());
+    if (result.code !== 0 || !Number.isFinite(panePid) || panePid <= 1) return false;
+    const ps = await run(['ps', '-Ao', 'pid=,ppid=']);
+    if (ps.code !== 0) return false;
+    const childrenOf = new Map<number, number[]>();
+    for (const line of ps.stdout.split('\n')) {
+      const [pid, ppid] = line.trim().split(/\s+/).map(Number);
+      if (!Number.isFinite(pid) || !Number.isFinite(ppid)) continue;
+      const list = childrenOf.get(ppid!);
+      if (list) list.push(pid!);
+      else childrenOf.set(ppid!, [pid!]);
+    }
+    return (childrenOf.get(panePid)?.length ?? 0) > 0;
   }
 
   async launch(config: SessionConfig): Promise<void> {
@@ -292,6 +406,10 @@ export class TmuxController {
       const scoped = (await readFile(this.paths.wardenToken, 'utf8').catch(() => '')).trim();
       if (!scoped) throw new Error('warden-scoped token is missing; cannot launch a warden pane un-scoped');
       pane.KTEAM_TOKEN = scoped;
+      // Assigned wardens additionally carry their per-assignment stop
+      // capability — the ONLY credential the api-server accepts for
+      // `stop <assigned target>` (shared-token spoofing defense).
+      if (config.stopCapability) pane.KTEAM_STOP_CAPABILITY = config.stopCapability;
     }
     const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
     const launcher = path.join(sessionDir(this.paths, config.id), 'launch.sh');

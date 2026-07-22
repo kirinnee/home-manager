@@ -31,6 +31,11 @@ export class ApiClient {
       headers: {
         authorization: `Bearer ${this.token}`,
         'x-kteam-request-id': crypto.randomUUID(),
+        // Assigned wardens carry an unguessable per-assignment stop
+        // capability in their pane env; the api-server authorizes
+        // `stop <assigned target>` by capability match, never by a
+        // client-chosen identity.
+        ...(process.env.KTEAM_STOP_CAPABILITY ? { 'x-kteam-stop-capability': process.env.KTEAM_STOP_CAPABILITY } : {}),
         ...init.headers,
       },
     };

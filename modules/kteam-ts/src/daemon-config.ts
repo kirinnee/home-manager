@@ -6,14 +6,26 @@ import { atomicJson, readJson } from './io';
 export interface WardenConfig {
   /** Deterministic detection always runs; this only gates LLM escalation. */
   enabled: boolean;
-  /** Cheap auto-mode wrapper the escalation warden session runs under. */
+  /** Auto-mode wrapper warden sessions run under (judgment work — use an
+   *  Opus-class account, not a mass-chore model). */
   wrapper: string;
   /** Fleet sweep cadence, minutes. */
   intervalMinutes: number;
   /** A waiting session idle this long is an unanswered question. */
   unattendedMinutes: number;
-  /** Minimum gap between escalation spawns (rate limit). */
+  /** Minimum gap between fleet-triage escalation spawns (rate limit). */
   minSpawnGapMinutes: number;
+  /** Sus list: thinking (counters advancing) with no transcript growth this
+   *  long is sus_thinking. */
+  susThinkingSeconds: number;
+  /** Sus list: a subprocess episode running continuously this long is
+   *  sus_subprocess. */
+  susSubprocessSeconds: number;
+  /** Max concurrently-live assigned (per-session) warden sessions. */
+  maxAssignedWardens: number;
+  /** After an assigned warden finishes for a session, don't respawn one for
+   *  that same session within this cooldown (minutes). */
+  assignedCooldownMinutes: number;
 }
 
 export interface DaemonConfig {
@@ -28,10 +40,17 @@ export interface DaemonConfig {
 
 export const defaultWardenConfig = (): WardenConfig => ({
   enabled: false,
-  wrapper: 'claude-auto-glm52a',
+  // Wardens JUDGE sus sessions (A6): understand the task, deep-dive the
+  // process, verdict leave/nudge/resume/kill — judgment work that needs an
+  // Opus-class account. The lead sets the live wrapper at ship time.
+  wrapper: 'claude-auto-atomi',
   intervalMinutes: 5,
   unattendedMinutes: 30,
-  minSpawnGapMinutes: 60,
+  minSpawnGapMinutes: 15,
+  susThinkingSeconds: 900,
+  susSubprocessSeconds: 900,
+  maxAssignedWardens: 3,
+  assignedCooldownMinutes: 30,
 });
 
 export const defaultDaemonConfig = (): DaemonConfig => ({
@@ -41,7 +60,9 @@ export const defaultDaemonConfig = (): DaemonConfig => ({
   // Native file notifications are primary; this short reconciliation interval
   // closes gaps from coalesced or dropped FSEvents/inotify notifications.
   transcriptReconcileSeconds: 2,
-  healthIntervalSeconds: 5,
+  // Reflex/monitor tick. The nudge/kill thresholds are wall-clock seconds
+  // (180/300), so 30 s granularity is acceptable and 6x cheaper than 5 s.
+  healthIntervalSeconds: 30,
   quotaUrl: 'http://127.0.0.1:47318/usage',
   warden: defaultWardenConfig(),
 });
