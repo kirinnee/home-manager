@@ -1,45 +1,30 @@
-// Single-session chat page. The center of the brief:
+// Single-session chat page:
 //  - tail-first loading with infinite scroll-up pagination via `before`
-//  - bubble rendering via pairing + markdown + tool cards + thinking blocks
-//  - live tail-follow via WS chat.* events (deduped)
-//  - sticky scroll (stay-at-bottom follows new messages; readers scrolled up
-//    stay exactly where they are; "Jump to latest" pill when detached)
+//  - transcript rendering (role-marked blocks, tools collapsed) built by
+//    buildTranscript()
+//  - live tail-follow via WS chat.* events (deduped); the MessageScroller
+//    owns sticky-bottom + jump-to-latest, so there is no manual scrolling here
 //  - composer (Enter send / Shift+Enter newline), queued-notice when busy,
 //    disabled while awaiting_question (the question form is the input then)
-//  - header (status / context / Interrupt / Stop / Resume), snapshot drawer,
-//    thinking indicator while busy
-//  - WINDOWED thread (react-virtuoso) — the brief says "virtualize if >500
-//    messages rendered", and live sessions already carry 7k+ records.
+//  - compact two-row header; Terminal tab retains its own snapshot polling
+//
+// Network budget (turn-003): the WS /v1/events feed drives live updates; the
+// only poll left here is a slow (8s) visibility-gated state fallback.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
-import {
-  ArrowDown,
-  Pause,
-  Play,
-  StopCircle,
-  ZapOff,
-  ChevronLeft,
-  Rows3,
-  Maximize2,
-  MessageSquare,
-  Terminal,
-} from 'lucide-react';
+import { MessageSquare, Terminal } from 'lucide-react';
 import { api, ApiError, HAS_TOKEN } from '../lib/api';
 import { openEventStream } from '../lib/ws';
 import type { SessionView, ChatRecord, KTeamEvent } from '../types';
-import { ActionGroup, Badge, Button } from '../components/Primitives';
-import { Link } from '../lib/router';
-import { ThinkingIndicator } from '../components/Harness';
-import { MessageBubble } from '../components/Primitives.MessageBubble';
 import { Composer } from '../components/Composer';
 import { QuestionForm } from '../components/QuestionForm';
-import { PaneSnapshotDrawer } from '../components/Question';
 import { TerminalView } from '../components/TerminalView';
 import { ViewTabs } from '../components/ViewTabs';
-import { pairRecordsToBubbles, latestPendingQuestion } from '../lib/pairing';
-import { useDensity } from '../hooks/useDensity';
-import { TERMINAL_STATUSES, WAITING_STATUSES, fmtAbsolute, isBusy, toneFor } from '../lib/utils';
+import { SessionHeader } from '../components/SessionHeader';
+import { Transcript } from '../components/Transcript';
+import { ThinkingIndicator } from '../components/Harness';
+import { buildTranscript, latestPendingQuestion } from '../lib/transcript';
+import { TERMINAL_STATUSES, WAITING_STATUSES, fmtAbsolute, isBusy } from '../lib/utils';
 
 const PAGE_SIZE = 200;
 
@@ -49,29 +34,19 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [nextBefore, setNextBefore] = useState<number | null>(null);
   const [total, setTotal] = useState(0);
-  // Loading-state trio: initial fetch (shows skeleton), pagination (top pill
-  // inside the thread), and "has the API returned offset 0 yet?" gates the
-  // "start of chat" sentinel.
   const [loadingInitial, setLoadingInitial] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
-  const [atStart, setAtStart] = useState(false); // true when we know offset===0
+  const [atStart, setAtStart] = useState(false);
   const [liveStatus, setLiveStatus] = useState<'connecting' | 'open' | 'closed'>('connecting');
   const [draft, setDraft] = useState('');
-  const [showJump, setShowJump] = useState(false);
   const [actionNotice, setActionNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
-  const [density, toggleDensity] = useDensity();
-  // View toggle: chat-thread (default) vs. the cached tmux pane snapshot.
-  // Polling for the terminal view is gated on this state + document.hidden,
-  // see TerminalView.tsx.
   const [tab, setTab] = useState<'chat' | 'terminal'>('chat');
+  // Bumped after the initial page loads to settle the MessageScroller at the
+  // true tail once dynamic (markdown/code) heights have laid out.
+  const [pinSignal, setPinSignal] = useState(0);
 
-  // react-virtuoso expects a stable sequential firstItemIndex when data
-  // pre-pends so internal offsets stay correct.
-  const [firstIndex, setFirstIndex] = useState(0);
-  const virtuosoRef = useRef<VirtuosoHandle | null>(null);
   const seenKeys = useRef<Set<string>>(new Set());
   const lastSeq = useRef<number>(-1);
-  // dedupe WS-driven refetches: ≥1s trailing debounce + single-flight.
   const refreshTimer = useRef<number | null>(null);
   const refreshInflight = useRef<Promise<void> | null>(null);
 
@@ -84,9 +59,9 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
     setNextBefore(null);
     setLoadingInitial(true);
     setAtStart(false);
+    setPinSignal(0);
     seenKeys.current.clear();
     lastSeq.current = -1;
-    setFirstIndex(0);
 
     (async () => {
       try {
@@ -97,17 +72,11 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
         if (cancelled) return;
         setView(v);
         setTotal(page.total);
-        const fresh = page.records;
-        setRecords(fresh);
+        setRecords(page.records);
         setNextBefore(page.offset);
-        for (const r of fresh) seenKeys.current.add(recordKey(r));
-        // "Start of chat" only becomes true once we've actually loaded a
-        // page that proves offset === 0 (i.e. there is no older page).
+        for (const r of page.records) seenKeys.current.add(recordKey(r));
         setAtStart(page.offset === 0);
-        // start at the tail (most recent message) on first load
-        requestAnimationFrame(() => {
-          virtuosoRef.current?.scrollToIndex({ index: 'LAST', align: 'end', behavior: 'auto' });
-        });
+        setPinSignal(n => n + 1);
       } catch (e) {
         if (!cancelled) setError(e instanceof ApiError ? e.message : String(e));
       } finally {
@@ -120,10 +89,8 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
     };
   }, [sessionId]);
 
-  // ---- periodic state refresh (5s) — the daemon terminal frame may lag this;
-  // ---- the WS path covers terminal.frame live updates too.
+  // ---- state refresh: WS-driven, with a slow visibility-gated fallback -----
   const refreshView = useCallback(async () => {
-    // Single-flight: coalesce re-entrant calls into one in-flight promise.
     if (refreshInflight.current) return refreshInflight.current;
     const p = (async () => {
       try {
@@ -139,8 +106,6 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
     return p;
   }, [sessionId]);
 
-  // Debounce-triggered refresh — the WS handler funnels its state events here
-  // so the daemon isn't hammered by N refetches per second of frame pings.
   const scheduleRefresh = useCallback(() => {
     if (refreshTimer.current) return;
     refreshTimer.current = window.setTimeout(() => {
@@ -150,11 +115,16 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
   }, [refreshView]);
 
   useEffect(() => {
-    const id = window.setInterval(() => void refreshView(), 5000);
+    // Fallback poll only — the WS state events are the primary path. Paused
+    // whenever the tab is hidden (turn-003 network budget).
+    const id = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      void refreshView();
+    }, 8000);
     return () => window.clearInterval(id);
   }, [refreshView]);
 
-  // ---- websocket: live chat events + terminal.frame → activity / context% ----
+  // ---- websocket: live chat events + terminal.frame → activity / context% --
   useEffect(() => {
     const handle = openEventStream(
       sessionId,
@@ -163,8 +133,6 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
         if (typeof ev.sequence === 'number' && ev.sequence <= lastSeq.current) return;
         if (typeof ev.sequence === 'number') lastSeq.current = ev.sequence;
 
-        // terminal.frame carries the latest pane activity/context; apply it
-        // immediately rather than waiting for the 5s poll.
         if (ev.type === 'terminal.frame') {
           const data = ev.data as { activity?: string; contextPercent?: number; promptReady?: boolean };
           setView(v =>
@@ -183,15 +151,11 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
           return;
         }
 
-        // State-patch events from the daemon. Debounced (trailing) + single-
-        // flight — see scheduleRefresh — so a busy daemon emitting dozens of
-        // terminal frames per second collapses to one GET /v1/sessions/:id.
         if (ev.type === 'state' || ev.type === 'session.state') {
           scheduleRefresh();
           return;
         }
 
-        // Live chat events. Promote the embedded record to ChatRecord.
         if (
           ev.type.startsWith('chat.') ||
           ev.type === 'tool.use' ||
@@ -204,11 +168,9 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
           const key = recordKey(rec);
           if (seenKeys.current.has(key)) return;
           seenKeys.current.add(key);
+          // Append only — the MessageScroller auto-follows the tail when the
+          // reader is at the bottom, and leaves them put otherwise.
           setRecords(rs => [...rs, rec]);
-          // Auto-stick to the bottom when the reader was already pinned.
-          requestAnimationFrame(() => {
-            virtuosoRef.current?.scrollToIndex({ index: 'LAST', align: 'end', behavior: 'smooth' });
-          });
         }
       },
       setLiveStatus,
@@ -216,23 +178,20 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
     return () => handle.close();
   }, [sessionId, scheduleRefresh]);
 
-  // ---- infinite scroll-up: load older pages via `before` ----
+  // ---- infinite scroll-up: load older pages via `before` -------------------
   const loadOlder = useCallback(async () => {
-    if (loadingOlder) return;
-    if (nextBefore == null) return;
+    if (loadingOlder || nextBefore == null) return;
     setLoadingOlder(true);
     try {
       const page = await api.chatHistory(sessionId, nextBefore, PAGE_SIZE);
       setTotal(page.total);
       setRecords(rs => {
-        for (const r of page.records) seenKeys.current.add(recordKey(r));
-        return [...page.records, ...rs];
+        const fresh = page.records.filter(r => !seenKeys.current.has(recordKey(r)));
+        for (const r of fresh) seenKeys.current.add(recordKey(r));
+        return [...fresh, ...rs];
       });
       setNextBefore(page.offset);
       setAtStart(page.offset === 0);
-      // Keep Virtuoso's firstItemIndex in sync so its in-DOM window stays
-      // anchored on the same visible record as the page prepends above.
-      setFirstIndex(n => n - page.records.length);
     } catch {
       /* leave as-is */
     } finally {
@@ -240,8 +199,8 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
     }
   }, [loadingOlder, nextBefore, sessionId]);
 
-  // ---- derived: paired bubbles + pending question ----
-  const bubbles = useMemo(() => pairRecordsToBubbles(records), [records]);
+  // ---- derived -------------------------------------------------------------
+  const blocks = useMemo(() => buildTranscript(records), [records]);
   const pendingQ = useMemo(
     () =>
       view?.state.pendingQuestion
@@ -262,7 +221,7 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
   const isTerminal = view ? TERMINAL_STATUSES.has(view.state.status) : false;
   const isKillFailed = view?.state.status === 'kill_failed';
 
-  // ---- actions ----
+  // ---- actions -------------------------------------------------------------
   async function send() {
     if (!draft.trim() || !HAS_TOKEN) return;
     const msg = draft.trim();
@@ -271,16 +230,12 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
     try {
       const next = await api.send(sessionId, msg);
       setView(next);
-      if (busy || isBusy(next)) {
-        setActionNotice({ kind: 'ok', text: 'Message queued for the next turn boundary.' });
-      }
+      if (busy || isBusy(next)) setActionNotice({ kind: 'ok', text: 'Message queued for the next turn boundary.' });
     } catch (e) {
       setActionNotice({ kind: 'err', text: e instanceof ApiError ? e.message : String(e) });
     }
   }
 
-  // Interrupt the running turn (safe Escape daemon-side), then deliver the
-  // draft immediately — the composer's explicit alternative to queueing.
   async function interruptAndSend() {
     if (!draft.trim() || !HAS_TOKEN) return;
     const msg = draft.trim();
@@ -292,161 +247,79 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
       setView(next);
       setActionNotice({ kind: 'ok', text: 'Turn interrupted — message delivered.' });
     } catch (e) {
-      setDraft(msg); // never eat the draft on failure
+      setDraft(msg);
       setActionNotice({ kind: 'err', text: e instanceof ApiError ? e.message : String(e) });
     }
   }
 
-  async function interrupt() {
+  const interrupt = useCallback(async () => {
     setActionNotice(null);
     try {
-      const next = await api.interrupt(sessionId);
-      setView(next);
+      setView(await api.interrupt(sessionId));
     } catch (e) {
       setActionNotice({ kind: 'err', text: e instanceof ApiError ? e.message : String(e) });
     }
-  }
+  }, [sessionId]);
 
-  async function stop() {
+  const stop = useCallback(async () => {
     const reason = window.prompt('Reason for stopping this session:', 'stopped from browser');
     if (reason == null) return;
     setActionNotice(null);
     try {
-      const next = await api.stop(sessionId, reason.trim() || 'stopped from browser');
-      setView(next);
+      setView(await api.stop(sessionId, reason.trim() || 'stopped from browser'));
     } catch (e) {
       setActionNotice({ kind: 'err', text: e instanceof ApiError ? e.message : String(e) });
     }
-  }
+  }, [sessionId]);
 
-  async function resume() {
+  const resume = useCallback(async () => {
     setActionNotice(null);
     try {
-      const next = await api.resume(sessionId);
-      setView(next);
+      setView(await api.resume(sessionId));
     } catch (e) {
       setActionNotice({ kind: 'err', text: e instanceof ApiError ? e.message : String(e) });
     }
-  }
+  }, [sessionId]);
 
-  // Virtuoso "tail-follow" toggle: when the user is within 80px of the bottom,
-  // new live records yank them down; otherwise they stay put.
-  const [atBottom, setAtBottom] = useState(true);
-  function onAtBottomChange(b: boolean) {
-    setAtBottom(b);
-    setShowJump(!b);
-  }
-
-  // ---- header --------------------------------------------------------------
-  const header = view ? (
-    <div className="flex flex-wrap items-center gap-3 mt-4 mb-3">
-      <Link to="/" className="inline-flex items-center gap-1 text-muted hover:text-fg text-[13px]">
-        <ChevronLeft size={14} /> Sessions
-      </Link>
-      <h1 className="text-[1.3rem] tracking-tight m-0">{view.config.teammate || view.config.name || sessionId}</h1>
-      {/* The TASK is the whole point of the session — keep it visible next to
-          the callsign, with the label chip for grouping context. */}
-      {view.config.teammate && view.config.name && (
-        <span className="text-[13px] text-fg-soft truncate max-w-[28rem]" title={view.config.name}>
-          {view.config.name}
-        </span>
-      )}
-      {view.config.label && <Badge tone="accent">{view.config.label}</Badge>}
-      <Badge tone={toneFor(view.state.status)}>{view.state.status}</Badge>
-      <span className="mono text-[11.5px] text-muted">
-        {view.config.model || view.config.modelHint || 'default'} · turn {view.state.turn}
-      </span>
-      {/* Wrapper binary + harness kind. Soft foreground, small text, truncated
-          (binary names like `claude-auto-loge` can be long on narrow viewports). */}
-      <span
-        className="mono text-[11.5px] text-fg-soft truncate min-w-0 max-w-[22rem]"
-        title={`${view.config.binary} (${view.config.harness} TUI)`}
-      >
-        {view.config.binary} · {view.config.harness} TUI
-      </span>
-      {view.state.contextPercent != null && (
-        <span className="mono text-[12px] text-fg-soft">context {view.state.contextPercent}%</span>
-      )}
-      <span className="ml-auto inline-flex items-center gap-1 text-[11.5px] text-muted mono">
-        <span
-          className={
-            liveStatus === 'open'
-              ? 'w-1.5 h-1.5 rounded-full bg-ok inline-block'
-              : liveStatus === 'connecting'
-                ? 'w-1.5 h-1.5 rounded-full bg-warn inline-block'
-                : 'w-1.5 h-1.5 rounded-full bg-err inline-block'
-          }
-        />
-        ws {liveStatus}
-      </span>
-      <Button
-        size="sm"
-        variant="ghost"
-        onClick={toggleDensity}
-        title={
-          density === 'compact'
-            ? 'Showing compact view (titles + chips only) — click for full bodies'
-            : 'Showing comfortable view (full bodies) — click to compact'
-        }
-      >
-        {density === 'compact' ? <Rows3 size={12} /> : <Maximize2 size={12} />}
-        {density === 'compact' ? 'compact' : 'comfortable'}
-      </Button>
-      <ActionGroup className="ml-2">
-        {!isTerminal && HAS_TOKEN && (
-          <Button size="sm" variant="outline" onClick={interrupt} title="Interrupt the active turn">
-            <Pause size={12} /> Interrupt
-          </Button>
-        )}
-        {(!isTerminal || isKillFailed) && HAS_TOKEN && (
-          <Button size="sm" variant="danger" onClick={stop} title="Stop the session">
-            <StopCircle size={12} /> Stop
-          </Button>
-        )}
-        {isTerminal && !isKillFailed && HAS_TOKEN && (
-          <Button size="sm" variant="primary" onClick={resume} title="Resume a finished session">
-            <Play size={12} /> Resume
-          </Button>
-        )}
-        {isKillFailed && (
-          <span className="inline-flex items-center gap-1 text-warn text-[12px]">
-            <ZapOff size={12} /> failed to kill — issue Stop first
-          </span>
-        )}
-      </ActionGroup>
-    </div>
-  ) : null;
-
-  // ---- main view -----------------------------------------------------------
-  const headerSlot = (
+  // ---- transcript header / footer slots ------------------------------------
+  const transcriptHeader = (
     <>
-      {loadingOlder && <div className="text-center text-muted text-[12px] py-2">loading older messages…</div>}
+      {loadingOlder && <div className="py-2 text-center text-[12px] text-muted">loading older messages…</div>}
       {atStart && records.length > 0 && (
-        <div className="text-center text-muted text-[12px] py-2">start of chat · {total} records total</div>
+        <div className="py-2 text-center text-[11.5px] text-faint">start of conversation · {total} records</div>
       )}
       {view && WAITING_STATUSES.has(view.state.status) && (
-        <div className="mx-auto mb-2 rounded-md border border-warn-border bg-warn-bg px-3 py-2 text-[12.5px] text-warn max-w-[640px]">
-          <div className="font-semibold mb-0.5">Waiting for input</div>
+        <div className="mx-auto mb-2 max-w-[640px] rounded-md border border-warn-border bg-warn-bg px-3 py-2 text-[12.5px] text-warn">
+          <div className="mb-0.5 font-semibold">Waiting for input</div>
           <span>
-            harness is in <code className="mono">{view.state.status}</code> since{' '}
-            {fmtAbsolute(view.state.lastActivityAt)}.
+            harness is <code className="mono">{view.state.status}</code> since {fmtAbsolute(view.state.lastActivityAt)}.
           </span>
         </div>
       )}
     </>
   );
-  const footerSlot = busy ? (
-    <div className="mt-3 flex justify-start">
-      <div className="max-w-[min(720px,85%)] rounded-lg border border-border bg-surface px-3 py-2.5">
-        <ThinkingIndicator activity={view?.state.activity ?? null} />
-      </div>
+  const transcriptFooter = busy ? (
+    <div className="px-2 py-2">
+      <ThinkingIndicator activity={view?.state.activity ?? null} />
     </div>
   ) : null;
 
   return (
-    <div className="flex flex-col h-[calc(100vh-44px)]">
-      {header}
-      <div className="flex items-center gap-2 mb-2">
+    <div className="flex h-[calc(100vh-44px)] flex-col">
+      {view && (
+        <SessionHeader
+          view={view}
+          liveStatus={liveStatus}
+          isTerminal={isTerminal}
+          isKillFailed={isKillFailed}
+          hasToken={HAS_TOKEN}
+          onInterrupt={() => void interrupt()}
+          onStop={() => void stop()}
+          onResume={() => void resume()}
+        />
+      )}
+
+      <div className="mb-2 flex items-center gap-2">
         <ViewTabs<'chat' | 'terminal'>
           tabs={[
             { id: 'chat', label: 'Chat', icon: <MessageSquare size={12} /> },
@@ -456,15 +329,16 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
           onChange={setTab}
         />
       </div>
+
       {error && (
-        <div className="rounded-md border border-err-border bg-err-bg px-3 py-2 text-err text-[13px] mb-2">{error}</div>
+        <div className="mb-2 rounded-md border border-err-border bg-err-bg px-3 py-2 text-[13px] text-err">{error}</div>
       )}
       {actionNotice && (
         <div
           className={
             actionNotice.kind === 'err'
-              ? 'rounded-md border border-err-border bg-err-bg px-3 py-1.5 text-err text-[12.5px] mb-2'
-              : 'rounded-md border border-ok-border bg-ok-bg px-3 py-1.5 text-ok text-[12.5px] mb-2'
+              ? 'mb-2 rounded-md border border-err-border bg-err-bg px-3 py-1.5 text-[12.5px] text-err'
+              : 'mb-2 rounded-md border border-ok-border bg-ok-bg px-3 py-1.5 text-[12.5px] text-ok'
           }
         >
           {actionNotice.text}
@@ -472,41 +346,23 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
       )}
 
       {tab === 'terminal' ? (
-        // Terminal tab handles its own polling + sticky-scroll; no composer,
-        // jump-to-latest, or snapshot drawer while it's mounted (it's the
-        // snapshot, no need to duplicate it).
         <TerminalView sessionId={sessionId} tmuxSession={view?.config.tmuxSession ?? ''} />
       ) : (
         <>
-          <div className="flex-1 min-h-0 rounded-md border border-border bg-surface flex flex-col overflow-hidden relative">
+          <div className="relative min-h-0 flex-1 overflow-hidden rounded-lg border border-border bg-surface">
             {loadingInitial ? (
               <ThreadSkeleton />
             ) : (
-              <Virtuoso
-                ref={virtuosoRef}
-                firstItemIndex={firstIndex}
-                initialTopMostItemIndex={Math.max(firstIndex + bubbles.length - 1, 0)}
-                data={bubbles}
-                followOutput={atBottom ? 'smooth' : false}
-                atBottomStateChange={onAtBottomChange}
-                startReached={() => void loadOlder()}
-                increaseViewportBy={{ top: 600, bottom: 600 }}
-                itemContent={(_, bubble) => <BubbleRow bubble={bubble} density={density} />}
-                components={{ Header: () => <>{headerSlot}</>, Footer: () => <>{footerSlot}</> }}
-                className="flex-1 min-h-0"
-                style={{ height: '100%' }}
+              <Transcript
+                blocks={blocks}
+                live={busy}
+                hasOlder={nextBefore != null}
+                loadingOlder={loadingOlder}
+                onLoadOlder={() => void loadOlder()}
+                pinSignal={pinSignal}
+                header={transcriptHeader}
+                footer={transcriptFooter}
               />
-            )}
-            {showJump && !loadingInitial && (
-              <button
-                type="button"
-                onClick={() => {
-                  virtuosoRef.current?.scrollToIndex({ index: 'LAST', align: 'end', behavior: 'smooth' });
-                }}
-                className="absolute bottom-20 left-1/2 -translate-x-1/2 rounded-full border border-accent-border bg-accent text-accent-fg px-3 py-1 text-[12px] font-semibold shadow-md hover:opacity-90"
-              >
-                <ArrowDown size={12} className="inline mr-1" /> jump to latest
-              </button>
             )}
           </div>
 
@@ -524,56 +380,36 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
           )}
           {awaitingQ && pendingQ && HAS_TOKEN && (
             <div className="mt-3">
-              <QuestionForm
-                sessionId={sessionId}
-                question={pendingQ}
-                onSubmit={() => {
-                  void refreshView();
-                }}
-              />
+              <QuestionForm sessionId={sessionId} question={pendingQ} onSubmit={() => void refreshView()} />
             </div>
           )}
           {!HAS_TOKEN && (
-            <div className="mt-3 rounded-md border border-warn-border bg-warn-bg px-3 py-2 text-warn text-[13px]">
+            <div className="mt-3 rounded-md border border-warn-border bg-warn-bg px-3 py-2 text-[13px] text-warn">
               Read-only: this origin did not receive an embedding token from the daemon, so messages, answers, and
               control actions are disabled.
             </div>
           )}
-
-          <div className="mt-3">
-            <PaneSnapshotDrawer sessionId={sessionId} />
-          </div>
         </>
       )}
     </div>
   );
 }
 
-function BubbleRow({
-  bubble,
-  density,
-}: {
-  bubble: ReturnType<typeof pairRecordsToBubbles>[number];
-  density: 'comfortable' | 'compact';
-}) {
-  return <MessageBubble bubble={bubble} density={density} />;
-}
-
 function ThreadSkeleton() {
   return (
-    <div className="flex-1 min-h-0 overflow-hidden p-4 space-y-2">
+    <div className="mx-auto flex h-full w-full max-w-[880px] flex-col gap-4 p-5">
       {Array.from({ length: 6 }).map((_, i) => (
-        <div key={i} className="flex animate-pulse">
-          <div className="h-12 w-3/5 rounded-md bg-surface-2" />
+        <div key={i} className="animate-pulse space-y-2">
+          <div className="h-2.5 w-24 rounded bg-surface-2" />
+          <div className="h-3 w-4/5 rounded bg-surface-2" />
+          <div className="h-3 w-3/5 rounded bg-surface-2" />
         </div>
       ))}
     </div>
   );
 }
 
-// Map a WS event envelope onto a ChatRecord. The daemon sometimes sends the
-// full record as `data`, other times flattens fields. Best-effort: prefer
-// `data`, fall back to envelope fields.
+// Map a WS event envelope onto a ChatRecord.
 function eventToRecord(ev: KTeamEvent): ChatRecord | null {
   const d = ev.data as Record<string, unknown> | null;
   if (!d || typeof d !== 'object') return null;
