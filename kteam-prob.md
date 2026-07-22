@@ -465,3 +465,23 @@ verdict FIX-FIRST, review fixes applied by the lead):
 
 130 tests green, tsc clean. Warden false-positive class ("completed reclassified
 failed after restart") is now structurally closed by the turn-scoped markers.
+
+## 2026-07-22 19:27 — papercut: daemon cold-init outruns the CLI readiness window
+
+**Problem:** `kteam daemon install`/`start` reported "kteamd did not become ready"
+and `daemon status` showed "process exists, but API unavailable" — yet the daemon
+came up healthy ~85 s after spawn. With 990 stored sessions, SessionManager.create
+(recovery/reconciliation) runs BEFORE the bind, so the port stays closed for the
+whole init while the CLI's wait window expires.
+
+**Evidence:** pid 47453 spawned 19:27:30; /v1/health first answered 19:28:57
+(sessions:990). No error in daemon.log — pure startup latency.
+
+**Suspected code path:** `src/index.ts` waitForDaemon timeout vs
+`src/daemon-entry.ts` init ordering (manager created before bind — intentional
+since G1, the bind is the single-instance lock and must come after the probe).
+
+**Workaround:** just re-check `kteam daemon status` after a minute.
+
+**Suggested fix:** scale the CLI wait window (or poll until the pid dies), and/or
+archive terminal sessions out of the hot store so init doesn't scan ~1000 dirs.
