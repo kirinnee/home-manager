@@ -2,6 +2,7 @@ import type { Server, ServerWebSocket } from 'bun';
 import { existsSync } from 'node:fs';
 import { join, normalize } from 'node:path';
 import type { KTeamService } from './service';
+import { WARDEN_LABEL } from './warden-detect';
 import { renderShell } from './ui';
 
 // Built chat UI (Vite output, committed): served when present; the legacy
@@ -19,7 +20,47 @@ export interface ApiServerOptions {
   host: string;
   port: number;
   token: string;
+  /** Capability-scoped token the warden pane runs under. When set, requests
+   *  bearing it are restricted to a read + safe-recovery allowlist (GET routes
+   *  except warden oversight, plus send/answer/resume/migrate, plus signalling
+   *  ONLY a warden-labelled session so the warden can complete itself). Every
+   *  other route — start/stop/remove/interrupt and the warden/* routes — is
+   *  rejected 403. Omitted in tests that only exercise the admin path. */
+  wardenToken?: string;
   service: KTeamService;
+}
+
+/** Actions the warden-scoped token may POST to /v1/sessions/:id. `signal` is
+ *  gated further (self-completion only) in the gate below. */
+const WARDEN_ALLOWED_ACTIONS = new Set(['send', 'answer', 'resume', 'migrate']);
+
+/** Decide whether the warden-scoped token may perform this request. Returns a
+ *  403 Response when denied, or undefined when allowed. Reads (GET) are allowed
+ *  except the warden oversight routes; the only permitted writes are the
+ *  safe-recovery actions plus self-completion via `signal`. */
+async function wardenScopeDenial(method: string, url: URL, service: KTeamService): Promise<Response | undefined> {
+  const forbidden = (what: string) => json({ error: `the warden-scoped token may not ${what}` }, 403);
+  const pathname = url.pathname;
+  if (pathname.startsWith('/v1/warden/')) return forbidden('use the warden oversight routes');
+  if (method === 'GET') return undefined; // every other read is fine
+  if (pathname === '/v1/sessions' && method === 'POST') return forbidden('start sessions');
+  if (method === 'DELETE') return forbidden('remove sessions');
+  const match = pathname.match(/^\/v1\/sessions\/([^/]+)(?:\/(.+))?$/);
+  if (match && method === 'POST') {
+    const action = match[2];
+    if (action && WARDEN_ALLOWED_ACTIONS.has(action)) return undefined;
+    if (action === 'signal') {
+      // A warden completes its own turn with `kteam signal done`; permit signal
+      // ONLY when the target resolves to a warden-labelled session, so it can
+      // never mark another teammate's work done or ask for help on its behalf.
+      const id = decodeURIComponent(match[1]!);
+      const target = await service.get(id).catch(() => undefined);
+      if (target?.config.label === WARDEN_LABEL) return undefined;
+      return forbidden('signal a non-warden session');
+    }
+    return forbidden(`perform the "${action ?? 'stop'}" action`);
+  }
+  return forbidden('access this route');
 }
 
 const json = (value: unknown, status = 200) => Response.json(value, { status });
@@ -107,7 +148,15 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
         });
       }
-      if (bearer !== options.token && websocketToken !== options.token) return json({ error: 'unauthorized' }, 401);
+      const authedAdmin = bearer === options.token || websocketToken === options.token;
+      const authedWarden = options.wardenToken !== undefined && bearer === options.wardenToken;
+      if (!authedAdmin && !authedWarden) return json({ error: 'unauthorized' }, 401);
+      // Warden-scoped token: enforce the capability allowlist before routing.
+      // (An admin token that also happens to match is never scoped.)
+      if (authedWarden && !authedAdmin) {
+        const denial = await wardenScopeDenial(request.method, url, options.service);
+        if (denial) return denial;
+      }
 
       try {
         if (isWebSocket) {
@@ -122,6 +171,12 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           return upgraded ? undefined : json({ error: 'websocket upgrade failed' }, 400);
         }
         if (url.pathname === '/v1/health' && request.method === 'GET') return json(await options.service.health());
+        if (url.pathname === '/v1/warden/status' && request.method === 'GET')
+          return json(await options.service.wardenStatus());
+        if (url.pathname === '/v1/warden/run' && request.method === 'POST') {
+          const input = await body<{ spawn?: boolean }>(request);
+          return json(await options.service.wardenRun(input.spawn === true));
+        }
         if (url.pathname === '/v1/sessions' && request.method === 'GET') return json(await options.service.list());
         if (url.pathname === '/v1/sessions' && request.method === 'POST')
           return json(await options.service.start(await body(request)), 201);
@@ -154,6 +209,11 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
         if (action === 'resume' && request.method === 'POST') {
           const input = await body<{ message?: string }>(request);
           return json(await options.service.resume(id, input.message));
+        }
+        if (action === 'migrate' && request.method === 'POST') {
+          const input = await body<{ agent?: string; model?: string }>(request);
+          if (!input.agent) throw new HttpError(400, 'agent is required');
+          return json(await options.service.migrate(id, input.agent, input.model));
         }
         if (action === 'signal' && request.method === 'POST') {
           const input = await body<{ kind: 'done' | 'help'; message?: string }>(request);

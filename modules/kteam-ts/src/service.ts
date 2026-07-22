@@ -1,9 +1,33 @@
 import type { KTeamEvent, SendRequest, SessionConfig, SessionState, StartSessionRequest } from './types';
+import type { WardenConfig } from './daemon-config';
+import type { WardenAnomaly } from './warden-detect';
 
 export interface SessionView {
   config: SessionConfig;
   state: SessionState;
   directory: string;
+}
+
+export interface WardenStatusView {
+  config: WardenConfig;
+  lastSweepAt?: string;
+  anomalies: WardenAnomaly[];
+  fingerprint: string;
+  /** Id of a currently-live escalation warden session, if any. */
+  liveWarden?: string;
+  /** When escalation last spawned a warden (from durable warden state). */
+  lastSpawnAt?: string;
+  /** Newest report on disk: its path and first few lines. */
+  lastReport?: { path: string; head: string };
+}
+
+export interface WardenRunView {
+  sweptAt: string;
+  anomalies: WardenAnomaly[];
+  /** Session id of a warden spawned by this run, when escalation fired. */
+  spawned?: string;
+  /** Why escalation did not spawn (disabled, gap, no anomalies, live warden…). */
+  message?: string;
 }
 
 export interface AttachmentView {
@@ -26,6 +50,9 @@ export interface KTeamService {
   interrupt(id: string): Promise<SessionView>;
   stop(id: string, reason?: string): Promise<SessionView>;
   resume(id: string, message?: string): Promise<SessionView>;
+  /** Continue a session on another same-kind account (new wrapper); relaunches
+   *  via the resume path under the new wrapper. Cross-kind is rejected. */
+  migrate(id: string, agent: string, model?: string): Promise<SessionView>;
   remove(id: string, purge?: boolean, force?: boolean): Promise<void>;
   signal(id: string, kind: 'done' | 'help', message?: string): Promise<SessionView>;
   snapshot(id: string): Promise<string>;
@@ -45,4 +72,8 @@ export interface KTeamService {
   subscribe(listener: (event: KTeamEvent) => void): () => void;
   addAttachment(id: string, filename: string, mime: string, bytes: Uint8Array): Promise<AttachmentView>;
   getAttachment(id: string, attachmentId: string): Promise<{ attachment: AttachmentView; bytes: Uint8Array }>;
+  /** Fleet-warden status: config, last sweep, current anomalies, last report. */
+  wardenStatus(): Promise<WardenStatusView>;
+  /** Force a fleet sweep now; `spawn` forces escalation past the gap/enabled. */
+  wardenRun(spawn?: boolean): Promise<WardenRunView>;
 }
