@@ -89,6 +89,14 @@ export interface SessionState {
   contextPercent?: number;
   activity?: string;
   lastToolStartedAt?: string;
+  /** A6 liveness ledger (see src/liveness.ts): per-life-sign timestamps. */
+  lastTranscriptAt?: string;
+  lastPaneAt?: string;
+  lastCounterAdvanceAt?: string;
+  lastTokenAdvanceAt?: string;
+  lastSubprocessAt?: string;
+  subprocessSince?: string;
+  nudgedAt?: string;
   retryAttempt?: number;
   turnCompleted?: boolean;
   quota?: {
@@ -222,5 +230,38 @@ export interface TerminalFrameData {
   activity?: string;
   contextPercent?: number;
   promptReady?: boolean;
+  [k: string]: unknown;
+}
+
+// ============================================================================
+// Warden fleet-health ("checks"). Mirror of the daemon's WardenStatusView —
+// rendered defensively: every field is optional so an older daemon that omits
+// the route (or fields) degrades to "hidden" rather than crashing.
+// ============================================================================
+
+export interface WardenAnomaly {
+  kind: string;
+  sessionId: string;
+  teammate?: string;
+  label?: string;
+  status?: string;
+  detail?: string;
+  since?: string;
+  idleMinutes?: number;
+  [k: string]: unknown;
+}
+
+export interface WardenStatusView {
+  config?: {
+    enabled?: boolean;
+    wrapper?: string;
+    intervalMinutes?: number;
+    [k: string]: unknown;
+  };
+  lastSweepAt?: string;
+  anomalies?: WardenAnomaly[];
+  liveWarden?: string;
+  lastSpawnAt?: string;
+  lastReport?: { path: string; head: string };
   [k: string]: unknown;
 }

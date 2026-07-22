@@ -3,7 +3,7 @@
 // for loopback clients and an empty string otherwise — we surface the empty
 // case as a read-only banner and gate every mutating call on token presence).
 
-import type { SessionView, ChatHistoryPage, KTeamEvent } from '../types';
+import type { SessionView, ChatHistoryPage, KTeamEvent, WardenStatusView } from '../types';
 
 declare global {
   interface Window {
@@ -89,6 +89,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(message ? { message } : {}),
     }),
+  wardenStatus: () => request<WardenStatusView>('/v1/warden/status'),
   replay: (id: string, after: number, limit = 200) => {
     const qs = `after=${after}&limit=${limit}`;
     return request<{ events: KTeamEvent[]; latest: number }>(
