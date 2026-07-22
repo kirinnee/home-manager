@@ -13,7 +13,18 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
-import { ArrowDown, Pause, Play, StopCircle, ZapOff, ChevronLeft, Rows3, Maximize2 } from 'lucide-react';
+import {
+  ArrowDown,
+  Pause,
+  Play,
+  StopCircle,
+  ZapOff,
+  ChevronLeft,
+  Rows3,
+  Maximize2,
+  MessageSquare,
+  Terminal,
+} from 'lucide-react';
 import { api, ApiError, HAS_TOKEN } from '../lib/api';
 import { openEventStream } from '../lib/ws';
 import type { SessionView, ChatRecord, KTeamEvent } from '../types';
@@ -24,6 +35,8 @@ import { MessageBubble } from '../components/Primitives.MessageBubble';
 import { Composer } from '../components/Composer';
 import { QuestionForm } from '../components/QuestionForm';
 import { PaneSnapshotDrawer } from '../components/Question';
+import { TerminalView } from '../components/TerminalView';
+import { ViewTabs } from '../components/ViewTabs';
 import { pairRecordsToBubbles, latestPendingQuestion } from '../lib/pairing';
 import { useDensity } from '../hooks/useDensity';
 import { TERMINAL_STATUSES, WAITING_STATUSES, fmtAbsolute, isBusy, toneFor } from '../lib/utils';
@@ -47,6 +60,10 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
   const [showJump, setShowJump] = useState(false);
   const [actionNotice, setActionNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
   const [density, toggleDensity] = useDensity();
+  // View toggle: chat-thread (default) vs. the cached tmux pane snapshot.
+  // Polling for the terminal view is gated on this state + document.hidden,
+  // see TerminalView.tsx.
+  const [tab, setTab] = useState<'chat' | 'terminal'>('chat');
 
   // react-virtuoso expects a stable sequential firstItemIndex when data
   // pre-pends so internal offsets stay correct.
@@ -339,6 +356,14 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
       <span className="mono text-[11.5px] text-muted">
         {view.config.model || view.config.modelHint || 'default'} · turn {view.state.turn}
       </span>
+      {/* Wrapper binary + harness kind. Soft foreground, small text, truncated
+          (binary names like `claude-auto-loge` can be long on narrow viewports). */}
+      <span
+        className="mono text-[11.5px] text-fg-soft truncate min-w-0 max-w-[22rem]"
+        title={`${view.config.binary} (${view.config.harness} TUI)`}
+      >
+        {view.config.binary} · {view.config.harness} TUI
+      </span>
       {view.state.contextPercent != null && (
         <span className="mono text-[12px] text-fg-soft">context {view.state.contextPercent}%</span>
       )}
@@ -421,6 +446,16 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
   return (
     <div className="flex flex-col h-[calc(100vh-44px)]">
       {header}
+      <div className="flex items-center gap-2 mb-2">
+        <ViewTabs<'chat' | 'terminal'>
+          tabs={[
+            { id: 'chat', label: 'Chat', icon: <MessageSquare size={12} /> },
+            { id: 'terminal', label: 'Terminal', icon: <Terminal size={12} /> },
+          ]}
+          current={tab}
+          onChange={setTab}
+        />
+      </div>
       {error && (
         <div className="rounded-md border border-err-border bg-err-bg px-3 py-2 text-err text-[13px] mb-2">{error}</div>
       )}
@@ -436,71 +471,80 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
         </div>
       )}
 
-      <div className="flex-1 min-h-0 rounded-md border border-border bg-surface flex flex-col overflow-hidden relative">
-        {loadingInitial ? (
-          <ThreadSkeleton />
-        ) : (
-          <Virtuoso
-            ref={virtuosoRef}
-            firstItemIndex={firstIndex}
-            initialTopMostItemIndex={Math.max(firstIndex + bubbles.length - 1, 0)}
-            data={bubbles}
-            followOutput={atBottom ? 'smooth' : false}
-            atBottomStateChange={onAtBottomChange}
-            startReached={() => void loadOlder()}
-            increaseViewportBy={{ top: 600, bottom: 600 }}
-            itemContent={(_, bubble) => <BubbleRow bubble={bubble} density={density} />}
-            components={{ Header: () => <>{headerSlot}</>, Footer: () => <>{footerSlot}</> }}
-            className="flex-1 min-h-0"
-            style={{ height: '100%' }}
-          />
-        )}
-        {showJump && !loadingInitial && (
-          <button
-            type="button"
-            onClick={() => {
-              virtuosoRef.current?.scrollToIndex({ index: 'LAST', align: 'end', behavior: 'smooth' });
-            }}
-            className="absolute bottom-20 left-1/2 -translate-x-1/2 rounded-full border border-accent-border bg-accent text-accent-fg px-3 py-1 text-[12px] font-semibold shadow-md hover:opacity-90"
-          >
-            <ArrowDown size={12} className="inline mr-1" /> jump to latest
-          </button>
-        )}
-      </div>
+      {tab === 'terminal' ? (
+        // Terminal tab handles its own polling + sticky-scroll; no composer,
+        // jump-to-latest, or snapshot drawer while it's mounted (it's the
+        // snapshot, no need to duplicate it).
+        <TerminalView sessionId={sessionId} tmuxSession={view?.config.tmuxSession ?? ''} />
+      ) : (
+        <>
+          <div className="flex-1 min-h-0 rounded-md border border-border bg-surface flex flex-col overflow-hidden relative">
+            {loadingInitial ? (
+              <ThreadSkeleton />
+            ) : (
+              <Virtuoso
+                ref={virtuosoRef}
+                firstItemIndex={firstIndex}
+                initialTopMostItemIndex={Math.max(firstIndex + bubbles.length - 1, 0)}
+                data={bubbles}
+                followOutput={atBottom ? 'smooth' : false}
+                atBottomStateChange={onAtBottomChange}
+                startReached={() => void loadOlder()}
+                increaseViewportBy={{ top: 600, bottom: 600 }}
+                itemContent={(_, bubble) => <BubbleRow bubble={bubble} density={density} />}
+                components={{ Header: () => <>{headerSlot}</>, Footer: () => <>{footerSlot}</> }}
+                className="flex-1 min-h-0"
+                style={{ height: '100%' }}
+              />
+            )}
+            {showJump && !loadingInitial && (
+              <button
+                type="button"
+                onClick={() => {
+                  virtuosoRef.current?.scrollToIndex({ index: 'LAST', align: 'end', behavior: 'smooth' });
+                }}
+                className="absolute bottom-20 left-1/2 -translate-x-1/2 rounded-full border border-accent-border bg-accent text-accent-fg px-3 py-1 text-[12px] font-semibold shadow-md hover:opacity-90"
+              >
+                <ArrowDown size={12} className="inline mr-1" /> jump to latest
+              </button>
+            )}
+          </div>
 
-      {!awaitingQ && HAS_TOKEN && (
-        <div className="mt-3">
-          <Composer
-            draft={draft}
-            onDraftChange={setDraft}
-            onSubmit={() => void send()}
-            onInterruptAndSend={() => void interruptAndSend()}
-            disabled={!view || loadingInitial}
-            busy={busy}
-          />
-        </div>
-      )}
-      {awaitingQ && pendingQ && HAS_TOKEN && (
-        <div className="mt-3">
-          <QuestionForm
-            sessionId={sessionId}
-            question={pendingQ}
-            onSubmit={() => {
-              void refreshView();
-            }}
-          />
-        </div>
-      )}
-      {!HAS_TOKEN && (
-        <div className="mt-3 rounded-md border border-warn-border bg-warn-bg px-3 py-2 text-warn text-[13px]">
-          Read-only: this origin did not receive an embedding token from the daemon, so messages, answers, and control
-          actions are disabled.
-        </div>
-      )}
+          {!awaitingQ && HAS_TOKEN && (
+            <div className="mt-3">
+              <Composer
+                draft={draft}
+                onDraftChange={setDraft}
+                onSubmit={() => void send()}
+                onInterruptAndSend={() => void interruptAndSend()}
+                disabled={!view || loadingInitial}
+                busy={busy}
+              />
+            </div>
+          )}
+          {awaitingQ && pendingQ && HAS_TOKEN && (
+            <div className="mt-3">
+              <QuestionForm
+                sessionId={sessionId}
+                question={pendingQ}
+                onSubmit={() => {
+                  void refreshView();
+                }}
+              />
+            </div>
+          )}
+          {!HAS_TOKEN && (
+            <div className="mt-3 rounded-md border border-warn-border bg-warn-bg px-3 py-2 text-warn text-[13px]">
+              Read-only: this origin did not receive an embedding token from the daemon, so messages, answers, and
+              control actions are disabled.
+            </div>
+          )}
 
-      <div className="mt-3">
-        <PaneSnapshotDrawer sessionId={sessionId} />
-      </div>
+          <div className="mt-3">
+            <PaneSnapshotDrawer sessionId={sessionId} />
+          </div>
+        </>
+      )}
     </div>
   );
 }
