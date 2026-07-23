@@ -408,6 +408,156 @@ describe('send() delivery holes (turn-012 fix round)', () => {
   });
 });
 
+describe('partition-tolerant loud bootstrap (turn-019 P0)', () => {
+  test('a phase failure is recorded and LATER phases still run', async () => {
+    const manager = bareManager();
+    const ran: string[] = [];
+    manager.bootstrapErrors = [];
+    manager.emitTransient = () => undefined;
+    manager.store = {
+      importFromDisk: async () => {
+        ran.push('import');
+        throw new Error('index exploded');
+      },
+    };
+    manager.initializeGlobalSequence = async () => {
+      ran.push('global-sequence');
+    };
+    manager.recover = async () => {
+      ran.push('recover');
+      throw new Error('recover exploded');
+    };
+    manager.startWarden = async () => {
+      ran.push('warden');
+    };
+    await (manager as unknown as { bootstrap: () => Promise<void> }).bootstrap();
+    expect(ran).toEqual(['import', 'global-sequence', 'recover', 'warden']); // warden ALWAYS armed
+    const errors = manager.bootstrapErrors as string[];
+    expect(errors).toHaveLength(2);
+    expect(errors[0]).toContain('import');
+    expect(errors[1]).toContain('recover');
+  });
+
+  test('one bad session cannot abort recovery of the rest', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-recover-isolate-'));
+    temporaryDirectories.push(home);
+    const recovered: string[] = [];
+    const manager = bareManager();
+    manager.paths = createPaths(home);
+    manager.monitors = new Map();
+    manager.bootstrapErrors = [];
+    manager.emit = async () => ({});
+    manager.list = async () => [
+      {
+        directory: `${home}/bad`,
+        config: { id: 'bad', tmuxSession: 'kteam-bad-agent', retry: {} },
+        state: { id: 'bad', status: 'running', turn: 1 },
+      },
+      {
+        directory: `${home}/good`,
+        config: { id: 'good', tmuxSession: 'kteam-good-agent', retry: {} },
+        state: { id: 'good', status: 'running', turn: 1 },
+      },
+    ];
+    manager.tmux = {
+      state: async (name: string) => {
+        if (name === 'kteam-bad-agent') throw new Error('tmux exploded for this session');
+        return { alive: true, dead: false, promptReady: true };
+      },
+    };
+    manager.transition = async () => undefined;
+    manager.startMonitor = async (id: string) => {
+      recovered.push(id);
+    };
+    await (manager as unknown as { recover: () => Promise<void> }).recover();
+    expect(recovered).toEqual(['good']); // the good session was still adopted
+    expect((manager.bootstrapErrors as string[])[0]).toContain('bad');
+  });
+
+  test('a session started by a client during the bootstrap window is not double-adopted', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-recover-race-'));
+    temporaryDirectories.push(home);
+    const manager = bareManager();
+    manager.paths = createPaths(home);
+    manager.bootstrapErrors = [];
+    manager.emit = async () => ({});
+    // The client's start() already registered a live monitor for s1.
+    manager.monitors = new Map([['s1', { abort: new AbortController() }]]);
+    let transitions = 0;
+    manager.list = async () => [
+      {
+        directory: `${home}/s1`,
+        config: { id: 's1', tmuxSession: 'kteam-s1-agent', retry: {} },
+        state: { id: 's1', status: 'running', turn: 1 },
+      },
+    ];
+    manager.tmux = {
+      state: async () => {
+        throw new Error('recover must not even probe a session that already has a monitor');
+      },
+    };
+    manager.transition = async () => {
+      transitions++;
+    };
+    manager.startMonitor = async () => {
+      throw new Error('must not restart a live monitor');
+    };
+    await (manager as unknown as { recover: () => Promise<void> }).recover();
+    expect(transitions).toBe(0);
+    expect(manager.bootstrapErrors as string[]).toHaveLength(0);
+  });
+
+  test('selfCheck repairs unmonitored running sessions and re-arms a dead warden timer', async () => {
+    const manager = bareManager();
+    const transient: string[] = [];
+    const started: string[] = [];
+    let wardenArmed = 0;
+    manager.closed = false;
+    manager.monitors = new Map();
+    manager.bootstrapErrors = ['bootstrap phase recover failed: boom'];
+    manager.wardenTimer = undefined;
+    manager.wardenState = { lastSweepAt: new Date(Date.now() - 60 * 60_000).toISOString() };
+    manager.options = { warden: { intervalMinutes: 5 } };
+    manager.list = async () => [
+      { directory: '/x/s1', config: { id: 's1' }, state: { id: 's1', status: 'running', turn: 1 } },
+      { directory: '/x/s2', config: { id: 's2' }, state: { id: 's2', status: 'completed', turn: 1 } },
+    ];
+    manager.emitTransient = (type: string) => {
+      transient.push(type);
+    };
+    manager.startMonitor = async (id: string) => {
+      started.push(id);
+    };
+    manager.startWarden = async () => {
+      wardenArmed++;
+    };
+    await (manager as unknown as { selfCheck: () => Promise<void> }).selfCheck();
+    expect(transient).toEqual(['fleet.self_check_failed']);
+    expect(started).toEqual(['s1']); // running-without-monitor repaired; terminal ignored
+    expect(wardenArmed).toBe(1); // dead timer re-armed
+  });
+
+  test('selfCheck is silent when everything is healthy', async () => {
+    const manager = bareManager();
+    const transient: string[] = [];
+    manager.closed = false;
+    manager.monitors = new Map([['s1', {}]]);
+    manager.bootstrapErrors = [];
+    manager.wardenTimer = setInterval(() => undefined, 1_000_000);
+    manager.wardenState = { lastSweepAt: new Date().toISOString() };
+    manager.options = { warden: { intervalMinutes: 5 } };
+    manager.list = async () => [
+      { directory: '/x/s1', config: { id: 's1' }, state: { id: 's1', status: 'running', turn: 1 } },
+    ];
+    manager.emitTransient = (type: string) => {
+      transient.push(type);
+    };
+    await (manager as unknown as { selfCheck: () => Promise<void> }).selfCheck();
+    clearInterval(manager.wardenTimer as ReturnType<typeof setInterval>);
+    expect(transient).toEqual([]);
+  });
+});
+
 describe('needs_human flag + sweep dedupe (turn-018)', () => {
   test('a needs_human verdict sets the durable flag once and emits fleet.needs_human', async () => {
     const transient: string[] = [];
@@ -979,6 +1129,9 @@ describe('boot recovery re-adopts live panes (A1)', () => {
     let monitors = 0;
     const manager = bareManager();
     manager.paths = createPaths(home);
+    manager.monitors = new Map();
+    manager.bootstrapErrors = [];
+    manager.emit = async () => ({});
     manager.list = async () => [
       {
         directory: path.join(home, 's1'),
@@ -1013,6 +1166,9 @@ describe('boot recovery re-adopts live panes (A1)', () => {
     const events: Array<{ patch: { status?: string } }> = [];
     const manager = bareManager();
     manager.paths = createPaths(home);
+    manager.monitors = new Map();
+    manager.bootstrapErrors = [];
+    manager.emit = async () => ({});
     manager.list = async () => [
       {
         directory: path.join(home, 's1'),
@@ -1045,6 +1201,9 @@ describe('boot reconciliation honors the done marker (G4)', () => {
     const transitions: Array<{ status?: string }> = [];
     const manager = bareManager();
     manager.paths = paths;
+    manager.monitors = new Map();
+    manager.bootstrapErrors = [];
+    manager.emit = async () => ({});
     manager.list = async () => [
       {
         directory: path.join(home, 's1'),
