@@ -308,6 +308,10 @@ describe('context percent parsing', () => {
     expect(contextPercentUsed('❯\n  30% context left')).toBe(70);
     expect(contextPercentUsed('Context left until auto-compact: 8%')).toBe(92);
     expect(contextPercentUsed('97% (194k/200k)')).toBe(97);
+    // 1M-context sessions render an M suffix — the k-only pattern missed
+    // these, blanking context fleet-wide right after the 1M rollout.
+    expect(contextPercentUsed('📊 74% (735k/1M)')).toBe(74);
+    expect(contextPercentUsed('12% (118k/1m)')).toBe(12);
     expect(contextPercentUsed('no statusline here')).toBeUndefined();
   });
 });
