@@ -248,6 +248,8 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           return upgraded ? undefined : json({ error: 'websocket upgrade failed' }, 400);
         }
         if (url.pathname === '/v1/health' && request.method === 'GET') return json(await options.service.health());
+        if (url.pathname === '/v1/wrappers' && request.method === 'GET') return json(await options.service.wrappers());
+        if (url.pathname === '/v1/projects' && request.method === 'GET') return json(await options.service.projects());
         if (url.pathname === '/v1/warden/status' && request.method === 'GET')
           return json(await options.service.wardenStatus());
         if (url.pathname === '/v1/warden/run' && request.method === 'POST') {

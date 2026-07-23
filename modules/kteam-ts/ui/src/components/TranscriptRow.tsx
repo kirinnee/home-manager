@@ -59,20 +59,19 @@ export const TranscriptRow = memo(function TranscriptRow({ block, live, isLast }
   }
 });
 
-function RoleMeta({ label, ts }: { label: string; ts?: string }) {
-  return (
-    <div className="mb-1 flex items-center gap-2 text-[10.5px] uppercase tracking-[0.12em] text-faint">
-      <span className="font-semibold">{label}</span>
-      {ts && <span className="mono tracking-normal normal-case">{fmtClock(ts)}</span>}
-    </div>
-  );
-}
-
-function AssistantMessage({ text, ts, source }: { text: string; ts?: string; source: string }) {
+// Assistant text: no per-message role label (role reads from layout — user
+// blocks are railed + filled, assistant is plain prose). Metadata sits aside,
+// revealed on hover: a slim left gutter rule + a timestamp that fades in.
+function AssistantMessage({ text, ts }: { text: string; ts?: string; source: string }) {
   if (!text.trim()) return null;
   return (
-    <div className="py-1">
-      <RoleMeta label={source === 'codex' ? 'codex' : 'assistant'} ts={ts} />
+    <div className="group relative py-1 pl-3">
+      <span className="absolute left-0 top-2 bottom-2 w-px bg-border-soft opacity-0 transition-opacity group-hover:opacity-100" />
+      {ts && (
+        <span className="pointer-events-none absolute right-0 top-1 mono text-[10.5px] text-faint opacity-0 transition-opacity group-hover:opacity-100">
+          {fmtClock(ts)}
+        </span>
+      )}
       <Markdown text={text} />
     </div>
   );

@@ -6,11 +6,13 @@ import { forwardRef, useEffect, useState, type AnchorHTMLAttributes, type MouseE
 
 export interface Route {
   path: string;
-  // path === '/' | '/session/:id' | any other string (fall back to list)
+  // path === '/' | '/new' | '/session/:id' | any other string (fall back to list)
   sessionId?: string;
+  isNew?: boolean;
 }
 
 function parseRoute(pathname: string): Route {
+  if (pathname === '/new') return { path: '/new', isNew: true };
   if (pathname.startsWith('/session/')) {
     const rest = pathname.slice('/session/'.length);
     if (rest) {
@@ -33,6 +35,12 @@ export function useRoute(): [Route, (to: string) => void] {
     setRoute(parseRoute(to));
   };
   return [route, push];
+}
+
+/** Programmatic navigation (same mechanism as <Link>). */
+export function navigate(to: string): void {
+  history.pushState({}, '', to);
+  window.dispatchEvent(new PopStateEvent('popstate'));
 }
 
 interface LinkProps extends AnchorHTMLAttributes<HTMLAnchorElement> {

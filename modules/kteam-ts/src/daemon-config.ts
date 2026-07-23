@@ -39,6 +39,9 @@ export interface DaemonConfig {
   transcriptReconcileSeconds: number;
   healthIntervalSeconds: number;
   quotaUrl: string;
+  /** Roots scanned by GET /v1/projects for git repos (New-session picker +
+   *  list grouping). `~`/`$HOME` are expanded. */
+  projectRoots: string[];
   warden: WardenConfig;
 }
 
@@ -68,6 +71,7 @@ export const defaultDaemonConfig = (): DaemonConfig => ({
   // (180/300), so 30 s granularity is acceptable and 6x cheaper than 5 s.
   healthIntervalSeconds: 30,
   quotaUrl: 'http://127.0.0.1:47318/usage',
+  projectRoots: ['~/Workspace', '~/.config'],
   warden: defaultWardenConfig(),
 });
 

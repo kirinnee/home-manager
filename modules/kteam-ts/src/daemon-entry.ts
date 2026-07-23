@@ -30,6 +30,7 @@ const manager = await SessionManager.create(paths, {
   quotaUrl: config.quotaUrl,
   transcriptReconcileSeconds: config.transcriptReconcileSeconds,
   publicUrl: config.publicUrl,
+  projectRoots: config.projectRoots,
   warden: config.warden,
 });
 // Retry EADDRINUSE: a dying predecessor (service-manager restart) can hold the

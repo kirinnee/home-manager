@@ -60,6 +60,17 @@
   --err-bg: #f7eded;
   --err-border: #e6cfcf;
 
+  /* per-tool-type hues (consistent color per tool across the transcript) */
+  --tool-bash: #2f8a56;
+  --tool-read: #2f6fd6;
+  --tool-edit: #b3701c;
+  --tool-write: #7c53d6;
+  --tool-patch: #c0417f;
+  --tool-search: #0e8fa8;
+  --tool-plan: #5b5bd6;
+  --tool-wait: #6b7280;
+  --tool-generic: #737382;
+
   --bar-bg: rgba(251, 251, 252, 0.82);
   --shadow-sm: 0 1px 1px rgba(24, 24, 27, 0.04);
   --shadow-md: 0 1px 2px rgba(24, 24, 27, 0.06), 0 4px 12px rgba(24, 24, 27, 0.05);
@@ -109,6 +120,16 @@
   --err: #cc7d7d;
   --err-bg: #251616;
   --err-border: #482a2a;
+
+  --tool-bash: #5cc08a;
+  --tool-read: #6ea8f0;
+  --tool-edit: #e0a95a;
+  --tool-write: #b49af0;
+  --tool-patch: #ec84b6;
+  --tool-search: #4fc6dc;
+  --tool-plan: #9a9df0;
+  --tool-wait: #9aa0ac;
+  --tool-generic: #90909c;
 
   --bar-bg: rgba(11, 11, 13, 0.84);
   --shadow-sm: 0 1px 1px rgba(0, 0, 0, 0.4);
