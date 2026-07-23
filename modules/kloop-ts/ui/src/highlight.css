@@ -1,0 +1,68 @@
+/* Highlight.js — github-light/dark via CSS variables so it follows theme. */
+.hljs {
+  color: var(--fg);
+  background: var(--code-bg);
+}
+.hljs-comment,
+.hljs-quote {
+  color: var(--muted);
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-section,
+.hljs-link {
+  color: #7c3aed;
+}
+.hljs-string,
+.hljs-title,
+.hljs-name,
+.hljs-type,
+.hljs-attribute,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-built_in,
+.hljs-addition,
+.hljs-variable,
+.hljs-template-tag,
+.hljs-template-variable {
+  color: #0e7490;
+}
+.hljs-number,
+.hljs-meta {
+  color: #b45309;
+}
+.hljs-deletion {
+  color: #b91c1c;
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 700;
+}
+:root[data-theme='dark'] .hljs-keyword,
+:root[data-theme='dark'] .hljs-selector-tag,
+:root[data-theme='dark'] .hljs-literal,
+:root[data-theme='dark'] .hljs-section,
+:root[data-theme='dark'] .hljs-link {
+  color: #c4b5fd;
+}
+:root[data-theme='dark'] .hljs-string,
+:root[data-theme='dark'] .hljs-title,
+:root[data-theme='dark'] .hljs-name,
+:root[data-theme='dark'] .hljs-type,
+:root[data-theme='dark'] .hljs-attribute,
+:root[data-theme='dark'] .hljs-symbol,
+:root[data-theme='dark'] .hljs-built_in,
+:root[data-theme='dark'] .hljs-addition,
+:root[data-theme='dark'] .hljs-variable,
+:root[data-theme='dark'] .hljs-template-tag,
+:root[data-theme='dark'] .hljs-template-variable {
+  color: #67e8f9;
+}
+:root[data-theme='dark'] .hljs-number,
+:root[data-theme='dark'] .hljs-meta {
+  color: #fbbf24;
+}

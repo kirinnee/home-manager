@@ -64,27 +64,32 @@ export function makeKloopData(deps: CliDeps): KloopData {
     // deriveStatus already flags a dead pid as `crashed` for display).
     async listRuns() {
       const rows = await indexDb.listRuns();
-      const runs: Record<string, unknown>[] = [];
-      for (const row of rows) {
-        const lock = await pidLock.read(row.id);
-        const state = await eventLog.deriveStatus(row.id, lock?.pid);
-        if (!state) continue;
-        const startedMs = new Date(row.started_at).getTime();
-        const terminal = state.status !== 'running' && state.status !== 'pending';
-        const endMs = terminal && state.lastEventAt ? new Date(state.lastEventAt).getTime() : Date.now();
-        runs.push({
-          id: row.id,
-          workspace: row.workspace,
-          status: state.status,
-          loop: state.currentLoop,
-          maxIterations: state.config?.maxIterations,
-          phase: state.currentPhase,
-          exitReason: state.exitReason,
-          startedAt: row.started_at,
-          elapsedMs: Math.max(0, endMs - startedMs),
-          endedAt: terminal ? state.lastEventAt : undefined,
-        });
-      }
+      // PERF: derive every run concurrently (was a sequential await-in-for loop). Each
+      // deriveStatus is now backed by the mtime-keyed materialize cache, so unchanged
+      // runs cost one stat() instead of a full events.jsonl re-read + re-parse.
+      const derived = await Promise.all(
+        rows.map(async row => {
+          const lock = await pidLock.read(row.id);
+          const state = await eventLog.deriveStatus(row.id, lock?.pid);
+          if (!state) return null;
+          const startedMs = new Date(row.started_at).getTime();
+          const terminal = state.status !== 'running' && state.status !== 'pending';
+          const endMs = terminal && state.lastEventAt ? new Date(state.lastEventAt).getTime() : Date.now();
+          return {
+            id: row.id,
+            workspace: row.workspace,
+            status: state.status,
+            loop: state.currentLoop,
+            maxIterations: state.config?.maxIterations,
+            phase: state.currentPhase,
+            exitReason: state.exitReason,
+            startedAt: row.started_at,
+            elapsedMs: Math.max(0, endMs - startedMs),
+            endedAt: terminal ? state.lastEventAt : undefined,
+          } as Record<string, unknown>;
+        }),
+      );
+      const runs = derived.filter((r): r is Record<string, unknown> => r !== null);
       runs.sort((a, b) => new Date(b.startedAt as string).getTime() - new Date(a.startedAt as string).getTime());
       return runs;
     },

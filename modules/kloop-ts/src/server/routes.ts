@@ -2,8 +2,15 @@ import { closeSync, existsSync, openSync, readSync, statSync } from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
 import type { CliDeps } from '../cli';
 import { getKloopHome } from '../deps';
+import { KTEAM_UI_BASE, listRunSessions } from '../kteam';
+import { applyConfigEdit, type ConfigEdit, readConfigResponse } from './config';
 import { type KloopData, makeKloopData } from './data';
 import { SHELL_HTML } from './page';
+
+// The committed Vite build (modules/kloop-ts/ui-dist), served as the primary SPA.
+// When it's absent (e.g. a source checkout that never ran `bun run build`), serve
+// falls back to the legacy server-rendered SHELL_HTML.
+const UI_DIST = new URL('../../ui-dist', import.meta.url).pathname;
 
 // ============================================================================
 // Request router for `kloop serve`. /api/* returns JSON/SSE read fresh from
@@ -191,13 +198,53 @@ function kloopTailStream(abs: string): Response {
   });
 }
 
-async function handleApi(data: KloopData, parts: string[], url: URL): Promise<Response | null> {
+/** True when the request originates from loopback (gate for config writes). */
+function isLoopback(server: KloopServer | undefined, req: Request): boolean {
+  try {
+    const ip = server?.requestIP?.(req)?.address ?? '';
+    return ip === '127.0.0.1' || ip === '::1' || ip.endsWith(':127.0.0.1') || ip === '::ffff:127.0.0.1';
+  } catch {
+    return false;
+  }
+}
+
+async function handleApi(
+  data: KloopData,
+  parts: string[],
+  url: URL,
+  req: Request,
+  server: KloopServer | undefined,
+): Promise<Response | null> {
   if (parts.length === 2 && parts[1] === 'events') return eventsStream();
   if (parts[1] === 'kloop') {
+    // --- config pane (GET read / PUT edit) ---
+    if (parts.length === 3 && parts[2] === 'config') {
+      if (req.method === 'GET' || req.method === 'HEAD') return json(await readConfigResponse());
+      if (req.method === 'PUT' || req.method === 'POST') {
+        // Writes are localhost-only: `kloop dash` binds 0.0.0.0 read-only, so a remote
+        // viewer must never be able to rewrite the fleet config.
+        if (!isLoopback(server, req)) return json({ ok: false, error: 'config edits are localhost-only' }, 403);
+        let body: ConfigEdit;
+        try {
+          body = (await req.json()) as ConfigEdit;
+        } catch {
+          return json({ ok: false, error: 'invalid JSON body' }, 400);
+        }
+        const result = await applyConfigEdit(body);
+        return json(result, result.ok ? 200 : 400);
+      }
+      return json({ error: 'method not allowed' }, 405);
+    }
+    if (req.method !== 'GET' && req.method !== 'HEAD') return json({ error: 'method not allowed' }, 405);
     if (parts.length === 3 && parts[2] === 'runs') return json(await data.listRuns());
     if (parts.length === 4 && parts[2] === 'runs') {
       const d = await data.runDetail(decodeURIComponent(parts[3]));
       return d ? json(d) : notFoundJson();
+    }
+    // --- run's kteam agent sessions (deep-link + live status) ---
+    if (parts.length === 5 && parts[2] === 'runs' && parts[4] === 'sessions') {
+      const runId = decodeURIComponent(parts[3]);
+      return json({ kteamBase: KTEAM_UI_BASE, sessions: listRunSessions(runId) });
     }
     if (parts.length === 3 && parts[2] === 'file') {
       const rel = url.searchParams.get('path') ?? '';
@@ -308,21 +355,50 @@ async function metricsResponse(data: KloopData): Promise<Response> {
   });
 }
 
+/** Minimal shape of the Bun server object we use (requestIP for loopback checks). */
+interface KloopServer {
+  requestIP?: (req: Request) => { address: string } | null;
+}
+
+/**
+ * Serve the committed Vite SPA from ui-dist: hashed assets under /assets/* raw
+ * (immutable cache), every other path → index.html (client-side routing). Falls
+ * back to the legacy SHELL_HTML when ui-dist/index.html is absent.
+ */
+async function serveSpa(pathname: string): Promise<Response> {
+  // Static assets: confine to ui-dist/assets, reject traversal.
+  if (pathname.startsWith('/assets/') && !pathname.includes('..')) {
+    const file = Bun.file(`${UI_DIST}${pathname}`);
+    if (await file.exists()) {
+      return new Response(file, { headers: { 'cache-control': 'public, max-age=31536000, immutable' } });
+    }
+    return new Response('not found', { status: 404 });
+  }
+  const index = Bun.file(`${UI_DIST}/index.html`);
+  if (await index.exists()) {
+    return new Response(index, {
+      headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
+    });
+  }
+  // No built SPA — fall back to the legacy server-rendered viewer.
+  return html(SHELL_HTML);
+}
+
 /** Build the Bun.serve fetch handler bound to a deps-backed data layer. */
-export function createFetch(deps: CliDeps): (req: Request) => Promise<Response> {
+export function createFetch(deps: CliDeps): (req: Request, server?: KloopServer) => Promise<Response> {
   const data = makeKloopData(deps);
-  return async (req: Request): Promise<Response> => {
+  return async (req: Request, server?: KloopServer): Promise<Response> => {
     try {
       const url = new URL(req.url);
+      const parts = url.pathname.split('/').filter(Boolean);
+      if (parts[0] === 'api') {
+        return (await handleApi(data, parts, url, req, server)) ?? notFoundJson();
+      }
       if (req.method !== 'GET' && req.method !== 'HEAD') {
         return new Response('Method Not Allowed', { status: 405 });
       }
       if (url.pathname === '/metrics') return metricsResponse(data);
-      const parts = url.pathname.split('/').filter(Boolean);
-      if (parts[0] === 'api') {
-        return (await handleApi(data, parts, url)) ?? notFoundJson();
-      }
-      return html(SHELL_HTML);
+      return serveSpa(url.pathname);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return json({ error: 'internal error', message }, 500);

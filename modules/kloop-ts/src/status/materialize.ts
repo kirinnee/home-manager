@@ -1,3 +1,4 @@
+import { stat } from 'node:fs/promises';
 import * as YAML from 'yaml';
 import type { FsService, Paths } from '../deps';
 import { paths as defaultPaths } from '../deps';
@@ -19,6 +20,43 @@ import { EVENT_TYPES } from '../types';
 const SCHEMA_VERSION = 4;
 
 // ============================================================================
+// mtime-keyed in-process cache (PERF)
+// ============================================================================
+//
+// `kloop serve` calls deriveStatus/materialize once PER RUN, PER REQUEST (the runs
+// list re-derives every run on every `/api/kloop/runs` hit). Before this cache each
+// call re-read status.yaml AND the ENTIRE events.jsonl, then re-parsed every line —
+// even for terminal runs whose event log never changes again. That is the measured
+// hot path.
+//
+// We key on the events.jsonl (mtimeMs,size) fingerprint: append-only logs only ever
+// grow, so an unchanged (mtime,size) means an unchanged fold. On a hit we reuse the
+// cached fold and skip both disk reads entirely. The volatile bits (PID-liveness
+// crash detection + terminal cleanup) are re-applied on a fresh clone every call, so
+// a process that died since the last materialize is still reflected immediately.
+interface StatusCacheEntry {
+  mtimeMs: number;
+  size: number;
+  status: MaterializedStatus;
+}
+const statusCache = new Map<string, StatusCacheEntry>();
+
+/** (mtimeMs,size) of the events log, or null when it doesn't exist yet. */
+async function eventsSignature(eventsPath: string): Promise<{ mtimeMs: number; size: number } | null> {
+  try {
+    const s = await stat(eventsPath);
+    return { mtimeMs: s.mtimeMs, size: s.size };
+  } catch {
+    return null;
+  }
+}
+
+/** Test/maintenance hook: drop cached folds (e.g. between test cases). */
+export function clearStatusCache(): void {
+  statusCache.clear();
+}
+
+// ============================================================================
 // Materialize: WAL → status.yaml
 // ============================================================================
 
@@ -35,31 +73,44 @@ export async function materialize(
   const statusPath = paths.runStatus(runId);
   const eventsPath = paths.runEvents(runId);
 
-  // 1. Load existing status (or create empty)
-  let status = await loadStatus(statusPath, runId, fs);
+  const sig = await eventsSignature(eventsPath);
+  const cached = statusCache.get(eventsPath);
 
-  // 2. Read events from cursor onward
-  const allLines = await readEventLines(eventsPath, fs);
-  const newStart = status.lastEventIndex;
+  let status: MaterializedStatus;
+  if (cached && sig && cached.mtimeMs === sig.mtimeMs && cached.size === sig.size) {
+    // Cache hit — reuse the fold. Clone so the volatile pid/terminal mutations below
+    // never poison the cached (pure) fold.
+    status = structuredClone(cached.status);
+  } else {
+    // 1. Load existing status (or create empty)
+    status = await loadStatus(statusPath, runId, fs);
 
-  if (newStart < allLines.length) {
-    // Replay new events
-    for (let i = newStart; i < allLines.length; i++) {
-      const line = allLines[i].trim();
-      if (!line) continue;
-      try {
-        const event = JSON.parse(line) as KloopEvent;
-        applyEvent(status, event);
-        status.lastEventIndex = i + 1;
-        status.lastEventAt = event.timestamp;
-      } catch {
-        // Skip malformed lines
-        status.lastEventIndex = i + 1;
+    // 2. Read events from cursor onward
+    const allLines = await readEventLines(eventsPath, fs);
+    const newStart = status.lastEventIndex;
+
+    if (newStart < allLines.length) {
+      // Replay new events
+      for (let i = newStart; i < allLines.length; i++) {
+        const line = allLines[i].trim();
+        if (!line) continue;
+        try {
+          const event = JSON.parse(line) as KloopEvent;
+          applyEvent(status, event);
+          status.lastEventIndex = i + 1;
+          status.lastEventAt = event.timestamp;
+        } catch {
+          // Skip malformed lines
+          status.lastEventIndex = i + 1;
+        }
       }
+
+      // Persist updated status
+      await writeStatus(statusPath, status, fs);
     }
 
-    // Persist updated status
-    await writeStatus(statusPath, status, fs);
+    // Cache the PURE fold (pre-pid, pre-terminal-cleanup) keyed on the events sig.
+    if (sig) statusCache.set(eventsPath, { mtimeMs: sig.mtimeMs, size: sig.size, status: structuredClone(status) });
   }
 
   // 3. Check PID liveness (crash detection) — don't persist this
