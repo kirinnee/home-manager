@@ -43,6 +43,12 @@ export type CodexNormalizedEvent =
   | (CodexEventMetadata & {
       type: 'turn.started' | 'turn.completed' | 'turn.aborted';
       data: { turnId?: string };
+    })
+  | (CodexEventMetadata & {
+      /** From token_count events: last request's prompt+output size and the
+       *  model's actual context window (codex reports it directly). */
+      type: 'context.usage';
+      data: { contextTokens: number; contextWindow?: number };
     });
 
 export interface CodexNormalizationOptions {
@@ -274,6 +280,28 @@ export function normalizeCodexTranscriptRecord(
     return reasoning === undefined
       ? diagnostic(record, payload, options)
       : [{ ...metadata(record, payload, options), type: 'chat.assistant.reasoning', data: { reasoning } }];
+  }
+
+  // Context accounting from the rollout's own token_count events: the last
+  // request's prompt size plus the model's actual context window — the ground
+  // truth the pane statusline only approximates (turn-020).
+  if (recordType === 'event_msg' && itemType === 'token_count') {
+    const info = object(payload.info);
+    const last = object(info?.last_token_usage);
+    const contextTokens =
+      (typeof last?.input_tokens === 'number' ? last.input_tokens : 0) +
+      (typeof last?.output_tokens === 'number' ? last.output_tokens : 0);
+    const contextWindow = typeof info?.model_context_window === 'number' ? info.model_context_window : undefined;
+    if (contextTokens > 0) {
+      return [
+        {
+          ...metadata(record, payload, options),
+          type: 'context.usage',
+          data: { contextTokens, ...(contextWindow !== undefined ? { contextWindow } : {}) },
+        },
+      ];
+    }
+    return diagnostic(record, payload, options);
   }
 
   if (recordType !== 'response_item' || !itemType) return diagnostic(record, payload, options);

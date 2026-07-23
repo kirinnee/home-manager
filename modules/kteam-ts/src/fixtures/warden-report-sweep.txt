@@ -1,0 +1,131 @@
+# Fleet Warden Report — sweep 2026-07-23T05:12:36.344Z
+
+**Warden verdict:** 1 anomaly triaged. **No safe warden action taken** — the one
+designated recovery (`kteam resume`) has already been proven to fail
+deterministically on this session (3 daemon auto-retries + 1 prior-warden resume,
+all identical). Repeating it would not be a safe/obvious recovery. This session
+**still needs a human**. This is the **second consecutive sweep** to flag it with
+the same conclusion.
+
+---
+
+## Anomaly: `mrwqdd6b-efd590a5` — lacey / diene-supervision-build
+
+- **Status at sweep:** `failed` → detector class `abandoned_wreckage`
+- **Binary:** `claude-auto-atomi` (claude, model=opus, auto), turn 9
+- **cwd:** `/home/kirin/Workspace/atomi/diene`
+- **Reported reason:** `interactive harness did not become ready within 90s;
+  last frame: promptReady=false, cursor=2:30`
+
+### What I found (root cause — confirmed, unchanged from prior sweep)
+
+The failure is **not** a task crash and **not** a quota/network fault. It is a
+**deterministic startup-menu wedge tied to session size**. `launch.sh` resumes a
+large transcript:
+
+```
+claude-auto-atomi --dangerously-skip-permissions --resume f81f5cc4-... --model opus --disallowedTools AskUserQuestion
+```
+
+Because the session is **~382k tokens / 2h45m**, Claude Code interposes its
+interactive resume-confirmation gate before the prompt:
+
+```
+❯ 1. Resume from summary (recommended)
+  2. Resume full session as-is
+  3. Don't ask me again
+  Enter to confirm · Esc to cancel
+```
+
+The kteam readiness detector does not auto-answer this menu, so the pane never
+reaches `promptReady=true` and the 90s timeout fires. Every `--resume` relaunch of
+this session hits the identical menu (`last-snapshot.txt` and the prior warden's
+final snapshot both show it).
+
+**Evidence this is deterministic, not transient (from `events.jsonl`):**
+- Turn 7 resume 04:49:29 → `control.launch_retry` 04:50:59 (cursor 2:44)
+- Turn 8 resume 04:52:51 → `control.launch_retry` 04:54:21 (cursor 2:44)
+- `session.failed` 04:55:52
+- Turn 9 resume 04:55:52 (the **prior warden's** recovery attempt) → `launch_retry`
+  04:57:22 (cursor 2:44) → `session.failed` 04:58:53
+
+That is **four** resume attempts, all wedged on the same menu. The transient retry
+budget (`retry.transientAttempts: 3`) is exhausted.
+
+### No work was lost — engineering appears complete
+
+- Real work last advanced at **02:11 (turn 6), which completed cleanly**
+  (`session.completed`, health idle at 02:11:28).
+- Turn 6's `summary.md` reflects the finished V3 frontier bugfix:
+  `exec/smoke-report.txt` → **45 passed, 0 failed**; Pr+CI satisfaction rule
+  corrected in both the engine and `status.ts` (byte-identical frontiers across
+  index / files-fallback / engine paths); the five required dependency edges
+  validated (fleet←helm-wrapper, fleet←t3-design, bun-cli←bun-base-wo-helm,
+  flutter-base←shared-wo-docker-helm, operator-template←go-base-w-observability);
+  corrected frontier 10→7 matching the expected ready set; `engine_paused`
+  defaulting ON (live tick: `possible=7 active=0 deficit=7 · engine=PAUSED ·
+  respond: BLOCKED`).
+- Turns 7–9 were **re-deliveries** of that same V3 bugfix brief plus one
+  finalization ask (create `exec/markers/lacey-v3fix.done`, then `kteam signal
+  done`). None ran, because startup wedged every time.
+- **Confirmed still outstanding:** `/home/kirin/Workspace/atomi/diene/exec/markers/`
+  does not exist and no `lacey-v3fix.done` marker was written — so the task was
+  never formally signalled done, even though the substantive work looks finished.
+
+### What I did this sweep
+
+- Re-inspected the durable dir (state.json, config.json, launch.sh, events.jsonl,
+  turns/, last-snapshot.txt) and the prior warden report
+  (`2026-07-23T04-52-36-310Z.md`).
+- Confirmed via `kteam ps` and `tmux ls` that the session is **fully dead** (no
+  `kteam-mrwqdd6b-efd590a5-agent` tmux session; not listed in `kteam ps`).
+- **Did NOT run `kteam resume` again.** The prior warden already ran it at 04:55
+  and it re-wedged identically; the daemon retried it 3× before that. A 5th
+  identical resume is a known-failing action, so it is not a "safe, obvious
+  recovery" and would only churn a Claude launch. Withholding it is the correct
+  call.
+
+### Why no allowed warden action applies
+
+- **`kteam resume`** — proven to deterministically re-wedge on the resume menu (4×).
+  Not safe/effective; the readiness detector cannot clear the gate on its own.
+- **`kteam send`** — session is dead / pre-prompt; a send would not be consumed.
+- **`kteam migrate`** — not a quota/rate-limit case, and no migrate candidates were
+  provided. Irrelevant.
+- **Answer a question** — n/a; no answerable teammate question in this session's
+  own files.
+- Dismissing the menu by keystroke into the tmux pane, or editing `launch.sh` to
+  skip the gate, is out of warden scope (rules 2 & the forbidden-actions list).
+
+---
+
+## Needs a human (recurring — flagged for the second sweep in a row)
+
+**`mrwqdd6b-efd590a5` (lacey) is blocked on Claude Code's "Resume from summary"
+startup menu and cannot self-recover via any warden action.** Pick one:
+
+1. **Manually dismiss the menu.** Relaunch/attach the agent pane and press `1`
+   (Resume from summary) + Enter so the harness reaches the prompt, then let it
+   write `exec/markers/lacey-v3fix.done` and run `kteam signal done`.
+2. **Durable harness fix (recommended).** Make kteamd auto-answer this
+   resume-confirmation gate for large sessions (send `1`/Enter on detecting the
+   menu, or add a non-interactive resume flag / disable the gate via harness
+   config). This will recur for **any** session that crosses the token/age
+   threshold — a harness-level fix is the only durable remedy.
+3. **Accept and finalize out-of-band.** If the 02:11 summary is accepted as
+   complete (smoke 45/45, engine safely PAUSED), a human can record the
+   finalization (marker + `signal done`) directly; the engineering itself looks
+   finished and nothing is dispatching.
+
+**Lead follow-ups (out of warden scope — not actioned), carried from lacey's
+summary:** (a) what to do with the output of nodes `chandler` mis-dispatched onto
+blocked deps under the old frontier rule (bun-cli, flutter-base, fleet, bun-lib,
+operator-template — lacey reports those sessions have exited and the engine is
+paused, so nothing is dispatching); (b) whether `probe-suites` needs an
+EXECUTION.md §4 row (it currently has none and is safe-defaulted into the frontier).
+
+---
+
+### Other sessions
+No other anomalies in this sweep. The remaining fleet sessions (karin, jamal,
+parker, donovan, and this warden) were `running`/`tool_running` and not flagged.

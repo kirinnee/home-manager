@@ -43,6 +43,10 @@ export interface DaemonConfig {
    *  list grouping). `~`/`$HOME` are expanded. */
   projectRoots: string[];
   warden: WardenConfig;
+  /** Context-window overrides for transcript-based context accounting:
+   *  substring pattern → window size, longest match wins. Built-ins: `[1m]`
+   *  ⇒ 1M, default 200k (codex reports its own window in token_count). */
+  contextWindows?: Record<string, number>;
 }
 
 export const defaultWardenConfig = (): WardenConfig => ({

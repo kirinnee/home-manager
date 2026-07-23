@@ -96,8 +96,23 @@ function reportedReason(block: string): string | undefined {
 }
 
 function verdictSummary(content: string): string | undefined {
-  const m = content.match(/\*\*(?:Warden )?verdict:?\*\*\s*([^\n]+(?:\n(?!\n)[^\n]+)*)/i);
-  return m ? m[1]!.replace(/\s+/g, ' ').trim() : undefined;
+  // Bolded verdict line (both formats), else the assigned format's
+  // `## Summary` section first sentence(s).
+  const bold = content.match(/\*\*(?:Warden )?verdict:?\*\*\s*(?:\w+\s*[—–-]\s*)?([^\n]+(?:\n(?!\n)[^\n]+)*)/i);
+  if (bold) return bold[1]!.replace(/\s+/g, ' ').trim();
+  const summary = content.match(/^##\s+Summary\s*\n+([\s\S]*?)(?:\n\n|\n##|\n?$)/m);
+  if (summary && summary[1]!.trim()) return summary[1]!.replace(/\s+/g, ' ').trim();
+  return undefined;
+}
+
+/** Assigned-report header: `# Warden report — <sessionId> (teammate <name>,
+ *  <label>)` — the machine-stable template the assigned prompt mandates. */
+function assignedHeader(content: string): { session: string; teammate?: string; label?: string } | undefined {
+  const m = content.match(
+    /^#\s+Warden report\s*(?:—|-)\s*([A-Za-z0-9._-]+)\s*(?:\(\s*teammate\s+([^,)]+?)\s*(?:,\s*([^)]+?)\s*)?\))?/m,
+  );
+  if (!m) return undefined;
+  return { session: m[1]!.trim(), teammate: m[2]?.trim() || undefined, label: m[3]?.trim() || undefined };
 }
 
 /** Session id embedded in an assigned report filename `<ts>-<sessionId>.md`.
@@ -130,9 +145,15 @@ export function parseWardenReports(files: WardenReportFile[], limit = 20): Warde
         });
       }
     } else {
+      // Assigned-warden format: no `## Anomaly:` sections — identity lives in
+      // the `# Warden report — <id> (teammate <name>, <label>)` header, with
+      // the filename session id as backstop.
+      const header = assignedHeader(file.content);
       entries.push({
         at,
-        targetSession: filenameSession(file.path),
+        targetSession: header?.session ?? filenameSession(file.path),
+        teammate: header?.teammate,
+        label: header?.label,
         verdict,
         reason: summary,
         reportPath: file.path,

@@ -38,7 +38,15 @@ export type ClaudeNormalizedEvent =
       data: { toolUseId: string; content: unknown; text?: string; isError: boolean };
     })
   | (ClaudeEventMetadata & { type: 'interaction.question'; data: { toolUseId: string; questions: ClaudeQuestion[] } })
-  | (ClaudeEventMetadata & { type: 'turn.completed'; data: Record<string, never> });
+  | (ClaudeEventMetadata & { type: 'turn.completed'; data: Record<string, never> })
+  | (ClaudeEventMetadata & {
+      /** Context accounting from the harness's OWN usage record — the ground
+       *  truth the status line only approximates (turn-020: pane scraping
+       *  broke on the 1M-suffix statusline). contextTokens = input +
+       *  cache_read + cache_creation of the latest assistant message. */
+      type: 'context.usage';
+      data: { contextTokens: number; model?: string };
+    });
 
 export interface TranscriptCursor {
   file: string;
@@ -264,6 +272,25 @@ export function normalizeClaudeTranscriptRecord(value: unknown): ClaudeNormalize
 
   if (role === 'assistant' && message.stop_reason === 'end_turn') {
     events.push({ ...eventMetadata(record, message), type: 'turn.completed', data: {} });
+  }
+
+  // Context accounting: every assistant record carries a usage block whose
+  // input + cache_read + cache_creation is the prompt-side context size.
+  if (role === 'assistant') {
+    const usage = object(message.usage);
+    if (usage) {
+      const total =
+        (typeof usage.input_tokens === 'number' ? usage.input_tokens : 0) +
+        (typeof usage.cache_read_input_tokens === 'number' ? usage.cache_read_input_tokens : 0) +
+        (typeof usage.cache_creation_input_tokens === 'number' ? usage.cache_creation_input_tokens : 0);
+      if (total > 0) {
+        events.push({
+          ...eventMetadata(record, message),
+          type: 'context.usage',
+          data: { contextTokens: total, ...(string(message.model) ? { model: string(message.model) } : {}) },
+        });
+      }
+    }
   }
 
   return events;
