@@ -104,3 +104,15 @@ test('assigned header without teammate parenthetical still yields the session id
     reason: 'Wedged but recoverable.',
   });
 });
+
+test('extracts the reason when the verdict word sits INSIDE the bold marker', async () => {
+  const path = await import('node:path');
+  // Real live report (constance): "**Verdict: LEAVE.** The 50m ..." with no
+  // ## Summary section — the reason is the prose after the closing asterisks.
+  const content = await Bun.file(path.join(import.meta.dir, 'fixtures', 'warden-report-assigned-leave.txt')).text();
+  const [entry] = parseWardenReports([
+    { path: '/reports/2026-07-23T18-49-41-096Z-mrxfco84-4a536642.md', content, mtimeMs: 1 },
+  ]);
+  expect(entry).toMatchObject({ targetSession: 'mrxfco84-4a536642', teammate: 'constance', verdict: 'cleared' });
+  expect(entry!.reason).toContain('proof harness');
+});
