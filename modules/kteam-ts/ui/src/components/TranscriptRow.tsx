@@ -10,7 +10,7 @@
 
 import { memo, useState } from 'react';
 import { ChevronRight, Brain } from 'lucide-react';
-import type { TranscriptBlock } from '../lib/transcript';
+import type { TranscriptBlock, ToolCall } from '../lib/transcript';
 import { Markdown } from './Markdown';
 import { ToolGroup } from './ToolGroup';
 import { MarkerSeparator } from './Marker';
@@ -31,6 +31,37 @@ interface Props {
   block: TranscriptBlock;
   live: boolean;
   isLast: boolean;
+}
+
+// buildTranscript() creates fresh block OBJECTS every rebuild, so default
+// referential memo would re-render every row on each WS append (the streaming
+// "jump"/churn source). Compare by stable id + the fields that actually affect
+// output, so only the block whose content changed re-renders.
+function callsEqual(a: ToolCall[], b: ToolCall[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i]!;
+    const y = b[i]!;
+    if (x.key !== y.key || !!x.result !== !!y.result || x.result?.isError !== y.result?.isError) return false;
+  }
+  return true;
+}
+
+function sameProps(prev: Props, next: Props): boolean {
+  if (prev.live !== next.live || prev.isLast !== next.isLast) return false;
+  const a = prev.block;
+  const b = next.block;
+  if (a.id !== b.id || a.kind !== b.kind) return false;
+  if (a.kind === 'user' || a.kind === 'assistant') {
+    return a.text === (b as typeof a).text && a.ts === (b as typeof a).ts;
+  }
+  if (a.kind === 'thinking') {
+    return a.text === (b as typeof a).text && a.durationMs === (b as typeof a).durationMs;
+  }
+  if (a.kind === 'tools') return callsEqual(a.calls, (b as typeof a).calls);
+  if (a.kind === 'turn') return a.variant === (b as typeof a).variant && a.ts === (b as typeof a).ts;
+  if (a.kind === 'notice') return a.label === (b as typeof a).label;
+  return false;
 }
 
 export const TranscriptRow = memo(function TranscriptRow({ block, live, isLast }: Props) {
@@ -57,7 +88,7 @@ export const TranscriptRow = memo(function TranscriptRow({ block, live, isLast }
         </div>
       );
   }
-});
+}, sameProps);
 
 // Assistant text: no per-message role label (role reads from layout — user
 // blocks are railed + filled, assistant is plain prose). Metadata sits aside,

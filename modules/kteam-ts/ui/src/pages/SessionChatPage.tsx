@@ -252,9 +252,20 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
     });
   }, [records, pending.length]);
 
+  // Send lock: a SYNCHRONOUS ref guard is the authoritative double-send fix —
+  // it blocks the second call (Enter+click race, rapid double-Enter, a stray
+  // re-fire) before the first yields at its await. `sending` mirrors it for the
+  // composer's disabled state. The x-kteam-request-id header (lib/api) is the
+  // server-side backstop.
+  const sendingRef = useRef(false);
+  const [sending, setSending] = useState(false);
+
   // ---- actions -------------------------------------------------------------
   async function send() {
+    if (sendingRef.current) return;
     if (!draft.trim() || !HAS_TOKEN) return;
+    sendingRef.current = true;
+    setSending(true);
     const msg = draft.trim();
     setDraft('');
     setActionNotice(null);
@@ -268,11 +279,17 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
     } catch (e) {
       setPending(p => p.map(x => (x.key === key ? { ...x, status: 'error' } : x)));
       setActionNotice({ kind: 'err', text: e instanceof ApiError ? e.message : String(e) });
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
     }
   }
 
   async function interruptAndSend() {
+    if (sendingRef.current) return;
     if (!draft.trim() || !HAS_TOKEN) return;
+    sendingRef.current = true;
+    setSending(true);
     const msg = draft.trim();
     setDraft('');
     setActionNotice(null);
@@ -286,6 +303,9 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
     } catch (e) {
       setPending(p => p.map(x => (x.key === key ? { ...x, status: 'error' } : x)));
       setActionNotice({ kind: 'err', text: e instanceof ApiError ? e.message : String(e) });
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
     }
   }
 
@@ -416,6 +436,7 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
                 onInterruptAndSend={() => void interruptAndSend()}
                 disabled={!view || loadingInitial}
                 busy={busy}
+                sending={sending}
               />
             </div>
           )}

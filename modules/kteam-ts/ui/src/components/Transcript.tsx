@@ -1,20 +1,24 @@
 // The transcript scroll region, built on @shadcn/react's headless
-// MessageScroller. Round-2 scroll rules (turn-005):
-//   - NO auto-scroll on new content. autoScroll is OFF; the viewport only
-//     follows the tail when the reader is already at the very bottom by their
-//     own action.
-//   - when new messages arrive while the reader is scrolled up, they are
-//     counted and surfaced as an "N new — jump to latest" pill instead of
-//     yanking the scroll.
-//   - defaultScrollPosition="end" + a pinSignal settle still land the initial
-//     page at the true bottom (this was the round-1 "stops short" fix).
+// MessageScroller (used for structure + preserveScrollOnPrepend). Scroll
+// behaviour (round 3, live-session calm) is hand-rolled for correctness:
+//
+//   - STICK-TO-BOTTOM via a ResizeObserver on the content: whenever content
+//     height changes AND the reader is following (at the very bottom), we pin
+//     to the bottom. The observer fires AFTER layout, so streaming blocks that
+//     grow in place (a merged assistant message gaining tokens) or lay out
+//     late (markdown/code/images) can't leave the tail "stuck short" — the
+//     round-1/round-3 bug. autoScroll is OFF because it only reacts to new
+//     items, not in-place growth.
+//   - NO jump while detached: if the reader scrolled up, height changes never
+//     move the viewport; new tail blocks are counted for an "N new — jump to
+//     latest" pill instead.
 //   - preserveScrollOnPrepend keeps the viewport steady when older pages load.
 //
 // Not virtualized; tail-first pagination underneath keeps only the loaded
 // window in the DOM (see SessionChatPage.loadOlder).
 
 import { memo, useEffect, useRef, useState, type ReactNode } from 'react';
-import { MessageScroller, useMessageScroller } from '@shadcn/react/message-scroller';
+import { MessageScroller } from '@shadcn/react/message-scroller';
 import { ArrowDown } from 'lucide-react';
 import type { TranscriptBlock } from '../lib/transcript';
 import { TranscriptRow } from './TranscriptRow';
@@ -33,42 +37,58 @@ interface Props {
 const AT_BOTTOM_PX = 96;
 
 function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, header, footer }: Props) {
-  const { scrollToEnd } = useMessageScroller();
-  const atBottomRef = useRef(true);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const followRef = useRef(true); // are we stuck to the bottom?
   const [detached, setDetached] = useState(false);
   const [newCount, setNewCount] = useState(0);
   const prevLastId = useRef<string | null>(null);
   const last = blocks.length - 1;
   const lastId = blocks.length ? blocks[last]!.id : null;
 
-  // Initial settle: after the first page's dynamic (markdown/code) heights lay
-  // out, pin to the true tail. Bumped by the page via pinSignal.
+  const viewport = () => rootRef.current?.querySelector<HTMLElement>('.kt-viewport') ?? null;
+  const pin = () => {
+    const v = viewport();
+    if (v) v.scrollTop = v.scrollHeight;
+  };
+
+  // Stick-to-bottom: re-pin on ANY content resize while following. Fires after
+  // layout, so late/growing heights never leave the tail short.
+  useEffect(() => {
+    const v = viewport();
+    const content = rootRef.current?.querySelector<HTMLElement>('.kt-content');
+    if (!v || !content) return;
+    const ro = new ResizeObserver(() => {
+      if (followRef.current) v.scrollTop = v.scrollHeight;
+    });
+    ro.observe(content);
+    return () => ro.disconnect();
+  }, []);
+
+  // Initial settle to the true tail (and whenever the page bumps pinSignal).
   useEffect(() => {
     if (pinSignal <= 0) return;
-    const raf = requestAnimationFrame(() => scrollToEnd({ behavior: 'auto' }));
-    const t = setTimeout(() => scrollToEnd({ behavior: 'auto' }), 160);
+    followRef.current = true;
+    setDetached(false);
+    setNewCount(0);
+    const raf = requestAnimationFrame(pin);
+    const t = setTimeout(pin, 160);
     return () => {
       cancelAnimationFrame(raf);
       clearTimeout(t);
     };
-  }, [pinSignal, scrollToEnd]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pinSignal]);
 
-  // New tail content: follow only if the reader is at the bottom; otherwise
-  // count it for the pill. Older-page prepends don't change the last id, so
-  // they never trigger either path.
+  // New tail content while scrolled up → count it for the pill. (The follow
+  // case is handled entirely by the ResizeObserver.)
   useEffect(() => {
     const prev = prevLastId.current;
-    if (lastId && prev !== null && lastId !== prev) {
-      if (atBottomRef.current) {
-        requestAnimationFrame(() => scrollToEnd({ behavior: 'smooth' }));
-      } else {
-        const idx = blocks.findIndex(b => b.id === prev);
-        const added = idx >= 0 ? blocks.length - 1 - idx : 1;
-        setNewCount(c => c + Math.max(1, added));
-      }
+    if (lastId && prev !== null && lastId !== prev && !followRef.current) {
+      const idx = blocks.findIndex(b => b.id === prev);
+      const added = idx >= 0 ? blocks.length - 1 - idx : 1;
+      setNewCount(c => c + Math.max(1, added));
     }
     prevLastId.current = lastId;
-    // Intentionally keyed on lastId only; refs carry the rest.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastId]);
 
@@ -76,36 +96,38 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
     const el = e.currentTarget;
     const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
     const atBottom = gap < AT_BOTTOM_PX;
-    atBottomRef.current = atBottom;
+    followRef.current = atBottom;
     setDetached(!atBottom);
     if (atBottom && newCount) setNewCount(0);
     if (el.scrollTop < 280 && hasOlder && !loadingOlder) onLoadOlder();
   }
 
   function jump() {
-    scrollToEnd({ behavior: 'smooth' });
-    setNewCount(0);
+    followRef.current = true;
     setDetached(false);
-    atBottomRef.current = true;
+    setNewCount(0);
+    pin();
   }
 
   return (
-    <MessageScroller.Root className="relative flex h-full min-h-0 flex-col">
-      <MessageScroller.Viewport
-        className="min-h-0 flex-1 overflow-y-auto scroll-thin"
-        preserveScrollOnPrepend
-        onScroll={onScroll}
-      >
-        <MessageScroller.Content className="mx-auto flex w-full max-w-[880px] flex-col gap-1 px-3 py-4 sm:px-5">
-          {header}
-          {blocks.map((b, idx) => (
-            <MessageScroller.Item key={b.id} messageId={b.id} scrollAnchor>
-              <TranscriptRow block={b} live={live} isLast={idx === last} />
-            </MessageScroller.Item>
-          ))}
-          {footer}
-        </MessageScroller.Content>
-      </MessageScroller.Viewport>
+    <div ref={rootRef} className="relative flex h-full min-h-0 flex-col">
+      <MessageScroller.Root className="flex min-h-0 flex-1 flex-col">
+        <MessageScroller.Viewport
+          className="kt-viewport min-h-0 flex-1 overflow-y-auto scroll-thin"
+          preserveScrollOnPrepend
+          onScroll={onScroll}
+        >
+          <MessageScroller.Content className="kt-content mx-auto flex w-full max-w-[880px] flex-col gap-1 px-3 py-4 sm:px-5">
+            {header}
+            {blocks.map((b, idx) => (
+              <MessageScroller.Item key={b.id} messageId={b.id} scrollAnchor>
+                <TranscriptRow block={b} live={live} isLast={idx === last} />
+              </MessageScroller.Item>
+            ))}
+            {footer}
+          </MessageScroller.Content>
+        </MessageScroller.Viewport>
+      </MessageScroller.Root>
 
       {detached && (
         <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center">
@@ -119,7 +141,7 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
           </button>
         </div>
       )}
-    </MessageScroller.Root>
+    </div>
   );
 }
 
