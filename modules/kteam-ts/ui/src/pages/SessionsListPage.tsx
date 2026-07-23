@@ -5,19 +5,51 @@
 //  - live updates via WebSocket /v1/events with a 1.5s trailing debounce.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, Sparkles, Activity, FolderGit2, Plus } from 'lucide-react';
+import { Bot, Sparkles, Activity, FolderGit2, Plus, Search, X, CornerDownLeft } from 'lucide-react';
 import { api } from '../lib/api';
-import type { ProjectInfo, SessionView } from '../types';
+import type { ProjectInfo, SearchResponse, SessionView } from '../types';
 import { Badge } from '../components/Primitives';
 import { WardenStrip } from '../components/WardenStrip';
 import { WardenVerdicts } from '../components/WardenVerdicts';
-import { Link } from '../lib/router';
+import { Link, navigate } from '../lib/router';
 import { debounce, TERMINAL_STATUSES, fmtRelative, toneFor } from '../lib/utils';
 import { openEventStream } from '../lib/ws';
 
 function baseName(p: string): string {
   const seg = p.replace(/\/+$/, '').split('/').filter(Boolean);
   return seg.length ? seg[seg.length - 1]! : p;
+}
+
+function isTypingTarget(t: EventTarget | null): boolean {
+  const el = t as HTMLElement | null;
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable;
+}
+
+// Highlight case-insensitive occurrences of `q` in `text`.
+function highlight(text: string, q: string) {
+  if (!q) return text;
+  const lower = text.toLowerCase();
+  const nq = q.toLowerCase();
+  const parts: React.ReactNode[] = [];
+  let i = 0;
+  let n = 0;
+  while (i < text.length) {
+    const at = lower.indexOf(nq, i);
+    if (at === -1) {
+      parts.push(text.slice(i));
+      break;
+    }
+    if (at > i) parts.push(text.slice(i, at));
+    parts.push(
+      <mark key={n++} className="rounded bg-accent-soft px-0.5 text-accent">
+        {text.slice(at, at + q.length)}
+      </mark>,
+    );
+    i = at + q.length;
+  }
+  return parts;
 }
 
 export function SessionsListPage() {
@@ -27,6 +59,11 @@ export function SessionsListPage() {
   const [filter, setFilter] = useState('');
   const [includeFinished, setIncludeFinished] = useState(false);
   const socketRef = useRef<ReturnType<typeof openEventStream> | null>(null);
+  // Transcript search (server-side, on Enter) — distinct from the instant
+  // client-side list filter above.
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  const [tResults, setTResults] = useState<SearchResponse | null>(null);
+  const [tSearching, setTSearching] = useState(false);
 
   async function load(initial = false) {
     try {
@@ -52,15 +89,55 @@ export function SessionsListPage() {
     return () => handle.close();
   }, []);
 
+  // Instant, client-side filter across every identifying field.
   const visible = useMemo(() => {
     if (!sessions) return [];
     const needle = filter.trim().toLowerCase();
     return sessions.filter(v => {
       if (!includeFinished && TERMINAL_STATUSES.has(v.state.status)) return false;
-      if (needle && !(v.config.label ?? '').toLowerCase().includes(needle)) return false;
-      return true;
+      if (!needle) return true;
+      const c = v.config;
+      const hay = [c.id, c.teammate, c.name, c.label, c.binary, c.model, c.modelHint, c.cwd, v.state.status]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      return hay.includes(needle);
     });
   }, [sessions, filter, includeFinished]);
+
+  // `/` focuses the search box from anywhere (unless already typing).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === '/' && !isTypingTarget(e.target)) {
+        e.preventDefault();
+        searchRef.current?.focus();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  async function runTranscriptSearch() {
+    const q = filter.trim();
+    if (!q) {
+      setTResults(null);
+      return;
+    }
+    setTSearching(true);
+    try {
+      setTResults(await api.search(q, 40));
+    } catch {
+      setTResults({ query: q, scanned: 0, results: [] });
+    } finally {
+      setTSearching(false);
+    }
+  }
+
+  function clearSearch() {
+    setFilter('');
+    setTResults(null);
+    searchRef.current?.blur();
+  }
 
   // Group by project: longest project-path prefix of the session cwd wins;
   // otherwise fall back to the cwd's basename so nothing is orphaned.
@@ -103,20 +180,56 @@ export function SessionsListPage() {
       <WardenStrip />
       <WardenVerdicts />
 
-      <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-border-soft bg-surface-2 px-3 py-2">
-        <input
-          type="search"
-          placeholder="Filter by label…"
-          value={filter}
-          onChange={e => setFilter(e.target.value)}
-          aria-label="Filter by label"
-          className="min-w-[220px] flex-1 bg-surface"
-        />
-        <label className="inline-flex cursor-pointer items-center gap-2 whitespace-nowrap text-[13px] text-fg-soft">
-          <input type="checkbox" checked={includeFinished} onChange={e => setIncludeFinished(e.target.checked)} />
-          include finished
-        </label>
+      <div className="mb-4 rounded-lg border border-border-soft bg-surface-2 px-3 py-2">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="relative flex min-w-[240px] flex-1 items-center">
+            <Search size={14} className="pointer-events-none absolute left-2.5 text-faint" />
+            <input
+              ref={searchRef}
+              type="text"
+              placeholder="Search sessions — id, teammate, task, label, project, model, status…  ( / )"
+              value={filter}
+              onChange={e => setFilter(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  void runTranscriptSearch();
+                } else if (e.key === 'Escape') {
+                  e.preventDefault();
+                  clearSearch();
+                }
+              }}
+              aria-label="Search sessions and transcripts"
+              className="w-full bg-surface pl-8 pr-8"
+            />
+            {filter && (
+              <button
+                type="button"
+                onClick={clearSearch}
+                aria-label="Clear search"
+                className="absolute right-2 text-faint hover:text-fg"
+              >
+                <X size={14} />
+              </button>
+            )}
+          </div>
+          <label className="inline-flex cursor-pointer items-center gap-2 whitespace-nowrap text-[13px] text-fg-soft">
+            <input type="checkbox" checked={includeFinished} onChange={e => setIncludeFinished(e.target.checked)} />
+            include finished
+          </label>
+        </div>
+        <div className="mt-1.5 flex items-center gap-1.5 pl-0.5 text-[11px] text-faint">
+          <span>filters the list live</span>
+          <span className="text-border">·</span>
+          <span className="inline-flex items-center gap-1">
+            <CornerDownLeft size={11} /> Enter searches transcripts
+          </span>
+        </div>
       </div>
+
+      {(tSearching || tResults) && (
+        <TranscriptResults query={filter} searching={tSearching} results={tResults} onClose={() => setTResults(null)} />
+      )}
 
       {error && (
         <div className="mb-3 rounded-md border border-err-border bg-err-bg px-3 py-2 text-[13px] text-err">{error}</div>
@@ -162,6 +275,69 @@ export function SessionsListPage() {
           </section>
         ))}
       </div>
+    </div>
+  );
+}
+
+function TranscriptResults({
+  query,
+  searching,
+  results,
+  onClose,
+}: {
+  query: string;
+  searching: boolean;
+  results: SearchResponse | null;
+  onClose: () => void;
+}) {
+  return (
+    <div className="mb-4 overflow-hidden rounded-lg border border-border bg-surface shadow-sm">
+      <div className="flex items-center gap-2 border-b border-border-soft bg-surface-2 px-3 py-2 text-[12.5px]">
+        <Search size={14} className="shrink-0 text-faint" />
+        <span className="font-medium text-fg-soft">Transcript matches</span>
+        {results && (
+          <span className="mono text-[11.5px] text-faint">
+            {results.results.length} in {results.scanned} session{results.scanned === 1 ? '' : 's'} searched
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close transcript results"
+          className="ml-auto rounded p-1 text-muted hover:bg-surface hover:text-fg"
+        >
+          <X size={14} />
+        </button>
+      </div>
+      {searching ? (
+        <div className="px-3 py-4 text-[12.5px] text-muted">searching transcripts…</div>
+      ) : !results || results.results.length === 0 ? (
+        <div className="px-3 py-4 text-[12.5px] text-muted">
+          No transcript matches for <span className="mono text-fg-soft">{query}</span>.
+        </div>
+      ) : (
+        <ul className="divide-y divide-border-soft">
+          {results.results.map((r, i) => (
+            <li key={`${r.sessionId}-${i}`}>
+              <button
+                type="button"
+                onClick={() => navigate(`/session/${encodeURIComponent(r.sessionId)}`)}
+                className="block w-full px-3 py-2 text-left hover:bg-surface-2"
+              >
+                <div className="flex items-center gap-2 text-[12px]">
+                  <span className="font-semibold text-fg">{r.teammate ?? r.sessionId}</span>
+                  <span className="mono text-[11px] text-faint">{r.sessionId}</span>
+                  {r.turn != null && <span className="mono text-[11px] text-faint">turn {r.turn}</span>}
+                  <span className="mono ml-auto shrink-0 text-[11px] text-faint">{r.at ? fmtRelative(r.at) : ''}</span>
+                </div>
+                <div className="mt-0.5 line-clamp-2 text-[12.5px] leading-snug text-muted">
+                  {highlight(r.snippet, query.trim())}
+                </div>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

@@ -1,0 +1,26 @@
+      66  ## What I need from you
+      73 -The engine is **armed but paused** — it will not dispatch anything until you run:
+      67 +The engine is **armed but paused** — it dispatches nothing until you run:
+      68  ```
+      69  bun exec/bin/db.ts meta engine_paused false
+      70  ```
+      77 -Before arming, two calls are yours: (a) what to do with the seven mis-dispatched
+      78 -nodes' work, and (b) whether `probe-suites` should get an EXECUTION.md §4 row so it
+      79 -stops showing as frontier. Dashboard publishing stays on (it is a view, not
+      80 -dispatch) so you can see the corrected frontier while paused.
+      71 +Two calls are yours before arming: (a) what to do with the seven mis-dispatched
+      72 +nodes' work, and (b) whether `probe-suites` should get an EXECUTION.md §4 row — it
+      73 +has none, so safe-default puts it in the frontier (which matches your expected set,
+      74 +but its real state is unrecorded). Dashboard publishing stays on while paused so you
+      75 +can see the corrected frontier; it is a view, not dispatch.
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  This session is 2h 45m old and 382k tokens.
+
+  Resuming the full session will consume a substantial portion of your usage limits. We recommend resuming from a summary.
+
+  ❯ 1. Resume from summary (recommended)
+    2. Resume full session as-is
+    3. Don't ask me again
+
+  Enter to confirm · Esc to cancel

@@ -69,6 +69,10 @@ export interface SessionConfig {
    *  long is TYPED verbatim into the composer instead of the turn-file
    *  indirection. 0 disables direct sends. Default 500. */
   directSendMaxChars?: number;
+  /** How to answer Claude Code's large-session resume gate ("Resume from
+   *  summary (recommended)" / "Resume full session as-is"). Default 'full'
+   *  for fidelity; option 3 ("Don't ask me again") is never selected. */
+  resumeMenuChoice?: 'full' | 'summary';
   maxSnapshots: number;
   systemPromptFile: string;
   originalPromptFile: string;
@@ -139,6 +143,13 @@ export interface SessionState {
    *  matching chat.user record appears (correlated under the session lock);
    *  entries surviving into a terminal state are surfaced as lost. */
   pendingNativeSends?: Array<{ id: string; at: string; message: string; attachmentIds?: string[] }>;
+  /** A warden delivered a needs_human verdict for this session: the reason,
+   *  shown in ps/UI. While set, the sweep suppresses re-triage of the same
+   *  anomaly class (needsHumanKind) — no identical report every sweep.
+   *  Cleared by answer/resume/stop (a human acted). */
+  needsHuman?: string;
+  /** Anomaly kind fingerprint the needs_human verdict was issued for. */
+  needsHumanKind?: string;
   /** Context-window usage (percent used) parsed from the TUI statusline. */
   contextPercent?: number;
   /** The harness's live activity/spinner line ("✻ Lollygagging… (34s · 2.1k
@@ -189,6 +200,7 @@ export interface StartSessionRequest {
   nudgeAfterSeconds?: number;
   killAfterSeconds?: number;
   directSendMaxChars?: number;
+  resumeMenuChoice?: 'full' | 'summary';
   /** Internal (daemon-minted): assigned-warden stop capability to embed in
    *  the new session's config/pane env. Harmless if a client sets it — the
    *  authorization check compares against the capability recorded in the

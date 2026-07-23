@@ -61,6 +61,7 @@ function printView(view: Awaited<ReturnType<ApiClient['get']>>): void {
     `pane ${age(view.state.lastPaneAt)}`,
   ];
   console.log(`  liveness: ${ledger.join('  ')}${view.state.nudgedAt ? '  ⚠ nudged' : ''}`);
+  if (view.state.needsHuman) console.log(`  🚨 NEEDS HUMAN: ${view.state.needsHuman}`);
   if (view.state.reason) console.log(`  ${view.state.reason}`);
   for (const question of view.state.pendingQuestion?.questions ?? []) {
     console.log(`  question: ${question.question}`);

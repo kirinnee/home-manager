@@ -29,8 +29,23 @@ import { atomicJson, now, readJson, run, writeTextAtomic } from './io';
 import { NAME_WINDOW_MS, pickTeammateName } from './names';
 import type { KTeamPaths } from './paths';
 import { configFile, markerFile, sessionDir, stateFile, turnLog, turnPrompt } from './paths';
-import type { AttachmentView, KTeamService, SessionView, WardenRunView, WardenStatusView } from './service';
-import { detectAnomalies, WARDEN_LABEL, type WardenAnomaly, type WardenSessionView } from './warden-detect';
+import type {
+  AttachmentView,
+  KTeamService,
+  SearchResponse,
+  SearchResult,
+  SessionView,
+  WardenRunView,
+  WardenStatusView,
+} from './service';
+import { searchRecords } from './transcript-search';
+import {
+  detectAnomalies,
+  fingerprintAnomalies,
+  WARDEN_LABEL,
+  type WardenAnomaly,
+  type WardenSessionView,
+} from './warden-detect';
 import { rankFailoverCandidates, selectFailoverCandidate } from './failover';
 import type { AgentUsage } from './core';
 import { EventStore, type JsonValue, type SessionEvent } from './storage';
@@ -422,6 +437,7 @@ export class SessionManager implements KTeamService {
       nudgeAfterSeconds: this.number(request.nudgeAfterSeconds, 180, 30, 'nudgeAfterSeconds'),
       killAfterSeconds: this.number(request.killAfterSeconds, 300, 60, 'killAfterSeconds'),
       directSendMaxChars: this.number(request.directSendMaxChars, 500, 0, 'directSendMaxChars'),
+      resumeMenuChoice: request.resumeMenuChoice === 'summary' ? 'summary' : 'full',
       maxSnapshots: this.number(request.maxSnapshots, 200, 1, 'maxSnapshots'),
       ...(request.stopCapability ? { stopCapability: request.stopCapability } : {}),
       systemPromptFile: path.join(directory, 'system.md'),
@@ -722,6 +738,7 @@ export class SessionManager implements KTeamService {
 
   async answer(id: string, labels: string[], other?: string, responses?: string[]): Promise<SessionView> {
     id = this.resolveRef(id);
+    await this.clearNeedsHuman(id);
     return await this.withAutoRevive(id, 'answer', () =>
       this.serialized(id, async () => {
         const view = await this.get(id);
@@ -772,6 +789,7 @@ export class SessionManager implements KTeamService {
 
   async stop(id: string, reason = 'stopped by client'): Promise<SessionView> {
     id = this.resolveRef(id);
+    await this.clearNeedsHuman(id);
     this.cancelRetry(id);
     void this.cancelQuotaWaiter(id);
     return await this.serialized(id, async () => {
@@ -794,6 +812,8 @@ export class SessionManager implements KTeamService {
 
   async resume(id: string, message?: string, guard?: ResumeGuard): Promise<SessionView> {
     id = this.resolveRef(id);
+    // Automatic retries are not a human action; only explicit resumes clear.
+    if (!guard) await this.clearNeedsHuman(id);
     if (!guard) this.cancelRetry(id);
     let startMonitorAfterUnlock = false;
     const resumed = await this.serialized(id, async () => {
@@ -2882,12 +2902,27 @@ export class SessionManager implements KTeamService {
     // the recent-terminal-wreckage window — an old failure that nobody handled
     // within the window ages out rather than nagging forever.
     const unattendedMs = Math.max(60_000, this.options.warden.unattendedMinutes * 60_000);
-    const result = detectAnomalies(views, Date.now(), {
+    const detected = detectAnomalies(views, Date.now(), {
       unattendedMs,
       terminalWindowMs: unattendedMs,
       susThinkingSeconds: Math.max(60, this.options.warden.susThinkingSeconds),
       susSubprocessSeconds: Math.max(60, this.options.warden.susSubprocessSeconds),
     });
+    // Reconcile fresh needs_human verdicts from warden reports into session
+    // state, then SUPPRESS re-triage of a flagged session's same anomaly
+    // class: a needs_human session already reached the human — an identical
+    // report every sweep is noise (lacey, 2026-07-23). The flag clears when a
+    // human acts (answer/resume/stop).
+    await this.reconcileNeedsHuman(sessions);
+    const flagged = new Map(
+      sessions
+        .filter(view => view.state.needsHuman !== undefined)
+        .map(view => [view.config.id, view.state.needsHumanKind]),
+    );
+    const anomalies = detected.anomalies.filter(
+      item => !flagged.has(item.sessionId) || (flagged.get(item.sessionId) ?? item.kind) !== item.kind,
+    );
+    const result = { anomalies, fingerprint: fingerprintAnomalies(anomalies) };
     const at = now();
     this.lastSweep = { at, anomalies: result.anomalies, fingerprint: result.fingerprint };
     this.wardenState.lastSweepAt = at;
@@ -3265,6 +3300,50 @@ export class SessionManager implements KTeamService {
     return scanProjects(this.options.projectRoots ?? ['~/Workspace', '~/.config']);
   }
 
+  /** Reconcile needs_human verdicts from recent warden reports into durable
+   *  session state: set `needsHuman` (reason) + `needsHumanKind` (the anomaly
+   *  class fingerprint used for sweep dedupe) and emit a transient
+   *  fleet.needs_human ONCE per flagging. Cheap: reads only the recent
+   *  reports already parsed by wardenVerdicts(). */
+  private async reconcileNeedsHuman(sessions: SessionView[]): Promise<void> {
+    const verdicts = await this.wardenVerdicts().catch(() => [] as WardenVerdict[]);
+    const byId = new Map(sessions.map(view => [view.config.id, view]));
+    for (const verdict of verdicts) {
+      if (verdict.verdict !== 'needs_human' || !verdict.targetSession) continue;
+      const view = byId.get(verdict.targetSession);
+      if (!view || view.state.needsHuman !== undefined) continue;
+      const reason = verdict.reason ?? 'a warden concluded this session needs a human decision';
+      // The anomaly kind at flag time keys the dedupe: a NEW anomaly class on
+      // the same session still surfaces.
+      const kind = this.lastSweep?.anomalies.find(item => item.sessionId === view.config.id)?.kind;
+      await this.store
+        .updateState<SessionState>(view.config.id, current => ({
+          ...current,
+          needsHuman: reason,
+          ...(kind ? { needsHumanKind: kind } : {}),
+        }))
+        .catch(() => undefined);
+      view.state.needsHuman = reason;
+      view.state.needsHumanKind = kind;
+      this.emitTransient('fleet.needs_human', {
+        sessionId: view.config.id,
+        teammate: view.config.teammate,
+        reason,
+        reportPath: verdict.reportPath,
+      });
+    }
+  }
+
+  /** A human acted on the session — clear the needs_human flag so the sweep
+   *  resumes watching it. Called from answer/resume/stop. */
+  private async clearNeedsHuman(id: string): Promise<void> {
+    await this.store
+      .updateState<SessionState>(id, current =>
+        current.needsHuman === undefined ? current : { ...current, needsHuman: undefined, needsHumanKind: undefined },
+      )
+      .catch(() => undefined);
+  }
+
   async wardenVerdicts(): Promise<WardenVerdict[]> {
     const dir = this.paths.wardenReports;
     const names = (await readdir(dir).catch(() => [] as string[])).filter(n => n.endsWith('.md'));
@@ -3288,6 +3367,51 @@ export class SessionManager implements KTeamService {
       })),
     );
     return parseWardenReports(files.filter(f => f.content));
+  }
+
+  async search(query: string, limit = 30): Promise<SearchResponse> {
+    const q = (query ?? '').trim();
+    if (!q) return { query: '', scanned: 0, results: [] };
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) limit = 30;
+    const MAX_SCAN = 150;
+    // Fast reject: regex-test the raw file before parsing lines (most sessions
+    // won't contain the term). Escaped so the query is a literal substring.
+    const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    // Newest-first: search where the user most likely means.
+    const sessions = (await this.list()).sort((a, b) => {
+      const at = Date.parse(a.state.lastActivityAt ?? a.config.updatedAt ?? '') || 0;
+      const bt = Date.parse(b.state.lastActivityAt ?? b.config.updatedAt ?? '') || 0;
+      return bt - at;
+    });
+    const results: SearchResult[] = [];
+    let scanned = 0;
+    for (const v of sessions) {
+      if (results.length >= limit || scanned >= MAX_SCAN) break;
+      scanned++;
+      const raw = await readFile(path.join(sessionDir(this.paths, v.config.id), 'chat.jsonl'), 'utf8').catch(() => '');
+      if (!raw || !re.test(raw)) continue;
+      const records = raw
+        .split('\n')
+        .filter(Boolean)
+        .flatMap(line => {
+          try {
+            return [JSON.parse(line) as unknown];
+          } catch {
+            return [];
+          }
+        });
+      for (const m of searchRecords(records as Parameters<typeof searchRecords>[0], q, 3)) {
+        results.push({
+          sessionId: v.config.id,
+          teammate: v.config.teammate ?? v.config.name,
+          turn: m.turn,
+          snippet: m.snippet,
+          at: m.at,
+        });
+        if (results.length >= limit) break;
+      }
+    }
+    return { query: q, scanned, results };
   }
 
   async wardenReport(reportPath: string): Promise<string> {

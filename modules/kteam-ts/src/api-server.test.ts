@@ -128,6 +128,21 @@ class FakeService implements KTeamService {
     ];
   };
   wardenReport = async (p: string) => `# report ${p}\n\nVerdict: KILL\n`;
+  search = async (query: string, limit = 30) => ({
+    query,
+    scanned: 7,
+    results: query
+      ? [
+          {
+            sessionId: 's1',
+            teammate: 'test',
+            turn: 2,
+            snippet: `… ${query} matched here …`,
+            at: '2026-01-01T00:00:00Z',
+          },
+        ].slice(0, limit)
+      : [],
+  });
 }
 
 const servers: Server<unknown>[] = [];
@@ -163,6 +178,19 @@ describe('kteam daemon API', () => {
     const pr = await fetch(`${base}/v1/projects`, { headers: auth });
     expect(pr.status).toBe(200);
     expect(((await pr.json()) as Array<{ name: string }>)[0]!.name).toBe('home-manager');
+  });
+
+  test('exposes transcript search with a scanned count', async () => {
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service: new FakeService() });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}`;
+    const auth = { authorization: 'Bearer secret' };
+    const res = await fetch(`${base}/v1/search?q=hello&limit=10`, { headers: auth });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { scanned: number; results: Array<{ sessionId: string; snippet: string }> };
+    expect(body.scanned).toBe(7);
+    expect(body.results[0]!.sessionId).toBe('s1');
+    expect(body.results[0]!.snippet).toContain('hello');
   });
 
   test('exposes warden verdicts and a report reader', async () => {

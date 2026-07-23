@@ -97,6 +97,8 @@ export interface SessionState {
   lastSubprocessAt?: string;
   subprocessSince?: string;
   nudgedAt?: string;
+  needsHuman?: string;
+  needsHumanKind?: string;
   retryAttempt?: number;
   turnCompleted?: boolean;
   quota?: {
@@ -274,6 +276,20 @@ export interface StartSessionPayload {
   model?: string;
   label?: string;
   name?: string;
+}
+
+export interface SearchResult {
+  sessionId: string;
+  teammate?: string;
+  turn?: number;
+  snippet: string;
+  at?: string;
+}
+
+export interface SearchResponse {
+  query: string;
+  scanned: number;
+  results: SearchResult[];
 }
 
 export type WardenVerdictKind = 'killed' | 'revived' | 'nudged' | 'cleared' | 'needs_human' | 'unknown';

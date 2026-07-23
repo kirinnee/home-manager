@@ -254,6 +254,11 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
             return upgraded ? undefined : json({ error: 'websocket upgrade failed' }, 400);
           }
           if (url.pathname === '/v1/health' && request.method === 'GET') return json(await options.service.health());
+          if (url.pathname === '/v1/search' && request.method === 'GET') {
+            const q = url.searchParams.get('q') ?? '';
+            const limitRaw = Number(url.searchParams.get('limit') ?? '30');
+            return json(await options.service.search(q, Number.isFinite(limitRaw) ? limitRaw : 30));
+          }
           if (url.pathname === '/v1/wrappers' && request.method === 'GET')
             return json(await options.service.wrappers());
           if (url.pathname === '/v1/projects' && request.method === 'GET')
