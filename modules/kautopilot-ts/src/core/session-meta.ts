@@ -8,6 +8,7 @@ import {
 import { dirname, join } from "node:path";
 import { sessionDir } from "./artifacts";
 import { readConfig } from "./config";
+import type { Phase } from "./phase-plan";
 
 // ============================================================================
 // session.json — the one flat session's mutable metadata (§4, §11)
@@ -94,6 +95,13 @@ export interface SessionMeta {
 	epoch: number;
 	runMode: RunMode;
 	execMode: ExecMode;
+	/**
+	 * The plan-shaping phases THIS session runs, in canonical order (always includes
+	 * `plan`). Pinned at `start` (explicit `--phases` → keyword-heuristic proposal →
+	 * config default) so later config flips never re-shape an in-flight session.
+	 * Absent (pre-feature sessions) means the full canonical set. See core/phase-plan.ts.
+	 */
+	phases?: Phase[];
 	/** Whether the binary may merge a ready PR itself (`auto`) or must ask (`manual`). */
 	mergeMode: MergeMode;
 	/**

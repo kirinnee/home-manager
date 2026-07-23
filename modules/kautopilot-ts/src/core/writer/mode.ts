@@ -10,13 +10,15 @@ import type { Config } from "../types";
 
 export type StepExecution = "inline" | "deferred";
 
-/** The six interactive writer steps (the STEP_ARTIFACT keys). */
+/** The interactive writer steps (the STEP_ARTIFACT keys). `plan_only` is the
+ *  plan-only ("fast") single artifact and defers like the other writer steps. */
 const WRITER_STEPS = [
 	"brainstorm",
 	"triage",
 	"write_spec",
 	"write_master_plan",
 	"write_plans",
+	"plan_only",
 	"feedback",
 ] as const;
 

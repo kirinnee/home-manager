@@ -130,6 +130,15 @@ export function serializeConfigWithComments(config: Config): string {
 	lines.push(`  maxParallelRepos: ${config.settings.maxParallelRepos}`);
 	lines.push(`  runMode: ${config.settings.runMode}`);
 	lines.push(`  execMode: ${config.settings.execMode}`);
+	// Phase-set model: default set, keyword classes, and confidence threshold.
+	const ph = config.settings.phases;
+	lines.push("  phases:");
+	lines.push(`    default: [${ph.default.join(", ")}]`);
+	lines.push(`    confidenceThreshold: ${ph.confidenceThreshold}`);
+	lines.push("    keywords:");
+	lines.push(`      planOnly: [${ph.keywords.planOnly.join(", ")}]`);
+	lines.push(`      full: [${ph.keywords.full.join(", ")}]`);
+	lines.push(`      brainstorm: [${ph.keywords.brainstorm.join(", ")}]`);
 	lines.push(`  viewerBaseUrl: ${config.settings.viewerBaseUrl}`);
 	lines.push(`  kloopBaseUrl: ${config.settings.kloopBaseUrl}`);
 	lines.push(`  viewerPort: ${config.settings.viewerPort}`);

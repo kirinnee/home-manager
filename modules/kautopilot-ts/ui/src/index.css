@@ -1,0 +1,158 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================================
+   Design tokens — a compact professional engineering tool (Linear / GitHub /
+   Vercel density). Neutral zinc surfaces + one understated indigo accent +
+   muted semantic status hues, hand-tuned light + dark themes (data-theme).
+   Ported from the legacy single-file shell so the React app keeps the look.
+   ============================================================================ */
+:root {
+	color-scheme: light dark;
+	--s-1: 4px; --s-2: 6px; --s-3: 10px; --s-4: 12px; --s-5: 16px; --s-6: 24px; --s-7: 36px;
+	--r-sm: 6px; --r-md: 8px; --r-lg: 10px; --r-full: 999px;
+	--font-ui: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+	--font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+	--bg: #fbfbfc;
+	--surface: #ffffff;
+	--surface-2: #f5f5f6;
+	--raised: #ffffff;
+	--fg: #18181b;
+	--fg-soft: #3f3f46;
+	--muted: #71717a;
+	--border: #e4e4e7;
+	--border-soft: #ececee;
+	--accent: #4f5bd5;
+	--accent-fg: #ffffff;
+	--accent-soft: #eef0fb;
+	--accent-border: #d4d8f4;
+	--code-bg: #f5f5f6;
+	--code-border: #e4e4e7;
+	--bold: #312e81;
+	--italic: #0e7490;
+	--inline-code: #b03060;
+	--inline-code-bg: #fbeef2;
+	--inline-code-border: #f1d6df;
+	--ring: rgba(79, 91, 213, 0.4);
+	--ok: #3f7e52; --ok-bg: #eef4f0; --ok-border: #cfe2d6;
+	--warn: #8a6420; --warn-bg: #f7f1e6; --warn-border: #e7dac0;
+	--pend: #52525b; --pend-bg: #f4f4f5; --pend-border: #e4e4e7;
+	--err: #a14040; --err-bg: #f7eded; --err-border: #e6cfcf;
+	--block: #98532f; --block-bg: #f6efe9; --block-border: #e3d3c5;
+	--add: #3f7e52; --add-bg: #eef5f0; --add-word: #a9deb9;
+	--del: #a14040; --del-bg: #f6edee; --del-word: #f1b9b9;
+	--sh-sm: 0 1px 1px rgba(24,24,27,0.04);
+	--sh-md: 0 1px 2px rgba(24,24,27,0.06), 0 2px 6px rgba(24,24,27,0.05);
+	--sh-lg: 0 4px 16px rgba(24,24,27,0.1);
+	--bar-bg: rgba(251,251,252,0.85);
+}
+:root[data-theme="dark"] {
+	--bg: #0a0a0b;
+	--surface: #141416;
+	--surface-2: #1b1b1e;
+	--raised: #18181b;
+	--fg: #f4f4f5;
+	--fg-soft: #d4d4d8;
+	--muted: #9b9ba3;
+	--border: #2a2a2e;
+	--border-soft: #222226;
+	--accent: #8b93e8;
+	--accent-fg: #0b0b0e;
+	--accent-soft: #1c1c2c;
+	--accent-border: #353560;
+	--code-bg: #141416;
+	--code-border: #2a2a2e;
+	--bold: #c7ccf8;
+	--italic: #6cc6d4;
+	--inline-code: #f0a2bf;
+	--inline-code-bg: #241820;
+	--inline-code-border: #3a2630;
+	--ring: rgba(139, 147, 232, 0.5);
+	--ok: #6fae82; --ok-bg: #14241a; --ok-border: #234630;
+	--warn: #c79a52; --warn-bg: #241d11; --warn-border: #463719;
+	--pend: #9b9ba3; --pend-bg: #1b1b1e; --pend-border: #2e2e33;
+	--err: #cc7d7d; --err-bg: #251616; --err-border: #482a2a;
+	--block: #c08a5e; --block-bg: #241a11; --block-border: #463219;
+	--add: #6fae82; --add-bg: #15391f; --add-word: #2f6b46;
+	--del: #cc7d7d; --del-bg: #3d1a1d; --del-word: #7a3739;
+	--sh-sm: 0 1px 1px rgba(0,0,0,0.4);
+	--sh-md: 0 1px 2px rgba(0,0,0,0.45), 0 2px 8px rgba(0,0,0,0.3);
+	--sh-lg: 0 6px 24px rgba(0,0,0,0.55);
+	--bar-bg: rgba(10,10,11,0.85);
+}
+
+html {
+	-webkit-text-size-adjust: 100%;
+	scroll-behavior: smooth;
+	scroll-padding-top: 56px;
+}
+body {
+	margin: 0;
+	background: var(--bg);
+	color: var(--fg);
+	font-family: var(--font-ui);
+	font-size: 13.5px;
+	line-height: 1.45;
+	-webkit-font-smoothing: antialiased;
+	text-rendering: optimizeLegibility;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; text-underline-offset: 2px; }
+:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: var(--r-sm); }
+::selection { background: var(--accent-soft); }
+
+/* ── prose (the one comfortable-to-read area) ──────────────────────────── */
+.prose { font-size: 15px; line-height: 1.65; color: var(--fg-soft); overflow-wrap: break-word; }
+.prose > :first-child { margin-top: 0; }
+.prose h1, .prose h2, .prose h3, .prose h4 {
+	color: var(--fg); line-height: 1.3; font-weight: 700; letter-spacing: -0.015em;
+	margin-top: 1.6em; margin-bottom: 0.5em; scroll-margin-top: 56px;
+}
+.prose h1 { font-size: 1.5rem; }
+.prose h2 { font-size: 1.25rem; padding-bottom: 0.25em; border-bottom: 1px solid var(--border); }
+.prose h3 { font-size: 1.1rem; }
+.prose h4 { font-size: 1rem; }
+.prose p { margin: 0.85em 0; }
+.prose ul, .prose ol { margin: 0.85em 0; padding-left: 1.4em; }
+.prose li { margin: 0.3em 0; }
+.prose li::marker { color: var(--muted); }
+.prose a { font-weight: 500; }
+.prose a:hover { text-decoration: underline; }
+.prose strong { color: var(--bold); font-weight: 700; }
+.prose em { color: var(--italic); font-style: italic; }
+.prose ins.d-ins { text-decoration: none; background: var(--add-word); color: var(--fg); font-weight: 600; border-radius: 3px; padding: 0 2px; }
+.prose del.d-del { text-decoration: line-through; text-decoration-color: var(--del); background: var(--del-word); color: var(--fg); border-radius: 3px; padding: 0 2px; }
+.prose hr { border: none; border-top: 1px solid var(--border); margin: 1.6em 0; }
+.prose blockquote {
+	margin: 1em 0; padding: 0.4em 1em; color: var(--muted);
+	border-left: 3px solid var(--accent); background: var(--accent-soft);
+	border-radius: 0 var(--r-sm) var(--r-sm) 0;
+}
+.prose blockquote p { margin: 0.4em 0; }
+.prose code {
+	font-family: var(--font-mono); font-size: 0.85em;
+	background: var(--inline-code-bg); border: 1px solid var(--inline-code-border);
+	padding: 0.1em 0.4em; border-radius: 5px; color: var(--inline-code);
+}
+.prose pre {
+	background: var(--code-bg); border: 1px solid var(--code-border);
+	border-radius: var(--r-md); padding: var(--s-4); margin: 1.1em 0;
+	overflow-x: auto; font-size: 0.82rem; line-height: 1.55;
+}
+.prose pre code { background: none; border: none; padding: 0; font-size: inherit; color: inherit; }
+.prose img { max-width: 100%; border-radius: var(--r-sm); }
+.prose table { border-collapse: collapse; width: 100%; font-size: 0.88rem; margin: 1.1em 0; display: block; overflow-x: auto; }
+.prose th, .prose td { padding: 6px 11px; text-align: left; border-bottom: 1px solid var(--border-soft); }
+.prose th { background: var(--surface-2); font-weight: 600; color: var(--fg); white-space: nowrap; }
+.prose tbody tr:nth-child(even) { background: var(--surface-2); }
+.prose .mermaid-card {
+	margin: 1.2em 0; padding: var(--s-4); border: 1px solid var(--border);
+	border-radius: var(--r-md); background: var(--surface); text-align: center; overflow-x: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	* { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; scroll-behavior: auto; }
+}

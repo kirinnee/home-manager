@@ -19,6 +19,12 @@ import {
 	type PlanNode,
 	type PrPlan,
 } from "../core/orchestration";
+import {
+	hasPhase,
+	isPlanOnly,
+	type Phase,
+	sessionPhases,
+} from "../core/phase-plan";
 import type { ArtifactKind, ArtifactRef } from "../core/revisions";
 import {
 	currentRevisionPath,
@@ -28,7 +34,11 @@ import {
 	plansRepoDir,
 	revisionPath,
 } from "../core/revisions";
-import { updateSessionMeta } from "../core/session-meta";
+import {
+	readSessionMeta,
+	type SessionMeta,
+	updateSessionMeta,
+} from "../core/session-meta";
 import type { ReviewerConfig } from "../core/types";
 import { authoringRepoName, latestPlanFiles } from "../phases/shared";
 import {
@@ -42,7 +52,13 @@ import {
 // ============================================================================
 // PLAN phase — `kautopilot next` (session-scoped, repo-agnostic for spec).
 // resolve_org → [brainstorm → create_ticket] → fetch_ticket → triage →
-// write_spec → write_plans → finalize_plans
+// write_spec → write_master_plan → write_plans → finalize_plans
+//
+// PHASE SET (core/phase-plan.ts): the four plan-shaping phases (brainstorm, triage,
+// spec, plan) are independently selectable — `session.json.phases` pins the subset.
+// Transitions consult it (`nextTimelineStep`) and skip omitted phases entirely, so no
+// empty artifact is created. `plan` is mandatory; `[plan]` alone collapses into the
+// single `plan_only` artifact (one PR). The full set is the default.
 //
 // write_spec and write_plans each CARRY their reviewer fan-out (spec_reviewers /
 // plan_reviewers) so reviewers run BEFORE the version is presented to the user —
@@ -92,6 +108,26 @@ function lastDiff(
 	});
 }
 
+/**
+ * The path of an upstream artifact when its phase ran AND the file exists on disk;
+ * otherwise a fallback note that points the writer at the ticket/request instead.
+ * This keeps a downstream step coherent when an earlier phase was skipped from the
+ * phase set (e.g. `[spec, plan]` runs write_spec with no triage doc) — the reused
+ * config body's `{triage}`/`{spec}` placeholder resolves to guidance, not a dangling path.
+ */
+function upstreamDocOrNote(
+	ctx: StepContext,
+	phase: Phase,
+	path: string,
+	label: string,
+): string {
+	if (hasPhase(ctx.meta, phase) && existsSync(path)) return path;
+	const req = ctx.meta.request
+		? ` The user's request: ${ctx.meta.request}`
+		: "";
+	return `(no ${label} — the ${phase} phase was skipped; work from the ticket/request instead.${req})`;
+}
+
 function buildReview(
 	reviewers: Record<string, ReviewerConfig>,
 	vars: Record<string, string | null>,
@@ -111,6 +147,37 @@ function buildReview(
 	};
 }
 
+// --- phase-set routing -------------------------------------------------------
+
+// The ordered plan-timeline AFTER any ticket plumbing. Each artifact step is gated
+// by its phase; `finalize_plans` is plan plumbing (always runs). Skipping a phase
+// omits its artifact entirely — the step never runs, so no empty file is created.
+const PLAN_TIMELINE: { step: string; phase?: Phase }[] = [
+	{ step: "triage", phase: "triage" },
+	{ step: "write_spec", phase: "spec" },
+	{ step: "write_master_plan", phase: "plan" },
+	{ step: "write_plans", phase: "plan" },
+	{ step: "finalize_plans" },
+];
+
+/**
+ * The next plan-timeline step AFTER `afterStep` that this session's phase set
+ * enables (plumbing steps are always enabled). `afterStep === null` returns the
+ * FIRST enabled step (used to enter the timeline from ticket plumbing).
+ */
+function nextTimelineStep(afterStep: string | null, meta: SessionMeta): string {
+	const phases = sessionPhases(meta);
+	const start =
+		afterStep === null
+			? 0
+			: PLAN_TIMELINE.findIndex((e) => e.step === afterStep) + 1;
+	for (let i = start; i < PLAN_TIMELINE.length; i++) {
+		const e = PLAN_TIMELINE[i];
+		if (!e.phase || phases.includes(e.phase)) return e.step;
+	}
+	return "finalize_plans";
+}
+
 // --- resolve_org (code) ------------------------------------------------------
 
 const resolveOrg: StepDef = {
@@ -121,8 +188,16 @@ const resolveOrg: StepDef = {
 	run: async (ctx) => {
 		// Org is resolved at `start` (--org → ticket → ask) and recorded in session.json.
 		if (!ctx.meta.org) throw new Error("resolve_org: org not set on session");
-		// Ad-hoc (no ticket) flow shapes the idea first.
-		return ctx.meta.ticketId ? "fetch_ticket" : "brainstorm";
+		const phases = sessionPhases(ctx.meta);
+		// Plan-only ("fast") shape: collapse the whole plan phase into ONE artifact
+		// (one PR); no brainstorm/ticket/triage/spec/master-plan.
+		if (isPlanOnly(phases)) return "plan_only";
+		// A ticket → fetch it once so downstream phases can read it. No ticket but
+		// brainstorm enabled → shape the idea (then create the ticket). No ticket and
+		// no brainstorm → enter the timeline directly off the request text.
+		if (ctx.meta.ticketId) return "fetch_ticket";
+		if (phases.includes("brainstorm")) return "brainstorm";
+		return nextTimelineStep(null, ctx.meta);
 	},
 };
 
@@ -247,7 +322,7 @@ const fetchTicket: StepDef = {
 			},
 		} satisfies PreparedStep;
 	},
-	finalize: async () => "triage",
+	finalize: async (ctx) => nextTimelineStep(null, ctx.meta),
 };
 
 // --- triage (interactive) ----------------------------------------------------
@@ -351,7 +426,7 @@ const triage: StepDef = {
 				}
 			});
 		}
-		return "write_spec";
+		return nextTimelineStep("triage", ctx.meta);
 	},
 };
 
@@ -404,7 +479,7 @@ const writeSpec: StepDef = {
 		const vars = {
 			...planVars(ctx),
 			spec: path,
-			triage: triagePath,
+			triage: upstreamDocOrNote(ctx, "triage", triagePath, "triage doc"),
 			specTemplate: ctx.config.templates.spec,
 			review_summary: existsSync(summaryFile)
 				? summaryFile
@@ -434,7 +509,7 @@ const writeSpec: StepDef = {
 			review,
 		} satisfies PreparedStep;
 	},
-	finalize: async () => "write_master_plan",
+	finalize: async (ctx) => nextTimelineStep("write_spec", ctx.meta),
 };
 
 function latestSpecVersion(ctx: StepContext): number {
@@ -549,8 +624,13 @@ const writeMasterPlan: StepDef = {
 		const vars = {
 			...planVars(ctx),
 			master_plan: path,
-			spec: latestSpecPath(ctx),
-			triage: latestTriagePath(ctx),
+			spec: upstreamDocOrNote(ctx, "spec", latestSpecPath(ctx), "spec doc"),
+			triage: upstreamDocOrNote(
+				ctx,
+				"triage",
+				latestTriagePath(ctx),
+				"triage doc",
+			),
 			mergeMode: ctx.meta.mergeMode,
 			lastDiff: lastDiff(ctx.sessionId, "master_plan", { epoch: ctx.version }),
 		};
@@ -586,7 +666,7 @@ const writeMasterPlan: StepDef = {
 		if (master.nodes.length > 0 || master.prs.length > 0) {
 			initOrchestration(ctx.sessionId, ctx.version, effectiveMerge, master);
 		}
-		return "write_plans";
+		return nextTimelineStep("write_master_plan", ctx.meta);
 	},
 };
 
@@ -722,8 +802,13 @@ const writePlans: StepDef = {
 			...planVars(ctx),
 			plans: plansDir,
 			version: String(version),
-			spec: latestSpecPath(ctx),
-			triage: latestTriagePath(ctx),
+			spec: upstreamDocOrNote(ctx, "spec", latestSpecPath(ctx), "spec doc"),
+			triage: upstreamDocOrNote(
+				ctx,
+				"triage",
+				latestTriagePath(ctx),
+				"triage doc",
+			),
 			master_plan: latestMasterPlanPath(ctx),
 			planTemplate: ctx.config.templates.plan,
 			lastDiff: lastDiff(ctx.sessionId, "plans", { epoch: ctx.version, repo }),
@@ -758,12 +843,14 @@ const writePlans: StepDef = {
 		if (ctx.metadata?.escalate === "amend_spec") {
 			// amend_spec (plans found the spec wrong) bumps the epoch and re-runs the
 			// shared plan phase (SPEC §7.1/§13 #5). write_plans is already session-scoped,
-			// so returning "write_spec" re-enters the shared timeline at the new epoch.
+			// so re-entering the timeline at the new epoch redoes spec (when the spec phase
+			// is enabled) then the master plan; with no spec phase there is nothing to
+			// amend, so fall through to re-plan from the master plan.
 			updateSessionMeta(ctx.sessionId, (m) => {
 				m.epoch += 1;
 				for (const r of m.repos) r.status = "pending";
 			});
-			return "write_spec";
+			return hasPhase(ctx.meta, "spec") ? "write_spec" : "write_master_plan";
 		}
 		return "finalize_plans";
 	},
@@ -820,6 +907,184 @@ const finalizePlans: StepDef = {
 
 		// Plans approved → hand execution to the skill. The binary waits at
 		// `await_repos` while the skill drives `kautopilot schedule`/`record`.
+		return "await_repos";
+	},
+};
+
+// --- plan_only (interactive; the plan-only "fast" shape) --------------------
+
+// The plan-only shape touches ONE repo, registered under this fixed LABEL. The
+// bucket the plan is authored into is resolved from `authoringRepoName(meta)` at
+// prepare time — with no repos registered yet that is "default" — so the label MUST
+// match for finalize_plans to find and assign the plan. The repo's real filesystem
+// path (for worktrees) travels separately in `repoPath`; the branch/PR naming is
+// independent of this internal label.
+const PLAN_ONLY_REPO_LABEL = "default";
+
+const PLAN_ONLY_MECHANICS = `## CRITICAL: Plan-only shape — ONE artifact, ONE PR
+
+This is a PLAN-ONLY run (the phase set is just \`plan\`). The whole plan phase
+(brainstorm → triage → spec → master plan → per-repo plans) is COLLAPSED into this
+single step: you capture the intent, ask your clarifying questions, then write ONE
+document — the plan — and the run goes straight to implementation as EXACTLY ONE PR.
+There is no separate spec, no master plan, no multi-plan breakdown.
+
+### 1. Capture & CONFIRM the intent FIRST (do NOT skip this)
+Before writing anything, turn the request into a concrete, agreed problem statement:
+- The user's request: {request}
+- Explore just enough context (the repo, recent commits) to ground your questions.
+- Ask your clarifying questions ONE at a time — prefer multiple-choice (AskUserQuestion).
+  Focus on the real problem, scope, and success criteria. Keep it TIGHT — this is the
+  fast lane, not a full debate.
+- Then state the captured intent back and get the user to CONFIRM it before you draft
+  the plan. Intent capture + confirmation is REQUIRED in every shape — never assume it.
+
+### 2. Decide the SINGLE repo + path
+The plan-only shape touches ONE repo and opens ONE PR. Identify the repo this change
+lives in, find its absolute filesystem path on disk (confirm with the user), and a short
+branch slug. Report the path as \`repoPath\` and the slug as \`branchSlug\` in the completion
+metadata; a one-line PR title as \`prTitle\`.
+
+### 3. Write the ONE combined plan document
+Write a SINGLE plan file to \`{plans}/plan-1/v1.md\` (the stable id \`plan-1\`). This one
+document folds the brainstorm (agreed problem + direction), the triage (scope + repo),
+the spec goals, AND the implementation plan into ONE plan, titled as the plan. It is a
+self-standing vertical slice: prepped + implemented + verified in ONE commit. Add the
+front-matter line \`repo: ${PLAN_ONLY_REPO_LABEL}\` at the top so the controller assigns it.
+Follow the plan template:
+{planTemplate}
+
+Every acceptance criterion MUST carry an Evidence line (prefer type-1 automated proof).
+
+### Previous revision diff (if any)
+{lastDiff}`;
+
+const planOnly: StepDef = {
+	name: "plan_only",
+	phase: "plan",
+	kind: "interactive",
+	scope: "session",
+	prepare: async (ctx) => {
+		// No repo is registered yet, so the authoring bucket resolves to
+		// PLAN_ONLY_REPO_LABEL ("default") — the same label finalize_plans reads back.
+		const repo = authoringRepoName(ctx.meta);
+		const versions = listPlanSetVersions(ctx.sessionId, ctx.version, repo);
+		const version = versions.length ? Math.max(...versions) : 1;
+		const plansDir = plansRepoDir(ctx.sessionId, ctx.version, repo);
+		mkdirSync(plansDir, { recursive: true });
+		// Plan-only has no separate spec/triage docs; the intent captured in this same
+		// step IS the spec. Provide a note so the reused plan_writer body's {spec}/{triage}
+		// placeholders resolve coherently instead of leaking literal braces.
+		const foldedNote =
+			"(plan-only shape — no separate spec/triage doc; the intent you captured and confirmed above IS the spec/triage)";
+		const vars = {
+			...planVars(ctx),
+			plans: plansDir,
+			version: String(version),
+			spec: foldedNote,
+			triage: foldedNote,
+			planTemplate: ctx.config.templates.plan,
+			request: ctx.meta.request ?? "(no request text recorded — ask the user)",
+			lastDiff: lastDiff(ctx.sessionId, "plans", {
+				epoch: ctx.version,
+				repo,
+			}),
+		};
+		const body = getAgentPrompt(
+			"phase1",
+			"plan_writer",
+			vars as Record<string, string>,
+		);
+		return {
+			prompt: `${substitute(PLAN_ONLY_MECHANICS, vars)}\n\n${approvalGate(ctx, "plan_only")}\n\n${body}`,
+			vars,
+			contract: {
+				outputFile: plansDir,
+				completionEvent: "plan_only:approved",
+				completionMetadataSchema: {
+					repoPath: "string?",
+					branchSlug: "string?",
+					prTitle: "string?",
+				},
+			},
+		} satisfies PreparedStep;
+	},
+	finalize: async (ctx) => {
+		// SINGLE-PLAN ENFORCEMENT (structural, not by convention): reject any output
+		// other than exactly one `plan-1` folder BEFORE mutating any state. This runs
+		// before registration/orchestration, so a rejected completion leaves the step
+		// pending and the session untouched. It also means we never hand off to the
+		// greedy `finalize_plans` (which would assign a stray `plan-2`); plan-only owns
+		// its assignment below, keeping session + orchestration in lockstep on one plan.
+		const repo = authoringRepoName(ctx.meta); // PLAN_ONLY_REPO_LABEL ("default")
+		const authored = latestPlanFiles(ctx.sessionId, ctx.version, repo).map(
+			(p) => p.plan,
+		);
+		if (authored.length !== 1 || authored[0] !== "plan-1") {
+			throw new Error(
+				`plan-only requires EXACTLY one plan folder named "plan-1", found [${
+					authored.join(", ") || "none"
+				}]. The plan-only shape is one artifact → one PR: author only ` +
+					`{plans}/plan-1/vN.md (remove any others), then re-run \`kautopilot complete\`.`,
+			);
+		}
+
+		const repoPath = ctx.metadata?.repoPath as string | undefined;
+		const branchSlug = ctx.metadata?.branchSlug as string | undefined;
+		const prTitle =
+			(ctx.metadata?.prTitle as string | undefined) ?? "Plan-only change";
+		const slug = branchSlug ? slugifyBranch(branchSlug) : "";
+		// Register EXACTLY ONE repo (label PLAN_ONLY_REPO_LABEL) and assign it the single
+		// validated plan directly — no generic finalize_plans re-scan.
+		updateSessionMeta(ctx.sessionId, (m) => {
+			const ticketRef = branchTicketRef(m.ticketId);
+			const branch = slug
+				? `${gitUserSlug()}/${ticketRef ? `${ticketRef}-` : "ticket-"}${slug}`
+				: null;
+			const existing = m.repos.find((r) => r.repo === PLAN_ONLY_REPO_LABEL);
+			if (existing) {
+				existing.plans = ["plan-1"];
+			} else {
+				m.repos.push({
+					repo: PLAN_ONLY_REPO_LABEL,
+					repoPath: repoPath ?? m.folder,
+					worktree: null,
+					branch,
+					plans: ["plan-1"],
+					dependsOn: [],
+					prNumber: null,
+					prUrl: null,
+					status: "pending",
+				});
+			}
+		});
+		// Freeze a single-PR, single-plan orchestration by CONSTRUCTION — the plan-only
+		// shape cannot fan out to more than one PR (single-PR enforcement).
+		const meta = readSessionMeta(ctx.sessionId);
+		const branch = meta?.repos[0]?.branch ?? `${gitUserSlug()}/plan-only`;
+		const master: MasterPlan = {
+			prs: [
+				{
+					id: "pr-1",
+					repo: PLAN_ONLY_REPO_LABEL,
+					branch,
+					title: prTitle,
+					plans: ["plan-1"],
+				},
+			],
+			nodes: [
+				{
+					plan: "plan-1",
+					repo: PLAN_ONLY_REPO_LABEL,
+					pr: "pr-1",
+					title: prTitle,
+				},
+			],
+			deps: [],
+		};
+		initOrchestration(ctx.sessionId, ctx.version, ctx.meta.mergeMode, master);
+		// Skip finalize_plans (its greedy per-folder assignment could re-introduce a
+		// stray plan); hand straight to the schedule/record gate.
 		return "await_repos";
 	},
 };
@@ -974,6 +1239,7 @@ export const PLAN_STEPS: StepDef[] = [
 	writeMasterPlan,
 	writePlans,
 	finalizePlans,
+	planOnly,
 	feedbackCheck,
 	feedback,
 ];

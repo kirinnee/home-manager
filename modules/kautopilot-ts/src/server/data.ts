@@ -24,7 +24,7 @@ import { ensureStatus } from "../core/status";
 // ============================================================================
 
 /** Root of the session store. Resolved lazily so tests can swap $HOME. */
-function storeRoot(): string {
+export function storeRoot(): string {
 	return `${process.env.HOME}/.kautopilot`;
 }
 
@@ -33,7 +33,7 @@ function storeRoot(): string {
  * session.json. Excludes the global `config.yaml`, the `orgs` dir, and any
  * other non-session entries. Tolerates a missing store (sandbox / empty HOME).
  */
-function listSessionIds(): string[] {
+export function listSessionIds(): string[] {
 	const root = storeRoot();
 	if (!existsSync(root)) return [];
 	const ids: string[] = [];
@@ -77,6 +77,40 @@ function planRepos(sessionId: string, epoch: number): string[] {
 		.sort();
 }
 
+/**
+ * Pipeline/run modes surfaced as opaque strings so the UI renders them
+ * generically (no code change when a new mode such as "fast" is added). The
+ * `pipeline` field is read defensively from meta — it does not exist yet, so it
+ * is null today and lights up automatically once the pipeline writes it.
+ */
+export interface SessionModes {
+	run: string | null;
+	exec: string | null;
+	merge: string | null;
+	writer: string | null;
+	pipeline: string | null;
+}
+
+function sessionModes(meta: SessionMeta): SessionModes {
+	const m = meta as SessionMeta & {
+		pipelineMode?: unknown;
+		mode?: unknown;
+	};
+	const pipeline =
+		typeof m.pipelineMode === "string"
+			? m.pipelineMode
+			: typeof m.mode === "string"
+				? m.mode
+				: null;
+	return {
+		run: meta.runMode ?? null,
+		exec: meta.execMode ?? null,
+		merge: meta.mergeMode ?? null,
+		writer: meta.writerMode ?? null,
+		pipeline,
+	};
+}
+
 export interface SessionSummary {
 	id: string;
 	ticketId: string;
@@ -84,6 +118,7 @@ export interface SessionSummary {
 	ticketSystem: string;
 	epoch: number;
 	phase: string;
+	modes: SessionModes;
 	repos: Array<{
 		repo: string;
 		status: string;
@@ -92,7 +127,7 @@ export interface SessionSummary {
 	}>;
 }
 
-function summarize(id: string, meta: SessionMeta): SessionSummary {
+export function summarize(id: string, meta: SessionMeta): SessionSummary {
 	const status = ensureStatus(id);
 	return {
 		id,
@@ -101,6 +136,7 @@ function summarize(id: string, meta: SessionMeta): SessionSummary {
 		ticketSystem: meta.ticketSystem,
 		epoch: meta.epoch,
 		phase: status.phase,
+		modes: sessionModes(meta),
 		repos: meta.repos.map((r) => ({
 			repo: r.repo,
 			status: r.status,
@@ -170,6 +206,7 @@ export interface SessionDetail {
 	meta: SessionMeta;
 	phase: string;
 	state: string;
+	modes: SessionModes;
 	artifacts: {
 		ticket: boolean;
 		/** ticket-draft.md (ad-hoc sessions that brainstormed before a ticket). */
@@ -229,6 +266,7 @@ export function getSessionDetail(id: string): SessionDetail | null {
 		meta,
 		phase: status.phase,
 		state: status.state,
+		modes: sessionModes(meta),
 		artifacts: {
 			ticket: existsSync(join(sessionDir(id), "ticket.md")),
 			ticketDraft: existsSync(join(sessionDir(id), "ticket-draft.md")),
