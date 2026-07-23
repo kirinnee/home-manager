@@ -166,7 +166,7 @@ export interface KTeamEvent<T = unknown> {
   sessionId: string;
   turn: number;
   type: string;
-  source: 'daemon' | 'claude' | 'codex' | 'tmux' | 'client' | 'watcher';
+  source: 'daemon' | 'claude' | 'codex' | 'tmux' | 'client' | 'watcher' | 'warden';
   data: T;
 }
 

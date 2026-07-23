@@ -9,6 +9,7 @@ import type {
 import type { WardenConfig } from './daemon-config';
 import type { WardenAnomaly } from './warden-detect';
 import type { ProjectInfo, WrapperInfo } from './fleet-inventory';
+import type { WardenVerdict } from './warden-verdicts';
 
 export interface SessionView {
   config: SessionConfig;
@@ -98,4 +99,9 @@ export interface KTeamService {
   wardenStatus(): Promise<WardenStatusView>;
   /** Force a fleet sweep now; `spawn` forces escalation past the gap/enabled. */
   wardenRun(spawn?: boolean): Promise<WardenRunView>;
+  /** Recent warden verdicts parsed from the reports (newest first). */
+  wardenVerdicts(): Promise<WardenVerdict[]>;
+  /** Raw markdown of one warden report; `path` is validated to live under the
+   *  reports directory. */
+  wardenReport(path: string): Promise<string>;
 }

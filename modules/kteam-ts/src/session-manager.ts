@@ -14,6 +14,8 @@ import {
 } from './codex-transcript';
 import { discoverAutoAgents, inferHarness, modelHint, shellSafeSessionName } from './core';
 import { listWrappers, scanProjects, type ProjectInfo, type WrapperInfo } from './fleet-inventory';
+import { currentActor } from './actor-context';
+import { parseWardenReports, type WardenVerdict } from './warden-verdicts';
 import {
   discoverCodexSession,
   codexSessionIds,
@@ -2356,6 +2358,10 @@ export class SessionManager implements KTeamService {
   ): Promise<KTeamEvent> {
     if (this.closed) throw new Error('kteam daemon is shutting down');
     if (this.deleting.has(id) && !allowDeleting) throw new Error('session deletion is in progress');
+    // Attribute to the request actor (e.g. a warden HTTP action) when one is in
+    // scope. Captured synchronously — the append runs on a deferred queue where
+    // the AsyncLocalStorage context would no longer be current.
+    const effectiveSource = currentActor() ?? source;
     let resolveEvent!: (event: KTeamEvent) => void;
     let rejectEvent!: (error: unknown) => void;
     const result = new Promise<KTeamEvent>((resolve, reject) => {
@@ -2371,7 +2377,7 @@ export class SessionManager implements KTeamService {
         const globalSequence = ++this.globalSequence;
         await atomicJson(path.join(this.paths.daemon, 'global-sequence.json'), { sequence: globalSequence, at: now() });
         const stored = await this.store.append(id, type, {
-          source,
+          source: effectiveSource,
           turn: resolvedTurn,
           payload,
           globalSequence,
@@ -3064,6 +3070,8 @@ export class SessionManager implements KTeamService {
       '## Rules',
       '- Do NOT touch any other session. No git writes, no repository edits, no new non-warden sessions.',
       `- Write your report to EXACTLY: ${reportPath}`,
+      '- START the report with a machine-readable line `Verdict: LEAVE|NUDGE|RESUME|KILL` (exactly one),',
+      '  then the human explanation. (The Fleet UI parses this line.)',
       '- Then run: kteam signal done',
     ].join('\n');
   }
@@ -3255,6 +3263,41 @@ export class SessionManager implements KTeamService {
 
   async projects(): Promise<ProjectInfo[]> {
     return scanProjects(this.options.projectRoots ?? ['~/Workspace', '~/.config']);
+  }
+
+  async wardenVerdicts(): Promise<WardenVerdict[]> {
+    const dir = this.paths.wardenReports;
+    const names = (await readdir(dir).catch(() => [] as string[])).filter(n => n.endsWith('.md'));
+    // Read only the most recent reports (by mtime) — bounded work.
+    const stats = await Promise.all(
+      names.map(async name => {
+        const p = path.join(dir, name);
+        const s = await stat(p).catch(() => undefined);
+        return s ? { path: p, mtimeMs: s.mtimeMs } : undefined;
+      }),
+    );
+    const recent = stats
+      .filter((x): x is { path: string; mtimeMs: number } => x !== undefined)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+      .slice(0, 40);
+    const files = await Promise.all(
+      recent.map(async r => ({
+        path: r.path,
+        mtimeMs: r.mtimeMs,
+        content: await readFile(r.path, 'utf8').catch(() => ''),
+      })),
+    );
+    return parseWardenReports(files.filter(f => f.content));
+  }
+
+  async wardenReport(reportPath: string): Promise<string> {
+    // Validate: only files directly under the reports dir, no traversal.
+    const dir = path.resolve(this.paths.wardenReports);
+    const resolved = path.resolve(reportPath);
+    if (path.dirname(resolved) !== dir || !resolved.endsWith('.md')) throw new Error('report not found');
+    return readFile(resolved, 'utf8').catch(() => {
+      throw new Error('report not found');
+    });
   }
 
   async wardenStatus(): Promise<WardenStatusView> {
