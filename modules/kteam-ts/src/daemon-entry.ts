@@ -47,8 +47,20 @@ await writeFile(paths.pid, `${process.pid}\n`, { mode: 0o600 });
 console.log(`kteamd listening on http://${config.host}:${server.port} (pid ${process.pid})`);
 // Index journals + recover sessions AFTER listen: the scan of ~1000 session
 // directories must never block the bind (the old 80 s cold-boot window).
-await manager.bootstrap();
-console.log('kteamd bootstrap complete (journals indexed, sessions reconciled)');
+// bootstrap() isolates phase failures internally; this catch is the LAST
+// resort — an unexpected throw must not take down a listening daemon, and
+// must never be silent (2026-07-23 silent-partial-boot incident).
+try {
+  await manager.bootstrap();
+  const problems = manager.bootstrapErrors.length;
+  console.log(
+    problems === 0
+      ? 'kteamd bootstrap complete (journals indexed, sessions reconciled)'
+      : `kteamd bootstrap DEGRADED: ${problems} error(s) — see /v1/health bootstrapErrorMessages`,
+  );
+} catch (error) {
+  console.error(`kteamd bootstrap crashed (daemon stays up; self-check will repair): ${String(error)}`);
+}
 
 let stopping = false;
 const stop = async () => {

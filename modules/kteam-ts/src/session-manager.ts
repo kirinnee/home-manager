@@ -175,6 +175,9 @@ export class SessionManager implements KTeamService {
   /** Fleet warden (layer-3 oversight): a periodic deterministic sweep plus,
    *  when enabled, rate-limited LLM escalation. */
   private wardenTimer?: ReturnType<typeof setInterval>;
+  /** Armed in create(), independent of bootstrap — the watchdog for the
+   *  silent-partial-boot class. */
+  private selfCheckTimer?: ReturnType<typeof setInterval>;
   private wardenState: WardenRuntimeState = {};
   private lastSweep?: WardenSweep;
   private lastEmittedFingerprint = '';
@@ -195,22 +198,90 @@ export class SessionManager implements KTeamService {
     // Open WITHOUT the disk import: the journal scan (even incremental) must
     // never hold the API bind hostage. bootstrap() runs it after listen.
     const store = await EventStore.open({ home: paths.home, databasePath: paths.database, importExisting: false });
-    return new SessionManager(paths, store, options);
+    const manager = new SessionManager(paths, store, options);
+    // Self-check timer armed HERE — independent of bootstrap, so it survives
+    // any bootstrap failure and flags the residue (the class the user had to
+    // spot by eyeballing a timestamp on 2026-07-23).
+    manager.selfCheckTimer = setInterval(() => void manager.selfCheck().catch(() => undefined), 60_000);
+    return manager;
+  }
+
+  /** Detect the silent-partial-boot class: active sessions without a monitor,
+   *  and a warden sweep that stopped happening (timer dead or wedged). Emits
+   *  a fleet.self_check_failed transient and — where safe — repairs by
+   *  starting the missing monitors and re-arming the warden. */
+  private async selfCheck(): Promise<void> {
+    if (this.closed) return;
+    const sessions = await this.list();
+    const unmonitored = sessions.filter(
+      view => !terminalStatuses.includes(view.state.status) && !this.monitors.has(view.config.id),
+    );
+    const lastSweepMs = this.wardenState.lastSweepAt ? Date.parse(this.wardenState.lastSweepAt) : 0;
+    const sweepStale =
+      this.wardenTimer === undefined ||
+      (lastSweepMs > 0 &&
+        Date.now() - lastSweepMs > Math.max(120_000, this.options.warden.intervalMinutes * 60_000 * 3));
+    if (unmonitored.length === 0 && !sweepStale) return;
+    this.emitTransient('fleet.self_check_failed', {
+      unmonitoredRunning: unmonitored.map(view => view.config.id),
+      wardenTimerArmed: this.wardenTimer !== undefined,
+      wardenLastSweepAt: this.wardenState.lastSweepAt,
+      bootstrapErrors: this.bootstrapErrors,
+    });
+    console.error(
+      `kteamd self-check: ${unmonitored.length} running session(s) without a monitor` +
+        `${sweepStale ? '; warden sweep stale/dead' : ''} — repairing`,
+    );
+    for (const view of unmonitored) {
+      await this.startMonitor(view.config.id).catch(error =>
+        console.error(`kteamd self-check: monitor start failed for ${view.config.id}: ${String(error)}`),
+      );
+    }
+    if (sweepStale) {
+      if (this.wardenTimer) clearInterval(this.wardenTimer);
+      this.wardenTimer = undefined;
+      await this.startWarden().catch(error =>
+        console.error(`kteamd self-check: warden re-arm failed: ${String(error)}`),
+      );
+    }
   }
 
   /** Index journals, reconcile survivors, and arm the warden. Runs AFTER the
    *  API socket is listening — early requests see a possibly-partial index
    *  (which only grows) rather than a connection refused. */
+  /** Errors collected during bootstrap — surfaced via /v1/health so a partial
+   *  boot can never be silent again (2026-07-23 06:23 incident: bootstrap
+   *  died quietly mid-recover, 4 running sessions unmonitored, warden timer
+   *  never armed, nothing logged). */
+  readonly bootstrapErrors: string[] = [];
+
   async bootstrap(): Promise<void> {
-    await this.store.importFromDisk();
-    await this.initializeGlobalSequence();
-    await this.recover();
-    await this.startWarden();
+    // Partition-tolerant and LOUD: each phase runs even if an earlier one
+    // threw; every failure is logged AND kept for the health endpoint. The
+    // self-check timer (armed in create(), independent of this chain) watches
+    // for the residue: unmonitored running sessions, dead warden timer.
+    const phase = async (name: string, work: () => Promise<unknown>) => {
+      try {
+        await work();
+      } catch (error) {
+        const message = `bootstrap phase ${name} failed: ${error instanceof Error ? error.message : String(error)}`;
+        this.bootstrapErrors.push(message);
+        console.error(`kteamd: ${message}`);
+      }
+    };
+    await phase('import', () => this.store.importFromDisk());
+    await phase('global-sequence', () => this.initializeGlobalSequence());
+    await phase('recover', () => this.recover());
+    await phase('warden', () => this.startWarden());
+    if (this.bootstrapErrors.length > 0) {
+      this.emitTransient('fleet.bootstrap_errors', { errors: this.bootstrapErrors });
+    }
   }
 
   async close(): Promise<void> {
     this.closed = true;
     if (this.wardenTimer) clearInterval(this.wardenTimer);
+    if (this.selfCheckTimer) clearInterval(this.selfCheckTimer);
     await this.wardenSweepChain.catch(() => undefined);
     for (const timer of this.retryTimers.values()) clearTimeout(timer);
     this.retryTimers.clear();
@@ -232,14 +303,25 @@ export class SessionManager implements KTeamService {
 
   async health(): Promise<Record<string, unknown>> {
     const sessions = await this.list();
+    const active = sessions.filter(item => !terminalStatuses.includes(item.state.status));
+    // Self-check surface (2026-07-23 silent-bootstrap incident): the operator
+    // must be able to see — and the sweep must be able to flag — a partial
+    // boot without eyeballing timestamps.
+    const unmonitoredRunning = active.filter(item => !this.monitors.has(item.config.id)).length;
+    const lastSweepMs = this.wardenState.lastSweepAt ? Date.parse(this.wardenState.lastSweepAt) : 0;
     return {
-      ok: true,
+      ok: this.bootstrapErrors.length === 0 && unmonitoredRunning === 0,
       version: '0.2.0',
       pid: process.pid,
       home: this.paths.home,
       sessions: sessions.length,
-      running: sessions.filter(item => !terminalStatuses.includes(item.state.status)).length,
+      running: active.length,
       monitors: this.monitors.size,
+      unmonitoredRunning,
+      wardenLastSweepSeconds: lastSweepMs > 0 ? Math.floor((Date.now() - lastSweepMs) / 1000) : null,
+      wardenTimerArmed: this.wardenTimer !== undefined,
+      bootstrapErrors: this.bootstrapErrors.length,
+      ...(this.bootstrapErrors.length > 0 ? { bootstrapErrorMessages: this.bootstrapErrors.slice(0, 10) } : {}),
       time: now(),
     };
   }
@@ -1300,6 +1382,27 @@ export class SessionManager implements KTeamService {
 
   private async recover(): Promise<void> {
     for (const session of await this.list()) {
+      try {
+        await this.recoverSession(session);
+      } catch (error) {
+        // One bad session must never abort the chain: the 06:23 boot died
+        // mid-recover and left every LATER session unmonitored with the
+        // warden timer unarmed. Isolate, record, continue.
+        const message = `recovery of ${session.config.id} failed: ${error instanceof Error ? error.message : String(error)}`;
+        this.bootstrapErrors.push(message);
+        console.error(`kteamd: ${message}`);
+        await this.emit(session.config.id, 'daemon.recovery_failed', { message }, 'daemon').catch(() => undefined);
+      }
+    }
+  }
+
+  private async recoverSession(session: SessionView): Promise<void> {
+    {
+      // Race guard: the API listens BEFORE bootstrap finishes, so a client
+      // can start()/resume() a session while recover() walks the list. Such
+      // a session already has a live monitor — adoption bookkeeping here
+      // would fight the fresh launch (double monitors, spurious snapshots).
+      if (this.monitors.has(session.config.id)) return;
       const paneState = await this.tmux.state(session.config.tmuxSession);
       if (session.state.status === 'kill_failed') {
         if (paneState.alive) {
@@ -1308,7 +1411,7 @@ export class SessionManager implements KTeamService {
             await this.stopTmuxWithEvidence(session.config, 'retry kill after daemon restart');
           } catch {
             if (!paneState.dead) await this.startMonitor(session.config.id);
-            continue;
+            return;
           }
         }
         await this.transition(
@@ -1322,14 +1425,14 @@ export class SessionManager implements KTeamService {
           },
           'session.failed',
         );
-        continue;
+        return;
       }
       if (terminalStatuses.includes(session.state.status)) {
         if (paneState.alive) {
           await this.tmux.snapshot(session.config, true);
           await this.stopTmuxWithEvidence(session.config, 'terminal session survived daemon restart');
         }
-        continue;
+        return;
       }
       if (paneState.alive && !paneState.dead) {
         // A1: with KillMode=process the tmux server (and this pane) survives a
@@ -1346,7 +1449,7 @@ export class SessionManager implements KTeamService {
         if (session.state.status === 'rate_limited' && session.config.retry?.waitForQuotaReset !== false) {
           this.scheduleQuotaWaiter(session.config.id);
         }
-        continue;
+        return;
       }
       if (paneState.alive) {
         await this.tmux.snapshot(session.config, true);

@@ -11,7 +11,8 @@ export type WardenAnomalyKind =
   | 'abandoned_wreckage'
   | 'quota_reset_passed'
   | 'sus_thinking'
-  | 'sus_subprocess';
+  | 'sus_subprocess'
+  | 'bootstrap_degraded';
 
 export interface WardenAnomaly {
   kind: WardenAnomalyKind;
