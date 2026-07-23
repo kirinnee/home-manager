@@ -1,0 +1,69 @@
+Verdict: LEAVE
+
+# Warden report — mrxfco84-4a536642 (teammate constance, node:bun-cli)
+
+**Verdict: LEAVE.** The 50m "sus" background subprocess is a legitimate,
+contract-prescribed proof harness that is idle-blocked (0.0% CPU) on a proof
+slot — not burning CPU or tokens. The controller session is alive, responsive,
+and correctly checkpointing. No warden action is warranted.
+
+## What the flagged subprocess actually is
+
+`sus_subprocess` fired on:
+- **PID 2023615** — `bun .../mrxfco84-4a536642/r-e7a-local-partitioned-proof-bdc225a.ts`
+- **PID 2023984** — its child `bash exec/bin/proof-slot.sh <harness> --inner`
+
+This is the R-E7a local partitioned CyanPrint proof union that constance armed
+as a **background** task and parked on, exactly per the node's safe-waiting
+addendum ("log `waiting`, arm the watch as a BACKGROUND task, END YOUR TURN").
+Long-lived, idle background proof harnesses are the *intended* pattern for this
+node, so the >50m-subprocess heuristic is a false positive for this class.
+
+## Evidence — two looks ~2 min apart
+
+| Signal | Look 1 (~18:50Z) | Look 2 (18:52:25Z) | Reading |
+| --- | --- | --- | --- |
+| Harness 2023615 | etimes 3064, **0.0% CPU** | etimes 3189, **0.0% CPU** | idle-blocked, not thrashing |
+| Waiter 2023984 | 0.0% CPU | 0.0% CPU | blocked on slot flock |
+| probe-report.json | absent | absent | worktree clean, no partial |
+| Session liveness | conv 0s / think 0s / sus:yes / kill:no | conv 6s / think 0s (18:51:08) | controller ALIVE & active |
+
+- **Not burning resources:** both harness and waiter sit at 0.0% CPU across
+  both looks. The subprocess is genuinely blocked on a `proof-slot.sh`
+  semaphore, consuming no CPU and no tokens.
+- **Why it hasn't progressed:** proof-slot 1 is held by an **unrelated** session
+  — PID 1657032, `cyanprint probe ...`, TMPDIR under `mrx3pt9r-78abf8ea` — which
+  has run ~118 min. The bun-cli harness is lawfully queued behind it. This is
+  external resource contention, not a bun-cli fault, and not something constance
+  can or should force (it cannot evict another node's slot).
+- **Controller is healthy:** it received the 18:47:26Z audit nudge, took a turn,
+  and wrote a fresh files-first `waiting` diary checkpoint at 18:49:42Z
+  (progress.jsonl) accurately describing the slot state. Liveness shows active
+  thinking (think 0s) — the turn is not dead.
+- **Diary shows lawful history, not a spin loop:** it correctly went
+  `blocked --awaiting lead-ruling` at 17:51 when the remote suite folded to a
+  2-row "broken" floor (engine defect filed: sulfone.lite#14), received lead
+  addendum R-E7a authorizing the local venue at 17:54, re-planned, and armed
+  exactly one background harness. No duplicate proof, no self-certify, no
+  false green.
+
+## Why not the other verdicts
+
+- **KILL** — rejected. Nothing is "demonstrably burning time/tokens with no
+  progress": subprocess is 0% CPU, session parks between checkpoints. Killing
+  would destroy a correctly-armed harness and a healthy controller.
+- **RESUME** — rejected. The turn is not dead; liveness shows the session
+  actively working (think 0s, conv 6s).
+- **NUDGE** — rejected. The session already received and correctly handled an
+  audit nudge at 18:47 minutes ago; it is not wedged, only lawfully waiting on
+  an external slot. A second nudge would be redundant and cannot free the slot.
+
+## Note for the fleet / lead (informational, no action taken)
+
+The only real friction is external: an unrelated `mrx3pt9r` CyanPrint suite has
+held a local proof slot for ~2h, starving bun-cli's queued harness. The bun-cli
+diary also observes slot 2 appears unowned while proof-slot.sh stays queued on
+slot 1 — a possible `proof-slot.sh` queuing quirk worth a look, but it is out of
+this warden's single-session scope and requires no action on mrxfco84-4a536642.
+
+Verdict stands: **LEAVE.**

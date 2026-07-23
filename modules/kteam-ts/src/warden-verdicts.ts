@@ -100,6 +100,10 @@ function verdictSummary(content: string): string | undefined {
   // `## Summary` section first sentence(s).
   const bold = content.match(/\*\*(?:Warden )?verdict:?\*\*\s*(?:\w+\s*[—–-]\s*)?([^\n]+(?:\n(?!\n)[^\n]+)*)/i);
   if (bold) return bold[1]!.replace(/\s+/g, ' ').trim();
+  // Verdict word INSIDE the bold — "**Verdict: LEAVE.** The subprocess is …" —
+  // the reason is the prose that follows the closing asterisks.
+  const boldInside = content.match(/\*\*(?:Warden )?verdict:?\s+[a-z_ -]+[.!]?\*\*\s*([^\n]+(?:\n(?!\n)[^\n]+)*)/i);
+  if (boldInside && boldInside[1]!.trim()) return boldInside[1]!.replace(/\s+/g, ' ').trim();
   const summary = content.match(/^##\s+Summary\s*\n+([\s\S]*?)(?:\n\n|\n##|\n?$)/m);
   if (summary && summary[1]!.trim()) return summary[1]!.replace(/\s+/g, ' ').trim();
   return undefined;
