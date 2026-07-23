@@ -21,8 +21,16 @@ export interface PaneState {
 }
 
 export interface StartupDialogAction {
-  kind: 'claude-trust' | 'codex-trust' | 'permission-bypass' | 'api-key' | 'onboarding';
+  kind: 'claude-trust' | 'codex-trust' | 'permission-bypass' | 'api-key' | 'onboarding' | 'resume-menu';
   keys: string[];
+}
+
+export interface StartupDialogOptions {
+  /** How to answer Claude Code's large-session resume gate ("Resume from
+   *  summary (recommended) / Resume full session as-is / Don't ask me
+   *  again"). 'full' keeps fidelity (kteam default); 'summary' saves quota.
+   *  Option 3 is NEVER selected — it mutates global account state. */
+  resumeMenuChoice?: 'full' | 'summary';
 }
 
 export interface PaneMetadata {
@@ -179,8 +187,32 @@ function navigationToAffirmative(pane: string): string[] {
   return [...Array(Math.abs(affirmative - selected)).fill(direction), 'Enter'];
 }
 
+/** Claude Code's large-session resume gate (fixture claude-resume-menu.txt:
+ *  "This session is 2h 45m old and 382k tokens… ❯ 1. Resume from summary
+ *  (recommended) / 2. Resume full session as-is / 3. Don't ask me again").
+ *  Deterministically wedged every resume of a big session until answered
+ *  (lacey, 2026-07-23). Returns the keystrokes for the CONFIGURED choice;
+ *  never option 3 (it mutates global account state). */
+export function resumeMenuAction(pane: string, choice: 'full' | 'summary'): StartupDialogAction | undefined {
+  const lower = pane.toLowerCase();
+  if (!lower.includes('resume from summary') || !lower.includes('resume full session')) return undefined;
+  const options = pane.split('\n').flatMap(line => {
+    const match = line.match(/^\s*([>›❯»])?\s*(\d+)[.)]\s+(.+)$/u);
+    return match ? [{ selected: Boolean(match[1]), label: match[3]!.trim().toLowerCase() }] : [];
+  });
+  const wanted = options.findIndex(option =>
+    choice === 'summary' ? option.label.startsWith('resume from summary') : option.label.startsWith('resume full'),
+  );
+  const selected = options.findIndex(option => option.selected);
+  if (wanted < 0 || selected < 0) return undefined;
+  const direction = wanted > selected ? 'Down' : 'Up';
+  return { kind: 'resume-menu', keys: [...Array(Math.abs(wanted - selected)).fill(direction), 'Enter'] };
+}
+
 /** Return keystrokes only for startup dialogs whose affirmative path is known. */
-export function startupDialogAction(pane: string): StartupDialogAction | undefined {
+export function startupDialogAction(pane: string, options: StartupDialogOptions = {}): StartupDialogAction | undefined {
+  const resumeMenu = resumeMenuAction(pane, options.resumeMenuChoice ?? 'full');
+  if (resumeMenu) return resumeMenu;
   const lower = pane.toLowerCase();
   let kind: StartupDialogAction['kind'] | undefined;
   if (lower.includes('do you trust the contents of this directory')) {
@@ -451,10 +483,15 @@ export class TmuxController {
     ]);
     if (result.code !== 0) throw new Error(`failed to launch tmux: ${result.stderr.trim()}`);
     await run(['tmux', 'set-option', '-t', config.tmuxSession, 'remain-on-exit', 'on']);
-    await this.waitReady(config.tmuxSession, 90_000, true);
+    await this.waitReady(config.tmuxSession, 90_000, true, { resumeMenuChoice: config.resumeMenuChoice });
   }
 
-  async waitReady(name: string, timeoutMs = 45_000, handleStartupDialogs = false): Promise<void> {
+  async waitReady(
+    name: string,
+    timeoutMs = 45_000,
+    handleStartupDialogs = false,
+    dialogOptions: StartupDialogOptions = {},
+  ): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     let stable = 0;
     let lastState: PaneState | undefined;
@@ -465,7 +502,7 @@ export class TmuxController {
       lastState = current;
       if (!current.alive || current.dead)
         throw new Error(`interactive harness exited (${current.exitCode ?? 'unknown'})`);
-      const action = handleStartupDialogs ? startupDialogAction(current.visiblePane) : undefined;
+      const action = handleStartupDialogs ? startupDialogAction(current.visiblePane, dialogOptions) : undefined;
       if (action) {
         const attempts = (dialogAttempts.get(action.kind) ?? 0) + 1;
         dialogAttempts.set(action.kind, attempts);
@@ -547,7 +584,7 @@ export class TmuxController {
     // Startup dialogs (trust prompts, api-key confirmation) can surface late,
     // after launch()'s readiness gate — answer them here too so the injected
     // prompt is never queued behind a modal.
-    await this.waitReady(config.tmuxSession, 30_000, true);
+    await this.waitReady(config.tmuxSession, 30_000, true, { resumeMenuChoice: config.resumeMenuChoice });
     await this.inject(config.tmuxSession, text);
   }
 

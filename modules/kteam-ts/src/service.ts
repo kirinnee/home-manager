@@ -11,6 +11,21 @@ import type { WardenAnomaly } from './warden-detect';
 import type { ProjectInfo, WrapperInfo } from './fleet-inventory';
 import type { WardenVerdict } from './warden-verdicts';
 
+export interface SearchResult {
+  sessionId: string;
+  teammate?: string;
+  turn?: number;
+  snippet: string;
+  at?: string;
+}
+
+export interface SearchResponse {
+  query: string;
+  /** how many sessions were actually scanned (honesty line in the UI). */
+  scanned: number;
+  results: SearchResult[];
+}
+
 export interface SessionView {
   config: SessionConfig;
   state: SessionState;
@@ -104,4 +119,6 @@ export interface KTeamService {
   /** Raw markdown of one warden report; `path` is validated to live under the
    *  reports directory. */
   wardenReport(path: string): Promise<string>;
+  /** Case-insensitive transcript grep across recent sessions (bounded). */
+  search(query: string, limit?: number): Promise<SearchResponse>;
 }

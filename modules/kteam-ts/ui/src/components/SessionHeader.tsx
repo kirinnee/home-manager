@@ -64,6 +64,11 @@ export const SessionHeader = memo(function SessionHeader({
             nudged
           </Badge>
         )}
+        {state.needsHuman && (
+          <Badge tone="err" className="shrink-0" title={state.needsHuman}>
+            needs human
+          </Badge>
+        )}
 
         <ActionGroup className="ml-auto shrink-0">
           {!isTerminal && hasToken && (

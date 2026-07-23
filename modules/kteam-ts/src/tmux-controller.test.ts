@@ -8,6 +8,7 @@ import {
   paneShowsActiveWork,
   paneWorkCounters,
   parsePaneMetadata,
+  resumeMenuAction,
   startupDialogAction,
   TmuxController,
   workCountersAdvanced,
@@ -200,6 +201,53 @@ describe('safe interrupt (F1/F2)', () => {
     const source = TmuxController.prototype.interrupt.toString();
     expect(source).toContain('Escape');
     expect(source).not.toContain('C-c');
+  });
+});
+
+describe('claude resume-menu gate (turn-018, the lacey wedge)', () => {
+  const fixture = () => Bun.file(path.join(import.meta.dir, 'fixtures', 'claude-resume-menu.txt')).text();
+
+  test('detects the real captured gate and answers per the configured choice', async () => {
+    const pane = await fixture();
+    // Default 'full': option 2 from the ❯-selected option 1 → Down, Enter.
+    expect(startupDialogAction(pane)).toEqual({ kind: 'resume-menu', keys: ['Down', 'Enter'] });
+    expect(startupDialogAction(pane, { resumeMenuChoice: 'full' })).toEqual({
+      kind: 'resume-menu',
+      keys: ['Down', 'Enter'],
+    });
+    // 'summary': option 1 is already selected → just Enter.
+    expect(startupDialogAction(pane, { resumeMenuChoice: 'summary' })).toEqual({
+      kind: 'resume-menu',
+      keys: ['Enter'],
+    });
+  });
+
+  test("never selects option 3 (Don't ask me again) under any configuration", async () => {
+    const pane = await fixture();
+    for (const choice of ['full', 'summary'] as const) {
+      const action = resumeMenuAction(pane, choice)!;
+      // Max travel from option 1 is one Down (to option 2) — never two.
+      expect(action.keys.filter(key => key === 'Down').length).toBeLessThanOrEqual(1);
+    }
+  });
+
+  test('does not fire on frames without the gate', async () => {
+    expect(resumeMenuAction('❯ \n? for shortcuts', 'full')).toBeUndefined();
+    expect(resumeMenuAction('1. Resume work\n2. Stop', 'full')).toBeUndefined();
+    // The loge ready frame must not read as a resume menu.
+    const loge = await Bun.file(path.join(import.meta.dir, 'fixtures', 'codex-loge-ready.txt')).text();
+    expect(resumeMenuAction(loge, 'full')).toBeUndefined();
+  });
+
+  test('navigates back up when the selector sits below the wanted option', () => {
+    const pane = [
+      'This session is 2h 45m old and 382k tokens.',
+      '  1. Resume from summary (recommended)',
+      '❯ 2. Resume full session as-is',
+      "  3. Don't ask me again",
+    ].join('\n');
+    expect(resumeMenuAction(pane, 'summary')).toEqual({ kind: 'resume-menu', keys: ['Up', 'Enter'] });
+    expect(resumeMenuAction(pane, 'full')).toEqual({ kind: 'resume-menu', keys: ['Enter'] });
   });
 });
 

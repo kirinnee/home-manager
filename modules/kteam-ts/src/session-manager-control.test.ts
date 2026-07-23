@@ -408,6 +408,66 @@ describe('send() delivery holes (turn-012 fix round)', () => {
   });
 });
 
+describe('needs_human flag + sweep dedupe (turn-018)', () => {
+  test('a needs_human verdict sets the durable flag once and emits fleet.needs_human', async () => {
+    const transient: string[] = [];
+    let state: Record<string, unknown> = { id: 's1', status: 'failed', turn: 9 };
+    const manager = bareManager();
+    manager.lastSweep = {
+      at: 'now',
+      anomalies: [{ kind: 'abandoned_wreckage', sessionId: 's1', status: 'failed', detail: 'x' }],
+      fingerprint: 'abandoned_wreckage:s1',
+    };
+    manager.wardenVerdicts = async () => [
+      {
+        at: 'now',
+        targetSession: 's1',
+        verdict: 'needs_human',
+        reason: 'resume fails deterministically',
+        reportPath: '/r.md',
+      },
+    ];
+    manager.store = {
+      updateState: async (_id: string, mutate: (c: Record<string, unknown>) => Record<string, unknown>) => {
+        state = mutate(state);
+        return state;
+      },
+    };
+    manager.emitTransient = (type: string) => {
+      transient.push(type);
+    };
+    const sessions = [{ config: { id: 's1', teammate: 'lacey' }, state, directory: '/x/s1' }];
+    await (manager as unknown as { reconcileNeedsHuman: (sessions: unknown[]) => Promise<void> }).reconcileNeedsHuman(
+      sessions,
+    );
+    expect(state.needsHuman).toBe('resume fails deterministically');
+    expect(state.needsHumanKind).toBe('abandoned_wreckage');
+    expect(transient).toEqual(['fleet.needs_human']);
+    // Second reconcile with the flag already set: no re-flag, no re-emit.
+    await (manager as unknown as { reconcileNeedsHuman: (sessions: unknown[]) => Promise<void> }).reconcileNeedsHuman([
+      { config: { id: 's1', teammate: 'lacey' }, state, directory: '/x/s1' },
+    ]);
+    expect(transient).toHaveLength(1);
+  });
+
+  test('clearNeedsHuman resets the flag only when set', async () => {
+    let writes = 0;
+    let state: Record<string, unknown> = { id: 's1', needsHuman: 'why', needsHumanKind: 'abandoned_wreckage' };
+    const manager = bareManager();
+    manager.store = {
+      updateState: async (_id: string, mutate: (c: Record<string, unknown>) => Record<string, unknown>) => {
+        writes++;
+        state = mutate(state);
+        return state;
+      },
+    };
+    await (manager as unknown as { clearNeedsHuman: (id: string) => Promise<void> }).clearNeedsHuman('s1');
+    expect(state.needsHuman).toBeUndefined();
+    expect(state.needsHumanKind).toBeUndefined();
+    expect(writes).toBe(1);
+  });
+});
+
 describe('native-queue consumption correlation (turn-016 P1)', () => {
   function correlationManager(initial: {
     turn: number;
