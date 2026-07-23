@@ -5,7 +5,7 @@
 //  - live updates via WebSocket /v1/events with a 1.5s trailing debounce.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, Sparkles, Activity, FolderGit2, Plus, Search, X, CornerDownLeft } from 'lucide-react';
+import { Bot, Sparkles, Activity, FolderGit2, Plus, Search, X, CornerDownLeft, LayoutGrid, Rows3 } from 'lucide-react';
 import { api } from '../lib/api';
 import type { ProjectInfo, SearchResponse, SessionView } from '../types';
 import { Badge } from '../components/Primitives';
@@ -18,6 +18,37 @@ import { openEventStream } from '../lib/ws';
 function baseName(p: string): string {
   const seg = p.replace(/\/+$/, '').split('/').filter(Boolean);
   return seg.length ? seg[seg.length - 1]! : p;
+}
+
+// < 640px → mobile; drives the auto-default to card view.
+function useIsNarrow(bp = 640): boolean {
+  const [narrow, setNarrow] = useState(() => (typeof window !== 'undefined' ? window.innerWidth < bp : false));
+  useEffect(() => {
+    const on = () => setNarrow(window.innerWidth < bp);
+    window.addEventListener('resize', on);
+    return () => window.removeEventListener('resize', on);
+  }, [bp]);
+  return narrow;
+}
+
+// One-line "what it's doing": the live pane activity when working, else the
+// task description, else the id. Present in both list and card views.
+function activityLine(v: SessionView): { text: string; live: boolean } {
+  const act = v.state.activity?.trim();
+  if (act) return { text: act, live: !TERMINAL_STATUSES.has(v.state.status) };
+  const task = v.config.name?.trim();
+  if (task && task !== v.config.teammate) return { text: task, live: false };
+  return { text: v.config.id, live: false };
+}
+
+function ActivityLine({ view, className = '' }: { view: SessionView; className?: string }) {
+  const { text, live } = activityLine(view);
+  return (
+    <span className={`inline-flex min-w-0 items-center gap-1.5 ${className}`}>
+      <Activity size={11} className={live ? 'shrink-0 text-accent' : 'shrink-0 text-faint'} />
+      <span className={live ? 'truncate shimmer' : 'truncate text-muted'}>{text}</span>
+    </span>
+  );
 }
 
 function isTypingTarget(t: EventTarget | null): boolean {
@@ -64,6 +95,11 @@ export function SessionsListPage() {
   const searchRef = useRef<HTMLInputElement | null>(null);
   const [tResults, setTResults] = useState<SearchResponse | null>(null);
   const [tSearching, setTSearching] = useState(false);
+  // View mode: cards (mobile-friendly) vs table. Auto-defaults to cards on
+  // narrow viewports; a desktop user can override.
+  const isNarrow = useIsNarrow();
+  const [viewPref, setViewPref] = useState<'cards' | 'table' | null>(null);
+  const mode = viewPref ?? (isNarrow ? 'cards' : 'table');
 
   async function load(initial = false) {
     try {
@@ -217,6 +253,25 @@ export function SessionsListPage() {
             <input type="checkbox" checked={includeFinished} onChange={e => setIncludeFinished(e.target.checked)} />
             include finished
           </label>
+          {!isNarrow && (
+            <div className="inline-flex shrink-0 rounded-md border border-border bg-surface p-0.5">
+              {(['table', 'cards'] as const).map(m => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setViewPref(m)}
+                  aria-label={`${m} view`}
+                  title={`${m} view`}
+                  className={`inline-flex h-6 items-center gap-1 rounded px-2 text-[12px] font-medium transition-colors ${
+                    mode === m ? 'bg-surface-2 text-fg' : 'text-muted hover:text-fg'
+                  }`}
+                >
+                  {m === 'table' ? <Rows3 size={12} /> : <LayoutGrid size={12} />}
+                  {m}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
         <div className="mt-1.5 flex items-center gap-1.5 pl-0.5 text-[11px] text-faint">
           <span>filters the list live</span>
@@ -251,27 +306,35 @@ export function SessionsListPage() {
               {g.path && <span className="mono truncate text-[11.5px] text-faint">{g.path}</span>}
               <span className="mono ml-auto shrink-0 text-[11.5px] text-faint">{g.rows.length}</span>
             </div>
-            <div className="overflow-x-auto rounded-lg border border-border bg-surface shadow-sm">
-              <table className="w-full min-w-[820px] border-collapse">
-                <thead>
-                  <tr>
-                    <Th>Teammate</Th>
-                    <Th>Model</Th>
-                    <Th>Label</Th>
-                    <Th>Status</Th>
-                    <Th>Harness</Th>
-                    <Th>Context</Th>
-                    <Th>Activity</Th>
-                    <Th>Updated</Th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {g.rows.map(v => (
-                    <SessionRow key={v.config.id} view={v} />
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            {mode === 'cards' ? (
+              <div className="grid gap-2">
+                {g.rows.map(v => (
+                  <SessionCard key={v.config.id} view={v} />
+                ))}
+              </div>
+            ) : (
+              <div className="overflow-x-auto rounded-lg border border-border bg-surface shadow-sm">
+                <table className="w-full min-w-[820px] border-collapse">
+                  <thead>
+                    <tr>
+                      <Th>Teammate</Th>
+                      <Th>Model</Th>
+                      <Th>Label</Th>
+                      <Th>Status</Th>
+                      <Th>Harness</Th>
+                      <Th>Context</Th>
+                      <Th>Activity</Th>
+                      <Th>Updated</Th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {g.rows.map(v => (
+                      <SessionRow key={v.config.id} view={v} />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </section>
         ))}
       </div>
@@ -353,7 +416,6 @@ function Th({ children }: { children: React.ReactNode }) {
 function SessionRow({ view }: { view: SessionView }) {
   const cfg = view.config;
   const state = view.state;
-  const running = !TERMINAL_STATUSES.has(state.status);
   return (
     <tr className="group border-b border-border-soft transition-colors last:border-b-0 hover:bg-surface-2">
       <td className="px-3 py-2.5 align-middle">
@@ -388,20 +450,54 @@ function SessionRow({ view }: { view: SessionView }) {
           <span className="text-faint">—</span>
         )}
       </td>
-      <td className="max-w-[280px] px-3 py-2.5 align-middle">
-        <div className="mono inline-flex max-w-full items-center gap-1.5 text-[12px]">
-          {state.activity ? (
-            <>
-              <Activity size={11} className="shrink-0 text-accent" />
-              <span className={running ? 'truncate shimmer' : 'truncate text-fg-soft'}>{state.activity}</span>
-            </>
-          ) : (
-            <span className="text-faint">—</span>
-          )}
-        </div>
+      <td className="max-w-[320px] px-3 py-2.5 align-middle">
+        <ActivityLine view={view} className="mono max-w-full text-[12px]" />
       </td>
       <td className="mono px-3 py-2.5 align-middle text-[12px] text-muted">{fmtRelative(state.lastActivityAt)}</td>
     </tr>
+  );
+}
+
+// Mobile-first card: full-width, tappable, single column, no horizontal
+// scroll. Shows the same fields as a table row, activity line included.
+function SessionCard({ view }: { view: SessionView }) {
+  const cfg = view.config;
+  const state = view.state;
+  return (
+    <Link
+      to={`/session/${encodeURIComponent(cfg.id)}`}
+      className="group block rounded-lg border border-border bg-surface p-3 shadow-sm transition-colors hover:border-accent-border active:bg-surface-2"
+    >
+      <div className="flex items-center gap-2">
+        <span className="min-w-0 truncate font-semibold text-fg group-hover:text-accent">
+          {cfg.teammate || cfg.name || cfg.id}
+        </span>
+        <Badge tone={toneFor(state.status)} className="ml-auto shrink-0">
+          {state.status}
+        </Badge>
+      </div>
+      <div className="mono mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-faint">
+        <span className="truncate">{cfg.id}</span>
+        <span className="text-border">·</span>
+        <span className="inline-flex items-center gap-1 text-fg-soft">
+          {cfg.harness === 'claude' ? <Bot size={11} /> : <Sparkles size={11} />}
+          {cfg.model || cfg.modelHint || 'default'}
+        </span>
+        {cfg.label && (
+          <>
+            <span className="text-border">·</span>
+            <span className="text-fg-soft">{cfg.label}</span>
+          </>
+        )}
+      </div>
+      <div className="mt-1.5">
+        <ActivityLine view={view} className="w-full text-[12px]" />
+      </div>
+      <div className="mt-1.5 flex items-center gap-2">
+        {state.contextPercent != null && <ContextMeter value={state.contextPercent} />}
+        <span className="mono ml-auto shrink-0 text-[11px] text-faint">{fmtRelative(state.lastActivityAt)}</span>
+      </div>
+    </Link>
   );
 }
 
