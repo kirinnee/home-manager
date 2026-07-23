@@ -1,6 +1,7 @@
 import type { KTeamEvent, SendRequest, SessionConfig, SessionState, StartSessionRequest } from './types';
 import type { WardenConfig } from './daemon-config';
 import type { WardenAnomaly } from './warden-detect';
+import type { ProjectInfo, WrapperInfo } from './fleet-inventory';
 
 export interface SessionView {
   config: SessionConfig;
@@ -78,6 +79,10 @@ export interface KTeamService {
    *  `targetId`'s active warden assignment — the only case the warden token
    *  may stop a session. */
   wardenMayStop(capability: string, targetId: string): boolean;
+  /** Agent wrappers from the kfleet bin (New-session picker). */
+  wrappers(): Promise<WrapperInfo[]>;
+  /** Git repos under the configured project roots (New-session picker + list grouping). */
+  projects(): Promise<ProjectInfo[]>;
   /** Fleet-warden status: config, last sweep, current anomalies, last report. */
   wardenStatus(): Promise<WardenStatusView>;
   /** Force a fleet sweep now; `spawn` forces escalation past the gap/enabled. */

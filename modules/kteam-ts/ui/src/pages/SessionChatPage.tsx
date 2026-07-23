@@ -28,6 +28,13 @@ import { TERMINAL_STATUSES, WAITING_STATUSES, fmtAbsolute, isBusy } from '../lib
 
 const PAGE_SIZE = 200;
 
+type PendingStatus = 'sending' | 'queued' | 'delivered' | 'error';
+interface PendingSend {
+  key: string;
+  text: string;
+  status: PendingStatus;
+}
+
 export function SessionChatPage({ sessionId }: { sessionId: string }) {
   const [view, setView] = useState<SessionView | null>(null);
   const [records, setRecords] = useState<ChatRecord[]>([]);
@@ -221,17 +228,45 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
   const isTerminal = view ? TERMINAL_STATUSES.has(view.state.status) : false;
   const isKillFailed = view?.state.status === 'kill_failed';
 
+  // Fluid "working" elapsed: stamp when the session became busy, clear when it
+  // idles. The footer ticks locally from this (no extra network).
+  const [busySince, setBusySince] = useState<number | null>(null);
+  useEffect(() => {
+    setBusySince(prev => (busy ? (prev ?? Date.now()) : null));
+  }, [busy]);
+
+  // Optimistic sends: a message shows immediately as a "sent" box with a
+  // pending → delivered/queued state; it's reaped once the real chat.user
+  // record lands via WS/history.
+  const [pending, setPending] = useState<PendingSend[]>([]);
+  useEffect(() => {
+    if (!pending.length) return;
+    const userTexts = new Set(
+      records
+        .filter(r => r.type === 'chat.user')
+        .map(r => String((r.data as { text?: unknown } | undefined)?.text ?? '').trim()),
+    );
+    setPending(p => {
+      const next = p.filter(x => x.status === 'sending' || x.status === 'error' || !userTexts.has(x.text));
+      return next.length === p.length ? p : next;
+    });
+  }, [records, pending.length]);
+
   // ---- actions -------------------------------------------------------------
   async function send() {
     if (!draft.trim() || !HAS_TOKEN) return;
     const msg = draft.trim();
     setDraft('');
     setActionNotice(null);
+    const key = `send-${Date.now()}-${Math.round(Math.random() * 1e6)}`;
+    setPending(p => [...p, { key, text: msg, status: 'sending' }]);
     try {
       const next = await api.send(sessionId, msg);
       setView(next);
-      if (busy || isBusy(next)) setActionNotice({ kind: 'ok', text: 'Message queued for the next turn boundary.' });
+      const queued = busy || isBusy(next);
+      setPending(p => p.map(x => (x.key === key ? { ...x, status: queued ? 'queued' : 'delivered' } : x)));
     } catch (e) {
+      setPending(p => p.map(x => (x.key === key ? { ...x, status: 'error' } : x)));
       setActionNotice({ kind: 'err', text: e instanceof ApiError ? e.message : String(e) });
     }
   }
@@ -241,13 +276,15 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
     const msg = draft.trim();
     setDraft('');
     setActionNotice(null);
+    const key = `int-${Date.now()}-${Math.round(Math.random() * 1e6)}`;
+    setPending(p => [...p, { key, text: msg, status: 'sending' }]);
     try {
       await api.interrupt(sessionId);
       const next = await api.send(sessionId, msg);
       setView(next);
-      setActionNotice({ kind: 'ok', text: 'Turn interrupted — message delivered.' });
+      setPending(p => p.map(x => (x.key === key ? { ...x, status: 'delivered' } : x)));
     } catch (e) {
-      setDraft(msg);
+      setPending(p => p.map(x => (x.key === key ? { ...x, status: 'error' } : x)));
       setActionNotice({ kind: 'err', text: e instanceof ApiError ? e.message : String(e) });
     }
   }
@@ -298,11 +335,15 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
       )}
     </>
   );
-  const transcriptFooter = busy ? (
-    <div className="px-2 py-2">
-      <ThinkingIndicator activity={view?.state.activity ?? null} />
-    </div>
-  ) : null;
+  const transcriptFooter =
+    pending.length || busy ? (
+      <div className="space-y-1.5 px-2 py-2">
+        {pending.map(p => (
+          <PendingMessage key={p.key} text={p.text} status={p.status} />
+        ))}
+        {busy && <ThinkingIndicator activity={view?.state.activity ?? null} since={busySince} />}
+      </div>
+    ) : null;
 
   return (
     <div className="flex h-[calc(100vh-44px)] flex-col">
@@ -391,6 +432,45 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
           )}
         </>
       )}
+    </div>
+  );
+}
+
+// Optimistic "sent" box — mirrors the user-block styling with a pending →
+// delivered/queued/failed state chip so the send never feels lost.
+function PendingMessage({ text, status }: { text: string; status: PendingStatus }) {
+  const label =
+    status === 'sending'
+      ? 'sending…'
+      : status === 'queued'
+        ? 'queued for next turn'
+        : status === 'delivered'
+          ? 'delivered'
+          : 'failed to send';
+  const tone =
+    status === 'error'
+      ? 'text-err'
+      : status === 'delivered'
+        ? 'text-ok'
+        : status === 'queued'
+          ? 'text-warn'
+          : 'text-muted';
+  return (
+    <div
+      className={`overflow-hidden rounded-md border border-l-[2.5px] border-border border-l-user-border bg-user-bg ${
+        status === 'delivered' ? 'opacity-80' : ''
+      }`}
+    >
+      <div className="flex items-center gap-2 px-3 pt-1.5">
+        <span className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-accent">you</span>
+        <span className={`mono ml-auto inline-flex items-center gap-1 text-[10.5px] ${tone}`}>
+          {status === 'sending' && (
+            <span className="inline-block h-2.5 w-2.5 animate-spin rounded-full border border-current border-t-transparent" />
+          )}
+          {label}
+        </span>
+      </div>
+      <div className="whitespace-pre-wrap break-words px-3 pb-2 pt-0.5 text-[13px] leading-relaxed text-fg">{text}</div>
     </div>
   );
 }

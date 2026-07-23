@@ -24,10 +24,16 @@ import {
   CircleDot,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
-import { extractToolSummary, parseExecOutput, resultText, type ToolKind } from '../lib/tool-extract';
+import {
+  extractToolSummary,
+  parseExecOutput,
+  resultText,
+  toolColorVar,
+  langFromPath,
+  type ToolKind,
+} from '../lib/tool-extract';
+import { CodeBlock } from './CodeBlock';
 import type { ToolCall } from '../lib/transcript';
-
-const PREVIEW_LINES = 16;
 
 function iconFor(kind: ToolKind) {
   switch (kind) {
@@ -166,6 +172,16 @@ function ToolLine({ call }: { call: ToolCall }) {
   const rtext = call.result ? resultText(call.result) : null;
   const cleaned = rtext != null && sum.isExec ? parseExecOutput(rtext).cleanText : rtext;
 
+  const bodyLang =
+    sum.kind === 'bash'
+      ? 'bash'
+      : sum.kind === 'edit' || sum.kind === 'patch'
+        ? 'diff'
+        : sum.kind === 'write'
+          ? langFromPath(sum.filePath)
+          : undefined;
+  const resultLang = langFromPath(sum.filePath);
+
   return (
     <div>
       <button
@@ -176,7 +192,7 @@ function ToolLine({ call }: { call: ToolCall }) {
           hasBody ? 'cursor-pointer hover:bg-surface-2' : 'cursor-default',
         )}
       >
-        <Icon size={12} className="shrink-0 text-faint" />
+        <Icon size={12} className="shrink-0" style={{ color: toolColorVar(sum.kind) }} />
         <span className="mono font-medium text-fg-soft">{sum.verb}</span>
         <span className="mono min-w-0 flex-1 truncate text-muted" title={sum.headline}>
           {sum.headline}
@@ -194,43 +210,16 @@ function ToolLine({ call }: { call: ToolCall }) {
       </button>
       {open && hasBody && (
         <div className="mb-1 ml-1.5 space-y-1">
-          {sum.bodyLines.length > 0 && <Pre lines={sum.bodyLines} />}
+          {sum.bodyLines.length > 0 && <CodeBlock code={sum.bodyLines.join('\n')} lang={bodyLang} />}
           {cleaned != null && (
             <div>
               <div className="px-1 pb-0.5 text-[10.5px] uppercase tracking-wider text-faint">
                 {err ? 'error' : 'result'} · {cleaned.split('\n').length} lines
               </div>
-              <Pre lines={cleaned.split('\n')} tone={err ? 'err' : 'default'} />
+              <CodeBlock code={cleaned} lang={err ? undefined : resultLang} tone={err ? 'err' : 'default'} />
             </div>
           )}
         </div>
-      )}
-    </div>
-  );
-}
-
-function Pre({ lines, tone = 'default' }: { lines: string[]; tone?: 'default' | 'err' }) {
-  const [expanded, setExpanded] = useState(false);
-  const tooMany = lines.length > PREVIEW_LINES;
-  const shown = expanded ? lines : lines.slice(0, PREVIEW_LINES);
-  return (
-    <div>
-      <pre
-        className={cn(
-          'm-0 max-h-[380px] overflow-auto rounded-md border px-2.5 py-2 text-[11.75px] leading-[1.5] mono whitespace-pre-wrap break-words scroll-thin',
-          tone === 'err' ? 'border-err-border bg-err-bg text-err' : 'border-border-soft bg-code-bg text-code-fg',
-        )}
-      >
-        {shown.join('\n')}
-      </pre>
-      {tooMany && (
-        <button
-          type="button"
-          onClick={() => setExpanded(v => !v)}
-          className="mt-0.5 px-1 text-[11px] text-accent hover:underline"
-        >
-          {expanded ? 'show less' : `show ${lines.length - PREVIEW_LINES} more lines`}
-        </button>
       )}
     </div>
   );

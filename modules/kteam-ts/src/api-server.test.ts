@@ -90,6 +90,25 @@ class FakeService implements KTeamService {
     fingerprint: '',
   });
   wardenRun = async (_spawn?: boolean) => ({ sweptAt: '2026-01-01T00:00:00Z', anomalies: [], message: 'no anomalies' });
+  wrappers = async () => [
+    {
+      name: 'claude-auto-loge',
+      harness: 'claude' as const,
+      mode: 'auto' as const,
+      launchable: true,
+      modelHint: 'F5/frontier account',
+    },
+    {
+      name: 'claude-loge',
+      harness: 'claude' as const,
+      mode: 'interactive' as const,
+      launchable: false,
+      modelHint: 'loge',
+    },
+  ];
+  projects = async () => [
+    { name: 'home-manager', path: '/home/u/.config/home-manager', lastActivity: '2026-01-01T00:00:00Z' },
+  ];
 }
 
 const servers: Server<unknown>[] = [];
@@ -110,6 +129,21 @@ describe('kteam daemon API', () => {
     });
     expect(response.status).toBe(200);
     expect(((await response.json()) as SessionView).config.id).toBe('s1');
+  });
+
+  test('exposes wrappers and projects for the New-session flow', async () => {
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service: new FakeService() });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}`;
+    const auth = { authorization: 'Bearer secret' };
+    expect((await fetch(`${base}/v1/wrappers`)).status).toBe(401);
+    const wr = await fetch(`${base}/v1/wrappers`, { headers: auth });
+    expect(wr.status).toBe(200);
+    const wrappers = (await wr.json()) as Array<{ name: string; launchable: boolean }>;
+    expect(wrappers.some(w => w.name === 'claude-auto-loge' && w.launchable)).toBe(true);
+    const pr = await fetch(`${base}/v1/projects`, { headers: auth });
+    expect(pr.status).toBe(200);
+    expect(((await pr.json()) as Array<{ name: string }>)[0]!.name).toBe('home-manager');
   });
 
   test('replays history before live WebSocket events', async () => {

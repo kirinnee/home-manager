@@ -1,12 +1,13 @@
-// Session header — two tight rows, truncation-safe, no layout jumps.
+// Session header — decrowded into distinct rows so nothing is squeezed:
 //   row 1: identity (teammate · task · label · status) + controls
-//   row 2: dense mono status strip (model · turn · wrapper · context · liveness · ws)
+//   row 2: wrapper/CLI · model · turn · mode
+//   row 3: context + liveness + ws  (self-ticking, isolated from the transcript)
 //
-// The per-second liveness/elapsed ticking is isolated in <LivenessStrip/> so
-// it re-renders only itself, never the transcript.
+// The per-second liveness/context ticking lives in <LivenessStrip/> so it
+// re-renders only itself.
 
 import { memo, useEffect, useState } from 'react';
-import { ChevronLeft, Pause, Play, StopCircle, ZapOff } from 'lucide-react';
+import { ChevronLeft, Pause, Play, StopCircle, ZapOff, Bot, Sparkles } from 'lucide-react';
 import type { SessionView } from '../types';
 import { Badge, Button, ActionGroup } from './Primitives';
 import { Link } from '../lib/router';
@@ -35,13 +36,14 @@ export const SessionHeader = memo(function SessionHeader({
 }: Props) {
   const { config, state } = view;
   const title = config.teammate || config.name || config.id;
+  const model = config.model || config.modelHint || 'default';
 
   return (
-    <div className="mt-3 mb-2 flex flex-col gap-1.5">
+    <div className="mt-3 mb-2 flex flex-col gap-1.5 border-b border-border-soft pb-2.5">
       {/* row 1 — identity + controls */}
       <div className="flex items-center gap-2.5 min-w-0">
-        <Link to="/" className="inline-flex shrink-0 items-center gap-1 text-muted hover:text-fg text-[13px]">
-          <ChevronLeft size={15} />
+        <Link to="/" className="inline-flex shrink-0 items-center gap-1 text-muted hover:text-fg" title="All sessions">
+          <ChevronLeft size={16} />
         </Link>
         <h1 className="m-0 shrink-0 text-[1.15rem] font-semibold tracking-tight">{title}</h1>
         {config.teammate && config.name && (
@@ -87,7 +89,28 @@ export const SessionHeader = memo(function SessionHeader({
         </ActionGroup>
       </div>
 
-      {/* row 2 — dense mono status strip */}
+      {/* row 2 — wrapper / model / turn / mode */}
+      <div className="flex min-w-0 items-center gap-x-3 overflow-hidden text-[11.5px] text-muted mono whitespace-nowrap">
+        <span
+          className="inline-flex shrink-0 items-center gap-1 text-fg-soft"
+          title={`${config.binary} · ${config.harness} TUI`}
+        >
+          {config.harness === 'claude' ? (
+            <Bot size={12} className="text-faint" />
+          ) : (
+            <Sparkles size={12} className="text-faint" />
+          )}
+          <span className="min-w-0 truncate">{config.binary}</span>
+        </span>
+        <Sep />
+        <span className="shrink-0 text-fg-soft">{model}</span>
+        <Sep />
+        <span className="shrink-0">turn {state.turn}</span>
+        <Sep />
+        <span className="shrink-0 text-faint">{config.mode} mode</span>
+      </div>
+
+      {/* row 3 — context + liveness + ws */}
       <LivenessStrip view={view} liveStatus={liveStatus} />
     </div>
   );
@@ -108,20 +131,17 @@ const LivenessStrip = memo(function LivenessStrip({
   view: SessionView;
   liveStatus: 'connecting' | 'open' | 'closed';
 }) {
-  // Self-contained 1s tick — re-renders only this strip.
+  // Self-contained 1s tick — re-renders only this strip (fluid liveness ages).
   const [, tick] = useState(0);
   useEffect(() => {
     const id = setInterval(() => tick(n => n + 1), 1000);
     return () => clearInterval(id);
   }, []);
 
-  const { config, state } = view;
-  const model = config.model || config.modelHint || 'default';
+  const { state } = view;
   const ctx = state.contextPercent;
   const ctxTone = ctx == null ? '' : ctx >= 90 ? 'text-err' : ctx >= 75 ? 'text-warn' : 'text-fg-soft';
 
-  // Defensive liveness readout: render only the signs the API actually
-  // provides (melanie's ledger fields may be absent on older daemons).
   const now = Date.now();
   const ages = AGE_KEYS.map(([label, key]) => {
     const at = state[key];
@@ -133,25 +153,17 @@ const LivenessStrip = memo(function LivenessStrip({
   const dot = liveStatus === 'open' ? 'bg-ok' : liveStatus === 'connecting' ? 'bg-warn' : 'bg-err';
 
   return (
-    <div className="flex min-w-0 items-center gap-x-3 gap-y-0.5 overflow-hidden text-[11.5px] text-muted mono whitespace-nowrap">
-      <span className="shrink-0 text-fg-soft">{model}</span>
-      <Sep />
-      <span className="shrink-0">turn {state.turn}</span>
-      <Sep />
-      <span className="min-w-0 truncate text-faint" title={`${config.binary} · ${config.harness} TUI`}>
-        {config.binary} · {config.harness}
-      </span>
-      {ctx != null && (
-        <>
-          <Sep />
-          <span className={`shrink-0 ${ctxTone}`}>context {ctx}%</span>
-        </>
+    <div className="flex min-w-0 items-center gap-x-3 overflow-hidden text-[11.5px] text-muted mono whitespace-nowrap">
+      {ctx != null ? (
+        <span className={`shrink-0 ${ctxTone}`}>context {ctx}%</span>
+      ) : (
+        <span className="shrink-0 text-faint">context —</span>
       )}
       {ages.length > 0 && (
         <>
           <Sep />
           <span
-            className="shrink-0 text-faint"
+            className="min-w-0 truncate text-faint"
             title="liveness ledger: seconds since transcript / token / counter / subprocess / pane life-signs"
           >
             {ages.join(' · ')}

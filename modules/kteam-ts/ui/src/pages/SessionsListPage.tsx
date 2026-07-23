@@ -1,22 +1,27 @@
-// Sessions list. Live teammate sessions managed by kteamd.
-//  - toolbar: label filter + "include finished" toggle
-//  - table: teammate, model, label, status, harness, context %, activity, updated
-//  - live updates via WebSocket /v1/events with a 1.5s trailing debounce (the
-//    daemon emits frame events every few seconds per session — never refetch
-//    per event).
+// Sessions list. Live teammate sessions managed by kteamd, grouped by project.
+//  - toolbar: label filter + "include finished" toggle + New session
+//  - per-project group: header + table (teammate, model, status, harness,
+//    context, activity, updated)
+//  - live updates via WebSocket /v1/events with a 1.5s trailing debounce.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, Sparkles, Activity } from 'lucide-react';
+import { Bot, Sparkles, Activity, FolderGit2, Plus } from 'lucide-react';
 import { api } from '../lib/api';
-import type { SessionView } from '../types';
+import type { ProjectInfo, SessionView } from '../types';
 import { Badge } from '../components/Primitives';
 import { WardenStrip } from '../components/WardenStrip';
 import { Link } from '../lib/router';
 import { debounce, TERMINAL_STATUSES, fmtRelative, toneFor } from '../lib/utils';
 import { openEventStream } from '../lib/ws';
 
+function baseName(p: string): string {
+  const seg = p.replace(/\/+$/, '').split('/').filter(Boolean);
+  return seg.length ? seg[seg.length - 1]! : p;
+}
+
 export function SessionsListPage() {
   const [sessions, setSessions] = useState<SessionView[] | null>(null);
+  const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState('');
   const [includeFinished, setIncludeFinished] = useState(false);
@@ -33,6 +38,10 @@ export function SessionsListPage() {
 
   useEffect(() => {
     void load(true);
+    void api
+      .projects()
+      .then(setProjects)
+      .catch(() => setProjects([]));
   }, []);
 
   useEffect(() => {
@@ -52,18 +61,42 @@ export function SessionsListPage() {
     });
   }, [sessions, filter, includeFinished]);
 
+  // Group by project: longest project-path prefix of the session cwd wins;
+  // otherwise fall back to the cwd's basename so nothing is orphaned.
+  const groups = useMemo(() => {
+    const byPathLen = [...projects].sort((a, b) => b.path.length - a.path.length);
+    const map = new Map<string, { name: string; path: string; rows: SessionView[] }>();
+    for (const v of visible) {
+      const cwd = v.config.cwd ?? '';
+      const match = byPathLen.find(p => cwd === p.path || cwd.startsWith(p.path + '/'));
+      const key = match?.path ?? cwd ?? 'ungrouped';
+      const name = match?.name ?? (cwd ? baseName(cwd) : 'ungrouped');
+      if (!map.has(key)) map.set(key, { name, path: match?.path ?? cwd, rows: [] });
+      map.get(key)!.rows.push(v);
+    }
+    return [...map.values()].sort((a, b) => b.rows.length - a.rows.length || a.name.localeCompare(b.name));
+  }, [visible, projects]);
+
   return (
     <div className="mx-auto w-full">
-      <div className="mt-5 mb-4 flex items-end justify-between gap-3">
+      <div className="mt-5 mb-4 flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="m-0 text-[1.5rem] font-semibold tracking-tight">Sessions</h1>
           <p className="mt-0.5 text-[13px] text-muted">Live teammate sessions managed by kteamd.</p>
         </div>
-        {sessions && (
-          <span className="mono text-[12px] text-faint">
-            {visible.length} shown · {sessions.length} total
-          </span>
-        )}
+        <div className="flex items-center gap-3">
+          {sessions && (
+            <span className="mono text-[12px] text-faint">
+              {visible.length} shown · {sessions.length} total
+            </span>
+          )}
+          <Link
+            to="/new"
+            className="inline-flex items-center gap-1.5 rounded-md border border-accent bg-accent px-3 py-1.5 text-[13px] font-semibold text-accent-fg hover:bg-accent-strong"
+          >
+            <Plus size={14} /> New session
+          </Link>
+        </div>
       </div>
 
       <WardenStrip />
@@ -93,29 +126,40 @@ export function SessionsListPage() {
           No matching sessions.
         </div>
       )}
-      {sessions && visible.length > 0 && (
-        <div className="overflow-x-auto rounded-lg border border-border bg-surface shadow-sm">
-          <table className="w-full min-w-[860px] border-collapse">
-            <thead>
-              <tr>
-                <Th>Teammate</Th>
-                <Th>Model</Th>
-                <Th>Label</Th>
-                <Th>Status</Th>
-                <Th>Harness</Th>
-                <Th>Context</Th>
-                <Th>Activity</Th>
-                <Th>Updated</Th>
-              </tr>
-            </thead>
-            <tbody>
-              {visible.map(v => (
-                <SessionRow key={v.config.id} view={v} />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+
+      <div className="space-y-5">
+        {groups.map(g => (
+          <section key={g.path || g.name}>
+            <div className="mb-1.5 flex items-baseline gap-2 px-0.5">
+              <FolderGit2 size={14} className="shrink-0 translate-y-0.5 text-faint" />
+              <span className="text-[13px] font-semibold text-fg">{g.name}</span>
+              {g.path && <span className="mono truncate text-[11.5px] text-faint">{g.path}</span>}
+              <span className="mono ml-auto shrink-0 text-[11.5px] text-faint">{g.rows.length}</span>
+            </div>
+            <div className="overflow-x-auto rounded-lg border border-border bg-surface shadow-sm">
+              <table className="w-full min-w-[820px] border-collapse">
+                <thead>
+                  <tr>
+                    <Th>Teammate</Th>
+                    <Th>Model</Th>
+                    <Th>Label</Th>
+                    <Th>Status</Th>
+                    <Th>Harness</Th>
+                    <Th>Context</Th>
+                    <Th>Activity</Th>
+                    <Th>Updated</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {g.rows.map(v => (
+                    <SessionRow key={v.config.id} view={v} />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        ))}
+      </div>
     </div>
   );
 }

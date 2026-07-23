@@ -31,6 +31,9 @@ export interface ExtractedTool {
   bodyLines: string[];
   kind: ToolKind;
   isExec: boolean;
+  /** file this tool touched, when applicable — used to syntax-highlight the
+   *  result/body by extension. */
+  filePath?: string;
 }
 
 function extractExecCommand(input: unknown): { cmd: string } | null {
@@ -151,6 +154,7 @@ export function extractToolSummary(name: string | undefined, input: unknown): Ex
       bodyLines: file ? [file] : [],
       kind: 'read',
       isExec: false,
+      filePath: file,
     };
   }
   if (n === 'write') {
@@ -164,6 +168,7 @@ export function extractToolSummary(name: string | undefined, input: unknown): Ex
       bodyLines: file ? [file, '', ...stringifySafe(content).split('\n')] : [],
       kind: 'write',
       isExec: false,
+      filePath: file,
     };
   }
   if (n === 'edit' || n === 'multi_edit' || n === 'multiedit' || n === 'edit_file') {
@@ -185,6 +190,7 @@ export function extractToolSummary(name: string | undefined, input: unknown): Ex
       bodyLines: lines,
       kind: 'edit',
       isExec: false,
+      filePath: file,
     };
   }
   if (n === 'apply_patch' || n === 'patch' || n === 'notebookedit') {
@@ -270,6 +276,70 @@ export function extractToolSummary(name: string | undefined, input: unknown): Ex
 
 function cap(s: string): string {
   return s ? s[0]!.toUpperCase() + s.slice(1) : s;
+}
+
+/** CSS custom property for a tool kind's consistent hue (see index.css). */
+export function toolColorVar(kind: ToolKind): string {
+  return `var(--tool-${kind})`;
+}
+
+// Map a filename/extension to a highlight.js language id. Undefined → let the
+// caller fall back to plain text (never auto-detect: it's slow and wrong on
+// logs/output).
+const EXT_LANG: Record<string, string> = {
+  ts: 'typescript',
+  tsx: 'typescript',
+  js: 'javascript',
+  jsx: 'javascript',
+  mjs: 'javascript',
+  cjs: 'javascript',
+  json: 'json',
+  md: 'markdown',
+  mdx: 'markdown',
+  css: 'css',
+  scss: 'scss',
+  html: 'xml',
+  xml: 'xml',
+  svg: 'xml',
+  sh: 'bash',
+  bash: 'bash',
+  zsh: 'bash',
+  fish: 'bash',
+  py: 'python',
+  rb: 'ruby',
+  go: 'go',
+  rs: 'rust',
+  java: 'java',
+  kt: 'kotlin',
+  c: 'c',
+  h: 'c',
+  cpp: 'cpp',
+  cc: 'cpp',
+  hpp: 'cpp',
+  cs: 'csharp',
+  php: 'php',
+  yml: 'yaml',
+  yaml: 'yaml',
+  toml: 'ini',
+  ini: 'ini',
+  sql: 'sql',
+  lua: 'lua',
+  nix: 'nix',
+  dockerfile: 'dockerfile',
+  swift: 'swift',
+  scala: 'scala',
+  pl: 'perl',
+  r: 'r',
+  diff: 'diff',
+  patch: 'diff',
+};
+
+export function langFromPath(p?: string): string | undefined {
+  if (!p) return undefined;
+  const base = p.split(/[/\\]/).pop() ?? p;
+  if (/^dockerfile$/i.test(base)) return 'dockerfile';
+  const ext = base.includes('.') ? base.split('.').pop()!.toLowerCase() : '';
+  return EXT_LANG[ext];
 }
 
 // Best-effort readable text of a tool result.

@@ -251,6 +251,31 @@ export interface WardenAnomaly {
   [k: string]: unknown;
 }
 
+// New-session flow: wrappers + projects (mirrors src/fleet-inventory.ts).
+export interface WrapperInfo {
+  name: string;
+  harness: Harness;
+  mode: 'auto' | 'interactive';
+  launchable: boolean;
+  modelHint: string;
+}
+
+export interface ProjectInfo {
+  name: string;
+  path: string;
+  lastActivity?: string;
+}
+
+export interface StartSessionPayload {
+  prompt: string;
+  agent: string;
+  cwd?: string;
+  mode?: InteractionMode;
+  model?: string;
+  label?: string;
+  name?: string;
+}
+
 export interface WardenStatusView {
   config?: {
     enabled?: boolean;

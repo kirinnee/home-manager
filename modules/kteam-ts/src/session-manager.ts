@@ -13,6 +13,7 @@ import {
   type CodexTranscriptWatcher,
 } from './codex-transcript';
 import { discoverAutoAgents, inferHarness, modelHint, shellSafeSessionName } from './core';
+import { listWrappers, scanProjects, type ProjectInfo, type WrapperInfo } from './fleet-inventory';
 import {
   discoverCodexSession,
   codexSessionIds,
@@ -62,6 +63,7 @@ interface SessionManagerOptions {
   quotaUrl: string;
   transcriptReconcileSeconds: number;
   publicUrl: string;
+  projectRoots: string[];
   warden: WardenConfig;
 }
 interface WardenRuntimeState {
@@ -3072,6 +3074,14 @@ export class SessionManager implements KTeamService {
     const file = path.join(this.paths.wardenReports, latest);
     const text = await readFile(file, 'utf8').catch(() => '');
     return { path: file, head: text.split('\n').slice(0, 12).join('\n') };
+  }
+
+  async wrappers(): Promise<WrapperInfo[]> {
+    return listWrappers(this.paths.kfleetBin);
+  }
+
+  async projects(): Promise<ProjectInfo[]> {
+    return scanProjects(this.options.projectRoots ?? ['~/Workspace', '~/.config']);
   }
 
   async wardenStatus(): Promise<WardenStatusView> {
