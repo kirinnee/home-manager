@@ -10,6 +10,7 @@ import { api } from '../lib/api';
 import type { ProjectInfo, SessionView } from '../types';
 import { Badge } from '../components/Primitives';
 import { WardenStrip } from '../components/WardenStrip';
+import { WardenVerdicts } from '../components/WardenVerdicts';
 import { Link } from '../lib/router';
 import { debounce, TERMINAL_STATUSES, fmtRelative, toneFor } from '../lib/utils';
 import { openEventStream } from '../lib/ws';
@@ -100,6 +101,7 @@ export function SessionsListPage() {
       </div>
 
       <WardenStrip />
+      <WardenVerdicts />
 
       <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-border-soft bg-surface-2 px-3 py-2">
         <input

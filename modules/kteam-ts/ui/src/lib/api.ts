@@ -11,6 +11,7 @@ import type {
   WrapperInfo,
   ProjectInfo,
   StartSessionPayload,
+  WardenVerdict,
 } from '../types';
 
 declare global {
@@ -106,6 +107,8 @@ export const api = {
       body: JSON.stringify(message ? { message } : {}),
     }),
   wardenStatus: () => request<WardenStatusView>('/v1/warden/status'),
+  wardenVerdicts: () => request<WardenVerdict[]>('/v1/warden/verdicts'),
+  wardenReport: (path: string) => request<string>(`/v1/warden/report?path=${encodeURIComponent(path)}`),
   wrappers: () => request<WrapperInfo[]>('/v1/wrappers'),
   projects: () => request<ProjectInfo[]>('/v1/projects'),
   createSession: (payload: StartSessionPayload) =>

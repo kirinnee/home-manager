@@ -276,6 +276,18 @@ export interface StartSessionPayload {
   name?: string;
 }
 
+export type WardenVerdictKind = 'killed' | 'revived' | 'nudged' | 'cleared' | 'needs_human' | 'unknown';
+
+export interface WardenVerdict {
+  at: string;
+  targetSession?: string;
+  teammate?: string;
+  label?: string;
+  verdict: WardenVerdictKind;
+  reason?: string;
+  reportPath: string;
+}
+
 export interface WardenStatusView {
   config?: {
     enabled?: boolean;

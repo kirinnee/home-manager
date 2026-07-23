@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { Server } from 'bun';
 import { RecentRequestIds, startApiServer } from './api-server';
+import { currentActor } from './actor-context';
 import type { AttachmentView, KTeamService, SessionView } from './service';
 import type { KTeamEvent, SendRequest, StartSessionRequest } from './types';
 import { WARDEN_LABEL } from './warden-detect';
@@ -44,7 +45,10 @@ class FakeService implements KTeamService {
   };
   health = async () => ({ ok: true });
   list = async () => [view];
-  get = async () => view;
+  get = async () => {
+    this.lastActor = currentActor();
+    return view;
+  };
   start = async (_input: StartSessionRequest) => view;
   send = async (_id: string, _input: SendRequest) => ({ ...view, disposition: 'delivered' as const });
   answer = async () => view;
@@ -109,6 +113,21 @@ class FakeService implements KTeamService {
   projects = async () => [
     { name: 'home-manager', path: '/home/u/.config/home-manager', lastActivity: '2026-01-01T00:00:00Z' },
   ];
+  lastActor: string | undefined = undefined;
+  wardenVerdicts = async () => {
+    this.lastActor = currentActor();
+    return [
+      {
+        at: '2026-01-01T00:00:00Z',
+        targetSession: 's1',
+        teammate: 'lacey',
+        verdict: 'killed' as const,
+        reason: 'burning tokens with no progress',
+        reportPath: '/home/u/.kteam/daemon/warden/reports/2026-01-01T00-00-00-000Z-s1.md',
+      },
+    ];
+  };
+  wardenReport = async (p: string) => `# report ${p}\n\nVerdict: KILL\n`;
 }
 
 const servers: Server<unknown>[] = [];
@@ -144,6 +163,22 @@ describe('kteam daemon API', () => {
     const pr = await fetch(`${base}/v1/projects`, { headers: auth });
     expect(pr.status).toBe(200);
     expect(((await pr.json()) as Array<{ name: string }>)[0]!.name).toBe('home-manager');
+  });
+
+  test('exposes warden verdicts and a report reader', async () => {
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service: new FakeService() });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}`;
+    const auth = { authorization: 'Bearer secret' };
+    const vr = await fetch(`${base}/v1/warden/verdicts`, { headers: auth });
+    expect(vr.status).toBe(200);
+    const verdicts = (await vr.json()) as Array<{ verdict: string; targetSession: string }>;
+    expect(verdicts[0]!.verdict).toBe('killed');
+    expect(verdicts[0]!.targetSession).toBe('s1');
+    const rep = await fetch(`${base}/v1/warden/report?path=/x/y.md`, { headers: auth });
+    expect(rep.status).toBe(200);
+    expect(await rep.text()).toContain('Verdict: KILL');
+    expect((await fetch(`${base}/v1/warden/report`, { headers: auth })).status).toBe(400);
   });
 
   test('replays history before live WebSocket events', async () => {
@@ -348,6 +383,17 @@ describe('warden-scoped token authorization', () => {
     servers.push(server);
     return `http://127.0.0.1:${server.port}`;
   }
+
+  test('attributes warden-token requests to the warden actor (admin requests are unattributed)', async () => {
+    const service = new FakeService();
+    const base = scopedServer(service);
+    const r1 = await fetch(`${base}/v1/sessions/s1`, { headers: scoped });
+    expect(r1.status).toBe(200);
+    expect(service.lastActor).toBe('warden');
+    const r2 = await fetch(`${base}/v1/sessions/s1`, { headers: { authorization: 'Bearer secret' } });
+    expect(r2.status).toBe(200);
+    expect(service.lastActor).toBeUndefined();
+  });
 
   test('permits reads and the safe-recovery writes', async () => {
     const base = scopedServer();
