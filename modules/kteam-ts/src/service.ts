@@ -1,4 +1,11 @@
-import type { KTeamEvent, SendRequest, SessionConfig, SessionState, StartSessionRequest } from './types';
+import type {
+  KTeamEvent,
+  SendDisposition,
+  SendRequest,
+  SessionConfig,
+  SessionState,
+  StartSessionRequest,
+} from './types';
 import type { WardenConfig } from './daemon-config';
 import type { WardenAnomaly } from './warden-detect';
 import type { ProjectInfo, WrapperInfo } from './fleet-inventory';
@@ -48,7 +55,11 @@ export interface KTeamService {
   list(): Promise<SessionView[]>;
   get(id: string): Promise<SessionView>;
   start(request: StartSessionRequest): Promise<SessionView>;
-  send(id: string, request: SendRequest): Promise<SessionView>;
+  /** Returns the view plus a `disposition`: 'delivered' (injected into the
+   *  live turn), 'queued' (busy; delivers at the next prompt-ready boundary),
+   *  or 'revived' (terminal session relaunched with the message as its next
+   *  turn). Additive field — older clients ignore it. */
+  send(id: string, request: SendRequest): Promise<SessionView & { disposition: SendDisposition }>;
   answer(id: string, labels: string[], other?: string, responses?: string[]): Promise<SessionView>;
   interrupt(id: string): Promise<SessionView>;
   stop(id: string, reason?: string): Promise<SessionView>;

@@ -46,7 +46,7 @@ class FakeService implements KTeamService {
   list = async () => [view];
   get = async () => view;
   start = async (_input: StartSessionRequest) => view;
-  send = async (_id: string, _input: SendRequest) => view;
+  send = async (_id: string, _input: SendRequest) => ({ ...view, disposition: 'delivered' as const });
   answer = async () => view;
   interrupt = async () => view;
   stop = async () => view;
@@ -222,7 +222,7 @@ describe('request-id idempotency for retried mutations', () => {
     let sends = 0;
     service.send = async () => {
       sends++;
-      return view;
+      return { ...view, disposition: 'delivered' as const };
     };
     const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
     servers.push(server);
@@ -245,7 +245,7 @@ describe('request-id idempotency for retried mutations', () => {
     let sends = 0;
     service.send = async () => {
       sends++;
-      return view;
+      return { ...view, disposition: 'delivered' as const };
     };
     const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
     servers.push(server);
@@ -288,7 +288,7 @@ describe('request-id idempotency for retried mutations', () => {
     service.send = async () => {
       sends++;
       await gate; // hold the first application open until both requests are in flight
-      return view;
+      return { ...view, disposition: 'delivered' as const };
     };
     const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
     servers.push(server);

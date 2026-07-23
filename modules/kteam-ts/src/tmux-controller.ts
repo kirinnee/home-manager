@@ -551,6 +551,86 @@ export class TmuxController {
     await this.inject(config.tmuxSession, text);
   }
 
+  /** Type text into a BUSY pane's composer and submit it into the harness's
+   *  NATIVE queue (both TUIs hold text typed mid-turn and auto-submit it at
+   *  the next turn boundary — verified empirically 2026-07-23, fixtures
+   *  claude/codex-native-queue.txt). No readiness gate on purpose: the pane
+   *  is expected to be mid-turn. Verifies the text landed (echoed in the
+   *  composer/queue area) before submitting; multi-line payloads are sent as
+   *  a bracketed paste so the TUI treats them as one message. */
+  async typeIntoQueue(name: string, text: string): Promise<void> {
+    const normalize = (value: string) => value.replace(/\s+/g, '');
+    const probe = normalize(text).slice(0, 50);
+    // The COMPOSER received the text — not merely "the text is somewhere on
+    // screen" (a payload like `continue` is routinely present in output,
+    // review P2). Landing evidence = the probe appears in a NEW frame region:
+    // capture BEFORE typing, and require the probe count to increase.
+    const countProbe = (frame: string) => {
+      if (!probe) return 0;
+      const haystack = normalize(frame);
+      let count = 0;
+      for (let index = haystack.indexOf(probe); index >= 0; index = haystack.indexOf(probe, index + 1)) count++;
+      return count;
+    };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) {
+        await run(['tmux', 'send-keys', '-t', name, 'C-u']);
+        await Bun.sleep(200 * attempt);
+      }
+      const before = countProbe(await this.captureVisible(name));
+      // Bracketed paste keeps embedded newlines from submitting early.
+      const sent = text.includes('\n')
+        ? await this.pasteText(name, text)
+        : await run(['tmux', 'send-keys', '-t', name, '-l', text]);
+      if (sent.code !== 0) throw new Error(sent.stderr.trim() || 'tmux type failed');
+      // Repaints can transiently hide a correctly-typed composer: poll a few
+      // frames for the count to increase instead of judging one snapshot.
+      let landed = false;
+      for (let poll = 0; poll < 4 && !landed; poll++) {
+        await Bun.sleep(300);
+        landed = countProbe(await this.captureVisible(name)) > before;
+      }
+      if (!landed) continue;
+      const enter = await run(['tmux', 'send-keys', '-t', name, 'Enter']);
+      if (enter.code !== 0) throw new Error(enter.stderr.trim() || 'tmux submit failed');
+      await Bun.sleep(500);
+      // Codex mid-turn: Enter does NOT submit; the composer keeps the text
+      // and renders a "tab to queue message" hint — press Tab to move it into
+      // the explicit queue (verified live, fixture codex-native-queue.txt).
+      // Tolerant match (whitespace/wording drift) but anchored to the hint
+      // words so a stale unrelated frame doesn't trigger a blind Tab.
+      const afterEnter = (await this.captureVisible(name)).toLowerCase();
+      if (/tab to queue/.test(afterEnter) && countProbe(afterEnter) > before) {
+        await run(['tmux', 'send-keys', '-t', name, 'Tab']);
+        await Bun.sleep(300);
+      }
+      // Post-acceptance proof: the probe must still be visible (claude echoes
+      // the queued line "❯ <text>", codex keeps it in the composer/queue) OR
+      // the pane must show active work about to consume it. A frame with
+      // neither means the submit landed on an idle prompt or was swallowed —
+      // report failure so the caller can re-decide rather than assume queued.
+      const finalFrame = await this.captureVisible(name);
+      if (countProbe(finalFrame) > before || paneShowsActiveWork(finalFrame)) return;
+      throw new Error('the message left the composer without queue evidence (pane may have gone idle mid-type)');
+    }
+    throw new Error('text did not land in the busy composer');
+  }
+
+  private async pasteText(name: string, text: string): Promise<{ code: number; stdout: string; stderr: string }> {
+    const buffer = `kteam-q-${crypto.randomUUID().slice(0, 8)}`;
+    const proc = Bun.spawn(['tmux', 'load-buffer', '-b', buffer, '-'], {
+      stdin: 'pipe',
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    proc.stdin.write(text);
+    await proc.stdin.end();
+    const code = await proc.exited;
+    if (code !== 0) return { code, stdout: '', stderr: await new Response(proc.stderr).text() };
+    const paste = await run(['tmux', 'paste-buffer', '-p', '-d', '-b', buffer, '-t', name]);
+    return paste;
+  }
+
   async interrupt(config: SessionConfig): Promise<void> {
     const name = config.tmuxSession;
     const before = await this.state(name);

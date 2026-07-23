@@ -209,6 +209,11 @@ program
   .option('--timeout <seconds>', '', Number)
   .option('--nudge-after <seconds>', 'zero life-signs this long earns a continue nudge (default 180)', Number)
   .option('--kill-after <seconds>', 'zero life-signs this long is a stall kill (default 300)', Number)
+  .option(
+    '--direct-max <chars>',
+    'short single-line payloads up to this length are typed verbatim (0 disables; default 500)',
+    Number,
+  )
   .option('--max-snapshots <count>', '', Number)
   .option('--json')
   .action(async (parts: string[], options: Record<string, string | number | boolean | undefined>) => {
@@ -248,6 +253,7 @@ program
       timeoutSeconds: options.timeout as number | undefined,
       nudgeAfterSeconds: options.nudgeAfter as number | undefined,
       killAfterSeconds: options.killAfter as number | undefined,
+      directSendMaxChars: options.directMax as number | undefined,
       maxSnapshots: options.maxSnapshots as number | undefined,
       initialAttachments,
     });
@@ -312,7 +318,10 @@ program
   .argument('[message...]')
   .option('-i, --image <file>', 'attach image; repeatable', (value, values: string[]) => [...values, value], [])
   .option('--message-file <file>', 'read the message from a file (use for long messages)')
-  .option('--now', 'immediate-or-fail: refuse a busy session instead of queueing for the next turn boundary')
+  .option(
+    '--now',
+    'immediate steer: interrupt the active turn (Escape) and deliver the message right away instead of riding the native queue',
+  )
   .action(async (id: string, parts: string[], options: { image: string[]; messageFile?: string; now?: boolean }) => {
     const api = await client();
     const fileMessage = options.messageFile ? (await readFile(options.messageFile, 'utf8')).trim() : '';
@@ -323,9 +332,17 @@ program
       attachmentIds: attachments.map(item => item.id),
       now: options.now === true,
     });
-    // Busy session + default mode = the daemon queued it for the turn boundary.
-    const busy = !['waiting', 'awaiting_user', 'interrupted'].includes(view.state.status) && !view.state.promptReady;
-    if (!options.now && busy) console.error('kteam send: session is busy — message queued for the next turn boundary');
+    // The daemon states what actually happened; older daemons omit the field
+    // and fall back to the status-based guess.
+    if (view.disposition === 'queued')
+      console.log("queued in the TUI's native queue (auto-submits at the turn boundary)");
+    else if (view.disposition === 'revived') console.log('revived session with message');
+    else if (view.disposition === 'delivered') console.log('delivered');
+    else {
+      const busy = !['waiting', 'awaiting_user', 'interrupted'].includes(view.state.status) && !view.state.promptReady;
+      if (!options.now && busy)
+        console.error('kteam send: session is busy — message queued for the next turn boundary');
+    }
     printView(view);
   });
 program

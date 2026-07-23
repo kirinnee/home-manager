@@ -42,7 +42,15 @@ import {
   type StallLivenessState,
 } from './tmux-controller';
 import { reflexAssess, renderLivenessYaml, susFindings, type LivenessLedger } from './liveness';
-import type { KTeamEvent, SendRequest, SessionConfig, SessionState, SessionStatus, StartSessionRequest } from './types';
+import type {
+  KTeamEvent,
+  SendDisposition,
+  SendRequest,
+  SessionConfig,
+  SessionState,
+  SessionStatus,
+  StartSessionRequest,
+} from './types';
 
 interface MonitorHandle {
   abort: AbortController;
@@ -411,6 +419,7 @@ export class SessionManager implements KTeamService {
       timeoutSeconds: this.number(request.timeoutSeconds, 14_400, 30, 'timeoutSeconds'),
       nudgeAfterSeconds: this.number(request.nudgeAfterSeconds, 180, 30, 'nudgeAfterSeconds'),
       killAfterSeconds: this.number(request.killAfterSeconds, 300, 60, 'killAfterSeconds'),
+      directSendMaxChars: this.number(request.directSendMaxChars, 500, 0, 'directSendMaxChars'),
       maxSnapshots: this.number(request.maxSnapshots, 200, 1, 'maxSnapshots'),
       ...(request.stopCapability ? { stopCapability: request.stopCapability } : {}),
       systemPromptFile: path.join(directory, 'system.md'),
@@ -498,67 +507,138 @@ export class SessionManager implements KTeamService {
     return await this.get(id);
   }
 
-  async send(id: string, request: SendRequest): Promise<SessionView> {
+  async send(id: string, request: SendRequest): Promise<SessionView & { disposition: SendDisposition }> {
     id = this.resolveRef(id);
     {
-      // Atomic revive+send: a finished/stopped session accepts a follow-up
-      // message directly — resume() relaunches the TUI and injects it as the
-      // next turn under the session lock (and if the pane turns out to be
-      // alive by then, resume() delivers it as a plain send). This removes the
-      // unwinnable client-side send⇄resume status ping-pong.
+      // Cheap pre-lock probe ONLY to route obvious revives without waiting on
+      // the lock; the authoritative terminal/liveness decision is re-made
+      // UNDER the lock below (a completion can win the race after this).
       const probe = await this.get(id);
       const paneProbe = await this.tmux.state(probe.config.tmuxSession);
-      if (!paneProbe.alive || paneProbe.dead) {
-        const message = request.message?.trim();
-        const attachmentBlock = await this.attachments.buildImageReferenceBlock(id, request.attachmentIds ?? []);
-        const complete = [message, attachmentBlock].filter(Boolean).join('\n\n');
-        if (!complete) throw new Error('message or attachment is required');
-        return await this.resume(id, complete);
+      if (terminalStatuses.includes(probe.state.status) || !paneProbe.alive || paneProbe.dead) {
+        return await this.reviveWithMessage(id, request);
       }
     }
-    return await this.serialized(id, async () => {
+    const outcome = await this.serialized(id, async () => {
       const view = await this.get(id);
+      // Authoritative re-check under the lock: a session that reached a
+      // terminal status while we waited must take the resume path (its live
+      // pane, if any, is an unmonitored leftover — never type into it).
+      // resume() takes the lock itself, so signal the caller instead.
+      if (terminalStatuses.includes(view.state.status)) return { kind: 'revive' as const };
       const paneState = await this.tmux.state(view.config.tmuxSession);
-      if (!paneState.alive || paneState.dead)
-        throw new Error('session stopped while sending; retry `kteam send` (it revives stopped sessions)');
+      if (!paneState.alive || paneState.dead) return { kind: 'revive' as const };
       if (view.state.status === 'awaiting_question')
         throw new Error('answer the structured question with `kteam answer`');
       // promptReady means the TUI input box is demonstrably idle even when the
       // transcript-derived status lags (dropped end-of-turn records).
-      if (
+      let busy =
         !waitingStatuses.includes(view.state.status) &&
         view.state.status !== 'interrupted' &&
-        view.state.promptReady !== true
-      ) {
-        // F5: a busy session QUEUES the message by default — the monitor
-        // delivers it at the next genuine prompt-ready turn boundary through
-        // the normal inject path. `--now` restores immediate-or-fail. The old
-        // unconditional refusal is what pushed operators to the destructive
-        // interrupt as a live-steer channel.
-        if (request.now === true) throw new Error(`session is ${view.state.status}; interrupt it before sending`);
+        view.state.promptReady !== true;
+      if (busy) {
+        // `--now` = stop the active turn first (Escape, the same safe key
+        // interrupt() uses), then RE-READ the pane: once Escape produced a
+        // ready prompt this is a normal tracked direct send, not a queue
+        // ride. waitReady bounds the settle instead of a blind sleep.
+        if (request.now === true && paneShowsActiveWork(paneState.visiblePane)) {
+          await run(['tmux', 'send-keys', '-t', view.config.tmuxSession, 'Escape']);
+          await this.tmux.waitReady(view.config.tmuxSession, 10_000).catch(() => undefined);
+          const after = await this.tmux.state(view.config.tmuxSession);
+          if (!after.alive || after.dead) return { kind: 'revive' as const };
+          if (after.promptReady) busy = false;
+        } else {
+          // The busy verdict is otherwise re-validated right before typing:
+          // if the pane turned prompt-ready in the probe→lock window, fall
+          // through to the tracked delivered path instead of typing into an
+          // idle composer and mis-reporting 'queued' (an Enter at an idle
+          // prompt SUBMITS — that would be an untracked ghost turn).
+          const recheck = await this.tmux.state(view.config.tmuxSession);
+          if (!recheck.alive || recheck.dead) return { kind: 'revive' as const };
+          if (recheck.promptReady) busy = false;
+        }
+      }
+      if (busy) {
+        // Busy session: type the message into the TUI's NATIVE queue (both
+        // harnesses hold text typed mid-turn and auto-submit it at the next
+        // boundary — verified 2026-07-23, fixtures *-native-queue.txt). The
+        // send is recorded DURABLY in state.pendingNativeSends first; the
+        // turn advances only when the transcript's chat.user boundary is
+        // correlated (correlateNativeSend), so a queued message can never
+        // run as an untracked ghost turn.
         const queuedMessage = request.message?.trim();
         if (!queuedMessage && !request.attachmentIds?.length) throw new Error('message or attachment is required');
+        const attachmentBlock = await this.attachments.buildImageReferenceBlock(id, request.attachmentIds ?? []);
+        const payload = [queuedMessage, attachmentBlock].filter(Boolean).join('\n\n');
+        const entry = {
+          id: crypto.randomUUID(),
+          at: now(),
+          message: payload,
+          attachmentIds: request.attachmentIds ?? [],
+        };
+        // Durable BEFORE the keystrokes: a daemon crash between type-in and
+        // consumption must leave evidence to recover/report from.
+        await this.store.updateState<SessionState>(id, current => ({
+          ...current,
+          pendingNativeSends: [...(current.pendingNativeSends ?? []), entry],
+        }));
+        try {
+          await this.tmux.typeIntoQueue(view.config.tmuxSession, payload);
+        } catch (error) {
+          await this.store.updateState<SessionState>(id, current => ({
+            ...current,
+            pendingNativeSends: (current.pendingNativeSends ?? []).filter(item => item.id !== entry.id),
+          }));
+          throw error;
+        }
         await appendFile(
-          path.join(view.directory, 'channel', 'pending-sends.jsonl'),
-          `${JSON.stringify({ id: crypto.randomUUID(), at: now(), message: queuedMessage, attachmentIds: request.attachmentIds ?? [] })}\n`,
+          path.join(view.directory, 'channel', 'inbox.jsonl'),
+          `${JSON.stringify({ at: now(), type: 'message', queued: true, queueId: entry.id, message: queuedMessage, attachmentIds: request.attachmentIds ?? [] })}\n`,
         );
         await this.emit(
           id,
           'control.send_queued',
-          { message: queuedMessage, attachmentIds: request.attachmentIds ?? [] },
+          { queueId: entry.id, message: queuedMessage, attachmentIds: request.attachmentIds ?? [], native: true },
           'client',
         );
-        // Cut the monitor's current sleep short: the queued message should be
-        // delivered within seconds of the prompt turning ready, not after the
-        // remainder of a 30 s tick.
-        this.monitors.get(id)?.wake?.();
-        return await this.get(id);
+        return { kind: 'queued' as const };
       }
+      await this.deliverToIdlePrompt(id, view, request);
+      return { kind: 'delivered' as const };
+    });
+    if (outcome.kind === 'revive') return await this.reviveWithMessage(id, request);
+    return { ...(await this.get(id)), disposition: outcome.kind };
+  }
+
+  /** Terminal/dead-pane send: relaunch through resume() with the message as
+   *  the next tracked turn. */
+  private async reviveWithMessage(
+    id: string,
+    request: SendRequest,
+  ): Promise<SessionView & { disposition: SendDisposition }> {
+    const message = request.message?.trim();
+    const attachmentBlock = await this.attachments.buildImageReferenceBlock(id, request.attachmentIds ?? []);
+    const complete = [message, attachmentBlock].filter(Boolean).join('\n\n');
+    if (!complete) throw new Error('message or attachment is required');
+    return { ...(await this.resume(id, complete)), disposition: 'revived' };
+  }
+
+  /** Tracked idle-prompt delivery: write the turn artifacts, advance the turn,
+   *  inject (direct or via the turn-file instruction), and transition. Runs
+   *  UNDER the session lock (callers hold it). */
+  private async deliverToIdlePrompt(id: string, view: SessionView, request: SendRequest): Promise<void> {
+    {
       const message = request.message?.trim();
       if (!message && !request.attachmentIds?.length) throw new Error('message or attachment is required');
       const attachmentBlock = await this.attachments.buildImageReferenceBlock(id, request.attachmentIds ?? []);
       const complete = [message, attachmentBlock].filter(Boolean).join('\n\n');
       const turn = view.config.turn + 1;
+      // Short simple payloads go DIRECT (typed verbatim into the composer);
+      // the write-file-then-"read your turn file" indirection stays for
+      // long/multi-line/attachment payloads and the original turn-1 prompt.
+      // The turn file is still written on both paths (bookkeeping: logs,
+      // resume context) — direct only changes what gets TYPED.
+      const direct = this.isDirectPayload(complete, view.config);
       await writeFile(turnPrompt(this.paths, id, turn), `${complete}\n`, { mode: 0o600 });
       await appendFile(
         path.join(view.directory, 'channel', 'inbox.jsonl'),
@@ -570,13 +650,22 @@ export class SessionManager implements KTeamService {
         updatedAt: now(),
       }));
       await rm(markerFile(this.paths, id, 'needs-help'), { force: true });
-      await this.emit(id, 'control.send', { message, attachmentIds: request.attachmentIds ?? [] }, 'client', turn);
-      await this.tmux.send(config, this.promptInstruction(id, turn));
-      // Markers written while this injection was GATED on a busy pane belong
-      // to the PREVIOUS turn (e.g. the agent's `signal done` for work that
-      // finished during the wait) — clear them now that the new turn's prompt
-      // has actually landed, else the monitor reports a false `completed` for
-      // a turn that is just starting (observed live: geoffrey, 2026-07-21).
+      await this.emit(
+        id,
+        'control.send',
+        { message, attachmentIds: request.attachmentIds ?? [], ...(direct ? { direct: true } : {}) },
+        'client',
+        turn,
+      );
+      await this.tmux.send(config, direct ? complete : this.promptInstruction(id, turn));
+      // Markers written between the send request and the prompt landing
+      // (tmux.send can still block briefly on late startup dialogs) belong to
+      // the PREVIOUS turn — e.g. the agent's `signal done` racing this send.
+      // Clear them now that the new turn's prompt has actually landed, else
+      // the monitor reports a false `completed` for a turn that is just
+      // starting (observed live: geoffrey, 2026-07-21). The old busy-QUEUE
+      // gate is gone (native TUI queueing), which shrank this race window
+      // from minutes to seconds — but not to zero.
       await Promise.all(['done', 'needs-help'].map(name => rm(markerFile(this.paths, id, name), { force: true })));
       this.autoContinued.delete(id);
       this.doneDeferred.delete(id);
@@ -601,40 +690,7 @@ export class SessionManager implements KTeamService {
         },
         'turn.started',
       );
-      return await this.get(id);
-    });
-  }
-
-  /** Deliver queued busy-time sends at a prompt-ready turn boundary. Entries
-   *  are marked delivered BEFORE injection (at-most-once); if the session went
-   *  busy again mid-delivery, send() re-queues the combined message itself. */
-  private async deliverPendingSends(id: string, directory: string): Promise<boolean> {
-    const file = path.join(directory, 'channel', 'pending-sends.jsonl');
-    const raw = await readFile(file, 'utf8').catch(() => '');
-    const entries = raw
-      .split('\n')
-      .filter(Boolean)
-      .flatMap(line => {
-        try {
-          return [JSON.parse(line) as { id: string; at: string; message?: string; attachmentIds?: string[] }];
-        } catch {
-          return [];
-        }
-      });
-    if (entries.length === 0) return false;
-    await writeFile(file, '', { mode: 0o600 });
-    await appendFile(
-      path.join(directory, 'channel', 'delivered-sends.jsonl'),
-      `${entries.map(entry => JSON.stringify({ ...entry, deliveredAt: now() })).join('\n')}\n`,
-    );
-    await this.emit(id, 'control.send_dequeued', { count: entries.length }, 'daemon');
-    const message = entries
-      .map(entry => entry.message)
-      .filter(Boolean)
-      .join('\n\n---\n\n');
-    const attachmentIds = entries.flatMap(entry => entry.attachmentIds ?? []);
-    await this.send(id, { message, attachmentIds });
-    return true;
+    }
   }
 
   /** F4 auto-revive guard: if a control action left the pane DEAD (e.g. a
@@ -752,10 +808,31 @@ export class SessionManager implements KTeamService {
       }
       const paneState = await this.tmux.state(view.config.tmuxSession);
       if (paneState.alive && !paneState.dead) {
-        if (!message) throw new Error('session is already running');
-        return await this.sendUnlocked(view, message);
+        // A TERMINAL session's leftover live pane (daemon-restart re-adoption,
+        // reconciled completion) is unmonitored — injecting into it loses the
+        // message. Kill it and fall through to a tracked relaunch; only a
+        // genuinely NON-terminal session takes the plain-send shortcut.
+        if (!terminalStatuses.includes(view.state.status)) {
+          if (!message) throw new Error('session is already running');
+          return await this.sendUnlocked(view, message);
+        }
+        // Deliberate tradeoff, surfaced not silent: killing the leftover pane
+        // discards any unsent text still sitting in its composer/native
+        // queue. The final snapshot preserves the frame for the operator.
+        await this.tmux.snapshot(view.config, true);
+        await this.emit(
+          id,
+          'control.composer_discarded',
+          {
+            reason:
+              'terminal-session pane killed before revive; unsent composer text (if any) is in the final snapshot',
+          },
+          'daemon',
+        ).catch(() => undefined);
+        await this.stopTmuxWithEvidence(view.config, 'terminal session pane cleanup before revive');
+      } else if (paneState.alive) {
+        await this.stopTmuxWithEvidence(view.config, 'cleanup before resume');
       }
-      if (paneState.alive) await this.stopTmuxWithEvidence(view.config, 'cleanup before resume');
       if (view.config.harness === 'codex' && !view.config.harnessSessionId) {
         const found = await discoverCodexSession(view.config, await this.claimedCodexSessionIds(id));
         if (!found) throw new Error('could not identify the persisted Codex session to resume');
@@ -1620,24 +1697,6 @@ export class SessionManager implements KTeamService {
             view = await this.get(id);
           }
 
-          // F5: deliver queued busy-time sends at the turn boundary, before
-          // idle handling can park the session in awaiting_user or nudge it.
-          if (
-            pane.promptReady &&
-            !protectedStatuses.includes(view.state.status) &&
-            view.state.status !== 'awaiting_question' &&
-            view.state.status !== 'rate_limited' &&
-            (['waiting', 'awaiting_user', 'interrupted'].includes(view.state.status) || view.state.promptReady === true)
-          ) {
-            const delivered = await this.deliverPendingSends(id, view.directory).catch(error =>
-              this.emit(id, 'control.send_dequeue_failed', { message: String(error) }, 'daemon').then(() => false),
-            );
-            if (delivered) {
-              promptStable = 0;
-              view = await this.get(id);
-            }
-          }
-
           if (pane.promptReady) promptStable++;
           else promptStable = 0;
           const transcriptBusy =
@@ -1932,14 +1991,10 @@ export class SessionManager implements KTeamService {
             'watcher',
           ).catch(() => undefined);
         }
-        // A queued busy-time send must not wait out the full 30 s tick: while
-        // pending-sends exist, poll fast so delivery lands within seconds of
-        // the prompt turning ready (review P2 — the tick change would have
-        // made queued steers and automode continuation up to 6x slower).
-        const pendingSends = await stat(path.join(sessionDir(this.paths, id), 'channel', 'pending-sends.jsonl'))
-          .then(info => info.size > 0)
-          .catch(() => false);
-        await interruptibleSleep((pendingSends ? Math.min(sleepSeconds, 2) : sleepSeconds) * 1000, signal, wake => {
+        // The wake hook lets send() interrupt a long tick when it needs the
+        // monitor to re-evaluate promptly (e.g. right after a native-queue
+        // type-in, so status/ledger reflect the new composer state).
+        await interruptibleSleep(sleepSeconds * 1000, signal, wake => {
           const monitor = this.monitors.get(id);
           if (monitor && monitor.abort.signal === signal) monitor.wake = wake;
         });
@@ -1953,13 +2008,105 @@ export class SessionManager implements KTeamService {
     }
   }
 
+  /** Correlate a transcript chat.user record against the durable
+   *  pendingNativeSends queue (runs under the session lock, called by both
+   *  transcript handlers BEFORE they process the batch). A match means the
+   *  TUI consumed a natively-queued message at a turn boundary: atomically
+   *  advance the turn (config + state), materialize the turn file, re-scope
+   *  markers, reset the liveness episode, and emit the consumption event —
+   *  exactly the bookkeeping a tracked send performs at injection time.
+   *  Matching is by normalized text prefix, oldest entry first; duplicates or
+   *  replayed transcript batches cannot double-advance because the entry is
+   *  removed with the same state update that records the consumption. */
+  private async correlateNativeSends(
+    id: string,
+    view: SessionView,
+    events: ReadonlyArray<{ type: string; data: unknown }>,
+  ): Promise<void> {
+    const pending = view.state.pendingNativeSends ?? [];
+    if (pending.length === 0) return;
+    const normalize = (value: string) => value.replace(/\s+/g, '');
+    const userTexts = events
+      .filter(event => event.type === 'chat.user')
+      .map(event => normalize(String((event.data as { text?: string }).text ?? '')));
+    if (userTexts.length === 0) return;
+    // One transcript user event consumes AT MOST one pending entry: two queued
+    // sends sharing a message (or an 80-char prefix) must each wait for their
+    // own boundary — a single "continue" record must never advance two turns
+    // and delete both entries.
+    const consumedTexts = new Set<number>();
+    for (const entry of [...pending]) {
+      const probe = normalize(entry.message).slice(0, 80);
+      if (!probe) continue;
+      const matchIndex = userTexts.findIndex((text, index) => !consumedTexts.has(index) && text.includes(probe));
+      if (matchIndex === -1) continue;
+      consumedTexts.add(matchIndex);
+      const turn = view.config.turn + 1;
+      await writeFile(turnPrompt(this.paths, id, turn), `${entry.message}\n`, { mode: 0o600 });
+      view.config = await this.store.updateConfig<SessionConfig>(id, current => ({
+        ...current,
+        turn,
+        updatedAt: now(),
+      }));
+      // Markers written during the previous turn must not complete this one.
+      await Promise.all(['done', 'needs-help'].map(name => rm(markerFile(this.paths, id, name), { force: true })));
+      this.autoContinued.delete(id);
+      this.doneDeferred.delete(id);
+      await this.store.updateState<SessionState>(id, current => ({
+        ...current,
+        turn,
+        startedAt: now(),
+        turnCompleted: false,
+        promptReady: false,
+        reason: undefined,
+        nudgedAt: undefined,
+        pendingNativeSends: (current.pendingNativeSends ?? []).filter(item => item.id !== entry.id),
+      }));
+      await this.emit(
+        id,
+        'control.send_consumed',
+        { queueId: entry.id, turn, message: entry.message.slice(0, 200) },
+        'daemon',
+        turn,
+      );
+      view = await this.get(id);
+    }
+  }
+
+  /** Native sends still pending when a session hits a terminal state were
+   *  never consumed — the pane died/completed with text in the composer or
+   *  queue. Surface the loss LOUDLY (event + state.reason); the recovery path
+   *  is status-based revive, which re-sends the recorded message. */
+  private async reportLostNativeSends(id: string): Promise<void> {
+    const view = await this.get(id).catch(() => undefined);
+    const pending = view?.state.pendingNativeSends ?? [];
+    if (!view || pending.length === 0) return;
+    await this.store
+      .updateState<SessionState>(id, current => ({
+        ...current,
+        pendingNativeSends: [],
+        reason: `${current.reason ? `${current.reason}; ` : ''}${pending.length} native-queued send(s) not consumed before the session ended (recover with: kteam send — the messages are in channel/inbox.jsonl)`,
+      }))
+      .catch(() => undefined);
+    await this.emit(
+      id,
+      'control.send_lost',
+      { entries: pending.map(entry => ({ queueId: entry.id, at: entry.at, message: entry.message.slice(0, 200) })) },
+      'daemon',
+      undefined,
+      true,
+    ).catch(() => undefined);
+  }
+
   private async handleClaudeEvents(
     id: string,
     events: readonly ClaudeNormalizedEvent[],
     offset: number,
   ): Promise<void> {
     await this.serialized(id, async () => {
-      const view = await this.get(id);
+      let view = await this.get(id);
+      await this.correlateNativeSends(id, view, events);
+      view = await this.get(id);
       let autoQuestion = false;
       for (const event of events) {
         await appendFile(path.join(view.directory, 'chat.jsonl'), `${JSON.stringify(event)}\n`);
@@ -2064,7 +2211,9 @@ export class SessionManager implements KTeamService {
 
   private async handleCodexEvents(id: string, events: readonly CodexNormalizedEvent[], offset: number): Promise<void> {
     await this.serialized(id, async () => {
-      const view = await this.get(id);
+      let view = await this.get(id);
+      await this.correlateNativeSends(id, view, events);
+      view = await this.get(id);
       let autoQuestion = false;
       for (const event of events) {
         await appendFile(path.join(view.directory, 'chat.jsonl'), `${JSON.stringify(event)}\n`);
@@ -2187,6 +2336,14 @@ export class SessionManager implements KTeamService {
     });
     if (suppressed) return;
     await this.emit(id, eventType, { status: state.status, health: state.health, ...eventData }, 'daemon', state.turn);
+    // Busy-time sends live in the TUI's NATIVE queue; a completing turn
+    // normally consumes them at the boundary (correlateNativeSends). If the
+    // session ends with entries still pending, the message died with the
+    // pane/queue — surface the loss loudly so the caller can re-send
+    // (status-based revive is the recovery path).
+    if (patch.status !== undefined && terminalStatuses.includes(patch.status)) {
+      setTimeout(() => void this.reportLostNativeSends(id).catch(() => undefined), 0);
+    }
   }
 
   private async emit(
@@ -2567,6 +2724,22 @@ export class SessionManager implements KTeamService {
 
   private promptInstruction(id: string, turn: number): string {
     return `Read the file ${turnPrompt(this.paths, id, turn)} now, then carefully follow every instruction inside it. This is your complete task for this turn.`;
+  }
+
+  /** True when a payload is safe to type verbatim into the composer instead
+   *  of the turn-file indirection: single line after trim, no attachment
+   *  block (those embed file paths the model must read), under the
+   *  directSendMaxChars threshold, and free of characters that fight TUI
+   *  quoting/paste handling (control chars). */
+  private isDirectPayload(payload: string, config: SessionConfig): boolean {
+    const limit = config.directSendMaxChars ?? 500;
+    if (limit <= 0) return false;
+    const trimmed = payload.trim();
+    if (!trimmed || trimmed.length > limit) return false;
+    if (trimmed.includes('\n')) return false;
+    // eslint-disable-next-line no-control-regex
+    if (/[\u0000-\u001f\u007f]/.test(trimmed)) return false;
+    return true;
   }
 
   private attachmentView(stored: {

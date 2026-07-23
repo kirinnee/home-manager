@@ -1,0 +1,21 @@
+  Thought for 6s (ctrl+o to expand)
+
+● The command is running in the background. Let me wait for it to complete and retrieve the output.
+
+● Task Output b2mdhfwp3
+  ⎿  QUEUE_TEST_DONE
+
+❯ NATIVE QUEUE PROBE: after your current task, reply with exactly the word ACKQUEUE
+
+● Background command "Sleep 45 seconds then echo marker" completed (exit code 0)
+
+  Thought for 27s (ctrl+o to expand)
+
+● The sleep 45 && echo QUEUE_TEST_DONE command completed successfully (exit code 0). Its output was:
+
+  QUEUE_TEST_DONE
+
+  ACKQUEUE
+
+✻ Brewed for 1m 25s
+

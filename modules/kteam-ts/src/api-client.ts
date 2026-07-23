@@ -1,6 +1,6 @@
 import { readFile } from 'fs/promises';
 import type { AttachmentView, SessionView, WardenRunView, WardenStatusView } from './service';
-import type { KTeamEvent, SendRequest, StartSessionRequest } from './types';
+import type { KTeamEvent, SendDisposition, SendRequest, StartSessionRequest } from './types';
 import type { KTeamPaths } from './paths';
 import { loadDaemonConfig } from './daemon-config';
 
@@ -89,7 +89,7 @@ export class ApiClient {
     });
   }
   send(id: string, input: SendRequest) {
-    return this.post<SessionView>(id, 'send', input);
+    return this.post<SessionView & { disposition?: SendDisposition }>(id, 'send', input);
   }
   answer(id: string, labels: string[], other?: string, responses?: string[]) {
     return this.post<SessionView>(id, 'answer', { labels, other, responses });
