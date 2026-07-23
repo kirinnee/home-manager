@@ -12,11 +12,11 @@
         "worktrunkpkgs": "worktrunkpkgs"
       },
       "locked": {
-        "lastModified": 1783476428,
-        "narHash": "sha256-v/yLWWRJ4KUUT6V9h/YIqXvrj3vMwshC3dxWgeLkcy0=",
+        "lastModified": 1784766970,
+        "narHash": "sha256-FA46dJoRw3Hkh9OU2+MdTdqk/GZy4pd3SJp0+ZtudN4=",
         "owner": "AtomiCloud",
         "repo": "nix-registry",
-        "rev": "4b6052544564891b8695b5f4769c7593ec060372",
+        "rev": "31aa08d6f73fd54d1fafb8afdedb03b80cd4883e",
         "type": "github"
       },
       "original": {
@@ -518,11 +518,11 @@
         "treefmt-nix": "treefmt-nix_2"
       },
       "locked": {
-        "lastModified": 1784702368,
-        "narHash": "sha256-cS5Rv01brbs95/a5NrNCxKLqMZWkFnRRZXdmz2NZnQs=",
+        "lastModified": 1784750082,
+        "narHash": "sha256-rlCpeJ6DnyOrA2hdvZ4Qm/RW3KMU92ZGVQkewueyMtc=",
         "owner": "numtide",
         "repo": "llm-agents.nix",
-        "rev": "6c650f7597e3f212395e4fdba754bf6537cc2298",
+        "rev": "1451661abdf7f4496c7417b58301375579ca119b",
         "type": "github"
       },
       "original": {
