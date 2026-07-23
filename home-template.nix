@@ -363,6 +363,7 @@ rec {
       nil
       atomi.cyanprint
       atomi.attic
+      atomi.obsidian_headless # headless Obsidian vault sync CLI
 
 
       # LLM friendly
