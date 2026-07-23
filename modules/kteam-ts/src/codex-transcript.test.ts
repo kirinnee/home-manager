@@ -228,6 +228,48 @@ describe('Codex transcript normalization', () => {
   });
 });
 
+describe('context.usage extraction (turn-020)', () => {
+  test('emits tokens + window from a real-shaped token_count event', () => {
+    // Real shape captured 2026-07-23 from a live rollout JSONL.
+    const events = normalizeCodexTranscriptRecord(
+      {
+        timestamp: '2026-07-23T06:00:00.000Z',
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          info: {
+            total_token_usage: { input_tokens: 4_128_238, output_tokens: 20_463, total_tokens: 4_148_701 },
+            last_token_usage: {
+              input_tokens: 167_531,
+              cached_input_tokens: 165_632,
+              cache_write_input_tokens: 0,
+              output_tokens: 527,
+              reasoning_output_tokens: 100,
+              total_tokens: 168_058,
+            },
+            model_context_window: 258_400,
+          },
+          rate_limits: { limit_id: 'codex' },
+        },
+      },
+      { sessionId: SESSION_ID },
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: 'context.usage',
+      data: { contextTokens: 167_531 + 527, contextWindow: 258_400 },
+    });
+  });
+
+  test('token_count without last usage degrades to a diagnostic', () => {
+    const events = normalizeCodexTranscriptRecord(
+      { type: 'event_msg', payload: { type: 'token_count', info: {} } },
+      { sessionId: SESSION_ID },
+    );
+    expect(events.every(event => event.type !== 'context.usage')).toBe(true);
+  });
+});
+
 describe('Codex transcript file watching', () => {
   test('tails only the exact rollout through partial writes, replacement, and truncation', async () => {
     const temporary = await temporaryDirectory();

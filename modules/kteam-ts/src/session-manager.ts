@@ -12,7 +12,7 @@ import {
   type CodexNormalizedEvent,
   type CodexTranscriptWatcher,
 } from './codex-transcript';
-import { discoverAutoAgents, inferHarness, modelHint, shellSafeSessionName } from './core';
+import { contextWindowForModel, discoverAutoAgents, inferHarness, modelHint, shellSafeSessionName } from './core';
 import { listWrappers, scanProjects, type ProjectInfo, type WrapperInfo } from './fleet-inventory';
 import { currentActor } from './actor-context';
 import { parseWardenReports, type WardenVerdict } from './warden-verdicts';
@@ -90,6 +90,7 @@ interface SessionManagerOptions {
   publicUrl: string;
   projectRoots: string[];
   warden: WardenConfig;
+  contextWindows?: Record<string, number>;
 }
 interface WardenRuntimeState {
   lastSweepAt?: string;
@@ -1762,9 +1763,14 @@ export class SessionManager implements KTeamService {
             paneHash = nextPaneHash;
             await this.tmux.snapshot(view.config);
             await writeFile(turnLog(this.paths, id, view.config.turn), pane.pane, { mode: 0o600 });
-            const contextPercent = contextPercentUsed(pane.visiblePane);
+            // Pane parse is only the FALLBACK: once a transcript usage record
+            // has set contextPercent, the harness's own accounting wins (the
+            // statusline can change shape any time — the 1M-suffix breakage).
+            const paneContext = contextPercentUsed(pane.visiblePane);
+            const contextPercent = view.state.contextPercent === undefined ? paneContext : undefined;
+            const effectiveContext = view.state.contextPercent ?? paneContext;
             const contextTurnedHigh =
-              contextPercent !== undefined && contextPercent >= 85 && (view.state.contextPercent ?? 0) < 85;
+              effectiveContext !== undefined && effectiveContext >= 85 && (view.state.contextPercent ?? 0) < 85;
             // The harness's own spinner line ("✻ Lollygagging… (34s · 2.1k
             // tokens)") — the chat UI's received-and-thinking indicator.
             const activity = paneActivityLine(pane.visiblePane);
@@ -2257,6 +2263,29 @@ export class SessionManager implements KTeamService {
           }
         }
       }
+      // Transcript-based context accounting (turn-020): the harness's own
+      // usage records are ground truth; the pane statusline is only a
+      // fallback. Last usage event in the batch wins.
+      const usageEvent = [...events].reverse().find(event => event.type === 'context.usage') as
+        | { data: { contextTokens: number; model?: string; contextWindow?: number } }
+        | undefined;
+      const contextPercentFromUsage = usageEvent
+        ? Math.round(
+            (usageEvent.data.contextTokens /
+              (usageEvent.data.contextWindow ??
+                contextWindowForModel(usageEvent.data.model ?? view.config.model, this.options.contextWindows))) *
+              100,
+          )
+        : undefined;
+      if (
+        contextPercentFromUsage !== undefined &&
+        contextPercentFromUsage >= 85 &&
+        (view.state.contextPercent ?? 0) < 85
+      ) {
+        await this.emit(id, 'context.high', { contextPercent: contextPercentFromUsage }, 'watcher').catch(
+          () => undefined,
+        );
+      }
       await this.store.updateState<SessionState>(id, current => {
         const madeProgress = events.some(event => event.type !== 'chat.user' && event.type !== 'interaction.question');
         const openTools = new Set(current.openTools ?? []);
@@ -2310,6 +2339,7 @@ export class SessionManager implements KTeamService {
           turnCompleted,
           lastToolStartedAt,
           transcriptOffset: Math.max(current.transcriptOffset ?? 0, offset),
+          ...(contextPercentFromUsage !== undefined ? { contextPercent: contextPercentFromUsage } : {}),
           retryAttempt: madeProgress ? 0 : current.retryAttempt,
           lastTranscriptAt: now(),
           lastActivityAt: now(),
@@ -2363,6 +2393,29 @@ export class SessionManager implements KTeamService {
             );
           }
         }
+      }
+      // Transcript-based context accounting (turn-020): the harness's own
+      // usage records are ground truth; the pane statusline is only a
+      // fallback. Last usage event in the batch wins.
+      const usageEvent = [...events].reverse().find(event => event.type === 'context.usage') as
+        | { data: { contextTokens: number; model?: string; contextWindow?: number } }
+        | undefined;
+      const contextPercentFromUsage = usageEvent
+        ? Math.round(
+            (usageEvent.data.contextTokens /
+              (usageEvent.data.contextWindow ??
+                contextWindowForModel(usageEvent.data.model ?? view.config.model, this.options.contextWindows))) *
+              100,
+          )
+        : undefined;
+      if (
+        contextPercentFromUsage !== undefined &&
+        contextPercentFromUsage >= 85 &&
+        (view.state.contextPercent ?? 0) < 85
+      ) {
+        await this.emit(id, 'context.high', { contextPercent: contextPercentFromUsage }, 'watcher').catch(
+          () => undefined,
+        );
       }
       await this.store.updateState<SessionState>(id, current => {
         const madeProgress = events.some(event => event.type !== 'chat.user' && event.type !== 'interaction.question');
@@ -2419,6 +2472,7 @@ export class SessionManager implements KTeamService {
           turnCompleted,
           lastToolStartedAt,
           transcriptOffset: Math.max(current.transcriptOffset ?? 0, offset),
+          ...(contextPercentFromUsage !== undefined ? { contextPercent: contextPercentFromUsage } : {}),
           retryAttempt: madeProgress ? 0 : current.retryAttempt,
           lastTranscriptAt: now(),
           lastActivityAt: now(),
@@ -3208,8 +3262,17 @@ export class SessionManager implements KTeamService {
       '## Rules',
       '- Do NOT touch any other session. No git writes, no repository edits, no new non-warden sessions.',
       `- Write your report to EXACTLY: ${reportPath}`,
-      '- START the report with a machine-readable line `Verdict: LEAVE|NUDGE|RESUME|KILL` (exactly one),',
-      '  then the human explanation. (The Fleet UI parses this line.)',
+      '- The report MUST follow this machine-stable template (the Fleet UI parses lines 1 and 3):',
+      '```',
+      'Verdict: LEAVE|NUDGE|RESUME|KILL',
+      '',
+      `# Warden report — ${target.config.id} (teammate ${target.config.teammate ?? '-'}, ${target.config.label ?? '-'})`,
+      '',
+      '## Summary',
+      '<one- or two-sentence reason for the verdict>',
+      '',
+      '<free-form evidence sections>',
+      '```',
       '- Then run: kteam signal done',
     ].join('\n');
   }

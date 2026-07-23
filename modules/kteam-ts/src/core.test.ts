@@ -119,3 +119,14 @@ describe('usage-aware recommendations', () => {
     expect(usableAgent(undefined)).toBe(true);
   });
 });
+
+test('contextWindowForModel: 1m suffix, default, and overrides (turn-020)', () => {
+  const { contextWindowForModel } = require('./core');
+  expect(contextWindowForModel('claude-fable-5[1m]')).toBe(1_000_000);
+  expect(contextWindowForModel('claude-opus-4-8')).toBe(200_000);
+  expect(contextWindowForModel(undefined)).toBe(200_000);
+  // Overrides match by substring, longest pattern wins.
+  expect(contextWindowForModel('glm-5.2', { 'glm-5.2': 131_072 })).toBe(131_072);
+  expect(contextWindowForModel('glm-5.2-turbo', { glm: 100_000, 'glm-5.2-turbo': 65_536 })).toBe(65_536);
+  expect(contextWindowForModel('claude-fable-5[1m]', { fable: 900_000 })).toBe(900_000);
+});

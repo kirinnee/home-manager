@@ -186,3 +186,18 @@ export function interactiveHarnessArgs(config: SessionConfig): string[] {
 export function shellSafeSessionName(id: string, suffix: string): string {
   return `kteam-${id.replace(/[^a-zA-Z0-9_-]/g, '-')}-${suffix}`.slice(0, 80);
 }
+
+/** Context window for a model id, for transcript-based context accounting.
+ *  Overrides (daemon config `contextWindows`) match by substring, longest
+ *  pattern first, so specific ids beat family names. Built-ins: the `[1m]`
+ *  suffix marks 1M-context Claude models; everything else defaults 200k. */
+export function contextWindowForModel(model: string | undefined, overrides?: Record<string, number>): number {
+  if (model && overrides) {
+    const patterns = Object.keys(overrides)
+      .filter(pattern => model.includes(pattern))
+      .sort((a, b) => b.length - a.length);
+    if (patterns.length > 0) return overrides[patterns[0]!]!;
+  }
+  if (model?.includes('[1m]')) return 1_000_000;
+  return 200_000;
+}

@@ -29,6 +29,7 @@ const manager = await SessionManager.create(paths, {
   healthIntervalSeconds: config.healthIntervalSeconds,
   quotaUrl: config.quotaUrl,
   transcriptReconcileSeconds: config.transcriptReconcileSeconds,
+  contextWindows: config.contextWindows,
   publicUrl: config.publicUrl,
   projectRoots: config.projectRoots,
   warden: config.warden,

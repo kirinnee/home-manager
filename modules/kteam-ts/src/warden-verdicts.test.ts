@@ -61,3 +61,46 @@ test('parseWardenReports caps the list', () => {
   }));
   expect(parseWardenReports(files, 20).length).toBe(20);
 });
+
+test('parses the REAL assigned-warden report format (fixture from live daemon, turn-020)', async () => {
+  const path = await import('node:path');
+  const content = await Bun.file(path.join(import.meta.dir, 'fixtures', 'warden-report-assigned.txt')).text();
+  const [entry] = parseWardenReports([
+    { path: '/reports/2026-07-23T18-39-40-962Z-mrx35inz-80a08da9.md', content, mtimeMs: 1 },
+  ]);
+  expect(entry).toMatchObject({
+    targetSession: 'mrx35inz-80a08da9',
+    teammate: 'matthew',
+    label: 'node:go-base',
+    verdict: 'cleared', // Verdict: LEAVE
+  });
+  // The reason must be present and human-meaningful (## Summary sentence).
+  expect(entry!.reason).toContain('legitimate');
+});
+
+test('parses the REAL sweep report format alongside (fixture from live daemon)', async () => {
+  const path = await import('node:path');
+  const content = await Bun.file(path.join(import.meta.dir, 'fixtures', 'warden-report-sweep.txt')).text();
+  const [entry] = parseWardenReports([{ path: '/reports/2026-07-23T05-12-36-344Z.md', content, mtimeMs: 1 }]);
+  expect(entry).toMatchObject({
+    targetSession: 'mrwqdd6b-efd590a5',
+    teammate: 'lacey',
+    verdict: 'needs_human',
+  });
+  expect(entry!.reason).toBeDefined();
+});
+
+test('assigned header without teammate parenthetical still yields the session id', () => {
+  const [entry] = parseWardenReports([
+    {
+      path: '/reports/2026-07-23T00-00-00-000Z-mrxaaaa-11112222.md',
+      content: 'Verdict: NUDGE\n\n# Warden report — mrxaaaa-11112222\n\n## Summary\nWedged but recoverable.\n',
+      mtimeMs: 1,
+    },
+  ]);
+  expect(entry).toMatchObject({
+    targetSession: 'mrxaaaa-11112222',
+    verdict: 'nudged',
+    reason: 'Wedged but recoverable.',
+  });
+});

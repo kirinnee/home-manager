@@ -1,0 +1,52 @@
+Verdict: LEAVE
+
+# Warden report — mrx35inz-80a08da9 (teammate matthew, node:go-base)
+
+## Summary
+The flagged background subprocess is a **legitimate, actively progressing** remote
+proof-sharding driver for the `go-base` node's PR phase. It is not wedged and is
+not burning tokens for nothing. No action needed — LEAVE.
+
+## What the session is doing
+- Node controller for `go-base` (lane `codex-auto-loge`, model `gpt-5.6-sol`), in
+  worktree `.worktrees/exec-go-base-20260723T053800Z`.
+- In the **PR / remote-proof phase**: driving a single sequential proof runner
+  (`~/.kteam/mrx35inz-80a08da9/r-e7-focused-proof-e4fa7c5.ts`) that dispatches
+  disjoint proof shards to a remote droplet (ssh root@143.198.59.34), accepting
+  features/probes for sha `e4fa7c5` toward a target of 66 features / 113 probes.
+- The diary explicitly treats this as the "sole sequential driver" (no duplicate
+  / whole-suite runs) — hence one long-lived background subprocess by design.
+
+## Progress evidence (monotonic across looks ~1 min apart)
+Reading `r-e7-focused-e4fa7c5.status.json`:
+- 18:36 diary checkpoint: 6 shards, 36/66 features, 61/113 probes, attempt 7
+- 18:38:29Z: attempt 8, 7 shards, 42 features, 71 probes, 0 folds
+- 18:40:19Z: attempt 9, 8 shards, 48 features, 81 probes, 0 folds
+
+Features 36→42→48, probes 61→71→81, shards 6→7→8, attempts 7→8→9, **zero fold
+attempts** throughout. Clear forward movement between looks.
+
+## Liveness / activity evidence
+- `liveness.yaml`: conversation ~7s, tokens counter advancing (1891→1991→…),
+  pane ~1s, subprocess 0s. `triggers: nudge=no, kill=no, sus=yes` — sus fires
+  ONLY on the >18m subprocess-age heuristic, not on any stall signal.
+- `kteam events --after -50`: continuous `tool.use` / `tool.result` /
+  `chat.assistant.text` / `terminal.frame` through 18:40, incl. an assistant
+  update ("Six fresh shards now cover 36/66 features and 61/113 probes…") and a
+  fresh `progress.sh waiting` diary write.
+- Proof runner PID 2143101 alive, low CPU (~0.1%) — expected for an orchestrator
+  that spends most wall time blocked on remote ssh proof cycles (~50s each).
+- Diary (`progress.jsonl`) kept current with `waiting --awaiting remote-proof`
+  checkpoints at 18:24, 18:31, 18:37 (≈ every 7 min, within the 10-min rule),
+  each naming the next reconciliation time.
+
+## Why not NUDGE / RESUME / KILL
+- Not NUDGE: the turn is alive and advancing; a message would only interrupt a
+  correctly-behaving sequential proof driver.
+- Not RESUME: the turn is not dead — assistant text, tool calls, and token
+  counter all moving.
+- Not KILL: the opposite of "burning time/tokens with no progress" — every look
+  shows accepted features/probes climbing toward the DoD target with zero folds.
+
+## Verdict
+LEAVE. Expected long operation, demonstrably progressing.

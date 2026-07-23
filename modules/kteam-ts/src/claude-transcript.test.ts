@@ -153,6 +153,35 @@ describe('Claude transcript normalization', () => {
   });
 });
 
+describe('context.usage extraction (turn-020)', () => {
+  test('emits context tokens from a real-shaped assistant usage block', () => {
+    const record = assistantRecord([{ type: 'text', text: 'ok' }], 'end_turn');
+    (record.message as Record<string, unknown>).model = 'claude-fable-5[1m]';
+    (record.message as Record<string, unknown>).usage = {
+      // Real shape captured 2026-07-23 from a live session JSONL.
+      input_tokens: 2,
+      cache_creation_input_tokens: 339,
+      cache_read_input_tokens: 757_130,
+      output_tokens: 294,
+      server_tool_use: { web_search_requests: 0, web_fetch_requests: 0 },
+    };
+    const events = normalizeClaudeTranscriptRecord(record);
+    const usage = events.find(event => event.type === 'context.usage');
+    expect(usage?.data).toEqual({ contextTokens: 2 + 339 + 757_130, model: 'claude-fable-5[1m]' });
+  });
+
+  test('no usage block or zero totals emit nothing', () => {
+    expect(
+      normalizeClaudeTranscriptRecord(assistantRecord([{ type: 'text', text: 'x' }])).filter(
+        event => event.type === 'context.usage',
+      ),
+    ).toHaveLength(0);
+    const zero = assistantRecord([{ type: 'text', text: 'x' }]);
+    (zero.message as Record<string, unknown>).usage = { input_tokens: 0, output_tokens: 5 };
+    expect(normalizeClaudeTranscriptRecord(zero).filter(event => event.type === 'context.usage')).toHaveLength(0);
+  });
+});
+
 describe('Claude transcript file watching', () => {
   test('discovers only the exact UUID and tails partial, replaced, and truncated files', async () => {
     const temporary = await temporaryDirectory();
