@@ -246,7 +246,10 @@ export function contextPercentUsed(pane: string): number | undefined {
   if (used) return Number(used[1]);
   const left = lower.match(/(\d{1,3})%\s*(?:context\s*)?left|context\s*left[^0-9]{0,25}(\d{1,3})%/);
   if (left) return 100 - Number(left[1] ?? left[2]);
-  const ratio = lower.match(/(\d{1,3})%\s*\(\s*[\d.,]+k?\s*\/\s*[\d.,]+k?\s*\)/);
+  // Accepts k AND m unit suffixes: 1M-context sessions render "(735k/1M)",
+  // which the k-only pattern silently missed (context showed empty fleet-wide
+  // right after the 1M rollout).
+  const ratio = lower.match(/(\d{1,3})%\s*\(\s*[\d.,]+[km]?\s*\/\s*[\d.,]+[km]?\s*\)/);
   if (ratio) return Number(ratio[1]);
   return undefined;
 }
