@@ -65,6 +65,10 @@ export interface SessionConfig {
   nudgeAfterSeconds?: number;
   /** A6 reflex: zero life-signs this long (nudge didn't revive any) → kill. */
   killAfterSeconds?: number;
+  /** Short-direct sends: a single-line no-attachment payload at most this
+   *  long is TYPED verbatim into the composer instead of the turn-file
+   *  indirection. 0 disables direct sends. Default 500. */
+  directSendMaxChars?: number;
   maxSnapshots: number;
   systemPromptFile: string;
   originalPromptFile: string;
@@ -130,6 +134,11 @@ export interface SessionState {
   /** When the reflex layer nudged this zero-life-signs episode (one nudge per
    *  episode; cleared when any life-sign returns). */
   nudgedAt?: string;
+  /** Native-queue sends typed into the TUI while it was busy, awaiting their
+   *  transcript consumption boundary. Durable: the turn advances only when a
+   *  matching chat.user record appears (correlated under the session lock);
+   *  entries surviving into a terminal state are surfaced as lost. */
+  pendingNativeSends?: Array<{ id: string; at: string; message: string; attachmentIds?: string[] }>;
   /** Context-window usage (percent used) parsed from the TUI statusline. */
   contextPercent?: number;
   /** The harness's live activity/spinner line ("✻ Lollygagging… (34s · 2.1k
@@ -179,6 +188,7 @@ export interface StartSessionRequest {
   timeoutSeconds?: number;
   nudgeAfterSeconds?: number;
   killAfterSeconds?: number;
+  directSendMaxChars?: number;
   /** Internal (daemon-minted): assigned-warden stop capability to embed in
    *  the new session's config/pane env. Harmless if a client sets it — the
    *  authorization check compares against the capability recorded in the
@@ -195,10 +205,15 @@ export interface StartSessionRequest {
 export interface SendRequest {
   message: string;
   attachmentIds?: string[];
-  /** Immediate-or-fail: refuse busy sessions instead of queueing the message
-   *  for delivery at the next prompt-ready turn boundary. */
+  /** Immediate steer: interrupt the active turn (Escape) and deliver the
+   *  message right away instead of riding the TUI's native queue. */
   now?: boolean;
 }
+
+/** What actually happened to a send: injected into the live turn, queued for
+ *  the next prompt-ready boundary, or delivered by reviving a finished
+ *  session as its next turn. Additive — absent on older daemons. */
+export type SendDisposition = 'delivered' | 'queued' | 'revived';
 
 export interface Recommendation {
   binary: string;

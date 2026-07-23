@@ -1,0 +1,21 @@
+› Run this exact command and report its output: sleep 45 && echo QUEUE_TEST_DONE
+  NATIVE QUEUE PROBE: after the current command finishes, reply with exactly the word ACKQUEUE
+
+
+• Running the exact command now; I’ll wait for it to finish.
+
+• Ran direnv exec . zsh -lc 'sleep 45 && echo QUEUE_TEST_DONE'
+  └ QUEUE_TEST_DONE
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• ACKQUEUE
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+› SECOND PROBE typed mid-turn: also reply with the word MIDTURNACK
+
+
+• MIDTURNACK
+

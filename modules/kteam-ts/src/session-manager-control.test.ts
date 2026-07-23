@@ -168,6 +168,504 @@ describe('assigned-warden capacity (A6 fix round)', () => {
   });
 });
 
+describe('send() delivery holes (turn-012 fix round)', () => {
+  function sendManager(input: { status: string; paneAlive: boolean; promptReady?: boolean }) {
+    const calls: string[] = [];
+    const manager = bareManager();
+    manager.resolveRef = (id: string) => id;
+    manager.serialized = async (_id: string, work: () => Promise<unknown>) => await work();
+    manager.attachments = { buildImageReferenceBlock: async () => '' };
+    manager.get = async () => ({
+      directory: '/tmp/kteam-send-test/s1',
+      config: { id: 's1', tmuxSession: 'kteam-s1-agent', turn: 3 },
+      state: { id: 's1', status: input.status, turn: 3, promptReady: input.promptReady ?? false },
+    });
+    manager.tmux = {
+      state: async () => ({ alive: input.paneAlive, dead: !input.paneAlive, promptReady: input.promptReady ?? false }),
+      snapshot: async () => 'frame\n',
+    };
+    manager.resume = async (_id: string, message?: string) => {
+      calls.push(`resume:${message}`);
+      return {
+        directory: '/tmp/kteam-send-test/s1',
+        config: { id: 's1', turn: 4 },
+        state: { id: 's1', status: 'running', turn: 4 },
+      };
+    };
+    manager.sendUnlocked = async (_view: unknown, message: string) => {
+      calls.push(`sendUnlocked:${message}`);
+      return { config: { id: 's1' }, state: { status: 'running' } };
+    };
+    manager.stopTmuxWithEvidence = async (_config: unknown, reason: string) => {
+      calls.push(`kill:${reason}`);
+    };
+    return { manager, calls };
+  }
+
+  test("a COMPLETED session with a live idle pane is REVIVED, never direct-injected (the pane's a leftover)", async () => {
+    const { manager, calls } = sendManager({ status: 'completed', paneAlive: true, promptReady: true });
+    const result = await (
+      manager as unknown as {
+        send: (id: string, request: { message: string }) => Promise<{ disposition: string }>;
+      }
+    ).send('s1', { message: 'follow-up work' });
+    expect(result.disposition).toBe('revived');
+    expect(calls).toEqual(['resume:follow-up work']);
+  });
+
+  test('a busy live session types into the NATIVE queue: durable record + disposition=queued', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-send-disp-'));
+    temporaryDirectories.push(home);
+    await mkdir(path.join(home, 's1', 'channel'), { recursive: true });
+    const { manager } = sendManager({ status: 'running', paneAlive: true, promptReady: false });
+    const typed: string[] = [];
+    let state: Record<string, unknown> = { id: 's1', status: 'running', turn: 3, promptReady: false };
+    manager.get = async () => ({
+      directory: path.join(home, 's1'),
+      config: { id: 's1', tmuxSession: 'kteam-s1-agent', turn: 3 },
+      state,
+    });
+    manager.store = {
+      updateState: async (_id: string, mutate: (c: Record<string, unknown>) => Record<string, unknown>) => {
+        state = mutate(state);
+        return state;
+      },
+    };
+    manager.tmux = {
+      state: async () => ({ alive: true, dead: false, promptReady: false, visiblePane: '• Working (10s' }),
+      typeIntoQueue: async (_name: string, text: string) => {
+        typed.push(text);
+      },
+    };
+    manager.emit = async () => ({});
+    manager.monitors = new Map();
+    const queued = await (
+      manager as unknown as {
+        send: (id: string, request: { message: string }) => Promise<{ disposition: string }>;
+      }
+    ).send('s1', { message: 'steer' });
+    expect(queued.disposition).toBe('queued');
+    expect(typed).toEqual(['steer']); // typed into the TUI's native queue…
+    // …recorded DURABLY for transcript correlation (turn advances at
+    // consumption, never at type-in)…
+    const pending = state.pendingNativeSends as Array<{ id: string; message: string }>;
+    expect(pending).toHaveLength(1);
+    expect(pending[0]!.message).toBe('steer');
+    // …and no external mailbox file is created anymore.
+    const mailbox = await readFile(path.join(home, 's1', 'channel', 'pending-sends.jsonl'), 'utf8').catch(() => null);
+    expect(mailbox === null || mailbox === '').toBe(true);
+  });
+
+  test('a failed type-in rolls the durable record back (no phantom pending entry)', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-send-fail-'));
+    temporaryDirectories.push(home);
+    await mkdir(path.join(home, 's1', 'channel'), { recursive: true });
+    const { manager } = sendManager({ status: 'running', paneAlive: true, promptReady: false });
+    let state: Record<string, unknown> = { id: 's1', status: 'running', turn: 3, promptReady: false };
+    manager.get = async () => ({
+      directory: path.join(home, 's1'),
+      config: { id: 's1', tmuxSession: 'kteam-s1-agent', turn: 3 },
+      state,
+    });
+    manager.store = {
+      updateState: async (_id: string, mutate: (c: Record<string, unknown>) => Record<string, unknown>) => {
+        state = mutate(state);
+        return state;
+      },
+    };
+    manager.tmux = {
+      state: async () => ({ alive: true, dead: false, promptReady: false, visiblePane: '• Working (10s' }),
+      typeIntoQueue: async () => {
+        throw new Error('text did not land in the busy composer');
+      },
+    };
+    manager.emit = async () => ({});
+    manager.monitors = new Map();
+    await expect(
+      (manager as unknown as { send: (id: string, request: { message: string }) => Promise<unknown> }).send('s1', {
+        message: 'doomed',
+      }),
+    ).rejects.toThrow(/did not land/);
+    expect((state.pendingNativeSends as unknown[]) ?? []).toHaveLength(0);
+  });
+
+  test('terminal transition BETWEEN probe and lock takes the revive path, never types', async () => {
+    const { manager, calls } = sendManager({ status: 'running', paneAlive: true, promptReady: false });
+    // Pre-lock probe sees running; under the lock the session is completed.
+    let reads = 0;
+    manager.get = async () => ({
+      directory: '/tmp/kteam-send-test/s1',
+      config: { id: 's1', tmuxSession: 'kteam-s1-agent', turn: 3 },
+      state: { id: 's1', status: ++reads === 1 ? 'running' : 'completed', turn: 3, promptReady: false },
+    });
+    manager.tmux = {
+      state: async () => ({ alive: true, dead: false, promptReady: false, visiblePane: '• Working (10s' }),
+      typeIntoQueue: async () => {
+        throw new Error('must never type into a terminal session');
+      },
+    };
+    const result = await (
+      manager as unknown as {
+        send: (id: string, request: { message: string }) => Promise<{ disposition: string }>;
+      }
+    ).send('s1', { message: 'late message' });
+    expect(result.disposition).toBe('revived');
+    expect(calls).toEqual(['resume:late message']);
+  });
+
+  test('busy→idle race in the probe window becomes a TRACKED delivered send, not a ghost queue ride', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-send-race-'));
+    temporaryDirectories.push(home);
+    await mkdir(path.join(home, 's1', 'channel'), { recursive: true });
+    await mkdir(path.join(home, 's1', 'turns'), { recursive: true });
+    const { manager } = sendManager({ status: 'running', paneAlive: true, promptReady: false });
+    let paneReads = 0;
+    let typedViaQueue = 0;
+    let delivered = '';
+    manager.paths = createPaths(home);
+    manager.autoContinued = new Set();
+    manager.doneDeferred = new Set();
+    manager.monitors = new Map();
+    manager.get = async () => ({
+      directory: path.join(home, 's1'),
+      config: { id: 's1', tmuxSession: 'kteam-s1-agent', turn: 3, directSendMaxChars: 500 },
+      state: { id: 's1', status: 'running', turn: 3, promptReady: false },
+    });
+    manager.tmux = {
+      // First pane read (status probe under lock): busy. Recheck right before
+      // typing: prompt-ready — the TUI finished in the window.
+      state: async () => ({
+        alive: true,
+        dead: false,
+        promptReady: ++paneReads >= 2,
+        visiblePane: paneReads >= 2 ? '❯ ' : '• Working (10s',
+      }),
+      typeIntoQueue: async () => {
+        typedViaQueue++;
+      },
+      send: async (_config: unknown, text: string) => {
+        delivered = text;
+      },
+    };
+    manager.store = {
+      updateState: async (_id: string, mutate: (c: Record<string, unknown>) => Record<string, unknown>) => mutate({}),
+      updateConfig: async (_id: string, mutate: (c: Record<string, unknown>) => Record<string, unknown>) =>
+        mutate({ id: 's1', tmuxSession: 'kteam-s1-agent', turn: 3, directSendMaxChars: 500 }),
+    };
+    manager.emit = async () => ({});
+    manager.transition = async () => undefined;
+    const result = await (
+      manager as unknown as {
+        send: (id: string, request: { message: string }) => Promise<{ disposition: string }>;
+      }
+    ).send('s1', { message: 'raced message' });
+    expect(result.disposition).toBe('delivered');
+    expect(typedViaQueue).toBe(0); // never treated as a queue ride
+    expect(delivered).toBe('raced message'); // tracked direct send
+    // Turn file materialized for the tracked turn.
+    expect(await readFile(path.join(home, 's1', 'turns', 'turn-004.md'), 'utf8')).toContain('raced message');
+  });
+
+  test('--now on an actively-working pane presses Escape before typing (immediate steer)', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-send-now-'));
+    temporaryDirectories.push(home);
+    await mkdir(path.join(home, 's1', 'channel'), { recursive: true });
+    const { manager } = sendManager({ status: 'running', paneAlive: true, promptReady: false });
+    const typed: string[] = [];
+    manager.get = async () => ({
+      directory: path.join(home, 's1'),
+      config: { id: 's1', tmuxSession: 'kteam-s1-agent', turn: 3 },
+      state: { id: 's1', status: 'running', turn: 3, promptReady: false },
+    });
+    manager.tmux = {
+      state: async () => ({
+        alive: true,
+        dead: false,
+        promptReady: false,
+        visiblePane: '✻ Lollygagging… (34s · 2.1k tokens)',
+      }),
+      // Escape stopped the turn but the prompt has not settled to ready in
+      // the wait window — the message rides the native queue (tracked).
+      waitReady: async () => {
+        throw new Error('not ready in window');
+      },
+      typeIntoQueue: async (_name: string, text: string) => {
+        typed.push(text);
+      },
+    };
+    manager.store = {
+      updateState: async (_id: string, mutate: (c: Record<string, unknown>) => Record<string, unknown>) => mutate({}),
+    };
+    manager.emit = async () => ({});
+    manager.monitors = new Map();
+    const result = await (
+      manager as unknown as {
+        send: (id: string, request: { message: string; now?: boolean }) => Promise<{ disposition: string }>;
+      }
+    ).send('s1', { message: 'urgent steer', now: true });
+    expect(result.disposition).toBe('queued');
+    expect(typed).toEqual(['urgent steer']);
+  });
+});
+
+describe('native-queue consumption correlation (turn-016 P1)', () => {
+  function correlationManager(initial: {
+    turn: number;
+    pendingNativeSends: Array<{ id: string; at: string; message: string }>;
+  }) {
+    const events: Array<{ type: string; turn?: number }> = [];
+    let config: Record<string, unknown> = { id: 's1', tmuxSession: 'kteam-s1-agent', turn: initial.turn };
+    let state: Record<string, unknown> = {
+      id: 's1',
+      status: 'running',
+      turn: initial.turn,
+      nudgedAt: '2026-07-23T00:00:00.000Z', // stale nudge must clear on the new turn
+      pendingNativeSends: initial.pendingNativeSends,
+    };
+    const manager = bareManager();
+    manager.autoContinued = new Set(['s1']);
+    manager.doneDeferred = new Set(['s1']);
+    manager.store = {
+      updateConfig: async (_id: string, mutate: (c: Record<string, unknown>) => Record<string, unknown>) => {
+        config = mutate(config);
+        return config;
+      },
+      updateState: async (_id: string, mutate: (c: Record<string, unknown>) => Record<string, unknown>) => {
+        state = mutate(state);
+        return state;
+      },
+    };
+    manager.emit = async (_id: string, type: string, _payload: unknown, _source: string, turn?: number) => {
+      events.push({ type, turn });
+      return {};
+    };
+    const call = async (batch: Array<{ type: string; data: unknown }>, home: string) => {
+      manager.paths = createPaths(home);
+      const view = {
+        directory: path.join(home, 's1'),
+        config,
+        state,
+      };
+      manager.get = async () => ({ directory: path.join(home, 's1'), config, state });
+      await (
+        manager as unknown as {
+          correlateNativeSends: (id: string, view: unknown, events: unknown[]) => Promise<void>;
+        }
+      ).correlateNativeSends('s1', view, batch);
+    };
+    return { manager, call, events, config: () => config, state: () => state };
+  }
+
+  test('a matching chat.user advances the turn exactly once with full bookkeeping', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-correlate-'));
+    temporaryDirectories.push(home);
+    await mkdir(path.join(home, 's1', 'turns'), { recursive: true });
+    await mkdir(path.join(home, 's1', 'markers'), { recursive: true });
+    await writeFile(path.join(home, 's1', 'markers', 'done.json'), '{"type":"done","turn":3}\n');
+    const harness = correlationManager({
+      turn: 3,
+      pendingNativeSends: [{ id: 'q1', at: 'then', message: 'queued steer message' }],
+    });
+    await harness.call([{ type: 'chat.user', data: { text: 'queued steer message' } }], home);
+    // Turn advanced atomically on config AND state.
+    expect(harness.config().turn).toBe(4);
+    expect(harness.state().turn).toBe(4);
+    // Queue entry consumed; nudge episode reset; turn marked incomplete.
+    expect(harness.state().pendingNativeSends).toHaveLength(0);
+    expect(harness.state().nudgedAt).toBeUndefined();
+    expect(harness.state().turnCompleted).toBe(false);
+    // Turn file materialized; stale turn-3 done marker cleared (cannot
+    // complete queued turn 4).
+    expect(await readFile(path.join(home, 's1', 'turns', 'turn-004.md'), 'utf8')).toContain('queued steer message');
+    expect(await readFile(path.join(home, 's1', 'markers', 'done.json'), 'utf8').catch(() => 'GONE')).toBe('GONE');
+    // Consumption event tagged with the NEW turn.
+    expect(harness.events).toEqual([{ type: 'control.send_consumed', turn: 4 }]);
+  });
+
+  test('replayed/duplicate transcript batches cannot double-advance', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-correlate-dup-'));
+    temporaryDirectories.push(home);
+    await mkdir(path.join(home, 's1', 'turns'), { recursive: true });
+    const harness = correlationManager({
+      turn: 3,
+      pendingNativeSends: [{ id: 'q1', at: 'then', message: 'only once' }],
+    });
+    const batch = [{ type: 'chat.user', data: { text: 'only once' } }];
+    await harness.call(batch, home);
+    await harness.call(batch, home); // replay
+    expect(harness.config().turn).toBe(4); // not 5
+    expect(harness.events.filter(event => event.type === 'control.send_consumed')).toHaveLength(1);
+  });
+
+  test('an unrelated chat.user does not consume the pending entry', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-correlate-nomatch-'));
+    temporaryDirectories.push(home);
+    const harness = correlationManager({
+      turn: 3,
+      pendingNativeSends: [{ id: 'q1', at: 'then', message: 'the queued message text' }],
+    });
+    await harness.call([{ type: 'chat.user', data: { text: 'a totally different prompt' } }], home);
+    expect(harness.config().turn).toBe(3);
+    expect(harness.state().pendingNativeSends).toHaveLength(1);
+    expect(harness.events).toHaveLength(0);
+  });
+
+  test('IDENTICAL queued messages: one chat.user consumes exactly one entry', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-correlate-same-'));
+    temporaryDirectories.push(home);
+    await mkdir(path.join(home, 's1', 'turns'), { recursive: true });
+    const harness = correlationManager({
+      turn: 3,
+      pendingNativeSends: [
+        { id: 'q1', at: 'then', message: 'continue' },
+        { id: 'q2', at: 'later', message: 'continue' },
+      ],
+    });
+    await harness.call([{ type: 'chat.user', data: { text: 'continue' } }], home);
+    // One boundary => one consumption: turn 4 only, q2 still pending.
+    expect(harness.config().turn).toBe(4);
+    expect(harness.state().pendingNativeSends).toHaveLength(1);
+    expect(harness.events.filter(event => event.type === 'control.send_consumed')).toHaveLength(1);
+  });
+
+  test('SAME-PREFIX queued messages: shared 80-char prefix does not double-consume', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-correlate-prefix-'));
+    temporaryDirectories.push(home);
+    await mkdir(path.join(home, 's1', 'turns'), { recursive: true });
+    const shared = 'x'.repeat(90); // identical first 80 chars, different tails
+    const harness = correlationManager({
+      turn: 3,
+      pendingNativeSends: [
+        { id: 'q1', at: 'then', message: `${shared} alpha` },
+        { id: 'q2', at: 'later', message: `${shared} beta` },
+      ],
+    });
+    await harness.call([{ type: 'chat.user', data: { text: `${shared} alpha` } }], home);
+    expect(harness.config().turn).toBe(4);
+    expect(harness.state().pendingNativeSends).toHaveLength(1);
+  });
+
+  test('two queued entries + two chat.user events consume both, in order', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-correlate-two-'));
+    temporaryDirectories.push(home);
+    await mkdir(path.join(home, 's1', 'turns'), { recursive: true });
+    const harness = correlationManager({
+      turn: 3,
+      pendingNativeSends: [
+        { id: 'q1', at: 'then', message: 'continue' },
+        { id: 'q2', at: 'later', message: 'continue' },
+      ],
+    });
+    await harness.call(
+      [
+        { type: 'chat.user', data: { text: 'continue' } },
+        { type: 'chat.user', data: { text: 'continue' } },
+      ],
+      home,
+    );
+    expect(harness.config().turn).toBe(5);
+    expect(harness.state().pendingNativeSends).toHaveLength(0);
+    expect(harness.events.filter(event => event.type === 'control.send_consumed')).toHaveLength(2);
+  });
+
+  test('pending entries surviving into a terminal state are reported LOST (recovery: revive)', async () => {
+    const events: Array<{ type: string }> = [];
+    let state: Record<string, unknown> = {
+      id: 's1',
+      status: 'stopped',
+      turn: 3,
+      pendingNativeSends: [{ id: 'q1', at: 'then', message: 'died in composer' }],
+    };
+    const manager = bareManager();
+    manager.get = async () => ({ directory: '/x/s1', config: { id: 's1', turn: 3 }, state });
+    manager.store = {
+      updateState: async (_id: string, mutate: (c: Record<string, unknown>) => Record<string, unknown>) => {
+        state = mutate(state);
+        return state;
+      },
+    };
+    manager.emit = async (_id: string, type: string) => {
+      events.push({ type });
+      return {};
+    };
+    await (manager as unknown as { reportLostNativeSends: (id: string) => Promise<void> }).reportLostNativeSends('s1');
+    expect(events).toEqual([{ type: 'control.send_lost' }]);
+    expect(state.pendingNativeSends).toHaveLength(0);
+    expect(String(state.reason)).toContain('not consumed before the session ended');
+  });
+});
+
+describe('short-direct sends (turn-013)', () => {
+  const config = (overrides: Record<string, unknown> = {}) => ({ directSendMaxChars: 500, ...overrides });
+
+  function isDirect(payload: string, overrides: Record<string, unknown> = {}): boolean {
+    const manager = bareManager();
+    return (manager as unknown as { isDirectPayload: (p: string, c: unknown) => boolean }).isDirectPayload(
+      payload,
+      config(overrides),
+    );
+  }
+
+  test('short single-line payloads are direct; long/multi-line/control ones are not', () => {
+    expect(isDirect('continue with the next step')).toBe(true);
+    expect(isDirect('x'.repeat(501))).toBe(false); // over threshold
+    expect(isDirect('line one\nline two')).toBe(false); // multi-line
+    expect(isDirect('has a tab\there')).toBe(false); // control char fights TUI quoting
+    expect(isDirect('')).toBe(false);
+    expect(isDirect('fine', { directSendMaxChars: 0 })).toBe(false); // knob disables
+    expect(isDirect('x'.repeat(100), { directSendMaxChars: 50 })).toBe(false); // knob shrinks
+  });
+
+  test('direct payloads are TYPED verbatim; long payloads use the turn-file instruction', async () => {
+    async function deliver(message: string): Promise<{ typed: string; turnFile: string }> {
+      const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-direct-'));
+      temporaryDirectories.push(home);
+      await mkdir(path.join(home, 's1', 'channel'), { recursive: true });
+      await mkdir(path.join(home, 's1', 'turns'), { recursive: true });
+      let typed = '';
+      const manager = bareManager();
+      manager.resolveRef = (id: string) => id;
+      manager.serialized = async (_id: string, work: () => Promise<unknown>) => await work();
+      manager.paths = createPaths(home);
+      manager.attachments = { buildImageReferenceBlock: async () => '' };
+      manager.autoContinued = new Set();
+      manager.doneDeferred = new Set();
+      manager.monitors = new Map();
+      manager.get = async () => ({
+        directory: path.join(home, 's1'),
+        config: { id: 's1', tmuxSession: 'kteam-s1-agent', turn: 1, directSendMaxChars: 500 },
+        state: { id: 's1', status: 'awaiting_user', turn: 1, promptReady: true },
+      });
+      manager.tmux = {
+        state: async () => ({ alive: true, dead: false, promptReady: true, visiblePane: '❯ ' }),
+        send: async (_config: unknown, text: string) => {
+          typed = text;
+        },
+      };
+      manager.store = {
+        updateConfig: async (_id: string, mutate: (c: Record<string, unknown>) => Record<string, unknown>) =>
+          mutate({ id: 's1', tmuxSession: 'kteam-s1-agent', turn: 1, directSendMaxChars: 500 }),
+      };
+      manager.emit = async () => ({});
+      manager.transition = async () => undefined;
+      await (manager as unknown as { send: (id: string, request: { message: string }) => Promise<unknown> }).send(
+        's1',
+        { message },
+      );
+      const turnFile = await readFile(path.join(home, 's1', 'turns', 'turn-002.md'), 'utf8').catch(() => '');
+      return { typed, turnFile };
+    }
+
+    const short = await deliver('run the tests again');
+    expect(short.typed).toBe('run the tests again'); // typed verbatim
+    expect(short.turnFile).toContain('run the tests again'); // bookkeeping file still written
+
+    const long = await deliver(`do these steps:\n1. one\n2. two`);
+    expect(long.typed).toContain('Read the file'); // turn-file instruction
+    expect(long.turnFile).toContain('do these steps');
+  });
+});
+
 describe('nudgedAt is turn-scoped (A6 fix round)', () => {
   test('every turn-committing transition clears nudgedAt so a new turn is nudged before any kill', async () => {
     // Source-level guard across all five turn-start sites: send, answer,
@@ -176,8 +674,8 @@ describe('nudgedAt is turn-scoped (A6 fix round)', () => {
     const source = await Bun.file(path.join(import.meta.dir, 'session-manager.ts')).text();
     const turnStarts = source.split('startedAt: now()').length - 1;
     const nudgeResets = source.split('nudgedAt: undefined').length - 1;
-    expect(turnStarts).toBe(5);
-    expect(nudgeResets).toBeGreaterThanOrEqual(5);
+    expect(turnStarts).toBeGreaterThanOrEqual(5);
+    expect(nudgeResets).toBeGreaterThanOrEqual(turnStarts);
   });
 });
 
@@ -581,57 +1079,5 @@ describe('launchWithRetry (G5)', () => {
     manager.emit = async () => undefined;
     await expect(call(manager)).rejects.toThrow(/exited/);
     expect(launches).toBe(1);
-  });
-});
-
-describe('deliverPendingSends (F5)', () => {
-  async function sessionDirectory(): Promise<string> {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'kteam-f5-'));
-    temporaryDirectories.push(directory);
-    await mkdir(path.join(directory, 'channel'), { recursive: true });
-    return directory;
-  }
-
-  function managerWith(sends: Array<{ message: string; attachmentIds?: string[] }>): Loose {
-    const manager = bareManager();
-    manager.emit = async () => undefined;
-    manager.send = async (_id: string, request: { message: string; attachmentIds?: string[] }) => {
-      sends.push(request);
-      return {} as SessionView;
-    };
-    return manager;
-  }
-
-  test('queued messages deliver exactly once, combined, and are marked delivered', async () => {
-    const directory = await sessionDirectory();
-    const pending = path.join(directory, 'channel', 'pending-sends.jsonl');
-    await writeFile(
-      pending,
-      `${JSON.stringify({ id: '1', at: 't', message: 'first steer' })}\n${JSON.stringify({ id: '2', at: 't', message: 'second steer', attachmentIds: ['a1'] })}\n`,
-    );
-    const sends: Array<{ message: string; attachmentIds?: string[] }> = [];
-    const manager = managerWith(sends);
-    const call = manager as unknown as { deliverPendingSends: (id: string, dir: string) => Promise<boolean> };
-
-    expect(await call.deliverPendingSends('x', directory)).toBe(true);
-    expect(sends).toHaveLength(1);
-    expect(sends[0]!.message).toBe('first steer\n\n---\n\nsecond steer');
-    expect(sends[0]!.attachmentIds).toEqual(['a1']);
-    expect(await readFile(pending, 'utf8')).toBe('');
-    const delivered = await readFile(path.join(directory, 'channel', 'delivered-sends.jsonl'), 'utf8');
-    expect(delivered.trim().split('\n')).toHaveLength(2);
-
-    // Second sweep: nothing left — at-most-once.
-    expect(await call.deliverPendingSends('x', directory)).toBe(false);
-    expect(sends).toHaveLength(1);
-  });
-
-  test('no queue file means no delivery', async () => {
-    const directory = await sessionDirectory();
-    const sends: Array<{ message: string }> = [];
-    const manager = managerWith(sends);
-    const call = manager as unknown as { deliverPendingSends: (id: string, dir: string) => Promise<boolean> };
-    expect(await call.deliverPendingSends('x', directory)).toBe(false);
-    expect(sends).toEqual([]);
   });
 });
