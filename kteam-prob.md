@@ -578,3 +578,24 @@ not consult `paneShowsActiveWork()`/activity line before declaring a stall.
 
 **Fix (assigned to melanie as A6):** stall only when transcript is silent AND the pane
 shows no active work across consecutive polls; spinner-frame fixture tests.
+
+## 2026-07-23 — send() delivery holes: stranded queues, pane-based revive, silent dispositions
+
+External investigation (donovan/lacey message losses) verified against source — all three
+REAL:
+
+1. **Stranded queue:** `deliverPendingSends` is called ONLY from the monitor's
+   prompt-ready boundary (session-manager.ts:1632). Completion paths never drain or fail
+   the queue; messages queued in a turn that ends by completing are lost silently in
+   channel/pending-sends.jsonl.
+2. **Pane-based revive:** send() revives only when the tmux pane is dead (:509-517).
+   A COMPLETED session with a live idle pane (restart re-adoption, reconciled
+   completion) skips revive AND the queue (idle prompt => promptReady=true) and
+   direct-injects into an unmonitored pane: no queue record, no tracked turn.
+3. **Silent success:** queued and injected-into-finished both return the normal view,
+   CLI exit 0 — no delivered|queued|revived disposition for callers.
+
+**Fix (dispatched to melanie):** flush-or-fail the pending queue on every terminal
+transition (revive with it or emit a loud control.send_stranded + nonzero surface);
+revive on STATUS (completed/stopped/failed) not pane liveness; send() returns an
+explicit disposition surfaced by the CLI and API.
