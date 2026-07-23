@@ -214,6 +214,42 @@ Each of triage/spec/plans is an interactive debate producing **multiple versions
 (§8). Escalation `amend_spec` (plans found the spec wrong) bumps the epoch and re-runs
 spec.
 
+### 7.1a phase-set model — independently selectable phases
+
+The four plan-shaping phases — **brainstorm, triage, spec, plan** — are
+**independently selectable**. A session pins a **`phases`** set (`session.json.phases`,
+canonical order, validated: unique + ordered + **always includes `plan`**). Any subset
+of the earlier phases may be included; they always run in canonical order, and an
+**omitted phase is skipped ENTIRELY** — its step never runs, so no empty placeholder
+artifact is created. **`plan` is mandatory**: every run ends in a plan artifact then
+implementation.
+
+- **`[plan]` alone is the "fast" shape.** `resolve_org → plan_only → finalize_plans →
+  await_repos`. **plan_only** (interactive) collapses brainstorm ⨝ triage ⨝ ticket ⨝
+  spec ⨝ master_plan ⨝ plans into **ONE artifact**: it captures & **confirms** the
+  user's intent (the clarifying-question guardrail is never skipped), decides the
+  **single repo + path**, then writes **one document — the plan** (titled as the plan,
+  folding problem/scope/goals/implementation) as `plan-1`. On approval it registers
+  exactly one repo and freezes a **single-PR, single-plan** `orchestration.yaml` by
+  construction — the fast shape produces **exactly one PR**. It maps to the `plans`
+  artifact kind, so `revise` and the deferred-writer relay work unchanged (**composes
+  with deferred-writer mode**: the single plan is the deferred artifact).
+- **Any larger set** routes through the normal timeline, skipping the omitted phases:
+  the first included phase does the intent capture, and the `plan` phase keeps the full
+  `write_master_plan → write_plans` orchestration (multi-PR capable). When an earlier
+  doc is absent (its phase was skipped), the downstream step's `{triage}`/`{spec}`
+  placeholder resolves to a note pointing at the ticket/request.
+
+**Phase resolution at `start`** (pinned, never re-read mid-session): an explicit
+`--phases <list>` (validated, normalized, `plan` forced in) → else a **keyword-heuristic
+proposal** from the request (config-driven `settings.phases.keywords`; word-boundary,
+case-insensitive): `small|simple|quick|fast → [plan]`, `big|long|dangerous|risky → all
+four`, `unsure|discuss|brainstorm|explore|"bounce ideas" → include brainstorm` → else
+`settings.phases.default`. The proposal carries a **confidence** scored against
+`settings.phases.confidenceThreshold`: high → **propose** the set and continue; low →
+**ask** a few clarifying questions first. Either way the chosen set is echoed and always
+overridable, and intent capture + user confirmation stay mandatory in every shape.
+
 ### 7.2 execution (DAG plans, PR waves; interaction queued serially)
 
 When plans are approved, bare `next` hands execution to the controller as a DAG frontier.

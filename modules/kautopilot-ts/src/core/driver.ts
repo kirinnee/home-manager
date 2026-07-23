@@ -275,6 +275,9 @@ export const STEP_ARTIFACT: Record<string, ArtifactKind> = {
 	write_spec: "spec",
 	write_master_plan: "master_plan",
 	write_plans: "plans",
+	// The plan-only ("fast") single collapsed artifact IS the plan set (one plan, one
+	// PR), so it maps to the `plans` kind and reuses the plan-set revise/relay bookkeeping.
+	plan_only: "plans",
 	feedback: "feedback",
 };
 

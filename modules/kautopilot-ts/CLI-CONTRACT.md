@@ -116,7 +116,7 @@ until the step's `completionEvent` is logged. **This is the resume story.**
 | kind          | Who runs it                            | Examples                                                                                                                                       |
 | ------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `code`        | the binary, inline (**never yielded**) | plan/feedback plumbing such as org resolution and artifact finalization |
-| `interactive` | harness, **inline**, serialized        | brainstorm (ad-hoc), triage, write_spec, **write_master_plan**, write_plans, feedback_check, feedback |
+| `interactive` | harness, **inline**, serialized        | brainstorm (ad-hoc), triage, write_spec, **write_master_plan**, write_plans, **plan_only** (the `[plan]`-only collapsed artifact), feedback_check, feedback |
 | `agent`       | harness, **isolated sub-agent**        | create_ticket, fetch_ticket. Reviewer fan-out rides on write_spec/write_plans. |
 
 ---
@@ -313,9 +313,9 @@ DAG model above is the only execution path.)
 
 When `session.json.writerMode == "deferred"` (set at `start --writer deferred`,
 default from `config.writer.mode`; **pinned per session** against config flips),
-the six writer steps (brainstorm, triage, write_spec, write_master_plan,
-write_plans, feedback) that are enabled in `config.writer.steps` yield
-`execution: "deferred"`. The harness then drives the step through a **writer
+the writer steps (brainstorm, triage, write_spec, write_master_plan,
+write_plans, **plan_only**, feedback) that are enabled in `config.writer.steps`
+yield `execution: "deferred"`. The harness then drives the step through a **writer
 session** — a Claude conversation on a fleet account (`config.writer.pool`,
 pinned per phase in `scratch/<phaseKey>/writer.json`) that the binary runs
 turn-by-turn as a persistent **kteamd** session (`kteam start` on turn 1,
@@ -395,7 +395,7 @@ dependsOn[], prNumber, prUrl, status }`. There is no per-repo WAL. The multi-PR/
 ## 7. Session & repo commands
 
 ```
-kautopilot start [TICKET_ID | "request"] [--org liftoff|atomicloud] [--merge manual|auto]   # convenience: init session + invoke default harness
+kautopilot start [TICKET_ID | "request"] [--org liftoff|atomicloud] [--merge manual|auto] [--phases <list>]   # convenience: init session + invoke default harness (--phases is a subset of brainstorm,triage,spec,plan — plan always included; e.g. 'plan' → one artifact/one PR; else the request keywords propose a set)
 kautopilot next [--json]                                              # the plan/feedback driver (§2)
 kautopilot complete [step] …                                          # advance; step optional (§3)
 kautopilot revise [--repo <repo>] …                                   # mint next version + return link (§5)

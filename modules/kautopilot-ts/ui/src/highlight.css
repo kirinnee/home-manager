@@ -1,0 +1,12 @@
+/* Minimal highlight.js token theme mapped onto our CSS variables so code blocks
+   adapt to light/dark automatically (no separate github / github-dark sheets). */
+.hljs { color: var(--fg-soft); background: transparent; }
+.hljs-comment, .hljs-quote { color: var(--muted); font-style: italic; }
+.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-section, .hljs-link { color: var(--accent); }
+.hljs-function .hljs-keyword { color: var(--accent); }
+.hljs-string, .hljs-attr, .hljs-template-tag, .hljs-addition { color: var(--ok); }
+.hljs-title, .hljs-name, .hljs-type, .hljs-attribute, .hljs-symbol, .hljs-bullet, .hljs-built_in, .hljs-selector-class { color: var(--italic); }
+.hljs-number, .hljs-meta, .hljs-variable, .hljs-template-variable { color: var(--warn); }
+.hljs-deletion { color: var(--err); }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 700; }

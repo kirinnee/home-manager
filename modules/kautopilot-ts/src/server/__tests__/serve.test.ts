@@ -103,6 +103,14 @@ describe("serve", () => {
 			expect(list[0].ticketId).toBe("PE-9999");
 			expect(list[0].org).toBe("liftoff");
 			expect(list[0].ticketSystem).toBe("jira");
+			// Modes surfaced as opaque strings (mode-as-data; pipeline null today).
+			expect(list[0].modes).toEqual({
+				run: "current-session",
+				exec: "kloop",
+				merge: null,
+				writer: null,
+				pipeline: null,
+			});
 			// Index repos carry the PR number + url for the clickable PR link.
 			expect(list[0].repos[0]).toEqual({
 				repo: "api",
@@ -151,14 +159,15 @@ describe("serve", () => {
 			]);
 			expect(doc.markdown).toContain("Second version.");
 
-			// page route returns the shell HTML
+			// page route returns the SPA shell (built React app, or legacy fallback);
+			// either way it's a full HTML document titled kautopilot for the client
+			// to boot from — the same shell for every deep link (reload-safe URLs).
 			const pageRes = await fetch(`${base}/sessions/${id}`);
 			expect(pageRes.status).toBe(200);
+			expect(pageRes.headers.get("content-type")).toContain("text/html");
 			const pageHtml = await pageRes.text();
-			expect(pageHtml).toContain(
-				'<meta name="viewport" content="width=device-width, initial-scale=1">',
-			);
-			expect(pageHtml).toContain("mermaid");
+			expect(pageHtml.toLowerCase()).toContain("<!doctype html>");
+			expect(pageHtml).toContain("kautopilot");
 
 			// unknown session → API 404
 			const missing = await fetch(`${base}/api/sessions/test-nope`);

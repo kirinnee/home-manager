@@ -1,4 +1,10 @@
 import { z } from "zod";
+import {
+	CANONICAL_PHASES,
+	DEFAULT_CONFIDENCE_THRESHOLD,
+	DEFAULT_PHASE_KEYWORDS,
+	DEFAULT_PHASES,
+} from "./phase-plan";
 
 // ============================================================================
 // Log Entry
@@ -353,6 +359,7 @@ const WRITER_STEP_NAMES = [
 	"write_spec",
 	"write_master_plan",
 	"write_plans",
+	"plan_only",
 	"feedback",
 ] as const;
 
@@ -477,6 +484,39 @@ export const configSchema = z.object({
 			.enum(["current-session", "sub-agent"])
 			.default("current-session"),
 		execMode: z.enum(["kloop", "sub-agent"]).default("kloop"),
+		// Phase-set model (see core/phase-plan.ts). All plain JSON/YAML fields so a
+		// config-pane UI can edit them with no code coupling.
+		phases: z
+			.object({
+				// Phase set for NEW sessions when the heuristics find no strong cue
+				// (pinned into session.json.phases at `start`; `--phases` overrides).
+				default: z.array(z.enum(CANONICAL_PHASES)).default([...DEFAULT_PHASES]),
+				// Keyword classes that propose a phase set from the initial request
+				// (word-boundary, case-insensitive; extensible without a code change).
+				keywords: z
+					.object({
+						planOnly: z
+							.array(z.string())
+							.default([...DEFAULT_PHASE_KEYWORDS.planOnly]),
+						full: z.array(z.string()).default([...DEFAULT_PHASE_KEYWORDS.full]),
+						brainstorm: z
+							.array(z.string())
+							.default([...DEFAULT_PHASE_KEYWORDS.brainstorm]),
+					})
+					.default({ ...DEFAULT_PHASE_KEYWORDS }),
+				// At/above this the proposal is offered and the run continues; below
+				// it the harness asks a few clarifying questions first.
+				confidenceThreshold: z
+					.number()
+					.min(0)
+					.max(1)
+					.default(DEFAULT_CONFIDENCE_THRESHOLD),
+			})
+			.default({
+				default: [...DEFAULT_PHASES],
+				keywords: { ...DEFAULT_PHASE_KEYWORDS },
+				confidenceThreshold: DEFAULT_CONFIDENCE_THRESHOLD,
+			}),
 		// Public base URL of THIS (kautopilot) viewer, for shareable artifact links.
 		// Defaults to the local serve port; set a public domain in config.yaml when
 		// exposing it (e.g. through a tunnel).
@@ -699,6 +739,11 @@ Output ONLY the problems found — one per line. If none, output "No issues foun
 		maxParallelRepos: 2,
 		runMode: "current-session",
 		execMode: "kloop",
+		phases: {
+			default: [...DEFAULT_PHASES],
+			keywords: { ...DEFAULT_PHASE_KEYWORDS },
+			confidenceThreshold: DEFAULT_CONFIDENCE_THRESHOLD,
+		},
 		viewerBaseUrl: "http://localhost:47317",
 		kloopBaseUrl: "http://localhost:47316",
 		viewerPort: 47317,

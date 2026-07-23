@@ -2,6 +2,12 @@ import { ensureGlobalConfig, resolveConfig, writeConfig } from "./config";
 import { upsertSession } from "./db";
 import { generateSessionId } from "./id";
 import {
+	normalizePhases,
+	type Phase,
+	type PhaseProposal,
+	proposePhases,
+} from "./phase-plan";
+import {
 	type ExecMode,
 	type Lpsm,
 	type MergeMode,
@@ -11,6 +17,7 @@ import {
 	type SessionMeta,
 	writeSessionMeta,
 } from "./session-meta";
+import type { Config } from "./types";
 
 // ============================================================================
 // Create a host-driven session: DB row + resolved config + session.json. Org is
@@ -30,6 +37,9 @@ export interface CreateSessionInput {
 	/** Writer-step execution (default from config.writer.mode). Pinned here so
 	 *  later config flips never affect an in-flight session. */
 	writerMode?: "inline" | "deferred";
+	/** Explicit phase set (CLI `--phases`). When omitted, resolved from the
+	 *  request-text keyword heuristics, then `config.settings.phases.default`. */
+	phases?: Phase[];
 	/** Per-session merge policy (default `manual` — ask before merging). */
 	mergeMode?: MergeMode;
 	maxParallelRepos?: number;
@@ -39,6 +49,43 @@ export interface CreateSessionInput {
 	tags?: string[];
 }
 
+/** The `proposePhases` config view derived from a resolved config. */
+function phaseCfgView(config: Config): {
+	keywords: Config["settings"]["phases"]["keywords"];
+	defaultPhases: Phase[];
+	confidenceThreshold: number;
+} {
+	const p = config.settings.phases;
+	return {
+		keywords: p.keywords,
+		defaultPhases: p.default,
+		confidenceThreshold: p.confidenceThreshold,
+	};
+}
+
+/**
+ * Resolve the phase plan for a new session at `start`, for both PINNING and the
+ * confidence-gated propose/ask UX: an explicit `--phases` set is a firm proposal
+ * (confidence 1); otherwise the keyword heuristics propose a set + confidence from
+ * the request text. The chosen set is always echoed and always overridable.
+ */
+export function proposeStartPhasePlan(
+	org: Org,
+	opts: { explicit?: Phase[]; requestText?: string | null },
+): PhaseProposal {
+	ensureGlobalConfig();
+	const config = resolveConfig(org);
+	if (opts.explicit && opts.explicit.length > 0) {
+		return {
+			phases: normalizePhases(opts.explicit),
+			confidence: 1,
+			decision: "propose",
+			reasons: ["explicit --phases"],
+		};
+	}
+	return proposePhases(opts.requestText, phaseCfgView(config));
+}
+
 export function createSession(input: CreateSessionInput): SessionMeta {
 	const sessionId = generateSessionId();
 	const policy = resolveOrgPolicy(input.org);
@@ -46,6 +93,13 @@ export function createSession(input: CreateSessionInput): SessionMeta {
 	ensureGlobalConfig();
 	const config = resolveConfig(input.org);
 	writeConfig(sessionId, config);
+
+	// Resolve + pin the phase set: an explicit set wins; otherwise the keyword
+	// heuristics propose one from the request text. (core/phase-plan.ts)
+	const phases =
+		input.phases && input.phases.length > 0
+			? normalizePhases(input.phases)
+			: proposePhases(input.request, phaseCfgView(config)).phases;
 
 	const now = new Date().toISOString();
 	upsertSession({
@@ -72,6 +126,7 @@ export function createSession(input: CreateSessionInput): SessionMeta {
 		runMode: input.runMode ?? config.settings.runMode,
 		execMode: input.execMode ?? config.settings.execMode,
 		writerMode: input.writerMode ?? config.writer.mode,
+		phases,
 		mergeMode: input.mergeMode ?? "manual",
 		maxParallelRepos:
 			input.maxParallelRepos ?? config.settings.maxParallelRepos,

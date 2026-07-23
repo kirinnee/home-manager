@@ -84,13 +84,14 @@ describe("stepExecution", () => {
 		}
 	});
 
-	test("isWriterStep matches exactly the six STEP_ARTIFACT steps", () => {
+	test("isWriterStep matches exactly the STEP_ARTIFACT steps (incl. plan_only)", () => {
 		for (const s of [
 			"brainstorm",
 			"triage",
 			"write_spec",
 			"write_master_plan",
 			"write_plans",
+			"plan_only",
 			"feedback",
 		])
 			expect(isWriterStep(s)).toBe(true);

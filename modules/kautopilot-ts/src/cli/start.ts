@@ -1,6 +1,12 @@
 import { isCancel, select } from "@clack/prompts";
 import { Command } from "commander";
-import { createSession } from "../core/session-create";
+import {
+	gatePhasePlan,
+	type Phase,
+	type PhaseProposal,
+	parsePhasesArg,
+} from "../core/phase-plan";
+import { createSession, proposeStartPhasePlan } from "../core/session-create";
 import {
 	detectOrgFromTicket,
 	type ExecMode,
@@ -30,6 +36,10 @@ export function createStartCommand(): Command {
 		)
 		.option("--org <org>", "Org: liftoff | atomicloud")
 		.option("--exec <mode>", "Execution mode: kloop | sub-agent")
+		.option(
+			"--phases <list>",
+			"Phase set (comma-separated subset of brainstorm,triage,spec,plan; plan is always included), e.g. 'plan' or 'spec,plan'. Overrides the keyword heuristics; pinned into the session.",
+		)
 		.option(
 			"--writer <mode>",
 			"Writer-step execution: inline | deferred (defaults from config.writer.mode; pinned into the session)",
@@ -64,6 +74,7 @@ export function createStartCommand(): Command {
 				opts: {
 					org?: string;
 					exec?: string;
+					phases?: string;
 					writer?: string;
 					merge?: string;
 					maxRepos?: number;
@@ -120,6 +131,44 @@ async function resolveOrg(
 	return picked as Org;
 }
 
+/**
+ * Low-confidence clarifying question, asked BEFORE the session commits to a phase
+ * set. On a TTY it asks the user how much upfront planning to do; headless (no TTY)
+ * it can't clarify, so it proceeds with the proposal and says so. Only invoked by
+ * the gate on an `ask` outcome. (core/phase-plan.ts gatePhasePlan)
+ */
+async function askPhasesInteractively(
+	proposal: PhaseProposal,
+): Promise<readonly string[]> {
+	if (!process.stdout.isTTY) {
+		logInfo(
+			`Ambiguous request (confidence ${proposal.confidence.toFixed(2)}) and no TTY to clarify — proceeding with the proposed set [${proposal.phases.join(", ")}]. Override with --phases.`,
+		);
+		return proposal.phases;
+	}
+	logInfo(
+		`The request was ambiguous (confidence ${proposal.confidence.toFixed(2)}). ${proposal.reasons.join("; ")}.`,
+	);
+	const picked = await select({
+		message: "How much upfront planning should this run do?",
+		options: [
+			{
+				value: "plan",
+				label: "Plan only — one artifact, one PR (small/quick)",
+			},
+			{ value: "spec,plan", label: "Spec + plan" },
+			{ value: "triage,spec,plan", label: "Triage + spec + plan" },
+			{
+				value: "brainstorm,triage,spec,plan",
+				label: "Full — brainstorm → triage → spec → plan (big/risky)",
+			},
+		],
+		initialValue: proposal.phases.join(","),
+	});
+	if (isCancel(picked)) throw new Error("Cancelled.");
+	return parsePhasesArg(picked as string);
+}
+
 /** Build an LPSM object from whichever flags are set, or undefined if none. */
 function buildLpsm(opts: {
 	landscape?: string;
@@ -142,6 +191,7 @@ async function runStart(
 	opts: {
 		org?: string;
 		exec?: string;
+		phases?: string;
 		writer?: string;
 		merge?: string;
 		maxRepos?: number;
@@ -155,6 +205,26 @@ async function runStart(
 ): Promise<void> {
 	const ticketId = task && looksLikeTicketId(task) ? task : null;
 	const org = await resolveOrg(ticketId, opts.org);
+
+	// Phase set: an explicit `--phases` list (validated + normalized) or the
+	// keyword-heuristic proposal from the request. The proposal also carries the
+	// confidence gate — a low-confidence guess is a cue for the harness to confirm
+	// or clarify before proceeding. Either way the chosen set is echoed + overridable.
+	let explicitPhases: Phase[] | undefined;
+	if (opts.phases !== undefined) {
+		explicitPhases = parsePhasesArg(opts.phases);
+	}
+	const requestText = ticketId ? undefined : (task ?? undefined);
+	const phasePlan = proposeStartPhasePlan(org, {
+		explicit: explicitPhases,
+		requestText,
+	});
+	// CONFIDENCE GATE — runs BEFORE the session is created. A confident proposal
+	// proceeds as-is; a low-confidence one asks a clarifying question FIRST, and the
+	// session is pinned with the answer (never the unconfirmed guess).
+	const gate = await gatePhasePlan(phasePlan, () =>
+		askPhasesInteractively(phasePlan),
+	);
 
 	let execMode: ExecMode | undefined;
 	if (opts.exec !== undefined) {
@@ -209,6 +279,7 @@ async function runStart(
 		folder,
 		execMode,
 		writerMode,
+		phases: gate.phases,
 		mergeMode,
 		maxParallelRepos: opts.maxRepos,
 		lpsm,
@@ -221,6 +292,17 @@ async function runStart(
 		`${meta.org} (${meta.ticketSystem}, commitSpec=${meta.commitSpec})`,
 	);
 	logField("Task", ticketId ?? `(ad-hoc) ${task ?? ""}`);
+	logField(
+		"Phases",
+		`${(meta.phases ?? []).join(" → ")} (${
+			gate.asked
+				? `clarified — proposal was low confidence ${phasePlan.confidence.toFixed(2)}`
+				: `confidence ${phasePlan.confidence.toFixed(2)}`
+		})`,
+	);
+	if (phasePlan.reasons.length > 0) {
+		logInfo(`Phase rationale: ${phasePlan.reasons.join("; ")}.`);
+	}
 	logField("Merge", meta.mergeMode);
 	logField("Writer", meta.writerMode ?? "inline");
 	if (meta.lpsm) {
