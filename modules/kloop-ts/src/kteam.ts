@@ -56,6 +56,57 @@ export function daemonReachable(): boolean {
   }
 }
 
+/** The kteam web UI base URL (deep-link target for a run's agent sessions). */
+export const KTEAM_UI_BASE = process.env.KTEAM_UI_BASE ?? 'http://127.0.0.1:7337';
+
+/** One kteam session belonging to a kloop run, shaped for the UI deep-link. */
+export interface RunSession {
+  /** kteam session id — deep-links to `${KTEAM_UI_BASE}/session/${id}`. */
+  id: string;
+  /** teammate/session name, e.g. `kloop-<runId>-<iter>-impl` / `-rev-<idx>`. */
+  name: string;
+  binary?: string;
+  /** live kteam status (running/completed/failed/stalled/…). */
+  status?: string;
+  model?: string;
+  updatedAt?: string;
+}
+
+/**
+ * List the kteam sessions for a run (label `kloop-<runId>`) so the UI can show a
+ * teammate name + live status per agent and deep-link into the kteam chat view.
+ * Best-effort: returns [] when the daemon is down / unparseable. Read-only.
+ */
+export function listRunSessions(runId: string): RunSession[] {
+  try {
+    const proc = Bun.spawnSync(['kteam', 'ps', '--all', '--label', `kloop-${runId}`, '--json'], {
+      stdout: 'pipe',
+      stderr: 'ignore',
+    });
+    if (proc.exitCode !== 0) return [];
+    const views = JSON.parse(proc.stdout.toString().trim() || '[]') as Array<{
+      config?: { id?: string; name?: string; binary?: string; model?: string };
+      state?: { status?: string; updatedAt?: string };
+    }>;
+    const out: RunSession[] = [];
+    for (const v of views) {
+      const id = v.config?.id;
+      if (!id) continue;
+      out.push({
+        id,
+        name: v.config?.name ?? id,
+        binary: v.config?.binary,
+        status: v.state?.status,
+        model: v.config?.model,
+        updatedAt: v.state?.updatedAt,
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 /** Best-effort: stop every kteam session labeled for this run (used on cancel). */
 export function stopRunSessions(runId: string): void {
   try {
