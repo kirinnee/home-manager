@@ -599,3 +599,132 @@ REAL:
 transition (revive with it or emit a loud control.send_stranded + nonzero surface);
 revive on STATUS (completed/stopped/failed) not pane liveness; send() returns an
 explicit disposition surfaced by the CLI and API.
+
+## 2026-07-23 — "at usage limit" mislabels not-logged-in accounts (kfleet usage → kteam recommend)
+
+**Problem:** `kteam recommend` excluded `claude-auto-{glm52a,glm52b,mm3}` as "(at usage limit)" when they are NOT at any usage limit — they are simply **not authenticated** (missing env vars `ZAI_API_KEY_A`, `ZAI_API_KEY_B`, `MINIMAX_API_KEY`). This sent the lead down a wrong diagnostic path (assumed quota exhaustion, rerouted work) before the user flagged it.
+
+**Evidence:** `kfleet usage` shows these rows as `not logged in (missing env var ...)` yet its summary prints `6 at limit: ...` AND `6 NOT logged in (re-auth needed): ...` for the SAME accounts — the not-logged-in set is folded into the at-limit count. kteam's `recommend` reads the kfleet `/usage` feed where `usableAgent(ln) = ln.atLimit !== true && ln.authOk !== false` (src/core.ts) and only surfaces the single reason string "at usage limit", losing the authOk=false distinction.
+
+**Suspected code path:** `modules/kteam-ts/src/core.ts` (`usableAgent`/exclusion reason string in the recommend path) + the upstream kfleet `usage` summary that classifies missing-key accounts as "at limit". recommend should distinguish `atLimit` (quota) from `authOk===false` (re-auth/missing key) and label them separately.
+
+**Workaround:** don't trust the "at usage limit" label from recommend for the zai/minimax key-based accounts; verify with `kfleet usage` (look for "not logged in (missing env var ...)"). Real fix = load the ZAI/MINIMAX keys into the env (sops secrets.yaml → load-secrets).
+
+## 2026-07-23 — queued sends stranded across session completion (melanie, mrwirdnf-9f80826f)
+
+- **Problem:** two `kteam send` messages queued while the session was mid-turn were never
+  delivered; the session completed and the payloads are stuck in
+  `~/.kteam/mrwirdnf-9f80826f/channel/pending-sends.jsonl` (2 entries). Both were
+  user-decision instructions for the very round in flight; one (03:18) SUPERSEDES the
+  mailbox-flush part of the work — the teammate finished turn 12 implementing the old design.
+- **Evidence:** events.jsonl — `control.send_queued` 03:16:09 and 03:18:14 with NO matching
+  `control.send_dequeued`/`control.send` after; `session.completed` 03:26:02; earlier sends
+  (22:26:44, 22:30:34) show the healthy queued→dequeued→send pattern within ~1s.
+  `channel/pending-sends.jsonl` mtime 03:18, 2 lines.
+- **Suspected code path:** `modules/kteam-ts/src/session-manager.ts` — live daemon flushes
+  the pending-send queue only on prompt-ready detection during an active turn; `transition()`
+  into a terminal status does not flush or revive, so anything queued during the final
+  work stretch is silently stranded. (This is precisely the "terminal-transition queue
+  flush" hole this session's round 12 was tasked to fix — the live daemon reproduced it
+  against its own fixer.)
+- **Workaround:** babysitter resumed the session once (`kteam resume mrwirdnf-9f80826f ...`)
+  with a reorientation pointing at the two stranded payloads so the round can absorb the
+  superseding design change. Long-term fix is in the session's own turn-12+ deliverable
+  (terminal-transition flush → status-based revive → explicit dispositions + strand path).
+
+## 2026-07-23 — resume of a completed session is instantly re-completed by the stale done marker (melanie, mrwirdnf-9f80826f)
+
+- **Problem:** babysitter ran `kteam resume mrwirdnf-9f80826f "<reorientation>"` at ~03:31:57
+  on the completed session. The session went `starting turn=13`, then was back to
+  `completed` within seconds; the tmux pane (`kteam-mrwirdnf-...-agent`) no longer exists.
+  The teammate never processed the resume message; the 2 stranded pending-sends (see
+  previous entry) remain undelivered in `channel/pending-sends.jsonl`.
+- **Evidence:** `markers/done.json` was NOT cleared by resume — it now reads
+  `{"at":"2026-07-23T03:32:05.725Z","type":"done","turn":13}`, i.e. re-stamped with the
+  NEW turn BEFORE the transcript replay events (`transcript.discovered` 03:32:06.045,
+  first `tool.use` 03:32:06.453). A teammate cannot have signalled done at 03:32:05 —
+  the pane was still bootstrapping. `session.completed` for turn 12 was at 03:26:02;
+  resume bumped turn to 13 and the session completed again with zero real work.
+- **Confound:** five unrelated sessions (obs-hq-enrich wave, mrwygff9/gkz4/gpba/gtiq/gxqi)
+  bootstrapped concurrently 03:32:05–03:32:28 (launch storm; injector-race territory per
+  the bootstrapChain comment), but the marker re-stamp alone explains the re-completion.
+- **Suspected code path:** `modules/kteam-ts/src/session-manager.ts` — resume() does not
+  clear/invalidate `markers/done.json` from the previous completion; the done-marker watch
+  (or adoption-time reconciliation) sees the stale file, re-stamps it with the current
+  turn, and transitions the revived session straight back to completed, reaping the pane.
+  Related: `doneDeferred` only defers while the pane is "working"; a bootstrapping pane may
+  not count.
+- **Workaround:** delete the stale `markers/done.json` BEFORE `kteam resume`, then resume
+  with the message again. (Applied by babysitter; see next entry if it recurred.)
+
+## 2026-07-23 — RECURRENCE: stale done marker insta-completes revived session (melanie, mrwirdnf-9f80826f, turns 15/16)
+
+- **Problem:** the lead revived melanie at 04:20:31 (`session.resuming`) for the duncan-P1 fix
+  round. Launch went through `control.launch_retry` (04:22:01), `session.resumed` 04:22:07.839
+  — and `markers/done.json` was re-stamped `{"at":"04:22:08.031","turn":16}` 200ms later,
+  BEFORE the transcript replay (`transcript.discovered` 04:22:08.121; the chat/tool events
+  after it are millisecond-spaced history replay). `session.completed` 04:22:08.172. The fix
+  round never ran; summary.md has no turn-15/16 section. Same mechanism as the 03:32 entry —
+  this time triggered by the LEAD's own resume: resumes without a manual marker clear
+  reliably lose the round while looking "completed clean" in status output.
+- **Evidence:** events.jsonl ~lines 4881-4890; done.json turn 16 at 04:22:08.031 vs
+  session.resumed 04:22:07.839 (agent cannot signal done in 200ms); no new summary section;
+  turn counter jumped 14→16 across one revive (launch_retry appears to consume a turn).
+- **Suspected code path:** as previous entry — resume()/adoption in
+  `modules/kteam-ts/src/session-manager.ts` does not clear `markers/done.json`; the marker
+  watch fires on the stale file and re-stamps it with the current turn. The turn-013/014
+  work narrowed marker-clear to the send path only, not resume-relaunch.
+- **Workaround (verified):** `rm ~/.kteam/<id>/markers/done.json` BEFORE `kteam resume`.
+  Applied again by babysitter with a reorientation to duncan's 2 P1s.
+
+## 2026-07-23 ~02:3x — P1: `kteam send` silently loses messages (queued-orphan + fake-revive)
+
+**Problem:** two independent silent-loss paths, both verified tonight (diene exec-engine build):
+
+1. Message queued for a BUSY session (`pending-sends.jsonl`) is delivered only by that
+   session's monitor "at the next prompt-ready boundary" — if the turn instead ends in
+   `completed`, nothing ever flushes the queue. Evidence: mrwqdhfs-abc9f831 has 2 stranded
+   messages (incl. a design ruling) in channel/pending-sends.jsonl.
+2. Send-to-finished "revive" triggers only when the PANE is dead (`!paneProbe.alive`,
+   session-manager.ts ~504-517). A completed session with its TUI still open skips revive
+   → direct keystroke injection into an unmonitored pane → message untracked/lost.
+   Evidence: mrwqdd6b-efd590a5 got a send that appears in NEITHER pending nor delivered.
+3. Both paths exit 0 — no queued/undeliverable/revived signal to the caller.
+
+**Fix shape:** flush-or-fail pending queue at session completion (revive with queued
+messages, or error); revive on STATUS (completed/stopped), not pane aliveness; `send`
+must report delivered|queued|revived explicitly and fail loudly when undeliverable.
+**Workaround:** use `kteam resume <id> <msg>` for finished sessions; verify delivery via
+new turn activity, never trust exit 0.
+
+## 2026-07-23 ~05:51 — P2: liveness monitor stall-killed a controller whose work lived in a BACKGROUND subprocess
+
+Session mrx2yh55-d6d678cf (kathleen/opus, diene shared-wo-docker-helm controller): killed as
+stalled after ~5 min of no transcript/counter growth while its real work (a cyanprint proof
+run) was a background task — the kill also destroyed that subprocess before it produced its
+report. Pane was idle-but-healthy; the liveness ledger's pane/transcript signals were blind
+to subprocess activity (the ledger tracks `subprocess` age but the stall branch apparently
+did not treat a live tracked subprocess as a life sign, or the task ran untracked via the
+harness background facility). Recovery: the diene exec auditor revived the SAME session
+(no duplicate), which verified the loss, logged recovery, and relaunched the proof — good
+external handling, but the kill itself is a false positive of the A6 class in a new shape.
+**Fix idea:** stall verdict must treat a live tracked subprocess/background task as work; or
+never stop tmux on stall while `subprocess` liveness is fresh. Also note the effective stall
+window observed was ~5 min (config default was 900s — check what changed).
+
+## 2026-07-23 07:09 — relaunch of a 735k-token claude session misreads readiness (A5-class, claude variant)
+
+**Problem:** status-based revive of madeline (mrwnuv96, 74%/1M context) killed her idle
+pane and the RELAUNCH failed "not ready within 90s; promptReady=false, cursor=2:43" —
+twice (launch retry included). Session marked failed although her deliverable was
+already complete. Either the resume-confirmation menu appears in a variant the new
+handler misses on very large sessions, or promptReady misclassifies the 1M-context
+status-line layout. Her -final snapshots show a healthy idle composer pre-kill.
+
+**Suspected code path:** tmux-controller.ts promptReady()/resume-menu detection —
+needs a fixture from an actual 735k-token relaunch frame (capture during reproduction).
+
+**Workaround:** none needed for the work (deliverable shipped); session left failed —
+warden will flag it; do NOT loop resumes (lacey-lesson: deterministic wedge).
+
+**Fix owner:** next kteam-ts round.
