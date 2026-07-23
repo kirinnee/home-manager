@@ -48,6 +48,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (TOKEN) headers.set('authorization', `Bearer ${TOKEN}`);
   if (init?.body && !headers.has('content-type')) headers.set('content-type', 'application/json');
+  // Idempotency: every mutation carries an x-kteam-request-id so the daemon
+  // dedupes retries/double-fires of the SAME logical call (see api-server
+  // DEDUPED_ACTIONS). Callers reuse one id across a logical action by setting
+  // the header in `init`; otherwise a fresh id is minted per call.
+  const method = (init?.method ?? 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD' && !headers.has('x-kteam-request-id')) {
+    headers.set('x-kteam-request-id', crypto.randomUUID());
+  }
   const res = await fetch(path, { ...init, headers });
   if (res.status === 401) recoverFromStaleToken();
   if (!res.ok) {
