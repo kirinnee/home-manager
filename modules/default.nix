@@ -34,9 +34,9 @@ rec {
   '';
   # kloge: pull the loge credential pool out of the LLM cluster and run
   # CLIProxyAPI in Docker (locally or pushed to a box). docker comes from
-  # OrbStack on the host PATH; rsync/ssh/curl/coreutils are bundled here.
+  # OrbStack on the host PATH; bash/git/jq/rsync/ssh/curl/coreutils are bundled here.
   kloge = nixpkgs.writeShellScriptBin "kloge" ''
-    export PATH="${nixpkgs.lib.makeBinPath [ nixpkgs.rsync nixpkgs.openssh nixpkgs.curl nixpkgs.coreutils ]}:$PATH"
+    export PATH="${nixpkgs.lib.makeBinPath [ nixpkgs.bash nixpkgs.gitMinimal nixpkgs.jq nixpkgs.rsync nixpkgs.openssh nixpkgs.curl nixpkgs.coreutils ]}:$PATH"
     exec ${nixpkgs.bun}/bin/bun run ~/.config/home-manager/modules/kloge-ts/src/index.ts "$@"
   '';
   # klaude/kodex: run-from-source wrappers. Wrap crc-kirin/Codex in persistent

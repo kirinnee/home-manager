@@ -11,9 +11,18 @@ export const authDir = join(dataDir, 'auth');
 export const configFile = join(dataDir, 'config.yaml');
 export const composeFile = join(dataDir, 'compose.yaml');
 
-// CLIProxyAPI docker image. Upstream project: github.com/router-for-me/CLIProxyAPI.
-// Pin via KLOGE_IMAGE for reproducibility; :latest matches the upstream compose.
-export const image = process.env.KLOGE_IMAGE ?? 'eceasy/cli-proxy-api:latest';
+// CLIProxyAPI docker images. The maintained fork is deliberately opt-in so an
+// existing render keeps using the upstream image until its operator selects it.
+export const DEFAULT_IMAGE = 'eceasy/cli-proxy-api:latest';
+export const PATCHED_IMAGE = 'kloge-cliproxy:patched';
+
+export function resolveImage(environment: Record<string, string | undefined> = process.env): string {
+  return environment.KLOGE_IMAGE ?? DEFAULT_IMAGE;
+}
+
+export function isPatchedImage(selectedImage: string): boolean {
+  return selectedImage === PATCHED_IMAGE;
+}
 export const containerName = 'kloge-cliproxy';
 
 // Placeholder API key clients present to the proxy — same convention as loge.

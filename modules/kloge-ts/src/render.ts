@@ -3,7 +3,16 @@
 // credentials). Both config and compose use container-internal / relative paths
 // so the whole ~/.kloge dir can be rsynced to a box and started identically.
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { authDir, composeFile, configFile, containerName, dataDir, image, internalApiKey } from './paths';
+import {
+  authDir,
+  composeFile,
+  configFile,
+  containerName,
+  dataDir,
+  internalApiKey,
+  isPatchedImage,
+  resolveImage,
+} from './paths';
 
 // Inside the container the auth-dir is mounted at /root/.cli-proxy-api and the
 // config at /CLIProxyAPI/config.yaml (upstream image defaults).
@@ -29,16 +38,18 @@ export function renderConfigYaml(port: number): string {
   ].join('\n');
 }
 
-export function renderComposeYaml(port: number): string {
+export function renderComposeYaml(port: number, selectedImage = resolveImage()): string {
   // Relative bind mounts resolve against the compose file's directory, so this
   // is identical on the Mac and on a pushed box. Port is bound to 127.0.0.1 so
   // the proxy is reachable only from the host it runs on.
+  const patched = isPatchedImage(selectedImage);
   return [
     '# Rendered by kloge — CLIProxyAPI for the loge pool.',
     'services:',
     '  cli-proxy-api:',
-    `    image: ${image}`,
-    '    pull_policy: always',
+    `    image: ${selectedImage}`,
+    `    pull_policy: ${patched ? 'never' : 'always'}`,
+    ...(patched ? ['    command:', '      - ./CLIProxyAPI', '      - --local-model'] : []),
     `    container_name: ${containerName}`,
     '    ports:',
     `      - "127.0.0.1:${port}:${port}"`,
