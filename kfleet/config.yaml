@@ -52,6 +52,10 @@ profiles:
       # Fable + Opus run with the 1M-token context beta (the `[1m]` model
       # suffix; verified end-to-end through CLIProxyAPI on 2026-07-22).
       # Sonnet/Haiku stay at their native windows.
+      # NOTE: opus stays 4-8 here (NOT opus-5) — the CLIProxyAPI image behind
+      # kloge rejects claude-opus-5 ("unknown provider for model"); its model
+      # registry lacks opus-5 as of 2026-07-24. Bump to claude-opus-5[1m] once
+      # `kloge` advertises it (check `curl :8317/v1/models`).
       ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-4-8[1m]
       ANTHROPIC_DEFAULT_SONNET_MODEL: claude-sonnet-5
       ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-4-5-20251001
@@ -105,12 +109,15 @@ agents:
   # 1M-context beta variants (`[1m]` suffix — verified live 2026-07-22).
   # Scoped per-agent, NOT on the shared claude profile, so provider-backed
   # accounts (glm52/mm3/deepseek) never see the suffix their APIs would 400 on.
+  # opus → Opus 5 (claude-opus-5[1m], verified live via OAuth 2026-07-24 →
+  # 1,000,000-token window). These OAuth accounts hit Anthropic directly, so
+  # they get opus-5 immediately; the loge gateway lags (see the loge profile).
   - name: kirin
     kind: claude
     profiles:
       - claude
     env: &anthropic-1m
-      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-4-8[1m]
+      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5[1m]
       ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5[1m]
   - name: liftoff
     kind: claude
