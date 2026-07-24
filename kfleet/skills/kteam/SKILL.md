@@ -35,7 +35,8 @@ Model choice is driven by the task: how much thinking it needs, how confident yo
 | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------- |
 | Fable 5                           | smartest — plan hard problems, understand complex relations and concepts, map blindspots; pin the design down BEFORE implementation starts                                                                            | slow    | `claude-auto-{kirin,liftoff,atomi}` + `--model fable`; `claude-auto-loge` (default)         |
 | GPT-5.6-sol @ ultra effort        | best/smartest IMPLEMENTER — less raw smarts than Fable but more diligent and thorough. VERY EXPENSIVE: reserve for the hardest, most critical implementations, only after the big ideas and blindspots are mapped out | slow    | `codex-auto-loge` (default; pinned to ultra reasoning effort)                               |
-| Opus 4.8                          | next-best model — good implementer                                                                                                                                                                                    | medium  | `claude-auto-{kirin,liftoff,atomi}` (default)                                               |
+| Opus 5                            | TOP IMPLEMENTER TIER — same tier as GPT-5.6-sol: use for the hardest, most critical implementations (and strong planning). Only accounts with Opus 5 access serve it                                                  | medium  | `claude-auto-{kirin,atomi}` (default via `opus`; liftoff/loge lack access → they serve 4.8) |
+| Opus 4.8                          | next-best after the top tier — good implementer                                                                                                                                                                       | medium  | `claude-auto-{kirin,liftoff,atomi}` (default)                                               |
 | GPT-5.6-terra / GPT-5.5           | alright implementers but VERY STRONG reviewers — default choice for reviewing anyone's work                                                                                                                           | medium  | `codex-auto-{loai,loio,ernest,kirin,atomi,personal}` (terra default; gpt-5.5 via `--model`) |
 | GLM-5.2                           | Opus 4.8 substitute for implementation; downside: SLOW                                                                                                                                                                | slow    | `claude-auto-glm52{a,b}` (default)                                                          |
 | MiniMax M3 / Sonnet 5             | super well-guarded tasks — mechanical plus a bit of smarts; M3 is also strong at frontend/UI/screenshot-to-code/SVG                                                                                                   | fast    | `claude-auto-mm3`; Anthropic accounts + `--model sonnet`                                    |
@@ -46,16 +47,16 @@ Model choice is driven by the task: how much thinking it needs, how confident yo
 
 The standard chain: **main thread (Fable) → planner session → implementer session(s) → reviewer**.
 
-- The main thread stays team lead and judges complexity, but OFFLOADS the planning itself: send it to a kteam **Fable** session. For simpler, low-ambiguity plans the planner can be **GPT-5.6-sol or Opus 4.8** instead.
+- The main thread stays team lead and judges complexity, but OFFLOADS the planning itself: send it to a kteam **Fable** session. For simpler, low-ambiguity plans the planner can be **GPT-5.6-sol, Opus 5, or Opus 4.8** instead.
 - A planner session may spawn its own implementer teammates — ideally **Opus 4.8, GPT-5.6-terra, or GLM-5.2** — for generic to mid-high difficulty tasks.
 - Implementer selection:
-  - **GPT-5.6-sol** — long, big workloads with many checkpoints/checklists, and the hardest critical implementations. VERY expensive; don't spend it on small tasks.
+  - **GPT-5.6-sol / Opus 5** — the top implementer tier: long, big workloads with many checkpoints/checklists, and the hardest critical implementations. Expensive; don’t spend them on small tasks. (Opus 5 only on accounts that have it: kirin/atomi.)
   - **Opus 4.8 / GPT-5.6-terra** — generic to mid-high difficulty.
   - **GLM-5.2** — mechanical or frontend work; use sparingly.
-- **GPT-5.6-terra / GPT-5.5 may implement ONLY when a smarter model (Fable, sol, or Opus) wrote the plan.** Never let terra plan-and-implement nontrivial work on its own.
+- **GPT-5.6-terra / GPT-5.5 may implement ONLY when a smarter model (Fable, sol, Opus 5, or Opus 4.8) wrote the plan.** Never let terra plan-and-implement nontrivial work on its own.
 - **Product-facing work: NEVER MiniMax M3 or DeepSeek V4** — too weak; GLM-5.2 sparingly.
 - **GLM-5.2 and MiniMax M3 are the mass-chore tier**: divide-and-conquer jobs, 1 file = 1 agent style. That is their only broad-use niche.
-- **Big-context tasks need at least Opus 4.8 or GPT-5.6-terra — and if a big-context task is being IMPLEMENTED, the implementer must be GPT-5.6-sol or Fable** (Fable implementing is fine there).
+- **Big-context tasks need at least Opus 4.8 or GPT-5.6-terra — and if a big-context task is being IMPLEMENTED, the implementer must be GPT-5.6-sol, Opus 5, or Fable** (Fable implementing is fine there).
 
 Other rules of thumb:
 
