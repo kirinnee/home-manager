@@ -2,8 +2,8 @@
 // (CLIProxyAPI in Docker, mounting ~/.kloge/auth + config.yaml). Each binds the
 // proxy to 127.0.0.1 on its own host, so you "access it locally" on whichever
 // machine it runs on.
-import { existsSync, readdirSync } from 'node:fs';
-import { authDir, composeFile, dataDir, internalApiKey, localUrl, resolvePort } from './paths';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { authDir, composeFile, dataDir, internalApiKey, localUrl, PATCHED_IMAGE, resolvePort } from './paths';
 import { die, dockerCompose, log, need, ok, run, warn } from './exec';
 
 function requireRendered(): void {
@@ -84,11 +84,24 @@ export interface PushOpts {
   start: boolean; // run `docker compose up -d` on the box after copying
 }
 
+export function composeUsesPatchedImage(contents: string): boolean {
+  return contents.split('\n').some(line => line.trim() === `image: ${PATCHED_IMAGE}`);
+}
+
 /** rsync ~/.kloge to a box and (optionally) start CLIProxyAPI there. */
 export async function push(opts: PushOpts): Promise<void> {
+  requireRendered();
+  const patched = composeUsesPatchedImage(readFileSync(composeFile, 'utf8'));
+  if (patched && opts.start) {
+    die(
+      `rendered compose uses local-only ${PATCHED_IMAGE}, but kloge push cannot transfer Docker images — ` +
+        'build/load that tag on the remote host, then use `kloge push <host> --no-up` and start it there manually',
+    );
+  }
+  if (patched) warn(`pushing compose for local-only ${PATCHED_IMAGE}; confirm that tag already exists on ${opts.host}`);
+
   await need('rsync');
   await need('ssh');
-  requireRendered();
 
   // ClearAllForwardings stops the user's ssh-config LocalForwards (e.g. a
   // :1455 that's often already bound) from failing/polluting our commands.

@@ -11,6 +11,7 @@ import { Command } from 'commander';
 import { DEFAULT_PORT, resolvePort } from './paths';
 import { pull, renderOnly } from './pull';
 import { down, logs, push, status, up } from './deploy';
+import { buildPatchedImage } from './build';
 
 const program = new Command();
 program.name('kloge').description('Local/box CLIProxyAPI for the loge credential pool (Docker)').showHelpAfterError();
@@ -37,6 +38,13 @@ program
   .option('-p, --port <port>', 'listen port', String(resolvePort()))
   .action(async o => {
     await renderOnly(Number.parseInt(o.port, 10));
+  });
+
+program
+  .command('build')
+  .description('build the maintained local CLIProxyAPI image (does not render or restart)')
+  .action(async () => {
+    await buildPatchedImage();
   });
 
 program

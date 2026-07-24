@@ -50,6 +50,7 @@ port is bound to `127.0.0.1` on whichever host it runs on.
 ```bash
 kloge pull                     # pull creds + render config/compose (kubectl, ctx eks-llm-us-east-1)
 kloge pull -c <other-context>  # pull from a different kube context
+kloge build                    # build the opt-in maintained image with claude-opus-5
 kloge up                       # start the container locally -> http://127.0.0.1:8317
 kloge status                   # data dir, creds, container state, served models
 kloge logs -f                  # follow container logs
@@ -83,10 +84,40 @@ ssh -N -L 8317:127.0.0.1:8317 user@box
 - `KLOGE_IMAGE` — pin the CLIProxyAPI image (default `eceasy/cli-proxy-api:latest`).
 - `KLOGE_API_KEY` — client-facing placeholder key (default `loge-internal`).
 
+## Maintained model-catalog image
+
+Upstream's embedded catalog can lag newly released models. This repository
+contains a pinned, auditable build recipe under `cliproxy-fork/` that applies a
+small model-catalog overlay and builds `kloge-cliproxy:patched`. It is opt-in:
+
+```bash
+kloge build
+KLOGE_IMAGE=kloge-cliproxy:patched kloge render
+kloge up
+```
+
+For this image, the rendered compose uses `pull_policy: never` and starts the
+binary with `--local-model`, preventing the three-hour remote catalog refresh
+from replacing maintained additions. The default upstream image and behavior
+are unchanged when `KLOGE_IMAGE` is unset. To roll back, render the upstream
+image again and run `kloge up`:
+
+```bash
+KLOGE_IMAGE=eceasy/cli-proxy-api:latest kloge render
+kloge up
+```
+
+The patched tag exists only in the Docker store where `kloge build` ran.
+`kloge push` therefore refuses to auto-start a rendered patched compose on a
+remote host. Build or load `kloge-cliproxy:patched` on that host first, use
+`kloge push <host> --no-up`, then start the copied compose there manually.
+
 ## Notes
 
 - Requires `kubectl` (creds pull) with a valid kubeconfig + AWS auth for the
   context, `docker` (compose v2 or v1), and for `push`, `rsync` + `ssh`.
+  `kloge build` additionally uses `git` to fetch the pinned upstream source and
+  `jq` to validate the patched model catalog before compiling it.
 - **Auth: `kloge pull` needs the DevOps role.** The LLM cluster
   (`eks-llm-us-east-1`) only authorizes `vungle2-DevOpsRole` — the default
   `vungle2-EngineeringRole` gets 401 for every read there. kloge shells plain
