@@ -9,7 +9,8 @@ import { discoverAutoAgents, recommendAgents, usableAgent, type AgentUsage } fro
 import { DaemonService } from './daemon-service';
 import { resolveBinary } from './harness';
 import { createPaths } from './paths';
-import type { KTeamEvent, SessionStatus } from './types';
+import { SIGNAL_KINDS } from './types';
+import type { KTeamEvent, SessionStatus, SignalKind } from './types';
 
 const VERSION = '0.2.1';
 const paths = createPaths();
@@ -61,6 +62,12 @@ function printView(view: Awaited<ReturnType<ApiClient['get']>>): void {
     `pane ${age(view.state.lastPaneAt)}`,
   ];
   console.log(`  liveness: ${ledger.join('  ')}${view.state.nudgedAt ? '  ⚠ nudged' : ''}`);
+  if (view.state.waiting)
+    console.log(
+      `  ⏸ DECLARED WAIT: ${view.state.waiting.condition ?? 'external condition'}` +
+        `${view.state.waiting.until ? ` until ${view.state.waiting.until}` : ' (open-ended)'}` +
+        ' — parked on purpose; idle-kill and the turn ceiling are suspended',
+    );
   if (view.state.needsHuman) console.log(`  🚨 NEEDS HUMAN: ${view.state.needsHuman}`);
   if (view.state.reason) console.log(`  ${view.state.reason}`);
   for (const question of view.state.pendingQuestion?.questions ?? []) {
@@ -216,6 +223,11 @@ program
     Number,
   )
   .option('--max-snapshots <count>', '', Number)
+  .option('--detach', 'return as soon as the session is persisted; the TUI launch continues in the background')
+  .option(
+    '--request-id <id>',
+    'idempotency key (also KTEAM_REQUEST_ID): re-running start with the same id returns the SAME session instead of a second teammate',
+  )
   .option('--json')
   .action(async (parts: string[], options: Record<string, string | number | boolean | undefined>) => {
     const initialAttachments = await Promise.all(
@@ -238,28 +250,36 @@ program
     }
     const view = await (
       await client()
-    ).start({
-      prompt,
-      agent: String(options.agent),
-      name: options.name as string | undefined,
-      label: options.label as string | undefined,
-      // A teammate's pane carries its own session id — starting a session from
-      // inside one automatically records the parent (teammate trees).
-      parent: (options.parent as string | undefined) ?? process.env.KTEAM_SESSION_ID,
-      model: options.model as string | undefined,
-      cwd: String(options.cwd),
-      mode: options.mode as 'auto' | 'interactive',
-      intervalSeconds: options.interval as number | undefined,
-      stallSeconds: options.stall as number | undefined,
-      timeoutSeconds: options.timeout as number | undefined,
-      nudgeAfterSeconds: options.nudgeAfter as number | undefined,
-      killAfterSeconds: options.killAfter as number | undefined,
-      directSendMaxChars: options.directMax as number | undefined,
-      maxSnapshots: options.maxSnapshots as number | undefined,
-      initialAttachments,
-    });
+    ).start(
+      {
+        prompt,
+        agent: String(options.agent),
+        name: options.name as string | undefined,
+        label: options.label as string | undefined,
+        // A teammate's pane carries its own session id — starting a session from
+        // inside one automatically records the parent (teammate trees).
+        parent: (options.parent as string | undefined) ?? process.env.KTEAM_SESSION_ID,
+        model: options.model as string | undefined,
+        cwd: String(options.cwd),
+        mode: options.mode as 'auto' | 'interactive',
+        intervalSeconds: options.interval as number | undefined,
+        stallSeconds: options.stall as number | undefined,
+        timeoutSeconds: options.timeout as number | undefined,
+        nudgeAfterSeconds: options.nudgeAfter as number | undefined,
+        killAfterSeconds: options.killAfter as number | undefined,
+        directSendMaxChars: options.directMax as number | undefined,
+        maxSnapshots: options.maxSnapshots as number | undefined,
+        detach: options.detach === true,
+        initialAttachments,
+      },
+      options.requestId as string | undefined,
+    );
     if (options.json) console.log(JSON.stringify(view, null, 2));
     else printView(view);
+    if (view.state.status === 'starting')
+      console.error(
+        `note: ${view.config.id} is still launching in the background — watch it with \`kteam ps\` / \`kteam stream ${view.config.id}\``,
+      );
   });
 
 program
@@ -289,7 +309,9 @@ program
     const rows = sessions.map(view => [
       view.config.teammate ?? '-',
       view.config.id,
-      view.state.status,
+      // A declared park reports the same 'waiting' status as an unanswered
+      // question; the marker is the only fleet-level way to tell them apart.
+      view.state.waiting ? `${view.state.status} PARKED` : view.state.status,
       view.config.model ?? 'default',
       view.config.binary,
       view.config.mode,
@@ -418,15 +440,26 @@ program
 
 program
   .command('signal')
+  .description('done | help | waiting | working — the teammate lifecycle signals')
   .argument('<kind>')
   .argument('[message...]')
   .option('--session <id>')
-  .action(async (kind: string, parts: string[], options: { session?: string }) => {
+  .option('--until <when>', 'waiting: deadline as a duration (45m, 2h) or ISO timestamp; the daemon wakes you at it')
+  .option('--on <condition>', 'waiting: what is being waited for (shown in status and heartbeats)')
+  .action(async (kind: string, parts: string[], options: { session?: string; until?: string; on?: string }) => {
     const id = options.session ?? process.env.KTEAM_SESSION_ID;
     if (!id) throw new Error('no session id; pass --session or run inside kteam');
-    if (kind !== 'done' && kind !== 'help') throw new Error('kind must be done or help');
-    await (await client()).signal(id, kind, parts.join(' ') || undefined);
-    console.log(`${kind} signal recorded`);
+    if (!SIGNAL_KINDS.includes(kind as SignalKind)) throw new Error(`kind must be one of ${SIGNAL_KINDS.join(', ')}`);
+    if ((options.until || options.on) && kind !== 'waiting') throw new Error('--until/--on apply to `signal waiting`');
+    const view = await (
+      await client()
+    ).signal(id, kind as SignalKind, parts.join(' ') || undefined, { until: options.until, condition: options.on });
+    if (kind === 'waiting')
+      console.log(
+        `waiting recorded${view.state.waiting?.until ? ` until ${view.state.waiting.until}` : ' (open-ended)'} — ` +
+          'idle-kill and the turn ceiling are suspended while it holds',
+      );
+    else console.log(`${kind} signal recorded`);
   });
 
 program
@@ -490,6 +523,7 @@ program
     const marker = options.untilMarker === undefined ? undefined : path.resolve(options.untilMarker);
     const deadline = timeoutSec === undefined ? undefined : Date.now() + timeoutSec * 1000;
     let notedMissingMarker = false;
+    let notedDeclaredWait = false;
     while (true) {
       const view = await api.get(id);
       const print = () => {
@@ -516,8 +550,18 @@ program
           console.error(`kteam wait: session completed but marker not present yet; still waiting for ${marker}`);
         }
         // A session waiting on the lead can never produce the marker on its
-        // own — hand control back so the question/help gets answered.
-        if (['waiting', 'awaiting_user', 'awaiting_question'].includes(view.state.status)) {
+        // own — hand control back so the question/help gets answered. A
+        // DECLARED wait is the opposite: the teammate is parked on an external
+        // condition and the daemon will wake it, so keep waiting.
+        if (view.state.waiting !== undefined) {
+          if (!notedDeclaredWait) {
+            notedDeclaredWait = true;
+            console.error(
+              `kteam wait: teammate declared a wait${view.state.waiting.condition ? ` on ${view.state.waiting.condition}` : ''}` +
+                `${view.state.waiting.until ? ` until ${view.state.waiting.until}` : ' (open-ended)'}; still waiting`,
+            );
+          }
+        } else if (['waiting', 'awaiting_user', 'awaiting_question'].includes(view.state.status)) {
           print();
           console.error('kteam wait: session needs attention before the marker can appear');
           return;
@@ -525,9 +569,12 @@ program
       } else if (
         terminal.includes(view.state.status) ||
         view.state.status === 'kill_failed' ||
-        view.state.status === 'waiting' ||
-        view.state.status === 'awaiting_user' ||
-        view.state.status === 'awaiting_question'
+        // A DECLARED wait is not "needs attention": the daemon holds the
+        // deadline and will wake the teammate, so keep waiting for it.
+        (view.state.waiting === undefined &&
+          (view.state.status === 'waiting' ||
+            view.state.status === 'awaiting_user' ||
+            view.state.status === 'awaiting_question'))
       ) {
         print();
         return;

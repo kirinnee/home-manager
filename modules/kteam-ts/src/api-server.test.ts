@@ -269,7 +269,7 @@ describe('kteam daemon API', () => {
       body: JSON.stringify({ kind: 'nope' }),
     });
     expect(signal.status).toBe(400);
-    expect(((await signal.json()) as { error: string }).error).toBe('kind must be done or help');
+    expect(((await signal.json()) as { error: string }).error).toBe('kind must be one of done, help, waiting, working');
   });
 });
 
@@ -498,5 +498,91 @@ describe('warden-scoped token authorization', () => {
       body: JSON.stringify({ kind: 'done' }),
     });
     expect(allowed.status).toBe(200);
+  });
+});
+
+describe('create idempotency (exit-143 spawn timeouts, 2026-07-23/24)', () => {
+  /** A service that counts starts and hands out a distinct session each time. */
+  class CountingStartService extends FakeService {
+    starts = 0;
+    startDelayMs = 0;
+    override start = async (_input: StartSessionRequest) => {
+      this.starts += 1;
+      const id = `s-${this.starts}`;
+      if (this.startDelayMs > 0) await Bun.sleep(this.startDelayMs);
+      return { ...view, config: { ...view.config, id }, state: { ...view.state, id } };
+    };
+    override get = async (...args: unknown[]) => {
+      const id = String(args[0] ?? 's1');
+      return { ...view, config: { ...view.config, id }, state: { ...view.state, id } };
+    };
+  }
+
+  const post = (base: string, requestId?: string) =>
+    fetch(`${base}/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer secret',
+        'content-type': 'application/json',
+        ...(requestId ? { 'x-kteam-request-id': requestId } : {}),
+      },
+      body: JSON.stringify({ prompt: 'go', agent: 'claude-auto-atomi' }),
+    });
+
+  test('a retry carrying the same request id returns the FIRST session, not a second one', async () => {
+    const service = new CountingStartService();
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}`;
+    const first = (await (await post(base, 'req-1')).json()) as SessionView;
+    const retry = (await (await post(base, 'req-1')).json()) as SessionView;
+    expect(service.starts).toBe(1);
+    expect(retry.config.id).toBe(first.config.id);
+    // A different request id is a genuinely different start.
+    await post(base, 'req-2');
+    expect(service.starts).toBe(2);
+  });
+
+  test('a retry that OVERLAPS the first attempt shares it instead of launching twice', async () => {
+    const service = new CountingStartService();
+    service.startDelayMs = 60;
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}`;
+    const [a, b] = await Promise.all([post(base, 'req-overlap'), post(base, 'req-overlap')]);
+    const [first, second] = (await Promise.all([a.json(), b.json()])) as SessionView[];
+    expect(service.starts).toBe(1);
+    expect(second!.config.id).toBe(first!.config.id);
+  });
+
+  test('by-request resolves the session a caller never got a response for', async () => {
+    const service = new CountingStartService();
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}`;
+    const created = (await (await post(base, 'req-lost')).json()) as SessionView;
+    // The lookup is keyed by request id AND payload, exactly like the create.
+    const payload = Bun.hash(JSON.stringify({ prompt: 'go', agent: 'claude-auto-atomi' })).toString(16);
+
+    const found = await fetch(`${base}/v1/sessions/by-request/req-lost?payload=${payload}`, {
+      headers: { authorization: 'Bearer secret' },
+    });
+    expect(found.status).toBe(200);
+    expect(((await found.json()) as SessionView).config.id).toBe(created.config.id);
+
+    const missing = await fetch(`${base}/v1/sessions/by-request/req-never-sent?payload=${payload}`, {
+      headers: { authorization: 'Bearer secret' },
+    });
+    expect(missing.status).toBe(404);
+
+    // Same id, DIFFERENT task: the lookup must never hand back the first
+    // session (an exported KTEAM_REQUEST_ID would otherwise silently alias
+    // every start in a shell to the first one).
+    const other = Bun.hash(JSON.stringify({ prompt: 'something else' })).toString(16);
+    const wrong = await fetch(`${base}/v1/sessions/by-request/req-lost?payload=${other}`, {
+      headers: { authorization: 'Bearer secret' },
+    });
+    expect(wrong.status).toBe(404);
+    expect(service.starts).toBe(1);
   });
 });

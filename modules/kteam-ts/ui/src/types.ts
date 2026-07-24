@@ -101,6 +101,9 @@ export interface SessionState {
   needsHumanKind?: string;
   retryAttempt?: number;
   turnCompleted?: boolean;
+  /** A DECLARED wait (`kteam signal waiting`): parked on an external condition
+   *  with the daemon holding the deadline — NOT a question waiting on a human. */
+  waiting?: { since: string; until?: string; condition?: string };
   quota?: {
     atLimit?: boolean;
     authOk?: boolean;

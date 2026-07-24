@@ -5,6 +5,12 @@ import path from 'path';
 import { DaemonService } from './daemon-service';
 import { createPaths } from './paths';
 
+// Hermeticity (2026-07-24 02:02Z incident): a test that reached the real home
+// wrote the LIVE systemd unit and crash-looped the production daemon. Under
+// this flag DaemonService refuses to default to the real home or the real
+// runner, so the mistake fails loudly in the test instead of on the machine.
+process.env.KTEAM_TEST_HERMETIC = '1';
+
 const temporaryHomes: string[] = [];
 
 async function temporaryHome(): Promise<string> {
@@ -110,5 +116,79 @@ describe('macOS launchd service', () => {
     await service.start();
 
     expect(calls.some(argv => argv[0] === 'launchctl' && argv[1] === 'bootstrap')).toBe(true);
+  });
+});
+
+describe('supervises(pid) — the gate on self-restart', () => {
+  test('systemd: only the unit MainPID counts, and only with a unit installed', async () => {
+    const home = await temporaryHome();
+    const commands: string[][] = [];
+    const runner = async (argv: string[]) => {
+      commands.push(argv);
+      return { code: 0, stdout: 'MainPID=4242\n', stderr: '' };
+    };
+    const service = new DaemonService(createPaths(path.join(home, '.kteam')), '/usr/bin/kteamd', {
+      platform: 'linux',
+      home,
+      runner,
+    });
+    // No unit file on disk: nothing is supervising us, whatever systemd says.
+    expect(await service.supervises(4242)).toBe(false);
+    expect(commands).toEqual([]);
+
+    await service.install();
+    commands.length = 0;
+    expect(await service.supervises(4242)).toBe(true);
+    expect(await service.supervises(4243)).toBe(false); // another process's pid
+    expect(commands[0]).toContain('--property=MainPID');
+  });
+
+  test('systemd: a failed query is never taken as proof of supervision', async () => {
+    const home = await temporaryHome();
+    const service = new DaemonService(createPaths(path.join(home, '.kteam')), '/usr/bin/kteamd', {
+      platform: 'linux',
+      home,
+      runner: async () => ({ code: 1, stdout: '', stderr: 'boom' }),
+    });
+    await service.install().catch(() => undefined);
+    expect(await service.supervises(4242)).toBe(false);
+  });
+
+  test('launchd: the printed pid must match', async () => {
+    const home = await temporaryHome();
+    const service = new DaemonService(createPaths(path.join(home, '.kteam')), '/usr/bin/kteamd', {
+      platform: 'darwin',
+      home,
+      runner: async () => ({ code: 0, stdout: 'state = running\n\tpid = 909\n', stderr: '' }),
+    });
+    expect(await service.supervises(909)).toBe(true);
+    expect(await service.supervises(910)).toBe(false);
+  });
+});
+
+describe('test hermeticity (2026-07-24 live-unit clobber)', () => {
+  test('defaulting to the real home or runner is refused under the flag', () => {
+    // The incident in one line: `new DaemonService(paths, bin, runner, 'linux')`
+    // passed the runner as `options`, so every default applied — real home,
+    // real `systemctl` — and install() replaced the production unit.
+    expect(() => new DaemonService(createPaths('/tmp/kteam-hermetic-probe'), '/bin/kteamd')).toThrow(
+      'KTEAM_TEST_HERMETIC',
+    );
+    expect(
+      () => new DaemonService(createPaths('/tmp/kteam-hermetic-probe'), '/bin/kteamd', { home: '/tmp/x' }),
+    ).toThrow('KTEAM_TEST_HERMETIC');
+  });
+
+  test('an install under a temp home never touches the real unit path', async () => {
+    const home = await temporaryHome();
+    const service = new DaemonService(createPaths(path.join(home, '.kteam')), '/usr/bin/kteamd', {
+      platform: 'linux',
+      home,
+      runner: async () => ({ code: 0, stdout: '', stderr: '' }),
+    });
+    await service.install();
+    const written = path.join(home, '.config', 'systemd', 'user', 'kteamd.service');
+    expect(await readFile(written, 'utf8')).toContain('/usr/bin/kteamd');
+    expect(written.startsWith(os.tmpdir())).toBe(true);
   });
 });

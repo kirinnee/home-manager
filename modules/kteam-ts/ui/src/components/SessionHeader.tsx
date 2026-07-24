@@ -57,7 +57,13 @@ export const SessionHeader = memo(function SessionHeader({
           </Badge>
         )}
         <Badge tone={toneFor(state.status)} className="shrink-0">
-          {state.status}
+          {/* A declared park reports 'waiting' exactly like an unanswered
+              question does — say which, and until when. */}
+          {state.waiting
+            ? `parked: ${state.waiting.condition ?? 'external condition'}${
+                state.waiting.until ? ` · until ${new Date(state.waiting.until).toLocaleTimeString()}` : ''
+              }`
+            : state.status}
         </Badge>
         {state.nudgedAt && (
           <Badge tone="warn" className="shrink-0">

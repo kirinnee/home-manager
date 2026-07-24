@@ -10,6 +10,7 @@ export type WardenAnomalyKind =
   | 'unattended_question'
   | 'abandoned_wreckage'
   | 'quota_reset_passed'
+  | 'declared_wait_overdue'
   | 'sus_thinking'
   | 'sus_subprocess'
   | 'bootstrap_degraded';
@@ -74,6 +75,14 @@ export interface WardenDetectOptions {
 const ACTIVE_MONITORED: SessionStatus[] = ['running', 'thinking', 'tool_running'];
 /** Waiting statuses that, when idle too long, mean nobody answered. */
 const WAITING_IDLE: SessionStatus[] = ['awaiting_question', 'awaiting_user', 'waiting'];
+/** When an open-ended declared wait is woken by the daemon. Single definition:
+ *  the daemon imports it for its own backstop, so the detector and the wake can
+ *  never drift apart (a warden that flags waits before the daemon wakes them
+ *  would report every legitimate park). */
+export const WAITING_BACKSTOP_MS = 4 * 60 * 60_000;
+/** Statuses a session never leaves — a declared wait on one of these is
+ *  finished history, not a park anybody must chase. */
+const TERMINAL: SessionStatus[] = ['completed', 'failed', 'stalled', 'stopped', 'kill_failed'];
 
 function parseMs(value: string | undefined): number {
   if (!value) return 0;
@@ -137,7 +146,32 @@ export function detectAnomalies(
     // waiting-idle status is anomalous. INTERACTIVE sessions are often parked at
     // a ready prompt on purpose — only an explicit unanswered question
     // (awaiting_question) counts there, not a plain idle prompt.
-    const waitingEscalatable = config.mode === 'auto' || state.status === 'awaiting_question';
+    // A DECLARED wait (`kteam signal waiting`) is deliberate, not unattended:
+    // the teammate said what it is waiting for and the daemon holds the
+    // deadline. It only becomes an anomaly once that deadline has visibly
+    // passed without the daemon waking it (the wake failed).
+    const declaredWait = state.waiting;
+    // An open-ended wait has no deadline to be past, so it is judged against
+    // the daemon's own backstop: either way, a wait that outlives when it
+    // should have been woken means the wake did not fire.
+    const declaredWaitDeadline = declaredWait
+      ? parseMs(declaredWait.until) || parseMs(declaredWait.since) + WAITING_BACKSTOP_MS
+      : 0;
+    if (
+      declaredWait !== undefined &&
+      !TERMINAL.includes(state.status) &&
+      declaredWaitDeadline > 0 &&
+      nowMs - declaredWaitDeadline >= options.unattendedMs
+    ) {
+      anomalies.push({
+        ...base,
+        kind: 'declared_wait_overdue',
+        detail: `declared wait is past ${declaredWait.until ?? 'its open-ended backstop'} and still waiting — the wake did not fire`,
+        since: new Date(declaredWaitDeadline).toISOString(),
+      });
+    }
+    const waitingEscalatable =
+      declaredWait === undefined && (config.mode === 'auto' || state.status === 'awaiting_question');
     if (waitingEscalatable && WAITING_IDLE.includes(state.status)) {
       const idleSince = latestMs(
         state.lastActivityAt,

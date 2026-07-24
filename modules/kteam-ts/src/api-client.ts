@@ -1,8 +1,18 @@
 import { readFile } from 'fs/promises';
 import type { AttachmentView, SessionView, WardenRunView, WardenStatusView } from './service';
-import type { KTeamEvent, SendDisposition, SendRequest, StartSessionRequest } from './types';
+import type { KTeamEvent, SendDisposition, SendRequest, SignalKind, SignalOptions, StartSessionRequest } from './types';
 import type { KTeamPaths } from './paths';
 import { loadDaemonConfig } from './daemon-config';
+import { sessionName } from './names';
+
+/** Hard deadline for one daemon request attempt. Above every legitimate
+ *  operation (start caps its own wait at 45 s) and below the caller timeouts
+ *  that were SIGTERMing the CLI at exit 143. */
+const REQUEST_TIMEOUT_MS = 120_000;
+/** Deadline for the "did my lost start actually land?" lookups. Short on
+ *  purpose: they run AFTER a request already burned its own deadline, and the
+ *  whole point is to answer inside the caller's timeout. */
+const RECOVERY_TIMEOUT_MS = 15_000;
 
 export class ApiClient {
   private constructor(
@@ -18,7 +28,7 @@ export class ApiClient {
     return new ApiClient(baseUrl.replace(/\/$/, ''), token);
   }
 
-  async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  async request<T>(path: string, init: RequestInit = {}, timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
     // One transient socket error must not fail an otherwise-healthy call
     // (background/automation shells hit this constantly while the daemon is
     // demonstrably up), so retry briefly before declaring the daemon
@@ -41,16 +51,36 @@ export class ApiClient {
     };
     let response: Response | undefined;
     let lastError: unknown;
+    let timedOut = false;
     for (let attempt = 0; attempt < 3 && !response; attempt++) {
       if (attempt > 0) await Bun.sleep(250 * attempt);
       try {
-        response = await fetch(`${this.baseUrl}${path}`, options);
+        // A DEADLINE, not an open-ended wait. Without one the CLI blocks
+        // forever against a daemon that cannot answer, and whoever invoked it
+        // eventually SIGTERMs the process — the exit-143 spawn timeouts, where
+        // the caller learns nothing while the daemon may well have applied the
+        // mutation. Every daemon operation is bounded below this (start caps
+        // its own wait at 45 s), so a hit here is a real fault, not slowness.
+        response = await fetch(`${this.baseUrl}${path}`, {
+          ...options,
+          signal: AbortSignal.timeout(timeoutMs),
+        });
       } catch (error) {
         lastError = error;
+        // Retrying a deadline just multiplies it; a timeout is terminal.
+        if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+          timedOut = true;
+          break;
+        }
       }
     }
     if (!response) {
       const detail = lastError instanceof Error ? ` (${lastError.message})` : '';
+      if (timedOut)
+        throw new Error(
+          `kteam daemon did not answer ${path} within ${Math.round(timeoutMs / 1000)}s${detail}; ` +
+            'it may still have applied the request — check `kteam ps` before retrying',
+        );
       throw new Error(`kteam daemon is unavailable at ${this.baseUrl}${detail}; run \`kteam daemon start\``);
     }
     if (!response.ok) {
@@ -81,12 +111,71 @@ export class ApiClient {
   get(id: string) {
     return this.request<SessionView>(`/v1/sessions/${encodeURIComponent(id)}`);
   }
-  start(input: StartSessionRequest) {
-    return this.request<SessionView>('/v1/sessions', {
-      method: 'POST',
-      body: JSON.stringify(input),
-      headers: { 'content-type': 'application/json' },
-    });
+  /** Start a session under a caller-owned request id, so a lost response can
+   *  be RESOLVED instead of guessed. A `kteam start` whose HTTP answer never
+   *  arrived still created the session (2026-07-23: two such calls produced
+   *  live controllers a caller believed had failed) — reporting failure there
+   *  is what makes a retrying responder duplicate teammates. */
+  async start(input: StartSessionRequest, requestId = process.env.KTEAM_REQUEST_ID || crypto.randomUUID()) {
+    // Clock-skew grace on the "created after I called" window below.
+    const calledAt = Date.now() - 5_000;
+    const body = JSON.stringify(input);
+    const payload = Bun.hash(body).toString(16);
+    try {
+      return await this.request<SessionView>('/v1/sessions', {
+        method: 'POST',
+        body,
+        headers: { 'content-type': 'application/json', 'x-kteam-request-id': requestId },
+      });
+    } catch (error) {
+      // Only a TRANSPORT failure leaves the outcome unknown; a daemon that
+      // answered (bad wrapper, missing prompt) rejected the start outright and
+      // there is nothing to recover.
+      if (!(error instanceof Error) || !/did not answer|is unavailable/.test(error.message)) throw error;
+      // The recovery lookups get their own SHORT deadline: three full-length
+      // requests against an unresponsive daemon would take longer than the
+      // caller timeouts this whole change exists to stay under.
+      const created = await this.request<SessionView>(
+        `/v1/sessions/by-request/${requestId}?payload=${payload}`,
+        {},
+        RECOVERY_TIMEOUT_MS,
+      ).catch(() => undefined);
+      if (created) return created;
+      // Last resort, and the one that works against a daemon too busy (or too
+      // old) to answer the lookup: the session row is persisted BEFORE the TUI
+      // launch, so a start that "failed" is usually visible in the list. One
+      // retry covers the persist landing just after the deadline.
+      for (const delay of [0, 1_000]) {
+        if (delay) await Bun.sleep(delay);
+        const found = await this.findCreatedSession(input, calledAt);
+        if (found) return found;
+      }
+      throw error;
+    }
+  }
+
+  /** The session THIS start call created: same agent, same derived NAME, same
+   *  label, created after the call began — and exactly one candidate.
+   *
+   *  The name is always compared (the daemon derives one from the prompt when
+   *  `--name` is absent, and the client can derive the identical string). A
+   *  label alone would not do: labels group a whole team, so a sibling start
+   *  on the same agent and label would be adopted as "my" session and the
+   *  caller would then talk to someone else's teammate. */
+  private async findCreatedSession(input: StartSessionRequest, sinceMs: number): Promise<SessionView | undefined> {
+    const expected = sessionName(input.name ?? input.prompt.trim().split(/\s+/).slice(0, 5).join('-'));
+    if (!expected) return undefined;
+    const sessions = await this.request<SessionView[]>('/v1/sessions', {}, RECOVERY_TIMEOUT_MS).catch(
+      () => [] as SessionView[],
+    );
+    const matches = sessions.filter(
+      view =>
+        view.config.binary === input.agent &&
+        view.config.name === expected &&
+        (input.label === undefined || view.config.label === input.label) &&
+        Date.parse(view.config.createdAt) >= sinceMs,
+    );
+    return matches.length === 1 ? matches[0] : undefined;
   }
   send(id: string, input: SendRequest) {
     return this.post<SessionView & { disposition?: SendDisposition }>(id, 'send', input);
@@ -106,8 +195,8 @@ export class ApiClient {
   migrate(id: string, agent: string, model?: string) {
     return this.post<SessionView>(id, 'migrate', { agent, model });
   }
-  signal(id: string, kind: 'done' | 'help', message?: string) {
-    return this.post<SessionView>(id, 'signal', { kind, message });
+  signal(id: string, kind: SignalKind, message?: string, options: SignalOptions = {}) {
+    return this.post<SessionView>(id, 'signal', { kind, message, ...options });
   }
   remove(id: string, purge = false, force = false) {
     return this.request<void>(`/v1/sessions/${encodeURIComponent(id)}?purge=${purge}&force=${force}`, {

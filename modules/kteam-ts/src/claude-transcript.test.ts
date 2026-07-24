@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { appendFile, mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, rename, rm, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -10,6 +10,7 @@ import {
   startClaudeTranscriptWatcher,
   type ClaudeNormalizedEvent,
   type ClaudeTranscriptWatcher,
+  type TranscriptWatchBackend,
 } from './claude-transcript';
 
 const SESSION_ID = '11111111-1111-4111-8111-111111111111';
@@ -286,5 +287,153 @@ describe('Claude transcript file watching', () => {
     const parseError = errors.find(error => error instanceof ClaudeTranscriptParseError);
     expect(parseError).toBeInstanceOf(ClaudeTranscriptParseError);
     expect(parseError?.message).not.toContain('synthetic-invalid-json');
+  });
+});
+
+describe('watch scope + rediscovery throttle (2026-07-23 listener-flap fix)', () => {
+  /** Records every directory/file the watcher arms a native watch on. */
+  function recordingBackend(): { targets: string[]; live: () => string[]; backend: TranscriptWatchBackend } {
+    const targets: string[] = [];
+    const open = new Set<string>();
+    return {
+      targets,
+      live: () => [...open],
+      backend: {
+        watch(target) {
+          targets.push(target);
+          open.add(target);
+          return {
+            close() {
+              open.delete(target);
+            },
+          };
+        },
+      },
+    };
+  }
+
+  test('watches ONE directory, not every project below the shared root', async () => {
+    const temporary = await temporaryDirectory();
+    const root = path.join(temporary, 'projects');
+    const project = path.join(root, 'fixture-project');
+    // The shared harness home holds every project any teammate ever ran in.
+    for (const noise of ['other-a', 'other-b', 'other-c'])
+      await mkdir(path.join(root, noise, 'nested'), { recursive: true });
+    await mkdir(project, { recursive: true });
+    const transcript = path.join(project, `${SESSION_ID}.jsonl`);
+    await writeFile(transcript, jsonl(userRecord('Hello.')));
+    const recorder = recordingBackend();
+    const events: ClaudeNormalizedEvent[] = [];
+
+    const watcher = await startClaudeTranscriptWatcher({
+      transcriptRoot: root,
+      sessionId: SESSION_ID,
+      reconcileIntervalMs: 20,
+      watchBackend: recorder.backend,
+      onEvents(next) {
+        events.push(...next);
+      },
+    });
+    runningWatchers.push(watcher);
+    await waitFor(() => events.length === 1, 'first record');
+    // Let several reconcile ticks pass: they must not re-walk or re-arm.
+    await Bun.sleep(120);
+
+    const live = recorder.live().sort();
+    expect(live).toEqual([project, transcript].sort());
+    // Nothing under an unrelated project is ever watched.
+    expect(recorder.targets.some(target => target.includes('other-'))).toBe(false);
+  });
+
+  test('a rename storm cannot re-walk the tree on every notification', async () => {
+    const temporary = await temporaryDirectory();
+    const root = path.join(temporary, 'projects');
+    const project = path.join(root, 'fixture-project');
+    await mkdir(project, { recursive: true });
+    const transcript = path.join(project, `${SESSION_ID}.jsonl`);
+    await writeFile(transcript, jsonl(userRecord('Hello.')));
+    const listeners: Array<(event: { eventType: 'change' | 'rename' }) => void> = [];
+    const backend: TranscriptWatchBackend = {
+      watch(_target, onChange) {
+        listeners.push(onChange);
+        return { close() {} };
+      },
+    };
+    const discovered: string[] = [];
+    const watcher = await startClaudeTranscriptWatcher({
+      transcriptRoot: root,
+      sessionId: SESSION_ID,
+      reconcileIntervalMs: 20,
+      rediscoverIntervalMs: 60_000,
+      watchBackend: backend,
+      onDiscovered(file) {
+        discovered.push(file);
+      },
+      onEvents() {},
+    });
+    runningWatchers.push(watcher);
+    await waitFor(() => discovered.length === 1, 'discovery');
+    const armedAfterDiscovery = listeners.length;
+
+    // A NEWER file with the same UUID appears in another project directory.
+    // Only a full-tree rediscovery walk can find it — so it is the probe for
+    // whether the storm re-walks: with the throttle the watcher keeps tailing
+    // the file it already holds (old behaviour: every rename notification, and
+    // every 2 s tick, re-walked the whole shared home and switched to it).
+    const other = path.join(root, 'other-project');
+    await mkdir(other, { recursive: true });
+    const decoy = path.join(other, `${SESSION_ID}.jsonl`);
+    await writeFile(decoy, jsonl(userRecord('Decoy.')));
+    const future = new Date(Date.now() + 60_000);
+    await utimes(decoy, future, future);
+
+    // A neighbouring session churns files: 50 rename notifications.
+    for (let index = 0; index < 50; index += 1) for (const listener of listeners) listener({ eventType: 'rename' });
+    await Bun.sleep(120);
+
+    expect(discovered).toEqual([transcript]); // no rediscovery inside the throttle
+    expect(listeners.length).toBe(armedAfterDiscovery); // and no re-arm storm
+    expect(watcher.snapshot().file).toBe(transcript);
+  });
+
+  test('a rediscovery IS performed once the throttle window has passed', async () => {
+    const temporary = await temporaryDirectory();
+    const root = path.join(temporary, 'projects');
+    const project = path.join(root, 'fixture-project');
+    await mkdir(project, { recursive: true });
+    const transcript = path.join(project, `${SESSION_ID}.jsonl`);
+    await writeFile(transcript, jsonl(userRecord('Hello.')));
+    const listeners: Array<(event: { eventType: 'change' | 'rename' }) => void> = [];
+    const backend: TranscriptWatchBackend = {
+      watch(_target, onChange) {
+        listeners.push(onChange);
+        return { close() {} };
+      },
+    };
+    const discovered: string[] = [];
+    const watcher = await startClaudeTranscriptWatcher({
+      transcriptRoot: root,
+      sessionId: SESSION_ID,
+      reconcileIntervalMs: 20,
+      rediscoverIntervalMs: 0, // no throttle: every rename may re-walk
+      watchBackend: backend,
+      onDiscovered(file) {
+        discovered.push(file);
+      },
+      onEvents() {},
+    });
+    runningWatchers.push(watcher);
+    await waitFor(() => discovered.length === 1, 'discovery');
+
+    const other = path.join(root, 'other-project');
+    await mkdir(other, { recursive: true });
+    const newer = path.join(other, `${SESSION_ID}.jsonl`);
+    await writeFile(newer, jsonl(userRecord('Newer.')));
+    const future = new Date(Date.now() + 60_000);
+    await utimes(newer, future, future);
+    for (const listener of listeners) listener({ eventType: 'rename' });
+
+    await waitFor(() => watcher.snapshot().file === newer, 'rediscovery once unthrottled');
+    expect(discovered).toEqual([transcript, newer]);
   });
 });

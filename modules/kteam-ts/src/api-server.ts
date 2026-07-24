@@ -1,8 +1,9 @@
 import type { Server, ServerWebSocket } from 'bun';
 import { existsSync } from 'node:fs';
 import { join, normalize } from 'node:path';
-import type { KTeamService } from './service';
-import type { SendRequest } from './types';
+import type { KTeamService, SessionView } from './service';
+import { SIGNAL_KINDS } from './types';
+import type { SendRequest, SignalKind, StartSessionRequest } from './types';
 import { WARDEN_LABEL } from './warden-detect';
 import { renderShell } from './ui';
 import { actorContext } from './actor-context';
@@ -122,6 +123,23 @@ export class RecentRequestIds {
   }
 }
 
+/** Reserved dedup ref for session CREATE (no session id exists yet). */
+const CREATE_REF = '#create';
+
+/** Insertion-ordered map with a hard capacity — oldest entry evicted first. */
+class BoundedMap<K, V> {
+  private readonly entries = new Map<K, V>();
+  constructor(private readonly capacity = 200) {}
+  get(key: K): V | undefined {
+    return this.entries.get(key);
+  }
+  set(key: K, value: V): void {
+    this.entries.delete(key);
+    this.entries.set(key, value);
+    while (this.entries.size > this.capacity) this.entries.delete(this.entries.keys().next().value!);
+  }
+}
+
 async function body<T>(request: Request): Promise<T> {
   try {
     return (await request.json()) as T;
@@ -142,6 +160,10 @@ class HttpError extends Error {
 export function startApiServer(options: ApiServerOptions): Server<SocketData> {
   const sockets = new Set<ServerWebSocket<SocketData>>();
   const recentRequests = new RecentRequestIds();
+  /** requestId → the session that request already created (create idempotency). */
+  const createdSessions = new BoundedMap<string, string>();
+  /** In-flight creates, so a retry that overlaps the first attempt shares it. */
+  const createRequests = new Map<string, Promise<SessionView>>();
   /** `${sessionRef}\n${requestId}` → the pending application. A duplicate that
    *  arrives while the first application is still awaited must NOT re-apply —
    *  it shares the original promise (and its error, so a failure stays
@@ -279,8 +301,55 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
             });
           }
           if (url.pathname === '/v1/sessions' && request.method === 'GET') return json(await options.service.list());
-          if (url.pathname === '/v1/sessions' && request.method === 'POST')
-            return json(await options.service.start(await body(request)), 201);
+          if (url.pathname === '/v1/sessions' && request.method === 'POST') {
+            // CREATE is idempotent per request id. A start whose RESPONSE was
+            // lost (socket error, caller timeout, SIGTERM) still created the
+            // session, so the client's blind retry used to launch a SECOND
+            // teammate for the same task — the duplicate controllers seen on
+            // 2026-07-23. Keyed under a reserved ref (no session id exists yet).
+            const createId = request.headers.get('x-kteam-request-id') ?? undefined;
+            const input = await body<StartSessionRequest>(request);
+            if (createId === undefined) return json(await options.service.start(input), 201);
+            // The key binds the id to the PAYLOAD. A caller that exports one
+            // KTEAM_REQUEST_ID for a whole shell would otherwise have its
+            // second and third `kteam start` answered with the first
+            // session — different tasks silently never launched, exit 0.
+            const key = `${CREATE_REF}\n${createId}\n${Bun.hash(JSON.stringify(input)).toString(16)}`;
+            const pending = createRequests.get(key);
+            if (pending) return json(await pending, 201);
+            const previous = createdSessions.get(key);
+            if (previous !== undefined) return json(await options.service.get(previous), 201);
+            const attempt = (async () => {
+              const view = (await options.service.start(input)) as SessionView;
+              createdSessions.set(key, view.config.id);
+              return view;
+            })();
+            createRequests.set(key, attempt);
+            try {
+              return json(await attempt, 201);
+            } finally {
+              createRequests.delete(key);
+            }
+          }
+
+          // Answer "did my start actually create a session?" for a caller whose
+          // response was lost. Must be matched BEFORE the /:id route.
+          const byRequest = url.pathname.match(/^\/v1\/sessions\/by-request\/([^/]+)$/);
+          if (byRequest && request.method === 'GET') {
+            // Keyed by request id AND payload hash, exactly like the create
+            // itself: a caller that reuses one id across DIFFERENT starts must
+            // never be handed the earlier task's session as its own.
+            const key = `${CREATE_REF}\n${decodeURIComponent(byRequest[1]!)}\n${url.searchParams.get('payload') ?? ''}`;
+            const created = createdSessions.get(key);
+            if (created !== undefined) return json(await options.service.get(created));
+            // The caller usually asks precisely because its own request is
+            // still running (the CLI's deadline is shorter than a queued
+            // bootstrap), so wait for the in-flight create rather than
+            // answering 404 and inviting a duplicate launch.
+            const pending = createRequests.get(key);
+            if (pending) return json(await pending);
+            return json({ error: 'no session was created for that request id' }, 404);
+          }
 
           const match = url.pathname.match(/^\/v1\/sessions\/([^/]+)(?:\/(.+))?$/);
           if (!match) return json({ error: 'not found' }, 404);
@@ -344,9 +413,14 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
             return await applyOnce(() => options.service.migrate(id, input.agent!, input.model));
           }
           if (action === 'signal' && request.method === 'POST') {
-            const input = await body<{ kind: 'done' | 'help'; message?: string }>(request);
-            if (input.kind !== 'done' && input.kind !== 'help') throw new HttpError(400, 'kind must be done or help');
-            return await applyOnce(() => options.service.signal(id, input.kind, input.message));
+            const input = await body<{ kind: SignalKind; message?: string; until?: string; condition?: string }>(
+              request,
+            );
+            if (!SIGNAL_KINDS.includes(input.kind))
+              throw new HttpError(400, `kind must be one of ${SIGNAL_KINDS.join(', ')}`);
+            return await applyOnce(() =>
+              options.service.signal(id, input.kind, input.message, { until: input.until, condition: input.condition }),
+            );
           }
           if (action === 'snapshot' && request.method === 'GET') {
             // Default = the monitor's on-disk frame (fast, lock-free). ?live=true

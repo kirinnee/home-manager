@@ -109,6 +109,10 @@ export interface ClaudeTranscriptWatcherOptions {
   onError?(error: Error): void;
   /** Safety net for dropped/coalesced native notifications. Defaults to 2 seconds. */
   reconcileIntervalMs?: number;
+  /** Floor between two FULL-TREE rediscovery walks once a transcript is
+   *  already selected. Defaults to 60 seconds; a missing file always
+   *  rediscovers immediately regardless of this. */
+  rediscoverIntervalMs?: number;
   /** A previously persisted complete-line byte cursor. */
   initialOffset?: number;
   watchBackend?: TranscriptWatchBackend;
@@ -369,6 +373,11 @@ export class ClaudeTranscriptWatcher {
   private reconcileRequested = false;
   private directoryRefreshRequested = false;
   private reconcilePromise?: Promise<void>;
+  /** When the last full-tree discovery walk ran (throttles the expensive path). */
+  private lastDiscoveryAt = 0;
+  /** Consecutive walks that found nothing — the input to the search backoff. */
+  private discoveryAttempts = 0;
+  private readonly rediscoverIntervalMs: number;
 
   constructor(options: ClaudeTranscriptWatcherOptions) {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(options.sessionId)) {
@@ -376,13 +385,18 @@ export class ClaudeTranscriptWatcher {
     }
     this.options = options;
     this.backend = options.watchBackend ?? nativeTranscriptWatchBackend;
+    this.rediscoverIntervalMs = Math.max(0, options.rediscoverIntervalMs ?? 60_000);
   }
 
   async start(): Promise<this> {
     if (this.running) return this;
     this.running = true;
     const interval = Math.max(10, this.options.reconcileIntervalMs ?? 2_000);
-    this.timer = setInterval(() => void this.requestReconcile(true), interval);
+    // The periodic tick is the CHEAP path (stat the known file, read the
+    // delta). It must never force a full-tree rediscovery: that ran every
+    // 2 s per session over the SHARED harness home and pinned the daemon's
+    // event loop (2026-07-23 listener-flap incident).
+    this.timer = setInterval(() => void this.requestReconcile(), interval);
     this.timer.unref?.();
     await this.requestReconcile(true);
     return this;
@@ -459,12 +473,19 @@ export class ClaudeTranscriptWatcher {
     }
   }
 
-  private async refreshDirectoryWatches(): Promise<void> {
-    const rootDirectories = await directoriesBelow(this.options.transcriptRoot);
-    const directories =
-      rootDirectories.length > 0
-        ? rootDirectories
-        : await nearestExistingDirectory(this.options.transcriptRoot).then(value => (value ? [value] : []));
+  /** Watch the SMALLEST directory set that can wake reconciliation:
+   *  - transcript known → its own directory (one inotify watch);
+   *  - not yet discovered → the nearest existing ancestor of the root, so a
+   *    freshly created project directory is noticed.
+   *  The old behaviour armed one watch per directory BELOW the root: with a
+   *  shared harness home (~300 project directories) every live session held
+   *  ~300 watches over the same tree, so every transcript write by any
+   *  teammate woke every session's watcher into a full re-walk. The 2 s
+   *  reconcile poll — not the watch set — is the correctness guarantee. */
+  private async refreshDirectoryWatches(file: string | undefined): Promise<void> {
+    const directories = file
+      ? [path.dirname(file)]
+      : await nearestExistingDirectory(this.options.transcriptRoot).then(value => (value ? [value] : []));
     const desired = new Set(directories);
     for (const [directory, watcher] of this.directoryWatches) {
       if (desired.has(directory)) continue;
@@ -479,19 +500,45 @@ export class ClaudeTranscriptWatcher {
   }
 
   private async reconcile(): Promise<void> {
-    const refreshDirectories = this.directoryRefreshRequested;
+    const refreshRequested = this.directoryRefreshRequested;
     this.directoryRefreshRequested = false;
-    if (refreshDirectories) await this.refreshDirectoryWatches();
 
     let file = this.transcriptFile;
-    if (
-      !file ||
-      refreshDirectories ||
-      !(await stat(file)
+    const usable =
+      file !== undefined &&
+      (await stat(file)
         .then(info => info.isFile())
-        .catch(() => false))
-    ) {
+        .catch(() => false));
+    // Full-tree discovery is the EXPENSIVE path (a readdir per project
+    // directory plus a stat per candidate). Run it when there is no usable
+    // file — and otherwise at most once per REDISCOVER_INTERVAL_MS, so a
+    // rename storm in the shared harness home cannot re-walk it on every
+    // notification.
+    // Before discovery the walk is the only way to FIND the file, so it runs
+    // often — but not forever at full rate: a session whose transcript never
+    // appears (login-walled, dead harness) would otherwise re-walk the shared
+    // home every 2 s for the ~360 s until the turn-never-started reflex fires,
+    // and a launch storm multiplies that by the number of sessions.
+    const searchFloor = Math.min(this.rediscoverIntervalMs, this.discoveryAttempts < 5 ? 0 : 15_000);
+    const sinceDiscovery = Date.now() - this.lastDiscoveryAt;
+    // Even settled, re-walk once per interval rather than only on a rename:
+    // the only armed watches are the transcript and its own directory, so a
+    // NEWER file for the same session appearing under a different project
+    // directory would otherwise never be noticed and the watcher would tail a
+    // frozen file until the turn-never-started reflex failed the session.
+    const rediscover = usable
+      ? sinceDiscovery >= this.rediscoverIntervalMs
+      : refreshRequested || sinceDiscovery >= searchFloor;
+    if (rediscover) {
+      this.lastDiscoveryAt = Date.now();
       file = await findClaudeTranscript(this.options.transcriptRoot, this.options.sessionId);
+      this.discoveryAttempts = file ? 0 : this.discoveryAttempts + 1;
+      await this.refreshDirectoryWatches(file);
+    } else if (!usable) {
+      // The known path is gone and this tick is inside the search backoff:
+      // treat it as absent rather than reading on into stat() and throwing
+      // ENOENT — an error per tick, forever, once a transcript is deleted.
+      file = undefined;
     }
     if (!file) {
       this.detachFile();
