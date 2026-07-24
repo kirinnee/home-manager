@@ -855,3 +855,87 @@ Root causes found (all three residuals shared ONE load bomb), fixes landed in `m
   Test hermeticity is now part of this deliverable, not a footnote.
 - **Lesson for every round:** run `bun run check` (tsc THEN tests) — never a bare
   `bun test` — on any test that can touch the machine's own service manager.
+
+## 2026-07-24 03:05Z — residual: /signal endpoint hangs under boot/adoption load
+
+- Observed on BOTH the pre-fix daemon (pid 2480034) and the hardened build
+  (pid 2939951, commit 8aa2632) during its post-restart adoption storm:
+  `kteam signal done` HANGS (rc=124 under a 90s timeout; also "daemon did not
+  answer /v1/sessions/<id>/signal within 120s") while other endpoints kept
+  answering; daemon 41-51% CPU, RSS 242→370MB, sqlite churning. doneAt stayed
+  null until adoption completed, then the signal landed.
+- Reporter's key correction: earlier exit-137s were the HARNESS killing the
+  session while the CLI sat blocked — the CLI does not crash; debug the daemon
+  signal handler path, not the CLI.
+- Workaround that worked: a setsid-detached bounded retry loop that survives
+  session teardown (6 attempts x 120s), stopped the moment doneAt landed.
+- Likely benign post-adoption (endpoint recovered once ok:true), but worth a
+  look at what serializes the signal path against bootstrap/adoption.
+
+## 2026-07-24 03:12Z — new-build bug: launch_backgrounded strands the session state
+
+- Session mryd2xvg (carol, claude-auto-atomi): the new bounded-start path fired
+  session.launch_backgrounded ("launch still in progress after 45s, bootstrap
+  queue") — but the launch was never marked complete afterwards. Result:
+  status=failed while the TUI is demonstrably ALIVE and working (liveness
+  transcript 4s, tools running, context advancing); `kteam send` refuses with
+  "has not finished launching yet; retry once it is running". So the daemon can
+  neither supervise nor steer a healthy session: monitors/warden state unclear,
+  done marker at risk of the same refusal at completion.
+- Expected: launch_backgrounded must be resolved by a completion event when the
+  bootstrap finishes (the pane came up and the prompt was delivered), flipping
+  status to running and unlocking control actions.
+
+## 2026-07-24 03:19Z — false TERMINAL record for a live session (composes with launch_backgrounded)
+
+- Session mryd2xvg (carol): state.json holds status=failed, health=crashed,
+  reason="interactive claude exited unknown", finishedAt written 3.7 SECONDS
+  after startedAt — while the SAME file keeps advancing lastTranscriptAt /
+  lastToolStartedAt in real time. The launch detector recorded a terminal
+  transition that never happened.
+- Fallout chain: kteam ps (non --all) hides the "terminal" session → engine
+  minute-loop sees controller-dead every minute → repair batch spawned per
+  minute (strong-lane session each) + duplicate-dispatch risk; daemon-side,
+  automode continuation/nudges/stall monitor no longer cover the live session,
+  so it may park at its prompt forever after the current turn.
+- ALSO: daemon boot recovery REVIVED an explicitly stopped session (brooks,
+  quota-dead loai zombie, stopped 02:58Z, relaunched 03:06Z by recovery) —
+  stopped sessions must stay stopped across restarts.
+- Engine-side mitigation landing (minute.ts ps --all + liveness-fresher-than-
+  finishedAt); daemon needs the root fix in the launch detector + revive policy.
+
+## 2026-07-24 03:28Z — addendum on the /signal hang + memory observations (new build)
+
+- /v1/sessions/<id>/signal for session mry44s2n hung through at least 03:20:17Z
+  (6 detached attempts rc=124; log ~/.kteam/mry44s2n-c682e626/signal-detached.log)
+  while /status, /ps and sends to OTHER sessions answered — endpoint- or
+  session-scoped serialization, not a global wedge.
+- RSS: 242MB (02:49) → 605MB (03:24) → 434MB (03:28) — peaked and came back,
+  so not a monotonic leak; possibly the one-time global-sequence backfill.
+  CPU sustained 41-58% for 40 min is still high for idle-ish load — worth a
+  profile in round 3.
+- Aggravating factor (self-report): a lead-side retry loop re-sent an identical
+  ack to the hung session every ~145s for ~40 min (each attempt itself hanging
+  120s server-side) — likely feeding the very serialization it waited on.
+  Killed. Lesson: never point an until-loop at a HANGING endpoint (loud-fail
+  loops are for busy-composer rejections, which fail fast).
+
+## 2026-07-24 07:10Z — ghost-session class: stop does not kill the harness process; queues outlive stops
+
+- Session mry44s2n (darwin) was `kteam stop`ed TWICE (04:27Z re-stop) yet its
+  claude process kept executing queued native-composer messages for ~2.5h more
+  (turn 25, fresh Bash tool.use at 07:02:13Z per auditor packet), invisible to
+  `kteam ps` (status=stopped, lastPaneAt 03:34Z). Process eventually
+  self-terminated after draining the backlog; verified gone at 07:08Z (no
+  claude PID for its harness session id, no tmux session).
+- Two policy gaps: (1) `kteam stop` should terminate/confirm-dead the
+  underlying harness process, not just record the stop and kill the pane;
+  (2) queued messages addressed to a STOPPED session must be dropped or
+  parked, not delivered — stale queue delivery is what revived this session
+  repeatedly (see also the 02:5x zombie revival of the same session and the
+  brooks boot-recovery revival).
+- 2026-07-24 08:2xZ addendum (same revival class, 4th instance): fleet
+  supervision auto-RESUMED a launch-failed worker (mryoajlc/Ethan) while its
+  retry (mryoccvi/Vicente) was live from an identical prompt in the same
+  worktree → duplicate workers. Resume/revive must check for a live successor
+  with the same label/worktree before resurrecting a failed/stopped session.
