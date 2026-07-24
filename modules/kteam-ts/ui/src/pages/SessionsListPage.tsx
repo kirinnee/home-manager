@@ -34,6 +34,14 @@ function useIsNarrow(bp = 640): boolean {
 // One-line "what it's doing": the live pane activity when working, else the
 // task description, else the id. Present in both list and card views.
 function activityLine(v: SessionView): { text: string; live: boolean } {
+  // A declared wait outranks the pane: the teammate is parked on purpose and
+  // the useful line is WHAT it waits for and until when, not a stale spinner.
+  const wait = v.state.waiting;
+  if (wait)
+    return {
+      text: `waiting: ${wait.condition ?? 'external condition'}${wait.until ? ` (until ${new Date(wait.until).toLocaleTimeString()})` : ''}`,
+      live: true,
+    };
   const act = v.state.activity?.trim();
   if (act) return { text: act, live: !TERMINAL_STATUSES.has(v.state.status) };
   const task = v.config.name?.trim();

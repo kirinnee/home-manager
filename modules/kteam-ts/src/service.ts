@@ -4,6 +4,8 @@ import type {
   SendRequest,
   SessionConfig,
   SessionState,
+  SignalKind,
+  SignalOptions,
   StartSessionRequest,
 } from './types';
 import type { WardenConfig } from './daemon-config';
@@ -84,7 +86,7 @@ export interface KTeamService {
    *  via the resume path under the new wrapper. Cross-kind is rejected. */
   migrate(id: string, agent: string, model?: string): Promise<SessionView>;
   remove(id: string, purge?: boolean, force?: boolean): Promise<void>;
-  signal(id: string, kind: 'done' | 'help', message?: string): Promise<SessionView>;
+  signal(id: string, kind: SignalKind, message?: string, options?: SignalOptions): Promise<SessionView>;
   snapshot(id: string): Promise<string>;
   /** The monitor's most recent pane snapshot, read from disk — no tmux capture,
    *  no session lock. The UI polls this; snapshot() stays for live captures. */

@@ -4,6 +4,7 @@ import { mkdir, readFile, rm, writeFile } from 'fs/promises';
 import { startApiServer } from './api-server';
 import { EXIT_ALREADY_RUNNING, bindWithRetry, probeExistingDaemon } from './daemon-boot';
 import { ensureDaemonToken, ensureWardenToken, loadDaemonConfig } from './daemon-config';
+import { DaemonService } from './daemon-service';
 import { createPaths } from './paths';
 import { SessionManager } from './session-manager';
 
@@ -23,8 +24,33 @@ if (await probeExistingDaemon({ url: `http://${config.host}:${config.port}`, tok
   process.exit(EXIT_ALREADY_RUNNING);
 }
 
+/** How long a shutdown may drain before exiting anyway. The service manager's
+ *  own stop timeout is the hard deadline: on 2026-07-23 a close() that awaited
+ *  wedged monitor I/O ran past systemd's 90 s and was SIGKILLed, orphaning the
+ *  tmux server. Both restart supervisors (systemd Restart=always, launchd
+ *  KeepAlive) re-spawn a clean exit, so exiting promptly IS the restart. */
+const SHUTDOWN_GRACE_MS = 15_000;
+
 const token = await ensureDaemonToken(paths);
 const wardenToken = await ensureWardenToken(paths);
+/** Assigned once the server exists; the manager may ask for a restart before then. */
+let requestStop: (reason: string) => void = reason => {
+  console.error(`kteamd: stopping before startup completed (${reason})`);
+  process.exit(0);
+};
+// A clean exit is only a RESTART when a service manager owns this process. An
+// env marker would leak into every child (a daemon started by hand from a
+// supervised pane inherits it), so ask the manager whether it owns our pid.
+/** Does a service manager own THIS process? Asked when a restart is actually
+ *  wanted, not latched at boot: the probe shells out to the service manager,
+ *  which on a loaded box is exactly what is slow, and a boot-time false would
+ *  disable the repair for the whole process lifetime. Bounded either way — it
+ *  must never hold up the bind or a shutdown. */
+const supervised = async () =>
+  await Promise.race([
+    new DaemonService(paths, process.execPath).supervises(process.pid).catch(() => false),
+    Bun.sleep(3_000).then(() => false),
+  ]);
 const manager = await SessionManager.create(paths, {
   healthIntervalSeconds: config.healthIntervalSeconds,
   quotaUrl: config.quotaUrl,
@@ -33,6 +59,11 @@ const manager = await SessionManager.create(paths, {
   publicUrl: config.publicUrl,
   projectRoots: config.projectRoots,
   warden: config.warden,
+  onSelfRestart: async () => {
+    if (!(await supervised())) return false;
+    requestStop('session index unhealable in place');
+    return true;
+  },
 });
 // Retry EADDRINUSE: a dying predecessor (service-manager restart) can hold the
 // port for seconds while it drains; give it up to 30 s before failing.
@@ -46,6 +77,36 @@ const server = await bindWithRetry(() =>
 // must never overwrite the live daemon's pid.
 await writeFile(paths.pid, `${process.pid}\n`, { mode: 0o600 });
 console.log(`kteamd listening on http://${config.host}:${server.port} (pid ${process.pid})`);
+
+let stopping = false;
+const stop = async (reason: string) => {
+  if (stopping) return;
+  stopping = true;
+  console.log(`kteamd stopping (${reason})`);
+  server.stop(true);
+  // BOUNDED drain: monitor loops await tmux and transcript I/O that can hang,
+  // and a shutdown that outlives the service manager's timeout is SIGKILLed
+  // mid-write. Give the drain a deadline and exit cleanly either way.
+  const drained = await Promise.race([
+    manager.close().then(() => true),
+    Bun.sleep(SHUTDOWN_GRACE_MS).then(() => false),
+  ]).catch(error => {
+    console.error(`kteamd: shutdown drain failed: ${String(error)}`);
+    return false;
+  });
+  if (!drained) console.error(`kteamd: shutdown drain exceeded ${SHUTDOWN_GRACE_MS}ms — exiting anyway`);
+  await rm(paths.pid, { force: true }).catch(() => undefined);
+  process.exit(0);
+};
+// Bound BEFORE bootstrap: the self-check timer is armed in create() and can
+// ask for a restart at t=60 s, long before a cold boot finishes indexing.
+requestStop = reason => void stop(reason);
+process.on('SIGINT', () => {
+  void stop('SIGINT');
+});
+process.on('SIGTERM', () => {
+  void stop('SIGTERM');
+});
 // Index journals + recover sessions AFTER listen: the scan of ~1000 session
 // directories must never block the bind (the old 80 s cold-boot window).
 // bootstrap() isolates phase failures internally; this catch is the LAST
@@ -62,19 +123,3 @@ try {
 } catch (error) {
   console.error(`kteamd bootstrap crashed (daemon stays up; self-check will repair): ${String(error)}`);
 }
-
-let stopping = false;
-const stop = async () => {
-  if (stopping) return;
-  stopping = true;
-  server.stop(true);
-  await manager.close();
-  await rm(paths.pid, { force: true });
-  process.exit(0);
-};
-process.on('SIGINT', () => {
-  void stop();
-});
-process.on('SIGTERM', () => {
-  void stop();
-});

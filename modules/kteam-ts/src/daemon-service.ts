@@ -39,13 +39,33 @@ export class DaemonService {
   private readonly platform: NodeJS.Platform;
   private readonly home: string;
   private readonly runner: Runner;
+  /** True when the caller pinned a home (a test) instead of using the real one. */
+  private readonly pinnedHome: boolean;
 
   constructor(
     private readonly paths: KTeamPaths,
     private readonly daemonBinary: string,
     options: DaemonServiceOptions = {},
   ) {
+    // Tests set KTEAM_TEST_HERMETIC=1. Under it, falling back to the REAL home
+    // or the REAL command runner is a hard error — 2026-07-24 02:02Z: a test
+    // constructed this class with positional args, so `options` was undefined,
+    // every default applied, and install() overwrote the live
+    // ~/.config/systemd/user/kteamd.service with ExecStart=/bin/kteamd plus a
+    // /tmp KTEAM_HOME, then ran `systemctl --user daemon-reload`. The
+    // production daemon crash-looped (203/EXEC) until a human reinstalled it.
+    // `bun test` does not typecheck, so the type error never ran.
+    // NODE_ENV=test covers every file `bun test` loads, whether or not it
+    // remembered to opt in — the guard must not depend on load order.
+    const hermetic = process.env.KTEAM_TEST_HERMETIC === '1' || process.env.NODE_ENV === 'test';
+    if (hermetic && (options.home === undefined || options.runner === undefined)) {
+      throw new Error(
+        'DaemonService under KTEAM_TEST_HERMETIC must be given both home and runner — ' +
+          'defaulting to the real ones would write the live systemd/launchd unit',
+      );
+    }
     this.platform = options.platform ?? process.platform;
+    this.pinnedHome = options.home !== undefined;
     this.home = options.home ?? os.homedir();
     this.runner = options.runner ?? run;
   }
@@ -55,7 +75,12 @@ export class DaemonService {
   }
 
   private systemdUnit(): string {
-    const configHome = process.env.XDG_CONFIG_HOME ?? path.join(this.home, '.config');
+    // XDG_CONFIG_HOME only applies to the REAL home. When a caller pinned a
+    // home (tests always do), that pin wins — otherwise an exported
+    // XDG_CONFIG_HOME would send a temp-home test back at the live unit.
+    const configHome = this.pinnedHome
+      ? path.join(this.home, '.config')
+      : (process.env.XDG_CONFIG_HOME ?? path.join(this.home, '.config'));
     return path.join(configHome, 'systemd', 'user', SYSTEMD_UNIT);
   }
 
@@ -176,6 +201,25 @@ WantedBy=default.target
       } catch {}
     }
     await rm(this.paths.pid, { force: true });
+  }
+
+  /** Does the SERVICE MANAGER own this pid? The one honest proof that a clean
+   *  exit will be followed by a restart — an env marker leaks into every child
+   *  (a daemon started by hand from a supervised pane inherits it), and a unit
+   *  file on disk says nothing about who started the running process. */
+  async supervises(pid: number): Promise<boolean> {
+    if (this.platform === 'linux') {
+      if (!existsSync(this.systemdUnit())) return false;
+      const result = await this.runner(['systemctl', '--user', 'show', SYSTEMD_UNIT, '--property=MainPID']);
+      if (result.code !== 0) return false;
+      return Number(result.stdout.trim().split('=')[1]) === pid;
+    }
+    if (this.platform === 'darwin') {
+      const result = await this.runner(['launchctl', 'print', this.domain()]);
+      if (result.code !== 0) return false;
+      return new RegExp(`\\bpid = ${pid}\\b`).test(result.stdout);
+    }
+    return false;
   }
 
   async status(): Promise<{ running: boolean; pid?: number }> {

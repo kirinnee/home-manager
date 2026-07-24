@@ -172,3 +172,10 @@ export function pickTeammateName(recentlyUsed: Iterable<string>, lastUsedAt?: Ma
   }
   return best;
 }
+
+/** The stored form of a session name: filesystem- and column-safe. A client
+ *  that has to look up a session it started must compare against THIS shape,
+ *  not the raw `--name` it passed. */
+export function sessionName(raw: string): string {
+  return raw.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 48);
+}

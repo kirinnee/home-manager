@@ -78,6 +78,19 @@ interface EventPointerRow {
   sequence: number;
 }
 
+interface GlobalPointerRow extends EventPointerRow {
+  session_id: string;
+  global_sequence: number;
+}
+
+/** One page of the cross-session feed: the events that RESOLVED, plus how many
+ *  index rows the page covered and the cursor it reached. */
+export interface GlobalPage {
+  events: SessionEvent[];
+  rows: number;
+  cursor: number;
+}
+
 interface SessionRow {
   id: string;
   directory: string;
@@ -131,6 +144,16 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 function stringField(value: unknown, field: string): string | undefined {
   const candidate = asRecord(value)?.[field];
   return typeof candidate === 'string' ? candidate : undefined;
+}
+
+/** The daemon's fleet-wide counter, lifted out of the event payload so the
+ *  cross-session feed can be answered by ONE indexed query. Journals written
+ *  before the counter existed fall back to the per-session sequence — exactly
+ *  what SessionManager.fromStored does when it renders the same event. */
+function globalSequenceOf(event: SessionEvent): number {
+  const data = asRecord(event.data);
+  const global = data?.globalSequence;
+  return typeof global === 'number' && Number.isSafeInteger(global) ? global : event.sequence;
 }
 
 function parseEvent(value: unknown, expectedSessionId: string): SessionEvent | undefined {
@@ -345,6 +368,18 @@ export class EventStore {
       CREATE INDEX IF NOT EXISTS events_type_idx ON events(type);
       CREATE INDEX IF NOT EXISTS sessions_status_idx ON sessions(status);
     `);
+    // ADDITIVE migration (2026-07-23 daemon-wedge fix): the cross-session
+    // event feed must be answerable by one bounded query instead of loading
+    // every journal into memory. `global_sequence` is the daemon's fleet-wide
+    // counter, lifted out of the payload so it can be indexed. Additive
+    // because the index generation is NOT bumped: an existing v2 database
+    // keeps its rows (with NULLs here) and backfills in the background —
+    // never a hard "delete the database" boot failure on a live daemon.
+    const columns = database.query<{ name: string }, []>('PRAGMA table_info(events)').all();
+    if (!columns.some(column => column.name === 'global_sequence')) {
+      database.exec('ALTER TABLE events ADD COLUMN global_sequence INTEGER');
+    }
+    database.exec('CREATE INDEX IF NOT EXISTS events_global_idx ON events(global_sequence)');
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     return database;
   }
@@ -569,6 +604,11 @@ export class EventStore {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       buffer = Buffer.alloc(0);
     }
+    this.reindexSessionFromBuffer(sessionId, buffer);
+  }
+
+  /** Replace one session's pointer rows from journal bytes already in hand. */
+  private reindexSessionFromBuffer(sessionId: string, buffer: Buffer): void {
     const scan = scanBuffer(buffer, this.eventsFile(sessionId), sessionId);
     this.database.transaction(() => {
       this.database.query('DELETE FROM events WHERE session_id = ?').run(sessionId);
@@ -600,6 +640,233 @@ export class EventStore {
       )
       .all();
     return rows.map(row => this.sessionFromRow(row));
+  }
+
+  /** Bounded CROSS-SESSION replay, ordered by the fleet-wide global sequence.
+   *
+   *  This exists because the old fleet feed materialized every event of every
+   *  session (multi-GB), mapped it, sorted it, and returned ≤ limit — one UI
+   *  connect blocked the daemon's event loop for minutes and ballooned its
+   *  heap (2026-07-23 daemon-wedge incident). Here the index answers the
+   *  window and only the selected records are read from their journals.
+   *
+   *  Rows whose journal bytes no longer match their pointer are re-indexed
+   *  once and then skipped: one rewritten journal must never wedge the feed. */
+  replayGlobal(afterGlobalSequence: number, limit: number, sessionId?: string): GlobalPage {
+    this.assertOpen();
+    if (!Number.isSafeInteger(afterGlobalSequence) || afterGlobalSequence < 0)
+      throw new Error('afterGlobalSequence must be a non-negative integer');
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('limit must be a positive integer');
+    if (sessionId !== undefined) validateSessionId(sessionId);
+    const rows =
+      sessionId === undefined
+        ? this.database
+            .query<GlobalPointerRow, [number, number]>(
+              `SELECT session_id, sequence, byte_offset, byte_length, global_sequence
+                 FROM events
+                WHERE global_sequence > ?
+                ORDER BY global_sequence ASC
+                LIMIT ?`,
+            )
+            .all(afterGlobalSequence, limit)
+        : this.database
+            .query<GlobalPointerRow, [string, number, number]>(
+              `SELECT session_id, sequence, byte_offset, byte_length, global_sequence
+                 FROM events
+                WHERE session_id = ? AND global_sequence > ?
+                ORDER BY global_sequence ASC
+                LIMIT ?`,
+            )
+            .all(sessionId, afterGlobalSequence, limit);
+    // Tie-safe boundary: journals written before the fleet counter existed
+    // fall back to their per-session sequence, so two sessions can legitimately
+    // share a global_sequence. The cursor is exclusive, so a page that ended
+    // mid-tie would drop the sibling — pull the rest of the tie in first.
+    const last = rows.at(-1)?.global_sequence;
+    if (last !== undefined && rows.length === limit) rows.push(...this.tieRows(last, rows, sessionId));
+    // ROWS, not resolved events: a row this scan had to skip (torn journal
+    // line, missing file) must not read as "end of backlog" to a paging
+    // caller, or the rest of the replay is silently truncated.
+    return {
+      events: this.resolveGlobalRows(rows),
+      rows: rows.length,
+      cursor: rows.at(-1)?.global_sequence ?? afterGlobalSequence,
+    };
+  }
+
+  /** The most recent `limit` events (fleet-wide, or of one session), oldest-first. */
+  tailGlobal(limit: number, sessionId?: string): SessionEvent[] {
+    this.assertOpen();
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('limit must be a positive integer');
+    if (sessionId !== undefined) validateSessionId(sessionId);
+    const rows =
+      sessionId === undefined
+        ? this.database
+            .query<GlobalPointerRow, [number]>(
+              `SELECT session_id, sequence, byte_offset, byte_length, global_sequence
+                 FROM events
+                WHERE global_sequence IS NOT NULL
+                ORDER BY global_sequence DESC
+                LIMIT ?`,
+            )
+            .all(limit)
+        : this.database
+            .query<GlobalPointerRow, [string, number]>(
+              `SELECT session_id, sequence, byte_offset, byte_length, global_sequence
+                 FROM events
+                WHERE session_id = ? AND global_sequence IS NOT NULL
+                ORDER BY global_sequence DESC
+                LIMIT ?`,
+            )
+            .all(sessionId, limit);
+    return this.resolveGlobalRows(rows.reverse());
+  }
+
+  /** Highest indexed global sequence (0 when the index holds none). */
+  latestGlobalSequence(): number {
+    this.assertOpen();
+    const row = this.database
+      .query<{ value: number | null }, []>('SELECT MAX(global_sequence) AS value FROM events')
+      .get();
+    return typeof row?.value === 'number' ? row.value : 0;
+  }
+
+  /** True when this session still holds rows indexed before `global_sequence`
+   *  existed — they are invisible to the global feed until backfilled. */
+  sessionNeedsGlobalBackfill(sessionId: string): boolean {
+    validateSessionId(sessionId);
+    this.assertOpen();
+    const row = this.database
+      .query<
+        { value: number },
+        [string]
+      >('SELECT COUNT(*) AS value FROM (SELECT 1 FROM events WHERE session_id = ? AND global_sequence IS NULL LIMIT 1)')
+      .get(sessionId);
+    return (row?.value ?? 0) > 0;
+  }
+
+  /** The next session (newest first) whose rows still need the backfill. */
+  nextSessionNeedingGlobalBackfill(): string | undefined {
+    this.assertOpen();
+    return this.database
+      .query<{ session_id: string }, []>(
+        `SELECT e.session_id AS session_id
+           FROM events e
+           JOIN sessions s ON s.id = e.session_id
+          WHERE e.global_sequence IS NULL
+          GROUP BY e.session_id
+          ORDER BY COALESCE(s.updated_at, s.created_at, s.id) DESC
+          LIMIT 1`,
+      )
+      .get()?.session_id;
+  }
+
+  /** Re-index ONE session so its rows carry a global sequence. Callers walk
+   *  sessions one at a time and yield between them: the migration must never
+   *  become the very event-loop hog it was written to remove. */
+  async backfillGlobalSequence(sessionId: string): Promise<void> {
+    validateSessionId(sessionId);
+    this.assertOpen();
+    await this.serialized(sessionId, async () => {
+      // ASYNC read: the migration walks whole journals, and doing that with
+      // readFileSync would block the event loop for the size of each file —
+      // the very hazard this whole change exists to remove.
+      const buffer = (await readBytesFrom(this.eventsFile(sessionId), 0)) ?? Buffer.alloc(0);
+      // The reindex replaces every row of this session, and each insert stamps
+      // a global sequence — so a session can never come out of here still
+      // needing the backfill, and the walk always terminates.
+      this.reindexSessionFromBuffer(sessionId, buffer);
+    });
+  }
+
+  /** The rows sharing `sequence` that this page did not already include. */
+  private tieRows(
+    sequence: number,
+    included: readonly GlobalPointerRow[],
+    sessionId: string | undefined,
+  ): GlobalPointerRow[] {
+    const seen = new Set(included.map(row => `${row.session_id}\n${row.sequence}`));
+    const rows = this.database
+      .query<GlobalPointerRow, [number]>(
+        `SELECT session_id, sequence, byte_offset, byte_length, global_sequence
+           FROM events WHERE global_sequence = ? ORDER BY session_id, sequence`,
+      )
+      .all(sequence);
+    return rows.filter(
+      row =>
+        !seen.has(`${row.session_id}\n${row.sequence}`) && (sessionId === undefined || row.session_id === sessionId),
+    );
+  }
+
+  private resolveGlobalRows(rows: readonly GlobalPointerRow[]): SessionEvent[] {
+    const events: SessionEvent[] = [];
+    const descriptors = new Map<string, number | undefined>();
+    /** Sessions re-indexed during this resolve → their refreshed pointers. */
+    const refreshed = new Map<string, Map<number, GlobalPointerRow>>();
+    try {
+      for (const row of rows) {
+        // Once a session has been re-indexed, EVERY later row of that session
+        // in this window is stale too — use the refreshed pointer, not the
+        // one the original query handed us.
+        const current = refreshed.get(row.session_id)?.get(row.sequence) ?? row;
+        let event = this.readPointer(descriptors, current);
+        if (!event && !refreshed.has(row.session_id)) {
+          // Pointer/identity mismatch: the journal was rewritten under the
+          // index. Re-index that session once and retry from fresh pointers.
+          this.reindexSessionSync(row.session_id);
+          const fresh = this.database
+            .query<GlobalPointerRow, [string]>(
+              `SELECT session_id, sequence, byte_offset, byte_length, global_sequence
+                 FROM events WHERE session_id = ?`,
+            )
+            .all(row.session_id);
+          refreshed.set(row.session_id, new Map(fresh.map(item => [item.sequence, item])));
+          const handle = descriptors.get(row.session_id);
+          if (handle !== undefined) closeSync(handle);
+          descriptors.delete(row.session_id);
+          const retry = refreshed.get(row.session_id)!.get(row.sequence);
+          if (retry) event = this.readPointer(descriptors, retry);
+        }
+        if (event) events.push(event);
+      }
+    } finally {
+      for (const descriptor of descriptors.values()) if (descriptor !== undefined) closeSync(descriptor);
+    }
+    return events;
+  }
+
+  /** Read and identity-verify one pointer row, reusing an open descriptor per
+   *  session. `undefined` means the row is unusable (missing journal, short
+   *  read, unparseable bytes, or an identity mismatch). */
+  private readPointer(descriptors: Map<string, number | undefined>, row: GlobalPointerRow): SessionEvent | undefined {
+    if (!descriptors.has(row.session_id)) {
+      let descriptor: number | undefined;
+      try {
+        descriptor = openSync(this.eventsFile(row.session_id), 'r');
+      } catch {
+        descriptor = undefined;
+      }
+      descriptors.set(row.session_id, descriptor);
+    }
+    const descriptor = descriptors.get(row.session_id);
+    if (descriptor === undefined) return undefined;
+    const buffer = Buffer.alloc(row.byte_length);
+    const read = readSync(descriptor, buffer, 0, row.byte_length, row.byte_offset);
+    if (read !== row.byte_length) return undefined;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(buffer.toString('utf8', 0, read));
+    } catch {
+      return undefined;
+    }
+    const event = parseEvent(parsed, row.session_id);
+    return event && event.sequence === row.sequence ? event : undefined;
+  }
+
+  /** Session directories present on disk — the authority the disposable index
+   *  is checked against (daemon post-wedge consistency check). */
+  async sessionIdsOnDisk(): Promise<string[]> {
+    return await this.discoverSessionIds();
   }
 
   async syncSession(sessionId: string): Promise<SyncResult> {
@@ -704,15 +971,16 @@ export class EventStore {
       .run(event.sessionId, this.sessionDirectory(event.sessionId), now());
     this.database
       .query(
-        `INSERT INTO events (session_id, sequence, time, type, byte_offset, byte_length)
-       VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO events (session_id, sequence, time, type, byte_offset, byte_length, global_sequence)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(session_id, sequence) DO UPDATE SET
          time = excluded.time,
          type = excluded.type,
          byte_offset = excluded.byte_offset,
-         byte_length = excluded.byte_length`,
+         byte_length = excluded.byte_length,
+         global_sequence = excluded.global_sequence`,
       )
-      .run(event.sessionId, event.sequence, event.time, event.type, offset, length);
+      .run(event.sessionId, event.sequence, event.time, event.type, offset, length, globalSequenceOf(event));
   }
 
   private async indexSessionMetadata(

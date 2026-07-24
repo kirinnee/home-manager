@@ -728,3 +728,130 @@ needs a fixture from an actual 735k-token relaunch frame (capture during reprodu
 warden will flag it; do NOT loop resumes (lacey-lesson: deterministic wedge).
 
 **Fix owner:** next kteam-ts round.
+
+## 2026-07-23 night — three kteamd residuals from the diene sprint (evidence-anchored)
+
+1. **Daemon wedge class (P1, twice tonight):** self-checks stop + API hangs ~11 min
+   (23:26:46Z gap; earlier ~18:5x), then self-recovers — but AFTER recovery `kteam ps`
+   is INCOMPLETE: done-marked sessions absent from ps while still writing events
+   (evidence: exec-auditor mry51raq refreeze report, sessions mry50147/mry5jclz/mry4o1br).
+   Only a full restart restores index coherence. Need: root-cause the hang (event-loop
+   starvation under load? index churn?), and a post-recovery self-consistency check
+   (ps-vs-session-dirs) that triggers reindex or self-restart.
+2. **kteam start exit-143 spawner timeouts (recurring):** responder spawns time out
+   mid-start while the session actually launches; persist-early makes it cosmetic but
+   the timeout owner is still unidentified (respond wrapper vs client vs unit).
+3. **No waiting-aware lifecycle:** parked/waiting custodians cannot survive
+   (nudge=180s/kill=300s idle; 4h turn ceiling kills long-suite babysitters and
+   ruling-parked customs — 4 cap-kills + 4 park-loops handled by lead workarounds
+   tonight). Need: a declarable waiting state (session-level, e.g. via a marker or
+   `kteam signal waiting --until/--on <condition>`) that suspends idle-kill and turn
+   ceilings while keeping heartbeat visibility.
+
+## 2026-07-24 00:25Z — fresh evidence during hardening round 2 (for audra)
+
+- Spawn false-failures ×3 in 20 min (listener slowness): `kteam start` reported
+  failure but the session WAS created and runs fine each time.
+  - 00:08Z exit 143 (caller wrapper timeout) → session eugene mry6m1va-a63d8047 alive.
+  - 00:25Z "daemon did not answer /v1/sessions within 120s" → session marcos
+    mry77urs-43a73830 alive. The 120s is the kteam CLI's OWN HTTP timeout —
+    under a slow listener the CLI declares failure for spawns the daemon
+    actually applied. Fix direction: idempotent start (client request-id +
+    daemon dedupe) or CLI re-checks for the just-created session before
+    declaring failure.
+- NEW: post-restart sessions never persist `~/.kteam/<id>/liveness.yaml`
+  (skeptical-auditor finding, artifact ~/.kteam/mry51raq-0babfd08/). Confirmed:
+  mry6ripn-544b52e3 (created 00:12:24Z post-restart), mry4o1br-f646d397
+  (resumed 00:22:33Z), mry44s2n-c682e626 — while pre-restart peers update
+  liveness.yaml every few seconds. `kteam status` counters still live, so only
+  the on-disk reflex-ledger write path is skipped for post-restart sessions.
+- `kteam send` to a busy claude session (audra, mid-tool-run) failed twice with
+  "text did not land in the busy composer" — the native queue path itself
+  rejected; earlier the SAME session queued fine while `thinking`. Queueing
+  appears state-dependent (tool_running vs thinking?) — that gap re-opens the
+  silent-loss/no-steer class for busy sessions.
+
+## 2026-07-24 02:02Z — PRODUCTION OUTAGE: hardening tests clobbered the real systemd unit
+
+- The kteamd-hardening session's test run REPLACED ~/.config/systemd/user/kteamd.service
+  with a test unit: ExecStart="/bin/kteamd" (nonexistent), KTEAM_HOME=
+  /tmp/kteam-daemon-service-test-3kfT55, logs into the test dir. systemd restarted
+  into it at 02:02:18Z → crash loop (status=203/EXEC), daemon fully down.
+- Impact: CLI unreachable ~8 min; ALL tmux panes + in-flight proofs survived
+  (KillMode=process). Engine responders correctly refused to touch the daemon and
+  filed file-first done markers. `kteam signal done` exits 0 even when the daemon
+  is unreachable — scripted callers silently believe it succeeded (separate bug).
+- Recovery: lead preserved the clobbered unit as evidence, ran `kteam daemon
+install` from the installed CLI (correct ExecStart + KTEAM_HOME=~/.kteam,
+  KillMode=process verified), daemon rebooted, panes re-adopted.
+- Fix required: hermetic tests — unit files only under an isolated
+  XDG_CONFIG_HOME/systemd root; never write the real user unit path; never
+  daemon-reload/restart the real user manager from tests. Plus: `kteam signal`
+  must exit nonzero when the daemon is unreachable.
+
+## 2026-07-24 — RESOLUTION of the three night residuals (kteamd-hardening-round-2, session mry62ao5)
+
+Root causes found (all three residuals shared ONE load bomb), fixes landed in `modules/kteam-ts`:
+
+1. **The wedge/listener flap was the Claude transcript watcher, not index churn.**
+   `ClaudeTranscriptWatcher` armed one inotify watch per directory BELOW the shared
+   harness home (`~/.kfleet/shared/claude/projects`, ~290 dirs → ~4 000 watches with a
+   dozen sessions; the live daemon held 3 838 fds 10 min after boot), and its 2 s
+   reconcile tick passed `refreshDirectories = true` — so every session re-walked the
+   WHOLE shared tree every 2 s, plus once per rename notification from any other
+   session's writes. Self-amplifying under load: 66 % CPU in state R, timers frozen
+   11 min (23:26:46Z → 23:37:55Z), accepts starved. **Fix:** watch only the
+   transcript's own directory (1–2 watches/session), never force a refresh from the
+   tick, throttle full-tree rediscovery (60 s) and back off search walks after 5 misses.
+   Second, smaller bomb: the fleet-wide `/v1/events` feed (`replay(undefined, …)`)
+   loaded EVERY session's journal into memory, mapped and sorted it, then returned
+   ≤ 1 000 — the UI's list page connects with `after=-200` and reconnects with backoff.
+   **Fix:** an indexed `global_sequence` column (additive migration, no rebuild demand)
+   - bounded SQL windows; the fleet feed is the newest 5 000 events, per-session replay
+     stays complete.
+2. **Post-restart sessions had NO monitor tick at all** (the liveness.yaml report):
+   `startMonitor` awaited the transcript watcher BEFORE arming the loop, and under the
+   storm that await did not settle — so every session started after the 23:49 restart
+   ran with no snapshots, no `checks/`, no `liveness.yaml`, no stall reflex and no turn
+   ceiling, while `monitors.has(id)` made the self-check call it healthy. **Fix:** arm
+   the loop first; the watcher attaches after (and stops itself if the loop already
+   exited).
+3. **exit-143 spawn timeouts:** the owner is the CALLER's timeout, reachable because
+   `kteam start` held its HTTP request through a cross-session-serialized bootstrap
+   whose tail was that same watcher walk. **Fix:** `start` answers within 45 s (or
+   immediately with `--detach`) and finishes launching in the background; creates are
+   idempotent per request id + payload hash; `/v1/sessions/by-request/<id>?payload=`
+   resolves a lost response; the CLI re-resolves before reporting failure and has a
+   120 s deadline (15 s for the recovery lookups). Control actions refuse to touch a
+   session whose first launch is still queued, and a bootstrap never kills a pane it
+   did not create.
+4. **Post-wedge ps incoherence:** the self-check now measures its OWN timer lateness
+   (≥ 180 s ⇒ `fleet.daemon_wedge`) and reconciles the SQLite index against the session
+   directories — reindexing unindexed/stale rows and re-adopting terminal sessions whose
+   journal still grows (once each); an index that will not heal after 3 passes requests
+   a clean restart, but only when the service manager actually owns the pid and at most
+   once per 30 min (persisted stamp).
+5. **Waiting-aware lifecycle:** `kteam signal waiting --until <45m|2h|ISO> --on "<cond>"`
+   (+ `signal working`). Suspends nudge/stall-kill/turn-ceiling, holds the status against
+   transcript recomputation, heartbeats every 5 min, wakes the teammate at the deadline
+   (every wait is force-woken within 4 h), credits parked time back against the ceiling,
+   and is cleared by any new turn or terminal transition. The warden treats a declared
+   wait as deliberate and only flags it once its wake is overdue.
+
+## 2026-07-24 02:02Z — SELF-INFLICTED: a test clobbered the LIVE systemd unit
+
+- **Problem:** a test I added for `DaemonService.supervises()` constructed the class with
+  POSITIONAL args (`new DaemonService(paths, bin, runner, 'linux')`), so `options` was
+  `undefined` and every default applied — the REAL home and the REAL command runner.
+  `install()` then overwrote `~/.config/systemd/user/kteamd.service` with
+  `ExecStart="/bin/kteamd"` and `KTEAM_HOME=/tmp/kteam-daemon-service-test-3kfT55`, and
+  ran `systemctl --user daemon-reload`. The production daemon crash-looped 203/EXEC
+  until the lead recovered it with `kteam daemon install`.
+- **Why it slipped through:** `bun test` does not typecheck, and I ran the new file with
+  `bun test` before `tsc`. TypeScript would have rejected the call outright.
+- **Fix (landed):** `DaemonService` now throws when `KTEAM_TEST_HERMETIC=1` and either
+  `home` or `runner` is defaulted; `daemon-service.test.ts` sets that flag at import, and
+  two tests pin it (the refusal, and that an install writes only under the temp home).
+  Test hermeticity is now part of this deliverable, not a footnote.
+- **Lesson for every round:** run `bun run check` (tsc THEN tests) — never a bare
+  `bun test` — on any test that can touch the machine's own service manager.

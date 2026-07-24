@@ -173,6 +173,7 @@ describe('send() delivery holes (turn-012 fix round)', () => {
     const calls: string[] = [];
     const manager = bareManager();
     manager.resolveRef = (id: string) => id;
+    manager.launching = new Map<string, number>();
     manager.serialized = async (_id: string, work: () => Promise<unknown>) => await work();
     manager.attachments = { buildImageReferenceBlock: async () => '' };
     manager.get = async () => ({
@@ -239,6 +240,7 @@ describe('send() delivery holes (turn-012 fix round)', () => {
     };
     manager.emit = async () => ({});
     manager.monitors = new Map();
+    manager.launching = new Map<string, number>();
     const queued = await (
       manager as unknown as {
         send: (id: string, request: { message: string }) => Promise<{ disposition: string }>;
@@ -281,6 +283,7 @@ describe('send() delivery holes (turn-012 fix round)', () => {
     };
     manager.emit = async () => ({});
     manager.monitors = new Map();
+    manager.launching = new Map<string, number>();
     await expect(
       (manager as unknown as { send: (id: string, request: { message: string }) => Promise<unknown> }).send('s1', {
         message: 'doomed',
@@ -326,6 +329,7 @@ describe('send() delivery holes (turn-012 fix round)', () => {
     manager.autoContinued = new Set();
     manager.doneDeferred = new Set();
     manager.monitors = new Map();
+    manager.launching = new Map<string, number>();
     manager.get = async () => ({
       directory: path.join(home, 's1'),
       config: { id: 's1', tmuxSession: 'kteam-s1-agent', turn: 3, directSendMaxChars: 500 },
@@ -398,6 +402,7 @@ describe('send() delivery holes (turn-012 fix round)', () => {
     };
     manager.emit = async () => ({});
     manager.monitors = new Map();
+    manager.launching = new Map<string, number>();
     const result = await (
       manager as unknown as {
         send: (id: string, request: { message: string; now?: boolean }) => Promise<{ disposition: string }>;
@@ -430,8 +435,12 @@ describe('partition-tolerant loud bootstrap (turn-019 P0)', () => {
     manager.startWarden = async () => {
       ran.push('warden');
     };
+    manager.backfillGlobalSequences = async () => {
+      ran.push('global-sequence-backfill');
+    };
     await (manager as unknown as { bootstrap: () => Promise<void> }).bootstrap();
-    expect(ran).toEqual(['import', 'global-sequence', 'recover', 'warden']); // warden ALWAYS armed
+    // warden ALWAYS armed, and the index migration runs after it
+    expect(ran).toEqual(['import', 'global-sequence', 'recover', 'warden', 'global-sequence-backfill']);
     const errors = manager.bootstrapErrors as string[];
     expect(errors).toHaveLength(2);
     expect(errors[0]).toContain('import');
@@ -445,6 +454,7 @@ describe('partition-tolerant loud bootstrap (turn-019 P0)', () => {
     const manager = bareManager();
     manager.paths = createPaths(home);
     manager.monitors = new Map();
+    manager.launching = new Map<string, number>();
     manager.bootstrapErrors = [];
     manager.emit = async () => ({});
     manager.list = async () => [
@@ -514,6 +524,7 @@ describe('partition-tolerant loud bootstrap (turn-019 P0)', () => {
     let wardenArmed = 0;
     manager.closed = false;
     manager.monitors = new Map();
+    manager.launching = new Map<string, number>();
     manager.bootstrapErrors = ['bootstrap phase recover failed: boom'];
     manager.wardenTimer = undefined;
     manager.wardenState = { lastSweepAt: new Date(Date.now() - 60 * 60_000).toISOString() };
@@ -525,6 +536,7 @@ describe('partition-tolerant loud bootstrap (turn-019 P0)', () => {
     manager.emitTransient = (type: string) => {
       transient.push(type);
     };
+    manager.consistencyCheck = async () => ({ missingFromIndex: [], staleRows: [], zombies: [], repaired: [] });
     manager.startMonitor = async (id: string) => {
       started.push(id);
     };
@@ -542,6 +554,7 @@ describe('partition-tolerant loud bootstrap (turn-019 P0)', () => {
     const transient: string[] = [];
     manager.closed = false;
     manager.monitors = new Map([['s1', {}]]);
+    manager.launching = new Map<string, number>();
     manager.bootstrapErrors = [];
     manager.wardenTimer = setInterval(() => undefined, 1_000_000);
     manager.wardenState = { lastSweepAt: new Date().toISOString() };
@@ -552,6 +565,7 @@ describe('partition-tolerant loud bootstrap (turn-019 P0)', () => {
     manager.emitTransient = (type: string) => {
       transient.push(type);
     };
+    manager.consistencyCheck = async () => ({ missingFromIndex: [], staleRows: [], zombies: [], repaired: [] });
     await (manager as unknown as { selfCheck: () => Promise<void> }).selfCheck();
     clearInterval(manager.wardenTimer as ReturnType<typeof setInterval>);
     expect(transient).toEqual([]);
@@ -586,6 +600,7 @@ describe('needs_human flag + sweep dedupe (turn-018)', () => {
     manager.emitTransient = (type: string) => {
       transient.push(type);
     };
+    manager.consistencyCheck = async () => ({ missingFromIndex: [], staleRows: [], zombies: [], repaired: [] });
     const sessions = [{ config: { id: 's1', teammate: 'lacey' }, state, directory: '/x/s1' }];
     await (manager as unknown as { reconcileNeedsHuman: (sessions: unknown[]) => Promise<void> }).reconcileNeedsHuman(
       sessions,
@@ -841,6 +856,8 @@ describe('short-direct sends (turn-013)', () => {
       manager.autoContinued = new Set();
       manager.doneDeferred = new Set();
       manager.monitors = new Map();
+      manager.launching = new Map<string, number>();
+      manager.launching = new Map<string, number>();
       manager.get = async () => ({
         directory: path.join(home, 's1'),
         config: { id: 's1', tmuxSession: 'kteam-s1-agent', turn: 1, directSendMaxChars: 500 },
@@ -1130,6 +1147,7 @@ describe('boot recovery re-adopts live panes (A1)', () => {
     const manager = bareManager();
     manager.paths = createPaths(home);
     manager.monitors = new Map();
+    manager.launching = new Map<string, number>();
     manager.bootstrapErrors = [];
     manager.emit = async () => ({});
     manager.list = async () => [
@@ -1167,6 +1185,7 @@ describe('boot recovery re-adopts live panes (A1)', () => {
     const manager = bareManager();
     manager.paths = createPaths(home);
     manager.monitors = new Map();
+    manager.launching = new Map<string, number>();
     manager.bootstrapErrors = [];
     manager.emit = async () => ({});
     manager.list = async () => [
@@ -1202,6 +1221,7 @@ describe('boot reconciliation honors the done marker (G4)', () => {
     const manager = bareManager();
     manager.paths = paths;
     manager.monitors = new Map();
+    manager.launching = new Map<string, number>();
     manager.bootstrapErrors = [];
     manager.emit = async () => ({});
     manager.list = async () => [

@@ -169,6 +169,21 @@ export interface SessionState {
   retryAttempt?: number;
   /** True only after the harness transcript records the current turn ending. */
   turnCompleted?: boolean;
+  /** A DECLARED wait (`kteam signal waiting`): the teammate is deliberately
+   *  parked on an external condition, not stalled. While set, the idle nudge,
+   *  the stall kill, and the turn ceiling are suspended and the monitor emits
+   *  heartbeats instead. Cleared on expiry, on the next turn, or by
+   *  `kteam signal working`. */
+  waiting?: {
+    since: string;
+    /** ISO deadline; at expiry the daemon wakes the teammate. Absent = open-ended. */
+    until?: string;
+    /** Human-readable description of what is being waited for. */
+    condition?: string;
+  };
+  /** Seconds this turn has spent in declared waits, credited back against the
+   *  turn ceiling so parked time never counts as runtime. */
+  waitingCreditSeconds?: number;
 }
 
 export interface KTeamEvent<T = unknown> {
@@ -207,6 +222,10 @@ export interface StartSessionRequest {
    *  daemon's own assignment record, never against this field. */
   stopCapability?: string;
   maxSnapshots?: number;
+  /** Return as soon as the session is persisted instead of waiting for the
+   *  TUI bootstrap. The launch continues in the background either way — this
+   *  only decides whether the caller waits for it. */
+  detach?: boolean;
   initialAttachments?: Array<{
     filename: string;
     mime?: string;
@@ -226,6 +245,19 @@ export interface SendRequest {
  *  the next prompt-ready boundary, or delivered by reviving a finished
  *  session as its next turn. Additive — absent on older daemons. */
 export type SendDisposition = 'delivered' | 'queued' | 'revived';
+
+/** Teammate-driven lifecycle signals. `done`/`help` are the original pair;
+ *  `waiting`/`working` declare and end a deliberate park (see SessionState.waiting).
+ *  ONE definition: the CLI, the API route, and the type all read this array. */
+export const SIGNAL_KINDS = ['done', 'help', 'waiting', 'working'] as const;
+export type SignalKind = (typeof SIGNAL_KINDS)[number];
+
+export interface SignalOptions {
+  /** Deadline for a declared wait: an ISO timestamp or a duration (`45m`, `2h`). */
+  until?: string;
+  /** What is being waited for — published in status, events, and heartbeats. */
+  condition?: string;
+}
 
 export interface Recommendation {
   binary: string;

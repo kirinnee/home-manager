@@ -26,7 +26,7 @@ import {
 } from './harness';
 import type { WardenConfig } from './daemon-config';
 import { atomicJson, now, readJson, run, writeTextAtomic } from './io';
-import { NAME_WINDOW_MS, pickTeammateName } from './names';
+import { NAME_WINDOW_MS, pickTeammateName, sessionName } from './names';
 import type { KTeamPaths } from './paths';
 import { configFile, markerFile, sessionDir, stateFile, turnLog, turnPrompt } from './paths';
 import type {
@@ -42,6 +42,7 @@ import { searchRecords } from './transcript-search';
 import {
   detectAnomalies,
   fingerprintAnomalies,
+  WAITING_BACKSTOP_MS,
   WARDEN_LABEL,
   type WardenAnomaly,
   type WardenSessionView,
@@ -66,12 +67,19 @@ import type {
   SessionConfig,
   SessionState,
   SessionStatus,
+  SignalKind,
+  SignalOptions,
   StartSessionRequest,
 } from './types';
 
 interface MonitorHandle {
   abort: AbortController;
   transcript?: ClaudeTranscriptWatcher | CodexTranscriptWatcher;
+  /** In-flight transcript arming. Both startMonitor and the tick loop ask for
+   *  the codex watcher, and `transcript` is only set at the END of that
+   *  async work — without this they each start one, doubling every event and
+   *  leaking the loser (which nothing ever stops). */
+  transcriptStarting?: Promise<void>;
   loop?: Promise<void>;
   /** Interrupts the loop's current sleep so a freshly queued send is
    *  considered immediately instead of after the full tick. */
@@ -91,6 +99,11 @@ interface SessionManagerOptions {
   projectRoots: string[];
   warden: WardenConfig;
   contextWindows?: Record<string, number>;
+  /** Invoked when the daemon decides its own index is unhealable and a clean
+   *  restart is the only repair. The entrypoint owns HOW (and WHETHER — only a
+   *  process a service manager will re-spawn may exit); the manager only
+   *  decides WHEN. Returns false when it declined, so the manager can say so. */
+  onSelfRestart?: () => boolean | Promise<boolean>;
 }
 interface WardenRuntimeState {
   lastSweepAt?: string;
@@ -134,6 +147,90 @@ class ResumeCancelled extends Error {}
 const terminalStatuses: SessionStatus[] = ['completed', 'failed', 'stalled', 'stopped'];
 const protectedStatuses: SessionStatus[] = [...terminalStatuses, 'kill_failed'];
 const waitingStatuses: SessionStatus[] = ['waiting', 'awaiting_question', 'awaiting_user', 'rate_limited'];
+/** How far back a FLEET-WIDE replay cursor may reach. The cross-session feed
+ *  is a live stream, not an archive: a client asking for the whole fleet from
+ *  sequence 0 would page through every event ever recorded. Per-session
+ *  replay stays complete — only the fleet feed is windowed. */
+const GLOBAL_BACKLOG_MAX = 5_000;
+/** A self-check tick this late means the event loop stopped running: the
+ *  timer interval is 60 s, so three missed ticks is unambiguous. */
+const WEDGE_GAP_MS = 180_000;
+/** A terminal session whose journal keeps growing this long after finishedAt
+ *  is still doing work nothing supervises (and `ps` cannot show). */
+const TERMINAL_ACTIVITY_GRACE_MS = 60_000;
+/** Consecutive consistency passes that failed to heal the index before a
+ *  clean self-restart is requested. */
+const INCOHERENT_RESTART_THRESHOLD = 3;
+/** Minimum wall-clock gap between two self-restarts, across process lifetimes. */
+const SELF_RESTART_COOLDOWN_MS = 30 * 60_000;
+/** How long `start` holds its HTTP request open waiting for the TUI bootstrap
+ *  before answering with the persisted 'starting' session and letting the
+ *  launch finish in the background. Comfortably under every caller deadline
+ *  that produced the exit-143 spawn timeouts. */
+const START_WAIT_MS = 45_000;
+/** How long a queued first launch is given before the self-check stops
+ *  excluding it and repairs (or fails) it like any other session. */
+const LAUNCH_GRACE_MS = 10 * 60_000;
+/** How many sessions the boot-time global-sequence migration walks (newest
+ *  first). The fleet feed is a recent window, and any older session heals on
+ *  its first replay — so boot pays for the useful end only, not for every
+ *  journal ever written. */
+const GLOBAL_BACKFILL_SESSIONS = 50;
+/** How often a declared wait publishes a heartbeat, so "parked" never looks
+ *  the same as "gone" to a lead reading the event stream. */
+const WAITING_HEARTBEAT_MS = 300_000;
+
+/** True when the reflex layer and the turn ceiling must stand down: a declared
+ *  wait, a waiting status, or an interrupted turn. `state.waiting` — not the
+ *  status — is the authority for a park, because transcript records recompute
+ *  the status every few seconds. */
+export function lifecycleSuspended(state: SessionState): boolean {
+  return state.waiting !== undefined || waitingStatuses.includes(state.status) || state.status === 'interrupted';
+}
+
+/** The turn ceiling, with declared-wait time credited back: a babysitter parked
+ *  for three hours has not been RUNNING for three hours. */
+export function turnCeilingMs(config: Pick<SessionConfig, 'timeoutSeconds'>, state: SessionState): number {
+  return (config.timeoutSeconds + (state.waitingCreditSeconds ?? 0)) * 1000;
+}
+
+/** Turn a `--until` argument into an ISO deadline. Accepts an ISO timestamp or
+ *  a relative duration (`45m`, `2h`, `90s`, `1h30m`). */
+export function parseDeadline(value: string, fromMs = Date.now()): string {
+  const text = value.trim();
+  if (!text) throw new Error('--until requires a duration (45m, 2h) or an ISO timestamp');
+  const duration = text.match(/^(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?$/i);
+  if (duration && duration.slice(1).some(part => part !== undefined)) {
+    const [hours, minutes, seconds] = duration.slice(1).map(part => Number(part ?? 0)) as [number, number, number];
+    const ms = (hours * 3600 + minutes * 60 + seconds) * 1000;
+    if (ms <= 0) throw new Error('--until must be a positive duration');
+    return new Date(fromMs + Math.min(ms, WAITING_BACKSTOP_MS)).toISOString();
+  }
+  // Only a real ISO-8601 DATE is accepted here. Date.parse is far looser —
+  // it reads a bare "45" as the YEAR 2045, so the very plausible typo
+  // `--until 45` (for 45m) would have parked a session, unsupervised, for two
+  // decades: no nudge, no stall kill, no ceiling, and no warden verdict.
+  if (!/^\d{4}-\d{2}-\d{2}([T ]|$)/.test(text))
+    throw new Error(`could not read "${value}" as a duration (45m, 2h, 90s) or an ISO timestamp`);
+  const absolute = Date.parse(text);
+  if (!Number.isFinite(absolute)) throw new Error(`could not read "${value}" as a duration or ISO timestamp`);
+  if (absolute <= fromMs) throw new Error(`--until ${value} is already in the past`);
+  // The backstop is a ceiling on every wait, not just open-ended ones: a park
+  // must always end within a bounded time of when it was declared.
+  return new Date(Math.min(absolute, fromMs + WAITING_BACKSTOP_MS)).toISOString();
+}
+
+/** What one index-vs-disk reconciliation found. */
+interface ConsistencyReport {
+  /** Session directories with no index row at all (invisible to `ps`). */
+  missingFromIndex: string[];
+  /** Index rows whose status disagrees with the session's own state.json. */
+  staleRows: string[];
+  /** Terminal sessions whose journal is still growing. */
+  zombies: string[];
+  /** Sessions this pass reindexed or re-adopted. */
+  repaired: string[];
+}
 
 async function interruptibleSleep(
   milliseconds: number,
@@ -164,6 +261,23 @@ export class SessionManager implements KTeamService {
   private readonly autoContinued = new Set<string>();
   /** One-shot flags for done-markers deferred while the pane is still working. */
   private readonly doneDeferred = new Set<string>();
+  /** Sessions whose FIRST launch is still queued behind the bootstrap chain.
+   *  Their tmux session does not exist yet, so a monitor started for them
+   *  would read a dead pane and mark a launching session `failed` — and a
+   *  terminal status suppresses every later patch, including the launch's own
+   *  `session.running`. Bounded `start`/`--detach` make this window routine. */
+  private readonly launching = new Map<string, number>();
+  /** True while this session's FIRST launch is still plausibly queued behind
+   *  the cross-session bootstrap chain. */
+  private launchingRecently(id: string): boolean {
+    const startedAt = this.launching.get(id);
+    return startedAt !== undefined && Date.now() - startedAt < LAUNCH_GRACE_MS;
+  }
+
+  /** Zombie sessions already re-adopted this daemon lifetime (once each). */
+  private readonly readoptedZombies = new Set<string>();
+  /** id → when this declared wait last published a heartbeat. */
+  private readonly waitingHeartbeats = new Map<string, number>();
   /** TUI bootstrap (launch + first inject) serialized ACROSS sessions: rapid
    *  concurrent starts race the injector — only the first survives, the rest
    *  land typed-but-never-started. */
@@ -179,6 +293,16 @@ export class SessionManager implements KTeamService {
   /** Armed in create(), independent of bootstrap — the watchdog for the
    *  silent-partial-boot class. */
   private selfCheckTimer?: ReturnType<typeof setInterval>;
+  /** True once the boot import finished: the consistency check is meaningless
+   *  before it (everything on disk is legitimately unindexed). */
+  private indexImported = false;
+  /** When the self-check last ran; its lateness is the wedge detector. */
+  private lastSelfCheckAt = 0;
+  /** Consecutive consistency passes that left `ps` incomplete. */
+  private consecutiveIncoherentChecks = 0;
+  private selfRestartRequested = false;
+  /** An unhealable index has already been reported (once per daemon). */
+  private selfRestartAnnounced = false;
   private wardenState: WardenRuntimeState = {};
   private lastSweep?: WardenSweep;
   private lastEmittedFingerprint = '';
@@ -213,9 +337,38 @@ export class SessionManager implements KTeamService {
    *  starting the missing monitors and re-arming the warden. */
   private async selfCheck(): Promise<void> {
     if (this.closed) return;
+    // The timer's OWN lateness is the wedge detector: this interval fires
+    // every 60 s, so a multi-minute gap means the event loop was starved (the
+    // 2026-07-23 incident: 23:26:46Z → 23:37:55Z, no timers, no accepts).
+    // Nothing the daemon believes about the fleet survives that gap
+    // unverified, so a wedge always forces a full consistency pass.
+    const tickAt = Date.now();
+    const gapMs = this.lastSelfCheckAt === 0 ? 0 : tickAt - this.lastSelfCheckAt;
+    this.lastSelfCheckAt = tickAt;
+    const wedged = gapMs >= WEDGE_GAP_MS;
+    if (wedged) {
+      const gapSeconds = Math.round(gapMs / 1000);
+      console.error(
+        `kteamd self-check: event loop was starved for ${gapSeconds}s (timer gap) — verifying index against session directories`,
+      );
+      this.emitTransient('fleet.daemon_wedge', {
+        gapSeconds,
+        since: new Date(tickAt - gapMs).toISOString(),
+        monitors: this.monitors.size,
+      });
+    }
+    await this.consistencyCheck(wedged).catch(error =>
+      console.error(`kteamd self-check: consistency check failed: ${String(error)}`),
+    );
     const sessions = await this.list();
     const unmonitored = sessions.filter(
-      view => !terminalStatuses.includes(view.state.status) && !this.monitors.has(view.config.id),
+      view =>
+        !terminalStatuses.includes(view.state.status) &&
+        !this.monitors.has(view.config.id) &&
+        // …but only while the launch is plausibly still queued. A bootstrap
+        // that never finishes (one hung tmux command holds the whole chain)
+        // must not hide its session from repair forever.
+        !this.launchingRecently(view.config.id),
     );
     const lastSweepMs = this.wardenState.lastSweepAt ? Date.parse(this.wardenState.lastSweepAt) : 0;
     const sweepStale =
@@ -247,6 +400,170 @@ export class SessionManager implements KTeamService {
     }
   }
 
+  /** `kteam ps` reads the disposable SQLite index; the session DIRECTORIES are
+   *  the authority. After the 2026-07-23 wedge the two disagreed — sessions
+   *  were missing from `ps` while their journals kept growing — and only a
+   *  full daemon restart restored coherence.
+   *
+   *  This is that reconciliation, made routine: membership is compared every
+   *  tick (cheap), and a deep pass (per-session state + zombie detection)
+   *  runs after a wedge or whenever membership drifted. Everything found is
+   *  repaired in place — reindex the row, re-adopt the session with a live
+   *  monitor — and only a discrepancy that SURVIVES repair escalates to a
+   *  clean self-restart, so restarts stay a last resort (they cost every live
+   *  pane in the fleet). */
+  private async consistencyCheck(deep: boolean): Promise<ConsistencyReport> {
+    const report: ConsistencyReport = { missingFromIndex: [], staleRows: [], zombies: [], repaired: [] };
+    // Never race the boot import. Until it finishes, EVERY session directory
+    // legitimately looks "missing from the index" — repairing against that
+    // would duplicate the import's work and, three passes in, restart a daemon
+    // that was merely still booting (a permanent boot loop).
+    if (!this.indexImported) return report;
+    const onDisk = await this.store.sessionIdsOnDisk();
+    const onDiskSet = new Set(onDisk);
+    const indexed = this.store.listSessions();
+    const indexedIds = new Set(indexed.map(item => item.id));
+    for (const id of onDisk) if (!indexedIds.has(id)) report.missingFromIndex.push(id);
+    if (deep || report.missingFromIndex.length > 0) {
+      for (const item of indexed) {
+        // Rows for deleted/purged directories are metadata-only leftovers,
+        // not incoherence.
+        if (!onDiskSet.has(item.id)) continue;
+        const state = await this.store.readState<SessionState>(item.id).catch(() => undefined);
+        if (!state) continue;
+        if (state.status !== item.status) report.staleRows.push(item.id);
+        if (terminalStatuses.includes(state.status) && (await this.journalOutlivedTerminal(item.id, state)))
+          report.zombies.push(item.id);
+      }
+    }
+    const drifted = report.missingFromIndex.length + report.staleRows.length + report.zombies.length;
+    if (drifted === 0) {
+      this.consecutiveIncoherentChecks = 0;
+      return report;
+    }
+    console.error(
+      `kteamd consistency: ${report.missingFromIndex.length} unindexed, ${report.staleRows.length} stale row(s), ` +
+        `${report.zombies.length} terminal-but-active — repairing`,
+    );
+    for (const id of [...report.missingFromIndex, ...report.staleRows]) {
+      const synced = await this.store.syncSession(id).then(
+        () => true,
+        error => {
+          console.error(`kteamd consistency: reindex of ${id} failed: ${String(error)}`);
+          return false;
+        },
+      );
+      if (synced) report.repaired.push(id);
+    }
+    // A terminal session whose journal keeps growing still owns a live,
+    // UNMONITORED pane: its completion was recorded but never carried out.
+    // Re-adopting it lets the normal monitor finish the job (it defers while
+    // the pane is genuinely working, then reaps it) instead of leaving work
+    // that `ps` cannot show and nothing supervises.
+    for (const id of report.zombies) {
+      // ONCE per session per daemon lifetime. The re-adopt itself would
+      // otherwise re-trigger its own detector — the readopt event lands in the
+      // journal whose mtime IS the zombie test, and a monitor over a dead pane
+      // exits immediately — so an unguarded repair loops forever.
+      if (this.monitors.has(id) || this.readoptedZombies.has(id)) continue;
+      this.readoptedZombies.add(id);
+      await this.startMonitor(id).then(
+        () => report.repaired.push(id),
+        error => console.error(`kteamd consistency: re-adopt of ${id} failed: ${String(error)}`),
+      );
+    }
+    // Verify the repair rather than trusting it: membership that is STILL
+    // wrong after reindexing means the index cannot be healed in place.
+    const stillMissing = (await this.store.sessionIdsOnDisk()).filter(id => !this.store.getSession(id));
+    this.consecutiveIncoherentChecks = stillMissing.length > 0 ? this.consecutiveIncoherentChecks + 1 : 0;
+    this.emitTransient('fleet.index_incoherent', {
+      missingFromIndex: report.missingFromIndex,
+      staleRows: report.staleRows,
+      zombies: report.zombies,
+      repaired: report.repaired.filter(id => !stillMissing.includes(id)),
+      stillMissing,
+      consecutive: this.consecutiveIncoherentChecks,
+    });
+    if (this.consecutiveIncoherentChecks >= INCOHERENT_RESTART_THRESHOLD) await this.requestSelfRestart(stillMissing);
+    return report;
+  }
+
+  /** True when a terminal session's journal kept growing well after it was
+   *  declared finished — the "done-marked but still writing events" shape. */
+  private async journalOutlivedTerminal(id: string, state: SessionState): Promise<boolean> {
+    const finishedMs = state.finishedAt ? Date.parse(state.finishedAt) : 0;
+    if (!Number.isFinite(finishedMs) || finishedMs === 0) return false;
+    const info = await stat(path.join(sessionDir(this.paths, id), 'events.jsonl')).catch(() => undefined);
+    if (!info) return false;
+    return info.mtimeMs - finishedMs >= TERMINAL_ACTIVITY_GRACE_MS;
+  }
+
+  /** Last resort: an index that cannot be healed in place is fixed by a clean
+   *  restart (the service manager restarts us; the journals are authoritative,
+   *  so boot rebuilds from disk). Announced, evidenced, and only ever from a
+   *  quiescent close — never a hard exit that abandons in-flight writes. */
+  private async requestSelfRestart(unhealable: string[]): Promise<void> {
+    if (this.selfRestartRequested) return;
+    // ACROSS restarts too: a condition the boot cannot fix (an unreadable
+    // journal, a directory the index refuses) would otherwise restart the
+    // daemon every few minutes forever, dropping fleet supervision for each
+    // boot window. One restart per cooldown, then live with it and complain.
+    const stampFile = path.join(this.paths.daemon, 'self-restart.json');
+    const stamp = await readJson<{ at?: string }>(stampFile).catch(() => ({}) as { at?: string });
+    const lastAt = stamp.at ? Date.parse(stamp.at) : 0;
+    const cooling = lastAt > 0 && Date.now() - lastAt < SELF_RESTART_COOLDOWN_MS;
+    const headline =
+      `kteamd: session index is unhealable after ${this.consecutiveIncoherentChecks} passes ` +
+      `(${unhealable.length} session(s) invisible to ps) — `;
+    // The report is announced ONCE per outcome, but the decision is re-made
+    // every pass: whether a restart is possible is the ENTRYPOINT's answer
+    // (it asks the service manager whether it owns this pid) and can change,
+    // so a single "no" must not silence the daemon about a broken index for
+    // the rest of its life.
+    const announceOnce = (detail: string, data: Record<string, unknown>) => {
+      if (this.selfRestartAnnounced) return;
+      this.selfRestartAnnounced = true;
+      console.error(headline + detail);
+      this.emitTransient('fleet.daemon_self_restart', {
+        reason: 'session index unhealable in place',
+        sessions: unhealable.slice(0, 20),
+        consecutive: this.consecutiveIncoherentChecks,
+        ...data,
+      });
+    };
+    if (cooling) {
+      announceOnce(
+        `NOT restarting: a self-restart already happened within ${Math.round(SELF_RESTART_COOLDOWN_MS / 60_000)}m — this needs a human`,
+        { supervised: true, cooling: true },
+      );
+      return;
+    }
+    this.selfRestartRequested = true;
+    // Stamp BEFORE handing over: the handler drains and exits, so a stamp
+    // written after it may never land — and an unstamped restart loses the
+    // cooldown that stops a restart loop. A declined restart takes it back.
+    await atomicJson(stampFile, { at: now(), sessions: unhealable.slice(0, 20) }).catch(() => undefined);
+    // A handler that THROWS is a decline, not a restart: treating it as one
+    // would leave the latch and the stamp set for a restart that never
+    // happened, disabling the repair for the next 30 minutes.
+    const restarting = await (async () => (await this.options.onSelfRestart?.()) ?? false)().catch(error => {
+      console.error(`kteamd: self-restart handler failed: ${String(error)}`);
+      return false;
+    });
+    if (restarting) {
+      announceOnce('restarting cleanly', { supervised: true, cooling: false });
+      return;
+    }
+    // Nothing would re-spawn this daemon (started by hand, no unit owns the
+    // pid). Un-latch and un-stamp so a later pass reconsiders.
+    this.selfRestartRequested = false;
+    await rm(stampFile, { force: true }).catch(() => undefined);
+    announceOnce(
+      'NOT restarting: this daemon is not under a service manager. Restart it yourself: `kteam daemon restart`',
+      { supervised: false, cooling: false },
+    );
+  }
+
   /** Index journals, reconcile survivors, and arm the warden. Runs AFTER the
    *  API socket is listening — early requests see a possibly-partial index
    *  (which only grows) rather than a connection refused. */
@@ -271,12 +588,37 @@ export class SessionManager implements KTeamService {
       }
     };
     await phase('import', () => this.store.importFromDisk());
+    // Set even when the phase FAILED: a partial index is exactly what the
+    // consistency check should repair — it just must not race the import.
+    this.indexImported = true;
     await phase('global-sequence', () => this.initializeGlobalSequence());
     await phase('recover', () => this.recover());
     await phase('warden', () => this.startWarden());
+    await phase('global-sequence-backfill', () => this.backfillGlobalSequences());
     if (this.bootstrapErrors.length > 0) {
       this.emitTransient('fleet.bootstrap_errors', { errors: this.bootstrapErrors });
     }
+  }
+
+  /** One-time migration for index rows written before events carried an
+   *  indexed global sequence. Newest session first — the useful end of the
+   *  fleet feed is correct within seconds — and one session per turn of the
+   *  loop, so the migration never starves the event loop it exists to
+   *  protect. */
+  private async backfillGlobalSequences(limit = GLOBAL_BACKFILL_SESSIONS): Promise<void> {
+    let migrated = 0;
+    while (!this.closed && migrated < limit) {
+      const next = this.store.nextSessionNeedingGlobalBackfill();
+      if (next === undefined) break;
+      await this.store.backfillGlobalSequence(next);
+      migrated += 1;
+      await Bun.sleep(5);
+    }
+    if (migrated > 0)
+      console.log(
+        `kteamd: global-sequence backfill covered ${migrated} recent session(s)` +
+          `${this.store.nextSessionNeedingGlobalBackfill() ? '; older ones heal on first replay' : ''}`,
+      );
   }
 
   async close(): Promise<void> {
@@ -496,7 +838,7 @@ export class SessionManager implements KTeamService {
     const createdAt = now();
     const config: SessionConfig = {
       id,
-      name: (request.name ?? prompt.split(/\s+/).slice(0, 5).join('-')).replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 48),
+      name: sessionName(request.name ?? prompt.split(/\s+/).slice(0, 5).join('-')),
       teammate: this.assignTeammateName(),
       label,
       parent: parentView?.config.id,
@@ -560,6 +902,50 @@ export class SessionManager implements KTeamService {
       { status: 'starting', startedAt: now(), health: 'healthy', nudgedAt: undefined },
       'session.starting',
     );
+    // The TUI bootstrap is serialized ACROSS sessions, so a launch storm makes
+    // each caller wait for every queued predecessor. Callers have their own
+    // deadlines: the exec responders SIGTERMed `kteam start` (exit 143) while
+    // the daemon went on to create the session anyway — a launch reported as
+    // failed that a retry then duplicated. So the REQUEST is bounded here: the
+    // session is already persisted and its bootstrap keeps running in the
+    // background, and the caller gets a real view of a 'starting' session
+    // instead of an open socket and a timeout.
+    this.launching.set(id, Date.now());
+    const bootstrap = this.bootstrapSession(id, config).finally(() => this.launching.delete(id));
+    await this.awaitBootstrap(id, bootstrap, request.detach === true ? 0 : START_WAIT_MS);
+    return await this.get(id);
+  }
+
+  /** Wait for a launch, but only for `waitMs`. A bootstrap that fails inside
+   *  the window throws (callers keep today's fast-failure semantics); one that
+   *  is merely SLOW is announced and left running in the background. */
+  private async awaitBootstrap(id: string, bootstrap: Promise<void>, waitMs: number): Promise<void> {
+    let bootstrapError: unknown;
+    const guarded = bootstrap.catch(error => {
+      bootstrapError = error;
+    });
+    const settled = await Promise.race([guarded.then(() => true), Bun.sleep(waitMs).then(() => false)]);
+    if (settled) {
+      if (bootstrapError !== undefined) throw bootstrapError;
+      return;
+    }
+    await this.emit(
+      id,
+      'session.launch_backgrounded',
+      {
+        reason:
+          waitMs === 0
+            ? 'detached start: the launch runs in the background'
+            : `launch still in progress after ${Math.round(waitMs / 1000)}s (bootstrap queue); it continues in the background`,
+      },
+      'daemon',
+    ).catch(() => undefined);
+  }
+
+  /** Launch the TUI, inject turn 1, and hand the session to its monitor. Any
+   *  failure is recorded ON THE SESSION (status + reason) before it is
+   *  rethrown, so a caller that already gave up still leaves durable evidence. */
+  private async bootstrapSession(id: string, config: SessionConfig): Promise<void> {
     try {
       // send() re-verifies prompt readiness right before typing — launch()'s
       // readiness can go stale if a late startup splash repaints the pane,
@@ -580,6 +966,21 @@ export class SessionManager implements KTeamService {
       );
       await this.startMonitor(id);
     } catch (error) {
+      // A shutdown mid-launch is not a failed launch: emit() rejects once the
+      // daemon is closing, and treating that as a launch failure would kill
+      // the pane of a teammate that had just started. Leave it for the next
+      // boot's recover() to adopt.
+      if (this.closed) {
+        console.error(`kteamd: launch of ${id} interrupted by shutdown; leaving the pane for recovery`);
+        return;
+      }
+      // "already exists" means something else owns this tmux name (a revive
+      // that raced the queue). Killing it would destroy a live teammate; the
+      // owner is responsible for it, so bail out without touching the pane.
+      if (/already exists/i.test(String(error))) {
+        console.error(`kteamd: launch of ${id} found its tmux session already live; leaving it to its owner`);
+        return;
+      }
       await this.tmux.snapshot(config, true).catch(() => '');
       let killError: unknown;
       try {
@@ -605,7 +1006,6 @@ export class SessionManager implements KTeamService {
       );
       throw error;
     }
-    return await this.get(id);
   }
 
   async send(id: string, request: SendRequest): Promise<SessionView & { disposition: SendDisposition }> {
@@ -615,6 +1015,8 @@ export class SessionManager implements KTeamService {
       // the lock; the authoritative terminal/liveness decision is re-made
       // UNDER the lock below (a completion can win the race after this).
       const probe = await this.get(id);
+      if (this.launchingRecently(id))
+        throw new Error(`session ${id} has not finished launching yet; retry once it is running`);
       const paneProbe = await this.tmux.state(probe.config.tmuxSession);
       if (terminalStatuses.includes(probe.state.status) || !paneProbe.alive || paneProbe.dead) {
         return await this.reviveWithMessage(id, request);
@@ -895,6 +1297,8 @@ export class SessionManager implements KTeamService {
 
   async resume(id: string, message?: string, guard?: ResumeGuard): Promise<SessionView> {
     id = this.resolveRef(id);
+    if (this.launchingRecently(id))
+      throw new Error(`session ${id} has not finished launching yet; retry once it is running`);
     // Automatic retries are not a human action; only explicit resumes clear.
     if (!guard) await this.clearNeedsHuman(id);
     if (!guard) this.cancelRetry(id);
@@ -978,6 +1382,8 @@ export class SessionManager implements KTeamService {
           pendingQuestion: undefined,
           promptReady: false,
           turnCompleted: false,
+          waiting: undefined,
+          waitingCreditSeconds: 0,
         },
         'session.resuming',
       );
@@ -1208,11 +1614,14 @@ export class SessionManager implements KTeamService {
     }
   }
 
-  async signal(id: string, kind: 'done' | 'help', message?: string): Promise<SessionView> {
+  async signal(id: string, kind: SignalKind, message?: string, options: SignalOptions = {}): Promise<SessionView> {
     id = this.resolveRef(id);
     this.cancelRetry(id);
     return await this.serialized(id, async () => {
       const view = await this.get(id);
+      if (kind === 'waiting' || kind === 'working') {
+        return await this.applyWaitingSignal(view, kind, message, options);
+      }
       if (kind === 'done') {
         void this.cancelQuotaWaiter(id);
         if (message) await writeFile(path.join(view.directory, 'summary.md'), `${message}\n`, { mode: 0o600 });
@@ -1270,6 +1679,141 @@ export class SessionManager implements KTeamService {
       }
       return await this.get(id);
     });
+  }
+
+  /** Enter or leave a DECLARED wait.
+   *
+   *  A parked custodian used to be indistinguishable from a dead one: the
+   *  reflex layer nudged at 180 s and killed at 300 s, and the turn ceiling
+   *  reaped long-running babysitters at 4 h (2026-07-23: four cap-kills and
+   *  four park-loops in one night). Declaring the wait suspends both while
+   *  keeping the session visibly alive — heartbeats keep flowing, the
+   *  deadline is published, and expiry WAKES the teammate rather than killing
+   *  it. Legal in automode: unlike `help`, it never asks a human for
+   *  anything. */
+  private async applyWaitingSignal(
+    view: SessionView,
+    kind: 'waiting' | 'working',
+    message: string | undefined,
+    options: SignalOptions,
+  ): Promise<SessionView> {
+    const id = view.config.id;
+    if (kind === 'working') {
+      await this.clearWaiting(id, 'signalled working');
+      return await this.get(id);
+    }
+    if (protectedStatuses.includes(view.state.status))
+      throw new Error(`session ${id} is ${view.state.status}; resume it before declaring a wait`);
+    const until = options.until === undefined ? undefined : parseDeadline(options.until);
+    const waiting = {
+      since: now(),
+      ...(until ? { until } : {}),
+      ...(options.condition ? { condition: options.condition } : {}),
+    };
+    const detail = [options.condition ?? message, until ? `until ${until}` : 'open-ended'].filter(Boolean).join(' — ');
+    await this.transition(
+      id,
+      { status: 'waiting', health: 'waiting', reason: `waiting: ${detail}`, waiting },
+      'session.waiting',
+      { until: until ?? null, condition: options.condition ?? null },
+    );
+    return await this.get(id);
+  }
+
+  /** Leave the declared wait: drop the marker, credit the parked time back
+   *  against the turn ceiling, and return the session to running. */
+  private async clearWaiting(id: string, reason: string): Promise<void> {
+    this.waitingHeartbeats.delete(id);
+    const view = await this.get(id).catch(() => undefined);
+    if (view?.state.waiting === undefined) return;
+    const since = view.state.waiting?.since ? Date.parse(view.state.waiting.since) : Number.NaN;
+    const parkedSeconds = Number.isFinite(since) ? Math.max(0, Math.round((Date.now() - since) / 1000)) : 0;
+    // The credit outlives the wait: the ceiling must never charge a session
+    // for time it spent deliberately parked.
+    const waitingCreditSeconds = (view.state.waitingCreditSeconds ?? 0) + parkedSeconds;
+    await this.transition(
+      id,
+      {
+        ...(protectedStatuses.includes(view.state.status) ? {} : { status: 'running', health: 'healthy' }),
+        reason,
+        waiting: undefined,
+        waitingCreditSeconds,
+        // Re-anchor the reflex: a park produces no life-signs by design, so
+        // waking into a ledger that is hours stale would have the very next
+        // tick nudge — or kill — the teammate the daemon just woke.
+        nudgedAt: undefined,
+        lastActivityAt: now(),
+        lastTranscriptAt: now(),
+        lastPaneAt: now(),
+      },
+      'session.waiting_cleared',
+      { reason, parkedSeconds, waitingCreditSeconds },
+    );
+  }
+
+  /** One monitor tick of a DECLARED wait: publish a heartbeat so the park is
+   *  visibly alive, and at the deadline clear the wait and WAKE the teammate
+   *  (the wait is a pause, not an ending — nothing here ever kills). */
+  private async serviceWaiting(view: SessionView): Promise<void> {
+    const id = view.config.id;
+    const waiting = view.state.waiting;
+    if (!waiting) return;
+    const sinceMs = Date.parse(waiting.since);
+    const elapsedSeconds = Number.isFinite(sinceMs) ? Math.round((Date.now() - sinceMs) / 1000) : 0;
+    // An open-ended wait still ENDS. Without a backstop a park would suspend
+    // the idle kill and the ceiling forever, so a teammate that declared a
+    // wait and then died quietly would become immortal — the park-loop this
+    // feature exists to end, inverted.
+    const declaredUntilMs = waiting.until ? Date.parse(waiting.until) : Number.NaN;
+    const untilMs = Number.isFinite(declaredUntilMs)
+      ? declaredUntilMs
+      : (Number.isFinite(sinceMs) ? sinceMs : Date.now()) + WAITING_BACKSTOP_MS;
+    if (Date.now() >= untilMs) {
+      const backstopped = !Number.isFinite(declaredUntilMs);
+      const reason = backstopped
+        ? `open-ended wait hit the ${Math.round(WAITING_BACKSTOP_MS / 60_000)}m backstop (${waiting.condition ?? 'no condition given'})`
+        : `declared wait elapsed (${waiting.condition ?? 'no condition given'})`;
+      await this.clearWaiting(id, reason);
+      await this.emit(
+        id,
+        'session.waiting_expired',
+        { until: waiting.until ?? null, condition: waiting.condition ?? null, backstopped, elapsedSeconds },
+        'watcher',
+      );
+      await this.tmux
+        .send(
+          view.config,
+          `The wait you declared has elapsed (${waiting.condition ?? 'no condition given'}). Re-check the condition and continue the task.`,
+        )
+        .catch(error => void this.emit(id, 'session.waiting_wake_failed', { message: String(error) }, 'watcher'));
+      return;
+    }
+    // Hold the status against the transcript's constant recomputation, so the
+    // park stays what `ps`, the UI, and `kteam wait` see.
+    if (view.state.status !== 'waiting' && !protectedStatuses.includes(view.state.status)) {
+      await this.transition(id, { status: 'waiting', health: 'waiting' }, 'session.waiting_held');
+    }
+    const lastBeat = this.waitingHeartbeats.get(id) ?? 0;
+    if (Date.now() - lastBeat < WAITING_HEARTBEAT_MS) return;
+    this.waitingHeartbeats.set(id, Date.now());
+    await atomicJson(path.join(view.directory, 'checks', 'waiting.json'), {
+      at: now(),
+      since: waiting.since,
+      until: waiting.until ?? null,
+      condition: waiting.condition ?? null,
+      elapsedSeconds,
+    });
+    await this.emit(
+      id,
+      'session.waiting_heartbeat',
+      {
+        elapsedSeconds,
+        until: waiting.until ?? null,
+        condition: waiting.condition ?? null,
+        remainingSeconds: Math.max(0, Math.round((untilMs - Date.now()) / 1000)),
+      },
+      'watcher',
+    );
   }
 
   async snapshot(id: string): Promise<string> {
@@ -1336,23 +1880,29 @@ export class SessionManager implements KTeamService {
     if (!Number.isSafeInteger(after) || after < -10_000) throw new Error('after must be a safe integer >= -10000');
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000)
       throw new Error('limit must be between 1 and 10000');
-    const events = id
-      ? this.replayCompleteJournal(id)
-      : this.store.listSessions().flatMap(session => this.replayCompleteJournal(session.id));
-    const ordered = events.map(event => this.fromStored(event)).sort((a, b) => a.sequence - b.sequence);
-    if (after < 0) return ordered.slice(after);
-    return ordered.filter(event => event.sequence > after).slice(0, limit);
-  }
-
-  private replayCompleteJournal(id: string): SessionEvent[] {
-    const events: SessionEvent[] = [];
-    let localSequence = 0;
-    while (true) {
-      const page = this.store.replay(id, { afterSequence: localSequence, limit: 10_000 });
-      events.push(...page);
-      if (page.length < 10_000) return events;
-      localSequence = page.at(-1)!.sequence;
+    // Rows indexed before the global-sequence column existed are invisible to
+    // these queries; heal the requested session on demand (bounded to one
+    // session — the fleet-wide walk is a background bootstrap phase).
+    if (id !== undefined && this.store.sessionNeedsGlobalBackfill(id)) await this.store.backfillGlobalSequence(id);
+    // Both branches are INDEX-BOUNDED: the old implementation loaded every
+    // event of every session into memory, mapped it, and sorted it before
+    // slicing — one fleet-wide connect wedged the daemon for minutes and grew
+    // its heap into the gigabytes (2026-07-23 wedge/listener-flap incident).
+    if (after < 0) return this.store.tailGlobal(-after, id).map(event => this.fromStored(event));
+    const backlogFloor = id === undefined ? Math.max(0, this.store.latestGlobalSequence() - GLOBAL_BACKLOG_MAX) : 0;
+    let cursor = Math.max(after, backlogFloor);
+    // A short page is how every caller detects end-of-backlog, so a page
+    // whose rows did not all RESOLVE (torn journal line, missing file) must
+    // be topped up instead of returned short — otherwise one bad line
+    // truncates the rest of a replay.
+    const events: KTeamEvent[] = [];
+    while (events.length < limit) {
+      const page = this.store.replayGlobal(cursor, limit - events.length, id);
+      if (page.rows === 0) break;
+      cursor = page.cursor;
+      for (const event of page.events) events.push(this.fromStored(event));
     }
+    return events;
   }
 
   subscribe(listener: (event: KTeamEvent) => void): () => void {
@@ -1498,8 +2048,26 @@ export class SessionManager implements KTeamService {
     const view = await this.get(id);
     const handle: MonitorHandle = { abort: new AbortController() };
     this.monitors.set(id, handle);
+    // Arm the tick loop BEFORE the transcript watcher. Starting a watcher is
+    // filesystem work over the SHARED harness home, and its first reconcile
+    // could fail to settle at all while the fleet churned that tree (see the
+    // watch-scope fix in claude-transcript.ts): every session started during
+    // that stretch ran with NO monitor tick — no pane snapshots, no
+    // heartbeat.json, no liveness.yaml, no stall reflex, no turn ceiling —
+    // while `monitors.has(id)` made the self-check call it healthy
+    // (2026-07-24: confirmed on every session created after the 23:49 restart).
+    // The loop's own first act is reading state, so it needs nothing from the
+    // watcher; a codex session arms its transcript from inside the loop.
+    handle.loop = this.monitorLoop(id, handle.abort.signal);
+    void handle.loop.catch(() => undefined);
+    await this.startTranscriptWatcher(id, view, handle);
+  }
+
+  /** Attach the harness transcript tail to a monitor handle. Separate from
+   *  startMonitor so the tick loop can be armed first — see the comment there. */
+  private async startTranscriptWatcher(id: string, view: SessionView, handle: MonitorHandle): Promise<void> {
     if (view.config.harness === 'claude' && view.config.harnessHome) {
-      handle.transcript = await startClaudeTranscriptWatcher({
+      const watcher = await startClaudeTranscriptWatcher({
         transcriptRoot: path.join(view.config.harnessHome, 'projects'),
         sessionId: view.config.harnessSessionId,
         initialOffset: view.state.transcriptOffset ?? 0,
@@ -1524,15 +2092,28 @@ export class SessionManager implements KTeamService {
           void this.emit(id, 'transcript.error', { message: error.message }, 'watcher').catch(() => undefined);
         },
       });
+      // The tick loop is armed first and may already have exited (dead pane,
+      // done marker) by the time this resolves — its cleanup stops
+      // handle.transcript, which was still undefined then. Without this the
+      // watcher tails on forever, writing state for a session nobody watches.
+      if (handle.abort.signal.aborted || this.monitors.get(id) !== handle) await watcher.stop();
+      else handle.transcript = watcher;
     } else if (view.config.harness === 'codex') {
       await this.ensureCodexTranscript(id, handle);
     }
-    handle.loop = this.monitorLoop(id, handle.abort.signal);
-    void handle.loop.catch(() => undefined);
   }
 
   private async ensureCodexTranscript(id: string, handle: MonitorHandle): Promise<void> {
     if (handle.transcript || handle.abort.signal.aborted) return;
+    if (handle.transcriptStarting) return await handle.transcriptStarting;
+    const arming = this.armCodexTranscript(id, handle).finally(() => {
+      handle.transcriptStarting = undefined;
+    });
+    handle.transcriptStarting = arming;
+    return await arming;
+  }
+
+  private async armCodexTranscript(id: string, handle: MonitorHandle): Promise<void> {
     let view = await this.get(id);
     let transcriptFile = view.config.transcriptFile;
     let harnessSessionId = view.config.harnessSessionId;
@@ -1844,6 +2425,7 @@ export class SessionManager implements KTeamService {
           if (
             promptStable >= 2 &&
             !turnBusy &&
+            view.state.waiting === undefined &&
             !waitingStatuses.includes(view.state.status) &&
             !protectedStatuses.includes(view.state.status) &&
             view.state.status !== 'interrupted'
@@ -1918,9 +2500,26 @@ export class SessionManager implements KTeamService {
             }));
             view = await this.get(id);
           }
-          const waiting = waitingStatuses.includes(view.state.status) || view.state.status === 'interrupted';
+          // Declared wait (`kteam signal waiting`): keep it visible, expire it
+          // on time, and wake the teammate rather than letting the reflex
+          // layer treat a deliberate park as a corpse.
+          if (view.state.waiting !== undefined) {
+            await this.serviceWaiting(view);
+            view = await this.get(id);
+          }
+          // `state.waiting` — not the status — is the authority for a declared
+          // wait: transcript records recompute status every few seconds
+          // (running/thinking/tool_running), so gating only on the status let
+          // the very tool_result of `kteam signal waiting` erase the park and
+          // hand the session straight back to the nudge, the stall kill, and
+          // the automode auto-continue.
+          const waiting = lifecycleSuspended(view.state);
           const startedAt = view.state.startedAt ? Date.parse(view.state.startedAt) : Date.parse(view.config.createdAt);
-          if (!waiting && Date.now() - startedAt >= view.config.timeoutSeconds * 1000) {
+          // Time spent in declared waits is credited back: a babysitter parked
+          // for three hours has not been RUNNING for three hours, and the
+          // ceiling must not reap it for waiting as instructed.
+          const ceilingMs = turnCeilingMs(view.config, view.state);
+          if (!waiting && Date.now() - startedAt >= ceilingMs) {
             await this.tmux.snapshot(view.config, true);
             await atomicJson(path.join(view.directory, 'kill.json'), {
               at: now(),
@@ -1933,7 +2532,11 @@ export class SessionManager implements KTeamService {
               {
                 status: 'stopped',
                 health: 'idle',
-                reason: `exceeded timeout of ${view.config.timeoutSeconds}s`,
+                reason:
+                  `exceeded timeout of ${view.config.timeoutSeconds}s` +
+                  ((view.state.waitingCreditSeconds ?? 0) > 0
+                    ? ` (+${view.state.waitingCreditSeconds}s credited for declared waits)`
+                    : ''),
                 finishedAt: now(),
                 promptReady: false,
               },
@@ -2509,6 +3112,13 @@ export class SessionManager implements KTeamService {
       const preserveKillFailure =
         current.status === 'kill_failed' && !(patch.status !== undefined && terminalStatuses.includes(patch.status));
       const next = { ...current, ...patch };
+      // A session that ENDS is not waiting for anything any more. Nothing else
+      // clears a declared wait on the terminal paths (stop, timeout, stall
+      // kill, pane death), and once terminal every later patch is suppressed —
+      // so a park left set here would be permanent: `kteam wait` would never
+      // return and the warden would report an overdue wait on a dead session
+      // forever.
+      if (patch.status !== undefined && protectedStatuses.includes(patch.status)) next.waiting = undefined;
       if (!preserveTerminal && !preserveKillFailure) return next;
       suppressed = true;
       return current;
@@ -2593,6 +3203,9 @@ export class SessionManager implements KTeamService {
       updatedAt: now(),
     }));
     await this.tmux.send(config, this.promptInstruction(config.id, turn));
+    // A new turn ends any declared wait: the teammate has been given work,
+    // and the ceiling credit belongs to the turn that earned it.
+    this.waitingHeartbeats.delete(config.id);
     await this.transition(
       config.id,
       {
@@ -2603,6 +3216,8 @@ export class SessionManager implements KTeamService {
         lastActivityAt: now(),
         turnCompleted: false,
         nudgedAt: undefined,
+        waiting: undefined,
+        waitingCreditSeconds: 0,
       },
       'turn.started',
     );
@@ -2859,6 +3474,10 @@ export class SessionManager implements KTeamService {
         reason: `${reason}: ${message}`,
         finishedAt: undefined,
         promptReady: false,
+        // This write bypasses transition(), so it clears the declared wait
+        // itself: kill_failed is protected, and every later patch is
+        // suppressed — a park left set here could never be cleared again.
+        waiting: undefined,
       }));
       await this.emit(
         config.id,
@@ -2898,11 +3517,21 @@ export class SessionManager implements KTeamService {
     const helpRule =
       config.mode === 'interactive'
         ? '7. If blocked without a structured question tool, run: kteam signal help "your precise question"'
-        : '7. Never signal help or wait for a reply in automode.';
+        : '7. Never signal help or wait for a HUMAN reply in automode. Waiting on an EXTERNAL condition is different and supported: see rule 9.';
+    // Rule 9 (2026-07-24): before declared waits, a teammate parked on a long
+    // suite or a deploy was indistinguishable from a dead one — nudged at
+    // 180 s, stall-killed at 300 s, and reaped by the 4 h turn ceiling.
+    const waitRule =
+      '9. If you must wait on an EXTERNAL condition (a long suite, a deploy, a scheduled window), declare it: ' +
+      'kteam signal waiting --until <45m|2h|ISO> --on "<what you are waiting for>". That suspends the idle nudge, ' +
+      'the stall kill, and the turn ceiling while heartbeats keep you visible; the daemon wakes you at the deadline. ' +
+      '--until is optional (an open-ended park is fine), but EVERY wait is force-woken after 4 hours. ' +
+      'Run kteam signal working when the condition resolves. This is legal in automode — it asks nobody for anything. ' +
+      'Never park instead of finishing: it is for waiting, not for idling.';
     // Rule 8 exists because a teammate once ran `bun add` at a repo root: bun
     // created a root package.json/node_modules that shadowed a nested package's
     // deps and broke tooling fleet-wide until a human cleaned it up.
-    return `# kteam teammate contract\n\n${interaction}\n\nYour durable coordination directory is ${directory}.\n\nRules:\n1. Work only on the assigned task and respect repository instructions.\n2. Do not manage tmux or the daemon.\n3. Keep useful session-only artifacts under the coordination directory.\n4. When the assigned task is genuinely complete, write ${directory}/summary.md and run: kteam signal done\n5. Never claim completion without the done marker.\n6. Preserve unrelated user changes.\n${helpRule}\n8. Run \`bun add\`/\`bun install\` (and other package-manager installs) ONLY from inside the target package directory — cd there in the same command or use absolute paths. NEVER run them at the repository root: that creates a root package.json/node_modules that shadows nested packages and breaks their tooling.\n`;
+    return `# kteam teammate contract\n\n${interaction}\n\nYour durable coordination directory is ${directory}.\n\nRules:\n1. Work only on the assigned task and respect repository instructions.\n2. Do not manage tmux or the daemon.\n3. Keep useful session-only artifacts under the coordination directory.\n4. When the assigned task is genuinely complete, write ${directory}/summary.md and run: kteam signal done\n5. Never claim completion without the done marker.\n6. Preserve unrelated user changes.\n${helpRule}\n8. Run \`bun add\`/\`bun install\` (and other package-manager installs) ONLY from inside the target package directory — cd there in the same command or use absolute paths. NEVER run them at the repository root: that creates a root package.json/node_modules that shadows nested packages and breaks their tooling.\n${waitRule}\n`;
   }
 
   private promptInstruction(id: string, turn: number): string {
