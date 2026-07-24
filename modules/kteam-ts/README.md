@@ -7,7 +7,7 @@ transcript JSONL with filesystem notifications and normalized into durable event
 ```text
 kteam daemon install                 # launchd (macOS) or systemd --user (Linux)
 kteam daemon status
-kteam recommend "build and review a frontend"
+kteam recommend "build and review a frontend"          # --budget cheap|balanced|max, --roles, --json
 kteam start --agent claude-auto-mm3 --mode auto --image reference.png "build the frontend"
 kteam start --agent codex-auto-atomi --mode interactive "review it with me"
 kteam stream <id>
@@ -23,11 +23,23 @@ kteam signal working                 # end the park early (any new turn also cle
 kteam delete <id>                    # soft delete; --purge is permanent
 ```
 
-`start` answers within 45 s even when the bootstrap queue is longer than that —
-the session comes back `starting` and its launch continues in the background
-(`--detach` returns immediately). Creates are idempotent per request id (pass your
-own with `--request-id` / `KTEAM_REQUEST_ID` and reuse it on every retry), so a
-start whose response is lost never yields a duplicate teammate.
+`start` answers within 45 s — 90 s for the slow providers (GLM/MiniMax/DeepSeek)
+— even when the bootstrap queue is longer than that: the session comes back
+`starting` and its launch continues in the background (`--detach` returns
+immediately). A backgrounded launch is PENDING, never failed: it resolves itself
+with `session.launch_settled` (→ `running`, monitor attached) or fails with the
+real reason. Control actions that land in that window queue behind the launch
+rather than being refused. Creates are idempotent per request id (pass your own
+with `--request-id` / `KTEAM_REQUEST_ID` and reuse it on every retry), so a start
+whose response is lost never yields a duplicate teammate.
+
+`recommend` classifies the task along explicit axes (complexity, kind, risk,
+size, ambiguity, audience — each with the words that drove it) and proposes a
+team SHAPE per the handoff chain: planner → implementer(s)/researcher → fan-out →
+cross-family reviewer. Every role offers a primary plus ranked alternatives with
+the exact `kteam start` command; the doctrine tiers in
+`kfleet/skills/kteam/SKILL.md` are enforced as floors, so hard work can never
+land on the mass-chore tier and a chore never burns the top tier.
 
 A declared wait suspends the idle nudge, the stall kill, and the turn ceiling
 while heartbeating every 5 minutes; at `--until` — or after 4 hours, whichever

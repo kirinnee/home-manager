@@ -282,6 +282,9 @@ describe('bounded start (exit-143 spawn timeouts)', () => {
   function startManager() {
     const events: Array<{ type: string; data: Record<string, unknown> }> = [];
     const manager = bareManager();
+    // Real managers always carry this map (class field); Object.create skips
+    // the constructor, and awaitBootstrap marks the launch as backgrounded.
+    manager.launching = new Map([['s1', { at: Date.now(), bootstrap: Promise.resolve() }]]);
     manager.emit = async (_id: string, type: string, data: Record<string, unknown>) => {
       events.push({ type, data });
     };

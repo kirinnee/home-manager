@@ -5,7 +5,14 @@ import { existsSync } from 'fs';
 import { readFile } from 'fs/promises';
 import path from 'path';
 import { ApiClient } from './api-client';
-import { discoverAutoAgents, recommendAgents, usableAgent, type AgentUsage } from './core';
+import {
+  discoverAutoAgents,
+  recommendTeam,
+  resolveDisplayModel,
+  type AgentUsage,
+  type Budget,
+  type TeamRole,
+} from './core';
 import { DaemonService } from './daemon-service';
 import { resolveBinary } from './harness';
 import { createPaths } from './paths';
@@ -42,7 +49,7 @@ async function waitForDaemon(): Promise<Record<string, unknown>> {
 
 function printView(view: Awaited<ReturnType<ApiClient['get']>>): void {
   console.log(
-    `${view.config.teammate ?? '-'} (${view.config.id})  ${view.state.status}  ${view.config.binary}  model=${view.config.model ?? 'default'}${view.config.label ? `  label=${view.config.label}` : ''}${view.config.parent ? `  parent=${view.config.parent}` : ''}  ${view.config.mode}  turn ${view.state.turn}`,
+    `${view.config.teammate ?? '-'} (${view.config.id})  ${view.state.status}  ${view.config.binary}  model=${resolveDisplayModel(view.config.binary, view.config.model, view.state.observedModel).model}${view.config.label ? `  label=${view.config.label}` : ''}${view.config.parent ? `  parent=${view.config.parent}` : ''}  ${view.config.mode}  turn ${view.state.turn}`,
   );
   console.log(`  ${view.config.cwd}`);
   const vitals = [
@@ -181,19 +188,86 @@ program
   .argument('[task...]')
   .option('--json')
   .option('--no-usage', 'skip the kfleet usage probe (no exclusion or load balancing)')
-  .action(async (parts: string[], options: { json?: boolean; usage?: boolean }) => {
-    const task = parts.join(' ').trim();
-    const available = discoverAutoAgents(paths.kfleetBin);
-    const usage = options.usage === false ? [] : await fetchAgentUsage();
-    const recommendations = recommendAgents(task, available, usage);
-    const excluded = usage
-      .filter(item => available.includes(item.binary) && !usableAgent(item))
-      .map(item => `${item.binary} (${item.atLimit ? 'at usage limit' : 'not logged in'})`);
-    if (options.json) return console.log(JSON.stringify({ task, available, excluded, recommendations }, null, 2));
-    console.log('Suggested team (review with the user before launching):');
-    for (const item of recommendations) console.log(`  ${item.binary} — ${item.role}: ${item.reason}`);
-    if (excluded.length) console.log(`Excluded: ${excluded.join(', ')}`);
-  });
+  .addOption(
+    new Option('--budget <budget>', 'bias the picks: cost-first, default, or quality-first')
+      .choices(['cheap', 'balanced', 'max'])
+      .default('balanced'),
+  )
+  .option(
+    '--roles <roles>',
+    'force the team shape instead of deriving it (comma-separated: planner,implementer,researcher,reviewer,fan-out)',
+  )
+  .option('--label <label>', 'ownership label to put in the generated kteam start commands')
+  .action(
+    async (
+      parts: string[],
+      options: { json?: boolean; usage?: boolean; budget: Budget; roles?: string; label?: string },
+    ) => {
+      const task = parts.join(' ').trim();
+      if (!task) {
+        console.error('a task description is required: kteam recommend "<task>"');
+        process.exitCode = 1;
+        return;
+      }
+      const available = discoverAutoAgents(paths.kfleetBin);
+      const usage = options.usage === false ? [] : await fetchAgentUsage();
+      const roles = options.roles
+        ?.split(',')
+        .map(role => role.trim())
+        .filter(Boolean) as TeamRole[] | undefined;
+      const team = recommendTeam(task, available, {
+        usage,
+        budget: options.budget,
+        roles,
+        label: options.label,
+      });
+      if (options.json) return console.log(JSON.stringify({ available, ...team }, null, 2));
+
+      console.log(`Task: ${task}`);
+      console.log(`Read: ${team.reasoning}`);
+      console.log(`Budget: ${team.budget}`);
+      console.log('');
+      for (const role of team.roles) {
+        const heading = role.count ? `${role.role.toUpperCase()} ×${role.count}` : role.role.toUpperCase();
+        console.log(`${heading} — ${role.why}`);
+        console.log(`  ▸ PRIMARY  ${option(role.primary)}`);
+        console.log(`    ${role.primary.command}`);
+        for (const alternative of role.alternatives) {
+          console.log(`  · alt      ${option(alternative)}`);
+          console.log(`    ${alternative.command}`);
+        }
+        console.log('');
+      }
+      if (team.warnings.length) {
+        console.log('Warnings:');
+        for (const warning of team.warnings) console.log(`  ! ${warning}`);
+        console.log('');
+      }
+      if (team.exclusions.length) {
+        console.log('Excluded:');
+        for (const item of team.exclusions) console.log(`  - ${item.binary}: ${item.reason}`);
+        console.log('');
+      }
+      console.log('Review this with the user before launching — it spends account quota.');
+    },
+  );
+
+function option(item: {
+  binary: string;
+  modelLabel: string;
+  modelFlag?: string;
+  tradeoff: string;
+  caveat?: string;
+}): string {
+  const flag = item.modelFlag ? ` --model ${item.modelFlag}` : '';
+  const caveats: Record<string, string> = {
+    'below-doctrine-floor': 'below the doctrine floor for this role — deliberate override only',
+    'same-model-family': 'same model family as the implementer — a weaker independent check',
+    'not-for-product-facing': 'doctrine bars this model from product-facing work — support role only',
+  };
+  const caveat = item.caveat ? `\n             ⚠ ${caveats[item.caveat] ?? item.caveat}` : '';
+  return `${item.modelLabel.padEnd(20)} ${item.binary}${flag}\n             ${item.tradeoff}${caveat}`;
+}
 
 program
   .command('start')
@@ -312,7 +386,10 @@ program
       // A declared park reports the same 'waiting' status as an unanswered
       // question; the marker is the only fleet-level way to tell them apart.
       view.state.waiting ? `${view.state.status} PARKED` : view.state.status,
-      view.config.model ?? 'default',
+      // The RESOLVED model, not the alias: `claude-auto-glm52a` defaults to the
+      // alias `opus` while the pane actually runs glm-5.2. Harness-reported
+      // first, then the wrapper's known mapping, then whatever was configured.
+      resolveDisplayModel(view.config.binary, view.config.model, view.state.observedModel).model,
       view.config.binary,
       view.config.mode,
       view.config.name,

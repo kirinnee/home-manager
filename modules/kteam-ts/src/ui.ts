@@ -116,7 +116,18 @@ const el = (tag, cls, html) => { const node = document.createElement(tag); if (c
 function tone(status) { const s = String(status || '').toLowerCase(); if (/(completed|success|healthy|ready|done|awaiting_user|interrupted)/.test(s)) return 'ok'; if (/(running|starting|thinking|tool|retry|rate|waiting)/.test(s)) return 'warn'; if (/(failed|stalled|stopped|kill|error)/.test(s)) return 'err'; return 'pend'; }
 function statusBadge(status) { return '<span class="badge ' + tone(status) + '"><span class="pip"></span>' + esc(status) + '</span>'; }
 function fmtTime(value) { if (!value) return '—'; const date = new Date(value); return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString(); }
-function fmtModel(view) { return view.config.model || view.config.modelHint || 'default'; }
+// The RESOLVED model, mirroring core.ts resolveDisplayModel: what the harness
+// itself reported, else the wrapper's alias mapping (claude-auto-glm52a
+// defaults to the alias "opus" while the pane runs glm-5.2), else configured.
+const WRAPPER_MODELS = [[/^claude-auto-glm52[ab]?$/, 'glm-5.2'], [/^claude-auto-mm3$/, 'minimax-m3'], [/^claude-auto-dsv4f$/, 'deepseek-v4-flash'], [/^claude-auto-dsv4p$/, 'deepseek-v4-pro']];
+function fmtModel(view) {
+  if (view.state && view.state.observedModel) return view.state.observedModel;
+  const binary = String(view.config.binary || '');
+  const model = String(view.config.model || '');
+  const mapped = (WRAPPER_MODELS.find((entry) => entry[0].test(binary)) || [])[1];
+  if (mapped && (!model || /^(opus|sonnet|haiku|fable)(-\d.*)?$/i.test(model))) return mapped;
+  return model || view.config.modelHint || 'default';
+}
 function api(path, init) {
   const options = init || {};
   const headers = Object.assign({ authorization: 'Bearer ' + TOKEN }, options.headers || {});

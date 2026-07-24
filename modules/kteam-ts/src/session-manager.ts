@@ -12,7 +12,14 @@ import {
   type CodexNormalizedEvent,
   type CodexTranscriptWatcher,
 } from './codex-transcript';
-import { contextWindowForModel, discoverAutoAgents, inferHarness, modelHint, shellSafeSessionName } from './core';
+import {
+  contextWindowForModel,
+  discoverAutoAgents,
+  inferHarness,
+  modelHint,
+  shellSafeSessionName,
+  startWaitMsFor,
+} from './core';
 import { listWrappers, scanProjects, type ProjectInfo, type WrapperInfo } from './fleet-inventory';
 import { currentActor } from './actor-context';
 import { parseWardenReports, type WardenVerdict } from './warden-verdicts';
@@ -71,6 +78,15 @@ import type {
   SignalOptions,
   StartSessionRequest,
 } from './types';
+
+/** A FIRST launch in flight: when it was registered, and the bootstrap promise
+ *  so control actions can queue behind it instead of being refused. */
+interface LaunchProgress {
+  at: number;
+  bootstrap: Promise<void>;
+  /** True once `start` gave up waiting and announced the background launch. */
+  backgrounded?: boolean;
+}
 
 interface MonitorHandle {
   abort: AbortController;
@@ -147,6 +163,9 @@ class ResumeCancelled extends Error {}
 const terminalStatuses: SessionStatus[] = ['completed', 'failed', 'stalled', 'stopped'];
 const protectedStatuses: SessionStatus[] = [...terminalStatuses, 'kill_failed'];
 const waitingStatuses: SessionStatus[] = ['waiting', 'awaiting_question', 'awaiting_user', 'rate_limited'];
+/** Statuses a session can hold BEFORE its tmux pane has ever been created.
+ *  In these the absence of a pane means "not launched yet", never "crashed". */
+const preLaunchStatuses: SessionStatus[] = ['created', 'starting'];
 /** How far back a FLEET-WIDE replay cursor may reach. The cross-session feed
  *  is a live stream, not an archive: a client asking for the whole fleet from
  *  sequence 0 would page through every event ever recorded. Per-session
@@ -168,6 +187,11 @@ const SELF_RESTART_COOLDOWN_MS = 30 * 60_000;
  *  launch finish in the background. Comfortably under every caller deadline
  *  that produced the exit-143 spawn timeouts. */
 const START_WAIT_MS = 45_000;
+/** How long a control action (send/resume) queues behind an in-flight FIRST
+ *  launch before answering "still launching". Long enough to swallow the
+ *  bootstrap queue for a slow provider, short enough to stay under the client
+ *  request timeout. */
+const CONTROL_LAUNCH_WAIT_MS = 60_000;
 /** How long a queued first launch is given before the self-check stops
  *  excluding it and repairs (or fails) it like any other session. */
 const LAUNCH_GRACE_MS = 10 * 60_000;
@@ -265,13 +289,37 @@ export class SessionManager implements KTeamService {
    *  Their tmux session does not exist yet, so a monitor started for them
    *  would read a dead pane and mark a launching session `failed` — and a
    *  terminal status suppresses every later patch, including the launch's own
-   *  `session.running`. Bounded `start`/`--detach` make this window routine. */
-  private readonly launching = new Map<string, number>();
+   *  `session.running`. Bounded `start`/`--detach` make this window routine.
+   *
+   *  Registered BEFORE the `starting` transition on purpose: transition()
+   *  awaits emit(), which rides the global event queue, and under a launch
+   *  storm that queue ran 10+ seconds behind. Registering after it left a
+   *  window where the session was persisted as `starting` but unknown to this
+   *  map — the self-check then "repaired" it with a monitor that read a pane
+   *  which did not exist yet and recorded `session.crashed` on a healthy
+   *  teammate (2026-07-24, mrzi4r0p / claude-auto-glm52a). */
+  private readonly launching = new Map<string, LaunchProgress>();
   /** True while this session's FIRST launch is still plausibly queued behind
    *  the cross-session bootstrap chain. */
   private launchingRecently(id: string): boolean {
-    const startedAt = this.launching.get(id);
-    return startedAt !== undefined && Date.now() - startedAt < LAUNCH_GRACE_MS;
+    const progress = this.launching.get(id);
+    return progress !== undefined && Date.now() - progress.at < LAUNCH_GRACE_MS;
+  }
+
+  /** Give an in-flight FIRST launch up to `waitMs` to finish, so a control
+   *  action that lands during the launch window queues behind it instead of
+   *  being refused outright. Resolves true when the launch settled. */
+  private async awaitLaunchSettled(id: string, waitMs: number): Promise<boolean> {
+    const progress = this.launching.get(id);
+    if (!progress) return true;
+    const settled = await Promise.race([
+      progress.bootstrap.then(
+        () => true,
+        () => true,
+      ),
+      Bun.sleep(waitMs).then(() => false),
+    ]);
+    return settled;
   }
 
   /** Zombie sessions already re-adopted this daemon lifetime (once each). */
@@ -893,15 +941,34 @@ export class SessionManager implements KTeamService {
       writeFile(path.join(directory, 'channel', 'inbox.jsonl'), '', { mode: 0o600 }),
       writeFile(path.join(directory, 'channel', 'outbox.jsonl'), '', { mode: 0o600 }),
     ]);
-    await this.emit(id, 'session.created', { binary, harness, mode, cwd }, 'daemon', 1);
-    for (const stored of initialAttachments) {
-      await this.emit(id, 'attachment.created', this.attachmentView(stored), 'client', 1);
+    // Claim the launch window BEFORE anything that awaits the event queue.
+    // `emit`/`transition` can sit behind a 10-second global queue during a
+    // launch storm, and everything that protects a launching session keys off
+    // this map — registering it later left the session visible as `starting`
+    // to the self-check while still unregistered here. The real bootstrap
+    // promise replaces this placeholder a few lines down.
+    let releaseLaunch = () => {};
+    this.launching.set(id, {
+      at: Date.now(),
+      bootstrap: new Promise<void>(resolve => {
+        releaseLaunch = resolve;
+      }),
+    });
+    try {
+      await this.emit(id, 'session.created', { binary, harness, mode, cwd }, 'daemon', 1);
+      for (const stored of initialAttachments) {
+        await this.emit(id, 'attachment.created', this.attachmentView(stored), 'client', 1);
+      }
+      await this.transition(
+        id,
+        { status: 'starting', startedAt: now(), health: 'healthy', nudgedAt: undefined },
+        'session.starting',
+      );
+    } catch (error) {
+      this.launching.delete(id);
+      releaseLaunch();
+      throw error;
     }
-    await this.transition(
-      id,
-      { status: 'starting', startedAt: now(), health: 'healthy', nudgedAt: undefined },
-      'session.starting',
-    );
     // The TUI bootstrap is serialized ACROSS sessions, so a launch storm makes
     // each caller wait for every queued predecessor. Callers have their own
     // deadlines: the exec responders SIGTERMed `kteam start` (exit 143) while
@@ -910,9 +977,22 @@ export class SessionManager implements KTeamService {
     // session is already persisted and its bootstrap keeps running in the
     // background, and the caller gets a real view of a 'starting' session
     // instead of an open socket and a timeout.
-    this.launching.set(id, Date.now());
-    const bootstrap = this.bootstrapSession(id, config).finally(() => this.launching.delete(id));
-    await this.awaitBootstrap(id, bootstrap, request.detach === true ? 0 : START_WAIT_MS);
+    const bootstrap = this.bootstrapSession(id, config).finally(() => {
+      this.launching.delete(id);
+      releaseLaunch();
+    });
+    // Keep the launch registered under the REAL bootstrap promise so control
+    // actions can queue behind it (awaitLaunchSettled).
+    const claim = this.launching.get(id);
+    if (claim)
+      this.launching.set(id, {
+        ...claim,
+        bootstrap: bootstrap.then(
+          () => undefined,
+          () => undefined,
+        ),
+      });
+    await this.awaitBootstrap(id, bootstrap, request.detach === true ? 0 : startWaitMsFor(binary, START_WAIT_MS));
     return await this.get(id);
   }
 
@@ -929,10 +1009,17 @@ export class SessionManager implements KTeamService {
       if (bootstrapError !== undefined) throw bootstrapError;
       return;
     }
+    // A backgrounded launch is PENDING, never failed: the session keeps its
+    // `starting` status and the bootstrap resolves it (session.launch_settled
+    // → running, or the normal failure path with the real reason).
+    const claim = this.launching.get(id);
+    if (claim) this.launching.set(id, { ...claim, backgrounded: true });
     await this.emit(
       id,
       'session.launch_backgrounded',
       {
+        status: 'starting',
+        pending: true,
         reason:
           waitMs === 0
             ? 'detached start: the launch runs in the background'
@@ -950,21 +1037,50 @@ export class SessionManager implements KTeamService {
       // send() re-verifies prompt readiness right before typing — launch()'s
       // readiness can go stale if a late startup splash repaints the pane,
       // and a prompt injected into a booting TUI lands as a no-op turn.
+      const queuedAt = Date.now();
       await this.serializedBootstrap(async () => {
         await this.launchWithRetry(config);
+        // The pane demonstrably EXISTS from here on. Durable, because it is
+        // what tells a monitor apart from "the tmux session does not exist
+        // yet" — the state a pre-launch monitor used to misread as a crash.
+        await this.store.updateState<SessionState>(id, current => ({ ...current, launchedAt: now() }));
         await this.tmux.send(config, this.promptInstruction(id, 1));
       });
+      const backgrounded = this.launching.get(id)?.backgrounded === true;
       await this.transition(
         id,
         {
           status: 'running',
+          health: 'healthy',
+          reason: undefined,
+          finishedAt: undefined,
+          exitCode: undefined,
           lastActivityAt: now(),
           promptReady: false,
           turnCompleted: false,
         },
         'session.running',
+        {},
+        // A launch that outlived its request window must be able to write its
+        // own outcome even if something recorded a (wrong) terminal status
+        // while it was still queued — otherwise the healthy teammate stays
+        // `failed` forever and every control action refuses it.
+        { force: true },
       );
       await this.startMonitor(id);
+      if (backgrounded) {
+        await this.emit(
+          id,
+          'session.launch_settled',
+          {
+            status: 'running',
+            outcome: 'running',
+            elapsedSeconds: Math.round((Date.now() - queuedAt) / 1000),
+            reason: 'the backgrounded launch came up: prompt delivered and the monitor is attached',
+          },
+          'daemon',
+        ).catch(() => undefined);
+      }
     } catch (error) {
       // A shutdown mid-launch is not a failed launch: emit() rejects once the
       // daemon is closing, and treating that as a launch failure would kill
@@ -999,11 +1115,24 @@ export class SessionManager implements KTeamService {
         if (paneState.alive && !paneState.dead) await this.startMonitor(id).catch(() => undefined);
         throw new AggregateError([error, killError], reason);
       }
+      // A GENUINE launch failure still fails, with the real reason — this is
+      // the other half of the pending contract: backgrounding never fails a
+      // session, but a launch that actually died must say so.
       await this.transition(
         id,
         { status: 'failed', health: 'crashed', reason: String(error), finishedAt: now(), promptReady: false },
         'session.failed',
+        {},
+        { force: true },
       );
+      if (this.launching.get(id)?.backgrounded === true) {
+        await this.emit(
+          id,
+          'session.launch_settled',
+          { status: 'failed', outcome: 'failed', reason: String(error) },
+          'daemon',
+        ).catch(() => undefined);
+      }
       throw error;
     }
   }
@@ -1014,9 +1143,17 @@ export class SessionManager implements KTeamService {
       // Cheap pre-lock probe ONLY to route obvious revives without waiting on
       // the lock; the authoritative terminal/liveness decision is re-made
       // UNDER the lock below (a completion can win the race after this).
+      // A launch still in flight is PENDING, not a refusal: queue behind it
+      // rather than rejecting a send that the caller has no way to time. Only
+      // a launch that is still queued after the whole window fails, and it
+      // fails with something the caller can act on.
+      if (this.launchingRecently(id) && !(await this.awaitLaunchSettled(id, CONTROL_LAUNCH_WAIT_MS))) {
+        throw new Error(
+          `session ${id} is still launching (queued behind the bootstrap chain for ` +
+            `${Math.round(CONTROL_LAUNCH_WAIT_MS / 1000)}s); it is pending, not failed — retry once \`kteam ps\` shows it running`,
+        );
+      }
       const probe = await this.get(id);
-      if (this.launchingRecently(id))
-        throw new Error(`session ${id} has not finished launching yet; retry once it is running`);
       const paneProbe = await this.tmux.state(probe.config.tmuxSession);
       if (terminalStatuses.includes(probe.state.status) || !paneProbe.alive || paneProbe.dead) {
         return await this.reviveWithMessage(id, request);
@@ -1297,8 +1434,15 @@ export class SessionManager implements KTeamService {
 
   async resume(id: string, message?: string, guard?: ResumeGuard): Promise<SessionView> {
     id = this.resolveRef(id);
-    if (this.launchingRecently(id))
-      throw new Error(`session ${id} has not finished launching yet; retry once it is running`);
+    // Same pending-not-refused contract as send(): wait for an in-flight first
+    // launch instead of rejecting outright. A resume that lands mid-launch and
+    // succeeds anyway would fight the bootstrap for the same tmux name.
+    if (this.launchingRecently(id) && !(await this.awaitLaunchSettled(id, CONTROL_LAUNCH_WAIT_MS))) {
+      throw new Error(
+        `session ${id} is still launching (queued behind the bootstrap chain for ` +
+          `${Math.round(CONTROL_LAUNCH_WAIT_MS / 1000)}s); it is pending, not failed — retry once \`kteam ps\` shows it running`,
+      );
+    }
     // Automatic retries are not a human action; only explicit resumes clear.
     if (!guard) await this.clearNeedsHuman(id);
     if (!guard) this.cancelRetry(id);
@@ -2267,6 +2411,37 @@ export class SessionManager implements KTeamService {
           }
           const pane = await this.tmux.state(view.config.tmuxSession);
           if (!pane.alive || pane.dead) {
+            // A pane that has NEVER been launched is not a crashed pane. Until
+            // the bootstrap runs `tmux new-session`, `tmux.state` reports the
+            // same "not alive" as a dead harness — and a monitor started into
+            // that window (self-check repair, launch-grace expiry) used to
+            // record `session.crashed` on a teammate that then came up and did
+            // the whole task, leaving it `failed` forever because a terminal
+            // status suppresses every later patch.
+            if (view.state.launchedAt === undefined && preLaunchStatuses.includes(view.state.status)) {
+              if (this.launchingRecently(id)) {
+                // Still queued behind the bootstrap chain: PENDING, not dead.
+                // Stay attached and re-check on the next tick.
+                await interruptibleSleep(sleepSeconds * 1000, signal);
+                continue;
+              }
+              // No launch is in flight any more and the pane was never
+              // created (daemon restart mid-queue, or a bootstrap that died
+              // without reaching tmux). That IS a real failure — say what it
+              // actually was rather than blaming a harness that never ran.
+              await this.transition(
+                id,
+                {
+                  status: 'failed',
+                  health: 'crashed',
+                  reason: 'the launch never created its tmux session; use resume to relaunch',
+                  finishedAt: now(),
+                  promptReady: false,
+                },
+                'session.launch_failed',
+              );
+              return;
+            }
             if (!terminalStatuses.includes(view.state.status)) {
               await this.tmux.snapshot(view.config, true);
               const exitEvidence = { at: now(), alive: pane.alive, dead: pane.dead, exitCode: pane.exitCode };
@@ -2943,6 +3118,9 @@ export class SessionManager implements KTeamService {
           lastToolStartedAt,
           transcriptOffset: Math.max(current.transcriptOffset ?? 0, offset),
           ...(contextPercentFromUsage !== undefined ? { contextPercent: contextPercentFromUsage } : {}),
+          // Ground truth for the MODEL column: the wrapper alias (`opus` on a
+          // GLM account) is only what was requested — this is what answered.
+          ...(usageEvent?.data.model ? { observedModel: usageEvent.data.model } : {}),
           retryAttempt: madeProgress ? 0 : current.retryAttempt,
           lastTranscriptAt: now(),
           lastActivityAt: now(),
@@ -3076,6 +3254,9 @@ export class SessionManager implements KTeamService {
           lastToolStartedAt,
           transcriptOffset: Math.max(current.transcriptOffset ?? 0, offset),
           ...(contextPercentFromUsage !== undefined ? { contextPercent: contextPercentFromUsage } : {}),
+          // Ground truth for the MODEL column: the wrapper alias (`opus` on a
+          // GLM account) is only what was requested — this is what answered.
+          ...(usageEvent?.data.model ? { observedModel: usageEvent.data.model } : {}),
           retryAttempt: madeProgress ? 0 : current.retryAttempt,
           lastTranscriptAt: now(),
           lastActivityAt: now(),
@@ -3105,12 +3286,16 @@ export class SessionManager implements KTeamService {
     patch: Partial<SessionState>,
     eventType: string,
     eventData: Record<string, unknown> = {},
+    options: { force?: boolean } = {},
   ): Promise<void> {
     let suppressed = false;
     const state = await this.store.updateState<SessionState>(id, current => {
-      const preserveTerminal = terminalStatuses.includes(current.status) && patch.status !== 'starting';
+      const preserveTerminal =
+        !options.force && terminalStatuses.includes(current.status) && patch.status !== 'starting';
       const preserveKillFailure =
-        current.status === 'kill_failed' && !(patch.status !== undefined && terminalStatuses.includes(patch.status));
+        !options.force &&
+        current.status === 'kill_failed' &&
+        !(patch.status !== undefined && terminalStatuses.includes(patch.status));
       const next = { ...current, ...patch };
       // A session that ENDS is not waiting for anything any more. Nothing else
       // clears a declared wait on the terminal paths (stop, timeout, stall
