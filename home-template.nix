@@ -364,6 +364,7 @@ rec {
       atomi.cyanprint
       atomi.attic
       atomi.obsidian_headless # headless Obsidian vault sync CLI
+      atomi.mmoney-cli # MoneyMonarch CLI
 
 
       # LLM friendly
