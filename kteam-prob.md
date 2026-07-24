@@ -939,3 +939,53 @@ Root causes found (all three residuals shared ONE load bomb), fixes landed in `m
   retry (mryoccvi/Vicente) was live from an identical prompt in the same
   worktree → duplicate workers. Resume/revive must check for a live successor
   with the same label/worktree before resurrecting a failed/stopped session.
+
+## 2026-07-24 22:5xZ — ROOT-CAUSED + FIXED: slow launches marked `failed` (the launch_backgrounded/false-terminal class)
+
+- Reproduced: session mrzi4r0p (claude-auto-glm52a). Events were
+  `session.starting` → **`session.crashed`** → `transcript.discovered` →
+  `chat.user` → `session.launch_backgrounded` → `chat.assistant.thinking`:
+  the daemon recorded `failed`/`crashed` 6.6 s into a launch that was still
+  QUEUED, then the TUI came up, did the whole task and signalled done — while
+  `state.status` stayed `failed` forever (a terminal status suppresses every
+  later patch, so the launch's own `session.running` was dropped) and every
+  control action refused the session. Same shape as the 03:19Z carol/mryd2xvg
+  entry (finishedAt 3.7 s after startedAt, reason "interactive claude exited
+  unknown", liveness still advancing).
+- ROOT CAUSE (proved by the daemon journal: `22:18:49 kteamd self-check:
+1 running session(s) without a monitor — repairing`, and state.finishedAt
+  22:18:49.868): `start()` registered the session in `this.launching` only
+  AFTER `await transition(... 'starting')`, and `transition()` awaits `emit()`,
+  which rides the GLOBAL event queue — 10-19 s behind during that 5-session
+  launch storm (event timestamps in the journal lag the state writes by exactly
+  that much). In that window the session was persisted as `starting` but
+  invisible to `launchingRecently()`, so the 60 s self-check "repaired" it with
+  a monitor; the monitor read `tmux has-session` on a session that did not
+  exist YET and could not tell "not launched" from "died", so it took the
+  dead-pane branch → `session.crashed`.
+- FIXED in modules/kteam-ts (not yet committed at time of writing; daemon picks
+  it up only on restart):
+  1. `launching` is claimed BEFORE any awaited emit — the race window is gone.
+  2. New durable `state.launchedAt` (written the moment `tmux new-session`
+     succeeds). The monitor's dead-pane branch now treats "no launchedAt +
+     status created/starting" as PENDING while a launch is in flight, and as
+     `session.launch_failed` ("the launch never created its tmux session") once
+     it is not — never as a harness crash.
+  3. A backgrounded launch resolves itself: `session.launch_settled`
+     (→ running + monitor attached) or the real failure. The success transition
+     is forced, so even a stray terminal record written mid-launch cannot
+     strand a live teammate.
+  4. `send`/`resume` landing in the launch window QUEUE behind the launch (up
+     to 60 s) instead of the old instant "has not finished launching yet".
+  5. Start window is account-aware: 90 s for the slow providers
+     (glm52/mm3/dsv4\*), 45 s otherwise.
+  6. Cosmetic: `ps`/`status`/web UI show the RESOLVED model (glm-5.2) instead of
+     the wrapper alias (`opus`), from harness usage records where available.
+- Evidence (throwaway daemon, KTEAM_HOME under a temp dir, port 7399, own
+  TMUX_TMPDIR): backgrounded glm52a launch → created → starting →
+  launch_backgrounded → running → launch_settled(outcome=running) → completed,
+  no `session.crashed`; a wrapper that exits 3 still fails fast with the real
+  reason; a wrapper that never paints a prompt fails with "did not become ready
+  within 90s" plus launch_settled(outcome=failed); a `kteam send` issued during
+  the backgrounded window waited ~16 s and was delivered 0.25 s after
+  launch_settled.

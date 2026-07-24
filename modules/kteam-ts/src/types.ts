@@ -152,6 +152,16 @@ export interface SessionState {
   needsHumanKind?: string;
   /** Context-window usage (percent used) parsed from the TUI statusline. */
   contextPercent?: number;
+  /** When this session's tmux pane was first created by a successful launch.
+   *  Absence is the ONLY way to tell "the pane does not exist yet" (a launch
+   *  still queued behind the bootstrap chain) from "the pane died" — both look
+   *  identical to `tmux has-session`. A monitor that reads a missing pane on a
+   *  session with no launchedAt must treat it as pending, never crashed. */
+  launchedAt?: string;
+  /** The model the harness ITSELF reported in its transcript usage records
+   *  (e.g. `glm-5.2` on a wrapper whose alias is `opus`). Ground truth for
+   *  display; the configured alias is only a request. */
+  observedModel?: string;
   /** The harness's live activity/spinner line ("✻ Lollygagging… (34s · 2.1k
    *  tokens)") parsed from the pane — the UI's received-and-thinking signal.
    *  Cleared when the pane goes idle. */
