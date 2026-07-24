@@ -423,7 +423,8 @@ rec {
       grafanactl
 
       # AI
-      pkgs-unstable.rtk
+      # (rtk removed 2026-07-25: unused since the kfleet/kteam stack replaced it,
+      # and its source build blocked home-manager generations.)
 
 
       # liftoff
