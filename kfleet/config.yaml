@@ -119,11 +119,16 @@ agents:
     env: &anthropic-1m
       ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5[1m]
       ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5[1m]
+  # liftoff does NOT have Opus 5 access yet (verified 2026-07-25: Anthropic
+  # returns not_found_error for claude-opus-5 on this account's OAuth token,
+  # while atomi/kirin succeed). Keep it on 4-8 until the rollout reaches it.
   - name: liftoff
     kind: claude
     profiles:
       - claude
-    env: *anthropic-1m
+    env:
+      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-4-8[1m]
+      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5[1m]
   - name: atomi
     kind: claude
     profiles:
