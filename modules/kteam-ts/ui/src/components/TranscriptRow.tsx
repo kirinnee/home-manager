@@ -192,7 +192,7 @@ function AssistantMessage({ text, ts }: { text: string; ts?: string; source: str
     <div className={cn('group relative pl-3', ts && TS_GUTTER)}>
       <span className="absolute left-0 top-1 bottom-1 w-px bg-border-soft opacity-0 transition-opacity group-hover:opacity-100" />
       {ts && (
-        <span className="pointer-events-none absolute right-0 top-0.5 w-[50px] text-right mono text-[10.5px] tabular-nums text-faint opacity-0 transition-opacity group-hover:opacity-100">
+        <span className="pointer-events-none absolute right-0 top-0.5 w-[50px] text-right mono text-2xs tabular-nums text-faint opacity-0 transition-opacity group-hover:opacity-100">
           {fmtClock(ts)}
         </span>
       )}
@@ -210,7 +210,8 @@ function AssistantMessage({ text, ts }: { text: string; ts?: string; source: str
 function PeerChip({ from }: { from: PeerFrom }) {
   return (
     <span
-      className="inline-flex shrink-0 items-center gap-1 rounded-sm bg-accent-soft px-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-accent"
+      className="kt-badge shrink-0"
+      data-tone="accent"
       title={
         from.replyExpected
           ? `sent by teammate ${from.name}, which is parked waiting for a reply`
@@ -236,28 +237,26 @@ function UserMessage({ text, ts, from }: { text: string; ts?: string; from?: Pee
   if (preview.length > 160) preview = preview.slice(0, 160) + '…';
 
   return (
-    <div className="overflow-hidden rounded-md border border-l-[2.5px] border-border border-l-user-border bg-user-bg">
-      <div className="flex items-center gap-2 px-2.5 pt-1">
+    <div className="overflow-hidden rounded-panel border border-l-[2.5px] border-border border-l-user-border bg-user-bg">
+      <div className="flex items-center gap-2 px-panel pt-1">
         {/* A peer message says WHO instead of the generic "message": the sender
             is the most important thing about it. */}
         {from ? (
           <PeerChip from={from} />
         ) : (
-          <span className="shrink-0 whitespace-nowrap text-[10.5px] uppercase tracking-[0.12em] font-semibold text-accent">
+          <span className="kt-label shrink-0 whitespace-nowrap text-accent">
             {isProtocol ? 'turn prompt' : 'message'}
           </span>
         )}
         {/* In FLOW, never absolute: a user block already has a metadata row, so
             the stamp belongs in it. shrink-0 keeps it whole at 390px instead of
             being squeezed into the label beside it. */}
-        {ts && (
-          <span className="mono shrink-0 whitespace-nowrap text-[10.5px] tabular-nums text-faint">{fmtClock(ts)}</span>
-        )}
+        {ts && <span className="mono shrink-0 whitespace-nowrap text-2xs tabular-nums text-faint">{fmtClock(ts)}</span>}
         {collapsible && (
           <button
             type="button"
             onClick={() => setOpen(v => !v)}
-            className="ml-auto inline-flex items-center gap-1 text-[11px] text-muted hover:text-fg"
+            className="ml-auto inline-flex items-center gap-1 text-meta text-muted hover:text-fg"
           >
             <span>{open ? 'collapse' : `${lines.length} lines`}</span>
             <ChevronRight size={12} className={cn('transition-transform', open && 'rotate-90')} />
@@ -268,7 +267,7 @@ function UserMessage({ text, ts, from }: { text: string; ts?: string; from?: Pee
         <button
           type="button"
           onClick={() => setOpen(true)}
-          className="block w-full px-2.5 pb-1.5 pt-0.5 text-left mono text-[12.5px] text-fg-soft truncate"
+          className="block w-full px-panel pb-1.5 pt-0.5 text-left mono text-ui text-fg-soft truncate"
           title={preview}
         >
           {preview}
@@ -276,7 +275,7 @@ function UserMessage({ text, ts, from }: { text: string; ts?: string; from?: Pee
       ) : (
         // Line-height stays comfortable INSIDE prose: readability of the words
         // outranks density, and the space this pass reclaimed came from chrome.
-        <div className="px-2.5 pb-1.5 pt-0.5 text-[13px] leading-[1.55] whitespace-pre-wrap break-words text-fg">
+        <div className="px-panel pb-1.5 pt-0.5 text-row leading-base whitespace-pre-wrap break-words text-fg">
           {text}
         </div>
       )}
@@ -294,14 +293,14 @@ function ThinkingLine({ text, durationMs }: { text: string; durationMs?: number 
       <button
         type="button"
         onClick={() => setOpen(v => !v)}
-        className="flex w-full items-center gap-1.5 rounded px-2 py-px text-left hover:bg-surface-2"
+        className="flex w-full items-center gap-1.5 rounded-control px-2 py-px text-left hover:bg-surface-2"
       >
         <Brain size={10} className="shrink-0" />
         <span className="italic">{label}</span>
         <ChevronRight size={10} className={cn('shrink-0 transition-transform', open && 'rotate-90')} />
       </button>
       {open && (
-        <pre className="m-0 ml-2 mt-0.5 max-h-80 overflow-auto rounded-md border border-border-soft bg-surface-2 px-2.5 py-2 text-[11.75px] leading-[1.55] mono whitespace-pre-wrap break-words text-fg-soft scroll-thin">
+        <pre className="m-0 ml-2 mt-0.5 max-h-80 overflow-auto rounded-md border border-border-soft bg-surface-2 px-2.5 py-2 text-code leading-base mono whitespace-pre-wrap break-words text-fg-soft scroll-thin">
           {text}
         </pre>
       )}

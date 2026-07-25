@@ -137,7 +137,7 @@ export const ToolGroup = memo(function ToolGroup({ calls, live, isLast }: Props)
       <button
         type="button"
         onClick={() => setOpen(v => !v)}
-        className="flex w-full items-center gap-1.5 rounded px-2 py-px text-left hover:bg-surface-2"
+        className="flex w-full items-center gap-1.5 rounded-control px-2 py-px text-left hover:bg-surface-2"
       >
         <span className="mono shrink-0">{calls.length} tools</span>
         <span className="mono min-w-0 flex-1 truncate">· {summarize(calls)}</span>
@@ -198,7 +198,7 @@ function ToolLine({ call }: { call: ToolCall }) {
         type="button"
         onClick={() => hasBody && setOpen(v => !v)}
         className={cn(
-          'flex w-full items-center gap-1.5 rounded px-1.5 py-px text-left',
+          'flex w-full items-center gap-1.5 rounded-control px-1.5 py-px text-left',
           hasBody ? 'cursor-pointer hover:bg-surface-2' : 'cursor-default',
         )}
       >
@@ -222,7 +222,7 @@ function ToolLine({ call }: { call: ToolCall }) {
           {sum.bodyLines.length > 0 && <CodeBlock code={sum.bodyLines.join('\n')} lang={bodyLang} />}
           {cleaned != null && (
             <div>
-              <div className="px-1 pb-0.5 text-[10px] uppercase tracking-wider">
+              <div className="kt-label px-1 pb-0.5">
                 {err ? 'error' : 'result'} · {cleaned.split('\n').length} lines
               </div>
               <CodeBlock code={cleaned} lang={err ? undefined : resultLang} tone={err ? 'err' : 'default'} />
