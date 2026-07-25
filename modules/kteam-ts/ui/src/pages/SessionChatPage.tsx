@@ -28,6 +28,7 @@ import { ViewTabs } from '../components/ViewTabs';
 import { SessionHeader } from '../components/SessionHeader';
 import { Transcript } from '../components/Transcript';
 import { ThinkingIndicator } from '../components/Harness';
+import { displayCallsign } from '../lib/callsign';
 import { buildTranscript, latestPendingQuestion } from '../lib/transcript';
 import { useUsage } from '../hooks/useUsage';
 import { useDebouncedEffect } from '../hooks/useDebounce';
@@ -421,7 +422,7 @@ export function SessionChatPage({
   // Every input below is already-derived coarse state. Nothing here reads
   // `records`, subscribes to anything, or touches the fetch, merge and scroll
   // paths above.
-  const who = view?.config.teammate || view?.config.name || 'This session';
+  const who = view?.config.teammate ? displayCallsign(view.config.teammate) : view?.config.name || 'This session';
 
   // Socket trouble is only worth announcing to someone who HAD a connection.
   // Every page starts at `connecting`, and narrating the normal first handshake

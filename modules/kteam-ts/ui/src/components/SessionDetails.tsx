@@ -48,6 +48,7 @@ import {
 } from 'lucide-react';
 import type { SessionView } from '../types';
 import type { Quota } from '../lib/usage';
+import { displayCallsign } from '../lib/callsign';
 import { cn, fmtAbsolute, fmtAge, fmtRelative } from '../lib/utils';
 import { buildLineage, byNewestActivity, parentDisplay, shortSessionId } from '../lib/lineage';
 import { Link } from '../lib/router';
@@ -178,7 +179,7 @@ export function SessionDetails({ id, view, quota, liveStatus, open, onClose, lab
   const { config, state } = view;
   const observedModel = config.model?.trim();
   const requestedModel = config.modelHint?.trim();
-  const title = config.teammate || config.name || config.id;
+  const title = config.teammate ? displayCallsign(config.teammate) : config.name || config.id;
 
   function beginSwipe(event: ReactPointerEvent<HTMLButtonElement>) {
     if (!open || event.button !== 0) return;
@@ -327,6 +328,7 @@ export function SessionDetails({ id, view, quota, liveStatus, open, onClose, lab
             )}
 
             <Group icon={<UserRound size={13} aria-hidden="true" />} title="Identity" tone="identity">
+              {/* Canonical copy/command value, e.g. `kteam send <teammate>`. */}
               <Row label="Teammate" value={config.teammate} />
               <Row label="Task" value={config.name} />
               <Row label="Label" value={config.label} />
@@ -435,7 +437,7 @@ function useOpenFleet(open: boolean) {
 }
 
 function sessionName(view: SessionView): string {
-  return view.config.teammate?.trim() || view.config.name?.trim() || shortSessionId(view.config.id);
+  return displayCallsign(view.config.teammate) || view.config.name?.trim() || shortSessionId(view.config.id);
 }
 
 function sessionPath(id: string): string {

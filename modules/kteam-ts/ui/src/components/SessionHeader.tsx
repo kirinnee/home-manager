@@ -36,6 +36,7 @@ import { memo, useEffect, useId, useState, type ReactNode } from 'react';
 import { ChevronLeft, Pause, Play, StopCircle, ZapOff, MoreHorizontal } from 'lucide-react';
 import type { SessionView } from '../types';
 import { Button, ActionGroup } from './Primitives';
+import { displayCallsign } from '../lib/callsign';
 import { Link } from '../lib/router';
 import { cn, toneFor, type Tone } from '../lib/utils';
 import { SessionDetails, type LiveStatus } from './SessionDetails';
@@ -93,7 +94,7 @@ export const SessionHeader = memo(function SessionHeader({
   showTheme = true,
 }: Props) {
   const { config, state } = view;
-  const title = config.teammate || config.name || config.id;
+  const title = config.teammate ? displayCallsign(config.teammate) : config.name || config.id;
   const subtitle = config.teammate && config.name ? config.name : config.label;
   const [detailsOpen, setDetailsOpen] = useState(false);
   const detailsId = useId();

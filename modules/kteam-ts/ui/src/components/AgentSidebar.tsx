@@ -55,6 +55,7 @@ import {
   X,
 } from 'lucide-react';
 import type { SessionView } from '../types';
+import { displayCallsign } from '../lib/callsign';
 import { Link } from '../lib/router';
 import { cn } from '../lib/utils';
 import { filterSessions, groupByProject, modeCounts, type SessionGroup } from '../lib/grouping';
@@ -323,7 +324,7 @@ function SidebarRow({
         aria-current={active ? 'page' : undefined}
         onClick={onNavigate}
         title={[
-          cfg.teammate || cfg.id,
+          cfg.teammate ? displayCallsign(cfg.teammate) : cfg.id,
           mark.label,
           spawnedBy && spawnedByLabel && `${spawnedByLabel}${parentId ? `\n${parentId}` : ''}`,
         ]
@@ -355,7 +356,7 @@ function SidebarRow({
           </div>
           <div className="mt-0.5 flex min-w-0 items-center gap-xs pl-3.5">
             <span className={cn('mono min-w-0 truncate text-meta', active ? 'text-accent' : 'text-muted')}>
-              {cfg.teammate || cfg.id}
+              {cfg.teammate ? displayCallsign(cfg.teammate) : cfg.id}
             </span>
             {labels.map(l => (
               <span

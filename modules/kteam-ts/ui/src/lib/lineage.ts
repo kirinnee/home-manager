@@ -4,6 +4,7 @@
 // client-side tree recurse forever.
 
 import type { SessionView } from '../types';
+import { displayCallsign } from './callsign';
 
 /** Sidebar indentation stops growing after two 10px steps. */
 export const MAX_INDENT_DEPTH = 2;
@@ -45,7 +46,7 @@ export function shortSessionId(id: string): string {
 }
 
 function displayName(view: SessionView): string {
-  return view.config.teammate?.trim() || view.config.name?.trim() || shortSessionId(view.config.id);
+  return displayCallsign(view.config.teammate) || view.config.name?.trim() || shortSessionId(view.config.id);
 }
 
 /** Resolve by id, never by the recyclable teammate callsign. */
