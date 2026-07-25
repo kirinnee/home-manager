@@ -82,6 +82,8 @@ import {
 } from './tmux-controller';
 import { reflexAssess, renderLivenessYaml, susFindings, type LivenessLedger } from './liveness';
 import type {
+  Harness,
+  InteractionMode,
   KTeamEvent,
   SendDisposition,
   SendRequest,
@@ -347,6 +349,27 @@ export function parseDeadline(value: string, fromMs = Date.now()): string {
   // The backstop is a ceiling on every wait, not just open-ended ones: a park
   // must always end within a bounded time of when it was declared.
   return new Date(Math.min(absolute, fromMs + WAITING_BACKSTOP_MS)).toISOString();
+}
+
+/** Whether a session launches with Remote Control. RC is claude-only (codex has
+ *  no RC flag) and exists so a HUMAN can watch/steer the session from the RC
+ *  surface (phone, claude.ai). An explicit per-session choice (`--rc`/`--no-rc`,
+ *  i.e. a defined `requestRemoteControl`) always wins. With NO explicit choice
+ *  the default is MODE-DEPENDENT: an interactive session is the user's own
+ *  hands-on window and follows the fleet default (on); an auto teammate has no
+ *  human at the wheel, so RC is pure overhead and defaults OFF regardless of the
+ *  fleet default. The fleet `remoteControl` config is therefore now read as the
+ *  default for INTERACTIVE sessions only. */
+export function resolveRemoteControl(
+  harness: Harness,
+  mode: InteractionMode,
+  requestRemoteControl: boolean | undefined,
+  fleetDefault: boolean | undefined,
+): boolean {
+  if (harness !== 'claude') return false;
+  if (requestRemoteControl !== undefined) return requestRemoteControl;
+  if (mode === 'auto') return false;
+  return fleetDefault ?? true;
 }
 
 /** What one index-vs-disk reconciliation found. */
@@ -1020,8 +1043,10 @@ export class SessionManager implements KTeamService {
     // macOS exposes /tmp through /private/tmp. Store the canonical path so
     // harness trust records and transcript metadata agree with the session.
     const cwd = await realpath(requestedCwd);
-    // Remote Control: claude-only, request wins, else the fleet default (on).
-    const remoteControl = harness === 'claude' && (request.remoteControl ?? this.options.remoteControl ?? true);
+    // Remote Control: claude-only, explicit request wins, else a MODE-DEPENDENT
+    // default (interactive follows the fleet default, auto is off). See
+    // resolveRemoteControl.
+    const remoteControl = resolveRemoteControl(harness, mode, request.remoteControl, this.options.remoteControl);
     const harnessFlags = (request.harnessFlags ?? []).map(flag => flag.trim()).filter(Boolean);
     const harnessHome = await wrapperHome(wrapper, harness);
     if (!harnessHome)
@@ -2082,6 +2107,57 @@ export class SessionManager implements KTeamService {
       ).catch(() => undefined);
       throw new Error(reason);
     }
+  }
+
+  /** Validate a requested teammate callsign for a RENAME and ensure no OTHER
+   *  live session in the window already holds it. Mirrors resolveTeammateName's
+   *  checks, but excludes `exceptId` so renaming a session's title while keeping
+   *  (or re-asserting) its own callsign is not a self-collision. Returns the
+   *  normalised slug. */
+  private resolveRenameTeammate(requested: string, exceptId: string): string {
+    const normalized = normalizeTeammateName(requested);
+    if (!normalized)
+      throw new Error(
+        `invalid --teammate name "${requested}": use a slug like "hayden" — ` +
+          'lowercase, start with a letter, then letters/digits/hyphens, at most 32 chars',
+      );
+    const { liveByName } = this.teammateNameUsage();
+    const live = (liveByName.get(normalized) ?? []).filter(config => config.id !== exceptId);
+    if (live.length > 0) {
+      const conflicts = live.map(config => `${config.id} (${config.name})`).join(', ');
+      throw new Error(
+        `teammate name "${normalized}" is already taken by a live session in the last 5 days: ${conflicts}. ` +
+          'Pick another with `kteam name`.',
+      );
+    }
+    return normalized;
+  }
+
+  /** Rename a session's TASK TITLE and/or its teammate CALLSIGN. Renaming the
+   *  callsign is cheap and safe because the callsign is not load-bearing — tmux
+   *  sessions, session directories, and KTEAM_SESSION_ID all key on the id, and
+   *  `kteam send/attach/--parent` resolve the name live off `config.teammate`.
+   *  So a callsign rename simply changes what the name resolves to, guarded by
+   *  the same collision check as `start --teammate` (excluding this session).
+   *  Persists to config.json AND the metadata index (so `kteam ps` and the web
+   *  UI both reflect it) and journals a `session.renamed` event so the live UI
+   *  refetches without a manual refresh. Works on running and terminal
+   *  sessions alike — it only rewrites config. */
+  async rename(id: string, name?: string, teammate?: string): Promise<SessionView> {
+    const resolved = this.resolveRef(id);
+    const title = name?.trim();
+    const requestedTeammate = teammate?.trim();
+    if (!title && !requestedTeammate) throw new Error('rename requires --name "New Title" and/or --teammate <name>');
+    const nextName = title ? displayName(title) : undefined;
+    const nextTeammate = requestedTeammate ? this.resolveRenameTeammate(requestedTeammate, resolved) : undefined;
+    const config = await this.store.updateConfig<SessionConfig>(resolved, current => ({
+      ...current,
+      ...(nextName !== undefined ? { name: nextName } : {}),
+      ...(nextTeammate !== undefined ? { teammate: nextTeammate } : {}),
+      updatedAt: now(),
+    }));
+    await this.emit(resolved, 'session.renamed', { name: config.name, teammate: config.teammate }, 'client');
+    return await this.get(resolved);
   }
 
   async remove(id: string, purge = false, force = false): Promise<void> {

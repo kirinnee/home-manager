@@ -115,7 +115,7 @@ const json = (value: unknown, status = 200) => Response.json(value, { status });
  *  reuses the original x-kteam-request-id, so a duplicate id here means the
  *  first attempt already applied server-side — re-applying would duplicate the
  *  message/turn. */
-const DEDUPED_ACTIONS = new Set(['send', 'answer', 'signal', 'resume', 'migrate']);
+const DEDUPED_ACTIONS = new Set(['send', 'answer', 'signal', 'resume', 'migrate', 'rename']);
 
 /** Per-session LRU of recently APPLIED request ids. Ids are recorded only after
  *  the mutation succeeds: a failed attempt stays retryable, while a retry of a
@@ -453,6 +453,12 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
             const input = await body<{ agent?: string; model?: string }>(request);
             if (!input.agent) throw new HttpError(400, 'agent is required');
             return await applyOnce(() => options.service.migrate(id, input.agent!, input.model));
+          }
+          if (action === 'rename' && request.method === 'POST') {
+            const input = await body<{ name?: string; teammate?: string }>(request);
+            if (!input.name?.trim() && !input.teammate?.trim())
+              throw new HttpError(400, 'name and/or teammate is required');
+            return await applyOnce(() => options.service.rename(id, input.name, input.teammate));
           }
           if (action === 'signal' && request.method === 'POST') {
             const input = await body<{

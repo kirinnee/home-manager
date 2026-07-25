@@ -40,10 +40,13 @@ export interface SessionConfig {
   model?: string;
   mode: InteractionMode;
   /** Launch the harness with Remote Control enabled, so the session also shows
-   *  up in the user's RC surface (claude only — codex has no RC flag). Default
-   *  ON for claude wrappers; `--no-rc` / daemon config `remoteControl: false`
-   *  turns it off. Orthogonal to `mode`: an auto teammate still runs
-   *  autonomously, it is merely also visible/steerable from RC. */
+   *  up in the user's RC surface (claude only — codex has no RC flag). The
+   *  DEFAULT is mode-dependent: interactive sessions follow the fleet default
+   *  (on) since a human is at the wheel; auto teammates default OFF because RC
+   *  with no human is pure overhead. An explicit `--rc`/`--no-rc` (a defined
+   *  value here) overrides that default in either direction. Still orthogonal to
+   *  `mode` in that you CAN force RC on for an auto teammate — it merely no
+   *  longer happens by default. See resolveRemoteControl. */
   remoteControl?: boolean;
   /** Escape hatch: extra harness flags appended verbatim to the generated
    *  launcher (`kteam start --harness-flag …`, repeatable). Kept in the config

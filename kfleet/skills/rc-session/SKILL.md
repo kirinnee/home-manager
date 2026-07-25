@@ -15,7 +15,7 @@ the terminal, on the phone, or at claude.ai. This supersedes the old `klaude han
 Every session gets a human title of the form **`[Hayden] Fix Transcript`**:
 
 - `Hayden` — the **teammate callsign**, Title-Cased.
-- `Fix Transcript` — the **task**, Title-Cased, 2–3 words.
+- `Fix Transcript` — the **task**, natural Title Case, up to 5 words.
 
 This title is what `kteam ps` and the dashboard show in the TASK column. `kteam` stores it
 **verbatim** (the brackets survive), so compose it correctly up front.
@@ -30,9 +30,9 @@ To compose it you must know the teammate name **before** you start — so pick i
 
 ## Steps
 
-1. **Get the task** (2–3 words) if the user did not already say what the session is for —
-   e.g. "Fix Transcript", "HQ Notes", "Codex Spike". If the user gave a full name/title
-   explicitly, use it as-is and skip the composing below.
+1. **Get the task** (natural Title Case, up to 5 words) if the user did not already say what
+   the session is for — e.g. "Fix Transcript", "HQ Notes", "Codex Spike". If the user gave a
+   full name/title explicitly, use it as-is and skip the composing below.
 
 2. **Pick the teammate name first:**
 
@@ -95,8 +95,8 @@ Inside an existing tmux client this switches the client rather than nesting.
 Ask only for:
 
 - **Target assistant**, if the user did not say Claude, Codex, `crc`, or `rc`.
-- **Task** (2–3 words), if the user did not say what the session is for and no full name
-  was supplied.
+- **Task** (natural Title Case, up to 5 words), if the user did not say what the session is
+  for and no full name was supplied.
 
 Do not ask about worktrees, ticket systems, categories, harnesses, or wrappers.
 

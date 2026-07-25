@@ -273,7 +273,7 @@ program
   .addOption(new Option('--mode <mode>').choices(['auto', 'interactive']).default('auto'))
   .option(
     '--name <name>',
-    'human-readable TASK TITLE shown in `kteam ps` and the dashboard; free-form, kept verbatim. Convention: `[Teammate] Short Task Title` (e.g. "[Hayden] Fix Transcript")',
+    'human-readable TASK TITLE shown in `kteam ps` and the dashboard; free-form, kept verbatim. Convention: natural Title Case, at most 5 words (e.g. "Fix Transcript Scrolling"). Teammate sessions may prefix the callsign: "[Hayden] Fix Transcript"',
   )
   .option(
     '--teammate <name>',
@@ -287,8 +287,11 @@ program
   .option('--parent <id>', 'parent session (defaults to KTEAM_SESSION_ID when started from inside a teammate)')
   .option('--prompt-file <file>', 'read the task prompt from a file instead of the command line (use for long prompts)')
   .option('--model <model>', 'override the model (alias or full id); defaults to the wrapper KTEAM_MODEL')
-  .option('--rc', 'launch with Remote Control so the session is visible/steerable in the RC surface (claude; default)')
-  .option('--no-rc', 'launch WITHOUT Remote Control')
+  .option(
+    '--rc',
+    'launch with Remote Control so the session is visible/steerable in the RC surface (claude only). Default ON for --mode interactive, OFF for --mode auto; --rc forces it on for an auto session',
+  )
+  .option('--no-rc', 'launch WITHOUT Remote Control (the default for --mode auto; use to force it off for interactive)')
   .option(
     '--harness-flag <flag>',
     'extra flag passed straight to the harness binary; repeatable',
@@ -355,8 +358,9 @@ program
         // inside one automatically records the parent (teammate trees).
         parent: (options.parent as string | undefined) ?? process.env.KTEAM_SESSION_ID,
         model: options.model as string | undefined,
-        // Only send an explicit RC decision when the user made one; otherwise the
-        // daemon's fleet default (config `remoteControl`, itself on) decides.
+        // Only send an explicit RC decision when the user gave --rc/--no-rc;
+        // otherwise leave it unset so the daemon applies the mode-dependent
+        // default (interactive -> fleet default/on, auto -> off).
         remoteControl: command.getOptionValueSource('rc') === 'cli' ? options.rc === true : undefined,
         harnessFlags: (options.harnessFlag as unknown as string[]) ?? [],
         cwd: String(options.cwd),
@@ -585,6 +589,23 @@ program
   .action(async (id, options: { agent: string; model?: string }) =>
     printView(await (await client()).migrate(id, options.agent, options.model)),
   );
+program
+  .command('rename')
+  .description('change a session task title and/or teammate callsign (accepts an id or a teammate name)')
+  .argument('<id>', 'session id or teammate name')
+  .option('--name <title>', 'new task title, kept verbatim — e.g. "Fix Transcript Scrolling"')
+  .option('--teammate <name>', 'new teammate callsign (slug); collision-checked against live sessions')
+  .option('--json', 'print the renamed session as {id, name, teammate} JSON instead of the usual view')
+  .action(async (id, options: { name?: string; teammate?: string; json?: boolean }) => {
+    if (!options.name?.trim() && !options.teammate?.trim())
+      throw new Error('rename needs --name "New Title" and/or --teammate <name>');
+    const view = await (await client()).rename(id, options.name, options.teammate);
+    if (options.json) {
+      console.log(JSON.stringify({ id: view.config.id, name: view.config.name, teammate: view.config.teammate }));
+      return;
+    }
+    printView(view);
+  });
 program
   .command('restart')
   .description('stop the session (even while "running") and resume it in a fresh TUI')

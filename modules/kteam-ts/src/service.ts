@@ -118,6 +118,12 @@ export interface KTeamService {
   /** Continue a session on another same-kind account (new wrapper); relaunches
    *  via the resume path under the new wrapper. Cross-kind is rejected. */
   migrate(id: string, agent: string, model?: string): Promise<SessionView>;
+  /** Change a session's task title and/or its teammate callsign. Accepts a
+   *  session id or a teammate name. Persists to config + the metadata index and
+   *  journals `session.renamed` so `kteam ps` and the web UI reflect it live.
+   *  Works on running and terminal sessions. At least one of name/teammate is
+   *  required; a teammate change is collision-checked like `start --teammate`. */
+  rename(id: string, name?: string, teammate?: string): Promise<SessionView>;
   remove(id: string, purge?: boolean, force?: boolean): Promise<void>;
   signal(id: string, kind: SignalKind, message?: string, options?: SignalOptions): Promise<SessionView>;
   snapshot(id: string): Promise<string>;
