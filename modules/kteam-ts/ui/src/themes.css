@@ -219,15 +219,15 @@
   --err-border: #e6cfcf;
 
   /* ---- per-tool-type hues (consistent colour per tool across a transcript) */
-  --tool-bash: #2f8a56;
-  --tool-read: #2f6fd6;
-  --tool-edit: #b3701c;
+  --tool-bash: #2b7e4e;
+  --tool-read: #2e6cd0;
+  --tool-edit: #9c6218;
   --tool-write: #7c53d6;
-  --tool-patch: #c0417f;
-  --tool-search: #0e8fa8;
+  --tool-patch: #bd407d;
+  --tool-search: #0c7a8f;
   --tool-plan: #5b5bd6;
-  --tool-wait: #6b7280;
-  --tool-generic: #737382;
+  --tool-wait: #696f7d;
+  --tool-generic: #6e6e7c;
 
   /* ---- syntax (consumed by highlight.css) ---- */
   --syn-comment: #6d6d7c;
@@ -564,7 +564,7 @@
   --tool-patch: #9c2a63;
   --tool-search: #0a7181;
   --tool-plan: #1c4f8a;
-  --tool-wait: #4f7780;
+  --tool-wait: #4d737c;
   --tool-generic: #3c6771;
 
   --syn-comment: #4d747e;
@@ -955,13 +955,13 @@
   --err-border: #e3bcaa;
 
   --tool-bash: #4a6a28;
-  --tool-read: #8a6a12;
-  --tool-edit: #a4501a;
+  --tool-read: #806211;
+  --tool-edit: #a24f1a;
   --tool-write: #6d4a7a;
   --tool-patch: #a03a52;
   --tool-search: #3f6b62;
   --tool-plan: #7a5a2a;
-  --tool-wait: #7b6950;
+  --tool-wait: #75644c;
   --tool-generic: #6a5741;
 
   --syn-comment: #76654d;
@@ -1042,7 +1042,7 @@
   --tool-patch: #e2879b;
   --tool-search: #79b0a4;
   --tool-plan: #cfa878;
-  --tool-wait: #938067;
+  --tool-wait: #99876f;
   --tool-generic: #b39c80;
 
   --syn-comment: #917d64;
