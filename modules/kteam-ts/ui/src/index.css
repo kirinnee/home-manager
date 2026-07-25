@@ -596,8 +596,17 @@ body {
 
    Every rule below is gated on a phone-shaped condition — `max-width: 767px`
    (below DRAWER_MAX, the same line the layout already switches on),
-   `(pointer: coarse)`, or `html[data-keyboard='open']`. None of them can reach a
-   desktop, and none of them touches a theme token. */
+   `(pointer: coarse)`, or `html[data-keyboard='open']`. None of them touches a
+   theme token.
+
+   The guarantee is that no rule can affect the DESKTOP LAYOUT, and the reason is
+   worth stating precisely rather than as "these selectors cannot match a
+   desktop" — the `(pointer: coarse)` branch of the `[data-kb-hide]` rule can
+   match a coarse-pointer device at desktop width. It is moot because the markup
+   it selects is only ever rendered by the compact branch, which is what the
+   `compact` prop and the suppressed app bar decide. That is the checkable fact,
+   and it is the same fact that makes an ungated `data-kb-hide` a trap for
+   whoever adds the next one. */
 
 /* THE STATUS WORD COLLAPSES, THE STATUS DOES NOT. Below 420px the header row is
    a fleet trigger, a back/identity target, two tab icons, the theme picker and

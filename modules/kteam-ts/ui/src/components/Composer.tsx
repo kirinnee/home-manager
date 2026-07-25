@@ -300,10 +300,12 @@ function ContextStrip({ context }: { context: ComposerContext }) {
  *
  *  `ctx %` survives because it is the one that changes what you do next (a
  *  session at 92% is about to compact), and the socket dot survives because the
- *  app bar that used to carry it is not on screen on a phone — without it a
- *  dropped connection would have no rest-visible signal at all. Model and turn
+ *  app bar that used to carry it is not on screen on a phone — it is the only
+ *  rest-visible connection signal WHILE NOT TYPING. It carries `data-kb-hide`,
+ *  so a drop that happens mid-draft is not shown here; it surfaces through the
+ *  send path instead, which is where it would change what you do. Model and turn
  *  are in the details drawer. It sits INSIDE the action row, so it costs no
- *  height, and it goes away entirely once the keyboard is up. */
+ *  height. */
 function CompactContext({
   context,
   sending,
