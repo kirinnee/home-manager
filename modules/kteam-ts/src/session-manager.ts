@@ -62,7 +62,7 @@ import {
 } from './warden-detect';
 import { rankFailoverCandidates, selectFailoverCandidate } from './failover';
 import type { AgentUsage } from './core';
-import { chatEventFingerprint, EventStore, type JsonValue, type SessionEvent } from './storage';
+import { chatEventFingerprint, EventStore, type IndexedSession, type JsonValue, type SessionEvent } from './storage';
 import {
   fetchKfleetUsage,
   quotaFromUsage,
@@ -216,6 +216,14 @@ const TERMINAL_ACTIVITY_GRACE_MS = 60_000;
 const INCOHERENT_RESTART_THRESHOLD = 3;
 /** Minimum wall-clock gap between two self-restarts, across process lifetimes. */
 const SELF_RESTART_COOLDOWN_MS = 30 * 60_000;
+/** How often the consistency pass re-verifies that chat pointers RESOLVE. A
+ *  rotted chat index is not urgent (control/lifecycle journals are unaffected),
+ *  so this runs far less often than the 60 s membership check to avoid steady
+ *  file I/O and needless rebuilds of transcripts a harness is actively
+ *  rewriting. */
+const CHAT_VERIFY_INTERVAL_MS = 5 * 60_000;
+/** Newest chat pointers sampled per session when probing resolvability. */
+const CHAT_VERIFY_SAMPLE = 3;
 /** How long `start` holds its HTTP request open waiting for the TUI bootstrap
  *  before answering with the persisted 'starting' session and letting the
  *  launch finish in the background. Comfortably under every caller deadline
@@ -351,6 +359,9 @@ interface ConsistencyReport {
   zombies: string[];
   /** Sessions this pass reindexed or re-adopted. */
   repaired: string[];
+  /** Live sessions whose chat pointer rows exist but no longer RESOLVE to
+   *  readable transcript bytes, and could not be healed by a rebuild this pass. */
+  chatIndexBroken: string[];
 }
 
 async function interruptibleSleep(
@@ -462,6 +473,8 @@ export class SessionManager implements KTeamService {
   private bootstrapFinished = false;
   /** When the self-check last ran; its lateness is the wedge detector. */
   private lastSelfCheckAt = 0;
+  /** When chat-pointer resolvability was last verified (own slower cadence). */
+  private lastChatVerifyAt = 0;
   /** Consecutive consistency passes that left `ps` incomplete. */
   private consecutiveIncoherentChecks = 0;
   private selfRestartRequested = false;
@@ -579,7 +592,13 @@ export class SessionManager implements KTeamService {
    *  clean self-restart, so restarts stay a last resort (they cost every live
    *  pane in the fleet). */
   private async consistencyCheck(deep: boolean): Promise<ConsistencyReport> {
-    const report: ConsistencyReport = { missingFromIndex: [], staleRows: [], zombies: [], repaired: [] };
+    const report: ConsistencyReport = {
+      missingFromIndex: [],
+      staleRows: [],
+      zombies: [],
+      repaired: [],
+      chatIndexBroken: [],
+    };
     // Never race the boot import. Until it finishes, EVERY session directory
     // legitimately looks "missing from the index" â repairing against that
     // would duplicate the import's work and, three passes in, restart a daemon
@@ -588,6 +607,13 @@ export class SessionManager implements KTeamService {
     const onDisk = await this.store.sessionIdsOnDisk();
     const onDiskSet = new Set(onDisk);
     const indexed = this.store.listSessions();
+    // Verify chat pointers actually RESOLVE (not just that rows exist). This is
+    // independent of index membership â a chat index can rot while `ps` is
+    // perfectly healthy â and must NOT feed the membership-restart counter, so
+    // it runs here on its own cadence and reports separately.
+    await this.verifyChatIndexes(indexed, report).catch(error =>
+      console.error(`kteamd consistency: chat-index verification failed: ${String(error)}`),
+    );
     const indexedIds = new Set(indexed.map(item => item.id));
     for (const id of onDisk) if (!indexedIds.has(id)) report.missingFromIndex.push(id);
     if (deep || report.missingFromIndex.length > 0) {
@@ -2396,17 +2422,139 @@ export class SessionManager implements KTeamService {
     if (view) await this.ensureChatIndex(id, view);
     const total = this.store.chatPointerCount(id);
     if (total === 0) return await this.chatHistoryFromLegacyFile(id, before, limit);
-    const end = before === undefined ? total : Math.max(0, Math.min(before, total));
-    const offset = Math.max(0, end - limit);
-    const normalize =
-      view?.config.harness === 'codex'
-        ? (line: string) => parseCodexTranscriptLine(line) as unknown[]
-        : (line: string) => parseClaudeTranscriptLine(line) as unknown[];
-    const rows = this.store.chatPointers(id, offset, end - offset);
-    const { records, skipped } = this.store.resolveChatPointers(rows, normalize);
+    const normalize = this.chatNormalizer(view);
+    const page = this.readChatWindow(id, total, before, limit, normalize);
+    // A window that HAS pointer rows but resolves to ZERO records is the danger
+    // case: the recorded byte offsets are stale. The classic trigger is a codex
+    // rollout transcript the harness rewrote/compacted in place, which shifts
+    // every offset so no pointer's bytes match its fingerprint any more. Do NOT
+    // serve a valid-looking empty page (it reads as "nothing happened" rather
+    // than "your index is broken"). Rebuild THIS ONE session's pointers from the
+    // current transcript â no global reindex â and retry once.
+    if (page.rows > 0 && page.records.length === 0 && view?.config.transcriptFile) {
+      await this.rebuildChatIndex(id, view);
+      const rebuiltTotal = this.store.chatPointerCount(id);
+      const retry = this.readChatWindow(id, rebuiltTotal, before, limit, normalize);
+      if (retry.rows > 0 && retry.records.length === 0) {
+        throw new Error(
+          `chat index for ${id} is unreadable: ${rebuiltTotal} pointer row(s) resolve to no records even ` +
+            `after rebuilding from ${view.config.transcriptFile} â the harness likely rotated, compacted, or ` +
+            `truncated that transcript. Refusing to serve a silent empty transcript.`,
+        );
+      }
+      return {
+        total: rebuiltTotal,
+        offset: retry.offset,
+        records: retry.records,
+        ...(retry.skipped > 0 ? { degraded: retry.skipped } : {}),
+      };
+    }
+    // Pointers exist and none resolve, but there is no transcript to rebuild from
+    // (the harness file is gone). Still refuse to serve a silent empty page.
+    if (page.rows > 0 && page.records.length === 0) {
+      throw new Error(
+        `chat index for ${id} is unreadable: ${total} pointer row(s) resolve to no records and the harness ` +
+          `transcript is unavailable to rebuild from. Refusing to serve a silent empty transcript.`,
+      );
+    }
     // BEST EFFORT by design: the harness owns those files and may compact or
     // delete them. Say so rather than silently returning a short page.
-    return { total, offset, records, ...(skipped > 0 ? { degraded: skipped } : {}) };
+    return {
+      total,
+      offset: page.offset,
+      records: page.records,
+      ...(page.skipped > 0 ? { degraded: page.skipped } : {}),
+    };
+  }
+
+  /** The harness parser that turns one transcript line into normalized chat
+   *  records. Shared by the live watcher, the lazy indexer, and resolution. */
+  private chatNormalizer(view?: SessionView): (line: string) => unknown[] {
+    return view?.config.harness === 'codex'
+      ? (line: string) => parseCodexTranscriptLine(line) as unknown[]
+      : (line: string) => parseClaudeTranscriptLine(line) as unknown[];
+  }
+
+  /** Read one page of chat pointers and resolve it. Reports how many pointer
+   *  ROWS the window held (before resolution) so callers can distinguish a
+   *  legitimately empty page (off the end of the history) from a broken index
+   *  (rows present, none resolvable). */
+  private readChatWindow(
+    id: string,
+    total: number,
+    before: number | undefined,
+    limit: number,
+    normalize: (line: string) => unknown[],
+  ): { offset: number; rows: number; records: unknown[]; skipped: number } {
+    const end = before === undefined ? total : Math.max(0, Math.min(before, total));
+    const offset = Math.max(0, end - limit);
+    const rows = this.store.chatPointers(id, offset, end - offset);
+    const { records, skipped } = this.store.resolveChatPointers(rows, normalize);
+    return { offset, rows: rows.length, records, skipped };
+  }
+
+  /** Rebuild ONE session's chat pointers from its current transcript. Used when
+   *  a served window has pointer rows but none resolve â the stored offsets are
+   *  stale. Forgets just this session's chat pointers + source bookkeeping and
+   *  re-scans the file once; far cheaper and safer than a global reindex. */
+  private async rebuildChatIndex(id: string, view: SessionView): Promise<void> {
+    const file = view.config.transcriptFile;
+    if (!file) return;
+    // Drop any in-flight ensureChatIndex memo so a later fetch re-verifies from
+    // scratch rather than trusting the pass we are about to invalidate.
+    this.chatIndexChecks.delete(id);
+    this.store.forgetChatPointers(id);
+    await this.indexHarnessTranscript(id, view, file, false);
+  }
+
+  /** Verify that live sessions' chat pointer rows actually RESOLVE to readable
+   *  transcript bytes â not merely that rows exist. A session whose newest
+   *  pointers no longer resolve (a rewritten/compacted transcript shifted every
+   *  byte offset) is rebuilt in place from its current transcript; if it still
+   *  cannot resolve afterwards it is reported LOUDLY rather than left to serve
+   *  blank transcripts. Never feeds the membership-restart counter. */
+  private async verifyChatIndexes(indexed: readonly IndexedSession[], report: ConsistencyReport): Promise<void> {
+    const nowMs = Date.now();
+    if (nowMs - this.lastChatVerifyAt < CHAT_VERIFY_INTERVAL_MS) return;
+    this.lastChatVerifyAt = nowMs;
+    for (const item of indexed) {
+      const config = item.config as SessionConfig | undefined;
+      if (!config) continue;
+      if (item.status && terminalStatuses.includes(item.status as SessionStatus)) continue;
+      const id = config.id;
+      if (this.store.chatPointerCount(id) === 0) continue;
+      const view = await this.get(id).catch(() => undefined);
+      if (!view) continue;
+      const normalize = this.chatNormalizer(view);
+      if (this.chatTailResolves(id, normalize)) continue;
+      // Newest pointers do not resolve â rebuild this ONE session and re-probe.
+      try {
+        await this.rebuildChatIndex(id, view);
+      } catch (error) {
+        console.error(`kteamd consistency: chat-index rebuild of ${id} failed: ${String(error)}`);
+      }
+      if (this.chatTailResolves(id, normalize)) report.repaired.push(id);
+      else report.chatIndexBroken.push(id);
+    }
+    if (report.chatIndexBroken.length > 0) {
+      console.error(
+        `kteamd consistency: ${report.chatIndexBroken.length} session(s) have chat pointers that no longer ` +
+          `resolve to readable transcript bytes even after a rebuild: ${report.chatIndexBroken.join(', ')}`,
+      );
+      this.emitTransient('fleet.chat_index_broken', { sessions: report.chatIndexBroken });
+    }
+  }
+
+  /** Does the NEWEST window of a session's chat pointers resolve to at least one
+   *  record? A cheap tail sample, not a full-history scan. */
+  private chatTailResolves(id: string, normalize: (line: string) => unknown[]): boolean {
+    const total = this.store.chatPointerCount(id);
+    if (total === 0) return true;
+    const sample = Math.min(total, CHAT_VERIFY_SAMPLE);
+    const rows = this.store.chatPointers(id, total - sample, sample);
+    if (rows.length === 0) return true;
+    const { records } = this.store.resolveChatPointers(rows, normalize);
+    return records.length > 0;
   }
 
   /** Ensure this process has done one complete reconstruction pass over the
