@@ -179,7 +179,7 @@ export function SessionDetails({ id, view, quota, liveStatus, open, onClose, lab
   const { config, state } = view;
   const observedModel = config.model?.trim();
   const requestedModel = config.modelHint?.trim();
-  const title = config.teammate ? displayCallsign(config.teammate) : config.name || config.id;
+  const title = displayCallsign(config.teammate) || config.name || config.id;
 
   function beginSwipe(event: ReactPointerEvent<HTMLButtonElement>) {
     if (!open || event.button !== 0) return;

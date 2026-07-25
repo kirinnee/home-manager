@@ -94,7 +94,7 @@ export const SessionHeader = memo(function SessionHeader({
   showTheme = true,
 }: Props) {
   const { config, state } = view;
-  const title = config.teammate ? displayCallsign(config.teammate) : config.name || config.id;
+  const title = displayCallsign(config.teammate) || config.name || config.id;
   const subtitle = config.teammate && config.name ? config.name : config.label;
   const [detailsOpen, setDetailsOpen] = useState(false);
   const detailsId = useId();

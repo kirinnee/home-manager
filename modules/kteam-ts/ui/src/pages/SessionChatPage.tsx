@@ -422,7 +422,7 @@ export function SessionChatPage({
   // Every input below is already-derived coarse state. Nothing here reads
   // `records`, subscribes to anything, or touches the fetch, merge and scroll
   // paths above.
-  const who = view?.config.teammate ? displayCallsign(view.config.teammate) : view?.config.name || 'This session';
+  const who = displayCallsign(view?.config.teammate) || view?.config.name || 'This session';
 
   // Socket trouble is only worth announcing to someone who HAD a connection.
   // Every page starts at `connecting`, and narrating the normal first handshake

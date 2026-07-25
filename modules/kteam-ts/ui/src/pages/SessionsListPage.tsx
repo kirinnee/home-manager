@@ -323,9 +323,7 @@ function TranscriptResults({
                 className="block w-full px-panel py-row-y text-left hover:bg-surface-2"
               >
                 <div className="flex items-center gap-sm text-cell">
-                  <span className="font-semibold text-fg">
-                    {r.teammate ? displayCallsign(r.teammate) : r.sessionId}
-                  </span>
+                  <span className="font-semibold text-fg">{displayCallsign(r.teammate) || r.sessionId}</span>
                   <span className="mono text-meta text-faint">{r.sessionId}</span>
                   {r.turn != null && <span className="mono text-meta text-faint">turn {r.turn}</span>}
                   <span className="mono ml-auto shrink-0 text-meta text-faint">{r.at ? fmtRelative(r.at) : ''}</span>
@@ -382,7 +380,7 @@ const SessionRow = memo(function SessionRow({
       <td>
         <Link to={`/session/${encodeURIComponent(cfg.id)}`} className="block min-w-0" title={cfg.id}>
           <div className="truncate text-row font-semibold text-fg group-hover:text-accent">
-            {cfg.teammate ? displayCallsign(cfg.teammate) : cfg.id}
+            {displayCallsign(cfg.teammate) || cfg.id}
           </div>
           {/* `.kt-chrome` is the app's one recede-at-rest meta tier: a
               contrast-checked ink that brightens when you reach for the row,
@@ -481,7 +479,7 @@ const SessionCard = memo(function SessionCard({
     >
       <div className="flex items-center gap-sm">
         <span className="min-w-0 truncate text-row font-semibold text-fg group-hover:text-accent">
-          {cfg.teammate ? displayCallsign(cfg.teammate) : cfg.id}
+          {displayCallsign(cfg.teammate) || cfg.id}
         </span>
         {/* Status is the one badge that must never be squeezed, so it sits on
             row 1 with the name. Mode and RC get their own row below WITH THEIR

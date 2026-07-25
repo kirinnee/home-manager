@@ -74,7 +74,7 @@ export function WardenStrip() {
       {!clean && (
         <span
           className="mono ml-auto min-w-0 truncate text-faint"
-          title={anomalies.map(a => `${a.kind}: ${a.teammate ? displayCallsign(a.teammate) : a.sessionId}`).join('\n')}
+          title={anomalies.map(a => `${a.kind}: ${displayCallsign(a.teammate) || a.sessionId}`).join('\n')}
         >
           {anomalies
             .slice(0, 3)
