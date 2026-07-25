@@ -51,6 +51,19 @@ function fmtDuration(ms: number): string {
   return rem ? `${m}m ${rem}s` : `${m}m`;
 }
 
+// A transcript timestamp is only ever a wall clock (`HH:MM:SS`, 8 chars). But
+// `fmtClock` (utils.ts) echoes its raw input verbatim when the value is not a
+// parseable date, and that raw string is UNBOUNDED — a malformed `ts` would then
+// render at full length inside a `shrink-0 whitespace-nowrap` stamp and widen the
+// row past the viewport, breaking the transcript's scrollWidth ≤ clientWidth
+// gate. So bound every stamp here: pass a well-formed clock through, otherwise
+// show a fixed short placeholder. Kept local to the transcript because other
+// `fmtClock` callers may legitimately want the raw fallback.
+function clockLabel(ts?: string): string {
+  const s = fmtClock(ts);
+  return /^\d{2}:\d{2}:\d{2}$/.test(s) ? s : '—';
+}
+
 interface Props {
   block: TranscriptBlock;
   live: boolean;
@@ -216,7 +229,7 @@ function AssistantMessage({ text, ts }: { text: string; ts?: string; source: str
       <span className="absolute left-0 top-1 bottom-1 w-px bg-border-soft opacity-0 transition-opacity group-hover:opacity-100" />
       {ts && (
         <span className="pointer-events-none absolute right-0 top-0.5 w-[64px] sm:w-[50px] text-right mono text-2xs tabular-nums text-faint opacity-0 transition-opacity group-hover:opacity-100">
-          {fmtClock(ts)}
+          {clockLabel(ts)}
         </span>
       )}
       <Markdown text={text} />
@@ -267,7 +280,7 @@ function UserMessage({ text, ts, from }: { text: string; ts?: string; from?: Pee
         <div className="flex min-w-0 items-center gap-2 px-panel pt-1">
           <PeerChip from={from} />
           {ts && (
-            <span className="mono shrink-0 whitespace-nowrap text-2xs tabular-nums text-faint">{fmtClock(ts)}</span>
+            <span className="mono shrink-0 whitespace-nowrap text-2xs tabular-nums text-faint">{clockLabel(ts)}</span>
           )}
           {collapsible && (
             <button
@@ -318,7 +331,7 @@ function UserMessage({ text, ts, from }: { text: string; ts?: string; from?: Pee
             {/* In FLOW, never absolute: the timestamp cannot collide with prose
                 at either desktop or phone widths. */}
             {ts && (
-              <span className="mono shrink-0 whitespace-nowrap text-2xs tabular-nums text-faint">{fmtClock(ts)}</span>
+              <span className="mono shrink-0 whitespace-nowrap text-2xs tabular-nums text-faint">{clockLabel(ts)}</span>
             )}
             {collapsible && (
               <button
@@ -425,7 +438,7 @@ function SystemRow({ info, ts }: { info: SystemBlockInfo; ts?: string }) {
         {info.status && (
           <span className={cn('min-w-0 max-w-[14ch] shrink truncate font-medium', toneClass)}>{info.status}</span>
         )}
-        {ts && <span className="mono shrink-0 whitespace-nowrap tabular-nums text-faint">{fmtClock(ts)}</span>}
+        {ts && <span className="mono shrink-0 whitespace-nowrap tabular-nums text-faint">{clockLabel(ts)}</span>}
         <ChevronRight size={10} className={cn('shrink-0 transition-transform', open && 'rotate-90')} />
       </button>
       {open && (

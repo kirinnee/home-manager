@@ -45,6 +45,15 @@ const ENVIRONMENT_CONTEXT = `<environment_context>
 
 const TURN_PROMPT = `Read the file /home/kirin/.kteam/ms0v8vgc-d445a669/turns/turn-001.md now, then carefully follow every instruction inside it. This is your complete task for this turn.`;
 
+const TURN_PROMPT_MAC = `Read the file /Users/erng/.kteam/abc-123/turns/turn-042.md now, then carefully follow every instruction inside it. This is your complete task for this turn.`;
+
+const TURN_PROMPT_WIN = `Read the file C:\\Users\\erng\\.kteam\\abc-123\\turns\\turn-002.md now, then carefully follow every instruction inside it.`;
+
+const LIVENESS = `Liveness check: no output, pane change, or subprocess activity has been observed for several minutes. If you are alive, continue the task now.`;
+const AUTOMODE = `Automode: do not wait for user input. Make the best reasonable decision, continue the task, and write the required done marker when complete.`;
+const CONTINUE = `Continue from where you left off.`;
+const IMAGE_META = `[Image: original 1138x2151, displayed at 1058x2000. Multiply coordinates by 1.08 to map to original image.]`;
+
 const SYSTEM_REMINDER = `<system-reminder>
 The user has changed their mind about the approach. Prefer the smaller diff.
 </system-reminder>`;
@@ -116,11 +125,27 @@ describe('classifySystemText — other harness wrappers', () => {
     expect(info!.raw).toBe(SYSTEM_REMINDER);
   });
 
-  test('turn prompt → label + turn-NNN.md summary', () => {
+  test('turn prompt (Linux path) → label + turn-NNN.md summary', () => {
     const info = classifySystemText(TURN_PROMPT);
     expect(info!.label).toBe('turn prompt');
     expect(info!.summary).toBe('turn-001.md');
     expect(info!.raw).toBe(TURN_PROMPT);
+  });
+
+  test('turn prompt (macOS /Users path) → classified, platform-agnostic', () => {
+    const info = classifySystemText(TURN_PROMPT_MAC);
+    expect(info!.label).toBe('turn prompt');
+    expect(info!.summary).toBe('turn-042.md');
+  });
+
+  test('turn prompt (Windows backslash separators) → classified, separator-safe', () => {
+    const info = classifySystemText(TURN_PROMPT_WIN);
+    expect(info!.label).toBe('turn prompt');
+    expect(info!.summary).toBe('turn-002.md');
+  });
+
+  test('human sentence mentioning a turn .md path but no instruction clause → null', () => {
+    expect(classifySystemText('please open /Users/me/.kteam/x/turns/turn-003.md and tell me what it says')).toBeNull();
   });
 
   test('interrupt notice → interrupted, warn tone', () => {
@@ -146,6 +171,52 @@ describe('classifySystemText — other harness wrappers', () => {
     const info = classifySystemText('This session is being continued from a previous conversation. Nothing else.');
     expect(info!.label).toBe('context compacted');
     expect(info!.summary).toBe('earlier conversation summarised');
+  });
+});
+
+describe('classifySystemText — daemon-injected automode plumbing', () => {
+  test('liveness check prefix → liveness, compact summary, raw retained', () => {
+    const info = classifySystemText(LIVENESS);
+    expect(info!.label).toBe('liveness');
+    expect(info!.summary).toBe('no recent activity — continuing');
+    expect(info!.raw).toBe(LIVENESS);
+  });
+
+  test('automode do-not-wait prefix → automode, raw retained', () => {
+    const info = classifySystemText(AUTOMODE);
+    expect(info!.label).toBe('automode');
+    expect(info!.summary).toBe('do not wait for input');
+    expect(info!.raw).toBe(AUTOMODE);
+  });
+
+  test('exact "Continue from where you left off." → continue', () => {
+    const info = classifySystemText(CONTINUE);
+    expect(info!.label).toBe('continue');
+    expect(info!.summary).toBe('resume where left off');
+    expect(info!.raw).toBe(CONTINUE);
+  });
+
+  test('"Continue…" with trailing prose → null (whole-string match only)', () => {
+    // A human who types more than the bare daemon nudge keeps their message.
+    expect(classifySystemText('Continue from where you left off. Also add a test.')).toBeNull();
+  });
+
+  test('human paraphrase of a liveness/automode idea → null (anchored prefix)', () => {
+    expect(classifySystemText('are you still alive? please continue the task')).toBeNull();
+    expect(classifySystemText('in automode you should not wait for me')).toBeNull();
+  });
+
+  test('image-attachment metadata → image, original dimensions', () => {
+    const info = classifySystemText(IMAGE_META);
+    expect(info!.label).toBe('image');
+    expect(info!.summary).toBe('original 1138x2151');
+    expect(info!.raw).toBe(IMAGE_META);
+  });
+
+  test('image bracket followed by human prose → null (must be the entire text)', () => {
+    expect(
+      classifySystemText('[Image: original 800x600, displayed at 400x300.] what is wrong with this diagram?'),
+    ).toBeNull();
   });
 });
 
