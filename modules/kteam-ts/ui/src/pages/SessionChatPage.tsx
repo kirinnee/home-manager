@@ -8,14 +8,19 @@
 //    disabled while awaiting_question (the question form is the input then)
 //  - compact two-row header; Terminal tab retains its own snapshot polling
 //
-// Network budget (turn-003): the WS /v1/events feed drives live updates; the
-// only poll left here is a slow (8s) visibility-gated state fallback.
+// Network budget (round 5): this page owns NO socket and NO poll. The shared
+// store (lib/store.tsx) holds the one fleet socket, applies state deltas and
+// batches a targeted `getSession` per session; this page subscribes to its
+// session's event stream (buffered, so history→subscribe has no gap), reads the
+// cached SessionView, and fetches only chat history. What it removed: a second
+// WebSocket, an 8s `getSession` poll and a 20s `listSessions` poll for folder
+// neighbours — all three ran per open session, forever.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MessageSquare, Terminal } from 'lucide-react';
 import { api, ApiError, HAS_TOKEN } from '../lib/api';
-import { openEventStream } from '../lib/ws';
-import type { SessionView, ChatRecord, KTeamEvent } from '../types';
+import { useFleet, useSession, useSessionEvents, useStore } from '../lib/store';
+import type { ChatRecord, KTeamEvent } from '../types';
 import { Composer } from '../components/Composer';
 import { QuestionForm } from '../components/QuestionForm';
 import { TerminalView } from '../components/TerminalView';
@@ -27,19 +32,35 @@ import { buildTranscript, latestPendingQuestion } from '../lib/transcript';
 import { useUsage } from '../hooks/useUsage';
 import { quotaFor } from '../lib/usage';
 import { FolderSidebar, FolderSidebarToggle, folderNeighbours } from '../components/FolderSidebar';
-import { TERMINAL_STATUSES, WAITING_STATUSES, fmtAbsolute, isBusy } from '../lib/utils';
+import { TERMINAL_STATUSES, WAITING_STATUSES, cn, fmtAbsolute, isBusy } from '../lib/utils';
 
 const PAGE_SIZE = 200;
+/** Slack when matching an optimistic send against the real chat.user record it
+ *  became. The record's timestamp comes from the harness's own clock, which can
+ *  sit slightly behind the browser's. */
+const RECORD_CLOCK_SLACK_MS = 5_000;
 
 type PendingStatus = 'sending' | 'queued' | 'delivered' | 'error';
 interface PendingSend {
   key: string;
   text: string;
   status: PendingStatus;
+  /** Idempotency key for the LOGICAL message. Every attempt to deliver this
+   *  message — the first, a retry after an error, the interrupt-then-send path —
+   *  carries this same id, so the daemon applies it exactly once. */
+  requestId: string;
+  /** When the reader sent it. Used to reap against chat.user records that
+   *  arrived AFTER this send, never against an identical older message. */
+  at: number;
 }
 
 export function SessionChatPage({ sessionId }: { sessionId: string }) {
-  const [view, setView] = useState<SessionView | null>(null);
+  const store = useStore();
+  // The cached SessionView. Navigating to a session you have seen paints its
+  // header immediately instead of after a round trip; the store keeps it fresh
+  // from the socket (deltas + one batched GET per burst).
+  const view = useSession(sessionId);
+  const { sessions, status: liveStatus } = useFleet();
   const [records, setRecords] = useState<ChatRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [nextBefore, setNextBefore] = useState<number | null>(null);
@@ -47,7 +68,6 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
   const [loadingInitial, setLoadingInitial] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [atStart, setAtStart] = useState(false);
-  const [liveStatus, setLiveStatus] = useState<'connecting' | 'open' | 'closed'>('connecting');
   const [draft, setDraft] = useState('');
   const [actionNotice, setActionNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
   const [tab, setTab] = useState<'chat' | 'terminal'>('chat');
@@ -60,14 +80,27 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
   const pinToBottom = useCallback(() => setPinSignal(n => n + 1), []);
 
   const seenKeys = useRef<Set<string>>(new Set());
-  const lastSeq = useRef<number>(-1);
-  const refreshTimer = useRef<number | null>(null);
-  const refreshInflight = useRef<Promise<void> | null>(null);
+  /** True once the initial history page has settled — gates the reconnect
+   *  catch-up so it can never race the first load. */
+  const loadedRef = useRef(false);
 
-  // ---- initial load: view + first page + first WS connection (after=-200) ----
+  /** Merge a freshly fetched tail page into the record list. Content dedupe
+   *  (`seenKeys`) does the work: anything already on screen is dropped, so a
+   *  re-fetch of the same page is a no-op and only genuinely missed records
+   *  land — which, being a tail, belong at the end. */
+  const mergeTail = useCallback((page: { total: number; records: ChatRecord[] }) => {
+    setTotal(page.total);
+    setRecords(rs => {
+      const fresh = page.records.filter(r => !seenKeys.current.has(recordKey(r)));
+      if (fresh.length === 0) return rs;
+      for (const r of fresh) seenKeys.current.add(recordKey(r));
+      return [...rs, ...fresh];
+    });
+  }, []);
+
+  // ---- initial load: cached/fetched view + first history page --------------
   useEffect(() => {
     let cancelled = false;
-    setView(null);
     setRecords([]);
     setError(null);
     setNextBefore(null);
@@ -75,22 +108,33 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
     setAtStart(false);
     setPinSignal(0);
     seenKeys.current.clear();
-    lastSeq.current = -1;
+    loadedRef.current = false;
 
     (async () => {
       try {
-        const [v, page] = await Promise.all([
-          api.getSession(sessionId),
+        // The view goes through the store (one inflight request per session,
+        // shared with the socket-driven refresh) so a deep link and the fleet
+        // hydration cannot both GET the same session.
+        const [, page] = await Promise.all([
+          store.fetchSession(sessionId),
           api.chatHistory(sessionId, undefined, PAGE_SIZE),
         ]);
         if (cancelled) return;
-        setView(v);
         setTotal(page.total);
-        setRecords(page.records);
+        // MERGE, don't replace. The subscription is live while this fetch is in
+        // flight (and replays the store's buffer the moment it attaches), so
+        // records can already be on screen — a plain `setRecords(page.records)`
+        // threw away anything that streamed in during the round trip. History is
+        // older than anything appended live, so the fresh half goes in front.
+        setRecords(live => {
+          const fresh = page.records.filter(r => !seenKeys.current.has(recordKey(r)));
+          for (const r of fresh) seenKeys.current.add(recordKey(r));
+          return live.length === 0 ? fresh : [...fresh, ...live];
+        });
         setNextBefore(page.offset);
-        for (const r of page.records) seenKeys.current.add(recordKey(r));
         setAtStart(page.offset === 0);
         setPinSignal(n => n + 1);
+        loadedRef.current = true;
       } catch (e) {
         if (!cancelled) setError(e instanceof ApiError ? e.message : String(e));
       } finally {
@@ -101,149 +145,83 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [sessionId]);
+  }, [sessionId, store]);
 
-  // ---- state refresh: WS-driven, with a slow visibility-gated fallback -----
-  const refreshView = useCallback(async () => {
-    if (refreshInflight.current) return refreshInflight.current;
-    const p = (async () => {
-      try {
-        const v = await api.getSession(sessionId);
-        setView(v);
-      } catch {
-        /* keep prior */
-      }
-    })().finally(() => {
-      refreshInflight.current = null;
-    });
-    refreshInflight.current = p;
-    return p;
-  }, [sessionId]);
+  // ---- live events: the store's per-session subscription -------------------
+  //
+  // Buffered-then-live: the store replays its bounded recent window for this
+  // session the moment we subscribe, so an event that arrived while the history
+  // fetch was in flight is not lost between the two.
+  //
+  // Only transcript records are handled here. State — terminal.frame fields,
+  // status/health transitions, quota — is applied by the store to the cached
+  // SessionView this page reads, so there is no second copy to keep in sync and
+  // no per-page refresh timer.
+  useSessionEvents(sessionId, (ev: KTeamEvent) => {
+    // SEQUENCE 0 MEANS "NOT IN THE JOURNAL", NOT "OLD".
+    //
+    // Two whole event classes are broadcast live but never journalled, and both
+    // carry sequence 0 by construction:
+    //   - terminal.frame            (liveness only; 6.5k/session on disk)
+    //   - every harness-derived chat event — chat.user, chat.assistant.*,
+    //     tool.use, tool.result (commit 03ff676: indexed by byte pointer in the
+    //     harness's own transcript, never copied into events.jsonl)
+    //
+    // A monotonic sequence guard is only meaningful for JOURNALLED events;
+    // applying it to sequence-0 events discarded 100% of streaming chat. The
+    // store dedupes journalled events by (session, sequence) and lets every
+    // sequence-0 frame through; CONTENT dedupe (`seenKeys`) is the correct
+    // mechanism for these, and it runs below.
+    if (
+      ev.type.startsWith('chat.') ||
+      ev.type === 'tool.use' ||
+      ev.type === 'tool.result' ||
+      ev.type.startsWith('interaction.') ||
+      ev.type.startsWith('turn.')
+    ) {
+      const rec = eventToRecord(ev);
+      if (!rec) return;
+      const key = recordKey(rec);
+      if (seenKeys.current.has(key)) return;
+      seenKeys.current.add(key);
+      // Append only — the MessageScroller auto-follows the tail when the reader
+      // is at the bottom, and leaves them put otherwise.
+      setRecords(rs => [...rs, rec]);
+    }
+  });
 
-  const scheduleRefresh = useCallback(() => {
-    if (refreshTimer.current) return;
-    refreshTimer.current = window.setTimeout(() => {
-      refreshTimer.current = null;
-      void refreshView();
-    }, 1100);
-  }, [refreshView]);
-
+  // ---- reconnect catch-up --------------------------------------------------
+  //
+  // The socket's own backfill is a JOURNAL tail, and chat frames are not
+  // journalled (sequence 0, byte-pointer indexed in the harness transcript). So
+  // a drop of any length loses exactly the messages the reader cares about, and
+  // nothing replays them. On every reopen, re-fetch the newest history page and
+  // merge it: everything already on screen is dropped by content dedupe, so the
+  // cost of a redundant catch-up is one request.
+  const previousStatus = useRef(liveStatus);
   useEffect(() => {
-    // Fallback poll only — the WS state events are the primary path. Paused
-    // whenever the tab is hidden (turn-003 network budget).
-    const id = window.setInterval(() => {
-      if (typeof document !== 'undefined' && document.hidden) return;
-      void refreshView();
-    }, 8000);
-    return () => window.clearInterval(id);
-  }, [refreshView]);
-
-  // ---- websocket: live chat events + terminal.frame → activity / context% --
-  useEffect(() => {
-    const handle = openEventStream(
-      sessionId,
-      -200,
-      (ev: KTeamEvent) => {
-        // SEQUENCE 0 MEANS "NOT IN THE JOURNAL", NOT "OLD".
-        //
-        // Two whole event classes are broadcast live but never journalled, and
-        // both carry sequence 0 by construction:
-        //   - terminal.frame            (liveness only; 6.5k/session on disk)
-        //   - every harness-derived chat event — chat.user, chat.assistant.*,
-        //     tool.use, tool.result (commit 03ff676: indexed by byte pointer in
-        //     the harness's own transcript, never copied into events.jsonl)
-        //
-        // The monotonic `lastSeq` guard is only meaningful for JOURNALLED
-        // events. Applying it to sequence-0 events discarded 100% of streaming
-        // chat the moment any journalled event (session.running, seq 3) had
-        // arrived — which is always, because the backfill replays them first.
-        // That is the "doesn't stream" bug: the transcript only ever advanced
-        // when something else forced a refetch.
-        //
-        // Content dedupe (`seenKeys`) is the correct mechanism for these, and
-        // it already runs below.
-        const journalled = typeof ev.sequence === 'number' && ev.sequence > 0;
-        if (journalled) {
-          if (ev.sequence <= lastSeq.current) return;
-          lastSeq.current = ev.sequence;
-        }
-
-        if (ev.type === 'terminal.frame') {
-          const data = ev.data as {
-            activity?: string;
-            contextPercent?: number;
-            promptReady?: boolean;
-            usage5hPercent?: number;
-            usageWeeklyPercent?: number;
-            usage5hResetAt?: number;
-            usageWeeklyResetAt?: number;
-            usageAtLimit?: boolean;
-            usageAuthOk?: boolean;
-          };
-          setView(v =>
-            v
-              ? {
-                  ...v,
-                  state: {
-                    ...v.state,
-                    activity: data.activity ?? v.state.activity,
-                    contextPercent: data.contextPercent ?? v.state.contextPercent,
-                    promptReady: data.promptReady ?? v.state.promptReady,
-                    // `??` throughout: the daemon OMITS a quota field it does
-                    // not know, and an omitted field must leave the last known
-                    // value alone rather than blanking the readout between the
-                    // feed's 300s refreshes.
-                    usage5hPercent: data.usage5hPercent ?? v.state.usage5hPercent,
-                    usageWeeklyPercent: data.usageWeeklyPercent ?? v.state.usageWeeklyPercent,
-                    usage5hResetAt: data.usage5hResetAt ?? v.state.usage5hResetAt,
-                    usageWeeklyResetAt: data.usageWeeklyResetAt ?? v.state.usageWeeklyResetAt,
-                    usageAtLimit: data.usageAtLimit ?? v.state.usageAtLimit,
-                    usageAuthOk: data.usageAuthOk ?? v.state.usageAuthOk,
-                  },
-                }
-              : v,
-          );
-          return;
-        }
-
-        // `quota.updated` fires when the cached kfleet usage feed refreshes
-        // (every 300s), which is the only way the header's quota moves on a
-        // session that is idle and therefore emitting no terminal frames.
-        if (
-          ev.type === 'state' ||
-          ev.type === 'session.state' ||
-          ev.type === 'session.remote_control' ||
-          ev.type === 'quota.updated'
-        ) {
-          scheduleRefresh();
-          return;
-        }
-
-        if (
-          ev.type.startsWith('chat.') ||
-          ev.type === 'tool.use' ||
-          ev.type === 'tool.result' ||
-          ev.type.startsWith('interaction.') ||
-          ev.type.startsWith('turn.')
-        ) {
-          const rec = eventToRecord(ev);
-          if (!rec) return;
-          const key = recordKey(rec);
-          if (seenKeys.current.has(key)) return;
-          seenKeys.current.add(key);
-          // Append only — the MessageScroller auto-follows the tail when the
-          // reader is at the bottom, and leaves them put otherwise.
-          setRecords(rs => [...rs, rec]);
-        }
-      },
-      setLiveStatus,
-    );
-    return () => handle.close();
-  }, [sessionId, scheduleRefresh]);
+    const previous = previousStatus.current;
+    previousStatus.current = liveStatus;
+    if (liveStatus !== 'open' || previous === 'open' || !loadedRef.current) return;
+    void api
+      .chatHistory(sessionId, undefined, PAGE_SIZE)
+      .then(mergeTail)
+      .catch(() => undefined);
+  }, [liveStatus, mergeTail, sessionId]);
 
   // ---- infinite scroll-up: load older pages via `before` -------------------
+  // The guard is a REF, not the `loadingOlder` state. The transcript calls this
+  // from its scroll handler, which fires several times per tick near the top;
+  // `setLoadingOlder(true)` does not take effect until the next render, so every
+  // one of those calls passed the state guard and fetched the SAME page.
+  // Measured: the duplicate prepends land in one commit, scrollHeight spikes to
+  // +2× the page before settling back, and the scroll controller's prepend
+  // correction — which reads scrollHeight in that commit — over-corrects by the
+  // whole spike and throws the reader to the bottom (see Transcript.tsx).
+  const loadingOlderRef = useRef(false);
   const loadOlder = useCallback(async () => {
-    if (loadingOlder || nextBefore == null) return;
+    if (loadingOlderRef.current || nextBefore == null) return;
+    loadingOlderRef.current = true;
     setLoadingOlder(true);
     try {
       const page = await api.chatHistory(sessionId, nextBefore, PAGE_SIZE);
@@ -258,9 +236,10 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
     } catch {
       /* leave as-is */
     } finally {
+      loadingOlderRef.current = false;
       setLoadingOlder(false);
     }
-  }, [loadingOlder, nextBefore, sessionId]);
+  }, [nextBefore, sessionId]);
 
   // ---- derived -------------------------------------------------------------
   const blocks = useMemo(() => buildTranscript(records), [records]);
@@ -286,29 +265,10 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
   const quota = useMemo(() => (view ? quotaFor(view, usageIdx) : null), [view, usageIdx]);
 
   // ---- folder neighbours: who else is working in this cwd ------------------
-  // Polled slowly and independently of the chat: the fleet changes on the scale
-  // of minutes, and this must never compete with the transcript for bandwidth
-  // or re-render it. Visibility-gated like the other background polls.
-  const [fleet, setFleet] = useState<SessionView[]>([]);
-  useEffect(() => {
-    let cancelled = false;
-    const load = () => {
-      if (typeof document !== 'undefined' && document.hidden) return;
-      api
-        .listSessions()
-        .then(list => {
-          if (!cancelled) setFleet(list);
-        })
-        .catch(() => undefined);
-    };
-    load();
-    const timer = window.setInterval(load, 20_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, []);
-  const neighbours = useMemo(() => folderNeighbours(fleet, view), [fleet, view]);
+  // Straight off the store's fleet cache — no poll of its own. This used to be
+  // a 20s `listSessions()` per open session purely to answer "who else is in
+  // this folder", a question the shared list already answers.
+  const neighbours = useMemo(() => folderNeighbours(sessions ?? [], view ?? null), [sessions, view]);
   // Closed by default: the sidebar is a lookup, not the reason you opened the
   // page, and opening it narrows the transcript.
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -329,110 +289,159 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
   // pending → delivered/queued state; it's reaped once the real chat.user
   // record lands via WS/history.
   const [pending, setPending] = useState<PendingSend[]>([]);
+  // Mirror, so send() can consult the CURRENT list without closing over a
+  // render-old copy (it needs the requestId of a still-failed identical send).
+  const pendingRef = useRef<PendingSend[]>([]);
+  useEffect(() => {
+    pendingRef.current = pending;
+  }, [pending]);
+
+  // REAPING. The real chat.user record IS the proof of delivery, so it retires
+  // the optimistic box whatever the box currently claims — including 'sending'
+  // (the POST can outlive the record: the harness writes its transcript entry as
+  // soon as the text is submitted, while the daemon is still polling the pane for
+  // turn-started evidence) and including 'error' (measured: a send whose response
+  // was lost had in fact landed, and the box sat there reading "failed to send"
+  // next to the delivered message forever). Keeping either of those was the
+  // visible half of "message double send": the same text rendered twice.
+  //
+  // Matched only against records that arrived AFTER this send, so re-sending
+  // text that already appears earlier in the transcript ("continue", "ok") is not
+  // reaped by its own predecessor.
   useEffect(() => {
     if (!pending.length) return;
-    const userTexts = new Set(
-      records
-        .filter(r => r.type === 'chat.user')
-        .map(r => String((r.data as { text?: unknown } | undefined)?.text ?? '').trim()),
-    );
+    const userMsgs = records
+      .filter(r => r.type === 'chat.user')
+      .map(r => ({
+        text: String((r.data as { text?: unknown } | undefined)?.text ?? '').trim(),
+        at: Date.parse(r.timestamp ?? '') || 0,
+      }));
     setPending(p => {
-      const next = p.filter(x => x.status === 'sending' || x.status === 'error' || !userTexts.has(x.text));
+      const next = p.filter(x => !userMsgs.some(m => m.text === x.text && m.at >= x.at - RECORD_CLOCK_SLACK_MS));
       return next.length === p.length ? p : next;
     });
   }, [records, pending.length]);
 
-  // Send lock: a SYNCHRONOUS ref guard is the authoritative double-send fix —
-  // it blocks the second call (Enter+click race, rapid double-Enter, a stray
-  // re-fire) before the first yields at its await. `sending` mirrors it for the
-  // composer's disabled state. The x-kteam-request-id header (lib/api) is the
-  // server-side backstop.
+  // Send lock: a SYNCHRONOUS ref guard blocks a CONCURRENT second call (Enter +
+  // click in one gesture, rapid double-Enter, a stray re-fire) before the first
+  // yields at its await. `sending` mirrors it for the composer's disabled state.
+  //
+  // What it cannot do — and this is why the bug survived three rounds — is stop
+  // a SEQUENTIAL repeat: the reader sends, the call fails (or its response is
+  // lost), the guard is released in `finally`, and the reader sends the same
+  // message again. Two attempts, no overlap, so no lock can see the connection.
+  // Only an idempotency key spanning both attempts can, which is what
+  // `identityFor` resolves and what api.send now carries.
   const sendingRef = useRef(false);
   const [sending, setSending] = useState(false);
 
+  /** The identity a logical message should be sent under.
+   *
+   *  If the same text is still sitting there as FAILED, this send IS that message
+   *  again — the reader retyping instead of pressing retry — so it inherits both
+   *  the original request id (the daemon then recognises the repeat and does not
+   *  apply it twice; measured double delivery, 2026-07-25) and the original row
+   *  (one message, one box). Any other send, including a deliberate repeat of
+   *  text that already went through, gets a fresh id and is delivered normally. */
+  const identityFor = useCallback((text: string): { requestId: string; key?: string } => {
+    const failed = pendingRef.current.find(p => p.text === text && p.status === 'error');
+    return failed ? { requestId: failed.requestId, key: failed.key } : { requestId: crypto.randomUUID() };
+  }, []);
+
   // ---- actions -------------------------------------------------------------
-  async function send() {
-    if (sendingRef.current) return;
-    if (!draft.trim() || !HAS_TOKEN) return;
-    sendingRef.current = true;
-    setSending(true);
+  const deliver = useCallback(
+    async (msg: string, opts: { interruptFirst: boolean; requestId: string; key?: string }) => {
+      if (sendingRef.current) return;
+      if (!msg || !HAS_TOKEN) return;
+      sendingRef.current = true;
+      setSending(true);
+      setActionNotice(null);
+      const key = opts.key ?? `send-${Date.now()}-${Math.round(Math.random() * 1e6)}`;
+      // A retry re-uses its own row rather than stacking a second box for the
+      // same message.
+      setPending(p =>
+        p.some(x => x.key === key)
+          ? p.map(x => (x.key === key ? { ...x, status: 'sending' as PendingStatus } : x))
+          : [...p, { key, text: msg, status: 'sending' as PendingStatus, requestId: opts.requestId, at: Date.now() }],
+      );
+      // The reader just spoke: put them at the bottom and resume following, so the
+      // reply streams in under their eyes instead of somewhere off-screen.
+      pinToBottom();
+      try {
+        if (opts.interruptFirst) await api.interrupt(sessionId);
+        const next = await api.send(sessionId, msg, false, opts.requestId);
+        // Straight into the shared cache: this page, the dashboard behind it and
+        // the folder sidebar all read the same record.
+        store.upsertSession(next);
+        const queued = !opts.interruptFirst && (busy || isBusy(next));
+        setPending(p => p.map(x => (x.key === key ? { ...x, status: queued ? 'queued' : 'delivered' } : x)));
+      } catch (e) {
+        setPending(p => p.map(x => (x.key === key ? { ...x, status: 'error' } : x)));
+        setActionNotice({ kind: 'err', text: e instanceof ApiError ? e.message : String(e) });
+      } finally {
+        sendingRef.current = false;
+        setSending(false);
+      }
+    },
+    [busy, pinToBottom, sessionId],
+  );
+
+  function send() {
     const msg = draft.trim();
+    if (!msg || sendingRef.current) return;
     setDraft('');
-    setActionNotice(null);
-    const key = `send-${Date.now()}-${Math.round(Math.random() * 1e6)}`;
-    setPending(p => [...p, { key, text: msg, status: 'sending' }]);
-    // The reader just spoke: put them at the bottom and resume following, so the
-    // reply streams in under their eyes instead of somewhere off-screen.
-    pinToBottom();
-    try {
-      const next = await api.send(sessionId, msg);
-      setView(next);
-      const queued = busy || isBusy(next);
-      setPending(p => p.map(x => (x.key === key ? { ...x, status: queued ? 'queued' : 'delivered' } : x)));
-    } catch (e) {
-      setPending(p => p.map(x => (x.key === key ? { ...x, status: 'error' } : x)));
-      setActionNotice({ kind: 'err', text: e instanceof ApiError ? e.message : String(e) });
-    } finally {
-      sendingRef.current = false;
-      setSending(false);
-    }
+    void deliver(msg, { interruptFirst: false, ...identityFor(msg) });
   }
 
-  async function interruptAndSend() {
-    if (sendingRef.current) return;
-    if (!draft.trim() || !HAS_TOKEN) return;
-    sendingRef.current = true;
-    setSending(true);
+  function interruptAndSend() {
     const msg = draft.trim();
+    if (!msg || sendingRef.current) return;
     setDraft('');
-    setActionNotice(null);
-    const key = `int-${Date.now()}-${Math.round(Math.random() * 1e6)}`;
-    setPending(p => [...p, { key, text: msg, status: 'sending' }]);
-    // The reader just spoke: put them at the bottom and resume following, so the
-    // reply streams in under their eyes instead of somewhere off-screen.
-    pinToBottom();
-    try {
-      await api.interrupt(sessionId);
-      const next = await api.send(sessionId, msg);
-      setView(next);
-      setPending(p => p.map(x => (x.key === key ? { ...x, status: 'delivered' } : x)));
-    } catch (e) {
-      setPending(p => p.map(x => (x.key === key ? { ...x, status: 'error' } : x)));
-      setActionNotice({ kind: 'err', text: e instanceof ApiError ? e.message : String(e) });
-    } finally {
-      sendingRef.current = false;
-      setSending(false);
-    }
+    void deliver(msg, { interruptFirst: true, ...identityFor(msg) });
   }
+
+  /** Retry a failed optimistic send with its ORIGINAL request id, so a first
+   *  attempt that actually landed (and only lost its response) is recognised by
+   *  the daemon and not applied a second time. */
+  const retryPending = useCallback(
+    (entry: PendingSend) => {
+      void deliver(entry.text, { interruptFirst: false, requestId: entry.requestId, key: entry.key });
+    },
+    [deliver],
+  );
+
+  const dismissPending = useCallback((key: string) => {
+    setPending(p => p.filter(x => x.key !== key));
+  }, []);
 
   const interrupt = useCallback(async () => {
     setActionNotice(null);
     try {
-      setView(await api.interrupt(sessionId));
+      store.upsertSession(await api.interrupt(sessionId));
     } catch (e) {
       setActionNotice({ kind: 'err', text: e instanceof ApiError ? e.message : String(e) });
     }
-  }, [sessionId]);
+  }, [sessionId, store]);
 
   const stop = useCallback(async () => {
     const reason = window.prompt('Reason for stopping this session:', 'stopped from browser');
     if (reason == null) return;
     setActionNotice(null);
     try {
-      setView(await api.stop(sessionId, reason.trim() || 'stopped from browser'));
+      store.upsertSession(await api.stop(sessionId, reason.trim() || 'stopped from browser'));
     } catch (e) {
       setActionNotice({ kind: 'err', text: e instanceof ApiError ? e.message : String(e) });
     }
-  }, [sessionId]);
+  }, [sessionId, store]);
 
   const resume = useCallback(async () => {
     setActionNotice(null);
     try {
-      setView(await api.resume(sessionId));
+      store.upsertSession(await api.resume(sessionId));
     } catch (e) {
       setActionNotice({ kind: 'err', text: e instanceof ApiError ? e.message : String(e) });
     }
-  }, [sessionId]);
+  }, [sessionId, store]);
 
   // ---- transcript header / footer slots ------------------------------------
   const transcriptHeader = (
@@ -453,7 +462,13 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
     pending.length || busy ? (
       <div className="space-y-1 px-1 py-1">
         {pending.map(p => (
-          <PendingMessage key={p.key} text={p.text} status={p.status} />
+          <PendingMessage
+            key={p.key}
+            text={p.text}
+            status={p.status}
+            onRetry={() => retryPending(p)}
+            onDismiss={() => dismissPending(p.key)}
+          />
         ))}
         {busy && <ThinkingIndicator activity={view?.state.activity ?? null} since={busySince} />}
       </div>
@@ -521,7 +536,7 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
         <>
           <div className="flex min-h-0 flex-1 gap-2">
             <FolderSidebar
-              current={view}
+              current={view ?? null}
               neighbours={neighbours}
               usage={usageIdx}
               open={sidebarOpen}
@@ -560,7 +575,11 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
           )}
           {awaitingQ && pendingQ && HAS_TOKEN && (
             <div className="mt-2">
-              <QuestionForm sessionId={sessionId} question={pendingQ} onSubmit={() => void refreshView()} />
+              <QuestionForm
+                sessionId={sessionId}
+                question={pendingQ}
+                onSubmit={() => void store.fetchSession(sessionId).catch(() => undefined)}
+              />
             </div>
           )}
           {!HAS_TOKEN && (
@@ -576,38 +595,79 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
 }
 
 // Optimistic "sent" box — mirrors the user-block styling with a pending →
-// delivered/queued/failed state chip so the send never feels lost.
-function PendingMessage({ text, status }: { text: string; status: PendingStatus }) {
-  const label =
-    status === 'sending'
-      ? 'sending…'
-      : status === 'queued'
-        ? 'queued for next turn'
-        : status === 'delivered'
-          ? 'delivered'
-          : 'failed to send';
-  const tone =
-    status === 'error'
-      ? 'text-err'
-      : status === 'delivered'
-        ? 'text-ok'
-        : status === 'queued'
-          ? 'text-warn'
-          : 'text-muted';
+// delivered/queued/failed state badge so the send never feels lost.
+//
+// The status used to be a bare run of coloured monospace text hard against the
+// box's right edge, which read as a glitch rather than a label: at 10.5px, full
+// --warn on --user-bg with no padding and no container looks like an inverted
+// selection block, and it was the only element in the transcript styled that
+// way. It is now the same quiet chip the rest of the UI uses — soft tonal
+// background, hairline border, rounded, padded, non-selectable, inset from the
+// edge like every other piece of row metadata. Widths are stable across the four
+// states (the label text changes, nothing around it moves), so the pending →
+// delivered transition cannot jump the layout.
+const PENDING_BADGE: Record<PendingStatus, { label: string; tone: string }> = {
+  sending: { label: 'sending', tone: 'border-border bg-surface-2 text-muted' },
+  queued: { label: 'queued for next turn', tone: 'border-warn-border bg-warn-bg text-warn' },
+  delivered: { label: 'delivered', tone: 'border-ok-border bg-ok-bg text-ok' },
+  error: { label: 'failed to send', tone: 'border-err-border bg-err-bg text-err' },
+};
+
+function PendingMessage({
+  text,
+  status,
+  onRetry,
+  onDismiss,
+}: {
+  text: string;
+  status: PendingStatus;
+  onRetry?: () => void;
+  onDismiss?: () => void;
+}) {
+  const { label, tone } = PENDING_BADGE[status];
   return (
     <div
-      className={`overflow-hidden rounded-md border border-l-[2.5px] border-border border-l-user-border bg-user-bg ${
-        status === 'delivered' ? 'opacity-80' : ''
-      }`}
+      className={cn(
+        'overflow-hidden rounded-md border border-l-[2.5px] border-border border-l-user-border bg-user-bg',
+        status === 'delivered' && 'opacity-80',
+      )}
     >
       <div className="flex items-center gap-2 px-2.5 pt-1">
         <span className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-accent">you</span>
-        <span className={`mono ml-auto inline-flex items-center gap-1 text-[10.5px] ${tone}`}>
+        <span
+          className={cn(
+            'ml-auto inline-flex shrink-0 select-none items-center gap-1 rounded-sm border px-1.5 py-px text-[10.5px] font-medium leading-[1.5]',
+            tone,
+          )}
+        >
           {status === 'sending' && (
             <span className="inline-block h-2.5 w-2.5 animate-spin rounded-full border border-current border-t-transparent" />
           )}
           {label}
         </span>
+        {status === 'error' && (
+          <>
+            {/* Retry re-uses this message's original request id, so a first
+                attempt that DID land is recognised by the daemon and dropped
+                rather than delivered twice (see requestIdFor). */}
+            <button
+              type="button"
+              onClick={onRetry}
+              className="shrink-0 rounded-sm border border-border px-1.5 py-px text-[10.5px] font-medium text-muted hover:bg-surface-2 hover:text-fg"
+              title="Send this message again with the same idempotency key — if the first attempt actually landed, the daemon will not deliver it twice"
+            >
+              retry
+            </button>
+            <button
+              type="button"
+              onClick={onDismiss}
+              className="shrink-0 rounded-sm px-1 py-px text-[10.5px] text-faint hover:text-fg"
+              title="Remove this box"
+            >
+              dismiss
+            </button>
+          </>
+        )}
       </div>
       <div className="whitespace-pre-wrap break-words px-2.5 pb-1.5 pt-0.5 text-[13px] leading-snug text-fg">
         {text}
