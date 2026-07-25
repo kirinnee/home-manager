@@ -6,8 +6,17 @@ import { Link } from '../lib/router';
 import { ThemeToggle } from './ThemeToggle';
 import { HAS_TOKEN } from '../lib/api';
 import { useFleet } from '../lib/store';
+import { SidebarDrawerTrigger } from './AgentSidebar';
 
-export function AppBar({ crumbs }: { crumbs: Array<{ href?: string; label: string }> }) {
+export function AppBar({
+  crumbs,
+  onOpenSidebar,
+}: {
+  crumbs: Array<{ href?: string; label: string }>;
+  /** Opens the fleet sidebar's mobile drawer. The trigger renders itself only
+   *  at drawer widths — the rail and the expanded column carry their own. */
+  onOpenSidebar: () => void;
+}) {
   const { status } = useFleet();
   return (
     // Not sticky any more: the shell no longer scrolls, so the bar is simply the
@@ -15,6 +24,7 @@ export function AppBar({ crumbs }: { crumbs: Array<{ href?: string; label: strin
     // 1180px centering that used to wrap this row is gone.
     <header className="shrink-0 border-b border-border bg-[var(--bar-bg)]">
       <div className="flex min-h-[32px] w-full items-center gap-2 px-3">
+        <SidebarDrawerTrigger onOpen={onOpenSidebar} />
         <nav className="flex min-w-0 flex-1 items-center gap-1.5 text-[12.5px] text-muted">
           {crumbs.map((c, i) => (
             <span key={`${i}-${c.label}`} className="flex items-center gap-1.5">
