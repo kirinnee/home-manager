@@ -29,6 +29,7 @@ import { ChevronRight, Brain, Info } from 'lucide-react';
 import type { TranscriptBlock, ToolCall, PeerFrom, SystemBlockInfo } from '../lib/transcript';
 import { Markdown } from './Markdown';
 import { ToolGroup } from './ToolGroup';
+import { displayCallsign } from '../lib/callsign';
 import { cn, fmtClock } from '../lib/utils';
 
 const PROTOCOL_HEADER = /#\s*(AGENTS\.md instructions|SYSTEM\s*PROMPT|INSTRUCTIONS)/i;
@@ -244,17 +245,18 @@ function AssistantMessage({ text, ts }: { text: string; ts?: string; source: str
  *  agent talking to itself. The chip is small and quiet (it is metadata) but it
  *  is coloured, because WHO said something changes how the rest is read. */
 function PeerChip({ from }: { from: PeerFrom }) {
+  const name = displayCallsign(from.name);
   return (
     <span
       className="kt-badge min-w-0 max-w-full truncate"
       data-tone="accent"
       title={
         from.replyExpected
-          ? `sent by teammate ${from.name}, which is parked waiting for a reply`
-          : `sent by teammate ${from.name} (no reply expected)`
+          ? `sent by teammate ${name}, which is parked waiting for a reply`
+          : `sent by teammate ${name} (no reply expected)`
       }
     >
-      {from.name}
+      {name}
       {from.replyExpected && <span className="font-normal normal-case tracking-normal opacity-80">· awaiting</span>}
     </span>
   );

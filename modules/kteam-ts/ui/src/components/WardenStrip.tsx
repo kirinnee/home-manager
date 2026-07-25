@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ShieldCheck, ShieldAlert } from 'lucide-react';
 import { api } from '../lib/api';
 import type { WardenStatusView } from '../types';
+import { displayCallsign } from '../lib/callsign';
 import { fmtRelative } from '../lib/utils';
 
 const POLL_MS = 30_000;
@@ -73,7 +74,7 @@ export function WardenStrip() {
       {!clean && (
         <span
           className="mono ml-auto min-w-0 truncate text-faint"
-          title={anomalies.map(a => `${a.kind}: ${a.teammate ?? a.sessionId}`).join('\n')}
+          title={anomalies.map(a => `${a.kind}: ${a.teammate ? displayCallsign(a.teammate) : a.sessionId}`).join('\n')}
         >
           {anomalies
             .slice(0, 3)

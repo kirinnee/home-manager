@@ -10,6 +10,7 @@ import { ChevronRight, Gavel, Skull, HeartPulse, Bell, Check, UserRound, X } fro
 import { api } from '../lib/api';
 import { useDialogFocus } from '../hooks/useDialogFocus';
 import type { WardenVerdict, WardenVerdictKind } from '../types';
+import { displayCallsign } from '../lib/callsign';
 // LAZY. Rendering the dashboard must not download the markdown + syntax
 // highlighting stack: this section is collapsed by default and most readers
 // never open a report at all. The chunk arrives when one is opened.
@@ -115,7 +116,7 @@ export function WardenVerdicts() {
                     {meta.label}
                   </span>
                   <span className="shrink-0 text-[12.5px] font-medium text-fg">
-                    {v.teammate ?? v.targetSession ?? '—'}
+                    {v.teammate ? displayCallsign(v.teammate) : (v.targetSession ?? '—')}
                   </span>
                   {v.reason && <span className="min-w-0 flex-1 truncate text-[12px] text-muted">{v.reason}</span>}
                   <span className="mono ml-auto shrink-0 text-[11px] text-faint">{fmtRelative(v.at)}</span>

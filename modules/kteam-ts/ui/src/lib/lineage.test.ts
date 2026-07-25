@@ -105,7 +105,7 @@ describe('parentDisplay', () => {
       [unnamed.config.id, unnamed],
     ]);
 
-    expect(parentDisplay(named.config.id, byId)).toMatchObject({ kind: 'resolved', name: 'meghan' });
+    expect(parentDisplay(named.config.id, byId)).toMatchObject({ kind: 'resolved', name: 'Meghan' });
     expect(parentDisplay(unnamed.config.id, byId)).toMatchObject({ kind: 'resolved', name: 'old session' });
     expect(parentDisplay('deadbeef0011', byId)).toEqual({ kind: 'missing', shortId: 'deadbeef…' });
     expect(parentDisplay(undefined, byId)).toBeNull();
