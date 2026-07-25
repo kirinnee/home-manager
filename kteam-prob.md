@@ -989,3 +989,260 @@ Root causes found (all three residuals shared ONE load bomb), fixes landed in `m
   within 90s" plus launch_settled(outcome=failed); a `kteam send` issued during
   the backgrounded window waited ~16 s and was delivered 0.25 s after
   launch_settled.
+
+## 2026-07-25 — two interactive claude-auto-atomi sessions went `stopped` / `health: idle` within 30s of each other
+
+- **Observed by**: gertrude (`mrzyhipl-2d13ff0a`, kteam-ui round 5) while driving the web UI in a
+  real headless Chromium against the live daemon (pid 3531171, port 7337).
+- **Problem**: at ~07:00Z two `interactive`-mode sessions on the `claude-auto-atomi` wrapper left
+  `awaiting_user` on their own:
+  - `tiffany mrzys5g2-62d644e4` — its Claude TUI recorded `<command-name>/exit</command-name>` +
+    `<local-command-stdout>See ya!</local-command-stdout>` at `06:59:50.386Z`, i.e. the harness
+    itself exited. The next `kteam send` correctly took the revive path (`resume`), so the session
+    came back at turn 1 with the pending message delivered as a turn file — no message was lost.
+  - `elijah mrzsvgdb-2df3df1f` (the user's HQ session, opus-5) — `session.stopped`
+    `{source: daemon, health: idle}` at `07:00:21.616Z`, with nothing but `quota.updated` events
+    before it and no `session.stalled`, `stall_kill`, `session.crashed` or explicit stop.
+- **Why it matters**: `interactive` sessions are human-driven and are supposed to be exempt from the
+  idle/stall machinery. An unexplained `stopped` on the user's own HQ session looks like the wrong
+  layer reclaiming it. The two events being 30s apart on the SAME wrapper suggests a common trigger
+  (account/wrapper-scoped) rather than two coincidences.
+- **Not the UI**: the web client can only stop a session through an explicit Stop click
+  (`api.stop`); no probe in that round issued one, and round-5's diff touches only
+  `ui/src/{lib/api,pages/SessionChatPage,components/Transcript,components/TranscriptRow}` plus
+  `ui-dist`. The `/exit` on tiffany was recorded by the harness in its own transcript, not sent by
+  the UI.
+- **Suspected code path**: `src/liveness.ts` / `src/session-manager.ts` idle handling — whatever
+  emits `session.stopped` with `health: 'idle'` and no preceding `session.stalled`. Worth checking
+  whether the interactive-mode exemption covers that path, and whether a wrapper-level signal
+  (quota watcher / kfleet usage refresh — `quota.updated` was the only thing firing) can reach it.
+- **Workaround**: `kteam resume <id>` brings the session back with history intact; a `kteam send`
+  revives it automatically.
+- **Not reproduced deliberately** (it happened on the user's live session), so no isolated repro —
+  raw evidence is in `~/.kteam/mrzsvgdb-2df3df1f/events.jsonl` seq 100-103 and
+  `~/.kteam/mrzys5g2-62d644e4` chat records around 06:59:50Z.
+
+## 2026-07-25 — `--name` is slugified, destroying human-readable task titles
+
+**Problem.** `kteam start --name "[UI] kteam Themes SPA Redesign"` is stored and displayed as
+`-UI--kteam-Themes-SPA-Redesign`. Spaces and brackets are replaced with `-`, and the value is
+truncated to 48 chars. The TASK column in `kteam ps` (and the web dashboard, which reads the same
+`config.name`) is therefore unreadable for any multi-word task description — even though `--name`'s
+own CLI help calls it a "succinct summary of what this session is supposed to do".
+
+**Evidence.**
+
+```
+$ kteam ps --label kteam-redesign
+TEAMMATE  ...  TASK
+jessica   ...  -UI--kteam-Themes-SPA-Redesign
+desmond   ...  -Core--Teammate-Flag-RC-Naming
+$ jq -r .name ~/.kteam/ms025va9-977d024b/config.json
+-UI--kteam-Themes-SPA-Redesign
+```
+
+Launched with `--name "[UI] kteam Themes SPA Redesign"` and `--name "[Core] Teammate Flag RC Naming"`.
+
+**Suspected code path.** `modules/kteam-ts/src/names.ts:196` —
+
+```ts
+export function sessionName(raw: string): string {
+  return raw.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 48);
+}
+```
+
+Applied at `src/session-manager.ts:1009` when the session config is built, and mirrored in
+`src/api-client.ts:191` for start-idempotency lookup. The doc comment says the shape exists to be
+"filesystem- and column-safe", but nothing appears to use `config.name` as a path component — the
+session directory is keyed by session id, and `src/core.ts:857` slugifies separately for tmux
+names. So the sanitisation looks defensive rather than required.
+
+**Impact.** Blocks the requested convention `[Hayden] Fix Transcript` for rc-session titles, and
+makes the dashboard TASK column noisy.
+
+**Workaround.** None client-side — the daemon rewrites the value on the way in.
+
+**Suggested fix.** Split the concerns: keep a slugified `nameSlug` for anything that genuinely needs
+a safe token, and store the raw (trimmed, control-chars-stripped, length-capped ~120) string as the
+display `name`. Keep `api-client.ts` idempotency comparison consistent with whichever field it keys on.
+
+## 2026-07-25 07:45 UTC — kteam-redesign batch: CLI globally broken during a teammate's mid-refactor of shared src
+
+- **Problem**: the entire `kteam` CLI (`kteam ps`, `kteam status`, `kteam daemon status`, presumably `kteam send`/`resume`/`attach` too since they share the same entrypoint) failed for EVERYONE — the babysitter's own polling, and by extension the lead session `dixie` and any other teammate trying to reach the daemon — while teammate `desmond` (claude-opus-4-8, session `ms026al6-b1285b8c`) was mid-edit on `modules/kteam-ts/src/names.ts` as part of his assigned task ("caller-chosen teammate name (--teammate + kteam name)").
+- **Evidence**: repeated direct invocation, all failing identically:
+
+  ```
+  $ direnv exec . kteam ps --label kteam-redesign
+  1 | })
+  2 | {
+      ^
+  SyntaxError: Export named 'sessionName' not found in module '/home/kirin/.config/home-manager/modules/kteam-ts/src/names.ts'.
+        at loadAndEvaluateModule (2:1)
+  Bun v1.3.13 (Linux x64)
+
+  $ direnv exec . kteam daemon status
+  (same SyntaxError)
+  ```
+
+  `grep -rn "sessionName" modules/kteam-ts/src/*.ts` at the time showed `src/api-client.ts:6/191` and `src/session-manager.ts:41/1088` still importing/calling `sessionName` from `./names`, while `names.ts` itself no longer exported it (desmond had renamed it to `displayName`, per his own in-file comment explaining the slugify→displayName redesign, but had not yet updated the two call sites). Desmond's own snapshot at the time shows him mid-fix on an unrelated regex bug in the same function (`.replace(/[^@-^_^?]+/g, ' ')` control-char stripping), i.e. he was still actively iterating on the file when the CLI was probed.
+
+- **Root cause (architecture, not a bug in the traditional sense)**: `kteam` is a thin wrapper — `/home/kirin/.nix-profile/bin/kteam` is `exec bun run ~/.config/home-manager/modules/kteam-ts/src/index.ts "$@"` — i.e. every CLI invocation re-evaluates the live TypeScript source tree fresh, with NO build step and NO isolation between "the source a teammate is actively editing" and "the source every other kteam invocation on the box runs against." This is inherent to the current dev workflow (edit source in place, no separate build/install step for the CLI itself) but means any multi-file rename/refactor mid-flight in `modules/kteam-ts/src` makes the CLI unusable system-wide — not just for the editing session, but for the lead, the babysitter, and every other teammate — for the duration of the inconsistency (observed here: at least ~1-2 minutes while desmond worked through it).
+- **Suspected code path**: no single function is "wrong" — this is about `modules/kteam-ts/src/names.ts` (the file being edited) plus the fact that `bin/kteam`'s wrapper has no build/dist indirection (contrast with the `ui-dist/` built bundle for the web UI, which IS isolated from `ui/src` edits). If self-hosting robustness matters, consider either (a) a separate installed/copied CLI snapshot that isn't the same tree teammates edit, or (b) having teammates work in a git worktree (which the repo's own PR-workflow rule already recommends for exactly this kind of reason) instead of editing `modules/kteam-ts/src` in place while `kteam` itself is depended on live.
+- **Impact observed**: transient total CLI outage (confirmed via 3 separate command failures: `kteam ps`, `kteam ps -a`, `kteam daemon status`) during an in-place edit of shared kteam-ts source by one of the very teammates kteam was coordinating. Self-resolved once desmond finished/fixed the rename (not independently confirmed how long the full window was, but it recovered without intervention).
+- **Workaround**: none needed to unblock desmond (he was fixing his own mistake); for the babysitter, fall back to direct filesystem reads (`~/.kteam/<id>/last-snapshot.txt`, `events.jsonl`, `state.json`) instead of `kteam` subcommands until the CLI recovers. General recommendation: anyone editing `modules/kteam-ts/src` in place should expect `kteam` itself to break for all concurrent users for the duration of any inconsistent multi-file rename, and should land renames as a single atomic edit (or work in a worktree) rather than saving files one at a time.
+
+## 2026-07-25 — new daemon endpoints are unverifiable without a fleet-wide restart; 404 surfaces as exit-0 stdout
+
+**Problem.** Two coupled issues found while verifying a new `kteam name` subcommand.
+
+1. The `kteam` CLI is **live source** — the nix wrapper is
+   `exec bun run ~/.config/home-manager/modules/kteam-ts/src/index.ts "$@"` — but `kteamd` is a
+   long-running process. So a new CLI subcommand appears instantly while the daemon half of the
+   same feature does not exist until the daemon restarts. Restarting is expensive: 20+ live
+   sessions fleet-wide depend on it. Net effect: any change touching the daemon API cannot be
+   verified end-to-end during development without risking the whole fleet.
+2. When the client hits a route the running daemon does not serve, the 404 is swallowed:
+   ```
+   $ kteam name -n 3
+   kteam: not found
+   $ echo $?
+   0
+   ```
+   A missing route prints a bare body fragment to **stdout** and exits **0**. Any script piping
+   `kteam` output will treat "kteam: not found" as a valid result.
+
+**Evidence.** `kteam --help` lists `name` (so the command is registered), while the call itself
+returns the message above with exit 0. Daemon pid 3531171 predates the commit that added the route.
+
+**Suspected code path.** CLI wrapper in the nix `kteam` derivation; client transport in
+`modules/kteam-ts/src/api-client.ts` (error/status handling on non-2xx); route table in
+`modules/kteam-ts/src/api-server.ts`.
+
+**Workaround.** Verify daemon-side changes through in-process tests against the service layer
+(`src/daemon-service.test.ts`, `src/session-manager-launch.test.ts`) rather than the live daemon.
+
+**Suggested fix.** (a) Non-2xx responses must throw and exit non-zero, with the status code and
+route named. (b) Have the client send its version and warn loudly on a daemon/CLI version skew —
+"your CLI is newer than the running daemon; restart kteamd to use <command>". (c) Consider a
+daemon reload path that drains rather than drops session monitors.
+
+**CORRECTION (same day).** Point 2 above is WRONG and is retracted: `kteam name` exits **1**, not 0,
+and writes to **stderr**, not stdout. The original measurement piped through `tail` and then read
+`$?`, which reports the exit status of `tail`. The existing throw path
+(`api-client.ts` request() → top-level catch in `index.ts`) already handles non-2xx correctly, so
+there is no swallowed-error bug. Point 1 (CLI is live-source while `kteamd` is long-running, so
+daemon-side changes need a restart to verify end-to-end) still stands, as does the suggestion to
+warn on CLI/daemon version skew — the message "kteam: not found" gives no hint that the cause is a
+stale daemon.
+
+## 2026-07-25 — `/v1/sessions/<id>/chat` returns zero records for one session
+
+**Problem.** `GET /v1/sessions/ms025va9-977d024b/chat?limit=200` returns
+`{total: 1053, offset: 853, records: []}` — an empty page for a session with a
+thousand records. Every `limit`/`before` combination behaves the same
+(`limit=10`, `limit=200&before=853`, `limit=50&before=1000` → all empty). Five
+other sessions checked the same way return 200 records each, so it is one
+session's data, not the route.
+
+**Symptom in the UI.** That session's transcript renders as a blank card — the
+header, composer and status all work, so it reads as a UI bug. It is not; the
+daemon is returning nothing to render. (Found while reproducing a mobile scroll
+complaint: "the transcript won't scroll" was in part "there is nothing in it".)
+
+**Suspected code path.** `src/storage.ts` chat pointers: `appendChatPointers` /
+the pointer→byte-offset resolution against the harness transcript. The session's
+`total` comes from the pointer index, so the index has rows; resolving them to
+records yields nothing — a rewritten/rotated/moved harness transcript file with
+the pointer rows left behind would produce exactly this. Compare with
+`replay()`, which has an explicit identity check and re-index fallback for the
+same failure mode on `events.jsonl`; the chat pointer path appears to have no
+equivalent recovery.
+
+**Workaround.** None from the UI side. The records exist in the harness
+transcript; only kteam's index of them is unusable.
+
+Claude-Session: https://claude.ai/code/session_01LGZH4t7Ua5Yhv3NfmMywwX
+
+## 2026-07-25 — chat API returns records:[] with total:1053 for one session (transcript unreadable)
+
+**Problem.** `GET /v1/sessions/ms025va9-977d024b/chat` returns `records: []` while simultaneously
+reporting `total: 1053`, for **every** combination of `limit` and `before`. Other sessions return
+records normally from the same endpoint. The practical effect: that session's transcript cannot be
+read in the web UI at all, even though the daemon knows 1053 records exist.
+
+**Evidence.** Found by a teammate doing UI work against the live daemon; reproduced across multiple
+`limit`/`before` values. Contrast with other session ids on the same endpoint, which return 200
+records as expected. The non-zero `total` alongside an empty `records` array is the key signal —
+the count and the fetch disagree, so this is not "no data".
+
+**Suspected code path.** `modules/kteam-ts/src/storage.ts` — the chat pointer index versus the
+on-disk journals. `total` is evidently served from one source (the pointer index / a count row) and
+`records` from another (journal reads keyed by pointer), so a pointer index that is corrupt, stale,
+or keyed differently for this session yields count-without-content. Related prior art in this log:
+the daemon self-check has previously reported "unindexed" and "schema generation 0" repair passes
+for `kteam.sqlite`, which is the same index.
+
+**Impact.** Silent and total data loss from the user's perspective for an affected session — the UI
+shows an empty conversation rather than an error, so it reads as "nothing happened" rather than
+"the index is broken".
+
+**Workaround.** None in the UI. The raw journals under `~/.kteam/<id>/` still hold the content.
+
+**Suggested fix.** (a) Make the mismatch loud: if `total > 0` and `records` is empty, return an
+error or a diagnostic flag rather than a valid-looking empty page. (b) Have the consistency
+self-check verify pointer-index rows resolve to readable journal offsets, not merely that rows
+exist. (c) Add a repair path that rebuilds a single session's pointers from its journals.
+
+## 2026-07-25 — chat transcript renders 0 blocks under `vite dev` (StrictMode double-invoke)
+
+**Problem.** In the Vite dev server the chat transcript renders 0 blocks; a production build of the
+same commit renders 79 for the same session. The chat request itself returns 200, so the data
+arrives and is then dropped.
+
+**Suspected code path.** The initial-load effect in the chat page / session store under React 18+
+StrictMode, whose deliberate double-invoke of effects in development exposes an unguarded
+load-then-set sequence (e.g. the second invocation's in-flight request resolving after a cleanup has
+already cleared state, or a cursor advanced twice).
+
+**Impact.** Development-only — shipping builds are unaffected — but it makes `bun run dev` useless
+for any chat/transcript work, which pushes contributors toward slow production-build test loops.
+
+**Suggested fix.** Guard the initial-load effect against double invocation (abort controller +
+ignore-stale-response flag), which is the correct pattern regardless and is exactly what StrictMode
+is designed to surface.
+
+## 2026-07-25 — no working-tree isolation between concurrent teammates: foreign staged files hitchhike into commits
+
+**Problem.** kteam runs many teammates concurrently in the SAME checkout with no isolation. Two
+distinct failure modes were hit in one batch:
+
+1. **Foreign staged files swept into another agent's commit.** A UI teammate committing a CSS
+   palette change captured a `src/*.test.ts` file that a _different_ teammate had staged moments
+   earlier, producing `f233dac` — a themes.css commit containing an unrelated daemon test. Verified
+   afterwards: content intact, 3 pass / 0 fail, so no data was lost, but the attribution and commit
+   hygiene are wrong and the owning teammate started a needless "repair".
+2. **A verification build silently deployed to production.** `kteamd` serves `modules/kteam-ts/ui-dist`
+   directly off disk, so an agent running a routine `bun run build` for typecheck/verification
+   _instantly deployed_ a half-migrated UI to the live URL with no commit and no review. Caught only
+   because a human was actively testing the page at that moment.
+
+**Evidence.** `git show --stat f233dac` lists `src/session-manager-chat.test.ts` alongside
+`ui/src/themes.css` and `ui/scripts/contrast-audit.ts`. For (2), the live bundle hash changed to an
+uncommitted artefact while `git status` showed `ui-dist` modified + untracked.
+
+**Suspected cause.** Not a kteam code defect — a structural consequence of the execution model:
+`kteam start --cwd <same dir>` for N teammates gives N agents one index, one worktree, and one
+build output directory. Nothing in kteam warns about it.
+
+**Impact.** Cross-contaminated commits, misattributed work, wasted "repair" effort, and — worst —
+unreviewed production deploys from routine developer commands.
+
+**Workarounds now in force for this batch.** Strict per-file ownership assigned by the lead;
+`git commit --only <paths>` mandatory (never `git commit -a`); verification builds must target a
+temp `--outDir`, with `ui-dist` written only by a deliberate deploy commit.
+
+**Suggested fix.** (a) Offer first-class per-teammate git worktree isolation as a `kteam start`
+option (the harness already understands worktrees elsewhere in this repo's tooling), so concurrent
+teammates cannot share an index. (b) At minimum, have `kteam start` WARN when another live session
+already has the same `--cwd`, naming it. (c) Document the "serving a build directory from a shared
+tree means any build is a deploy" hazard — it is not obvious and it bit us.
