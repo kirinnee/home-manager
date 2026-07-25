@@ -54,6 +54,12 @@ const AUTOMODE = `Automode: do not wait for user input. Make the best reasonable
 const CONTINUE = `Continue from where you left off.`;
 const IMAGE_META = `[Image: original 1138x2151, displayed at 1058x2000. Multiply coordinates by 1.08 to map to original image.]`;
 
+// Daemon "declared wait elapsed" notice (session-manager.ts). Fixed prefix +
+// suffix, only the parenthesized condition varies.
+const WAIT_ELAPSED_REAL = `The wait you declared has elapsed (peer reply from bennett on the review thread). Re-check the condition and continue the task.`;
+const WAIT_ELAPSED_NONE = `The wait you declared has elapsed (no condition given). Re-check the condition and continue the task.`;
+const WAIT_ELAPSED_EMPTY = `The wait you declared has elapsed (). Re-check the condition and continue the task.`;
+
 const SYSTEM_REMINDER = `<system-reminder>
 The user has changed their mind about the approach. Prefer the smaller diff.
 </system-reminder>`;
@@ -216,6 +222,39 @@ describe('classifySystemText — daemon-injected automode plumbing', () => {
   test('image bracket followed by human prose → null (must be the entire text)', () => {
     expect(
       classifySystemText('[Image: original 800x600, displayed at 400x300.] what is wrong with this diagram?'),
+    ).toBeNull();
+  });
+});
+
+describe('classifySystemText — daemon "declared wait elapsed" notice', () => {
+  test('real condition → wait elapsed, parenthesized condition surfaced', () => {
+    const info = classifySystemText(WAIT_ELAPSED_REAL);
+    expect(info!.label).toBe('wait elapsed');
+    expect(info!.summary).toBe('peer reply from bennett on the review thread');
+    expect(info!.raw).toBe(WAIT_ELAPSED_REAL);
+  });
+
+  test('daemon "no condition given" placeholder → surfaced verbatim', () => {
+    const info = classifySystemText(WAIT_ELAPSED_NONE);
+    expect(info!.label).toBe('wait elapsed');
+    expect(info!.summary).toBe('no condition given');
+  });
+
+  test('odd/empty parenthesized condition → fixed fallback summary', () => {
+    const info = classifySystemText(WAIT_ELAPSED_EMPTY);
+    expect(info!.label).toBe('wait elapsed');
+    expect(info!.summary).toBe('no condition given');
+  });
+
+  test('human near-miss: prefix without the parenthesized condition + suffix → null', () => {
+    expect(classifySystemText('The wait you declared has elapsed, so I moved on.')).toBeNull();
+  });
+
+  test('human near-miss: quotes the phrase mid-sentence → null (anchored whole-string)', () => {
+    expect(
+      classifySystemText(
+        'Note: "The wait you declared has elapsed (x). Re-check the condition and continue the task." is the daemon line.',
+      ),
     ).toBeNull();
   });
 });
