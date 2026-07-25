@@ -116,7 +116,7 @@ export function WardenVerdicts() {
                     {meta.label}
                   </span>
                   <span className="shrink-0 text-[12.5px] font-medium text-fg">
-                    {v.teammate ? displayCallsign(v.teammate) : (v.targetSession ?? '—')}
+                    {displayCallsign(v.teammate) || (v.targetSession ?? '—')}
                   </span>
                   {v.reason && <span className="min-w-0 flex-1 truncate text-[12px] text-muted">{v.reason}</span>}
                   <span className="mono ml-auto shrink-0 text-[11px] text-faint">{fmtRelative(v.at)}</span>
