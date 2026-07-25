@@ -128,6 +128,9 @@ export const TranscriptRow = memo(function TranscriptRow({ block, live, isLast, 
   return (
     <div
       className="kt-block"
+      // The scroll controller's prepend anchor looks a block up by id to restore
+      // its exact position when an older page loads (see Transcript.tsx).
+      data-block-id={block.id}
       data-kind={kind}
       data-turn={turnChange ? 'true' : undefined}
       data-after={previous ? tierOf(previous.kind) : undefined}
@@ -166,13 +169,30 @@ function TurnBoundary({ block }: { block: Extract<TranscriptBlock, { kind: 'turn
 // Assistant text: no per-message role label (role reads from layout — user
 // blocks are railed + filled, assistant is plain prose). Metadata sits aside,
 // revealed on hover: a slim left gutter rule + a timestamp that fades in.
+//
+// THE TIMESTAMP NEEDS ITS OWN COLUMN. Absolutely positioning it at `right-0`
+// over prose that occupies the full width means it lands ON the first line
+// whenever that line reaches the right edge — the glyphs interleave and both the
+// message and the time become unreadable (reported from a live session:
+// "can i restart this?" with 22:56:19 drawn through it; measured 4 colliding
+// stamps at 1440px and 11 at 390px on one loaded transcript).
+//
+// So the gutter is RESERVED, not borrowed: `pr-[--kt-ts-gutter]` shrinks the
+// content box, the stamp is positioned inside that padding, and inline content
+// therefore wraps before it can reach the stamp. Guaranteed at every width, not
+// tuned per breakpoint. Reserving it unconditionally (rather than only on hover)
+// is deliberate: a padding that appears on hover would reflow the paragraph under
+// the cursor, and a reflow mid-stream is exactly what knocks the transcript out
+// of follow.
+const TS_GUTTER = 'pr-[54px]';
+
 function AssistantMessage({ text, ts }: { text: string; ts?: string; source: string }) {
   if (!text.trim()) return null;
   return (
-    <div className="group relative pl-3">
+    <div className={cn('group relative pl-3', ts && TS_GUTTER)}>
       <span className="absolute left-0 top-1 bottom-1 w-px bg-border-soft opacity-0 transition-opacity group-hover:opacity-100" />
       {ts && (
-        <span className="pointer-events-none absolute right-0 top-0.5 mono text-[10.5px] text-faint opacity-0 transition-opacity group-hover:opacity-100">
+        <span className="pointer-events-none absolute right-0 top-0.5 w-[50px] text-right mono text-[10.5px] tabular-nums text-faint opacity-0 transition-opacity group-hover:opacity-100">
           {fmtClock(ts)}
         </span>
       )}
@@ -223,11 +243,16 @@ function UserMessage({ text, ts, from }: { text: string; ts?: string; from?: Pee
         {from ? (
           <PeerChip from={from} />
         ) : (
-          <span className="text-[10.5px] uppercase tracking-[0.12em] font-semibold text-accent">
+          <span className="shrink-0 whitespace-nowrap text-[10.5px] uppercase tracking-[0.12em] font-semibold text-accent">
             {isProtocol ? 'turn prompt' : 'message'}
           </span>
         )}
-        {ts && <span className="mono text-[10.5px] text-faint">{fmtClock(ts)}</span>}
+        {/* In FLOW, never absolute: a user block already has a metadata row, so
+            the stamp belongs in it. shrink-0 keeps it whole at 390px instead of
+            being squeezed into the label beside it. */}
+        {ts && (
+          <span className="mono shrink-0 whitespace-nowrap text-[10.5px] tabular-nums text-faint">{fmtClock(ts)}</span>
+        )}
         {collapsible && (
           <button
             type="button"
