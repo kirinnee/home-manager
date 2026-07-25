@@ -14,6 +14,12 @@ import { useTheme, type ResolvedMode, type ThemeFamilyId, type ThemeMode } from 
 import { cn } from '../lib/utils';
 import { Button } from './Primitives';
 
+/** Everything the browser can put focus on inside the panel. The `tabIndex >= 0`
+ *  filter applied to this list is what separates a TAB STOP from something that
+ *  is merely focusable — see the cycle below. */
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]';
+
 const MODE_OPTIONS: ReadonlyArray<{ id: ThemeMode; label: string; Icon: typeof Sun; hint: string }> = [
   { id: 'system', label: 'Auto', Icon: Monitor, hint: 'Follow the operating system' },
   { id: 'light', label: 'Light', Icon: Sun, hint: 'Always light' },
@@ -44,6 +50,7 @@ export function ThemeToggle() {
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const panelId = useId();
 
   const close = useCallback((returnFocus: boolean) => {
@@ -77,6 +84,58 @@ export function ThemeToggle() {
     if (!open) return;
     listRef.current?.querySelector<HTMLButtonElement>('[aria-checked="true"]')?.focus();
   }, [open]);
+
+  // TAB CYCLE. The panel has said `role="dialog"` since it was written, and Tab
+  // walked straight out of it: one press from the family in force left the
+  // reader somewhere in the page behind, with the popover still open and still
+  // announcing itself as a dialog. A dialog you can tab out of but not see past
+  // is the worst of both shapes.
+  //
+  // Deliberately NOT the shared useDialogFocus contract. That hook restores
+  // focus to the opener on EVERY close, which is right for a modal and wrong
+  // here: this popover also dismisses on an outside click, and snatching focus
+  // back to the trigger when the reader has just clicked into something else
+  // would be a regression. Escape, initial focus and return-focus are already
+  // correct above; the cycle is the only piece missing, so the cycle is the only
+  // piece added. No `aria-modal` either — the page behind stays live and
+  // reachable by pointer, and claiming otherwise would be a lie that assistive
+  // tech repeats to the reader.
+  //
+  // The cycle turns on TAB STOPS (`tabIndex >= 0`), not on everything focusable,
+  // because the family list is a roving radiogroup: four of its five buttons sit
+  // at `tabIndex={-1}` and Tab never visits them. A first/last comparison over
+  // "everything focusable" would believe the cycle ends at the LAST family
+  // button and happily let focus escape from the CHECKED one — which is where a
+  // keyboard reader actually stands. Position is compared by document order, so
+  // a programmatic focus onto a parked button still wraps instead of leaking.
+  const onPanelKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== 'Tab') return;
+    const panel = panelRef.current;
+    if (!panel) return;
+    const stops = [...panel.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(
+      el => el.tabIndex >= 0 && (el.offsetParent !== null || el === document.activeElement),
+    );
+    const first = stops[0];
+    const last = stops[stops.length - 1];
+    if (!first || !last) return;
+    const active = document.activeElement as HTMLElement | null;
+    const follows = (a: Element, b: Element) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+
+    if (e.shiftKey) {
+      // Backwards past the top: nothing inside left to land on.
+      if (!active || active === first || !follows(first, active)) {
+        e.preventDefault();
+        last.focus();
+      }
+      return;
+    }
+    // Forwards past the last stop — including from a parked button that sits
+    // after it in the DOM.
+    if (!active || active === last || !follows(active, last)) {
+      e.preventDefault();
+      first.focus();
+    }
+  }, []);
 
   // Roving arrow-key navigation inside the family radiogroup.
   const onListKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -117,20 +176,26 @@ export function ThemeToggle() {
         aria-controls={open ? panelId : undefined}
       >
         <Palette size={14} aria-hidden="true" />
-        <span className="hidden text-[11px] font-medium sm:inline">{activeFamily?.label ?? 'Theme'}</span>
+        <span className="hidden text-meta font-medium sm:inline">{activeFamily?.label ?? 'Theme'}</span>
       </Button>
 
       {open && (
         <div
+          ref={panelRef}
           id={panelId}
           role="dialog"
           aria-label="Theme"
-          className="absolute right-0 top-full z-50 mt-1 w-[292px] rounded-lg border border-border bg-surface p-2 shadow-md"
+          onKeyDown={onPanelKeyDown}
+          // Role silhouette, not a generic one: `shadow-popover` is what makes
+          // Neo-Brutalism's hard offset block appear here instead of a soft
+          // Studio blur, and `rounded-panel`/`p-panel` follow the family's own
+          // geometry rather than a fixed 8px/8px.
+          className="absolute right-0 top-full z-50 mt-1 w-[292px] rounded-panel border border-border bg-surface p-panel shadow-popover"
         >
           <div
             role="radiogroup"
             aria-label="Colour mode"
-            className="mb-2 flex gap-1 rounded-md border border-border bg-surface-2 p-1"
+            className="mb-2 flex gap-1 rounded-control border border-border bg-surface-2 p-1"
           >
             {MODE_OPTIONS.map(({ id, label, Icon, hint }) => {
               const checked = mode === id;
@@ -142,8 +207,12 @@ export function ThemeToggle() {
                   aria-checked={checked}
                   title={hint}
                   onClick={() => setMode(id)}
+                  // `h-control-sm` instead of `py-1`: themes.css composes the
+                  // coarse-pointer floor into that token, so this segmented
+                  // control is 24px on a desktop and a full 44px thumb target on
+                  // a phone without this component knowing what a pointer is.
                   className={cn(
-                    'flex flex-1 items-center justify-center gap-1 rounded px-2 py-1 text-[11px] font-medium transition-colors',
+                    'flex h-control-sm flex-1 items-center justify-center gap-1 rounded-tab px-control-x text-meta font-medium transition-colors',
                     checked
                       ? // `border-accent`, NOT `border-accent-border`: a
                         // state-bearing edge has to be identifiable, and
@@ -181,15 +250,15 @@ export function ThemeToggle() {
                   tabIndex={checked ? 0 : -1}
                   onClick={() => setFamily(f.id as ThemeFamilyId)}
                   className={cn(
-                    'flex w-full flex-col gap-1 rounded-md border p-2 text-left transition-colors',
+                    'flex w-full flex-col gap-1 rounded-panel border p-panel text-left transition-colors',
                     checked ? 'border-accent bg-accent-soft' : 'border-border bg-surface hover:border-accent',
                   )}
                 >
                   <span className="flex items-center gap-1">
-                    <span className="text-[12.5px] font-semibold text-fg">{f.label}</span>
+                    <span className="text-ui font-semibold text-fg">{f.label}</span>
                     {checked && <Check size={12} className="text-accent" aria-hidden="true" />}
                   </span>
-                  <span className="text-[11px] leading-snug text-muted">{f.blurb}</span>
+                  <span className="text-meta leading-base text-muted">{f.blurb}</span>
                   <span className="mt-1 flex items-stretch gap-1.5">
                     {(['light', 'dark'] as ResolvedMode[]).map(variant => (
                       <Swatch key={variant} theme={`${f.id}-${variant}`} current={checked && resolved === variant} />
@@ -200,7 +269,7 @@ export function ThemeToggle() {
             })}
           </div>
 
-          <p className="mt-2 border-t border-border-soft pt-1.5 text-[10.5px] leading-snug text-faint">
+          <p className="mt-2 border-t border-border-soft pt-1.5 text-2xs leading-base text-faint">
             Previews render in their own theme. Auto follows the OS live.
           </p>
         </div>
