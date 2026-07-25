@@ -1102,6 +1102,17 @@ body {
 .kt-composer--compact .kt-composer__actions {
   column-gap: var(--gap-xs);
 }
+/* A mouse-first hybrid reports `pointer:fine`, so the global coarse-pointer
+   floor intentionally does not inflate all its desktop controls. Its idle send
+   icon still has to survive a tap from the secondary coarse input; target only
+   that control when ANY pointer is coarse. Pure-coarse devices already receive
+   the same 44px floor globally, so their geometry is unchanged. */
+@media (any-pointer: coarse) {
+  .kt-composer__tap-send {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
 .kt-input::placeholder {
   color: var(--muted);
 }

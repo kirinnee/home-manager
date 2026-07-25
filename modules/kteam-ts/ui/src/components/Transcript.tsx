@@ -178,9 +178,9 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
   const prevFirstId = useRef<string | null>(null);
   /** scrollHeight as of the last paint — the shrink test's baseline. */
   const prevScrollHeight = useRef(0);
-  /** Distance from the bottom as of the last SETTLED scroll event. The one
-   *  quantity a prepend leaves untouched, and the only one measured outside a
-   *  commit — so it is what the prepend correction restores. */
+  /** Distance from the bottom as of the last settled scroll or resize callback.
+   *  It is the one quantity a prepend leaves untouched, so it is what the
+   *  prepend correction restores. */
   const gapFromBottom = useRef(0);
   /** scrollTop we last OBSERVED or SET. `onScroll` compares against this to tell
    *  a user's scroll-up from our own pin; every programmatic write updates it, so
@@ -293,6 +293,11 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
         // Record OUR write, so the scroll event it triggers is not read as the
         // reader moving. Without this the very act of following looks like input.
         lastScrollTop.current = v.scrollTop;
+      } else {
+        // Reflow and responsive content padding can change the true gap without
+        // a scroll event. Refresh the prepend baseline from this settled layout,
+        // but NEVER write scrollTop while the reader is detached.
+        gapFromBottom.current = Math.max(0, v.scrollHeight - v.scrollTop - v.clientHeight);
       }
       prevScrollHeight.current = v.scrollHeight;
       prevClientHeight.current = v.clientHeight;
@@ -308,7 +313,13 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
     if (!v || typeof ResizeObserver === 'undefined') return;
     const ro = new ResizeObserver(() => {
       if (followRef.current) pin();
-      else prevClientHeight.current = v.clientHeight;
+      else {
+        // A breakpoint, keyboard or composer resize can change both the viewport
+        // and content reflow. Keep the detached prepend baseline current without
+        // opposing the reader with a scrollTop write.
+        gapFromBottom.current = Math.max(0, v.scrollHeight - v.scrollTop - v.clientHeight);
+        prevClientHeight.current = v.clientHeight;
+      }
     });
     ro.observe(v);
     return () => ro.disconnect();
@@ -331,12 +342,12 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
   // `offsetTop` reads the same transient and fails identically — it is the
   // measurement that is untrustworthy here, not the formula.
   //
-  // What IS trustworthy is the reader's distance from the bottom, read from the
-  // last SETTLED scroll event (one layout, three metrics, no commit in flight) —
-  // and a prepend inserts content ABOVE, so that distance is exactly invariant
-  // across it. Restoring it needs no baseline height at all, and it cannot
-  // overshoot: the worst case is being off by whatever streamed in below since
-  // that scroll event, which is a delta, never a page.
+  // What IS trustworthy is the reader's distance from the bottom, refreshed
+  // from the last settled scroll or ResizeObserver callback (one layout, three
+  // metrics) — and a prepend inserts content ABOVE, so that distance is exactly
+  // invariant across it. Restoring it needs no baseline height at all, and it
+  // cannot overshoot: the worst case is being off by whatever streamed in below
+  // since that observation, which is a delta, never a page.
   useLayoutEffect(() => {
     const v = viewportRef.current;
     if (!v) return;
