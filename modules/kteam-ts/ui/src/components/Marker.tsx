@@ -14,10 +14,9 @@ export function MarkerSeparator({ children, tone = 'muted' }: { children: ReactN
     <div className="flex items-center gap-3 py-1 select-none">
       <span className="h-px flex-1 bg-border-soft" />
       <span
-        className={cn(
-          'text-[10.5px] uppercase tracking-[0.14em] font-medium',
-          tone === 'faint' ? 'text-faint' : 'text-muted',
-        )}
+        // `.kt-label` owns the casing: Ember renders small caps instead of
+        // shouted uppercase, Mission 0.14em mono caps, Neo 800 weight.
+        className={cn('kt-label', tone === 'faint' ? 'text-faint' : 'text-muted')}
       >
         {children}
       </span>
@@ -48,7 +47,7 @@ export function MarkerLine({
       onClick={onClick}
       title={title}
       className={cn(
-        'group flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[12px] text-muted',
+        'group flex w-full items-center gap-sm rounded-control px-cell-x py-row-y text-left text-cell text-muted',
         onClick && 'hover:bg-surface-2 transition-colors',
         className,
       )}

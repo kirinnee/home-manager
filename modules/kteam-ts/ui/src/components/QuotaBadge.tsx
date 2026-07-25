@@ -101,9 +101,7 @@ export function QuotaReadout({
       {five != null && <span className={tone(five)}>5h {five}%</span>}
       {five != null && week != null && <span className="text-border">·</span>}
       {week != null && <span className={tone(week)}>wk {week}%</span>}
-      {quota.atLimit && (
-        <span className="rounded-sm bg-err-bg px-1 font-semibold uppercase tracking-wide text-err">at limit</span>
-      )}
+      {quota.atLimit && <span className="kt-label rounded-badge bg-err-bg px-1 text-err">at limit</span>}
     </span>
   );
 }

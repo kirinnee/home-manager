@@ -47,7 +47,10 @@ export function RcBadge({
         // A card/row can be wrapped in a <Link>; stop the click so opening RC
         // never also navigates the SPA underneath.
         onClick={e => e.stopPropagation()}
-        className={`inline-flex shrink-0 items-center gap-1 rounded border border-ok-border bg-ok-bg px-2 py-0.5 text-[11px] font-semibold text-ok transition-colors hover:border-accent-border hover:text-accent ${className}`}
+        // `.kt-badge[data-tone=ok]` carries the geometry + tone; hover moves to
+        // `--accent` because `--accent-border` is decorative tint only now.
+        data-tone="ok"
+        className={`kt-badge shrink-0 transition-colors hover:border-accent hover:text-accent ${className}`}
       >
         <Radio size={11} />
         {size === 'md' && 'rc'}
