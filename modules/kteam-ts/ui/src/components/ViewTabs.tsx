@@ -21,34 +21,27 @@ interface Props<T extends string> {
 
 export function ViewTabs<T extends string>({ tabs, current, onChange, className }: Props<T>) {
   return (
+    // The track keeps its own geometry; each tab is `.kt-tab`, which owns the
+    // height, padding, radius, casing, font and selected treatment per theme —
+    // pills in Ember, notched mono caps in Mission, hard blocks in Neo. Nothing
+    // here knows which.
     <div
       role="tablist"
-      className={cn(
-        'inline-flex items-center rounded-md border border-border bg-surface-2 p-0.5 text-[12px]',
-        className,
-      )}
+      className={cn('inline-flex items-center rounded-control border border-border bg-surface-2 p-0.5', className)}
     >
-      {tabs.map(tab => {
-        const active = tab.id === current;
-        return (
-          <button
-            key={tab.id}
-            type="button"
-            role="tab"
-            aria-selected={active}
-            onClick={() => onChange(tab.id)}
-            className={cn(
-              'inline-flex items-center gap-1.5 h-6 px-2.5 rounded font-medium transition-colors',
-              active
-                ? 'bg-surface text-fg border border-border shadow-sm'
-                : 'text-muted hover:text-fg border border-transparent',
-            )}
-          >
-            {tab.icon}
-            {tab.label}
-          </button>
-        );
-      })}
+      {tabs.map(tab => (
+        <button
+          key={tab.id}
+          type="button"
+          role="tab"
+          aria-selected={tab.id === current}
+          onClick={() => onChange(tab.id)}
+          className="kt-tab"
+        >
+          {tab.icon}
+          {tab.label}
+        </button>
+      ))}
     </div>
   );
 }
