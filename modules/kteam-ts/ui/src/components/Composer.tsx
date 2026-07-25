@@ -181,7 +181,7 @@ export function Composer({
 
       {/* Action cluster, inside the box. Wraps to its own line under ~380px
           instead of pushing the send button off the edge. */}
-      <div className="flex min-h-control flex-wrap items-center gap-x-sm gap-y-xs">
+      <div className="kt-composer__actions flex min-h-control flex-wrap items-center gap-x-sm gap-y-xs">
         {/* Deliberately NOT `.kt-chrome`: that class rests at 78% opacity, which
             is right for transcript metadata and wrong for the line that tells
             you what Enter will do and whether your message is in flight.
