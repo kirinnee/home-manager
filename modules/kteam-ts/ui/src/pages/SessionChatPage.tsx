@@ -656,6 +656,7 @@ export function SessionChatPage({
       {view && (
         <SessionHeader
           view={view}
+          active={active}
           quota={quota}
           liveStatus={liveStatus}
           isTerminal={isTerminal}

@@ -32,7 +32,7 @@
 // that must never be one click away — a declared park and needs-human — keep a
 // rest-visible chip up here, because they are what a lead scans for.
 
-import { memo, useId, useState, type ReactNode } from 'react';
+import { memo, useEffect, useId, useState, type ReactNode } from 'react';
 import { ChevronLeft, Pause, Play, StopCircle, ZapOff, MoreHorizontal } from 'lucide-react';
 import type { SessionView } from '../types';
 import { Button, ActionGroup } from './Primitives';
@@ -45,6 +45,8 @@ import type { Quota } from '../lib/usage';
 
 interface Props {
   view: SessionView;
+  /** Retained chat panes stay mounted; false means this header is backgrounded. */
+  active?: boolean;
   /** Resolved account quota for this session's wrapper; null = unknown. */
   quota: Quota | null;
   liveStatus: LiveStatus;
@@ -76,6 +78,7 @@ interface Props {
 
 export const SessionHeader = memo(function SessionHeader({
   view,
+  active,
   quota,
   liveStatus,
   isTerminal,
@@ -95,6 +98,12 @@ export const SessionHeader = memo(function SessionHeader({
   const [detailsOpen, setDetailsOpen] = useState(false);
   const detailsId = useId();
   const panelId = `${detailsId}-panel`;
+
+  // A retained background pane must not keep an invisible modal or its
+  // open-only lineage subscription alive after route navigation.
+  useEffect(() => {
+    if (active === false) setDetailsOpen(false);
+  }, [active]);
 
   const actions = (
     <SessionActions
