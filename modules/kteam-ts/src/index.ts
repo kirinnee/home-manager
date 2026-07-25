@@ -681,14 +681,20 @@ program
   });
 program
   .command('attach')
-  .argument('<id>')
-  .action(async id => {
+  .argument('<id>', 'session id or teammate name')
+  .description("attach this terminal to the session's tmux pane (Ctrl-b d detaches)")
+  .option('--print', 'print the tmux command instead of running it')
+  .action(async (id: string, options: { print?: boolean }) => {
     const view = await (await client()).get(id);
-    const proc = Bun.spawn(['tmux', 'attach-session', '-t', view.config.tmuxSession], {
-      stdin: 'inherit',
-      stdout: 'inherit',
-      stderr: 'inherit',
-    });
+    const target = view.config.tmuxSession;
+    // Inside an existing tmux client, `attach-session` refuses to nest; the
+    // equivalent there is switching this client to the teammate's session.
+    const argv = process.env.TMUX ? ['tmux', 'switch-client', '-t', target] : ['tmux', 'attach-session', '-t', target];
+    if (options.print) {
+      console.log(argv.join(' '));
+      return;
+    }
+    const proc = Bun.spawn(argv, { stdin: 'inherit', stdout: 'inherit', stderr: 'inherit' });
     process.exitCode = await proc.exited;
   });
 const humanBytes = (bytes: number) =>
