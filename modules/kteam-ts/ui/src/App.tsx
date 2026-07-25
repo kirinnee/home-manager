@@ -24,6 +24,7 @@ import { SessionsListPage } from './pages/SessionsListPage';
 import { NewSessionPage } from './pages/NewSessionPage';
 import { cn } from './lib/utils';
 import { useAppViewport } from './hooks/useAppViewport';
+import { useLayoutMode } from './hooks/useLayoutMode';
 
 // THE CHAT PAGE IS A LAZY CHUNK. It pulls in the whole reading stack — the
 // transcript, markdown, syntax highlighting, tool previews, the terminal view —
@@ -78,6 +79,19 @@ export function App() {
   // First thing in the component: every height below is measured against it.
   useAppViewport();
 
+  // THE SESSION ROUTE HAS NO APP BAR ON A PHONE (round 8).
+  //
+  // Measured at 390x844: the breadcrumb row (`804 / Sessions / <id>` + theme),
+  // the identity row (back + status + teammate) and the tab/controls row were
+  // three separate bands saying two things, 141px of a 844px screen before a
+  // keyboard existed. The bar's three jobs are all re-homed into the session
+  // header's single row — the drawer trigger and the theme picker move there,
+  // and the breadcrumb is redundant with a back link whose label already says
+  // "Back to all sessions". The dashboard and the new-session route keep the bar
+  // exactly as it was, and so does every viewport at or above DRAWER_MAX.
+  const layout = useLayoutMode();
+  const compactSession = Boolean(route.sessionId) && layout === 'drawer';
+
   // Mobile drawer visibility. It lives here rather than in the sidebar because
   // the AppBar's trigger and the drawer's own close button must drive ONE piece
   // of state, and because navigating to a session from the drawer has to shut
@@ -124,7 +138,7 @@ export function App() {
   // always covers exactly what the reader can see.
   return (
     <div className="kt-shell flex flex-col overflow-hidden">
-      <AppBar crumbs={crumbs} onOpenSidebar={() => setDrawerOpen(true)} />
+      {!compactSession && <AppBar crumbs={crumbs} onOpenSidebar={() => setDrawerOpen(true)} />}
       {/* THE SIDEBAR IS A SHELL SIBLING, not a page child: it is mounted once,
           for the app's life, so navigation never remounts it and its scroll
           position and filter state simply persist. It is also a sibling of the
@@ -145,7 +159,13 @@ export function App() {
           {mounted.map(id => (
             <Pane key={id} active={route.sessionId === id}>
               <Suspense fallback={<ChatChunkFallback />}>
-                <SessionChatPage sessionId={id} />
+                {/* The drawer trigger rides in the session header when the app
+                    bar is suppressed, so the opener has to reach down here. */}
+                <SessionChatPage
+                  sessionId={id}
+                  active={route.sessionId === id}
+                  onOpenSidebar={() => setDrawerOpen(true)}
+                />
               </Suspense>
             </Pane>
           ))}

@@ -22,7 +22,7 @@ export function AppBar({
     // Not sticky any more: the shell no longer scrolls, so the bar is simply the
     // first row of a flex column that fills the viewport. Full bleed — the
     // 1180px centering that used to wrap this row is gone.
-    <header className="shrink-0 border-b border-border bg-[var(--bar-bg)]">
+    <header data-density-region="app-bar" className="shrink-0 border-b border-border bg-[var(--bar-bg)]">
       <div className="flex min-h-control w-full items-center gap-sm px-panel font-ui text-ui">
         <SidebarDrawerTrigger onOpen={onOpenSidebar} />
         <nav className="flex min-w-0 flex-1 items-center gap-sm text-muted">

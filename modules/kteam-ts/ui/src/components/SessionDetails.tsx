@@ -22,7 +22,7 @@
 //     external and explicitly opens in a new tab
 
 import { memo, useEffect, useRef, useState, type ReactNode } from 'react';
-import { Activity, Bot, Gauge, Radio, Sparkles, UserRound, X, ExternalLink, AlertTriangle } from 'lucide-react';
+import { Activity, Bot, Gauge, Radio, Sparkles, UserRound, X, ExternalLink, AlertTriangle, Zap } from 'lucide-react';
 import type { SessionView } from '../types';
 import type { Quota } from '../lib/usage';
 import { cn, fmtAbsolute, fmtAge, fmtRelative } from '../lib/utils';
@@ -40,6 +40,13 @@ interface Props {
   onClose: () => void;
   /** Id of the button that opens this, so focus can be handed back to it. */
   labelledBy?: string;
+  /** Session controls (Interrupt / Stop / Resume) when the caller has nowhere to
+   *  put them — the phone header is a single nowrap row and cannot hold three
+   *  more 44px targets. They go FIRST, above the read-only groups, because a
+   *  drawer opened to stop a session should not need a scroll to do it. This is
+   *  the whole reason the drawer is the overflow: it already traps focus,
+   *  restores it and answers Escape, so the controls lose nothing by moving. */
+  actions?: ReactNode;
 }
 
 /** Group tones. Colour is the SECOND signal in every case — the icon and the
@@ -51,7 +58,7 @@ const GROUP_TONE = {
   budget: 'text-ok border-ok-border',
 } as const;
 
-export function SessionDetails({ view, quota, liveStatus, open, onClose, labelledBy }: Props) {
+export function SessionDetails({ view, quota, liveStatus, open, onClose, labelledBy, actions }: Props) {
   const panelRef = useRef<HTMLDivElement | null>(null);
   // Escape, focus-in, focus-restore and the Tab trap — the same contract the
   // fleet drawer now uses (hooks/useDialogFocus.ts).
@@ -102,6 +109,21 @@ export function SessionDetails({ view, quota, liveStatus, open, onClose, labelle
         {/* The drawer's OWN scroller. The page below still owns exactly one
             (the transcript); this one is an overlay and never nests inside it. */}
         <div className="min-h-0 flex-1 overflow-y-auto scroll-thin">
+          {actions && (
+            <section className="kt-details__group">
+              <h2
+                className={cn(
+                  'kt-label m-0 mb-xs flex items-center gap-xs border-l-heavy pl-cell-x',
+                  GROUP_TONE.progress,
+                )}
+              >
+                <Zap size={13} aria-hidden="true" />
+                Controls
+              </h2>
+              <div className="flex flex-wrap items-center gap-sm">{actions}</div>
+            </section>
+          )}
+
           <Group icon={<UserRound size={13} aria-hidden="true" />} title="Identity" tone="identity">
             <Row label="Teammate" value={config.teammate} />
             <Row label="Task" value={config.name} />
