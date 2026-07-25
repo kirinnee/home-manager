@@ -58,6 +58,14 @@ import type { SessionView } from '../types';
 import { Link } from '../lib/router';
 import { cn } from '../lib/utils';
 import { filterSessions, groupByProject, modeCounts, type SessionGroup } from '../lib/grouping';
+import {
+  buildLineage,
+  MAX_INDENT_DEPTH,
+  nestByLineage,
+  parentDisplay,
+  type LineageIndex,
+  type NestedRow,
+} from '../lib/lineage';
 import { useFleet, useStore, useUiControls, type ModeFilter } from '../lib/store';
 import { StatusMark, statusMark } from './StatusMark';
 import { TaskName } from './TaskName';
@@ -260,18 +268,45 @@ function Controls({ autoFocusSearch = false }: { autoFocusSearch?: boolean }) {
 // Rows
 // ---------------------------------------------------------------------------
 
+function parentTrail(view: SessionView, byId: ReadonlyMap<string, SessionView>): string {
+  const names: string[] = [];
+  const seen = new Set<string>([view.config.id]);
+  let parentId = view.config.parent?.trim();
+  while (parentId && !seen.has(parentId) && names.length <= byId.size) {
+    seen.add(parentId);
+    const parent = parentDisplay(parentId, byId);
+    if (!parent) break;
+    names.unshift(parent.kind === 'resolved' ? parent.name : parent.shortId);
+    parentId = parent.kind === 'resolved' ? parent.view.config.parent?.trim() : undefined;
+  }
+  return names.join(' → ');
+}
+
 function SidebarRow({
-  view,
+  row,
   active,
+  activeId,
+  byId,
   onNavigate,
 }: {
-  view: SessionView;
+  row: NestedRow;
   active: boolean;
+  activeId?: string;
+  byId: ReadonlyMap<string, SessionView>;
   /** Drawer only: picking a session has to shut the overlay covering it. */
   onNavigate?: () => void;
 }) {
+  const { view, depth, children, spawnedBy } = row;
   const cfg = view.config;
   const mark = statusMark(view);
+  const parent = parentDisplay(cfg.parent, byId);
+  const spawnedByLabel = parent ? `spawned by ${parent.kind === 'resolved' ? parent.name : parent.shortId}` : undefined;
+  const parentId = cfg.parent?.trim();
+  const deepTitle =
+    depth > MAX_INDENT_DEPTH
+      ? `depth ${depth} — spawned by ${parentTrail(view, byId) || spawnedByLabel?.replace('spawned by ', '') || 'unknown parent'}`
+      : undefined;
+  const indent = Math.min(depth, MAX_INDENT_DEPTH) * 10;
   const labels = (cfg.label ?? '')
     .split(',')
     .map(s => s.trim())
@@ -285,8 +320,17 @@ function SidebarRow({
         // links is the one you are on; the left rail and surface are the same
         // fact for everyone else.
         aria-current={active ? 'page' : undefined}
+        aria-label={[cfg.name || cfg.id, cfg.teammate && `teammate ${cfg.teammate}`, spawnedByLabel]
+          .filter(Boolean)
+          .join(' — ')}
         onClick={onNavigate}
-        title={`${cfg.teammate || cfg.id}\n${mark.label}`}
+        title={[
+          cfg.teammate || cfg.id,
+          mark.label,
+          spawnedBy && spawnedByLabel && `${spawnedByLabel}${parentId ? `\n${parentId}` : ''}`,
+        ]
+          .filter(Boolean)
+          .join('\n')}
         // `.kt-navrow` keys its active treatment off `aria-current="page"` — the
         // attribute this row already had — so the hand-rolled `border-l-2` rail
         // is gone and the family draws its own: 2px inset in Studio, 4px glowing
@@ -296,44 +340,71 @@ function SidebarRow({
       >
         {/* ONE child, because `.kt-navrow` is a centred flex row: the two text
             lines stack inside it rather than sitting side by side. */}
-        <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 items-center gap-sm">
-            <StatusMark view={view} />
-            <TaskName
-              name={cfg.name}
-              teammate={cfg.teammate}
-              size="sm"
-              className={cn('min-w-0 flex-1', active && 'text-accent')}
-            />
-          </div>
-          <div className="mt-0.5 flex min-w-0 items-center gap-xs pl-3.5">
-            <span className={cn('mono min-w-0 truncate text-meta', active ? 'text-accent' : 'text-muted')}>
-              {cfg.teammate || cfg.id}
-            </span>
-            {labels.map(l => (
-              <span
-                key={l}
-                className="shrink-0 rounded-badge border border-border-soft bg-surface-2 px-xs text-2xs text-muted"
-              >
-                {l}
+        <div className="min-w-0 flex-1" style={depth > 0 ? { paddingLeft: `${indent}px` } : undefined}>
+          <div className={cn('min-w-0', depth > 0 && 'border-l border-border-soft')}>
+            <div className="flex min-w-0 items-center gap-sm">
+              {deepTitle && (
+                <span aria-hidden="true" title={deepTitle} className="shrink-0 text-faint">
+                  »
+                </span>
+              )}
+              <StatusMark view={view} />
+              <TaskName
+                name={cfg.name}
+                teammate={cfg.teammate}
+                size="sm"
+                className={cn('min-w-0 flex-1', active && 'text-accent')}
+              />
+            </div>
+            <div className="mt-0.5 flex min-w-0 items-center gap-xs pl-3.5">
+              <span className={cn('mono min-w-0 truncate text-meta', active ? 'text-accent' : 'text-muted')}>
+                {cfg.teammate || cfg.id}
               </span>
-            ))}
+              {labels.map(l => (
+                <span
+                  key={l}
+                  className="shrink-0 rounded-badge border border-border-soft bg-surface-2 px-xs text-2xs text-muted"
+                >
+                  {l}
+                </span>
+              ))}
+            </div>
           </div>
         </div>
       </Link>
+      {children.length > 0 && (
+        <ul className="m-0 list-none p-0">
+          {children.map(child => (
+            <SidebarRow
+              key={child.view.config.id}
+              row={child}
+              active={child.view.config.id === activeId}
+              activeId={activeId}
+              byId={byId}
+              onNavigate={onNavigate}
+            />
+          ))}
+        </ul>
+      )}
     </li>
   );
 }
 
 function GroupBlock({
   group,
+  lineage,
+  byId,
   activeId,
   onNavigate,
 }: {
   group: SessionGroup;
+  lineage: LineageIndex;
+  byId: ReadonlyMap<string, SessionView>;
   activeId?: string;
   onNavigate?: () => void;
 }) {
+  const rows = useMemo(() => nestByLineage(group.rows, lineage), [group.rows, lineage]);
+
   return (
     <section>
       {/* Sticky, and OPAQUE (`bg-bg`, no alpha): rows scroll under it, and a
@@ -346,8 +417,15 @@ function GroupBlock({
         <span className="mono ml-auto shrink-0 text-2xs text-faint">{group.rows.length}</span>
       </h3>
       <ul className="m-0 list-none p-0">
-        {group.rows.map(v => (
-          <SidebarRow key={v.config.id} view={v} active={v.config.id === activeId} onNavigate={onNavigate} />
+        {rows.map(row => (
+          <SidebarRow
+            key={row.view.config.id}
+            row={row}
+            active={row.view.config.id === activeId}
+            activeId={activeId}
+            byId={byId}
+            onNavigate={onNavigate}
+          />
         ))}
       </ul>
     </section>
@@ -500,6 +578,8 @@ function Body({
   groups,
   count,
   total,
+  lineage,
+  byId,
   activeId,
   autoFocusSearch,
   onNavigate,
@@ -507,6 +587,8 @@ function Body({
   groups: SessionGroup[];
   count: number;
   total: number;
+  lineage: LineageIndex;
+  byId: ReadonlyMap<string, SessionView>;
   activeId?: string;
   autoFocusSearch?: boolean;
   onNavigate?: () => void;
@@ -525,7 +607,14 @@ function Body({
         ) : (
           <div className="space-y-1 py-1">
             {groups.map(g => (
-              <GroupBlock key={g.path || g.name} group={g} activeId={activeId} onNavigate={onNavigate} />
+              <GroupBlock
+                key={g.path || g.name}
+                group={g}
+                lineage={lineage}
+                byId={byId}
+                activeId={activeId}
+                onNavigate={onNavigate}
+              />
             ))}
           </div>
         )}
@@ -556,7 +645,7 @@ export interface AgentSidebarProps {
 }
 
 export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSidebarProps) {
-  const { sessions, projects } = useFleet();
+  const { sessions, projects, byId } = useFleet();
   const [controls, setControls] = useUiControls();
   const layout = useLayoutMode();
 
@@ -571,6 +660,7 @@ export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSideb
     [sessions, controls.query, controls.mode, controls.rcOnly, controls.includeFinished],
   );
   const groups = useMemo(() => groupByProject(visible, projects, true), [visible, projects]);
+  const lineage = useMemo(() => buildLineage(sessions ?? []), [sessions]);
   const total = sessions?.length ?? 0;
 
   // Escape, focus-in, focus-restore-to-the-trigger and a real Tab trap — the
@@ -632,6 +722,8 @@ export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSideb
             groups={groups}
             count={visible.length}
             total={total}
+            lineage={lineage}
+            byId={byId}
             activeId={activeId}
             autoFocusSearch
             onNavigate={onCloseDrawer}
@@ -671,7 +763,7 @@ export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSideb
           <ChevronsLeft size={14} />
         </button>
       </div>
-      <Body groups={groups} count={visible.length} total={total} activeId={activeId} />
+      <Body groups={groups} count={visible.length} total={total} lineage={lineage} byId={byId} activeId={activeId} />
     </nav>
   );
 }
