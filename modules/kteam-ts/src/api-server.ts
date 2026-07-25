@@ -13,10 +13,23 @@ import { actorContext } from './actor-context';
 const UI_DIST = new URL('../ui-dist', import.meta.url).pathname;
 
 interface SocketData {
-  sessionId?: string;
+  /** Sessions this socket subscribes to. Empty = the whole fleet.
+   *  `?sessionId=` may repeat or carry a comma-separated list, so one socket
+   *  can follow N specific teammates without taking the fleet firehose. */
+  sessionIds: string[];
+  /** Per-session delivery cursor (that session's own `sequence`). Independent
+   *  per session by construction: sessions no longer share an ordering domain,
+   *  so a busy one cannot delay or renumber another's frames. */
+  cursors: Map<string, number>;
   after: number;
   replaying: boolean;
   queued: string[];
+}
+
+/** Parse `?sessionId=a&sessionId=b` and `?sessionId=a,b` into a de-duplicated list. */
+function subscribedSessions(url: URL): string[] {
+  const raw = url.searchParams.getAll('sessionId').flatMap(value => value.split(','));
+  return [...new Set(raw.map(value => value.trim()).filter(value => value.length > 0))];
 }
 
 export interface ApiServerOptions {
@@ -172,10 +185,9 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
   const unsubscribe = options.service.subscribe(event => {
     const encoded = JSON.stringify(event);
     for (const socket of sockets) {
-      if (!socket.data.sessionId || socket.data.sessionId === event.sessionId) {
-        if (socket.data.replaying) socket.data.queued.push(encoded);
-        else socket.send(encoded);
-      }
+      if (socket.data.sessionIds.length > 0 && !socket.data.sessionIds.includes(event.sessionId)) continue;
+      if (socket.data.replaying) socket.data.queued.push(encoded);
+      else socket.send(encoded);
     }
   });
 
@@ -267,7 +279,8 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           if (isWebSocket) {
             const upgraded = serverInstance.upgrade(request, {
               data: {
-                sessionId: url.searchParams.get('sessionId') ?? undefined,
+                sessionIds: subscribedSessions(url),
+                cursors: new Map<string, number>(),
                 after: Number(url.searchParams.get('after') ?? 0),
                 replaying: true,
                 queued: [],
@@ -290,6 +303,14 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           if (url.pathname === '/v1/warden/run' && request.method === 'POST') {
             const input = await body<{ spawn?: boolean }>(request);
             return json(await options.service.wardenRun(input.spawn === true));
+          }
+          if (url.pathname === '/v1/gc' && request.method === 'GET') {
+            const raw = Number(url.searchParams.get('limit') ?? '20');
+            return json(await options.service.scratchPlan(Number.isFinite(raw) ? raw : 20));
+          }
+          if (url.pathname === '/v1/gc' && request.method === 'POST') {
+            const input = await body<{ force?: boolean }>(request);
+            return json(await options.service.scratchSweep(input.force === true));
           }
           if (url.pathname === '/v1/warden/verdicts' && request.method === 'GET')
             return json(await options.service.wardenVerdicts());
@@ -484,17 +505,33 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
       open(socket) {
         sockets.add(socket);
         void (async () => {
-          let cursor = socket.data.after;
-          while (true) {
-            const events = await options.service.replay(socket.data.sessionId, cursor, 1_000);
-            for (const event of events) socket.send(JSON.stringify(event));
-            if (events.length > 0) cursor = events.at(-1)!.sequence;
-            if (events.length < 1_000) break;
+          const { sessionIds, cursors } = socket.data;
+          // Backfill each subscribed session INDEPENDENTLY, from its own
+          // sequence. One session's long history no longer delays another's
+          // first frame, and there is no shared cursor to renumber.
+          const targets: Array<string | undefined> = sessionIds.length > 0 ? sessionIds : [undefined];
+          for (const sessionId of targets) {
+            let cursor = socket.data.after;
+            while (true) {
+              const events = await options.service.replay(sessionId, cursor, 1_000);
+              for (const event of events) {
+                socket.send(JSON.stringify(event));
+                cursors.set(event.sessionId, Math.max(cursors.get(event.sessionId) ?? 0, event.sequence));
+              }
+              if (events.length > 0) cursor = events.at(-1)!.sequence;
+              // A fleet backfill is a bounded tail, never a paged archive.
+              if (events.length < 1_000 || sessionId === undefined) break;
+            }
           }
           socket.data.replaying = false;
           for (const encoded of socket.data.queued) {
-            const queued = JSON.parse(encoded) as { sequence?: number };
-            if ((queued.sequence ?? 0) > cursor) socket.send(encoded);
+            const queued = JSON.parse(encoded) as { sequence?: number; sessionId?: string };
+            // Dedupe against THAT session's cursor: sequences are per-session
+            // now, so comparing against a single number would drop live frames
+            // from every session with a shorter journal than the last one
+            // backfilled.
+            const delivered = cursors.get(queued.sessionId ?? '') ?? 0;
+            if ((queued.sequence ?? 0) > delivered) socket.send(encoded);
           }
           socket.data.queued.length = 0;
         })().catch(error => socket.send(JSON.stringify({ type: 'error', error: String(error) })));

@@ -425,9 +425,6 @@ describe('partition-tolerant loud bootstrap (turn-019 P0)', () => {
         throw new Error('index exploded');
       },
     };
-    manager.initializeGlobalSequence = async () => {
-      ran.push('global-sequence');
-    };
     manager.recover = async () => {
       ran.push('recover');
       throw new Error('recover exploded');
@@ -435,12 +432,12 @@ describe('partition-tolerant loud bootstrap (turn-019 P0)', () => {
     manager.startWarden = async () => {
       ran.push('warden');
     };
-    manager.backfillGlobalSequences = async () => {
-      ran.push('global-sequence-backfill');
+    manager.sweepScratch = async () => {
+      ran.push('scratch-gc');
     };
     await (manager as unknown as { bootstrap: () => Promise<void> }).bootstrap();
-    // warden ALWAYS armed, and the index migration runs after it
-    expect(ran).toEqual(['import', 'global-sequence', 'recover', 'warden', 'global-sequence-backfill']);
+    // warden ALWAYS armed, and scratch gc runs after it
+    expect(ran).toEqual(['import', 'recover', 'warden', 'scratch-gc']);
     const errors = manager.bootstrapErrors as string[];
     expect(errors).toHaveLength(2);
     expect(errors[0]).toContain('import');

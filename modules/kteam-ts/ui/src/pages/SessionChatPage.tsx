@@ -137,8 +137,14 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
       sessionId,
       -200,
       (ev: KTeamEvent) => {
-        if (typeof ev.sequence === 'number' && ev.sequence <= lastSeq.current) return;
-        if (typeof ev.sequence === 'number') lastSeq.current = ev.sequence;
+        // terminal.frame is LIVE-ONLY: it is never journalled (6.5k frames per
+        // session was the largest single write class on disk), so it carries no
+        // durable sequence and must bypass the replay-dedupe that would drop
+        // every frame as "already seen".
+        if (ev.type !== 'terminal.frame') {
+          if (typeof ev.sequence === 'number' && ev.sequence <= lastSeq.current) return;
+          if (typeof ev.sequence === 'number') lastSeq.current = ev.sequence;
+        }
 
         if (ev.type === 'terminal.frame') {
           const data = ev.data as { activity?: string; contextPercent?: number; promptReady?: boolean };

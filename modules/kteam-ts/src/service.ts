@@ -12,6 +12,7 @@ import type { WardenConfig } from './daemon-config';
 import type { WardenAnomaly } from './warden-detect';
 import type { ProjectInfo, WrapperInfo } from './fleet-inventory';
 import type { WardenVerdict } from './warden-verdicts';
+import type { ScratchPlan } from './session-manager';
 
 export interface SearchResult {
   sessionId: string;
@@ -121,6 +122,10 @@ export interface KTeamService {
   /** Raw markdown of one warden report; `path` is validated to live under the
    *  reports directory. */
   wardenReport(path: string): Promise<string>;
+  /** What a scratch sweep WOULD reclaim, without touching anything. */
+  scratchPlan(limit?: number): Promise<ScratchPlan[]>;
+  /** Run a scratch sweep now (bypasses the enabled gate when forced). */
+  scratchSweep(force?: boolean): Promise<{ sessions: number; bytes: number; failures: number }>;
   /** Case-insensitive transcript grep across recent sessions (bounded). */
   search(query: string, limit?: number): Promise<SearchResponse>;
 }

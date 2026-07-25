@@ -32,6 +32,16 @@ export interface WardenConfig {
   assignedCooldownMinutes: number;
 }
 
+export interface ScratchConfig {
+  /** Reclaim agent scratch from long-terminal sessions. */
+  enabled: boolean;
+  /** How long a session must have been TERMINAL before its scratch expires. */
+  ttlHours: number;
+  /** Sessions reclaimed per sweep pass — rate limit, so GC never competes
+   *  with launches or event delivery. */
+  perSweep: number;
+}
+
 export interface DaemonConfig {
   host: string;
   port: number;
@@ -43,6 +53,7 @@ export interface DaemonConfig {
    *  list grouping). `~`/`$HOME` are expanded. */
   projectRoots: string[];
   warden: WardenConfig;
+  scratch: ScratchConfig;
   /** Context-window overrides for transcript-based context accounting:
    *  substring pattern → window size, longest match wins. Built-ins: `[1m]`
    *  ⇒ 1M, default 200k (codex reports its own window in token_count). */
@@ -64,6 +75,12 @@ export const defaultWardenConfig = (): WardenConfig => ({
   assignedCooldownMinutes: 30,
 });
 
+export const defaultScratchConfig = (): ScratchConfig => ({
+  enabled: true,
+  ttlHours: 24,
+  perSweep: 5,
+});
+
 export const defaultDaemonConfig = (): DaemonConfig => ({
   host: '127.0.0.1',
   port: 7337,
@@ -77,6 +94,7 @@ export const defaultDaemonConfig = (): DaemonConfig => ({
   quotaUrl: 'http://127.0.0.1:47318/usage',
   projectRoots: ['~/Workspace', '~/.config'],
   warden: defaultWardenConfig(),
+  scratch: defaultScratchConfig(),
 });
 
 export async function loadDaemonConfig(paths: KTeamPaths): Promise<DaemonConfig> {
@@ -89,6 +107,7 @@ export async function loadDaemonConfig(paths: KTeamPaths): Promise<DaemonConfig>
     ...defaultDaemonConfig(),
     ...onDisk,
     warden: { ...defaultWardenConfig(), ...(onDisk.warden ?? {}) },
+    scratch: { ...defaultScratchConfig(), ...(onDisk.scratch ?? {}) },
   };
   if (process.env.KTEAM_HOST) merged.host = process.env.KTEAM_HOST;
   if (process.env.KTEAM_PORT) merged.port = Number(process.env.KTEAM_PORT);

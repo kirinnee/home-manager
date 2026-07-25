@@ -291,12 +291,21 @@ describe('bounded start (exit-143 spawn timeouts)', () => {
     return { manager, events };
   }
 
-  const awaitBootstrap = (manager: Loose, id: string, bootstrap: Promise<void>, waitMs: number) =>
+  /** `running` defaults to a promise that never settles: these cases are all
+   *  about what happens when the RUNNING milestone is not reached inside the
+   *  window. The milestone's own behaviour is pinned separately below. */
+  const awaitBootstrap = (
+    manager: Loose,
+    id: string,
+    bootstrap: Promise<void>,
+    waitMs: number,
+    running: Promise<void> = new Promise<void>(() => {}),
+  ) =>
     (
       manager as unknown as {
-        awaitBootstrap: (id: string, bootstrap: Promise<void>, waitMs: number) => Promise<void>;
+        awaitBootstrap: (id: string, bootstrap: Promise<void>, running: Promise<void>, waitMs: number) => Promise<void>;
       }
-    ).awaitBootstrap(id, bootstrap, waitMs);
+    ).awaitBootstrap(id, bootstrap, running, waitMs);
 
   test('a launch slower than the window is announced, not awaited forever', async () => {
     const { manager, events } = startManager();
@@ -335,6 +344,22 @@ describe('bounded start (exit-143 spawn timeouts)', () => {
     });
     await awaitBootstrap(manager, 's1', bootstrap, 0);
     expect(String(events[0]!.data.reason)).toContain('detached start');
+    released();
+    await bootstrap;
+  });
+
+  test('reaching RUNNING returns immediately, without announcing a background launch', async () => {
+    // The 2026-07-25 P0: the session was up in 3.7 s and had already COMPLETED
+    // its task when the 45 s window expired and declared the launch
+    // "backgrounded". The caller waits for the milestone, not for the whole
+    // bootstrap to unwind.
+    const { manager, events } = startManager();
+    let released = () => {};
+    const bootstrap = new Promise<void>(resolve => {
+      released = resolve;
+    });
+    await awaitBootstrap(manager, 's1', bootstrap, 5_000, Promise.resolve());
+    expect(events).toEqual([]);
     released();
     await bootstrap;
   });
@@ -389,20 +414,28 @@ describe('monitor arming order (the 2026-07-24 unsupervised-session bug)', () =>
   });
 });
 
-describe('fleet-feed policy in SessionManager.replay', () => {
-  function replayManager(latest: number) {
-    const calls: Array<{ kind: 'window' | 'tail'; cursor: number; limit: number; id?: string }> = [];
+describe('feed policy in SessionManager.replay', () => {
+  // The fleet-wide counter is gone. Per-session replay pages by the session's
+  // OWN sequence (exact and complete); the id-less fleet feed is a bounded
+  // recent tail, because without a total order there is nothing to page
+  // through — and paging a million-event archive is what wedged the daemon in
+  // the first place (2026-07-23).
+  function replayManager() {
+    const calls: Array<{ kind: 'session' | 'sessionTail' | 'fleetTail'; cursor: number; limit: number; id?: string }> =
+      [];
     const manager = bareManager();
     manager.resolveRef = (id: string) => id;
     manager.store = {
-      latestGlobalSequence: () => latest,
-      sessionNeedsGlobalBackfill: () => false,
-      replayGlobal: (cursor: number, limit: number, id?: string) => {
-        calls.push({ kind: 'window', cursor, limit, id });
-        return { events: [], rows: 0, cursor };
+      replay: (id: string, options: { afterSequence: number; limit: number }) => {
+        calls.push({ kind: 'session', cursor: options.afterSequence, limit: options.limit, id });
+        return [];
       },
-      tailGlobal: (limit: number, id?: string) => {
-        calls.push({ kind: 'tail', cursor: 0, limit, id });
+      tailSession: (id: string, limit: number) => {
+        calls.push({ kind: 'sessionTail', cursor: 0, limit, id });
+        return [];
+      },
+      tailFleet: (limit: number) => {
+        calls.push({ kind: 'fleetTail', cursor: 0, limit });
         return [];
       },
     };
@@ -416,45 +449,34 @@ describe('fleet-feed policy in SessionManager.replay', () => {
       }
     ).replay(id, after, limit);
 
-  test('a fleet-wide cursor is floored to the live window, never the whole archive', async () => {
-    const { manager, calls } = replayManager(1_000_000);
-    await replay(manager, undefined, 0, 1_000);
-    // Paging a million events one page at a time is what wedged the daemon.
-    expect(calls[0]).toEqual({ kind: 'window', cursor: 995_000, limit: 1_000, id: undefined });
-  });
-
-  test('a cursor already inside the window is honoured verbatim', async () => {
-    const { manager, calls } = replayManager(1_000_000);
-    await replay(manager, undefined, 999_000, 1_000);
-    expect(calls[0]!.cursor).toBe(999_000);
-  });
-
-  test('per-session replay stays COMPLETE — the window is a fleet-feed rule only', async () => {
-    const { manager, calls } = replayManager(1_000_000);
+  test('per-session replay pages by that session’s own sequence, from wherever asked', async () => {
+    const { manager, calls } = replayManager();
     await replay(manager, 's1', 0, 1_000);
-    expect(calls[0]).toEqual({ kind: 'window', cursor: 0, limit: 1_000, id: 's1' });
+    expect(calls[0]).toEqual({ kind: 'session', cursor: 0, limit: 1_000, id: 's1' });
+    await replay(manager, 's1', 4_200, 100);
+    expect(calls[1]).toEqual({ kind: 'session', cursor: 4_200, limit: 100, id: 's1' });
+  });
+
+  test('the fleet feed is a bounded tail — never a paged archive walk', async () => {
+    const { manager, calls } = replayManager();
+    await replay(manager, undefined, 0, 1_000);
+    expect(calls[0]).toEqual({ kind: 'fleetTail', cursor: 0, limit: 1_000 });
+  });
+
+  test('the fleet tail is capped by the live window even when a caller asks for more', async () => {
+    const { manager, calls } = replayManager();
+    await replay(manager, undefined, 0, 10_000);
+    expect(calls[0]!.limit).toBe(5_000);
   });
 
   test('a negative cursor is tail semantics, fleet-wide or per session', async () => {
-    const { manager, calls } = replayManager(50);
+    const { manager, calls } = replayManager();
     await replay(manager, undefined, -200);
     await replay(manager, 's1', -200);
     expect(calls).toEqual([
-      { kind: 'tail', cursor: 0, limit: 200, id: undefined },
-      { kind: 'tail', cursor: 0, limit: 200, id: 's1' },
+      { kind: 'fleetTail', cursor: 0, limit: 200 },
+      { kind: 'sessionTail', cursor: 0, limit: 200, id: 's1' },
     ]);
-  });
-
-  test('a session whose rows predate the global-sequence column is healed on demand', async () => {
-    const { manager, calls } = replayManager(10);
-    const healed: string[] = [];
-    (manager.store as Record<string, unknown>).sessionNeedsGlobalBackfill = (id: string) => id === 's-legacy';
-    (manager.store as Record<string, unknown>).backfillGlobalSequence = async (id: string) => {
-      healed.push(id);
-    };
-    await replay(manager, 's-legacy', 0);
-    expect(healed).toEqual(['s-legacy']);
-    expect(calls[0]!.id).toBe('s-legacy');
   });
 });
 
