@@ -1,7 +1,7 @@
-// One transcript block, rendered top-to-bottom (no bubbles). Memoized so a
+// One transcript block, rendered top-to-bottom. Memoized so a
 // live append or a header tick never re-renders existing rows.
 //
-//   human user — unboxed prose led once by the accent `>>>` prompt marker
+//   human user — right-aligned, family-themed bubble with spoken attribution
 //   peer user  — sender chip + the existing quiet peer card treatment
 //   assistant  — clean rendered markdown, no container chrome
 //   thinking   — collapsed one-liner ("thought for 2m 14s"), expandable
@@ -209,7 +209,7 @@ function TurnBoundary({ block }: { block: Extract<TranscriptBlock, { kind: 'turn
 }
 
 // Assistant text: no per-message role label (role reads from layout — human
-// turns are prompt-led, peers carry a sender chip, assistant is plain prose).
+// turns move right, peers carry a sender chip, assistant is plain prose).
 // Metadata sits aside, revealed on hover: a slim left gutter rule + a timestamp
 // that fades in.
 //
@@ -324,26 +324,15 @@ function UserMessage({ text, ts, from }: { text: string; ts?: string; from?: Pee
   }
 
   return (
-    <div className="flex min-w-0 items-start gap-2 pt-0.5">
-      {/* Once per transcript block is deliberate. Repeating this for source
-          lines would bloat long pastes, and wrapped visual lines would still be
-          inconsistent as the viewport changed. One stable leader supplies the
-          requested shell-prompt attribution while the min-width:0 text column
-          gives every wrapped line a clean hanging indent. */}
+    <div className="kt-bubble-row">
       <span className="sr-only">You said:</span>
-      <span
-        className="mono shrink-0 select-none whitespace-nowrap text-row font-semibold leading-base text-accent"
-        aria-hidden="true"
-      >
-        &gt;&gt;&gt;
-      </span>
-      <div className="min-w-0 flex-1">
+      <div className="kt-bubble">
         {(ts || collapsible) && (
-          <div className="flex min-w-0 items-center gap-2">
+          <div className="flex min-w-0 items-center gap-2 px-panel pt-1">
             {/* In FLOW, never absolute: the timestamp cannot collide with prose
                 at either desktop or phone widths. */}
             {ts && (
-              <span className="mono shrink-0 whitespace-nowrap text-2xs tabular-nums text-faint">{clockLabel(ts)}</span>
+              <span className="mono shrink-0 whitespace-nowrap text-2xs tabular-nums text-muted">{clockLabel(ts)}</span>
             )}
             {collapsible && (
               <button
@@ -361,7 +350,7 @@ function UserMessage({ text, ts, from }: { text: string; ts?: string; from?: Pee
           <button
             type="button"
             onClick={() => setOpen(true)}
-            className="block min-w-0 max-w-full truncate pb-1.5 pt-0.5 text-left mono text-ui text-fg-soft"
+            className="block min-w-0 max-w-full truncate px-panel pb-1.5 pt-0.5 text-left mono text-ui text-[color:var(--bubble-fg)]"
             title={preview}
           >
             {preview}
@@ -369,7 +358,7 @@ function UserMessage({ text, ts, from }: { text: string; ts?: string; from?: Pee
         ) : (
           // Line-height stays comfortable INSIDE prose: readability of the
           // words outranks density; this pass reclaims chrome, not leading.
-          <div className="kt-user-copy min-w-0 max-w-full pb-1.5 pt-0.5 text-row leading-base whitespace-pre-wrap break-words text-fg">
+          <div className="kt-user-copy min-w-0 max-w-full px-panel pb-1.5 pt-0.5 text-row leading-base whitespace-pre-wrap break-words text-[color:var(--bubble-fg)]">
             {text}
           </div>
         )}

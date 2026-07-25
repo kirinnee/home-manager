@@ -355,6 +355,33 @@ pre,
   margin-top: 6px;
 }
 
+/* Genuine human turns and their optimistic copies share one shell. Alignment
+   belongs to the outer flex layer; prose remains left-aligned inside the box.
+   Both layers explicitly opt out of the flex min-content floor so a long path
+   can wrap through `.kt-user-copy` instead of widening the transcript. */
+.kt-bubble-row {
+  display: flex;
+  min-width: 0;
+  justify-content: flex-end;
+}
+.kt-bubble {
+  min-width: 0;
+  max-width: min(85%, 580px);
+  border: var(--bubble-stroke) solid var(--bubble-border);
+  border-radius: var(--bubble-radius);
+  background: var(--bubble-bg);
+  color: var(--bubble-fg);
+  box-shadow: var(--bubble-shadow);
+  text-align: left;
+  /* Intentionally no overflow:hidden: coarse-pointer controls extend their
+     invisible 44px hit area beyond their visual box. */
+}
+@media (max-width: 640px) {
+  .kt-bubble {
+    max-width: 92%;
+  }
+}
+
 /* ============================================================================
    .md — rendered-markdown prose for assistant messages.
    The previous UI referenced `.markdown-body` but never defined it, so

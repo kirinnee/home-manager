@@ -6,7 +6,7 @@
 // the Codex `<environment_context>` turn, kteam's own `Read the file …turn-NNN.md`
 // prompt, interrupt notices and post-compaction summaries all arrive as
 // `chat.user` records and, until now, rendered as full-width fake HUMAN messages
-// (the `>>>`-led prose card). The single biggest offender is the turn prompt:
+// (the right-aligned human bubble). The single biggest offender is the turn prompt:
 // ~1,584 records across all sessions, one per turn, each drawn as a paragraph the
 // human never wrote.
 //
@@ -128,7 +128,7 @@ const COMMAND_TAGS = [
 // The Codex protocol turn — `# AGENTS.md instructions` followed by the
 // `<INSTRUCTIONS>` / `<environment_context>` wrapper. It is genuinely the
 // harness's instructions turn, not human prose, yet without this it renders in
-// the user voice (the `>>>` marker), misattributing machine plumbing to the
+// the right-aligned user voice, misattributing machine plumbing to the
 // human. Anchored on the exact header AND gated on the wrapper's presence so an
 // ordinary `# …` markdown heading a human typed can never match.
 const CODEX_PROTOCOL = /^#\s*AGENTS\.md instructions\b/;
