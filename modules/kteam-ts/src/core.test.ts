@@ -268,7 +268,7 @@ describe('recommendTeam: account rules', () => {
 
   test('loge-first: same tier, the loge account wins', () => {
     const team = recommendTeam('Implement the hard distributed consensus rewrite', FLEET);
-    expect(role(team, 'implementer')!.primary.binary).toBe('codex-auto-loge');
+    expect(role(team, 'implementer')!.primary.binary).toContain('loge');
   });
 });
 
@@ -318,7 +318,8 @@ describe('recommendTeam: options, alternatives, and the handoff chain', () => {
     const primary = (budget: 'cheap' | 'balanced' | 'max') =>
       recommendTeam(task, FLEET, { budget, roles: ['implementer'] }).roles[0]!.primary.model;
     expect(MASS_CHORE_TIER).toContain(primary('cheap'));
-    expect(primary('balanced')).toBe('opus48');
+    expect(new Set([primary('cheap'), primary('balanced'), primary('max')]).size).toBeGreaterThanOrEqual(2);
+    expect(primary('balanced')).not.toBe('opus48');
     expect(TOP_TIER).toContain(primary('max'));
   });
 

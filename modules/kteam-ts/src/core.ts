@@ -199,8 +199,10 @@ const MODELS: Record<ModelKey, ModelSpec> = {
     power: 95,
     score: { planner: 86, researcher: 85, reviewer: 80 },
     implementerFit: { mechanical: 12, mid: 60, hard: 98 },
-    note: 'same top tier as sol, faster; only kirin/atomi serve it',
+    note: 'same top tier as sol, faster; served by every Anthropic-backed account',
   },
+  // RETIRED as a choice (2026-07-25): Opus 5 costs the same, so 4.8 is never
+  // the right pick. Kept only as the 'strong implementer' power threshold.
   opus48: {
     label: 'Opus 4.8',
     family: 'claude',
@@ -328,7 +330,7 @@ const ACCOUNTS: AccountSpec[] = [
     loge: true,
     options: [
       { model: 'fable5' },
-      { model: 'opus48', flag: 'claude-opus-4-8' },
+      { model: 'opus5', flag: 'claude-opus-5' },
       { model: 'sonnet5', flag: 'claude-sonnet-5' },
     ],
   },
@@ -342,10 +344,9 @@ const ACCOUNTS: AccountSpec[] = [
     ],
   },
   {
-    // liftoff has no Opus 5 access: its `opus` alias serves 4.8.
     match: /^claude-auto-liftoff$/,
     options: [
-      { model: 'opus48' },
+      { model: 'opus5' },
       { model: 'fable5', flag: 'fable' },
       { model: 'sonnet5', flag: 'sonnet' },
       { model: 'haiku', flag: 'haiku' },
@@ -542,7 +543,7 @@ const COST_PENALTY: Record<Budget, Record<ModelSpec['cost'], number>> = {
 function primaryFloor(role: TeamRole, classification: TaskClassification, budget: Budget): number {
   if (role === 'fan-out') return 0;
   if (role === 'reviewer') return MODELS.gpt55.power;
-  if (role === 'planner') return MODELS.opus48.power;
+  if (role === 'planner') return MODELS.opus5.power;
   const { complexity, risk, size } = classification;
   const qualityFirst = budget === 'max' && complexity !== 'mechanical' ? MODELS.opus5.power : 0;
   // Big-context IMPLEMENTATION is a top-tier-only job per the skill.
@@ -796,23 +797,56 @@ export function recommendAgents(task: string, agents: string[], usage: AgentUsag
   }));
 }
 
+/** The Remote Control shape, as kfleet declares it for the `crc-*` alias
+ *  (`aliases.crc.claude: --dangerously-skip-permissions --chrome --rc`). We add
+ *  the flags to OUR launcher rather than launching the `crc-*` binary: `crc-x`
+ *  is literally `exec claude-x --dangerously-skip-permissions --chrome --rc "$@"`,
+ *  so the two are identical in effect — but the alias is optional in kfleet
+ *  config (not every account has one), kteam resolves the wrapper, its
+ *  CLAUDE_CONFIG_DIR and its KTEAM_MODEL from the `claude-auto-*` name, and
+ *  `--dangerously-skip-permissions` is already in our arg list. Appending
+ *  keeps one launch path and one wrapper-resolution path.
+ *
+ *  `--rc` is claude's documented alias for `--remote-control [name]` (verified
+ *  in the 2.1.219 bundle's flag table). The name is left AUTO-generated and only
+ *  the prefix is pinned, so the RC surface labels the session with the teammate
+ *  it belongs to while claude still guarantees uniqueness — passing a fixed name
+ *  would collide across relaunches of the same session. */
+export function remoteControlArgs(config: Pick<SessionConfig, 'harness' | 'teammate' | 'id'>): string[] {
+  if (config.harness !== 'claude') return [];
+  return ['--chrome', '--rc', '--remote-control-session-name-prefix', `kteam-${config.teammate ?? config.id}`];
+}
+
 export function interactiveHarnessArgs(config: SessionConfig): string[] {
   // Both harnesses take `--model <alias|id>`. When set it's the user override or
   // the wrapper's kfleet default (KTEAM_MODEL); when unset, omit it entirely.
   const model = config.model ? ['--model', config.model] : [];
+  const extra = config.harnessFlags ?? [];
 
   if (config.harness === 'claude') {
     const sessionFlag = config.turn === 1 ? '--session-id' : '--resume';
     const args = ['--dangerously-skip-permissions', sessionFlag, config.harnessSessionId, ...model];
     if (config.mode === 'auto') args.push('--disallowedTools', 'AskUserQuestion');
-    return args;
+    // RC composes with everything above: the session-id correlation, the model
+    // flag and the automode tool ban are untouched — RC only adds a second
+    // control surface onto the same TUI.
+    if (config.remoteControl) args.push(...remoteControlArgs(config));
+    return [...args, ...extra];
   }
 
   if (config.turn === 1) {
-    return [...model, '--dangerously-bypass-approvals-and-sandbox', '--no-alt-screen'];
+    return [...model, '--dangerously-bypass-approvals-and-sandbox', '--no-alt-screen', ...extra];
   }
-  // `resume` is a subcommand and must stay first; the model flag follows it.
-  return ['resume', ...model, '--dangerously-bypass-approvals-and-sandbox', '--no-alt-screen', config.harnessSessionId];
+  // `resume` is a subcommand and must stay first; the model flag follows it, and
+  // the session id must stay LAST (positional) — extra flags go before it.
+  return [
+    'resume',
+    ...model,
+    '--dangerously-bypass-approvals-and-sandbox',
+    '--no-alt-screen',
+    ...extra,
+    config.harnessSessionId,
+  ];
 }
 
 export function shellSafeSessionName(id: string, suffix: string): string {
