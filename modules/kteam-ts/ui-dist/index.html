@@ -15,8 +15,56 @@
     <script data-cfasync="false">
       window.__KTEAM_TOKEN__ = '__KTEAM_TOKEN__';
     </script>
-    <script type="module" crossorigin src="/assets/index-HoRqgAeE.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-Cu005ZlV.css">
+    <!-- Pre-paint theme bootstrap. Resolves the stored preference to the SAME
+         single root attribute the app uses (`data-theme="<family>-<mode>"`,
+         mode already resolved) before the first paint, so the page never
+         flashes the wrong theme on a hard load. This duplicates the contract in
+         src/hooks/useTheme.ts on purpose — that file cannot run this early.
+         Keep the key, the family list and the legacy handling in step with it.
+         data-cfasync=false for the same reason as the token above: a deferred
+         run would lose the race with first paint. -->
+    <script data-cfasync="false">
+      (function () {
+        var KEY = 'kteam-theme';
+        var FAMILIES = ['studio', 'mission', 'neo', 'ember', 'contrast'];
+        var MODES = ['system', 'light', 'dark'];
+        var family = 'studio';
+        var mode = 'system';
+        try {
+          var raw = localStorage.getItem(KEY);
+          if (raw) {
+            var text = raw.trim();
+            if (text.charAt(0) === '{') {
+              var o = JSON.parse(text);
+              if (o && FAMILIES.indexOf(o.family) >= 0) family = o.family;
+              if (o && MODES.indexOf(o.mode) >= 0) mode = o.mode;
+            } else if (MODES.indexOf(text) >= 0) {
+              // Legacy value: bare 'light' / 'dark' → Studio with that mode.
+              mode = text;
+            } else {
+              var cut = text.lastIndexOf('-');
+              var f = cut > 0 ? text.slice(0, cut) : '';
+              var m = cut > 0 ? text.slice(cut + 1) : '';
+              if (FAMILIES.indexOf(f) >= 0 && (m === 'light' || m === 'dark')) {
+                family = f;
+                mode = m;
+              }
+            }
+          }
+        } catch (e) {
+          /* private mode / blocked storage — defaults are fine */
+        }
+        var resolved =
+          mode === 'system'
+            ? window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+              ? 'dark'
+              : 'light'
+            : mode;
+        document.documentElement.setAttribute('data-theme', family + '-' + resolved);
+      })();
+    </script>
+    <script type="module" crossorigin src="/assets/index-DHWVB_hx.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-KhOOGwMR.css">
   </head>
   <body>
     <div id="root"></div>
