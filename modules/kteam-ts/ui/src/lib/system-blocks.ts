@@ -67,25 +67,49 @@ function toneForStatus(status: string | undefined): 'ok' | 'warn' | 'err' | unde
   return 'warn';
 }
 
-// Rule 3: kteam's own turn prompt. Anchored and path-shaped — a human sentence
-// that merely mentions a `.md` file cannot match, because the whole prefix
-// including the fixed instruction clause must be present at line start.
-const TURN_PROMPT =
-  /^Read the file \/home\/kirin\/\.kteam\/[\w-]+\/turns\/(turn-\d+)\.md now, then carefully follow every instruction inside it\./;
+// kteam's own turn prompt. Anchored and path-shaped — a human sentence that
+// merely mentions a `.md` file cannot match, because the whole prefix INCLUDING
+// the fixed instruction clause ("now, then carefully follow every instruction
+// inside it.") must be present at the start.
+//
+// The path is home- and platform-AGNOSTIC: the leading directory varies by OS
+// and user (`/home/<user>`, `/Users/<user>`, a Windows `C:\Users\<user>`), so
+// only the invariant `…<sep>.kteam<sep><id><sep>turns<sep>turn-NNN.md` tail is
+// matched, with `<sep>` accepting `/` or `\`. The fixed instruction clause, not
+// the path prefix, is what keeps this off human prose.
+const SEP = '[\\\\/]';
+const TURN_PROMPT = new RegExp(
+  `^Read the file .*${SEP}\\.kteam${SEP}[\\w.-]+${SEP}turns${SEP}(turn-\\d+)\\.md now, then carefully follow every instruction inside it\\.`,
+);
 
-// Rule 4: harness interrupt notices. The raw IS the summary.
+// Harness interrupt notices. The raw IS the summary.
 const INTERRUPTED = /^\[Request interrupted by user( for tool use)?\]/;
 
-// Rule 5: the post-compaction opener (a long system narrative).
+// The post-compaction opener (a long system narrative).
 const COMPACTED = /^This session is being continued from a previous conversation/;
 
-// Rule 5.5: Claude Code's local slash-command markers. These were named in the
-// original ask but have ZERO occurrences in kteam transcripts (kteam sessions
-// never take the local-command path), so the generic fallback below cannot see
-// them: they arrive as INLINE (`<command-name>/foo</command-name>`) or SIBLING
-// pairs, never as a lone opening line. They are handled with a narrow, explicit
-// allow-list — the tag names are specific enough that a human sentence cannot
-// trip it — while the generic fallback stays conservative.
+// Daemon-injected automode/liveness plumbing (see rules 6–9). These are emitted
+// by the kteam daemon into the user channel to steer an autonomous session; each
+// is anchored on the exact daemon-authored prefix so a human paraphrase cannot
+// trip it. `CONTINUE_EXACT` is a WHOLE-STRING match — the most conservative
+// possible — because the sentence is short enough that a leading-substring rule
+// could plausibly demote a human message.
+const LIVENESS = /^Liveness check: no output, pane change, or subprocess activity/;
+const AUTOMODE = /^Automode: do not wait for user input\./;
+const CONTINUE_EXACT = /^Continue from where you left off\.$/;
+// Image attachment metadata the harness prepends. Required to be the ENTIRE text
+// (0/31 observed records carry trailing prose): if a future record appends the
+// human's message after the bracket, it degrades to a user message — the safe
+// direction — rather than hiding what the human wrote.
+const IMAGE_META = /^\[Image: original (\d+x\d+)[^\]]*\]$/;
+
+// Claude Code's local slash-command markers. These were named in the original
+// ask but have ZERO occurrences in kteam transcripts (kteam sessions never take
+// the local-command path), so the generic fallback below cannot see them: they
+// arrive as INLINE (`<command-name>/foo</command-name>`) or SIBLING pairs, never
+// as a lone opening line. They are handled with a narrow, explicit allow-list —
+// the tag names are specific enough that a human sentence cannot trip it — while
+// the generic fallback stays conservative.
 const COMMAND_TAGS = [
   'command-name',
   'command-message',
@@ -94,7 +118,7 @@ const COMMAND_TAGS = [
   'local-command-stderr',
 ];
 
-// Rule 5.7: the Codex protocol turn — `# AGENTS.md instructions` followed by the
+// The Codex protocol turn — `# AGENTS.md instructions` followed by the
 // `<INSTRUCTIONS>` / `<environment_context>` wrapper. It is genuinely the
 // harness's instructions turn, not human prose, yet without this it renders in
 // the user voice (the `>>>` marker), misattributing machine plumbing to the
@@ -102,8 +126,8 @@ const COMMAND_TAGS = [
 // ordinary `# …` markdown heading a human typed can never match.
 const CODEX_PROTOCOL = /^#\s*AGENTS\.md instructions\b/;
 
-// Rule 6 opener: the FIRST line is exactly one opening tag (optionally with
-// attributes) and nothing else. `<tag>` or `<tag attr="…">`.
+// Generic-fallback opener: the FIRST line is exactly one opening tag (optionally
+// with attributes) and nothing else. `<tag>` or `<tag attr="…">`.
 const LEADING_TAG = /^<([a-zA-Z][\w:-]*)(\s[^>]*)?>\s*$/;
 
 /** Returns block info when `text` is harness-injected system noise, or `null`
@@ -114,8 +138,9 @@ export function classifySystemText(text: string): SystemBlockInfo | null {
 
   // 1. task-notification — structured, with a status chip and a summary line.
   //    Both `<summary>` and the first `<result>` line are human-actionable, so
-  //    when both are present neither is dropped: they are joined into the one
-  //    compact line (result second, de-duplicated if it repeats the summary).
+  //    both contribute to the compact line (result second, de-duplicated if it
+  //    repeats the summary); the collapsed line may truncate, but the raw
+  //    disclosure always retains the full text.
   if (/^\s*<task-notification>/.test(text)) {
     const status = tagContent(text, 'status');
     const summaryEl = oneLine(tagContent(text, 'summary'));
@@ -172,14 +197,27 @@ export function classifySystemText(text: string): SystemBlockInfo | null {
     return { label: 'context compacted', summary, raw: text };
   }
 
-  // 5.7. Codex protocol turn (`# AGENTS.md instructions` + the harness wrapper).
+  // 6. daemon liveness nudge.
+  if (LIVENESS.test(text)) return { label: 'liveness', summary: 'no recent activity — continuing', raw: text };
+
+  // 7. daemon automode notice.
+  if (AUTOMODE.test(text)) return { label: 'automode', summary: 'do not wait for input', raw: text };
+
+  // 8. daemon "continue" nudge (whole-string match, see CONTINUE_EXACT).
+  if (CONTINUE_EXACT.test(text.trim())) return { label: 'continue', summary: 'resume where left off', raw: text };
+
+  // 9. image-attachment metadata.
+  const img = IMAGE_META.exec(text.trim());
+  if (img) return { label: 'image', summary: `original ${img[1]}`, raw: text };
+
+  // 10. Codex protocol turn (`# AGENTS.md instructions` + the harness wrapper).
   if (CODEX_PROTOCOL.test(text) && /<INSTRUCTIONS>|<environment_context>/.test(text)) {
     return { label: 'agents instructions', summary: 'Codex harness instructions', raw: text };
   }
 
-  // 5.5. Known local slash-command markers (see COMMAND_TAGS). The leading tag
-  //      must be one of the known names AND close somewhere (inline or block) —
-  //      the close is the same safety valve as rule 6.
+  // 11. Known local slash-command markers (see COMMAND_TAGS). The leading tag
+  //     must be one of the known names AND close somewhere (inline or block) —
+  //     the close is the same safety valve as rule 12.
   const firstNonEmpty = text
     .split('\n')
     .map(l => l.trim())
@@ -199,11 +237,11 @@ export function classifySystemText(text: string): SystemBlockInfo | null {
     }
   }
 
-  // 6. Generic fallback: a message whose FIRST line is a lone opening tag AND
-  //    whose text contains the matching close tag. Both conditions required —
-  //    the close tag is the safety valve keeping an unclosed `<…` human message
-  //    a user message. Catches `<environment_context>` today and any future
-  //    harness wrapper with no release.
+  // 12. Generic fallback: a message whose FIRST line is a lone opening tag AND
+  //     whose text contains the matching close tag. Both conditions required —
+  //     the close tag is the safety valve keeping an unclosed `<…` human message
+  //     a user message. Catches `<environment_context>` today and any future
+  //     harness wrapper with no release.
   const head = LEADING_TAG.exec(text.split('\n', 1)[0] ?? '');
   if (head) {
     const tag = head[1]!;
