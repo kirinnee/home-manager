@@ -1,0 +1,985 @@
+/* ============================================================================
+   kteam UI — THEME TOKEN DEFINITIONS.
+
+   Split out of index.css (which now owns base elements, shell/layout, mobile
+   density and the component classes) so the theme families can be worked on
+   independently of the layout. index.css `@import`s this file; nothing else
+   should.
+
+   ── THEME CONTRACT ────────────────────────────────────────────────────────
+   Exactly ONE resolved attribute on the root element:
+
+       <html data-theme="<family>-<mode>">
+
+   family ∈ studio | mission | neo | ember | contrast
+   mode   ∈ light  | dark            (already resolved — never "system")
+
+   The resolution (stored preference → OS fallback → attribute) is implemented
+   twice on purpose: once pre-paint in `index.html` and once in
+   `src/hooks/useTheme.ts`. Both read the SAME `kteam-theme` key and MUST stay
+   in sync; if you change one, change the other.
+
+   Legacy: `kteam-theme` used to hold the bare strings `light` / `dark`. The
+   hook migrates them to studio, and the selectors below also accept
+   `data-theme='light'|'dark'` directly so a stale attribute can never strand a
+   user on half-resolved tokens.
+
+   Swatches: every mode block is also selected via `[data-swatch='<family>-<mode>']`,
+   so the theme picker can mount a real, live, CSS-only preview of any theme
+   inside the current one (see `.kt-swatch` in index.css). Components must never
+   hardcode a colour — TSX carries token utilities only.
+
+   Literal colours are expected HERE and nowhere else in `src/`, apart from
+   `highlight.css`'s tokenised mapping.
+   ============================================================================ */
+
+/* ============================================================================
+   Fallback / default token set == studio-light. Anything not overridden by a
+   family or mode block resolves here, so an unknown `data-theme` degrades to a
+   complete, readable theme rather than to nothing.
+
+   `[data-swatch]` is in the selector on purpose. A swatch is a nested element,
+   and custom properties INHERIT — so without a base declaration of its own it
+   would pick up whichever family is currently active on `:root` for every token
+   its own family/mode block does not restate, and preview the wrong palette
+   (most visibly Studio, whose values are exactly these defaults). Seeding every
+   swatch with the same complete baseline the root gets means each one layers
+   family → mode identically to a real theme, independent of the page around it.
+   Equal specificity + later source order lets the family/mode blocks below win.
+   ============================================================================ */
+:root,
+[data-swatch] {
+  color-scheme: light;
+
+  /* ---- typography ---- */
+  --font-body: 'Inter var', Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  --font-display: 'Inter var', Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, 'JetBrains Mono', 'SFMono-Regular', 'Cascadia Mono', Menlo, Consolas, monospace;
+  --font-size-base: 13.5px;
+  --leading-base: 1.55;
+  --tracking-display: -0.01em;
+  --md-font-size: 13.75px;
+  --md-leading: 1.62;
+  --code-font-size: 12.5px;
+  --chrome-font-size: 11px;
+  --chrome-opacity: 0.78;
+
+  /* ---- geometry ---- */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 9px;
+  --radius-lg: 13px;
+  --radius-pill: 9999px;
+  --border-width: 1px;
+  --border-width-heavy: 2px;
+
+  /* ---- neutrals — cool zinc, low chroma so the accent + syntax carry ---- */
+  --bg: #fbfbfc;
+  --surface: #ffffff;
+  --surface-2: #f5f5f7;
+  --surface-3: #ededf1;
+  --fg: #17171b;
+  --fg-soft: #45454e;
+  --muted: #737382;
+  --faint: #9a9aa6;
+  --border: #e7e7ec;
+  --border-soft: #efeff3;
+
+  /* ---- single accent — refined indigo ---- */
+  --accent: #4f52d6;
+  --accent-rgb: 79 82 214;
+  --accent-fg: #ffffff;
+  --accent-soft: #eeeffc;
+  --accent-border: #d6d8f5;
+  --accent-strong: #3f42c4;
+
+  /* ---- user turn surface (transcript left-border block) ---- */
+  --user-bg: #f6f7fb;
+  --user-border: #4f52d6;
+  --user-rail: #c9cbef;
+
+  /* ---- code / mono surfaces ---- */
+  --code-bg: #f5f5f7;
+  --code-border: #e7e7ec;
+  --code-fg: #2b2b31;
+
+  /* ---- status ---- */
+  --ok: #3f7e52;
+  --ok-bg: #eef4f0;
+  --ok-border: #cfe2d6;
+  --warn: #8a6420;
+  --warn-bg: #f7f1e6;
+  --warn-border: #e7dac0;
+  --pend: #5b5b66;
+  --pend-bg: #f2f2f4;
+  --pend-border: #e2e2e8;
+  --err: #a14040;
+  --err-bg: #f7eded;
+  --err-border: #e6cfcf;
+
+  /* ---- per-tool-type hues (consistent colour per tool across a transcript) */
+  --tool-bash: #2f8a56;
+  --tool-read: #2f6fd6;
+  --tool-edit: #b3701c;
+  --tool-write: #7c53d6;
+  --tool-patch: #c0417f;
+  --tool-search: #0e8fa8;
+  --tool-plan: #5b5bd6;
+  --tool-wait: #6b7280;
+  --tool-generic: #737382;
+
+  /* ---- syntax (consumed by highlight.css) ---- */
+  --syn-comment: #6d6d7c;
+  --syn-keyword: #7c3aed;
+  --syn-string: #0e7490;
+  --syn-type: #0e7490;
+  --syn-number: #b45309;
+  --syn-meta: #b45309;
+  --syn-addition: #15803d;
+  --syn-deletion: #b91c1c;
+
+  /* ---- chrome / effects ---- */
+  --bar-bg: rgba(251, 251, 252, 0.82);
+  --glow-alpha: 0;
+  --shadow-glow: 0 0 30px rgb(var(--accent-rgb) / var(--glow-alpha));
+  --shadow-sm: 0 1px 1px rgba(24, 24, 27, 0.04);
+  --shadow-md: 0 1px 2px rgba(24, 24, 27, 0.06), 0 4px 12px rgba(24, 24, 27, 0.05);
+  --shadow-lg: 0 2px 4px rgba(24, 24, 27, 0.07), 0 16px 40px rgba(24, 24, 27, 0.1);
+  --body-wash: none;
+  --overlay: none;
+  --overlay-opacity: 0;
+  --overlay-blend: normal;
+  --scrim: rgba(24, 24, 27, 0.38);
+
+  /* ---- focus + selection ---- */
+  --ring: rgba(79, 82, 214, 0.38);
+  --focus-color: #4f52d6;
+  --focus-width: 2px;
+  --focus-offset: 2px;
+  --selection-bg: #d9daf8;
+  --selection-fg: #17171b;
+}
+
+/* ============================================================================
+   FAMILY 1 — STUDIO. The house look: refined indigo on cool zinc, calm
+   surfaces, soft blurred shadows. Light values are the `:root` defaults above.
+   ============================================================================ */
+:root[data-theme='studio-light'],
+:root[data-theme='light'],
+[data-swatch='studio-light'] {
+  color-scheme: light;
+}
+
+:root[data-theme='studio-dark'],
+:root[data-theme='dark'],
+[data-swatch='studio-dark'] {
+  color-scheme: dark;
+
+  --bg: #0b0b0d;
+  --surface: #141417;
+  --surface-2: #1a1a1e;
+  --surface-3: #232329;
+  --fg: #f2f2f4;
+  --fg-soft: #c9c9d1;
+  --muted: #90909c;
+  --faint: #6c6c78;
+  --border: #2a2a30;
+  --border-soft: #202024;
+
+  --accent: #8f93ee;
+  --accent-rgb: 143 147 238;
+  --accent-fg: #0b0b0e;
+  --accent-soft: #1b1b2b;
+  --accent-border: #34345c;
+  --accent-strong: #a6a9f4;
+
+  --user-bg: #16161d;
+  --user-border: #8f93ee;
+  --user-rail: #3a3a63;
+
+  --code-bg: #121215;
+  --code-border: #24242a;
+  --code-fg: #d6d6de;
+
+  --ok: #6fae82;
+  --ok-bg: #14241a;
+  --ok-border: #234630;
+  --warn: #c79a52;
+  --warn-bg: #241d11;
+  --warn-border: #463719;
+  --pend: #9a9aa6;
+  --pend-bg: #1b1b1f;
+  --pend-border: #2e2e35;
+  --err: #cc7d7d;
+  --err-bg: #251616;
+  --err-border: #482a2a;
+
+  --tool-bash: #5cc08a;
+  --tool-read: #6ea8f0;
+  --tool-edit: #e0a95a;
+  --tool-write: #b49af0;
+  --tool-patch: #ec84b6;
+  --tool-search: #4fc6dc;
+  --tool-plan: #9a9df0;
+  --tool-wait: #9aa0ac;
+  --tool-generic: #90909c;
+
+  --syn-comment: #90909c;
+  --syn-keyword: #c4b5fd;
+  --syn-string: #67e8f9;
+  --syn-type: #67e8f9;
+  --syn-number: #fbbf24;
+  --syn-meta: #fbbf24;
+  --syn-addition: #86efac;
+  --syn-deletion: #fca5a5;
+
+  --bar-bg: rgba(11, 11, 13, 0.84);
+  --shadow-sm: 0 1px 1px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.45), 0 4px 14px rgba(0, 0, 0, 0.42);
+  --shadow-lg: 0 2px 4px rgba(0, 0, 0, 0.5), 0 18px 44px rgba(0, 0, 0, 0.5);
+  --scrim: rgba(0, 0, 0, 0.6);
+
+  --ring: rgba(143, 147, 238, 0.42);
+  --focus-color: #8f93ee;
+  --selection-bg: #2f2f5c;
+  --selection-fg: #f2f2f4;
+}
+
+/* ============================================================================
+   FAMILY 2 — MISSION CONTROL. Port of the reference design: condensed display
+   type, hairline cyan rules, a radial body wash, a fixed 3px scanline overlay
+   and cyan glow shadows. Dark is faithful; light keeps the cyan/amber signal
+   language but darkens every ink to stay readable and drops the effects way
+   down (raw #47f3ff is ~1.2:1 on white — it can never be text in light mode).
+   ============================================================================ */
+:root[data-theme^='mission-'],
+[data-swatch^='mission-'] {
+  --font-display: 'Aptos Display', 'Avenir Next Condensed', 'Franklin Gothic Medium', 'Segoe UI', system-ui, sans-serif;
+  --font-body: 'Aptos', 'Avenir Next', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-mono: 'Cascadia Code', 'Cascadia Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', ui-monospace, monospace;
+  --tracking-display: 0.01em;
+  --chrome-font-size: 11px;
+  /* Full opacity, unlike Studio: --faint here is already a real tonal step
+     below --muted, and dimming it further put the chrome tier under 4.5:1. The
+     size drop does the receding. */
+  --chrome-opacity: 1;
+
+  --radius-xs: 2px;
+  --radius-sm: 3px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --border-width: 1px;
+  --border-width-heavy: 1px;
+}
+
+:root[data-theme='mission-dark'],
+[data-swatch='mission-dark'] {
+  color-scheme: dark;
+
+  --bg: #050a0f;
+  --surface: #081219;
+  --surface-2: #0b1821;
+  --surface-3: #09212a;
+  --fg: #effcff;
+  --fg-soft: #c7dee3;
+  --muted: #a7c0c7;
+  --faint: #809da5;
+  --border: rgba(151, 217, 224, 0.18);
+  --border-soft: rgba(151, 217, 224, 0.1);
+
+  --accent: #47f3ff;
+  --accent-rgb: 71 243 255;
+  --accent-fg: #03121a;
+  --accent-soft: rgba(71, 243, 255, 0.1);
+  --accent-border: rgba(71, 243, 255, 0.38);
+  --accent-strong: #9ff9ff;
+
+  --user-bg: #071a22;
+  --user-border: #47f3ff;
+  --user-rail: rgba(71, 243, 255, 0.42);
+
+  --code-bg: #030609;
+  --code-border: rgba(151, 217, 224, 0.16);
+  --code-fg: #d8f2f6;
+
+  --ok: #5ee6a8;
+  --ok-bg: rgba(94, 230, 168, 0.1);
+  --ok-border: rgba(94, 230, 168, 0.32);
+  --warn: #ffad55;
+  --warn-bg: rgba(255, 173, 85, 0.1);
+  --warn-border: rgba(255, 173, 85, 0.32);
+  --pend: #a7c0c7;
+  --pend-bg: rgba(151, 217, 224, 0.08);
+  --pend-border: rgba(151, 217, 224, 0.24);
+  --err: #ff6b7a;
+  --err-bg: rgba(255, 107, 122, 0.1);
+  --err-border: rgba(255, 107, 122, 0.34);
+
+  --tool-bash: #5ee6a8;
+  --tool-read: #63a9ff;
+  --tool-edit: #ffad55;
+  --tool-write: #c28cff;
+  --tool-patch: #ff8fb0;
+  --tool-search: #47f3ff;
+  --tool-plan: #b9d7ff;
+  --tool-wait: #809da5;
+  --tool-generic: #a7c0c7;
+
+  --syn-comment: #809da5;
+  --syn-keyword: #c28cff;
+  --syn-string: #5ee6a8;
+  --syn-type: #47f3ff;
+  --syn-number: #ffad55;
+  --syn-meta: #ffd3a2;
+  --syn-addition: #5ee6a8;
+  --syn-deletion: #ff6b7a;
+
+  --bar-bg: rgba(5, 10, 15, 0.86);
+  --glow-alpha: 0.09;
+  --shadow-sm: 0 0 0 1px rgba(151, 217, 224, 0.08), var(--shadow-glow);
+  --shadow-md: 0 14px 34px rgba(0, 0, 0, 0.55), var(--shadow-glow);
+  --shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.62), var(--shadow-glow);
+  --scrim: rgba(2, 6, 10, 0.72);
+
+  --body-wash:
+    radial-gradient(circle at 73% 9%, rgba(71, 243, 255, 0.085), transparent 26rem),
+    radial-gradient(circle at 4% 34%, rgba(30, 83, 96, 0.14), transparent 32rem),
+    linear-gradient(180deg, #050a0f 0%, #061017 44%, #03070a 100%);
+  --overlay: repeating-linear-gradient(180deg, transparent 0, transparent 3px, rgba(167, 230, 235, 0.025) 4px);
+  --overlay-opacity: 0.24;
+  --overlay-blend: screen;
+
+  --ring: rgba(71, 243, 255, 0.34);
+  --focus-color: #47f3ff;
+  --selection-bg: #47f3ff;
+  --selection-fg: #041016;
+}
+
+:root[data-theme='mission-light'],
+[data-swatch='mission-light'] {
+  color-scheme: light;
+
+  --bg: #f1fafc;
+  --surface: #ffffff;
+  --surface-2: #e7f5f8;
+  --surface-3: #d9eef3;
+  --fg: #05212a;
+  --fg-soft: #123f4a;
+  --muted: #3c6771;
+  --faint: #4f7780;
+  --border: rgba(11, 82, 95, 0.2);
+  --border-soft: rgba(11, 82, 95, 0.11);
+
+  --accent: #0a7181;
+  --accent-rgb: 10 113 129;
+  --accent-fg: #ffffff;
+  --accent-soft: #dcf2f6;
+  --accent-border: #a2d6de;
+  --accent-strong: #06525f;
+
+  --user-bg: #e9f6f9;
+  --user-border: #0a7181;
+  --user-rail: #a2d6de;
+
+  --code-bg: #eaf5f8;
+  --code-border: rgba(11, 82, 95, 0.16);
+  --code-fg: #103139;
+
+  --ok: #0a6f4b;
+  --ok-bg: #ddf4ea;
+  --ok-border: #a8ddc9;
+  --warn: #8a4f08;
+  --warn-bg: #fceedd;
+  --warn-border: #eccfa7;
+  --pend: #3c6771;
+  --pend-bg: #e7f0f2;
+  --pend-border: #c3d9dd;
+  --err: #a8283a;
+  --err-bg: #fbe6e9;
+  --err-border: #e8bdc4;
+
+  --tool-bash: #0a6f4b;
+  --tool-read: #14559c;
+  --tool-edit: #8a4f08;
+  --tool-write: #6a3a9c;
+  --tool-patch: #9c2a63;
+  --tool-search: #0a7181;
+  --tool-plan: #1c4f8a;
+  --tool-wait: #4f7780;
+  --tool-generic: #3c6771;
+
+  --syn-comment: #4d747e;
+  --syn-keyword: #6a2c9c;
+  --syn-string: #0d6b5e;
+  --syn-type: #0a7181;
+  --syn-number: #8a4f08;
+  --syn-meta: #8a4f08;
+  --syn-addition: #0a6f4b;
+  --syn-deletion: #a8283a;
+
+  --bar-bg: rgba(241, 250, 252, 0.86);
+  --glow-alpha: 0.05;
+  --shadow-sm: 0 1px 1px rgba(6, 48, 56, 0.05);
+  --shadow-md: 0 1px 2px rgba(6, 48, 56, 0.07), 0 8px 22px rgba(6, 48, 56, 0.08);
+  --shadow-lg: 0 2px 4px rgba(6, 48, 56, 0.08), 0 20px 46px rgba(6, 48, 56, 0.12);
+  --scrim: rgba(6, 34, 40, 0.4);
+
+  --body-wash:
+    radial-gradient(circle at 76% 6%, rgba(10, 113, 129, 0.07), transparent 28rem),
+    radial-gradient(circle at 4% 36%, rgba(255, 173, 85, 0.06), transparent 30rem);
+  --overlay: repeating-linear-gradient(180deg, transparent 0, transparent 3px, rgba(6, 48, 56, 0.05) 4px);
+  --overlay-opacity: 0.16;
+  --overlay-blend: multiply;
+
+  --ring: rgba(10, 113, 129, 0.3);
+  --focus-color: #06525f;
+  --selection-bg: #b7e7ee;
+  --selection-fg: #05212a;
+}
+
+/* ============================================================================
+   FAMILY 3 — NEO-BRUTALISM (accessible technical). Hard 2px rules (3px where a
+   thing must read as a block), radius ~0, flat 4px offset shadows instead of
+   blurs, chunky grotesk display over a grotesk body. "Accessible" is a hard
+   requirement, not a vibe: every text/background pair here clears WCAG AA,
+   chrome never dims below full opacity, and the focus ring is a 2px hard rule.
+   ============================================================================ */
+:root[data-theme^='neo-'],
+[data-swatch^='neo-'] {
+  --font-display: 'Archivo Black', 'Arial Black', 'Helvetica Neue', Impact, system-ui, sans-serif;
+  --font-body: 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'Cascadia Mono', ui-monospace, 'Courier New', monospace;
+  --font-size-base: 13.5px;
+  --leading-base: 1.5;
+  --tracking-display: 0.005em;
+  --md-font-size: 14px;
+  --md-leading: 1.6;
+  --chrome-font-size: 11.5px;
+  --chrome-opacity: 1;
+
+  --radius-xs: 0px;
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 2px;
+  --border-width: 2px;
+  --border-width-heavy: 3px;
+}
+
+:root[data-theme='neo-light'],
+[data-swatch='neo-light'] {
+  color-scheme: light;
+
+  --bg: #f2efe6;
+  --surface: #ffffff;
+  --surface-2: #f7f3e7;
+  --surface-3: #ffe8b0;
+  --fg: #0a0a0a;
+  --fg-soft: #1c1c1c;
+  --muted: #3d3d3d;
+  --faint: #545454;
+  --border: #0a0a0a;
+  --border-soft: #0a0a0a;
+
+  --accent: #1f1fc4;
+  --accent-rgb: 31 31 196;
+  --accent-fg: #ffffff;
+  --accent-soft: #dcdcff;
+  --accent-border: #0a0a0a;
+  --accent-strong: #14149a;
+
+  --user-bg: #dcdcff;
+  --user-border: #0a0a0a;
+  --user-rail: #1f1fc4;
+
+  --code-bg: #f7f3e7;
+  --code-border: #0a0a0a;
+  --code-fg: #0a0a0a;
+
+  --ok: #05602f;
+  --ok-bg: #b6f2ce;
+  --ok-border: #0a0a0a;
+  --warn: #6b4400;
+  --warn-bg: #ffd97a;
+  --warn-border: #0a0a0a;
+  --pend: #2b2b2b;
+  --pend-bg: #e6e2d6;
+  --pend-border: #0a0a0a;
+  --err: #a80019;
+  --err-bg: #ffc9cf;
+  --err-border: #0a0a0a;
+
+  --tool-bash: #0a6b35;
+  --tool-read: #14449e;
+  --tool-edit: #7a4200;
+  --tool-write: #5b1fb0;
+  --tool-patch: #a1005f;
+  --tool-search: #0a5560;
+  --tool-plan: #2a2a99;
+  --tool-wait: #4a4a4a;
+  --tool-generic: #3d3d3d;
+
+  --syn-comment: #3d3d3d;
+  --syn-keyword: #5b1fb0;
+  --syn-string: #0a6b35;
+  --syn-type: #14449e;
+  --syn-number: #7a4200;
+  --syn-meta: #a1005f;
+  --syn-addition: #0a6b35;
+  --syn-deletion: #a80019;
+
+  --bar-bg: #ffe8b0;
+  --shadow-ink: #0a0a0a;
+  --shadow-sm: 2px 2px 0 var(--shadow-ink);
+  --shadow-md: 4px 4px 0 var(--shadow-ink);
+  --shadow-lg: 6px 6px 0 var(--shadow-ink);
+  --scrim: rgba(10, 10, 10, 0.5);
+
+  --ring: rgba(31, 31, 196, 0.32);
+  --focus-color: #1f1fc4;
+  --focus-offset: 2px;
+  --selection-bg: #ffe14d;
+  --selection-fg: #0a0a0a;
+}
+
+:root[data-theme='neo-dark'],
+[data-swatch='neo-dark'] {
+  color-scheme: dark;
+
+  --bg: #0e0e0c;
+  --surface: #1a1a18;
+  --surface-2: #232320;
+  --surface-3: #2e2e29;
+  --fg: #fdfdf4;
+  --fg-soft: #ececdd;
+  --muted: #c4c4b6;
+  --faint: #a3a396;
+  --border: #f5f5e8;
+  --border-soft: #f5f5e8;
+
+  --accent: #ffe14d;
+  --accent-rgb: 255 225 77;
+  --accent-fg: #14140f;
+  --accent-soft: #33301a;
+  --accent-border: #f5f5e8;
+  --accent-strong: #fff08a;
+
+  --user-bg: #2b2814;
+  --user-border: #f5f5e8;
+  --user-rail: #ffe14d;
+
+  --code-bg: #131311;
+  --code-border: #f5f5e8;
+  --code-fg: #f2f2e6;
+
+  --ok: #5ce68f;
+  --ok-bg: #10301d;
+  --ok-border: #f5f5e8;
+  --warn: #ffb340;
+  --warn-bg: #33240d;
+  --warn-border: #f5f5e8;
+  --pend: #c4c4b6;
+  --pend-bg: #232320;
+  --pend-border: #f5f5e8;
+  --err: #ff8f9c;
+  --err-bg: #331519;
+  --err-border: #f5f5e8;
+
+  --tool-bash: #5ce68f;
+  --tool-read: #8fc4ff;
+  --tool-edit: #ffb340;
+  --tool-write: #cba6ff;
+  --tool-patch: #ff9ec4;
+  --tool-search: #6fe0e8;
+  --tool-plan: #b3b3ff;
+  --tool-wait: #a3a396;
+  --tool-generic: #c4c4b6;
+
+  --syn-comment: #a3a396;
+  --syn-keyword: #d9b3ff;
+  --syn-string: #7ce6a0;
+  --syn-type: #8fd0ff;
+  --syn-number: #ffcc4d;
+  --syn-meta: #ff9ec4;
+  --syn-addition: #7ce6a0;
+  --syn-deletion: #ff8f9c;
+
+  --bar-bg: #14140f;
+  --shadow-ink: #f5f5e8;
+  --shadow-sm: 2px 2px 0 var(--shadow-ink);
+  --shadow-md: 4px 4px 0 var(--shadow-ink);
+  --shadow-lg: 6px 6px 0 var(--shadow-ink);
+  --scrim: rgba(6, 6, 4, 0.7);
+
+  --ring: rgba(255, 225, 77, 0.32);
+  --focus-color: #ffe14d;
+  --selection-bg: #ffe14d;
+  --selection-fg: #14140f;
+}
+
+/* ============================================================================
+   FAMILY 4 — EMBER (warm, low blue light). For long evening sessions: paper
+   and candlelight instead of screen white, a serif display voice over a
+   humanist body, generous radii, soft warm shadows, slightly larger type and
+   looser leading. Blue is deliberately absent from the signal palette — the
+   two cool-ish accents (search/write) are desaturated on purpose.
+   ============================================================================ */
+:root[data-theme^='ember-'],
+[data-swatch^='ember-'] {
+  --font-display: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, 'Times New Roman', serif;
+  --font-body: Seravek, 'Gill Sans Nova', Optima, 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-mono: 'Iosevka Term', 'Cascadia Mono', ui-monospace, Menlo, Consolas, monospace;
+  --font-size-base: 14px;
+  --leading-base: 1.6;
+  --tracking-display: 0;
+  --md-font-size: 14.5px;
+  --md-leading: 1.68;
+  --code-font-size: 13px;
+  --chrome-font-size: 11.5px;
+  /* Full opacity for the same reason as Mission: the chrome tier recedes by
+     size and tone, not by dimming text under 4.5:1. */
+  --chrome-opacity: 1;
+
+  --radius-xs: 6px;
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 18px;
+  --border-width: 1px;
+  --border-width-heavy: 2px;
+}
+
+:root[data-theme='ember-light'],
+[data-swatch='ember-light'] {
+  color-scheme: light;
+
+  --bg: #f6eee1;
+  --surface: #fdf7ec;
+  --surface-2: #f1e6d4;
+  --surface-3: #e9dbc4;
+  --fg: #2a2017;
+  --fg-soft: #483828;
+  --muted: #6a5741;
+  --faint: #7b6950;
+  --border: #dfcbaf;
+  --border-soft: #ece0cc;
+
+  --accent: #a4501a;
+  --accent-rgb: 164 80 26;
+  --accent-fg: #fff8ec;
+  --accent-soft: #f7e6d4;
+  --accent-border: #dcb88c;
+  --accent-strong: #863d10;
+
+  --user-bg: #f2e4cf;
+  --user-border: #a4501a;
+  --user-rail: #dcb88c;
+
+  --code-bg: #f0e5d2;
+  --code-border: #dfcbaf;
+  --code-fg: #382a1c;
+
+  --ok: #4a6a28;
+  --ok-bg: #e8eed4;
+  --ok-border: #c8d3a8;
+  --warn: #87590f;
+  --warn-bg: #f7e8cb;
+  --warn-border: #e0c495;
+  --pend: #6a5741;
+  --pend-bg: #efe4d2;
+  --pend-border: #dccdb2;
+  --err: #9e3722;
+  --err-bg: #f7e0d6;
+  --err-border: #e3bcaa;
+
+  --tool-bash: #4a6a28;
+  --tool-read: #8a6a12;
+  --tool-edit: #a4501a;
+  --tool-write: #6d4a7a;
+  --tool-patch: #a03a52;
+  --tool-search: #3f6b62;
+  --tool-plan: #7a5a2a;
+  --tool-wait: #7b6950;
+  --tool-generic: #6a5741;
+
+  --syn-comment: #76654d;
+  --syn-keyword: #8a3d12;
+  --syn-string: #4a6a28;
+  --syn-type: #6d4a7a;
+  --syn-number: #7a5610;
+  --syn-meta: #a03a52;
+  --syn-addition: #4a6a28;
+  --syn-deletion: #9e3722;
+
+  --bar-bg: rgba(246, 238, 225, 0.88);
+  --shadow-sm: 0 1px 2px rgba(84, 54, 20, 0.07);
+  --shadow-md: 0 2px 4px rgba(84, 54, 20, 0.08), 0 10px 26px rgba(94, 62, 26, 0.1);
+  --shadow-lg: 0 3px 6px rgba(84, 54, 20, 0.1), 0 22px 50px rgba(94, 62, 26, 0.14);
+  --scrim: rgba(58, 38, 18, 0.4);
+
+  --body-wash:
+    radial-gradient(circle at 82% 4%, rgba(214, 148, 62, 0.14), transparent 30rem),
+    radial-gradient(circle at 6% 42%, rgba(196, 118, 48, 0.08), transparent 34rem);
+
+  --ring: rgba(164, 80, 26, 0.3);
+  --focus-color: #863d10;
+  --selection-bg: #f0d4a8;
+  --selection-fg: #2a2017;
+}
+
+:root[data-theme='ember-dark'],
+[data-swatch='ember-dark'] {
+  color-scheme: dark;
+
+  --bg: #17120d;
+  --surface: #1f1913;
+  --surface-2: #282019;
+  --surface-3: #332a21;
+  --fg: #f5e9d8;
+  --fg-soft: #ddcdb6;
+  --muted: #b39c80;
+  --faint: #938067;
+  --border: #3a2f24;
+  --border-soft: #2b231b;
+
+  --accent: #f0a35a;
+  --accent-rgb: 240 163 90;
+  --accent-fg: #1a1209;
+  --accent-soft: #332415;
+  --accent-border: #5c4429;
+  --accent-strong: #f7bd83;
+
+  --user-bg: #241c13;
+  --user-border: #f0a35a;
+  --user-rail: #5c4429;
+
+  --code-bg: #140f0a;
+  --code-border: #33291f;
+  --code-fg: #e6d7c2;
+
+  --ok: #94b96f;
+  --ok-bg: #1d2415;
+  --ok-border: #38472a;
+  --warn: #e0a640;
+  --warn-bg: #2a2011;
+  --warn-border: #4d3a19;
+  --pend: #b39c80;
+  --pend-bg: #241d16;
+  --pend-border: #3c3126;
+  --err: #e5806b;
+  --err-bg: #2a1913;
+  --err-border: #4d2e24;
+
+  --tool-bash: #94b96f;
+  --tool-read: #d6b055;
+  --tool-edit: #f0a35a;
+  --tool-write: #c39ecb;
+  --tool-patch: #e2879b;
+  --tool-search: #79b0a4;
+  --tool-plan: #cfa878;
+  --tool-wait: #938067;
+  --tool-generic: #b39c80;
+
+  --syn-comment: #917d64;
+  --syn-keyword: #f0a35a;
+  --syn-string: #94b96f;
+  --syn-type: #c39ecb;
+  --syn-number: #e0c060;
+  --syn-meta: #e2879b;
+  --syn-addition: #94b96f;
+  --syn-deletion: #e5806b;
+
+  --bar-bg: rgba(23, 18, 13, 0.88);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.42);
+  --shadow-md: 0 2px 4px rgba(0, 0, 0, 0.46), 0 12px 30px rgba(0, 0, 0, 0.44);
+  --shadow-lg: 0 3px 6px rgba(0, 0, 0, 0.5), 0 24px 54px rgba(0, 0, 0, 0.5);
+  --scrim: rgba(12, 8, 4, 0.68);
+
+  --body-wash:
+    radial-gradient(circle at 84% 2%, rgba(240, 163, 90, 0.1), transparent 30rem),
+    radial-gradient(circle at 4% 46%, rgba(158, 84, 32, 0.09), transparent 34rem);
+
+  --ring: rgba(240, 163, 90, 0.32);
+  --focus-color: #f0a35a;
+  --selection-bg: #4a3520;
+  --selection-fg: #f5e9d8;
+}
+
+/* ============================================================================
+   FAMILY 5 — HIGH CONTRAST (AAA target). Not a palette swap: pure black/white
+   grounds, no soft greys, no blurred shadows and no wash at all, 2px rules on
+   every edge, a 3px focus ring, and larger type at looser leading. Every text
+   colour here targets ≥ 7:1 against its own surface.
+   ============================================================================ */
+:root[data-theme^='contrast-'],
+[data-swatch^='contrast-'] {
+  --font-display: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-body: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  --font-size-base: 14.5px;
+  --leading-base: 1.6;
+  --tracking-display: 0;
+  --md-font-size: 15px;
+  --md-leading: 1.7;
+  --code-font-size: 13.5px;
+  --chrome-font-size: 12px;
+  --chrome-opacity: 1;
+
+  --radius-xs: 2px;
+  --radius-sm: 2px;
+  --radius-md: 3px;
+  --radius-lg: 4px;
+  --border-width: 2px;
+  --border-width-heavy: 3px;
+
+  --focus-width: 3px;
+  --body-wash: none;
+  --overlay: none;
+  --overlay-opacity: 0;
+}
+
+:root[data-theme='contrast-light'],
+[data-swatch='contrast-light'] {
+  color-scheme: light;
+
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f0f0f0;
+  --surface-3: #e0e0e0;
+  --fg: #000000;
+  --fg-soft: #111111;
+  --muted: #333333;
+  --faint: #444444;
+  --border: #000000;
+  --border-soft: #5c5c5c;
+
+  --accent: #0033a0;
+  --accent-rgb: 0 51 160;
+  --accent-fg: #ffffff;
+  --accent-soft: #e4eaf8;
+  --accent-border: #0033a0;
+  --accent-strong: #002270;
+
+  --user-bg: #eef2fb;
+  --user-border: #0033a0;
+  --user-rail: #0033a0;
+
+  --code-bg: #f0f0f0;
+  --code-border: #000000;
+  --code-fg: #000000;
+
+  --ok: #005c2e;
+  --ok-bg: #e3f2e9;
+  --ok-border: #005c2e;
+  --warn: #6b3a00;
+  --warn-bg: #f6e9d8;
+  --warn-border: #6b3a00;
+  --pend: #333333;
+  --pend-bg: #ededed;
+  --pend-border: #333333;
+  --err: #a30012;
+  --err-bg: #fbeaec;
+  --err-border: #a30012;
+
+  --tool-bash: #00532b;
+  --tool-read: #0033a0;
+  --tool-edit: #6b3a00;
+  --tool-write: #4b0082;
+  --tool-patch: #8a0050;
+  --tool-search: #004d59;
+  --tool-plan: #2b2b8a;
+  --tool-wait: #333333;
+  --tool-generic: #333333;
+
+  --syn-comment: #333333;
+  --syn-keyword: #4b0082;
+  --syn-string: #00532b;
+  --syn-type: #0033a0;
+  --syn-number: #6b3a00;
+  --syn-meta: #8a0050;
+  --syn-addition: #00532b;
+  --syn-deletion: #a30012;
+
+  --bar-bg: #ffffff;
+  --shadow-sm: none;
+  --shadow-md: 0 0 0 2px var(--border);
+  --shadow-lg: 0 0 0 3px var(--border);
+  --scrim: rgba(0, 0, 0, 0.62);
+
+  --ring: rgba(0, 51, 160, 0.4);
+  --focus-color: #0033a0;
+  --selection-bg: #ffe14d;
+  --selection-fg: #000000;
+}
+
+:root[data-theme='contrast-dark'],
+[data-swatch='contrast-dark'] {
+  color-scheme: dark;
+
+  --bg: #000000;
+  --surface: #000000;
+  --surface-2: #141414;
+  --surface-3: #202020;
+  --fg: #ffffff;
+  --fg-soft: #f0f0f0;
+  --muted: #d2d2d2;
+  --faint: #bcbcbc;
+  --border: #ffffff;
+  --border-soft: #9a9a9a;
+
+  --accent: #7fd4ff;
+  --accent-rgb: 127 212 255;
+  --accent-fg: #000000;
+  --accent-soft: #04202b;
+  --accent-border: #7fd4ff;
+  --accent-strong: #b8e8ff;
+
+  --user-bg: #06222e;
+  --user-border: #7fd4ff;
+  --user-rail: #7fd4ff;
+
+  --code-bg: #101010;
+  --code-border: #ffffff;
+  --code-fg: #ffffff;
+
+  --ok: #4ce68f;
+  --ok-bg: #052015;
+  --ok-border: #4ce68f;
+  --warn: #ffc14d;
+  --warn-bg: #241a05;
+  --warn-border: #ffc14d;
+  --pend: #d2d2d2;
+  --pend-bg: #171717;
+  --pend-border: #d2d2d2;
+  --err: #ff8f9c;
+  --err-bg: #260c11;
+  --err-border: #ff8f9c;
+
+  --tool-bash: #4ce68f;
+  --tool-read: #7fd4ff;
+  --tool-edit: #ffc14d;
+  --tool-write: #d9a3ff;
+  --tool-patch: #ff9ec4;
+  --tool-search: #6ff0e8;
+  --tool-plan: #b3c4ff;
+  --tool-wait: #d2d2d2;
+  --tool-generic: #d2d2d2;
+
+  --syn-comment: #bcbcbc;
+  --syn-keyword: #d9a3ff;
+  --syn-string: #4ce68f;
+  --syn-type: #7fd4ff;
+  --syn-number: #ffc14d;
+  --syn-meta: #ff9ec4;
+  --syn-addition: #4ce68f;
+  --syn-deletion: #ff8f9c;
+
+  --bar-bg: #000000;
+  --shadow-sm: none;
+  --shadow-md: 0 0 0 2px var(--border);
+  --shadow-lg: 0 0 0 3px var(--border);
+  --scrim: rgba(0, 0, 0, 0.78);
+
+  --ring: rgba(127, 212, 255, 0.42);
+  --focus-color: #7fd4ff;
+  --selection-bg: #7fd4ff;
+  --selection-fg: #000000;
+}
