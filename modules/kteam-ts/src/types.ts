@@ -264,6 +264,17 @@ export interface StartSessionRequest {
   prompt?: string;
   agent: string;
   name?: string;
+  /** Caller-chosen teammate callsign instead of an auto-assigned one, so the
+   *  caller can compose a `[Name] Task` title BEFORE starting (the auto-assigned
+   *  name is only known after start). Normalised to the pool's slug shape and
+   *  rejected if invalid; a collision with a LIVE session in the resolution
+   *  window fails loudly unless `teammateFallback` is set. Omitted => the daemon
+   *  auto-assigns exactly as before. */
+  teammate?: string;
+  /** With `teammate`: on collision, auto-assign a free name instead of failing.
+   *  Opt-in escape hatch — the default is to fail so a caller embedding the name
+   *  in a title finds out immediately. */
+  teammateFallback?: boolean;
   label?: string;
   /** Parent kteam session id — auto-filled by the CLI from KTEAM_SESSION_ID
    *  when a teammate starts a teammate. */

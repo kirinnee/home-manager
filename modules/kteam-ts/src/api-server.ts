@@ -337,6 +337,10 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
               headers: { 'content-type': 'text/markdown; charset=utf-8' },
             });
           }
+          if (url.pathname === '/v1/names' && request.method === 'GET') {
+            const raw = Number(url.searchParams.get('count') ?? '1');
+            return json(await options.service.suggestNames(Number.isFinite(raw) ? raw : 1));
+          }
           if (url.pathname === '/v1/sessions' && request.method === 'GET')
             return json((await options.service.list()).map(compactFleetSession));
           if (url.pathname === '/v1/sessions' && request.method === 'POST') {

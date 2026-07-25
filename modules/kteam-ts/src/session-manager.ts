@@ -38,7 +38,7 @@ import {
 import { defaultScratchConfig, type ScratchConfig, type WardenConfig } from './daemon-config';
 import { type ScratchEntry, reclaimScratch, scanScratch, scratchEligibility, trimSnapshots } from './scratch-gc';
 import { atomicJson, now, readJson, run, writeTextAtomic } from './io';
-import { NAME_WINDOW_MS, pickTeammateName, sessionName } from './names';
+import { NAME_WINDOW_MS, displayName, normalizeTeammateName, pickTeammateName } from './names';
 import type { KTeamPaths } from './paths';
 import { configFile, markerFile, sessionDir, stateFile, turnLog, turnPrompt } from './paths';
 import type {
@@ -861,10 +861,20 @@ export class SessionManager implements KTeamService {
     return match?.id ?? ref;
   }
 
-  /** Assign a fresh teammate callsign, avoiding names used within the window. */
-  private assignTeammateName(): string {
+  /** Gather teammate-name usage inside the resolution window ONCE, so the
+   *  auto-assigner, the `--teammate` collision check, and `kteam name` all read
+   *  the same facts. `recent` = names used in the window (auto-assign avoids
+   *  these); `lastUsedAt` = newest creation time per name (the LRU fallback);
+   *  `liveByName` = the LIVE (non-terminal) sessions holding each name, which is
+   *  what a `--teammate` collision is defined against. */
+  private teammateNameUsage(): {
+    recent: string[];
+    lastUsedAt: Map<string, number>;
+    liveByName: Map<string, SessionConfig[]>;
+  } {
     const recent: string[] = [];
     const lastUsedAt = new Map<string, number>();
+    const liveByName = new Map<string, SessionConfig[]>();
     const cutoff = Date.now() - NAME_WINDOW_MS;
     for (const item of this.store.listSessions()) {
       const config = item.config as SessionConfig | undefined;
@@ -873,8 +883,73 @@ export class SessionManager implements KTeamService {
       const created = Date.parse(config.createdAt) || 0;
       if (created >= cutoff) recent.push(name);
       lastUsedAt.set(name, Math.max(lastUsedAt.get(name) ?? 0, created));
+      const state = item.state as SessionState | undefined;
+      if (created >= cutoff && state && !terminalStatuses.includes(state.status)) {
+        const live = liveByName.get(name) ?? [];
+        live.push(config);
+        liveByName.set(name, live);
+      }
     }
+    return { recent, lastUsedAt, liveByName };
+  }
+
+  /** Assign a fresh teammate callsign, avoiding names used within the window. */
+  private assignTeammateName(): string {
+    const { recent, lastUsedAt } = this.teammateNameUsage();
     return pickTeammateName(recent, lastUsedAt);
+  }
+
+  /** Resolve the teammate name for a new session. Absent `--teammate` =>
+   *  auto-assign (unchanged path). A supplied name is normalised to the pool's
+   *  slug shape and REJECTED if invalid; if a live session in the window already
+   *  holds it the start FAILS with the conflict listed, unless `teammateFallback`
+   *  opts into auto-assigning a free name instead. */
+  private resolveTeammateName(request: StartSessionRequest): string {
+    const requested = request.teammate?.trim();
+    if (!requested) return this.assignTeammateName();
+    const normalized = normalizeTeammateName(requested);
+    if (!normalized)
+      throw new Error(
+        `invalid --teammate name "${requested}": use a slug like "hayden" — ` +
+          'lowercase, start with a letter, then letters/digits/hyphens, at most 32 chars',
+      );
+    const { recent, lastUsedAt, liveByName } = this.teammateNameUsage();
+    const live = liveByName.get(normalized) ?? [];
+    if (live.length > 0) {
+      if (request.teammateFallback) {
+        const used = new Set(recent);
+        used.add(normalized);
+        return pickTeammateName([...used], lastUsedAt);
+      }
+      const conflicts = live.map(config => `${config.id} (${config.name})`).join(', ');
+      throw new Error(
+        `teammate name "${normalized}" is already taken by a live session in the last 5 days: ${conflicts}. ` +
+          'Pass --teammate-fallback to auto-assign a free name instead, or pick another with `kteam name`.',
+      );
+    }
+    return normalized;
+  }
+
+  /** Suggest teammate names that are free within the resolution window, for a
+   *  caller composing a `[Name] Task` title before it starts. A SUGGESTION, not
+   *  a reservation: nothing is persisted, so a later `start --teammate` may
+   *  still collide (a correct reservation needs a durable TTL store and would
+   *  race on the reservation record itself — not worth it when the collision is
+   *  already handled and the caller just retries with the next name). */
+  async suggestNames(count = 1): Promise<string[]> {
+    const wanted = Math.max(1, Math.min(Math.floor(count) || 1, 50));
+    const { recent, lastUsedAt } = this.teammateNameUsage();
+    const used = new Set(recent);
+    const names: string[] = [];
+    while (names.length < wanted) {
+      const name = pickTeammateName([...used], lastUsedAt);
+      // Pool exhausted: pickTeammateName falls back to an LRU name that may
+      // already be in `used`. Stop rather than emit a duplicate suggestion.
+      if (used.has(name)) break;
+      used.add(name);
+      names.push(name);
+    }
+    return names;
   }
 
   /** Walk a parent chain (by id); true if the session or any ancestor carries
@@ -903,6 +978,10 @@ export class SessionManager implements KTeamService {
     // TUI a human drives: a bare start is the normal case, and injecting an
     // opening turn into it would be kteam typing into the human's session.
     if (!prompt && mode !== 'interactive') throw new Error('prompt is required');
+    // Resolve the teammate callsign up front (pure + store-only): a bad
+    // `--teammate` slug or a live-session collision must fail on the same terms
+    // whatever the wrapper/filesystem look like, and before any launch work.
+    const teammate = this.resolveTeammateName(request);
     const binary = request.agent;
     const harness = inferHarness(binary);
     if (!path.basename(binary).startsWith(`${harness}-auto-`))
@@ -1004,10 +1083,13 @@ export class SessionManager implements KTeamService {
     const createdAt = now();
     const config: SessionConfig = {
       id,
-      // A bare interactive session has no prompt to name itself after; it is
-      // named for what it is (the human renames it via --name if they care).
-      name: sessionName(request.name ?? (prompt ? prompt.split(/\s+/).slice(0, 5).join('-') : 'interactive')),
-      teammate: this.assignTeammateName(),
+      // The human task title, shown verbatim in ps/the dashboard — the
+      // `[Teammate] Task Title` convention is preserved, only control chars and
+      // length are normalised (see displayName). A bare interactive session has
+      // no prompt to name itself after, so it is named for what it is (renamed
+      // via --name if the human cares).
+      name: displayName(request.name ?? (prompt ? prompt.split(/\s+/).slice(0, 5).join('-') : 'interactive')),
+      teammate,
       label,
       parent: parentView?.config.id,
       binary,
