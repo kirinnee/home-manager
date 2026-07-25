@@ -44,6 +44,7 @@ function haystack(v: SessionView): string {
     c.teammate,
     c.name,
     c.label,
+    c.parent,
     c.binary,
     c.model,
     c.modelHint,

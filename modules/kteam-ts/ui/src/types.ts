@@ -42,6 +42,9 @@ export interface SessionConfig {
   name: string;
   teammate?: string;
   label?: string;
+  /** The kteam session that STARTED this one (auto-captured from the caller's
+   *  KTEAM_SESSION_ID pane env) — teammates spawning teammates form a tree. */
+  parent?: string;
   binary: string;
   harness: Harness;
   modelHint: string;
