@@ -36,17 +36,14 @@ export class ApiError extends Error {
   }
 }
 
-// A 401 while we HOLD a token means the token is stale (page served across a
-// daemon token change or the old substitution bug) — a fresh page load embeds
-// the current one. Reload ONCE per tab session; the guard prevents loops when
-// the daemon genuinely rejects us.
-function recoverFromStaleToken(): void {
-  if (typeof window === 'undefined' || !HAS_TOKEN) return;
-  if (sessionStorage.getItem('kteam-token-reload') === '1') return;
-  sessionStorage.setItem('kteam-token-reload', '1');
-  window.location.reload();
-}
-
+// NO FULL DOCUMENT LOADS. A 401 used to force a one-shot document reload on
+// the theory that a stale embedded token is fixed by re-serving index.html. It
+// also threw away the entire client — draft,
+// scroll, loaded transcript, socket — for what is an ordinary failed request,
+// and it fired on a genuine authorization failure too (the guard only stopped
+// the SECOND reload, never the first). Authorization failure is now surfaced
+// like any other error: an ApiError the caller renders while the SPA keeps its
+// draft, scroll position, transcript, and reconnect loop intact.
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (TOKEN) headers.set('authorization', `Bearer ${TOKEN}`);
@@ -55,18 +52,28 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   // dedupes retries/double-fires of the SAME logical call (see api-server
   // DEDUPED_ACTIONS). Callers reuse one id across a logical action by setting
   // the header in `init`; otherwise a fresh id is minted per call.
+  //
+  // A per-call mint is a LAST RESORT, not the design. It makes the server's
+  // dedupe unreachable for the case it exists for: measured 2026-07-25, a send
+  // whose response was lost and which the reader then re-sent arrived twice with
+  // two different ids, and the message was delivered to the agent twice (06:09:32
+  // and 06:09:38). Any mutation a person can repeat MUST pass its own id — see
+  // `api.send`/`api.answer` and SessionChatPage's per-message requestId.
   const method = (init?.method ?? 'GET').toUpperCase();
   if (method !== 'GET' && method !== 'HEAD' && !headers.has('x-kteam-request-id')) {
     headers.set('x-kteam-request-id', crypto.randomUUID());
   }
   const res = await fetch(path, { ...init, headers });
-  if (res.status === 401) recoverFromStaleToken();
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new ApiError(res.status, body.error ?? `HTTP ${res.status}`);
+    const fallback =
+      res.status === 401
+        ? HAS_TOKEN
+          ? 'unauthorized — the daemon rejected this page’s credentials'
+          : 'unauthorized — this origin was served without a daemon token (read-only)'
+        : `HTTP ${res.status}`;
+    throw new ApiError(res.status, body.error ?? fallback);
   }
-  // Any success re-arms the one-shot stale-token recovery.
-  if (typeof window !== 'undefined') sessionStorage.removeItem('kteam-token-reload');
   if (res.status === 204) return undefined as T;
   const ct = res.headers.get('content-type') ?? '';
   return ct.includes('application/json') ? ((await res.json()) as T) : ((await res.text()) as unknown as T);
@@ -83,15 +90,20 @@ export const api = {
   },
   snapshot: (id: string, live = false) =>
     request<string>(`/v1/sessions/${encodeURIComponent(id)}/snapshot${live ? '?live=true' : ''}`),
-  send: (id: string, message: string, now = false) =>
+  // `requestId` identifies the LOGICAL message, not this attempt: pass the same
+  // one for every delivery of the same message (first try, retry after an error,
+  // the interrupt-then-send path) and the daemon applies it exactly once.
+  send: (id: string, message: string, now = false, requestId?: string) =>
     request<SessionView>(`/v1/sessions/${encodeURIComponent(id)}/send`, {
       method: 'POST',
       body: JSON.stringify({ message, now }),
+      ...(requestId ? { headers: { 'x-kteam-request-id': requestId } } : {}),
     }),
-  answer: (id: string, payload: { labels?: string[]; other?: string; responses?: string[] }) =>
+  answer: (id: string, payload: { labels?: string[]; other?: string; responses?: string[] }, requestId?: string) =>
     request<SessionView>(`/v1/sessions/${encodeURIComponent(id)}/answer`, {
       method: 'POST',
       body: JSON.stringify(payload),
+      ...(requestId ? { headers: { 'x-kteam-request-id': requestId } } : {}),
     }),
   interrupt: (id: string) =>
     request<SessionView>(`/v1/sessions/${encodeURIComponent(id)}/interrupt`, {

@@ -1,25 +1,44 @@
 // Sessions list. Live teammate sessions managed by kteamd, grouped by project.
-//  - toolbar: label filter + "include finished" toggle + New session
+//  - toolbar: instant filter + mode segment + RC + "include finished" + New
 //  - per-project group: header + table (teammate, model, status, harness,
 //    context, activity, updated)
-//  - live updates via WebSocket /v1/events with a 1.5s trailing debounce.
+//
+// NO DATA OF ITS OWN (round 5). This page used to fetch the session list, open
+// its own fleet WebSocket, and re-GET the ENTIRE list 1.5s after every event —
+// including while it was not even the visible route. Sessions, projects and
+// live updates now come from the shared store, which holds ONE socket for the
+// app and refreshes one session at a time. Its filters are the store's global
+// persisted controls, so they survive navigation and reload and the sidebar
+// slice can render the same controls without a second source of truth.
 
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, Sparkles, Activity, FolderGit2, Plus, Search, X, LayoutGrid, Rows3, User, Cpu } from 'lucide-react';
-import { api } from '../lib/api';
-import type { InteractionMode, ProjectInfo, SearchResponse, SessionView } from '../types';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Bot,
+  Sparkles,
+  Activity,
+  FolderGit2,
+  Plus,
+  Search,
+  X,
+  LayoutGrid,
+  Rows3,
+  User,
+  Cpu,
+  Radio,
+} from 'lucide-react';
+import type { SearchResponse, SessionView } from '../types';
 import { Badge } from '../components/Primitives';
 import { ModeBadge, MODE_HINT } from '../components/ModeBadge';
 import { RcBadge } from '../components/RcBadge';
 import { WardenStrip } from '../components/WardenStrip';
 import { WardenVerdicts } from '../components/WardenVerdicts';
 import { Link, navigate } from '../lib/router';
-import { debounce, TERMINAL_STATUSES, fmtAge, fmtRelative, toneFor } from '../lib/utils';
-import { openEventStream } from '../lib/ws';
+import { TERMINAL_STATUSES, fmtAge, fmtRelative, toneFor } from '../lib/utils';
 import { QuotaReadout } from '../components/QuotaBadge';
 import { useUsage } from '../hooks/useUsage';
 import { quotaFor, type Quota } from '../lib/usage';
 import type { UsageAccountView } from '../types';
+import { useFleet, useStore, useTranscriptSearch, useUiControls } from '../lib/store';
 
 function baseName(p: string): string {
   const seg = p.replace(/\/+$/, '').split('/').filter(Boolean);
@@ -101,51 +120,24 @@ function highlight(text: string, q: string) {
 }
 
 export function SessionsListPage() {
-  const [sessions, setSessions] = useState<SessionView[] | null>(null);
-  const [projects, setProjects] = useState<ProjectInfo[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [filter, setFilter] = useState('');
-  const [includeFinished, setIncludeFinished] = useState(false);
-  // Mode segment: the primary way to read the fleet — who is driving what.
-  // Composes with the search box (both are applied in `visible`).
-  const [modeFilter, setModeFilter] = useState<'all' | InteractionMode>('all');
-  const socketRef = useRef<ReturnType<typeof openEventStream> | null>(null);
+  // Shared cache + one socket for the whole app (lib/store.tsx).
+  const { sessions, projects, error } = useFleet();
+  const store = useStore();
+  // Global persisted controls: the instant query, the mode segment, the RC
+  // filter, "include finished" and the table/cards preference.
+  const [controls, setControls] = useUiControls();
+  const { query: filter, mode: modeFilter, rcOnly, includeFinished, dashboardView: viewPref } = controls;
   // Transcript search (server-side, on Enter) — distinct from the instant
-  // client-side list filter above.
+  // client-side list filter above. Also store-owned, so its results survive
+  // navigating into a hit and back.
   const searchRef = useRef<HTMLInputElement | null>(null);
-  const [tResults, setTResults] = useState<SearchResponse | null>(null);
-  const [tSearching, setTSearching] = useState(false);
+  const { searching: tSearching, results: tResults } = useTranscriptSearch();
   // View mode: cards (mobile-friendly) vs table. Auto-defaults to cards on
   // narrow viewports; a desktop user can override.
   const isNarrow = useIsNarrow();
-  const [viewPref, setViewPref] = useState<'cards' | 'table' | null>(null);
   const mode = viewPref ?? (isNarrow ? 'cards' : 'table');
   // Account quota, fleet-wide and joined by wrapper binary — see lib/usage.ts.
   const { index: usage } = useUsage();
-
-  async function load(initial = false) {
-    try {
-      setSessions(await api.listSessions());
-      setError(null);
-    } catch (e) {
-      if (initial) setError(String(e instanceof Error ? e.message : e));
-    }
-  }
-
-  useEffect(() => {
-    void load(true);
-    void api
-      .projects()
-      .then(setProjects)
-      .catch(() => setProjects([]));
-  }, []);
-
-  useEffect(() => {
-    const debounced = debounce(() => void load(false), 1500);
-    const handle = openEventStream('', -200, () => debounced());
-    socketRef.current = handle;
-    return () => handle.close();
-  }, []);
 
   // Instant, client-side filter across every identifying field.
   const visible = useMemo(() => {
@@ -154,6 +146,7 @@ export function SessionsListPage() {
     return sessions.filter(v => {
       if (!includeFinished && TERMINAL_STATUSES.has(v.state.status)) return false;
       if (modeFilter !== 'all' && v.config.mode !== modeFilter) return false;
+      if (rcOnly && !v.config.remoteControl) return false;
       if (!needle) return true;
       const c = v.config;
       // `c.mode` is in the haystack too, so typing "interactive" filters as
@@ -176,7 +169,7 @@ export function SessionsListPage() {
         .toLowerCase();
       return hay.includes(needle);
     });
-  }, [sessions, filter, includeFinished, modeFilter]);
+  }, [sessions, filter, includeFinished, modeFilter, rcOnly]);
 
   // Per-mode counts for the segment labels (over everything the OTHER filters
   // admit, so the numbers describe what clicking would show).
@@ -190,8 +183,14 @@ export function SessionsListPage() {
   }, [sessions, includeFinished]);
 
   // `/` focuses the search box from anywhere (unless already typing).
+  //
+  // This page stays MOUNTED behind a session route now (App.tsx keeps it alive
+  // so its scroll and filters survive), so the shortcut has to check that the
+  // dashboard is the route actually on screen — otherwise `/` on a chat page
+  // would be swallowed to focus an invisible input.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (window.location.pathname !== '/') return;
       if (e.key === '/' && !isTypingTarget(e.target)) {
         e.preventDefault();
         searchRef.current?.focus();
@@ -201,25 +200,17 @@ export function SessionsListPage() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  async function runTranscriptSearch() {
-    const q = filter.trim();
-    if (!q) {
-      setTResults(null);
-      return;
-    }
-    setTSearching(true);
-    try {
-      setTResults(await api.search(q, 40));
-    } catch {
-      setTResults({ query: q, scanned: 0, results: [] });
-    } finally {
-      setTSearching(false);
-    }
+  function setFilter(next: string) {
+    setControls({ query: next });
+  }
+
+  function runTranscriptSearch() {
+    void store.runSearch(filter);
   }
 
   function clearSearch() {
-    setFilter('');
-    setTResults(null);
+    setControls({ query: '' });
+    store.clearSearch();
     searchRef.current?.blur();
   }
 
@@ -308,7 +299,7 @@ export function SessionsListPage() {
               <button
                 key={m}
                 type="button"
-                onClick={() => setModeFilter(m)}
+                onClick={() => setControls({ mode: m })}
                 title={m === 'all' ? 'every session' : MODE_HINT[m]}
                 aria-pressed={modeFilter === m}
                 className={`inline-flex h-6 items-center gap-1 rounded px-2 text-[12px] font-medium transition-colors ${
@@ -326,8 +317,30 @@ export function SessionsListPage() {
               </button>
             ))}
           </div>
+          {/* RC is a real filter now, not just a word in the search haystack:
+              "which sessions can I drive from my phone?" is a question you ask
+              of the fleet, and typing "rc" also matched anything whose task
+              text happened to contain those letters. */}
+          <button
+            type="button"
+            onClick={() => setControls({ rcOnly: !rcOnly })}
+            aria-pressed={rcOnly}
+            title="only sessions launched with Remote Control"
+            className={`inline-flex h-6 shrink-0 items-center gap-1 rounded-md border px-2 text-[12px] font-medium transition-colors ${
+              rcOnly
+                ? 'border-accent-border bg-accent-soft text-accent'
+                : 'border-border bg-surface text-muted hover:text-fg'
+            }`}
+          >
+            <Radio size={11} />
+            rc only
+          </button>
           <label className="inline-flex cursor-pointer items-center gap-2 whitespace-nowrap text-[13px] text-fg-soft">
-            <input type="checkbox" checked={includeFinished} onChange={e => setIncludeFinished(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={includeFinished}
+              onChange={e => setControls({ includeFinished: e.target.checked })}
+            />
             include finished
           </label>
           {!isNarrow && (
@@ -336,7 +349,7 @@ export function SessionsListPage() {
                 <button
                   key={m}
                   type="button"
-                  onClick={() => setViewPref(m)}
+                  onClick={() => setControls({ dashboardView: m })}
                   aria-label={`${m} view`}
                   title={`${m} view`}
                   className={`inline-flex h-6 items-center gap-1 rounded px-2 text-[12px] font-medium transition-colors ${
@@ -357,7 +370,12 @@ export function SessionsListPage() {
       </div>
 
       {(tSearching || tResults) && (
-        <TranscriptResults query={filter} searching={tSearching} results={tResults} onClose={() => setTResults(null)} />
+        <TranscriptResults
+          query={filter}
+          searching={tSearching}
+          results={tResults}
+          onClose={() => store.clearSearch()}
+        />
       )}
 
       {error && (
@@ -491,7 +509,17 @@ function Th({ children }: { children: React.ReactNode }) {
   );
 }
 
-function SessionRow({ view, usage }: { view: SessionView; usage: Map<string, UsageAccountView> }) {
+// MEMOIZED (round 5). The store patches ONE session's object per event and
+// leaves every other object identical, so a memo on the row means a terminal
+// frame from one teammate re-renders one row instead of the whole fleet. (The
+// usage index is memoized in useUsage for the same reason.)
+const SessionRow = memo(function SessionRow({
+  view,
+  usage,
+}: {
+  view: SessionView;
+  usage: Map<string, UsageAccountView>;
+}) {
   const cfg = view.config;
   const state = view.state;
   const quota: Quota | null = quotaFor(view, usage);
@@ -557,11 +585,17 @@ function SessionRow({ view, usage }: { view: SessionView; usage: Map<string, Usa
       </td>
     </tr>
   );
-}
+});
 
 // Mobile-first card: full-width, tappable, single column, no horizontal
 // scroll. Shows the same fields as a table row, activity line included.
-function SessionCard({ view, usage }: { view: SessionView; usage: Map<string, UsageAccountView> }) {
+const SessionCard = memo(function SessionCard({
+  view,
+  usage,
+}: {
+  view: SessionView;
+  usage: Map<string, UsageAccountView>;
+}) {
   const cfg = view.config;
   const state = view.state;
   const quota: Quota | null = quotaFor(view, usage);
@@ -614,7 +648,7 @@ function SessionCard({ view, usage }: { view: SessionView; usage: Map<string, Us
       </div>
     </Link>
   );
-}
+});
 
 function ContextMeter({ value }: { value: number }) {
   const pct = Math.max(0, Math.min(100, value));
