@@ -6,11 +6,14 @@ import {
   startClaudeTranscriptWatcher,
   type ClaudeNormalizedEvent,
   type ClaudeTranscriptWatcher,
+  type TranscriptCursor,
+  parseClaudeTranscriptLine,
 } from './claude-transcript';
 import {
   startCodexTranscriptWatcher,
   type CodexNormalizedEvent,
   type CodexTranscriptWatcher,
+  parseCodexTranscriptLine,
 } from './codex-transcript';
 import {
   contextWindowForModel,
@@ -58,7 +61,7 @@ import {
 } from './warden-detect';
 import { rankFailoverCandidates, selectFailoverCandidate } from './failover';
 import type { AgentUsage } from './core';
-import { EventStore, type JsonValue, type SessionEvent } from './storage';
+import { chatEventFingerprint, EventStore, type JsonValue, type SessionEvent } from './storage';
 import {
   contextPercentUsed,
   backgroundTerminalCount,
@@ -131,6 +134,9 @@ interface SessionManagerOptions {
   transcriptReconcileSeconds: number;
   publicUrl: string;
   projectRoots: string[];
+  /** Fleet default for Remote Control on claude launches; a request may
+   *  override it per session. Undefined => on. */
+  remoteControl?: boolean;
   warden: WardenConfig;
   scratch?: ScratchConfig;
   contextWindows?: Record<string, number>;
@@ -219,9 +225,28 @@ const LAUNCH_GRACE_MS = 10 * 60_000;
  *  largest write class the daemon had (6584 terminal.frame records in one real
  *  12.7k-event session, every one of them an fsync). */
 const LIVE_ONLY_EVENT_TYPES = new Set(['terminal.frame']);
+/** Event classes the HARNESS already recorded in its own transcript. kteam
+ *  indexes these by byte offset (chat_pointers) and streams them live, but never
+ *  copies their content into its own journal. They were 5.9 MB of an 8.2 MB
+ *  events.jsonl plus the whole 6.2 MB chat.jsonl on one real session.
+ *
+ *  turn.completed / interaction.question are deliberately NOT here: they are
+ *  low-volume CONTROL signals the daemon acts on, so they stay journalled. */
+const HARNESS_DERIVED_EVENT_TYPES = new Set([
+  'chat.user',
+  'chat.assistant.text',
+  'chat.assistant.thinking',
+  'tool.use',
+  'tool.result',
+  'context.usage',
+]);
 /** How many recent live-only frames to retain per session, for a late
  *  subscriber and for the wedge/liveness reflexes. */
 const LIVE_FRAME_RING = 50;
+/** Coalesce monitors for teammates sharing one checkout. This is far below the
+ *  30 s tick, so it changes no observable freshness while avoiding five
+ *  identical git subprocesses per session in an aligned fleet tick. */
+const GIT_FINGERPRINT_COALESCE_MS = 2_000;
 /** How often a declared wait publishes a heartbeat, so "parked" never looks
  *  the same as "gone" to a lead reading the event stream. */
 const WAITING_HEARTBEAT_MS = 300_000;
@@ -232,6 +257,23 @@ const WAITING_HEARTBEAT_MS = 300_000;
  *  the status every few seconds. */
 export function lifecycleSuspended(state: SessionState): boolean {
   return state.waiting !== undefined || waitingStatuses.includes(state.status) || state.status === 'interrupted';
+}
+
+/** IMMORTAL INTERACTIVE: an interactive session is a terminal a human drives.
+ *  Sitting at a ready prompt for days is its NORMAL state, so every automatic
+ *  lifecycle reflex stands down for it — the nudge, the stall kill, the per-turn
+ *  timeout ceiling and the lost-prompt reaper. `lifecycleSuspended` already
+ *  covers the common case (`awaiting_user` is a waiting status), but only while
+ *  the status is accurate: a pane that never reports promptReady (late splash,
+ *  a menu, a repainting composer) stays `running`, and that is exactly the
+ *  session the reflex used to kill after 300 s of "silence". The MODE is the
+ *  durable fact, so it decides.
+ *
+ *  Auto sessions are unchanged: they have no human at the keyboard, so the
+ *  reflex layer is the only thing standing between a frozen teammate and a
+ *  four-hour hang. */
+export function reflexSuspended(config: Pick<SessionConfig, 'mode'>, state: SessionState): boolean {
+  return config.mode === 'interactive' || lifecycleSuspended(state);
 }
 
 /** The turn ceiling, with declared-wait time credited back: a babysitter parked
@@ -360,6 +402,12 @@ export class SessionManager implements KTeamService {
   private transientSequence = 0;
   /** Recent LIVE-ONLY frames per session (see LIVE_ONLY_EVENT_TYPES). */
   private readonly liveFrames = new Map<string, KTeamEvent[]>();
+  /** One lazy full-transcript index check per session and daemon lifetime.
+   *  This makes chat_pointers genuinely disposable: after a DB rebuild (or
+   *  the first v4 boot of an existing session), the first chat read recreates
+   *  every pointer from the harness's authoritative file. */
+  private readonly chatIndexChecks = new Map<string, Promise<void>>();
+  private readonly gitFingerprintCache = new Map<string, { at: number; value?: string; pending?: Promise<string> }>();
   /** In-flight journal appends per session, so close() can drain what
    *  `transition` deliberately did not await. */
   private readonly pendingEmits = new Map<string, Promise<unknown>>();
@@ -373,6 +421,10 @@ export class SessionManager implements KTeamService {
   /** True once the boot import finished: the consistency check is meaningless
    *  before it (everything on disk is legitimately unindexed). */
   private indexImported = false;
+  /** Health must not report `ok` during the intentionally early-listening
+   *  bootstrap window. A cold empty index previously claimed healthy at
+   *  136 ms while journal import/recovery continued for another 29.8 s. */
+  private bootstrapFinished = false;
   /** When the self-check last ran; its lateness is the wedge detector. */
   private lastSelfCheckAt = 0;
   /** Consecutive consistency passes that left `ps` incomplete. */
@@ -671,6 +723,7 @@ export class SessionManager implements KTeamService {
     await phase('recover', () => this.recover());
     await phase('warden', () => this.startWarden());
     await phase('scratch-gc', () => this.sweepScratch());
+    this.bootstrapFinished = true;
     if (this.bootstrapErrors.length > 0) {
       this.emitTransient('fleet.bootstrap_errors', { errors: this.bootstrapErrors });
     }
@@ -713,7 +766,8 @@ export class SessionManager implements KTeamService {
     const unmonitoredRunning = active.filter(item => !this.monitors.has(item.config.id)).length;
     const lastSweepMs = this.wardenState.lastSweepAt ? Date.parse(this.wardenState.lastSweepAt) : 0;
     return {
-      ok: this.bootstrapErrors.length === 0 && unmonitoredRunning === 0,
+      ok: this.bootstrapFinished && this.bootstrapErrors.length === 0 && unmonitoredRunning === 0,
+      bootstrapping: !this.bootstrapFinished,
       version: '0.2.0',
       pid: process.pid,
       home: this.paths.home,
@@ -802,8 +856,16 @@ export class SessionManager implements KTeamService {
   }
 
   async start(request: StartSessionRequest): Promise<SessionView> {
-    const prompt = request.prompt?.trim();
-    if (!prompt) throw new Error('prompt is required');
+    const prompt = request.prompt?.trim() ?? '';
+    // Pure argument validation first, before any wrapper/filesystem probing, so a
+    // malformed request is rejected on the same terms whatever the environment.
+    const mode = request.mode ?? 'auto';
+    if (mode !== 'auto' && mode !== 'interactive') throw new Error('mode must be auto or interactive');
+    // An automode teammate with no task cannot do anything but violate the
+    // protocol, so the prompt stays mandatory there. INTERACTIVE mode is a plain
+    // TUI a human drives: a bare start is the normal case, and injecting an
+    // opening turn into it would be kteam typing into the human's session.
+    if (!prompt && mode !== 'interactive') throw new Error('prompt is required');
     const binary = request.agent;
     const harness = inferHarness(binary);
     if (!path.basename(binary).startsWith(`${harness}-auto-`))
@@ -816,8 +878,9 @@ export class SessionManager implements KTeamService {
     // macOS exposes /tmp through /private/tmp. Store the canonical path so
     // harness trust records and transcript metadata agree with the session.
     const cwd = await realpath(requestedCwd);
-    const mode = request.mode ?? 'auto';
-    if (mode !== 'auto' && mode !== 'interactive') throw new Error('mode must be auto or interactive');
+    // Remote Control: claude-only, request wins, else the fleet default (on).
+    const remoteControl = harness === 'claude' && (request.remoteControl ?? this.options.remoteControl ?? true);
+    const harnessFlags = (request.harnessFlags ?? []).map(flag => flag.trim()).filter(Boolean);
     const harnessHome = await wrapperHome(wrapper, harness);
     if (!harnessHome)
       throw new Error(
@@ -846,7 +909,10 @@ export class SessionManager implements KTeamService {
     // error must not spawn a second live session for the same work. An
     // identical (binary, cwd, prompt) session started in the last 10 minutes
     // that is still live IS that earlier request succeeding server-side.
-    for (const existing of await this.list()) {
+    // …but a BARE interactive start has no prompt to be identical to, and a human
+    // opening a second terminal on the same repo is not a retry. Only prompted
+    // starts are de-duplicated.
+    for (const existing of prompt ? await this.list() : []) {
       if (
         existing.config.binary === binary &&
         existing.config.cwd === cwd &&
@@ -901,7 +967,9 @@ export class SessionManager implements KTeamService {
     const createdAt = now();
     const config: SessionConfig = {
       id,
-      name: sessionName(request.name ?? prompt.split(/\s+/).slice(0, 5).join('-')),
+      // A bare interactive session has no prompt to name itself after; it is
+      // named for what it is (the human renames it via --name if they care).
+      name: sessionName(request.name ?? (prompt ? prompt.split(/\s+/).slice(0, 5).join('-') : 'interactive')),
       teammate: this.assignTeammateName(),
       label,
       parent: parentView?.config.id,
@@ -910,6 +978,8 @@ export class SessionManager implements KTeamService {
       modelHint: modelHint(binary),
       model,
       mode,
+      ...(remoteControl ? { remoteControl: true } : {}),
+      ...(harnessFlags.length ? { harnessFlags } : {}),
       cwd,
       createdAt,
       updatedAt: createdAt,
@@ -943,14 +1013,23 @@ export class SessionManager implements KTeamService {
       turnCompleted: false,
     };
     const systemPrompt = this.systemPrompt(config);
+    // A bare interactive start gets NO turn-1 prompt file: the file is what
+    // `promptInstruction` points the harness at, and the whole point of a bare
+    // start is that nothing is typed into the human's TUI. Its absence is also
+    // what the re-inject reflex checks before re-sending a turn.
+    const deliverFirstTurn = assignedPrompt.length > 0;
     await Promise.all([
       this.store.writeConfig(id, config),
       this.store.writeState(id, state),
       writeFile(config.systemPromptFile, systemPrompt, { mode: 0o600 }),
       writeFile(config.originalPromptFile, `${assignedPrompt}\n`, { mode: 0o600 }),
-      writeFile(turnPrompt(this.paths, id, 1), `${systemPrompt}\n# Assigned task\n\n${assignedPrompt}\n`, {
-        mode: 0o600,
-      }),
+      ...(deliverFirstTurn
+        ? [
+            writeFile(turnPrompt(this.paths, id, 1), `${systemPrompt}\n# Assigned task\n\n${assignedPrompt}\n`, {
+              mode: 0o600,
+            }),
+          ]
+        : []),
       writeFile(turnLog(this.paths, id, 1), '', { mode: 0o600 }),
       writeFile(path.join(directory, 'chat.jsonl'), '', { mode: 0o600 }),
       writeFile(path.join(directory, 'channel', 'inbox.jsonl'), '', { mode: 0o600 }),
@@ -1002,7 +1081,7 @@ export class SessionManager implements KTeamService {
     const running = new Promise<void>(resolve => {
       signalRunning = resolve;
     });
-    const bootstrap = this.bootstrapSession(id, config, signalRunning).finally(() => {
+    const bootstrap = this.bootstrapSession(id, config, signalRunning, deliverFirstTurn).finally(() => {
       this.launching.delete(id);
       releaseLaunch();
     });
@@ -1081,6 +1160,7 @@ export class SessionManager implements KTeamService {
     id: string,
     config: SessionConfig,
     signalRunning: () => void = () => {},
+    deliverFirstTurn = true,
   ): Promise<void> {
     try {
       // send() re-verifies prompt readiness right before typing â launch()'s
@@ -1093,7 +1173,9 @@ export class SessionManager implements KTeamService {
         // what tells a monitor apart from "the tmux session does not exist
         // yet" â the state a pre-launch monitor used to misread as a crash.
         await this.store.updateState<SessionState>(id, current => ({ ...current, launchedAt: now() }));
-        await this.tmux.send(config, this.promptInstruction(id, 1));
+        // Bare interactive start: the pane is up at its own prompt and that IS
+        // the deliverable. Nothing is typed.
+        if (deliverFirstTurn) await this.tmux.send(config, this.promptInstruction(id, 1));
       });
       const backgrounded = this.launching.get(id)?.backgrounded === true;
       await this.transition(
@@ -1330,7 +1412,16 @@ export class SessionManager implements KTeamService {
       // long/multi-line/attachment payloads and the original turn-1 prompt.
       // The turn file is still written on both paths (bookkeeping: logs,
       // resume context) â direct only changes what gets TYPED.
-      const direct = this.isDirectPayload(complete, view.config);
+      //
+      // INTERACTIVE sessions always go direct: the composer is a chat box a human
+      // is typing into, and answering a human's paragraph with "read
+      // /home/.../turns/turn-014.md" is not a conversation. Attachments still take
+      // the indirection - that block is a list of file paths the harness must
+      // open. Bracketed paste (tmux-controller) keeps multi-line payloads whole.
+      const direct =
+        view.config.mode === 'interactive' && !request.attachmentIds?.length
+          ? true
+          : this.isDirectPayload(complete, view.config);
       await writeFile(turnPrompt(this.paths, id, turn), `${complete}\n`, { mode: 0o600 });
       await appendFile(
         path.join(view.directory, 'channel', 'inbox.jsonl'),
@@ -1451,9 +1542,23 @@ export class SessionManager implements KTeamService {
         const view = await this.get(id);
         await this.emit(id, 'control.interrupt.requested', {}, 'client');
         await this.tmux.interrupt(view.config);
+        // An interactive pane that is back (or still) at a ready prompt goes to
+        // awaiting_user, not `interrupted`: the human pressed stop, the terminal
+        // is theirs again. `interrupted` would also be sticky — the monitor's
+        // awaiting_user transition deliberately skips that status — so an idle
+        // interactive session would keep claiming it was interrupted forever.
+        // "Idle" here is the ABSENCE OF ACTIVE WORK, not promptReady: a human
+        // with half a message typed has a non-ready composer and is still idle,
+        // and marking that session `interrupted` would stick (the monitor's
+        // awaiting_user transition skips `interrupted` on purpose).
+        const after = await this.tmux.state(view.config.tmuxSession).catch(() => undefined);
+        const idleInteractive =
+          view.config.mode === 'interactive' && after !== undefined && !paneShowsActiveWork(after.visiblePane);
         await this.transition(
           id,
-          { status: 'interrupted', health: 'idle', promptReady: true, reason: 'interrupted by client' },
+          idleInteractive
+            ? { status: 'awaiting_user', health: 'idle', promptReady: true, reason: undefined }
+            : { status: 'interrupted', health: 'idle', promptReady: true, reason: 'interrupted by client' },
           'control.interrupted',
         );
         return await this.get(id);
@@ -1548,13 +1653,19 @@ export class SessionManager implements KTeamService {
           updatedAt: now(),
         }));
       }
-      const turn = view.config.turn + 1;
+      // Bare relaunch: an interactive session resumed with no message just gets
+      // its terminal back (`--resume <session-id>`, nothing typed). Telling a
+      // human's TUI to "continue the assigned task" would be kteam inventing a
+      // turn nobody asked for, so there is no new turn and no turn file either.
+      const bareRelaunch = view.config.mode === 'interactive' && !message?.trim();
+      const turn = bareRelaunch ? view.config.turn : view.config.turn + 1;
       const prompt = message?.trim() || 'Continue the assigned task from where you stopped.';
-      await writeFile(
-        turnPrompt(this.paths, id, turn),
-        `${prompt}\n\nContinue using the same kteam completion and interaction protocol.\n`,
-        { mode: 0o600 },
-      );
+      if (!bareRelaunch)
+        await writeFile(
+          turnPrompt(this.paths, id, turn),
+          `${prompt}\n\nContinue using the same kteam completion and interaction protocol.\n`,
+          { mode: 0o600 },
+        );
       await Promise.all(
         ['done', 'needs-help', 'process-exit'].map(name => rm(markerFile(this.paths, id, name), { force: true })),
       );
@@ -1586,7 +1697,7 @@ export class SessionManager implements KTeamService {
       try {
         await this.serializedBootstrap(async () => {
           await this.launchWithRetry(config);
-          await this.tmux.send(config, this.promptInstruction(id, turn));
+          if (!bareRelaunch) await this.tmux.send(config, this.promptInstruction(id, turn));
         });
         this.autoContinued.delete(id);
         this.doneDeferred.delete(id);
@@ -1796,6 +1907,7 @@ export class SessionManager implements KTeamService {
       // (and it left the removed row behind anyway, which is why the index
       // carried 1036 sessions against 700 directories on disk).
       this.store.forgetSession(id);
+      this.chatIndexChecks.delete(id);
     } finally {
       this.deleting.delete(id);
       if (restartMonitor && !this.closed) await this.startMonitor(id).catch(() => undefined);
@@ -2051,6 +2163,127 @@ export class SessionManager implements KTeamService {
   ): Promise<{ total: number; offset: number; records: unknown[] }> {
     id = this.resolveRef(id);
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error('limit must be 1..1000');
+    // Chat history is INDEXED, not copied: the records live in the harness's own
+    // transcript and are re-normalized here by the same parser the live watcher
+    // uses. Lazily scanning once makes the SQLite table rebuildable and also
+    // avoids the rollout boundary bug where the first new pointer hid all of a
+    // legacy session's older chat.jsonl records.
+    const view = await this.get(id).catch(() => undefined);
+    if (view) await this.ensureChatIndex(id, view);
+    const total = this.store.chatPointerCount(id);
+    if (total === 0) return await this.chatHistoryFromLegacyFile(id, before, limit);
+    const end = before === undefined ? total : Math.max(0, Math.min(before, total));
+    const offset = Math.max(0, end - limit);
+    const normalize =
+      view?.config.harness === 'codex'
+        ? (line: string) => parseCodexTranscriptLine(line) as unknown[]
+        : (line: string) => parseClaudeTranscriptLine(line) as unknown[];
+    const rows = this.store.chatPointers(id, offset, end - offset);
+    const { records, skipped } = this.store.resolveChatPointers(rows, normalize);
+    // BEST EFFORT by design: the harness owns those files and may compact or
+    // delete them. Say so rather than silently returning a short page.
+    return { total, offset, records, ...(skipped > 0 ? { degraded: skipped } : {}) };
+  }
+
+  /** Ensure this process has done one complete reconstruction pass over the
+   *  current harness transcript. Live watcher inserts are identity-deduped, so
+   *  scanning an already-complete index is cheap and harmless; after a schema
+   *  rebuild it restores history that events.jsonl deliberately no longer
+   *  duplicates. Missing/deleted harness files degrade to the legacy copy or
+   *  skipped pointers rather than failing the API request. */
+  private async ensureChatIndex(id: string, view: SessionView): Promise<void> {
+    const file = view.config.transcriptFile;
+    if (!file) return;
+    let check = this.chatIndexChecks.get(id);
+    if (!check) {
+      check = (async () => {
+        const info = await stat(file);
+        if (this.store.chatSourceCurrent(id, file, info)) return;
+        await this.indexHarnessTranscript(id, view, file, !this.store.chatSourceKnown(id, file));
+      })();
+      this.chatIndexChecks.set(id, check);
+    }
+    try {
+      await check;
+    } catch {
+      // The harness owns this file and can rotate/delete it. Let resolution
+      // report degradation, and allow a later request to retry if it returns.
+      if (this.chatIndexChecks.get(id) === check) this.chatIndexChecks.delete(id);
+    }
+  }
+
+  private async indexHarnessTranscript(
+    id: string,
+    view: SessionView,
+    file: string,
+    replaceUnverified: boolean,
+  ): Promise<void> {
+    const bytes = await readFile(file);
+    if (replaceUnverified) this.store.forgetChatSourcePointers(id, file);
+    const normalize =
+      view.config.harness === 'codex'
+        ? (line: string) => parseCodexTranscriptLine(line) as unknown[]
+        : (line: string) => parseClaudeTranscriptLine(line) as unknown[];
+    const fallbackTime = now();
+    let lineStart = 0;
+    let batch: Array<{
+      time: string;
+      type: string;
+      turn: number;
+      sourceFile: string;
+      byteOffset: number;
+      byteLength: number;
+      recordIndex: number;
+      fingerprint: string;
+    }> = [];
+    const flush = () => {
+      if (batch.length === 0) return;
+      this.store.appendChatPointers(id, batch);
+      batch = [];
+    };
+    for (let index = 0; index < bytes.length; index += 1) {
+      if (bytes[index] !== 0x0a) continue;
+      const line = bytes.subarray(lineStart, index).toString('utf8');
+      if (line.length > 0) {
+        let events: unknown[] = [];
+        try {
+          events = normalize(line);
+        } catch {
+          // Same degradation contract as the live watcher: one malformed
+          // complete record is skipped; later records remain indexable.
+        }
+        for (let recordIndex = 0; recordIndex < events.length; recordIndex += 1) {
+          const event = events[recordIndex] as { type?: string; timestamp?: string };
+          if (!event.type || !HARNESS_DERIVED_EVENT_TYPES.has(event.type)) continue;
+          batch.push({
+            time: event.timestamp ?? fallbackTime,
+            type: event.type,
+            turn: view.config.turn,
+            sourceFile: file,
+            byteOffset: lineStart,
+            byteLength: index - lineStart,
+            recordIndex,
+            fingerprint: chatEventFingerprint(event),
+          });
+          if (batch.length >= 1_000) flush();
+        }
+      }
+      lineStart = index + 1;
+    }
+    flush();
+    // Only claim complete coverage if the file did not change underneath the
+    // scan. Otherwise the inserted rows remain useful, but the next daemon
+    // lifetime checks/reconstructs again instead of trusting a torn extent.
+    const info = await stat(file);
+    if (info.size === bytes.length) this.store.markChatSource(id, file, info);
+  }
+
+  /** Pre-pointer sessions: read the chat.jsonl copy kteam used to write. */
+  private async chatHistoryFromLegacyFile(
+    id: string,
+    before: number | undefined,
+    limit: number,
+  ): Promise<{ total: number; offset: number; records: unknown[] }> {
     const raw = await readFile(path.join(sessionDir(this.paths, id), 'chat.jsonl'), 'utf8').catch(() => '');
     const records = raw
       .split('\n')
@@ -2123,7 +2356,15 @@ export class SessionManager implements KTeamService {
   }
 
   private async recover(): Promise<void> {
-    for (const session of await this.list()) {
+    const sessions = await this.list();
+    const tmuxSessions = await this.tmux.listSessions();
+    for (const session of sessions) {
+      // Terminal panes are exceptional restart wreckage. Inventory tmux ONCE
+      // and probe only names that actually exist instead of forking one
+      // `has-session` per historical session. Never use the snapshot to skip
+      // an ACTIVE session: a launch can race boot after the inventory, and its
+      // fresh state probe is the pane-safe guard against a false failure.
+      if (terminalStatuses.includes(session.state.status) && !tmuxSessions.has(session.config.tmuxSession)) continue;
       try {
         await this.recoverSession(session);
       } catch (error) {
@@ -2279,7 +2520,7 @@ export class SessionManager implements KTeamService {
           }));
           await this.emit(id, 'transcript.discovered', { file }, 'watcher');
         },
-        onEvents: async (events, cursor) => await this.handleClaudeEvents(id, events, cursor.endOffset),
+        onEvents: async (events, cursor) => await this.handleClaudeEvents(id, events, cursor),
         onCheckpoint: async cursor => {
           await this.store.updateState<SessionState>(id, current => ({
             ...current,
@@ -2325,6 +2566,17 @@ export class SessionManager implements KTeamService {
         ...current,
         harnessSessionId,
         transcriptFile,
+        harnessSessionBaseline: undefined,
+        updatedAt: now(),
+      }));
+      view = { ...view, config };
+    } else if (view.config.harnessSessionBaseline !== undefined) {
+      // The baseline exists only to distinguish the rollout created by this
+      // launch. Once both identifiers are known it is dead O(fleet) baggage in
+      // config.json, SQLite metadata, and every session response.
+      const config = await this.store.updateConfig<SessionConfig>(id, current => ({
+        ...current,
+        harnessSessionBaseline: undefined,
         updatedAt: now(),
       }));
       view = { ...view, config };
@@ -2339,11 +2591,12 @@ export class SessionManager implements KTeamService {
           ...current,
           harnessSessionId,
           transcriptFile: file,
+          harnessSessionBaseline: undefined,
           updatedAt: now(),
         }));
         await this.emit(id, 'transcript.discovered', { file, harnessSessionId }, 'watcher');
       },
-      onEvents: async (events, cursor) => await this.handleCodexEvents(id, events, cursor.endOffset),
+      onEvents: async (events, cursor) => await this.handleCodexEvents(id, events, cursor),
       onCheckpoint: async cursor => {
         await this.store.updateState<SessionState>(id, current => ({
           ...current,
@@ -2748,7 +3001,10 @@ export class SessionManager implements KTeamService {
           // the very tool_result of `kteam signal waiting` erase the park and
           // hand the session straight back to the nudge, the stall kill, and
           // the automode auto-continue.
-          const waiting = lifecycleSuspended(view.state);
+          // Suspends the ceiling, the lost-prompt reaper, the nudge and the kill
+          // below — for a declared wait, a waiting status, OR any interactive
+          // session (immortal by mode: see reflexSuspended).
+          const waiting = reflexSuspended(view.config, view.state);
           const startedAt = view.state.startedAt ? Date.parse(view.state.startedAt) : Date.parse(view.config.createdAt);
           // Time spent in declared waits is credited back: a babysitter parked
           // for three hours has not been RUNNING for three hours, and the
@@ -3070,16 +3326,23 @@ export class SessionManager implements KTeamService {
   private async handleClaudeEvents(
     id: string,
     events: readonly ClaudeNormalizedEvent[],
-    offset: number,
+    cursor: TranscriptCursor,
   ): Promise<void> {
+    const offset = cursor.endOffset;
     await this.serialized(id, async () => {
       let view = await this.get(id);
       await this.correlateNativeSends(id, view, events);
       view = await this.get(id);
       let autoQuestion = false;
+      // The harness already wrote these records. kteam INDEXES them where they
+      // live (one SQLite row each, no bytes) and broadcasts them live; it does
+      // not copy them into events.jsonl or chat.jsonl. Only the records the
+      // harness does NOT produce — kteam's own control/lifecycle events — are
+      // journalled, which is what makes the journal small and authoritative.
+      this.indexChatRecords(id, view, events, cursor);
       for (const event of events) {
-        await appendFile(path.join(view.directory, 'chat.jsonl'), `${JSON.stringify(event)}\n`);
-        await this.emit(id, event.type, event.data, 'claude', view.config.turn);
+        if (HARNESS_DERIVED_EVENT_TYPES.has(event.type)) this.broadcastChat(id, event, view.config.turn, 'claude');
+        else await this.emit(id, event.type, event.data, 'claude', view.config.turn);
         if (event.type === 'interaction.question') {
           await appendFile(
             path.join(view.directory, 'channel', 'outbox.jsonl'),
@@ -3209,15 +3472,26 @@ export class SessionManager implements KTeamService {
     });
   }
 
-  private async handleCodexEvents(id: string, events: readonly CodexNormalizedEvent[], offset: number): Promise<void> {
+  private async handleCodexEvents(
+    id: string,
+    events: readonly CodexNormalizedEvent[],
+    cursor: TranscriptCursor,
+  ): Promise<void> {
+    const offset = cursor.endOffset;
     await this.serialized(id, async () => {
       let view = await this.get(id);
       await this.correlateNativeSends(id, view, events);
       view = await this.get(id);
       let autoQuestion = false;
+      // The harness already wrote these records. kteam INDEXES them where they
+      // live (one SQLite row each, no bytes) and broadcasts them live; it does
+      // not copy them into events.jsonl or chat.jsonl. Only the records the
+      // harness does NOT produce — kteam's own control/lifecycle events — are
+      // journalled, which is what makes the journal small and authoritative.
+      this.indexChatRecords(id, view, events, cursor);
       for (const event of events) {
-        await appendFile(path.join(view.directory, 'chat.jsonl'), `${JSON.stringify(event)}\n`);
-        await this.emit(id, event.type, event.data, 'codex', view.config.turn);
+        if (HARNESS_DERIVED_EVENT_TYPES.has(event.type)) this.broadcastChat(id, event, view.config.turn, 'codex');
+        else await this.emit(id, event.type, event.data, 'codex', view.config.turn);
         if (event.type === 'interaction.question') {
           await appendFile(
             path.join(view.directory, 'channel', 'outbox.jsonl'),
@@ -3398,6 +3672,61 @@ export class SessionManager implements KTeamService {
     if (patch.status !== undefined && terminalStatuses.includes(patch.status)) {
       setTimeout(() => void this.reportLostNativeSends(id).catch(() => undefined), 0);
     }
+  }
+
+  /** Index one harness record's chat events as pointers into the harness's OWN
+   *  transcript. No bytes are written — this replaces what used to be an
+   *  events.jsonl append plus a chat.jsonl append per event. */
+  private indexChatRecords(
+    id: string,
+    view: SessionView,
+    events: readonly { type: string; timestamp?: string }[],
+    cursor: TranscriptCursor,
+  ): void {
+    const entries = events.flatMap((event, index) =>
+      HARNESS_DERIVED_EVENT_TYPES.has(event.type)
+        ? [
+            {
+              time: event.timestamp ?? now(),
+              type: event.type,
+              turn: view.config.turn,
+              sourceFile: cursor.file,
+              byteOffset: cursor.startOffset,
+              // The record's own line length, excluding its newline.
+              byteLength: Math.max(0, cursor.endOffset - cursor.startOffset - 1),
+              recordIndex: index,
+              fingerprint: chatEventFingerprint(event),
+            },
+          ]
+        : [],
+    );
+    try {
+      this.store.appendChatPointers(id, entries);
+    } catch (error) {
+      this.chatIndexChecks.delete(id);
+      console.error(`kteamd: chat pointer index failed for ${id}: ${error}`);
+    }
+  }
+
+  /** Deliver a harness-derived chat event to live subscribers WITHOUT
+   *  journalling it. `sequence` is 0: it has no position in kteam's journal
+   *  (its durable home is the harness transcript, indexed by chat pointer). */
+  private broadcastChat(
+    id: string,
+    event: { type: string; data: unknown },
+    turn: number,
+    source: 'claude' | 'codex',
+  ): void {
+    const live: KTeamEvent = {
+      sequence: 0,
+      time: now(),
+      sessionId: id,
+      turn,
+      type: event.type,
+      source,
+      data: event.data,
+    };
+    for (const listener of this.listeners) listener(live);
   }
 
   /** Emit without making the caller wait for the journal write. Ordering is
@@ -3809,6 +4138,25 @@ export class SessionManager implements KTeamService {
   }
 
   private async gitFingerprint(cwd: string): Promise<string> {
+    const key = path.resolve(cwd);
+    const cached = this.gitFingerprintCache.get(key);
+    if (cached && Date.now() - cached.at < GIT_FINGERPRINT_COALESCE_MS) {
+      if (cached.pending) return await cached.pending;
+      if (cached.value !== undefined) return cached.value;
+    }
+    const pending = this.computeGitFingerprint(key);
+    this.gitFingerprintCache.set(key, { at: Date.now(), pending });
+    try {
+      const value = await pending;
+      this.gitFingerprintCache.set(key, { at: Date.now(), value });
+      return value;
+    } catch (error) {
+      if (this.gitFingerprintCache.get(key)?.pending === pending) this.gitFingerprintCache.delete(key);
+      throw error;
+    }
+  }
+
+  private async computeGitFingerprint(cwd: string): Promise<string> {
     if ((await run(['git', '-C', cwd, 'rev-parse', '--is-inside-work-tree'])).code !== 0) return '';
     const [statusResult, statResult, worktreeDiff, indexDiff] = await Promise.all([
       run(['git', '-C', cwd, 'status', '--short']),
@@ -4614,14 +4962,32 @@ export class SessionManager implements KTeamService {
     for (const v of sessions) {
       if (results.length >= limit || scanned >= MAX_SCAN) break;
       scanned++;
-      const raw = await readFile(path.join(sessionDir(this.paths, v.config.id), 'chat.jsonl'), 'utf8').catch(() => '');
+      // Chat lives in the HARNESS transcript now (chat_pointers). Fast-reject
+      // against that file, exactly as this used to do against chat.jsonl, and
+      // fall back to the legacy copy for pre-pointer sessions.
+      const pointerCount = this.store.chatPointerCount(v.config.id);
+      const legacyRaw = await readFile(path.join(sessionDir(this.paths, v.config.id), 'chat.jsonl'), 'utf8').catch(
+        () => '',
+      );
+      const transcriptRaw = v.config.transcriptFile
+        ? await readFile(v.config.transcriptFile, 'utf8').catch(() => '')
+        : '';
+      // Pointer sessions search the authoritative transcript directly. A
+      // rebuilt-yet-empty pointer index also chooses it when there is no
+      // legacy copy; a deleted harness file falls back to legacy history.
+      const useTranscript = transcriptRaw.length > 0 && (pointerCount > 0 || legacyRaw.length === 0);
+      const raw = useTranscript ? transcriptRaw : legacyRaw;
       if (!raw || !re.test(raw)) continue;
+      const normalize =
+        v.config.harness === 'codex'
+          ? (line: string) => parseCodexTranscriptLine(line) as unknown[]
+          : (line: string) => parseClaudeTranscriptLine(line) as unknown[];
       const records = raw
         .split('\n')
         .filter(Boolean)
         .flatMap(line => {
           try {
-            return [JSON.parse(line) as unknown];
+            return useTranscript ? normalize(line) : [JSON.parse(line) as unknown];
           } catch {
             return [];
           }

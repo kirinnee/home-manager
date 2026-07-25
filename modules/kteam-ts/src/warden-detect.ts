@@ -126,6 +126,14 @@ export function detectAnomalies(
     // No-recursion: never flag a warden session or any of its descendants (it
     // would make the warden escalate against itself in an endless loop).
     if (inWardenLineage(view)) continue;
+    // IMMORTAL INTERACTIVE: an interactive session is a human's terminal. Every
+    // anomaly class here answers the question "is anybody looking after this?" —
+    // and for interactive the answer is yes, by construction. Idle for days at a
+    // ready prompt, an unanswered question, even a pane the human closed are all
+    // normal states, not wreckage to escalate. Skipping the session entirely
+    // (rather than per-kind) is what makes "never flagged" auditable: a new
+    // anomaly class cannot silently start catching interactive sessions.
+    if (config.mode === 'interactive') continue;
     const base: Omit<WardenAnomaly, 'kind' | 'detail'> = {
       sessionId: config.id,
       teammate: config.teammate,
@@ -142,10 +150,8 @@ export function detectAnomalies(
     }
 
     // A waiting status is only "unattended" worth escalating when nobody is
-    // expected to be at the keyboard. AUTO sessions have no human driver, so any
-    // waiting-idle status is anomalous. INTERACTIVE sessions are often parked at
-    // a ready prompt on purpose — only an explicit unanswered question
-    // (awaiting_question) counts there, not a plain idle prompt.
+    // expected to be at the keyboard — which, now that interactive sessions are
+    // skipped outright above, is every session that reaches this line.
     // A DECLARED wait (`kteam signal waiting`) is deliberate, not unattended:
     // the teammate said what it is waiting for and the daemon holds the
     // deadline. It only becomes an anomaly once that deadline has visibly
@@ -170,8 +176,7 @@ export function detectAnomalies(
         since: new Date(declaredWaitDeadline).toISOString(),
       });
     }
-    const waitingEscalatable =
-      declaredWait === undefined && (config.mode === 'auto' || state.status === 'awaiting_question');
+    const waitingEscalatable = declaredWait === undefined;
     if (waitingEscalatable && WAITING_IDLE.includes(state.status)) {
       const idleSince = latestMs(
         state.lastActivityAt,

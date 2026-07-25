@@ -1,4 +1,5 @@
 import { Database } from 'bun:sqlite';
+import { createHash } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rmSync } from 'fs';
 import { mkdir, open, readFile, readdir, rename, rm, stat } from 'fs/promises';
 import os from 'os';
@@ -75,9 +76,16 @@ export interface EventStoreOptions {
  *  per-session `sequence` is the authoritative order, and the fleet view is
  *  merged by TIME at read time off `events_fleet_idx`.
  *
+ *  v4 added `chat_pointers`: harness-derived chat records are INDEXED where the
+ *  harness already wrote them instead of being re-encoded into events.jsonl and
+ *  chat.jsonl. One real session held 8.2 MB of events.jsonl + 6.2 MB of
+ *  chat.jsonl against a 9.6 MB harness transcript — 14 MB of derived copies of
+ *  a file we already have. Now kteam journals only what the harness does NOT
+ *  record (its own control/lifecycle events) and transforms the rest on read.
+ *
  *  The journals are authoritative and the DB is derived, so a database from an
  *  older generation is deleted and rebuilt rather than migrated. */
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 interface EventPointerRow {
   byte_offset: number;
@@ -116,6 +124,27 @@ interface SessionRow {
   last_sequence: number;
   config_json: string | null;
   state_json: string | null;
+}
+
+export interface ChatPointerRow {
+  ordinal: number;
+  time: string;
+  type: string;
+  turn: number;
+  source_file: string;
+  byte_offset: number;
+  byte_length: number;
+  record_index: number;
+  event_fingerprint: string;
+}
+
+/** Strong identity for one normalized harness event. A type check alone is
+ *  insufficient: after compaction, a different assistant-text record can sit
+ *  at the exact same offset and length. */
+export function chatEventFingerprint(event: unknown): string {
+  const encoded = JSON.stringify(event);
+  if (encoded === undefined) throw new TypeError('chat event is not JSON serializable');
+  return createHash('sha256').update(encoded).digest('base64url');
 }
 
 interface JournalSyncRow {
@@ -364,7 +393,13 @@ export class EventStore {
         user_version: number;
       }
     ).user_version;
-    if (version !== SCHEMA_VERSION) {
+    // v3 → v4 is additive (chat_pointers only), so keep the expensive event
+    // pointer index in place. On the measured 707-session / 961 MB store,
+    // throwing v3 away made this rollout spend 23.5 s rebuilding bytes that
+    // are unchanged. Older/unknown generations still take the proven clean
+    // rebuild path below.
+    const canMigrateInPlace = version === 3 && SCHEMA_VERSION === 4;
+    if (version !== SCHEMA_VERSION && !canMigrateInPlace) {
       const hasTables =
         database.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'").all().length > 0;
       if (hasTables) {
@@ -379,6 +414,12 @@ export class EventStore {
     }
     chmodSync(this.databasePath, 0o600);
     database.exec('PRAGMA journal_mode = WAL');
+    // The JSONL journal is fsynced first and is authoritative; SQLite stores
+    // disposable byte pointers. FULL made every event pay two additional DB
+    // syncs (measured total: 3.01 fsync/event). WAL+NORMAL remains
+    // crash-consistent while allowing the index to be rebuilt after lost
+    // recent transactions, leaving the one durability sync that matters.
+    database.exec('PRAGMA synchronous = NORMAL');
     database.exec('PRAGMA foreign_keys = ON');
     database.exec('PRAGMA busy_timeout = 5000');
     database.exec(`
@@ -407,6 +448,37 @@ export class EventStore {
       );
       CREATE INDEX IF NOT EXISTS events_type_idx ON events(type);
       CREATE INDEX IF NOT EXISTS sessions_status_idx ON sessions(status);
+      CREATE TABLE IF NOT EXISTS chat_pointers (
+        session_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL,
+        time TEXT NOT NULL,
+        type TEXT NOT NULL,
+        turn INTEGER NOT NULL,
+        /** The HARNESS's own transcript file — kteam never wrote these bytes. */
+        source_file TEXT NOT NULL,
+        byte_offset INTEGER NOT NULL,
+        byte_length INTEGER NOT NULL,
+        /** Which normalized event within that one JSONL record (an assistant
+         *  message with three content blocks yields three). */
+        record_index INTEGER NOT NULL,
+        /** SHA-256 of the exact normalized event. Type alone cannot detect a
+         *  same-shaped record moved into this offset by compaction. */
+        event_fingerprint TEXT NOT NULL,
+        PRIMARY KEY (session_id, ordinal)
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS chat_pointer_identity_idx
+        ON chat_pointers(session_id, source_file, byte_offset, record_index, event_fingerprint);
+      CREATE TABLE IF NOT EXISTS chat_sources (
+        session_id TEXT NOT NULL,
+        source_file TEXT NOT NULL,
+        device TEXT NOT NULL,
+        inode TEXT NOT NULL,
+        source_size INTEGER NOT NULL,
+        source_mtime_ms INTEGER NOT NULL,
+        pointer_count INTEGER NOT NULL,
+        PRIMARY KEY (session_id, source_file),
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      );
     `);
     // The fleet feed's ONLY ordering index. (time, session_id, sequence) is the
     // full ordering key, so the merged cross-session page is answered by an
@@ -690,6 +762,8 @@ export class EventStore {
   forgetSession(sessionId: string): void {
     validateSessionId(sessionId);
     this.assertOpen();
+    this.database.query('DELETE FROM chat_pointers WHERE session_id = ?').run(sessionId);
+    this.database.query('DELETE FROM chat_sources WHERE session_id = ?').run(sessionId);
     this.database.query('DELETE FROM sessions WHERE id = ?').run(sessionId);
     this.sessionCache.delete(sessionId);
     this.lastSequences.delete(sessionId);
@@ -772,6 +846,273 @@ export class EventStore {
       )
       .all(sessionId, limit);
     return this.resolvePointerRows(rows.reverse());
+  }
+
+  // ── Harness-transcript chat pointers ──────────────────────────────────────
+  //
+  // kteam does not copy the harness's transcript. It records WHERE each chat
+  // record lives in the harness's own file and re-normalizes on read, using the
+  // same parsers the live watcher uses.
+  //
+  // DOCUMENTED TRADEOFF: the harness owns those files and may compact, rotate,
+  // or delete them. Resolution therefore verifies identity (the bytes must
+  // still parse into a record whose normalized event at `record_index` has the
+  // recorded type) and SKIPS anything that no longer matches. If a harness file
+  // disappears, that session's chat history is best-effort and may be short or
+  // empty — kteam's own control/lifecycle journal is unaffected and remains
+  // fully authoritative.
+
+  /** Record pointer rows for the normalized events of ONE harness record. */
+  appendChatPointers(
+    sessionId: string,
+    entries: readonly {
+      time: string;
+      type: string;
+      turn: number;
+      sourceFile: string;
+      byteOffset: number;
+      byteLength: number;
+      recordIndex: number;
+      fingerprint: string;
+    }[],
+  ): void {
+    validateSessionId(sessionId);
+    this.assertOpen();
+    if (entries.length === 0) return;
+    const insert = this.database.query(
+      `INSERT INTO chat_pointers
+         (session_id, ordinal, time, type, turn, source_file, byte_offset, byte_length, record_index, event_fingerprint)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT DO NOTHING`,
+    );
+    this.database.transaction(() => {
+      this.ensureSessionRow(sessionId);
+      let ordinal =
+        this.database
+          .query<
+            { value: number },
+            [string]
+          >('SELECT COALESCE(MAX(ordinal), 0) AS value FROM chat_pointers WHERE session_id = ?')
+          .get(sessionId)?.value ?? 0;
+      for (const entry of entries) {
+        const nextOrdinal = ordinal + 1;
+        const result = insert.run(
+          sessionId,
+          nextOrdinal,
+          entry.time,
+          entry.type,
+          entry.turn,
+          entry.sourceFile,
+          entry.byteOffset,
+          entry.byteLength,
+          entry.recordIndex,
+          entry.fingerprint,
+        );
+        // A replayed transcript line hits the identity unique index and writes
+        // nothing. Reuse that ordinal for the next genuinely-new record so
+        // pagination remains dense.
+        if (result.changes > 0) ordinal = nextOrdinal;
+      }
+    })();
+  }
+
+  chatPointerCount(sessionId: string): number {
+    validateSessionId(sessionId);
+    this.assertOpen();
+    const row = this.database
+      .query<{ value: number }, [string]>('SELECT COUNT(*) AS value FROM chat_pointers WHERE session_id = ?')
+      .get(sessionId);
+    return row?.value ?? 0;
+  }
+
+  /** Whether a previous complete reconstruction covered these exact harness
+   *  bytes. This is a skip hint only: pointer resolution still verifies every
+   *  event fingerprint before serving it. */
+  chatSourceCurrent(
+    sessionId: string,
+    sourceFile: string,
+    info: { dev: number | bigint; ino: number | bigint; size: number; mtimeMs: number },
+  ): boolean {
+    validateSessionId(sessionId);
+    this.assertOpen();
+    const row = this.database
+      .query<
+        {
+          device: string;
+          inode: string;
+          source_size: number;
+          source_mtime_ms: number;
+          pointer_count: number;
+        },
+        [string, string]
+      >(
+        `SELECT device, inode, source_size, source_mtime_ms, pointer_count
+           FROM chat_sources WHERE session_id = ? AND source_file = ?`,
+      )
+      .get(sessionId, sourceFile);
+    if (
+      !row ||
+      row.device !== info.dev.toString() ||
+      row.inode !== info.ino.toString() ||
+      row.source_size !== info.size ||
+      row.source_mtime_ms !== Math.trunc(info.mtimeMs)
+    )
+      return false;
+    const actual =
+      this.database
+        .query<
+          { value: number },
+          [string, string]
+        >('SELECT COUNT(*) AS value FROM chat_pointers WHERE session_id = ? AND source_file = ?')
+        .get(sessionId, sourceFile)?.value ?? 0;
+    return actual >= row.pointer_count;
+  }
+
+  chatSourceKnown(sessionId: string, sourceFile: string): boolean {
+    validateSessionId(sessionId);
+    this.assertOpen();
+    return (
+      this.database
+        .query<
+          { value: number },
+          [string, string]
+        >('SELECT 1 AS value FROM chat_sources WHERE session_id = ? AND source_file = ?')
+        .get(sessionId, sourceFile) !== null
+    );
+  }
+
+  /** Drop an unverified source's rows before its first complete reconstruction.
+   *  A live watcher may have indexed NEW tail records before the lazy scan;
+   *  retaining those ordinals would put the old prefix after the new tail. */
+  forgetChatSourcePointers(sessionId: string, sourceFile: string): void {
+    validateSessionId(sessionId);
+    this.assertOpen();
+    this.database
+      .query('DELETE FROM chat_pointers WHERE session_id = ? AND source_file = ?')
+      .run(sessionId, sourceFile);
+    this.database.query('DELETE FROM chat_sources WHERE session_id = ? AND source_file = ?').run(sessionId, sourceFile);
+  }
+
+  markChatSource(
+    sessionId: string,
+    sourceFile: string,
+    info: { dev: number | bigint; ino: number | bigint; size: number; mtimeMs: number },
+  ): void {
+    validateSessionId(sessionId);
+    this.assertOpen();
+    const pointerCount =
+      this.database
+        .query<
+          { value: number },
+          [string, string]
+        >('SELECT COUNT(*) AS value FROM chat_pointers WHERE session_id = ? AND source_file = ?')
+        .get(sessionId, sourceFile)?.value ?? 0;
+    this.database
+      .query(
+        `INSERT INTO chat_sources
+           (session_id, source_file, device, inode, source_size, source_mtime_ms, pointer_count)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(session_id, source_file) DO UPDATE SET
+           device = excluded.device,
+           inode = excluded.inode,
+           source_size = excluded.source_size,
+           source_mtime_ms = excluded.source_mtime_ms,
+           pointer_count = excluded.pointer_count`,
+      )
+      .run(
+        sessionId,
+        sourceFile,
+        info.dev.toString(),
+        info.ino.toString(),
+        info.size,
+        Math.trunc(info.mtimeMs),
+        pointerCount,
+      );
+  }
+
+  /** A window of chat pointer rows, oldest-first. */
+  chatPointers(sessionId: string, offset: number, limit: number): ChatPointerRow[] {
+    validateSessionId(sessionId);
+    this.assertOpen();
+    return this.database
+      .query<ChatPointerRow, [string, number, number]>(
+        `SELECT ordinal, time, type, turn, source_file, byte_offset, byte_length, record_index, event_fingerprint
+           FROM chat_pointers
+          WHERE session_id = ?
+          ORDER BY ordinal ASC
+          LIMIT ? OFFSET ?`,
+      )
+      .all(sessionId, limit, Math.max(0, offset));
+  }
+
+  /** Resolve pointer rows into normalized chat records using `normalize`, which
+   *  the caller supplies (the harness parser for this session). Rows whose bytes
+   *  no longer produce a matching record are SKIPPED and counted — that is the
+   *  compaction/rotation path, and it degrades the view instead of failing it. */
+  resolveChatPointers(
+    rows: readonly ChatPointerRow[],
+    normalize: (line: string) => unknown[],
+  ): { records: unknown[]; skipped: number } {
+    const records: unknown[] = [];
+    let skipped = 0;
+    const descriptors = new Map<string, number | undefined>();
+    try {
+      for (const row of rows) {
+        if (!descriptors.has(row.source_file)) {
+          let descriptor: number | undefined;
+          try {
+            descriptor = openSync(row.source_file, 'r');
+          } catch {
+            descriptor = undefined;
+          }
+          descriptors.set(row.source_file, descriptor);
+        }
+        const descriptor = descriptors.get(row.source_file);
+        if (descriptor === undefined) {
+          skipped += 1;
+          continue;
+        }
+        const buffer = Buffer.alloc(row.byte_length);
+        let read = 0;
+        try {
+          read = readSync(descriptor, buffer, 0, row.byte_length, row.byte_offset);
+        } catch {
+          skipped += 1;
+          continue;
+        }
+        if (read !== row.byte_length) {
+          skipped += 1;
+          continue;
+        }
+        let normalized: unknown[];
+        try {
+          normalized = normalize(buffer.toString('utf8', 0, read));
+        } catch {
+          skipped += 1;
+          continue;
+        }
+        const record = normalized[row.record_index] as { type?: string } | undefined;
+        // IDENTITY CHECK, same contract as readPointer: a compacted file can
+        // hold a different-but-valid record at this offset, and serving it would
+        // be silent corruption of the history.
+        if (!record || record.type !== row.type || chatEventFingerprint(record) !== row.event_fingerprint) {
+          skipped += 1;
+          continue;
+        }
+        records.push(record);
+      }
+    } finally {
+      for (const descriptor of descriptors.values()) if (descriptor !== undefined) closeSync(descriptor);
+    }
+    return { records, skipped };
+  }
+
+  /** Drop a session's chat pointers (harness file rotated — re-index instead). */
+  forgetChatPointers(sessionId: string): void {
+    validateSessionId(sessionId);
+    this.assertOpen();
+    this.database.query('DELETE FROM chat_pointers WHERE session_id = ?').run(sessionId);
+    this.database.query('DELETE FROM chat_sources WHERE session_id = ?').run(sessionId);
   }
 
   /** The newest indexed event of the fleet, as a feed cursor. */
@@ -886,6 +1227,8 @@ export class EventStore {
     this.assertOpen();
     await this.waitForAppends();
     this.database.transaction(() => {
+      this.database.exec('DELETE FROM chat_sources');
+      this.database.exec('DELETE FROM chat_pointers');
       this.database.exec('DELETE FROM events');
       this.database.exec('DELETE FROM sessions');
     })();

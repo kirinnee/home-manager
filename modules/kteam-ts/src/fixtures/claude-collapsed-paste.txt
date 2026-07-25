@@ -1,0 +1,12 @@
+● Read src/session-manager.ts (1200 lines)
+  ⎿  Read 1200 lines
+
+● I'll start by auditing every kill path.
+
+✻ Auditing… (2m 14s · ↑ 18.4k tokens · esc to interrupt)
+
+────────────────────────────────────────────────────────────────────────────────
+❯ [Pasted text #1 +16 lines]
+    paste again to expand
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on · ? for shortcuts

@@ -221,26 +221,54 @@ describe('warden anomaly detection', () => {
     expect(result.anomalies).toHaveLength(0);
   });
 
-  test('interactive sessions flag only an explicit unanswered question, not a parked prompt', () => {
-    const parkedUser = detectAnomalies(
-      [view('awaiting_user', { config: { mode: 'interactive' }, state: { lastActivityAt: iso(45 * 60_000) } })],
-      NOW,
-      OPTIONS,
-    );
-    expect(parkedUser.anomalies).toHaveLength(0);
-    const parkedWaiting = detectAnomalies(
-      [view('waiting', { config: { mode: 'interactive' }, state: { lastActivityAt: iso(45 * 60_000) } })],
-      NOW,
-      OPTIONS,
-    );
-    expect(parkedWaiting.anomalies).toHaveLength(0);
-    const question = detectAnomalies(
-      [view('awaiting_question', { config: { mode: 'interactive' }, state: { lastActivityAt: iso(45 * 60_000) } })],
-      NOW,
-      OPTIONS,
-    );
-    expect(question.anomalies).toHaveLength(1);
-    expect(question.anomalies[0]!.kind).toBe('unattended_question');
+  // IMMORTAL INTERACTIVE: an interactive session is a human's terminal, so the
+  // sweep never flags it — no matter how long it sits, what it is waiting on, or
+  // whether its pane died. Each case below is an anomaly class that WOULD fire
+  // for the same state in auto mode (asserted alongside, so the test proves the
+  // exemption rather than an inert detector).
+  test('interactive sessions are never flagged, in any anomaly class', () => {
+    const idle = { lastActivityAt: iso(45 * 60_000) };
+    for (const status of ['awaiting_user', 'waiting', 'awaiting_question'] as const) {
+      expect(
+        detectAnomalies([view(status, { config: { mode: 'interactive' }, state: idle })], NOW, OPTIONS).anomalies,
+      ).toHaveLength(0);
+      expect(
+        detectAnomalies([view(status, { config: { mode: 'auto' }, state: idle })], NOW, OPTIONS).anomalies.length,
+      ).toBeGreaterThan(0);
+    }
+    // dead monitor
+    expect(
+      detectAnomalies([view('running', { config: { mode: 'interactive' }, hasLiveMonitor: false })], NOW, OPTIONS)
+        .anomalies,
+    ).toHaveLength(0);
+    expect(
+      detectAnomalies([view('running', { config: { mode: 'auto' }, hasLiveMonitor: false })], NOW, OPTIONS).anomalies
+        .length,
+    ).toBeGreaterThan(0);
+    // a pane the human closed is not wreckage to escalate
+    expect(
+      detectAnomalies(
+        [view('failed', { config: { mode: 'interactive' }, state: { finishedAt: iso(60_000) } })],
+        NOW,
+        OPTIONS,
+      ).anomalies,
+    ).toHaveLength(0);
+    // sus_thinking: counters advancing, transcript silent for 20m
+    const susState = { startedAt: iso(30 * 60_000), lastCounterAdvanceAt: iso(0), lastTranscriptAt: iso(20 * 60_000) };
+    expect(
+      detectAnomalies([view('thinking', { config: { mode: 'interactive' }, state: susState })], NOW, OPTIONS).anomalies,
+    ).toHaveLength(0);
+    expect(
+      detectAnomalies([view('thinking', { config: { mode: 'auto' }, state: susState })], NOW, OPTIONS).anomalies.length,
+    ).toBeGreaterThan(0);
+    // an overdue declared wait belongs to the human at the keyboard
+    const overdue = { waiting: { since: iso(5 * 60 * 60_000), until: iso(4 * 60 * 60_000), on: 'CI' } };
+    expect(
+      detectAnomalies([view('waiting', { config: { mode: 'interactive' }, state: overdue })], NOW, OPTIONS).anomalies,
+    ).toHaveLength(0);
+    expect(
+      detectAnomalies([view('waiting', { config: { mode: 'auto' }, state: overdue })], NOW, OPTIONS).anomalies.length,
+    ).toBeGreaterThan(0);
   });
 });
 

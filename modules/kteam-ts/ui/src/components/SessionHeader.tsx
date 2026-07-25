@@ -119,6 +119,17 @@ export const SessionHeader = memo(function SessionHeader({
         <span className="shrink-0">turn {state.turn}</span>
         <Sep />
         <span className="shrink-0 text-faint">{config.mode} mode</span>
+        {config.remoteControl && (
+          <>
+            <Sep />
+            <span
+              className="shrink-0 text-faint"
+              title="launched with Remote Control (--rc): also visible in your RC surface"
+            >
+              rc
+            </span>
+          </>
+        )}
       </div>
 
       {/* row 3 — context + liveness + ws */}

@@ -183,7 +183,9 @@ export class ApiClient {
    *  on the same agent and label would be adopted as "my" session and the
    *  caller would then talk to someone else's teammate. */
   private async findCreatedSession(input: StartSessionRequest, sinceMs: number): Promise<SessionView | undefined> {
-    const expected = sessionName(input.name ?? input.prompt.trim().split(/\s+/).slice(0, 5).join('-'));
+    // Same derivation the daemon uses, including its bare-interactive fallback.
+    const derived = input.prompt?.trim() ? input.prompt.trim().split(/\s+/).slice(0, 5).join('-') : 'interactive';
+    const expected = sessionName(input.name ?? derived);
     if (!expected) return undefined;
     const sessions = await this.request<SessionView[]>('/v1/sessions', {}, RECOVERY_TIMEOUT_MS).catch(
       () => [] as SessionView[],

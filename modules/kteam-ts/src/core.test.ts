@@ -72,6 +72,65 @@ describe('harness support', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Remote Control (the crc shape) — kfleet declares it as
+// `aliases.crc.claude: --dangerously-skip-permissions --chrome --rc`, and we add
+// those flags to OUR launcher instead of launching the crc-* binary.
+// ---------------------------------------------------------------------------
+describe('remote control', () => {
+  test('adds the crc flag shape and nothing else, without disturbing kteam wiring', () => {
+    const args = interactiveHarnessArgs({ ...config('claude', 1, 'fable'), remoteControl: true, teammate: 'mordecai' });
+    expect(args).toContain('--rc');
+    expect(args).toContain('--chrome');
+    // The RC session is LABELLED for its teammate but still auto-named, so
+    // relaunching the same session cannot collide on a fixed name.
+    expect(args[args.indexOf('--remote-control-session-name-prefix') + 1]).toBe('kteam-mordecai');
+    expect(args).not.toContain('--remote-control');
+    // Everything kteam correlates on survives: session-id (turn 1), the model
+    // flag, and the automode AskUserQuestion ban.
+    expect(args[args.indexOf('--session-id') + 1]).toBe('00000000-0000-4000-8000-000000000000');
+    expect(args[args.indexOf('--model') + 1]).toBe('fable');
+    expect(args).toContain('--disallowedTools');
+    expect(args[0]).toBe('--dangerously-skip-permissions');
+  });
+
+  test('composes with resume (turn 2) — RC never replaces the resume correlation', () => {
+    const args = interactiveHarnessArgs({ ...config('claude', 2), remoteControl: true });
+    expect(args[args.indexOf('--resume') + 1]).toBe('00000000-0000-4000-8000-000000000000');
+    expect(args).toContain('--rc');
+  });
+
+  test('interactive + RC keeps AskUserQuestion available (only automode bans it)', () => {
+    const args = interactiveHarnessArgs({ ...config('claude', 1), mode: 'interactive', remoteControl: true });
+    expect(args).toContain('--rc');
+    expect(args).not.toContain('--disallowedTools');
+  });
+
+  test('codex has no RC flag: the request is ignored rather than passed on', () => {
+    const args = interactiveHarnessArgs({ ...config('codex', 1), remoteControl: true });
+    expect(args).not.toContain('--rc');
+    expect(args).not.toContain('--chrome');
+  });
+
+  test('off by default in the arg builder (the daemon decides the default)', () => {
+    expect(interactiveHarnessArgs(config('claude', 1))).not.toContain('--rc');
+  });
+});
+
+describe('harness-flag escape hatch', () => {
+  test('claude: appended verbatim, after everything kteam owns', () => {
+    const args = interactiveHarnessArgs({ ...config('claude', 1), harnessFlags: ['--verbose', '--bare'] });
+    expect(args.slice(-2)).toEqual(['--verbose', '--bare']);
+  });
+
+  test('codex resume: extra flags go BEFORE the positional session id', () => {
+    const args = interactiveHarnessArgs({ ...config('codex', 2), harnessFlags: ['--verbose'] });
+    expect(args[0]).toBe('resume');
+    expect(args.at(-1)).toBe('00000000-0000-4000-8000-000000000000');
+    expect(args.at(-2)).toBe('--verbose');
+  });
+});
+
 test('contextWindowForModel: 1m suffix, default, and overrides (turn-020)', () => {
   const { contextWindowForModel } = require('./core');
   expect(contextWindowForModel('claude-fable-5[1m]')).toBe(1_000_000);

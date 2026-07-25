@@ -39,6 +39,17 @@ export interface SessionConfig {
    *  flag and let the wrapper keep its own default. */
   model?: string;
   mode: InteractionMode;
+  /** Launch the harness with Remote Control enabled, so the session also shows
+   *  up in the user's RC surface (claude only — codex has no RC flag). Default
+   *  ON for claude wrappers; `--no-rc` / daemon config `remoteControl: false`
+   *  turns it off. Orthogonal to `mode`: an auto teammate still runs
+   *  autonomously, it is merely also visible/steerable from RC. */
+  remoteControl?: boolean;
+  /** Escape hatch: extra harness flags appended verbatim to the generated
+   *  launcher (`kteam start --harness-flag …`, repeatable). Kept in the config
+   *  so the launcher a session was started with is fully reconstructible on
+   *  resume. */
+  harnessFlags?: string[];
   cwd: string;
   createdAt: string;
   updatedAt: string;
@@ -207,7 +218,11 @@ export interface KTeamEvent<T = unknown> {
 }
 
 export interface StartSessionRequest {
-  prompt: string;
+  /** The opening turn. REQUIRED for auto mode (an autonomous teammate with no
+   *  task is meaningless) and OPTIONAL for interactive mode: a bare
+   *  `--mode interactive` start just brings the TUI up at its own prompt with
+   *  nothing injected, and the human drives it from the kteam UI or the pane. */
+  prompt?: string;
   agent: string;
   name?: string;
   label?: string;
@@ -216,6 +231,11 @@ export interface StartSessionRequest {
   parent?: string;
   cwd?: string;
   mode?: InteractionMode;
+  /** Launch with Remote Control (claude only). Omitted => the daemon default
+   *  (`remoteControl` in daemon config, itself defaulting to true). */
+  remoteControl?: boolean;
+  /** Extra harness flags appended to the generated launcher, verbatim. */
+  harnessFlags?: string[];
   /** Override the model. When omitted, kteam feeds the wrapper's kfleet default
    *  (KTEAM_MODEL); when that too is absent, no `--model` flag is passed. */
   model?: string;

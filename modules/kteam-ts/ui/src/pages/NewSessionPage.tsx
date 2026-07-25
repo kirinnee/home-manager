@@ -55,7 +55,10 @@ export function NewSessionPage() {
     return byHarness;
   }, [wrappers]);
 
-  const canSubmit = HAS_TOKEN && agent.trim().length > 0 && prompt.trim().length > 0 && !submitting;
+  // Interactive mode is a plain TUI a human drives: starting one with no task
+  // is the normal case (nothing is typed into it). Auto mode still needs a task.
+  const canSubmit =
+    HAS_TOKEN && agent.trim().length > 0 && (prompt.trim().length > 0 || mode === 'interactive') && !submitting;
 
   async function submit() {
     if (!canSubmit) return;
@@ -63,7 +66,7 @@ export function NewSessionPage() {
     setError(null);
     try {
       const view = await api.createSession({
-        prompt: prompt.trim(),
+        prompt: prompt.trim() || undefined,
         agent: agent.trim(),
         cwd: cwd.trim() || undefined,
         mode,
@@ -220,12 +223,19 @@ export function NewSessionPage() {
           />
         </Field>
 
-        <Field label="Opening prompt" hint="the task for this teammate">
+        <Field
+          label={mode === 'interactive' ? 'Opening message (optional)' : 'Opening prompt'}
+          hint={
+            mode === 'interactive'
+              ? 'leave empty to just open the TUI at its prompt — you drive it from the chat below'
+              : 'the task for this teammate'
+          }
+        >
           <Textarea
             value={prompt}
             onChange={e => setPrompt(e.target.value)}
             rows={6}
-            placeholder="Describe the task…"
+            placeholder={mode === 'interactive' ? '(optional) first message…' : 'Describe the task…'}
           />
         </Field>
 

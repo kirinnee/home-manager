@@ -279,6 +279,14 @@ program
   .option('--parent <id>', 'parent session (defaults to KTEAM_SESSION_ID when started from inside a teammate)')
   .option('--prompt-file <file>', 'read the task prompt from a file instead of the command line (use for long prompts)')
   .option('--model <model>', 'override the model (alias or full id); defaults to the wrapper KTEAM_MODEL')
+  .option('--rc', 'launch with Remote Control so the session is visible/steerable in the RC surface (claude; default)')
+  .option('--no-rc', 'launch WITHOUT Remote Control')
+  .option(
+    '--harness-flag <flag>',
+    'extra flag passed straight to the harness binary; repeatable',
+    (value, values: string[]) => [...values, value],
+    [],
+  )
   .option('--cwd <dir>', '', process.cwd())
   .option(
     '-i, --image <file>',
@@ -303,7 +311,7 @@ program
     'idempotency key (also KTEAM_REQUEST_ID): re-running start with the same id returns the SAME session instead of a second teammate',
   )
   .option('--json')
-  .action(async (parts: string[], options: Record<string, string | number | boolean | undefined>) => {
+  .action(async (parts: string[], options: Record<string, string | number | boolean | undefined>, command: Command) => {
     const initialAttachments = await Promise.all(
       ((options.image as unknown as string[]) ?? []).map(async filename => {
         const file = Bun.file(filename);
@@ -318,8 +326,11 @@ program
     const filePrompt = options.promptFile ? (await readFile(String(options.promptFile), 'utf8')).trim() : '';
     const argPrompt = parts.join(' ').trim();
     const prompt = [argPrompt, filePrompt].filter(Boolean).join('\n\n');
-    if (!prompt) {
-      console.error('provide a prompt (arguments and/or --prompt-file)');
+    // `--mode interactive` is a terminal for a human: starting one with no task
+    // is the normal case, and nothing is typed into it. Auto mode still needs a
+    // task - an autonomous teammate with no assignment can only misbehave.
+    if (!prompt && options.mode !== 'interactive') {
+      console.error('provide a prompt (arguments and/or --prompt-file), or use --mode interactive to start bare');
       process.exit(2);
     }
     const view = await (
@@ -334,6 +345,10 @@ program
         // inside one automatically records the parent (teammate trees).
         parent: (options.parent as string | undefined) ?? process.env.KTEAM_SESSION_ID,
         model: options.model as string | undefined,
+        // Only send an explicit RC decision when the user made one; otherwise the
+        // daemon's fleet default (config `remoteControl`, itself on) decides.
+        remoteControl: command.getOptionValueSource('rc') === 'cli' ? options.rc === true : undefined,
+        harnessFlags: (options.harnessFlag as unknown as string[]) ?? [],
         cwd: String(options.cwd),
         mode: options.mode as 'auto' | 'interactive',
         intervalSeconds: options.interval as number | undefined,
