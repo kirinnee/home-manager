@@ -2,20 +2,25 @@
 // banner when the daemon didn't substitute a token (i.e. we're on a non-loopback
 // origin).
 
+import { Search } from 'lucide-react';
 import { Link } from '../lib/router';
 import { ThemeToggle } from './ThemeToggle';
 import { HAS_TOKEN } from '../lib/api';
 import { useFleet } from '../lib/store';
 import { SidebarDrawerTrigger } from './AgentSidebar';
+import { PALETTE_KEYSHORTCUTS, paletteShortcutLabel } from './CommandPalette';
 
 export function AppBar({
   crumbs,
   onOpenSidebar,
+  onOpenPalette,
 }: {
   crumbs: Array<{ href?: string; label: string }>;
   /** Opens the fleet sidebar's mobile drawer. The trigger renders itself only
    *  at drawer widths — the rail and the expanded column carry their own. */
   onOpenSidebar: () => void;
+  /** Opens the Cmd/Ctrl+K palette. */
+  onOpenPalette: () => void;
 }) {
   const { status } = useFleet();
   return (
@@ -57,6 +62,25 @@ export function AppBar({
             read-only: no local token
           </span>
         )}
+        {/* DISCOVERABILITY, NOT DECORATION. A keyboard-only feature that nothing
+            on screen mentions is a feature only the person who built it has. This
+            is a REAL button — clicking it opens the palette — so it is honest to
+            a pointer user as well as legible to a keyboard one, and it declares
+            the shortcut it stands for rather than drawing a picture of it.
+
+            Hidden below `sm`: the palette is keyboard-summoned and there is no
+            keyboard on a phone to summon it with, so a phone spends zero pixels
+            on it (the chat route suppresses this whole bar there anyway). */}
+        <button
+          type="button"
+          onClick={onOpenPalette}
+          aria-keyshortcuts={PALETTE_KEYSHORTCUTS}
+          title="Jump to a session — the command palette"
+          className="kt-chrome hidden shrink-0 items-center gap-xs rounded-control border border-border-soft px-badge-x py-0.5 text-meta text-muted hover:border-border hover:text-fg sm:inline-flex"
+        >
+          <Search size={11} aria-hidden="true" />
+          <span className="mono">{paletteShortcutLabel()}</span>
+        </button>
         <ThemeToggle />
       </div>
     </header>

@@ -16,10 +16,11 @@
 // keeping the pane mounted to preserve. visibility:hidden keeps layout, paints
 // nothing, and takes its subtree out of the tab order.
 
-import { Suspense, lazy, useEffect, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import { useRoute } from './lib/router';
 import { AppBar } from './components/AppBar';
 import { AgentSidebar } from './components/AgentSidebar';
+import { CommandPalette } from './components/CommandPalette';
 import { SessionsListPage } from './pages/SessionsListPage';
 import { NewSessionPage } from './pages/NewSessionPage';
 import { cn } from './lib/utils';
@@ -101,6 +102,38 @@ export function App() {
     setDrawerOpen(false);
   }, [route.path]);
 
+  // THE COMMAND PALETTE IS A SHELL SIBLING, mounted exactly once.
+  //
+  // It has to answer from EVERY route — including from inside the composer, a
+  // filter box or a retained-but-hidden pane — so the shortcut lives here rather
+  // than in any page, and the dialog itself is a sibling of `<main>` rather than
+  // a child of whichever page happens to be visible. `focusSignal` is what makes
+  // a second ⌘K put the caret back in the query box instead of no-opping.
+  const [palette, setPalette] = useState({ open: false, focusSignal: 0 });
+  const closePalette = useCallback(() => setPalette(p => ({ ...p, open: false })), []);
+  const openPalette = useCallback(() => setPalette(p => ({ open: true, focusSignal: p.focusSignal + 1 })), []);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      // An IME is mid-composition: the keystroke belongs to the candidate
+      // window, not to us. `keyCode === 229` is the legacy spelling of the same
+      // fact that some IMEs still send instead of `isComposing`.
+      if (event.isComposing || event.keyCode === 229) return;
+      if (event.key !== 'k' && event.key !== 'K') return;
+      // Meta on Apple, Control everywhere else — but both are accepted on both,
+      // because a reader on a cross-platform keyboard should not have to care.
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+      // preventDefault ONLY once every guard has passed: this key is the browser's
+      // address-bar/search shortcut, and swallowing it on a keystroke we are not
+      // handling would be taking something and giving nothing back.
+      event.preventDefault();
+      openPalette();
+    };
+    // Capture, so a page-level or input-level handler cannot eat it first.
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [openPalette]);
+
   // Most-recently-visited first; the array IS the LRU. Adjusted DURING render
   // (the supported "derive state from props" pattern) rather than in an effect:
   // an effect would commit one frame in which the route names a session that has
@@ -138,7 +171,9 @@ export function App() {
   // always covers exactly what the reader can see.
   return (
     <div className="kt-shell flex flex-col overflow-hidden">
-      {!compactSession && <AppBar crumbs={crumbs} onOpenSidebar={() => setDrawerOpen(true)} />}
+      {!compactSession && (
+        <AppBar crumbs={crumbs} onOpenSidebar={() => setDrawerOpen(true)} onOpenPalette={openPalette} />
+      )}
       {/* THE SIDEBAR IS A SHELL SIBLING, not a page child: it is mounted once,
           for the app's life, so navigation never remounts it and its scroll
           position and filter state simply persist. It is also a sibling of the
@@ -176,6 +211,10 @@ export function App() {
           )}
         </main>
       </div>
+      {/* Last child, above everything: it is `position: fixed` so tree order does
+          not decide where it paints, but it does decide who wins a z-index tie
+          with the details sheet and the mobile drawer. */}
+      <CommandPalette open={palette.open} focusSignal={palette.focusSignal} onClose={closePalette} />
     </div>
   );
 }
