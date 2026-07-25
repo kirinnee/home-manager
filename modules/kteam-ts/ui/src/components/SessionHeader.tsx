@@ -314,18 +314,37 @@ function SessionActions({
 }
 
 /** A declared park and needs-human. Both carry their own words — the colour is
- *  reinforcement, never the message. */
+ *  reinforcement, never the message.
+ *
+ *  THE PHONE STRIP IS BUDGETED AT 24px. It is a whole extra band above the
+ *  transcript that only an exceptional session pays, so it is capped — and
+ *  measured, it was not: 26.1px in Studio and 29.7px in High Contrast, because
+ *  the chip inherits the body leading (1.55, which is 21.7px on a 14px chip) and
+ *  then adds 4px of padding and up to 4px of border on top.
+ *
+ *  So the WIDE variant tightens the leading to 1.25 and drops the vertical
+ *  padding: the half-leading that a 1.25 line-height still carries is what keeps
+ *  the tint from hugging the words, and it leaves descenders (`parked`) room
+ *  inside the `truncate` box, which `leading-none` would have clipped. Nothing
+ *  else moves — same words, same tint, same border, same badge radius, and
+ *  neither chip is interactive so no target floor is involved. The desktop chip
+ *  shares a row with the title and the controls and is untouched. */
+const CHIP_BASE = 'inline-flex items-center rounded-badge border px-badge-x text-meta';
+/** Tight enough for the 24px budget, loose enough to keep descenders. */
+const CHIP_COMPACT = 'py-0 leading-tight';
+const CHIP_DESKTOP = 'py-0.5';
+
 function ExceptionChips({ state, wide }: { state: SessionView['state']; wide?: boolean }) {
   return (
     <>
       {state.waiting && (
         <span
           className={cn(
-            'inline-flex min-w-0 items-center rounded-badge border border-warn-border bg-warn-bg px-badge-x py-0.5 text-meta font-medium text-warn',
-            // The desktop chip shares a row with the title and the controls and
-            // is capped so it cannot crowd them out; the phone strip is its own
-            // line and has the whole width to spend.
-            wide ? 'max-w-full' : 'max-w-[34vw]',
+            CHIP_BASE,
+            'min-w-0 border-warn-border bg-warn-bg font-medium text-warn',
+            // The desktop chip is capped so it cannot crowd the title out; the
+            // phone strip is its own line and has the whole width to spend.
+            wide ? `max-w-full ${CHIP_COMPACT}` : `max-w-[34vw] ${CHIP_DESKTOP}`,
           )}
           title={`parked${state.waiting.until ? ` until ${new Date(state.waiting.until).toLocaleString()}` : ''}: ${
             state.waiting.condition ?? 'external condition'
@@ -336,7 +355,11 @@ function ExceptionChips({ state, wide }: { state: SessionView['state']; wide?: b
       )}
       {state.needsHuman && (
         <span
-          className="inline-flex shrink-0 items-center rounded-badge border border-err-border bg-err-bg px-badge-x py-0.5 text-meta font-semibold text-err"
+          className={cn(
+            CHIP_BASE,
+            'shrink-0 border-err-border bg-err-bg font-semibold text-err',
+            wide ? CHIP_COMPACT : CHIP_DESKTOP,
+          )}
           title={state.needsHuman}
         >
           needs human
