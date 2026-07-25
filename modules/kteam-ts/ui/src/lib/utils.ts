@@ -22,6 +22,24 @@ export function fmtRelative(value?: string | null): string {
   return formatDistanceToNow(d, { addSuffix: true });
 }
 
+/** Terse relative age for dense rows: "12s", "4m", "3h", "2d".
+ *
+ *  date-fns's `formatDistanceToNow` renders "less than a minute ago", which in a
+ *  fleet table wraps to three lines and makes every row three times as tall as
+ *  the fact it carries. Full precision stays available as a `title`. */
+export function fmtAge(value?: string | null): string {
+  if (!value) return '—';
+  const t = Date.parse(value);
+  if (!Number.isFinite(t)) return String(value);
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
 export function fmtClock(value?: string | null): string {
   if (!value) return '—';
   const d = new Date(value);

@@ -166,7 +166,17 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
         }
 
         if (ev.type === 'terminal.frame') {
-          const data = ev.data as { activity?: string; contextPercent?: number; promptReady?: boolean };
+          const data = ev.data as {
+            activity?: string;
+            contextPercent?: number;
+            promptReady?: boolean;
+            usage5hPercent?: number;
+            usageWeeklyPercent?: number;
+            usage5hResetAt?: number;
+            usageWeeklyResetAt?: number;
+            usageAtLimit?: boolean;
+            usageAuthOk?: boolean;
+          };
           setView(v =>
             v
               ? {
@@ -176,6 +186,16 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
                     activity: data.activity ?? v.state.activity,
                     contextPercent: data.contextPercent ?? v.state.contextPercent,
                     promptReady: data.promptReady ?? v.state.promptReady,
+                    // `??` throughout: the daemon OMITS a quota field it does
+                    // not know, and an omitted field must leave the last known
+                    // value alone rather than blanking the readout between the
+                    // feed's 300s refreshes.
+                    usage5hPercent: data.usage5hPercent ?? v.state.usage5hPercent,
+                    usageWeeklyPercent: data.usageWeeklyPercent ?? v.state.usageWeeklyPercent,
+                    usage5hResetAt: data.usage5hResetAt ?? v.state.usage5hResetAt,
+                    usageWeeklyResetAt: data.usageWeeklyResetAt ?? v.state.usageWeeklyResetAt,
+                    usageAtLimit: data.usageAtLimit ?? v.state.usageAtLimit,
+                    usageAuthOk: data.usageAuthOk ?? v.state.usageAuthOk,
                   },
                 }
               : v,
@@ -183,7 +203,15 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
           return;
         }
 
-        if (ev.type === 'state' || ev.type === 'session.state' || ev.type === 'session.remote_control') {
+        // `quota.updated` fires when the cached kfleet usage feed refreshes
+        // (every 300s), which is the only way the header's quota moves on a
+        // session that is idle and therefore emitting no terminal frames.
+        if (
+          ev.type === 'state' ||
+          ev.type === 'session.state' ||
+          ev.type === 'session.remote_control' ||
+          ev.type === 'quota.updated'
+        ) {
           scheduleRefresh();
           return;
         }
@@ -372,23 +400,21 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
   // ---- transcript header / footer slots ------------------------------------
   const transcriptHeader = (
     <>
-      {loadingOlder && <div className="py-2 text-center text-[12px] text-muted">loading older messages…</div>}
+      {loadingOlder && <div className="py-1 text-center text-[11.5px] text-muted">loading older messages…</div>}
       {atStart && records.length > 0 && (
-        <div className="py-2 text-center text-[11.5px] text-faint">start of conversation · {total} records</div>
+        <div className="py-1 text-center text-[11px] text-faint">start of conversation · {total} records</div>
       )}
       {view && WAITING_STATUSES.has(view.state.status) && (
-        <div className="mx-auto mb-2 max-w-[640px] rounded-md border border-warn-border bg-warn-bg px-3 py-2 text-[12.5px] text-warn">
-          <div className="mb-0.5 font-semibold">Waiting for input</div>
-          <span>
-            harness is <code className="mono">{view.state.status}</code> since {fmtAbsolute(view.state.lastActivityAt)}.
-          </span>
+        <div className="mx-auto mb-1 max-w-[640px] rounded-md border border-warn-border bg-warn-bg px-2.5 py-1 text-[12px] text-warn">
+          waiting for input — <code className="mono">{view.state.status}</code> since{' '}
+          {fmtAbsolute(view.state.lastActivityAt)}
         </div>
       )}
     </>
   );
   const transcriptFooter =
     pending.length || busy ? (
-      <div className="space-y-1.5 px-2 py-2">
+      <div className="space-y-1 px-1 py-1">
         {pending.map(p => (
           <PendingMessage key={p.key} text={p.text} status={p.status} />
         ))}
@@ -396,8 +422,11 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
       </div>
     ) : null;
 
+  // h-full/min-h-0 — the shell (App.tsx) owns the viewport height now; this page
+  // just fills what it is given. A hardcoded calc() here is what made the page
+  // itself scrollable on top of the transcript.
   return (
-    <div className="flex h-[calc(100vh-44px)] flex-col">
+    <div className="flex h-full min-h-0 flex-col pb-2">
       {view && (
         <SessionHeader
           view={view}
@@ -408,29 +437,33 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
           onInterrupt={() => void interrupt()}
           onStop={() => void stop()}
           onResume={() => void resume()}
+          // The Chat/Terminal switch rides in the header rather than owning a
+          // row of its own — one two-item segmented control did not justify
+          // ~34px of every screen.
+          tabs={
+            <ViewTabs<'chat' | 'terminal'>
+              tabs={[
+                { id: 'chat', label: 'Chat', icon: <MessageSquare size={11} /> },
+                { id: 'terminal', label: 'Terminal', icon: <Terminal size={11} /> },
+              ]}
+              current={tab}
+              onChange={setTab}
+            />
+          }
         />
       )}
 
-      <div className="mb-2 flex items-center gap-2">
-        <ViewTabs<'chat' | 'terminal'>
-          tabs={[
-            { id: 'chat', label: 'Chat', icon: <MessageSquare size={12} /> },
-            { id: 'terminal', label: 'Terminal', icon: <Terminal size={12} /> },
-          ]}
-          current={tab}
-          onChange={setTab}
-        />
-      </div>
-
       {error && (
-        <div className="mb-2 rounded-md border border-err-border bg-err-bg px-3 py-2 text-[13px] text-err">{error}</div>
+        <div className="mb-1 rounded-md border border-err-border bg-err-bg px-2.5 py-1 text-[12.5px] text-err">
+          {error}
+        </div>
       )}
       {actionNotice && (
         <div
           className={
             actionNotice.kind === 'err'
-              ? 'mb-2 rounded-md border border-err-border bg-err-bg px-3 py-1.5 text-[12.5px] text-err'
-              : 'mb-2 rounded-md border border-ok-border bg-ok-bg px-3 py-1.5 text-[12.5px] text-ok'
+              ? 'mb-1 rounded-md border border-err-border bg-err-bg px-2.5 py-1 text-[12px] text-err'
+              : 'mb-1 rounded-md border border-ok-border bg-ok-bg px-2.5 py-1 text-[12px] text-ok'
           }
         >
           {actionNotice.text}
@@ -459,7 +492,7 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
           </div>
 
           {!awaitingQ && HAS_TOKEN && (
-            <div className="mt-3">
+            <div className="mt-2">
               <Composer
                 draft={draft}
                 onDraftChange={setDraft}
@@ -472,12 +505,12 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
             </div>
           )}
           {awaitingQ && pendingQ && HAS_TOKEN && (
-            <div className="mt-3">
+            <div className="mt-2">
               <QuestionForm sessionId={sessionId} question={pendingQ} onSubmit={() => void refreshView()} />
             </div>
           )}
           {!HAS_TOKEN && (
-            <div className="mt-3 rounded-md border border-warn-border bg-warn-bg px-3 py-2 text-[13px] text-warn">
+            <div className="mt-2 rounded-md border border-warn-border bg-warn-bg px-2.5 py-1.5 text-[12.5px] text-warn">
               Read-only: this origin did not receive an embedding token from the daemon, so messages, answers, and
               control actions are disabled.
             </div>
@@ -513,7 +546,7 @@ function PendingMessage({ text, status }: { text: string; status: PendingStatus 
         status === 'delivered' ? 'opacity-80' : ''
       }`}
     >
-      <div className="flex items-center gap-2 px-3 pt-1.5">
+      <div className="flex items-center gap-2 px-2.5 pt-1">
         <span className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-accent">you</span>
         <span className={`mono ml-auto inline-flex items-center gap-1 text-[10.5px] ${tone}`}>
           {status === 'sending' && (
@@ -522,14 +555,16 @@ function PendingMessage({ text, status }: { text: string; status: PendingStatus 
           {label}
         </span>
       </div>
-      <div className="whitespace-pre-wrap break-words px-3 pb-2 pt-0.5 text-[13px] leading-relaxed text-fg">{text}</div>
+      <div className="whitespace-pre-wrap break-words px-2.5 pb-1.5 pt-0.5 text-[13px] leading-snug text-fg">
+        {text}
+      </div>
     </div>
   );
 }
 
 function ThreadSkeleton() {
   return (
-    <div className="mx-auto flex h-full w-full max-w-[880px] flex-col gap-4 p-5">
+    <div className="mx-auto flex h-full w-full max-w-[880px] flex-col gap-3 p-3">
       {Array.from({ length: 6 }).map((_, i) => (
         <div key={i} className="animate-pulse space-y-2">
           <div className="h-2.5 w-24 rounded bg-surface-2" />

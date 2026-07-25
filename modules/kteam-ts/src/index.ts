@@ -18,6 +18,7 @@ import { resolveBinary } from './harness';
 import { createPaths } from './paths';
 import { SIGNAL_KINDS } from './types';
 import type { KTeamEvent, SessionStatus, SignalKind } from './types';
+import { compactUsageQuota, fetchKfleetUsage, UsageFeed, usageQuotaLabel } from './usage';
 
 const VERSION = '0.2.1';
 const paths = createPaths();
@@ -52,8 +53,10 @@ function printView(view: Awaited<ReturnType<ApiClient['get']>>): void {
     `${view.config.teammate ?? '-'} (${view.config.id})  ${view.state.status}  ${view.config.binary}  model=${resolveDisplayModel(view.config.binary, view.config.model, view.state.observedModel).model}${view.config.label ? `  label=${view.config.label}` : ''}${view.config.parent ? `  parent=${view.config.parent}` : ''}  ${view.config.mode}  turn ${view.state.turn}`,
   );
   console.log(`  ${view.config.cwd}`);
+  const quota = usageQuotaLabel(view.state);
   const vitals = [
     view.state.contextPercent !== undefined ? `context ${view.state.contextPercent}% used` : '',
+    quota ? `quota ${quota}` : '',
     view.state.lastToolStartedAt ? `last tool started ${view.state.lastToolStartedAt}` : '',
   ].filter(Boolean);
   if (vitals.length) console.log(`  ${vitals.join('  ')}`);
@@ -163,24 +166,14 @@ daemonCommand
     } else process.stdout.write(await readFile(paths.daemonLog, 'utf8').catch(() => ''));
   });
 
-/** Account usage from kfleet: the serve endpoint when it's up (fast, cached),
- *  else one `kfleet usage --json` probe. Empty on total failure — recommend
- *  still works, just without usage-based exclusion/balancing. */
+const agentUsageFeed = new UsageFeed(process.env.KTEAM_QUOTA_URL ?? 'http://127.0.0.1:47318/usage', {
+  fallback: fetchKfleetUsage,
+});
+
+/** Account usage from the same cached feed as the daemon quota waiter. Empty
+ *  on total failure — recommend still works without usage-based balancing. */
 async function fetchAgentUsage(): Promise<AgentUsage[]> {
-  try {
-    const response = await fetch(process.env.KTEAM_QUOTA_URL ?? 'http://127.0.0.1:47318/usage', {
-      signal: AbortSignal.timeout(3_000),
-    });
-    if (response.ok) {
-      const payload = (await response.json()) as { accounts?: AgentUsage[] };
-      if (payload.accounts?.length) return payload.accounts;
-    }
-  } catch {}
-  try {
-    const probe = Bun.spawnSync(['kfleet', 'usage', '--json', '--no-relogin'], { timeout: 60_000 });
-    if (probe.exitCode === 0) return JSON.parse(probe.stdout.toString()) as AgentUsage[];
-  } catch {}
-  return [];
+  return await agentUsageFeed.accounts();
 }
 
 program
@@ -394,7 +387,7 @@ program
     // Column widths are measured from the DATA (fixed widths misalign the
     // moment any value outgrows them). Variable-length columns (TASK, LABEL)
     // sit at the end; the final column is never padded.
-    const header = ['TEAMMATE', 'ID', 'STATUS', 'MODEL', 'AGENT', 'MODE', 'TASK', 'LABEL'];
+    const header = ['TEAMMATE', 'ID', 'STATUS', 'MODEL', 'AGENT', 'MODE', 'QUOTA', 'TASK', 'LABEL'];
     const rows = sessions.map(view => [
       view.config.teammate ?? '-',
       view.config.id,
@@ -407,6 +400,7 @@ program
       resolveDisplayModel(view.config.binary, view.config.model, view.state.observedModel).model,
       view.config.binary,
       view.config.mode,
+      compactUsageQuota(view.state),
       view.config.name,
       view.config.label ?? '-',
     ]);

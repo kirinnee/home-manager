@@ -62,6 +62,7 @@ import {
 import { rankFailoverCandidates, selectFailoverCandidate } from './failover';
 import type { AgentUsage } from './core';
 import { chatEventFingerprint, EventStore, type JsonValue, type SessionEvent } from './storage';
+import { fetchKfleetUsage, quotaFromUsage, UsageFeed, usageEventData, usageStateFromQuota } from './usage';
 import {
   contextPercentUsed,
   backgroundTerminalCount,
@@ -394,6 +395,8 @@ export class SessionManager implements KTeamService {
    *  concurrent starts race the injector â only the first survives, the rest
    *  land typed-but-never-started. */
   private bootstrapChain: Promise<void> = Promise.resolve();
+  /** One daemon-wide cache over kfleet's 300-second usage feed. */
+  private readonly usageFeed: UsageFeed;
   private readonly quotaWaiters = new Map<string, QuotaWaiter>();
   private readonly retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** Counter for TRANSIENT (never-journalled) events only â WS-only frames
@@ -445,6 +448,8 @@ export class SessionManager implements KTeamService {
   ) {
     this.tmux = new TmuxController(paths, options.publicUrl);
     this.attachments = new AttachmentStore({ rootDir: paths.home });
+    const hermetic = process.env.KTEAM_TEST_HERMETIC === '1' || process.env.NODE_ENV === 'test';
+    this.usageFeed = new UsageFeed(options.quotaUrl, { fallback: hermetic ? undefined : fetchKfleetUsage });
   }
 
   static async create(paths: KTeamPaths, options: SessionManagerOptions): Promise<SessionManager> {
@@ -1011,6 +1016,7 @@ export class SessionManager implements KTeamService {
       openTools: [],
       transcriptOffset: 0,
       turnCompleted: false,
+      ...(preflightQuota ? { quota: preflightQuota, ...usageStateFromQuota(preflightQuota) } : {}),
     };
     const systemPrompt = this.systemPrompt(config);
     // A bare interactive start gets NO turn-1 prompt file: the file is what
@@ -1826,6 +1832,20 @@ export class SessionManager implements KTeamService {
       harnessHome,
       updatedAt: now(),
     }));
+    if (agent !== from) {
+      // Usage belongs to the wrapper account, not the conversation. Never show
+      // the old account's cached quota while the new wrapper is coming up.
+      await this.store.updateState<SessionState>(id, current => ({
+        ...current,
+        quota: undefined,
+        usage5hPercent: undefined,
+        usageWeeklyPercent: undefined,
+        usage5hResetAt: undefined,
+        usageWeeklyResetAt: undefined,
+        usageAtLimit: undefined,
+        usageAuthOk: undefined,
+      }));
+    }
     // Claude transcripts live under the new home; repoint the watched file so the
     // monitor tails the right JSONL after relaunch (codex rediscovers on resume).
     if (migrated.harness === 'claude') {
@@ -2781,6 +2801,7 @@ export class SessionManager implements KTeamService {
                     reason: 'account quota exhausted',
                     exitCode: pane.exitCode,
                     quota,
+                    ...(quota ? usageStateFromQuota(quota) : {}),
                   },
                   'quota.exhausted',
                   quota ?? {},
@@ -2863,6 +2884,7 @@ export class SessionManager implements KTeamService {
                 promptReady: pane.promptReady,
                 ...(activity !== undefined ? { activity } : {}),
                 ...(contextPercent !== undefined ? { contextPercent } : {}),
+                ...usageEventData(view.state),
               },
             );
             // Sessions past ~85% context wedge silently (prompts queue, never
@@ -3897,15 +3919,24 @@ export class SessionManager implements KTeamService {
     try {
       const quota = await this.fetchQuota(config, signal);
       if (!quota || signal.aborted) return;
+      const usageState = usageStateFromQuota(quota);
       let newlyExhausted = false;
       let recoveredWithoutRetry = false;
       let readyToResume = false;
       let inactive = false;
+      let usageChanged = false;
       const state = await this.store.updateState<SessionState>(id, current => {
         if (protectedStatuses.includes(current.status)) {
           inactive = true;
           return current;
         }
+        usageChanged =
+          current.usage5hPercent !== usageState.usage5hPercent ||
+          current.usageWeeklyPercent !== usageState.usageWeeklyPercent ||
+          current.usage5hResetAt !== usageState.usage5hResetAt ||
+          current.usageWeeklyResetAt !== usageState.usageWeeklyResetAt ||
+          current.usageAtLimit !== usageState.usageAtLimit ||
+          current.usageAuthOk !== usageState.usageAuthOk;
         newlyExhausted = quota.atLimit === true && current.status !== 'rate_limited';
         recoveredWithoutRetry =
           quota.atLimit === false && current.status === 'rate_limited' && config.retry?.waitForQuotaReset === false;
@@ -3914,6 +3945,7 @@ export class SessionManager implements KTeamService {
         return {
           ...current,
           quota,
+          ...usageState,
           status: quota.atLimit
             ? 'rate_limited'
             : recoveredWithoutRetry
@@ -3933,6 +3965,10 @@ export class SessionManager implements KTeamService {
       if (inactive || signal.aborted) return;
       await atomicJson(path.join(sessionDir(this.paths, id), 'checks', 'quota.json'), { at: now(), ...quota });
       if (signal.aborted) return;
+      if (usageChanged)
+        await this.emit(id, 'quota.updated', { binary: config.binary, ...usageEventData(state) }, 'watcher').catch(
+          () => undefined,
+        );
       if (newlyExhausted) await this.emit(id, 'quota.exhausted', quota, 'watcher');
       if (quota.atLimit && config.retry?.waitForQuotaReset !== false) this.scheduleQuotaWaiter(id);
       if (readyToResume) this.scheduleQuotaWaiter(id);
@@ -3941,55 +3977,19 @@ export class SessionManager implements KTeamService {
   }
 
   private async fetchQuota(config: SessionConfig, signal?: AbortSignal): Promise<SessionState['quota'] | undefined> {
-    try {
-      const timeout = AbortSignal.timeout(3_000);
-      const response = await fetch(this.options.quotaUrl, {
-        signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-      });
-      if (!response.ok) return undefined;
-      const payload = (await response.json()) as {
-        accounts?: Array<{
-          binary?: string;
-          atLimit?: boolean;
-          authOk?: boolean;
-          fiveHourPercent?: number;
-          weeklyPercent?: number;
-          fiveHourResetAt?: number;
-          weeklyResetAt?: number;
-        }>;
-      };
-      const account = payload.accounts?.find(item => item.binary === config.binary);
-      if (!account) return undefined;
-      const resets = [account.fiveHourResetAt, account.weeklyResetAt].filter(
-        (value): value is number => typeof value === 'number',
-      );
-      return {
-        atLimit: account.atLimit,
-        authOk: account.authOk,
-        fiveHourPercent: account.fiveHourPercent,
-        weeklyPercent: account.weeklyPercent,
-        ...(resets.length ? { resetAt: Math.min(...resets) } : {}),
-      };
-    } catch {
-      return undefined;
-    }
+    const account = (await this.fetchUsageAccounts(signal)).find(item => item.binary === config.binary);
+    if (account) return quotaFromUsage(account);
+    // A successful snapshot that omits this wrapper is authoritative unknown:
+    // clear any old wrapper's values. Before the first successful snapshot,
+    // preserve state rather than treating a feed outage as real data.
+    return this.usageFeed.hasSnapshot() ? {} : undefined;
   }
 
   /** The full per-account usage feed (same endpoint as fetchQuota), used to pick
-   *  a failover target. Empty on any failure â failover then just no-ops and the
-   *  session keeps waiting for its own quota to reset. */
+   *  a failover target. Readers share the last good 300-second snapshot; empty
+   *  before the first successful refresh means failover safely no-ops. */
   private async fetchUsageAccounts(signal?: AbortSignal): Promise<AgentUsage[]> {
-    try {
-      const timeout = AbortSignal.timeout(3_000);
-      const response = await fetch(this.options.quotaUrl, {
-        signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-      });
-      if (!response.ok) return [];
-      const payload = (await response.json()) as { accounts?: AgentUsage[] };
-      return payload.accounts ?? [];
-    } catch {
-      return [];
-    }
+    return await this.usageFeed.accounts(signal);
   }
 
   /** When `retry.allowAccountFailover` is on and a rate-limited session's quota

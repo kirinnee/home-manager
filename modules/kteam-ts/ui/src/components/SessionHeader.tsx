@@ -1,19 +1,23 @@
-// Session header — decrowded into distinct rows so nothing is squeezed:
-//   row 1: identity (teammate · task · label · status) + controls
-//   row 2: wrapper/CLI · model · turn · mode
-//   row 3: context + liveness + ws  (self-ticking, isolated from the transcript)
+// Session header — TWO rows, because the third was costing a line of transcript
+// on every screen for facts that fit inline:
+//   row 1: identity (teammate · task · label · mode · rc · status) + tabs + controls
+//   row 2: wrapper/CLI · model · turn · context · liveness · ws
 //
 // The per-second liveness/context ticking lives in <LivenessStrip/> so it
-// re-renders only itself.
+// re-renders only itself; it is now an inline segment of row 2 rather than a
+// row. Everything that used to be spelled out in prose ("autonomous ·
+// reflex-supervised", the RC URL in full) is a `title` on the badge that
+// already says it — the header states facts, it does not explain the tool.
 
-import { memo, useEffect, useState } from 'react';
+import { memo, useEffect, useState, type ReactNode } from 'react';
 import { ChevronLeft, Pause, Play, StopCircle, ZapOff, Bot, Sparkles, Radio } from 'lucide-react';
 import type { SessionView } from '../types';
 import { Badge, Button, ActionGroup } from './Primitives';
-import { ModeBadge, MODE_HINT } from './ModeBadge';
+import { ModeBadge } from './ModeBadge';
 import { RcBadge } from './RcBadge';
 import { Link } from '../lib/router';
 import { toneFor } from '../lib/utils';
+import { QuotaReadout, hasQuota } from './QuotaBadge';
 
 interface Props {
   view: SessionView;
@@ -24,6 +28,8 @@ interface Props {
   onInterrupt: () => void;
   onStop: () => void;
   onResume: () => void;
+  /** Chat/Terminal switch, hosted here instead of owning its own row. */
+  tabs?: ReactNode;
 }
 
 export const SessionHeader = memo(function SessionHeader({
@@ -35,26 +41,32 @@ export const SessionHeader = memo(function SessionHeader({
   onInterrupt,
   onStop,
   onResume,
+  tabs,
 }: Props) {
   const { config, state } = view;
   const title = config.teammate || config.name || config.id;
   const model = config.model || config.modelHint || 'default';
 
   return (
-    <div className="mt-3 mb-2 flex flex-col gap-1.5 border-b border-border-soft pb-2.5">
-      {/* row 1 — identity + controls */}
-      <div className="flex items-center gap-2.5 min-w-0">
+    <div className="mt-1.5 mb-1 flex flex-col gap-1 border-b border-border-soft pb-1.5">
+      {/* row 1 — identity + tabs + controls.
+          Wraps: at 390px the identity badges plus the tab switch plus two
+          buttons cannot share a line, and pushing Interrupt/Stop off the right
+          edge (as the un-wrapped version did) makes them unreachable. Wrapping
+          costs a line only on the widths where it is the alternative to losing
+          the controls. */}
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
         <Link to="/" className="inline-flex shrink-0 items-center gap-1 text-muted hover:text-fg" title="All sessions">
-          <ChevronLeft size={16} />
+          <ChevronLeft size={15} />
         </Link>
-        <h1 className="m-0 shrink-0 text-[1.15rem] font-semibold tracking-tight">{title}</h1>
+        <h1 className="m-0 shrink-0 text-[15px] font-semibold tracking-tight">{title}</h1>
         {config.teammate && config.name && (
-          <span className="min-w-0 truncate text-[13px] text-muted" title={config.name}>
+          <span className="min-w-0 truncate text-[12px] text-muted" title={config.name}>
             {config.name}
           </span>
         )}
         {config.label && (
-          <Badge tone="accent" className="shrink-0">
+          <Badge tone="accent" className="min-w-0 max-w-[40vw] truncate" title={config.label}>
             {config.label}
           </Badge>
         )}
@@ -83,20 +95,22 @@ export const SessionHeader = memo(function SessionHeader({
           </Badge>
         )}
 
-        <ActionGroup className="ml-auto shrink-0">
+        {tabs && <div className="ml-auto shrink-0">{tabs}</div>}
+
+        <ActionGroup className={tabs ? 'shrink-0' : 'ml-auto shrink-0'}>
           {!isTerminal && hasToken && (
             <Button size="sm" variant="outline" onClick={onInterrupt} title="Interrupt the active turn">
-              <Pause size={12} /> Interrupt
+              <Pause size={12} /> <span className="hidden sm:inline">Interrupt</span>
             </Button>
           )}
           {(!isTerminal || isKillFailed) && hasToken && (
             <Button size="sm" variant="danger" onClick={onStop} title="Stop the session">
-              <StopCircle size={12} /> Stop
+              <StopCircle size={12} /> <span className="hidden sm:inline">Stop</span>
             </Button>
           )}
           {isTerminal && !isKillFailed && hasToken && (
             <Button size="sm" variant="primary" onClick={onResume} title="Resume a finished session">
-              <Play size={12} /> Resume
+              <Play size={12} /> <span className="hidden sm:inline">Resume</span>
             </Button>
           )}
           {isKillFailed && (
@@ -124,12 +138,9 @@ export const SessionHeader = memo(function SessionHeader({
         <span className="shrink-0 text-fg-soft">{model}</span>
         <Sep />
         <span className="shrink-0">turn {state.turn}</span>
-        <Sep />
-        <span className="shrink-0 text-faint" title={MODE_HINT[config.mode]}>
-          {config.mode === 'interactive' ? 'human-driven · never auto-nudged' : 'autonomous · reflex-supervised'}
-        </span>
-        {/* The RC link in full, so it can be read, copied, or opened — the badge
-            above is the glanceable form, this is the addressable one. */}
+        {/* The RC link, addressable. The mode badge in row 1 already carries
+            MODE_HINT as its tooltip, so the sentence that used to sit here is
+            gone rather than duplicated. */}
         {state.remoteControlUrl && (
           <>
             <Sep />
@@ -140,7 +151,7 @@ export const SessionHeader = memo(function SessionHeader({
               title={state.remoteControlUrl}
               className="inline-flex min-w-0 shrink items-center gap-1 text-accent hover:underline"
             >
-              <Radio size={12} className="shrink-0" />
+              <Radio size={11} className="shrink-0" />
               <span className="min-w-0 truncate">remote control</span>
             </a>
           </>
@@ -153,10 +164,9 @@ export const SessionHeader = memo(function SessionHeader({
             </span>
           </>
         )}
+        <Sep />
+        <LivenessStrip view={view} liveStatus={liveStatus} />
       </div>
-
-      {/* row 3 — context + liveness + ws */}
-      <LivenessStrip view={view} liveStatus={liveStatus} />
     </div>
   );
 });
@@ -198,28 +208,34 @@ const LivenessStrip = memo(function LivenessStrip({
   const dot = liveStatus === 'open' ? 'bg-ok' : liveStatus === 'connecting' ? 'bg-warn' : 'bg-err';
 
   return (
-    <div className="flex min-w-0 items-center gap-x-3 overflow-hidden text-[11.5px] text-muted mono whitespace-nowrap">
+    <>
       {ctx != null ? (
         <span className={`shrink-0 ${ctxTone}`}>context {ctx}%</span>
       ) : (
         <span className="shrink-0 text-faint">context —</span>
       )}
+      {hasQuota(state) && (
+        <>
+          <Sep />
+          <QuotaReadout state={state} className="text-faint" />
+        </>
+      )}
       {ages.length > 0 && (
         <>
           <Sep />
           <span
-            className="min-w-0 truncate text-faint"
+            className="hidden min-w-0 truncate text-faint sm:inline"
             title="liveness ledger: seconds since transcript / token / counter / subprocess / pane life-signs"
           >
             {ages.join(' · ')}
           </span>
         </>
       )}
-      <span className="ml-auto inline-flex shrink-0 items-center gap-1">
+      <span className="ml-auto inline-flex shrink-0 items-center gap-1" title={`websocket ${liveStatus}`}>
         <span className={`inline-block h-1.5 w-1.5 rounded-full ${dot}`} />
-        ws {liveStatus}
+        <span className="hidden sm:inline">ws {liveStatus}</span>
       </span>
-    </div>
+    </>
   );
 });
 

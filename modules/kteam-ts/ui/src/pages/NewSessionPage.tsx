@@ -81,8 +81,10 @@ export function NewSessionPage() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-[720px]">
-      <div className="mt-5 mb-4 flex items-center gap-2.5">
+    // One scroll region, like every other route: the shell is exactly the
+    // viewport, so this form scrolls inside itself rather than the page.
+    <div className="mx-auto w-full max-w-[720px] min-h-0 flex-1 overflow-y-auto scroll-thin pb-3">
+      <div className="mt-3 mb-3 flex items-center gap-2.5">
         <Link to="/" className="inline-flex shrink-0 items-center gap-1 text-muted hover:text-fg text-[13px]">
           <ChevronLeft size={15} /> Sessions
         </Link>

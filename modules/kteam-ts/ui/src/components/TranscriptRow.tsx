@@ -5,7 +5,7 @@
 //   assistant  — clean rendered markdown, no container chrome
 //   thinking    — collapsed one-liner ("thought for 2m 14s"), expandable
 //   tools      — delegated to <ToolGroup/>
-//   turn       — slim labeled separator
+//   turn       — ONE hairline per collapsed run of turn events, never per event
 //   notice     — muted system row
 
 import { memo, useState } from 'react';
@@ -13,7 +13,6 @@ import { ChevronRight, Brain } from 'lucide-react';
 import type { TranscriptBlock, ToolCall } from '../lib/transcript';
 import { Markdown } from './Markdown';
 import { ToolGroup } from './ToolGroup';
-import { MarkerSeparator } from './Marker';
 import { cn, fmtClock } from '../lib/utils';
 
 const PROTOCOL_HEADER = /#\s*(AGENTS\.md instructions|SYSTEM\s*PROMPT|INSTRUCTIONS)/i;
@@ -59,7 +58,10 @@ function sameProps(prev: Props, next: Props): boolean {
     return a.text === (b as typeof a).text && a.durationMs === (b as typeof a).durationMs;
   }
   if (a.kind === 'tools') return callsEqual(a.calls, (b as typeof a).calls);
-  if (a.kind === 'turn') return a.variant === (b as typeof a).variant && a.ts === (b as typeof a).ts;
+  if (a.kind === 'turn') {
+    const t = b as typeof a;
+    return a.ts === t.ts && a.durationMs === t.durationMs && a.skipped === t.skipped && a.aborted === t.aborted;
+  }
   if (a.kind === 'notice') return a.label === (b as typeof a).label;
   return false;
 }
@@ -75,20 +77,38 @@ export const TranscriptRow = memo(function TranscriptRow({ block, live, isLast }
     case 'tools':
       return <ToolGroup calls={block.calls} live={live} isLast={isLast} />;
     case 'turn':
-      return (
-        <MarkerSeparator tone="faint">
-          {block.variant}
-          {block.ts ? ` · ${fmtClock(block.ts)}` : ''}
-        </MarkerSeparator>
-      );
+      return <TurnBoundary block={block} />;
     case 'notice':
       return (
-        <div className="px-2 py-0.5 text-[11px] text-faint mono truncate" title={block.label}>
+        <div className="px-2 py-px text-[11px] text-faint mono truncate" title={block.label}>
           {block.label}
         </div>
       );
   }
 }, sameProps);
+
+// A turn boundary — ONE hairline for a whole run of turn events (see
+// lib/transcript.ts). It earns its line by carrying the closed turn's duration
+// and, when the run swallowed empty resume/nudge turns, how many. `aborted` is
+// the only variant that gets colour, because it is the only one that means
+// something went wrong.
+function TurnBoundary({ block }: { block: Extract<TranscriptBlock, { kind: 'turn' }> }) {
+  const bits: string[] = [];
+  if (block.aborted) bits.push('turn aborted');
+  else if (block.durationMs != null) bits.push(`turn · ${fmtDuration(block.durationMs)}`);
+  else bits.push('turn');
+  if (block.skipped) bits.push(`${block.skipped} empty`);
+  if (block.ts) bits.push(fmtClock(block.ts));
+  return (
+    <div className="flex select-none items-center gap-2 py-[3px]" title={block.ts ? fmtClock(block.ts) : undefined}>
+      <span className="h-px flex-1 bg-border-soft" />
+      <span className={cn('text-[10px] tracking-[0.1em] mono', block.aborted ? 'text-warn' : 'text-faint')}>
+        {bits.join(' · ')}
+      </span>
+      <span className="h-px flex-1 bg-border-soft" />
+    </div>
+  );
+}
 
 // Assistant text: no per-message role label (role reads from layout — user
 // blocks are railed + filled, assistant is plain prose). Metadata sits aside,
@@ -96,7 +116,7 @@ export const TranscriptRow = memo(function TranscriptRow({ block, live, isLast }
 function AssistantMessage({ text, ts }: { text: string; ts?: string; source: string }) {
   if (!text.trim()) return null;
   return (
-    <div className="group relative py-1 pl-3">
+    <div className="group relative py-0.5 pl-3">
       <span className="absolute left-0 top-2 bottom-2 w-px bg-border-soft opacity-0 transition-opacity group-hover:opacity-100" />
       {ts && (
         <span className="pointer-events-none absolute right-0 top-1 mono text-[10.5px] text-faint opacity-0 transition-opacity group-hover:opacity-100">
@@ -121,9 +141,9 @@ function UserMessage({ text, ts }: { text: string; ts?: string }) {
   if (preview.length > 160) preview = preview.slice(0, 160) + '…';
 
   return (
-    <div className="py-1">
+    <div className="py-0.5">
       <div className="overflow-hidden rounded-md border border-l-[2.5px] border-border border-l-user-border bg-user-bg">
-        <div className="flex items-center gap-2 px-3 pt-1.5">
+        <div className="flex items-center gap-2 px-2.5 pt-1">
           <span className="text-[10.5px] uppercase tracking-[0.12em] font-semibold text-accent">
             {isProtocol ? 'turn prompt' : 'message'}
           </span>
@@ -143,13 +163,13 @@ function UserMessage({ text, ts }: { text: string; ts?: string }) {
           <button
             type="button"
             onClick={() => setOpen(true)}
-            className="block w-full px-3 pb-2 pt-0.5 text-left mono text-[12.5px] text-fg-soft truncate"
+            className="block w-full px-2.5 pb-1.5 pt-0.5 text-left mono text-[12.5px] text-fg-soft truncate"
             title={preview}
           >
             {preview}
           </button>
         ) : (
-          <div className="px-3 pb-2 pt-0.5 text-[13px] leading-relaxed whitespace-pre-wrap break-words text-fg">
+          <div className="px-2.5 pb-1.5 pt-0.5 text-[13px] leading-snug whitespace-pre-wrap break-words text-fg">
             {text}
           </div>
         )}
@@ -162,11 +182,11 @@ function ThinkingLine({ text, durationMs }: { text: string; durationMs?: number 
   const [open, setOpen] = useState(false);
   const label = durationMs != null ? `thought for ${fmtDuration(durationMs)}` : 'thought';
   return (
-    <div className="py-0.5">
+    <div className="py-px">
       <button
         type="button"
         onClick={() => setOpen(v => !v)}
-        className="group flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[12px] text-muted hover:bg-surface-2"
+        className="group flex w-full items-center gap-2 rounded-md px-2 py-0.5 text-left text-[12px] text-muted hover:bg-surface-2"
       >
         <Brain size={12} className="shrink-0 text-faint" />
         <span className="italic">{label}</span>
