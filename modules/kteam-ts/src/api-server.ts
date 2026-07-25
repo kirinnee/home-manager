@@ -303,6 +303,13 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
             const limitRaw = Number(url.searchParams.get('limit') ?? '30');
             return json(await options.service.search(q, Number.isFinite(limitRaw) ? limitRaw : 30));
           }
+          // Account quota, per wrapper binary. A FLEET-WIDE route rather than a
+          // per-session field: the daemon's usage feed is one cached snapshot
+          // shared by every session, and stamping it into each session's state
+          // only happens on that session's 60s monitor tick — so a list built
+          // from session state alone shows blanks for everything idle, newly
+          // started, or terminal. The browser joins this onto `config.binary`.
+          if (url.pathname === '/v1/usage' && request.method === 'GET') return json(await options.service.usage());
           if (url.pathname === '/v1/wrappers' && request.method === 'GET')
             return json(await options.service.wrappers());
           if (url.pathname === '/v1/projects' && request.method === 'GET')
@@ -444,13 +451,21 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
             return await applyOnce(() => options.service.migrate(id, input.agent!, input.model));
           }
           if (action === 'signal' && request.method === 'POST') {
-            const input = await body<{ kind: SignalKind; message?: string; until?: string; condition?: string }>(
-              request,
-            );
+            const input = await body<{
+              kind: SignalKind;
+              message?: string;
+              until?: string;
+              condition?: string;
+              peer?: string;
+            }>(request);
             if (!SIGNAL_KINDS.includes(input.kind))
               throw new HttpError(400, `kind must be one of ${SIGNAL_KINDS.join(', ')}`);
             return await applyOnce(() =>
-              options.service.signal(id, input.kind, input.message, { until: input.until, condition: input.condition }),
+              options.service.signal(id, input.kind, input.message, {
+                until: input.until,
+                condition: input.condition,
+                peer: input.peer,
+              }),
             );
           }
           if (action === 'snapshot' && request.method === 'GET') {

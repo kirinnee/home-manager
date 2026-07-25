@@ -123,7 +123,16 @@ export interface SessionState {
   turnCompleted?: boolean;
   /** A DECLARED wait (`kteam signal waiting`): parked on an external condition
    *  with the daemon holding the deadline — NOT a question waiting on a human. */
-  waiting?: { since: string; until?: string; condition?: string };
+  waiting?: {
+    since: string;
+    until?: string;
+    condition?: string;
+    /** PEER WAIT: parked awaiting a reply from this kteam session. Healthy —
+     *  the daemon ends the park the moment that peer sends back. */
+    peer?: string;
+    /** The peer's teammate callsign, so the UI can name it without a lookup. */
+    peerName?: string;
+  };
   quota?: {
     atLimit?: boolean;
     authOk?: boolean;
@@ -137,6 +146,38 @@ export interface SessionView {
   config: SessionConfig;
   state: SessionState;
   directory: string;
+}
+
+// ============================================================================
+// Account quota — GET /v1/usage
+//
+// The daemon's cached `kfleet usage` snapshot, one record per wrapper binary.
+// Session STATE also carries usage fields, but only after that session's
+// monitor loop has run its 60s quota tick, so it is blank for anything idle,
+// newly launched, or terminal. This feed is the same fact for every session
+// and is available at once; the UI joins it onto `config.binary` and prefers
+// whichever source actually has a number (see lib/usage.ts).
+//
+// Absent field = UNKNOWN. Never render a missing value as 0%.
+// ============================================================================
+
+export interface UsageAccountView {
+  binary: string;
+  fiveHourPercent?: number;
+  weeklyPercent?: number;
+  fiveHourResetAt?: number;
+  weeklyResetAt?: number;
+  atLimit?: boolean;
+  /** false ⇒ the wrapper needs logging in; that is not a quota reading. */
+  authOk?: boolean;
+}
+
+export interface UsageFeedView {
+  /** ISO time of the daemon's last successful refresh, when it has had one. */
+  at?: string;
+  /** True before the first successful refresh — show "no data", not zeros. */
+  stale: boolean;
+  accounts: UsageAccountView[];
 }
 
 // ============================================================================

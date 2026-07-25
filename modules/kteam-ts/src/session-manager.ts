@@ -47,6 +47,7 @@ import type {
   SearchResponse,
   SearchResult,
   SessionView,
+  UsageFeedView,
   WardenRunView,
   WardenStatusView,
 } from './service';
@@ -62,7 +63,14 @@ import {
 import { rankFailoverCandidates, selectFailoverCandidate } from './failover';
 import type { AgentUsage } from './core';
 import { chatEventFingerprint, EventStore, type JsonValue, type SessionEvent } from './storage';
-import { fetchKfleetUsage, quotaFromUsage, UsageFeed, usageEventData, usageStateFromQuota } from './usage';
+import {
+  fetchKfleetUsage,
+  quotaFromUsage,
+  UsageFeed,
+  usageAccountView,
+  usageEventData,
+  usageStateFromQuota,
+} from './usage';
 import {
   contextPercentUsed,
   backgroundTerminalCount,
@@ -281,6 +289,30 @@ export function reflexSuspended(config: Pick<SessionConfig, 'mode'>, state: Sess
  *  for three hours has not been RUNNING for three hours. */
 export function turnCeilingMs(config: Pick<SessionConfig, 'timeoutSeconds'>, state: SessionState): number {
   return (config.timeoutSeconds + (state.waitingCreditSeconds ?? 0)) * 1000;
+}
+
+/** The banner prepended to a message one SESSION sent to another.
+ *
+ *  A teammate reads only the message text, so attribution has to live in it.
+ *  Without this every peer message reads as the lead speaking — and a
+ *  teammate that cannot tell a peer from its lead cannot judge whether to
+ *  simply comply, to push back, or to escalate.
+ *
+ *  When the sender is parked awaiting an answer (`signal waiting --peer`), the
+ *  banner also states the exact command that unblocks them, because "reply to
+ *  X" without the addressing rule is the step teammates get wrong. It is
+ *  omitted for fire-and-forget so a note that wants nothing back never reads
+ *  as a demand. */
+export function peerPreamble(sender: Pick<SessionView, 'config'>, replyExpected: boolean): string {
+  const from = sender.config.teammate ?? sender.config.id;
+  const lines = [`[peer message from teammate ${from} (session ${sender.config.id}) — not from the human lead]`];
+  if (replyExpected)
+    lines.push(
+      `${from} is PARKED waiting for your reply and cannot continue until it arrives. ` +
+        `Answer with: kteam send ${from} "<your reply>"`,
+    );
+  else lines.push(`No reply is required; ${from} has carried on. Reply with \`kteam send ${from} "…"\` if useful.`);
+  return `${lines.join('\n')}\n\n`;
 }
 
 /** Turn a `--until` argument into an ISO deadline. Accepts an ISO timestamp or
@@ -1279,6 +1311,31 @@ export class SessionManager implements KTeamService {
 
   async send(id: string, request: SendRequest): Promise<SessionView & { disposition: SendDisposition }> {
     id = this.resolveRef(id);
+    // PEER MESSAGING. `from` is a LABEL, never an authorization: the bearer
+    // token already authorized this call, and the sender is resolved here only
+    // so the message can be attributed to a teammate rather than to "the
+    // human". An unresolvable ref degrades to an unattributed send rather than
+    // failing — a delivered message matters more than a cosmetic field.
+    const sender =
+      request.from === undefined || request.from === id
+        ? undefined
+        : await this.get(this.resolveRef(request.from)).catch(() => undefined);
+    if (sender) {
+      // The harness only ever sees the message TEXT, so attribution has to be
+      // in it: an unlabelled peer message reads as the lead speaking, and a
+      // teammate that cannot tell the difference cannot decide whether to
+      // obey it, negotiate, or escalate. The reply instruction is included
+      // only when the sender is actually parked on one, so a fire-and-forget
+      // note never nags the receiver into answering.
+      request = {
+        ...request,
+        // Canonicalized from the session record: the id, and the callsign the
+        // daemon knows it by — never whatever the caller claimed.
+        from: sender.config.id,
+        ...(sender.config.teammate ? { fromName: sender.config.teammate } : {}),
+        message: `${peerPreamble(sender, request.replyExpected === true)}${request.message}`,
+      };
+    }
     {
       // Cheap pre-lock probe ONLY to route obvious revives without waiting on
       // the lock; the authoritative terminal/liveness decision is re-made
@@ -1373,12 +1430,21 @@ export class SessionManager implements KTeamService {
         }
         await appendFile(
           path.join(view.directory, 'channel', 'inbox.jsonl'),
-          `${JSON.stringify({ at: now(), type: 'message', queued: true, queueId: entry.id, message: queuedMessage, attachmentIds: request.attachmentIds ?? [] })}\n`,
+          `${JSON.stringify({ at: now(), type: 'message', queued: true, queueId: entry.id, message: queuedMessage, attachmentIds: request.attachmentIds ?? [], ...(request.from ? { from: request.from, fromName: request.fromName } : {}) })}\n`,
         );
         await this.emit(
           id,
           'control.send_queued',
-          { queueId: entry.id, message: queuedMessage, attachmentIds: request.attachmentIds ?? [], native: true },
+          {
+            queueId: entry.id,
+            message: queuedMessage,
+            attachmentIds: request.attachmentIds ?? [],
+            native: true,
+            ...(request.from
+              ? { from: request.from, ...(request.fromName ? { fromName: request.fromName } : {}) }
+              : {}),
+            ...(request.replyExpected ? { replyExpected: true } : {}),
+          },
           'client',
         );
         return { kind: 'queued' as const };
@@ -1387,6 +1453,14 @@ export class SessionManager implements KTeamService {
       return { kind: 'delivered' as const };
     });
     if (outcome.kind === 'revive') return await this.reviveWithMessage(id, request);
+    // The RECIPIENT may be parked awaiting a reply from this very sender —
+    // in which case this send IS that reply, and the park ends here. Doing it
+    // on the daemon side (rather than making the waiter poll, or requiring the
+    // replier to also `signal working` on someone else's behalf) is what turns
+    // request/response into a real pattern: both sides only ever call
+    // `kteam send`. Runs after delivery, so a waiter is never woken for a
+    // message that failed to land.
+    if (sender) await this.endPeerWait(id, sender.config.id).catch(() => undefined);
     return { ...(await this.get(id)), disposition: outcome.kind };
   }
 
@@ -1431,7 +1505,7 @@ export class SessionManager implements KTeamService {
       await writeFile(turnPrompt(this.paths, id, turn), `${complete}\n`, { mode: 0o600 });
       await appendFile(
         path.join(view.directory, 'channel', 'inbox.jsonl'),
-        `${JSON.stringify({ at: now(), type: 'message', turn, message, attachmentIds: request.attachmentIds ?? [] })}\n`,
+        `${JSON.stringify({ at: now(), type: 'message', turn, message, attachmentIds: request.attachmentIds ?? [], ...(request.from ? { from: request.from, fromName: request.fromName } : {}) })}\n`,
       );
       const config = await this.store.updateConfig<SessionConfig>(id, current => ({
         ...current,
@@ -1442,7 +1516,16 @@ export class SessionManager implements KTeamService {
       await this.emit(
         id,
         'control.send',
-        { message, attachmentIds: request.attachmentIds ?? [], ...(direct ? { direct: true } : {}) },
+        {
+          message,
+          attachmentIds: request.attachmentIds ?? [],
+          ...(direct ? { direct: true } : {}),
+          // Who sent this. Present only for SESSION-to-session messages, so
+          // its absence is exactly "a human sent it" — the UI keys the sender
+          // chip off that (see lib/transcript.ts peerFrom).
+          ...(request.from ? { from: request.from, ...(request.fromName ? { fromName: request.fromName } : {}) } : {}),
+          ...(request.replyExpected ? { replyExpected: true } : {}),
+        },
         'client',
         turn,
       );
@@ -2037,19 +2120,58 @@ export class SessionManager implements KTeamService {
     if (protectedStatuses.includes(view.state.status))
       throw new Error(`session ${id} is ${view.state.status}; resume it before declaring a wait`);
     const until = options.until === undefined ? undefined : parseDeadline(options.until);
+    // PEER WAIT: resolve the target NOW and refuse an unknown one. Parking on
+    // a name that resolves to nobody would suspend the reflex layer waiting
+    // for a reply that can never arrive — a typo becoming an effectively
+    // immortal session. The deadline backstop would wake it eventually, but
+    // hours late and with no explanation; failing the signal outright says
+    // what is wrong while the teammate can still fix it.
+    let peer: SessionView | undefined;
+    if (options.peer !== undefined) {
+      const peerId = this.resolveRef(options.peer);
+      if (peerId === id) throw new Error('a session cannot wait on a reply from itself');
+      peer = await this.get(peerId).catch(() => undefined);
+      if (!peer) throw new Error(`unknown kteam session "${options.peer}" - cannot wait for a reply from it`);
+    }
     const waiting = {
       since: now(),
       ...(until ? { until } : {}),
       ...(options.condition ? { condition: options.condition } : {}),
+      ...(peer ? { peer: peer.config.id, ...(peer.config.teammate ? { peerName: peer.config.teammate } : {}) } : {}),
     };
-    const detail = [options.condition ?? message, until ? `until ${until}` : 'open-ended'].filter(Boolean).join(' â ');
+    const peerLabel = peer ? `reply from ${peer.config.teammate ?? peer.config.id}` : undefined;
+    const detail = [peerLabel ?? options.condition ?? message, until ? `until ${until}` : 'open-ended']
+      .filter(Boolean)
+      .join(' â ');
     await this.transition(
       id,
       { status: 'waiting', health: 'waiting', reason: `waiting: ${detail}`, waiting },
       'session.waiting',
-      { until: until ?? null, condition: options.condition ?? null },
+      {
+        until: until ?? null,
+        condition: options.condition ?? null,
+        ...(peer ? { peer: peer.config.id, peerName: peer.config.teammate ?? null } : {}),
+      },
     );
     return await this.get(id);
+  }
+
+  /** `recipientId` was parked awaiting a reply from `senderId`, and that reply
+   *  has just been delivered — so end the park.
+   *
+   *  This is what makes request/response work without polling: the waiter
+   *  declares `signal waiting --peer <target>`, the target answers with an
+   *  ordinary `kteam send <waiter> "…"`, and the wait ends here. Neither side
+   *  needs a reply-specific command, and the replier never has to signal
+   *  anything on the waiter's behalf.
+   *
+   *  No-op unless the recipient is parked on THIS sender: an unrelated peer
+   *  message must not release a wait that is still genuinely outstanding. */
+  private async endPeerWait(recipientId: string, senderId: string): Promise<void> {
+    const view = await this.get(recipientId).catch(() => undefined);
+    if (view?.state.waiting?.peer !== senderId) return;
+    const who = view.state.waiting.peerName ?? senderId;
+    await this.clearWaiting(recipientId, `${who} replied`);
   }
 
   /** Leave the declared wait: drop the marker, credit the parked time back
@@ -4969,6 +5091,29 @@ export class SessionManager implements KTeamService {
       })),
     );
     return parseWardenReports(files.filter(f => f.content));
+  }
+
+  /** The cached `kfleet usage` feed, projected for the browser and keyed by
+   *  wrapper binary.
+   *
+   *  Why an endpoint and not per-session state: session state only gains usage
+   *  numbers when that session's monitor loop runs its 60s quota tick, so an
+   *  idle/terminal session — and EVERY session for the first minute of its
+   *  life — carries none, and a fleet list would render a sea of blanks next
+   *  to a `kteam ps` that shows numbers. One feed the UI joins by binary is
+   *  the same fact for every session, available immediately.
+   *
+   *  Never fabricates: before the first successful refresh this reports
+   *  `stale: true` with no accounts, which the UI renders as "no data" rather
+   *  than as 0%. */
+  async usage(): Promise<UsageFeedView> {
+    const accounts = await this.fetchUsageAccounts().catch(() => [] as AgentUsage[]);
+    const at = this.usageFeed.snapshotAt();
+    return {
+      ...(at === undefined ? {} : { at: new Date(at).toISOString() }),
+      stale: !this.usageFeed.hasSnapshot(),
+      accounts: accounts.map(usageAccountView),
+    };
   }
 
   async search(query: string, limit = 30): Promise<SearchResponse> {

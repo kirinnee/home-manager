@@ -17,10 +17,13 @@ import { ModeBadge } from './ModeBadge';
 import { RcBadge } from './RcBadge';
 import { Link } from '../lib/router';
 import { toneFor } from '../lib/utils';
-import { QuotaReadout, hasQuota } from './QuotaBadge';
+import { QuotaReadout } from './QuotaBadge';
+import type { Quota } from '../lib/usage';
 
 interface Props {
   view: SessionView;
+  /** Resolved account quota for this session's wrapper; null = unknown. */
+  quota: Quota | null;
   liveStatus: 'connecting' | 'open' | 'closed';
   isTerminal: boolean;
   isKillFailed: boolean;
@@ -30,10 +33,14 @@ interface Props {
   onResume: () => void;
   /** Chat/Terminal switch, hosted here instead of owning its own row. */
   tabs?: ReactNode;
+  /** "who else is in this folder" toggle — next to the back link, because it
+   *  is navigation, not a control that acts on this session. */
+  folderToggle?: ReactNode;
 }
 
 export const SessionHeader = memo(function SessionHeader({
   view,
+  quota,
   liveStatus,
   isTerminal,
   isKillFailed,
@@ -42,6 +49,7 @@ export const SessionHeader = memo(function SessionHeader({
   onStop,
   onResume,
   tabs,
+  folderToggle,
 }: Props) {
   const { config, state } = view;
   const title = config.teammate || config.name || config.id;
@@ -59,6 +67,7 @@ export const SessionHeader = memo(function SessionHeader({
         <Link to="/" className="inline-flex shrink-0 items-center gap-1 text-muted hover:text-fg" title="All sessions">
           <ChevronLeft size={15} />
         </Link>
+        {folderToggle}
         <h1 className="m-0 shrink-0 text-[15px] font-semibold tracking-tight">{title}</h1>
         {config.teammate && config.name && (
           <span className="min-w-0 truncate text-[12px] text-muted" title={config.name}>
@@ -165,7 +174,7 @@ export const SessionHeader = memo(function SessionHeader({
           </>
         )}
         <Sep />
-        <LivenessStrip view={view} liveStatus={liveStatus} />
+        <LivenessStrip view={view} quota={quota} liveStatus={liveStatus} />
       </div>
     </div>
   );
@@ -181,9 +190,11 @@ const AGE_KEYS = [
 
 const LivenessStrip = memo(function LivenessStrip({
   view,
+  quota,
   liveStatus,
 }: {
   view: SessionView;
+  quota: Quota | null;
   liveStatus: 'connecting' | 'open' | 'closed';
 }) {
   // Self-contained 1s tick — re-renders only this strip (fluid liveness ages).
@@ -214,12 +225,12 @@ const LivenessStrip = memo(function LivenessStrip({
       ) : (
         <span className="shrink-0 text-faint">context —</span>
       )}
-      {hasQuota(state) && (
-        <>
-          <Sep />
-          <QuotaReadout state={state} className="text-faint" />
-        </>
-      )}
+      {/* Always present, like context: a header that silently drops the quota
+          when the feed has no record is indistinguishable from a UI that never
+          rendered one — which is exactly how this looked before. `showUnknown`
+          makes "we don't know" a visible, explainable state. */}
+      <Sep />
+      <QuotaReadout quota={quota} className="text-faint" showUnknown />
       {ages.length > 0 && (
         <>
           <Sep />

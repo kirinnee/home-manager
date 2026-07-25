@@ -50,8 +50,44 @@ export interface ToolCall {
   orphanResult?: boolean;
 }
 
+/** A message that came from another SESSION rather than from the human.
+ *
+ *  The daemon prepends an attribution banner to peer messages (see
+ *  session-manager.peerPreamble) because the harness only ever reads message
+ *  TEXT. In the browser that banner is redundant chrome — the UI can render a
+ *  proper sender chip instead — so it is parsed off here and the remaining
+ *  prose is what gets shown. */
+export interface PeerFrom {
+  name: string;
+  /** The sender is parked awaiting an answer to this message. */
+  replyExpected: boolean;
+}
+
+/** Matches the banner emitted by session-manager.peerPreamble. Kept tolerant:
+ *  an unrecognised banner is simply left in the body rather than half-stripped,
+ *  so a daemon/UI version skew degrades to "shows extra text", never to
+ *  "silently eats the first paragraph of a message". */
+const PEER_BANNER = /^\[peer message from teammate ([^\s(]+)[^\]]*\]\n(.*?)\n\n/s;
+
+export function peerFrom(text: string): { from: PeerFrom | null; body: string } {
+  const match = PEER_BANNER.exec(text);
+  if (!match) return { from: null, body: text };
+  return {
+    from: { name: match[1]!, replyExpected: /PARKED/.test(match[2] ?? '') },
+    body: text.slice(match[0].length),
+  };
+}
+
 export type TranscriptBlock =
-  | { id: string; kind: 'user'; text: string; ts?: string; source: string }
+  | {
+      id: string;
+      kind: 'user';
+      text: string;
+      ts?: string;
+      source: string;
+      /** Present when another session sent this, absent when a human did. */
+      from?: PeerFrom;
+    }
   | { id: string; kind: 'assistant'; text: string; ts?: string; source: string }
   | { id: string; kind: 'thinking'; text: string; ts?: string; durationMs?: number; source: string }
   | { id: string; kind: 'tools'; calls: ToolCall[]; ts?: string }
@@ -195,12 +231,17 @@ export function buildTranscript(records: ChatRecord[]): TranscriptBlock[] {
 
     if (type === 'chat.user') {
       flushTurns(false);
+      // Peer messages carry their attribution INSIDE the text (that is the only
+      // channel the harness reads). Lift it out into structured form so the UI
+      // can show a sender chip and the reader sees prose, not a banner.
+      const { from, body } = peerFrom(dataStr(r, 'text') ?? '');
       out.push({
         id: mkId(`u-${hash(sig(r))}`),
         kind: 'user',
-        text: dataStr(r, 'text') ?? '',
+        text: body,
         ts: r.timestamp,
         source: r.source ?? 'user',
+        ...(from ? { from } : {}),
       });
       prevTs = r.timestamp;
       i++;

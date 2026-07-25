@@ -1,11 +1,22 @@
-// A run of consecutive tool calls, collapsed into ONE slim group line —
-// tools are background noise, visible but small. Never a big card, never a
-// modal.
+// A run of consecutive tool calls, collapsed into ONE slim group line.
 //
-//   collapsed:  ● 4 tools · Bash, Edit ×2, Read            ✓
-//   running:    ● Bash · bun test — 34s               ◌ (subtle spinner)
-//   expanded:   each call as its own slim line, individually openable to its
-//               input body + result.
+// ASYMMETRIC DENSITY (see index.css): tools are background texture, not
+// content. Everything at rest lives in the `.kt-chrome` tier — 11px / 1.35,
+// --faint at 78% opacity — which is a clear step below the 13–13.75px full-tone
+// message text around it. The collapsed state is a SINGLE line with no card, no
+// border, no background, and no decorative icon of its own:
+//
+//   collapsed:  4 tools · Bash, Edit ×2, Read                        ✓
+//   running:    Bash · bun test — 34s                                ◌
+//   expanded:   one slim line per call, each openable to input + result
+//
+// Two things deliberately keep their weight:
+//   - a RUNNING tool (the accent spinner) — it is live status, not history;
+//   - an ERROR (the red triangle, via .kt-chrome-alert) — a failure that faded
+//     into the background would be a bug, not a density win.
+//
+// Expansion is opt-in on click and brings back full-size code surfaces: you
+// opened it on purpose, so the body should be comfortable to read.
 
 import { memo, useEffect, useState } from 'react';
 import {
@@ -21,7 +32,6 @@ import {
   Wrench,
   Check,
   TriangleAlert,
-  CircleDot,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import {
@@ -79,7 +89,7 @@ function Elapsed({ since }: { since?: string }) {
   if (!Number.isFinite(start)) return null;
   const s = Math.max(0, Math.floor((Date.now() - start) / 1000));
   const label = s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
-  return <span className="mono text-faint">— {label}</span>;
+  return <span className="mono shrink-0">— {label}</span>;
 }
 
 interface Props {
@@ -101,49 +111,49 @@ export const ToolGroup = memo(function ToolGroup({ calls, live, isLast }: Props)
   const single = calls.length === 1;
 
   // ---- running: a dedicated slim status line (spinner + elapsed) ----------
+  // Still chrome-sized, but the spinner keeps the accent: this is the one tool
+  // state that is live information rather than a record of the past.
   if (running && single) {
     const sum = extractToolSummary(lastCall!.use.name, lastCall!.use.input);
     return (
-      <div className="flex items-center gap-2 px-2 py-1 text-[12px]">
-        <Loader2 size={12} className="shrink-0 animate-spin text-accent" />
-        <span className="mono font-medium text-fg-soft">{sum.verb}</span>
-        <span className="mono truncate text-muted">· {sum.headline}</span>
+      <div className="kt-chrome flex items-center gap-1.5 px-2 py-px">
+        <Loader2 size={10} className="kt-chrome-alert shrink-0 animate-spin text-accent" />
+        <span className="mono shrink-0">{sum.verb}</span>
+        <span className="mono min-w-0 flex-1 truncate">· {sum.headline}</span>
         <Elapsed since={lastCall!.ts} />
       </div>
     );
   }
 
-  const StatusIcon = running ? Loader2 : anyError ? TriangleAlert : Check;
-  const statusClass = running ? 'text-accent animate-spin' : anyError ? 'text-err' : 'text-ok';
-
   // ---- single (non-running) tool: render its line directly (one click to
   //      the body — no redundant group wrapper for the common case) --------
-  if (single && !running) {
-    return (
-      <div className="text-[12px]">
-        <ToolLine call={calls[0]!} />
-      </div>
-    );
-  }
+  if (single && !running) return <ToolLine call={calls[0]!} />;
+
+  const StatusIcon = running ? Loader2 : anyError ? TriangleAlert : Check;
 
   // ---- summary line -------------------------------------------------------
   return (
-    <div className="text-[12px]">
+    <div className="kt-chrome">
       <button
         type="button"
         onClick={() => setOpen(v => !v)}
-        className="group flex w-full items-center gap-2 rounded-md px-2 py-1 text-left transition-colors hover:bg-surface-2"
+        className="flex w-full items-center gap-1.5 rounded px-2 py-px text-left hover:bg-surface-2"
       >
-        <CircleDot size={11} className={cn('shrink-0', running ? 'text-accent' : 'text-faint')} />
-        <span className="text-muted">{calls.length === 1 ? '1 tool' : `${calls.length} tools`}</span>
-        <span className="mono min-w-0 flex-1 truncate text-faint">· {summarize(calls)}</span>
+        <span className="mono shrink-0">{calls.length} tools</span>
+        <span className="mono min-w-0 flex-1 truncate">· {summarize(calls)}</span>
         {running && <Elapsed since={lastCall!.ts} />}
-        <StatusIcon size={12} className={cn('shrink-0', statusClass)} />
-        <ChevronRight size={13} className={cn('shrink-0 text-faint transition-transform', open && 'rotate-90')} />
+        <StatusIcon
+          size={10}
+          className={cn(
+            'shrink-0',
+            running ? 'kt-chrome-alert animate-spin text-accent' : anyError ? 'kt-chrome-alert text-err' : '',
+          )}
+        />
+        <ChevronRight size={10} className={cn('shrink-0 transition-transform', open && 'rotate-90')} />
       </button>
 
       {open && (
-        <div className="mt-0.5 space-y-0.5 border-l border-border-soft pl-2">
+        <div className="border-l border-border-soft pl-1.5">
           {calls.map(c => (
             <ToolLine key={c.key} call={c} />
           ))}
@@ -183,37 +193,36 @@ function ToolLine({ call }: { call: ToolCall }) {
   const resultLang = langFromPath(sum.filePath);
 
   return (
-    <div>
+    <div className="kt-chrome">
       <button
         type="button"
         onClick={() => hasBody && setOpen(v => !v)}
         className={cn(
-          'flex w-full items-center gap-2 rounded px-1.5 py-1 text-left',
+          'flex w-full items-center gap-1.5 rounded px-1.5 py-px text-left',
           hasBody ? 'cursor-pointer hover:bg-surface-2' : 'cursor-default',
         )}
       >
-        <Icon size={12} className="shrink-0" style={{ color: toolColorVar(sum.kind) }} />
-        <span className="mono font-medium text-fg-soft">{sum.verb}</span>
-        <span className="mono min-w-0 flex-1 truncate text-muted" title={sum.headline}>
+        {/* The per-tool hue is kept but shrunk to 10px and left un-boosted, so
+            it reads as a bullet you can scan by colour rather than as an icon
+            claiming a row of its own. */}
+        <Icon size={10} className="shrink-0" style={{ color: toolColorVar(sum.kind) }} />
+        <span className="mono shrink-0">{sum.verb}</span>
+        <span className="mono min-w-0 flex-1 truncate" title={sum.headline}>
           {sum.headline}
         </span>
         {err ? (
-          <TriangleAlert size={11} className="shrink-0 text-err" />
+          <TriangleAlert size={10} className="kt-chrome-alert shrink-0 text-err" />
         ) : call.result ? (
-          <Check size={11} className="shrink-0 text-ok" />
-        ) : (
-          <span className="shrink-0 text-[10px] text-faint">·</span>
-        )}
-        {hasBody && (
-          <ChevronRight size={12} className={cn('shrink-0 text-faint transition-transform', open && 'rotate-90')} />
-        )}
+          <Check size={10} className="shrink-0" />
+        ) : null}
+        {hasBody && <ChevronRight size={10} className={cn('shrink-0 transition-transform', open && 'rotate-90')} />}
       </button>
       {open && hasBody && (
-        <div className="mb-1 ml-1.5 space-y-1">
+        <div className="mb-1 ml-1.5 mt-0.5 space-y-1">
           {sum.bodyLines.length > 0 && <CodeBlock code={sum.bodyLines.join('\n')} lang={bodyLang} />}
           {cleaned != null && (
             <div>
-              <div className="px-1 pb-0.5 text-[10.5px] uppercase tracking-wider text-faint">
+              <div className="px-1 pb-0.5 text-[10px] uppercase tracking-wider">
                 {err ? 'error' : 'result'} · {cleaned.split('\n').length} lines
               </div>
               <CodeBlock code={cleaned} lang={err ? undefined : resultLang} tone={err ? 'err' : 'default'} />

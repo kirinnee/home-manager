@@ -1,20 +1,24 @@
 // Account quota (5-hour + weekly window) for the wrapper a session runs under.
 //
-// One rendering, used by the chat header, the fleet table and the session card,
-// because "how much of this account is left" is the same fact everywhere. The
-// numbers come from the daemon's cached `kfleet usage` feed (see src/usage.ts);
-// they are percent USED, same polarity as context.
+// One rendering, used by the chat header, the fleet table, the session card and
+// the folder sidebar, because "how much of this account is left" is the same
+// fact everywhere. See lib/usage.ts for HOW a session's quota is resolved
+// (session state when its monitor has stamped one, else the /v1/usage feed
+// joined by wrapper binary). Numbers are percent USED — same polarity as
+// context, so higher is worse.
 //
-// Two rules the daemon side already enforces and this must not undo:
-//   - unknown is not zero. A wrapper with no usage record renders nothing at
-//     all rather than a confident "0%".
-//   - an auth failure is not a quota. `usageAuthOk === false` means the wrapper
+// Three rules the daemon side already enforces and this must not undo:
+//   - unknown is not zero. A wrapper with no usage record renders an explicit
+//     "quota —", never a confident "0%".
+//   - an auth failure is not a quota. `authOk === false` means the wrapper
 //     needs logging in, which is a different problem and says so.
+//   - AT LIMIT is not merely "100%". It is the state that stops work, so it
+//     takes the one piece of real colour and weight in this component.
 //
 // Muted by default: this is reference information, not an alert. It only takes
 // colour once a window is actually running out.
 
-import type { SessionState } from '../types';
+import type { Quota } from '../lib/usage';
 import { cn } from '../lib/utils';
 
 /** Humanised time until a window rolls over: "47m", "3h 10m", "2d". */
@@ -34,12 +38,36 @@ function tone(pct: number): string {
   return pct >= 90 ? 'text-err' : pct >= 75 ? 'text-warn' : '';
 }
 
-export function hasQuota(state: SessionState): boolean {
-  return state.usageAuthOk === false || state.usage5hPercent != null || state.usageWeeklyPercent != null;
+function Unknown({ className }: { className: string }) {
+  return (
+    <span
+      className={cn('mono shrink-0 text-faint', className)}
+      title="kfleet reports no usage for this wrapper (API-key accounts have no quota window)"
+    >
+      quota —
+    </span>
+  );
 }
 
-export function QuotaReadout({ state, className = '' }: { state: SessionState; className?: string }) {
-  if (state.usageAuthOk === false) {
+/**
+ * `quota` null ⇒ nothing is known about this wrapper.
+ *
+ * `showUnknown` decides what that means HERE. In a table cell or a sidebar row
+ * the column exists either way, so an explicit em-dash is the honest fill; in
+ * the chat header an absent readout should simply take no space.
+ */
+export function QuotaReadout({
+  quota,
+  className = '',
+  showUnknown = false,
+}: {
+  quota: Quota | null;
+  className?: string;
+  showUnknown?: boolean;
+}) {
+  if (!quota) return showUnknown ? <Unknown className={className} /> : null;
+
+  if (quota.authOk === false) {
     return (
       <span
         className={cn('mono shrink-0 text-warn', className)}
@@ -49,16 +77,21 @@ export function QuotaReadout({ state, className = '' }: { state: SessionState; c
       </span>
     );
   }
-  const five = state.usage5hPercent;
-  const week = state.usageWeeklyPercent;
-  if (five == null && week == null) return null;
 
-  const fiveIn = resetsIn(state.usage5hResetAt);
-  const weekIn = resetsIn(state.usageWeeklyResetAt);
+  const five = quota.fiveHourPercent;
+  const week = quota.weeklyPercent;
+  // At-limit with no percentages is still the most important thing to say, so
+  // it is not folded into the unknown case.
+  if (five == null && week == null && quota.atLimit !== true) {
+    return showUnknown ? <Unknown className={className} /> : null;
+  }
+
+  const fiveIn = resetsIn(quota.fiveHourResetAt);
+  const weekIn = resetsIn(quota.weeklyResetAt);
   const title = [
     five == null ? null : `5-hour window ${five}% used${fiveIn ? ` · resets in ${fiveIn}` : ''}`,
     week == null ? null : `weekly window ${week}% used${weekIn ? ` · resets in ${weekIn}` : ''}`,
-    state.usageAtLimit ? 'this account is AT LIMIT' : null,
+    quota.atLimit ? 'this account is AT LIMIT — work is blocked until the window resets' : null,
   ]
     .filter(Boolean)
     .join('\n');
@@ -68,7 +101,9 @@ export function QuotaReadout({ state, className = '' }: { state: SessionState; c
       {five != null && <span className={tone(five)}>5h {five}%</span>}
       {five != null && week != null && <span className="text-border">·</span>}
       {week != null && <span className={tone(week)}>wk {week}%</span>}
-      {state.usageAtLimit && <span className="font-semibold text-err">at limit</span>}
+      {quota.atLimit && (
+        <span className="rounded-sm bg-err-bg px-1 font-semibold uppercase tracking-wide text-err">at limit</span>
+      )}
     </span>
   );
 }
