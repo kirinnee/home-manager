@@ -31,8 +31,7 @@ import { ThinkingIndicator } from '../components/Harness';
 import { buildTranscript, latestPendingQuestion } from '../lib/transcript';
 import { useUsage } from '../hooks/useUsage';
 import { quotaFor } from '../lib/usage';
-import { FolderSidebar, FolderSidebarToggle, folderNeighbours } from '../components/FolderSidebar';
-import { TERMINAL_STATUSES, WAITING_STATUSES, cn, fmtAbsolute, isBusy } from '../lib/utils';
+import { TERMINAL_STATUSES, WAITING_STATUSES, cn, fmtAbsolute, isBusy, toneFor } from '../lib/utils';
 
 const PAGE_SIZE = 200;
 /** Slack when matching an optimistic send against the real chat.user record it
@@ -60,7 +59,10 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
   // header immediately instead of after a round trip; the store keeps it fresh
   // from the socket (deltas + one batched GET per burst).
   const view = useSession(sessionId);
-  const { sessions, status: liveStatus } = useFleet();
+  // Only the socket state is read from the fleet snapshot now — the folder
+  // neighbour list moved to the global sidebar, so this page no longer
+  // re-renders when some other session's row changes.
+  const { status: liveStatus } = useFleet();
   const [records, setRecords] = useState<ChatRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [nextBefore, setNextBefore] = useState<number | null>(null);
@@ -264,16 +266,27 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
   const { index: usageIdx } = useUsage();
   const quota = useMemo(() => (view ? quotaFor(view, usageIdx) : null), [view, usageIdx]);
 
-  // ---- folder neighbours: who else is working in this cwd ------------------
-  // Straight off the store's fleet cache — no poll of its own. This used to be
-  // a 20s `listSessions()` per open session purely to answer "who else is in
-  // this folder", a question the shared list already answers.
-  const neighbours = useMemo(() => folderNeighbours(sessions ?? [], view ?? null), [sessions, view]);
-  // Closed by default: the sidebar is a lookup, not the reason you opened the
-  // page, and opening it narrows the transcript.
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  // The per-page folder sidebar is GONE (round 6). "Who else is working here"
+  // is now answered by the persistent global agent sidebar, which is on screen
+  // on every route and groups the whole fleet by folder — a drawer inside the
+  // chat page that narrowed the transcript to say the same thing was a second
+  // answer to a question that already had one.
 
   const busy = useMemo(() => (view ? isBusy(view) : false), [view]);
+  // The composer's context strip. Fixed-height and always fully populated (an
+  // unknown field renders as "—"), so it can never resize the transcript
+  // viewport mid-stream — see the height note in Composer.tsx.
+  const composerContext = useMemo(
+    () => ({
+      model: view?.config.model || view?.config.modelHint || undefined,
+      turn: view?.state.turn,
+      contextPercent: view?.state.contextPercent,
+      status: view?.state.waiting ? 'parked' : view?.state.status,
+      statusTone: view ? toneFor(view.state.status) : undefined,
+      liveStatus,
+    }),
+    [view, liveStatus],
+  );
   const awaitingQ = view?.state.status === 'awaiting_question';
   const isTerminal = view ? TERMINAL_STATUSES.has(view.state.status) : false;
   const isKillFailed = view?.state.status === 'kill_failed';
@@ -478,9 +491,8 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
   // just fills what it is given. A hardcoded calc() here is what made the page
   // itself scrollable on top of the transcript.
   //
-  // The folder sidebar is a SIBLING column (lg+) rather than anything nested in
-  // the transcript, so opening it narrows the conversation instead of adding a
-  // second scroller inside it.
+  // The global fleet sidebar is a shell sibling; this page keeps only the
+  // transcript scroller and fixed details overlay in its own layout.
   return (
     <div className="flex h-full min-h-0 flex-col pb-2">
       {view && (
@@ -494,9 +506,6 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
           onInterrupt={() => void interrupt()}
           onStop={() => void stop()}
           onResume={() => void resume()}
-          folderToggle={
-            <FolderSidebarToggle count={neighbours.total} open={sidebarOpen} onToggle={() => setSidebarOpen(v => !v)} />
-          }
           // The Chat/Terminal switch rides in the header rather than owning a
           // row of its own — one two-item segmented control did not justify
           // ~34px of every screen.
@@ -534,30 +543,23 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
         <TerminalView sessionId={sessionId} tmuxSession={view?.config.tmuxSession ?? ''} />
       ) : (
         <>
-          <div className="flex min-h-0 flex-1 gap-2">
-            <FolderSidebar
-              current={view ?? null}
-              neighbours={neighbours}
-              usage={usageIdx}
-              open={sidebarOpen}
-              onToggle={() => setSidebarOpen(v => !v)}
-            />
-            <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden rounded-lg border border-border bg-surface">
-              {loadingInitial ? (
-                <ThreadSkeleton />
-              ) : (
-                <Transcript
-                  blocks={blocks}
-                  live={busy}
-                  hasOlder={nextBefore != null}
-                  loadingOlder={loadingOlder}
-                  onLoadOlder={() => void loadOlder()}
-                  pinSignal={pinSignal}
-                  header={transcriptHeader}
-                  footer={transcriptFooter}
-                />
-              )}
-            </div>
+          {/* ONE pane scroller: the transcript. The details drawer is a fixed
+              overlay with its own internal scroller, so this stays true. */}
+          <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden rounded-lg border border-border bg-surface">
+            {loadingInitial ? (
+              <ThreadSkeleton />
+            ) : (
+              <Transcript
+                blocks={blocks}
+                live={busy}
+                hasOlder={nextBefore != null}
+                loadingOlder={loadingOlder}
+                onLoadOlder={() => void loadOlder()}
+                pinSignal={pinSignal}
+                header={transcriptHeader}
+                footer={transcriptFooter}
+              />
+            )}
           </div>
 
           {!awaitingQ && HAS_TOKEN && (
@@ -570,6 +572,7 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
                 disabled={!view || loadingInitial}
                 busy={busy}
                 sending={sending}
+                context={composerContext}
               />
             </div>
           )}
