@@ -85,24 +85,58 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
   /** True once the initial history page has settled — gates the reconnect
    *  catch-up so it can never race the first load. */
   const loadedRef = useRef(false);
+  /** Monotonic id of the CURRENT load. Every async continuation checks it before
+   *  touching state, so a response from a load that has been superseded — a
+   *  StrictMode setup→cleanup→setup, a navigation to another session, a slow
+   *  first request landing after a fast second one — is dropped instead of
+   *  overwriting newer state. A boolean `cancelled` per effect run could only say
+   *  "my run ended", never "someone else's run is now authoritative". */
+  const loadId = useRef(0);
+
+  /** STATE UPDATERS HERE MUST BE PURE — see the round-7 note on the initial
+   *  load. `fresh` is computed and `seenKeys` is mutated OUTSIDE the updater;
+   *  the updater itself only concatenates. */
+  const takeFresh = useCallback((records: ChatRecord[]): ChatRecord[] => {
+    const fresh = records.filter(r => !seenKeys.current.has(recordKey(r)));
+    for (const r of fresh) seenKeys.current.add(recordKey(r));
+    return fresh;
+  }, []);
 
   /** Merge a freshly fetched tail page into the record list. Content dedupe
    *  (`seenKeys`) does the work: anything already on screen is dropped, so a
    *  re-fetch of the same page is a no-op and only genuinely missed records
    *  land — which, being a tail, belong at the end. */
-  const mergeTail = useCallback((page: { total: number; records: ChatRecord[] }) => {
-    setTotal(page.total);
-    setRecords(rs => {
-      const fresh = page.records.filter(r => !seenKeys.current.has(recordKey(r)));
-      if (fresh.length === 0) return rs;
-      for (const r of fresh) seenKeys.current.add(recordKey(r));
-      return [...rs, ...fresh];
-    });
-  }, []);
+  const mergeTail = useCallback(
+    (page: { total: number; records: ChatRecord[] }) => {
+      setTotal(page.total);
+      const fresh = takeFresh(page.records);
+      if (fresh.length === 0) return;
+      setRecords(rs => [...rs, ...fresh]);
+    },
+    [takeFresh],
+  );
 
   // ---- initial load: cached/fetched view + first history page --------------
+  //
+  // ROUND 7 — WHY THE TRANSCRIPT WAS EMPTY IN `vite dev`.
+  //
+  // Measured: production rendered 79 blocks for a session, `bun run dev`
+  // rendered 0, and the chat request returned 200 in both. The cause was not the
+  // fetch and not the socket — it was an IMPURE STATE UPDATER.
+  //
+  // The merge below used to run inside `setRecords(live => …)` and mutate
+  // `seenKeys` from there. React StrictMode DOUBLE-INVOKES updater functions in
+  // development, precisely to surface impurity. The first invocation filtered the
+  // page against an empty `seenKeys`, added all 200 keys, and returned them; the
+  // second invocation ran with those keys already present, filtered every record
+  // out, and returned an EMPTY array — which is the one React kept. Same code in
+  // production, where updaters run once, worked perfectly. Every dedupe-and-merge
+  // path had the same shape (initial load, reconnect catch-up, older-page
+  // prepend), so all three now compute `fresh` and mutate the ref OUTSIDE the
+  // updater via `takeFresh`, leaving updaters that only concatenate.
   useEffect(() => {
-    let cancelled = false;
+    const generation = ++loadId.current;
+    const superseded = () => loadId.current !== generation;
     setRecords([]);
     setError(null);
     setNextBefore(null);
@@ -121,33 +155,31 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
           store.fetchSession(sessionId),
           api.chatHistory(sessionId, undefined, PAGE_SIZE),
         ]);
-        if (cancelled) return;
+        if (superseded()) return;
         setTotal(page.total);
         // MERGE, don't replace. The subscription is live while this fetch is in
         // flight (and replays the store's buffer the moment it attaches), so
         // records can already be on screen — a plain `setRecords(page.records)`
         // threw away anything that streamed in during the round trip. History is
         // older than anything appended live, so the fresh half goes in front.
-        setRecords(live => {
-          const fresh = page.records.filter(r => !seenKeys.current.has(recordKey(r)));
-          for (const r of fresh) seenKeys.current.add(recordKey(r));
-          return live.length === 0 ? fresh : [...fresh, ...live];
-        });
+        const fresh = takeFresh(page.records);
+        setRecords(live => (live.length === 0 ? fresh : [...fresh, ...live]));
         setNextBefore(page.offset);
         setAtStart(page.offset === 0);
         setPinSignal(n => n + 1);
         loadedRef.current = true;
       } catch (e) {
-        if (!cancelled) setError(e instanceof ApiError ? e.message : String(e));
+        if (!superseded()) setError(e instanceof ApiError ? e.message : String(e));
       } finally {
-        if (!cancelled) setLoadingInitial(false);
+        if (!superseded()) setLoadingInitial(false);
       }
     })();
 
-    return () => {
-      cancelled = true;
-    };
-  }, [sessionId, store]);
+    // No cleanup flag: the generation IS the guard, and it keeps working after
+    // this run's cleanup has gone (a late response from the previous session
+    // must not clear the new one's state).
+    return undefined;
+  }, [sessionId, store, takeFresh]);
 
   // ---- live events: the store's per-session subscription -------------------
   //
@@ -228,11 +260,9 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
     try {
       const page = await api.chatHistory(sessionId, nextBefore, PAGE_SIZE);
       setTotal(page.total);
-      setRecords(rs => {
-        const fresh = page.records.filter(r => !seenKeys.current.has(recordKey(r)));
-        for (const r of fresh) seenKeys.current.add(recordKey(r));
-        return [...fresh, ...rs];
-      });
+      // Pure updater; the dedupe and the ref mutation happen in `takeFresh`.
+      const fresh = takeFresh(page.records);
+      setRecords(rs => [...fresh, ...rs]);
       setNextBefore(page.offset);
       setAtStart(page.offset === 0);
     } catch {
@@ -241,7 +271,7 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
       loadingOlderRef.current = false;
       setLoadingOlder(false);
     }
-  }, [nextBefore, sessionId]);
+  }, [nextBefore, sessionId, takeFresh]);
 
   // ---- derived -------------------------------------------------------------
   const blocks = useMemo(() => buildTranscript(records), [records]);
