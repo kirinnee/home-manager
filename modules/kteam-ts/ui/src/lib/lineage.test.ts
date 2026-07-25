@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { SessionView } from '../types';
-import { MAX_INDENT_DEPTH, buildLineage, nestByLineage, parentDisplay, shortSessionId } from './lineage';
+import { buildLineage, lineageIndent, nestByLineage, parentDisplay, shortSessionId } from './lineage';
 
 function session(
   id: string,
@@ -70,6 +70,30 @@ describe('buildLineage', () => {
       'b',
     ]);
   });
+
+  test('keeps a tail that points at a dropped three-node cycle', () => {
+    const d = session('d', { parent: 'a' });
+    const a = session('a', { parent: 'b' });
+    const b = session('b', { parent: 'c' });
+    const c = session('c', { parent: 'a' });
+    const lineage = buildLineage([d, a, b, c]);
+
+    expect([...lineage.parentOf]).toEqual([['d', 'a']]);
+    expect(lineage.childrenOf.get('a')?.map(view => view.config.id)).toEqual(['d']);
+    expect(lineage.depthOf.get('a')).toBe(0);
+    expect(lineage.depthOf.get('d')).toBe(1);
+  });
+
+  test('fills depths when children arrive before their parents', () => {
+    const grandchild = session('grandchild', { parent: 'child' });
+    const child = session('child', { parent: 'root' });
+    const root = session('root');
+    const lineage = buildLineage([grandchild, child, root]);
+
+    expect(lineage.depthOf.get('root')).toBe(0);
+    expect(lineage.depthOf.get('child')).toBe(1);
+    expect(lineage.depthOf.get('grandchild')).toBe(2);
+  });
 });
 
 describe('parentDisplay', () => {
@@ -105,7 +129,9 @@ describe('nestByLineage', () => {
     expect(flattened[0]).toMatchObject({ depth: 0, spawnedBy: 'root' });
   });
 
-  test('caps visual indentation externally while preserving a deep nested structure', () => {
+  test('clamps sidebar indentation through the geometry helper it renders with', () => {
+    // This Bun-only harness does not mount the sidebar DOM. Browser gates remain
+    // responsible for the native-list and continuous-rail visual assertion.
     const a = session('a');
     const b = session('b', { parent: 'a' });
     const c = session('c', { parent: 'b' });
@@ -114,7 +140,11 @@ describe('nestByLineage', () => {
     const deep = nested[0]!.children[0]!.children[0]!.children[0]!;
 
     expect(deep.depth).toBe(3);
-    expect(Math.min(deep.depth, MAX_INDENT_DEPTH)).toBe(2);
+    expect(lineageIndent(0)).toBe(0);
+    expect(lineageIndent(1)).toBe(10);
+    expect(lineageIndent(2)).toBe(20);
+    expect(lineageIndent(deep.depth)).toBe(20);
+    expect(lineageIndent(99)).toBe(20);
   });
 
   test('sorts roots by newest descendant and each sibling set by its own activity', () => {
