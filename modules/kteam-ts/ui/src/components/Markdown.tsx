@@ -19,11 +19,19 @@ import { fenceLanguage, highlightToHtml } from '../lib/highlight';
 
 export const Markdown = memo(function Markdown({ text }: { text: string }) {
   return (
-    <div className="md">
+    <div className="md min-w-0 max-w-full">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
           a: ({ node: _node, ...rest }) => <a {...rest} target="_blank" rel="noreferrer" />,
+          // A table's min-content width is allowed to exceed prose width. Give
+          // that width one local, reachable scroller instead of making the
+          // entire transcript the horizontal scroll container.
+          table: ({ node: _node, ...rest }) => (
+            <div className="md-table-scroll scroll-thin">
+              <table {...rest} />
+            </div>
+          ),
           code: ({ node: _node, className, children, ...rest }) => {
             const lang = fenceLanguage(className);
             const source = lang ? String(children).replace(/\n$/, '') : '';

@@ -1,7 +1,8 @@
 // One transcript block, rendered top-to-bottom (no bubbles). Memoized so a
 // live append or a header tick never re-renders existing rows.
 //
-//   user       — compact block, accent left-rail + faint fill, whitespace kept
+//   human user — unboxed prose led once by the accent `>>>` prompt marker
+//   peer user  — sender chip + the existing quiet peer card treatment
 //   assistant  — clean rendered markdown, no container chrome
 //   thinking   — collapsed one-liner ("thought for 2m 14s"), expandable
 //   tools      — delegated to <ToolGroup/>
@@ -127,7 +128,7 @@ export const TranscriptRow = memo(function TranscriptRow({ block, live, isLast, 
 
   return (
     <div
-      className="kt-block"
+      className="kt-block min-w-0"
       // The scroll controller's prepend anchor looks a block up by id to restore
       // its exact position when an older page loads (see Transcript.tsx).
       data-block-id={block.id}
@@ -166,9 +167,10 @@ function TurnBoundary({ block }: { block: Extract<TranscriptBlock, { kind: 'turn
   );
 }
 
-// Assistant text: no per-message role label (role reads from layout — user
-// blocks are railed + filled, assistant is plain prose). Metadata sits aside,
-// revealed on hover: a slim left gutter rule + a timestamp that fades in.
+// Assistant text: no per-message role label (role reads from layout — human
+// turns are prompt-led, peers carry a sender chip, assistant is plain prose).
+// Metadata sits aside, revealed on hover: a slim left gutter rule + a timestamp
+// that fades in.
 //
 // THE TIMESTAMP NEEDS ITS OWN COLUMN. Absolutely positioning it at `right-0`
 // over prose that occupies the full width means it lands ON the first line
@@ -189,7 +191,7 @@ const TS_GUTTER = 'pr-[54px]';
 function AssistantMessage({ text, ts }: { text: string; ts?: string; source: string }) {
   if (!text.trim()) return null;
   return (
-    <div className={cn('group relative pl-3', ts && TS_GUTTER)}>
+    <div className={cn('group relative min-w-0 pl-3', ts && TS_GUTTER)}>
       <span className="absolute left-0 top-1 bottom-1 w-px bg-border-soft opacity-0 transition-opacity group-hover:opacity-100" />
       {ts && (
         <span className="pointer-events-none absolute right-0 top-0.5 w-[50px] text-right mono text-2xs tabular-nums text-faint opacity-0 transition-opacity group-hover:opacity-100">
@@ -210,7 +212,7 @@ function AssistantMessage({ text, ts }: { text: string; ts?: string; source: str
 function PeerChip({ from }: { from: PeerFrom }) {
   return (
     <span
-      className="kt-badge shrink-0"
+      className="kt-badge min-w-0 max-w-full truncate"
       data-tone="accent"
       title={
         from.replyExpected
@@ -236,49 +238,96 @@ function UserMessage({ text, ts, from }: { text: string; ts?: string; from?: Pee
     lines.find(l => l.trim() && !/^[<#-]/.test(l.trim()))?.trim() ?? lines.find(l => l.trim())?.trim() ?? '(empty)';
   if (preview.length > 160) preview = preview.slice(0, 160) + '…';
 
-  return (
-    <div className="overflow-hidden rounded-panel border border-l-[2.5px] border-border border-l-user-border bg-user-bg">
-      <div className="flex items-center gap-2 px-panel pt-1">
-        {/* A peer message says WHO instead of the generic "message": the sender
-            is the most important thing about it. */}
-        {from ? (
+  if (from) {
+    // Peer messages keep the existing card + sender chip: WHO spoke is the
+    // essential distinction when one session is talking to another.
+    return (
+      <div className="min-w-0 overflow-hidden rounded-panel border border-l-[2.5px] border-border border-l-user-border bg-user-bg">
+        <div className="flex min-w-0 items-center gap-2 px-panel pt-1">
           <PeerChip from={from} />
-        ) : (
-          <span className="kt-label shrink-0 whitespace-nowrap text-accent">
-            {isProtocol ? 'turn prompt' : 'message'}
-          </span>
-        )}
-        {/* In FLOW, never absolute: a user block already has a metadata row, so
-            the stamp belongs in it. shrink-0 keeps it whole at 390px instead of
-            being squeezed into the label beside it. */}
-        {ts && <span className="mono shrink-0 whitespace-nowrap text-2xs tabular-nums text-faint">{fmtClock(ts)}</span>}
-        {collapsible && (
+          {ts && (
+            <span className="mono shrink-0 whitespace-nowrap text-2xs tabular-nums text-faint">{fmtClock(ts)}</span>
+          )}
+          {collapsible && (
+            <button
+              type="button"
+              onClick={() => setOpen(v => !v)}
+              className="ml-auto inline-flex shrink-0 items-center gap-1 text-meta text-muted hover:text-fg"
+            >
+              <span>{open ? 'collapse' : `${lines.length} lines`}</span>
+              <ChevronRight size={12} className={cn('transition-transform', open && 'rotate-90')} />
+            </button>
+          )}
+        </div>
+        {collapsible && !open ? (
           <button
             type="button"
-            onClick={() => setOpen(v => !v)}
-            className="ml-auto inline-flex items-center gap-1 text-meta text-muted hover:text-fg"
+            onClick={() => setOpen(true)}
+            className="block min-w-0 max-w-full truncate px-panel pb-1.5 pt-0.5 text-left mono text-ui text-fg-soft"
+            title={preview}
           >
-            <span>{open ? 'collapse' : `${lines.length} lines`}</span>
-            <ChevronRight size={12} className={cn('transition-transform', open && 'rotate-90')} />
+            {preview}
           </button>
+        ) : (
+          <div className="kt-user-copy min-w-0 max-w-full px-panel pb-1.5 pt-0.5 text-row leading-base whitespace-pre-wrap break-words text-fg">
+            {text}
+          </div>
         )}
       </div>
-      {collapsible && !open ? (
-        <button
-          type="button"
-          onClick={() => setOpen(true)}
-          className="block w-full px-panel pb-1.5 pt-0.5 text-left mono text-ui text-fg-soft truncate"
-          title={preview}
-        >
-          {preview}
-        </button>
-      ) : (
-        // Line-height stays comfortable INSIDE prose: readability of the words
-        // outranks density, and the space this pass reclaimed came from chrome.
-        <div className="px-panel pb-1.5 pt-0.5 text-row leading-base whitespace-pre-wrap break-words text-fg">
-          {text}
-        </div>
-      )}
+    );
+  }
+
+  return (
+    <div className="flex min-w-0 items-start gap-2 pt-0.5">
+      {/* Once per transcript block is deliberate. Repeating this for source
+          lines would bloat long pastes, and wrapped visual lines would still be
+          inconsistent as the viewport changed. One stable leader supplies the
+          requested shell-prompt attribution while the min-width:0 text column
+          gives every wrapped line a clean hanging indent. */}
+      <span className="sr-only">You said:</span>
+      <span
+        className="mono shrink-0 select-none whitespace-nowrap text-row font-semibold leading-base text-accent"
+        aria-hidden="true"
+      >
+        &gt;&gt;&gt;
+      </span>
+      <div className="min-w-0 flex-1">
+        {(ts || collapsible) && (
+          <div className="flex min-w-0 items-center gap-2">
+            {/* In FLOW, never absolute: the timestamp cannot collide with prose
+                at either desktop or phone widths. */}
+            {ts && (
+              <span className="mono shrink-0 whitespace-nowrap text-2xs tabular-nums text-faint">{fmtClock(ts)}</span>
+            )}
+            {collapsible && (
+              <button
+                type="button"
+                onClick={() => setOpen(v => !v)}
+                className="ml-auto inline-flex shrink-0 items-center gap-1 text-meta text-muted hover:text-fg"
+              >
+                <span>{open ? 'collapse' : `${lines.length} lines`}</span>
+                <ChevronRight size={12} className={cn('transition-transform', open && 'rotate-90')} />
+              </button>
+            )}
+          </div>
+        )}
+        {collapsible && !open ? (
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            className="block min-w-0 max-w-full truncate pb-1.5 pt-0.5 text-left mono text-ui text-fg-soft"
+            title={preview}
+          >
+            {preview}
+          </button>
+        ) : (
+          // Line-height stays comfortable INSIDE prose: readability of the
+          // words outranks density; this pass reclaims chrome, not leading.
+          <div className="kt-user-copy min-w-0 max-w-full pb-1.5 pt-0.5 text-row leading-base whitespace-pre-wrap break-words text-fg">
+            {text}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -293,14 +342,14 @@ function ThinkingLine({ text, durationMs }: { text: string; durationMs?: number 
       <button
         type="button"
         onClick={() => setOpen(v => !v)}
-        className="flex w-full items-center gap-1.5 rounded-control px-2 py-px text-left hover:bg-surface-2"
+        className="flex w-full min-w-0 items-center gap-1.5 rounded-control px-2 py-px text-left hover:bg-surface-2"
       >
         <Brain size={10} className="shrink-0" />
         <span className="italic">{label}</span>
         <ChevronRight size={10} className={cn('shrink-0 transition-transform', open && 'rotate-90')} />
       </button>
       {open && (
-        <pre className="m-0 ml-2 mt-0.5 max-h-80 overflow-auto rounded-md border border-border-soft bg-surface-2 px-2.5 py-2 text-code leading-base mono whitespace-pre-wrap break-words text-fg-soft scroll-thin">
+        <pre className="m-0 ml-2 mt-0.5 max-h-80 max-w-full min-w-0 overflow-auto rounded-md border border-border-soft bg-surface-2 px-2.5 py-2 text-code leading-base mono whitespace-pre-wrap break-words text-fg-soft scroll-thin">
           {text}
         </pre>
       )}
