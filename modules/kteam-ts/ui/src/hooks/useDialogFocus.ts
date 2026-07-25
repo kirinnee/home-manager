@@ -17,7 +17,7 @@
 // The trap is returned as an `onKeyDown` for the dialog element rather than
 // installed globally: it must only apply while focus is genuinely inside.
 
-import { useCallback, useEffect, useRef, type KeyboardEvent, type RefObject } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, type KeyboardEvent, type RefObject } from 'react';
 
 /** Everything focusable we can meet inside an overlay in this app. */
 const FOCUSABLE =
@@ -48,7 +48,11 @@ export function useDialogFocus(
     return () => document.removeEventListener('keydown', onKey);
   }, [open, onClose]);
 
-  useEffect(() => {
+  // Capture the opener before descendant passive effects run. The fleet drawer
+  // deliberately focuses its search input in a child useEffect; capturing in a
+  // parent passive effect races behind that focus and would restore to the
+  // drawer's soon-to-be-removed input instead of to the trigger.
+  useLayoutEffect(() => {
     if (open) {
       restoreTo.current = document.activeElement as HTMLElement | null;
       if (autoFocus) {
