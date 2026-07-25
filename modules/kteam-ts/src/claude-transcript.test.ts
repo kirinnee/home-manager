@@ -183,6 +183,46 @@ describe('context.usage extraction (turn-020)', () => {
   });
 });
 
+describe('Remote Control announcement (session.remote_control)', () => {
+  // Real shape captured 2026-07-25 from a live `--rc` session's JSONL.
+  const bridgeRecord = (extra: Record<string, unknown> = {}) => ({
+    parentUuid: null,
+    isSidechain: false,
+    type: 'system',
+    subtype: 'bridge_status',
+    content:
+      '/remote-control is active · Continue here, on your phone, or at https://claude.ai/code/session_01PeGYkR3AQFt7tguRUoxdGe',
+    url: 'https://claude.ai/code/session_01PeGYkR3AQFt7tguRUoxdGe',
+    isMeta: false,
+    timestamp: '2026-07-25T02:13:45.543Z',
+    uuid: '65d2fd61-d985-4fd5-8302-dd63a3d05140',
+    sessionId: '94eb6428-a5ef-41f3-b57b-6b07665925f9',
+    ...extra,
+  });
+
+  test('extracts the RC url from the structured `url` field', () => {
+    const events = normalizeClaudeTranscriptRecord(bridgeRecord());
+    expect(events).toHaveLength(1);
+    expect(events[0]!.type).toBe('session.remote_control');
+    expect(events[0]!.data).toEqual({ url: 'https://claude.ai/code/session_01PeGYkR3AQFt7tguRUoxdGe' });
+    expect(events[0]!.timestamp).toBe('2026-07-25T02:13:45.543Z');
+  });
+
+  test('a bridge_status record never yields chat content', () => {
+    // Its `content` is a STRING, which the generic path would otherwise have
+    // read as a chat message and rendered as a transcript block.
+    expect(normalizeClaudeTranscriptRecord(bridgeRecord()).some(event => event.type.startsWith('chat.'))).toBe(false);
+  });
+
+  test('ignores a bridge_status carrying no url or a foreign one', () => {
+    expect(normalizeClaudeTranscriptRecord(bridgeRecord({ url: undefined }))).toHaveLength(0);
+    // Only the RC surface. A link anywhere else is not this session's RC url.
+    expect(normalizeClaudeTranscriptRecord(bridgeRecord({ url: 'https://evil.example/code/session_1' }))).toHaveLength(
+      0,
+    );
+  });
+});
+
 describe('Claude transcript file watching', () => {
   test('discovers only the exact UUID and tails partial, replaced, and truncated files', async () => {
     const temporary = await temporaryDirectory();

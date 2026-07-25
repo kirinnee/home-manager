@@ -3364,6 +3364,21 @@ export class SessionManager implements KTeamService {
           }
         }
       }
+      // Remote Control URL, from the harness's OWN bridge_status record. Made
+      // STICKY in state so the UI can offer the link for the session's whole
+      // life — the pane prints the sentence once and it scrolls off within a
+      // screen or two. The EVENT itself was already journalled by the loop above
+      // (session.remote_control is not harness-derived), so this only persists
+      // the fact.
+      const rcEvent = [...events].reverse().find(event => event.type === 'session.remote_control') as
+        | { data: { url: string } }
+        | undefined;
+      if (rcEvent && view.state.remoteControlUrl !== rcEvent.data.url) {
+        await this.store
+          .updateState<SessionState>(id, current => ({ ...current, remoteControlUrl: rcEvent.data.url }))
+          .catch(() => undefined);
+        view = await this.get(id);
+      }
       // Transcript-based context accounting (turn-020): the harness's own
       // usage records are ground truth; the pane statusline is only a
       // fallback. Last usage event in the batch wins.
@@ -3710,21 +3725,34 @@ export class SessionManager implements KTeamService {
 
   /** Deliver a harness-derived chat event to live subscribers WITHOUT
    *  journalling it. `sequence` is 0: it has no position in kteam's journal
-   *  (its durable home is the harness transcript, indexed by chat pointer). */
+   *  (its durable home is the harness transcript, indexed by chat pointer).
+   *
+   *  `time` is the HARNESS record's own timestamp, not the broadcast instant.
+   *  It is the only identity a live chat frame carries (sequence is 0 for all of
+   *  them), so consumers dedupe live-vs-history on it — and `now()` made every
+   *  live frame a NEW record that history would later re-deliver under its real
+   *  timestamp, duplicating the whole tail on reconnect. */
   private broadcastChat(
     id: string,
-    event: { type: string; data: unknown },
+    event: { type: string; data: unknown; timestamp?: string; recordUuid?: string; blockIndex?: number },
     turn: number,
     source: 'claude' | 'codex',
   ): void {
     const live: KTeamEvent = {
       sequence: 0,
-      time: now(),
+      time: event.timestamp ?? now(),
       sessionId: id,
       turn,
       type: event.type,
       source,
       data: event.data,
+      // The harness record's own identity, carried through so a live frame and
+      // the SAME record later served by /chat are recognizably one record. With
+      // sequence pinned to 0 for this whole class, this is the only exact
+      // identity available — without it a reader must guess from content, and a
+      // reconnect re-shows the tail.
+      ...(event.recordUuid === undefined ? {} : { recordUuid: event.recordUuid }),
+      ...(event.blockIndex === undefined ? {} : { blockIndex: event.blockIndex }),
     };
     for (const listener of this.listeners) listener(live);
   }

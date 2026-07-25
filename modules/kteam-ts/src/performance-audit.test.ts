@@ -9,6 +9,7 @@ import { parseClaudeTranscriptLine } from './claude-transcript';
 import { createPaths } from './paths';
 import { SessionManager } from './session-manager';
 import { chatEventFingerprint, EventStore } from './storage';
+import type { KTeamEvent } from './types';
 
 const homes: string[] = [];
 async function temporaryHome(): Promise<string> {
@@ -86,6 +87,58 @@ describe('measured cold/warm boot regressions', () => {
     expect(delivered).toBe(75);
     expect(internals.liveFrames.get('session-a')).toHaveLength(50);
     expect(internals.store.replay('session-a')).toEqual([]);
+    unsubscribe();
+    await internals.close();
+  });
+
+  // A live chat frame carries sequence 0 (it is not in the journal), so its
+  // TIMESTAMP and its harness record identity are the only things a consumer can
+  // dedupe on. Stamping it with the broadcast instant made every live frame a
+  // record history would later re-deliver under a different time — the UI then
+  // showed the tail twice on reconnect, and could not tell live from replayed.
+  test('live chat frames carry the harness record time and identity, not the broadcast instant', async () => {
+    const home = await temporaryHome();
+    const manager = await SessionManager.create(createPaths(home), managerOptions());
+    const internals = manager as unknown as {
+      broadcastChat: (
+        id: string,
+        event: { type: string; data: unknown; timestamp?: string; recordUuid?: string; blockIndex?: number },
+        turn: number,
+        source: 'claude' | 'codex',
+      ) => void;
+      store: EventStore;
+      close: () => Promise<void>;
+    };
+    const seen: KTeamEvent[] = [];
+    const unsubscribe = manager.subscribe(event => seen.push(event));
+    internals.broadcastChat(
+      'session-a',
+      {
+        type: 'chat.assistant.text',
+        data: { text: 'hello' },
+        timestamp: '2026-07-25T02:13:45.543Z',
+        recordUuid: '65d2fd61-d985-4fd5-8302-dd63a3d05140',
+        blockIndex: 1,
+      },
+      3,
+      'claude',
+    );
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({
+      sequence: 0,
+      time: '2026-07-25T02:13:45.543Z',
+      type: 'chat.assistant.text',
+      turn: 3,
+      recordUuid: '65d2fd61-d985-4fd5-8302-dd63a3d05140',
+      blockIndex: 1,
+    });
+    // Still never journalled — this class lives in the harness transcript.
+    expect(internals.store.replay('session-a')).toEqual([]);
+
+    // A record with no identity of its own still broadcasts (older transcripts).
+    internals.broadcastChat('session-a', { type: 'tool.use', data: { toolUseId: 't1' } }, 1, 'claude');
+    expect(seen[1]).toMatchObject({ sequence: 0, type: 'tool.use' });
+    expect(seen[1]!.recordUuid).toBeUndefined();
     unsubscribe();
     await internals.close();
   });

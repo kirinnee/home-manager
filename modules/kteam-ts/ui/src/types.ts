@@ -88,6 +88,9 @@ export interface SessionState {
   reason?: string;
   health?: 'healthy' | 'thinking' | 'waiting' | 'idle' | 'stalled' | 'rate_limited' | 'crashed' | 'unknown';
   promptReady?: boolean;
+  /** The session's Remote Control surface (claude + `--rc`), from the harness's
+   *  own bridge_status transcript record. Sticky for the session's whole life. */
+  remoteControlUrl?: string;
   openTools?: string[];
   pendingQuestion?: PendingQuestion | null;
   contextPercent?: number;

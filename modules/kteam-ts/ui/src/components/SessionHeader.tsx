@@ -7,10 +7,11 @@
 // re-renders only itself.
 
 import { memo, useEffect, useState } from 'react';
-import { ChevronLeft, Pause, Play, StopCircle, ZapOff, Bot, Sparkles } from 'lucide-react';
+import { ChevronLeft, Pause, Play, StopCircle, ZapOff, Bot, Sparkles, Radio } from 'lucide-react';
 import type { SessionView } from '../types';
 import { Badge, Button, ActionGroup } from './Primitives';
 import { ModeBadge, MODE_HINT } from './ModeBadge';
+import { RcBadge } from './RcBadge';
 import { Link } from '../lib/router';
 import { toneFor } from '../lib/utils';
 
@@ -60,6 +61,8 @@ export const SessionHeader = memo(function SessionHeader({
         {/* Mode first: whether a human is driving decides how everything else on
             this page should be read — and whether the reflex layer applies. */}
         <ModeBadge mode={config.mode} />
+        {/* RC next to mode: both answer "how can this session be driven?" */}
+        <RcBadge remoteControl={config.remoteControl} url={state.remoteControlUrl} />
         <Badge tone={toneFor(state.status)} className="shrink-0">
           {/* A declared park reports 'waiting' exactly like an unanswered
               question does — say which, and until when. */}
@@ -125,14 +128,28 @@ export const SessionHeader = memo(function SessionHeader({
         <span className="shrink-0 text-faint" title={MODE_HINT[config.mode]}>
           {config.mode === 'interactive' ? 'human-driven · never auto-nudged' : 'autonomous · reflex-supervised'}
         </span>
-        {config.remoteControl && (
+        {/* The RC link in full, so it can be read, copied, or opened — the badge
+            above is the glanceable form, this is the addressable one. */}
+        {state.remoteControlUrl && (
           <>
             <Sep />
-            <span
-              className="shrink-0 text-faint"
-              title="launched with Remote Control (--rc): also visible in your RC surface"
+            <a
+              href={state.remoteControlUrl}
+              target="_blank"
+              rel="noreferrer"
+              title={state.remoteControlUrl}
+              className="inline-flex min-w-0 shrink items-center gap-1 text-accent hover:underline"
             >
-              rc
+              <Radio size={12} className="shrink-0" />
+              <span className="min-w-0 truncate">remote control</span>
+            </a>
+          </>
+        )}
+        {config.remoteControl && !state.remoteControlUrl && (
+          <>
+            <Sep />
+            <span className="shrink-0 text-faint" title="launched with --rc; RC link not announced yet">
+              rc pending
             </span>
           </>
         )}
