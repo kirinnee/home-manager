@@ -104,13 +104,7 @@ export function Composer({
   const showInterrupt = Boolean(busy && !disabled && onInterruptAndSend);
 
   return (
-    <div
-      className={cn(
-        'rounded-lg border border-border bg-surface shadow-sm transition-colors motion-reduce:transition-none',
-        'focus-within:border-accent focus-within:ring-2 focus-within:ring-[var(--ring)]',
-        disabled && 'opacity-60',
-      )}
-    >
+    <div className={cn('kt-composer transition-colors motion-reduce:transition-none', disabled && 'opacity-60')}>
       {context && <ContextStrip context={context} />}
 
       {/* The textarea is borderless and transparent: the WRAPPER is the input as
@@ -124,7 +118,7 @@ export function Composer({
         disabled={disabled || sending}
         aria-label="Message"
         className={cn(
-          'block w-full resize-none border-0 bg-transparent px-3 py-2 text-[13.5px] leading-snug text-fg',
+          'block w-full resize-none border-0 bg-transparent py-row-y text-fg',
           'placeholder:text-faint focus:border-0 focus:shadow-none focus:outline-none focus-visible:outline-none',
           'disabled:cursor-not-allowed',
         )}
@@ -142,12 +136,12 @@ export function Composer({
 
       {/* Action cluster, inside the box. Wraps to its own line under ~380px
           instead of pushing the send button off the edge. */}
-      <div className="flex min-h-[34px] flex-wrap items-center gap-x-2 gap-y-1 px-2 pb-2">
+      <div className="flex min-h-control flex-wrap items-center gap-x-sm gap-y-xs">
         {/* Deliberately NOT `.kt-chrome`: that class rests at 78% opacity, which
             is right for transcript metadata and wrong for the line that tells
             you what Enter will do and whether your message is in flight. */}
         <span
-          className="mr-auto inline-flex min-w-0 items-center gap-1 truncate pl-1 text-[11px] text-muted"
+          className="mr-auto inline-flex min-w-0 items-center gap-xs truncate text-meta text-muted"
           aria-live="polite"
         >
           {sending ? (
@@ -206,7 +200,7 @@ function ContextStrip({ context }: { context: ComposerContext }) {
   const socketTone = liveStatus === 'open' ? 'bg-ok' : liveStatus === 'connecting' ? 'bg-warn' : 'bg-err';
 
   return (
-    <div className="mono flex h-[22px] w-full items-center gap-x-2 overflow-hidden whitespace-nowrap border-b border-border-soft px-3 text-[11px] text-muted">
+    <div className="mono flex h-control-sm w-full items-center gap-x-sm overflow-hidden whitespace-nowrap border-b border-border-soft text-chrome text-muted">
       <Field className="min-w-0 flex-1 truncate text-fg-soft" title={model ? `model: ${model}` : 'model unknown'}>
         {model || '—'}
       </Field>
@@ -225,10 +219,10 @@ function ContextStrip({ context }: { context: ComposerContext }) {
       </Field>
       {liveStatus && (
         <span
-          className="ml-auto inline-flex shrink-0 items-center gap-1 text-faint"
+          className="ml-auto inline-flex shrink-0 items-center gap-xs text-faint"
           title={`live event stream ${liveStatus}`}
         >
-          <span className={cn('inline-block h-1.5 w-1.5 rounded-full', socketTone)} aria-hidden="true" />
+          <span className={cn('kt-dot', socketTone)} aria-hidden="true" />
           <span className="hidden sm:inline">{liveStatus}</span>
         </span>
       )}

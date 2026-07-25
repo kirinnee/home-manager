@@ -23,11 +23,11 @@ export function AppBar({
     // first row of a flex column that fills the viewport. Full bleed — the
     // 1180px centering that used to wrap this row is gone.
     <header className="shrink-0 border-b border-border bg-[var(--bar-bg)]">
-      <div className="flex min-h-[32px] w-full items-center gap-2 px-3">
+      <div className="flex min-h-control w-full items-center gap-sm px-panel font-ui text-ui">
         <SidebarDrawerTrigger onOpen={onOpenSidebar} />
-        <nav className="flex min-w-0 flex-1 items-center gap-1.5 text-[12.5px] text-muted">
+        <nav className="flex min-w-0 flex-1 items-center gap-sm text-muted">
           {crumbs.map((c, i) => (
-            <span key={`${i}-${c.label}`} className="flex items-center gap-1.5">
+            <span key={`${i}-${c.label}`} className="flex items-center gap-sm">
               {c.href ? (
                 <Link to={c.href} className="hover:text-fg">
                   {c.label}
@@ -45,15 +45,15 @@ export function AppBar({
             cache and catches up on its own. */}
         {status !== 'open' && (
           <span
-            className="inline-flex shrink-0 items-center gap-1.5 text-[11px] text-muted"
+            className="inline-flex shrink-0 items-center gap-xs text-meta text-muted"
             title={status === 'connecting' ? 'connecting to the daemon…' : 'reconnecting to the daemon…'}
           >
-            <span className={`h-1.5 w-1.5 rounded-full ${status === 'connecting' ? 'bg-warn' : 'bg-err'}`} />
+            <span className={`kt-dot ${status === 'connecting' ? 'bg-warn' : 'bg-err'}`} />
             <span className="hidden sm:inline">{status === 'connecting' ? 'connecting' : 'reconnecting'}</span>
           </span>
         )}
         {!HAS_TOKEN && (
-          <span className="rounded border border-warn-border bg-warn-bg px-2 py-0.5 text-[11px] text-warn">
+          <span className="kt-badge" data-tone="warn">
             read-only: no local token
           </span>
         )}

@@ -28,6 +28,7 @@ import type { Quota } from '../lib/usage';
 import { cn, fmtAbsolute, fmtAge, fmtRelative } from '../lib/utils';
 import { MODE_HINT } from './ModeBadge';
 import { useDialogFocus } from '../hooks/useDialogFocus';
+import { Button } from './Primitives';
 
 export type LiveStatus = 'connecting' | 'open' | 'closed';
 
@@ -44,7 +45,7 @@ interface Props {
 /** Group tones. Colour is the SECOND signal in every case — the icon and the
  *  heading text carry the identity. */
 const GROUP_TONE = {
-  identity: 'text-accent border-accent-border',
+  identity: 'text-accent border-accent',
   runtime: 'text-fg-soft border-border',
   progress: 'text-warn border-warn-border',
   budget: 'text-ok border-ok-border',
@@ -80,29 +81,27 @@ export function SessionDetails({ view, quota, liveStatus, open, onClose, labelle
         aria-label={labelledBy ? undefined : 'Session details'}
         tabIndex={-1}
         onKeyDown={onKeyDown}
-        className={cn(
-          'kt-overlay fixed right-0 z-50 flex w-full flex-col border-l border-border bg-surface shadow-lg',
-          'sm:w-[400px]',
-        )}
+        className={cn('kt-overlay kt-panel kt-details fixed right-0 z-50 flex w-full flex-col font-ui', 'sm:w-[400px]')}
       >
-        <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2">
-          <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-fg">
+        <div className="kt-panel__header shrink-0">
+          <span className="min-w-0 flex-1 truncate font-display text-title font-semibold tracking-display text-fg">
             {config.teammate || config.name || config.id}
           </span>
-          <button
+          <Button
             type="button"
+            variant="ghost"
+            size="sm"
             onClick={onClose}
             aria-label="Close session details"
             title="Close (Esc)"
-            className="rounded-sm p-1 text-muted hover:bg-surface-2 hover:text-fg"
           >
             <X size={15} aria-hidden="true" />
-          </button>
+          </Button>
         </div>
 
         {/* The drawer's OWN scroller. The page below still owns exactly one
             (the transcript); this one is an overlay and never nests inside it. */}
-        <div className="min-h-0 flex-1 overflow-y-auto scroll-thin px-3 py-2">
+        <div className="min-h-0 flex-1 overflow-y-auto scroll-thin">
           <Group icon={<UserRound size={13} aria-hidden="true" />} title="Identity" tone="identity">
             <Row label="Teammate" value={config.teammate} />
             <Row label="Task" value={config.name} />
@@ -135,16 +134,16 @@ export function SessionDetails({ view, quota, liveStatus, open, onClose, labelle
             <Row label="Mode" value={config.mode} hint={MODE_HINT[config.mode]} />
             <Row label="tmux session" value={config.tmuxSession} mono />
             {config.remoteControl && (
-              <div className="flex items-baseline gap-2 py-0.5">
-                <dt className="w-[104px] shrink-0 text-[11px] text-muted">Remote control</dt>
-                <dd className="m-0 min-w-0 flex-1 text-[12px] text-fg-soft">
+              <div className="flex items-baseline gap-sm">
+                <dt className="w-[104px] shrink-0 text-meta text-muted">Remote control</dt>
+                <dd className="m-0 min-w-0 flex-1 text-cell text-fg-soft">
                   {state.remoteControlUrl ? (
                     <a
                       href={state.remoteControlUrl}
                       target="_blank"
                       rel="noreferrer"
                       title={state.remoteControlUrl}
-                      className="inline-flex min-w-0 items-center gap-1 text-accent hover:underline"
+                      className="inline-flex min-w-0 items-center gap-xs text-accent hover:underline"
                     >
                       <Radio size={11} aria-hidden="true" />
                       <span className="min-w-0 truncate">open RC surface</span>
@@ -185,17 +184,12 @@ function Group({
   children: ReactNode;
 }) {
   return (
-    <section className="mb-3 last:mb-1">
-      <h2
-        className={cn(
-          'm-0 mb-1 flex items-center gap-1.5 border-l-2 pl-2 text-[11px] font-semibold uppercase tracking-[0.1em]',
-          GROUP_TONE[tone],
-        )}
-      >
+    <section className="kt-details__group">
+      <h2 className={cn('kt-label m-0 mb-xs flex items-center gap-xs border-l-heavy pl-cell-x', GROUP_TONE[tone])}>
         {icon}
         {title}
       </h2>
-      <dl className="m-0 rounded-md border border-border-soft bg-surface-2 px-2.5 py-1.5">{children}</dl>
+      <dl className="m-0 grid gap-xs">{children}</dl>
     </section>
   );
 }
@@ -216,13 +210,13 @@ function Row({
 }) {
   const text = value === undefined || value === null || value === '' ? '—' : String(value);
   return (
-    <div className="flex items-baseline gap-2 py-0.5">
-      <dt className="w-[104px] shrink-0 text-[11px] text-muted" title={hint}>
+    <div className="flex items-baseline gap-sm">
+      <dt className="w-[104px] shrink-0 text-meta text-muted" title={hint}>
         {label}
       </dt>
       <dd
         className={cn(
-          'm-0 min-w-0 flex-1 break-words text-[12px]',
+          'm-0 min-w-0 flex-1 break-words text-cell',
           text === '—' ? 'text-faint' : (tone ?? 'text-fg-soft'),
           mono && 'mono',
         )}
@@ -320,7 +314,7 @@ const BudgetRows = memo(function BudgetRows({ view, quota }: { view: SessionView
       <>
         <Row label="Account" value={config.binary} mono />
         <Row label="Quota" value={undefined} hint="the usage feed has no record for this wrapper yet" />
-        <p className="m-0 pt-1 text-[11px] text-faint">
+        <p className="m-0 text-meta leading-base text-faint">
           No usage data for this wrapper yet — that is “unknown”, not “nothing used”.
         </p>
       </>
@@ -344,7 +338,7 @@ const BudgetRows = memo(function BudgetRows({ view, quota }: { view: SessionView
       />
       <Row label="Weekly resets" value={resetAt(quota.weeklyResetAt)} mono />
       {quota.atLimit === true && (
-        <div className="flex items-center gap-1.5 pt-1 text-[11.5px] text-err">
+        <div className="flex items-center gap-xs text-meta text-err">
           <AlertTriangle size={12} aria-hidden="true" />
           at limit — the wrapper is rate-limited until the window rolls over
         </div>
