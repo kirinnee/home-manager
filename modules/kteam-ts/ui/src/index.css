@@ -1156,6 +1156,31 @@ pre,
   }
 }
 
+/* ---- kt-pulse: the sidebar's live status mark ----------------------------
+   A slow breath on the ACTIVE status glyph only (StatusMark's circle), so a
+   working teammate is distinguishable from a parked one across the room. It is
+   never the only signal: shape (circle/diamond/square), colour and the glyph's
+   aria-label/title all carry the same fact, so removing the animation removes
+   nothing but the motion. Opacity only — no transform, because the diamond
+   variant is itself a rotate() and animating transform would fight it. */
+@keyframes kt-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.42;
+  }
+}
+.kt-pulse {
+  animation: kt-pulse 2s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .kt-pulse {
+    animation: none;
+  }
+}
+
 /* ============================================================================
    THEME SWATCH — a real, live preview. The element carries `data-swatch` and
    therefore re-declares that theme's tokens locally (see the selector lists

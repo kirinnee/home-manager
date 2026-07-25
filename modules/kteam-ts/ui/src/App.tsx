@@ -16,9 +16,10 @@
 // keeping the pane mounted to preserve. visibility:hidden keeps layout, paints
 // nothing, and takes its subtree out of the tab order.
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRoute } from './lib/router';
 import { AppBar } from './components/AppBar';
+import { AgentSidebar } from './components/AgentSidebar';
 import { SessionsListPage } from './pages/SessionsListPage';
 import { SessionChatPage } from './pages/SessionChatPage';
 import { NewSessionPage } from './pages/NewSessionPage';
@@ -41,6 +42,15 @@ function Pane({ active, children }: { active: boolean; children: React.ReactNode
 
 export function App() {
   const [route] = useRoute();
+
+  // Mobile drawer visibility. It lives here rather than in the sidebar because
+  // the AppBar's trigger and the drawer's own close button must drive ONE piece
+  // of state, and because navigating to a session from the drawer has to shut
+  // it — on a phone the drawer covers the page you just asked for.
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  useEffect(() => {
+    setDrawerOpen(false);
+  }, [route.path]);
 
   // Most-recently-visited first; the array IS the LRU. Adjusted DURING render
   // (the supported "derive state from props" pattern) rather than in an effect:
@@ -70,22 +80,31 @@ export function App() {
   // the display empty, and the sidebar slice needs the whole width.
   return (
     <div className="flex h-screen h-[100dvh] flex-col overflow-hidden">
-      <AppBar crumbs={crumbs} />
-      <main className="relative w-full min-h-0 flex-1">
-        <Pane active={!route.sessionId && !route.isNew}>
-          <SessionsListPage />
-        </Pane>
-        {mounted.map(id => (
-          <Pane key={id} active={route.sessionId === id}>
-            <SessionChatPage sessionId={id} />
+      <AppBar crumbs={crumbs} onOpenSidebar={() => setDrawerOpen(true)} />
+      {/* THE SIDEBAR IS A SHELL SIBLING, not a page child: it is mounted once,
+          for the app's life, so navigation never remounts it and its scroll
+          position and filter state simply persist. It is also a sibling of the
+          main pane's scroller rather than a parent of it, which is what keeps
+          the one-scroll-region rule intact — two scrollers side by side, never
+          one nested inside the other. */}
+      <div className="flex min-h-0 w-full flex-1">
+        <AgentSidebar activeId={route.sessionId} drawerOpen={drawerOpen} onCloseDrawer={() => setDrawerOpen(false)} />
+        <main className="relative min-h-0 min-w-0 flex-1">
+          <Pane active={!route.sessionId && !route.isNew}>
+            <SessionsListPage />
           </Pane>
-        ))}
-        {route.isNew && (
-          <Pane active>
-            <NewSessionPage />
-          </Pane>
-        )}
-      </main>
+          {mounted.map(id => (
+            <Pane key={id} active={route.sessionId === id}>
+              <SessionChatPage sessionId={id} />
+            </Pane>
+          ))}
+          {route.isNew && (
+            <Pane active>
+              <NewSessionPage />
+            </Pane>
+          )}
+        </main>
+      </div>
     </div>
   );
 }
