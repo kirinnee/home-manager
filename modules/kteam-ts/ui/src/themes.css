@@ -1345,3 +1345,65 @@
     --input-font-floor: 16px;
   }
 }
+
+/* A phone needs its own hierarchy, not desktop's 10–13px chrome enlarged as a
+   screenshot. These remain FAMILY tokens: Mission stays the tightest,
+   Neo/Ember broaden their headlines, and High Contrast keeps the largest
+   instrument labels. The 44px control/row floors above supply the matching
+   touch spacing without erasing each family's horizontal density. */
+@media (max-width: 640px) {
+  :root[data-theme^='studio-'] {
+    --text-2xs: 12px;
+    --text-xs: 13px;
+    --text-sm: 14px;
+    --text-base: 15px;
+    --text-md: 16px;
+    --text-lg: 18px;
+    --text-display: 1.375rem;
+    --label-size: 12px;
+  }
+
+  :root[data-theme^='mission-'] {
+    --text-2xs: 12px;
+    --text-xs: 12.5px;
+    --text-sm: 13.5px;
+    --text-base: 14.5px;
+    --text-md: 15.5px;
+    --text-lg: 17.5px;
+    --text-display: 1.25rem;
+    --label-size: 12px;
+  }
+
+  :root[data-theme^='neo-'] {
+    --text-2xs: 12px;
+    --text-xs: 13.5px;
+    --text-sm: 14.5px;
+    --text-base: 15.5px;
+    --text-md: 16.5px;
+    --text-lg: 19px;
+    --text-display: 1.5rem;
+    --label-size: 12.5px;
+  }
+
+  :root[data-theme^='ember-'] {
+    --text-2xs: 12.5px;
+    --text-xs: 13.5px;
+    --text-sm: 14.5px;
+    --text-base: 15.5px;
+    --text-md: 17px;
+    --text-lg: 19px;
+    --text-display: 1.5rem;
+    --label-size: 12.5px;
+  }
+
+  :root[data-theme^='contrast-'] {
+    --text-2xs: 13px;
+    --text-xs: 14px;
+    --text-sm: 15px;
+    --text-base: 16px;
+    --text-md: 17.5px;
+    --text-lg: 20px;
+    --text-display: 1.5rem;
+    --label-size: 13px;
+  }
+}

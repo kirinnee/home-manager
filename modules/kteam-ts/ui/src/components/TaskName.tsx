@@ -85,20 +85,18 @@ export function TaskName({
   const chipVisible = showPrefix && prefix && prefix.toLowerCase() !== (teammate ?? '').trim().toLowerCase();
 
   return (
-    <span className={cn('inline-flex min-w-0 items-baseline gap-1.5', className)} title={title}>
+    <span className={cn('inline-flex min-w-0 items-baseline gap-sm', className)} title={title}>
       {chipVisible && (
         <span
           className={cn(
-            'shrink-0 rounded border border-border-soft bg-surface-3 px-1 font-medium text-muted',
-            size === 'sm' ? 'text-[10px]' : 'text-[10.5px]',
+            'shrink-0 rounded-badge border border-border-soft bg-surface-3 px-xs font-medium text-muted',
+            size === 'sm' ? 'text-2xs' : 'text-meta',
           )}
         >
           {prefix}
         </span>
       )}
-      <span className={cn('min-w-0 truncate text-fg', size === 'sm' ? 'text-[12.5px]' : 'text-[13px] font-medium')}>
-        {task}
-      </span>
+      <span className={cn('min-w-0 truncate text-fg', size === 'sm' ? 'text-ui' : 'text-row font-medium')}>{task}</span>
     </span>
   );
 }

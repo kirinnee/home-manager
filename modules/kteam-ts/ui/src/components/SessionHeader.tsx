@@ -58,7 +58,7 @@ export const SessionHeader = memo(function SessionHeader({
   const panelId = `${detailsId}-panel`;
 
   return (
-    <div className="mt-1.5 mb-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-border-soft pb-1.5">
+    <div className="mt-1.5 mb-1 flex min-w-0 flex-wrap items-center gap-x-sm gap-y-xs border-b border-border-soft pb-1.5">
       <Link
         to="/"
         aria-label="Back to all sessions"
@@ -70,11 +70,11 @@ export const SessionHeader = memo(function SessionHeader({
 
       <StatusChip status={state.status} parked={Boolean(state.waiting)} />
 
-      <h1 className="m-0 min-w-0 max-w-[42vw] truncate text-[15px] font-semibold tracking-tight" title={title}>
+      <h1 className="m-0 min-w-0 max-w-[42vw] truncate text-title font-semibold tracking-tight" title={title}>
         {title}
       </h1>
       {subtitle && (
-        <span className="hidden min-w-0 max-w-[28vw] truncate text-[12px] text-muted sm:inline" title={subtitle}>
+        <span className="hidden min-w-0 max-w-[28vw] truncate text-cell text-muted sm:inline" title={subtitle}>
           {subtitle}
         </span>
       )}
@@ -83,7 +83,7 @@ export const SessionHeader = memo(function SessionHeader({
           own words — the colour is reinforcement, never the message. */}
       {state.waiting && (
         <span
-          className="inline-flex min-w-0 max-w-[34vw] items-center rounded border border-warn-border bg-warn-bg px-1.5 py-0.5 text-[11px] font-medium text-warn"
+          className="inline-flex min-w-0 max-w-[34vw] items-center rounded-badge border border-warn-border bg-warn-bg px-badge-x py-0.5 text-meta font-medium text-warn"
           title={`parked${state.waiting.until ? ` until ${new Date(state.waiting.until).toLocaleString()}` : ''}: ${
             state.waiting.condition ?? 'external condition'
           }`}
@@ -93,14 +93,14 @@ export const SessionHeader = memo(function SessionHeader({
       )}
       {state.needsHuman && (
         <span
-          className="inline-flex shrink-0 items-center rounded border border-err-border bg-err-bg px-1.5 py-0.5 text-[11px] font-semibold text-err"
+          className="inline-flex shrink-0 items-center rounded-badge border border-err-border bg-err-bg px-badge-x py-0.5 text-meta font-semibold text-err"
           title={state.needsHuman}
         >
           needs human
         </span>
       )}
 
-      <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+      <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-sm">
         {tabs}
         <ActionGroup>
           {!isTerminal && hasToken && (
@@ -132,7 +132,7 @@ export const SessionHeader = memo(function SessionHeader({
           )}
           {isKillFailed && (
             <span
-              className="inline-flex items-center gap-1 text-[12px] text-warn"
+              className="inline-flex items-center gap-xs text-cell text-warn"
               title="the pane could not be killed; Stop it first"
             >
               <ZapOff size={12} aria-hidden="true" /> kill failed — Stop first
@@ -189,7 +189,7 @@ function StatusChip({ status, parked }: { status: string; parked: boolean }) {
   const tone = toneFor(status);
   return (
     <span
-      className="inline-flex shrink-0 items-center gap-1.5 text-[12px] font-semibold"
+      className="inline-flex shrink-0 items-center gap-sm text-cell font-semibold"
       title={parked ? `${status} — parked on a declared external condition` : `session status: ${status}`}
     >
       <span className={cn('inline-block h-2 w-2 shrink-0', SHAPE[tone])} aria-hidden="true" />
