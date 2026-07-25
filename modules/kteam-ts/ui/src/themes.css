@@ -49,6 +49,108 @@
    ============================================================================ */
 :root,
 [data-swatch] {
+  /* ═══ structural token layer ═══ */
+
+  /* ---- typography ---- */
+  --font-ui: var(--font-body);
+  --font-prose: var(--font-body);
+  --text-2xs: 10px;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 12.5px;
+  --text-md: 13.5px;
+  --text-lg: 15px;
+  --text-display: 1.15rem;
+  --text-input-desktop: 13.5px;
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-strong: 600;
+  --weight-display: 650;
+  --leading-tight: 1.3;
+  --tracking-label: 0.1em;
+  --tracking-body: 0;
+  --label-transform: uppercase;
+  --label-variant: normal;
+  --label-size: 10px;
+  --label-weight: 600;
+  --display-transform: none;
+  --prose-measure: 90ch;
+  /* Chrome ink is its OWN contrast-checked token now. It used to be --faint
+     dimmed by a subtree opacity, which nero measured at 1.92:1 on nested
+     subtree content — a whole-subtree opacity dims things it was never sized
+     against. The tier is now separated by size (--chrome-font-size), family
+     (mono) and this ink, all of which are measurable. 4.77:1 on --surface. */
+  --chrome-fg: #72727b;
+
+  /* ---- geometry roles (components consume THESE, never the raw ramp) ---- */
+  --radius-control: var(--radius-sm);
+  --radius-panel: var(--radius-lg);
+  --radius-badge: var(--radius-xs);
+  --radius-tab: var(--radius-sm);
+  --radius-input: var(--radius-sm);
+  --radius-dot: 9999px; /* never themed — shape is a non-colour status signal */
+  --notch: 0px;
+  --clip-control: none;
+  --clip-panel: none;
+  --bracket-size: 0px;
+
+  /* ---- stroke ---- */
+  --stroke: var(--border-width);
+  --stroke-heavy: var(--border-width-heavy);
+  --stroke-control: 1px;
+  --stroke-panel: 1px;
+  --divider-width: 1px;
+  --divider-color: var(--border-soft);
+  --rule-inset: none;
+  /* Control edges — the strokes that IDENTIFY an interactive thing. Contrast-
+     constrained (>=3:1, >=7:1 in High Contrast), unlike decorative --border. */
+  --border-strong: #929295;
+
+  /* ---- elevation roles ---- */
+  --shadow-ink: transparent; /* only Neo uses a hard offset ink */
+  --shadow-control: var(--shadow-sm);
+  --shadow-panel: var(--shadow-md);
+  --shadow-popover: var(--shadow-lg);
+  --shadow-active: 0 0 0 2px var(--ring);
+  --press-translate: 0px;
+  --rail-active: inset 2px 0 0 var(--accent);
+
+  /* ---- density ---- */
+  --space-unit: 4px;
+  --control-h-desktop: 28px;
+  --control-h-sm-desktop: 24px;
+  --row-min-h-desktop: 34px;
+  --pad-control-x: 10px;
+  --pad-badge-x: 8px;
+  --pad-panel: 10px;
+  --pad-row-y: 6px;
+  --pad-cell-x: 8px;
+  --gap-xs: 4px;
+  --gap-sm: 6px;
+  --gap-md: 10px;
+
+  /* ---- surface treatment ---- */
+  --panel-bg: var(--surface);
+  --panel-texture: none;
+  --panel-texture-size: auto;
+
+  /* ---- accessibility ---- */
+  --focus-shadow: none;
+  --outline-always: none;
+  --underline-links: none;
+
+  /* ---- MOBILE ACCESSIBILITY FLOOR — declared ONCE, here (lead ruling).
+     Freddie CONSUMES these; he does not declare them. Families set the
+     `*-desktop` tokens; var() substitution is lazy and per-element, so when a
+     family block below changes --control-h-desktop on :root these four
+     re-resolve automatically. max() means no theme can drop below the floor. */
+  --target-floor: 0px;
+  --input-font-floor: 0px;
+  --control-h: max(var(--control-h-desktop), var(--target-floor));
+  --control-h-sm: max(var(--control-h-sm-desktop), var(--target-floor));
+  --row-min-h: max(var(--row-min-h-desktop), var(--target-floor));
+  --text-input: max(var(--text-input-desktop), var(--input-font-floor));
+
   color-scheme: light;
 
   /* ---- typography ---- */
@@ -62,7 +164,6 @@
   --md-leading: 1.62;
   --code-font-size: 12.5px;
   --chrome-font-size: 11px;
-  --chrome-opacity: 0.78;
 
   /* ---- geometry ---- */
   --radius-xs: 4px;
@@ -173,6 +274,10 @@
 :root[data-theme='studio-dark'],
 :root[data-theme='dark'],
 [data-swatch='studio-dark'] {
+  /* ═══ structural token layer ═══ */
+  --border-strong: #646468; /* 3.10:1 */
+  --chrome-fg: #7e7e88; /* 4.56:1 on --surface */
+
   color-scheme: dark;
 
   --bg: #0b0b0d;
@@ -254,6 +359,54 @@
    ============================================================================ */
 :root[data-theme^='mission-'],
 [data-swatch^='mission-'] {
+  /* ═══ structural token layer ═══ */
+
+  /* The single most important line in this block: uppercase Cascadia mono on
+     EVERY control, badge, tab and table cell. Does more for grayscale
+     recognisability than the entire cyan palette. */
+  --font-ui: var(--font-mono);
+  --chrome-fg: var(--faint);
+  --text-display: 1.05rem;
+  --leading-base: 1.5;
+  --leading-tight: 1.2;
+  --tracking-label: 0.14em;
+  --tracking-body: 0.005em;
+  --label-weight: 700;
+  --display-transform: uppercase;
+  --weight-medium: 600;
+  --weight-strong: 700;
+  --weight-display: 700;
+
+  --radius-control: 3px;
+  --radius-panel: 6px;
+  --radius-badge: 2px;
+  --radius-tab: 2px;
+  --radius-input: 3px;
+  /* Notched corners — the reference's own recipe (site.css:433 controls, :469
+     panels). Panel clipping is OPT-IN via .kt-panel--clipped only: a clipped
+     focus ring or popover is an a11y regression. */
+  --notch: 8px;
+  --clip-control: polygon(0 0, calc(100% - 6px) 0, 100% 6px, 100% 100%, 6px 100%, 0 calc(100% - 6px));
+  --clip-panel: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
+  --bracket-size: 10px;
+
+  --divider-color: var(--border);
+  --control-h-desktop: 26px;
+  --control-h-sm-desktop: 24px;
+  --row-min-h-desktop: 32px;
+  --pad-row-y: 5px;
+  --pad-panel: 12px;
+
+  --rail-active: inset 4px 0 0 var(--accent);
+  --panel-bg: linear-gradient(135deg, rgb(var(--accent-rgb) / 0.06), transparent 28%), var(--surface);
+  /* 32px HUD grid — reference site.css:585-590. */
+  --panel-texture:
+    linear-gradient(90deg, rgb(var(--accent-rgb) / 0.05) 1px, transparent 1px),
+    linear-gradient(180deg, rgb(var(--accent-rgb) / 0.05) 1px, transparent 1px);
+  --panel-texture-size: 32px 32px;
+  --focus-shadow: 0 0 0 5px rgb(var(--accent-rgb) / 0.18);
+  --rule-inset: inset 0 1px 0 rgb(var(--accent-rgb) / 0.08);
+
   --font-display: 'Aptos Display', 'Avenir Next Condensed', 'Franklin Gothic Medium', 'Segoe UI', system-ui, sans-serif;
   --font-body: 'Aptos', 'Avenir Next', 'Segoe UI', system-ui, -apple-system, sans-serif;
   --font-mono: 'Cascadia Code', 'Cascadia Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', ui-monospace, monospace;
@@ -262,7 +415,6 @@
   /* Full opacity, unlike Studio: --faint here is already a real tonal step
      below --muted, and dimming it further put the chrome tier under 4.5:1. The
      size drop does the receding. */
-  --chrome-opacity: 1;
 
   --radius-xs: 2px;
   --radius-sm: 3px;
@@ -274,6 +426,10 @@
 
 :root[data-theme='mission-dark'],
 [data-swatch='mission-dark'] {
+  /* ═══ structural token layer ═══ */
+  /* from the reference --line-strong .32, keeps the teal cast */
+  --border-strong: #4e666d; /* 3.12:1 */
+
   color-scheme: dark;
 
   --bg: #050a0f;
@@ -357,6 +513,9 @@
 
 :root[data-theme='mission-light'],
 [data-swatch='mission-light'] {
+  /* ═══ structural token layer ═══ */
+  --border-strong: #859699; /* 3.09:1 */
+
   color-scheme: light;
 
   --bg: #f1fafc;
@@ -446,6 +605,57 @@
    ============================================================================ */
 :root[data-theme^='neo-'],
 [data-swatch^='neo-'] {
+  /* ═══ structural token layer ═══ */
+
+  --chrome-fg: var(--faint);
+  --weight-normal: 500;
+  --weight-medium: 700;
+  --weight-strong: 800;
+  --weight-display: 900;
+  --text-2xs: 10.5px;
+  --text-xs: 11.5px;
+  --text-sm: 12.5px;
+  --text-base: 13px;
+  --text-lg: 15.5px;
+  --text-display: 1.2rem;
+  --text-input-desktop: 14px;
+  --label-size: 11px;
+  --label-weight: 800;
+  --tracking-label: 0.04em;
+  --prose-measure: 88ch;
+
+  --radius-control: 0px;
+  --radius-panel: 0px;
+  --radius-badge: 0px;
+  --radius-tab: 0px;
+  --radius-input: 0px;
+
+  --stroke-control: 2px;
+  --stroke-panel: 3px;
+  --divider-width: 2px;
+  --divider-color: var(--border);
+
+  /* Hard offset, zero blur — and the block physically depresses into its own
+     shadow when pressed. --shadow-ink is per-mode in the neo colour blocks. */
+  --shadow-control: 3px 3px 0 var(--shadow-ink);
+  --shadow-panel: 4px 4px 0 var(--shadow-ink);
+  --shadow-popover: 6px 6px 0 var(--shadow-ink);
+  --shadow-active: 1px 1px 0 var(--shadow-ink);
+  --press-translate: 2px;
+  --rail-active: inset 4px 0 0 var(--accent);
+
+  --control-h-desktop: 32px;
+  --control-h-sm-desktop: 28px;
+  --row-min-h-desktop: 40px;
+  --pad-control-x: 12px;
+  --pad-panel: 12px;
+  --pad-row-y: 8px;
+  --pad-cell-x: 10px;
+  --gap-xs: 6px;
+  --gap-sm: 8px;
+  --gap-md: 12px;
+  --focus-offset: 0px; /* the ring rides the hard border instead of floating off it */
+
   --font-display: 'Archivo Black', 'Arial Black', 'Helvetica Neue', Impact, system-ui, sans-serif;
   --font-body: 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', system-ui, sans-serif;
   --font-mono: 'IBM Plex Mono', 'Cascadia Mono', ui-monospace, 'Courier New', monospace;
@@ -455,7 +665,6 @@
   --md-font-size: 14px;
   --md-leading: 1.6;
   --chrome-font-size: 11.5px;
-  --chrome-opacity: 1;
 
   --radius-xs: 0px;
   --radius-sm: 0px;
@@ -467,6 +676,9 @@
 
 :root[data-theme='neo-light'],
 [data-swatch='neo-light'] {
+  /* ═══ structural token layer ═══ */
+  --border-strong: var(--border); /* 19.80:1 — already max-contrast ink */
+
   color-scheme: light;
 
   --bg: #f2efe6;
@@ -543,6 +755,9 @@
 
 :root[data-theme='neo-dark'],
 [data-swatch='neo-dark'] {
+  /* ═══ structural token layer ═══ */
+  --border-strong: var(--border); /* 15.86:1 — already max-contrast ink */
+
   color-scheme: dark;
 
   --bg: #0e0e0c;
@@ -625,6 +840,53 @@
    ============================================================================ */
 :root[data-theme^='ember-'],
 [data-swatch^='ember-'] {
+  /* ═══ structural token layer ═══ */
+
+  /* --font-prose is what makes Ember a different TOOL rather than brown Studio:
+     the transcript renders in Iowan Old Style / Palatino at a 72ch book measure. */
+  --font-prose: var(--font-display);
+  --prose-measure: 72ch;
+  --chrome-fg: var(--faint);
+  /* The only family that uses small caps rather than shouted uppercase. */
+  --label-transform: none;
+  --label-variant: all-small-caps;
+  --label-size: 11.5px;
+  --label-weight: 600;
+  --tracking-label: 0.06em;
+
+  --text-2xs: 10.5px;
+  --text-xs: 11.5px;
+  --text-sm: 12.5px;
+  --text-base: 13.5px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-display: 1.25rem;
+  --text-input-desktop: 14px;
+
+  /* Pills, not rectangles. */
+  --radius-control: 8px;
+  --radius-panel: 16px;
+  --radius-badge: 9999px;
+  --radius-tab: 9999px;
+  --radius-input: 10px;
+
+  /* No drop shadow: depth is a paper seam, not a float. */
+  --shadow-control: none;
+  --rule-inset: inset 0 1px 0 var(--border-soft);
+  --rail-active: inset 3px 0 0 var(--accent);
+
+  --control-h-desktop: 30px;
+  --control-h-sm-desktop: 26px;
+  --row-min-h-desktop: 40px;
+  --pad-control-x: 14px;
+  --pad-badge-x: 10px;
+  --pad-panel: 16px;
+  --pad-row-y: 10px;
+  --pad-cell-x: 12px;
+  --gap-xs: 6px;
+  --gap-sm: 10px;
+  --gap-md: 14px;
+
   --font-display: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, 'Times New Roman', serif;
   --font-body: Seravek, 'Gill Sans Nova', Optima, 'Segoe UI', system-ui, -apple-system, sans-serif;
   --font-mono: 'Iosevka Term', 'Cascadia Mono', ui-monospace, Menlo, Consolas, monospace;
@@ -637,7 +899,6 @@
   --chrome-font-size: 11.5px;
   /* Full opacity for the same reason as Mission: the chrome tier recedes by
      size and tone, not by dimming text under 4.5:1. */
-  --chrome-opacity: 1;
 
   --radius-xs: 6px;
   --radius-sm: 10px;
@@ -649,6 +910,9 @@
 
 :root[data-theme='ember-light'],
 [data-swatch='ember-light'] {
+  /* ═══ structural token layer ═══ */
+  --border-strong: #9a8c79; /* 3.08:1 */
+
   color-scheme: light;
 
   --bg: #f6eee1;
@@ -727,6 +991,9 @@
 
 :root[data-theme='ember-dark'],
 [data-swatch='ember-dark'] {
+  /* ═══ structural token layer ═══ */
+  --border-strong: #6f675f; /* 3.14:1 */
+
   color-scheme: dark;
 
   --bg: #17120d;
@@ -811,6 +1078,61 @@
    ============================================================================ */
 :root[data-theme^='contrast-'],
 [data-swatch^='contrast-'] {
+  /* ═══ structural token layer ═══ */
+
+  /* An UNDECORATED instrument, not monochrome Neo: no offset shadows, no display
+     face, no casing games — redundant explicit affordance instead. */
+  --chrome-fg: var(--faint);
+  --text-2xs: 11px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 13.5px;
+  --text-md: 14.5px;
+  --text-lg: 16px;
+  --text-display: 1.2rem;
+  --text-input-desktop: 14.5px;
+  --weight-normal: 500;
+  --weight-medium: 600;
+  --weight-strong: 700;
+  --weight-display: 800;
+  --label-size: 11px;
+  --label-weight: 700;
+  --tracking-label: 0.06em;
+  --prose-measure: 80ch;
+
+  --radius-control: 2px;
+  --radius-panel: 4px;
+  --radius-badge: 2px;
+  --radius-tab: 2px;
+  --radius-input: 2px;
+
+  --stroke-control: 2px;
+  --stroke-panel: 2px;
+  --divider-width: 2px;
+  --divider-color: var(--border);
+
+  --shadow-control: none;
+  --shadow-panel: none;
+  --shadow-popover: 0 0 0 2px var(--border); /* a ring, not a shadow */
+  --shadow-active: 0 0 0 3px var(--focus-color);
+  --rail-active: inset 4px 0 0 var(--accent);
+
+  --control-h-desktop: 34px;
+  --control-h-sm-desktop: 30px;
+  --row-min-h-desktop: 44px;
+  --pad-control-x: 12px;
+  --pad-panel: 12px;
+  --pad-row-y: 8px;
+  --pad-cell-x: 10px;
+  --gap-xs: 6px;
+  --gap-sm: 8px;
+  --gap-md: 12px;
+
+  /* Every control carries a permanent outline; every link is underlined at rest. */
+  --outline-always: var(--stroke-control) solid var(--border-strong);
+  --underline-links: underline;
+  --focus-shadow: 0 0 0 6px rgb(var(--accent-rgb) / 0.25);
+
   --font-display: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   --font-body: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   --font-mono: ui-monospace, 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
@@ -821,7 +1143,6 @@
   --md-leading: 1.7;
   --code-font-size: 13.5px;
   --chrome-font-size: 12px;
-  --chrome-opacity: 1;
 
   --radius-xs: 2px;
   --radius-sm: 2px;
@@ -838,6 +1159,9 @@
 
 :root[data-theme='contrast-light'],
 [data-swatch='contrast-light'] {
+  /* ═══ structural token layer ═══ */
+  --border-strong: #000000; /* 21:1 */
+
   color-scheme: light;
 
   --bg: #ffffff;
@@ -912,6 +1236,9 @@
 
 :root[data-theme='contrast-dark'],
 [data-swatch='contrast-dark'] {
+  /* ═══ structural token layer ═══ */
+  --border-strong: #ffffff; /* 21:1 */
+
   color-scheme: dark;
 
   --bg: #000000;
@@ -982,4 +1309,39 @@
   --focus-color: #7fd4ff;
   --selection-bg: #7fd4ff;
   --selection-fg: #000000;
+}
+
+/* ============================================================================
+   MOBILE ACCESSIBILITY FLOOR — must stay at the END of this file.
+
+   Specificity note, and it is load-bearing: bare `:root` is (0,1,0) and would
+   LOSE to the attribute-qualified family blocks above, so a bare-:root floor
+   would be silently ignored under every theme. `:root[data-theme]` is (0,2,0)
+   — equal to `:root[data-theme='x']` — so equal specificity plus later source
+   order wins deterministically. Same fix as the reduced-motion block.
+
+   Components never test for a pointer type: they consume --control-h /
+   --row-min-h / --text-input, which themes.css already composed with max().
+   ============================================================================ */
+@media (pointer: coarse) {
+  :root,
+  :root[data-theme] {
+    /* WCAG 2.5.5 target minimum. No theme may go below it. */
+    --target-floor: 44px;
+  }
+}
+
+/* `(pointer: coarse)` is in here as well as `(max-width: 640px)` on purpose, and
+   it MUST match the condition on the `:root input` rule in index.css that
+   consumes this. A coarse-pointer tablet wider than 640px still focus-zooms, so
+   the consuming rule fires there — and if this token were still 0px at that
+   width, `font-size: var(--text-input)` would resolve to the desktop size on a
+   device that zooms. Same condition on both ends, no gap. */
+@media (pointer: coarse), (max-width: 640px) {
+  :root,
+  :root[data-theme] {
+    /* iOS auto-zooms any input under 16px, and the fix must NOT be
+       maximum-scale=1 (that breaks pinch-zoom, WCAG 1.4.4). */
+    --input-font-floor: 16px;
+  }
 }

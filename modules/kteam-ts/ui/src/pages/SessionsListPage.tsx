@@ -441,7 +441,10 @@ const SessionCard = memo(function SessionCard({
   return (
     <Link
       to={`/session/${encodeURIComponent(cfg.id)}`}
-      className="group block rounded-lg border border-border bg-surface p-2 shadow-sm transition-colors hover:border-accent-border active:bg-surface-2"
+      // `hover:border-accent`, not `hover:border-accent-border`: the hover edge
+      // is the affordance, and `--accent-border` is 1.2-2.9:1 on surface in 6 of
+      // 10 themes (contract §8.2 — decorative tint only).
+      className="group block rounded-lg border border-border bg-surface p-2 shadow-sm transition-colors hover:border-accent active:bg-surface-2"
     >
       <div className="flex items-center gap-2">
         <span className="min-w-0 truncate font-semibold text-fg group-hover:text-accent">{cfg.teammate || cfg.id}</span>
