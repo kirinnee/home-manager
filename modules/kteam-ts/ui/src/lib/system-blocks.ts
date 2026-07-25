@@ -88,7 +88,7 @@ const INTERRUPTED = /^\[Request interrupted by user( for tool use)?\]/;
 // The post-compaction opener (a long system narrative).
 const COMPACTED = /^This session is being continued from a previous conversation/;
 
-// Daemon-injected automode/liveness plumbing (see rules 6–9). These are emitted
+// Daemon-injected automode/liveness plumbing (see rules 6–10). These are emitted
 // by the kteam daemon into the user channel to steer an autonomous session; each
 // is anchored on the exact daemon-authored prefix so a human paraphrase cannot
 // trip it. `CONTINUE_EXACT` is a WHOLE-STRING match — the most conservative
@@ -97,6 +97,13 @@ const COMPACTED = /^This session is being continued from a previous conversation
 const LIVENESS = /^Liveness check: no output, pane change, or subprocess activity/;
 const AUTOMODE = /^Automode: do not wait for user input\./;
 const CONTINUE_EXACT = /^Continue from where you left off\.$/;
+// Daemon "declared wait elapsed" notice (session-manager.ts, ~107 records). The
+// prefix and suffix are FIXED — only the parenthesized condition varies (the
+// daemon substitutes `no condition given` when the wait carried none). Anchored
+// on BOTH the fixed prefix and suffix, whole-string, so a human quoting the
+// phrase cannot trip it; capture group 1 is the raw condition text.
+const WAIT_ELAPSED =
+  /^The wait you declared has elapsed \(([\s\S]*)\)\. Re-check the condition and continue the task\.\s*$/;
 // Image attachment metadata the harness prepends. Required to be the ENTIRE text
 // (0/31 observed records carry trailing prose): if a future record appends the
 // human's message after the bracket, it degrades to a user message — the safe
@@ -206,18 +213,27 @@ export function classifySystemText(text: string): SystemBlockInfo | null {
   // 8. daemon "continue" nudge (whole-string match, see CONTINUE_EXACT).
   if (CONTINUE_EXACT.test(text.trim())) return { label: 'continue', summary: 'resume where left off', raw: text };
 
-  // 9. image-attachment metadata.
+  // 9. daemon "declared wait elapsed" notice. Surface the parenthesized
+  //    condition as the summary; fixed fallback when it carried none (empty or
+  //    the daemon's own `no condition given` placeholder).
+  const wait = WAIT_ELAPSED.exec(text.trim());
+  if (wait) {
+    const cond = oneLine(wait[1]);
+    return { label: 'wait elapsed', summary: cond ?? 'no condition given', raw: text };
+  }
+
+  // 10. image-attachment metadata.
   const img = IMAGE_META.exec(text.trim());
   if (img) return { label: 'image', summary: `original ${img[1]}`, raw: text };
 
-  // 10. Codex protocol turn (`# AGENTS.md instructions` + the harness wrapper).
+  // 11. Codex protocol turn (`# AGENTS.md instructions` + the harness wrapper).
   if (CODEX_PROTOCOL.test(text) && /<INSTRUCTIONS>|<environment_context>/.test(text)) {
     return { label: 'agents instructions', summary: 'Codex harness instructions', raw: text };
   }
 
-  // 11. Known local slash-command markers (see COMMAND_TAGS). The leading tag
+  // 12. Known local slash-command markers (see COMMAND_TAGS). The leading tag
   //     must be one of the known names AND close somewhere (inline or block) —
-  //     the close is the same safety valve as rule 12.
+  //     the close is the same safety valve as rule 13.
   const firstNonEmpty = text
     .split('\n')
     .map(l => l.trim())
@@ -237,7 +253,7 @@ export function classifySystemText(text: string): SystemBlockInfo | null {
     }
   }
 
-  // 12. Generic fallback: a message whose FIRST line is a lone opening tag AND
+  // 13. Generic fallback: a message whose FIRST line is a lone opening tag AND
   //     whose text contains the matching close tag. Both conditions required —
   //     the close tag is the safety valve keeping an unclosed `<…` human message
   //     a user message. Catches `<environment_context>` today and any future
