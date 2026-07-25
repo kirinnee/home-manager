@@ -7,6 +7,14 @@ import type { SessionView } from '../types';
 
 /** Sidebar indentation stops growing after two 10px steps. */
 export const MAX_INDENT_DEPTH = 2;
+const INDENT_PER_LEVEL = 10;
+
+/** The one geometry rule used by the nested sidebar: two physical steps at
+ * most, even when DOM nesting continues beyond that visual cap. */
+export function lineageIndent(depth: number): number {
+  const wholeDepth = Number.isFinite(depth) ? Math.max(0, Math.floor(depth)) : 0;
+  return Math.min(wholeDepth, MAX_INDENT_DEPTH) * INDENT_PER_LEVEL;
+}
 
 export interface LineageIndex {
   /** Direct children in the daemon's supplied order. */
@@ -174,7 +182,9 @@ function sortAndDepth(rows: NestedRow[], depth: number): number {
 
 /** Nest only under parents visible in this same project group. A filtered,
  * purged or cross-project parent leaves its child flat, retaining the raw
- * parent id so the sidebar can still describe the relationship in its tooltip. */
+ * parent id so the sidebar can still describe the relationship in its tooltip.
+ * The defensive ancestor check makes attachment O(n × depth), plus ordinary
+ * sibling sorting; live lineage depth is intentionally shallow. */
 export function nestByLineage(rows: readonly SessionView[], lineage: LineageIndex): NestedRow[] {
   const visibleIds = new Set(rows.map(view => view.config.id));
   const nodes = new Map<string, NestedRow>();

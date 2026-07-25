@@ -60,6 +60,7 @@ import { cn } from '../lib/utils';
 import { filterSessions, groupByProject, modeCounts, type SessionGroup } from '../lib/grouping';
 import {
   buildLineage,
+  lineageIndent,
   MAX_INDENT_DEPTH,
   nestByLineage,
   parentDisplay,
@@ -302,11 +303,11 @@ function SidebarRow({
   const parent = parentDisplay(cfg.parent, byId);
   const spawnedByLabel = parent ? `spawned by ${parent.kind === 'resolved' ? parent.name : parent.shortId}` : undefined;
   const parentId = cfg.parent?.trim();
-  const deepTitle =
-    depth > MAX_INDENT_DEPTH
-      ? `depth ${depth} — spawned by ${parentTrail(view, byId) || spawnedByLabel?.replace('spawned by ', '') || 'unknown parent'}`
-      : undefined;
-  const indent = Math.min(depth, MAX_INDENT_DEPTH) * 10;
+  const deepChain = depth > MAX_INDENT_DEPTH ? parentTrail(view, byId) : undefined;
+  const deepTitle = deepChain ? `spawned by ${deepChain}${parentId ? `\n${parentId}` : ''}` : undefined;
+  const lineageText = [spawnedByLabel, deepChain && `full lineage: ${deepChain}`].filter(Boolean).join('; ');
+  const childDepth = children[0]?.depth ?? depth;
+  const railIndent = Math.max(0, lineageIndent(childDepth) - lineageIndent(depth));
   const labels = (cfg.label ?? '')
     .split(',')
     .map(s => s.trim())
@@ -320,9 +321,6 @@ function SidebarRow({
         // links is the one you are on; the left rail and surface are the same
         // fact for everyone else.
         aria-current={active ? 'page' : undefined}
-        aria-label={[cfg.name || cfg.id, cfg.teammate && `teammate ${cfg.teammate}`, spawnedByLabel]
-          .filter(Boolean)
-          .join(' — ')}
         onClick={onNavigate}
         title={[
           cfg.teammate || cfg.id,
@@ -340,40 +338,44 @@ function SidebarRow({
       >
         {/* ONE child, because `.kt-navrow` is a centred flex row: the two text
             lines stack inside it rather than sitting side by side. */}
-        <div className="min-w-0 flex-1" style={depth > 0 ? { paddingLeft: `${indent}px` } : undefined}>
-          <div className={cn('min-w-0', depth > 0 && 'border-l border-border-soft')}>
-            <div className="flex min-w-0 items-center gap-sm">
-              {deepTitle && (
-                <span aria-hidden="true" title={deepTitle} className="shrink-0 text-faint">
-                  »
-                </span>
-              )}
-              <StatusMark view={view} />
-              <TaskName
-                name={cfg.name}
-                teammate={cfg.teammate}
-                size="sm"
-                className={cn('min-w-0 flex-1', active && 'text-accent')}
-              />
-            </div>
-            <div className="mt-0.5 flex min-w-0 items-center gap-xs pl-3.5">
-              <span className={cn('mono min-w-0 truncate text-meta', active ? 'text-accent' : 'text-muted')}>
-                {cfg.teammate || cfg.id}
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-sm">
+            {deepTitle && (
+              <span aria-hidden="true" title={deepTitle} className="shrink-0 text-faint">
+                »
               </span>
-              {labels.map(l => (
-                <span
-                  key={l}
-                  className="shrink-0 rounded-badge border border-border-soft bg-surface-2 px-xs text-2xs text-muted"
-                >
-                  {l}
-                </span>
-              ))}
-            </div>
+            )}
+            <StatusMark view={view} />
+            <TaskName
+              name={cfg.name}
+              teammate={cfg.teammate}
+              size="sm"
+              className={cn('min-w-0 flex-1', active && 'text-accent')}
+            />
           </div>
+          <div className="mt-0.5 flex min-w-0 items-center gap-xs pl-3.5">
+            <span className={cn('mono min-w-0 truncate text-meta', active ? 'text-accent' : 'text-muted')}>
+              {cfg.teammate || cfg.id}
+            </span>
+            {labels.map(l => (
+              <span
+                key={l}
+                className="shrink-0 rounded-badge border border-border-soft bg-surface-2 px-xs text-2xs text-muted"
+              >
+                {l}
+              </span>
+            ))}
+          </div>
+          {lineageText && <span className="sr-only"> — {lineageText}</span>}
         </div>
       </Link>
       {children.length > 0 && (
-        <ul className="m-0 list-none p-0">
+        /* The rail is on the child list, not a padded nav row: one border now
+            spans every adjacent child (and its nested descendants) continuously. */
+        <ul
+          className={cn('m-0 list-none p-0', railIndent > 0 && 'border-l border-border-soft')}
+          style={railIndent > 0 ? { marginLeft: `${railIndent - 1}px` } : undefined}
+        >
           {children.map(child => (
             <SidebarRow
               key={child.view.config.id}
