@@ -93,7 +93,11 @@ function ModeSegment({
   onChange: (next: ModeFilter) => void;
 }) {
   return (
-    <div className="flex rounded-md border border-border bg-surface p-0.5" role="group" aria-label="Filter by mode">
+    <div
+      className="flex rounded-control border border-border bg-surface p-0.5"
+      role="group"
+      aria-label="Filter by mode"
+    >
       {MODE_ORDER.map(m => (
         <button
           key={m}
@@ -108,15 +112,22 @@ function ModeSegment({
               ? `every session matching the current search and filters (${counts.all})`
               : `${MODE_HINT[m]}\n${counts[m]} match the current search and filters`
           }
-          className={cn(
-            'inline-flex min-w-0 flex-1 items-center justify-center gap-1 rounded px-1 py-1 text-[11.5px] font-medium transition-colors',
-            value === m ? 'bg-surface-2 text-fg' : 'text-muted hover:text-fg',
-          )}
+          // `.kt-tab` + the `aria-pressed` already on this button: the selected
+          // treatment is now the family's (pill in Ember, notched mono caps in
+          // Mission, hard block in Neo) instead of a hardcoded `bg-surface-2`.
+          //
+          // `!px-xs` is deliberate and is the ONE override here. `.kt-tab`'s
+          // `--pad-control-x` is a toolbar figure (10-14px); three of these
+          // segments share a 248px column, so at 14px a side "Interactive"
+          // truncates to two characters. `--gap-xs` keeps the padding themed
+          // while leaving the label readable, and `!` is required because the
+          // structural classes are emitted after Tailwind's utilities.
+          className="kt-tab min-w-0 flex-1 justify-center !px-xs"
         >
           {m === 'auto' && <Cpu size={10} className="shrink-0" />}
           {m === 'interactive' && <User size={10} className="shrink-0" />}
           <span className="truncate">{MODE_LABEL[m]}</span>
-          <span className="mono shrink-0 text-[10.5px] text-faint">{counts[m]}</span>
+          <span className="mono shrink-0 text-2xs text-faint">{counts[m]}</span>
         </button>
       ))}
     </div>
@@ -162,7 +173,7 @@ function Controls({ autoFocusSearch = false }: { autoFocusSearch?: boolean }) {
   }, [autoFocusSearch]);
 
   return (
-    <div className="flex flex-col gap-1.5">
+    <div className="flex flex-col gap-sm">
       <div className="relative flex items-center">
         <Search size={13} className="pointer-events-none absolute left-2 text-faint" />
         <input
@@ -189,7 +200,15 @@ function Controls({ autoFocusSearch = false }: { autoFocusSearch?: boolean }) {
           }}
           placeholder="Search fleet…  ( / )"
           aria-label="Search sessions — Enter also searches transcripts"
-          className="w-full py-1 pl-7 pr-7 text-[12.5px]"
+          // `.kt-input` brings the themed edge (`--border-strong`, ≥3:1), radius,
+          // focus ring AND `--text-input`, which themes.css floors at 16px under
+          // `(max-width: 640px)` — the hardcoded 12.5px made iOS zoom the whole
+          // drawer every time this box was focused.
+          //
+          // The two `!` overrides are the icon gutters: `.kt-input` sets
+          // `padding` as a shorthand, so `pl-7`/`pr-7` cannot win on source order
+          // alone. Vertical padding stays themed.
+          className="kt-input !pl-7 !pr-7"
         />
         {controls.query && (
           <button
@@ -199,7 +218,7 @@ function Controls({ autoFocusSearch = false }: { autoFocusSearch?: boolean }) {
               store.clearSearch();
             }}
             aria-label="Clear search"
-            className="absolute right-1.5 rounded p-0.5 text-faint hover:text-fg"
+            className="absolute right-1.5 rounded-control p-0.5 text-faint hover:text-fg"
           >
             <X size={13} />
           </button>
@@ -208,23 +227,22 @@ function Controls({ autoFocusSearch = false }: { autoFocusSearch?: boolean }) {
 
       <ModeSegment value={controls.mode} counts={counts} onChange={m => setControls({ mode: m })} />
 
-      <div className="flex items-center gap-1.5">
+      <div className="flex items-center gap-sm">
         <button
           type="button"
           onClick={() => setControls({ rcOnly: !controls.rcOnly })}
           aria-pressed={controls.rcOnly}
           title="only sessions launched with Remote Control (steerable from claude.ai / your phone)"
-          className={cn(
-            'inline-flex h-6 shrink-0 items-center gap-1 rounded-md border px-1.5 text-[11.5px] font-medium transition-colors',
-            controls.rcOnly
-              ? 'border-accent-border bg-accent-soft text-accent'
-              : 'border-border bg-surface text-muted hover:text-fg',
-          )}
+          // STATE SITE 1 of 2. The pressed edge was `--accent-border`, which
+          // measures 1.2-2.9:1 on surface in 6 of 10 themes; `.kt-tab
+          // [aria-pressed='true']` draws it in `--accent` (≥4.5:1 in all ten)
+          // and takes the whole selected treatment with it. Contract §8.2(b).
+          className="kt-tab shrink-0"
         >
           <Radio size={10} />
           rc only
         </button>
-        <label className="inline-flex cursor-pointer items-center gap-1.5 text-[11.5px] text-fg-soft">
+        <label className="inline-flex cursor-pointer items-center gap-sm text-meta text-fg-soft">
           <input
             type="checkbox"
             checked={controls.includeFinished}
@@ -269,34 +287,38 @@ function SidebarRow({
         aria-current={active ? 'page' : undefined}
         onClick={onNavigate}
         title={`${cfg.teammate || cfg.id}\n${mark.label}`}
-        className={cn(
-          'group block border-l-2 py-1 pl-2 pr-1.5 transition-colors',
-          active
-            ? 'border-accent bg-accent-soft'
-            : 'border-transparent hover:border-border hover:bg-surface-2 focus-visible:bg-surface-2',
-        )}
+        // `.kt-navrow` keys its active treatment off `aria-current="page"` — the
+        // attribute this row already had — so the hand-rolled `border-l-2` rail
+        // is gone and the family draws its own: 2px inset in Studio, 4px glowing
+        // in Mission, 4px hard in Neo, 3px in Ember, 4px in High Contrast. Row
+        // height, padding, radius and type size come with it.
+        className="kt-navrow group"
       >
-        <div className="flex min-w-0 items-center gap-1.5">
-          <StatusMark view={view} />
-          <TaskName
-            name={cfg.name}
-            teammate={cfg.teammate}
-            size="sm"
-            className={cn('min-w-0 flex-1', active && 'text-accent')}
-          />
-        </div>
-        <div className="mt-0.5 flex min-w-0 items-center gap-1 pl-3.5">
-          <span className={cn('mono min-w-0 truncate text-[11px]', active ? 'text-accent' : 'text-muted')}>
-            {cfg.teammate || cfg.id}
-          </span>
-          {labels.map(l => (
-            <span
-              key={l}
-              className="shrink-0 rounded-sm border border-border-soft bg-surface-2 px-1 text-[10px] text-muted"
-            >
-              {l}
+        {/* ONE child, because `.kt-navrow` is a centred flex row: the two text
+            lines stack inside it rather than sitting side by side. */}
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-sm">
+            <StatusMark view={view} />
+            <TaskName
+              name={cfg.name}
+              teammate={cfg.teammate}
+              size="sm"
+              className={cn('min-w-0 flex-1', active && 'text-accent')}
+            />
+          </div>
+          <div className="mt-0.5 flex min-w-0 items-center gap-xs pl-3.5">
+            <span className={cn('mono min-w-0 truncate text-meta', active ? 'text-accent' : 'text-muted')}>
+              {cfg.teammate || cfg.id}
             </span>
-          ))}
+            {labels.map(l => (
+              <span
+                key={l}
+                className="shrink-0 rounded-badge border border-border-soft bg-surface-2 px-xs text-2xs text-muted"
+              >
+                {l}
+              </span>
+            ))}
+          </div>
         </div>
       </Link>
     </li>
@@ -316,12 +338,12 @@ function GroupBlock({
     <section>
       {/* Sticky, and OPAQUE (`bg-bg`, no alpha): rows scroll under it, and a
           translucent header over a dense list is unreadable in every theme. */}
-      <h3 className="sticky top-0 z-10 flex min-w-0 items-center gap-1.5 bg-bg px-2 py-1">
+      <h3 className="sticky top-0 z-10 flex min-w-0 items-center gap-sm bg-bg px-cell-x py-row-y">
         <FolderGit2 size={11} className="shrink-0 text-faint" />
-        <span className="min-w-0 truncate text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
-          {group.name}
-        </span>
-        <span className="mono ml-auto shrink-0 text-[10.5px] text-faint">{group.rows.length}</span>
+        {/* Section heads are the canonical `.kt-label` site: Ember renders these
+            as small caps, Mission as 0.14em mono caps, Neo at 800. */}
+        <span className="kt-label min-w-0 truncate">{group.name}</span>
+        <span className="mono ml-auto shrink-0 text-2xs text-faint">{group.rows.length}</span>
       </h3>
       <ul className="m-0 list-none p-0">
         {group.rows.map(v => (
@@ -350,26 +372,52 @@ function RailButton({
   badge?: number;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-label={label}
-      aria-pressed={active}
-      title={label}
-      className={cn(
-        'relative inline-flex h-7 w-7 items-center justify-center rounded-md border transition-colors',
-        active
-          ? 'border-accent-border bg-accent-soft text-accent'
-          : 'border-border bg-surface text-muted hover:text-fg',
-      )}
-    >
-      {children}
+    // The badge is a SIBLING of the button, not a child, and the wrapper is what
+    // it is positioned against. `.kt-btn` resolves `clip-path` to Mission's
+    // `notch(6px)`, and clip-path clips descendants — nested, the count bubble
+    // would have had its corner sliced off in exactly one family.
+    <span className="relative inline-flex">
+      <button
+        type="button"
+        onClick={onClick}
+        aria-label={label}
+        aria-pressed={active}
+        title={label}
+        // STATE SITE 2 of 2. `.kt-btn` so the rail carries the family silhouette
+        // the rest of the app's buttons do — including High Contrast's permanent
+        // `--outline-always`, which a bare tab would have dropped — and the
+        // pressed edge moves from `--accent-border` to `--accent` (contract
+        // §8.2(b)).
+        //
+        // The `!` prefixes are load-bearing: `.kt-btn` is emitted after
+        // Tailwind's utilities, so its `border`/`background`/`color` shorthands
+        // beat a same-specificity utility on source order. `!px-0` +
+        // `aspect-square` keep the button square at whatever `--control-h` the
+        // family asks for (26px Mission → 34px High Contrast → 44px on a coarse
+        // pointer) instead of pinning it to 28px.
+        className={cn(
+          'kt-btn aspect-square justify-center !px-0',
+          active && '!border-accent !bg-accent-soft !text-accent',
+        )}
+      >
+        {children}
+      </button>
       {badge != null && badge > 0 && (
-        <span className="mono absolute -bottom-1 -right-1 rounded-full border border-border bg-surface px-1 text-[9px] leading-[1.3] text-muted">
+        // NOT `.kt-badge`: that class carries the `pend` tone, and this is a
+        // neutral count bubble. It stays deliberately round — same reasoning as
+        // StatusMark, shape is the signal at this size.
+        //
+        // `aria-hidden` because the count is already spoken as part of the
+        // button's `aria-label`; `pointer-events-none` because, now that it is
+        // outside the button, a click landing on it would otherwise miss.
+        <span
+          aria-hidden
+          className="mono pointer-events-none absolute -bottom-1 -right-1 rounded-full border border-border bg-surface px-1 text-2xs leading-[1.3] text-muted"
+        >
           {badge > 99 ? '99+' : badge}
         </span>
       )}
-    </button>
+    </span>
   );
 }
 
@@ -394,7 +442,7 @@ function Rail({ count, onExpand }: { count: number; onExpand: () => void }) {
   const nextMode: ModeFilter = controls.mode === 'all' ? 'auto' : controls.mode === 'auto' ? 'interactive' : 'all';
 
   return (
-    <div className="flex flex-col items-center gap-1.5 py-2">
+    <div className="flex flex-col items-center gap-sm py-2">
       <RailButton label="Expand the fleet sidebar" onClick={onExpand}>
         <ChevronsRight size={14} />
       </RailButton>
@@ -402,7 +450,8 @@ function Rail({ count, onExpand }: { count: number; onExpand: () => void }) {
         to="/new"
         aria-label="New session"
         title="New session"
-        className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-accent bg-accent text-accent-fg hover:bg-accent-strong"
+        data-variant="primary"
+        className="kt-btn aspect-square justify-center !px-0"
       >
         <Plus size={14} />
       </Link>
@@ -464,13 +513,13 @@ function Body({
 }) {
   return (
     <>
-      <div className="shrink-0 border-b border-border-soft px-2 pb-2">
+      <div className="shrink-0 border-b border-border-soft px-cell-x pb-2">
         <Controls autoFocusSearch={autoFocusSearch} />
       </div>
       {/* THE ONE SCROLLER. A sibling of the main pane's, never nested in it. */}
       <div className="min-h-0 flex-1 overflow-y-auto scroll-thin">
         {groups.length === 0 ? (
-          <p className="px-2 py-4 text-[12px] text-muted">
+          <p className="px-cell-x py-4 text-cell text-muted">
             {total === 0 ? 'No sessions yet.' : 'No sessions match these filters.'}
           </p>
         ) : (
@@ -481,15 +530,11 @@ function Body({
           </div>
         )}
       </div>
-      <div className="flex shrink-0 items-center gap-2 border-t border-border-soft px-2 py-1.5">
-        <Link
-          to="/new"
-          onClick={onNavigate}
-          className="inline-flex items-center gap-1 rounded-md border border-accent bg-accent px-2 py-1 text-[12px] font-semibold text-accent-fg hover:bg-accent-strong"
-        >
+      <div className="flex shrink-0 items-center gap-sm border-t border-border-soft px-cell-x py-row-y">
+        <Link to="/new" onClick={onNavigate} data-variant="primary" className="kt-btn">
           <Plus size={12} /> New session
         </Link>
-        <span className="mono ml-auto shrink-0 text-[10.5px] text-faint" title="shown / total sessions">
+        <span className="mono ml-auto shrink-0 text-2xs text-faint" title="shown / total sessions">
           {count}/{total}
         </span>
       </div>
@@ -563,17 +608,20 @@ export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSideb
         <aside
           className={cn(
             'absolute inset-y-0 left-0 flex w-[min(88vw,300px)] flex-col',
-            'border-r border-border bg-bg py-2 shadow-lg',
+            // `shadow-popover`, not `shadow-lg`: the drawer is one of the three
+            // popover surfaces in the contract, so Neo gets a 6px hard offset
+            // and High Contrast a 2px ring instead of a blur.
+            'border-r border-border bg-bg py-2 shadow-popover',
           )}
         >
-          <div className="mb-1.5 flex shrink-0 items-center gap-1.5 px-2">
+          <div className="mb-1.5 flex shrink-0 items-center gap-sm px-cell-x">
             <Users size={13} className="shrink-0 text-faint" />
-            <span className="text-[12.5px] font-semibold">Fleet</span>
+            <span className="text-ui font-semibold">Fleet</span>
             <button
               type="button"
               onClick={onCloseDrawer}
               aria-label="Close the fleet sidebar"
-              className="ml-auto rounded p-1 text-muted hover:bg-surface-2 hover:text-fg"
+              className="ml-auto rounded-control p-1 text-muted hover:bg-surface-2 hover:text-fg"
             >
               <X size={14} />
             </button>
@@ -610,15 +658,15 @@ export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSideb
       aria-label="Fleet sessions"
       className={cn('flex min-h-0 shrink-0 flex-col border-r border-border bg-bg pt-2', EXPANDED_W)}
     >
-      <div className="mb-1.5 flex shrink-0 items-center gap-1.5 px-2">
+      <div className="mb-1.5 flex shrink-0 items-center gap-sm px-cell-x">
         <Users size={13} className="shrink-0 text-faint" />
-        <span className="text-[12.5px] font-semibold">Fleet</span>
+        <span className="text-ui font-semibold">Fleet</span>
         <button
           type="button"
           onClick={collapse}
           aria-label="Collapse the fleet sidebar to an icon rail"
           title="Collapse to an icon rail"
-          className="ml-auto rounded p-1 text-muted hover:bg-surface-2 hover:text-fg"
+          className="ml-auto rounded-control p-1 text-muted hover:bg-surface-2 hover:text-fg"
         >
           <ChevronsLeft size={14} />
         </button>
@@ -640,7 +688,10 @@ export function SidebarDrawerTrigger({ onOpen }: { onOpen: () => void }) {
       onClick={onOpen}
       aria-label="Open the fleet sidebar"
       title="Open the fleet sidebar"
-      className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-1.5 py-0.5 text-[11.5px] text-muted hover:border-accent-border hover:text-fg"
+      // The hover edge here stays `--accent-border`: it is decorative tint on a
+      // control whose state never depends on it, which §8.2(b) explicitly still
+      // permits. Only the two selected states above had to move to `--accent`.
+      className="inline-flex shrink-0 items-center gap-xs rounded-control border border-border px-1.5 py-0.5 text-meta text-muted hover:border-accent-border hover:text-fg"
     >
       <Users size={12} />
       <span className="mono">{sessions?.length ?? 0}</span>
