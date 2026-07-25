@@ -72,7 +72,12 @@ export function QuestionForm({ sessionId, question, onSubmit }: Props) {
   }
 
   return (
-    <div className="my-2 rounded-md border border-accent-border bg-accent-soft p-3">
+    // `border-accent`, not `border-accent-border`. This edge is not a panel
+    // outline: the form only exists while the session is BLOCKED on an answer,
+    // and the accent-framed block is what marks the transcript's one actionable
+    // spot. `--accent-border` measures 1.2-2.9:1 on `--accent-soft` in 6 of 10
+    // themes; `--accent` clears 4.5:1 on that same fill everywhere.
+    <div className="my-2 rounded-md border border-accent bg-accent-soft p-3">
       <div className="mb-2 text-[10.5px] uppercase tracking-wider text-muted font-semibold">Structured question</div>
       {questions.map((q, i) => (
         <div key={i} className="mb-2 last:mb-0">

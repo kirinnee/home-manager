@@ -30,6 +30,7 @@ import { Transcript } from '../components/Transcript';
 import { ThinkingIndicator } from '../components/Harness';
 import { buildTranscript, latestPendingQuestion } from '../lib/transcript';
 import { useUsage } from '../hooks/useUsage';
+import { useDebouncedEffect } from '../hooks/useDebounce';
 import { quotaFor } from '../lib/usage';
 import { TERMINAL_STATUSES, WAITING_STATUSES, cn, fmtAbsolute, isBusy, toneFor } from '../lib/utils';
 
@@ -92,6 +93,12 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
    *  overwriting newer state. A boolean `cancelled` per effect run could only say
    *  "my run ended", never "someone else's run is now authoritative". */
   const loadId = useRef(0);
+  /** Tools this page WATCHED run, monotonic for the life of the mounted session.
+   *  Read only by the screen-reader turn summary further down. It counts from the
+   *  live event stream and not from `records` on purpose: `records` also grows
+   *  when the reader pages BACKWARDS, and a history page of old tool calls must
+   *  never be announced as work that just happened. */
+  const liveTools = useRef(0);
 
   /** STATE UPDATERS HERE MUST BE PURE — see the round-7 note on the initial
    *  load. `fresh` is computed and `seenKeys` is mutated OUTSIDE the updater;
@@ -218,6 +225,10 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
       const key = recordKey(rec);
       if (seenKeys.current.has(key)) return;
       seenKeys.current.add(key);
+      // Counted once per deduped tool, for the spoken turn summary only. A ref
+      // bump: it feeds no render, and it neither reorders nor filters anything
+      // below it.
+      if (rec.type === 'tool.use') liveTools.current += 1;
       // Append only — the MessageScroller auto-follows the tail when the reader
       // is at the bottom, and leaves them put otherwise.
       setRecords(rs => [...rs, rec]);
@@ -364,6 +375,89 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
       return next.length === p.length ? p : next;
     });
   }, [records, pending.length]);
+
+  // ---- what a screen reader is told -----------------------------------------
+  //
+  // The transcript itself must NOT be a live region. A streaming token feed on
+  // `polite` is unusable — it re-reads, it never finishes, and it buries the one
+  // fact the reader wanted. So this page carries two small visually-hidden
+  // regions instead, and the transcript stays silent:
+  //
+  //   POLITE   a one-line summary of the session's COARSE state — started
+  //            answering, finished, waiting on a question, socket dropped. It
+  //            changes a handful of times per turn, never per token, and it is
+  //            `aria-atomic` so the whole sentence is read rather than a diff.
+  //   ALERT    reserved for the errors that interrupt what the reader was doing:
+  //            a send that failed, a control action that failed, a conversation
+  //            that would not load. Everything else stays polite.
+  //
+  // Both are named, because more than one session pane can be mounted at once
+  // and "is responding" from an unidentified region is worse than silence.
+  //
+  // Every input below is already-derived coarse state. Nothing here reads
+  // `records`, subscribes to anything, or touches the fetch, merge and scroll
+  // paths above.
+  const who = view?.config.teammate || view?.config.name || 'This session';
+
+  // Socket trouble is only worth announcing to someone who HAD a connection.
+  // Every page starts at `connecting`, and narrating the normal first handshake
+  // as "reconnecting" would make the first thing a reader hears a false alarm.
+  const [everConnected, setEverConnected] = useState(false);
+  useEffect(() => {
+    if (liveStatus === 'open') setEverConnected(true);
+  }, [liveStatus]);
+
+  // Coarse turn boundaries. `busy` rising starts a turn and `busy` falling ends
+  // one; the tool count is the tools seen between those two edges, so a turn
+  // already in flight when the page opened reports completion without a count
+  // rather than a wrong one.
+  const [turnSummary, setTurnSummary] = useState<string | null>(null);
+  const turnToolBase = useRef(0);
+  const wasBusy = useRef(false);
+  useEffect(() => {
+    if (busy === wasBusy.current) return;
+    wasBusy.current = busy;
+    if (busy) {
+      turnToolBase.current = liveTools.current;
+      setTurnSummary(null);
+      return;
+    }
+    const tools = liveTools.current - turnToolBase.current;
+    setTurnSummary(tools > 0 ? `Turn complete. ${tools} tool${tools === 1 ? '' : 's'} ran.` : 'Turn complete.');
+  }, [busy]);
+
+  // Counters and any leftover summary belong to the session that produced them.
+  useEffect(() => {
+    liveTools.current = 0;
+    turnToolBase.current = 0;
+    wasBusy.current = false;
+    setTurnSummary(null);
+  }, [sessionId]);
+
+  const statusMessage = useMemo(() => {
+    if (!view) return '';
+    if (everConnected && liveStatus !== 'open') return `${who}: live connection lost, reconnecting.`;
+    if (awaitingQ) return `${who} is waiting for an answer to a question.`;
+    if (busy) return `${who} is responding.`;
+    if (isTerminal) return `${who} has stopped. Status: ${view.state.status.replace(/_/g, ' ')}.`;
+    return turnSummary ? `${who}: ${turnSummary}` : '';
+  }, [view, everConnected, liveStatus, awaitingQ, busy, isTerminal, who, turnSummary]);
+
+  // Debounced, which is the whole reason this is a separate piece of state: a
+  // status that flickers (busy → idle → busy across one tool boundary) must
+  // produce ONE announcement, not three. It also leaves the region mounted and
+  // empty on the first paint, which is what makes assistive tech treat later
+  // writes as updates rather than as initial content.
+  const [announcement, setAnnouncement] = useState('');
+  useDebouncedEffect(() => setAnnouncement(statusMessage), [statusMessage], 600);
+
+  const sendFailed = pending.some(p => p.status === 'error');
+  const alertMessage = useMemo(() => {
+    if (error) return `${who}: this conversation could not be loaded. ${error}`;
+    if (actionNotice?.kind === 'err') return `${who}: ${actionNotice.text}`;
+    if (sendFailed) return `${who}: your message failed to send.`;
+    return '';
+  }, [error, actionNotice, sendFailed, who]);
 
   // Send lock: a SYNCHRONOUS ref guard blocks a CONCURRENT second call (Enter +
   // click in one gesture, rapid double-Enter, a stray re-fire) before the first
@@ -525,6 +619,16 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
   // transcript scroller and fixed details overlay in its own layout.
   return (
     <div className="flex h-full min-h-0 flex-col pb-2">
+      {/* Spoken status. Outside the tab switch, so a reader on the Terminal tab
+          still hears that the session started answering or dropped its socket.
+          `sr-only` and not `hidden`: display:none would take these straight back
+          out of the accessibility tree. */}
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {announcement}
+      </div>
+      <div className="sr-only" role="alert" aria-live="assertive" aria-atomic="true">
+        {alertMessage}
+      </div>
       {view && (
         <SessionHeader
           view={view}
