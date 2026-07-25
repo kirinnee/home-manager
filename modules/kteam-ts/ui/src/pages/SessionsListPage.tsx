@@ -83,7 +83,7 @@ function activityLine(v: SessionView): { text: string; live: boolean } {
 function ActivityLine({ view, className = '' }: { view: SessionView; className?: string }) {
   const { text, live } = activityLine(view);
   return (
-    <span className={`inline-flex min-w-0 max-w-full items-center gap-1.5 ${className}`}>
+    <span className={`inline-flex min-w-0 max-w-full items-center gap-sm ${className}`}>
       <Activity size={11} className={live ? 'shrink-0 text-accent' : 'shrink-0 text-faint'} />
       <span className={live ? 'truncate shimmer' : 'truncate text-muted'} title={text}>
         {text}
@@ -108,7 +108,7 @@ function highlight(text: string, q: string) {
     }
     if (at > i) parts.push(text.slice(i, at));
     parts.push(
-      <mark key={n++} className="rounded bg-accent-soft px-0.5 text-accent">
+      <mark key={n++} className="rounded-badge bg-accent-soft px-0.5 text-accent">
         {text.slice(at, at + q.length)}
       </mark>,
     );
@@ -155,15 +155,20 @@ export function SessionsListPage() {
   return (
     <div className="flex h-full min-h-0 w-full flex-col pb-2">
       <div className="mt-2 mb-2 flex flex-wrap items-center justify-between gap-2">
-        <h1 className="m-0 text-[1.15rem] font-semibold tracking-tight">Sessions</h1>
-        <div className="flex items-center gap-2.5">
+        {/* `--text-display` / `--weight-display` / `--tracking-display`: Mission
+            shouts this in 0.08em caps, Neo at 900, Ember in a serif. */}
+        <h1 className="m-0 font-display text-display font-bold tracking-display">Sessions</h1>
+        <div className="flex items-center gap-sm">
           {sessions && (
-            <span className="mono text-[11.5px] text-faint" title="visible / total sessions">
+            <span className="mono text-meta text-faint" title="visible / total sessions">
               {visible.length}/{sessions.length}
             </span>
           )}
           {!isNarrow && (
-            <div className="inline-flex shrink-0 rounded-md border border-border bg-surface p-0.5">
+            // Same shape as ViewTabs: the track keeps its own box, each option is
+            // `.kt-tab` and `aria-pressed` — already the accessible truth here —
+            // is what the selected treatment keys off. No state class list left.
+            <div className="inline-flex shrink-0 rounded-control border border-border bg-surface p-0.5">
               {(['table', 'cards'] as const).map(m => (
                 <button
                   key={m}
@@ -172,9 +177,7 @@ export function SessionsListPage() {
                   aria-label={`${m} view`}
                   aria-pressed={mode === m}
                   title={`${m} view`}
-                  className={`inline-flex h-6 items-center gap-1 rounded px-2 text-[12px] font-medium transition-colors ${
-                    mode === m ? 'bg-surface-2 text-fg' : 'text-muted hover:text-fg'
-                  }`}
+                  className="kt-tab"
                 >
                   {m === 'table' ? <Rows3 size={12} /> : <LayoutGrid size={12} />}
                   {m}
@@ -182,10 +185,7 @@ export function SessionsListPage() {
               ))}
             </div>
           )}
-          <Link
-            to="/new"
-            className="inline-flex items-center gap-1.5 rounded-md border border-accent bg-accent px-2.5 py-1 text-[12.5px] font-semibold text-accent-fg hover:bg-accent-strong"
-          >
+          <Link to="/new" data-variant="primary" className="kt-btn">
             <Plus size={13} /> New session
           </Link>
         </div>
@@ -204,13 +204,15 @@ export function SessionsListPage() {
       )}
 
       {error && (
-        <div className="mb-3 rounded-md border border-err-border bg-err-bg px-3 py-2 text-[13px] text-err">{error}</div>
+        <div className="mb-3 rounded-panel border border-err-border bg-err-bg px-panel py-row-y text-row text-err">
+          {error}
+        </div>
       )}
 
       <div className="min-h-0 flex-1 overflow-y-auto scroll-thin">
         {!sessions && <SkeletonRows />}
         {sessions && visible.length === 0 && (
-          <div className="rounded-lg border border-dashed border-border bg-surface-2 px-4 py-10 text-center text-muted">
+          <div className="rounded-panel border border-dashed border-border bg-surface-2 px-4 py-10 text-center text-muted">
             No matching sessions.
           </div>
         )}
@@ -218,11 +220,11 @@ export function SessionsListPage() {
         <div className="space-y-3">
           {groups.map(g => (
             <section key={g.path || g.name}>
-              <div className="mb-1 flex items-baseline gap-2 px-0.5">
+              <div className="mb-1 flex items-baseline gap-sm px-0.5">
                 <FolderGit2 size={13} className="shrink-0 translate-y-0.5 text-faint" />
-                <span className="text-[12.5px] font-semibold text-fg">{g.name}</span>
-                {g.path && <span className="mono truncate text-[11px] text-faint">{g.path}</span>}
-                <span className="mono ml-auto shrink-0 text-[11px] text-faint">{g.rows.length}</span>
+                <span className="text-ui font-semibold text-fg">{g.name}</span>
+                {g.path && <span className="mono truncate text-meta text-faint">{g.path}</span>}
+                <span className="mono ml-auto shrink-0 text-meta text-faint">{g.rows.length}</span>
               </div>
               {mode === 'cards' ? (
                 <div className="grid gap-1.5">
@@ -237,8 +239,13 @@ export function SessionsListPage() {
                 // columns plus per-cell truncation mean the table is exactly as
                 // wide as the pane at any width, and ACTIVITY — the column you
                 // actually read — gets the largest share instead of 150px.
-                <div className="rounded-lg border border-border bg-surface shadow-sm">
+                <div className="kt-panel">
                   <table className="w-full table-fixed border-collapse">
+                    {/* One table per project group, so each needs its own
+                        accessible name — otherwise a screen-reader user hears
+                        six identical "table with 6 columns" landmarks and has no
+                        way to tell which project they are in. */}
+                    <caption className="sr-only">Sessions in {g.name}</caption>
                     <thead>
                       <tr>
                         <Th className="w-[16%]">Teammate</Th>
@@ -277,12 +284,12 @@ function TranscriptResults({
   onClose: () => void;
 }) {
   return (
-    <div className="mb-4 overflow-hidden rounded-lg border border-border bg-surface shadow-sm">
-      <div className="flex items-center gap-2 border-b border-border-soft bg-surface-2 px-3 py-2 text-[12.5px]">
+    <div className="kt-panel mb-4 overflow-hidden">
+      <div className="kt-panel__header bg-surface-2 text-ui">
         <Search size={14} className="shrink-0 text-faint" />
         <span className="font-medium text-fg-soft">Transcript matches</span>
         {results && (
-          <span className="mono text-[11.5px] text-faint">
+          <span className="mono text-meta text-faint">
             {results.results.length} in {results.scanned} session{results.scanned === 1 ? '' : 's'} searched
           </span>
         )}
@@ -290,15 +297,15 @@ function TranscriptResults({
           type="button"
           onClick={onClose}
           aria-label="Close transcript results"
-          className="ml-auto rounded p-1 text-muted hover:bg-surface hover:text-fg"
+          className="ml-auto rounded-control p-1 text-muted hover:bg-surface hover:text-fg"
         >
           <X size={14} />
         </button>
       </div>
       {searching ? (
-        <div className="px-3 py-4 text-[12.5px] text-muted">searching transcripts…</div>
+        <div className="px-panel py-4 text-ui text-muted">searching transcripts…</div>
       ) : !results || results.results.length === 0 ? (
-        <div className="px-3 py-4 text-[12.5px] text-muted">
+        <div className="px-panel py-4 text-ui text-muted">
           No transcript matches for <span className="mono text-fg-soft">{query}</span>.
         </div>
       ) : (
@@ -308,15 +315,15 @@ function TranscriptResults({
               <button
                 type="button"
                 onClick={() => navigate(`/session/${encodeURIComponent(r.sessionId)}`)}
-                className="block w-full px-3 py-2 text-left hover:bg-surface-2"
+                className="block w-full px-panel py-row-y text-left hover:bg-surface-2"
               >
-                <div className="flex items-center gap-2 text-[12px]">
+                <div className="flex items-center gap-sm text-cell">
                   <span className="font-semibold text-fg">{r.teammate ?? r.sessionId}</span>
-                  <span className="mono text-[11px] text-faint">{r.sessionId}</span>
-                  {r.turn != null && <span className="mono text-[11px] text-faint">turn {r.turn}</span>}
-                  <span className="mono ml-auto shrink-0 text-[11px] text-faint">{r.at ? fmtRelative(r.at) : ''}</span>
+                  <span className="mono text-meta text-faint">{r.sessionId}</span>
+                  {r.turn != null && <span className="mono text-meta text-faint">turn {r.turn}</span>}
+                  <span className="mono ml-auto shrink-0 text-meta text-faint">{r.at ? fmtRelative(r.at) : ''}</span>
                 </div>
-                <div className="mt-0.5 line-clamp-2 text-[12.5px] leading-snug text-muted">
+                <div className="mt-0.5 line-clamp-2 text-ui leading-snug text-muted">
                   {highlight(r.snippet, query.trim())}
                 </div>
               </button>
@@ -328,10 +335,15 @@ function TranscriptResults({
   );
 }
 
+// `scope="col"` is what tells a screen reader that this header labels a COLUMN
+// rather than a row — without it a six-column grid is announced as bare cells.
+// `.kt-label` owns the casing: shouted uppercase in Studio/Mission/Neo, small
+// caps in Ember, and 0.14em mono caps under Mission's `--font-ui: mono`.
 function Th({ children, className = '' }: { children: React.ReactNode; className?: string }) {
   return (
     <th
-      className={`border-b border-border bg-surface-2 px-2 py-1.5 text-left text-[10px] font-semibold uppercase tracking-[0.1em] text-muted ${className}`}
+      scope="col"
+      className={`kt-label border-b border-border bg-surface-2 px-cell-x py-row-y text-left ${className}`}
     >
       {children}
     </th>
@@ -353,13 +365,22 @@ const SessionRow = memo(function SessionRow({
   const state = view.state;
   const quota: Quota | null = quotaFor(view, usage);
   return (
-    <tr className="group border-b border-border-soft transition-colors last:border-b-0 hover:bg-surface-2">
+    // `.kt-row` owns the divider, the hover, the row floor (34px Studio, 32px
+    // Mission, 44px High Contrast) and — via `.kt-row > td` — the cell padding,
+    // cell type size and vertical alignment. The cells below therefore carry
+    // LAYOUT only.
+    <tr className="kt-row group">
       {/* IDENTITY — who, and its label. The id moves to the second line and the
           label joins it here rather than owning a whole column. */}
-      <td className="px-2 py-1.5 align-middle">
+      <td>
         <Link to={`/session/${encodeURIComponent(cfg.id)}`} className="block min-w-0" title={cfg.id}>
-          <div className="truncate font-semibold text-fg group-hover:text-accent">{cfg.teammate || cfg.id}</div>
-          <div className="mono flex min-w-0 items-baseline gap-1 text-[11px] text-faint">
+          <div className="truncate text-row font-semibold text-fg group-hover:text-accent">
+            {cfg.teammate || cfg.id}
+          </div>
+          {/* `.kt-chrome` is the app's one recede-at-rest meta tier: a
+              contrast-checked ink that brightens when you reach for the row,
+              replacing three hand-tuned `text-[11px] text-faint` copies. */}
+          <div className="kt-chrome mono flex min-w-0 items-baseline gap-xs">
             <span className="truncate">{cfg.id}</span>
             {cfg.label && (
               <>
@@ -375,10 +396,10 @@ const SessionRow = memo(function SessionRow({
       {/* TASK — the headline of the row. A real leading `[Bracket]` prefix is
           always rendered as its own chip, including when it repeats the nearby
           teammate: that prefix is part of the raw human title contract. */}
-      <td className="px-2 py-1.5 align-middle">
+      <td>
         <TaskName name={cfg.name} size="md" className="max-w-full" />
       </td>
-      <td className="px-2 py-1.5 align-middle">
+      <td>
         <Badge tone={toneFor(state.status)} className="max-w-full truncate">
           {state.status}
         </Badge>
@@ -386,13 +407,13 @@ const SessionRow = memo(function SessionRow({
       {/* RUNTIME — mode + RC on top, CLI + model underneath. Three columns
           collapsed into one: they answer a single question ("what is this thing
           running as?") and were never read independently. */}
-      <td className="px-2 py-1.5 align-middle">
-        <div className="flex min-w-0 flex-col gap-0.5">
-          <div className="flex items-center gap-1.5">
+      <td>
+        <div className="flex min-w-0 flex-col gap-xs">
+          <div className="flex items-center gap-sm">
             <ModeBadge mode={cfg.mode} />
             <RcBadge remoteControl={cfg.remoteControl} url={state.remoteControlUrl} />
           </div>
-          <span className="mono flex min-w-0 items-center gap-1 text-[11.5px] text-fg-soft" title={cfg.harness}>
+          <span className="mono flex min-w-0 items-center gap-xs text-meta text-fg-soft" title={cfg.harness}>
             {cfg.harness === 'claude' ? (
               <Bot size={11} className="shrink-0 text-faint" />
             ) : (
@@ -402,19 +423,19 @@ const SessionRow = memo(function SessionRow({
           </span>
         </div>
       </td>
-      <td className="px-2 py-1.5 align-middle">
-        <ActivityLine view={view} className="mono text-[12px]" />
+      <td>
+        <ActivityLine view={view} className="mono text-cell" />
       </td>
       {/* SIGNALS — context, quota and age stacked into one compact cell. Each
           was a column of its own; none of them is worth 10% of the width. */}
-      <td className="px-2 py-1.5 align-middle">
-        <div className="flex min-w-0 flex-col gap-0.5">
+      <td>
+        <div className="flex min-w-0 flex-col gap-xs">
           {state.contextPercent != null ? (
             <ContextMeter value={state.contextPercent} />
           ) : (
-            <span className="text-[11.5px] text-faint">no context</span>
+            <span className="text-meta text-faint">no context</span>
           )}
-          <div className="mono flex min-w-0 items-center gap-1.5 text-[11px]">
+          <div className="kt-chrome mono flex min-w-0 items-center gap-sm">
             <QuotaReadout quota={quota} className="min-w-0 truncate text-muted" showUnknown />
             <span className="ml-auto shrink-0 text-faint" title={fmtRelative(state.lastActivityAt)}>
               {fmtAge(state.lastActivityAt)}
@@ -441,13 +462,20 @@ const SessionCard = memo(function SessionCard({
   return (
     <Link
       to={`/session/${encodeURIComponent(cfg.id)}`}
+      // `.kt-panel` for the card silhouette — Mission gets the gridded, glowing
+      // HUD sheet, Neo a 3px block on a 4px hard offset, Ember a seamed page,
+      // High Contrast a plain bordered box. `p-panel` is the themed body
+      // padding (10px Studio → 16px Ember); density is a design statement.
+      //
       // `hover:border-accent`, not `hover:border-accent-border`: the hover edge
       // is the affordance, and `--accent-border` is 1.2-2.9:1 on surface in 6 of
       // 10 themes (contract §8.2 — decorative tint only).
-      className="group block rounded-lg border border-border bg-surface p-2 shadow-sm transition-colors hover:border-accent active:bg-surface-2"
+      className="kt-panel group block p-panel transition-colors hover:border-accent active:bg-surface-2"
     >
-      <div className="flex items-center gap-2">
-        <span className="min-w-0 truncate font-semibold text-fg group-hover:text-accent">{cfg.teammate || cfg.id}</span>
+      <div className="flex items-center gap-sm">
+        <span className="min-w-0 truncate text-row font-semibold text-fg group-hover:text-accent">
+          {cfg.teammate || cfg.id}
+        </span>
         {/* Status is the one badge that must never be squeezed, so it sits on
             row 1 with the name. Mode and RC get their own row below WITH THEIR
             WORDS: at 390px an unlabelled cog and antenna are not legible, and
@@ -462,7 +490,7 @@ const SessionCard = memo(function SessionCard({
       <div className="mt-1">
         <TaskName name={cfg.name} size="md" className="max-w-full" />
       </div>
-      <div className="mono mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-faint">
+      <div className="kt-chrome mono mt-0.5 flex flex-wrap items-center gap-x-sm gap-y-0.5">
         <span className="truncate">{cfg.id}</span>
         <span className="text-border">·</span>
         <span className="inline-flex items-center gap-1 text-fg-soft">
@@ -477,17 +505,17 @@ const SessionCard = memo(function SessionCard({
         )}
       </div>
       {/* Mode + RC, with words, on their own line — legible at 390px. */}
-      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+      <div className="mt-1.5 flex flex-wrap items-center gap-sm">
         <ModeBadge mode={cfg.mode} />
         <RcBadge remoteControl={cfg.remoteControl} url={state.remoteControlUrl} />
       </div>
       <div className="mt-1.5">
-        <ActivityLine view={view} className="w-full text-[12px]" />
+        <ActivityLine view={view} className="w-full text-cell" />
       </div>
-      <div className="mt-1.5 flex items-center gap-2">
+      <div className="mt-1.5 flex items-center gap-sm">
         {state.contextPercent != null && <ContextMeter value={state.contextPercent} />}
-        <QuotaReadout quota={quota} className="text-[11px] text-faint" showUnknown />
-        <span className="mono ml-auto shrink-0 text-[11px] text-faint" title={fmtRelative(state.lastActivityAt)}>
+        <QuotaReadout quota={quota} className="text-meta text-faint" showUnknown />
+        <span className="mono ml-auto shrink-0 text-meta text-faint" title={fmtRelative(state.lastActivityAt)}>
           {fmtAge(state.lastActivityAt)}
         </span>
       </div>
@@ -499,11 +527,13 @@ function ContextMeter({ value }: { value: number }) {
   const pct = Math.max(0, Math.min(100, value));
   const bar = pct >= 90 ? 'bg-err' : pct >= 75 ? 'bg-warn' : 'bg-ok';
   return (
-    <div className="flex items-center gap-1.5" title={`context ${pct}% used`}>
-      <div className="h-1.5 w-10 shrink-0 overflow-hidden rounded-full bg-surface-3">
-        <div className={`h-full ${bar}`} style={{ width: `${pct}%` }} />
+    // `.kt-meter*` owns the track geometry — Neo squares it off (`--radius-badge`
+    // resolves to 0 there) while every other family keeps the pill.
+    <div className="kt-meter" title={`context ${pct}% used`}>
+      <div className="kt-meter__track">
+        <div className={`kt-meter__fill ${bar}`} style={{ width: `${pct}%` }} />
       </div>
-      <span className="mono text-[11.5px] text-fg-soft">{pct}%</span>
+      <span className="mono text-meta text-fg-soft">{pct}%</span>
     </div>
   );
 }
@@ -512,7 +542,9 @@ function SkeletonRows() {
   return (
     <div className="grid gap-2">
       {Array.from({ length: 6 }).map((_, i) => (
-        <div key={i} className="h-11 animate-pulse rounded-lg border border-border-soft bg-surface-2" />
+        // `h-row` is the themed row floor the real rows will land on, so the
+        // skeleton does not jump height when the data arrives.
+        <div key={i} className="h-row animate-pulse rounded-panel border border-border-soft bg-surface-2" />
       ))}
     </div>
   );
