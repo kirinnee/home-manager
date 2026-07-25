@@ -471,6 +471,9 @@ describe('partition-tolerant loud bootstrap (turn-019 P0)', () => {
         if (name === 'kteam-bad-agent') throw new Error('tmux exploded for this session');
         return { alive: true, dead: false, promptReady: true };
       },
+      // recover() inventories tmux ONCE (see recover()): an empty set means no
+      // terminal pane survived the restart, which is what these cases model.
+      listSessions: async () => new Set<string>(),
     };
     manager.transition = async () => undefined;
     manager.startMonitor = async (id: string) => {
@@ -502,6 +505,9 @@ describe('partition-tolerant loud bootstrap (turn-019 P0)', () => {
       state: async () => {
         throw new Error('recover must not even probe a session that already has a monitor');
       },
+      // recover() inventories tmux ONCE (see recover()): an empty set means no
+      // terminal pane survived the restart, which is what these cases model.
+      listSessions: async () => new Set<string>(),
     };
     manager.transition = async () => {
       transitions++;
@@ -1157,6 +1163,9 @@ describe('boot recovery re-adopts live panes (A1)', () => {
     manager.tmux = {
       state: async () => ({ alive: true, dead: false, promptReady: true }),
       snapshot: async () => 'frame\n',
+      // recover() inventories tmux ONCE (see recover()): an empty set means no
+      // terminal pane survived the restart, which is what these cases model.
+      listSessions: async () => new Set<string>(),
     };
     manager.stopTmuxWithEvidence = async () => {
       kills++;
@@ -1192,7 +1201,12 @@ describe('boot recovery re-adopts live panes (A1)', () => {
         state: { id: 's1', status: 'starting', turn: 1 },
       },
     ];
-    manager.tmux = { state: async () => ({ alive: true, dead: false, promptReady: false }) };
+    manager.tmux = {
+      state: async () => ({ alive: true, dead: false, promptReady: false }),
+      // recover() inventories tmux ONCE (see recover()): an empty set means no
+      // terminal pane survived the restart, which is what these cases model.
+      listSessions: async () => new Set<string>(),
+    };
     manager.stopTmuxWithEvidence = async () => {
       throw new Error('must not kill a live pane during recovery');
     };
@@ -1228,7 +1242,12 @@ describe('boot reconciliation honors the done marker (G4)', () => {
         state: { id: 's1', status: 'running', turn: 2 },
       },
     ];
-    manager.tmux = { state: async () => ({ alive: false, dead: true, promptReady: false }) };
+    manager.tmux = {
+      state: async () => ({ alive: false, dead: true, promptReady: false }),
+      // recover() inventories tmux ONCE (see recover()): an empty set means no
+      // terminal pane survived the restart, which is what these cases model.
+      listSessions: async () => new Set<string>(),
+    };
     manager.transition = async (_id: string, patch: { status?: string }) => {
       transitions.push(patch);
     };

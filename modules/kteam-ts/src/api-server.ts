@@ -46,6 +46,15 @@ export interface ApiServerOptions {
   service: KTeamService;
 }
 
+/** The Codex discovery baseline is private launch bookkeeping, not session
+ *  state. Returning ~700 UUIDs per Codex session made the 707-session list
+ *  response 11.8 MB (10.44 MB was this field alone). */
+export function compactFleetSession(view: SessionView): SessionView {
+  if (view.config.harnessSessionBaseline === undefined) return view;
+  const { harnessSessionBaseline: _baseline, ...config } = view.config;
+  return { ...view, config };
+}
+
 /** Actions the warden-scoped token may POST to /v1/sessions/:id. `signal` is
  *  gated further (self-completion only) in the gate below. */
 const WARDEN_ALLOWED_ACTIONS = new Set(['send', 'answer', 'resume', 'migrate']);
@@ -321,7 +330,8 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
               headers: { 'content-type': 'text/markdown; charset=utf-8' },
             });
           }
-          if (url.pathname === '/v1/sessions' && request.method === 'GET') return json(await options.service.list());
+          if (url.pathname === '/v1/sessions' && request.method === 'GET')
+            return json((await options.service.list()).map(compactFleetSession));
           if (url.pathname === '/v1/sessions' && request.method === 'POST') {
             // CREATE is idempotent per request id. A start whose RESPONSE was
             // lost (socket error, caller timeout, SIGTERM) still created the

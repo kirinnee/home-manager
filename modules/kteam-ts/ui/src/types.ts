@@ -47,6 +47,10 @@ export interface SessionConfig {
   modelHint: string;
   model?: string;
   mode: InteractionMode;
+  /** Launched with Remote Control (claude only): the session is also visible
+   *  and steerable in the users RC surface. */
+  remoteControl?: boolean;
+  harnessFlags?: string[];
   cwd: string;
   createdAt: string;
   updatedAt: string;
@@ -272,13 +276,17 @@ export interface ProjectInfo {
 }
 
 export interface StartSessionPayload {
-  prompt: string;
+  /** Optional for interactive mode: a bare start brings the TUI up with
+   *  nothing typed into it. */
+  prompt?: string;
   agent: string;
   cwd?: string;
   mode?: InteractionMode;
   model?: string;
   label?: string;
   name?: string;
+  /** Omit to take the daemons default (on for claude). */
+  remoteControl?: boolean;
 }
 
 export interface SearchResult {

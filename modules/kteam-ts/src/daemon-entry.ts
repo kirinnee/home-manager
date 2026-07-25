@@ -58,6 +58,7 @@ const manager = await SessionManager.create(paths, {
   contextWindows: config.contextWindows,
   publicUrl: config.publicUrl,
   projectRoots: config.projectRoots,
+  remoteControl: config.remoteControl,
   warden: config.warden,
   scratch: config.scratch,
   onSelfRestart: async () => {

@@ -93,6 +93,70 @@ export function paneShowsActiveWork(pane: string): boolean {
   return false;
 }
 
+/** Above this many characters — or on any embedded newline — a payload is
+ *  delivered as a BRACKETED PASTE rather than literal keystrokes. Both TUIs
+ *  treat a large burst of literal keys as a paste anyway (and then collapse it),
+ *  so making the paste explicit is the difference between one deterministic
+ *  paste event and a race with the harness's own burst heuristic. */
+const PASTE_TRANSPORT_CHARS = 240;
+
+/** Which kind of evidence proved a payload reached the composer. `placeholder`
+ *  means the harness collapsed it and shows no characters — the caller must
+ *  never "clear and retype" that. */
+export type LandingEvidence = 'chars' | 'placeholder';
+
+/** Collapsed-paste placeholders. BOTH harnesses replace a large or multi-line
+ *  paste with a placeholder and render NONE of the characters:
+ *    claude 2.1.219: `[Pasted text #1 +16 lines]` / `[Pasted text #1]`, plus
+ *      `[Image #1]`, `[Audio #1]`, `[...Truncated text …]`
+ *    codex 0.145.0:  `[Pasted Content …]`
+ *  Both forms are taken from the shipped binaries' own format strings, not
+ *  guessed. The capture group is the placeholder's counter, so a SECOND paste
+ *  ("#2") is recognizable as new even when the frame still shows the first. */
+const PASTE_PLACEHOLDER =
+  /\[(?:Pasted text|Pasted Content|Image|Audio|\.{3}Truncated text)(?:[^\]\n]*?#(\d+))?[^\]\n]*\]/gi;
+
+export interface ComposerEvidence {
+  /** Occurrences of the payload's character probe in the frame. */
+  chars: number;
+  /** Collapsed-paste placeholders in the frame. */
+  placeholders: number;
+  /** Highest placeholder counter seen (`#3` ⇒ 3); 0 when none carry one. */
+  maxPlaceholderIndex: number;
+}
+
+/** What a frame says about a payload we typed: character echo AND collapsed-paste
+ *  placeholders. The probe is the normalized first 50 characters — the COMPOSER
+ *  must have received it, not merely "the text is somewhere on screen" (a payload
+ *  like `continue` is routinely present in output), so callers compare counts
+ *  before/after typing rather than testing presence. */
+export function composerEvidence(frame: string, text: string): ComposerEvidence {
+  const normalize = (value: string) => value.replace(/\s+/g, '');
+  const probe = normalize(text).slice(0, 50);
+  let chars = 0;
+  if (probe) {
+    const haystack = normalize(frame);
+    for (let index = haystack.indexOf(probe); index >= 0; index = haystack.indexOf(probe, index + 1)) chars++;
+  }
+  let placeholders = 0;
+  let maxPlaceholderIndex = 0;
+  for (const match of frame.matchAll(PASTE_PLACEHOLDER)) {
+    placeholders++;
+    const counter = Number(match[1] ?? 0);
+    if (Number.isFinite(counter) && counter > maxPlaceholderIndex) maxPlaceholderIndex = counter;
+  }
+  return { chars, placeholders, maxPlaceholderIndex };
+}
+
+/** True while the frame still shows the payload we typed — as characters or as
+ *  the placeholder the harness collapsed it into. Used to tell "still sitting in
+ *  the composer / echoed as a queued line" from "gone" without caring which
+ *  display form the harness chose. */
+export function composerHolds(frame: string, text: string, evidence: LandingEvidence): boolean {
+  const seen = composerEvidence(frame, text);
+  return evidence === 'placeholder' ? seen.placeholders > 0 : seen.chars > 0;
+}
+
 export interface PaneWorkCounters {
   elapsedSeconds?: number;
   tokens?: number;
@@ -298,6 +362,21 @@ export class TmuxController {
     return (await run(['tmux', 'has-session', '-t', name])).code === 0;
   }
 
+  /** One fleet inventory for boot recovery. A 707-session warm boot used to
+   *  fork `tmux has-session` once for every terminal session (3.36 s total),
+   *  even though virtually none had a pane. Active sessions still get a fresh
+   *  state probe in SessionManager, so launch/readoption races stay safe. */
+  async listSessions(): Promise<Set<string>> {
+    const result = await run(['tmux', 'list-sessions', '-F', '#{session_name}']);
+    if (result.code !== 0) return new Set();
+    return new Set(
+      result.stdout
+        .split('\n')
+        .map(name => name.trim())
+        .filter(Boolean),
+    );
+  }
+
   async capture(name: string): Promise<string> {
     const result = await run(['tmux', 'capture-pane', '-p', '-S', '-', '-t', name]);
     if (result.code !== 0) return '';
@@ -406,6 +485,29 @@ export class TmuxController {
     // ("failed to launch tmux: command too long") on real machines.
     const managedEnv = new Set([
       'CLAUDECODE',
+      // A daemon started from INSIDE a Claude pane (a dev/test daemon, or a
+      // teammate bringing one up) carries that session's own markers. Copied
+      // into a teammate's pane they do real damage:
+      //   CLAUDE_CODE_CHILD_SESSION => "Transcript saving is off", so the
+      //     harness writes NO transcript — and kteam's chat history, turn
+      //     correlation and context accounting are all derived from it;
+      //   ANTHROPIC_* (key, auth token, base URL, default-model overrides) =>
+      //     the launching session's ACCOUNT leaks into a different wrapper's
+      //     pane. Wrappers that export their own values override it, but ones
+      //     that authenticate from CLAUDE_CONFIG_DIR credentials (the personal
+      //     accounts) inherit a foreign base URL and boot "Not logged in".
+      // The wrapper is the single source of truth for account/model env, so
+      // dropping the whole family here is both safe and the fix.
+      'CLAUDE_CODE_CHILD_SESSION',
+      'ANTHROPIC_API_KEY',
+      'ANTHROPIC_AUTH_TOKEN',
+      'ANTHROPIC_BASE_URL',
+      'ANTHROPIC_DEFAULT_OPUS_MODEL',
+      'ANTHROPIC_DEFAULT_SONNET_MODEL',
+      'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+      'ANTHROPIC_DEFAULT_FABLE_MODEL',
+      'ANTHROPIC_MODEL',
+      'ANTHROPIC_SMALL_FAST_MODEL',
       // Never copy a bearer token out of the daemon's own env into a pane —
       // the pane's KTEAM_TOKEN is set explicitly below (scoped for wardens,
       // unset otherwise so the CLI reads the admin token file as before).
@@ -464,7 +566,11 @@ export class TmuxController {
         ...['KTEAM_HOME', 'KTEAM_SESSION_ID', 'KTEAM_URL', 'PATH', ...(pane.KTEAM_TOKEN ? ['KTEAM_TOKEN'] : [])].map(
           key => `export ${key}=${quote(pane[key]!)}`,
         ),
-        'unset CLAUDECODE',
+        // Excluding these from the exports above is not enough: `tmux
+        // new-session` inherits the tmux SERVER's environment, so a server that
+        // was itself started from a polluted shell would hand them to the pane
+        // anyway. Unset them in the pane, right before exec'ing the wrapper.
+        `unset CLAUDECODE ${[...managedEnv].filter(key => key.startsWith('CLAUDE_') || key.startsWith('ANTHROPIC_')).join(' ')}`,
         `exec ${[config.binary, ...interactiveHarnessArgs(config)].map(quote).join(' ')}`,
         '',
       ].join('\n'),
@@ -533,39 +639,31 @@ export class TmuxController {
   }
 
   async inject(name: string, text: string): Promise<void> {
-    const normalize = (value: string) => value.replace(/\s+/g, '');
-    const probe = normalize(text).slice(0, 50);
     // The turn STARTED only with positive busy evidence (spinner/token counter)
-    // or a demonstrably non-idle pane. A probe that merely vanished from an
+    // or a demonstrably non-idle pane. A payload that merely vanished from an
     // otherwise idle input box is a swallowed prompt, NOT an instant turn —
     // that misread caused the systemic "typed but vanished, session idle"
     // stalls across Claude wrappers.
     const turnStarted = (current: PaneState): boolean =>
       !current.alive || current.dead || paneShowsActiveWork(current.visiblePane) || !current.promptReady;
     let everLanded = false;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      if (attempt > 0) {
-        await run(['tmux', 'send-keys', '-t', name, 'C-u']);
-        await Bun.sleep(200 * attempt);
-      }
-      const sent = await run(['tmux', 'send-keys', '-t', name, '-l', text]);
-      if (sent.code !== 0) throw new Error(sent.stderr.trim() || 'tmux send failed');
-      await Bun.sleep(400);
-      if (!normalize(await this.captureVisible(name)).includes(probe)) continue;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const evidence = await this.fillComposer(name, text).catch(() => undefined);
+      if (!evidence) continue;
       everLanded = true;
       // Enter can be swallowed while the TUI repaints; press again while the
-      // typed text is still sitting unsubmitted in the input box.
+      // payload is still sitting unsubmitted in the input box.
       submits: for (let submit = 0; submit < 3; submit++) {
-        const enter = await run(['tmux', 'send-keys', '-t', name, 'Enter']);
+        const enter = await this.keys(name, 'Enter');
         if (enter.code !== 0) throw new Error(enter.stderr.trim() || 'tmux submit failed');
         for (let poll = 0; poll < 12; poll++) {
           await Bun.sleep(500);
           const current = await this.state(name);
           if (turnStarted(current)) return;
-          if (!normalize(current.visiblePane).includes(probe)) {
-            // Text left the input box without busy evidence yet. Slow models
-            // take a beat to render the spinner — grant a short grace, then
-            // treat it as swallowed and retype from scratch.
+          if (!composerHolds(current.visiblePane, text, evidence)) {
+            // The payload left the input box without busy evidence yet. Slow
+            // models take a beat to render the spinner — grant a short grace,
+            // then treat it as swallowed and retype from scratch.
             for (let grace = 0; grace < 8; grace++) {
               await Bun.sleep(500);
               if (turnStarted(await this.state(name))) return;
@@ -574,7 +672,8 @@ export class TmuxController {
           }
         }
       }
-      // Fall through to retype (C-u clears any stale residue first).
+      // Fall through to retype: the composer is demonstrably empty (the payload
+      // left it without starting a turn), so nothing can be destroyed.
     }
     throw new Error(
       everLanded
@@ -583,11 +682,79 @@ export class TmuxController {
     );
   }
 
+  /** Get `text` into the pane's composer and PROVE it landed, returning which
+   *  kind of evidence proved it.
+   *
+   *  Transport is chosen by size: a bracketed paste for multi-line or large
+   *  payloads (one atomic paste event, which is also what both TUIs are built to
+   *  accept), literal `send-keys -l` for short single lines, which the TUIs echo
+   *  character-for-character.
+   *
+   *  Landing evidence, either of:
+   *   1. a NEW collapsed-paste placeholder (`[Pasted text #2 +40 lines]`) — the
+   *      harness stating it took a paste it will NOT display; or
+   *   2. a NEW occurrence of the character probe (short text only).
+   *
+   *  Why this exists: verification used to require (2) alone. Both harnesses
+   *  collapse a large paste into a placeholder and render none of the characters,
+   *  so a ~1.2k multi-line message reported "text did not land" — and each retry
+   *  pressed C-u first, DESTROYING a message that had in fact landed, before
+   *  failing on a delivery that had worked. Hence the invariant enforced below:
+   *  while a placeholder is present we never clear the composer. */
+  protected async fillComposer(name: string, text: string): Promise<LandingEvidence> {
+    const paste = text.includes('\n') || text.length > PASTE_TRANSPORT_CHARS;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) {
+        // Only reachable when NOTHING landed (the placeholder guard below
+        // returns first otherwise), so clearing cannot destroy a delivery.
+        await this.keys(name, 'C-u');
+        await Bun.sleep(this.composerPollMs * attempt);
+      }
+      const before = composerEvidence(await this.captureVisible(name), text);
+      const sent = paste ? await this.pasteText(name, text) : await this.keys(name, '-l', text);
+      if (sent.code !== 0) throw new Error(sent.stderr.trim() || 'tmux type failed');
+      // Repaints can transiently hide a correctly-filled composer: poll a few
+      // frames for evidence instead of judging one snapshot.
+      for (let poll = 0; poll < 6; poll++) {
+        await Bun.sleep(this.composerPollMs);
+        const after = composerEvidence(await this.captureVisible(name), text);
+        if (after.placeholders > before.placeholders || after.maxPlaceholderIndex > before.maxPlaceholderIndex)
+          return 'placeholder';
+        if (after.chars > before.chars) return 'chars';
+      }
+      // No NEW evidence. If the composer nonetheless holds a placeholder, a
+      // paste of ours is sitting in it (a repaint can hide the counter bump, and
+      // a re-paste of identical text may not move the count): submitting that is
+      // correct, and retyping would duplicate or destroy it.
+      if (composerEvidence(await this.captureVisible(name), text).placeholders > 0) return 'placeholder';
+    }
+    throw new Error('text did not land in the composer');
+  }
+
   async send(config: SessionConfig, text: string): Promise<void> {
     // Startup dialogs (trust prompts, api-key confirmation) can surface late,
     // after launch()'s readiness gate — answer them here too so the injected
     // prompt is never queued behind a modal.
-    await this.waitReady(config.tmuxSession, 30_000, true, { resumeMenuChoice: config.resumeMenuChoice });
+    const interactive = config.mode === 'interactive';
+    await this.waitReady(config.tmuxSession, interactive ? 10_000 : 30_000, true, {
+      resumeMenuChoice: config.resumeMenuChoice,
+    }).catch(async error => {
+      // INTERACTIVE panes have a second reason to never report a ready prompt:
+      // a human (at the pane, or through the harness's own remote-control
+      // surface) left text sitting in the composer. `promptReady` is false for
+      // as long as that draft is there, so waiting cannot help — a UI send used
+      // to burn the full timeout and then fail with "did not become ready",
+      // which reads as "kteam refused to type". The composer belongs to whoever
+      // is driving; the UI IS driving, so clear the stale draft and type.
+      if (!interactive) throw error;
+      const state = await this.state(config.tmuxSession);
+      if (!state.alive || state.dead) throw error;
+      // Genuinely mid-turn is a different case with a different answer (the
+      // caller's native-queue path) — never type over live work.
+      if (paneShowsActiveWork(state.visiblePane)) throw error;
+      await this.keys(config.tmuxSession, 'C-u');
+      await Bun.sleep(200);
+    });
     await this.inject(config.tmuxSession, text);
   }
 
@@ -599,64 +766,45 @@ export class TmuxController {
    *  composer/queue area) before submitting; multi-line payloads are sent as
    *  a bracketed paste so the TUI treats them as one message. */
   async typeIntoQueue(name: string, text: string): Promise<void> {
-    const normalize = (value: string) => value.replace(/\s+/g, '');
-    const probe = normalize(text).slice(0, 50);
-    // The COMPOSER received the text — not merely "the text is somewhere on
-    // screen" (a payload like `continue` is routinely present in output,
-    // review P2). Landing evidence = the probe appears in a NEW frame region:
-    // capture BEFORE typing, and require the probe count to increase.
-    const countProbe = (frame: string) => {
-      if (!probe) return 0;
-      const haystack = normalize(frame);
-      let count = 0;
-      for (let index = haystack.indexOf(probe); index >= 0; index = haystack.indexOf(probe, index + 1)) count++;
-      return count;
-    };
-    for (let attempt = 0; attempt < 3; attempt++) {
-      if (attempt > 0) {
-        await run(['tmux', 'send-keys', '-t', name, 'C-u']);
-        await Bun.sleep(200 * attempt);
-      }
-      const before = countProbe(await this.captureVisible(name));
-      // Bracketed paste keeps embedded newlines from submitting early.
-      const sent = text.includes('\n')
-        ? await this.pasteText(name, text)
-        : await run(['tmux', 'send-keys', '-t', name, '-l', text]);
-      if (sent.code !== 0) throw new Error(sent.stderr.trim() || 'tmux type failed');
-      // Repaints can transiently hide a correctly-typed composer: poll a few
-      // frames for the count to increase instead of judging one snapshot.
-      let landed = false;
-      for (let poll = 0; poll < 4 && !landed; poll++) {
-        await Bun.sleep(300);
-        landed = countProbe(await this.captureVisible(name)) > before;
-      }
-      if (!landed) continue;
-      const enter = await run(['tmux', 'send-keys', '-t', name, 'Enter']);
-      if (enter.code !== 0) throw new Error(enter.stderr.trim() || 'tmux submit failed');
-      await Bun.sleep(500);
-      // Codex mid-turn: Enter does NOT submit; the composer keeps the text
-      // and renders a "tab to queue message" hint — press Tab to move it into
-      // the explicit queue (verified live, fixture codex-native-queue.txt).
-      // Tolerant match (whitespace/wording drift) but anchored to the hint
-      // words so a stale unrelated frame doesn't trigger a blind Tab.
-      const afterEnter = (await this.captureVisible(name)).toLowerCase();
-      if (/tab to queue/.test(afterEnter) && countProbe(afterEnter) > before) {
-        await run(['tmux', 'send-keys', '-t', name, 'Tab']);
-        await Bun.sleep(300);
-      }
-      // Post-acceptance proof: the probe must still be visible (claude echoes
-      // the queued line "❯ <text>", codex keeps it in the composer/queue) OR
-      // the pane must show active work about to consume it. A frame with
-      // neither means the submit landed on an idle prompt or was swallowed —
-      // report failure so the caller can re-decide rather than assume queued.
-      const finalFrame = await this.captureVisible(name);
-      if (countProbe(finalFrame) > before || paneShowsActiveWork(finalFrame)) return;
-      throw new Error('the message left the composer without queue evidence (pane may have gone idle mid-type)');
+    // Landing verification (including the collapsed-paste case) lives in
+    // fillComposer; this method owns only the SUBMIT semantics of a busy pane.
+    const evidence = await this.fillComposer(name, text);
+    const enter = await this.keys(name, 'Enter');
+    if (enter.code !== 0) throw new Error(enter.stderr.trim() || 'tmux submit failed');
+    await Bun.sleep(500);
+    // Codex mid-turn: Enter does NOT submit; the composer keeps the text
+    // and renders a "tab to queue message" hint — press Tab to move it into
+    // the explicit queue (verified live, fixture codex-native-queue.txt).
+    // Tolerant match (whitespace/wording drift) but anchored to the hint
+    // words so a stale unrelated frame doesn't trigger a blind Tab.
+    const afterEnter = await this.captureVisible(name);
+    if (/tab to queue/i.test(afterEnter) && composerHolds(afterEnter, text, evidence)) {
+      await this.keys(name, 'Tab');
+      await Bun.sleep(300);
     }
-    throw new Error('text did not land in the busy composer');
+    // Post-acceptance proof: the payload must still be visible (claude echoes
+    // the queued line "❯ <text>", or its placeholder; codex keeps it in the
+    // composer/queue) OR the pane must show active work about to consume it. A
+    // frame with neither means the submit landed on an idle prompt or was
+    // swallowed — report failure so the caller can re-decide rather than assume
+    // the message is queued.
+    const finalFrame = await this.captureVisible(name);
+    if (composerHolds(finalFrame, text, evidence) || paneShowsActiveWork(finalFrame)) return;
+    throw new Error('the message left the composer without queue evidence (pane may have gone idle mid-type)');
   }
 
-  private async pasteText(name: string, text: string): Promise<{ code: number; stdout: string; stderr: string }> {
+  /** Frame cadence while waiting for landing evidence. A field, not a constant,
+   *  so tests can run the real verification loop without real waits. */
+  protected readonly composerPollMs: number = 300;
+
+  /** The composer path's ONLY keystroke primitive. A single seam so landing
+   *  verification (which must never press C-u over a delivered paste) can be
+   *  tested against recorded frames instead of a live tmux server. */
+  protected async keys(name: string, ...keys: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+    return await run(['tmux', 'send-keys', '-t', name, ...keys]);
+  }
+
+  protected async pasteText(name: string, text: string): Promise<{ code: number; stdout: string; stderr: string }> {
     const buffer = `kteam-q-${crypto.randomUUID().slice(0, 8)}`;
     const proc = Bun.spawn(['tmux', 'load-buffer', '-b', buffer, '-'], {
       stdin: 'pipe',
@@ -675,14 +823,24 @@ export class TmuxController {
     const name = config.tmuxSession;
     const before = await this.state(name);
     if (!before.alive || before.dead) throw new Error('session pane is dead; use resume');
-    // Idempotent: an idle pane (or the codex interrupted banner) has nothing
-    // to stop — sending another keystroke is what QUITS a codex TUI.
-    if (!paneShowsActiveWork(before.visiblePane)) return;
+    const working = paneShowsActiveWork(before.visiblePane);
     // Escape is the safe stop-current-turn key in BOTH harness TUIs; C-c is
     // the quit path (codex exits on C-c at an idle prompt). Exactly one
     // keystroke per call — no internal retries.
-    const result = await run(['tmux', 'send-keys', '-t', name, 'Escape']);
+    //
+    // When there is no active turn the key is normally SUPPRESSED (idempotence:
+    // for codex, keystrokes at an idle prompt are how the TUI gets quit). The
+    // exception is an interactive CLAUDE pane: the UI's stop button is the
+    // human's Escape key, and Escape at an idle claude prompt is harmless — it
+    // clears a half-typed composer or closes a menu, which is exactly what the
+    // human pressing "stop" is asking for. Refusing to send it made the control
+    // feel dead whenever kteam's status lagged the pane by a tick.
+    if (!working && !(config.mode === 'interactive' && config.harness === 'claude')) return;
+    const result = await this.keys(name, 'Escape');
     if (result.code !== 0) throw new Error(result.stderr.trim() || 'tmux interrupt failed');
+    // Nothing was running, so there is no turn to wind down: skip the readiness
+    // wait (30 s of polling for a state the pane is already in).
+    if (!working) return;
     await this.waitReady(name, 30_000);
   }
 

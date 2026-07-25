@@ -52,6 +52,11 @@ export interface DaemonConfig {
   /** Roots scanned by GET /v1/projects for git repos (New-session picker +
    *  list grouping). `~`/`$HOME` are expanded. */
   projectRoots: string[];
+  /** Fleet-wide default for Remote Control on claude sessions (`kteam start`
+   *  without `--rc`/`--no-rc`, and every UI/API start that omits the field).
+   *  True: every claude teammate is also visible/steerable in the user's RC
+   *  surface. Set false to make RC strictly opt-in. */
+  remoteControl: boolean;
   warden: WardenConfig;
   scratch: ScratchConfig;
   /** Context-window overrides for transcript-based context accounting:
@@ -93,6 +98,10 @@ export const defaultDaemonConfig = (): DaemonConfig => ({
   healthIntervalSeconds: 30,
   quotaUrl: 'http://127.0.0.1:47318/usage',
   projectRoots: ['~/Workspace', '~/.config'],
+  // RC on by default: the flags are additive (they change nothing about how the
+  // TUI is driven from kteam) and the user's stated intent is to see every
+  // teammate in their remote-control surface.
+  remoteControl: true,
   warden: defaultWardenConfig(),
   scratch: defaultScratchConfig(),
 });
