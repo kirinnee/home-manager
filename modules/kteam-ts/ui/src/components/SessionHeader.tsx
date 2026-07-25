@@ -10,6 +10,7 @@ import { memo, useEffect, useState } from 'react';
 import { ChevronLeft, Pause, Play, StopCircle, ZapOff, Bot, Sparkles } from 'lucide-react';
 import type { SessionView } from '../types';
 import { Badge, Button, ActionGroup } from './Primitives';
+import { ModeBadge, MODE_HINT } from './ModeBadge';
 import { Link } from '../lib/router';
 import { toneFor } from '../lib/utils';
 
@@ -56,6 +57,9 @@ export const SessionHeader = memo(function SessionHeader({
             {config.label}
           </Badge>
         )}
+        {/* Mode first: whether a human is driving decides how everything else on
+            this page should be read — and whether the reflex layer applies. */}
+        <ModeBadge mode={config.mode} />
         <Badge tone={toneFor(state.status)} className="shrink-0">
           {/* A declared park reports 'waiting' exactly like an unanswered
               question does — say which, and until when. */}
@@ -118,7 +122,9 @@ export const SessionHeader = memo(function SessionHeader({
         <Sep />
         <span className="shrink-0">turn {state.turn}</span>
         <Sep />
-        <span className="shrink-0 text-faint">{config.mode} mode</span>
+        <span className="shrink-0 text-faint" title={MODE_HINT[config.mode]}>
+          {config.mode === 'interactive' ? 'human-driven · never auto-nudged' : 'autonomous · reflex-supervised'}
+        </span>
         {config.remoteControl && (
           <>
             <Sep />

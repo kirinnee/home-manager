@@ -5,10 +5,24 @@
 //  - live updates via WebSocket /v1/events with a 1.5s trailing debounce.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, Sparkles, Activity, FolderGit2, Plus, Search, X, CornerDownLeft, LayoutGrid, Rows3 } from 'lucide-react';
+import {
+  Bot,
+  Sparkles,
+  Activity,
+  FolderGit2,
+  Plus,
+  Search,
+  X,
+  CornerDownLeft,
+  LayoutGrid,
+  Rows3,
+  User,
+  Cpu,
+} from 'lucide-react';
 import { api } from '../lib/api';
-import type { ProjectInfo, SearchResponse, SessionView } from '../types';
+import type { InteractionMode, ProjectInfo, SearchResponse, SessionView } from '../types';
 import { Badge } from '../components/Primitives';
+import { ModeBadge, MODE_HINT } from '../components/ModeBadge';
 import { WardenStrip } from '../components/WardenStrip';
 import { WardenVerdicts } from '../components/WardenVerdicts';
 import { Link, navigate } from '../lib/router';
@@ -97,6 +111,9 @@ export function SessionsListPage() {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState('');
   const [includeFinished, setIncludeFinished] = useState(false);
+  // Mode segment: the primary way to read the fleet — who is driving what.
+  // Composes with the search box (both are applied in `visible`).
+  const [modeFilter, setModeFilter] = useState<'all' | InteractionMode>('all');
   const socketRef = useRef<ReturnType<typeof openEventStream> | null>(null);
   // Transcript search (server-side, on Enter) — distinct from the instant
   // client-side list filter above.
@@ -139,15 +156,28 @@ export function SessionsListPage() {
     const needle = filter.trim().toLowerCase();
     return sessions.filter(v => {
       if (!includeFinished && TERMINAL_STATUSES.has(v.state.status)) return false;
+      if (modeFilter !== 'all' && v.config.mode !== modeFilter) return false;
       if (!needle) return true;
       const c = v.config;
-      const hay = [c.id, c.teammate, c.name, c.label, c.binary, c.model, c.modelHint, c.cwd, v.state.status]
+      // `c.mode` is in the haystack too, so typing "interactive" filters as well.
+      const hay = [c.id, c.teammate, c.name, c.label, c.binary, c.model, c.modelHint, c.cwd, c.mode, v.state.status]
         .filter(Boolean)
         .join(' ')
         .toLowerCase();
       return hay.includes(needle);
     });
-  }, [sessions, filter, includeFinished]);
+  }, [sessions, filter, includeFinished, modeFilter]);
+
+  // Per-mode counts for the segment labels (over everything the OTHER filters
+  // admit, so the numbers describe what clicking would show).
+  const modeCounts = useMemo(() => {
+    const pool = (sessions ?? []).filter(v => includeFinished || !TERMINAL_STATUSES.has(v.state.status));
+    return {
+      all: pool.length,
+      interactive: pool.filter(v => v.config.mode === 'interactive').length,
+      auto: pool.filter(v => v.config.mode === 'auto').length,
+    };
+  }, [sessions, includeFinished]);
 
   // `/` focuses the search box from anywhere (unless already typing).
   useEffect(() => {
@@ -257,6 +287,33 @@ export function SessionsListPage() {
               </button>
             )}
           </div>
+          <div
+            className="inline-flex shrink-0 rounded-md border border-border bg-surface p-0.5"
+            role="group"
+            aria-label="Filter by mode"
+          >
+            {(['all', 'interactive', 'auto'] as const).map(m => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => setModeFilter(m)}
+                title={m === 'all' ? 'every session' : MODE_HINT[m]}
+                aria-pressed={modeFilter === m}
+                className={`inline-flex h-6 items-center gap-1 rounded px-2 text-[12px] font-medium transition-colors ${
+                  modeFilter === m
+                    ? m === 'interactive'
+                      ? 'bg-accent-soft text-accent'
+                      : 'bg-surface-2 text-fg'
+                    : 'text-muted hover:text-fg'
+                }`}
+              >
+                {m === 'interactive' && <User size={11} />}
+                {m === 'auto' && <Cpu size={11} />}
+                {m}
+                <span className="mono text-[11px] text-faint">{modeCounts[m]}</span>
+              </button>
+            ))}
+          </div>
           <label className="inline-flex cursor-pointer items-center gap-2 whitespace-nowrap text-[13px] text-fg-soft">
             <input type="checkbox" checked={includeFinished} onChange={e => setIncludeFinished(e.target.checked)} />
             include finished
@@ -281,11 +338,27 @@ export function SessionsListPage() {
             </div>
           )}
         </div>
-        <div className="mt-1.5 flex items-center gap-1.5 pl-0.5 text-[11px] text-faint">
-          <span>filters the list live</span>
-          <span className="text-border">·</span>
-          <span className="inline-flex items-center gap-1">
+        {/* Hint row. The full sentences only fit from `sm` up; on a phone the
+            same distinction is stated in one compact line rather than wrapping
+            into four cramped columns. */}
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 pl-0.5 text-[11px] text-faint">
+          <span className="hidden sm:inline">filters the list live</span>
+          <span className="hidden text-border sm:inline">·</span>
+          <span className="hidden items-center gap-1 sm:inline-flex">
             <CornerDownLeft size={11} /> Enter searches transcripts
+          </span>
+          <span className="hidden text-border sm:inline">·</span>
+          <span className="hidden items-center gap-1 sm:inline-flex">
+            <User size={11} className="text-accent" /> interactive is human-driven and never auto-nudged or killed
+          </span>
+          <span className="hidden text-border sm:inline">·</span>
+          <span className="hidden items-center gap-1 sm:inline-flex">
+            <Cpu size={11} /> auto runs unattended and is nudged/killed when it goes silent
+          </span>
+          <span className="inline-flex items-center gap-1 sm:hidden">
+            <User size={11} className="text-accent" /> interactive = you drive it, never auto-killed
+            <span className="text-border">·</span>
+            <Cpu size={11} /> auto = supervised
           </span>
         </div>
       </div>
@@ -326,6 +399,7 @@ export function SessionsListPage() {
                   <thead>
                     <tr>
                       <Th>Teammate</Th>
+                      <Th>Mode</Th>
                       <Th>Model</Th>
                       <Th>Label</Th>
                       <Th>Status</Th>
@@ -432,6 +506,9 @@ function SessionRow({ view }: { view: SessionView }) {
           <div className="mono text-[11px] text-faint">{cfg.id}</div>
         </Link>
       </td>
+      <td className="px-3 py-2.5 align-middle">
+        <ModeBadge mode={cfg.mode} />
+      </td>
       <td className="mono px-3 py-2.5 align-middle text-[12.5px] text-fg-soft">
         {cfg.model || cfg.modelHint || 'default'}
       </td>
@@ -480,7 +557,8 @@ function SessionCard({ view }: { view: SessionView }) {
         <span className="min-w-0 truncate font-semibold text-fg group-hover:text-accent">
           {cfg.teammate || cfg.name || cfg.id}
         </span>
-        <Badge tone={toneFor(state.status)} className="ml-auto shrink-0">
+        <ModeBadge mode={cfg.mode} className="ml-auto" />
+        <Badge tone={toneFor(state.status)} className="shrink-0">
           {state.status}
         </Badge>
       </div>
