@@ -80,7 +80,7 @@
      subtree content — a whole-subtree opacity dims things it was never sized
      against. The tier is now separated by size (--chrome-font-size), family
      (mono) and this ink, all of which are measurable. 4.77:1 on --surface. */
-  --chrome-fg: #72727b;
+  --chrome-fg: #6e6e77;
 
   /* ---- geometry roles (components consume THESE, never the raw ramp) ---- */
   --radius-control: var(--radius-sm);
@@ -104,7 +104,7 @@
   --rule-inset: none;
   /* Control edges — the strokes that IDENTIFY an interactive thing. Contrast-
      constrained (>=3:1, >=7:1 in High Contrast), unlike decorative --border. */
-  --border-strong: #929295;
+  --border-strong: #868689;
 
   /* ---- elevation roles ---- */
   --shadow-ink: transparent; /* only Neo uses a hard offset ink */
@@ -275,8 +275,8 @@
 :root[data-theme='dark'],
 [data-swatch='studio-dark'] {
   /* ═══ structural token layer ═══ */
-  --border-strong: #646468; /* 3.10:1 */
-  --chrome-fg: #7e7e88; /* 4.56:1 on --surface */
+  --border-strong: #6f6f73; /* 3.10:1 */
+  --chrome-fg: #83838c; /* 4.56:1 on --surface */
 
   color-scheme: dark;
 
@@ -428,7 +428,7 @@
 [data-swatch='mission-dark'] {
   /* ═══ structural token layer ═══ */
   /* from the reference --line-strong .32, keeps the teal cast */
-  --border-strong: #4e666d; /* 3.12:1 */
+  --border-strong: #586f75; /* 3.12:1 */
 
   color-scheme: dark;
 
@@ -514,7 +514,7 @@
 :root[data-theme='mission-light'],
 [data-swatch='mission-light'] {
   /* ═══ structural token layer ═══ */
-  --border-strong: #859699; /* 3.09:1 */
+  --border-strong: #78878a; /* 3.09:1 */
 
   color-scheme: light;
 
@@ -911,7 +911,7 @@
 :root[data-theme='ember-light'],
 [data-swatch='ember-light'] {
   /* ═══ structural token layer ═══ */
-  --border-strong: #9a8c79; /* 3.08:1 */
+  --border-strong: #857969; /* 3.08:1 */
 
   color-scheme: light;
 
@@ -992,7 +992,7 @@
 :root[data-theme='ember-dark'],
 [data-swatch='ember-dark'] {
   /* ═══ structural token layer ═══ */
-  --border-strong: #6f675f; /* 3.14:1 */
+  --border-strong: #7c756e; /* 3.14:1 */
 
   color-scheme: dark;
 
