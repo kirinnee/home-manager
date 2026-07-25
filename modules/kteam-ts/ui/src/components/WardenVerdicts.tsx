@@ -126,7 +126,7 @@ function ReportModal({ title, body, onClose }: { title: string; body: string | n
   }, [onClose]);
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 pt-[6vh] backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-scrim p-4 pt-[6vh] backdrop-blur-sm"
       onClick={onClose}
     >
       <div

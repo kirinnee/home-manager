@@ -226,7 +226,7 @@ export function FolderSidebar({ current, neighbours, usage, open, onToggle }: Pr
           type="button"
           aria-label="Close"
           onClick={onToggle}
-          className="absolute inset-0 bg-black/35 backdrop-blur-[1px]"
+          className="absolute inset-0 bg-scrim backdrop-blur-[1px]"
         />
         <aside
           className={cn(
