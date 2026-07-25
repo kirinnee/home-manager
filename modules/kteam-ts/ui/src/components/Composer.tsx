@@ -309,7 +309,10 @@ function ContextStrip({ context }: { context: ComposerContext }) {
   const socketTone = liveStatus === 'open' ? 'bg-ok' : liveStatus === 'connecting' ? 'bg-warn' : 'bg-err';
 
   return (
-    <div className="mono flex min-w-0 flex-1 items-center gap-x-sm overflow-hidden whitespace-nowrap text-chrome text-muted">
+    <div
+      data-density-region="composer-context"
+      className="mono flex min-w-0 flex-1 items-center gap-x-sm overflow-hidden whitespace-nowrap text-chrome text-muted"
+    >
       {liveStatus && (
         <span className="inline-flex shrink-0 items-center text-faint" title={`live event stream ${liveStatus}`}>
           <span className={cn('kt-dot', socketTone)} aria-hidden="true" />
