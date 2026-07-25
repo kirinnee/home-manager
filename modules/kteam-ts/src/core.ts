@@ -821,6 +821,37 @@ export function remoteControlArgs(config: Pick<SessionConfig, 'harness' | 'teamm
   return ['--chrome', '--rc', '--remote-control-session-name-prefix', `kteam-${config.teammate ?? config.id}`];
 }
 
+/** Title-case a teammate callsign slug for display: "hayden" -> "Hayden",
+ *  "mary-jane" -> "Mary-Jane". Slugs are lowercase letters/digits/hyphens, so
+ *  capitalising the first letter of each hyphen segment is the whole job. */
+function titleCaseTeammate(slug: string): string {
+  return slug
+    .split('-')
+    .map(part => (part ? part[0]!.toUpperCase() + part.slice(1) : part))
+    .join('-');
+}
+
+/** The display title kteam hands the harness (Claude's `--name`) so the RC
+ *  surface — claude.ai/code and the resume picker — shows the SAME
+ *  "[Teammate] Task" title as kteam's own TASK column.
+ *
+ *  - A task title that already opens with "[" is used VERBATIM: the rc-session
+ *    convention composes the full "[Team] Task" up front, so re-prefixing would
+ *    double the bracket ("[Team] [Team] …").
+ *  - Otherwise the Title-Cased teammate is prefixed: "hayden" + "Fix Login" ->
+ *    "[Hayden] Fix Login".
+ *  - With no task title, the bracketed teammate alone is the name.
+ *  - With neither, returns undefined so the caller passes NO --name (an empty
+ *    flag value is worse than an unnamed session). */
+export function harnessDisplayName(config: { teammate?: string; name?: string }): string | undefined {
+  const task = config.name?.trim();
+  const teammate = config.teammate?.trim();
+  const prefix = teammate ? `[${titleCaseTeammate(teammate)}]` : undefined;
+  if (task && task.startsWith('[')) return task;
+  if (task && prefix) return `${prefix} ${task}`;
+  return task || prefix;
+}
+
 export function interactiveHarnessArgs(config: SessionConfig): string[] {
   // Both harnesses take `--model <alias|id>`. When set it's the user override or
   // the wrapper's kfleet default (KTEAM_MODEL); when unset, omit it entirely.
@@ -830,6 +861,14 @@ export function interactiveHarnessArgs(config: SessionConfig): string[] {
   if (config.harness === 'claude') {
     const sessionFlag = config.turn === 1 ? '--session-id' : '--resume';
     const args = ['--dangerously-skip-permissions', sessionFlag, config.harnessSessionId, ...model];
+    // Name the session on Claude's side too — one argv element, so tmux-
+    // controller's single-quote `quote()` keeps the spaces and [brackets]
+    // intact. `--name` is a global flag accepted with BOTH --session-id and
+    // --resume (verified: `--resume <id> --name …` fails only on a missing
+    // session, never on the flag), so a relaunch after `kteam rename` re-applies
+    // the current title.
+    const displayName = harnessDisplayName(config);
+    if (displayName) args.push('--name', displayName);
     if (config.mode === 'auto') args.push('--disallowedTools', 'AskUserQuestion');
     // RC composes with everything above: the session-id correlation, the model
     // flag and the automode tool ban are untouched — RC only adds a second

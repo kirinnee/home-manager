@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   classifyTask,
+  harnessDisplayName,
   inferHarness,
   interactiveHarnessArgs,
   recommendTeam,
@@ -114,6 +115,72 @@ describe('remote control', () => {
 
   test('off by default in the arg builder (the daemon decides the default)', () => {
     expect(interactiveHarnessArgs(config('claude', 1))).not.toContain('--rc');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Session display name (Claude's --name). kteam names the CLAUDE-side session
+// with the same "[Teammate] Task" title as its own TASK column, so the RC
+// surface (claude.ai/code + resume picker) is searchable. Codex has no
+// launch-time display-name flag, so it gets none.
+// ---------------------------------------------------------------------------
+describe('harnessDisplayName', () => {
+  test('prefixes the Title-Cased teammate onto a bare task title', () => {
+    expect(harnessDisplayName({ teammate: 'hayden', name: 'Fix Login' })).toBe('[Hayden] Fix Login');
+  });
+
+  test('uses an already-bracketed title verbatim (no doubled prefix)', () => {
+    expect(harnessDisplayName({ teammate: 'jessica', name: '[Jessica] Kteam UI Theme Redesign' })).toBe(
+      '[Jessica] Kteam UI Theme Redesign',
+    );
+  });
+
+  test('falls back to the bracketed teammate alone when there is no task title', () => {
+    expect(harnessDisplayName({ teammate: 'marlon', name: '' })).toBe('[Marlon]');
+    expect(harnessDisplayName({ teammate: 'marlon' })).toBe('[Marlon]');
+  });
+
+  test('title-cases each hyphen segment of a compound slug', () => {
+    expect(harnessDisplayName({ teammate: 'mary-jane', name: 'Ship It' })).toBe('[Mary-Jane] Ship It');
+  });
+
+  test('returns undefined when there is nothing worth naming', () => {
+    expect(harnessDisplayName({})).toBeUndefined();
+  });
+});
+
+describe('claude --name wiring', () => {
+  const named = { teammate: 'jessica', name: '[Jessica] Kteam UI Theme Redesign' };
+
+  test('first launch (turn 1) passes --name as a SINGLE argv element', () => {
+    const args = interactiveHarnessArgs({ ...config('claude', 1), ...named });
+    // one element, spaces + brackets intact — this is what makes tmux quote() safe
+    expect(args[args.indexOf('--name') + 1]).toBe('[Jessica] Kteam UI Theme Redesign');
+    // does not disturb the session-id correlation or the leading skip-permissions
+    expect(args[0]).toBe('--dangerously-skip-permissions');
+    expect(args[args.indexOf('--session-id') + 1]).toBe('00000000-0000-4000-8000-000000000000');
+  });
+
+  test('resume (turn 2) ALSO passes --name (accepted with --resume)', () => {
+    const args = interactiveHarnessArgs({ ...config('claude', 2), ...named });
+    expect(args[args.indexOf('--name') + 1]).toBe('[Jessica] Kteam UI Theme Redesign');
+    expect(args).toContain('--resume');
+  });
+
+  test('composes [Teammate] Task from a bare task title', () => {
+    const args = interactiveHarnessArgs({ ...config('claude', 1), teammate: 'hayden', name: 'Fix Login' });
+    expect(args[args.indexOf('--name') + 1]).toBe('[Hayden] Fix Login');
+  });
+
+  test('--name sits before the harnessFlags escape hatch', () => {
+    const args = interactiveHarnessArgs({ ...config('claude', 1), ...named, harnessFlags: ['--verbose', '--bare'] });
+    expect(args.slice(-2)).toEqual(['--verbose', '--bare']);
+    expect(args.indexOf('--name')).toBeLessThan(args.indexOf('--verbose'));
+  });
+
+  test('codex gets NO --name (no launch-time display-name flag), on launch or resume', () => {
+    expect(interactiveHarnessArgs({ ...config('codex', 1), ...named })).not.toContain('--name');
+    expect(interactiveHarnessArgs({ ...config('codex', 2), ...named })).not.toContain('--name');
   });
 });
 
