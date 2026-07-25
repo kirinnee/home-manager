@@ -1,35 +1,30 @@
 // Sessions list. Live teammate sessions managed by kteamd, grouped by project.
-//  - toolbar: instant filter + mode segment + RC + "include finished" + New
-//  - per-project group: header + table (teammate, model, status, harness,
-//    context, activity, updated)
+//  - header: title + count + table/cards switch + New
+//  - per-project group: header + table (identity, TASK, status, runtime,
+//    activity, signals)
 //
 // NO DATA OF ITS OWN (round 5). This page used to fetch the session list, open
 // its own fleet WebSocket, and re-GET the ENTIRE list 1.5s after every event —
 // including while it was not even the visible route. Sessions, projects and
 // live updates now come from the shared store, which holds ONE socket for the
-// app and refreshes one session at a time. Its filters are the store's global
-// persisted controls, so they survive navigation and reload and the sidebar
-// slice can render the same controls without a second source of truth.
+// app and refreshes one session at a time.
+//
+// NO FILTER CONTROLS OF ITS OWN (round 6). The persistent agent sidebar owns
+// the instant query, the All/Auto/Interactive segment, the RC filter and
+// "include finished" — one source of truth, rendered once, visible on every
+// route. This page still READS those store controls, so the rows on screen are
+// exactly what the sidebar says they are; it just no longer offers a second set
+// of widgets that could disagree. Transcript search is the same story: the
+// sidebar owns the input and the Enter trigger, this page renders the results
+// panel from the store and can close it.
 
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  Bot,
-  Sparkles,
-  Activity,
-  FolderGit2,
-  Plus,
-  Search,
-  X,
-  LayoutGrid,
-  Rows3,
-  User,
-  Cpu,
-  Radio,
-} from 'lucide-react';
+import { memo, useMemo, useEffect, useState } from 'react';
+import { Bot, Sparkles, Activity, FolderGit2, Plus, Search, X, LayoutGrid, Rows3 } from 'lucide-react';
 import type { SearchResponse, SessionView } from '../types';
 import { Badge } from '../components/Primitives';
-import { ModeBadge, MODE_HINT } from '../components/ModeBadge';
+import { ModeBadge } from '../components/ModeBadge';
 import { RcBadge } from '../components/RcBadge';
+import { TaskName } from '../components/TaskName';
 import { WardenStrip } from '../components/WardenStrip';
 import { WardenVerdicts } from '../components/WardenVerdicts';
 import { Link, navigate } from '../lib/router';
@@ -39,11 +34,7 @@ import { useUsage } from '../hooks/useUsage';
 import { quotaFor, type Quota } from '../lib/usage';
 import type { UsageAccountView } from '../types';
 import { useFleet, useStore, useTranscriptSearch, useUiControls } from '../lib/store';
-
-function baseName(p: string): string {
-  const seg = p.replace(/\/+$/, '').split('/').filter(Boolean);
-  return seg.length ? seg[seg.length - 1]! : p;
-}
+import { filterSessions, groupByProject } from '../lib/grouping';
 
 // Below this the TABLE cannot fit without a horizontal scrollbar, so the card
 // view becomes the default — the one-scroll-region rule means no nested
@@ -59,8 +50,17 @@ function useIsNarrow(bp = 900): boolean {
   return narrow;
 }
 
-// One-line "what it's doing": the live pane activity when working, else the
-// task description, else the id. Present in both list and card views.
+// TASK rendering (`config.name`, bracket-prefix parsing, em-dash fallback) lives
+// in components/TaskName.tsx, and fleet filtering + project grouping live in
+// lib/grouping.ts — both shared with the persistent sidebar on purpose. The
+// dashboard and the sidebar must answer "which sessions, whose project, what
+// task?" identically, and the only way they can disagree is by each keeping its
+// own copy of the predicate.
+
+// One-line "what it's doing": the live pane activity when working, else a quiet
+// word about the state. TASK has its own column now, so this deliberately no
+// longer falls back to `config.name` — that printed the same string twice on
+// every row that was not actively working.
 function activityLine(v: SessionView): { text: string; live: boolean } {
   // A declared wait outranks the pane: the teammate is parked on purpose and
   // the useful line is WHAT it waits for and until when, not a stale spinner.
@@ -72,26 +72,24 @@ function activityLine(v: SessionView): { text: string; live: boolean } {
     };
   const act = v.state.activity?.trim();
   if (act) return { text: act, live: !TERMINAL_STATUSES.has(v.state.status) };
-  const task = v.config.name?.trim();
-  if (task && task !== v.config.teammate) return { text: task, live: false };
-  return { text: v.config.id, live: false };
+  // Nothing live to report. The id is already in the identity cell, so say
+  // something about the state instead of repeating it.
+  return {
+    text: TERMINAL_STATUSES.has(v.state.status) ? 'no activity recorded' : 'awaiting activity',
+    live: false,
+  };
 }
 
 function ActivityLine({ view, className = '' }: { view: SessionView; className?: string }) {
   const { text, live } = activityLine(view);
   return (
-    <span className={`inline-flex min-w-0 items-center gap-1.5 ${className}`}>
+    <span className={`inline-flex min-w-0 max-w-full items-center gap-1.5 ${className}`}>
       <Activity size={11} className={live ? 'shrink-0 text-accent' : 'shrink-0 text-faint'} />
-      <span className={live ? 'truncate shimmer' : 'truncate text-muted'}>{text}</span>
+      <span className={live ? 'truncate shimmer' : 'truncate text-muted'} title={text}>
+        {text}
+      </span>
     </span>
   );
-}
-
-function isTypingTarget(t: EventTarget | null): boolean {
-  const el = t as HTMLElement | null;
-  if (!el) return false;
-  const tag = el.tagName;
-  return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable;
 }
 
 // Highlight case-insensitive occurrences of `q` in `text`.
@@ -123,14 +121,13 @@ export function SessionsListPage() {
   // Shared cache + one socket for the whole app (lib/store.tsx).
   const { sessions, projects, error } = useFleet();
   const store = useStore();
-  // Global persisted controls: the instant query, the mode segment, the RC
-  // filter, "include finished" and the table/cards preference.
+  // Global persisted controls, OWNED BY THE SIDEBAR. Read-only here except for
+  // the table/cards preference, which is a property of this page.
   const [controls, setControls] = useUiControls();
   const { query: filter, mode: modeFilter, rcOnly, includeFinished, dashboardView: viewPref } = controls;
-  // Transcript search (server-side, on Enter) — distinct from the instant
-  // client-side list filter above. Also store-owned, so its results survive
-  // navigating into a hit and back.
-  const searchRef = useRef<HTMLInputElement | null>(null);
+  // Transcript search results (server-side, triggered from the sidebar) —
+  // distinct from the instant client-side list filter below. Store-owned, so
+  // the results survive navigating into a hit and back.
   const { searching: tSearching, results: tResults } = useTranscriptSearch();
   // View mode: cards (mobile-friendly) vs table. Auto-defaults to cards on
   // narrow viewports; a desktop user can override.
@@ -139,111 +136,51 @@ export function SessionsListPage() {
   // Account quota, fleet-wide and joined by wrapper binary — see lib/usage.ts.
   const { index: usage } = useUsage();
 
-  // Instant, client-side filter across every identifying field.
-  const visible = useMemo(() => {
-    if (!sessions) return [];
-    const needle = filter.trim().toLowerCase();
-    return sessions.filter(v => {
-      if (!includeFinished && TERMINAL_STATUSES.has(v.state.status)) return false;
-      if (modeFilter !== 'all' && v.config.mode !== modeFilter) return false;
-      if (rcOnly && !v.config.remoteControl) return false;
-      if (!needle) return true;
-      const c = v.config;
-      // `c.mode` is in the haystack too, so typing "interactive" filters as
-      // well — and a literal "rc" matches the RC-enabled sessions.
-      const hay = [
-        c.id,
-        c.teammate,
-        c.name,
-        c.label,
-        c.binary,
-        c.model,
-        c.modelHint,
-        c.cwd,
-        c.mode,
-        v.state.status,
-        c.remoteControl ? 'rc remote-control' : '',
-      ]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase();
-      return hay.includes(needle);
-    });
-  }, [sessions, filter, includeFinished, modeFilter, rcOnly]);
+  // Instant, client-side filter across every identifying field — the SHARED
+  // predicate, fed by the sidebar's controls. The output is what this page
+  // shows, so the sidebar's counts and this table can never disagree.
+  const visible = useMemo(
+    () => (sessions ? filterSessions(sessions, { query: filter, mode: modeFilter, rcOnly, includeFinished }) : []),
+    [sessions, filter, includeFinished, modeFilter, rcOnly],
+  );
 
-  // Per-mode counts for the segment labels (over everything the OTHER filters
-  // admit, so the numbers describe what clicking would show).
-  const modeCounts = useMemo(() => {
-    const pool = (sessions ?? []).filter(v => includeFinished || !TERMINAL_STATUSES.has(v.state.status));
-    return {
-      all: pool.length,
-      interactive: pool.filter(v => v.config.mode === 'interactive').length,
-      auto: pool.filter(v => v.config.mode === 'auto').length,
-    };
-  }, [sessions, includeFinished]);
+  // Longest-project-path-prefix grouping, cwd basename fallback. `sortRows` is
+  // left off: the dashboard keeps the daemon's order (the sidebar is the view
+  // that wants most-recently-active first).
+  const groups = useMemo(() => groupByProject(visible, projects), [visible, projects]);
 
-  // `/` focuses the search box from anywhere (unless already typing).
-  //
-  // This page stays MOUNTED behind a session route now (App.tsx keeps it alive
-  // so its scroll and filters survive), so the shortcut has to check that the
-  // dashboard is the route actually on screen — otherwise `/` on a chat page
-  // would be swallowed to focus an invisible input.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (window.location.pathname !== '/') return;
-      if (e.key === '/' && !isTypingTarget(e.target)) {
-        e.preventDefault();
-        searchRef.current?.focus();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
-
-  function setFilter(next: string) {
-    setControls({ query: next });
-  }
-
-  function runTranscriptSearch() {
-    void store.runSearch(filter);
-  }
-
-  function clearSearch() {
-    setControls({ query: '' });
-    store.clearSearch();
-    searchRef.current?.blur();
-  }
-
-  // Group by project: longest project-path prefix of the session cwd wins;
-  // otherwise fall back to the cwd's basename so nothing is orphaned.
-  const groups = useMemo(() => {
-    const byPathLen = [...projects].sort((a, b) => b.path.length - a.path.length);
-    const map = new Map<string, { name: string; path: string; rows: SessionView[] }>();
-    for (const v of visible) {
-      const cwd = v.config.cwd ?? '';
-      const match = byPathLen.find(p => cwd === p.path || cwd.startsWith(p.path + '/'));
-      const key = match?.path ?? cwd ?? 'ungrouped';
-      const name = match?.name ?? (cwd ? baseName(cwd) : 'ungrouped');
-      if (!map.has(key)) map.set(key, { name, path: match?.path ?? cwd, rows: [] });
-      map.get(key)!.rows.push(v);
-    }
-    return [...map.values()].sort((a, b) => b.rows.length - a.rows.length || a.name.localeCompare(b.name));
-  }, [visible, projects]);
-
-  // The page is a flex column that fills the shell: a fixed toolbar block and
+  // The page is a flex column that fills the shell: a fixed header block and
   // ONE scroller under it. The whole page used to be the scroller, which was
-  // fine on its own but inconsistent with the chat route — and it meant the
-  // search box and filters scrolled away exactly when a long fleet made them
-  // most useful.
+  // fine on its own but inconsistent with the chat route.
   return (
     <div className="flex h-full min-h-0 w-full flex-col pb-2">
       <div className="mt-2 mb-2 flex flex-wrap items-center justify-between gap-2">
         <h1 className="m-0 text-[1.15rem] font-semibold tracking-tight">Sessions</h1>
         <div className="flex items-center gap-2.5">
           {sessions && (
-            <span className="mono text-[11.5px] text-faint">
+            <span className="mono text-[11.5px] text-faint" title="visible / total sessions">
               {visible.length}/{sessions.length}
             </span>
+          )}
+          {!isNarrow && (
+            <div className="inline-flex shrink-0 rounded-md border border-border bg-surface p-0.5">
+              {(['table', 'cards'] as const).map(m => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setControls({ dashboardView: m })}
+                  aria-label={`${m} view`}
+                  aria-pressed={mode === m}
+                  title={`${m} view`}
+                  className={`inline-flex h-6 items-center gap-1 rounded px-2 text-[12px] font-medium transition-colors ${
+                    mode === m ? 'bg-surface-2 text-fg' : 'text-muted hover:text-fg'
+                  }`}
+                >
+                  {m === 'table' ? <Rows3 size={12} /> : <LayoutGrid size={12} />}
+                  {m}
+                </button>
+              ))}
+            </div>
           )}
           <Link
             to="/new"
@@ -256,118 +193,6 @@ export function SessionsListPage() {
 
       <WardenStrip />
       <WardenVerdicts />
-
-      <div className="mb-2 rounded-lg border border-border-soft bg-surface-2 px-2.5 py-1.5">
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="relative flex min-w-[240px] flex-1 items-center">
-            <Search size={14} className="pointer-events-none absolute left-2.5 text-faint" />
-            <input
-              ref={searchRef}
-              type="text"
-              placeholder="Search sessions — id, teammate, task, label, project, model, status…  ( / )"
-              value={filter}
-              onChange={e => setFilter(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  void runTranscriptSearch();
-                } else if (e.key === 'Escape') {
-                  e.preventDefault();
-                  clearSearch();
-                }
-              }}
-              aria-label="Search sessions and transcripts"
-              className="w-full bg-surface pl-8 pr-8"
-            />
-            {filter && (
-              <button
-                type="button"
-                onClick={clearSearch}
-                aria-label="Clear search"
-                className="absolute right-2 text-faint hover:text-fg"
-              >
-                <X size={14} />
-              </button>
-            )}
-          </div>
-          <div
-            className="inline-flex shrink-0 rounded-md border border-border bg-surface p-0.5"
-            role="group"
-            aria-label="Filter by mode"
-          >
-            {(['all', 'interactive', 'auto'] as const).map(m => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => setControls({ mode: m })}
-                title={m === 'all' ? 'every session' : MODE_HINT[m]}
-                aria-pressed={modeFilter === m}
-                className={`inline-flex h-6 items-center gap-1 rounded px-2 text-[12px] font-medium transition-colors ${
-                  modeFilter === m
-                    ? m === 'interactive'
-                      ? 'bg-accent-soft text-accent'
-                      : 'bg-surface-2 text-fg'
-                    : 'text-muted hover:text-fg'
-                }`}
-              >
-                {m === 'interactive' && <User size={11} />}
-                {m === 'auto' && <Cpu size={11} />}
-                {m}
-                <span className="mono text-[11px] text-faint">{modeCounts[m]}</span>
-              </button>
-            ))}
-          </div>
-          {/* RC is a real filter now, not just a word in the search haystack:
-              "which sessions can I drive from my phone?" is a question you ask
-              of the fleet, and typing "rc" also matched anything whose task
-              text happened to contain those letters. */}
-          <button
-            type="button"
-            onClick={() => setControls({ rcOnly: !rcOnly })}
-            aria-pressed={rcOnly}
-            title="only sessions launched with Remote Control"
-            className={`inline-flex h-6 shrink-0 items-center gap-1 rounded-md border px-2 text-[12px] font-medium transition-colors ${
-              rcOnly
-                ? 'border-accent-border bg-accent-soft text-accent'
-                : 'border-border bg-surface text-muted hover:text-fg'
-            }`}
-          >
-            <Radio size={11} />
-            rc only
-          </button>
-          <label className="inline-flex cursor-pointer items-center gap-2 whitespace-nowrap text-[13px] text-fg-soft">
-            <input
-              type="checkbox"
-              checked={includeFinished}
-              onChange={e => setControls({ includeFinished: e.target.checked })}
-            />
-            include finished
-          </label>
-          {!isNarrow && (
-            <div className="inline-flex shrink-0 rounded-md border border-border bg-surface p-0.5">
-              {(['table', 'cards'] as const).map(m => (
-                <button
-                  key={m}
-                  type="button"
-                  onClick={() => setControls({ dashboardView: m })}
-                  aria-label={`${m} view`}
-                  title={`${m} view`}
-                  className={`inline-flex h-6 items-center gap-1 rounded px-2 text-[12px] font-medium transition-colors ${
-                    mode === m ? 'bg-surface-2 text-fg' : 'text-muted hover:text-fg'
-                  }`}
-                >
-                  {m === 'table' ? <Rows3 size={12} /> : <LayoutGrid size={12} />}
-                  {m}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-        {/* The instructional hint row is gone (round 4): four sentences
-            explaining that a filter filters, that Enter searches, and what the
-            two modes mean. The placeholder already says the first two and the
-            mode badges carry MODE_HINT as a tooltip. */}
-      </div>
 
       {(tSearching || tResults) && (
         <TranscriptResults
@@ -406,20 +231,22 @@ export function SessionsListPage() {
                   ))}
                 </div>
               ) : (
-                <div className="overflow-x-auto rounded-lg border border-border bg-surface shadow-sm">
-                  <table className="w-full min-w-[780px] border-collapse">
+                // SIX columns, `table-fixed`, no min-width and no horizontal
+                // scroller. The old ten-column wall needed 780px of intrinsic
+                // width and scrolled sideways inside the page; percentage
+                // columns plus per-cell truncation mean the table is exactly as
+                // wide as the pane at any width, and ACTIVITY — the column you
+                // actually read — gets the largest share instead of 150px.
+                <div className="rounded-lg border border-border bg-surface shadow-sm">
+                  <table className="w-full table-fixed border-collapse">
                     <thead>
                       <tr>
-                        <Th>Teammate</Th>
-                        <Th>Mode</Th>
-                        <Th>Model</Th>
-                        <Th>Label</Th>
-                        <Th>Status</Th>
-                        <Th>CLI</Th>
-                        <Th>Context</Th>
-                        <Th>Quota</Th>
-                        <Th>Activity</Th>
-                        <Th>Updated</Th>
+                        <Th className="w-[16%]">Teammate</Th>
+                        <Th className="w-[22%]">Task</Th>
+                        <Th className="w-[9%]">Status</Th>
+                        <Th className="w-[14%]">Runtime</Th>
+                        <Th className="w-[26%]">Activity</Th>
+                        <Th className="w-[13%]">Signals</Th>
                       </tr>
                     </thead>
                     <tbody>
@@ -501,9 +328,11 @@ function TranscriptResults({
   );
 }
 
-function Th({ children }: { children: React.ReactNode }) {
+function Th({ children, className = '' }: { children: React.ReactNode; className?: string }) {
   return (
-    <th className="border-b border-border bg-surface-2 px-2 py-1.5 text-left text-[10px] font-semibold uppercase tracking-[0.1em] text-muted">
+    <th
+      className={`border-b border-border bg-surface-2 px-2 py-1.5 text-left text-[10px] font-semibold uppercase tracking-[0.1em] text-muted ${className}`}
+    >
       {children}
     </th>
   );
@@ -525,70 +354,80 @@ const SessionRow = memo(function SessionRow({
   const quota: Quota | null = quotaFor(view, usage);
   return (
     <tr className="group border-b border-border-soft transition-colors last:border-b-0 hover:bg-surface-2">
-      <td className="max-w-[150px] px-2 py-1.5 align-middle">
+      {/* IDENTITY — who, and its label. The id moves to the second line and the
+          label joins it here rather than owning a whole column. */}
+      <td className="px-2 py-1.5 align-middle">
         <Link to={`/session/${encodeURIComponent(cfg.id)}`} className="block min-w-0" title={cfg.id}>
-          <div className="truncate font-semibold text-fg group-hover:text-accent">
-            {cfg.teammate || cfg.name || cfg.id}
+          <div className="truncate font-semibold text-fg group-hover:text-accent">{cfg.teammate || cfg.id}</div>
+          <div className="mono flex min-w-0 items-baseline gap-1 text-[11px] text-faint">
+            <span className="truncate">{cfg.id}</span>
+            {cfg.label && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span className="truncate text-fg-soft" title={cfg.label}>
+                  {cfg.label}
+                </span>
+              </>
+            )}
           </div>
-          <div className="mono truncate text-[11px] text-faint">{cfg.id}</div>
         </Link>
       </td>
+      {/* TASK — the headline of the row. A real leading `[Bracket]` prefix is
+          always rendered as its own chip, including when it repeats the nearby
+          teammate: that prefix is part of the raw human title contract. */}
       <td className="px-2 py-1.5 align-middle">
-        <div className="flex items-center gap-1.5">
-          <ModeBadge mode={cfg.mode} />
-          <RcBadge remoteControl={cfg.remoteControl} url={state.remoteControlUrl} />
+        <TaskName name={cfg.name} size="md" className="max-w-full" />
+      </td>
+      <td className="px-2 py-1.5 align-middle">
+        <Badge tone={toneFor(state.status)} className="max-w-full truncate">
+          {state.status}
+        </Badge>
+      </td>
+      {/* RUNTIME — mode + RC on top, CLI + model underneath. Three columns
+          collapsed into one: they answer a single question ("what is this thing
+          running as?") and were never read independently. */}
+      <td className="px-2 py-1.5 align-middle">
+        <div className="flex min-w-0 flex-col gap-0.5">
+          <div className="flex items-center gap-1.5">
+            <ModeBadge mode={cfg.mode} />
+            <RcBadge remoteControl={cfg.remoteControl} url={state.remoteControlUrl} />
+          </div>
+          <span className="mono flex min-w-0 items-center gap-1 text-[11.5px] text-fg-soft" title={cfg.harness}>
+            {cfg.harness === 'claude' ? (
+              <Bot size={11} className="shrink-0 text-faint" />
+            ) : (
+              <Sparkles size={11} className="shrink-0 text-faint" />
+            )}
+            <span className="truncate">{cfg.model || cfg.modelHint || 'default'}</span>
+          </span>
         </div>
       </td>
-      <td className="mono max-w-[130px] truncate whitespace-nowrap px-2 py-1.5 align-middle text-[12px] text-fg-soft">
-        {cfg.model || cfg.modelHint || 'default'}
+      <td className="px-2 py-1.5 align-middle">
+        <ActivityLine view={view} className="mono text-[12px]" />
       </td>
-      <td className="max-w-[150px] px-2 py-1.5 align-middle text-[12.5px]">
-        {cfg.label ? (
-          <span className="block truncate text-fg-soft" title={cfg.label}>
-            {cfg.label}
-          </span>
-        ) : (
-          <span className="text-faint">—</span>
-        )}
-      </td>
-      <td className="whitespace-nowrap px-2 py-1.5 align-middle">
-        <Badge tone={toneFor(state.status)}>{state.status}</Badge>
-      </td>
-      <td className="whitespace-nowrap px-2 py-1.5 align-middle" title={cfg.harness}>
-        <span className="mono inline-flex items-center gap-1.5 text-[12px] text-fg-soft">
-          {cfg.harness === 'claude' ? (
-            <Bot size={13} className="text-faint" />
+      {/* SIGNALS — context, quota and age stacked into one compact cell. Each
+          was a column of its own; none of them is worth 10% of the width. */}
+      <td className="px-2 py-1.5 align-middle">
+        <div className="flex min-w-0 flex-col gap-0.5">
+          {state.contextPercent != null ? (
+            <ContextMeter value={state.contextPercent} />
           ) : (
-            <Sparkles size={13} className="text-faint" />
+            <span className="text-[11.5px] text-faint">no context</span>
           )}
-          <span className="hidden xl:inline">{cfg.harness}</span>
-        </span>
-      </td>
-      <td className="whitespace-nowrap px-2 py-1.5 align-middle">
-        {state.contextPercent != null ? (
-          <ContextMeter value={state.contextPercent} />
-        ) : (
-          <span className="text-faint">—</span>
-        )}
-      </td>
-      <td className="whitespace-nowrap px-2 py-1.5 align-middle text-[11.5px]">
-        <QuotaReadout quota={quota} className="text-muted" showUnknown />
-      </td>
-      <td className="max-w-[150px] px-2 py-1.5 align-middle">
-        <ActivityLine view={view} className="mono max-w-full text-[12px]" />
-      </td>
-      <td
-        className="mono whitespace-nowrap px-2 py-1.5 align-middle text-[12px] text-muted"
-        title={fmtRelative(state.lastActivityAt)}
-      >
-        {fmtAge(state.lastActivityAt)}
+          <div className="mono flex min-w-0 items-center gap-1.5 text-[11px]">
+            <QuotaReadout quota={quota} className="min-w-0 truncate text-muted" showUnknown />
+            <span className="ml-auto shrink-0 text-faint" title={fmtRelative(state.lastActivityAt)}>
+              {fmtAge(state.lastActivityAt)}
+            </span>
+          </div>
+        </div>
       </td>
     </tr>
   );
 });
 
 // Mobile-first card: full-width, tappable, single column, no horizontal
-// scroll. Shows the same fields as a table row, activity line included.
+// scroll. Shows the same fields as a table row, TASK and activity included.
 const SessionCard = memo(function SessionCard({
   view,
   usage,
@@ -605,9 +444,7 @@ const SessionCard = memo(function SessionCard({
       className="group block rounded-lg border border-border bg-surface p-2 shadow-sm transition-colors hover:border-accent-border active:bg-surface-2"
     >
       <div className="flex items-center gap-2">
-        <span className="min-w-0 truncate font-semibold text-fg group-hover:text-accent">
-          {cfg.teammate || cfg.name || cfg.id}
-        </span>
+        <span className="min-w-0 truncate font-semibold text-fg group-hover:text-accent">{cfg.teammate || cfg.id}</span>
         {/* Status is the one badge that must never be squeezed, so it sits on
             row 1 with the name. Mode and RC get their own row below WITH THEIR
             WORDS: at 390px an unlabelled cog and antenna are not legible, and
@@ -616,6 +453,11 @@ const SessionCard = memo(function SessionCard({
         <Badge tone={toneFor(state.status)} className="shrink-0">
           {state.status}
         </Badge>
+      </div>
+      {/* TASK, directly under the name: on a phone this is the line that tells
+          you which session you are looking at. */}
+      <div className="mt-1">
+        <TaskName name={cfg.name} size="md" className="max-w-full" />
       </div>
       <div className="mono mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-faint">
         <span className="truncate">{cfg.id}</span>
@@ -654,7 +496,7 @@ function ContextMeter({ value }: { value: number }) {
   const pct = Math.max(0, Math.min(100, value));
   const bar = pct >= 90 ? 'bg-err' : pct >= 75 ? 'bg-warn' : 'bg-ok';
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="flex items-center gap-1.5" title={`context ${pct}% used`}>
       <div className="h-1.5 w-10 shrink-0 overflow-hidden rounded-full bg-surface-3">
         <div className={`h-full ${bar}`} style={{ width: `${pct}%` }} />
       </div>
