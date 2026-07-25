@@ -214,7 +214,7 @@ describe('pointer index (A2)', () => {
     store.close();
   });
 
-  test('refuses a database from another schema generation (fresh-slate ship: no auto-migration)', async () => {
+  test('DISCARDS a database from another schema generation and rebuilds from the journals', async () => {
     const home = await temporaryHome();
     const databasePath = path.join(home, 'daemon', 'kteam.sqlite');
     await mkdir(path.dirname(databasePath), { recursive: true });
@@ -224,7 +224,25 @@ describe('pointer index (A2)', () => {
         type TEXT NOT NULL, event_json TEXT NOT NULL, PRIMARY KEY (session_id, sequence));
     `);
     legacy.close();
-    expect(EventStore.open({ home })).rejects.toThrow(/schema generation 0, expected 2.*delete the old database/s);
+    // A journal on disk is the authority; the index holds nothing that is not
+    // derivable from it, so an older generation is deleted and rebuilt rather
+    // than refused. (It used to throw and ask an operator to delete the file
+    // by hand — a boot failure for something the daemon can always redo.)
+    await mkdir(path.join(home, 'session-a'), { recursive: true });
+    await writeFile(
+      path.join(home, 'session-a', 'events.jsonl'),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        sequence: 1,
+        sessionId: 'session-a',
+        time: '2026-07-25T00:00:00.000Z',
+        type: 'test.event',
+        data: {},
+      })}\n`,
+    );
+    const store = await EventStore.open({ home });
+    expect(store.replay('session-a').map(event => event.sequence)).toEqual([1]);
+    store.close();
   });
 
   test('replay detects a rewritten journal (valid-but-different events) and re-indexes instead of serving them', async () => {

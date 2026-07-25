@@ -676,6 +676,49 @@ program
     });
     process.exitCode = await proc.exited;
   });
+const humanBytes = (bytes: number) =>
+  bytes >= 1e9
+    ? `${(bytes / 1e9).toFixed(1)} GB`
+    : bytes >= 1e6
+      ? `${(bytes / 1e6).toFixed(1)} MB`
+      : `${(bytes / 1e3).toFixed(0)} kB`;
+
+program
+  .command('gc')
+  .description('reclaim agent scratch from sessions terminal past the TTL (kteam data is never touched)')
+  .option('--dry-run', 'print what WOULD be freed and why, without deleting anything')
+  .option('--limit <count>', 'sessions to consider in a dry run', Number, 20)
+  .option('--force', 'run even when scratch gc is disabled in daemon config')
+  .option('--json')
+  .action(async (options: { dryRun?: boolean; limit: number; force?: boolean; json?: boolean }) => {
+    const api = await client();
+    if (options.dryRun) {
+      const plan = await api.scratchPlan(options.limit);
+      if (options.json) return console.log(JSON.stringify(plan, null, 2));
+      const eligible = plan.filter(item => item.eligible);
+      const total = eligible.reduce((sum, item) => sum + item.bytes, 0);
+      for (const item of plan) {
+        const mark = item.eligible ? 'FREE' : 'keep';
+        console.log(
+          `${mark}  ${item.sessionId}  ${humanBytes(item.bytes).padStart(8)}  ${item.teammate ?? ''}${item.eligible ? '' : `  (${item.reason})`}`,
+        );
+        if (item.eligible) {
+          for (const entry of item.entries.slice(0, 8))
+            console.log(
+              `        ${humanBytes(entry.bytes).padStart(8)}  ${entry.name}${entry.kind === 'directory' ? '/' : ''}`,
+            );
+        }
+      }
+      console.log(`\nwould free ${humanBytes(total)} from ${eligible.length} session(s) — nothing was deleted`);
+      return;
+    }
+    const result = await api.scratchSweep(options.force === true);
+    if (options.json) return console.log(JSON.stringify(result, null, 2));
+    console.log(
+      `reclaimed ${humanBytes(result.bytes)} from ${result.sessions} session(s)${result.failures > 0 ? `; ${result.failures} entr(ies) could not be removed (see daemon log)` : ''}`,
+    );
+  });
+
 const wardenCommand = program.command('warden').description('fleet-level watchdog (layer-3 oversight)');
 wardenCommand
   .command('status')

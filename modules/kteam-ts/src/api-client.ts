@@ -14,6 +14,16 @@ const REQUEST_TIMEOUT_MS = 120_000;
  *  whole point is to answer inside the caller's timeout. */
 const RECOVERY_TIMEOUT_MS = 15_000;
 
+export interface ScratchPlanView {
+  sessionId: string;
+  teammate?: string;
+  directory: string;
+  bytes: number;
+  entries: Array<{ name: string; bytes: number; kind: string }>;
+  eligible: boolean;
+  reason?: string;
+}
+
 export class ApiClient {
   private constructor(
     private readonly baseUrl: string,
@@ -102,6 +112,16 @@ export class ApiClient {
     return this.request<WardenRunView>('/v1/warden/run', {
       method: 'POST',
       body: JSON.stringify({ spawn }),
+      headers: { 'content-type': 'application/json' },
+    });
+  }
+  scratchPlan(limit = 20) {
+    return this.request<ScratchPlanView[]>(`/v1/gc?limit=${limit}`);
+  }
+  scratchSweep(force = false) {
+    return this.request<{ sessions: number; bytes: number; failures: number }>('/v1/gc', {
+      method: 'POST',
+      body: JSON.stringify({ force }),
       headers: { 'content-type': 'application/json' },
     });
   }

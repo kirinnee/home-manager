@@ -59,6 +59,7 @@ const manager = await SessionManager.create(paths, {
   publicUrl: config.publicUrl,
   projectRoots: config.projectRoots,
   warden: config.warden,
+  scratch: config.scratch,
   onSelfRestart: async () => {
     if (!(await supervised())) return false;
     requestStop('session index unhealable in place');

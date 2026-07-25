@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync } from 'fs';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rmSync } from 'fs';
 import { mkdir, open, readFile, readdir, rename, rm, stat } from 'fs/promises';
 import os from 'os';
 import path from 'path';
@@ -65,12 +65,19 @@ export interface EventStoreOptions {
   importExisting?: boolean;
 }
 
-/** Pointer-index schema generation. Version 2 replaced the fat `event_json`
- *  payload column with byte offsets into each session's own events.jsonl —
- *  the journal files are authoritative and the DB is derived, so an older
- *  database is simply deleted and rebuilt as the lean index (that one-time
- *  rebuild also collapses the multi-GB v1 file + WAL). */
-const SCHEMA_VERSION = 2;
+/** Pointer-index schema generation.
+ *
+ *  v2 replaced the fat `event_json` payload column with byte offsets into each
+ *  session's own events.jsonl. v3 DROPPED `global_sequence`: a single
+ *  fleet-wide counter forced every event of every session through one
+ *  serialized chain (plus an atomic file write per event) to hand out numbers
+ *  that only the id-less `kteam stream` ever read. Sessions are independent —
+ *  per-session `sequence` is the authoritative order, and the fleet view is
+ *  merged by TIME at read time off `events_fleet_idx`.
+ *
+ *  The journals are authoritative and the DB is derived, so a database from an
+ *  older generation is deleted and rebuilt rather than migrated. */
+const SCHEMA_VERSION = 3;
 
 interface EventPointerRow {
   byte_offset: number;
@@ -78,17 +85,26 @@ interface EventPointerRow {
   sequence: number;
 }
 
-interface GlobalPointerRow extends EventPointerRow {
+interface FleetPointerRow extends EventPointerRow {
   session_id: string;
-  global_sequence: number;
+  time: string;
+}
+
+/** Cursor into the time-merged fleet feed. Ordering key is
+ *  (time, session_id, sequence) — `time` alone is not unique across sessions,
+ *  and a cursor that could not break a tie would drop or repeat events. */
+export interface FleetCursor {
+  time: string;
+  sessionId: string;
+  sequence: number;
 }
 
 /** One page of the cross-session feed: the events that RESOLVED, plus how many
  *  index rows the page covered and the cursor it reached. */
-export interface GlobalPage {
+export interface FleetPage {
   events: SessionEvent[];
   rows: number;
-  cursor: number;
+  cursor?: FleetCursor;
 }
 
 interface SessionRow {
@@ -144,16 +160,6 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 function stringField(value: unknown, field: string): string | undefined {
   const candidate = asRecord(value)?.[field];
   return typeof candidate === 'string' ? candidate : undefined;
-}
-
-/** The daemon's fleet-wide counter, lifted out of the event payload so the
- *  cross-session feed can be answered by ONE indexed query. Journals written
- *  before the counter existed fall back to the per-session sequence — exactly
- *  what SessionManager.fromStored does when it renders the same event. */
-function globalSequenceOf(event: SessionEvent): number {
-  const data = asRecord(event.data);
-  const global = data?.globalSequence;
-  return typeof global === 'number' && Number.isSafeInteger(global) ? global : event.sequence;
 }
 
 function parseEvent(value: unknown, expectedSessionId: string): SessionEvent | undefined {
@@ -303,6 +309,20 @@ export class EventStore {
   private readonly database: Database;
   private readonly appendQueues = new Map<string, Promise<void>>();
   private readonly lastSequences = new Map<string, number>();
+  /** Parsed session metadata, served instead of re-querying + re-parsing the
+   *  whole `sessions` table. `listSessions()` used to cost ~150 ms per call on
+   *  a 1000-session fleet (an 80 ms indexed scan of ~16 MB of config/state
+   *  blobs plus a 67 ms JSON.parse of all of them) and sits behind
+   *  `resolveRef()` — i.e. behind EVERY session operation, including each
+   *  monitor tick. That one query was the daemon's 87%-CPU burner. The daemon
+   *  is the only writer of this database, so an in-process cache is
+   *  authoritative between writes. */
+  private readonly sessionCache = new Map<string, IndexedSession>();
+  /** Journal tail state per session, so a warm append skips the stat + the
+   *  last-byte read it used to pay on every single event. */
+  private readonly journalTails = new Map<string, { size: number; endsWithNewline: boolean }>();
+  /** Session directories this process has already created. */
+  private readonly knownDirectories = new Set<string>();
   private closed = false;
 
   private constructor(home: string, databasePath: string) {
@@ -310,16 +330,35 @@ export class EventStore {
     this.databasePath = path.resolve(databasePath);
     mkdirSync(path.dirname(this.databasePath), { recursive: true, mode: 0o700 });
     this.database = this.openDatabase();
+    this.loadSessionCache();
   }
 
-  /** Open the index, refusing any database whose schema generation is not
-   *  SCHEMA_VERSION. Fresh-slate ship decision (2026-07-22): there is NO
-   *  automatic v1→v2 migration — the legacy fat DB is deleted operationally
-   *  at ship time and boot builds the pointer index from session journals.
-   *  An unexpected on-disk generation is an operator error, not something to
-   *  silently rebuild over. */
+  /** Fill the metadata cache from the index in ONE query. */
+  private loadSessionCache(): void {
+    this.sessionCache.clear();
+    const rows = this.database
+      .query<
+        SessionRow,
+        []
+      >(`SELECT id, directory, status, created_at, updated_at, last_sequence, config_json, state_json FROM sessions`)
+      .all();
+    for (const row of rows) {
+      try {
+        this.sessionCache.set(row.id, this.sessionFromRow(row));
+      } catch {
+        // A row with unparseable JSON is skipped, not fatal: the journals are
+        // authoritative and syncSession rewrites it on the next import.
+      }
+    }
+  }
+
+  /** Open the index, DISCARDING any database from another schema generation.
+   *  This file holds nothing that is not derivable from the session journals
+   *  (metadata + byte offsets), so rebuilding is always safe and is strictly
+   *  better than the old behaviour of refusing to boot and asking an operator
+   *  to delete the file by hand. */
   private openDatabase(): Database {
-    const database = new Database(this.databasePath, { create: true, strict: true });
+    let database = new Database(this.databasePath, { create: true, strict: true });
     const version = (
       database.query<{ user_version: number }, []>('PRAGMA user_version').get() as {
         user_version: number;
@@ -330,10 +369,12 @@ export class EventStore {
         database.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'").all().length > 0;
       if (hasTables) {
         database.close();
-        throw new Error(
-          `kteam.sqlite has schema generation ${version}, expected ${SCHEMA_VERSION}; ` +
-            'delete the old database file (it is a disposable index — journals are authoritative) and restart',
+        console.error(
+          `kteamd: kteam.sqlite is schema generation ${version}, expected ${SCHEMA_VERSION}; ` +
+            'discarding the disposable pointer index and rebuilding it from the journals',
         );
+        for (const suffix of ['', '-wal', '-shm']) rmSync(`${this.databasePath}${suffix}`, { force: true });
+        database = new Database(this.databasePath, { create: true, strict: true });
       }
     }
     chmodSync(this.databasePath, 0o600);
@@ -364,22 +405,14 @@ export class EventStore {
         PRIMARY KEY (session_id, sequence),
         FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
       );
-      CREATE INDEX IF NOT EXISTS events_time_idx ON events(time);
       CREATE INDEX IF NOT EXISTS events_type_idx ON events(type);
       CREATE INDEX IF NOT EXISTS sessions_status_idx ON sessions(status);
     `);
-    // ADDITIVE migration (2026-07-23 daemon-wedge fix): the cross-session
-    // event feed must be answerable by one bounded query instead of loading
-    // every journal into memory. `global_sequence` is the daemon's fleet-wide
-    // counter, lifted out of the payload so it can be indexed. Additive
-    // because the index generation is NOT bumped: an existing v2 database
-    // keeps its rows (with NULLs here) and backfills in the background —
-    // never a hard "delete the database" boot failure on a live daemon.
-    const columns = database.query<{ name: string }, []>('PRAGMA table_info(events)').all();
-    if (!columns.some(column => column.name === 'global_sequence')) {
-      database.exec('ALTER TABLE events ADD COLUMN global_sequence INTEGER');
-    }
-    database.exec('CREATE INDEX IF NOT EXISTS events_global_idx ON events(global_sequence)');
+    // The fleet feed's ONLY ordering index. (time, session_id, sequence) is the
+    // full ordering key, so the merged cross-session page is answered by an
+    // index walk with no temp b-tree and no fleet-wide counter behind it.
+    database.exec('CREATE INDEX IF NOT EXISTS events_fleet_idx ON events(time, session_id, sequence)');
+    database.exec('DROP INDEX IF EXISTS events_time_idx');
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     return database;
   }
@@ -418,7 +451,7 @@ export class EventStore {
   async writeConfig(sessionId: string, config: unknown): Promise<void> {
     await this.serialized(sessionId, async () => {
       await writeJsonAtomic(this.configFile(sessionId), config);
-      await this.indexSessionMetadata(sessionId);
+      await this.indexSessionMetadata(sessionId, { config });
     });
   }
 
@@ -428,7 +461,7 @@ export class EventStore {
       const current = await readJsonFile<T>(this.configFile(sessionId));
       const next = await transform(current);
       await writeJsonAtomic(this.configFile(sessionId), next);
-      await this.indexSessionMetadata(sessionId);
+      await this.indexSessionMetadata(sessionId, { config: next });
       return next;
     });
   }
@@ -436,7 +469,7 @@ export class EventStore {
   async writeState(sessionId: string, state: unknown): Promise<void> {
     await this.serialized(sessionId, async () => {
       await writeJsonAtomic(this.stateFile(sessionId), state);
-      await this.indexSessionMetadata(sessionId);
+      await this.indexSessionMetadata(sessionId, { state });
     });
   }
 
@@ -446,7 +479,7 @@ export class EventStore {
       const current = await readJsonFile<T>(this.stateFile(sessionId));
       const next = await transform(current);
       await writeJsonAtomic(this.stateFile(sessionId), next);
-      await this.indexSessionMetadata(sessionId);
+      await this.indexSessionMetadata(sessionId, { state: next });
       return next;
     });
   }
@@ -474,7 +507,10 @@ export class EventStore {
 
     return await this.serialized(sessionId, async () => {
       this.assertOpen();
-      await mkdir(this.sessionDirectory(sessionId), { recursive: true, mode: 0o700 });
+      if (!this.knownDirectories.has(sessionId)) {
+        await mkdir(this.sessionDirectory(sessionId), { recursive: true, mode: 0o700 });
+        this.knownDirectories.add(sessionId);
+      }
       const previous = await this.lastSequence(sessionId);
       const event: SessionEvent<T> = {
         schemaVersion: 1,
@@ -485,10 +521,17 @@ export class EventStore {
         data: canonicalData,
       };
       const file = this.eventsFile(sessionId);
-      const size = (await stat(file).catch(() => undefined))?.size ?? 0;
-      const needsNewline = size > 0 && (await this.lastByteIsNewline(file, size)) === false;
+      // Warm path: this process appended to the journal already, so its size and
+      // trailing byte are known. The cold path pays the stat + one-byte read
+      // exactly once per session per daemon lifetime instead of per event.
+      let tail = this.journalTails.get(sessionId);
+      if (!tail) {
+        const size = (await stat(file).catch(() => undefined))?.size ?? 0;
+        tail = { size, endsWithNewline: size === 0 || (await this.lastByteIsNewline(file, size)) };
+      }
+      const needsNewline = !tail.endsWithNewline;
       const line = JSON.stringify(event);
-      const offset = size + (needsNewline ? 1 : 0);
+      const offset = tail.size + (needsNewline ? 1 : 0);
       const length = Buffer.byteLength(line, 'utf8');
       const handle = await open(file, 'a', 0o600);
       let journal: { size: number; mtimeMs: number };
@@ -500,12 +543,17 @@ export class EventStore {
       } finally {
         await handle.close();
       }
+      this.journalTails.set(sessionId, { size: journal.size, endsWithNewline: true });
 
       // From this point onward the append succeeded even if the disposable index
       // is later lost. Index synchronously so replay is immediately consistent.
       this.lastSequences.set(sessionId, event.sequence);
       this.insertEvent(event, offset, length);
-      await this.indexSessionMetadata(sessionId, event.sequence, journal);
+      // Sequence/journal bump ONLY. Re-reading config.json + state.json and
+      // re-serializing both into the index on every event was pure waste: a
+      // config is ~44 KB on a codex session (harnessSessionBaseline), so a
+      // chatty turn rewrote megabytes of unchanged blob per second.
+      this.indexJournalProgress(sessionId, event.sequence, journal);
       return event;
     });
   }
@@ -621,188 +669,128 @@ export class EventStore {
   getSession(sessionId: string): IndexedSession | undefined {
     validateSessionId(sessionId);
     this.assertOpen();
-    const row = this.database
-      .query<SessionRow, [string]>(
-        `SELECT id, directory, status, created_at, updated_at, last_sequence, config_json, state_json
-         FROM sessions WHERE id = ?`,
-      )
-      .get(sessionId);
-    return row ? this.sessionFromRow(row) : undefined;
+    return this.sessionCache.get(sessionId);
   }
 
+  /** All indexed sessions, newest activity first. Served from the in-process
+   *  cache — see `sessionCache`. This is on the hot path of literally every
+   *  session operation (`resolveRef`), so it must never touch the database. */
   listSessions(): IndexedSession[] {
     this.assertOpen();
-    const rows = this.database
-      .query<SessionRow, []>(
-        `SELECT id, directory, status, created_at, updated_at, last_sequence, config_json, state_json
-         FROM sessions
-        ORDER BY COALESCE(updated_at, created_at, id) DESC`,
-      )
-      .all();
-    return rows.map(row => this.sessionFromRow(row));
-  }
-
-  /** Bounded CROSS-SESSION replay, ordered by the fleet-wide global sequence.
-   *
-   *  This exists because the old fleet feed materialized every event of every
-   *  session (multi-GB), mapped it, sorted it, and returned ≤ limit — one UI
-   *  connect blocked the daemon's event loop for minutes and ballooned its
-   *  heap (2026-07-23 daemon-wedge incident). Here the index answers the
-   *  window and only the selected records are read from their journals.
-   *
-   *  Rows whose journal bytes no longer match their pointer are re-indexed
-   *  once and then skipped: one rewritten journal must never wedge the feed. */
-  replayGlobal(afterGlobalSequence: number, limit: number, sessionId?: string): GlobalPage {
-    this.assertOpen();
-    if (!Number.isSafeInteger(afterGlobalSequence) || afterGlobalSequence < 0)
-      throw new Error('afterGlobalSequence must be a non-negative integer');
-    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('limit must be a positive integer');
-    if (sessionId !== undefined) validateSessionId(sessionId);
-    const rows =
-      sessionId === undefined
-        ? this.database
-            .query<GlobalPointerRow, [number, number]>(
-              `SELECT session_id, sequence, byte_offset, byte_length, global_sequence
-                 FROM events
-                WHERE global_sequence > ?
-                ORDER BY global_sequence ASC
-                LIMIT ?`,
-            )
-            .all(afterGlobalSequence, limit)
-        : this.database
-            .query<GlobalPointerRow, [string, number, number]>(
-              `SELECT session_id, sequence, byte_offset, byte_length, global_sequence
-                 FROM events
-                WHERE session_id = ? AND global_sequence > ?
-                ORDER BY global_sequence ASC
-                LIMIT ?`,
-            )
-            .all(sessionId, afterGlobalSequence, limit);
-    // Tie-safe boundary: journals written before the fleet counter existed
-    // fall back to their per-session sequence, so two sessions can legitimately
-    // share a global_sequence. The cursor is exclusive, so a page that ended
-    // mid-tie would drop the sibling — pull the rest of the tie in first.
-    const last = rows.at(-1)?.global_sequence;
-    if (last !== undefined && rows.length === limit) rows.push(...this.tieRows(last, rows, sessionId));
-    // ROWS, not resolved events: a row this scan had to skip (torn journal
-    // line, missing file) must not read as "end of backlog" to a paging
-    // caller, or the rest of the replay is silently truncated.
-    return {
-      events: this.resolveGlobalRows(rows),
-      rows: rows.length,
-      cursor: rows.at(-1)?.global_sequence ?? afterGlobalSequence,
-    };
-  }
-
-  /** The most recent `limit` events (fleet-wide, or of one session), oldest-first. */
-  tailGlobal(limit: number, sessionId?: string): SessionEvent[] {
-    this.assertOpen();
-    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('limit must be a positive integer');
-    if (sessionId !== undefined) validateSessionId(sessionId);
-    const rows =
-      sessionId === undefined
-        ? this.database
-            .query<GlobalPointerRow, [number]>(
-              `SELECT session_id, sequence, byte_offset, byte_length, global_sequence
-                 FROM events
-                WHERE global_sequence IS NOT NULL
-                ORDER BY global_sequence DESC
-                LIMIT ?`,
-            )
-            .all(limit)
-        : this.database
-            .query<GlobalPointerRow, [string, number]>(
-              `SELECT session_id, sequence, byte_offset, byte_length, global_sequence
-                 FROM events
-                WHERE session_id = ? AND global_sequence IS NOT NULL
-                ORDER BY global_sequence DESC
-                LIMIT ?`,
-            )
-            .all(sessionId, limit);
-    return this.resolveGlobalRows(rows.reverse());
-  }
-
-  /** Highest indexed global sequence (0 when the index holds none). */
-  latestGlobalSequence(): number {
-    this.assertOpen();
-    const row = this.database
-      .query<{ value: number | null }, []>('SELECT MAX(global_sequence) AS value FROM events')
-      .get();
-    return typeof row?.value === 'number' ? row.value : 0;
-  }
-
-  /** True when this session still holds rows indexed before `global_sequence`
-   *  existed — they are invisible to the global feed until backfilled. */
-  sessionNeedsGlobalBackfill(sessionId: string): boolean {
-    validateSessionId(sessionId);
-    this.assertOpen();
-    const row = this.database
-      .query<
-        { value: number },
-        [string]
-      >('SELECT COUNT(*) AS value FROM (SELECT 1 FROM events WHERE session_id = ? AND global_sequence IS NULL LIMIT 1)')
-      .get(sessionId);
-    return (row?.value ?? 0) > 0;
-  }
-
-  /** The next session (newest first) whose rows still need the backfill. */
-  nextSessionNeedingGlobalBackfill(): string | undefined {
-    this.assertOpen();
-    return this.database
-      .query<{ session_id: string }, []>(
-        `SELECT e.session_id AS session_id
-           FROM events e
-           JOIN sessions s ON s.id = e.session_id
-          WHERE e.global_sequence IS NULL
-          GROUP BY e.session_id
-          ORDER BY COALESCE(s.updated_at, s.created_at, s.id) DESC
-          LIMIT 1`,
-      )
-      .get()?.session_id;
-  }
-
-  /** Re-index ONE session so its rows carry a global sequence. Callers walk
-   *  sessions one at a time and yield between them: the migration must never
-   *  become the very event-loop hog it was written to remove. */
-  async backfillGlobalSequence(sessionId: string): Promise<void> {
-    validateSessionId(sessionId);
-    this.assertOpen();
-    await this.serialized(sessionId, async () => {
-      // ASYNC read: the migration walks whole journals, and doing that with
-      // readFileSync would block the event loop for the size of each file —
-      // the very hazard this whole change exists to remove.
-      const buffer = (await readBytesFrom(this.eventsFile(sessionId), 0)) ?? Buffer.alloc(0);
-      // The reindex replaces every row of this session, and each insert stamps
-      // a global sequence — so a session can never come out of here still
-      // needing the backfill, and the walk always terminates.
-      this.reindexSessionFromBuffer(sessionId, buffer);
+    return [...this.sessionCache.values()].sort((left, right) => {
+      const a = left.updatedAt ?? left.createdAt ?? left.id;
+      const b = right.updatedAt ?? right.createdAt ?? right.id;
+      return a < b ? 1 : a > b ? -1 : 0;
     });
   }
 
-  /** The rows sharing `sequence` that this page did not already include. */
-  private tieRows(
-    sequence: number,
-    included: readonly GlobalPointerRow[],
-    sessionId: string | undefined,
-  ): GlobalPointerRow[] {
-    const seen = new Set(included.map(row => `${row.session_id}\n${row.sequence}`));
-    const rows = this.database
-      .query<GlobalPointerRow, [number]>(
-        `SELECT session_id, sequence, byte_offset, byte_length, global_sequence
-           FROM events WHERE global_sequence = ? ORDER BY session_id, sequence`,
-      )
-      .all(sequence);
-    return rows.filter(
-      row =>
-        !seen.has(`${row.session_id}\n${row.sequence}`) && (sessionId === undefined || row.session_id === sessionId),
-    );
+  /** Drop a removed session from the index and the cache. Without this the
+   *  index kept a row (and the cache an entry) for every session ever removed
+   *  — the live fleet carried 1036 rows against 700 directories on disk. */
+  forgetSession(sessionId: string): void {
+    validateSessionId(sessionId);
+    this.assertOpen();
+    this.database.query('DELETE FROM sessions WHERE id = ?').run(sessionId);
+    this.sessionCache.delete(sessionId);
+    this.lastSequences.delete(sessionId);
+    this.journalTails.delete(sessionId);
+    this.knownDirectories.delete(sessionId);
   }
 
-  private resolveGlobalRows(rows: readonly GlobalPointerRow[]): SessionEvent[] {
+  /** Bounded CROSS-SESSION feed, merged by TIME at read time.
+   *
+   *  There is no fleet-wide counter behind this any more. Sessions are
+   *  independent: each journal is append-only and its own `sequence` is the
+   *  authoritative order, and `events_fleet_idx (time, session_id, sequence)`
+   *  merges them on demand. What this gives up is a dense total order across
+   *  sessions — cross-session ordering is now by wall-clock timestamp, with
+   *  (session_id, sequence) breaking ties deterministically. Nothing consumed
+   *  the old total order: every UI/CLI reader is per-session except the id-less
+   *  `kteam stream`, which only wants "recent, then live".
+   *
+   *  Rows whose journal bytes no longer match their pointer are re-indexed
+   *  once and then skipped: one rewritten journal must never wedge the feed. */
+  replayFleet(after: FleetCursor | undefined, limit: number): FleetPage {
+    this.assertOpen();
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('limit must be a positive integer');
+    const rows = after
+      ? this.database
+          .query<FleetPointerRow, [string, string, string, string, number, number]>(
+            `SELECT session_id, sequence, time, byte_offset, byte_length
+               FROM events
+              WHERE time > ? OR (time = ? AND (session_id > ? OR (session_id = ? AND sequence > ?)))
+              ORDER BY time ASC, session_id ASC, sequence ASC
+              LIMIT ?`,
+          )
+          .all(after.time, after.time, after.sessionId, after.sessionId, after.sequence, limit)
+      : this.database
+          .query<FleetPointerRow, [number]>(
+            `SELECT session_id, sequence, time, byte_offset, byte_length
+               FROM events
+              ORDER BY time ASC, session_id ASC, sequence ASC
+              LIMIT ?`,
+          )
+          .all(limit);
+    // ROWS, not resolved events: a row this scan had to skip (torn journal
+    // line, missing file) must not read as "end of backlog" to a paging
+    // caller, or the rest of the replay is silently truncated.
+    const last = rows.at(-1);
+    return {
+      events: this.resolvePointerRows(rows),
+      rows: rows.length,
+      cursor: last ? { time: last.time, sessionId: last.session_id, sequence: last.sequence } : after,
+    };
+  }
+
+  /** The most recent `limit` events across the whole fleet, oldest-first. */
+  tailFleet(limit: number): SessionEvent[] {
+    this.assertOpen();
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('limit must be a positive integer');
+    const rows = this.database
+      .query<FleetPointerRow, [number]>(
+        `SELECT session_id, sequence, time, byte_offset, byte_length
+           FROM events
+          ORDER BY time DESC, session_id DESC, sequence DESC
+          LIMIT ?`,
+      )
+      .all(limit);
+    return this.resolvePointerRows(rows.reverse());
+  }
+
+  /** The most recent `limit` events of ONE session, oldest-first. */
+  tailSession(sessionId: string, limit: number): SessionEvent[] {
+    validateSessionId(sessionId);
+    this.assertOpen();
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('limit must be a positive integer');
+    const rows = this.database
+      .query<FleetPointerRow, [string, number]>(
+        `SELECT session_id, sequence, time, byte_offset, byte_length
+           FROM events
+          WHERE session_id = ?
+          ORDER BY sequence DESC
+          LIMIT ?`,
+      )
+      .all(sessionId, limit);
+    return this.resolvePointerRows(rows.reverse());
+  }
+
+  /** The newest indexed event of the fleet, as a feed cursor. */
+  latestFleetCursor(): FleetCursor | undefined {
+    this.assertOpen();
+    const row = this.database
+      .query<
+        { time: string; session_id: string; sequence: number },
+        []
+      >(`SELECT time, session_id, sequence FROM events ORDER BY time DESC, session_id DESC, sequence DESC LIMIT 1`)
+      .get();
+    return row ? { time: row.time, sessionId: row.session_id, sequence: row.sequence } : undefined;
+  }
+
+  private resolvePointerRows(rows: readonly FleetPointerRow[]): SessionEvent[] {
     const events: SessionEvent[] = [];
     const descriptors = new Map<string, number | undefined>();
     /** Sessions re-indexed during this resolve → their refreshed pointers. */
-    const refreshed = new Map<string, Map<number, GlobalPointerRow>>();
+    const refreshed = new Map<string, Map<number, FleetPointerRow>>();
     try {
       for (const row of rows) {
         // Once a session has been re-indexed, EVERY later row of that session
@@ -815,8 +803,8 @@ export class EventStore {
           // index. Re-index that session once and retry from fresh pointers.
           this.reindexSessionSync(row.session_id);
           const fresh = this.database
-            .query<GlobalPointerRow, [string]>(
-              `SELECT session_id, sequence, byte_offset, byte_length, global_sequence
+            .query<FleetPointerRow, [string]>(
+              `SELECT session_id, sequence, time, byte_offset, byte_length
                  FROM events WHERE session_id = ?`,
             )
             .all(row.session_id);
@@ -838,7 +826,7 @@ export class EventStore {
   /** Read and identity-verify one pointer row, reusing an open descriptor per
    *  session. `undefined` means the row is unusable (missing journal, short
    *  read, unparseable bytes, or an identity mismatch). */
-  private readPointer(descriptors: Map<string, number | undefined>, row: GlobalPointerRow): SessionEvent | undefined {
+  private readPointer(descriptors: Map<string, number | undefined>, row: FleetPointerRow): SessionEvent | undefined {
     if (!descriptors.has(row.session_id)) {
       let descriptor: number | undefined;
       try {
@@ -902,6 +890,9 @@ export class EventStore {
       this.database.exec('DELETE FROM sessions');
     })();
     this.lastSequences.clear();
+    this.sessionCache.clear();
+    this.journalTails.clear();
+    this.knownDirectories.clear();
     return await this.importFromDisk();
   }
 
@@ -971,26 +962,73 @@ export class EventStore {
       .run(event.sessionId, this.sessionDirectory(event.sessionId), now());
     this.database
       .query(
-        `INSERT INTO events (session_id, sequence, time, type, byte_offset, byte_length, global_sequence)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO events (session_id, sequence, time, type, byte_offset, byte_length)
+       VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(session_id, sequence) DO UPDATE SET
          time = excluded.time,
          type = excluded.type,
          byte_offset = excluded.byte_offset,
-         byte_length = excluded.byte_length,
-         global_sequence = excluded.global_sequence`,
+         byte_length = excluded.byte_length`,
       )
-      .run(event.sessionId, event.sequence, event.time, event.type, offset, length, globalSequenceOf(event));
+      .run(event.sessionId, event.sequence, event.time, event.type, offset, length);
   }
 
+  /** Journal-progress bump ONLY — the per-append hot path. Touches four
+   *  integer/text columns and the cached entry; never re-reads or re-serializes
+   *  the config/state documents. */
+  private indexJournalProgress(
+    sessionId: string,
+    lastSequence: number,
+    journal: { size: number; mtimeMs: number },
+  ): void {
+    this.database
+      .query(
+        `UPDATE sessions
+            SET last_sequence = ?, journal_size = ?, journal_mtime_ms = ?, indexed_at = ?
+          WHERE id = ?`,
+      )
+      .run(lastSequence, journal.size, journal.mtimeMs, now(), sessionId);
+    const cached = this.sessionCache.get(sessionId);
+    if (cached) cached.lastSequence = lastSequence;
+    // A journal can legitimately exist before config.json does (append-first
+    // callers, and `insertEvent` seeds the FK parent row). Seed the cache too,
+    // or `getSession` reports the session missing until something writes a
+    // document.
+    else
+      this.sessionCache.set(sessionId, {
+        id: sessionId,
+        directory: this.sessionDirectory(sessionId),
+        lastSequence,
+      });
+  }
+
+  /** Re-read a session's config/state from disk. Used by the import/reconcile
+   *  path, where the files are the authority and may have changed underneath
+   *  the cache. */
+  private async readDocuments(sessionId: string): Promise<{ config?: unknown; state?: unknown }> {
+    const [config, state] = await Promise.all([
+      readJsonIfPresent(this.configFile(sessionId)),
+      readJsonIfPresent(this.stateFile(sessionId)),
+    ]);
+    return { config, state };
+  }
+
+  /** Refresh the indexed metadata for one session. `documents` carries the
+   *  config/state the caller just wrote, so the common path never re-reads
+   *  from disk what it already has in hand. */
   private async indexSessionMetadata(
     sessionId: string,
+    documents: { config?: unknown; state?: unknown } = {},
     knownLastSequence?: number,
     journal?: { size: number; mtimeMs: number },
   ): Promise<void> {
-    const config = await readJsonIfPresent(this.configFile(sessionId));
-    const state = await readJsonIfPresent(this.stateFile(sessionId));
-    const lastSequence = knownLastSequence ?? (await this.lastSequence(sessionId));
+    const cached = this.sessionCache.get(sessionId);
+    // Key PRESENCE decides, not the value: the import path legitimately passes
+    // `{ config: undefined }` for a session whose config.json is gone, and that
+    // must clear the indexed document rather than fall back to a stale cache.
+    const config = 'config' in documents ? documents.config : (cached?.config ?? undefined);
+    const state = 'state' in documents ? documents.state : (cached?.state ?? undefined);
+    const lastSequence = knownLastSequence ?? cached?.lastSequence ?? (await this.lastSequence(sessionId));
     const status = stringField(state, 'status');
     const createdAt = stringField(config, 'createdAt') ?? stringField(state, 'startedAt');
     const updatedAt =
@@ -1029,6 +1067,16 @@ export class EventStore {
         journal?.mtimeMs ?? null,
         now(),
       );
+    this.sessionCache.set(sessionId, {
+      id: sessionId,
+      directory: this.sessionDirectory(sessionId),
+      status,
+      createdAt,
+      updatedAt,
+      lastSequence,
+      config,
+      state,
+    });
   }
 
   private async syncSessionUnlocked(sessionId: string): Promise<SyncResult> {
@@ -1048,7 +1096,7 @@ export class EventStore {
       const lastSequence = indexed?.last_sequence ?? 0;
       this.ensureSessionRow(sessionId);
       this.lastSequences.set(sessionId, lastSequence);
-      await this.indexSessionMetadata(sessionId, lastSequence);
+      await this.indexSessionMetadata(sessionId, await this.readDocuments(sessionId), lastSequence);
       return { sessionId, eventCount: 0, lastSequence, problems: [] };
     }
 
@@ -1057,7 +1105,10 @@ export class EventStore {
     // this is what turns a warm boot from a full-history reimport into a stat.
     if (indexed && indexed.journal_size === info.size && indexed.journal_mtime_ms === mtimeMs) {
       this.lastSequences.set(sessionId, indexed.last_sequence);
-      await this.indexSessionMetadata(sessionId, indexed.last_sequence, { size: info.size, mtimeMs });
+      await this.indexSessionMetadata(sessionId, await this.readDocuments(sessionId), indexed.last_sequence, {
+        size: info.size,
+        mtimeMs,
+      });
       return { sessionId, eventCount: 0, lastSequence: indexed.last_sequence, problems: [] };
     }
 
@@ -1079,7 +1130,10 @@ export class EventStore {
           for (const scanned of tail.events) this.insertEvent(scanned.event, scanned.offset, scanned.length);
         })();
         this.lastSequences.set(sessionId, lastSequence);
-        await this.indexSessionMetadata(sessionId, lastSequence, { size: info.size, mtimeMs });
+        await this.indexSessionMetadata(sessionId, await this.readDocuments(sessionId), lastSequence, {
+          size: info.size,
+          mtimeMs,
+        });
         return { sessionId, eventCount: tail.events.length, lastSequence, problems: [] };
       }
     }
@@ -1094,7 +1148,10 @@ export class EventStore {
       for (const scanned of scan.events) this.insertEvent(scanned.event, scanned.offset, scanned.length);
     })();
     this.lastSequences.set(sessionId, lastSequence);
-    await this.indexSessionMetadata(sessionId, lastSequence, { size: info.size, mtimeMs });
+    await this.indexSessionMetadata(sessionId, await this.readDocuments(sessionId), lastSequence, {
+      size: info.size,
+      mtimeMs,
+    });
     return {
       sessionId,
       eventCount: scan.events.length,

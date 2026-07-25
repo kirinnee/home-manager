@@ -373,6 +373,8 @@ export class ClaudeTranscriptWatcher {
   private reconcileRequested = false;
   private directoryRefreshRequested = false;
   private reconcilePromise?: Promise<void>;
+  /** Resolvers waiting for the next complete reconcile pass. */
+  private passWaiters: Array<() => void> = [];
   /** When the last full-tree discovery walk ran (throttles the expensive path). */
   private lastDiscoveryAt = 0;
   /** Consecutive walks that found nothing — the input to the search backoff. */
@@ -398,8 +400,28 @@ export class ClaudeTranscriptWatcher {
     // event loop (2026-07-23 listener-flap incident).
     this.timer = setInterval(() => void this.requestReconcile(), interval);
     this.timer.unref?.();
-    await this.requestReconcile(true);
+    // Await ONE pass, not the drain loop. `requestReconcile` returns a loop
+    // that keeps going while `reconcileRequested` is set, and the periodic
+    // timer re-sets it — so on a transcript that is actively being written
+    // (i.e. every freshly launched session) that promise settles late or not
+    // at all, and `start()` used to inherit the delay. Callers want "the
+    // watcher is armed and has looked once", which is what a pass is.
+    const first = this.nextPass();
+    void this.requestReconcile(true);
+    await first;
     return this;
+  }
+
+  /** Resolves after the next COMPLETE reconcile pass (or immediately once the
+   *  watcher stops). */
+  private nextPass(): Promise<void> {
+    if (!this.running) return Promise.resolve();
+    return new Promise<void>(resolve => this.passWaiters.push(resolve));
+  }
+
+  private releasePassWaiters(): void {
+    const waiters = this.passWaiters.splice(0);
+    for (const resolve of waiters) resolve();
   }
 
   async stop(): Promise<void> {
@@ -411,6 +433,7 @@ export class ClaudeTranscriptWatcher {
     this.fileWatch = undefined;
     for (const watcher of this.directoryWatches.values()) watcher.close();
     this.directoryWatches.clear();
+    this.releasePassWaiters();
     await this.reconcilePromise;
   }
 
@@ -444,9 +467,11 @@ export class ClaudeTranscriptWatcher {
           } catch (error) {
             this.report(error);
           }
+          this.releasePassWaiters();
         }
       })().finally(() => {
         this.reconcilePromise = undefined;
+        this.releasePassWaiters();
         if (this.running && this.reconcileRequested) void this.requestReconcile();
       });
     }

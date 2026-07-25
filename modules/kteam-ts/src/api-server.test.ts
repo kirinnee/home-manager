@@ -128,6 +128,8 @@ class FakeService implements KTeamService {
     ];
   };
   wardenReport = async (p: string) => `# report ${p}\n\nVerdict: KILL\n`;
+  scratchPlan = async () => [];
+  scratchSweep = async () => ({ sessions: 0, bytes: 0, failures: 0 });
   search = async (query: string, limit = 30) => ({
     query,
     scanned: 7,

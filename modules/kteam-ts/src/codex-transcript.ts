@@ -444,6 +444,8 @@ export class CodexTranscriptWatcher {
   private reconcileRequested = false;
   private directoryRefreshRequested = false;
   private reconcilePromise?: Promise<void>;
+  /** Resolvers waiting for the next complete reconcile pass. */
+  private passWaiters: Array<() => void> = [];
 
   constructor(options: CodexTranscriptWatcherOptions) {
     if (!options.transcriptFile.trim()) throw new Error('Codex transcriptFile is required');
@@ -458,8 +460,23 @@ export class CodexTranscriptWatcher {
     const interval = Math.max(10, this.options.reconcileIntervalMs ?? 2_000);
     this.timer = setInterval(() => void this.requestReconcile(true), interval);
     this.timer.unref?.();
-    await this.requestReconcile(true);
+    // ONE pass, not the drain loop — see the same note in claude-transcript.ts.
+    const first = this.nextPass();
+    void this.requestReconcile(true);
+    await first;
     return this;
+  }
+
+  /** Resolves after the next COMPLETE reconcile pass (or immediately once the
+   *  watcher stops). */
+  private nextPass(): Promise<void> {
+    if (!this.running) return Promise.resolve();
+    return new Promise<void>(resolve => this.passWaiters.push(resolve));
+  }
+
+  private releasePassWaiters(): void {
+    const waiters = this.passWaiters.splice(0);
+    for (const resolve of waiters) resolve();
   }
 
   async stop(): Promise<void> {
@@ -471,6 +488,7 @@ export class CodexTranscriptWatcher {
     this.fileWatch = undefined;
     this.directoryWatch?.close();
     this.directoryWatch = undefined;
+    this.releasePassWaiters();
     await this.reconcilePromise;
   }
 
@@ -504,9 +522,11 @@ export class CodexTranscriptWatcher {
           } catch (error) {
             this.report(error);
           }
+          this.releasePassWaiters();
         }
       })().finally(() => {
         this.reconcilePromise = undefined;
+        this.releasePassWaiters();
         if (this.running && this.reconcileRequested) void this.requestReconcile();
       });
     }
