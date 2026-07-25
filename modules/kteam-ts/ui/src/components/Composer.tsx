@@ -139,27 +139,31 @@ export function Composer({
       <div className="flex min-h-control flex-wrap items-center gap-x-sm gap-y-xs">
         {/* Deliberately NOT `.kt-chrome`: that class rests at 78% opacity, which
             is right for transcript metadata and wrong for the line that tells
-            you what Enter will do and whether your message is in flight. */}
-        <span
-          className="mr-auto inline-flex min-w-0 items-center gap-xs truncate text-meta text-muted"
-          aria-live="polite"
-        >
+            you what Enter will do and whether your message is in flight.
+
+            The line is NOT itself a live region (a11y report S-4): when it was,
+            the static "· Shift+Enter newline" hint was re-announced on every
+            busy/sending transition. Only the STATUS words below sit in the
+            live region, so a screen reader hears "sending…" or the send/queue
+            change without the keyboard hint being read back every time. */}
+        <span className="mr-auto inline-flex min-w-0 items-center gap-xs truncate text-meta text-muted">
           {sending ? (
-            <>
-              <span
-                className="inline-block h-2.5 w-2.5 shrink-0 animate-spin rounded-full border border-current border-t-transparent motion-reduce:animate-none"
-                aria-hidden="true"
-              />
-              sending…
-            </>
+            <span
+              className="inline-block h-2.5 w-2.5 shrink-0 animate-spin rounded-full border border-current border-t-transparent motion-reduce:animate-none"
+              aria-hidden="true"
+            />
           ) : (
-            <>
-              <CornerDownLeft size={11} aria-hidden="true" />
-              <span className="truncate">
-                {busy ? 'Enter queues for the next turn' : 'Enter sends'} · Shift+Enter newline
-              </span>
-            </>
+            <CornerDownLeft size={11} aria-hidden="true" />
           )}
+          <span className="truncate">
+            {/* Persistent, atomic region: only these status words announce on a
+                send/queue/busy transition. */}
+            <span aria-live="polite" aria-atomic="true">
+              {sending ? 'sending…' : busy ? 'Enter queues for the next turn' : 'Enter sends'}
+            </span>
+            {/* Static hint — outside the live region so it is never re-announced. */}
+            {!sending && ' · Shift+Enter newline'}
+          </span>
         </span>
 
         {showInterrupt && (
