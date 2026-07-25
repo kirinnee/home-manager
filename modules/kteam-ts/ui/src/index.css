@@ -625,6 +625,8 @@ body {
 @media (pointer: coarse) {
   :root button,
   :root [role='tab'],
+  :root input:not([type='checkbox']):not([type='radio']),
+  :root textarea,
   :root select,
   :root summary,
   :root a[href] {
