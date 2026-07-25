@@ -427,12 +427,11 @@
      below --muted, and dimming it further put the chrome tier under 4.5:1. The
      size drop does the receding. */
 
-  /* The RAW ramp is squared too, not just the roles. Most of the app has not
-     migrated to `.kt-*` yet, so the dashboard's table wrapper, the sidebar and
-     the cards still reach for `rounded-lg` / `rounded-md` / `rounded` directly.
-     Leaving the ramp rounded while the roles went square would have produced
-     exactly the half-themed result this whole refactor exists to prevent —
-     square buttons inside a rounded panel. */
+  /* The RAW ramp is squared too, not just the roles. Remaining utility-shaped
+     call sites still reach for `rounded-lg` / `rounded-md` / `rounded`
+     directly. Leaving the ramp rounded while the roles went square would
+     produce exactly the half-themed result this refactor exists to prevent —
+     square buttons inside rounded local chrome. */
   --radius-xs: 0px;
   --radius-sm: 0px;
   --radius-md: 0px;
@@ -603,9 +602,9 @@
   --glow-alpha: 0.05;
   /* INSET STRUCTURE, not float. An instrument panel is seated in its chassis, so
      the soft blur becomes a hard 1px ring plus an inset top-light — the same
-     read as mission-dark`s hairline-and-glow, inverted for a white ground. Every
-     un-migrated card and the dashboard table wrapper use `shadow-sm`, so this is
-     the inset treatment actually reaching the screen today. */
+     read as mission-dark's hairline-and-glow, inverted for a white ground. The
+     role shadows and any remaining utility consumers both resolve through this
+     treatment. */
   --shadow-sm: 0 0 0 1px rgba(11, 82, 95, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.9);
   --shadow-md:
     0 0 0 1px rgba(11, 82, 95, 0.26), inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 10px 24px rgba(6, 48, 56, 0.1);
@@ -619,11 +618,10 @@
      behind the sidebar, the area below a short table. That is what makes the
      theme read as an instrument rather than as a page with a textured card on it.
 
-     The grid ink is the deep teal at 0.10/0.055 (major/minor), which survives
+     The grid ink is the deep teal at 0.14/0.077 (major/minor), which survives
      achromatopsia as a legible ruled field while staying far below text weight.
-     The two radials are kept but pushed to 0.10 so there is still a bright
-     corner and a warm counterpoint. Order matters: lines first so the radials
-     sit under them.
+     The old radials were removed: they consumed contrast budget without adding
+     a grayscale structural signal, so that budget now belongs to the grid.
 
      `repeating-linear-gradient` on purpose rather than `linear-gradient` plus a
      `background-size`: it tiles itself, so the whole field stays inside

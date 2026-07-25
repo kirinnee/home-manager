@@ -362,10 +362,10 @@ const PAIRS = buildPairs();
 const WASH_PEAK: Partial<Record<`${Family}-${Mode}`, string[]>> = {
   'mission-dark': ['rgba(71, 243, 255, 0.085)', 'rgba(30, 83, 96, 0.14)'],
   /* mission-light is now a ruled telemetry grid, not two soft radials. Listed
-     worst-case: the point where a MAJOR and a MINOR grid line cross under both
-     radials, which is the darkest ground any body ink has to sit on in this
-     theme. Keep this in step with `--body-wash` in themes.css — an out-of-date
-     entry here makes the wash rows measure a page that no longer exists. */
+     worst-case: the point where a MAJOR and a MINOR grid line cross, which is
+     the darkest ground any body ink has to sit on in this theme. Keep this in
+     step with `--body-wash` in themes.css — an out-of-date entry here makes the
+     wash rows measure a page that no longer exists. */
   'mission-light': ['rgba(11, 82, 95, 0.14)', 'rgba(11, 82, 95, 0.077)'],
   'ember-light': ['rgba(214, 148, 62, 0.14)', 'rgba(196, 118, 48, 0.08)'],
   'ember-dark': ['rgba(240, 163, 90, 0.1)', 'rgba(158, 84, 32, 0.09)'],
