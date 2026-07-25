@@ -15,13 +15,16 @@ the terminal, on the phone, or at claude.ai. This supersedes the old `klaude han
 Run from the intended working directory (or pass `--cwd`):
 
 ```bash
-kteam start -a <wrapper> --mode interactive --name "<slug>" --cwd "$PWD"
+kteam start -a claude-auto-kirin --model claude-opus-5[1m] --mode interactive --name "<slug>" --cwd "$PWD"
 ```
 
 - **No prompt/task argument.** Interactive sessions start bare at the harness prompt —
   never inject an opening turn; the human types the first thing themselves.
-- **Wrapper**: default `claude-auto-atomi` for Claude; for Codex use a codex wrapper
-  (e.g. `codex-auto-loge`). Codex has no RC flag, so RC applies to Claude only.
+- **Wrapper**: default `claude-auto-kirin` with **Opus 5** for Claude —
+  `-a claude-auto-kirin --model claude-opus-5[1m]`. (The fleet rule that bans
+  `claude-auto-kirin` is about AUTONOMOUS teammate work; these are the user's OWN
+  hands-on sessions, so the personal account is the right one.) For Codex use a codex
+  wrapper (e.g. `codex-auto-loge`); Codex has no RC flag, so RC applies to Claude only.
 - **Name**: default to the cwd basename; prefer a user-provided name.
 - **Directory**: the current working directory unless the user gives another path.
 - `--no-rc` opts a single session out of remote control.
@@ -29,7 +32,7 @@ kteam start -a <wrapper> --mode interactive --name "<slug>" --cwd "$PWD"
 Examples:
 
 ```bash
-kteam start -a claude-auto-atomi --mode interactive --name "HQ" --cwd ~/Obsidian/HQ
+kteam start -a claude-auto-kirin --model claude-opus-5[1m] --mode interactive --name "HQ" --cwd ~/Obsidian/HQ
 kteam start -a codex-auto-loge  --mode interactive --name "codex-spike" --cwd "$PWD"
 ```
 
