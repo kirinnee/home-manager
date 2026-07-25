@@ -225,6 +225,9 @@ export class ApiClient {
   migrate(id: string, agent: string, model?: string) {
     return this.post<SessionView>(id, 'migrate', { agent, model });
   }
+  rename(id: string, name?: string, teammate?: string) {
+    return this.post<SessionView>(id, 'rename', { name, teammate });
+  }
   signal(id: string, kind: SignalKind, message?: string, options: SignalOptions = {}) {
     return this.post<SessionView>(id, 'signal', { kind, message, ...options });
   }

@@ -74,11 +74,11 @@ Other rules of thumb:
 
 ## Launch and supervise
 
-Start one approved teammate per task. ALWAYS pass `--name` (a succinct summary of what the session is supposed to do) and `--label` (an ownership slug for YOUR batch — e.g. your session/repo/ticket identifier) so you can later list just your own teammates with `kteam ps --label <label>`:
+Start one approved teammate per task. ALWAYS pass `--name` (the TASK TITLE) and `--label` (an ownership slug for YOUR batch — e.g. your session/repo/ticket identifier) so you can later list just your own teammates with `kteam ps --label <label>`. The title is a natural **Title Case** phrase of **at most 5 words** — "Build Claims Frontend", not a slug like `build-claims-frontend`:
 
 ```bash
-kteam start --agent claude-auto-mm3 --mode auto --cwd "$PWD" --name build-claims-frontend --label tesla-infographic --image reference.png "Build the requested frontend and verify it"
-kteam start --agent codex-auto-atomi --mode interactive --cwd "$PWD" --name review-current-diff --label tesla-infographic "Review the current diff with me"
+kteam start --agent claude-auto-mm3 --mode auto --cwd "$PWD" --name "Build Claims Frontend" --label tesla-infographic --image reference.png "Build the requested frontend and verify it"
+kteam start --agent codex-auto-atomi --mode interactive --cwd "$PWD" --name "Review Current Diff" --label tesla-infographic "Review the current diff with me"
 ```
 
 For LONG prompts (more than a few sentences), write the brief to a file and pass `--prompt-file <file>` instead of inlining it on the command line (`kteam send` takes `--message-file` for the same reason); command-line and file content are combined when both are given. The daemon already delivers every prompt to the TUI via a turn file, so file-based briefs lose nothing.

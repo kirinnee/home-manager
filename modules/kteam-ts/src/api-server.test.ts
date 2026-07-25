@@ -57,6 +57,7 @@ class FakeService implements KTeamService {
   stop = async () => view;
   resume = async () => view;
   migrate = async (_id: string, _agent: string, _model?: string) => view;
+  rename = async (_id: string, _name?: string, _teammate?: string) => view;
   remove = async () => {};
   signal = async () => view;
   wardenMayStop = (_wardenId: string, _targetId: string) => false;
