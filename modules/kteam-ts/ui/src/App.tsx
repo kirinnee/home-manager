@@ -16,19 +16,49 @@
 // keeping the pane mounted to preserve. visibility:hidden keeps layout, paints
 // nothing, and takes its subtree out of the tab order.
 
-import { useEffect, useState } from 'react';
+import { Suspense, lazy, useEffect, useState } from 'react';
 import { useRoute } from './lib/router';
 import { AppBar } from './components/AppBar';
 import { AgentSidebar } from './components/AgentSidebar';
 import { SessionsListPage } from './pages/SessionsListPage';
-import { SessionChatPage } from './pages/SessionChatPage';
 import { NewSessionPage } from './pages/NewSessionPage';
 import { cn } from './lib/utils';
 import { useAppViewport } from './hooks/useAppViewport';
 
+// THE CHAT PAGE IS A LAZY CHUNK. It pulls in the whole reading stack — the
+// transcript, markdown, syntax highlighting, tool previews, the terminal view —
+// and a reader looking at the fleet dashboard has asked for none of it.
+// Measured (perf report): dashboard entry 837.0 KB raw / 253.8 KB gzip →
+// 298.2 KB / 88.7 KB. The chat route downloads the rest on the first navigation
+// into a session and keeps it for the life of the tab, so the second session
+// opens with no network at all.
+const SessionChatPage = lazy(() =>
+  import('./pages/SessionChatPage').then(module => ({ default: module.SessionChatPage })),
+);
+
 /** How many session pages stay mounted at once (the current one plus the one
  *  you most recently came from — enough for back-and-forth, bounded). */
 const MAX_MOUNTED_SESSIONS = 2;
+
+/** Shown for the one navigation that actually waits on the chat chunk.
+ *
+ *  It fills the pane exactly like the page it stands in for, so the shell does
+ *  not shift when the real thing arrives, and it announces itself: `role=status`
+ *  with `aria-live=polite` tells a screen reader the app is fetching rather than
+ *  leaving it on a silent empty region. */
+function ChatChunkFallback() {
+  return (
+    <div role="status" aria-live="polite" className="flex h-full min-h-0 w-full items-center justify-center">
+      <span className="inline-flex items-center gap-2 text-[13px] text-muted">
+        <span
+          className="inline-block h-3 w-3 animate-spin rounded-full border border-current border-t-transparent motion-reduce:animate-none"
+          aria-hidden="true"
+        />
+        Loading conversation…
+      </span>
+    </div>
+  );
+}
 
 function Pane({ active, children }: { active: boolean; children: React.ReactNode }) {
   return (
@@ -107,9 +137,16 @@ export function App() {
           <Pane active={!route.sessionId && !route.isNew}>
             <SessionsListPage />
           </Pane>
+          {/* One Suspense boundary PER PANE, not one wrapping the list: a shared
+              boundary would replace a retained, fully loaded chat with a
+              fallback the moment another pane suspended. Only the first
+              navigation suspends at all — the chunk is cached afterwards — and
+              the LRU, drafts, scroll and client-side navigation are untouched. */}
           {mounted.map(id => (
             <Pane key={id} active={route.sessionId === id}>
-              <SessionChatPage sessionId={id} />
+              <Suspense fallback={<ChatChunkFallback />}>
+                <SessionChatPage sessionId={id} />
+              </Suspense>
             </Pane>
           ))}
           {route.isNew && (

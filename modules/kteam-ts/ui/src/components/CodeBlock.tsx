@@ -5,15 +5,10 @@
 // shared .hljs rules in highlight.css.
 
 import { memo, useMemo, useState } from 'react';
-import hljs from 'highlight.js/lib/common';
+import { escapeHtml, highlightToHtml } from '../lib/highlight';
 import { cn } from '../lib/utils';
 
-const MAX_HL_CHARS = 60_000; // don't tokenize huge blobs
 const PREVIEW_LINES = 16;
-
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
 
 export const CodeBlock = memo(function CodeBlock({
   code,
@@ -29,14 +24,13 @@ export const CodeBlock = memo(function CodeBlock({
   const tooMany = lines.length > PREVIEW_LINES;
   const shown = expanded ? code : lines.slice(0, PREVIEW_LINES).join('\n');
 
+  // The shared registry decides (lib/highlight.ts): a null result means "this
+  // one is not highlightable" — no language, an unknown one, too big, or a
+  // parser that threw — and the answer for all four is the same escaped text
+  // this file always fell back to.
   const html = useMemo(() => {
     if (tone === 'err') return escapeHtml(shown);
-    if (!lang || shown.length > MAX_HL_CHARS || !hljs.getLanguage(lang)) return escapeHtml(shown);
-    try {
-      return hljs.highlight(shown, { language: lang }).value;
-    } catch {
-      return escapeHtml(shown);
-    }
+    return highlightToHtml(shown, lang) ?? escapeHtml(shown);
   }, [shown, lang, tone]);
 
   return (
