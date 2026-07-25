@@ -36,7 +36,17 @@ import {
 } from 'react';
 import { api, ApiError } from './api';
 import { openEventStream, type EventStreamHandle, type StreamStatus } from './ws';
-import type { InteractionMode, KTeamEvent, ProjectInfo, SearchResponse, SessionState, SessionView } from '../types';
+import type {
+  InteractionMode,
+  KTeamEvent,
+  ProjectInfo,
+  SearchResponse,
+  SessionState,
+  SessionView,
+  UsageAccountView,
+  UsageFeedView,
+} from '../types';
+import { usageIndex } from './usage';
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -57,6 +67,10 @@ const REFRESH_DEBOUNCE_MS = 900;
 /** Slow full-list reconcile. The socket is the mechanism; this only heals
  *  anything the delta path could have missed. */
 const RECONCILE_MS = 45_000;
+/** Account quota feed. kfleet refreshes on its own 300s interval and the daemon
+ *  caches that, so polling faster than the data changes just burns requests.
+ *  60s keeps a reset countdown honest. */
+const USAGE_MS = 60_000;
 /** Don't reconcile twice inside this window (reconnect + interval racing). */
 const RECONCILE_MIN_GAP_MS = 5_000;
 /** Fleet tail replayed on every (re)connect. */
@@ -114,6 +128,13 @@ export interface SearchSnapshot {
   query: string;
   searching: boolean;
   results: SearchResponse | null;
+}
+
+/** The fleet-wide account-quota feed plus its by-binary index. One slice, so a
+ *  quota refresh re-renders the badges that read it and nothing else. */
+export interface UsageSnapshot {
+  feed: UsageFeedView | null;
+  index: Map<string, UsageAccountView>;
 }
 
 type Listener = () => void;
@@ -260,6 +281,15 @@ export class FleetStore {
   private reconcileTimer: number | null = null;
   private lastReconcileAt = 0;
 
+  /** ONE account-quota poll for the whole app. It used to be a `useUsage` hook
+   *  with its own 60s interval, mounted once per consumer — so the dashboard
+   *  plus two retained chat panes ran three identical requests forever. Its own
+   *  snapshot slice, so a usage response re-renders the badges and nothing else. */
+  private usageSnapshot: UsageSnapshot = { feed: null, index: new Map() };
+  private usageTimer: number | null = null;
+  private usageInflight = false;
+  private lastUsageAt = 0;
+
   private searchToken = 0;
 
   // -- lifecycle ------------------------------------------------------------
@@ -279,6 +309,11 @@ export class FleetStore {
       if (typeof document !== 'undefined' && document.hidden) return;
       void this.reconcile();
     }, RECONCILE_MS);
+    void this.refreshUsage();
+    this.usageTimer = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      void this.refreshUsage();
+    }, USAGE_MS);
     document.addEventListener('visibilitychange', this.onVisibility);
   }
 
@@ -289,6 +324,8 @@ export class FleetStore {
     this.socket = null;
     if (this.reconcileTimer != null) window.clearInterval(this.reconcileTimer);
     this.reconcileTimer = null;
+    if (this.usageTimer != null) window.clearInterval(this.usageTimer);
+    this.usageTimer = null;
     document.removeEventListener('visibilitychange', this.onVisibility);
     for (const timer of this.refreshTimers.values()) window.clearTimeout(timer);
     this.refreshTimers.clear();
@@ -299,7 +336,28 @@ export class FleetStore {
     // Coming back to a tab that has been asleep: the reconcile interval was
     // skipped while hidden, so heal the list once, now.
     void this.reconcile();
+    // Same for quota — a countdown that stopped while hidden is worse than no
+    // countdown, but only refetch if the interval genuinely lapsed.
+    if (Date.now() - this.lastUsageAt >= USAGE_MS) void this.refreshUsage();
   };
+
+  /** Fetch the fleet-wide usage feed. Last-good on failure: a transient error
+   *  must never blank a readout that was correct a minute ago, and an absent
+   *  record must read as "unknown", never as 0% (see lib/usage.ts). */
+  private async refreshUsage(): Promise<void> {
+    if (this.usageInflight) return;
+    this.usageInflight = true;
+    try {
+      const feed = await api.usage();
+      this.usageSnapshot = { feed, index: usageIndex(feed) };
+      this.notify(true);
+    } catch {
+      /* keep the last good snapshot */
+    } finally {
+      this.usageInflight = false;
+      this.lastUsageAt = Date.now();
+    }
+  }
 
   private async hydrate(): Promise<void> {
     // Stamped BEFORE the request: the socket opens at roughly the same moment
@@ -336,6 +394,7 @@ export class FleetStore {
   getFleet = (): FleetSnapshot => this.fleetSnapshot;
   getControls = (): UiControls => this.controlsSnapshot;
   getSearch = (): SearchSnapshot => this.searchSnapshot;
+  getUsage = (): UsageSnapshot => this.usageSnapshot;
   getSession = (id: string): SessionView | undefined => this.fleetSnapshot.byId.get(id);
 
   private notify(immediate = false): void {
@@ -735,3 +794,11 @@ export function useSessions(): SessionView[] {
 }
 
 const EMPTY_SESSIONS: SessionView[] = [];
+
+/** The fleet-wide account-quota feed. Same shape the old `useUsage` hook
+ *  returned, so every call site is unchanged — but there is now ONE poll behind
+ *  it for the whole app instead of one per mounted consumer. */
+export function useUsageSnapshot(): UsageSnapshot {
+  const s = useStore();
+  return useSyncExternalStore(s.subscribe, s.getUsage, s.getUsage);
+}
