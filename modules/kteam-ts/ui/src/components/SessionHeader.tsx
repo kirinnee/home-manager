@@ -25,15 +25,15 @@
 // screen and read as a badge wall rather than as a status.
 //
 // What stays here is what you STEER by:
-//   back · status (shape + word) · who/what · exceptions · tabs · controls · Details
+//   back · status (shape + word) · who/what · exceptions · tabs · controls · overflow
 //
-// Everything else moved into <SessionDetails/>, an accessible right-side drawer
-// with four labelled groups (Identity, Runtime, Progress, Budget). The two facts
+// Everything else moved into <SessionDetails/>, an accessible bottom sheet with
+// labelled Identity, Lineage, Runtime, Progress and Budget groups. The two facts
 // that must never be one click away — a declared park and needs-human — keep a
 // rest-visible chip up here, because they are what a lead scans for.
 
 import { memo, useId, useState, type ReactNode } from 'react';
-import { ChevronLeft, Pause, Play, StopCircle, ZapOff, Info, MoreHorizontal } from 'lucide-react';
+import { ChevronLeft, Pause, Play, StopCircle, ZapOff, MoreHorizontal } from 'lucide-react';
 import type { SessionView } from '../types';
 import { Button, ActionGroup } from './Primitives';
 import { Link } from '../lib/router';
@@ -109,13 +109,14 @@ export const SessionHeader = memo(function SessionHeader({
   );
   const details = (
     <SessionDetails
+      id={panelId}
       view={view}
       quota={quota}
       liveStatus={liveStatus}
       open={detailsOpen}
       onClose={() => setDetailsOpen(false)}
       labelledBy={detailsId}
-      // On a phone the drawer is where Interrupt/Stop/Resume live: it is already
+      // On a phone the sheet is where Interrupt/Stop/Resume live: it is already
       // a real dialog with a focus trap, an Escape path and restored focus, so
       // the controls keep a robust home instead of a second ad-hoc popover.
       actions={compact ? actions : undefined}
@@ -237,10 +238,10 @@ export const SessionHeader = memo(function SessionHeader({
             onClick={() => setDetailsOpen(open => !open)}
             aria-expanded={detailsOpen}
             aria-controls={detailsOpen ? panelId : undefined}
-            aria-label="Session details"
-            title="Identity, runtime, progress and budget for this session"
+            aria-label="Session controls and details"
+            title="Controls, identity, lineage, runtime, progress and budget"
           >
-            <Info size={12} aria-hidden="true" /> <span className="hidden sm:inline">Details</span>
+            <MoreHorizontal size={16} aria-hidden="true" />
           </Button>
         </ActionGroup>
       </div>

@@ -1,4 +1,4 @@
-// SESSION DETAILS — the drawer behind the header's "Details" button.
+// SESSION DETAILS — the bottom sheet behind the header's overflow button.
 //
 // The header used to be a badge wall: mode, RC, status, nudged, needs-human,
 // wrapper, model, turn, context, five liveness ages, quota and the socket state,
@@ -6,33 +6,61 @@
 // somebody needs — none of them is a fact everybody needs all the time, and
 // together they cost two lines of transcript on a 100dvh page and read as noise.
 //
-// They live here instead, in four LABELLED groups. The header keeps only what
-// you steer by (who, status, tabs, controls) and this answers "what exactly am I
-// looking at".
+// They live here instead, in labelled groups. The header keeps only what you
+// steer by (who, status, tabs, controls) and this answers "what exactly am I
+// looking at" — including the session's direct lineage.
 //
 // Rules this file follows:
 //   - a group is never identified by colour alone: icon + written heading, with
 //     the tone as reinforcement
 //   - decorative icons are aria-hidden; the adjacent text is the name
-//   - it is a real dialog: Escape, backdrop click and an explicit labelled close
-//     button all dismiss it, focus moves in and is restored on the way out
+//   - it is a real dialog: Escape, scrim, a labelled handle button and a
+//     handle-only swipe all dismiss it; focus moves in and is restored
 //   - it is an OVERLAY with its own scroller, so the page keeps exactly one
 //     pane scroller (the transcript) and the 100dvh shell never scrolls
-//   - no navigation: the only link is the session's own RC surface, which is
-//     external and explicitly opens in a new tab
+//   - lineage is the one in-app navigation this metadata surface owns; every
+//     route link closes the sheet before the route changes
 
-import { memo, useEffect, useRef, useState, type ReactNode } from 'react';
-import { Activity, Bot, Gauge, Radio, Sparkles, UserRound, X, ExternalLink, AlertTriangle, Zap } from 'lucide-react';
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type MouseEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from 'react';
+import {
+  Activity,
+  AlertTriangle,
+  Bot,
+  ExternalLink,
+  Gauge,
+  GitFork,
+  Radio,
+  Sparkles,
+  UserRound,
+  Zap,
+} from 'lucide-react';
 import type { SessionView } from '../types';
 import type { Quota } from '../lib/usage';
 import { cn, fmtAbsolute, fmtAge, fmtRelative } from '../lib/utils';
+import { buildLineage, byNewestActivity, parentDisplay, shortSessionId } from '../lib/lineage';
+import { Link } from '../lib/router';
+import { useStore } from '../lib/store';
 import { MODE_HINT } from './ModeBadge';
+import { StatusMark } from './StatusMark';
 import { useDialogFocus } from '../hooks/useDialogFocus';
-import { Button } from './Primitives';
 
 export type LiveStatus = 'connecting' | 'open' | 'closed';
 
 interface Props {
+  /** Concrete panel id; the header trigger's aria-controls resolves to it. */
+  id: string;
   view: SessionView;
   quota: Quota | null;
   liveStatus: LiveStatus;
@@ -43,8 +71,8 @@ interface Props {
   /** Session controls (Interrupt / Stop / Resume) when the caller has nowhere to
    *  put them — the phone header is a single nowrap row and cannot hold three
    *  more 44px targets. They go FIRST, above the read-only groups, because a
-   *  drawer opened to stop a session should not need a scroll to do it. This is
-   *  the whole reason the drawer is the overflow: it already traps focus,
+   *  sheet opened to stop a session should not need a scroll to do it. This is
+   *  the whole reason the sheet is the overflow: it already traps focus,
    *  restores it and answers Escape, so the controls lose nothing by moving. */
   actions?: ReactNode;
 }
@@ -53,144 +81,321 @@ interface Props {
  *  heading text carry the identity. */
 const GROUP_TONE = {
   identity: 'text-accent border-accent',
+  lineage: 'text-accent border-accent',
   runtime: 'text-fg-soft border-border',
   progress: 'text-warn border-warn-border',
   budget: 'text-ok border-ok-border',
 } as const;
 
-export function SessionDetails({ view, quota, liveStatus, open, onClose, labelledBy, actions }: Props) {
+const SHEET_TRANSITION_MS = 200;
+const REDUCED_MOTION = '(prefers-reduced-motion: reduce)';
+const MAX_DIRECT_CHILDREN = 12;
+
+function usePrefersReducedMotion(): boolean {
+  const [reduced, setReduced] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia?.(REDUCED_MOTION).matches === true,
+  );
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const media = window.matchMedia(REDUCED_MOTION);
+    const sync = () => setReduced(media.matches);
+    sync();
+    media.addEventListener('change', sync);
+    return () => media.removeEventListener('change', sync);
+  }, []);
+  return reduced;
+}
+
+interface SwipeGesture {
+  pointerId: number;
+  startY: number;
+  lastY: number;
+  lastAt: number;
+  distance: number;
+  velocity: number;
+}
+
+export function SessionDetails({ id, view, quota, liveStatus, open, onClose, labelledBy, actions }: Props) {
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const swipeRef = useRef<SwipeGesture | null>(null);
+  const suppressHandleClick = useRef(false);
+  const reducedMotion = usePrefersReducedMotion();
+  const [mounted, setMounted] = useState(open);
+  const [entered, setEntered] = useState(false);
+  const [dragY, setDragY] = useState<number | null>(null);
+
+  // `open || mounted` is load-bearing: the first open renders the panel before
+  // useDialogFocus tries to focus it, while `mounted` alone keeps the DOM around
+  // for the close slide. Reduced motion removes it in the closing layout pass.
+  const rendered = open || mounted;
+  useLayoutEffect(() => {
+    let frame: number | undefined;
+    swipeRef.current = null;
+    setDragY(null);
+    if (open) {
+      setMounted(true);
+      suppressHandleClick.current = false;
+      if (reducedMotion) setEntered(true);
+      else {
+        setEntered(false);
+        frame = requestAnimationFrame(() => setEntered(true));
+      }
+    } else {
+      setEntered(false);
+      if (reducedMotion) setMounted(false);
+    }
+    return () => {
+      if (frame !== undefined) cancelAnimationFrame(frame);
+    };
+  }, [open, reducedMotion]);
+
+  useEffect(() => {
+    if (open || !mounted || reducedMotion) return;
+    const timeout = window.setTimeout(() => setMounted(false), SHEET_TRANSITION_MS);
+    return () => window.clearTimeout(timeout);
+  }, [open, mounted, reducedMotion]);
+
+  // Losing the window mid-drag must snap the sheet back rather than leaving a
+  // stale offset for the next open. Pointer capture itself is released by the
+  // browser; this only clears our gesture state.
+  useEffect(() => {
+    const cancelSwipe = () => {
+      if (!swipeRef.current) return;
+      swipeRef.current = null;
+      suppressHandleClick.current = true;
+      setDragY(null);
+    };
+    window.addEventListener('blur', cancelSwipe);
+    return () => window.removeEventListener('blur', cancelSwipe);
+  }, []);
+
   // Escape, focus-in, focus-restore and the Tab trap — the same contract the
   // fleet drawer now uses (hooks/useDialogFocus.ts).
   const { onKeyDown } = useDialogFocus(open, panelRef, onClose);
 
-  if (!open) return null;
+  if (!rendered) return null;
 
   const { config, state } = view;
   const observedModel = config.model?.trim();
   const requestedModel = config.modelHint?.trim();
+  const title = config.teammate || config.name || config.id;
+
+  function beginSwipe(event: ReactPointerEvent<HTMLButtonElement>) {
+    if (!open || event.button !== 0) return;
+    const at = event.timeStamp;
+    swipeRef.current = {
+      pointerId: event.pointerId,
+      startY: event.clientY,
+      lastY: event.clientY,
+      lastAt: at,
+      distance: 0,
+      velocity: 0,
+    };
+    suppressHandleClick.current = false;
+    setDragY(0);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function moveSwipe(event: ReactPointerEvent<HTMLButtonElement>) {
+    const gesture = swipeRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    const distance = Math.max(0, event.clientY - gesture.startY);
+    const elapsed = Math.max(1, event.timeStamp - gesture.lastAt);
+    gesture.velocity = (event.clientY - gesture.lastY) / elapsed;
+    gesture.lastY = event.clientY;
+    gesture.lastAt = event.timeStamp;
+    gesture.distance = distance;
+    if (distance > 4) suppressHandleClick.current = true;
+    setDragY(distance);
+  }
+
+  function endSwipe(event: ReactPointerEvent<HTMLButtonElement>, cancelled: boolean) {
+    const gesture = swipeRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId))
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    swipeRef.current = null;
+
+    const threshold = (panelRef.current?.getBoundingClientRect().height ?? 0) * 0.25;
+    const shouldClose =
+      !cancelled && (gesture.distance >= threshold || (gesture.distance > 12 && gesture.velocity > 0.65));
+    setDragY(null);
+    if (shouldClose) onClose();
+  }
+
+  function clickHandle() {
+    if (suppressHandleClick.current) {
+      suppressHandleClick.current = false;
+      return;
+    }
+    onClose();
+  }
+
+  const sheetTransform =
+    dragY === null ? (open && entered ? 'translateY(0)' : 'translateY(100%)') : `translateY(${dragY}px)`;
 
   return (
-    <>
+    <div
+      className={cn('kt-overlay fixed inset-x-0 z-40 flex flex-col justify-end', !open && 'pointer-events-none')}
+      aria-hidden={open ? undefined : true}
+    >
       {/* Backdrop. A plain button so a click OR a keyboard activation dismisses,
           and screen readers are told what it does rather than meeting a div. */}
       <button
         type="button"
         aria-label="Close session details"
         onClick={onClose}
-        className="kt-overlay fixed inset-0 z-40 cursor-default bg-scrim"
+        disabled={!open}
+        tabIndex={open ? 0 : -1}
+        className={cn(
+          'absolute inset-0 cursor-default bg-scrim transition-opacity duration-200 motion-reduce:transition-none',
+          open && entered ? 'opacity-100' : 'opacity-0',
+        )}
       />
       <div
+        id={id}
         ref={panelRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={labelledBy}
-        aria-label={labelledBy ? undefined : 'Session details'}
-        tabIndex={-1}
-        onKeyDown={onKeyDown}
-        className={cn('kt-overlay kt-panel kt-details fixed right-0 z-50 flex w-full flex-col font-ui', 'sm:w-[400px]')}
+        role={open ? 'dialog' : undefined}
+        aria-modal={open ? true : undefined}
+        aria-labelledby={open ? labelledBy : undefined}
+        aria-label={open && !labelledBy ? 'Session details' : undefined}
+        tabIndex={open ? -1 : undefined}
+        inert={open ? undefined : true}
+        onKeyDown={open ? onKeyDown : undefined}
+        onTransitionEnd={event => {
+          if (!open && event.target === event.currentTarget && event.propertyName === 'transform') setMounted(false);
+        }}
+        className={cn(
+          'kt-panel kt-sheet kt-details relative z-10 flex w-full flex-col font-ui will-change-transform',
+          dragY === null && 'transition-transform duration-200 ease-out motion-reduce:transition-none',
+        )}
+        style={{
+          maxHeight: 'min(72dvh, calc(var(--app-h, 100dvh) - var(--gap-sm)))',
+          transform: sheetTransform,
+        }}
       >
-        <div className="kt-panel__header shrink-0">
-          <span className="min-w-0 flex-1 truncate font-display text-title font-semibold tracking-display text-fg">
-            {config.teammate || config.name || config.id}
-          </span>
-          <Button
+        <div className="shrink-0 border-b border-border-soft">
+          {/* The handle is both the visible dismissal affordance and the ONLY
+              swipe surface. Its own touch-action prevents gesture arbitration;
+              the metadata scroller below never sees these pointer handlers. */}
+          <button
             type="button"
-            variant="ghost"
-            size="sm"
-            onClick={onClose}
             aria-label="Close session details"
-            title="Close (Esc)"
+            data-sheet-swipe="supported"
+            disabled={!open}
+            onClick={clickHandle}
+            onPointerDown={beginSwipe}
+            onPointerMove={moveSwipe}
+            onPointerUp={event => endSwipe(event, false)}
+            onPointerCancel={event => endSwipe(event, true)}
+            className="group mx-auto flex min-h-[44px] w-20 touch-none cursor-grab items-center justify-center py-3 active:cursor-grabbing"
+            title="Close, or swipe down"
           >
-            <X size={15} aria-hidden="true" />
-          </Button>
+            <span
+              className="block h-1 w-12 rounded-full bg-border-strong transition-colors group-hover:bg-fg-soft"
+              aria-hidden="true"
+            />
+          </button>
+          <div className="mx-auto flex w-full max-w-2xl min-w-0 items-baseline gap-sm px-panel pb-row-y">
+            <span
+              className="min-w-0 flex-1 truncate font-display text-title font-semibold tracking-display text-fg"
+              title={title}
+            >
+              {title}
+            </span>
+            <span className="kt-label shrink-0">Session details</span>
+          </div>
         </div>
 
-        {/* The drawer's OWN scroller. The page below still owns exactly one
+        {/* The sheet's OWN scroller. The page below still owns exactly one
             (the transcript); this one is an overlay and never nests inside it. */}
         <div className="min-h-0 flex-1 overflow-y-auto scroll-thin">
-          {actions && (
-            <section className="kt-details__group">
-              <h2
-                className={cn(
-                  'kt-label m-0 mb-xs flex items-center gap-xs border-l-heavy pl-cell-x',
-                  GROUP_TONE.progress,
-                )}
-              >
-                <Zap size={13} aria-hidden="true" />
-                Controls
-              </h2>
-              <div className="flex flex-wrap items-center gap-sm">{actions}</div>
-            </section>
-          )}
-
-          <Group icon={<UserRound size={13} aria-hidden="true" />} title="Identity" tone="identity">
-            <Row label="Teammate" value={config.teammate} />
-            <Row label="Task" value={config.name} />
-            <Row label="Label" value={config.label} />
-            <Row label="Folder" value={config.cwd} mono />
-            <Row label="Session id" value={config.id} mono />
-            <Row label="Started" value={state.startedAt ? fmtAbsolute(state.startedAt) : undefined} mono />
-            {state.finishedAt && <Row label="Finished" value={fmtAbsolute(state.finishedAt)} mono />}
-          </Group>
-
-          <Group
-            icon={
-              config.harness === 'claude' ? (
-                <Bot size={13} aria-hidden="true" />
-              ) : (
-                <Sparkles size={13} aria-hidden="true" />
-              )
-            }
-            title="Runtime"
-            tone="runtime"
-          >
-            <Row label="CLI wrapper" value={config.binary} mono />
-            <Row label="Harness" value={config.harness} />
-            <Row label="Model (observed)" value={observedModel} mono />
-            <Row
-              label="Model (requested)"
-              value={requestedModel && requestedModel !== observedModel ? requestedModel : undefined}
-              mono
-            />
-            <Row label="Mode" value={config.mode} hint={MODE_HINT[config.mode]} />
-            <Row label="tmux session" value={config.tmuxSession} mono />
-            {config.remoteControl && (
-              <div className="flex items-baseline gap-sm">
-                <dt className="w-[104px] shrink-0 text-meta text-muted">Remote control</dt>
-                <dd className="m-0 min-w-0 flex-1 text-cell text-fg-soft">
-                  {state.remoteControlUrl ? (
-                    <a
-                      href={state.remoteControlUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      title={state.remoteControlUrl}
-                      className="inline-flex min-w-0 items-center gap-xs text-accent hover:underline"
-                    >
-                      <Radio size={11} aria-hidden="true" />
-                      <span className="min-w-0 truncate">open RC surface</span>
-                      <ExternalLink size={10} aria-hidden="true" />
-                    </a>
-                  ) : (
-                    <span className="text-faint" title="launched with --rc; the surface has not announced itself yet">
-                      enabled · link pending
-                    </span>
+          <div className="mx-auto grid w-full max-w-2xl grid-cols-1 sm:grid-cols-2">
+            {actions && (
+              <section className="kt-details__group sm:col-span-2">
+                <h2
+                  className={cn(
+                    'kt-label m-0 mb-xs flex items-center gap-xs border-l-heavy pl-cell-x',
+                    GROUP_TONE.progress,
                   )}
-                </dd>
-              </div>
+                >
+                  <Zap size={13} aria-hidden="true" />
+                  Controls
+                </h2>
+                <div className="flex flex-wrap items-center gap-sm">{actions}</div>
+              </section>
             )}
-          </Group>
 
-          <Group icon={<Activity size={13} aria-hidden="true" />} title="Progress" tone="progress">
-            <ProgressRows view={view} liveStatus={liveStatus} />
-          </Group>
+            <Group icon={<UserRound size={13} aria-hidden="true" />} title="Identity" tone="identity">
+              <Row label="Teammate" value={config.teammate} />
+              <Row label="Task" value={config.name} />
+              <Row label="Label" value={config.label} />
+              <Row label="Folder" value={config.cwd} mono />
+              <Row label="Session id" value={config.id} mono />
+              <Row label="Started" value={state.startedAt ? fmtAbsolute(state.startedAt) : undefined} mono />
+              {state.finishedAt && <Row label="Finished" value={fmtAbsolute(state.finishedAt)} mono />}
+            </Group>
 
-          <Group icon={<Gauge size={13} aria-hidden="true" />} title="Budget" tone="budget">
-            <BudgetRows view={view} quota={quota} />
-          </Group>
+            <LineageGroup open={open} sessionId={config.id} parentId={config.parent} onNavigate={onClose} />
+
+            <Group
+              icon={
+                config.harness === 'claude' ? (
+                  <Bot size={13} aria-hidden="true" />
+                ) : (
+                  <Sparkles size={13} aria-hidden="true" />
+                )
+              }
+              title="Runtime"
+              tone="runtime"
+            >
+              <Row label="CLI wrapper" value={config.binary} mono />
+              <Row label="Harness" value={config.harness} />
+              <Row label="Model (observed)" value={observedModel} mono />
+              <Row
+                label="Model (requested)"
+                value={requestedModel && requestedModel !== observedModel ? requestedModel : undefined}
+                mono
+              />
+              <Row label="Mode" value={config.mode} hint={MODE_HINT[config.mode]} />
+              <Row label="tmux session" value={config.tmuxSession} mono />
+              {config.remoteControl && (
+                <div className="flex items-baseline gap-sm">
+                  <dt className="w-[104px] shrink-0 text-meta text-muted">Remote control</dt>
+                  <dd className="m-0 min-w-0 flex-1 text-cell text-fg-soft">
+                    {state.remoteControlUrl ? (
+                      <a
+                        href={state.remoteControlUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        title={state.remoteControlUrl}
+                        className="inline-flex min-w-0 items-center gap-xs text-accent hover:underline"
+                      >
+                        <Radio size={11} aria-hidden="true" />
+                        <span className="min-w-0 truncate">open RC surface</span>
+                        <ExternalLink size={10} aria-hidden="true" />
+                      </a>
+                    ) : (
+                      <span className="text-faint" title="launched with --rc; the surface has not announced itself yet">
+                        enabled · link pending
+                      </span>
+                    )}
+                  </dd>
+                </div>
+              )}
+            </Group>
+
+            <Group icon={<Activity size={13} aria-hidden="true" />} title="Progress" tone="progress">
+              <ProgressRows view={view} liveStatus={liveStatus} />
+            </Group>
+
+            <Group icon={<Gauge size={13} aria-hidden="true" />} title="Budget" tone="budget">
+              <BudgetRows view={view} quota={quota} />
+            </Group>
+          </div>
         </div>
       </div>
-    </>
+    </div>
   );
 }
 
@@ -213,6 +418,112 @@ function Group({
       </h2>
       <dl className="m-0 grid gap-xs">{children}</dl>
     </section>
+  );
+}
+
+/** The retained session pane keeps SessionDetails mounted while closed, so a
+ *  normal useFleet() here would subscribe every hidden pane to every fleet
+ *  update. Keep the hook order stable but attach the store listener only while
+ *  the sheet is genuinely open; the closing frame reads the last snapshot. */
+function useOpenFleet(open: boolean) {
+  const store = useStore();
+  const subscribe = useCallback(
+    (notify: () => void) => (open ? store.subscribe(notify) : () => undefined),
+    [open, store],
+  );
+  return useSyncExternalStore(subscribe, store.getFleet, store.getFleet);
+}
+
+function sessionName(view: SessionView): string {
+  return view.config.teammate?.trim() || view.config.name?.trim() || view.config.label?.trim() || 'session';
+}
+
+function sessionPath(id: string): string {
+  return `/session/${encodeURIComponent(id)}`;
+}
+
+function LineageGroup({
+  open,
+  sessionId,
+  parentId,
+  onNavigate,
+}: {
+  open: boolean;
+  sessionId: string;
+  parentId?: string;
+  onNavigate: () => void;
+}) {
+  const { sessions, byId } = useOpenFleet(open);
+  const lineage = useMemo(() => buildLineage(sessions ?? []), [sessions]);
+  const parent = useMemo(() => parentDisplay(parentId, byId), [parentId, byId]);
+  const children = useMemo(
+    () => [...(lineage.childrenOf.get(sessionId) ?? [])].sort(byNewestActivity),
+    [lineage, sessionId],
+  );
+
+  if (!parent && children.length === 0) return null;
+
+  const shownChildren = children.slice(0, MAX_DIRECT_CHILDREN);
+  const hiddenChildren = children.length - shownChildren.length;
+  const closeBeforeRoute = (event: MouseEvent<HTMLAnchorElement>) => {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+    onNavigate();
+  };
+
+  return (
+    <Group icon={<GitFork size={13} aria-hidden="true" />} title="Lineage" tone="lineage">
+      {parent && (
+        <div className="flex items-start gap-sm">
+          <dt className="w-[104px] shrink-0 text-meta text-muted">Parent</dt>
+          <dd className="m-0 min-w-0 flex-1 text-cell">
+            {parent.kind === 'resolved' ? (
+              <Link
+                to={sessionPath(parent.view.config.id)}
+                data-lineage-nav="parent"
+                onClickCapture={closeBeforeRoute}
+                className="inline-flex min-w-0 max-w-full items-center gap-xs text-accent hover:underline"
+                title={`${parent.name} · ${parent.view.config.id}`}
+              >
+                <span className="min-w-0 truncate">{parent.name}</span>
+                <span className="mono shrink-0 text-meta text-faint">{shortSessionId(parent.view.config.id)}</span>
+              </Link>
+            ) : (
+              <span className="text-faint" title={parentId}>
+                missing record · <span className="mono">{parent.shortId}</span>
+              </span>
+            )}
+          </dd>
+        </div>
+      )}
+
+      {children.length > 0 && (
+        <div className="flex items-start gap-sm">
+          <dt className="w-[104px] shrink-0 text-meta text-muted">Direct children</dt>
+          <dd className="m-0 grid min-w-0 flex-1 gap-xs">
+            {shownChildren.map(child => {
+              const name = sessionName(child);
+              return (
+                <Link
+                  key={child.config.id}
+                  to={sessionPath(child.config.id)}
+                  data-lineage-nav="child"
+                  onClickCapture={closeBeforeRoute}
+                  className="flex min-w-0 items-center gap-xs rounded-control px-1.5 py-1 text-cell text-fg-soft hover:bg-surface-2 hover:text-accent"
+                  title={`${name} · ${child.config.id}`}
+                >
+                  <StatusMark view={child} size={7} />
+                  <span className="min-w-0 flex-1 truncate">{name}</span>
+                  <span className="mono shrink-0 text-meta text-faint">{shortSessionId(child.config.id)}</span>
+                </Link>
+              );
+            })}
+            {hiddenChildren > 0 && (
+              <span className="px-1.5 text-meta text-faint">+{hiddenChildren} more direct children</span>
+            )}
+          </dd>
+        </div>
+      )}
+    </Group>
   );
 }
 
