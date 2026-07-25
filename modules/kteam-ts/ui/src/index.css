@@ -96,9 +96,16 @@ textarea {
   border-radius: var(--radius-sm);
   padding: 7px 10px;
 }
+/* NO `outline: none` HERE.
+   It used to be, and it made the translucent `--ring` glow the ONLY focus
+   indicator on every text field in the app — measured at 1.5-2.9:1 against the
+   surface in all ten themes, under a 3:1 floor (a11y audit, WCAG 2.4.11/1.4.11).
+   That silently voided the Neo-AA and Contrast-AAA claims for anyone navigating
+   by keyboard. The `:focus-visible` rule below already draws a real, tokenised,
+   ≥3:1 outline in every theme; the ring and the accent border stay as the
+   decorative half. */
 input:focus,
 textarea:focus {
-  outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--ring);
 }
@@ -506,4 +513,216 @@ pre,
 .kt-viewport,
 .kt-content {
   overflow-anchor: auto;
+}
+
+/* ============================================================================
+   MOBILE / TOUCH.
+   ============================================================================
+   Everything here is about the app being used on a phone in a hand. It is one
+   section on purpose: the shell geometry, the safe areas, the target-size floor
+   and the density ramp are one problem, and splitting them across component
+   files is how the previous rounds ended up with a desktop app that happened to
+   fit in 390px.
+
+   Palette-independent by construction — no colour is named below, so this can
+   land alongside theme work without either side touching the other's values.
+   ============================================================================ */
+
+/* ---- THE SHELL IS THE VISUAL VIEWPORT -------------------------------------
+   `100dvh` is not what the reader can see once a software keyboard is up. iOS
+   Safari keeps the layout viewport at full height and PANS the visual viewport
+   over it, so the bottom of a 100dvh, overflow:hidden shell — the composer, the
+   send button — sits behind the keyboard with nothing to scroll it into view.
+   Android only resizes once the viewport meta opts in (index.html).
+
+   So the shell is sized from `window.visualViewport` and positioned at its pan
+   offset (src/hooks/useAppViewport.ts writes --app-h / --app-top / --kb-h). The
+   three height declarations are a deliberate fallback ladder: a browser without
+   dvh gets vh, a page whose JS has not run yet gets dvh, and everything else
+   gets the real visible height. */
+.kt-shell {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: var(--app-top, 0px);
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  height: var(--app-h, 100dvh);
+  /* Notch and home indicator. `viewport-fit=cover` lets the app paint edge to
+     edge; these pay the insets back exactly once, at the outermost box, so no
+     component has to know about them and desktop (`env()` = 0) is untouched. */
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
+/* Nothing behind the app scrolls, ever. The shell IS the viewport, so a page
+   scroll can only be an accident — iOS trying to scroll a focused input into
+   view, or a rubber-band at the end of a transcript fling — and either one
+   leaves the fixed shell visibly offset from the screen. */
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+/* Full-height OVERLAYS (the fleet drawer, the session details panel) follow the
+   same visible box as the shell rather than the layout viewport. Without this a
+   drawer opened with the keyboard up runs on behind it. */
+.kt-overlay {
+  top: var(--app-top, 0px);
+  height: 100dvh;
+  height: var(--app-h, 100dvh);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* ---- iOS FOCUS ZOOM -------------------------------------------------------
+   Safari zooms the page when a text field smaller than 16px takes focus, and
+   then leaves you there — the app is suddenly 1.3x too wide and the reader has
+   to pinch back. The fix is NOT `maximum-scale=1` (that disables pinch-zoom
+   entirely: WCAG 1.4.4). The fix is to never render a text field below 16px on
+   a touch screen.
+
+   `:root` is in the selector so this beats the Tailwind `text-[13.5px]`-style
+   utilities the components set (a bare element selector would lose to them).
+   TODO: 16px becomes `var(--input-font-floor)` once themes.css declares it
+   (anderson owns that token). */
+@media (pointer: coarse), (max-width: 640px) {
+  :root input,
+  :root textarea,
+  :root select {
+    font-size: 16px;
+  }
+}
+
+/* ---- TARGET SIZE ----------------------------------------------------------
+   WCAG 2.2 asks for 24x24 as a minimum; a hand asks for more. Under a coarse
+   pointer every control gets a 44px box — the icon buttons in the app bar, the
+   drawer trigger, the tabs, the theme picker, the composer's send cluster.
+
+   This is a HIT-AREA floor, not a zoom: `min-height`/`min-width` grow the box a
+   control is centred in, they do not change its type scale or its padding, so
+   the layout keeps its density and the finger gets its 44px.
+   TODO: 44px becomes `var(--target-floor)` once themes.css declares it
+   (anderson owns that token). */
+@media (pointer: coarse) {
+  :root button,
+  :root [role='tab'],
+  :root select,
+  :root summary,
+  :root a[href] {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  /* A checkbox's LABEL is the real target — the box itself stays its own size. */
+  :root label:has(> input[type='checkbox']) {
+    min-height: 44px;
+  }
+
+  /* THE TRANSCRIPT KEEPS ITS DENSITY AND STILL GETS 44px.
+     A tool disclosure is tapped as often as anything in the app, so it does not
+     get an exemption — but growing every chevron to a 44px BOX would double the
+     height of a transcript that is mostly tool rows. So the box stays its own
+     size and an invisible, centred 44px hit area is laid over it: the finger
+     gets its target, the layout does not move. */
+  .kt-content button,
+  .kt-content [role='tab'],
+  .kt-content summary {
+    position: relative;
+    min-height: 0;
+    min-width: 0;
+  }
+  .kt-content button::after,
+  .kt-content [role='tab']::after,
+  .kt-content summary::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 44px;
+    height: 44px;
+    transform: translate(-50%, -50%);
+    /* Behind the control's own content, above nothing else: it exists only to
+       be hit. */
+    z-index: 0;
+  }
+
+  /* THE ONE EXEMPTION: a link inside a sentence. WCAG 2.5.8 exempts targets in
+     a block of text for the obvious reason — a 44px box around a word in the
+     middle of a paragraph would break the line box and overlap its neighbours.
+     Everything that is NOT prose (breadcrumbs, the sidebar's session rows, New
+     session, the RC link) keeps the floor above. */
+  .md a,
+  p a,
+  li a {
+    min-height: 0;
+    min-width: 0;
+  }
+}
+
+/* ---- DENSITY RAMP ---------------------------------------------------------
+   A phone is not a small desktop: the same 11-13px chrome that reads as
+   "dense and professional" at arm's length on a 27" display reads as "unreadable"
+   at 30cm on a 390px screen, and the fix is not to zoom the whole UI (that just
+   turns one problem into a scrolling problem).
+
+   So: the CONTENT scale goes up — body, markdown, code — while the structure
+   stays where it is. Chrome gets a smaller bump plus full opacity, because at
+   0.78 on a phone in daylight it is not chrome, it is invisible.
+
+   These tokens are DEFINED in themes.css; this is a viewport-conditional
+   re-tune of the same names, not a second definition. */
+@media (max-width: 640px) {
+  :root {
+    /* 16px is the phone baseline, not a "large" setting: it is what iOS and
+       Android use for body copy, it is the size below which Safari zooms a
+       focused field, and the reader's actual complaint was that this app was
+       unreadable on a phone. The transcript matches it — the conversation is the
+       content, so it gets body size, not caption size. */
+    --font-size-base: 16px;
+    --leading-base: 1.55;
+    --md-font-size: 16px;
+    --md-leading: 1.6;
+    --code-font-size: 14px;
+    --chrome-font-size: 12.5px;
+    --chrome-opacity: 0.92;
+  }
+  /* Rendered prose gets a little more room to breathe between blocks, since the
+     line count per paragraph roughly doubles at this width. */
+  .kt-block[data-kind='message'] {
+    margin-top: 16px;
+  }
+  .kt-block[data-kind='message'][data-turn='true'] {
+    margin-top: 22px;
+  }
+}
+
+/* ---- REDUCED MOTION, GLOBALLY ---------------------------------------------
+   The theme layer already suppresses its own effects, and a few components pass
+   `motion-reduce:` on their spinners — but that is opt-in, so every `animate-*`
+   added later starts out non-compliant (audit: 6 such sites). One rule covers
+   the whole app, including anything added tomorrow.
+
+   Deliberately NOT `animation: none`: a spinner that vanishes tells the reader
+   nothing is happening. It is slowed to a step, which conveys "busy" without
+   the motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+  .animate-spin,
+  .animate-pulse,
+  .animate-ping,
+  .animate-bounce {
+    animation: none !important;
+    opacity: 1 !important;
+  }
 }

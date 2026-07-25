@@ -421,6 +421,35 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
   // construction: it only fires for a reader who has arrived within
   // REENGAGE_PX of the bottom, and it moves DOWN — the direction they were
   // already going — so it cannot oppose the gesture that triggered it.
+  //
+  // ROUND 6 — THAT LAST CLAIM WAS UNTESTED, AND ON A PHONE IT IS FALSE.
+  //
+  // "They were already going down" was an assumption about how a reader reaches
+  // the band, never a condition. A reader can also be INSIDE the band while
+  // moving UP — for the first ~96px of every scroll-up that starts at the tail,
+  // which is where every scroll-up starts, because the transcript opens pinned.
+  //
+  // On a mouse that window is invisible: one wheel tick is 100px+, so the very
+  // first scroll event already leaves the band. A FINGER delivers the same
+  // 300px drag as ~10-20 touchmoves of 20-40px each. Measured on a real
+  // transcript at 390x844 (headless Chromium, genuine touch events, session
+  // mrwirdnf-9f80826f, scrollHeight 3094 / clientHeight 621, bottom = 2473):
+  //
+  //   touchmove → scroll 2473→2428   (the finger moves it up, correctly)
+  //   scroll 2428 → gap 45 ≤ 96 → RE-ENGAGE → pin() → scroll 2473
+  //   touchmove → scroll 2473→2443 → gap 30 → RE-ENGAGE → pin() → 2473
+  //   …every frame, for the whole gesture
+  //
+  // Net movement after a full 360px drag: 0px. The transcript is FROZEN at the
+  // tail on touch devices — not "hard to scroll", immovable — and it is exactly
+  // the feedback loop this comment forbids, arriving through the one branch it
+  // exempted. (Detach itself worked; follow was re-armed a frame later.)
+  //
+  // The fix is to make the assumption a condition: re-engage only when the
+  // reader is NOT moving up in this event. Arriving at the bottom going down
+  // still re-engages on the same frame it always did (the streaming-tail case
+  // REENGAGE_PX exists for is untouched); passing through the band on the way UP
+  // no longer re-arms follow behind the reader's back.
   function onScroll(e: React.UIEvent<HTMLDivElement>) {
     const el = e.currentTarget;
     const scrollTop = el.scrollTop;
@@ -435,10 +464,14 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
     if (movedUp && byReader && !shrank && followRef.current) {
       followRef.current = false;
       setDetached(true);
-    } else if (nearBottom && !followRef.current) {
+    } else if (nearBottom && !movedUp && !followRef.current) {
       // Scrolled back down to the bottom under their own steam — resume
       // following, and pin so we land exactly at the tail rather than wherever
       // in the band they stopped.
+      //
+      // `!movedUp` is what keeps this from opposing a gesture: a reader who is
+      // inside the band but travelling UPWARD is leaving, not arriving (see the
+      // round-6 note above).
       followRef.current = true;
       setDetached(false);
       setNewCount(0);

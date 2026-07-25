@@ -27,6 +27,7 @@ import type { SessionView } from '../types';
 import type { Quota } from '../lib/usage';
 import { cn, fmtAbsolute, fmtAge, fmtRelative } from '../lib/utils';
 import { MODE_HINT } from './ModeBadge';
+import { useDialogFocus } from '../hooks/useDialogFocus';
 
 export type LiveStatus = 'connecting' | 'open' | 'closed';
 
@@ -51,33 +52,9 @@ const GROUP_TONE = {
 
 export function SessionDetails({ view, quota, liveStatus, open, onClose, labelledBy }: Props) {
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const restoreTo = useRef<HTMLElement | null>(null);
-
-  // Escape closes from anywhere, including from inside the panel.
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.stopPropagation();
-        onClose();
-      }
-    };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [open, onClose]);
-
-  // Focus in on open, back to the trigger on close — a drawer you can open with
-  // the keyboard and then not reach is worse than no drawer.
-  useEffect(() => {
-    if (open) {
-      restoreTo.current = document.activeElement as HTMLElement | null;
-      panelRef.current?.focus();
-      return;
-    }
-    const previous = restoreTo.current;
-    restoreTo.current = null;
-    if (previous && typeof previous.focus === 'function' && document.contains(previous)) previous.focus();
-  }, [open]);
+  // Escape, focus-in, focus-restore and the Tab trap — the same contract the
+  // fleet drawer now uses (hooks/useDialogFocus.ts).
+  const { onKeyDown } = useDialogFocus(open, panelRef, onClose);
 
   if (!open) return null;
 
@@ -93,7 +70,7 @@ export function SessionDetails({ view, quota, liveStatus, open, onClose, labelle
         type="button"
         aria-label="Close session details"
         onClick={onClose}
-        className="fixed inset-0 z-40 cursor-default bg-scrim motion-reduce:transition-none"
+        className="kt-overlay fixed inset-0 z-40 cursor-default bg-scrim"
       />
       <div
         ref={panelRef}
@@ -102,28 +79,9 @@ export function SessionDetails({ view, quota, liveStatus, open, onClose, labelle
         aria-labelledby={labelledBy}
         aria-label={labelledBy ? undefined : 'Session details'}
         tabIndex={-1}
-        // `aria-modal` claims the rest of the page is unreachable, so Tab has to
-        // actually stay inside — a claim the reader can disprove with one
-        // keystroke is worse than not making it.
-        onKeyDown={event => {
-          if (event.key !== 'Tab') return;
-          const focusable = panelRef.current?.querySelectorAll<HTMLElement>(
-            'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
-          );
-          if (!focusable || focusable.length === 0) return;
-          const first = focusable[0]!;
-          const last = focusable[focusable.length - 1]!;
-          const active = document.activeElement;
-          if (event.shiftKey && (active === first || active === panelRef.current)) {
-            event.preventDefault();
-            last.focus();
-          } else if (!event.shiftKey && active === last) {
-            event.preventDefault();
-            first.focus();
-          }
-        }}
+        onKeyDown={onKeyDown}
         className={cn(
-          'fixed right-0 top-0 z-50 flex h-[100dvh] w-full flex-col border-l border-border bg-surface shadow-lg',
+          'kt-overlay fixed right-0 z-50 flex w-full flex-col border-l border-border bg-surface shadow-lg',
           'sm:w-[400px]',
         )}
       >

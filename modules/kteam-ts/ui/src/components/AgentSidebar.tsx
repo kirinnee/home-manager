@@ -63,6 +63,7 @@ import { StatusMark, statusMark } from './StatusMark';
 import { TaskName } from './TaskName';
 import { MODE_HINT } from './ModeBadge';
 import { useLayoutMode, type LayoutMode } from '../hooks/useLayoutMode';
+import { useDialogFocus } from '../hooks/useDialogFocus';
 
 /** Expanded width. Wide enough for a task line and a teammate name, narrow
  *  enough that the transcript beside it still reads comfortably at 1280px. */
@@ -527,18 +528,15 @@ export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSideb
   const groups = useMemo(() => groupByProject(visible, projects, true), [visible, projects]);
   const total = sessions?.length ?? 0;
 
-  // Escape closes the drawer, from anywhere inside it.
-  useEffect(() => {
-    if (layout !== 'drawer' || !drawerOpen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        onCloseDrawer();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [layout, drawerOpen, onCloseDrawer]);
+  // Escape, focus-in, focus-restore-to-the-trigger and a real Tab trap — the
+  // shared modal contract (hooks/useDialogFocus.ts), the same one the session
+  // details drawer uses. `autoFocus: false` because this drawer focuses its
+  // SEARCH BOX instead (Body's `autoFocusSearch`), which is the one control a
+  // reader opening the fleet list actually wants.
+  const drawerRef = useRef<HTMLDivElement | null>(null);
+  const { onKeyDown: onDrawerKeyDown } = useDialogFocus(layout === 'drawer' && drawerOpen, drawerRef, onCloseDrawer, {
+    autoFocus: false,
+  });
 
   const collapse = useCallback(() => setControls({ sidebarCollapsed: true }), [setControls]);
   const expand = useCallback(() => setControls({ sidebarCollapsed: false }), [setControls]);
@@ -548,7 +546,14 @@ export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSideb
   if (layout === 'drawer') {
     if (!drawerOpen) return null;
     return (
-      <div className="fixed inset-0 z-40 md:hidden" role="dialog" aria-modal="true" aria-label="Fleet sessions">
+      <div
+        ref={drawerRef}
+        onKeyDown={onDrawerKeyDown}
+        className="kt-overlay fixed inset-0 z-40 md:hidden"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Fleet sessions"
+      >
         <button
           type="button"
           aria-label="Close the fleet sidebar"
