@@ -112,6 +112,17 @@ export type TranscriptBlock =
     }
   | { id: string; kind: 'notice'; label: string; detail?: string };
 
+/** A turn separator earns a transcript row only when it communicates a fact.
+ * Keep this shared between the builder and renderer so a malformed or legacy
+ * caller cannot reintroduce an empty flex item and its rhythm margin. */
+export function isInformativeTurnBoundary(boundary: {
+  aborted?: boolean;
+  durationMs?: number;
+  skipped?: number;
+}): boolean {
+  return boundary.aborted === true || boundary.durationMs !== undefined || boundary.skipped !== undefined;
+}
+
 function dataStr(rec: ChatRecord, key: string): string | undefined {
   const d = rec.data as Record<string, unknown> | undefined;
   const v = d?.[key];
@@ -216,7 +227,7 @@ export function buildTranscript(records: ChatRecord[]): TranscriptBlock[] {
     // one boundary worth showing with nothing after it.
     if (final && !p.aborted) return;
     const last = p.markers[p.markers.length - 1]!;
-    out.push({
+    const boundary: Extract<TranscriptBlock, { kind: 'turn' }> = {
       id: mkId(`n-${hash(p.key)}`),
       kind: 'turn',
       ...(last.ts === undefined ? {} : { ts: last.ts }),
@@ -225,7 +236,8 @@ export function buildTranscript(records: ChatRecord[]): TranscriptBlock[] {
       // anything beyond that is an empty turn this line stands in for.
       ...(p.markers.length > 2 ? { skipped: p.markers.length - 2 } : {}),
       ...(p.aborted ? { aborted: true } : {}),
-    });
+    };
+    if (isInformativeTurnBoundary(boundary)) out.push(boundary);
   };
 
   const n = records.length;
