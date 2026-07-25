@@ -179,14 +179,18 @@ function TurnBoundary({ block }: { block: Extract<TranscriptBlock, { kind: 'turn
 // "can i restart this?" with 22:56:19 drawn through it; measured 4 colliding
 // stamps at 1440px and 11 at 390px on one loaded transcript).
 //
-// So the gutter is RESERVED, not borrowed: `pr-[--kt-ts-gutter]` shrinks the
+// So the gutter is RESERVED, not borrowed: `pr-[68px]` on phones shrinks the
 // content box, the stamp is positioned inside that padding, and inline content
 // therefore wraps before it can reach the stamp. Guaranteed at every width, not
 // tuned per breakpoint. Reserving it unconditionally (rather than only on hover)
 // is deliberate: a padding that appears on hover would reflow the paragraph under
 // the cursor, and a reflow mid-stream is exactly what knocks the transcript out
 // of follow.
-const TS_GUTTER = 'pr-[54px]';
+// A full monospace HH:MM:SS clock measures 62px at `text-2xs`; on a phone,
+// leave 2px of breathing room inside its 64px column and 4px before the prose.
+// The wider desktop padding already contains the former 50px column, so retain
+// that established desktop measure.
+const TS_GUTTER = 'pr-[68px] sm:pr-[54px]';
 
 function AssistantMessage({ text, ts }: { text: string; ts?: string; source: string }) {
   if (!text.trim()) return null;
@@ -194,7 +198,7 @@ function AssistantMessage({ text, ts }: { text: string; ts?: string; source: str
     <div className={cn('group relative min-w-0 pl-3', ts && TS_GUTTER)}>
       <span className="absolute left-0 top-1 bottom-1 w-px bg-border-soft opacity-0 transition-opacity group-hover:opacity-100" />
       {ts && (
-        <span className="pointer-events-none absolute right-0 top-0.5 w-[50px] text-right mono text-2xs tabular-nums text-faint opacity-0 transition-opacity group-hover:opacity-100">
+        <span className="pointer-events-none absolute right-0 top-0.5 w-[64px] sm:w-[50px] text-right mono text-2xs tabular-nums text-faint opacity-0 transition-opacity group-hover:opacity-100">
           {fmtClock(ts)}
         </span>
       )}
