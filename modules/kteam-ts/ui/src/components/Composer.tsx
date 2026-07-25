@@ -31,6 +31,7 @@ import { useEffect, useLayoutEffect, useRef, type ReactNode } from 'react';
 import { CornerDownLeft, Send, Clock, ZapOff } from 'lucide-react';
 import { Button } from './Primitives';
 import { cn, type Tone } from '../lib/utils';
+import { useKeyboardOpen } from '../hooks/useAppViewport';
 
 /** Facts the strip states. Every one is optional — the strip's height does not
  *  depend on any of them being known. */
@@ -53,11 +54,37 @@ interface Props {
   sending?: boolean;
   placeholder?: string;
   context?: ComposerContext;
+  /** Phone chrome. Two rows of the four disappear and NOTHING about the safety
+   *  semantics moves:
+   *
+   *    - the context strip stops being a row of its own and becomes a socket dot
+   *      plus `ctx N%` in the action row's left slot. Model and turn are one tap
+   *      away in the session details drawer, and neither is a fact you steer by
+   *      while typing.
+   *    - the keyboard hint stops being VISIBLE. "Shift+Enter newline" is not a
+   *      thing a phone keyboard can do, so on touch it was a line of type that
+   *      cost 20px to say nothing. It is moved to `sr-only`, NOT removed: the
+   *      `aria-live` status words ("sending…", the send/queue change) are inside
+   *      it, and dropping them would regress a11y S-4.
+   *
+   *  Enter/Shift+Enter/IME handling, the send lock, the disabled path and the
+   *  44px/16px floors are untouched — they are not chrome. */
+  compact?: boolean;
 }
 
 /** ~6 lines. Past this the composer scrolls internally instead of eating the
  *  transcript — the shell is exactly 100dvh and has nowhere to give. */
 const MAX_TEXTAREA_PX = 148;
+/** ~4 lines. A phone at rest has 844px, not 900+, and the transcript is already
+ *  paying for a 44px touch floor on every control around it. */
+const COMPACT_MAX_TEXTAREA_PX = 96;
+/** ~2 lines. With a 336px keyboard up the whole visible app is ~508px, and a
+ *  composer that can grow to 148px there is a composer that has eaten a third of
+ *  what is left to read. Past this it scrolls internally, which is the same
+ *  contract the desktop cap has always had — just measured against the box the
+ *  reader can actually see. A percentage of `--app-h` was the obvious form and
+ *  the wrong one: 30% of 508px is 152px, which is larger than the desktop cap. */
+const COMPACT_KEYBOARD_MAX_TEXTAREA_PX = 64;
 const MIN_TEXTAREA_PX = 38;
 
 const TONE_TEXT: Record<Tone, string> = {
@@ -78,8 +105,17 @@ export function Composer({
   sending,
   placeholder,
   context,
+  compact,
 }: Props) {
   const ref = useRef<HTMLTextAreaElement | null>(null);
+  const keyboardOpen = useKeyboardOpen();
+  // The growth cap is a property of the box the reader can see, so it follows
+  // the viewport rather than the device. Desktop is unchanged at 148px.
+  const maxTextareaPx = !compact
+    ? MAX_TEXTAREA_PX
+    : keyboardOpen
+      ? COMPACT_KEYBOARD_MAX_TEXTAREA_PX
+      : COMPACT_MAX_TEXTAREA_PX;
 
   // Keep focus on the composer across re-renders (the user types → state
   // updates → React re-renders → focus would otherwise jump to <body>).
@@ -90,22 +126,31 @@ export function Composer({
   });
 
   // Auto-grow. Measured BEFORE paint so the box never flashes at the wrong
-  // height, and capped so a pasted essay cannot swallow the conversation.
+  // height, and capped so a pasted essay cannot swallow the conversation. The
+  // cap is a dependency: opening the keyboard has to re-run this, or a draft
+  // that grew to four lines at rest keeps its 96px through a 508px viewport.
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
     el.style.height = 'auto';
-    const next = Math.min(MAX_TEXTAREA_PX, Math.max(MIN_TEXTAREA_PX, el.scrollHeight));
+    const next = Math.min(maxTextareaPx, Math.max(MIN_TEXTAREA_PX, el.scrollHeight));
     el.style.height = `${next}px`;
-    el.style.overflowY = el.scrollHeight > MAX_TEXTAREA_PX ? 'auto' : 'hidden';
-  }, [draft]);
+    el.style.overflowY = el.scrollHeight > maxTextareaPx ? 'auto' : 'hidden';
+  }, [draft, maxTextareaPx]);
 
   const canSubmit = !disabled && !sending && draft.trim().length > 0;
   const showInterrupt = Boolean(busy && !disabled && onInterruptAndSend);
 
   return (
-    <div className={cn('kt-composer transition-colors motion-reduce:transition-none', disabled && 'opacity-60')}>
-      {context && <ContextStrip context={context} />}
+    <div
+      data-density-region="composer"
+      className={cn(
+        'kt-composer transition-colors motion-reduce:transition-none',
+        compact && 'kt-composer--compact',
+        disabled && 'opacity-60',
+      )}
+    >
+      {context && !compact && <ContextStrip context={context} />}
 
       {/* The textarea is borderless and transparent: the WRAPPER is the input as
           far as the eye (and the focus ring) is concerned. */}
@@ -146,25 +191,38 @@ export function Composer({
             busy/sending transition. Only the STATUS words below sit in the
             live region, so a screen reader hears "sending…" or the send/queue
             change without the keyboard hint being read back every time. */}
-        <span className="mr-auto inline-flex min-w-0 items-center gap-xs truncate text-meta text-muted">
-          {sending ? (
-            <span
-              className="inline-block h-2.5 w-2.5 shrink-0 animate-spin rounded-full border border-current border-t-transparent motion-reduce:animate-none"
-              aria-hidden="true"
-            />
-          ) : (
-            <CornerDownLeft size={11} aria-hidden="true" />
-          )}
-          <span className="truncate">
-            {/* Persistent, atomic region: only these status words announce on a
-                send/queue/busy transition. */}
-            <span aria-live="polite" aria-atomic="true">
+        {compact ? (
+          <span className="mr-auto inline-flex min-w-0 items-center gap-xs truncate text-meta text-muted">
+            {/* SPOKEN, NEVER SHOWN. `sr-only` and not `hidden`: display:none
+                would take the live region straight out of the accessibility
+                tree and a screen-reader reader would stop hearing "sending…"
+                and the send↔queue change entirely. */}
+            <span className="sr-only" aria-live="polite" aria-atomic="true">
               {sending ? 'sending…' : busy ? 'Enter queues for the next turn' : 'Enter sends'}
             </span>
-            {/* Static hint — outside the live region so it is never re-announced. */}
-            {!sending && ' · Shift+Enter newline'}
+            {context && <CompactContext context={context} sending={sending} dense={showInterrupt} />}
           </span>
-        </span>
+        ) : (
+          <span className="mr-auto inline-flex min-w-0 items-center gap-xs truncate text-meta text-muted">
+            {sending ? (
+              <span
+                className="inline-block h-2.5 w-2.5 shrink-0 animate-spin rounded-full border border-current border-t-transparent motion-reduce:animate-none"
+                aria-hidden="true"
+              />
+            ) : (
+              <CornerDownLeft size={11} aria-hidden="true" />
+            )}
+            <span className="truncate">
+              {/* Persistent, atomic region: only these status words announce on a
+                  send/queue/busy transition. */}
+              <span aria-live="polite" aria-atomic="true">
+                {sending ? 'sending…' : busy ? 'Enter queues for the next turn' : 'Enter sends'}
+              </span>
+              {/* Static hint — outside the live region so it is never re-announced. */}
+              {!sending && ' · Shift+Enter newline'}
+            </span>
+          </span>
+        )}
 
         {showInterrupt && (
           <Button
@@ -204,7 +262,10 @@ function ContextStrip({ context }: { context: ComposerContext }) {
   const socketTone = liveStatus === 'open' ? 'bg-ok' : liveStatus === 'connecting' ? 'bg-warn' : 'bg-err';
 
   return (
-    <div className="mono flex h-control-sm w-full items-center gap-x-sm overflow-hidden whitespace-nowrap border-b border-border-soft text-chrome text-muted">
+    <div
+      data-density-region="composer-context"
+      className="mono flex h-control-sm w-full items-center gap-x-sm overflow-hidden whitespace-nowrap border-b border-border-soft text-chrome text-muted"
+    >
       <Field className="min-w-0 flex-1 truncate text-fg-soft" title={model ? `model: ${model}` : 'model unknown'}>
         {model || '—'}
       </Field>
@@ -231,6 +292,68 @@ function ContextStrip({ context }: { context: ComposerContext }) {
         </span>
       )}
     </div>
+  );
+}
+
+/** The phone form of the strip: what is left after asking which of these four
+ *  facts you would act on mid-conversation.
+ *
+ *  `ctx %` survives because it is the one that changes what you do next (a
+ *  session at 92% is about to compact), and the socket dot survives because the
+ *  app bar that used to carry it is not on screen on a phone — without it a
+ *  dropped connection would have no rest-visible signal at all. Model and turn
+ *  are in the details drawer. It sits INSIDE the action row, so it costs no
+ *  height, and it goes away entirely once the keyboard is up. */
+function CompactContext({
+  context,
+  sending,
+  dense,
+}: {
+  context: ComposerContext;
+  sending?: boolean;
+  /** Interrupt & send is on the row. THE BUTTONS WIN.
+   *
+   *  Two full-word buttons plus `ctx 69%` is ~350px of a 346px row at 390px, and
+   *  a flex row breaks BEFORE it shrinks — so the readout was pushing Queue onto
+   *  a second line and paying 44px for four characters. The dot stays (it is the
+   *  only rest-visible connection signal once the app bar is gone on a phone) and
+   *  the number moves into the tooltip and the spoken text, both of which it was
+   *  already in. */
+  dense?: boolean;
+}) {
+  const { contextPercent, liveStatus } = context;
+  const ctxTone =
+    contextPercent == null ? 'text-faint' : contextPercent >= 90 ? 'text-err' : contextPercent >= 75 ? 'text-warn' : '';
+  const socketTone = liveStatus === 'open' ? 'bg-ok' : liveStatus === 'connecting' ? 'bg-warn' : 'bg-err';
+
+  return (
+    <span
+      data-kb-hide
+      className="mono inline-flex min-w-0 shrink-0 items-center gap-xs truncate"
+      title={`context window used: ${contextPercent == null ? 'unknown' : `${contextPercent}%`}${
+        liveStatus ? ` · live event stream ${liveStatus}` : ''
+      }`}
+    >
+      {sending ? (
+        <span
+          className="inline-block h-2.5 w-2.5 shrink-0 animate-spin rounded-full border border-current border-t-transparent motion-reduce:animate-none"
+          aria-hidden="true"
+        />
+      ) : (
+        <span className={cn('kt-dot shrink-0', socketTone)} aria-hidden="true" />
+      )}
+      {/* The dot is a shape without a word, so the word is spoken instead — and
+          the context number is spoken in both variants, seen in only one. */}
+      <span className="sr-only">
+        live event stream {liveStatus ?? 'unknown'}, context window{' '}
+        {contextPercent == null ? 'unknown' : `${contextPercent}% used`}
+      </span>
+      {!dense && (
+        <span className={cn('truncate', ctxTone)} aria-hidden="true">
+          ctx {contextPercent == null ? '—' : `${contextPercent}%`}
+        </span>
+      )}
+    </span>
   );
 }
 

@@ -154,7 +154,11 @@ export function SessionsListPage() {
   // fine on its own but inconsistent with the chat route.
   return (
     <div className="flex h-full min-h-0 w-full flex-col pb-2">
-      <div className="mt-2 mb-2 flex flex-wrap items-center justify-between gap-2">
+      {/* Tighter above the fold on a phone: at 390x844 this toolbar and the app
+          bar are the dashboard's whole chrome budget, and 8px of margin at each
+          end of it is most of a sixth session row. `sm:` restores the desktop
+          rhythm exactly. */}
+      <div className="mt-1 mb-1 flex flex-wrap items-center justify-between gap-2 sm:mt-2 sm:mb-2">
         {/* `--text-display` / `--weight-display` / `--tracking-display`: Mission
             shouts this in 0.08em caps, Neo at 900, Ember in a serif. */}
         <h1 className="m-0 font-display text-display font-bold tracking-display">Sessions</h1>
@@ -209,7 +213,7 @@ export function SessionsListPage() {
         </div>
       )}
 
-      <div className="min-h-0 flex-1 overflow-y-auto scroll-thin">
+      <div data-density-region="dashboard-scroller" className="min-h-0 flex-1 overflow-y-auto scroll-thin">
         {!sessions && <SkeletonRows />}
         {sessions && visible.length === 0 && (
           <div className="rounded-panel border border-dashed border-border bg-surface-2 px-4 py-10 text-center text-muted">

@@ -1,5 +1,23 @@
 // Session header — ONE compact summary bar.
 //
+// ROUND 8 — ON A PHONE IT IS ONE ROW, AND IT IS THE ONLY ROW.
+//
+// Measured at 390x844 it was three: the app bar's breadcrumb, this bar's
+// identity line, and this bar's WRAPPED action line (the `flex-wrap` below plus
+// four 44px touch targets cannot share 390px with a title). 141px of chrome
+// stating the session's name twice. So below DRAWER_MAX the app bar is
+// suppressed entirely (App.tsx) and this becomes the single top row, `nowrap`,
+// carrying everything it re-homed:
+//
+//   [fleet] [‹ ◆ status teammate ————] [chat|term] [theme] [⋯]
+//
+// The composition is deliberate and was costed against 360px, not 390px: Back,
+// the status shape and the identity are ONE flexible labelled target rather than
+// three, because eight separate 44px controls in one row do not fit at any phone
+// width. Interrupt/Stop/Resume join Details behind the `⋯` overflow — which is
+// the existing focus-trapped details dialog, not a new popover — so the row
+// holds five targets and a flexible title instead of nine.
+//
 // It used to be two dense rows: identity badges, mode, RC, status, nudged,
 // needs-human, wrapper, model, turn, context, five liveness ages, quota and the
 // socket state. Every fact there is real, and none of them is a fact you need
@@ -15,12 +33,14 @@
 // rest-visible chip up here, because they are what a lead scans for.
 
 import { memo, useId, useState, type ReactNode } from 'react';
-import { ChevronLeft, Pause, Play, StopCircle, ZapOff, Info } from 'lucide-react';
+import { ChevronLeft, Pause, Play, StopCircle, ZapOff, Info, MoreHorizontal } from 'lucide-react';
 import type { SessionView } from '../types';
 import { Button, ActionGroup } from './Primitives';
 import { Link } from '../lib/router';
 import { cn, toneFor, type Tone } from '../lib/utils';
 import { SessionDetails, type LiveStatus } from './SessionDetails';
+import { SidebarDrawerTrigger } from './AgentSidebar';
+import { ThemeToggle } from './ThemeToggle';
 import type { Quota } from '../lib/usage';
 
 interface Props {
@@ -36,6 +56,22 @@ interface Props {
   onResume: () => void;
   /** Chat/Terminal switch, hosted here instead of owning its own row. */
   tabs?: ReactNode;
+  /** Phone chrome: one nowrap row that also absorbs the suppressed app bar's
+   *  drawer trigger and theme picker, and moves the session controls behind the
+   *  details overflow. Desktop never sets it and never changes shape. */
+  compact?: boolean;
+  /** Opens the fleet drawer. Only meaningful while `compact` — above DRAWER_MAX
+   *  the app bar still owns the trigger. */
+  onOpenSidebar?: () => void;
+  /** Mount the theme picker. THE THEME PICKER MUST BE A SINGLE INSTANCE.
+   *
+   *  `useTheme` holds the preference in component state and writes it to
+   *  localStorage; a same-document write fires no `storage` event, so a second,
+   *  RETAINED session pane (App.tsx keeps up to MAX_MOUNTED_SESSIONS mounted so
+   *  drafts and scroll survive navigation) would sit on a stale family and
+   *  re-assert it on its next render. Only the pane the reader is looking at
+   *  renders one. */
+  showTheme?: boolean;
 }
 
 export const SessionHeader = memo(function SessionHeader({
@@ -49,6 +85,9 @@ export const SessionHeader = memo(function SessionHeader({
   onStop,
   onResume,
   tabs,
+  compact,
+  onOpenSidebar,
+  showTheme = true,
 }: Props) {
   const { config, state } = view;
   const title = config.teammate || config.name || config.id;
@@ -57,8 +96,112 @@ export const SessionHeader = memo(function SessionHeader({
   const detailsId = useId();
   const panelId = `${detailsId}-panel`;
 
+  const actions = (
+    <SessionActions
+      isTerminal={isTerminal}
+      isKillFailed={isKillFailed}
+      hasToken={hasToken}
+      onInterrupt={onInterrupt}
+      onStop={onStop}
+      onResume={onResume}
+      labels={Boolean(compact)}
+    />
+  );
+  const details = (
+    <SessionDetails
+      view={view}
+      quota={quota}
+      liveStatus={liveStatus}
+      open={detailsOpen}
+      onClose={() => setDetailsOpen(false)}
+      labelledBy={detailsId}
+      // On a phone the drawer is where Interrupt/Stop/Resume live: it is already
+      // a real dialog with a focus trap, an Escape path and restored focus, so
+      // the controls keep a robust home instead of a second ad-hoc popover.
+      actions={compact ? actions : undefined}
+    />
+  );
+
+  if (compact) {
+    const tone = toneFor(state.status);
+    return (
+      <>
+        <div
+          data-density-region="session-header"
+          data-density-row="primary"
+          className="kt-session-bar mt-0.5 mb-0.5 flex min-w-0 flex-nowrap items-center gap-xs border-b border-border-soft pb-0.5"
+        >
+          {onOpenSidebar && <SidebarDrawerTrigger onOpen={onOpenSidebar} />}
+
+          {/* BACK + STATUS + IDENTITY ARE ONE TARGET. Three 44px boxes for three
+              facts that are read together does not fit at 360px, and the middle
+              one was never interactive anyway. The link's accessible name spells
+              out all three, so nothing is lost to a screen reader; the shape is
+              what makes the state readable without colour, and the WORD beside it
+              collapses (visually only) below 420px — see `.kt-status-word`. */}
+          <Link
+            to="/"
+            aria-label={`Back to all sessions. Currently ${title}, status ${state.status}`}
+            title={`Back to all sessions — ${title} · ${state.status}`}
+            className="inline-flex min-w-0 flex-1 items-center gap-xs text-muted hover:text-fg"
+          >
+            <ChevronLeft size={16} aria-hidden="true" className="shrink-0" />
+            <span className={cn('inline-block h-2 w-2 shrink-0', SHAPE[tone])} aria-hidden="true" />
+            <span className={cn('kt-status-word shrink-0 text-meta font-semibold', TEXT[tone])} aria-hidden="true">
+              {state.status}
+            </span>
+            <h1 className="m-0 min-w-0 truncate text-ui font-semibold tracking-tight text-fg">{title}</h1>
+          </Link>
+
+          {/* Shed while typing: you are writing into Chat, so the switch to
+              Terminal and the theme picker are not what the row is for. Back,
+              identity, the fleet drawer and the session controls all stay. */}
+          <div data-kb-hide className="shrink-0">
+            {tabs}
+          </div>
+          {showTheme && (
+            <div data-kb-hide className="shrink-0">
+              <ThemeToggle />
+            </div>
+          )}
+          <Button
+            id={detailsId}
+            size="sm"
+            variant="outline"
+            className="shrink-0"
+            onClick={() => setDetailsOpen(open => !open)}
+            aria-expanded={detailsOpen}
+            aria-controls={detailsOpen ? panelId : undefined}
+            aria-label="Session controls and details"
+            title="Interrupt, stop, resume, and this session's identity, runtime, progress and budget"
+          >
+            <MoreHorizontal size={16} aria-hidden="true" />
+          </Button>
+        </div>
+
+        {/* The two exceptions keep rest-visible priority, and they cannot share a
+            nowrap row — so they get a conditional strip that a normal running
+            session never pays for. */}
+        {(state.waiting || state.needsHuman) && (
+          <div
+            data-density-region="session-exceptions"
+            className="mb-0.5 flex min-w-0 flex-nowrap items-center gap-xs overflow-hidden"
+          >
+            <ExceptionChips state={state} wide />
+          </div>
+        )}
+
+        {details}
+      </>
+    );
+  }
+
   return (
-    <div className="mt-1.5 mb-1 flex min-w-0 flex-wrap items-center gap-x-sm gap-y-xs border-b border-border-soft pb-1.5">
+    <div
+      data-density-region="session-header"
+      data-density-row="primary"
+      className="mt-1.5 mb-1 flex min-w-0 flex-wrap items-center gap-x-sm gap-y-xs border-b border-border-soft pb-1.5"
+    >
       <Link
         to="/"
         aria-label="Back to all sessions"
@@ -81,63 +224,12 @@ export const SessionHeader = memo(function SessionHeader({
 
       {/* The two exceptions that stay at rest-visible priority. Both carry their
           own words — the colour is reinforcement, never the message. */}
-      {state.waiting && (
-        <span
-          className="inline-flex min-w-0 max-w-[34vw] items-center rounded-badge border border-warn-border bg-warn-bg px-badge-x py-0.5 text-meta font-medium text-warn"
-          title={`parked${state.waiting.until ? ` until ${new Date(state.waiting.until).toLocaleString()}` : ''}: ${
-            state.waiting.condition ?? 'external condition'
-          }`}
-        >
-          <span className="truncate">parked: {state.waiting.condition ?? 'external condition'}</span>
-        </span>
-      )}
-      {state.needsHuman && (
-        <span
-          className="inline-flex shrink-0 items-center rounded-badge border border-err-border bg-err-bg px-badge-x py-0.5 text-meta font-semibold text-err"
-          title={state.needsHuman}
-        >
-          needs human
-        </span>
-      )}
+      <ExceptionChips state={state} />
 
       <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-sm">
         {tabs}
         <ActionGroup>
-          {!isTerminal && hasToken && (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={onInterrupt}
-              aria-label="Interrupt the active turn"
-              title="Interrupt the active turn"
-            >
-              <Pause size={12} aria-hidden="true" /> <span className="hidden sm:inline">Interrupt</span>
-            </Button>
-          )}
-          {(!isTerminal || isKillFailed) && hasToken && (
-            <Button size="sm" variant="danger" onClick={onStop} aria-label="Stop this session" title="Stop the session">
-              <StopCircle size={12} aria-hidden="true" /> <span className="hidden sm:inline">Stop</span>
-            </Button>
-          )}
-          {isTerminal && !isKillFailed && hasToken && (
-            <Button
-              size="sm"
-              variant="primary"
-              onClick={onResume}
-              aria-label="Resume this finished session"
-              title="Resume a finished session"
-            >
-              <Play size={12} aria-hidden="true" /> <span className="hidden sm:inline">Resume</span>
-            </Button>
-          )}
-          {isKillFailed && (
-            <span
-              className="inline-flex items-center gap-xs text-cell text-warn"
-              title="the pane could not be killed; Stop it first"
-            >
-              <ZapOff size={12} aria-hidden="true" /> kill failed — Stop first
-            </span>
-          )}
+          {actions}
           <Button
             id={detailsId}
             size="sm"
@@ -153,17 +245,106 @@ export const SessionHeader = memo(function SessionHeader({
         </ActionGroup>
       </div>
 
-      <SessionDetails
-        view={view}
-        quota={quota}
-        liveStatus={liveStatus}
-        open={detailsOpen}
-        onClose={() => setDetailsOpen(false)}
-        labelledBy={detailsId}
-      />
+      {details}
     </div>
   );
 });
+
+/** Interrupt / Stop / Resume, and the kill-failed explanation that replaces
+ *  them. Rendered inline in the desktop header and inside the details dialog on
+ *  a phone — `labels` is the only difference, because the dialog has room for
+ *  the words that the header hides below `sm`. */
+function SessionActions({
+  isTerminal,
+  isKillFailed,
+  hasToken,
+  onInterrupt,
+  onStop,
+  onResume,
+  labels,
+}: {
+  isTerminal: boolean;
+  isKillFailed: boolean;
+  hasToken: boolean;
+  onInterrupt: () => void;
+  onStop: () => void;
+  onResume: () => void;
+  labels: boolean;
+}) {
+  const word = (text: string) => <span className={labels ? undefined : 'hidden sm:inline'}>{text}</span>;
+  return (
+    <>
+      {!isTerminal && hasToken && (
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={onInterrupt}
+          aria-label="Interrupt the active turn"
+          title="Interrupt the active turn"
+        >
+          <Pause size={12} aria-hidden="true" /> {word('Interrupt')}
+        </Button>
+      )}
+      {(!isTerminal || isKillFailed) && hasToken && (
+        <Button size="sm" variant="danger" onClick={onStop} aria-label="Stop this session" title="Stop the session">
+          <StopCircle size={12} aria-hidden="true" /> {word('Stop')}
+        </Button>
+      )}
+      {isTerminal && !isKillFailed && hasToken && (
+        <Button
+          size="sm"
+          variant="primary"
+          onClick={onResume}
+          aria-label="Resume this finished session"
+          title="Resume a finished session"
+        >
+          <Play size={12} aria-hidden="true" /> {word('Resume')}
+        </Button>
+      )}
+      {isKillFailed && (
+        <span
+          className="inline-flex items-center gap-xs text-cell text-warn"
+          title="the pane could not be killed; Stop it first"
+        >
+          <ZapOff size={12} aria-hidden="true" /> kill failed — Stop first
+        </span>
+      )}
+    </>
+  );
+}
+
+/** A declared park and needs-human. Both carry their own words — the colour is
+ *  reinforcement, never the message. */
+function ExceptionChips({ state, wide }: { state: SessionView['state']; wide?: boolean }) {
+  return (
+    <>
+      {state.waiting && (
+        <span
+          className={cn(
+            'inline-flex min-w-0 items-center rounded-badge border border-warn-border bg-warn-bg px-badge-x py-0.5 text-meta font-medium text-warn',
+            // The desktop chip shares a row with the title and the controls and
+            // is capped so it cannot crowd them out; the phone strip is its own
+            // line and has the whole width to spend.
+            wide ? 'max-w-full' : 'max-w-[34vw]',
+          )}
+          title={`parked${state.waiting.until ? ` until ${new Date(state.waiting.until).toLocaleString()}` : ''}: ${
+            state.waiting.condition ?? 'external condition'
+          }`}
+        >
+          <span className="truncate">parked: {state.waiting.condition ?? 'external condition'}</span>
+        </span>
+      )}
+      {state.needsHuman && (
+        <span
+          className="inline-flex shrink-0 items-center rounded-badge border border-err-border bg-err-bg px-badge-x py-0.5 text-meta font-semibold text-err"
+          title={state.needsHuman}
+        >
+          needs human
+        </span>
+      )}
+    </>
+  );
+}
 
 /** Status as SHAPE + WORD. The shape is what makes it readable without colour
  *  (a themed UI with five families cannot rely on hue alone, and neither can a

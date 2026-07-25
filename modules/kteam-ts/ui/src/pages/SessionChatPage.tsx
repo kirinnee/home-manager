@@ -31,6 +31,7 @@ import { ThinkingIndicator } from '../components/Harness';
 import { buildTranscript, latestPendingQuestion } from '../lib/transcript';
 import { useUsage } from '../hooks/useUsage';
 import { useDebouncedEffect } from '../hooks/useDebounce';
+import { useLayoutMode } from '../hooks/useLayoutMode';
 import { quotaFor } from '../lib/usage';
 import { TERMINAL_STATUSES, WAITING_STATUSES, cn, fmtAbsolute, isBusy, toneFor } from '../lib/utils';
 
@@ -54,8 +55,24 @@ interface PendingSend {
   at: number;
 }
 
-export function SessionChatPage({ sessionId }: { sessionId: string }) {
+export function SessionChatPage({
+  sessionId,
+  active,
+  onOpenSidebar,
+}: {
+  sessionId: string;
+  /** Is this the pane the reader is looking at? Panes stay MOUNTED when you
+   *  navigate away (see App.tsx), which is what preserves their draft, scroll
+   *  and loaded history — but it also means anything single-instance must not be
+   *  rendered by a retained pane. */
+  active?: boolean;
+  onOpenSidebar?: () => void;
+}) {
   const store = useStore();
+  // Below DRAWER_MAX the app bar is suppressed (App.tsx) and this page's header
+  // becomes the app's only top row, so it inherits the drawer trigger and the
+  // theme picker. `matchMedia`-driven: it fires on the crossing, not per pixel.
+  const compact = useLayoutMode() === 'drawer';
   // The cached SessionView. Navigating to a session you have seen paints its
   // header immediately instead of after a round trip; the store keeps it fresh
   // from the socket (deltas + one batched GET per burst).
@@ -82,6 +99,13 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
   const [pinSignal, setPinSignal] = useState(0);
   const pinToBottom = useCallback(() => setPinSignal(n => n + 1), []);
 
+  // DELIBERATELY NOT PINNED ON KEYBOARD-OPEN. It is tempting — the reader who
+  // taps the composer is usually replying to the latest message — but "usually"
+  // is not "always": scrolling up to quote older context and THEN tapping the
+  // composer is the exact case, and a forced re-pin would throw away a detach
+  // the reader made with their own thumb. Opening the keyboard changes chrome
+  // only; it never issues a scroll intent. The transcript's own follow logic
+  // already handles the geometry change when it is attached.
   const seenKeys = useRef<Set<string>>(new Set());
   /** True once the initial history page has settled — gates the reconnect
    *  catch-up so it can never race the first load. */
@@ -640,17 +664,23 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
           onInterrupt={() => void interrupt()}
           onStop={() => void stop()}
           onResume={() => void resume()}
+          compact={compact}
+          showTheme={active !== false}
+          onOpenSidebar={onOpenSidebar}
           // The Chat/Terminal switch rides in the header rather than owning a
           // row of its own — one two-item segmented control did not justify
-          // ~34px of every screen.
+          // ~34px of every screen. On a phone it also drops its words: two 44px
+          // icon targets instead of ~96px of `CHAT`/`TERMINAL`, which is what
+          // buys the single nowrap row.
           tabs={
             <ViewTabs<'chat' | 'terminal'>
               tabs={[
-                { id: 'chat', label: 'Chat', icon: <MessageSquare size={11} /> },
-                { id: 'terminal', label: 'Terminal', icon: <Terminal size={11} /> },
+                { id: 'chat', label: 'Chat', icon: <MessageSquare size={compact ? 15 : 11} /> },
+                { id: 'terminal', label: 'Terminal', icon: <Terminal size={compact ? 15 : 11} /> },
               ]}
               current={tab}
               onChange={setTab}
+              iconOnly={compact}
             />
           }
         />
@@ -707,6 +737,7 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
                 busy={busy}
                 sending={sending}
                 context={composerContext}
+                compact={compact}
               />
             </div>
           )}

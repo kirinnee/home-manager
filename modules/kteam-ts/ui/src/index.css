@@ -585,6 +585,52 @@ body {
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
+/* ---- PHONE CHAT CHROME ----------------------------------------------------
+   Measured at 390x844 before this: 349px of chrome around 495px of transcript —
+   41% of the screen spent on furniture, and with a 336px keyboard up the
+   transcript fell to 159px, which is a screen you cannot read on. The structural
+   half of the fix is in the components (one header row instead of three, the app
+   bar suppressed on the session route, no keyboard hint on a touch keyboard);
+   this is the part that has to be conditional on the VIEWPORT rather than on a
+   prop.
+
+   Every rule below is gated on a phone-shaped condition — `max-width: 767px`
+   (below DRAWER_MAX, the same line the layout already switches on),
+   `(pointer: coarse)`, or `html[data-keyboard='open']`. None of them can reach a
+   desktop, and none of them touches a theme token. */
+
+/* THE STATUS WORD COLLAPSES, THE STATUS DOES NOT. Below 420px the header row is
+   a fleet trigger, a back/identity target, two tab icons, the theme picker and
+   the overflow — the long words (`tool_running`, `awaiting_question`) are what
+   push the teammate's name out of it. So the word goes and the SHAPE stays:
+   filled circle, diamond, square, hollow ring. It is still not colour-only, and
+   the word itself is still in the link's accessible name and its tooltip, so
+   nothing is lost to a screen reader or a long-press — only to the eye that can
+   see the shape. */
+@media (max-width: 419px) {
+  .kt-session-bar .kt-status-word {
+    display: none;
+  }
+}
+
+/* KEYBOARD OPEN: GIVE THE TRANSCRIPT EVERYTHING ELSE.
+   While someone is typing, the only two things that matter are what they are
+   writing and what they are answering. The theme picker, the Chat/Terminal
+   switch and the composer's context readout are none of that, so they go — and
+   come straight back when the keyboard does. Back, identity, the fleet drawer
+   and the session-controls overflow all stay reachable.
+
+   `display: none` is correct HERE and wrong for the composer's status line: this
+   is redundant chrome that returns intact, whereas that line owns the `aria-live`
+   region and is `sr-only` instead. Nothing animates: iOS reports intermediate
+   viewport heights at frame rate while it pans, so a transition on any of this
+   would be visible jank on every keystroke that resizes the box. */
+@media (pointer: coarse), (max-width: 767px) {
+  html[data-keyboard='open'] [data-kb-hide] {
+    display: none;
+  }
+}
+
 /* ---- iOS FOCUS ZOOM -------------------------------------------------------
    Safari zooms the page when a text field smaller than 16px takes focus, and
    then leaves you there — the app is suddenly 1.3x too wide and the reader has
@@ -964,6 +1010,19 @@ body {
 }
 .kt-composer {
   padding: var(--pad-panel);
+}
+/* PHONE COMPOSER. `--pad-panel` is a resting-density statement — 10px in Studio,
+   16px in Ember — and on a 1440px display that is exactly right. On a 390x844
+   phone it is 20-32px of vertical air wrapped around a 44px field and a 44px
+   button row, inside a box that is already the second-largest thing on screen.
+   The horizontal inset is untouched (the text must not run into the border) and
+   so are the border, the focus ring and every touch floor; only the vertical air
+   goes. Class-scoped rather than media-scoped on purpose: it applies to exactly
+   the instance the drawer-width layout renders, so a coarse-pointer tablet on
+   the desktop layout keeps the desktop composer. */
+.kt-composer--compact {
+  padding-top: var(--gap-xs);
+  padding-bottom: var(--gap-xs);
 }
 .kt-input::placeholder {
   color: var(--muted);

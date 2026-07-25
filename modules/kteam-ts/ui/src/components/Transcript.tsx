@@ -500,6 +500,11 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
     <div className="relative flex h-full min-h-0 flex-col">
       <div
         ref={viewportRef}
+        // The chrome-to-content gate measures CONTENT as this element's box, so
+        // the name sits on the real scroll viewport rather than on the bordered
+        // panel around it — the two differ by the border and would quietly
+        // flatter the ratio.
+        data-density-region="transcript-scroller"
         className="kt-viewport min-h-0 flex-1 overflow-y-auto scroll-thin"
         onScroll={onScroll}
         role="log"
