@@ -171,9 +171,15 @@ export function NewSessionPage() {
                         type="button"
                         onClick={() => setAgent(w.name)}
                         title={w.modelHint}
+                        // SELECTED uses `border-accent`, not `border-accent-border`:
+                        // the edge is carrying the picked-agent state here, and
+                        // `--accent-border` is a decorative tint measuring
+                        // 1.2-2.9:1 against the surfaces in 6 of 10 themes. The
+                        // hover tint below is left alone on purpose — it is a
+                        // pointer-only nicety, not a state.
                         className={`rounded-md border px-2.5 py-1 text-[12.5px] mono transition-colors ${
                           agent === w.name
-                            ? 'border-accent-border bg-accent-soft text-accent'
+                            ? 'border-accent bg-accent-soft text-accent'
                             : 'border-border bg-surface hover:border-accent-border'
                         }`}
                       >

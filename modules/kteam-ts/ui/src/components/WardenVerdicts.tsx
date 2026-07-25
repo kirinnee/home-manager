@@ -5,9 +5,10 @@
 // self-hides if the route is absent (older daemon). Clicking a row opens the
 // full markdown report.
 
-import { Suspense, lazy, useEffect, useRef, useState } from 'react';
+import { Suspense, lazy, useCallback, useId, useRef, useState, useEffect } from 'react';
 import { ChevronRight, Gavel, Skull, HeartPulse, Bell, Check, UserRound, X } from 'lucide-react';
 import { api } from '../lib/api';
+import { useDialogFocus } from '../hooks/useDialogFocus';
 import type { WardenVerdict, WardenVerdictKind } from '../types';
 // LAZY. Rendering the dashboard must not download the markdown + syntax
 // highlighting stack: this section is collapsed by default and most readers
@@ -19,8 +20,14 @@ const POLL_MS = 30_000;
 
 const VERDICT: Record<WardenVerdictKind, { label: string; cls: string; Icon: typeof Skull }> = {
   killed: { label: 'killed', cls: 'text-err border-err-border bg-err-bg', Icon: Skull },
-  revived: { label: 'revived', cls: 'text-accent border-accent-border bg-accent-soft', Icon: HeartPulse },
-  nudged: { label: 'nudged', cls: 'text-accent border-accent-border bg-accent-soft', Icon: Bell },
+  // `border-accent`, NOT `border-accent-border`: these two badges are the only
+  // ones in this table whose edge is drawn in the accent family, and the verdict
+  // IS the state — 1.4.11 territory. `--accent-border` is a decorative tint that
+  // measures 1.2-2.9:1 against `--accent-soft` in 6 of 10 themes; `--accent`
+  // already has to clear 4.5:1 as link text on that same fill, so 3:1 as a border
+  // costs nothing and the hue is unchanged.
+  revived: { label: 'revived', cls: 'text-accent border-accent bg-accent-soft', Icon: HeartPulse },
+  nudged: { label: 'nudged', cls: 'text-accent border-accent bg-accent-soft', Icon: Bell },
   cleared: { label: 'cleared', cls: 'text-muted border-border bg-surface-2', Icon: Check },
   needs_human: { label: 'needs human', cls: 'text-warn border-warn-border bg-warn-bg', Icon: UserRound },
   unknown: { label: 'reviewed', cls: 'text-faint border-border bg-surface-2', Icon: Gavel },
@@ -32,6 +39,9 @@ export function WardenVerdicts() {
   const [open, setOpen] = useState(false);
   const [report, setReport] = useState<{ path: string; title: string; body: string | null } | null>(null);
   const timer = useRef<number | null>(null);
+  // Stable, so the modal's Escape listener is not torn down and re-added on
+  // every poll tick of this component.
+  const closeReport = useCallback(() => setReport(null), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -116,35 +126,75 @@ export function WardenVerdicts() {
         </ul>
       )}
 
-      {report && <ReportModal title={report.title} body={report.body} onClose={() => setReport(null)} />}
+      {/* Rendered unconditionally with an `open` flag, the way SessionDetails is:
+          the focus-restore half of the modal contract runs on the open->closed
+          TRANSITION, so a modal that unmounts instead of closing never hands the
+          reader back to the row they opened it from. */}
+      <ReportModal
+        open={report !== null}
+        title={report?.title ?? ''}
+        body={report?.body ?? null}
+        onClose={closeReport}
+      />
     </div>
   );
 }
 
-function ReportModal({ title, body, onClose }: { title: string; body: string | null; onClose: () => void }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+// The full warden report. A real dialog now: Escape, initial focus, a Tab trap
+// and focus restoration all come from the shared contract in
+// hooks/useDialogFocus.ts — the same one SessionDetails and the fleet drawer
+// use, so there is one implementation of this and not a third thinner copy.
+function ReportModal({
+  open,
+  title,
+  body,
+  onClose,
+}: {
+  open: boolean;
+  title: string;
+  body: string | null;
+  onClose: () => void;
+}) {
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const titleId = useId();
+  const { onKeyDown } = useDialogFocus(open, panelRef, onClose);
+
+  if (!open) return null;
+
   return (
+    // The scrim stays a plain div with a click handler, deliberately. Promoting
+    // it to a <button> (as the session drawer does, where it is the only close
+    // affordance) would put a SECOND focusable "close this report" in the tab
+    // order under the same name as the header X — the exact duplicate the audit
+    // flagged on the fleet drawer. A mouse dismiss needs no tab stop; keyboard
+    // readers already have Escape and the labelled X.
     <div
       className="fixed inset-0 z-50 flex items-start justify-center bg-scrim p-4 pt-[6vh] backdrop-blur-sm"
       onClick={onClose}
     >
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        onKeyDown={onKeyDown}
         className="flex max-h-[86vh] w-full max-w-[820px] flex-col overflow-hidden rounded-lg border border-border bg-surface shadow-md"
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center gap-2 border-b border-border-soft px-4 py-2.5">
-          <Gavel size={14} className="text-faint" />
-          <span className="mono truncate text-[12.5px] text-fg-soft">{title}</span>
+          <Gavel size={14} className="text-faint" aria-hidden="true" />
+          <span id={titleId} className="mono truncate text-[12.5px] text-fg-soft">
+            {title}
+          </span>
           <button
             type="button"
             onClick={onClose}
+            aria-label={`Close report ${title}`}
+            title="Close (Esc)"
             className="ml-auto rounded p-1 text-muted hover:bg-surface-2 hover:text-fg"
           >
-            <X size={16} />
+            <X size={16} aria-hidden="true" />
           </button>
         </div>
         <div className="min-h-0 flex-1 overflow-auto px-5 py-4 scroll-thin">
