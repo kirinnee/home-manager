@@ -48,9 +48,13 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
   const [draft, setDraft] = useState('');
   const [actionNotice, setActionNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
   const [tab, setTab] = useState<'chat' | 'terminal'>('chat');
-  // Bumped after the initial page loads to settle the MessageScroller at the
-  // true tail once dynamic (markdown/code) heights have laid out.
+  // Bumped to (re-)pin the transcript to the true tail and re-engage follow.
+  // Two occasions, both of which mean "the reader's attention is at the bottom":
+  //   - the initial page has loaded (open a session → you want the latest)
+  //   - the reader just SENT something (you want to watch the reply arrive, even
+  //     if you had scrolled up to re-read something while composing)
   const [pinSignal, setPinSignal] = useState(0);
+  const pinToBottom = useCallback(() => setPinSignal(n => n + 1), []);
 
   const seenKeys = useRef<Set<string>>(new Set());
   const lastSeq = useRef<number>(-1);
@@ -137,13 +141,28 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
       sessionId,
       -200,
       (ev: KTeamEvent) => {
-        // terminal.frame is LIVE-ONLY: it is never journalled (6.5k frames per
-        // session was the largest single write class on disk), so it carries no
-        // durable sequence and must bypass the replay-dedupe that would drop
-        // every frame as "already seen".
-        if (ev.type !== 'terminal.frame') {
-          if (typeof ev.sequence === 'number' && ev.sequence <= lastSeq.current) return;
-          if (typeof ev.sequence === 'number') lastSeq.current = ev.sequence;
+        // SEQUENCE 0 MEANS "NOT IN THE JOURNAL", NOT "OLD".
+        //
+        // Two whole event classes are broadcast live but never journalled, and
+        // both carry sequence 0 by construction:
+        //   - terminal.frame            (liveness only; 6.5k/session on disk)
+        //   - every harness-derived chat event — chat.user, chat.assistant.*,
+        //     tool.use, tool.result (commit 03ff676: indexed by byte pointer in
+        //     the harness's own transcript, never copied into events.jsonl)
+        //
+        // The monotonic `lastSeq` guard is only meaningful for JOURNALLED
+        // events. Applying it to sequence-0 events discarded 100% of streaming
+        // chat the moment any journalled event (session.running, seq 3) had
+        // arrived — which is always, because the backfill replays them first.
+        // That is the "doesn't stream" bug: the transcript only ever advanced
+        // when something else forced a refetch.
+        //
+        // Content dedupe (`seenKeys`) is the correct mechanism for these, and
+        // it already runs below.
+        const journalled = typeof ev.sequence === 'number' && ev.sequence > 0;
+        if (journalled) {
+          if (ev.sequence <= lastSeq.current) return;
+          lastSeq.current = ev.sequence;
         }
 
         if (ev.type === 'terminal.frame') {
@@ -164,7 +183,7 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
           return;
         }
 
-        if (ev.type === 'state' || ev.type === 'session.state') {
+        if (ev.type === 'state' || ev.type === 'session.state' || ev.type === 'session.remote_control') {
           scheduleRefresh();
           return;
         }
@@ -277,6 +296,9 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
     setActionNotice(null);
     const key = `send-${Date.now()}-${Math.round(Math.random() * 1e6)}`;
     setPending(p => [...p, { key, text: msg, status: 'sending' }]);
+    // The reader just spoke: put them at the bottom and resume following, so the
+    // reply streams in under their eyes instead of somewhere off-screen.
+    pinToBottom();
     try {
       const next = await api.send(sessionId, msg);
       setView(next);
@@ -301,6 +323,9 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
     setActionNotice(null);
     const key = `int-${Date.now()}-${Math.round(Math.random() * 1e6)}`;
     setPending(p => [...p, { key, text: msg, status: 'sending' }]);
+    // The reader just spoke: put them at the bottom and resume following, so the
+    // reply streams in under their eyes instead of somewhere off-screen.
+    pinToBottom();
     try {
       await api.interrupt(sessionId);
       const next = await api.send(sessionId, msg);
@@ -537,25 +562,51 @@ function eventToRecord(ev: KTeamEvent): ChatRecord | null {
     return null;
   const source = (typeof d['source'] === 'string' ? d['source'] : ev.source) as string;
   const sourceTyped = (source === 'claude' || source === 'codex' ? source : 'claude') as 'claude' | 'codex';
+  const meta = ev as unknown as { recordUuid?: string; blockIndex?: number };
   return {
     source: sourceTyped,
     timestamp: typeof d['timestamp'] === 'string' ? (d['timestamp'] as string) : ev.time,
     type,
     data: d,
+    // Carried so this live record and its /chat twin share one identity key.
+    ...(meta.recordUuid === undefined ? {} : { recordUuid: meta.recordUuid }),
+    ...(meta.blockIndex === undefined ? {} : { blockIndex: meta.blockIndex }),
   } as ChatRecord;
+}
+
+// Identity of one chat record, for live-vs-history dedupe.
+//
+// PREFIX TRUNCATION IS NOT ALLOWED HERE. The old key hashed only the first 256
+// chars of the body, so two long assistant messages sharing an opening (very
+// common: "Let me check the...", a repeated tool preamble) collided and the
+// second was silently dropped as "already seen" — losing whole streamed
+// paragraphs. `recordUuid` is the harness's own per-record id and is exact when
+// present; otherwise fall back to a full-length content hash.
+function fieldHash(value: unknown): string {
+  const s = String(value ?? '');
+  // djb2 over the WHOLE string, plus the length as a cheap collision guard.
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return `${(h >>> 0).toString(36)}:${s.length}`;
 }
 
 function recordKey(rec: ChatRecord): string {
   const t = rec.timestamp ?? '';
   const type = rec.type;
-  const data = rec.data;
+  const data = rec.data as Record<string, unknown> | undefined;
+  // `recordUuid` + `blockIndex` sit at the TOP level of a chat record (history)
+  // and of a live chat frame (broadcastChat forwards them) — one exact identity
+  // shared by both paths, so a reconnect's backfill never re-appends the tail.
+  const meta = rec as unknown as { recordUuid?: unknown; blockIndex?: unknown };
+  if (typeof meta.recordUuid === 'string' && meta.recordUuid)
+    return `${rec.source}|${type}|${meta.recordUuid}|${String(meta.blockIndex ?? '')}`;
   let sig = '';
-  if (data && typeof data === 'object') {
-    if ('text' in data) sig += `t=${String((data as { text?: unknown }).text ?? '').slice(0, 256)}`;
-    if ('thinking' in data) sig += `th=${String((data as { thinking?: unknown }).thinking ?? '').slice(0, 256)}`;
-    if ('reasoning' in data) sig += `r=${String((data as { reasoning?: unknown }).reasoning ?? '').slice(0, 256)}`;
-    if ('toolUseId' in data) sig += `id=${String((data as { toolUseId?: unknown }).toolUseId ?? '')}`;
-    if ('isError' in data) sig += `e=${String((data as { isError?: unknown }).isError ?? '')}`;
+  if (data) {
+    if ('text' in data) sig += `t=${fieldHash(data['text'])}`;
+    if ('thinking' in data) sig += `th=${fieldHash(data['thinking'])}`;
+    if ('reasoning' in data) sig += `r=${fieldHash(data['reasoning'])}`;
+    if ('toolUseId' in data) sig += `id=${String(data['toolUseId'] ?? '')}`;
+    if ('isError' in data) sig += `e=${String(data['isError'] ?? '')}`;
   }
   return `${rec.source}|${type}|${t}|${sig}`;
 }

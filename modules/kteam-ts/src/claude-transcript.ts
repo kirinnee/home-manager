@@ -40,6 +40,16 @@ export type ClaudeNormalizedEvent =
   | (ClaudeEventMetadata & { type: 'interaction.question'; data: { toolUseId: string; questions: ClaudeQuestion[] } })
   | (ClaudeEventMetadata & { type: 'turn.completed'; data: Record<string, never> })
   | (ClaudeEventMetadata & {
+      /** Remote Control came up for this session. The harness writes a
+       *  `system`/`bridge_status` record carrying the RC surface URL — the
+       *  AUTHORITATIVE source for it. The pane prints the same sentence, but
+       *  that text scrolls away and (worse) shows any RC url the session merely
+       *  READ, so pane scraping attributes other teammates' links to this
+       *  session. */
+      type: 'session.remote_control';
+      data: { url: string };
+    })
+  | (ClaudeEventMetadata & {
       /** Context accounting from the harness's OWN usage record — the ground
        *  truth the status line only approximates (turn-020: pane scraping
        *  broke on the 1M-suffix statusline). contextTokens = input +
@@ -221,6 +231,16 @@ export function normalizeClaudeTranscriptRecord(value: unknown): ClaudeNormalize
   const content = message.content ?? record.content;
   const blocks = Array.isArray(content) ? content : [content];
   const events: ClaudeNormalizedEvent[] = [];
+
+  // Remote Control announcement. Structured (`url`), so no sentence parsing —
+  // and it is per-session by construction, unlike the pane line.
+  if (record.type === 'system' && record.subtype === 'bridge_status') {
+    const url = string(record.url);
+    if (url && /^https:\/\/claude\.ai\/code\//.test(url)) {
+      return [{ ...eventMetadata(record, message), type: 'session.remote_control', data: { url } }];
+    }
+    return [];
+  }
 
   for (let blockIndex = 0; blockIndex < blocks.length; blockIndex += 1) {
     const value = blocks[blockIndex];

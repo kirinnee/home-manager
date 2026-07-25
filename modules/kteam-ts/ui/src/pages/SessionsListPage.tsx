@@ -23,6 +23,7 @@ import { api } from '../lib/api';
 import type { InteractionMode, ProjectInfo, SearchResponse, SessionView } from '../types';
 import { Badge } from '../components/Primitives';
 import { ModeBadge, MODE_HINT } from '../components/ModeBadge';
+import { RcBadge } from '../components/RcBadge';
 import { WardenStrip } from '../components/WardenStrip';
 import { WardenVerdicts } from '../components/WardenVerdicts';
 import { Link, navigate } from '../lib/router';
@@ -159,8 +160,21 @@ export function SessionsListPage() {
       if (modeFilter !== 'all' && v.config.mode !== modeFilter) return false;
       if (!needle) return true;
       const c = v.config;
-      // `c.mode` is in the haystack too, so typing "interactive" filters as well.
-      const hay = [c.id, c.teammate, c.name, c.label, c.binary, c.model, c.modelHint, c.cwd, c.mode, v.state.status]
+      // `c.mode` is in the haystack too, so typing "interactive" filters as
+      // well — and a literal "rc" matches the RC-enabled sessions.
+      const hay = [
+        c.id,
+        c.teammate,
+        c.name,
+        c.label,
+        c.binary,
+        c.model,
+        c.modelHint,
+        c.cwd,
+        c.mode,
+        v.state.status,
+        c.remoteControl ? 'rc remote-control' : '',
+      ]
         .filter(Boolean)
         .join(' ')
         .toLowerCase();
@@ -399,7 +413,7 @@ export function SessionsListPage() {
                   <thead>
                     <tr>
                       <Th>Teammate</Th>
-                      <Th>Mode</Th>
+                      <Th>Mode · RC</Th>
                       <Th>Model</Th>
                       <Th>Label</Th>
                       <Th>Status</Th>
@@ -507,7 +521,10 @@ function SessionRow({ view }: { view: SessionView }) {
         </Link>
       </td>
       <td className="px-3 py-2.5 align-middle">
-        <ModeBadge mode={cfg.mode} />
+        <div className="flex items-center gap-1.5">
+          <ModeBadge mode={cfg.mode} />
+          <RcBadge remoteControl={cfg.remoteControl} url={state.remoteControlUrl} />
+        </div>
       </td>
       <td className="mono px-3 py-2.5 align-middle text-[12.5px] text-fg-soft">
         {cfg.model || cfg.modelHint || 'default'}
@@ -557,7 +574,11 @@ function SessionCard({ view }: { view: SessionView }) {
         <span className="min-w-0 truncate font-semibold text-fg group-hover:text-accent">
           {cfg.teammate || cfg.name || cfg.id}
         </span>
-        <ModeBadge mode={cfg.mode} className="ml-auto" />
+        {/* Status is the one badge that must never be squeezed, so it sits on
+            row 1 with the name. Mode and RC get their own row below WITH THEIR
+            WORDS: at 390px an unlabelled cog and antenna are not legible, and
+            "auto vs interactive" is the fact the user most needs to read. */}
+        <span className="ml-auto" />
         <Badge tone={toneFor(state.status)} className="shrink-0">
           {state.status}
         </Badge>
@@ -575,6 +596,11 @@ function SessionCard({ view }: { view: SessionView }) {
             <span className="text-fg-soft">{cfg.label}</span>
           </>
         )}
+      </div>
+      {/* Mode + RC, with words, on their own line — legible at 390px. */}
+      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+        <ModeBadge mode={cfg.mode} />
+        <RcBadge remoteControl={cfg.remoteControl} url={state.remoteControlUrl} />
       </div>
       <div className="mt-1.5">
         <ActivityLine view={view} className="w-full text-[12px]" />

@@ -119,6 +119,12 @@ export interface SessionState {
   reason?: string;
   health?: 'healthy' | 'thinking' | 'waiting' | 'idle' | 'stalled' | 'rate_limited' | 'crashed' | 'unknown';
   promptReady?: boolean;
+  /** The session's Remote Control surface, from the harness's own
+   *  `bridge_status` transcript record (claude + `--rc`). Sticky for the whole
+   *  session: the pane prints it once and it scrolls off, and the pane text is
+   *  not attributable anyway (a teammate that merely READS another session's RC
+   *  line would have that url scraped as its own). */
+  remoteControlUrl?: string;
   openTools?: string[];
   pendingQuestion?: {
     toolUseId: string;
@@ -208,6 +214,11 @@ export interface SessionState {
 }
 
 export interface KTeamEvent<T = unknown> {
+  /** Position in THIS session's journal. 0 = never journalled — the live-only
+   *  classes (terminal.frame) and every harness-derived chat event, whose
+   *  durable home is the harness transcript (indexed by chat pointer). A 0 is
+   *  "outside the journal", NOT "older than everything": consumers must not
+   *  apply a monotonic sequence filter to these. */
   sequence: number;
   time: string;
   sessionId: string;
@@ -215,6 +226,10 @@ export interface KTeamEvent<T = unknown> {
   type: string;
   source: 'daemon' | 'claude' | 'codex' | 'tmux' | 'client' | 'watcher' | 'warden';
   data: T;
+  /** Harness-record identity, present on live harness-derived chat frames so a
+   *  live frame and the same record later read from /chat dedupe exactly. */
+  recordUuid?: string;
+  blockIndex?: number;
 }
 
 export interface StartSessionRequest {

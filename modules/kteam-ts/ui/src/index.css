@@ -412,4 +412,21 @@ pre,
 .md img {
   max-width: 100%;
   border-radius: var(--radius-sm);
+  /* An image whose intrinsic size is unknown until it loads reflows the block
+     AFTER layout. For a reader who has scrolled up that is content growing above
+     the viewport — i.e. the page moving under them. Reserving a box up front
+     means the load swaps pixels into space that already existed. */
+  height: auto;
+  contain-intrinsic-size: auto 320px;
+  content-visibility: auto;
+}
+
+/* ---- scroll anchoring: keep a detached reader's viewport still ------------
+   The transcript relies on the browser's own scroll anchoring to absorb late
+   layout (images, syntax highlighting, fonts) without a measure-then-correct
+   flicker. It is the default, but it is also inherited-off by any ancestor that
+   sets `overflow-anchor: none`, so the transcript states it explicitly. */
+.kt-viewport,
+.kt-content {
+  overflow-anchor: auto;
 }

@@ -54,14 +54,27 @@ function hash(s: string): string {
   return (h >>> 0).toString(36);
 }
 
+// Identity of a record, for deriving a STABLE React key.
+//
+// The harness's own `recordUuid` is used when present, because it does not
+// change as a streaming message grows. Content signatures do: a block whose id
+// is derived from its text gets a NEW id on every delta, which React reads as
+// "different element" — unmount, remount, lose scroll position and any open
+// disclosure. That remount storm is what made a streaming session flicker.
+//
+// The content fallback hashes the FULL body (never a prefix) so two long
+// messages that merely start alike cannot share an id.
 function sig(rec: ChatRecord): string {
+  const meta = rec as unknown as { recordUuid?: unknown; blockIndex?: unknown };
+  if (typeof meta.recordUuid === 'string' && meta.recordUuid)
+    return `${rec.source ?? ''}|${rec.type}|${meta.recordUuid}|${String(meta.blockIndex ?? '')}`;
   const t = rec.timestamp ?? '';
   let body = '';
   const d = rec.data as Record<string, unknown> | undefined;
   if (d) {
     for (const k of ['text', 'thinking', 'reasoning', 'toolUseId', 'name']) {
       const v = d[k];
-      if (typeof v === 'string') body += `${k}=${v.slice(0, 120)};`;
+      if (typeof v === 'string') body += `${k}=${hash(v)}:${v.length};`;
     }
   }
   return `${rec.source ?? ''}|${rec.type}|${t}|${body}`;
@@ -83,6 +96,12 @@ function extractAnswerText(r: ChatRecord): string {
 }
 
 const TOOL_TYPES = new Set(['tool.use', 'tool.result']);
+
+/** Record types that are DATA, not conversation: they are consumed elsewhere in
+ *  the UI (header context %, RC badge) and must never render as a transcript
+ *  row. Anything not listed here still falls through to a visible `notice` row —
+ *  a new record type should be noticed, not silently swallowed. */
+const SILENT_TYPES = new Set(['context.usage', 'session.remote_control']);
 
 export function buildTranscript(records: ChatRecord[]): TranscriptBlock[] {
   const out: TranscriptBlock[] = [];
@@ -129,6 +148,16 @@ export function buildTranscript(records: ChatRecord[]): TranscriptBlock[] {
 
     if (type === 'interaction.question') {
       i++; // rendered as the inline question form, not a transcript block
+      continue;
+    }
+
+    // Not conversation. `context.usage` is context ACCOUNTING that rides the
+    // same harness-derived channel (it is a chat pointer, so /chat returns it),
+    // and it landed in the catch-all `notice` branch below — printing a literal
+    // "context.usage" line after almost every assistant message and tool call.
+    // Its content already has a home: the header's context %.
+    if (SILENT_TYPES.has(type)) {
+      i++;
       continue;
     }
 
@@ -180,7 +209,11 @@ export function buildTranscript(records: ChatRecord[]): TranscriptBlock[] {
       const run = records.slice(runStart, i);
       const calls = groupToolRun(run);
       const firstTs = run[0]?.timestamp;
-      out.push({ id: mkId(`g-${hash(run.map(sig).join('|'))}`), kind: 'tools', calls, ts: firstTs });
+      // Keyed on the run's FIRST record only. Hashing the whole run gave the
+      // group a new id every time a tool.use/tool.result was appended to it —
+      // i.e. on every event of an active tool run — remounting the group (and
+      // collapsing whatever the reader had expanded) mid-stream.
+      out.push({ id: mkId(`g-${hash(sig(run[0]!))}`), kind: 'tools', calls, ts: firstTs });
       prevTs = run[run.length - 1]?.timestamp;
       continue;
     }
