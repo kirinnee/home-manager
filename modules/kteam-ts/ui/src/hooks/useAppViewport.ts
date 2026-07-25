@@ -136,7 +136,12 @@ export function useAppViewport(): void {
       // what it has to absorb is the browser chrome one orientation pays and the
       // other does not (~60-90px on a phone), which does not scale with the
       // display. A proportional band would reach 288px on a 1920px coarse panel
-      // and start reading split-screen changes as rotations.
+      // and start reading split-screen changes as rotations. A browser whose
+      // chrome asymmetry somehow exceeded 120px in one orientation only would
+      // match nothing here and fall through to no baseline — closed, chrome
+      // visible, corrected by the next unfocused frame. That is cheaper to state
+      // than to guard, and it is the same direction every other failure here
+      // takes.
       //
       // CLOSEST match, not the first one in the array: with several widths
       // remembered, two can sit inside the band at once, and taking whichever
