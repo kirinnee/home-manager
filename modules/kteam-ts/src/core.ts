@@ -82,10 +82,14 @@ export function discoverAutoAgents(binDir: string): string[] {
 /** Per-binary account health from `kfleet usage` (the kfleet serve /usage feed). */
 export interface AgentUsage {
   binary: string;
+  ok?: boolean;
+  usageBased?: boolean;
   atLimit?: boolean;
   authOk?: boolean;
-  fiveHourPercent?: number;
-  weeklyPercent?: number;
+  fiveHourPercent?: number | null;
+  weeklyPercent?: number | null;
+  fiveHourResetAt?: number | null;
+  weeklyResetAt?: number | null;
 }
 
 /** How "spent" an account is: the tighter of its 5h and weekly windows. */

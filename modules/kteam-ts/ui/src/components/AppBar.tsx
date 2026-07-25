@@ -7,9 +7,11 @@ import { HAS_TOKEN } from '../lib/api';
 
 export function AppBar({ crumbs }: { crumbs: Array<{ href?: string; label: string }> }) {
   return (
-    <header className="sticky top-0 z-30 border-b border-border bg-[var(--bar-bg)] backdrop-blur-md">
-      <div className="mx-auto flex max-w-[1180px] min-h-[42px] items-center gap-2 px-3">
-        <nav className="flex-1 min-w-0 flex items-center gap-1.5 text-sm text-muted">
+    // Not sticky any more: the shell no longer scrolls, so the bar is simply the
+    // first row of a flex column that fills the viewport.
+    <header className="shrink-0 border-b border-border bg-[var(--bar-bg)]">
+      <div className="mx-auto flex max-w-[1180px] min-h-[32px] items-center gap-2 px-3">
+        <nav className="flex min-w-0 flex-1 items-center gap-1.5 text-[12.5px] text-muted">
           {crumbs.map((c, i) => (
             <span key={`${i}-${c.label}`} className="flex items-center gap-1.5">
               {c.href ? (

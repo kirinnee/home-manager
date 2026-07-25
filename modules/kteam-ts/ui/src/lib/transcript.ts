@@ -10,8 +10,29 @@
 //   - a RUN of tool.use / tool.result     → ONE tools block (the whole run
 //     collapses into a single slim group line; uses are paired to results by
 //     toolUseId within the run).
-//   - turn.*                              → a slim turn marker.
+//   - turn.*                              → NOT a row of its own. See below.
 //   - anything else                       → a muted notice row.
+//
+// TURN MARKERS ARE A SEPARATOR, NOT AN EVENT LOG (round 4).
+//
+// Rendering one divider per turn event produced the reported "wall of empty
+// rows": a session that has been resumed/nudged repeatedly emits a
+// turn.started/turn.completed pair per nudge with NO conversation between them,
+// and `/chat` history carries no turn records at all — so the websocket's
+// journal backfill (`after=-200`) dumps the whole accumulated run of them at the
+// END of the transcript. The user saw ~20 consecutive full-width dividers after
+// the last assistant message, including two COMPLETED in a row.
+//
+// So turn events never become rows directly. They accumulate in a buffer that
+// is FLUSHED — into at most ONE slim boundary — only when real content arrives
+// after them. A boundary that separates nothing is dropped:
+//   - a run with no content BEFORE it (transcript opens on turn markers) → gone
+//   - a run with no content AFTER it (the backfilled tail) → gone
+//   - N consecutive empty turns → one line, which says how many it swallowed
+// The one exception is turn.aborted: "your turn was interrupted" is real
+// information even with nothing after it, so an aborted run still flushes at the
+// end. The boundary also carries the duration of the turn it closes, which is
+// the fact a reader actually wants from a turn marker.
 //
 // Ids are content-derived and stable per record so React keys (and the
 // MessageScroller's preserveScrollOnPrepend anchoring) survive older-page
@@ -34,7 +55,18 @@ export type TranscriptBlock =
   | { id: string; kind: 'assistant'; text: string; ts?: string; source: string }
   | { id: string; kind: 'thinking'; text: string; ts?: string; durationMs?: number; source: string }
   | { id: string; kind: 'tools'; calls: ToolCall[]; ts?: string }
-  | { id: string; kind: 'turn'; variant: 'started' | 'completed' | 'aborted'; ts?: string }
+  | {
+      id: string;
+      kind: 'turn';
+      /** When the boundary sits — the newest marker in the collapsed run. */
+      ts?: string;
+      /** How long the turn that just CLOSED took, when both ends are known. */
+      durationMs?: number;
+      /** Turn boundaries swallowed beyond this one (empty resume/nudge turns). */
+      skipped?: number;
+      /** The run contained a turn.aborted — the turn did not finish normally. */
+      aborted?: boolean;
+    }
   | { id: string; kind: 'notice'; label: string; detail?: string };
 
 function dataStr(rec: ChatRecord, key: string): string | undefined {
@@ -103,6 +135,16 @@ const TOOL_TYPES = new Set(['tool.use', 'tool.result']);
  *  a new record type should be noticed, not silently swallowed. */
 const SILENT_TYPES = new Set(['context.usage', 'session.remote_control']);
 
+interface PendingTurns {
+  /** Every marker in the current run, newest last. */
+  markers: { variant: 'started' | 'completed' | 'aborted'; ts?: string }[];
+  /** Duration of the most recent turn to close inside this run. */
+  durationMs?: number;
+  aborted: boolean;
+  /** sig() of the first marker — the run's stable React key. */
+  key: string;
+}
+
 export function buildTranscript(records: ChatRecord[]): TranscriptBlock[] {
   const out: TranscriptBlock[] = [];
   const seen = new Map<string, number>();
@@ -110,6 +152,37 @@ export function buildTranscript(records: ChatRecord[]): TranscriptBlock[] {
     const n = (seen.get(raw) ?? 0) + 1;
     seen.set(raw, n);
     return n === 1 ? raw : `${raw}#${n}`;
+  };
+
+  // ---- turn-boundary buffering (see the header comment) --------------------
+  let pending: PendingTurns | null = null;
+  /** Timestamp of the last turn.started, so a turn.completed can be given the
+   *  duration of the turn it closes. */
+  let openTurnAt: string | undefined;
+
+  /** Emit the buffered run as ONE boundary — but only if it actually separates
+   *  something. `final` is the end-of-stream flush, where there is by
+   *  definition no content after the run. */
+  const flushTurns = (final: boolean) => {
+    const p = pending;
+    pending = null;
+    if (!p || p.markers.length === 0) return;
+    // Nothing above it: the transcript would open on a divider.
+    if (out.length === 0) return;
+    // Nothing below it: this is the backfilled tail — the wall. An abort is the
+    // one boundary worth showing with nothing after it.
+    if (final && !p.aborted) return;
+    const last = p.markers[p.markers.length - 1]!;
+    out.push({
+      id: mkId(`n-${hash(p.key)}`),
+      kind: 'turn',
+      ...(last.ts === undefined ? {} : { ts: last.ts }),
+      ...(p.durationMs === undefined ? {} : { durationMs: p.durationMs }),
+      // One boundary is expected (the previous turn ending / the next starting);
+      // anything beyond that is an empty turn this line stands in for.
+      ...(p.markers.length > 2 ? { skipped: p.markers.length - 2 } : {}),
+      ...(p.aborted ? { aborted: true } : {}),
+    });
   };
 
   const n = records.length;
@@ -121,6 +194,7 @@ export function buildTranscript(records: ChatRecord[]): TranscriptBlock[] {
     const type = r.type;
 
     if (type === 'chat.user') {
+      flushTurns(false);
       out.push({
         id: mkId(`u-${hash(sig(r))}`),
         kind: 'user',
@@ -134,6 +208,7 @@ export function buildTranscript(records: ChatRecord[]): TranscriptBlock[] {
     }
 
     if (type === 'interaction.answer') {
+      flushTurns(false);
       out.push({
         id: mkId(`a-${hash(sig(r))}`),
         kind: 'user',
@@ -169,6 +244,7 @@ export function buildTranscript(records: ChatRecord[]): TranscriptBlock[] {
         if (t) parts.push(t);
         i++;
       }
+      flushTurns(false);
       out.push({
         id: mkId(`t-${hash(sig(first))}`),
         kind: 'assistant',
@@ -188,6 +264,7 @@ export function buildTranscript(records: ChatRecord[]): TranscriptBlock[] {
         start != null && end != null && end >= start && end - start < 3 * 3600_000 ? end - start : undefined;
       // Empty thinking heartbeats are dropped entirely.
       if (text.trim()) {
+        flushTurns(false);
         out.push({
           id: mkId(`k-${hash(sig(r))}`),
           kind: 'thinking',
@@ -213,28 +290,41 @@ export function buildTranscript(records: ChatRecord[]): TranscriptBlock[] {
       // group a new id every time a tool.use/tool.result was appended to it —
       // i.e. on every event of an active tool run — remounting the group (and
       // collapsing whatever the reader had expanded) mid-stream.
+      flushTurns(false);
       out.push({ id: mkId(`g-${hash(sig(run[0]!))}`), kind: 'tools', calls, ts: firstTs });
       prevTs = run[run.length - 1]?.timestamp;
       continue;
     }
 
     if (type === 'turn.started' || type === 'turn.completed' || type === 'turn.aborted') {
-      out.push({
-        id: mkId(`n-${hash(sig(r))}`),
-        kind: 'turn',
-        variant: type.replace('turn.', '') as 'started' | 'completed' | 'aborted',
-        ts: r.timestamp,
-      });
+      const variant = type.slice('turn.'.length) as 'started' | 'completed' | 'aborted';
+      if (variant === 'started') openTurnAt = r.timestamp;
+      // The duration of the turn this marker CLOSES — the one useful fact a
+      // turn boundary carries. Bounded, so a stale openTurnAt from before a
+      // resume cannot print "thought for 9 hours".
+      let closedMs: number | undefined;
+      if (variant !== 'started') {
+        const start = tsMs(openTurnAt);
+        const end = tsMs(r.timestamp);
+        if (start != null && end != null && end >= start && end - start < 3 * 3600_000) closedMs = end - start;
+        openTurnAt = undefined;
+      }
+      pending ??= { markers: [], aborted: false, key: sig(r) };
+      pending.markers.push({ variant, ...(r.timestamp === undefined ? {} : { ts: r.timestamp }) });
+      if (closedMs !== undefined) pending.durationMs = closedMs;
+      if (variant === 'aborted') pending.aborted = true;
       prevTs = r.timestamp;
       i++;
       continue;
     }
 
     // Unknown / system record.
+    flushTurns(false);
     out.push({ id: mkId(`x-${hash(sig(r))}`), kind: 'notice', label: type });
     i++;
   }
 
+  flushTurns(true);
   return out;
 }
 

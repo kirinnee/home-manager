@@ -5,7 +5,7 @@ import path from 'node:path';
 import { createPaths } from './paths';
 import { SessionManager } from './session-manager';
 import type { SessionView } from './service';
-import type { SessionConfig } from './types';
+import type { SessionConfig, SessionState } from './types';
 
 // Fixture-level tests over prototype instances: the real SessionManager wires a
 // daemon, tmux, and event store — these tests exercise the control-path logic
@@ -976,7 +976,11 @@ describe('migrate — cross-account continuation', () => {
     manager.cancelRetry = () => undefined;
     manager.cancelQuotaWaiter = async () => undefined;
     manager.get = async () => claudeSession;
-    return Object.assign(manager, over);
+    const configured = Object.assign(manager, over);
+    const store = configured.store as Loose;
+    store.updateState ??= async (_id: string, mutate: (state: SessionState) => SessionState) =>
+      mutate(claudeSession.state);
+    return configured;
   }
 
   const callMigrate = (manager: Loose, id: string, agent: string, model?: string) =>

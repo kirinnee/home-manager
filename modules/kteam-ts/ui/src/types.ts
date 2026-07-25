@@ -94,6 +94,19 @@ export interface SessionState {
   openTools?: string[];
   pendingQuestion?: PendingQuestion | null;
   contextPercent?: number;
+  /** Account quota for THIS session's wrapper, projected from the daemon's
+   *  cached `kfleet usage` feed (refreshed on kfleet's own 300s interval).
+   *  Percent USED, so higher is worse — the same polarity as contextPercent.
+   *  Every field is optional and is simply absent when the feed has no record
+   *  for the wrapper: a missing quota must read as "unknown", never as 0%. */
+  usage5hPercent?: number;
+  usageWeeklyPercent?: number;
+  /** Epoch ms when each window rolls over. */
+  usage5hResetAt?: number;
+  usageWeeklyResetAt?: number;
+  usageAtLimit?: boolean;
+  /** false ⇒ the wrapper is not authenticated; show that, not a percentage. */
+  usageAuthOk?: boolean;
   activity?: string;
   lastToolStartedAt?: string;
   /** A6 liveness ledger (see src/liveness.ts): per-life-sign timestamps. */

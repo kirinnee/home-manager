@@ -169,6 +169,18 @@ export interface SessionState {
   needsHumanKind?: string;
   /** Context-window usage (percent used) parsed from the TUI statusline. */
   contextPercent?: number;
+  /** Rolling five-hour quota usage (percent used) from cached kfleet usage. */
+  usage5hPercent?: number;
+  /** Rolling weekly quota usage (percent used) from cached kfleet usage. */
+  usageWeeklyPercent?: number;
+  /** Epoch milliseconds when the rolling five-hour quota resets. */
+  usage5hResetAt?: number;
+  /** Epoch milliseconds when the rolling weekly quota resets. */
+  usageWeeklyResetAt?: number;
+  /** Whether kfleet reports this wrapper is currently at a usage limit. */
+  usageAtLimit?: boolean;
+  /** False when kfleet reports that this wrapper needs authentication. */
+  usageAuthOk?: boolean;
   /** When this session's tmux pane was first created by a successful launch.
    *  Absence is the ONLY way to tell "the pane does not exist yet" (a launch
    *  still queued behind the bootstrap chain) from "the pane died" — both look
@@ -191,6 +203,8 @@ export interface SessionState {
     authOk?: boolean;
     fiveHourPercent?: number;
     weeklyPercent?: number;
+    fiveHourResetAt?: number;
+    weeklyResetAt?: number;
     resetAt?: number;
   };
   retryAttempt?: number;

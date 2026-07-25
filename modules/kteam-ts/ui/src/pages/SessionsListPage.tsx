@@ -5,20 +5,7 @@
 //  - live updates via WebSocket /v1/events with a 1.5s trailing debounce.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  Bot,
-  Sparkles,
-  Activity,
-  FolderGit2,
-  Plus,
-  Search,
-  X,
-  CornerDownLeft,
-  LayoutGrid,
-  Rows3,
-  User,
-  Cpu,
-} from 'lucide-react';
+import { Bot, Sparkles, Activity, FolderGit2, Plus, Search, X, LayoutGrid, Rows3, User, Cpu } from 'lucide-react';
 import { api } from '../lib/api';
 import type { InteractionMode, ProjectInfo, SearchResponse, SessionView } from '../types';
 import { Badge } from '../components/Primitives';
@@ -27,16 +14,20 @@ import { RcBadge } from '../components/RcBadge';
 import { WardenStrip } from '../components/WardenStrip';
 import { WardenVerdicts } from '../components/WardenVerdicts';
 import { Link, navigate } from '../lib/router';
-import { debounce, TERMINAL_STATUSES, fmtRelative, toneFor } from '../lib/utils';
+import { debounce, TERMINAL_STATUSES, fmtAge, fmtRelative, toneFor } from '../lib/utils';
 import { openEventStream } from '../lib/ws';
+import { QuotaReadout, hasQuota } from '../components/QuotaBadge';
 
 function baseName(p: string): string {
   const seg = p.replace(/\/+$/, '').split('/').filter(Boolean);
   return seg.length ? seg[seg.length - 1]! : p;
 }
 
-// < 640px → mobile; drives the auto-default to card view.
-function useIsNarrow(bp = 640): boolean {
+// Below this the TABLE cannot fit without a horizontal scrollbar, so the card
+// view becomes the default — the one-scroll-region rule means no nested
+// scrollbars, and a table narrower than its content is exactly that. (A user who
+// explicitly picks table view below this width still gets it, and its scroll.)
+function useIsNarrow(bp = 900): boolean {
   const [narrow, setNarrow] = useState(() => (typeof window !== 'undefined' ? window.innerWidth < bp : false));
   useEffect(() => {
     const on = () => setNarrow(window.innerWidth < bp);
@@ -243,24 +234,26 @@ export function SessionsListPage() {
     return [...map.values()].sort((a, b) => b.rows.length - a.rows.length || a.name.localeCompare(b.name));
   }, [visible, projects]);
 
+  // The page is a flex column that fills the shell: a fixed toolbar block and
+  // ONE scroller under it. The whole page used to be the scroller, which was
+  // fine on its own but inconsistent with the chat route — and it meant the
+  // search box and filters scrolled away exactly when a long fleet made them
+  // most useful.
   return (
-    <div className="mx-auto w-full">
-      <div className="mt-5 mb-4 flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="m-0 text-[1.5rem] font-semibold tracking-tight">Sessions</h1>
-          <p className="mt-0.5 text-[13px] text-muted">Live teammate sessions managed by kteamd.</p>
-        </div>
-        <div className="flex items-center gap-3">
+    <div className="flex h-full min-h-0 w-full flex-col pb-2">
+      <div className="mt-2 mb-2 flex flex-wrap items-center justify-between gap-2">
+        <h1 className="m-0 text-[1.15rem] font-semibold tracking-tight">Sessions</h1>
+        <div className="flex items-center gap-2.5">
           {sessions && (
-            <span className="mono text-[12px] text-faint">
-              {visible.length} shown · {sessions.length} total
+            <span className="mono text-[11.5px] text-faint">
+              {visible.length}/{sessions.length}
             </span>
           )}
           <Link
             to="/new"
-            className="inline-flex items-center gap-1.5 rounded-md border border-accent bg-accent px-3 py-1.5 text-[13px] font-semibold text-accent-fg hover:bg-accent-strong"
+            className="inline-flex items-center gap-1.5 rounded-md border border-accent bg-accent px-2.5 py-1 text-[12.5px] font-semibold text-accent-fg hover:bg-accent-strong"
           >
-            <Plus size={14} /> New session
+            <Plus size={13} /> New session
           </Link>
         </div>
       </div>
@@ -268,7 +261,7 @@ export function SessionsListPage() {
       <WardenStrip />
       <WardenVerdicts />
 
-      <div className="mb-4 rounded-lg border border-border-soft bg-surface-2 px-3 py-2">
+      <div className="mb-2 rounded-lg border border-border-soft bg-surface-2 px-2.5 py-1.5">
         <div className="flex flex-wrap items-center gap-3">
           <div className="relative flex min-w-[240px] flex-1 items-center">
             <Search size={14} className="pointer-events-none absolute left-2.5 text-faint" />
@@ -352,29 +345,10 @@ export function SessionsListPage() {
             </div>
           )}
         </div>
-        {/* Hint row. The full sentences only fit from `sm` up; on a phone the
-            same distinction is stated in one compact line rather than wrapping
-            into four cramped columns. */}
-        <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 pl-0.5 text-[11px] text-faint">
-          <span className="hidden sm:inline">filters the list live</span>
-          <span className="hidden text-border sm:inline">·</span>
-          <span className="hidden items-center gap-1 sm:inline-flex">
-            <CornerDownLeft size={11} /> Enter searches transcripts
-          </span>
-          <span className="hidden text-border sm:inline">·</span>
-          <span className="hidden items-center gap-1 sm:inline-flex">
-            <User size={11} className="text-accent" /> interactive is human-driven and never auto-nudged or killed
-          </span>
-          <span className="hidden text-border sm:inline">·</span>
-          <span className="hidden items-center gap-1 sm:inline-flex">
-            <Cpu size={11} /> auto runs unattended and is nudged/killed when it goes silent
-          </span>
-          <span className="inline-flex items-center gap-1 sm:hidden">
-            <User size={11} className="text-accent" /> interactive = you drive it, never auto-killed
-            <span className="text-border">·</span>
-            <Cpu size={11} /> auto = supervised
-          </span>
-        </div>
+        {/* The instructional hint row is gone (round 4): four sentences
+            explaining that a filter filters, that Enter searches, and what the
+            two modes mean. The placeholder already says the first two and the
+            mode badges carry MODE_HINT as a tooltip. */}
       </div>
 
       {(tSearching || tResults) && (
@@ -385,54 +359,57 @@ export function SessionsListPage() {
         <div className="mb-3 rounded-md border border-err-border bg-err-bg px-3 py-2 text-[13px] text-err">{error}</div>
       )}
 
-      {!sessions && <SkeletonRows />}
-      {sessions && visible.length === 0 && (
-        <div className="rounded-lg border border-dashed border-border bg-surface-2 px-4 py-12 text-center text-muted">
-          No matching sessions.
-        </div>
-      )}
+      <div className="min-h-0 flex-1 overflow-y-auto scroll-thin">
+        {!sessions && <SkeletonRows />}
+        {sessions && visible.length === 0 && (
+          <div className="rounded-lg border border-dashed border-border bg-surface-2 px-4 py-10 text-center text-muted">
+            No matching sessions.
+          </div>
+        )}
 
-      <div className="space-y-5">
-        {groups.map(g => (
-          <section key={g.path || g.name}>
-            <div className="mb-1.5 flex items-baseline gap-2 px-0.5">
-              <FolderGit2 size={14} className="shrink-0 translate-y-0.5 text-faint" />
-              <span className="text-[13px] font-semibold text-fg">{g.name}</span>
-              {g.path && <span className="mono truncate text-[11.5px] text-faint">{g.path}</span>}
-              <span className="mono ml-auto shrink-0 text-[11.5px] text-faint">{g.rows.length}</span>
-            </div>
-            {mode === 'cards' ? (
-              <div className="grid gap-2">
-                {g.rows.map(v => (
-                  <SessionCard key={v.config.id} view={v} />
-                ))}
+        <div className="space-y-3">
+          {groups.map(g => (
+            <section key={g.path || g.name}>
+              <div className="mb-1 flex items-baseline gap-2 px-0.5">
+                <FolderGit2 size={13} className="shrink-0 translate-y-0.5 text-faint" />
+                <span className="text-[12.5px] font-semibold text-fg">{g.name}</span>
+                {g.path && <span className="mono truncate text-[11px] text-faint">{g.path}</span>}
+                <span className="mono ml-auto shrink-0 text-[11px] text-faint">{g.rows.length}</span>
               </div>
-            ) : (
-              <div className="overflow-x-auto rounded-lg border border-border bg-surface shadow-sm">
-                <table className="w-full min-w-[820px] border-collapse">
-                  <thead>
-                    <tr>
-                      <Th>Teammate</Th>
-                      <Th>Mode · RC</Th>
-                      <Th>Model</Th>
-                      <Th>Label</Th>
-                      <Th>Status</Th>
-                      <Th>Harness</Th>
-                      <Th>Context</Th>
-                      <Th>Activity</Th>
-                      <Th>Updated</Th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {g.rows.map(v => (
-                      <SessionRow key={v.config.id} view={v} />
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
-        ))}
+              {mode === 'cards' ? (
+                <div className="grid gap-1.5">
+                  {g.rows.map(v => (
+                    <SessionCard key={v.config.id} view={v} />
+                  ))}
+                </div>
+              ) : (
+                <div className="overflow-x-auto rounded-lg border border-border bg-surface shadow-sm">
+                  <table className="w-full min-w-[780px] border-collapse">
+                    <thead>
+                      <tr>
+                        <Th>Teammate</Th>
+                        <Th>Mode</Th>
+                        <Th>Model</Th>
+                        <Th>Label</Th>
+                        <Th>Status</Th>
+                        <Th>CLI</Th>
+                        <Th>Context</Th>
+                        <Th>Quota</Th>
+                        <Th>Activity</Th>
+                        <Th>Updated</Th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {g.rows.map(v => (
+                        <SessionRow key={v.config.id} view={v} />
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -503,7 +480,7 @@ function TranscriptResults({
 
 function Th({ children }: { children: React.ReactNode }) {
   return (
-    <th className="border-b border-border bg-surface-2 px-3 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-[0.1em] text-muted">
+    <th className="border-b border-border bg-surface-2 px-2 py-1.5 text-left text-[10px] font-semibold uppercase tracking-[0.1em] text-muted">
       {children}
     </th>
   );
@@ -514,48 +491,68 @@ function SessionRow({ view }: { view: SessionView }) {
   const state = view.state;
   return (
     <tr className="group border-b border-border-soft transition-colors last:border-b-0 hover:bg-surface-2">
-      <td className="px-3 py-2.5 align-middle">
-        <Link to={`/session/${encodeURIComponent(cfg.id)}`} className="block">
-          <div className="font-semibold text-fg group-hover:text-accent">{cfg.teammate || cfg.name || cfg.id}</div>
-          <div className="mono text-[11px] text-faint">{cfg.id}</div>
+      <td className="max-w-[150px] px-2 py-1.5 align-middle">
+        <Link to={`/session/${encodeURIComponent(cfg.id)}`} className="block min-w-0" title={cfg.id}>
+          <div className="truncate font-semibold text-fg group-hover:text-accent">
+            {cfg.teammate || cfg.name || cfg.id}
+          </div>
+          <div className="mono truncate text-[11px] text-faint">{cfg.id}</div>
         </Link>
       </td>
-      <td className="px-3 py-2.5 align-middle">
+      <td className="px-2 py-1.5 align-middle">
         <div className="flex items-center gap-1.5">
           <ModeBadge mode={cfg.mode} />
           <RcBadge remoteControl={cfg.remoteControl} url={state.remoteControlUrl} />
         </div>
       </td>
-      <td className="mono px-3 py-2.5 align-middle text-[12.5px] text-fg-soft">
+      <td className="mono max-w-[130px] truncate whitespace-nowrap px-2 py-1.5 align-middle text-[12px] text-fg-soft">
         {cfg.model || cfg.modelHint || 'default'}
       </td>
-      <td className="px-3 py-2.5 align-middle text-[13px]">
-        {cfg.label ? <span className="text-fg-soft">{cfg.label}</span> : <span className="text-faint">—</span>}
+      <td className="max-w-[150px] px-2 py-1.5 align-middle text-[12.5px]">
+        {cfg.label ? (
+          <span className="block truncate text-fg-soft" title={cfg.label}>
+            {cfg.label}
+          </span>
+        ) : (
+          <span className="text-faint">—</span>
+        )}
       </td>
-      <td className="px-3 py-2.5 align-middle">
+      <td className="whitespace-nowrap px-2 py-1.5 align-middle">
         <Badge tone={toneFor(state.status)}>{state.status}</Badge>
       </td>
-      <td className="px-3 py-2.5 align-middle">
-        <span className="mono inline-flex items-center gap-1.5 text-[12.5px] text-fg-soft">
+      <td className="whitespace-nowrap px-2 py-1.5 align-middle" title={cfg.harness}>
+        <span className="mono inline-flex items-center gap-1.5 text-[12px] text-fg-soft">
           {cfg.harness === 'claude' ? (
             <Bot size={13} className="text-faint" />
           ) : (
             <Sparkles size={13} className="text-faint" />
           )}
-          {cfg.harness}
+          <span className="hidden xl:inline">{cfg.harness}</span>
         </span>
       </td>
-      <td className="px-3 py-2.5 align-middle">
+      <td className="whitespace-nowrap px-2 py-1.5 align-middle">
         {state.contextPercent != null ? (
           <ContextMeter value={state.contextPercent} />
         ) : (
           <span className="text-faint">—</span>
         )}
       </td>
-      <td className="max-w-[320px] px-3 py-2.5 align-middle">
+      <td className="whitespace-nowrap px-2 py-1.5 align-middle text-[11.5px]">
+        {hasQuota(state) ? (
+          <QuotaReadout state={state} className="text-muted" />
+        ) : (
+          <span className="text-faint">—</span>
+        )}
+      </td>
+      <td className="max-w-[150px] px-2 py-1.5 align-middle">
         <ActivityLine view={view} className="mono max-w-full text-[12px]" />
       </td>
-      <td className="mono px-3 py-2.5 align-middle text-[12px] text-muted">{fmtRelative(state.lastActivityAt)}</td>
+      <td
+        className="mono whitespace-nowrap px-2 py-1.5 align-middle text-[12px] text-muted"
+        title={fmtRelative(state.lastActivityAt)}
+      >
+        {fmtAge(state.lastActivityAt)}
+      </td>
     </tr>
   );
 }
@@ -568,7 +565,7 @@ function SessionCard({ view }: { view: SessionView }) {
   return (
     <Link
       to={`/session/${encodeURIComponent(cfg.id)}`}
-      className="group block rounded-lg border border-border bg-surface p-3 shadow-sm transition-colors hover:border-accent-border active:bg-surface-2"
+      className="group block rounded-lg border border-border bg-surface p-2 shadow-sm transition-colors hover:border-accent-border active:bg-surface-2"
     >
       <div className="flex items-center gap-2">
         <span className="min-w-0 truncate font-semibold text-fg group-hover:text-accent">
@@ -607,7 +604,10 @@ function SessionCard({ view }: { view: SessionView }) {
       </div>
       <div className="mt-1.5 flex items-center gap-2">
         {state.contextPercent != null && <ContextMeter value={state.contextPercent} />}
-        <span className="mono ml-auto shrink-0 text-[11px] text-faint">{fmtRelative(state.lastActivityAt)}</span>
+        {hasQuota(state) && <QuotaReadout state={state} className="text-[11px] text-faint" />}
+        <span className="mono ml-auto shrink-0 text-[11px] text-faint" title={fmtRelative(state.lastActivityAt)}>
+          {fmtAge(state.lastActivityAt)}
+        </span>
       </div>
     </Link>
   );
@@ -617,11 +617,11 @@ function ContextMeter({ value }: { value: number }) {
   const pct = Math.max(0, Math.min(100, value));
   const bar = pct >= 90 ? 'bg-err' : pct >= 75 ? 'bg-warn' : 'bg-ok';
   return (
-    <div className="flex items-center gap-2">
-      <div className="h-1.5 w-16 overflow-hidden rounded-full bg-surface-3">
+    <div className="flex items-center gap-1.5">
+      <div className="h-1.5 w-10 shrink-0 overflow-hidden rounded-full bg-surface-3">
         <div className={`h-full ${bar}`} style={{ width: `${pct}%` }} />
       </div>
-      <span className="mono text-[12px] text-fg-soft">{pct}%</span>
+      <span className="mono text-[11.5px] text-fg-soft">{pct}%</span>
     </div>
   );
 }
@@ -629,8 +629,8 @@ function ContextMeter({ value }: { value: number }) {
 function SkeletonRows() {
   return (
     <div className="grid gap-2">
-      {Array.from({ length: 5 }).map((_, i) => (
-        <div key={i} className="h-14 animate-pulse rounded-lg border border-border-soft bg-surface-2" />
+      {Array.from({ length: 6 }).map((_, i) => (
+        <div key={i} className="h-11 animate-pulse rounded-lg border border-border-soft bg-surface-2" />
       ))}
     </div>
   );

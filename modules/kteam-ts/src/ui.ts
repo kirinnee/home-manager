@@ -191,7 +191,7 @@ async function loadList() {
 }
 function renderVitals(view) {
   const state = view.state;
-  return '<div class="vitals"><div class="vital"><div class="label">Context</div><div class="value">' + esc(state.contextPercent === undefined ? '—' : state.contextPercent + '% used') + '</div></div><div class="vital"><div class="label">Last tool start</div><div class="value">' + esc(fmtTime(state.lastToolStartedAt)) + '</div></div><div class="vital"><div class="label">Last activity</div><div class="value">' + esc(fmtTime(state.lastActivityAt)) + '</div></div><div class="vital"><div class="label">Reason</div><div class="value">' + esc(state.reason || '—') + '</div></div></div>';
+  return '<div class="vitals"><div class="vital"><div class="label">Context</div><div class="value">' + esc(state.contextPercent === undefined ? '—' : state.contextPercent + '% used') + (state.usageAuthOk === false ? ' <span class="muted">quota AUTH REQUIRED</span>' : state.usage5hPercent === undefined && state.usageWeeklyPercent === undefined ? '' : ' <span class="muted">quota ' + esc((state.usage5hPercent === undefined ? '—' : state.usage5hPercent + '%') + '/' + (state.usageWeeklyPercent === undefined ? '—' : state.usageWeeklyPercent + '%')) + '</span>') + '</div></div><div class="vital"><div class="label">Last tool start</div><div class="value">' + esc(fmtTime(state.lastToolStartedAt)) + '</div></div><div class="vital"><div class="label">Last activity</div><div class="value">' + esc(fmtTime(state.lastActivityAt)) + '</div></div><div class="vital"><div class="label">Reason</div><div class="value">' + esc(state.reason || '—') + '</div></div></div>';
 }
 function renderQuestion(view, host, refresh) {
   const pending = view.state.pendingQuestion;
