@@ -120,6 +120,96 @@ async function monitorHarness(input: {
 const runMonitor = (manager: Loose, signal: AbortSignal) =>
   (manager as unknown as { monitorLoop: (id: string, signal: AbortSignal) => Promise<void> }).monitorLoop('s1', signal);
 
+// --- teammate name resolution ( --teammate / kteam name ) ------------------
+
+describe('teammate name resolution', () => {
+  interface FakeSession {
+    teammate: string;
+    status: string;
+    /** ms before now the session was created (default: inside the window). */
+    ageMs?: number;
+    id?: string;
+    name?: string;
+  }
+
+  /** A bare manager whose store lists exactly these sessions, enough for
+   *  teammateNameUsage / resolveTeammateName / suggestNames (which read only
+   *  store.listSessions()). */
+  function nameManager(sessions: FakeSession[]): Loose {
+    const manager = bareManager();
+    manager.store = {
+      listSessions: () =>
+        sessions.map((session, index) => ({
+          id: session.id ?? `id-${index}`,
+          directory: `/tmp/id-${index}`,
+          config: {
+            id: session.id ?? `id-${index}`,
+            teammate: session.teammate,
+            name: session.name ?? `task-${index}`,
+            createdAt: new Date(Date.now() - (session.ageMs ?? 60_000)).toISOString(),
+          },
+          state: { status: session.status },
+        })),
+    };
+    return manager;
+  }
+
+  const resolve = (manager: Loose, request: Record<string, unknown>) =>
+    (manager as unknown as { resolveTeammateName: (r: Record<string, unknown>) => string }).resolveTeammateName(
+      request,
+    );
+
+  test('auto-assigns when --teammate is absent', () => {
+    const manager = nameManager([{ teammate: 'aaron', status: 'running' }]);
+    const name = resolve(manager, {});
+    expect(name).toMatch(/^[a-z][a-z0-9-]*$/);
+    expect(name).not.toBe('aaron'); // avoids the in-window name
+  });
+
+  test('accepts and normalises a valid --teammate name', () => {
+    const manager = nameManager([]);
+    expect(resolve(manager, { teammate: 'Hayden' })).toBe('hayden');
+  });
+
+  test('rejects an invalid --teammate slug', () => {
+    const manager = nameManager([]);
+    expect(() => resolve(manager, { teammate: '[Hayden]' })).toThrow(/invalid --teammate/);
+  });
+
+  test('fails loudly when a LIVE session in the window holds the name', () => {
+    const manager = nameManager([{ teammate: 'hayden', status: 'running', id: 'ms-live', name: 'Fix Transcript' }]);
+    expect(() => resolve(manager, { teammate: 'hayden' })).toThrow(/already taken by a live session/);
+    expect(() => resolve(manager, { teammate: 'hayden' })).toThrow(/ms-live/);
+  });
+
+  test('a terminal session holding the name is NOT a collision', () => {
+    const manager = nameManager([{ teammate: 'hayden', status: 'completed' }]);
+    expect(resolve(manager, { teammate: 'hayden' })).toBe('hayden');
+  });
+
+  test('a same-name session OUTSIDE the window is NOT a collision', () => {
+    const manager = nameManager([
+      { teammate: 'hayden', status: 'running', ageMs: 6 * 24 * 60 * 60 * 1000 }, // 6 days > 5-day window
+    ]);
+    expect(resolve(manager, { teammate: 'hayden' })).toBe('hayden');
+  });
+
+  test('--teammate-fallback auto-assigns a free name on collision', () => {
+    const manager = nameManager([{ teammate: 'hayden', status: 'running' }]);
+    const name = resolve(manager, { teammate: 'hayden', teammateFallback: true });
+    expect(name).not.toBe('hayden');
+    expect(name).toMatch(/^[a-z][a-z0-9-]*$/);
+  });
+
+  test('suggestNames returns distinct free names, avoiding in-window names', async () => {
+    const manager = nameManager([{ teammate: 'aaron', status: 'running' }]);
+    const names = await (manager as unknown as { suggestNames: (n: number) => Promise<string[]> }).suggestNames(5);
+    expect(names).toHaveLength(5);
+    expect(new Set(names).size).toBe(5); // distinct
+    expect(names).not.toContain('aaron');
+  });
+});
+
 describe('a launch still in flight is PENDING, never crashed', () => {
   test('a monitor started mid-launch leaves a starting session alone', async () => {
     const harness = await monitorHarness({ status: 'starting', launchInFlight: true });
