@@ -1,23 +1,47 @@
-// Chat composer — multiline input, Enter-to-send, Shift+Enter newline.
-// Disables itself when the session is awaiting a structured question (the
-// question form is the input then). On a BUSY session the send controls split
-// into the two real choices at the point of intent: "Queue" (deliver at the
-// next turn boundary — the daemon's default) and "Interrupt & send" (stop the
-// current turn safely, then deliver now).
+// Chat composer — ONE input surface.
 //
-// The two buttons ARE the explanation — the paragraph that used to appear above
-// them on every busy session taught the user their own tool at the cost of ~37px
-// of transcript, and its appearing/disappearing was itself a bug: it resized the
-// viewport mid-stream, which is what knocked the transcript out of follow (see
-// Transcript.tsx). Button titles carry the detail for anyone who wants it.
+// It used to be a bordered box containing a second bordered box (the textarea)
+// with a button row beneath it: a form, not a place to talk. This is a single
+// surface — a slim context strip, a borderless auto-growing textarea, and the
+// actions INSIDE the box on the same line as the hint. The whole thing takes the
+// focus ring as one object, the way Telegram and claude.ai do it.
 //
-// Round 3 double-send fix: the composer is LOCKED while a send is in flight
-// (`sending`) — Enter is a no-op and both buttons disable — so a second
-// keystroke/click can't launch a duplicate. The page also holds a synchronous
-// ref guard, and every mutation carries an idempotency id (server backstop).
+// SAFETY SEMANTICS ARE UNCHANGED, and they are the reason this file has more
+// comments than markup:
+//   - Enter (no Shift, not composing) always takes the SAFE path: send when
+//     idle, QUEUE when busy. Interrupting is an explicit click and can never be
+//     reached by a keystroke.
+//   - Shift+Enter inserts a newline; an IME composition Enter is ignored
+//     entirely (`isComposing`), so Japanese/Chinese/Korean input can't send.
+//   - `sending` locks the whole surface: Enter is a no-op and both buttons
+//     disable, so a second keystroke or click cannot launch a duplicate. The
+//     page holds a synchronous ref guard as well, and every mutation carries an
+//     idempotency id (the server-side backstop).
+//   - `disabled` is the structured-question path: when the daemon is waiting on
+//     a QuestionForm answer, that form IS the input and this is inert.
+//
+// HEIGHT STABILITY. The strip is a fixed-height, single-line, never-wrapping row
+// and always renders every field (an unknown value renders as "—"), because the
+// transcript's follow behaviour keys off viewport height: a strip that grew a
+// line when the model name arrived would resize the scroller mid-stream. The
+// textarea grows only in response to typing — a deliberate, user-driven change —
+// and stops at MAX_TEXTAREA_PX.
 
-import { useEffect, useRef } from 'react';
-import { Button, Textarea } from './Primitives';
+import { useEffect, useLayoutEffect, useRef, type ReactNode } from 'react';
+import { CornerDownLeft, Send, Clock, ZapOff } from 'lucide-react';
+import { Button } from './Primitives';
+import { cn, type Tone } from '../lib/utils';
+
+/** Facts the strip states. Every one is optional — the strip's height does not
+ *  depend on any of them being known. */
+export interface ComposerContext {
+  model?: string;
+  turn?: number;
+  contextPercent?: number;
+  status?: string;
+  statusTone?: Tone;
+  liveStatus?: 'connecting' | 'open' | 'closed';
+}
 
 interface Props {
   draft: string;
@@ -28,7 +52,21 @@ interface Props {
   busy?: boolean;
   sending?: boolean;
   placeholder?: string;
+  context?: ComposerContext;
 }
+
+/** ~6 lines. Past this the composer scrolls internally instead of eating the
+ *  transcript — the shell is exactly 100dvh and has nowhere to give. */
+const MAX_TEXTAREA_PX = 148;
+const MIN_TEXTAREA_PX = 38;
+
+const TONE_TEXT: Record<Tone, string> = {
+  ok: 'text-ok',
+  warn: 'text-warn',
+  err: 'text-err',
+  pend: 'text-pend',
+  accent: 'text-accent',
+};
 
 export function Composer({
   draft,
@@ -39,6 +77,7 @@ export function Composer({
   busy,
   sending,
   placeholder,
+  context,
 }: Props) {
   const ref = useRef<HTMLTextAreaElement | null>(null);
 
@@ -50,53 +89,165 @@ export function Composer({
     }
   });
 
+  // Auto-grow. Measured BEFORE paint so the box never flashes at the wrong
+  // height, and capped so a pasted essay cannot swallow the conversation.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    const next = Math.min(MAX_TEXTAREA_PX, Math.max(MIN_TEXTAREA_PX, el.scrollHeight));
+    el.style.height = `${next}px`;
+    el.style.overflowY = el.scrollHeight > MAX_TEXTAREA_PX ? 'auto' : 'hidden';
+  }, [draft]);
+
   const canSubmit = !disabled && !sending && draft.trim().length > 0;
+  const showInterrupt = Boolean(busy && !disabled && onInterruptAndSend);
 
   return (
-    <div className="space-y-1.5 rounded-lg border border-border bg-surface p-2">
-      <Textarea
+    <div
+      className={cn(
+        'rounded-lg border border-border bg-surface shadow-sm transition-colors motion-reduce:transition-none',
+        'focus-within:border-accent focus-within:ring-2 focus-within:ring-[var(--ring)]',
+        disabled && 'opacity-60',
+      )}
+    >
+      {context && <ContextStrip context={context} />}
+
+      {/* The textarea is borderless and transparent: the WRAPPER is the input as
+          far as the eye (and the focus ring) is concerned. */}
+      <textarea
         ref={ref}
         value={draft}
         onChange={e => onDraftChange(e.target.value)}
-        placeholder={placeholder ?? 'Send a message to this teammate…'}
-        rows={2}
+        placeholder={placeholder ?? 'Message this teammate…'}
+        rows={1}
         disabled={disabled || sending}
+        aria-label="Message"
+        className={cn(
+          'block w-full resize-none border-0 bg-transparent px-3 py-2 text-[13.5px] leading-snug text-fg',
+          'placeholder:text-faint focus:border-0 focus:shadow-none focus:outline-none focus-visible:outline-none',
+          'disabled:cursor-not-allowed',
+        )}
         onKeyDown={e => {
           if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
             e.preventDefault();
-            // Enter always takes the safe path (queue); interrupting is an
-            // explicit click, never an accidental keystroke. canSubmit is false
-            // while a send is in flight, so a second Enter can't double-fire.
+            // Enter ALWAYS takes the safe path (send when idle, queue when
+            // busy); interrupting is an explicit click, never an accidental
+            // keystroke. canSubmit is false while a send is in flight, so a
+            // second Enter cannot double-fire.
             if (canSubmit) onSubmit();
           }
         }}
       />
-      <div className="flex items-center justify-end gap-2">
-        {sending && <span className="mono mr-auto text-[11.5px] text-muted">sending…</span>}
-        {busy && !disabled && onInterruptAndSend && (
+
+      {/* Action cluster, inside the box. Wraps to its own line under ~380px
+          instead of pushing the send button off the edge. */}
+      <div className="flex min-h-[34px] flex-wrap items-center gap-x-2 gap-y-1 px-2 pb-2">
+        {/* Deliberately NOT `.kt-chrome`: that class rests at 78% opacity, which
+            is right for transcript metadata and wrong for the line that tells
+            you what Enter will do and whether your message is in flight. */}
+        <span
+          className="mr-auto inline-flex min-w-0 items-center gap-1 truncate pl-1 text-[11px] text-muted"
+          aria-live="polite"
+        >
+          {sending ? (
+            <>
+              <span
+                className="inline-block h-2.5 w-2.5 shrink-0 animate-spin rounded-full border border-current border-t-transparent motion-reduce:animate-none"
+                aria-hidden="true"
+              />
+              sending…
+            </>
+          ) : (
+            <>
+              <CornerDownLeft size={11} aria-hidden="true" />
+              <span className="truncate">
+                {busy ? 'Enter queues for the next turn' : 'Enter sends'} · Shift+Enter newline
+              </span>
+            </>
+          )}
+        </span>
+
+        {showInterrupt && (
           <Button
             variant="danger"
             size="sm"
             disabled={!canSubmit}
-            title="Stop the current turn, then deliver this message now"
-            onClick={() => onInterruptAndSend()}
+            aria-label="Interrupt the current turn and send this message now"
+            title="Stop the current turn safely, then deliver this message now"
+            onClick={() => onInterruptAndSend?.()}
           >
-            Interrupt &amp; send
+            <ZapOff size={12} aria-hidden="true" />
+            <span>Interrupt &amp; send</span>
           </Button>
         )}
         <Button
           variant="primary"
           size="sm"
           disabled={!canSubmit}
-          title={busy ? 'Deliver at the next turn boundary' : 'Send now'}
+          aria-label={busy ? 'Queue this message for the next turn' : 'Send this message'}
+          title={busy ? 'Deliver at the next turn boundary (safe)' : 'Send now'}
           onClick={() => onSubmit()}
         >
-          {sending && (
-            <span className="inline-block h-3 w-3 animate-spin rounded-full border border-current border-t-transparent" />
-          )}
-          {sending ? 'Sending' : busy ? 'Queue' : 'Send'}
+          {busy ? <Clock size={12} aria-hidden="true" /> : <Send size={12} aria-hidden="true" />}
+          <span>{busy ? 'Queue' : 'Send'}</span>
         </Button>
       </div>
     </div>
+  );
+}
+
+/** Fixed-height single line. Never wraps, never changes height — see the height
+ *  note at the top of this file. */
+function ContextStrip({ context }: { context: ComposerContext }) {
+  const { model, turn, contextPercent, status, statusTone, liveStatus } = context;
+  const ctxTone =
+    contextPercent == null ? 'text-faint' : contextPercent >= 90 ? 'text-err' : contextPercent >= 75 ? 'text-warn' : '';
+  const socketTone = liveStatus === 'open' ? 'bg-ok' : liveStatus === 'connecting' ? 'bg-warn' : 'bg-err';
+
+  return (
+    <div className="mono flex h-[22px] w-full items-center gap-x-2 overflow-hidden whitespace-nowrap border-b border-border-soft px-3 text-[11px] text-muted">
+      <Field className="min-w-0 flex-1 truncate text-fg-soft" title={model ? `model: ${model}` : 'model unknown'}>
+        {model || '—'}
+      </Field>
+      <Sep />
+      <Field title="turn number">turn {turn ?? '—'}</Field>
+      <Sep />
+      <Field className={ctxTone} title="context window used">
+        ctx {contextPercent == null ? '—' : `${contextPercent}%`}
+      </Field>
+      <Sep />
+      <Field
+        className={cn('min-w-0 max-w-[34%] truncate', statusTone ? TONE_TEXT[statusTone] : '')}
+        title={`session status: ${status ?? 'unknown'}`}
+      >
+        {status ?? '—'}
+      </Field>
+      {liveStatus && (
+        <span
+          className="ml-auto inline-flex shrink-0 items-center gap-1 text-faint"
+          title={`live event stream ${liveStatus}`}
+        >
+          <span className={cn('inline-block h-1.5 w-1.5 rounded-full', socketTone)} aria-hidden="true" />
+          <span className="hidden sm:inline">{liveStatus}</span>
+        </span>
+      )}
+    </div>
+  );
+}
+
+function Field({ children, className, title }: { children: ReactNode; className?: string; title?: string }) {
+  return (
+    <span className={cn('shrink-0', className)} title={title}>
+      {children}
+    </span>
+  );
+}
+
+function Sep() {
+  return (
+    <span className="shrink-0 text-border" aria-hidden="true">
+      ·
+    </span>
   );
 }
