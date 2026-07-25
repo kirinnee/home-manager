@@ -1,19 +1,46 @@
 ---
 name: rc-session
-description: 'Start or hand off a named assistant session inside zellij. Use when the user runs /rc-session, says "start a session" or "start an rc session", or wants to switch between mobile/browser SSH and CLI for Claude remote-control or Codex. Use `klaude handoff` for Claude and `kodex handoff` for Codex. Do not create or ask about worktrees.'
+description: 'Start or attach a named human-driven assistant session on kteam. Use when the user runs /rc-session, says "start a session" or "start an rc session", or wants to switch between mobile/browser and the CLI for Claude remote control or Codex. Sessions are kteam interactive sessions; attach with `kteam attach <name>`. Do not create or ask about worktrees.'
 ---
 
-# Start an RC Session
+# Start an RC session (kteam interactive)
 
-Start a named assistant session in detached `zellij`, without creating a worktree.
-The same session can then be attached from mobile/browser SSH or from a local CLI.
+Start a named, human-driven assistant session with `kteam` — a plain TUI the user drives
+themselves. Remote control is ON by default for Claude, so the same session continues in
+the terminal, on the phone, or at claude.ai. This supersedes the old `klaude handoff` /
+`kodex handoff` (zellij) flow.
 
-## Defaults
+## Launch
 
-- **Claude**: run `klaude handoff` — it launches the `crc-kirin` binary inside the session.
-- **Codex**: run `kodex handoff` — it launches the `codex` binary inside the session.
-- **Directory**: use the current working directory unless the user explicitly gives another path.
-- **Name**: the default session NAME is the cwd basename. Prefer a user-provided name; if none is given and the basename would be unclear, ask for a short name.
+Run from the intended working directory (or pass `--cwd`):
+
+```bash
+kteam start -a <wrapper> --mode interactive --name "<slug>" --cwd "$PWD"
+```
+
+- **No prompt/task argument.** Interactive sessions start bare at the harness prompt —
+  never inject an opening turn; the human types the first thing themselves.
+- **Wrapper**: default `claude-auto-atomi` for Claude; for Codex use a codex wrapper
+  (e.g. `codex-auto-loge`). Codex has no RC flag, so RC applies to Claude only.
+- **Name**: default to the cwd basename; prefer a user-provided name.
+- **Directory**: the current working directory unless the user gives another path.
+- `--no-rc` opts a single session out of remote control.
+
+Examples:
+
+```bash
+kteam start -a claude-auto-atomi --mode interactive --name "HQ" --cwd ~/Obsidian/HQ
+kteam start -a codex-auto-loge  --mode interactive --name "codex-spike" --cwd "$PWD"
+```
+
+## Attach
+
+```bash
+kteam attach <name>          # teammate name or session id (Ctrl-b d detaches)
+kteam attach <name> --print  # print the tmux command instead of attaching
+```
+
+Inside an existing tmux client this switches the client rather than nesting.
 
 ## Gather Only What Is Missing
 
@@ -26,41 +53,29 @@ Do not ask about worktrees, ticket systems, categories, harnesses, or wrappers.
 
 Target selection:
 
-- Choose **Claude** when the user says Claude, `crc`, remote control, phone-driveable, or just `rc` without saying Codex.
+- Choose **Claude** when the user says Claude, `crc`, remote control, phone-driveable, or
+  just `rc` without saying Codex.
 - Choose **Codex** when the user says Codex.
-- Treat "mobile to CLI", "CLI to mobile", "phone", "handoff", "switch devices", and "continue from terminal" as a handoff request.
+- Treat "mobile to CLI", "CLI to mobile", "phone", "handoff", "switch devices", and
+  "continue from terminal" as a request for one of these sessions — they are all the same
+  thing now, since the session is attachable from anywhere.
 
-## Launch
+## Why kteam rather than zellij
 
-Run one of these from the intended working directory:
-
-```bash
-klaude handoff -n "<slug>"
-kodex handoff -n "<slug>"
-```
-
-Pass any extra agent flags after the name. Examples:
-
-```bash
-klaude handoff -n "pe-investigate" --model opus
-kodex handoff -n "codex-spike" --model <model>
-```
-
-Notes:
-
-- **Existing session name**: if a zellij session with that name already exists, `klaude`/`kodex` ignore ALL agent flags and just attach to it. Pick a new name if the flags must apply — and the report must say the session was reused.
-- **kodex flag forwarding**: any flags forwarded to `kodex` replace its default bootstrap prompt.
-- If the user gave a directory, launch via `direnv exec <dir> klaude handoff -n "<slug>"` (or `kodex …`) — do not try to `cd`.
+Interactive sessions are **immortal**: the reflex monitor never nudges or kills them and
+the fleet warden never flags them, so one may sit idle for days. They also get kteam's
+history, the web UI (chat + live terminal view), and `kteam ps` visibility for free.
 
 ## Report
 
-After launch, report (take the session name from `klaude`/`kodex`'s own stderr output — names are sanitized, so never re-derive it yourself; say "reused existing session" if it attached to one):
+After launch, report (take the teammate NAME from kteam's own output — never re-derive it;
+say "reused existing session" if one was attached instead of created):
 
 ```text
 Session started
   Target : claude|codex
   Dir    : <work_dir>
-  zellij : <slug>
-  Attach : klaude -n "<slug>" | kodex -n "<slug>"
-  Raw    : zellij attach "<slug>"
+  Name   : <teammate name>
+  Attach : kteam attach "<name>"
+  Remote : the pane prints a claude.ai/code link while RC is active
 ```
