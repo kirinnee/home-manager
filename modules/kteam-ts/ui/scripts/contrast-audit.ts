@@ -507,15 +507,9 @@ function evaluate(family: Family, mode: Mode): Row[] {
         if (l) bgC = over(l, bgC);
       }
       for (const t of WASH_TIERS) push(t, tokens.get(t) ?? null, 'bg+wash', bgC, 'body', 'body-wash hot spot');
-      push(
-        'faint@chrome-opacity',
-        tokens.get('faint') ?? null,
-        'bg+wash',
-        bgC,
-        'body',
-        '.kt-chrome over wash hot spot',
-        'chrome-opacity',
-      );
+      // `.kt-chrome` over the same hot spot. Its ink is `--chrome-fg` now, not
+      // `--faint` under a subtree alpha, so this row follows that token.
+      push('chrome-fg', tokens.get('chrome-fg') ?? null, 'bg+wash', bgC, 'body', '.kt-chrome over wash hot spot');
     }
   }
 
