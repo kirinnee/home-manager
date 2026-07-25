@@ -145,7 +145,12 @@ export function ThemeToggle() {
                   className={cn(
                     'flex flex-1 items-center justify-center gap-1 rounded px-2 py-1 text-[11px] font-medium transition-colors',
                     checked
-                      ? 'border border-accent-border bg-accent-soft text-accent'
+                      ? // `border-accent`, NOT `border-accent-border`: a
+                        // state-bearing edge has to be identifiable, and
+                        // `--accent-border` measures 1.2-2.9:1 against its
+                        // surface in 6 of the 10 themes. It is decorative tint
+                        // only now (contract §8.2).
+                        'border border-accent bg-accent-soft text-accent'
                       : 'border border-transparent text-muted hover:text-fg',
                   )}
                 >
@@ -177,9 +182,7 @@ export function ThemeToggle() {
                   onClick={() => setFamily(f.id as ThemeFamilyId)}
                   className={cn(
                     'flex w-full flex-col gap-1 rounded-md border p-2 text-left transition-colors',
-                    checked
-                      ? 'border-accent-border bg-accent-soft'
-                      : 'border-border bg-surface hover:border-accent-border',
+                    checked ? 'border-accent bg-accent-soft' : 'border-border bg-surface hover:border-accent',
                   )}
                 >
                   <span className="flex items-center gap-1">

@@ -280,16 +280,22 @@ pre,
      message prose      --md-font-size / --md-leading    full --fg
      user message       base size      / --leading-base  full --fg
      ---------------------------------------------------------------
-     chrome (tools,     --chrome-font-size / 1.35        --faint at
-     thinking, turn                                      --chrome-opacity
-     boundaries,                                         (≈ a 2.75px drop and a
-     notices)                                            real tonal step below
-                                                         prose, not a nudge)
+     chrome (tools,     --chrome-font-size / 1.35        --chrome-fg
+     thinking, turn                                      (≈ a 2.75px drop and a
+     boundaries,                                          real tonal step below
+     notices)                                             prose, not a nudge)
 
-   Those three are tokens now rather than literals, because the themes disagree
-   about them on purpose: Neo-Brutalism and High Contrast set --chrome-opacity
-   to 1 (dimming text below AA is not available to them), and Ember runs the
-   whole scale slightly larger and looser.
+   Those are tokens rather than literals because the themes disagree about them
+   on purpose — Ember runs the whole scale slightly larger and looser.
+
+   THE CHROME TIER IS NO LONGER A SUBTREE OPACITY. It used to be `--faint` under
+   `opacity: var(--chrome-opacity)`, and that was wrong in a way a ratio check on
+   the token alone could not see: opacity applies to the WHOLE subtree, so nested
+   content that was never sized against it — a TaskName chip, a status glyph, an
+   error string — got dimmed too, measured as low as 1.92:1 (nero). A single
+   contrast-checked ink is measurable and composes; a subtree alpha is neither.
+   `--chrome-fg` clears 4.5:1 on its surfaces in every theme while staying a real
+   tonal step below `--muted`, so the noise still recedes.
 
    Chrome uses a single `.kt-chrome` class rather than per-component sizes so
    "make the noise recede" stays ONE edit, and so nothing can drift back up to
@@ -305,23 +311,23 @@ pre,
 .kt-chrome {
   font-size: var(--chrome-font-size);
   line-height: 1.35;
-  color: var(--faint);
-  opacity: var(--chrome-opacity);
-  transition:
-    opacity 120ms ease,
-    color 120ms ease;
+  color: var(--chrome-fg);
+  transition: color 120ms ease;
 }
-/* Reaching for a row makes it fully legible; at rest it stays background. */
+/* Reaching for a row makes it fully legible; at rest it stays background. Colour
+   only — there is no opacity to restore any more. */
 .kt-chrome:hover,
 .kt-chrome:focus-within {
-  opacity: 1;
-  color: var(--muted);
+  color: var(--fg-soft);
 }
-/* An error is the one piece of chrome allowed to keep its colour — a failed
-   tool that faded into the background would be a bug, not a density win. */
-.kt-chrome .kt-chrome-alert {
-  opacity: 1;
-}
+/* `.kt-chrome-alert` no longer needs a rule here. An error is still the one piece
+   of chrome allowed to keep its colour — a failed tool that faded into the
+   background would be a bug, not a density win — but that now happens by itself:
+   every call site already sets its own ink (`text-err` on the triangle,
+   `text-accent` on the spinner, ToolGroup.tsx:120/149/214), and a child's own
+   colour always beats the inherited `--chrome-fg`. The `opacity: 1` that used to
+   live here existed ONLY to escape the subtree alpha that is now gone, so keeping
+   it would be cargo. The class stays as a hook for the components. */
 
 /* ---- vertical rhythm ------------------------------------------------------
    Owned per-block instead of by a container `gap`, because the whole point is
@@ -588,13 +594,19 @@ body {
 
    `:root` is in the selector so this beats the Tailwind `text-[13.5px]`-style
    utilities the components set (a bare element selector would lose to them).
-   TODO: 16px becomes `var(--input-font-floor)` once themes.css declares it
-   (anderson owns that token). */
+
+   TOKENISED (anderson). `--text-input` is `max(--text-input-desktop,
+   --input-font-floor)`, so it is the theme's own field size on a mouse and never
+   below 16px on a touch screen — the floor is composed in rather than asserted
+   here. themes.css sets `--input-font-floor: 16px` under EXACTLY this media
+   condition, `(pointer: coarse), (max-width: 640px)`; the two must stay matched,
+   or a coarse-pointer tablet wider than 640px would land back on the desktop
+   size on a device that zooms. */
 @media (pointer: coarse), (max-width: 640px) {
   :root input,
   :root textarea,
   :root select {
-    font-size: 16px;
+    font-size: var(--text-input);
   }
 }
 
@@ -606,20 +618,22 @@ body {
    This is a HIT-AREA floor, not a zoom: `min-height`/`min-width` grow the box a
    control is centred in, they do not change its type scale or its padding, so
    the layout keeps its density and the finger gets its 44px.
-   TODO: 44px becomes `var(--target-floor)` once themes.css declares it
-   (anderson owns that token). */
+
+   TOKENISED (anderson). themes.css sets `--target-floor: 44px` under
+   `(pointer: coarse)` and 0px otherwise, so the number lives in one place and
+   the same token also floors --control-h/--row-min-h for every themed control. */
 @media (pointer: coarse) {
   :root button,
   :root [role='tab'],
   :root select,
   :root summary,
   :root a[href] {
-    min-height: 44px;
-    min-width: 44px;
+    min-height: var(--target-floor);
+    min-width: var(--target-floor);
   }
   /* A checkbox's LABEL is the real target — the box itself stays its own size. */
   :root label:has(> input[type='checkbox']) {
-    min-height: 44px;
+    min-height: var(--target-floor);
   }
 
   /* THE TRANSCRIPT KEEPS ITS DENSITY AND STILL GETS 44px.
@@ -642,8 +656,8 @@ body {
     position: absolute;
     top: 50%;
     left: 50%;
-    width: 44px;
-    height: 44px;
+    width: var(--target-floor);
+    height: var(--target-floor);
     transform: translate(-50%, -50%);
     /* Behind the control's own content, above nothing else: it exists only to
        be hit. */
@@ -671,12 +685,21 @@ body {
 
    So: the CONTENT scale goes up — body, markdown, code — while the structure
    stays where it is. Chrome gets a smaller bump plus full opacity, because at
-   0.78 on a phone in daylight it is not chrome, it is invisible.
+   0.78 on a phone in daylight it is not chrome, it is invisible — and the
+   subtree opacity is gone entirely now, replaced by the --chrome-fg ink.
 
    These tokens are DEFINED in themes.css; this is a viewport-conditional
-   re-tune of the same names, not a second definition. */
+   re-tune of the same names, not a second definition.
+
+   `:root[data-theme]` is in the selector, not bare `:root` (anderson). The
+   per-family blocks in themes.css are attribute-qualified — `:root[data-theme^='ember-']`
+   is (0,2,0) — so a bare `:root` here is (0,1,0) and LOSES on specificity: this
+   whole ramp was silently inert for neo, ember and contrast, which are exactly
+   the families that re-tune the type scale. Equal specificity plus later source
+   order wins deterministically. */
 @media (max-width: 640px) {
-  :root {
+  :root,
+  :root[data-theme] {
     /* 16px is the phone baseline, not a "large" setting: it is what iOS and
        Android use for body copy, it is the size below which Safari zooms a
        focused field, and the reader's actual complaint was that this app was
@@ -688,7 +711,6 @@ body {
     --md-leading: 1.6;
     --code-font-size: 14px;
     --chrome-font-size: 12.5px;
-    --chrome-opacity: 0.92;
   }
   /* Rendered prose gets a little more room to breathe between blocks, since the
      line count per paragraph roughly doubles at this width. */
@@ -725,4 +747,449 @@ body {
     animation: none !important;
     opacity: 1 !important;
   }
+}
+
+/* ============================================================================
+   TIER 1 — item 2: structural component classes for `ui/src/index.css`.
+
+   APPEND AS ONE SECTION at the end of index.css, after the existing `.kt-swatch`
+   / `.kt-chrome` / `.md` sections. Nothing existing is modified, so this composes
+   with Freddie's shell + mobile work and with nero's a11y fixes rather than
+   fighting them.
+
+   THIS IS WHERE THE DEPTH LIVES. The token layer (themes.css) is inert on its
+   own; these classes are what turn a token into a silhouette. Every value below
+   is a role token — no literals, no colours, and NO theme selectors except in the
+   clearly-marked decoration section at the bottom.
+
+   Rules this file obeys:
+     - components emit a `.kt-*` class plus semantic utilities; they never branch
+       on theme, and `data-*` attributes carry STATE only
+     - nothing here reads a raw ramp token (`--radius-sm`); only roles
+       (`--radius-control`), so a sixth family retargets roles and this file is
+       untouched
+   ============================================================================ */
+
+/* ---- shared label voice ---------------------------------------------------
+   Replaces every hand-rolled `uppercase tracking-[0.1em] text-[10px]` in the
+   app (table headers, Marker, SessionDetails group headings, sidebar section
+   heads, ToolGroup). Ember is the one family that resolves this to small caps
+   instead of shouted uppercase, and it only works because the casing is a token
+   rather than a utility class. */
+.kt-label {
+  font-family: var(--font-display);
+  font-size: var(--label-size);
+  font-weight: var(--label-weight);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-label);
+  text-transform: var(--label-transform);
+  font-variant-caps: var(--label-variant);
+  color: var(--muted);
+}
+
+/* ---- button --------------------------------------------------------------
+   `[data-variant]` is state/role, not theme. Neo's block visibly depresses into
+   its own offset shadow on press; every other family resolves
+   `--press-translate` to 0 and simply ignores the rule. */
+.kt-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--gap-sm);
+  height: var(--control-h);
+  padding-inline: var(--pad-control-x);
+  border: var(--stroke-control) solid var(--border-strong);
+  border-radius: var(--radius-control);
+  outline: var(--outline-always);
+  outline-offset: calc(-1 * var(--stroke-control));
+  clip-path: var(--clip-control);
+  background: var(--surface);
+  box-shadow: var(--shadow-control);
+  color: var(--fg-soft);
+  font-family: var(--font-ui);
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-label);
+  text-transform: var(--label-transform);
+  white-space: nowrap;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease,
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    translate 80ms ease;
+}
+.kt-btn--sm {
+  height: var(--control-h-sm);
+  padding-inline: calc(var(--pad-control-x) * 0.8);
+  font-size: var(--text-xs);
+}
+.kt-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.kt-btn:active:not(:disabled) {
+  translate: var(--press-translate) var(--press-translate);
+  box-shadow: var(--shadow-active);
+}
+.kt-btn[data-variant='primary'] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.kt-btn[data-variant='primary']:hover {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  color: var(--accent-fg);
+}
+.kt-btn[data-variant='danger'] {
+  border-color: var(--err);
+  color: var(--err);
+}
+.kt-btn[data-variant='danger']:hover {
+  background: var(--err-bg);
+  border-color: var(--err);
+  color: var(--err);
+}
+/* Ghost keeps NO resting border or shadow — but High Contrast overrides that
+   below, because an invisible control is exactly what that family exists to
+   prevent. */
+.kt-btn[data-variant='ghost'] {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+.kt-btn[data-variant='ghost']:hover {
+  background: var(--surface-2);
+  border-color: transparent;
+  color: var(--fg);
+}
+
+/* ---- badge --------------------------------------------------------------- */
+.kt-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--gap-xs);
+  padding: 1px var(--pad-badge-x);
+  border: var(--stroke) solid var(--pend-border);
+  border-radius: var(--radius-badge);
+  clip-path: var(--clip-control);
+  background: var(--pend-bg);
+  color: var(--pend);
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-strong);
+  letter-spacing: var(--tracking-label);
+  text-transform: var(--label-transform);
+  white-space: nowrap;
+}
+.kt-badge[data-tone='ok'] {
+  border-color: var(--ok-border);
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+.kt-badge[data-tone='warn'] {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+.kt-badge[data-tone='err'] {
+  border-color: var(--err-border);
+  background: var(--err-bg);
+  color: var(--err);
+}
+/* --accent, NOT --accent-border: the latter measures 1.2-2.9:1 in 6 of 10
+   themes and is decorative tint only (nero's ask, contract §8.2). */
+.kt-badge[data-tone='accent'] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* ---- tab ---------------------------------------------------------------- */
+.kt-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--gap-xs);
+  height: var(--control-h-sm);
+  padding-inline: var(--pad-control-x);
+  border: var(--stroke-control) solid transparent;
+  border-radius: var(--radius-tab);
+  clip-path: var(--clip-control);
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-label);
+  text-transform: var(--label-transform);
+  white-space: nowrap;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+.kt-tab:hover {
+  color: var(--fg);
+}
+.kt-tab[aria-selected='true'],
+.kt-tab[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: var(--shadow-active);
+  color: var(--accent);
+}
+
+/* ---- input / composer surface -------------------------------------------
+   `--text-input` is the floor-composed token: on a phone it can never resolve
+   below 16px, so iOS never focus-zooms and we never need `maximum-scale`. */
+.kt-input,
+.kt-composer {
+  width: 100%;
+  border: var(--stroke-control) solid var(--border-strong);
+  border-radius: var(--radius-input);
+  outline: var(--outline-always);
+  outline-offset: calc(-1 * var(--stroke-control));
+  background: var(--surface);
+  box-shadow: var(--rule-inset);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: var(--text-input);
+  line-height: var(--leading-base);
+}
+.kt-input {
+  padding: var(--pad-row-y) var(--pad-control-x);
+  min-height: var(--control-h);
+}
+.kt-composer {
+  padding: var(--pad-panel);
+}
+.kt-input::placeholder {
+  color: var(--muted);
+}
+.kt-input:focus-visible,
+.kt-composer:focus-within {
+  border-color: var(--accent);
+  box-shadow:
+    0 0 0 3px var(--ring),
+    var(--focus-shadow);
+}
+
+/* ---- panel --------------------------------------------------------------
+   The elevation model is the strongest grayscale signal in the whole system:
+   blurred float (Studio/Ember) vs hairline-plus-glow (Mission) vs hard offset
+   (Neo) vs nothing at all (High Contrast) is legible before any hue registers.
+
+   `--panel-texture` is a background-IMAGE layer over `--panel-bg`, which is
+   itself allowed to be a gradient + colour (Mission). Order matters: texture
+   first so it sits above the wash. */
+.kt-panel {
+  border: var(--stroke-panel) solid var(--border);
+  border-radius: var(--radius-panel);
+  background-color: var(--surface);
+  background-image: var(--panel-texture);
+  background-size: var(--panel-texture-size);
+  box-shadow: var(--shadow-panel), var(--rule-inset);
+}
+.kt-panel__header {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  padding: var(--pad-row-y) var(--pad-panel);
+  border-bottom: var(--divider-width) solid var(--divider-color);
+}
+.kt-panel__body {
+  padding: var(--pad-panel);
+}
+/* OPT-IN clipping (contract R1, lead decision 7). A clipped panel also clips
+   descendant popovers and focus rings, so notching is NEVER the default — only
+   leaf panels that contain no overflowing UI may take this. */
+.kt-panel--clipped {
+  clip-path: var(--clip-panel);
+}
+
+/* ---- table / list rows -------------------------------------------------- */
+.kt-row {
+  min-height: var(--row-min-h);
+  border-bottom: var(--divider-width) solid var(--divider-color);
+  transition: background-color 120ms ease;
+}
+.kt-row:last-child {
+  border-bottom: 0;
+}
+.kt-row:hover {
+  background: var(--surface-2);
+}
+.kt-row > td,
+.kt-row > th {
+  padding: var(--pad-row-y) var(--pad-cell-x);
+  font-size: var(--text-sm);
+  vertical-align: middle;
+}
+.kt-row[data-active='true'] {
+  background: var(--accent-soft);
+  box-shadow: var(--rail-active);
+}
+
+/* ---- sidebar navigation row -------------------------------------------- */
+.kt-navrow {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  width: 100%;
+  min-height: var(--row-min-h);
+  padding: var(--pad-row-y) var(--pad-cell-x);
+  border: var(--stroke-control) solid transparent;
+  border-radius: var(--radius-control);
+  outline: var(--outline-always);
+  outline-offset: calc(-1 * var(--stroke-control));
+  background: transparent;
+  color: var(--fg-soft);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  text-align: left;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+.kt-navrow:hover {
+  background: var(--surface-2);
+  color: var(--fg);
+}
+/* The active rail is the family's signature: 2px Studio, 4px glowing Mission,
+   4px hard Neo, 3px Ember, 4px Contrast. */
+.kt-navrow[data-active='true'],
+.kt-navrow[aria-current='page'] {
+  background: var(--accent-soft);
+  box-shadow: var(--rail-active);
+  color: var(--accent);
+  font-weight: var(--weight-strong);
+}
+
+/* ---- transcript message + tool chrome ---------------------------------- */
+.kt-msg {
+  border-radius: var(--radius-panel);
+  font-family: var(--font-prose);
+  font-size: var(--md-font-size);
+  line-height: var(--md-leading);
+}
+.kt-msg[data-role='user'] {
+  padding: var(--pad-row-y) var(--pad-panel);
+  background: var(--user-bg);
+  box-shadow: inset 2px 0 0 var(--user-border);
+}
+/* Ember reads the transcript in a serif at a book measure — the single change
+   that makes it a different TOOL rather than a warm recolour. Applies to prose
+   only; `.md pre`/`code` keep `--font-mono` via the existing base rules
+   (contract R4). */
+.kt-msg .md {
+  max-width: var(--prose-measure);
+  font-family: var(--font-prose);
+}
+.kt-tool {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-xs);
+  font-family: var(--font-mono);
+  font-size: var(--chrome-font-size);
+  line-height: var(--leading-tight);
+  opacity: var(--chrome-opacity);
+}
+
+/* ---- details panel ------------------------------------------------------ */
+.kt-details {
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  box-shadow: var(--shadow-popover);
+}
+.kt-details__group {
+  padding: var(--pad-panel);
+  border-bottom: var(--divider-width) solid var(--divider-color);
+}
+.kt-details__group:last-child {
+  border-bottom: 0;
+}
+
+/* ---- status dot + meter ------------------------------------------------- */
+.kt-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  /* NEVER themed: shape is a non-colour status signal and StatusMark pairs it
+     with a glyph + aria-label. Squaring it in Neo would destroy the
+     shape-carries-meaning contract. */
+  border-radius: var(--radius-dot);
+  border: 1px solid var(--border-strong);
+}
+.kt-meter {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-xs);
+}
+.kt-meter__track {
+  overflow: hidden;
+  width: 40px;
+  height: 6px;
+  flex: none;
+  border-radius: var(--radius-badge);
+  background: var(--surface-3);
+}
+.kt-meter__fill {
+  height: 100%;
+}
+
+/* ============================================================================
+   THEME-SCOPED DECORATION — the ONLY theme selectors in the codebase.
+
+   This is mechanism "TS" from the contract: a family adds decoration that no
+   other family has, and it cannot be expressed as a scalar token. Components
+   stay identical; the CSS knows. Nothing here is required for the UI to
+   function, so a family that drops out costs one deletion.
+   ============================================================================ */
+
+/* ---- Mission Control: HUD corner brackets ------------------------------
+   Opt-in via `data-hud` on a panel. Drawn as an inset pseudo-element rather
+   than as a border so it never affects layout, and deliberately NOT clip-path,
+   so a bracketed panel can still host a popover. */
+:root[data-theme^='mission-'] .kt-panel[data-hud]::before,
+:root[data-theme^='mission-'] .kt-panel[data-hud]::after {
+  content: '';
+  position: absolute;
+  width: var(--bracket-size);
+  height: var(--bracket-size);
+  pointer-events: none;
+}
+:root[data-theme^='mission-'] .kt-panel[data-hud] {
+  position: relative;
+}
+:root[data-theme^='mission-'] .kt-panel[data-hud]::before {
+  top: -1px;
+  left: -1px;
+  border-top: 2px solid var(--accent);
+  border-left: 2px solid var(--accent);
+}
+:root[data-theme^='mission-'] .kt-panel[data-hud]::after {
+  right: -1px;
+  bottom: -1px;
+  border-right: 2px solid var(--accent);
+  border-bottom: 2px solid var(--accent);
+}
+
+/* ---- High Contrast: nothing may be invisible --------------------------
+   A ghost button with no resting border is a legibility failure in the family
+   whose entire purpose is redundant explicit affordance, so the ghost variant
+   gets its edge back. Links are underlined at rest, not on hover. */
+:root[data-theme^='contrast-'] .kt-btn[data-variant='ghost'] {
+  border-color: var(--border-strong);
+}
+:root[data-theme^='contrast-'] a,
+:root[data-theme^='contrast-'] .md a {
+  text-decoration-line: var(--underline-links);
+}
+
+/* ---- Ember: paper seams, not floating cards ---------------------------
+   Depth comes from a top inset rule (the seam where one sheet overlaps
+   another) plus generous padding. `--shadow-panel` is still a soft warm blur
+   here, but the seam is what reads first. */
+:root[data-theme^='ember-'] .kt-panel__header {
+  box-shadow: var(--rule-inset);
 }
