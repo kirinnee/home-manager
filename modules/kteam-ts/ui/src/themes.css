@@ -194,10 +194,18 @@
   --accent-border: #d6d8f5;
   --accent-strong: #3f42c4;
 
-  /* ---- user turn surface (transcript left-border block) ---- */
+  /* ---- peer turn surface ---- */
   --user-bg: #f6f7fb;
   --user-border: #4f52d6;
   --user-rail: #c9cbef;
+
+  /* ---- genuine human bubble roles ---- */
+  --bubble-bg: var(--user-bg);
+  --bubble-fg: var(--fg);
+  --bubble-border: var(--border-soft);
+  --bubble-stroke: var(--border-width);
+  --bubble-radius: var(--radius-panel);
+  --bubble-shadow: var(--shadow-sm);
 
   /* ---- code / mono surfaces ---- */
   --code-bg: #f5f5f7;
@@ -269,6 +277,13 @@
 :root[data-theme='light'],
 [data-swatch='studio-light'] {
   color-scheme: light;
+
+  --bubble-bg: #eceffc;
+  --bubble-fg: var(--fg);
+  --bubble-border: var(--border-soft);
+  --bubble-stroke: 1px;
+  --bubble-radius: 14px 14px 4px 14px;
+  --bubble-shadow: var(--shadow-sm);
 }
 
 :root[data-theme='studio-dark'],
@@ -301,6 +316,13 @@
   --user-bg: #16161d;
   --user-border: #8f93ee;
   --user-rail: #3a3a63;
+
+  --bubble-bg: #1c1d2e;
+  --bubble-fg: var(--fg);
+  --bubble-border: var(--border-soft);
+  --bubble-stroke: 1px;
+  --bubble-radius: 14px 14px 4px 14px;
+  --bubble-shadow: var(--shadow-sm);
 
   --code-bg: #121215;
   --code-border: #24242a;
@@ -418,6 +440,10 @@
   --focus-shadow: 0 0 0 5px rgb(var(--accent-rgb) / 0.18);
   --rule-inset: inset 0 1px 0 rgb(var(--accent-rgb) / 0.08);
 
+  --bubble-stroke: 1px;
+  --bubble-radius: 0px;
+  --bubble-shadow: var(--shadow-sm);
+
   --font-display: 'Aptos Display', 'Avenir Next Condensed', 'Franklin Gothic Medium', 'Segoe UI', system-ui, sans-serif;
   --font-body: 'Aptos', 'Avenir Next', 'Segoe UI', system-ui, -apple-system, sans-serif;
   --font-mono: 'Cascadia Code', 'Cascadia Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', ui-monospace, monospace;
@@ -469,6 +495,10 @@
   --user-bg: #071a22;
   --user-border: #47f3ff;
   --user-rail: rgba(71, 243, 255, 0.42);
+
+  --bubble-bg: var(--user-bg);
+  --bubble-fg: var(--fg);
+  --bubble-border: var(--user-border);
 
   --code-bg: #030609;
   --code-border: rgba(151, 217, 224, 0.16);
@@ -561,6 +591,10 @@
   --user-bg: #e9f6f9;
   --user-border: #0a7181;
   --user-rail: #a2d6de;
+
+  --bubble-bg: var(--user-bg);
+  --bubble-fg: var(--fg);
+  --bubble-border: var(--user-border);
 
   --code-bg: #eaf5f8;
   --code-border: rgba(11, 82, 95, 0.16);
@@ -698,6 +732,10 @@
   --radius-tab: 0px;
   --radius-input: 0px;
 
+  --bubble-stroke: 2px;
+  --bubble-radius: 0px;
+  --bubble-shadow: 3px 3px 0 var(--shadow-ink);
+
   --stroke-control: 2px;
   --stroke-panel: 3px;
   --divider-width: 2px;
@@ -770,6 +808,10 @@
   --user-bg: #dcdcff;
   --user-border: #0a0a0a;
   --user-rail: #1f1fc4;
+
+  --bubble-bg: var(--user-bg);
+  --bubble-fg: var(--fg);
+  --bubble-border: var(--user-border);
 
   --code-bg: #f7f3e7;
   --code-border: #0a0a0a;
@@ -849,6 +891,10 @@
   --user-bg: #2b2814;
   --user-border: #f5f5e8;
   --user-rail: #ffe14d;
+
+  --bubble-bg: var(--user-bg);
+  --bubble-fg: var(--fg);
+  --bubble-border: var(--user-border);
 
   --code-bg: #131311;
   --code-border: #f5f5e8;
@@ -938,6 +984,11 @@
   --radius-tab: 9999px;
   --radius-input: 10px;
 
+  --bubble-border: transparent;
+  --bubble-stroke: 1px;
+  --bubble-radius: var(--radius-panel);
+  --bubble-shadow: var(--rule-inset);
+
   /* No drop shadow: depth is a paper seam, not a float. */
   --shadow-control: none;
   --rule-inset: inset 0 1px 0 var(--border-soft);
@@ -1004,6 +1055,10 @@
   --user-bg: #f2e4cf;
   --user-border: #a4501a;
   --user-rail: #dcb88c;
+
+  --bubble-bg: var(--user-bg);
+  --bubble-fg: var(--fg);
+  --bubble-border: transparent;
 
   --code-bg: #f0e5d2;
   --code-border: #dfcbaf;
@@ -1085,6 +1140,10 @@
   --user-bg: #241c13;
   --user-border: #f0a35a;
   --user-rail: #5c4429;
+
+  --bubble-bg: var(--user-bg);
+  --bubble-fg: var(--fg);
+  --bubble-border: transparent;
 
   --code-bg: #140f0a;
   --code-border: #33291f;
@@ -1174,6 +1233,10 @@
   --radius-tab: 2px;
   --radius-input: 2px;
 
+  --bubble-stroke: 2px;
+  --bubble-radius: 2px;
+  --bubble-shadow: none;
+
   --stroke-control: 2px;
   --stroke-panel: 2px;
   --divider-width: 2px;
@@ -1254,6 +1317,10 @@
   --user-border: #0033a0;
   --user-rail: #0033a0;
 
+  --bubble-bg: var(--user-bg);
+  --bubble-fg: var(--fg);
+  --bubble-border: var(--user-border);
+
   --code-bg: #f0f0f0;
   --code-border: #000000;
   --code-fg: #000000;
@@ -1330,6 +1397,10 @@
   --user-bg: #06222e;
   --user-border: #7fd4ff;
   --user-rail: #7fd4ff;
+
+  --bubble-bg: var(--user-bg);
+  --bubble-fg: var(--fg);
+  --bubble-border: var(--user-border);
 
   --code-bg: #101010;
   --code-border: #ffffff;

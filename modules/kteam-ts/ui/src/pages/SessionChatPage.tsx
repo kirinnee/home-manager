@@ -29,7 +29,8 @@ import { SessionHeader } from '../components/SessionHeader';
 import { Transcript } from '../components/Transcript';
 import { ThinkingIndicator } from '../components/Harness';
 import { displayCallsign } from '../lib/callsign';
-import { buildTranscript, latestPendingQuestion } from '../lib/transcript';
+import { buildTranscript, latestPendingQuestion, peerFrom } from '../lib/transcript';
+import { classifySystemText } from '../lib/system-blocks';
 import { useUsage } from '../hooks/useUsage';
 import { useDebouncedEffect } from '../hooks/useDebounce';
 import { useLayoutMode } from '../hooks/useLayoutMode';
@@ -54,6 +55,18 @@ interface PendingSend {
   /** When the reader sent it. Used to reap against chat.user records that
    *  arrived AFTER this send, never against an identical older message. */
   at: number;
+}
+
+/** A pending local send is confirmed only by a record that the transcript will
+ * render as the same genuine human voice. Peer banners and harness-injected
+ * system text share the chat.user channel but are not delivery evidence. */
+export function recordConfirmsPending(record: ChatRecord, pending: { text: string; at: number }): boolean {
+  if (record.type !== 'chat.user') return false;
+  const raw = String((record.data as { text?: unknown } | undefined)?.text ?? '');
+  const { from, body } = peerFrom(raw);
+  if (from || classifySystemText(body)) return false;
+  const at = Date.parse(record.timestamp ?? '') || 0;
+  return body.trim() === pending.text && at >= pending.at - RECORD_CLOCK_SLACK_MS;
 }
 
 export function SessionChatPage({
@@ -389,14 +402,8 @@ export function SessionChatPage({
   // reaped by its own predecessor.
   useEffect(() => {
     if (!pending.length) return;
-    const userMsgs = records
-      .filter(r => r.type === 'chat.user')
-      .map(r => ({
-        text: String((r.data as { text?: unknown } | undefined)?.text ?? '').trim(),
-        at: Date.parse(r.timestamp ?? '') || 0,
-      }));
     setPending(p => {
-      const next = p.filter(x => !userMsgs.some(m => m.text === x.text && m.at >= x.at - RECORD_CLOCK_SLACK_MS));
+      const next = p.filter(x => !records.some(record => recordConfirmsPending(record, x)));
       return next.length === p.length ? p : next;
     });
   }, [records, pending.length]);
@@ -764,7 +771,7 @@ export function SessionChatPage({
   );
 }
 
-// Optimistic "sent" box — mirrors the user-block styling with a pending →
+// Optimistic "sent" bubble — mirrors the human styling with a pending →
 // delivered/queued/failed state badge so the send never feels lost.
 //
 // The status used to be a bare run of coloured monospace text hard against the
@@ -796,51 +803,48 @@ function PendingMessage({
 }) {
   const { label, tone } = PENDING_BADGE[status];
   return (
-    <div
-      className={cn(
-        'overflow-hidden rounded-md border border-l-[2.5px] border-border border-l-user-border bg-user-bg',
-        status === 'delivered' && 'opacity-80',
-      )}
-    >
-      <div className="flex items-center gap-2 px-2.5 pt-1">
-        <span className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-accent">you</span>
-        <span
-          className={cn(
-            'ml-auto inline-flex shrink-0 select-none items-center gap-1 rounded-sm border px-1.5 py-px text-[10.5px] font-medium leading-[1.5]',
-            tone,
+    <div className="kt-bubble-row">
+      <span className="sr-only">You said:</span>
+      <div className="kt-bubble">
+        <div className="flex min-w-0 items-center gap-2 px-panel pt-1">
+          <span
+            className={cn(
+              'ml-auto inline-flex shrink-0 select-none items-center gap-1 rounded-sm border px-1.5 py-px text-[10.5px] font-medium leading-[1.5]',
+              tone,
+            )}
+          >
+            {status === 'sending' && (
+              <span className="inline-block h-2.5 w-2.5 animate-spin rounded-full border border-current border-t-transparent" />
+            )}
+            {label}
+          </span>
+          {status === 'error' && (
+            <>
+              {/* Retry re-uses this message's original request id, so a first
+                  attempt that DID land is recognised by the daemon and dropped
+                  rather than delivered twice (see requestIdFor). */}
+              <button
+                type="button"
+                onClick={onRetry}
+                className="shrink-0 rounded-sm border border-border px-1.5 py-px text-[10.5px] font-medium text-muted hover:bg-surface-2 hover:text-fg"
+                title="Send this message again with the same idempotency key — if the first attempt actually landed, the daemon will not deliver it twice"
+              >
+                retry
+              </button>
+              <button
+                type="button"
+                onClick={onDismiss}
+                className="shrink-0 rounded-sm px-1 py-px text-[10.5px] text-muted hover:text-fg"
+                title="Remove this box"
+              >
+                dismiss
+              </button>
+            </>
           )}
-        >
-          {status === 'sending' && (
-            <span className="inline-block h-2.5 w-2.5 animate-spin rounded-full border border-current border-t-transparent" />
-          )}
-          {label}
-        </span>
-        {status === 'error' && (
-          <>
-            {/* Retry re-uses this message's original request id, so a first
-                attempt that DID land is recognised by the daemon and dropped
-                rather than delivered twice (see requestIdFor). */}
-            <button
-              type="button"
-              onClick={onRetry}
-              className="shrink-0 rounded-sm border border-border px-1.5 py-px text-[10.5px] font-medium text-muted hover:bg-surface-2 hover:text-fg"
-              title="Send this message again with the same idempotency key — if the first attempt actually landed, the daemon will not deliver it twice"
-            >
-              retry
-            </button>
-            <button
-              type="button"
-              onClick={onDismiss}
-              className="shrink-0 rounded-sm px-1 py-px text-[10.5px] text-faint hover:text-fg"
-              title="Remove this box"
-            >
-              dismiss
-            </button>
-          </>
-        )}
-      </div>
-      <div className="whitespace-pre-wrap break-words px-2.5 pb-1.5 pt-0.5 text-[13px] leading-snug text-fg">
-        {text}
+        </div>
+        <div className="kt-user-copy min-w-0 max-w-full whitespace-pre-wrap break-words px-panel pb-1.5 pt-0.5 text-[13px] leading-snug text-[color:var(--bubble-fg)]">
+          {text}
+        </div>
       </div>
     </div>
   );

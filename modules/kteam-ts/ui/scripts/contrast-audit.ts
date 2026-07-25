@@ -194,6 +194,20 @@ function resolveTheme(family: Family, mode: Mode): Map<string, string> {
   return tokens;
 }
 
+/** Resolve the nested preview swatch through the same base → family → mode
+ * layers. Bubble roles must remain byte-identical to the live root theme so a
+ * picker preview cannot silently inherit the currently active family's box. */
+function resolveSwatch(family: Family, mode: Mode): Map<string, string> {
+  const isBase = (s: string) => /:root,\s*\[data-swatch\]$/.test(s);
+  const isFamily = (s: string) => s.includes(`[data-swatch^='${family}-']`);
+  const isMode = (s: string) => s.includes(`[data-swatch='${family}-${mode}']`);
+  const tokens = new Map<string, string>();
+  for (const pick of [isBase, isFamily, isMode]) {
+    for (const b of BLOCKS) if (pick(b.selector)) for (const [k, v] of b.decls) tokens.set(k, v);
+  }
+  return tokens;
+}
+
 /* ---------- pair specification ------------------------------------------- */
 
 type Tier = 'body' | 'large' | 'ui' | 'decor';
@@ -246,13 +260,16 @@ function buildPairs(): Pair[] {
      `faint` is not. Inventing pairs that never render would force the whole
      ink ramp darker to satisfy a combination no user can see. */
   add('fg', [...SURFACES, 'user-bg'], 'body', 'body copy / .md prose');
+  /* The bubble has its own foreground/background roles, so audit the actual
+     pair instead of assuming aliases always land on the legacy user surface. */
+  p.push({ fg: 'bubble-fg', bg: 'bubble-bg', tier: 'body', where: 'genuine human bubble copy' });
   add(
     'fg-soft',
     ['bg', 'surface', 'surface-2', 'user-bg', 'code-bg'],
     'body',
     'secondary copy, TerminalView, blockquote',
   );
-  add('muted', [...SURFACES, 'user-bg'], 'body', 'text-muted (57x) + TaskName chip on surface-3');
+  add('muted', [...SURFACES, 'user-bg', 'bubble-bg'], 'body', 'text-muted + bubble metadata');
   add('faint', ['bg', 'surface', 'surface-2'], 'body', 'text-faint (58x)');
   /* `.kt-chrome` is no longer a dimmed subtree. It used to be `--faint` under
      `opacity: var(--chrome-opacity)`, and the two lines that modelled it here
@@ -420,6 +437,28 @@ function flattenAliases(tokens: Map<string, string>): Map<string, string> {
   return out;
 }
 
+const BUBBLE_ROLES = ['bubble-bg', 'bubble-fg', 'bubble-border', 'bubble-stroke', 'bubble-radius', 'bubble-shadow'];
+
+function assertBubbleSwatchParity(): void {
+  const errors: string[] = [];
+  for (const family of FAMILIES) {
+    for (const mode of MODES) {
+      const theme = flattenAliases(resolveTheme(family, mode));
+      const swatch = flattenAliases(resolveSwatch(family, mode));
+      for (const role of BUBBLE_ROLES) {
+        if (theme.get(role) !== swatch.get(role)) {
+          errors.push(
+            `${family}-${mode}: --${role} root=${theme.get(role) ?? '(missing)'} swatch=${swatch.get(role) ?? '(missing)'}`,
+          );
+        }
+      }
+    }
+  }
+  if (!errors.length) return;
+  console.error(`contrast-audit: bubble swatch parity failed\n${errors.join('\n')}`);
+  process.exit(2);
+}
+
 /** Resolve a token to an opaque colour, compositing over `--bg` when translucent. */
 function opaque(tokens: Map<string, string>, name: string): Rgba | null {
   const raw = tokens.get(name);
@@ -445,6 +484,9 @@ function evaluate(family: Family, mode: Mode): Row[] {
     where: string,
     alphaToken?: string,
   ) => {
+    // High Contrast makes an explicit AAA promise for its human voice. This is
+    // a hard pair-specific floor, not merely the summary claim printed below.
+    const need = fgName === 'bubble-fg' && family === 'contrast' ? 7 : THRESHOLD[tier];
     const fgC0 = fgRaw === null ? null : parseColor(fgRaw);
     if (!fgC0 || !bgC) {
       rows.push({
@@ -456,7 +498,7 @@ function evaluate(family: Family, mode: Mode): Row[] {
         fgHex: fgRaw ?? '(missing)',
         bgHex: bgC ? hex(bgC) : '(missing)',
         ratio: 0,
-        need: THRESHOLD[tier],
+        need,
         status: 'UNRESOLVED',
       });
       return;
@@ -468,7 +510,6 @@ function evaluate(family: Family, mode: Mode): Row[] {
     }
     const flat = fgC.a >= 1 ? fgC : over(fgC, bgC);
     const ratio = contrast(flat, bgC);
-    const need = THRESHOLD[tier];
     rows.push({
       theme,
       fg: fgName,
@@ -561,6 +602,8 @@ function suggestFor(theme: string, token: string, rows: Row[]): string | null {
 }
 
 /* ---------- report -------------------------------------------------------- */
+
+assertBubbleSwatchParity();
 
 const argv = process.argv.slice(2);
 const args = new Set(argv);
