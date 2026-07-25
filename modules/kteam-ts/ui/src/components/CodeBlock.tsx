@@ -34,10 +34,10 @@ export const CodeBlock = memo(function CodeBlock({
   }, [shown, lang, tone]);
 
   return (
-    <div>
+    <div className="min-w-0 max-w-full">
       <pre
         className={cn(
-          'hljs m-0 max-h-[380px] overflow-auto rounded-md border px-2.5 py-2 text-[11.75px] leading-[1.5] mono whitespace-pre-wrap break-words scroll-thin',
+          'kt-code-block hljs m-0 max-h-[380px] max-w-full min-w-0 overflow-auto rounded-md border px-2.5 py-2 text-[11.75px] leading-[1.5] mono whitespace-pre-wrap break-words scroll-thin',
           tone === 'err' ? 'border-err-border !bg-err-bg text-err' : 'border-border-soft',
         )}
       >

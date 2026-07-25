@@ -334,6 +334,7 @@ pre,
    that the gaps are NOT uniform. Values are margin-top; the first child's is
    suppressed so the transcript never opens on dead space. */
 .kt-block {
+  min-width: 0;
   margin-top: 2px;
 }
 .kt-block:first-child {
@@ -361,6 +362,8 @@ pre,
    scale). This is the real typographic hierarchy.
    ============================================================================ */
 .md {
+  min-width: 0;
+  max-width: 100%;
   font-size: var(--md-font-size);
   line-height: var(--md-leading);
   color: var(--fg);
@@ -422,6 +425,7 @@ pre,
 }
 .md a {
   color: var(--accent);
+  overflow-wrap: anywhere;
   text-decoration: underline;
   text-underline-offset: 2px;
   text-decoration-color: color-mix(in srgb, var(--accent) 42%, transparent);
@@ -456,16 +460,21 @@ pre,
   background: var(--code-bg);
   border: var(--border-width) solid var(--code-border);
   color: var(--code-fg);
+  overflow-wrap: anywhere;
+  word-break: break-word;
   white-space: break-spaces;
 }
 /* fenced code blocks */
 .md pre {
+  min-width: 0;
+  max-width: 100%;
   margin: 0.7em 0;
   padding: 0.8em 0.95em;
   border-radius: var(--radius-md);
   background: var(--code-bg);
   border: var(--border-width) solid var(--code-border);
   overflow: auto;
+  overscroll-behavior-inline: contain;
   font-size: var(--code-font-size);
   line-height: 1.5;
 }
@@ -478,13 +487,21 @@ pre,
   white-space: pre;
 }
 /* tables */
-.md table {
+.md-table-scroll {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   margin: 0.75em 0;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+.md table {
+  width: max-content;
+  min-width: 100%;
+  margin: 0;
   border-collapse: collapse;
   font-size: 12.75px;
-  display: block;
-  max-width: 100%;
-  overflow-x: auto;
 }
 .md th,
 .md td {
@@ -511,6 +528,20 @@ pre,
   content-visibility: auto;
 }
 
+/* Plain user input wraps even when it is a path, URL or session id with no
+   natural breakpoints. Tool-result code keeps its own reachable scroller as a
+   fallback; neither is allowed to widen the transcript viewport. */
+.kt-user-copy,
+.kt-code-block {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.kt-code-block {
+  overscroll-behavior-inline: contain;
+}
+
 /* ---- scroll anchoring: keep a detached reader's viewport still ------------
    The transcript relies on the browser's own scroll anchoring to absorb late
    layout (images, syntax highlighting, fonts) without a measure-then-correct
@@ -518,7 +549,15 @@ pre,
    sets `overflow-anchor: none`, so the transcript states it explicitly. */
 .kt-viewport,
 .kt-content {
+  min-width: 0;
   overflow-anchor: auto;
+}
+/* Flex items default to min-width:auto, which lets a single pre/table/string
+   make the OUTER log horizontally scroll. These children may shrink; their
+   local code/table containers keep intrinsically wide content reachable. */
+.kt-content > * {
+  min-width: 0;
+  max-width: 100%;
 }
 
 /* ============================================================================
@@ -1018,17 +1057,15 @@ body {
   min-height: var(--control-h);
 }
 .kt-composer {
-  padding: var(--pad-panel);
+  padding: var(--gap-sm) var(--pad-panel);
 }
-/* PHONE COMPOSER. `--pad-panel` is a resting-density statement — 10px in Studio,
-   16px in Ember — and on a 1440px display that is exactly right. On a 390x844
-   phone it is 20-32px of vertical air wrapped around a 44px field and a 44px
-   button row, inside a box that is already the second-largest thing on screen.
-   The horizontal inset is untouched (the text must not run into the border) and
-   so are the border, the focus ring and every touch floor; only the vertical air
-   goes. Class-scoped rather than media-scoped on purpose: it applies to exactly
-   the instance the drawer-width layout renders, so a coarse-pointer tablet on
-   the desktop layout keeps the desktop composer. */
+/* PHONE COMPOSER. Desktop now spends only `--gap-sm` vertically around its two
+   bands; a 390x844 phone trims that once more to `--gap-xs` around the 44px
+   field/action floors. The horizontal `--pad-panel` inset is untouched (text
+   must not run into the border), as are the border, focus ring and touch floors.
+   Class-scoped rather than media-scoped on purpose: it applies to exactly the
+   drawer-width instance, so a coarse-pointer tablet on the desktop layout keeps
+   desktop spacing. */
 .kt-composer--compact {
   padding-top: var(--gap-xs);
   padding-bottom: var(--gap-xs);
@@ -1208,6 +1245,12 @@ body {
   border-bottom: var(--divider-width) solid var(--divider-color);
 }
 .kt-details__group:last-child {
+  border-bottom: 0;
+}
+
+/* ---- bottom sheet (SessionDetails) ---- */
+.kt-sheet {
+  border-radius: var(--radius-panel) var(--radius-panel) 0 0;
   border-bottom: 0;
 }
 

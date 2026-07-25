@@ -2,9 +2,9 @@
 //
 // It used to be a bordered box containing a second bordered box (the textarea)
 // with a button row beneath it: a form, not a place to talk. This is a single
-// surface — a slim context strip, a borderless auto-growing textarea, and the
-// actions INSIDE the box on the same line as the hint. The whole thing takes the
-// focus ring as one object, the way Telegram and claude.ai do it.
+// surface — a borderless auto-growing textarea, then context, hint and actions
+// on ONE compact line inside the box. The whole thing takes the focus ring as
+// one object, the way Telegram and claude.ai do it.
 //
 // SAFETY SEMANTICS ARE UNCHANGED, and they are the reason this file has more
 // comments than markup:
@@ -13,30 +13,32 @@
 //     reached by a keystroke.
 //   - Shift+Enter inserts a newline; an IME composition Enter is ignored
 //     entirely (`isComposing`), so Japanese/Chinese/Korean input can't send.
-//   - `sending` locks the whole surface: Enter is a no-op and both buttons
-//     disable, so a second keystroke or click cannot launch a duplicate. The
-//     page holds a synchronous ref guard as well, and every mutation carries an
-//     idempotency id (the server-side backstop).
+//   - `sending` locks the whole surface: Enter is a no-op and every rendered
+//     action disables, so a second keystroke or click cannot launch a duplicate.
+//     The page holds a synchronous ref guard as well, and every mutation carries
+//     an idempotency id (the server-side backstop).
 //   - `disabled` is the structured-question path: when the daemon is waiting on
 //     a QuestionForm answer, that form IS the input and this is inert.
 //
-// HEIGHT STABILITY. The strip is a fixed-height, single-line, never-wrapping row
-// and always renders every field (an unknown value renders as "—"), because the
-// transcript's follow behaviour keys off viewport height: a strip that grew a
-// line when the model name arrived would resize the scroller mid-stream. The
-// textarea grows only in response to typing — a deliberate, user-driven change —
-// and stops at MAX_TEXTAREA_PX.
+// HEIGHT STABILITY. On desktop the context/hint/action line is fixed-height,
+// single-line and never wrapping; unknown context values render as "—". The
+// transcript's follow behaviour keys off viewport height, so model or status
+// arriving cannot grow the composer mid-stream. The textarea grows only in
+// response to typing — a deliberate, user-driven change — and stops at
+// MAX_TEXTAREA_PX.
 
-import { useEffect, useLayoutEffect, useRef, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { CornerDownLeft, Send, Clock, ZapOff } from 'lucide-react';
 import { Button } from './Primitives';
 import { cn, type Tone } from '../lib/utils';
 import { useKeyboardOpen } from '../hooks/useAppViewport';
 
-/** Facts the strip states. Every one is optional — the strip's height does not
- *  depend on any of them being known. */
+/** Facts the compact context line accepts. Every one is optional — its height
+ *  does not depend on any of them being known. */
 export interface ComposerContext {
   model?: string;
+  /** Accepted for the frozen page contract, but intentionally never rendered:
+   *  turn belongs in session metadata. */
   turn?: number;
   contextPercent?: number;
   status?: string;
@@ -54,13 +56,12 @@ interface Props {
   sending?: boolean;
   placeholder?: string;
   context?: ComposerContext;
-  /** Phone chrome. Two rows of the four disappear and NOTHING about the safety
-   *  semantics moves:
+  /** Phone chrome. The same single context/action line gets denser and NOTHING
+   *  about the safety semantics moves:
    *
-   *    - the context strip stops being a row of its own and becomes a socket dot
-   *      plus `ctx N%` in the action row's left slot. Model and turn are one tap
-   *      away in the session details drawer, and neither is a fact you steer by
-   *      while typing.
+   *    - context becomes a socket dot plus `ctx N%` in the action row's left
+   *      slot. Model is one tap away in session details and is not a fact you
+   *      steer by while typing. Turn is metadata and never enters this surface.
    *    - the keyboard hint stops being VISIBLE. "Shift+Enter newline" is not a
    *      thing a phone keyboard can do, so on touch it was a line of type that
    *      cost 20px to say nothing. It is moved to `sr-only`, NOT removed: the
@@ -86,6 +87,7 @@ const COMPACT_MAX_TEXTAREA_PX = 96;
  *  the wrong one: 30% of 508px is 152px, which is larger than the desktop cap. */
 const COMPACT_KEYBOARD_MAX_TEXTAREA_PX = 64;
 const MIN_TEXTAREA_PX = 38;
+const COARSE_POINTER = '(pointer: coarse)';
 
 const TONE_TEXT: Record<Tone, string> = {
   ok: 'text-ok',
@@ -94,6 +96,28 @@ const TONE_TEXT: Record<Tone, string> = {
   pend: 'text-pend',
   accent: 'text-accent',
 };
+
+/** Pointer capability is independent of layout width: a wide tablet still
+ *  needs a tap target, while a narrow fine-pointer window still has Enter. */
+function useCoarsePointer(): boolean {
+  const [coarse, setCoarse] = useState(
+    () =>
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia(COARSE_POINTER).matches,
+  );
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const media = window.matchMedia(COARSE_POINTER);
+    const sync = () => setCoarse(media.matches);
+    sync();
+    media.addEventListener('change', sync);
+    return () => media.removeEventListener('change', sync);
+  }, []);
+
+  return coarse;
+}
 
 export function Composer({
   draft,
@@ -109,6 +133,7 @@ export function Composer({
 }: Props) {
   const ref = useRef<HTMLTextAreaElement | null>(null);
   const keyboardOpen = useKeyboardOpen();
+  const coarsePointer = useCoarsePointer();
   // The growth cap is a property of the box the reader can see, so it follows
   // the viewport rather than the device. Desktop is unchanged at 148px.
   const maxTextareaPx = !compact
@@ -150,8 +175,6 @@ export function Composer({
         disabled && 'opacity-60',
       )}
     >
-      {context && !compact && <ContextStrip context={context} />}
-
       {/* The textarea is borderless and transparent: the WRAPPER is the input as
           far as the eye (and the focus ring) is concerned. */}
       <textarea
@@ -179,18 +202,15 @@ export function Composer({
         }}
       />
 
-      {/* Action cluster, inside the box. Wraps to its own line under ~380px
-          instead of pushing the send button off the edge. */}
-      <div className="kt-composer__actions flex min-h-control flex-wrap items-center gap-x-sm gap-y-xs">
-        {/* Deliberately NOT `.kt-chrome`: that class rests at 78% opacity, which
-            is right for transcript metadata and wrong for the line that tells
-            you what Enter will do and whether your message is in flight.
-
-            The line is NOT itself a live region (a11y report S-4): when it was,
-            the static "· Shift+Enter newline" hint was re-announced on every
-            busy/sending transition. Only the STATUS words below sit in the
-            live region, so a screen reader hears "sending…" or the send/queue
-            change without the keyboard hint being read back every time. */}
+      {/* Context, hint and actions share this one line on desktop. Phone keeps
+          flex-wrap as a last-resort safety valve below ~380px; desktop never
+          wraps, so a live status update cannot resize the transcript viewport. */}
+      <div
+        className={cn(
+          'kt-composer__actions min-h-control items-center gap-x-sm gap-y-xs',
+          compact ? 'flex flex-wrap' : 'flex flex-nowrap',
+        )}
+      >
         {compact ? (
           <span className="mr-auto inline-flex min-w-0 items-center gap-xs truncate text-meta text-muted">
             {/* SPOKEN, NEVER SHOWN. `sr-only` and not `hidden`: display:none
@@ -203,76 +223,105 @@ export function Composer({
             {context && <CompactContext context={context} sending={sending} dense={showInterrupt} />}
           </span>
         ) : (
-          <span className="mr-auto inline-flex min-w-0 items-center gap-xs truncate text-meta text-muted">
-            {sending ? (
-              <span
-                className="inline-block h-2.5 w-2.5 shrink-0 animate-spin rounded-full border border-current border-t-transparent motion-reduce:animate-none"
-                aria-hidden="true"
-              />
-            ) : (
-              <CornerDownLeft size={11} aria-hidden="true" />
-            )}
-            <span className="truncate">
-              {/* Persistent, atomic region: only these status words announce on a
-                  send/queue/busy transition. */}
-              <span aria-live="polite" aria-atomic="true">
-                {sending ? 'sending…' : busy ? 'Enter queues for the next turn' : 'Enter sends'}
+          <div className="mr-auto flex min-w-0 items-center gap-sm overflow-hidden">
+            {context && <ContextStrip context={context} />}
+            {context && <Sep />}
+            {/* Deliberately NOT `.kt-chrome`: this tells the reader how the
+                keyboard behaves and whether a message is in flight. The line is
+                not itself live: only the changing STATUS words are, so the
+                static Shift+Enter hint is never re-announced (a11y report S-4). */}
+            <span className="inline-flex shrink-0 items-center gap-xs text-meta text-muted">
+              {sending ? (
+                <span
+                  className="inline-block h-2.5 w-2.5 shrink-0 animate-spin rounded-full border border-current border-t-transparent motion-reduce:animate-none"
+                  aria-hidden="true"
+                />
+              ) : (
+                <CornerDownLeft size={11} aria-hidden="true" />
+              )}
+              <span>
+                {/* Persistent, atomic region: only these status words announce
+                    on a send/queue/busy transition. */}
+                <span aria-live="polite" aria-atomic="true">
+                  {sending ? 'sending…' : busy ? 'Enter queues for the next turn' : 'Enter sends'}
+                </span>
+                {/* Static hint — outside the live region so it is never
+                    re-announced. */}
+                {!sending && ' · Shift+Enter newline'}
               </span>
-              {/* Static hint — outside the live region so it is never re-announced. */}
-              {!sending && ' · Shift+Enter newline'}
             </span>
-          </span>
+          </div>
         )}
 
-        {showInterrupt && (
-          <Button
-            variant="danger"
-            size="sm"
-            disabled={!canSubmit}
-            aria-label="Interrupt the current turn and send this message now"
-            title="Stop the current turn safely, then deliver this message now"
-            onClick={() => onInterruptAndSend?.()}
-          >
-            <ZapOff size={12} aria-hidden="true" />
-            <span>Interrupt &amp; send</span>
-          </Button>
-        )}
-        <Button
-          variant="primary"
-          size="sm"
-          disabled={!canSubmit}
-          aria-label={busy ? 'Queue this message for the next turn' : 'Send this message'}
-          title={busy ? 'Deliver at the next turn boundary (safe)' : 'Send now'}
-          onClick={() => onSubmit()}
-        >
-          {busy ? <Clock size={12} aria-hidden="true" /> : <Send size={12} aria-hidden="true" />}
-          <span>{busy ? 'Queue' : 'Send'}</span>
-        </Button>
+        <div className="flex shrink-0 items-center gap-xs">
+          {showInterrupt && (
+            <Button
+              variant="danger"
+              size="sm"
+              disabled={!canSubmit}
+              aria-label="Interrupt the current turn and send this message now"
+              title="Stop the current turn safely, then deliver this message now"
+              onClick={() => onInterruptAndSend?.()}
+            >
+              <ZapOff size={12} aria-hidden="true" />
+              <span>Interrupt &amp; send</span>
+            </Button>
+          )}
+          {busy ? (
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={!canSubmit}
+              aria-label="Queue this message for the next turn"
+              title="Deliver at the next turn boundary (safe)"
+              onClick={() => onSubmit()}
+            >
+              <Clock size={12} aria-hidden="true" />
+              <span>Queue</span>
+            </Button>
+          ) : coarsePointer ? (
+            // Enter is the desktop send affordance. Touch keyboards still need
+            // a tap target, so this icon-only control exists only when the
+            // primary pointer is coarse (regardless of layout width).
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={!canSubmit}
+              aria-label="Send this message"
+              title="Send now"
+              onClick={() => onSubmit()}
+            >
+              <Send size={12} aria-hidden="true" />
+            </Button>
+          ) : null}
+        </div>
       </div>
     </div>
   );
 }
 
-/** Fixed-height single line. Never wraps, never changes height — see the height
- *  note at the top of this file. */
+/** Desktop context shares the action line, yields width to the keyboard contract
+ *  and busy controls, and never wraps — see the height note at the top. */
 function ContextStrip({ context }: { context: ComposerContext }) {
-  const { model, turn, contextPercent, status, statusTone, liveStatus } = context;
+  const { model, contextPercent, status, statusTone, liveStatus } = context;
   const ctxTone =
     contextPercent == null ? 'text-faint' : contextPercent >= 90 ? 'text-err' : contextPercent >= 75 ? 'text-warn' : '';
   const socketTone = liveStatus === 'open' ? 'bg-ok' : liveStatus === 'connecting' ? 'bg-warn' : 'bg-err';
 
   return (
-    <div
-      data-density-region="composer-context"
-      className="mono flex h-control-sm w-full items-center gap-x-sm overflow-hidden whitespace-nowrap border-b border-border-soft text-chrome text-muted"
-    >
+    <div className="mono flex min-w-0 flex-1 items-center gap-x-sm overflow-hidden whitespace-nowrap text-chrome text-muted">
+      {liveStatus && (
+        <span className="inline-flex shrink-0 items-center text-faint" title={`live event stream ${liveStatus}`}>
+          <span className={cn('kt-dot', socketTone)} aria-hidden="true" />
+          <span className="sr-only">live event stream {liveStatus}</span>
+        </span>
+      )}
+      {liveStatus && <Sep />}
       <Field className="min-w-0 flex-1 truncate text-fg-soft" title={model ? `model: ${model}` : 'model unknown'}>
         {model || '—'}
       </Field>
       <Sep />
-      <Field title="turn number">turn {turn ?? '—'}</Field>
-      <Sep />
-      <Field className={ctxTone} title="context window used">
+      <Field className={cn('shrink-0', ctxTone)} title="context window used">
         ctx {contextPercent == null ? '—' : `${contextPercent}%`}
       </Field>
       <Sep />
@@ -282,15 +331,6 @@ function ContextStrip({ context }: { context: ComposerContext }) {
       >
         {status ?? '—'}
       </Field>
-      {liveStatus && (
-        <span
-          className="ml-auto inline-flex shrink-0 items-center gap-xs text-faint"
-          title={`live event stream ${liveStatus}`}
-        >
-          <span className={cn('kt-dot', socketTone)} aria-hidden="true" />
-          <span className="hidden sm:inline">{liveStatus}</span>
-        </span>
-      )}
     </div>
   );
 }
@@ -361,7 +401,7 @@ function CompactContext({
 
 function Field({ children, className, title }: { children: ReactNode; className?: string; title?: string }) {
   return (
-    <span className={cn('shrink-0', className)} title={title}>
+    <span className={className} title={title}>
       {children}
     </span>
   );

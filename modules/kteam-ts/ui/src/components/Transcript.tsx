@@ -33,10 +33,10 @@
 //     mechanism that compensates sub-frame without a measure-then-correct
 //     flicker.
 //
-//   PREPEND (an older page loads): scrollHeight is measured before paint and
-//     the delta is added back to scrollTop, so the reader's content does not
-//     move. Browser anchoring cannot cover this case: the whole DOM above the
-//     viewport is replaced at once.
+//   PREPEND (an older page loads): the reader's last settled gap from the bottom
+//     is restored before paint, so their content does not move. Browser anchoring
+//     cannot cover this case: the whole DOM above the viewport is replaced at
+//     once, and an in-commit scrollHeight delta is not trustworthy here.
 //
 // Follow is a sticky STATE, not a distance test on each event: it disengages as
 // soon as the reader scrolls up at all and re-engages only at the true bottom
@@ -497,7 +497,7 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
   }
 
   return (
-    <div className="relative flex h-full min-h-0 flex-col">
+    <div className="relative flex h-full min-h-0 min-w-0 flex-col">
       <div
         ref={viewportRef}
         // The chrome-to-content gate measures CONTENT as this element's box, so
@@ -505,7 +505,7 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
         // panel around it — the two differ by the border and would quietly
         // flatter the ratio.
         data-density-region="transcript-scroller"
-        className="kt-viewport min-h-0 flex-1 overflow-y-auto scroll-thin"
+        className="kt-viewport min-h-0 min-w-0 flex-1 overflow-y-auto scroll-thin"
         onScroll={onScroll}
         role="log"
         aria-label="Transcript"
@@ -513,8 +513,16 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
         {/* NO container `gap` — spacing is asymmetric by design (see index.css
             "ASYMMETRIC DENSITY"). A uniform gap is exactly what made tools cost
             as much vertical space as conversation. Each row declares its own
-            top margin from what it is and what precedes it. */}
-        <div ref={contentRef} className="kt-content mx-auto flex w-full max-w-[880px] flex-col px-2 py-2 sm:px-4">
+            top margin from what it is and what precedes it.
+
+            Desktop gets extra tail padding INSIDE this measured content box.
+            Padding participates in scrollHeight, so exact pinning and bottom
+            detection already include it; because it is constant across a
+            prepend, the settled gap-from-bottom invariant also stays exact. */}
+        <div
+          ref={contentRef}
+          className="kt-content mx-auto flex min-w-0 w-full max-w-[880px] flex-col px-2 pb-2 pt-2 sm:px-4 sm:pb-8"
+        >
           {header}
           {blocks.map((b, idx) => (
             <TranscriptRow
