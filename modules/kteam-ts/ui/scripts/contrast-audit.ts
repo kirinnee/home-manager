@@ -40,9 +40,15 @@
    ── THINGS THIS ACCOUNTS FOR ──────────────────────────────────────────────
    * alpha. Mission Control's borders and status washes are `rgba()`; a token
      with alpha is composited over its actual backdrop before measuring.
-   * `--chrome-opacity`. `.kt-chrome` renders `--faint` at that opacity, so the
-     effective ink is a blend, not `--faint`. Both the plain (`text-faint`) and
-     the dimmed (`.kt-chrome`) forms are checked, because both ship.
+   * `var()` aliases. A token may point at another token (`--border-strong:
+     var(--border)` in Neo, `--chrome-fg: var(--faint)` in four families). These
+     are flattened before measuring — an unflattened alias parses as null, and a
+     null foreground is reported UNRESOLVED and then skipped, which silently
+     removes the pair from the gate instead of checking it.
+   * `.kt-chrome` is NOT a dimmed subtree. It once rendered `--faint` under
+     `opacity: var(--chrome-opacity)`; it now uses one contrast-checked ink,
+     `--chrome-fg`, because a subtree alpha also dimmed descendants that were
+     never sized against it (a TaskName chip measured 1.92:1). One ink, one check.
    * `--bar-bg`. Translucent sticky bars are composited over `--bg`.
    * `--body-wash`. Mission and Ember paint radial gradients over `--bg`; at the
      hot spot the page background is NOT `--bg`. The peak stop of each wash is
@@ -248,10 +254,13 @@ function buildPairs(): Pair[] {
   );
   add('muted', [...SURFACES, 'user-bg'], 'body', 'text-muted (57x) + TaskName chip on surface-3');
   add('faint', ['bg', 'surface', 'surface-2'], 'body', 'text-faint (58x)');
-  add('faint', ['bg', 'surface', 'surface-2'], 'body', '.kt-chrome at --chrome-opacity', 'chrome-opacity');
-  // A `.kt-chrome` ancestor's opacity multiplies whatever a descendant sets,
-  // so the TaskName chip inside a chrome row is muted *dimmed*, on surface-3.
-  add('muted', ['surface-3'], 'body', 'TaskName chip inside .kt-chrome', 'chrome-opacity');
+  /* `.kt-chrome` is no longer a dimmed subtree. It used to be `--faint` under
+     `opacity: var(--chrome-opacity)`, and the two lines that modelled it here
+     (faint-at-alpha, plus the TaskName chip inheriting that alpha on surface-3)
+     described a mechanism that no longer exists: index.css now sets
+     `color: var(--chrome-fg)` with no opacity at all, precisely because a subtree
+     alpha dimmed descendants it was never sized against. One real ink, one check. */
+  add('chrome-fg', ['bg', 'surface', 'surface-2', 'bar-bg'], 'body', '.kt-chrome ink');
   add('code-fg', ['code-bg'], 'body', 'inline code / fenced blocks');
   // Sticky bars are translucent over the page background.
   add('fg', ['bar-bg'], 'body', 'AppBar / SessionHeader title');
@@ -296,15 +305,26 @@ function buildPairs(): Pair[] {
      Everything in the advisory group below is an edge drawn around something
      already identified by its own fill, its own text, or both. Removing it
      removes prettiness, not meaning. Ratios are still printed. */
-  /* `input, textarea` draw their edge with `--border` (index.css), and a field's
-     edge is the only thing that says "you can type here" — so for THIS token the
-     control case sets the bar, not the decorative card case. If a future pass
-     splits the token (a `--border-strong` for controls, `--border` left soft for
-     cards) move this line to that token and demote `--border` to `decor`. */
-  add('border', SURFACES, 'ui', 'input/textarea edge (also used on cards)');
+  /* THAT FUTURE PASS HAPPENED. The token is split: `--border-strong` draws the
+     edge of anything you can operate (`.kt-btn`, `.kt-input`, `.kt-composer`,
+     `.kt-tab`, `.kt-navrow`, and the `input, textarea` base rule), so the control
+     case sets the bar on that token; `--border` is left to cards, panels and
+     table wrappers, which are identified by their own fill and content. So this
+     line moves to `--border-strong` and `--border` demotes to `decor`, exactly as
+     the previous comment here specified. */
+  add('border-strong', SURFACES, 'ui', 'control edge — input/textarea/.kt-btn/.kt-tab/.kt-navrow');
   /* Carries the SELECTED / checked / pressed state on AgentSidebar's rcOnly and
      rail toggles, ThemeToggle's mode + family radios, and NewSessionPage's agent
-     picker — a state, so explicitly in 1.4.11's scope. */
+     picker — a state, so explicitly in 1.4.11's scope.
+
+     STAYS HARD ON PURPOSE, even though the contract now says state edges must use
+     `--accent` and this token is decorative tint only. The rule is about the code
+     as it stands, not as it is meant to stand: Primitives, ThemeToggle and
+     SessionsListPage have been swept, but AgentSidebar (x2), SessionDetails,
+     NewSessionPage, WardenVerdicts (x2), QuestionForm and StatusMark still bind
+     state to this token, so it still IS a state indicator and must still clear
+     3:1. Demote to `decor` only once that sweep is committed — until then a green
+     check here would be describing a fix that has not shipped. */
   add('accent-border', ['surface', 'surface-2', 'bg', 'accent-soft'], 'ui', 'SELECTED/checked/pressed border');
   add('user-border', ['user-bg', 'surface', 'bg'], 'ui', 'user-turn 2.5px rail');
   for (const s of ['ok', 'warn', 'err', 'pend']) add(s, ['surface', 'bg', 'surface-2'], 'ui', 'StatusMark fill / dot');
@@ -314,13 +334,23 @@ function buildPairs(): Pair[] {
      focused accent-filled button puts a gap of parent background between fill
      and ring. The colours the ring actually borders are the surfaces. */
   add('focus-color', [...SURFACES, 'user-bg', 'code-bg', 'accent-soft'], 'ui', 'focus ring vs the surface it sits on');
-  /* HARD, because as shipped it is the ONLY focus indicator on every text field:
-     `input:focus` sets `outline: none` and replaces it with this 3px bloom. If
-     that `outline: none` goes away and :focus-visible does the work, this drops
-     to decoration — see the report's F-2. */
-  add('ring', ['surface', 'bg', 'surface-2'], 'ui', 'input:focus indicator (outline is suppressed)');
+  /* DEMOTED, and the condition the previous comment set is the reason: the
+     `outline: none` on `input:focus` is gone (index.css says so explicitly now,
+     with the rationale inline), so `:focus-visible` draws a real tokenised
+     outline at --focus-width/--focus-color on every field in every theme. This
+     3px bloom is no longer the indicator, it is the decorative half sitting
+     behind one — and `--focus-color` above is still HARD-checked, so demoting
+     this weakens nothing. The old label also asserted "outline is suppressed",
+     which is now simply false. */
+  add('ring', ['surface', 'bg', 'surface-2'], 'decor', 'input:focus bloom behind the real outline');
 
   /* --- advisory: decoration around already-identified things ------------- */
+  /* Demoted from `ui` now that `--border-strong` carries every control edge:
+     what is left on this token is the outline of a card, panel or table wrapper,
+     each already identified by its own fill and its own content. Mission's is the
+     reference design's own `rgba(151,217,224,.18)` hairline, which is decoration
+     by intent. Ratios are still printed. */
+  add('border', SURFACES, 'decor', 'card/panel/table edge (fill + content identify it)');
   add('border-soft', SURFACES, 'decor', 'hairline separators');
   add('code-border', ['surface', 'bg', 'code-bg'], 'decor', 'code block edge (mono fill identifies it)');
   for (const s of ['ok', 'warn', 'err', 'pend'])
@@ -358,6 +388,39 @@ type Row = {
   status: 'PASS' | 'FAIL' | 'ADVISORY' | 'UNRESOLVED';
 };
 
+/**
+ * Flatten whole-value `var()` aliases so every entry holds a literal colour.
+ *
+ * The token layer legitimately aliases one token to another — `--border-strong:
+ * var(--border)` in Neo (its border ink is already max-contrast, so the control
+ * edge has nothing to add) and `--chrome-fg: var(--faint)` in the four families
+ * whose faint already clears AA. `parseColor('var(--faint)')` returns null, and a
+ * null fg is reported UNRESOLVED and then NOT CHECKED — so an alias silently
+ * removed a pair from the gate. That is worse than a failure: 40 pairs, including
+ * every Neo and High Contrast control edge, were being skipped rather than
+ * verified. Flattening once here fixes every call site at once.
+ */
+function flattenAliases(tokens: Map<string, string>): Map<string, string> {
+  const ALIAS = /^var\(\s*--([a-z0-9-]+)\s*\)$/i;
+  const out = new Map(tokens);
+  for (const key of [...out.keys()]) {
+    let value = out.get(key)!;
+    const seen = new Set<string>([key]);
+    let m = ALIAS.exec(value.trim());
+    while (m) {
+      const target = m[1]!;
+      if (seen.has(target)) break; // cycle guard: --a: var(--b); --b: var(--a)
+      seen.add(target);
+      const next = out.get(target);
+      if (next === undefined) break; // dangling alias — leave it UNRESOLVED
+      value = next;
+      m = ALIAS.exec(value.trim());
+    }
+    out.set(key, value);
+  }
+  return out;
+}
+
 /** Resolve a token to an opaque colour, compositing over `--bg` when translucent. */
 function opaque(tokens: Map<string, string>, name: string): Rgba | null {
   const raw = tokens.get(name);
@@ -371,7 +434,7 @@ function opaque(tokens: Map<string, string>, name: string): Rgba | null {
 
 function evaluate(family: Family, mode: Mode): Row[] {
   const theme = `${family}-${mode}`;
-  const tokens = resolveTheme(family, mode);
+  const tokens = flattenAliases(resolveTheme(family, mode));
   const rows: Row[] = [];
 
   const push = (
@@ -482,7 +545,9 @@ function suggestFor(theme: string, token: string, rows: Row[]): string | null {
   if (!failing.length) return null;
   // Row labels carry an `@alpha-token` suffix; the token name is the part before.
   const name = token.split('@')[0]!;
-  const base = parseColor(resolveTheme(theme.split('-')[0] as Family, theme.split('-')[1] as Mode).get(name) ?? '');
+  const base = parseColor(
+    flattenAliases(resolveTheme(theme.split('-')[0] as Family, theme.split('-')[1] as Mode)).get(name) ?? '',
+  );
   if (!base) return null;
   const bgs = failing.map(r => ({ c: parseColor(r.bgHex)!, need: r.need })).filter(x => x.c);
   // Which direction? Away from the lightest background we must clear.
