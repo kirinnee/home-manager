@@ -53,7 +53,7 @@ export const Link = forwardRef<HTMLAnchorElement, LinkProps>(function Link({ to,
       ref={ref}
       href={to}
       onClick={(e: MouseEvent<HTMLAnchorElement>) => {
-        if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
         e.preventDefault();
         history.pushState({}, '', to);
         window.dispatchEvent(new PopStateEvent('popstate'));

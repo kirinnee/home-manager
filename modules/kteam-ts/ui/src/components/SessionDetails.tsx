@@ -435,7 +435,7 @@ function useOpenFleet(open: boolean) {
 }
 
 function sessionName(view: SessionView): string {
-  return view.config.teammate?.trim() || view.config.name?.trim() || view.config.label?.trim() || 'session';
+  return view.config.teammate?.trim() || view.config.name?.trim() || shortSessionId(view.config.id);
 }
 
 function sessionPath(id: string): string {
@@ -453,6 +453,7 @@ function LineageGroup({
   parentId?: string;
   onNavigate: () => void;
 }) {
+  const store = useStore();
   const { sessions, byId } = useOpenFleet(open);
   const lineage = useMemo(() => buildLineage(sessions ?? []), [sessions]);
   const parent = useMemo(() => parentDisplay(parentId, byId), [parentId, byId]);
@@ -465,8 +466,18 @@ function LineageGroup({
 
   const shownChildren = children.slice(0, MAX_DIRECT_CHILDREN);
   const hiddenChildren = children.length - shownChildren.length;
+  // Use the undecorated prefix: shortSessionId() adds an ellipsis for display,
+  // but the fleet haystack contains the raw parent id this query must match.
+  const parentQuery = sessionId.slice(0, 8);
   const closeBeforeRoute = (event: MouseEvent<HTMLAnchorElement>) => {
-    if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+    onNavigate();
+  };
+  const showAllChildren = (event: MouseEvent<HTMLAnchorElement>) => {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+    // The router intentionally parses only pathnames, so mirror the honest URL
+    // query into the persisted dashboard controls before its click handler runs.
+    store.setControls({ query: parentQuery });
     onNavigate();
   };
 
@@ -518,7 +529,13 @@ function LineageGroup({
               );
             })}
             {hiddenChildren > 0 && (
-              <span className="px-1.5 text-meta text-faint">+{hiddenChildren} more direct children</span>
+              <Link
+                to={`/?q=${encodeURIComponent(parentQuery)}`}
+                onClickCapture={showAllChildren}
+                className="px-1.5 text-meta text-accent hover:underline"
+              >
+                +{hiddenChildren} more direct children
+              </Link>
             )}
           </dd>
         </div>
