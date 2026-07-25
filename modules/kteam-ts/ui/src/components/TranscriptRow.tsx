@@ -26,7 +26,13 @@
 
 import { memo, useState } from 'react';
 import { ChevronRight, Brain, Info } from 'lucide-react';
-import type { TranscriptBlock, ToolCall, PeerFrom, SystemBlockInfo } from '../lib/transcript';
+import {
+  isInformativeTurnBoundary,
+  type TranscriptBlock,
+  type ToolCall,
+  type PeerFrom,
+  type SystemBlockInfo,
+} from '../lib/transcript';
 import { Markdown } from './Markdown';
 import { ToolGroup } from './ToolGroup';
 import { displayCallsign } from '../lib/callsign';
@@ -127,6 +133,10 @@ function tierOf(kind: TranscriptBlock['kind']): 'message' | 'chrome' {
 }
 
 export const TranscriptRow = memo(function TranscriptRow({ block, live, isLast, previous }: Props) {
+  // Suppress before creating `.kt-block`: transcript rows are flex items, so
+  // an empty wrapper would still retain its speaker-rhythm margin as a gap.
+  if (block.kind === 'turn' && !isInformativeTurnBoundary(block)) return null;
+
   const kind = tierOf(block.kind);
   // A speaker change (user→assistant or back) is the widest gap in the
   // transcript. Intervening chrome does not break it: a reply that ran tools
