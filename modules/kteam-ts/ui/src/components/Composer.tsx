@@ -87,7 +87,7 @@ const COMPACT_MAX_TEXTAREA_PX = 96;
  *  the wrong one: 30% of 508px is 152px, which is larger than the desktop cap. */
 const COMPACT_KEYBOARD_MAX_TEXTAREA_PX = 64;
 const MIN_TEXTAREA_PX = 38;
-const COARSE_POINTER = '(pointer: coarse)';
+const ANY_COARSE_POINTER = '(any-pointer: coarse)';
 
 const TONE_TEXT: Record<Tone, string> = {
   ok: 'text-ok',
@@ -97,26 +97,27 @@ const TONE_TEXT: Record<Tone, string> = {
   accent: 'text-accent',
 };
 
-/** Pointer capability is independent of layout width: a wide tablet still
- *  needs a tap target, while a narrow fine-pointer window still has Enter. */
-function useCoarsePointer(): boolean {
-  const [coarse, setCoarse] = useState(
+/** Pointer capability is independent of both layout width and PRIMARY pointer:
+ *  a mouse-first hybrid may still be tapped, while a fine-pointer-only narrow
+ *  window still has Enter. */
+function useHasCoarsePointer(): boolean {
+  const [hasCoarsePointer, setHasCoarsePointer] = useState(
     () =>
       typeof window !== 'undefined' &&
       typeof window.matchMedia === 'function' &&
-      window.matchMedia(COARSE_POINTER).matches,
+      window.matchMedia(ANY_COARSE_POINTER).matches,
   );
 
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return;
-    const media = window.matchMedia(COARSE_POINTER);
-    const sync = () => setCoarse(media.matches);
+    const media = window.matchMedia(ANY_COARSE_POINTER);
+    const sync = () => setHasCoarsePointer(media.matches);
     sync();
     media.addEventListener('change', sync);
     return () => media.removeEventListener('change', sync);
   }, []);
 
-  return coarse;
+  return hasCoarsePointer;
 }
 
 export function Composer({
@@ -133,7 +134,7 @@ export function Composer({
 }: Props) {
   const ref = useRef<HTMLTextAreaElement | null>(null);
   const keyboardOpen = useKeyboardOpen();
-  const coarsePointer = useCoarsePointer();
+  const hasCoarsePointer = useHasCoarsePointer();
   // The growth cap is a property of the box the reader can see, so it follows
   // the viewport rather than the device. Desktop is unchanged at 148px.
   const maxTextareaPx = !compact
@@ -279,11 +280,12 @@ export function Composer({
               <Clock size={12} aria-hidden="true" />
               <span>Queue</span>
             </Button>
-          ) : coarsePointer ? (
+          ) : hasCoarsePointer ? (
             // Enter is the desktop send affordance. Touch keyboards still need
-            // a tap target, so this icon-only control exists only when the
-            // primary pointer is coarse (regardless of layout width).
+            // a tap target, so this icon-only control exists whenever ANY input
+            // is coarse — including mouse-first hybrid devices.
             <Button
+              className="kt-composer__tap-send"
               variant="primary"
               size="sm"
               disabled={!canSubmit}
