@@ -13,6 +13,7 @@ import type {
   StartSessionPayload,
   WardenVerdict,
   SearchResponse,
+  UsageFeedView,
 } from '../types';
 
 declare global {
@@ -111,6 +112,7 @@ export const api = {
   wardenVerdicts: () => request<WardenVerdict[]>('/v1/warden/verdicts'),
   wardenReport: (path: string) => request<string>(`/v1/warden/report?path=${encodeURIComponent(path)}`),
   search: (q: string, limit = 30) => request<SearchResponse>(`/v1/search?q=${encodeURIComponent(q)}&limit=${limit}`),
+  usage: () => request<UsageFeedView>('/v1/usage'),
   wrappers: () => request<WrapperInfo[]>('/v1/wrappers'),
   projects: () => request<ProjectInfo[]>('/v1/projects'),
   createSession: (payload: StartSessionPayload) =>

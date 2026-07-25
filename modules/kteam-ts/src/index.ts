@@ -72,12 +72,16 @@ function printView(view: Awaited<ReturnType<ApiClient['get']>>): void {
     `pane ${age(view.state.lastPaneAt)}`,
   ];
   console.log(`  liveness: ${ledger.join('  ')}${view.state.nudgedAt ? '  ⚠ nudged' : ''}`);
-  if (view.state.waiting)
+  if (view.state.waiting) {
+    // A PEER wait names who is expected to unblock it — the single most useful
+    // fact when a lead is working out why a teammate is idle.
+    const peer = view.state.waiting.peerName ?? view.state.waiting.peer;
     console.log(
-      `  ⏸ DECLARED WAIT: ${view.state.waiting.condition ?? 'external condition'}` +
+      `  ⏸ DECLARED WAIT: ${peer ? `reply from ${peer}` : (view.state.waiting.condition ?? 'external condition')}` +
         `${view.state.waiting.until ? ` until ${view.state.waiting.until}` : ' (open-ended)'}` +
         ' — parked on purpose; idle-kill and the turn ceiling are suspended',
     );
+  }
   if (view.state.needsHuman) console.log(`  🚨 NEEDS HUMAN: ${view.state.needsHuman}`);
   if (view.state.reason) console.log(`  ${view.state.reason}`);
   for (const question of view.state.pendingQuestion?.questions ?? []) {
@@ -393,7 +397,13 @@ program
       view.config.id,
       // A declared park reports the same 'waiting' status as an unanswered
       // question; the marker is the only fleet-level way to tell them apart.
-      view.state.waiting ? `${view.state.status} PARKED` : view.state.status,
+      // A PEER park says who it is on, so a lead reading `ps` can see a
+      // teammate-to-teammate conversation in flight rather than a mystery idle.
+      view.state.waiting
+        ? `${view.state.status} PARKED${
+            view.state.waiting.peer ? `←${view.state.waiting.peerName ?? view.state.waiting.peer}` : ''
+          }`
+        : view.state.status,
       // The RESOLVED model, not the alias: `claude-auto-glm52a` defaults to the
       // alias `opus` while the pane actually runs glm-5.2. Harness-reported
       // first, then the wrapper's known mapping, then whatever was configured.
@@ -431,36 +441,80 @@ program
     '--now',
     'immediate steer: interrupt the active turn (Escape) and deliver the message right away instead of riding the native queue',
   )
-  .action(async (id: string, parts: string[], options: { image: string[]; messageFile?: string; now?: boolean }) => {
-    const api = await client();
-    const fileMessage = options.messageFile ? (await readFile(options.messageFile, 'utf8')).trim() : '';
-    const message = [parts.join(' ').trim(), fileMessage].filter(Boolean).join('\n\n');
-    const attachments = await Promise.all(options.image.map(file => api.upload(id, file)));
-    const view = await api.send(id, {
-      message,
-      attachmentIds: attachments.map(item => item.id),
-      now: options.now === true,
-    });
-    // The daemon states what actually happened; older daemons omit the field
-    // and fall back to the status-based guess.
-    if (view.disposition === 'queued')
-      console.log("queued in the TUI's native queue (auto-submits at the turn boundary)");
-    else if (view.disposition === 'revived') console.log('revived session with message');
-    else if (view.disposition === 'delivered') console.log('delivered');
-    else {
-      const busy = !['waiting', 'awaiting_user', 'interrupted'].includes(view.state.status) && !view.state.promptReady;
-      if (!options.now && busy)
-        console.error('kteam send: session is busy — message queued for the next turn boundary');
-    }
-    printView(view);
-  });
+  .option(
+    '--ask',
+    'request/response: label this as needing a reply and PARK this session until the peer sends one back (peer messaging; requires running inside a kteam session)',
+  )
+  .option('--until <when>', 'with --ask: give up waiting after this long (45m, 2h, or an ISO timestamp)')
+  .action(
+    async (
+      id: string,
+      parts: string[],
+      options: { image: string[]; messageFile?: string; now?: boolean; ask?: boolean; until?: string },
+    ) => {
+      const api = await client();
+      const fileMessage = options.messageFile ? (await readFile(options.messageFile, 'utf8')).trim() : '';
+      const message = [parts.join(' ').trim(), fileMessage].filter(Boolean).join('\n\n');
+      const attachments = await Promise.all(options.image.map(file => api.upload(id, file)));
+      // PEER MESSAGING: a send issued from inside a teammate pane is a message
+      // from THAT SESSION, not from the human. The daemon uses this only to
+      // label the message (and to route the reply for --ask); authorization is
+      // still the bearer token.
+      const self = process.env.KTEAM_SESSION_ID;
+      if (options.ask && !self)
+        throw new Error(
+          '--ask parks the CALLING session, so it only works inside a kteam session (no KTEAM_SESSION_ID)',
+        );
+      if (options.until && !options.ask) throw new Error('--until applies to `kteam send --ask`');
+      const view = await api.send(id, {
+        message,
+        attachmentIds: attachments.map(item => item.id),
+        now: options.now === true,
+        ...(self ? { from: self } : {}),
+        ...(options.ask ? { replyExpected: true } : {}),
+      });
+      // The daemon states what actually happened; older daemons omit the field
+      // and fall back to the status-based guess.
+      if (view.disposition === 'queued')
+        console.log("queued in the TUI's native queue (auto-submits at the turn boundary)");
+      else if (view.disposition === 'revived') console.log('revived session with message');
+      else if (view.disposition === 'delivered') console.log('delivered');
+      else {
+        const busy =
+          !['waiting', 'awaiting_user', 'interrupted'].includes(view.state.status) && !view.state.promptReady;
+        if (!options.now && busy)
+          console.error('kteam send: session is busy — message queued for the next turn boundary');
+      }
+      // --ask: park the CALLER until the peer replies. Declared AFTER the send
+      // lands, so a failed send never leaves this session waiting on a message
+      // the peer was never given. The daemon ends the park the moment that peer
+      // sends back — no polling, and the reflex layer treats the park as
+      // healthy for its whole duration.
+      if (options.ask && self) {
+        await api.signal(self, 'waiting', undefined, {
+          peer: id,
+          ...(options.until ? { until: options.until } : {}),
+          condition: `a reply from ${view.config.teammate ?? id}`,
+        });
+        console.log(
+          `parked awaiting a reply from ${view.config.teammate ?? id}` +
+            `${options.until ? ` (until ${options.until})` : ' (open-ended; 4h backstop)'}` +
+            ' — the daemon wakes this session when the reply arrives',
+        );
+      }
+      printView(view);
+    },
+  );
 program
   .command('reply')
   .description('compatibility alias for send')
   .argument('<id>')
   .argument('<message...>')
   .action(async (id: string, parts: string[]) => {
-    printView(await (await client()).send(id, { message: parts.join(' ') }));
+    // Same peer attribution as `send`: a reply issued inside a teammate pane
+    // is from that session, and it must end any peer wait the target declared.
+    const self = process.env.KTEAM_SESSION_ID;
+    printView(await (await client()).send(id, { message: parts.join(' '), ...(self ? { from: self } : {}) }));
   });
 
 program
@@ -532,21 +586,39 @@ program
   .option('--session <id>')
   .option('--until <when>', 'waiting: deadline as a duration (45m, 2h) or ISO timestamp; the daemon wakes you at it')
   .option('--on <condition>', 'waiting: what is being waited for (shown in status and heartbeats)')
-  .action(async (kind: string, parts: string[], options: { session?: string; until?: string; on?: string }) => {
-    const id = options.session ?? process.env.KTEAM_SESSION_ID;
-    if (!id) throw new Error('no session id; pass --session or run inside kteam');
-    if (!SIGNAL_KINDS.includes(kind as SignalKind)) throw new Error(`kind must be one of ${SIGNAL_KINDS.join(', ')}`);
-    if ((options.until || options.on) && kind !== 'waiting') throw new Error('--until/--on apply to `signal waiting`');
-    const view = await (
-      await client()
-    ).signal(id, kind as SignalKind, parts.join(' ') || undefined, { until: options.until, condition: options.on });
-    if (kind === 'waiting')
-      console.log(
-        `waiting recorded${view.state.waiting?.until ? ` until ${view.state.waiting.until}` : ' (open-ended)'} — ` +
-          'idle-kill and the turn ceiling are suspended while it holds',
-      );
-    else console.log(`${kind} signal recorded`);
-  });
+  .option(
+    '--peer <teammate>',
+    'waiting: park until THIS teammate sends you a message; the daemon wakes you the moment it arrives (peer request/response)',
+  )
+  .action(
+    async (
+      kind: string,
+      parts: string[],
+      options: { session?: string; until?: string; on?: string; peer?: string },
+    ) => {
+      const id = options.session ?? process.env.KTEAM_SESSION_ID;
+      if (!id) throw new Error('no session id; pass --session or run inside kteam');
+      if (!SIGNAL_KINDS.includes(kind as SignalKind)) throw new Error(`kind must be one of ${SIGNAL_KINDS.join(', ')}`);
+      if ((options.until || options.on || options.peer) && kind !== 'waiting')
+        throw new Error('--until/--on/--peer apply to `signal waiting`');
+      const view = await (
+        await client()
+      ).signal(id, kind as SignalKind, parts.join(' ') || undefined, {
+        until: options.until,
+        condition: options.on,
+        peer: options.peer,
+      });
+      if (kind === 'waiting') {
+        const peer = view.state.waiting?.peerName ?? view.state.waiting?.peer;
+        console.log(
+          `waiting recorded${peer ? ` for a reply from ${peer}` : ''}` +
+            `${view.state.waiting?.until ? ` until ${view.state.waiting.until}` : ' (open-ended)'} — ` +
+            'idle-kill and the turn ceiling are suspended while it holds' +
+            (peer ? '; the daemon wakes this session as soon as that peer sends back' : ''),
+        );
+      } else console.log(`${kind} signal recorded`);
+    },
+  );
 
 program
   .command('snapshot')

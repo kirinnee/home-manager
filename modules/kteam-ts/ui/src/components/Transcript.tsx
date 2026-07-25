@@ -350,13 +350,20 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
         role="log"
         aria-label="Transcript"
       >
-        <div
-          ref={contentRef}
-          className="kt-content mx-auto flex w-full max-w-[880px] flex-col gap-0.5 px-2 py-2 sm:px-4"
-        >
+        {/* NO container `gap` — spacing is asymmetric by design (see index.css
+            "ASYMMETRIC DENSITY"). A uniform gap is exactly what made tools cost
+            as much vertical space as conversation. Each row declares its own
+            top margin from what it is and what precedes it. */}
+        <div ref={contentRef} className="kt-content mx-auto flex w-full max-w-[880px] flex-col px-2 py-2 sm:px-4">
           {header}
           {blocks.map((b, idx) => (
-            <TranscriptRow key={b.id} block={b} live={live} isLast={idx === last} />
+            <TranscriptRow
+              key={b.id}
+              block={b}
+              live={live}
+              isLast={idx === last}
+              previous={idx > 0 ? blocks[idx - 1] : undefined}
+            />
           ))}
           {footer}
         </div>

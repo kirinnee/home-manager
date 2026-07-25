@@ -4,6 +4,7 @@ import {
   quotaFromUsage,
   USAGE_REFRESH_MS,
   UsageFeed,
+  usageAccountView,
   usageEventData,
   usageQuotaLabel,
   usageStateFromQuota,
@@ -171,6 +172,70 @@ describe('session usage projection', () => {
       fiveHourResetAt: 1_785_259_371_000,
       resetAt: 1_785_259_371_000,
     });
+  });
+});
+
+// The /v1/usage wire shape. It must be keyed by the wrapper binary (the join
+// key the browser already has on every session config) and must carry through
+// the same "unknown is not zero" normalization the session state uses — a
+// second, looser projection would let the API contradict `kteam ps`.
+describe('usageAccountView (the /v1/usage wire projection)', () => {
+  test('keys by binary and keeps both windows plus their resets', () => {
+    expect(
+      usageAccountView({
+        binary: 'claude-auto-atomi',
+        ok: true,
+        authOk: true,
+        usageBased: true,
+        fiveHourPercent: 7,
+        weeklyPercent: 49,
+        fiveHourResetAt: 1_784_964_000_363,
+        weeklyResetAt: 1_785_142_800_363,
+        atLimit: false,
+      }),
+    ).toEqual({
+      binary: 'claude-auto-atomi',
+      atLimit: false,
+      authOk: true,
+      fiveHourPercent: 7,
+      weeklyPercent: 49,
+      fiveHourResetAt: 1_784_964_000_363,
+      weeklyResetAt: 1_785_142_800_363,
+    });
+  });
+
+  test('a logged-out wrapper reports authOk:false and NO percentages', () => {
+    expect(
+      usageAccountView({
+        binary: 'claude-auto-dsv4p',
+        ok: false,
+        authOk: false,
+        usageBased: true,
+        fiveHourPercent: 0,
+        weeklyPercent: 0,
+        atLimit: false,
+      }),
+    ).toEqual({ binary: 'claude-auto-dsv4p', authOk: false });
+  });
+
+  test('an at-limit account keeps atLimit distinct from its percentage', () => {
+    const view = usageAccountView({
+      binary: 'codex-auto-loai',
+      ok: true,
+      authOk: true,
+      usageBased: true,
+      fiveHourPercent: 100,
+      weeklyPercent: null,
+      fiveHourResetAt: 1_785_259_371_000,
+      weeklyResetAt: null,
+      atLimit: true,
+    });
+    expect(view.atLimit).toBe(true);
+    expect(view.fiveHourPercent).toBe(100);
+    expect(view.weeklyPercent).toBeUndefined();
+    // `resetAt` is a CLI-side convenience derived from the two windows; the
+    // wire shape carries the windows themselves so the UI can label each.
+    expect(view).not.toHaveProperty('resetAt');
   });
 });
 

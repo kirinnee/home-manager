@@ -1,5 +1,5 @@
 import { readFile } from 'fs/promises';
-import type { AttachmentView, SessionView, WardenRunView, WardenStatusView } from './service';
+import type { AttachmentView, SessionView, UsageFeedView, WardenRunView, WardenStatusView } from './service';
 import type { KTeamEvent, SendDisposition, SendRequest, SignalKind, SignalOptions, StartSessionRequest } from './types';
 import type { KTeamPaths } from './paths';
 import { loadDaemonConfig } from './daemon-config';
@@ -114,6 +114,9 @@ export class ApiClient {
       body: JSON.stringify({ spawn }),
       headers: { 'content-type': 'application/json' },
     });
+  }
+  usage() {
+    return this.request<UsageFeedView>('/v1/usage');
   }
   scratchPlan(limit = 20) {
     return this.request<ScratchPlanView[]>(`/v1/gc?limit=${limit}`);

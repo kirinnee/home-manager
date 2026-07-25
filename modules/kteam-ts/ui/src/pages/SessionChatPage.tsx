@@ -24,6 +24,9 @@ import { SessionHeader } from '../components/SessionHeader';
 import { Transcript } from '../components/Transcript';
 import { ThinkingIndicator } from '../components/Harness';
 import { buildTranscript, latestPendingQuestion } from '../lib/transcript';
+import { useUsage } from '../hooks/useUsage';
+import { quotaFor } from '../lib/usage';
+import { FolderSidebar, FolderSidebarToggle, folderNeighbours } from '../components/FolderSidebar';
 import { TERMINAL_STATUSES, WAITING_STATUSES, fmtAbsolute, isBusy } from '../lib/utils';
 
 const PAGE_SIZE = 200;
@@ -276,6 +279,40 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
     [view, records],
   );
 
+  // Account quota for this session's wrapper. The feed is fleet-wide and
+  // joined by binary, so the badge is populated on the first paint rather than
+  // waiting for this session's own 60s quota tick (see lib/usage.ts).
+  const { index: usageIdx } = useUsage();
+  const quota = useMemo(() => (view ? quotaFor(view, usageIdx) : null), [view, usageIdx]);
+
+  // ---- folder neighbours: who else is working in this cwd ------------------
+  // Polled slowly and independently of the chat: the fleet changes on the scale
+  // of minutes, and this must never compete with the transcript for bandwidth
+  // or re-render it. Visibility-gated like the other background polls.
+  const [fleet, setFleet] = useState<SessionView[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      api
+        .listSessions()
+        .then(list => {
+          if (!cancelled) setFleet(list);
+        })
+        .catch(() => undefined);
+    };
+    load();
+    const timer = window.setInterval(load, 20_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+  const neighbours = useMemo(() => folderNeighbours(fleet, view), [fleet, view]);
+  // Closed by default: the sidebar is a lookup, not the reason you opened the
+  // page, and opening it narrows the transcript.
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
   const busy = useMemo(() => (view ? isBusy(view) : false), [view]);
   const awaitingQ = view?.state.status === 'awaiting_question';
   const isTerminal = view ? TERMINAL_STATUSES.has(view.state.status) : false;
@@ -425,11 +462,16 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
   // h-full/min-h-0 — the shell (App.tsx) owns the viewport height now; this page
   // just fills what it is given. A hardcoded calc() here is what made the page
   // itself scrollable on top of the transcript.
+  //
+  // The folder sidebar is a SIBLING column (lg+) rather than anything nested in
+  // the transcript, so opening it narrows the conversation instead of adding a
+  // second scroller inside it.
   return (
     <div className="flex h-full min-h-0 flex-col pb-2">
       {view && (
         <SessionHeader
           view={view}
+          quota={quota}
           liveStatus={liveStatus}
           isTerminal={isTerminal}
           isKillFailed={isKillFailed}
@@ -437,6 +479,9 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
           onInterrupt={() => void interrupt()}
           onStop={() => void stop()}
           onResume={() => void resume()}
+          folderToggle={
+            <FolderSidebarToggle count={neighbours.total} open={sidebarOpen} onToggle={() => setSidebarOpen(v => !v)} />
+          }
           // The Chat/Terminal switch rides in the header rather than owning a
           // row of its own — one two-item segmented control did not justify
           // ~34px of every screen.
@@ -474,21 +519,30 @@ export function SessionChatPage({ sessionId }: { sessionId: string }) {
         <TerminalView sessionId={sessionId} tmuxSession={view?.config.tmuxSession ?? ''} />
       ) : (
         <>
-          <div className="relative min-h-0 flex-1 overflow-hidden rounded-lg border border-border bg-surface">
-            {loadingInitial ? (
-              <ThreadSkeleton />
-            ) : (
-              <Transcript
-                blocks={blocks}
-                live={busy}
-                hasOlder={nextBefore != null}
-                loadingOlder={loadingOlder}
-                onLoadOlder={() => void loadOlder()}
-                pinSignal={pinSignal}
-                header={transcriptHeader}
-                footer={transcriptFooter}
-              />
-            )}
+          <div className="flex min-h-0 flex-1 gap-2">
+            <FolderSidebar
+              current={view}
+              neighbours={neighbours}
+              usage={usageIdx}
+              open={sidebarOpen}
+              onToggle={() => setSidebarOpen(v => !v)}
+            />
+            <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden rounded-lg border border-border bg-surface">
+              {loadingInitial ? (
+                <ThreadSkeleton />
+              ) : (
+                <Transcript
+                  blocks={blocks}
+                  live={busy}
+                  hasOlder={nextBefore != null}
+                  loadingOlder={loadingOlder}
+                  onLoadOlder={() => void loadOlder()}
+                  pinSignal={pinSignal}
+                  header={transcriptHeader}
+                  footer={transcriptFooter}
+                />
+              )}
+            </div>
           </div>
 
           {!awaitingQ && HAS_TOKEN && (

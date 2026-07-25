@@ -11,6 +11,7 @@ export type WardenAnomalyKind =
   | 'abandoned_wreckage'
   | 'quota_reset_passed'
   | 'declared_wait_overdue'
+  | 'peer_wait_unanswerable'
   | 'sus_thinking'
   | 'sus_subprocess'
   | 'bootstrap_degraded';
@@ -176,6 +177,36 @@ export function detectAnomalies(
         since: new Date(declaredWaitDeadline).toISOString(),
       });
     }
+    // PEER WAIT WHOSE PEER CAN NEVER ANSWER.
+    //
+    // `signal waiting --peer X` is healthy for as long as X might still reply.
+    // Once X is terminal it cannot, and the waiter is parked on an event that
+    // will never happen — reflex suspended, ceiling suspended — until the 4h
+    // backstop finally wakes it. That is hours of a teammate looking perfectly
+    // healthy while being permanently stuck, which is precisely the failure
+    // mode declared waits exist to make visible rather than to hide.
+    //
+    // Flagged immediately (no idle grace): the evidence is categorical — the
+    // peer is in a terminal state — not a guess from elapsed time.
+    if (declaredWait?.peer !== undefined && !TERMINAL.includes(state.status)) {
+      const peer = byId.get(declaredWait.peer);
+      const peerName = declaredWait.peerName ?? declaredWait.peer;
+      if (peer === undefined || TERMINAL.includes(peer.state.status)) {
+        anomalies.push({
+          ...base,
+          kind: 'peer_wait_unanswerable',
+          detail:
+            peer === undefined
+              ? `parked awaiting a reply from ${peerName}, which is not a known session — nothing can wake it before the 4h backstop`
+              : `parked awaiting a reply from ${peerName}, which is ${peer.state.status} and can never reply`,
+          since: declaredWait.since,
+          // One assigned warden: the fix is judgement (re-ask someone else,
+          // continue without the answer, or stop), not a mechanical retry.
+          assignedWarden: true,
+        });
+      }
+    }
+
     const waitingEscalatable = declaredWait === undefined;
     if (waitingEscalatable && WAITING_IDLE.includes(state.status)) {
       const idleSince = latestMs(

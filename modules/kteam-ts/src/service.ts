@@ -59,6 +59,33 @@ export interface WardenRunView {
   message?: string;
 }
 
+/** One wrapper's account quota, as the browser sees it. Keyed by the wrapper
+ *  binary a session runs under (`config.binary`), so the UI can join it onto
+ *  any session without the daemon having to stamp every session's state.
+ *
+ *  Absent fields mean UNKNOWN, never zero: a wrapper kfleet has no record for
+ *  is simply missing from `accounts`, and a wrapper whose record exists but
+ *  carries no usable numbers (auth failure, non-usage-based provider) reports
+ *  the fields it does know and omits the rest. */
+export interface UsageAccountView {
+  binary: string;
+  fiveHourPercent?: number;
+  weeklyPercent?: number;
+  fiveHourResetAt?: number;
+  weeklyResetAt?: number;
+  atLimit?: boolean;
+  authOk?: boolean;
+}
+
+export interface UsageFeedView {
+  /** When the daemon's cached feed was last refreshed (ISO), when known. */
+  at?: string;
+  /** True when the daemon has never obtained a snapshot — the UI must render
+   *  "no data" rather than an empty (and therefore falsely confident) list. */
+  stale: boolean;
+  accounts: UsageAccountView[];
+}
+
 export interface AttachmentView {
   id: string;
   filename: string;
@@ -128,4 +155,7 @@ export interface KTeamService {
   scratchSweep(force?: boolean): Promise<{ sessions: number; bytes: number; failures: number }>;
   /** Case-insensitive transcript grep across recent sessions (bounded). */
   search(query: string, limit?: number): Promise<SearchResponse>;
+  /** The daemon's cached `kfleet usage` feed, per wrapper binary. The browser
+   *  joins this onto sessions by `config.binary`; see UsageFeedView. */
+  usage(): Promise<UsageFeedView>;
 }

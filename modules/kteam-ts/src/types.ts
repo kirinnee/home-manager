@@ -221,6 +221,16 @@ export interface SessionState {
     until?: string;
     /** Human-readable description of what is being waited for. */
     condition?: string;
+    /** PEER WAIT: this session is parked awaiting a reply from another kteam
+     *  session, named here by id. A peer wait is a FIRST-CLASS healthy state,
+     *  not a stall — the reflex nudge, the stall kill and the turn ceiling are
+     *  suspended exactly as for any declared wait, and the warden's sus filter
+     *  is aware of it (see warden-detect). It ends the moment the peer sends
+     *  anything back, without the waiter having to poll or signal `working`. */
+    peer?: string;
+    /** Display name of `peer` at the time the wait was declared, so status
+     *  output can say "awaiting mordecai" without a second lookup. */
+    peerName?: string;
   };
   /** Seconds this turn has spent in declared waits, credited back against the
    *  turn ceiling so parked time never counts as runtime. */
@@ -298,6 +308,23 @@ export interface SendRequest {
   /** Immediate steer: interrupt the active turn (Escape) and deliver the
    *  message right away instead of riding the TUI's native queue. */
   now?: boolean;
+  /** PEER MESSAGING: the kteam session this message came FROM, auto-filled by
+   *  the CLI from KTEAM_SESSION_ID. Absent means a human sent it (browser UI,
+   *  a human's own shell), which is the distinction the transcript needs —
+   *  "the lead asked for this" and "a teammate asked for this" carry very
+   *  different weight and were previously indistinguishable.
+   *
+   *  Never trusted as authorization: it only labels the message. Every send is
+   *  already authorized by the bearer token. */
+  from?: string;
+  /** Sender's teammate callsign, filled in BY THE DAEMON once it resolves
+   *  `from`. A client-supplied value is overwritten — the display name must
+   *  come from the session record, not from whoever is calling. */
+  fromName?: string;
+  /** The sender is parked awaiting a reply to THIS message (see
+   *  SessionState.waiting.peer). Recorded so the receiver's prompt can say who
+   *  is blocked on it, and so the daemon can wake the sender when it answers. */
+  replyExpected?: boolean;
 }
 
 /** What actually happened to a send: injected into the live turn, queued for
@@ -316,6 +343,10 @@ export interface SignalOptions {
   until?: string;
   /** What is being waited for — published in status, events, and heartbeats. */
   condition?: string;
+  /** `signal waiting --peer <ref>`: park until THIS teammate replies. Resolved
+   *  to a session id; an unknown ref is rejected rather than silently parking
+   *  on nobody. The daemon ends the wait when that peer sends back. */
+  peer?: string;
 }
 
 export interface Recommendation {

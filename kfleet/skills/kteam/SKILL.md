@@ -107,6 +107,44 @@ Use `kteam send <id> "…"` for an interactive user turn — sending to a BUSY s
 
 Attach initial images with `kteam start ... --image <file> "…"`; send follow-up images with `kteam send <id> --image <file> "…"`. The client uploads the bytes to the daemon, which validates and stores them under the session, then injects daemon-local absolute paths through tmux.
 
+## Teammates talking to each other (peer messaging)
+
+Not everything has to route through the lead. **Any session may `kteam send <teammate> "…"` to any other session** — names resolve fleet-wide, so a teammate addresses a peer exactly the way you do. A send issued from inside a pane is automatically stamped with the sending SESSION, and the receiver sees a banner naming the sender and saying explicitly that it is not the human lead (the web UI shows it as a sender chip instead).
+
+**When to use a peer, when to report to the lead:**
+
+- **Peer** — you need a fact, artifact, or decision that another teammate owns: an interface it just defined, whether it already migrated a file you are about to touch, the shape of the fixture it wrote. Anything where the answer is _in another session's head_ and the lead would only be relaying.
+- **Lead** — scope changes, conflicts you cannot resolve between yourselves, anything needing the user, and your final result. The lead is the one holding the whole picture; do not route a decision through a peer to avoid asking.
+
+**Two shapes. Pick deliberately.**
+
+1. **Fire-and-forget** — say it and carry on:
+
+   ```bash
+   kteam send jessie "FYI: I renamed Session.quota to Session.usage in types.ts; rebase before you touch it."
+   ```
+
+   The receiver is told no reply is expected. Use this for anything the peer needs to _know_ but you do not need an answer to.
+
+2. **Request/response** — ask, then WAIT for the answer:
+
+   ```bash
+   kteam send jessie --ask --until 30m "What exact field name did you settle on for the reset timestamp?"
+   ```
+
+   `--ask` does two things: it tells the receiver you are blocked and spells out the reply command (`kteam send <you> "…"`), and it **parks your own session** on that peer. Waiting this way is a first-class healthy state — the 180 s nudge, the 300 s stall kill, and the turn ceiling are all suspended, exactly as for `kteam signal waiting`, so a legitimate wait is never read as a stall. The daemon wakes you **the instant that peer sends anything back**; you do not poll. `--until` is optional (open-ended parks are fine; everything is force-woken after 4 h).
+
+   Equivalent long form if you already sent the question: `kteam signal waiting --peer jessie --until 30m`.
+
+**Answering a peer is just a normal send.** There is no special reply command — `kteam send <asker> "…"` un-parks them automatically.
+
+**Cautions:**
+
+- **A peer may be mid-turn.** Your message lands in its harness's native queue and is consumed at the next turn boundary, not immediately. Do not expect a fast answer from a busy teammate, and never `--ask` a peer that is about to finish.
+- **`--ask` is a real block.** Only use it when you genuinely cannot proceed. If you can do useful work without the answer, fire-and-forget and keep going.
+- **A peer that can never answer is flagged.** If you park on a teammate that is already completed/failed/stopped (or does not exist), the warden raises `peer_wait_unanswerable` and assigns a warden to unstick you, rather than letting you sit until the 4 h backstop.
+- `kteam ps` shows a peer park as `waiting PARKED←<name>`, so the lead can see agent-to-agent conversations in flight.
+
 ## Finish safely
 
 Treat `completed` as a teammate claim, not proof. Read `summary.md`, inspect the repository diff, and run appropriate verification. For `failed`, `stalled`, or `stopped`, inspect `last-snapshot.txt`, `kill.json`, and the current turn log before deciding whether to reply, restart, or finish locally.

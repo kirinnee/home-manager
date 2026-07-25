@@ -16,7 +16,10 @@ import { WardenVerdicts } from '../components/WardenVerdicts';
 import { Link, navigate } from '../lib/router';
 import { debounce, TERMINAL_STATUSES, fmtAge, fmtRelative, toneFor } from '../lib/utils';
 import { openEventStream } from '../lib/ws';
-import { QuotaReadout, hasQuota } from '../components/QuotaBadge';
+import { QuotaReadout } from '../components/QuotaBadge';
+import { useUsage } from '../hooks/useUsage';
+import { quotaFor, type Quota } from '../lib/usage';
+import type { UsageAccountView } from '../types';
 
 function baseName(p: string): string {
   const seg = p.replace(/\/+$/, '').split('/').filter(Boolean);
@@ -117,6 +120,8 @@ export function SessionsListPage() {
   const isNarrow = useIsNarrow();
   const [viewPref, setViewPref] = useState<'cards' | 'table' | null>(null);
   const mode = viewPref ?? (isNarrow ? 'cards' : 'table');
+  // Account quota, fleet-wide and joined by wrapper binary — see lib/usage.ts.
+  const { index: usage } = useUsage();
 
   async function load(initial = false) {
     try {
@@ -379,7 +384,7 @@ export function SessionsListPage() {
               {mode === 'cards' ? (
                 <div className="grid gap-1.5">
                   {g.rows.map(v => (
-                    <SessionCard key={v.config.id} view={v} />
+                    <SessionCard key={v.config.id} view={v} usage={usage} />
                   ))}
                 </div>
               ) : (
@@ -401,7 +406,7 @@ export function SessionsListPage() {
                     </thead>
                     <tbody>
                       {g.rows.map(v => (
-                        <SessionRow key={v.config.id} view={v} />
+                        <SessionRow key={v.config.id} view={v} usage={usage} />
                       ))}
                     </tbody>
                   </table>
@@ -486,9 +491,10 @@ function Th({ children }: { children: React.ReactNode }) {
   );
 }
 
-function SessionRow({ view }: { view: SessionView }) {
+function SessionRow({ view, usage }: { view: SessionView; usage: Map<string, UsageAccountView> }) {
   const cfg = view.config;
   const state = view.state;
+  const quota: Quota | null = quotaFor(view, usage);
   return (
     <tr className="group border-b border-border-soft transition-colors last:border-b-0 hover:bg-surface-2">
       <td className="max-w-[150px] px-2 py-1.5 align-middle">
@@ -538,11 +544,7 @@ function SessionRow({ view }: { view: SessionView }) {
         )}
       </td>
       <td className="whitespace-nowrap px-2 py-1.5 align-middle text-[11.5px]">
-        {hasQuota(state) ? (
-          <QuotaReadout state={state} className="text-muted" />
-        ) : (
-          <span className="text-faint">—</span>
-        )}
+        <QuotaReadout quota={quota} className="text-muted" showUnknown />
       </td>
       <td className="max-w-[150px] px-2 py-1.5 align-middle">
         <ActivityLine view={view} className="mono max-w-full text-[12px]" />
@@ -559,9 +561,10 @@ function SessionRow({ view }: { view: SessionView }) {
 
 // Mobile-first card: full-width, tappable, single column, no horizontal
 // scroll. Shows the same fields as a table row, activity line included.
-function SessionCard({ view }: { view: SessionView }) {
+function SessionCard({ view, usage }: { view: SessionView; usage: Map<string, UsageAccountView> }) {
   const cfg = view.config;
   const state = view.state;
+  const quota: Quota | null = quotaFor(view, usage);
   return (
     <Link
       to={`/session/${encodeURIComponent(cfg.id)}`}
@@ -604,7 +607,7 @@ function SessionCard({ view }: { view: SessionView }) {
       </div>
       <div className="mt-1.5 flex items-center gap-2">
         {state.contextPercent != null && <ContextMeter value={state.contextPercent} />}
-        {hasQuota(state) && <QuotaReadout state={state} className="text-[11px] text-faint" />}
+        <QuotaReadout quota={quota} className="text-[11px] text-faint" showUnknown />
         <span className="mono ml-auto shrink-0 text-[11px] text-faint" title={fmtRelative(state.lastActivityAt)}>
           {fmtAge(state.lastActivityAt)}
         </span>

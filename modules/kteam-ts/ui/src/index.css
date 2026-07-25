@@ -266,6 +266,84 @@ pre,
 }
 
 /* ============================================================================
+   ASYMMETRIC DENSITY — the transcript spends its pixels on conversation.
+   ============================================================================
+
+   The previous pass tightened EVERYTHING uniformly, which is the wrong trade:
+   it squeezed the prose (the only thing anyone actually reads) by exactly as
+   much as it squeezed the tool spam. The rule here is the opposite —
+
+     machine chrome  → smaller, dimmer, one slim line, no card, no borders
+     human/assistant → MORE room around it, unchanged line-height within it
+
+   Concretely, and these are the numbers the whole file is built on:
+
+     message prose      13.75px / 1.62      full --fg
+     user message       13px    / 1.55      full --fg
+     ---------------------------------------------------------------
+     chrome (tools,     11px    / 1.35      --faint at 78% opacity
+     thinking, turn                         (≈ a 2.75px drop and a real
+     boundaries,                             tonal step below prose, not
+     notices)                                a nudge)
+
+   Chrome uses a single `.kt-chrome` class rather than per-component sizes so
+   "make the noise recede" stays ONE edit, and so nothing can drift back up to
+   message weight component by component. Hover restores full --muted, so a row
+   you actually reach for becomes legible without ever competing at rest.
+
+   Vertical rhythm is the other half. The transcript no longer sets a uniform
+   `gap`; instead each block declares its own top margin via `.kt-block`, so a
+   run of tools stacks tight (2px) while a message gets real air (14px, and 18px
+   when it follows a message from the other party — the turn boundary you can
+   see without a divider). */
+
+.kt-chrome {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--faint);
+  opacity: 0.78;
+  transition:
+    opacity 120ms ease,
+    color 120ms ease;
+}
+/* Reaching for a row makes it fully legible; at rest it stays background. */
+.kt-chrome:hover,
+.kt-chrome:focus-within {
+  opacity: 1;
+  color: var(--muted);
+}
+/* An error is the one piece of chrome allowed to keep its colour — a failed
+   tool that faded into the background would be a bug, not a density win. */
+.kt-chrome .kt-chrome-alert {
+  opacity: 1;
+}
+
+/* ---- vertical rhythm ------------------------------------------------------
+   Owned per-block instead of by a container `gap`, because the whole point is
+   that the gaps are NOT uniform. Values are margin-top; the first child's is
+   suppressed so the transcript never opens on dead space. */
+.kt-block {
+  margin-top: 2px;
+}
+.kt-block:first-child {
+  margin-top: 0;
+}
+/* Real conversation breathes. */
+.kt-block[data-kind='message'] {
+  margin-top: 14px;
+}
+/* A change of speaker is the strongest boundary in the transcript, and this
+   space is what lets it read as one without a divider rule. */
+.kt-block[data-kind='message'][data-turn='true'] {
+  margin-top: 18px;
+}
+/* Chrome that FOLLOWS a message belongs to it — keep it close, so the tools an
+   assistant ran read as part of that reply rather than as a separate event. */
+.kt-block[data-kind='chrome'][data-after='message'] {
+  margin-top: 6px;
+}
+
+/* ============================================================================
    .md — rendered-markdown prose for assistant messages.
    The previous UI referenced `.markdown-body` but never defined it, so
    markdown fell back to the Tailwind preflight reset (no bullets, no heading

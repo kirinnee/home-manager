@@ -71,6 +71,13 @@ export class UsageFeed {
     return this.cached !== undefined;
   }
 
+  /** Epoch ms of the last successful refresh, or undefined before the first.
+   *  The API surfaces this so the UI can say "as of …" rather than implying
+   *  the numbers are live. */
+  snapshotAt(): number | undefined {
+    return this.cached?.at;
+  }
+
   async accounts(signal?: AbortSignal): Promise<AgentUsage[]> {
     if (signal?.aborted) return [];
     const at = this.clock();
@@ -133,6 +140,15 @@ export function quotaFromUsage(account: AgentUsage): NonNullable<SessionState['q
     ...(weeklyResetAt !== undefined ? { weeklyResetAt } : {}),
     ...(resets.length ? { resetAt: Math.min(...resets) } : {}),
   };
+}
+
+/** Project one feed record into the wire shape the browser consumes. Reuses
+ *  quotaFromUsage so the API can never disagree with what the session state
+ *  and `kteam ps` show — same normalization, same "unknown is not zero" and
+ *  "auth failure is not a quota" rules, one place. */
+export function usageAccountView(account: AgentUsage): { binary: string } & NonNullable<SessionState['quota']> {
+  const { resetAt: _resetAt, ...quota } = quotaFromUsage(account);
+  return { binary: account.binary, ...quota };
 }
 
 export interface SessionUsageStatePatch {

@@ -130,6 +130,26 @@ class FakeService implements KTeamService {
   wardenReport = async (p: string) => `# report ${p}\n\nVerdict: KILL\n`;
   scratchPlan = async () => [];
   scratchSweep = async () => ({ sessions: 0, bytes: 0, failures: 0 });
+  usage = async () => ({
+    at: '2026-01-01T00:00:00Z',
+    stale: false,
+    accounts: [
+      // The session under test runs claude-auto-mm3, so this one is joinable.
+      {
+        binary: 'claude-auto-mm3',
+        fiveHourPercent: 7,
+        weeklyPercent: 49,
+        fiveHourResetAt: 1784964000363,
+        weeklyResetAt: 1785142800363,
+        atLimit: false,
+        authOk: true,
+      },
+      // An exhausted account and a logged-out one: both must survive the wire
+      // with their distinguishing field intact rather than collapsing to 0%.
+      { binary: 'codex-auto-loai', atLimit: true, authOk: true, fiveHourPercent: 100 },
+      { binary: 'claude-auto-dsv4p', authOk: false },
+    ],
+  });
   search = async (query: string, limit = 30) => ({
     query,
     scanned: 7,
@@ -180,6 +200,69 @@ describe('kteam daemon API', () => {
     const pr = await fetch(`${base}/v1/projects`, { headers: auth });
     expect(pr.status).toBe(200);
     expect(((await pr.json()) as Array<{ name: string }>)[0]!.name).toBe('home-manager');
+  });
+
+  // GET /v1/usage is the ONLY way the browser can learn account quota: session
+  // views carry usage fields only after that session's own 60s monitor tick,
+  // so a fleet list built from state alone shows blanks (the "quota is not in
+  // the UI" gap). These assertions pin the wire contract the UI joins against.
+  test('exposes the account usage feed, keyed by wrapper binary', async () => {
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service: new FakeService() });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}`;
+    expect((await fetch(`${base}/v1/usage`)).status).toBe(401);
+
+    const res = await fetch(`${base}/v1/usage`, { headers: { authorization: 'Bearer secret' } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      at?: string;
+      stale: boolean;
+      accounts: Array<{
+        binary: string;
+        fiveHourPercent?: number;
+        weeklyPercent?: number;
+        fiveHourResetAt?: number;
+        weeklyResetAt?: number;
+        atLimit?: boolean;
+        authOk?: boolean;
+      }>;
+    };
+    expect(body.stale).toBe(false);
+    expect(body.at).toBe('2026-01-01T00:00:00Z');
+
+    // Joinable by the binary a session config already carries.
+    const mm3 = body.accounts.find(a => a.binary === 'claude-auto-mm3');
+    expect(mm3).toBeDefined();
+    expect(mm3!.fiveHourPercent).toBe(7);
+    expect(mm3!.weeklyPercent).toBe(49);
+    expect(mm3!.fiveHourResetAt).toBe(1784964000363);
+    expect(mm3!.weeklyResetAt).toBe(1785142800363);
+    expect(mm3!.atLimit).toBe(false);
+    expect(mm3!.authOk).toBe(true);
+
+    // atLimit survives distinctly from "100%" — it is what blocks work.
+    expect(body.accounts.find(a => a.binary === 'codex-auto-loai')!.atLimit).toBe(true);
+
+    // UNKNOWN IS NOT ZERO: a logged-out wrapper reports authOk:false and NO
+    // percentages, so the UI can render "auth!" instead of a confident 0%.
+    const loggedOut = body.accounts.find(a => a.binary === 'claude-auto-dsv4p')!;
+    expect(loggedOut.authOk).toBe(false);
+    expect(loggedOut.fiveHourPercent).toBeUndefined();
+    expect(loggedOut.weeklyPercent).toBeUndefined();
+  });
+
+  test('the warden-scoped token may READ the usage feed', async () => {
+    const server = startApiServer({
+      host: '127.0.0.1',
+      port: 0,
+      token: 'secret',
+      wardenToken: 'warden-secret',
+      service: new FakeService(),
+    });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}`;
+    const res = await fetch(`${base}/v1/usage`, { headers: { authorization: 'Bearer warden-secret' } });
+    expect(res.status).toBe(200);
   });
 
   test('exposes transcript search with a scanned count', async () => {
