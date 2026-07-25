@@ -293,11 +293,11 @@ function buildPairs(): Pair[] {
        HARD  --border-strong   the boundary of a control (input, textarea,
                                outline button). Nothing else says "this is a
                                field you can type in", so it must clear 3:1.
-       HARD  --accent-border    the SELECTED / current state on sidebar rows and
-                               theme cards — a state, explicitly in scope.
+       ADVISORY --accent-border decorative tint around controls whose fill,
+                                label, or icon already identifies them. Every
+                                selected/checked/pressed edge uses --accent.
        HARD  --focus-color      focus indicator.
-       HARD  --ring             the 3px halo on `input:focus` — no outline-offset,
-                               so it is adjacent to the field itself.
+       ADVISORY --ring          bloom behind the real focus-colour outline.
        HARD  --user-border      the 2.5px rail that identifies a user turn; the
                                only marker that block gets.
        HARD  ok/warn/err/pend   StatusMark's fills, where the dot IS the info.
@@ -313,19 +313,13 @@ function buildPairs(): Pair[] {
      line moves to `--border-strong` and `--border` demotes to `decor`, exactly as
      the previous comment here specified. */
   add('border-strong', SURFACES, 'ui', 'control edge — input/textarea/.kt-btn/.kt-tab/.kt-navrow');
-  /* Carries the SELECTED / checked / pressed state on AgentSidebar's rcOnly and
-     rail toggles, ThemeToggle's mode + family radios, and NewSessionPage's agent
-     picker — a state, so explicitly in 1.4.11's scope.
-
-     STAYS HARD ON PURPOSE, even though the contract now says state edges must use
-     `--accent` and this token is decorative tint only. The rule is about the code
-     as it stands, not as it is meant to stand: Primitives, ThemeToggle and
-     SessionsListPage have been swept, but AgentSidebar (x2), SessionDetails,
-     NewSessionPage, WardenVerdicts (x2), QuestionForm and StatusMark still bind
-     state to this token, so it still IS a state indicator and must still clear
-     3:1. Demote to `decor` only once that sweep is committed — until then a green
-     check here would be describing a fix that has not shipped. */
-  add('accent-border', ['surface', 'surface-2', 'bg', 'accent-soft'], 'ui', 'SELECTED/checked/pressed border');
+  /* The promised source sweep is committed. Selected/checked/pressed controls
+     now draw their state edge with contrast-constrained `--accent`. The only
+     remaining consumers of `--accent-border` are hover tint, StatusMark's ring
+     around an already-filled/shape-coded mark, and the labelled jump button's
+     edge. Removing any of those edges removes decoration, not information. Keep
+     measuring the token, but no longer make a decorative hairline fail CI. */
+  add('accent-border', ['surface', 'surface-2', 'bg', 'accent-soft'], 'decor', 'decorative accent tint');
   add('user-border', ['user-bg', 'surface', 'bg'], 'ui', 'user-turn 2.5px rail');
   for (const s of ['ok', 'warn', 'err', 'pend']) add(s, ['surface', 'bg', 'surface-2'], 'ui', 'StatusMark fill / dot');
   /* `--focus-color` is checked against the surfaces the ring can sit ON, and
