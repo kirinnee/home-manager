@@ -40,6 +40,8 @@
 
 import type { ChatRecord } from '../types';
 import type { ToolResultData, ToolUseData } from './tool-extract';
+import { classifySystemText, type SystemBlockInfo } from './system-blocks';
+export type { SystemBlockInfo } from './system-blocks';
 
 export interface ToolCall {
   key: string;
@@ -89,6 +91,11 @@ export type TranscriptBlock =
       from?: PeerFrom;
     }
   | { id: string; kind: 'assistant'; text: string; ts?: string; source: string }
+  // A harness-INJECTED system text that arrived on the user channel (task
+  // notifications, the turn prompt, environment_context, …) — classified at
+  // render-model build time so the raw record stays untouched. See
+  // lib/system-blocks.ts. Only ever produced for non-peer chat.user records.
+  | { id: string; kind: 'system'; info: SystemBlockInfo; ts?: string; source: string }
   | { id: string; kind: 'thinking'; text: string; ts?: string; durationMs?: number; source: string }
   | { id: string; kind: 'tools'; calls: ToolCall[]; ts?: string }
   | {
@@ -235,14 +242,28 @@ export function buildTranscript(records: ChatRecord[]): TranscriptBlock[] {
       // channel the harness reads). Lift it out into structured form so the UI
       // can show a sender chip and the reader sees prose, not a banner.
       const { from, body } = peerFrom(dataStr(r, 'text') ?? '');
-      out.push({
-        id: mkId(`u-${hash(sig(r))}`),
-        kind: 'user',
-        text: body,
-        ts: r.timestamp,
-        source: r.source ?? 'user',
-        ...(from ? { from } : {}),
-      });
+      // A genuine human/peer message renders as a user block; a harness-injected
+      // system text (classified ONLY when there is no peer attribution, so peer
+      // semantics are untouched by construction) collapses to a slim system row.
+      const info = from ? null : classifySystemText(body);
+      if (info) {
+        out.push({
+          id: mkId(`s-${hash(sig(r))}`),
+          kind: 'system',
+          info,
+          ts: r.timestamp,
+          source: r.source ?? 'user',
+        });
+      } else {
+        out.push({
+          id: mkId(`u-${hash(sig(r))}`),
+          kind: 'user',
+          text: body,
+          ts: r.timestamp,
+          source: r.source ?? 'user',
+          ...(from ? { from } : {}),
+        });
+      }
       prevTs = r.timestamp;
       i++;
       continue;

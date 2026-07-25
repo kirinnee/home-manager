@@ -25,14 +25,23 @@
 // drawing a divider between them.
 
 import { memo, useState } from 'react';
-import { ChevronRight, Brain } from 'lucide-react';
-import type { TranscriptBlock, ToolCall, PeerFrom } from '../lib/transcript';
+import { ChevronRight, Brain, Info } from 'lucide-react';
+import type { TranscriptBlock, ToolCall, PeerFrom, SystemBlockInfo } from '../lib/transcript';
 import { Markdown } from './Markdown';
 import { ToolGroup } from './ToolGroup';
 import { cn, fmtClock } from '../lib/utils';
 
 const PROTOCOL_HEADER = /#\s*(AGENTS\.md instructions|SYSTEM\s*PROMPT|INSTRUCTIONS)/i;
 const LONG_USER_LINES = 16;
+
+// System-row status chip: tone colours the WORD (never colour alone — the status
+// text is always present for readers who don't perceive the hue). Reuses the
+// existing tone utilities, so no new theme tokens.
+const TONE_CLASS: Record<'ok' | 'warn' | 'err', string> = {
+  ok: 'text-ok',
+  warn: 'text-warn',
+  err: 'text-err',
+};
 
 function fmtDuration(ms: number): string {
   const s = Math.round(ms / 1000);
@@ -88,6 +97,12 @@ function sameProps(prev: Props, next: Props): boolean {
     const t = b as typeof a;
     return a.ts === t.ts && a.durationMs === t.durationMs && a.skipped === t.skipped && a.aborted === t.aborted;
   }
+  if (a.kind === 'system') {
+    // raw is the superset of every derived field, so comparing it (plus ts)
+    // is sufficient — a stable history record's raw never changes in place.
+    const t = b as typeof a;
+    return a.info.raw === t.info.raw && a.ts === t.ts;
+  }
   if (a.kind === 'notice') return a.label === (b as typeof a).label;
   return false;
 }
@@ -117,6 +132,8 @@ export const TranscriptRow = memo(function TranscriptRow({ block, live, isLast, 
         return <ToolGroup calls={block.calls} live={live} isLast={isLast} />;
       case 'turn':
         return <TurnBoundary block={block} />;
+      case 'system':
+        return <SystemRow info={block.info} ts={block.ts} />;
       case 'notice':
         return (
           <div className="kt-chrome mono truncate px-2" title={block.label}>
@@ -355,6 +372,65 @@ function ThinkingLine({ text, durationMs }: { text: string; durationMs?: number 
       {open && (
         <pre className="m-0 ml-2 mt-0.5 max-h-80 max-w-full min-w-0 overflow-auto rounded-md border border-border-soft bg-surface-2 px-2.5 py-2 text-code leading-base mono whitespace-pre-wrap break-words text-fg-soft scroll-thin">
           {text}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+// A harness-INJECTED system text (task notification, turn prompt,
+// environment_context, interrupt notice, …) rendered as ONE slim chrome line —
+// the same "machine noise recedes" treatment as ThinkingLine, so it needs no CSS
+// of its own and is structurally SHORTER than the user card it replaces (mobile
+// density budgets are unaffected). Collapsed by default, always: 1,584 turn
+// prompts is the argument. Clicking reveals the full raw text, so nothing the
+// classifier derived a summary from is ever dropped.
+//
+// The summary truncates and the expanded body wraps/scrolls locally, so the row
+// never widens its ancestor — the transcript's scrollWidth ≤ clientWidth gate
+// holds at every width even with a ~180-char output-file path expanded.
+//
+// data-kind stays 'chrome' (set on the outer .kt-block) for the rhythm contract;
+// `data-system-row` here is a stable, non-styling semantic hook carrying the
+// classification label for tests/assertions.
+function SystemRow({ info, ts }: { info: SystemBlockInfo; ts?: string }) {
+  const [open, setOpen] = useState(false);
+  const toneClass = info.tone ? TONE_CLASS[info.tone] : undefined;
+  return (
+    <div className="kt-chrome" data-system-row={info.label}>
+      <button
+        type="button"
+        onClick={() => setOpen(v => !v)}
+        aria-expanded={open}
+        className="flex w-full min-w-0 items-center gap-1.5 rounded-control px-2 py-px text-left hover:bg-surface-2"
+      >
+        <Info size={10} className="shrink-0" aria-hidden="true" />
+        {/* Label and status are CAPPED and truncate: an unknown wrapper's tag
+            name (or a long status) can be arbitrarily long, and un-capped
+            shrink-0 spans would widen the row past a 390px viewport. Known
+            labels ("task notification", "environment_context") fit within 22ch,
+            so only genuinely long unknown tags ellipsize. The summary stays the
+            flexible line, and the raw body is fully readable on expand. */}
+        <span className="min-w-0 max-w-[22ch] shrink truncate font-medium">{info.label}</span>
+        {info.summary ? (
+          <>
+            <span className="shrink-0 opacity-50" aria-hidden="true">
+              ·
+            </span>
+            <span className="min-w-0 flex-1 truncate opacity-80">{info.summary}</span>
+          </>
+        ) : (
+          <span className="flex-1" aria-hidden="true" />
+        )}
+        {info.status && (
+          <span className={cn('min-w-0 max-w-[14ch] shrink truncate font-medium', toneClass)}>{info.status}</span>
+        )}
+        {ts && <span className="mono shrink-0 whitespace-nowrap tabular-nums text-faint">{fmtClock(ts)}</span>}
+        <ChevronRight size={10} className={cn('shrink-0 transition-transform', open && 'rotate-90')} />
+      </button>
+      {open && (
+        <pre className="m-0 ml-2 mt-0.5 max-h-80 max-w-full min-w-0 overflow-auto rounded-md border border-border-soft bg-surface-2 px-2.5 py-2 text-code leading-base mono whitespace-pre-wrap break-words text-fg-soft scroll-thin">
+          {info.raw}
         </pre>
       )}
     </div>
