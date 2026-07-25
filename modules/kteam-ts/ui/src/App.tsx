@@ -24,6 +24,7 @@ import { SessionsListPage } from './pages/SessionsListPage';
 import { SessionChatPage } from './pages/SessionChatPage';
 import { NewSessionPage } from './pages/NewSessionPage';
 import { cn } from './lib/utils';
+import { useAppViewport } from './hooks/useAppViewport';
 
 /** How many session pages stay mounted at once (the current one plus the one
  *  you most recently came from — enough for back-and-forth, bounded). */
@@ -42,6 +43,10 @@ function Pane({ active, children }: { active: boolean; children: React.ReactNode
 
 export function App() {
   const [route] = useRoute();
+
+  // Sizes the shell from the VISUAL viewport (--app-h / --app-top / --kb-h).
+  // First thing in the component: every height below is measured against it.
+  useAppViewport();
 
   // Mobile drawer visibility. It lives here rather than in the sidebar because
   // the AppBar's trigger and the drawer's own close button must drive ONE piece
@@ -78,8 +83,17 @@ export function App() {
   // FULL BLEED (round 5): the `max-w-[1180px]` centering is gone. On a wide
   // screen the fleet table was squeezed into the middle third with the rest of
   // the display empty, and the sidebar slice needs the whole width.
+  //
+  // ROUND 6 — THE VIEWPORT IS THE *VISUAL* VIEWPORT. `100dvh` is not the visible
+  // area on a phone with the keyboard up: iOS keeps the layout viewport at full
+  // height and pans over it, so the bottom of a 100dvh shell (the composer, the
+  // send button) sits behind the keyboard with nothing to scroll — the shell is
+  // deliberately `overflow:hidden`. `.kt-shell` is sized from
+  // `window.visualViewport` via `--app-h`/`--app-top` (useAppViewport), falling
+  // back to dvh and then vh, and is `position: fixed` at the pan offset so it
+  // always covers exactly what the reader can see.
   return (
-    <div className="flex h-screen h-[100dvh] flex-col overflow-hidden">
+    <div className="kt-shell flex flex-col overflow-hidden">
       <AppBar crumbs={crumbs} onOpenSidebar={() => setDrawerOpen(true)} />
       {/* THE SIDEBAR IS A SHELL SIBLING, not a page child: it is mounted once,
           for the app's life, so navigation never remounts it and its scroll

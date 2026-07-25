@@ -2,7 +2,20 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- `interactive-widget=resizes-content`: Android's software keyboard must
+         RESIZE the layout viewport rather than pan over it, so the composer
+         stays inside the shell. iOS ignores this and pans instead — that half is
+         handled by sizing the shell from `window.visualViewport`
+         (src/hooks/useAppViewport.ts).
+         `viewport-fit=cover` lets the app paint into the notch/home-indicator
+         area; index.css pays the safe-area insets back where they matter.
+         NO `maximum-scale`/`user-scalable=no`: pinch-zoom must keep working
+         (WCAG 1.4.4). iOS focus-zoom is prevented the correct way instead — by
+         never rendering a text field below 16px on a phone. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+    />
     <meta name="color-scheme" content="light dark" />
     <link rel="icon" href="data:," />
     <title>Kteam</title>
