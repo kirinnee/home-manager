@@ -49,6 +49,7 @@ class FakeService implements KTeamService {
     this.lastActor = currentActor();
     return view;
   };
+  suggestNames = async (count = 1) => ['aaron', 'abel', 'abigail'].slice(0, count);
   start = async (_input: StartSessionRequest) => view;
   send = async (_id: string, _input: SendRequest) => ({ ...view, disposition: 'delivered' as const });
   answer = async () => view;

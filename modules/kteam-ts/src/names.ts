@@ -4,6 +4,23 @@
 
 export const NAME_WINDOW_MS = 5 * 24 * 60 * 60 * 1000;
 
+/** Longest a teammate callsign may be. The pool names are short; a title-length
+ *  string belongs in `--name` (the task), not here. */
+export const MAX_TEAMMATE_NAME_LENGTH = 32;
+
+/** Normalise a caller-supplied teammate name to the shape the pool uses:
+ *  trimmed, lowercased, a leading letter then letters/digits/hyphens, at most
+ *  MAX_TEAMMATE_NAME_LENGTH chars. Returns null when the input cannot be a valid
+ *  slug — the daemon rejects that LOUDLY rather than rewriting it, because the
+ *  caller is about to embed the name in a session title and a silent rename
+ *  would make `[Foo] …` point at teammate `bar`. */
+export function normalizeTeammateName(raw: string): string | null {
+  const name = raw.trim().toLowerCase();
+  if (!name || name.length > MAX_TEAMMATE_NAME_LENGTH) return null;
+  if (!/^[a-z][a-z0-9-]*$/.test(name)) return null;
+  return name;
+}
+
 // prettier-ignore
 export const TEAMMATE_NAMES: string[] = [
   'aaron', 'abel', 'abigail', 'ada', 'adam', 'adele', 'adrian', 'adriana', 'agatha', 'agnes',
@@ -173,9 +190,22 @@ export function pickTeammateName(recentlyUsed: Iterable<string>, lastUsedAt?: Ma
   return best;
 }
 
-/** The stored form of a session name: filesystem- and column-safe. A client
- *  that has to look up a session it started must compare against THIS shape,
- *  not the raw `--name` it passed. */
-export function sessionName(raw: string): string {
-  return raw.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 48);
+/** The stored form of a session's human TITLE (`config.name`). It is displayed
+ *  verbatim in `ps` and the dashboard, so it PRESERVES the caller's text —
+ *  including the `[Teammate] Task Title` convention — and only flattens control
+ *  characters / runs of whitespace and caps the length.
+ *
+ *  It used to slugify (`[^a-zA-Z0-9_-] -> '-'`, cap 48), which turned
+ *  `[Hayden] Fix Transcript` into `-Hayden--Fix-Transcript` and made the
+ *  bracket convention impossible. That slug was never load-bearing: session
+ *  directories are keyed by session id and tmux names by shellSafeSessionName(id),
+ *  so nothing downstream needs a filesystem-safe token here. A client that has
+ *  to look up a session it started must still compare against THIS shape (the
+ *  daemon stores exactly what this returns). */
+export function displayName(raw: string): string {
+  return raw
+    .replace(/[\x00-\x1f\x7f]+/g, ' ') // flatten control chars (newlines, tabs, etc.)
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120);
 }

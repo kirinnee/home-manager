@@ -100,6 +100,11 @@ export interface KTeamService {
   health(): Promise<Record<string, unknown>>;
   list(): Promise<SessionView[]>;
   get(id: string): Promise<SessionView>;
+  /** Suggest `count` teammate names that are free within the resolution window,
+   *  for a caller composing a `[Name] Task` title before start. A SUGGESTION,
+   *  not a reservation: nothing is persisted, so `start --teammate` may still
+   *  collide and the caller retries with the next name. */
+  suggestNames(count?: number): Promise<string[]>;
   start(request: StartSessionRequest): Promise<SessionView>;
   /** Returns the view plus a `disposition`: 'delivered' (injected into the
    *  live turn), 'queued' (busy; delivers at the next prompt-ready boundary),

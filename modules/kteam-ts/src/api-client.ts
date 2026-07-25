@@ -3,7 +3,7 @@ import type { AttachmentView, SessionView, UsageFeedView, WardenRunView, WardenS
 import type { KTeamEvent, SendDisposition, SendRequest, SignalKind, SignalOptions, StartSessionRequest } from './types';
 import type { KTeamPaths } from './paths';
 import { loadDaemonConfig } from './daemon-config';
-import { sessionName } from './names';
+import { displayName } from './names';
 
 /** Hard deadline for one daemon request attempt. Above every legitimate
  *  operation (start caps its own wait at 45 s) and below the caller timeouts
@@ -131,6 +131,11 @@ export class ApiClient {
   list() {
     return this.request<SessionView[]>('/v1/sessions');
   }
+  /** Suggest available teammate names (a suggestion, not a reservation — see
+   *  KTeamService.suggestNames). */
+  suggestNames(count = 1) {
+    return this.request<string[]>(`/v1/names?count=${encodeURIComponent(count)}`);
+  }
   get(id: string) {
     return this.request<SessionView>(`/v1/sessions/${encodeURIComponent(id)}`);
   }
@@ -188,7 +193,7 @@ export class ApiClient {
   private async findCreatedSession(input: StartSessionRequest, sinceMs: number): Promise<SessionView | undefined> {
     // Same derivation the daemon uses, including its bare-interactive fallback.
     const derived = input.prompt?.trim() ? input.prompt.trim().split(/\s+/).slice(0, 5).join('-') : 'interactive';
-    const expected = sessionName(input.name ?? derived);
+    const expected = displayName(input.name ?? derived);
     if (!expected) return undefined;
     const sessions = await this.request<SessionView[]>('/v1/sessions', {}, RECOVERY_TIMEOUT_MS).catch(
       () => [] as SessionView[],

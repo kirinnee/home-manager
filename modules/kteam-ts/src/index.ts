@@ -271,7 +271,18 @@ program
   .argument('[prompt...]')
   .requiredOption('-a, --agent <binary>')
   .addOption(new Option('--mode <mode>').choices(['auto', 'interactive']).default('auto'))
-  .option('--name <name>', 'succinct summary of what this session is supposed to do (shown in ps)')
+  .option(
+    '--name <name>',
+    'human-readable TASK TITLE shown in `kteam ps` and the dashboard; free-form, kept verbatim. Convention: `[Teammate] Short Task Title` (e.g. "[Hayden] Fix Transcript")',
+  )
+  .option(
+    '--teammate <name>',
+    'use THIS teammate callsign instead of auto-assigning, so you can compose the `[Name] Task` title first (slug: lowercase, letter-first). Fails if a live session in the last 5 days already holds it (see --teammate-fallback)',
+  )
+  .option(
+    '--teammate-fallback',
+    'with --teammate: if the name is already taken by a live session, auto-assign a free name instead of failing',
+  )
   .option('--label <label>', 'ownership label (lead session/repo/ticket slug); filter later with `kteam ps --label`')
   .option('--parent <id>', 'parent session (defaults to KTEAM_SESSION_ID when started from inside a teammate)')
   .option('--prompt-file <file>', 'read the task prompt from a file instead of the command line (use for long prompts)')
@@ -337,6 +348,8 @@ program
         prompt,
         agent: String(options.agent),
         name: options.name as string | undefined,
+        teammate: options.teammate as string | undefined,
+        teammateFallback: options.teammateFallback === true,
         label: options.label as string | undefined,
         // A teammate's pane carries its own session id — starting a session from
         // inside one automatically records the parent (teammate trees).
@@ -366,6 +379,20 @@ program
       console.error(
         `note: ${view.config.id} is still launching in the background — watch it with \`kteam ps\` / \`kteam stream ${view.config.id}\``,
       );
+  });
+
+program
+  .command('name')
+  .description(
+    'print an available teammate name so you can compose a `[Name] Task` title before `start`. A SUGGESTION, not a reservation — `kteam start --teammate <name>` may still collide; just retry with the next suggestion',
+  )
+  .option('-n, --count <count>', 'print this many names (default 1)', Number)
+  .option('--json', 'print the names as a JSON array')
+  .action(async (options: { count?: number; json?: boolean }) => {
+    const count = Number.isFinite(options.count) && (options.count as number) > 0 ? (options.count as number) : 1;
+    const names = await (await client()).suggestNames(count);
+    if (options.json) console.log(JSON.stringify(names, null, 2));
+    else for (const name of names) console.log(name);
   });
 
 program
