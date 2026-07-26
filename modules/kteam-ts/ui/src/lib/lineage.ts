@@ -1,9 +1,10 @@
-// SESSION LINEAGE — defensive, presentation-free helpers shared by the fleet
+// SESSION LINEAGE — defensive indexing and display helpers shared by the fleet
 // surfaces. The daemon records a parent id when one kteam session starts
 // another, but old records, purges and future malformed data must never make a
 // client-side tree recurse forever.
 
 import type { SessionView } from '../types';
+import { parseTaskName, taskIsRedundant } from '../components/TaskName';
 import { displayCallsign } from './callsign';
 
 /** Sidebar indentation stops growing after two 10px steps. */
@@ -45,8 +46,31 @@ export function shortSessionId(id: string): string {
   return id.length > 8 ? `${id.slice(0, 8)}…` : id;
 }
 
+/** Display-only identity for a lineage relationship. Raw config values remain
+ * for routes, commands and copy surfaces; this one carries the complete label
+ * for visual names, tooltips and screen-reader context. */
+export interface LineageLabel {
+  /** Title-cased teammate callsign, or empty when no callsign exists. */
+  callsign: string;
+  /** Plain, legacy-prefix-free task text; empty when it repeats the callsign. */
+  task: string;
+  /** Callsign + task, either one alone, or a concise id when neither exists. */
+  text: string;
+  /** Complete tooltip/accessibility form, retaining the raw session id. */
+  full: string;
+}
+
+/** Build one consistent, task-bearing display name for every lineage surface. */
+export function lineageLabel(view: SessionView): LineageLabel {
+  const callsign = displayCallsign(view.config.teammate);
+  const parsedTask = parseTaskName(view.config.name).task;
+  const task = taskIsRedundant(view.config.name, view.config.teammate) ? '' : parsedTask;
+  const text = callsign && task ? `${callsign} · ${task}` : callsign || task || shortSessionId(view.config.id);
+  return { callsign, task, text, full: `${text} · ${view.config.id}` };
+}
+
 function displayName(view: SessionView): string {
-  return displayCallsign(view.config.teammate) || view.config.name?.trim() || shortSessionId(view.config.id);
+  return lineageLabel(view).text;
 }
 
 /** Resolve by id, never by the recyclable teammate callsign. */

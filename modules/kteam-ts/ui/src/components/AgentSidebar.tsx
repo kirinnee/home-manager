@@ -62,6 +62,7 @@ import { filterSessions, groupByProject, modeCounts, type SessionGroup } from '.
 import {
   buildLineage,
   lineageIndent,
+  lineageLabel,
   MAX_INDENT_DEPTH,
   nestByLineage,
   parentDisplay,
@@ -270,21 +271,35 @@ function Controls({ autoFocusSearch = false }: { autoFocusSearch?: boolean }) {
 // Rows
 // ---------------------------------------------------------------------------
 
-function parentTrail(view: SessionView, byId: ReadonlyMap<string, SessionView>): string {
+function parentTrail(
+  view: SessionView,
+  byId: ReadonlyMap<string, SessionView>,
+): { text: string; full: string } | undefined {
   const names: string[] = [];
+  const fullNames: string[] = [];
   const seen = new Set<string>([view.config.id]);
   let parentId = view.config.parent?.trim();
   while (parentId && !seen.has(parentId) && names.length <= byId.size) {
     seen.add(parentId);
     const parent = parentDisplay(parentId, byId);
     if (!parent) break;
-    names.unshift(parent.kind === 'resolved' ? parent.name : parent.shortId);
+    if (parent.kind === 'resolved') {
+      const label = lineageLabel(parent.view);
+      names.unshift(label.text);
+      fullNames.unshift(label.full);
+    } else {
+      names.unshift(parent.shortId);
+      fullNames.unshift(parentId);
+    }
     parentId = parent.kind === 'resolved' ? parent.view.config.parent?.trim() : undefined;
   }
-  return names.join(' → ');
+  const text = names.join(' → ');
+  return text ? { text, full: fullNames.join(' → ') } : undefined;
 }
 
-function SidebarRow({
+/** Exported for static-markup coverage of the sidebar's visible and
+ * screen-reader lineage contract. */
+export function SidebarRow({
   row,
   active,
   activeId,
@@ -301,12 +316,19 @@ function SidebarRow({
   const { view, depth, children, spawnedBy } = row;
   const cfg = view.config;
   const mark = statusMark(view);
+  const label = lineageLabel(view);
   const parent = parentDisplay(cfg.parent, byId);
-  const spawnedByLabel = parent ? `spawned by ${parent.kind === 'resolved' ? parent.name : parent.shortId}` : undefined;
   const parentId = cfg.parent?.trim();
+  const parentLabel = parent?.kind === 'resolved' ? lineageLabel(parent.view) : undefined;
+  const parentFull =
+    parentLabel?.full ??
+    (parent?.kind === 'missing'
+      ? `${parent.shortId}${parentId && parentId !== parent.shortId ? ` · ${parentId}` : ''}`
+      : undefined);
+  const spawnedByFull = parentFull ? `spawned by ${parentFull}` : undefined;
   const deepChain = depth > MAX_INDENT_DEPTH ? parentTrail(view, byId) : undefined;
-  const deepTitle = deepChain ? `spawned by ${deepChain}${parentId ? `\n${parentId}` : ''}` : undefined;
-  const lineageText = [spawnedByLabel, deepChain && `full lineage: ${deepChain}`].filter(Boolean).join('; ');
+  const deepTitle = deepChain ? `spawned by ${deepChain.full}` : undefined;
+  const lineageText = [spawnedByFull, deepChain && `full lineage: ${deepChain.full}`].filter(Boolean).join('; ');
   const childDepth = children[0]?.depth ?? depth;
   const railIndent = Math.max(0, lineageIndent(childDepth) - lineageIndent(depth));
   const labels = (cfg.label ?? '')
@@ -323,13 +345,7 @@ function SidebarRow({
         // fact for everyone else.
         aria-current={active ? 'page' : undefined}
         onClick={onNavigate}
-        title={[
-          displayCallsign(cfg.teammate) || cfg.id,
-          mark.label,
-          spawnedBy && spawnedByLabel && `${spawnedByLabel}${parentId ? `\n${parentId}` : ''}`,
-        ]
-          .filter(Boolean)
-          .join('\n')}
+        title={[label.full, mark.label, spawnedBy && spawnedByFull, deepTitle].filter(Boolean).join('\n')}
         // `.kt-navrow` keys its active treatment off `aria-current="page"` — the
         // attribute this row already had — so the hand-rolled `border-l-2` rail
         // is gone and the family draws its own: 2px inset in Studio, 4px glowing

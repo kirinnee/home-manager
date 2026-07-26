@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import type { SessionView } from '../types';
-import { buildLineage, lineageIndent, nestByLineage, parentDisplay, shortSessionId } from './lineage';
+import { SidebarRow } from '../components/AgentSidebar';
+import { LineageName } from '../components/TaskName';
+import { buildLineage, lineageIndent, lineageLabel, nestByLineage, parentDisplay, shortSessionId } from './lineage';
 
 function session(
   id: string,
@@ -105,11 +109,111 @@ describe('parentDisplay', () => {
       [unnamed.config.id, unnamed],
     ]);
 
-    expect(parentDisplay(named.config.id, byId)).toMatchObject({ kind: 'resolved', name: 'Meghan' });
+    expect(parentDisplay(named.config.id, byId)).toMatchObject({
+      kind: 'resolved',
+      name: 'Meghan · task parent-123456',
+    });
     expect(parentDisplay(unnamed.config.id, byId)).toMatchObject({ kind: 'resolved', name: 'old session' });
     expect(parentDisplay('deadbeef0011', byId)).toEqual({ kind: 'missing', shortId: 'deadbeef…' });
     expect(parentDisplay(undefined, byId)).toBeNull();
     expect(shortSessionId('short')).toBe('short');
+  });
+});
+
+describe('lineageLabel', () => {
+  test('joins a title-cased callsign with a plain task while retaining the raw id', () => {
+    const view = session('ms0zbxh8-5cce961d', {
+      teammate: 'hayden',
+      name: '[Hayden] Fix the transcript scroller',
+    });
+    const label = lineageLabel(view);
+
+    expect(label).toEqual({
+      callsign: 'Hayden',
+      task: 'Fix the transcript scroller',
+      text: 'Hayden · Fix the transcript scroller',
+      full: 'Hayden · Fix the transcript scroller · ms0zbxh8-5cce961d',
+    });
+    expect(label.text).not.toContain('[');
+    expect(label.text).not.toContain(']');
+  });
+
+  test('suppresses redundant tasks and falls back sensibly when identity data is missing', () => {
+    const redundant = lineageLabel(session('redundant-id', { teammate: 'meghan', name: '[Legacy] Meghan' }));
+    const taskOnly = lineageLabel(session('task-only-id', { name: '[Legacy] Repair old records' }));
+    const idOnly = lineageLabel(session('deadbeef0011', { name: '' }));
+
+    expect(redundant).toMatchObject({ callsign: 'Meghan', task: '', text: 'Meghan', full: 'Meghan · redundant-id' });
+    expect(taskOnly).toMatchObject({ callsign: '', task: 'Repair old records', text: 'Repair old records' });
+    expect(idOnly).toEqual({ callsign: '', task: '', text: 'deadbeef…', full: 'deadbeef… · deadbeef0011' });
+  });
+
+  test('keeps complete long task-bearing labels in the rendered deep-sidebar tooltip and screen-reader context', () => {
+    const root = session('root-123456789', {
+      teammate: 'mary-jane',
+      name: '[Legacy] Repair the unusually long transcript-search cursor regression without dropping context',
+    });
+    const middle = session('middle-1234567', {
+      parent: root.config.id,
+      teammate: 'meghan',
+      name: '[Meghan] Trace the long-lived sidebar lineage relationship',
+    });
+    const leaf = session('leaf-123456789', {
+      parent: middle.config.id,
+      teammate: 'wyatt',
+      name: '[Wyatt] Verify a deep lineage tooltip preserves every full parent task',
+    });
+    const deep = session('deep-123456789', {
+      parent: leaf.config.id,
+      teammate: 'olivia',
+      name: '[Olivia] Surface the complete four-level ancestry in the deep marker',
+    });
+    const lineage = buildLineage([root, middle, leaf, deep]);
+    const trail = [root, middle, leaf].map(lineageLabel);
+    const nested = nestByLineage([root, middle, leaf, deep], lineage);
+    const deepRow = nested[0]!.children[0]!.children[0]!.children[0]!;
+    const deepTrail = trail.map(label => label.full).join(' → ');
+    const markup = renderToStaticMarkup(
+      createElement(SidebarRow, {
+        row: deepRow,
+        active: false,
+        byId: new Map([root, middle, leaf, deep].map(view => [view.config.id, view])),
+      }),
+    );
+
+    // SidebarRow activates its deep parent trail only beyond MAX_INDENT_DEPTH (2).
+    expect(lineage.depthOf.get(deep.config.id)).toBe(3);
+    expect(deepRow.depth).toBe(3);
+    expect(trail.map(label => label.text).join(' → ')).toContain(
+      'Mary-Jane · Repair the unusually long transcript-search cursor regression',
+    );
+    expect(trail.map(label => label.text).join(' → ')).toContain(
+      'Wyatt · Verify a deep lineage tooltip preserves every full parent task',
+    );
+    expect(trail.map(label => label.full).join(' → ')).toContain(root.config.id);
+    expect(trail.map(label => label.full).join(' → ')).toContain(middle.config.id);
+    expect(markup).toContain(`title="${lineageLabel(deep).full}\nactive — running\nspawned by ${deepTrail}"`);
+    expect(markup).toContain(
+      `<span class="sr-only"> — spawned by ${lineageLabel(leaf).full}; full lineage: ${deepTrail}</span>`,
+    );
+  });
+
+  test('renders a shrink-safe callsign/task label with complete tooltip and screen-reader text', () => {
+    const label = lineageLabel(
+      session('lineage-render-id', {
+        teammate: 'mary-jane',
+        name: '[Legacy] A deliberately long task title that must yield before the callsign does',
+      }),
+    );
+    const markup = renderToStaticMarkup(createElement(LineageName, { label }));
+
+    expect(markup).toContain(`title="${label.full}"`);
+    expect(markup).toContain('class="shrink-0">Mary-Jane</span>');
+    expect(markup).toContain('class="shrink-0 text-faint"> · </span>');
+    expect(markup).toContain(
+      'class="min-w-0 truncate">A deliberately long task title that must yield before the callsign does</span>',
+    );
+    expect(markup).toContain(`<span class="sr-only">${label.full}</span>`);
   });
 });
 
