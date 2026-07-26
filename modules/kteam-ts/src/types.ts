@@ -264,7 +264,19 @@ export interface KTeamEvent<T = unknown> {
   sessionId: string;
   turn: number;
   type: string;
-  source: 'daemon' | 'claude' | 'codex' | 'tmux' | 'client' | 'watcher' | 'warden';
+  source:
+    | 'daemon'
+    | 'claude'
+    | 'codex'
+    | 'tmux'
+    | 'client'
+    | 'watcher'
+    | 'warden'
+    | 'admin-cli'
+    | 'admin-ui'
+    | `warden:${string}`
+    | `peer:${string}`
+    | (string & {});
   data: T;
   /** Harness-record identity, present on live harness-derived chat frames so a
    *  live frame and the same record later read from /chat dedupe exactly. */
