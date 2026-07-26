@@ -59,7 +59,7 @@ import {
 
 const HERE = dirname(new URL(import.meta.url).pathname);
 const UI_ROOT = join(HERE, '..');
-/** Repo-relative prefix of this package, for reading `git status --porcelain`. */
+/** Repo-relative prefix of this package, for reading `STATUS_ARGV` output. */
 const PKG_PREFIX = 'modules/kteam-ts/ui/';
 
 /** The ONLY paths in this package that are not build inputs. Everything else is
@@ -103,6 +103,31 @@ function git(args: string[]): string {
   }
   return proc.stdout.toString();
 }
+
+/** The EXACT status invocation the guard uses. Exported so a regression test can
+    run this argv itself rather than a hand-copied approximation of it — the
+    escape below happened in the command, before `dirtyGuardedInputs()` ever saw
+    a string, so a test that only feeds that function cannot catch a recurrence.
+
+    `--untracked-files=all` is load-bearing twice over:
+
+      1. Ambient config wins otherwise. A user or repo `status.showUntrackedFiles
+         = no` makes a bare `git status --porcelain` print NOTHING for untracked
+         files, so an untracked `future-build-shaping.config.mts` was invisible
+         and the build proceeded, stamping the committed release ID onto a tree
+         that contained an unreviewed build input. Found by audit after the
+         denylist fix — the denylist was correct, but it was being handed an
+         empty string.
+
+      2. Even with default config, `-unormal` COLLAPSES an untracked directory to
+         `newtool/` instead of listing its files. That still trips the guard (the
+         prefix matches), but the operator would be told `newtool/` rather than
+         which files, and any exemption logic reasoning about file paths would be
+         comparing against a directory name.
+
+    A command-line flag beats every config source, which is the point: the guard
+    must not be silenceable by a setting outside this repo. */
+export const STATUS_ARGV = ['status', '--porcelain', '--untracked-files=all'] as const;
 
 /** Parse `git status --porcelain` into repo-relative paths, handling renames
     (`R  old -> new`) and quoted paths with spaces. */
@@ -174,7 +199,7 @@ async function main(): Promise<void> {
   }
 
   /* ---- 1. clean-source guard ------------------------------------------- */
-  const dirty = dirtyGuardedInputs(git(['status', '--porcelain']));
+  const dirty = dirtyGuardedInputs(git([...STATUS_ARGV]));
   if (dirty.length > 0) {
     if (!allowDirty) {
       console.error(

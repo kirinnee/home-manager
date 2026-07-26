@@ -12,10 +12,10 @@
    ============================================================================ */
 
 import { describe, expect, test } from 'bun:test';
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { dirtyGuardedInputs, porcelainPaths } from './build-pwa';
+import { STATUS_ARGV, dirtyGuardedInputs, porcelainPaths } from './build-pwa';
 import { buildManifest, buildOfflineHtml } from './gen-pwa';
 import { iconUrls, precacheClosure, renderPrecacheModule, type ViteManifest } from './postbuild-pwa';
 import {
@@ -271,6 +271,113 @@ describe('clean-source guard (C1)', () => {
 
   test('a clean tree passes', () => {
     expect(dirtyGuardedInputs('')).toEqual([]);
+  });
+});
+
+/* The guard's INPUT, not its logic. A closure review found the denylist above
+   was correct and still let a build through: `git status --porcelain` honours
+   `status.showUntrackedFiles`, so a repo or user config of `no` handed
+   `dirtyGuardedInputs()` an empty string and an untracked
+   `future-build-shaping.config.mts` sailed past. Feeding that function a
+   hand-written porcelain string can never catch this — the escape happens
+   before it is called. So these tests run real git in a real throwaway repo,
+   with the hostile config actually set, using the same STATUS_ARGV the
+   orchestrator uses. */
+describe('the guard cannot be silenced by ambient git config (P1)', () => {
+  /** A minimal repo with one commit and the ui package path present, so
+      porcelain output has the same shape the orchestrator parses. */
+  function scratchRepo(config: string[][] = []): string {
+    const dir = mkdtempSync(join(tmpdir(), 'kteam-guard-config-'));
+    const run = (...args: string[]): void => {
+      const p = Bun.spawnSync({ cmd: ['git', ...args], cwd: dir, stdout: 'pipe', stderr: 'pipe' });
+      if (p.exitCode !== 0) throw new Error(`git ${args.join(' ')}: ${p.stderr.toString()}`);
+    };
+    run('init', '-q');
+    run('config', 'user.email', 'test@example.invalid');
+    run('config', 'user.name', 'test');
+    run('config', 'commit.gpgsign', 'false');
+    mkdirSync(join(dir, 'modules', 'kteam-ts', 'ui'), { recursive: true });
+    writeFileSync(join(dir, 'modules', 'kteam-ts', 'ui', 'tracked.ts'), 'export {};\n');
+    run('add', '-A');
+    run('commit', '-qm', 'base');
+    for (const c of config) run('config', ...c);
+    return dir;
+  }
+
+  function status(dir: string): string {
+    // Deliberately the SAME argv the orchestrator runs, imported from it.
+    const p = Bun.spawnSync({ cmd: ['git', ...STATUS_ARGV], cwd: dir, stdout: 'pipe', stderr: 'pipe' });
+    return p.stdout.toString();
+  }
+
+  function withRepo(config: string[][], fn: (dir: string) => void): void {
+    const dir = scratchRepo(config);
+    try {
+      fn(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const UNTRACKED = 'modules/kteam-ts/ui/future-build-shaping.config.mts';
+
+  test('EXACT closure repro: status.showUntrackedFiles=no still reports the untracked input', () => {
+    withRepo([['status.showUntrackedFiles', 'no']], dir => {
+      writeFileSync(join(dir, UNTRACKED), 'export default {};\n');
+
+      // Sanity: without the flag, this config really does hide the file. If git
+      // ever changes that, this assertion tells us the test has gone stale
+      // rather than silently passing for the wrong reason.
+      const bare = Bun.spawnSync({ cmd: ['git', 'status', '--porcelain'], cwd: dir, stdout: 'pipe' }).stdout.toString();
+      expect(bare).not.toContain('future-build-shaping');
+
+      // The guard's actual invocation must see it anyway...
+      const porcelain = status(dir);
+      expect(porcelain).toContain('future-build-shaping.config.mts');
+      // ...and must therefore refuse the build.
+      expect(dirtyGuardedInputs(porcelain)).toEqual(['future-build-shaping.config.mts']);
+    });
+  });
+
+  test('the same holds for showUntrackedFiles=off and for a scoped no', () => {
+    for (const value of ['off', 'no']) {
+      withRepo([['status.showUntrackedFiles', value]], dir => {
+        writeFileSync(join(dir, UNTRACKED), 'export default {};\n');
+        expect(dirtyGuardedInputs(status(dir))).toEqual(['future-build-shaping.config.mts']);
+      });
+    }
+  });
+
+  test('untracked directories are listed per FILE, not collapsed to the directory', () => {
+    // git's own default (-unormal) prints `newtool/` rather than its contents.
+    // That still trips the guard, but the operator would be told a directory
+    // name, and exemption logic comparing file paths would be matching against
+    // something that is not a file path.
+    withRepo([], dir => {
+      mkdirSync(join(dir, 'modules', 'kteam-ts', 'ui', 'newtool'), { recursive: true });
+      writeFileSync(join(dir, 'modules/kteam-ts/ui/newtool/a.config.ts'), 'x\n');
+      writeFileSync(join(dir, 'modules/kteam-ts/ui/newtool/b.config.ts'), 'y\n');
+      expect(dirtyGuardedInputs(status(dir))).toEqual(['newtool/a.config.ts', 'newtool/b.config.ts']);
+    });
+  });
+
+  test('a genuinely clean tree still passes under the same invocation', () => {
+    // The flag must not make the guard paranoid — a clean worktree has to build,
+    // or the whole pipeline is bricked.
+    withRepo([], dir => {
+      expect(dirtyGuardedInputs(status(dir))).toEqual([]);
+    });
+    withRepo([['status.showUntrackedFiles', 'no']], dir => {
+      expect(dirtyGuardedInputs(status(dir))).toEqual([]);
+    });
+  });
+
+  test('the orchestrator pins the flag on the command line, where no config can override it', () => {
+    // A config-based fix (`-c status.showUntrackedFiles=all`) would work too, but
+    // asserting the literal argv keeps the guarantee legible and pins the thing
+    // that regressed.
+    expect(STATUS_ARGV).toEqual(['status', '--porcelain', '--untracked-files=all']);
+    expect(STATUS_ARGV).toContain('--untracked-files=all');
   });
 });
 
