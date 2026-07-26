@@ -3834,12 +3834,13 @@ export class SessionManager implements KTeamService {
           const tokensAdvanced =
             liveness.lastTokenAdvanceAt !== undefined &&
             liveness.lastTokenAdvanceAt !== previousLiveness.lastTokenAdvanceAt;
-          // Subprocess life-sign, two sources: a live child under the pane
-          // while a tool.use is open (gated â harness TUIs keep idle helper
-          // children), or the codex "N background terminal(s) running" footer.
+          // Subprocess life-sign, two sources: any live child under the pane,
+          // regardless of transcript tool correlation (background commands can
+          // outlive/miss tool.use records), or the Codex background-terminal
+          // footer. Long-lived-but-weird helpers are warden/sus territory; a
+          // positively live process must never feed the reflex kill verdict.
           const subprocessAlive =
-            ((view.state.openTools?.length ?? 0) > 0 && (await this.tmux.subprocessAlive(view.config.tmuxSession))) ||
-            backgroundTerminalCount(pane.visiblePane) > 0;
+            (await this.tmux.subprocessAlive(view.config.tmuxSession)) || backgroundTerminalCount(pane.visiblePane) > 0;
           if (counterAdvanced || tokensAdvanced || subprocessAlive || view.state.subprocessSince !== undefined) {
             await this.store.updateState<SessionState>(id, current => ({
               ...current,

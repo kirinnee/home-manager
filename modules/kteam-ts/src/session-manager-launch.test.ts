@@ -325,6 +325,109 @@ describe('done markers are turn-scoped in the live monitor', () => {
   });
 });
 
+describe('subprocess liveness without transcript tool records', () => {
+  test('a live pane child with no open tools keeps a silent session out of the kill verdict', async () => {
+    const home = await temporaryHome();
+    const directory = path.join(home, 's1');
+    await mkdir(path.join(directory, 'checks'), { recursive: true });
+    await mkdir(path.join(directory, 'turns'), { recursive: true });
+    const old = new Date(Date.now() - 10 * 60_000).toISOString();
+    const state: Record<string, unknown> = {
+      id: 's1',
+      status: 'running',
+      turn: 1,
+      startedAt: old,
+      lastTranscriptAt: new Date(Date.parse(old) + 1_000).toISOString(),
+      lastPaneAt: old,
+      lastSubprocessAt: old,
+      nudgedAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+      openTools: [],
+      turnCompleted: false,
+    };
+    const config = {
+      id: 's1',
+      harness: 'claude',
+      mode: 'auto',
+      binary: 'claude-auto-loge',
+      tmuxSession: 'kteam-s1-agent',
+      turn: 1,
+      intervalSeconds: 0.01,
+      cwd: home,
+      createdAt: old,
+      timeoutSeconds: 7_200,
+      nudgeAfterSeconds: 1,
+      killAfterSeconds: 2,
+    };
+    const manager = bareManager();
+    const abort = new AbortController();
+    let subprocessProbes = 0;
+    let kills = 0;
+    const events: string[] = [];
+    manager.closed = false;
+    manager.paths = { home, sessions: home, daemon: home };
+    manager.monitors = new Map();
+    manager.launching = new Map();
+    manager.doneDeferred = new Set();
+    manager.autoContinued = new Set();
+    manager.options = {
+      healthIntervalSeconds: 0.01,
+      warden: { susThinkingSeconds: 900, susSubprocessSeconds: 900 },
+    };
+    manager.get = async () => ({ directory, config, state });
+    manager.tmux = {
+      state: async () => ({
+        alive: true,
+        dead: false,
+        pane: 'silent static pane',
+        visiblePane: 'silent static pane',
+        promptReady: false,
+      }),
+      snapshot: async () => '',
+      subprocessAlive: async () => {
+        subprocessProbes += 1;
+        return true;
+      },
+      send: async () => undefined,
+    };
+    manager.gitFingerprint = async () => '';
+    manager.updateQuota = async () => undefined;
+    manager.transition = async (_id: string, patch: Record<string, unknown>, type: string) => {
+      events.push(type);
+      // The first frame seen after monitor attachment is a baseline, not new
+      // work for this regression: hold the deliberately stale pane timestamp.
+      const applied = { ...patch };
+      if (type === 'terminal.frame') delete applied.lastPaneAt;
+      Object.assign(state, applied);
+    };
+    manager.store = {
+      updateState: async (_id: string, mutate: (current: Record<string, unknown>) => Record<string, unknown>) => {
+        Object.assign(state, mutate(state));
+        if (state.lastSubprocessAt !== old) abort.abort();
+        return state;
+      },
+    };
+    manager.stopTmuxWithEvidence = async () => {
+      kills += 1;
+    };
+    manager.emit = async (_id: string, type: string) => {
+      events.push(type);
+    };
+
+    const fallback = setTimeout(() => abort.abort(), 2_000);
+    try {
+      await runMonitor(manager, abort.signal);
+    } finally {
+      clearTimeout(fallback);
+    }
+
+    expect(subprocessProbes).toBeGreaterThan(0);
+    expect(state.lastSubprocessAt).not.toBe(old);
+    expect(kills).toBe(0);
+    expect(events).not.toContain('session.stalled');
+    expect(state.status).toBe('running');
+  });
+});
+
 // The 2026-07-26 revive-on-send incident, in its exact harmful order:
 // monitor writes failed DURING relaunch -> relaunch succeeds -> running patch
 // arrives afterwards. A terminal-preserving transition used to discard that
