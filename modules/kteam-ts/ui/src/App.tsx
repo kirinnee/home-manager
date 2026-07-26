@@ -119,10 +119,21 @@ export function App() {
       // window, not to us. `keyCode === 229` is the legacy spelling of the same
       // fact that some IMEs still send instead of `isComposing`.
       if (event.isComposing || event.keyCode === 229) return;
+      // BOTH CASES, BECAUSE CAPS LOCK IS NOT A MODIFIER. With Caps Lock on and
+      // no Shift held, `key` is `'K'` and `shiftKey` is false — that is still the
+      // shortcut, and testing the letter's casing to detect Shift would break it.
       if (event.key !== 'k' && event.key !== 'K') return;
       // Meta on Apple, Control everywhere else — but both are accepted on both,
       // because a reader on a cross-platform keyboard should not have to care.
-      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+      //
+      // SHIFT IS A DIFFERENT SHORTCUT, NOT A SLOPPIER SPELLING OF THIS ONE.
+      // `Cmd/Ctrl+Shift+K` is Firefox's Web Console and Chrome's own binding; the
+      // hint declares `Meta+K Control+K` and nothing else, so accepting Shift
+      // would both swallow a browser feature and make the advertised shortcut a
+      // lie. Alt is excluded for the same reason (`Ctrl+Alt+K` is a compose
+      // sequence on several layouts).
+      if (event.shiftKey || event.altKey) return;
+      if (!(event.metaKey || event.ctrlKey)) return;
       // preventDefault ONLY once every guard has passed: this key is the browser's
       // address-bar/search shortcut, and swallowing it on a keystroke we are not
       // handling would be taking something and giving nothing back.
