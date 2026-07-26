@@ -1,0 +1,78 @@
+{
+  "generatorVersion": "1.1.0",
+  "command": "bun run gen:icons  (cwd: modules/kteam-ts/ui)",
+  "sourceFile": "brand/kteam-mark.svg",
+  "sourceBlob": "c99215af01b815552b94a00836e480e79defad32",
+  "sourceSha256": "fc09cfb83ecb28a56554a33d6c46bc4a8ef92d83f3a82f61aa3081523c741126",
+  "icons": [
+    {
+      "name": "icon-192",
+      "file": "icon-192.4b80496b83.png",
+      "sha256": "4b80496b833310b8aed3e7fe6c52be6c0ac6555911e7054c082de1c31feadc57",
+      "bytes": 4398,
+      "mime": "image/png",
+      "width": 192,
+      "height": 192,
+      "purpose": "any"
+    },
+    {
+      "name": "maskable-192",
+      "file": "maskable-192.a2dc4e508d.png",
+      "sha256": "a2dc4e508d2f68b86d8fd9fbafb9cebc8007119ad2fc73f2bc53fe993ec61721",
+      "bytes": 3615,
+      "mime": "image/png",
+      "width": 192,
+      "height": 192,
+      "purpose": "maskable"
+    },
+    {
+      "name": "icon-512",
+      "file": "icon-512.4d6591da01.png",
+      "sha256": "4d6591da01d152449c75d5717cd2fd0175d624b4f5f14dc568cec04de6853413",
+      "bytes": 14061,
+      "mime": "image/png",
+      "width": 512,
+      "height": 512,
+      "purpose": "any"
+    },
+    {
+      "name": "maskable-512",
+      "file": "maskable-512.17e4f04ec4.png",
+      "sha256": "17e4f04ec4aee36633dbb28c9b59983c1ba927b554ce2b37064d77bf37d57119",
+      "bytes": 5971,
+      "mime": "image/png",
+      "width": 512,
+      "height": 512,
+      "purpose": "maskable"
+    },
+    {
+      "name": "apple-touch-icon",
+      "file": "apple-touch-icon.1d79d00c19.png",
+      "sha256": "1d79d00c1992078e14888e143d07750b71eca96ca78e41ec670d42f21c5e1948",
+      "bytes": 2964,
+      "mime": "image/png",
+      "width": 180,
+      "height": 180
+    },
+    {
+      "name": "favicon-svg",
+      "file": "favicon.fc09cfb83e.svg",
+      "sha256": "fc09cfb83ecb28a56554a33d6c46bc4a8ef92d83f3a82f61aa3081523c741126",
+      "bytes": 2418,
+      "mime": "image/svg+xml"
+    },
+    {
+      "name": "favicon-ico",
+      "file": "favicon.1e0c791b41.ico",
+      "sha256": "1e0c791b41ff0cbcf6ad1cfe090a51aa8996ed03db03883d1921f5a23574e5f2",
+      "bytes": 1561,
+      "mime": "image/x-icon"
+    }
+  ],
+  "legacyIco": {
+    "file": "favicon.ico",
+    "url": "/favicon.ico",
+    "sha256": "1e0c791b41ff0cbcf6ad1cfe090a51aa8996ed03db03883d1921f5a23574e5f2",
+    "identicalTo": "favicon.1e0c791b41.ico"
+  }
+}
