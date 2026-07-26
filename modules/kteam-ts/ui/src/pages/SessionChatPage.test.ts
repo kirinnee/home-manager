@@ -26,11 +26,18 @@ ${SAME_TEXT}`);
     expect(block?.kind === 'user' ? block.from?.name : undefined).toBe('jessica');
   });
 
-  test('classified system text with identical body neither reaps nor becomes a human bubble', () => {
+  test('a common classified phrase still confirms delivery without becoming a human bubble', () => {
+    const text = 'Continue from where you left off.';
+    const system = chatUser(text);
+    expect(recordConfirmsPending(system, { text, at: SENT_AT })).toBe(true);
+    expect(buildTranscript([system])[0]?.kind).toBe('system');
+  });
+
+  test('an identical turn prompt likewise confirms delivery while remaining a system row', () => {
     const text =
       'Read the file /home/kirin/.kteam/ms0abc/turns/turn-014.md now, then carefully follow every instruction inside it. This is your complete task for this turn.';
     const system = chatUser(text);
-    expect(recordConfirmsPending(system, { text, at: SENT_AT })).toBe(false);
+    expect(recordConfirmsPending(system, { text, at: SENT_AT })).toBe(true);
     expect(buildTranscript([system])[0]?.kind).toBe('system');
   });
 });
