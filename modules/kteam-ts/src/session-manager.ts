@@ -130,6 +130,17 @@ interface StoredEnvelope {
    *  Still present in old journals, no longer written or read. */
   globalSequence?: number;
 }
+
+/** Only this failure class is eligible for the single file-backed retry. An
+ *  error after verified typing (for example, an audit-log write failure) must
+ *  never be mistaken for composer rejection and duplicate the send. */
+class NativeQueueComposerError extends Error {
+  constructor(message: string, cause: unknown) {
+    super(message, { cause });
+    this.name = 'NativeQueueComposerError';
+  }
+}
+
 export interface ScratchPlan {
   sessionId: string;
   teammate?: string;
@@ -237,6 +248,10 @@ const START_WAIT_MS = 45_000;
  *  bootstrap queue for a slow provider, short enough to stay under the client
  *  request timeout. */
 const CONTROL_LAUNCH_WAIT_MS = 60_000;
+/** Long bracketed pastes are unreliable in a busy Claude composer (4.3KB was
+ *  lost 8/8 in live repros). Keep native-queue typing below this bound and put
+ *  the complete logical message in a durable file instead. */
+const NATIVE_QUEUE_INLINE_MAX_CHARS = 1_000;
 /** How long a queued first launch is given before the self-check stops
  *  excluding it and repairs (or fails) it like any other session. */
 const LAUNCH_GRACE_MS = 10 * 60_000;
@@ -1452,6 +1467,11 @@ export class SessionManager implements KTeamService {
 
   async send(id: string, request: SendRequest): Promise<SessionView & { disposition: SendDisposition }> {
     id = this.resolveRef(id);
+    // Preserve what the peer actually asked us to send before adding the
+    // receiver-facing attribution preamble. The sender's outbox is an audit
+    // record of the logical message, not of transport decoration.
+    const outboundMessage = request.message;
+    const outboundAttachmentIds = [...(request.attachmentIds ?? [])];
     // PEER MESSAGING. `from` is a LABEL, never an authorization: the bearer
     // token already authorized this call, and the sender is resolved here only
     // so the message can be attributed to a teammate rather than to "the
@@ -1548,46 +1568,25 @@ export class SessionManager implements KTeamService {
         if (!queuedMessage && !request.attachmentIds?.length) throw new Error('message or attachment is required');
         const attachmentBlock = await this.attachments.buildImageReferenceBlock(id, request.attachmentIds ?? []);
         const payload = [queuedMessage, attachmentBlock].filter(Boolean).join('\n\n');
-        const entry = {
-          id: crypto.randomUUID(),
-          at: now(),
-          message: payload,
-          attachmentIds: request.attachmentIds ?? [],
-        };
-        // Durable BEFORE the keystrokes: a daemon crash between type-in and
-        // consumption must leave evidence to recover/report from.
-        await this.store.updateState<SessionState>(id, current => ({
-          ...current,
-          pendingNativeSends: [...(current.pendingNativeSends ?? []), entry],
-        }));
+        const fileBacked = payload.length > NATIVE_QUEUE_INLINE_MAX_CHARS;
         try {
-          await this.tmux.typeIntoQueue(view.config.tmuxSession, payload);
-        } catch (error) {
-          await this.store.updateState<SessionState>(id, current => ({
-            ...current,
-            pendingNativeSends: (current.pendingNativeSends ?? []).filter(item => item.id !== entry.id),
-          }));
-          throw error;
+          await this.queueNativeSend(id, view, request, queuedMessage, payload, fileBacked);
+        } catch (firstError) {
+          if (!(firstError instanceof NativeQueueComposerError)) throw firstError;
+          // A short direct type gets exactly one retry through the durable
+          // file-backed route. Long payloads start there: never retype a 4KB+
+          // collapsed paste whose acceptance cannot be proved.
+          if (fileBacked) throw firstError;
+          try {
+            await this.queueNativeSend(id, view, request, queuedMessage, payload, true);
+          } catch (fallbackError) {
+            if (!(fallbackError instanceof NativeQueueComposerError)) throw fallbackError;
+            throw new AggregateError(
+              [firstError, fallbackError],
+              `native composer delivery failed and the one durable file-backed fallback also failed for session ${id}; ${String(fallbackError)}`,
+            );
+          }
         }
-        await appendFile(
-          path.join(view.directory, 'channel', 'inbox.jsonl'),
-          `${JSON.stringify({ at: now(), type: 'message', queued: true, queueId: entry.id, message: queuedMessage, attachmentIds: request.attachmentIds ?? [], ...(request.from ? { from: request.from, fromName: request.fromName } : {}) })}\n`,
-        );
-        await this.emit(
-          id,
-          'control.send_queued',
-          {
-            queueId: entry.id,
-            message: queuedMessage,
-            attachmentIds: request.attachmentIds ?? [],
-            native: true,
-            ...(request.from
-              ? { from: request.from, ...(request.fromName ? { fromName: request.fromName } : {}) }
-              : {}),
-            ...(request.replyExpected ? { replyExpected: true } : {}),
-          },
-          'client',
-        );
         return { kind: 'queued' as const };
       }
       await this.deliverToIdlePrompt(id, view, request);
@@ -1601,8 +1600,97 @@ export class SessionManager implements KTeamService {
     // request/response into a real pattern: both sides only ever call
     // `kteam send`. Runs after delivery, so a waiter is never woken for a
     // message that failed to land.
-    if (sender) await this.endPeerWait(id, sender.config.id).catch(() => undefined);
+    if (sender) {
+      await appendFile(
+        path.join(sender.directory, 'channel', 'outbox.jsonl'),
+        `${JSON.stringify({
+          at: now(),
+          type: 'message',
+          from: sender.config.id,
+          ...(sender.config.teammate ? { fromName: sender.config.teammate } : {}),
+          to: id,
+          disposition: outcome.kind,
+          message: outboundMessage?.trim() ?? '',
+          attachmentIds: outboundAttachmentIds,
+        })}\n`,
+      ).catch(async error => {
+        // Delivery already happened, so never invite a duplicate retry by
+        // changing the disposition. Surface the missing audit row loudly.
+        await this.emit(
+          id,
+          'control.outbox_write_failed',
+          { from: sender.config.id, to: id, disposition: outcome.kind, message: String(error) },
+          'daemon',
+        ).catch(() => undefined);
+      });
+      await this.endPeerWait(id, sender.config.id).catch(() => undefined);
+    }
     return { ...(await this.get(id)), disposition: outcome.kind };
+  }
+
+  /** Persist and type one native-queue entry. For file-backed delivery the
+   *  pane sees only a short instruction; the full logical payload remains in
+   *  both pendingNativeSends and a mode-0600 channel file. */
+  private async queueNativeSend(
+    id: string,
+    view: SessionView,
+    request: SendRequest,
+    queuedMessage: string | undefined,
+    payload: string,
+    fileBacked: boolean,
+  ): Promise<void> {
+    const queueId = crypto.randomUUID();
+    const payloadFile = fileBacked ? path.join(view.directory, 'channel', `queued-${queueId}.md`) : undefined;
+    const queueText = payloadFile
+      ? `Read the queued message file at ${payloadFile} completely now, then follow every instruction inside it.`
+      : payload;
+    const entry: NonNullable<SessionState['pendingNativeSends']>[number] = {
+      id: queueId,
+      at: now(),
+      message: payload,
+      attachmentIds: request.attachmentIds ?? [],
+      ...(payloadFile ? { queueText, payloadFile } : {}),
+    };
+    if (payloadFile) await writeFile(payloadFile, `${payload}\n`, { mode: 0o600 });
+    // Durable BEFORE the keystrokes: a daemon crash between type-in and
+    // consumption must leave evidence to recover/report from.
+    await this.store.updateState<SessionState>(id, current => ({
+      ...current,
+      pendingNativeSends: [...(current.pendingNativeSends ?? []), entry],
+    }));
+    try {
+      await this.tmux.typeIntoQueue(view.config.tmuxSession, queueText);
+    } catch (error) {
+      await this.store.updateState<SessionState>(id, current => ({
+        ...current,
+        pendingNativeSends: (current.pendingNativeSends ?? []).filter(item => item.id !== entry.id),
+      }));
+      if (payloadFile) {
+        throw new NativeQueueComposerError(
+          `durable queue instruction failed; the complete payload remains at ${payloadFile} (retry with \`kteam send ${id} --message-file ${payloadFile}\`): ${String(error)}`,
+          error,
+        );
+      }
+      throw new NativeQueueComposerError(`native queue composer delivery failed: ${String(error)}`, error);
+    }
+    await appendFile(
+      path.join(view.directory, 'channel', 'inbox.jsonl'),
+      `${JSON.stringify({ at: now(), type: 'message', queued: true, queueId: entry.id, message: queuedMessage, attachmentIds: request.attachmentIds ?? [], ...(request.from ? { from: request.from, fromName: request.fromName } : {}) })}\n`,
+    );
+    await this.emit(
+      id,
+      'control.send_queued',
+      {
+        queueId: entry.id,
+        message: queuedMessage,
+        attachmentIds: request.attachmentIds ?? [],
+        native: true,
+        ...(payloadFile ? { fileBacked: true, payloadFile } : {}),
+        ...(request.from ? { from: request.from, ...(request.fromName ? { fromName: request.fromName } : {}) } : {}),
+        ...(request.replyExpected ? { replyExpected: true } : {}),
+      },
+      'client',
+    );
   }
 
   /** Terminal/dead-pane send: relaunch through resume() with the message as
@@ -1644,11 +1732,15 @@ export class SessionManager implements KTeamService {
           ? true
           : this.isDirectPayload(complete, view.config);
       await writeFile(turnPrompt(this.paths, id, turn), `${complete}\n`, { mode: 0o600 });
+      // Prove the prompt landed before recording a delivered message or
+      // advancing the turn. A failed injection must leave no phantom inbox
+      // row and no turn bump.
+      await this.tmux.send(view.config, direct ? complete : this.promptInstruction(id, turn));
       await appendFile(
         path.join(view.directory, 'channel', 'inbox.jsonl'),
         `${JSON.stringify({ at: now(), type: 'message', turn, message, attachmentIds: request.attachmentIds ?? [], ...(request.from ? { from: request.from, fromName: request.fromName } : {}) })}\n`,
       );
-      const config = await this.store.updateConfig<SessionConfig>(id, current => ({
+      await this.store.updateConfig<SessionConfig>(id, current => ({
         ...current,
         turn,
         updatedAt: now(),
@@ -1670,7 +1762,6 @@ export class SessionManager implements KTeamService {
         'client',
         turn,
       );
-      await this.tmux.send(config, direct ? complete : this.promptInstruction(id, turn));
       // Markers written between the send request and the prompt landing
       // (tmux.send can still block briefly on late startup dialogs) belong to
       // the PREVIOUS turn â e.g. the agent's `signal done` racing this send.
@@ -3875,7 +3966,7 @@ export class SessionManager implements KTeamService {
     // and delete both entries.
     const consumedTexts = new Set<number>();
     for (const entry of [...pending]) {
-      const probe = normalize(entry.message).slice(0, 80);
+      const probe = normalize(entry.queueText ?? entry.message).slice(0, 80);
       if (!probe) continue;
       const matchIndex = userTexts.findIndex((text, index) => !consumedTexts.has(index) && text.includes(probe));
       if (matchIndex === -1) continue;
