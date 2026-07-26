@@ -77,6 +77,7 @@ import {
   foldStallLiveness,
   paneActivityLine,
   paneShowsActiveWork,
+  INTERACTIVE_READY_TIMEOUT_MS,
   TmuxController,
   type PaneState,
   type StallLivenessState,
@@ -1541,7 +1542,7 @@ export class SessionManager implements KTeamService {
         // ride. waitReady bounds the settle instead of a blind sleep.
         if (request.now === true && paneShowsActiveWork(paneState.visiblePane)) {
           await run(['tmux', 'send-keys', '-t', view.config.tmuxSession, 'Escape']);
-          await this.tmux.waitReady(view.config.tmuxSession, 10_000).catch(() => undefined);
+          await this.tmux.waitReady(view.config.tmuxSession, INTERACTIVE_READY_TIMEOUT_MS).catch(() => undefined);
           const after = await this.tmux.state(view.config.tmuxSession);
           if (!after.alive || after.dead) return { kind: 'revive' as const };
           if (after.promptReady) busy = false;
@@ -2239,7 +2240,7 @@ export class SessionManager implements KTeamService {
    *  rewrite the config to the new wrapper (binary/home/model â keeping the
    *  harnessSessionId, teammate, label, parent), then relaunch through the normal
    *  resume path under the new wrapper. Cross-KIND migration is unsupported. */
-  async migrate(id: string, agent: string, model?: string): Promise<SessionView> {
+  async migrate(id: string, agent: string, model?: string, allowContextDowngrade = false): Promise<SessionView> {
     id = this.resolveRef(id);
     this.cancelRetry(id);
     // Abort (never drain) the quota waiter: failover calls migrate from INSIDE
@@ -2270,6 +2271,33 @@ export class SessionManager implements KTeamService {
       );
     // Model: explicit arg > the new wrapper's kfleet default (KTEAM_MODEL) > keep.
     const nextModel = model?.trim() || (await wrapperModel(wrapper)) || view.config.model;
+    const currentModel = resolveDisplayModel(view.config.binary, view.config.model, view.state.observedModel).model;
+    const currentWindow = contextWindowForModel(currentModel, this.options.contextWindows);
+    const targetWindow = contextWindowForModel(nextModel, this.options.contextWindows);
+    const currentContextTokens =
+      view.state.contextTokens ??
+      (view.state.contextPercent !== undefined
+        ? Math.ceil(((view.state.contextWindow ?? currentWindow) * Math.max(0, view.state.contextPercent)) / 100)
+        : undefined);
+    // Reject before journalling intent or stopping the old pane. A smaller
+    // target is opt-in because even a currently-small transcript can grow past
+    // it; a transcript that ALREADY exceeds the target is never launchable and
+    // the downgrade flag must not turn a delayed failure into an accepted one.
+    if (targetWindow < currentWindow && !allowContextDowngrade) {
+      const targetName = nextModel ?? 'the target model';
+      const largerVariant = targetName.includes('[1m]') ? targetName : `${targetName}[1m]`;
+      throw new Error(
+        `refusing context-window downgrade from ${currentModel} (${currentWindow} tokens) to ${targetName} ` +
+          `(${targetWindow} tokens); use --model ${largerVariant} to retain the larger window, or retry with ` +
+          '--allow-context-downgrade',
+      );
+    }
+    if (currentContextTokens !== undefined && currentContextTokens > targetWindow) {
+      throw new Error(
+        `refusing migration to ${nextModel ?? agent}: current context uses ${currentContextTokens} tokens, ` +
+          `exceeding the target window of ${targetWindow} tokens; choose a [1m] model variant`,
+      );
+    }
     const at = now();
     // Snapshot the ORIGINAL account so a failed relaunch can be rolled back â
     // the config must never be left pointing at a wrapper that never launched.
@@ -2338,19 +2366,42 @@ export class SessionManager implements KTeamService {
           .catch(() => undefined);
         throw error;
       }
-      // Relaunch failed: roll the config back to the original account so the
-      // session never points at a wrapper that never launched, and record the
-      // full story in the failure reason.
+      // Relaunch failed: roll the ACCOUNT back. Model rollback is a separate
+      // decision — once the new model was observed or reached a ready prompt,
+      // reverting it would make the next resume request the wrong model and
+      // recreate the relaunch loop this guard exists to stop.
       const detail = error instanceof Error ? error.message : String(error);
+      const latest = await this.get(id).catch(() => undefined);
+      const requestedModel = nextModel?.trim().toLowerCase();
+      const observedModel = latest?.state.observedModel?.trim().toLowerCase();
+      const targetConfigStillStaged = latest?.config.binary === agent && latest.config.model === nextModel;
+      const observedNextModel = Boolean(
+        targetConfigStillStaged &&
+        requestedModel &&
+        observedModel &&
+        (observedModel === requestedModel ||
+          observedModel.includes(requestedModel) ||
+          requestedModel.includes(observedModel)),
+      );
+      const paneAfterFailure = await this.tmux.state(migrated.tmuxSession).catch(() => undefined);
+      const reachedPromptReady = Boolean(
+        targetConfigStillStaged &&
+        (latest?.state.promptReady === true ||
+          (paneAfterFailure?.alive && !paneAfterFailure.dead && paneAfterFailure.promptReady)),
+      );
+      const keepLaunchedModel = Boolean(nextModel && (observedNextModel || reachedPromptReady));
       await this.store
         .updateConfig<SessionConfig>(id, current => ({
           ...current,
           ...original,
+          ...(keepLaunchedModel ? { model: nextModel } : {}),
           migration: undefined,
           updatedAt: now(),
         }))
         .catch(() => undefined);
-      const reason = `migration to ${agent} failed: ${detail}; session restored to ${from} (stopped)`;
+      const reason =
+        `migration to ${agent} failed: ${detail}; session restored to ${from} (stopped)` +
+        (keepLaunchedModel ? ` and kept launched model ${nextModel}` : '');
       await this.transition(
         id,
         { status: 'failed', reason, finishedAt: now(), health: 'crashed' },
@@ -4147,17 +4198,16 @@ export class SessionManager implements KTeamService {
       const usageEvent = [...events].reverse().find(event => event.type === 'context.usage') as
         | { data: { contextTokens: number; model?: string; contextWindow?: number } }
         | undefined;
+      const contextWindowFromUsage = usageEvent
+        ? (usageEvent.data.contextWindow ??
+          contextWindowForModel(
+            usageEvent.data.model ??
+              resolveDisplayModel(view.config.binary, view.config.model, view.state.observedModel).model,
+            this.options.contextWindows,
+          ))
+        : undefined;
       const contextPercentFromUsage = usageEvent
-        ? Math.round(
-            (usageEvent.data.contextTokens /
-              (usageEvent.data.contextWindow ??
-                contextWindowForModel(
-                  usageEvent.data.model ??
-                    resolveDisplayModel(view.config.binary, view.config.model, view.state.observedModel).model,
-                  this.options.contextWindows,
-                ))) *
-              100,
-          )
+        ? Math.round((usageEvent.data.contextTokens / contextWindowFromUsage!) * 100)
         : undefined;
       if (
         contextPercentFromUsage !== undefined &&
@@ -4222,6 +4272,9 @@ export class SessionManager implements KTeamService {
           lastToolStartedAt,
           transcriptOffset: Math.max(current.transcriptOffset ?? 0, offset),
           ...(contextPercentFromUsage !== undefined ? { contextPercent: contextPercentFromUsage } : {}),
+          ...(usageEvent
+            ? { contextTokens: usageEvent.data.contextTokens, contextWindow: contextWindowFromUsage }
+            : {}),
           // Ground truth for the MODEL column: the wrapper alias (`opus` on a
           // GLM account) is only what was requested â this is what answered.
           ...(usageEvent?.data.model ? { observedModel: usageEvent.data.model } : {}),
@@ -4296,17 +4349,16 @@ export class SessionManager implements KTeamService {
       const usageEvent = [...events].reverse().find(event => event.type === 'context.usage') as
         | { data: { contextTokens: number; model?: string; contextWindow?: number } }
         | undefined;
+      const contextWindowFromUsage = usageEvent
+        ? (usageEvent.data.contextWindow ??
+          contextWindowForModel(
+            usageEvent.data.model ??
+              resolveDisplayModel(view.config.binary, view.config.model, view.state.observedModel).model,
+            this.options.contextWindows,
+          ))
+        : undefined;
       const contextPercentFromUsage = usageEvent
-        ? Math.round(
-            (usageEvent.data.contextTokens /
-              (usageEvent.data.contextWindow ??
-                contextWindowForModel(
-                  usageEvent.data.model ??
-                    resolveDisplayModel(view.config.binary, view.config.model, view.state.observedModel).model,
-                  this.options.contextWindows,
-                ))) *
-              100,
-          )
+        ? Math.round((usageEvent.data.contextTokens / contextWindowFromUsage!) * 100)
         : undefined;
       if (
         contextPercentFromUsage !== undefined &&
@@ -4373,6 +4425,9 @@ export class SessionManager implements KTeamService {
           lastToolStartedAt,
           transcriptOffset: Math.max(current.transcriptOffset ?? 0, offset),
           ...(contextPercentFromUsage !== undefined ? { contextPercent: contextPercentFromUsage } : {}),
+          ...(usageEvent
+            ? { contextTokens: usageEvent.data.contextTokens, contextWindow: contextWindowFromUsage }
+            : {}),
           // Ground truth for the MODEL column: the wrapper alias (`opus` on a
           // GLM account) is only what was requested â this is what answered.
           ...(usageEvent?.data.model ? { observedModel: usageEvent.data.model } : {}),
