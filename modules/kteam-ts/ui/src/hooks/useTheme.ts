@@ -100,6 +100,51 @@ function osPrefersDark(): boolean {
   return typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-color-scheme: dark)').matches;
 }
 
+/* ---------- PWA manifest + window colour (plan §4.3, audit M4) -------------
+   Ten generated manifests exist per release, one per family+mode, differing ONLY
+   in `theme_color`/`background_color`. The active one is selected by rewriting
+   the href of the SINGLE `<link id="kteam-manifest">` that index.html created —
+   never by appending another link, which is what M4 flagged: browsers take the
+   first manifest link and the extra ones are dead weight that make the DOM lie
+   about which manifest is in force.
+   -------------------------------------------------------------------------- */
+
+export const MANIFEST_LINK_ID = 'kteam-manifest';
+
+/** Matches the family+mode segment of a generated manifest filename. Anchored on
+ *  the `manifest-` prefix and the following `.` so it cannot touch the release
+ *  hash or the extension — the release must survive the swap untouched, since it
+ *  names the generation this bundle belongs to. */
+const MANIFEST_THEME_RE = /manifest-[a-z]+-[a-z]+\./;
+
+/** Repoint a manifest href at a different family+mode, preserving the release.
+ *
+ *  Pure and exported because it is the one piece of this that can be wrong in a
+ *  way nothing would notice at runtime: a bad swap yields a 404 the browser
+ *  reports only in an install prompt nobody is watching. Returns the input
+ *  unchanged if it does not look like a generated manifest name (a dev server,
+ *  or a hand-edited href) rather than fabricating a URL.
+ *
+ *  The inline bootstrap in index.html applies the SAME rule pre-paint — keep the
+ *  two in step. */
+export function manifestHrefFor(currentHref: string, family: ThemeFamilyId, resolved: ResolvedMode): string {
+  if (!MANIFEST_THEME_RE.test(currentHref)) return currentHref;
+  return currentHref.replace(MANIFEST_THEME_RE, `manifest-${family}-${resolved}.`);
+}
+
+/** The live window colour for the OS chrome (Android address bar, Chromium
+ *  title bar, iOS status-bar tint in standalone).
+ *
+ *  READ FROM THE COMPUTED STYLE, never from a colour map in TS. themes.css is
+ *  the only place a theme's `--bg` is defined; the build-time manifests parse
+ *  that same file. A second copy in TypeScript would be a third source of truth
+ *  and would drift the first time a token is retuned (audit M4). Reading it
+ *  computed also means the value is correct for whatever `data-theme` is
+ *  actually applied, including a value this code does not know about. */
+export function themeColorFromComputedStyle(root: Element): string {
+  return getComputedStyle(root).getPropertyValue('--bg').trim();
+}
+
 export interface ThemeState extends ThemePref {
   /** The mode actually in force — never 'system'. */
   resolved: ResolvedMode;
@@ -139,9 +184,36 @@ export function useTheme(): ThemeState {
 
   // Publish + persist. The inline bootstrap already set the same attribute for
   // the first paint; this keeps it true for every change afterwards.
+  //
+  // The manifest href and the window colour are updated in the SAME effect,
+  // after the attribute is set, because the colour is read back from the
+  // computed style and that read is only correct once `data-theme` is applied.
   useEffect(() => {
-    document.documentElement.dataset.theme = attr;
-  }, [attr]);
+    const root = document.documentElement;
+    root.dataset.theme = attr;
+
+    const link = document.getElementById(MANIFEST_LINK_ID);
+    if (link) {
+      const current = link.getAttribute('href') ?? '';
+      const next = manifestHrefFor(current, pref.family, resolved);
+      // Only on a real change: assigning the same href re-fetches the manifest
+      // in some browsers, and this effect runs on every mode flip.
+      if (next !== current) link.setAttribute('href', next);
+    }
+
+    // ONE identified meta element, created on demand. index.html deliberately
+    // ships without a theme-color: a static one would be wrong for four of the
+    // five families, and briefly painting the wrong colour is worse than
+    // painting none.
+    let meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+    if (!meta) {
+      meta = document.createElement('meta');
+      meta.name = 'theme-color';
+      document.head.appendChild(meta);
+    }
+    const color = themeColorFromComputedStyle(root);
+    if (color && meta.content !== color) meta.content = color;
+  }, [attr, pref.family, resolved]);
 
   useEffect(() => {
     try {

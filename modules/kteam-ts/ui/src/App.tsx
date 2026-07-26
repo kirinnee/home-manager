@@ -26,6 +26,7 @@ import { NewSessionPage } from './pages/NewSessionPage';
 import { cn } from './lib/utils';
 import { useAppViewport } from './hooks/useAppViewport';
 import { useLayoutMode } from './hooks/useLayoutMode';
+import { useServiceWorkerUpdate } from './hooks/useServiceWorkerUpdate';
 
 // THE CHAT PAGE IS A LAZY CHUNK. It pulls in the whole reading stack — the
 // transcript, markdown, syntax highlighting, tool previews, the terminal view —
@@ -92,6 +93,12 @@ export function App() {
   // exactly as it was, and so does every viewport at or above DRAWER_MAX.
   const layout = useLayoutMode();
   const compactSession = Boolean(route.sessionId) && layout === 'drawer';
+
+  // Registers the app-shell worker and owns the whole update lifecycle
+  // (src/hooks/useServiceWorkerUpdate.ts). Mounted here, once, for the app's
+  // life: the chip has to be reachable from every route, and a per-page hook
+  // would re-register on navigation.
+  const { updateReady, applyUpdate } = useServiceWorkerUpdate();
 
   // Mobile drawer visibility. It lives here rather than in the sidebar because
   // the AppBar's trigger and the drawer's own close button must drive ONE piece
@@ -183,7 +190,35 @@ export function App() {
   return (
     <div className="kt-shell flex flex-col overflow-hidden">
       {!compactSession && (
-        <AppBar crumbs={crumbs} onOpenSidebar={() => setDrawerOpen(true)} onOpenPalette={openPalette} />
+        <AppBar
+          crumbs={crumbs}
+          onOpenSidebar={() => setDrawerOpen(true)}
+          onOpenPalette={openPalette}
+          updateReady={updateReady}
+          onApplyUpdate={applyUpdate}
+        />
+      )}
+      {/* THE RECOVERY AFFORDANCE MUST SURVIVE THE BAR BEING GONE.
+          On a phone the session route suppresses the AppBar entirely (see the
+          note above), and that is the single most likely place to hit a pruned
+          lazy chunk — the chat page IS the lazy chunk. Without this the reader
+          would be left on a permanent "Loading conversation…" with no way out.
+          So when the bar is hidden AND something is actually wrong, the chip
+          renders as its own one-row band instead. Only for 'recovery': a routine
+          update offer is not worth spending a phone's vertical space on, and it
+          will be there the next time the bar is. */}
+      {compactSession && updateReady === 'recovery' && (
+        <div className="shrink-0 border-b border-border bg-[var(--bar-bg)] px-panel py-1">
+          <button
+            type="button"
+            onClick={applyUpdate}
+            aria-live="polite"
+            className="kt-badge w-full justify-center"
+            data-tone="warn"
+          >
+            Reload to recover
+          </button>
+        </div>
       )}
       {/* THE SIDEBAR IS A SHELL SIBLING, not a page child: it is mounted once,
           for the app's life, so navigation never remounts it and its scroll

@@ -10,7 +10,13 @@
      over the app + node projects, and this one is compiled separately by
      `scripts/postbuild-pwa.ts` (`tsc -p sw`) AFTER the Vite step, because it
      depends on the generated `precache.gen.ts`. Including it in the solution
-     build would make a clean checkout fail before that file exists. */
+     build would make a clean checkout fail before that file exists.
+
+     The contract TESTS are excluded here and typechecked by
+     `sw/tsconfig.test.json` instead: they need `bun:test` and the ambient bun
+     types, and adding those to this project would defeat its purpose — worker
+     source could then reference node/bun globals that do not exist in a worker
+     and nothing would complain. */
   "compilerOptions": {
     "target": "ES2022",
     "lib": ["ES2022", "WebWorker"],
@@ -28,5 +34,6 @@
     "noImplicitOverride": true,
     "verbatimModuleSyntax": false
   },
-  "include": ["./**/*.ts"]
+  "include": ["./**/*.ts"],
+  "exclude": ["./**/*.test.ts"]
 }

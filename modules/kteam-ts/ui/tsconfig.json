@@ -1,4 +1,15 @@
 {
   "files": [],
-  "references": [{ "path": "./tsconfig.app.json" }, { "path": "./tsconfig.node.json" }]
+  /* `sw/tsconfig.json` is deliberately ABSENT here: it includes the worker entry,
+     which imports the gitignored generated `precache.gen.ts`, so a clean checkout
+     would fail `tsc -b` before the first build. `scripts/postbuild-pwa.ts` runs
+     `tsc -p sw` after the Vite step instead, when that file exists.
+
+     The worker contract tests DO belong here — they import only `sw/policy.ts`,
+     which has no generated dependency, so nothing about them needs a build. */
+  "references": [
+    { "path": "./tsconfig.app.json" },
+    { "path": "./tsconfig.node.json" },
+    { "path": "./sw/tsconfig.test.json" }
+  ]
 }
