@@ -765,6 +765,38 @@ rec {
               aws sts get-caller-identity
             }
 
+            # Start a DETACHED kteam interactive session on the personal Claude
+            # account, in the current directory. The callsign is picked BEFORE
+            # launch so kteam can name the Claude-side session `[Name] Task`;
+            # `--name` itself stays the plain task title (the TASK column).
+            #
+            #   ki "Fix Login Flow"                   -> bare, you type the first turn
+            #   ki "Fix Login Flow" "start in auth.ts" -> opens with that instruction
+            #
+            # Attach afterwards with `kteam attach <name>` (printed on start).
+            ki() {
+              if [ "$#" -lt 1 ]; then
+                echo 'usage: ki "<Task Name>" [opening instruction...]' >&2
+                echo '       task title: natural Title Case, up to 5 words' >&2
+                return 1
+              fi
+
+              local task=$1
+              shift
+
+              local mate
+              mate=$(kteam name) || return 1
+
+              kteam start \
+                --agent claude-auto-kirin \
+                --model 'claude-opus-5[1m]' \
+                --mode interactive \
+                --teammate "$mate" \
+                --name "$task" \
+                --cwd "$PWD" \
+                "$@"
+            }
+
           '';
           wtShell = lib.mkOrder 5000 ''
             if command -v wt >/dev/null 2>&1; then eval "$(command wt config shell init zsh)"; fi
