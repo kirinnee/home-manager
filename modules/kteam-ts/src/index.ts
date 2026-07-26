@@ -21,6 +21,7 @@ import { SIGNAL_KINDS } from './types';
 import type { KTeamEvent, SessionStatus, SignalKind } from './types';
 import { compactUsageQuota, fetchKfleetUsage, UsageFeed, usageQuotaLabel } from './usage';
 import { KTEAM_VERSION } from './version';
+import { waitForDaemonReady } from './daemon-wait';
 
 const VERSION = KTEAM_VERSION;
 const paths = createPaths();
@@ -40,14 +41,14 @@ const daemon = new DaemonService(paths, daemonBinary);
 const terminal: SessionStatus[] = ['completed', 'failed', 'stalled', 'stopped'];
 
 async function waitForDaemon(): Promise<Record<string, unknown>> {
-  for (let attempt = 0; attempt < 40; attempt++) {
-    try {
-      return await (await client()).health();
-    } catch {
-      await Bun.sleep(250);
-    }
-  }
-  throw new Error(`kteamd did not become ready; inspect ${paths.daemonLog}`);
+  return await waitForDaemonReady({
+    health: async () => await (await client()).health(),
+    pidLiveness: () => daemon.pidLiveness(),
+    sleep: ms => Bun.sleep(ms),
+    now: () => Date.now(),
+    onProgress: seconds => console.error(`daemon starting — still initializing (${seconds}s); waiting up to 90s…`),
+    daemonLog: paths.daemonLog,
+  });
 }
 
 function printView(view: Awaited<ReturnType<ApiClient['get']>>): void {
