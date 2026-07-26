@@ -20,12 +20,13 @@
    `immutable`, which would otherwise pin the old worker for a year).
 
    ── NO clients.claim() ────────────────────────────────────────────────────
-   A new worker controls only pages loaded AFTER it activates. Claiming would
-   repoint already-open tabs at the new generation, and those tabs' lazily
-   imported chunk URLs belong to the OLD generation — claiming is precisely
-   what made old chunks unreachable in the failure this design replaces. Open
-   tabs therefore keep their controller and their generation's cache; the
-   reader chooses when to move, via the update chip.
+   Claiming is omitted because it would seize the uncontrolled first-visit page.
+   It does NOT protect already-controlled tabs from an update: a skipWaiting
+   activation transfers every client of the replaced worker and fires
+   `controllerchange` in each one. Open tabs keep their old worker only while the
+   update sits in `waiting`. After any tab takes the update chip, old tabs' lazy
+   chunks remain available because the new worker serves from every retained
+   generation's shell cache.
    ============================================================================ */
 
 import { PRECACHE_URLS, RELEASE_ID } from './precache.gen';
@@ -48,12 +49,11 @@ export async function onActivate(): Promise<void> {
     so importing this module from a test does not attach listeners to the test
     runner's global scope. */
 export function registerWorkerEvents(sw: ServiceWorkerGlobalScope): void {
-  const precached = new Set(PRECACHE_URLS);
-
   sw.addEventListener('install', event => {
     // NOT skipWaiting(): the new worker must sit in `waiting` until the reader
-    // takes the update chip. Activating over an open tab is what the whole
-    // two-branch update bridge exists to avoid.
+    // takes the update chip. That protection lasts only until the first chip
+    // click anywhere in the origin; activation then transfers all controlled
+    // clients, while retained-cache serving protects their old lazy chunks.
     event.waitUntil(onInstall());
   });
 
@@ -69,7 +69,7 @@ export function registerWorkerEvents(sw: ServiceWorkerGlobalScope): void {
     } catch {
       return; // Unparseable: not ours to handle.
     }
-    const policy = fetchPolicy(request.method, url, sw.location.origin, precached, request.mode === 'navigate');
+    const policy = fetchPolicy(request.method, url, sw.location.origin, request.mode === 'navigate');
     if (policy === 'passthrough') return;
     event.respondWith(respond(request, policy, RELEASE_ID) as Promise<Response>);
   });

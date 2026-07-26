@@ -33,9 +33,13 @@
        A cached shell would pin a reader to an old generation permanently — the
        failure mode the fingerprinting exists to prevent.
 
-   So there is NO opportunistic runtime caching. An asset is either in the
-   generated precache closure (cache-first, safe because content-addressed) or
-   it goes to the network untouched.
+   The WRITE invariant is unchanged: only installation writes, and it writes
+   exactly one generated, all-or-nothing closure into that release's cache.
+   There is NO opportunistic runtime caching. The SERVE rule is deliberately
+   broader and read-only: any same-origin subresource may be served from any
+   retained generation's closure when CacheStorage contains it, then falls back
+   to the network on a miss. Membership is the safety test because every shell
+   cache contains only an install closure of content-addressed assets.
    ============================================================================ */
 
 /** Every shell cache starts with this. One prefix is what makes "delete the
@@ -63,9 +67,10 @@ export const INDEX_KEY = '/__kteam-shell-generations';
 /** Current + TWO previous (plan §4.4, B3).
 
     The two previous generations are what let a tab that has been open across
-    two deploys still lazy-load its own chat chunk: its chunk URLs are content-
-    addressed into ITS generation's cache, and that cache is still here. On the
-    fourth generation the oldest is pruned, and that tab's next dynamic import
+    two deploys still lazy-load its own chat chunk. A skipWaiting activation may
+    have transferred that tab to a newer worker, but any active worker serves
+    content-addressed URLs from any retained shell cache. On the fourth
+    generation the oldest is pruned, and that tab's next uncached dynamic import
     fails — which is the documented, drilled degradation path, surfaced as
     `vite:preloadError` → recovery chip → one reload. */
 export const RETAINED_GENERATIONS = 3;
@@ -84,7 +89,7 @@ export function offlineUrl(release: string): string {
 }
 
 /* ---------- fetch policy --------------------------------------------------
-   A pure function over (method, URL, precache set) because it is the
+   A pure function over (method, URL, origin, navigation status) because it is the
    security-relevant decision in this design: it is what guarantees no token and
    no transcript ever reaches CacheStorage. A policy embedded in the fetch
    handler could only be tested by driving real FetchEvents; as a function it is
@@ -96,9 +101,9 @@ export type FetchPolicy =
   | 'passthrough'
   /** Network-only; on failure serve the cached offline page. Never cached. */
   | 'navigate'
-  /** In the precache closure: content-addressed, so cache-first is safe. */
+  /** Same-origin subresource: serve from any retained closure, else network. */
   | 'cache-first'
-  /** Same-origin but not precached: plain network, never written to a cache. */
+  /** Index bookkeeping key: plain network, never exposed from CacheStorage. */
   | 'network';
 
 /** Everything the daemon serves under this prefix is live API surface: REST,
@@ -107,13 +112,7 @@ export type FetchPolicy =
     even observed. */
 export const API_PREFIX = '/v1/';
 
-export function fetchPolicy(
-  method: string,
-  url: URL,
-  workerOrigin: string,
-  precached: ReadonlySet<string>,
-  isNavigate: boolean,
-): FetchPolicy {
+export function fetchPolicy(method: string, url: URL, workerOrigin: string, isNavigate: boolean): FetchPolicy {
   // A non-GET is a mutation. There is nothing to serve from a cache and
   // nothing safe to store, and intercepting one risks replaying it.
   if (method !== 'GET') return 'passthrough';
@@ -125,8 +124,13 @@ export function fetchPolicy(
   // The shell document: always from the network so the token substitution and
   // the current release names are fresh. Never stored.
   if (isNavigate) return 'navigate';
-  if (precached.has(url.pathname)) return 'cache-first';
-  return 'network';
+  // Bookkeeping is not content. Without this guard, a page request for the
+  // synthetic key could be answered by the JSON stored in the index cache.
+  if (url.pathname === INDEX_KEY) return 'network';
+  // CacheStorage membership is the test. Every shell cache contains exactly an
+  // all-or-nothing install closure, so a hit in ANY retained generation is a
+  // content-addressed static. This path never writes on a miss.
+  return 'cache-first';
 }
 
 /* ---------- retention ----------------------------------------------------- */
@@ -266,9 +270,13 @@ export async function writeGenerationOrder(order: readonly string[]): Promise<vo
     named cache on any failure, so even a rejected phase-two write cannot leave a
     remnant.
 
-    Responses are buffered as `Response` objects; their bodies are not read here,
-    so a shell of a few hundred KB costs no more memory than the streaming
-    version would have held anyway.
+    Phase one drains every body as soon as its fetch resolves. Holding unread
+    Responses until every fetch settles pins their connections; with more URLs
+    than the browser's per-host connection budget, the queued fetches can then
+    deadlock behind the responses this function is waiting to collect. Draining
+    buffers the whole closure at the phase boundary. That is appropriate while
+    the app shell stays single-digit MB; if it grows beyond that, use bounded-
+    concurrency draining rather than returning to unread streaming responses.
 
     `cache: 'reload'` bypasses the HTTP cache for the fetch itself. These URLs
     are served `immutable`, so a poisoned or partial intermediary entry would
@@ -286,12 +294,20 @@ export async function precacheAll(cache: Cache, urls: readonly string[], base: s
       if (!response.ok) {
         throw new Error(`sw: refusing to install — ${url} responded ${response.status}`);
       }
-      return { url, response };
+      return {
+        url,
+        body: await response.arrayBuffer(),
+        headers: response.headers,
+        status: response.status,
+      };
     }),
   );
   // Only reached when every fetch above resolved OK: `Promise.all` rejects on the
-  // first failure, so no `put` has run by this point.
-  await Promise.all(fetched.map(({ url, response }) => cache.put(url, response)));
+  // first failure, so no `put` has run by this point. Reconstructing preserves
+  // the metadata browsers need when consuming cached modules and styles.
+  await Promise.all(
+    fetched.map(({ url, body, headers, status }) => cache.put(url, new Response(body, { headers, status }))),
+  );
 }
 
 /** Open this release's cache and fill it. Rejects (failing install) on any
@@ -359,10 +375,9 @@ export async function respond(request: Request, policy: FetchPolicy, release: st
   if (policy === 'cache-first') {
     const hit = await caches.match(request);
     if (hit) return hit;
-    // A precached URL that is missing means the cache was evicted under storage
-    // pressure. Go to the network, but do NOT repopulate: writing here would
-    // make this worker's cache diverge from its install manifest, and the URL
-    // is content-addressed so the network copy is identical anyway.
+    // A miss means no retained generation installed this URL (or its cache was
+    // evicted under storage pressure). Go to the network, but do NOT repopulate:
+    // writing here would make a shell cache diverge from its install manifest.
     return await fetch(request);
   }
 

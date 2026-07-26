@@ -56,7 +56,6 @@ const PRECACHE_URLS: readonly string[] = [
   '/icons/favicon.fc09cfb83e.svg',
   `/offline.${RELEASE_ID}.html`,
 ];
-const precached = new Set(PRECACHE_URLS);
 
 /** Install a stub `fetch`, and return a restore function.
 
@@ -75,32 +74,28 @@ function stubFetch(impl: (input: Request | string | URL) => Promise<Response>): 
 }
 
 function policy(path: string, opts: { method?: string; navigate?: boolean; origin?: string } = {}) {
-  return fetchPolicy(
-    opts.method ?? 'GET',
-    new URL(path, opts.origin ?? ORIGIN),
-    ORIGIN,
-    precached,
-    opts.navigate ?? false,
-  );
+  return fetchPolicy(opts.method ?? 'GET', new URL(path, opts.origin ?? ORIGIN), ORIGIN, opts.navigate ?? false);
 }
 
 describe('fetch policy — what may never be cached', () => {
+  test('[U1] fetchPolicy has no active-generation precache-set input', () => {
+    expect(fetchPolicy.length).toBe(4);
+  });
+
   // THE CORE TOKEN GUARANTEE. index.html carries the daemon's loopback token,
   // substituted per request. If a navigation were ever cacheable the token would
   // be written into CacheStorage, where it outlives the tab.
-  test('navigations are network-only, never cache-first', () => {
+  test('[U5] navigations are network-only, never cache-first', () => {
     expect(policy('/', { navigate: true })).toBe('navigate');
     expect(policy('/sessions/abc', { navigate: true })).toBe('navigate');
     expect(policy('/anything/at/all', { navigate: true })).toBe('navigate');
   });
 
-  // Even if a list ever DID name the shell, the policy must not serve it from a
-  // cache: `/` is caught by the navigate branch above, and `/index.html`
-  // reached as a subresource is plain network. The list-side half of this
-  // guarantee ("the build never puts them in the list") is asserted against the
-  // real generated list in precache.gen.test.ts.
-  test('index.html is never cache-first, even as a non-navigation request', () => {
-    expect(policy('/index.html')).toBe('network');
+  // `/index.html` as a subresource follows the read-only cache-first policy.
+  // Safety comes from the install-list invariant (the closure never contains
+  // it) plus U6's miss/no-write proof; navigations remain network-only.
+  test('[U2/U5] index.html is cache-first only as a non-navigation request', () => {
+    expect(policy('/index.html')).toBe('cache-first');
     expect(policy('/index.html', { navigate: true })).toBe('navigate');
   });
 
@@ -118,28 +113,34 @@ describe('fetch policy — what may never be cached', () => {
     expect(policy(path)).toBe('passthrough');
   });
 
-  test('a path merely starting with the letters v1 is NOT treated as API', () => {
+  test('[U1/U2] a path merely starting with the letters v1 is NOT treated as API', () => {
     // Guards against a `startsWith('/v1')` bug: `/v10-icons/x.png` is a normal
     // static and must not be silently exempted from the shell rules.
-    expect(policy('/v10-icons/x.png')).toBe('network');
+    expect(policy('/v10-icons/x.png')).toBe('cache-first');
     expect(API_PREFIX).toBe('/v1/');
   });
 
-  test('non-GET is always passthrough, including for precached URLs', () => {
+  test('[U1] non-GET is always passthrough, including for formerly-precached URLs', () => {
     const url = PRECACHE_URLS[0]!;
     expect(policy(url, { method: 'POST' })).toBe('passthrough');
     expect(policy(url, { method: 'HEAD' })).toBe('passthrough');
     expect(policy('/v1/sessions', { method: 'DELETE' })).toBe('passthrough');
   });
 
-  test('cross-origin is passthrough even for an identical path', () => {
+  test('[U1] cross-origin is passthrough even for an identical path', () => {
     const url = PRECACHE_URLS[0]!;
     expect(policy(url, { origin: 'https://cdn.example.com' })).toBe('passthrough');
   });
 
-  test('precached fingerprinted statics are cache-first; unknown same-origin is network', () => {
+  test('[U2] every same-origin non-API subresource is cache-first', () => {
     for (const url of PRECACHE_URLS) expect(policy(url)).toBe('cache-first');
-    expect(policy('/assets/never-built-DEADBEEF.js')).toBe('network');
+    expect(policy('/assets/never-built-DEADBEEF.js')).toBe('cache-first');
+    expect(policy('/images/not-in-this-generation.png')).toBe('cache-first');
+  });
+
+  test('[U3] the generation-index bookkeeping key is network-only', () => {
+    expect(policy(INDEX_KEY)).toBe('network');
+    expect(policy(INDEX_KEY, { navigate: true })).toBe('navigate');
   });
 });
 
@@ -449,7 +450,7 @@ describe('retention survives a lost or corrupt generation index', () => {
   });
 });
 
-describe('install is all-or-nothing (M6)', () => {
+describe('precache drain and all-or-nothing install [U11-U13]', () => {
   function fakeCache() {
     const put = new Map<string, Response>();
     return {
@@ -458,7 +459,79 @@ describe('install is all-or-nothing (M6)', () => {
     };
   }
 
-  test('every response is checked ok BEFORE it is cached', async () => {
+  test('[U11/M8] every response body is fully drained before the first cache.put', async () => {
+    const events: string[] = [];
+    const cache = {
+      put: async (url: string) => {
+        events.push(`put:${url}`);
+      },
+    } as unknown as Cache;
+
+    class TrackedResponse extends Response {
+      constructor(
+        private readonly label: string,
+        private readonly delayMs: number,
+      ) {
+        super(`body:${label}`, { status: 200 });
+      }
+
+      override async arrayBuffer(): Promise<ArrayBuffer> {
+        events.push(`drain-start:${this.label}`);
+        if (this.delayMs > 0) await new Promise(resolve => setTimeout(resolve, this.delayMs));
+        const body = await super.arrayBuffer();
+        events.push(`drain-end:${this.label}`);
+        return body;
+      }
+    }
+
+    const restore = stubFetch(async input => {
+      const path = new URL(input instanceof Request ? input.url : String(input)).pathname;
+      return new TrackedResponse(path, path === '/b.css' ? 20 : 0);
+    });
+    try {
+      await precacheAll(cache, ['/a.js', '/b.css'], ORIGIN);
+      const firstPut = events.findIndex(event => event.startsWith('put:'));
+      const drainEnds = events
+        .map((event, index) => ({ event, index }))
+        .filter(({ event }) => event.startsWith('drain-end:'));
+
+      expect(firstPut).toBeGreaterThan(-1);
+      expect(drainEnds.map(({ event }) => event).sort()).toEqual(['drain-end:/a.js', 'drain-end:/b.css']);
+      expect(drainEnds.every(({ index }) => index < firstPut)).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  test('[U12] reconstructed cache writes preserve status, headers, and body', async () => {
+    let written: Response | undefined;
+    const cache = {
+      put: async (_url: string, response: Response) => {
+        written = response;
+      },
+    } as unknown as Cache;
+    const restore = stubFetch(
+      async () =>
+        new Response('export const loaded = true;', {
+          status: 201,
+          headers: {
+            'content-type': 'application/javascript; charset=utf-8',
+            'x-worker-fixture': 'preserved',
+          },
+        }),
+    );
+    try {
+      await precacheAll(cache, ['/assets/x.js'], ORIGIN);
+      expect(written?.status).toBe(201);
+      expect(written?.headers.get('content-type')).toBe('application/javascript; charset=utf-8');
+      expect(written?.headers.get('x-worker-fixture')).toBe('preserved');
+      expect(await written?.text()).toBe('export const loaded = true;');
+    } finally {
+      restore();
+    }
+  });
+
+  test('[U13] every response is checked ok BEFORE it is cached', async () => {
     const { cache, put } = fakeCache();
     const restore = stubFetch(async () => new Response('ok', { status: 200 }));
     try {
@@ -630,8 +703,42 @@ describe('install is all-or-nothing (M6)', () => {
 });
 
 describe('respond()', () => {
-  test('passthrough returns undefined so the caller skips respondWith', async () => {
+  test('[U5] passthrough returns undefined so the caller skips respondWith', async () => {
     expect(await respond(new Request(`${ORIGIN}/v1/sessions`), 'passthrough', RELEASE_ID)).toBeUndefined();
+  });
+
+  test('[U3/M2] INDEX_KEY uses network without touching CacheStorage', async () => {
+    const originalCaches = (globalThis as { caches?: CacheStorage }).caches;
+    let cacheInteractions = 0;
+    let networkCalls = 0;
+    const restore = stubFetch(async () => {
+      networkCalls += 1;
+      return new Response('network, not generation index');
+    });
+    (globalThis as { caches?: unknown }).caches = {
+      match: async () => {
+        cacheInteractions += 1;
+        return new Response('["old-release"]');
+      },
+      open: async () => {
+        cacheInteractions += 1;
+        return { put: async () => void (cacheInteractions += 1) };
+      },
+      keys: async () => {
+        cacheInteractions += 1;
+        return [INDEX_CACHE];
+      },
+    };
+    try {
+      const request = new Request(`${ORIGIN}${INDEX_KEY}`);
+      const response = await respond(request, policy(INDEX_KEY), RELEASE_ID);
+      expect(await response!.text()).toBe('network, not generation index');
+      expect(networkCalls).toBe(1);
+      expect(cacheInteractions).toBe(0);
+    } finally {
+      restore();
+      (globalThis as { caches?: unknown }).caches = originalCaches;
+    }
   });
 
   test('a failed navigation serves the offline page for this release', async () => {
@@ -651,7 +758,7 @@ describe('respond()', () => {
     }
   });
 
-  test('a successful navigation is served from the network and never cached', async () => {
+  test('[U5/M6] a successful navigation is served from the network and never cached', async () => {
     const originalCaches = (globalThis as { caches?: CacheStorage }).caches;
     let cachePutCalls = 0;
     const restore = stubFetch(async () => new Response('<html>fresh shell with token</html>'));
@@ -673,27 +780,104 @@ describe('respond()', () => {
     }
   });
 
-  test('cache-first prefers the cache and falls back to the network without repopulating', async () => {
+  test('[U4/M1/M3] a new worker serves an old-generation hit and never writes on hit or miss', async () => {
     const originalCaches = (globalThis as { caches?: CacheStorage }).caches;
-    let hit = true;
+    const OLD = '111111111111';
+    const NEW = '222222222222';
+    const oldPath = '/assets/Old-abc.js';
+    const oldUrl = `${ORIGIN}${oldPath}`;
+    const retained = new Map<string, Map<string, string>>([
+      [cacheNameFor(OLD), new Map([[oldUrl, 'from retained OLD cache']])],
+      [cacheNameFor(NEW), new Map()],
+    ]);
+    let matchedCache: string | undefined;
     let opened = 0;
-    const restore = stubFetch(async () => new Response('from network'));
+    let putCalls = 0;
+    let networkCalls = 0;
+    const restore = stubFetch(async () => {
+      networkCalls += 1;
+      return new Response('from network');
+    });
     (globalThis as { caches?: unknown }).caches = {
-      match: async () => (hit ? new Response('from cache') : undefined),
+      match: async (request: Request) => {
+        for (const [name, entries] of retained) {
+          const body = entries.get(request.url);
+          if (body !== undefined) {
+            matchedCache = name;
+            return new Response(body);
+          }
+        }
+        return undefined;
+      },
       open: async () => {
         opened += 1;
-        return { put: async () => {} };
+        return {
+          put: async () => {
+            putCalls += 1;
+          },
+        };
       },
     };
     try {
-      const cached = await respond(new Request(`${ORIGIN}/assets/x.js`), 'cache-first', RELEASE_ID);
-      expect(await cached!.text()).toBe('from cache');
+      // The path is absent from NEW's closure. The policy must still reach the
+      // global CacheStorage lookup, where only OLD contains it.
+      expect(policy(oldPath)).toBe('cache-first');
+      const request = new Request(oldUrl);
+      const cached = await respond(request, policy(oldPath), NEW);
+      expect(await cached!.text()).toBe('from retained OLD cache');
+      expect(matchedCache).toBe(cacheNameFor(OLD));
+      expect(networkCalls).toBe(0);
 
-      hit = false;
-      const network = await respond(new Request(`${ORIGIN}/assets/x.js`), 'cache-first', RELEASE_ID);
+      retained.get(cacheNameFor(OLD))!.delete(oldUrl);
+      const network = await respond(request, policy(oldPath), NEW);
       expect(await network!.text()).toBe('from network');
-      // Never writes: this worker's cache must match its install manifest.
+      expect(networkCalls).toBe(1);
+      // Never writes on either branch: each cache remains exactly its manifest.
       expect(opened).toBe(0);
+      expect(putCalls).toBe(0);
+    } finally {
+      restore();
+      (globalThis as { caches?: unknown }).caches = originalCaches;
+    }
+  });
+
+  test('[U6] a realistic closure cannot answer index.html and a miss never writes', async () => {
+    const originalCaches = (globalThis as { caches?: CacheStorage }).caches;
+    const closure = new Map(PRECACHE_URLS.map(url => [`${ORIGIN}${url}`, `cached:${url}`]));
+    let opened = 0;
+    let putCalls = 0;
+    let networkCalls = 0;
+    const restore = stubFetch(async () => {
+      networkCalls += 1;
+      return new Response('<html>fresh shell with request token</html>', {
+        headers: { 'content-type': 'text/html' },
+      });
+    });
+    (globalThis as { caches?: unknown }).caches = {
+      match: async (request: Request) => {
+        const body = closure.get(request.url);
+        return body === undefined ? undefined : new Response(body);
+      },
+      open: async () => {
+        opened += 1;
+        return {
+          put: async () => {
+            putCalls += 1;
+          },
+        };
+      },
+    };
+    try {
+      expect(closure.has(`${ORIGIN}/`)).toBe(false);
+      expect(closure.has(`${ORIGIN}/index.html`)).toBe(false);
+      expect([...closure.keys()].some(url => new URL(url).pathname.startsWith(API_PREFIX))).toBe(false);
+
+      const request = new Request(`${ORIGIN}/index.html`);
+      const response = await respond(request, policy('/index.html'), RELEASE_ID);
+      expect(await response!.text()).toContain('fresh shell with request token');
+      expect(networkCalls).toBe(1);
+      expect(opened).toBe(0);
+      expect(putCalls).toBe(0);
     } finally {
       restore();
       (globalThis as { caches?: unknown }).caches = originalCaches;
