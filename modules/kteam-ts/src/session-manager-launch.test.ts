@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { SessionManager } from './session-manager';
@@ -64,6 +64,8 @@ async function monitorHarness(input: {
   status: string;
   launchInFlight: boolean;
   launchedAt?: string;
+  subprocessAlive?: boolean;
+  finalFrame?: string;
 }): Promise<MonitorHarness> {
   const home = await temporaryHome();
   const recorded: Recorded[] = [];
@@ -92,12 +94,22 @@ async function monitorHarness(input: {
   );
   manager.doneDeferred = new Set();
   manager.autoContinued = new Set();
+  // Production deliberately pauses before the confirming probe. Unit tests
+  // exercise the same two-probe control flow without paying that wall time.
+  manager.terminalReprobeMs = 0;
   manager.options = { healthIntervalSeconds: 1, warden: { intervalMinutes: 5 } };
   manager.get = async () => ({ directory: path.join(home, 's1'), config, state });
   manager.tmux = {
     // The exact signature of a tmux session that was never created — and of
     // one whose harness died. They are indistinguishable at this layer.
-    state: async () => ({ alive: false, dead: true, pane: '', visiblePane: '', promptReady: false }),
+    state: async () => ({
+      alive: false,
+      dead: true,
+      pane: input.finalFrame ?? '',
+      visiblePane: input.finalFrame ?? '',
+      promptReady: false,
+    }),
+    subprocessAlive: async () => input.subprocessAlive === true,
     snapshot: async () => '',
   };
   manager.transition = async (_id: string, patch: Record<string, unknown>, type: string) => {
@@ -253,6 +265,224 @@ describe('a launch still in flight is PENDING, never crashed', () => {
     await loop;
     expect(harness.recorded.map(item => item.type)).toContain('session.crashed');
     expect(harness.state.status).toBe('failed');
+    expect(harness.state.reason).not.toBe('interactive claude exited unknown');
+    expect(String(harness.state.reason)).toContain('exit code unavailable');
+  });
+
+  test('one failed has-session probe cannot terminalize a still-live harness process', async () => {
+    const harness = await monitorHarness({
+      status: 'running',
+      launchInFlight: false,
+      launchedAt: new Date().toISOString(),
+      subprocessAlive: true,
+    });
+    const abort = new AbortController();
+    const loop = runMonitor(harness.manager, abort.signal);
+    await Bun.sleep(20);
+    abort.abort();
+    await loop;
+    expect(harness.recorded.map(item => item.type)).toContain('control.false_terminal_averted');
+    expect(harness.recorded.map(item => item.type)).not.toContain('session.crashed');
+    expect(harness.state.status).toBe('running');
+  });
+});
+
+// The 2026-07-26 revive-on-send incident, in its exact harmful order:
+// monitor writes failed DURING relaunch -> relaunch succeeds -> running patch
+// arrives afterwards. A terminal-preserving transition used to discard that
+// correction and leave a healthy pane recorded failed.
+describe('revive-on-send relaunch race', () => {
+  test('the successful running correction wins after a monitor writes a spurious terminal state', async () => {
+    const home = await temporaryHome();
+    await Promise.all([
+      mkdir(path.join(home, 's1', 'turns'), { recursive: true }),
+      mkdir(path.join(home, 's1', 'markers'), { recursive: true }),
+      mkdir(path.join(home, 's1', 'channel'), { recursive: true }),
+    ]);
+    const config: Record<string, unknown> = {
+      id: 's1',
+      harness: 'claude',
+      mode: 'auto',
+      binary: 'claude-auto-loge',
+      tmuxSession: 'kteam-s1-agent',
+      turn: 3,
+      intervalSeconds: 1,
+      cwd: home,
+    };
+    let state: Record<string, unknown> = {
+      id: 's1',
+      status: 'completed',
+      health: 'idle',
+      turn: 3,
+      finishedAt: new Date().toISOString(),
+    };
+    const order: string[] = [];
+    const manager = bareManager();
+    manager.paths = {
+      home,
+      sessions: home,
+      daemon: home,
+    };
+    manager.closed = false;
+    manager.launching = new Map();
+    manager.monitors = new Map();
+    manager.queues = new Map();
+    manager.autoContinued = new Set();
+    manager.doneDeferred = new Set();
+    manager.resolveRef = (id: string) => id;
+    manager.serialized = async (_id: string, work: () => Promise<unknown>) => await work();
+    manager.serializedBootstrap = async (work: () => Promise<unknown>) => await work();
+    manager.clearNeedsHuman = async () => undefined;
+    manager.cancelRetry = () => undefined;
+    manager.attachments = { buildImageReferenceBlock: async () => '' };
+    manager.promptInstruction = () => 'read the next turn';
+    manager.store = {
+      updateConfig: async (_id: string, mutate: (current: Record<string, unknown>) => Record<string, unknown>) => {
+        Object.assign(config, mutate(config));
+        return config;
+      },
+      updateState: async (_id: string, mutate: (current: Record<string, unknown>) => Record<string, unknown>) => {
+        state = mutate(state);
+        return state;
+      },
+    };
+    manager.get = async () => ({ directory: path.join(home, 's1'), config, state });
+    manager.emitDeferred = () => undefined;
+    manager.emit = async () => ({});
+    manager.stopMonitor = async () => {
+      order.push('monitor-stopped');
+    };
+    manager.startMonitor = async () => {
+      order.push('monitor-started');
+    };
+    manager.tmux = {
+      state: async () => ({ alive: false, dead: true, promptReady: false, pane: '', visiblePane: '' }),
+      send: async () => {
+        order.push('prompt-sent');
+      },
+      subprocessAlive: async () => false,
+      snapshot: async () => '',
+    };
+    manager.stopTmuxWithEvidence = async () => undefined;
+    manager.launchWithRetry = async () => {
+      order.push('launched');
+      expect((manager.launching as Map<string, unknown>).has('s1')).toBe(true);
+      // Precisely the racing monitor write from the incident.
+      await (
+        manager as unknown as {
+          transition: (id: string, patch: Record<string, unknown>, type: string) => Promise<void>;
+        }
+      ).transition(
+        's1',
+        {
+          status: 'failed',
+          health: 'crashed',
+          reason: 'interactive claude exited unknown',
+          finishedAt: new Date().toISOString(),
+        },
+        'session.crashed',
+      );
+      order.push('spurious-failed');
+    };
+
+    const result = await (
+      manager as unknown as {
+        send: (id: string, request: { message: string }) => Promise<{ disposition: string }>;
+      }
+    ).send('s1', { message: 'continue the same task' });
+
+    expect(result.disposition).toBe('revived');
+    expect(order).toEqual(['monitor-stopped', 'launched', 'spurious-failed', 'prompt-sent', 'monitor-started']);
+    expect(state.launchedAt).toBeDefined();
+    expect(state.status).toBe('running');
+    expect(state.health).toBe('healthy');
+    expect(state.reason).toBeUndefined();
+    expect((manager.launching as Map<string, unknown>).has('s1')).toBe(false);
+  });
+
+  test('a launch error cannot make resume kill a pane that re-probes live and prompt-ready', async () => {
+    const home = await temporaryHome();
+    await Promise.all([
+      mkdir(path.join(home, 's1', 'turns'), { recursive: true }),
+      mkdir(path.join(home, 's1', 'markers'), { recursive: true }),
+    ]);
+    let config: Record<string, unknown> = {
+      id: 's1',
+      harness: 'claude',
+      mode: 'auto',
+      binary: 'claude-auto-loge',
+      tmuxSession: 'kteam-s1-agent',
+      turn: 3,
+      cwd: home,
+    };
+    let state: Record<string, unknown> = { id: 's1', status: 'failed', health: 'crashed', turn: 3 };
+    let probes = 0;
+    let kills = 0;
+    let monitors = 0;
+    const events: string[] = [];
+    const manager = bareManager();
+    manager.paths = { home, sessions: home, daemon: home };
+    manager.closed = false;
+    manager.terminalReprobeMs = 0;
+    manager.launching = new Map();
+    manager.monitors = new Map();
+    manager.autoContinued = new Set();
+    manager.doneDeferred = new Set();
+    manager.resolveRef = (id: string) => id;
+    manager.serialized = async (_id: string, work: () => Promise<unknown>) => await work();
+    manager.serializedBootstrap = async (work: () => Promise<unknown>) => await work();
+    manager.clearNeedsHuman = async () => undefined;
+    manager.cancelRetry = () => undefined;
+    manager.promptInstruction = () => 'continue';
+    manager.store = {
+      updateConfig: async (_id: string, mutate: (current: Record<string, unknown>) => Record<string, unknown>) => {
+        config = mutate(config);
+        return config;
+      },
+      updateState: async (_id: string, mutate: (current: Record<string, unknown>) => Record<string, unknown>) => {
+        state = mutate(state);
+        return state;
+      },
+    };
+    manager.get = async () => ({ directory: path.join(home, 's1'), config, state });
+    manager.transition = async (_id: string, patch: Record<string, unknown>) => {
+      state = { ...state, ...patch };
+    };
+    manager.emit = async (_id: string, type: string) => {
+      events.push(type);
+      return {};
+    };
+    manager.stopMonitor = async () => undefined;
+    manager.startMonitor = async () => {
+      monitors++;
+    };
+    manager.stopTmuxWithEvidence = async () => {
+      kills++;
+    };
+    manager.launchWithRetry = async () => {
+      throw new Error('interactive harness exited; exit code unavailable (single-probe)');
+    };
+    manager.tmux = {
+      // Old-pane inspection is dead. Both failure probes then see the newly
+      // created replacement pane alive and editable.
+      state: async () =>
+        ++probes === 1
+          ? { alive: false, dead: true, promptReady: false, pane: '', visiblePane: '' }
+          : { alive: true, dead: false, promptReady: true, pane: '❯ ', visiblePane: '❯ ' },
+      subprocessAlive: async () => false,
+      snapshot: async () => {
+        throw new Error('must not snapshot/kill the live successor');
+      },
+    };
+
+    const resumed = await (
+      manager as unknown as { resume: (id: string, message: string) => Promise<{ state: Record<string, unknown> }> }
+    ).resume('s1', 'continue');
+    expect(kills).toBe(0);
+    expect(monitors).toBe(1);
+    expect(events).toContain('control.false_terminal_averted');
+    expect(resumed.state.status).toBe('running');
+    expect(resumed.state.health).toBe('healthy');
   });
 });
 

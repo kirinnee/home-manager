@@ -78,6 +78,7 @@ import {
   paneActivityLine,
   paneShowsActiveWork,
   TmuxController,
+  type PaneState,
   type StallLivenessState,
 } from './tmux-controller';
 import { reflexAssess, renderLivenessYaml, susFindings, type LivenessLedger } from './liveness';
@@ -239,6 +240,10 @@ const CONTROL_LAUNCH_WAIT_MS = 60_000;
 /** How long a queued first launch is given before the self-check stops
  *  excluding it and repairs (or fails) it like any other session. */
 const LAUNCH_GRACE_MS = 10 * 60_000;
+/** A failed `tmux has-session` is only one observation. Give tmux a moment to
+ *  settle, then probe the pane and process tree independently before writing
+ *  an irreversible terminal status. */
+const TERMINAL_REPROBE_MS = 250;
 /** Event classes that are broadcast live but NEVER journalled. They are
  *  liveness signals, not history: keeping them out of events.jsonl removed the
  *  largest write class the daemon had (6584 terminal.frame records in one real
@@ -416,7 +421,7 @@ export class SessionManager implements KTeamService {
   private readonly autoContinued = new Set<string>();
   /** One-shot flags for done-markers deferred while the pane is still working. */
   private readonly doneDeferred = new Set<string>();
-  /** Sessions whose FIRST launch is still queued behind the bootstrap chain.
+  /** Sessions whose launch/relaunch is still queued behind the bootstrap chain.
    *  Their tmux session does not exist yet, so a monitor started for them
    *  would read a dead pane and mark a launching session `failed` â and a
    *  terminal status suppresses every later patch, including the launch's own
@@ -503,6 +508,9 @@ export class SessionManager implements KTeamService {
   private selfRestartRequested = false;
   /** An unhealable index has already been reported (once per daemon). */
   private selfRestartAnnounced = false;
+  /** A field (rather than an inlined sleep) so hermetic race tests can run the
+   *  real confirmation path without wall-clock delay. */
+  private readonly terminalReprobeMs = TERMINAL_REPROBE_MS;
   private wardenState: WardenRuntimeState = {};
   private lastSweep?: WardenSweep;
   private lastEmittedFingerprint = '';
@@ -1811,6 +1819,65 @@ export class SessionManager implements KTeamService {
     });
   }
 
+  /** Confirm a harness really exited before making that verdict durable. A
+   *  single failed tmux probe is not death: `has-session` has returned false
+   *  transiently while the pane and harness process were both healthy. The
+   *  second pane probe and the process-tree probe are independent evidence;
+   *  either one reporting life is authoritative. */
+  private async confirmHarnessExit(
+    config: SessionConfig,
+    firstProbe: PaneState,
+    context: string,
+    source: KTeamEvent['source'],
+  ): Promise<{ confirmed: boolean; pane: PaneState; subprocessAlive: boolean }> {
+    await Bun.sleep(this.terminalReprobeMs ?? TERMINAL_REPROBE_MS);
+    const [secondProbe, subprocessAlive] = await Promise.all([
+      this.tmux.state(config.tmuxSession).catch(() => firstProbe),
+      this.tmux.subprocessAlive(config.tmuxSession).catch(() => false),
+    ]);
+    if ((secondProbe.alive && !secondProbe.dead) || subprocessAlive) {
+      await this.emit(
+        config.id,
+        'control.false_terminal_averted',
+        {
+          context,
+          firstProbe: { alive: firstProbe.alive, dead: firstProbe.dead, exitCode: firstProbe.exitCode },
+          secondProbe: { alive: secondProbe.alive, dead: secondProbe.dead, exitCode: secondProbe.exitCode },
+          subprocessAlive,
+        },
+        source,
+      ).catch(() => undefined);
+      return { confirmed: false, pane: secondProbe, subprocessAlive };
+    }
+    // Prefer whichever probe retained the final pane frame/exit status. A
+    // failed has-session probe necessarily has neither.
+    const pane =
+      secondProbe.exitCode !== undefined || secondProbe.visiblePane.trim() || secondProbe.pane.trim()
+        ? secondProbe
+        : firstProbe;
+    return { confirmed: true, pane, subprocessAlive: false };
+  }
+
+  private harnessExitReason(config: SessionConfig, pane: PaneState): string {
+    if (pane.exitCode !== undefined) return `interactive ${config.harness} exited ${pane.exitCode}`;
+    const finalFrame = (pane.visiblePane.trim() ? pane.visiblePane : pane.pane)
+      .split('\n')
+      .map(line => line.trim())
+      .filter(Boolean)
+      .slice(-6)
+      .join(' | ')
+      .slice(0, 400);
+    return (
+      `interactive ${config.harness} exited; exit code unavailable after confirmed re-probe` +
+      (finalFrame ? `; final frame: ${finalFrame}` : '; no final pane output captured')
+    );
+  }
+
+  private resumeFailureReason(config: SessionConfig, error: unknown, pane: PaneState): string {
+    const detail = error instanceof Error ? error.message : String(error);
+    return /\bexited\b/i.test(detail) ? this.harnessExitReason(config, pane) : detail;
+  }
+
   async resume(id: string, message?: string, guard?: ResumeGuard): Promise<SessionView> {
     id = this.resolveRef(id);
     // Same pending-not-refused contract as send(): wait for an in-flight first
@@ -1822,163 +1889,230 @@ export class SessionManager implements KTeamService {
           `${Math.round(CONTROL_LAUNCH_WAIT_MS / 1000)}s); it is pending, not failed â retry once \`kteam ps\` shows it running`,
       );
     }
-    // Automatic retries are not a human action; only explicit resumes clear.
-    if (!guard) await this.clearNeedsHuman(id);
-    if (!guard) this.cancelRetry(id);
-    let startMonitorAfterUnlock = false;
-    const resumed = await this.serialized(id, async () => {
-      const automaticRetry = guard?.status === 'retrying';
-      let view = await this.get(id);
-      if (view.state.status === 'kill_failed')
-        throw new Error('the previous tmux kill failed; use stop again before resume');
-      if (
-        guard &&
-        (view.state.status !== guard.status ||
-          (guard.retryAttempt !== undefined && view.state.retryAttempt !== guard.retryAttempt))
-      ) {
-        throw new ResumeCancelled(`resume guard changed from ${guard.status}`);
-      }
-      const paneState = await this.tmux.state(view.config.tmuxSession);
-      if (paneState.alive && !paneState.dead) {
-        // A TERMINAL session's leftover live pane (daemon-restart re-adoption,
-        // reconciled completion) is unmonitored â injecting into it loses the
-        // message. Kill it and fall through to a tracked relaunch; only a
-        // genuinely NON-terminal session takes the plain-send shortcut.
-        if (!terminalStatuses.includes(view.state.status)) {
-          if (!message) throw new Error('session is already running');
-          return await this.sendUnlocked(view, message);
+    // Claim the relaunch BEFORE clearNeedsHuman/transition can await an event
+    // append. The self-check and monitor death path use this map as their
+    // launch amnesty; leaving resume unregistered let them terminalize the
+    // session while its replacement pane was still being created.
+    let releaseResumeLaunch = () => {};
+    const resumeLaunch = new Promise<void>(resolve => {
+      releaseResumeLaunch = resolve;
+    });
+    this.launching.set(id, { at: Date.now(), bootstrap: resumeLaunch });
+    try {
+      // Automatic retries are not a human action; only explicit resumes clear.
+      if (!guard) await this.clearNeedsHuman(id);
+      if (!guard) this.cancelRetry(id);
+      let startMonitorAfterUnlock = false;
+      const resumed = await this.serialized(id, async () => {
+        const automaticRetry = guard?.status === 'retrying';
+        let view = await this.get(id);
+        if (view.state.status === 'kill_failed')
+          throw new Error('the previous tmux kill failed; use stop again before resume');
+        if (
+          guard &&
+          (view.state.status !== guard.status ||
+            (guard.retryAttempt !== undefined && view.state.retryAttempt !== guard.retryAttempt))
+        ) {
+          throw new ResumeCancelled(`resume guard changed from ${guard.status}`);
         }
-        // Deliberate tradeoff, surfaced not silent: killing the leftover pane
-        // discards any unsent text still sitting in its composer/native
-        // queue. The final snapshot preserves the frame for the operator.
-        await this.tmux.snapshot(view.config, true);
-        await this.emit(
-          id,
-          'control.composer_discarded',
-          {
-            reason:
-              'terminal-session pane killed before revive; unsent composer text (if any) is in the final snapshot',
-          },
-          'daemon',
-        ).catch(() => undefined);
-        await this.stopTmuxWithEvidence(view.config, 'terminal session pane cleanup before revive');
-      } else if (paneState.alive) {
-        await this.stopTmuxWithEvidence(view.config, 'cleanup before resume');
-      }
-      if (view.config.harness === 'codex' && !view.config.harnessSessionId) {
-        const found = await discoverCodexSession(view.config, await this.claimedCodexSessionIds(id));
-        if (!found) throw new Error('could not identify the persisted Codex session to resume');
-        view.config = await this.store.updateConfig<SessionConfig>(id, current => ({
+        const paneState = await this.tmux.state(view.config.tmuxSession);
+        if (paneState.alive && !paneState.dead) {
+          // A TERMINAL session's leftover live pane (daemon-restart re-adoption,
+          // reconciled completion) is unmonitored â injecting into it loses the
+          // message. Kill it and fall through to a tracked relaunch; only a
+          // genuinely NON-terminal session takes the plain-send shortcut.
+          if (!terminalStatuses.includes(view.state.status)) {
+            if (!message) throw new Error('session is already running');
+            return await this.sendUnlocked(view, message);
+          }
+        }
+        // The old monitor must be disarmed before resume deliberately kills or
+        // replaces its pane. Otherwise that monitor observes resume's own kill
+        // and writes a terminal verdict in the middle of the relaunch.
+        await this.stopMonitor(id);
+        if (paneState.alive && !paneState.dead) {
+          // Deliberate tradeoff, surfaced not silent: killing the leftover pane
+          // discards any unsent text still sitting in its composer/native
+          // queue. The final snapshot preserves the frame for the operator.
+          await this.tmux.snapshot(view.config, true);
+          await this.emit(
+            id,
+            'control.composer_discarded',
+            {
+              reason:
+                'terminal-session pane killed before revive; unsent composer text (if any) is in the final snapshot',
+            },
+            'daemon',
+          ).catch(() => undefined);
+          await this.stopTmuxWithEvidence(view.config, 'terminal session pane cleanup before revive');
+        } else if (paneState.alive) {
+          await this.stopTmuxWithEvidence(view.config, 'cleanup before resume');
+        }
+        if (view.config.harness === 'codex' && !view.config.harnessSessionId) {
+          const found = await discoverCodexSession(view.config, await this.claimedCodexSessionIds(id));
+          if (!found) throw new Error('could not identify the persisted Codex session to resume');
+          view.config = await this.store.updateConfig<SessionConfig>(id, current => ({
+            ...current,
+            harnessSessionId: found.id,
+            transcriptFile: found.file,
+            updatedAt: now(),
+          }));
+        }
+        // Bare relaunch: an interactive session resumed with no message just gets
+        // its terminal back (`--resume <session-id>`, nothing typed). Telling a
+        // human's TUI to "continue the assigned task" would be kteam inventing a
+        // turn nobody asked for, so there is no new turn and no turn file either.
+        const bareRelaunch = view.config.mode === 'interactive' && !message?.trim();
+        const turn = bareRelaunch ? view.config.turn : view.config.turn + 1;
+        const prompt = message?.trim() || 'Continue the assigned task from where you stopped.';
+        if (!bareRelaunch)
+          await writeFile(
+            turnPrompt(this.paths, id, turn),
+            `${prompt}\n\nContinue using the same kteam completion and interaction protocol.\n`,
+            { mode: 0o600 },
+          );
+        await Promise.all(
+          ['done', 'needs-help', 'process-exit'].map(name => rm(markerFile(this.paths, id, name), { force: true })),
+        );
+        const config = await this.store.updateConfig<SessionConfig>(id, current => ({
           ...current,
-          harnessSessionId: found.id,
-          transcriptFile: found.file,
+          turn,
           updatedAt: now(),
         }));
-      }
-      // Bare relaunch: an interactive session resumed with no message just gets
-      // its terminal back (`--resume <session-id>`, nothing typed). Telling a
-      // human's TUI to "continue the assigned task" would be kteam inventing a
-      // turn nobody asked for, so there is no new turn and no turn file either.
-      const bareRelaunch = view.config.mode === 'interactive' && !message?.trim();
-      const turn = bareRelaunch ? view.config.turn : view.config.turn + 1;
-      const prompt = message?.trim() || 'Continue the assigned task from where you stopped.';
-      if (!bareRelaunch)
-        await writeFile(
-          turnPrompt(this.paths, id, turn),
-          `${prompt}\n\nContinue using the same kteam completion and interaction protocol.\n`,
-          { mode: 0o600 },
-        );
-      await Promise.all(
-        ['done', 'needs-help', 'process-exit'].map(name => rm(markerFile(this.paths, id, name), { force: true })),
-      );
-      const config = await this.store.updateConfig<SessionConfig>(id, current => ({
-        ...current,
-        turn,
-        updatedAt: now(),
-      }));
-      await this.transition(
-        id,
-        {
-          status: 'starting',
-          turn,
-          startedAt: now(),
-          reason: undefined,
-          finishedAt: undefined,
-          exitCode: undefined,
-          nudgedAt: undefined,
-          retryAttempt: automaticRetry ? view.state.retryAttempt : 0,
-          openTools: [],
-          pendingQuestion: undefined,
-          promptReady: false,
-          turnCompleted: false,
-          waiting: undefined,
-          waitingCreditSeconds: 0,
-        },
-        'session.resuming',
-      );
-      try {
-        await this.serializedBootstrap(async () => {
-          await this.launchWithRetry(config);
-          if (!bareRelaunch) await this.tmux.send(config, this.promptInstruction(id, turn));
-        });
-        this.autoContinued.delete(id);
-        this.doneDeferred.delete(id);
         await this.transition(
           id,
           {
-            status: 'running',
-            health: 'healthy',
+            status: 'starting',
+            turn,
+            startedAt: now(),
+            reason: undefined,
+            finishedAt: undefined,
+            exitCode: undefined,
+            nudgedAt: undefined,
+            retryAttempt: automaticRetry ? view.state.retryAttempt : 0,
+            openTools: [],
+            pendingQuestion: undefined,
             promptReady: false,
-            lastActivityAt: now(),
             turnCompleted: false,
+            waiting: undefined,
+            waitingCreditSeconds: 0,
           },
-          'session.resumed',
+          'session.resuming',
         );
-        // A watcher immediately replays persisted transcript bytes through the
-        // same per-session queue. Starting it while this queue is held would
-        // deadlock resume against its own transcript callback.
-        startMonitorAfterUnlock = true;
-      } catch (error) {
-        await this.tmux.snapshot(config, true).catch(() => '');
-        await this.stopTmuxWithEvidence(config, 'failed resume cleanup');
-        const attempt = view.state.retryAttempt ?? 0;
-        if (automaticRetry && attempt < (config.retry?.transientAttempts ?? 0)) {
-          const nextAttempt = attempt + 1;
+        try {
+          await this.serializedBootstrap(async () => {
+            await this.launchWithRetry(config);
+            // The replacement pane demonstrably exists from here on. Refreshing
+            // launchedAt gives the monitor the same durable launch evidence the
+            // first-start path already records.
+            await this.store.updateState<SessionState>(id, current => ({ ...current, launchedAt: now() }));
+            if (!bareRelaunch) await this.tmux.send(config, this.promptInstruction(id, turn));
+          });
+          this.autoContinued.delete(id);
+          this.doneDeferred.delete(id);
           await this.transition(
             id,
             {
-              status: 'retrying',
-              health: 'crashed',
-              reason: String(error),
-              retryAttempt: nextAttempt,
+              status: 'running',
+              health: 'healthy',
+              reason: undefined,
+              finishedAt: undefined,
+              exitCode: undefined,
               promptReady: false,
+              lastActivityAt: now(),
+              turnCompleted: false,
             },
-            'retry.scheduled',
-            { attempt: nextAttempt, delaySeconds: 2 ** nextAttempt },
+            'session.resumed',
+            {},
+            // A monitor racing this relaunch may already have written a terminal
+            // status. The relaunch's proven success is the authoritative later
+            // observation and must not be suppressed by terminal preservation.
+            { force: true },
           );
-          this.scheduleTransientRetry(id, nextAttempt);
-        } else {
-          await this.transition(
-            id,
-            {
-              status: 'failed',
-              health: 'crashed',
-              reason: String(error),
-              finishedAt: now(),
-              promptReady: false,
-            },
-            'session.failed',
+          // A watcher immediately replays persisted transcript bytes through the
+          // same per-session queue. Starting it while this queue is held would
+          // deadlock resume against its own transcript callback.
+          startMonitorAfterUnlock = true;
+        } catch (error) {
+          const firstFailureProbe = await this.tmux.state(config.tmuxSession).catch(
+            () =>
+              ({
+                alive: false,
+                dead: true,
+                promptReady: false,
+                pane: '',
+                visiblePane: '',
+              }) satisfies PaneState,
           );
+          const exit = await this.confirmHarnessExit(config, firstFailureProbe, 'resume relaunch failure', 'daemon');
+          if (!exit.confirmed) {
+            // Readiness/injection reported an error, but the independent pane or
+            // process probe proves the harness survived. Preserve it, restore a
+            // steerable state, and hand it back to a fresh monitor instead of
+            // killing a healthy prompt-ready successor.
+            await this.transition(
+              id,
+              {
+                status: 'running',
+                health: exit.pane.promptReady ? 'healthy' : 'unknown',
+                reason: undefined,
+                finishedAt: undefined,
+                exitCode: undefined,
+                promptReady: exit.pane.promptReady,
+                lastActivityAt: now(),
+              },
+              'session.resume_false_terminal_averted',
+              { subprocessAlive: exit.subprocessAlive },
+              { force: true },
+            );
+            startMonitorAfterUnlock = true;
+            return await this.get(id);
+          }
+          await this.tmux.snapshot(config, true).catch(() => '');
+          await this.stopTmuxWithEvidence(config, 'failed resume cleanup');
+          const attempt = view.state.retryAttempt ?? 0;
+          const failureReason = this.resumeFailureReason(config, error, exit.pane);
+          if (automaticRetry && attempt < (config.retry?.transientAttempts ?? 0)) {
+            const nextAttempt = attempt + 1;
+            await this.transition(
+              id,
+              {
+                status: 'retrying',
+                health: 'crashed',
+                reason: failureReason,
+                retryAttempt: nextAttempt,
+                promptReady: false,
+              },
+              'retry.scheduled',
+              { attempt: nextAttempt, delaySeconds: 2 ** nextAttempt },
+            );
+            this.scheduleTransientRetry(id, nextAttempt);
+          } else {
+            await this.transition(
+              id,
+              {
+                status: 'failed',
+                health: 'crashed',
+                reason: failureReason,
+                finishedAt: now(),
+                promptReady: false,
+              },
+              'session.failed',
+            );
+          }
+          throw error;
         }
-        throw error;
+        return await this.get(id);
+      });
+      if (startMonitorAfterUnlock) {
+        await this.startMonitor(id);
+        return await this.get(id);
       }
-      return await this.get(id);
-    });
-    if (startMonitorAfterUnlock) {
-      await this.startMonitor(id);
-      return await this.get(id);
+      return resumed;
+    } finally {
+      if (this.launching.get(id)?.bootstrap === resumeLaunch) this.launching.delete(id);
+      releaseResumeLaunch();
     }
-    return resumed;
   }
 
   /** Continue an existing session on a DIFFERENT same-kind account. kfleet pools
@@ -3217,9 +3351,23 @@ export class SessionManager implements KTeamService {
               );
               return;
             }
+            const exit = await this.confirmHarnessExit(view.config, pane, 'monitor dead-pane probe', 'watcher');
+            if (!exit.confirmed) {
+              // Do not spin if tmux keeps serving one bad has-session result;
+              // this `continue` skips the loop's ordinary tail sleep.
+              await interruptibleSleep(sleepSeconds * 1000, signal);
+              continue;
+            }
+            const terminalPane = exit.pane;
             if (!terminalStatuses.includes(view.state.status)) {
               await this.tmux.snapshot(view.config, true);
-              const exitEvidence = { at: now(), alive: pane.alive, dead: pane.dead, exitCode: pane.exitCode };
+              const exitEvidence = {
+                at: now(),
+                alive: terminalPane.alive,
+                dead: terminalPane.dead,
+                exitCode: terminalPane.exitCode,
+                confirmedByReprobe: true,
+              };
               await Promise.all([
                 atomicJson(path.join(view.directory, 'checks', 'exit.json'), exitEvidence),
                 atomicJson(markerFile(this.paths, id, 'process-exit'), exitEvidence),
@@ -3229,7 +3377,9 @@ export class SessionManager implements KTeamService {
               // task text and tool output routinely mention rate limits, quotas,
               // HTTP codes, and network errors, and must not steer classification.
               const lower = (
-                pane.visiblePane.trim() ? pane.visiblePane : pane.pane.split('\n').slice(-60).join('\n')
+                terminalPane.visiblePane.trim()
+                  ? terminalPane.visiblePane
+                  : terminalPane.pane.split('\n').slice(-60).join('\n')
               ).toLowerCase();
               if (
                 quota?.atLimit === true ||
@@ -3241,7 +3391,7 @@ export class SessionManager implements KTeamService {
                     status: 'rate_limited',
                     health: 'rate_limited',
                     reason: 'account quota exhausted',
-                    exitCode: pane.exitCode,
+                    exitCode: terminalPane.exitCode,
                     quota,
                     ...(quota ? usageStateFromQuota(quota) : {}),
                   },
@@ -3260,7 +3410,7 @@ export class SessionManager implements KTeamService {
                     status: 'retrying',
                     health: 'crashed',
                     reason: 'transient harness failure',
-                    exitCode: pane.exitCode,
+                    exitCode: terminalPane.exitCode,
                     retryAttempt: attempt,
                   },
                   'retry.scheduled',
@@ -3272,14 +3422,14 @@ export class SessionManager implements KTeamService {
                   ? 'persisted conversation could not be resumed'
                   : /invalid api key|unauthorized|sign in|log in/i.test(lower)
                     ? 'harness authentication failed'
-                    : `interactive ${view.config.harness} exited ${pane.exitCode ?? 'unknown'}`;
+                    : this.harnessExitReason(view.config, terminalPane);
                 await this.transition(
                   id,
                   {
                     status: 'failed',
                     health: 'crashed',
                     reason,
-                    exitCode: pane.exitCode,
+                    exitCode: terminalPane.exitCode,
                     finishedAt: now(),
                     promptReady: false,
                   },

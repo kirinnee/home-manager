@@ -610,7 +610,11 @@ export class TmuxController {
       const current = await this.state(name);
       lastState = current;
       if (!current.alive || current.dead)
-        throw new Error(`interactive harness exited (${current.exitCode ?? 'unknown'})`);
+        throw new Error(
+          current.exitCode === undefined
+            ? 'interactive harness exited; exit code unavailable (single-probe)'
+            : `interactive harness exited (${current.exitCode})`,
+        );
       const action = handleStartupDialogs ? startupDialogAction(current.visiblePane, dialogOptions) : undefined;
       if (action) {
         const attempts = (dialogAttempts.get(action.kind) ?? 0) + 1;
