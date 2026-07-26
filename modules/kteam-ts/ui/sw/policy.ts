@@ -143,17 +143,68 @@ export function retainedGenerations(order: readonly string[], keep: number = RET
   return keep <= 0 ? [] : order.slice(-keep);
 }
 
-/** Which existing caches to delete.
+/** Which existing caches to delete: every shell cache outside the retention
+    window, by PREFIX.
 
-    Deletes by PREFIX rather than by "everything in the index I am not keeping",
-    so a generation whose index record was lost (private-mode eviction, a failed
-    write, an index cache deleted by hand) is still collected instead of leaking
-    forever. The index cache itself is exempt — it is bookkeeping, not a
-    generation, and deleting it would erase the ordering that makes retention
-    possible at all. */
+    Prefix-based rather than "everything named in the index that I am not
+    keeping", so a generation the index never knew about cannot leak forever.
+    That is safe only because the retention window itself is reconciled against
+    the live caches first — see `reconcileGenerationOrder`. Feed this a window
+    computed from an EMPTY order and it will happily delete generations that are
+    still in use, which is exactly the bug reconciliation exists to prevent.
+
+    The index cache itself is exempt — it is bookkeeping, not a generation, and
+    deleting it would erase the ordering that makes retention possible at all. */
 export function cachesToDelete(existing: readonly string[], retained: readonly string[]): string[] {
   const keep = new Set(retained.map(cacheNameFor));
   return existing.filter(name => name.startsWith(CACHE_PREFIX) && name !== INDEX_CACHE && !keep.has(name));
+}
+
+/** The release ids of the shell caches that actually exist, in the order
+    CacheStorage reports them.
+
+    That order is not incidental: the Cache API's name list is specified as an
+    ordered list appended to on first `caches.open()`, so iteration order IS
+    creation order. For shell caches, creation happens once per release during
+    install — which makes this a genuine reconstruction of deploy history and the
+    only one available when the index is gone. */
+export function releasesFromCacheNames(existing: readonly string[]): string[] {
+  return existing
+    .filter(name => name.startsWith(CACHE_PREFIX) && name !== INDEX_CACHE)
+    .map(name => name.slice(CACHE_PREFIX.length));
+}
+
+/** Reconcile the recorded generation order against the caches that are really
+    there, and return the order retention should be computed from.
+
+    WHY THIS EXISTS. `readGenerationOrder()` degrades a missing or corrupt index
+    to `[]`, and an empty order means "retain only the release activating now" —
+    so a single lost index entry made the next activation delete BOTH prior
+    generations, and every tab still running one of them lost its lazy chunks a
+    generation early. The index is a cache like any other: private-mode
+    eviction, storage pressure or a hand-cleared origin can take it while the
+    generation caches survive. Losing bookkeeping must not destroy the data the
+    bookkeeping describes.
+
+    Two cases, and each is the best answer available for its case:
+
+      * The record accounts for every live cache → TRUST THE RECORD. It is the
+        only source that knows about re-activations, where a release is promoted
+        to newest without its cache being re-created, so creation order cannot
+        see it.
+      * Anything live is unaccounted for (index missing, truncated, corrupt, or
+        a cache created by a build whose activation never finished) → TRUST
+        CREATION ORDER for the whole set. Recorded positions cannot be merged
+        with discovered ones without inventing an ordering between them, and
+        guessing wrong here means pruning a live generation.
+
+    Recorded ids with no surviving cache are dropped in both cases: they are
+    history about generations that are already gone. */
+export function reconcileGenerationOrder(recorded: readonly string[], existing: readonly string[]): string[] {
+  const discovered = releasesFromCacheNames(existing);
+  const alive = new Set(discovered);
+  const known = recorded.filter(r => alive.has(r));
+  return known.length === discovered.length ? known : discovered;
 }
 
 export async function readGenerationOrder(): Promise<string[]> {
@@ -163,8 +214,9 @@ export async function readGenerationOrder(): Promise<string[]> {
     if (!hit) return [];
     const parsed: unknown = await hit.json();
     // Defensive: this is persisted state from an older worker build. A shape
-    // change must degrade to "no history" (which prunes conservatively by
-    // prefix) rather than throwing inside activate.
+    // change must degrade to "no history" — which is then RECONCILED against the
+    // live caches rather than acted on directly, so degrading here costs the
+    // re-activation nuance and nothing else.
     if (!Array.isArray(parsed)) return [];
     return parsed.filter((r): r is string => typeof r === 'string');
   } catch {
@@ -184,13 +236,27 @@ export async function writeGenerationOrder(order: readonly string[]): Promise<vo
 
 /* ---------- lifecycle ----------------------------------------------------- */
 
-/** Precache the generated closure.
+/** Precache the generated closure, ALL-OR-NOTHING.
 
-    Every response is checked `ok` BEFORE `cache.put` and the whole install
-    REJECTS on any failure, which leaves this worker non-current: a worker that
-    installed with a half-populated cache would serve a shell missing one chunk
-    and fail in a way no reload could fix. Failing install keeps the previous
-    generation serving, which is the correct outcome.
+    TWO PHASES, and the split is the whole point. Phase one fetches every URL and
+    checks every response `ok`; phase two writes. Nothing is written until every
+    response has arrived and passed, so a failure cannot leave a partially
+    populated cache behind.
+
+    The obvious one-pass version — check `ok`, then `cache.put`, all inside one
+    `Promise.all` — is wrong, and wrong in a way that only shows up under real
+    network timing: a fast 200 for `/a.js` completes its `put` while a slow 404
+    for `/b.css` is still in flight. The install promise rejects, so this worker
+    never activates, but CacheStorage has no transaction tied to worker
+    installation and `/a.js` stays written. The next install of the same release
+    then opens a cache that already has content, and "all-or-nothing" is a
+    comment rather than a property. `installRelease` additionally deletes the
+    named cache on any failure, so even a rejected phase-two write cannot leave a
+    remnant.
+
+    Responses are buffered as `Response` objects; their bodies are not read here,
+    so a shell of a few hundred KB costs no more memory than the streaming
+    version would have held anyway.
 
     `cache: 'reload'` bypasses the HTTP cache for the fetch itself. These URLs
     are served `immutable`, so a poisoned or partial intermediary entry would
@@ -202,30 +268,57 @@ export async function writeGenerationOrder(order: readonly string[]): Promise<vo
     `location.href` reproduces. The cache is keyed by the original root-absolute
     string, matching what `caches.match(request)` looks up on a fetch event. */
 export async function precacheAll(cache: Cache, urls: readonly string[], base: string): Promise<void> {
-  await Promise.all(
+  const fetched = await Promise.all(
     urls.map(async url => {
       const response = await fetch(new Request(new URL(url, base).href, { cache: 'reload' }));
       if (!response.ok) {
         throw new Error(`sw: refusing to install — ${url} responded ${response.status}`);
       }
-      await cache.put(url, response);
+      return { url, response };
     }),
   );
+  // Only reached when every fetch above resolved OK: `Promise.all` rejects on the
+  // first failure, so no `put` has run by this point.
+  await Promise.all(fetched.map(({ url, response }) => cache.put(url, response)));
 }
 
 /** Open this release's cache and fill it. Rejects (failing install) on any
-    non-OK response — see `precacheAll`. */
+    non-OK response — see `precacheAll`.
+
+    On ANY failure the named cache is DELETED before rejecting. `precacheAll`
+    already withholds every write until all responses pass, so this covers the
+    remaining cases: a `cache.put` that fails partway through phase two (quota
+    exceeded on the fifth of twelve entries), or a retry after some earlier
+    interrupted install. Deleting is safe precisely because this worker is not
+    active — the generation currently serving readers is a different cache — and
+    it means the next install attempt starts from empty rather than from a
+    half-populated cache it would have no way to distinguish from a complete one.
+
+    Deletion failure is swallowed: the install error is the one worth reporting,
+    and masking it with a cleanup error would hide why the install failed. */
 export async function installRelease(release: string, urls: readonly string[], base: string): Promise<void> {
-  const cache = await caches.open(cacheNameFor(release));
-  await precacheAll(cache, urls, base);
+  const name = cacheNameFor(release);
+  const cache = await caches.open(name);
+  try {
+    await precacheAll(cache, urls, base);
+  } catch (error) {
+    await caches.delete(name).catch(() => false);
+    throw error;
+  }
 }
 
 /** Record this release as newest, prune everything outside the retention
-    window, and persist the trimmed order. */
+    window, and persist the trimmed order.
+
+    The order is RECONCILED against the caches that actually exist before
+    anything is deleted (see `reconcileGenerationOrder`), so a missing or corrupt
+    index degrades to "prune by discovered creation order" instead of "delete
+    every generation but this one". */
 export async function activateRelease(release: string): Promise<void> {
-  const order = nextGenerationOrder(await readGenerationOrder(), release);
-  const retained = retainedGenerations(order);
   const existing = await caches.keys();
+  const recorded = reconcileGenerationOrder(await readGenerationOrder(), existing);
+  const order = nextGenerationOrder(recorded, release);
+  const retained = retainedGenerations(order);
   await Promise.all(cachesToDelete(existing, retained).map(name => caches.delete(name)));
   // Written AFTER the deletions so a failure mid-prune leaves the index naming
   // caches that still exist, never caches that are already gone.

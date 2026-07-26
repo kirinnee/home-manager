@@ -30,10 +30,14 @@ import {
   RETAINED_GENERATIONS,
   cacheNameFor,
   cachesToDelete,
+  activateRelease,
   fetchPolicy,
+  installRelease,
   nextGenerationOrder,
   offlineUrl,
   precacheAll,
+  reconcileGenerationOrder,
+  releasesFromCacheNames,
   respond,
   retainedGenerations,
 } from './policy';
@@ -207,8 +211,11 @@ describe('retention — current + two previous (B3)', () => {
   });
 
   // Deleting by prefix rather than "index minus retained" means a generation
-  // whose index record was lost is still collected instead of leaking forever.
-  test('a cache with no index record is still collected', () => {
+  // outside the retention WINDOW is collected instead of leaking forever. The
+  // window it is compared against must itself be reconciled first — see the
+  // index-loss suite below, which is what stops this from deleting live
+  // generations when the index is gone.
+  test('a shell cache outside the retention window is collected even if unnamed', () => {
     expect(cachesToDelete(['kteam-shell-orphan'], ['aaa', 'bbb', 'ccc'])).toEqual(['kteam-shell-orphan']);
   });
 
@@ -216,6 +223,173 @@ describe('retention — current + two previous (B3)', () => {
     expect(INDEX_KEY.startsWith('/')).toBe(true);
     expect(INDEX_CACHE).toBe(`${CACHE_PREFIX}index`);
     expect('index').not.toMatch(RELEASE_ID_RE);
+  });
+});
+
+// LOSING THE BOOKKEEPING MUST NOT DESTROY THE DATA IT DESCRIBES.
+//
+// The index is a cache like any other: private-mode eviction, storage pressure,
+// or a hand-cleared origin can take it while the generation caches survive.
+// Before reconciliation, an absent index made the next activation retain ONLY
+// the activating release and delete both prior generations — so every tab still
+// running B or C lost its lazy chunks a generation early, which is precisely the
+// failure the three-generation window exists to prevent.
+describe('retention survives a lost or corrupt generation index', () => {
+  const A = 'aaaaaaaaaaaa';
+  const B = 'bbbbbbbbbbbb';
+  const C = 'cccccccccccc';
+  const D = 'dddddddddddd';
+  /** Creation order, which is the order CacheStorage reports names in. */
+  const liveABCD = [INDEX_CACHE, cacheNameFor(A), cacheNameFor(B), cacheNameFor(C), cacheNameFor(D)];
+
+  test('an EMPTY record is reconstructed from cache creation order', () => {
+    // The regression itself. Index gone, A/B/C on disk, D installing.
+    const existing = [cacheNameFor(A), cacheNameFor(B), cacheNameFor(C), cacheNameFor(D)];
+    const order = nextGenerationOrder(reconcileGenerationOrder([], existing), D);
+    const retained = retainedGenerations(order);
+
+    expect(retained).toEqual([B, C, D]);
+    expect(cachesToDelete(existing, retained)).toEqual([cacheNameFor(A)]);
+  });
+
+  test('a CORRUPT record (non-array, wrong element types) behaves like an empty one', () => {
+    // readGenerationOrder() maps both to []; what matters is that [] no longer
+    // means "delete everything".
+    const existing = [cacheNameFor(A), cacheNameFor(B), cacheNameFor(C)];
+    for (const recorded of [[], ['not-a-live-release'], [A, 'ghost']]) {
+      const retained = retainedGenerations(nextGenerationOrder(reconcileGenerationOrder(recorded, existing), D));
+      expect(retained).toContain(B);
+      expect(retained).toContain(C);
+      expect(retained).toContain(D);
+    }
+  });
+
+  test('a TRUNCATED record falls back to creation order for the whole set', () => {
+    // Half-written index: it names C but not A or B. Merging a recorded position
+    // with two discovered ones would require inventing an order between them, so
+    // the discovered order is used for all three.
+    const existing = [cacheNameFor(A), cacheNameFor(B), cacheNameFor(C)];
+    expect(reconcileGenerationOrder([C], existing)).toEqual([A, B, C]);
+  });
+
+  test('a COMPLETE record is trusted over creation order', () => {
+    // Re-activation ordering lives only in the record: B was promoted to newest
+    // without its cache being re-created, so creation order cannot see it.
+    const existing = [cacheNameFor(A), cacheNameFor(B), cacheNameFor(C)];
+    expect(reconcileGenerationOrder([A, C, B], existing)).toEqual([A, C, B]);
+  });
+
+  test('records naming generations that are already gone are dropped', () => {
+    const existing = [cacheNameFor(C), cacheNameFor(D)];
+    // A and B were pruned by an earlier activation; the record must not resurrect
+    // them into the retention window and displace a live generation.
+    expect(reconcileGenerationOrder([A, B, C, D], existing)).toEqual([C, D]);
+  });
+
+  test('the index cache and foreign caches are never mistaken for generations', () => {
+    expect(releasesFromCacheNames([...liveABCD, 'workbox-precache-v2', 'some-other-app'])).toEqual([A, B, C, D]);
+    expect(reconcileGenerationOrder([], [INDEX_CACHE])).toEqual([]);
+  });
+
+  test('a first-ever install with nothing on disk still retains only itself', () => {
+    const retained = retainedGenerations(nextGenerationOrder(reconcileGenerationOrder([], []), A));
+    expect(retained).toEqual([A]);
+    expect(cachesToDelete([], retained)).toEqual([]);
+  });
+
+  /* ---------- and through activateRelease itself ---------------------------
+     The tests above compose the pure functions by hand, which is not enough:
+     removing the reconciliation call from `activateRelease` left all of them
+     green (verified by mutation). These drive the real function against a fake
+     CacheStorage, so the WIRING is covered and not just the pieces.
+     ---------------------------------------------------------------------- */
+
+  /** A CacheStorage whose `keys()` preserves insertion order, as the spec
+      requires — that ordering is the whole basis of reconstruction. */
+  function fakeCacheStorage(names: readonly string[], indexBody?: string) {
+    const present = [...names];
+    const stored = new Map<string, string>();
+    if (indexBody !== undefined) stored.set(INDEX_KEY, indexBody);
+    const deleted: string[] = [];
+    const storage = {
+      keys: async () => [...present],
+      open: async (name: string) => ({
+        match: async (key: string) => {
+          if (name !== INDEX_CACHE) return undefined;
+          const body = stored.get(key);
+          return body === undefined ? undefined : new Response(body);
+        },
+        put: async (key: string, response: Response) => void stored.set(key, await response.text()),
+      }),
+      delete: async (name: string) => {
+        deleted.push(name);
+        const at = present.indexOf(name);
+        if (at >= 0) present.splice(at, 1);
+        return at >= 0;
+      },
+    };
+    return { storage, deleted, index: () => stored.get(INDEX_KEY), present: () => [...present] };
+  }
+
+  async function activateWith(names: readonly string[], indexBody: string | undefined, release: string) {
+    const originalCaches = (globalThis as { caches?: CacheStorage }).caches;
+    const fake = fakeCacheStorage(names, indexBody);
+    (globalThis as { caches?: unknown }).caches = fake.storage;
+    try {
+      await activateRelease(release);
+      return fake;
+    } finally {
+      (globalThis as { caches?: unknown }).caches = originalCaches;
+    }
+  }
+
+  test('activateRelease with NO index keeps B and C and prunes only A', async () => {
+    const fake = await activateWith(
+      [INDEX_CACHE, cacheNameFor(A), cacheNameFor(B), cacheNameFor(C), cacheNameFor(D)],
+      undefined,
+      D,
+    );
+    expect(fake.deleted).toEqual([cacheNameFor(A)]);
+    expect(JSON.parse(fake.index()!)).toEqual([B, C, D]);
+  });
+
+  test('activateRelease with a CORRUPT index keeps B and C', async () => {
+    const fake = await activateWith(
+      [INDEX_CACHE, cacheNameFor(A), cacheNameFor(B), cacheNameFor(C), cacheNameFor(D)],
+      '{"not":"an array"}',
+      D,
+    );
+    expect(fake.deleted).toEqual([cacheNameFor(A)]);
+    expect(JSON.parse(fake.index()!)).toEqual([B, C, D]);
+  });
+
+  test('activateRelease with unparseable index JSON keeps B and C', async () => {
+    const fake = await activateWith([INDEX_CACHE, cacheNameFor(B), cacheNameFor(C), cacheNameFor(D)], 'not json', D);
+    expect(fake.deleted).toEqual([]);
+    expect(JSON.parse(fake.index()!)).toEqual([B, C, D]);
+  });
+
+  test('activateRelease trusts a COMPLETE index over creation order', async () => {
+    // B re-activated after C, so the record's order differs from creation order
+    // and is the only one that knows.
+    const fake = await activateWith(
+      [INDEX_CACHE, cacheNameFor(A), cacheNameFor(B), cacheNameFor(C)],
+      JSON.stringify([A, C, B]),
+      D,
+    );
+    expect(fake.deleted).toEqual([cacheNameFor(A)]);
+    expect(JSON.parse(fake.index()!)).toEqual([C, B, D]);
+  });
+
+  test('activateRelease never deletes the index cache itself', async () => {
+    const fake = await activateWith([INDEX_CACHE, cacheNameFor(A)], undefined, A);
+    expect(fake.deleted).toEqual([]);
+    expect(fake.present()).toContain(INDEX_CACHE);
+  });
+
+  test('activateRelease leaves foreign caches alone', async () => {
+    const fake = await activateWith([INDEX_CACHE, 'workbox-precache-v2', cacheNameFor(A)], undefined, A);
+    expect(fake.deleted).toEqual([]);
   });
 });
 
@@ -261,7 +435,7 @@ describe('install is all-or-nothing (M6)', () => {
   // A worker that installed with a half-populated cache would serve a shell
   // missing a chunk and fail in a way no reload could fix. Rejecting keeps the
   // PREVIOUS generation serving, which is the correct outcome.
-  test('one non-OK response rejects the whole install and caches nothing for it', async () => {
+  test('one non-OK response rejects the whole install and caches NOTHING AT ALL', async () => {
     const { cache, put } = fakeCache();
     const restore = stubFetch(async input => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
@@ -270,6 +444,45 @@ describe('install is all-or-nothing (M6)', () => {
     try {
       await expect(precacheAll(cache, ['/a.js', '/b.css'], ORIGIN)).rejects.toThrow(/refusing to install.*b\.css.*404/);
       expect(put.has('/b.css')).toBe(false);
+      // The SIBLING matters as much as the failing URL: asserting only that the
+      // 404'd entry is absent passes for a cache left half-populated.
+      expect([...put.keys()]).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  // THE TIMING CASE. A fast 200 racing a slow 404 is what a real deploy against
+  // a partially-propagated origin looks like, and it is the only ordering where
+  // check-then-put-per-URL is observably wrong: /a.js finishes its put while
+  // /b.css is still in flight. With the fetch and write phases split, the delay
+  // changes nothing.
+  test('a SUCCESSFUL sibling does not survive a delayed failure', async () => {
+    const { cache, put } = fakeCache();
+    const restore = stubFetch(async input => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (!url.includes('b.css')) return new Response('ok', { status: 200 });
+      await new Promise(resolve => setTimeout(resolve, 20));
+      return new Response('nope', { status: 404 });
+    });
+    try {
+      await expect(precacheAll(cache, ['/a.js', '/b.css'], ORIGIN)).rejects.toThrow(/refusing to install/);
+      expect([...put.keys()]).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  test('a network error mid-list also writes nothing', async () => {
+    const { cache, put } = fakeCache();
+    const restore = stubFetch(async input => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes('b.css')) throw new TypeError('network down');
+      return new Response('ok', { status: 200 });
+    });
+    try {
+      await expect(precacheAll(cache, ['/a.js', '/b.css'], ORIGIN)).rejects.toThrow(/network down/);
+      expect([...put.keys()]).toEqual([]);
     } finally {
       restore();
     }
@@ -282,6 +495,80 @@ describe('install is all-or-nothing (M6)', () => {
       await expect(precacheAll(cache, ['/a.js'], ORIGIN)).rejects.toThrow(/refusing to install/);
     } finally {
       restore();
+    }
+  });
+
+  // Belt and braces for the one failure `precacheAll`'s phase split cannot
+  // prevent: a `cache.put` that fails partway through the write phase (quota
+  // exceeded on the fifth of twelve entries). The named cache must be gone, so
+  // the next attempt starts empty rather than from a half-populated cache it
+  // could not distinguish from a complete one.
+  test('a failing cache.put deletes the whole generation cache', async () => {
+    const originalCaches = (globalThis as { caches?: CacheStorage }).caches;
+    const written: string[] = [];
+    const deleted: string[] = [];
+    const restore = stubFetch(async () => new Response('ok', { status: 200 }));
+    (globalThis as { caches?: unknown }).caches = {
+      open: async () => ({
+        put: async (url: string) => {
+          written.push(url);
+          if (url === '/b.css') throw new DOMException('quota exceeded', 'QuotaExceededError');
+        },
+      }),
+      delete: async (name: string) => {
+        deleted.push(name);
+        return true;
+      },
+    };
+    try {
+      await expect(installRelease(RELEASE_ID, ['/a.js', '/b.css'], ORIGIN)).rejects.toThrow(/quota exceeded/);
+      expect(deleted).toEqual([cacheNameFor(RELEASE_ID)]);
+    } finally {
+      restore();
+      (globalThis as { caches?: unknown }).caches = originalCaches;
+    }
+  });
+
+  test('a fetch failure also deletes the generation cache, and the install error wins', async () => {
+    const originalCaches = (globalThis as { caches?: CacheStorage }).caches;
+    const deleted: string[] = [];
+    const restore = stubFetch(async () => new Response('nope', { status: 404 }));
+    (globalThis as { caches?: unknown }).caches = {
+      open: async () => ({ put: async () => {} }),
+      // Cleanup that itself fails must not mask WHY the install failed.
+      delete: async (name: string) => {
+        deleted.push(name);
+        throw new Error('delete failed');
+      },
+    };
+    try {
+      await expect(installRelease(RELEASE_ID, ['/a.js'], ORIGIN)).rejects.toThrow(/refusing to install/);
+      expect(deleted).toEqual([cacheNameFor(RELEASE_ID)]);
+    } finally {
+      restore();
+      (globalThis as { caches?: unknown }).caches = originalCaches;
+    }
+  });
+
+  test('a successful install writes every URL and deletes nothing', async () => {
+    const originalCaches = (globalThis as { caches?: CacheStorage }).caches;
+    const written: string[] = [];
+    let deletes = 0;
+    const restore = stubFetch(async () => new Response('ok', { status: 200 }));
+    (globalThis as { caches?: unknown }).caches = {
+      open: async () => ({ put: async (url: string) => void written.push(url) }),
+      delete: async () => {
+        deletes += 1;
+        return true;
+      },
+    };
+    try {
+      await installRelease(RELEASE_ID, ['/a.js', '/b.css'], ORIGIN);
+      expect(written.sort()).toEqual(['/a.js', '/b.css']);
+      expect(deletes).toBe(0);
+    } finally {
+      restore();
+      (globalThis as { caches?: unknown }).caches = originalCaches;
     }
   });
 });
