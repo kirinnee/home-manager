@@ -1,0 +1,32 @@
+{
+  /* Service-worker typechecking, separate from the app on purpose.
+
+     `tsconfig.app.json` includes only `src/` — a worker source outside it would
+     be typechecked by NOTHING (audit B2). And the app config pulls in `DOM`,
+     which would let `window`/`document`/`localStorage` typecheck happily inside
+     a worker where none of them exist. So: WebWorker lib, no DOM.
+
+     Not part of the `tsconfig.json` project references graph: `tsc -b` runs
+     over the app + node projects, and this one is compiled separately by
+     `scripts/postbuild-pwa.ts` (`tsc -p sw`) AFTER the Vite step, because it
+     depends on the generated `precache.gen.ts`. Including it in the solution
+     build would make a clean checkout fail before that file exists. */
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "WebWorker"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": [],
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "verbatimModuleSyntax": false
+  },
+  "include": ["./**/*.ts"]
+}

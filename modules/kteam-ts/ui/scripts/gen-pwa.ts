@@ -1,0 +1,254 @@
+/* ============================================================================
+   PRE-BUILD generation: the 10 web app manifests + the offline page.
+
+   Invoked as an in-process step by `scripts/build-pwa.ts`, which passes the one
+   release ID it computed:
+
+       bun scripts/gen-pwa.ts --release=<12 hex>   # (normally never run by hand)
+
+   Everything is written into `public/`, so the ordinary Vite copy step puts it
+   in the output directory — no post-build file shuffling, and `emptyOutDir`
+   stays safe.
+
+   ── WHY TEN MANIFESTS ─────────────────────────────────────────────────────
+   `theme_color`/`background_color` are the installed app's window chrome and
+   splash. They are a *static document* value; there is no way to make one
+   manifest track a runtime theme. So each family/mode gets its own manifest and
+   `useTheme` (Stage D) repoints the single `<link id="kteam-manifest">` at the
+   matching one. Everything else about the ten files is identical — same `id`,
+   `start_url`, `scope`, name and icon set — so a theme switch never changes app
+   identity (which would orphan an existing installation).
+
+   Colours come from `src/themes.css` via scripts/theme-tokens.ts. A missing
+   family/mode block or a missing `--bg` FAILS the build (audit M4).
+   ============================================================================ */
+
+import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { FAMILIES, MODES, isGeneratedPublicFile, manifestName, offlineName, releaseIdFromArgv } from './release';
+import { defaultCssEntry, readThemeTokens } from './theme-tokens';
+
+const HERE = dirname(new URL(import.meta.url).pathname);
+const UI_ROOT = join(HERE, '..');
+const PUBLIC_DIR = join(UI_ROOT, 'public');
+const ICONS_MANIFEST = join(PUBLIC_DIR, 'icons', 'icons.gen.json');
+
+type IconEntry = { name: string; file: string; width?: number; height?: number; mime: string; purpose?: string };
+
+/** Manifest icon list, built from the COMMITTED icons.gen.json so the names can
+    never drift from the files actually on disk. */
+function manifestIcons(icons: IconEntry[]): unknown[] {
+  const byName = new Map(icons.map(i => [i.name, i]));
+  const entries: unknown[] = [];
+  for (const name of ['icon-192', 'icon-512', 'maskable-192', 'maskable-512'] as const) {
+    const icon = byName.get(name);
+    if (!icon) throw new Error(`gen-pwa: icons.gen.json is missing "${name}" — run \`bun run gen:icons\``);
+    entries.push({
+      src: `/icons/${icon.file}`,
+      sizes: `${icon.width}x${icon.height}`,
+      type: icon.mime,
+      purpose: name.startsWith('maskable') ? 'maskable' : 'any',
+    });
+  }
+  return entries;
+}
+
+/** All ten manifests are byte-identical except `theme_color`/`background_color`,
+    so the family/mode pair is not a parameter — it only selects the colour the
+    caller passes in. Keeping identity fields (`id`, `start_url`, `scope`, `name`)
+    out of the per-theme axis is deliberate: varying them would make a theme
+    switch look like a different app and orphan an existing installation. */
+export function buildManifest(themeColor: string, icons: IconEntry[]): Record<string, unknown> {
+  return {
+    // `id` pins app identity across releases and across theme switches. Without
+    // it, Chromium derives identity from `start_url`, and any future change
+    // there would strand the installed app as a separate entry.
+    id: '/',
+    name: 'Kteam',
+    short_name: 'Kteam',
+    description: 'Coordinate Claude and Codex teammates in detached sessions.',
+    start_url: '/',
+    scope: '/',
+    display: 'standalone',
+    orientation: 'any',
+    theme_color: themeColor,
+    background_color: themeColor,
+    icons: manifestIcons(icons),
+  };
+}
+
+/** The offline document. Token-less by construction (it is a generated static
+    file that the daemon's token substitution never touches — it only rewrites
+    index.html), with the theme bootstrap and CSS inlined because a service
+    worker serving this page may be the only thing that responds at all. */
+export function buildOfflineHtml(
+  colors: Map<string, { bg: string; fg: string; accent: string; border: string }>,
+): string {
+  // One CSS rule per resolved theme, keyed by the same single `data-theme`
+  // attribute the app uses, so the offline page honours the user's theme
+  // without importing the 1400-line stylesheet.
+  const rules = [...colors]
+    .map(
+      ([theme, c]) =>
+        `      [data-theme='${theme}'] { --bg: ${c.bg}; --fg: ${c.fg}; --accent: ${c.accent}; --border: ${c.border}; }`,
+    )
+    .join('\n');
+
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="robots" content="noindex" />
+    <title>Kteam — not connected</title>
+    <!-- Generated by scripts/gen-pwa.ts. Do not edit; edit the generator.
+         Contains NO daemon token and NO session data: the service worker never
+         caches navigations or any daemon API response, so an offline launch is
+         honestly disconnected rather than a stale-looking app. This file is
+         asserted to contain no API path and no external reference at all
+         (scripts/build-pwa.test.ts) — it must render with zero network. -->
+    <script>
+      // Same contract as index.html's pre-paint bootstrap, minimised: resolve
+      // the stored preference to one data-theme attribute before first paint.
+      (function () {
+        var FAMILIES = ['studio', 'mission', 'neo', 'ember', 'contrast'];
+        var MODES = ['system', 'light', 'dark'];
+        var family = 'studio';
+        var mode = 'system';
+        try {
+          var raw = localStorage.getItem('kteam-theme');
+          if (raw) {
+            var text = raw.trim();
+            if (text.charAt(0) === '{') {
+              var o = JSON.parse(text);
+              if (o && FAMILIES.indexOf(o.family) >= 0) family = o.family;
+              if (o && MODES.indexOf(o.mode) >= 0) mode = o.mode;
+            } else if (MODES.indexOf(text) >= 0) {
+              mode = text;
+            } else {
+              var cut = text.lastIndexOf('-');
+              var f = cut > 0 ? text.slice(0, cut) : '';
+              var m = cut > 0 ? text.slice(cut + 1) : '';
+              if (FAMILIES.indexOf(f) >= 0 && (m === 'light' || m === 'dark')) {
+                family = f;
+                mode = m;
+              }
+            }
+          }
+        } catch (e) {
+          /* private mode — defaults are fine */
+        }
+        var resolved =
+          mode === 'system'
+            ? window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+              ? 'dark'
+              : 'light'
+            : mode;
+        document.documentElement.setAttribute('data-theme', family + '-' + resolved);
+      })();
+    </script>
+    <style>
+      :root { --bg: #fbfbfc; --fg: #17171b; --accent: #4f52d6; --border: #e7e7ec; }
+${rules}
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; }
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: max(24px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right))
+          max(24px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left));
+        background: var(--bg);
+        color: var(--fg);
+        font: 14px/1.5 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      main { max-width: 34rem; text-align: center; }
+      h1 { margin: 0 0 0.5rem; font-size: 1.125rem; font-weight: 600; letter-spacing: -0.01em; }
+      p { margin: 0 0 1.5rem; opacity: 0.8; }
+      code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; }
+      button {
+        font: inherit;
+        font-weight: 600;
+        color: var(--bg);
+        background: var(--accent);
+        border: 1px solid var(--accent);
+        border-radius: 8px;
+        /* 44px min target for coarse pointers. */
+        min-height: 44px;
+        padding: 0 1.25rem;
+        cursor: pointer;
+      }
+      button:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Kteam is not connected</h1>
+      <p>
+        The <code>kteamd</code> daemon is unreachable. Kteam keeps no offline copy of
+        your sessions, so there is nothing to show until it answers again.
+      </p>
+      <button type="button" onclick="location.reload()">Retry</button>
+    </main>
+  </body>
+</html>
+`;
+}
+
+/** Remove earlier generations of OUR OWN output only. Anything hand-authored in
+    public/, and the committed icons, are untouched — this is what keeps a stale
+    manifest from a previous release out of the next `ui-dist` while leaving the
+    tracked provenance files alone (audit C1). */
+export function cleanGeneratedPublic(publicDir: string): string[] {
+  if (!existsSync(publicDir)) return [];
+  const removed: string[] = [];
+  for (const name of readdirSync(publicDir)) {
+    if (!isGeneratedPublicFile(name)) continue;
+    unlinkSync(join(publicDir, name));
+    removed.push(name);
+  }
+  return removed;
+}
+
+export function generate(release: string): string[] {
+  const icons = (JSON.parse(readFileSync(ICONS_MANIFEST, 'utf8')) as { icons: IconEntry[] }).icons;
+  const themes = readThemeTokens(defaultCssEntry(UI_ROOT));
+  mkdirSync(PUBLIC_DIR, { recursive: true });
+
+  const removed = cleanGeneratedPublic(PUBLIC_DIR);
+  if (removed.length > 0) console.log(`gen-pwa: swept ${removed.length} stale generated file(s) from public/`);
+
+  const written: string[] = [];
+  const offlineColors = new Map<string, { bg: string; fg: string; accent: string; border: string }>();
+
+  for (const family of FAMILIES) {
+    for (const mode of MODES) {
+      // Any missing block or token throws out of readThemeTokens — the build
+      // fails instead of shipping a wrong-coloured manifest (audit M4).
+      const bg = themes.token(family, mode, 'bg');
+      const manifest = buildManifest(bg, icons);
+      const name = manifestName(family, mode, release);
+      writeFileSync(join(PUBLIC_DIR, name), `${JSON.stringify(manifest, null, 2)}\n`);
+      written.push(name);
+      offlineColors.set(`${family}-${mode}`, {
+        bg,
+        fg: themes.token(family, mode, 'fg'),
+        accent: themes.token(family, mode, 'accent'),
+        border: themes.token(family, mode, 'border'),
+      });
+    }
+  }
+
+  const offline = offlineName(release);
+  writeFileSync(join(PUBLIC_DIR, offline), buildOfflineHtml(offlineColors));
+  written.push(offline);
+  return written;
+}
+
+if (import.meta.main) {
+  const release = releaseIdFromArgv(process.argv.slice(2));
+  const written = generate(release);
+  console.log(`gen-pwa: wrote ${written.length} file(s) into public/ for release ${release}`);
+}
