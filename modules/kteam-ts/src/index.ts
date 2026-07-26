@@ -599,8 +599,12 @@ program
   .argument('<id>')
   .requiredOption('-a, --agent <binary>', 'the auto-mode wrapper to move the session onto (same harness kind)')
   .option('--model <model>', 'override the model on the new account; defaults to the new wrapper KTEAM_MODEL')
-  .action(async (id, options: { agent: string; model?: string }) =>
-    printView(await (await client()).migrate(id, options.agent, options.model)),
+  .option(
+    '--allow-context-downgrade',
+    'permit migrating onto an account with a smaller context window than the current one (normally refused)',
+  )
+  .action(async (id, options: { agent: string; model?: string; allowContextDowngrade?: boolean }) =>
+    printView(await (await client()).migrate(id, options.agent, options.model, options.allowContextDowngrade)),
   );
 program
   .command('rename')
