@@ -306,20 +306,27 @@ export function startWorkerLifecycle(deps: WorkerLifecycleDeps): () => void {
  *
  *  This is the fourth-generation eviction surfacing (plan §4.4/B3): a tab whose
  *  generation's cache has been pruned tries to lazy-load its chat chunk, the URL
- *  is gone from both cache and server, and the dynamic import rejects.
- *  `preventDefault()` stops it becoming an unhandled rejection, and the chip
- *  comes up in RECOVERY wording — this tab is already broken, and the reader
- *  needs to know a reload is the fix rather than reading a spinner forever.
+ *  is gone from both cache and server, so the fetch behind the import fails and
+ *  Vite dispatches this event. `preventDefault()` is what stops the failure
+ *  becoming an unhandled rejection in the console (see the paragraph below for
+ *  the mechanism — it does not stop the failure itself), and the chip comes up
+ *  in RECOVERY wording: this tab is already broken, and the reader needs to know
+ *  a reload is the fix rather than reading a spinner forever.
  *
  *  HALF THE STORY, AND THE HALF THAT CANNOT SAVE THE PAGE ON ITS OWN.
- *  `preventDefault()` suppresses only the global unhandled-rejection surface;
- *  the `React.lazy` promise still rejects and React still rethrows it during
- *  render. Stage E measured what that costs with nothing catching it: the root
- *  unmounts, `#root` is emptied and the chip this watch just raised is
- *  destroyed along with it (`drill-nocache.json`, `rootChildren: 0`,
- *  `chip: null`). The render-time half is caught by `ChunkErrorBoundary`, which
- *  raises recovery through the same `raiseRecovery` this does. The two are a
- *  pair — dropping either one puts the reader back on a blank page.
+ *  `preventDefault()` does not make the failure go away; it moves where the
+ *  failure surfaces. Vite's preload helper treats a default-prevented
+ *  `vite:preloadError` as handled and RESOLVES the import with `undefined`
+ *  rather than rethrowing — which is exactly why the global unhandled-rejection
+ *  surface goes quiet. The lazy factory in `App.tsx` then throws on that
+ *  `undefined`, so the promise `React.lazy` is waiting on rejects after all,
+ *  and React rethrows that error during render. Stage E measured what that
+ *  costs with nothing catching it: the root unmounts, `#root` is emptied and
+ *  the chip this watch just raised is destroyed along with it
+ *  (`drill-nocache.json`, `rootChildren: 0`, `chip: null`). The render-time
+ *  half is caught by `ChunkErrorBoundary`, which raises recovery through the
+ *  same `raiseRecovery` this does. The two are a pair — dropping either one
+ *  puts the reader back on a blank page.
  *
  *  Watched unconditionally, with no service-worker gate: a preload can fail on a
  *  plain redeploy with no worker involved at all, and the reader is just as stuck.

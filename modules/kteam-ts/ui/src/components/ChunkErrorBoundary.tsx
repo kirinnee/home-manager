@@ -10,25 +10,30 @@
 // whole root and takes the chip down with it. Measured at the failure point:
 // `#root.children.length === 0`, `document.body.innerText === ""`, `chip: null`.
 //
-// The mechanism is that `preventDefault()` only suppresses the GLOBAL
-// unhandled-rejection surface. The rejected `import()` still rejects the
-// `React.lazy` promise, React rethrows it during render, and — with no error
-// boundary anywhere in the tree — React's documented response to an uncaught
-// render error is to unmount the entire root. So the one UI element that exists
-// to rescue this exact situation was being destroyed by the event that raises
-// it. This boundary is the missing half: `startPreloadErrorWatch` handles the
+// The mechanism is that `preventDefault()` does not make the failure go away —
+// it moves where the failure surfaces. Vite's preload helper treats a
+// default-prevented `vite:preloadError` as handled and RESOLVES the import with
+// `undefined` instead of rethrowing, which is what keeps the GLOBAL
+// unhandled-rejection surface quiet. `App.tsx`'s lazy factory then throws on
+// that `undefined`, so the promise `React.lazy` is waiting on rejects after
+// all, React rethrows that error during render, and — with no error boundary
+// anywhere in the tree — React's documented response to an uncaught render
+// error is to unmount the entire root. So the one UI element that exists to
+// rescue this exact situation was being destroyed by the event that raises it.
+// This boundary is the missing half: `startPreloadErrorWatch` handles the
 // preload-path failure, this handles the render-time rethrow. They are a pair,
 // not alternatives.
 //
 // WHY IT CATCHES EVERYTHING RATHER THAN SNIFFING FOR CHUNK ERRORS.
 // The obvious refinement — only swallow errors whose message matches Vite's
 // "Failed to fetch dynamically imported module" — would MISS the very failure
-// this exists for. Because the watch calls `preventDefault()`, Vite's preload
-// helper resolves the import with `undefined` instead of rethrowing, so the
-// error that actually reaches the boundary is the TypeError thrown one line
-// later by the lazy factory reading a property off `undefined`. The drill
-// recorded it verbatim: `Cannot read properties of undefined (reading
-// 'SessionChatPage')`. Nothing in that message says "chunk". So: catch-all, and
+// this exists for. Vite's own message never reaches React: what reaches the
+// boundary is whatever the lazy factory throws on the `undefined` it was handed
+// instead. `App.tsx`'s chat-page factory checks for it and throws a named
+// error; the unhardened factories, such as `WardenVerdicts`'s `Markdown`, throw
+// the TypeError from reading a property off `undefined` — which is what the
+// drill recorded verbatim, `Cannot read properties of undefined (reading
+// 'SessionChatPage')`. Nothing in either message says "chunk". So: catch-all, and
 // a broken pane carrying an honest reload offer beats a blank root in every
 // case, including a genuine render bug. `componentDidCatch` still reports the
 // error and the component stack to the console, so dev surfaces keep it.
