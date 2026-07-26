@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  kteam app mark — the single source of truth for every generated icon.
+
+  Contract (do not break without re-running `bun run gen:icons` and committing
+  the results):
+
+  * 512x512 canvas, full-bleed opaque background. Maskable icons MUST be
+    full-bleed; a transparent maskable icon renders as a floating sliver once
+    the platform applies its own mask.
+  * All ink lives inside the maskable SAFE ZONE — the centred circle of radius
+    40% of the canvas (204.8px at 512). The drawn bounding box is
+    x 159..353, y 119..395, i.e. 194x276 centred on (256,256); its furthest
+    corner sits ~170px from the centre, and no stroke extent exceeds ~168px,
+    so the mark survives a circular, squircle or teardrop mask untouched.
+    `scripts/verify-icons.ts` re-measures this from the rendered PNGs instead
+    of trusting this comment.
+    NOTE: XML comments cannot contain a double hyphen, so CSS custom property
+    names are written here without their leading dashes.
+  * Colours are the Studio accent on the Studio dark page background
+    (accent #4f52d6 / bg #0b0b0d in src/themes.css). The mark is
+    theme-independent on purpose: an installed icon is snapshotted by the OS
+    (permanently on iOS), so it can never track the in-app theme.
+  * Arms use BUTT caps (the default). Square caps would extend each diagonal
+    past its endpoint and eat the clearance between the lower arm and the
+    cursor bar, and would push the corners outside the safe zone.
+
+  Shape: a terminal-prompt "K" — a monospace stem with two arms meeting at the
+  x-height, over a cursor bar. The "any" icon variants are the same artwork
+  rendered larger (the generator crops the outer padding); the maskable
+  variants keep this padding as mask headroom.
+-->
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="512"
+  height="512"
+  viewBox="0 0 512 512"
+  role="img"
+  aria-label="kteam"
+>
+  <rect width="512" height="512" fill="#0b0b0d" />
+  <g fill="#4f52d6">
+    <!-- stem -->
+    <rect x="159" y="119" width="42" height="220" />
+    <!-- upper arm (starts inside the stem so the join is solid) -->
+    <path d="M199 229 L329 133" fill="none" stroke="#4f52d6" stroke-width="40" />
+    <!-- lower arm -->
+    <path d="M199 229 L329 325" fill="none" stroke="#4f52d6" stroke-width="40" />
+    <!-- cursor bar -->
+    <rect x="211" y="369" width="142" height="26" />
+  </g>
+</svg>
