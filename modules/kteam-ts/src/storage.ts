@@ -1,6 +1,6 @@
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rmSync } from 'fs';
+import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, readSync, rmSync } from 'fs';
 import { mkdir, open, readFile, readdir, rename, rm, stat } from 'fs/promises';
 import os from 'os';
 import path from 'path';
@@ -65,6 +65,29 @@ export interface EventStoreOptions {
   /** Import on-disk sessions when opening. Defaults to true. */
   importExisting?: boolean;
 }
+
+/** Retention policy for the hot-store archival pass (B3). Storage owns the
+ *  mechanism (which rows leave the cache); the caller owns the policy inputs —
+ *  crucially `isProtected`, since only the session manager knows which sessions
+ *  are warden targets or have a live monitor and must never be archived. */
+export interface ArchivalPolicy {
+  /** Terminal sessions whose last activity is older than this many days are
+   *  archived. `<= 0` disables the pass entirely (returns no candidates). */
+  retentionDays: number;
+  /** Injectable wall-clock 'now' in ms for the age cutoff. Defaults to Date.now(). */
+  nowMs?: number;
+  /** Status values that count as terminal. Defaults to the session manager's
+   *  terminal set (completed/failed/stalled/stopped). */
+  terminalStatuses?: readonly string[];
+  /** Never-archive predicate supplied by the caller: warden targets, sessions
+   *  with a live monitor, or anything else the daemon still holds. */
+  isProtected?: (id: string) => boolean;
+  /** Cap on how many sessions a single pass archives, so retention never
+   *  competes with launches or event delivery. Defaults to 50. */
+  limit?: number;
+}
+
+const DEFAULT_TERMINAL_STATUSES: readonly string[] = ['completed', 'failed', 'stalled', 'stopped'];
 
 /** Pointer-index schema generation.
  *
@@ -347,6 +370,11 @@ export class EventStore {
    *  is the only writer of this database, so an in-process cache is
    *  authoritative between writes. */
   private readonly sessionCache = new Map<string, IndexedSession>();
+  /** Ids of sessions archived out of the hot cache (B3). An in-process mirror of
+   *  the `archived_sessions` table so the hot write path can tell in O(1) whether
+   *  a metadata write needs to clear a persisted archive marker, without a DB
+   *  round-trip on every index. */
+  private readonly archivedIds = new Set<string>();
   /** Journal tail state per session, so a warm append skips the stat + the
    *  last-byte read it used to pay on every single event. */
   private readonly journalTails = new Map<string, { size: number; endsWithNewline: boolean }>();
@@ -362,14 +390,20 @@ export class EventStore {
     this.loadSessionCache();
   }
 
-  /** Fill the metadata cache from the index in ONE query. */
+  /** Fill the metadata cache from the index in ONE query, EXCLUDING archived
+   *  sessions (B3) — the whole point of archival is to keep them off the hot
+   *  path, so the boot-time parse never pays for aged terminal history. */
   private loadSessionCache(): void {
     this.sessionCache.clear();
+    this.archivedIds.clear();
+    for (const { id } of this.database.query<{ id: string }, []>(`SELECT id FROM archived_sessions`).all()) {
+      this.archivedIds.add(id);
+    }
     const rows = this.database
       .query<
         SessionRow,
         []
-      >(`SELECT id, directory, status, created_at, updated_at, last_sequence, config_json, state_json FROM sessions`)
+      >(`SELECT id, directory, status, created_at, updated_at, last_sequence, config_json, state_json FROM sessions WHERE id NOT IN (SELECT id FROM archived_sessions)`)
       .all();
     for (const row of rows) {
       try {
@@ -478,6 +512,20 @@ export class EventStore {
         pointer_count INTEGER NOT NULL,
         PRIMARY KEY (session_id, source_file),
         FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      );
+      /** Hot-store retention (B3). A terminal session older than the retention
+       *  window is ARCHIVED — its metadata row and journals stay on disk, but it
+       *  is kept OUT of the in-process sessionCache so it no longer costs a parse
+       *  at every boot nor a scan on every consistency sweep. This is purely a
+       *  hot-path exclusion marker; it holds nothing that is not re-derivable, so
+       *  it is intentionally NOT recreated by a journal rebuild (an un-archive on
+       *  rebuild is harmless — the next retention pass re-archives). Additive via
+       *  IF NOT EXISTS, so it needs no SCHEMA_VERSION bump and never forces the
+       *  live store to rebuild. */
+      CREATE TABLE IF NOT EXISTS archived_sessions (
+        id TEXT PRIMARY KEY,
+        archived_at TEXT NOT NULL,
+        FOREIGN KEY (id) REFERENCES sessions(id) ON DELETE CASCADE
       );
     `);
     // The fleet feed's ONLY ordering index. (time, session_id, sequence) is the
@@ -764,11 +812,113 @@ export class EventStore {
     this.assertOpen();
     this.database.query('DELETE FROM chat_pointers WHERE session_id = ?').run(sessionId);
     this.database.query('DELETE FROM chat_sources WHERE session_id = ?').run(sessionId);
+    // archived_sessions.id CASCADEs off sessions, but the pragma only fires when
+    // enabled for THIS connection — delete explicitly so the mirror stays exact.
+    this.database.query('DELETE FROM archived_sessions WHERE id = ?').run(sessionId);
     this.database.query('DELETE FROM sessions WHERE id = ?').run(sessionId);
     this.sessionCache.delete(sessionId);
+    this.archivedIds.delete(sessionId);
     this.lastSequences.delete(sessionId);
     this.journalTails.delete(sessionId);
     this.knownDirectories.delete(sessionId);
+  }
+
+  /** Is this session currently archived out of the hot cache? (B3) */
+  isArchived(sessionId: string): boolean {
+    this.assertOpen();
+    return this.archivedIds.has(sessionId);
+  }
+
+  /** Ids of every archived session, for `kteam ps -a` and diagnostics. (B3) */
+  archivedSessionIds(): string[] {
+    this.assertOpen();
+    return [...this.archivedIds].sort();
+  }
+
+  /** Archive one terminal session: keep its row and journals on disk but drop it
+   *  from the hot cache so it stops costing a parse per boot and a scan per
+   *  sweep. Returns false (a no-op) if the session is unknown or already gone —
+   *  callers decide the policy; this is only the mechanism. (B3) */
+  archiveSession(sessionId: string): boolean {
+    validateSessionId(sessionId);
+    this.assertOpen();
+    const known = this.database.query<{ id: string }, [string]>('SELECT id FROM sessions WHERE id = ?').get(sessionId);
+    if (!known) return false;
+    this.database
+      .query('INSERT INTO archived_sessions (id, archived_at) VALUES (?, ?) ON CONFLICT(id) DO NOTHING')
+      .run(sessionId, now());
+    this.archivedIds.add(sessionId);
+    this.sessionCache.delete(sessionId);
+    return true;
+  }
+
+  /** Bring an archived session back into the hot cache from its persisted row.
+   *  Idempotent; returns false if the session was not archived. (B3) */
+  unarchiveSession(sessionId: string): boolean {
+    validateSessionId(sessionId);
+    this.assertOpen();
+    if (!this.archivedIds.delete(sessionId)) return false;
+    this.database.query('DELETE FROM archived_sessions WHERE id = ?').run(sessionId);
+    const row = this.database
+      .query<
+        SessionRow,
+        [string]
+      >(`SELECT id, directory, status, created_at, updated_at, last_sequence, config_json, state_json FROM sessions WHERE id = ?`)
+      .get(sessionId);
+    if (row) {
+      try {
+        this.sessionCache.set(sessionId, this.sessionFromRow(row));
+      } catch {
+        // Unparseable row: leave it out of the cache; a syncSession rewrites it.
+      }
+    }
+    return true;
+  }
+
+  /** Resolve a session by id whether or not it is archived, un-archiving it as a
+   *  side effect (the "lazy-load on demand" contract for `resolveRef`/`resume`:
+   *  touching an archived session revives it). Live sessions come straight from
+   *  the cache; an archived one is read from its persisted row. (B3) */
+  resolveIncludingArchived(sessionId: string): IndexedSession | undefined {
+    validateSessionId(sessionId);
+    this.assertOpen();
+    const live = this.sessionCache.get(sessionId);
+    if (live) return live;
+    if (!this.archivedIds.has(sessionId)) return undefined;
+    this.unarchiveSession(sessionId);
+    return this.sessionCache.get(sessionId);
+  }
+
+  /** The retention pass (B3). Archive terminal sessions whose last activity is
+   *  older than `retentionDays`, skipping anything the caller marks protected
+   *  (warden targets, live monitors) and anything younger than the window.
+   *  Oldest-first up to `limit`. Returns the ids it archived. A `retentionDays`
+   *  of `<= 0` disables it (returns []), which is how the feature ships OFF by
+   *  default. Only ever moves cache membership — never deletes data. */
+  archiveStaleTerminalSessions(policy: ArchivalPolicy): string[] {
+    this.assertOpen();
+    if (!(policy.retentionDays > 0)) return [];
+    const nowMs = policy.nowMs ?? Date.now();
+    const cutoffMs = nowMs - policy.retentionDays * 86_400_000;
+    const terminal = new Set(policy.terminalStatuses ?? DEFAULT_TERMINAL_STATUSES);
+    const limit = policy.limit ?? 50;
+    const candidates: { id: string; ageKey: number }[] = [];
+    for (const session of this.sessionCache.values()) {
+      if (!session.status || !terminal.has(session.status)) continue;
+      if (policy.isProtected?.(session.id)) continue;
+      const stamp = session.updatedAt ?? session.createdAt;
+      const stampMs = stamp ? Date.parse(stamp) : NaN;
+      // No parseable activity stamp ⇒ cannot prove it is old ⇒ never archive.
+      if (!Number.isFinite(stampMs) || stampMs >= cutoffMs) continue;
+      candidates.push({ id: session.id, ageKey: stampMs });
+    }
+    candidates.sort((a, b) => a.ageKey - b.ageKey);
+    const archived: string[] = [];
+    for (const candidate of candidates) {
+      if (archived.length >= limit) break;
+      if (this.archiveSession(candidate.id)) archived.push(candidate.id);
+    }
+    return archived;
   }
 
   /** Bounded CROSS-SESSION feed, merged by TIME at read time.
@@ -1214,12 +1364,20 @@ export class EventStore {
     const sessionIds = await this.discoverSessionIds();
     const problems: JournalProblem[] = [];
     let eventCount = 0;
+    let imported = 0;
     for (const sessionId of sessionIds) {
+      // Archived sessions (B3) stay OUT of the boot import — that skip IS the
+      // retention payoff: their aged journals are never re-scanned and their
+      // metadata never re-parsed into the hot cache. They remain resolvable on
+      // demand (resolveIncludingArchived) and revive on the next real write.
+      // (A full rebuildIndex still processes them — see its note.)
+      if (this.archivedIds.has(sessionId)) continue;
       const result = await this.syncSession(sessionId);
       eventCount += result.eventCount;
+      imported += 1;
       problems.push(...result.problems);
     }
-    return { sessionCount: sessionIds.length, eventCount, problems };
+    return { sessionCount: imported, eventCount, problems };
   }
 
   /** Clear the disposable index and recreate it entirely from session files. */
@@ -1365,6 +1523,13 @@ export class EventStore {
     knownLastSequence?: number,
     journal?: { size: number; mtimeMs: number },
   ): Promise<void> {
+    // A metadata write means the session is live again (resume, a late event):
+    // un-archive it so it rejoins the hot cache and its exclusion does not
+    // survive across the next boot. Guarded on the in-memory mirror so the DB
+    // is touched only when a marker actually exists — the hot path pays nothing.
+    if (this.archivedIds.size && this.archivedIds.delete(sessionId)) {
+      this.database.query('DELETE FROM archived_sessions WHERE id = ?').run(sessionId);
+    }
     const cached = this.sessionCache.get(sessionId);
     // Key PRESENCE decides, not the value: the import path legitimately passes
     // `{ config: undefined }` for a session whose config.json is gone, and that
@@ -1521,9 +1686,15 @@ export class EventStore {
     const sessions: string[] = [];
     for (const entry of entries) {
       if (!entry.isDirectory() || !SESSION_ID.test(entry.name) || RESERVED_DIRECTORIES.has(entry.name)) continue;
-      const directory = path.join(this.home, entry.name);
-      const hasSessionArtifact = ['config.json', 'state.json', 'events.jsonl'].some(file =>
-        existsSync(path.join(directory, file)),
+      // One directory listing instead of three blocking existsSync stats per
+      // candidate (this runs twice per consistency pass over ~700 directories):
+      // a single async readdir yields every artifact name at once, and a
+      // directory read failure is treated as "no artifacts", exactly as three
+      // failed existsSync calls were. Semantics are unchanged — a session dir
+      // still qualifies iff it holds any of the three artifacts.
+      const contents = await readdir(path.join(this.home, entry.name)).catch(() => [] as string[]);
+      const hasSessionArtifact = contents.some(
+        name => name === 'config.json' || name === 'state.json' || name === 'events.jsonl',
       );
       if (hasSessionArtifact) sessions.push(entry.name);
     }

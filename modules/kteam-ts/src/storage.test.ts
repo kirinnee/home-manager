@@ -335,3 +335,140 @@ describe('pointer index (A2)', () => {
     store.close();
   });
 });
+
+describe('hot-store archival / retention (B3)', () => {
+  const DAY = 86_400_000;
+  const NOW = Date.parse('2026-07-26T00:00:00.000Z');
+
+  async function makeSession(
+    store: EventStore,
+    id: string,
+    options: { status: string; ageDays: number },
+  ): Promise<void> {
+    const iso = new Date(NOW - options.ageDays * DAY).toISOString();
+    await store.writeConfig(id, { id, createdAt: iso, updatedAt: iso });
+    await store.writeState(id, { id, status: options.status });
+  }
+
+  test('the pass archives only aged, terminal, unprotected sessions', async () => {
+    const home = await temporaryHome();
+    const store = await EventStore.open({ home });
+    await makeSession(store, 'old-done', { status: 'completed', ageDays: 30 });
+    await makeSession(store, 'young-done', { status: 'completed', ageDays: 2 });
+    await makeSession(store, 'old-running', { status: 'running', ageDays: 30 });
+    await makeSession(store, 'old-warden', { status: 'stopped', ageDays: 30 });
+
+    const archived = store.archiveStaleTerminalSessions({
+      retentionDays: 14,
+      nowMs: NOW,
+      isProtected: id => id === 'old-warden', // e.g. a warden target or live monitor
+    });
+
+    // Only the aged, terminal, unprotected session is archived; young (inside
+    // the window), non-terminal, and protected sessions are all left alone.
+    expect(archived).toEqual(['old-done']);
+    expect(store.isArchived('old-done')).toBe(true);
+    expect(store.getSession('old-done')).toBeUndefined();
+    expect(
+      store
+        .listSessions()
+        .map(session => session.id)
+        .sort(),
+    ).toEqual(['old-running', 'old-warden', 'young-done']);
+    store.close();
+  });
+
+  test('retentionDays <= 0 disables the pass (ships OFF by default)', async () => {
+    const home = await temporaryHome();
+    const store = await EventStore.open({ home });
+    await makeSession(store, 'ancient-done', { status: 'completed', ageDays: 900 });
+    expect(store.archiveStaleTerminalSessions({ retentionDays: 0, nowMs: NOW })).toEqual([]);
+    expect(store.getSession('ancient-done')).toBeDefined();
+    expect(store.isArchived('ancient-done')).toBe(false);
+    store.close();
+  });
+
+  test('the per-pass limit archives the oldest first and leaves the rest', async () => {
+    const home = await temporaryHome();
+    const store = await EventStore.open({ home });
+    await makeSession(store, 'done-100d', { status: 'completed', ageDays: 100 });
+    await makeSession(store, 'done-90d', { status: 'completed', ageDays: 90 });
+    await makeSession(store, 'done-80d', { status: 'completed', ageDays: 80 });
+
+    const archived = store.archiveStaleTerminalSessions({ retentionDays: 14, nowMs: NOW, limit: 2 });
+    expect(archived).toEqual(['done-100d', 'done-90d']); // oldest two
+    expect(store.isArchived('done-80d')).toBe(false);
+    store.close();
+  });
+
+  test('an archived session is resolvable by id and revives on resolve', async () => {
+    const home = await temporaryHome();
+    const store = await EventStore.open({ home });
+    await makeSession(store, 'old-done', { status: 'completed', ageDays: 30 });
+    store.archiveStaleTerminalSessions({ retentionDays: 14, nowMs: NOW });
+    expect(store.getSession('old-done')).toBeUndefined();
+
+    // resolveRef's lazy-load: touching it returns the session AND un-archives it.
+    const resolved = store.resolveIncludingArchived('old-done');
+    expect(resolved?.id).toBe('old-done');
+    expect(resolved?.status).toBe('completed');
+    expect(store.isArchived('old-done')).toBe(false);
+    expect(store.getSession('old-done')?.id).toBe('old-done');
+    // A never-archived, unknown id still resolves to undefined.
+    expect(store.resolveIncludingArchived('never-existed')).toBeUndefined();
+    store.close();
+  });
+
+  test('archival survives a reopen: import skips it, but it stays resolvable', async () => {
+    const home = await temporaryHome();
+    let store = await EventStore.open({ home });
+    await makeSession(store, 'old-done', { status: 'completed', ageDays: 30 });
+    await makeSession(store, 'live-one', { status: 'completed', ageDays: 1 });
+    store.archiveStaleTerminalSessions({ retentionDays: 14, nowMs: NOW });
+    store.close();
+
+    // Reopen: importFromDisk must NOT re-import/revive the archived session —
+    // that skip is the boot-cost payoff.
+    store = await EventStore.open({ home });
+    expect(store.isArchived('old-done')).toBe(true);
+    expect(store.getSession('old-done')).toBeUndefined();
+    expect(store.listSessions().map(session => session.id)).toEqual(['live-one']);
+    // Still resolvable on demand after the reopen.
+    expect(store.resolveIncludingArchived('old-done')?.id).toBe('old-done');
+    expect(store.isArchived('old-done')).toBe(false);
+    store.close();
+  });
+
+  test('a live write to an archived session un-archives it (resume path)', async () => {
+    const home = await temporaryHome();
+    const store = await EventStore.open({ home });
+    await makeSession(store, 'old-done', { status: 'completed', ageDays: 30 });
+    store.archiveStaleTerminalSessions({ retentionDays: 14, nowMs: NOW });
+    expect(store.isArchived('old-done')).toBe(true);
+
+    // Resuming writes fresh state — that metadata write revives it automatically.
+    await store.writeState('old-done', { id: 'old-done', status: 'running' });
+    expect(store.isArchived('old-done')).toBe(false);
+    expect(store.getSession('old-done')?.status).toBe('running');
+    store.close();
+  });
+
+  test('discoverSessionIds still lists exactly the dirs holding a session artifact', async () => {
+    const home = await temporaryHome();
+    const store = await EventStore.open({ home, importExisting: false });
+    // A directory qualifies iff it holds config.json, state.json, or events.jsonl.
+    const write = async (dir: string, file: string, body: string) => {
+      await mkdir(path.join(home, dir), { recursive: true });
+      await writeFile(path.join(home, dir, file), body);
+    };
+    await write('sess-a', 'config.json', '{}');
+    await write('sess-b', 'events.jsonl', '');
+    await write('sess-c', 'state.json', '{}');
+    await mkdir(path.join(home, 'sess-empty'), { recursive: true });
+    await write('sess-other', 'notes.txt', 'hi');
+    await write('daemon', 'config.json', '{}'); // reserved name
+
+    expect(await store.sessionIdsOnDisk()).toEqual(['sess-a', 'sess-b', 'sess-c']);
+    store.close();
+  });
+});
