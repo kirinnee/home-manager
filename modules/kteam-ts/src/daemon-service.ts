@@ -222,6 +222,29 @@ WantedBy=default.target
     return false;
   }
 
+  /** Startup liveness of the pid file, for the CLI's readiness wait. The daemon
+   *  writes paths.pid ONLY after it binds (daemon-entry.ts), so:
+   *   - 'absent'  → no usable pid file yet: pre-bind (schema rebuild, EADDRINUSE
+   *                 drain) — still coming up, keep waiting.
+   *   - 'alive'   → the recorded pid answers signal 0: the process is up (may
+   *                 not be serving HTTP yet).
+   *   - 'dead'    → a pid is recorded but the process is gone: it bound, wrote
+   *                 its pid, then died.
+   *  Cheaper than status() (no service-manager shell-out); safe to poll. A 'dead'
+   *  verdict can also be a STALE pid from a prior crashed run, so the caller only
+   *  fast-fails on 'dead' after it has seen 'alive' in the same wait. */
+  async pidLiveness(): Promise<'alive' | 'dead' | 'absent'> {
+    const raw = (await readFile(this.paths.pid, 'utf8').catch(() => '')).trim();
+    const pid = Number(raw);
+    if (!raw || !Number.isFinite(pid) || pid <= 1) return 'absent';
+    try {
+      process.kill(pid, 0);
+      return 'alive';
+    } catch {
+      return 'dead';
+    }
+  }
+
   async status(): Promise<{ running: boolean; pid?: number }> {
     const pid = Number((await readFile(this.paths.pid, 'utf8').catch(() => '')).trim());
     if (Number.isFinite(pid) && pid > 1) {

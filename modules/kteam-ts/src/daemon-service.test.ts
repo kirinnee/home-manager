@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtemp, readFile, rm } from 'fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { DaemonService } from './daemon-service';
@@ -190,5 +190,46 @@ describe('test hermeticity (2026-07-24 live-unit clobber)', () => {
     const written = path.join(home, '.config', 'systemd', 'user', 'kteamd.service');
     expect(await readFile(written, 'utf8')).toContain('/usr/bin/kteamd');
     expect(written.startsWith(os.tmpdir())).toBe(true);
+  });
+});
+
+describe('pidLiveness (B2) — the readiness-wait death probe', () => {
+  async function serviceWithTeamHome(): Promise<{ service: DaemonService; pidFile: string }> {
+    const home = await temporaryHome();
+    const teamHome = path.join(home, '.kteam');
+    const paths = createPaths(teamHome);
+    await mkdir(paths.daemon, { recursive: true });
+    const service = new DaemonService(paths, '/usr/bin/kteamd', {
+      platform: 'linux',
+      home,
+      runner: async () => ({ code: 0, stdout: '', stderr: '' }),
+    });
+    return { service, pidFile: paths.pid };
+  }
+
+  test("no pid file yet reads 'absent' (pre-bind), so the wait keeps going", async () => {
+    const { service } = await serviceWithTeamHome();
+    expect(await service.pidLiveness()).toBe('absent');
+  });
+
+  test("a garbage or reserved pid reads 'absent', never 'dead'", async () => {
+    const { service, pidFile } = await serviceWithTeamHome();
+    await writeFile(pidFile, 'not-a-number\n');
+    expect(await service.pidLiveness()).toBe('absent');
+    await writeFile(pidFile, '1\n'); // pid 1 is reserved, not a real daemon
+    expect(await service.pidLiveness()).toBe('absent');
+  });
+
+  test("our own live pid reads 'alive'", async () => {
+    const { service, pidFile } = await serviceWithTeamHome();
+    await writeFile(pidFile, `${process.pid}\n`);
+    expect(await service.pidLiveness()).toBe('alive');
+  });
+
+  test("a recorded-but-gone pid reads 'dead' (bound, wrote pid, then exited)", async () => {
+    const { service, pidFile } = await serviceWithTeamHome();
+    // A pid that cannot belong to a running process on this box.
+    await writeFile(pidFile, '2147483000\n');
+    expect(await service.pidLiveness()).toBe('dead');
   });
 });
