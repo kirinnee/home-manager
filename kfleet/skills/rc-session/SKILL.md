@@ -10,29 +10,33 @@ themselves. Remote control is ON by default for Claude, so the same session cont
 the terminal, on the phone, or at claude.ai. This supersedes the old `klaude handoff` /
 `kodex handoff` (zellij) flow.
 
-## The session title: `[Teammate] Task Title`
+## Two names, and kteam composes the bracketed one for you
 
-Every session gets a human title of the form **`[Hayden] Fix Transcript`**:
+A session has **two** distinct names — do not conflate them:
 
-- `Hayden` — the **teammate callsign**, Title-Cased.
-- `Fix Transcript` — the **task**, natural Title Case, up to 5 words.
+- **The task title** — `--name`, the **PLAIN** task, natural Title Case, up to 5 words:
+  `Fix Transcript`. **No brackets, no callsign.** This is what `kteam ps` and the dashboard
+  show in the TASK column, stored verbatim.
+- **The teammate callsign** — `--teammate`, a slug like `hayden`. The session's identity.
+- **The Claude-side session name** — you do **not** pass this. kteam automatically names
+  Claude's own session **`[Teammate] Task`** (e.g. `[Hayden] Fix Transcript`) at launch, so
+  it shows up that way in claude.ai/code and the `claude` resume picker.
 
-This title is what `kteam ps` and the dashboard show in the TASK column. `kteam` stores it
-**verbatim** (the brackets survive), so compose it correctly up front.
+> **Pass the PLAIN task title as `--name` — never compose `[Teammate] …` by hand.** kteam
+> adds the `[Teammate]` prefix for the Claude-side name itself; if you pre-bracket `--name`
+> you pollute the TASK column with brackets the user does not want there (and risk a doubled
+> `[Team] [Team] …`). The callsign goes in `--teammate`; the plain task goes in `--name`.
 
-To compose it you must know the teammate name **before** you start — so pick it first with
-`kteam name`, then pass BOTH the chosen name (`--teammate`) and the composed title
-(`--name`) in one `kteam start`.
-
-> **`--name` is the TASK TITLE, not a slug and not the directory basename.** (The old
-> version of this skill passed the cwd basename as `--name` — that is wrong now.) The
-> teammate callsign goes in `--teammate`; the human title goes in `--name`.
+You must still know the teammate name **before** you start (kteam needs it at launch to
+compose the Claude-side name), so pick it first with `kteam name`, then pass BOTH
+`--teammate` and the plain `--name` in one `kteam start`.
 
 ## Steps
 
-1. **Get the task** (natural Title Case, up to 5 words) if the user did not already say what
-   the session is for — e.g. "Fix Transcript", "HQ Notes", "Codex Spike". If the user gave a
-   full name/title explicitly, use it as-is and skip the composing below.
+1. **Get the task title** (natural Title Case, up to 5 words) if the user did not already say
+   what the session is for — e.g. "Fix Transcript", "HQ Notes", "Codex Spike". This is the
+   **PLAIN** title only — you never add a `[Teammate]` prefix. If the user gave a full title
+   explicitly, use it as-is.
 
 2. **Pick the teammate name first:**
 
@@ -43,21 +47,20 @@ To compose it you must know the teammate name **before** you start — so pick i
    This is a _suggestion_, not a reservation — a later `start --teammate` can still collide
    (rare); if it does, just take the next suggestion (`kteam name -n 5` prints several).
 
-3. **Compose the title:** `[<Teammate>] <Task Title>` — teammate Title-Cased, task
-   Title-Cased. `hayden` + "fix transcript" → `[Hayden] Fix Transcript`.
-
-4. **Start with both flags in one shot** (run from the intended dir, or pass `--cwd`):
+3. **Start with both flags in one shot** (run from the intended dir, or pass `--cwd`). Put
+   the callsign in `--teammate` and the **plain** task title in `--name` — no brackets, no
+   callsign in `--name`. kteam composes the `[Hayden] Fix Transcript` Claude-side name itself:
 
    ```bash
    kteam start -a claude-auto-kirin --model 'claude-opus-5[1m]' --mode interactive \
-     --teammate hayden --name "[Hayden] Fix Transcript" --cwd "$PWD"
+     --teammate hayden --name "Fix Transcript" --cwd "$PWD"
    ```
 
-5. **Handle a collision.** If `start` fails with _"teammate name … is already taken by a
-   live session"_, pick the next suggested name, re-Title-Case, recompose the title, and
-   retry. (Or add `--teammate-fallback` to let kteam auto-assign a free name instead of
-   failing — but then read the ACTUAL teammate name back from kteam's output before you
-   report the title, since it will differ from what you composed.)
+4. **Handle a collision.** If `start` fails with _"teammate name … is already taken by a
+   live session"_, pick the next suggested name and retry with it in `--teammate` — the
+   plain `--name` title never changes. (Or add `--teammate-fallback` to let kteam
+   auto-assign a free name instead of failing — but then read the ACTUAL teammate name back
+   from kteam's output before you report, since kteam composes the Claude-side name from it.)
 
 ## Rules that always apply
 
@@ -78,7 +81,7 @@ Codex example:
 ```bash
 kteam name   # -> e.g. `marlon`
 kteam start -a codex-auto-loge --mode interactive \
-  --teammate marlon --name "[Marlon] Codex Spike" --cwd "$PWD"
+  --teammate marlon --name "Codex Spike" --cwd "$PWD"
 ```
 
 ## Attach
@@ -89,6 +92,18 @@ kteam attach <name> --print  # print the tmux command instead of attaching
 ```
 
 Inside an existing tmux client this switches the client rather than nesting.
+
+## Rename later
+
+`kteam rename <name> --name "New Title"` takes the **plain** title too — kept verbatim, no
+brackets, exactly the same rule as `start`. (`--teammate <slug>` renames the callsign.)
+
+One limitation to know: rename only rewrites config, so it updates kteam's **TASK column
+immediately**, but the **Claude-side session name only re-composes on the next
+relaunch/resume**. A session that is currently LIVE keeps its old `[Teammate] …` name in
+claude.ai/code and the resume picker until it is resumed. So after renaming a running
+session, expect the TASK column to change now and the claude.ai title to catch up only after
+the next `kteam resume`.
 
 ## Gather Only What Is Missing
 
@@ -120,12 +135,20 @@ history, the web UI (chat + live terminal view), and `kteam ps` visibility for f
 After launch, report (take the teammate NAME from kteam's own output — never re-derive it;
 say "reused existing session" if one was attached instead of created):
 
+Report the **plain task title** AND the **Claude-side session name** separately — since
+kteam now composes the second from the first, they differ and both matter (one is what the
+TASK column shows, the other is what claude.ai/code and the resume picker show):
+
 ```text
 Session started
-  Target : claude|codex
-  Dir    : <work_dir>
-  Title  : [Hayden] Fix Transcript
-  Name   : <teammate name>
-  Attach : kteam attach "<name>"
-  Remote : the pane prints a claude.ai/code link while RC is active
+  Target  : claude|codex
+  Dir     : <work_dir>
+  Task    : Fix Transcript             # plain title — kteam's TASK column, what you passed to --name
+  Session : [Hayden] Fix Transcript    # Claude-side name (claude.ai/code + resume picker), composed by kteam
+  Name    : <teammate name>
+  Attach  : kteam attach "<name>"
+  Remote  : the pane prints a claude.ai/code link while RC is active
 ```
+
+The `Session` line is Claude-only: Codex has no launch-time display-name flag, so a Codex
+session has no `[Teammate] Task` name — report just the plain Task for it.
