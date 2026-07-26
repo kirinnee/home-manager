@@ -1969,6 +1969,24 @@ export class SessionManager implements KTeamService {
     return /\bexited\b/i.test(detail) ? this.harnessExitReason(config, pane) : detail;
   }
 
+  /** Refuse resurrection when another live teammate already owns the same
+   *  labelled work in the same checkout. This is the durable successor signal
+   *  available to every revive path (send, control auto-revive, quota wake,
+   *  and transient retry), all of which converge on resume(). */
+  private liveSuccessorFor(view: SessionView): SessionConfig | undefined {
+    const label = view.config.label?.trim();
+    if (!label) return undefined;
+    const cwd = path.resolve(view.config.cwd);
+    for (const item of this.store.listSessions?.() ?? []) {
+      const config = item.config as SessionConfig | undefined;
+      const state = item.state as SessionState | undefined;
+      if (!config || !state || config.id === view.config.id) continue;
+      if (config.label?.trim() !== label || !config.cwd || path.resolve(config.cwd) !== cwd) continue;
+      if (!terminalStatuses.includes(state.status)) return config;
+    }
+    return undefined;
+  }
+
   async resume(id: string, message?: string, guard?: ResumeGuard): Promise<SessionView> {
     id = this.resolveRef(id);
     // Same pending-not-refused contract as send(): wait for an in-flight first
@@ -2016,6 +2034,14 @@ export class SessionManager implements KTeamService {
             if (!message) throw new Error('session is already running');
             return await this.sendUnlocked(view, message);
           }
+        }
+        const successor = this.liveSuccessorFor(view);
+        if (successor) {
+          const successorName = successor.teammate ?? successor.id;
+          throw new Error(
+            `refusing to revive session ${id}: live successor ${successorName} (${successor.id}) already owns ` +
+              `label ${view.config.label} in ${path.resolve(view.config.cwd)}; continue there or stop it first`,
+          );
         }
         // The old monitor must be disarmed before resume deliberately kills or
         // replaces its pane. Otherwise that monitor observes resume's own kill

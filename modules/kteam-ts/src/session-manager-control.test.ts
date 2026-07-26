@@ -72,6 +72,68 @@ describe('withAutoRevive (F4)', () => {
     ).rejects.toThrow('question not visible');
     expect(revives).toBe(0);
   });
+
+  test('auto-revive refuses when a live same-label and same-cwd successor already exists', async () => {
+    const manager = bareManager();
+    const targetConfig = {
+      id: 'target',
+      teammate: 'old-worker',
+      label: 'batch-a4',
+      cwd: '/repo',
+      tmuxSession: 'kteam-target-agent',
+      harness: 'claude',
+      mode: 'auto',
+      turn: 3,
+    };
+    const targetState = { id: 'target', status: 'failed', turn: 3 };
+    manager.resolveRef = (id: string) => id;
+    manager.launching = new Map();
+    manager.serialized = async (_id: string, work: () => Promise<unknown>) => await work();
+    manager.clearNeedsHuman = async () => undefined;
+    manager.cancelRetry = () => undefined;
+    manager.get = async () => ({ directory: '/sessions/target', config: targetConfig, state: targetState });
+    manager.store = {
+      listSessions: () => [
+        { id: 'target', config: targetConfig, state: targetState },
+        {
+          id: 'successor',
+          config: {
+            id: 'successor',
+            teammate: 'new-worker',
+            label: 'batch-a4',
+            cwd: '/repo',
+            tmuxSession: 'kteam-successor-agent',
+          },
+          state: { id: 'successor', status: 'running' },
+        },
+      ],
+    };
+    manager.tmux = { state: async () => ({ alive: false, dead: true, promptReady: false }) };
+    manager.emit = async () => ({});
+    manager.stopMonitor = async () => {
+      throw new Error('must refuse before relaunch teardown');
+    };
+    await expect(
+      (
+        manager as unknown as {
+          withAutoRevive: (
+            id: string,
+            action: string,
+            operation: () => Promise<SessionView>,
+            message?: string,
+          ) => Promise<SessionView>;
+        }
+      ).withAutoRevive(
+        'target',
+        'send',
+        async () => {
+          throw new Error('old pane died');
+        },
+        'continue',
+      ),
+    ).rejects.toThrow(/live successor new-worker \(successor\).*batch-a4/);
+    expect((manager.launching as Map<string, unknown>).has('target')).toBe(false);
+  });
 });
 
 describe('assigned-warden stop scope (A6)', () => {
