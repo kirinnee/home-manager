@@ -30,7 +30,6 @@ import { Transcript } from '../components/Transcript';
 import { ThinkingIndicator } from '../components/Harness';
 import { displayCallsign } from '../lib/callsign';
 import { buildTranscript, latestPendingQuestion, peerFrom } from '../lib/transcript';
-import { classifySystemText } from '../lib/system-blocks';
 import { useUsage } from '../hooks/useUsage';
 import { useDebouncedEffect } from '../hooks/useDebounce';
 import { useLayoutMode } from '../hooks/useLayoutMode';
@@ -57,14 +56,15 @@ interface PendingSend {
   at: number;
 }
 
-/** A pending local send is confirmed only by a record that the transcript will
- * render as the same genuine human voice. Peer banners and harness-injected
- * system text share the chat.user channel but are not delivery evidence. */
+/** A pending local send is confirmed by a same-text, in-window chat.user record
+ * unless peer metadata proves another author sent it. Content classification
+ * controls presentation, so it must not strand a locally typed system-like
+ * phrase in the optimistic bubble forever. */
 export function recordConfirmsPending(record: ChatRecord, pending: { text: string; at: number }): boolean {
   if (record.type !== 'chat.user') return false;
   const raw = String((record.data as { text?: unknown } | undefined)?.text ?? '');
   const { from, body } = peerFrom(raw);
-  if (from || classifySystemText(body)) return false;
+  if (from) return false;
   const at = Date.parse(record.timestamp ?? '') || 0;
   return body.trim() === pending.text && at >= pending.at - RECORD_CLOCK_SLACK_MS;
 }
