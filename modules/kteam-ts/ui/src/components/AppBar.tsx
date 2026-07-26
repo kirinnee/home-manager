@@ -11,6 +11,34 @@ import { SidebarDrawerTrigger } from './AgentSidebar';
 import { PALETTE_KEYSHORTCUTS, paletteShortcutLabel } from './CommandPalette';
 import type { UpdateReason } from '../hooks/useServiceWorkerUpdate';
 
+/** The chip's two wordings, as data so they can be asserted directly.
+ *
+ *  THE RECOVERY TITLE NAMES NO CAUSE, and that is a correction rather than a
+ *  style preference. It used to read "…because a newer version was deployed",
+ *  but recovery has several possible causes and the chip cannot tell them
+ *  apart. `startPreloadErrorWatch` is unconditional, so a plain network blip on
+ *  a preload raises it with no deploy involved at all; and `ChunkErrorBoundary`
+ *  catches every render error — deliberately, because the error a pruned chunk
+ *  actually produces is an ordinary-looking one that no message filter would
+ *  recognise — so an everyday render bug raises it too. Blaming a deploy would
+ *  be a confident lie in most of those cases, and it would send the reader
+ *  looking for a release note that does not exist.
+ *
+ *  What is true of EVERY path that raises recovery: this tab has already failed
+ *  to load part of itself, and a reload is the only thing the reader can do
+ *  about it. That is exactly what the title says and no more. The update
+ *  wording is untouched — it IS about a version, and it can say so. */
+export const UPDATE_CHIP = {
+  update: {
+    label: 'Update ready — reload',
+    title: 'A newer version of Kteam is installed and ready. Reload to use it.',
+  },
+  recovery: {
+    label: 'Reload to recover',
+    title: 'This tab could not load part of the app. Reload to recover.',
+  },
+} as const satisfies Record<UpdateReason, { label: string; title: string }>;
+
 export function AppBar({
   crumbs,
   onOpenSidebar,
@@ -75,6 +103,8 @@ export function AppBar({
             waiting until this is clicked. Two wordings because they are two
             different facts — "Update ready" is news, "Reload to recover" means
             this tab has ALREADY failed to load part of itself and is stuck.
+            Both live in UPDATE_CHIP above, where the recovery title's silence
+            about the cause is explained and asserted.
             `aria-live=polite` announces the chip's arrival without stealing
             focus mid-typing; `data-tone=warn` for recovery so it does not read
             as routine. */}
@@ -83,16 +113,12 @@ export function AppBar({
             type="button"
             onClick={onApplyUpdate}
             aria-live="polite"
-            title={
-              updateReady === 'recovery'
-                ? 'This tab could not load part of the app because a newer version was deployed. Reload to recover.'
-                : 'A newer version of Kteam is installed and ready. Reload to use it.'
-            }
+            title={UPDATE_CHIP[updateReady].title}
             className="kt-badge shrink-0 items-center gap-xs hover:text-fg"
             data-tone={updateReady === 'recovery' ? 'warn' : 'accent'}
           >
             <RefreshCw size={11} aria-hidden="true" />
-            {updateReady === 'recovery' ? 'Reload to recover' : 'Update ready — reload'}
+            {UPDATE_CHIP[updateReady].label}
           </button>
         )}
         {/* DISCOVERABILITY, NOT DECORATION. A keyboard-only feature that nothing
