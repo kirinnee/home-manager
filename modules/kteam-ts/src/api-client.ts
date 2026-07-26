@@ -4,6 +4,56 @@ import type { KTeamEvent, SendDisposition, SendRequest, SignalKind, SignalOption
 import type { KTeamPaths } from './paths';
 import { loadDaemonConfig } from './daemon-config';
 import { displayName } from './names';
+import { KTEAM_VERSION } from './version';
+
+/** Compare two dotted numeric versions. >0 when `a` is newer, <0 when older,
+ *  0 when equal or either is unparseable (treat unknown as "no skew"). */
+export function compareVersions(a: string, b: string): number {
+  const parse = (v: string) => v.split('.').map(n => Number.parseInt(n, 10));
+  const pa = parse(a);
+  const pb = parse(b);
+  if (pa.some(Number.isNaN) || pb.some(Number.isNaN)) return 0;
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (diff !== 0) return diff > 0 ? 1 : -1;
+  }
+  return 0;
+}
+
+/** The one-line skew warning (or undefined when the versions match / the daemon
+ *  didn't report one). Names BOTH versions and the direction, so an operator
+ *  after a deploy knows whether to restart the daemon or update the CLI. Pure so
+ *  it can be unit-tested without a live daemon; the once-per-invocation guard
+ *  lives in ApiClient. */
+export function versionSkewWarning(cliVersion: string, daemonVersion: string | null | undefined): string | undefined {
+  if (!daemonVersion || daemonVersion === cliVersion) return undefined;
+  const direction = compareVersions(cliVersion, daemonVersion);
+  if (direction > 0)
+    return `kteam CLI ${cliVersion} / kteamd ${daemonVersion} — daemon is stale; restart kteamd to pick up new commands.`;
+  if (direction < 0)
+    return `kteam CLI ${cliVersion} / kteamd ${daemonVersion} — daemon is newer than this CLI; update the kteam CLI to match.`;
+  return undefined;
+}
+
+/** Message for an unknown-route 404: always names the route (method + path) and
+ *  BOTH versions; when the daemon is demonstrably older it frames the route as a
+ *  command the CLI shipped that the running daemon predates. Pure for testing. */
+export function formatUnknownRouteError(
+  route: string,
+  cliVersion: string,
+  daemonVersion: string | null | undefined,
+): string {
+  const daemon = daemonVersion ?? 'unknown';
+  if (daemonVersion && compareVersions(cliVersion, daemonVersion) > 0)
+    return (
+      `kteam: this command requires a newer kteamd — the CLI is ${cliVersion} but the running daemon is ${daemon}; ` +
+      `restart kteamd to pick up new commands (route ${route} returned 404).`
+    );
+  return (
+    `kteam: daemon returned 404 for ${route} — unknown route; if this command is new, the running daemon ` +
+    `predates it (CLI ${cliVersion}, daemon ${daemon}).`
+  );
+}
 
 /** Hard deadline for one daemon request attempt. Above every legitimate
  *  operation (start caps its own wait at 45 s) and below the caller timeouts
@@ -25,10 +75,24 @@ export interface ScratchPlanView {
 }
 
 export class ApiClient {
+  /** Skew is warned about at most once per CLI invocation (a single command
+   *  fires many requests). Static so it spans every ApiClient in the process. */
+  private static skewWarned = false;
+
   private constructor(
     private readonly baseUrl: string,
     private readonly token: string,
   ) {}
+
+  /** Emit the version-skew warning to stderr once per invocation. Exposed for
+   *  tests via the pure `versionSkewWarning`; this just gates + prints. */
+  private noteDaemonVersion(daemonVersion: string | null): void {
+    if (ApiClient.skewWarned) return;
+    const warning = versionSkewWarning(KTEAM_VERSION, daemonVersion);
+    if (!warning) return;
+    ApiClient.skewWarned = true;
+    console.error(warning);
+  }
 
   static async connect(paths: KTeamPaths): Promise<ApiClient> {
     const config = await loadDaemonConfig(paths);
@@ -51,6 +115,9 @@ export class ApiClient {
       headers: {
         authorization: `Bearer ${this.token}`,
         'x-kteam-request-id': crypto.randomUUID(),
+        // Every request carries the CLI's version so the daemon (and, via its
+        // response header, the CLI) can detect a post-deploy skew.
+        'x-kteam-version': KTEAM_VERSION,
         // Assigned wardens carry an unguessable per-assignment stop
         // capability in their pane env; the api-server authorizes
         // `stop <assigned target>` by capability match, never by a
@@ -93,8 +160,25 @@ export class ApiClient {
         );
       throw new Error(`kteam daemon is unavailable at ${this.baseUrl}${detail}; run \`kteam daemon start\``);
     }
+    // A response — of any status — carries the daemon's version. Surface a skew
+    // once so the operator isn't left with an unactionable error after a deploy.
+    const daemonVersion = response.headers.get('x-kteam-version');
+    this.noteDaemonVersion(daemonVersion);
     if (!response.ok) {
-      const payload = (await response.json().catch(() => ({ error: response.statusText }))) as { error?: string };
+      const payload = (await response.json().catch(() => ({ error: response.statusText }))) as {
+        error?: string;
+        code?: string;
+        method?: string;
+        path?: string;
+      };
+      // An unknown-route 404 (as opposed to a "no such session" 404) after a
+      // deploy is the classic version-skew symptom. Name the method+path+status
+      // AND both versions, and — when the daemon is demonstrably older — say the
+      // command the CLI shipped predates the running daemon, not just "skew".
+      if (response.status === 404 && payload.code === 'unknown_route') {
+        const route = `${payload.method ?? init.method ?? 'GET'} ${payload.path ?? path}`;
+        throw new Error(formatUnknownRouteError(route, KTEAM_VERSION, daemonVersion));
+      }
       throw new Error(payload.error ?? `daemon returned HTTP ${response.status}`);
     }
     if (response.status === 204) return undefined as T;

@@ -7,6 +7,7 @@ import type { SendRequest, SignalKind, StartSessionRequest } from './types';
 import { WARDEN_LABEL } from './warden-detect';
 import { renderShell } from './ui';
 import { actorContext } from './actor-context';
+import { KTEAM_VERSION } from './version';
 
 // Built chat UI (Vite output, committed): served when present; the legacy
 // single-file shell remains the fallback so the daemon never 404s its own UI.
@@ -109,7 +110,19 @@ async function wardenScopeDenial(
   return forbidden('access this route');
 }
 
-const json = (value: unknown, status = 200) => Response.json(value, { status });
+const json = (value: unknown, status = 200) =>
+  Response.json(value, { status, headers: { 'x-kteam-version': KTEAM_VERSION } });
+
+/** Body for a route the daemon doesn't recognise. The `code` lets the CLI tell
+ *  this apart from a "no such session" 404 (which carries a descriptive error),
+ *  and method+path let it name the exact route — the classic version-skew
+ *  symptom when a new CLI hits an old daemon after a deploy. */
+const unknownRoute = (method: string, path: string) => ({
+  error: `no route ${method} ${path}`,
+  code: 'unknown_route',
+  method,
+  path,
+});
 
 /** Mutating session actions the client may retry on a socket error. A retry
  *  reuses the original x-kteam-request-id, so a duplicate id here means the
@@ -394,7 +407,7 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           }
 
           const match = url.pathname.match(/^\/v1\/sessions\/([^/]+)(?:\/(.+))?$/);
-          if (!match) return json({ error: 'not found' }, 404);
+          if (!match) return json(unknownRoute(request.method, url.pathname), 404);
           const id = decodeURIComponent(match[1]!);
           const action = match[2];
           // Idempotency for retried mutations: apply once per request id, and
@@ -527,14 +540,19 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
               },
             });
           }
-          return json({ error: 'not found' }, 404);
+          return json(unknownRoute(request.method, url.pathname), 404);
         } catch (error) {
           const status =
             error instanceof HttpError ? error.status : /unknown kteam session/i.test(String(error)) ? 404 : 409;
           return json({ error: error instanceof Error ? error.message : String(error) }, status);
         }
       };
-      return wardenActor ? actorContext.run({ actor: 'warden' }, dispatch) : dispatch();
+      const response = await (wardenActor ? actorContext.run({ actor: 'warden' }, dispatch) : dispatch());
+      // Every API response advertises the daemon's version (json() already
+      // does; this also covers the text/binary routes — snapshot, logs,
+      // attachments — so the CLI detects skew on any command).
+      if (response && !response.headers.has('x-kteam-version')) response.headers.set('x-kteam-version', KTEAM_VERSION);
+      return response;
     },
     websocket: {
       open(socket) {
