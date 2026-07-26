@@ -21,22 +21,41 @@
         sampling the border band OUTSIDE the safe circle and asserting every
         sample equals the background field, not by trusting the SVG's comment;
      5. the fingerprinted ICO carries exactly the 16 and 32 frames, and the
-        stable legacy `favicon.ico` is byte-identical to it *at generation
-        time* (its recorded hash — the file itself is intentionally excluded
-        from freshness gates because the api-server serves it `immutable`);
-     6. every icon URL referenced by a generated manifest or by index.html
+        stable legacy `public/favicon.ico` is byte-identical to it ON DISK,
+        not merely according to two recorded manifest fields;
+     6. the CURRENT `brand/kteam-mark.svg` still hashes to both recorded
+        provenance values, so a committed art change without regenerated icons
+        fails instead of shipping icons that do not match their source;
+     7. every icon URL referenced by a generated manifest or by index.html
         resolves to a file present in `icons.gen.json`.
+
+   ── WHY 5 AND 6 HASH REAL BYTES ───────────────────────────────────────────
+   An audit found both of these were false negatives. The legacy check compared
+   `manifest.legacyIco.sha256` with `icon.sha256` — two numbers from the same
+   generation run, which agree by construction and keep agreeing after someone
+   edits the actual file. And `sourceBlob`/`sourceSha256` were declared in the
+   type but never compared to anything. In an isolated copy, flipping a byte in
+   `favicon.ico` still returned zero problems.
+
+   The HTTP cache policy is irrelevant here: `/favicon.ico` being served
+   `immutable` means a BROWSER may hold a stale copy, which is intended. It says
+   nothing about whether the bytes in the repo match their provenance, and this
+   is a source-tree verifier.
    ============================================================================ */
 
-import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { gitBlobHash, sha256 } from './hash';
 import { decodePng, icoFrames, pixelAt } from './png';
 
 const HERE = dirname(new URL(import.meta.url).pathname);
 export const UI_ROOT = join(HERE, '..');
-export const ICON_DIR = join(UI_ROOT, 'public', 'icons');
+export const PUBLIC_DIR = join(UI_ROOT, 'public');
+export const ICON_DIR = join(PUBLIC_DIR, 'icons');
 export const ICONS_MANIFEST = join(ICON_DIR, 'icons.gen.json');
+/** The art the committed icons are rendered from. Hashed on every verify so a
+    changed mark without a regenerated set is a failure, not a silent drift. */
+export const SOURCE_SVG = join(UI_ROOT, 'brand', 'kteam-mark.svg');
 
 type IconEntry = {
   name: string;
@@ -49,12 +68,22 @@ type IconEntry = {
   purpose?: string;
 };
 
-type IconsManifest = {
+export type IconsManifest = {
   generatorVersion: string;
+  /** Path of the source art, relative to the ui package. Optional so an older
+      manifest still parses; the verifier falls back to the canonical path. */
+  sourceFile?: string;
   sourceBlob: string;
   sourceSha256: string;
   icons: IconEntry[];
-  legacyIco: { file: string; sha256: string; identicalTo: string };
+  legacyIco: {
+    file: string;
+    /** Served URL. Optional for older manifests; when present it must be the
+        root path, since a nested legacy copy answers no browser probe. */
+    url?: string;
+    sha256: string;
+    identicalTo: string;
+  };
 };
 
 export function readIconsManifest(path: string = ICONS_MANIFEST): IconsManifest {
@@ -62,10 +91,6 @@ export function readIconsManifest(path: string = ICONS_MANIFEST): IconsManifest 
     throw new Error(`missing ${path} — run \`bun run gen:icons\` and commit the result`);
   }
   return JSON.parse(readFileSync(path, 'utf8')) as IconsManifest;
-}
-
-function sha256(buf: Buffer): string {
-  return createHash('sha256').update(buf).digest('hex');
 }
 
 /** Every logical icon the rest of the build is entitled to reference. */
@@ -135,16 +160,101 @@ function opacityProblems(file: string, buf: Buffer): Problem[] {
   return [];
 }
 
+/** Re-hash the CURRENT source mark and compare against both recorded
+    provenance values. This is what makes "the committed icons were rendered
+    from the committed art" a checked fact. Both hashes are compared, not just
+    one, because they are recorded independently and a disagreement between them
+    means the provenance file itself is corrupt. */
+export function sourceProvenanceProblems(manifest: IconsManifest, sourceSvg: string = SOURCE_SVG): Problem[] {
+  const rel = manifest.sourceFile ?? 'brand/kteam-mark.svg';
+  if (!existsSync(sourceSvg)) {
+    return [`${rel}: icon source art is missing, but icons.gen.json records hashes for it`];
+  }
+  const problems: Problem[] = [];
+  const buf = readFileSync(sourceSvg);
+  const actualSha = sha256(buf);
+  const actualBlob = gitBlobHash(buf);
+  if (actualSha !== manifest.sourceSha256) {
+    problems.push(
+      `${rel}: sha256 ${actualSha.slice(0, 12)}… does not match icons.gen.json ` +
+        `(${manifest.sourceSha256.slice(0, 12)}…) — run \`bun run gen:icons\` and commit the regenerated set`,
+    );
+  }
+  if (actualBlob !== manifest.sourceBlob) {
+    problems.push(
+      `${rel}: git blob ${actualBlob.slice(0, 12)}… does not match icons.gen.json ` +
+        `(${manifest.sourceBlob.slice(0, 12)}…) — run \`bun run gen:icons\` and commit the regenerated set`,
+    );
+  }
+  return problems;
+}
+
+/** Verify the unlinked root legacy fallback against the fingerprinted ICO's
+    ACTUAL bytes. `publicDir` is the directory the file lives in — `public/`,
+    not `public/icons/`, because the whole point is the root URL. */
+export function legacyIcoProblems(
+  manifest: IconsManifest,
+  fingerprintedIco: Buffer | undefined,
+  publicDir: string = PUBLIC_DIR,
+): Problem[] {
+  const { legacyIco } = manifest;
+  const path = join(publicDir, legacyIco.file);
+  const problems: Problem[] = [];
+
+  // The served URL must be the well-known root path, or the fallback answers
+  // nothing: a browser probing /favicon.ico would get the SPA shell instead.
+  const expectedUrl = `/${legacyIco.file}`;
+  if (legacyIco.url !== undefined && legacyIco.url !== expectedUrl) {
+    problems.push(`icons.gen.json: legacyIco.url is ${legacyIco.url}, expected ${expectedUrl}`);
+  }
+  if (legacyIco.file.includes('/')) {
+    problems.push(
+      `icons.gen.json: legacyIco.file is ${legacyIco.file}; the legacy fallback must sit at the public root ` +
+        `so it is served as /favicon.ico`,
+    );
+  }
+
+  if (!existsSync(path)) {
+    problems.push(`${legacyIco.file}: legacy fallback copy is missing from the public root`);
+    return problems;
+  }
+
+  // Hash the REAL bytes. Comparing the two recorded fields to each other (the
+  // previous behaviour) can never fail, because generation wrote both.
+  const buf = readFileSync(path);
+  const actual = sha256(buf);
+  if (actual !== legacyIco.sha256) {
+    problems.push(
+      `${legacyIco.file}: sha256 does not match icons.gen.json (the file has been modified since generation)`,
+    );
+  }
+  if (fingerprintedIco !== undefined && !buf.equals(fingerprintedIco)) {
+    problems.push(
+      `${legacyIco.file}: not byte-identical to the fingerprinted ${legacyIco.identicalTo} — ` +
+        `the legacy fallback must be an exact copy`,
+    );
+  }
+  return problems;
+}
+
 /** Core icon-set verification. Returns a list of human-readable problems;
     empty means the committed set is coherent. */
-export function verifyIcons(iconDir: string = ICON_DIR, manifestPath: string = ICONS_MANIFEST): Problem[] {
+export function verifyIcons(
+  iconDir: string = ICON_DIR,
+  manifestPath: string = ICONS_MANIFEST,
+  options: { publicDir?: string; sourceSvg?: string } = {},
+): Problem[] {
   const manifest = readIconsManifest(manifestPath);
   const problems: Problem[] = [];
   const byName = new Map(manifest.icons.map(i => [i.name, i]));
+  // `public/` is the parent of `icons/` unless a test points them elsewhere.
+  const publicDir = options.publicDir ?? dirname(iconDir);
 
   for (const required of REQUIRED_ICONS) {
     if (!byName.has(required)) problems.push(`icons.gen.json is missing required icon "${required}"`);
   }
+
+  problems.push(...sourceProvenanceProblems(manifest, options.sourceSvg ?? SOURCE_SVG));
 
   for (const icon of manifest.icons) {
     const path = join(iconDir, icon.file);
@@ -174,10 +284,12 @@ export function verifyIcons(iconDir: string = ICON_DIR, manifestPath: string = I
     }
   }
 
-  // ICO frames.
+  // ICO frames, and the legacy copy measured against these real bytes.
   const icoEntry = byName.get('favicon-ico');
+  let fingerprintedIco: Buffer | undefined;
   if (icoEntry && existsSync(join(iconDir, icoEntry.file))) {
     const buf = readFileSync(join(iconDir, icoEntry.file));
+    fingerprintedIco = buf;
     let frames: ReturnType<typeof icoFrames> = [];
     try {
       frames = icoFrames(buf);
@@ -193,20 +305,21 @@ export function verifyIcons(iconDir: string = ICON_DIR, manifestPath: string = I
         problems.push(`${icoEntry.file}: frame ${frame.width} runs past end of file`);
       }
     }
-    // The stable legacy copy must have been byte-identical WHEN GENERATED. We
-    // compare recorded hashes, not the file on disk: `/favicon.ico` is served
-    // `immutable` and is deliberately allowed to go stale (§4.2/C3).
-    if (manifest.legacyIco.sha256 !== icoEntry.sha256 || manifest.legacyIco.identicalTo !== icoEntry.file) {
-      problems.push('icons.gen.json: legacy favicon.ico was not byte-identical to the fingerprinted ICO at generation');
-    }
-    if (!existsSync(join(iconDir, manifest.legacyIco.file))) {
-      problems.push(`${manifest.legacyIco.file}: legacy fallback copy is missing`);
+    if (manifest.legacyIco.identicalTo !== icoEntry.file) {
+      problems.push(
+        `icons.gen.json: legacyIco.identicalTo is ${manifest.legacyIco.identicalTo}, ` +
+          `but the fingerprinted ICO is ${icoEntry.file}`,
+      );
     }
   }
+  // Runs even when the fingerprinted ICO is missing, so "both ICOs absent" is
+  // still reported rather than silently skipped.
+  problems.push(...legacyIcoProblems(manifest, fingerprintedIco, publicDir));
 
   // Orphans: generated-looking files on disk that icons.gen.json does not know
-  // about would be shipped by Vite's public copy without any provenance.
-  const known = new Set([...manifest.icons.map(i => i.file), manifest.legacyIco.file, 'icons.gen.json']);
+  // about would be shipped by Vite's public copy without any provenance. The
+  // legacy ICO is NOT expected here any more — it lives at the public root.
+  const known = new Set([...manifest.icons.map(i => i.file), 'icons.gen.json']);
   for (const name of readdirSync(iconDir)) {
     if (!known.has(name)) problems.push(`${name}: present in public/icons but absent from icons.gen.json`);
   }
@@ -223,12 +336,18 @@ export function verifyIconReferences(text: string, source: string, manifestPath:
   const problems: Problem[] = [];
   for (const match of text.matchAll(/\/icons\/([A-Za-z0-9._-]+)/g)) {
     const file = match[1]!;
-    if (file === manifest.legacyIco.file) {
-      problems.push(`${source}: references the stable legacy /icons/favicon.ico, which must never be linked (C3)`);
-      continue;
-    }
     if (file === 'icons.gen.json') continue;
     if (!known.has(file)) problems.push(`${source}: references /icons/${file}, which is not in icons.gen.json`);
+  }
+  // The root legacy fallback exists for user agents that probe `/favicon.ico`
+  // on their own. Linking it would opt real page loads into an intentionally
+  // immutable, potentially year-stale icon — the fingerprinted ICO is the
+  // primary (C3). Matched with a boundary so `/favicon.1e0c791b41.ico` and
+  // `/icons/favicon.ico` do not trip it.
+  const legacyUrl = manifest.legacyIco.url ?? `/${manifest.legacyIco.file}`;
+  const legacyLink = new RegExp(`(^|[^/\\w.])${legacyUrl.replace(/[.]/g, '\\.')}(?![\\w.])`);
+  if (legacyLink.test(text)) {
+    problems.push(`${source}: links the stable legacy ${legacyUrl}, which must never be linked (C3)`);
   }
   return problems;
 }
@@ -245,5 +364,8 @@ if (import.meta.main) {
     process.exit(1);
   }
   const manifest = readIconsManifest();
-  console.log(`verify-icons: OK — ${manifest.icons.length} icons + legacy favicon.ico verified`);
+  console.log(
+    `verify-icons: OK — ${manifest.icons.length} icons, source provenance, ` +
+      `and the unlinked root ${manifest.legacyIco.url ?? '/favicon.ico'} verified`,
+  );
 }

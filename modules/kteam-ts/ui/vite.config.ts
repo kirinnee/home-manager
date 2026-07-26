@@ -1,6 +1,6 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
-import { RELEASE_ENV, assertReleaseId } from './scripts/release';
+import { RELEASE_ENV, VITE_RELEASE_ENV, ReleaseIdError, assertReleaseId } from './scripts/release';
 
 // Outdir lives OUTSIDE src/ so the daemon's Bun bundler (which TS-includes
 // ./src/**) never sees or tries to resolve Vite-only assets. The daemon serves
@@ -19,14 +19,39 @@ import { RELEASE_ENV, assertReleaseId } from './scripts/release';
 // mid-rebase would be a bad trade. A BUILD without the env var fails loudly.
 const DEV_RELEASE = 'devdevdevdev';
 
-function releaseId(command: string): string {
-  const fromEnv = process.env[RELEASE_ENV];
-  if (command === 'serve') return fromEnv ?? DEV_RELEASE;
-  // A build MUST have come through the orchestrator.
-  return assertReleaseId(
-    fromEnv,
+/** Resolve the release for this Vite invocation.
+
+    A BUILD requires BOTH orchestrator variables, and requires them to agree.
+    `KTEAM_RELEASE_ID` is the canonical value; `VITE_KTEAM_RELEASE` is the copy
+    Vite exposes to `%VITE_KTEAM_RELEASE%` in index.html. Checking only the
+    first would let a stale or hand-set `VITE_KTEAM_RELEASE` name a different
+    generation in the HTML than the `define` compiled into the bundle — the
+    manifest link and the app's own release constant would disagree, which is
+    precisely the split brain the single-orchestrator rule exists to prevent.
+    Nothing downstream can detect that, so it is checked here.
+
+    Exported so scripts/build-pwa.test.ts can assert the missing/mismatch cases
+    without spawning vite.
+
+    `vite dev` has no release at all, so it degrades to a literal rather than
+    failing (see the note above). */
+export function releaseId(command: string, env: Record<string, string | undefined> = process.env): string {
+  if (command === 'serve') return env[RELEASE_ENV] ?? DEV_RELEASE;
+  const canonical = assertReleaseId(
+    env[RELEASE_ENV],
     `${RELEASE_ENV} (set by scripts/build-pwa.ts — run \`bun run build\`, not \`vite build\`)`,
   );
+  const viteCopy = assertReleaseId(
+    env[VITE_RELEASE_ENV],
+    `${VITE_RELEASE_ENV} (set by scripts/build-pwa.ts — index.html's %${VITE_RELEASE_ENV}% needs it)`,
+  );
+  if (viteCopy !== canonical) {
+    throw new ReleaseIdError(
+      `release id mismatch: ${RELEASE_ENV}=${canonical} but ${VITE_RELEASE_ENV}=${viteCopy}. ` +
+        `index.html and the compiled bundle would name different releases.`,
+    );
+  }
+  return canonical;
 }
 
 export default defineConfig(({ command }) => {

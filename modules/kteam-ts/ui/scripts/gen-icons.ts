@@ -30,7 +30,7 @@
    * favicon.<sha>.svg              — the source mark, fingerprinted
    * favicon.<sha>.ico              — 16+32 frames, fingerprinted, and the
                                       PRIMARY linked ICO
-   * favicon.ico                    — byte-identical stable copy, emitted ONLY
+   * ../favicon.ico  (public root)  — byte-identical stable copy, emitted ONLY
                                       as a legacy fallback for user agents that
                                       probe the well-known path. Under the
                                       api-server's unconditional `immutable`
@@ -38,14 +38,26 @@
                                       cache for a year, so it is deliberately
                                       never linked and never part of any
                                       freshness assertion.
+
+                                      It lives at `public/favicon.ico`, NOT
+                                      `public/icons/favicon.ico`, because the
+                                      whole point is the well-known ROOT URL
+                                      `/favicon.ico`. An audit caught the
+                                      earlier version writing it inside
+                                      `icons/`, where a browser probing the root
+                                      path fell through to the SPA shell and got
+                                      HTML instead of an icon.
    ============================================================================ */
 
-import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fingerprint, gitBlobHash, sha256 } from './hash';
 
-const GENERATOR_VERSION = '1.0.0';
+/** Bumped when the OUTPUT SHAPE changes (filenames, provenance schema), so a
+    stale committed set is identifiable. 1.1.0: legacy ICO moved to the public
+    root and the provenance schema gained `url`/`root` fields. */
+const GENERATOR_VERSION = '1.1.0';
 
 /* ---------- loading sharp inside a Nix dev shell --------------------------
    sharp ships a prebuilt native binary linked against the system libstdc++.
@@ -89,8 +101,11 @@ const sharp = await loadSharp();
 const HERE = dirname(new URL(import.meta.url).pathname);
 const UI_ROOT = join(HERE, '..');
 const SOURCE_SVG = join(UI_ROOT, 'brand', 'kteam-mark.svg');
-const ICON_DIR = join(UI_ROOT, 'public', 'icons');
+const PUBLIC_DIR = join(UI_ROOT, 'public');
+const ICON_DIR = join(PUBLIC_DIR, 'icons');
 const MANIFEST_PATH = join(ICON_DIR, 'icons.gen.json');
+/** The well-known root path. Served as `/favicon.ico`. */
+const LEGACY_ICO_PATH = join(PUBLIC_DIR, 'favicon.ico');
 
 /** Padding trimmed off the "any" variants. The source keeps mask headroom; an
     `any` icon is displayed as-authored, so it should fill more of its box. */
@@ -111,30 +126,19 @@ export type IconEntry = {
 export type IconsManifest = {
   generatorVersion: string;
   command: string;
-  /** `git hash-object` of brand/kteam-mark.svg — ties this set to exact art. */
+  /** Path of the source art, relative to the UI package root. */
+  sourceFile: string;
+  /** `git hash-object` of brand/kteam-mark.svg — ties this set to exact art.
+      The verifier re-hashes the CURRENT file and compares, so committing a
+      changed mark without regenerating icons is a hard failure. */
   sourceBlob: string;
   sourceSha256: string;
   icons: IconEntry[];
-  /** Deliberately-stale legacy fallback; excluded from freshness gates. */
-  legacyIco: { file: string; sha256: string; identicalTo: string };
+  /** Deliberately-stale legacy fallback; excluded from freshness gates but NOT
+      from byte-identity verification. `file` is relative to `public/`, and
+      `url` is the served path it exists to answer. */
+  legacyIco: { file: string; url: string; sha256: string; identicalTo: string };
 };
-
-function sha256(buf: Uint8Array): string {
-  return createHash('sha256').update(buf).digest('hex');
-}
-
-function fingerprint(buf: Uint8Array): string {
-  return sha256(buf).slice(0, 10);
-}
-
-/** `git hash-object`-compatible blob id, computed locally so the generator does
-    not need a git process (and works in a fresh checkout without one). */
-function gitBlobHash(buf: Uint8Array): string {
-  const header = Buffer.from(`blob ${buf.length}\0`, 'utf8');
-  return createHash('sha1')
-    .update(Buffer.concat([header, Buffer.from(buf)]))
-    .digest('hex');
-}
 
 /* ---------- ICO container ------------------------------------------------
    Written by hand: sharp has no ICO encoder, and pulling a second native
@@ -215,6 +219,8 @@ function cleanGenerated(): void {
     /^maskable-(192|512)\.[0-9a-f]{10}\.png$/,
     /^apple-touch-icon\.[0-9a-f]{10}\.png$/,
     /^favicon\.[0-9a-f]{10}\.(svg|ico)$/,
+    // pre-1.1.0 location of the legacy copy (it now lives at the public root);
+    // swept so the move cannot leave a stale duplicate behind.
     /^favicon\.ico$/,
     // pre-1.0.0 stems, swept so a rename cannot leave orphans behind
     /^favicon-(svg|ico)\.[0-9a-f]{10}\.(svg|ico)$/,
@@ -223,6 +229,9 @@ function cleanGenerated(): void {
   for (const name of readdirSync(ICON_DIR)) {
     if (schemes.some(re => re.test(name))) unlinkSync(join(ICON_DIR, name));
   }
+  // The root legacy copy is rewritten below; remove it first so a failed run
+  // never leaves a copy that disagrees with icons.gen.json.
+  if (existsSync(LEGACY_ICO_PATH)) unlinkSync(LEGACY_ICO_PATH);
 }
 
 async function main(): Promise<void> {
@@ -278,20 +287,23 @@ async function main(): Promise<void> {
   const ico = buildIco(icoFrames);
   const icoEntry = emit('favicon-ico', 'favicon', 'ico', ico, {});
 
-  // Stable legacy copy — byte-identical, intentionally never linked (see header).
-  writeFileSync(join(ICON_DIR, 'favicon.ico'), ico);
+  // Stable legacy copy at the PUBLIC ROOT — byte-identical, intentionally never
+  // linked (see header). Root, not icons/, so `/favicon.ico` resolves.
+  writeFileSync(LEGACY_ICO_PATH, ico);
 
   const manifest: IconsManifest = {
     generatorVersion: GENERATOR_VERSION,
     command: 'bun run gen:icons  (cwd: modules/kteam-ts/ui)',
+    sourceFile: 'brand/kteam-mark.svg',
     sourceBlob: gitBlobHash(svg),
     sourceSha256: sha256(svg),
     icons,
-    legacyIco: { file: 'favicon.ico', sha256: sha256(ico), identicalTo: icoEntry.file },
+    legacyIco: { file: 'favicon.ico', url: '/favicon.ico', sha256: sha256(ico), identicalTo: icoEntry.file },
   };
   writeFileSync(MANIFEST_PATH, `${JSON.stringify(manifest, null, 2)}\n`);
 
-  console.log(`gen-icons: wrote ${icons.length} icons + favicon.ico + icons.gen.json into public/icons/`);
+  console.log(`gen-icons: wrote ${icons.length} icons + icons.gen.json into public/icons/`);
+  console.log('gen-icons: wrote legacy fallback public/favicon.ico (served /favicon.ico, never linked)');
   for (const i of icons) console.log(`  ${i.name.padEnd(18)} ${i.file}`);
 }
 

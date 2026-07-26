@@ -65,15 +65,26 @@ export function assertReleaseId(value: string | undefined, source: string): stri
 }
 
 /** Read `--release=<id>` from a child step's argv and cross-check it against the
-    orchestrator's exported value. Never falls back to git. */
+    orchestrator's exported value. Never falls back to git.
+
+    BOTH sources are REQUIRED. An earlier version only compared them when the
+    env var happened to exist, which meant a hand-run
+    `bun scripts/gen-pwa.ts --release=<anything>` was accepted and could write
+    half a release — manifests from one generation beside a precache list from
+    another. Demanding the exported variable is what makes "every child was
+    launched by the orchestrator" a checked fact rather than a convention. */
 export function releaseIdFromArgv(
   argv: readonly string[],
   env: Record<string, string | undefined> = process.env,
 ): string {
   const flag = argv.find(a => a.startsWith('--release='));
   const fromArg = assertReleaseId(flag?.slice('--release='.length), '--release=<id>');
-  const fromEnv = env[RELEASE_ENV];
-  if (fromEnv !== undefined && fromEnv !== fromArg) {
+  const fromEnv = assertReleaseId(
+    env[RELEASE_ENV],
+    `${RELEASE_ENV} — every build step must be launched by scripts/build-pwa.ts, which exports it; ` +
+      `running this script by hand cannot produce a coherent release`,
+  );
+  if (fromEnv !== fromArg) {
     throw new ReleaseIdError(
       `release id mismatch: --release=${fromArg} but ${RELEASE_ENV}=${fromEnv}. ` +
         `A single build must stamp one generation into every artifact.`,

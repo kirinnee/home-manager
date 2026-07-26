@@ -1,6 +1,7 @@
 {
-  "generatorVersion": "1.0.0",
+  "generatorVersion": "1.1.0",
   "command": "bun run gen:icons  (cwd: modules/kteam-ts/ui)",
+  "sourceFile": "brand/kteam-mark.svg",
   "sourceBlob": "c99215af01b815552b94a00836e480e79defad32",
   "sourceSha256": "fc09cfb83ecb28a56554a33d6c46bc4a8ef92d83f3a82f61aa3081523c741126",
   "icons": [
@@ -70,6 +71,7 @@
   ],
   "legacyIco": {
     "file": "favicon.ico",
+    "url": "/favicon.ico",
     "sha256": "1e0c791b41ff0cbcf6ad1cfe090a51aa8996ed03db03883d1921f5a23574e5f2",
     "identicalTo": "favicon.1e0c791b41.ico"
   }
