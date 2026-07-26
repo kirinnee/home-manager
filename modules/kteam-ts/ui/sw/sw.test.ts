@@ -272,6 +272,35 @@ describe('retention survives a lost or corrupt generation index', () => {
     expect(reconcileGenerationOrder([C], existing)).toEqual([A, B, C]);
   });
 
+  // A DUPLICATED record is damage, not history — and it is JSON-valid, so
+  // `readGenerationOrder()` hands it over intact. `[A, A, C, C]` against live
+  // A/B/C/D survives the alive-filter with four entries and MATCHES THE COUNT of
+  // four discovered generations, so a length-only authority test trusts it: B is
+  // never mentioned, falls outside the window, and is deleted a generation early,
+  // while the duplicates are written back to corrupt the next activation too.
+  test('a DUPLICATED record is not authoritative, even when the counts match', () => {
+    const existing = [cacheNameFor(A), cacheNameFor(B), cacheNameFor(C), cacheNameFor(D)];
+    expect(reconcileGenerationOrder([A, A, C, C], existing)).toEqual([A, B, C, D]);
+  });
+
+  test('a record duplicating EVERY live generation is still rejected', () => {
+    const existing = [cacheNameFor(A), cacheNameFor(B)];
+    // Counts match at 4 vs 2 only after the filter — this is the shape where a
+    // naive check could pass for a different reason, so it is asserted directly.
+    expect(reconcileGenerationOrder([A, A, B, B], existing)).toEqual([A, B]);
+    expect(reconcileGenerationOrder([B, B], existing)).toEqual([A, B]);
+  });
+
+  test('a record with duplicates whose distinct set is complete is still rejected', () => {
+    // [A, B, B] filters to three entries against three live caches, and its
+    // distinct set IS {A, B, C}-minus-C... the point being that "the set is
+    // right" is not sufficient: a duplicate means the recorded ORDER is
+    // untrustworthy, so reconstruction is the only honest answer.
+    const existing = [cacheNameFor(A), cacheNameFor(B), cacheNameFor(C)];
+    expect(reconcileGenerationOrder([A, B, B], existing)).toEqual([A, B, C]);
+    expect(reconcileGenerationOrder([C, C, A], existing)).toEqual([A, B, C]);
+  });
+
   test('a COMPLETE record is trusted over creation order', () => {
     // Re-activation ordering lives only in the record: B was promoted to newest
     // without its cache being re-created, so creation order cannot see it.
@@ -367,6 +396,33 @@ describe('retention survives a lost or corrupt generation index', () => {
     const fake = await activateWith([INDEX_CACHE, cacheNameFor(B), cacheNameFor(C), cacheNameFor(D)], 'not json', D);
     expect(fake.deleted).toEqual([]);
     expect(JSON.parse(fake.index()!)).toEqual([B, C, D]);
+  });
+
+  // THE AUDITED REPRO, end to end. A JSON-valid duplicated index is the one
+  // corruption shape that reaches `activateRelease` intact, so it must be driven
+  // through the real function: the helper test above passes even if the caller
+  // stops consulting the helper.
+  test('activateRelease with a DUPLICATED index keeps B and writes a clean order', async () => {
+    const fake = await activateWith(
+      [INDEX_CACHE, cacheNameFor(A), cacheNameFor(B), cacheNameFor(C), cacheNameFor(D)],
+      JSON.stringify([A, A, C, C]),
+      D,
+    );
+    expect(fake.deleted).toEqual([cacheNameFor(A)]);
+    // Not [C, C, D]: a duplicate written back would corrupt the NEXT activation
+    // too, so each activation has to leave the index clean.
+    expect(JSON.parse(fake.index()!)).toEqual([B, C, D]);
+  });
+
+  test('the index an activation writes is always duplicate-free', async () => {
+    const fake = await activateWith(
+      [INDEX_CACHE, cacheNameFor(B), cacheNameFor(C), cacheNameFor(D)],
+      JSON.stringify([B, B, C, C, D, D]),
+      D,
+    );
+    const written = JSON.parse(fake.index()!) as string[];
+    expect(new Set(written).size).toBe(written.length);
+    expect(written).toEqual([B, C, D]);
   });
 
   test('activateRelease trusts a COMPLETE index over creation order', async () => {
