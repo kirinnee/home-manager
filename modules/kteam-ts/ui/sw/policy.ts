@@ -188,23 +188,35 @@ export function releasesFromCacheNames(existing: readonly string[]): string[] {
 
     Two cases, and each is the best answer available for its case:
 
-      * The record accounts for every live cache → TRUST THE RECORD. It is the
-        only source that knows about re-activations, where a release is promoted
-        to newest without its cache being re-created, so creation order cannot
-        see it.
-      * Anything live is unaccounted for (index missing, truncated, corrupt, or
-        a cache created by a build whose activation never finished) → TRUST
-        CREATION ORDER for the whole set. Recorded positions cannot be merged
-        with discovered ones without inventing an ordering between them, and
-        guessing wrong here means pruning a live generation.
+      * The record is a DUPLICATE-FREE ONE-TO-ONE match for the live generation
+        set → TRUST THE RECORD. It is the only source that knows about
+        re-activations, where a release is promoted to newest without its cache
+        being re-created, so creation order cannot see it.
+      * Anything else (index missing, truncated, corrupt, duplicated, or a cache
+        created by a build whose activation never finished) → TRUST CREATION
+        ORDER for the whole set. Recorded positions cannot be merged with
+        discovered ones without inventing an ordering between them, and guessing
+        wrong here means pruning a live generation.
+
+    THE TEST IS SET EQUALITY, NOT LENGTH. Comparing
+    `known.length === discovered.length` looks equivalent and is not: a record of
+    `[A, A, C, C]` against live caches A/B/C/D survives the filter with four
+    entries, matches the count, and is then trusted — so B, which the record
+    never mentions, falls outside the retention window and is deleted, and the
+    duplicates are written back into the index to corrupt the next activation
+    too. A record that names one generation twice is not a history; it is damage,
+    and it must take the reconstruction path like any other damage.
 
     Recorded ids with no surviving cache are dropped in both cases: they are
-    history about generations that are already gone. */
+    history about generations that are already gone. `discovered` needs no
+    de-duplication of its own — it comes from cache NAMES, which CacheStorage
+    keeps unique. */
 export function reconcileGenerationOrder(recorded: readonly string[], existing: readonly string[]): string[] {
   const discovered = releasesFromCacheNames(existing);
   const alive = new Set(discovered);
   const known = recorded.filter(r => alive.has(r));
-  return known.length === discovered.length ? known : discovered;
+  const authoritative = known.length === discovered.length && new Set(known).size === known.length;
+  return authoritative ? known : discovered;
 }
 
 export async function readGenerationOrder(): Promise<string[]> {
