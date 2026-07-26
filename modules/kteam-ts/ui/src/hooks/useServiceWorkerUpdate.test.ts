@@ -19,6 +19,7 @@ import {
   applyDecision,
   browserApplyDeps,
   canRegister,
+  nextUpdateReason,
   runApplyUpdate,
   startPreloadErrorWatch,
   startWorkerLifecycle,
@@ -525,6 +526,43 @@ describe('startWorkerLifecycle — cleanup', () => {
     // The cleanup already ran, so anything attached now would leak forever.
     expect(reg.events.count('updatefound')).toBe(0);
     expect(env.raised).toEqual([]);
+  });
+});
+
+describe('nextUpdateReason — which chip wins', () => {
+  // THE CHIP IS TWO DIFFERENT STATEMENTS, and only one of them is about this
+  // tab being broken. Getting the priority wrong is not cosmetic: a reader
+  // whose pane has already died would be told "Update ready — reload", which
+  // reads as an optional offer they can ignore.
+  test('recovery is never downgraded to update', () => {
+    expect(nextUpdateReason('recovery', 'update')).toBe('recovery');
+  });
+
+  // THE NEW HALF. There are now two ways to learn this tab is broken — the
+  // `vite:preloadError` watch and `ChunkErrorBoundary`'s render-time catch —
+  // and a routine update chip may well already be up when either fires (the
+  // deploy that pruned the chunk is exactly the deploy that raised the offer).
+  // A rule of "first raise wins" would leave that reader on the wrong wording
+  // on the one path that exists to rescue them.
+  test('an update already on screen is UPGRADED to recovery', () => {
+    expect(nextUpdateReason('update', 'recovery')).toBe('recovery');
+  });
+
+  test('either reason raises from nothing', () => {
+    expect(nextUpdateReason(null, 'update')).toBe('update');
+    expect(nextUpdateReason(null, 'recovery')).toBe('recovery');
+  });
+
+  test('repeats are idempotent — the chip does not flicker between reasons', () => {
+    expect(nextUpdateReason('update', 'update')).toBe('update');
+    expect(nextUpdateReason('recovery', 'recovery')).toBe('recovery');
+  });
+
+  test('recovery is absorbing: no sequence of raises can leave it', () => {
+    // The lifecycle keeps raising 'update' on every subsequent deploy while the
+    // tab stays open, so this is a real sequence, not a contrived one.
+    const reasons: UpdateReason[] = ['update', 'recovery', 'update', 'update'];
+    expect(reasons.reduce<UpdateReason | null>(nextUpdateReason, null)).toBe('recovery');
   });
 });
 
