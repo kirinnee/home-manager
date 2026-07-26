@@ -42,6 +42,12 @@ export interface PaneMetadata {
   paneWidth?: number;
 }
 
+interface ProcessRecord {
+  pid: number;
+  ppid: number;
+  stat?: string;
+}
+
 const STARTUP_BLOCKERS = [
   'do you trust the contents of this directory',
   'do you trust the files',
@@ -452,25 +458,57 @@ export class TmuxController {
     };
   }
 
-  /** A6 subprocess life-sign: true when the pane's harness process has at
-   *  least one live child (a running tool subprocess). The pane launcher
-   *  `exec`s the harness, so the pane pid IS the harness and its children are
-   *  tool processes. */
-  async subprocessAlive(name: string): Promise<boolean> {
+  protected async panePid(name: string): Promise<number | undefined> {
     const result = await run(['tmux', 'display-message', '-p', '-t', name, '#{pane_pid}']);
     const panePid = Number(result.stdout.trim());
-    if (result.code !== 0 || !Number.isFinite(panePid) || panePid <= 1) return false;
-    const ps = await run(['ps', '-Ao', 'pid=,ppid=']);
-    if (ps.code !== 0) return false;
-    const childrenOf = new Map<number, number[]>();
+    return result.code === 0 && Number.isFinite(panePid) && panePid > 1 ? panePid : undefined;
+  }
+
+  protected async processTable(): Promise<ProcessRecord[]> {
+    const ps = await run(['ps', '-Ao', 'pid=,ppid=,stat=']);
+    if (ps.code !== 0) throw new Error(ps.stderr.trim() || 'could not read the process table');
+    const records: ProcessRecord[] = [];
     for (const line of ps.stdout.split('\n')) {
-      const [pid, ppid] = line.trim().split(/\s+/).map(Number);
-      if (!Number.isFinite(pid) || !Number.isFinite(ppid)) continue;
-      const list = childrenOf.get(ppid!);
-      if (list) list.push(pid!);
-      else childrenOf.set(ppid!, [pid!]);
+      const [pidText, ppidText, stat] = line.trim().split(/\s+/);
+      const pid = Number(pidText);
+      const ppid = Number(ppidText);
+      if (Number.isFinite(pid) && pid > 1 && Number.isFinite(ppid)) records.push({ pid, ppid, stat });
     }
-    return (childrenOf.get(panePid)?.length ?? 0) > 0;
+    return records;
+  }
+
+  private processTreePids(rootPid: number, records: readonly ProcessRecord[]): number[] {
+    const childrenOf = new Map<number, number[]>();
+    for (const { pid, ppid } of records) {
+      const list = childrenOf.get(ppid);
+      if (list) list.push(pid);
+      else childrenOf.set(ppid, [pid]);
+    }
+    const tree = [rootPid];
+    const seen = new Set(tree);
+    for (let index = 0; index < tree.length; index++) {
+      for (const child of childrenOf.get(tree[index]!) ?? []) {
+        if (seen.has(child)) continue;
+        seen.add(child);
+        tree.push(child);
+      }
+    }
+    return tree;
+  }
+
+  /** A6 subprocess life-sign: true when the pane's harness process has at
+   *  least one live descendant (a running tool subprocess). The pane launcher
+   *  `exec`s the harness, so the pane pid IS the harness and its descendants
+   *  are tool processes. */
+  async subprocessAlive(name: string): Promise<boolean> {
+    const panePid = await this.panePid(name);
+    if (panePid === undefined) return false;
+    const records = await this.processTable().catch(() => undefined);
+    if (records === undefined) return false;
+    const live = new Set(records.filter(record => !record.stat?.startsWith('Z')).map(record => record.pid));
+    return this.processTreePids(panePid, records)
+      .slice(1)
+      .some(pid => live.has(pid));
   }
 
   async launch(config: SessionConfig): Promise<void> {
@@ -923,13 +961,96 @@ export class TmuxController {
     return pane;
   }
 
-  async stop(name: string): Promise<void> {
-    for (let attempt = 0; attempt < 3; attempt++) {
-      if (!(await this.alive(name))) return;
-      const result = await run(['tmux', 'kill-session', '-t', name]);
-      await Bun.sleep(100 * (attempt + 1));
-      if (!(await this.alive(name))) return;
-      if (attempt === 2) throw new Error(result.stderr.trim() || `tmux session ${name} survived kill-session`);
+  protected async killSession(name: string): Promise<{ code: number; stdout: string; stderr: string }> {
+    return await run(['tmux', 'kill-session', '-t', name]);
+  }
+
+  protected async stopSleep(ms: number): Promise<void> {
+    await Bun.sleep(ms);
+  }
+
+  protected async signalProcess(pid: number, signal: 'SIGTERM' | 'SIGKILL'): Promise<void> {
+    process.kill(pid, signal);
+  }
+
+  private async survivingProcessPids(rootPid: number, trackedPids: readonly number[]): Promise<number[]> {
+    const records = await this.processTable();
+    // Zombies have exited and cannot be killed; treating a short-lived zombie
+    // as a surviving harness would make every successful teardown look like a
+    // ghost. Their parent still has to reap them, but they are not executing.
+    const live = new Set(records.filter(record => !record.stat?.startsWith('Z')).map(record => record.pid));
+    // Captured descendants remain tracked after the root dies and the kernel
+    // reparents them to pid 1. Also include any descendant spawned between
+    // the initial capture and teardown while the root is still present.
+    const candidates = [...new Set([...trackedPids, ...this.processTreePids(rootPid, records)])];
+    return candidates.filter(pid => live.has(pid));
+  }
+
+  private async signalProcessTree(pids: readonly number[], signal: 'SIGTERM' | 'SIGKILL'): Promise<void> {
+    // Children first: stop tool subprocesses before their harness parent, while
+    // retaining the captured pid list so reparenting cannot hide a ghost.
+    for (const pid of [...pids].reverse()) {
+      try {
+        await this.signalProcess(pid, signal);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+      }
     }
+  }
+
+  async stop(name: string): Promise<void> {
+    if (!(await this.alive(name))) return;
+    const panePid = await this.panePid(name).catch(() => undefined);
+    let trackedPids = panePid === undefined ? [] : [panePid];
+    let captureProblem = panePid === undefined ? 'pane pid was unavailable before tmux teardown' : undefined;
+    if (panePid !== undefined) {
+      try {
+        const records = await this.processTable();
+        if (records.some(record => record.pid === panePid)) trackedPids = this.processTreePids(panePid, records);
+        else captureProblem = `pane pid ${panePid} was absent from the process table before tmux teardown`;
+      } catch (error) {
+        captureProblem = `process tree capture failed before tmux teardown: ${String(error)}`;
+      }
+    }
+    let stopped = false;
+    let lastResult = { code: 0, stdout: '', stderr: '' };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      lastResult = await this.killSession(name);
+      await this.stopSleep(100 * (attempt + 1));
+      if (!(await this.alive(name))) {
+        stopped = true;
+        break;
+      }
+    }
+    if (!stopped)
+      throw new Error(lastResult.stderr.trim() || `tmux session ${name} survived three kill-session attempts`);
+    if (panePid === undefined)
+      throw new Error(
+        `tmux session ${name} stopped, but harness process death could not be confirmed: ${captureProblem}`,
+      );
+
+    let survivors = await this.survivingProcessPids(panePid, trackedPids).catch(error => {
+      throw new Error(
+        `tmux session ${name} stopped, but harness process death could not be confirmed: ${String(error)}`,
+      );
+    });
+    if (survivors.length > 0) {
+      await this.signalProcessTree(survivors, 'SIGTERM');
+      await this.stopSleep(500);
+      survivors = await this.survivingProcessPids(panePid, trackedPids);
+    }
+    if (survivors.length > 0) {
+      await this.signalProcessTree(survivors, 'SIGKILL');
+      await this.stopSleep(250);
+      survivors = await this.survivingProcessPids(panePid, trackedPids);
+    }
+    if (survivors.length > 0)
+      throw new Error(
+        `harness process tree for tmux session ${name} survived SIGKILL; surviving pids: ${survivors.join(', ')}`,
+      );
+    if (captureProblem)
+      throw new Error(
+        `tmux session ${name} stopped, but harness process death could not be confirmed: ${captureProblem}`,
+      );
   }
 }

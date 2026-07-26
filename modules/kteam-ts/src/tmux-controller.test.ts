@@ -510,6 +510,69 @@ describe('fillComposer', () => {
   });
 });
 
+describe('stop() confirms the harness process tree is gone', () => {
+  type ProcessRecord = { pid: number; ppid: number };
+
+  class StopHarness extends TmuxController {
+    readonly signals: Array<{ pid: number; signal: 'SIGTERM' | 'SIGKILL' }> = [];
+    private tmuxAlive = true;
+
+    constructor(private readonly tables: ProcessRecord[][]) {
+      super(createPaths('/tmp/kteam-stop-test'), 'http://127.0.0.1:7337');
+    }
+
+    override async alive(): Promise<boolean> {
+      return this.tmuxAlive;
+    }
+
+    protected async panePid(): Promise<number | undefined> {
+      return 4_100;
+    }
+
+    protected async processTable(): Promise<ProcessRecord[]> {
+      return this.tables.shift() ?? [];
+    }
+
+    protected async killSession(): Promise<{ code: number; stdout: string; stderr: string }> {
+      this.tmuxAlive = false;
+      return { code: 0, stdout: '', stderr: '' };
+    }
+
+    protected async stopSleep(): Promise<void> {}
+
+    protected async signalProcess(pid: number, signal: 'SIGTERM' | 'SIGKILL'): Promise<void> {
+      this.signals.push({ pid, signal });
+    }
+  }
+
+  const tree = [
+    { pid: 4_100, ppid: 1 },
+    { pid: 4_101, ppid: 4_100 },
+  ];
+
+  test('a normal tmux teardown confirms the captured pane process tree died', async () => {
+    const controller = new StopHarness([tree, []]);
+    await controller.stop('kteam-a4-normal-test-agent');
+    expect(controller.signals).toEqual([]);
+  });
+
+  test('a surviving harness escalates child-first through SIGTERM then SIGKILL', async () => {
+    const controller = new StopHarness([tree, tree, tree, []]);
+    await controller.stop('kteam-a4-escalate-test-agent');
+    expect(controller.signals).toEqual([
+      { pid: 4_101, signal: 'SIGTERM' },
+      { pid: 4_100, signal: 'SIGTERM' },
+      { pid: 4_101, signal: 'SIGKILL' },
+      { pid: 4_100, signal: 'SIGKILL' },
+    ]);
+  });
+
+  test('a process tree surviving SIGKILL fails loudly with the surviving pids', async () => {
+    const controller = new StopHarness([tree, tree, tree, tree]);
+    await expect(controller.stop('kteam-a4-ghost-test-agent')).rejects.toThrow(/survived SIGKILL.*4100.*4101/);
+  });
+});
+
 describe('send() into an interactive pane whose composer already holds a draft', () => {
   // A human (at the pane, or through the harness's own remote-control surface)
   // leaves text in the composer → promptReady stays false → the readiness gate
