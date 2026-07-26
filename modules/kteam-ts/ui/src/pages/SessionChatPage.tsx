@@ -17,10 +17,10 @@
 // neighbours — all three ran per open session, forever.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { MessageSquare, Terminal } from 'lucide-react';
+import { ImageOff, Loader2, MessageSquare, RotateCcw, Terminal, X } from 'lucide-react';
 import { api, ApiError, HAS_TOKEN } from '../lib/api';
-import { useFleet, useSession, useSessionEvents, useStore } from '../lib/store';
-import type { ChatRecord, KTeamEvent } from '../types';
+import { useFleet, useSession, useSessionEvents, useStore, useUiControls } from '../lib/store';
+import type { ChatRecord, KTeamEvent, SessionView } from '../types';
 import { Composer } from '../components/Composer';
 import { QuestionForm } from '../components/QuestionForm';
 import { TerminalView } from '../components/TerminalView';
@@ -29,7 +29,25 @@ import { SessionHeader } from '../components/SessionHeader';
 import { Transcript } from '../components/Transcript';
 import { ThinkingIndicator } from '../components/Harness';
 import { displayCallsign } from '../lib/callsign';
-import { buildTranscript, latestPendingQuestion, peerFrom } from '../lib/transcript';
+import {
+  buildTranscript,
+  buildSendIndex,
+  isTranscriptJournalEvent,
+  latestPendingQuestion,
+  peerFrom,
+  type TranscriptBlock,
+} from '../lib/transcript';
+import {
+  attachmentErrorCopy,
+  attachmentErrorMessage,
+  attachmentFromView,
+  formatAttachmentSize,
+  sameAttachmentIds,
+  validateAttachmentFile,
+  type AttachmentView,
+  type StoredTranscriptImage,
+} from '../lib/attachments';
+import { AttachmentImageProvider, TranscriptImageGallery } from '../components/AttachmentImage';
 import { useUsage } from '../hooks/useUsage';
 import { useDebouncedEffect } from '../hooks/useDebounce';
 import { useLayoutMode } from '../hooks/useLayoutMode';
@@ -54,6 +72,19 @@ interface PendingSend {
   /** When the reader sent it. Used to reap against chat.user records that
    *  arrived AFTER this send, never against an identical older message. */
   at: number;
+  attachmentIds: string[];
+  attachments: StoredTranscriptImage[];
+  localAttachmentIds: string[];
+}
+
+type PendingAttachmentStatus = 'uploading' | 'ready' | 'failed';
+interface PendingAttachment {
+  localId: string;
+  file: File;
+  objectUrl?: string;
+  status: PendingAttachmentStatus;
+  view?: AttachmentView;
+  error?: string;
 }
 
 /** A pending local send is confirmed by a same-text, in-window chat.user record
@@ -67,6 +98,39 @@ export function recordConfirmsPending(record: ChatRecord, pending: { text: strin
   if (from) return false;
   const at = Date.parse(record.timestamp ?? '') || 0;
   return body.trim() === pending.text && at >= pending.at - RECORD_CLOCK_SLACK_MS;
+}
+
+export function blockConfirmsPending(
+  block: TranscriptBlock,
+  pending: { text: string; at: number; attachmentIds?: readonly string[] },
+): boolean {
+  if (block.kind !== 'user' || block.from) return false;
+  const at = Date.parse(block.ts ?? '') || 0;
+  if (at < pending.at - RECORD_CLOCK_SLACK_MS) return false;
+  const pendingIds = pending.attachmentIds ?? [];
+  const blockIds = (block.attachments ?? []).map(image => image.attachmentId);
+  if (!sameAttachmentIds(blockIds, pendingIds)) return false;
+  const text = pending.text.trim();
+  return (text.length > 0 || pendingIds.length > 0) && block.text.trim() === text;
+}
+
+/** Is the session — as far as this client AUTHORITATIVELY knows — waiting on an
+ *  OPEN structured question? True when the daemon's view state says so, either
+ *  via the `awaiting_question` status OR a `pendingQuestion` object it left in
+ *  the state. Both come from `getSession`/`listSessions`, which carry the whole
+ *  state atomically, so this heals the moment a reconnect/visibility refresh
+ *  lands (see the store's forced reconcile) even if the live `interaction.question`
+ *  push flipped neither field (it carries no status — dale's diagnosis, Rank 4).
+ *
+ *  DELIBERATELY NOT derived from the transcript records: `latestPendingQuestion`
+ *  returns the last question whether or not it was answered, so gating on it
+ *  would resurrect a form — and block free-text sends — for a session that has
+ *  already answered and moved on. A terminal session is never awaiting anything,
+ *  so a stale question is never shown for one. */
+export function hasOpenQuestion(view: SessionView | undefined): boolean {
+  if (!view) return false;
+  if (TERMINAL_STATUSES.has(view.state.status)) return false;
+  return view.state.status === 'awaiting_question' || !!view.state.pendingQuestion;
 }
 
 export function SessionChatPage({
@@ -87,6 +151,19 @@ export function SessionChatPage({
   // becomes the app's only top row, so it inherits the drawer trigger and the
   // theme picker. `matchMedia`-driven: it fires on the crossing, not per pixel.
   const compact = useLayoutMode() === 'drawer';
+  // CHAT WIDTH (item 5). The mechanism lives here; the settings control and the
+  // persisted store field are nina's (`SettingsPage.tsx` / `lib/store.tsx`). We
+  // read the value DEFENSIVELY off `UiControls` so that the day nina lands
+  // `chatWidth` on the additive `kteam-ui-controls-v1` payload it flows straight
+  // through with no further edit here. Until then the field is absent and we
+  // default to 'full' — full-bleed, exactly today's behaviour — so the mechanism
+  // is correct and invisible. 'readable' caps the whole chat column (transcript
+  // AND composer, so they stay aligned) at a reading measure; see `.kt-chat-surface`
+  // in index.css. It is a no-op below that measure, which is why this is "mostly
+  // for desktop": a phone viewport is already narrower than the cap.
+  const [uiControls] = useUiControls();
+  const chatWidth: 'full' | 'readable' =
+    (uiControls as { chatWidth?: 'full' | 'readable' }).chatWidth === 'readable' ? 'readable' : 'full';
   // The cached SessionView. Navigating to a session you have seen paints its
   // header immediately instead of after a round trip; the store keeps it fresh
   // from the socket (deltas + one batched GET per burst).
@@ -96,6 +173,7 @@ export function SessionChatPage({
   // re-renders when some other session's row changes.
   const { status: liveStatus } = useFleet();
   const [records, setRecords] = useState<ChatRecord[]>([]);
+  const [journalEvents, setJournalEvents] = useState<KTeamEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [nextBefore, setNextBefore] = useState<number | null>(null);
   const [total, setTotal] = useState(0);
@@ -103,6 +181,7 @@ export function SessionChatPage({
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [atStart, setAtStart] = useState(false);
   const [draft, setDraft] = useState('');
+  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [actionNotice, setActionNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
   const [tab, setTab] = useState<'chat' | 'terminal'>('chat');
   // Bumped to (re-)pin the transcript to the true tail and re-engage follow.
@@ -121,6 +200,7 @@ export function SessionChatPage({
   // only; it never issues a scroll intent. The transcript's own follow logic
   // already handles the geometry change when it is attached.
   const seenKeys = useRef<Set<string>>(new Set());
+  const seenJournalKeys = useRef<Set<string>>(new Set());
   /** True once the initial history page has settled — gates the reconnect
    *  catch-up so it can never race the first load. */
   const loadedRef = useRef(false);
@@ -144,6 +224,12 @@ export function SessionChatPage({
   const takeFresh = useCallback((records: ChatRecord[]): ChatRecord[] => {
     const fresh = records.filter(r => !seenKeys.current.has(recordKey(r)));
     for (const r of fresh) seenKeys.current.add(recordKey(r));
+    return fresh;
+  }, []);
+
+  const takeFreshJournal = useCallback((events: KTeamEvent[]): KTeamEvent[] => {
+    const fresh = events.filter(event => !seenJournalKeys.current.has(journalEventKey(event)));
+    for (const event of fresh) seenJournalKeys.current.add(journalEventKey(event));
     return fresh;
   }, []);
 
@@ -183,12 +269,14 @@ export function SessionChatPage({
     const generation = ++loadId.current;
     const superseded = () => loadId.current !== generation;
     setRecords([]);
+    setJournalEvents([]);
     setError(null);
     setNextBefore(null);
     setLoadingInitial(true);
     setAtStart(false);
     setPinSignal(0);
     seenKeys.current.clear();
+    seenJournalKeys.current.clear();
     loadedRef.current = false;
 
     (async () => {
@@ -196,9 +284,16 @@ export function SessionChatPage({
         // The view goes through the store (one inflight request per session,
         // shared with the socket-driven refresh) so a deep link and the fleet
         // hydration cannot both GET the same session.
-        const [, page] = await Promise.all([
+        const [, page, eventTail] = await Promise.all([
           store.fetchSession(sessionId),
           api.chatHistory(sessionId, undefined, PAGE_SIZE),
+          // UI-only bounded fallback: full journals reach 19–47 MB and the
+          // current daemon has no server-side type filter. The newest 2,000
+          // durable events cover active/recent sends; older misses deliberately
+          // degrade to today's slim turn-prompt row instead of downloading the
+          // whole journal on every open. Named follow-up: add an indexed
+          // server-side `types=` filter before widening or removing this tail.
+          api.replay(sessionId, -2_000, 2_000).catch(() => []),
         ]);
         if (superseded()) return;
         setTotal(page.total);
@@ -209,6 +304,8 @@ export function SessionChatPage({
         // older than anything appended live, so the fresh half goes in front.
         const fresh = takeFresh(page.records);
         setRecords(live => (live.length === 0 ? fresh : [...fresh, ...live]));
+        const freshEvents = takeFreshJournal(eventTail.filter(isTranscriptJournalEvent));
+        setJournalEvents(live => (live.length === 0 ? freshEvents : [...freshEvents, ...live]));
         setNextBefore(page.offset);
         setAtStart(page.offset === 0);
         setPinSignal(n => n + 1);
@@ -224,7 +321,7 @@ export function SessionChatPage({
     // this run's cleanup has gone (a late response from the previous session
     // must not clear the new one's state).
     return undefined;
-  }, [sessionId, store, takeFresh]);
+  }, [sessionId, store, takeFresh, takeFreshJournal]);
 
   // ---- live events: the store's per-session subscription -------------------
   //
@@ -237,6 +334,13 @@ export function SessionChatPage({
   // SessionView this page reads, so there is no second copy to keep in sync and
   // no per-page refresh timer.
   useSessionEvents(sessionId, (ev: KTeamEvent) => {
+    if (isTranscriptJournalEvent(ev)) {
+      const key = journalEventKey(ev);
+      if (!seenJournalKeys.current.has(key)) {
+        seenJournalKeys.current.add(key);
+        setJournalEvents(events => [...events, ev]);
+      }
+    }
     // SEQUENCE 0 MEANS "NOT IN THE JOURNAL", NOT "OLD".
     //
     // Two whole event classes are broadcast live but never journalled, and both
@@ -290,7 +394,15 @@ export function SessionChatPage({
       .chatHistory(sessionId, undefined, PAGE_SIZE)
       .then(mergeTail)
       .catch(() => undefined);
-  }, [liveStatus, mergeTail, sessionId]);
+    // Fix 1 (dale, Rank 1): the socket's reconnect backfill is a 200-event
+    // GLOBAL fleet tail, so a `interaction.question` raised for THIS session
+    // while we were disconnected is never re-pushed and the question is lost.
+    // The store's reconnect `reconcile(true)` heals the whole fleet, but that is
+    // 45s-throttled and can be pre-empted; a targeted `getSession` for the open
+    // session guarantees THIS view's `status`/`pendingQuestion` are authoritative
+    // the instant the socket reopens. One request, not a poll.
+    void store.fetchSession(sessionId).catch(() => undefined);
+  }, [liveStatus, mergeTail, sessionId, store]);
 
   // ---- infinite scroll-up: load older pages via `before` -------------------
   // The guard is a REF, not the `loadingOlder` state. The transcript calls this
@@ -323,7 +435,16 @@ export function SessionChatPage({
   }, [nextBefore, sessionId, takeFresh]);
 
   // ---- derived -------------------------------------------------------------
-  const blocks = useMemo(() => buildTranscript(records), [records]);
+  const sendIndex = useMemo(() => buildSendIndex(journalEvents, sessionId), [journalEvents, sessionId]);
+  // The live turn gates inline-queue synthesis: a short send to a busy session
+  // leaves NO chat.user record, so buildTranscript materializes one once the
+  // turn it was queued in has closed — which is also the block the optimistic
+  // "queued" chip reaps against (see SendIndex.queued / synthesizeDeliveredQueued).
+  const currentTurn = view?.state.turn;
+  const blocks = useMemo(
+    () => buildTranscript(records, sendIndex, sessionId, currentTurn),
+    [records, sendIndex, sessionId, currentTurn],
+  );
   const pendingQ = useMemo(
     () =>
       view?.state.pendingQuestion
@@ -369,6 +490,126 @@ export function SessionChatPage({
   const awaitingQ = view?.state.status === 'awaiting_question';
   const isTerminal = view ? TERMINAL_STATUSES.has(view.state.status) : false;
   const isKillFailed = view?.state.status === 'kill_failed';
+  // Fix 2 (dale, Rank 4): the live `interaction.question` push carries neither
+  // `status` nor `health`, so `transitionPatch` leaves `status` on its old value
+  // until the debounced `getSession` lands — during which `awaitingQ` is false
+  // and the form stays hidden even though a real question is open. Gate the form
+  // on `hasOpenQuestion`, which ALSO fires on a non-null `pendingQuestion`, so
+  // the form surfaces the instant EITHER field is authoritative. It is keyed
+  // strictly on `view.state` (never the records fallback) and returns false for
+  // any terminal session, so a stale/answered question is never resurrected.
+  const showQuestion = HAS_TOKEN && hasOpenQuestion(view);
+
+  // ---- eager attachment uploads -------------------------------------------
+  const attachmentObjectUrls = useRef<Set<string>>(new Set());
+  const previousAttachmentSession = useRef(sessionId);
+  const revokeObjectUrl = useCallback((url?: string) => {
+    if (!url) return;
+    URL.revokeObjectURL(url);
+    attachmentObjectUrls.current.delete(url);
+  }, []);
+
+  useEffect(
+    () => () => {
+      for (const url of attachmentObjectUrls.current) URL.revokeObjectURL(url);
+      attachmentObjectUrls.current.clear();
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (previousAttachmentSession.current === sessionId) return;
+    previousAttachmentSession.current = sessionId;
+    for (const entry of pendingAttachments) revokeObjectUrl(entry.objectUrl);
+    setPendingAttachments([]);
+  }, [pendingAttachments, revokeObjectUrl, sessionId]);
+
+  const uploadAttachment = useCallback(
+    async (localId: string, file: File) => {
+      const validation = validateAttachmentFile(file);
+      if (validation) {
+        setPendingAttachments(entries =>
+          entries.map(entry =>
+            entry.localId === localId ? { ...entry, status: 'failed', error: attachmentErrorCopy(validation) } : entry,
+          ),
+        );
+        return;
+      }
+      setPendingAttachments(entries =>
+        entries.map(entry =>
+          entry.localId === localId ? { ...entry, status: 'uploading', error: undefined, view: undefined } : entry,
+        ),
+      );
+      try {
+        const uploaded = await api.upload(sessionId, file);
+        setPendingAttachments(entries =>
+          entries.map(entry =>
+            entry.localId === localId ? { ...entry, status: 'ready', view: uploaded, error: undefined } : entry,
+          ),
+        );
+      } catch (uploadError) {
+        setPendingAttachments(entries =>
+          entries.map(entry =>
+            entry.localId === localId
+              ? { ...entry, status: 'failed', view: undefined, error: attachmentErrorMessage(uploadError) }
+              : entry,
+          ),
+        );
+      }
+    },
+    [sessionId],
+  );
+
+  const addFiles = useCallback(
+    (files: File[]) => {
+      if (!HAS_TOKEN || files.length === 0) return;
+      const entries = files.map(file => {
+        const localId = `attachment-${crypto.randomUUID()}`;
+        const validation = validateAttachmentFile(file);
+        let objectUrl: string | undefined;
+        if (file.type.startsWith('image/')) {
+          objectUrl = URL.createObjectURL(file);
+          attachmentObjectUrls.current.add(objectUrl);
+        }
+        return {
+          localId,
+          file,
+          ...(objectUrl ? { objectUrl } : {}),
+          status: validation ? ('failed' as const) : ('uploading' as const),
+          ...(validation ? { error: attachmentErrorCopy(validation) } : {}),
+        };
+      });
+      setPendingAttachments(current => [...current, ...entries]);
+      for (const entry of entries) if (entry.status === 'uploading') void uploadAttachment(entry.localId, entry.file);
+    },
+    [uploadAttachment],
+  );
+
+  const removeAttachment = useCallback(
+    (localId: string) => {
+      revokeObjectUrl(pendingAttachments.find(entry => entry.localId === localId)?.objectUrl);
+      setPendingAttachments(current => current.filter(entry => entry.localId !== localId));
+    },
+    [pendingAttachments, revokeObjectUrl],
+  );
+
+  const clearAttachments = useCallback(
+    (localIds: readonly string[]) => {
+      const ids = new Set(localIds);
+      for (const entry of pendingAttachments) if (ids.has(entry.localId)) revokeObjectUrl(entry.objectUrl);
+      setPendingAttachments(current => current.filter(entry => !ids.has(entry.localId)));
+    },
+    [pendingAttachments, revokeObjectUrl],
+  );
+
+  const readyAttachments = useMemo(
+    () =>
+      pendingAttachments.filter(
+        (entry): entry is PendingAttachment & { view: AttachmentView } => entry.status === 'ready' && !!entry.view,
+      ),
+    [pendingAttachments],
+  );
+  const hasUploadingAttachments = pendingAttachments.some(entry => entry.status === 'uploading');
 
   // Fluid "working" elapsed: stamp when the session became busy, clear when it
   // idles. The footer ticks locally from this (no extra network).
@@ -388,7 +629,7 @@ export function SessionChatPage({
     pendingRef.current = pending;
   }, [pending]);
 
-  // REAPING. The real chat.user record IS the proof of delivery, so it retires
+  // REAPING. A visible transcript block IS the proof of delivery, so it retires
   // the optimistic box whatever the box currently claims — including 'sending'
   // (the POST can outlive the record: the harness writes its transcript entry as
   // soon as the text is submitted, while the daemon is still polling the pane for
@@ -403,10 +644,10 @@ export function SessionChatPage({
   useEffect(() => {
     if (!pending.length) return;
     setPending(p => {
-      const next = p.filter(x => !records.some(record => recordConfirmsPending(record, x)));
+      const next = p.filter(x => !blocks.some(block => blockConfirmsPending(block, x)));
       return next.length === p.length ? p : next;
     });
-  }, [records, pending.length]);
+  }, [blocks, pending.length]);
 
   // ---- what a screen reader is told -----------------------------------------
   //
@@ -512,16 +753,43 @@ export function SessionChatPage({
    *  apply it twice; measured double delivery, 2026-07-25) and the original row
    *  (one message, one box). Any other send, including a deliberate repeat of
    *  text that already went through, gets a fresh id and is delivered normally. */
-  const identityFor = useCallback((text: string): { requestId: string; key?: string } => {
-    const failed = pendingRef.current.find(p => p.text === text && p.status === 'error');
+  const identityFor = useCallback((text: string, attachmentIds: string[]): { requestId: string; key?: string } => {
+    const failed = pendingRef.current.find(
+      p => p.text === text && p.status === 'error' && sameAttachmentIds(p.attachmentIds, attachmentIds),
+    );
     return failed ? { requestId: failed.requestId, key: failed.key } : { requestId: crypto.randomUUID() };
   }, []);
 
   // ---- actions -------------------------------------------------------------
   const deliver = useCallback(
-    async (msg: string, opts: { interruptFirst: boolean; requestId: string; key?: string }) => {
+    async (
+      msg: string,
+      opts: {
+        interruptFirst: boolean;
+        requestId: string;
+        key?: string;
+        attachmentIds: string[];
+        attachments: StoredTranscriptImage[];
+        localAttachmentIds: string[];
+      },
+    ) => {
       if (sendingRef.current) return;
-      if (!msg || !HAS_TOKEN) return;
+      if ((!msg && opts.attachmentIds.length === 0) || !HAS_TOKEN) return;
+      // Fix 3 (dale, Rank 2): a plain free-text send that lands on an open
+      // question is rejected by the daemon, but silently — the reader typed
+      // because they could not see the form, and their message vanishes with no
+      // trace of why. Refuse it on the client with a visible notice that names
+      // the form and the interrupt-and-send escape hatch, and heal the view so
+      // the form surfaces. `interruptFirst` is the deliberate supersede path and
+      // is allowed through — that one replaces the question loudly.
+      if (!opts.interruptFirst && hasOpenQuestion(view)) {
+        setActionNotice({
+          kind: 'err',
+          text: 'This session is waiting for an answer to a structured question. Answer it in the form below, or use interrupt-and-send to replace it.',
+        });
+        void store.fetchSession(sessionId).catch(() => undefined);
+        return;
+      }
       sendingRef.current = true;
       setSending(true);
       setActionNotice(null);
@@ -531,42 +799,80 @@ export function SessionChatPage({
       setPending(p =>
         p.some(x => x.key === key)
           ? p.map(x => (x.key === key ? { ...x, status: 'sending' as PendingStatus } : x))
-          : [...p, { key, text: msg, status: 'sending' as PendingStatus, requestId: opts.requestId, at: Date.now() }],
+          : [
+              ...p,
+              {
+                key,
+                text: msg,
+                status: 'sending' as PendingStatus,
+                requestId: opts.requestId,
+                at: Date.now(),
+                attachmentIds: opts.attachmentIds,
+                attachments: opts.attachments,
+                localAttachmentIds: opts.localAttachmentIds,
+              },
+            ],
       );
       // The reader just spoke: put them at the bottom and resume following, so the
       // reply streams in under their eyes instead of somewhere off-screen.
       pinToBottom();
       try {
         if (opts.interruptFirst) await api.interrupt(sessionId);
-        const next = await api.send(sessionId, msg, false, opts.requestId);
+        const next = await api.send(sessionId, msg, false, opts.requestId, opts.attachmentIds);
         // Straight into the shared cache: this page, the dashboard behind it and
         // the folder sidebar all read the same record.
         store.upsertSession(next);
-        const queued = !opts.interruptFirst && (busy || isBusy(next));
+        const queued =
+          next.disposition === 'queued' || (!opts.interruptFirst && !next.disposition && (busy || isBusy(next)));
         setPending(p => p.map(x => (x.key === key ? { ...x, status: queued ? 'queued' : 'delivered' } : x)));
+        clearAttachments(opts.localAttachmentIds);
       } catch (e) {
         setPending(p => p.map(x => (x.key === key ? { ...x, status: 'error' } : x)));
         setActionNotice({ kind: 'err', text: e instanceof ApiError ? e.message : String(e) });
+        // A send can fail precisely because the daemon flipped to
+        // `awaiting_question` between paint and submit (the race Fix 3 guards on
+        // the client). Re-fetch the authoritative view so, if that is what
+        // happened, the question form replaces the composer instead of leaving
+        // the reader staring at a bare "message failed".
+        void store.fetchSession(sessionId).catch(() => undefined);
       } finally {
         sendingRef.current = false;
         setSending(false);
       }
     },
-    [busy, pinToBottom, sessionId],
+    [busy, clearAttachments, pinToBottom, sessionId, store, view],
   );
 
   function send() {
     const msg = draft.trim();
-    if (!msg || sendingRef.current) return;
+    if ((!msg && readyAttachments.length === 0) || hasUploadingAttachments || sendingRef.current) return;
+    const attachmentIds = readyAttachments.map(entry => entry.view.id);
+    const attachments = readyAttachments.map(entry => attachmentFromView(sessionId, entry.view));
+    const localAttachmentIds = readyAttachments.map(entry => entry.localId);
     setDraft('');
-    void deliver(msg, { interruptFirst: false, ...identityFor(msg) });
+    void deliver(msg, {
+      interruptFirst: false,
+      ...identityFor(msg, attachmentIds),
+      attachmentIds,
+      attachments,
+      localAttachmentIds,
+    });
   }
 
   function interruptAndSend() {
     const msg = draft.trim();
-    if (!msg || sendingRef.current) return;
+    if ((!msg && readyAttachments.length === 0) || hasUploadingAttachments || sendingRef.current) return;
+    const attachmentIds = readyAttachments.map(entry => entry.view.id);
+    const attachments = readyAttachments.map(entry => attachmentFromView(sessionId, entry.view));
+    const localAttachmentIds = readyAttachments.map(entry => entry.localId);
     setDraft('');
-    void deliver(msg, { interruptFirst: true, ...identityFor(msg) });
+    void deliver(msg, {
+      interruptFirst: true,
+      ...identityFor(msg, attachmentIds),
+      attachmentIds,
+      attachments,
+      localAttachmentIds,
+    });
   }
 
   /** Retry a failed optimistic send with its ORIGINAL request id, so a first
@@ -574,7 +880,14 @@ export function SessionChatPage({
    *  the daemon and not applied a second time. */
   const retryPending = useCallback(
     (entry: PendingSend) => {
-      void deliver(entry.text, { interruptFirst: false, requestId: entry.requestId, key: entry.key });
+      void deliver(entry.text, {
+        interruptFirst: false,
+        requestId: entry.requestId,
+        key: entry.key,
+        attachmentIds: entry.attachmentIds,
+        attachments: entry.attachments,
+        localAttachmentIds: entry.localAttachmentIds,
+      });
     },
     [deliver],
   );
@@ -613,6 +926,14 @@ export function SessionChatPage({
   }, [sessionId, store]);
 
   // ---- transcript header / footer slots ------------------------------------
+  const attachmentSlot = pendingAttachments.length ? (
+    <PendingAttachmentStrip
+      entries={pendingAttachments}
+      onRetry={entry => void uploadAttachment(entry.localId, entry.file)}
+      onRemove={entry => removeAttachment(entry.localId)}
+    />
+  ) : undefined;
+
   const transcriptHeader = (
     <>
       {loadingOlder && <div className="py-1 text-center text-[11.5px] text-muted">loading older messages…</div>}
@@ -634,6 +955,7 @@ export function SessionChatPage({
           <PendingMessage
             key={p.key}
             text={p.text}
+            attachments={p.attachments}
             status={p.status}
             onRetry={() => retryPending(p)}
             onDismiss={() => dismissPending(p.key)}
@@ -715,58 +1037,155 @@ export function SessionChatPage({
       {tab === 'terminal' ? (
         <TerminalView sessionId={sessionId} tmuxSession={view?.config.tmuxSession ?? ''} />
       ) : (
-        <>
-          {/* ONE pane scroller: the transcript. The details drawer is a fixed
-              overlay with its own internal scroller, so this stays true. */}
-          <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden rounded-lg border border-border bg-surface">
-            {loadingInitial ? (
-              <ThreadSkeleton />
-            ) : (
-              <Transcript
-                blocks={blocks}
-                live={busy}
-                hasOlder={nextBefore != null}
-                loadingOlder={loadingOlder}
-                onLoadOlder={() => void loadOlder()}
-                pinSignal={pinSignal}
-                header={transcriptHeader}
-                footer={transcriptFooter}
-              />
+        <AttachmentImageProvider>
+          {/* CHAT WIDTH SURFACE (item 5): `data-chat-width` drives the max-width.
+              'full' (default) is full-bleed — no cap, today's behaviour. 'readable'
+              caps the whole column so transcript and composer narrow together and
+              stay centered. Below the cap this is inert (phones are unaffected). */}
+          <div className="kt-chat-surface flex min-h-0 min-w-0 w-full flex-1 flex-col" data-chat-width={chatWidth}>
+            {/* ONE pane scroller: the transcript. The details drawer is a fixed
+              overlay with its own internal scroller, so this stays true.
+              Below `sm` the card melts away — no border, no rounding, no
+              surface fill distinct from the pane — so the conversation reads
+              edge-to-edge on a phone where that frame is pure cost. The card
+              (border + rounded-lg + bg-surface) is restored at `sm` and up. */}
+            <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden sm:rounded-lg sm:border sm:border-border sm:bg-surface">
+              {loadingInitial ? (
+                <ThreadSkeleton />
+              ) : (
+                <Transcript
+                  blocks={blocks}
+                  live={busy}
+                  hasOlder={nextBefore != null}
+                  loadingOlder={loadingOlder}
+                  onLoadOlder={() => void loadOlder()}
+                  pinSignal={pinSignal}
+                  header={transcriptHeader}
+                  footer={transcriptFooter}
+                />
+              )}
+            </div>
+
+            {!showQuestion && HAS_TOKEN && (
+              <div className="mt-2">
+                <Composer
+                  draft={draft}
+                  onDraftChange={setDraft}
+                  onSubmit={() => void send()}
+                  onInterruptAndSend={() => void interruptAndSend()}
+                  disabled={!view || loadingInitial}
+                  busy={busy}
+                  sending={sending}
+                  context={composerContext}
+                  compact={compact}
+                  onFiles={addFiles}
+                  attachmentSlot={attachmentSlot}
+                  hasAttachments={readyAttachments.length > 0}
+                  attachmentsPending={hasUploadingAttachments}
+                />
+              </div>
+            )}
+            {showQuestion && pendingQ && (
+              <div className="mt-2">
+                <QuestionForm
+                  // Remount on a NEW question set: `picks`/`others` are `useState`
+                  // initializers, so without this a set arriving while the form is
+                  // still mounted would carry the previous set's answers.
+                  key={(pendingQ.data as { toolUseId?: string } | undefined)?.toolUseId}
+                  sessionId={sessionId}
+                  question={pendingQ}
+                  onSubmit={() => void store.fetchSession(sessionId).catch(() => undefined)}
+                  // Phone: one question per screen. Paging is a LAYOUT decision, so
+                  // it keys off `compact` (the same signal `Composer` gets), never
+                  // off input modality — a narrow desktop window is not a phone.
+                  compact={compact}
+                />
+              </div>
+            )}
+            {!HAS_TOKEN && (
+              <div className="mt-2 rounded-md border border-warn-border bg-warn-bg px-2.5 py-1.5 text-[12.5px] text-warn">
+                Read-only: this origin did not receive an embedding token from the daemon, so messages, answers, and
+                control actions are disabled.
+              </div>
             )}
           </div>
-
-          {!awaitingQ && HAS_TOKEN && (
-            <div className="mt-2">
-              <Composer
-                draft={draft}
-                onDraftChange={setDraft}
-                onSubmit={() => void send()}
-                onInterruptAndSend={() => void interruptAndSend()}
-                disabled={!view || loadingInitial}
-                busy={busy}
-                sending={sending}
-                context={composerContext}
-                compact={compact}
-              />
-            </div>
-          )}
-          {awaitingQ && pendingQ && HAS_TOKEN && (
-            <div className="mt-2">
-              <QuestionForm
-                sessionId={sessionId}
-                question={pendingQ}
-                onSubmit={() => void store.fetchSession(sessionId).catch(() => undefined)}
-              />
-            </div>
-          )}
-          {!HAS_TOKEN && (
-            <div className="mt-2 rounded-md border border-warn-border bg-warn-bg px-2.5 py-1.5 text-[12.5px] text-warn">
-              Read-only: this origin did not receive an embedding token from the daemon, so messages, answers, and
-              control actions are disabled.
-            </div>
-          )}
-        </>
+        </AttachmentImageProvider>
       )}
+    </div>
+  );
+}
+
+function PendingAttachmentStrip({
+  entries,
+  onRetry,
+  onRemove,
+}: {
+  entries: PendingAttachment[];
+  onRetry(entry: PendingAttachment): void;
+  onRemove(entry: PendingAttachment): void;
+}) {
+  return (
+    <div
+      className="flex min-w-0 gap-2 overflow-x-auto border-b border-border-soft pb-2 scroll-thin"
+      aria-label="Attached images"
+    >
+      {entries.map(entry => (
+        <div
+          key={entry.localId}
+          className={cn(
+            'flex min-w-[230px] max-w-[320px] items-center gap-2 rounded-control border bg-surface-2 p-1.5',
+            entry.status === 'failed' ? 'border-err-border' : 'border-border-soft',
+          )}
+          role={entry.status === 'failed' ? 'alert' : 'status'}
+        >
+          {entry.objectUrl ? (
+            <img
+              src={entry.objectUrl}
+              alt=""
+              className="h-12 w-12 shrink-0 rounded-sm border border-border-soft object-cover"
+            />
+          ) : (
+            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-sm border border-border-soft bg-surface">
+              <ImageOff size={18} className="text-muted" aria-hidden="true" />
+            </span>
+          )}
+          <span className="min-w-0 flex-1 text-meta">
+            <span className="block truncate text-fg" title={entry.file.name}>
+              {entry.file.name}
+            </span>
+            <span className="block text-faint">{formatAttachmentSize(entry.file.size)}</span>
+            {entry.status === 'uploading' ? (
+              <span className="inline-flex items-center gap-1 text-muted">
+                <Loader2 size={11} className="animate-spin motion-reduce:animate-none" aria-hidden="true" /> uploading
+              </span>
+            ) : entry.status === 'failed' ? (
+              <span className="block text-err">{entry.error}</span>
+            ) : (
+              <span className="block text-ok">ready</span>
+            )}
+          </span>
+          {entry.status === 'failed' && (
+            <button
+              type="button"
+              className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-control text-muted hover:bg-surface hover:text-fg"
+              onClick={() => onRetry(entry)}
+              aria-label={`Retry ${entry.file.name}`}
+              title="Retry upload"
+            >
+              <RotateCcw size={15} aria-hidden="true" />
+            </button>
+          )}
+          <button
+            type="button"
+            className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-control text-muted hover:bg-surface hover:text-fg"
+            onClick={() => onRemove(entry)}
+            aria-label={`Remove ${entry.file.name}`}
+            title="Remove image"
+          >
+            <X size={16} aria-hidden="true" />
+          </button>
+        </div>
+      ))}
     </div>
   );
 }
@@ -792,11 +1211,13 @@ const PENDING_BADGE: Record<PendingStatus, { label: string; tone: string }> = {
 
 function PendingMessage({
   text,
+  attachments,
   status,
   onRetry,
   onDismiss,
 }: {
   text: string;
+  attachments: StoredTranscriptImage[];
   status: PendingStatus;
   onRetry?: () => void;
   onDismiss?: () => void;
@@ -842,9 +1263,12 @@ function PendingMessage({
             </>
           )}
         </div>
-        <div className="kt-user-copy min-w-0 max-w-full whitespace-pre-wrap break-words px-panel pb-1.5 pt-0.5 text-[13px] leading-snug text-[color:var(--bubble-fg)]">
-          {text}
-        </div>
+        {text && (
+          <div className="kt-user-copy min-w-0 max-w-full whitespace-pre-wrap break-words px-panel pb-1.5 pt-0.5 text-[13px] leading-snug text-[color:var(--bubble-fg)]">
+            {text}
+          </div>
+        )}
+        <TranscriptImageGallery images={attachments} className="px-panel pb-2 pt-1" />
       </div>
     </div>
   );
@@ -865,6 +1289,11 @@ function ThreadSkeleton() {
 }
 
 // Map a WS event envelope onto a ChatRecord.
+function journalEventKey(event: KTeamEvent): string {
+  if (event.sequence > 0) return `${event.sessionId}:${event.sequence}`;
+  return `${event.sessionId}:${event.type}:${event.time}:${fieldHash(JSON.stringify(event.data ?? null))}`;
+}
+
 function eventToRecord(ev: KTeamEvent): ChatRecord | null {
   const d = ev.data as Record<string, unknown> | null;
   if (!d || typeof d !== 'object') return null;

@@ -8,10 +8,17 @@
 // the only way they can still disagree is by each carrying its own copy of the
 // predicate — which is what this file removes.
 //
-// Three exported pieces, in the order they are applied:
+// Exported pieces, in the order they are applied:
+//   scopeSessions   — folder mode: narrow the fleet to ONE project group (identity
+//                     when no scope is active), composed BEFORE the four filters
 //   filterSessions  — the instant client-side filter (query + mode + rc + finished)
 //   modeCounts      — what each mode segment WOULD show, under the other filters
 //   groupByProject  — longest-project-path-prefix grouping, cwd basename fallback
+//
+// The grouping matcher is factored out into `projectKeyFor` so grouping and
+// scoping can NEVER disagree on which folder a session belongs to: the group
+// header you tap to focus a folder and the predicate that then narrows the list
+// derive the session's group key from the exact same code.
 
 import type { ProjectInfo, SessionView } from '../types';
 import { TERMINAL_STATUSES } from './utils';
@@ -111,10 +118,90 @@ function byActivity(a: SessionView, b: SessionView): number {
   );
 }
 
+/** Strip trailing slashes for prefix comparison, keeping a bare root `/`.
+ *
+ *  Daemon-registered `ProjectInfo.path` values are NOT guaranteed canonical
+ *  (no trailing slash, no symlink variance) — that was flagged as a CANNOT-TELL
+ *  in the plan. Routing both grouping and scope equality through this one
+ *  normaliser is the mitigation: a `…/repo` and a `…/repo/` registration collapse
+ *  to the same key, so a scope set from one still matches sessions filed under
+ *  the other. */
+export function normalizeProjectPath(p: string): string {
+  const trimmed = (p ?? '').replace(/\/+$/, '');
+  return trimmed === '' ? (p ?? '') : trimmed;
+}
+
+/** The group a session belongs to: `{ key, name }`.
+ *
+ *  `key` is the STABLE identity used everywhere scope is compared or persisted —
+ *  a normalised registered project path, or the session's own (normalised) cwd
+ *  when it matches no known project. `name` is only for display. Names can
+ *  collide across distinct paths; keys cannot, which is why folder mode scopes
+ *  on the key, never the name.
+ *
+ *  The LONGEST registered path that prefixes the cwd wins, so a worktree nested
+ *  inside a repo files under the worktree rather than the parent. */
+export interface ProjectKey {
+  key: string;
+  name: string;
+}
+
+export function projectKeyFor(cwd: string, projects: readonly ProjectInfo[]): ProjectKey {
+  const c = normalizeProjectPath(cwd ?? '');
+  let best: ProjectInfo | undefined;
+  let bestLen = -1;
+  for (const p of projects) {
+    const pp = normalizeProjectPath(p.path);
+    if ((c === pp || c.startsWith(pp + '/')) && pp.length > bestLen) {
+      best = p;
+      bestLen = pp.length;
+    }
+  }
+  if (best) return { key: normalizeProjectPath(best.path), name: best.name };
+  return { key: c, name: c ? baseName(c) : 'ungrouped' };
+}
+
+/** True when a session falls in the active folder scope. `scope === null` means
+ *  "no folder mode" and admits everything (identity). `scope` is a group KEY
+ *  (see `projectKeyFor`), never a display name. */
+export function sessionInScope(view: SessionView, projects: readonly ProjectInfo[], scope: string | null): boolean {
+  if (scope === null) return true;
+  return projectKeyFor(view.config.cwd ?? '', projects).key === normalizeProjectPath(scope);
+}
+
+/** Folder mode: narrow the fleet to one project group. Applied BEFORE the four
+ *  filters and replacing none of them; an identity pass-through when unscoped, so
+ *  the whole feature degrades to today's behaviour the instant `scope` is null. */
+export function scopeSessions(
+  sessions: readonly SessionView[],
+  projects: readonly ProjectInfo[],
+  scope: string | null,
+): SessionView[] {
+  if (scope === null) return sessions.slice();
+  const s = normalizeProjectPath(scope);
+  return sessions.filter(v => projectKeyFor(v.config.cwd ?? '', projects).key === s);
+}
+
+/** A scope is RESOLVABLE when it names a real folder: a registered project path,
+ *  or the group key of at least one session in the UNFILTERED fleet (which covers
+ *  cwd-fallback groups). Computed over the unfiltered list on purpose — a folder
+ *  whose sessions are all finished with "include finished" off is *filtered-empty*
+ *  (scope preserved), not *missing* (scope recovered). */
+export function isScopeResolvable(
+  scope: string,
+  sessions: readonly SessionView[],
+  projects: readonly ProjectInfo[],
+): boolean {
+  const s = normalizeProjectPath(scope);
+  if (projects.some(p => normalizeProjectPath(p.path) === s)) return true;
+  return sessions.some(v => projectKeyFor(v.config.cwd ?? '', projects).key === s);
+}
+
 /** Group by project: the LONGEST registered project path that prefixes the
  *  session's cwd wins (so a worktree nested inside a repo files under the
  *  worktree, not the parent), and a cwd under no known project falls back to
- *  its own basename so nothing is orphaned.
+ *  its own basename so nothing is orphaned. Delegates the per-session decision
+ *  to `projectKeyFor` so scoping can never file a session differently.
  *
  *  `sortRows` is opt-in because the dashboard preserves the daemon's order
  *  while the sidebar wants most-recent-first. */
@@ -123,14 +210,10 @@ export function groupByProject(
   projects: readonly ProjectInfo[],
   sortRows = false,
 ): SessionGroup[] {
-  const byPathLen = [...projects].sort((a, b) => b.path.length - a.path.length);
   const map = new Map<string, SessionGroup>();
   for (const v of sessions) {
-    const cwd = v.config.cwd ?? '';
-    const match = byPathLen.find(p => cwd === p.path || cwd.startsWith(p.path + '/'));
-    const key = match?.path ?? cwd ?? 'ungrouped';
-    const name = match?.name ?? (cwd ? baseName(cwd) : 'ungrouped');
-    if (!map.has(key)) map.set(key, { name, path: match?.path ?? cwd, rows: [] });
+    const { key, name } = projectKeyFor(v.config.cwd ?? '', projects);
+    if (!map.has(key)) map.set(key, { name, path: key, rows: [] });
     map.get(key)!.rows.push(v);
   }
   const groups = [...map.values()];

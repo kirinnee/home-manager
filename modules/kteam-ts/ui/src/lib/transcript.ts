@@ -38,8 +38,14 @@
 // MessageScroller's preserveScrollOnPrepend anchoring) survive older-page
 // prepends without remounting the visible tail.
 
-import type { ChatRecord } from '../types';
-import type { ToolResultData, ToolUseData } from './tool-extract';
+import type { ChatRecord, KTeamEvent } from '../types';
+import { resultImages, type ToolResultData, type ToolUseData } from './tool-extract';
+import {
+  attachmentFromToolPath,
+  sameAttachmentIds,
+  type StoredTranscriptImage,
+  type TranscriptImage,
+} from './attachments';
 import { classifySystemText, type SystemBlockInfo } from './system-blocks';
 export type { SystemBlockInfo } from './system-blocks';
 
@@ -50,6 +56,9 @@ export interface ToolCall {
   ts?: string;
   /** true when this call was a bare result with no matching use in the run. */
   orphanResult?: boolean;
+  /** Bytes already present in a Claude result, or an authenticated store id
+   * derived from a same-session Codex view_image path. */
+  images?: TranscriptImage[];
 }
 
 /** A message that came from another SESSION rather than from the human.
@@ -89,6 +98,7 @@ export type TranscriptBlock =
       source: string;
       /** Present when another session sent this, absent when a human did. */
       from?: PeerFrom;
+      attachments?: StoredTranscriptImage[];
     }
   | { id: string; kind: 'assistant'; text: string; ts?: string; source: string }
   // A harness-INJECTED system text that arrived on the user channel (task
@@ -189,6 +199,221 @@ const TOOL_TYPES = new Set(['tool.use', 'tool.result']);
  *  a new record type should be noticed, not silently swallowed. */
 const SILENT_TYPES = new Set(['context.usage', 'session.remote_control']);
 
+/** Does this record produce NO visible transcript block, so a tool run should
+ *  bridge STRAIGHT ACROSS it rather than end at it?
+ *
+ *  Measured on a real busy session (mrwirdnf, 4022 records): a `context.usage`
+ *  accounting record is emitted after almost every tool result, and it — along
+ *  with empty thinking heartbeats and empty assistant text — used to TERMINATE
+ *  the tool run despite rendering nothing. That shattered one turn's tools into
+ *  ~1330 separate single-call lines instead of a handful of grouped ones, AND
+ *  split a `tool.use` from its own `tool.result` (the result then rendered as a
+ *  bare "result tool result" orphan line). 88.5% of all run breaks in that
+ *  session were one of these invisible records.
+ *
+ *  Bridging them keeps a turn's tools in ONE group and lets groupToolRun pair
+ *  use↔result again. Records that DO render — visible prose, real thinking, a
+ *  user/system row, an informative turn boundary — still break the run, so the
+ *  reader never sees two tool batches reordered across something they can read.
+ *  Turn markers are deliberately NOT bridged here: their visibility is decided
+ *  later by flushTurns, and a non-informative one that survives leaves two
+ *  adjacent tools blocks that the final merge pass folds together anyway. */
+function bridgesToolRun(rec: ChatRecord): boolean {
+  const type = rec.type;
+  if (SILENT_TYPES.has(type)) return true;
+  if (type === 'chat.assistant.thinking' || type === 'chat.assistant.reasoning') {
+    const t = dataStr(rec, type === 'chat.assistant.thinking' ? 'thinking' : 'reasoning');
+    return !(t && t.trim());
+  }
+  if (type === 'chat.assistant.text') {
+    const t = dataStr(rec, 'text');
+    return !(t && t.trim());
+  }
+  return false;
+}
+
+const TRANSCRIPT_JOURNAL_TYPES = new Set([
+  'control.send',
+  'control.send_queued',
+  'control.send_consumed',
+  'attachment.created',
+]);
+
+export function isTranscriptJournalEvent(event: KTeamEvent): boolean {
+  return TRANSCRIPT_JOURNAL_TYPES.has(event.type);
+}
+
+export interface SentMessage {
+  kind: 'sent' | 'queued';
+  sequence: number;
+  time: string;
+  turn?: number;
+  queueId?: string;
+  message: string;
+  attachmentIds: string[];
+  from?: string;
+  fromName?: string;
+  replyExpected?: boolean;
+}
+
+export interface SendIndex {
+  byTurn: ReadonlyMap<number, SentMessage>;
+  byQueueId: ReadonlyMap<string, SentMessage>;
+  attachments: ReadonlyMap<string, StoredTranscriptImage>;
+  /** Inline (NON file-backed) native-queue sends. These are the only send class
+   *  the harness delivers WITHOUT leaving a chat.user transcript record: a short
+   *  message typed into a busy session's composer is folded into a turn and no
+   *  `chat.user` / `control.send_consumed` is ever emitted for it (verified on
+   *  ms1lhymf-c4051f31, turns 36→37). buildTranscript SYNTHESIZES a user block
+   *  for each once its turn has demonstrably closed, so the message is visible
+   *  after reload AND the optimistic "queued" chip has a block to reap against.
+   *  File-backed queued sends are excluded — those DO leave a "Read the queued
+   *  message file …" chat.user row that byQueueId replaces in place. */
+  queued: readonly SentMessage[];
+}
+
+function validAttachmentIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((id): id is string => typeof id === 'string' && /^att_[a-f0-9]{64}$/i.test(id));
+}
+
+/** Build the send indexes. `byTurn`/`byQueueId` are REPLACEMENT indexes: the
+ * direct turn-file and file-backed-queue paths both leave a real chat.user row
+ * (a turn prompt / a "Read the queued message file …" instruction) that
+ * buildTranscript rewrites in place. `queued` is a SYNTHESIS list: inline native
+ * queue sends leave no chat.user row at all, so buildTranscript builds one for
+ * them (see the SendIndex.queued note). */
+export function buildSendIndex(events: KTeamEvent[], sessionId: string): SendIndex {
+  const byTurn = new Map<number, SentMessage>();
+  const byQueueId = new Map<string, SentMessage>();
+  const queued: SentMessage[] = [];
+  const queuedSeen = new Set<string>();
+  const attachments = new Map<string, StoredTranscriptImage>();
+  const seen = new Set<number>();
+
+  for (const event of [...events].sort((a, b) => a.sequence - b.sequence)) {
+    if (event.sessionId !== sessionId || (event.sequence > 0 && seen.has(event.sequence))) continue;
+    if (event.sequence > 0) seen.add(event.sequence);
+    if (!event.data || typeof event.data !== 'object') continue;
+    const data = event.data as Record<string, unknown>;
+
+    if (event.type === 'attachment.created') {
+      const id = typeof data['id'] === 'string' ? data['id'] : '';
+      if (!/^att_[a-f0-9]{64}$/i.test(id)) continue;
+      attachments.set(id, {
+        kind: 'attachment',
+        sessionId,
+        attachmentId: id,
+        filename: typeof data['filename'] === 'string' && data['filename'] ? data['filename'] : id,
+        ...(typeof data['mime'] === 'string' ? { mime: data['mime'] } : {}),
+        ...(typeof data['size'] === 'number' ? { size: data['size'] } : {}),
+      });
+      continue;
+    }
+
+    if (event.type === 'control.send' && data['direct'] !== true && typeof event.turn === 'number') {
+      if (!byTurn.has(event.turn)) {
+        byTurn.set(event.turn, {
+          kind: 'sent',
+          sequence: event.sequence,
+          time: event.time,
+          turn: event.turn,
+          message: typeof data['message'] === 'string' ? data['message'].trim() : '',
+          attachmentIds: validAttachmentIds(data['attachmentIds']),
+          ...(typeof data['from'] === 'string' ? { from: data['from'] } : {}),
+          ...(typeof data['fromName'] === 'string' ? { fromName: data['fromName'] } : {}),
+          ...(data['replyExpected'] === true ? { replyExpected: true } : {}),
+        });
+      }
+      continue;
+    }
+
+    if (event.type === 'control.send_queued' && typeof data['queueId'] === 'string' && data['queueId']) {
+      const queueId = data['queueId'];
+      const message: SentMessage = {
+        kind: 'queued',
+        sequence: event.sequence,
+        time: event.time,
+        queueId,
+        ...(typeof event.turn === 'number' ? { turn: event.turn } : {}),
+        message: typeof data['message'] === 'string' ? data['message'].trim() : '',
+        attachmentIds: validAttachmentIds(data['attachmentIds']),
+        ...(typeof data['from'] === 'string' ? { from: data['from'] } : {}),
+        ...(typeof data['fromName'] === 'string' ? { fromName: data['fromName'] } : {}),
+        ...(data['replyExpected'] === true ? { replyExpected: true } : {}),
+      };
+      // File-backed queue sends leave a chat.user instruction row that
+      // byQueueId rewrites; inline ones leave nothing, so they go on the
+      // synthesis list instead. The two paths are mutually exclusive.
+      if (data['fileBacked'] === true) {
+        if (!byQueueId.has(queueId)) byQueueId.set(queueId, message);
+      } else if (!queuedSeen.has(queueId)) {
+        queuedSeen.add(queueId);
+        queued.push(message);
+      }
+    }
+  }
+  return { byTurn, byQueueId, attachments, queued };
+}
+
+function queuedFileId(text: string): string | undefined {
+  const normalized = text.replaceAll('\\', '/');
+  const match =
+    /^Read the queued message file at .*\/\.kteam\/[\w.-]+\/channel\/queued-([0-9a-f-]{36})\.md completely now, then follow every instruction inside it\./i.exec(
+      normalized,
+    );
+  return match?.[1];
+}
+
+/** Conservatively strip only the daemon's complete, trailing reference block.
+ * Any malformed line leaves the prose untouched. */
+export function stripAttachmentReferenceBlock(text: string): { text: string; attachmentIds: string[] } | null {
+  const heading = /(?:^|\n\n)(Attached images? \(inspect th(?:is|ese) files? directly before responding\):\n)/g;
+  let match: RegExpExecArray | null = null;
+  for (const candidate of text.matchAll(heading)) match = candidate;
+  if (!match || match.index === undefined) return null;
+  const blockStart = match.index + (match[0].startsWith('\n\n') ? 2 : 0);
+  const lines = text.slice(blockStart).split('\n');
+  if (
+    lines.length < 2 ||
+    !/^Attached images? \(inspect th(?:is|ese) files? directly before responding\):$/.test(lines[0]!)
+  )
+    return null;
+  const attachmentIds: string[] = [];
+  for (const line of lines.slice(1)) {
+    const item = /^- .+ \(image\/(?:png|jpeg|gif|webp), \d+ bytes, id (att_[a-f0-9]{64})\)$/.exec(line);
+    if (!item) return null;
+    attachmentIds.push(item[1]!);
+  }
+  if (!attachmentIds.length) return null;
+  return { text: text.slice(0, match.index).trim(), attachmentIds };
+}
+
+function imagesForIds(
+  ids: string[],
+  sends: SendIndex | undefined,
+  sessionId: string | undefined,
+): StoredTranscriptImage[] {
+  if (!sessionId) return [];
+  return ids.map(
+    id =>
+      sends?.attachments.get(id) ?? {
+        kind: 'attachment' as const,
+        sessionId,
+        attachmentId: id,
+        filename: id,
+      },
+  );
+}
+
+function senderFor(message: SentMessage, parsed: PeerFrom | null): PeerFrom | undefined {
+  if (!message.from && !parsed) return undefined;
+  return {
+    name: message.fromName ?? parsed?.name ?? message.from!,
+    replyExpected: message.replyExpected ?? parsed?.replyExpected ?? false,
+  };
+}
+
 interface PendingTurns {
   /** Every marker in the current run, newest last. */
   markers: { variant: 'started' | 'completed' | 'aborted'; ts?: string }[];
@@ -199,7 +424,18 @@ interface PendingTurns {
   key: string;
 }
 
-export function buildTranscript(records: ChatRecord[]): TranscriptBlock[] {
+export function buildTranscript(
+  records: ChatRecord[],
+  sends?: SendIndex,
+  sessionId?: string,
+  /** The session's live turn. Inline native-queue sends are synthesized into
+   *  user blocks only once this has advanced PAST the turn they were queued in
+   *  — the proof they left the composer (a turn cannot advance while its queued
+   *  text sits unsubmitted; a lost send dies at its turn and never advances it).
+   *  Undefined ⇒ turn unknown ⇒ synthesize nothing, so a queued chip is never
+   *  cleared on an assumption. */
+  currentTurn?: number,
+): TranscriptBlock[] {
   const out: TranscriptBlock[] = [];
   const seen = new Map<string, number>();
   const mkId = (raw: string): string => {
@@ -258,22 +494,53 @@ export function buildTranscript(records: ChatRecord[]): TranscriptBlock[] {
       // system text (classified ONLY when there is no peer attribution, so peer
       // semantics are untouched by construction) collapses to a slim system row.
       const info = from ? null : classifySystemText(body);
-      if (info) {
+      const turnNumber = info?.label === 'turn prompt' ? Number(/turn-(\d+)\.md/.exec(info.summary ?? '')?.[1]) : NaN;
+      const queueId = from ? undefined : queuedFileId(body);
+      const merged = Number.isFinite(turnNumber)
+        ? sends?.byTurn.get(turnNumber)
+        : queueId
+          ? sends?.byQueueId.get(queueId)
+          : undefined;
+
+      if (merged) {
+        const parsed = peerFrom(merged.message);
+        const mergedFrom = senderFor(merged, parsed.from);
+        const attachments = imagesForIds(merged.attachmentIds, sends, sessionId);
         out.push({
-          id: mkId(`s-${hash(sig(r))}`),
+          // The record, not the late-arriving event, owns row identity. `p-` is
+          // also used by the fallback below so a replay race cannot remount it.
+          id: mkId(`p-${hash(sig(r))}`),
+          kind: 'user',
+          text: parsed.body,
+          ts: r.timestamp,
+          source: r.source ?? 'user',
+          ...(mergedFrom ? { from: mergedFrom } : {}),
+          ...(attachments.length ? { attachments } : {}),
+        });
+      } else if (info || queueId) {
+        const fallbackInfo: SystemBlockInfo = info ?? {
+          label: 'queued message',
+          summary: queueId ? `queued-${queueId.slice(0, 8)}….md` : undefined,
+          raw: body,
+        };
+        out.push({
+          id: mkId(`${info?.label === 'turn prompt' || queueId ? 'p' : 's'}-${hash(sig(r))}`),
           kind: 'system',
-          info,
+          info: fallbackInfo,
           ts: r.timestamp,
           source: r.source ?? 'user',
         });
       } else {
+        const referenced = stripAttachmentReferenceBlock(body);
+        const attachments = imagesForIds(referenced?.attachmentIds ?? [], sends, sessionId);
         out.push({
           id: mkId(`u-${hash(sig(r))}`),
           kind: 'user',
-          text: body,
+          text: referenced?.text ?? body,
           ts: r.timestamp,
           source: r.source ?? 'user',
           ...(from ? { from } : {}),
+          ...(attachments.length ? { attachments } : {}),
         });
       }
       prevTs = r.timestamp;
@@ -354,11 +621,22 @@ export function buildTranscript(records: ChatRecord[]): TranscriptBlock[] {
     }
 
     if (TOOL_TYPES.has(type)) {
-      // Consume the whole consecutive run of tool activity.
+      // Consume the whole run of tool activity — bridging STRAIGHT ACROSS any
+      // record that renders nothing (see bridgesToolRun). Those invisible
+      // records used to end the run despite emitting no block, which both
+      // fragmented one turn's tools into dozens of group lines and split a
+      // tool.use from its own tool.result. Bridging keeps the run intact.
       const runStart = i;
-      while (i < n && TOOL_TYPES.has(records[i]!.type)) i++;
-      const run = records.slice(runStart, i);
-      const calls = groupToolRun(run);
+      let lastTool = i;
+      while (i < n && (TOOL_TYPES.has(records[i]!.type) || bridgesToolRun(records[i]!))) {
+        if (TOOL_TYPES.has(records[i]!.type)) lastTool = i;
+        i++;
+      }
+      // Group only the tool records; the bridged records are transparent (they
+      // emit nothing, so consuming them here just stops them re-breaking the run
+      // or reaching a branch that would build an empty message block).
+      const run = records.slice(runStart, lastTool + 1).filter(rc => TOOL_TYPES.has(rc.type));
+      const calls = groupToolRun(run, sessionId, sends?.attachments);
       const firstTs = run[0]?.timestamp;
       // Keyed on the run's FIRST record only. Hashing the whole run gave the
       // group a new id every time a tool.use/tool.result was appended to it —
@@ -366,7 +644,7 @@ export function buildTranscript(records: ChatRecord[]): TranscriptBlock[] {
       // collapsing whatever the reader had expanded) mid-stream.
       flushTurns(false);
       out.push({ id: mkId(`g-${hash(sig(run[0]!))}`), kind: 'tools', calls, ts: firstTs });
-      prevTs = run[run.length - 1]?.timestamp;
+      prevTs = records[i - 1]?.timestamp;
       continue;
     }
 
@@ -399,12 +677,140 @@ export function buildTranscript(records: ChatRecord[]): TranscriptBlock[] {
   }
 
   flushTurns(true);
+  return synthesizeDeliveredQueued(mergeAdjacentToolBlocks(out), sends, sessionId, currentTurn);
+}
+
+/** Weave in a user block for each inline native-queue send whose turn has
+ *  closed (see SendIndex.queued). Runs on the finished block list so it never
+ *  perturbs turn grouping or tool-run merging: each block is inserted at its
+ *  chronological position by send time, and a send already visible as a real
+ *  chat.user row (or an earlier synthesis) is skipped so nothing double-renders.
+ *  Placement by time mirrors where the reader typed it — a human interjection
+ *  during the agent's work — and gives the optimistic reaper a block whose ts is
+ *  in-window with the pending send it must clear. */
+function synthesizeDeliveredQueued(
+  blocks: TranscriptBlock[],
+  sends: SendIndex | undefined,
+  sessionId: string | undefined,
+  currentTurn: number | undefined,
+): TranscriptBlock[] {
+  const queued = sends?.queued;
+  if (!queued?.length || currentTurn == null) return blocks;
+  const out = [...blocks];
+  for (const q of queued) {
+    // Not yet delivered: the turn it was queued in is still open (or its turn
+    // is unknown). Leave it to the sender's optimistic chip; do not fabricate a
+    // delivered row for a message that may still be sitting in the composer.
+    if (q.turn == null || currentTurn <= q.turn) continue;
+    const parsed = peerFrom(q.message);
+    const from = senderFor(q, parsed.from);
+    const text = parsed.body.trim();
+    const attachments = imagesForIds(q.attachmentIds, sends, sessionId);
+    if (!text && attachments.length === 0) continue;
+    // Already on screen (a real chat.user landed, or a duplicate queueId): the
+    // existing row and the reaper own it, so never add a second bubble.
+    const duplicate = out.some(
+      b =>
+        b.kind === 'user' &&
+        b.text.trim() === text &&
+        (b.from?.name ?? undefined) === (from?.name ?? undefined) &&
+        sameAttachmentIds(
+          (b.attachments ?? []).map(image => image.attachmentId),
+          q.attachmentIds,
+        ),
+    );
+    if (duplicate) continue;
+    const block: Extract<TranscriptBlock, { kind: 'user' }> = {
+      id: `q-${hash(q.queueId ?? String(q.sequence))}`,
+      kind: 'user',
+      text,
+      ts: q.time,
+      source: q.from ?? 'user',
+      ...(from ? { from } : {}),
+      ...(attachments.length ? { attachments } : {}),
+    };
+    const at = tsMs(q.time);
+    let idx = out.length;
+    if (at != null) {
+      const found = out.findIndex(b => {
+        const bt = 'ts' in b ? tsMs(b.ts) : undefined;
+        return bt != null && bt > at;
+      });
+      if (found !== -1) idx = found;
+    }
+    out.splice(idx, 0, block);
+  }
   return out;
+}
+
+/** Fold any two `tools` blocks that ended up ADJACENT in the output into one.
+ *
+ *  Adjacency here is a proof, not a heuristic: if nothing sits between two tools
+ *  blocks in the built list, then every source record between their runs emitted
+ *  no block — so concatenating their calls in order reorders nothing the reader
+ *  can see. The record-level bridge (bridgesToolRun) already merges the common
+ *  case; this pass is the catch-all for anything that slips through without a
+ *  visible block, most notably a turn boundary that flushTurns judged
+ *  uninformative and dropped. It keeps the FIRST block's id and ts, so the id is
+ *  stable across rebuilds and the group never remounts (nor loses an expansion)
+ *  as later runs merge into it while streaming. */
+function mergeAdjacentToolBlocks(blocks: TranscriptBlock[]): TranscriptBlock[] {
+  const merged: TranscriptBlock[] = [];
+  for (const b of blocks) {
+    const prev = merged[merged.length - 1];
+    if (b.kind === 'tools' && prev && prev.kind === 'tools') {
+      merged[merged.length - 1] = { ...prev, calls: prev.calls.concat(b.calls) };
+      continue;
+    }
+    merged.push(b);
+  }
+  return merged;
 }
 
 // Pair uses to results within a run by toolUseId; keep use order, append any
 // orphan results at the end so nothing is silently dropped.
-function groupToolRun(run: ChatRecord[]): ToolCall[] {
+function toolInputPath(input: unknown): string | undefined {
+  if (input && typeof input === 'object' && !Array.isArray(input)) {
+    const obj = input as Record<string, unknown>;
+    for (const key of ['path', 'file_path', 'filePath']) if (typeof obj[key] === 'string') return obj[key] as string;
+  }
+  if (typeof input === 'string') {
+    const match = /(?:path|file_path|filePath)\s*[:=]\s*["'`]([^"'`]+)["'`]/.exec(input);
+    return match?.[1];
+  }
+  return undefined;
+}
+
+function imagesForCall(
+  call: ToolCall,
+  sessionId: string | undefined,
+  knownAttachments: ReadonlyMap<string, StoredTranscriptImage>,
+): TranscriptImage[] {
+  const images: TranscriptImage[] = [];
+  if (call.result) {
+    for (const [index, image] of resultImages(call.result).entries()) {
+      images.push({
+        kind: 'inline',
+        src: `data:${image.mediaType};base64,${image.data}`,
+        alt: `Tool result image ${index + 1}`,
+      });
+    }
+  }
+  if (sessionId && /(?:^|\.)view_image$/i.test(call.use.name ?? '')) {
+    const path = toolInputPath(call.use.input);
+    if (path) {
+      const attachment = attachmentFromToolPath(sessionId, path, knownAttachments);
+      if (attachment) images.push(attachment);
+    }
+  }
+  return images;
+}
+
+function groupToolRun(
+  run: ChatRecord[],
+  sessionId?: string,
+  knownAttachments: ReadonlyMap<string, StoredTranscriptImage> = new Map(),
+): ToolCall[] {
   const uses: { rec: ChatRecord; call: ToolCall }[] = [];
   const results: ChatRecord[] = [];
   for (const rec of run) {
@@ -453,6 +859,10 @@ function groupToolRun(run: ChatRecord[]): ToolCall[] {
       ts: res.timestamp,
       orphanResult: true,
     });
+  }
+  for (const call of calls) {
+    const images = imagesForCall(call, sessionId, knownAttachments);
+    if (images.length) call.images = images;
   }
   return calls;
 }

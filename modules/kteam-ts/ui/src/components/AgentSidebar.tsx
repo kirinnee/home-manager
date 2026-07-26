@@ -49,6 +49,8 @@ import {
   Plus,
   Radio,
   Search,
+  Settings,
+  ShieldCheck,
   SlidersHorizontal,
   User,
   Users,
@@ -70,11 +72,13 @@ import {
   type NestedRow,
 } from '../lib/lineage';
 import { useFleet, useStore, useUiControls, type ModeFilter } from '../lib/store';
+import { enterProjectScope, readProjectScope } from '../hooks/useProjectScope';
 import { StatusMark, statusMark } from './StatusMark';
 import { TaskName } from './TaskName';
 import { MODE_HINT } from './ModeBadge';
 import { useLayoutMode, type LayoutMode } from '../hooks/useLayoutMode';
 import { useDialogFocus } from '../hooks/useDialogFocus';
+import { useInputModality } from '../hooks/useInputModality';
 
 /** Expanded width. Wide enough for a task line and a teammate name, narrow
  *  enough that the transcript beside it still reads comfortably at 1280px. */
@@ -409,17 +413,37 @@ export function SidebarRow({
   );
 }
 
-function GroupBlock({
+/** Pin the focused folder first without disturbing the activity order of the
+ *  rest. A filtered-out scope simply isn't present and nothing is pinned.
+ *  Exported pure so the pin contract is asserted without a store or a render. */
+export function pinScopedFirst(groups: SessionGroup[], scope: string | null): SessionGroup[] {
+  if (scope === null) return groups;
+  const idx = groups.findIndex(x => x.path === scope);
+  if (idx <= 0) return groups;
+  return [groups[idx]!, ...groups.slice(0, idx), ...groups.slice(idx + 1)];
+}
+
+/** Exported for static-markup coverage of the folder-scope header contract. */
+export function GroupBlock({
   group,
   lineage,
   byId,
   activeId,
+  scoped,
+  coarse,
+  onFocus,
   onNavigate,
 }: {
   group: SessionGroup;
   lineage: LineageIndex;
   byId: ReadonlyMap<string, SessionView>;
   activeId?: string;
+  /** This group is the active folder scope: pinned first + accent + aria-current. */
+  scoped?: boolean;
+  /** Drawer/touch context: the header button takes the 44px touch floor. */
+  coarse?: boolean;
+  /** Focus this folder (folder mode). */
+  onFocus: (path: string) => void;
   onNavigate?: () => void;
 }) {
   const rows = useMemo(() => nestByLineage(group.rows, lineage), [group.rows, lineage]);
@@ -427,12 +451,34 @@ function GroupBlock({
   return (
     <section>
       {/* Sticky, and OPAQUE (`bg-bg`, no alpha): rows scroll under it, and a
-          translucent header over a dense list is unreadable in every theme. */}
-      <h3 className="sticky top-0 z-10 flex min-w-0 items-center gap-sm bg-bg px-cell-x py-row-y">
-        <FolderGit2 size={11} className="shrink-0 text-faint" />
-        {/* Section heads are the canonical `.kt-label` site: Ember renders these
-            as small caps, Mission as 0.14em mono caps, Neo at 800. */}
-        <span className="kt-label min-w-0 truncate">{group.name}</span>
+          translucent header over a dense list is unreadable in every theme.
+          `aria-current="true"` marks the focused folder for a screen reader; the
+          accent treatment is the same fact for everyone else. */}
+      <h3
+        className="sticky top-0 z-10 flex min-w-0 items-center gap-sm bg-bg px-cell-x py-row-y"
+        aria-current={scoped ? 'true' : undefined}
+      >
+        {/* The icon+name is the fold-in entry point — a real button that focuses
+            the folder, and in the drawer also closes the overlay (row parity). */}
+        <button
+          type="button"
+          onClick={() => {
+            onFocus(group.path);
+            onNavigate?.();
+          }}
+          aria-label={`Focus folder ${group.name}`}
+          title={`Focus folder ${group.name}`}
+          className={cn(
+            'flex min-w-0 flex-1 items-center gap-sm rounded-control text-left hover:bg-surface-2',
+            coarse && 'min-h-[44px]',
+            scoped && 'text-accent',
+          )}
+        >
+          <FolderGit2 size={11} className={cn('shrink-0', scoped ? 'text-accent' : 'text-faint')} />
+          {/* Section heads are the canonical `.kt-label` site: Ember renders these
+              as small caps, Mission as 0.14em mono caps, Neo at 800. */}
+          <span className="kt-label min-w-0 truncate">{group.name}</span>
+        </button>
         <span className="mono ml-auto shrink-0 text-2xs text-faint">{group.rows.length}</span>
       </h3>
       <ul className="m-0 list-none p-0">
@@ -552,6 +598,22 @@ function Rail({ count, onExpand }: { count: number; onExpand: () => void }) {
       >
         <Plus size={14} />
       </Link>
+      <Link
+        to="/warden"
+        aria-label="Open Warden"
+        title="Warden"
+        className="kt-btn h-[44px] w-[44px] justify-center !px-0"
+      >
+        <ShieldCheck size={14} />
+      </Link>
+      <Link
+        to="/settings"
+        aria-label="Open settings"
+        title="Settings"
+        className="kt-btn h-[44px] w-[44px] justify-center !px-0"
+      >
+        <Settings size={14} />
+      </Link>
       <div className="my-0.5 h-px w-6 bg-border" aria-hidden />
       <RailButton
         label={`Search and filter the fleet (${count} shown) — expands the sidebar`}
@@ -589,6 +651,31 @@ function Rail({ count, onExpand }: { count: number; onExpand: () => void }) {
   );
 }
 
+/** Drawer-width destination tabs. They stay inside the deliberate fleet
+ * drawer instead of taking two permanent slots in the phone's top bar. */
+function NarrowDestinations({ onNavigate }: { onNavigate: () => void }) {
+  const store = useStore();
+  const openSettings = () => {
+    onNavigate();
+    requestAnimationFrame(() => store.openSettings());
+  };
+  return (
+    <nav
+      aria-label="Destinations"
+      className="grid shrink-0 grid-cols-2 gap-sm border-b border-border-soft px-cell-x pb-2"
+    >
+      <Link to="/warden" onClick={onNavigate} className="kt-btn min-h-[44px] justify-center gap-xs">
+        <ShieldCheck size={14} aria-hidden="true" />
+        Warden
+      </Link>
+      <button type="button" onClick={openSettings} className="kt-btn min-h-[44px] justify-center gap-xs">
+        <Settings size={14} aria-hidden="true" />
+        Settings
+      </button>
+    </nav>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Body (shared by expanded column and drawer)
 // ---------------------------------------------------------------------------
@@ -600,6 +687,9 @@ function Body({
   lineage,
   byId,
   activeId,
+  scope,
+  coarse,
+  onFocus,
   autoFocusSearch,
   onNavigate,
 }: {
@@ -609,6 +699,11 @@ function Body({
   lineage: LineageIndex;
   byId: ReadonlyMap<string, SessionView>;
   activeId?: string;
+  /** The active folder scope key (folder mode), or null. */
+  scope: string | null;
+  /** Drawer/touch context, forwarded to the folder-header buttons. */
+  coarse?: boolean;
+  onFocus: (path: string) => void;
   autoFocusSearch?: boolean;
   onNavigate?: () => void;
 }) {
@@ -632,6 +727,9 @@ function Body({
                 lineage={lineage}
                 byId={byId}
                 activeId={activeId}
+                scoped={scope !== null && g.path === scope}
+                coarse={coarse}
+                onFocus={onFocus}
                 onNavigate={onNavigate}
               />
             ))}
@@ -663,10 +761,38 @@ export interface AgentSidebarProps {
   onCloseDrawer: () => void;
 }
 
+/**
+ * A touch drawer must not invoke the software keyboard merely by opening. The
+ * dialog focus hook already gives the container a stable, non-text landing
+ * point; desktop keeps the search-first flow it has always had.
+ *
+ * Kept as a small pure policy so both focus sites change together and the
+ * touch/desktop contract stays directly testable without a browser harness.
+ */
+export function drawerFocusPolicy(touchAffected: boolean): {
+  dialogAutoFocus: boolean;
+  searchAutoFocus: boolean;
+} {
+  return {
+    dialogAutoFocus: touchAffected,
+    searchAutoFocus: !touchAffected,
+  };
+}
+
 export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSidebarProps) {
   const { sessions, projects, byId } = useFleet();
+  const store = useStore();
   const [controls, setControls] = useUiControls();
   const layout = useLayoutMode();
+  const { touchAffected } = useInputModality();
+
+  // FOLDER MODE. The sidebar stays WHOLE-FLEET (it is the only cross-project
+  // navigation surface, so scoping it would hide the very rows the drawer exists
+  // to reach). It only PINS the focused folder first and marks it — the dashboard
+  // is what narrows. Reading the scope from the store keeps sidebar and dashboard
+  // from ever drifting.
+  const scope = readProjectScope(controls);
+  const onFocus = useCallback((path: string) => enterProjectScope(store, path), [store]);
 
   const visible = useMemo(
     () =>
@@ -678,18 +804,38 @@ export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSideb
       }),
     [sessions, controls.query, controls.mode, controls.rcOnly, controls.includeFinished],
   );
-  const groups = useMemo(() => groupByProject(visible, projects, true), [visible, projects]);
+  const groups = useMemo(
+    () => pinScopedFirst(groupByProject(visible, projects, true), scope),
+    [visible, projects, scope],
+  );
   const lineage = useMemo(() => buildLineage(sessions ?? []), [sessions]);
   const total = sessions?.length ?? 0;
 
   // Escape, focus-in, focus-restore-to-the-trigger and a real Tab trap — the
   // shared modal contract (hooks/useDialogFocus.ts), the same one the session
-  // details drawer uses. `autoFocus: false` because this drawer focuses its
-  // SEARCH BOX instead (Body's `autoFocusSearch`), which is the one control a
-  // reader opening the fleet list actually wants.
+  // details drawer uses. Touch uses the dialog container as its non-text
+  // landing point so opening the drawer never summons the software keyboard;
+  // fine pointer + hover retains the established search-first flow.
   const drawerRef = useRef<HTMLDivElement | null>(null);
-  const { onKeyDown: onDrawerKeyDown } = useDialogFocus(layout === 'drawer' && drawerOpen, drawerRef, onCloseDrawer, {
-    autoFocus: false,
+  const drawerIsOpen = layout === 'drawer' && drawerOpen;
+
+  // THE POLICY IS LATCHED FOR THE LIFE OF ONE OPENING. `useDialogFocus` re-runs
+  // its layout effect whenever `autoFocus` changes, and re-running it while the
+  // dialog is already open overwrites `restoreTo` with whatever is focused INSIDE
+  // the drawer — so a later close-without-navigate would restore focus to a node
+  // that is about to unmount instead of the trigger, breaking the restore
+  // contract; a false→true flip would additionally yank focus to the container
+  // mid-use. Modality can genuinely change while the drawer is open (a
+  // convertible switching modes, a mouse attached or detached — a media-query
+  // `change`, rare but real), so the value that OPENED the drawer governs it.
+  // The ref is only written while the drawer is shut, which makes the write
+  // idempotent and safe under StrictMode double-render.
+  const latchedTouch = useRef(touchAffected);
+  if (!drawerIsOpen) latchedTouch.current = touchAffected;
+  const focusPolicy = drawerFocusPolicy(latchedTouch.current);
+
+  const { onKeyDown: onDrawerKeyDown } = useDialogFocus(drawerIsOpen, drawerRef, onCloseDrawer, {
+    autoFocus: focusPolicy.dialogAutoFocus,
   });
 
   const collapse = useCallback(() => setControls({ sidebarCollapsed: true }), [setControls]);
@@ -703,6 +849,7 @@ export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSideb
       <div
         ref={drawerRef}
         onKeyDown={onDrawerKeyDown}
+        tabIndex={-1}
         className="kt-overlay fixed inset-0 z-40 md:hidden"
         role="dialog"
         aria-modal="true"
@@ -735,8 +882,10 @@ export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSideb
               <X size={14} />
             </button>
           </div>
-          {/* Focus lands on the search box when the drawer opens, so a keyboard
-              user is inside the dialog rather than behind it. */}
+          <NarrowDestinations onNavigate={onCloseDrawer} />
+          {/* Fine pointer + hover keeps the established search-first drawer.
+              Coarse touch instead lands on the dialog container above, never
+              a text input, so opening cannot summon the software keyboard. */}
           <Body
             groups={groups}
             count={visible.length}
@@ -744,7 +893,10 @@ export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSideb
             lineage={lineage}
             byId={byId}
             activeId={activeId}
-            autoFocusSearch
+            scope={scope}
+            coarse
+            onFocus={onFocus}
+            autoFocusSearch={focusPolicy.searchAutoFocus}
             onNavigate={onCloseDrawer}
           />
         </aside>
@@ -782,7 +934,16 @@ export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSideb
           <ChevronsLeft size={14} />
         </button>
       </div>
-      <Body groups={groups} count={visible.length} total={total} lineage={lineage} byId={byId} activeId={activeId} />
+      <Body
+        groups={groups}
+        count={visible.length}
+        total={total}
+        lineage={lineage}
+        byId={byId}
+        activeId={activeId}
+        scope={scope}
+        onFocus={onFocus}
+      />
     </nav>
   );
 }

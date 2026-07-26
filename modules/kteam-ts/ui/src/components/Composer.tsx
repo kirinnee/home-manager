@@ -6,13 +6,15 @@
 // on ONE compact line inside the box. The whole thing takes the focus ring as
 // one object, the way Telegram and claude.ai do it.
 //
-// SAFETY SEMANTICS ARE UNCHANGED, and they are the reason this file has more
+// SAFETY SEMANTICS ARE EXPLICIT, and they are the reason this file has more
 // comments than markup:
-//   - Enter (no Shift, not composing) always takes the SAFE path: send when
-//     idle, QUEUE when busy. Interrupting is an explicit click and can never be
-//     reached by a keystroke.
-//   - Shift+Enter inserts a newline; an IME composition Enter is ignored
-//     entirely (`isComposing`), so Japanese/Chinese/Korean input can't send.
+//   - Enter (no Shift, not composing) takes the SAFE path only with positive
+//     fine-pointer + hover hardware-desktop confidence: send when idle, QUEUE
+//     when busy. In every touch/ambiguous context it inserts a newline, as does
+//     Shift+Enter. Interrupting is an explicit click and can never be reached
+//     by a keystroke.
+//   - An IME composition Enter is ignored entirely (`isComposing`), so
+//     Japanese/Chinese/Korean input can't send.
 //   - `sending` locks the whole surface: Enter is a no-op and every rendered
 //     action disables, so a second keystroke or click cannot launch a duplicate.
 //     The page holds a synchronous ref guard as well, and every mutation carries
@@ -27,11 +29,19 @@
 // response to typing — a deliberate, user-driven change — and stops at
 // MAX_TEXTAREA_PX.
 
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import { CornerDownLeft, Send, Clock, ZapOff } from 'lucide-react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { CornerDownLeft, Send, Clock, ZapOff, Paperclip } from 'lucide-react';
 import { Button } from './Primitives';
 import { cn, type Tone } from '../lib/utils';
 import { useKeyboardOpen } from '../hooks/useAppViewport';
+import { useDebouncedEffect } from '../hooks/useDebounce';
+import { clearDraft, loadDraft, saveDraft } from '../lib/drafts';
+import { readInputModality, useInputModality } from '../hooks/useInputModality';
+
+/** Quiet window before a non-empty draft is written to storage. Debounced so a
+ *  fast typist does not hit localStorage on every keystroke; short enough that a
+ *  draft is durable within a breath of the reader pausing. */
+const DRAFT_SAVE_DEBOUNCE_MS = 400;
 
 /** Facts the compact context line accepts. Every one is optional — its height
  *  does not depend on any of them being known. */
@@ -49,6 +59,12 @@ export interface ComposerContext {
 interface Props {
   draft: string;
   onDraftChange(value: string): void;
+  /** Session this composer belongs to. When present, the TEXT draft is
+   *  persisted per session (localStorage, see lib/drafts.ts) so it survives a
+   *  reload. Optional on purpose: without it — the SSR/test render, or a mount
+   *  site that has not opted in yet — persistence is simply inert, never a
+   *  crash. Pending attachments are never persisted. */
+  sessionId?: string;
   onSubmit(): void;
   onInterruptAndSend?(): void;
   disabled?: boolean;
@@ -71,6 +87,14 @@ interface Props {
    *  Enter/Shift+Enter/IME handling, the send lock, the disabled path and the
    *  44px/16px floors are untouched — they are not chrome. */
   compact?: boolean;
+  /** Capture only. The page owns validation, eager upload, retry and removal. */
+  onFiles?(files: File[]): void;
+  /** Page-owned pending upload chips, placed inside the single composer surface. */
+  attachmentSlot?: ReactNode;
+  /** Ready attachments make an otherwise empty draft submittable. */
+  hasAttachments?: boolean;
+  /** Uploads may continue while the reader types, but sending waits for them. */
+  attachmentsPending?: boolean;
 }
 
 /** ~6 lines. Past this the composer scrolls internally instead of eating the
@@ -87,7 +111,6 @@ const COMPACT_MAX_TEXTAREA_PX = 96;
  *  the wrong one: 30% of 508px is 152px, which is larger than the desktop cap. */
 const COMPACT_KEYBOARD_MAX_TEXTAREA_PX = 64;
 const MIN_TEXTAREA_PX = 38;
-const ANY_COARSE_POINTER = '(any-pointer: coarse)';
 
 const TONE_TEXT: Record<Tone, string> = {
   ok: 'text-ok',
@@ -97,32 +120,192 @@ const TONE_TEXT: Record<Tone, string> = {
   accent: 'text-accent',
 };
 
-/** Pointer capability is independent of both layout width and PRIMARY pointer:
- *  a mouse-first hybrid may still be tapped, while a fine-pointer-only narrow
- *  window still has Enter. */
-function useHasCoarsePointer(): boolean {
-  const [hasCoarsePointer, setHasCoarsePointer] = useState(
-    () =>
-      typeof window !== 'undefined' &&
-      typeof window.matchMedia === 'function' &&
-      window.matchMedia(ANY_COARSE_POINTER).matches,
+export function composerCanSubmit({
+  draft,
+  disabled,
+  sending,
+  hasAttachments,
+  attachmentsPending,
+}: {
+  draft: string;
+  disabled?: boolean;
+  sending?: boolean;
+  hasAttachments?: boolean;
+  attachmentsPending?: boolean;
+}): boolean {
+  return !disabled && !sending && !attachmentsPending && (draft.trim().length > 0 || hasAttachments === true);
+}
+
+/** Pure keyboard policy used by the real handler and its exhaustive matrix. */
+export function composerEnterDecision({
+  key,
+  shiftKey,
+  isComposing,
+  enterSends,
+  canSubmit,
+}: {
+  key: string;
+  shiftKey: boolean;
+  isComposing: boolean;
+  enterSends: boolean;
+  canSubmit: boolean;
+}): { preventDefault: boolean; submit: boolean } {
+  if (key !== 'Enter' || shiftKey || isComposing || !enterSends) {
+    return { preventDefault: false, submit: false };
+  }
+  return { preventDefault: true, submit: canSubmit };
+}
+
+export function handleComposerKeyDown({
+  event,
+  canSubmit,
+  readEnterSends,
+  onSubmit,
+}: {
+  event: {
+    key: string;
+    shiftKey: boolean;
+    isComposing: boolean;
+    preventDefault(): void;
+  };
+  canSubmit: boolean;
+  readEnterSends(): boolean;
+  onSubmit(): void;
+}): void {
+  // `readEnterSends` is invoked inside every event, never captured from a
+  // render. This is the safety edge that makes touch -> next Enter immediate.
+  const decision = composerEnterDecision({
+    key: event.key,
+    shiftKey: event.shiftKey,
+    isComposing: event.isComposing,
+    enterSends: readEnterSends(),
+    canSubmit,
+  });
+  if (decision.preventDefault) event.preventDefault();
+  if (decision.submit) onSubmit();
+}
+
+export function composerStatusCopy({
+  sending,
+  busy,
+  enterSends,
+}: {
+  sending?: boolean;
+  busy?: boolean;
+  enterSends: boolean;
+}): { liveText: string; keyboardHint: string } {
+  const liveText = sending
+    ? 'Sending…'
+    : busy
+      ? enterSends
+        ? 'Enter queues for the next turn'
+        : 'Queue sends at the next turn boundary'
+      : enterSends
+        ? 'Enter sends'
+        : 'Send button sends';
+  return {
+    liveText,
+    keyboardHint: enterSends && !sending ? ' · Shift+Enter newline' : '',
+  };
+}
+
+export function shouldRefocusComposer({
+  touchAffected,
+  activeElementIsBody,
+  disabled,
+  sending,
+}: {
+  touchAffected: boolean;
+  activeElementIsBody: boolean;
+  disabled?: boolean;
+  sending?: boolean;
+}): boolean {
+  return !touchAffected && activeElementIsBody && !disabled && !sending;
+}
+
+/**
+ * Keyboard delivery never selects the destructive action. `busy` changes the
+ * safe callback's meaning to queue and changes the visible label, but the
+ * callback identity remains `onSubmit`; interrupt is click-only in every state.
+ */
+export function selectComposerKeyboardSubmit(actions: {
+  busy?: boolean;
+  onSubmit(): void;
+  onInterruptAndSend?(): void;
+}): () => void {
+  return actions.onSubmit;
+}
+
+export function clipboardImageFiles(
+  items: ArrayLike<{ kind: string; type: string; getAsFile(): File | null }>,
+): File[] {
+  return Array.from(items)
+    .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
+    .map(item => item.getAsFile())
+    .filter((file): file is File => file !== null);
+}
+
+/**
+ * Hook-free so the exact native-event wiring can be exercised without adding a
+ * DOM implementation to this package's test stack. The live reader defaults to
+ * the singleton and is called inside each key event, never at render time.
+ */
+export function ComposerTextarea({
+  inputRef,
+  draft,
+  onDraftChange,
+  onSubmit,
+  canSubmit,
+  disabled,
+  sending,
+  placeholder,
+  readModality = readInputModality,
+}: {
+  inputRef: RefObject<HTMLTextAreaElement | null>;
+  draft: string;
+  onDraftChange(value: string): void;
+  onSubmit(): void;
+  canSubmit: boolean;
+  disabled?: boolean;
+  sending?: boolean;
+  placeholder?: string;
+  readModality?: typeof readInputModality;
+}) {
+  return (
+    <textarea
+      ref={inputRef}
+      value={draft}
+      onChange={e => onDraftChange(e.target.value)}
+      placeholder={placeholder ?? 'Message this teammate…'}
+      rows={1}
+      disabled={disabled || sending}
+      aria-label="Message"
+      className={cn(
+        'block w-full resize-none border-0 bg-transparent py-row-y text-fg',
+        'placeholder:text-faint focus:border-0 focus:shadow-none focus:outline-none focus-visible:outline-none',
+        'disabled:cursor-not-allowed',
+      )}
+      onKeyDown={e => {
+        handleComposerKeyDown({
+          event: {
+            key: e.key,
+            shiftKey: e.shiftKey,
+            isComposing: e.nativeEvent.isComposing,
+            preventDefault: () => e.preventDefault(),
+          },
+          canSubmit,
+          readEnterSends: () => readModality().enterSends,
+          onSubmit,
+        });
+      }}
+    />
   );
-
-  useEffect(() => {
-    if (typeof window.matchMedia !== 'function') return;
-    const media = window.matchMedia(ANY_COARSE_POINTER);
-    const sync = () => setHasCoarsePointer(media.matches);
-    sync();
-    media.addEventListener('change', sync);
-    return () => media.removeEventListener('change', sync);
-  }, []);
-
-  return hasCoarsePointer;
 }
 
 export function Composer({
   draft,
   onDraftChange,
+  sessionId,
   onSubmit,
   onInterruptAndSend,
   disabled,
@@ -131,10 +314,16 @@ export function Composer({
   placeholder,
   context,
   compact,
+  onFiles,
+  attachmentSlot,
+  hasAttachments,
+  attachmentsPending,
 }: Props) {
   const ref = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const disabledReasonId = useId();
   const keyboardOpen = useKeyboardOpen();
-  const hasCoarsePointer = useHasCoarsePointer();
+  const { touchAffected, enterSends } = useInputModality();
   // The growth cap is a property of the box the reader can see, so it follows
   // the viewport rather than the device. Desktop is unchanged at 148px.
   const maxTextareaPx = !compact
@@ -146,7 +335,15 @@ export function Composer({
   // Keep focus on the composer across re-renders (the user types → state
   // updates → React re-renders → focus would otherwise jump to <body>).
   useEffect(() => {
-    if (ref.current && document.activeElement === document.body && !disabled && !sending) {
+    if (
+      ref.current &&
+      shouldRefocusComposer({
+        touchAffected,
+        activeElementIsBody: document.activeElement === document.body,
+        disabled,
+        sending,
+      })
+    ) {
       ref.current.focus();
     }
   });
@@ -164,8 +361,64 @@ export function Composer({
     el.style.overflowY = el.scrollHeight > maxTextareaPx ? 'auto' : 'hidden';
   }, [draft, maxTextareaPx]);
 
-  const canSubmit = !disabled && !sending && draft.trim().length > 0;
+  // ---- per-session draft persistence ---------------------------------------
+  //
+  // HYDRATE ONCE, THEN persist. `draftsReady` gates the save/clear effects so
+  // the restore below can never be clobbered by the empty-draft clear: the
+  // clear effect is inert until hydration has read storage and flipped the gate.
+  // The Composer is remounted per page (sessionId stable for its lifetime), so
+  // this runs a single time per open session.
+  const [draftsReady, setDraftsReady] = useState(false);
+  useEffect(() => {
+    if (!sessionId) {
+      setDraftsReady(true);
+      return;
+    }
+    const saved = loadDraft(sessionId);
+    // Only restore into an empty buffer — never clobber text the reader is
+    // already carrying (a retained pane navigated back into with content).
+    if (saved && draft.trim().length === 0) onDraftChange(saved);
+    setDraftsReady(true);
+    // Deliberately keyed on sessionId alone: a once-per-session hydration that
+    // must not re-fire when the draft it just restored re-renders the composer.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  // Debounced write of a non-empty draft. An empty/whitespace draft is handled
+  // by the immediate clear below, so this never writes one.
+  useDebouncedEffect(
+    () => {
+      if (!draftsReady || !sessionId) return;
+      if (draft.trim().length > 0) saveDraft(sessionId, draft);
+    },
+    [draftsReady, sessionId, draft],
+    DRAFT_SAVE_DEBOUNCE_MS,
+  );
+
+  // The clear path — and, crucially, the SEND path. send()/interruptAndSend()
+  // set the draft to '' the instant a message is ACCEPTED (verified against
+  // SessionChatPage: both the immediate send and the queued-for-next-turn
+  // disposition clear the draft synchronously before the network call), so an
+  // empty buffer is the signal that the draft was consumed. Cleared immediately,
+  // not on the debounce, so a reload right after sending does not resurrect it.
+  useEffect(() => {
+    if (!draftsReady || !sessionId) return;
+    if (draft.trim().length === 0) clearDraft(sessionId);
+  }, [draftsReady, sessionId, draft]);
+
+  const canSubmit = composerCanSubmit({ draft, disabled, sending, hasAttachments, attachmentsPending });
   const showInterrupt = Boolean(busy && !disabled && onInterruptAndSend);
+  const keyboardSubmit = selectComposerKeyboardSubmit({ busy, onSubmit, onInterruptAndSend });
+  const disabledReason = disabled
+    ? 'Answer the question above first.'
+    : sending
+      ? 'Sending…'
+      : attachmentsPending
+        ? 'Wait for images to finish uploading.'
+        : draft.trim().length === 0 && !hasAttachments
+          ? 'Message is empty.'
+          : undefined;
+  const statusCopy = composerStatusCopy({ sending, busy, enterSends });
 
   return (
     <div
@@ -175,33 +428,45 @@ export function Composer({
         compact && 'kt-composer--compact',
         disabled && 'opacity-60',
       )}
+      onPaste={event => {
+        if (!onFiles || disabled || sending) return;
+        const files = clipboardImageFiles(event.clipboardData.items);
+        if (!files.length) return;
+        event.preventDefault();
+        onFiles(files);
+      }}
+      onDragOver={event => {
+        if (!onFiles || disabled || sending) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'copy';
+      }}
+      onDrop={event => {
+        if (!onFiles || disabled || sending) return;
+        const files = Array.from(event.dataTransfer.files);
+        if (!files.length) return;
+        event.preventDefault();
+        onFiles(files);
+      }}
     >
+      {attachmentSlot}
       {/* The textarea is borderless and transparent: the WRAPPER is the input as
           far as the eye (and the focus ring) is concerned. */}
-      <textarea
-        ref={ref}
-        value={draft}
-        onChange={e => onDraftChange(e.target.value)}
-        placeholder={placeholder ?? 'Message this teammate…'}
-        rows={1}
-        disabled={disabled || sending}
-        aria-label="Message"
-        className={cn(
-          'block w-full resize-none border-0 bg-transparent py-row-y text-fg',
-          'placeholder:text-faint focus:border-0 focus:shadow-none focus:outline-none focus-visible:outline-none',
-          'disabled:cursor-not-allowed',
-        )}
-        onKeyDown={e => {
-          if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-            e.preventDefault();
-            // Enter ALWAYS takes the safe path (send when idle, queue when
-            // busy); interrupting is an explicit click, never an accidental
-            // keystroke. canSubmit is false while a send is in flight, so a
-            // second Enter cannot double-fire.
-            if (canSubmit) onSubmit();
-          }
-        }}
+      <ComposerTextarea
+        inputRef={ref}
+        draft={draft}
+        onDraftChange={onDraftChange}
+        onSubmit={keyboardSubmit}
+        canSubmit={canSubmit}
+        disabled={disabled}
+        sending={sending}
+        placeholder={placeholder}
       />
+
+      {disabledReason && (
+        <span id={disabledReasonId} className="sr-only">
+          {disabledReason}
+        </span>
+      )}
 
       {/* Context, hint and actions share this one line on desktop. Phone keeps
           flex-wrap as a last-resort safety valve below ~380px; desktop never
@@ -219,19 +484,21 @@ export function Composer({
                 tree and a screen-reader reader would stop hearing "sending…"
                 and the send↔queue change entirely. */}
             <span className="sr-only" aria-live="polite" aria-atomic="true">
-              {sending ? 'sending…' : busy ? 'Enter queues for the next turn' : 'Enter sends'}
+              {statusCopy.liveText}
             </span>
             {context && <CompactContext context={context} sending={sending} dense={showInterrupt} />}
           </span>
         ) : (
           <div className="mr-auto flex min-w-0 items-center gap-sm overflow-hidden">
             {context && <ContextStrip context={context} />}
-            {context && <Sep />}
+            {context && enterSends && <Sep />}
             {/* Deliberately NOT `.kt-chrome`: this tells the reader how the
                 keyboard behaves and whether a message is in flight. The line is
                 not itself live: only the changing STATUS words are, so the
                 static Shift+Enter hint is never re-announced (a11y report S-4). */}
-            <span className="inline-flex shrink-0 items-center gap-xs text-meta text-muted">
+            <span
+              className={cn('inline-flex shrink-0 items-center gap-xs text-meta text-muted', !enterSends && 'sr-only')}
+            >
               {sending ? (
                 <span
                   className="inline-block h-2.5 w-2.5 shrink-0 animate-spin rounded-full border border-current border-t-transparent motion-reduce:animate-none"
@@ -244,56 +511,111 @@ export function Composer({
                 {/* Persistent, atomic region: only these status words announce
                     on a send/queue/busy transition. */}
                 <span aria-live="polite" aria-atomic="true">
-                  {sending ? 'sending…' : busy ? 'Enter queues for the next turn' : 'Enter sends'}
+                  {statusCopy.liveText}
                 </span>
                 {/* Static hint — outside the live region so it is never
                     re-announced. */}
-                {!sending && ' · Shift+Enter newline'}
+                {statusCopy.keyboardHint}
               </span>
             </span>
           </div>
         )}
 
         <div className="flex shrink-0 items-center gap-xs">
+          {onFiles && (
+            <>
+              <input
+                ref={fileInputRef}
+                className="sr-only"
+                type="file"
+                accept="image/png,image/jpeg,image/gif,image/webp"
+                multiple
+                disabled={disabled || sending}
+                tabIndex={-1}
+                aria-hidden="true"
+                onChange={event => {
+                  const files = Array.from(event.currentTarget.files ?? []);
+                  event.currentTarget.value = '';
+                  if (files.length) onFiles(files);
+                }}
+              />
+              <Button
+                className="min-h-[44px] min-w-[44px] px-2"
+                variant="ghost"
+                size="sm"
+                disabled={disabled || sending}
+                aria-label="Attach images"
+                title="Attach PNG, JPEG, GIF or WebP images"
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <Paperclip size={15} aria-hidden="true" />
+                <span className="sr-only">Attach images</span>
+              </Button>
+            </>
+          )}
           {showInterrupt && (
             <Button
+              className={cn(touchAffected && 'min-h-[44px] min-w-[44px]')}
               variant="danger"
               size="sm"
               disabled={!canSubmit}
+              aria-disabled={!canSubmit}
               aria-label="Interrupt the current turn and send this message now"
+              aria-describedby={disabledReason ? disabledReasonId : undefined}
               title="Stop the current turn safely, then deliver this message now"
               onClick={() => onInterruptAndSend?.()}
             >
               <ZapOff size={12} aria-hidden="true" />
+              {/* KEEPS ITS WORD on touch, unlike Send/Queue. This is the one
+                  destructive-ish action here — it stops a running turn — and on a
+                  phone there is no hover tooltip to disambiguate a lone glyph. The
+                  user asked only for send/queue to go icon-only; a labelled,
+                  danger-toned control is the safer default for the action that
+                  can throw work away, and it only appears in the busy state so it
+                  is not what eats the resting row. */}
               <span>Interrupt &amp; send</span>
             </Button>
           )}
           {busy ? (
             <Button
+              className={cn(touchAffected && 'min-h-[44px] min-w-[44px]')}
               variant="primary"
               size="sm"
               disabled={!canSubmit}
+              aria-disabled={!canSubmit}
               aria-label="Queue this message for the next turn"
+              aria-describedby={disabledReason ? disabledReasonId : undefined}
               title="Deliver at the next turn boundary (safe)"
               onClick={() => onSubmit()}
             >
               <Clock size={12} aria-hidden="true" />
-              <span>Queue</span>
+              {/* Icon-only on touch (the word eats the row on a phone); desktop
+                  keeps the label. The accessible name lives in `aria-label`, so
+                  the button is never nameless — the word is hidden visually,
+                  present for assistive tech, in every state. */}
+              <span className={cn(touchAffected && 'sr-only')}>Queue</span>
             </Button>
-          ) : hasCoarsePointer ? (
-            // Enter is the desktop send affordance. Touch keyboards still need
-            // a tap target, so this icon-only control exists whenever ANY input
-            // is coarse — including mouse-first hybrid devices.
+          ) : touchAffected ? (
+            // An explicit control is the mandatory path whenever Enter is
+            // conservative. It remains visible and labelled even while empty,
+            // disabled, or sending; native disabled plus the described reason
+            // explains why it is momentarily unavailable.
             <Button
-              className="kt-composer__tap-send"
+              className="kt-composer__tap-send min-h-[44px] min-w-[44px]"
               variant="primary"
               size="sm"
               disabled={!canSubmit}
+              aria-disabled={!canSubmit}
               aria-label="Send this message"
+              aria-describedby={disabledReason ? disabledReasonId : undefined}
               title="Send now"
               onClick={() => onSubmit()}
             >
               <Send size={12} aria-hidden="true" />
+              {/* Touch-only branch, so always icon-only: the glyph carries the
+                  meaning and `aria-label` carries the name. Kept as `sr-only`
+                  rather than dropped so the button has visible-to-AT text too. */}
+              <span className="sr-only">Send</span>
             </Button>
           ) : null}
         </div>

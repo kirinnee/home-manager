@@ -1,4 +1,5 @@
-// Tiny pushState-based router. Two routes: '/' → list, '/session/:id' → chat.
+// Tiny pushState-based router. Static pages stay explicit; session leaves carry
+// their id. Used in place of react-router to keep the dep tree tight.
 // Used in place of react-router to keep the dep tree tight. Listens to
 // popstate so back/forward buttons Just Work.
 
@@ -6,13 +7,17 @@ import { forwardRef, useEffect, useState, type AnchorHTMLAttributes, type MouseE
 
 export interface Route {
   path: string;
-  // path === '/' | '/new' | '/session/:id' | any other string (fall back to list)
+  // path === '/' | '/new' | '/settings' | '/warden' | '/session/:id' | unknown → list
   sessionId?: string;
   isNew?: boolean;
+  isSettings?: boolean;
+  isWarden?: boolean;
 }
 
-function parseRoute(pathname: string): Route {
+export function parseRoute(pathname: string): Route {
   if (pathname === '/new') return { path: '/new', isNew: true };
+  if (pathname === '/settings') return { path: '/settings', isSettings: true };
+  if (pathname === '/warden') return { path: '/warden', isWarden: true };
   if (pathname.startsWith('/session/')) {
     const rest = pathname.slice('/session/'.length);
     if (rest) {

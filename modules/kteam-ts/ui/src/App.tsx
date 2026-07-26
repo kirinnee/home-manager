@@ -17,17 +17,21 @@
 // nothing, and takes its subtree out of the tab order.
 
 import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
-import { useRoute } from './lib/router';
+import { navigate, useRoute } from './lib/router';
 import { AppBar } from './components/AppBar';
 import { AgentSidebar } from './components/AgentSidebar';
 import { CommandPalette } from './components/CommandPalette';
 import { SessionsListPage } from './pages/SessionsListPage';
 import { NewSessionPage } from './pages/NewSessionPage';
+import { SettingsPage, SettingsSheet } from './pages/SettingsPage';
+import { WardenPage } from './pages/WardenPage';
 import { ChunkErrorBoundary } from './components/ChunkErrorBoundary';
 import { cn } from './lib/utils';
 import { useAppViewport } from './hooks/useAppViewport';
 import { useLayoutMode } from './hooks/useLayoutMode';
 import { useServiceWorkerUpdate } from './hooks/useServiceWorkerUpdate';
+import { useChrome, useStore } from './lib/store';
+import { isSettingId, settingsHref, type SettingId } from './lib/settings';
 
 // THE CHAT PAGE IS A LAZY CHUNK. It pulls in the whole reading stack — the
 // transcript, markdown, syntax highlighting, tool previews, the terminal view —
@@ -75,11 +79,20 @@ function ChatChunkFallback() {
   );
 }
 
+// THE ROUTE GUTTER IS BREAKPOINT-SCOPED. A flat `px-3` charged 12px per edge at
+// every width. On a phone that is the single largest remaining inset in front of
+// transcript prose — measured as the top item in a 21px-per-edge stack, ahead of
+// the scroller's own padding — and 24px of a 390px screen is real text. Desktop
+// keeps the established 12px, where the width is not scarce and the gutter is
+// what stops content colliding with the window edge.
 function Pane({ active, children }: { active: boolean; children: React.ReactNode }) {
   return (
     <div
       aria-hidden={active ? undefined : true}
-      className={cn('absolute inset-0 flex min-h-0 flex-col px-3', active ? 'z-10' : 'pointer-events-none invisible')}
+      className={cn(
+        'absolute inset-0 flex min-h-0 flex-col px-1 sm:px-3',
+        active ? 'z-10' : 'pointer-events-none invisible',
+      )}
     >
       {children}
     </div>
@@ -135,13 +148,28 @@ export function App() {
   // Measured at 390x844: the breadcrumb row (`804 / Sessions / <id>` + theme),
   // the identity row (back + status + teammate) and the tab/controls row were
   // three separate bands saying two things, 141px of a 844px screen before a
-  // keyboard existed. The bar's three jobs are all re-homed into the session
-  // header's single row — the drawer trigger and the theme picker move there,
-  // and the breadcrumb is redundant with a back link whose label already says
-  // "Back to all sessions". The dashboard and the new-session route keep the bar
-  // exactly as it was, and so does every viewport at or above DRAWER_MAX.
+  // keyboard existed. Its navigation is re-homed into the session header's
+  // single row — the fleet trigger moves there, theme lives in Settings, and
+  // the breadcrumb is redundant with a back link whose label already says
+  // "Back to all sessions". The dashboard and full-width destinations keep the
+  // bar, and so does every viewport at or above DRAWER_MAX.
   const layout = useLayoutMode();
   const compactSession = Boolean(route.sessionId) && layout === 'drawer';
+  const settingsAsSheet = Boolean(route.isSettings) && layout === 'drawer';
+  const fullWidthDestination = Boolean(route.isSettings || route.isWarden);
+  const store = useStore();
+  const chrome = useChrome();
+
+  // A phone opens Settings without changing the underlying route. If that same
+  // window grows into rail/desktop mode, preserve the reader's destination as
+  // the real deep-linkable page rather than leaving an invisible mobile overlay
+  // flag behind.
+  useEffect(() => {
+    if (layout === 'drawer' || !chrome.settingsOpen) return;
+    const target = chrome.settingsTarget;
+    store.closeSettings();
+    navigate(settingsHref(target));
+  }, [chrome.settingsOpen, chrome.settingsTarget, layout, store]);
 
   // Registers the app-shell worker and owns the whole update lifecycle
   // (src/hooks/useServiceWorkerUpdate.ts). Mounted here, once, for the app's
@@ -212,9 +240,13 @@ export function App() {
 
   const crumbs = route.isNew
     ? [{ href: '/', label: 'Sessions' }, { label: 'New' }]
-    : route.sessionId
-      ? [{ href: '/', label: 'Sessions' }, { label: route.sessionId }]
-      : [{ label: 'Sessions' }];
+    : route.isSettings
+      ? [{ href: '/', label: 'Sessions' }, { label: 'Settings' }]
+      : route.isWarden
+        ? [{ href: '/', label: 'Sessions' }, { label: 'Warden' }]
+        : route.sessionId
+          ? [{ href: '/', label: 'Sessions' }, { label: route.sessionId }]
+          : [{ label: 'Sessions' }];
 
   // ONE SCROLL REGION (round 4). The shell is exactly the viewport — `100dvh`,
   // so it tracks mobile browser chrome collapsing instead of overflowing behind
@@ -241,10 +273,13 @@ export function App() {
       {!compactSession && (
         <AppBar
           crumbs={crumbs}
-          onOpenSidebar={() => setDrawerOpen(true)}
+          onOpenSidebar={fullWidthDestination ? undefined : () => setDrawerOpen(true)}
           onOpenPalette={openPalette}
           updateReady={updateReady}
           onApplyUpdate={applyUpdate}
+          settingsActive={route.isSettings}
+          wardenActive={route.isWarden}
+          showTheme={!route.isSettings}
         />
       )}
       {/* THE RECOVERY AFFORDANCE MUST SURVIVE THE BAR BEING GONE.
@@ -269,21 +304,23 @@ export function App() {
           </button>
         </div>
       )}
-      {/* THE SIDEBAR IS A SHELL SIBLING, not a page child: it is mounted once,
-          for the app's life, so navigation never remounts it and its scroll
-          position and filter state simply persist. It is also a sibling of the
-          main pane's scroller rather than a parent of it, which is what keeps
-          the one-scroll-region rule intact — two scrollers side by side, never
-          one nested inside the other. */}
+      {/* THE SIDEBAR IS A SESSIONS-SURFACE SIBLING, not a page child. It stays
+          mounted across dashboard/new/session navigation so its scroll and
+          filters persist, but Settings is deliberately a full-width,
+          non-session destination: no fleet rail, drawer, or bento there. */}
       <div className="flex min-h-0 w-full flex-1">
-        <AgentSidebar activeId={route.sessionId} drawerOpen={drawerOpen} onCloseDrawer={() => setDrawerOpen(false)} />
+        {!fullWidthDestination && (
+          <AgentSidebar activeId={route.sessionId} drawerOpen={drawerOpen} onCloseDrawer={() => setDrawerOpen(false)} />
+        )}
         <main className="relative min-h-0 min-w-0 flex-1">
-          {/* THE DASHBOARD IS A LAZY-CHUNK PANE TOO, which is easy to miss: the
-              page itself is a static import, but it renders `WardenVerdicts`,
-              which lazy-loads the markdown renderer. Without a boundary here a
-              pruned Markdown chunk blanks the root from the dashboard exactly
-              the way a pruned chat chunk does from a session. */}
-          <SafePane active={!route.sessionId && !route.isNew} onChunkError={raiseRecovery} onReload={applyUpdate}>
+          {/* Keep the dashboard behind the same recovery boundary as every
+              other pane. Warden owns its own route now, so no Warden polling or
+              markdown work remains mounted here. */}
+          <SafePane
+            active={!route.sessionId && !route.isNew && !route.isWarden && (!route.isSettings || settingsAsSheet)}
+            onChunkError={raiseRecovery}
+            onReload={applyUpdate}
+          >
             <SessionsListPage />
           </SafePane>
           {/* One Suspense boundary PER PANE, not one wrapping the list: a shared
@@ -309,8 +346,32 @@ export function App() {
               <NewSessionPage />
             </SafePane>
           )}
+          {route.isSettings && !settingsAsSheet && (
+            <SafePane active onChunkError={raiseRecovery} onReload={applyUpdate}>
+              <SettingsPage />
+            </SafePane>
+          )}
+          {route.isWarden && (
+            <SafePane active onChunkError={raiseRecovery} onReload={applyUpdate}>
+              <WardenPage />
+            </SafePane>
+          )}
         </main>
       </div>
+      <SettingsSheet
+        open={layout === 'drawer' && (chrome.settingsOpen || Boolean(route.isSettings))}
+        target={
+          chrome.settingsOpen
+            ? chrome.settingsTarget
+            : typeof window !== 'undefined' && isSettingId(window.location.hash.replace(/^#/, ''))
+              ? (window.location.hash.replace(/^#/, '') as SettingId)
+              : null
+        }
+        onClose={() => {
+          store.closeSettings();
+          if (route.isSettings) navigate('/');
+        }}
+      />
       {/* Last child, above everything: it is `position: fixed` so tree order does
           not decide where it paints, but it does decide who wins a z-index tie
           with the details sheet and the mobile drawer. */}

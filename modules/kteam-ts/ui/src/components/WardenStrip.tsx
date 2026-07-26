@@ -12,7 +12,16 @@ import { fmtRelative } from '../lib/utils';
 
 const POLL_MS = 30_000;
 
-export function WardenStrip() {
+/**
+ * `SessionsListPage` still contains the old call site but is owned by a later
+ * wave. Its default is intentionally quiet; only WardenPage opts into polling
+ * and rendering, so the dashboard no longer carries warden chrome or requests.
+ */
+export function WardenStrip({ page = false }: { page?: boolean } = {}) {
+  return page ? <WardenStripPanel /> : null;
+}
+
+function WardenStripPanel() {
   const [status, setStatus] = useState<WardenStatusView | null>(null);
   const [failed, setFailed] = useState(false);
   const timer = useRef<number | null>(null);

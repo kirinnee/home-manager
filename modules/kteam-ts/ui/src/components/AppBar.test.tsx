@@ -17,7 +17,7 @@
 // a second, drifting copy.
 
 import { describe, expect, test } from 'bun:test';
-import { UPDATE_CHIP } from './AppBar';
+import { SETTINGS_ENTRY, UPDATE_CHIP, WARDEN_ENTRY } from './AppBar';
 import type { UpdateReason } from '../hooks/useServiceWorkerUpdate';
 
 /** Words that assert a REASON the app cannot know at chip time. A title
@@ -66,5 +66,31 @@ describe('the two chips stay two different statements', () => {
     }
     expect(UPDATE_CHIP.update.label).not.toBe(UPDATE_CHIP.recovery.label);
     expect(UPDATE_CHIP.update.title).not.toBe(UPDATE_CHIP.recovery.title);
+  });
+});
+
+describe('Settings entry point', () => {
+  test('is a labelled desktop app-bar link to the static route', async () => {
+    expect(SETTINGS_ENTRY).toEqual({
+      label: 'Settings',
+      title: 'Open appearance and density settings',
+    });
+    const source = await Bun.file(new URL('./AppBar.tsx', import.meta.url).pathname).text();
+    expect(source).toContain('to="/settings"');
+    expect(source).toContain("settingsActive ? 'page'");
+    expect(source).toContain('aria-label="Destinations"');
+    expect(source).toContain('min-[1100px]:flex');
+    expect(source).toContain('{onOpenSidebar && <SidebarDrawerTrigger');
+  });
+
+  test('adds the first-class Warden desktop tab while keeping mobile chrome in the sidebar', async () => {
+    expect(WARDEN_ENTRY).toEqual({
+      label: 'Warden',
+      title: 'Open fleet supervision and verdicts',
+    });
+    const source = await Bun.file(new URL('./AppBar.tsx', import.meta.url).pathname).text();
+    expect(source).toContain('to="/warden"');
+    expect(source).toContain("wardenActive ? 'page'");
+    expect(source).toContain("layout !== 'drawer' && <ThemeToggle");
   });
 });

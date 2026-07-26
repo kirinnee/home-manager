@@ -34,7 +34,13 @@ const VERDICT: Record<WardenVerdictKind, { label: string; cls: string; Icon: typ
   unknown: { label: 'reviewed', cls: 'text-faint border-border bg-surface-2', Icon: Gavel },
 };
 
-export function WardenVerdicts() {
+/** See WardenStrip: the legacy dashboard call remains source-compatible but is
+ * inert; WardenPage is the sole surface that opts into data and rendering. */
+export function WardenVerdicts({ page = false }: { page?: boolean } = {}) {
+  return page ? <WardenVerdictsPanel /> : null;
+}
+
+function WardenVerdictsPanel() {
   const [verdicts, setVerdicts] = useState<WardenVerdict[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [open, setOpen] = useState(false);
@@ -84,7 +90,7 @@ export function WardenVerdicts() {
       <button
         type="button"
         onClick={() => setOpen(o => !o)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12.5px] hover:bg-surface-2"
+        className="flex min-h-[44px] w-full items-center gap-2 px-3 py-2 text-left text-[12.5px] hover:bg-surface-2"
       >
         <Gavel size={14} className="shrink-0 text-faint" />
         <span className="font-medium text-fg-soft">Warden verdicts</span>
@@ -104,7 +110,7 @@ export function WardenVerdicts() {
                 <button
                   type="button"
                   onClick={() => void openReport(v)}
-                  className="flex w-full items-center gap-2.5 px-3 py-2 text-left hover:bg-surface-2"
+                  className="flex min-h-[44px] w-full items-center gap-2.5 px-3 py-2 text-left hover:bg-surface-2"
                 >
                   <span
                     className={cn(
@@ -193,7 +199,7 @@ function ReportModal({
             onClick={onClose}
             aria-label={`Close report ${title}`}
             title="Close (Esc)"
-            className="ml-auto rounded p-1 text-muted hover:bg-surface-2 hover:text-fg"
+            className="ml-auto inline-flex h-[44px] w-[44px] items-center justify-center rounded-control p-0 text-muted hover:bg-surface-2 hover:text-fg"
           >
             <X size={16} aria-hidden="true" />
           </button>

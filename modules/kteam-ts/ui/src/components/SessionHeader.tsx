@@ -9,14 +9,22 @@
 // suppressed entirely (App.tsx) and this becomes the single top row, `nowrap`,
 // carrying everything it re-homed:
 //
-//   [fleet] [‹ ◆ status teammate ————] [chat|term] [theme] [⋯]
+//   [fleet] [‹ task ———————————————————————————————] [⋯]
 //
-// The composition is deliberate and was costed against 360px, not 390px: Back,
-// the status shape and the identity are ONE flexible labelled target rather than
-// three, because eight separate 44px controls in one row do not fit at any phone
-// width. Interrupt/Stop/Resume join Details behind the `⋯` overflow — which is
-// the existing focus-trapped details dialog, not a new popover — so the row
-// holds five targets and a flexible title instead of nine.
+// The composition is deliberate and was costed against 360px, not 390px: Back
+// and the identity are ONE flexible labelled target rather than two, because
+// eight separate 44px controls in one row do not fit at any phone width.
+// Interrupt/Stop/Resume join Details behind the `⋯` overflow — which is the
+// existing focus-trapped details dialog, not a new popover — so the row holds
+// three targets (fleet, back/identity, overflow) and a flexible title.
+//
+// THE PHONE ROW STATES NO STATUS AND NO FLEET COUNT. Both were carried here
+// when this was the only row, and both are facts you glance at rather than
+// steer by: the status shape/word duplicated what the transcript and the fleet
+// list already say, and the `Users 12` count on the drawer trigger is a number
+// nobody acts on from inside a session. They cost width in the one place where
+// width is the scarce resource, so on a phone the trigger is icon-only and the
+// status lives in the details sheet. Desktop keeps both, unchanged.
 //
 // It used to be two dense rows: identity badges, mode, RC, status, nudged,
 // needs-human, wrapper, model, turn, context, five liveness ages, quota and the
@@ -32,17 +40,118 @@
 // that must never be one click away — a declared park and needs-human — keep a
 // rest-visible chip up here, because they are what a lead scans for.
 
-import { memo, useEffect, useId, useState, type ReactNode } from 'react';
-import { ChevronLeft, Pause, Play, StopCircle, ZapOff, MoreHorizontal } from 'lucide-react';
+import {
+  cloneElement,
+  isValidElement,
+  memo,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from 'react';
+import { ChevronLeft, Pause, Play, StopCircle, Users, ZapOff, MoreHorizontal, Settings } from 'lucide-react';
 import type { SessionView } from '../types';
 import { Button, ActionGroup } from './Primitives';
 import { displayCallsign } from '../lib/callsign';
 import { Link } from '../lib/router';
 import { cn, toneFor, type Tone } from '../lib/utils';
 import { SessionDetails, type LiveStatus } from './SessionDetails';
-import { SidebarDrawerTrigger } from './AgentSidebar';
-import { ThemeToggle } from './ThemeToggle';
+import { RenameSheet } from './RenameSheet';
+import { MigrateSheet } from './MigrateSheet';
+import { parseTaskName, TaskName, taskIsRedundant } from './TaskName';
 import type { Quota } from '../lib/usage';
+import { useStore } from '../lib/store';
+
+const COMPACT_CALLSIGN_TITLE_RATIO = 0.6;
+
+interface ViewSwitcherElementProps {
+  iconOnly?: boolean;
+  onChange?: (id: string) => void;
+}
+
+/** SessionChatPage owns the selected view and passes the switch as a React
+ * element. Clone only its presentation callback for the compact sheet: labels
+ * become visible and choosing a view dismisses the sheet immediately. */
+export function viewSwitcherForSheet(tabs: ReactNode, onSelected: () => void): ReactNode {
+  if (!isValidElement(tabs)) return tabs;
+  const element = tabs as ReactElement<ViewSwitcherElementProps>;
+  if (typeof element.props.onChange !== 'function') return tabs;
+  const onChange = element.props.onChange;
+  return cloneElement(element, {
+    iconOnly: false,
+    onChange: (id: string) => {
+      onChange(id);
+      onSelected();
+    },
+  });
+}
+
+export interface SessionHeaderIdentity {
+  /** Source passed to TaskName; task first, then callsign, then id. */
+  renderName: string;
+  /** Plain equivalent of the visible TaskName content for accessible names. */
+  primaryLabel: string;
+  callsign: string;
+  hasNamedTask: boolean;
+  hasDistinctCallsign: boolean;
+  desktopSecondary: string;
+}
+
+/** Keep the user's task as the session's headline everywhere. A missing task
+ * falls back to callsign and then id so the bar can never become nameless. */
+export function sessionHeaderIdentity(
+  name: string | undefined,
+  teammate: string | undefined,
+  id: string,
+  label?: string,
+): SessionHeaderIdentity {
+  const rawName = (name ?? '').trim();
+  const parsed = parseTaskName(rawName);
+  const hasNamedTask = Boolean(parsed.task);
+  const callsign = displayCallsign(teammate);
+  const renderName = hasNamedTask ? rawName : callsign || id;
+  const prefixVisible = Boolean(parsed.prefix && parsed.prefix.toLowerCase() !== (teammate ?? '').trim().toLowerCase());
+  const primaryLabel = hasNamedTask
+    ? [prefixVisible ? parsed.prefix : null, parsed.task].filter(Boolean).join(' ')
+    : renderName;
+  const hasDistinctCallsign = Boolean(hasNamedTask && callsign && !taskIsRedundant(rawName, teammate));
+  const fallbackSecondary = (label ?? '').trim();
+  return {
+    renderName,
+    primaryLabel,
+    callsign,
+    hasNamedTask,
+    hasDistinctCallsign,
+    desktopSecondary: hasDistinctCallsign
+      ? callsign
+      : fallbackSecondary && fallbackSecondary !== primaryLabel
+        ? fallbackSecondary
+        : '',
+  };
+}
+
+/** The plan's 60% rule is necessary but not sufficient in today's denser
+ * phone row. Also require the task+callsign pair to fit the actual identity
+ * slot, so adding secondary context can never force the task to truncate. */
+export function compactCallsignFits(
+  titleWidth: number,
+  rowWidth: number,
+  combinedWidth: number,
+  identityWidth: number,
+  hasDistinctCallsign = true,
+): boolean {
+  return (
+    hasDistinctCallsign &&
+    titleWidth > 0 &&
+    rowWidth > 0 &&
+    identityWidth > 0 &&
+    titleWidth < rowWidth * COMPACT_CALLSIGN_TITLE_RATIO &&
+    combinedWidth <= identityWidth
+  );
+}
 
 interface Props {
   view: SessionView;
@@ -60,20 +169,14 @@ interface Props {
   /** Chat/Terminal switch, hosted here instead of owning its own row. */
   tabs?: ReactNode;
   /** Phone chrome: one nowrap row that also absorbs the suppressed app bar's
-   *  drawer trigger and theme picker, and moves the session controls behind the
+   *  fleet trigger, and moves the view switch plus session controls behind the
    *  details overflow. Desktop never sets it and never changes shape. */
   compact?: boolean;
   /** Opens the fleet drawer. Only meaningful while `compact` — above DRAWER_MAX
    *  the app bar still owns the trigger. */
   onOpenSidebar?: () => void;
-  /** Mount the theme picker. THE THEME PICKER MUST BE A SINGLE INSTANCE.
-   *
-   *  `useTheme` holds the preference in component state and writes it to
-   *  localStorage; a same-document write fires no `storage` event, so a second,
-   *  RETAINED session pane (App.tsx keeps up to MAX_MOUNTED_SESSIONS mounted so
-   *  drafts and scroll survive navigation) would sit on a stale family and
-   *  re-assert it on its next render. Only the pane the reader is looking at
-   *  renders one. */
+  /** Legacy caller compatibility. Theme now lives in Settings on mobile; the
+   * desktop AppBar retains its established standalone picker. */
   showTheme?: boolean;
 }
 
@@ -91,20 +194,77 @@ export const SessionHeader = memo(function SessionHeader({
   tabs,
   compact,
   onOpenSidebar,
-  showTheme = true,
 }: Props) {
   const { config, state } = view;
-  const title = displayCallsign(config.teammate) || config.name || config.id;
-  const subtitle = config.teammate && config.name ? config.name : config.label;
+  const store = useStore();
+  const identity = sessionHeaderIdentity(config.name, config.teammate, config.id, config.label);
+  const compactRowRef = useRef<HTMLDivElement>(null);
+  const compactIdentityRef = useRef<HTMLSpanElement>(null);
+  const compactTitleMeasureRef = useRef<HTMLSpanElement>(null);
+  const compactCombinedMeasureRef = useRef<HTMLSpanElement>(null);
+  const [showCompactCallsign, setShowCompactCallsign] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [migrateOpen, setMigrateOpen] = useState(false);
   const detailsId = useId();
   const panelId = `${detailsId}-panel`;
 
   // A retained background pane must not keep an invisible modal or its
   // open-only lineage subscription alive after route navigation.
   useEffect(() => {
-    if (active === false) setDetailsOpen(false);
+    if (active === false) {
+      setDetailsOpen(false);
+      setRenameOpen(false);
+      setMigrateOpen(false);
+    }
   }, [active]);
+
+  // Measure the task at its real rendered font, including text-size preference
+  // and any TaskName prefix chip. ResizeObserver catches viewport, font and
+  // text-adjust changes without a competing breakpoint or modality hook.
+  useLayoutEffect(() => {
+    if (!compact || !identity.hasDistinctCallsign) {
+      setShowCompactCallsign(false);
+      return;
+    }
+
+    const update = () => {
+      const row = compactRowRef.current;
+      const slot = compactIdentityRef.current;
+      const title = compactTitleMeasureRef.current;
+      const combined = compactCombinedMeasureRef.current;
+      if (!row || !slot || !title || !combined) return;
+      const next = compactCallsignFits(
+        title.getBoundingClientRect().width,
+        row.getBoundingClientRect().width,
+        combined.getBoundingClientRect().width,
+        slot.getBoundingClientRect().width,
+        identity.hasDistinctCallsign,
+      );
+      setShowCompactCallsign(current => (current === next ? current : next));
+    };
+
+    update();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(update);
+    for (const element of [
+      compactRowRef.current,
+      compactIdentityRef.current,
+      compactTitleMeasureRef.current,
+      compactCombinedMeasureRef.current,
+    ]) {
+      if (element) observer?.observe(element);
+    }
+    window.addEventListener('resize', update);
+    let cancelled = false;
+    void document.fonts?.ready.then(() => {
+      if (!cancelled) update();
+    });
+    return () => {
+      cancelled = true;
+      observer?.disconnect();
+      window.removeEventListener('resize', update);
+    };
+  }, [compact, identity.callsign, identity.hasDistinctCallsign, identity.renderName]);
 
   const actions = (
     <SessionActions
@@ -117,64 +277,123 @@ export const SessionHeader = memo(function SessionHeader({
       labels={Boolean(compact)}
     />
   );
+  const compactActions = (
+    <>
+      {actions}
+      <button
+        type="button"
+        onClick={() => {
+          // Let the Details focus trap restore to its trigger before Settings
+          // opens and takes focus. Opening both modal layers in one React batch
+          // would let the closing sheet steal focus back from the new one.
+          setDetailsOpen(false);
+          requestAnimationFrame(() => store.openSettings());
+        }}
+        aria-label={MOBILE_SETTINGS.label}
+        title={MOBILE_SETTINGS.title}
+        className="kt-btn inline-flex min-h-[44px] items-center gap-sm"
+      >
+        <Settings size={14} aria-hidden="true" />
+        Settings
+      </button>
+    </>
+  );
+  const compactViewSwitcher = compact ? viewSwitcherForSheet(tabs, () => setDetailsOpen(false)) : undefined;
   const details = (
-    <SessionDetails
-      id={panelId}
-      view={view}
-      quota={quota}
-      liveStatus={liveStatus}
-      open={detailsOpen}
-      onClose={() => setDetailsOpen(false)}
-      labelledBy={detailsId}
-      // On a phone the sheet is where Interrupt/Stop/Resume live: it is already
-      // a real dialog with a focus trap, an Escape path and restored focus, so
-      // the controls keep a robust home instead of a second ad-hoc popover.
-      actions={compact ? actions : undefined}
-    />
+    <>
+      <SessionDetails
+        id={panelId}
+        view={view}
+        quota={quota}
+        liveStatus={liveStatus}
+        open={detailsOpen}
+        onClose={() => {
+          setDetailsOpen(false);
+          setRenameOpen(false);
+          setMigrateOpen(false);
+        }}
+        labelledBy={detailsId}
+        // On a phone the sheet is where Interrupt/Stop/Resume live: it is already
+        // a real dialog with a focus trap, an Escape path and restored focus, so
+        // the controls keep a robust home instead of a second ad-hoc popover.
+        actions={compact ? compactActions : undefined}
+        viewSwitcher={compactViewSwitcher}
+        onRename={hasToken ? () => setRenameOpen(true) : undefined}
+        onMigrate={hasToken ? () => setMigrateOpen(true) : undefined}
+      />
+      <RenameSheet view={view} open={renameOpen} onClose={() => setRenameOpen(false)} />
+      <MigrateSheet view={view} open={migrateOpen} onClose={() => setMigrateOpen(false)} />
+    </>
   );
 
   if (compact) {
-    const tone = toneFor(state.status);
     return (
       <>
         <div
+          ref={compactRowRef}
           data-density-region="session-header"
           data-density-row="primary"
           className="kt-session-bar mt-0.5 mb-0.5 flex min-w-0 flex-nowrap items-center gap-xs border-b border-border-soft pb-0.5"
         >
-          {onOpenSidebar && <SidebarDrawerTrigger onOpen={onOpenSidebar} />}
+          {onOpenSidebar && <FleetTrigger onOpen={onOpenSidebar} />}
 
-          {/* BACK + STATUS + IDENTITY ARE ONE TARGET. Three 44px boxes for three
-              facts that are read together does not fit at 360px, and the middle
-              one was never interactive anyway. The link's accessible name spells
-              out all three, so nothing is lost to a screen reader; the shape is
-              what makes the state readable without colour, and the WORD beside it
-              collapses (visually only) below 420px — see `.kt-status-word`. */}
+          {/* BACK + IDENTITY ARE ONE TARGET. Two 44px boxes for two facts that
+              are read together does not fit at 360px. The accessible name spells
+              out both, and it deliberately names NO status: the mobile row does
+              not show one any more, and a name that announces a state the
+              control does not present misleads exactly the reader who cannot
+              see the row to check it. */}
           <Link
             to="/"
-            aria-label={`Back to all sessions. Currently ${title}, status ${state.status}`}
-            title={`Back to all sessions — ${title} · ${state.status}`}
-            className="inline-flex min-w-0 flex-1 items-center gap-xs text-muted hover:text-fg"
+            aria-label={MOBILE_BACK.label(identity.primaryLabel, showCompactCallsign ? identity.callsign : undefined)}
+            title={MOBILE_BACK.title(identity.primaryLabel, showCompactCallsign ? identity.callsign : undefined)}
+            className="inline-flex min-h-[44px] min-w-0 flex-1 items-center gap-xs text-muted hover:text-fg"
           >
             <ChevronLeft size={16} aria-hidden="true" className="shrink-0" />
-            <span className={cn('inline-block h-2 w-2 shrink-0', SHAPE[tone])} aria-hidden="true" />
-            <span className={cn('kt-status-word shrink-0 text-meta font-semibold', TEXT[tone])} aria-hidden="true">
-              {state.status}
+            <h1 data-session-primary-title={identity.primaryLabel} className="m-0 min-w-0 flex-1 text-fg">
+              <span ref={compactIdentityRef} data-session-identity-slot className="flex min-w-0 items-baseline gap-xs">
+                <TaskName
+                  name={identity.renderName}
+                  teammate={config.teammate}
+                  showPrefix={identity.hasNamedTask}
+                  size="sm"
+                  className="min-w-0 max-w-full flex-1 font-semibold tracking-tight"
+                />
+                {showCompactCallsign && (
+                  <span data-session-callsign className="shrink-0 text-meta font-normal text-muted">
+                    · {identity.callsign}
+                  </span>
+                )}
+              </span>
+            </h1>
+
+            {/* Intrinsic-width probe for the 60% rule. It uses the same
+                components and type classes as the visible identity but is
+                removed from layout, paint, hit testing and the accessibility
+                tree. */}
+            <span
+              aria-hidden="true"
+              className="pointer-events-none invisible fixed left-0 top-0 h-0 w-0 overflow-hidden"
+            >
+              <span
+                ref={compactCombinedMeasureRef}
+                data-session-combined-measure
+                className="inline-flex w-max items-baseline gap-xs whitespace-nowrap"
+              >
+                <span ref={compactTitleMeasureRef} data-session-title-measure className="inline-flex w-max">
+                  <TaskName
+                    name={identity.renderName}
+                    teammate={config.teammate}
+                    showPrefix={identity.hasNamedTask}
+                    size="sm"
+                    className="max-w-none font-semibold tracking-tight"
+                  />
+                </span>
+                <span className="shrink-0 text-meta font-normal">· {identity.callsign}</span>
+              </span>
             </span>
-            <h1 className="m-0 min-w-0 truncate text-ui font-semibold tracking-tight text-fg">{title}</h1>
           </Link>
 
-          {/* Shed while typing: you are writing into Chat, so the switch to
-              Terminal and the theme picker are not what the row is for. Back,
-              identity, the fleet drawer and the session controls all stay. */}
-          <div data-kb-hide className="shrink-0">
-            {tabs}
-          </div>
-          {showTheme && (
-            <div data-kb-hide className="shrink-0">
-              <ThemeToggle />
-            </div>
-          )}
           <Button
             id={detailsId}
             size="sm"
@@ -184,7 +403,7 @@ export const SessionHeader = memo(function SessionHeader({
             aria-expanded={detailsOpen}
             aria-controls={detailsOpen ? panelId : undefined}
             aria-label="Session controls and details"
-            title="Interrupt, stop, resume, and this session's identity, runtime, progress and budget"
+            title="View, controls, settings, identity, runtime, progress and budget"
           >
             <MoreHorizontal size={16} aria-hidden="true" />
           </Button>
@@ -224,12 +443,18 @@ export const SessionHeader = memo(function SessionHeader({
 
       <StatusChip status={state.status} parked={Boolean(state.waiting)} />
 
-      <h1 className="m-0 min-w-0 max-w-[42vw] truncate text-title font-semibold tracking-tight" title={title}>
-        {title}
+      <h1
+        className="m-0 min-w-0 max-w-[42vw] truncate text-title font-semibold tracking-tight"
+        title={identity.primaryLabel}
+      >
+        {identity.primaryLabel}
       </h1>
-      {subtitle && (
-        <span className="hidden min-w-0 max-w-[28vw] truncate text-cell text-muted sm:inline" title={subtitle}>
-          {subtitle}
+      {identity.desktopSecondary && (
+        <span
+          className="hidden min-w-0 max-w-[28vw] truncate text-cell text-muted sm:inline"
+          title={identity.desktopSecondary}
+        >
+          {identity.desktopSecondary}
         </span>
       )}
 
@@ -260,6 +485,47 @@ export const SessionHeader = memo(function SessionHeader({
     </div>
   );
 });
+
+/** The phone row's back/identity accessible name, lifted out of the JSX so the
+ *  property that matters is checkable: it names the session, and it names NO
+ *  status. The visible status left this row, and an accessible name is not the
+ *  place to keep a fact the control stopped presenting — a screen-reader user
+ *  cannot glance at the row to see it is gone. The status is in the details
+ *  sheet, one deliberate tap away, and it is fully labelled there. */
+export const MOBILE_BACK = {
+  label: (title: string, callsign?: string) =>
+    `Back to all sessions. Currently ${title}${callsign ? `, ${callsign}` : ''}`,
+  title: (title: string, callsign?: string) => `Back to all sessions — ${title}${callsign ? ` · ${callsign}` : ''}`,
+};
+
+/** The phone fleet trigger's names. Icon-only and COUNTLESS on purpose (see the
+ *  header note), so the name says what the control does and claims no number:
+ *  `Open the fleet sidebar (12)` would announce a fact the button no longer
+ *  shows, and the count is not why anyone presses it. */
+export const MOBILE_FLEET = { label: 'Open the fleet sidebar', title: 'Open the fleet sidebar' };
+
+/** Settings is reached from the phone overflow as a labelled 44px action. It
+ * opens the shared Settings bottom sheet without changing the session route. */
+export const MOBILE_SETTINGS = { label: 'Open settings', title: 'Open appearance and density settings' };
+
+/** The phone drawer trigger. `SidebarDrawerTrigger` is the desktop/tablet app
+ *  bar's control and still renders `Users N` there, which is right: that bar has
+ *  the width and the count is fleet context. This row is 360px wide at worst and
+ *  is the ONLY row, so it takes the icon alone. Same position, same action, same
+ *  chrome — one fact fewer. */
+function FleetTrigger({ onOpen }: { onOpen: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      aria-label={MOBILE_FLEET.label}
+      title={MOBILE_FLEET.title}
+      className="inline-flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-control border border-border p-0 text-muted hover:border-accent-border hover:text-fg"
+    >
+      <Users size={16} aria-hidden="true" />
+    </button>
+  );
+}
 
 /** Interrupt / Stop / Resume, and the kill-failed explanation that replaces
  *  them. Rendered inline in the desktop header and inside the details dialog on

@@ -1,11 +1,8 @@
 // THE COMMAND PALETTE — Cmd/Ctrl+K, one dialog, mounted once for the app's life.
 //
-// This slice ships the user-felt core only: JUMP TO A SESSION. Filters, view,
-// theme and per-session actions are deliberately absent — they need a command
-// bus so their owners can register what they own, and shipping a half-wired bus
-// under a keyboard shortcut is worse than shipping the one thing the shortcut is
-// actually for. The markup is already grouped (`role="group"` inside the
-// listbox) so those groups slot in without re-laying the a11y contract.
+// Sessions and Settings share this one search surface. Settings metadata comes
+// from lib/settings.ts, the same catalog the Settings UI maps, so searchable
+// controls cannot drift from the page that owns them.
 //
 // Four things this file is careful about:
 //
@@ -26,7 +23,7 @@
 //                  dashboard and the transcript exactly nothing.
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent } from 'react';
-import { ArrowDown, ArrowUp, CornerDownLeft, Search } from 'lucide-react';
+import { ArrowDown, ArrowUp, CornerDownLeft, Search, Settings } from 'lucide-react';
 import type { SessionView } from '../types';
 import { navigate } from '../lib/router';
 import { useStore } from '../lib/store';
@@ -39,6 +36,9 @@ import { useDialogFocus } from '../hooks/useDialogFocus';
 import { useDebouncedEffect } from '../hooks/useDebounce';
 import { StatusMark, statusMark } from './StatusMark';
 import { TaskName, parseTaskName } from './TaskName';
+import { useLayoutMode } from '../hooks/useLayoutMode';
+import { settingsHref, settingsPaletteEntries, type SettingsPaletteEntry } from '../lib/settings';
+import { useInputModality } from '../hooks/useInputModality';
 
 /** Stable element ids. The palette is a SINGLETON (App mounts exactly one), so
  *  these are constants rather than `useId()` values — an option id that changed
@@ -47,8 +47,10 @@ import { TaskName, parseTaskName } from './TaskName';
 const PANEL_ID = 'kt-palette';
 const INPUT_ID = 'kt-palette-input';
 const LISTBOX_ID = 'kt-palette-listbox';
+const SETTINGS_HEADING_ID = 'kt-palette-group-settings';
 const SESSIONS_HEADING_ID = 'kt-palette-group-sessions';
-const optionId = (sessionId: string) => `kt-palette-option-${sessionId}`;
+const sessionOptionId = (sessionId: string) => `kt-palette-option-session-${sessionId}`;
+const settingsOptionId = (id: string) => `kt-palette-option-${id}`;
 
 /** Deliberately slower than the keystroke that changes the result set: a fast
  *  typist should hear one settled count, not a stream of intermediate ones.
@@ -81,6 +83,12 @@ interface PaletteSession extends SessionEntry {
   folderName: string;
 }
 
+type PaletteResult = { kind: 'settings'; entry: SettingsPaletteEntry } | { kind: 'session'; entry: PaletteSession };
+
+function paletteResultId(result: PaletteResult): string {
+  return result.kind === 'settings' ? settingsOptionId(result.entry.id) : sessionOptionId(result.entry.id);
+}
+
 /** Fleet state, subscribed to ONLY while the palette is open.
  *
  *  Same shape as SessionDetails' `useOpenFleet` and for the same reason: this
@@ -101,6 +109,13 @@ function countLabel(n: number): string {
   return `${n} result${n === 1 ? '' : 's'}`;
 }
 
+export function paletteFocusPolicy(touchAffected: boolean): {
+  dialogAutoFocus: boolean;
+  inputAutoFocus: boolean;
+} {
+  return { dialogAutoFocus: touchAffected, inputAutoFocus: !touchAffected };
+}
+
 export function CommandPalette({
   open,
   /** Bumped every time the shortcut fires. Pressing ⌘K while the palette is
@@ -118,11 +133,22 @@ export function CommandPalette({
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
   const [announcement, setAnnouncement] = useState('');
+  const store = useStore();
+  const layout = useLayoutMode();
+  const { touchAffected } = useInputModality();
+
+  // Modality is latched for one opening so a convertible changing pointer mode
+  // cannot re-run the dialog focus effect or summon a keyboard mid-use.
+  const latchedTouch = useRef(touchAffected);
+  if (!open) latchedTouch.current = touchAffected;
+  const focusPolicy = paletteFocusPolicy(latchedTouch.current);
 
   // Escape, the Tab trap and restore-to-opener. `autoFocus: false` because the
   // container is not where focus belongs — the query input is, and the effect
   // below moves it there (the fleet drawer's pattern).
-  const { onKeyDown: trapKeyDown } = useDialogFocus(open, panelRef, onClose, { autoFocus: false });
+  const { onKeyDown: trapKeyDown } = useDialogFocus(open, panelRef, onClose, {
+    autoFocus: focusPolicy.dialogAutoFocus,
+  });
 
   const { sessions, projects } = useOpenFleet(open);
 
@@ -155,9 +181,17 @@ export function CommandPalette({
     });
   }, [sessions, projects]);
 
-  const results = useMemo(
+  const sessionResults = useMemo(
     () => (query.trim() ? rankSessions(entries, query, { limit: MAX_SESSION_RESULTS }) : recentSessions(entries)),
     [entries, query],
+  );
+  const settingsResults = useMemo(() => settingsPaletteEntries(query), [query]);
+  const results = useMemo<PaletteResult[]>(
+    () => [
+      ...settingsResults.map(entry => ({ kind: 'settings' as const, entry })),
+      ...sessionResults.map(entry => ({ kind: 'session' as const, entry })),
+    ],
+    [sessionResults, settingsResults],
   );
 
   // The active row is DERIVED and clamped rather than corrected in an effect: a
@@ -175,12 +209,12 @@ export function CommandPalette({
   // Opening (or re-pressing the shortcut) puts the caret in the box and selects
   // whatever is already there, so the next keystroke replaces it.
   useEffect(() => {
-    if (!open) return;
+    if (!open || !focusPolicy.inputAutoFocus) return;
     const input = inputRef.current;
     if (!input) return;
     input.focus();
     input.select();
-  }, [open, focusSignal]);
+  }, [open, focusSignal, focusPolicy.inputAutoFocus]);
 
   // Closing resets the query so the next ⌘K opens on the recents rather than on
   // a stale search. Kept out of the open-effect so it cannot fight the caret.
@@ -195,7 +229,7 @@ export function CommandPalette({
   // own list and nothing else — the page below cannot scroll at all.
   useEffect(() => {
     if (!open || !activeEntry) return;
-    document.getElementById(optionId(activeEntry.id))?.scrollIntoView({ block: 'nearest' });
+    document.getElementById(paletteResultId(activeEntry))?.scrollIntoView({ block: 'nearest' });
   }, [open, activeEntry]);
 
   useDebouncedEffect(
@@ -207,11 +241,23 @@ export function CommandPalette({
   );
 
   const run = useCallback(
-    (entry: PaletteSession) => {
-      navigate(`/session/${encodeURIComponent(entry.id)}`);
+    (result: PaletteResult) => {
+      if (result.kind === 'session') {
+        navigate(`/session/${encodeURIComponent(result.entry.id)}`);
+        onClose();
+        return;
+      }
+
       onClose();
+      if (layout === 'drawer') {
+        // The palette's focus trap must restore before the Settings sheet takes
+        // focus, exactly like the Details → Settings handoff.
+        requestAnimationFrame(() => store.openSettings(result.entry.settingId));
+      } else {
+        navigate(settingsHref(result.entry.settingId));
+      }
     },
-    [onClose],
+    [layout, onClose, store],
   );
 
   const onInputKeyDown = useCallback(
@@ -287,15 +333,15 @@ export function CommandPalette({
             role="combobox"
             aria-expanded="true"
             aria-controls={LISTBOX_ID}
-            aria-activedescendant={activeEntry ? optionId(activeEntry.id) : undefined}
+            aria-activedescendant={activeEntry ? paletteResultId(activeEntry) : undefined}
             aria-autocomplete="list"
-            aria-label="Jump to a session — type a teammate, task, label, folder or id"
+            aria-label="Search sessions and settings"
             autoComplete="off"
             spellCheck={false}
             value={query}
             onChange={event => setQuery(event.target.value)}
             onKeyDown={onInputKeyDown}
-            placeholder="Jump to a session…"
+            placeholder="Search sessions and settings…"
             // Not `.kt-input`: the panel already draws the edge, and a second
             // bordered control inside it reads as a box in a box. Type size and
             // colour still come from tokens.
@@ -307,20 +353,39 @@ export function CommandPalette({
             (the transcript); this is an overlay and never nests inside it. */}
         <div className="min-h-0 flex-1 overflow-y-auto scroll-thin px-xs py-xs">
           <div id={LISTBOX_ID} role="listbox" aria-label="Results">
-            {results.length > 0 && (
+            {settingsResults.length > 0 && (
+              <div role="group" aria-labelledby={SETTINGS_HEADING_ID}>
+                <div id={SETTINGS_HEADING_ID} className="kt-label px-cell-x pb-xs pt-xs">
+                  {trimmed ? 'Settings' : 'Commands'}
+                </div>
+                {settingsResults.map((entry, index) => (
+                  <SettingsOption
+                    key={entry.id}
+                    entry={entry}
+                    selected={index === activeIndex}
+                    onActivate={() => run({ kind: 'settings', entry })}
+                    onHover={() => setActive(index)}
+                  />
+                ))}
+              </div>
+            )}
+            {sessionResults.length > 0 && (
               <div role="group" aria-labelledby={SESSIONS_HEADING_ID}>
                 <div id={SESSIONS_HEADING_ID} className="kt-label px-cell-x pb-xs pt-xs">
                   {trimmed ? 'Sessions' : 'Recent sessions'}
                 </div>
-                {results.map((entry, index) => (
-                  <SessionOption
-                    key={entry.id}
-                    entry={entry}
-                    selected={index === activeIndex}
-                    onActivate={() => run(entry)}
-                    onHover={() => setActive(index)}
-                  />
-                ))}
+                {sessionResults.map((entry, index) => {
+                  const resultIndex = settingsResults.length + index;
+                  return (
+                    <SessionOption
+                      key={entry.id}
+                      entry={entry}
+                      selected={resultIndex === activeIndex}
+                      onActivate={() => run({ kind: 'session', entry })}
+                      onHover={() => setActive(resultIndex)}
+                    />
+                  );
+                })}
               </div>
             )}
           </div>
@@ -329,8 +394,8 @@ export function CommandPalette({
             <p className="m-0 px-cell-x py-row-y text-cell text-muted">
               {trimmed ? (
                 <>
-                  No session matches <span className="mono text-fg-soft">{trimmed}</span>. Try a teammate callsign, a
-                  word from the task, a project folder, or the start of a session id.
+                  Nothing matches <span className="mono text-fg-soft">{trimmed}</span>. Try a setting, teammate
+                  callsign, task, project folder, or the start of a session id.
                 </>
               ) : (
                 'No sessions yet.'
@@ -351,6 +416,36 @@ export function CommandPalette({
   );
 }
 
+function SettingsOption({
+  entry,
+  selected,
+  onActivate,
+  onHover,
+}: {
+  entry: SettingsPaletteEntry;
+  selected: boolean;
+  onActivate: () => void;
+  onHover: () => void;
+}) {
+  return (
+    <div
+      id={settingsOptionId(entry.id)}
+      role="option"
+      aria-selected={selected}
+      data-active={selected ? 'true' : undefined}
+      onClick={onActivate}
+      onPointerMove={onHover}
+      className="kt-navrow min-h-[44px] cursor-pointer items-start"
+    >
+      <Settings size={14} className="mt-0.5 shrink-0 text-accent" aria-hidden="true" />
+      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span className="font-semibold text-fg">{entry.label}</span>
+        <span className="truncate text-meta text-muted">{entry.description}</span>
+      </span>
+    </div>
+  );
+}
+
 function SessionOption({
   entry,
   selected,
@@ -366,7 +461,7 @@ function SessionOption({
   const callsign = displayCallsign(entry.teammate);
   return (
     <div
-      id={optionId(entry.id)}
+      id={sessionOptionId(entry.id)}
       role="option"
       aria-selected={selected}
       data-active={selected ? 'true' : undefined}
