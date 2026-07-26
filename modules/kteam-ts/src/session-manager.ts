@@ -63,6 +63,7 @@ import {
 import { rankFailoverCandidates, selectFailoverCandidate } from './failover';
 import type { AgentUsage } from './core';
 import { chatEventFingerprint, EventStore, type IndexedSession, type JsonValue, type SessionEvent } from './storage';
+import { KTEAM_VERSION } from './version';
 import {
   fetchKfleetUsage,
   quotaFromUsage,
@@ -220,9 +221,15 @@ const preLaunchStatuses: SessionStatus[] = ['created', 'starting'];
  *  sequence 0 would page through every event ever recorded. Per-session
  *  replay stays complete â only the fleet feed is windowed. */
 const GLOBAL_BACKLOG_MAX = 5_000;
+/** Expected cadence of the daemon self-check. Lag is the measured timer gap
+ * above this interval, not the whole interval itself. */
+const SELF_CHECK_INTERVAL_MS = 60_000;
 /** A self-check tick this late means the event loop stopped running: the
  *  timer interval is 60 s, so three missed ticks is unambiguous. */
 const WEDGE_GAP_MS = 180_000;
+/** Long fleet scans yield at this boundary so timers and request handling can
+ * run even when every store lookup is satisfied synchronously from cache. */
+const SWEEP_CHUNK_SIZE = 25;
 /** A terminal session whose journal keeps growing this long after finishedAt
  *  is still doing work nothing supervises (and `ps` cannot show). */
 const TERMINAL_ACTIVITY_GRACE_MS = 60_000;
@@ -517,6 +524,10 @@ export class SessionManager implements KTeamService {
   private bootstrapFinished = false;
   /** When the self-check last ran; its lateness is the wedge detector. */
   private lastSelfCheckAt = 0;
+  /** Latest observed timer delay beyond the expected self-check interval. */
+  private eventLoopLagMs = 0;
+  /** Daemon-lifetime count of self-check gaps classified as wedges. */
+  private wedgeCount = 0;
   /** When chat-pointer resolvability was last verified (own slower cadence). */
   private lastChatVerifyAt = 0;
   /** Consecutive consistency passes that left `ps` incomplete. */
@@ -553,7 +564,7 @@ export class SessionManager implements KTeamService {
     // Self-check timer armed HERE â independent of bootstrap, so it survives
     // any bootstrap failure and flags the residue (the class the user had to
     // spot by eyeballing a timestamp on 2026-07-23).
-    manager.selfCheckTimer = setInterval(() => void manager.selfCheck().catch(() => undefined), 60_000);
+    manager.selfCheckTimer = setInterval(() => void manager.selfCheck().catch(() => undefined), SELF_CHECK_INTERVAL_MS);
     return manager;
   }
 
@@ -571,8 +582,10 @@ export class SessionManager implements KTeamService {
     const tickAt = Date.now();
     const gapMs = this.lastSelfCheckAt === 0 ? 0 : tickAt - this.lastSelfCheckAt;
     this.lastSelfCheckAt = tickAt;
+    this.eventLoopLagMs = gapMs === 0 ? 0 : Math.max(0, gapMs - SELF_CHECK_INTERVAL_MS);
     const wedged = gapMs >= WEDGE_GAP_MS;
     if (wedged) {
+      this.wedgeCount = (this.wedgeCount ?? 0) + 1;
       const gapSeconds = Math.round(gapMs / 1000);
       console.error(
         `kteamd self-check: event loop was starved for ${gapSeconds}s (timer gap) â verifying index against session directories`,
@@ -638,6 +651,14 @@ export class SessionManager implements KTeamService {
    *  monitor â and only a discrepancy that SURVIVES repair escalates to a
    *  clean self-restart, so restarts stay a last resort (they cost every live
    *  pane in the fleet). */
+  private async sweepYield(): Promise<void> {
+    await Bun.sleep(0);
+  }
+
+  private async yieldSweepChunk(index: number): Promise<void> {
+    if (index > 0 && index % SWEEP_CHUNK_SIZE === 0) await this.sweepYield();
+  }
+
   private async consistencyCheck(deep: boolean): Promise<ConsistencyReport> {
     const report: ConsistencyReport = {
       missingFromIndex: [],
@@ -652,7 +673,6 @@ export class SessionManager implements KTeamService {
     // that was merely still booting (a permanent boot loop).
     if (!this.indexImported) return report;
     const onDisk = await this.store.sessionIdsOnDisk();
-    const onDiskSet = new Set(onDisk);
     const indexed = this.store.listSessions();
     // Verify chat pointers actually RESOLVE (not just that rows exist). This is
     // independent of index membership â a chat index can rot while `ps` is
@@ -661,10 +681,22 @@ export class SessionManager implements KTeamService {
     await this.verifyChatIndexes(indexed, report).catch(error =>
       console.error(`kteamd consistency: chat-index verification failed: ${String(error)}`),
     );
-    const indexedIds = new Set(indexed.map(item => item.id));
-    for (const id of onDisk) if (!indexedIds.has(id)) report.missingFromIndex.push(id);
+    const indexedIds = new Set<string>();
+    for (let index = 0; index < indexed.length; index++) {
+      await this.yieldSweepChunk(index);
+      indexedIds.add(indexed[index]!.id);
+    }
+    const onDiskSet = new Set<string>();
+    for (let index = 0; index < onDisk.length; index++) {
+      await this.yieldSweepChunk(index);
+      const id = onDisk[index]!;
+      onDiskSet.add(id);
+      if (!indexedIds.has(id)) report.missingFromIndex.push(id);
+    }
     if (deep || report.missingFromIndex.length > 0) {
-      for (const item of indexed) {
+      for (let index = 0; index < indexed.length; index++) {
+        await this.yieldSweepChunk(index);
+        const item = indexed[index]!;
         // Rows for deleted/purged directories are metadata-only leftovers,
         // not incoherence.
         if (!onDiskSet.has(item.id)) continue;
@@ -684,7 +716,10 @@ export class SessionManager implements KTeamService {
       `kteamd consistency: ${report.missingFromIndex.length} unindexed, ${report.staleRows.length} stale row(s), ` +
         `${report.zombies.length} terminal-but-active â repairing`,
     );
-    for (const id of [...report.missingFromIndex, ...report.staleRows]) {
+    const resyncIds = [...report.missingFromIndex, ...report.staleRows];
+    for (let index = 0; index < resyncIds.length; index++) {
+      await this.yieldSweepChunk(index);
+      const id = resyncIds[index]!;
       const synced = await this.store.syncSession(id).then(
         () => true,
         error => {
@@ -699,7 +734,9 @@ export class SessionManager implements KTeamService {
     // Re-adopting it lets the normal monitor finish the job (it defers while
     // the pane is genuinely working, then reaps it) instead of leaving work
     // that `ps` cannot show and nothing supervises.
-    for (const id of report.zombies) {
+    for (let index = 0; index < report.zombies.length; index++) {
+      await this.yieldSweepChunk(index);
+      const id = report.zombies[index]!;
       // ONCE per session per daemon lifetime. The re-adopt itself would
       // otherwise re-trigger its own detector â the readopt event lands in the
       // journal whose mtime IS the zombie test, and a monitor over a dead pane
@@ -713,7 +750,13 @@ export class SessionManager implements KTeamService {
     }
     // Verify the repair rather than trusting it: membership that is STILL
     // wrong after reindexing means the index cannot be healed in place.
-    const stillMissing = (await this.store.sessionIdsOnDisk()).filter(id => !this.store.getSession(id));
+    const diskAfterRepair = await this.store.sessionIdsOnDisk();
+    const stillMissing: string[] = [];
+    for (let index = 0; index < diskAfterRepair.length; index++) {
+      await this.yieldSweepChunk(index);
+      const id = diskAfterRepair[index]!;
+      if (!this.store.getSession(id)) stillMissing.push(id);
+    }
     this.consecutiveIncoherentChecks = stillMissing.length > 0 ? this.consecutiveIncoherentChecks + 1 : 0;
     this.emitTransient('fleet.index_incoherent', {
       missingFromIndex: report.missingFromIndex,
@@ -751,9 +794,11 @@ export class SessionManager implements KTeamService {
     const stamp = await readJson<{ at?: string }>(stampFile).catch(() => ({}) as { at?: string });
     const lastAt = stamp.at ? Date.parse(stamp.at) : 0;
     const cooling = lastAt > 0 && Date.now() - lastAt < SELF_RESTART_COOLDOWN_MS;
+    const preview = unhealable.slice(0, 10);
+    const previewSuffix = unhealable.length > preview.length ? `, +${unhealable.length - preview.length} more` : '';
     const headline =
       `kteamd: session index is unhealable after ${this.consecutiveIncoherentChecks} passes ` +
-      `(${unhealable.length} session(s) invisible to ps) â `;
+      `(${unhealable.length} session(s) invisible to ps; ids: ${preview.join(', ')}${previewSuffix}) â `;
     // The report is announced ONCE per outcome, but the decision is re-made
     // every pass: whether a restart is possible is the ENTRYPOINT's answer
     // (it asks the service manager whether it owns this pid) and can change,
@@ -765,7 +810,7 @@ export class SessionManager implements KTeamService {
       console.error(headline + detail);
       this.emitTransient('fleet.daemon_self_restart', {
         reason: 'session index unhealable in place',
-        sessions: unhealable.slice(0, 20),
+        sessions: [...unhealable],
         consecutive: this.consecutiveIncoherentChecks,
         ...data,
       });
@@ -878,7 +923,7 @@ export class SessionManager implements KTeamService {
     return {
       ok: this.bootstrapFinished && this.bootstrapErrors.length === 0 && unmonitoredRunning === 0,
       bootstrapping: !this.bootstrapFinished,
-      version: '0.2.0',
+      version: KTEAM_VERSION,
       pid: process.pid,
       home: this.paths.home,
       sessions: sessions.length,
@@ -887,6 +932,9 @@ export class SessionManager implements KTeamService {
       unmonitoredRunning,
       wardenLastSweepSeconds: lastSweepMs > 0 ? Math.floor((Date.now() - lastSweepMs) / 1000) : null,
       wardenTimerArmed: this.wardenTimer !== undefined,
+      eventLoopLagMs: this.eventLoopLagMs,
+      lastSelfCheckAt: this.lastSelfCheckAt > 0 ? new Date(this.lastSelfCheckAt).toISOString() : null,
+      wedgeCount: this.wedgeCount,
       scratchGcEnabled: this.scratchConfig.enabled,
       scratchReclaimedSessions: this.scratchReclaimed.sessions,
       scratchReclaimedBytes: this.scratchReclaimed.bytes,
@@ -2914,7 +2962,9 @@ export class SessionManager implements KTeamService {
     const nowMs = Date.now();
     if (nowMs - this.lastChatVerifyAt < CHAT_VERIFY_INTERVAL_MS) return;
     this.lastChatVerifyAt = nowMs;
-    for (const item of indexed) {
+    for (let index = 0; index < indexed.length; index++) {
+      await this.yieldSweepChunk(index);
+      const item = indexed[index]!;
       const config = item.config as SessionConfig | undefined;
       if (!config) continue;
       if (item.status && terminalStatuses.includes(item.status as SessionStatus)) continue;
