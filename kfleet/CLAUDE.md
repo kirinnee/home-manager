@@ -5,7 +5,6 @@
 - When working on PE or Liftoff tasks that are ops-related (infrastructure, Kubernetes, metrics, logs, production debugging), use the `/liftoff-ops` skill. This ensures `loctl` is used instead of direct kubectl/helm/aws/etc.
 - For autonomous ticket-to-PR workflows, use the `/kagent-autopilot` skill.
 - The AI agent fleet (per-account `claude-<name>` / `codex-<name>` wrappers + their settings/memory/skills/hooks) is managed by **`kfleet`**. Home Manager owns the source assets in this repo under `kfleet/` and links them into `~/.kfleet/`; edit `kfleet/config.yaml`, `kfleet/CLAUDE.md`, `kfleet/CLAUDE.auto.md`, `kfleet/templates/`, `kfleet/skills/`, or `kfleet/skills-codex/`, then run `hms` (which runs `kfleet apply`) or run `kfleet apply` for asset-only refreshes. Do NOT edit generated homes like `~/.claude-<name>/`, `~/.codex-<name>/`, or generated wrappers under `~/.kfleet/bin/`. `modules/agent-config` is deprecated legacy seed material; do not use it as the source of truth. Only `multi-gh`/`multi-gws` accounts are still Nix-managed in `home-template.nix`.
-- **Delegate through `kteam` as much as possible** — the main thread's context and tokens are the scarcest resource. Any substantial work a teammate could do (implementation, research, review, debugging, bulk edits, long builds/tests) goes to a detached `kteam` session instead of being done inline or via native subagents; the main thread stays lean: coordinate, decide, verify, and talk to the user. Use the `/kteam` skill; recommend a task-specific mix of installed auto-mode Claude/Codex wrappers before launching unless the user already chose them. Keep the main thread as team lead; teammates communicate through `~/.kteam/<session-id>/`, receive live replies through `kteam send`, and restart stopped TUIs through `kteam resume`. The harness session must be an interactive TUI in tmux—never Claude `--print` or Codex `exec`.
 - **kteam model routing** (full table + handoff chain in the `/kteam` skill): chain = Fable main thread → planner (kteam Fable; sol/Opus OK for low-ambiguity plans; planners may spawn implementers) → implementer. Implementers: GPT-5.6-sol for long many-checkpoint workloads; Opus 4.8 / GPT-5.6-terra for generic→mid-high; GLM-5.2 sparingly (mechanical/frontend). terra/5.5 implement only from a plan by Fable/sol/Opus. Product-facing: NEVER MiniMax M3 or DeepSeek V4. mm3 + GLM-5.2 = mass-chore tier only (divide-and-conquer, 1 file = 1 agent). Big context needs ≥ Opus/terra — and sol or Fable only when implementing against it.
 
 ## Communication style
@@ -61,3 +60,55 @@ direnv exec . sudo -A darwin-rebuild switch --flake "$HOME/.config/home-manager#
 - Babysit the PR until it is genuinely green before marking the work done — resolve merge conflicts and fix CI failures yourself, push the fixes, and re-verify that conflicts are cleared and CI is passing.
 - Never merge a PR yourself; leave the actual merge to the user.
 - Whenever you open or reference a PR, always include its full URL (e.g. `https://github.com/<org>/<repo>/pull/<number>`) in your reply so the user can click straight through. Never mention a PR by number alone.
+
+## How to use kteam (fan out — this is the default, not the exception)
+
+**Delegate through `kteam` as much as possible.** Your own context and tokens are the scarcest
+resource in the system. Any substantial work a teammate could do — implementation, research, review,
+debugging, bulk edits, long builds or test runs — goes to a detached `kteam` session instead of
+being done inline or through native subagents. You stay lean and act as team lead: pick the model
+mix, monitor, answer teammate messages, and verify the result.
+
+**Fan out WIDE.** The common failure is doing too much yourself, not spawning too many teammates. If
+a task splits into independent pieces, spawn one teammate per piece and run them concurrently. For
+mass chores the unit is one file per agent. Only serialise work that genuinely depends on an earlier
+result.
+
+```bash
+kteam daemon status                       # is kteamd up? start/install it if not
+kteam recommend "<task>"                  # suggested wrapper/model for the work
+
+# launch one teammate per independent task (detached; returns immediately)
+kteam start --agent claude-auto-loge --mode auto --cwd "$PWD" \
+  --name "Fix Transcript Scrolling" --label my-batch "<the full brief>"
+
+kteam ps --label my-batch                 # your batch only (-a includes finished)
+kteam status <name|id>                    # one session in detail
+kteam stream <name|id>                    # live output
+kteam wait <name|id>                      # block until it finishes
+kteam wait <id> --until-marker <file>     # gate on a deliverable, not a claim
+
+kteam send <name> "steer or answer"       # queued; delivered at the next turn boundary
+kteam send <name> --ask --until 30m "?"   # ask AND park yourself until they reply
+kteam answer <name> <labels...>           # structured questions
+kteam interrupt <name>                    # abandon the current approach (safe, idempotent)
+kteam resume <name>                       # revive a stopped/dead TUI, conversation intact
+kteam rename <name> --name "New Title"    # retitle a session
+```
+
+- `--name` is the **plain task title**: natural Title Case, up to 5 words (`Fix Transcript
+Scrolling`, not `fix-transcript-scrolling`). Never add a `[Teammate]` prefix — kteam composes the
+  Claude-side session name itself. `--label` is your batch slug so `kteam ps --label` shows only
+  your own teammates.
+- Long briefs go in a file: `--prompt-file <file>` on start, `--message-file <file>` on send.
+  **Sending a multi-KB message to a BUSY session can fail** — prefer writing the brief to a file and
+  sending a short pointer to it, then confirm delivery landed in `~/.kteam/<id>/channel/inbox.jsonl`.
+- Teammates may message each other directly (`kteam send <peer>`) for facts the peer owns. Route
+  scope changes, conflicts and final results through the lead.
+- **Verify, don't trust.** `completed` is a claim: read `~/.kteam/<id>/summary.md`, inspect the diff,
+  and run the checks yourself before believing it.
+- **Never restart `kteamd`** — the whole fleet depends on it. That is the human's call.
+
+**Concurrent teammates share one working tree.** Assign explicit per-file ownership with no file
+owned twice, always commit with `git commit --only <paths>` (never `-a`) after checking the index for
+someone else's staged files, and never let two teammates edit the same file at once.

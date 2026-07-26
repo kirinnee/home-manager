@@ -220,8 +220,8 @@ infix), so `<alias>-<name>` execs `<kind>-<name>` with the flags — e.g. claude
 agents `kirin` / `auto-kirin` → `yolo-kirin` / `yolo-auto-kirin`. Per-kind because
 each harness's flags differ (claude `--dangerously-skip-permissions`, codex
 `--full-auto`, …). This is the one-line way to give the whole fleet `yolo-*` /
-`crc-*` — including the exact names `klaude` (`crc-kirin`) and `rc-session`
-(`yolo-{kirin,liftoff,atomi}`) expect.
+`crc-*` — including the exact names `rc-session` (`yolo-{kirin,liftoff,atomi}`)
+expects.
 
 **Command** — `name` (the generated binary), `target` (an agent wrapper name like
 `claude-kirin`), `flags` (prepended before the user's args). Generates
