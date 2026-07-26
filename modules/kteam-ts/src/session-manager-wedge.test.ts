@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { SessionManager } from './session-manager';
+import { KTEAM_VERSION } from './version';
 
 // The 2026-07-23 daemon wedge: the event loop stopped for 11 minutes (23:26:46Z
 // → 23:37:55Z — no timer ticks, no accepts), and AFTER it recovered `kteam ps`
@@ -222,6 +223,70 @@ describe('post-wedge index consistency (ps vs session directories)', () => {
     expect(announced[0]!.data.supervised).toBe(false);
     expect(harness.restarts.count).toBe(0);
   });
+
+  test('the unhealable headline names a capped id preview while the transient retains every id', async () => {
+    const home = await temporaryHome();
+    const harness = wedgeManager({ home, onDisk: [], indexed: [], states: {} });
+    harness.manager.consecutiveIncoherentChecks = 3;
+    const ids = Array.from({ length: 25 }, (_, index) => `s-unhealable-${String(index).padStart(2, '0')}`);
+    const errors: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => errors.push(args.map(String).join(' '));
+    try {
+      await (
+        harness.manager as unknown as { requestSelfRestart: (unhealable: string[]) => Promise<void> }
+      ).requestSelfRestart(ids);
+    } finally {
+      console.error = originalError;
+    }
+
+    const headline = errors.find(line => line.includes('session index is unhealable')) ?? '';
+    expect(headline).toContain(ids[0]!);
+    expect(headline).toContain(ids[9]!);
+    expect(headline).not.toContain(ids[10]!);
+    const event = harness.transient.find(item => item.type === 'fleet.daemon_self_restart');
+    expect(event?.data.sessions).toEqual(ids);
+  });
+});
+
+describe('cooperative consistency sweeps', () => {
+  test('membership and chat-index scans yield between bounded chunks', async () => {
+    const home = await temporaryHome();
+    const ids = Array.from({ length: 51 }, (_, index) => `s-${index}`);
+    const harness = wedgeManager({
+      home,
+      onDisk: ids,
+      indexed: ids.map(id => ({ id, status: 'running' })),
+      states: Object.fromEntries(ids.map(id => [id, { status: 'running' }])),
+    });
+    harness.manager.lastChatVerifyAt = Date.now();
+    let membershipYields = 0;
+    harness.manager.sweepYield = async () => {
+      membershipYields += 1;
+    };
+    await consistency(harness.manager, false);
+    expect(membershipYields).toBeGreaterThanOrEqual(2);
+
+    const chatManager = bareManager();
+    chatManager.lastChatVerifyAt = 0;
+    chatManager.store = { chatPointerCount: () => 0 };
+    let chatYields = 0;
+    chatManager.sweepYield = async () => {
+      chatYields += 1;
+    };
+    await (
+      chatManager as unknown as {
+        verifyChatIndexes: (
+          indexed: Array<{ id: string; status: string; config: { id: string } }>,
+          report: Record<string, string[]>,
+        ) => Promise<void>;
+      }
+    ).verifyChatIndexes(
+      ids.map(id => ({ id, status: 'running', config: { id } })),
+      { missingFromIndex: [], staleRows: [], zombies: [], repaired: [], chatIndexBroken: [] },
+    );
+    expect(chatYields).toBeGreaterThanOrEqual(2);
+  });
 });
 
 describe('wedge detection from the self-check timer', () => {
@@ -258,6 +323,8 @@ describe('wedge detection from the self-check timer', () => {
     expect(wedge).toBeDefined();
     expect(wedge?.data.gapSeconds as number).toBeGreaterThanOrEqual(660);
     expect(deepCalls).toEqual([true]);
+    expect(manager.eventLoopLagMs as number).toBeGreaterThanOrEqual(600_000);
+    expect(manager.wedgeCount).toBe(1);
   });
 
   test('an on-time tick is not a wedge and only runs the cheap pass', async () => {
@@ -275,6 +342,31 @@ describe('wedge detection from the self-check timer', () => {
     expect(transient).toEqual([]);
     expect(deepCalls).toEqual([false]);
     expect(manager.lastSelfCheckAt as number).toBeGreaterThan(0);
+  });
+
+  test('health exposes version, latest loop lag, self-check time, and wedge count', async () => {
+    const manager = bareManager();
+    const lastSelfCheckAt = Date.parse('2026-07-26T01:02:03.000Z');
+    manager.list = async () => [];
+    manager.monitors = new Map();
+    manager.wardenState = {};
+    manager.bootstrapFinished = true;
+    manager.bootstrapErrors = [];
+    manager.options = { scratch: { enabled: false } };
+    manager.scratchReclaimed = { sessions: 0, bytes: 0 };
+    manager.paths = { home: '/tmp/kteam-health-test' };
+    manager.lastSelfCheckAt = lastSelfCheckAt;
+    manager.eventLoopLagMs = 1_234;
+    manager.wedgeCount = 7;
+
+    await expect(
+      (manager as unknown as { health: () => Promise<Record<string, unknown>> }).health(),
+    ).resolves.toMatchObject({
+      version: KTEAM_VERSION,
+      eventLoopLagMs: 1_234,
+      lastSelfCheckAt: '2026-07-26T01:02:03.000Z',
+      wedgeCount: 7,
+    });
   });
 });
 
