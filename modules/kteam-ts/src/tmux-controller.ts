@@ -119,6 +119,11 @@ const PASTE_TRANSPORT_CHARS = 240;
  *  never "clear and retype" that. */
 export type LandingEvidence = 'chars' | 'placeholder';
 
+/** What happened after a proven composer delivery was submitted. A command
+ *  that the TUI consumes and handles locally is successful even though no
+ *  model turn (spinner/non-idle work state) follows it. */
+export type InjectionOutcome = 'turn-started' | 'handled-local';
+
 /** Collapsed-paste placeholders. BOTH harnesses replace a large or multi-line
  *  paste with a placeholder and render NONE of the characters:
  *    claude 2.1.219: `[Pasted text #1 +16 lines]` / `[Pasted text #1]`, plus
@@ -350,6 +355,84 @@ export function paneActivityLine(pane: string): string | undefined {
     }
   }
   return undefined;
+}
+
+/** Whitespace-stripped, lowercased form used for pane/label comparisons.
+ *  Strips spaces AND newlines, so a value split across two wrapped TUI lines
+ *  collapses back together — but only if nothing else (box-drawing, a
+ *  right-column panel) sits BETWEEN the fragments on those lines. That caveat
+ *  is the whole reason a full-label contiguous match is unreliable; see
+ *  `optionVisibleOnPane`. */
+function normalizeForMatch(value: string): string {
+  return value.replace(/\s+/g, '').toLowerCase();
+}
+
+export const STRUCTURED_ANSWER_NOT_VISIBLE =
+  'the structured question is not visible in the interactive tmux pane; snapshot and retry';
+
+/** The shortest whitespace-stripped prefix of `label` (taken up to its first
+ *  '(' — the common wrap point for trailing "(Recommended)"-style suffixes)
+ *  that is NOT a substring of any OTHER option's label. Seeing such a fragment
+ *  on the pane proves THIS option's own identifying text is present and cannot
+ *  be confused with a sibling option's text.
+ *
+ *  Shortest-distinctive is deliberate: a shorter fragment is less likely to be
+ *  broken across a wrap or clipped by ellipsis truncation, while the
+ *  no-other-option-contains-it requirement keeps it unambiguous. Returns
+ *  `null` when no safe fragment exists (too short, or every candidate collides
+ *  with another option) — the caller then refuses rather than guess. */
+export function distinctiveOptionFragment(label: string, allOptions: string[]): string | null {
+  const head = label.split('(')[0] ?? label;
+  const base = normalizeForMatch(head) || normalizeForMatch(label);
+  const others = allOptions.filter(option => option !== label).map(normalizeForMatch);
+  const MIN_FRAGMENT = 4;
+  const MAX_FRAGMENT = Math.min(base.length, 24);
+  for (let length = MIN_FRAGMENT; length <= MAX_FRAGMENT; length++) {
+    const fragment = base.slice(0, length);
+    if (!others.some(other => other.includes(fragment))) return fragment;
+  }
+  return null;
+}
+
+/** Is a single option we intend to select genuinely on screen, and NOT
+ *  confusable with a sibling? We match on the shortest fragment that uniquely
+ *  identifies this option among the whole set (its full label when distinct;
+ *  a shorter prefix when that prefix already disambiguates). This is both:
+ *   - wrap/truncation robust — a short fragment survives a line wrap or an
+ *     ellipsis clip that would break a full-label contiguous match; and
+ *   - mis-answer proof — the fragment cannot be a substring of another
+ *     option's label, so a sibling's on-screen text can never satisfy it.
+ *  When no distinctive fragment exists (e.g. one label is a prefix of another)
+ *  we return false so the caller refuses rather than risk the wrong option. */
+export function optionVisibleOnPane(normalizedPane: string, label: string, allOptions: string[]): boolean {
+  const fragment = distinctiveOptionFragment(label, allOptions);
+  if (!fragment) return false;
+  return normalizedPane.includes(fragment);
+}
+
+/** Pure precondition for driving the interactive structured-question menu by
+ *  index. Returns a refusal message, or `null` to proceed. The daemon must
+ *  never type into a menu it cannot confirm is on screen — a wrong keystroke
+ *  answers the wrong option, which is far worse than refusing — so this gate
+ *  requires: the question text is visible, the pane is NOT back at an idle
+ *  prompt, and every option we intend to select is unambiguously visible.
+ *  A freeform-only answer supplies no `selected` labels, so the option check
+ *  is vacuous (unchanged behaviour). */
+export function structuredAnswerRefusal(args: {
+  pane: string;
+  question: string;
+  options: string[];
+  selected: string[];
+  promptReady: boolean;
+}): string | null {
+  const normalizedPane = normalizeForMatch(args.pane);
+  const questionProbe = normalizeForMatch(args.question).slice(0, 40);
+  if (!questionProbe || !normalizedPane.includes(questionProbe)) return STRUCTURED_ANSWER_NOT_VISIBLE;
+  if (args.promptReady) return STRUCTURED_ANSWER_NOT_VISIBLE;
+  for (const label of args.selected) {
+    if (!optionVisibleOnPane(normalizedPane, label, args.options)) return STRUCTURED_ANSWER_NOT_VISIBLE;
+  }
+  return null;
 }
 
 export function parsePaneMetadata(value: string): PaneMetadata {
@@ -690,48 +773,43 @@ export class TmuxController {
     throw new Error(`interactive harness did not become ready within ${Math.round(timeoutMs / 1000)}s${diagnostic}`);
   }
 
-  async inject(name: string, text: string): Promise<void> {
-    // The turn STARTED only with positive busy evidence (spinner/token counter)
-    // or a demonstrably non-idle pane. A payload that merely vanished from an
-    // otherwise idle input box is a swallowed prompt, NOT an instant turn —
-    // that misread caused the systemic "typed but vanished, session idle"
-    // stalls across Claude wrappers.
-    const turnStarted = (current: PaneState): boolean =>
-      !current.alive || current.dead || paneShowsActiveWork(current.visiblePane) || !current.promptReady;
-    let everLanded = false;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const evidence = await this.fillComposer(name, text).catch(() => undefined);
-      if (!evidence) continue;
-      everLanded = true;
-      // Enter can be swallowed while the TUI repaints; press again while the
-      // payload is still sitting unsubmitted in the input box.
-      submits: for (let submit = 0; submit < 3; submit++) {
-        const enter = await this.keys(name, 'Enter');
-        if (enter.code !== 0) throw new Error(enter.stderr.trim() || 'tmux submit failed');
-        for (let poll = 0; poll < 12; poll++) {
-          await Bun.sleep(500);
-          const current = await this.state(name);
-          if (turnStarted(current)) return;
-          if (!composerHolds(current.visiblePane, text, evidence)) {
-            // The payload left the input box without busy evidence yet. Slow
-            // models take a beat to render the spinner — grant a short grace,
-            // then treat it as swallowed and retype from scratch.
-            for (let grace = 0; grace < 8; grace++) {
-              await Bun.sleep(500);
-              if (turnStarted(await this.state(name))) return;
-            }
-            break submits;
-          }
-        }
+  async inject(name: string, text: string): Promise<InjectionOutcome> {
+    // fillComposer owns the ONLY text-entry retry. It retries three times while
+    // there is no landing evidence, and returns exactly once a copy is proven
+    // present. From that point on this method may retry Enter, but must NEVER
+    // retype: the TUI may have consumed a native command and already performed
+    // an arbitrary side effect even when no model turn starts.
+    const evidence = await this.fillComposer(name, text).catch(error => {
+      if (/text did not land in the composer/i.test(String(error)))
+        throw new Error('text did not land in the interactive input box');
+      throw error;
+    });
+
+    // Enter can be swallowed while the TUI repaints. It is safe to press Enter
+    // again only while the original payload is demonstrably still in the
+    // composer; once it disappears, delivery has been consumed and is final.
+    for (let submit = 0; submit < 3; submit++) {
+      const enter = await this.keys(name, 'Enter');
+      if (enter.code !== 0) throw new Error(enter.stderr.trim() || 'tmux submit failed');
+      for (let poll = 0; poll < 12; poll++) {
+        await Bun.sleep(this.injectionPollMs);
+        const current = await this.state(name);
+        if (!current.alive || current.dead || paneShowsActiveWork(current.visiblePane)) return 'turn-started';
+
+        // promptReady is positive evidence that the cursor is back at an empty
+        // composer. Check it before the broad pane text probe: local output may
+        // echo the submitted command in scrollback, but that does not mean the
+        // composer still holds it.
+        if (current.promptReady) return 'handled-local';
+
+        // The payload left the composer and the pane advanced to a non-idle
+        // state (a normal turn beginning, a selector, or another local result).
+        // Either way it was consumed, so success is final and retyping would be
+        // unsafe. Preserve the established normal-turn classification here.
+        if (!composerHolds(current.visiblePane, text, evidence)) return 'turn-started';
       }
-      // Fall through to retype: the composer is demonstrably empty (the payload
-      // left it without starting a turn), so nothing can be destroyed.
     }
-    throw new Error(
-      everLanded
-        ? 'the prompt was typed but the harness never started the turn'
-        : 'text did not land in the interactive input box',
-    );
+    throw new Error('the prompt landed but remained in the interactive input box after submit retries');
   }
 
   /** Get `text` into the pane's composer and PROVE it landed, returning which
@@ -783,7 +861,7 @@ export class TmuxController {
     throw new Error('text did not land in the composer');
   }
 
-  async send(config: SessionConfig, text: string): Promise<void> {
+  async send(config: SessionConfig, text: string): Promise<InjectionOutcome> {
     // Startup dialogs (trust prompts, api-key confirmation) can surface late,
     // after launch()'s readiness gate — answer them here too so the injected
     // prompt is never queued behind a modal.
@@ -812,7 +890,7 @@ export class TmuxController {
       await this.keys(config.tmuxSession, 'C-u');
       await Bun.sleep(200);
     });
-    await this.inject(config.tmuxSession, text);
+    return await this.inject(config.tmuxSession, text);
   }
 
   /** Type text into a BUSY pane's composer and submit it into the harness's
@@ -853,6 +931,11 @@ export class TmuxController {
   /** Frame cadence while waiting for landing evidence. A field, not a constant,
    *  so tests can run the real verification loop without real waits. */
   protected readonly composerPollMs: number = 300;
+
+  /** Frame cadence while waiting for a landed input to be consumed. Kept as a
+   *  field so the fixture-driven exactly-once tests exercise the real loop
+   *  without sleeping. */
+  protected readonly injectionPollMs: number = 500;
 
   /** The composer path's ONLY keystroke primitive. A single seam so landing
    *  verification (which must never press C-u over a delivered paste) can be
@@ -918,7 +1001,6 @@ export class TmuxController {
       const question = pending.questions[questionIndex]!;
       const current = await this.state(config.tmuxSession);
       const pane = current.visiblePane;
-      const normalizedPane = pane.replace(/\s+/g, '').toLowerCase();
       const options = question.options ?? [];
       const response = responses?.[questionIndex];
       const selected =
@@ -928,11 +1010,20 @@ export class TmuxController {
             ? [response]
             : [];
       const freeform = response !== undefined && selected.length === 0 ? response : other;
-      const questionProbe = question.question.replace(/\s+/g, '').toLowerCase().slice(0, 40);
-      const selectedVisible = selected.every(label => normalizedPane.includes(label.replace(/\s+/g, '').toLowerCase()));
-      if (!questionProbe || !normalizedPane.includes(questionProbe) || !selectedVisible || current.promptReady) {
-        throw new Error('the structured question is not visible in the interactive tmux pane; snapshot and retry');
-      }
+      // The daemon navigates this menu purely by INDEX over the stored
+      // `options`; this gate only proves the right question is on screen so we
+      // never drive it blind. A full-label contiguous match refused any option
+      // whose label wrapped across two lines (panel text between the fragments)
+      // or was ellipsis-truncated — see structuredAnswerRefusal for the
+      // wrap/truncation-safe, mis-answer-proof check.
+      const refusal = structuredAnswerRefusal({
+        pane,
+        question: question.question,
+        options: options.map(option => option.label),
+        selected,
+        promptReady: current.promptReady,
+      });
+      if (refusal) throw new Error(refusal);
       if (selected.length === 0 && !freeform) throw new Error(`no supplied selection matches: ${question.question}`);
       if (freeform) {
         for (let cursor = 0; cursor < options.length; cursor++)
