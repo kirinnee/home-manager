@@ -602,18 +602,24 @@ program
   );
 program
   .command('rename')
-  .description('change a session task title and/or teammate callsign (accepts an id or a teammate name)')
+  .description(
+    'change a session task title and/or teammate callsign, or detach it from its parent (accepts an id or a teammate name)',
+  )
   .argument('<id>', 'session id or teammate name')
   .option(
     '--name <title>',
     'new task title, kept verbatim — e.g. "Fix Transcript Scrolling". Stored immediately (the TASK column updates now); the Claude-side session name ("[Teammate] Task" in claude.ai/code and the resume picker) re-composes only on the next relaunch/resume, so a LIVE session keeps its old name until it is resumed',
   )
   .option('--teammate <name>', 'new teammate callsign (slug); collision-checked against live sessions')
+  .option(
+    '--clear-parent',
+    'detach the session from its parent in the lineage tree (re-roots it in ps/UI); safe no-op if it has no parent. Use to fix a human session mis-parented under the agent that spawned it',
+  )
   .option('--json', 'print the renamed session as {id, name, teammate} JSON instead of the usual view')
-  .action(async (id, options: { name?: string; teammate?: string; json?: boolean }) => {
-    if (!options.name?.trim() && !options.teammate?.trim())
-      throw new Error('rename needs --name "New Title" and/or --teammate <name>');
-    const view = await (await client()).rename(id, options.name, options.teammate);
+  .action(async (id, options: { name?: string; teammate?: string; clearParent?: boolean; json?: boolean }) => {
+    if (!options.name?.trim() && !options.teammate?.trim() && !options.clearParent)
+      throw new Error('rename needs --name "New Title", --teammate <name>, and/or --clear-parent');
+    const view = await (await client()).rename(id, options.name, options.teammate, options.clearParent);
     if (options.json) {
       console.log(JSON.stringify({ id: view.config.id, name: view.config.name, teammate: view.config.teammate }));
       return;

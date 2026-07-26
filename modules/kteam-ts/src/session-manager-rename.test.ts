@@ -1,13 +1,15 @@
 import { describe, expect, test } from 'bun:test';
 import { SessionManager } from './session-manager';
 
-// `kteam rename` changes a session's TASK TITLE and/or its teammate CALLSIGN.
-// It must: accept an id OR a teammate name (resolveRef), require at least one
-// field, normalise + collision-check a new callsign exactly like
-// `start --teammate` (but EXCLUDING the session itself, so re-asserting its own
-// name is never a self-collision), persist via updateConfig (config + index in
-// one primitive), and journal a `session.renamed` event so the live UI
-// refetches. These pin that behaviour without a live daemon.
+// `kteam rename` changes a session's TASK TITLE and/or its teammate CALLSIGN,
+// and/or DETACHES it from its parent (--clear-parent). It must: accept an id OR
+// a teammate name (resolveRef), require at least one field, normalise +
+// collision-check a new callsign exactly like `start --teammate` (but EXCLUDING
+// the session itself, so re-asserting its own name is never a self-collision),
+// clear the parent pointer without touching anything else, persist via
+// updateConfig (config + index in one primitive), and journal a
+// `session.renamed` event so the live UI refetches. These pin that behaviour
+// without a live daemon.
 
 type Loose = Record<string, unknown>;
 
@@ -18,7 +20,12 @@ interface Row {
 
 interface Harness {
   manager: {
-    rename(id: string, name?: string, teammate?: string): Promise<{ config: Record<string, unknown> }>;
+    rename(
+      id: string,
+      name?: string,
+      teammate?: string,
+      clearParent?: boolean,
+    ): Promise<{ config: Record<string, unknown> }>;
   };
   rows: Map<string, Row>;
   emitted: Array<{ id: string; type: string; payload: unknown }>;
@@ -54,6 +61,15 @@ function harness(rows: Row[]): Harness {
 
 function row(id: string, teammate: string, name: string, status = 'running'): Row {
   return { config: { id, teammate, name, createdAt: RECENT }, state: { status } };
+}
+
+/** A row that carries a parent pointer (and optionally a label), for the
+ *  --clear-parent cases. */
+function childRow(id: string, teammate: string, name: string, parent: string, label?: string): Row {
+  return {
+    config: { id, teammate, name, parent, ...(label ? { label } : {}), createdAt: RECENT },
+    state: { status: 'running' },
+  };
 }
 
 describe('SessionManager.rename', () => {
@@ -107,10 +123,61 @@ describe('SessionManager.rename', () => {
     await expect(h.manager.rename('s1', undefined, '99 bad name!')).rejects.toThrow(/invalid --teammate name/);
   });
 
-  test('requires at least one of --name / --teammate', async () => {
+  test('requires at least one of --name / --teammate / --clear-parent', async () => {
     const h = harness([row('s1', 'hayden', 'A')]);
     await expect(h.manager.rename('s1')).rejects.toThrow(/requires --name/);
     // nothing emitted on the no-op error path
     expect(h.emitted.length).toBe(0);
+  });
+});
+
+describe('SessionManager.rename --clear-parent', () => {
+  test('clears the parent pointer alone and journals session.renamed', async () => {
+    const h = harness([childRow('s1', 'quincy', 'Executive Assistant', 'agent-1')]);
+    expect(h.rows.get('s1')!.config.parent).toBe('agent-1');
+    const view = await h.manager.rename('s1', undefined, undefined, true);
+    // parent is dropped entirely (key removed), so `config.parent ?` reads false
+    expect(view.config.parent).toBeUndefined();
+    expect('parent' in (h.rows.get('s1')!.config as object)).toBe(false);
+    // the UI-driving event still fires so the lineage sidebar re-nests live
+    const event = h.emitted.find(e => e.type === 'session.renamed');
+    expect(event).toBeDefined();
+    expect(event!.id).toBe('s1');
+  });
+
+  test('is a safe no-op (not an error) when the session has no parent', async () => {
+    const h = harness([row('s1', 'kennedy', 'HQ Notes')]);
+    const view = await h.manager.rename('s1', undefined, undefined, true);
+    expect(view.config.parent).toBeUndefined();
+    // still emits — harmless, and keeps the UI consistent
+    expect(h.emitted.some(e => e.type === 'session.renamed')).toBe(true);
+  });
+
+  test('leaves the callsign untouched, so teammate-name resolution is unaffected', async () => {
+    const h = harness([childRow('s1', 'dustin', 'Inbox Triage', 'agent-1')]);
+    // resolve BY teammate name — proves resolveRef still finds it after the clear
+    const view = await h.manager.rename('dustin', undefined, undefined, true);
+    expect(view.config.id).toBe('s1');
+    expect(view.config.teammate).toBe('dustin');
+    expect(view.config.name).toBe('Inbox Triage');
+    expect(view.config.parent).toBeUndefined();
+  });
+
+  test('touches ONLY the parent — label (warden lineage) and other fields survive', async () => {
+    const h = harness([childRow('s1', 'dixie', 'Team Lead', 'agent-1', 'my-batch')]);
+    await h.manager.rename('s1', undefined, undefined, true);
+    const config = h.rows.get('s1')!.config;
+    expect(config.parent).toBeUndefined();
+    // label is what warden lineage keys on; it must be preserved verbatim
+    expect(config.label).toBe('my-batch');
+    expect(config.teammate).toBe('dixie');
+    expect(config.name).toBe('Team Lead');
+  });
+
+  test('clears the parent AND retitles in one call', async () => {
+    const h = harness([childRow('s1', 'quincy', 'Old', 'agent-1')]);
+    const view = await h.manager.rename('s1', 'New Title', undefined, true);
+    expect(view.config.name).toBe('New Title');
+    expect(view.config.parent).toBeUndefined();
   });
 });
