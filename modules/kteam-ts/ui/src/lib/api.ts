@@ -15,6 +15,7 @@ import type {
   SearchResponse,
   UsageFeedView,
 } from '../types';
+import { attachmentApiPath, type AttachmentView } from './attachments';
 
 declare global {
   interface Window {
@@ -30,10 +31,24 @@ export const HAS_TOKEN = TOKEN.length > 0;
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  code?: string;
+  constructor(status: number, message: string, code?: string) {
     super(message);
     this.status = status;
+    this.code = code;
   }
+}
+
+export interface RenameSessionPatch {
+  name?: string;
+  teammate?: string;
+  clearParent?: boolean;
+}
+
+export interface MigrateSessionTarget {
+  agent: string;
+  model?: string;
+  allowContextDowngrade?: boolean;
 }
 
 // NO FULL DOCUMENT LOADS. A 401 used to force a one-shot document reload on
@@ -47,7 +62,10 @@ export class ApiError extends Error {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (TOKEN) headers.set('authorization', `Bearer ${TOKEN}`);
-  if (init?.body && !headers.has('content-type')) headers.set('content-type', 'application/json');
+  // The browser must own a FormData boundary. Supplying application/json here
+  // makes multipart uploads unreadable even though the bytes are present.
+  if (init?.body && !(init.body instanceof FormData) && !headers.has('content-type'))
+    headers.set('content-type', 'application/json');
   // Idempotency: every mutation carries an x-kteam-request-id so the daemon
   // dedupes retries/double-fires of the SAME logical call (see api-server
   // DEDUPED_ACTIONS). Callers reuse one id across a logical action by setting
@@ -65,18 +83,20 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   const res = await fetch(path, { ...init, headers });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
+    const body = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
     const fallback =
       res.status === 401
         ? HAS_TOKEN
           ? 'unauthorized — the daemon rejected this page’s credentials'
           : 'unauthorized — this origin was served without a daemon token (read-only)'
         : `HTTP ${res.status}`;
-    throw new ApiError(res.status, body.error ?? fallback);
+    throw new ApiError(res.status, body.error ?? fallback, body.code);
   }
   if (res.status === 204) return undefined as T;
   const ct = res.headers.get('content-type') ?? '';
-  return ct.includes('application/json') ? ((await res.json()) as T) : ((await res.text()) as unknown as T);
+  if (ct.includes('application/json')) return (await res.json()) as T;
+  if (ct.startsWith('image/')) return (await res.blob()) as T;
+  return (await res.text()) as unknown as T;
 }
 
 export const api = {
@@ -93,12 +113,24 @@ export const api = {
   // `requestId` identifies the LOGICAL message, not this attempt: pass the same
   // one for every delivery of the same message (first try, retry after an error,
   // the interrupt-then-send path) and the daemon applies it exactly once.
-  send: (id: string, message: string, now = false, requestId?: string) =>
-    request<SessionView>(`/v1/sessions/${encodeURIComponent(id)}/send`, {
+  send: (id: string, message: string, now = false, requestId?: string, attachmentIds?: string[]) =>
+    request<SessionView & { disposition?: 'delivered' | 'queued' | 'revived' }>(
+      `/v1/sessions/${encodeURIComponent(id)}/send`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ message, now, ...(attachmentIds?.length ? { attachmentIds } : {}) }),
+        ...(requestId ? { headers: { 'x-kteam-request-id': requestId } } : {}),
+      },
+    ),
+  upload: (id: string, file: File) => {
+    const form = new FormData();
+    form.set('file', file);
+    return request<AttachmentView>(`/v1/sessions/${encodeURIComponent(id)}/attachments`, {
       method: 'POST',
-      body: JSON.stringify({ message, now }),
-      ...(requestId ? { headers: { 'x-kteam-request-id': requestId } } : {}),
-    }),
+      body: form,
+    });
+  },
+  attachment: (id: string, attachmentId: string) => request<Blob>(attachmentApiPath(id, attachmentId)),
   answer: (id: string, payload: { labels?: string[]; other?: string; responses?: string[] }, requestId?: string) =>
     request<SessionView>(`/v1/sessions/${encodeURIComponent(id)}/answer`, {
       method: 'POST',
@@ -120,6 +152,20 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(message ? { message } : {}),
     }),
+  // Both actions are daemon-deduped. The caller must mint one id for the
+  // logical gesture and retain it across a retry whose body is unchanged.
+  rename: (id: string, patch: RenameSessionPatch, requestId: string) =>
+    request<SessionView>(`/v1/sessions/${encodeURIComponent(id)}/rename`, {
+      method: 'POST',
+      body: JSON.stringify(patch),
+      headers: { 'x-kteam-request-id': requestId },
+    }),
+  migrate: (id: string, target: MigrateSessionTarget, requestId: string) =>
+    request<SessionView>(`/v1/sessions/${encodeURIComponent(id)}/migrate`, {
+      method: 'POST',
+      body: JSON.stringify(target),
+      headers: { 'x-kteam-request-id': requestId },
+    }),
   wardenStatus: () => request<WardenStatusView>('/v1/warden/status'),
   wardenVerdicts: () => request<WardenVerdict[]>('/v1/warden/verdicts'),
   wardenReport: (path: string) => request<string>(`/v1/warden/report?path=${encodeURIComponent(path)}`),
@@ -131,8 +177,6 @@ export const api = {
     request<SessionView>('/v1/sessions', { method: 'POST', body: JSON.stringify(payload) }),
   replay: (id: string, after: number, limit = 200) => {
     const qs = `after=${after}&limit=${limit}`;
-    return request<{ events: KTeamEvent[]; latest: number }>(
-      `/v1/sessions/${encodeURIComponent(id)}/events?${qs}`,
-    ).then(r => r.events ?? []);
+    return request<KTeamEvent[]>(`/v1/sessions/${encodeURIComponent(id)}/events?${qs}`);
   },
 };

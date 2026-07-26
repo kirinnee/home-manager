@@ -20,6 +20,16 @@ const KEY = 'kteam-theme';
 export type ThemeMode = 'system' | 'light' | 'dark';
 export type ResolvedMode = 'light' | 'dark';
 export type ThemeFamilyId = 'studio' | 'mission' | 'neo' | 'ember' | 'contrast';
+export type TextScale = 'default' | 'large' | 'larger';
+
+/** Discrete choices keep the result predictable at narrow widths. There is no
+ * sub-default option because shrinking the whole interface would pull existing
+ * 44px touch targets below their accessibility floor. */
+export const TEXT_SCALE_FACTORS: Readonly<Record<TextScale, number>> = {
+  default: 1,
+  large: 1.125,
+  larger: 1.25,
+};
 
 export interface ThemeFamily {
   id: ThemeFamilyId;
@@ -40,11 +50,13 @@ export const THEME_FAMILIES: readonly ThemeFamily[] = [
 
 const FAMILY_IDS: readonly string[] = THEME_FAMILIES.map(f => f.id);
 const MODES: readonly string[] = ['system', 'light', 'dark'];
+const TEXT_SCALES: readonly string[] = ['default', 'large', 'larger'];
 const DEFAULT_FAMILY: ThemeFamilyId = 'studio';
 
 export interface ThemePref {
   family: ThemeFamilyId;
   mode: ThemeMode;
+  textScale: TextScale;
 }
 
 /**
@@ -54,7 +66,7 @@ export interface ThemePref {
  * by hand. Anything unrecognised falls back to Studio + system.
  */
 export function parseThemePref(raw: string | null): ThemePref {
-  const fallback: ThemePref = { family: DEFAULT_FAMILY, mode: 'system' };
+  const fallback: ThemePref = { family: DEFAULT_FAMILY, mode: 'system', textScale: 'default' };
   if (!raw) return fallback;
   const text = raw.trim();
   if (!text) return fallback;
@@ -66,6 +78,8 @@ export function parseThemePref(raw: string | null): ThemePref {
         family:
           parsed && FAMILY_IDS.includes(parsed.family as string) ? (parsed.family as ThemeFamilyId) : DEFAULT_FAMILY,
         mode: parsed && MODES.includes(parsed.mode as string) ? (parsed.mode as ThemeMode) : 'system',
+        textScale:
+          parsed && TEXT_SCALES.includes(parsed.textScale as string) ? (parsed.textScale as TextScale) : 'default',
       };
     } catch {
       return fallback;
@@ -73,27 +87,54 @@ export function parseThemePref(raw: string | null): ThemePref {
   }
 
   // Legacy `kteam-theme: 'dark'` — keep the user's mode, adopt Studio.
-  if (MODES.includes(text)) return { family: DEFAULT_FAMILY, mode: text as ThemeMode };
+  if (MODES.includes(text)) return { family: DEFAULT_FAMILY, mode: text as ThemeMode, textScale: 'default' };
 
   const cut = text.lastIndexOf('-');
   if (cut > 0) {
     const family = text.slice(0, cut);
     const mode = text.slice(cut + 1);
     if (FAMILY_IDS.includes(family) && (mode === 'light' || mode === 'dark')) {
-      return { family: family as ThemeFamilyId, mode };
+      return { family: family as ThemeFamilyId, mode, textScale: 'default' };
     }
   }
   return fallback;
 }
 
 function read(): ThemePref {
-  if (typeof window === 'undefined') return { family: DEFAULT_FAMILY, mode: 'system' };
+  if (typeof window === 'undefined') return { family: DEFAULT_FAMILY, mode: 'system', textScale: 'default' };
   try {
     return parseThemePref(localStorage.getItem(KEY));
   } catch {
     // Private mode / blocked storage.
-    return { family: DEFAULT_FAMILY, mode: 'system' };
+    return { family: DEFAULT_FAMILY, mode: 'system', textScale: 'default' };
   }
+}
+
+/** Publish the preference on the root. `text-size-adjust` is intentional: this
+ * UI contains both tokenised and legacy pixel typography, and the property
+ * scales both without changing the CSS-pixel coordinate system used by
+ * visualViewport, fixed shell sizing, safe areas, or the 44px target floor.
+ * The prefixed spelling covers WebKit; browser/pinch zoom remains enabled and
+ * composes normally. Never use root `zoom` here — it makes --app-h itself grow
+ * and can put the composer behind a software keyboard. */
+export function applyTextScale(root: HTMLElement, scale: TextScale): void {
+  root.dataset.textScale = scale;
+  const percent = `${TEXT_SCALE_FACTORS[scale] * 100}%`;
+  root.style.removeProperty('zoom');
+  root.style.setProperty('text-size-adjust', percent);
+  root.style.setProperty('-webkit-text-size-adjust', percent);
+}
+
+type CssSupports = (property: string, value: string) => boolean;
+
+/** Percentage support is the capability that matters. Some engines recognise
+ * the property name but accept only `auto`/`none`; treating that as support
+ * would leave an enabled control that silently does nothing. */
+export function supportsTextScale(probe?: CssSupports): boolean {
+  const supports =
+    probe ?? (typeof CSS !== 'undefined' && typeof CSS.supports === 'function' ? CSS.supports.bind(CSS) : undefined);
+  if (!supports) return false;
+  return supports('text-size-adjust', '125%') || supports('-webkit-text-size-adjust', '125%');
 }
 
 function osPrefersDark(): boolean {
@@ -151,13 +192,16 @@ export interface ThemeState extends ThemePref {
   /** The value on `<html data-theme>`, e.g. 'mission-dark'. */
   attr: string;
   families: readonly ThemeFamily[];
+  textScaleSupported: boolean;
   setFamily: (family: ThemeFamilyId) => void;
   setMode: (mode: ThemeMode) => void;
+  setTextScale: (scale: TextScale) => void;
 }
 
 export function useTheme(): ThemeState {
   const [pref, setPref] = useState<ThemePref>(read);
   const [systemDark, setSystemDark] = useState<boolean>(osPrefersDark);
+  const textScaleSupported = supportsTextScale();
 
   // Follow the OS live. Subscribed unconditionally (it is one listener and the
   // user can flip to 'system' at any moment) — the value only *matters* when
@@ -191,6 +235,7 @@ export function useTheme(): ThemeState {
   useEffect(() => {
     const root = document.documentElement;
     root.dataset.theme = attr;
+    applyTextScale(root, pref.textScale);
 
     const link = document.getElementById(MANIFEST_LINK_ID);
     if (link) {
@@ -213,7 +258,7 @@ export function useTheme(): ThemeState {
     }
     const color = themeColorFromComputedStyle(root);
     if (color && meta.content !== color) meta.content = color;
-  }, [attr, pref.family, resolved]);
+  }, [attr, pref.family, pref.textScale, resolved]);
 
   useEffect(() => {
     try {
@@ -225,17 +270,26 @@ export function useTheme(): ThemeState {
 
   const setFamily = useCallback((family: ThemeFamilyId) => setPref(p => ({ ...p, family })), []);
   const setMode = useCallback((mode: ThemeMode) => setPref(p => ({ ...p, mode })), []);
+  const setTextScale = useCallback(
+    (textScale: TextScale) => {
+      if (textScaleSupported) setPref(p => ({ ...p, textScale }));
+    },
+    [textScaleSupported],
+  );
 
   return useMemo(
     () => ({
       family: pref.family,
       mode: pref.mode,
+      textScale: pref.textScale,
       resolved,
       attr,
       families: THEME_FAMILIES,
+      textScaleSupported,
       setFamily,
       setMode,
+      setTextScale,
     }),
-    [pref.family, pref.mode, resolved, attr, setFamily, setMode],
+    [pref.family, pref.mode, pref.textScale, resolved, attr, textScaleSupported, setFamily, setMode, setTextScale],
   );
 }

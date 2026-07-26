@@ -1,5 +1,6 @@
-// Theme picker. A compact trigger in the app bar opens a popover with the five
-// theme families and an explicit Auto / Light / Dark control.
+// Desktop theme picker. Its standalone app-bar trigger opens a popover with the
+// five theme families and an explicit Auto / Light / Dark control. Mobile keeps
+// these same controls in Settings so the phone bar stays uncluttered.
 //
 // The family previews are the real thing, not an approximation: each swatch
 // carries `data-swatch="<family>-<mode>"`, and index.css declares that theme's
@@ -8,10 +9,11 @@
 // font, accent, status trio, border weight and corner radius — while the rest
 // of the app stays in the current one. Nothing here hardcodes a colour.
 
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type RefObject } from 'react';
 import { Check, Monitor, Moon, Palette, Sun } from 'lucide-react';
-import { useTheme, type ResolvedMode, type ThemeFamilyId, type ThemeMode } from '../hooks/useTheme';
+import { useTheme, type ResolvedMode, type ThemeState, type ThemeMode } from '../hooks/useTheme';
 import { isTopEscapeLayer, pushEscapeLayer } from '../hooks/useDialogFocus';
+import { useKeyboardOpen } from '../hooks/useAppViewport';
 import { cn } from '../lib/utils';
 import { Button } from './Primitives';
 
@@ -26,6 +28,17 @@ const MODE_OPTIONS: ReadonlyArray<{ id: ThemeMode; label: string; Icon: typeof S
   { id: 'light', label: 'Light', Icon: Sun, hint: 'Always light' },
   { id: 'dark', label: 'Dark', Icon: Moon, hint: 'Always dark' },
 ];
+
+/** The list is capped and scrollable, so its cards must retain their natural
+ * height instead of flexbox compressing their swatches into the next card. */
+export const THEME_FAMILY_CARD_CLASS =
+  'flex w-full shrink-0 flex-col gap-1 rounded-panel border p-panel text-left transition-colors';
+
+/** Keyboard-driven dismissal deliberately does not restore focus: the trigger
+ * may be inside chrome that becomes hidden as the keyboard opens. */
+export function closeThemePopoverForKeyboard(close: (returnFocus: boolean) => void) {
+  close(false);
+}
 
 /** A live, CSS-only preview of one family/mode pair. */
 function Swatch({ theme, current }: { theme: string; current: boolean }) {
@@ -45,9 +58,125 @@ function Swatch({ theme, current }: { theme: string; current: boolean }) {
   );
 }
 
+/** The actual theme controls, shared by the compact legacy popover and the new
+ * flat Settings section. `constrained` is popover-only; a page section grows
+ * naturally so its family cards can never be flex-compressed or hidden behind
+ * a keyboard-closing chrome wrapper. */
+export function ThemeSettings({
+  theme,
+  constrained = false,
+  listRef,
+}: {
+  theme: ThemeState;
+  constrained?: boolean;
+  listRef?: RefObject<HTMLDivElement | null>;
+}) {
+  const internalListRef = useRef<HTMLDivElement>(null);
+  const activeListRef = listRef ?? internalListRef;
+  const { family, mode, resolved, families, setFamily, setMode } = theme;
+
+  const onListKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const keys = ['ArrowDown', 'ArrowRight', 'ArrowUp', 'ArrowLeft', 'Home', 'End'];
+    if (!keys.includes(e.key)) return;
+    e.preventDefault();
+    const index = families.findIndex(option => option.id === family);
+    const last = families.length - 1;
+    const next =
+      e.key === 'Home'
+        ? 0
+        : e.key === 'End'
+          ? last
+          : e.key === 'ArrowDown' || e.key === 'ArrowRight'
+            ? Math.min(last, index + 1)
+            : Math.max(0, index - 1);
+    const target = families[next];
+    if (!target) return;
+    setFamily(target.id);
+    activeListRef.current?.querySelector<HTMLButtonElement>(`[data-family="${target.id}"]`)?.focus();
+  };
+
+  return (
+    <>
+      <div
+        role="radiogroup"
+        aria-label="Colour mode"
+        className="mb-2 flex gap-1 rounded-control border border-border bg-surface-2 p-1"
+      >
+        {MODE_OPTIONS.map(({ id, label, Icon, hint }) => {
+          const checked = mode === id;
+          return (
+            <button
+              key={id}
+              type="button"
+              role="radio"
+              aria-checked={checked}
+              title={hint}
+              onClick={() => setMode(id)}
+              className={cn(
+                'flex h-control-sm flex-1 items-center justify-center gap-1 rounded-tab px-control-x text-meta font-medium transition-colors',
+                checked
+                  ? 'border border-accent bg-accent-soft text-accent'
+                  : 'border border-transparent text-muted hover:text-fg',
+              )}
+            >
+              <Icon size={12} aria-hidden="true" />
+              {label}
+            </button>
+          );
+        })}
+      </div>
+
+      <div
+        ref={activeListRef}
+        role="radiogroup"
+        aria-label="Theme family"
+        onKeyDown={onListKeyDown}
+        className={cn('flex flex-col gap-1.5', constrained && 'max-h-[min(60vh,420px)] overflow-y-auto scroll-thin')}
+      >
+        {families.map(option => {
+          const checked = option.id === family;
+          return (
+            <button
+              key={option.id}
+              type="button"
+              role="radio"
+              data-family={option.id}
+              aria-checked={checked}
+              aria-label={`${option.label} — ${option.blurb}`}
+              tabIndex={checked ? 0 : -1}
+              onClick={() => setFamily(option.id)}
+              className={cn(
+                THEME_FAMILY_CARD_CLASS,
+                checked ? 'border-accent bg-accent-soft' : 'border-border bg-surface hover:border-accent',
+              )}
+            >
+              <span className="flex items-center gap-1">
+                <span className="text-ui font-semibold text-fg">{option.label}</span>
+                {checked && <Check size={12} className="text-accent" aria-hidden="true" />}
+              </span>
+              <span className="text-meta leading-base text-muted">{option.blurb}</span>
+              <span className="mt-1 flex items-stretch gap-1.5">
+                {(['light', 'dark'] as ResolvedMode[]).map(variant => (
+                  <Swatch key={variant} theme={`${option.id}-${variant}`} current={checked && resolved === variant} />
+                ))}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      <p className="mt-2 border-t border-border-soft pt-1.5 text-2xs leading-base text-faint">
+        Previews render in their own theme. Auto follows the OS live.
+      </p>
+    </>
+  );
+}
+
 export function ThemeToggle() {
-  const { family, mode, resolved, families, setFamily, setMode } = useTheme();
+  const theme = useTheme();
+  const { family, mode, resolved, families } = theme;
   const [open, setOpen] = useState(false);
+  const keyboardOpen = useKeyboardOpen();
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -108,6 +237,13 @@ export function ThemeToggle() {
       release();
     };
   }, [open, close]);
+
+  // A ThemeToggle can live in `data-kb-hide` chrome. Close through the same
+  // state path as every other dismissal before that chrome is display:none;
+  // `false` keeps focus off a trigger that is about to be hidden.
+  useEffect(() => {
+    if (open && keyboardOpen) closeThemePopoverForKeyboard(close);
+  }, [open, keyboardOpen, close]);
 
   // Opening puts focus on the family that is currently in force, so the popover
   // is usable without a pointer.
@@ -170,27 +306,6 @@ export function ThemeToggle() {
     }
   }, []);
 
-  // Roving arrow-key navigation inside the family radiogroup.
-  const onListKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    const keys = ['ArrowDown', 'ArrowRight', 'ArrowUp', 'ArrowLeft', 'Home', 'End'];
-    if (!keys.includes(e.key)) return;
-    e.preventDefault();
-    const index = families.findIndex(f => f.id === family);
-    const last = families.length - 1;
-    const next =
-      e.key === 'Home'
-        ? 0
-        : e.key === 'End'
-          ? last
-          : e.key === 'ArrowDown' || e.key === 'ArrowRight'
-            ? Math.min(last, index + 1)
-            : Math.max(0, index - 1);
-    const target = families[next];
-    if (!target) return;
-    setFamily(target.id);
-    listRef.current?.querySelector<HTMLButtonElement>(`[data-family="${target.id}"]`)?.focus();
-  };
-
   const activeFamily = families.find(f => f.id === family);
   const modeLabel = MODE_OPTIONS.find(m => m.id === mode)?.label ?? 'Auto';
   const summary = `Theme: ${activeFamily?.label ?? family}, ${modeLabel}${mode === 'system' ? ` (${resolved})` : ''}`;
@@ -223,88 +338,9 @@ export function ThemeToggle() {
           // Neo-Brutalism's hard offset block appear here instead of a soft
           // Studio blur, and `rounded-panel`/`p-panel` follow the family's own
           // geometry rather than a fixed 8px/8px.
-          className="absolute right-0 top-full z-50 mt-1 w-[292px] rounded-panel border border-border bg-surface p-panel shadow-popover"
+          className="absolute right-0 top-full z-50 mt-1 w-[272px] rounded-panel border border-border bg-surface p-panel shadow-popover sm:w-[292px]"
         >
-          <div
-            role="radiogroup"
-            aria-label="Colour mode"
-            className="mb-2 flex gap-1 rounded-control border border-border bg-surface-2 p-1"
-          >
-            {MODE_OPTIONS.map(({ id, label, Icon, hint }) => {
-              const checked = mode === id;
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  role="radio"
-                  aria-checked={checked}
-                  title={hint}
-                  onClick={() => setMode(id)}
-                  // `h-control-sm` instead of `py-1`: themes.css composes the
-                  // coarse-pointer floor into that token, so this segmented
-                  // control is 24px on a desktop and a full 44px thumb target on
-                  // a phone without this component knowing what a pointer is.
-                  className={cn(
-                    'flex h-control-sm flex-1 items-center justify-center gap-1 rounded-tab px-control-x text-meta font-medium transition-colors',
-                    checked
-                      ? // `border-accent`, NOT `border-accent-border`: a
-                        // state-bearing edge has to be identifiable, and
-                        // `--accent-border` measures 1.2-2.9:1 against its
-                        // surface in 6 of the 10 themes. It is decorative tint
-                        // only now (contract §8.2).
-                        'border border-accent bg-accent-soft text-accent'
-                      : 'border border-transparent text-muted hover:text-fg',
-                  )}
-                >
-                  <Icon size={12} aria-hidden="true" />
-                  {label}
-                </button>
-              );
-            })}
-          </div>
-
-          <div
-            ref={listRef}
-            role="radiogroup"
-            aria-label="Theme family"
-            onKeyDown={onListKeyDown}
-            className="flex max-h-[min(60vh,420px)] flex-col gap-1.5 overflow-y-auto scroll-thin"
-          >
-            {families.map(f => {
-              const checked = f.id === family;
-              return (
-                <button
-                  key={f.id}
-                  type="button"
-                  role="radio"
-                  data-family={f.id}
-                  aria-checked={checked}
-                  aria-label={`${f.label} — ${f.blurb}`}
-                  tabIndex={checked ? 0 : -1}
-                  onClick={() => setFamily(f.id as ThemeFamilyId)}
-                  className={cn(
-                    'flex w-full flex-col gap-1 rounded-panel border p-panel text-left transition-colors',
-                    checked ? 'border-accent bg-accent-soft' : 'border-border bg-surface hover:border-accent',
-                  )}
-                >
-                  <span className="flex items-center gap-1">
-                    <span className="text-ui font-semibold text-fg">{f.label}</span>
-                    {checked && <Check size={12} className="text-accent" aria-hidden="true" />}
-                  </span>
-                  <span className="text-meta leading-base text-muted">{f.blurb}</span>
-                  <span className="mt-1 flex items-stretch gap-1.5">
-                    {(['light', 'dark'] as ResolvedMode[]).map(variant => (
-                      <Swatch key={variant} theme={`${f.id}-${variant}`} current={checked && resolved === variant} />
-                    ))}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-
-          <p className="mt-2 border-t border-border-soft pt-1.5 text-2xs leading-base text-faint">
-            Previews render in their own theme. Auto follows the OS live.
-          </p>
+          <ThemeSettings theme={theme} constrained listRef={listRef} />
         </div>
       )}
     </div>

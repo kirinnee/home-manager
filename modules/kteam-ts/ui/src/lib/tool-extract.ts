@@ -18,6 +18,11 @@ export type ToolResultData = {
   [k: string]: unknown;
 };
 
+export interface ToolResultImage {
+  mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
+  data: string;
+}
+
 export type ToolKind = 'bash' | 'read' | 'write' | 'edit' | 'patch' | 'search' | 'plan' | 'wait' | 'generic';
 
 export interface ExtractedTool {
@@ -342,13 +347,38 @@ export function langFromPath(p?: string): string | undefined {
   return EXT_LANG[ext];
 }
 
+const INLINE_IMAGE_MIMES = new Set<ToolResultImage['mediaType']>([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+]);
+
+/** Claude tool results already carry these bytes to the browser. Keep parsing
+ * narrow (base64 image blocks only; never SVG) so transcript data cannot turn
+ * into an active data document. */
+export function resultImages(result: ToolResultData): ToolResultImage[] {
+  if (!Array.isArray(result.content)) return [];
+  const images: ToolResultImage[] = [];
+  for (const part of result.content) {
+    if (!part || typeof part !== 'object') continue;
+    const block = part as { type?: unknown; source?: unknown };
+    if (block.type !== 'image' || !block.source || typeof block.source !== 'object') continue;
+    const source = block.source as { type?: unknown; media_type?: unknown; data?: unknown };
+    if (source.type !== 'base64' || typeof source.media_type !== 'string' || typeof source.data !== 'string') continue;
+    if (!INLINE_IMAGE_MIMES.has(source.media_type as ToolResultImage['mediaType']) || !source.data) continue;
+    images.push({ mediaType: source.media_type as ToolResultImage['mediaType'], data: source.data });
+  }
+  return images;
+}
+
 // Best-effort readable text of a tool result.
 export function resultText(result: ToolResultData): string | null {
   if (typeof result.text === 'string') return result.text;
   if (Array.isArray(result.content)) {
-    const parts = (result.content as Array<{ text?: string; type?: string }>).map(p =>
-      typeof p?.text === 'string' ? p.text : `[${p?.type ?? 'unknown'}]`,
-    );
+    const parts = (result.content as Array<{ text?: string; type?: string }>)
+      .map(p => (typeof p?.text === 'string' ? p.text : p?.type === 'image' ? null : `[${p?.type ?? 'unknown'}]`))
+      .filter((part): part is string => part !== null);
     const joined = parts.join('\n');
     return joined.length ? joined : null;
   }

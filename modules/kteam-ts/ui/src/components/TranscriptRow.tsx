@@ -35,6 +35,8 @@ import {
 } from '../lib/transcript';
 import { Markdown } from './Markdown';
 import { ToolGroup } from './ToolGroup';
+import { TranscriptImageGallery } from './AttachmentImage';
+import type { StoredTranscriptImage, TranscriptImage } from '../lib/attachments';
 import { displayCallsign } from '../lib/callsign';
 import { cn, fmtClock } from '../lib/utils';
 
@@ -89,8 +91,29 @@ function callsEqual(a: ToolCall[], b: ToolCall[]): boolean {
     const x = a[i]!;
     const y = b[i]!;
     if (x.key !== y.key || !!x.result !== !!y.result || x.result?.isError !== y.result?.isError) return false;
+    if (!transcriptImagesEqual(x.images, y.images)) return false;
   }
   return true;
+}
+
+export function transcriptImagesEqual(a?: TranscriptImage[], b?: TranscriptImage[]): boolean {
+  if ((a?.length ?? 0) !== (b?.length ?? 0)) return false;
+  return (a ?? []).every((image, index) => {
+    const other = b![index]!;
+    if (image.kind !== other.kind) return false;
+    if (image.kind === 'inline') {
+      return other.kind === 'inline' && image.alt === other.alt && image.src === other.src;
+    }
+    return (
+      other.kind === 'attachment' &&
+      image.sessionId === other.sessionId &&
+      image.attachmentId === other.attachmentId &&
+      image.filename === other.filename &&
+      image.mime === other.mime &&
+      image.size === other.size &&
+      image.alt === other.alt
+    );
+  });
 }
 
 function sameProps(prev: Props, next: Props): boolean {
@@ -104,7 +127,12 @@ function sameProps(prev: Props, next: Props): boolean {
   if (a.id !== b.id || a.kind !== b.kind) return false;
   if (a.kind === 'user') {
     const t = b as typeof a;
-    return a.text === t.text && a.ts === t.ts && a.from?.name === t.from?.name;
+    return (
+      a.text === t.text &&
+      a.ts === t.ts &&
+      a.from?.name === t.from?.name &&
+      transcriptImagesEqual(a.attachments, t.attachments)
+    );
   }
   if (a.kind === 'assistant') {
     return a.text === (b as typeof a).text && a.ts === (b as typeof a).ts;
@@ -147,13 +175,22 @@ export const TranscriptRow = memo(function TranscriptRow({ block, live, isLast, 
   const body = (() => {
     switch (block.kind) {
       case 'user':
-        return <UserMessage text={block.text} ts={block.ts} from={block.from} />;
+        return <UserMessage text={block.text} ts={block.ts} from={block.from} attachments={block.attachments} />;
       case 'assistant':
         return <AssistantMessage text={block.text} ts={block.ts} source={block.source} />;
       case 'thinking':
         return <ThinkingLine text={block.text} durationMs={block.durationMs} />;
       case 'tools':
-        return <ToolGroup calls={block.calls} live={live} isLast={isLast} />;
+        return (
+          <>
+            <ToolGroup calls={block.calls} live={live} isLast={isLast} />
+            <TranscriptImageGallery
+              images={block.calls.flatMap(call => call.images ?? [])}
+              initialLimit={4}
+              className="px-2 pt-1"
+            />
+          </>
+        );
       case 'turn':
         return <TurnBoundary block={block} />;
       case 'system':
@@ -210,39 +247,48 @@ function TurnBoundary({ block }: { block: Extract<TranscriptBlock, { kind: 'turn
 
 // Assistant text: no per-message role label (role reads from layout — human
 // turns move right, peers carry a sender chip, assistant is plain prose).
-// Metadata sits aside, revealed on hover: a slim left gutter rule + a timestamp
-// that fades in.
 //
-// THE TIMESTAMP NEEDS ITS OWN COLUMN. Absolutely positioning it at `right-0`
-// over prose that occupies the full width means it lands ON the first line
-// whenever that line reaches the right edge — the glyphs interleave and both the
-// message and the time become unreadable (reported from a live session:
-// "can i restart this?" with 22:56:19 drawn through it; measured 4 colliding
-// stamps at 1440px and 11 at 390px on one loaded transcript).
+// ASSISTANT PROSE IS FLUSH. Every layout class here is measured against one
+// rule: space may only be reserved for an affordance that can actually appear
+// at that width. Two reserves failed that rule and are gone:
 //
-// So the gutter is RESERVED, not borrowed: `pr-[68px]` on phones shrinks the
-// content box, the stamp is positioned inside that padding, and inline content
-// therefore wraps before it can reach the stamp. Guaranteed at every width, not
-// tuned per breakpoint. Reserving it unconditionally (rather than only on hover)
-// is deliberate: a padding that appears on hover would reflow the paragraph under
-// the cursor, and a reflow mid-stream is exactly what knocks the transcript out
-// of follow.
-// A full monospace HH:MM:SS clock measures 62px at `text-2xs`; on a phone,
-// leave 2px of breathing room inside its 64px column and 4px before the prose.
-// The wider desktop padding already contains the former 50px column, so retain
-// that established desktop measure.
-const TS_GUTTER = 'pr-[68px] sm:pr-[54px]';
+//  - The hover rail (a `w-px` rule in a `pl-3` indent) cost 12px of every
+//    line at every width to reveal 1px of decoration on hover. On touch, where
+//    hover never fires, it was 12px of permanent loss for something that could
+//    never be seen; on a desktop it bought an ornament with body width. No
+//    replacement ornament is planned — speaker asymmetry is already carried by
+//    right-aligned human bubbles and the peer card's accent edge.
+//  - The phone timestamp column. THE TIMESTAMP STILL NEEDS ITS OWN COLUMN
+//    WHERE IT IS SHOWN: positioning it at `right-0` over full-width prose means
+//    it lands ON the first line whenever that line reaches the right edge and
+//    the glyphs interleave (reported live: "can i restart this?" with 22:56:19
+//    drawn through it; measured 4 collisions at 1440px, 11 at 390px). So at
+//    `sm+` the gutter stays RESERVED, not borrowed — inline content wraps
+//    before it can reach the stamp, and it is reserved unconditionally because
+//    a padding that appeared on hover would reflow the paragraph under the
+//    cursor and knock the transcript out of follow.
+//    Below `sm` there is nothing to reserve FOR: hover cannot fire, so the
+//    stamp is `hidden` and its 68px column would be dead space on the width
+//    that can least afford it (measured: 268px of prose on a 390px screen).
+//    Clock context on phones lives in turn boundaries and system rows.
+//
+// Exported as data so the reserve contract is assertable without a DOM (this
+// package has no DOM implementation); see `TranscriptRow.test.ts`.
+export const ASSISTANT_LAYOUT = {
+  /** No horizontal padding/margin of any kind: prose starts at the content edge. */
+  wrap: 'group relative min-w-0',
+  /** Desktop-only stamp column. 54px retains the established desktop measure. */
+  gutter: 'sm:pr-[54px]',
+  /** Hover-revealed clock, mounted for layout only at `sm+`. */
+  stamp:
+    'pointer-events-none absolute right-0 top-0.5 hidden w-[50px] text-right mono text-2xs tabular-nums text-faint opacity-0 transition-opacity sm:block group-hover:opacity-100',
+} as const;
 
 function AssistantMessage({ text, ts }: { text: string; ts?: string; source: string }) {
   if (!text.trim()) return null;
   return (
-    <div className={cn('group relative min-w-0 pl-3', ts && TS_GUTTER)}>
-      <span className="absolute left-0 top-1 bottom-1 w-px bg-border-soft opacity-0 transition-opacity group-hover:opacity-100" />
-      {ts && (
-        <span className="pointer-events-none absolute right-0 top-0.5 w-[64px] sm:w-[50px] text-right mono text-2xs tabular-nums text-faint opacity-0 transition-opacity group-hover:opacity-100">
-          {clockLabel(ts)}
-        </span>
-      )}
+    <div className={cn(ASSISTANT_LAYOUT.wrap, ts && ASSISTANT_LAYOUT.gutter)}>
+      {ts && <span className={ASSISTANT_LAYOUT.stamp}>{clockLabel(ts)}</span>}
       <Markdown text={text} />
     </div>
   );
@@ -272,7 +318,17 @@ function PeerChip({ from }: { from: PeerFrom }) {
   );
 }
 
-function UserMessage({ text, ts, from }: { text: string; ts?: string; from?: PeerFrom }) {
+function UserMessage({
+  text,
+  ts,
+  from,
+  attachments = [],
+}: {
+  text: string;
+  ts?: string;
+  from?: PeerFrom;
+  attachments?: StoredTranscriptImage[];
+}) {
   const lines = text.split('\n');
   const isProtocol = PROTOCOL_HEADER.test(text) && text.length > 2000;
   const isLong = lines.length > LONG_USER_LINES || text.length > 1400;
@@ -305,7 +361,7 @@ function UserMessage({ text, ts, from }: { text: string; ts?: string; from?: Pee
             </button>
           )}
         </div>
-        {collapsible && !open ? (
+        {text && collapsible && !open ? (
           <button
             type="button"
             onClick={() => setOpen(true)}
@@ -314,11 +370,12 @@ function UserMessage({ text, ts, from }: { text: string; ts?: string; from?: Pee
           >
             {preview}
           </button>
-        ) : (
+        ) : text ? (
           <div className="kt-user-copy min-w-0 max-w-full px-panel pb-1.5 pt-0.5 text-row leading-base whitespace-pre-wrap break-words text-fg">
             {text}
           </div>
-        )}
+        ) : null}
+        <TranscriptImageGallery images={attachments} className="px-panel pb-2 pt-1" />
       </div>
     );
   }
@@ -346,7 +403,7 @@ function UserMessage({ text, ts, from }: { text: string; ts?: string; from?: Pee
             )}
           </div>
         )}
-        {collapsible && !open ? (
+        {text && collapsible && !open ? (
           <button
             type="button"
             onClick={() => setOpen(true)}
@@ -355,13 +412,14 @@ function UserMessage({ text, ts, from }: { text: string; ts?: string; from?: Pee
           >
             {preview}
           </button>
-        ) : (
+        ) : text ? (
           // Line-height stays comfortable INSIDE prose: readability of the
           // words outranks density; this pass reclaims chrome, not leading.
           <div className="kt-user-copy min-w-0 max-w-full px-panel pb-1.5 pt-0.5 text-row leading-base whitespace-pre-wrap break-words text-[color:var(--bubble-fg)]">
             {text}
           </div>
-        )}
+        ) : null}
+        <TranscriptImageGallery images={attachments} className="px-panel pb-2 pt-1" />
       </div>
     </div>
   );

@@ -42,6 +42,8 @@ import {
   Gauge,
   GitFork,
   Radio,
+  Pencil,
+  ServerCog,
   Sparkles,
   UserRound,
   Zap,
@@ -76,6 +78,13 @@ interface Props {
    *  the whole reason the sheet is the overflow: it already traps focus,
    *  restores it and answers Escape, so the controls lose nothing by moving. */
   actions?: ReactNode;
+  /** The mobile Chat / Terminal segment. It is first in the sheet because view
+   *  selection is navigation, not session metadata. */
+  viewSwitcher?: ReactNode;
+  /** Layer a rename sheet over Details without adding another overflow menu. */
+  onRename?: () => void;
+  /** Layer the destructive runtime migration flow over Details. */
+  onMigrate?: () => void;
 }
 
 /** Group tones. Colour is the SECOND signal in every case — the icon and the
@@ -116,7 +125,38 @@ interface SwipeGesture {
   velocity: number;
 }
 
-export function SessionDetails({ id, view, quota, liveStatus, open, onClose, labelledBy, actions }: Props) {
+export interface BottomSheetProps {
+  id: string;
+  open: boolean;
+  onClose: () => void;
+  labelledBy?: string;
+  ariaLabel?: string;
+  closeLabel: string;
+  children: ReactNode;
+  panelClassName?: string;
+  maxHeight?: string;
+  /** Settings can replace Details during its closing frame, so it paints one
+   *  layer higher while still using exactly the same sheet machinery. */
+  zIndexClass?: string;
+}
+
+/**
+ * The shared focus-trapped, swipe-dismissable bottom-sheet shell. Session
+ * details was the original implementation; Settings deliberately composes this
+ * exact primitive instead of growing a second, subtly different modal.
+ */
+export function BottomSheet({
+  id,
+  open,
+  onClose,
+  labelledBy,
+  ariaLabel,
+  closeLabel,
+  children,
+  panelClassName,
+  maxHeight = 'min(72dvh, calc(var(--app-h, 100dvh) - var(--gap-sm)))',
+  zIndexClass = 'z-40',
+}: BottomSheetProps) {
   const panelRef = useRef<HTMLDivElement | null>(null);
   const swipeRef = useRef<SwipeGesture | null>(null);
   const suppressHandleClick = useRef(false);
@@ -176,11 +216,6 @@ export function SessionDetails({ id, view, quota, liveStatus, open, onClose, lab
 
   if (!rendered) return null;
 
-  const { config, state } = view;
-  const observedModel = config.model?.trim();
-  const requestedModel = config.modelHint?.trim();
-  const title = displayCallsign(config.teammate) || config.name || config.id;
-
   function beginSwipe(event: ReactPointerEvent<HTMLButtonElement>) {
     if (!open || event.button !== 0) return;
     const at = event.timeStamp;
@@ -237,14 +272,19 @@ export function SessionDetails({ id, view, quota, liveStatus, open, onClose, lab
 
   return (
     <div
-      className={cn('kt-overlay fixed inset-x-0 z-40 flex flex-col justify-end', !open && 'pointer-events-none')}
+      data-bottom-sheet={id}
+      className={cn(
+        'kt-overlay fixed inset-x-0 flex flex-col justify-end',
+        zIndexClass,
+        !open && 'pointer-events-none',
+      )}
       aria-hidden={open ? undefined : true}
     >
       {/* Backdrop. A plain button so a click OR a keyboard activation dismisses,
           and screen readers are told what it does rather than meeting a div. */}
       <button
         type="button"
-        aria-label="Close session details"
+        aria-label={closeLabel}
         onClick={onClose}
         disabled={!open}
         tabIndex={open ? 0 : -1}
@@ -259,7 +299,7 @@ export function SessionDetails({ id, view, quota, liveStatus, open, onClose, lab
         role={open ? 'dialog' : undefined}
         aria-modal={open ? true : undefined}
         aria-labelledby={open ? labelledBy : undefined}
-        aria-label={open && !labelledBy ? 'Session details' : undefined}
+        aria-label={open && !labelledBy ? ariaLabel : undefined}
         tabIndex={open ? -1 : undefined}
         inert={open ? undefined : true}
         onKeyDown={open ? onKeyDown : undefined}
@@ -267,137 +307,214 @@ export function SessionDetails({ id, view, quota, liveStatus, open, onClose, lab
           if (!open && event.target === event.currentTarget && event.propertyName === 'transform') setMounted(false);
         }}
         className={cn(
-          'kt-panel kt-sheet kt-details relative z-10 flex w-full flex-col font-ui will-change-transform',
+          'kt-panel kt-sheet relative z-10 flex w-full flex-col font-ui will-change-transform',
+          panelClassName,
           dragY === null && 'transition-transform duration-200 ease-out motion-reduce:transition-none',
         )}
         style={{
-          maxHeight: 'min(72dvh, calc(var(--app-h, 100dvh) - var(--gap-sm)))',
+          maxHeight,
           transform: sheetTransform,
         }}
       >
-        <div className="shrink-0 border-b border-border-soft">
-          {/* The handle is both the visible dismissal affordance and the ONLY
-              swipe surface. Its own touch-action prevents gesture arbitration;
-              the metadata scroller below never sees these pointer handlers. */}
-          <button
-            type="button"
-            aria-label="Close session details"
-            data-sheet-swipe="supported"
-            disabled={!open}
-            onClick={clickHandle}
-            onPointerDown={beginSwipe}
-            onPointerMove={moveSwipe}
-            onPointerUp={event => endSwipe(event, false)}
-            onPointerCancel={event => endSwipe(event, true)}
-            className="group mx-auto flex min-h-[44px] w-20 touch-none cursor-grab items-center justify-center py-3 active:cursor-grabbing"
-            title="Close, or swipe down"
-          >
-            <span
-              className="block h-1 w-12 rounded-full bg-border-strong transition-colors group-hover:bg-fg-soft"
-              aria-hidden="true"
-            />
-          </button>
-          <div className="mx-auto flex w-full max-w-2xl min-w-0 items-baseline gap-sm px-panel pb-row-y">
-            <span
-              className="min-w-0 flex-1 truncate font-display text-title font-semibold tracking-display text-fg"
-              title={title}
-            >
-              {title}
-            </span>
-            <span className="kt-label shrink-0">Session details</span>
-          </div>
-        </div>
-
-        {/* The sheet's OWN scroller. The page below still owns exactly one
-            (the transcript); this one is an overlay and never nests inside it. */}
-        <div className="min-h-0 flex-1 overflow-y-auto scroll-thin">
-          <div className="mx-auto grid w-full max-w-2xl grid-cols-1 sm:grid-cols-2">
-            {actions && (
-              <section className="kt-details__group sm:col-span-2">
-                <h2
-                  className={cn(
-                    'kt-label m-0 mb-xs flex items-center gap-xs border-l-heavy pl-cell-x',
-                    GROUP_TONE.progress,
-                  )}
-                >
-                  <Zap size={13} aria-hidden="true" />
-                  Controls
-                </h2>
-                <div className="flex flex-wrap items-center gap-sm">{actions}</div>
-              </section>
-            )}
-
-            <Group icon={<UserRound size={13} aria-hidden="true" />} title="Identity" tone="identity">
-              {/* Canonical copy/command value, e.g. `kteam send <teammate>`. */}
-              <Row label="Teammate" value={config.teammate} />
-              <Row label="Task" value={config.name} />
-              <Row label="Label" value={config.label} />
-              <Row label="Folder" value={config.cwd} mono />
-              <Row label="Session id" value={config.id} mono />
-              <Row label="Started" value={state.startedAt ? fmtAbsolute(state.startedAt) : undefined} mono />
-              {state.finishedAt && <Row label="Finished" value={fmtAbsolute(state.finishedAt)} mono />}
-            </Group>
-
-            <LineageGroup open={open} sessionId={config.id} parentId={config.parent} onNavigate={onClose} />
-
-            <Group
-              icon={
-                config.harness === 'claude' ? (
-                  <Bot size={13} aria-hidden="true" />
-                ) : (
-                  <Sparkles size={13} aria-hidden="true" />
-                )
-              }
-              title="Runtime"
-              tone="runtime"
-            >
-              <Row label="CLI wrapper" value={config.binary} mono />
-              <Row label="Harness" value={config.harness} />
-              <Row label="Model (observed)" value={observedModel} mono />
-              <Row
-                label="Model (requested)"
-                value={requestedModel && requestedModel !== observedModel ? requestedModel : undefined}
-                mono
-              />
-              <Row label="Mode" value={config.mode} hint={MODE_HINT[config.mode]} />
-              <Row label="tmux session" value={config.tmuxSession} mono />
-              {config.remoteControl && (
-                <div className="flex items-baseline gap-sm">
-                  <dt className="w-[104px] shrink-0 text-meta text-muted">Remote control</dt>
-                  <dd className="m-0 min-w-0 flex-1 text-cell text-fg-soft">
-                    {state.remoteControlUrl ? (
-                      <a
-                        href={state.remoteControlUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        title={state.remoteControlUrl}
-                        className="inline-flex min-w-0 items-center gap-xs text-accent hover:underline"
-                      >
-                        <Radio size={11} aria-hidden="true" />
-                        <span className="min-w-0 truncate">open RC surface</span>
-                        <ExternalLink size={10} aria-hidden="true" />
-                      </a>
-                    ) : (
-                      <span className="text-faint" title="launched with --rc; the surface has not announced itself yet">
-                        enabled · link pending
-                      </span>
-                    )}
-                  </dd>
-                </div>
-              )}
-            </Group>
-
-            <Group icon={<Activity size={13} aria-hidden="true" />} title="Progress" tone="progress">
-              <ProgressRows view={view} liveStatus={liveStatus} />
-            </Group>
-
-            <Group icon={<Gauge size={13} aria-hidden="true" />} title="Budget" tone="budget">
-              <BudgetRows view={view} quota={quota} />
-            </Group>
-          </div>
-        </div>
+        {/* The handle is both the visible dismissal affordance and the ONLY
+            swipe surface. Its own touch-action prevents gesture arbitration;
+            the content scroller below never sees these pointer handlers. */}
+        <button
+          type="button"
+          aria-label={closeLabel}
+          data-sheet-swipe="supported"
+          disabled={!open}
+          onClick={clickHandle}
+          onPointerDown={beginSwipe}
+          onPointerMove={moveSwipe}
+          onPointerUp={event => endSwipe(event, false)}
+          onPointerCancel={event => endSwipe(event, true)}
+          className="group mx-auto flex min-h-[44px] w-20 shrink-0 touch-none cursor-grab items-center justify-center py-3 active:cursor-grabbing"
+          title="Close, or swipe down"
+        >
+          <span
+            className="block h-1 w-12 rounded-full bg-border-strong transition-colors group-hover:bg-fg-soft"
+            aria-hidden="true"
+          />
+        </button>
+        {children}
       </div>
     </div>
+  );
+}
+
+export function SessionDetails({
+  id,
+  view,
+  quota,
+  liveStatus,
+  open,
+  onClose,
+  labelledBy,
+  actions,
+  viewSwitcher,
+  onRename,
+  onMigrate,
+}: Props) {
+  const { config, state } = view;
+  const observedModel = config.model?.trim();
+  const requestedModel = config.modelHint?.trim();
+  const title = displayCallsign(config.teammate) || config.name || config.id;
+
+  return (
+    <BottomSheet
+      id={id}
+      open={open}
+      onClose={onClose}
+      labelledBy={labelledBy}
+      ariaLabel="Session details"
+      closeLabel="Close session details"
+      panelClassName="kt-details"
+    >
+      <div className="shrink-0 border-b border-border-soft">
+        <div className="mx-auto flex w-full max-w-2xl min-w-0 items-baseline gap-sm px-panel pb-row-y">
+          <span
+            className="min-w-0 flex-1 truncate font-display text-title font-semibold tracking-display text-fg"
+            title={title}
+          >
+            {title}
+          </span>
+          <span className="kt-label shrink-0">Session details</span>
+        </div>
+      </div>
+
+      {/* The sheet's OWN scroller. The page below still owns exactly one
+          (the transcript); this one is an overlay and never nests inside it. */}
+      <div className="min-h-0 flex-1 overflow-y-auto scroll-thin">
+        <div className="mx-auto grid w-full max-w-2xl grid-cols-1 sm:grid-cols-2">
+          {viewSwitcher && (
+            <section className="kt-details__group sm:col-span-2">
+              <h2
+                className={cn(
+                  'kt-label m-0 mb-xs flex items-center gap-xs border-l-heavy pl-cell-x',
+                  GROUP_TONE.identity,
+                )}
+              >
+                <Activity size={13} aria-hidden="true" />
+                View
+              </h2>
+              <div className="flex items-center">{viewSwitcher}</div>
+            </section>
+          )}
+          {actions && (
+            <section className="kt-details__group sm:col-span-2">
+              <h2
+                className={cn(
+                  'kt-label m-0 mb-xs flex items-center gap-xs border-l-heavy pl-cell-x',
+                  GROUP_TONE.progress,
+                )}
+              >
+                <Zap size={13} aria-hidden="true" />
+                Controls
+              </h2>
+              <div className="flex flex-wrap items-center gap-sm">{actions}</div>
+            </section>
+          )}
+
+          <Group
+            icon={<UserRound size={13} aria-hidden="true" />}
+            title="Identity"
+            tone="identity"
+            headerAction={
+              onRename ? (
+                <button
+                  type="button"
+                  onClick={onRename}
+                  aria-label="Edit session identity"
+                  title="Rename task, callsign, or detach from parent"
+                  className="inline-flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-control border border-border text-muted hover:border-accent hover:text-accent"
+                >
+                  <Pencil size={15} aria-hidden="true" />
+                </button>
+              ) : undefined
+            }
+          >
+            {/* Canonical copy/command value, e.g. `kteam send <teammate>`. */}
+            <Row label="Teammate" value={config.teammate} />
+            <Row label="Task" value={config.name} />
+            <Row label="Label" value={config.label} />
+            <Row label="Folder" value={config.cwd} mono />
+            <Row label="Session id" value={config.id} mono />
+            <Row label="Started" value={state.startedAt ? fmtAbsolute(state.startedAt) : undefined} mono />
+            {state.finishedAt && <Row label="Finished" value={fmtAbsolute(state.finishedAt)} mono />}
+          </Group>
+
+          <LineageGroup open={open} sessionId={config.id} parentId={config.parent} onNavigate={onClose} />
+
+          <Group
+            icon={
+              config.harness === 'claude' ? (
+                <Bot size={13} aria-hidden="true" />
+              ) : (
+                <Sparkles size={13} aria-hidden="true" />
+              )
+            }
+            title="Runtime"
+            tone="runtime"
+            footerAction={
+              onMigrate ? (
+                <button
+                  type="button"
+                  onClick={onMigrate}
+                  className="kt-btn flex min-h-[44px] w-full items-center justify-between gap-sm text-left"
+                >
+                  <span>Change model / account…</span>
+                  <ServerCog size={15} aria-hidden="true" className="shrink-0" />
+                </button>
+              ) : undefined
+            }
+          >
+            <Row label="CLI wrapper" value={config.binary} mono />
+            <Row label="Harness" value={config.harness} />
+            <Row label="Model (observed)" value={observedModel} mono />
+            <Row
+              label="Model (requested)"
+              value={requestedModel && requestedModel !== observedModel ? requestedModel : undefined}
+              mono
+            />
+            <Row label="Mode" value={config.mode} hint={MODE_HINT[config.mode]} />
+            <Row label="tmux session" value={config.tmuxSession} mono />
+            {config.remoteControl && (
+              <div className="flex items-baseline gap-sm">
+                <dt className="w-[104px] shrink-0 text-meta text-muted">Remote control</dt>
+                <dd className="m-0 min-w-0 flex-1 text-cell text-fg-soft">
+                  {state.remoteControlUrl ? (
+                    <a
+                      href={state.remoteControlUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={state.remoteControlUrl}
+                      className="inline-flex min-w-0 items-center gap-xs text-accent hover:underline"
+                    >
+                      <Radio size={11} aria-hidden="true" />
+                      <span className="min-w-0 truncate">open RC surface</span>
+                      <ExternalLink size={10} aria-hidden="true" />
+                    </a>
+                  ) : (
+                    <span className="text-faint" title="launched with --rc; the surface has not announced itself yet">
+                      enabled · link pending
+                    </span>
+                  )}
+                </dd>
+              </div>
+            )}
+          </Group>
+
+          <Group icon={<Activity size={13} aria-hidden="true" />} title="Progress" tone="progress">
+            <ProgressRows view={view} liveStatus={liveStatus} />
+          </Group>
+
+          <Group icon={<Gauge size={13} aria-hidden="true" />} title="Budget" tone="budget">
+            <BudgetRows view={view} quota={quota} />
+          </Group>
+        </div>
+      </div>
+    </BottomSheet>
   );
 }
 
@@ -406,19 +523,34 @@ function Group({
   title,
   tone,
   children,
+  headerAction,
+  footerAction,
 }: {
   icon: ReactNode;
   title: string;
   tone: keyof typeof GROUP_TONE;
   children: ReactNode;
+  headerAction?: ReactNode;
+  footerAction?: ReactNode;
 }) {
+  const heading = (
+    <h2 className={cn('kt-label m-0 flex items-center gap-xs border-l-heavy pl-cell-x', GROUP_TONE[tone])}>
+      {icon}
+      {title}
+    </h2>
+  );
   return (
     <section className="kt-details__group">
-      <h2 className={cn('kt-label m-0 mb-xs flex items-center gap-xs border-l-heavy pl-cell-x', GROUP_TONE[tone])}>
-        {icon}
-        {title}
-      </h2>
+      {headerAction ? (
+        <div className="mb-xs flex min-h-[44px] items-center justify-between gap-sm">
+          {heading}
+          {headerAction}
+        </div>
+      ) : (
+        <div className="mb-xs">{heading}</div>
+      )}
       <dl className="m-0 grid gap-xs">{children}</dl>
+      {footerAction && <div className="mt-3">{footerAction}</div>}
     </section>
   );
 }

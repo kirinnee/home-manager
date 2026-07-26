@@ -103,65 +103,77 @@ interface Props {
 export const ToolGroup = memo(function ToolGroup({ calls, live, isLast }: Props) {
   const [open, setOpen] = useState(false);
 
-  const anyError = calls.some(c => c.result?.isError);
   // The trailing unfinished call of a live session is "running".
   const lastCall = calls[calls.length - 1];
   const running = live && isLast && lastCall && !lastCall.result && !lastCall.orphanResult;
 
-  const single = calls.length === 1;
+  // A running tool is live status, so it never hides inside the collapsed count:
+  // it gets its own named line (verb · headline · elapsed) below the history.
+  // The finished calls collapse into the group above it — even in a large merged
+  // run, you can still see exactly which tool is live.
+  const history = running ? calls.slice(0, -1) : calls;
+  const anyError = history.some(c => c.result?.isError);
 
-  // ---- running: a dedicated slim status line (spinner + elapsed) ----------
-  // Still chrome-sized, but the spinner keeps the accent: this is the one tool
-  // state that is live information rather than a record of the past.
-  if (running && single) {
-    const sum = extractToolSummary(lastCall!.use.name, lastCall!.use.input);
+  const runningLine = running ? <RunningLine call={lastCall!} /> : null;
+
+  // ---- history is empty: a single running tool, nothing done yet ----------
+  if (history.length === 0) return runningLine;
+
+  // ---- single finished tool: render its line directly (one click to the
+  //      body — no redundant group wrapper for the common case) ------------
+  if (history.length === 1) {
     return (
-      <div className="kt-chrome flex items-center gap-1.5 px-2 py-px">
-        <Loader2 size={10} className="kt-chrome-alert shrink-0 animate-spin text-accent" />
-        <span className="mono shrink-0">{sum.verb}</span>
-        <span className="mono min-w-0 flex-1 truncate">· {sum.headline}</span>
-        <Elapsed since={lastCall!.ts} />
-      </div>
+      <>
+        <ToolLine call={history[0]!} />
+        {runningLine}
+      </>
     );
   }
 
-  // ---- single (non-running) tool: render its line directly (one click to
-  //      the body — no redundant group wrapper for the common case) --------
-  if (single && !running) return <ToolLine call={calls[0]!} />;
-
-  const StatusIcon = running ? Loader2 : anyError ? TriangleAlert : Check;
+  const StatusIcon = anyError ? TriangleAlert : Check;
 
   // ---- summary line -------------------------------------------------------
   return (
-    <div className="kt-chrome">
-      <button
-        type="button"
-        onClick={() => setOpen(v => !v)}
-        className="flex w-full items-center gap-1.5 rounded-control px-2 py-px text-left hover:bg-surface-2"
-      >
-        <span className="mono shrink-0">{calls.length} tools</span>
-        <span className="mono min-w-0 flex-1 truncate">· {summarize(calls)}</span>
-        {running && <Elapsed since={lastCall!.ts} />}
-        <StatusIcon
-          size={10}
-          className={cn(
-            'shrink-0',
-            running ? 'kt-chrome-alert animate-spin text-accent' : anyError ? 'kt-chrome-alert text-err' : '',
-          )}
-        />
-        <ChevronRight size={10} className={cn('shrink-0 transition-transform', open && 'rotate-90')} />
-      </button>
+    <>
+      <div className="kt-chrome">
+        <button
+          type="button"
+          onClick={() => setOpen(v => !v)}
+          className="flex w-full items-center gap-1.5 rounded-control px-2 py-px text-left hover:bg-surface-2"
+        >
+          <span className="mono shrink-0">{history.length} tools</span>
+          <span className="mono min-w-0 flex-1 truncate">· {summarize(history)}</span>
+          <StatusIcon size={10} className={cn('shrink-0', anyError ? 'kt-chrome-alert text-err' : '')} />
+          <ChevronRight size={10} className={cn('shrink-0 transition-transform', open && 'rotate-90')} />
+        </button>
 
-      {open && (
-        <div className="border-l border-border-soft pl-1.5">
-          {calls.map(c => (
-            <ToolLine key={c.key} call={c} />
-          ))}
-        </div>
-      )}
-    </div>
+        {open && (
+          <div className="border-l border-border-soft pl-1.5">
+            {history.map(c => (
+              <ToolLine key={c.key} call={c} />
+            ))}
+          </div>
+        )}
+      </div>
+      {runningLine}
+    </>
   );
 });
+
+// A dedicated slim status line for the live tool (spinner + elapsed). Still
+// chrome-sized, but the spinner keeps the accent: this is the one tool state
+// that is live information rather than a record of the past.
+function RunningLine({ call }: { call: ToolCall }) {
+  const sum = extractToolSummary(call.use.name, call.use.input);
+  return (
+    <div className="kt-chrome flex items-center gap-1.5 px-2 py-px">
+      <Loader2 size={10} className="kt-chrome-alert shrink-0 animate-spin text-accent" />
+      <span className="mono shrink-0">{sum.verb}</span>
+      <span className="mono min-w-0 flex-1 truncate">· {sum.headline}</span>
+      <Elapsed since={call.ts} />
+    </div>
+  );
+}
 
 function ToolLine({ call }: { call: ToolCall }) {
   const [open, setOpen] = useState(false);

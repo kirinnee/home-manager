@@ -1,133 +1,601 @@
 // Inline structured question form (interaction.question). Mirrors the CLI
 // contract the daemon enforces: single question → labels (+ other), multiple
 // questions → responses (one per question).
+//
+// TWO RENDER MODES, ONE STATE MODEL, ONE SUBMIT PATH. On a phone (`compact`)
+// a multi-question set is PAGED — one question per screen with Back/Next —
+// because a 3-4 question set with an always-open textarea under each is a
+// full-screen-plus wall on 390px. On desktop (and for a single-question set)
+// every question renders at once, exactly as before. The two modes differ only
+// in WHICH questions render and whether a nav row shows: `picks`/`others`/
+// `otherSelected`, `buildPayload`, and the single final `api.answer` POST are
+// mode-independent. See ms1lv08o-91f42cd0/question-paging-spec.md.
+//
+// Three latent bugs the spec found are fixed here:
+//   1. multi-question sets rendered single-choice questions as checkboxes and
+//      then submitted only the first pick — silent data loss. `optionIsMultiple`
+//      is now `multiSelect && !multi-question-set`, so a multi-question set is
+//      strictly single-choice per page, matching the wire.
+//   2. no `requestId` was passed, defeating the server dedupe. One id is minted
+//      per pending set (keyed to `toolUseId`) and reused across retries.
+//   3. stale state when a NEW set arrived while mounted. The mount site now
+//      keys on `toolUseId` (see questionform-mountsite.patch.md); as a safe
+//      degrade when unwired, the component also resets on a `toolUseId` change.
 
-import { useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type Ref } from 'react';
 import { Button } from './Primitives';
 import type { ChatRecord } from '../types';
 import { api, ApiError } from '../lib/api';
+import { cn } from '../lib/utils';
+import { useInputModality } from '../hooks/useInputModality';
+
+export interface PFQuestion {
+  question: string;
+  header?: string;
+  options?: { label: string; description?: string }[];
+  multiSelect?: boolean;
+}
+
+/** All answer-in-progress state. Arrays are parallel to `questions`. */
+export interface AnswerState {
+  /** Selected option labels per question. */
+  picks: string[][];
+  /** Freeform "Other" text per question (kept even while Other is deselected). */
+  others: string[];
+  /** Whether the exclusive "Other" row is the selection for that question. */
+  otherSelected: boolean[];
+}
+
+// ---- pure helpers (exported for unit tests) --------------------------------
+
+export function initAnswerState(questions: PFQuestion[]): AnswerState {
+  return {
+    picks: questions.map(() => []),
+    others: questions.map(() => ''),
+    otherSelected: questions.map(() => false),
+  };
+}
+
+/**
+ * Checkboxes ONLY for a single-question multiSelect. Every question in a
+ * multi-question set is single-choice — the wire carries one response string
+ * per question (`responses[i]`), so a checkbox there collects picks the daemon
+ * silently drops. This is the fix for the pre-existing `!!q.multiSelect ||
+ * isMulti` quirk.
+ */
+export function optionIsMultiple(q: PFQuestion, isMultiSet: boolean): boolean {
+  return !!q.multiSelect && !isMultiSet;
+}
+
+/** Toggle an option pick. Picking any option deselects the exclusive Other row
+ *  (freeform beats selections on the wire, so the two can never coexist). */
+export function applyOptionToggle(state: AnswerState, i: number, label: string, multiple: boolean): AnswerState {
+  const picks = state.picks.slice();
+  const cur = picks[i] ?? [];
+  const has = cur.includes(label);
+  picks[i] = multiple ? (has ? cur.filter(x => x !== label) : [...cur, label]) : [label];
+  const otherSelected = state.otherSelected.slice();
+  otherSelected[i] = false;
+  return { ...state, picks, otherSelected };
+}
+
+/** Select the exclusive Other row, clearing any option picks for that question. */
+export function applyOtherSelect(state: AnswerState, i: number): AnswerState {
+  const picks = state.picks.slice();
+  picks[i] = [];
+  const otherSelected = state.otherSelected.slice();
+  otherSelected[i] = true;
+  return { ...state, picks, otherSelected };
+}
+
+export function setOtherText(state: AnswerState, i: number, text: string): AnswerState {
+  const others = state.others.slice();
+  others[i] = text;
+  return { ...state, others };
+}
+
+/** A question is answered when an option is picked, or Other is selected with
+ *  non-empty trimmed text. */
+export function isAnswered(state: AnswerState, i: number): boolean {
+  if (state.otherSelected[i]) return (state.others[i] ?? '').trim().length > 0;
+  return (state.picks[i]?.length ?? 0) > 0;
+}
+
+export function allAnswered(state: AnswerState, questions: PFQuestion[]): boolean {
+  return questions.every((_, i) => isAnswered(state, i));
+}
+
+/** First unanswered question index, or -1 if every question is answered. */
+export function firstUnansweredIndex(state: AnswerState, questions: PFQuestion[]): number {
+  return questions.findIndex((_, i) => !isAnswered(state, i));
+}
+
+export type AnswerPayload = { labels?: string[]; other?: string; responses?: string[] };
+
+/**
+ * Byte-identical wire semantics to the original form, only narrowed by the
+ * Other-is-exclusive rule (never `labels` AND `other` together — a strict
+ * subset of what the daemon already accepted):
+ *   - single question → `{ labels, other? }`
+ *   - N questions     → `{ responses }`, one string per question, freeform
+ *     text taking precedence over the pick (matches tmux-controller).
+ */
+export function buildPayload(questions: PFQuestion[], state: AnswerState): AnswerPayload {
+  if (questions.length <= 1) {
+    if (state.otherSelected[0]) {
+      return { labels: [], other: (state.others[0] ?? '').trim() || undefined };
+    }
+    return { labels: state.picks[0] ?? [], other: undefined };
+  }
+  const responses = questions.map((_, i) =>
+    state.otherSelected[i] ? (state.others[i] ?? '').trim() : (state.picks[i]?.[0] ?? ''),
+  );
+  return { responses };
+}
+
+export function clampPage(page: number, count: number): number {
+  if (count <= 0) return 0;
+  return Math.min(Math.max(0, page), count - 1);
+}
+
+/** Reveal-focus the Other textarea ONLY on a non-touch (mouse/keyboard)
+ *  context. On touch, revealing it must never summon the keyboard unprompted
+ *  (plan §4). Mirrors Composer's `shouldRefocusComposer`. */
+export function shouldFocusOtherTextarea(touchAffected: boolean): boolean {
+  return !touchAffected;
+}
+
+/**
+ * One request id per pending question SET, reused across every attempt
+ * (including a post-error retry) so the daemon dedupe (`api-server`
+ * DEDUPED_ACTIONS) applies the answer exactly once. A new set (new
+ * `toolUseId`) mints a fresh id. Pure so the contract is unit-testable without
+ * a DOM: same key ⇒ same id object; changed key ⇒ freshly minted.
+ */
+export function resolveRequestId(
+  prev: { id: string; key: string | undefined } | null,
+  key: string | undefined,
+  mint: () => string,
+): { id: string; key: string | undefined } {
+  if (prev && prev.key === key) return prev;
+  return { id: mint(), key };
+}
+
+/**
+ * Submit orchestration with a synchronous double-fire guard. Extracted so the
+ * "rapid double-tap issues exactly one api.answer" property is testable in a
+ * DOM-free harness: two overlapping calls sharing `guard` run `send` once.
+ * A validation failure or a rejected send releases the guard so a retry (with
+ * the SAME request id) can proceed; a successful send keeps it held because the
+ * form is about to unmount.
+ */
+export async function submitAnswers(opts: {
+  guard: { current: boolean };
+  validate: () => string | null;
+  send: () => Promise<void>;
+  setSubmitting: (v: boolean) => void;
+  setError: (v: string | null) => void;
+}): Promise<void> {
+  const { guard, validate, send, setSubmitting, setError } = opts;
+  if (guard.current) return;
+  guard.current = true;
+  const err = validate();
+  if (err) {
+    setError(err);
+    guard.current = false;
+    return;
+  }
+  setSubmitting(true);
+  setError(null);
+  try {
+    await send();
+  } catch (e) {
+    setError(e instanceof ApiError ? e.message : String(e));
+    guard.current = false;
+  } finally {
+    setSubmitting(false);
+  }
+}
+
+// ---- presentational pieces --------------------------------------------------
 
 interface Props {
   sessionId: string;
   question: ChatRecord;
   onSubmit(): void;
+  /** Phone chrome: paged, one question per screen (multi-question sets only).
+   *  Defaults false so the component is correct and shippable before the mount
+   *  site threads it through (like `Composer`). */
+  compact?: boolean;
 }
 
-export function QuestionForm({ sessionId, question, onSubmit }: Props) {
-  const data = question.data as
-    | {
-        questions?: Array<{
-          question: string;
-          header?: string;
-          options?: { label: string; description?: string }[];
-          multiSelect?: boolean;
-        }>;
-      }
-    | undefined;
+/** The all-at-once / single-question submit button. Kept visible, labelled and
+ *  ≥44px in every state (disabled while submitting, never hidden). */
+export function QuestionSubmitControl({ submitting, onClick }: { submitting: boolean; onClick(): void }) {
+  const submittingReasonId = useId();
+  return (
+    <>
+      {submitting && (
+        <span id={submittingReasonId} className="sr-only" role="status" aria-live="polite">
+          Submitting answer…
+        </span>
+      )}
+      <Button
+        className="min-h-[44px] min-w-[44px]"
+        variant="primary"
+        size="sm"
+        type="button"
+        disabled={submitting}
+        aria-disabled={submitting}
+        aria-describedby={submitting ? submittingReasonId : undefined}
+        onClick={onClick}
+      >
+        Submit answer
+      </Button>
+    </>
+  );
+}
+
+/**
+ * The paged nav row. Back + (Next | Submit answers), every control visible,
+ * labelled and ≥44px in every state — disabled is allowed, hidden never (plan
+ * §5). A disabled control always carries an `aria-describedby` reason.
+ */
+export function QuestionNav({
+  page,
+  pageCount,
+  canAdvance,
+  canSubmit,
+  submitting,
+  onBack,
+  onNext,
+  onSubmit,
+}: {
+  page: number;
+  pageCount: number;
+  canAdvance: boolean;
+  canSubmit: boolean;
+  submitting: boolean;
+  onBack(): void;
+  onNext(): void;
+  onSubmit(): void;
+}) {
+  const backReasonId = useId();
+  const nextReasonId = useId();
+  const submitReasonId = useId();
+  const isLast = page >= pageCount - 1;
+  const backDisabled = page <= 0;
+  const nextDisabled = !canAdvance;
+  const submitDisabled = submitting || !canSubmit;
+  const submitReason = submitting ? 'Submitting answer…' : 'Answer every question to submit';
+
+  return (
+    <div className="mt-2 flex shrink-0 items-center justify-between gap-2">
+      {backDisabled && (
+        <span id={backReasonId} className="sr-only">
+          You are on the first question.
+        </span>
+      )}
+      <Button
+        className="min-h-[44px] min-w-[44px]"
+        variant="outline"
+        size="sm"
+        type="button"
+        disabled={backDisabled}
+        aria-disabled={backDisabled}
+        aria-describedby={backDisabled ? backReasonId : undefined}
+        onClick={onBack}
+      >
+        Back
+      </Button>
+      {isLast ? (
+        <>
+          {submitDisabled && (
+            <span
+              id={submitReasonId}
+              className="sr-only"
+              role={submitting ? 'status' : undefined}
+              aria-live={submitting ? 'polite' : undefined}
+            >
+              {submitReason}
+            </span>
+          )}
+          <Button
+            className="min-h-[44px] min-w-[44px]"
+            variant="primary"
+            size="sm"
+            type="button"
+            disabled={submitDisabled}
+            aria-disabled={submitDisabled}
+            aria-describedby={submitDisabled ? submitReasonId : undefined}
+            onClick={onSubmit}
+          >
+            Submit answers
+          </Button>
+        </>
+      ) : (
+        <>
+          {nextDisabled && (
+            <span id={nextReasonId} className="sr-only">
+              Select an option or write a response first.
+            </span>
+          )}
+          <Button
+            className="min-h-[44px] min-w-[44px]"
+            variant="primary"
+            size="sm"
+            type="button"
+            disabled={nextDisabled}
+            aria-disabled={nextDisabled}
+            aria-describedby={nextDisabled ? nextReasonId : undefined}
+            onClick={onNext}
+          >
+            Next
+          </Button>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** One question: heading (focus target), option rows, exclusive Other row, and
+ *  the revealed Other textarea. Every tappable row is ≥44px. */
+function QuestionBlock({
+  q,
+  i,
+  isMultiSet,
+  compact,
+  state,
+  progressLabel,
+  headingRef,
+  otherRef,
+  onOption,
+  onSelectOther,
+  onOtherText,
+}: {
+  q: PFQuestion;
+  i: number;
+  isMultiSet: boolean;
+  compact: boolean;
+  state: AnswerState;
+  progressLabel?: string;
+  headingRef?: Ref<HTMLDivElement>;
+  otherRef?: Ref<HTMLTextAreaElement>;
+  onOption(i: number, label: string, multiple: boolean): void;
+  onSelectOther(i: number): void;
+  onOtherText(i: number, text: string): void;
+}) {
+  const multiple = optionIsMultiple(q, isMultiSet);
+  const otherSel = state.otherSelected[i] ?? false;
+  const headingText = `${q.header || `Question ${i + 1}`}: ${q.question}`;
+  const inputType = multiple ? 'checkbox' : 'radio';
+  const rowClass = 'flex items-start gap-2 rounded px-2 min-h-[44px] py-2 hover:bg-surface cursor-pointer text-[13px]';
+
+  return (
+    <div
+      role="group"
+      aria-label={progressLabel ? `${progressLabel}: ${headingText}` : headingText}
+      className="mb-2 last:mb-0"
+    >
+      {progressLabel && (
+        <div className="mb-1 text-[10.5px] uppercase tracking-wider text-muted font-semibold">{progressLabel}</div>
+      )}
+      {/* Focus target on user-initiated page change. `tabIndex=-1` + a non-text
+          element cannot summon the touch keyboard. Never focused on mount. */}
+      <div ref={headingRef} tabIndex={-1} className="text-[13px] font-semibold outline-none">
+        {headingText}
+      </div>
+      <div className="mt-1 space-y-0.5">
+        {(q.options ?? []).map(opt => {
+          const selected = !otherSel && (state.picks[i] ?? []).includes(opt.label);
+          return (
+            <label key={opt.label} className={rowClass}>
+              <input
+                type={inputType}
+                name={`q${i}`}
+                checked={selected}
+                onChange={() => onOption(i, opt.label, multiple)}
+                className="mt-0.5"
+              />
+              <span>
+                {opt.label}
+                {opt.description && <span className="text-muted"> — {opt.description}</span>}
+              </span>
+            </label>
+          );
+        })}
+        {/* "Other" is an explicit, EXCLUSIVE row — the daemon delivers freeform
+            instead of selections whenever text is present, so the UI now says
+            that plainly rather than implying you can check boxes AND type. */}
+        <label className={rowClass}>
+          <input
+            type={inputType}
+            name={`q${i}`}
+            checked={otherSel}
+            onChange={() => onSelectOther(i)}
+            className="mt-0.5"
+          />
+          <span>Other…</span>
+        </label>
+        {otherSel && (
+          <textarea
+            ref={otherRef}
+            className={cn(
+              'mt-1 w-full min-h-[44px] rounded border border-border bg-surface p-2 text-[13px]',
+              compact ? 'resize-none' : 'resize-y',
+            )}
+            placeholder="Type your response"
+            value={state.others[i] ?? ''}
+            onChange={e => onOtherText(i, e.target.value)}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---- the component ----------------------------------------------------------
+
+export function QuestionForm({ sessionId, question, onSubmit, compact = false }: Props) {
+  const data = question.data as { questions?: PFQuestion[]; toolUseId?: string } | undefined;
   const questions = data?.questions ?? [];
-  const isMulti = questions.length > 1;
-  const [picks, setPicks] = useState<string[][]>(() => questions.map(() => []));
-  const [others, setOthers] = useState<string[]>(() => questions.map(() => ''));
+  const toolUseId = data?.toolUseId;
+  const isMultiSet = questions.length > 1;
+  const paged = compact && isMultiSet;
+
+  const [state, setState] = useState<AnswerState>(() => initAnswerState(questions));
+  const [page, setPage] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { touchAffected } = useInputModality();
 
-  function toggle(qIdx: number, label: string, multiple: boolean) {
-    setPicks(p => {
-      const next = p.slice();
-      const cur = next[qIdx] ?? [];
-      const has = cur.includes(label);
-      next[qIdx] = multiple ? (has ? cur.filter(x => x !== label) : [...cur, label]) : [label];
-      return next;
+  // Degrade safely when the mount site has not (yet) keyed on `toolUseId`: a
+  // NEW question set arriving while mounted resets the in-progress answers
+  // instead of leaving `picks`/`others` stale against the new questions. The
+  // real fix is `key={toolUseId}` (mount-site patch); this is belt-and-braces.
+  useEffect(() => {
+    setState(initAnswerState(questions));
+    setPage(0);
+    setError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toolUseId]);
+
+  const submitGuard = useRef(false);
+  const requestIdRef = useRef<{ id: string; key: string | undefined } | null>(null);
+  requestIdRef.current = resolveRequestId(requestIdRef.current, toolUseId, () => crypto.randomUUID());
+  const requestId = requestIdRef.current.id;
+
+  const safePage = clampPage(page, questions.length);
+
+  // Focus-follows-wizard-step: move focus to the new page's heading ONLY after
+  // a user-initiated Back/Next, never on mount/reconnect/compact flip.
+  const headingRef = useRef<HTMLDivElement>(null);
+  const navigatedRef = useRef(false);
+  useLayoutEffect(() => {
+    if (navigatedRef.current) {
+      headingRef.current?.focus();
+      navigatedRef.current = false;
+    }
+  }, [safePage]);
+
+  // Reveal-focus the Other textarea on non-touch only.
+  const otherRef = useRef<HTMLTextAreaElement>(null);
+  const focusOtherFor = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    if (focusOtherFor.current !== null && otherRef.current) {
+      otherRef.current.focus();
+      focusOtherFor.current = null;
+    }
+  });
+
+  function goTo(next: number) {
+    navigatedRef.current = true;
+    setPage(clampPage(next, questions.length));
+  }
+
+  function onOption(i: number, label: string, multiple: boolean) {
+    setState(s => applyOptionToggle(s, i, label, multiple));
+  }
+  function onSelectOther(i: number) {
+    setState(s => applyOtherSelect(s, i));
+    if (shouldFocusOtherTextarea(touchAffected)) focusOtherFor.current = i;
+  }
+  function onOtherText(i: number, text: string) {
+    setState(s => setOtherText(s, i, text));
+  }
+
+  function runSubmit() {
+    void submitAnswers({
+      guard: submitGuard,
+      validate: () => {
+        if (!isMultiSet) {
+          if (!isAnswered(state, 0)) return 'Pick an option or write a response first';
+          return null;
+        }
+        if (!allAnswered(state, questions)) return 'Answer every question (option or text)';
+        return null;
+      },
+      send: async () => {
+        await api.answer(sessionId, buildPayload(questions, state), requestId);
+        onSubmit();
+      },
+      setSubmitting,
+      setError,
     });
   }
 
-  async function submit() {
-    setSubmitting(true);
-    setError(null);
-    try {
-      let payload: { labels?: string[]; other?: string; responses?: string[] };
-      if (!isMulti) {
-        payload = { labels: picks[0] ?? [], other: (others[0] ?? '').trim() || undefined };
-        if ((picks[0]?.length ?? 0) === 0 && !payload.other) {
-          setError('Pick an option or write a response first');
-          setSubmitting(false);
-          return;
-        }
-      } else {
-        const responses = questions.map((_, i) => (others[i] ?? '').trim() || (picks[i]?.[0] ?? ''));
-        if (responses.some(r => !r)) {
-          setError('Answer every question (option or text)');
-          setSubmitting(false);
-          return;
-        }
-        payload = { responses };
-      }
-      await api.answer(sessionId, payload);
-      onSubmit();
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
-    } finally {
-      setSubmitting(false);
-    }
+  if (questions.length === 0) return null;
+
+  const errorRow = error && (
+    <div className="mt-2 rounded border border-err-border bg-err-bg px-2 py-1 text-[12px] text-err">{error}</div>
+  );
+
+  // border-accent, not border-accent-border: this block marks the transcript's
+  // one actionable spot while the session is BLOCKED on an answer.
+  const shell = 'my-2 rounded-md border border-accent bg-accent-soft p-3';
+
+  if (paged) {
+    const q = questions[safePage]!;
+    return (
+      // Card is a bounded flex column: the question body scrolls internally and
+      // the nav row sits OUTSIDE the scroller, so an open keyboard shrinks the
+      // shell (--app-h) without ever pushing Back/Next off screen (spec §7).
+      <div className={cn(shell, 'flex max-h-[calc(var(--app-h,100dvh)-9rem)] flex-col')}>
+        <div className="mb-1 shrink-0 text-[10.5px] uppercase tracking-wider text-muted font-semibold">
+          Structured question — {safePage + 1} of {questions.length}
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <QuestionBlock
+            key={safePage}
+            q={q}
+            i={safePage}
+            isMultiSet={isMultiSet}
+            compact={compact}
+            state={state}
+            progressLabel={`Question ${safePage + 1} of ${questions.length}`}
+            headingRef={headingRef}
+            otherRef={otherRef}
+            onOption={onOption}
+            onSelectOther={onSelectOther}
+            onOtherText={onOtherText}
+          />
+          {errorRow}
+        </div>
+        <QuestionNav
+          page={safePage}
+          pageCount={questions.length}
+          canAdvance={isAnswered(state, safePage)}
+          canSubmit={allAnswered(state, questions)}
+          submitting={submitting}
+          onBack={() => goTo(safePage - 1)}
+          onNext={() => goTo(safePage + 1)}
+          onSubmit={runSubmit}
+        />
+      </div>
+    );
   }
 
+  // All-at-once (desktop, or a compact single-question set).
   return (
-    // `border-accent`, not `border-accent-border`. This edge is not a panel
-    // outline: the form only exists while the session is BLOCKED on an answer,
-    // and the accent-framed block is what marks the transcript's one actionable
-    // spot. `--accent-border` measures 1.2-2.9:1 on `--accent-soft` in 6 of 10
-    // themes; `--accent` clears 4.5:1 on that same fill everywhere.
-    <div className="my-2 rounded-md border border-accent bg-accent-soft p-3">
+    <div className={shell}>
       <div className="mb-2 text-[10.5px] uppercase tracking-wider text-muted font-semibold">Structured question</div>
       {questions.map((q, i) => (
-        <div key={i} className="mb-2 last:mb-0">
-          <div className="text-[13px] font-semibold">
-            {q.header || `Question ${i + 1}`}: {q.question}
-          </div>
-          <div className="mt-1 space-y-0.5">
-            {(q.options ?? []).map(opt => {
-              const selected = (picks[i] ?? []).includes(opt.label);
-              return (
-                <label
-                  key={opt.label}
-                  className="flex items-start gap-2 px-1 py-1 rounded hover:bg-surface cursor-pointer text-[13px]"
-                >
-                  <input
-                    type={q.multiSelect ? 'checkbox' : 'radio'}
-                    name={`q${i}`}
-                    checked={selected}
-                    onChange={() => toggle(i, opt.label, !!q.multiSelect || isMulti)}
-                    className="mt-0.5"
-                  />
-                  <span>
-                    {opt.label}
-                    {opt.description && <span className="text-muted"> — {opt.description}</span>}
-                  </span>
-                </label>
-              );
-            })}
-            <textarea
-              className="mt-1 w-full min-h-[44px] resize-y rounded border border-border bg-surface p-2 text-[13px]"
-              placeholder="Other response (optional)"
-              value={others[i] ?? ''}
-              onChange={e =>
-                setOthers(o => {
-                  const next = o.slice();
-                  next[i] = e.target.value;
-                  return next;
-                })
-              }
-            />
-          </div>
-        </div>
+        <QuestionBlock
+          key={i}
+          q={q}
+          i={i}
+          isMultiSet={isMultiSet}
+          compact={compact}
+          state={state}
+          otherRef={focusOtherFor.current === i ? otherRef : undefined}
+          onOption={onOption}
+          onSelectOther={onSelectOther}
+          onOtherText={onOtherText}
+        />
       ))}
-      {error && (
-        <div className="mt-2 rounded border border-err-border bg-err-bg px-2 py-1 text-[12px] text-err">{error}</div>
-      )}
+      {errorRow}
       <div className="mt-2">
-        <Button variant="primary" size="sm" disabled={submitting} onClick={submit}>
-          Submit answer
-        </Button>
+        <QuestionSubmitControl submitting={submitting} onClick={runSubmit} />
       </div>
     </div>
   );

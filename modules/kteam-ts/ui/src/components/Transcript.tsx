@@ -162,6 +162,48 @@ const LOAD_OLDER_PX = 280;
  *  Erring long merely honours a detach the reader did ask for. */
 const INTENT_WINDOW_MS = 1500;
 
+/** The minimal shape of a `Selection` this module needs. Declared locally so the
+ *  decision below is testable without a DOM (this package has no DOM impl; see
+ *  Transcript.test.ts). */
+export interface SelectionLike {
+  isCollapsed: boolean;
+  rangeCount: number;
+  anchorNode: Node | null;
+  focusNode: Node | null;
+}
+
+/** MAY FOLLOW WRITE scrollTop RIGHT NOW? — the pure decision behind the whole
+ *  selection fix.
+ *
+ *  Measured (see transcript-selection-diagnosis.md): a `scrollTop` write while
+ *  the reader holds a text selection COLLAPSES that selection (3/3 repro on the
+ *  live page). The transcript re-pins to the tail on every streaming delta, so
+ *  during a live turn that collapse fires continuously and the convo becomes
+ *  unhighlightable. So follow must NOT pin while a non-collapsed selection is
+ *  anchored inside the viewport.
+ *
+ *  Returns true when a pin would destroy an active selection, i.e. follow must
+ *  hold off. A collapsed selection (a bare caret), an empty one, or one anchored
+ *  entirely OUTSIDE the transcript (composer, another pane) is no obstacle — a
+ *  scroll cannot ruin what the reader is not selecting here.
+ *
+ *  Either endpoint inside counts: a selection can be anchored above the fold and
+ *  extended into the viewport (or vice versa), and pinning would wreck it just
+ *  the same. `contains` is injected so the logic is assertable with plain data. */
+export function pinBlockedBySelection(sel: SelectionLike | null, contains: (node: Node | null) => boolean): boolean {
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return false;
+  return contains(sel.anchorNode) || contains(sel.focusNode);
+}
+
+/** DOM adapter over {@link pinBlockedBySelection}: is a non-collapsed selection
+ *  anchored inside `el`? Returns false when there is no window (SSR/tests) or no
+ *  element, so a missing environment never blocks follow. */
+function hasSelectionIn(el: HTMLElement | null): boolean {
+  if (!el || typeof window === 'undefined') return false;
+  const sel = window.getSelection();
+  return pinBlockedBySelection(sel, node => !!node && el.contains(node));
+}
+
 function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, header, footer }: Props) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
@@ -200,6 +242,12 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
   const pin = useCallback(() => {
     const v = viewportRef.current;
     if (!v) return;
+    // Never yank the viewport out from under a live text selection: a scrollTop
+    // write collapses it (measured). Follow resumes the moment the selection is
+    // cleared — see the selectionchange listener below. This is the ONE guard
+    // that covers every pin() caller (both ResizeObservers, the layout effect,
+    // the initial settle, the onScroll re-engage, and jump()).
+    if (hasSelectionIn(v)) return;
     // Assignment, not scrollTo({behavior:'smooth'}): instant and idempotent. The
     // browser clamps to scrollHeight - clientHeight, so this lands EXACTLY at the
     // bottom — never "almost". A smooth animation restarted on every delta is
@@ -278,6 +326,24 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
     };
   }, []);
 
+  // ---- SELECTION RELEASES FOLLOW'S HOLD -------------------------------------
+  // While a selection is held, pin() and the content ResizeObserver both hold
+  // off writing scrollTop (a write collapses the selection — measured). That
+  // leaves a following reader OFF the tail if the stream kept growing during the
+  // selection. Nothing re-pins on its own until the next delta or resize, so a
+  // stream that goes idle mid-selection would strand them just short of the
+  // bottom. So: the instant the selection clears, re-pin if still following.
+  // pin() is a no-op when the selection is still live, so an intermediate
+  // selectionchange during a drag cannot fight the drag.
+  useEffect(() => {
+    const onSelChange = () => {
+      const s = typeof window !== 'undefined' ? window.getSelection() : null;
+      if ((!s || s.isCollapsed || s.rangeCount === 0) && followRef.current) pin();
+    };
+    document.addEventListener('selectionchange', onSelChange, { passive: true });
+    return () => document.removeEventListener('selectionchange', onSelChange);
+  }, [pin]);
+
   // ---- FOLLOWING: pin on any content resize ---------------------------------
   // Covers all three growth shapes with one mechanism: a new block, a block
   // growing in place (streaming text), and a block that lays out late (image,
@@ -288,12 +354,16 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
     const ro = new ResizeObserver(() => {
       const v = viewportRef.current;
       if (!v) return;
-      if (followRef.current) {
+      // This write does NOT go through pin(), so it needs the same selection
+      // guard: a scrollTop write here on a streaming delta would collapse a
+      // held selection. Holding off leaves follow armed; the next delta after
+      // the selection clears re-pins.
+      if (followRef.current && !hasSelectionIn(v)) {
         v.scrollTop = v.scrollHeight;
         // Record OUR write, so the scroll event it triggers is not read as the
         // reader moving. Without this the very act of following looks like input.
         lastScrollTop.current = v.scrollTop;
-      } else {
+      } else if (!followRef.current) {
         // Reflow and responsive content padding can change the true gap without
         // a scroll event. Refresh the prepend baseline from this settled layout,
         // but NEVER write scrollTop while the reader is detached.
@@ -532,7 +602,16 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
             prepend, the settled gap-from-bottom invariant also stays exact. */}
         <div
           ref={contentRef}
-          className="kt-content mx-auto flex min-w-0 w-full max-w-[880px] flex-col px-2 pb-2 pt-2 sm:px-4 sm:pb-8"
+          // MOBILE SIDE PADDING IS 4px, NOT 8px. On a phone the transcript already
+          // sits inside the route pane's 4px gutter (App.tsx `px-1`); below sm the
+          // scroller card melts away entirely (SessionChatPage: border/rounding/bg
+          // are sm-only now), so this 4px content pad is the ONLY inside-the-box
+          // reserve left. An 8px pad on top of the pane gutter put assistant prose
+          // too far from each screen edge; 4px keeps a hair of breathing room
+          // without a card while staying flush enough to feel edge-to-edge. This
+          // is deliberately NOT dropped to 0 — readability wins over reclaiming the
+          // last 4px. Desktop keeps sm:px-4 (it has the width, and the card is back).
+          className="kt-content mx-auto flex min-w-0 w-full max-w-[880px] flex-col px-1 pb-2 pt-2 sm:px-4 sm:pb-8"
         >
           {header}
           {blocks.map((b, idx) => (

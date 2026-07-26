@@ -2,7 +2,7 @@
 // banner when the daemon didn't substitute a token (i.e. we're on a non-loopback
 // origin).
 
-import { RefreshCw, Search } from 'lucide-react';
+import { RefreshCw, Search, Settings, ShieldCheck } from 'lucide-react';
 import { Link } from '../lib/router';
 import { ThemeToggle } from './ThemeToggle';
 import { HAS_TOKEN } from '../lib/api';
@@ -10,6 +10,7 @@ import { useFleet } from '../lib/store';
 import { SidebarDrawerTrigger } from './AgentSidebar';
 import { PALETTE_KEYSHORTCUTS, paletteShortcutLabel } from './CommandPalette';
 import type { UpdateReason } from '../hooks/useServiceWorkerUpdate';
+import { useLayoutMode } from '../hooks/useLayoutMode';
 
 /** The chip's two wordings, as data so they can be asserted directly.
  *
@@ -39,37 +40,57 @@ export const UPDATE_CHIP = {
   },
 } as const satisfies Record<UpdateReason, { label: string; title: string }>;
 
+export const SETTINGS_ENTRY = {
+  label: 'Settings',
+  title: 'Open appearance and density settings',
+} as const;
+
+export const WARDEN_ENTRY = {
+  label: 'Warden',
+  title: 'Open fleet supervision and verdicts',
+} as const;
+
 export function AppBar({
   crumbs,
   onOpenSidebar,
   onOpenPalette,
   updateReady,
   onApplyUpdate,
+  settingsActive = false,
+  wardenActive = false,
+  showTheme = true,
 }: {
   crumbs: Array<{ href?: string; label: string }>;
   /** Opens the fleet sidebar's mobile drawer. The trigger renders itself only
    *  at drawer widths — the rail and the expanded column carry their own. */
-  onOpenSidebar: () => void;
+  /** Sessions-surface drawer opener. Absent on non-session destinations such
+   *  as Settings, where the fleet sidebar and its bento do not exist. */
+  onOpenSidebar?: () => void;
   /** Opens the Cmd/Ctrl+K palette. */
   onOpenPalette: () => void;
   /** Non-null when a newer release is installed and waiting, or when this tab
    *  has already failed to lazy-load a chunk. Null hides the chip entirely. */
   updateReady?: UpdateReason | null;
   onApplyUpdate?: () => void;
+  settingsActive?: boolean;
+  wardenActive?: boolean;
+  /** The flat Settings page owns theme controls while it is active. */
+  showTheme?: boolean;
 }) {
   const { status } = useFleet();
+  const layout = useLayoutMode();
   return (
     // Not sticky any more: the shell no longer scrolls, so the bar is simply the
     // first row of a flex column that fills the viewport. Full bleed — the
     // 1180px centering that used to wrap this row is gone.
     <header data-density-region="app-bar" className="shrink-0 border-b border-border bg-[var(--bar-bg)]">
       <div className="flex min-h-control w-full items-center gap-sm px-panel font-ui text-ui">
-        <SidebarDrawerTrigger onOpen={onOpenSidebar} />
+        {onOpenSidebar && <SidebarDrawerTrigger onOpen={onOpenSidebar} />}
         <nav className="flex min-w-0 flex-1 items-center gap-sm text-muted">
           {crumbs.map((c, i) => (
             <span key={`${i}-${c.label}`} className="flex items-center gap-sm">
               {c.href ? (
-                <Link to={c.href} className="hover:text-fg">
+                <Link to={c.href} className="inline-flex min-h-[44px] items-center hover:text-fg">
                   {c.label}
                 </Link>
               ) : (
@@ -127,7 +148,7 @@ export function AppBar({
             a pointer user as well as legible to a keyboard one, and it declares
             the shortcut it stands for rather than drawing a picture of it.
 
-            Hidden below `sm`: the palette is keyboard-summoned and there is no
+            Hidden below `md`: the palette is keyboard-summoned and there is no
             keyboard on a phone to summon it with, so a phone spends zero pixels
             on it (the chat route suppresses this whole bar there anyway). */}
         <button
@@ -135,12 +156,44 @@ export function AppBar({
           onClick={onOpenPalette}
           aria-keyshortcuts={PALETTE_KEYSHORTCUTS}
           title="Jump to a session — the command palette"
-          className="kt-chrome hidden shrink-0 items-center gap-xs rounded-control border border-border-soft px-badge-x py-0.5 text-meta text-muted hover:border-border hover:text-fg sm:inline-flex"
+          className="kt-chrome hidden shrink-0 items-center gap-xs rounded-control border border-border-soft px-badge-x py-0.5 text-meta text-muted hover:border-border hover:text-fg md:inline-flex"
         >
           <Search size={11} aria-hidden="true" />
           <span className="mono">{paletteShortcutLabel()}</span>
         </button>
-        <ThemeToggle />
+        {/* Small desktop destination tabs. Drawer/rail widths get the same two
+            destinations inside the fleet sidebar, so the top bar does not turn
+            into a second navigation row on a phone. The complete nav IA remains
+            a later batch. */}
+        {/* Visibility belongs to the PARENT. `.kt-btn` sets display later in
+            the stylesheet than Tailwind's `.hidden`, so putting both classes
+            on one anchor makes the button win and leak into 390px chrome. */}
+        <nav aria-label="Destinations" className="hidden shrink-0 items-center gap-xs min-[1100px]:flex">
+          <Link
+            to="/warden"
+            aria-current={wardenActive ? 'page' : undefined}
+            aria-label={WARDEN_ENTRY.label}
+            title={WARDEN_ENTRY.title}
+            className="kt-btn kt-btn--sm shrink-0 items-center gap-xs"
+          >
+            <ShieldCheck size={14} aria-hidden="true" />
+            <span className="text-meta font-medium">Warden</span>
+          </Link>
+          <Link
+            to="/settings"
+            aria-current={settingsActive ? 'page' : undefined}
+            aria-label={SETTINGS_ENTRY.label}
+            title={SETTINGS_ENTRY.title}
+            className="kt-btn kt-btn--sm shrink-0 items-center gap-xs"
+          >
+            <Settings size={14} aria-hidden="true" />
+            <span className="text-meta font-medium">Settings</span>
+          </Link>
+        </nav>
+        {/* Keep the established standalone picker for desktop. On a phone the
+            only theme control is Settings, so hidden chrome does not mount a
+            second useTheme instance behind the sheet. */}
+        {showTheme && layout !== 'drawer' && <ThemeToggle />}
       </div>
     </header>
   );

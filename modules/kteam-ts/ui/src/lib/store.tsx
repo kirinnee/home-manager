@@ -47,6 +47,7 @@ import type {
   UsageFeedView,
 } from '../types';
 import { usageIndex } from './usage';
+import type { SettingId } from './settings';
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -84,6 +85,8 @@ const CONTROLS_KEY = 'kteam-ui-controls-v1';
 
 export type ModeFilter = 'all' | InteractionMode;
 export type DashboardView = 'cards' | 'table';
+export type Density = 'full' | 'compact' | 'minimal';
+export type ChatWidth = 'full' | 'readable';
 
 /** Global, persisted UI controls. They live in the store rather than in the
  *  dashboard so the sidebar slice can render the same controls without either
@@ -97,6 +100,18 @@ export interface UiControls {
   includeFinished: boolean;
   /** null = follow the viewport (cards when narrow). */
   dashboardView: DashboardView | null;
+  /** null = use the first-load device default without persisting it. */
+  density: Density | null;
+  /** Chat pane horizontal measure. 'full' = full-bleed (today's behaviour);
+   *  'readable' caps the column at a reading measure and centres it. Mostly a
+   *  desktop control — a phone is already narrower than the cap, so it is inert
+   *  there. Non-null default because there is no device-derived answer to defer
+   *  to, unlike `density`. */
+  chatWidth: ChatWidth;
+  /** Folder mode: focus one project group. The group KEY (a normalised project
+   *  path, or a raw cwd for fallback groups) — never the display name, which can
+   *  collide. null = the whole fleet. Working state, same class as query/mode. */
+  projectScope: string | null;
   /** For the persistent sidebar (next slice); persisted now so it is remembered
    *  the first time that UI exists. */
   sidebarCollapsed: boolean;
@@ -108,6 +123,9 @@ const DEFAULT_CONTROLS: UiControls = {
   rcOnly: false,
   includeFinished: false,
   dashboardView: null,
+  density: null,
+  chatWidth: 'full',
+  projectScope: null,
   sidebarCollapsed: false,
 };
 
@@ -137,6 +155,13 @@ export interface UsageSnapshot {
   index: Map<string, UsageAccountView>;
 }
 
+/** Ephemeral shell overlays. Unlike filters these must not survive a reload:
+ * opening Settings is current navigation state, not a preference. */
+export interface ChromeSnapshot {
+  settingsOpen: boolean;
+  settingsTarget: SettingId | null;
+}
+
 type Listener = () => void;
 type EventListener = (event: KTeamEvent) => void;
 
@@ -144,11 +169,15 @@ type EventListener = (event: KTeamEvent) => void;
 // Persistence
 // ---------------------------------------------------------------------------
 
-function loadControls(): UiControls {
-  if (typeof localStorage === 'undefined') return DEFAULT_CONTROLS;
+/** Parse the additive controls-v1 payload field by field.
+ *
+ * Older payloads have no `density`; that is deliberately `null`, not a written
+ * default, so the first-load pointer policy can choose compact on a phone and
+ * full on desktop. Unknown fields remain harmless for forward/backward
+ * compatibility, and one malformed field cannot discard the user's others. */
+export function parseUiControls(raw: string | null): UiControls {
+  if (!raw) return DEFAULT_CONTROLS;
   try {
-    const raw = localStorage.getItem(CONTROLS_KEY);
-    if (!raw) return DEFAULT_CONTROLS;
     const parsed = JSON.parse(raw) as Partial<UiControls>;
     // Field-by-field, type-checked: a hand-edited or older blob must degrade to
     // the default for that field, never poison the whole control set.
@@ -162,9 +191,30 @@ function loadControls(): UiControls {
       includeFinished:
         typeof parsed.includeFinished === 'boolean' ? parsed.includeFinished : DEFAULT_CONTROLS.includeFinished,
       dashboardView: parsed.dashboardView === 'cards' || parsed.dashboardView === 'table' ? parsed.dashboardView : null,
+      density:
+        parsed.density === 'full' || parsed.density === 'compact' || parsed.density === 'minimal'
+          ? parsed.density
+          : null,
+      // Optional on read: an older blob has no `chatWidth`, so it degrades to
+      // 'full' — which IS today's behaviour, so the field can never poison a
+      // set it predates. No key/version bump needed for the same reason.
+      chatWidth: parsed.chatWidth === 'readable' ? 'readable' : 'full',
+      // Additive, like density: absent/invalid/empty → null (the whole fleet),
+      // which IS today's behaviour, so an older blob can never mean something
+      // else. Stores the group KEY, never the display name.
+      projectScope: typeof parsed.projectScope === 'string' && parsed.projectScope !== '' ? parsed.projectScope : null,
       sidebarCollapsed:
         typeof parsed.sidebarCollapsed === 'boolean' ? parsed.sidebarCollapsed : DEFAULT_CONTROLS.sidebarCollapsed,
     };
+  } catch {
+    return DEFAULT_CONTROLS;
+  }
+}
+
+function loadControls(): UiControls {
+  if (typeof localStorage === 'undefined') return DEFAULT_CONTROLS;
+  try {
+    return parseUiControls(localStorage.getItem(CONTROLS_KEY));
   } catch {
     return DEFAULT_CONTROLS;
   }
@@ -262,9 +312,16 @@ export class FleetStore {
   };
   private controlsSnapshot: UiControls = loadControls();
   private searchSnapshot: SearchSnapshot = { query: '', searching: false, results: null };
+  private chromeSnapshot: ChromeSnapshot = { settingsOpen: false, settingsTarget: null };
 
   private socket: EventStreamHandle | null = null;
   private started = false;
+  /** Have we ever seen the socket reach `open`? The FIRST open is the initial
+   *  handshake (already covered by hydrate's list fetch); a LATER open is a
+   *  genuine RECONNECT, where the 200-event global tail cannot be trusted to
+   *  carry a per-session status change we missed while down — so that one gets a
+   *  FORCED reconcile. */
+  private hasConnected = false;
 
   /** Per-session highest JOURNALLED sequence seen. Sequences are per session,
    *  so this is a map, not a number. */
@@ -334,8 +391,12 @@ export class FleetStore {
   private onVisibility = () => {
     if (typeof document !== 'undefined' && document.hidden) return;
     // Coming back to a tab that has been asleep: the reconcile interval was
-    // skipped while hidden, so heal the list once, now.
-    void this.reconcile();
+    // skipped while hidden AND the socket may have missed a per-session status
+    // change (a structured question raised while backgrounded is the case that
+    // bit us — dale's diagnosis, Rank 1). FORCE this one reconcile past the 5s
+    // gap so a returning PWA always heals immediately, instead of the pending
+    // question staying invisible for up to the 45s interval.
+    void this.reconcile(true);
     // Same for quota — a countdown that stopped while hidden is worse than no
     // countdown, but only refetch if the interval genuinely lapsed.
     if (Date.now() - this.lastUsageAt >= USAGE_MS) void this.refreshUsage();
@@ -395,6 +456,7 @@ export class FleetStore {
   getControls = (): UiControls => this.controlsSnapshot;
   getSearch = (): SearchSnapshot => this.searchSnapshot;
   getUsage = (): UsageSnapshot => this.usageSnapshot;
+  getChrome = (): ChromeSnapshot => this.chromeSnapshot;
   getSession = (id: string): SessionView | undefined => this.fleetSnapshot.byId.get(id);
 
   private notify(immediate = false): void {
@@ -422,8 +484,17 @@ export class FleetStore {
     if (this.fleetSnapshot.status === status) return;
     this.setFleet({ status });
     // A socket that just (re)opened may have missed events while it was down;
-    // the tail covers journalled ones, a reconcile covers the rest.
-    if (status === 'open') void this.reconcile();
+    // the tail covers journalled ones, a reconcile covers the rest. The FIRST
+    // open dedupes against hydrate's fetch (hydrate stamped lastReconcileAt for
+    // exactly this); a RECONNECT forces the reconcile past the 5s gap, because
+    // the 200-event global tail routinely misses a per-session status change
+    // (e.g. a question raised while we were down) and the whole point of the
+    // reconnect heal is to catch it (dale's diagnosis, Rank 1).
+    if (status === 'open') {
+      const reconnect = this.hasConnected;
+      this.hasConnected = true;
+      void this.reconcile(reconnect);
+    }
   }
 
   /** Replace the whole list, reusing unchanged session objects so open pages
@@ -696,6 +767,20 @@ export class FleetStore {
     this.notify(true);
   }
 
+  // -- shell overlays -------------------------------------------------------
+
+  openSettings(target: SettingId | null = null): void {
+    if (this.chromeSnapshot.settingsOpen && this.chromeSnapshot.settingsTarget === target) return;
+    this.chromeSnapshot = { settingsOpen: true, settingsTarget: target };
+    this.notify(true);
+  }
+
+  closeSettings(): void {
+    if (!this.chromeSnapshot.settingsOpen && this.chromeSnapshot.settingsTarget === null) return;
+    this.chromeSnapshot = { settingsOpen: false, settingsTarget: null };
+    this.notify(true);
+  }
+
   // -- transcript search ----------------------------------------------------
 
   async runSearch(query: string): Promise<void> {
@@ -766,6 +851,11 @@ export function useUiControls(): [UiControls, (patch: Partial<UiControls>) => vo
   const controls = useSyncExternalStore(s.subscribe, s.getControls, s.getControls);
   const set = useCallback((patch: Partial<UiControls>) => s.setControls(patch), [s]);
   return [controls, set];
+}
+
+export function useChrome(): ChromeSnapshot {
+  const s = useStore();
+  return useSyncExternalStore(s.subscribe, s.getChrome, s.getChrome);
 }
 
 export function useTranscriptSearch(): SearchSnapshot {
