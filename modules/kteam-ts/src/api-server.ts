@@ -6,7 +6,7 @@ import { SIGNAL_KINDS } from './types';
 import type { SendRequest, SignalKind, StartSessionRequest } from './types';
 import { WARDEN_LABEL } from './warden-detect';
 import { renderShell } from './ui';
-import { actorContext } from './actor-context';
+import { actorContext, resolveApiActor, type TokenClass } from './actor-context';
 import { KTEAM_VERSION } from './version';
 
 // Built chat UI (Vite output, committed): served when present; the legacy
@@ -292,10 +292,20 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
         if (denial) return denial;
       }
 
-      // Attribute events caused by this request to the warden when it is
-      // authenticated as one (warden-scoped token, or an assigned-warden stop
-      // capability). SessionManager.emit reads this context.
-      const wardenActor = authedWarden || request.headers.get('x-kteam-stop-capability') != null;
+      // Attribute events caused by this request to WHOEVER caused it — the human
+      // via the CLI ('admin-cli') or web UI ('admin-ui'), a warden
+      // ('warden:<id>'), or a teammate ('peer:<id>') — so the journal can answer
+      // "who did this" instead of blaming 'daemon'. SessionManager.emit reads
+      // this context at emit time. A warden is authenticated by the warden-scoped
+      // token or an assigned-warden stop capability; everything else is the admin
+      // token, split into peer/CLI/UI by the self-identification headers.
+      const tokenClass: TokenClass =
+        authedWarden || request.headers.get('x-kteam-stop-capability') != null ? 'warden' : 'admin';
+      const actor = resolveApiActor({
+        tokenClass,
+        sessionId: request.headers.get('x-kteam-session-id') ?? undefined,
+        client: request.headers.get('x-kteam-client') ?? undefined,
+      });
       const dispatch = async (): Promise<Response | undefined> => {
         try {
           if (isWebSocket) {
@@ -549,7 +559,7 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           return json({ error: error instanceof Error ? error.message : String(error) }, status);
         }
       };
-      const response = await (wardenActor ? actorContext.run({ actor: 'warden' }, dispatch) : dispatch());
+      const response = await actorContext.run({ actor }, dispatch);
       // Every API response advertises the daemon's version (json() already
       // does; this also covers the text/binary routes — snapshot, logs,
       // attachments — so the CLI detects skew on any command).

@@ -123,6 +123,14 @@ export class ApiClient {
         // `stop <assigned target>` by capability match, never by a
         // client-chosen identity.
         ...(process.env.KTEAM_STOP_CAPABILITY ? { 'x-kteam-stop-capability': process.env.KTEAM_STOP_CAPABILITY } : {}),
+        // Actor attribution (see actor-context.resolveApiActor). Marks this
+        // request as coming from the CLI (the browser SPA sends neither header,
+        // so it reads as the UI), and carries the acting pane's own session id
+        // when run from inside a teammate/warden — turning an admin-token action
+        // into 'peer:<id>' / 'warden:<id>' rather than an anonymous admin. Never
+        // an authorization input; the bearer token already authorized the call.
+        'x-kteam-client': 'cli',
+        ...(process.env.KTEAM_SESSION_ID ? { 'x-kteam-session-id': process.env.KTEAM_SESSION_ID } : {}),
         ...init.headers,
       },
     };
