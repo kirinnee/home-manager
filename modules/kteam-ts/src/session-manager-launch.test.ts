@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { SessionManager } from './session-manager';
@@ -63,6 +63,7 @@ interface MonitorHarness {
 async function monitorHarness(input: {
   status: string;
   launchInFlight: boolean;
+  turn?: number;
   launchedAt?: string;
   subprocessAlive?: boolean;
   finalFrame?: string;
@@ -72,7 +73,7 @@ async function monitorHarness(input: {
   const state: Record<string, unknown> = {
     id: 's1',
     status: input.status,
-    turn: 1,
+    turn: input.turn ?? 1,
     ...(input.launchedAt ? { launchedAt: input.launchedAt } : {}),
   };
   const config = {
@@ -81,7 +82,7 @@ async function monitorHarness(input: {
     mode: 'auto',
     binary: 'claude-auto-glm52a',
     tmuxSession: 'kteam-s1-agent',
-    turn: 1,
+    turn: input.turn ?? 1,
     intervalSeconds: 1,
     cwd: home,
   };
@@ -284,6 +285,43 @@ describe('a launch still in flight is PENDING, never crashed', () => {
     expect(harness.recorded.map(item => item.type)).toContain('control.false_terminal_averted');
     expect(harness.recorded.map(item => item.type)).not.toContain('session.crashed');
     expect(harness.state.status).toBe('running');
+  });
+});
+
+describe('done markers are turn-scoped in the live monitor', () => {
+  test('a turn-N marker during turn N+1 is journaled as stale and does not complete the session', async () => {
+    const harness = await monitorHarness({
+      status: 'running',
+      launchInFlight: false,
+      turn: 4,
+      launchedAt: new Date().toISOString(),
+    });
+    const markerDirectory = path.join(String((harness.manager.paths as { home: string }).home), 's1', 'markers');
+    await mkdir(markerDirectory, { recursive: true });
+    await writeFile(path.join(markerDirectory, 'done.json'), '{"type":"done","turn":3}\n');
+    harness.manager.stopTmuxWithEvidence = async () => undefined;
+    const abort = new AbortController();
+    const loop = runMonitor(harness.manager, abort.signal);
+    await Bun.sleep(30);
+    abort.abort();
+    await loop;
+    expect(harness.recorded.map(item => item.type)).toContain('session.stale_done_marker');
+    expect(harness.recorded.map(item => item.type)).not.toContain('session.completed');
+  });
+
+  test('a marker for the current turn still completes the session', async () => {
+    const harness = await monitorHarness({
+      status: 'running',
+      launchInFlight: false,
+      turn: 4,
+      launchedAt: new Date().toISOString(),
+    });
+    const markerDirectory = path.join(String((harness.manager.paths as { home: string }).home), 's1', 'markers');
+    await mkdir(markerDirectory, { recursive: true });
+    await writeFile(path.join(markerDirectory, 'done.json'), '{"type":"done","turn":4}\n');
+    harness.manager.stopTmuxWithEvidence = async () => undefined;
+    await runMonitor(harness.manager, new AbortController().signal);
+    expect(harness.recorded.map(item => item.type)).toContain('session.completed');
   });
 });
 
