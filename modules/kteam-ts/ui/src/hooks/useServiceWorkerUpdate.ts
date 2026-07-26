@@ -52,6 +52,29 @@ export interface ServiceWorkerUpdate {
   updateReady: UpdateReason | null;
   /** Chip click. Idempotent per action — see `applyUpdate`. */
   applyUpdate: () => void;
+  /** Raise the recovery chip from outside the hook.
+   *
+   *  `vite:preloadError` is not the only way this tab learns it is broken: a
+   *  rejected `React.lazy` surfaces as a render-time throw that only an error
+   *  boundary sees (`components/ChunkErrorBoundary.tsx`). Both routes must end
+   *  in the SAME state transition, so the boundary calls this rather than
+   *  owning a second, subtly different piece of chip state. */
+  raiseRecovery: () => void;
+}
+
+/** The chip's state transition, as a pure function so the priority rule is
+ *  assertable without a React tree.
+ *
+ *  TWO RULES, AND THEY POINT THE SAME WAY: recovery is never downgraded to
+ *  update, and update is always UPGRADED to recovery. `recovery` is a statement
+ *  about this tab — something in it has already failed to load and it is stuck
+ *  until reloaded — which stays true no matter what the worker does afterwards,
+ *  and becomes true the moment anything fails even if a routine update offer
+ *  got there first. Telling a stuck reader "Update ready" would be a lie about
+ *  the state of their tab in exactly the case where they most need the truth. */
+export function nextUpdateReason(prev: UpdateReason | null, next: UpdateReason): UpdateReason {
+  if (prev === 'recovery' || next === 'recovery') return 'recovery';
+  return prev ?? next;
 }
 
 /* ---------- capability gate ----------------------------------------------- */
@@ -288,6 +311,16 @@ export function startWorkerLifecycle(deps: WorkerLifecycleDeps): () => void {
  *  comes up in RECOVERY wording — this tab is already broken, and the reader
  *  needs to know a reload is the fix rather than reading a spinner forever.
  *
+ *  HALF THE STORY, AND THE HALF THAT CANNOT SAVE THE PAGE ON ITS OWN.
+ *  `preventDefault()` suppresses only the global unhandled-rejection surface;
+ *  the `React.lazy` promise still rejects and React still rethrows it during
+ *  render. Stage E measured what that costs with nothing catching it: the root
+ *  unmounts, `#root` is emptied and the chip this watch just raised is
+ *  destroyed along with it (`drill-nocache.json`, `rootChildren: 0`,
+ *  `chip: null`). The render-time half is caught by `ChunkErrorBoundary`, which
+ *  raises recovery through the same `raiseRecovery` this does. The two are a
+ *  pair — dropping either one puts the reader back on a blank page.
+ *
  *  Watched unconditionally, with no service-worker gate: a preload can fail on a
  *  plain redeploy with no worker involved at all, and the reader is just as stuck.
  *  Returns the cleanup function. */
@@ -332,6 +365,16 @@ export function browserApplyDeps(env: ApplyEnv): ApplyDeps {
       // waiting-worker path never attaches a `controllerchange` listener, so it
       // can never be reloaded out from under its reader by someone else's
       // update. `once` plus the armed guard means exactly one reload.
+      //
+      // WHAT THIS DOES NOT MEAN. It is a guarantee about RELOADS, not about the
+      // controller. Stage E measured the difference: when any tab on the origin
+      // takes an update, `skipWaiting()` activation transfers EVERY client of
+      // the replaced worker, so an untouched tab is silently repointed to the
+      // new worker and receives `controllerchange` without ever having armed
+      // anything (`drill-main.txt` step5: 0 listeners, 0 postMessages, load
+      // count unchanged). It is not reloaded — that is what this guard buys —
+      // and being repointed is safe because the fetch policy serves any
+      // RETAINED generation's cache, not just the active worker's own.
       container?.addEventListener('controllerchange', () => env.reload(), { once: true });
     },
     reload: env.reload,
@@ -354,12 +397,14 @@ export function useServiceWorkerUpdate(): ServiceWorkerUpdate {
    *  so the offline/error surface takes over instead of a reload cycle. */
   const armed = useRef(false);
 
-  // A chip already raised as `recovery` must never be downgraded to `update`:
-  // recovery means THIS tab has already failed to load something, which stays
-  // true regardless of what the worker does afterwards.
+  // Recovery wins in both directions — see `nextUpdateReason`.
   const raise = useCallback((reason: UpdateReason) => {
-    setUpdateReady(prev => (prev === 'recovery' ? prev : (prev ?? reason)));
+    setUpdateReady(prev => nextUpdateReason(prev, reason));
   }, []);
+
+  // ONE recovery entry point for both halves of the failure surface: the
+  // preload watch below and `ChunkErrorBoundary`'s render-time catch.
+  const raiseRecovery = useCallback(() => raise('recovery'), [raise]);
 
   useEffect(() => {
     if (!canRegister(navigator, window.isSecureContext)) return;
@@ -372,7 +417,7 @@ export function useServiceWorkerUpdate(): ServiceWorkerUpdate {
     });
   }, [raise]);
 
-  useEffect(() => startPreloadErrorWatch(window, () => setUpdateReady('recovery')), []);
+  useEffect(() => startPreloadErrorWatch(window, raiseRecovery), [raiseRecovery]);
 
   const applyUpdate = useCallback(() => {
     void runApplyUpdate(
@@ -389,5 +434,5 @@ export function useServiceWorkerUpdate(): ServiceWorkerUpdate {
     );
   }, []);
 
-  return { updateReady, applyUpdate };
+  return { updateReady, applyUpdate, raiseRecovery };
 }

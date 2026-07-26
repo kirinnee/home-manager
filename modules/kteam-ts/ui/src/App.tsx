@@ -23,6 +23,7 @@ import { AgentSidebar } from './components/AgentSidebar';
 import { CommandPalette } from './components/CommandPalette';
 import { SessionsListPage } from './pages/SessionsListPage';
 import { NewSessionPage } from './pages/NewSessionPage';
+import { ChunkErrorBoundary } from './components/ChunkErrorBoundary';
 import { cn } from './lib/utils';
 import { useAppViewport } from './hooks/useAppViewport';
 import { useLayoutMode } from './hooks/useLayoutMode';
@@ -36,7 +37,18 @@ import { useServiceWorkerUpdate } from './hooks/useServiceWorkerUpdate';
 // into a session and keeps it for the life of the tab, so the second session
 // opens with no network at all.
 const SessionChatPage = lazy(() =>
-  import('./pages/SessionChatPage').then(module => ({ default: module.SessionChatPage })),
+  import('./pages/SessionChatPage').then(module => {
+    // THE IMPORT CAN RESOLVE WITH `undefined` INSTEAD OF REJECTING.
+    // `startPreloadErrorWatch` calls `preventDefault()` on `vite:preloadError`
+    // — correct, it is what stops the unhandled rejection — and Vite's preload
+    // helper reads that as "handled" and resolves the import with `undefined`.
+    // Reading `.SessionChatPage` off that throws a TypeError that names the
+    // property rather than the failure ("Cannot read properties of undefined
+    // (reading 'SessionChatPage')" is what Stage E actually recorded). The
+    // boundary catches it either way; this only makes the console line true.
+    if (!module) throw new Error('kteam: the chat chunk failed to load');
+    return { default: module.SessionChatPage };
+  }),
 );
 
 /** How many session pages stay mounted at once (the current one plus the one
@@ -74,6 +86,43 @@ function Pane({ active, children }: { active: boolean; children: React.ReactNode
   );
 }
 
+/** A pane that cannot take the shell down with it.
+ *
+ *  ONE BOUNDARY PER PANE, INSIDE THE PANE AND OUTSIDE ITS SUSPENSE, for
+ *  pane-local isolation — the same reason the Suspense boundaries are per-pane.
+ *  A single shared boundary at the top of `<main>` would keep the root and the
+ *  sidebar alive, but it would replace every retained pane with one failed
+ *  pane's fallback; the mounted-pane cache exists precisely so a healthy
+ *  conversation you navigated away from is still there when you come back.
+ *  Outside the Suspense rather than inside it so the boundary owns the whole
+ *  pane surface: the recovery message replaces the loading fallback instead of
+ *  rendering underneath a spinner that will never resolve.
+ *
+ *  Every pane gets one, not just the panes that lazy-load today: the boundary is
+ *  exactly transparent while its child is healthy, and the failure it prevents —
+ *  React unmounting the whole root, measured as an empty `#root` and no chip in
+ *  Stage E — is not worth re-earning the next time someone adds a lazy import to
+ *  a page that does not have one now. */
+export function SafePane({
+  active,
+  onChunkError,
+  onReload,
+  children,
+}: {
+  active: boolean;
+  onChunkError: (error: unknown) => void;
+  onReload: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <Pane active={active}>
+      <ChunkErrorBoundary onChunkError={onChunkError} onReload={onReload}>
+        {children}
+      </ChunkErrorBoundary>
+    </Pane>
+  );
+}
+
 export function App() {
   const [route] = useRoute();
 
@@ -98,7 +147,7 @@ export function App() {
   // (src/hooks/useServiceWorkerUpdate.ts). Mounted here, once, for the app's
   // life: the chip has to be reachable from every route, and a per-page hook
   // would re-register on navigation.
-  const { updateReady, applyUpdate } = useServiceWorkerUpdate();
+  const { updateReady, applyUpdate, raiseRecovery } = useServiceWorkerUpdate();
 
   // Mobile drawer visibility. It lives here rather than in the sidebar because
   // the AppBar's trigger and the drawer's own close button must drive ONE piece
@@ -229,16 +278,21 @@ export function App() {
       <div className="flex min-h-0 w-full flex-1">
         <AgentSidebar activeId={route.sessionId} drawerOpen={drawerOpen} onCloseDrawer={() => setDrawerOpen(false)} />
         <main className="relative min-h-0 min-w-0 flex-1">
-          <Pane active={!route.sessionId && !route.isNew}>
+          {/* THE DASHBOARD IS A LAZY-CHUNK PANE TOO, which is easy to miss: the
+              page itself is a static import, but it renders `WardenVerdicts`,
+              which lazy-loads the markdown renderer. Without a boundary here a
+              pruned Markdown chunk blanks the root from the dashboard exactly
+              the way a pruned chat chunk does from a session. */}
+          <SafePane active={!route.sessionId && !route.isNew} onChunkError={raiseRecovery} onReload={applyUpdate}>
             <SessionsListPage />
-          </Pane>
+          </SafePane>
           {/* One Suspense boundary PER PANE, not one wrapping the list: a shared
               boundary would replace a retained, fully loaded chat with a
               fallback the moment another pane suspended. Only the first
               navigation suspends at all — the chunk is cached afterwards — and
               the LRU, drafts, scroll and client-side navigation are untouched. */}
           {mounted.map(id => (
-            <Pane key={id} active={route.sessionId === id}>
+            <SafePane key={id} active={route.sessionId === id} onChunkError={raiseRecovery} onReload={applyUpdate}>
               <Suspense fallback={<ChatChunkFallback />}>
                 {/* The drawer trigger rides in the session header when the app
                     bar is suppressed, so the opener has to reach down here. */}
@@ -248,12 +302,12 @@ export function App() {
                   onOpenSidebar={() => setDrawerOpen(true)}
                 />
               </Suspense>
-            </Pane>
+            </SafePane>
           ))}
           {route.isNew && (
-            <Pane active>
+            <SafePane active onChunkError={raiseRecovery} onReload={applyUpdate}>
               <NewSessionPage />
-            </Pane>
+            </SafePane>
           )}
         </main>
       </div>
