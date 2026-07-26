@@ -116,8 +116,12 @@ export interface KTeamService {
   stop(id: string, reason?: string): Promise<SessionView>;
   resume(id: string, message?: string): Promise<SessionView>;
   /** Continue a session on another same-kind account (new wrapper); relaunches
-   *  via the resume path under the new wrapper. Cross-kind is rejected. */
-  migrate(id: string, agent: string, model?: string): Promise<SessionView>;
+   *  via the resume path under the new wrapper. Cross-kind is rejected.
+   *  `allowContextDowngrade` opts into migrating onto a target whose context
+   *  window is smaller than the current one (normally refused because the live
+   *  transcript may not fit); optional and additive, so an implementation that
+   *  does not yet honour it still satisfies this interface. */
+  migrate(id: string, agent: string, model?: string, allowContextDowngrade?: boolean): Promise<SessionView>;
   /** Change a session's task title and/or its teammate callsign, and/or detach
    *  it from its parent (`clearParent`). Accepts a session id or a teammate name.
    *  Persists to config + the metadata index and journals `session.renamed` so

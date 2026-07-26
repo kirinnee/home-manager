@@ -306,8 +306,8 @@ export class ApiClient {
   resume(id: string, message?: string) {
     return this.post<SessionView>(id, 'resume', { message });
   }
-  migrate(id: string, agent: string, model?: string) {
-    return this.post<SessionView>(id, 'migrate', { agent, model });
+  migrate(id: string, agent: string, model?: string, allowContextDowngrade?: boolean) {
+    return this.post<SessionView>(id, 'migrate', { agent, model, allowContextDowngrade });
   }
   rename(id: string, name?: string, teammate?: string, clearParent?: boolean) {
     return this.post<SessionView>(id, 'rename', { name, teammate, clearParent });

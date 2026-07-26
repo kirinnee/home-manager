@@ -56,7 +56,11 @@ class FakeService implements KTeamService {
   interrupt = async () => view;
   stop = async () => view;
   resume = async () => view;
-  migrate = async (_id: string, _agent: string, _model?: string) => view;
+  lastMigrate?: { id: string; agent: string; model?: string; allowContextDowngrade?: boolean };
+  migrate = async (id: string, agent: string, model?: string, allowContextDowngrade?: boolean) => {
+    this.lastMigrate = { id, agent, model, allowContextDowngrade };
+    return view;
+  };
   rename = async (_id: string, _name?: string, _teammate?: string, _clearParent?: boolean) => view;
   remove = async () => {};
   signal = async () => view;
@@ -395,6 +399,36 @@ describe('kteam daemon API', () => {
     });
     expect(signal.status).toBe(400);
     expect(((await signal.json()) as { error: string }).error).toBe('kind must be one of done, help, waiting, working');
+  });
+
+  test('migrate carries --allow-context-downgrade through to the daemon payload (B4)', async () => {
+    const service = new FakeService();
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}`;
+    const admin = { authorization: 'Bearer secret', 'content-type': 'application/json' };
+
+    const on = await fetch(`${base}/v1/sessions/s1/migrate`, {
+      method: 'POST',
+      headers: admin,
+      body: JSON.stringify({ agent: 'claude-auto-glm52b', model: 'glm-5.2', allowContextDowngrade: true }),
+    });
+    expect(on.status).toBe(200);
+    expect(service.lastMigrate).toEqual({
+      id: 's1',
+      agent: 'claude-auto-glm52b',
+      model: 'glm-5.2',
+      allowContextDowngrade: true,
+    });
+
+    // Omitted flag arrives as undefined (not coerced to true) — the daemon
+    // keeps its default context-downgrade refusal.
+    await fetch(`${base}/v1/sessions/s1/migrate`, {
+      method: 'POST',
+      headers: admin,
+      body: JSON.stringify({ agent: 'claude-auto-glm52b' }),
+    });
+    expect(service.lastMigrate?.allowContextDowngrade).toBeUndefined();
   });
 });
 

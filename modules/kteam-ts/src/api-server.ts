@@ -463,9 +463,11 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
             return await applyOnce(() => options.service.resume(id, input.message));
           }
           if (action === 'migrate' && request.method === 'POST') {
-            const input = await body<{ agent?: string; model?: string }>(request);
+            const input = await body<{ agent?: string; model?: string; allowContextDowngrade?: boolean }>(request);
             if (!input.agent) throw new HttpError(400, 'agent is required');
-            return await applyOnce(() => options.service.migrate(id, input.agent!, input.model));
+            return await applyOnce(() =>
+              options.service.migrate(id, input.agent!, input.model, input.allowContextDowngrade),
+            );
           }
           if (action === 'rename' && request.method === 'POST') {
             const input = await body<{ name?: string; teammate?: string; clearParent?: boolean }>(request);
