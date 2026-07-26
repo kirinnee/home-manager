@@ -2133,29 +2133,43 @@ export class SessionManager implements KTeamService {
     return normalized;
   }
 
-  /** Rename a session's TASK TITLE and/or its teammate CALLSIGN. Renaming the
-   *  callsign is cheap and safe because the callsign is not load-bearing — tmux
-   *  sessions, session directories, and KTEAM_SESSION_ID all key on the id, and
+  /** Rename a session's TASK TITLE and/or its teammate CALLSIGN, and/or DETACH
+   *  it from its parent (`clearParent`). Renaming the callsign is cheap and safe
+   *  because the callsign is not load-bearing — tmux sessions, session
+   *  directories, and KTEAM_SESSION_ID all key on the id, and
    *  `kteam send/attach/--parent` resolve the name live off `config.teammate`.
    *  So a callsign rename simply changes what the name resolves to, guarded by
    *  the same collision check as `start --teammate` (excluding this session).
+   *  Clearing the parent drops the lineage pointer only — it re-roots a session
+   *  in the `ps`/UI tree and is a safe no-op when there is no parent.
    *  Persists to config.json AND the metadata index (so `kteam ps` and the web
    *  UI both reflect it) and journals a `session.renamed` event so the live UI
    *  refetches without a manual refresh. Works on running and terminal
    *  sessions alike — it only rewrites config. */
-  async rename(id: string, name?: string, teammate?: string): Promise<SessionView> {
+  async rename(id: string, name?: string, teammate?: string, clearParent = false): Promise<SessionView> {
     const resolved = this.resolveRef(id);
     const title = name?.trim();
     const requestedTeammate = teammate?.trim();
-    if (!title && !requestedTeammate) throw new Error('rename requires --name "New Title" and/or --teammate <name>');
+    if (!title && !requestedTeammate && !clearParent)
+      throw new Error('rename requires --name "New Title", --teammate <name>, and/or --clear-parent');
     const nextName = title ? displayName(title) : undefined;
     const nextTeammate = requestedTeammate ? this.resolveRenameTeammate(requestedTeammate, resolved) : undefined;
-    const config = await this.store.updateConfig<SessionConfig>(resolved, current => ({
-      ...current,
-      ...(nextName !== undefined ? { name: nextName } : {}),
-      ...(nextTeammate !== undefined ? { teammate: nextTeammate } : {}),
-      updatedAt: now(),
-    }));
+    const config = await this.store.updateConfig<SessionConfig>(resolved, current => {
+      const next: SessionConfig = {
+        ...current,
+        ...(nextName !== undefined ? { name: nextName } : {}),
+        ...(nextTeammate !== undefined ? { teammate: nextTeammate } : {}),
+        updatedAt: now(),
+      };
+      // Detach from the parent — clears the lineage pointer ONLY. Nothing else
+      // keys on `parent` for a non-warden session (name resolution uses
+      // id/teammate; warden lineage only walks WARDEN ancestors), so a human
+      // session mis-parented under the agent that spawned it is re-rooted
+      // without side effects. Deleting the key (vs undefined) keeps config.json
+      // clean; a no-op when there is no parent.
+      if (clearParent) delete next.parent;
+      return next;
+    });
     await this.emit(resolved, 'session.renamed', { name: config.name, teammate: config.teammate }, 'client');
     return await this.get(resolved);
   }

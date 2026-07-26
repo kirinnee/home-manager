@@ -455,10 +455,10 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
             return await applyOnce(() => options.service.migrate(id, input.agent!, input.model));
           }
           if (action === 'rename' && request.method === 'POST') {
-            const input = await body<{ name?: string; teammate?: string }>(request);
-            if (!input.name?.trim() && !input.teammate?.trim())
-              throw new HttpError(400, 'name and/or teammate is required');
-            return await applyOnce(() => options.service.rename(id, input.name, input.teammate));
+            const input = await body<{ name?: string; teammate?: string; clearParent?: boolean }>(request);
+            if (!input.name?.trim() && !input.teammate?.trim() && !input.clearParent)
+              throw new HttpError(400, 'name, teammate, and/or clearParent is required');
+            return await applyOnce(() => options.service.rename(id, input.name, input.teammate, input.clearParent));
           }
           if (action === 'signal' && request.method === 'POST') {
             const input = await body<{
