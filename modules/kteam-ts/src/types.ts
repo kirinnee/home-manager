@@ -185,6 +185,10 @@ export interface SessionState {
   needsHumanKind?: string;
   /** Context-window usage (percent used) parsed from the TUI statusline. */
   contextPercent?: number;
+  /** Exact live context usage from the harness transcript when available. */
+  contextTokens?: number;
+  /** Context-window size paired with `contextTokens` by the harness. */
+  contextWindow?: number;
   /** Rolling five-hour quota usage (percent used) from cached kfleet usage. */
   usage5hPercent?: number;
   /** Rolling weekly quota usage (percent used) from cached kfleet usage. */

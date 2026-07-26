@@ -48,6 +48,14 @@ interface ProcessRecord {
   stat?: string;
 }
 
+/** Central readiness budgets. These deliberately preserve the established
+ * values; naming every call-site budget prevents one path drifting when the
+ * fleet's startup/readiness tuning changes. */
+export const INTERACTIVE_READY_TIMEOUT_MS = 10_000;
+export const AUTOMODE_READY_TIMEOUT_MS = 30_000;
+export const DEFAULT_READY_TIMEOUT_MS = 45_000;
+export const LAUNCH_READY_TIMEOUT_MS = 90_000;
+
 const STARTUP_BLOCKERS = [
   'do you trust the contents of this directory',
   'do you trust the files',
@@ -630,12 +638,14 @@ export class TmuxController {
     ]);
     if (result.code !== 0) throw new Error(`failed to launch tmux: ${result.stderr.trim()}`);
     await run(['tmux', 'set-option', '-t', config.tmuxSession, 'remain-on-exit', 'on']);
-    await this.waitReady(config.tmuxSession, 90_000, true, { resumeMenuChoice: config.resumeMenuChoice });
+    await this.waitReady(config.tmuxSession, LAUNCH_READY_TIMEOUT_MS, true, {
+      resumeMenuChoice: config.resumeMenuChoice,
+    });
   }
 
   async waitReady(
     name: string,
-    timeoutMs = 45_000,
+    timeoutMs = DEFAULT_READY_TIMEOUT_MS,
     handleStartupDialogs = false,
     dialogOptions: StartupDialogOptions = {},
   ): Promise<void> {
@@ -778,9 +788,14 @@ export class TmuxController {
     // after launch()'s readiness gate — answer them here too so the injected
     // prompt is never queued behind a modal.
     const interactive = config.mode === 'interactive';
-    await this.waitReady(config.tmuxSession, interactive ? 10_000 : 30_000, true, {
-      resumeMenuChoice: config.resumeMenuChoice,
-    }).catch(async error => {
+    await this.waitReady(
+      config.tmuxSession,
+      interactive ? INTERACTIVE_READY_TIMEOUT_MS : AUTOMODE_READY_TIMEOUT_MS,
+      true,
+      {
+        resumeMenuChoice: config.resumeMenuChoice,
+      },
+    ).catch(async error => {
       // INTERACTIVE panes have a second reason to never report a ready prompt:
       // a human (at the pane, or through the harness's own remote-control
       // surface) left text sitting in the composer. `promptReady` is false for
@@ -883,7 +898,7 @@ export class TmuxController {
     // Nothing was running, so there is no turn to wind down: skip the readiness
     // wait (30 s of polling for a state the pane is already in).
     if (!working) return;
-    await this.waitReady(name, 30_000);
+    await this.waitReady(name, AUTOMODE_READY_TIMEOUT_MS);
   }
 
   async answerQuestion(

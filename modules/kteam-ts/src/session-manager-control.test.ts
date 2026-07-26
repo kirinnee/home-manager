@@ -1269,6 +1269,7 @@ describe('migrate — cross-account continuation', () => {
     const manager = bareManager();
     manager.store = { listSessions: () => [] };
     manager.paths = { kfleetBin: '/nonexistent-kfleet-bin' };
+    manager.options = { contextWindows: {} };
     manager.cancelRetry = () => undefined;
     manager.cancelQuotaWaiter = async () => undefined;
     manager.get = async () => claudeSession;
@@ -1279,12 +1280,12 @@ describe('migrate — cross-account continuation', () => {
     return configured;
   }
 
-  const callMigrate = (manager: Loose, id: string, agent: string, model?: string) =>
-    (manager as unknown as { migrate: (id: string, agent: string, model?: string) => Promise<SessionView> }).migrate(
-      id,
-      agent,
-      model,
-    );
+  const callMigrate = (manager: Loose, id: string, agent: string, model?: string, allowContextDowngrade?: boolean) =>
+    (
+      manager as unknown as {
+        migrate: (id: string, agent: string, model?: string, allowContextDowngrade?: boolean) => Promise<SessionView>;
+      }
+    ).migrate(id, agent, model, allowContextDowngrade);
 
   test('rejects cross-harness migration', async () => {
     const manager = migrateManager();
@@ -1301,7 +1302,69 @@ describe('migrate — cross-account continuation', () => {
     await expect(callMigrate(manager, 's1', 'claude-interactive')).rejects.toThrow(/auto-mode fleet wrappers/);
   });
 
-  test('rewrites binary/home/model, keeps identity, emits session.migrated, then resumes', async () => {
+  test('refuses a 1M-to-200k context downgrade without the flag and names the 1M variant', async () => {
+    const wrapperDir = await mkdtemp(path.join(os.tmpdir(), 'kteam-migrate-window-'));
+    temporaryDirectories.push(wrapperDir);
+    await writeFile(
+      path.join(wrapperDir, 'claude-auto-smaller'),
+      'export CLAUDE_CONFIG_DIR="/new/home"\nexport KTEAM_MODEL="claude-fable-5"\n',
+      { mode: 0o755 },
+    );
+    const oneMillionSession = {
+      ...claudeSession,
+      config: { ...claudeSession.config, model: 'claude-fable-5[1m]' },
+      state: { ...claudeSession.state, contextTokens: 100_000 },
+    } as SessionView;
+    let journaled = false;
+    const manager = migrateManager({
+      paths: { kfleetBin: wrapperDir },
+      get: async () => oneMillionSession,
+      store: {
+        listSessions: () => [],
+        updateConfig: async () => {
+          journaled = true;
+          throw new Error('must refuse before journaling migration intent');
+        },
+      },
+    });
+
+    await expect(callMigrate(manager, 's1', 'claude-auto-smaller')).rejects.toThrow(
+      /claude-fable-5\[1m\].*--allow-context-downgrade/,
+    );
+    expect(journaled).toBe(false);
+  });
+
+  test('refuses an over-capacity target even when context downgrade is allowed', async () => {
+    const wrapperDir = await mkdtemp(path.join(os.tmpdir(), 'kteam-migrate-capacity-'));
+    temporaryDirectories.push(wrapperDir);
+    await writeFile(
+      path.join(wrapperDir, 'claude-auto-smaller'),
+      'export CLAUDE_CONFIG_DIR="/new/home"\nexport KTEAM_MODEL="claude-fable-5"\n',
+      { mode: 0o755 },
+    );
+    const overCapacitySession = {
+      ...claudeSession,
+      config: { ...claudeSession.config, model: 'claude-fable-5[1m]' },
+      state: { ...claudeSession.state, contextTokens: 639_000 },
+    } as SessionView;
+    let journaled = false;
+    const manager = migrateManager({
+      paths: { kfleetBin: wrapperDir },
+      get: async () => overCapacitySession,
+      store: {
+        listSessions: () => [],
+        updateConfig: async () => {
+          journaled = true;
+          throw new Error('must refuse before journaling migration intent');
+        },
+      },
+    });
+
+    await expect(callMigrate(manager, 's1', 'claude-auto-smaller', undefined, true)).rejects.toThrow(/639000.*200000/);
+    expect(journaled).toBe(false);
+  });
+
+  test('a window-equal migration rewrites binary/home/model, keeps identity, and resumes', async () => {
     const wrapperDir = await mkdtemp(path.join(os.tmpdir(), 'kteam-migrate-'));
     temporaryDirectories.push(wrapperDir);
     const wrapper = path.join(wrapperDir, 'claude-auto-glm52b');
@@ -1437,6 +1500,51 @@ describe('migrate — cross-account continuation', () => {
     expect(events).toContain('session.migrating');
     expect(transitions.at(-1)?.status).toBe('failed');
     expect(transitions.at(-1)?.reason).toContain('restored to claude-auto-glm52a');
+  });
+
+  test('rolls back the account but preserves a model that demonstrably launched', async () => {
+    const wrapperDir = await mkdtemp(path.join(os.tmpdir(), 'kteam-migrate-launched-model-'));
+    temporaryDirectories.push(wrapperDir);
+    await writeFile(
+      path.join(wrapperDir, 'claude-auto-next'),
+      'export CLAUDE_CONFIG_DIR="/new/home"\nexport KTEAM_MODEL="claude-fable-5"\n',
+      { mode: 0o755 },
+    );
+
+    let current = { ...(claudeSession.config as unknown as Loose) };
+    let reads = 0;
+    const manager = migrateManager({
+      paths: { kfleetBin: wrapperDir },
+      get: async () => {
+        reads++;
+        if (reads === 1) return claudeSession;
+        return {
+          ...claudeSession,
+          config: current,
+          state: { ...claudeSession.state, observedModel: 'claude-fable-5', promptReady: false },
+        };
+      },
+      store: {
+        listSessions: () => [],
+        updateConfig: async (_id: string, mutate: (c: Loose) => Loose) => {
+          current = mutate(current);
+          return current;
+        },
+      },
+      stopMonitor: async () => undefined,
+      tmux: { state: async () => ({ alive: false, dead: true, promptReady: false }) },
+      emit: async () => ({}) as unknown,
+      transition: async () => undefined,
+      resume: async () => {
+        throw new Error('monitor attach failed after the model answered');
+      },
+    });
+
+    await expect(callMigrate(manager, 's1', 'claude-auto-next')).rejects.toThrow(/kept launched model/);
+    expect(current.binary).toBe('claude-auto-glm52a');
+    expect(current.harnessHome).toBe('/old/home');
+    expect(current.model).toBe('claude-fable-5');
+    expect(current.migration).toBeUndefined();
   });
 });
 
