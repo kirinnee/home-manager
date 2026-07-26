@@ -142,6 +142,204 @@ export async function runApplyUpdate(deps: ApplyDeps): Promise<ApplyDecision> {
   return decision;
 }
 
+/* ---------- injectable browser surfaces -----------------------------------
+   The registration/listener lifecycle below used to live inline in the hook's
+   effects, where the only way to reach it was to mount a component in a real
+   DOM — so nothing tested it, and deleting either effect left the suite green.
+
+   These structural interfaces are the narrowest slice of the real APIs the
+   lifecycle actually touches, so a test supplies plain objects and a browser
+   supplies `navigator.serviceWorker` / `document` / `window` unchanged. The point
+   is that the tests drive the SAME functions the hook calls, rather than a
+   reimplementation of them that can drift.
+   -------------------------------------------------------------------------- */
+
+/** `addEventListener`/`removeEventListener`, and nothing else. No options
+    parameter: the lifecycle never passes one (the single `once` listener lives in
+    `browserApplyDeps`, which declares its own surface). */
+export interface ListenerTarget {
+  addEventListener: (type: string, listener: (event: Event) => void) => void;
+  removeEventListener: (type: string, listener: (event: Event) => void) => void;
+}
+
+export interface WorkerLike extends ListenerTarget {
+  readonly state: string;
+}
+
+export interface RegistrationLike extends ListenerTarget {
+  readonly installing: WorkerLike | null;
+  readonly waiting: unknown;
+  update: () => Promise<unknown>;
+}
+
+export interface ContainerLike {
+  readonly controller: unknown;
+  register: (url: string, options: { scope: string }) => Promise<RegistrationLike>;
+}
+
+/** Only `visibilityState` is read; the listener half is the target above. */
+export interface VisibilityTarget extends ListenerTarget {
+  readonly visibilityState: string;
+}
+
+export interface WorkerLifecycleDeps {
+  container: ContainerLike;
+  doc: VisibilityTarget;
+  /** The release to register. Injected rather than read from `currentRelease()`
+      in here, because that reads a build-time `define` which does not exist
+      outside a Vite bundle — the hook reads it, so this stays callable from a
+      test without stubbing a global. */
+  release: string;
+  /** Called when a chip should appear. Called more than once is fine — the hook
+      collapses repeats and never downgrades a `recovery` chip. */
+  onUpdateReady: (reason: UpdateReason) => void;
+  /** Registration failure reporting, injected so a test can assert it is
+      swallowed rather than thrown. */
+  onError: (error: unknown) => void;
+}
+
+/** Register the worker and watch for updates. Returns the cleanup function.
+ *
+ *  This IS the hook's effect body — the hook passes the real browser objects and
+ *  returns this function directly. Everything it does is consequential and was
+ *  previously unprovable:
+ *
+ *    * registering at the fixed root scope (a wrong scope silently creates a
+ *      second registration instead of updating the one that exists),
+ *    * raising the chip only once an installing worker reaches `installed`
+ *      AND a controller exists (without that second condition the FIRST install
+ *      would show an "update ready" chip with nothing newer to move to),
+ *    * catching a registration rejection instead of letting it break the app,
+ *    * re-checking on tab visibility, because a long-lived SPA may never
+ *      navigate,
+ *    * removing every listener on unmount. */
+export function startWorkerLifecycle(deps: WorkerLifecycleDeps): () => void {
+  const { container, doc, release, onUpdateReady, onError } = deps;
+  let cancelled = false;
+  let registration: RegistrationLike | null = null;
+  const cleanups: Array<() => void> = [];
+
+  /** `updatefound` fires when a new worker starts installing; it becomes
+   *  actionable only once it reaches `installed` (i.e. waiting). Watching the
+   *  installing worker's state rather than polling `registration.waiting` means
+   *  the chip appears the moment the update is genuinely ready. */
+  const watchInstalling = (worker: WorkerLike | null): void => {
+    if (!worker) return;
+    const onState = () => {
+      // `installed` while another worker controls the page = waiting. Without a
+      // controller this is the FIRST install, which is not an update and must not
+      // raise a chip — there is nothing newer to move to.
+      if (worker.state === 'installed' && container.controller) onUpdateReady('update');
+    };
+    worker.addEventListener('statechange', onState);
+    cleanups.push(() => worker.removeEventListener('statechange', onState));
+    // Called immediately as well: the worker may already have reached
+    // `installed` between the event firing and this listener attaching.
+    onState();
+  };
+
+  void container
+    .register(workerUrl(release), { scope: WORKER_SCOPE })
+    .then(reg => {
+      // Unmounted while registration was in flight: attaching listeners now
+      // would leak them, since the cleanup already ran.
+      if (cancelled) return;
+      registration = reg;
+
+      // Already waiting when we registered (installed during a previous visit
+      // and never taken): the chip must appear without waiting for an event that
+      // has already fired.
+      if (reg.waiting && container.controller) onUpdateReady('update');
+      watchInstalling(reg.installing);
+
+      const onUpdateFound = () => watchInstalling(reg.installing);
+      reg.addEventListener('updatefound', onUpdateFound);
+      cleanups.push(() => reg.removeEventListener('updatefound', onUpdateFound));
+    })
+    .catch((error: unknown) => {
+      // A failed registration must never break the app: without a worker the UI
+      // simply has no offline shell and no chip. Logged, not surfaced.
+      onError(error);
+    });
+
+  // UPDATE CHECKS ON RETURN, NOT ON A TIMER. The browser revalidates the worker
+  // script on navigation, but this app is a long-lived SPA that a reader may
+  // leave open for days without ever navigating. Checking when the tab becomes
+  // visible again ties the check to the moment it can be acted on, and costs one
+  // conditional request.
+  const onVisibility = () => {
+    if (doc.visibilityState === 'visible') void registration?.update().catch(() => {});
+  };
+  doc.addEventListener('visibilitychange', onVisibility);
+  cleanups.push(() => doc.removeEventListener('visibilitychange', onVisibility));
+
+  return () => {
+    cancelled = true;
+    for (const off of cleanups) off();
+  };
+}
+
+/** VITE'S NAMESPACED EVENT — `vite:preloadError`, not `preloadError`.
+ *
+ *  This is the fourth-generation eviction surfacing (plan §4.4/B3): a tab whose
+ *  generation's cache has been pruned tries to lazy-load its chat chunk, the URL
+ *  is gone from both cache and server, and the dynamic import rejects.
+ *  `preventDefault()` stops it becoming an unhandled rejection, and the chip
+ *  comes up in RECOVERY wording — this tab is already broken, and the reader
+ *  needs to know a reload is the fix rather than reading a spinner forever.
+ *
+ *  Watched unconditionally, with no service-worker gate: a preload can fail on a
+ *  plain redeploy with no worker involved at all, and the reader is just as stuck.
+ *  Returns the cleanup function. */
+export function startPreloadErrorWatch(win: ListenerTarget, onRecovery: () => void): () => void {
+  const onPreloadError = (event: Event) => {
+    event.preventDefault();
+    onRecovery();
+  };
+  win.addEventListener('vite:preloadError', onPreloadError);
+  return () => win.removeEventListener('vite:preloadError', onPreloadError);
+}
+
+/* ---------- the real ApplyDeps --------------------------------------------- */
+
+export interface ApplyContainer {
+  getRegistration: (scope: string) => Promise<WaitingRegistration | null | undefined>;
+  addEventListener: (type: string, listener: () => void, options: { once: true }) => void;
+}
+
+export interface ApplyEnv {
+  /** `null` when service workers are unavailable — then there is no registration
+      to consult and the recovery reload is the only sensible action. */
+  container: ApplyContainer | null;
+  reload: () => void;
+  isArmed: () => boolean;
+  setArmed: () => void;
+}
+
+/** Build the real `ApplyDeps` from browser objects.
+ *
+ *  Separated from the hook so the CONTROLLER ADAPTER is testable: `armReload`
+ *  attaching a `once` `controllerchange` listener that reloads is the mechanism
+ *  the whole skip-waiting branch depends on, and it is invisible to a test that
+ *  only checks `runApplyUpdate`'s decisions against a stub. */
+export function browserApplyDeps(env: ApplyEnv): ApplyDeps {
+  const { container } = env;
+  return {
+    getRegistration: () =>
+      container ? container.getRegistration(WORKER_SCOPE).then(reg => reg ?? null) : Promise.resolve(null),
+    armReload: () => {
+      // Scoped to THIS tab, and only on this branch: a tab that never took the
+      // waiting-worker path never attaches a `controllerchange` listener, so it
+      // can never be reloaded out from under its reader by someone else's
+      // update. `once` plus the armed guard means exactly one reload.
+      container?.addEventListener('controllerchange', () => env.reload(), { once: true });
+    },
+    reload: env.reload,
+    isArmed: env.isArmed,
+    setArmed: env.setArmed,
+  };
+}
+
 /* ---------- the hook ------------------------------------------------------- */
 
 export function useServiceWorkerUpdate(): ServiceWorkerUpdate {
@@ -156,108 +354,39 @@ export function useServiceWorkerUpdate(): ServiceWorkerUpdate {
    *  so the offline/error surface takes over instead of a reload cycle. */
   const armed = useRef(false);
 
+  // A chip already raised as `recovery` must never be downgraded to `update`:
+  // recovery means THIS tab has already failed to load something, which stays
+  // true regardless of what the worker does afterwards.
+  const raise = useCallback((reason: UpdateReason) => {
+    setUpdateReady(prev => (prev === 'recovery' ? prev : (prev ?? reason)));
+  }, []);
+
   useEffect(() => {
     if (!canRegister(navigator, window.isSecureContext)) return;
-    const container = navigator.serviceWorker;
+    return startWorkerLifecycle({
+      container: navigator.serviceWorker as unknown as ContainerLike,
+      doc: document,
+      release: currentRelease(),
+      onUpdateReady: raise,
+      onError: error => console.warn('kteam: service worker registration failed', error),
+    });
+  }, [raise]);
 
-    let cancelled = false;
-    let registration: ServiceWorkerRegistration | null = null;
-    const cleanups: Array<() => void> = [];
-
-    /** `updatefound` fires when a new worker starts installing; it becomes
-     *  actionable only once it reaches `installed` (i.e. waiting). Watching the
-     *  installing worker's state rather than polling `registration.waiting`
-     *  means the chip appears the moment the update is genuinely ready. */
-    const watchInstalling = (worker: ServiceWorker | null): void => {
-      if (!worker) return;
-      const onState = () => {
-        // `installed` while another worker controls the page = waiting. Without
-        // a controller this is the FIRST install, which is not an update and
-        // must not raise a chip — there is nothing newer to move to.
-        if (worker.state === 'installed' && container.controller) {
-          setUpdateReady(prev => prev ?? 'update');
-        }
-      };
-      worker.addEventListener('statechange', onState);
-      cleanups.push(() => worker.removeEventListener('statechange', onState));
-      onState();
-    };
-
-    void container
-      .register(workerUrl(currentRelease()), { scope: WORKER_SCOPE })
-      .then(reg => {
-        if (cancelled) return;
-        registration = reg;
-
-        // Already waiting when we registered (installed during a previous visit
-        // and never taken): the chip must appear without waiting for an event
-        // that has already fired.
-        if (reg.waiting && container.controller) setUpdateReady(prev => prev ?? 'update');
-        watchInstalling(reg.installing);
-
-        const onUpdateFound = () => watchInstalling(reg.installing);
-        reg.addEventListener('updatefound', onUpdateFound);
-        cleanups.push(() => reg.removeEventListener('updatefound', onUpdateFound));
-      })
-      .catch((error: unknown) => {
-        // A failed registration must never break the app: without a worker the
-        // UI simply has no offline shell and no chip. Logged, not surfaced.
-        console.warn('kteam: service worker registration failed', error);
-      });
-
-    // UPDATE CHECKS ON RETURN, NOT ON A TIMER. The browser revalidates the
-    // worker script on navigation, but this app is a long-lived SPA that a
-    // reader may leave open for days without ever navigating. Checking when the
-    // tab becomes visible again ties the check to the moment it can be acted on,
-    // and costs one conditional request.
-    const onVisibility = () => {
-      if (document.visibilityState === 'visible') void registration?.update().catch(() => {});
-    };
-    document.addEventListener('visibilitychange', onVisibility);
-    cleanups.push(() => document.removeEventListener('visibilitychange', onVisibility));
-
-    return () => {
-      cancelled = true;
-      for (const off of cleanups) off();
-    };
-  }, []);
-
-  // VITE'S NAMESPACED EVENT — `vite:preloadError`, not `preloadError`.
-  //
-  // This is the fourth-generation eviction surfacing (plan §4.4/B3): a tab whose
-  // generation's cache has been pruned tries to lazy-load its chat chunk, the
-  // URL is gone from both cache and server, and the dynamic import rejects.
-  // `preventDefault()` stops it becoming an unhandled rejection, and the chip
-  // comes up in RECOVERY wording — this tab is already broken, and the reader
-  // needs to know a reload is the fix rather than reading a spinner forever.
-  useEffect(() => {
-    const onPreloadError = (event: Event) => {
-      event.preventDefault();
-      setUpdateReady('recovery');
-    };
-    window.addEventListener('vite:preloadError', onPreloadError);
-    return () => window.removeEventListener('vite:preloadError', onPreloadError);
-  }, []);
+  useEffect(() => startPreloadErrorWatch(window, () => setUpdateReady('recovery')), []);
 
   const applyUpdate = useCallback(() => {
-    void runApplyUpdate({
-      getRegistration: () =>
-        canRegister(navigator, window.isSecureContext)
-          ? navigator.serviceWorker.getRegistration(WORKER_SCOPE).then(reg => reg ?? null)
-          : Promise.resolve(null),
-      armReload: () => {
-        // Scoped to THIS tab, and only on this branch: a tab that never took the
-        // waiting-worker path never attaches a `controllerchange` listener, so
-        // it can never be reloaded out from under its reader by someone else's
-        // update. `once` plus the armed guard means exactly one reload.
-        navigator.serviceWorker.addEventListener('controllerchange', () => window.location.reload(), { once: true });
-      },
-      reload: () => window.location.reload(),
-      isArmed: () => armed.current,
-      setArmed: () => {
-        armed.current = true;
-      },
-    });
+    void runApplyUpdate(
+      browserApplyDeps({
+        container: canRegister(navigator, window.isSecureContext)
+          ? (navigator.serviceWorker as unknown as ApplyContainer)
+          : null,
+        reload: () => window.location.reload(),
+        isArmed: () => armed.current,
+        setArmed: () => {
+          armed.current = true;
+        },
+      }),
+    );
   }, []);
 
   return { updateReady, applyUpdate };
