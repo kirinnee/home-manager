@@ -37,10 +37,28 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # NB: git has no trailing-comment syntax — a `# …` after a pattern is part of
 # the pattern and silently matches nothing. Comments stay on their own lines.
 #
+# The patterns below spell the release ID out as twelve [0-9a-f] classes because
+# git globs cannot express a hex range — `*` would also swallow
+# `manifest-studio-light.preview.json` or a hand-authored `offline.draft.html`,
+# and an invisible file can be copied into a build without review. Family and
+# mode are enumerated rather than globbed so the ignore rules mirror
+# GENERATED_PUBLIC_RE in scripts/release.ts exactly; a test asserts the two stay
+# in lockstep, so adding a theme family fails loudly here instead of leaking an
+# untracked generated file.
+#
 # gen-pwa output (release-suffixed manifest variants)
-public/manifest-*.*.json
+public/manifest-studio-light.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json
+public/manifest-studio-dark.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json
+public/manifest-mission-light.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json
+public/manifest-mission-dark.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json
+public/manifest-neo-light.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json
+public/manifest-neo-dark.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json
+public/manifest-ember-light.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json
+public/manifest-ember-dark.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json
+public/manifest-contrast-light.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json
+public/manifest-contrast-dark.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json
 # gen-pwa output (release-suffixed offline page)
-public/offline.*.html
+public/offline.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].html
 # postbuild-pwa output (precache list for one specific build)
 sw/precache.gen.ts
 

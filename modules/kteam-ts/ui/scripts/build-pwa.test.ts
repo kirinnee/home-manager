@@ -12,7 +12,8 @@
    ============================================================================ */
 
 import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { dirtyGuardedInputs, porcelainPaths } from './build-pwa';
 import { buildManifest, buildOfflineHtml } from './gen-pwa';
@@ -21,6 +22,7 @@ import {
   FAMILIES,
   MODES,
   RELEASE_ENV,
+  VITE_RELEASE_ENV,
   assertReleaseId,
   isGeneratedPublicFile,
   manifestName,
@@ -30,7 +32,21 @@ import {
   workerName,
 } from './release';
 import { defaultCssEntry, readThemeTokens, ThemeTokenError } from './theme-tokens';
-import { UI_ROOT, verifyIconReferences, verifyIcons } from './verify-icons';
+import {
+  ICONS_MANIFEST,
+  PUBLIC_DIR,
+  SOURCE_SVG,
+  UI_ROOT,
+  legacyIcoProblems,
+  readIconsManifest,
+  sourceProvenanceProblems,
+  verifyIconReferences,
+  verifyIcons,
+} from './verify-icons';
+// vite.config.ts exports its release resolution so the BUILD-vs-dev contract is
+// testable without spawning vite. Aliased because `releaseId` would collide
+// with the release-module helpers above.
+import { releaseId as viteReleaseId } from '../vite.config';
 
 const RELEASE = 'abcdef012345';
 
@@ -46,14 +62,53 @@ describe('release id discipline', () => {
   });
 
   test('a child step fails when it is given no release id (never re-derives one)', () => {
-    expect(() => releaseIdFromArgv([])).toThrow(/missing release id/);
-    expect(() => releaseIdFromArgv(['--out-dir=/tmp/x'])).toThrow(/missing release id/);
+    const env = { [RELEASE_ENV]: RELEASE };
+    expect(() => releaseIdFromArgv([], env)).toThrow(/missing release id/);
+    expect(() => releaseIdFromArgv(['--out-dir=/tmp/x'], env)).toThrow(/missing release id/);
+  });
+
+  test('a child step fails when the orchestrator env is MISSING, not only when it disagrees', () => {
+    // The audited version only compared the two when the env var happened to
+    // exist, so a hand-run `bun scripts/gen-pwa.ts --release=<anything>` was
+    // accepted and could write half a release. Absence must fail like a
+    // mismatch does.
+    expect(() => releaseIdFromArgv([`--release=${RELEASE}`], {})).toThrow(/missing release id/);
+    expect(() => releaseIdFromArgv([`--release=${RELEASE}`], {})).toThrow(new RegExp(RELEASE_ENV));
+    expect(() => releaseIdFromArgv([`--release=${RELEASE}`], { [RELEASE_ENV]: '' })).toThrow(/missing release id/);
+    // A present-but-malformed env value is also rejected, and names the env var.
+    expect(() => releaseIdFromArgv([`--release=${RELEASE}`], { [RELEASE_ENV]: 'nope' })).toThrow(/malformed/);
   });
 
   test('a child step fails when its argument disagrees with the orchestrator env (C1)', () => {
     const env = { [RELEASE_ENV]: RELEASE };
     expect(releaseIdFromArgv([`--release=${RELEASE}`], env)).toBe(RELEASE);
     expect(() => releaseIdFromArgv(['--release=0123456789ab'], env)).toThrow(/release id mismatch/);
+  });
+
+  test('a vite BUILD needs both orchestrator variables and needs them to agree', () => {
+    const both = { [RELEASE_ENV]: RELEASE, [VITE_RELEASE_ENV]: RELEASE };
+    expect(viteReleaseId('build', both)).toBe(RELEASE);
+
+    // Either one missing fails, and the message names the one that is missing —
+    // `%VITE_KTEAM_RELEASE%` in index.html and the compiled `define` come from
+    // different variables, so checking only the canonical one would let the
+    // HTML and the bundle name different generations with nothing downstream
+    // able to notice.
+    expect(() => viteReleaseId('build', {})).toThrow(new RegExp(RELEASE_ENV));
+    expect(() => viteReleaseId('build', { [RELEASE_ENV]: RELEASE })).toThrow(new RegExp(VITE_RELEASE_ENV));
+    expect(() => viteReleaseId('build', { [VITE_RELEASE_ENV]: RELEASE })).toThrow(new RegExp(RELEASE_ENV));
+    expect(() => viteReleaseId('build', { [RELEASE_ENV]: RELEASE, [VITE_RELEASE_ENV]: '' })).toThrow(
+      /missing release id/,
+    );
+    expect(() => viteReleaseId('build', { [RELEASE_ENV]: RELEASE, [VITE_RELEASE_ENV]: '0123456789ab' })).toThrow(
+      /release id mismatch/,
+    );
+    expect(() => viteReleaseId('build', { [RELEASE_ENV]: RELEASE, [VITE_RELEASE_ENV]: 'NOTHEX' })).toThrow(/malformed/);
+  });
+
+  test('`vite dev` still starts without any release (it builds no artifact)', () => {
+    expect(viteReleaseId('serve', {})).toBe('devdevdevdev');
+    expect(viteReleaseId('serve', { [RELEASE_ENV]: RELEASE })).toBe(RELEASE);
   });
 
   test('out-dir comes from argv, then env, then the served dist default', () => {
@@ -113,7 +168,19 @@ describe('clean-source guard (C1)', () => {
     ]);
   });
 
-  test('every widened guarded input trips the guard', () => {
+  test('the build-shaping config files an allowlist forgot are guarded (P1)', () => {
+    // The audit's headline finding: the guard was an ALLOWLIST, and neither of
+    // these two was on it — so `dirtyGuardedInputs()` returned [] for a dirty
+    // tailwind/postcss config even though both change the emitted CSS. They are
+    // asserted by name, separately from the loop below, because these exact two
+    // regressions are what this test exists to prevent.
+    expect(dirtyGuardedInputs(' M modules/kteam-ts/ui/tailwind.config.ts')).toEqual(['tailwind.config.ts']);
+    expect(dirtyGuardedInputs(' M modules/kteam-ts/ui/postcss.config.js')).toEqual(['postcss.config.js']);
+    expect(dirtyGuardedInputs('?? modules/kteam-ts/ui/tailwind.config.ts')).toEqual(['tailwind.config.ts']);
+    expect(dirtyGuardedInputs('?? modules/kteam-ts/ui/postcss.config.js')).toEqual(['postcss.config.js']);
+  });
+
+  test('every guarded input trips the guard', () => {
     // Each of these can change an artifact, so each must refuse a build.
     for (const input of [
       'index.html',
@@ -130,8 +197,28 @@ describe('clean-source guard (C1)', () => {
       'bun.lock',
       'package.json',
       'vite.config.ts',
+      'tailwind.config.ts',
+      'postcss.config.js',
+      'public/icons/icons.gen.json',
+      'public/favicon.ico',
     ]) {
       expect(dirtyGuardedInputs(` M modules/kteam-ts/ui/${input}`)).toEqual([input]);
+    }
+  });
+
+  test('the guard is a DENYLIST: an unforeseen new config file is guarded by default', () => {
+    // The property that makes P1 unrepeatable. Nobody has to remember to add a
+    // file for it to be covered; only an explicit UNGUARDED_INPUTS entry exempts
+    // one, and adding an entry is a reviewable diff.
+    for (const invented of [
+      'biome.json',
+      'uno.config.ts',
+      'lightningcss.config.mjs',
+      'src/generated/whatever.ts',
+      '.browserslistrc',
+      'some-tool-nobody-has-written-yet.config.mts',
+    ]) {
+      expect(dirtyGuardedInputs(` M modules/kteam-ts/ui/${invented}`)).toEqual([invented]);
     }
   });
 
@@ -146,6 +233,33 @@ describe('clean-source guard (C1)', () => {
     expect(dirtyGuardedInputs(porcelain)).toEqual([]);
   });
 
+  test('the deploy output directory is not mistaken for a package input', () => {
+    // `modules/kteam-ts/ui-dist/` shares no prefix with `modules/kteam-ts/ui/`
+    // once the trailing slash is honoured. A guard that compared without it
+    // would refuse every build the moment a build wrote its own output.
+    expect(dirtyGuardedInputs(' M modules/kteam-ts/ui-dist/assets/index-AAA.js')).toEqual([]);
+    expect(dirtyGuardedInputs('?? modules/kteam-ts/ui-dist/sw.abcdef012345.js')).toEqual([]);
+  });
+
+  test("a build's OWN generated public output never trips the next build's guard", () => {
+    // These are gitignored, so they should not appear in porcelain at all; the
+    // exemption is belt-and-braces for `--porcelain -unormal` style callers.
+    const generated = [
+      ...FAMILIES.flatMap(f => MODES.map(m => `public/${manifestName(f, m, RELEASE)}`)),
+      `public/${offlineName(RELEASE)}`,
+      'sw/precache.gen.ts',
+    ];
+    expect(dirtyGuardedInputs(generated.map(g => ` M modules/kteam-ts/ui/${g}`).join('\n'))).toEqual([]);
+
+    // But a LOOKALIKE in the same directory is a real, reviewable input.
+    expect(dirtyGuardedInputs(' M modules/kteam-ts/ui/public/manifest-studio-light.preview.json')).toEqual([
+      'public/manifest-studio-light.preview.json',
+    ]);
+    expect(dirtyGuardedInputs(' M modules/kteam-ts/ui/public/offline.draft.html')).toEqual([
+      'public/offline.draft.html',
+    ]);
+  });
+
   test('reports every dirty input, deduplicated and sorted', () => {
     const porcelain = [
       ' M modules/kteam-ts/ui/src/App.tsx',
@@ -157,6 +271,79 @@ describe('clean-source guard (C1)', () => {
 
   test('a clean tree passes', () => {
     expect(dirtyGuardedInputs('')).toEqual([]);
+  });
+});
+
+describe('generated-file ignore rules (P3)', () => {
+  // Asked of real git, not of a re-implementation of its glob semantics —
+  // `[0-9a-f]` classes and the `*`-vs-hex distinction are exactly the part a
+  // hand-rolled matcher would get subtly wrong.
+  const ignored = (rel: string): boolean =>
+    Bun.spawnSync({
+      cmd: ['git', 'check-ignore', '--no-index', '-q', rel],
+      cwd: UI_ROOT,
+    }).exitCode === 0;
+
+  test('every name a real build generates is ignored, so a clean build leaves a clean tree', () => {
+    // This is what lets the NEXT build's clean-source guard pass.
+    for (const family of FAMILIES) {
+      for (const mode of MODES) {
+        expect(ignored(`public/${manifestName(family, mode, RELEASE)}`)).toBe(true);
+      }
+    }
+    expect(ignored(`public/${offlineName(RELEASE)}`)).toBe(true);
+    expect(ignored('sw/precache.gen.ts')).toBe(true);
+  });
+
+  test('lookalikes stay VISIBLE, so nothing hand-authored can be copied in unreviewed', () => {
+    // The audited patterns were `public/manifest-*.*.json` and
+    // `public/offline.*.html`, which swallowed all of these. An ignored file is
+    // an unreviewable file: it can be added to the working tree, served by
+    // Vite's public copy, and never show up in `git status` or a diff.
+    for (const visible of [
+      'public/manifest-studio-light.preview.json',
+      'public/manifest-studio-light.json',
+      'public/manifest.json',
+      'public/manifest-studio-light.A6A86445AEC5.json', // uppercase hex
+      'public/manifest-studio-light.a6a86445aec.json', // 11 chars
+      'public/manifest-studio-light.a6a86445aec5z.json', // 13 chars
+      'public/manifest-other-light.a6a86445aec5.json', // unknown family
+      'public/manifest-studio-medium.a6a86445aec5.json', // unknown mode
+      'public/offline.preview.html',
+      'public/offline.html',
+      'public/offline.a6a86445aec.html',
+      'public/offline.a6a86445aec5z.html',
+      'public/favicon.ico',
+      'public/icons/icons.gen.json',
+      'public/icons/favicon.1e0c791b41.ico',
+    ]) {
+      expect(ignored(visible)).toBe(false);
+    }
+  });
+
+  test('the ignore rules and the cleanup matcher agree on exactly the same set', () => {
+    // Two independent expressions of "generated": .gitignore (git glob) and
+    // GENERATED_PUBLIC_RE (used by gen-pwa's pre-build sweep). If they drift,
+    // one of two bad things happens — a generated file is left visible and the
+    // next build's guard refuses, or a hand-authored file is swept away. Adding
+    // a theme family therefore fails HERE rather than in production.
+    const names = [
+      ...FAMILIES.flatMap(f => MODES.map(m => manifestName(f, m, RELEASE))),
+      offlineName(RELEASE),
+      'manifest.json',
+      'manifest-studio-light.json',
+      'manifest-studio-light.preview.json',
+      'manifest-other-light.a6a86445aec5.json',
+      'offline.html',
+      'offline.preview.html',
+      'favicon.ico',
+    ];
+    for (const name of names) {
+      expect({ name, ignored: ignored(`public/${name}`) }).toEqual({
+        name,
+        ignored: isGeneratedPublicFile(name),
+      });
+    }
   });
 });
 
@@ -389,11 +576,168 @@ describe('committed icon set', () => {
     expect(verifyIcons()).toEqual([]);
   });
 
+  test('the legacy fallback is served from the ROOT, so /favicon.ico resolves (P2)', () => {
+    // The audited build wrote it to public/icons/favicon.ico, where a browser
+    // probing the well-known root path fell through to the SPA shell and got
+    // HTML labelled as an icon. The whole value of this file is its URL.
+    const manifest = readIconsManifest();
+    expect(manifest.legacyIco.file).toBe('favicon.ico');
+    expect(manifest.legacyIco.file).not.toContain('/');
+    expect(manifest.legacyIco.url).toBe('/favicon.ico');
+    expect(Bun.file(join(PUBLIC_DIR, 'favicon.ico')).size).toBeGreaterThan(0);
+  });
+
+  test('the legacy fallback is byte-identical to the fingerprinted ICO', () => {
+    const manifest = readIconsManifest();
+    const legacy = readFileSync(join(PUBLIC_DIR, 'favicon.ico'));
+    const fingerprinted = readFileSync(join(PUBLIC_DIR, 'icons', manifest.legacyIco.identicalTo));
+    expect(legacy.equals(fingerprinted)).toBe(true);
+  });
+
   test("index.html's icon references all resolve, and never link the legacy favicon.ico (C3)", () => {
     // index.html is Stage D's file for the *link* edits; this assertion holds
     // either way — before the links land there is nothing to resolve, and after
     // they land they must resolve to fingerprinted files.
     const html = readFileSync(join(UI_ROOT, 'index.html'), 'utf8');
     expect(verifyIconReferences(html, 'index.html')).toEqual([]);
+  });
+
+  test('linking the root /favicon.ico is a problem, but the fingerprinted ICO is not', () => {
+    expect(verifyIconReferences('<link rel="icon" href="/favicon.ico">', 'probe')).toEqual([
+      'probe: links the stable legacy /favicon.ico, which must never be linked (C3)',
+    ]);
+    const manifest = readIconsManifest();
+    expect(verifyIconReferences(`<link rel="icon" href="/icons/${manifest.legacyIco.identicalTo}">`, 'probe')).toEqual(
+      [],
+    );
+  });
+});
+
+/* Mutation tests. These are the audit's P2 findings stated as executable
+   assertions: BOTH of these checks previously returned zero problems after a
+   real byte change, because each compared two fields that the same generation
+   run had written. Every case below mutates real bytes in an isolated copy and
+   demands a failure. */
+describe('icon provenance rejects real byte changes (P2)', () => {
+  /** Copy the whole public tree plus the source art into a scratch dir, so a
+      mutation cannot touch the committed set. Returns the paths verifyIcons
+      needs. */
+  function scratchIcons(): { dir: string; iconDir: string; manifest: string; publicDir: string; svg: string } {
+    const dir = mkdtempSync(join(tmpdir(), 'kteam-icon-mutation-'));
+    const publicDir = join(dir, 'public');
+    cpSync(PUBLIC_DIR, publicDir, { recursive: true });
+    const svg = join(dir, 'kteam-mark.svg');
+    cpSync(SOURCE_SVG, svg);
+    return {
+      dir,
+      iconDir: join(publicDir, 'icons'),
+      manifest: join(publicDir, 'icons', 'icons.gen.json'),
+      publicDir,
+      svg,
+    };
+  }
+
+  function withScratch(fn: (s: ReturnType<typeof scratchIcons>) => void): void {
+    const s = scratchIcons();
+    try {
+      fn(s);
+    } finally {
+      rmSync(s.dir, { recursive: true, force: true });
+    }
+  }
+
+  test('the unmutated copy passes, so a later failure means the mutation caused it', () => {
+    withScratch(s => {
+      expect(verifyIcons(s.iconDir, s.manifest, { publicDir: s.publicDir, sourceSvg: s.svg })).toEqual([]);
+    });
+  });
+
+  test('flipping one byte of the legacy favicon.ico is caught', () => {
+    withScratch(s => {
+      const path = join(s.publicDir, 'favicon.ico');
+      const buf = readFileSync(path);
+      buf[buf.length - 1] = buf[buf.length - 1]! ^ 0xff;
+      writeFileSync(path, buf);
+      const problems = verifyIcons(s.iconDir, s.manifest, { publicDir: s.publicDir, sourceSvg: s.svg });
+      // Both the recorded hash AND the byte-identity comparison must object.
+      expect(problems.some(p => /favicon\.ico: sha256 does not match/.test(p))).toBe(true);
+      expect(problems.some(p => /not byte-identical to the fingerprinted/.test(p))).toBe(true);
+    });
+  });
+
+  test('deleting the legacy favicon.ico is caught', () => {
+    withScratch(s => {
+      rmSync(join(s.publicDir, 'favicon.ico'));
+      expect(verifyIcons(s.iconDir, s.manifest, { publicDir: s.publicDir, sourceSvg: s.svg })).toEqual([
+        'favicon.ico: legacy fallback copy is missing from the public root',
+      ]);
+    });
+  });
+
+  test('a legacyIco.file pointing back inside icons/ is caught', () => {
+    withScratch(s => {
+      const manifest = JSON.parse(readFileSync(s.manifest, 'utf8'));
+      manifest.legacyIco.file = 'icons/favicon.ico';
+      manifest.legacyIco.url = '/icons/favicon.ico';
+      writeFileSync(s.manifest, JSON.stringify(manifest));
+      const problems = verifyIcons(s.iconDir, s.manifest, { publicDir: s.publicDir, sourceSvg: s.svg });
+      expect(problems.some(p => /must sit at the public root/.test(p))).toBe(true);
+    });
+  });
+
+  test('a legacyIco.url that is not the root path is caught', () => {
+    withScratch(s => {
+      const manifest = JSON.parse(readFileSync(s.manifest, 'utf8'));
+      manifest.legacyIco.url = '/icons/favicon.ico';
+      writeFileSync(s.manifest, JSON.stringify(manifest));
+      const problems = verifyIcons(s.iconDir, s.manifest, { publicDir: s.publicDir, sourceSvg: s.svg });
+      expect(problems).toContain('icons.gen.json: legacyIco.url is /icons/favicon.ico, expected /favicon.ico');
+    });
+  });
+
+  test('editing the source mark without regenerating icons is caught (both hashes)', () => {
+    withScratch(s => {
+      // A realistic edit: someone nudges the art and commits it, forgetting
+      // `bun run gen:icons`. Nothing else in the tree changes, so this check is
+      // the only thing standing between that and shipping icons whose recorded
+      // provenance is a lie.
+      writeFileSync(s.svg, readFileSync(s.svg, 'utf8').replace('<svg', '<svg data-tweaked="1"'));
+      const problems = verifyIcons(s.iconDir, s.manifest, { publicDir: s.publicDir, sourceSvg: s.svg });
+      expect(problems.some(p => /sha256 .* does not match icons\.gen\.json/.test(p))).toBe(true);
+      expect(problems.some(p => /git blob .* does not match icons\.gen\.json/.test(p))).toBe(true);
+      expect(problems.every(p => /gen:icons/.test(p))).toBe(true);
+    });
+  });
+
+  test('a missing source mark is caught rather than skipped', () => {
+    withScratch(s => {
+      rmSync(s.svg);
+      const problems = verifyIcons(s.iconDir, s.manifest, { publicDir: s.publicDir, sourceSvg: s.svg });
+      expect(problems).toContain(
+        'brand/kteam-mark.svg: icon source art is missing, but icons.gen.json records hashes for it',
+      );
+    });
+  });
+
+  test('a tampered sourceSha256 with an intact sourceBlob is caught (the fields are independent)', () => {
+    withScratch(s => {
+      const manifest = JSON.parse(readFileSync(s.manifest, 'utf8'));
+      manifest.sourceSha256 = 'f'.repeat(64);
+      writeFileSync(s.manifest, JSON.stringify(manifest));
+      const problems = verifyIcons(s.iconDir, s.manifest, { publicDir: s.publicDir, sourceSvg: s.svg });
+      expect(problems.some(p => /sha256 .* does not match/.test(p))).toBe(true);
+      expect(problems.some(p => /git blob/.test(p))).toBe(false);
+    });
+  });
+
+  test('the checks are reachable as pure functions too', () => {
+    const manifest = readIconsManifest(ICONS_MANIFEST);
+    expect(sourceProvenanceProblems(manifest, SOURCE_SVG)).toEqual([]);
+    expect(sourceProvenanceProblems({ ...manifest, sourceSha256: '0'.repeat(64) }, SOURCE_SVG)).toHaveLength(1);
+    const fingerprinted = readFileSync(join(PUBLIC_DIR, 'icons', manifest.legacyIco.identicalTo));
+    expect(legacyIcoProblems(manifest, fingerprinted, PUBLIC_DIR)).toEqual([]);
+    // A wrong "identical" reference: same length, different bytes.
+    const wrong = Buffer.alloc(fingerprinted.length, 0x41);
+    expect(legacyIcoProblems(manifest, wrong, PUBLIC_DIR)).toHaveLength(1);
   });
 });

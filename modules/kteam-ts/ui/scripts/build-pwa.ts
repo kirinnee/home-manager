@@ -26,9 +26,16 @@
    matches the commit it names. Building with a dirty input would stamp commit
    X onto artifacts that are not commit X, and the deploy commit's provenance
    would be a lie. Hence: any modification to a build INPUT refuses the build.
-   The guarded scope is deliberately wide (§4.1 step 1) — anything that can
-   change an artifact, including tsconfigs, `.gitignore`, `bun.lock` and
-   `brand/`.
+
+   The guarded scope is the WHOLE PACKAGE minus a short, explicit list of
+   provably-inert paths (`UNGUARDED_INPUTS`) — a DENYLIST. An audit found the
+   earlier allowlist version silently exempted `tailwind.config.ts` and
+   `postcss.config.js`, both of which change the emitted CSS: `dirtyGuardedInputs()`
+   returned [] for a dirty tailwind config. An allowlist exempts every file
+   nobody thought to enumerate, and the set of build-shaping config files grows
+   over time. Inverting the polarity makes the failure mode "a harmless file
+   refuses a build" (visible, one-line fix) instead of "a build lies about its
+   provenance" (invisible).
 
    `--allow-dirty` exists for local iteration ONLY: it marks the release ID
    `<hash>` → prints a loud banner, and is rejected outright when the output
@@ -46,6 +53,7 @@ import {
   RELEASE_ENV,
   VITE_RELEASE_ENV,
   assertReleaseId,
+  isGeneratedPublicFile,
   outDirFromArgv,
 } from './release';
 
@@ -54,25 +62,38 @@ const UI_ROOT = join(HERE, '..');
 /** Repo-relative prefix of this package, for reading `git status --porcelain`. */
 const PKG_PREFIX = 'modules/kteam-ts/ui/';
 
-/** Every path whose content can change a build artifact. Directories are
-    prefix-matched. Widened per audit C1 — a dirty tsconfig or lockfile changes
-    output just as surely as a dirty source file. */
-const GUARDED_INPUTS = [
-  'index.html',
-  'src/',
-  'public/',
-  'sw/',
-  'scripts/',
-  'brand/',
-  'tsconfig.json',
-  'tsconfig.app.json',
-  'tsconfig.node.json',
-  'sw/tsconfig.json',
-  '.gitignore',
-  'bun.lock',
-  'package.json',
-  'vite.config.ts',
+/** The ONLY paths in this package that are not build inputs. Everything else is
+    guarded, so a config file nobody enumerated is covered by default rather
+    than silently exempt (see "WHY THE CLEAN-SOURCE GUARD" above — an allowlist
+    let a dirty `tailwind.config.ts` through).
+
+    Directories are prefix-matched. Only add an entry when a change to it
+    PROVABLY cannot alter build output. Docs and editor state qualify;
+    `sw/precache.gen.ts` qualifies because this same build overwrites it. A
+    "probably fine" config file does not. */
+const UNGUARDED_INPUTS = [
+  // Prose. Not read by any build step.
+  'README.md',
+  'CHANGELOG.md',
+  // Editor and OS scratch.
+  '.idea/',
+  '.vscode/',
+  '.DS_Store',
+  // Written BY this build (postbuild-pwa), so its dirtiness is our own output.
+  'sw/precache.gen.ts',
+  // Never committed; `bun install` state is pinned by the guarded bun.lock.
+  'node_modules/',
 ] as const;
+
+/** gen-pwa's own release-suffixed output inside `public/`. Gitignored, so it
+    should not reach porcelain at all — exempted anyway so a caller passing
+    `--porcelain -unormal` cannot make a build refuse its own previous output.
+    A LOOKALIKE (`manifest-studio-light.preview.json`) is NOT exempt: it is a
+    real, reviewable input. */
+function isUnguardedPublicFile(rel: string): boolean {
+  const name = rel.slice('public/'.length);
+  return isGeneratedPublicFile(name);
+}
 
 function git(args: string[]): string {
   const proc = Bun.spawnSync(['git', ...args], { cwd: UI_ROOT, stdout: 'pipe', stderr: 'pipe' });
@@ -98,20 +119,26 @@ export function porcelainPaths(porcelain: string): string[] {
 }
 
 /** Which guarded inputs are dirty. Pure, so the determinism gate can test it
-    without a dirty worktree. */
+    without a dirty worktree.
+
+    Anything inside this package counts UNLESS it matches `UNGUARDED_INPUTS` or
+    is this build's own generated public output. Note `pkgPrefix` keeps its
+    trailing slash, so the sibling deploy directory `modules/kteam-ts/ui-dist/`
+    is correctly outside the package. */
 export function dirtyGuardedInputs(
   porcelain: string,
   pkgPrefix: string = PKG_PREFIX,
-  guarded: readonly string[] = GUARDED_INPUTS,
+  unguarded: readonly string[] = UNGUARDED_INPUTS,
 ): string[] {
   const hits = new Set<string>();
   for (const path of porcelainPaths(porcelain)) {
     if (!path.startsWith(pkgPrefix)) continue;
     const rel = path.slice(pkgPrefix.length);
-    for (const input of guarded) {
-      const matches = input.endsWith('/') ? rel.startsWith(input) : rel === input;
-      if (matches) hits.add(rel);
-    }
+    if (rel === '') continue;
+    const exempt =
+      unguarded.some(entry => (entry.endsWith('/') ? rel.startsWith(entry) : rel === entry)) ||
+      (rel.startsWith('public/') && isUnguardedPublicFile(rel));
+    if (!exempt) hits.add(rel);
   }
   return [...hits].sort();
 }
