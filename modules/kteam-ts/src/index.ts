@@ -22,6 +22,7 @@ import type { KTeamEvent, SessionStatus, SignalKind } from './types';
 import { compactUsageQuota, fetchKfleetUsage, UsageFeed, usageQuotaLabel } from './usage';
 import { KTEAM_VERSION } from './version';
 import { waitForDaemonReady } from './daemon-wait';
+import { resolveKillTimeout, TIMEOUT_KILL_HELP, KILL_AFTER_SECONDS_HELP } from './start-timeout';
 
 const VERSION = KTEAM_VERSION;
 const paths = createPaths();
@@ -313,7 +314,12 @@ program
   )
   .option('--interval <seconds>', '', Number)
   .option('--stall <seconds>', '', Number)
-  .option('--timeout <seconds>', '', Number)
+  .option('--timeout <seconds>', TIMEOUT_KILL_HELP, Number)
+  // Preferred, self-describing alias for --timeout: the legacy name reads like a
+  // readiness wait and got a healthy session killed. Same destination semantics;
+  // the action lets this win when both are supplied. NOTE: distinct from
+  // --kill-after (the no-life-signs STALL kill) despite the similar spelling.
+  .option('--kill-after-seconds <seconds>', KILL_AFTER_SECONDS_HELP, Number)
   .option('--nudge-after <seconds>', 'zero life-signs this long earns a continue nudge (default 180)', Number)
   .option('--kill-after <seconds>', 'zero life-signs this long is a stall kill (default 300)', Number)
   .option(
@@ -350,6 +356,11 @@ program
       console.error('provide a prompt (arguments and/or --prompt-file), or use --mode interactive to start bare');
       process.exit(2);
     }
+    const killTimeout = resolveKillTimeout({
+      timeout: options.timeout as number | undefined,
+      killAfterSeconds: options.killAfterSeconds as number | undefined,
+    });
+    if (killTimeout.warning) console.error(killTimeout.warning);
     const view = await (
       await client()
     ).start(
@@ -380,7 +391,7 @@ program
         mode: options.mode as 'auto' | 'interactive',
         intervalSeconds: options.interval as number | undefined,
         stallSeconds: options.stall as number | undefined,
-        timeoutSeconds: options.timeout as number | undefined,
+        timeoutSeconds: killTimeout.seconds,
         nudgeAfterSeconds: options.nudgeAfter as number | undefined,
         killAfterSeconds: options.killAfter as number | undefined,
         directSendMaxChars: options.directMax as number | undefined,
@@ -938,7 +949,11 @@ program.command('doctor').action(async () => {
   }
 });
 
-program.parseAsync(process.argv).catch(error => {
-  console.error(`kteam: ${error instanceof Error ? error.message : String(error)}`);
-  process.exitCode = 1;
-});
+// Guarded so importing this module never parses the test runner's argv or boots
+// the CLI as a side effect. `bun src/index.ts …` still runs normally.
+if (import.meta.main) {
+  program.parseAsync(process.argv).catch(error => {
+    console.error(`kteam: ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+  });
+}
