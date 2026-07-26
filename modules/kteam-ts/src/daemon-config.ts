@@ -42,6 +42,20 @@ export interface ScratchConfig {
   perSweep: number;
 }
 
+/** Hot-store retention (B3). Archives (never deletes) aged terminal sessions out
+ *  of the in-process metadata cache so boot/sweep cost stops scaling with total
+ *  history. Ships OFF by default: this is data lifecycle on the live store, so
+ *  it is opt-in and only ever moves cache membership — journals stay on disk and
+ *  an archived session is transparently revived when it is resolved or resumed. */
+export interface RetentionConfig {
+  /** Master switch. False ⇒ the archival pass is skipped entirely. */
+  enabled: boolean;
+  /** A terminal session is eligible once its last activity is older than this. */
+  retentionDays: number;
+  /** Sessions archived per pass — rate limit, mirroring scratch.perSweep. */
+  perSweep: number;
+}
+
 export interface DaemonConfig {
   host: string;
   port: number;
@@ -59,6 +73,7 @@ export interface DaemonConfig {
   remoteControl: boolean;
   warden: WardenConfig;
   scratch: ScratchConfig;
+  retention: RetentionConfig;
   /** Context-window overrides for transcript-based context accounting:
    *  substring pattern → window size, longest match wins. Built-ins: `[1m]`
    *  ⇒ 1M, default 200k (codex reports its own window in token_count). */
@@ -86,6 +101,14 @@ export const defaultScratchConfig = (): ScratchConfig => ({
   perSweep: 5,
 });
 
+export const defaultRetentionConfig = (): RetentionConfig => ({
+  // OFF by default — hot-store archival is opt-in until it has run on a real
+  // fleet. Flip `enabled` (and tune retentionDays) once vetted.
+  enabled: false,
+  retentionDays: 14,
+  perSweep: 50,
+});
+
 export const defaultDaemonConfig = (): DaemonConfig => ({
   host: '127.0.0.1',
   port: 7337,
@@ -104,6 +127,7 @@ export const defaultDaemonConfig = (): DaemonConfig => ({
   remoteControl: true,
   warden: defaultWardenConfig(),
   scratch: defaultScratchConfig(),
+  retention: defaultRetentionConfig(),
 });
 
 export async function loadDaemonConfig(paths: KTeamPaths): Promise<DaemonConfig> {
@@ -117,6 +141,7 @@ export async function loadDaemonConfig(paths: KTeamPaths): Promise<DaemonConfig>
     ...onDisk,
     warden: { ...defaultWardenConfig(), ...(onDisk.warden ?? {}) },
     scratch: { ...defaultScratchConfig(), ...(onDisk.scratch ?? {}) },
+    retention: { ...defaultRetentionConfig(), ...(onDisk.retention ?? {}) },
   };
   if (process.env.KTEAM_HOST) merged.host = process.env.KTEAM_HOST;
   if (process.env.KTEAM_PORT) merged.port = Number(process.env.KTEAM_PORT);
