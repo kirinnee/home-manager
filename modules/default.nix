@@ -2,7 +2,6 @@
 with nixpkgs;
 let
   trivialBuilders = import ./trivialBuilders.nix { inherit lib stdenv stdenvNoCC lndir runtimeShell shellcheck; };
-  klaudePath = nixpkgs.lib.makeBinPath [ nixpkgs.zellij nixpkgs.tmux ];
 in
 rec {
   backup-folder = import ./backup-folder/default.nix { inherit nixpkgs trivialBuilders; };
@@ -38,19 +37,6 @@ rec {
   kloge = nixpkgs.writeShellScriptBin "kloge" ''
     export PATH="${nixpkgs.lib.makeBinPath [ nixpkgs.bash nixpkgs.gitMinimal nixpkgs.jq nixpkgs.rsync nixpkgs.openssh nixpkgs.curl nixpkgs.coreutils ]}:$PATH"
     exec ${nixpkgs.bun}/bin/bun run ~/.config/home-manager/modules/kloge-ts/src/index.ts "$@"
-  '';
-  # klaude/kodex: run-from-source wrappers. Wrap crc-kirin/Codex in persistent
-  # zellij sessions. zellij/tmux are put on PATH; agent binaries/fzf come from
-  # the host PATH (crc-kirin is a kfleet-generated command in ~/.kfleet/bin).
-  klaude = nixpkgs.writeShellScriptBin "klaude" ''
-    export PATH="${klaudePath}:$PATH"
-    export KLAUDE_TARGET=claude
-    exec ${nixpkgs.bun}/bin/bun run ~/.config/home-manager/modules/klaude-ts/src/index.ts "$@"
-  '';
-  kodex = nixpkgs.writeShellScriptBin "kodex" ''
-    export PATH="${klaudePath}:$PATH"
-    export KLAUDE_TARGET=codex
-    exec ${nixpkgs.bun}/bin/bun run ~/.config/home-manager/modules/klaude-ts/src/index.ts "$@"
   '';
   # kfleet: run-from-source wrapper. Generates the claude/codex/gemini/opencode
   # account wrappers + config dirs from ~/.kfleet/config.yaml (replaces the old

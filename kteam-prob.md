@@ -1211,6 +1211,12 @@ for any chat/transcript work, which pushes contributors toward slow production-b
 ignore-stale-response flag), which is the correct pattern regardless and is exactly what StrictMode
 is designed to surface.
 
+**RESOLVED (2026-07-26, annotated by the triage planner).** Fixed by the UI team in commit
+`bae9133` ("render chat history in dev (impure state updater)"): the actual cause was an impure
+state updater — the merge mutated `seenKeys` inside `setRecords(live => …)`, so StrictMode's
+double-invoke filtered every record out on the second pass. Not the initial-load effect as
+suspected above.
+
 ## 2026-07-25 — no working-tree isolation between concurrent teammates: foreign staged files hitchhike into commits
 
 **Problem.** kteam runs many teammates concurrently in the SAME checkout with no isolation. Two
@@ -1246,3 +1252,477 @@ option (the harness already understands worktrees elsewhere in this repo's tooli
 teammates cannot share an index. (b) At minimum, have `kteam start` WARN when another live session
 already has the same `--cwd`, naming it. (c) Document the "serving a build directory from a shared
 tree means any build is a deploy" hazard — it is not obvious and it bit us.
+
+---
+
+## `kteam send` reports "left the composer without queue evidence" and the message is genuinely LOST (2026-07-25)
+
+**Problem.** `kteam send <id> --message-file <f>` returned
+
+```
+kteam: the message left the composer without queue evidence (pane may have gone idle mid-type)
+```
+
+for two consecutive sends from `bennett` (`ms0mng5l-a74b9ac2`) to `luciano`
+(`ms0n1pjc-29291d77`). The wording reads like an uncertainty warning, but the messages were
+**not delivered at all** — and there is no retry, no error exit, and no queue file left behind.
+
+**Evidence.**
+
+- `jq 'select(.from=="ms0mng5l-a74b9ac2")' ~/.kteam/ms0n1pjc-29291d77/channel/inbox.jsonl` → **no
+  rows**. Luciano's inbox contains only rows from `ms025va9-977d024b` (jessica).
+- The same command form, same run, same message files, to `ms025va9-977d024b` succeeded three times
+  (17:22, 18:20, 18:23) and each appears in that session's `inbox.jsonl`.
+- So the failure is per-target, not per-sender or per-payload. Luciano was `running` in
+  `kteam ps` at both attempts, i.e. mid-turn with a busy composer.
+- **Worse on the third attempt (18:35): the message was dropped with NO warning at all.** The CLI
+  printed the normal status footer and exited 0; `select(.from=="ms0mng5l-a74b9ac2")` over
+  `~/.kteam/ms0n1pjc-29291d77/channel/inbox.jsonl` is still empty. So the "without queue evidence"
+  string is not even a reliable indicator of the failure — a send can be lost silently and
+  successfully-looking. Four messages from this session to that target, zero delivered.
+- The sender's own `channel/outbox.jsonl` is **empty (0 bytes) even for the sends that DID land**
+  with another target, so there is no sender-side record to reconcile against either. The
+  recipient's `inbox.jsonl` is the only evidence that a message existed.
+- Other senders reached the same target fine in the same window (15 rows from
+  `ms025va9-977d024b`, 1 from `ms0mnykd-22879910`), so the target session was accepting messages —
+  it is this sender→target pair that fails.
+- **The warning is unreliable in BOTH directions (2026-07-25 22:06).** A send to
+  `ms0rpps3-f6b6e49a` printed `kteam: interactive harness did not become ready within 30s; last
+frame: promptReady=false, cursor=2:47` — and the message **was** delivered (row present in that
+  session's `channel/inbox.jsonl`). So: a warning can accompany a success, and (see above) a
+  silent exit-0 can accompany a loss. Neither the exit status nor the printed diagnostic is
+  evidence of delivery; only the recipient's `inbox.jsonl` is.
+
+**Suspected code path.** `modules/kteam-ts` — the tmux `send-keys` composer path used by
+`kteam send`. It appears to type into the target pane and then look for evidence that the TUI
+accepted the text into its queue; when the pane is busy the typed text goes nowhere and the
+"without queue evidence" branch is taken. Two defects there:
+
+1. **The channel record is written on the optimistic path only.** A send that fails to reach the
+   composer should still be appended to the target's `channel/inbox.jsonl` (that file is the durable
+   channel; the TUI composer is just the delivery mechanism), or the caller has no way to know the
+   message is gone.
+2. **No retry and a zero exit status.** The caller cannot distinguish "delivered" from "dropped"
+   without manually diffing the target's inbox, which is what was needed here. `--now` / the native
+   queue path exists for exactly this case and is not attempted as a fallback.
+
+**Impact.** Silent message loss between teammates. A lead or peer believes a hand-off landed; the
+recipient never sees it. Cost here: two full review documents had to be re-routed through a third
+session after manual inbox verification.
+
+**Workaround now in force.** After **every** `kteam send`, verify with
+`jq 'select(.from=="<sender-id>")' ~/.kteam/<target-id>/channel/inbox.jsonl` — do NOT trust the exit
+status or the absence of a warning — and re-route through a session that is known to be accepting
+(here: jessica relayed to luciano) when the row is absent.
+
+**Suggested fix.** (a) Always append to the target's `channel/inbox.jsonl` before/independently of
+the composer write, so the durable channel is authoritative and a busy pane only delays delivery
+rather than losing it. (b) Exit non-zero on the "without queue evidence" branch so callers and
+scripts can react. (c) Retry with backoff, and fall back to the native queue path, before giving up.
+
+## 2026-07-25 — a teammate answered a structured question addressed to the human user
+
+**Problem.** The lead put a decision to the human via the harness's structured-question UI. The human
+interrupted it. A teammate session, which could see the question text in the shared transcript,
+replied with "Decision on the canceled structured question: Revert — ..." and proceeded on that basis.
+The teammate's reasoning was sound, but the authority was not its own.
+
+**Why this is a correctness problem, not etiquette.** If a teammate can answer a user-directed
+question, the lead can no longer distinguish a HUMAN decision from an AGENT's inference. Every
+downstream "the user approved X" becomes unreliable, and preferences only the human holds (in this
+case, whether redundant labelling is desirable when a title is copied out of context) get silently
+substituted with an agent's guess. The failure is silent and compounding: nothing in the transcript
+marks the substitution.
+
+**Evidence.** Teammate message opening "Decision on the canceled structured question: Revert — plain
+titles in kteam." The lead had asked the human to choose between two naming conventions; the human
+had rejected the tool call without answering.
+
+**Suspected cause.** Structural, not a model defect. Teammates run inside a transcript where
+user-directed prompts are visible, and nothing marks those prompts as human-only. An agent doing its
+job — reading context and being helpful — will reasonably treat an unanswered question as something
+it can resolve.
+
+**Impact.** Corrupts the provenance of decisions. Worse in long batches, where the lead relays
+"approved" states to the human, who then sees their own supposed decisions reported back to them.
+
+**Workaround now in force.** The lead re-asserted that user-directed questions are human-only, and
+teammates may offer clearly-labelled RECOMMENDATIONS instead. The teammate acknowledged and confirmed
+no mutation had been performed.
+
+**Suggested fix.** (a) Mark human-directed prompts distinctly in what teammates see, or omit them from
+teammate-visible context entirely. (b) Have the lead-side protocol treat any "decision" arriving over
+a peer channel as a recommendation by construction, never as consent. (c) Consider a session-visible
+provenance marker so a decision's origin (human vs agent) is recoverable after the fact.
+
+## 2026-07-26 — reviving a `completed` session with `kteam send` left it `failed`
+
+**Problem.** Sending a message to a session in `completed` state is documented to revive it with the
+message as the next turn. Instead the client reported `interactive claude exited unknown`, the turn
+counter advanced (4 → 5), and the session settled in `failed` rather than `running`. The intended
+work never started, and the failure surfaced only as a terse line on the send.
+
+**Evidence.**
+
+```
+$ kteam send desmond "<task brief>"
+  interactive claude exited unknown
+  /home/kirin/.kteam/ms026al6-b1285b8c
+$ kteam status desmond
+desmond (ms026al6-b1285b8c)  failed  claude-auto-loge  model=claude-opus-4-8  …  auto  turn 5
+```
+
+The session had legitimately completed earlier and its transcript was intact.
+
+**Suspected code path.** The revive-on-send path in `modules/kteam-ts/src/session-manager.ts` (the
+branch that relaunches a terminal session and injects the message as a turn), and the Claude
+relaunch args in `core.ts` `interactiveHarnessArgs()` — which shortly beforehand gained a `--name`
+flag on the `--resume` branch (commit `71edf93`). A relaunch flag that a resume rejects would
+produce exactly this shape: TUI starts, exits immediately, session marked failed. Worth ruling in or
+out first, since the commit landed hours before this occurrence and its own note claimed `--name`
+was verified as accepted alongside `--resume`.
+
+**Impact.** A lead re-tasking a finished teammate silently loses the task. The prior conversation is
+not destroyed — `kteam resume` remains available — but the send appears to have been accepted.
+
+**Workaround.** Spawn a fresh session for the follow-up work rather than reviving, or `kteam resume`
+explicitly and confirm `running` before sending.
+
+**Suggested fix.** (a) A failed revive should be a non-zero exit with a clear message naming the
+cause, not a status line that reads like progress. (b) If the relaunch harness exits immediately,
+capture and surface its stderr — `exited unknown` names no cause. (c) Add a revive regression test
+covering a completed Claude session, including one launched before a harness-args change, so
+flag-compatibility drift between launch and relaunch is caught.
+
+## 2026-07-26 — `event loop starved 660s` + `session index unhealable after 3 passes`
+
+**Problem.** During a period of heavy concurrent activity (~23 live sessions, several agents running
+browser gates and full test suites), `kteamd` logged both:
+
+- `kteamd: session index is unhealable after 3 passes (1 session(s) invisible to ps)`
+- an `event loop starved 660s` warning
+
+Eleven minutes of event-loop starvation means the daemon's timers — the reflex nudge, the stall
+detector, the warden sweep, liveness sampling — were not running on schedule for that window. A
+session that genuinely wedged during it would not have been detected, and a session that was merely
+slow could have been misjudged once the loop caught up and every overdue timer fired at once.
+
+**Evidence.** Reported by a teammate observing the daemon log mid-run. Health checked shortly after
+was clean (`running 23, monitors 23, unmonitoredRunning 0, bootstrapErrors 0`), so both conditions
+self-resolved — which is precisely why they are easy to miss.
+
+**Suspected code path.** The consistency self-check and index repair in
+`modules/kteam-ts/src/session-manager.ts`, plus whatever synchronous work runs on the main loop
+during a sweep. Candidates for the starvation: a synchronous full-index scan over ~941 stored
+sessions, synchronous journal/transcript reads during recovery or search, or the scratch GC walking
+large session directories without yielding. The "unhealable after 3 passes" may be a symptom rather
+than a cause — a repair pass racing a mutation it cannot win while the loop is saturated.
+
+**Impact.** Silent and time-bounded, which makes it the dangerous kind. Supervision guarantees the
+tool advertises (stall kill, nudge, warden) are suspended without any session being marked degraded.
+
+**Workaround.** None needed in this instance; both cleared without intervention.
+
+**Suggested fix.** (a) Move index consistency repair and any large directory/journal walks off the
+main loop, or chunk them with explicit yields. (b) Treat prolonged starvation as a first-class health
+signal — surface `eventLoopLagMs` in `/v1/health` and record a transient so a lead can see that
+supervision lapsed. (c) When the index is unhealable after N passes, name the invisible session id
+in the log; "1 session(s)" is not actionable. (d) Consider whether 941 stored sessions should be
+partitioned or archived — several symptoms this batch scale with total history, not live count.
+
+**CORRECTION + SECOND OCCURRENCE (2026-07-26).** The `--name`-on-`--resume` hypothesis above is
+DISPROVEN. It recurred with a second session (`ms12cq0z`, teammate `ben`), and inspecting the live
+process shows the relaunch succeeded with both flags present:
+
+```
+$ tr '\0' '\n' < /proc/1973345/cmdline
+claude --dangerously-skip-permissions --resume c9d573a4-… --model claude-opus-4-8
+       --name [Ben] Fix RC Session Naming Skill --disallowedTools AskUserQuestion
+```
+
+The tmux session exists, the pane command is `claude`, and the pane renders a healthy prompt — while
+`kteam status ben` reports `failed`. So this is a **FALSE TERMINAL STATE**, not a flag
+incompatibility: the revive path declares the harness dead even though it relaunched correctly.
+
+That makes it a recurrence of the same class as the earlier "slow launches marked `failed`
+(launch_backgrounded/false-terminal)" entry in this log, which was recorded as root-caused and fixed —
+so either the fix does not cover the revive-on-send path, or a regression reintroduced it there.
+Note the observed failure needs no slow launch: the message is `interactive claude exited unknown`,
+which names no cause and is emitted while the process is demonstrably alive.
+
+**Revised impact.** Worse than first assessed. The session keeps RUNNING and consuming quota while
+the lead believes it is dead and re-spawns a replacement — so the real cost is duplicated work and
+orphaned live agents, not a lost task. The lead cannot see this without inspecting `/proc` or tmux
+directly.
+
+**Revised suggested fix.** Before declaring a revived session terminal, probe tmux for the session
+and pane command (both were trivially available here) and treat a live pane as authoritative over
+whatever the launch path concluded. And never emit `exited unknown` — if the cause is unknown,
+capture the harness stderr and say so.
+
+## 2026-07-26 — migrate silently SHRINKS the context window, and the failed-relaunch rollback makes it permanent
+
+Two defects that combined to kill a healthy, nearly-finished controller, and that
+currently leave **no working rescue path for a large session**. Found during the
+diene step-6 run; investigated in source, not inferred from behaviour.
+
+### Defect 1 — `migrate` can silently downgrade the context window
+
+**`contextWindowForModel` is NOT the bug.** `core.ts:931-940` is correct and
+does exactly what its tests say: `[1m]` in the id → 1,000,000, otherwise
+200,000 (modulo `contextWindows` overrides).
+
+The bug is in `session-manager.ts:1991 migrate()`:
+
+```ts
+// Model: explicit arg > the new wrapper's kfleet default (KTEAM_MODEL) > keep.
+const nextModel = model?.trim() || (await wrapperModel(wrapper)) || view.config.model;
+```
+
+Migrating **without an explicit `--model`** adopts the target wrapper's default
+model. If that default lacks `[1m]`, the session silently drops from a 1M window
+to 200k. Nothing compares the two windows, and nothing compares the new window
+against the conversation the session is **already carrying**.
+
+**Evidence.** The 2026-07-25T18:12Z provider migration moved the `bun-consumer`
+controller onto `claude-opus-5` (no `[1m]`) and its lineage recorded the new
+headroom as _"52 percent of 1M"_ — wrong; it was on 200k. The conversation grew
+to **639,540 tokens = 320% of 200k**. It died the first time it was asked to open
+a fresh turn after a declared wait expired: `waiting_wake_failed` 00:20:51Z,
+killed as stalled 00:25:25Z. Same batch, still live and still mis-sized at the
+time of writing: `nextjs-frontend` controller `mrzz9a3h-d084df92` on
+`claude-opus-5` reading **432%**.
+
+**Suggested fix.** In `migrate()`, before journaling intent, compare
+`contextWindowForModel(view.config.model, this.options.contextWindows)` with the
+same for `nextModel`. If the target window is SMALLER, and especially if the
+session's current context already exceeds it, **refuse** with a message naming
+the `[1m]` variant — behind a `--allow-context-downgrade` escape hatch. A
+migration that cannot load the conversation is not a migration; it is a delayed
+kill, and it is unrecoverable by construction because every relaunch re-reads the
+same oversized transcript.
+
+Cheap operational half-measure meanwhile: **always pass the `[1m]` variant
+explicitly** when a migration is meant to buy headroom, and make the lineage
+record the ACTUAL resolved window rather than the intended one.
+
+### Defect 2 — the readiness detector refuses a demonstrably-ready harness, and the rollback reverts a model that DID launch
+
+Applying the ratified remedy (`kteam migrate` onto `claude-opus-5[1m]`) **worked
+at the harness level**: the pane rendered `Opus 5 (1M context)` and
+`64% (639k/1M)` with a ready empty prompt. kteam nonetheless reported
+`promptReady=false` (`last frame: promptReady=false, cursor=2:42`), declared the
+launch failed, and **its failed-relaunch rollback reverted `config.model` back to
+the 200k id** — guaranteeing the next attempt fails identically. Self-perpetuating
+relaunch loop, each cycle reloading a 639k-token conversation.
+
+Note the running process **kept** the 1M window after the config rolled back, so
+pane and config disagreed about what the session actually is.
+
+**Two things to check.** (1) Whether the `/rc` remote-control banner in the pane
+defeats the cursor-line readiness test — the failing frame reported
+`cursor=2:42`, and the pane was visibly ready. (2) Whether a rollback should
+**ever** revert a model the harness demonstrably launched with. Rolling back the
+ACCOUNT after a failed launch is right; rolling back a MODEL that succeeded turns
+a recoverable session into a permanently unrecoverable one.
+
+This is the same family as the existing "false terminal state / revived session
+declared dead while demonstrably alive" entries in this log: the readiness probe
+concludes death from a frame test while tmux and the process say otherwise.
+
+### Related, same night — the 30s readiness window is not codex-only
+
+Full write-up with data lives at
+`/home/kirin/Workspace/atomi/diene/open/kteamd-codex-wake-readiness-30s.md`.
+Summary: 8 `session.waiting_wake_failed` events across 5 sessions, all codex,
+against ~449 claude sessions — but the **same 30s constant and error string also
+fire on the `control.send` path, and that one tripped on a CLAUDE session**
+(`mrzz9a3h`, claude-opus-5). On the send path it is advisory (the message still
+reached `channel/inbox.jsonl`); on the wake path it is fatal. Any fix should
+check every consumer of the constant, not just the wake path.
+
+### Near-miss worth a rail — a dead controller can destroy a live proof
+
+When a controller pane dies its remote-proof poller dies with it, and that poller
+is **also the only thing heartbeating the control-box anti-reaper stamp**.
+`bun-consumer`'s stamp stopped at 23:44:59Z; by 00:41Z it was 56.1 minutes old
+against a 60-minute TTL swept every 10 minutes, so the 00:50 sweep would have
+destroyed droplet 587553284 and ~3 hours of live binding proof. Recovered by
+refreshing the stamp and arming a detached keeper. **Suggested rail:** the reaper
+should verify droplet-side occupancy (`/proof/.slot-N` plus a live `cyanprint`)
+before destroying, so a dead poller can never cost a live proof.
+
+_(Logged 2026-07-26T01:03:01.321Z by the diene execution lead. Not fixed here: this repo was on
+`main` with uncommitted work in flight, and `kteamd` is currently supervising a
+live fleet, so a source change plus daemon restart was not taken unilaterally.)_
+
+### Confirmed again, with a concrete duplicate-delivery cost: `kteam send` reports failure after it has already delivered
+
+**Problem.** `kteam send megan "<long proof text>"` exited with
+
+```
+kteam: interactive harness did not become ready within 30s; last frame: promptReady=false, cursor=2:47
+```
+
+which reads as "not delivered". It _was_ delivered. I retried on that basis and
+**sent the message twice**.
+
+**Evidence.** Megan's session `ms0t1nzr-a60e7eac` has both attempts materialised
+as separate turn files:
+
+- `turns/turn-019.md` — first send (the one that "timed out")
+- `turns/turn-021.md` — retry, near-identical content
+
+Both carry the `[peer message from teammate chase (session ms10n6em-97c66749)]`
+header, so the recipient sees two peer messages saying the same thing, one of
+which contains an apologetic "you already found it yourself" framing that only
+made sense because I believed the first had failed. `channel/inbox.jsonl` exists
+and `markers/` is empty, matching the earlier finding that the send path writes
+the inbox before the readiness probe decides anything.
+
+**Why the frame test was false here.** The recipient was not idle-at-prompt: she
+was mid-`git worktree add` running the very closure probe the message was about
+(`kteam snapshot megan` showed `Working (15s) · 3 background terminals running`).
+So `promptReady=false` was _correct as a fact about the frame_ and _wrong as a
+conclusion about delivery_. A busy teammate is the normal case when you send them
+work — this will misfire routinely, not rarely.
+
+**Suspected code path.** Same 30s constant flagged in the entry above
+(`kteamd-codex-wake-readiness-30s.md`), on the `control.send` consumer. The bug
+is not the timeout duration, it is the **exit status and message**: the send path
+should report success once the inbox write and injection have happened, and treat
+`promptReady` as a delivery-latency hint at most. As written it converts a
+successful call into an apparent failure whose only obvious remedy — retry — is
+exactly the wrong action, and the CLI offers no idempotency key that would let a
+retry collapse into the original.
+
+**Workaround.** After any `kteam send` that reports the 30s readiness error, do
+NOT retry blind. Check `~/.kteam/<recipient-id>/turns/` (newest file) or
+`channel/inbox.jsonl` first; if the text is there, the send succeeded.
+
+_(Logged 2026-07-26 by chase, session `ms10n6em-97c66749`, during Stage C P1
+closure. Not fixed here: `modules/kteam-ts` source change plus a daemon restart
+was out of scope for this turn — the turn instructions explicitly forbade
+restarting the daemon while a live fleet was being supervised.)_
+
+## 2026-07-26 — actor attribution: human/UI stops are journaled as `source: daemon`
+
+**Problem.** The event journal cannot answer "who stopped this session". `transition()` hardcodes
+`'daemon'` as the fallback source (`session-manager.ts:4141`) and `currentActor()` is populated
+ONLY for warden-authenticated requests (`api-server.ts:537`) — so a stop issued by a human through
+the web UI or CLI with the ADMIN token lands in `events.jsonl` as `session.stopped
+{source: daemon}`, indistinguishable from a daemon-initiated stop.
+
+**Why this matters (found during triage of the 2026-07-25 "two interactive sessions stopped/idle"
+entry).** That investigation could not be closed: code inspection shows only `stop()` emits
+`session.stopped` and it is reachable only via HTTP/CLI (interactive sessions are fully
+reflex-exempt via `reflexSuspended`, `session-manager.ts:294-296`), which means the observed stops
+almost certainly came from a client — but the journal's `source: daemon` made that unprovable
+after the fact. The attribution gap converts every such incident into a CANNOT-TELL.
+
+**Suspected code path.** `modules/kteam-ts/src/api-server.ts` — actor context is set only in the
+warden-token branch (~:537); admin-token requests carry no actor. `modules/kteam-ts/src/
+session-manager.ts` `emitEvent`/`transition` (~:4141, :4259) — `currentActor() ?? 'daemon'`.
+
+**Suggested fix.** Stamp every API-originated mutation with an actor derived from the auth token
+class and transport (`admin-cli`, `admin-ui`, `warden:<id>`, `peer:<session-id>`), and reserve
+`daemon` for transitions the daemon itself initiates (reflex, monitor, boot reconciliation). The
+UI/CLI can additionally pass a self-identification header. Then "who stopped this session" is
+answerable from the journal alone.
+
+_(Logged 2026-07-26 by the triage planner (dwight, ms13qhmf-567cfa73) at the lead's request;
+verified in source at b26cac8. Triage table: `modules/kteam-ts/.kteam-prob-triage.md`.)_
+
+## 2026-07-26 ~01:40Z — REPRO: long `--message-file` sends to a busy claude session lost 8× consecutively; short inline send landed first try
+
+**Problem.** Fresh, clean reproduction of the send-loss class during the kteam-probfix batch.
+Eight consecutive `kteam send dorian --message-file <4.3KB brief>` to a BUSY claude session
+(mid-turn 1, actively implementing) all failed with `the message left the composer without queue
+evidence (pane may have gone idle mid-type)` and were verifiably NOT delivered (no row from this
+sender in `~/.kteam/ms14lfpl-5b14ac04/channel/inbox.jsonl` after each attempt; verified per
+attempt, ~45 s apart). Immediately afterwards a SHORT (~600 char) inline send to the same session
+reported `the prompt was typed but the harness never started the turn` — a warning — yet WAS
+durably queued (inbox row `queued=true` present). Meanwhile an earlier ~700-char send to the same
+session at 01:37:40 had also queued fine.
+
+**Key new datum: length-correlated.** Same sender, same target, same busy state, minutes apart:
+4.3 KB message-file payload → lost 8/8; ~600–700 char payloads → queued 2/2. Suggests the
+composer-typing path (type-then-verify-queue-evidence) breaks down on LONG payloads typed into a
+busy claude pane — e.g. the paste/typing takes long enough that the pane state changes mid-type,
+or the queue-evidence probe can't see the evidence for a large paste ("paste again to expand"
+collapsed-paste indicator was visible in the pane snapshot during this window).
+
+**Evidence.** Attempts at ~01:41–01:46Z from session ms13qhmf-567cfa73 (dwight) to
+ms14lfpl-5b14ac04 (dorian). Inbox rows present: 01:37:40 (short), 01:46:48 (short pointer);
+absent: all eight message-file attempts. Target pane snapshot mid-window showed the session
+healthy and working (`Implementing B1 version skew… · 62% (123k/200k)`).
+
+**Suspected code path.** `modules/kteam-ts/src/session-manager.ts` send → busy/native-queue path
+and `tmux-controller.ts` `typeIntoQueue` (the queue-evidence check after typing). The failure is
+loud (exit 1) — that part works — but there is no fallback and no retry, and the SIZE sensitivity
+means any lead sending a real brief (briefs are told to use `--message-file`!) hits this
+repeatedly. Note the second error string (`typed but the harness never started the turn`)
+accompanied a SUCCESSFUL durable queue — the unreliable-warning-in-both-directions problem
+already logged on 2026-07-25 is still current.
+
+**Workaround (verified).** Write the long payload to a file under the coordination dir and send a
+SHORT pointer message naming the file path; verify delivery via the recipient's inbox.jsonl, not
+the CLI output.
+
+**Fix pointer.** This is assigned as A2 in the current batch (georgia, ms14kkah-0e9f8014): the
+fallback-on-composer-failure item should cover the long-payload case explicitly — a payload that
+cannot be reliably typed should go through a turn-file/durable channel instead of the composer.
+
+_(Logged 2026-07-26 by the triage planner dwight, ms13qhmf-567cfa73, from direct observation.)_
+
+## 2026-07-26 — RESOLUTIONS: kteam-probfix batch (triage + 13 fixes, sessions dwight/georgia/dorian)
+
+Full triage of every entry above against source at b26cac8 lives in
+`modules/kteam-ts/.kteam-prob-triage.md` (20 resolved / 8 duplicates / 9 not-code /
+7 partial / 4 open / 2 cannot-tell at triage time). The OPEN + PARTIAL items were then fixed in
+13 scoped commits by two implementers (georgia = IMPL-A gpt-5.6-sol, dorian = IMPL-B opus-4.8),
+every fix with a fails-before/passes-after regression test; final gate 853 pass / 0 fail:
+
+- **False terminal on revive** (`kteam send` to completed session → `failed` while harness alive;
+  hit twice 2026-07-26) → RESOLVED `2752d53`. resume() now claims `launching`, refreshes
+  `launchedAt`, disarms/re-arms the monitor, force-applies the proven `running` correction;
+  terminal "exited" verdicts need a delayed re-probe + subprocess evidence; `exited unknown`
+  is gone.
+- **Send loss** (idle-path phantom inbox/turn, no fallback, no outbox; incl. the 8/8
+  length-correlated `--message-file` loss logged above) → RESOLVED `e5b7959`. Inject before
+  state commit; one durable file-backed fallback on composer rejection; multi-KB payloads go as
+  short file instructions; sender outbox rows.
+- **Stale done marker across gated injection / turn-blind monitor** → RESOLVED `f1d631b`
+  (both completion sites use doneMarkerForTurn; stale markers journal
+  `session.stale_done_marker`).
+- **Ghost sessions after stop + duplicate-worker revives** → RESOLVED `745d206` (process-tree
+  death confirmation, child-first TERM→KILL escalation, loud surviving PIDs; auto-revive refuses
+  a live same-label+cwd successor).
+- **migrate silently shrinks context window + rollback reverts a launched model** → RESOLVED
+  `af46422` + `974955e` (window comparison gated by `--allow-context-downgrade`; over-capacity
+  always refuses; rollback preserves an observed-launched model; readiness literals centralized).
+- **Event loop starved 660s / unhealable index invisible** → RESOLVED `bbfa0f4` (sweeps yield
+  every 25 items; health exposes `eventLoopLagMs`/`lastSelfCheckAt`/`wedgeCount`; unhealable ids
+  named).
+- **Stall-kill of sessions with live background subprocess (openTools gate)** → RESOLVED
+  `2fb79d3`.
+- **Daemon/CLI version skew + bare `kteam: not found` 404s** → RESOLVED `327c20a`
+  (x-kteam-version exchange; structured 404 naming method/path/versions).
+- **waitForDaemon fixed 10s window** → RESOLVED `28021c5` (pid-aware, 90s window, fails fast on
+  dead pid).
+- **Hot-store unbounded growth** → RESOLVED `a2d29cd` (aged terminal sessions archived out of the
+  hot store).
+- **`start --timeout` naming footgun** → RESOLVED `e4951f9` (`--kill-after-seconds` alias, KILL
+  wording, <600s warning). WatchdogSec deliberately NOT added (no sd_notify feeder exists — it
+  would kill a healthy daemon); left for a dedicated change.
+- **Actor attribution (`source: daemon` for human/UI stops, logged above)** → RESOLVED `cc9cbdc`
+  - `ca7edee` (actor derived from token class + self-id headers: admin-ui/admin-cli/peer:<id>/
+    warden:<id>; unknown kinds round-trip verbatim, never collapse to `daemon`).
+
+**ACTIVATION: none of the daemon-side fixes are live until `kteamd` restarts** (lead's call, one
+batched restart): A1–A7 runtime + B1/B3/B4/B6. B2/B5 are CLI-side (live immediately from source).
+
+Still deliberately open (see triage doc): the /rc-banner readiness CANNOT-TELL (needs a captured
+frame fixture), the 07-25 interactive-stops root cause (unanswerable pre-B6; diagnosable after
+restart), /signal-behind-adoption residual (bounded, deferred), and the two feature candidates
+(worktree isolation, human-only question provenance).

@@ -412,8 +412,6 @@ rec {
       kautopilot
       kteam
       kteamd
-      klaude
-      kodex
       kfleet
       kloge
       atomi.clickup_cli
@@ -955,10 +953,6 @@ rec {
         kapst = "kautopilot status";
         kapps = "kautopilot ps";
         kapx = "kautopilot stop";
-
-        # klaude
-        kat = "klaude at";
-        kn = "klaude -n";
 
         # kteam
         kt = "kteam";
