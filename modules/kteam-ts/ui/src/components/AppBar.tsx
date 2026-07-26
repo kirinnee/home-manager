@@ -2,18 +2,21 @@
 // banner when the daemon didn't substitute a token (i.e. we're on a non-loopback
 // origin).
 
-import { Search } from 'lucide-react';
+import { RefreshCw, Search } from 'lucide-react';
 import { Link } from '../lib/router';
 import { ThemeToggle } from './ThemeToggle';
 import { HAS_TOKEN } from '../lib/api';
 import { useFleet } from '../lib/store';
 import { SidebarDrawerTrigger } from './AgentSidebar';
 import { PALETTE_KEYSHORTCUTS, paletteShortcutLabel } from './CommandPalette';
+import type { UpdateReason } from '../hooks/useServiceWorkerUpdate';
 
 export function AppBar({
   crumbs,
   onOpenSidebar,
   onOpenPalette,
+  updateReady,
+  onApplyUpdate,
 }: {
   crumbs: Array<{ href?: string; label: string }>;
   /** Opens the fleet sidebar's mobile drawer. The trigger renders itself only
@@ -21,6 +24,10 @@ export function AppBar({
   onOpenSidebar: () => void;
   /** Opens the Cmd/Ctrl+K palette. */
   onOpenPalette: () => void;
+  /** Non-null when a newer release is installed and waiting, or when this tab
+   *  has already failed to lazy-load a chunk. Null hides the chip entirely. */
+  updateReady?: UpdateReason | null;
+  onApplyUpdate?: () => void;
 }) {
   const { status } = useFleet();
   return (
@@ -61,6 +68,32 @@ export function AppBar({
           <span className="kt-badge" data-tone="warn">
             read-only: no local token
           </span>
+        )}
+        {/* UPDATE / RECOVERY CHIP — an offer, never an interruption.
+            A reload throws away unsent composer text and the transcript scroll
+            position, so nothing here reloads on its own: the new worker sits
+            waiting until this is clicked. Two wordings because they are two
+            different facts — "Update ready" is news, "Reload to recover" means
+            this tab has ALREADY failed to load part of itself and is stuck.
+            `aria-live=polite` announces the chip's arrival without stealing
+            focus mid-typing; `data-tone=warn` for recovery so it does not read
+            as routine. */}
+        {updateReady && (
+          <button
+            type="button"
+            onClick={onApplyUpdate}
+            aria-live="polite"
+            title={
+              updateReady === 'recovery'
+                ? 'This tab could not load part of the app because a newer version was deployed. Reload to recover.'
+                : 'A newer version of Kteam is installed and ready. Reload to use it.'
+            }
+            className="kt-badge shrink-0 items-center gap-xs hover:text-fg"
+            data-tone={updateReady === 'recovery' ? 'warn' : 'accent'}
+          >
+            <RefreshCw size={11} aria-hidden="true" />
+            {updateReady === 'recovery' ? 'Reload to recover' : 'Update ready — reload'}
+          </button>
         )}
         {/* DISCOVERABILITY, NOT DECORATION. A keyboard-only feature that nothing
             on screen mentions is a feature only the person who built it has. This

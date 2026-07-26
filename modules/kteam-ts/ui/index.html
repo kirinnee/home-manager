@@ -17,7 +17,37 @@
       content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
     />
     <meta name="color-scheme" content="light dark" />
-    <link rel="icon" href="data:," />
+    <!-- FINGERPRINTED ICONS (C3). The unfingerprinted root-level ICO fallback is
+         deliberately NOT linked here: it exists only for user agents that probe
+         for it on their own, it is served `immutable`, and linking it would opt
+         real page loads into a potentially year-stale icon. verify-icons.ts
+         fails the build if this file references that root URL at all — which is
+         why this comment describes it rather than spelling it out. The `.ico`
+         below is the fingerprinted copy — same bytes, cache-safe URL — listed
+         after the SVG so browsers that understand SVG take that one. -->
+    <link rel="icon" type="image/svg+xml" href="/icons/favicon.fc09cfb83e.svg" />
+    <link rel="icon" type="image/x-icon" href="/icons/favicon.1e0c791b41.ico" />
+    <!-- iOS ignores the web manifest for Add-to-Home-Screen and reads these
+         instead. Everything here is SNAPSHOTTED AT ADD TIME and effectively
+         frozen: a later release cannot change the installed icon or title.
+         `black-translucent` lets the app paint under the status bar, which is
+         what makes the notch area take the theme's `--bg` rather than a black
+         band — index.css pays back the safe-area insets. -->
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.1d79d00c19.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Kteam" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <!-- ONE manifest link, created here with an id, and REPOINTED IN PLACE by
+         src/hooks/useTheme.ts on every theme change (audit M4) — never a second
+         link element. Ten generated manifests differ only in their theme/
+         background colour, so the href names the resolved family+mode. The
+         release comes from the orchestrator's `VITE_KTEAM_RELEASE`; a bare
+         `vite build` has no value for it and fails loudly (vite.config.ts).
+         `%…%` substitution happens at build time, so the FIRST paint of a hard
+         load already points at the right file — useTheme only has to keep it
+         true afterwards. -->
+    <link id="kteam-manifest" rel="manifest" href="/manifest-studio-light.%VITE_KTEAM_RELEASE%.json" />
     <title>Kteam</title>
     <!-- Daemon substitutes the real token at serve time (loopback only). For
          non-loopback requests this stays empty and the UI shows a read-only
@@ -74,6 +104,24 @@
               : 'light'
             : mode;
         document.documentElement.setAttribute('data-theme', family + '-' + resolved);
+        // Point the manifest link at THIS theme before first paint, using the
+        // same swap rule as `manifestHrefFor()` in src/hooks/useTheme.ts (keep
+        // the two in step). The build stamps a studio-light href; a reader on
+        // mission-dark would otherwise expose the wrong colours to an install
+        // prompt triggered before React mounts.
+        try {
+          var link = document.getElementById('kteam-manifest');
+          if (link) {
+            link.setAttribute(
+              'href',
+              link
+                .getAttribute('href')
+                .replace(/manifest-[a-z]+-[a-z]+\./, 'manifest-' + family + '-' + resolved + '.'),
+            );
+          }
+        } catch (e) {
+          /* the manifest link is best-effort; a failure here must not stop boot */
+        }
       })();
     </script>
   </head>

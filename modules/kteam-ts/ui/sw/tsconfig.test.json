@@ -1,0 +1,46 @@
+{
+  /* Worker CONTRACT TESTS, typechecked separately from the worker source.
+
+     `sw/tsconfig.json` deliberately has `"types": []` and no DOM, so worker code
+     cannot reference `window`/`document`/node globals that do not exist inside a
+     worker. That strictness is the point, and it is also why the test file
+     cannot live in that project: a bun test needs `bun:test`, and the fakes it
+     builds for `Cache`/`CacheStorage`/`fetch` need the WebWorker lib as well.
+
+     So the test gets its own project: WebWorker types (the APIs under test) plus
+     the ambient bun types (the runner). Still no DOM — a test that reached for
+     `document` would be testing something the worker can never do.
+
+     Referenced from the root tsconfig so plain `tsc -b` covers it; otherwise
+     this file would be typechecked by nothing, which is exactly the gap
+     `sw/tsconfig.json`'s own header warns about. That reference is only possible
+     because the tests import `policy.ts` rather than the worker entry: the entry
+     pulls in the gitignored `precache.gen.ts`, and referencing anything that
+     needs it would break `tsc -b` on a clean checkout. `composite` is required
+     of every referenced project. */
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "WebWorker"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "composite": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": false
+  },
+  /* The tests plus exactly the sources they import. A composite project must
+     list every file it compiles, so `policy.ts` and the release helper are named
+     here rather than picked up implicitly — and `policy.ts` is checked under
+     WebWorker types, the same way its own project checks it.
+
+     `sw.ts` is NOT here (nor is `precache.gen.ts`): the entry imports generated
+     code, so including it would reintroduce the clean-checkout failure this
+     whole split exists to remove. `tsc -p sw` covers the entry after a build. */
+  "include": ["./**/*.test.ts", "./policy.ts", "../scripts/release.ts"]
+}
