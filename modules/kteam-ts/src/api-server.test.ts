@@ -51,10 +51,16 @@ class FakeService implements KTeamService {
   };
   suggestNames = async (count = 1) => ['aaron', 'abel', 'abigail'].slice(0, count);
   start = async (_input: StartSessionRequest) => view;
-  send = async (_id: string, _input: SendRequest) => ({ ...view, disposition: 'delivered' as const });
+  send = async (_id: string, _input: SendRequest) => {
+    this.lastActor = currentActor();
+    return { ...view, disposition: 'delivered' as const };
+  };
   answer = async () => view;
   interrupt = async () => view;
-  stop = async () => view;
+  stop = async () => {
+    this.lastActor = currentActor();
+    return view;
+  };
   resume = async () => view;
   lastMigrate?: { id: string; agent: string; model?: string; allowContextDowngrade?: boolean };
   migrate = async (id: string, agent: string, model?: string, allowContextDowngrade?: boolean) => {
@@ -579,7 +585,9 @@ describe('warden-scoped token authorization', () => {
     expect(service.lastActor).toBe('warden');
     const r2 = await fetch(`${base}/v1/sessions/s1`, { headers: { authorization: 'Bearer secret' } });
     expect(r2.status).toBe(200);
-    expect(service.lastActor).toBeUndefined();
+    // An admin-token request with no self-identification headers is the human at
+    // the browser UI — attributed 'admin-ui', never unattributed (B6).
+    expect(service.lastActor).toBe('admin-ui');
   });
 
   test('permits reads and the safe-recovery writes', async () => {
@@ -657,6 +665,78 @@ describe('warden-scoped token authorization', () => {
       body: JSON.stringify({ kind: 'done' }),
     });
     expect(allowed.status).toBe(200);
+  });
+});
+
+describe('actor attribution behind API mutations (B6)', () => {
+  function adminServer(service: KTeamService): string {
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    return `http://127.0.0.1:${server.port}`;
+  }
+
+  test('an admin stop with no self-identification is the human at the web UI', async () => {
+    const service = new FakeService();
+    const base = adminServer(service);
+    const r = await fetch(`${base}/v1/sessions/s1/stop`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer secret', 'content-type': 'application/json' },
+      body: '{}',
+    });
+    expect(r.status).toBe(200);
+    expect(service.lastActor).toBe('admin-ui');
+  });
+
+  test('an admin stop carrying x-kteam-client: cli is the human at the CLI', async () => {
+    const service = new FakeService();
+    const base = adminServer(service);
+    const r = await fetch(`${base}/v1/sessions/s1/stop`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer secret', 'content-type': 'application/json', 'x-kteam-client': 'cli' },
+      body: '{}',
+    });
+    expect(r.status).toBe(200);
+    expect(service.lastActor).toBe('admin-cli');
+  });
+
+  test('an admin send from inside a teammate pane is attributed to that peer', async () => {
+    const service = new FakeService();
+    const base = adminServer(service);
+    const r = await fetch(`${base}/v1/sessions/s1/send`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer secret',
+        'content-type': 'application/json',
+        'x-kteam-session-id': 'georgia',
+        'x-kteam-client': 'cli',
+      },
+      body: JSON.stringify({ message: 'steer' }),
+    });
+    expect(r.status).toBe(200);
+    // The session id wins over the client header: this is a teammate, not the lead.
+    expect(service.lastActor).toBe('peer:georgia');
+  });
+
+  test('an assigned warden stop is attributed to the specific warden by its session id', async () => {
+    class AssignedService extends FakeService {
+      wardenMayStop = (capability: string, targetId: string) => capability === 'cap-secret-9' && targetId === 's1';
+    }
+    const service = new AssignedService();
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', wardenToken: 'warden', service });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}`;
+    const r = await fetch(`${base}/v1/sessions/s1/stop`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer warden',
+        'content-type': 'application/json',
+        'x-kteam-stop-capability': 'cap-secret-9',
+        'x-kteam-session-id': 'warden-7',
+      },
+      body: '{}',
+    });
+    expect(r.status).toBe(200);
+    expect(service.lastActor).toBe('warden:warden-7');
   });
 });
 
