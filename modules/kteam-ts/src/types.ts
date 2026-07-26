@@ -162,7 +162,20 @@ export interface SessionState {
    *  transcript consumption boundary. Durable: the turn advances only when a
    *  matching chat.user record appears (correlated under the session lock);
    *  entries surviving into a terminal state are surfaced as lost. */
-  pendingNativeSends?: Array<{ id: string; at: string; message: string; attachmentIds?: string[] }>;
+  pendingNativeSends?: Array<{
+    id: string;
+    at: string;
+    /** The complete logical message, materialized into the tracked turn file
+     *  when the harness consumes this native-queue entry. */
+    message: string;
+    attachmentIds?: string[];
+    /** What was actually typed into the native queue. For oversized/fallback
+     *  sends this is a short instruction pointing at payloadFile, so a 4KB+
+     *  collapsed paste never has to survive the busy composer. */
+    queueText?: string;
+    /** Durable absolute file holding `message` when queueText is indirect. */
+    payloadFile?: string;
+  }>;
   /** A warden delivered a needs_human verdict for this session: the reason,
    *  shown in ps/UI. While set, the sweep suppresses re-triage of the same
    *  anomaly class (needsHumanKind) — no identical report every sweep.

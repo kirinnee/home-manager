@@ -411,6 +411,210 @@ describe('send() delivery holes (turn-012 fix round)', () => {
     expect(result.disposition).toBe('queued');
     expect(typed).toEqual(['urgent steer']);
   });
+
+  test('a failed idle injection leaves no inbox row and does not bump the turn', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-send-idle-rollback-'));
+    temporaryDirectories.push(home);
+    await Promise.all([
+      mkdir(path.join(home, 's1', 'channel'), { recursive: true }),
+      mkdir(path.join(home, 's1', 'turns'), { recursive: true }),
+      mkdir(path.join(home, 's1', 'markers'), { recursive: true }),
+    ]);
+    await writeFile(path.join(home, 's1', 'channel', 'inbox.jsonl'), '');
+    let config: Record<string, unknown> = {
+      id: 's1',
+      mode: 'auto',
+      tmuxSession: 'kteam-s1-agent',
+      turn: 3,
+      directSendMaxChars: 500,
+    };
+    const manager = bareManager();
+    manager.paths = createPaths(home);
+    manager.attachments = { buildImageReferenceBlock: async () => '' };
+    manager.autoContinued = new Set();
+    manager.doneDeferred = new Set();
+    manager.tmux = {
+      send: async () => {
+        throw new Error('the prompt never started');
+      },
+    };
+    manager.store = {
+      updateConfig: async (_id: string, mutate: (current: Record<string, unknown>) => Record<string, unknown>) => {
+        config = mutate(config);
+        return config;
+      },
+    };
+    manager.emit = async () => ({});
+    manager.transition = async () => undefined;
+    await expect(
+      (
+        manager as unknown as {
+          deliverToIdlePrompt: (id: string, view: SessionView, request: { message: string }) => Promise<void>;
+        }
+      ).deliverToIdlePrompt(
+        's1',
+        {
+          directory: path.join(home, 's1'),
+          config,
+          state: { id: 's1', status: 'running', turn: 3 },
+        } as unknown as SessionView,
+        { message: 'must be atomic' },
+      ),
+    ).rejects.toThrow(/never started/);
+    expect(config.turn).toBe(3);
+    expect(await readFile(path.join(home, 's1', 'channel', 'inbox.jsonl'), 'utf8')).toBe('');
+  });
+
+  test('a composer rejection falls back once to a durable file-backed native queue', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-send-fallback-'));
+    temporaryDirectories.push(home);
+    await mkdir(path.join(home, 's1', 'channel'), { recursive: true });
+    const typed: string[] = [];
+    let state: Record<string, unknown> = { id: 's1', status: 'running', turn: 3, promptReady: false };
+    const { manager } = sendManager({ status: 'running', paneAlive: true, promptReady: false });
+    manager.get = async () => ({
+      directory: path.join(home, 's1'),
+      config: { id: 's1', tmuxSession: 'kteam-s1-agent', turn: 3 },
+      state,
+    });
+    manager.store = {
+      updateState: async (_id: string, mutate: (current: Record<string, unknown>) => Record<string, unknown>) => {
+        state = mutate(state);
+        return state;
+      },
+    };
+    manager.tmux = {
+      state: async () => ({ alive: true, dead: false, promptReady: false, visiblePane: '• Working (10s' }),
+      typeIntoQueue: async (_name: string, text: string) => {
+        typed.push(text);
+        if (typed.length === 1) throw new Error('the message left the composer without queue evidence');
+      },
+    };
+    manager.emit = async () => ({});
+    manager.monitors = new Map();
+    manager.launching = new Map();
+    const queued = await (
+      manager as unknown as {
+        send: (id: string, request: { message: string }) => Promise<{ disposition: string }>;
+      }
+    ).send('s1', { message: 'fallback payload' });
+    expect(queued.disposition).toBe('queued');
+    expect(typed).toHaveLength(2);
+    expect(typed[0]).toBe('fallback payload');
+    expect(typed[1]).toContain('Read the queued message file');
+    const pending = state.pendingNativeSends as Array<{ message: string; queueText?: string; payloadFile?: string }>;
+    expect(pending).toHaveLength(1);
+    expect(pending[0]!.message).toBe('fallback payload');
+    expect(pending[0]!.queueText).toBe(typed[1]);
+    expect(await readFile(pending[0]!.payloadFile!, 'utf8')).toBe('fallback payload\n');
+  });
+
+  test('a multi-kilobyte busy send queues only a short durable file instruction', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-send-long-fallback-'));
+    temporaryDirectories.push(home);
+    await mkdir(path.join(home, 's1', 'channel'), { recursive: true });
+    const long = `LONG SPEC\n${'x'.repeat(4_300)}`;
+    const typed: string[] = [];
+    let state: Record<string, unknown> = { id: 's1', status: 'running', turn: 3, promptReady: false };
+    const { manager } = sendManager({ status: 'running', paneAlive: true, promptReady: false });
+    manager.get = async () => ({
+      directory: path.join(home, 's1'),
+      config: { id: 's1', tmuxSession: 'kteam-s1-agent', turn: 3 },
+      state,
+    });
+    manager.store = {
+      updateState: async (_id: string, mutate: (current: Record<string, unknown>) => Record<string, unknown>) => {
+        state = mutate(state);
+        return state;
+      },
+    };
+    manager.tmux = {
+      state: async () => ({ alive: true, dead: false, promptReady: false, visiblePane: '• Working (10s' }),
+      typeIntoQueue: async (_name: string, text: string) => {
+        typed.push(text);
+      },
+    };
+    manager.emit = async () => ({});
+    manager.monitors = new Map();
+    manager.launching = new Map();
+    const queued = await (
+      manager as unknown as {
+        send: (id: string, request: { message: string }) => Promise<{ disposition: string }>;
+      }
+    ).send('s1', { message: long });
+    expect(queued.disposition).toBe('queued');
+    expect(typed).toHaveLength(1);
+    expect(typed[0]!.length).toBeLessThan(1_000);
+    expect(typed[0]).toContain('Read the queued message file');
+    expect(typed[0]).not.toContain('x'.repeat(500));
+    const pending = state.pendingNativeSends as Array<{ message: string; queueText?: string; payloadFile?: string }>;
+    expect(pending[0]!.message).toBe(long);
+    expect(pending[0]!.queueText).toBe(typed[0]);
+    expect(await readFile(pending[0]!.payloadFile!, 'utf8')).toBe(`${long}\n`);
+  });
+
+  test('a successful peer send appends a sender-side outbox row', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-send-outbox-'));
+    temporaryDirectories.push(home);
+    await Promise.all(
+      ['sender', 's1'].flatMap(id => [
+        mkdir(path.join(home, id, 'channel'), { recursive: true }),
+        mkdir(path.join(home, id, 'turns'), { recursive: true }),
+        mkdir(path.join(home, id, 'markers'), { recursive: true }),
+      ]),
+    );
+    await writeFile(path.join(home, 'sender', 'channel', 'outbox.jsonl'), '');
+    let targetConfig: Record<string, unknown> = {
+      id: 's1',
+      mode: 'interactive',
+      tmuxSession: 'kteam-s1-agent',
+      turn: 3,
+      directSendMaxChars: 500,
+    };
+    const targetState = { id: 's1', status: 'awaiting_user', turn: 3, promptReady: true };
+    const manager = bareManager();
+    manager.paths = createPaths(home);
+    manager.resolveRef = (id: string) => id;
+    manager.serialized = async (_id: string, work: () => Promise<unknown>) => await work();
+    manager.launching = new Map();
+    manager.monitors = new Map();
+    manager.autoContinued = new Set();
+    manager.doneDeferred = new Set();
+    manager.attachments = { buildImageReferenceBlock: async () => '' };
+    manager.get = async (id: string) =>
+      id === 'sender'
+        ? {
+            directory: path.join(home, 'sender'),
+            config: { id: 'sender', teammate: 'georgia', turn: 1 },
+            state: { id: 'sender', status: 'running', turn: 1 },
+          }
+        : { directory: path.join(home, 's1'), config: targetConfig, state: targetState };
+    manager.store = {
+      updateConfig: async (_id: string, mutate: (current: Record<string, unknown>) => Record<string, unknown>) => {
+        targetConfig = mutate(targetConfig);
+        return targetConfig;
+      },
+    };
+    manager.tmux = {
+      state: async () => ({ alive: true, dead: false, promptReady: true, visiblePane: '❯ ' }),
+      send: async () => undefined,
+    };
+    manager.emit = async () => ({});
+    manager.transition = async () => undefined;
+    manager.endPeerWait = async () => undefined;
+    const result = await (
+      manager as unknown as {
+        send: (id: string, request: { message: string; from: string }) => Promise<{ disposition: string }>;
+      }
+    ).send('s1', { message: 'peer update', from: 'sender' });
+    expect(result.disposition).toBe('delivered');
+    const rows = (await readFile(path.join(home, 'sender', 'channel', 'outbox.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ from: 'sender', to: 's1', disposition: 'delivered', message: 'peer update' });
+  });
 });
 
 describe('partition-tolerant loud bootstrap (turn-019 P0)', () => {
@@ -639,7 +843,13 @@ describe('needs_human flag + sweep dedupe (turn-018)', () => {
 describe('native-queue consumption correlation (turn-016 P1)', () => {
   function correlationManager(initial: {
     turn: number;
-    pendingNativeSends: Array<{ id: string; at: string; message: string }>;
+    pendingNativeSends: Array<{
+      id: string;
+      at: string;
+      message: string;
+      queueText?: string;
+      payloadFile?: string;
+    }>;
   }) {
     const events: Array<{ type: string; turn?: number }> = [];
     let config: Record<string, unknown> = { id: 's1', tmuxSession: 'kteam-s1-agent', turn: initial.turn };
@@ -708,6 +918,30 @@ describe('native-queue consumption correlation (turn-016 P1)', () => {
     expect(await readFile(path.join(home, 's1', 'markers', 'done.json'), 'utf8').catch(() => 'GONE')).toBe('GONE');
     // Consumption event tagged with the NEW turn.
     expect(harness.events).toEqual([{ type: 'control.send_consumed', turn: 4 }]);
+  });
+
+  test('a file-backed queue matches its short instruction and materializes the full payload', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-correlate-file-backed-'));
+    temporaryDirectories.push(home);
+    await mkdir(path.join(home, 's1', 'turns'), { recursive: true });
+    const fullMessage = `LONG SPEC\n${'x'.repeat(4_300)}`;
+    const queueText = `Read the queued message file at ${path.join(home, 's1', 'channel', 'queued-q1.md')}`;
+    const harness = correlationManager({
+      turn: 3,
+      pendingNativeSends: [
+        {
+          id: 'q1',
+          at: 'then',
+          message: fullMessage,
+          queueText,
+          payloadFile: path.join(home, 's1', 'channel', 'queued-q1.md'),
+        },
+      ],
+    });
+    await harness.call([{ type: 'chat.user', data: { text: queueText } }], home);
+    expect(harness.config().turn).toBe(4);
+    expect(harness.state().pendingNativeSends).toHaveLength(0);
+    expect(await readFile(path.join(home, 's1', 'turns', 'turn-004.md'), 'utf8')).toBe(`${fullMessage}\n`);
   });
 
   test('replayed/duplicate transcript batches cannot double-advance', async () => {
