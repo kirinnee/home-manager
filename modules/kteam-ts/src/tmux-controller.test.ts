@@ -7,11 +7,15 @@ import {
   composerEvidence,
   composerHolds,
   contextPercentUsed,
+  distinctiveOptionFragment,
+  optionVisibleOnPane,
   paneShowsActiveWork,
   paneWorkCounters,
   parsePaneMetadata,
   resumeMenuAction,
   startupDialogAction,
+  STRUCTURED_ANSWER_NOT_VISIBLE,
+  structuredAnswerRefusal,
   TmuxController,
   workCountersAdvanced,
 } from './tmux-controller';
@@ -510,6 +514,103 @@ describe('fillComposer', () => {
   });
 });
 
+describe('inject() consumption outcomes are exactly-once', () => {
+  const paths = createPaths('/tmp/kteam-inject-outcome-test');
+  const input = '/status';
+  const idle = ['› ', '', '  gpt-5.6-sol high · Context 0% used'].join('\n');
+  const filled = ['› /status', '', '  gpt-5.6-sol high · Context 0% used'].join('\n');
+
+  interface StateFixture {
+    pane: string;
+    promptReady: boolean;
+  }
+
+  class InjectionController extends TmuxController {
+    readonly sent: string[][] = [];
+    protected readonly composerPollMs = 0;
+    protected readonly injectionPollMs = 0;
+    private captureIndex = 0;
+    private stateIndex = 0;
+
+    constructor(
+      private readonly captureFrames: string[],
+      private readonly stateFrames: StateFixture[],
+    ) {
+      super(paths, 'http://127.0.0.1:7337');
+    }
+
+    override async captureVisible(): Promise<string> {
+      const index = Math.min(this.captureIndex++, this.captureFrames.length - 1);
+      return this.captureFrames[index]!;
+    }
+
+    override async state() {
+      const index = Math.min(this.stateIndex++, this.stateFrames.length - 1);
+      const fixture = this.stateFrames[index]!;
+      return {
+        alive: true,
+        dead: false,
+        promptReady: fixture.promptReady,
+        pane: fixture.pane,
+        visiblePane: fixture.pane,
+      };
+    }
+
+    protected override async keys(_name: string, ...keys: string[]) {
+      this.sent.push(keys);
+      return { code: 0, stdout: '', stderr: '' };
+    }
+
+    get injectionCount(): number {
+      return this.sent.filter(keys => keys[0] === '-l').length;
+    }
+
+    get submitCount(): number {
+      return this.sent.filter(keys => keys[0] === 'Enter').length;
+    }
+  }
+
+  test('input consumed with a model turn starts once', async () => {
+    const active = ['• Working (1s • Esc to interrupt)', '', '› '].join('\n');
+    const controller = new InjectionController([idle, filled], [{ pane: active, promptReady: false }]);
+
+    expect(await controller.inject('kteam-x-agent', input)).toBe('turn-started');
+    expect(controller.injectionCount).toBe(1);
+    expect(controller.submitCount).toBe(1);
+  });
+
+  test('input consumed without a model turn is handled locally once', async () => {
+    // The local result deliberately echoes the exact command in scrollback.
+    // A ready empty composer is stronger evidence than that broad text match.
+    const localResult = ['Account status for /status', '', '› ', '', '  gpt-5.6-sol high · Context 0% used'].join('\n');
+    const controller = new InjectionController([idle, filled], [{ pane: localResult, promptReady: true }]);
+
+    expect(await controller.inject('kteam-x-agent', input)).toBe('handled-local');
+    expect(controller.injectionCount).toBe(1);
+    expect(controller.submitCount).toBe(1);
+  });
+
+  test('input that never lands retries text entry, then fails', async () => {
+    const controller = new InjectionController([idle], []);
+
+    await expect(controller.inject('kteam-x-agent', input)).rejects.toThrow(
+      /text did not land in the interactive input box/,
+    );
+    expect(controller.injectionCount).toBe(3);
+    expect(controller.submitCount).toBe(0);
+  });
+
+  test('a busy composer retries Enter but never retypes the landed input', async () => {
+    const controller = new InjectionController([idle, filled], [{ pane: filled, promptReady: false }]);
+
+    await expect(controller.inject('kteam-x-agent', input)).rejects.toThrow(
+      /remained in the interactive input box after submit retries/,
+    );
+    expect(controller.injectionCount).toBe(1);
+    expect(controller.submitCount).toBe(3);
+  });
+});
+
 describe('stop() confirms the harness process tree is gone', () => {
   type ProcessRecord = { pid: number; ppid: number };
 
@@ -603,8 +704,9 @@ describe('send() into an interactive pane whose composer already holds a draft',
       this.sent.push(keys);
       return { code: 0, stdout: '', stderr: '' };
     }
-    override async inject(_name: string, text: string): Promise<void> {
+    override async inject(_name: string, text: string) {
       this.injected = text;
+      return 'turn-started' as const;
     }
   }
 
@@ -626,5 +728,171 @@ describe('send() into an interactive pane whose composer already holds a draft',
     const controller = new SendController('❯ \n? for shortcuts');
     await expect(controller.send({ ...base, mode: 'auto' }, 'hello')).rejects.toThrow(/did not become ready/);
     expect(controller.sent).toEqual([]);
+  });
+});
+
+describe('structured-answer visibility matcher', () => {
+  // The daemon drives the interactive question menu by INDEX over its stored
+  // options; this matcher is the sanity gate that the right question + option
+  // are genuinely on screen before it types. The hard rule under test: it must
+  // NEVER let a keystroke answer the wrong option, but it MUST answer an option
+  // whose label wrapped across two TUI lines or was ellipsis-truncated.
+  const QUESTION = 'Which naming theme should the fleet use?';
+  const OPTIONS = ['Plain role names (Recommended)', 'East Asian mythical', 'Norse', 'Chemistry'];
+
+  // Happy path: every label rendered contiguously on its own line.
+  const happyPane = [
+    `? ${QUESTION}`,
+    '  ○ Plain role names (Recommended)',
+    '  ○ East Asian mythical',
+    '  ○ Norse',
+    '  ○ Chemistry',
+    '  ↑/↓ to move · enter to select',
+  ].join('\n');
+
+  // The live bug: the picked label wraps, and a right-column panel prints
+  // BETWEEN the two fragments, so the full whitespace-stripped label is never a
+  // contiguous substring of the pane — but "Plain role names" alone is.
+  const wrappingPane = [
+    `? ${QUESTION}`,
+    '  ○ Plain role names        │ recent activity',
+    '    (Recommended)           │  - built ui',
+    '  ○ East Asian mythical     │  - ran tests',
+    '  ○ Norse                   │',
+    '  ○ Chemistry               │',
+  ].join('\n');
+
+  test('happy path: a contiguous label is visible and answerable', () => {
+    expect(
+      structuredAnswerRefusal({
+        pane: happyPane,
+        question: QUESTION,
+        options: OPTIONS,
+        selected: ['East Asian mythical'],
+        promptReady: false,
+      }),
+    ).toBeNull();
+  });
+
+  test('wrapping label (panel text between the fragments) is answerable — the bug fix', () => {
+    // Regression guard: the old full-label contiguous match refused this.
+    const normalized = wrappingPane.replace(/\s+/g, '').toLowerCase();
+    expect(normalized.includes('plainrolenames(recommended)')).toBe(false); // full label NOT contiguous
+    expect(
+      structuredAnswerRefusal({
+        pane: wrappingPane,
+        question: QUESTION,
+        options: OPTIONS,
+        selected: ['Plain role names (Recommended)'],
+        promptReady: false,
+      }),
+    ).toBeNull();
+  });
+
+  test('ellipsis-truncated long label is answerable', () => {
+    const options = ['Blue-green with automatic rollback on health-check failure', 'Canary', 'Recreate'];
+    const pane = [
+      '? Pick a deployment strategy',
+      '  ○ Blue-green with automatic rollback on health-che…',
+      '  ○ Canary',
+      '  ○ Recreate',
+    ].join('\n');
+    expect(
+      structuredAnswerRefusal({
+        pane,
+        question: 'Pick a deployment strategy',
+        options,
+        selected: ['Blue-green with automatic rollback on health-check failure'],
+        promptReady: false,
+      }),
+    ).toBeNull();
+  });
+
+  test('ambiguous prefix pair REFUSES rather than guess the wrong option', () => {
+    const options = ['Enable feature', 'Enable feature flags'];
+    // "Enable feature" wraps, so its full label is not contiguous; the only
+    // contiguous evidence ("enablefeature") also lives inside the sibling
+    // "Enable feature flags", so no fragment can distinguish them → refuse.
+    const pane = [
+      '? Toggle behaviour',
+      '  ○ Enable            │ note',
+      '    feature           │ note',
+      '  ○ Enable feature flags',
+    ].join('\n');
+    expect(distinctiveOptionFragment('Enable feature', options)).toBeNull();
+    expect(
+      structuredAnswerRefusal({
+        pane,
+        question: 'Toggle behaviour',
+        options,
+        selected: ['Enable feature'],
+        promptReady: false,
+      }),
+    ).toBe(STRUCTURED_ANSWER_NOT_VISIBLE);
+  });
+
+  test('a genuinely absent question is refused (question text not on the pane)', () => {
+    expect(
+      structuredAnswerRefusal({
+        pane: '❯ \n? for shortcuts\n',
+        question: QUESTION,
+        options: OPTIONS,
+        selected: ['Norse'],
+        promptReady: true,
+      }),
+    ).toBe(STRUCTURED_ANSWER_NOT_VISIBLE);
+  });
+
+  test('an idle prompt is refused even if the question text lingers in scrollback', () => {
+    expect(
+      structuredAnswerRefusal({
+        pane: happyPane,
+        question: QUESTION,
+        options: OPTIONS,
+        selected: ['Norse'],
+        promptReady: true,
+      }),
+    ).toBe(STRUCTURED_ANSWER_NOT_VISIBLE);
+  });
+
+  test('an option that is simply not on screen is refused', () => {
+    // Question visible, but the selected option row scrolled off entirely.
+    const pane = [`? ${QUESTION}`, '  ○ East Asian mythical', '  ○ Chemistry'].join('\n');
+    expect(
+      structuredAnswerRefusal({
+        pane,
+        question: QUESTION,
+        options: OPTIONS,
+        selected: ['Norse'],
+        promptReady: false,
+      }),
+    ).toBe(STRUCTURED_ANSWER_NOT_VISIBLE);
+  });
+
+  test('freeform-only answers (no selected labels) skip the option check', () => {
+    expect(
+      structuredAnswerRefusal({
+        pane: happyPane,
+        question: QUESTION,
+        options: OPTIONS,
+        selected: [],
+        promptReady: false,
+      }),
+    ).toBeNull();
+  });
+
+  test('distinctiveOptionFragment yields a unique, non-sibling fragment', () => {
+    const fragment = distinctiveOptionFragment('Plain role names (Recommended)', OPTIONS);
+    expect(fragment).not.toBeNull();
+    // Distinctive: no OTHER option contains it.
+    for (const other of OPTIONS.filter(o => o !== 'Plain role names (Recommended)')) {
+      expect(other.replace(/\s+/g, '').toLowerCase().includes(fragment!)).toBe(false);
+    }
+  });
+
+  test('optionVisibleOnPane matches a wrapped fragment but not a sibling-only fragment', () => {
+    const normalized = wrappingPane.replace(/\s+/g, '').toLowerCase();
+    expect(optionVisibleOnPane(normalized, 'Plain role names (Recommended)', OPTIONS)).toBe(true);
+    expect(optionVisibleOnPane(normalized, 'Norse', OPTIONS)).toBe(true);
   });
 });
