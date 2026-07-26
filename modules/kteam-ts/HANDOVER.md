@@ -126,3 +126,36 @@ dismissal must persist).
 - Gates to keep green: `bun run check`; contrast (0 hard failures); horizontal-scroll assertion;
   mobile density budgets; the new hover-reserved-space gate.
 - `kteam-prob.md` (repo root) is the running defect log — append, annotate, never delete history.
+
+---
+
+## 7. Stop point (2026-07-26) — read this before resuming
+
+The batch was **stopped mid-flight** for handover. Sessions are stopped, not destroyed:
+`kteam resume <name>` revives any of them with its conversation intact.
+
+**Stopped sessions** (all were children of `jessica`, itself a child of the lead session `dixie`):
+
+| Teammate | Was doing | Batch |
+| --- | --- | --- |
+| jessica | integration lead for the UI work | — |
+| max | S1 — reclaim the 80px transcript width | 1 |
+| alfred | theme selector overflow + kb-hide popover | 1 |
+| alexander | never autofocus search on touch | 1 |
+| lenny | touch Enter = newline + mandatory 44px Send | 1 |
+| rosa | drop mobile top-bar status pill + agent count | 1 |
+| cheryl | details/lineage work | 2 |
+
+**There is UNCOMMITTED, INCOMPLETE batch-1 work in the tree** — roughly five files under
+`modules/kteam-ts/ui/src/components/` (`AgentSidebar.tsx`, `SessionHeader.tsx`, `ThemeToggle.tsx`,
+`ThemeToggle.test.ts` (new), `TranscriptRow.tsx`). It was in progress when the implementers were
+stopped, so **do not assume it is coherent or that it passes gates.** Options when resuming:
+
+1. `kteam resume` the relevant implementer and let it finish its own stage (it has the context), or
+2. `git checkout` those paths and re-dispatch the stages cleanly from the plan.
+
+Do NOT simply commit them as-is. `ui-dist` is untouched and still serves the last good deploy
+(`cdb7839`), so the live page is unaffected by any of this.
+
+**Nothing else is outstanding**: core/CLI, prob-log fixes, fleet memory, `klaude` removal and the
+`ki` alias are all committed and pushed.
