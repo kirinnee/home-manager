@@ -24,6 +24,7 @@
 // the teammate is context for the task, not the headline.
 
 import { cn } from '../lib/utils';
+import type { LineageLabel } from '../lib/lineage';
 
 const BRACKET_PREFIX = /^\[([^[\]]+)\]\s*(.*)$/s;
 
@@ -53,6 +54,28 @@ export function taskIsRedundant(name: string | undefined, teammate: string | und
   const { task } = parseTaskName(name);
   if (!task) return true;
   return !!teammate && task.toLowerCase() === teammate.trim().toLowerCase();
+}
+
+/** Compact task-bearing lineage identity. The task is the only shrinkable
+ * segment, so a long title yields before the stable callsign. */
+export function LineageName({ label, className = '' }: { label: LineageLabel; className?: string }) {
+  const hasCallsign = Boolean(label.callsign);
+  const hasTask = Boolean(label.task);
+
+  return (
+    <span className={cn('inline-flex min-w-0 max-w-full items-baseline', className)} title={label.full}>
+      <span aria-hidden="true" className="inline-flex min-w-0 max-w-full items-baseline">
+        {hasCallsign && <span className="shrink-0">{label.callsign}</span>}
+        {hasCallsign && hasTask && <span className="shrink-0 text-faint"> · </span>}
+        {hasTask ? (
+          <span className="min-w-0 truncate">{label.task}</span>
+        ) : !hasCallsign ? (
+          <span className="mono min-w-0 truncate">{label.text}</span>
+        ) : null}
+      </span>
+      <span className="sr-only">{label.full}</span>
+    </span>
+  );
 }
 
 export function TaskName({
