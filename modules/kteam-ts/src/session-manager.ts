@@ -2443,13 +2443,18 @@ export class SessionManager implements KTeamService {
   /** True only when markers/done.json certifies the given CURRENT turn. A
    *  marker without a turn (pre-upgrade) or from an older turn is stale
    *  evidence and must not complete newer work. */
-  private doneMarkerForTurn(id: string, turn: number | undefined): boolean {
+  private doneMarkerTurn(id: string): number | undefined {
     try {
       const marker = JSON.parse(readFileSync(markerFile(this.paths, id, 'done'), 'utf8')) as { turn?: number };
-      return typeof marker.turn === 'number' && marker.turn === turn;
+      return typeof marker.turn === 'number' ? marker.turn : undefined;
     } catch {
-      return false;
+      return undefined;
     }
+  }
+
+  private doneMarkerForTurn(id: string, turn: number | undefined): boolean {
+    const markerTurn = this.doneMarkerTurn(id);
+    return markerTurn !== undefined && markerTurn === turn;
   }
 
   async signal(id: string, kind: SignalKind, message?: string, options: SignalOptions = {}): Promise<SessionView> {
@@ -3329,6 +3334,10 @@ export class SessionManager implements KTeamService {
     // 2026-07-19) is a transcript-correlation gap, not a lost prompt â it must
     // not be reinjected or failed as turn-never-started.
     let activeWorkTurn = -1;
+    // A stale marker remains on disk as forensic evidence until a new turn
+    // writes its own marker. Journal each distinct stale/current-turn pair
+    // once per monitor rather than flooding the event log every tick.
+    let staleDoneMarkerFingerprint: string | undefined;
     // A6: recognized work vocabulary with advancing counters across polls is
     // full liveness â a long silent thinking block writes no transcript bytes
     // for many minutes while the spinner clock keeps climbing, and the stall
@@ -3346,7 +3355,29 @@ export class SessionManager implements KTeamService {
             await this.ensureCodexTranscript(id, monitor);
             view = await this.get(id);
           }
-          if (existsSync(markerFile(this.paths, id, 'done'))) {
+          const currentTurn = view.state.turn ?? view.config.turn;
+          const doneMarkerExists = existsSync(markerFile(this.paths, id, 'done'));
+          const currentDoneMarker = this.doneMarkerForTurn(id, currentTurn);
+          if (doneMarkerExists && !currentDoneMarker) {
+            const markerTurn = this.doneMarkerTurn(id);
+            const fingerprint = `${markerTurn ?? 'invalid'}:${currentTurn ?? 'unknown'}`;
+            if (staleDoneMarkerFingerprint !== fingerprint) {
+              staleDoneMarkerFingerprint = fingerprint;
+              await this.emit(
+                id,
+                'session.stale_done_marker',
+                {
+                  markerTurn: markerTurn ?? null,
+                  currentTurn: currentTurn ?? null,
+                  reason: 'done marker does not certify the current turn and was ignored',
+                },
+                'watcher',
+              );
+            }
+          } else {
+            staleDoneMarkerFingerprint = undefined;
+          }
+          if (currentDoneMarker) {
             // A done marker written while the pane still shows an ACTIVE turn
             // (spinner/token counter) means the teammate declared victory
             // early â deliverables may not exist yet. Defer completion until
@@ -3628,7 +3659,7 @@ export class SessionManager implements KTeamService {
             } else if (
               view.config.mode === 'auto' &&
               !this.autoContinued.has(id) &&
-              !existsSync(markerFile(this.paths, id, 'done'))
+              !this.doneMarkerForTurn(id, view.state.turn ?? view.config.turn)
             ) {
               this.autoContinued.add(id);
               await this.emit(
