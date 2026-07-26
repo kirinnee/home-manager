@@ -189,6 +189,44 @@ describe('kteam daemon API', () => {
     expect(((await response.json()) as SessionView).config.id).toBe('s1');
   });
 
+  test('unknown routes 404 with a structured, skew-diagnosable payload (B1)', async () => {
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service: new FakeService() });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}`;
+    const auth = { authorization: 'Bearer secret' };
+
+    // A route the daemon doesn't know (e.g. a command shipped by a newer CLI).
+    const res = await fetch(`${base}/v1/does-not-exist`, { method: 'POST', headers: auth });
+    expect(res.status).toBe(404);
+    // The daemon advertises its version on every response, including errors.
+    expect(res.headers.get('x-kteam-version')).toBeTruthy();
+    const payload = (await res.json()) as { error?: string; code?: string; method?: string; path?: string };
+    // Structured so the CLI can tell this apart from a "no such session" 404 and
+    // name the exact route.
+    expect(payload.code).toBe('unknown_route');
+    expect(payload.method).toBe('POST');
+    expect(payload.path).toBe('/v1/does-not-exist');
+
+    // An unmatched sub-path under /v1/sessions/:id takes the same shape.
+    const sub = await fetch(`${base}/v1/sessions/s1/bogus-action`, { method: 'POST', headers: auth });
+    expect(sub.status).toBe(404);
+    expect(((await sub.json()) as { code?: string }).code).toBe('unknown_route');
+  });
+
+  test('successful responses advertise the daemon version header (B1)', async () => {
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service: new FakeService() });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}`;
+    const health = await fetch(`${base}/v1/health`, { headers: { authorization: 'Bearer secret' } });
+    expect(health.status).toBe(200);
+    expect(health.headers.get('x-kteam-version')).toBeTruthy();
+    // Text routes (snapshot) carry it too, so the CLI detects skew on any command.
+    const snap = await fetch(`${base}/v1/sessions/s1/snapshot?live=true`, {
+      headers: { authorization: 'Bearer secret' },
+    });
+    expect(snap.headers.get('x-kteam-version')).toBeTruthy();
+  });
+
   test('exposes wrappers and projects for the New-session flow', async () => {
     const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service: new FakeService() });
     servers.push(server);

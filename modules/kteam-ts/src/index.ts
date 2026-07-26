@@ -20,8 +20,9 @@ import { createPaths } from './paths';
 import { SIGNAL_KINDS } from './types';
 import type { KTeamEvent, SessionStatus, SignalKind } from './types';
 import { compactUsageQuota, fetchKfleetUsage, UsageFeed, usageQuotaLabel } from './usage';
+import { KTEAM_VERSION } from './version';
 
-const VERSION = '0.2.1';
+const VERSION = KTEAM_VERSION;
 const paths = createPaths();
 process.env.PATH = [paths.kfleetBin, process.env.PATH ?? ''].join(path.delimiter);
 // Background/automation shells sometimes carry HTTP(S)_PROXY vars the
