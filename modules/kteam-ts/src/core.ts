@@ -835,9 +835,14 @@ function titleCaseTeammate(slug: string): string {
  *  surface — claude.ai/code and the resume picker — shows the SAME
  *  "[Teammate] Task" title as kteam's own TASK column.
  *
- *  - A task title that already opens with "[" is used VERBATIM: the rc-session
- *    convention composes the full "[Team] Task" up front, so re-prefixing would
- *    double the bracket ("[Team] [Team] …").
+ *  - A task title that already opens with "[" is used VERBATIM. This keeps the
+ *    prefixing IDEMPOTENT: a caller that (for whatever reason) hands us an
+ *    already-composed "[Team] Task" — or any title that legitimately starts with
+ *    a bracket — is passed through untouched instead of being double-prefixed
+ *    into "[Team] [Team] …". Callers are now expected to pass a PLAIN task title
+ *    and let this function add the "[Team]"; this guard is the safety net that
+ *    keeps a stray pre-bracketed title from doubling. Keep it — its correctness
+ *    stands on its own (bracket idempotency), independent of any caller.
  *  - Otherwise the Title-Cased teammate is prefixed: "hayden" + "Fix Login" ->
  *    "[Hayden] Fix Login".
  *  - With no task title, the bracketed teammate alone is the name.
@@ -850,6 +855,29 @@ export function harnessDisplayName(config: { teammate?: string; name?: string })
   if (task && task.startsWith('[')) return task;
   if (task && prefix) return `${prefix} ${task}`;
   return task || prefix;
+}
+
+/** Resolve the parent session for a `kteam start`.
+ *
+ *  - An EXPLICIT `--parent <id>` always wins — the capability to parent any
+ *    session (even an interactive one) is preserved for anyone who asks for it.
+ *  - An `auto` teammate started from inside a pane INHERITS that pane
+ *    (`KTEAM_SESSION_ID`) as its parent, so delegated teammate trees draw
+ *    correctly in `ps`/UI and warden lineage.
+ *  - An `interactive` session does NOT auto-inherit. It is the HUMAN's own
+ *    terminal; the calling agent merely typed the `kteam start`. Parenting the
+ *    user's own session under whichever agent happened to invoke it renders it
+ *    backwards in the lineage sidebar (nested under an agent) — misleading now
+ *    that lineage is visible. So env inheritance is gated to auto mode. */
+export function resolveParent(opts: {
+  explicit?: string;
+  envSessionId?: string;
+  mode: 'auto' | 'interactive';
+}): string | undefined {
+  const explicit = opts.explicit?.trim();
+  if (explicit) return explicit;
+  if (opts.mode === 'interactive') return undefined;
+  return opts.envSessionId?.trim() || undefined;
 }
 
 export function interactiveHarnessArgs(config: SessionConfig): string[] {

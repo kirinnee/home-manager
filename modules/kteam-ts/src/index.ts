@@ -9,6 +9,7 @@ import {
   discoverAutoAgents,
   recommendTeam,
   resolveDisplayModel,
+  resolveParent,
   type AgentUsage,
   type Budget,
   type TeamRole,
@@ -284,7 +285,10 @@ program
     'with --teammate: if the name is already taken by a live session, auto-assign a free name instead of failing',
   )
   .option('--label <label>', 'ownership label (lead session/repo/ticket slug); filter later with `kteam ps --label`')
-  .option('--parent <id>', 'parent session (defaults to KTEAM_SESSION_ID when started from inside a teammate)')
+  .option(
+    '--parent <id>',
+    "parent session. An AUTO teammate started from inside a pane defaults to KTEAM_SESSION_ID (teammate trees); an INTERACTIVE session does NOT auto-inherit (it is the human's own terminal) — pass this to force a parent anyway",
+  )
   .option('--prompt-file <file>', 'read the task prompt from a file instead of the command line (use for long prompts)')
   .option('--model <model>', 'override the model (alias or full id); defaults to the wrapper KTEAM_MODEL')
   .option(
@@ -354,9 +358,16 @@ program
         teammate: options.teammate as string | undefined,
         teammateFallback: options.teammateFallback === true,
         label: options.label as string | undefined,
-        // A teammate's pane carries its own session id — starting a session from
-        // inside one automatically records the parent (teammate trees).
-        parent: (options.parent as string | undefined) ?? process.env.KTEAM_SESSION_ID,
+        // A teammate's pane carries its own session id. An AUTO teammate started
+        // from inside one auto-records the parent (delegated teammate trees); an
+        // INTERACTIVE session does NOT — it is the human's own terminal, not a
+        // teammate the caller spawned. An explicit --parent always wins. See
+        // resolveParent.
+        parent: resolveParent({
+          explicit: options.parent as string | undefined,
+          envSessionId: process.env.KTEAM_SESSION_ID,
+          mode: options.mode as 'auto' | 'interactive',
+        }),
         model: options.model as string | undefined,
         // Only send an explicit RC decision when the user gave --rc/--no-rc;
         // otherwise leave it unset so the daemon applies the mode-dependent
@@ -593,7 +604,10 @@ program
   .command('rename')
   .description('change a session task title and/or teammate callsign (accepts an id or a teammate name)')
   .argument('<id>', 'session id or teammate name')
-  .option('--name <title>', 'new task title, kept verbatim — e.g. "Fix Transcript Scrolling"')
+  .option(
+    '--name <title>',
+    'new task title, kept verbatim — e.g. "Fix Transcript Scrolling". Stored immediately (the TASK column updates now); the Claude-side session name ("[Teammate] Task" in claude.ai/code and the resume picker) re-composes only on the next relaunch/resume, so a LIVE session keeps its old name until it is resumed',
+  )
   .option('--teammate <name>', 'new teammate callsign (slug); collision-checked against live sessions')
   .option('--json', 'print the renamed session as {id, name, teammate} JSON instead of the usual view')
   .action(async (id, options: { name?: string; teammate?: string; json?: boolean }) => {

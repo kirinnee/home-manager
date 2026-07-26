@@ -6,6 +6,7 @@ import {
   interactiveHarnessArgs,
   recommendTeam,
   resolveDisplayModel,
+  resolveParent,
   startWaitMsFor,
   usableAgent,
   usageScore,
@@ -146,6 +147,43 @@ describe('harnessDisplayName', () => {
 
   test('returns undefined when there is nothing worth naming', () => {
     expect(harnessDisplayName({})).toBeUndefined();
+  });
+});
+
+describe('resolveParent: interactive sessions do not auto-inherit the caller pane', () => {
+  test('auto mode inherits KTEAM_SESSION_ID as parent (teammate trees)', () => {
+    expect(resolveParent({ envSessionId: 'lead-1', mode: 'auto' })).toBe('lead-1');
+  });
+
+  test('interactive mode does NOT inherit KTEAM_SESSION_ID', () => {
+    expect(resolveParent({ envSessionId: 'lead-1', mode: 'interactive' })).toBeUndefined();
+  });
+
+  test('auto mode with no env session id has no parent', () => {
+    expect(resolveParent({ mode: 'auto' })).toBeUndefined();
+    expect(resolveParent({ envSessionId: '', mode: 'auto' })).toBeUndefined();
+  });
+
+  test('interactive mode with no env session id has no parent', () => {
+    expect(resolveParent({ mode: 'interactive' })).toBeUndefined();
+  });
+
+  test('an explicit parent always wins — even for an interactive session', () => {
+    expect(resolveParent({ explicit: 'chosen', envSessionId: 'lead-1', mode: 'interactive' })).toBe('chosen');
+  });
+
+  test('an explicit parent wins over the inherited env id in auto mode too', () => {
+    expect(resolveParent({ explicit: 'chosen', envSessionId: 'lead-1', mode: 'auto' })).toBe('chosen');
+  });
+
+  test('an explicit parent is honored with no env id set', () => {
+    expect(resolveParent({ explicit: 'chosen', mode: 'interactive' })).toBe('chosen');
+    expect(resolveParent({ explicit: 'chosen', mode: 'auto' })).toBe('chosen');
+  });
+
+  test('blank/whitespace explicit and env values are ignored', () => {
+    expect(resolveParent({ explicit: '   ', envSessionId: 'lead-1', mode: 'auto' })).toBe('lead-1');
+    expect(resolveParent({ explicit: '   ', envSessionId: '  ', mode: 'auto' })).toBeUndefined();
   });
 });
 
