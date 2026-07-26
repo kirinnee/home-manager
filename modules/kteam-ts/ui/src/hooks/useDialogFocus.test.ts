@@ -93,6 +93,26 @@ describe('escape layers', () => {
     expect(isTopEscapeLayer(palette.token)).toBe(true);
   });
 
+  test('a non-modal popover on the stack ignores BOTH dismissal gestures, not just Escape', () => {
+    // The theme popover joins the stack without adopting `useDialogFocus`
+    // wholesale: it keeps its own focus policy (Escape returns focus to the
+    // trigger, an outside click does not) and borrows only the ordering. Both of
+    // its gestures — Escape AND an outside mousedown — are gated on the same
+    // predicate, because the palette's scrim is geometrically "outside" the
+    // theme panel and a containment test alone cannot tell it from the page.
+    const theme = open();
+    const palette = open();
+
+    // Stand-in for "would this layer act on a dismissal gesture right now?".
+    const wouldDismiss = (token: object) => isTopEscapeLayer(token);
+
+    expect(wouldDismiss(theme.token)).toBe(false); // Escape → palette only
+    expect(wouldDismiss(palette.token)).toBe(true); // scrim click → palette only
+
+    palette.release();
+    expect(wouldDismiss(theme.token)).toBe(true); // the NEXT dismissal gets it
+  });
+
   test('three deep unwinds one layer at a time, newest first', () => {
     const drawer = open();
     const sheet = open();

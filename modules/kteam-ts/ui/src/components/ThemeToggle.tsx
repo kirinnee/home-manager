@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Check, Monitor, Moon, Palette, Sun } from 'lucide-react';
 import { useTheme, type ResolvedMode, type ThemeFamilyId, type ThemeMode } from '../hooks/useTheme';
+import { isTopEscapeLayer, pushEscapeLayer } from '../hooks/useDialogFocus';
 import { cn } from '../lib/utils';
 import { Button } from './Primitives';
 
@@ -58,16 +59,45 @@ export function ThemeToggle() {
     if (returnFocus) triggerRef.current?.focus();
   }, []);
 
+  /** This popover's identity in the shared overlay stack. Stable for the
+   *  component's life, so StrictMode's setup/cleanup/setup re-pushes the same
+   *  layer instead of inventing a second one. */
+  const layer = useRef<object>({});
+
   // Escape closes and hands focus back; a click anywhere outside just closes.
+  //
+  // BOTH OF THOSE ARE DISMISSAL GESTURES, AND ONLY THE TOP LAYER MAY ANSWER ONE.
+  // This popover is not a modal (see the Tab-cycle note below) but it is an
+  // overlay, and the command palette can be summoned straight over it — from
+  // inside it, even, since ⌘K works from anywhere. Before this joined
+  // `ESCAPE_LAYERS` it was the last overlay in the app still listening on its
+  // own: one Escape closed the palette AND this panel, and one click on the
+  // palette's scrim did the same, because that scrim is outside `rootRef` and
+  // this handler could not tell it apart from a click on the page behind.
+  // Guarding both gestures on the same predicate keeps the two paths from
+  // drifting — a stack that governed only the keyboard would have left the
+  // pointer with the old bug.
+  //
+  // What is deliberately NOT shared is the focus policy: Escape returns focus to
+  // the trigger and an outside click does not, because the reader has just put
+  // focus somewhere else on purpose. `useDialogFocus` restores on every close,
+  // which is right for a modal and wrong here, so this keeps its own two-argument
+  // `close()` and borrows only the ordering.
   useEffect(() => {
     if (!open) return;
+    const token = layer.current;
+    const release = pushEscapeLayer(token);
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.stopPropagation();
-        close(true);
-      }
+      if (e.key !== 'Escape') return;
+      if (!isTopEscapeLayer(token)) return;
+      e.stopPropagation();
+      close(true);
     };
     const onPointerDown = (e: MouseEvent) => {
+      // A click that lands on a layer ABOVE this one belongs to that layer. It
+      // is still "outside" this panel geometrically, which is exactly why the
+      // containment test alone was not enough.
+      if (!isTopEscapeLayer(token)) return;
       if (!rootRef.current?.contains(e.target as Node)) close(false);
     };
     document.addEventListener('keydown', onKey);
@@ -75,6 +105,7 @@ export function ThemeToggle() {
     return () => {
       document.removeEventListener('keydown', onKey);
       document.removeEventListener('mousedown', onPointerDown);
+      release();
     };
   }, [open, close]);
 
@@ -91,8 +122,10 @@ export function ThemeToggle() {
   // announcing itself as a dialog. A dialog you can tab out of but not see past
   // is the worst of both shapes.
   //
-  // Deliberately NOT the shared useDialogFocus contract. That hook restores
-  // focus to the opener on EVERY close, which is right for a modal and wrong
+  // Deliberately NOT the shared useDialogFocus contract — the ORDERING is
+  // borrowed from it (see the layer stack above), the focus policy is not. That
+  // hook restores focus to the opener on EVERY close, which is right for a modal
+  // and wrong
   // here: this popover also dismisses on an outside click, and snatching focus
   // back to the trigger when the reader has just clicked into something else
   // would be a regression. Escape, initial focus and return-focus are already
