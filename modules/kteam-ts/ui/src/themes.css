@@ -1822,9 +1822,26 @@
         a clean flat ground (no wash, no texture, no overlay). Density carries a
         lot here — the opposite of Mission's tight instrument panel.
 
-   No `--body-wash`, no `--panel-texture`, no `--overlay`: the ground is honestly
-   flat, which is itself part of the Vercel read and keeps the audit simple (no
-   WASH_PEAK entry needed — there is no wash to model).
+   ── THE MARKETING LAYER (vercel.com, not the docs) ──────────────────────────
+   On top of the structural chassis above sits Vercel's MARKETING aesthetic: a
+   near-black canvas lit by an AURORA of vivid blue→cyan→violet→magenta radial
+   spotlights bled in from the edges (`--body-wash`), a gradient depth SHEEN on
+   panels (`--panel-texture`), and an accent GLOW on controls, panels and the
+   focus ring (`--shadow-*`, `--focus-shadow`, `--ring`). Dark leads; light takes
+   a much lighter-touch version of the same gradient language so the family reads
+   as one object across modes.
+
+   These are ADDITIVE, not the identity — remove every gradient and the greyscale
+   tells above still name the family. Three rules keep them tasteful and safe:
+     • Every LUMINOUS layer's intensity is `calc(<base> * var(--glow-alpha))`, and
+       index.css zeroes `--glow-alpha` under `prefers-reduced-motion` — so a reader
+       who wants less effect gets the clean near-black docs Geist back, no glow at
+       all. (Removing light only ever IMPROVES contrast.)
+     • The gradients are STATIC (no @keyframes touch them); nothing animates.
+     • The aurora brightens the dark ground, which is exactly where body text
+       contrast breaks. The two brightest stops (the top corners, under the
+       header) are transcribed into contrast-audit's WASH_PEAK and every body ink
+       is verified to clear AA at that WORST composited stop, not the average.
 
    ── FONTS ───────────────────────────────────────────────────────────────────
    Geist Sans / Geist Mono is the voice, but this is an offline PWA with a strict
@@ -1909,12 +1926,15 @@
   --bubble-radius: 10px;
   --bubble-shadow: var(--shadow-sm);
 
-  /* Barely any elevation. Controls rest FLAT on their hairline; only panels take
-     a whisper of shadow and only popovers really float. No offset ink (Neo), no
-     rings-instead-of-shadow (Contrast) — a soft blur that is almost not there. */
+  /* Elevation with DEPTH, not flatness. Controls carry a soft accent glow, panels
+     a coloured ambient, popovers really float (shadows defined per mode). The
+     luminous half of each is scaled by --glow-alpha (set to 1 below), which
+     index.css zeroes under prefers-reduced-motion — so the glow is opt-out. No
+     offset ink (Neo), no rings-instead-of-shadow (Contrast). */
   --shadow-ink: transparent;
-  --shadow-control: none;
-  --shadow-panel: var(--shadow-sm);
+  --glow-alpha: 1;
+  --shadow-control: 0 1px 2px rgba(0, 0, 0, 0.4), 0 0 18px -6px rgb(var(--accent-rgb) / calc(0.5 * var(--glow-alpha)));
+  --shadow-panel: var(--shadow-md);
   --shadow-popover: var(--shadow-lg);
   --press-translate: 0px;
   --rule-inset: none;
@@ -1936,16 +1956,24 @@
   --gap-sm: 8px;
   --gap-md: 14px;
 
-  /* Flat ground: no page wash, no panel grain, no overlay. */
+  /* DEPTH on panels: a top-left aurora glow plus a faint top light, so a panel
+     reads as a lit pane over the canvas rather than a flat card. Gradient, not
+     animation; the luminous part scales by --glow-alpha. The page's own aurora
+     is --body-wash, set per mode. No overlay (it would sit ABOVE text). */
   --panel-bg: var(--surface);
-  --panel-texture: none;
-  --body-wash: none;
+  --panel-texture:
+    radial-gradient(130% 110% at 0% 0%, rgb(var(--accent-rgb) / calc(0.1 * var(--glow-alpha))), transparent 58%),
+    linear-gradient(180deg, rgb(255 255 255 / calc(0.03 * var(--glow-alpha))), transparent 42%);
+  --panel-texture-size: 100% 100%;
   --overlay: none;
   --overlay-opacity: 0;
 
-  /* Focus is a soft blue bloom, not a permanent outline and not underlined
-     links — the calm end of the accessibility spectrum, unlike Contrast. */
-  --focus-shadow: 0 0 0 3px rgb(var(--accent-rgb) / 0.3);
+  /* Focus GLOWS: a crisp 1px accent ring plus a wide accent bloom. The bloom is
+     scaled by --glow-alpha, so under reduced-motion only the crisp ring remains
+     (and contrast can only improve). Not a permanent outline, links not
+     underlined — the calm end of the spectrum, unlike Contrast. */
+  --focus-shadow:
+    0 0 0 1px rgb(var(--accent-rgb) / 0.9), 0 0 22px 2px rgb(var(--accent-rgb) / calc(0.6 * var(--glow-alpha)));
   --outline-always: none;
   --underline-links: none;
 
@@ -1979,7 +2007,10 @@
   --fg: #171717;
   --fg-soft: #404040;
   --muted: #5f5f5f;
-  --faint: #6e6e6e;
+  /* Darkened one step from the docs-Geist #6e6e6e: the light aurora below tints
+     the ground down a touch, and faint on plain #fafafa was already only 4.55:1,
+     so this buys the margin to keep it AA over the WORST washed stop (5.09:1). */
+  --faint: #616161;
   /* THE HAIRLINE. #eaeaea is Vercel's signature border — decorative here, so
      the audit tiers it `decor` and the near-invisible edge is legal. */
   --border: #eaeaea;
@@ -2041,11 +2072,25 @@
 
   --bar-bg: rgba(250, 250, 250, 0.82);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
-  --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.05), 0 4px 10px rgba(0, 0, 0, 0.05);
-  --shadow-lg: 0 2px 4px rgba(0, 0, 0, 0.06), 0 12px 32px rgba(0, 0, 0, 0.1);
-  --scrim: rgba(0, 0, 0, 0.4);
+  --shadow-md:
+    0 1px 2px rgba(0, 0, 0, 0.05), 0 8px 24px -6px rgba(20, 40, 90, 0.1),
+    0 0 26px -8px rgb(var(--accent-rgb) / calc(0.18 * var(--glow-alpha)));
+  --shadow-lg:
+    0 2px 4px rgba(0, 0, 0, 0.06), 0 16px 40px -8px rgba(20, 40, 90, 0.14),
+    0 0 40px -8px rgb(var(--accent-rgb) / calc(0.2 * var(--glow-alpha)));
+  --scrim: rgba(15, 20, 40, 0.4);
 
-  --ring: rgba(0, 96, 223, 0.4);
+  /* LIGHTER-TOUCH aurora: the same blue→cyan→violet→magenta spotlights as dark,
+     but pastel and low-alpha so near-white only tints, never shouts. It darkens
+     the ground slightly, so the worst body-ink case (faint over the two top
+     stops) is transcribed into WASH_PEAK['geist-light'] and verified (5.09:1). */
+  --body-wash:
+    radial-gradient(46% 40% at 84% -6%, rgb(0 96 223 / calc(0.06 * var(--glow-alpha))), transparent 62%),
+    radial-gradient(44% 42% at 12% -4%, rgb(139 92 246 / calc(0.06 * var(--glow-alpha))), transparent 60%),
+    radial-gradient(52% 46% at 50% -14%, rgb(6 182 212 / calc(0.05 * var(--glow-alpha))), transparent 66%),
+    radial-gradient(64% 58% at 108% 112%, rgb(232 121 249 / calc(0.05 * var(--glow-alpha))), transparent 60%);
+
+  --ring: rgba(0, 96, 223, 0.42);
   --focus-color: #0060df;
   --selection-bg: #cfe3fd;
   --selection-fg: #171717;
@@ -2069,7 +2114,9 @@
   --fg: #ededed;
   --fg-soft: #b4b4b4;
   --muted: #a1a1a1;
-  --faint: #8f8f8f;
+  /* Lifted one step from the docs-Geist #8f8f8f for margin over the aurora's
+     brightest stop (the top corners lift the near-black ground). */
+  --faint: #979797;
   /* THE HAIRLINE, dark: a quiet #2a2a2a that nearly dissolves — decorative. */
   --border: #2a2a2a;
   --border-soft: #1f1f1f;
@@ -2128,13 +2175,30 @@
   --syn-addition: #3fcf7f;
   --syn-deletion: #ff6166;
 
-  --bar-bg: rgba(10, 10, 10, 0.8);
+  --bar-bg: rgba(9, 9, 12, 0.72);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.6);
-  --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.6), 0 4px 12px rgba(0, 0, 0, 0.5);
-  --shadow-lg: 0 2px 4px rgba(0, 0, 0, 0.6), 0 14px 36px rgba(0, 0, 0, 0.6);
-  --scrim: rgba(0, 0, 0, 0.7);
+  --shadow-md:
+    0 1px 2px rgba(0, 0, 0, 0.6), 0 10px 34px -8px rgba(0, 0, 0, 0.8),
+    0 0 30px -8px rgb(var(--accent-rgb) / calc(0.28 * var(--glow-alpha)));
+  --shadow-lg:
+    0 2px 4px rgba(0, 0, 0, 0.6), 0 20px 56px -10px rgba(0, 0, 0, 0.85),
+    0 0 48px -8px rgb(var(--accent-rgb) / calc(0.34 * var(--glow-alpha)));
+  --scrim: rgba(0, 0, 0, 0.72);
 
-  --ring: rgba(59, 158, 255, 0.45);
+  /* THE AURORA — vercel.com's marketing backdrop: vivid blue→cyan→violet→magenta
+     radial spotlights bled in from the edges of a near-black canvas, fixed to the
+     viewport for depth (body sets background-attachment: fixed). Each stop's alpha
+     is calc(x * --glow-alpha), so reduced-motion returns the clean near-black
+     docs Geist. WORST case for the light body ink is the brightest ground, which
+     is the two top-corner stops — transcribed verbatim into contrast-audit's
+     WASH_PEAK['geist-dark'] and verified there (do not drift the two apart). */
+  --body-wash:
+    radial-gradient(46% 40% at 84% -6%, rgb(59 158 255 / calc(0.12 * var(--glow-alpha))), transparent 62%),
+    radial-gradient(44% 42% at 12% -4%, rgb(139 92 246 / calc(0.11 * var(--glow-alpha))), transparent 60%),
+    radial-gradient(52% 46% at 50% -16%, rgb(34 211 238 / calc(0.07 * var(--glow-alpha))), transparent 66%),
+    radial-gradient(64% 58% at 108% 112%, rgb(232 121 249 / calc(0.1 * var(--glow-alpha))), transparent 60%);
+
+  --ring: rgba(59, 158, 255, 0.55);
   --focus-color: #3b9eff;
   --selection-bg: #163a5f;
   --selection-fg: #ededed;
