@@ -24,6 +24,14 @@ import {
   renderInflightCli,
   renderInflightReport,
 } from './migrate-preflight';
+import {
+  buildWaiterNotices,
+  computeGraphImpact,
+  graphImpactEmpty,
+  renderGraphHandoffSection,
+  renderGraphImpactCli,
+  toGraphNode,
+} from './migrate-graph';
 import { createPaths } from './paths';
 import { SIGNAL_KINDS } from './types';
 import type { KTeamEvent, SessionStatus, SignalKind } from './types';
@@ -687,6 +695,10 @@ program
     '--when-idle [timeout]',
     'instead of refusing on in-flight work, poll until the session is quiet (optionally up to <timeout>, e.g. 30s/5m/1h) then migrate',
   )
+  .option(
+    '--notify-waiters',
+    'also send each session parked on this one a visible, journalled note that it was migrated and is resuming (default: only the relaunched agent is told, via its migration report)',
+  )
   .action(
     async (
       id,
@@ -696,11 +708,18 @@ program
         allowContextDowngrade?: boolean;
         forceInflight?: boolean;
         whenIdle?: string | boolean;
+        notifyWaiters?: boolean;
       },
     ) => {
       const api = await client();
       let view = await api.get(id);
       const resolvedId = view.config.id;
+      // The session id stays stable across migration, so parent and child edges
+      // remain attached. Waiters parked on this session are the unresolved
+      // hazard: the relaunched agent must know that it still owes them a reply.
+      // Compute and print that blast radius before the migration call.
+      const graphImpact = computeGraphImpact(resolvedId, (await api.list().catch(() => [])).map(toGraphNode));
+      if (!graphImpactEmpty(graphImpact)) console.error(renderGraphImpactCli(graphImpact));
       const deps = {
         fetchChat: async (limit: number): Promise<unknown[]> => {
           const page = await api.request<{ records?: unknown[] }>(
@@ -746,11 +765,10 @@ program
       }
 
       // Write the report BEFORE the API call, so it survives a migrate that
-      // fails and rolls back (the pane kill has already destroyed the work).
-      // Only when there is genuine in-flight work — the empty common case
-      // migrates with no new friction.
+      // fails and rolls back. Graph impact alone also needs a report so the
+      // relaunched agent knows which parked peers still need a reply.
       let reportPath: string | undefined;
-      if (!report.empty) {
+      if (!report.empty || !graphImpactEmpty(graphImpact)) {
         reportPath = path.join(view.directory, 'migration-inflight.md');
         await writeTextAtomic(
           reportPath,
@@ -760,18 +778,32 @@ program
             targetModel: options.model,
             forced: decision.forced,
             at: now(),
-          }),
+          }) + renderGraphHandoffSection(graphImpact),
         );
-        console.error(renderInflightCli(report));
-        console.error(`migrate: wrote in-flight report to ${reportPath}`);
+        if (!report.empty) console.error(renderInflightCli(report));
+        console.error(`migrate: wrote migration report to ${reportPath}`);
       }
 
       const migrated = await api.migrate(id, options.agent, options.model, options.allowContextDowngrade);
 
-      // Handoff: tell the relaunched agent what was running. Queued at the next
-      // turn boundary (existing mechanism). Best-effort — the migrate already
-      // succeeded, so a failed send must not fail the command.
+      // Point the relaunched agent at the in-flight + graph report. Best-effort:
+      // the migration already succeeded, so a failed send cannot fail it.
       if (reportPath) await api.send(resolvedId, { message: handoffMessage(reportPath) }).catch(() => {});
+
+      // Optional active re-arm. These normal, journalled notes deliberately do
+      // not resolve a peer wait; only a genuine reply from the migrated session
+      // does that. The default path touches no other session.
+      if (options.notifyWaiters) {
+        for (const notice of buildWaiterNotices(graphImpact)) {
+          await api.send(notice.id, { message: notice.message }).catch(() => {});
+          console.error(`migrate: notified waiter ${notice.id}`);
+        }
+      } else if (graphImpact.waiters.length) {
+        console.error(
+          `migrate: ${graphImpact.waiters.length} session(s) are parked on this one; the relaunched agent was ` +
+            `told (in ${reportPath ?? 'the migration report'}) to reply. Re-run with --notify-waiters to also notify them directly.`,
+        );
+      }
       printView(migrated);
     },
   );
