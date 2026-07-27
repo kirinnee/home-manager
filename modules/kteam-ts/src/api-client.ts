@@ -302,8 +302,8 @@ export class ApiClient {
   send(id: string, input: SendRequest) {
     return this.post<SessionView & { disposition?: SendDisposition }>(id, 'send', input);
   }
-  answer(id: string, labels: string[], other?: string, responses?: string[]) {
-    return this.post<SessionView>(id, 'answer', { labels, other, responses });
+  answer(id: string, toolUseId: string, labels: string[], other?: string, responses?: string[]) {
+    return this.post<SessionView>(id, 'answer', { toolUseId, labels, other, responses });
   }
   interrupt(id: string) {
     return this.post<SessionView>(id, 'interrupt', {});

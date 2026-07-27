@@ -14,6 +14,8 @@ import type { WardenAnomaly } from './warden-detect';
 import type { ProjectInfo, WrapperInfo } from './fleet-inventory';
 import type { WardenVerdict } from './warden-verdicts';
 import type { ScratchPlan } from './session-manager';
+import type { FsDiffView, FsFileView, FsListing } from './fs';
+import type { GitChangesView } from './git';
 
 export interface SearchResult {
   sessionId: string;
@@ -116,8 +118,14 @@ export interface KTeamService {
    * turn. Claude switches to an account-allowlisted model in place; Codex opens
    * its native account-aware model/reasoning picker. */
   runtime(id: string, request: RuntimeControlRequest): Promise<SessionView>;
-  answer(id: string, labels: string[], other?: string, responses?: string[]): Promise<SessionView>;
-  interrupt(id: string): Promise<SessionView>;
+  /** Answer only the exact question the caller rendered. `toolUseId` prevents a
+   * stale browser/CLI response for question A from being driven into question B. */
+  answer(id: string, toolUseId: string, labels: string[], other?: string, responses?: string[]): Promise<SessionView>;
+  /** Return control to chat. `expectedToolUseId` binds the interrupt to the
+   * question the caller actually RENDERED: a web abandon for question A that
+   * lands after A was answered and B was asked must not cancel B. Omitted by the
+   * generic CLI/composer interrupt, which means "whatever is running now". */
+  interrupt(id: string, expectedToolUseId?: string): Promise<SessionView>;
   stop(id: string, reason?: string): Promise<SessionView>;
   resume(id: string, message?: string): Promise<SessionView>;
   /** Continue a session on another same-kind account (new wrapper); relaunches
@@ -154,6 +162,14 @@ export interface KTeamService {
   subscribe(listener: (event: KTeamEvent) => void): () => void;
   addAttachment(id: string, filename: string, mime: string, bytes: Uint8Array): Promise<AttachmentView>;
   getAttachment(id: string, attachmentId: string): Promise<{ attachment: AttachmentView; bytes: Uint8Array }>;
+  /** One directory of a session's working tree. `path` omitted = the cwd itself. */
+  fsList(id: string, path?: string): Promise<FsListing>;
+  /** One file's content or a refusal view. `rev: 'head'` reads the committed copy. */
+  fsFile(id: string, path: string, rev?: 'head'): Promise<FsFileView>;
+  /** Git status for the session cwd, filtered to that cwd. */
+  fsChanges(id: string): Promise<GitChangesView>;
+  /** Unified diff for one path in the session cwd. */
+  fsDiff(id: string, path: string): Promise<FsDiffView>;
   /** True when `capability` matches the per-assignment secret minted for
    *  `targetId`'s active warden assignment — the only case the warden token
    *  may stop a session. */

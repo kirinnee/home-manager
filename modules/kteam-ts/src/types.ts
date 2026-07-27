@@ -37,6 +37,20 @@ export type SessionStatus =
   | 'stalled'
   | 'stopped';
 
+export interface PendingQuestion {
+  toolUseId: string;
+  questions: Array<{
+    question: string;
+    header?: string;
+    options?: Array<{ label: string; description?: string }>;
+    multiSelect?: boolean;
+  }>;
+  /** Lifecycle evidence used to diagnose and recover daemon↔pane divergence. */
+  askedAt?: string;
+  lastSeenAt?: string;
+  missingSince?: string;
+}
+
 export interface SessionConfig {
   id: string;
   name: string;
@@ -147,15 +161,7 @@ export interface SessionState {
    *  line would have that url scraped as its own). */
   remoteControlUrl?: string;
   openTools?: string[];
-  pendingQuestion?: {
-    toolUseId: string;
-    questions: Array<{
-      question: string;
-      header?: string;
-      options?: Array<{ label: string; description?: string }>;
-      multiSelect?: boolean;
-    }>;
-  };
+  pendingQuestion?: PendingQuestion;
   transcriptOffset?: number;
   /** Liveness ledger (A6, see liveness.ts): explicit per-life-sign timestamps.
    *  Reflex life-signs = transcript growth + ANY pane change + subprocess;

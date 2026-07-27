@@ -5,6 +5,8 @@ import { currentActor } from './actor-context';
 import type { AttachmentView, KTeamService, SessionView } from './service';
 import type { KTeamEvent, RuntimeControlRequest, SendRequest, StartSessionRequest } from './types';
 import { WARDEN_LABEL } from './warden-detect';
+import { FsError, type FsDiffView, type FsFileView, type FsListing } from './fs';
+import { GitError, type GitChangesView } from './git';
 
 const view: SessionView = {
   directory: '/tmp/kteam/s1',
@@ -56,8 +58,8 @@ class FakeService implements KTeamService {
     return { ...view, disposition: 'delivered' as const };
   };
   runtime = async (_id: string, _input: RuntimeControlRequest) => view;
-  answer = async () => view;
-  interrupt = async () => view;
+  answer = async (_id: string, _toolUseId: string, _labels: string[], _other?: string, _responses?: string[]) => view;
+  interrupt = async (_id: string, _expectedToolUseId?: string) => view;
   stop = async () => {
     this.lastActor = currentActor();
     return view;
@@ -91,6 +93,23 @@ class FakeService implements KTeamService {
     createdAt: '2026-01-01T00:00:00Z',
   });
   getAttachment = async () => ({ attachment: await this.addAttachment(), bytes: new Uint8Array([1, 2]) });
+  fsList = async (_id: string, relativePath?: string): Promise<FsListing> => ({
+    root: '/tmp',
+    path: relativePath ?? '',
+    entries: [],
+  });
+  fsFile = async (_id: string, relativePath: string, rev?: 'head'): Promise<FsFileView> => ({
+    path: relativePath,
+    size: 5,
+    content: 'hello',
+    ...(rev ? { rev } : {}),
+  });
+  fsChanges = async (): Promise<GitChangesView> => ({ repo: true, branch: 'main', changes: [] });
+  fsDiff = async (_id: string, relativePath: string): Promise<FsDiffView> => ({
+    path: relativePath,
+    diff: '@@ -1 +1 @@\n-old\n+new\n',
+    kind: 'tracked',
+  });
   wardenStatus = async () => ({
     config: {
       enabled: false,
@@ -236,6 +255,123 @@ describe('kteam daemon API', () => {
       headers: { authorization: 'Bearer secret' },
     });
     expect(snap.headers.get('x-kteam-version')).toBeTruthy();
+  });
+
+  test('serves the four read-only filesystem routes with their frozen wire shapes', async () => {
+    const service = new FakeService();
+    let listedPath: string | undefined;
+    let fileCall: { path: string; rev?: 'head' } | undefined;
+    let diffPath: string | undefined;
+    service.fsList = async (_id, relativePath) => {
+      listedPath = relativePath;
+      return { root: '/tmp', path: relativePath ?? '', entries: [{ name: 'x.ts', type: 'file', size: 5 }] };
+    };
+    service.fsFile = async (_id, relativePath, rev) => {
+      fileCall = { path: relativePath, ...(rev ? { rev } : {}) };
+      return { path: relativePath, size: 5, content: 'hello', ...(rev ? { rev } : {}) };
+    };
+    service.fsDiff = async (_id, relativePath) => {
+      diffPath = relativePath;
+      return { path: relativePath, diff: '@@ -1 +1 @@\n-old\n+new\n', kind: 'tracked' };
+    };
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}/v1/sessions/s1/fs`;
+    const auth = { authorization: 'Bearer secret' };
+
+    const listing = await fetch(`${base}?path=src%2Flib`, { headers: auth });
+    expect(listing.status).toBe(200);
+    expect(listing.headers.get('cache-control')).toBe('no-store');
+    expect(((await listing.json()) as FsListing).entries[0]?.name).toBe('x.ts');
+    expect(listedPath).toBe('src/lib');
+
+    // URLSearchParams decodes once; the route must not re-animate a doubly
+    // encoded traversal token with a second decodeURIComponent call.
+    await fetch(`${base}?path=%252e%252e%2Fsafe`, { headers: auth });
+    expect(listedPath).toBe('%2e%2e/safe');
+
+    const file = await fetch(`${base}/file?path=docs%2Fguide.md&rev=head`, { headers: auth });
+    expect(file.status).toBe(200);
+    expect((await file.json()) as FsFileView).toMatchObject({ path: 'docs/guide.md', rev: 'head', content: 'hello' });
+    expect(fileCall).toEqual({ path: 'docs/guide.md', rev: 'head' });
+
+    const changes = await fetch(`${base}/changes`, { headers: auth });
+    expect(changes.status).toBe(200);
+    expect((await changes.json()) as GitChangesView).toMatchObject({ repo: true, branch: 'main', changes: [] });
+
+    const diff = await fetch(`${base}/diff?path=src%2Fx.ts`, { headers: auth });
+    expect(diff.status).toBe(200);
+    expect(diff.headers.get('content-type')).toContain('text/plain');
+    expect(diff.headers.get('cache-control')).toBe('no-store');
+    expect(await diff.text()).toContain('+new');
+    expect(diffPath).toBe('src/x.ts');
+  });
+
+  test('validates filesystem queries and never serves refused or truncated diffs', async () => {
+    const service = new FakeService();
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}/v1/sessions/s1/fs`;
+    const auth = { authorization: 'Bearer secret' };
+
+    // The no-store boundary is per-ROUTE, not per-error-class: these 400s are
+    // thrown as HttpError from query validation, and they took the generic
+    // json() path before, which left the filesystem surface's stated cache
+    // policy with a hole for the next error message added to these routes.
+    for (const path of ['/file', '/file?path=x&rev=main', '/diff', '/nope']) {
+      const response = await fetch(`${base}${path}`, { headers: auth });
+      expect([400, 404]).toContain(response.status);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+    }
+
+    service.fsDiff = async (_id, path) => ({ path, diff: '', kind: 'none', denied: true, reason: 'denylist' });
+    const denied = await fetch(`${base}/diff?path=.env`, { headers: auth });
+    expect(denied.status).toBe(403);
+    expect((await denied.json()) as { code: string }).toMatchObject({ code: 'denied' });
+
+    service.fsDiff = async (_id, path) => ({ path, diff: '', kind: 'none', ignored: true, reason: 'ignored' });
+    expect((await fetch(`${base}/diff?path=build%2Fx.js`, { headers: auth })).status).toBe(403);
+
+    service.fsDiff = async (_id, path) => ({ path, diff: 'PARTIAL MUST NOT LEAK', kind: 'tracked', truncated: true });
+    const capped = await fetch(`${base}/diff?path=huge.txt`, { headers: auth });
+    expect(capped.status).toBe(413);
+    expect(await capped.text()).not.toContain('PARTIAL MUST NOT LEAK');
+
+    service.fsList = async () => {
+      throw new FsError('invalid_path', 'bad path');
+    };
+    const invalid = await fetch(`${base}?path=..`, { headers: auth });
+    expect(invalid.status).toBe(400);
+    expect((await invalid.json()) as { code: string }).toMatchObject({ code: 'invalid_path' });
+
+    service.fsList = async () => {
+      throw new FsError('not_found', 'no such path');
+    };
+    expect((await fetch(`${base}?path=missing`, { headers: auth })).status).toBe(404);
+
+    service.fsList = async () => {
+      throw new FsError('escapes_root', 'path escapes the session root');
+    };
+    expect((await fetch(`${base}?path=link`, { headers: auth })).status).toBe(403);
+
+    service.fsChanges = async () => {
+      throw new GitError('git_timeout', 'git status timed out');
+    };
+    expect((await fetch(`${base}/changes`, { headers: auth })).status).toBe(504);
+
+    // Every error shape on the surface, one assertion: no-store regardless of
+    // which error class produced it.
+    service.fsFile = async () => {
+      throw new Error('an unclassified failure');
+    };
+    const generic = await fetch(`${base}/file?path=x`, { headers: auth });
+    expect(generic.status).toBe(409);
+    expect(generic.headers.get('cache-control')).toBe('no-store');
+
+    // ...and a non-fs route is unaffected: no-store is scoped to `fs`/`fs/*`.
+    const other = await fetch(`http://127.0.0.1:${server.port}/v1/sessions/s1/nonsense`, { headers: auth });
+    expect(other.status).toBe(404);
+    expect(other.headers.get('cache-control')).toBeNull();
   });
 
   test('exposes wrappers and projects for the New-session flow', async () => {
@@ -469,6 +605,101 @@ describe('request-id idempotency for retried mutations', () => {
     expect(sends).toBe(1);
   });
 
+  test('answer requires and forwards the exact structured-question tool id', async () => {
+    const service = new FakeService();
+    const calls: Array<{ id: string; toolUseId: string; labels: string[] }> = [];
+    service.answer = async (id, toolUseId, labels) => {
+      calls.push({ id, toolUseId, labels });
+      return view;
+    };
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}/v1/sessions/s1/answer`;
+
+    const missing = await fetch(base, {
+      method: 'POST',
+      headers: admin('answer-missing-id'),
+      body: JSON.stringify({ labels: ['Enable feature'] }),
+    });
+    expect(missing.status).toBe(400);
+    expect(calls).toEqual([]);
+
+    const accepted = await fetch(base, {
+      method: 'POST',
+      headers: admin('answer-tool-id'),
+      body: JSON.stringify({ toolUseId: 'tool-A', labels: ['Enable feature'] }),
+    });
+    expect(accepted.status).toBe(200);
+    expect(calls).toEqual([{ id: 's1', toolUseId: 'tool-A', labels: ['Enable feature'] }]);
+  });
+
+  test('duplicate abandon/interrupt request ids do not send Escape twice', async () => {
+    const service = new FakeService();
+    let interrupts = 0;
+    service.interrupt = async () => {
+      interrupts++;
+      return view;
+    };
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const request = () =>
+      fetch(`http://127.0.0.1:${server.port}/v1/sessions/s1/interrupt`, {
+        method: 'POST',
+        headers: admin('abandon-1'),
+        body: '{}',
+      });
+    expect((await request()).status).toBe(200);
+    expect((await request()).status).toBe(200);
+    expect(interrupts).toBe(1);
+  });
+
+  test('interrupt forwards a bound tool id, and stays generic without one', async () => {
+    const service = new FakeService();
+    const calls: Array<string | undefined> = [];
+    service.interrupt = async (_id, expectedToolUseId) => {
+      calls.push(expectedToolUseId);
+      return view;
+    };
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}/v1/sessions/s1/interrupt`;
+
+    // A question-specific web abandon names the question it rendered.
+    const bound = await fetch(base, {
+      method: 'POST',
+      headers: admin('abandon-bound'),
+      body: JSON.stringify({ toolUseId: 'tool-A' }),
+    });
+    expect(bound.status).toBe(200);
+
+    // The composer/CLI interrupt sends `{}` and means "whatever is running".
+    const generic = await fetch(base, { method: 'POST', headers: admin('interrupt-generic'), body: '{}' });
+    expect(generic.status).toBe(200);
+
+    // A bodyless POST is still the generic interrupt, not a 400.
+    const bodyless = await fetch(base, { method: 'POST', headers: admin('interrupt-bodyless') });
+    expect(bodyless.status).toBe(200);
+
+    expect(calls).toEqual(['tool-A', undefined, undefined]);
+
+    // An unusable binding is refused rather than silently downgraded to generic.
+    const blank = await fetch(base, {
+      method: 'POST',
+      headers: admin('abandon-blank'),
+      body: JSON.stringify({ toolUseId: '  ' }),
+    });
+    expect(blank.status).toBe(400);
+    expect(calls).toHaveLength(3);
+
+    const nonObject = await fetch(base, {
+      method: 'POST',
+      headers: admin('abandon-non-object'),
+      body: JSON.stringify('tool-A'),
+    });
+    expect(nonObject.status).toBe(400);
+    expect(calls).toHaveLength(3);
+  });
+
   test('a duplicate runtime request id opens the native control only once', async () => {
     const service = new FakeService();
     let controls = 0;
@@ -660,6 +891,18 @@ describe('warden-scoped token authorization', () => {
     expect((await post('/v1/warden/run')).status).toBe(403);
     expect((await fetch(`${base}/v1/sessions/s1`, { method: 'DELETE', headers: scoped })).status).toBe(403);
     expect((await fetch(`${base}/v1/warden/status`, { headers: scoped })).status).toBe(403);
+  });
+
+  test('rejects every session filesystem read with the warden-scoped token', async () => {
+    const base = scopedServer();
+    for (const path of [
+      '/v1/sessions/s1/fs',
+      '/v1/sessions/s1/fs/file?path=README.md',
+      '/v1/sessions/s1/fs/changes',
+      '/v1/sessions/s1/fs/diff?path=README.md',
+    ]) {
+      expect((await fetch(`${base}${path}`, { headers: scoped })).status).toBe(403);
+    }
   });
 
   test('an ASSIGNED warden may stop exactly its assigned target, by capability (A6 sus list)', async () => {

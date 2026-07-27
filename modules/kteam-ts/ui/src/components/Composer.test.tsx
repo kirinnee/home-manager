@@ -541,6 +541,58 @@ describe('the mandatory touch send cluster', () => {
     expectTouchTarget(buttonWithLabel(html, 'Queue this message for the next turn'));
   });
 
+  test('attach and mic stack vertically on the touch dock', () => {
+    const html = renderComposerWithMicrophone({ compact: true, onFiles: () => {}, context: { model: 'm' } });
+    // Both controls share a flex-COLUMN container — the same stack as
+    // Interrupt/Queue — instead of the old side-by-side row.
+    const attachAncestors = ancestorsOfLabelledButton(html, 'Attach images');
+    const micAncestors = ancestorsOfLabelledButton(html, 'Hold to dictate');
+    expect(attachAncestors.some(tag => tag.includes('flex-col') && tag.includes('items-end'))).toBe(true);
+    expect(micAncestors.some(tag => tag.includes('flex-col') && tag.includes('items-end'))).toBe(true);
+  });
+
+  test('the touch dock reserves the interrupt row even when idle, so height cannot jump', () => {
+    const openTag = (button: string) => button.slice(0, button.indexOf('>'));
+    const label = 'Interrupt the current turn and send this message now';
+
+    // Idle but interrupt-capable: the interrupt button IS present so its height
+    // is reserved, but it is invisible, disabled and out of the a11y tree —
+    // there is nothing to interrupt yet, and the box must not jump when there is.
+    const idle = renderComposer({
+      compact: true,
+      onFiles: () => {},
+      onInterruptAndSend: () => {},
+      context: { model: 'm' },
+    });
+    const reserved = buttonWithLabel(idle, label);
+    expect(openTag(reserved)).toContain('invisible');
+    expect(openTag(reserved)).toContain('aria-hidden="true"');
+    expect(openTag(reserved)).toContain('disabled=""');
+    // Same 44px footprint as the active control, so the reserved box matches it
+    // exactly in every theme (no magic pixel value, no separate spacer).
+    expectTouchTarget(reserved);
+
+    // Busy: the SAME row now carries the live, visible, interactive control.
+    const busy = renderComposer({
+      compact: true,
+      busy: true,
+      onFiles: () => {},
+      onInterruptAndSend: () => {},
+      context: { model: 'm' },
+    });
+    const active = buttonWithLabel(busy, label);
+    expect(openTag(active)).not.toContain('invisible');
+    expect(openTag(active)).not.toContain('aria-hidden');
+    expect(openTag(active)).not.toContain('disabled=""');
+  });
+
+  test('a composer with no interrupt callback reserves no interrupt row', () => {
+    // Reservation is scoped to composers that can actually interrupt; one that
+    // never can renders no interrupt button at all, active or reserved.
+    const html = renderComposer({ compact: true, onFiles: () => {}, context: { model: 'm' } });
+    expect(html).not.toContain('Interrupt the current turn and send this message now');
+  });
+
   test('touch-rendered copy contains no keyboard shortcut hint', () => {
     const html = renderComposer({ compact: true, context: { model: 'model' } });
     expect(html).not.toContain('Shift+Enter');

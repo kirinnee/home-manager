@@ -21,6 +21,15 @@ export interface KTeamPaths {
   wardenAnomalies: string;
   wardenState: string;
   wardenReports: string;
+  /** Learning subsystem (mines terminal sessions into proposed fleet rules).
+   *  Sibling of `daemon/warden/`, same 0700, "files authoritative" philosophy. */
+  learningDir: string;
+  learningState: string;
+  learningObservations: string;
+  learningProposals: string;
+  learningTombstones: string;
+  learningRuns: string;
+  learningPatches: string;
 }
 
 export function createPaths(home = process.env.KTEAM_HOME ?? path.join(os.homedir(), '.kteam')): KTeamPaths {
@@ -40,6 +49,13 @@ export function createPaths(home = process.env.KTEAM_HOME ?? path.join(os.homedi
     wardenAnomalies: path.join(home, 'daemon', 'warden', 'anomalies.json'),
     wardenState: path.join(home, 'daemon', 'warden', 'state.json'),
     wardenReports: path.join(home, 'daemon', 'warden', 'reports'),
+    learningDir: path.join(home, 'daemon', 'learning'),
+    learningState: path.join(home, 'daemon', 'learning', 'state.json'),
+    learningObservations: path.join(home, 'daemon', 'learning', 'observations.jsonl'),
+    learningProposals: path.join(home, 'daemon', 'learning', 'proposals.json'),
+    learningTombstones: path.join(home, 'daemon', 'learning', 'tombstones.json'),
+    learningRuns: path.join(home, 'daemon', 'learning', 'runs'),
+    learningPatches: path.join(home, 'daemon', 'learning', 'patches'),
   };
 }
 

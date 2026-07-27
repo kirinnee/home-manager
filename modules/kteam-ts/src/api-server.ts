@@ -5,9 +5,13 @@ import type { KTeamService, SessionView } from './service';
 import { SIGNAL_KINDS } from './types';
 import type { RuntimeControlRequest, SendRequest, SignalKind, StartSessionRequest } from './types';
 import { WARDEN_LABEL } from './warden-detect';
+import type { LearningAction, LearningService } from './learning';
+import type { ProposalState } from './learning-types';
 import { renderShell } from './ui';
 import { actorContext, resolveApiActor, type TokenClass } from './actor-context';
 import { KTEAM_VERSION } from './version';
+import { FsError } from './fs';
+import { GitError } from './git';
 
 // Built chat UI (Vite output, committed): served when present; the legacy
 // single-file shell remains the fallback so the daemon never 404s its own UI.
@@ -45,6 +49,11 @@ export interface ApiServerOptions {
    *  rejected 403. Omitted in tests that only exercise the admin path. */
   wardenToken?: string;
   service: KTeamService;
+  /** The Learning subsystem (mines terminal sessions into proposed fleet
+   *  rules). Optional and additive — an older daemon or a test can omit it and
+   *  every /v1/learning/* route answers 404. Kept separate from KTeamService so
+   *  the learning surface never widens the warden-scoped token. */
+  learning?: LearningService;
 }
 
 /** The Codex discovery baseline is private launch bookkeeping, not session
@@ -76,6 +85,13 @@ async function wardenScopeDenial(
   const forbidden = (what: string) => json({ error: `the warden-scoped token may not ${what}` }, 403);
   const pathname = url.pathname;
   if (pathname.startsWith('/v1/warden/')) return forbidden('use the warden oversight routes');
+  // Learning is admin-only (it can accept/reject rules that steer the whole
+  // fleet). Deny BEFORE the generic GET allowance below.
+  if (pathname.startsWith('/v1/learning')) return forbidden('use the learning routes');
+  // Working-tree bytes are admin-only. A warden oversees session conduct; it
+  // does not need repository contents. This must stay before the generic GET
+  // allowance or every filesystem route silently becomes warden-readable.
+  if (/^\/v1\/sessions\/[^/]+\/fs(?:\/|$)/.test(pathname)) return forbidden('browse session files');
   if (method === 'GET') return undefined; // every other read is fine
   if (pathname === '/v1/sessions' && method === 'POST') return forbidden('start sessions');
   if (method === 'DELETE') return forbidden('remove sessions');
@@ -113,6 +129,23 @@ async function wardenScopeDenial(
 const json = (value: unknown, status = 200) =>
   Response.json(value, { status, headers: { 'x-kteam-version': KTEAM_VERSION } });
 
+/** Filesystem responses can contain working-tree bytes and must not enter the
+ * browser's private HTTP cache (the service worker already passes /v1 through). */
+const fsJson = (value: unknown, status = 200): Response => {
+  const response = json(value, status);
+  response.headers.set('cache-control', 'no-store');
+  return response;
+};
+
+/**
+ * Is this request on the filesystem surface, and therefore no-store?
+ *
+ * Derived from the PATH rather than from a parsed `action` variable so the catch
+ * handler can ask the same question the routes do — including for errors thrown
+ * before any parsing happened.
+ */
+const isFsPath = (pathname: string): boolean => /^\/v1\/sessions\/[^/]+\/fs(\/|$)/.test(pathname);
+
 /** Body for a route the daemon doesn't recognise. The `code` lets the CLI tell
  *  this apart from a "no such session" 404 (which carries a descriptive error),
  *  and method+path let it name the exact route — the classic version-skew
@@ -128,7 +161,7 @@ const unknownRoute = (method: string, path: string) => ({
  *  reuses the original x-kteam-request-id, so a duplicate id here means the
  *  first attempt already applied server-side — re-applying would duplicate the
  *  message/turn. */
-const DEDUPED_ACTIONS = new Set(['send', 'answer', 'signal', 'resume', 'migrate', 'rename', 'runtime']);
+const DEDUPED_ACTIONS = new Set(['send', 'answer', 'interrupt', 'signal', 'resume', 'migrate', 'rename', 'runtime']);
 
 /** Per-session LRU of recently APPLIED request ids. Ids are recorded only after
  *  the mutation succeeds: a failed attempt stays retryable, while a retry of a
@@ -181,6 +214,32 @@ async function body<T>(request: Request): Promise<T> {
   } catch {
     throw new HttpError(400, 'invalid JSON body');
   }
+}
+
+/** Body parse for a route whose payload is entirely optional: an absent or
+ *  empty body is the no-fields case, not a client error. Malformed JSON is
+ *  still a 400 — silently downgrading it would drop a field the caller meant
+ *  to send. */
+async function optionalBody<T extends object>(request: Request): Promise<T> {
+  let text: string;
+  try {
+    text = await request.text();
+  } catch {
+    throw new HttpError(400, 'invalid JSON body');
+  }
+  if (text.trim() === '') return {} as T;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new HttpError(400, 'invalid JSON body');
+  }
+  // A nonempty non-object body is not the generic no-fields shape. Treating it
+  // as `{}` would silently downgrade a malformed question-bound abandon into a
+  // generic interrupt of whatever happens to be running now.
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed))
+    throw new HttpError(400, 'JSON body must be an object');
+  return parsed as T;
 }
 
 class HttpError extends Error {
@@ -360,6 +419,33 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
               headers: { 'content-type': 'text/markdown; charset=utf-8' },
             });
           }
+          // --- Learning (admin-only; 404 when the subsystem is not wired) ---
+          if (url.pathname.startsWith('/v1/learning')) {
+            if (!options.learning) return json(unknownRoute(request.method, url.pathname), 404);
+            const learning = options.learning;
+            if (url.pathname === '/v1/learning/status' && request.method === 'GET')
+              return json(await learning.learningStatus());
+            if (url.pathname === '/v1/learning/proposals' && request.method === 'GET') {
+              const state = url.searchParams.get('state') ?? undefined;
+              return json(await learning.learningProposals(state as ProposalState | undefined));
+            }
+            if (url.pathname === '/v1/learning/run' && request.method === 'POST') {
+              const input = await body<{ spawn?: boolean }>(request);
+              return json(await learning.learningRun(input.spawn === true));
+            }
+            if (url.pathname === '/v1/learning/config' && request.method === 'GET')
+              return json(await learning.learningConfig());
+            const propMatch = url.pathname.match(/^\/v1\/learning\/proposals\/([^/]+)(?:\/(patch))?$/);
+            if (propMatch && request.method === 'POST') {
+              const id = decodeURIComponent(propMatch[1]!);
+              if (propMatch[2] === 'patch') return json(await learning.learningPatch(id));
+              const input = await body<LearningAction>(request);
+              const updated = await learning.learningAct(id, input);
+              if (!updated) return json({ error: `unknown learning proposal ${id}` }, 404);
+              return json(updated);
+            }
+            return json(unknownRoute(request.method, url.pathname), 404);
+          }
           if (url.pathname === '/v1/names' && request.method === 'GET') {
             const raw = Number(url.searchParams.get('count') ?? '1');
             return json(await options.service.suggestNames(Number.isFinite(raw) ? raw : 1));
@@ -465,10 +551,25 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
             return await applyOnce(() => options.service.runtime(id, input));
           }
           if (action === 'answer' && request.method === 'POST') {
-            const input = await body<{ labels?: string[]; other?: string; responses?: string[] }>(request);
-            return await applyOnce(() => options.service.answer(id, input.labels ?? [], input.other, input.responses));
+            const input = await body<{ toolUseId?: string; labels?: string[]; other?: string; responses?: string[] }>(
+              request,
+            );
+            if (!input.toolUseId) throw new HttpError(400, 'toolUseId is required');
+            return await applyOnce(() =>
+              options.service.answer(id, input.toolUseId!, input.labels ?? [], input.other, input.responses),
+            );
           }
-          if (action === 'interrupt' && request.method === 'POST') return json(await options.service.interrupt(id));
+          if (action === 'interrupt' && request.method === 'POST') {
+            // Optional binding: a question-specific abandon names the question
+            // it rendered, so a retry that lands after that question is gone
+            // cannot cancel whatever the session moved on to. A bodyless or
+            // empty `{}` POST stays the generic interrupt it has always been.
+            const input = await optionalBody<{ toolUseId?: unknown }>(request);
+            const expected = input.toolUseId;
+            if (expected !== undefined && (typeof expected !== 'string' || expected.trim() === ''))
+              throw new HttpError(400, 'toolUseId must be a nonempty string');
+            return await applyOnce(() => options.service.interrupt(id, expected as string | undefined));
+          }
           if (action === 'stop' && request.method === 'POST') {
             const input = await body<{ reason?: string }>(request);
             return json(await options.service.stop(id, input.reason));
@@ -537,6 +638,36 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
               ),
             );
           }
+          if (action === 'fs' && request.method === 'GET') {
+            return fsJson(await options.service.fsList(id, url.searchParams.get('path') ?? undefined));
+          }
+          if (action === 'fs/file' && request.method === 'GET') {
+            const target = url.searchParams.get('path');
+            if (!target) throw new HttpError(400, 'query parameter "path" is required');
+            const requestedRev = url.searchParams.get('rev');
+            if (requestedRev !== null && requestedRev !== 'head')
+              throw new HttpError(400, 'query parameter "rev" must be "head"');
+            return fsJson(await options.service.fsFile(id, target, requestedRev === 'head' ? 'head' : undefined));
+          }
+          if (action === 'fs/changes' && request.method === 'GET') {
+            return fsJson(await options.service.fsChanges(id));
+          }
+          if (action === 'fs/diff' && request.method === 'GET') {
+            const target = url.searchParams.get('path');
+            if (!target) throw new HttpError(400, 'query parameter "path" is required');
+            const result = await options.service.fsDiff(id, target);
+            if (result.denied || result.ignored) {
+              const code = result.denied ? 'denied' : 'ignored';
+              return fsJson({ error: 'diff is not served by the repository secrets policy', code }, 403);
+            }
+            // A partial diff is actively misleading in a review surface. The
+            // core bounds memory at 1 MiB; the route refuses that partial body.
+            if (result.truncated)
+              return fsJson({ error: 'diff exceeds the 1 MB response limit', code: 'too_large' }, 413);
+            return new Response(result.diff, {
+              headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
+            });
+          }
           if (action === 'attachments' && request.method === 'POST') {
             const form = await request.formData();
             const file = form.get('file');
@@ -557,11 +688,41 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
               },
             });
           }
-          return json(unknownRoute(request.method, url.pathname), 404);
+          // `fs/…` typos and wrong methods are on the filesystem surface too, so
+          // they take the same no-store policy rather than depending on which
+          // branch produced them.
+          const unknown = unknownRoute(request.method, url.pathname);
+          return isFsPath(url.pathname) ? fsJson(unknown, 404) : json(unknown, 404);
         } catch (error) {
+          if (error instanceof FsError) {
+            const status =
+              error.code === 'not_found'
+                ? 404
+                : error.code === 'denied' || error.code === 'ignored' || error.code === 'escapes_root'
+                  ? 403
+                  : 400;
+            return fsJson({ error: error.message, code: error.code }, status);
+          }
+          if (error instanceof GitError) {
+            const status =
+              error.code === 'git_timeout'
+                ? 504
+                : error.code === 'not_in_head'
+                  ? 404
+                  : error.code === 'not_a_repo'
+                    ? 400
+                    : 500;
+            return fsJson({ error: error.message, code: error.code }, status);
+          }
           const status =
             error instanceof HttpError ? error.status : /unknown kteam session/i.test(String(error)) ? 404 : 409;
-          return json({ error: error instanceof Error ? error.message : String(error) }, status);
+          const body = { error: error instanceof Error ? error.message : String(error) };
+          // The no-store boundary is per-ROUTE, not per-error-type. A query
+          // validation 400 from /fs/file carries no file bytes today, but making
+          // the header depend on which error class was thrown means the next
+          // error message added to a filesystem route silently escapes the
+          // policy. Every response on `fs` and `fs/*` is no-store.
+          return isFsPath(url.pathname) ? fsJson(body, status) : json(body, status);
         }
       };
       const response = await actorContext.run({ actor }, dispatch);

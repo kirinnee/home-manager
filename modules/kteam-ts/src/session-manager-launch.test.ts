@@ -369,6 +369,10 @@ describe('subprocess liveness without transcript tool records', () => {
     manager.launching = new Map();
     manager.doneDeferred = new Set();
     manager.autoContinued = new Set();
+    // monitorLoop now routes structured-question reconciliation through the
+    // per-session queue. This isolated prototype fixture has no constructor-
+    // initialized queue maps, so provide the same uncontended semantics here.
+    manager.serialized = async (_id: string, work: () => Promise<unknown>) => await work();
     manager.options = {
       healthIntervalSeconds: 0.01,
       warden: { susThinkingSeconds: 900, susSubprocessSeconds: 900 },
@@ -452,12 +456,17 @@ describe('revive-on-send relaunch race', () => {
     };
     let state: Record<string, unknown> = {
       id: 's1',
-      status: 'completed',
-      health: 'idle',
+      status: 'failed',
+      health: 'crashed',
       turn: 3,
       finishedAt: new Date().toISOString(),
+      pendingQuestion: {
+        toolUseId: 'tool-before-resume',
+        questions: [{ question: 'Continue?', options: [{ label: 'Yes' }, { label: 'No' }] }],
+      },
     };
     const order: string[] = [];
+    const questionCancellations: Record<string, unknown>[] = [];
     const manager = bareManager();
     manager.paths = {
       home,
@@ -489,7 +498,13 @@ describe('revive-on-send relaunch race', () => {
     };
     manager.get = async () => ({ directory: path.join(home, 's1'), config, state });
     manager.emitDeferred = () => undefined;
-    manager.emit = async () => ({});
+    manager.emit = async (_id: string, type: string, data: Record<string, unknown>) => {
+      if (type === 'interaction.question_cancelled') {
+        order.push('question-cancelled');
+        questionCancellations.push(data);
+      }
+      return {};
+    };
     manager.stopMonitor = async () => {
       order.push('monitor-stopped');
     };
@@ -533,11 +548,26 @@ describe('revive-on-send relaunch race', () => {
     ).send('s1', { message: 'continue the same task' });
 
     expect(result.disposition).toBe('revived');
-    expect(order).toEqual(['monitor-stopped', 'launched', 'spurious-failed', 'prompt-sent', 'monitor-started']);
+    expect(order).toEqual([
+      'monitor-stopped',
+      'question-cancelled',
+      'launched',
+      'spurious-failed',
+      'prompt-sent',
+      'monitor-started',
+    ]);
     expect(state.launchedAt).toBeDefined();
     expect(state.status).toBe('running');
     expect(state.health).toBe('healthy');
     expect(state.reason).toBeUndefined();
+    expect(state.pendingQuestion).toBeUndefined();
+    expect(questionCancellations).toEqual([
+      {
+        toolUseId: 'tool-before-resume',
+        reason: 'session relaunched before a daemon-confirmed answer',
+        pendingQuestion: null,
+      },
+    ]);
     expect((manager.launching as Map<string, unknown>).has('s1')).toBe(false);
   });
 
