@@ -34,6 +34,10 @@ export interface PinApiService {
   edit(sessionId: string, id: string, text: string, actor: PinActor): Promise<PinSnapshot>;
   remove(sessionId: string, id: string, actor: PinActor): Promise<PinSnapshot>;
   importPins(sessionId: string, pins: import('./pins-types').Pin[], actor: PinActor): Promise<PinSnapshot>;
+  /** Live `pins.updated` stream. OPTIONAL so the many test doubles of this port
+   *  stay minimal — only the real PinService emits, and an absent implementation
+   *  simply means nothing broadcasts. */
+  subscribe?(listener: (event: import('./types').KTeamEvent) => void): () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -259,6 +263,12 @@ export class PinApi {
   private readonly inFlight = new Map<string, Promise<PinApiResponse>>();
 
   constructor(private readonly service: PinApiService) {}
+
+  /** Forward the service's live stream so the api-server has one thing to wire.
+   *  Returns a no-op unsubscribe when the service does not emit. */
+  subscribe(listener: (event: import('./types').KTeamEvent) => void): () => void {
+    return this.service.subscribe?.(listener) ?? ((): void => {});
+  }
 
   /** Handle a pins request, or return null when the path is not ours. Never
    *  throws for a client mistake; a non-PinError is rethrown so the caller's 500

@@ -9,6 +9,7 @@ import { LearningManager } from './learning';
 import { createPaths } from './paths';
 import { SessionManager } from './session-manager';
 import { createSttService } from './stt-service';
+import { PinApi, PinService } from './pins';
 import { TaskService } from './tasks';
 import { TaskApi } from './tasks-api';
 
@@ -74,6 +75,17 @@ const manager = await SessionManager.create(paths, {
 const learning = new LearningManager(paths, config.learning, manager);
 // One service and one idempotency controller for the daemon lifetime.
 const taskApi = new TaskApi(new TaskService(paths, manager));
+// One writable pin store + idempotency controller for the daemon lifetime.
+// The `has` adapter is the only thing PinService needs from the session world.
+const pinApi = new PinApi(
+  new PinService(paths, {
+    has: async (id: string) =>
+      manager.get(id).then(
+        () => true,
+        () => false,
+      ),
+  }),
+);
 const stt = createSttService({ paths });
 // Retry EADDRINUSE: a dying predecessor (service-manager restart) can hold the
 // port for seconds while it drains; give it up to 30 s before failing.
@@ -87,6 +99,7 @@ const server = await bindWithRetry(() =>
     learning,
     stt,
     tasks: taskApi,
+    pins: pinApi,
   }),
 ).catch(async error => {
   await Promise.allSettled([manager.close(), stt.close()]);
