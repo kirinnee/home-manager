@@ -1183,16 +1183,48 @@ body {
 }
 
 /* ---- details-sheet tab strip --------------------------------------------
-   The `⋯` sheet's tabs. Four labels do not always fit a 360px phone, so the
-   strip scrolls horizontally (SheetTabs scrolls the selected tab back into
-   view on change) — but the scrollbar itself is chrome the tabs do not need,
-   so it is hidden. The track hairline and gutter are borrowed from tokens the
-   sheet already uses, so no new theme tokens are introduced. */
-.kt-sheet-tabs {
-  scrollbar-width: none;
+   The `⋯` sheet's tabs, as REAL tabs rather than a row of buttons. The reader's
+   complaint was that they read as buttons and that the strip scrolled sideways;
+   both are gone. Four tabs share the strip as equal columns (`flex-1` in
+   SheetTabs), so they always fit — 360px is the tight case and it fits — and
+   there is nothing to scroll.
+
+   The idiom is the same `.kt-tab` VOCABULARY the mode segment and Chat/Terminal
+   switch use (same tokens, casing, font, theme-awareness), SPECIALISED here from
+   a pill into a tab: no resting fill or border, the inactive tabs recede to
+   muted text, and the selected tab takes `--accent` plus a 2px underline that
+   overlaps the strip's own baseline (negative margin) so it reads as connected
+   to the panel below it. Every value is a role token, so a sixth family retargets
+   the roles and this is untouched. */
+.kt-sheet-tabs .kt-tab {
+  height: auto;
+  padding-block: var(--pad-row-y);
+  padding-inline: var(--gap-xs);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  /* Pull the tab's own bottom edge onto the strip's `border-b` hairline, so the
+     active underline sits ON the shared baseline instead of above it. */
+  margin-bottom: calc(-1 * var(--divider-width));
+  color: var(--muted);
+  transition:
+    color 120ms ease,
+    border-color 120ms ease,
+    background-color 120ms ease;
 }
-.kt-sheet-tabs::-webkit-scrollbar {
-  display: none;
+.kt-sheet-tabs .kt-tab:hover {
+  background: var(--surface-2);
+  color: var(--fg);
+}
+/* Beats `.kt-tab[aria-selected='true']` (the pill treatment) on specificity, so
+   the sheet strip gets the tab treatment while ViewTabs keeps its segment. */
+.kt-sheet-tabs .kt-tab[aria-selected='true'] {
+  border-bottom-color: var(--accent);
+  background: transparent;
+  box-shadow: none;
+  color: var(--accent);
 }
 
 /* ---- input / composer surface -------------------------------------------
