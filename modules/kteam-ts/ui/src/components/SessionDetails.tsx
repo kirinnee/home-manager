@@ -52,7 +52,7 @@ import {
 } from 'lucide-react';
 import type { SessionView, WrapperInfo } from '../types';
 import type { Quota } from '../lib/usage';
-import { api, ApiError } from '../lib/api';
+import { api, ApiError, type RuntimeSessionAction } from '../lib/api';
 import { displayCallsign } from '../lib/callsign';
 import { cn, fmtAbsolute, fmtAge, fmtRelative, TERMINAL_STATUSES } from '../lib/utils';
 import { buildLineage, byNewestActivity, parentDisplay, shortSessionId } from '../lib/lineage';
@@ -559,6 +559,12 @@ export function SessionDetails({
                     onOpenTerminal={onOpenTerminal}
                     onClose={onClose}
                   />
+                  {/* Codex already tunes reasoning inside the model picker above,
+                      so a second control there would be redundant; Claude has a
+                      real in-session /effort command, so it gets its own. */}
+                  {config.harness === 'claude' && (
+                    <RuntimeEffortControls view={view} canControl={canControlRuntime} onClose={onClose} />
+                  )}
                   {onMigrate && (
                     <div className="mt-4 border-t border-border-soft pt-3">
                       <h3 className="m-0 text-ui font-semibold text-fg">Move account + relaunch</h3>
@@ -668,6 +674,20 @@ export function observedModelPresentation(observedModel: string | undefined, sta
 export function isRuntimeEndpointUnavailable(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404 && error.code === 'unknown_route';
 }
+
+/** A daemon that predates the effort runtime action rejects it with the 400 it
+ * raises for any non-model action. That is version skew — the account CAN tune
+ * effort, the running daemon just has not learned the verb yet — so it earns the
+ * same "restart required" treatment as a missing runtime route, not a red error. */
+export function isEffortActionUnsupported(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 400 && /runtime action/i.test(error.message);
+}
+
+/** The four persistable levels the installed Claude CLI accepts. `auto` (reset
+ * to the model default) and the session-only `max`/`ultracode` aliases are
+ * deliberately absent — this surface only offers what persists as a default. */
+export const CLAUDE_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh'] as const;
+export type ClaudeEffortLevel = (typeof CLAUDE_EFFORT_LEVELS)[number];
 
 export type ClaudeRuntimeModelsResolution =
   | { kind: 'available'; choices: NonNullable<WrapperInfo['runtimeModels']> }
@@ -919,16 +939,14 @@ export function ClaudeRuntimeChoices({
   if (choices.length === 0) {
     return (
       <p className="mt-2 text-meta leading-base text-muted">
-        This account does not advertise any in-place model choices. Claude effort tuning is not offered here because the
-        installed Claude 2.1.219 CLI cannot reliably tune it from this surface.
+        This account does not advertise any in-place model choices. Reasoning effort is set separately below.
       </p>
     );
   }
   return (
     <div className="mt-3">
       <p className="m-0 text-meta leading-base text-muted">
-        Only this account’s advertised Claude choices are shown. Verification updates after the next model response;
-        Claude effort tuning is not offered because the installed Claude 2.1.219 CLI cannot reliably tune it here.
+        Only this account’s advertised Claude choices are shown. Verification updates after the next model response.
       </p>
       <div className="mt-2 grid gap-2" aria-label="Switch Claude model in place">
         {choices.map(choice => (
@@ -947,6 +965,220 @@ export function ClaudeRuntimeChoices({
               )}
             </span>
             {submitting && <LoaderCircle size={15} aria-hidden="true" className="shrink-0 animate-spin" />}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+interface RuntimeEffortControlsProps {
+  view: SessionView;
+  canControl: boolean;
+  /** Claude reports a level took as a persisted default the moment the command
+   *  completes; the caller uses this to reflect the new value on the bar chip. */
+  onEffortSwitch?: (level: string) => void;
+  /** Codex tunes effort inside its native picker, which lives in the Terminal
+   *  view; the page owns that tab switch, exactly as the model control does. */
+  onOpenTerminal?: () => boolean;
+  onClose: () => void;
+}
+
+/**
+ * The reasoning-effort sibling of RuntimeModelControls. It is deliberately a
+ * SEPARATE surface, not a section grafted into the model control, because the
+ * two harnesses answer "change the thinking level" very differently:
+ *
+ *   - Claude has a real in-session `/effort` command with four persistable
+ *     levels. It writes the account's settings.json (now that kfleet
+ *     materialises it writable) and the next turn uses it. Claude does not echo
+ *     the level back in a transcript we parse, so — unlike the model switch —
+ *     there is no stale-until-evidence spinner: the persist is synchronous and
+ *     confirmed by the command completing.
+ *   - Codex combines model AND reasoning in one native two-stage picker; there
+ *     is no `/reasoning <x>` verb. So its "effort" control is the same Terminal
+ *     hand-off the model control uses, surfaced from the thinking chip too.
+ *
+ * Anything a harness cannot actually do is never rendered as a live control.
+ */
+export function RuntimeEffortControls({
+  view,
+  canControl,
+  onEffortSwitch,
+  onOpenTerminal,
+  onClose,
+}: RuntimeEffortControlsProps) {
+  const { config, state } = view;
+  const terminal = TERMINAL_STATUSES.has(state.status);
+  const promptReady = state.promptReady === true;
+  const [submitting, setSubmitting] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [restartRequired, setRestartRequired] = useState(false);
+
+  useEffect(() => {
+    setRestartRequired(false);
+    setFailure(null);
+    setNotice(null);
+  }, [config.id]);
+
+  async function runEffortCommand(level: string) {
+    if (!canControl || terminal || !promptReady || submitting || restartRequired) return;
+    setSubmitting(true);
+    setFailure(null);
+    setNotice(null);
+    try {
+      // Bridged to the effort verb until the contended lib/api.ts widens
+      // RuntimeSessionAction (see effort-bar.patch.md). A fresh id per click, so
+      // the daemon applies it exactly once and a retry is a new user decision.
+      await api.runtime(
+        config.id,
+        { action: 'effort', effort: level } as unknown as RuntimeSessionAction,
+        crypto.randomUUID(),
+      );
+      onEffortSwitch?.(level);
+      setNotice(`Effort set to ${level}. Saved as this account’s default for new sessions, and the next turn uses it.`);
+    } catch (error) {
+      if (isRuntimeEndpointUnavailable(error) || isEffortActionUnsupported(error)) {
+        setRestartRequired(true);
+        return;
+      }
+      setFailure(error instanceof ApiError ? error.message : String(error));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function openCodexPicker() {
+    if (!canControl || terminal || !promptReady || submitting || restartRequired) return;
+    setSubmitting(true);
+    setFailure(null);
+    setNotice(null);
+    try {
+      await api.runtime(config.id, { action: 'model' }, crypto.randomUUID());
+      if (onOpenTerminal?.()) {
+        onClose();
+        return;
+      }
+      setNotice('Codex opened its native picker. Select Terminal, then choose a model and its reasoning level.');
+    } catch (error) {
+      if (isRuntimeEndpointUnavailable(error)) {
+        setRestartRequired(true);
+        return;
+      }
+      setFailure(error instanceof ApiError ? error.message : String(error));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  const title = 'Reasoning effort';
+  if (terminal) {
+    return (
+      <div className="mt-4 border-t border-border-soft pt-3">
+        <h3 className="m-0 text-ui font-semibold text-fg">{title}</h3>
+        <p className="mt-1 text-meta leading-base text-muted">
+          Changing the reasoning level requires a running session. Resume or relaunch this session first.
+        </p>
+      </div>
+    );
+  }
+  if (!canControl) {
+    return (
+      <div className="mt-4 border-t border-border-soft pt-3">
+        <h3 className="m-0 text-ui font-semibold text-fg">{title}</h3>
+        <p className="mt-1 text-meta leading-base text-muted">
+          This origin is read-only, so it cannot change the running session’s reasoning level.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-4 border-t border-border-soft pt-3">
+      <h3 className="m-0 text-ui font-semibold text-fg">{title}</h3>
+      {!promptReady && (
+        <p className="mt-2 text-meta leading-base text-warn">
+          Wait for an idle prompt before changing the reasoning level. The daemon refuses a busy pane instead of
+          queueing this command.
+        </p>
+      )}
+
+      {restartRequired ? (
+        <p role="alert" className="mt-2 rounded-control border border-warn-border bg-surface-2 p-3 text-ui text-warn">
+          Daemon restart required to enable in-session effort switching.
+        </p>
+      ) : config.harness === 'claude' ? (
+        <ClaudeEffortChoices disabled={submitting || !promptReady} onChoose={level => void runEffortCommand(level)} />
+      ) : config.harness === 'codex' ? (
+        <div className="mt-3">
+          <p className="m-0 text-meta leading-base text-muted">
+            Codex sets reasoning inside its native picker — it asks for a model, then the reasoning level that model
+            supports. There is no separate reasoning command, so this opens the same picker.
+          </p>
+          <button
+            type="button"
+            disabled={submitting || !promptReady}
+            onClick={() => void openCodexPicker()}
+            className="kt-btn mt-3 flex min-h-[44px] w-full items-center justify-between gap-sm text-left"
+          >
+            <span>{submitting ? 'Opening native picker…' : 'Open model + reasoning picker in Terminal'}</span>
+            {submitting ? (
+              <LoaderCircle size={15} aria-hidden="true" className="shrink-0 animate-spin" />
+            ) : (
+              <Terminal size={15} aria-hidden="true" className="shrink-0" />
+            )}
+          </button>
+        </div>
+      ) : (
+        <p className="mt-2 text-meta leading-base text-muted">
+          In-session effort switching is not available for this harness, so no nonfunctional control is shown.
+        </p>
+      )}
+
+      {notice && (
+        <p role="status" className="mt-2 text-ui leading-base text-ok">
+          {notice}
+        </p>
+      )}
+      {failure && (
+        <p
+          role="alert"
+          className="mt-2 rounded-control border border-err-border bg-surface-2 p-3 text-ui leading-base text-err"
+        >
+          {failure}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** The four Claude effort levels as a 2-column grid of 44px targets, mirroring
+ *  ClaudeRuntimeChoices. Presentational: the parent owns the submit + notices. */
+export function ClaudeEffortChoices({
+  disabled,
+  onChoose,
+}: {
+  disabled: boolean;
+  onChoose: (level: ClaudeEffortLevel) => void;
+}) {
+  return (
+    <div className="mt-3">
+      <p className="m-0 text-meta leading-base text-muted">
+        Reasoning effort for new Claude turns. Persists to this account’s settings (saved as the default for new
+        sessions). Claude does not echo the level back, so it is shown as sent, not re-verified.
+      </p>
+      <div className="mt-2 grid grid-cols-2 gap-2" aria-label="Set Claude reasoning effort">
+        {CLAUDE_EFFORT_LEVELS.map(level => (
+          <button
+            key={level}
+            type="button"
+            disabled={disabled}
+            onClick={() => onChoose(level)}
+            aria-label={`Set reasoning effort to ${level}`}
+            className="kt-btn flex min-h-[44px] items-center justify-center capitalize"
+          >
+            {level}
           </button>
         ))}
       </div>

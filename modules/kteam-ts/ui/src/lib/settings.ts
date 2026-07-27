@@ -2,7 +2,7 @@
 // command palette. Labels, descriptions, anchors and search terms live here so
 // adding a setting cannot silently make its palette entry drift from the UI.
 
-export type SettingId = 'text-size' | 'density' | 'theme' | 'chat-width';
+export type SettingId = 'text-size' | 'density' | 'theme' | 'chat-width' | 'dictation';
 
 export interface SettingDefinition {
   id: SettingId;
@@ -39,6 +39,12 @@ export const SETTINGS_DEFINITIONS: readonly SettingDefinition[] = [
     label: 'Theme',
     description: 'Choose a colour mode and visual family. Changes apply immediately.',
     keywords: ['appearance', 'colour', 'color', 'mode', 'light', 'dark', 'auto', 'family', 'palette'],
+  },
+  {
+    id: 'dictation',
+    label: 'Dictation',
+    description: 'Speak into an editable message draft. Dictation never sends a message for you.',
+    keywords: ['voice', 'speech', 'microphone', 'mic', 'stt', 'transcribe', 'talk', 'audio', 'parakeet'],
   },
 ] as const;
 

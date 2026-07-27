@@ -2,8 +2,14 @@ import { describe, expect, test } from 'bun:test';
 import { SETTINGS_DEFINITIONS, isSettingId, settingsHref, settingsPaletteEntries } from './settings';
 
 describe('shared settings catalog', () => {
-  test('owns the three rendered controls in stable order', () => {
-    expect(SETTINGS_DEFINITIONS.map(setting => setting.id)).toEqual(['text-size', 'density', 'chat-width', 'theme']);
+  test('owns the rendered controls in stable order', () => {
+    expect(SETTINGS_DEFINITIONS.map(setting => setting.id)).toEqual([
+      'text-size',
+      'density',
+      'chat-width',
+      'theme',
+      'dictation',
+    ]);
     expect(new Set(SETTINGS_DEFINITIONS.map(setting => setting.id)).size).toBe(SETTINGS_DEFINITIONS.length);
     for (const setting of SETTINGS_DEFINITIONS) {
       expect(setting.label.length).toBeGreaterThan(0);
@@ -27,10 +33,12 @@ describe('shared settings catalog', () => {
     expect(settingsPaletteEntries('text size')[0]?.settingId).toBe('text-size');
     expect(settingsPaletteEntries('density')[0]?.settingId).toBe('density');
     expect(settingsPaletteEntries('dark').map(entry => entry.settingId)).toContain('theme');
+    expect(settingsPaletteEntries('microphone').map(entry => entry.settingId)).toContain('dictation');
   });
 
   test('builds deep links only for known setting ids', () => {
     expect(isSettingId('theme')).toBe(true);
+    expect(isSettingId('dictation')).toBe(true);
     expect(isSettingId('unknown')).toBe(false);
     expect(settingsHref()).toBe('/settings');
     expect(settingsHref('density')).toBe('/settings#density');

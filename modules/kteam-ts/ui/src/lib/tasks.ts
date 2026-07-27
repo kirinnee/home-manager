@@ -56,7 +56,7 @@ export interface TaskRecord extends TaskSummary {
   createdBy: string | null;
 }
 
-export type TaskActivityType = 'created' | 'status' | 'note' | 'link' | 'assign' | 'feedback' | 'session';
+export type TaskActivityType = 'created' | 'status' | 'note' | 'link' | 'assign' | 'order' | 'feedback' | 'session';
 export interface TaskActivity {
   v: number;
   seq: number;
@@ -69,16 +69,25 @@ export interface TaskActivity {
 
 const STATUS_SET = new Set<string>(TASK_STATUSES);
 const KIND_SET = new Set<TaskKind>(['bug', 'feature', 'infra', 'chore']);
-const ACTIVITY_SET = new Set<TaskActivityType>(['created', 'status', 'note', 'link', 'assign', 'feedback', 'session']);
+const ACTIVITY_SET = new Set<TaskActivityType>([
+  'created',
+  'status',
+  'note',
+  'link',
+  'assign',
+  'order',
+  'feedback',
+  'session',
+]);
 
-const EMPTY_LINKS: TaskLinks = { prs: [], branch: null, commits: [], docs: [] };
-const EMPTY_LIVE: TaskLive = {
+const emptyLinks = (): TaskLinks => ({ prs: [], branch: null, commits: [], docs: [] });
+const emptyLive = (): TaskLive => ({
   assigneeStatus: null,
   assigneeHealth: null,
   assigneeDoneMarker: false,
   assigneeLastActivityAt: null,
   staleness: null,
-};
+});
 
 function object(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
@@ -95,7 +104,7 @@ function isStatus(value: unknown): value is TaskStatus {
 
 export function parseTaskLinks(value: unknown): TaskLinks {
   const raw = object(value);
-  if (!raw) return EMPTY_LINKS;
+  if (!raw) return emptyLinks();
   return {
     prs: strings(raw['prs']),
     branch: text(raw['branch']),
@@ -106,7 +115,7 @@ export function parseTaskLinks(value: unknown): TaskLinks {
 
 export function parseTaskLive(value: unknown): TaskLive {
   const raw = object(value);
-  if (!raw) return EMPTY_LIVE;
+  if (!raw) return emptyLive();
   const staleness = raw['staleness'];
   return {
     assigneeStatus: text(raw['assigneeStatus']),
@@ -161,7 +170,13 @@ export function parseTaskRecord(value: unknown): TaskRecord | null {
 
 export function parseTaskActivity(value: unknown): TaskActivity | null {
   const raw = object(value);
-  if (!raw || typeof raw['seq'] !== 'number' || !Number.isFinite(raw['seq']) || typeof raw['type'] !== 'string')
+  if (
+    !raw ||
+    typeof raw['seq'] !== 'number' ||
+    !Number.isSafeInteger(raw['seq']) ||
+    raw['seq'] < 1 ||
+    typeof raw['type'] !== 'string'
+  )
     return null;
   if (!ACTIVITY_SET.has(raw['type'] as TaskActivityType)) return null;
   return {
@@ -185,6 +200,22 @@ export function parseTaskList(value: unknown): TaskSummary[] {
     seen.add(task.id);
     return [task];
   });
+}
+
+export interface ParsedTaskList {
+  tasks: TaskSummary[];
+  parseErrors: number;
+}
+
+/** Preserve the daemon's corruption count while still accepting a bare array
+ * from fixtures/older readers. Invalid counts degrade to zero, never NaN. */
+export function parseTaskListResponse(value: unknown): ParsedTaskList {
+  const raw = object(value);
+  const count = raw?.['parseErrors'];
+  return {
+    tasks: parseTaskList(value),
+    parseErrors: typeof count === 'number' && Number.isSafeInteger(count) && count > 0 ? count : 0,
+  };
 }
 
 export const TASK_STATUS_META: Record<TaskStatus, { label: string; tone: 'ok' | 'warn' | 'err' | 'pend' | 'accent' }> =
@@ -231,6 +262,8 @@ export function taskActivityText(activity: TaskActivity): string {
       ? `${String(d['from'] ?? 'status')} → ${String(d['to'] ?? 'status')}: ${note}`
       : `${String(d['from'] ?? 'status')} → ${String(d['to'] ?? 'status')}`;
   if (activity.type === 'assign') return `Assigned to ${String(d['assignee'] ?? d['to'] ?? 'unassigned')}`;
+  if (activity.type === 'order')
+    return `Priority ${String(d['from'] ?? 'unranked')} → ${String(d['to'] ?? 'unranked')}`;
   if (activity.type === 'link') return `Linked ${String(d['field'] ?? 'item')}: ${String(d['value'] ?? '')}`;
   if (activity.type === 'created') return `Created${d['status'] ? ` as ${String(d['status'])}` : ''}`;
   return note ?? (activity.type === 'session' ? `Session ${String(d['event'] ?? 'updated')}` : activity.type);

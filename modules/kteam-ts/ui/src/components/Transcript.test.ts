@@ -106,3 +106,56 @@ describe('paneUsableTableWidth — how wide a table may bleed', () => {
     expect(paneUsableTableWidth(20, 20, PAD, PAD)).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// quotableSelectionText — the text a "Quote" would insert, or '' for nothing.
+// Same injected-`contains` shape as pinBlockedBySelection, so the gate is
+// checkable without a Selection, a Node, or a DOM.
+// ---------------------------------------------------------------------------
+
+import { quotableSelectionText, type QuoteSelectionLike } from './Transcript';
+
+const qsel = (
+  text: string,
+  anchorNode: Node | null,
+  focusNode: Node | null,
+  over: Partial<QuoteSelectionLike> = {},
+): QuoteSelectionLike => ({
+  isCollapsed: false,
+  rangeCount: 1,
+  anchorNode,
+  focusNode,
+  toString: () => text,
+  ...over,
+});
+
+describe('quotableSelectionText', () => {
+  test('no selection object → empty', () => {
+    expect(quotableSelectionText(null, inViewport)).toBe('');
+  });
+
+  test('a collapsed caret → empty (nothing highlighted)', () => {
+    expect(quotableSelectionText(qsel('x', INSIDE, INSIDE, { isCollapsed: true }), inViewport)).toBe('');
+  });
+
+  test('zero ranges → empty', () => {
+    expect(quotableSelectionText(qsel('x', INSIDE, INSIDE, { rangeCount: 0 }), inViewport)).toBe('');
+  });
+
+  test('a real selection inside the transcript → its trimmed text', () => {
+    expect(quotableSelectionText(qsel('  hello world  ', INSIDE, INSIDE), inViewport)).toBe('hello world');
+  });
+
+  test('a selection anchored entirely OUTSIDE the transcript → empty', () => {
+    expect(quotableSelectionText(qsel('composer text', OUTSIDE, OUTSIDE), inViewport)).toBe('');
+  });
+
+  test('either endpoint inside counts — anchored above the fold, extended in', () => {
+    expect(quotableSelectionText(qsel('spanning', OUTSIDE, INSIDE), inViewport)).toBe('spanning');
+    expect(quotableSelectionText(qsel('spanning', INSIDE, OUTSIDE), inViewport)).toBe('spanning');
+  });
+
+  test('a whitespace-only selection is not quotable', () => {
+    expect(quotableSelectionText(qsel('   \n\t ', INSIDE, INSIDE), inViewport)).toBe('');
+  });
+});

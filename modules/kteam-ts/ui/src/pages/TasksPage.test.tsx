@@ -36,6 +36,27 @@ describe('TasksPage', () => {
     expect(html).toContain('Declared status remains in progress');
     expect(html).toContain('kteam#42');
   });
+  test('blocked rows expose the reason the user needs to act on', () => {
+    const html = renderToStaticMarkup(
+      <TaskRow
+        task={{ ...task, status: 'blocked', statusReason: 'Choose the rollout window' }}
+        onOpen={() => undefined}
+      />,
+    );
+    expect(html).toContain('Choose the rollout window');
+  });
+  test('dropped rows and details expose the mandatory reason', () => {
+    const dropped = {
+      ...task,
+      status: 'dropped' as const,
+      statusReason: 'The upstream API cannot support this safely',
+    };
+    const row = renderToStaticMarkup(<TaskRow task={dropped} onOpen={() => undefined} />);
+    const detail = renderToStaticMarkup(<TaskDetail task={dropped} activity={[]} />);
+    expect(row).toContain('The upstream API cannot support this safely');
+    expect(detail).toContain('Status reason');
+    expect(detail).toContain('The upstream API cannot support this safely');
+  });
   test('detail separates feedback and status events', () => {
     const html = renderToStaticMarkup(
       <TaskDetail

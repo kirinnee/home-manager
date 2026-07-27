@@ -4,6 +4,7 @@ import {
   groupTasks,
   parseTaskActivity,
   parseTaskList,
+  parseTaskListResponse,
   parseTaskRecord,
   TASK_STALENESS_COPY,
 } from './tasks';
@@ -30,7 +31,13 @@ describe('task UI parsing', () => {
   });
   test('only accepts known activity event types', () => {
     expect(parseTaskActivity({ seq: 1, type: 'feedback', data: { text: 'keep it' } })?.type).toBe('feedback');
+    expect(parseTaskActivity({ seq: 2, type: 'order', data: { from: null, to: 3 } })?.type).toBe('order');
+    expect(parseTaskActivity({ seq: 1.5, type: 'feedback' })).toBeNull();
     expect(parseTaskActivity({ seq: 1, type: 'surprise' })).toBeNull();
+  });
+  test('preserves the daemon parse-error count without trusting malformed counts', () => {
+    expect(parseTaskListResponse({ tasks: [raw], parseErrors: 2 })).toMatchObject({ parseErrors: 2 });
+    expect(parseTaskListResponse({ tasks: [raw], parseErrors: -1 }).parseErrors).toBe(0);
   });
 });
 
