@@ -817,6 +817,27 @@ describe('request-id idempotency for retried mutations', () => {
     expect(controls).toBe(1);
   });
 
+  test('runtime endpoint dispatches the clear and compact session commands', async () => {
+    const service = new FakeService();
+    const seen: string[] = [];
+    service.runtime = async (_id, input) => {
+      seen.push(input.action);
+      return view;
+    };
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const post = (action: string, id: string) =>
+      fetch(`http://127.0.0.1:${server.port}/v1/sessions/s1/runtime`, {
+        method: 'POST',
+        headers: admin(id),
+        body: JSON.stringify({ action }),
+      });
+
+    expect((await post('clear', 'rt-clear')).status).toBe(200);
+    expect((await post('compact', 'rt-compact')).status).toBe(200);
+    expect(seen).toEqual(['clear', 'compact']);
+  });
+
   test('runtime endpoint rejects arbitrary native-command actions', async () => {
     const service = new FakeService();
     let controls = 0;
