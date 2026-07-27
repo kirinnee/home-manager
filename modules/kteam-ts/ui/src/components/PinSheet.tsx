@@ -187,7 +187,7 @@ export function PinSheet({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
   const [editError, setEditError] = useState<string | null>(null);
-  const [undo, setUndo] = useState<{ pin: PinItem; index: number } | null>(null);
+  const [undo, setUndo] = useState<{ pin: PinItem } | null>(null);
   const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [jumpState, setJumpState] = useState<{
     id: string;
@@ -261,19 +261,22 @@ export function PinSheet({
   );
 
   const deleteWithUndo = useCallback(
-    (pin: PinItem, index: number) => {
+    (pin: PinItem) => {
       if (undoTimer.current) clearTimeout(undoTimer.current);
       pinsStore.remove(sessionId, pin.id);
-      setUndo({ pin, index });
+      setUndo({ pin });
       undoTimer.current = setTimeout(() => setUndo(null), UNDO_MS);
     },
     [sessionId],
   );
 
+  // Undo re-ADDS the pin (the daemon mints a fresh id and puts it at the front,
+  // newest-first) rather than restoring its old position — the server owns
+  // ordering, so the sheet never shows an order the reconcile would contradict.
   const restoreUndo = useCallback(() => {
     if (!undo) return;
     if (undoTimer.current) clearTimeout(undoTimer.current);
-    pinsStore.insertAt(sessionId, undo.pin, undo.index);
+    pinsStore.readd(sessionId, undo.pin);
     setUndo(null);
   }, [sessionId, undo]);
 
@@ -392,7 +395,7 @@ export function PinSheet({
             </p>
           ) : (
             <ul className="m-0 flex list-none flex-col gap-sm p-0">
-              {pins.map((pin, index) =>
+              {pins.map(pin =>
                 pin.kind === 'note' ? (
                   <NoteRow
                     key={pin.id}
@@ -409,7 +412,7 @@ export function PinSheet({
                       setEditError(null);
                     }}
                     onJump={pin.source ? () => void jumpTo(pin.id, pin.source!.blockId) : undefined}
-                    onDelete={() => deleteWithUndo(pin, index)}
+                    onDelete={() => deleteWithUndo(pin)}
                   />
                 ) : (
                   <MessageRow
@@ -417,7 +420,7 @@ export function PinSheet({
                     pin={pin}
                     jump={jumpState && jumpState.id === pin.id ? jumpState : null}
                     onJump={() => void jumpTo(pin.id, pin.blockId)}
-                    onDelete={() => deleteWithUndo(pin, index)}
+                    onDelete={() => deleteWithUndo(pin)}
                   />
                 ),
               )}
