@@ -126,7 +126,7 @@ function hex(c: Rgba): string {
 
 /* ---------- token extraction --------------------------------------------- */
 
-const FAMILIES = ['studio', 'mission', 'neo', 'ember', 'contrast'] as const;
+const FAMILIES = ['studio', 'mission', 'neo', 'ember', 'contrast', 'notebook'] as const;
 const MODES = ['light', 'dark'] as const;
 type Family = (typeof FAMILIES)[number];
 type Mode = (typeof MODES)[number];
@@ -386,6 +386,11 @@ const WASH_PEAK: Partial<Record<`${Family}-${Mode}`, string[]>> = {
   'mission-light': ['rgba(11, 82, 95, 0.14)', 'rgba(11, 82, 95, 0.077)'],
   'ember-light': ['rgba(214, 148, 62, 0.14)', 'rgba(196, 118, 48, 0.08)'],
   'ember-dark': ['rgba(240, 163, 90, 0.1)', 'rgba(158, 84, 32, 0.09)'],
+  /* Notebook's ruled field: worst case is where the horizontal rule crosses the
+     vertical margin line, so both inks are stacked over --bg. Keep these in step
+     with `--rule-ink`/`--margin-ink` in themes.css. */
+  'notebook-light': ['rgba(47, 78, 163, 0.07)', 'rgba(178, 54, 54, 0.1)'],
+  'notebook-dark': ['rgba(214, 224, 236, 0.06)', 'rgba(232, 130, 130, 0.08)'],
 };
 const WASH_TIERS = ['fg', 'fg-soft', 'muted', 'faint'];
 

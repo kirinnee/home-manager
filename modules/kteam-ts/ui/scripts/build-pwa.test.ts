@@ -539,7 +539,7 @@ describe('theme token reading (M4)', () => {
         seen.add(`${family}-${mode}`);
       }
     }
-    expect(seen.size).toBe(10);
+    expect(seen.size).toBe(12);
   });
 
   test('light and dark differ within every family (no silent fallback to the base block)', () => {
