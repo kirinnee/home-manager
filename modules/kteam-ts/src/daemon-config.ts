@@ -4,16 +4,55 @@ import type { KTeamPaths } from './paths';
 import { atomicJson, readJson } from './io';
 import { defaultLearningConfig, type LearningConfig } from './learning-types';
 
+/** One configured warden account. String shorthand `"claude-auto-glm52a"` is
+ *  accepted anywhere a WardenAccount is and normalizes to `{ wrapper }`. */
+export interface WardenAccount {
+  /** Auto-mode wrapper name (must exist in ~/.kfleet/bin at spawn time; a
+   *  missing wrapper is skipped, not fatal). */
+  wrapper: string;
+  /** Optional model override for THIS wrapper only. Same caveat as the legacy
+   *  top-level `model`: never pin a raw claude id on a provider-backed wrapper
+   *  (a `claude-*`/`[1m]` value 400s the z.ai API) — leave unset so the
+   *  wrapper's own KTEAM_MODEL alias resolves. */
+  model?: string;
+}
+
+export type WardenFailoverPolicy = 'fallback' | 'round_robin';
+
+export interface WardenFailoverConfig {
+  /** fallback: always prefer the earliest healthy entry in `accounts` (fails
+   *  back automatically when it recovers). round_robin: rotate spawns across
+   *  healthy entries to spread token burn. */
+  policy: WardenFailoverPolicy;
+  /** Consecutive UNCORROBORATED failures (generic launch errors) before a
+   *  wrapper is demoted. Feed-corroborated evidence (atLimit/authOk from
+   *  kfleet, which already triple-probes at the source since c409fd5) demotes
+   *  in ONE strike — adding hysteresis there would re-add the latency that
+   *  commit removed. */
+  failureThreshold: number;
+  /** How long a demoted wrapper stays ineligible before being retried. A
+   *  positive feed signal (atLimit===false && authOk!==false) clears the
+   *  demotion EARLY, so a quota reset never waits out the cooldown. */
+  cooldownMinutes: number;
+}
+
 export interface WardenConfig {
   /** Deterministic detection always runs; this only gates LLM escalation. */
   enabled: boolean;
-  /** Auto-mode wrapper warden sessions run under (judgment work — use an
-   *  Opus-class account, not a mass-chore model). */
+  /** LEGACY single wrapper. Kept so existing config.json files keep working;
+   *  normalized into `accounts[0]` when `accounts` is absent/empty. */
   wrapper: string;
-  /** Optional model override for warden session starts (e.g. run the loge
-   *  wrapper but pin wardens to claude-opus-4-8[1m] instead of the wrapper's
-   *  KTEAM_MODEL default). */
+  /** @deprecated Legacy top-level model — applies to the legacy `wrapper`
+   *  only. Prefer the per-account `model` on `accounts` entries. Same z.ai
+   *  caveat as WardenAccount.model. */
   model?: string;
+  /** Ordered warden account list. Position = preference under `fallback`;
+   *  string entries are wrapper-name shorthand. Absent/empty => the legacy
+   *  single `wrapper`/`model` pair, byte-for-byte today's behavior. */
+  accounts?: (WardenAccount | string)[];
+  /** Failover policy + hysteresis knobs. Absent => defaults
+   *  (fallback / 2 strikes / 30 min cooldown). */
+  failover?: WardenFailoverConfig;
   /** Fleet sweep cadence, minutes. */
   intervalMinutes: number;
   /** A waiting session idle this long is an unanswered question. */
@@ -91,6 +130,12 @@ export interface DaemonConfig {
   contextWindows?: Record<string, number>;
 }
 
+export const defaultWardenFailoverConfig = (): WardenFailoverConfig => ({
+  policy: 'fallback',
+  failureThreshold: 2,
+  cooldownMinutes: 30,
+});
+
 export const defaultWardenConfig = (): WardenConfig => ({
   enabled: false,
   // Wardens JUDGE sus sessions (A6): understand the task, deep-dive the process,
@@ -103,6 +148,10 @@ export const defaultWardenConfig = (): WardenConfig => ({
   // pin `model` to a raw claude id here — a `claude-*`/`[1m]` suffix 400s the z.ai
   // API (kfleet/config.yaml documents this).
   wrapper: 'claude-auto-glm52a',
+  // `accounts` is deliberately left unset: the legacy single-wrapper path IS
+  // the default. Listing accounts (in config.json or via the settings surface)
+  // opts into failover; the failover knobs below then govern selection.
+  failover: defaultWardenFailoverConfig(),
   intervalMinutes: 5,
   unattendedMinutes: 30,
   minSpawnGapMinutes: 15,
@@ -160,7 +209,13 @@ export async function loadDaemonConfig(paths: KTeamPaths): Promise<DaemonConfig>
   const merged: DaemonConfig = {
     ...defaultDaemonConfig(),
     ...onDisk,
-    warden: { ...defaultWardenConfig(), ...(onDisk.warden ?? {}) },
+    warden: {
+      ...defaultWardenConfig(),
+      ...(onDisk.warden ?? {}),
+      // One level deeper for failover so a partial `{ failover: { policy } }`
+      // keeps the default threshold/cooldown rather than dropping them.
+      failover: { ...defaultWardenFailoverConfig(), ...(onDisk.warden?.failover ?? {}) },
+    },
     scratch: { ...defaultScratchConfig(), ...(onDisk.scratch ?? {}) },
     retention: { ...defaultRetentionConfig(), ...(onDisk.retention ?? {}) },
     learning: { ...defaultLearningConfig(), ...(onDisk.learning ?? {}) },

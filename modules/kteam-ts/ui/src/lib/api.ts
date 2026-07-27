@@ -8,6 +8,8 @@ import type {
   ChatHistoryPage,
   KTeamEvent,
   WardenStatusView,
+  WardenConfigView,
+  WardenConfigPatch,
   WrapperInfo,
   ProjectInfo,
   StartSessionPayload,
@@ -201,6 +203,11 @@ export const api = {
       headers: { 'x-kteam-request-id': requestId },
     }),
   wardenStatus: () => request<WardenStatusView>('/v1/warden/status'),
+  wardenConfig: () => request<WardenConfigView>('/v1/warden/config'),
+  // Partial update; the daemon applies it live and answers with the normalized
+  // effective config + warnings (unknown wrappers warn, never reject).
+  updateWardenConfig: (patch: WardenConfigPatch) =>
+    request<WardenConfigView>('/v1/warden/config', { method: 'PATCH', body: JSON.stringify(patch) }),
   wardenVerdicts: () => request<WardenVerdict[]>('/v1/warden/verdicts'),
   wardenReport: (path: string) => request<string>(`/v1/warden/report?path=${encodeURIComponent(path)}`),
   search: (q: string, limit = 30) => request<SearchResponse>(`/v1/search?q=${encodeURIComponent(q)}&limit=${limit}`),

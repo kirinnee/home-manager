@@ -400,17 +400,67 @@ export interface WardenVerdict {
   reportPath: string;
 }
 
+// Warden account failover (mirrors src/service.ts WardenFailoverStatus /
+// WardenConfigView). Defensive like the rest of this block: every field the
+// daemon might omit is optional so an older daemon degrades to "hidden".
+
+export type WardenFailoverPolicy = 'fallback' | 'round_robin';
+
+export interface WardenAccountConfig {
+  wrapper: string;
+  model?: string;
+}
+
+export interface WardenFailoverAccountView {
+  wrapper: string;
+  model?: string;
+  eligible: boolean;
+  reason?: string;
+  demotedUntil?: string;
+  strikes?: number;
+  quota?: { fiveHourPercent?: number; weeklyPercent?: number; atLimit?: boolean; authOk?: boolean };
+}
+
+export interface WardenFailoverStatus {
+  policy: WardenFailoverPolicy;
+  failureThreshold: number;
+  cooldownMinutes: number;
+  accounts: WardenFailoverAccountView[];
+  lastSelection?: { wrapper: string; policy: WardenFailoverPolicy; at: string; reason: string };
+  exhaustedSince?: string;
+}
+
+export interface WardenConfig {
+  enabled?: boolean;
+  wrapper?: string;
+  model?: string;
+  accounts?: (WardenAccountConfig | string)[];
+  failover?: { policy?: WardenFailoverPolicy; failureThreshold?: number; cooldownMinutes?: number };
+  intervalMinutes?: number;
+  [k: string]: unknown;
+}
+
+export interface WardenConfigView {
+  config: WardenConfig;
+  accounts: WardenAccountConfig[];
+  warnings: string[];
+}
+
+/** PATCH body for /v1/warden/config — any subset; failover may be partial. */
+export interface WardenConfigPatch {
+  enabled?: boolean;
+  accounts?: (WardenAccountConfig | string)[];
+  failover?: { policy?: WardenFailoverPolicy; failureThreshold?: number; cooldownMinutes?: number };
+  [k: string]: unknown;
+}
+
 export interface WardenStatusView {
-  config?: {
-    enabled?: boolean;
-    wrapper?: string;
-    intervalMinutes?: number;
-    [k: string]: unknown;
-  };
+  config?: WardenConfig;
   lastSweepAt?: string;
   anomalies?: WardenAnomaly[];
   liveWarden?: string;
   lastSpawnAt?: string;
   lastReport?: { path: string; head: string };
+  failover?: WardenFailoverStatus;
   [k: string]: unknown;
 }

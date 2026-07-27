@@ -80,6 +80,28 @@ function WardenStripPanel() {
           <span className="mono text-accent">warden live</span>
         </>
       )}
+      {(status.failover?.accounts?.length ?? 0) > 0 && (
+        <>
+          <span className="text-border">·</span>
+          <span className="inline-flex flex-wrap items-center gap-1" aria-label="Warden accounts">
+            {status.failover!.accounts.map(account => (
+              <span
+                key={account.wrapper}
+                title={account.eligible ? 'healthy' : (account.reason ?? 'ineligible')}
+                className={
+                  account.eligible
+                    ? 'mono rounded-control bg-ok/10 px-1.5 py-0.5 text-ok'
+                    : 'mono rounded-control bg-warn/10 px-1.5 py-0.5 text-warn'
+                }
+              >
+                {account.wrapper.replace(/^(claude|codex)-auto-/, '')}
+                {account.wrapper === status.failover?.lastSelection?.wrapper ? ' ●' : ''}
+              </span>
+            ))}
+          </span>
+        </>
+      )}
+      {status.failover?.exhaustedSince && <span className="mono font-medium text-warn">no usable warden account!</span>}
       {!clean && (
         <span
           className="mono ml-auto min-w-0 truncate text-faint"

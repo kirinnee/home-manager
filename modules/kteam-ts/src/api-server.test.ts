@@ -137,6 +137,16 @@ class FakeService implements KTeamService {
     fingerprint: '',
   });
   wardenRun = async (_spawn?: boolean) => ({ sweptAt: '2026-01-01T00:00:00Z', anomalies: [], message: 'no anomalies' });
+  lastWardenConfigPatch: Record<string, unknown> | undefined = undefined;
+  wardenConfigView = async () => ({
+    config: (await this.wardenStatus()).config,
+    accounts: [{ wrapper: 'claude-auto-glm52a' }],
+    warnings: [],
+  });
+  updateWardenConfig = async (patch: Record<string, unknown>) => {
+    this.lastWardenConfigPatch = patch;
+    return this.wardenConfigView();
+  };
   wrappers = async () => [
     {
       name: 'claude-auto-loge',
