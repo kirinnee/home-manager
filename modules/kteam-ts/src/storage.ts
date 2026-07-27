@@ -192,7 +192,16 @@ interface JournalScan {
 }
 
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-const RESERVED_DIRECTORIES = new Set(['daemon', 'trash']);
+/** Directories that live in the kteam home but are NOT sessions.
+ *
+ *  `SESSION_ID` accepts any ordinary directory name, so anything the daemon
+ *  keeps beside its sessions would otherwise be scanned as one — and a session
+ *  could be created with that name and collide with it. `models` joined this
+ *  list when speech-to-text began storing model weights under
+ *  `~/.kteam/models`: nothing misdetects today, but the namespace is shared and
+ *  the failure would be silent. Anything else the daemon parks here belongs
+ *  here too. */
+const RESERVED_DIRECTORIES = new Set(['daemon', 'trash', 'models']);
 
 function now(): string {
   return new Date().toISOString();
