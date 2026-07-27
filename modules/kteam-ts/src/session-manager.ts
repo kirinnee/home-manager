@@ -63,6 +63,8 @@ import type {
   SearchResult,
   SessionView,
   UsageFeedView,
+  WardenConfigPatch,
+  WardenConfigView,
   WardenRunView,
   WardenStatusView,
 } from './service';
@@ -77,6 +79,17 @@ import {
   type WardenSessionView,
 } from './warden-detect';
 import { rankFailoverCandidates, selectFailoverCandidate } from './failover';
+import {
+  classifyWardenFailure,
+  effectiveFailoverConfig,
+  ineligibilityReason,
+  normalizeWardenAccounts,
+  reconcileDemotions,
+  recordWardenFailure,
+  recordWardenSuccess,
+  selectWardenAccount,
+  type WardenFailoverState,
+} from './warden-failover';
 import { decideAssignedWardens, wardenSlotsFree, type LiveWarden } from './warden-concurrency';
 import type { AgentUsage } from './core';
 import { chatEventFingerprint, EventStore, type IndexedSession, type JsonValue, type SessionEvent } from './storage';
@@ -239,6 +252,10 @@ interface WardenRuntimeState {
    *  lapses. Persisted so a kteamd restart does not drop every blessing and
    *  re-investigate the whole fleet at once. */
   blessings?: BlessingStore;
+  /** Account-failover bookkeeping (rrCursor, per-wrapper strikes/demotions,
+   *  last selection, exhaustion). Durable so a daemon restart cannot amnesty
+   *  a demotion or reset a strike count. See warden-failover.ts. */
+  failover?: WardenFailoverState;
 }
 interface WardenSweep {
   at: string;
@@ -638,6 +655,21 @@ export class SessionManager implements KTeamService {
   private lastEmittedFingerprint = '';
   /** Serializes sweeps so a forced `warden run` never races the interval. */
   private wardenSweepChain: Promise<unknown> = Promise.resolve();
+  /** Live warden config override, swapped by updateWardenConfig (hot reload).
+   *  Every warden read goes through the `wardenConfig` getter so a PATCH is
+   *  picked up by the next sweep/spawn without a daemon restart; the boot
+   *  config from options stays the fallback. */
+  private wardenConfigOverride?: WardenConfig;
+  /** Configured-but-missing warden wrappers already warned about — the
+   *  fleet.warden_config_invalid event fires once per daemon boot per wrapper,
+   *  not once per sweep. */
+  private wardenMissingWarned?: Set<string>;
+
+  /** The warden config every warden code path must read (never
+   *  options.warden directly): options.warden until a live PATCH swaps it. */
+  private get wardenConfig(): WardenConfig {
+    return this.wardenConfigOverride ?? this.options.warden;
+  }
 
   private constructor(
     readonly paths: KTeamPaths,
@@ -707,8 +739,7 @@ export class SessionManager implements KTeamService {
     const lastSweepMs = this.wardenState.lastSweepAt ? Date.parse(this.wardenState.lastSweepAt) : 0;
     const sweepStale =
       this.wardenTimer === undefined ||
-      (lastSweepMs > 0 &&
-        Date.now() - lastSweepMs > Math.max(120_000, this.options.warden.intervalMinutes * 60_000 * 3));
+      (lastSweepMs > 0 && Date.now() - lastSweepMs > Math.max(120_000, this.wardenConfig.intervalMinutes * 60_000 * 3));
     if (unmonitored.length === 0 && !sweepStale) return;
     this.emitTransient('fleet.self_check_failed', {
       unmonitoredRunning: unmonitored.map(view => view.config.id),
@@ -4632,8 +4663,8 @@ export class SessionManager implements KTeamService {
           const susNow =
             !waiting &&
             susFindings(ledger, Date.now(), {
-              susThinkingSeconds: Math.max(60, this.options.warden.susThinkingSeconds),
-              susSubprocessSeconds: Math.max(60, this.options.warden.susSubprocessSeconds),
+              susThinkingSeconds: Math.max(60, this.wardenConfig.susThinkingSeconds),
+              susSubprocessSeconds: Math.max(60, this.wardenConfig.susSubprocessSeconds),
               tickSeconds: view.config.intervalSeconds,
               anchorMs: turnStartedAt,
             }).length > 0;
@@ -6044,7 +6075,7 @@ export class SessionManager implements KTeamService {
    *  warden.enabled. */
   private async startWarden(): Promise<void> {
     this.wardenState = await readJson<WardenRuntimeState>(this.paths.wardenState).catch(() => ({}));
-    const intervalMs = Math.max(60_000, this.options.warden.intervalMinutes * 60_000);
+    const intervalMs = Math.max(60_000, this.wardenConfig.intervalMinutes * 60_000);
     this.wardenTimer = setInterval(() => {
       void this.runSweep(false).catch(() => undefined);
     }, intervalMs);
@@ -6083,12 +6114,12 @@ export class SessionManager implements KTeamService {
     // One knob (`unattendedMinutes`) drives both the idle-question threshold and
     // the recent-terminal-wreckage window â an old failure that nobody handled
     // within the window ages out rather than nagging forever.
-    const unattendedMs = Math.max(60_000, this.options.warden.unattendedMinutes * 60_000);
+    const unattendedMs = Math.max(60_000, this.wardenConfig.unattendedMinutes * 60_000);
     const detected = detectAnomalies(views, Date.now(), {
       unattendedMs,
       terminalWindowMs: unattendedMs,
-      susThinkingSeconds: Math.max(60, this.options.warden.susThinkingSeconds),
-      susSubprocessSeconds: Math.max(60, this.options.warden.susSubprocessSeconds),
+      susThinkingSeconds: Math.max(60, this.wardenConfig.susThinkingSeconds),
+      susSubprocessSeconds: Math.max(60, this.wardenConfig.susSubprocessSeconds),
     });
     // Reconcile fresh needs_human verdicts from warden reports into session
     // state, then SUPPRESS re-triage of a flagged session's same anomaly
@@ -6164,6 +6195,95 @@ export class SessionManager implements KTeamService {
     };
   }
 
+  /** Pick the account for the NEXT warden spawn (both spawn sites call this
+   *  per spawn, so round-robin rotates per spawn and fallback re-evaluates
+   *  eligibility every time — fail-back is automatic). Reconciles demotions
+   *  against the usage feed first (positive evidence restores early), warns
+   *  once per configured-but-missing wrapper, and edge-emits
+   *  fleet.warden_exhausted when every account is ineligible. Returns
+   *  undefined on exhaustion — the caller must skip the spawn WITHOUT
+   *  consuming its gap/fingerprint so recovery escalates immediately. */
+  private async pickWardenAccount(): Promise<{ wrapper: string; model?: string } | undefined> {
+    const config = this.wardenConfig;
+    const usage = await this.fetchUsageAccounts().catch(() => [] as AgentUsage[]);
+    const nowMs = Date.now();
+    const reconciled = reconcileDemotions(this.wardenState.failover ?? {}, usage, nowMs);
+    for (const restored of reconciled.restored) {
+      this.emitTransient('fleet.warden_wrapper_restored', restored);
+    }
+    let installed: string[] = [];
+    try {
+      installed = discoverAutoAgents(this.paths.kfleetBin);
+    } catch {
+      // Unreadable bin dir == empty inventory: evidence about nobody.
+    }
+    if (installed.length > 0) {
+      for (const account of normalizeWardenAccounts(config)) {
+        if (installed.includes(account.wrapper)) continue;
+        this.wardenMissingWarned ??= new Set();
+        if (this.wardenMissingWarned.has(account.wrapper)) continue;
+        this.wardenMissingWarned.add(account.wrapper);
+        this.emitTransient('fleet.warden_config_invalid', { wrapper: account.wrapper });
+      }
+    }
+    const previousWrapper = reconciled.state.lastSelection?.wrapper;
+    const wasExhausted = reconciled.state.exhaustedSince !== undefined;
+    const selection = selectWardenAccount({
+      config,
+      installedAgents: installed,
+      usage,
+      state: reconciled.state,
+      nowMs,
+    });
+    this.wardenState.failover = selection.state;
+    if (selection.exhausted) {
+      // Edge-triggered: one event per exhaustion episode, not one per sweep.
+      if (!wasExhausted) {
+        this.emitTransient('fleet.warden_exhausted', {
+          accounts: selection.reasons,
+          since: selection.state.exhaustedSince,
+        });
+      }
+      return undefined;
+    }
+    // A failover is a HEALTH-driven change of wrapper — round-robin rotation is
+    // routine and never emitted (the lastSelection record covers it).
+    if (selection.reason === 'failover' && previousWrapper && previousWrapper !== selection.account.wrapper) {
+      this.emitTransient('fleet.warden_failover', {
+        from: previousWrapper,
+        to: selection.account.wrapper,
+        policy: config.failover?.policy ?? 'fallback',
+        reason: 'preferred account unhealthy',
+      });
+    }
+    return selection.account;
+  }
+
+  /** Record a warden spawn failure against the WRAPPER (never the target):
+   *  feed-corroborated quota/auth evidence demotes in one strike, generic
+   *  launch errors accumulate to the configured threshold. */
+  private recordWardenSpawnFailure(wrapper: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    const failover = effectiveFailoverConfig(this.wardenConfig);
+    const result = recordWardenFailure(
+      this.wardenState.failover ?? {},
+      wrapper,
+      classifyWardenFailure(message),
+      message,
+      Date.now(),
+      failover,
+    );
+    this.wardenState.failover = result.state;
+    if (result.demoted) {
+      this.emitTransient('fleet.warden_wrapper_demoted', {
+        wrapper,
+        until: result.state.demotedUntil?.[wrapper],
+        strikes: result.strikes,
+        evidence: message,
+      });
+    }
+  }
+
   /** Reconcile + spawn per-session assigned wardens for sus anomalies, bounded
    *  by the FLEET-WIDE warden cap (the sweep warden counts too). Dedupes against
    *  live assignments, applies the per-target post-assignment cooldown, and
@@ -6174,7 +6294,7 @@ export class SessionManager implements KTeamService {
     sessions: SessionView[],
     force: boolean,
   ): Promise<string[]> {
-    const warden = this.options.warden;
+    const warden = this.wardenConfig;
     if (!force && !warden.enabled) return [];
     const queuedAnomalies = this.wardenState.assignedQueue ?? [];
     if (susAnomalies.length === 0 && queuedAnomalies.length === 0) return [];
@@ -6272,10 +6392,21 @@ export class SessionManager implements KTeamService {
     });
 
     const spawned: string[] = [];
+    // Targets deferred because every warden account was ineligible — queued
+    // (NOT cooled down) so the next sweep after any account recovers retries
+    // them immediately.
+    const deferred: string[] = [];
     for (const targetId of decision.spawn) {
       const anomaly = anomalyById.get(targetId);
       const target = byId.get(targetId);
       if (!anomaly || !target) continue; // defensive: id always resolves here
+      // Account selection is per spawn: round-robin rotates across targets and
+      // fallback re-checks the preferred account each time.
+      const account = await this.pickWardenAccount();
+      if (!account) {
+        deferred.push(targetId);
+        continue;
+      }
       const at = now();
       const reportPath = path.join(this.paths.wardenReports, `${at.replace(/[:.]/g, '-')}-${targetId}.md`);
       await mkdir(this.paths.wardenReports, { recursive: true, mode: 0o700 });
@@ -6287,14 +6418,15 @@ export class SessionManager implements KTeamService {
       try {
         const view = await this.start({
           prompt: this.buildAssignedWardenPrompt(anomaly, target, reportPath),
-          agent: warden.wrapper,
-          model: warden.model,
+          agent: account.wrapper,
+          model: account.model,
           mode: 'auto',
           label: WARDEN_LABEL,
           name: `warden:${target.config.teammate ?? targetId}`,
           cwd: this.paths.home,
           stopCapability: capability,
         });
+        this.wardenState.failover = recordWardenSuccess(this.wardenState.failover ?? {}, account.wrapper);
         const assignedKinds = [...new Set(susAnomalies.filter(a => a.sessionId === targetId).map(a => a.kind))];
         assignments[targetId] = {
           wardenId: view.config.id,
@@ -6311,9 +6443,16 @@ export class SessionManager implements KTeamService {
           reportPath,
         });
       } catch (error) {
-        cooldowns[targetId] = at; // broken wrapper: don't retry every sweep
+        // Strike the WRAPPER (the attributed cause) so failover can route the
+        // next spawn elsewhere — the old code punished only the TARGET's
+        // cooldown, silently starving every sus target on a dead account. The
+        // target cooldown is still recorded as damping for genuinely
+        // target-scoped failures (it also stops a same-sweep hot loop).
+        this.recordWardenSpawnFailure(account.wrapper, error);
+        cooldowns[targetId] = at;
         this.emitTransient('fleet.warden_spawn_failed', {
           targetId,
+          wrapper: account.wrapper,
           message: error instanceof Error ? error.message : String(error),
         });
       }
@@ -6322,7 +6461,7 @@ export class SessionManager implements KTeamService {
     // Persist the carried-over queue (still-sus, no slot) and report drops.
     this.wardenState.assignments = assignments;
     this.wardenState.assignedCooldowns = cooldowns;
-    this.wardenState.assignedQueue = decision.queue
+    this.wardenState.assignedQueue = [...decision.queue, ...deferred]
       .map(id => anomalyById.get(id))
       .filter((a): a is WardenAnomaly => a !== undefined);
     if (decision.dropped.length > 0) {
@@ -6411,7 +6550,7 @@ export class SessionManager implements KTeamService {
     sessions: SessionView[],
     force: boolean,
   ): Promise<{ spawned?: string; message?: string }> {
-    const warden = this.options.warden;
+    const warden = this.wardenConfig;
     if (!force && !warden.enabled) return { message: 'escalation disabled (warden.enabled=false)' };
     if (anomalies.length === 0) return { message: 'no anomalies to escalate' };
     // "Live" excludes protected statuses (terminal + kill_failed): a warden whose
@@ -6436,6 +6575,15 @@ export class SessionManager implements KTeamService {
     const spawnKey = `${this.wardenState.recoveryGeneration ?? 0}:${fingerprint}`;
     if (!force && spawnKey === this.wardenState.lastSpawnFingerprint)
       return { message: 'anomaly set unchanged since the last escalation' };
+    // Account selection AFTER the cheap gates: exhaustion must NOT consume the
+    // spawn gap or the suppression fingerprint (lastSpawnAt/lastSpawnFingerprint
+    // stay untouched, unlike the failed-launch path below), so the very next
+    // sweep after any account recovers escalates immediately.
+    const account = await this.pickWardenAccount();
+    if (!account) {
+      await this.saveWardenState();
+      return { message: 'every configured warden account is currently ineligible (exhausted)' };
+    }
     const at = now();
     const reportPath = path.join(this.paths.wardenReports, `${at.replace(/[:.]/g, '-')}.md`);
     await mkdir(this.paths.wardenReports, { recursive: true, mode: 0o700 });
@@ -6443,19 +6591,23 @@ export class SessionManager implements KTeamService {
     try {
       const view = await this.start({
         prompt,
-        agent: warden.wrapper,
-        model: warden.model,
+        agent: account.wrapper,
+        model: account.model,
         mode: 'auto',
         label: WARDEN_LABEL,
         name: 'warden-sweep',
         cwd: this.paths.home,
       });
+      this.wardenState.failover = recordWardenSuccess(this.wardenState.failover ?? {}, account.wrapper);
       this.wardenState.lastSpawnAt = at;
       this.wardenState.lastSpawnFingerprint = spawnKey;
       await this.saveWardenState();
       this.emitTransient('fleet.warden_spawned', { sessionId: view.config.id, count: anomalies.length, reportPath });
       return { spawned: view.config.id };
     } catch (error) {
+      // The strike lands on the WRAPPER, so once demoted the next escalation
+      // flows to the next configured account.
+      this.recordWardenSpawnFailure(account.wrapper, error);
       // A FAILED launch still consumes the spawn gap (record lastSpawnAt) so a
       // persistently-broken wrapper can't be retried every sweep â but do NOT
       // record the suppression key, so a changed anomaly set (or the same set in
@@ -6463,7 +6615,7 @@ export class SessionManager implements KTeamService {
       this.wardenState.lastSpawnAt = at;
       await this.saveWardenState();
       const message = `warden spawn failed: ${error instanceof Error ? error.message : String(error)}`;
-      this.emitTransient('fleet.warden_spawn_failed', { message });
+      this.emitTransient('fleet.warden_spawn_failed', { message, wrapper: account.wrapper });
       return { message };
     }
   }
@@ -6784,17 +6936,162 @@ export class SessionManager implements KTeamService {
       view => view.config.label === WARDEN_LABEL && !protectedStatuses.includes(view.state.status),
     )?.config.id;
     return {
-      config: this.options.warden,
+      config: this.wardenConfig,
       lastSweepAt,
       anomalies,
       fingerprint,
       liveWarden,
       lastSpawnAt: this.wardenState.lastSpawnAt,
       lastReport: await this.latestReport(),
+      failover: await this.wardenFailoverStatus(),
     };
+  }
+
+  /** The failover block of wardenStatus: effective accounts with live health,
+   *  the policy knobs, the last selection, and any exhaustion episode. */
+  private async wardenFailoverStatus(): Promise<NonNullable<WardenStatusView['failover']>> {
+    const config = this.wardenConfig;
+    const failover = effectiveFailoverConfig(config);
+    const usage = await this.fetchUsageAccounts().catch(() => [] as AgentUsage[]);
+    const usageByBinary = new Map(usage.map(item => [item.binary, item]));
+    let installed: string[] = [];
+    try {
+      installed = discoverAutoAgents(this.paths.kfleetBin);
+    } catch {}
+    const state = this.wardenState.failover ?? {};
+    const nowMs = Date.now();
+    const accounts = normalizeWardenAccounts(config).map(account => {
+      const reason = ineligibilityReason(account, { installedAgents: installed, usage, state, nowMs });
+      const record = usageByBinary.get(account.wrapper);
+      const quota = record ? quotaFromUsage(record) : undefined;
+      return {
+        wrapper: account.wrapper,
+        ...(account.model !== undefined ? { model: account.model } : {}),
+        eligible: reason === undefined,
+        ...(reason !== undefined ? { reason } : {}),
+        ...(state.demotedUntil?.[account.wrapper] !== undefined
+          ? { demotedUntil: state.demotedUntil[account.wrapper] }
+          : {}),
+        ...(state.strikes?.[account.wrapper] !== undefined ? { strikes: state.strikes[account.wrapper]!.count } : {}),
+        ...(quota
+          ? {
+              quota: {
+                ...(quota.fiveHourPercent !== undefined ? { fiveHourPercent: quota.fiveHourPercent } : {}),
+                ...(quota.weeklyPercent !== undefined ? { weeklyPercent: quota.weeklyPercent } : {}),
+                ...(quota.atLimit !== undefined ? { atLimit: quota.atLimit } : {}),
+                ...(quota.authOk !== undefined ? { authOk: quota.authOk } : {}),
+              },
+            }
+          : {}),
+      };
+    });
+    return {
+      policy: failover.policy,
+      failureThreshold: failover.failureThreshold,
+      cooldownMinutes: failover.cooldownMinutes,
+      accounts,
+      ...(state.lastSelection ? { lastSelection: state.lastSelection } : {}),
+      ...(state.exhaustedSince !== undefined ? { exhaustedSince: state.exhaustedSince } : {}),
+    };
+  }
+
+  async wardenConfigView(): Promise<WardenConfigView> {
+    return this.describeWardenConfig(this.wardenConfig);
+  }
+
+  private describeWardenConfig(config: WardenConfig): WardenConfigView {
+    const accounts = normalizeWardenAccounts(config);
+    const warnings: string[] = [];
+    let installed: string[] = [];
+    try {
+      installed = discoverAutoAgents(this.paths.kfleetBin);
+    } catch {}
+    if (installed.length > 0) {
+      for (const account of accounts) {
+        if (!installed.includes(account.wrapper))
+          warnings.push(
+            `wrapper ${account.wrapper} is not installed in ~/.kfleet/bin (it will be skipped until it appears)`,
+          );
+      }
+    }
+    if (accounts.length === 0) warnings.push('no warden accounts are configured');
+    return { config, accounts, warnings };
+  }
+
+  /** Apply a partial warden-config update LIVE: validate + normalize, persist
+   *  to daemon config.json (read-modify-write via atomicJson so non-warden keys
+   *  survive untouched), swap the in-memory config, and re-arm the sweep timer
+   *  when the interval changed. Unknown wrappers WARN, never reject — kfleet
+   *  may be about to create them, and rejecting would order-couple two tools.
+   *  Sweeps serialize on wardenSweepChain, so an in-flight sweep finishes under
+   *  the old config and the next one reads the new. */
+  async updateWardenConfig(patch: WardenConfigPatch): Promise<WardenConfigView> {
+    const current = this.wardenConfig;
+    const next: WardenConfig = {
+      ...current,
+      ...patch,
+      failover: { ...effectiveFailoverConfig(current), ...(patch.failover ?? {}) },
+    };
+    validateWardenConfigPatch(next);
+    const onDisk = await readJson<Record<string, unknown>>(this.paths.daemonConfig).catch(
+      () => ({}) as Record<string, unknown>,
+    );
+    await atomicJson(this.paths.daemonConfig, { ...onDisk, warden: next });
+    const previousInterval = current.intervalMinutes;
+    this.wardenConfigOverride = next;
+    if (next.intervalMinutes !== previousInterval && this.wardenTimer !== undefined) {
+      clearInterval(this.wardenTimer);
+      const intervalMs = Math.max(60_000, next.intervalMinutes * 60_000);
+      this.wardenTimer = setInterval(() => {
+        void this.runSweep(false).catch(() => undefined);
+      }, intervalMs);
+    }
+    this.emitTransient('warden.config_changed', { fields: Object.keys(patch) });
+    return this.describeWardenConfig(next);
   }
 
   async wardenRun(spawn = false): Promise<WardenRunView> {
     return await this.runSweep(spawn);
+  }
+}
+
+/** Reject a warden-config write that is structurally broken (wrong types /
+ *  out-of-range numbers). Wrapper EXISTENCE is deliberately not validated here
+ *  — that is a warning (see describeWardenConfig). */
+function validateWardenConfigPatch(config: WardenConfig): void {
+  const bad = (message: string) => {
+    throw new Error(`invalid warden config: ${message}`);
+  };
+  if (typeof config.enabled !== 'boolean') bad('enabled must be a boolean');
+  if (typeof config.wrapper !== 'string' || config.wrapper.trim() === '') bad('wrapper must be a non-empty string');
+  if (config.accounts !== undefined) {
+    if (!Array.isArray(config.accounts)) bad('accounts must be an array');
+    for (const entry of config.accounts ?? []) {
+      const wrapper = typeof entry === 'string' ? entry : entry?.wrapper;
+      if (typeof wrapper !== 'string' || wrapper.trim() === '')
+        bad('every accounts entry needs a non-empty wrapper name');
+      if (typeof entry === 'object' && entry.model !== undefined && typeof entry.model !== 'string')
+        bad('an account model override must be a string');
+    }
+  }
+  const failover = config.failover;
+  if (failover !== undefined) {
+    if (failover.policy !== 'fallback' && failover.policy !== 'round_robin')
+      bad("failover.policy must be 'fallback' or 'round_robin'");
+    if (!Number.isFinite(failover.failureThreshold) || failover.failureThreshold < 1)
+      bad('failover.failureThreshold must be a number >= 1');
+    if (!Number.isFinite(failover.cooldownMinutes) || failover.cooldownMinutes < 0)
+      bad('failover.cooldownMinutes must be a number >= 0');
+  }
+  for (const [key, minimum] of [
+    ['intervalMinutes', 1],
+    ['unattendedMinutes', 1],
+    ['minSpawnGapMinutes', 0],
+    ['maxAssignedWardens', 1],
+    ['assignedCooldownMinutes', 0],
+    ['blessMinutes', 0],
+  ] as const) {
+    const value = config[key];
+    if (!Number.isFinite(value) || (value as number) < minimum) bad(`${key} must be a number >= ${minimum}`);
   }
 }

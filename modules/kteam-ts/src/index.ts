@@ -1154,6 +1154,65 @@ wardenCommand
     else if (result.message) console.log(`no escalation: ${result.message}`);
   });
 
+const wardenConfigCommand = wardenCommand
+  .command('config')
+  .description('show the warden failover config (accounts, policy, health)')
+  .option('--json')
+  .action(async (options: { json?: boolean }) => {
+    const view = await (await client()).wardenConfig();
+    if (options.json) return console.log(JSON.stringify(view, null, 2));
+    const failover = view.config.failover;
+    console.log(
+      `policy: ${failover?.policy ?? 'fallback'}  threshold=${failover?.failureThreshold ?? 2}  cooldown=${failover?.cooldownMinutes ?? 30}m`,
+    );
+    console.log(`accounts (${view.accounts.length}):`);
+    for (const account of view.accounts)
+      console.log(`  ${account.wrapper}${account.model ? `  model=${account.model}` : ''}`);
+    for (const warning of view.warnings) console.log(`warning: ${warning}`);
+  });
+wardenConfigCommand
+  .command('set')
+  .description('update warden failover config live (no restart)')
+  .option('--policy <policy>', 'fallback | round_robin')
+  .option('--accounts <list>', 'comma-separated ordered wrapper list (first = preferred under fallback)')
+  .option('--failure-threshold <n>', 'consecutive generic failures before demotion')
+  .option('--cooldown-minutes <n>', 'demotion cooldown in minutes')
+  .option('--enabled <bool>', 'true | false — gate LLM escalation')
+  .option('--json')
+  .action(
+    async (options: {
+      policy?: string;
+      accounts?: string;
+      failureThreshold?: string;
+      cooldownMinutes?: string;
+      enabled?: string;
+      json?: boolean;
+    }) => {
+      const patch: Record<string, unknown> = {};
+      if (options.accounts !== undefined)
+        patch.accounts = options.accounts
+          .split(',')
+          .map(name => name.trim())
+          .filter(Boolean);
+      if (options.enabled !== undefined) patch.enabled = options.enabled === 'true';
+      const failover: Record<string, unknown> = {};
+      if (options.policy !== undefined) failover.policy = options.policy;
+      if (options.failureThreshold !== undefined) failover.failureThreshold = Number(options.failureThreshold);
+      if (options.cooldownMinutes !== undefined) failover.cooldownMinutes = Number(options.cooldownMinutes);
+      if (Object.keys(failover).length > 0) patch.failover = failover;
+      if (Object.keys(patch).length === 0) {
+        console.error(
+          'nothing to set — pass at least one of --policy/--accounts/--failure-threshold/--cooldown-minutes/--enabled',
+        );
+        process.exit(1);
+      }
+      const view = await (await client()).updateWardenConfig(patch as never);
+      if (options.json) return console.log(JSON.stringify(view, null, 2));
+      console.log('warden config updated (live — no restart needed)');
+      for (const warning of view.warnings) console.log(`warning: ${warning}`);
+    },
+  );
+
 program.command('doctor').action(async () => {
   const tmux = Bun.spawnSync(['tmux', '-V']);
   const agents = discoverAutoAgents(paths.kfleetBin);

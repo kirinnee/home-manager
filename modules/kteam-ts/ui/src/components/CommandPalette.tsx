@@ -249,6 +249,13 @@ export function CommandPalette({
       }
 
       onClose();
+      // Link rows (daemon-global settings that live on another page, e.g.
+      // Warden & failover) navigate to their own destination on every layout —
+      // the Settings sheet has no section to open for them.
+      if (result.entry.href) {
+        navigate(result.entry.href);
+        return;
+      }
       if (layout === 'drawer') {
         // The palette's focus trap must restore before the Settings sheet takes
         // focus, exactly like the Details → Settings handoff.

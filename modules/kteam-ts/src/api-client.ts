@@ -1,5 +1,13 @@
 import { readFile } from 'fs/promises';
-import type { AttachmentView, SessionView, UsageFeedView, WardenRunView, WardenStatusView } from './service';
+import type {
+  AttachmentView,
+  SessionView,
+  UsageFeedView,
+  WardenConfigPatch,
+  WardenConfigView,
+  WardenRunView,
+  WardenStatusView,
+} from './service';
 import type { KTeamEvent, SendDisposition, SendRequest, SignalKind, SignalOptions, StartSessionRequest } from './types';
 import type { KTeamPaths } from './paths';
 import { loadDaemonConfig } from './daemon-config';
@@ -204,6 +212,18 @@ export class ApiClient {
     return this.request<WardenRunView>('/v1/warden/run', {
       method: 'POST',
       body: JSON.stringify({ spawn }),
+      headers: { 'content-type': 'application/json' },
+    });
+  }
+  wardenConfig() {
+    return this.request<WardenConfigView>('/v1/warden/config');
+  }
+  /** Partial update; the daemon applies it live (no restart) and returns the
+   *  normalized effective config + warnings. */
+  updateWardenConfig(patch: WardenConfigPatch) {
+    return this.request<WardenConfigView>('/v1/warden/config', {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
       headers: { 'content-type': 'application/json' },
     });
   }

@@ -9,7 +9,7 @@ import type {
   SignalOptions,
   StartSessionRequest,
 } from './types';
-import type { WardenConfig } from './daemon-config';
+import type { WardenAccount, WardenConfig, WardenFailoverConfig, WardenFailoverPolicy } from './daemon-config';
 import type { WardenAnomaly } from './warden-detect';
 import type { ProjectInfo, WrapperInfo } from './fleet-inventory';
 import type { WardenVerdict } from './warden-verdicts';
@@ -38,6 +38,51 @@ export interface SessionView {
   directory: string;
 }
 
+/** One configured warden account with its live health, for status/UI. */
+export interface WardenFailoverAccountView {
+  wrapper: string;
+  model?: string;
+  /** Would a spawn RIGHT NOW consider this account? */
+  eligible: boolean;
+  /** Why not, when ineligible (missing wrapper, at limit, demoted…). */
+  reason?: string;
+  /** Demotion expiry (ISO) while the account is cooling down. */
+  demotedUntil?: string;
+  /** Consecutive uncorroborated failure count (resets on success). */
+  strikes?: number;
+  /** Quota summary from the kfleet feed, when the feed has scored it. */
+  quota?: { fiveHourPercent?: number; weeklyPercent?: number; atLimit?: boolean; authOk?: boolean };
+}
+
+/** The failover block of WardenStatusView: effective accounts + policy +
+ *  selection/exhaustion evidence. Additive — absent on older daemons. */
+export interface WardenFailoverStatus {
+  policy: WardenFailoverPolicy;
+  failureThreshold: number;
+  cooldownMinutes: number;
+  accounts: WardenFailoverAccountView[];
+  lastSelection?: { wrapper: string; policy: WardenFailoverPolicy; at: string; reason: string };
+  /** Set while EVERY configured account is ineligible. */
+  exhaustedSince?: string;
+}
+
+/** Effective warden config as the settings surface consumes it: the raw
+ *  config plus the normalized account list and any validation warnings. */
+export interface WardenConfigView {
+  config: WardenConfig;
+  /** `accounts`/legacy-wrapper normalized: ordered, deduped, shorthand expanded. */
+  accounts: WardenAccount[];
+  /** Non-fatal validation notes (e.g. a wrapper missing from ~/.kfleet/bin —
+   *  warned, not rejected: kfleet may be about to create it). */
+  warnings: string[];
+}
+
+/** PATCH shape for the warden config: any subset of fields; `failover` may
+ *  itself be partial. Unknown wrappers warn rather than reject. */
+export type WardenConfigPatch = Partial<Omit<WardenConfig, 'failover'>> & {
+  failover?: Partial<WardenFailoverConfig>;
+};
+
 export interface WardenStatusView {
   config: WardenConfig;
   lastSweepAt?: string;
@@ -49,6 +94,8 @@ export interface WardenStatusView {
   lastSpawnAt?: string;
   /** Newest report on disk: its path and first few lines. */
   lastReport?: { path: string; head: string };
+  /** Account failover: configured accounts, health, last selection. */
+  failover?: WardenFailoverStatus;
 }
 
 export interface WardenRunView {
@@ -182,6 +229,13 @@ export interface KTeamService {
   wardenStatus(): Promise<WardenStatusView>;
   /** Force a fleet sweep now; `spawn` forces escalation past the gap/enabled. */
   wardenRun(spawn?: boolean): Promise<WardenRunView>;
+  /** The effective warden config (accounts normalized) + validation warnings. */
+  wardenConfigView(): Promise<WardenConfigView>;
+  /** Apply a partial warden-config update LIVE: persists to daemon config.json,
+   *  swaps the in-memory config (next sweep/spawn uses it — no restart), and
+   *  re-arms the sweep timer when intervalMinutes changed. Unknown wrappers
+   *  warn rather than reject. */
+  updateWardenConfig(patch: WardenConfigPatch): Promise<WardenConfigView>;
   /** Recent warden verdicts parsed from the reports (newest first). */
   wardenVerdicts(): Promise<WardenVerdict[]>;
   /** Raw markdown of one warden report; `path` is validated to live under the

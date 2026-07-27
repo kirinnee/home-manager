@@ -55,6 +55,30 @@ export const SETTINGS_DESTINATION = {
   keywords: ['preferences', 'options', 'appearance', 'configure'],
 } as const;
 
+/** Link rows: settings that LIVE elsewhere but must be findable from the
+ *  Settings page and the palette. Unlike SETTINGS_DEFINITIONS (per-browser
+ *  localStorage preferences), these point at daemon-global, admin-token
+ *  server state — rendering them as links keeps this page's client-local
+ *  contract honest while honoring "it's in settings" muscle memory. */
+export interface SettingsLinkDefinition {
+  id: string;
+  label: string;
+  description: string;
+  href: string;
+  keywords: readonly string[];
+}
+
+export const SETTINGS_LINKS: readonly SettingsLinkDefinition[] = [
+  {
+    id: 'warden',
+    label: 'Warden & failover',
+    description:
+      'Configure warden accounts and the failover policy (fallback or round-robin), and see which account is active. Daemon-wide — lives on the Warden page.',
+    href: '/warden#config',
+    keywords: ['warden', 'failover', 'round robin', 'fallback', 'account', 'quota', 'token', 'wrapper', 'supervision'],
+  },
+] as const;
+
 const SETTINGS_BY_ID = new Map(SETTINGS_DEFINITIONS.map(definition => [definition.id, definition]));
 
 export function settingDefinition(id: SettingId): SettingDefinition {
@@ -76,6 +100,8 @@ export interface SettingsPaletteEntry {
   label: string;
   description: string;
   settingId: SettingId | null;
+  /** Link rows navigate here instead of a Settings section (e.g. /warden#config). */
+  href?: string;
 }
 
 /**
@@ -116,6 +142,19 @@ export function settingsPaletteEntries(query: string): SettingsPaletteEntry[] {
       label: definition.label,
       description: definition.description,
       settingId: definition.id,
+    });
+  }
+  // Link rows ride the same query so "failover" / "round robin" in Cmd/Ctrl+K
+  // jumps straight to the Warden config card.
+  for (const link of SETTINGS_LINKS) {
+    const haystack = [link.label, link.description, ...link.keywords].join(' ').toLocaleLowerCase();
+    if (!haystack.includes(needle)) continue;
+    entries.push({
+      id: `setting-link-${link.id}`,
+      label: link.label,
+      description: link.description,
+      settingId: null,
+      href: link.href,
     });
   }
   return entries;

@@ -1,7 +1,7 @@
 import type { Server, ServerWebSocket } from 'bun';
 import { existsSync } from 'node:fs';
 import { join, normalize } from 'node:path';
-import type { KTeamService, SessionView } from './service';
+import type { KTeamService, SessionView, WardenConfigPatch } from './service';
 import { SIGNAL_KINDS } from './types';
 import type { KTeamEvent, RuntimeControlRequest, SendRequest, SignalKind, StartSessionRequest } from './types';
 import { WARDEN_LABEL } from './warden-detect';
@@ -430,6 +430,17 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           if (url.pathname === '/v1/warden/run' && request.method === 'POST') {
             const input = await body<{ spawn?: boolean }>(request);
             return json(await options.service.wardenRun(input.spawn === true));
+          }
+          // Warden failover config: readable and hot-writable. It lives under
+          // /v1/warden/, and wardenScopeDenial already 403s the warden token for
+          // ANY path under that prefix — so this is admin-only by construction.
+          // Do NOT add a warden-token allowance here: a warden that can rewrite
+          // its own failover list could promote itself out of a demotion.
+          if (url.pathname === '/v1/warden/config' && request.method === 'GET')
+            return json(await options.service.wardenConfigView());
+          if (url.pathname === '/v1/warden/config' && request.method === 'PATCH') {
+            const patch = await body<WardenConfigPatch>(request);
+            return json(await options.service.updateWardenConfig(patch));
           }
           if (url.pathname === '/v1/gc' && request.method === 'GET') {
             const raw = Number(url.searchParams.get('limit') ?? '20');

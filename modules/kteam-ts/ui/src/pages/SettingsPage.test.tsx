@@ -31,6 +31,12 @@ describe('SettingsPage', () => {
     }
   });
 
+  test('renders the Warden & failover link row pointing at the warden page', () => {
+    const html = renderToStaticMarkup(<SettingsPage />);
+    expect(html).toContain('Warden &amp; failover');
+    expect(html).toContain('href="/warden#config"');
+  });
+
   test('has no autofocus path on touch', () => {
     const html = renderToStaticMarkup(<SettingsPage />).toLowerCase();
     expect(html).not.toContain('autofocus');

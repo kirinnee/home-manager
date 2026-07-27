@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { SETTINGS_DEFINITIONS, isSettingId, settingsHref, settingsPaletteEntries } from './settings';
+import { SETTINGS_DEFINITIONS, SETTINGS_LINKS, isSettingId, settingsHref, settingsPaletteEntries } from './settings';
 
 describe('shared settings catalog', () => {
   test('owns the rendered controls in stable order', () => {
@@ -34,6 +34,23 @@ describe('shared settings catalog', () => {
     expect(settingsPaletteEntries('density')[0]?.settingId).toBe('density');
     expect(settingsPaletteEntries('dark').map(entry => entry.settingId)).toContain('theme');
     expect(settingsPaletteEntries('microphone').map(entry => entry.settingId)).toContain('dictation');
+  });
+
+  test('link rows: warden & failover is findable and points at /warden#config', () => {
+    const warden = SETTINGS_LINKS.find(link => link.id === 'warden');
+    expect(warden?.href).toBe('/warden#config');
+    for (const query of ['failover', 'round robin', 'warden', 'fallback']) {
+      const entry = settingsPaletteEntries(query).find(item => item.id === 'setting-link-warden');
+      expect(entry?.href).toBe('/warden#config');
+      expect(entry?.settingId).toBeNull();
+    }
+    // Link rows never appear in the unfiltered palette (only the open command does).
+    expect(settingsPaletteEntries('').some(item => item.id === 'setting-link-warden')).toBe(false);
+  });
+
+  test('link row ids never collide with the control catalog', () => {
+    const ids = new Set(SETTINGS_DEFINITIONS.map(setting => setting.id as string));
+    for (const link of SETTINGS_LINKS) expect(ids.has(link.id)).toBe(false);
   });
 
   test('builds deep links only for known setting ids', () => {

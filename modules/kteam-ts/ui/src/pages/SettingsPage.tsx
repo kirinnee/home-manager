@@ -1,12 +1,18 @@
 import { useEffect, useId } from 'react';
-import { ChevronLeft } from 'lucide-react';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { ThemeSettings } from '../components/ThemeToggle';
 import { DictationSettings } from '../components/DictationSettings';
 import { BottomSheet } from '../components/SessionDetails';
 import { DENSITY_OPTIONS, useDensity } from '../hooks/useDensity';
 import { useInputModality } from '../hooks/useInputModality';
 import { TEXT_SCALE_FACTORS, useTheme, type TextScale, type ThemeState } from '../hooks/useTheme';
-import { SETTINGS_DEFINITIONS, isSettingId, type SettingDefinition, type SettingId } from '../lib/settings';
+import {
+  SETTINGS_DEFINITIONS,
+  SETTINGS_LINKS,
+  isSettingId,
+  type SettingDefinition,
+  type SettingId,
+} from '../lib/settings';
 import { Link } from '../lib/router';
 import { useUiControls, type ChatWidth } from '../lib/store';
 import { cn } from '../lib/utils';
@@ -207,6 +213,17 @@ export function SettingsContent({ target = null }: { target?: SettingId | null }
         <SettingsSection key={definition.id} definition={definition}>
           {control(definition.id)}
         </SettingsSection>
+      ))}
+      {SETTINGS_LINKS.map(link => (
+        <section key={link.id} id={`settings-${link.id}`} className="kt-panel p-panel" aria-label={link.label}>
+          <Link to={link.href} className="group flex min-h-[44px] w-full items-center justify-between gap-2 text-left">
+            <span className="min-w-0">
+              <span className="block text-title font-semibold text-fg group-hover:text-accent">{link.label}</span>
+              <span className="mt-1 block text-ui leading-base text-muted">{link.description}</span>
+            </span>
+            <ChevronRight size={16} aria-hidden="true" className="shrink-0 text-muted group-hover:text-accent" />
+          </Link>
+        </section>
       ))}
     </div>
   );
