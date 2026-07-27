@@ -17,6 +17,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { fenceLanguage, highlightToHtml } from '../lib/highlight';
 import { remarkTableLabels } from '../lib/remark-table-labels';
+import { InAppBrowserLink } from './InAppBrowser';
 
 export const Markdown = memo(function Markdown({ text }: { text: string }) {
   return (
@@ -27,7 +28,7 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
         // after remark-gfm has produced the table nodes.
         remarkPlugins={[remarkGfm, remarkTableLabels]}
         components={{
-          a: ({ node: _node, ...rest }) => <a {...rest} target="_blank" rel="noreferrer" />,
+          a: ({ node: _node, ...rest }) => <InAppBrowserLink {...rest} />,
           // Tables wrap aggressively to fit the pane and may full-bleed past the
           // prose measure (index.css `.md table` / `.md-table-scroll`). The
           // scroller is the last-resort catch for a table that still cannot

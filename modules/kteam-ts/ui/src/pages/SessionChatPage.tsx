@@ -30,6 +30,7 @@ import { fsTabAvailable, useFsProbe } from '../components/files-api';
 import { ViewTabs } from '../components/ViewTabs';
 import { SessionHeader } from '../components/SessionHeader';
 import { Transcript } from '../components/Transcript';
+import { InAppBrowserWorkspace } from '../components/InAppBrowser';
 import { ThinkingIndicator } from '../components/Harness';
 import { displayCallsign } from '../lib/callsign';
 import {
@@ -990,7 +991,7 @@ export function SessionChatPage({
   //
   // The global fleet sidebar is a shell sibling; this page keeps only the
   // transcript scroller and fixed details overlay in its own layout.
-  return (
+  const chatPage = (
     <div className="flex h-full min-h-0 flex-col pb-2">
       {/* Spoken status. Outside the tab switch, so a reader on the Terminal tab
           still hears that the session started answering or dropped its socket.
@@ -1159,6 +1160,7 @@ export function SessionChatPage({
       )}
     </div>
   );
+  return <InAppBrowserWorkspace compact={compact}>{chatPage}</InAppBrowserWorkspace>;
 }
 
 export function PendingAttachmentStrip({
