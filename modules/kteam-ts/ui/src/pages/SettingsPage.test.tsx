@@ -10,12 +10,15 @@ describe('SettingsPage', () => {
     expect(html).toContain('>Settings</h1>');
     expect(html).toContain('aria-label="Text size"');
     expect(html).toContain('aria-label="Dashboard density"');
+    expect(html).toContain('aria-label="Conversation width"');
     expect(html).toContain('aria-label="Colour mode"');
     expect(html).toContain('aria-label="Theme family"');
     expect(html).toContain('aria-label="Where speech is transcribed"');
-    for (const label of ['Default', 'Large', 'Larger', 'Full', 'Compact', 'Minimal']) {
+    for (const label of ['Default', 'Large', 'Larger', 'Full', 'Compact', 'Minimal', 'Full-bleed', 'Readable column']) {
       expect(html).toContain(`>${label}<`);
     }
+    expect(html).toContain('Full-bleed · default');
+    expect(html).toContain('Choosing it again will not change the conversation.');
   });
 
   test('keeps every direct settings action at the 44px touch floor', () => {
