@@ -126,7 +126,7 @@ function hex(c: Rgba): string {
 
 /* ---------- token extraction --------------------------------------------- */
 
-const FAMILIES = ['studio', 'mission', 'neo', 'ember', 'contrast', 'notebook'] as const;
+const FAMILIES = ['studio', 'mission', 'neo', 'ember', 'contrast', 'notebook', 'geist'] as const;
 const MODES = ['light', 'dark'] as const;
 type Family = (typeof FAMILIES)[number];
 type Mode = (typeof MODES)[number];
@@ -377,20 +377,20 @@ const PAIRS = buildPairs();
    is a radial gradient, so the page background at the hot spot is this blend —
    always LIGHTER than `--bg`, i.e. always worse for light-on-dark text. */
 const WASH_PEAK: Partial<Record<`${Family}-${Mode}`, string[]>> = {
-  'mission-dark': ['rgba(71, 243, 255, 0.085)', 'rgba(30, 83, 96, 0.14)'],
-  /* mission-light is now a ruled telemetry grid, not two soft radials. Listed
-     worst-case: the point where a MAJOR and a MINOR grid line cross, which is
-     the darkest ground any body ink has to sit on in this theme. Keep this in
-     step with `--body-wash` in themes.css — an out-of-date entry here makes the
-     wash rows measure a page that no longer exists. */
-  'mission-light': ['rgba(11, 82, 95, 0.14)', 'rgba(11, 82, 95, 0.077)'],
+  /* Mission is now a ruled instrument grid in BOTH modes (radials + scanlines
+     removed). Listed worst-case is the point where a MAJOR and a MINOR grid line
+     cross — the most-shifted ground any body ink sits on. Keep both entries in
+     step with `--body-wash` in themes.css; a stale entry measures a page that no
+     longer exists. */
+  'mission-dark': ['rgba(120, 200, 214, 0.055)', 'rgba(120, 200, 214, 0.03)'],
+  'mission-light': ['rgba(11, 82, 95, 0.13)', 'rgba(11, 82, 95, 0.06)'],
   'ember-light': ['rgba(214, 148, 62, 0.14)', 'rgba(196, 118, 48, 0.08)'],
   'ember-dark': ['rgba(240, 163, 90, 0.1)', 'rgba(158, 84, 32, 0.09)'],
-  /* Notebook's ruled field: worst case is where the horizontal rule crosses the
-     vertical margin line, so both inks are stacked over --bg. Keep these in step
-     with `--rule-ink`/`--margin-ink` in themes.css. */
-  'notebook-light': ['rgba(47, 78, 163, 0.07)', 'rgba(178, 54, 54, 0.1)'],
-  'notebook-dark': ['rgba(214, 224, 236, 0.06)', 'rgba(232, 130, 130, 0.08)'],
+  /* Notebook's warm paper wash: two soft radials, no hotspot. Worst case for
+     body ink is where both stops overlap, so both are stacked over --bg. Keep
+     these in step with `--body-wash` in themes.css. */
+  'notebook-light': ['rgba(191, 138, 92, 0.05)', 'rgba(160, 110, 70, 0.04)'],
+  'notebook-dark': ['rgba(224, 138, 103, 0.055)', 'rgba(120, 70, 40, 0.05)'],
 };
 const WASH_TIERS = ['fg', 'fg-soft', 'muted', 'faint'];
 

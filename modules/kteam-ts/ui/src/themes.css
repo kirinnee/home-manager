@@ -11,7 +11,7 @@
 
        <html data-theme="<family>-<mode>">
 
-   family ∈ studio | mission | neo | ember | contrast | notebook
+   family ∈ studio | mission | neo | ember | contrast | notebook | geist
    mode   ∈ light  | dark            (already resolved — never "system")
 
    The resolution (stored preference → OS fallback → attribute) is implemented
@@ -1787,6 +1787,360 @@
 }
 
 /* ============================================================================
+   FAMILY 7 — GEIST (Vercel). Near-absolute black and white, engineered
+   restraint, generous negative space. The look of the Vercel dashboard: a page
+   that is mostly quiet whitespace, hairline greys ruling it into regions, small
+   precise type, and colour spent only where it does a job (the one blue accent
+   for links, focus and primary action).
+
+   ── THE HARD PROBLEM: why this is not "the other black-and-white one" ───────
+   Two monochrome families already ship — Contrast (AAA, MAXIMAL: pure #000/#fff
+   grounds, 2px black edges on everything, permanent outlines, underlined links,
+   large heavy type, 44px rows) and Neo (BRUTALIST: hard 2–3px black rules,
+   0 radius, flat offset-ink shadows, black display weights). A Vercel family is
+   also monochrome, so it has to earn its identity STRUCTURALLY or it fails the
+   ship gate (name the family from a greyscale screenshot). For a monochrome
+   family the greyscale shot IS the colour shot — there is nowhere to hide — so
+   every differentiator below is a greyscale differentiator by construction:
+
+     1. BORDER WEIGHT + COLOUR — the strongest tell. Contrast and Neo both draw
+        MAXIMUM-contrast HEAVY black edges (2–3px, #000/#fff). Geist draws a 1px
+        HAIRLINE in a QUIET low-contrast grey (`--border` #eaeaea light / #2a2a2a
+        dark). In greyscale a Geist screen reads as pale cards whose edges nearly
+        dissolve; Contrast reads as stark black boxes; Neo as black-outlined
+        blocks. `--border-width-heavy` stays 1px too — Geist never thickens.
+     2. TYPE WEIGHT + SIZE — Geist is SMALL and LIGHT (13px base, 400/500/600,
+        tight negative tracking). Contrast is large and heavy (14.5px, 500–800);
+        Neo is chunky black (up to 900). Grey text that reads thin and small vs
+        thick and big is unmistakable with hue removed.
+     3. RADIUS — a consistent modest ~6px. Neo is 0 (hard), Contrast is 2px
+        (near-hard). 6px is visibly rounder than both yet far from Ember's pills.
+     4. ELEVATION — a WHISPER soft shadow at most; controls rest FLAT on a
+        hairline. Neo casts a hard offset ink block; Contrast casts nothing (uses
+        rings). Geist's soft-blur-almost-nothing is a third, distinct read.
+     5. NEGATIVE SPACE — airy: small controls with GENEROUS padding and gaps, on
+        a clean flat ground (no wash, no texture, no overlay). Density carries a
+        lot here — the opposite of Mission's tight instrument panel.
+
+   No `--body-wash`, no `--panel-texture`, no `--overlay`: the ground is honestly
+   flat, which is itself part of the Vercel read and keeps the audit simple (no
+   WASH_PEAK entry needed — there is no wash to model).
+
+   ── FONTS ───────────────────────────────────────────────────────────────────
+   Geist Sans / Geist Mono is the voice, but this is an offline PWA with a strict
+   CSP and a deliberately small bundle, and no family bundles a webfont — they
+   all ride SYSTEM STACKS. Geist is a geometric-humanist grotesque very close to
+   SF / Inter / Segoe, so we name `Geist` first (anyone who has it installed gets
+   the real thing) and fall back to the system Geist-alikes. Bundling Geist would
+   make it the ONLY webfont in the app for a KB cost the identity does not need —
+   the family is carried by structure (hairlines, radius, weight, space), not by
+   the exact glyphs. `--font-ui` stays SANS (not mono like Mission) so the chrome
+   reads as clean Vercel sans; mono is reserved for code/data via `--font-mono`.
+
+   BORDERS AND THE CONTRAST GATE — the hairline is where 1.4.11 bites. `--border`
+   / `--border-soft` are DECORATIVE (card/panel/divider edges, identified by
+   their own fill + content) and the audit tiers them `decor`, so the true
+   #eaeaea hairline is legal there. The LOAD-BEARING control edge is a separate
+   token, `--border-strong`, which the audit hard-checks at ≥3:1 against every
+   surface — so inputs and outline controls get a real, if still restrained, grey
+   that a user can find. That split is honest: a Vercel field edge genuinely is
+   more visible than a divider between two list rows.
+   ============================================================================ */
+:root[data-theme^='geist-'],
+[data-swatch^='geist-'] {
+  /* ═══ structural token layer ═══ */
+
+  /* Geist first; then the system faces that approximate it. Display == body:
+     Vercel has no separate display face, restraint is the point. Mono is Geist
+     Mono for code and data, not the chrome (that stays sans, unlike Mission). */
+  --font-display:
+    'Geist', 'Geist Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', system-ui,
+    sans-serif;
+  --font-body:
+    'Geist', 'Geist Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', system-ui,
+    sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  --chrome-fg: var(--faint);
+
+  /* Small, precise, LIGHT — the greyscale weight tell vs Contrast (heavy) and
+     Neo (black). Sentence-case labels with a whisper of tracking, never shouted
+     caps and never small-caps — a seventh distinct label treatment. */
+  --label-transform: none;
+  --label-variant: normal;
+  --label-size: 11px;
+  --label-weight: 500;
+  --tracking-label: 0.01em;
+  --display-transform: none;
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-strong: 600;
+  --weight-display: 600;
+
+  --text-2xs: 10px;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 12.5px;
+  --text-md: 13px;
+  --text-lg: 14.5px;
+  --text-display: 1.1rem;
+  --text-input-desktop: 13px;
+  --font-size-base: 13px;
+  --leading-base: 1.5;
+  --leading-tight: 1.25;
+  /* Geist's negative tracking is a big part of its precise, engineered feel. */
+  --tracking-display: -0.021em;
+  --tracking-body: -0.006em;
+  --md-font-size: 13.5px;
+  --md-leading: 1.6;
+  --code-font-size: 12.5px;
+  --chrome-font-size: 11px;
+  --prose-measure: 76ch;
+
+  /* One consistent modest radius. Rounder than Neo (0) and Contrast (2px),
+     nowhere near Ember's pills. */
+  --radius-control: 6px;
+  --radius-panel: 8px;
+  --radius-badge: 6px;
+  --radius-tab: 6px;
+  --radius-input: 6px;
+
+  --bubble-border: var(--border);
+  --bubble-stroke: 1px;
+  --bubble-radius: 10px;
+  --bubble-shadow: var(--shadow-sm);
+
+  /* Barely any elevation. Controls rest FLAT on their hairline; only panels take
+     a whisper of shadow and only popovers really float. No offset ink (Neo), no
+     rings-instead-of-shadow (Contrast) — a soft blur that is almost not there. */
+  --shadow-ink: transparent;
+  --shadow-control: none;
+  --shadow-panel: var(--shadow-sm);
+  --shadow-popover: var(--shadow-lg);
+  --press-translate: 0px;
+  --rule-inset: none;
+  --rail-active: inset 2px 0 0 var(--accent);
+  --divider-color: var(--border-soft);
+
+  /* Airy: small controls, generous padding and gaps. Negative space is a
+     load-bearing part of the identity, so this is deliberately roomier than
+     Studio and the opposite of Mission's tight panel. */
+  --control-h-desktop: 32px;
+  --control-h-sm-desktop: 28px;
+  --row-min-h-desktop: 40px;
+  --pad-control-x: 14px;
+  --pad-badge-x: 8px;
+  --pad-panel: 16px;
+  --pad-row-y: 8px;
+  --pad-cell-x: 12px;
+  --gap-xs: 6px;
+  --gap-sm: 8px;
+  --gap-md: 14px;
+
+  /* Flat ground: no page wash, no panel grain, no overlay. */
+  --panel-bg: var(--surface);
+  --panel-texture: none;
+  --body-wash: none;
+  --overlay: none;
+  --overlay-opacity: 0;
+
+  /* Focus is a soft blue bloom, not a permanent outline and not underlined
+     links — the calm end of the accessibility spectrum, unlike Contrast. */
+  --focus-shadow: 0 0 0 3px rgb(var(--accent-rgb) / 0.3);
+  --outline-always: none;
+  --underline-links: none;
+
+  /* The raw ramp echoes the roles so utility-shaped call sites stay on-family. */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  /* Hairline everywhere — "heavy" never thickens past 1px, which is the whole
+     point of the family and its clearest separation from Contrast/Neo in grey. */
+  --border-width: 1px;
+  --border-width-heavy: 1px;
+}
+
+:root[data-theme='geist-light'],
+[data-swatch='geist-light'] {
+  /* ═══ structural token layer ═══ */
+  /* Quiet control edge, not black: the lightest grey that still clears 3:1 on
+     the palest surface (surface-3), so an input reads as a field without turning
+     into a Contrast border. Decorative hairlines use --border below. */
+  --border-strong: #838383; /* 3.16:1 on the palest surface (surface-3) */
+
+  color-scheme: light;
+
+  /* Off-white desk, white cards — a subtle layered near-white, not one flat
+     sheet. Kept just off Contrast's pure #fff so the surfaces read as paper. */
+  --bg: #fafafa;
+  --surface: #ffffff;
+  --surface-2: #f7f7f7;
+  --surface-3: #efefef;
+  --fg: #171717;
+  --fg-soft: #404040;
+  --muted: #5f5f5f;
+  --faint: #6e6e6e;
+  /* THE HAIRLINE. #eaeaea is Vercel's signature border — decorative here, so
+     the audit tiers it `decor` and the near-invisible edge is legal. */
+  --border: #eaeaea;
+  --border-soft: #f0f0f0;
+
+  /* The single functional colour: Vercel blue, darkened just enough to clear
+     4.5:1 as link text on every surface (incl. the palest). The brighter blue
+     lives in --accent-soft / --accent-border and dark mode. */
+  --accent: #0060df;
+  --accent-rgb: 0 96 223;
+  --accent-fg: #ffffff;
+  --accent-soft: #e8f1fd;
+  --accent-border: #b6d4fb;
+  --accent-strong: #004ec0;
+
+  --user-bg: #f5f8fd;
+  --user-border: #0060df;
+  --user-rail: #b6d4fb;
+
+  --bubble-bg: var(--user-bg);
+  --bubble-fg: var(--fg);
+  --bubble-border: var(--border);
+
+  --code-bg: #f6f6f6;
+  --code-border: #eaeaea;
+  --code-fg: #1f1f1f;
+
+  --ok: #067647;
+  --ok-bg: #e6f4ec;
+  --ok-border: #b3ddc6;
+  --warn: #9a5b00;
+  --warn-bg: #fbf0e0;
+  --warn-border: #ecd4a8;
+  --pend: #525252;
+  --pend-bg: #f0f0f0;
+  --pend-border: #dcdcdc;
+  --err: #cc2f2f;
+  --err-bg: #fceceb;
+  --err-border: #f3c3c1;
+
+  --tool-bash: #067647;
+  --tool-read: #0060df;
+  --tool-edit: #9a5b00;
+  --tool-write: #6b30c4;
+  --tool-patch: #b02a76;
+  --tool-search: #0a7185;
+  --tool-plan: #3a45c4;
+  --tool-wait: #5f5f5f;
+  --tool-generic: #525252;
+
+  --syn-comment: #6b6b6b;
+  --syn-keyword: #6b30c4;
+  --syn-string: #067647;
+  --syn-type: #0a7185;
+  --syn-number: #9a5b00;
+  --syn-meta: #b02a76;
+  --syn-addition: #067647;
+  --syn-deletion: #cc2f2f;
+
+  --bar-bg: rgba(250, 250, 250, 0.82);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.05), 0 4px 10px rgba(0, 0, 0, 0.05);
+  --shadow-lg: 0 2px 4px rgba(0, 0, 0, 0.06), 0 12px 32px rgba(0, 0, 0, 0.1);
+  --scrim: rgba(0, 0, 0, 0.4);
+
+  --ring: rgba(0, 96, 223, 0.4);
+  --focus-color: #0060df;
+  --selection-bg: #cfe3fd;
+  --selection-fg: #171717;
+}
+
+:root[data-theme='geist-dark'],
+[data-swatch='geist-dark'] {
+  /* ═══ structural token layer ═══ */
+  /* Quiet control edge on the dark stock — the lightest it can be while still
+     clearing 3:1 on the palest dark surface. */
+  --border-strong: #7a7a7a; /* 3.30:1 on surface-3 */
+
+  color-scheme: dark;
+
+  /* Near-absolute black, layered — kept off Contrast's pure #000 so the surfaces
+     read as stacked planes under the hairlines rather than one void. */
+  --bg: #0a0a0a;
+  --surface: #111111;
+  --surface-2: #1a1a1a;
+  --surface-3: #242424;
+  --fg: #ededed;
+  --fg-soft: #b4b4b4;
+  --muted: #a1a1a1;
+  --faint: #8f8f8f;
+  /* THE HAIRLINE, dark: a quiet #2a2a2a that nearly dissolves — decorative. */
+  --border: #2a2a2a;
+  --border-soft: #1f1f1f;
+
+  /* The same functional blue, lifted for legibility on black. Dark text on the
+     bright accent (Studio/Notebook do the same) so a primary button stays
+     readable without a second accent token. */
+  --accent: #3b9eff;
+  --accent-rgb: 59 158 255;
+  --accent-fg: #04121f;
+  --accent-soft: #0d2842;
+  --accent-border: #1e4d80;
+  --accent-strong: #6bb6ff;
+
+  --user-bg: #0e1a28;
+  --user-border: #3b9eff;
+  --user-rail: #1e4d80;
+
+  --bubble-bg: var(--user-bg);
+  --bubble-fg: var(--fg);
+  --bubble-border: var(--border);
+
+  --code-bg: #141414;
+  --code-border: #262626;
+  --code-fg: #e0e0e0;
+
+  --ok: #3fcf7f;
+  --ok-bg: #0f2419;
+  --ok-border: #1f4632;
+  --warn: #e0a63a;
+  --warn-bg: #2a2110;
+  --warn-border: #4c3d1c;
+  --pend: #a1a1a1;
+  --pend-bg: #1a1a1a;
+  --pend-border: #2e2e2e;
+  --err: #ff6166;
+  --err-bg: #2a1315;
+  --err-border: #4d262a;
+
+  --tool-bash: #3fcf7f;
+  --tool-read: #3b9eff;
+  --tool-edit: #e0a63a;
+  --tool-write: #b48cff;
+  --tool-patch: #ff7fb0;
+  --tool-search: #45c8dc;
+  --tool-plan: #8c96ff;
+  --tool-wait: #a1a1a1;
+  --tool-generic: #a1a1a1;
+
+  --syn-comment: #8f8f8f;
+  --syn-keyword: #b48cff;
+  --syn-string: #3fcf7f;
+  --syn-type: #45c8dc;
+  --syn-number: #e0a63a;
+  --syn-meta: #ff7fb0;
+  --syn-addition: #3fcf7f;
+  --syn-deletion: #ff6166;
+
+  --bar-bg: rgba(10, 10, 10, 0.8);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.6);
+  --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.6), 0 4px 12px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 2px 4px rgba(0, 0, 0, 0.6), 0 14px 36px rgba(0, 0, 0, 0.6);
+  --scrim: rgba(0, 0, 0, 0.7);
+
+  --ring: rgba(59, 158, 255, 0.45);
+  --focus-color: #3b9eff;
+  --selection-bg: #163a5f;
+  --selection-fg: #ededed;
+}
+
+/* ============================================================================
    MOBILE ACCESSIBILITY FLOOR — must stay at the END of this file.
 
    Specificity note, and it is load-bearing: bare `:root` is (0,1,0) and would
@@ -1891,5 +2245,19 @@
     --text-lg: 19px;
     --text-display: 1.5rem;
     --label-size: 12.5px;
+  }
+
+  /* Geist stays the most restrained on a phone too — small, precise, the least
+     enlarged of any family, keeping its engineered read. The 44px control/row
+     floors above still supply the touch spacing. */
+  :root[data-theme^='geist-'] {
+    --text-2xs: 11.5px;
+    --text-xs: 12.5px;
+    --text-sm: 13.5px;
+    --text-base: 14.5px;
+    --text-md: 15.5px;
+    --text-lg: 17px;
+    --text-display: 1.3rem;
+    --label-size: 12px;
   }
 }
