@@ -3,6 +3,7 @@
 // and the symlinks/files kfleet owns are touched — sessions, auth, sqlite, etc.
 // inside a config dir are never removed.
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   lstatSync,
@@ -16,7 +17,7 @@ import {
 import path from 'node:path';
 import { binDir, home, resolveAsset } from '../deps';
 import { KIND_SPECS } from './kinds';
-import { type SettingsOutput, resolveSettings } from './settings';
+import { type SettingsOutput, readRuntimeLayer, resolveSettings } from './settings';
 import { type SharedResult, materializeSharedHistory } from './shared-history';
 import type {
   AliasMap,
@@ -134,8 +135,15 @@ function materializeAgent(r: ResolvedAgent, dirOverride?: string): string[] {
 
     // Structured-config assets (settings) are a layered list: deep-merge + emit.
     if (asset.format) {
-      const layers = (Array.isArray(ref) ? ref : [ref]) as SettingsLayer[];
+      let layers = (Array.isArray(ref) ? ref : [ref]) as SettingsLayer[];
       const dest = path.join(dir, asset.dest[0]);
+      // Runtime-mutated config (e.g. Claude's settings.json): prepend the existing
+      // on-disk file as the base layer so a re-apply preserves keys the harness
+      // wrote at runtime. Read BEFORE replaceWith deletes the dest below.
+      if (asset.preserveRuntimeKeys) {
+        const runtime = readRuntimeLayer(dest, asset.format);
+        if (runtime) layers = [runtime, ...layers];
+      }
       let out: SettingsOutput;
       try {
         out = resolveSettings(layers, asset.format, asset.mode);
@@ -143,7 +151,14 @@ function materializeAgent(r: ResolvedAgent, dirOverride?: string): string[] {
         throw new Error(`agent "${r.name}": ${(e as Error).message}`);
       }
       if (out.kind === 'write') replaceWith(dest, () => writeFileSync(dest, out.content));
-      else if (out.kind === 'copy') replaceWith(dest, () => copyFileSync(out.src, dest));
+      else if (out.kind === 'copy')
+        // copyFileSync preserves the source mode; a template linked out of the
+        // read-only nix store is 0444, so force the copy user-writable — mode:'copy'
+        // exists precisely so the harness can rewrite this file (e.g. /effort).
+        replaceWith(dest, () => {
+          copyFileSync(out.src, dest);
+          chmodSync(dest, 0o644);
+        });
       else replaceWith(dest, () => symlinkSync(out.src, dest));
       written.push(dest);
       continue;
