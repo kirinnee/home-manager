@@ -75,6 +75,18 @@ export function statusMark(view: SessionView): StatusMarkInfo {
   };
 }
 
+/** How a ROW carrying this session should treat its name, so a dense list has
+ *  vertical variation without re-adding any fact. A finished session is over,
+ *  so its name recedes to `--muted`; live and waiting work stays at full
+ *  `--fg` strength and anchors the eye. This is the ONLY differentiator that is
+ *  safe in greyscale AND colour-blind vision: it is a lightness step on a
+ *  contrast-checked ink (`muted` is gated ≥4.5:1 on every surface), never a hue,
+ *  so it reads the same when the status tones collapse to grey. Callers keep
+ *  their own weight (`font-semibold`) and hover (`group-hover:text-accent`). */
+export function nameToneClass(view: SessionView): string {
+  return statusMark(view).klass === 'finished' ? 'text-muted' : 'text-fg';
+}
+
 const TONE_FILL: Record<StatusMarkInfo['tone'], string> = {
   ok: 'bg-ok border-ok-border',
   warn: 'bg-warn border-warn-border',

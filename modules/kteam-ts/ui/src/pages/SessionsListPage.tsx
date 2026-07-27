@@ -25,6 +25,7 @@ import { Badge } from '../components/Primitives';
 import { ModeBadge } from '../components/ModeBadge';
 import { RcBadge } from '../components/RcBadge';
 import { TaskName } from '../components/TaskName';
+import { StatusMark, nameToneClass } from '../components/StatusMark';
 import { WardenStrip } from '../components/WardenStrip';
 import { WardenVerdicts } from '../components/WardenVerdicts';
 import { displayCallsign } from '../lib/callsign';
@@ -662,15 +663,25 @@ export const LeanSessionRow = memo(function LeanSessionRow({
   const cfg = view.config;
   return (
     <tr className="kt-row group">
+      {/* The status SHAPE leads the identity cell so a lean list still varies
+          row to row: circle/diamond/square is a landmark the eye can catch even
+          when the status WORD is gone (minimal) — and it is greyscale-safe, so
+          it is not the colour-only anchor the badge alone would be. The name
+          then recedes when the session is finished (`nameToneClass`), giving the
+          column a second, lightness-based rhythm. Neither adds a fact. */}
       <td>
-        <Link to={`/session/${encodeURIComponent(cfg.id)}`} className="block min-w-0">
-          <div className="truncate text-row font-semibold text-fg group-hover:text-accent">
+        <Link
+          to={`/session/${encodeURIComponent(cfg.id)}`}
+          className="flex min-w-0 items-center gap-sm text-row font-semibold"
+        >
+          <StatusMark view={view} />
+          <span className={cn('min-w-0 truncate group-hover:text-accent', nameToneClass(view))}>
             {displayCallsign(cfg.teammate) || cfg.id}
-          </div>
+          </span>
         </Link>
       </td>
       <td>
-        <TaskName name={cfg.name} size="md" className="max-w-full" />
+        <TaskName name={cfg.name} teammate={cfg.teammate} size="md" className="max-w-full" />
       </td>
       {density === 'compact' && (
         <td>
@@ -785,7 +796,11 @@ export const LeanSessionCard = memo(function LeanSessionCard({
       className="kt-panel group block p-3.5 sm:p-panel transition-colors hover:border-accent active:bg-surface-2"
     >
       <div className="flex min-w-0 items-center gap-sm">
-        <span className="min-w-0 truncate text-row font-semibold text-fg group-hover:text-accent">
+        {/* Same anchor as the table row: the shape carries state greyscale-safe,
+            and the name recedes once the work is done — so a scrolled column of
+            cards is not ten identical bold headings. */}
+        <StatusMark view={view} />
+        <span className={cn('min-w-0 truncate text-row font-semibold group-hover:text-accent', nameToneClass(view))}>
           {displayCallsign(cfg.teammate) || cfg.id}
         </span>
         {density === 'compact' && (
@@ -795,7 +810,7 @@ export const LeanSessionCard = memo(function LeanSessionCard({
         )}
       </div>
       <div className="mt-1.5 sm:mt-1">
-        <TaskName name={cfg.name} size="md" className="max-w-full" />
+        <TaskName name={cfg.name} teammate={cfg.teammate} size="md" className="max-w-full" />
       </div>
       {density === 'compact' && (view.state.waiting || view.state.needsHuman) && (
         <div className="mt-1.5 sm:mt-1 flex flex-wrap items-center gap-xs">

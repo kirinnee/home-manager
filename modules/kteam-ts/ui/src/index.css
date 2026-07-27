@@ -1189,48 +1189,42 @@ body {
 .kt-composer {
   padding: var(--gap-sm) var(--pad-panel);
 }
-/* PHONE COMPOSER. Desktop now spends only `--gap-sm` vertically around its two
-   bands; a 390x844 phone trims that once more to `--gap-xs` around the 44px
-   field/action floors. The horizontal `--pad-panel` inset is untouched (text
-   must not run into the border), as are the border, focus ring and touch floors.
-   Class-scoped rather than media-scoped on purpose: it applies to exactly the
-   drawer-width instance, so a coarse-pointer tablet on the desktop layout keeps
-   desktop spacing. */
+/* PHONE COMPOSER. Desktop spends `--gap-sm` vertically around its two bands and
+   `--pad-panel` horizontally; a phone trims BOTH. Vertically it drops to
+   `--gap-xs` around the 44px dock. HORIZONTALLY it drops from `--pad-panel`
+   (10-16px) to `--gap-xs` (4px): the reader asked to keep the controls "SOOO
+   close to the left and right", and with the phone dock (Composer.tsx) the
+   attach and send controls now hug those edges — a 44px control ~4px inside a
+   1px border, itself ~4px inside the route gutter (App.tsx `px-1`), so the input
+   spans nearly the whole screen. The border, focus ring and touch floors are
+   untouched, and the textarea is borderless so a small inset never runs text
+   into an edge. Class-scoped rather than media-scoped on purpose: it applies to
+   exactly the drawer-width instance, so a coarse-pointer tablet on the desktop
+   layout keeps desktop spacing. */
 .kt-composer--compact {
   padding-top: var(--gap-xs);
   padding-bottom: var(--gap-xs);
+  padding-left: var(--gap-xs);
+  padding-right: var(--gap-xs);
 }
-/* THE ACTION ROW STAYS ON ONE LINE WITH THE KEYBOARD UP, AT 360px, IN EVERY
-   FAMILY — which is the case that actually hurts.
+/* THE PHONE DOCK IS ONE LINE, IN EVERY FAMILY, AT 360px WITH THE KEYBOARD UP —
+   which is the case that actually hurts.
 
-   `Interrupt & send` is destructive and keeps its word: it is never truncated
-   and never becomes an icon. Every control keeps the 44px floor. So the only
-   thing left to give is horizontal air. Measured at 360px in High Contrast (the
-   deliberately largest-control family — uppercase, tracked, 34px controls) the
-   two buttons ALONE were 311px inside a 308px row, so they wrapped and the
-   composer paid 50px for a second line at exactly the moment the keyboard had
-   already halved the screen: 154px of composer against 282px of transcript.
-   They are 289px now, and every family clears the keyboard-open row at 360 with
-   8-86px to spare.
-
-   Scaled from the family's own `--pad-control-x` rather than pinned to a px
-   value, so a family that chose roomier controls still reads as roomier — it
-   just spends the room on the words instead of beside them. Nothing here is a
-   height, a target size or a type scale.
-
-   AT REST at 360, High Contrast alone still takes a second line: the context
-   readout is on that row and the row is 1px short. That is the `flex-wrap`
-   safety valve doing its job rather than a control going off the edge, it costs
-   nothing against the rest budget (154px composer, 614px transcript), and
-   buying the last pixel would mean either squeezing a destructive control's
-   padding to ~3.6px or dropping the only rest-visible connection signal. Both
-   are worse than a wrap on the narrowest phone in the largest-control theme. */
+   The controls no longer sit in a row of their own beneath the textarea; they
+   flank it (Composer.tsx `.kt-composer__dock`, `align-items:flex-end`), so the
+   textarea is `flex:1 min-width:0` and SHRINKS to whatever the edge-hugging
+   controls leave rather than pushing them onto a second line. That removes the
+   old wrap failure by construction — a busy row is attach (44) + `Interrupt &
+   send` + Queue on the right, the textarea simply takes the rest — but the
+   destructive `Interrupt & send` still keeps its word and its 44px floor, so it
+   is the widest thing on the row and still wants its horizontal air trimmed for
+   the textarea to keep a usable width at 360. Scaled from the family's own
+   `--pad-control-x` rather than pinned to a px value, so a roomier family still
+   reads as roomier — it just spends the room on the words, not beside them.
+   Nothing here is a height, a target size or a type scale. */
 .kt-composer--compact .kt-btn {
   gap: var(--gap-xs);
   padding-inline: calc(var(--pad-control-x) * 0.4);
-}
-.kt-composer--compact .kt-composer__actions {
-  column-gap: var(--gap-xs);
 }
 /* A mouse-first hybrid reports `pointer:fine`, so the global coarse-pointer
    floor intentionally does not inflate all its desktop controls. Its idle send

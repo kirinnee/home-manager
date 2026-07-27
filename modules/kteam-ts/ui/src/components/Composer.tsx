@@ -420,6 +420,110 @@ export function Composer({
           : undefined;
   const statusCopy = composerStatusCopy({ sending, busy, enterSends });
 
+  // The three controls, extracted so both layouts place the SAME markup: desktop
+  // groups them on the right of the action line, the phone dock flanks the
+  // textarea with attach on the left and send/queue on the right (Telegram). The
+  // attributes are the batch-1 invariant (44px, labelled, disabled-not-hidden)
+  // and must not diverge between layouts — Composer.test.tsx asserts them.
+  const attachControl = onFiles ? (
+    <>
+      <input
+        ref={fileInputRef}
+        className="sr-only"
+        type="file"
+        accept="image/png,image/jpeg,image/gif,image/webp"
+        multiple
+        disabled={disabled || sending}
+        tabIndex={-1}
+        aria-hidden="true"
+        onChange={event => {
+          const files = Array.from(event.currentTarget.files ?? []);
+          event.currentTarget.value = '';
+          if (files.length) onFiles(files);
+        }}
+      />
+      <Button
+        className="min-h-[44px] min-w-[44px] px-2"
+        variant="ghost"
+        size="sm"
+        disabled={disabled || sending}
+        aria-label="Attach images"
+        title="Attach PNG, JPEG, GIF or WebP images"
+        onClick={() => fileInputRef.current?.click()}
+      >
+        <Paperclip size={15} aria-hidden="true" />
+        <span className="sr-only">Attach images</span>
+      </Button>
+    </>
+  ) : null;
+
+  const interruptControl = showInterrupt ? (
+    <Button
+      className={cn(touchAffected && 'min-h-[44px] min-w-[44px]')}
+      variant="danger"
+      size="sm"
+      disabled={!canSubmit}
+      aria-disabled={!canSubmit}
+      aria-label="Interrupt the current turn and send this message now"
+      aria-describedby={disabledReason ? disabledReasonId : undefined}
+      title="Stop the current turn safely, then deliver this message now"
+      onClick={() => onInterruptAndSend?.()}
+    >
+      <ZapOff size={12} aria-hidden="true" />
+      {/* KEEPS ITS WORD on touch, unlike Send/Queue. This is the one
+          destructive-ish action here — it stops a running turn — and on a
+          phone there is no hover tooltip to disambiguate a lone glyph. The
+          user asked only for send/queue to go icon-only; a labelled,
+          danger-toned control is the safer default for the action that
+          can throw work away, and it only appears in the busy state so it
+          is not what eats the resting row. */}
+      <span>Interrupt &amp; send</span>
+    </Button>
+  ) : null;
+
+  const sendControl = busy ? (
+    <Button
+      className={cn(touchAffected && 'min-h-[44px] min-w-[44px]')}
+      variant="primary"
+      size="sm"
+      disabled={!canSubmit}
+      aria-disabled={!canSubmit}
+      aria-label="Queue this message for the next turn"
+      aria-describedby={disabledReason ? disabledReasonId : undefined}
+      title="Deliver at the next turn boundary (safe)"
+      onClick={() => onSubmit()}
+    >
+      <Clock size={12} aria-hidden="true" />
+      {/* Icon-only on touch (the word eats the row on a phone); desktop
+          keeps the label. The accessible name lives in `aria-label`, so
+          the button is never nameless — the word is hidden visually,
+          present for assistive tech, in every state. */}
+      <span className={cn(touchAffected && 'sr-only')}>Queue</span>
+    </Button>
+  ) : touchAffected ? (
+    // An explicit control is the mandatory path whenever Enter is
+    // conservative. It remains visible and labelled even while empty,
+    // disabled, or sending; native disabled plus the described reason
+    // explains why it is momentarily unavailable.
+    <Button
+      className="kt-composer__tap-send min-h-[44px] min-w-[44px]"
+      variant="primary"
+      size="sm"
+      disabled={!canSubmit}
+      aria-disabled={!canSubmit}
+      aria-label="Send this message"
+      aria-describedby={disabledReason ? disabledReasonId : undefined}
+      title="Send now"
+      onClick={() => onSubmit()}
+    >
+      <Send size={12} aria-hidden="true" />
+      {/* Touch-only branch, so always icon-only: the glyph carries the
+          meaning and `aria-label` carries the name. Kept as `sr-only`
+          rather than dropped so the button has visible-to-AT text too. */}
+      <span className="sr-only">Send</span>
+    </Button>
+  ) : null;
+
   return (
     <div
       data-density-region="composer"
@@ -449,177 +553,128 @@ export function Composer({
       }}
     >
       {attachmentSlot}
-      {/* The textarea is borderless and transparent: the WRAPPER is the input as
-          far as the eye (and the focus ring) is concerned. */}
-      <ComposerTextarea
-        inputRef={ref}
-        draft={draft}
-        onDraftChange={onDraftChange}
-        onSubmit={keyboardSubmit}
-        canSubmit={canSubmit}
-        disabled={disabled}
-        sending={sending}
-        placeholder={placeholder}
-      />
+      {compact ? (
+        // PHONE DOCK (Telegram). Attach bottom-LEFT, send/queue bottom-RIGHT, the
+        // textarea between them growing UPWARD — the controls flank the input on
+        // the same baseline instead of sitting in their own row beneath it, so
+        // they cost NO vertical band. `items-end` pins the 44px controls to the
+        // bottom while the textarea rises; `min-w-0 flex-1` lets the textarea
+        // take all the width the edge-hugging controls leave and still shrink so
+        // a busy row (attach + Interrupt & send + Queue) never overflows.
+        <>
+          <div className="kt-composer__dock flex items-end gap-xs">
+            {attachControl && <div className="flex shrink-0 items-end">{attachControl}</div>}
+            <div className="min-w-0 flex-1">
+              {/* Borderless + transparent: the composer WRAPPER is the input as
+                  far as the eye and the focus ring are concerned. */}
+              <ComposerTextarea
+                inputRef={ref}
+                draft={draft}
+                onDraftChange={onDraftChange}
+                onSubmit={keyboardSubmit}
+                canSubmit={canSubmit}
+                disabled={disabled}
+                sending={sending}
+                placeholder={placeholder}
+              />
+            </div>
+            {(interruptControl || sendControl) && (
+              <div className="flex shrink-0 items-end gap-xs">
+                {interruptControl}
+                {sendControl}
+              </div>
+            )}
+          </div>
 
-      {disabledReason && (
-        <span id={disabledReasonId} className="sr-only">
-          {disabledReason}
-        </span>
-      )}
+          {disabledReason && (
+            <span id={disabledReasonId} className="sr-only">
+              {disabledReason}
+            </span>
+          )}
 
-      {/* Context, hint and actions share this one line on desktop. Phone keeps
-          flex-wrap as a last-resort safety valve below ~380px; desktop never
-          wraps, so a live status update cannot resize the transcript viewport. */}
-      <div
-        className={cn(
-          'kt-composer__actions min-h-control items-center gap-x-sm gap-y-xs',
-          compact ? 'flex flex-wrap' : 'flex flex-nowrap',
-        )}
-      >
-        {compact ? (
-          <span className="mr-auto inline-flex min-w-0 items-center gap-xs truncate text-meta text-muted">
-            {/* SPOKEN, NEVER SHOWN. `sr-only` and not `hidden`: display:none
-                would take the live region straight out of the accessibility
-                tree and a screen-reader reader would stop hearing "sending…"
-                and the send↔queue change entirely. */}
+          {/* Status + context live UNDER the dock, not on it — a single thin line
+              carrying the spoken live region (always) and the rest-visible socket
+              dot + ctx% (`data-kb-hide`, so it is display:none while the keyboard
+              is up). When typing, this line has no in-flow content and collapses
+              to 0px, which is what returns the reclaimed band to the transcript. */}
+          <div className="kt-composer__meta flex items-center gap-xs text-meta text-muted">
+            {/* SPOKEN, NEVER SHOWN. `sr-only` and not `hidden`: display:none would
+                take the live region straight out of the accessibility tree and a
+                screen-reader would stop hearing "sending…" and the send↔queue
+                change entirely. */}
             <span className="sr-only" aria-live="polite" aria-atomic="true">
               {statusCopy.liveText}
             </span>
-            {context && <CompactContext context={context} sending={sending} dense={showInterrupt} />}
-          </span>
-        ) : (
-          <div className="mr-auto flex min-w-0 items-center gap-sm overflow-hidden">
-            {context && <ContextStrip context={context} />}
-            {context && enterSends && <Sep />}
-            {/* Deliberately NOT `.kt-chrome`: this tells the reader how the
-                keyboard behaves and whether a message is in flight. The line is
-                not itself live: only the changing STATUS words are, so the
-                static Shift+Enter hint is never re-announced (a11y report S-4). */}
-            <span
-              className={cn('inline-flex shrink-0 items-center gap-xs text-meta text-muted', !enterSends && 'sr-only')}
-            >
-              {sending ? (
-                <span
-                  className="inline-block h-2.5 w-2.5 shrink-0 animate-spin rounded-full border border-current border-t-transparent motion-reduce:animate-none"
-                  aria-hidden="true"
-                />
-              ) : (
-                <CornerDownLeft size={11} aria-hidden="true" />
-              )}
-              <span>
-                {/* Persistent, atomic region: only these status words announce
-                    on a send/queue/busy transition. */}
-                <span aria-live="polite" aria-atomic="true">
-                  {statusCopy.liveText}
-                </span>
-                {/* Static hint — outside the live region so it is never
-                    re-announced. */}
-                {statusCopy.keyboardHint}
-              </span>
-            </span>
+            {context && <CompactContext context={context} sending={sending} />}
           </div>
-        )}
+        </>
+      ) : (
+        // DESKTOP. The textarea sits above a single non-wrapping action line that
+        // carries the full context strip, the Shift+Enter hint and the controls —
+        // width is not scarce here, so this layout is unchanged.
+        <>
+          {/* The textarea is borderless and transparent: the WRAPPER is the input
+              as far as the eye (and the focus ring) is concerned. */}
+          <ComposerTextarea
+            inputRef={ref}
+            draft={draft}
+            onDraftChange={onDraftChange}
+            onSubmit={keyboardSubmit}
+            canSubmit={canSubmit}
+            disabled={disabled}
+            sending={sending}
+            placeholder={placeholder}
+          />
 
-        <div className="flex shrink-0 items-center gap-xs">
-          {onFiles && (
-            <>
-              <input
-                ref={fileInputRef}
-                className="sr-only"
-                type="file"
-                accept="image/png,image/jpeg,image/gif,image/webp"
-                multiple
-                disabled={disabled || sending}
-                tabIndex={-1}
-                aria-hidden="true"
-                onChange={event => {
-                  const files = Array.from(event.currentTarget.files ?? []);
-                  event.currentTarget.value = '';
-                  if (files.length) onFiles(files);
-                }}
-              />
-              <Button
-                className="min-h-[44px] min-w-[44px] px-2"
-                variant="ghost"
-                size="sm"
-                disabled={disabled || sending}
-                aria-label="Attach images"
-                title="Attach PNG, JPEG, GIF or WebP images"
-                onClick={() => fileInputRef.current?.click()}
+          {disabledReason && (
+            <span id={disabledReasonId} className="sr-only">
+              {disabledReason}
+            </span>
+          )}
+
+          <div className="kt-composer__actions min-h-control flex flex-nowrap items-center gap-x-sm gap-y-xs">
+            <div className="mr-auto flex min-w-0 items-center gap-sm overflow-hidden">
+              {context && <ContextStrip context={context} />}
+              {context && enterSends && <Sep />}
+              {/* Deliberately NOT `.kt-chrome`: this tells the reader how the
+                  keyboard behaves and whether a message is in flight. The line is
+                  not itself live: only the changing STATUS words are, so the
+                  static Shift+Enter hint is never re-announced (a11y report S-4). */}
+              <span
+                className={cn(
+                  'inline-flex shrink-0 items-center gap-xs text-meta text-muted',
+                  !enterSends && 'sr-only',
+                )}
               >
-                <Paperclip size={15} aria-hidden="true" />
-                <span className="sr-only">Attach images</span>
-              </Button>
-            </>
-          )}
-          {showInterrupt && (
-            <Button
-              className={cn(touchAffected && 'min-h-[44px] min-w-[44px]')}
-              variant="danger"
-              size="sm"
-              disabled={!canSubmit}
-              aria-disabled={!canSubmit}
-              aria-label="Interrupt the current turn and send this message now"
-              aria-describedby={disabledReason ? disabledReasonId : undefined}
-              title="Stop the current turn safely, then deliver this message now"
-              onClick={() => onInterruptAndSend?.()}
-            >
-              <ZapOff size={12} aria-hidden="true" />
-              {/* KEEPS ITS WORD on touch, unlike Send/Queue. This is the one
-                  destructive-ish action here — it stops a running turn — and on a
-                  phone there is no hover tooltip to disambiguate a lone glyph. The
-                  user asked only for send/queue to go icon-only; a labelled,
-                  danger-toned control is the safer default for the action that
-                  can throw work away, and it only appears in the busy state so it
-                  is not what eats the resting row. */}
-              <span>Interrupt &amp; send</span>
-            </Button>
-          )}
-          {busy ? (
-            <Button
-              className={cn(touchAffected && 'min-h-[44px] min-w-[44px]')}
-              variant="primary"
-              size="sm"
-              disabled={!canSubmit}
-              aria-disabled={!canSubmit}
-              aria-label="Queue this message for the next turn"
-              aria-describedby={disabledReason ? disabledReasonId : undefined}
-              title="Deliver at the next turn boundary (safe)"
-              onClick={() => onSubmit()}
-            >
-              <Clock size={12} aria-hidden="true" />
-              {/* Icon-only on touch (the word eats the row on a phone); desktop
-                  keeps the label. The accessible name lives in `aria-label`, so
-                  the button is never nameless — the word is hidden visually,
-                  present for assistive tech, in every state. */}
-              <span className={cn(touchAffected && 'sr-only')}>Queue</span>
-            </Button>
-          ) : touchAffected ? (
-            // An explicit control is the mandatory path whenever Enter is
-            // conservative. It remains visible and labelled even while empty,
-            // disabled, or sending; native disabled plus the described reason
-            // explains why it is momentarily unavailable.
-            <Button
-              className="kt-composer__tap-send min-h-[44px] min-w-[44px]"
-              variant="primary"
-              size="sm"
-              disabled={!canSubmit}
-              aria-disabled={!canSubmit}
-              aria-label="Send this message"
-              aria-describedby={disabledReason ? disabledReasonId : undefined}
-              title="Send now"
-              onClick={() => onSubmit()}
-            >
-              <Send size={12} aria-hidden="true" />
-              {/* Touch-only branch, so always icon-only: the glyph carries the
-                  meaning and `aria-label` carries the name. Kept as `sr-only`
-                  rather than dropped so the button has visible-to-AT text too. */}
-              <span className="sr-only">Send</span>
-            </Button>
-          ) : null}
-        </div>
-      </div>
+                {sending ? (
+                  <span
+                    className="inline-block h-2.5 w-2.5 shrink-0 animate-spin rounded-full border border-current border-t-transparent motion-reduce:animate-none"
+                    aria-hidden="true"
+                  />
+                ) : (
+                  <CornerDownLeft size={11} aria-hidden="true" />
+                )}
+                <span>
+                  {/* Persistent, atomic region: only these status words announce
+                      on a send/queue/busy transition. */}
+                  <span aria-live="polite" aria-atomic="true">
+                    {statusCopy.liveText}
+                  </span>
+                  {/* Static hint — outside the live region so it is never
+                      re-announced. */}
+                  {statusCopy.keyboardHint}
+                </span>
+              </span>
+            </div>
+
+            <div className="flex shrink-0 items-center gap-xs">
+              {attachControl}
+              {interruptControl}
+              {sendControl}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
