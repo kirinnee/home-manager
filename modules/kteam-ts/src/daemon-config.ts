@@ -26,7 +26,11 @@ export interface WardenConfig {
   /** Sus list: a subprocess episode running continuously this long is
    *  sus_subprocess. */
   susSubprocessSeconds: number;
-  /** Max concurrently-live assigned (per-session) warden sessions. */
+  /** Fleet-wide cap on concurrently-live warden sessions — BOTH per-session
+   *  assigned wardens AND the fleet-sweep warden count against it. `1` (the
+   *  default) means only ever one warden at a time across the whole fleet;
+   *  raise it to allow more. Kept the name `maxAssignedWardens` for config
+   *  back-compat; it now bounds the sweep warden too. */
   maxAssignedWardens: number;
   /** After an assigned warden finishes for a session, don't respawn one for
    *  that same session within this cooldown (minutes). */
@@ -93,7 +97,7 @@ export const defaultWardenConfig = (): WardenConfig => ({
   minSpawnGapMinutes: 15,
   susThinkingSeconds: 900,
   susSubprocessSeconds: 900,
-  maxAssignedWardens: 3,
+  maxAssignedWardens: 1,
   assignedCooldownMinutes: 30,
 });
 

@@ -487,6 +487,7 @@ describe('revive-on-send relaunch race', () => {
     manager.attachments = { buildImageReferenceBlock: async () => '' };
     manager.promptInstruction = () => 'read the next turn';
     manager.store = {
+      getSession: () => ({ config, state }),
       updateConfig: async (_id: string, mutate: (current: Record<string, unknown>) => Record<string, unknown>) => {
         Object.assign(config, mutate(config));
         return config;

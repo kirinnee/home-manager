@@ -68,6 +68,7 @@ import {
   type WardenSessionView,
 } from './warden-detect';
 import { rankFailoverCandidates, selectFailoverCandidate } from './failover';
+import { decideAssignedWardens, wardenSlotsFree, type LiveWarden } from './warden-concurrency';
 import type { AgentUsage } from './core';
 import { chatEventFingerprint, EventStore, type IndexedSession, type JsonValue, type SessionEvent } from './storage';
 import { KTEAM_VERSION } from './version';
@@ -204,6 +205,12 @@ interface WardenRuntimeState {
   /** Per-target cooldown after an assigned warden finished (verdict given):
    *  no respawn for the same session within assignedCooldownMinutes. */
   assignedCooldowns?: Record<string, string>;
+  /** Sus targets detected but not given a warden this sweep because the
+   *  fleet-wide concurrency cap was full. FIFO, persisted so a deferred
+   *  investigation is never lost: every sweep retries these BEFORE fresh
+   *  candidates and drops any that have since recovered. Full anomaly records
+   *  (not just ids) so a drained target still has a prompt without re-detection. */
+  assignedQueue?: WardenAnomaly[];
 }
 interface WardenSweep {
   at: string;
@@ -5189,6 +5196,21 @@ export class SessionManager implements KTeamService {
     if (patch.status !== undefined && terminalStatuses.includes(patch.status)) {
       setTimeout(() => void this.reportLostNativeSends(id).catch(() => undefined), 0);
     }
+    // A finishing warden FREES a fleet-wide concurrency slot. If sus targets are
+    // queued behind the cap, drain them now instead of waiting a full sweep
+    // interval. runSweep re-detects suspicion, so a target that recovered while
+    // waiting is dropped rather than investigated. Cheap + serialized on
+    // wardenSweepChain; gated on a non-empty queue so non-warden terminals and
+    // the idle fleet cost nothing.
+    if (patch.status !== undefined && terminalStatuses.includes(patch.status)) {
+      const finished = this.store.getSession(id);
+      if (
+        (finished?.config as SessionConfig | undefined)?.label === WARDEN_LABEL &&
+        (this.wardenState.assignedQueue?.length ?? 0) > 0
+      ) {
+        setTimeout(() => void this.runSweep(false).catch(() => undefined), 0);
+      }
+    }
   }
 
   /** Index one harness record's chat events as pointers into the harness's OWN
@@ -6043,17 +6065,20 @@ export class SessionManager implements KTeamService {
     };
   }
 
-  /** Reconcile + spawn per-session assigned wardens for sus anomalies. Caps
-   *  concurrency, dedupes against live assignments, and applies a per-target
-   *  cooldown after a finished assignment. Returns spawned warden ids. */
+  /** Reconcile + spawn per-session assigned wardens for sus anomalies, bounded
+   *  by the FLEET-WIDE warden cap (the sweep warden counts too). Dedupes against
+   *  live assignments, applies the per-target post-assignment cooldown, and
+   *  QUEUES any target it could not spawn this sweep (dropping ones that have
+   *  since recovered). Returns spawned warden ids. */
   private async spawnAssignedWardens(
     susAnomalies: WardenAnomaly[],
     sessions: SessionView[],
     force: boolean,
   ): Promise<string[]> {
     const warden = this.options.warden;
-    if (susAnomalies.length === 0) return [];
     if (!force && !warden.enabled) return [];
+    const queuedAnomalies = this.wardenState.assignedQueue ?? [];
+    if (susAnomalies.length === 0 && queuedAnomalies.length === 0) return [];
     const byId = new Map(sessions.map(view => [view.config.id, view]));
     // Reconcile: drop assignments whose warden session is gone/terminal, and
     // start the cooldown clock for the target at that moment.
@@ -6067,18 +6092,50 @@ export class SessionManager implements KTeamService {
       }
     }
     const cooldownMs = Math.max(0, warden.assignedCooldownMinutes * 60_000);
-    const spawned: string[] = [];
-    for (const anomaly of susAnomalies) {
-      // `assignments` already includes wardens spawned earlier in THIS loop,
-      // so its size alone is the live count â adding spawned.length again
-      // double-counted them and underfilled the cap (review P3).
-      if (Object.keys(assignments).length >= Math.max(1, warden.maxAssignedWardens)) break;
-      const targetId = anomaly.sessionId;
-      if (assignments[targetId]) continue; // a warden for it is already live
-      const cooledAt = cooldowns[targetId] ? Date.parse(cooldowns[targetId]!) : 0;
-      if (!force && cooledAt && Date.now() - cooledAt < cooldownMs) continue;
+    const nowMs = Date.now();
+
+    // A target is worth a warden only if it is still present, not protected,
+    // not already under a live warden, and not inside its post-assignment
+    // cooldown. Recovered / gone / cooled targets are neither spawned nor
+    // re-queued — this is the "drop a recovered target" rule.
+    const isStillSuspect = (targetId: string): boolean => {
       const target = byId.get(targetId);
-      if (!target || protectedStatuses.includes(target.state.status)) continue;
+      if (!target || protectedStatuses.includes(target.state.status)) return false;
+      if (assignments[targetId]) return false; // already under a live warden
+      const cooledAt = cooldowns[targetId] ? Date.parse(cooldowns[targetId]!) : 0;
+      if (!force && cooledAt && nowMs - cooledAt < cooldownMs) return false;
+      return true;
+    };
+
+    // Every live warden fleet-wide (assigned AND the sweep warden) — the SAME
+    // budget both spawn sites draw down. targetId ties an assigned warden to its
+    // session; the sweep warden has none (guards no single target).
+    const targetByWardenId = new Map<string, string>();
+    for (const [targetId, record] of Object.entries(assignments)) {
+      targetByWardenId.set(record.wardenId, targetId);
+    }
+    const live: LiveWarden[] = sessions
+      .filter(view => view.config.label === WARDEN_LABEL && !protectedStatuses.includes(view.state.status))
+      .map(view => ({ wardenId: view.config.id, targetId: targetByWardenId.get(view.config.id) }));
+
+    // Fresh anomalies supersede queued copies of the same target (more current).
+    const anomalyById = new Map<string, WardenAnomaly>();
+    for (const anomaly of queuedAnomalies) anomalyById.set(anomaly.sessionId, anomaly);
+    for (const anomaly of susAnomalies) anomalyById.set(anomaly.sessionId, anomaly);
+
+    const decision = decideAssignedWardens({
+      maxConcurrent: warden.maxAssignedWardens,
+      live,
+      candidates: susAnomalies.map(item => item.sessionId),
+      queued: queuedAnomalies.map(item => item.sessionId),
+      isStillSuspect,
+    });
+
+    const spawned: string[] = [];
+    for (const targetId of decision.spawn) {
+      const anomaly = anomalyById.get(targetId);
+      const target = byId.get(targetId);
+      if (!anomaly || !target) continue; // defensive: id always resolves here
       const at = now();
       const reportPath = path.join(this.paths.wardenReports, `${at.replace(/[:.]/g, '-')}-${targetId}.md`);
       await mkdir(this.paths.wardenReports, { recursive: true, mode: 0o700 });
@@ -6114,8 +6171,16 @@ export class SessionManager implements KTeamService {
         });
       }
     }
+
+    // Persist the carried-over queue (still-sus, no slot) and report drops.
     this.wardenState.assignments = assignments;
     this.wardenState.assignedCooldowns = cooldowns;
+    this.wardenState.assignedQueue = decision.queue
+      .map(id => anomalyById.get(id))
+      .filter((a): a is WardenAnomaly => a !== undefined);
+    if (decision.dropped.length > 0) {
+      this.emitTransient('fleet.warden_dequeued', { targets: decision.dropped, reason: 'recovered' });
+    }
     await this.saveWardenState();
     return spawned;
   }
@@ -6205,10 +6270,17 @@ export class SessionManager implements KTeamService {
     // "Live" excludes protected statuses (terminal + kill_failed): a warden whose
     // pane could not be killed must NOT block escalation forever â the spawn gap
     // below still rate-limits fresh wardens, so a wedged warden ages out.
-    const live = sessions.find(
+    const liveWardens = sessions.filter(
       view => view.config.label === WARDEN_LABEL && !protectedStatuses.includes(view.state.status),
     );
-    if (live) return { message: `a warden session is already live (${live.config.id})` };
+    // Fleet-wide concurrency cap SHARED with assigned wardens: the sweep warden
+    // draws down the same budget, so a full cap (default 1 = any live warden)
+    // blocks escalation. This is what makes "one warden at a time" hold across
+    // BOTH spawn sites.
+    if (wardenSlotsFree(warden.maxAssignedWardens, liveWardens.length) <= 0)
+      return {
+        message: `warden concurrency cap reached (${liveWardens.length}/${Math.max(1, warden.maxAssignedWardens)} live)`,
+      };
     const lastSpawnMs = this.wardenState.lastSpawnAt ? Date.parse(this.wardenState.lastSpawnAt) : 0;
     const gapMs = Math.max(0, warden.minSpawnGapMinutes * 60_000);
     if (!force && lastSpawnMs && Date.now() - lastSpawnMs < gapMs)
