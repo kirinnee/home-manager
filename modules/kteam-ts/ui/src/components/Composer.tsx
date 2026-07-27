@@ -37,6 +37,7 @@ import { useKeyboardOpen } from '../hooks/useAppViewport';
 import { useDebouncedEffect } from '../hooks/useDebounce';
 import { clearDraft, loadDraft, saveDraft } from '../lib/drafts';
 import { readInputModality, useInputModality } from '../hooks/useInputModality';
+import { useDictationBundle } from './DictationControl';
 
 /** Quiet window before a non-empty draft is written to storage. Debounced so a
  *  fast typist does not hit localStorage on every keystroke; short enough that a
@@ -214,18 +215,64 @@ export function composerStatusCopy({
   };
 }
 
+/** MAY THE COMPOSER PULL FOCUS BACK TO ITSELF RIGHT NOW?
+ *
+ *  `activeElementIsBody` means "focus fell off something", which is the case
+ *  this exists to repair — but it is ALSO exactly what a reader selecting
+ *  transcript prose looks like, because prose is not focusable. Focusing a text
+ *  field discards the document selection, so refocusing on that signal alone
+ *  silently deletes the reader's highlight.
+ *
+ *  Measured against the deployed build (A/B, desktop viewport, a session with
+ *  nothing running): as shipped, a held selection died within 1s to a single
+ *  `focus()` call, with ZERO DOM mutations anywhere in the transcript — which is
+ *  why three rounds of mutation-hunting never found it. Vetoing the refocus on a
+ *  held selection kept the same selection alive for 20s across 46 suppressed
+ *  attempts.
+ *
+ *  Nothing else changes: a selection is released the moment the reader clicks or
+ *  types, and the very next render restores focus exactly as before. */
 export function shouldRefocusComposer({
   touchAffected,
   activeElementIsBody,
   disabled,
   sending,
+  selectionHeld,
 }: {
   touchAffected: boolean;
   activeElementIsBody: boolean;
   disabled?: boolean;
   sending?: boolean;
+  /** Is the reader holding a text selection in the document (i.e. outside this
+   *  textarea — a textarea's own selection is not part of the document
+   *  Selection, so typing and dictation are unaffected)? */
+  selectionHeld?: boolean;
 }): boolean {
-  return !touchAffected && activeElementIsBody && !disabled && !sending;
+  return !touchAffected && activeElementIsBody && !disabled && !sending && !selectionHeld;
+}
+
+/** Is a document text selection currently held? Mirrors the transcript's own
+ *  test (Transcript.pinBlockedBySelection, TranscriptRow.isPlainBlockTap): a
+ *  non-collapsed selection with at least one range. A bare caret is no
+ *  obstacle. */
+function documentSelectionHeld(): boolean {
+  const s = typeof window === 'undefined' ? null : window.getSelection();
+  return !!s && !s.isCollapsed && s.rangeCount > 0;
+}
+
+/** Restore the caret after a dictated transcript has rendered into the
+ * controlled textarea. Deliberately does not focus: on touch, focus would raise
+ * the keyboard under the reader's thumb just because transcription finished. */
+export function restoreComposerSelection(
+  input: Pick<HTMLTextAreaElement, 'value' | 'setSelectionRange'> | null,
+  expectedText: string,
+  caret: number,
+): boolean {
+  if (!input || input.value !== expectedText) return false;
+  const finiteCaret = Number.isFinite(caret) ? Math.trunc(caret) : expectedText.length;
+  const boundedCaret = Math.max(0, Math.min(expectedText.length, finiteCaret));
+  input.setSelectionRange(boundedCaret, boundedCaret);
+  return true;
 }
 
 /**
@@ -330,6 +377,19 @@ export function Composer({
   const disabledReasonId = useId();
   const keyboardOpen = useKeyboardOpen();
   const { touchAffected, enterSends } = useInputModality();
+  const pendingDictationSelection = useRef<{ text: string; caret: number } | null>(null);
+  const dictation = useDictationBundle({
+    sessionId,
+    draft,
+    selectionRef: ref,
+    disabled: disabled || sending,
+    layout: 'compact',
+    onDraftChange: result => {
+      pendingDictationSelection.current = result;
+      onDraftChange(result.text);
+    },
+  });
+  const dictationActive = dictation.supported && dictation.handle.phase !== 'idle';
   // The growth cap is a property of the box the reader can see, so it follows
   // the viewport rather than the device. Desktop is unchanged at 148px.
   const maxTextareaPx = !compact
@@ -340,6 +400,14 @@ export function Composer({
 
   // Keep focus on the composer across re-renders (the user types → state
   // updates → React re-renders → focus would otherwise jump to <body>).
+  //
+  // NO DEPENDENCY ARRAY, so this runs after EVERY render — and the store
+  // re-renders SessionChatPage on every fleet notification, ~2-3 times a second
+  // whenever ANY session in the fleet is doing something, whether or not this
+  // one is. That cadence is harmless now that a held selection vetoes the
+  // refocus (see shouldRefocusComposer), but it is what turned this effect into
+  // "the highlight vanishes about a second after I make it", on a session that
+  // was itself completely idle.
   useEffect(() => {
     if (
       ref.current &&
@@ -348,6 +416,7 @@ export function Composer({
         activeElementIsBody: document.activeElement === document.body,
         disabled,
         sending,
+        selectionHeld: documentSelectionHeld(),
       })
     ) {
       ref.current.focus();
@@ -366,6 +435,18 @@ export function Composer({
     el.style.height = `${next}px`;
     el.style.overflowY = el.scrollHeight > maxTextareaPx ? 'auto' : 'hidden';
   }, [draft, maxTextareaPx]);
+
+  // Dictation updates a controlled value, so the browser cannot place the caret
+  // until React has committed that value. Restore only the selection here;
+  // never call focus(), and discard a stale selection if the parent changed the
+  // draft to something other than the transcript result in the meantime.
+  useLayoutEffect(() => {
+    const pending = pendingDictationSelection.current;
+    if (!pending) return;
+    pendingDictationSelection.current = null;
+    if (pending.text !== draft) return;
+    restoreComposerSelection(ref.current, pending.text, pending.caret);
+  }, [draft]);
 
   // ---- per-session draft persistence ---------------------------------------
   //
@@ -568,7 +649,12 @@ export function Composer({
         // a busy row (attach + Interrupt & send + Queue) never overflows.
         <>
           <div className="kt-composer__dock flex items-end gap-xs">
-            {attachControl && <div className="flex shrink-0 items-end">{attachControl}</div>}
+            {(attachControl || dictation.control) && (
+              <div className="flex shrink-0 items-end gap-xs">
+                {attachControl}
+                {dictation.control}
+              </div>
+            )}
             <div className="min-w-0 flex-1">
               {/* Borderless + transparent: the composer WRAPPER is the input as
                   far as the eye and the focus ring are concerned. */}
@@ -616,6 +702,9 @@ export function Composer({
             <span className="sr-only" aria-live="polite" aria-atomic="true">
               {statusCopy.liveText}
             </span>
+            {/* Idle dictation has no in-flow node. A permanent h-5 placeholder
+                here would give back the 20px the keyboard-open layout reclaimed. */}
+            {dictationActive && dictation.status}
             {/* The model, now a tap target — one tap from where the reader is to
                 switch it (ComposerRuntime owns the sheet). It carries its own
                 `data-kb-hide`, so it collapses with the rest of the meta line
@@ -650,6 +739,7 @@ export function Composer({
 
           <div className="kt-composer__actions min-h-control flex flex-nowrap items-center gap-x-sm gap-y-xs">
             <div className="mr-auto flex min-w-0 items-center gap-sm overflow-hidden">
+              {dictationActive && dictation.status}
               {context && <ContextStrip context={context} />}
               {context && enterSends && <Sep />}
               {/* Deliberately NOT `.kt-chrome`: this tells the reader how the
@@ -685,6 +775,7 @@ export function Composer({
 
             <div className="flex shrink-0 items-center gap-xs">
               {attachControl}
+              {dictation.control}
               {interruptControl}
               {sendControl}
             </div>
