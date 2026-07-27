@@ -16,7 +16,7 @@
       // Same contract as index.html's pre-paint bootstrap, minimised: resolve
       // the stored preference to one data-theme attribute before first paint.
       (function () {
-        var FAMILIES = ['studio', 'mission', 'neo', 'ember', 'contrast'];
+        var FAMILIES = ['studio', 'mission', 'neo', 'ember', 'contrast', 'notebook'];
         var MODES = ['system', 'light', 'dark'];
         var family = 'studio';
         var mode = 'system';
@@ -64,6 +64,8 @@
       [data-theme='ember-dark'] { --bg: #17120d; --fg: #f5e9d8; --accent: #f0a35a; --border: #3a2f24; }
       [data-theme='contrast-light'] { --bg: #ffffff; --fg: #000000; --accent: #0033a0; --border: #000000; }
       [data-theme='contrast-dark'] { --bg: #000000; --fg: #ffffff; --accent: #7fd4ff; --border: #ffffff; }
+      [data-theme='notebook-light'] { --bg: #f4f1e6; --fg: #22242e; --accent: #2f4ea3; --border: #e0d9c6; }
+      [data-theme='notebook-dark'] { --bg: #181b1e; --fg: #e9e6da; --accent: #8fb4e6; --border: #3a4048; }
       * { box-sizing: border-box; }
       html, body { margin: 0; height: 100%; }
       body {
