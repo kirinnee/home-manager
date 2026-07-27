@@ -8,20 +8,13 @@
 // near the top edge, away from the composer and newest transcript rows, and can
 // be hidden without cancelling the recording; the mic button brings it back.
 //
-// HONEST ABOUT "LIVE". Streaming was measured on this fleet and rejected — the
-// real-time factor is far above 1, so there is no way to show words as they are
-// spoken. This sheet therefore NEVER shows partial text or implies it is
-// keeping up. What it shows honestly:
-//   - RECORDING: a live indicator and an elapsed clock, so it is obviously
-//     capturing right now.
-//   - TRANSCRIBING: an indeterminate, MOVING bar — the work takes a few seconds
-//     and a frozen spinner reads as a hang. It is honest because it claims
-//     progress-is-happening, not a specific percentage.
-//   - REVIEW: the finished text in an editable field. Editing here, and the
-//     explicit Insert, are the safety property: dictation is the one input the
-//     reader cannot see before it exists, so nothing is committed for them.
-//   - FAILURE: the real reason, out loud — mic blocked, daemon unreachable,
-//     model not ready — each with Try again / Cancel rather than a dead spinner.
+// HONEST ABOUT LOCAL LIVE TEXT. Parakeet is a whole-buffer recogniser, not a
+// word-streaming API. Silence-aligned phrases appear while the microphone is
+// still open. The newest decoded phrase is PROVISIONAL and separately editable;
+// the earlier text is COMMITTED and user-owned. A later phrase appends — it
+// never assigns over either field or anything typed in the composer.
+//   - FAILURE: the real reason, out loud — mic blocked, model not prepared,
+//     local decode stalled — each with Try again / Cancel rather than a dead spinner.
 //
 import { useEffect, useId, useRef } from 'react';
 import { Mic, Square, Loader2, AlertCircle, CornerDownLeft, RotateCcw, X } from 'lucide-react';
@@ -29,7 +22,6 @@ import { Button, Textarea } from './Primitives';
 import { InputWaveform } from './InputWaveform';
 import type { DictationPhase } from '../hooks/useDictation';
 import type { CaptureMonitor } from '../lib/stt/audio-capture';
-import type { SttMode } from '../lib/stt/stt-settings';
 import { cn } from '../lib/utils';
 
 /** The visible step, derived from the capture phase plus what has landed. Pure
@@ -80,12 +72,21 @@ export function dictationFailureCopy(code: string | undefined): { title: string;
       return { title: 'Microphone busy', hint: 'Another app is using it. Close it and try again.' };
     case 'no-media-devices':
       return { title: 'Microphone unavailable', hint: 'This page needs a secure (https) connection to record.' };
-    case 'unavailable':
-      return { title: 'Speech model not ready', hint: 'The transcription model is still downloading or offline.' };
-    case 'unauthorized':
-      return { title: 'No transcription access' };
-    case 'network':
-      return { title: 'Daemon unreachable', hint: 'The transcription service could not be reached. Try again.' };
+    case 'not-prepared':
+      return {
+        title: 'Prepare this device first',
+        hint: 'Open Settings → Dictation and prepare the local speech model, then try again.',
+      };
+    case 'backlog':
+      return {
+        title: 'This device is falling behind',
+        hint: 'Recording stopped before any queued speech could be silently dropped. You can keep and insert the text below.',
+      };
+    case 'empty-segment':
+      return {
+        title: "One phrase wasn't readable",
+        hint: 'Recording stopped rather than silently omitting voiced audio. You can keep and insert the text below.',
+      };
     case 'too-long':
       return { title: 'Recording too long' };
     case 'bad-audio':
@@ -98,21 +99,23 @@ export function dictationFailureCopy(code: string | undefined): { title: string;
 export interface DictationSheetProps {
   open: boolean;
   stage: DictationStage;
-  mode: SttMode;
   /** Milliseconds elapsed in the CURRENT recording. Ignored off the recording
    *  stage. */
   elapsedMs: number;
   /** A read-only branch off the recorder's exact stream/audio graph. */
   inputMonitor: CaptureMonitor | null;
-  /** The editable transcript, shown on the review stage. Controlled by the
-   *  owner so an edit and an insert read the same value. */
-  text: string;
-  onTextChange(value: string): void;
+  /** Earlier silence-aligned phrases. Once displayed, this is reader-owned. */
+  committedText: string;
+  /** Newest decoded phrase; promoted only from the reader's current value. */
+  provisionalText: string;
+  pendingSegments: number;
+  onCommittedTextChange(value: string): void;
+  onProvisionalTextChange(value: string): void;
   errorCode?: string;
   errorMessage?: string;
   /** Hide only. Recording/transcription/review continues in the background. */
   onDismiss(): void;
-  /** Stop recording and transcribe. */
+  /** Stop recording and finish queued local transcription. */
   onStop(): void;
   /** Throw the recording/transcript away and close. */
   onCancel(): void;
@@ -136,11 +139,13 @@ function LiveDot() {
 export function DictationSheet({
   open,
   stage,
-  mode,
   elapsedMs,
   inputMonitor,
-  text,
-  onTextChange,
+  committedText,
+  provisionalText,
+  pendingSegments,
+  onCommittedTextChange,
+  onProvisionalTextChange,
   errorCode,
   errorMessage,
   onDismiss,
@@ -156,8 +161,8 @@ export function DictationSheet({
   // On review, drop the caret at the end of the transcript so a correction or a
   // follow-on word starts where the reader expects — but do NOT auto-focus:
   // focusing raises the keyboard under the reader's thumb the instant
-  // transcription finishes, which is exactly the surprise the hold-to-talk mic
-  // was faulted for. The reader taps to edit; then the caret is already home.
+  // transcription finishes, which would be a surprise on a phone. The reader
+  // taps to edit; then the caret is already home.
   useEffect(() => {
     if (!open || stage !== 'review') return;
     const el = editRef.current;
@@ -171,7 +176,7 @@ export function DictationSheet({
     stage === 'review'
       ? 'Review dictation'
       : stage === 'transcribing'
-        ? 'Transcribing'
+        ? 'Finishing locally'
         : stage === 'recording'
           ? 'Recording'
           : stage === 'error'
@@ -181,6 +186,7 @@ export function DictationSheet({
               : 'Opening microphone';
 
   if (!open) return null;
+  const hasEditableText = `${committedText}${provisionalText}`.trim().length > 0;
 
   return (
     <section
@@ -242,15 +248,14 @@ export function DictationSheet({
           </Button>
         </div>
 
-        {/* One polite live region carries the stage change to assistive tech —
-            state words only, never a partial transcript. */}
+        {/* One polite live region carries stage changes. Editable transcript
+            fields keep their own labels; repeatedly announcing every phrase
+            here would interrupt someone correcting the previous one. */}
         <span className="sr-only" aria-live="polite" aria-atomic="true">
           {stage === 'recording'
             ? 'Recording'
             : stage === 'transcribing'
-              ? mode === 'local'
-                ? 'Transcribing on this device'
-                : 'Transcribing'
+              ? 'Finishing transcription on this device'
               : stage === 'review'
                 ? 'Transcript ready to review'
                 : stage === 'empty'
@@ -261,15 +266,34 @@ export function DictationSheet({
         </span>
 
         {(stage === 'starting' || stage === 'recording') && (
-          <RecordingBody stage={stage} inputMonitor={inputMonitor} onStop={onStop} onCancel={onCancel} />
+          <RecordingBody
+            stage={stage}
+            inputMonitor={inputMonitor}
+            committedText={committedText}
+            provisionalText={provisionalText}
+            pendingSegments={pendingSegments}
+            onCommittedTextChange={onCommittedTextChange}
+            onProvisionalTextChange={onProvisionalTextChange}
+            onStop={onStop}
+            onCancel={onCancel}
+          />
         )}
 
-        {stage === 'transcribing' && <TranscribingBody mode={mode} onCancel={onCancel} />}
+        {stage === 'transcribing' && (
+          <TranscribingBody
+            committedText={committedText}
+            provisionalText={provisionalText}
+            pendingSegments={pendingSegments}
+            onCommittedTextChange={onCommittedTextChange}
+            onProvisionalTextChange={onProvisionalTextChange}
+            onCancel={onCancel}
+          />
+        )}
 
         {stage === 'review' && (
           <ReviewBody
-            text={text}
-            onTextChange={onTextChange}
+            text={committedText}
+            onTextChange={onCommittedTextChange}
             editRef={editRef}
             onInsert={onInsert}
             onRetry={onRetry}
@@ -286,7 +310,21 @@ export function DictationSheet({
           />
         )}
 
-        {stage === 'error' && (
+        {stage === 'error' && hasEditableText && (
+          <FailureWithText
+            body={errorMessage ?? 'Local transcription stopped.'}
+            hint={failure.hint}
+            committedText={committedText}
+            provisionalText={provisionalText}
+            onCommittedTextChange={onCommittedTextChange}
+            onProvisionalTextChange={onProvisionalTextChange}
+            onInsert={onInsert}
+            onRetry={onRetry}
+            onCancel={onCancel}
+          />
+        )}
+
+        {stage === 'error' && !hasEditableText && (
           <MessageBody
             body={errorMessage ?? 'Dictation failed.'}
             hint={failure.hint}
@@ -303,11 +341,21 @@ export function DictationSheet({
 function RecordingBody({
   stage,
   inputMonitor,
+  committedText,
+  provisionalText,
+  pendingSegments,
+  onCommittedTextChange,
+  onProvisionalTextChange,
   onStop,
   onCancel,
 }: {
   stage: DictationStage;
   inputMonitor: CaptureMonitor | null;
+  committedText: string;
+  provisionalText: string;
+  pendingSegments: number;
+  onCommittedTextChange(value: string): void;
+  onProvisionalTextChange(value: string): void;
   onStop(): void;
   onCancel(): void;
 }) {
@@ -315,20 +363,31 @@ function RecordingBody({
   return (
     <div className="flex flex-col gap-sm">
       <p className="text-ui text-muted">
-        {starting ? 'Opening the microphone…' : 'Listening — keep typing, then stop when you are done.'}
+        {starting
+          ? 'Opening the microphone and local speech model…'
+          : 'Listening locally — pause naturally to preview a phrase. Keep typing if you like.'}
       </p>
       {!starting && <InputWaveform monitor={inputMonitor} />}
+      {!starting && (
+        <LiveTranscriptFields
+          committedText={committedText}
+          provisionalText={provisionalText}
+          pendingSegments={pendingSegments}
+          onCommittedTextChange={onCommittedTextChange}
+          onProvisionalTextChange={onProvisionalTextChange}
+        />
+      )}
       <div className="flex gap-xs">
         <Button
           variant="primary"
           size="md"
           className="min-h-[44px] min-w-0 flex-1 justify-center gap-sm text-ui"
           disabled={starting}
-          aria-label="Stop recording and transcribe"
+          aria-label="Stop recording and finish local transcription"
           onClick={onStop}
         >
           <Square size={15} aria-hidden="true" />
-          Stop &amp; transcribe
+          Stop &amp; finish
         </Button>
         <Button
           variant="ghost"
@@ -345,12 +404,91 @@ function RecordingBody({
   );
 }
 
-function TranscribingBody({ mode, onCancel }: { mode: SttMode; onCancel(): void }) {
+interface LiveTranscriptFieldsProps {
+  committedText: string;
+  provisionalText: string;
+  pendingSegments: number;
+  onCommittedTextChange(value: string): void;
+  onProvisionalTextChange(value: string): void;
+}
+
+function LiveTranscriptFields({
+  committedText,
+  provisionalText,
+  pendingSegments,
+  onCommittedTextChange,
+  onProvisionalTextChange,
+}: LiveTranscriptFieldsProps) {
+  const hasText = `${committedText}${provisionalText}`.trim().length > 0;
+  if (!hasText && pendingSegments === 0) {
+    return (
+      <div
+        data-live-transcript="waiting"
+        className="rounded-control border border-dashed border-border bg-surface-2 px-3 py-2 text-meta leading-base text-faint"
+      >
+        Your first phrase will appear here after a natural pause. Audio stays on this device.
+      </div>
+    );
+  }
+  return (
+    <div data-live-transcript="editable" className="flex flex-col gap-xs">
+      <div className="rounded-control border border-ok-border bg-surface-2 p-2">
+        <label className="mb-1 flex items-center justify-between gap-2 text-meta font-semibold text-ok">
+          <span>Committed · yours to edit</span>
+          <span className="font-normal text-faint">kept</span>
+        </label>
+        <Textarea
+          value={committedText}
+          onChange={event => onCommittedTextChange(event.target.value)}
+          rows={2}
+          aria-label="Committed dictated text"
+          placeholder="Earlier phrases settle here. Later speech only appends."
+          className="min-h-[64px] w-full bg-surface"
+        />
+      </div>
+      <div className="rounded-control border border-accent-border bg-accent-soft p-2">
+        <label className="mb-1 flex items-center justify-between gap-2 text-meta font-semibold text-accent">
+          <span>Provisional · still settling</span>
+          <span className="font-normal text-faint">editable</span>
+        </label>
+        <Textarea
+          value={provisionalText}
+          onChange={event => onProvisionalTextChange(event.target.value)}
+          rows={2}
+          aria-label="Provisional dictated text"
+          placeholder={
+            pendingSegments > 0 ? 'Recognising the next phrase on this device…' : 'Newest phrase appears here.'
+          }
+          className="min-h-[64px] w-full border-accent-border bg-surface italic"
+        />
+      </div>
+      {pendingSegments > 0 && (
+        <p className="text-meta text-accent" role="status">
+          Recognising {pendingSegments === 1 ? 'one local phrase' : `${pendingSegments} local phrases`}…
+        </p>
+      )}
+    </div>
+  );
+}
+
+function TranscribingBody({
+  committedText,
+  provisionalText,
+  pendingSegments,
+  onCommittedTextChange,
+  onProvisionalTextChange,
+  onCancel,
+}: LiveTranscriptFieldsProps & { onCancel(): void }) {
   return (
     <div className="flex flex-col gap-sm">
-      <p className="text-ui text-muted">
-        {mode === 'local' ? 'Transcribing on this device…' : 'Transcribing your recording…'}
-      </p>
+      <p className="text-ui text-muted">Finishing the last phrase on this device. You can keep editing.</p>
+      <LiveTranscriptFields
+        committedText={committedText}
+        provisionalText={provisionalText}
+        pendingSegments={pendingSegments}
+        onCommittedTextChange={onCommittedTextChange}
+        onProvisionalTextChange={onProvisionalTextChange}
+      />
       {/* Indeterminate, MOVING bar: honest about "something is happening" without
           claiming a percentage the engine never reports. */}
       <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-2" aria-hidden="true">
@@ -366,6 +504,70 @@ function TranscribingBody({ mode, onCancel }: { mode: SttMode; onCancel(): void 
         <X size={14} aria-hidden="true" />
         Cancel
       </Button>
+    </div>
+  );
+}
+
+function FailureWithText({
+  body,
+  hint,
+  committedText,
+  provisionalText,
+  onCommittedTextChange,
+  onProvisionalTextChange,
+  onInsert,
+  onRetry,
+  onCancel,
+}: Omit<LiveTranscriptFieldsProps, 'pendingSegments'> & {
+  body: string;
+  hint?: string;
+  onInsert(): void;
+  onRetry(): void;
+  onCancel(): void;
+}) {
+  return (
+    <div className="flex flex-col gap-sm">
+      <p className="text-ui text-fg">{body}</p>
+      {hint && <p className="text-meta leading-base text-muted">{hint}</p>}
+      <LiveTranscriptFields
+        committedText={committedText}
+        provisionalText={provisionalText}
+        pendingSegments={0}
+        onCommittedTextChange={onCommittedTextChange}
+        onProvisionalTextChange={onProvisionalTextChange}
+      />
+      <Button
+        variant="primary"
+        size="md"
+        className="min-h-[48px] w-full justify-center gap-sm text-ui"
+        aria-label="Insert the captured text into the message"
+        onClick={onInsert}
+      >
+        <CornerDownLeft size={15} aria-hidden="true" />
+        Insert captured text
+      </Button>
+      <div className="flex gap-sm">
+        <Button
+          variant="ghost"
+          size="md"
+          className="min-h-[44px] flex-1 justify-center gap-xs"
+          aria-label="Discard and record again"
+          onClick={onRetry}
+        >
+          <RotateCcw size={14} aria-hidden="true" />
+          Record again
+        </Button>
+        <Button
+          variant="ghost"
+          size="md"
+          className="min-h-[44px] flex-1 justify-center gap-xs"
+          aria-label="Discard dictation"
+          onClick={onCancel}
+        >
+          <X size={14} aria-hidden="true" />
+          Cancel
+        </Button>
+      </div>
     </div>
   );
 }

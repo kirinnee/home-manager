@@ -34,6 +34,16 @@ const {
 } = await import('./local-engine');
 const { resetOrtRuntimeConfiguration } = await import('./ort-assets');
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
+
 /* ---------- fakes ---------------------------------------------------------- */
 
 class FakeCache {
@@ -264,6 +274,15 @@ describe('the first-microphone download is forbidden', () => {
     expect(await transcribeLocal(new Float32Array(0))).toBe('');
     expect(fromUrls).not.toHaveBeenCalled();
   });
+
+  test('an already-cancelled local decode never loads the model', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(transcribeLocal(new Float32Array([0.1]), { signal: controller.signal })).rejects.toMatchObject({
+      code: 'aborted',
+    });
+    expect(fromUrls).not.toHaveBeenCalled();
+  });
 });
 
 /* ---------- loading from the prepared cache -------------------------------- */
@@ -317,6 +336,44 @@ describe('loading uses the PREPARED bytes, not the network', () => {
     await transcribeLocal(new Float32Array([0.1]));
     await transcribeLocal(new Float32Array([0.2]));
     expect(fromUrls).toHaveBeenCalledTimes(1);
+  });
+
+  test('serializes decodes globally, including across recording generations', async () => {
+    const first = deferred<{ utterance_text: string }>();
+    const second = deferred<{ utterance_text: string }>();
+    const firstStarted = deferred<void>();
+    const secondStarted = deferred<void>();
+    let calls = 0;
+    let active = 0;
+    let peakActive = 0;
+    fromUrls.mockImplementationOnce(async () => ({
+      transcribe: async () => {
+        calls += 1;
+        active += 1;
+        peakActive = Math.max(peakActive, active);
+        if (calls === 1) firstStarted.resolve();
+        else secondStarted.resolve();
+        const result = await (calls === 1 ? first.promise : second.promise);
+        active -= 1;
+        return result;
+      },
+    }));
+
+    const a = transcribeLocal(new Float32Array([0.1]));
+    const b = transcribeLocal(new Float32Array([0.2]));
+    await firstStarted.promise;
+    expect(calls).toBe(1);
+    expect(active).toBe(1);
+
+    first.resolve({ utterance_text: 'first' });
+    await secondStarted.promise;
+    expect(await a).toBe('first');
+    expect(calls).toBe(2);
+    expect(peakActive).toBe(1);
+
+    second.resolve({ utterance_text: 'second' });
+    expect(await b).toBe('second');
+    expect(active).toBe(0);
   });
 });
 
@@ -439,9 +496,10 @@ describe('prepareLocalModel', () => {
 
   test('maps a storage refusal onto an actionable quota message', async () => {
     cache.putFailure = Object.assign(new Error('no room'), { name: 'QuotaExceededError' });
-    await expect(prepareLocalModel({ assets: TINY_ASSETS, fetchImpl: serveTiny() })).rejects.toMatchObject({
-      code: 'quota',
-    });
+    const failure = prepareLocalModel({ assets: TINY_ASSETS, fetchImpl: serveTiny() });
+    await expect(failure).rejects.toMatchObject({ code: 'quota' });
+    await expect(failure).rejects.toThrow(/free some space/i);
+    await expect(failure).rejects.not.toThrow(/daemon/i);
   });
 
   test('a cancelled preparation stops, and says it was cancelled', async () => {

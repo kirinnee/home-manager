@@ -1,25 +1,19 @@
 import { describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
-  DAEMON_LANGUAGE_NOTE,
-  DAEMON_MODE_SUMMARY,
   DICTATION_SAFETY_NOTE,
   DictationSettings,
   ENHANCEMENT_EXPLANATION,
   ENHANCEMENT_SOURCES_EXPLANATION,
   USER_CONTEXT_EXPLANATION,
-  LOCAL_LANGUAGE_NOTE,
   LOCAL_MODE_SUMMARY,
   LOCAL_MODE_TRADEOFFS,
   formatBytes,
-  languageNote,
-  languageOptionDisabled,
   needsBoxBrowserModel,
 } from './DictationSettings';
-import { STT_LANGUAGES } from '../lib/stt/stt-settings';
 
-/** Server rendering gives the DEFAULT settings (daemon, English, enhancement
- *  on) and no effects, which is exactly the first paint a reader sees. */
+/** Server rendering gives the local-only defaults (enhancement on) and no
+ * effects, which is exactly the first paint a reader sees. */
 const html = renderToStaticMarkup(<DictationSettings />);
 
 /** Entity-decoded, so assertions can be written in the copy's own characters. */
@@ -67,27 +61,6 @@ describe('needsBoxBrowserModel — the two-stage install', () => {
   });
 });
 
-describe('the language selector is honest about what it controls', () => {
-  test('daemon mode disables every language but English', () => {
-    expect(languageOptionDisabled('daemon', 'en')).toBe(false);
-    for (const language of STT_LANGUAGES.filter(entry => entry.code !== 'en')) {
-      expect(languageOptionDisabled('daemon', language.code)).toBe(true);
-    }
-  });
-
-  test('local mode disables nothing — and the note explains why that is not the same as working', () => {
-    for (const language of STT_LANGUAGES) expect(languageOptionDisabled('local', language.code)).toBe(false);
-    expect(languageNote('local')).toBe(LOCAL_LANGUAGE_NOTE);
-    // parakeet.js 1.4.4 accepts no language anywhere, so the honest note says
-    // the choice does not apply here rather than implying it does.
-    expect(LOCAL_LANGUAGE_NOTE).toContain('does not change transcription on this device');
-  });
-
-  test('daemon mode gets the English-only note', () => {
-    expect(languageNote('daemon')).toBe(DAEMON_LANGUAGE_NOTE);
-  });
-});
-
 describe('the mandatory local-mode disclosures', () => {
   test('every cost is rendered — there is no "show more"', () => {
     for (const tradeoff of LOCAL_MODE_TRADEOFFS) expect(text).toContain(tradeoff);
@@ -95,7 +68,7 @@ describe('the mandatory local-mode disclosures', () => {
 
   test('the four costs the brief requires are each stated', () => {
     const joined = LOCAL_MODE_TRADEOFFS.join(' ');
-    expect(joined).toContain('640 MB per device');
+    expect(joined).toContain('700 MB per device');
     expect(joined.toLowerCase()).toContain('slower on a phone');
     expect(joined).toContain('Safari clears unused site storage');
     expect(joined.toLowerCase()).toContain('battery');
@@ -106,23 +79,18 @@ describe('the mandatory local-mode disclosures', () => {
   });
 });
 
-describe('modes', () => {
-  test('offers exactly two, as a radiogroup, with daemon selected by default', () => {
-    expect(html).toContain('role="radiogroup"');
-    const radios = html.match(/role="radio"/gu) ?? [];
-    expect(radios).toHaveLength(2);
-    expect(text).toContain('On my box (recommended)');
-    expect(text).toContain('On this device');
-    expect(html).toMatch(/aria-checked="true"[\s\S]*?On my box \(recommended\)/u);
+describe('one local engine', () => {
+  test('shows one truthful local path and no selectable/dead daemon path', () => {
+    expect(html).not.toContain('role="radiogroup"');
+    expect(html).not.toContain('role="radio"');
+    expect(text).toContain('Transcribed on this device');
+    expect(text).not.toContain('On my box (recommended)');
+    expect(text).not.toContain('Box transcription');
   });
 
-  test('the daemon card carries the recommendation, not a footnote', () => {
-    expect(text).toContain(DAEMON_MODE_SUMMARY);
-    expect(DAEMON_MODE_SUMMARY.startsWith('Recommended.')).toBe(true);
-  });
-
-  test('the local card is upfront that it is desktop-first', () => {
+  test('states that microphone audio never goes to the box or a third party', () => {
     expect(text).toContain(LOCAL_MODE_SUMMARY);
+    expect(LOCAL_MODE_SUMMARY).toContain('never sent to your box or a third party');
   });
 
   test('states why WebGPU is not used, rather than leaving it unexplained', () => {
@@ -187,15 +155,16 @@ describe('readiness', () => {
     expect(text).toContain('/stt-models/parakeet-browser-v3');
   });
 
-  test('offers a re-check for the box', () => {
-    expect(text).toContain('Re-check');
+  test('describes the box as a model-file source, not a transcription engine', () => {
+    expect(text).toContain('Your box hosts the pinned files');
+    expect(text).not.toContain('Your box does the transcribing');
   });
 });
 
 describe('the touch and focus rules', () => {
   test('EVERY interactive target is at least 44 px', () => {
     const elements = interactiveElements(html);
-    expect(elements.length).toBeGreaterThan(4);
+    expect(elements.length).toBeGreaterThan(3);
     for (const element of elements) {
       expect(element).toContain('min-h-[44px]');
     }
@@ -205,11 +174,9 @@ describe('the touch and focus rules', () => {
     expect(html.toLowerCase()).not.toContain('autofocus');
   });
 
-  test('the language selector is a real, labelled control', () => {
-    expect(html).toContain('id="stt-language"');
-    expect(html).toContain('for="stt-language"');
-    const options = html.match(/<option\b/gu) ?? [];
-    expect(options).toHaveLength(STT_LANGUAGES.length);
+  test('does not render a language selector the local engine cannot honour', () => {
+    expect(html).not.toContain('id="stt-language"');
+    expect(html).not.toContain('<select');
   });
 });
 

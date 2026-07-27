@@ -42,40 +42,31 @@ function theButton(html: string): string {
   return match[0];
 }
 
-describe('dictationStatusCopy — never claims live text', () => {
-  test('says Recording while capturing and Transcribing after stop', () => {
-    expect(dictationStatusCopy('recording', 'daemon')).toBe('Recording…');
-    expect(dictationStatusCopy('transcribing', 'daemon')).toBe('Transcribing…');
-  });
-
-  test('names the device when the work is happening on it', () => {
-    expect(dictationStatusCopy('transcribing', 'local')).toBe('Transcribing on this device…');
+describe('dictationStatusCopy — local-only state', () => {
+  test('says Recording while capturing and names the device while finishing', () => {
+    expect(dictationStatusCopy('recording')).toBe('Recording…');
+    expect(dictationStatusCopy('transcribing')).toBe('Finishing on this device…');
   });
 
   test('idle says nothing at all', () => {
-    expect(dictationStatusCopy('idle', 'daemon')).toBe('');
+    expect(dictationStatusCopy('idle')).toBe('');
   });
 
   test('the permission wait is its own state, not "Recording"', () => {
-    expect(dictationStatusCopy('requesting', 'daemon')).toBe('Waiting for microphone permission…');
+    expect(dictationStatusCopy('requesting')).toBe('Waiting for microphone permission…');
   });
 
   test('an error shows the failure, with a fallback when there is no message', () => {
-    expect(dictationStatusCopy('error', 'daemon', 'Microphone access was blocked.')).toBe(
-      'Microphone access was blocked.',
-    );
-    expect(dictationStatusCopy('error', 'daemon')).toBe('Dictation failed.');
+    expect(dictationStatusCopy('error', 'Microphone access was blocked.')).toBe('Microphone access was blocked.');
+    expect(dictationStatusCopy('error')).toBe('Dictation failed.');
   });
 
-  test('NO phase, in either mode, promises live or streaming text', () => {
+  test('NO phase implies daemon or cloud transcription', () => {
     const phases = ['idle', 'requesting', 'recording', 'transcribing', 'error'] as const;
-    for (const mode of ['daemon', 'local'] as const) {
-      for (const phase of phases) {
-        const copy = dictationStatusCopy(phase, mode).toLowerCase();
-        expect(copy).not.toContain('live');
-        expect(copy).not.toContain('streaming');
-        expect(copy).not.toContain('real-time');
-      }
+    for (const phase of phases) {
+      const copy = dictationStatusCopy(phase).toLowerCase();
+      expect(copy).not.toContain('daemon');
+      expect(copy).not.toContain('cloud');
     }
   });
 });

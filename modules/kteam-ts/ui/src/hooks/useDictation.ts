@@ -1,44 +1,45 @@
-// The dictation controller — one state machine, two engines, and exactly one
-// way for text to leave it.
+// The dictation controller — one local engine, silence-aligned live segments,
+// and exactly one way for text to leave it.
 //
-// THE ONE OUTPUT. `onDraft` is the only callback this hook ever invokes with a
-// transcript. There is no `onSubmit`, no `onSend`, no "auto-send when the
-// reader says 'send it'". A finished utterance becomes an edit to an editable
-// draft and then the reader decides, exactly as if they had typed it. That is
-// not a nicety — dictation is the one input surface where the user cannot see
-// what they are about to commit until after it exists.
+// THE ONLY OUTPUTS ARE EDIT EVENTS. `onTranscriptEvent` publishes ordered local
+// segments into the editable dictation panel; `onDraft` remains the fallback
+// for a caller without that panel. There is no `onSubmit`, no `onSend`, and no
+// path from a model result to a message send.
 //
-// HOLD-TO-TALK, NOT TOGGLE. `start()` must be called synchronously from a
-// pointerdown/keydown handler so the permission prompt is attributable to the
-// gesture; `stop()` comes from pointerup/keyup/pointercancel. The awkward case
-// is real and handled: the reader can let go BEFORE the permission dialog is
-// answered. `stop()` during `requesting` sets a flag, and when the stream
-// finally opens it is closed again immediately with no audio — rather than the
-// alternative, which is a microphone that turns itself on after the reader
-// already let go.
+// TAP CONTROL. `start()` is called synchronously from the mic button so the
+// permission prompt is attributable to that gesture; `stop()` is the panel's
+// separate Stop action. The lower-level requesting-phase stop is still safe for
+// programmatic controls: when the stream finally opens it is closed immediately
+// rather than turning on after a stop was already requested.
 //
-// RACE SAFETY LIVES IN `lib/stt/utterance.ts`, not here — extracted so the
-// three races it exists to prevent have real tests rather than a comment, since
-// none of them can be reached through this app's `renderToStaticMarkup` test
-// style. Every start takes a generation number and every async continuation —
-// permission, capture, network, model — checks it before touching state, so a
-// second utterance started while the first is still transcribing cannot have
-// the first one's text land in the draft afterwards. A single-owner CLAIM over
-// the live capture means the 120-second limit and a pointer release arriving
-// together produce one transcription and one draft edit, not two. And a
-// background abort invalidates the generation, so a capture the browser closed
-// underneath us can never be transcribed afterwards. Aborting is real too: the
-// daemon request carries an `AbortSignal` that `cancel()` fires.
+// Every async boundary checks `UtteranceLatch`'s generation. Local ONNX work
+// cannot be interrupted physically, so cancellation aborts queued calls and
+// suppresses any result already inside WASM. The latch still owns the one live
+// capture, so limit + release can flush only once and a backgrounded recording
+// can publish nothing afterwards.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import type { ChatRecord } from '../types';
-import { captureErrorFrom, hasMicrophoneApi, startCapture, type CaptureMonitor } from '../lib/stt/audio-capture';
-import { daemonTranscribe } from '../lib/stt/daemon-engine';
-import { UtteranceLatch, finishUtterance } from '../lib/stt/utterance';
+import {
+  TARGET_SAMPLE_RATE,
+  captureErrorFrom,
+  hasMicrophoneApi,
+  resample,
+  startCapture,
+  type CaptureMonitor,
+} from '../lib/stt/audio-capture';
+import { UtteranceLatch, type CaptureLike } from '../lib/stt/utterance';
 import { readSttCapabilities } from '../lib/stt/capabilities';
 import { insertTranscript, readSelection, type SelectionLike } from '../lib/stt/draft';
 import { enhance } from '../lib/stt/enhancement';
+import {
+  LiveTranscriptionError,
+  LocalSegmentQueue,
+  appendTranscriptSegment,
+  type LiveTranscriptEvent,
+} from '../lib/stt/live-transcription';
+import { SilenceSegmenter, type SpeechSegment } from '../lib/stt/silence-segmenter';
 import { verifyWordOnly } from '../lib/stt/word-only-verifier';
 import { sttDictionary, useSttSettings, type SttSettings } from '../lib/stt/stt-settings';
 
@@ -101,6 +102,10 @@ export interface UseDictationOptions {
    *  appended at the end, which is the right fallback. */
   selectionRef?: { current: SelectionLike | null };
   onDraft: (result: DictationDraftResult) => void;
+  /** Ordered local transcript events for an editable live panel. When present,
+   * this consumer owns reconciliation and `onDraft` is not called: only its
+   * explicit Insert may touch the composer. */
+  onTranscriptEvent?: (event: LiveTranscriptEvent) => void;
   disabled?: boolean;
   /** Injected in tests. */
   settings?: SttSettings;
@@ -119,6 +124,8 @@ export interface DictationHandle {
   error: DictationError | null;
   /** Non-null while a transcript is being produced, for the status line. */
   busy: boolean;
+  /** Local utterances waiting for or currently inside the one model decode. */
+  pendingSegments: number;
   /** Call SYNCHRONOUSLY from a pointerdown/keydown handler. */
   start: () => void;
   /** Call from pointerup/keyup. Safe at any phase. */
@@ -126,6 +133,63 @@ export interface DictationHandle {
   /** Throw away whatever is in flight. Safe at any phase. */
   cancel: () => void;
   dismissError: () => void;
+}
+
+export interface LiveAudioRun {
+  segmenter: SilenceSegmenter | null;
+  inputSampleRate: number | null;
+  queue: LocalSegmentQueue;
+}
+
+interface ActiveLiveRun extends LiveAudioRun {
+  token: number;
+  transcripts: string[];
+  usesLiveConsumer: boolean;
+  failed: boolean;
+}
+
+function enqueueSpeechSegments(run: LiveAudioRun, segments: readonly SpeechSegment[]): void {
+  const inputRate = run.inputSampleRate;
+  if (inputRate === null) return;
+  for (const segment of segments) {
+    const samples =
+      inputRate === TARGET_SAMPLE_RATE ? segment.samples : resample(segment.samples, inputRate, TARGET_SAMPLE_RATE);
+    run.queue.enqueue({ id: segment.id, samples });
+  }
+}
+
+/** Feed the exact copied PCM accepted by capture into one rate-stable VAD.
+ * Exported because this seam and `finishLiveAudioRun` are the critical hook
+ * wiring: the final capture tail must pass here before the queue is closed. */
+export function observeLiveSamples(run: LiveAudioRun, samples: Float32Array, inputSampleRate: number): void {
+  if (run.segmenter === null) {
+    run.inputSampleRate = inputSampleRate;
+    run.segmenter = new SilenceSegmenter({ sampleRate: inputSampleRate });
+  } else if (run.inputSampleRate !== inputSampleRate) {
+    throw new Error('The microphone sample rate changed during recording.');
+  }
+  enqueueSpeechSegments(run, run.segmenter.push(samples));
+}
+
+/** Finish capture first (which synchronously observes its worklet flush tail),
+ * then flush the VAD, then wait for the one serialized decode queue. Keeping
+ * this ordering in one tested helper prevents a refactor from clipping the last
+ * word or closing the queue before it is enqueued. */
+export async function finishLiveAudioRun(capture: Pick<CaptureLike, 'stop'>, run: LiveAudioRun): Promise<void> {
+  await capture.stop();
+  if (run.segmenter) enqueueSpeechSegments(run, run.segmenter.flush());
+  await run.queue.finish();
+}
+
+/** Local model/queue failures use stable codes just like capture failures. */
+export function dictationErrorFromFailure(failure: unknown): DictationError | null {
+  const code = (failure as { code?: unknown } | null)?.code;
+  if (code === 'aborted') return null;
+  if (failure instanceof LiveTranscriptionError) return { code: failure.code, message: failure.message };
+  const message =
+    failure instanceof Error ? failure.message : 'Local transcription failed before the phrase could be kept.';
+  if (code === 'not-prepared') return { code: 'not-prepared', message };
+  return { code: typeof code === 'string' ? code : 'unknown', message };
 }
 
 export function useDictation(options: UseDictationOptions): DictationHandle {
@@ -138,9 +202,10 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
   // One transition when capture opens and one when it closes. The waveform
   // itself never updates React state; it paints its canvas behind a ref.
   const [inputMonitor, setInputMonitor] = useState<CaptureMonitor | null>(null);
+  const [pendingSegments, setPendingSegments] = useState(0);
 
   // Refs, not state, for everything the async paths read: state would be a
-  // stale closure by the time a 300 ms network round trip resolves.
+  // stale closure by the time a local decode or context lookup resolves.
   //
   // The generation counter and the single-owner claim over the live capture
   // both live in `UtteranceLatch` — extracted so the races they exist to
@@ -150,7 +215,7 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
   if (latchRef.current === null) latchRef.current = new UtteranceLatch();
   const latch = latchRef.current;
 
-  const abort = useRef<AbortController | null>(null);
+  const runRef = useRef<ActiveLiveRun | null>(null);
   const releaseRequested = useRef(false);
   const draftRef = useRef(options.draft);
   const optionsRef = useRef(options);
@@ -160,26 +225,35 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
   const supported = useMemo(() => hasMicrophoneApi(), []);
   const capabilities = useMemo(() => readSttCapabilities(), []);
 
-  /** Drop the current utterance entirely: cancel the capture (claimed or not),
-   *  abort any in-flight request, and move to a generation no continuation can
-   *  match. Idempotent. */
-  const teardown = useCallback(() => {
-    latch.cancel();
-    abort.current?.abort();
-    abort.current = null;
-    releaseRequested.current = false;
-  }, [latch]);
+  /** Drop the current utterance entirely. An in-flight ONNX call may finish on
+   * the CPU, but the queue and generation make it unable to publish. */
+  const teardown = useCallback(
+    (updateState = true) => {
+      const run = runRef.current;
+      runRef.current = null;
+      run?.segmenter?.reset();
+      // Invalidate first so the queue's pending callback is suppressed. This is
+      // important during unmount, where even a harmless setState is teardown work
+      // React should never receive.
+      latch.cancel();
+      run?.queue.cancel();
+      releaseRequested.current = false;
+      if (updateState) setPendingSegments(0);
+    },
+    [latch],
+  );
 
   // Unmount and disable must both release the microphone. A recording
   // indicator that outlives the component is the fastest way to lose trust.
   useEffect(() => {
-    return () => teardown();
+    return () => teardown(false);
   }, [teardown]);
 
   useEffect(() => {
     if (!disabled) return;
     teardown();
     setInputMonitor(null);
+    setError(null);
     setPhase('idle');
   }, [disabled, teardown]);
 
@@ -229,54 +303,135 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
     [latch, sessionId, settings],
   );
 
-  const transcribeSamples = useCallback(
-    async (samples: Float32Array, signal: AbortSignal): Promise<string> => {
-      if (settings.mode === 'local') {
-        // Lazily imported so neither `parakeet.js` nor the ONNX Runtime is in
-        // the graph of a reader who never turns local mode on.
-        const { transcribeLocal } = await import('../lib/stt/local-engine');
-        return transcribeLocal(samples, { capabilities });
-      }
-      return (await daemonTranscribe({ samples, language: settings.language, sessionId, signal })).text;
+  const reportRunFailure = useCallback(
+    (run: ActiveLiveRun, failure: unknown) => {
+      if (run.failed || !latch.isCurrent(run.token)) return;
+      const nextError = dictationErrorFromFailure(failure);
+      if (nextError === null) return;
+      run.failed = true;
+      run.segmenter?.reset();
+      run.queue.cancel();
+      latch.abort(run.token);
+      releaseRequested.current = false;
+      setPendingSegments(0);
+      setInputMonitor(null);
+      setError(nextError);
+      setPhase('error');
     },
-    [capabilities, sessionId, settings.language, settings.mode],
+    [latch],
   );
 
-  /** Run the one finish this generation is allowed. `finishUtterance` claims
-   *  the capture BEFORE its first await, so `onLimit` and a pointer release
-   *  arriving together produce one transcription and one draft edit, not two. */
+  /** Claim and finish this generation exactly once. The capture's flush first
+   * delivers its final PCM through `onSamples`; only then do we flush the VAD
+   * and close the SAME queue. A second whole-recording decode would duplicate
+   * speech and could replace reader edits, so there is intentionally none. */
   const finish = useCallback(
-    (token: number) => {
-      // Stop the monitor immediately, before the recorder's tail flush and
-      // transcription. This closes its rAF loop and AudioContext on Stop.
+    async (token: number): Promise<void> => {
+      const capture = latch.claim(token);
+      if (capture === null) return;
+      const run = runRef.current;
+      if (!run || run.token !== token) {
+        capture.cancel();
+        latch.settle(capture);
+        return;
+      }
       setInputMonitor(null);
-      return finishUtterance(token, {
-        latch,
-        transcribe: transcribeSamples,
-        refine: raw => enhanceTranscript(raw, token),
-        commit,
-        setPhase,
-        setError,
-        onController: controller => {
-          abort.current = controller;
-        },
-      });
+      setPhase('transcribing');
+      try {
+        await finishLiveAudioRun(
+          {
+            stop: async () => {
+              try {
+                return await capture.stop();
+              } catch (failure) {
+                throw captureErrorFrom(failure);
+              }
+            },
+          },
+          run,
+        );
+        if (!latch.isCurrent(token) || run.failed) return;
+
+        if (!latch.isCurrent(token) || run.failed) return;
+
+        const current = optionsRef.current;
+        if (run.usesLiveConsumer) {
+          current.onTranscriptEvent?.({ type: 'complete', generation: token });
+        } else {
+          const complete = run.transcripts.reduce(appendTranscriptSegment, '');
+          commit(complete);
+        }
+        setPendingSegments(0);
+        setPhase('idle');
+      } catch (failure) {
+        if (latch.isCurrent(token)) reportRunFailure(run, failure);
+      } finally {
+        latch.settle(capture);
+      }
     },
-    [commit, enhanceTranscript, latch, transcribeSamples],
+    [commit, latch, reportRunFailure],
   );
 
   const start = useCallback(() => {
     if (!supported || disabled) return;
     if (phase === 'requesting' || phase === 'recording') return;
+
+    const previous = runRef.current;
+    previous?.segmenter?.reset();
+    previous?.queue.cancel();
     const token = latch.begin();
+    let localEnginePromise: Promise<typeof import('../lib/stt/local-engine')> | null = null;
+    let run!: ActiveLiveRun;
+    const queue = new LocalSegmentQueue({
+      transcribe: async (samples, signal) => {
+        const engine = await (localEnginePromise ??= import('../lib/stt/local-engine'));
+        const raw = await engine.transcribeLocal(samples, { capabilities, signal });
+        if (raw.trim().length === 0) return raw;
+        return enhanceTranscript(raw, token);
+      },
+      onTranscript: result => {
+        if (!latch.isCurrent(token) || run.failed) return;
+        run.transcripts.push(result.text);
+        optionsRef.current.onTranscriptEvent?.({
+          type: 'segment',
+          generation: token,
+          id: result.id,
+          text: result.text,
+        });
+      },
+      onPendingChange: pending => {
+        if (latch.isCurrent(token) && !run.failed) setPendingSegments(pending);
+      },
+      onError: failure => reportRunFailure(run, failure),
+    });
+    run = {
+      token,
+      segmenter: null,
+      inputSampleRate: null,
+      queue,
+      transcripts: [],
+      usesLiveConsumer: typeof optionsRef.current.onTranscriptEvent === 'function',
+      failed: false,
+    };
+    runRef.current = run;
     releaseRequested.current = false;
     setInputMonitor(null);
+    setPendingSegments(0);
     setError(null);
     setPhase('requesting');
+    optionsRef.current.onTranscriptEvent?.({ type: 'reset', generation: token });
 
     // NO await between here and `startCapture` — see the file header.
-    startCapture({
+    const capturePromise = startCapture({
       onLimit: () => void finish(token),
+      onSamples: (samples, inputSampleRate) => {
+        if (!latch.isCurrent(token) || run.failed) return;
+        try {
+          observeLiveSamples(run, samples, inputSampleRate);
+        } catch (failure) {
+          reportRunFailure(run, failure);
+        }
+      },
       onAbort: () => {
         // The tab went to the background and the microphone closed underneath
         // us. Treat it as a cancellation: invalidate the generation so nothing
@@ -284,14 +439,27 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
         // control to idle — otherwise the button stays pressed-looking and the
         // next `start()` is refused for an utterance that no longer exists.
         if (!latch.abort(token)) return;
-        abort.current?.abort();
-        abort.current = null;
+        run.segmenter?.reset();
+        run.queue.cancel();
         releaseRequested.current = false;
+        setPendingSegments(0);
         setInputMonitor(null);
         setError(null);
         setPhase('idle');
+        optionsRef.current.onTranscriptEvent?.({ type: 'reset', generation: latch.generation });
       },
-    })
+    });
+
+    // Capture has already requested permission from the gesture. Warm the
+    // prepared local model while the reader begins speaking so the first pause
+    // does not also pay the full load delay. This never downloads: the loader's
+    // readiness gate rejects an unprepared/evicted cache.
+    localEnginePromise = import('../lib/stt/local-engine');
+    void localEnginePromise
+      .then(engine => engine.loadLocalEngine({ capabilities }))
+      .catch(failure => reportRunFailure(run, failure));
+
+    capturePromise
       .then(active => {
         // `attach` refuses a stale token, which is the case where a cancel or a
         // background abort landed while the permission prompt was still up.
@@ -311,12 +479,16 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
       })
       .catch(failure => {
         if (!latch.isCurrent(token)) return;
+        run.failed = true;
+        run.segmenter?.reset();
+        run.queue.cancel();
         const captureFailure = captureErrorFrom(failure);
+        setPendingSegments(0);
         setInputMonitor(null);
         setError({ code: captureFailure.code, message: captureFailure.message });
         setPhase('error');
       });
-  }, [disabled, finish, latch, phase, supported]);
+  }, [capabilities, disabled, enhanceTranscript, finish, latch, phase, reportRunFailure, supported]);
 
   const stop = useCallback(() => {
     if (latch.liveCapture === null) {
@@ -333,9 +505,12 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
 
   const cancel = useCallback(() => {
     teardown();
+    optionsRef.current.onTranscriptEvent?.({ type: 'reset', generation: latch.generation });
     setInputMonitor(null);
+    setPendingSegments(0);
+    setError(null);
     setPhase('idle');
-  }, [teardown]);
+  }, [latch, teardown]);
 
   const dismissError = useCallback(() => {
     setError(null);
@@ -347,7 +522,8 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
     phase,
     recording: phase === 'recording',
     inputMonitor,
-    busy: phase === 'transcribing',
+    busy: phase === 'transcribing' || pendingSegments > 0,
+    pendingSegments,
     error,
     start,
     stop,

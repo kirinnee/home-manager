@@ -1,32 +1,22 @@
 // The dictation settings surface.
 //
-// Its job is not to sell the feature. It is to make the two modes' real costs
-// visible BEFORE anyone commits to them, because one of those costs is a
-// 640 MB download onto a phone that may be on cellular. Every clause in
+// Dictation is browser-local only. The box still HOSTS the pinned model files,
+// but microphone audio never goes back to it and there is no dead daemon mode
+// card implying otherwise. This surface makes the local engine's real costs
+// visible BEFORE anyone commits to them, because one is a ~700 MB download
+// onto a phone that may be on cellular. Every clause in
 // `LOCAL_MODE_TRADEOFFS` is a measured or documented cost, not a disclaimer,
 // and the component renders all of them — there is no "show more".
-//
-// Daemon is the recommendation and says so in the card, not in a footnote. It
-// downloads once, on the box, for every device; it does not hold a gigabyte of
-// this browser's memory; and its storage cannot be reclaimed by the browser
-// when you go a week without opening the app.
 //
 // NO AUTOFOCUS anywhere, per this app's touch rules — opening a settings
 // section must not raise the keyboard on a phone. Every interactive target is
 // at least 44 px.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Download, Loader2, RefreshCw, Trash2 } from 'lucide-react';
+import { Check, Download, Loader2, Trash2 } from 'lucide-react';
 import { Button, Textarea } from './Primitives';
 import { cn } from '../lib/utils';
-import {
-  MAX_USER_CONTEXT_CHARS,
-  STT_LANGUAGES,
-  daemonSupportsLanguage,
-  sttDictionary,
-  useSttSettings,
-  type SttMode,
-} from '../lib/stt/stt-settings';
+import { MAX_USER_CONTEXT_CHARS, sttDictionary, useSttSettings } from '../lib/stt/stt-settings';
 import { userContextVocabulary } from '../lib/stt/enhancement';
 import { daemonSttStatus, requestDaemonModelInstall, type DaemonSttStatus } from '../lib/stt/daemon-engine';
 import {
@@ -55,18 +45,15 @@ export function formatBytes(bytes: number): string {
  *  - the battery clause follows from sustained full-CPU decoding.
  *  Exported so a test can assert the component renders all of them. */
 export const LOCAL_MODE_TRADEOFFS: readonly string[] = [
-  'About 640 MB per device — every phone, laptop and browser profile downloads it separately. Your box downloads it once, for all of them.',
+  'About 700 MB per device — every phone, laptop and browser profile stores its own copy. Your box hosts the pinned files, but never receives microphone audio.',
   'Slower on a phone. Transcribing can take longer than the recording did, because it runs on the CPU.',
   'Your browser can reclaim the download. Safari clears unused site storage after about seven days of not opening the app, and you would prepare the device again.',
   'It warms the device and uses battery while it transcribes.',
   'Model files come from your own kteam box, never a third-party CDN.',
 ] as const;
 
-export const DAEMON_MODE_SUMMARY =
-  'Recommended. Your box does the transcribing. It downloads the model once for every device you use, and this browser stores nothing.';
-
 export const LOCAL_MODE_SUMMARY =
-  'Everything happens inside this browser — nothing is sent anywhere, not even to your own box. Desktop first; workable but slow on a phone.';
+  'Everything happens inside this browser. Silence-aligned phrases are transcribed while you keep speaking; microphone audio is never sent to your box or a third party.';
 
 /** Said plainly next to the enhancement toggle. The capitalised phrase is the
  *  promise: a separate verifier compares the before and after and throws the
@@ -80,21 +67,8 @@ export const ENHANCEMENT_EXPLANATION =
 export const ENHANCEMENT_SOURCES_EXPLANATION =
   'It knows a word three ways, tried in this order: your words below (which always win), your context, and words used in the recent conversation. Everything runs instantly on this device — no AI model, nothing sent anywhere. When it is not sure, it changes nothing.';
 
-/** The language selector applies to BOX transcription only.
- *
- *  Checked against the installed `parakeet.js@1.4.4`: neither `fromUrls` nor
- *  `transcribe()` takes a language, and the multilingual v3 export decodes
- *  whatever it hears. There is no forcing path, so the honest thing is to say
- *  that the choice does nothing in this mode rather than leave a control that
- *  looks like it works. */
-export const LOCAL_LANGUAGE_NOTE =
-  'This choice does not change transcription on this device. The browser model is multilingual and works the language out from what it hears — there is no way to make it commit to one. Your choice applies when your box does the transcribing.';
-
-export const DAEMON_LANGUAGE_NOTE =
-  'Your box runs the English model, so the other languages are unavailable in this mode.';
-
 export const DICTATION_SAFETY_NOTE =
-  'Dictated text always lands in the message box for you to read and edit. Nothing is ever sent for you.';
+  'Microphone audio stays in this browser. Dictated text remains editable and only lands in the message box when you choose Insert. Nothing is ever sent for you.';
 
 /** Above the free-text context field. It has to establish two things fast:
  *  paste anything (it is prose, not a format), and only single words can ever
@@ -120,55 +94,14 @@ export function needsBoxBrowserModel(browserModel: { state: string } | undefined
   return browserModel !== undefined && browserModel.state !== 'ready';
 }
 
-/** Daemon mode is English-only, so the other twelve are disabled — visible,
- *  with the reason, rather than quietly missing. */
-export function languageOptionDisabled(mode: SttMode, code: string): boolean {
-  return mode === 'daemon' && !daemonSupportsLanguage(code);
-}
-
-/** Which note sits under the language selector. See `LOCAL_LANGUAGE_NOTE`: in
- *  local mode the selector genuinely does nothing, and says so. */
-export function languageNote(mode: SttMode): string {
-  return mode === 'daemon' ? DAEMON_LANGUAGE_NOTE : LOCAL_LANGUAGE_NOTE;
-}
-
-interface ModeCardProps {
-  mode: SttMode;
-  checked: boolean;
-  title: string;
-  summary: string;
-  onSelect: (mode: SttMode) => void;
-  children?: React.ReactNode;
-}
-
-function ModeCard({ mode, checked, title, summary, onSelect, children }: ModeCardProps) {
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={checked}
-      onClick={() => onSelect(mode)}
-      className={cn(
-        'flex min-h-[44px] min-w-0 flex-col items-start justify-center gap-1 rounded-control border px-control-x py-3 text-left transition-colors',
-        checked ? 'border-accent bg-accent-soft text-accent' : 'border-border bg-surface-2 text-fg hover:border-accent',
-      )}
-    >
-      <span className="text-ui font-semibold">{title}</span>
-      <span className="text-meta leading-base text-muted">{summary}</span>
-      {children}
-    </button>
-  );
-}
-
 export function DictationSettings() {
   const { settings, update, persisted } = useSttSettings();
   const capabilities = useMemo(() => readSttCapabilities(), []);
   const backend = useMemo(() => selectLocalBackend(capabilities), [capabilities]);
 
   const [daemon, setDaemon] = useState<DaemonSttStatus | null>(null);
-  const [daemonState, setDaemonState] = useState<SectionState>('unknown');
-  /** Keyed by model id: the daemon and browser models install independently and
-   *  a message about one must not appear under the other. */
+  /** Keyed by browser-model id. The box hosts these public weight files; it
+   * never receives microphone audio or performs dictation. */
   const [installMessages, setInstallMessages] = useState<Record<string, string>>({});
 
   const [localState, setLocalState] = useState<SectionState>('unknown');
@@ -177,10 +110,8 @@ export function DictationSettings() {
   const preparing = useRef<AbortController | null>(null);
 
   const refreshDaemon = useCallback(async () => {
-    setDaemonState('checking');
     const status = await daemonSttStatus();
     setDaemon(status);
-    setDaemonState(status.available ? 'ready' : 'missing');
   }, []);
 
   const refreshLocal = useCallback(async () => {
@@ -218,10 +149,8 @@ export function DictationSettings() {
     }
   }, []);
 
-  /** Ask the box to fetch a model it does not have. Shared by both sections:
-   *  the daemon model (what the box runs) and the browser model (what the box
-   *  SERVES to browsers) are two separate ~500 MB / ~670 MB downloads, and a
-   *  fresh install needs whichever one the chosen mode depends on. */
+  /** Ask the box to fetch the browser model it SERVES to devices. This installs
+   * public weight files only; microphone audio never takes this route. */
   const installOnBox = useCallback(
     (modelId: string) => {
       setInstallMessages(current => {
@@ -242,7 +171,6 @@ export function DictationSettings() {
    *  their glossary "take" (or see that plain prose yields nothing) without
    *  dictating a test sentence. */
   const userVocabulary = useMemo(() => userContextVocabulary(settings.userContext), [settings.userContext]);
-  const daemonModel = daemon?.daemonModel;
   const browserModel = daemon?.browserModel;
   /** The box has told us it does NOT have the browser weights. Preparing this
    *  device would then fetch the app shell instead of a 652 MB encoder, so the
@@ -256,88 +184,19 @@ export function DictationSettings() {
     <div className="flex flex-col gap-5">
       <p className="text-meta leading-base text-muted">{DICTATION_SAFETY_NOTE}</p>
 
-      {/* ---- mode ---- */}
-      <div className="flex flex-col gap-2">
-        <div
-          role="radiogroup"
-          aria-label="Where speech is transcribed"
-          className="grid grid-cols-1 gap-2 sm:grid-cols-2"
-        >
-          <ModeCard
-            mode="daemon"
-            checked={settings.mode === 'daemon'}
-            title="On my box (recommended)"
-            summary={DAEMON_MODE_SUMMARY}
-            onSelect={mode => update({ mode, language: 'en' })}
-          />
-          <ModeCard
-            mode="local"
-            checked={settings.mode === 'local'}
-            title="On this device"
-            summary={LOCAL_MODE_SUMMARY}
-            onSelect={mode => update({ mode })}
-          />
-        </div>
+      {/* ---- one honest engine ---- */}
+      <section
+        aria-label="Where speech is transcribed"
+        className="flex flex-col gap-2 rounded-control border border-accent bg-accent-soft p-3"
+      >
+        <h3 className="text-ui font-semibold text-accent">Transcribed on this device</h3>
+        <p className="text-meta leading-base text-fg">{LOCAL_MODE_SUMMARY}</p>
         <ul className="flex list-disc flex-col gap-1 pl-5 text-meta leading-base text-muted">
           {LOCAL_MODE_TRADEOFFS.map(item => (
             <li key={item}>{item}</li>
           ))}
         </ul>
         <p className="text-meta leading-base text-faint">{backend.webgpuBlockedReason}</p>
-      </div>
-
-      {/* ---- daemon readiness ---- */}
-      <section
-        aria-label="Box transcription"
-        className="flex flex-col gap-2 rounded-control border border-border bg-surface-2 p-3"
-      >
-        <h3 className="text-ui font-semibold">Your box</h3>
-        {daemonState === 'checking' && <p className="text-meta text-faint">Checking…</p>}
-        {daemonState !== 'checking' && !daemon?.available && (
-          <p className="text-meta leading-base text-warn">
-            {daemon?.unavailableReason ?? 'Your box cannot transcribe yet.'}
-          </p>
-        )}
-        {daemonModel && (
-          <p className="text-meta leading-base text-muted">
-            {daemonModel.label} — {daemonModel.state === 'ready' ? 'installed' : daemonModel.state.replace('-', ' ')}.{' '}
-            {daemonModel.costs.summary}
-          </p>
-        )}
-        {daemonModel?.install?.phase === 'downloading' && (
-          <p className="text-meta text-faint" role="status">
-            Downloading on the box — {formatBytes(daemonModel.install.receivedBytes)} of{' '}
-            {formatBytes(daemonModel.install.totalBytes)}.
-          </p>
-        )}
-        {daemonModel && installMessages[daemonModel.id] && (
-          <p className="text-meta leading-base text-warn">{installMessages[daemonModel.id]}</p>
-        )}
-        <div className="flex flex-wrap gap-2">
-          <Button
-            type="button"
-            size="sm"
-            className="min-h-[44px] min-w-[44px]"
-            onClick={() => void refreshDaemon()}
-            aria-label="Re-check the box"
-          >
-            <RefreshCw size={14} aria-hidden="true" />
-            <span className="ml-1">Re-check</span>
-          </Button>
-          {daemonModel && daemonModel.state !== 'ready' && (
-            <Button
-              type="button"
-              size="sm"
-              variant="primary"
-              className="min-h-[44px] min-w-[44px]"
-              disabled={daemonModel.install.phase === 'downloading'}
-              onClick={() => installOnBox(daemonModel.id)}
-            >
-              <Download size={14} aria-hidden="true" />
-              <span className="ml-1">Download on the box ({formatBytes(daemonModel.costs.downloadBytes)})</span>
-            </Button>
-          )}
-        </div>
       </section>
 
       {/* ---- browser readiness ---- */}
@@ -393,7 +252,7 @@ export function DictationSettings() {
           </p>
         )}
         {localState === 'missing' && !progress && (
-          <p className="text-meta leading-base text-faint">Not prepared. Local mode will not record until it is.</p>
+          <p className="text-meta leading-base text-faint">Not prepared. Dictation will not record until it is.</p>
         )}
         {progress && (
           <p className="text-meta text-faint" role="status">
@@ -447,33 +306,6 @@ export function DictationSettings() {
           )}
         </div>
       </section>
-
-      {/* ---- language ---- */}
-      <div className="flex flex-col gap-2">
-        <label htmlFor="stt-language" className="text-ui font-semibold">
-          Language (box transcription)
-        </label>
-        <select
-          id="stt-language"
-          className="min-h-[44px] rounded-control border border-border bg-surface-2 px-control-x text-ui text-fg"
-          value={settings.language}
-          onChange={event => update({ language: event.target.value })}
-        >
-          {STT_LANGUAGES.map(language => {
-            // Daemon mode is English-only. The other twelve are DISABLED rather
-            // than hidden, so the reader can see that the choice exists and
-            // read why it is unavailable — instead of wondering where it went.
-            const unavailable = languageOptionDisabled(settings.mode, language.code);
-            return (
-              <option key={language.code} value={language.code} disabled={unavailable}>
-                {language.label}
-                {unavailable ? ' — box transcribes English only' : ''}
-              </option>
-            );
-          })}
-        </select>
-        <p className="text-meta leading-base text-faint">{languageNote(settings.mode)}</p>
-      </div>
 
       {/* ---- enhancement ---- */}
       <div className="flex flex-col gap-2">

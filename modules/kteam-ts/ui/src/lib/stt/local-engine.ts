@@ -1,13 +1,11 @@
-// THE BROWSER ENGINE — real, opt-in, and desktop-first.
+// THE BROWSER ENGINE — local, explicit, and serialized.
 //
 // It runs Parakeet TDT 0.6B v3 (int8) entirely inside the page via
 // `parakeet.js@1.4.4` on `onnxruntime-web@1.24.1`. Nothing leaves the device,
-// not even to the reader's own box. It is a BATCH engine, exactly like the
-// daemon: hold, release, wait. It may produce no partials at all, and this file
-// never pretends otherwise — `createStreamingTranscriber()` exists in the
-// library and is deliberately not used, because chunked decoding at this
-// model's speed produces text that arrives after the sentence is over and
-// calling that "live" would be a lie.
+// not even to the reader's own box. It is a whole-buffer engine and may produce
+// no word-level partials at all. Live dictation therefore feeds it
+// SILENCE-ALIGNED utterances and labels the newest completed result
+// provisional; this file never pretends Parakeet itself is streaming.
 //
 // ── WHY THE BACKEND IS PINNED TO WASM, even where WebGPU exists ────────────
 //
@@ -324,7 +322,7 @@ export async function prepareLocalModel(
       if (name === 'QuotaExceededError') {
         throw new PrepareError(
           'quota',
-          'This device would not give the browser enough storage for the speech model (~640 MB). Free some space, or use the daemon instead.',
+          'This device would not give the browser enough storage for the speech model (~640 MB). Free some space, then prepare this device again.',
         );
       }
       throw new PrepareError('network', `${asset.label} could not be stored on this device.`);
@@ -441,9 +439,16 @@ interface LoadedModel {
 
 let loaded: LoadedModel | null = null;
 let loading: Promise<LoadedModel> | null = null;
+/** `ParakeetModel.transcribe` has no concurrency or cancellation contract.
+ * Keep one global tail so a new recording cannot enter the same model while a
+ * logically-cancelled decode from the previous generation is still running. */
+let localDecodeTail: Promise<void> = Promise.resolve();
 
 export interface LoadLocalOptions {
   capabilities?: { webgpu: boolean; likelyMobile: boolean };
+  /** Logical cancellation only. ONNX cannot interrupt an in-flight decode, but
+   * an aborted queued call is skipped and an in-flight result is discarded. */
+  signal?: AbortSignal;
 }
 
 /** Load the model, once. Concurrent callers share the in-flight load; a failed
@@ -456,7 +461,7 @@ export async function loadLocalEngine(options: LoadLocalOptions = {}): Promise<L
     // THE READINESS GATE, and it comes before everything.
     //
     // `fromUrls` fetches whatever it is given. Without this check, a reader who
-    // picked local mode and never pressed Prepare — or whose browser reclaimed
+    // started dictation without pressing Prepare — or whose browser reclaimed
     // the storage, which WebKit does after about seven days of not opening the
     // app — would trigger a silent ~670 MB download by holding the microphone
     // button. On a phone, on cellular. That is precisely the surprise this
@@ -542,13 +547,25 @@ export function unloadLocalEngine(): void {
  *  `ParakeetModel.transcribe` accepts a language, and the package's own
  *  `MODELS[...].languages` list is metadata for a UI, not an input to decoding.
  *  The v3 export is a single multilingual model that decodes whatever it hears.
- *  So the reader's language choice CANNOT be forced here, and passing it as a
- *  cosmetic field that the library silently drops would be worse than not
- *  passing it — it would look like it worked. The settings copy says so
- *  instead; see `LOCAL_LANGUAGE_NOTE` in `DictationSettings.tsx`. */
+ *  So a language choice CANNOT be forced here, and passing a cosmetic field
+ *  that the library silently drops would be worse than omitting the selector:
+ *  it would look like it worked. */
 export async function transcribeLocal(samples: Float32Array, options: LoadLocalOptions = {}): Promise<string> {
   if (samples.length === 0) return '';
-  const model = await loadLocalEngine(options);
-  const result = await model.transcribe(samples, 16_000, { returnTimestamps: false, returnConfidences: false });
-  return typeof result?.utterance_text === 'string' ? result.utterance_text.trim() : '';
+  const run = localDecodeTail.then(async () => {
+    if (options.signal?.aborted) throw new PrepareError('aborted', 'Transcription was cancelled.');
+    const model = await loadLocalEngine(options);
+    if (options.signal?.aborted) throw new PrepareError('aborted', 'Transcription was cancelled.');
+    const result = await model.transcribe(samples, 16_000, { returnTimestamps: false, returnConfidences: false });
+    // The WASM call above cannot be interrupted. This check is what makes a
+    // cancellation real at the publication boundary: the CPU may have finished
+    // old work, but old words cannot enter a new recording.
+    if (options.signal?.aborted) throw new PrepareError('aborted', 'Transcription was cancelled.');
+    return typeof result?.utterance_text === 'string' ? result.utterance_text.trim() : '';
+  });
+  localDecodeTail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
 }
