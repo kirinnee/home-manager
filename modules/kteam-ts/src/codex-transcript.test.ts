@@ -270,6 +270,42 @@ describe('context.usage extraction (turn-020)', () => {
   });
 });
 
+describe('runtime settings extraction', () => {
+  test('captures the exact model and reasoning effort from thread_settings_applied', () => {
+    // Real field shape observed in Codex 0.145.0 rollout JSONL.
+    const events = normalizeCodexTranscriptRecord(
+      record(
+        {
+          type: 'thread_settings_applied',
+          thread_settings: {
+            model: 'gpt-5.5',
+            model_provider_id: 'openai',
+            reasoning_effort: 'xhigh',
+          },
+        },
+        'event_msg',
+      ),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'runtime.settings',
+        data: { model: 'gpt-5.5', reasoningEffort: 'xhigh' },
+      }),
+    ]);
+  });
+
+  test('turn_context recovers live settings at the next turn boundary', () => {
+    expect(
+      normalizeCodexTranscriptRecord(
+        record({ model: 'gpt-5.6-sol', effort: 'ultra', turn_id: 'turn-fixture' }, 'turn_context'),
+      )[0],
+    ).toMatchObject({
+      type: 'runtime.settings',
+      data: { model: 'gpt-5.6-sol', reasoningEffort: 'ultra' },
+    });
+  });
+});
+
 describe('Codex transcript file watching', () => {
   test('tails only the exact rollout through partial writes, replacement, and truncation', async () => {
     const temporary = await temporaryDirectory();

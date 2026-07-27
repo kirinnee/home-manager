@@ -133,4 +133,29 @@ describe('session administration API transport', () => {
       allowContextDowngrade: true,
     });
   });
+
+  test('runtime model control uses its dedicated route and caller-owned request id', async () => {
+    const captured = await captureRequest(
+      new Response(JSON.stringify({ config: { id: 'session/odd' }, state: {}, directory: '/tmp/session' }), {
+        headers: { 'content-type': 'application/json' },
+      }),
+      () => api.runtime('session/odd', { action: 'model', model: 'claude-opus-5' }, 'runtime-gesture'),
+    );
+
+    expect(String(captured.input)).toContain('/v1/sessions/session%2Fodd/runtime');
+    expect(captured.init?.method).toBe('POST');
+    expect(new Headers(captured.init?.headers).get('x-kteam-request-id')).toBe('runtime-gesture');
+    expect(JSON.parse(String(captured.init?.body))).toEqual({ action: 'model', model: 'claude-opus-5' });
+  });
+
+  test('runtime Codex picker omits the model so the native account-aware picker decides it', async () => {
+    const captured = await captureRequest(
+      new Response(JSON.stringify({ config: { id: 'session' }, state: {}, directory: '/tmp/session' }), {
+        headers: { 'content-type': 'application/json' },
+      }),
+      () => api.runtime('session', { action: 'model' }, 'codex-runtime-gesture'),
+    );
+
+    expect(JSON.parse(String(captured.init?.body))).toEqual({ action: 'model' });
+  });
 });

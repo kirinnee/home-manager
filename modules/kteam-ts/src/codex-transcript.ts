@@ -49,6 +49,12 @@ export type CodexNormalizedEvent =
        *  model's actual context window (codex reports it directly). */
       type: 'context.usage';
       data: { contextTokens: number; contextWindow?: number };
+    })
+  | (CodexEventMetadata & {
+      /** Exact live settings emitted by Codex after its native model/reasoning
+       * picker (and again at turn setup). */
+      type: 'runtime.settings';
+      data: { model?: string; reasoningEffort?: string };
     });
 
 export interface CodexNormalizationOptions {
@@ -261,6 +267,30 @@ export function normalizeCodexTranscriptRecord(
   const payload = object(record.payload) ?? {};
   const recordType = string(record.type);
   const itemType = string(payload.type);
+
+  // OBSERVED in Codex 0.145.0: the native picker writes an event_msg with a
+  // nested thread_settings object carrying both exact values. turn_context is
+  // a second authoritative source at the next turn boundary and makes state
+  // recoverable when the local picker event predates watcher attachment.
+  if ((recordType === 'event_msg' && itemType === 'thread_settings_applied') || recordType === 'turn_context') {
+    const settings =
+      recordType === 'turn_context' ? payload : (object(payload.thread_settings) ?? object(record.thread_settings));
+    const model = string(settings?.model);
+    const reasoningEffort = string(settings?.reasoning_effort) ?? string(settings?.effort);
+    if (model !== undefined || reasoningEffort !== undefined) {
+      return [
+        {
+          ...metadata(record, payload, options),
+          type: 'runtime.settings',
+          data: {
+            ...(model !== undefined ? { model } : {}),
+            ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+          },
+        },
+      ];
+    }
+    return diagnostic(record, payload, options);
+  }
 
   if (recordType === 'event_msg' && itemType && ['task_started', 'task_complete', 'turn_aborted'].includes(itemType)) {
     const type =

@@ -1,5 +1,6 @@
 import type {
   KTeamEvent,
+  RuntimeControlRequest,
   SendDisposition,
   SendRequest,
   SessionConfig,
@@ -111,6 +112,10 @@ export interface KTeamService {
    *  or 'revived' (terminal session relaunched with the message as its next
    *  turn). Additive field — older clients ignore it. */
   send(id: string, request: SendRequest): Promise<SessionView & { disposition: SendDisposition }>;
+  /** Apply a semantic native-TUI runtime control without creating a kteam
+   * turn. Claude switches to an account-allowlisted model in place; Codex opens
+   * its native account-aware model/reasoning picker. */
+  runtime(id: string, request: RuntimeControlRequest): Promise<SessionView>;
   answer(id: string, labels: string[], other?: string, responses?: string[]): Promise<SessionView>;
   interrupt(id: string): Promise<SessionView>;
   stop(id: string, reason?: string): Promise<SessionView>;

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { createPaths } from './paths';
 import { SessionManager } from './session-manager';
 import type { SessionView } from './service';
-import type { SessionConfig, SessionState } from './types';
+import type { RuntimeControlRequest, SessionConfig, SessionState } from './types';
 
 // Fixture-level tests over prototype instances: the real SessionManager wires a
 // daemon, tmux, and event store — these tests exercise the control-path logic
@@ -227,6 +227,98 @@ describe('assigned-warden capacity (A6 fix round)', () => {
       false,
     );
     expect(started).toHaveLength(1); // only t2 got a new warden
+  });
+});
+
+describe('in-session runtime model controls', () => {
+  const callRuntime = (manager: Loose, request: RuntimeControlRequest) =>
+    (manager as unknown as SessionManager).runtime('s1', request);
+
+  function runtimeManager(input: {
+    harness: 'claude' | 'codex';
+    binary: string;
+    promptReady?: boolean;
+    outcome?: 'handled-local' | 'turn-started';
+  }) {
+    const commands: string[] = [];
+    const events: Array<{ type: string; data: Record<string, unknown> }> = [];
+    const view = {
+      directory: '/tmp/kteam-runtime-test/s1',
+      config: {
+        id: 's1',
+        harness: input.harness,
+        binary: input.binary,
+        tmuxSession: 'kteam-s1-agent',
+        turn: 7,
+      },
+      state: { id: 's1', status: 'awaiting_user', turn: 7, observedModel: 'previous-model' },
+    } as SessionView;
+    const manager = bareManager();
+    manager.resolveRef = (id: string) => id;
+    manager.serialized = async (_id: string, work: () => Promise<SessionView>) => await work();
+    manager.get = async () => view;
+    manager.tmux = {
+      state: async () => ({ alive: true, dead: false, promptReady: input.promptReady ?? true }),
+      inject: async (_name: string, command: string) => {
+        commands.push(command);
+        return input.outcome ?? 'handled-local';
+      },
+    };
+    manager.emit = async (_id: string, type: string, data: Record<string, unknown>) => {
+      events.push({ type, data });
+      return {};
+    };
+    return { manager, view, commands, events };
+  }
+
+  test('Claude injects one allowlisted account model without advancing the turn or lying about observed state', async () => {
+    const { manager, view, commands, events } = runtimeManager({
+      harness: 'claude',
+      binary: 'claude-auto-loge',
+    });
+    const result = await callRuntime(manager, { action: 'model', model: 'claude-sonnet-5' });
+
+    expect(result).toBe(view);
+    expect(commands).toEqual(['/model claude-sonnet-5']);
+    expect(result.config.turn).toBe(7);
+    expect(result.state.observedModel).toBe('previous-model');
+    expect(events).toEqual([
+      {
+        type: 'control.runtime_model',
+        data: { harness: 'claude', requestedModel: 'claude-sonnet-5' },
+      },
+    ]);
+  });
+
+  test('Codex opens its native account-aware model and reasoning picker', async () => {
+    const { manager, commands, events } = runtimeManager({ harness: 'codex', binary: 'codex-auto-loai' });
+    await callRuntime(manager, { action: 'model' });
+    expect(commands).toEqual(['/model']);
+    expect(events[0]).toEqual({ type: 'control.runtime_model', data: { harness: 'codex', picker: true } });
+  });
+
+  test('refuses busy panes and unsupported Claude model ids before typing', async () => {
+    const busy = runtimeManager({ harness: 'claude', binary: 'claude-auto-loge', promptReady: false });
+    await expect(callRuntime(busy.manager, { action: 'model', model: 'claude-sonnet-5' })).rejects.toThrow(
+      /idle prompt/,
+    );
+    expect(busy.commands).toEqual([]);
+
+    const provider = runtimeManager({ harness: 'claude', binary: 'claude-auto-mm3' });
+    await expect(callRuntime(provider.manager, { action: 'model', model: 'claude-sonnet-5' })).rejects.toThrow(
+      /not available on wrapper/,
+    );
+    expect(provider.commands).toEqual([]);
+  });
+
+  test('requires native local handling instead of silently accepting a model turn', async () => {
+    const { manager, events } = runtimeManager({
+      harness: 'codex',
+      binary: 'codex-auto-loge',
+      outcome: 'turn-started',
+    });
+    await expect(callRuntime(manager, { action: 'model' })).rejects.toThrow(/model turn instead of a native/);
+    expect(events).toEqual([]);
   });
 });
 

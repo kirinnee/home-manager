@@ -176,6 +176,18 @@ export function composerHolds(frame: string, text: string, evidence: LandingEvid
   return evidence === 'placeholder' ? seen.placeholders > 0 : seen.chars > 0;
 }
 
+/** Codex's native `/model` flow is a two-stage selector, not a model turn and
+ *  not an idle composer. Its frame can retain the submitted `/model` line in
+ *  scrollback, so the broad composer probe alone would mistake that echo for a
+ *  still-unsubmitted payload and press Enter again — selecting the highlighted
+ *  model without the user choosing it. These headings are shipped by the
+ *  installed Codex TUI and are positive local-handling evidence. The second
+ *  alternative is deliberately an unterminated prefix: Codex appends the
+ *  currently selected model name, including names added after this release. */
+export function paneShowsModelSelector(frame: string): boolean {
+  return /Select Model and Effort|Select Reasoning Level for/i.test(frame);
+}
+
 export interface PaneWorkCounters {
   elapsedSeconds?: number;
   tokens?: number;
@@ -795,6 +807,13 @@ export class TmuxController {
         await Bun.sleep(this.injectionPollMs);
         const current = await this.state(name);
         if (!current.alive || current.dead || paneShowsActiveWork(current.visiblePane)) return 'turn-started';
+
+        // Exact `/model` opens Codex's native model+effort selector. The pane
+        // often retains `› /model` above it, which composerHolds() cannot
+        // distinguish from an occupied composer. A selector heading proves the
+        // first Enter was consumed; pressing another would make a choice for
+        // the user. This local action is therefore complete after ONE Enter.
+        if (text.trim() === '/model' && paneShowsModelSelector(current.visiblePane)) return 'handled-local';
 
         // promptReady is positive evidence that the cursor is back at an empty
         // composer. Check it before the broad pane text probe: local output may

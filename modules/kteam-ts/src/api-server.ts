@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { join, normalize } from 'node:path';
 import type { KTeamService, SessionView } from './service';
 import { SIGNAL_KINDS } from './types';
-import type { SendRequest, SignalKind, StartSessionRequest } from './types';
+import type { RuntimeControlRequest, SendRequest, SignalKind, StartSessionRequest } from './types';
 import { WARDEN_LABEL } from './warden-detect';
 import { renderShell } from './ui';
 import { actorContext, resolveApiActor, type TokenClass } from './actor-context';
@@ -128,7 +128,7 @@ const unknownRoute = (method: string, path: string) => ({
  *  reuses the original x-kteam-request-id, so a duplicate id here means the
  *  first attempt already applied server-side — re-applying would duplicate the
  *  message/turn. */
-const DEDUPED_ACTIONS = new Set(['send', 'answer', 'signal', 'resume', 'migrate', 'rename']);
+const DEDUPED_ACTIONS = new Set(['send', 'answer', 'signal', 'resume', 'migrate', 'rename', 'runtime']);
 
 /** Per-session LRU of recently APPLIED request ids. Ids are recorded only after
  *  the mutation succeeds: a failed attempt stays retryable, while a retry of a
@@ -458,6 +458,11 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           if (action === 'send' && request.method === 'POST') {
             const input = await body<SendRequest>(request);
             return await applyOnce(() => options.service.send(id, input));
+          }
+          if (action === 'runtime' && request.method === 'POST') {
+            const input = await body<RuntimeControlRequest>(request);
+            if (input.action !== 'model') throw new HttpError(400, 'runtime action must be "model"');
+            return await applyOnce(() => options.service.runtime(id, input));
           }
           if (action === 'answer' && request.method === 'POST') {
             const input = await body<{ labels?: string[]; other?: string; responses?: string[] }>(request);

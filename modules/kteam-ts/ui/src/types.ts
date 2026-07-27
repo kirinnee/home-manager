@@ -110,6 +110,17 @@ export interface SessionState {
   usageAtLimit?: boolean;
   /** false ⇒ the wrapper is not authenticated; show that, not a percentage. */
   usageAuthOk?: boolean;
+  /** The model the harness itself most recently reported. This is runtime
+   * ground truth; config.model is only the launch-time request and can be an
+   * alias that the account resolved differently. */
+  observedModel?: string;
+  /** Timestamp of the last harness record that actually supplied model
+   * evidence. A local `/model` command alone does not advance it. */
+  observedModelAt?: string;
+  /** The reasoning effort Codex itself last reported. It is not a requested
+   * setting and is deliberately absent for Claude, whose installed runtime has
+   * no reliable in-session effort control here. */
+  observedReasoningEffort?: string;
   activity?: string;
   lastToolStartedAt?: string;
   /** A6 liveness ledger (see src/liveness.ts): per-life-sign timestamps. */
@@ -321,12 +332,23 @@ export interface WardenAnomaly {
 }
 
 // New-session flow: wrappers + projects (mirrors src/fleet-inventory.ts).
+export interface RuntimeModelOption {
+  /** Exact account-valid value sent to the harness's native /model command. */
+  value: string;
+  /** Human-readable account-valid model name. */
+  label: string;
+}
+
 export interface WrapperInfo {
   name: string;
   harness: Harness;
   mode: 'auto' | 'interactive';
   launchable: boolean;
   modelHint: string;
+  /** Present only when the daemon can safely advertise this wrapper's native
+   * in-place Claude model choices. Absence is deliberately not a fallback to a
+   * global catalog: provider accounts have different valid model sets. */
+  runtimeModels?: RuntimeModelOption[];
 }
 
 export interface ProjectInfo {
