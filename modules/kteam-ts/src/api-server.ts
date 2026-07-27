@@ -292,6 +292,7 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
   const unsubscribe = options.service.subscribe(broadcast);
   // A `pins.updated` mutation broadcasts the whole new snapshot to matching
   // sockets, so a reader on another device sees an agent's pin appear live.
+  const unsubscribeTasks = options.tasks?.subscribe(broadcast);
   const unsubscribePins = options.pins?.subscribe(broadcast);
 
   const server = Bun.serve<SocketData>({
@@ -859,7 +860,15 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
             // from every session with a shorter journal than the last one
             // backfilled.
             const delivered = cursors.get(queued.sessionId ?? '') ?? 0;
-            if ((queued.sequence ?? 0) > delivered) socket.send(encoded);
+            // Sequence 0 means LIVE-ONLY — the event carries a whole snapshot
+            // and has no journal entry to be backfilled from. Comparing it
+            // against the cursor dropped every one of them, which is harmless
+            // for frequent terminal frames (another arrives in a moment) but
+            // silently loses the ONLY notification a pins.updated or
+            // tasks.updated mutation ever sends, leaving a reader on a stale
+            // board with no way to know.
+            const sequence = queued.sequence ?? 0;
+            if (sequence === 0 || sequence > delivered) socket.send(encoded);
           }
           socket.data.queued.length = 0;
         })().catch(error => socket.send(JSON.stringify({ type: 'error', error: String(error) })));
@@ -874,6 +883,7 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
   const originalStop = server.stop.bind(server);
   server.stop = ((closeActiveConnections?: boolean) => {
     unsubscribe();
+    unsubscribeTasks?.();
     unsubscribePins?.();
     return originalStop(closeActiveConnections);
   }) as typeof server.stop;

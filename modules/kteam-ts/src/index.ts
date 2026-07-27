@@ -309,7 +309,7 @@ program
   .action(async (argv: string[]) => {
     try {
       const command = parseTaskCli(argv);
-      const requestSpec = taskCliRequest(command);
+      const requestSpec = taskCliRequest(command, process.env.KTEAM_SESSION_ID);
       const payload =
         command.command === 'create' && command.descriptionFile
           ? { ...command.body, description: await readFile(command.descriptionFile, 'utf8') }

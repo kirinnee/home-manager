@@ -56,12 +56,30 @@ const summary = (over: Partial<Task> = {}): TaskSummary => {
 };
 
 describe('routes', () => {
-  test('matches the four task routes and nothing else', () => {
+  test('matches aggregate reads plus the four session task routes', () => {
     expect(matchTaskRoute('GET', '/v1/tasks')).toEqual({ kind: 'list' });
     expect(matchTaskRoute('GET', '/v1/tasks/')).toEqual({ kind: 'list' });
     expect(matchTaskRoute('POST', '/v1/tasks')).toEqual({ kind: 'create' });
     expect(matchTaskRoute('GET', '/v1/tasks/F21')).toEqual({ kind: 'detail', id: 'F21' });
     expect(matchTaskRoute('POST', '/v1/tasks/F21')).toEqual({ kind: 'action', id: 'F21' });
+    expect(matchTaskRoute('GET', '/v1/sessions/ms-a/tasks')).toEqual({
+      kind: 'session-list',
+      sessionId: 'ms-a',
+    });
+    expect(matchTaskRoute('POST', '/v1/sessions/ms-a/tasks')).toEqual({
+      kind: 'session-create',
+      sessionId: 'ms-a',
+    });
+    expect(matchTaskRoute('GET', '/v1/sessions/ms-a/tasks/f21')).toEqual({
+      kind: 'session-detail',
+      sessionId: 'ms-a',
+      id: 'F21',
+    });
+    expect(matchTaskRoute('POST', '/v1/sessions/ms-a/tasks/F21')).toEqual({
+      kind: 'session-action',
+      sessionId: 'ms-a',
+      id: 'F21',
+    });
     expect(matchTaskRoute('DELETE', '/v1/tasks/F21')).toBeNull();
     expect(matchTaskRoute('GET', '/v1/sessions')).toBeNull();
   });
@@ -75,6 +93,7 @@ describe('routes', () => {
   test('isTaskPath covers the route family for 404 handling', () => {
     expect(isTaskPath('/v1/tasks')).toBe(true);
     expect(isTaskPath('/v1/tasks/F1')).toBe(true);
+    expect(isTaskPath('/v1/sessions/ms-a/tasks/F1')).toBe(true);
     expect(isTaskPath('/v1/tasksomething')).toBe(false);
   });
 
@@ -83,6 +102,8 @@ describe('routes', () => {
     expect(taskWardenDenial('GET', '/v1/tasks/F1')).toBeNull();
     expect(taskWardenDenial('POST', '/v1/tasks')).toBe('change tasks');
     expect(taskWardenDenial('POST', '/v1/tasks/F1')).toBe('change tasks');
+    expect(taskWardenDenial('GET', '/v1/sessions/ms-a/tasks')).toBeNull();
+    expect(taskWardenDenial('POST', '/v1/sessions/ms-a/tasks/F1')).toBe('change tasks');
     expect(taskWardenDenial('POST', '/v1/sessions')).toBeNull(); // not ours to judge
   });
 });
@@ -122,35 +143,30 @@ describe('list query parsing', () => {
 });
 
 describe('create body parsing', () => {
-  test('takes the fields the CLI sends and stamps the caller-supplied actor', () => {
-    const input = parseTaskCreateBody(
-      {
-        kind: 'bug',
-        title: 'Questions never reach the UI',
-        description: '## Symptom',
-        status: 'built',
-        assignee: 'sasha',
-        repo: '/repo',
-        order: 3,
-        links: { prs: ['https://x/1'], branch: 'fix/q', docs: ['~/b.md'] },
-      },
-      { actor: 'ms-lead', actorName: 'zelda' },
-    );
+  test('takes the fields the CLI sends without accepting provenance', () => {
+    const input = parseTaskCreateBody({
+      kind: 'bug',
+      title: 'Questions never reach the UI',
+      description: '## Symptom',
+      status: 'built',
+      assignee: 'sasha',
+      repo: '/repo',
+      order: 3,
+      links: { prs: ['https://x/1'], branch: 'fix/q', docs: ['~/b.md'] },
+    });
     expect(input).toMatchObject({
       kind: 'bug',
       title: 'Questions never reach the UI',
       status: 'built',
       assignee: 'sasha',
       order: 3,
-      actor: 'ms-lead',
-      actorName: 'zelda',
       links: { prs: ['https://x/1'], branch: 'fix/q', docs: ['~/b.md'] },
     });
   });
 
   test('a body-supplied actor cannot forge history', () => {
-    const input = parseTaskCreateBody({ kind: 'bug', title: 'x', actor: 'somebody-else' }, { actor: 'ms-real' });
-    expect(input.actor).toBe('ms-real');
+    const input = parseTaskCreateBody({ kind: 'bug', title: 'x', actor: 'somebody-else' });
+    expect(input).not.toHaveProperty('actor');
   });
 
   test('reason and statusReason are interchangeable on the wire', () => {
@@ -179,13 +195,12 @@ describe('create body parsing', () => {
 describe('action body parsing', () => {
   test('status carries the reason and the note', () => {
     expect(
-      parseTaskActionBody({ action: 'status', status: 'built', note: 'green', reason: 'x' }, { actor: 'a' }),
+      parseTaskActionBody({ action: 'status', status: 'built', note: 'green', reason: 'x', actor: 'forged' }),
     ).toEqual({
       action: 'status',
       status: 'built',
       reason: 'x',
       note: 'green',
-      actor: 'a',
     });
   });
 
@@ -225,6 +240,8 @@ describe('errors map to statuses a client can act on', () => {
     ['not-found', 404],
     ['too-long', 413],
     ['read-only', 403],
+    ['forbidden', 403],
+    ['ambiguous', 409],
     ['invalid', 400],
     ['reason-required', 400],
   ] as const)('%s → %s', (code, status) => {

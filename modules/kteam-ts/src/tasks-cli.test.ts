@@ -12,6 +12,8 @@ import {
 } from './tasks-cli';
 import { TASK_SCHEMA_VERSION, TaskError, type Task, type TaskSummary, type TaskView } from './tasks-types';
 
+const SELF = 'ms-self-1';
+
 const view = (over: Partial<Task> = {}): TaskView => ({
   v: TASK_SCHEMA_VERSION,
   id: 'F21',
@@ -122,9 +124,9 @@ describe('create', () => {
         links: { prs: ['https://x/1', 'https://x/2'], commits: ['abc'], docs: ['~/b.md'], branch: 'feat/x' },
       },
     });
-    expect(taskCliRequest(command)).toEqual({
+    expect(taskCliRequest(command, SELF)).toEqual({
       method: 'POST',
-      path: '/v1/tasks',
+      path: '/v1/sessions/ms-self-1/tasks',
       body: (command as { body: unknown }).body,
     });
   });
@@ -180,12 +182,18 @@ describe('list', () => {
       '--kind',
       'bug',
     ]);
-    expect(taskCliRequest(command).path).toBe('/v1/tasks?repo=%2Fa&assignee=ines&kind=bug&status=built&status=live');
+    expect(taskCliRequest(command, SELF).path).toBe(
+      '/v1/sessions/ms-self-1/tasks?repo=%2Fa&assignee=ines&kind=bug&status=built&status=live',
+    );
     expect(command).toMatchObject({ md: false });
   });
 
   test('a bare list has no query at all', () => {
-    expect(taskCliRequest(parseTaskCli(['list']))).toEqual({ method: 'GET', path: '/v1/tasks' });
+    expect(taskCliRequest(parseTaskCli(['list']), SELF)).toEqual({
+      method: 'GET',
+      path: '/v1/sessions/ms-self-1/tasks',
+    });
+    expect(taskCliRequest(parseTaskCli(['list', '--all']))).toEqual({ method: 'GET', path: '/v1/tasks' });
   });
 
   test('--md is carried on the command, so rendering decides, not the daemon', () => {
@@ -200,11 +208,14 @@ describe('list', () => {
 
 describe('show', () => {
   test('canonicalises the id and passes ?after=', () => {
-    expect(taskCliRequest(parseTaskCli(['show', 'f21', '--after', '4']))).toEqual({
+    expect(taskCliRequest(parseTaskCli(['show', 'f21', '--after', '4']), SELF)).toEqual({
       method: 'GET',
-      path: '/v1/tasks/F21?after=4',
+      path: '/v1/sessions/ms-self-1/tasks/F21?after=4',
     });
-    expect(taskCliRequest(parseTaskCli(['show', 'F21']))).toEqual({ method: 'GET', path: '/v1/tasks/F21' });
+    expect(taskCliRequest(parseTaskCli(['show', 'F21']), SELF)).toEqual({
+      method: 'GET',
+      path: '/v1/sessions/ms-self-1/tasks/F21',
+    });
   });
 
   test('a junk id is refused before any request', () => {
@@ -221,9 +232,9 @@ describe('the five mutations', () => {
       id: 'F21',
       body: { action: 'status', status: 'built', note: '590 tests green' },
     });
-    expect(taskCliRequest(command)).toEqual({
+    expect(taskCliRequest(command, SELF)).toEqual({
       method: 'POST',
-      path: '/v1/tasks/F21',
+      path: '/v1/sessions/ms-self-1/tasks/F21',
       body: (command as { body: unknown }).body,
     });
   });

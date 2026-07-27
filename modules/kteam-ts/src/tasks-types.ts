@@ -22,9 +22,8 @@
 //     rationale). A brief silently cut at 64 KiB is a brief that lies about what
 //     the work is.
 
-/** On-disk schema version for both `task.json` and each `activity.jsonl` line.
- *  A record with any other value is not understood by this build and is skipped
- *  by the parser (a migration point, never a crash). */
+/** On-disk schema version for task records and activity entries. A value from
+ *  another version is skipped by the parser (a migration point, never a crash). */
 export const TASK_SCHEMA_VERSION = 1;
 
 /** The board's own vocabulary (B7 / F21 / I3 / C2), so migration is 1:1. */
@@ -110,7 +109,7 @@ export type TaskLinkField = 'pr' | 'branch' | 'commit' | 'doc';
 
 export const TASK_LINK_FIELDS: readonly TaskLinkField[] = ['pr', 'branch', 'commit', 'doc'];
 
-/** The DECLARED record, exactly as it sits in `tasks/<id>/task.json`.
+/** The DECLARED record inside a session's `tasks.json` snapshot.
  *  Everything here was asserted by somebody; nothing here is derived. */
 export interface Task {
   v: number;
@@ -139,7 +138,7 @@ export interface Task {
   updatedAt: string;
 }
 
-/** One `activity.jsonl` line. `note`/`feedback` carry `text`; `status` carries
+/** One activity entry inside a session's `tasks.json`. `note`/`feedback` carry `text`; `status` carries
  *  `from`/`to` (+ optional `note`); `link` carries `field`/`value`; `assign`
  *  carries `from`/`to`; `order` carries `from`/`to` numbers; `session` is the
  *  phase-2 daemon-auto evidence line. */
@@ -220,9 +219,21 @@ export interface TaskView extends Task {
   live: TaskLive;
 }
 
+/** A task returned from a session-scoped route. `sessionId` is derived from the
+ *  route/storage path and is never persisted inside the task record itself. */
+export interface ScopedTaskView extends TaskView {
+  sessionId: string;
+}
+
 /** List rows: no `description` (a 40-row board must not ship 40 briefs), but the
  *  length is reported so the UI can show "has a brief" honestly. */
 export type TaskSummary = Omit<TaskView, 'description'> & { descriptionChars: number };
+
+/** Aggregate reads carry the storage owner on every row. IDs remain
+ *  fleet-global for stable links and spoken references; `null` names an
+ *  unresolved legacy-global record deliberately retained outside a fake
+ *  session. */
+export type ScopedTaskSummary = TaskSummary & { sessionId: string | null };
 
 // ---- API-facing shapes (FROZEN with ms2sdz76-f6226292, 2026-07-27) ----------
 //
@@ -234,11 +245,10 @@ export type TaskSummary = Omit<TaskView, 'description'> & { descriptionChars: nu
 
 export interface TaskListResponse {
   tasks: TaskSummary[];
-  /** Task directories whose record was unreadable/malformed and were SKIPPED.
-   *  Surfaced, never thrown — one corrupt file degrades to one missing row
-   *  (`parsePinStore` discipline). */
+  /** Records that were unreadable/malformed and therefore skipped. Surfaced,
+   *  never thrown — one corrupt entry degrades to one missing row. */
   parseErrors: number;
-  /** Additive: ids of the skipped directories, so the user can go look. */
+  /** Additive: ids/scopes of skipped records, so the user can inspect them. */
   parseErrorIds?: string[];
 }
 
@@ -247,6 +257,30 @@ export interface TaskDetailResponse {
   activity: TaskActivity[];
   /** Additive: activity lines on disk that failed to parse (never silently zero). */
   activityParseErrors?: number;
+}
+
+/** The session board returned by `GET /v1/sessions/:id/tasks` and carried in a
+ *  live `tasks.updated` event. It is deliberately list-shaped (briefs and
+ *  histories stay on the detail route), just like the whole-board pins event. */
+export interface SessionTaskListResponse extends Omit<TaskListResponse, 'tasks'> {
+  v: number;
+  sessionId: string;
+  tasks: ScopedTaskSummary[];
+  /** ISO timestamp of the underlying tasks.json snapshot. */
+  updatedAt: string;
+}
+
+/** Fleet-wide compatibility/read view. Writes never target this scope. */
+export interface FleetTaskListResponse extends Omit<TaskListResponse, 'tasks'> {
+  v: number;
+  sessionId: null;
+  tasks: ScopedTaskSummary[];
+  updatedAt: string;
+}
+
+export interface ScopedTaskDetailResponse extends Omit<TaskDetailResponse, 'task'> {
+  sessionId: string | null;
+  task: TaskView & { sessionId: string | null };
 }
 
 /** The store's own list result, before it is shaped into a response. */
@@ -266,7 +300,7 @@ export interface TaskActor {
   actorName?: string | null;
 }
 
-export interface TaskCreateInput extends TaskActor {
+export interface TaskCreateInput {
   kind: TaskKind;
   title: string;
   /** The full brief. Optional; refused over MAX_TASK_DESCRIPTION_LEN. */
@@ -279,6 +313,11 @@ export interface TaskCreateInput extends TaskActor {
   repo?: string | null;
   links?: Partial<{ prs: string[]; branch: string | null; commits: string[]; docs: string[] }>;
   order?: number | null;
+  /** @deprecated Transport parsers deliberately drop these. Kept only for
+   *  source compatibility with direct pre-session service callers. */
+  actor?: string | null;
+  /** @deprecated See actor. Server-resolved TaskActor is a separate argument. */
+  actorName?: string | null;
 }
 
 /** The five mutations of design §7 (`status|note|link|assign|order`) plus
@@ -304,6 +343,10 @@ export type TaskErrorCode =
   | 'too-long'
   | 'reason-required'
   | 'not-found'
+  /** A resolved agent attempted to write another session's board. */
+  | 'forbidden'
+  /** An aggregate id lookup found a migration conflict or damaged duplicate. */
+  | 'ambiguous'
   /** A non-daemon process attempted a write. */
   | 'read-only';
 

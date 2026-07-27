@@ -73,8 +73,13 @@ const manager = await SessionManager.create(paths, {
   },
 });
 const learning = new LearningManager(paths, config.learning, manager);
-// One service and one idempotency controller for the daemon lifetime.
-const taskApi = new TaskApi(new TaskService(paths, manager));
+// One writable service and one idempotency controller for the daemon lifetime.
+// Initialization performs the in-daemon, copy-only legacy migration, so the
+// first task request can never observe a half-migrated board and the daemon
+// stays the sole writer.
+const taskService = new TaskService(paths, manager);
+await taskService.initialize();
+const taskApi = new TaskApi(taskService);
 // One writable pin store + idempotency controller for the daemon lifetime.
 // The `has` adapter is the only thing PinService needs from the session world.
 const pinApi = new PinApi(

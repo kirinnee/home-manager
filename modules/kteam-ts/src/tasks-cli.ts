@@ -52,6 +52,10 @@ export const TASK_CLI_USAGE = `kteam task <command>
   assign <id> <who|--none>
   order  <id> <n|--none>
 
+  [--session <id>]       target a session explicitly; otherwise use
+                         KTEAM_SESSION_ID (an agent may only write its own)
+  list --all             fleet-wide aggregate READ
+
 A status of blocked or dropped REQUIRES --reason.`;
 
 export interface TaskCreateBody {
@@ -67,10 +71,10 @@ export interface TaskCreateBody {
 }
 
 export type TaskCliCommand =
-  | { command: 'create'; body: TaskCreateBody; descriptionFile?: string }
-  | { command: 'list'; query: URLSearchParams; md: boolean }
-  | { command: 'show'; id: string; afterSeq: number; md: boolean }
-  | { command: 'act'; id: string; body: TaskActionInput };
+  | { command: 'create'; body: TaskCreateBody; descriptionFile?: string; session?: string }
+  | { command: 'list'; query: URLSearchParams; md: boolean; all?: boolean; session?: string }
+  | { command: 'show'; id: string; afterSeq: number; md: boolean; session?: string }
+  | { command: 'act'; id: string; body: TaskActionInput; session?: string };
 
 /** A parsed argv, as flags and positionals. `--flag value` and `--flag=value`
  *  both work; a repeated flag collects. */
@@ -138,11 +142,22 @@ const requireNumber = (value: string, label: string): number => {
 export function parseTaskCli(argv: readonly string[]): TaskCliCommand {
   const { positional, flags } = splitTaskArgs(argv);
   const command = positional[0];
+  const rawSession = one(flags, 'session');
+  const session = rawSession !== undefined && rawSession.trim().length > 0 ? rawSession.trim() : undefined;
+  const scoped = session === undefined ? {} : { session };
+  if (has(flags, 'all') && command !== 'list') return invalid('--all is only valid with task list');
+  if (has(flags, 'all') && session !== undefined) return invalid('task list accepts --all or --session, not both');
   switch (command) {
     case 'create':
-      return parseCreate(flags, positional.slice(1));
+      return parseCreate(flags, positional.slice(1), session);
     case 'list':
-      return { command: 'list', query: buildTaskListQuery(flags), md: has(flags, 'md') };
+      return {
+        command: 'list',
+        query: buildTaskListQuery(flags),
+        md: has(flags, 'md'),
+        all: has(flags, 'all'),
+        ...scoped,
+      };
     case 'show':
       return {
         command: 'show',
@@ -152,6 +167,7 @@ export function parseTaskCli(argv: readonly string[]): TaskCliCommand {
           return after === undefined || after === '' ? 0 : requireNumber(after, 'after');
         })(),
         md: has(flags, 'md'),
+        ...scoped,
       };
     case 'status': {
       const id = requireId(positional[1]);
@@ -172,6 +188,7 @@ export function parseTaskCli(argv: readonly string[]): TaskCliCommand {
           ...(reason !== undefined && reason !== '' ? { reason } : {}),
           ...(note !== undefined && note !== '' ? { note } : {}),
         },
+        ...scoped,
       };
     }
     case 'note':
@@ -179,7 +196,7 @@ export function parseTaskCli(argv: readonly string[]): TaskCliCommand {
       const id = requireId(positional[1]);
       const text = positional.slice(2).join(' ').trim();
       if (text.length === 0) return invalid(`${command} needs some text`);
-      return { command: 'act', id, body: { action: command, text } };
+      return { command: 'act', id, body: { action: command, text }, ...scoped };
     }
     case 'link': {
       const id = requireId(positional[1]);
@@ -189,22 +206,22 @@ export function parseTaskCli(argv: readonly string[]): TaskCliCommand {
       const field = fields[0] as TaskLinkField;
       const value = one(flags, field) ?? '';
       if (value.trim().length === 0) return invalid(`--${field} needs a value`);
-      return { command: 'act', id, body: { action: 'link', field, value } };
+      return { command: 'act', id, body: { action: 'link', field, value }, ...scoped };
     }
     case 'assign': {
       const id = requireId(positional[1]);
       const who = positional[2];
-      if (has(flags, 'none')) return { command: 'act', id, body: { action: 'assign', assignee: null } };
+      if (has(flags, 'none')) return { command: 'act', id, body: { action: 'assign', assignee: null }, ...scoped };
       if (who === undefined || who.trim().length === 0)
         return invalid('assign needs a teammate, or --none to unassign');
-      return { command: 'act', id, body: { action: 'assign', assignee: who } };
+      return { command: 'act', id, body: { action: 'assign', assignee: who }, ...scoped };
     }
     case 'order': {
       const id = requireId(positional[1]);
-      if (has(flags, 'none')) return { command: 'act', id, body: { action: 'order', order: null } };
+      if (has(flags, 'none')) return { command: 'act', id, body: { action: 'order', order: null }, ...scoped };
       const rank = positional[2];
       if (rank === undefined) return invalid('order needs a rank, or --none to unrank');
-      return { command: 'act', id, body: { action: 'order', order: requireNumber(rank, 'order') } };
+      return { command: 'act', id, body: { action: 'order', order: requireNumber(rank, 'order') }, ...scoped };
     }
     case undefined:
       return invalid('which task command?');
@@ -213,7 +230,7 @@ export function parseTaskCli(argv: readonly string[]): TaskCliCommand {
   }
 }
 
-function parseCreate(flags: Map<string, string[]>, rest: readonly string[]): TaskCliCommand {
+function parseCreate(flags: Map<string, string[]>, rest: readonly string[], session?: string): TaskCliCommand {
   const kind = one(flags, 'kind');
   if (kind === undefined || !(TASK_KINDS as readonly string[]).includes(kind)) {
     return invalid(`--kind must be one of ${TASK_KINDS.join(', ')}`);
@@ -250,9 +267,9 @@ function parseCreate(flags: Map<string, string[]>, rest: readonly string[]): Tas
   const descriptionFile = one(flags, 'description-file');
   if (descriptionFile !== undefined && descriptionFile !== '') {
     if (body.description !== undefined) return invalid('pass --description or --description-file, not both');
-    return { command: 'create', body, descriptionFile };
+    return { command: 'create', body, descriptionFile, ...(session ? { session } : {}) };
   }
-  return { command: 'create', body };
+  return { command: 'create', body, ...(session ? { session } : {}) };
 }
 
 /** Build the query string for `task list` from parsed flags. Repeated
@@ -284,21 +301,32 @@ export interface TaskCliRequest {
 /** The HTTP call a parsed command needs. For `create` with
  *  `--description-file`, the wiring reads the file and merges it in first:
  *  `{ ...command.body, description: await readFile(command.descriptionFile) }`. */
-export function taskCliRequest(command: TaskCliCommand): TaskCliRequest {
+export function taskCliRequest(command: TaskCliCommand, selfSessionId?: string): TaskCliRequest {
+  if (command.command === 'list' && command.all) {
+    const query = command.query.toString();
+    return { method: 'GET', path: query.length > 0 ? `/v1/tasks?${query}` : '/v1/tasks' };
+  }
+  const sessionId =
+    command.session ??
+    (selfSessionId !== undefined && selfSessionId.trim().length > 0 ? selfSessionId.trim() : undefined);
+  if (sessionId === undefined) {
+    throw new TaskError('invalid', 'no session id; run inside a kteam session, pass --session <id>, or use list --all');
+  }
+  const base = `/v1/sessions/${encodeURIComponent(sessionId)}/tasks`;
   switch (command.command) {
     case 'create':
-      return { method: 'POST', path: '/v1/tasks', body: command.body };
+      return { method: 'POST', path: base, body: command.body };
     case 'list': {
       const query = command.query.toString();
-      return { method: 'GET', path: query.length > 0 ? `/v1/tasks?${query}` : '/v1/tasks' };
+      return { method: 'GET', path: query.length > 0 ? `${base}?${query}` : base };
     }
     case 'show':
       return {
         method: 'GET',
-        path: command.afterSeq > 0 ? `/v1/tasks/${command.id}?after=${command.afterSeq}` : `/v1/tasks/${command.id}`,
+        path: command.afterSeq > 0 ? `${base}/${command.id}?after=${command.afterSeq}` : `${base}/${command.id}`,
       };
     case 'act':
-      return { method: 'POST', path: `/v1/tasks/${command.id}`, body: command.body };
+      return { method: 'POST', path: `${base}/${command.id}`, body: command.body };
   }
 }
 

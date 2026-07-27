@@ -1,4 +1,5 @@
-// The /v1/tasks route handler, self-contained and transport-shaped rather than
+// The per-session /v1/sessions/:id/tasks route handler (plus legacy global
+// read/write compatibility), self-contained and transport-shaped rather than
 // Bun-shaped: it takes a method + URL + already-parsed JSON body and returns
 // `{ status, body }`, or NULL when the path is not a task route.
 //
@@ -33,9 +34,12 @@ import {
   type TaskActor,
   type TaskActionInput,
   type TaskCreateInput,
+  type FleetTaskListResponse,
   type TaskDetailResponse,
   type TaskListResponse,
-  type TaskView,
+  type ScopedTaskDetailResponse,
+  type ScopedTaskView,
+  type SessionTaskListResponse,
 } from './tasks-types';
 import {
   matchTaskRoute,
@@ -50,10 +54,18 @@ import {
 /** The narrow slice of TaskService the routes need. `TaskService` satisfies it
  *  structurally, and a test can pass a stub. */
 export interface TaskApiService {
-  taskList(filter: ReturnType<typeof parseTaskListQuery>): Promise<TaskListResponse>;
-  taskDetail(id: string, afterSeq?: number): Promise<TaskDetailResponse | undefined>;
-  taskCreate(input: TaskCreateInput): Promise<TaskView>;
-  taskAct(id: string, input: TaskActionInput & TaskActor): Promise<TaskView>;
+  /** Fleet-wide READ compatibility. */
+  taskList(filter: ReturnType<typeof parseTaskListQuery>): Promise<TaskListResponse | FleetTaskListResponse>;
+  taskDetail(id: string, afterSeq?: number): Promise<TaskDetailResponse | ScopedTaskDetailResponse | undefined>;
+  sessionTaskList?(sessionId: string, filter: ReturnType<typeof parseTaskListQuery>): Promise<SessionTaskListResponse>;
+  sessionTaskDetail?(sessionId: string, id: string, afterSeq?: number): Promise<ScopedTaskDetailResponse | undefined>;
+  sessionTaskCreate?(sessionId: string, input: TaskCreateInput, actor: TaskActor): Promise<ScopedTaskView>;
+  sessionTaskAct?(sessionId: string, id: string, input: TaskActionInput, actor: TaskActor): Promise<ScopedTaskView>;
+  /** @deprecated Direct/global mutation ports retained only for old test doubles. */
+  taskCreate?(input: TaskCreateInput & TaskActor): Promise<import('./tasks-types').TaskView>;
+  /** @deprecated See taskCreate. No route calls it. */
+  taskAct?(id: string, input: TaskActionInput & TaskActor): Promise<import('./tasks-types').TaskView>;
+  subscribe?(listener: (event: import('./types').KTeamEvent) => void): () => void;
 }
 
 export interface TaskApiRequest {
@@ -139,6 +151,11 @@ export class TaskApi {
 
   constructor(private readonly service: TaskApiService) {}
 
+  /** Forward the live `tasks.updated` stream to the API server's broadcaster. */
+  subscribe(listener: (event: import('./types').KTeamEvent) => void): () => void {
+    return this.service.subscribe?.(listener) ?? ((): void => {});
+  }
+
   /** Handle a task request, or return null when `url.pathname` is not ours.
    *
    *  Never throws for a client mistake: every TaskError becomes a status + body
@@ -162,25 +179,79 @@ export class TaskApi {
           return { status: 200, body: detail };
         }
         case 'create': {
-          const input = parseTaskCreateBody(request.body, request.actor ?? {});
+          const input = parseTaskCreateBody(request.body);
+          const createMethod = this.service.taskCreate;
+          if (!createMethod) throw new Error('compatibility task create service is not configured');
+          const create = createMethod.bind(this.service);
+          const actor = request.actor ?? {};
+          const scope =
+            typeof actor.actor === 'string' && actor.actor.trim() && actor.actor !== 'user'
+              ? actor.actor.trim()
+              : typeof input.assignee === 'string' && input.assignee.trim()
+                ? input.assignee.trim()
+                : 'unresolved';
+          return await this.once(
+            dedupeKey(`${scope}#create`, request.requestId, request.body),
+            request.requestId,
+            async () => ({ status: 201, body: await create({ ...input, ...actor }) }),
+          );
+        }
+        case 'action': {
+          const input = parseTaskActionBody(request.body);
+          const actMethod = this.service.taskAct;
+          if (!actMethod) throw new Error('compatibility task action service is not configured');
+          const act = actMethod.bind(this.service);
+          return await this.once(dedupeKey(route.id, request.requestId, request.body), request.requestId, async () => ({
+            status: 200,
+            body: await act(route.id, { ...input, ...(request.actor ?? {}) }),
+          }));
+        }
+        case 'session-list': {
+          const filter = parseTaskListQuery(request.url.searchParams);
+          if (!this.service.sessionTaskList) throw new Error('session task list service is not configured');
+          return { status: 200, body: await this.service.sessionTaskList(route.sessionId, filter) };
+        }
+        case 'session-detail': {
+          if (!this.service.sessionTaskDetail) throw new Error('session task detail service is not configured');
+          const detail = await this.service.sessionTaskDetail(
+            route.sessionId,
+            route.id,
+            parseAfterSeq(request.url.searchParams),
+          );
+          if (detail === undefined) {
+            return {
+              status: 404,
+              body: { error: `unknown task ${route.id} in session ${route.sessionId}`, code: 'not-found' },
+            };
+          }
+          return { status: 200, body: detail };
+        }
+        case 'session-create': {
+          const input = parseTaskCreateBody(request.body);
+          const createMethod = this.service.sessionTaskCreate;
+          if (!createMethod) throw new Error('session task create service is not configured');
+          const create = createMethod.bind(this.service);
           // Fingerprint the CLIENT payload, never the parsed input: the parsed
           // input carries resolved actor metadata, and a teammate rename (or a
           // transient session lookup failure) between two attempts of the SAME
           // logical call would otherwise change the key and write twice.
           return await this.once(
-            dedupeKey('#create', request.requestId, request.body),
+            dedupeKey(`${route.sessionId}#create`, request.requestId, request.body),
             request.requestId,
             async () => ({
               status: 201,
-              body: await this.service.taskCreate(input),
+              body: await create(route.sessionId, input, request.actor ?? {}),
             }),
           );
         }
-        case 'action': {
-          const input = parseTaskActionBody(request.body, request.actor ?? {});
+        case 'session-action': {
+          const input = parseTaskActionBody(request.body);
+          const actMethod = this.service.sessionTaskAct;
+          if (!actMethod) throw new Error('session task action service is not configured');
+          const act = actMethod.bind(this.service);
           return await this.once(dedupeKey(route.id, request.requestId, request.body), request.requestId, async () => ({
             status: 200,
-            body: await this.service.taskAct(route.id, input),
+            body: await act(route.sessionId, route.id, input, request.actor ?? {}),
           }));
         }
       }
