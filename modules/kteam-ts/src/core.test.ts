@@ -247,6 +247,32 @@ test('contextWindowForModel: 1m suffix, default, and overrides (turn-020)', () =
   expect(contextWindowForModel('claude-fable-5[1m]', { fable: 900_000 })).toBe(900_000);
 });
 
+test('contextWindowForSession: [1m] on config survives a stripped served model (turn-001 ctx bug)', () => {
+  const { contextWindowForSession } = require('./core');
+  // THE BUG: a live [1m] session reports message.model without the suffix, so
+  // keying the window on the served model gives 200k and inflates ctx% ~5x.
+  // The window must still come out 1M because config.model retains [1m].
+  expect(contextWindowForSession({ configModel: 'claude-opus-4-8[1m]', servedModel: 'claude-opus-4-8' })).toBe(
+    1_000_000,
+  );
+  // Non-[1m] config with a stripped served model stays at the 200k default.
+  expect(contextWindowForSession({ configModel: 'claude-opus-4-8', servedModel: 'claude-opus-4-8' })).toBe(200_000);
+  // A harness self-reported window (Codex) is authoritative over everything.
+  expect(contextWindowForSession({ configModel: 'gpt-5.6[1m]', servedModel: 'gpt-5.6', reportedWindow: 258_400 })).toBe(
+    258_400,
+  );
+  // An invalid self-reported window is ignored, falling through to the rules.
+  expect(
+    contextWindowForSession({ configModel: 'claude-opus-4-8[1m]', servedModel: 'claude-opus-4-8', reportedWindow: 0 }),
+  ).toBe(1_000_000);
+  // Overrides match the SERVED model (aliases resolved) and beat the [1m] rule.
+  expect(
+    contextWindowForSession({ configModel: 'opus', servedModel: 'glm-5.2', overrides: { 'glm-5.2': 131_072 } }),
+  ).toBe(131_072);
+  // Nothing known → default.
+  expect(contextWindowForSession({})).toBe(200_000);
+});
+
 // ---------------------------------------------------------------------------
 // `kteam recommend` — doctrine floors (kfleet/skills/kteam/SKILL.md)
 // ---------------------------------------------------------------------------
