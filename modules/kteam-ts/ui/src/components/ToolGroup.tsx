@@ -19,7 +19,7 @@
 // opened it on purpose, so the body should be comfortable to read.
 
 import { memo, useState } from 'react';
-import { useLiveTick } from '../hooks/useLiveTick';
+import { useLiveClock } from '../hooks/useLiveTick';
 import {
   ChevronRight,
   Loader2,
@@ -81,13 +81,17 @@ function summarize(calls: ToolCall[]): string {
 }
 
 function Elapsed({ since }: { since?: string }) {
-  // Re-render once a second to advance the count — but FREEZE while the reader
-  // holds a selection: this line lives inside the transcript, and on WebKit/iOS a
-  // per-second text mutation next to a highlight collapses it (see useLiveTick).
-  useLiveTick();
+  // The shared clock, NOT `Date.now()`. Like the ThinkingIndicator's elapsed,
+  // this label is not what breaks a reader's selection — measured on WebKit,
+  // only a re-render of the element the selection is IN does that, and this span
+  // is its own (useLiveTick.ts). It reads the frozen clock so that the label is
+  // byte-identical across any re-render this row is dragged through (a tool
+  // result landing re-renders it even while the tick is frozen), which costs
+  // nothing and removes real per-second churn.
+  const now = useLiveClock();
   const start = since ? Date.parse(since) : NaN;
   if (!Number.isFinite(start)) return null;
-  const s = Math.max(0, Math.floor((Date.now() - start) / 1000));
+  const s = Math.max(0, Math.floor((now - start) / 1000));
   const label = s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
   return <span className="mono shrink-0">— {label}</span>;
 }

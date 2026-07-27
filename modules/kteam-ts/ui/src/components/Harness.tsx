@@ -3,7 +3,7 @@
 // elapsed stripped and replaced by a fluid, client-side elapsed that ticks
 // every 1s from `since` — zero extra network (turn-005 fluid timers).
 
-import { useLiveTick } from '../hooks/useLiveTick';
+import { useLiveClock } from '../hooks/useLiveTick';
 
 function fmtElapsed(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -13,17 +13,26 @@ function fmtElapsed(ms: number): string {
 }
 
 export function ThinkingIndicator({ activity, since }: { activity?: string | null; since?: number | null }) {
-  // Re-render once a second to advance the fluid elapsed — but FREEZE while the
-  // reader holds a selection: this indicator lives inside the transcript, and on
-  // WebKit/iOS a per-second text mutation next to a highlight collapses it (see
-  // useLiveTick). The count catches up the moment the selection clears.
-  useLiveTick();
+  // The shared clock, NOT `Date.now()`.
+  //
+  // Honest scope: this label is NOT what breaks the reader's selection. Measured
+  // on WebKit, a text update only collapses a selection when it lands in the
+  // element the selection is IN, and this indicator has its own (useLiveTick.ts).
+  // Round 2 froze it believing otherwise and the bug survived.
+  //
+  // It reads the clock regardless, because the previous form was ineffective on
+  // its own terms and the shape is worth not repeating: this component is built
+  // inline in SessionChatPage's `transcriptFooter` and is not memoized, so every
+  // store notification (~4/s for a whole live turn) re-renders it — freezing its
+  // own tick froze nothing. A frozen VALUE makes the output identical across
+  // those re-renders, so React writes no text node at all.
+  const now = useLiveClock();
 
   const raw = (activity && activity.trim()) || 'Working…';
   // Drop a trailing "(34s · 2.1k tokens)" style parenthetical — we render our
   // own fluid elapsed instead of the daemon's 5s-quantised one.
   const label = raw.replace(/\s*\([^)]*\)\s*$/, '').trim() || 'Working…';
-  const elapsed = since != null ? fmtElapsed(Date.now() - since) : null;
+  const elapsed = since != null ? fmtElapsed(now - since) : null;
 
   return (
     <div className="flex items-center gap-2 text-[12.5px]">
