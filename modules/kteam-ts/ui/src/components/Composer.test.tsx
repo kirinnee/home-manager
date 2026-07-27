@@ -346,18 +346,22 @@ describe('Composer self-refocus policy', () => {
 describe('Composer dictation integration', () => {
   test('keeps the microphone absent when this page has no mediaDevices API', () => {
     const html = renderComposer({ onFiles: () => {} });
-    expect(html).not.toContain('Hold to dictate');
+    expect(html).not.toContain('Dictate a message');
     expect(html).not.toContain('data-dictation-phase');
   });
 
-  test('mounts a labelled 44px microphone beside Attach without an idle height placeholder', () => {
+  test('mounts a labelled 44px mic dialog-trigger beside Attach, collapsed at rest', () => {
     const html = renderComposerWithMicrophone({ compact: true, onFiles: () => {} });
     const attachAt = html.indexOf('aria-label="Attach images"');
-    const dictateAt = html.indexOf('aria-label="Hold to dictate"');
+    const dictateAt = html.indexOf('aria-label="Dictate a message"');
     expect(attachAt).toBeGreaterThan(-1);
     expect(dictateAt).toBeGreaterThan(attachAt);
-    expectTouchTarget(buttonWithLabel(html, 'Hold to dictate'));
+    expectTouchTarget(buttonWithLabel(html, 'Dictate a message'));
+    // The mic opens the modal — a dialog trigger, closed until tapped, with no
+    // dialog markup or inline status band painted at rest.
+    expect(buttonWithLabel(html, 'Dictate a message')).toContain('aria-haspopup="dialog"');
     expect(html).not.toContain('data-dictation-phase');
+    expect(html).not.toContain('role="dialog"');
     expect(html.toLowerCase()).not.toContain('autofocus');
   });
 
@@ -546,7 +550,7 @@ describe('the mandatory touch send cluster', () => {
     // Both controls share a flex-COLUMN container — the same stack as
     // Interrupt/Queue — instead of the old side-by-side row.
     const attachAncestors = ancestorsOfLabelledButton(html, 'Attach images');
-    const micAncestors = ancestorsOfLabelledButton(html, 'Hold to dictate');
+    const micAncestors = ancestorsOfLabelledButton(html, 'Dictate a message');
     expect(attachAncestors.some(tag => tag.includes('flex-col') && tag.includes('items-end'))).toBe(true);
     expect(micAncestors.some(tag => tag.includes('flex-col') && tag.includes('items-end'))).toBe(true);
   });

@@ -1310,6 +1310,29 @@ body {
     var(--focus-shadow);
 }
 
+/* THE DICTATION "TRANSCRIBING" BAR. Indeterminate on purpose: the engine reports
+   no percentage, so a MOVING sliver is the honest signal — "work is happening"
+   without a fake number — and it never freezes the way a static spinner reads as
+   a hang. Reduced-motion parks it as a centred bar (the utility class strips the
+   animation) so it still reads as "busy" without travel. */
+@keyframes kt-dictation-slide {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(320%);
+  }
+}
+.kt-dictation-bar {
+  animation: kt-dictation-slide 1.15s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .kt-dictation-bar {
+    animation: none;
+    margin-inline: auto;
+  }
+}
+
 /* ---- panel --------------------------------------------------------------
    The elevation model is the strongest grayscale signal in the whole system:
    blurred float (Studio/Ember) vs hairline-plus-glow (Mission) vs hard offset

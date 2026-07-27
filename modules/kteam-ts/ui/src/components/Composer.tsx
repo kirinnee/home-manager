@@ -106,16 +106,22 @@ interface Props {
 /** ~6 lines. Past this the composer scrolls internally instead of eating the
  *  transcript — the shell is exactly 100dvh and has nowhere to give. */
 const MAX_TEXTAREA_PX = 148;
-/** ~4 lines. A phone at rest has 844px, not 900+, and the transcript is already
- *  paying for a 44px touch floor on every control around it. */
-const COMPACT_MAX_TEXTAREA_PX = 96;
-/** ~2 lines. With a 336px keyboard up the whole visible app is ~508px, and a
- *  composer that can grow to 148px there is a composer that has eaten a third of
- *  what is left to read. Past this it scrolls internally, which is the same
- *  contract the desktop cap has always had — just measured against the box the
- *  reader can actually see. A percentage of `--app-h` was the obvious form and
- *  the wrong one: 30% of 508px is 152px, which is larger than the desktop cap. */
-const COMPACT_KEYBOARD_MAX_TEXTAREA_PX = 64;
+/** ~6 lines. A phone AT REST has ~844px and the transcript can spare it; the old
+ *  ~4-line cap made the reader scroll a draft they were still writing. */
+const COMPACT_MAX_TEXTAREA_PX = 160;
+/** ~5 lines. The dock ALREADY stands 92px tall — two stacked 44px touch targets
+ *  (attach/mic) on the left, interrupt/send on the right — so the first ~3 lines
+ *  of the textarea cost NOTHING: they fill height the dock is already paying for
+ *  (the textarea is top-aligned into that column, see the dock markup). The old
+ *  64px cap parked the reader at ~2 visible lines INSIDE a 92px box — it capped
+ *  the text well below the height already on screen, which is precisely the "I
+ *  can't see more than two rows" report. 140px shows ~5 lines before it scrolls
+ *  internally, and with a 336px keyboard up (visible app ~508px) a 140px textarea
+ *  is a ~150px composer — reached only once the reader has typed five lines, which
+ *  is exactly when they want to see them. A percentage of `--app-h` was the
+ *  obvious form and the wrong one: it caps a two-line draft as hard as a ten-line
+ *  one. */
+const COMPACT_KEYBOARD_MAX_TEXTAREA_PX = 140;
 const MIN_TEXTAREA_PX = 38;
 
 const TONE_TEXT: Record<Tone, string> = {
@@ -389,7 +395,6 @@ export function Composer({
       onDraftChange(result.text);
     },
   });
-  const dictationActive = dictation.supported && dictation.handle.phase !== 'idle';
   // The growth cap is a property of the box the reader can see, so it follows
   // the viewport rather than the device. Desktop is unchanged at 148px.
   const maxTextareaPx = !compact
@@ -658,31 +663,51 @@ export function Composer({
       }}
     >
       {attachmentSlot}
+      {/* The dictation modal: a full-viewport overlay, so it renders once here
+          regardless of layout and is inert (renders nothing) while closed. */}
+      {dictation.sheet}
       {compact ? (
-        // PHONE DOCK (Telegram). Attach bottom-LEFT, send/queue bottom-RIGHT, the
-        // textarea between them growing UPWARD — the controls flank the input on
-        // the same baseline instead of sitting in their own row beneath it, so
-        // they cost NO vertical band. `items-end` pins the 44px controls to the
-        // bottom while the textarea rises; `min-w-0 flex-1` lets the textarea
-        // take all the width the edge-hugging controls leave and still shrink so
-        // a busy row (attach + Interrupt & send + Queue) never overflows.
+        // PHONE DOCK (Telegram). Attach TOP-left, send/queue BOTTOM-right, and
+        // the text TOP-ALIGNED between them — the controls flank the input
+        // instead of sitting in their own row beneath it, so they cost NO
+        // vertical band.
+        //
+        // ALIGNMENT IS THE FIX FOR "the text sits low with empty space above it".
+        // The stacked icon columns are 92px tall (two 44px targets + a gap) and a
+        // one-line textarea is ~38px. The old row was `items-end`, which pinned
+        // that short textarea to the BOTTOM of the 92px column and left 65px of
+        // dead air above the first line — the reader typed into the middle of the
+        // box. Now the row is `items-stretch`: the textarea's flex cell stretches
+        // to the full dock height and the text sits at its TOP, so line one is at
+        // the top edge and new lines grow DOWNWARD from a fixed first line (the
+        // box grows down, the first line never moves). The icon columns own their
+        // own vertical placement instead of riding the row's baseline — attach
+        // pinned to the top (`justify-start`), interrupt/send pinned to the bottom
+        // (`justify-end`, nearest the thumb) — so the arrangement the reader asked
+        // for holds at every height. `min-w-0 flex-1` still lets the textarea take
+        // the width the edge-hugging controls leave and shrink so a busy row
+        // (attach + Interrupt & send + Queue) never overflows.
         <>
-          <div className="kt-composer__dock flex items-end gap-xs">
+          <div className="kt-composer__dock flex items-stretch gap-xs">
             {(attachControl || dictation.control) && (
               // STACKED VERTICAL ICONS, the same move as Interrupt/Queue on the
               // right (the user asked "can the attach and mic be stacked?"). A
               // column of two 44px icons costs one icon's WIDTH instead of two,
               // which is the scarce axis at 360px — it buys the textarea back the
               // width a side-by-side row spent, at the cost of height the dock is
-              // already paying for the interrupt column opposite it.
-              <div className="flex shrink-0 flex-col items-end gap-xs">
+              // already paying for the interrupt column opposite it. `justify-start`
+              // pins the pair to the TOP of the stretched column so attach stays
+              // top-left no matter how tall the textarea grows.
+              <div className="flex shrink-0 flex-col items-end justify-start gap-xs">
                 {attachControl}
                 {dictation.control}
               </div>
             )}
-            <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 flex-1 flex-col">
               {/* Borderless + transparent: the composer WRAPPER is the input as
-                  far as the eye and the focus ring are concerned. */}
+                  far as the eye and the focus ring are concerned. The wrapper
+                  stretches to the dock height (items-stretch on the row) and the
+                  textarea sits at its top, so the first line is at the top edge. */}
               <ComposerTextarea
                 inputRef={ref}
                 draft={draft}
@@ -708,8 +733,10 @@ export function Composer({
               // or not a turn is running — the height no longer jumps under the
               // reader as a session flips busy/idle. Reserved only when an
               // interrupt is wired at all (`onInterruptAndSend`); a composer that
-              // can never interrupt reserves nothing.
-              <div className="flex shrink-0 flex-col items-end gap-xs">
+              // can never interrupt reserves nothing. `justify-end` pins the pair
+              // to the BOTTOM of the stretched column so Send stays bottom-right,
+              // nearest the thumb, however tall the textarea grows.
+              <div className="flex shrink-0 flex-col items-end justify-end gap-xs">
                 {interruptControl ?? (onInterruptAndSend ? buildInterrupt(true) : null)}
                 {sendControl}
               </div>
@@ -735,9 +762,7 @@ export function Composer({
             <span className="sr-only" aria-live="polite" aria-atomic="true">
               {statusCopy.liveText}
             </span>
-            {/* Idle dictation has no in-flow node. A permanent h-5 placeholder
-                here would give back the 20px the keyboard-open layout reclaimed. */}
-            {dictationActive && dictation.status}
+            {/* Dictation status lives in its own modal now, not on this line. */}
             {/* The model, now a tap target — one tap from where the reader is to
                 switch it (ComposerRuntime owns the sheet). It carries its own
                 `data-kb-hide`, so it collapses with the rest of the meta line
@@ -772,7 +797,6 @@ export function Composer({
 
           <div className="kt-composer__actions min-h-control flex flex-nowrap items-center gap-x-sm gap-y-xs">
             <div className="mr-auto flex min-w-0 items-center gap-sm overflow-hidden">
-              {dictationActive && dictation.status}
               {context && <ContextStrip context={context} />}
               {context && enterSends && <Sep />}
               {/* Deliberately NOT `.kt-chrome`: this tells the reader how the
