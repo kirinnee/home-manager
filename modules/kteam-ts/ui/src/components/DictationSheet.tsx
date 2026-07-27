@@ -1,13 +1,12 @@
-// The dictation MODAL — tap the mic, speak, get text you can edit before it ever
-// touches the message box.
+// The dictation MINI PANEL — tap the mic, keep typing, speak, then review the
+// text before it ever touches the message box.
 //
-// WHY A MODAL AND NOT THE OLD HOLD-TO-TALK BUTTON. The mic used to be a
-// press-and-hold control in the composer with no visible flow: the reader could
-// not tell it was there, could not tell it was recording, and got a silent
-// insert on release. The report was blunt — "how to use it? it needs to be way
-// more ergonomic". So the mic is now a single tap that opens this sheet, which
-// is the whole interaction: a clear recording state, an obvious stop, the
-// transcript shown for editing, and an explicit Insert. One tap in, one tap out.
+// NON-MODAL IS THE PRODUCT REQUIREMENT. The first single-tap redesign used a
+// BottomSheet: clearer than hold-to-talk, but it trapped focus and blocked the
+// exact workflow the reader wanted to continue while recording. This panel has
+// no scrim, no inert page, no focus trap and no mount-time focus call. It sits
+// near the top edge, away from the composer and newest transcript rows, and can
+// be hidden without cancelling the recording; the mic button brings it back.
 //
 // HONEST ABOUT "LIVE". Streaming was measured on this fleet and rejected — the
 // real-time factor is far above 1, so there is no way to show words as they are
@@ -24,16 +23,14 @@
 //   - FAILURE: the real reason, out loud — mic blocked, daemon unreachable,
 //     model not ready — each with Try again / Cancel rather than a dead spinner.
 //
-// It reuses the shared `BottomSheet` (focus trap, swipe-dismiss, --app-h-aware
-// max height) rather than being a third modal, so it sits correctly above the
-// keyboard and behaves like Details and the runtime switchers.
-
 import { useEffect, useId, useRef } from 'react';
 import { Mic, Square, Loader2, AlertCircle, CornerDownLeft, RotateCcw, X } from 'lucide-react';
 import { Button, Textarea } from './Primitives';
-import { BottomSheet } from './SessionDetails';
+import { InputWaveform } from './InputWaveform';
 import type { DictationPhase } from '../hooks/useDictation';
+import type { CaptureMonitor } from '../lib/stt/audio-capture';
 import type { SttMode } from '../lib/stt/stt-settings';
+import { cn } from '../lib/utils';
 
 /** The visible step, derived from the capture phase plus what has landed. Pure
  *  and exported so the whole "what does the reader see right now" rule has a
@@ -51,7 +48,8 @@ export function dictationStage(input: {
 }): DictationStage {
   if (input.hasError || input.phase === 'error') return 'error';
   if (input.phase === 'transcribing') return 'transcribing';
-  if (input.phase === 'requesting' || input.phase === 'recording') return 'recording';
+  if (input.phase === 'requesting') return 'starting';
+  if (input.phase === 'recording') return 'recording';
   if (input.hasTranscript) return 'review';
   if (input.wasCapturing) return 'empty';
   return 'starting';
@@ -104,12 +102,16 @@ export interface DictationSheetProps {
   /** Milliseconds elapsed in the CURRENT recording. Ignored off the recording
    *  stage. */
   elapsedMs: number;
+  /** A read-only branch off the recorder's exact stream/audio graph. */
+  inputMonitor: CaptureMonitor | null;
   /** The editable transcript, shown on the review stage. Controlled by the
    *  owner so an edit and an insert read the same value. */
   text: string;
   onTextChange(value: string): void;
   errorCode?: string;
   errorMessage?: string;
+  /** Hide only. Recording/transcription/review continues in the background. */
+  onDismiss(): void;
   /** Stop recording and transcribe. */
   onStop(): void;
   /** Throw the recording/transcript away and close. */
@@ -136,10 +138,12 @@ export function DictationSheet({
   stage,
   mode,
   elapsedMs,
+  inputMonitor,
   text,
   onTextChange,
   errorCode,
   errorMessage,
+  onDismiss,
   onStop,
   onCancel,
   onRetry,
@@ -155,12 +159,12 @@ export function DictationSheet({
   // transcription finishes, which is exactly the surprise the hold-to-talk mic
   // was faulted for. The reader taps to edit; then the caret is already home.
   useEffect(() => {
-    if (stage !== 'review') return;
+    if (!open || stage !== 'review') return;
     const el = editRef.current;
     if (!el) return;
     const end = el.value.length;
     el.setSelectionRange(end, end);
-  }, [stage]);
+  }, [open, stage]);
 
   const failure = dictationFailureCopy(errorCode);
   const title =
@@ -168,22 +172,38 @@ export function DictationSheet({
       ? 'Review dictation'
       : stage === 'transcribing'
         ? 'Transcribing'
-        : stage === 'error'
-          ? failure.title
-          : stage === 'empty'
-            ? "Didn't catch that"
-            : 'Dictate';
+        : stage === 'recording'
+          ? 'Recording'
+          : stage === 'error'
+            ? failure.title
+            : stage === 'empty'
+              ? "Didn't catch that"
+              : 'Opening microphone';
+
+  if (!open) return null;
 
   return (
-    <BottomSheet
-      id={`${baseId}-sheet`}
-      open={open}
-      onClose={onCancel}
-      labelledBy={titleId}
-      closeLabel="Close dictation"
-      zIndexClass="z-50"
+    <section
+      id={`${baseId}-panel`}
+      data-dictation-panel="non-modal"
+      role="region"
+      aria-labelledby={titleId}
+      onKeyDown={event => {
+        // Local Escape only: the panel must never install a document-level
+        // handler that intercepts keys while the reader is typing elsewhere.
+        if (event.key !== 'Escape') return;
+        event.stopPropagation();
+        onDismiss();
+      }}
+      className={cn(
+        'fixed right-3 top-[calc(env(safe-area-inset-top,0px)+3.75rem)] z-50 max-h-[calc(var(--app-h,100dvh)-4.5rem)] w-[calc(100vw-1.5rem)] max-w-sm overflow-y-auto rounded-panel border border-l-heavy border-border bg-surface font-ui shadow-panel',
+        stage === 'recording' && 'border-l-err',
+        (stage === 'starting' || stage === 'transcribing') && 'border-l-accent',
+        (stage === 'empty' || stage === 'error') && 'border-l-warn',
+        stage === 'review' && 'border-l-ok',
+      )}
     >
-      <div className="mx-auto flex w-full max-w-2xl min-w-0 flex-col gap-panel px-panel py-row-y">
+      <div className="flex w-full min-w-0 flex-col gap-sm p-3">
         <div className="flex min-w-0 items-center gap-sm">
           {stage === 'recording' ? (
             <LiveDot />
@@ -209,13 +229,24 @@ export function DictationSheet({
               {formatElapsed(elapsedMs)}
             </span>
           )}
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="min-h-[44px] min-w-[44px] shrink-0 justify-center p-0"
+            aria-label="Hide dictation panel; recording continues"
+            title="Hide this panel — recording continues"
+            onClick={onDismiss}
+          >
+            <X size={15} aria-hidden="true" />
+          </Button>
         </div>
 
         {/* One polite live region carries the stage change to assistive tech —
             state words only, never a partial transcript. */}
         <span className="sr-only" aria-live="polite" aria-atomic="true">
           {stage === 'recording'
-            ? `Recording, ${formatElapsed(elapsedMs)}`
+            ? 'Recording'
             : stage === 'transcribing'
               ? mode === 'local'
                 ? 'Transcribing on this device'
@@ -230,7 +261,7 @@ export function DictationSheet({
         </span>
 
         {(stage === 'starting' || stage === 'recording') && (
-          <RecordingBody stage={stage} onStop={onStop} onCancel={onCancel} />
+          <RecordingBody stage={stage} inputMonitor={inputMonitor} onStop={onStop} onCancel={onCancel} />
         )}
 
         {stage === 'transcribing' && <TranscribingBody mode={mode} onCancel={onCancel} />}
@@ -265,38 +296,51 @@ export function DictationSheet({
           />
         )}
       </div>
-    </BottomSheet>
+    </section>
   );
 }
 
-function RecordingBody({ stage, onStop, onCancel }: { stage: DictationStage; onStop(): void; onCancel(): void }) {
+function RecordingBody({
+  stage,
+  inputMonitor,
+  onStop,
+  onCancel,
+}: {
+  stage: DictationStage;
+  inputMonitor: CaptureMonitor | null;
+  onStop(): void;
+  onCancel(): void;
+}) {
   const starting = stage === 'starting';
   return (
     <div className="flex flex-col gap-sm">
       <p className="text-ui text-muted">
-        {starting ? 'Opening the microphone…' : 'Listening. Tap Stop when you are done, then it is transcribed.'}
+        {starting ? 'Opening the microphone…' : 'Listening — keep typing, then stop when you are done.'}
       </p>
-      <Button
-        variant="primary"
-        size="md"
-        className="min-h-[52px] w-full justify-center gap-sm text-ui"
-        disabled={starting}
-        aria-label="Stop recording and transcribe"
-        onClick={onStop}
-      >
-        <Square size={16} aria-hidden="true" />
-        Stop &amp; transcribe
-      </Button>
-      <Button
-        variant="ghost"
-        size="md"
-        className="min-h-[44px] w-full justify-center gap-xs"
-        aria-label="Cancel dictation"
-        onClick={onCancel}
-      >
-        <X size={14} aria-hidden="true" />
-        Cancel
-      </Button>
+      {!starting && <InputWaveform monitor={inputMonitor} />}
+      <div className="flex gap-xs">
+        <Button
+          variant="primary"
+          size="md"
+          className="min-h-[44px] min-w-0 flex-1 justify-center gap-sm text-ui"
+          disabled={starting}
+          aria-label="Stop recording and transcribe"
+          onClick={onStop}
+        >
+          <Square size={15} aria-hidden="true" />
+          Stop &amp; transcribe
+        </Button>
+        <Button
+          variant="ghost"
+          size="md"
+          className="min-h-[44px] shrink-0 justify-center gap-xs"
+          aria-label="Cancel dictation"
+          onClick={onCancel}
+        >
+          <X size={14} aria-hidden="true" />
+          Cancel
+        </Button>
+      </div>
     </div>
   );
 }

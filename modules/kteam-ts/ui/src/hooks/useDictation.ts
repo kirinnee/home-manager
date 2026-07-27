@@ -33,7 +33,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import type { ChatRecord } from '../types';
-import { captureErrorFrom, hasMicrophoneApi, startCapture } from '../lib/stt/audio-capture';
+import { captureErrorFrom, hasMicrophoneApi, startCapture, type CaptureMonitor } from '../lib/stt/audio-capture';
 import { daemonTranscribe } from '../lib/stt/daemon-engine';
 import { UtteranceLatch, finishUtterance } from '../lib/stt/utterance';
 import { readSttCapabilities } from '../lib/stt/capabilities';
@@ -114,6 +114,8 @@ export interface DictationHandle {
   phase: DictationPhase;
   /** True while the mic is actually open. Drives `aria-pressed`. */
   recording: boolean;
+  /** Read-only analyser factory for the recorder's own stream/audio graph. */
+  inputMonitor: CaptureMonitor | null;
   error: DictationError | null;
   /** Non-null while a transcript is being produced, for the status line. */
   busy: boolean;
@@ -133,6 +135,9 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
 
   const [phase, setPhase] = useState<DictationPhase>('idle');
   const [error, setError] = useState<DictationError | null>(null);
+  // One transition when capture opens and one when it closes. The waveform
+  // itself never updates React state; it paints its canvas behind a ref.
+  const [inputMonitor, setInputMonitor] = useState<CaptureMonitor | null>(null);
 
   // Refs, not state, for everything the async paths read: state would be a
   // stale closure by the time a 300 ms network round trip resolves.
@@ -174,6 +179,7 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
   useEffect(() => {
     if (!disabled) return;
     teardown();
+    setInputMonitor(null);
     setPhase('idle');
   }, [disabled, teardown]);
 
@@ -212,7 +218,7 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
         }
       }
       if (!latch.isCurrent(token)) return raw;
-      const candidate = enhance({ text: raw, dictionary: entries, context });
+      const candidate = enhance({ text: raw, dictionary: entries, context, userContext: settings.userContext });
       if (candidate.text === raw) return raw;
       // THE VERIFIER IS NOT OPTIONAL AND NOT ADVISORY. If it refuses — for any
       // reason — the reader gets the model's own words, unmodified. Enhancement
@@ -240,8 +246,11 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
    *  the capture BEFORE its first await, so `onLimit` and a pointer release
    *  arriving together produce one transcription and one draft edit, not two. */
   const finish = useCallback(
-    (token: number) =>
-      finishUtterance(token, {
+    (token: number) => {
+      // Stop the monitor immediately, before the recorder's tail flush and
+      // transcription. This closes its rAF loop and AudioContext on Stop.
+      setInputMonitor(null);
+      return finishUtterance(token, {
         latch,
         transcribe: transcribeSamples,
         refine: raw => enhanceTranscript(raw, token),
@@ -251,7 +260,8 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
         onController: controller => {
           abort.current = controller;
         },
-      }),
+      });
+    },
     [commit, enhanceTranscript, latch, transcribeSamples],
   );
 
@@ -260,6 +270,7 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
     if (phase === 'requesting' || phase === 'recording') return;
     const token = latch.begin();
     releaseRequested.current = false;
+    setInputMonitor(null);
     setError(null);
     setPhase('requesting');
 
@@ -276,6 +287,7 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
         abort.current?.abort();
         abort.current = null;
         releaseRequested.current = false;
+        setInputMonitor(null);
         setError(null);
         setPhase('idle');
       },
@@ -294,11 +306,13 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
           void finish(token);
           return;
         }
+        setInputMonitor(active.monitor);
         setPhase('recording');
       })
       .catch(failure => {
         if (!latch.isCurrent(token)) return;
         const captureFailure = captureErrorFrom(failure);
+        setInputMonitor(null);
         setError({ code: captureFailure.code, message: captureFailure.message });
         setPhase('error');
       });
@@ -319,6 +333,7 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
 
   const cancel = useCallback(() => {
     teardown();
+    setInputMonitor(null);
     setPhase('idle');
   }, [teardown]);
 
@@ -331,6 +346,7 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
     supported,
     phase,
     recording: phase === 'recording',
+    inputMonitor,
     busy: phase === 'transcribing',
     error,
     start,

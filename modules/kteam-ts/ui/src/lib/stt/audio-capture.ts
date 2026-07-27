@@ -200,7 +200,25 @@ export function captureErrorFrom(error: unknown): CaptureError {
   return new CaptureError('capture-failed', message);
 }
 
+/** A visual-only branch off the recorder's already-running audio graph. */
+export interface CaptureAnalyserTap {
+  readonly analyser: AnalyserNode;
+  /** Disconnect this branch without touching the recorder or its tracks. */
+  disconnect(): void;
+}
+
+export interface CaptureMonitor {
+  /** Create a tap from the recorder's exact MediaStream source and AudioContext.
+   *  Returns null once capture has ended or if the browser rejects the branch. */
+  createAnalyser(): CaptureAnalyserTap | null;
+}
+
 export interface CaptureSession {
+  /** The exact device stream feeding this capture. Consumers may analyse it,
+   *  but must never stop its tracks; this session remains the sole owner. */
+  readonly stream: MediaStream;
+  /** Read-only analyser factory sharing this capture's active audio graph. */
+  readonly monitor: CaptureMonitor;
   /** The rate the samples were captured at, before resampling. */
   readonly inputSampleRate: number;
   /** True until the first `stop()`/`cancel()`/failure. */
@@ -283,6 +301,9 @@ export async function startCapture(options: StartCaptureOptions = {}): Promise<C
     onVisibility: null,
   };
   const chunks: Float32Array[] = [];
+  /** Visual analyser branches are independently disposable, but capture release
+   *  is the final backstop so a forgotten UI cleanup cannot leak a node. */
+  const monitorCleanups = new Set<() => void>();
   let captured = 0;
   let inputSampleRate = TARGET_SAMPLE_RATE;
   /** Is the microphone open, as the caller sees it. Goes false the moment the
@@ -320,6 +341,8 @@ export async function startCapture(options: StartCaptureOptions = {}): Promise<C
     } catch {
       /* the port is already gone */
     }
+    for (const cleanup of [...monitorCleanups]) cleanup();
+    monitorCleanups.clear();
     internals.worklet?.disconnect();
     internals.processor?.disconnect();
     internals.source?.disconnect();
@@ -475,7 +498,71 @@ export async function startCapture(options: StartCaptureOptions = {}): Promise<C
     return result;
   };
 
+  const monitor: CaptureMonitor = {
+    createAnalyser(): CaptureAnalyserTap | null {
+      const context = internals.context;
+      const source = internals.source;
+      if (!active || released || !context || !source) return null;
+
+      let analyser: AnalyserNode | null = null;
+      let mute: GainNode | null = null;
+      try {
+        analyser = context.createAnalyser();
+        mute = context.createGain();
+        mute.gain.value = 0;
+        source.connect(analyser);
+        analyser.connect(mute);
+        // Reaching a zero-gain destination keeps this branch actively pulled
+        // without ever playing microphone input through the speakers.
+        mute.connect(context.destination);
+      } catch {
+        try {
+          if (analyser) source.disconnect(analyser);
+        } catch {
+          /* the source is already gone */
+        }
+        try {
+          analyser?.disconnect();
+        } catch {
+          /* partially connected */
+        }
+        try {
+          mute?.disconnect();
+        } catch {
+          /* partially connected */
+        }
+        return null;
+      }
+
+      let connected = true;
+      const disconnect = (): void => {
+        if (!connected) return;
+        connected = false;
+        monitorCleanups.delete(disconnect);
+        try {
+          source.disconnect(analyser);
+        } catch {
+          /* capture release may have disconnected the source first */
+        }
+        try {
+          analyser.disconnect();
+        } catch {
+          /* already disconnected */
+        }
+        try {
+          mute.disconnect();
+        } catch {
+          /* already disconnected */
+        }
+      };
+      monitorCleanups.add(disconnect);
+      return { analyser, disconnect };
+    },
+  };
+
   return {
+    stream,
+    monitor,
     get inputSampleRate() {
       return inputSampleRate;
     },

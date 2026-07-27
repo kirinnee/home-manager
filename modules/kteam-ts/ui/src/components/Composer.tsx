@@ -663,8 +663,8 @@ export function Composer({
       }}
     >
       {attachmentSlot}
-      {/* The dictation modal: a full-viewport overlay, so it renders once here
-          regardless of layout and is inert (renders nothing) while closed. */}
+      {/* The dictation mini panel is fixed outside the composer flow, so it
+          renders once regardless of layout and paints nothing while hidden. */}
       {dictation.sheet}
       {compact ? (
         // PHONE DOCK (Telegram). Attach TOP-left, send/queue BOTTOM-right, and
@@ -762,7 +762,7 @@ export function Composer({
             <span className="sr-only" aria-live="polite" aria-atomic="true">
               {statusCopy.liveText}
             </span>
-            {/* Dictation status lives in its own modal now, not on this line. */}
+            {/* Dictation status lives in its own non-modal panel, not on this line. */}
             {/* The model, now a tap target — one tap from where the reader is to
                 switch it (ComposerRuntime owns the sheet). It carries its own
                 `data-kb-hide`, so it collapses with the rest of the meta line

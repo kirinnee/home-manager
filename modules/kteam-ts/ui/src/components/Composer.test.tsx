@@ -350,16 +350,21 @@ describe('Composer dictation integration', () => {
     expect(html).not.toContain('data-dictation-phase');
   });
 
-  test('mounts a labelled 44px mic dialog-trigger beside Attach, collapsed at rest', () => {
+  test('mounts a labelled 44px mic disclosure beside Attach, collapsed at rest', () => {
     const html = renderComposerWithMicrophone({ compact: true, onFiles: () => {} });
     const attachAt = html.indexOf('aria-label="Attach images"');
     const dictateAt = html.indexOf('aria-label="Dictate a message"');
     expect(attachAt).toBeGreaterThan(-1);
     expect(dictateAt).toBeGreaterThan(attachAt);
     expectTouchTarget(buttonWithLabel(html, 'Dictate a message'));
-    // The mic opens the modal — a dialog trigger, closed until tapped, with no
-    // dialog markup or inline status band painted at rest.
-    expect(buttonWithLabel(html, 'Dictate a message')).toContain('aria-haspopup="dialog"');
+    // The mic is a DISCLOSURE, not a dialog trigger. The panel is deliberately
+    // non-modal so the composer stays typeable while recording, so announcing
+    // `aria-haspopup="dialog"` would promise a modal that never arrives and
+    // tell a screen-reader user their focus is about to be captured when it is
+    // not. `aria-expanded` is the honest contract for a thing that opens
+    // beside you rather than over you.
+    expect(buttonWithLabel(html, 'Dictate a message')).toContain('aria-expanded="false"');
+    expect(buttonWithLabel(html, 'Dictate a message')).not.toContain('aria-haspopup="dialog"');
     expect(html).not.toContain('data-dictation-phase');
     expect(html).not.toContain('role="dialog"');
     expect(html.toLowerCase()).not.toContain('autofocus');
