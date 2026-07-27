@@ -417,17 +417,28 @@ describe('recommendTeam: account rules', () => {
     }
   });
 
-  test('excludes at-limit and logged-out accounts with the reason', () => {
-    const team = recommendTeam('Implement the feature', ['claude-auto-loge', 'codex-auto-atomi', 'claude-auto-atomi'], {
-      usage: [
-        { binary: 'claude-auto-loge', atLimit: true },
-        { binary: 'codex-auto-atomi', authOk: false },
-      ],
-    });
+  test('excludes at-limit and auth-failed accounts with an ACHIEVABLE remedy per account kind', () => {
+    const team = recommendTeam(
+      'Implement the feature',
+      ['claude-auto-loge', 'codex-auto-atomi', 'claude-auto-mm3', 'claude-auto-atomi'],
+      {
+        usage: [
+          { binary: 'claude-auto-loge', atLimit: true },
+          { binary: 'codex-auto-atomi', authOk: false, provider: 'codex' }, // OAuth
+          { binary: 'claude-auto-mm3', authOk: false, provider: 'minimax' }, // API key
+        ],
+      },
+    );
     expect(everyone(team).some(option => option.binary === 'claude-auto-loge')).toBe(false);
     expect(everyone(team).some(option => option.binary === 'codex-auto-atomi')).toBe(false);
+    expect(everyone(team).some(option => option.binary === 'claude-auto-mm3')).toBe(false);
     expect(team.exclusions.find(item => item.binary === 'claude-auto-loge')?.reason).toContain('usage limit');
-    expect(team.exclusions.find(item => item.binary === 'codex-auto-atomi')?.reason).toContain('not logged in');
+    // OAuth account → kfleet login is the real fix.
+    expect(team.exclusions.find(item => item.binary === 'codex-auto-atomi')?.reason).toContain('kfleet login');
+    // API-key account → NEVER kfleet login (a no-op for it); rotate the key in sops.
+    const mm3 = team.exclusions.find(item => item.binary === 'claude-auto-mm3')?.reason ?? '';
+    expect(mm3).toContain('$MINIMAX_API_KEY');
+    expect(mm3).not.toContain('kfleet login');
   });
 
   test('loge-first: same tier, the loge account wins', () => {

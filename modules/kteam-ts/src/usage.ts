@@ -115,6 +115,24 @@ export class UsageFeed {
   }
 }
 
+/** Providers whose credential is an OAuth login — the only class `kfleet login`
+ *  can fix. Everything else is a static API key that `kfleet login` SKIPS
+ *  (`cli/login.ts` filters to `oauth` identities), so telling the user to log in
+ *  is a no-op for those accounts. */
+const OAUTH_PROVIDERS = new Set(['anthropic', 'codex']);
+
+/** The ACHIEVABLE remedy for an account kfleet reports as auth-failed, chosen by
+ *  the account's provider so we never hand out advice that is impossible for that
+ *  account class. OAuth (anthropic/codex) → `kfleet login`; API-key (minimax/zai)
+ *  → rotate the key in sops, since `kfleet login` cannot touch it. Unknown/absent
+ *  provider → name both paths rather than guess wrong. */
+export function authFailureRemedy(provider?: string): string {
+  if (provider && OAUTH_PROVIDERS.has(provider)) return 'run `kfleet login`';
+  if (provider === 'minimax') return 'rotate $MINIMAX_API_KEY in sops (secrets.yaml), then run `kfleet apply`';
+  if (provider === 'zai') return "rotate the account's z.ai API key in sops (secrets.yaml), then run `kfleet apply`";
+  return 'for an API-key account rotate its key in sops then `kfleet apply`; for an OAuth account run `kfleet login`';
+}
+
 const percent = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100 ? value : undefined;
 const timestamp = (value: unknown): number | undefined =>
@@ -134,6 +152,7 @@ export function quotaFromUsage(account: AgentUsage): NonNullable<SessionState['q
   return {
     ...(usable && typeof account.atLimit === 'boolean' ? { atLimit: account.atLimit } : {}),
     ...(authOk !== undefined ? { authOk } : {}),
+    ...(account.provider ? { provider: account.provider } : {}),
     ...(fiveHourPercent !== undefined ? { fiveHourPercent } : {}),
     ...(weeklyPercent !== undefined ? { weeklyPercent } : {}),
     ...(fiveHourResetAt !== undefined ? { fiveHourResetAt } : {}),

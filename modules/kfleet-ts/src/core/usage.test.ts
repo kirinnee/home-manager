@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { ResolvedAgent } from './types';
-import { classifyAgent, jwtExpMs, oauthTokenUsable } from './usage';
+import { classifyAgent, classifyMinimaxBody, corroborateAuthFailure, jwtExpMs, oauthTokenUsable } from './usage';
 
 /** Build an unsigned JWT with the given payload (header.payload.sig, base64url). */
 function jwt(payload: Record<string, unknown>): string {
@@ -156,6 +156,95 @@ describe('oauthTokenUsable (auth_ok = currently-usable token)', () => {
   });
   test('a token with unknown expiry ⇒ usable (can not prove it expired)', () => {
     expect(oauthTokenUsable({ accessToken: 'a' }, now)).toBe(true);
+  });
+});
+
+describe('classifyMinimaxBody (single-response auth verdict)', () => {
+  test('status_code:0 ⇒ ok, authOk true, windows computed from REMAINING %', () => {
+    const w = classifyMinimaxBody({
+      base_resp: { status_code: 0, status_msg: 'success' },
+      model_remains: [
+        { model_name: 'general', current_interval_remaining_percent: 80, current_weekly_remaining_percent: 40 },
+      ],
+    });
+    expect(w.ok).toBe(true);
+    expect(w.authOk).toBe(true);
+    expect(w.fiveHourPercent).toBe(20); // 100 − 80 remaining
+    expect(w.weeklyPercent).toBe(60); // 100 − 40 remaining
+  });
+
+  test('status_code:1004 ("login fail") ⇒ authOk false', () => {
+    const w = classifyMinimaxBody({ base_resp: { status_code: 1004, status_msg: 'login fail' } });
+    expect(w.ok).toBe(false);
+    expect(w.authOk).toBe(false);
+  });
+
+  test('status_code:2049 ⇒ authOk false', () => {
+    expect(classifyMinimaxBody({ base_resp: { status_code: 2049 } }).authOk).toBe(false);
+  });
+
+  test('any OTHER nonzero code ⇒ authOk undefined (inconclusive, not condemned)', () => {
+    const w = classifyMinimaxBody({ base_resp: { status_code: 1039, status_msg: 'rate limited' } });
+    expect(w.ok).toBe(false);
+    expect(w.authOk).toBeUndefined();
+  });
+});
+
+describe('corroborateAuthFailure (one blip must not condemn a key)', () => {
+  const noSleep = async (): Promise<void> => {};
+  // A fake attempt sequence: each call returns the next scripted verdict.
+  const scripted = (seq: Array<boolean | undefined>): (() => Promise<{ ok: boolean; authOk?: boolean }>) => {
+    let i = 0;
+    return async () => {
+      const authOk = seq[Math.min(i, seq.length - 1)];
+      i += 1;
+      return { ok: authOk === true, authOk };
+    };
+  };
+
+  test('a SINGLE transient 1004 then a healthy probe ⇒ authOk NOT false', async () => {
+    const attempt = scripted([false, true]);
+    const w = await corroborateAuthFailure(attempt, { attempts: 3, sleepMs: noSleep });
+    expect(w.authOk).toBe(true);
+  });
+
+  test('repeated 1004s (rejected on every probe) ⇒ authOk stays false', async () => {
+    const attempt = scripted([false, false, false]);
+    const w = await corroborateAuthFailure(attempt, { attempts: 3, sleepMs: noSleep });
+    expect(w.authOk).toBe(false);
+  });
+
+  test('a genuinely bad key (always false) is still condemned', async () => {
+    let calls = 0;
+    const attempt = async (): Promise<{ ok: boolean; authOk?: boolean }> => {
+      calls += 1;
+      return { ok: false, authOk: false };
+    };
+    const w = await corroborateAuthFailure(attempt, { attempts: 3, sleepMs: noSleep });
+    expect(w.authOk).toBe(false);
+    expect(calls).toBe(3); // exhausts all corroborating probes before condemning
+  });
+
+  test('a transport error (authOk undefined) is inconclusive — returned WITHOUT retry', async () => {
+    let calls = 0;
+    const attempt = async (): Promise<{ ok: boolean; authOk?: boolean }> => {
+      calls += 1;
+      return { ok: false, authOk: undefined };
+    };
+    const w = await corroborateAuthFailure(attempt, { attempts: 3, sleepMs: noSleep });
+    expect(w.authOk).toBeUndefined();
+    expect(calls).toBe(1); // never re-probed: undefined is not a hard rejection
+  });
+
+  test('a healthy first probe short-circuits (no extra probes)', async () => {
+    let calls = 0;
+    const attempt = async (): Promise<{ ok: boolean; authOk?: boolean }> => {
+      calls += 1;
+      return { ok: true, authOk: true };
+    };
+    const w = await corroborateAuthFailure(attempt, { attempts: 3, sleepMs: noSleep });
+    expect(w.authOk).toBe(true);
+    expect(calls).toBe(1);
   });
 });
 

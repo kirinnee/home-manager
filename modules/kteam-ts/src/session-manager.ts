@@ -65,6 +65,7 @@ import type { AgentUsage } from './core';
 import { chatEventFingerprint, EventStore, type IndexedSession, type JsonValue, type SessionEvent } from './storage';
 import { KTEAM_VERSION } from './version';
 import {
+  authFailureRemedy,
   fetchKfleetUsage,
   quotaFromUsage,
   UsageFeed,
@@ -1173,7 +1174,9 @@ export class SessionManager implements KTeamService {
       throw new Error(`wrapper ${binary} is at its usage limit${reset}; pick another account`);
     }
     if (preflightQuota?.authOk === false) {
-      throw new Error(`wrapper ${binary} is not logged in (kfleet usage reports auth failure); run kfleet login`);
+      throw new Error(
+        `wrapper ${binary}'s credentials were rejected (kfleet usage reports auth failure); ${authFailureRemedy(preflightQuota.provider)}`,
+      );
     }
 
     const id = `${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
