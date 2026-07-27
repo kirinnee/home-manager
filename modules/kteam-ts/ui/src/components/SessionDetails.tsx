@@ -33,6 +33,7 @@ import {
   type MouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
+  type UIEvent as ReactUIEvent,
 } from 'react';
 import {
   Activity,
@@ -147,6 +148,12 @@ export interface BottomSheetProps {
   children: ReactNode;
   panelClassName?: string;
   maxHeight?: string;
+  /** ONE fixed height instead of sizing to the content. A tabbed sheet must
+   *  not change height when the reader switches tabs — the tab bar they just
+   *  tapped would relocate under their thumb — so the tabbed caller pins the
+   *  sheet to its ceiling and lets only the content area scroll. Callers whose
+   *  content is a single fixed form keep the shrink-to-fit default. */
+  height?: string;
   /** Settings can replace Details during its closing frame, so it paints one
    *  layer higher while still using exactly the same sheet machinery. */
   zIndexClass?: string;
@@ -167,6 +174,7 @@ export function BottomSheet({
   children,
   panelClassName,
   maxHeight = 'min(72dvh, calc(var(--app-h, 100dvh) - var(--gap-sm)))',
+  height,
   zIndexClass = 'z-40',
 }: BottomSheetProps) {
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -325,6 +333,11 @@ export function BottomSheet({
         )}
         style={{
           maxHeight,
+          // `height` (when given) still yields to `maxHeight`: the fixed
+          // height is the tall-end pick and maxHeight is the keyboard-safe
+          // ceiling, so an open keyboard shrinks the sheet rather than letting
+          // it run underneath.
+          ...(height ? { height } : {}),
           transform: sheetTransform,
         }}
       >
@@ -416,6 +429,31 @@ export function SessionDetails({
   // session you have not opened before starts on Identity; a reload forgets
   // everything (the memory is in-process only, see useDetailsTab).
   const [tab, setTab] = useDetailsTab(config.id, open);
+
+  // PER-TAB SCROLL MEMORY. The sheet is one fixed-height shell with ONE
+  // scroller carrying whichever panel is selected, so without this a scroll on
+  // Progress would leak into Budget and coming back would land wherever the
+  // other tab left the scroller. Each tab's offset is recorded on every scroll
+  // (cheap: a ref write, no render) and put back before paint when its panel
+  // returns. A tab never visited starts at 0. The memory is per-mount — a
+  // remembered offset can never outlive the panel content it was measured in
+  // longer than this SessionDetails instance.
+  const panelScrollerRef = useRef<HTMLDivElement | null>(null);
+  const tabScrollRef = useRef(new Map<DetailsTab, number>());
+  const rememberPanelScroll = useCallback(
+    (event: ReactUIEvent<HTMLDivElement>) => {
+      tabScrollRef.current.set(tab, event.currentTarget.scrollTop);
+    },
+    [tab],
+  );
+  // Before paint, so the reader never sees the wrong offset flash. `open` is a
+  // dependency because the scroller REMOUNTS on reopen (the closed sheet
+  // renders nothing) and the remembered tab should come back where it was left.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const el = panelScrollerRef.current;
+    if (el) el.scrollTop = tabScrollRef.current.get(tab) ?? 0;
+  }, [tab, open]);
   const tabs: SheetTabSpec<DetailsTab>[] = [
     { key: 'identity', label: 'Identity', icon: <UserRound size={13} aria-hidden="true" /> },
     {
@@ -446,6 +484,15 @@ export function SessionDetails({
       // ceiling never lets the sheet run under the keyboard (--app-h is the
       // visual-viewport height, not dvh).
       maxHeight="min(90dvh, calc(var(--app-h, 100dvh) - var(--gap-sm)))"
+      // FIXED, not content-sized. Measured before this (390x844): the sheet was
+      // 407px tall on Budget and 760px on Runtime, so every tab switch moved
+      // the tab bar itself — you tapped a tab and the strip you tapped jumped
+      // up to 353px. The sheet now RESTS at its ceiling: the same 90dvh /
+      // keyboard-safe expression as maxHeight, so the height is one stable
+      // number per viewport state and only the panel scroller's content varies.
+      // Height changes only when the viewport itself changes (keyboard, rotate)
+      // — never on a tab switch, and nothing animates height.
+      height="min(90dvh, calc(var(--app-h, 100dvh) - var(--gap-sm)))"
     >
       <div className="shrink-0 border-b border-border-soft">
         <div className="mx-auto flex w-full max-w-2xl min-w-0 items-baseline gap-sm px-panel pb-row-y">
@@ -506,7 +553,7 @@ export function SessionDetails({
           overlay and never nests inside it. Unselected panels are not rendered,
           so their links never enter the dialog's focus trap and the Progress
           1s ticker only runs while Progress is on screen. */}
-      <div className="min-h-0 flex-1 overflow-y-auto scroll-thin">
+      <div ref={panelScrollerRef} onScroll={rememberPanelScroll} className="min-h-0 flex-1 overflow-y-auto scroll-thin">
         <div
           role="tabpanel"
           id={sheetPanelId(id, tab)}

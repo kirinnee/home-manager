@@ -12,7 +12,7 @@
 // the guard must get right are checkable without a Selection or a Node.
 
 import { describe, expect, test } from 'bun:test';
-import { pinBlockedBySelection, paneUsableTableWidth, type SelectionLike } from './Transcript';
+import { pinBlockedBySelection, paneUsableTableWidth, touchQuotePlacement, type SelectionLike } from './Transcript';
 
 // Two sentinel "nodes". `contains` decides which is "inside" the viewport; the
 // guard never inspects a node itself, only asks the predicate.
@@ -157,5 +157,46 @@ describe('quotableSelectionText', () => {
 
   test('a whitespace-only selection is not quotable', () => {
     expect(quotableSelectionText(qsel('   \n\t ', INSIDE, INSIDE), inViewport)).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// touchQuotePlacement — where the touch Quote/Pin pair may sit. The reported
+// bug: placed above the selection it covered the selected bubble's own
+// timestamp row (390x844: buttons at y=177 over the clock at y=203). Policy is
+// now below-first, so the pair can only cover text the reader already read.
+
+describe('touchQuotePlacement', () => {
+  const PHONE = { width: 390, height: 844 };
+
+  test('sits BELOW the selection when there is room — never over the header row above it', () => {
+    // The measured collision case: selection line at y=225–244 in a bubble
+    // whose clock row is at y=203–222.
+    const pos = touchQuotePlacement({ x: 128, top: 225, bottom: 244 }, PHONE);
+    expect(pos.top).toBeGreaterThan(244); // strictly below the selection…
+    expect(pos.top).toBe(244 + 10); // …by the handle gap
+  });
+
+  test('flips ABOVE only when the selection ends too near the bottom to fit', () => {
+    const pos = touchQuotePlacement({ x: 128, top: 800, bottom: 820 }, PHONE);
+    expect(pos.top).toBeLessThan(800);
+    expect(pos.top).toBe(800 - 10 - 44);
+  });
+
+  test('a flipped pair near the very top clamps on screen', () => {
+    const pos = touchQuotePlacement({ x: 128, top: 20, bottom: 830 }, PHONE);
+    expect(pos.top).toBeGreaterThanOrEqual(8);
+  });
+
+  test('left edge clamps inside a 360px viewport at both extremes', () => {
+    const narrow = { width: 360, height: 780 };
+    expect(touchQuotePlacement({ x: 0, top: 100, bottom: 120 }, narrow).left).toBe(8);
+    const right = touchQuotePlacement({ x: 360, top: 100, bottom: 120 }, narrow).left;
+    expect(right + 148).toBeLessThanOrEqual(360 - 8);
+  });
+
+  test('centres on the selection when nothing clamps', () => {
+    const pos = touchQuotePlacement({ x: 195, top: 300, bottom: 320 }, PHONE);
+    expect(pos.left).toBe(195 - 148 / 2);
   });
 });

@@ -16,7 +16,7 @@ import {
   observedModelPresentation,
   resolveClaudeRuntimeModels,
 } from './SessionDetails';
-import { primeDetailsTab, resetDetailsTabMemory } from '../hooks/useDetailsTab';
+import { primeDetailsTab, resetDetailsTabMemory, type DetailsTab } from '../hooks/useDetailsTab';
 
 function view(harness: SessionView['config']['harness'] = 'codex'): SessionView {
   return {
@@ -69,6 +69,34 @@ describe('shared BottomSheet contract', () => {
     expect(html).toContain('data-sheet-swipe="supported"');
     expect(html).toContain('min-h-[44px]');
     expect(html).toContain('var(--app-h, 100dvh)');
+  });
+
+  test('shrink-to-fit callers stay content-sized: no height style without the height prop', () => {
+    const html = renderToStaticMarkup(
+      <BottomSheet id="fit-sheet" open onClose={() => undefined} ariaLabel="Fit sheet" closeLabel="Close fit sheet">
+        <p>Short content</p>
+      </BottomSheet>,
+    );
+    // `max-height:` also ends in "height:", so anchor on the separator.
+    expect(html).not.toContain(';height:min(');
+  });
+
+  test('a fixed-height caller pins the panel and keeps the keyboard-safe ceiling', () => {
+    const html = renderToStaticMarkup(
+      <BottomSheet
+        id="tall-sheet"
+        open
+        onClose={() => undefined}
+        ariaLabel="Tall sheet"
+        closeLabel="Close tall sheet"
+        height="min(90dvh, calc(var(--app-h, 100dvh) - var(--gap-sm)))"
+      >
+        <p>Sheet content</p>
+      </BottomSheet>,
+    );
+    expect(html).toContain('height:min(90dvh');
+    // maxHeight still present: an open keyboard shrinks the sheet.
+    expect(html).toContain('max-height:min(');
   });
 
   test('does not leave a focusable closed sheet in the initial DOM', () => {
@@ -362,6 +390,31 @@ describe('details sheet tabs', () => {
     expect(html).toContain('id="details-tabs-tab-identity"');
     expect(html).toContain('id="details-tabs-tabpanel-identity"');
     expect(html).toContain('aria-controls="details-tabs-tabpanel-identity"');
+  });
+
+  test('the tabbed sheet is FIXED-height so a tab switch cannot move the tab bar', () => {
+    resetDetailsTabMemory();
+    const render = (tab: DetailsTab) => {
+      resetDetailsTabMemory();
+      primeDetailsTab('runtime-probe', tab);
+      return renderToStaticMarkup(
+        <SessionDetails
+          id="details-fixed"
+          view={view('codex')}
+          quota={null}
+          liveStatus="open"
+          open
+          onClose={() => undefined}
+          canControlRuntime
+        />,
+      );
+    };
+    const heightOf = (html: string) => html.match(/style="[^"]*height:min\(90dvh[^)]*\)[^"]*"/)?.[0];
+    const identity = heightOf(render('identity'));
+    // The pinned height renders, and it is byte-identical on every tab — the
+    // sheet's box cannot depend on which panel is selected.
+    expect(identity).toBeTruthy();
+    for (const tab of ['runtime', 'progress', 'budget'] as const) expect(heightOf(render(tab))).toBe(identity);
   });
 
   test('two retained instances never collide on tab or panel ids', () => {

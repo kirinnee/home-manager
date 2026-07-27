@@ -227,6 +227,38 @@ const SELECTION_SETTLE_MS = 220;
  *  is not in the loaded window, before it gives up honestly (pinning-design.md
  *  §6). Matches PinSheet's displayed cap. */
 const LOCATE_PAGE_CAP = 10;
+
+/** The touch Quote/Pin pair's box, used to keep it on screen AND off the
+ *  message's own chrome. Width is the measured pair at the reduced type ramp
+ *  (was 176 for the larger buttons); height is one 44px touch target; the gap
+ *  clears the selection handles that iOS/Android draw at the range edge. */
+const TOUCH_QUOTE_WIDTH = 148;
+const TOUCH_QUOTE_HEIGHT = 44;
+const TOUCH_QUOTE_GAP = 10;
+
+/** Where the touch Quote/Pin pair goes, as pure policy (exported for tests —
+ *  this package has no DOM to measure in).
+ *
+ *  BELOW the selection by default, above only when there is no room below.
+ *  The previous above-first placement was measured at 390x844 covering the
+ *  selected message's own timestamp: a user bubble draws its clock in a header
+ *  row directly above the prose, so "above the selection" lands exactly on it
+ *  (buttons at y=177–221 over a clock at y=203–222). Below the range there is
+ *  only text the reader has already read past, and the OS selection handle gap
+ *  is respected on both sides. */
+export function touchQuotePlacement(
+  anchor: { x: number; top: number; bottom: number },
+  viewport: { width: number; height: number },
+): { left: number; top: number } {
+  const left = Math.min(
+    Math.max(8, anchor.x - TOUCH_QUOTE_WIDTH / 2),
+    Math.max(8, viewport.width - TOUCH_QUOTE_WIDTH - 8),
+  );
+  const below = anchor.bottom + TOUCH_QUOTE_GAP;
+  const fitsBelow = below + TOUCH_QUOTE_HEIGHT <= viewport.height - 8;
+  const top = fitsBelow ? below : Math.max(8, anchor.top - TOUCH_QUOTE_GAP - TOUCH_QUOTE_HEIGHT);
+  return { left, top };
+}
 /** How long to wait for an older page to settle into `blocks` before treating
  *  the load as stalled/exhausted during a locate. */
 const LOCATE_SETTLE_MS = 2500;
@@ -423,9 +455,15 @@ function Inner(props: Props) {
   const [quoteMenu, setQuoteMenu] = useState<{ x: number; y: number; text: string; blockId: string | null } | null>(
     null,
   );
-  const [touchQuote, setTouchQuote] = useState<{ x: number; y: number; text: string; blockId: string | null } | null>(
-    null,
-  );
+  const [touchQuote, setTouchQuote] = useState<{
+    x: number;
+    y: number;
+    /** Bottom edge of the selection rect — the anchor for the default
+     *  below-the-selection placement (see touchQuotePos). */
+    bottom: number;
+    text: string;
+    blockId: string | null;
+  } | null>(null);
   const quoteTriggerRef = useRef<HTMLElement | null>(null);
 
   const last = blocks.length - 1;
@@ -949,8 +987,8 @@ function Inner(props: Props) {
   // EXISTS. The touch range materialises ON or AFTER release (sampling during
   // the press sees it collapsed — the exact round-7/8 hazard), so we (a) wait a
   // settle beat after every selectionchange and pointer release, and (b) refuse
-  // while a pointer is still down. Then a small "Quote" button sits above the
-  // range and quotes on tap, using the text captured here.
+  // while a pointer is still down. Then a small "Quote" button sits below the
+  // range (see touchQuotePos) and quotes on tap, using the text captured here.
   useEffect(() => {
     if (!touchAffected) return undefined;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -969,7 +1007,8 @@ function Inner(props: Props) {
       const vr = v?.getBoundingClientRect();
       const x = found.rect ? found.rect.left + found.rect.width / 2 : (vr?.left ?? 0) + 48;
       const y = found.rect ? found.rect.top : (vr?.top ?? 0) + 48;
-      setTouchQuote({ x, y, text: found.text, blockId: found.blockId });
+      const bottom = found.rect ? found.rect.bottom : y + 24;
+      setTouchQuote({ x, y, bottom, text: found.text, blockId: found.blockId });
     };
     const schedule = () => {
       if (timer !== null) clearTimeout(timer);
@@ -1007,15 +1046,15 @@ function Inner(props: Props) {
       ]
     : [];
 
-  // Keep the touch button on screen at 360px: clamp its left, and flip below the
-  // selection when the range is too near the top to fit the button above it.
-  const touchQuotePos = (() => {
-    if (!touchQuote || typeof window === 'undefined') return null;
-    const width = 176;
-    const left = Math.min(Math.max(8, touchQuote.x - width / 2), Math.max(8, window.innerWidth - width - 8));
-    const top = touchQuote.y > 60 ? touchQuote.y - 48 : touchQuote.y + 24;
-    return { left, top };
-  })();
+  // Placement policy lives in touchQuotePlacement (pure, tested); this only
+  // feeds it the live viewport.
+  const touchQuotePos =
+    touchQuote && typeof window !== 'undefined'
+      ? touchQuotePlacement(
+          { x: touchQuote.x, top: touchQuote.y, bottom: touchQuote.bottom },
+          { width: window.innerWidth, height: window.innerHeight },
+        )
+      : null;
 
   // ---- PIN JUMP: scroll to a pinned message, honestly ------------------------
   //
@@ -1221,22 +1260,25 @@ function Inner(props: Props) {
           className="fixed z-40 inline-flex items-center gap-1"
           style={{ left: touchQuotePos.left, top: touchQuotePos.top }}
         >
+          {/* Visually smaller ("a bit too big" was the report) but never below
+              the 44px touch target: the shrink is horizontal padding and type,
+              the hit height stays. */}
           <button
             type="button"
             onClick={() => runQuote(touchQuote.text)}
             aria-label="Quote the selected text in the composer"
-            className="inline-flex min-h-[44px] items-center gap-xs rounded-full border border-accent-border bg-accent px-3 text-[13px] font-semibold text-accent-fg shadow-popover"
+            className="inline-flex min-h-[44px] items-center gap-xs rounded-full border border-accent-border bg-accent px-2.5 text-[12px] font-semibold text-accent-fg shadow-popover"
           >
-            <Quote size={14} aria-hidden="true" />
+            <Quote size={13} aria-hidden="true" />
             Quote
           </button>
           <button
             type="button"
             onClick={() => runPin(touchQuote.text, touchQuote.blockId)}
             aria-label="Pin the selected text"
-            className="inline-flex min-h-[44px] items-center gap-xs rounded-full border border-border bg-surface px-3 text-[13px] font-semibold text-fg shadow-popover"
+            className="inline-flex min-h-[44px] items-center gap-xs rounded-full border border-border bg-surface px-2.5 text-[12px] font-semibold text-fg shadow-popover"
           >
-            <Pin size={14} aria-hidden="true" />
+            <Pin size={13} aria-hidden="true" />
             Pin
           </button>
         </div>
