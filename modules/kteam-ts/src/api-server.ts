@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { join, normalize } from 'node:path';
 import type { KTeamService, SessionView } from './service';
 import { SIGNAL_KINDS } from './types';
-import type { RuntimeControlRequest, SendRequest, SignalKind, StartSessionRequest } from './types';
+import type { KTeamEvent, RuntimeControlRequest, SendRequest, SignalKind, StartSessionRequest } from './types';
 import { WARDEN_LABEL } from './warden-detect';
 import type { LearningAction, LearningService } from './learning';
 import type { ProposalState } from './learning-types';
@@ -15,6 +15,8 @@ import { GitError } from './git';
 import type { SttService } from './stt-service';
 import type { TaskApi } from './tasks-api';
 import { resolveTaskActor, taskApiRequestFrom } from './tasks-api';
+import type { PinApi } from './pins-api';
+import { isPinPath, pinWardenDenial } from './pins-api';
 import { isTaskPath, taskWardenDenial } from './tasks-contract';
 
 // Built chat UI (Vite output, committed): served when present; the legacy
@@ -62,6 +64,8 @@ export interface ApiServerOptions {
   stt?: SttService;
   /** Optional for older tests; daemon-entry supplies the singleton in production. */
   tasks?: TaskApi;
+  /** Daemon-owned per-session pins. Omitted in tests that don't exercise pins. */
+  pins?: PinApi;
 }
 
 /** The Codex discovery baseline is private launch bookkeeping, not session
@@ -103,6 +107,8 @@ async function wardenScopeDenial(
   if (/^\/v1\/sessions\/[^/]+\/fs(?:\/|$)/.test(pathname)) return forbidden('browse session files');
   const taskDenial = taskWardenDenial(method, pathname);
   if (taskDenial) return forbidden(taskDenial);
+  const pinDenial = pinWardenDenial(method, pathname);
+  if (pinDenial) return forbidden(pinDenial);
   if (method === 'GET') return undefined; // every other read is fine
   if (pathname === '/v1/sessions' && method === 'POST') return forbidden('start sessions');
   if (method === 'DELETE') return forbidden('remove sessions');
@@ -274,14 +280,18 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
    *  it shares the original promise (and its error, so a failure stays
    *  retryable for both callers). */
   const inFlightRequests = new Map<string, Promise<unknown>>();
-  const unsubscribe = options.service.subscribe(event => {
+  const broadcast = (event: KTeamEvent): void => {
     const encoded = JSON.stringify(event);
     for (const socket of sockets) {
       if (socket.data.sessionIds.length > 0 && !socket.data.sessionIds.includes(event.sessionId)) continue;
       if (socket.data.replaying) socket.data.queued.push(encoded);
       else socket.send(encoded);
     }
-  });
+  };
+  const unsubscribe = options.service.subscribe(broadcast);
+  // A `pins.updated` mutation broadcasts the whole new snapshot to matching
+  // sockets, so a reader on another device sees an agent's pin appear live.
+  const unsubscribePins = options.pins?.subscribe(broadcast);
 
   const server = Bun.serve<SocketData>({
     hostname: options.host,
@@ -535,6 +545,25 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
               ),
             );
             if (taskResponse) return json(taskResponse.body, taskResponse.status);
+            return json(unknownRoute(request.method, url.pathname), 404);
+          }
+
+          // MUST precede the generic session match, or `pins` is parsed as an
+          // unknown `:action`. Provenance is resolved server-side here and the
+          // request body never gets a say in who the actor is.
+          if (options.pins && isPinPath(url.pathname)) {
+            const actorForPins = await resolveTaskActor(options.service, {
+              sessionId: request.headers.get('x-kteam-session-id'),
+              actorSource: actor,
+            });
+            const pinResponse = await options.pins.handle({
+              method: request.method,
+              url,
+              body: request.method === 'POST' ? await body<unknown>(request) : undefined,
+              actor: actorForPins,
+              requestId: request.headers.get('x-kteam-request-id') ?? undefined,
+            });
+            if (pinResponse) return json(pinResponse.body, pinResponse.status);
             return json(unknownRoute(request.method, url.pathname), 404);
           }
 
@@ -819,6 +848,7 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
   const originalStop = server.stop.bind(server);
   server.stop = ((closeActiveConnections?: boolean) => {
     unsubscribe();
+    unsubscribePins?.();
     return originalStop(closeActiveConnections);
   }) as typeof server.stop;
   return server;

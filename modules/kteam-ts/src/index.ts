@@ -40,6 +40,8 @@ import { KTEAM_VERSION } from './version';
 import { waitForDaemonReady } from './daemon-wait';
 import { resolveKillTimeout, TIMEOUT_KILL_HELP, KILL_AFTER_SECONDS_HELP } from './start-timeout';
 import { isTaskError } from './tasks';
+import { parsePinCli, pinCliRequest, renderPinCli } from './pins-cli';
+import { isPinError } from './pins-types';
 import { parseTaskCli, renderTaskCli, taskCliRequest } from './tasks-cli';
 
 const VERSION = KTEAM_VERSION;
@@ -326,6 +328,35 @@ program
       process.stdout.write(renderTaskCli(command, response));
     } catch (error) {
       if (isTaskError(error)) {
+        process.stderr.write(`${error.message}\n`);
+        process.exitCode = 1;
+        return;
+      }
+      throw error;
+    }
+  });
+
+program
+  .command('pin')
+  .description('pin a note or link to a session (defaults to this one) so it stays at hand')
+  .allowUnknownOption(true)
+  .allowExcessArguments(true)
+  .argument('[args...]')
+  .action(async (argv: string[]) => {
+    try {
+      const command = parsePinCli(argv);
+      const requestSpec = pinCliRequest(command, process.env.KTEAM_SESSION_ID);
+      const response = await (
+        await client()
+      ).request<unknown>(requestSpec.path, {
+        method: requestSpec.method,
+        ...(requestSpec.body === undefined
+          ? {}
+          : { body: JSON.stringify(requestSpec.body), headers: { 'content-type': 'application/json' } }),
+      });
+      process.stdout.write(renderPinCli(command, response));
+    } catch (error) {
+      if (isPinError(error)) {
         process.stderr.write(`${error.message}\n`);
         process.exitCode = 1;
         return;
