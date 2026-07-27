@@ -34,7 +34,13 @@ import {
   type DictationDraftResult,
 } from '../hooks/useDictation';
 import { insertTranscript, readSelection, type SelectionLike } from '../lib/stt/draft';
-import { useSttSettings, type SttMode } from '../lib/stt/stt-settings';
+import {
+  completeTranscriptText,
+  editCommittedTranscript,
+  editProvisionalTranscript,
+  emptyLiveTranscript,
+  reduceLiveTranscript,
+} from '../lib/stt/live-transcription';
 import { DictationSheet, dictationStage, type DictationStage } from './DictationSheet';
 
 export interface DictationControlProps {
@@ -56,17 +62,17 @@ export interface DictationControlProps {
   className?: string;
 }
 
-/** Kept for the copy tests: the one rule — never claim live text — is checkable
- *  rather than remembered. The sheet inlines its own stage copy, but this pure
- *  map still guards the vocabulary. */
-export function dictationStatusCopy(phase: DictationPhase, mode: SttMode, errorMessage?: string): string {
+/** Kept for the copy tests: finishing must be named as local and recording must
+ *  not pretend every word is already settled. The sheet inlines its own stage
+ *  copy, but this pure map still guards the vocabulary. */
+export function dictationStatusCopy(phase: DictationPhase, errorMessage?: string): string {
   switch (phase) {
     case 'requesting':
       return 'Waiting for microphone permission…';
     case 'recording':
       return 'Recording…';
     case 'transcribing':
-      return mode === 'local' ? 'Transcribing on this device…' : 'Transcribing…';
+      return 'Finishing on this device…';
     case 'error':
       return errorMessage ?? 'Dictation failed.';
     case 'idle':
@@ -101,11 +107,9 @@ export interface DictationBundle {
 
 export function useDictationBundle(props: DictationControlProps): DictationBundle {
   const { draft, onDraftChange, sessionId, selectionRef, disabled, layout = 'compact', className } = props;
-  const { settings } = useSttSettings();
 
   const [open, setOpen] = useState(false);
-  const [transcript, setTranscript] = useState<string | null>(null);
-  const [edited, setEdited] = useState('');
+  const [liveText, setLiveText] = useState(() => emptyLiveTranscript());
   const [elapsedMs, setElapsedMs] = useState(0);
   const [wasCapturing, setWasCapturing] = useState(false);
   const startedAt = useRef(0);
@@ -119,6 +123,8 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
   onDraftChangeRef.current = onDraftChange;
   const selectionRefRef = useRef(selectionRef);
   selectionRefRef.current = selectionRef;
+  const liveTextRef = useRef(liveText);
+  liveTextRef.current = liveText;
 
   // The capture machine. `draft: ''` so its commit returns the RAW spoken text
   // (it has nothing to insert into); the actual insertion into the composer
@@ -126,10 +132,15 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
   const dictation = useDictation({
     sessionId,
     draft: '',
-    onDraft: result => {
-      setTranscript(result.text);
-      setEdited(result.text);
-    },
+    // The live event consumer below owns reconciliation. This fallback exists
+    // only because `useDictation` remains usable without the sheet.
+    onDraft: result =>
+      setLiveText(current => ({
+        ...emptyLiveTranscript(current.generation),
+        committed: result.text,
+        complete: true,
+      })),
+    onTranscriptEvent: event => setLiveText(current => reduceLiveTranscript(current, event)),
     disabled,
   });
 
@@ -155,15 +166,13 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
   const reset = useCallback(() => {
     dictation.cancel();
     setOpen(false);
-    setTranscript(null);
-    setEdited('');
+    setLiveText(emptyLiveTranscript());
     setElapsedMs(0);
     setWasCapturing(false);
   }, [dictation]);
 
   const beginRecording = useCallback(() => {
-    setTranscript(null);
-    setEdited('');
+    setLiveText(current => emptyLiveTranscript(current.generation));
     setElapsedMs(0);
     setWasCapturing(false);
     startedAt.current = performance.now();
@@ -177,14 +186,14 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
     if (
       dictationTriggerStartsFresh({
         phase,
-        hasTranscript: transcript !== null,
+        hasTranscript: completeTranscriptText(liveText).trim().length > 0,
         hasError: dictation.error !== null,
         wasCapturing,
       })
     ) {
       beginRecording();
     }
-  }, [beginRecording, dictation.error, disabled, phase, transcript, wasCapturing]);
+  }, [beginRecording, dictation.error, disabled, liveText, phase, wasCapturing]);
 
   const dismissPanel = useCallback(() => {
     // Hiding is intentionally not cancellation. The recorder, transcript and
@@ -193,7 +202,7 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
   }, []);
 
   const insert = useCallback(() => {
-    const text = edited.trim();
+    const text = completeTranscriptText(liveTextRef.current).trim();
     if (text.length === 0) {
       reset();
       return;
@@ -203,18 +212,20 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
     const result = insertTranscript(currentDraft, start, end, text);
     onDraftChangeRef.current(result);
     reset();
-  }, [edited, reset]);
+  }, [reset]);
+
+  const hasTranscript = completeTranscriptText(liveText).trim().length > 0;
 
   const stage = dictationStage({
     phase,
-    hasTranscript: transcript !== null,
+    hasTranscript,
     hasError: dictation.error !== null,
     wasCapturing,
   });
 
   const flowActive = !dictationTriggerStartsFresh({
     phase,
-    hasTranscript: transcript !== null,
+    hasTranscript,
     hasError: dictation.error !== null,
     wasCapturing,
   });
@@ -232,7 +243,7 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
       title={
         flowActive
           ? 'Show the active dictation recorder'
-          : 'Dictate a message — keep typing while it records, then review and insert. Nothing is ever sent for you.'
+          : 'Dictate locally — edit words while recording, then insert. Nothing is ever sent for you.'
       }
       onClick={openAndRecord}
     >
@@ -246,11 +257,13 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
     <DictationSheet
       open={open}
       stage={stage}
-      mode={settings.mode}
       elapsedMs={elapsedMs}
       inputMonitor={dictation.inputMonitor}
-      text={edited}
-      onTextChange={setEdited}
+      committedText={liveText.committed}
+      provisionalText={liveText.provisional}
+      pendingSegments={dictation.pendingSegments}
+      onCommittedTextChange={value => setLiveText(current => editCommittedTranscript(current, value))}
+      onProvisionalTextChange={value => setLiveText(current => editProvisionalTranscript(current, value))}
       errorCode={dictation.error?.code}
       errorMessage={dictation.error?.message}
       onDismiss={dismissPanel}

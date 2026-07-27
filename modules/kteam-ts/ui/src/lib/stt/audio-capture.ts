@@ -258,6 +258,13 @@ export interface StartCaptureOptions {
    * decision — the caller's job is to return itself to idle.
    */
   onAbort?: (reason: CaptureAbortReason) => void;
+  /** A copied view of every sample batch the recorder accepted, including the
+   * worklet's final flush tail. This is the only PCM observation seam for live
+   * transcription: consumers must segment it, never open a second stream or
+   * stop the recorder-owned tracks. The callback is synchronous and its
+   * buffer is independent, so retaining or mutating it cannot corrupt the
+   * finished utterance. */
+  onSamples?: (samples: Float32Array, inputSampleRate: number) => void;
   /** Injected for tests; defaults to the real one. */
   mediaDevices?: MediaDevices;
 }
@@ -379,6 +386,16 @@ export async function startCapture(options: StartCaptureOptions = {}): Promise<C
     const slice = samples.length <= remaining ? samples : samples.slice(0, remaining);
     chunks.push(slice);
     captured += slice.length;
+    try {
+      // Copy AFTER enforcing the hard ceiling, and notify BEFORE onLimit asks
+      // the controller to stop. That ordering lets the live segmenter see the
+      // final accepted samples exactly once. Callback failures are isolated
+      // from microphone ownership; the controller's callback reports its own
+      // queue/segmentation failures through state rather than throwing here.
+      options.onSamples?.(slice.slice(), inputSampleRate);
+    } catch {
+      /* an observer must never strand the microphone */
+    }
     if (captured >= maxSamples()) {
       // Stop the device immediately, then tell the caller. Waiting for the
       // caller to react would leave the mic open for another turn of the loop.

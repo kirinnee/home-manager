@@ -1,21 +1,16 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  DAEMON_LANGUAGES,
   DEFAULT_STT_SETTINGS,
   MAX_DICTIONARY_LINES,
   MAX_DICTIONARY_LINE_LENGTH,
   MAX_USER_CONTEXT_CHARS,
-  STT_LANGUAGES,
   STT_SETTINGS_KEY,
   STT_SETTINGS_VERSION,
-  daemonSupportsLanguage,
-  isSttLanguage,
   loadSttSettings,
   normaliseSttSettings,
   parseSttSettings,
   saveSttSettings,
   sttDictionary,
-  sttLanguageLabel,
   type SttSettings,
   type SttStorage,
 } from './stt-settings';
@@ -35,48 +30,10 @@ function memoryStorage(initial?: string): SttStorage & { value: string | null; w
   };
 }
 
-describe('the language catalogue', () => {
-  test('is the thirteen v3 documents, with unique codes', () => {
-    expect(STT_LANGUAGES.map(language => language.code)).toEqual([
-      'en',
-      'fr',
-      'de',
-      'es',
-      'it',
-      'pt',
-      'nl',
-      'pl',
-      'ru',
-      'uk',
-      'ja',
-      'ko',
-      'zh',
-    ]);
-    expect(new Set(STT_LANGUAGES.map(language => language.code)).size).toBe(13);
-    for (const language of STT_LANGUAGES) expect(language.label.length).toBeGreaterThan(0);
-  });
-
-  test('the daemon claims English and nothing else', () => {
-    expect(DAEMON_LANGUAGES).toEqual(['en']);
-    expect(daemonSupportsLanguage('en')).toBe(true);
-    expect(daemonSupportsLanguage('ja')).toBe(false);
-  });
-
-  test('recognises and labels known codes only', () => {
-    expect(isSttLanguage('uk')).toBe(true);
-    expect(isSttLanguage('kl')).toBe(false);
-    expect(isSttLanguage(7)).toBe(false);
-    expect(sttLanguageLabel('ja')).toBe('Japanese');
-    expect(sttLanguageLabel('zz')).toBe('zz');
-  });
-});
-
 describe('defaults', () => {
-  test('are daemon, English, enhancement on, empty dictionary and context', () => {
+  test('are browser-local, enhancement on, empty dictionary and context', () => {
     expect(DEFAULT_STT_SETTINGS).toEqual({
       v: STT_SETTINGS_VERSION,
-      mode: 'daemon',
-      language: 'en',
       enhancement: true,
       dictionary: [],
       userContext: '',
@@ -94,7 +51,7 @@ describe('parseSttSettings — never throws, always usable', () => {
     ['a JSON number', '42'],
     ['an object with no version', '{"mode":"local"}'],
     ['a FUTURE version', `{"v":${STT_SETTINGS_VERSION + 1},"mode":"local"}`],
-    ['an older version', `{"v":${STT_SETTINGS_VERSION - 1},"mode":"local"}`],
+    ['an unknown old version', '{"v":0,"mode":"local"}'],
   ];
 
   for (const [label, raw] of rubbish) {
@@ -104,22 +61,53 @@ describe('parseSttSettings — never throws, always usable', () => {
   }
 
   test('reads a well-formed payload', () => {
-    const raw = JSON.stringify({ v: 1, mode: 'local', language: 'de', enhancement: false, dictionary: ['tmux'] });
-    expect(parseSttSettings(raw)).toEqual({
-      v: 1,
+    const raw = JSON.stringify({
+      v: STT_SETTINGS_VERSION,
       mode: 'local',
       language: 'de',
+      enhancement: false,
+      dictionary: ['tmux'],
+    });
+    expect(parseSttSettings(raw)).toEqual({
+      v: STT_SETTINGS_VERSION,
       enhancement: false,
       dictionary: ['tmux'],
       userContext: '',
     });
   });
 
-  test('a pre-userContext v1 payload keeps its dictionary — added field, not a version bump', () => {
-    const raw = JSON.stringify({ v: 1, mode: 'daemon', language: 'en', enhancement: true, dictionary: ['kteam'] });
+  test('migrates a v1 DAEMON preference without losing dictionary or context', () => {
+    const raw = JSON.stringify({
+      v: 1,
+      mode: 'daemon',
+      language: 'en',
+      enhancement: false,
+      dictionary: ['kteam'],
+      userContext: 'nitroso and diene',
+    });
+    expect(parseSttSettings(raw)).toEqual({
+      v: STT_SETTINGS_VERSION,
+      enhancement: false,
+      dictionary: ['kteam'],
+      userContext: 'nitroso and diene',
+    });
+  });
+
+  test('migrates a pre-userContext v1 LOCAL payload without discarding its dictionary', () => {
+    const raw = JSON.stringify({ v: 1, mode: 'local', language: 'en', enhancement: true, dictionary: ['kteam'] });
     const parsed = parseSttSettings(raw);
+    expect(parsed.v).toBe(STT_SETTINGS_VERSION);
     expect(parsed.dictionary).toEqual(['kteam']);
     expect(parsed.userContext).toBe('');
+  });
+
+  test('ignores obsolete mode/language fields even when injected into v2', () => {
+    const parsed = parseSttSettings(
+      JSON.stringify({ ...DEFAULT_STT_SETTINGS, mode: 'daemon', language: 'ja', dictionary: ['tmux'] }),
+    );
+    expect(parsed).toEqual({ ...DEFAULT_STT_SETTINGS, dictionary: ['tmux'] });
+    expect(parsed).not.toHaveProperty('mode');
+    expect(parsed).not.toHaveProperty('language');
   });
 
   test('reads and caps the userContext field', () => {
@@ -131,7 +119,7 @@ describe('parseSttSettings — never throws, always usable', () => {
 
   test('falls back per FIELD, not per document, when one field is hostile', () => {
     const raw = JSON.stringify({
-      v: 1,
+      v: STT_SETTINGS_VERSION,
       mode: 'telepathy',
       language: 'klingon',
       enhancement: 'yes',
@@ -142,7 +130,7 @@ describe('parseSttSettings — never throws, always usable', () => {
 
   test('caps the dictionary length and each line', () => {
     const raw = JSON.stringify({
-      v: 1,
+      v: STT_SETTINGS_VERSION,
       mode: 'daemon',
       language: 'en',
       enhancement: true,
@@ -155,7 +143,7 @@ describe('parseSttSettings — never throws, always usable', () => {
 
   test('drops non-string dictionary entries without losing the rest', () => {
     const raw = JSON.stringify({
-      v: 1,
+      v: STT_SETTINGS_VERSION,
       mode: 'daemon',
       language: 'en',
       enhancement: true,
@@ -167,7 +155,13 @@ describe('parseSttSettings — never throws, always usable', () => {
 
 describe('normaliseSttSettings', () => {
   test('is parse applied to a caller-supplied object, so a bad value cannot be persisted', () => {
-    const hostile = { v: 1, mode: 'nope', language: 'nope', enhancement: 1, dictionary: [1] } as unknown as SttSettings;
+    const hostile = {
+      v: STT_SETTINGS_VERSION,
+      mode: 'nope',
+      language: 'nope',
+      enhancement: 1,
+      dictionary: [1],
+    } as unknown as SttSettings;
     expect(normaliseSttSettings(hostile)).toEqual({ ...DEFAULT_STT_SETTINGS });
   });
 });
@@ -176,9 +170,7 @@ describe('storage', () => {
   test('round-trips through a working storage', () => {
     const storage = memoryStorage();
     const next: SttSettings = {
-      v: 1,
-      mode: 'local',
-      language: 'ja',
+      v: STT_SETTINGS_VERSION,
       enhancement: false,
       dictionary: ['tmux'],
       userContext: 'nitroso and diene',

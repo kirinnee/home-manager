@@ -61,9 +61,10 @@ describe('dictationFailureCopy — a plain title per code', () => {
     expect(copy.hint?.toLowerCase()).toContain('allow');
   });
 
-  test('an unreachable daemon and a missing model are named distinctly', () => {
-    expect(dictationFailureCopy('network').title).toBe('Daemon unreachable');
-    expect(dictationFailureCopy('unavailable').title).toBe('Speech model not ready');
+  test('local readiness and data-loss prevention failures are named distinctly', () => {
+    expect(dictationFailureCopy('not-prepared').title).toBe('Prepare this device first');
+    expect(dictationFailureCopy('backlog').title).toBe('This device is falling behind');
+    expect(dictationFailureCopy('empty-segment').title).toBe("One phrase wasn't readable");
   });
 
   test('an unknown code still gets a title, never a blank', () => {
@@ -76,11 +77,13 @@ function render(overrides: Partial<DictationSheetProps> = {}): string {
   const props: DictationSheetProps = {
     open: true,
     stage: 'recording',
-    mode: 'daemon',
     elapsedMs: 3200,
     inputMonitor: null,
-    text: '',
-    onTextChange: () => {},
+    committedText: '',
+    provisionalText: '',
+    pendingSegments: 0,
+    onCommittedTextChange: () => {},
+    onProvisionalTextChange: () => {},
     onDismiss: () => {},
     onStop: () => {},
     onCancel: () => {},
@@ -111,7 +114,8 @@ describe('DictationSheet rendering', () => {
     expect(html).toContain('data-dictation-panel="non-modal"');
     expect(html).toContain('role="region"');
     expect(html).toContain('<canvas');
-    expect(html).toContain('Stop &amp; transcribe');
+    expect(html).toContain('Stop &amp; finish');
+    expect(html).toContain('Audio stays on this device');
     expect(html).toContain('Cancel');
     expect(html).toContain('Hide dictation panel; recording continues');
     expect(html).not.toContain('role="dialog"');
@@ -120,26 +124,71 @@ describe('DictationSheet rendering', () => {
     expect(html).not.toContain('bg-scrim');
   });
 
+  test('recording distinguishes editable committed text from editable provisional text', () => {
+    const html = render({
+      stage: 'recording',
+      committedText: 'reader corrected this',
+      provisionalText: 'latest phrase',
+      pendingSegments: 1,
+    });
+    expect(html).toContain('Committed · yours to edit');
+    expect(html).toContain('Provisional · still settling');
+    expect(html).toContain('aria-label="Committed dictated text"');
+    expect(html).toContain('aria-label="Provisional dictated text"');
+    expect(html).toContain('reader corrected this');
+    expect(html).toContain('latest phrase');
+    expect(html).toContain('Recognising one local phrase');
+  });
+
+  test('finishing keeps both transcript editors available and says it is local', () => {
+    const html = render({ stage: 'transcribing', committedText: 'kept', provisionalText: 'settling' });
+    expect(html).toContain('Finishing the last phrase on this device');
+    expect(html).toContain('Committed · yours to edit');
+    expect(html).toContain('Provisional · still settling');
+  });
+
   test('review shows the editable transcript, an explicit Insert, and the never-sent promise', () => {
-    const html = render({ stage: 'review', text: 'hello there' });
+    const html = render({ stage: 'review', committedText: 'hello there' });
     expect(html).toContain('hello there');
     expect(html).toContain('Insert into message');
     expect(html).toContain('Re-record');
     expect(html.toLowerCase()).toContain('nothing is sent');
   });
 
-  test('an error stage speaks the real reason plus Try again', () => {
-    const html = render({ stage: 'error', errorCode: 'network', errorMessage: 'The daemon could not be reached.' });
-    expect(html).toContain('The daemon could not be reached.');
+  test('an error stage speaks the real local-model reason plus Try again', () => {
+    const html = render({
+      stage: 'error',
+      errorCode: 'not-prepared',
+      errorMessage: 'The local speech model has not been prepared.',
+    });
+    expect(html).toContain('The local speech model has not been prepared.');
     expect(html).toContain('Try again');
   });
 
-  test('NO stage ever renders partial-text or live/streaming language', () => {
+  test('a local queue error keeps captured text editable and insertable', () => {
+    const html = render({
+      stage: 'error',
+      errorCode: 'backlog',
+      errorMessage: 'This device is falling behind.',
+      committedText: 'safe earlier phrase',
+      provisionalText: 'safe latest phrase',
+    });
+    expect(html).toContain('safe earlier phrase');
+    expect(html).toContain('safe latest phrase');
+    expect(html).toContain('Insert captured text');
+  });
+
+  test('NO stage implies that microphone audio goes to a daemon or cloud service', () => {
     for (const stage of ['starting', 'recording', 'transcribing', 'review', 'empty', 'error'] as const) {
-      const html = render({ stage, text: 'sample', errorCode: 'network', errorMessage: 'x' }).toLowerCase();
-      expect(html).not.toContain('streaming');
-      expect(html).not.toContain('real-time');
-      expect(html).not.toContain('live transcription');
+      const html = render({
+        stage,
+        committedText: 'sample',
+        errorCode: 'unknown',
+        errorMessage: 'x',
+      }).toLowerCase();
+      expect(html).not.toContain('sent to the daemon');
+      expect(html).not.toContain('sent to google');
+      expect(html).not.toContain('sent to apple');
     }
   });
 });

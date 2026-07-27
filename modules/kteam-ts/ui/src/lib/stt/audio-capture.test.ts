@@ -460,6 +460,37 @@ describe('the tail of the utterance', () => {
     }
   });
 
+  test('streams accepted PCM plus the flush tail in order without sharing mutable storage', async () => {
+    const observed: Array<{ samples: number[]; rate: number }> = [];
+    const { session, port } = await openSession({
+      onSamples: (samples, rate) => {
+        observed.push({ samples: [...samples], rate });
+        // A live consumer is allowed to retain or mutate its own copy. Neither
+        // may alter the recorder's authoritative finished utterance.
+        samples.fill(0.99);
+      },
+    });
+    try {
+      port.emit(new Float32Array([0.1, 0.2]));
+      port.pendingTail = new Float32Array([0.3, 0.4]);
+      const finished = await session.stop();
+      expect(observed).toEqual([
+        { samples: [expect.closeTo(0.1, 5), expect.closeTo(0.2, 5)], rate: 16_000 },
+        { samples: [expect.closeTo(0.3, 5), expect.closeTo(0.4, 5)], rate: 16_000 },
+      ]);
+      expect([...finished]).toEqual([
+        expect.closeTo(0.1, 5),
+        expect.closeTo(0.2, 5),
+        expect.closeTo(0.3, 5),
+        expect.closeTo(0.4, 5),
+      ]);
+      port.emit(new Float32Array([0.8]));
+      expect(observed).toHaveLength(2);
+    } finally {
+      uninstall();
+    }
+  });
+
   test('asks the worklet to flush exactly once, and waits for its acknowledgement', async () => {
     const { session, port } = await openSession();
     try {
