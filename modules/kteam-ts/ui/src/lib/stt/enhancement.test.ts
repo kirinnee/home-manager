@@ -5,8 +5,12 @@ import {
   contextVocabulary,
   enhance,
   fuzzyBudget,
+  looksLikeTermOfArt,
   MAX_DICTIONARY_TERMS,
+  MAX_USER_CONTEXT_CHARS,
+  MAX_USER_CONTEXT_VOCABULARY,
   parseDictionary,
+  userContextVocabulary,
   type DictionaryEntry,
 } from './enhancement';
 import { verifyWordOnly } from './word-only-verifier';
@@ -179,6 +183,133 @@ describe('contextVocabulary', () => {
   test('the dictionary outranks conversation vocabulary', () => {
     // "kteem" is an alias; a similar-looking context word must not win.
     expect(run('run kteem', ['kteen kteen kteen'])).toBe('run kteam');
+  });
+});
+
+describe('userContextVocabulary — free text into vocabulary', () => {
+  test('picks out distinctive words from prose and skips ordinary English', () => {
+    const vocabulary = userContextVocabulary(
+      'I work on the nitroso pipeline with Kirin. We should update the whole system together.',
+    );
+    expect(vocabulary).toContain('nitroso');
+    expect(vocabulary).toContain('Kirin');
+    // Common English — including everyday software words like "pipeline" —
+    // never becomes vocabulary, however prose-y the paste.
+    for (const ordinary of ['work', 'should', 'update', 'whole', 'system', 'together', 'with', 'pipeline']) {
+      expect(vocabulary).not.toContain(ordinary);
+    }
+  });
+
+  test('a term-of-art shape bypasses the common-word screen', () => {
+    // "update" is common English, but "Update-2" and "tool_use" are not prose.
+    const vocabulary = userContextVocabulary('sherpa-onnx tool_use GPT4 OAuth sha256');
+    expect(vocabulary).toEqual(['sherpa-onnx', 'tool_use', 'GPT4', 'OAuth', 'sha256']);
+  });
+
+  test('no occurrence floor: a glossary that names each term once still counts', () => {
+    expect(userContextVocabulary('nitroso, diene, alcohol')).toEqual(['nitroso', 'diene', 'alcohol']);
+  });
+
+  test('keeps the first spelling of a duplicate and respects the length floor', () => {
+    const vocabulary = userContextVocabulary('Nitroso and nitroso and ktm');
+    expect(vocabulary).toEqual(['Nitroso']);
+  });
+
+  test('caps the vocabulary and truncates over-long input rather than refusing it', () => {
+    const many = Array.from({ length: MAX_USER_CONTEXT_VOCABULARY + 50 }, (_, i) => `zzterm${i}`).join(' ');
+    expect(userContextVocabulary(many)).toHaveLength(MAX_USER_CONTEXT_VOCABULARY);
+    const long = `nitroso ${'x'.repeat(MAX_USER_CONTEXT_CHARS)} diene`;
+    const vocabulary = userContextVocabulary(long);
+    expect(vocabulary).toContain('nitroso');
+    expect(vocabulary).not.toContain('diene');
+  });
+
+  test('tolerates empty and non-string input', () => {
+    expect(userContextVocabulary('')).toEqual([]);
+    expect(userContextVocabulary(undefined)).toEqual([]);
+    expect(userContextVocabulary(null)).toEqual([]);
+  });
+});
+
+describe('looksLikeTermOfArt', () => {
+  test('inner capitals, digits, hyphens and underscores are signals; a leading capital is not', () => {
+    expect(looksLikeTermOfArt('OAuth')).toBe(true);
+    expect(looksLikeTermOfArt('sha256')).toBe(true);
+    expect(looksLikeTermOfArt('sherpa-onnx')).toBe(true);
+    expect(looksLikeTermOfArt('tool_use')).toBe(true);
+    expect(looksLikeTermOfArt('Sentence')).toBe(false);
+    expect(looksLikeTermOfArt('word')).toBe(false);
+  });
+});
+
+describe('enhance — user context in the vocabulary pool', () => {
+  test('repairs a mishearing of a word that exists only in the pasted context', () => {
+    const result = enhance({
+      text: 'restart nitrosa please',
+      dictionary: [],
+      context: [],
+      userContext: 'Our services: nitroso, diene, alcohol.',
+    });
+    expect(result.text).toBe('restart nitroso please');
+    expect(result.substitutions).toEqual([{ index: 1, from: 'nitrosa', to: 'nitroso', reason: 'user-context-fuzzy' }]);
+  });
+
+  test('the dictionary outranks the user context', () => {
+    // "kteem" is a declared alias for kteam; a near-identical context word
+    // must not intercept it.
+    const result = enhance({
+      text: 'run kteem',
+      dictionary: FLEET,
+      context: [],
+      userContext: 'kteen kteen kteen',
+    });
+    expect(result.text).toBe('run kteam');
+    expect(result.substitutions[0]?.reason).toBe('dictionary-alias');
+  });
+
+  test('the user context outranks mined conversation words', () => {
+    // Same distance from "nitrosa" in both pools; the deliberate paste wins
+    // and the duplicate is filtered out of the mined tier, so no tie fires.
+    const result = enhance({
+      text: 'check nitrosa',
+      dictionary: [],
+      context: ['nitroso nitroso', 'nitroso again'],
+      userContext: 'nitroso',
+    });
+    expect(result.text).toBe('check nitroso');
+    expect(result.substitutions[0]?.reason).toBe('user-context-fuzzy');
+  });
+
+  test('a context word identical to a dictionary term is filtered, not tied', () => {
+    const result = enhance({
+      text: 'open kfleat',
+      dictionary: FLEET,
+      context: [],
+      userContext: 'kfleet is our fleet manager',
+    });
+    expect(result.text).toBe('open kfleet');
+    expect(result.substitutions[0]?.reason).toBe('dictionary-fuzzy');
+  });
+
+  test('ordinary words in the transcript survive an ordinary-prose context', () => {
+    const text = 'we should update the system together';
+    const result = enhance({
+      text,
+      dictionary: [],
+      context: [],
+      userContext: 'I work on the nitroso pipeline. We should update the whole system together.',
+    });
+    expect(result.text).toBe(text);
+    expect(result.substitutions).toEqual([]);
+  });
+
+  test('everything the user context produces still passes the independent verifier', () => {
+    const samples = ['restart nitrosa now', 'Nitrosa, then dyene.', 'shirpa-onx failed'];
+    const userContext = 'nitroso, diene, sherpa-onnx';
+    for (const sample of samples) {
+      const result = enhance({ text: sample, dictionary: [], context: [], userContext });
+      expect(verifyWordOnly(sample, result.text).ok).toBe(true);
+    }
   });
 });
 

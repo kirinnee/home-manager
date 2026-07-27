@@ -24,7 +24,7 @@
 // item in a list.
 
 import { useCallback, useSyncExternalStore } from 'react';
-import { parseDictionary, type DictionaryEntry, type DictionaryParse } from './enhancement';
+import { MAX_USER_CONTEXT_CHARS, parseDictionary, type DictionaryEntry, type DictionaryParse } from './enhancement';
 
 export const STT_SETTINGS_KEY = 'kteam-stt-v1';
 export const STT_SETTINGS_VERSION = 1;
@@ -87,6 +87,10 @@ export function sttLanguageLabel(code: string): string {
 export const MAX_DICTIONARY_LINES = 200;
 export const MAX_DICTIONARY_LINE_LENGTH = 160;
 
+/** The free-text context cap, re-exported so the settings textarea can carry
+ *  the same `maxLength` the parser enforces on the way back in. */
+export { MAX_USER_CONTEXT_CHARS };
+
 export interface SttSettings {
   v: typeof STT_SETTINGS_VERSION;
   mode: SttMode;
@@ -97,6 +101,11 @@ export interface SttSettings {
   /** One term per line, exactly as the reader typed it. Parsed on use, not on
    *  save, so a half-typed line is never destroyed by a round trip. */
   dictionary: string[];
+  /** Free text mined for extra vocabulary — project jargon, names, a pasted
+   *  glossary. Stored verbatim; extraction happens on use. An ADDED field, not
+   *  a version bump: a v1 payload without it reads as the empty default, so
+   *  nobody's saved dictionary is discarded for a feature they have not used. */
+  userContext: string;
 }
 
 export const DEFAULT_STT_SETTINGS: SttSettings = Object.freeze({
@@ -105,6 +114,7 @@ export const DEFAULT_STT_SETTINGS: SttSettings = Object.freeze({
   language: 'en',
   enhancement: true,
   dictionary: [] as string[],
+  userContext: '',
 });
 
 /** Defensive parse. Never throws, always returns a usable object. */
@@ -135,7 +145,9 @@ export function parseSttSettings(raw: string | null | undefined): SttSettings {
     }
   }
 
-  return { v: STT_SETTINGS_VERSION, mode, language, enhancement, dictionary };
+  const userContext = typeof obj['userContext'] === 'string' ? obj['userContext'].slice(0, MAX_USER_CONTEXT_CHARS) : '';
+
+  return { v: STT_SETTINGS_VERSION, mode, language, enhancement, dictionary, userContext };
 }
 
 /** Normalise before writing, so a caller cannot persist an out-of-range shape

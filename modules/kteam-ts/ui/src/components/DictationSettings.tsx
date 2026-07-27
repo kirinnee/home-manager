@@ -20,12 +20,14 @@ import { Check, Download, Loader2, RefreshCw, Trash2 } from 'lucide-react';
 import { Button, Textarea } from './Primitives';
 import { cn } from '../lib/utils';
 import {
+  MAX_USER_CONTEXT_CHARS,
   STT_LANGUAGES,
   daemonSupportsLanguage,
   sttDictionary,
   useSttSettings,
   type SttMode,
 } from '../lib/stt/stt-settings';
+import { userContextVocabulary } from '../lib/stt/enhancement';
 import { daemonSttStatus, requestDaemonModelInstall, type DaemonSttStatus } from '../lib/stt/daemon-engine';
 import {
   STT_MODEL_BASE,
@@ -72,6 +74,12 @@ export const LOCAL_MODE_SUMMARY =
 export const ENHANCEMENT_EXPLANATION =
   'WORDS ONLY. It can swap a whole word for one you actually use — “kteam”, “tmux”, “Parakeet” — and nothing else. It cannot add, remove or reorder words, change punctuation or spacing, or rewrite a sentence. A separate check compares the result against the raw transcript and discards the whole thing if anything else moved.';
 
+/** Where enhancement's vocabulary comes from, in the order it is trusted.
+ *  Rendered under the toggle so the section explains itself: the reader should
+ *  not need the source to learn that it is offline and has no AI model. */
+export const ENHANCEMENT_SOURCES_EXPLANATION =
+  'It knows a word three ways, tried in this order: your words below (which always win), your context, and words used in the recent conversation. Everything runs instantly on this device — no AI model, nothing sent anywhere. When it is not sure, it changes nothing.';
+
 /** The language selector applies to BOX transcription only.
  *
  *  Checked against the installed `parakeet.js@1.4.4`: neither `fromUrls` nor
@@ -87,6 +95,12 @@ export const DAEMON_LANGUAGE_NOTE =
 
 export const DICTATION_SAFETY_NOTE =
   'Dictated text always lands in the message box for you to read and edit. Nothing is ever sent for you.';
+
+/** Above the free-text context field. It has to establish two things fast:
+ *  paste anything (it is prose, not a format), and only single words can ever
+ *  be swapped in — the same contract the dictionary states line by line. */
+export const USER_CONTEXT_EXPLANATION =
+  'Paste anything: project names, people, a glossary, a paragraph about what you work on. Dictation picks out the distinctive words and fixes mishearings of them. Plain English words are ignored, and if a term is also in “Your words” above, that entry wins.';
 
 type SectionState = 'unknown' | 'checking' | 'ready' | 'missing' | 'error';
 
@@ -224,6 +238,10 @@ export function DictationSettings() {
   );
 
   const dictionary = useMemo(() => sttDictionary(settings), [settings]);
+  /** Live echo of what the context field actually yields, so a reader can see
+   *  their glossary "take" (or see that plain prose yields nothing) without
+   *  dictating a test sentence. */
+  const userVocabulary = useMemo(() => userContextVocabulary(settings.userContext), [settings.userContext]);
   const daemonModel = daemon?.daemonModel;
   const browserModel = daemon?.browserModel;
   /** The box has told us it does NOT have the browser weights. Preparing this
@@ -473,6 +491,7 @@ export function DictationSettings() {
           <span className="text-meta">{settings.enhancement ? 'On' : 'Off'}</span>
         </button>
         <p className="text-meta leading-base text-muted">{ENHANCEMENT_EXPLANATION}</p>
+        <p className="text-meta leading-base text-muted">{ENHANCEMENT_SOURCES_EXPLANATION}</p>
       </div>
 
       {/* ---- dictionary ---- */}
@@ -503,6 +522,31 @@ export function DictationSettings() {
             ))}
           </ul>
         )}
+      </div>
+
+      {/* ---- free-text context ---- */}
+      <div className="flex flex-col gap-2">
+        <label htmlFor="stt-user-context" className="text-ui font-semibold">
+          Your context
+        </label>
+        <p className="text-meta leading-base text-muted">{USER_CONTEXT_EXPLANATION}</p>
+        <Textarea
+          id="stt-user-context"
+          className="min-h-[44px]"
+          rows={4}
+          spellCheck={false}
+          maxLength={MAX_USER_CONTEXT_CHARS}
+          value={settings.userContext}
+          onChange={event => update({ userContext: event.target.value })}
+          placeholder={'I work on kteam and kfleet with Kirin.\nOur services: nitroso, diene, alcohol.'}
+        />
+        <p className="text-meta text-faint">
+          {userVocabulary.length} word{userVocabulary.length === 1 ? '' : 's'} picked out
+          {userVocabulary.length > 0
+            ? ` — ${userVocabulary.slice(0, 8).join(', ')}${userVocabulary.length > 8 ? ', …' : ''}`
+            : ''}
+          .
+        </p>
       </div>
 
       {!persisted && (

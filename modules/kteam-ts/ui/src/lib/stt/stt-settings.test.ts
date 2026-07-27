@@ -4,6 +4,7 @@ import {
   DEFAULT_STT_SETTINGS,
   MAX_DICTIONARY_LINES,
   MAX_DICTIONARY_LINE_LENGTH,
+  MAX_USER_CONTEXT_CHARS,
   STT_LANGUAGES,
   STT_SETTINGS_KEY,
   STT_SETTINGS_VERSION,
@@ -71,13 +72,14 @@ describe('the language catalogue', () => {
 });
 
 describe('defaults', () => {
-  test('are daemon, English, enhancement on, empty dictionary', () => {
+  test('are daemon, English, enhancement on, empty dictionary and context', () => {
     expect(DEFAULT_STT_SETTINGS).toEqual({
       v: STT_SETTINGS_VERSION,
       mode: 'daemon',
       language: 'en',
       enhancement: true,
       dictionary: [],
+      userContext: '',
     });
   });
 });
@@ -109,7 +111,22 @@ describe('parseSttSettings — never throws, always usable', () => {
       language: 'de',
       enhancement: false,
       dictionary: ['tmux'],
+      userContext: '',
     });
+  });
+
+  test('a pre-userContext v1 payload keeps its dictionary — added field, not a version bump', () => {
+    const raw = JSON.stringify({ v: 1, mode: 'daemon', language: 'en', enhancement: true, dictionary: ['kteam'] });
+    const parsed = parseSttSettings(raw);
+    expect(parsed.dictionary).toEqual(['kteam']);
+    expect(parsed.userContext).toBe('');
+  });
+
+  test('reads and caps the userContext field', () => {
+    const raw = JSON.stringify({ ...DEFAULT_STT_SETTINGS, userContext: 'x'.repeat(MAX_USER_CONTEXT_CHARS + 100) });
+    expect(parseSttSettings(raw).userContext).toHaveLength(MAX_USER_CONTEXT_CHARS);
+    const hostile = JSON.stringify({ ...DEFAULT_STT_SETTINGS, userContext: ['not', 'a', 'string'] });
+    expect(parseSttSettings(hostile).userContext).toBe('');
   });
 
   test('falls back per FIELD, not per document, when one field is hostile', () => {
@@ -158,7 +175,14 @@ describe('normaliseSttSettings', () => {
 describe('storage', () => {
   test('round-trips through a working storage', () => {
     const storage = memoryStorage();
-    const next: SttSettings = { v: 1, mode: 'local', language: 'ja', enhancement: false, dictionary: ['tmux'] };
+    const next: SttSettings = {
+      v: 1,
+      mode: 'local',
+      language: 'ja',
+      enhancement: false,
+      dictionary: ['tmux'],
+      userContext: 'nitroso and diene',
+    };
     expect(saveSttSettings(next, storage)).toBe(true);
     expect(loadSttSettings(storage)).toEqual(next);
   });
