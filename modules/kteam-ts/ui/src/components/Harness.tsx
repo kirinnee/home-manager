@@ -3,7 +3,7 @@
 // elapsed stripped and replaced by a fluid, client-side elapsed that ticks
 // every 1s from `since` — zero extra network (turn-005 fluid timers).
 
-import { useEffect, useState } from 'react';
+import { useLiveTick } from '../hooks/useLiveTick';
 
 function fmtElapsed(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -13,11 +13,11 @@ function fmtElapsed(ms: number): string {
 }
 
 export function ThinkingIndicator({ activity, since }: { activity?: string | null; since?: number | null }) {
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    const t = setInterval(() => setTick(n => n + 1), 1000);
-    return () => clearInterval(t);
-  }, []);
+  // Re-render once a second to advance the fluid elapsed — but FREEZE while the
+  // reader holds a selection: this indicator lives inside the transcript, and on
+  // WebKit/iOS a per-second text mutation next to a highlight collapses it (see
+  // useLiveTick). The count catches up the moment the selection clears.
+  useLiveTick();
 
   const raw = (activity && activity.trim()) || 'Working…';
   // Drop a trailing "(34s · 2.1k tokens)" style parenthetical — we render our
