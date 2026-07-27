@@ -122,6 +122,15 @@ describe('parsePin', () => {
     const q = parsePin({ id: 'a', kind: 'message', blockId: 'u-1', blockKind: 'user', preview: 'p', at: 1, ts: 5 });
     expect('ts' in (q as object)).toBe(false);
   });
+  test('keeps a note source only when it is a well-formed { blockId }', () => {
+    const ok = parsePin({ id: 'a', kind: 'note', text: 'snip', at: 1, source: { blockId: 'u-1' } });
+    expect((ok as NotePin).source).toEqual({ blockId: 'u-1' });
+    // malformed sources degrade to a plain note, never a throw or a bogus jump
+    for (const bad of [{ blockId: 5 }, { blockId: '' }, {}, 'x', null]) {
+      const p = parsePin({ id: 'a', kind: 'note', text: 'snip', at: 1, source: bad });
+      expect((p as NotePin).source).toBeUndefined();
+    }
+  });
 });
 
 describe('addNote — caps and refusal', () => {
@@ -141,6 +150,14 @@ describe('addNote — caps and refusal', () => {
     if (!r.ok) throw new Error('ok');
     store = r.store;
     expect(sessionPins(store, S).map(p => (p as NotePin).text)).toEqual(['second', 'first']);
+  });
+  test('a selection note keeps its source blockId; a typed note has none', () => {
+    const sourced = addNote(emptyStore(), S, 'snippet', 'n', 1, { blockId: 'a-9' });
+    if (!sourced.ok) throw new Error('ok');
+    expect(sessionPins(sourced.store, S)[0]).toMatchObject({ kind: 'note', source: { blockId: 'a-9' } });
+    const typed = addNote(emptyStore(), S, 'typed', 'n', 1);
+    if (!typed.ok) throw new Error('ok');
+    expect((sessionPins(typed.store, S)[0] as NotePin).source).toBeUndefined();
   });
 });
 

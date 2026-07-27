@@ -73,6 +73,17 @@ export interface NotePin {
   text: string;
   /** Epoch ms created; bumped on edit. */
   at: number;
+  /** OPTIONAL PROVENANCE for a note that was PINNED FROM A SELECTION rather than
+   *  typed. A selection pin is a note (free text = the highlighted snippet), not
+   *  a message pin — it captures the exact words, and the words ARE the note. But
+   *  it is cheap to also remember which transcript block the snippet came from
+   *  (the row already carries `data-block-id`), so a sourced note can offer a
+   *  "Jump to source" back into the conversation, reusing the message-pin jump
+   *  bridge. Only `blockId` is stored — it is the single cheap fact available at
+   *  capture time (block kind/timestamp are not exposed as DOM attributes), and
+   *  it is enough for an exact-id, honest-not-found jump. Absent for a typed
+   *  note. See pin-selection.ts. */
+  source?: { blockId: string };
 }
 
 export type Pin = MessagePin | NotePin;
@@ -129,7 +140,16 @@ export function parsePin(value: unknown): Pin | null {
     // and never resurrect one past the cap (refuse-not-truncate holds on read
     // too, so a tampered payload cannot smuggle an oversized note back in).
     if (typeof text !== 'string' || text.trim().length === 0 || text.length > MAX_NOTE_LEN) return null;
-    return { id, kind: 'note', text, at };
+    // Optional provenance: keep it only when it is a well-formed { blockId:string }.
+    // A malformed source degrades the note to a plain typed note (never a throw,
+    // never a bogus jump target).
+    const src = p['source'];
+    let source: { blockId: string } | undefined;
+    if (src && typeof src === 'object') {
+      const blockId = (src as Record<string, unknown>)['blockId'];
+      if (typeof blockId === 'string' && blockId) source = { blockId };
+    }
+    return { id, kind: 'note', text, at, ...(source ? { source } : {}) };
   }
   return null;
 }
@@ -255,11 +275,23 @@ export type NoteResult = { ok: true; store: PinStore } | { ok: false; reason: 'e
 
 /** Add a free-text note. Empty/whitespace is refused silently (`empty`);
  *  over-cap is refused loudly (`too-long`) so the sheet can show the count —
- *  a link is never silently shortened. Newest note goes to the FRONT. */
-export function addNote(store: PinStore, sessionId: string, text: string, id: string, now: number): NoteResult {
+ *  a link is never silently shortened. Newest note goes to the FRONT.
+ *
+ *  `source` marks a note pinned FROM A SELECTION (pin-selection.ts): the caller
+ *  has already truncated the snippet to fit the cap (a snippet is display data,
+ *  not a link, so truncation-with-ellipsis is honest there — the source jump
+ *  gets you the full text), so this path treats over-cap the same for both. */
+export function addNote(
+  store: PinStore,
+  sessionId: string,
+  text: string,
+  id: string,
+  now: number,
+  source?: { blockId: string },
+): NoteResult {
   if (text.trim().length === 0) return { ok: false, reason: 'empty' };
   if (text.length > MAX_NOTE_LEN) return { ok: false, reason: 'too-long' };
-  const note: NotePin = { id, kind: 'note', text, at: now };
+  const note: NotePin = { id, kind: 'note', text, at: now, ...(source ? { source } : {}) };
   return { ok: true, store: putSession(store, sessionId, [note, ...sessionPins(store, sessionId)], now) };
 }
 
@@ -408,8 +440,8 @@ class PinsStore {
     this.emit();
   }
 
-  addNote(sessionId: string, text: string, now: number = Date.now()): NoteResult {
-    const result = addNote(this.snapshot, sessionId, text, uuid(), now);
+  addNote(sessionId: string, text: string, now: number = Date.now(), source?: { blockId: string }): NoteResult {
+    const result = addNote(this.snapshot, sessionId, text, uuid(), now, source);
     if (result.ok) this.commit(result.store);
     return result;
   }
