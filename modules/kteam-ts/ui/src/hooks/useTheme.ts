@@ -19,7 +19,7 @@ const KEY = 'kteam-theme';
 
 export type ThemeMode = 'system' | 'light' | 'dark';
 export type ResolvedMode = 'light' | 'dark';
-export type ThemeFamilyId = 'studio' | 'mission' | 'neo' | 'ember' | 'contrast' | 'notebook';
+export type ThemeFamilyId = 'studio' | 'mission' | 'neo' | 'ember' | 'contrast' | 'notebook' | 'geist';
 export type TextScale = 'default' | 'large' | 'larger';
 
 /** Discrete choices keep the result predictable at narrow widths. There is no
@@ -47,6 +47,7 @@ export const THEME_FAMILIES: readonly ThemeFamily[] = [
   { id: 'ember', label: 'Ember', blurb: 'Warm low-blue-light paper for long evenings.' },
   { id: 'contrast', label: 'High Contrast', blurb: 'Maximum legibility, AAA-targeted, no effects.' },
   { id: 'notebook', label: 'Notebook', blurb: 'Warm cream paper, terracotta ink, a serif hand for headings.' },
+  { id: 'geist', label: 'Geist', blurb: 'Hairline rules, small precise type, airy engineered minimalism.' },
 ];
 
 const FAMILY_IDS: readonly string[] = THEME_FAMILIES.map(f => f.id);
