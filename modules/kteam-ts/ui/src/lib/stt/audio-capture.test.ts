@@ -293,6 +293,23 @@ class FakeDocument {
 }
 
 let lastWorklet: FakeWorkletPort | null = null;
+let lastSourceNode: FakeConnectableNode | null = null;
+let lastAnalyserNode: FakeConnectableNode | null = null;
+let lastGainNode: FakeConnectableNode | null = null;
+
+class FakeConnectableNode {
+  readonly connections: unknown[] = [];
+  readonly disconnectedFrom: unknown[] = [];
+  disconnected = false;
+  gain = { value: 1 };
+  connect(target: unknown): void {
+    this.connections.push(target);
+  }
+  disconnect(target?: unknown): void {
+    this.disconnected = true;
+    if (target !== undefined) this.disconnectedFrom.push(target);
+  }
+}
 
 class FakeAudioWorkletNode {
   port = new FakeWorkletPort();
@@ -317,10 +334,19 @@ class FakeAudioContext {
     this.sampleRate = options?.sampleRate ?? 48_000;
   }
   createMediaStreamSource() {
-    return { connect: () => undefined, disconnect: () => undefined };
+    const source = new FakeConnectableNode();
+    lastSourceNode = source;
+    return source;
+  }
+  createAnalyser() {
+    const analyser = new FakeConnectableNode();
+    lastAnalyserNode = analyser;
+    return analyser;
   }
   createGain() {
-    return { gain: { value: 1 }, connect: () => undefined };
+    const gain = new FakeConnectableNode();
+    lastGainNode = gain;
+    return gain;
   }
   async resume(): Promise<void> {}
   async close(): Promise<void> {
@@ -330,10 +356,15 @@ class FakeAudioContext {
 
 describe('the tail of the utterance', () => {
   let stoppedTracks = 0;
+  let lastGrantedStream: MediaStream | null = null;
 
   function install(): void {
     lastWorklet = null;
+    lastSourceNode = null;
+    lastAnalyserNode = null;
+    lastGainNode = null;
     stoppedTracks = 0;
+    lastGrantedStream = null;
     Object.defineProperty(globalThis, 'AudioContext', { value: FakeAudioContext, configurable: true, writable: true });
     Object.defineProperty(globalThis, 'AudioWorkletNode', {
       value: FakeAudioWorkletNode,
@@ -346,13 +377,19 @@ describe('the tail of the utterance', () => {
     Reflect.deleteProperty(globalThis, 'AudioContext');
     Reflect.deleteProperty(globalThis, 'AudioWorkletNode');
     lastWorklet = null;
+    lastSourceNode = null;
+    lastAnalyserNode = null;
+    lastGainNode = null;
   }
 
   const mediaDevices = {
-    getUserMedia: () =>
-      Promise.resolve({
+    getUserMedia: () => {
+      const stream = {
         getTracks: () => [{ stop: () => (stoppedTracks += 1) }],
-      } as unknown as MediaStream),
+      } as unknown as MediaStream;
+      lastGrantedStream = stream;
+      return Promise.resolve(stream);
+    },
   } as unknown as MediaDevices;
 
   async function openSession(extra: Partial<Parameters<typeof startCapture>[0]> = {}) {
@@ -362,6 +399,47 @@ describe('the tail of the utterance', () => {
     if (!port) throw new Error('the fake worklet was never constructed');
     return { session, port };
   }
+
+  test('exposes the exact granted stream for read-only input analysis', async () => {
+    const { session } = await openSession();
+    try {
+      const grantedStream = lastGrantedStream;
+      if (!grantedStream) throw new Error('the fake media device returned no stream');
+      expect(session.stream).toBe(grantedStream);
+    } finally {
+      session.cancel();
+      uninstall();
+    }
+  });
+
+  test('creates a disposable analyser branch without stopping the recorder stream', async () => {
+    const { session } = await openSession();
+    try {
+      const tap = session.monitor.createAnalyser();
+      if (!tap) throw new Error('the fake capture did not create an analyser tap');
+      const source = lastSourceNode;
+      const analyser = lastAnalyserNode;
+      const gain = lastGainNode;
+      if (!source || !analyser || !gain) throw new Error('the fake monitor graph was incomplete');
+
+      expect(tap.analyser).toBe(analyser as unknown as AnalyserNode);
+      expect(source.connections).toContain(analyser);
+      expect(analyser.connections).toContain(gain);
+      expect(gain.gain.value).toBe(0);
+      expect(stoppedTracks).toBe(0);
+
+      tap.disconnect();
+      tap.disconnect();
+      expect(source.disconnectedFrom).toEqual([analyser]);
+      expect(analyser.disconnected).toBe(true);
+      expect(gain.disconnected).toBe(true);
+      expect(stoppedTracks).toBe(0);
+    } finally {
+      session.cancel();
+      expect(stoppedTracks).toBe(1);
+      uninstall();
+    }
+  });
 
   test('RETURNS the final partial batch the worklet was still holding', async () => {
     // THE REGRESSION. Before the fix, `stop()` marked the session inactive

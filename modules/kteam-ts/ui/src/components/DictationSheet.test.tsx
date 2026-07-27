@@ -15,8 +15,8 @@ describe('dictationStage — what the reader sees, derived from the phase', () =
     expect(dictationStage(base)).toBe('starting');
   });
 
-  test('requesting and recording are both the recording stage', () => {
-    expect(dictationStage({ ...base, phase: 'requesting' })).toBe('recording');
+  test('permission wait is starting; only an open mic is recording', () => {
+    expect(dictationStage({ ...base, phase: 'requesting' })).toBe('starting');
     expect(dictationStage({ ...base, phase: 'recording' })).toBe('recording');
   });
 
@@ -78,8 +78,10 @@ function render(overrides: Partial<DictationSheetProps> = {}): string {
     stage: 'recording',
     mode: 'daemon',
     elapsedMs: 3200,
+    inputMonitor: null,
     text: '',
     onTextChange: () => {},
+    onDismiss: () => {},
     onStop: () => {},
     onCancel: () => {},
     onRetry: () => {},
@@ -90,16 +92,32 @@ function render(overrides: Partial<DictationSheetProps> = {}): string {
 }
 
 describe('DictationSheet rendering', () => {
-  test('a closed sheet paints no dialog', () => {
-    const html = render({ open: false });
-    expect(html).not.toContain('role="dialog"');
+  test('the panel source contains no focus trap or mount-time focus call', async () => {
+    const source = await Bun.file(new URL('./DictationSheet.tsx', import.meta.url).pathname).text();
+    expect(source).not.toContain('<BottomSheet');
+    expect(source).not.toContain('useDialogFocus');
+    expect(source).not.toContain('.focus(');
+    expect(source).not.toContain('autoFocus');
   });
 
-  test('recording shows a live clock and a Stop target', () => {
+  test('a closed panel paints nothing', () => {
+    const html = render({ open: false });
+    expect(html).toBe('');
+  });
+
+  test('recording uses a non-modal mini panel with a waveform, clock, and Stop target', () => {
     const html = render({ stage: 'recording', elapsedMs: 5000 });
     expect(html).toContain('0:05');
+    expect(html).toContain('data-dictation-panel="non-modal"');
+    expect(html).toContain('role="region"');
+    expect(html).toContain('<canvas');
     expect(html).toContain('Stop &amp; transcribe');
     expect(html).toContain('Cancel');
+    expect(html).toContain('Hide dictation panel; recording continues');
+    expect(html).not.toContain('role="dialog"');
+    expect(html).not.toContain('aria-modal');
+    expect(html).not.toContain('data-bottom-sheet');
+    expect(html).not.toContain('bg-scrim');
   });
 
   test('review shows the editable transcript, an explicit Insert, and the never-sent promise', () => {

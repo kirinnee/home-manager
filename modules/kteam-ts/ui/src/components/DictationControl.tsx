@@ -1,20 +1,18 @@
 // The microphone control — a self-contained bundle that hands the composer a
-// mic BUTTON and a dictation MODAL, without the composer learning anything about
+// mic BUTTON and a non-modal dictation PANEL, without the composer learning about
 // speech.
 //
 // TAP, NOT HOLD. The mic used to be a press-and-hold control living in the
-// composer with no visible flow — the reader could not tell it existed, could
-// not tell it was recording, and got a silent insert on release ("how to use
-// it? it needs to be way more ergonomic"). Now a single tap opens `DictationSheet`
-// and starts recording; the sheet is the whole interaction (record → stop →
-// transcribe → review/edit → insert). See DictationSheet.tsx for the honesty
-// rules about "live" (there are none: no partial text is ever shown).
+// composer with no visible flow. A single tap now opens `DictationSheet` and
+// starts recording, but the panel deliberately does NOT trap focus or block the
+// composer: the reader can keep typing, hide it without cancelling, and bring it
+// back with the same mic button.
 //
 // WHY A HOOK THAT RETURNS NODES. The button belongs in the composer's action
-// column and the sheet is a full-viewport overlay; they are one state machine.
-// So `useDictationBundle` owns the state once and hands back both nodes, and the
-// composer drops them wherever it likes. `DictationControl` is the simple
-// wrapper for mounting them together.
+// column while the panel is fixed outside its layout; they are one state
+// machine. So `useDictationBundle` owns the state once and hands back both
+// nodes, and the composer drops them wherever it likes. `DictationControl` is
+// the simple wrapper for mounting them together.
 //
 // THE ONE OUTPUT IS STILL THE DRAFT. On Insert, the EDITED transcript is placed
 // into the composer draft at the caret via the same `insertTranscript` path
@@ -76,16 +74,28 @@ export function dictationStatusCopy(phase: DictationPhase, mode: SttMode, errorM
   }
 }
 
+/** A mic-button press starts only when there is no flow to resume. This is the
+ *  safety edge that makes hiding the panel non-destructive: recording,
+ *  transcription, review, empty and error states all reopen in place. */
+export function dictationTriggerStartsFresh(input: {
+  phase: DictationPhase;
+  hasTranscript: boolean;
+  hasError: boolean;
+  wasCapturing: boolean;
+}): boolean {
+  return input.phase === 'idle' && !input.hasTranscript && !input.hasError && !input.wasCapturing;
+}
+
 export interface DictationBundle {
   /** False when this browser has no microphone API. Render nothing. */
   supported: boolean;
   /** The 44px mic button that opens the sheet, or `null` when unsupported. */
   control: ReactNode;
-  /** The dictation modal. Always returned (renders nothing while closed) so the
+  /** The dictation panel. Always returned (renders nothing while closed) so the
    *  composer can drop it in one place regardless of layout. */
   sheet: ReactNode;
   handle: DictationHandle;
-  /** The visible modal stage, exposed for the composer/tests. */
+  /** The visible panel stage, exposed for the composer/tests. */
   stage: DictationStage;
 }
 
@@ -164,8 +174,23 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
   const openAndRecord = useCallback(() => {
     if (disabled) return;
     setOpen(true);
-    beginRecording();
-  }, [disabled, beginRecording]);
+    if (
+      dictationTriggerStartsFresh({
+        phase,
+        hasTranscript: transcript !== null,
+        hasError: dictation.error !== null,
+        wasCapturing,
+      })
+    ) {
+      beginRecording();
+    }
+  }, [beginRecording, dictation.error, disabled, phase, transcript, wasCapturing]);
+
+  const dismissPanel = useCallback(() => {
+    // Hiding is intentionally not cancellation. The recorder, transcript and
+    // elapsed clock continue; the mic button reopens this exact flow.
+    setOpen(false);
+  }, []);
 
   const insert = useCallback(() => {
     const text = edited.trim();
@@ -187,17 +212,28 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
     wasCapturing,
   });
 
+  const flowActive = !dictationTriggerStartsFresh({
+    phase,
+    hasTranscript: transcript !== null,
+    hasError: dictation.error !== null,
+    wasCapturing,
+  });
+
   const control = dictation.supported ? (
     <Button
       type="button"
       variant="ghost"
       size="sm"
-      className={cn('min-h-[44px] min-w-[44px] select-none px-2', className)}
+      className={cn('min-h-[44px] min-w-[44px] select-none px-2', dictation.recording && 'text-err', className)}
       disabled={disabled}
-      aria-haspopup="dialog"
       aria-expanded={open}
-      aria-label="Dictate a message"
-      title="Dictate a message — speak, review the text, then insert it. Nothing is ever sent for you."
+      aria-pressed={dictation.recording}
+      aria-label={flowActive ? 'Show dictation recorder' : 'Dictate a message'}
+      title={
+        flowActive
+          ? 'Show the active dictation recorder'
+          : 'Dictate a message — keep typing while it records, then review and insert. Nothing is ever sent for you.'
+      }
       onClick={openAndRecord}
     >
       <Mic size={15} aria-hidden="true" />
@@ -212,10 +248,12 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
       stage={stage}
       mode={settings.mode}
       elapsedMs={elapsedMs}
+      inputMonitor={dictation.inputMonitor}
       text={edited}
       onTextChange={setEdited}
       errorCode={dictation.error?.code}
       errorMessage={dictation.error?.message}
+      onDismiss={dismissPanel}
       onStop={dictation.stop}
       onCancel={reset}
       onRetry={beginRecording}
@@ -226,7 +264,7 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
   return { supported: dictation.supported, control, sheet, handle: dictation, stage };
 }
 
-/** The simple mounting form: mic button and its modal together. */
+/** The simple mounting form: mic button and its non-modal panel together. */
 export function DictationControl(props: DictationControlProps) {
   const { supported, control, sheet } = useDictationBundle(props);
   if (!supported) return null;

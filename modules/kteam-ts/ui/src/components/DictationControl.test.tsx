@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { DictationControl, dictationStatusCopy } from './DictationControl';
+import { DictationControl, dictationStatusCopy, dictationTriggerStartsFresh } from './DictationControl';
 
 /** Swap in a navigator that does — or does not — expose a microphone API.
  *  `hasMicrophoneApi` reads the global at render, which is exactly the
@@ -13,6 +13,23 @@ const REAL_NAVIGATOR = globalThis.navigator;
 
 afterEach(() => {
   Object.defineProperty(globalThis, 'navigator', { value: REAL_NAVIGATOR, configurable: true, writable: true });
+});
+
+describe('dictation trigger — hidden flows resume instead of restarting', () => {
+  const fresh = { phase: 'idle' as const, hasTranscript: false, hasError: false, wasCapturing: false };
+
+  test('starts only from a genuinely fresh idle state', () => {
+    expect(dictationTriggerStartsFresh(fresh)).toBe(true);
+  });
+
+  test('reopens every in-progress or landed state without replacing it', () => {
+    expect(dictationTriggerStartsFresh({ ...fresh, phase: 'requesting' })).toBe(false);
+    expect(dictationTriggerStartsFresh({ ...fresh, phase: 'recording' })).toBe(false);
+    expect(dictationTriggerStartsFresh({ ...fresh, phase: 'transcribing' })).toBe(false);
+    expect(dictationTriggerStartsFresh({ ...fresh, hasTranscript: true })).toBe(false);
+    expect(dictationTriggerStartsFresh({ ...fresh, hasError: true })).toBe(false);
+    expect(dictationTriggerStartsFresh({ ...fresh, wasCapturing: true })).toBe(false);
+  });
 });
 
 function render(props: Partial<Parameters<typeof DictationControl>[0]> = {}): string {
@@ -79,24 +96,25 @@ describe('rendering', () => {
   describe('with a microphone', () => {
     const NAV = { userAgent: 'test', mediaDevices: { getUserMedia: () => Promise.resolve({}) } };
 
-    test('renders a 44px, labelled dialog-trigger that is collapsed at rest', () => {
+    test('renders a 44px, labelled panel trigger that is collapsed at rest', () => {
       withNavigator(NAV);
       const button = theButton(render());
       expect(button).toContain('min-h-[44px]');
       expect(button).toContain('min-w-[44px]');
       expect(button).toContain('aria-label="Dictate a message"');
-      // It OPENS a modal — announced as a dialog trigger, closed until tapped.
-      expect(button).toContain('aria-haspopup="dialog"');
+      // It opens a non-modal region, not a dialog/menu that claims focus.
+      expect(button).not.toContain('aria-haspopup');
       expect(button).toContain('aria-expanded="false"');
       expect(button).toContain('type="button"');
     });
 
-    test('the closed sheet renders no dialog markup at rest', () => {
+    test('the closed panel renders no floating markup at rest', () => {
       withNavigator(NAV);
       const html = render();
-      // BottomSheet is inert until opened, so nothing but the trigger paints.
+      // The non-modal recorder is absent until opened, so only the trigger paints.
       expect(html).not.toContain('role="dialog"');
       expect(html).not.toContain('aria-modal');
+      expect(html).not.toContain('data-dictation-panel');
     });
 
     test('never autofocuses', () => {
