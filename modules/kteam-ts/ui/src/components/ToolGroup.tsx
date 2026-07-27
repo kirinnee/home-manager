@@ -18,7 +18,8 @@
 // Expansion is opt-in on click and brings back full-size code surfaces: you
 // opened it on purpose, so the body should be comfortable to read.
 
-import { memo, useEffect, useState } from 'react';
+import { memo, useState } from 'react';
+import { useLiveTick } from '../hooks/useLiveTick';
 import {
   ChevronRight,
   Loader2,
@@ -80,11 +81,10 @@ function summarize(calls: ToolCall[]): string {
 }
 
 function Elapsed({ since }: { since?: string }) {
-  const [, tick] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => tick(n => n + 1), 1000);
-    return () => clearInterval(id);
-  }, []);
+  // Re-render once a second to advance the count — but FREEZE while the reader
+  // holds a selection: this line lives inside the transcript, and on WebKit/iOS a
+  // per-second text mutation next to a highlight collapses it (see useLiveTick).
+  useLiveTick();
   const start = since ? Date.parse(since) : NaN;
   if (!Number.isFinite(start)) return null;
   const s = Math.max(0, Math.floor((Date.now() - start) / 1000));

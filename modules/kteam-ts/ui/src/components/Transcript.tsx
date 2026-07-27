@@ -195,13 +195,51 @@ export function pinBlockedBySelection(sel: SelectionLike | null, contains: (node
   return contains(sel.anchorNode) || contains(sel.focusNode);
 }
 
-/** DOM adapter over {@link pinBlockedBySelection}: is a non-collapsed selection
+/** MAY FOLLOW WRITE scrollTop RIGHT NOW? — the FULL decision, both signals.
+ *
+ *  Blocks the pin when EITHER a non-collapsed selection is anchored inside
+ *  ({@link pinBlockedBySelection}) OR a pointer/finger is currently held down on
+ *  the viewport (a gesture in progress).
+ *
+ *  ROUND 7 — WHY THE SELECTION SIGNAL ALONE IS NOT ENOUGH ON TOUCH.
+ *
+ *  `pinBlockedBySelection` cannot see a touch long-press. A finger selects by
+ *  long-pressing (finger DOWN, held still) until the word range materialises —
+ *  and for those first few hundred milliseconds the selection is still COLLAPSED
+ *  (or absent), so the selection guard is false and a streaming delta is allowed
+ *  to pin. Measured in a mobile browser against the live page (final-probe.mjs,
+ *  probe G2): with the finger down and the selection still collapsed, a single
+ *  content-resize pin moved the viewport 2136 → 2709 — the prose jumps ~570px out
+ *  from under the finger, the long-press target is gone, and the highlight never
+ *  forms. That is "can't highlight the convo at all" on a phone.
+ *
+ *  A MOUSE never hits this window: mousedown + the first mousemove produce a
+ *  non-collapsed range at once, so `pinBlockedBySelection` covers the whole drag
+ *  (probe G3: 0 pins mid-drag, selection survives). That asymmetry is exactly why
+ *  desktop was fixed by the selection guard and touch was not.
+ *
+ *  `pointerHeld` is the gesture latch the intent tracker already keeps (see the
+ *  intent effect). A held pointer means the reader is doing something with it —
+ *  selecting, or about to scroll — and the viewport must not be yanked to the
+ *  tail under it either way. When the finger lifts, follow resumes (the pointer
+ *  `up` handler re-pins if still following, and the selectionchange listener
+ *  re-pins when a selection is later cleared). */
+export function followPinBlocked(
+  pointerHeld: boolean,
+  sel: SelectionLike | null,
+  contains: (node: Node | null) => boolean,
+): boolean {
+  return pointerHeld || pinBlockedBySelection(sel, contains);
+}
+
+/** DOM adapter over {@link followPinBlocked}: is a pin unsafe right now, because
+ *  a finger/pointer is held on the viewport or a non-collapsed selection is
  *  anchored inside `el`? Returns false when there is no window (SSR/tests) or no
  *  element, so a missing environment never blocks follow. */
-function hasSelectionIn(el: HTMLElement | null): boolean {
-  if (!el || typeof window === 'undefined') return false;
+function pinBlockedNow(el: HTMLElement | null, pointerHeld: boolean): boolean {
+  if (!el || typeof window === 'undefined') return pointerHeld;
   const sel = window.getSelection();
-  return pinBlockedBySelection(sel, node => !!node && el.contains(node));
+  return followPinBlocked(pointerHeld, sel, node => !!node && el.contains(node));
 }
 
 function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, header, footer }: Props) {
@@ -242,12 +280,15 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
   const pin = useCallback(() => {
     const v = viewportRef.current;
     if (!v) return;
-    // Never yank the viewport out from under a live text selection: a scrollTop
-    // write collapses it (measured). Follow resumes the moment the selection is
-    // cleared — see the selectionchange listener below. This is the ONE guard
-    // that covers every pin() caller (both ResizeObservers, the layout effect,
-    // the initial settle, the onScroll re-engage, and jump()).
-    if (hasSelectionIn(v)) return;
+    // Never yank the viewport out from under a live text selection OR an
+    // in-progress pointer gesture. A scrollTop write collapses a held selection
+    // (measured), and a touch long-press dwells with the selection still
+    // COLLAPSED — so `pointerHeld` covers the window the selection check is blind
+    // to (round 7; see followPinBlocked). Follow resumes when the finger lifts
+    // (pointer `up` re-pin) or the selection is cleared (selectionchange re-pin).
+    // This is the ONE guard that covers every pin() caller (both ResizeObservers,
+    // the layout effect, the initial settle, the onScroll re-engage, and jump()).
+    if (pinBlockedNow(v, pointerHeld.current)) return;
     // Assignment, not scrollTo({behavior:'smooth'}): instant and idempotent. The
     // browser clamps to scrollHeight - clientHeight, so this lands EXACTLY at the
     // bottom — never "almost". A smooth animation restarted on every delta is
@@ -291,6 +332,13 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
     const up = () => {
       pointerHeld.current = false;
       mark();
+      // Gesture over. If the reader is still following (they long-pressed or
+      // tapped without scrolling away), resume the tail now that the pin guard
+      // has released — pin() is a no-op if they left a selection standing (it
+      // stays blocked by the selection half of the guard) or scrolled off the
+      // tail (followRef is already false), so this only snaps back the cases that
+      // should snap back.
+      if (followRef.current) pin();
     };
     const SCROLL_KEYS = new Set(['PageUp', 'PageDown', 'ArrowUp', 'ArrowDown', 'Home', 'End', ' ', 'Spacebar']);
     const onKey = (e: KeyboardEvent) => {
@@ -324,7 +372,7 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
       window.removeEventListener('blur', up);
       window.removeEventListener('keydown', onKey);
     };
-  }, []);
+  }, [pin]);
 
   // ---- SELECTION RELEASES FOLLOW'S HOLD -------------------------------------
   // While a selection is held, pin() and the content ResizeObserver both hold
@@ -354,11 +402,12 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
     const ro = new ResizeObserver(() => {
       const v = viewportRef.current;
       if (!v) return;
-      // This write does NOT go through pin(), so it needs the same selection
-      // guard: a scrollTop write here on a streaming delta would collapse a
-      // held selection. Holding off leaves follow armed; the next delta after
-      // the selection clears re-pins.
-      if (followRef.current && !hasSelectionIn(v)) {
+      // This write does NOT go through pin(), so it needs the same guard: a
+      // scrollTop write here on a streaming delta would collapse a held selection
+      // (and, mid touch long-press, yank the prose out from under the finger —
+      // see followPinBlocked). Holding off leaves follow armed; the pointer `up`
+      // re-pin or the next delta after the selection clears re-pins.
+      if (followRef.current && !pinBlockedNow(v, pointerHeld.current)) {
         v.scrollTop = v.scrollHeight;
         // Record OUR write, so the scroll event it triggers is not read as the
         // reader moving. Without this the very act of following looks like input.
