@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { deepMerge, resolveSettings } from './settings';
+import { deepMerge, readRuntimeLayer, resolveSettings } from './settings';
 
 describe('deepMerge', () => {
   test('nested objects merge key-by-key; scalars and arrays are replaced', () => {
@@ -59,5 +59,43 @@ describe('resolveSettings', () => {
 
   test('a missing file source throws', () => {
     expect(() => resolveSettings(['/no/such/file.toml'], 'toml', 'copy')).toThrow(/settings source not found/);
+  });
+});
+
+describe('readRuntimeLayer', () => {
+  const dir = (): string => mkdtempSync(path.join(tmpdir(), 'kfleet-rt-'));
+
+  test('parses a real on-disk file into an object (json)', () => {
+    const d = dir();
+    const f = path.join(d, 'settings.json');
+    writeFileSync(f, JSON.stringify({ model: 'opus', effortLevel: 'high' }));
+    expect(readRuntimeLayer(f, 'json')).toEqual({ model: 'opus', effortLevel: 'high' });
+  });
+
+  test('returns null for a symlink — a pre-copy store link has no runtime state to keep', () => {
+    const d = dir();
+    const target = path.join(d, 'store-settings.json');
+    writeFileSync(target, JSON.stringify({ model: 'opus' }));
+    const link = path.join(d, 'settings.json');
+    symlinkSync(target, link);
+    expect(readRuntimeLayer(link, 'json')).toBeNull();
+  });
+
+  test('returns null when the dest is absent or unparseable (never throws)', () => {
+    const d = dir();
+    expect(readRuntimeLayer(path.join(d, 'nope.json'), 'json')).toBeNull();
+    const bad = path.join(d, 'settings.json');
+    writeFileSync(bad, '{ not json');
+    expect(readRuntimeLayer(bad, 'json')).toBeNull();
+  });
+
+  test('as a base layer, template keys win but a runtime-only key survives', () => {
+    // Mirrors generate.ts: [runtimeLayer, ...templateLayers]. Template-declared
+    // `model` wins (fleet edit propagates); runtime-only `effortLevel` survives.
+    const out = resolveSettings([{ model: 'sonnet', effortLevel: 'high' }, { model: 'opus' }], 'json', 'copy');
+    expect(out.kind).toBe('write');
+    if (out.kind === 'write') {
+      expect(JSON.parse(out.content)).toEqual({ model: 'opus', effortLevel: 'high' });
+    }
   });
 });

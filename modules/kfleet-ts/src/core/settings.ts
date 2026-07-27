@@ -3,7 +3,7 @@
 // file-path layer is emitted verbatim (link/copy → comments & formatting kept);
 // any override means parse → deep-merge left→right → re-serialize for the kind
 // (codex:TOML claude:JSON). See core/kinds.ts (Asset.format) and core/merge.ts.
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import { resolveAsset } from '../deps';
 import type { SettingsLayer } from './types';
@@ -56,4 +56,19 @@ export function resolveSettings(layers: SettingsLayer[], format: Format, mode: '
     {},
   );
   return { kind: 'write', content: serializeConfig(merged, format) };
+}
+
+/** Read an already-materialized settings file so a re-apply can fold the keys the
+ *  harness wrote at runtime (e.g. Claude's `effortLevel` from `/effort`) back in as
+ *  a BASE layer — template layers then stack on top, so a template-declared key
+ *  still wins while a purely runtime key survives. Returns null when there is
+ *  nothing to preserve: the dest is absent, is a symlink (a pre-copy store link —
+ *  only template content, no runtime state), or does not parse. Never throws. */
+export function readRuntimeLayer(dest: string, format: Format): Obj | null {
+  try {
+    if (lstatSync(dest).isSymbolicLink()) return null;
+    return parseConfig(readFileSync(dest, 'utf8'), format);
+  } catch {
+    return null;
+  }
 }

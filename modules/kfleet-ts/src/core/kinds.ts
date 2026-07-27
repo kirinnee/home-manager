@@ -27,6 +27,12 @@ interface Asset {
    *  A single file-path layer is emitted verbatim per `mode` (no parse → comments
    *  and formatting preserved). */
   format?: 'toml' | 'json';
+  /** the harness rewrites this file at runtime (settings.json's /effort, /model…),
+   *  so on re-apply fold the existing on-disk file in as the BASE layer: template
+   *  layers stack on top, so a template-declared key still wins but a purely
+   *  runtime-written key (e.g. `effortLevel`) survives instead of being clobbered.
+   *  Requires `mode: 'copy'` (a symlink has nothing local to preserve). */
+  preserveRuntimeKeys?: boolean;
 }
 
 interface KindSpec {
@@ -53,7 +59,18 @@ export const KIND_SPECS: Record<Kind, KindSpec> = {
     wrapperEnv: (_n, dir) => ({ CLAUDE_CONFIG_DIR: dir }),
     autotrust: true,
     assets: [
-      { field: 'settings', dest: ['settings.json'], type: 'file', mode: 'link', format: 'json' },
+      // copy (not link): Claude rewrites settings.json at runtime (/effort persists
+      // `effortLevel` here via a read-modify-write; a store symlink → EACCES).
+      // preserveRuntimeKeys keeps that runtime key across re-apply. (/model uses
+      // .claude.json, which is already writable, so it was never affected.)
+      {
+        field: 'settings',
+        dest: ['settings.json'],
+        type: 'file',
+        mode: 'copy',
+        format: 'json',
+        preserveRuntimeKeys: true,
+      },
       { field: 'memory', dest: ['CLAUDE.md'], type: 'file', mode: 'link' },
       { field: 'skills', dest: ['skills'], type: 'dir', mode: 'link' },
       { field: 'mcp', dest: ['.mcp.json'], type: 'file', mode: 'link' },
