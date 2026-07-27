@@ -42,6 +42,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowDown,
   ChevronsLeft,
   ChevronsRight,
   Cpu,
@@ -89,6 +90,8 @@ import { MODE_HINT } from './ModeBadge';
 import { useLayoutMode, type LayoutMode } from '../hooks/useLayoutMode';
 import { useDialogFocus } from '../hooks/useDialogFocus';
 import { useInputModality } from '../hooks/useInputModality';
+import { usePullToSearch } from '../hooks/usePullToSearch';
+import { requestSearchFocus, subscribeSearchFocus } from '../lib/search-focus';
 
 /** Expanded width. Wide enough for a task line and a teammate name, narrow
  *  enough that the transcript beside it still reads comfortably at 1280px. */
@@ -352,6 +355,11 @@ function Controls({ autoFocusSearch = false }: { autoFocusSearch?: boolean }) {
   useEffect(() => {
     if (autoFocusSearch) inputRef.current?.focus();
   }, [autoFocusSearch]);
+
+  // Pull-down-to-search (touch drawer) focuses the box through this signal. That
+  // DOES summon the keyboard — deliberately, because a pull is an explicit user
+  // gesture, unlike the drawer merely opening (which stays keyboard-free).
+  useEffect(() => subscribeSearchFocus(() => inputRef.current?.focus()), []);
 
   return (
     <div className="flex flex-col gap-sm">
@@ -890,35 +898,59 @@ function Body({
   onNavigate?: () => void;
   onOpenSessionMenu?: OpenSessionMenu;
 }) {
+  // PULL-DOWN TO SEARCH — touch drawer only (`coarse`). Attached to THIS list
+  // scroller; on the expanded desktop column the gesture is disabled (the search
+  // box is already right there and there is no keyboard to summon).
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const pull = usePullToSearch(scrollerRef, { enabled: !!coarse, onTrigger: requestSearchFocus });
+
   return (
     <>
       <div className="shrink-0 border-b border-border-soft px-cell-x pb-2">
         <Controls autoFocusSearch={autoFocusSearch} />
       </div>
-      {/* THE ONE SCROLLER. A sibling of the main pane's, never nested in it. */}
-      <div className="min-h-0 flex-1 overflow-y-auto scroll-thin">
-        {groups.length === 0 ? (
-          <p className="px-cell-x py-4 text-cell text-muted">
-            {total === 0 ? 'No sessions yet.' : 'No sessions match these filters.'}
-          </p>
-        ) : (
-          <div className="space-y-1 py-1">
-            {groups.map(g => (
-              <GroupBlock
-                key={g.path || g.name}
-                group={g}
-                lineage={lineage}
-                byId={byId}
-                activeId={activeId}
-                scoped={scope !== null && g.path === scope}
-                coarse={coarse}
-                onFocus={onFocus}
-                onNavigate={onNavigate}
-                onOpenSessionMenu={onOpenSessionMenu}
-              />
-            ))}
+      {/* THE ONE SCROLLER, wrapped so the pull indicator can overlay its top
+          without joining the scroll flow. A sibling of the main pane's scroller,
+          never nested in it. */}
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        {coarse && pull.distance > 0 && (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-center justify-center gap-xs overflow-hidden text-meta text-muted"
+            style={{ height: Math.min(pull.distance * 0.5, 40), opacity: pull.progress }}
+          >
+            <ArrowDown size={13} className={cn('transition-transform', pull.armed && 'rotate-180 text-accent')} />
+            <span className={cn(pull.armed && 'text-accent')}>
+              {pull.armed ? 'Release to search' : 'Pull to search'}
+            </span>
           </div>
         )}
+        {/* `overscroll-contain`: a pull at the top must not chain to the page and
+            trigger the browser's own pull-to-refresh. */}
+        <div ref={scrollerRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain scroll-thin">
+          {groups.length === 0 ? (
+            <p className="px-cell-x py-4 text-cell text-muted">
+              {total === 0 ? 'No sessions yet.' : 'No sessions match these filters.'}
+            </p>
+          ) : (
+            <div className="space-y-1 py-1">
+              {groups.map(g => (
+                <GroupBlock
+                  key={g.path || g.name}
+                  group={g}
+                  lineage={lineage}
+                  byId={byId}
+                  activeId={activeId}
+                  scoped={scope !== null && g.path === scope}
+                  coarse={coarse}
+                  onFocus={onFocus}
+                  onNavigate={onNavigate}
+                  onOpenSessionMenu={onOpenSessionMenu}
+                />
+              ))}
+            </div>
+          )}
+        </div>
       </div>
       <div className="flex shrink-0 items-center gap-sm border-t border-border-soft px-cell-x py-row-y">
         <Link to="/new" onClick={onNavigate} data-variant="primary" className="kt-btn">

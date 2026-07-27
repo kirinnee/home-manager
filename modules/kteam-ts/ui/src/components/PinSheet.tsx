@@ -23,6 +23,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowDownToLine,
   Check,
+  CornerUpLeft,
   ExternalLink,
   GitPullRequest,
   LoaderCircle,
@@ -258,18 +259,21 @@ export function PinSheet({
     setUndo(null);
   }, [sessionId, undo]);
 
+  // Jump to a pinned message OR to the source block of a selection note — the
+  // machinery is identical (exact-id, honest not-found), so it is keyed by pin
+  // id and driven by the block id the caller passes.
   const jumpTo = useCallback(
-    async (pin: MessagePin) => {
-      setJumpState({ id: pin.id, phase: 'locating', pages: 0 });
-      const outcome = await requestJump(pin.blockId, pages =>
-        setJumpState(prev => (prev && prev.id === pin.id ? { ...prev, pages } : prev)),
+    async (pinId: string, blockId: string) => {
+      setJumpState({ id: pinId, phase: 'locating', pages: 0 });
+      const outcome = await requestJump(blockId, pages =>
+        setJumpState(prev => (prev && prev.id === pinId ? { ...prev, pages } : prev)),
       );
       if (outcome === 'jumped') {
         setJumpState(null);
         onClose();
         return;
       }
-      setJumpState({ id: pin.id, phase: 'done', pages: 0, outcome });
+      setJumpState({ id: pinId, phase: 'done', pages: 0, outcome });
     },
     [onClose],
   );
@@ -369,6 +373,7 @@ export function PinSheet({
                     editing={editingId === pin.id}
                     editText={editText}
                     editError={editError}
+                    jump={jumpState && jumpState.id === pin.id ? jumpState : null}
                     onEditTextChange={setEditText}
                     onBeginEdit={() => beginEdit(pin)}
                     onSaveEdit={() => saveEdit(pin.id)}
@@ -376,6 +381,7 @@ export function PinSheet({
                       setEditingId(null);
                       setEditError(null);
                     }}
+                    onJump={pin.source ? () => void jumpTo(pin.id, pin.source!.blockId) : undefined}
                     onDelete={() => deleteWithUndo(pin, index)}
                   />
                 ) : (
@@ -383,7 +389,7 @@ export function PinSheet({
                     key={pin.id}
                     pin={pin}
                     jump={jumpState && jumpState.id === pin.id ? jumpState : null}
-                    onJump={() => void jumpTo(pin)}
+                    onJump={() => void jumpTo(pin.id, pin.blockId)}
                     onDelete={() => deleteWithUndo(pin, index)}
                   />
                 ),
@@ -394,6 +400,33 @@ export function PinSheet({
       </div>
     </BottomSheet>
   );
+}
+
+/** The per-pin jump progress slice the sheet threads to whichever row owns the
+ *  jump — a message pin or a selection note with a source block. */
+type JumpSlice = { phase: 'locating' | 'done'; pages: number; outcome?: Exclude<JumpOutcome, 'jumped'> };
+
+/** Shared jump feedback: a spinner while locating, then the honest not-found /
+ *  no-transcript copy. Used by both the message row and a sourced note row so
+ *  the two never drift. Renders nothing when idle. */
+function JumpStatus({ jump }: { jump: JumpSlice | null }) {
+  if (!jump) return null;
+  if (jump.phase === 'locating') {
+    return (
+      <p role="status" className="mt-1 inline-flex items-center gap-xs text-meta leading-base text-muted">
+        <LoaderCircle size={12} aria-hidden="true" className="animate-spin motion-reduce:animate-none" />
+        {locatingLabel(jump.pages)}
+      </p>
+    );
+  }
+  if (jump.outcome) {
+    return (
+      <p role="status" className="mt-1 text-meta leading-base text-warn">
+        {jumpOutcomeCopy(jump.outcome)}
+      </p>
+    );
+  }
+  return null;
 }
 
 function RowShell({ children }: { children: React.ReactNode }) {
@@ -409,11 +442,13 @@ function IconButton({
   label,
   children,
   tone,
+  disabled,
 }: {
   onClick: () => void;
   label: string;
   children: React.ReactNode;
   tone?: 'danger' | 'accent';
+  disabled?: boolean;
 }) {
   return (
     <button
@@ -421,10 +456,12 @@ function IconButton({
       onClick={onClick}
       aria-label={label}
       title={label}
+      disabled={disabled}
       className={cn(
         'inline-flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-control text-muted hover:bg-surface-2',
         tone === 'danger' && 'hover:text-err',
         tone === 'accent' && 'hover:text-accent',
+        disabled && 'cursor-not-allowed opacity-60 hover:bg-transparent',
       )}
     >
       {children}
@@ -437,20 +474,26 @@ function NoteRow({
   editing,
   editText,
   editError,
+  jump,
   onEditTextChange,
   onBeginEdit,
   onSaveEdit,
   onCancelEdit,
+  onJump,
   onDelete,
 }: {
   note: NotePin;
   editing: boolean;
   editText: string;
   editError: string | null;
+  jump: JumpSlice | null;
   onEditTextChange: (text: string) => void;
   onBeginEdit: () => void;
   onSaveEdit: () => void;
   onCancelEdit: () => void;
+  /** Present only for a note pinned FROM A SELECTION that still knows its source
+   *  block — jumps back to that message. Absent for a typed note. */
+  onJump?: () => void;
   onDelete: () => void;
 }) {
   if (editing) {
@@ -493,28 +536,47 @@ function NoteRow({
   }
 
   const pr = parseGithubPr(note.text);
+  const locating = jump?.phase === 'locating';
   return (
     <RowShell>
-      <div className="min-w-0 flex-1 self-center break-words text-cell text-fg-soft">
-        {pr ? (
-          <a
-            href={pr.url}
-            target="_blank"
-            rel="noreferrer"
-            title={pr.url}
-            aria-label={`${pr.org}/${pr.repo} pull request ${pr.number}`}
-            className="inline-flex min-w-0 max-w-full items-center gap-xs rounded-badge border border-accent-border bg-surface-2 px-badge-x py-0.5 text-cell font-medium text-accent hover:underline"
-          >
-            <GitPullRequest size={13} aria-hidden="true" className="shrink-0" />
-            <span className="min-w-0 truncate">
-              {pr.repo}#{pr.number}
-            </span>
-            <ExternalLink size={11} aria-hidden="true" className="shrink-0" />
-          </a>
-        ) : (
-          <NoteText text={note.text} />
-        )}
+      <div className="min-w-0 flex-1">
+        <div className="break-words text-cell text-fg-soft">
+          {pr ? (
+            <a
+              href={pr.url}
+              target="_blank"
+              rel="noreferrer"
+              title={pr.url}
+              aria-label={`${pr.org}/${pr.repo} pull request ${pr.number}`}
+              className="inline-flex min-w-0 max-w-full items-center gap-xs rounded-badge border border-accent-border bg-surface-2 px-badge-x py-0.5 text-cell font-medium text-accent hover:underline"
+            >
+              <GitPullRequest size={13} aria-hidden="true" className="shrink-0" />
+              <span className="min-w-0 truncate">
+                {pr.repo}#{pr.number}
+              </span>
+              <ExternalLink size={11} aria-hidden="true" className="shrink-0" />
+            </a>
+          ) : (
+            <NoteText text={note.text} />
+          )}
+        </div>
+        {/* Provenance, only when this note was pinned FROM A SELECTION and still
+            knows its source block: a quiet "from a message" tag that jumps back.
+            The tag alone is not the target — the icon button beside it is (>=44px,
+            keyboard-reachable, not hover-only). */}
+        {onJump && <span className="mt-0.5 inline-block text-meta text-faint">pinned from a message</span>}
+        <JumpStatus jump={jump} />
       </div>
+      {onJump && (
+        <IconButton
+          onClick={onJump}
+          label={`Jump to the message this was pinned from`}
+          tone="accent"
+          disabled={locating}
+        >
+          <CornerUpLeft size={15} aria-hidden="true" />
+        </IconButton>
+      )}
       <IconButton onClick={onBeginEdit} label="Edit note" tone="accent">
         <Pencil size={15} aria-hidden="true" />
       </IconButton>
@@ -554,7 +616,7 @@ function MessageRow({
   onDelete,
 }: {
   pin: MessagePin;
-  jump: { phase: 'locating' | 'done'; pages: number; outcome?: Exclude<JumpOutcome, 'jumped'> } | null;
+  jump: JumpSlice | null;
   onJump: () => void;
   onDelete: () => void;
 }) {
@@ -568,17 +630,7 @@ function MessageRow({
           {clock && <span className="mono tabular-nums">{clock}</span>}
         </div>
         <p className="m-0 mt-0.5 line-clamp-3 break-words text-cell text-fg-soft">{pin.preview || '(empty message)'}</p>
-        {jump?.phase === 'done' && jump.outcome && (
-          <p role="status" className="mt-1 text-meta leading-base text-warn">
-            {jumpOutcomeCopy(jump.outcome)}
-          </p>
-        )}
-        {locating && (
-          <p role="status" className="mt-1 inline-flex items-center gap-xs text-meta leading-base text-muted">
-            <LoaderCircle size={12} aria-hidden="true" className="animate-spin motion-reduce:animate-none" />
-            {locatingLabel(jump.pages)}
-          </p>
-        )}
+        <JumpStatus jump={jump} />
       </div>
       <button
         type="button"
