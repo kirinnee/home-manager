@@ -8,11 +8,13 @@
 // Escape, swipe-to-dismiss) rather than inventing a second sheet system. On a
 // phone the transcript loses no height.
 //
-// PER-BROWSER, AND THE SHEET SAYS SO. Phase 1 stores pins in localStorage
-// (lib/pins.ts), which does not follow the reader between phone and desktop. The
-// design's honest rule is to state that in the UI rather than let the reader
-// discover it, so a one-line notice sits at the top of the sheet. Daemon-backed
-// cross-device sync is phase 2.
+// DAEMON-BACKED AND CROSS-DEVICE (phase 2). Pins now live on the daemon
+// (lib/pins.ts talks to /v1/sessions/:id/pins), so they follow the reader between
+// phone and desktop, converge live over the events stream, and — the point of
+// phase 2 — an AGENT can add them via `kteam pin`. Two honest surfaces follow
+// from that: a provenance tag on every agent-made pin (a reader must be able to
+// tell an agent's pin from their own), and, when the daemon is unreachable, a
+// notice that says so rather than an empty list that reads as "no pins".
 //
 // THE JUMP DEGRADES HONESTLY. A pin to a message older than the loaded (and
 // locate-loaded) transcript window must NEVER scroll to a plausible-but-wrong
@@ -22,6 +24,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowDownToLine,
+  Bot,
   Check,
   CornerUpLeft,
   ExternalLink,
@@ -43,7 +46,7 @@ import {
   type NotePin,
   type Pin as PinItem,
 } from '../lib/pins';
-import { useSessionPins } from '../hooks/usePins';
+import { useSessionPins, usePinsSession } from '../hooks/usePins';
 import { requestJump, type JumpOutcome } from '../lib/pin-bridge';
 import { useInputModality } from '../hooks/useInputModality';
 import { cn, fmtClock } from '../lib/utils';
@@ -56,6 +59,20 @@ const LOCATE_PAGE_CAP = 10;
 
 export function pinsTriggerLabel(count: number): string {
   return count > 0 ? `Pins (${count})` : 'Pins';
+}
+
+/** The short "who pinned this" tag for a pin, or null for a human pin (the
+ *  common case, which needs no adornment). An agent pin is ALWAYS visibly
+ *  distinguishable — this is the provenance requirement: a reader must never
+ *  mistake an agent's inference for the human's own decision. */
+export function pinProvenanceLabel(pin: Pick<PinItem, 'by' | 'createdByName'>): string | null {
+  if (pin.by !== 'agent') return null;
+  return pin.createdByName ? `pinned by ${pin.createdByName}` : 'pinned by an agent';
+}
+
+/** The honest degradation line when the daemon cannot be reached. */
+export function pinsUnreachableCopy(): string {
+  return "Can't reach the daemon — these pins may be out of date.";
 }
 
 export function noteCharsRemaining(text: string): number {
@@ -162,6 +179,7 @@ export function PinSheet({
   labelledBy?: string;
 }) {
   const pins = useSessionPins(sessionId);
+  const status = usePinsSession(sessionId);
   const { touchAffected } = useInputModality();
 
   const [draft, setDraft] = useState('');
@@ -295,11 +313,20 @@ export function PinSheet({
           </span>
           <span className="kt-label shrink-0">{pins.length} pinned</span>
         </div>
-        {/* The cross-device truth, stated rather than discovered. */}
-        <p className="mx-auto w-full max-w-2xl px-panel pb-row-y text-meta leading-base text-faint">
-          Saved on <strong className="font-semibold text-muted">this browser only</strong> — pins do not follow you to
-          another device yet.
-        </p>
+        {/* The cross-device truth, stated rather than discovered — now saved on
+            the daemon, so pins follow the reader between devices and an agent can
+            add them. If the daemon is unreachable, say so rather than let an empty
+            list read as "you have no pins". */}
+        {status === 'error' ? (
+          <p role="alert" className="mx-auto w-full max-w-2xl px-panel pb-row-y text-meta leading-base text-err">
+            {pinsUnreachableCopy()}
+          </p>
+        ) : (
+          <p className="mx-auto w-full max-w-2xl px-panel pb-row-y text-meta leading-base text-faint">
+            Saved on the <strong className="font-semibold text-muted">daemon</strong> — your pins follow you between
+            devices, and teammates can pin here too.
+          </p>
+        )}
       </div>
 
       {/* Add-note form, pinned above the list so it never needs a scroll. */}
@@ -427,6 +454,20 @@ function JumpStatus({ jump }: { jump: JumpSlice | null }) {
     );
   }
   return null;
+}
+
+/** The "an agent pinned this" tag. Renders nothing for a human pin, so the
+ *  reader only ever sees an adornment when there is a distinction to draw. Both
+ *  a labelled icon AND text carry the meaning (never colour/icon alone). */
+function ProvenanceTag({ pin }: { pin: Pick<PinItem, 'by' | 'createdByName'> }) {
+  const label = pinProvenanceLabel(pin);
+  if (!label) return null;
+  return (
+    <span className="mt-0.5 inline-flex items-center gap-xs text-meta font-medium text-accent">
+      <Bot size={11} aria-hidden="true" className="shrink-0" />
+      {label}
+    </span>
+  );
 }
 
 function RowShell({ children }: { children: React.ReactNode }) {
@@ -565,6 +606,9 @@ function NoteRow({
             The tag alone is not the target — the icon button beside it is (>=44px,
             keyboard-reachable, not hover-only). */}
         {onJump && <span className="mt-0.5 inline-block text-meta text-faint">pinned from a message</span>}
+        <div className="flex flex-wrap items-center gap-x-sm">
+          <ProvenanceTag pin={note} />
+        </div>
         <JumpStatus jump={jump} />
       </div>
       {onJump && (
@@ -630,6 +674,7 @@ function MessageRow({
           {clock && <span className="mono tabular-nums">{clock}</span>}
         </div>
         <p className="m-0 mt-0.5 line-clamp-3 break-words text-cell text-fg-soft">{pin.preview || '(empty message)'}</p>
+        <ProvenanceTag pin={pin} />
         <JumpStatus jump={jump} />
       </div>
       <button
