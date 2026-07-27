@@ -1,0 +1,431 @@
+/* ============================================================================
+   Files tab — the read-only working-tree viewer (Changes / Browse / diff / file).
+
+   OWNED BY THIS FEATURE. It is a separate stylesheet imported by `FilesTab.tsx`
+   rather than more lines in `index.css`, so it rides the same lazy chunk as the
+   session page and can be deleted with the feature.
+
+   NO LITERAL COLOURS, NO LITERAL TYPE. Every value resolves to a token declared
+   in `themes.css`, so all five families x light/dark carry the viewer without a
+   single per-theme rule here. Two deliberate literals: the 44px touch floor
+   (WCAG 2.5.8, and it must hold on a coarse pointer of ANY width) and the diff
+   gutter width in `ch` (it is text metrics, not palette).
+
+   Non-colour cues everywhere: an added line carries `+`, a removed line `-`,
+   and a status chip carries its letter. The tint is reinforcement — a
+   monochrome or colour-blind reading loses nothing.
+   ============================================================================ */
+
+.kt-fs {
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ---- top bar -------------------------------------------------------------
+   Wraps rather than scrolls: at 360px the switcher and the refresh control take
+   the first line and the path takes the second, which is readable. A nowrap bar
+   would push the path off-screen exactly when it is longest. */
+.kt-fs-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--gap-sm);
+  padding: var(--gap-sm) var(--pad-cell-x);
+  border-bottom: var(--stroke) solid var(--border-soft);
+  background: var(--surface-2);
+}
+
+.kt-fs-title {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 12ch;
+  flex-direction: column;
+  gap: 1px;
+}
+
+/* PHONE: THE PATH GETS ITS OWN ROW.
+   Sharing line 1 with the switcher and the actions left the title ~140px of a
+   360px pane, and a single long directory name then wrapped over FIVE lines
+   before any content. Dropping it below (the controls stay on line 1, where
+   they were going to wrap to anyway) gives it the full 344px and costs nothing:
+   measured, the same header is shorter overall. */
+@media (max-width: 640px) {
+  .kt-fs-title {
+    order: 3;
+    flex: 1 1 100%;
+  }
+
+  .kt-fs-actions {
+    order: 2;
+  }
+}
+
+.kt-fs-title-path {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--leading-tight);
+}
+
+.kt-fs-title-meta {
+  color: var(--muted);
+  font-size: var(--text-2xs);
+  line-height: var(--leading-tight);
+}
+
+.kt-fs-actions {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--gap-xs);
+  margin-inline-start: auto;
+}
+
+/* THE BRANCH CHIP MUST NOT PUSH THE REFRESH CONTROL OFF THE PANE.
+   Measured at 390px with a real branch name
+   (`feat/filesystem-viewer-changes-first`): `.kt-badge` is `nowrap`, so the
+   chip grew to 394px, carried the actions group to x=459 against a 382px pane
+   edge, and `overflow:hidden` then CLIPPED the Refresh button entirely. The
+   branch is context, not a control — it truncates, and the full name stays in
+   the chip's `title`. */
+.kt-fs-branch {
+  min-width: 0;
+  max-width: min(44vw, 18ch);
+}
+
+.kt-fs-branch > span {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- breadcrumbs ---------------------------------------------------------
+   Scrolls inside itself. A deep path must never widen the pane — that is what
+   makes the whole page scroll sideways on a phone. */
+.kt-fs-crumbs {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  gap: 2px;
+  overflow-x: auto;
+  padding: 2px var(--pad-cell-x);
+  border-bottom: var(--stroke) solid var(--border-soft);
+  scrollbar-width: none;
+}
+
+.kt-fs-crumbs::-webkit-scrollbar {
+  display: none;
+}
+
+.kt-fs-crumb {
+  display: inline-flex;
+  min-height: 44px;
+  flex: 0 0 auto;
+  align-items: center;
+  padding-inline: var(--pad-cell-x);
+  border: var(--stroke) solid transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.kt-fs-crumb:hover {
+  color: var(--fg);
+}
+
+.kt-fs-crumb[aria-current='page'] {
+  color: var(--fg);
+  font-weight: var(--weight-strong);
+}
+
+.kt-fs-crumb-sep {
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-size: var(--text-2xs);
+}
+
+/* ---- the one scroller ----------------------------------------------------
+   Exactly one vertical scroller per pane, and it contains its overscroll so a
+   rubber-band at the end of a diff does not scroll the page behind it. */
+.kt-fs-scroll {
+  min-height: 0;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+}
+
+/* ---- rows ---------------------------------------------------------------- */
+.kt-fs-row {
+  display: flex;
+  width: 100%;
+  min-height: 44px;
+  align-items: center;
+  gap: var(--gap-sm);
+  padding: var(--pad-row-y) var(--pad-cell-x);
+  border: 0;
+  border-bottom: var(--stroke) solid var(--border-soft);
+  background: transparent;
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  text-align: start;
+}
+
+button.kt-fs-row:hover {
+  background: var(--surface-2);
+}
+
+button.kt-fs-row:active {
+  background: var(--surface-3);
+}
+
+/* A row the daemon will refuse (denylisted, escaping symlink, gitignored) is
+   rendered as a non-interactive row, not a button that fails on tap. */
+.kt-fs-row[data-inert='true'] {
+  color: var(--muted);
+  cursor: default;
+}
+
+.kt-fs-icon {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.kt-fs-name {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 1px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--leading-tight);
+}
+
+.kt-fs-dim {
+  color: var(--muted);
+}
+
+.kt-fs-strong {
+  color: var(--fg);
+  font-weight: var(--weight-strong);
+}
+
+.kt-fs-meta {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: var(--text-2xs);
+  white-space: nowrap;
+}
+
+/* ---- notes: empty, loading, refusal, error ------------------------------- */
+.kt-fs-note {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--gap-sm);
+  padding: var(--pad-panel);
+  color: var(--fg-soft);
+  font-size: var(--text-sm);
+  line-height: var(--leading-base);
+}
+
+.kt-fs-note[data-tone='err'] {
+  border-inline-start: 2px solid var(--err);
+  background: var(--err-bg);
+  color: var(--err);
+}
+
+.kt-fs-note[data-tone='warn'] {
+  border-inline-start: 2px solid var(--warn);
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.kt-fs-section-label {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-xs);
+  padding: var(--gap-sm) var(--pad-cell-x) 2px;
+  color: var(--muted);
+  font-family: var(--font-display);
+  font-size: var(--label-size);
+  font-weight: var(--label-weight);
+  letter-spacing: var(--tracking-label);
+  text-transform: var(--label-transform);
+}
+
+/* ---- code + diff ---------------------------------------------------------
+   The horizontal scroller is INSIDE the pane. Long lines scroll here; the page
+   never does. */
+.kt-fs-code {
+  min-width: 0;
+  overflow-x: auto;
+  background: var(--code-bg);
+  overscroll-behavior-x: contain;
+}
+
+.kt-fs-pre {
+  margin: 0;
+  min-width: max-content;
+  padding: var(--gap-sm) var(--pad-cell-x);
+  color: var(--code-fg);
+  font-family: var(--font-mono);
+  font-size: var(--code-font-size);
+  line-height: 1.5;
+  white-space: pre;
+  tab-size: 2;
+}
+
+.kt-fs-diff {
+  min-width: max-content;
+  font-family: var(--font-mono);
+  font-size: var(--code-font-size);
+  line-height: 1.5;
+}
+
+.kt-fs-diff-line {
+  display: flex;
+  min-width: 100%;
+  align-items: baseline;
+  border-inline-start: 2px solid transparent;
+  background: var(--code-bg);
+  color: var(--code-fg);
+  white-space: pre;
+}
+
+/* `--muted`, NOT `--faint`: the gutter is text, so it owes 4.5:1 against every
+   background it lands on — and a line number lands on the ADD/DEL tint, not on
+   the plain code surface. Measured (contrast-audit resolution, all 14 themes):
+   `faint` on `--ok-bg`/`--err-bg` bottoms out at 4.26:1 in the Studio family,
+   `muted` at 4.93:1. */
+.kt-fs-gutter {
+  flex: 0 0 auto;
+  width: 4ch;
+  padding-inline: 2px;
+  color: var(--muted);
+  text-align: end;
+  user-select: none;
+}
+
+.kt-fs-sign {
+  flex: 0 0 auto;
+  width: 2ch;
+  padding-inline-start: 4px;
+  text-align: center;
+  user-select: none;
+}
+
+.kt-fs-diff-text {
+  flex: 1 1 auto;
+  padding-inline-end: var(--pad-cell-x);
+  tab-size: 2;
+}
+
+.kt-fs-diff-line[data-kind='add'] {
+  border-inline-start-color: var(--ok);
+  background: var(--ok-bg);
+  color: var(--fg);
+}
+
+.kt-fs-diff-line[data-kind='add'] .kt-fs-sign {
+  color: var(--ok);
+  font-weight: var(--weight-strong);
+}
+
+.kt-fs-diff-line[data-kind='del'] {
+  border-inline-start-color: var(--err);
+  background: var(--err-bg);
+  color: var(--fg);
+}
+
+.kt-fs-diff-line[data-kind='del'] .kt-fs-sign {
+  color: var(--err);
+  font-weight: var(--weight-strong);
+}
+
+.kt-fs-diff-line[data-kind='hunk'] {
+  border-block: var(--stroke) solid var(--border-soft);
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+.kt-fs-diff-line[data-kind='meta'],
+.kt-fs-diff-line[data-kind='nonl'] {
+  background: var(--surface);
+  color: var(--muted);
+}
+
+/* ---- rendered markdown ---------------------------------------------------
+   `.md` (index.css) owns the prose; this only gives it the pane's gutter and
+   keeps a wide table/fence from widening the pane itself. */
+.kt-fs-md {
+  min-width: 0;
+  max-width: 100%;
+  padding: var(--pad-panel);
+}
+
+/* LINKS IN RENDERED PROSE GET THE 44px FLOOR TOO.
+   `index.css` exempts `.md a` / `p a` / `li a` from the coarse-pointer floor —
+   WCAG 2.5.8 does exempt a link inside a sentence, and a 44px BOX there would
+   break the line box. This viewer's rule is stricter than WCAG, so it takes the
+   transcript's own trick instead of the exemption: the visible link keeps its
+   type size and an invisible, centred 44px hit area is laid over it. Nothing
+   moves; the finger gets its target. `.kt-fs-md .md a[href]` (0,3,1) outranks
+   the `.md a` exemption (0,1,1).
+
+   The honest trade: on consecutive wrapped lines these overlays overlap, and the
+   later link in DOM order wins the hit test — the same trade `index.css` already
+   takes for the transcript's tool rows and the composer's model chip. It is
+   scoped to `.kt-fs-md`, which contains no other controls. */
+@media (pointer: coarse) {
+  .kt-fs-md .md a[href] {
+    position: relative;
+    min-height: 0;
+    min-width: 0;
+  }
+
+  .kt-fs-md .md a[href]::after {
+    content: '';
+    position: absolute;
+    z-index: 0;
+    top: 50%;
+    left: 50%;
+    width: max(100%, var(--target-floor));
+    height: var(--target-floor);
+    transform: translate(-50%, -50%);
+  }
+}
+
+/* ---- toolbar chips ------------------------------------------------------- */
+.kt-fs-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--gap-xs);
+  padding: var(--gap-sm) var(--pad-cell-x);
+  border-bottom: var(--stroke) solid var(--border-soft);
+}
+
+.kt-fs-count {
+  color: var(--muted);
+  font-size: var(--text-2xs);
+}

@@ -902,27 +902,21 @@ body {
     min-width: 0;
   }
 
-  /* THE COMPOSER'S MODEL SWITCHER keeps the transcript's trick: the model
-     readout on the phone status line is a tap target, but growing it to a 44px
-     BOX would push the meta line — and the whole composer — taller, undoing the
-     reclaimed height. So the visible chip stays its type size and an invisible
-     44px hit area is laid over it. `:root .kt-…` (0,2,0) beats the `:root button`
-     floor (0,1,1). The overlay is anchored to the chip's TOP and grows DOWNWARD
-     into the dead space below the composer, never up into the dock, so it can
-     never intersect the attach/send hit areas on the row above. */
+  /* THE COMPOSER'S MODEL + REASONING CHIPS take the ordinary 44px target floor
+     like every other button — no overlay. The earlier version exempted the chip
+     from the floor and laid an invisible 44px box over it, anchored to the chip's
+     TOP and grown DOWNWARD, on the theory that a real 44px height would push the
+     meta line and undo the reclaimed composer height. Two problems: (1) at the
+     composer's bottom edge there is no dead space below to grow into, so the
+     overlay only ever reached ~33px; (2) the meta line is `data-kb-hide`, so it
+     is display:none in exactly the keyboard-open state the reclaimed height is
+     measured in — a real 44px rest height costs the typing layout nothing. So
+     the chips are now plain floored buttons and the `.kt-composer__runtime-row`
+     that holds them is the honest 44px target row. `min-width:0` keeps the model
+     readout free to truncate rather than being forced to a 44px minimum width
+     that would crowd the reasoning chip and `ctx %` beside it. */
   :root .kt-composer__runtime {
-    min-height: 0;
     min-width: 0;
-  }
-  :root .kt-composer__runtime::after {
-    content: '';
-    position: absolute;
-    left: 50%;
-    top: 0;
-    width: max(100%, var(--target-floor));
-    height: var(--target-floor);
-    transform: translateX(-50%);
-    z-index: 0;
   }
 }
 

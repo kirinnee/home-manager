@@ -7,6 +7,7 @@ import {
   composerCanSubmit,
   composerEnterDecision,
   composerStatusCopy,
+  restoreComposerSelection,
   selectComposerKeyboardSubmit,
   shouldRefocusComposer,
 } from './Composer';
@@ -27,6 +28,22 @@ function renderComposer(
   }> = {},
 ): string {
   return renderToStaticMarkup(<Composer draft="message" onDraftChange={() => {}} onSubmit={() => {}} {...props} />);
+}
+
+function renderComposerWithMicrophone(props: Parameters<typeof renderComposer>[0] = {}): string {
+  const root = globalThis as typeof globalThis & { navigator: Navigator };
+  const previous = root.navigator;
+  const capable = Object.create(previous) as Navigator;
+  Object.defineProperty(capable, 'mediaDevices', {
+    configurable: true,
+    value: { getUserMedia: () => Promise.reject(new Error('not called during render')) },
+  });
+  root.navigator = capable;
+  try {
+    return renderComposer(props);
+  } finally {
+    root.navigator = previous;
+  }
 }
 
 function buttonWithLabel(html: string, label: string): string {
@@ -323,6 +340,39 @@ describe('Composer self-refocus policy', () => {
     expect(
       shouldRefocusComposer({ touchAffected: false, activeElementIsBody: true, disabled: false, sending: true }),
     ).toBe(false);
+  });
+});
+
+describe('Composer dictation integration', () => {
+  test('keeps the microphone absent when this page has no mediaDevices API', () => {
+    const html = renderComposer({ onFiles: () => {} });
+    expect(html).not.toContain('Hold to dictate');
+    expect(html).not.toContain('data-dictation-phase');
+  });
+
+  test('mounts a labelled 44px microphone beside Attach without an idle height placeholder', () => {
+    const html = renderComposerWithMicrophone({ compact: true, onFiles: () => {} });
+    const attachAt = html.indexOf('aria-label="Attach images"');
+    const dictateAt = html.indexOf('aria-label="Hold to dictate"');
+    expect(attachAt).toBeGreaterThan(-1);
+    expect(dictateAt).toBeGreaterThan(attachAt);
+    expectTouchTarget(buttonWithLabel(html, 'Hold to dictate'));
+    expect(html).not.toContain('data-dictation-phase');
+    expect(html.toLowerCase()).not.toContain('autofocus');
+  });
+
+  test('restores a dictated caret without requiring or invoking focus', () => {
+    const selections: Array<[number, number]> = [];
+    const input = {
+      value: 'typed dictated tail',
+      setSelectionRange(start: number, end: number) {
+        selections.push([start, end]);
+      },
+    };
+    expect(restoreComposerSelection(input, input.value, 15)).toBe(true);
+    expect(selections).toEqual([[15, 15]]);
+    expect(restoreComposerSelection(input, 'a stale draft', 2)).toBe(false);
+    expect(selections).toEqual([[15, 15]]);
   });
 });
 

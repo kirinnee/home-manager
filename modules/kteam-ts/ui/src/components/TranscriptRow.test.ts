@@ -14,7 +14,8 @@
 // breakpoint-scoped, which is exactly what a `sm:` prefix says.
 
 import { describe, expect, test } from 'bun:test';
-import { ASSISTANT_LAYOUT, transcriptImagesEqual } from './TranscriptRow';
+import { ASSISTANT_LAYOUT, isPinnable, isPlainBlockTap, pinPreviewOf, transcriptImagesEqual } from './TranscriptRow';
+import type { TranscriptBlock } from '../lib/transcript';
 
 /** Utilities that shrink the content box horizontally. A bare one of these
  *  (no variant prefix) is a reserve every viewport pays for. */
@@ -83,6 +84,42 @@ describe('the hover timestamp', () => {
   test('stays a hover reveal rather than permanent chrome', () => {
     expect(classes(ASSISTANT_LAYOUT.stamp)).toContain('opacity-0');
     expect(classes(ASSISTANT_LAYOUT.stamp)).toContain('group-hover:opacity-100');
+  });
+});
+
+describe('pin affordance — tap gating', () => {
+  // A minimal Element stand-in: `closest` returns truthy iff the target sits
+  // inside one of the interactive selectors isPlainBlockTap guards against.
+  const el = (insideInteractive: boolean): Element =>
+    ({ closest: () => (insideInteractive ? ({} as Element) : null) }) as unknown as Element;
+
+  test('a plain tap on inert block content reveals the bar', () => {
+    expect(isPlainBlockTap(el(false), false)).toBe(true);
+  });
+  test('a tap that lands on a link/button/disclosure is left alone', () => {
+    expect(isPlainBlockTap(el(true), false)).toBe(false);
+  });
+  test('a tap while a selection is active never reveals the bar', () => {
+    expect(isPlainBlockTap(el(false), true)).toBe(false);
+  });
+  test('a null target (no element) counts as a plain tap', () => {
+    expect(isPlainBlockTap(null, false)).toBe(true);
+  });
+});
+
+describe('pinnability + preview', () => {
+  test('every block is pinnable except a turn boundary', () => {
+    expect(isPinnable({ kind: 'turn' } as TranscriptBlock)).toBe(false);
+    expect(isPinnable({ kind: 'assistant' } as TranscriptBlock)).toBe(true);
+    expect(isPinnable({ kind: 'user' } as TranscriptBlock)).toBe(true);
+  });
+  test('preview reads the visible text of each kind', () => {
+    expect(pinPreviewOf({ kind: 'assistant', text: 'hello there' } as TranscriptBlock)).toBe('hello there');
+    expect(
+      pinPreviewOf({ kind: 'tools', calls: [{ use: { name: 'Bash' } }, { use: {}, key: 'k2' }] } as TranscriptBlock),
+    ).toBe('Bash, k2');
+    expect(pinPreviewOf({ kind: 'system', info: { label: 'turn prompt' } } as TranscriptBlock)).toBe('turn prompt');
+    expect(pinPreviewOf({ kind: 'notice', label: 'reconnected' } as TranscriptBlock)).toBe('reconnected');
   });
 });
 

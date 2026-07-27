@@ -12,6 +12,7 @@ describe('SettingsPage', () => {
     expect(html).toContain('aria-label="Dashboard density"');
     expect(html).toContain('aria-label="Colour mode"');
     expect(html).toContain('aria-label="Theme family"');
+    expect(html).toContain('aria-label="Where speech is transcribed"');
     for (const label of ['Default', 'Large', 'Larger', 'Full', 'Compact', 'Minimal']) {
       expect(html).toContain(`>${label}<`);
     }
@@ -33,8 +34,6 @@ describe('SettingsPage', () => {
   test('has no autofocus path on touch', () => {
     const html = renderToStaticMarkup(<SettingsPage />).toLowerCase();
     expect(html).not.toContain('autofocus');
-    expect(html).not.toContain('<input');
-    expect(html).not.toContain('<textarea');
   });
 
   test('keeps text choices visible but disabled with an explanation when feature detection fails', () => {

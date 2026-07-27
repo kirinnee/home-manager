@@ -1,6 +1,7 @@
 import { useEffect, useId } from 'react';
 import { ChevronLeft } from 'lucide-react';
 import { ThemeSettings } from '../components/ThemeToggle';
+import { DictationSettings } from '../components/DictationSettings';
 import { BottomSheet } from '../components/SessionDetails';
 import { DENSITY_OPTIONS, useDensity } from '../hooks/useDensity';
 import { useInputModality } from '../hooks/useInputModality';
@@ -195,6 +196,8 @@ export function SettingsContent({ target = null }: { target?: SettingId | null }
         );
       case 'theme':
         return <ThemeSettings theme={theme} />;
+      case 'dictation':
+        return <DictationSettings />;
     }
   };
 

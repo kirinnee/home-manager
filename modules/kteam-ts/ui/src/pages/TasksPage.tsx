@@ -17,7 +17,7 @@ import {
   filterTasks,
   groupTasks,
   parseTaskActivity,
-  parseTaskList,
+  parseTaskListResponse,
   parseTaskRecord,
   taskActivityText,
   taskLivenessLabel,
@@ -53,6 +53,7 @@ const ALL = 'all';
 
 export function TasksPage({ fetchTasks, fetchTask, pollMs = 15_000, initialRepo = ALL }: TasksPageProps) {
   const [tasks, setTasks] = useState<TaskSummary[]>([]);
+  const [parseErrors, setParseErrors] = useState(0);
   const [filters, setFilters] = useState<TaskFilters>({ repo: initialRepo, status: ALL, assignee: ALL });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<TaskRecord | null>(null);
@@ -65,7 +66,9 @@ export function TasksPage({ fetchTasks, fetchTask, pollMs = 15_000, initialRepo 
   const load = useCallback(async () => {
     if (!fetchTasks) return;
     try {
-      setTasks(parseTaskList(await fetchTasks()));
+      const parsed = parseTaskListResponse(await fetchTasks());
+      setTasks(parsed.tasks);
+      setParseErrors(parsed.parseErrors);
       setFailed(false);
     } catch {
       setFailed(true);
@@ -77,37 +80,68 @@ export function TasksPage({ fetchTasks, fetchTask, pollMs = 15_000, initialRepo 
   useEffect(() => {
     void load();
     if (!fetchTasks || pollMs <= 0) return;
-    const interval = window.setInterval(() => void load(), pollMs);
-    return () => window.clearInterval(interval);
+    const poll = () => {
+      if (typeof document === 'undefined' || !document.hidden) void load();
+    };
+    const wake = () => {
+      if (!document.hidden) void load();
+    };
+    const interval = window.setInterval(poll, pollMs);
+    document.addEventListener('visibilitychange', wake);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', wake);
+    };
   }, [fetchTasks, load, pollMs]);
+
+  const loadDetail = useCallback(
+    async (id: string) => {
+      if (!fetchTask) return;
+      const result = await fetchTask(id);
+      const response = result as TaskDetailResponse;
+      const record = parseTaskRecord(response?.task ?? result);
+      const entries = Array.isArray(response?.activity) ? response.activity : [];
+      return {
+        record,
+        activity: entries
+          .flatMap(item => {
+            const parsed = parseTaskActivity(item);
+            return parsed ? [parsed] : [];
+          })
+          .sort((a, b) => a.seq - b.seq),
+      };
+    },
+    [fetchTask],
+  );
 
   useEffect(() => {
     if (!selectedId || !fetchTask) return;
     let cancelled = false;
-    void fetchTask(selectedId)
-      .then(result => {
-        if (cancelled) return;
-        const response = result as TaskDetailResponse;
-        const record = parseTaskRecord(response?.task ?? result);
-        setDetail(record);
-        const entries = Array.isArray(response?.activity) ? response.activity : [];
-        setActivity(
-          entries.flatMap(item => {
-            const parsed = parseTaskActivity(item);
-            return parsed ? [parsed] : [];
-          }),
-        );
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setDetail(null);
-          setActivity([]);
-        }
-      });
+    const refresh = () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      void loadDetail(selectedId)
+        .then(result => {
+          if (cancelled || !result) return;
+          setDetail(result.record);
+          setActivity(result.activity);
+        })
+        // A failed poll must not erase a brief/history that was already loaded.
+        // For a first-load failure the summary remains visible and the next poll
+        // retries; for later failures the last known-good detail stays put.
+        .catch(() => undefined);
+    };
+    refresh();
+    const wake = () => {
+      if (!document.hidden) refresh();
+    };
+    const interval = pollMs > 0 ? window.setInterval(refresh, pollMs) : undefined;
+    document.addEventListener('visibilitychange', wake);
     return () => {
       cancelled = true;
+      if (interval !== undefined) window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', wake);
     };
-  }, [fetchTask, selectedId]);
+  }, [fetchTask, loadDetail, pollMs, selectedId]);
 
   const repos = useMemo(() => [...new Set(tasks.flatMap(task => (task.repo ? [task.repo] : [])))].sort(), [tasks]);
   const assignees = useMemo(
@@ -121,7 +155,12 @@ export function TasksPage({ fetchTasks, fetchTask, pollMs = 15_000, initialRepo 
   const selected = detail?.id === selectedId ? detail : selectedSummary;
 
   const close = useCallback(() => setSelectedId(null), []);
-  const choose = useCallback((id: string) => setSelectedId(id), []);
+  const choose = useCallback((id: string) => {
+    // Never render task B with task A's activity while B's request is in flight.
+    setDetail(null);
+    setActivity([]);
+    setSelectedId(id);
+  }, []);
   const updateFilter = <K extends keyof TaskFilters>(key: K, value: TaskFilters[K]) =>
     setFilters(prev => ({ ...prev, [key]: value }));
 
@@ -148,8 +187,21 @@ export function TasksPage({ fetchTasks, fetchTask, pollMs = 15_000, initialRepo 
         />
 
         {failed && (
-          <p role="status" className="kt-badge w-fit" data-tone="warn">
+          <p
+            role="status"
+            className="kt-badge w-fit max-w-full break-words text-left !whitespace-normal"
+            data-tone="warn"
+          >
             Task service unavailable; showing the last successful result.
+          </p>
+        )}
+        {parseErrors > 0 && (
+          <p
+            role="status"
+            className="kt-badge w-fit max-w-full break-words text-left !whitespace-normal"
+            data-tone="warn"
+          >
+            {parseErrors} malformed task {parseErrors === 1 ? 'record was' : 'records were'} skipped.
           </p>
         )}
         {!fetchTasks && (
@@ -174,7 +226,7 @@ export function TasksPage({ fetchTasks, fetchTask, pollMs = 15_000, initialRepo 
           </section>
         )}
 
-        <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.52fr)]">
+        <div className="grid min-w-0 gap-3 md:grid-cols-[minmax(0,1fr)_minmax(300px,0.52fr)]">
           <main className="min-w-0 space-y-3" aria-label="Task board">
             {loading && tasks.length === 0 && <p className="text-ui text-muted">Loading tasks…</p>}
             {!loading && visible.length === 0 && fetchTasks && (
@@ -201,7 +253,7 @@ export function TasksPage({ fetchTasks, fetchTask, pollMs = 15_000, initialRepo 
             ))}
           </main>
 
-          <aside className="hidden min-w-0 lg:block" aria-label="Task detail">
+          <aside className="hidden min-w-0 md:block" aria-label="Task detail">
             <div className="sticky top-2">
               {selected ? <TaskDetail task={selected} activity={activity} /> : <EmptyDetail />}
             </div>
@@ -215,7 +267,7 @@ export function TasksPage({ fetchTasks, fetchTask, pollMs = 15_000, initialRepo 
         onClose={close}
         ariaLabel="Task detail"
         closeLabel="Close task detail"
-        panelClassName="lg:hidden"
+        panelClassName="md:hidden"
       >
         <div className="min-h-0 overflow-y-auto scroll-thin px-3 pb-4">
           {selected && <TaskDetail task={selected} activity={activity} />}
@@ -303,7 +355,7 @@ function FilterSelect({
     <label className="flex min-w-0 flex-1 flex-col gap-0.5 text-xs text-muted sm:min-w-[150px]">
       {label}
       <select
-        className="kt-input min-h-[38px] max-w-full px-2 text-ui text-fg"
+        className="kt-input min-h-[44px] max-w-full px-2 text-ui text-fg"
         value={value}
         onChange={event => onChange(event.target.value)}
       >
@@ -322,13 +374,22 @@ export function TaskRow({ task, onOpen }: { task: TaskSummary; onOpen: (id: stri
       <button
         type="button"
         onClick={() => onOpen(task.id)}
-        className="flex min-w-0 flex-1 items-center gap-2 text-left focus-visible:z-10"
+        className="flex min-h-[44px] min-w-0 flex-1 items-center gap-2 text-left focus-visible:z-10"
       >
         <span className="mono shrink-0 text-xs font-semibold text-accent">{task.id}</span>
         <span className="min-w-0 flex-1">
           <span className="block truncate text-ui font-medium text-fg">{task.title}</span>
+          {(task.status === 'blocked' || task.status === 'dropped') && task.statusReason && (
+            <span
+              className={`mt-0.5 block truncate text-xs font-medium ${
+                task.status === 'dropped' ? 'text-err' : 'text-warn'
+              }`}
+            >
+              {task.statusReason}
+            </span>
+          )}
           <span className="mt-0.5 flex min-w-0 items-center gap-1 text-xs text-muted">
-            <LivenessDot stale={Boolean(stale)} /> <span className="truncate">{taskLivenessLabel(task)}</span>
+            <LivenessDot task={task} /> <span className="truncate">{taskLivenessLabel(task)}</span>
           </span>
         </span>
         <Badge tone={meta.tone} className="shrink-0 whitespace-nowrap">
@@ -360,15 +421,14 @@ export function TaskRow({ task, onOpen }: { task: TaskSummary; onOpen: (id: stri
   );
 }
 
-function LivenessDot({ stale }: { stale: boolean }) {
+function LivenessDot({ task }: { task: Pick<TaskSummary, 'assignee' | 'live'> }) {
+  const tone = task.live.staleness ? 'bg-warn' : task.live.assigneeHealth === 'active' ? 'bg-ok' : 'bg-muted';
   return (
     <span
       aria-hidden="true"
-      className={
-        stale
-          ? 'h-2 w-2 shrink-0 rounded-full bg-warn animate-pulse motion-reduce:animate-none'
-          : 'h-2 w-2 shrink-0 rounded-full bg-muted'
-      }
+      className={`h-2 w-2 shrink-0 rounded-full ${tone} ${
+        task.live.staleness ? 'animate-pulse motion-reduce:animate-none' : ''
+      }`}
     />
   );
 }
@@ -395,6 +455,18 @@ export function TaskDetail({ task, activity }: { task: TaskSummary | TaskRecord;
         </div>
       </PanelHeader>
       <PanelBody className="flex min-w-0 flex-col gap-4">
+        {task.statusReason && (
+          <section>
+            <Label>Status reason</Label>
+            <p
+              className={`mt-1 break-words text-ui font-medium ${
+                task.status === 'dropped' ? 'text-err' : task.status === 'blocked' ? 'text-warn' : 'text-fg'
+              }`}
+            >
+              {task.statusReason}
+            </p>
+          </section>
+        )}
         {stale && (
           <div role="status" className="rounded-control border border-warn/50 bg-warn/10 p-2 text-ui text-fg">
             <span className="font-semibold text-warn">Evidence: {stale.label}.</span> {stale.reason}

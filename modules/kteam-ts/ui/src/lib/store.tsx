@@ -276,10 +276,12 @@ function framePatch(data: unknown): Partial<SessionState> {
  *  status moves the instant the event lands, and the batched GET that follows
  *  only fills in the rest. */
 function transitionPatch(event: KTeamEvent): Partial<SessionState> {
-  const d = (event.data ?? {}) as { status?: unknown; health?: unknown };
+  const d = (event.data ?? {}) as { status?: unknown; health?: unknown; pendingQuestion?: unknown };
   const patch: Partial<SessionState> = {};
   if (typeof d.status === 'string') patch.status = d.status as SessionState['status'];
   if (typeof d.health === 'string') patch.health = d.health as SessionState['health'];
+  if (d.pendingQuestion === null || (typeof d.pendingQuestion === 'object' && d.pendingQuestion !== null))
+    patch.pendingQuestion = d.pendingQuestion as SessionState['pendingQuestion'];
   if (event.time) patch.lastActivityAt = event.time;
   return patch;
 }

@@ -17,7 +17,7 @@
 // neighbours — all three ran per open session, forever.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ImageOff, Loader2, MessageSquare, RotateCcw, Terminal, X } from 'lucide-react';
+import { FileText, ImageOff, Loader2, MessageSquare, RotateCcw, Terminal, X } from 'lucide-react';
 import { api, ApiError, HAS_TOKEN } from '../lib/api';
 import { useFleet, useSession, useSessionEvents, useStore, useUiControls } from '../lib/store';
 import type { ChatRecord, KTeamEvent, SessionView } from '../types';
@@ -25,6 +25,8 @@ import { Composer } from '../components/Composer';
 import { ComposerRuntime } from '../components/ComposerRuntime';
 import { QuestionForm } from '../components/QuestionForm';
 import { TerminalView } from '../components/TerminalView';
+import { FilesTab } from '../components/FilesTab';
+import { fsTabAvailable, useFsProbe } from '../components/files-api';
 import { ViewTabs } from '../components/ViewTabs';
 import { SessionHeader } from '../components/SessionHeader';
 import { Transcript } from '../components/Transcript';
@@ -184,7 +186,23 @@ export function SessionChatPage({
   const [draft, setDraft] = useState('');
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [actionNotice, setActionNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
-  const [tab, setTab] = useState<'chat' | 'terminal'>('chat');
+  const [tab, setTab] = useState<'chat' | 'terminal' | 'files'>('chat');
+  // FILES TAB CAPABILITY. The daemon's `fs/*` routes ship after this UI, so the
+  // tab is probed rather than assumed: one `fs/changes` per session (cached and
+  // shared with the tab itself, so opening it costs no second request). A 404
+  // carrying `code: 'unknown_route'` — the daemon's own version-skew signal —
+  // means this build has no fs routes and the tab is not offered at all. Any
+  // OTHER failure still shows the tab, which reports the error honestly; hiding
+  // a feature because one request failed is how a reader concludes it does not
+  // exist.
+  const fsProbe = useFsProbe(sessionId);
+  const filesAvailable = fsTabAvailable(fsProbe.state);
+  // A pane is retained across navigation, so it can outlive the answer that put
+  // it on Files (a daemon downgrade, a session whose probe resolves late). Never
+  // leave the reader on a tab that no longer exists.
+  useEffect(() => {
+    if (tab === 'files' && !filesAvailable) setTab('chat');
+  }, [tab, filesAvailable]);
   // Bumped to (re-)pin the transcript to the true tail and re-engage follow.
   // Two occasions, both of which mean "the reader's attention is at the bottom":
   //   - the initial page has loaded (open a session → you want the latest)
@@ -1005,10 +1023,16 @@ export function SessionChatPage({
           // icon targets instead of ~96px of `CHAT`/`TERMINAL`, which is what
           // buys the single nowrap row.
           tabs={
-            <ViewTabs<'chat' | 'terminal'>
+            <ViewTabs<'chat' | 'terminal' | 'files'>
               tabs={[
                 { id: 'chat', label: 'Chat', icon: <MessageSquare size={compact ? 15 : 11} /> },
                 { id: 'terminal', label: 'Terminal', icon: <Terminal size={compact ? 15 : 11} /> },
+                // Third only when the daemon actually serves `fs/*`. On a phone
+                // this switch lives in the details sheet (SessionHeader moves it
+                // there), so a third entry costs the top row nothing.
+                ...(filesAvailable
+                  ? [{ id: 'files' as const, label: 'Files', icon: <FileText size={compact ? 15 : 11} /> }]
+                  : []),
               ]}
               current={tab}
               onChange={setTab}
@@ -1037,6 +1061,8 @@ export function SessionChatPage({
 
       {tab === 'terminal' ? (
         <TerminalView sessionId={sessionId} tmuxSession={view?.config.tmuxSession ?? ''} />
+      ) : tab === 'files' ? (
+        <FilesTab sessionId={sessionId} cwd={view?.config.cwd} />
       ) : (
         <AttachmentImageProvider>
           {/* CHAT WIDTH SURFACE (item 5): `data-chat-width` drives the max-width.
@@ -1070,6 +1096,7 @@ export function SessionChatPage({
             {!showQuestion && HAS_TOKEN && (
               <div className="mt-2">
                 <Composer
+                  sessionId={sessionId}
                   draft={draft}
                   onDraftChange={setDraft}
                   onSubmit={() => void send()}
@@ -1134,7 +1161,7 @@ export function SessionChatPage({
   );
 }
 
-function PendingAttachmentStrip({
+export function PendingAttachmentStrip({
   entries,
   onRetry,
   onRemove,
@@ -1143,17 +1170,27 @@ function PendingAttachmentStrip({
   onRetry(entry: PendingAttachment): void;
   onRemove(entry: PendingAttachment): void;
 }) {
+  // Alignment is the flex default `stretch`, deliberately NOT `items-start`: the
+  // failed chip is the tallest and already sets the strip's height, so letting the
+  // others match it costs no pixels and keeps the row from reading as ragged.
   return (
     <div
-      className="flex min-w-0 gap-2 overflow-x-auto border-b border-border-soft pb-2 scroll-thin"
+      className="flex min-w-0 gap-1.5 overflow-x-auto border-b border-border-soft pb-1 scroll-thin"
       aria-label="Attached images"
     >
       {entries.map(entry => (
         <div
           key={entry.localId}
           className={cn(
-            'flex min-w-[230px] max-w-[320px] items-center gap-2 rounded-control border bg-surface-2 p-1.5',
-            entry.status === 'failed' ? 'border-err-border' : 'border-border-soft',
+            'flex items-center gap-1.5 rounded-control border bg-surface-2 p-1',
+            // Failure is the only state that needs a SECOND 44px control AND the
+            // only one whose second row carries a sentence rather than a token,
+            // so it gets the wider box: 88px of buttons plus a wrapping error out
+            // of the same 230px would have forced the error to truncate, and that
+            // is the one string here the reader cannot do without.
+            entry.status === 'failed'
+              ? 'min-w-[320px] max-w-[344px] border-err-border'
+              : 'min-w-[230px] max-w-[320px] border-border-soft',
           )}
           role={entry.status === 'failed' ? 'alert' : 'status'}
         >
@@ -1161,26 +1198,47 @@ function PendingAttachmentStrip({
             <img
               src={entry.objectUrl}
               alt=""
-              className="h-12 w-12 shrink-0 rounded-sm border border-border-soft object-cover"
+              className="h-9 w-9 shrink-0 rounded-sm border border-border-soft object-cover"
             />
           ) : (
-            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-sm border border-border-soft bg-surface">
-              <ImageOff size={18} className="text-muted" aria-hidden="true" />
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm border border-border-soft bg-surface">
+              <ImageOff size={16} className="text-muted" aria-hidden="true" />
             </span>
           )}
-          <span className="min-w-0 flex-1 text-meta">
+          {/* TWO ROWS, TIGHT LEADING. This was three rows at body leading — name,
+              size, state — which put 60px of type beside a 44px button and made
+              the chip 74px tall before a pixel of it said anything the reader did
+              not already know. Size and state now share row two: both are one
+              short token, they are read together ("472 KB · ready"), and the state
+              keeps its own colour so the scan still works.
+
+              FAILURE IS THE DELIBERATE EXCEPTION. An error is a sentence, not a
+              token, so on `failed` the SIZE is dropped — a hard failure has
+              already said whatever mattered about the bytes — and the error takes
+              the whole second row so it can wrap instead of truncate. That is why
+              a failed chip is a few px taller than a ready one; it is still less
+              than half of what every chip used to cost. */}
+          <span className="min-w-0 flex-1 text-meta leading-tight">
             <span className="block truncate text-fg" title={entry.file.name}>
               {entry.file.name}
             </span>
-            <span className="block text-faint">{formatAttachmentSize(entry.file.size)}</span>
-            {entry.status === 'uploading' ? (
-              <span className="inline-flex items-center gap-1 text-muted">
-                <Loader2 size={11} className="animate-spin motion-reduce:animate-none" aria-hidden="true" /> uploading
-              </span>
-            ) : entry.status === 'failed' ? (
+            {entry.status === 'failed' ? (
               <span className="block text-err">{entry.error}</span>
             ) : (
-              <span className="block text-ok">ready</span>
+              <span className="flex min-w-0 items-center gap-1">
+                <span className="shrink-0 text-faint">{formatAttachmentSize(entry.file.size)}</span>
+                <span className="shrink-0 text-faint" aria-hidden="true">
+                  ·
+                </span>
+                {entry.status === 'uploading' ? (
+                  <span className="inline-flex shrink-0 items-center gap-1 text-muted">
+                    <Loader2 size={11} className="animate-spin motion-reduce:animate-none" aria-hidden="true" />{' '}
+                    uploading
+                  </span>
+                ) : (
+                  <span className="shrink-0 text-ok">ready</span>
+                )}
+              </span>
             )}
           </span>
           {entry.status === 'failed' && (

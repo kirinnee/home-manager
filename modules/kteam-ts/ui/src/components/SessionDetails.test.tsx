@@ -4,9 +4,13 @@ import type { SessionView } from '../types';
 import { ApiError } from '../lib/api';
 import {
   BottomSheet,
+  CLAUDE_EFFORT_LEVELS,
+  ClaudeEffortChoices,
   ClaudeRuntimeChoices,
+  RuntimeEffortControls,
   RuntimeModelControls,
   SessionDetails,
+  isEffortActionUnsupported,
   isRuntimeEndpointUnavailable,
   modelObservationChanged,
   observedModelPresentation,
@@ -235,6 +239,100 @@ describe('in-session runtime model controls', () => {
     expect(details('codex')).toContain('Last observed reasoning');
     expect(details('codex')).toContain('high');
     expect(details('claude')).not.toContain('Last observed reasoning');
+  });
+});
+
+describe('reasoning effort controls', () => {
+  function idle(harness: SessionView['config']['harness']): SessionView {
+    const v = view(harness);
+    v.state.promptReady = true;
+    return v;
+  }
+
+  test('Claude gets four persistable 44px effort levels and no others', () => {
+    const html = renderToStaticMarkup(
+      <RuntimeEffortControls view={idle('claude')} canControl onClose={() => undefined} />,
+    );
+    expect(html).toContain('Reasoning effort');
+    for (const level of CLAUDE_EFFORT_LEVELS) expect(html).toContain(`Set reasoning effort to ${level}`);
+    // `auto`, `max` and `ultracode` are session-only or resets — never offered.
+    expect(html).not.toContain('Set reasoning effort to auto');
+    expect(html).not.toContain('ultracode');
+    expect(html).toContain('min-h-[44px]');
+    expect(html).toContain('saved as the default for new sessions');
+  });
+
+  test('Codex reasoning is the native picker hand-off, never a fabricated /reasoning verb', () => {
+    const html = renderToStaticMarkup(
+      <RuntimeEffortControls view={idle('codex')} canControl onOpenTerminal={() => true} onClose={() => undefined} />,
+    );
+    expect(html).toContain('Open model + reasoning picker in Terminal');
+    // No Claude-style level grid on a Codex session.
+    expect(html).not.toContain('Set reasoning effort to low');
+  });
+
+  test('a terminal session refuses the effort control instead of showing a dead one', () => {
+    const terminal = idle('claude');
+    terminal.state.status = 'completed';
+    const html = renderToStaticMarkup(<RuntimeEffortControls view={terminal} canControl onClose={() => undefined} />);
+    expect(html).toContain('requires a running session');
+    expect(html).not.toContain('<button');
+  });
+
+  test('a read-only origin explains why effort cannot be changed and shows no control', () => {
+    const html = renderToStaticMarkup(
+      <RuntimeEffortControls view={idle('claude')} canControl={false} onClose={() => undefined} />,
+    );
+    expect(html).toContain('read-only');
+    expect(html).not.toContain('<button');
+  });
+
+  test('a busy pane blocks the effort command until an idle prompt', () => {
+    const busy = view('claude'); // promptReady left unset ⇒ not ready
+    const html = renderToStaticMarkup(<RuntimeEffortControls view={busy} canControl onClose={() => undefined} />);
+    expect(html).toContain('Wait for an idle prompt before changing the reasoning level');
+    expect(html).toContain('disabled=""');
+  });
+
+  test('ClaudeEffortChoices is a presentational grid the parent can disable', () => {
+    const enabled = renderToStaticMarkup(<ClaudeEffortChoices disabled={false} onChoose={() => undefined} />);
+    expect(enabled.match(/<button/g)?.length).toBe(CLAUDE_EFFORT_LEVELS.length);
+    expect(enabled).not.toContain('disabled=""');
+
+    const disabled = renderToStaticMarkup(<ClaudeEffortChoices disabled onChoose={() => undefined} />);
+    expect(disabled.match(/disabled=""/g)?.length).toBe(CLAUDE_EFFORT_LEVELS.length);
+  });
+
+  test('an old daemon rejecting the effort verb reads as restart-required, not a red error', () => {
+    expect(isEffortActionUnsupported(new ApiError(400, 'runtime action must be "model"'))).toBe(true);
+    // A genuine 404 keeps the existing runtime-endpoint treatment; an unrelated
+    // 400 stays an ordinary failure the reader should see verbatim.
+    expect(isEffortActionUnsupported(new ApiError(404, 'unknown_route'))).toBe(false);
+    expect(isEffortActionUnsupported(new ApiError(400, 'model is required'))).toBe(false);
+  });
+
+  test('the details Runtime tab gives Claude an effort control and Codex none of its own', () => {
+    const details = (harness: SessionView['config']['harness']) => {
+      resetDetailsTabMemory();
+      primeDetailsTab('runtime-probe', 'runtime');
+      const v = idle(harness);
+      return renderToStaticMarkup(
+        <SessionDetails
+          id={`details-effort-${harness}`}
+          view={v}
+          quota={null}
+          liveStatus="open"
+          open
+          onClose={() => undefined}
+          canControlRuntime
+        />,
+      );
+    };
+
+    expect(details('claude')).toContain('Set Claude reasoning effort');
+    // Codex tunes reasoning inside the model picker already on this tab, so it
+    // must NOT grow a second, redundant effort control.
+    expect(details('codex')).not.toContain('Set Claude reasoning effort');
   });
 });
 
