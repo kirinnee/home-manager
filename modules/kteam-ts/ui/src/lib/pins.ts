@@ -1,27 +1,34 @@
-// Per-session PINS — now DAEMON-BACKED (phase 2).
-//
-// Phase 1 kept pins in this file's `kteam-pins-v1` localStorage key. That was
-// per-browser (pins did not follow the reader between phone and desktop) and no
-// AGENT could reach it. Phase 2 moves the source of truth to the daemon
-// (src/pins-*.ts, `GET`/`POST /v1/sessions/:id/pins`) so:
+// Per-session PINS — DAEMON-BACKED. The daemon (src/pins-*.ts,
+// `GET`/`POST /v1/sessions/:id/pins`) is the ONE source of truth:
 //   - an agent can pin via `kteam pin`, and its pins are visibly tagged as
 //     agent-made (provenance) so the reader can always tell who put a pin there;
 //   - pins follow the reader across devices, converging live over the events
-//     stream (a `pins.updated` event carrying the whole snapshot).
+//     stream (a `pins.updated` event carrying the whole snapshot);
+//   - ALL policy — caps (including the agent sub-cap), dedupe, ordering, preview
+//     derivation, provenance stamping — runs daemon-side and nowhere else.
 //
-// This module keeps the SAME external-store contract the UI already consumes
-// (`pinsStore.getSnapshot()` / `.subscribe()` + the mutation method names), so
-// TranscriptRow, SessionHeader, PinSheet and pin-selection are unchanged. The
-// in-memory `PinStore` shape is now a per-session CACHE hydrated from the daemon;
-// mutations apply optimistically and then reconcile against the server snapshot
-// (the returned body, and the live `pins.updated` event). The old pure helpers
-// (parse/caps/toggle/add) still power the optimistic cache updates.
+// What this module keeps client-side is deliberately policy-free:
+//   1. A per-session in-memory CACHE of the last server snapshot, exposed
+//      through the external-store contract the UI consumes (`getSnapshot()` /
+//      `subscribe()`), so React reads are synchronous and stable.
+//   2. An OPTIMISTIC ECHO on each mutation: the cache reflects the asked-for
+//      change immediately, then the authoritative snapshot in the POST response
+//      (or the live `pins.updated` event) overwrites it. The echo computes no
+//      policy — if the daemon caps, dedupes, or reorders, that is what sticks.
+//   3. Synchronous NOTE VALIDATION (empty / over-cap), because the sheet needs
+//      its refuse-not-truncate feedback before any round-trip.
+//
+// The phase-1 client store (the `kteam-pins-v1` localStorage key with local
+// caps, LRU and persistence-on-mutate) is GONE as a store. Its read path is
+// retained for exactly one purpose: the one-time migration that imports a
+// reader's existing localStorage pins into the daemon on first load of a
+// session with no server pins (see `maybeMigrate`). Nothing writes that key any
+// more, and the key is deliberately NOT deleted after import — a device whose
+// migration has not run yet must keep its data recoverable.
 //
 // DEGRADATION: when the daemon is unreachable a session's status is `error`, so
 // the sheet can say "can't reach pins" rather than render an empty list that
-// looks like "you have no pins". MIGRATION: the reader's phase-1 localStorage
-// pins are imported into the daemon once, on first load of a session that has
-// none server-side (see `maybeMigrate`).
+// looks like "you have no pins".
 
 import { TOKEN } from './api';
 
@@ -31,18 +38,15 @@ export const PINS_KEY = 'kteam-pins-v1';
  *  the one-time migration never re-runs. */
 const MIGRATED_KEY = 'kteam-pins-migrated-v1';
 export const PINS_VERSION = 1;
-/** LRU cap: at most this many sessions retain pins, newest-touched kept. */
-export const MAX_PIN_SESSIONS = 50;
-/** A pin board, not a second transcript. Adding past the cap drops the OLDEST
- *  pin in that session (never refuses the new one — the reader's latest intent
- *  wins). */
+/** Defensive per-session cap applied when READING the legacy localStorage
+ *  payload for migration. The LIVE cap is the daemon's (src/pins-types.ts),
+ *  which also enforces an agent sub-cap this client never needs to know. */
 export const MAX_PINS_PER_SESSION = 20;
-/** Per-note hard cap. A note over this is REFUSED, never truncated — the reader
- *  must never get back a silently shortened link (drafts.ts:30-33 rationale). */
+/** Per-note hard cap, mirrored from the daemon (src/pins-types.ts) so the sheet
+ *  can refuse synchronously with a character count. A note over this is
+ *  REFUSED, never truncated — the reader must never get back a silently
+ *  shortened link (drafts.ts:30-33 rationale). The daemon re-validates. */
 export const MAX_NOTE_LEN = 500;
-/** Stored message-pin preview length. This is derived DISPLAY data, so
- *  truncation here is fine (unlike a note). */
-export const PREVIEW_LEN = 200;
 
 /** The transcript block kinds a pin can point at. Mirrors TranscriptBlock.kind
  *  without importing it, so this pure module stays free of the transcript. */
@@ -50,12 +54,12 @@ export type PinBlockKind = 'user' | 'assistant' | 'thinking' | 'tools' | 'system
 
 /** Who created a pin. Stamped by the daemon from the resolved actor, never by a
  *  client. A pin with no `by` (a legacy localStorage pin, or an optimistic local
- *  pin awaiting the server round-trip) reads as the human — the safe default, so
- *  an agent attribution is never invented. */
+ *  echo awaiting the server round-trip) reads as the human — the safe default,
+ *  so an agent attribution is never invented. */
 export type PinBy = 'human' | 'agent';
 
-/** Provenance shared by both pin kinds. All optional so legacy/local pins parse
- *  unchanged; `by` absent ⇒ human. */
+/** Provenance shared by both pin kinds. All optional so legacy/echoed pins
+ *  parse unchanged; `by` absent ⇒ human. */
 export interface PinProvenance {
   by?: PinBy;
   /** The authoring agent's session id (attribution only), else null/absent. */
@@ -72,9 +76,9 @@ export interface MessagePin extends PinProvenance {
    *  caveat and the honest not-found path that covers it. */
   blockId: string;
   blockKind: PinBlockKind;
-  /** First PREVIEW_LEN chars of the block text AT PIN TIME. Stored, not derived
-   *  at render — this is what keeps a pin legible when its target block is not
-   *  loaded. */
+  /** First chars of the block text AT PIN TIME, derived by the daemon
+   *  (pins-store.toPreview). Stored, not re-derived at render — this is what
+   *  keeps a pin legible when its target block is not loaded. */
   preview: string;
   /** The block's record timestamp, for display. */
   ts?: string;
@@ -106,7 +110,7 @@ export type Pin = MessagePin | NotePin;
 
 export interface PinSessionEntry {
   pins: Pin[];
-  /** LRU touch — epoch ms of the last mutation to this session's pins. */
+  /** Epoch ms this cache entry was last written (snapshot applied or echoed). */
   at: number;
 }
 
@@ -180,8 +184,9 @@ export function parsePin(value: unknown): Pin | null {
   return null;
 }
 
-/** Defensive parse: any malformed, wrong-version, or non-conforming payload
- *  degrades to an empty store. Never throws. */
+/** Defensive parse of the LEGACY localStorage payload (migration source only).
+ *  Any malformed, wrong-version, or non-conforming payload degrades to an empty
+ *  store. Never throws. */
 export function parsePinStore(raw: string | null): PinStore {
   if (!raw) return emptyStore();
   let parsed: unknown;
@@ -212,7 +217,7 @@ export function parsePinStore(raw: string | null): PinStore {
       const pin = parsePin(raw);
       if (!pin) continue;
       // Drop duplicate ids and duplicate message blocks defensively — the
-      // mutators never create them, but a hand-edited payload might.
+      // phase-1 mutators never created them, but a hand-edited payload might.
       if (seenIds.has(pin.id)) continue;
       if (pin.kind === 'message') {
         if (seenBlocks.has(pin.blockId)) continue;
@@ -221,27 +226,14 @@ export function parsePinStore(raw: string | null): PinStore {
       seenIds.add(pin.id);
       pins.push(pin);
     }
-    if (pins.length === 0) continue; // an empty session wastes a slot and a quota
+    if (pins.length === 0) continue;
     sessions[key] = { pins: pins.slice(0, MAX_PINS_PER_SESSION), at };
   }
   return { v: PINS_VERSION, sessions };
 }
 
-/** Keep only the `max` most-recently-touched sessions. */
-export function evictLru(store: PinStore, max = MAX_PIN_SESSIONS): PinStore {
-  const keys = Object.keys(store.sessions);
-  if (keys.length <= max) return store;
-  const kept = keys.sort((a, b) => (store.sessions[b]?.at ?? 0) - (store.sessions[a]?.at ?? 0)).slice(0, max);
-  const sessions: Record<string, PinSessionEntry> = {};
-  for (const key of kept) {
-    const entry = store.sessions[key];
-    if (entry) sessions[key] = entry;
-  }
-  return { v: PINS_VERSION, sessions };
-}
-
-/** The pins for one session, in DISPLAY order (store order, newest-first on
- *  insert), or [] when there are none. */
+/** The pins for one session, in DISPLAY order (the daemon's order), or [] when
+ *  there are none. */
 export function sessionPins(store: PinStore, sessionId: string): Pin[] {
   return store.sessions[sessionId]?.pins ?? [];
 }
@@ -251,111 +243,16 @@ export function isMessagePinned(store: PinStore, sessionId: string, blockId: str
   return sessionPins(store, sessionId).some(p => p.kind === 'message' && p.blockId === blockId);
 }
 
-/** Truncate a block's text to a stored preview (PREVIEW_LEN, single-lined). */
-export function toPreview(text: string): string {
-  const flat = text.replace(/\s+/g, ' ').trim();
-  return flat.length > PREVIEW_LEN ? `${flat.slice(0, PREVIEW_LEN)}…` : flat;
-}
+export type NoteResult = { ok: true } | { ok: false; reason: 'empty' | 'too-long' };
 
-/** Write a session's pin list back, refreshing its LRU touch and re-capping the
- *  whole store. An empty list REMOVES the session (no empty slots). */
-function putSession(store: PinStore, sessionId: string, pins: Pin[], now: number): PinStore {
-  const sessions = { ...store.sessions };
-  if (pins.length === 0) {
-    delete sessions[sessionId];
-    return { v: PINS_VERSION, sessions };
-  }
-  sessions[sessionId] = { pins: pins.slice(0, MAX_PINS_PER_SESSION), at: now };
-  return evictLru({ v: PINS_VERSION, sessions });
-}
-
-/** Toggle a message pin. Pinning an already-pinned block is a no-op on the DATA
- *  (dedupe by blockId); the caller flashes the existing entry instead. Newest
- *  pins go to the FRONT (display order). */
-export function toggleMessagePin(
-  store: PinStore,
-  sessionId: string,
-  input: { id: string; blockId: string; blockKind: PinBlockKind; preview: string; ts?: string },
-  now: number,
-): PinStore {
-  const pins = sessionPins(store, sessionId);
-  if (pins.some(p => p.kind === 'message' && p.blockId === input.blockId)) {
-    // Unpin toggles OFF an existing pin.
-    const next = pins.filter(p => !(p.kind === 'message' && p.blockId === input.blockId));
-    if (next.length === pins.length) return store;
-    return putSession(store, sessionId, next, now);
-  }
-  const pin: MessagePin = {
-    id: input.id,
-    kind: 'message',
-    blockId: input.blockId,
-    blockKind: input.blockKind,
-    preview: toPreview(input.preview),
-    at: now,
-    ...(input.ts ? { ts: input.ts } : {}),
-  };
-  return putSession(store, sessionId, [pin, ...pins], now);
-}
-
-export type NoteResult = { ok: true; store: PinStore } | { ok: false; reason: 'empty' | 'too-long' };
-
-/** Add a free-text note. Empty/whitespace is refused silently (`empty`);
- *  over-cap is refused loudly (`too-long`) so the sheet can show the count —
- *  a link is never silently shortened. Newest note goes to the FRONT.
- *
- *  `source` marks a note pinned FROM A SELECTION (pin-selection.ts): the caller
- *  has already truncated the snippet to fit the cap (a snippet is display data,
- *  not a link, so truncation-with-ellipsis is honest there — the source jump
- *  gets you the full text), so this path treats over-cap the same for both. */
-export function addNote(
-  store: PinStore,
-  sessionId: string,
-  text: string,
-  id: string,
-  now: number,
-  source?: { blockId: string },
-): NoteResult {
+/** Synchronous note validation, so the sheet can refuse before any round-trip.
+ *  Empty/whitespace is refused silently (`empty`); over-cap is refused loudly
+ *  (`too-long`) so the sheet can show the count — a link is never silently
+ *  shortened. The daemon re-validates with the same rules (pins-store). */
+export function validateNote(text: string): NoteResult {
   if (text.trim().length === 0) return { ok: false, reason: 'empty' };
   if (text.length > MAX_NOTE_LEN) return { ok: false, reason: 'too-long' };
-  const note: NotePin = { id, kind: 'note', text, at: now, ...(source ? { source } : {}) };
-  return { ok: true, store: putSession(store, sessionId, [note, ...sessionPins(store, sessionId)], now) };
-}
-
-/** Edit a note in place, keeping its position. Same caps as add. A no-op edit
- *  (identical text) returns the store unchanged so callers can skip a write. */
-export function editNote(store: PinStore, sessionId: string, id: string, text: string, now: number): NoteResult {
-  if (text.trim().length === 0) return { ok: false, reason: 'empty' };
-  if (text.length > MAX_NOTE_LEN) return { ok: false, reason: 'too-long' };
-  const pins = sessionPins(store, sessionId);
-  let changed = false;
-  const next = pins.map(p => {
-    if (p.kind === 'note' && p.id === id) {
-      if (p.text === text) return p;
-      changed = true;
-      return { ...p, text, at: now };
-    }
-    return p;
-  });
-  if (!changed) return { ok: true, store };
-  return { ok: true, store: putSession(store, sessionId, next, now) };
-}
-
-/** Remove any pin by id. Returns the same reference when nothing matched so
- *  callers can skip a needless write. */
-export function removePin(store: PinStore, sessionId: string, id: string, now: number): PinStore {
-  const pins = sessionPins(store, sessionId);
-  const next = pins.filter(p => p.id !== id);
-  if (next.length === pins.length) return store;
-  return putSession(store, sessionId, next, now);
-}
-
-/** Re-insert a removed pin at a given index (undo). Clamped into range; caps
- *  still apply. */
-export function insertPinAt(store: PinStore, sessionId: string, pin: Pin, index: number, now: number): PinStore {
-  const pins = sessionPins(store, sessionId).filter(p => p.id !== pin.id);
-  const at = Math.max(0, Math.min(index, pins.length));
-  const next = [...pins.slice(0, at), pin, ...pins.slice(at)];
-  return putSession(store, sessionId, next, now);
+  return { ok: true };
 }
 
 // ---- GitHub PR link recognition (display only) ------------------------------
@@ -396,7 +293,9 @@ function hasStorage(): boolean {
 }
 
 /** Read the phase-1 localStorage store. Retained ONLY so its pins can be imported
- *  into the daemon once (see `maybeMigrate`); nothing writes this key any more. */
+ *  into the daemon once (see `maybeMigrate`); nothing writes this key any more,
+ *  and nothing deletes it — a device whose migration has not run yet must keep
+ *  its data recoverable. */
 export function readStore(): PinStore {
   if (!hasStorage()) return emptyStore();
   try {
@@ -476,13 +375,13 @@ export function parseServerPins(value: unknown): Pin[] {
 // ---- subscribable singleton -------------------------------------------------
 //
 // The hook layer (hooks/usePins.ts) reads through this via useSyncExternalStore.
-// It keeps an in-memory per-session CACHE (the same `PinStore` shape phase 1
-// used) so React gets a stable reference between mutations and the synchronous
-// readers (TranscriptRow's `isMessagePinned`) keep working. The source of truth
-// is the daemon: `hydrate()` GETs a session on demand, `applyServerSnapshot()`
-// applies a GET/POST body or a live `pins.updated` event, and every mutation
-// optimistically updates the cache, POSTs, then reconciles against the server's
-// returned snapshot.
+// It keeps an in-memory per-session CACHE so React gets a stable reference
+// between updates and the synchronous readers (TranscriptRow's
+// `isMessagePinned`) keep working. The source of truth is the daemon:
+// `hydrate()` GETs a session on demand, `applyServerSnapshot()` applies a
+// GET/POST body or a live `pins.updated` event verbatim (no client-side caps or
+// reordering), and every mutation echoes into the cache, POSTs the action, then
+// reconciles against the server's returned snapshot.
 
 type Listener = () => void;
 
@@ -492,7 +391,7 @@ export type PinSessionStatus = 'idle' | 'loading' | 'ready' | 'error';
 
 class PinsStore {
   // Cache starts EMPTY (not from localStorage): the daemon is the source of
-  // truth now, and localStorage is imported through the migration path only.
+  // truth, and localStorage is imported through the migration path only.
   private snapshot: PinStore = emptyStore();
   private listeners = new Set<Listener>();
   private statuses = new Map<string, PinSessionStatus>();
@@ -519,20 +418,20 @@ class PinsStore {
     this.emit();
   }
 
-  private commit(next: PinStore): void {
-    if (next === this.snapshot) return;
-    this.snapshot = next;
+  /** Replace one session's cached pin list wholesale. No policy runs here — no
+   *  caps, no dedupe, no ordering rules; those are the daemon's alone. */
+  private put(sessionId: string, pins: Pin[]): void {
+    const sessions = { ...this.snapshot.sessions };
+    if (pins.length === 0) delete sessions[sessionId];
+    else sessions[sessionId] = { pins, at: Date.now() };
+    this.snapshot = { v: PINS_VERSION, sessions };
     this.emit();
   }
 
   /** Replace one session's pins from an authoritative server snapshot (a GET/POST
-   *  body or a live `pins.updated` event). The cache order IS the daemon order. */
+   *  body or a live `pins.updated` event). The cache IS the daemon's list. */
   applyServerSnapshot(sessionId: string, value: unknown): void {
-    const pins = parseServerPins(value);
-    const sessions = { ...this.snapshot.sessions };
-    if (pins.length === 0) delete sessions[sessionId];
-    else sessions[sessionId] = { pins: pins.slice(0, MAX_PINS_PER_SESSION), at: Date.now() };
-    this.commit(evictLru({ v: PINS_VERSION, sessions }));
+    this.put(sessionId, parseServerPins(value));
   }
 
   /** Fetch a session's pins from the daemon. Idempotent: a second call while the
@@ -579,10 +478,12 @@ class PinsStore {
     }
   }
 
-  /** Optimistically apply `next` to the cache, POST `body`, then reconcile from
-   *  the server snapshot. On failure, re-hydrate to resync and flag the error. */
-  private mutate(sessionId: string, next: PinStore, body: unknown): void {
-    this.commit(next);
+  /** Echo `pins` into the cache so the UI reflects the asked-for change at once,
+   *  POST `body`, then reconcile from the server snapshot — whatever the daemon
+   *  decided (caps, dedupe, ordering, provenance) overwrites the echo. On
+   *  failure, re-hydrate to resync and flag the error. */
+  private mutate(sessionId: string, pins: Pin[], body: unknown): void {
+    this.put(sessionId, pins);
     void (async () => {
       try {
         const result = await pinFetch(pinPath(sessionId), { method: 'POST', body: JSON.stringify(body) });
@@ -590,50 +491,78 @@ class PinsStore {
         this.setStatus(sessionId, 'ready');
       } catch {
         this.setStatus(sessionId, 'error');
-        // Resync from the daemon so the optimistic change never lingers as a lie.
+        // Resync from the daemon so the echo never lingers as a lie.
         this.statuses.delete(sessionId);
         void this.hydrate(sessionId);
       }
     })();
   }
 
+  /** Add a free-text note. Validation is synchronous so the sheet gets its
+   *  empty/too-long feedback before the round-trip; the daemon assigns the real
+   *  id and provenance (the echoed id is provisional and replaced on reconcile).
+   *
+   *  `source` marks a note pinned FROM A SELECTION (pin-selection.ts): the
+   *  caller has already truncated the snippet to fit the cap (a snippet is
+   *  display data, not a link, so truncation-with-ellipsis is honest there —
+   *  the source jump gets you the full text). */
   addNote(sessionId: string, text: string, now: number = Date.now(), source?: { blockId: string }): NoteResult {
-    // Local validation gives the sheet its synchronous empty/too-long feedback.
-    const result = addNote(this.snapshot, sessionId, text, uuid(), now, source);
-    if (!result.ok) return result;
-    this.mutate(sessionId, result.store, {
+    const valid = validateNote(text);
+    if (!valid.ok) return valid;
+    const note: NotePin = { id: uuid(), kind: 'note', text, at: now, ...(source ? { source } : {}) };
+    this.mutate(sessionId, [note, ...sessionPins(this.snapshot, sessionId)], {
       action: 'add',
       kind: 'note',
       text,
       ...(source ? { source } : {}),
     });
-    return result;
+    return valid;
   }
 
+  /** Edit a note in place. Same validation as add; a no-op edit (identical text
+   *  or unknown id) skips the round-trip. */
   editNote(sessionId: string, id: string, text: string, now: number = Date.now()): NoteResult {
-    const result = editNote(this.snapshot, sessionId, id, text, now);
-    if (!result.ok) return result;
-    // A no-op edit returns the same store — skip the round-trip.
-    if (result.store !== this.snapshot) this.mutate(sessionId, result.store, { action: 'edit', id, text });
-    return result;
+    const valid = validateNote(text);
+    if (!valid.ok) return valid;
+    const pins = sessionPins(this.snapshot, sessionId);
+    const target = pins.find((p): p is NotePin => p.kind === 'note' && p.id === id);
+    if (!target || target.text === text) return valid;
+    this.mutate(
+      sessionId,
+      pins.map(p => (p.kind === 'note' && p.id === id ? { ...p, text, at: now } : p)),
+      { action: 'edit', id, text },
+    );
+    return valid;
   }
 
+  /** Pin a message, or unpin it when its block is already pinned. The echoed
+   *  preview is the caller's raw text; the daemon derives the stored preview
+   *  (pins-store.toPreview) and the reconcile replaces the echo. */
   toggleMessage(
     sessionId: string,
     input: { blockId: string; blockKind: PinBlockKind; preview: string; ts?: string },
     now: number = Date.now(),
   ): void {
-    const existing = sessionPins(this.snapshot, sessionId).find(
-      p => p.kind === 'message' && p.blockId === input.blockId,
-    );
+    const pins = sessionPins(this.snapshot, sessionId);
+    const existing = pins.find(p => p.kind === 'message' && p.blockId === input.blockId);
     if (existing) {
-      this.mutate(sessionId, removePin(this.snapshot, sessionId, existing.id, now), {
-        action: 'remove',
-        id: existing.id,
-      });
+      this.mutate(
+        sessionId,
+        pins.filter(p => p.id !== existing.id),
+        { action: 'remove', id: existing.id },
+      );
       return;
     }
-    this.mutate(sessionId, toggleMessagePin(this.snapshot, sessionId, { id: uuid(), ...input }, now), {
+    const pin: MessagePin = {
+      id: uuid(),
+      kind: 'message',
+      blockId: input.blockId,
+      blockKind: input.blockKind,
+      preview: input.preview,
+      at: now,
+      ...(input.ts ? { ts: input.ts } : {}),
+    };
+    this.mutate(sessionId, [pin, ...pins], {
       action: 'add',
       kind: 'message',
       blockId: input.blockId,
@@ -643,15 +572,19 @@ class PinsStore {
     });
   }
 
-  remove(sessionId: string, id: string, now: number = Date.now()): void {
-    const next = removePin(this.snapshot, sessionId, id, now);
-    if (next !== this.snapshot) this.mutate(sessionId, next, { action: 'remove', id });
+  /** Remove any pin by id. A miss is a silent no-op (no round-trip). */
+  remove(sessionId: string, id: string): void {
+    const pins = sessionPins(this.snapshot, sessionId);
+    const next = pins.filter(p => p.id !== id);
+    if (next.length === pins.length) return;
+    this.mutate(sessionId, next, { action: 'remove', id });
   }
 
-  /** Undo a delete. Re-adds the pin server-side (position is not restored — a
-   *  re-created pin goes to the front, matching newest-first); the optimistic
-   *  cache keeps the old index until the server snapshot reconciles. */
-  insertAt(sessionId: string, pin: Pin, index: number, now: number = Date.now()): void {
+  /** Undo a delete by re-adding the pin server-side. Position is NOT restored —
+   *  a re-created pin goes to the front (newest-first), the daemon mints a fresh
+   *  id, and provenance is re-stamped from the current actor. The echo matches
+   *  that (front insert), so undo never shows an order the server will contradict. */
+  readd(sessionId: string, pin: Pin, now: number = Date.now()): void {
     const body =
       pin.kind === 'note'
         ? { action: 'add', kind: 'note', text: pin.text, ...(pin.source ? { source: pin.source } : {}) }
@@ -663,13 +596,14 @@ class PinsStore {
             preview: pin.preview,
             ...(pin.ts ? { ts: pin.ts } : {}),
           };
-    this.mutate(sessionId, insertPinAt(this.snapshot, sessionId, pin, index, now), body);
+    const rest = sessionPins(this.snapshot, sessionId).filter(p => p.id !== pin.id);
+    this.mutate(sessionId, [{ ...pin, at: now }, ...rest], body);
   }
 }
 
-/** A daemon-portable id. crypto.randomUUID is available in the UI's secure
- *  context (Cloudflare tunnel, HTTPS); fall back to a timestamp-random id where
- *  it is not so a pin never fails to get an id. */
+/** A daemon-portable id for the request-id header and the provisional echo.
+ *  crypto.randomUUID is available in the UI's secure context (Cloudflare
+ *  tunnel, HTTPS); fall back to a timestamp-random id where it is not. */
 function uuid(): string {
   try {
     if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
