@@ -31,6 +31,8 @@ import { compactUsageQuota, fetchKfleetUsage, UsageFeed, usageQuotaLabel } from 
 import { KTEAM_VERSION } from './version';
 import { waitForDaemonReady } from './daemon-wait';
 import { resolveKillTimeout, TIMEOUT_KILL_HELP, KILL_AFTER_SECONDS_HELP } from './start-timeout';
+import { isTaskError } from './tasks';
+import { parseTaskCli, renderTaskCli, taskCliRequest } from './tasks-cli';
 
 const VERSION = KTEAM_VERSION;
 const paths = createPaths();
@@ -287,6 +289,42 @@ function option(item: {
   const caveat = item.caveat ? `\n             ⚠ ${caveats[item.caveat] ?? item.caveat}` : '';
   return `${item.modelLabel.padEnd(20)} ${item.binary}${flag}\n             ${item.tradeoff}${caveat}`;
 }
+
+program
+  .command('task')
+  .description('read and update daemon-owned task records')
+  .allowUnknownOption(true)
+  .allowExcessArguments(true)
+  .argument('[args...]')
+  .action(async (argv: string[]) => {
+    try {
+      const command = parseTaskCli(argv);
+      const requestSpec = taskCliRequest(command);
+      const payload =
+        command.command === 'create' && command.descriptionFile
+          ? { ...command.body, description: await readFile(command.descriptionFile, 'utf8') }
+          : requestSpec.body;
+      const response = await (
+        await client()
+      ).request<unknown>(requestSpec.path, {
+        method: requestSpec.method,
+        ...(payload === undefined
+          ? {}
+          : {
+              body: JSON.stringify(payload),
+              headers: { 'content-type': 'application/json' },
+            }),
+      });
+      process.stdout.write(renderTaskCli(command, response));
+    } catch (error) {
+      if (isTaskError(error)) {
+        process.stderr.write(`${error.message}\n`);
+        process.exitCode = 1;
+        return;
+      }
+      throw error;
+    }
+  });
 
 program
   .command('start')

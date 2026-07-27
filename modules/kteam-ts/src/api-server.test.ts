@@ -8,6 +8,15 @@ import { WARDEN_LABEL } from './warden-detect';
 import { FsError, type FsDiffView, type FsFileView, type FsListing } from './fs';
 import { GitError, type GitChangesView } from './git';
 import type { SttService } from './stt-service';
+import { TaskApi, type TaskApiService } from './tasks-api';
+import type {
+  TaskActionInput,
+  TaskActor,
+  TaskCreateInput,
+  TaskDetailResponse,
+  TaskListResponse,
+  TaskView as TaskBoardView,
+} from './tasks';
 
 const view: SessionView = {
   directory: '/tmp/kteam/s1',
@@ -1037,6 +1046,176 @@ describe('warden-scoped token authorization', () => {
       body: JSON.stringify({ kind: 'done' }),
     });
     expect(allowed.status).toBe(200);
+  });
+});
+
+describe('task API integration', () => {
+  const taskView: TaskBoardView = {
+    v: 1,
+    id: 'F1',
+    kind: 'feature',
+    title: 'Task API',
+    description: 'Wire the daemon route.',
+    status: 'todo',
+    statusReason: null,
+    assignee: null,
+    repo: '/tmp',
+    links: { prs: [], branch: null, commits: [], docs: [] },
+    order: null,
+    createdAt: '2026-07-27T00:00:00.000Z',
+    createdBy: 'user',
+    updatedAt: '2026-07-27T00:00:00.000Z',
+    live: {
+      assigneeStatus: null,
+      assigneeHealth: null,
+      assigneeDoneMarker: false,
+      assigneeLastActivityAt: null,
+      staleness: null,
+    },
+  };
+
+  class CountingTaskService implements TaskApiService {
+    creates = 0;
+    acts = 0;
+    lastCreate: TaskCreateInput | undefined;
+    lastAct: (TaskActionInput & TaskActor) | undefined;
+
+    taskList = async (): Promise<TaskListResponse> => ({ tasks: [], parseErrors: 0 });
+    taskDetail = async (): Promise<TaskDetailResponse> => ({ task: taskView, activity: [] });
+    taskCreate = async (input: TaskCreateInput): Promise<TaskBoardView> => {
+      this.creates += 1;
+      this.lastCreate = input;
+      return taskView;
+    };
+    taskAct = async (_id: string, input: TaskActionInput & TaskActor): Promise<TaskBoardView> => {
+      this.acts += 1;
+      this.lastAct = input;
+      return taskView;
+    };
+  }
+
+  function taskServer(
+    tasks: CountingTaskService,
+    service: KTeamService = new FakeService(),
+    wardenToken?: string,
+  ): string {
+    const server = startApiServer({
+      host: '127.0.0.1',
+      port: 0,
+      token: 'secret',
+      service,
+      tasks: new TaskApi(tasks),
+      ...(wardenToken ? { wardenToken } : {}),
+    });
+    servers.push(server);
+    return `http://127.0.0.1:${server.port}`;
+  }
+
+  test('one daemon-lifetime TaskApi applies duplicate create and note request ids once', async () => {
+    const tasks = new CountingTaskService();
+    const base = taskServer(tasks);
+    const post = (path: string, requestId: string, value: unknown) =>
+      fetch(`${base}${path}`, {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json',
+          'x-kteam-request-id': requestId,
+        },
+        body: JSON.stringify(value),
+      });
+
+    expect((await post('/v1/tasks', 'create-1', { kind: 'feature', title: 'Task API' })).status).toBe(201);
+    expect((await post('/v1/tasks', 'create-1', { kind: 'feature', title: 'Task API' })).status).toBe(201);
+    expect(tasks.creates).toBe(1);
+
+    expect((await post('/v1/tasks/F1', 'note-1', { action: 'note', text: 'wired' })).status).toBe(200);
+    expect((await post('/v1/tasks/F1', 'note-1', { action: 'note', text: 'wired' })).status).toBe(200);
+    expect(tasks.acts).toBe(1);
+  });
+
+  test('the warden token may read task records but cannot create or mutate them', async () => {
+    const tasks = new CountingTaskService();
+    const base = taskServer(tasks, new FakeService(), 'warden');
+    const headers = { authorization: 'Bearer warden' };
+
+    expect((await fetch(`${base}/v1/tasks`, { headers })).status).toBe(200);
+    expect((await fetch(`${base}/v1/tasks/F1`, { headers })).status).toBe(200);
+    expect(
+      (
+        await fetch(`${base}/v1/tasks`, {
+          method: 'POST',
+          headers: { ...headers, 'content-type': 'application/json' },
+          body: JSON.stringify({ kind: 'feature', title: 'forbidden' }),
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await fetch(`${base}/v1/tasks/F1`, {
+          method: 'POST',
+          headers: { ...headers, 'content-type': 'application/json' },
+          body: JSON.stringify({ action: 'note', text: 'forbidden' }),
+        })
+      ).status,
+    ).toBe(403);
+    expect(tasks.creates).toBe(0);
+    expect(tasks.acts).toBe(0);
+  });
+
+  test('task history attributes panes canonically, humans as user, and ignores body actors', async () => {
+    class CallsignedService extends FakeService {
+      override get = async () => ({
+        ...view,
+        config: { ...view.config, id: 's1', teammate: 'lacey' },
+      });
+    }
+    const tasks = new CountingTaskService();
+    const base = taskServer(tasks, new CallsignedService());
+
+    const fromPane = await fetch(`${base}/v1/tasks`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer secret',
+        'content-type': 'application/json',
+        'x-kteam-session-id': 's1',
+      },
+      body: JSON.stringify({
+        kind: 'feature',
+        title: 'Attributed',
+        actor: 'forged-session',
+        actorName: 'forged-name',
+      }),
+    });
+    expect(fromPane.status).toBe(201);
+    expect(tasks.lastCreate?.actor).toBe('s1');
+    expect(tasks.lastCreate?.actorName).toBe('lacey');
+
+    const fromHuman = await fetch(`${base}/v1/tasks/F1`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer secret', 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'note', text: 'human note', actor: 'forged', actorName: 'forged' }),
+    });
+    expect(fromHuman.status).toBe(200);
+    expect(tasks.lastAct?.actor).toBe('user');
+    expect(tasks.lastAct?.actorName).toBe('user');
+  });
+
+  test('malformed task JSON is 400 and unsupported methods use the normal unknown-route 404', async () => {
+    const base = taskServer(new CountingTaskService());
+    const malformed = await fetch(`${base}/v1/tasks`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer secret', 'content-type': 'application/json' },
+      body: '{',
+    });
+    expect(malformed.status).toBe(400);
+
+    const unsupported = await fetch(`${base}/v1/tasks`, {
+      method: 'PUT',
+      headers: { authorization: 'Bearer secret' },
+    });
+    expect(unsupported.status).toBe(404);
+    expect(((await unsupported.json()) as { code?: string }).code).toBe('unknown_route');
   });
 });
 
