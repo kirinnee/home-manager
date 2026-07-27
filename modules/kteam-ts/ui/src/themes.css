@@ -373,11 +373,20 @@
 }
 
 /* ============================================================================
-   FAMILY 2 — MISSION CONTROL. Port of the reference design: condensed display
-   type, hairline cyan rules, a radial body wash, a fixed 3px scanline overlay
-   and cyan glow shadows. Dark is faithful; light keeps the cyan/amber signal
-   language but darkens every ink to stay readable and drops the effects way
-   down (raw #47f3ff is ~1.2:1 on white — it can never be text in light mode).
+   FAMILY 2 — MISSION CONTROL. Reworked from an effects-led "ops console" (CRT
+   scanlines, chamfered sci-fi bevels, a radial glow wash) into a precision
+   INSTRUMENT: a ruled measurement grid, honest square controls in mono-
+   uppercase, hairline registers and corner brackets. What carries the family in
+   greyscale is now STRUCTURE — the grid + square corners + mono-uppercase + the
+   hairline rules — not an effect.
+
+   REMOVED, and why: the scanline overlay (a CRT novelty that wears off fast on a
+   tool you stare at for hours — pure costume); the corner chamfer (every button,
+   badge and tab wore a diagonal bevel that read as game HUD, not equipment); and
+   the cyan glow on shadows (an effect, not a signal). Both modes now share the
+   same ruled-grid chassis and seated (not floating) elevation — dark keeps the
+   cyan signal on near-black, light the deep teal on white. Restraint reads as
+   cool; the leftover signal language is the instrument, not the film prop.
    ============================================================================ */
 :root[data-theme^='mission-'],
 [data-swatch^='mission-'] {
@@ -409,18 +418,18 @@
   --radius-badge: 0px;
   --radius-tab: 0px;
   --radius-input: 0px;
-  /* Notched corners — the reference's own recipe (site.css:433 controls, :469
-     panels). Panel clipping is OPT-IN via .kt-panel--clipped only: a clipped
-     focus ring or popover is an a11y regression. */
-  --notch: 8px;
-  /* Chamfer raised 6px -> 9px. `.kt-btn`, `.kt-badge` and `.kt-tab` all consume
-     `--clip-control` and are all migrated, so this is the one piece of Mission's
-     notch language that actually reaches the screen today — the panel notch is
-     still gated behind `.kt-panel--clipped`, which nothing opts into yet. At 6px
-     on a 22px badge the cut was too small to survive a screenshot; at 9px the
-     top-right/bottom-left chamfer is unmistakable on every control. */
-  --clip-control: polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px));
-  --clip-panel: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
+  /* NO chamfer. The old notched/chamfered corners on every control were the
+     family's costume tell — a diagonal sci-fi bevel top-right/bottom-left that
+     read as game HUD, not measurement equipment, and it aged into a novelty. It
+     is gone: controls are honest squares. The silhouette work it did is carried
+     instead by zero radius + mono-uppercase labels + the ruled grid + the corner
+     registration brackets, every one of which survives a greyscale capture. */
+  --notch: 0px;
+  --clip-control: none;
+  --clip-panel: none;
+  /* Corner registration brackets on `[data-hud]` panels — a real measurement-
+     equipment detail (index.css draws two accent L-marks at opposite corners).
+     Kept because it reads as precision, not as costume, unlike the chamfer. */
   --bracket-size: 10px;
 
   --divider-color: var(--border);
@@ -431,13 +440,17 @@
   --pad-panel: 12px;
 
   --rail-active: inset 4px 0 0 var(--accent);
-  --panel-bg: linear-gradient(135deg, rgb(var(--accent-rgb) / 0.06), transparent 28%), var(--surface);
-  /* 32px HUD grid — reference site.css:585-590. */
+  /* Flat surface — the diagonal accent-tint wash on panels was another decorative
+     tell; the panel now reads its identity from the grid texture and the seated
+     hairline, not a gradient sheen. */
+  --panel-bg: var(--surface);
+  /* 32px instrument grid on panels, aligned to the same module as the page grid
+     so a panel is a continuous piece of the ruled field, not a textured card. */
   --panel-texture:
     linear-gradient(90deg, rgb(var(--accent-rgb) / 0.05) 1px, transparent 1px),
     linear-gradient(180deg, rgb(var(--accent-rgb) / 0.05) 1px, transparent 1px);
   --panel-texture-size: 32px 32px;
-  --focus-shadow: 0 0 0 5px rgb(var(--accent-rgb) / 0.18);
+  --focus-shadow: 0 0 0 3px rgb(var(--accent-rgb) / 0.16);
   --rule-inset: inset 0 1px 0 rgb(var(--accent-rgb) / 0.08);
 
   --bubble-stroke: 1px;
@@ -537,19 +550,31 @@
   --syn-deletion: #ff6b7a;
 
   --bar-bg: rgba(5, 10, 15, 0.86);
-  --glow-alpha: 0.09;
-  --shadow-sm: 0 0 0 1px rgba(151, 217, 224, 0.08), var(--shadow-glow);
-  --shadow-md: 0 14px 34px rgba(0, 0, 0, 0.55), var(--shadow-glow);
-  --shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.62), var(--shadow-glow);
+  /* No glow. The cyan bloom on every shadow was an effect, not a signal; an
+     instrument is SEATED in its chassis, so elevation is now a hard hairline ring
+     plus a clean dark shadow — the same seated read as light, inverted. */
+  --glow-alpha: 0;
+  --shadow-sm: 0 0 0 1px rgba(151, 217, 224, 0.08);
+  --shadow-md: 0 0 0 1px rgba(151, 217, 224, 0.09), 0 12px 30px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 0 0 1px rgba(151, 217, 224, 0.11), 0 22px 54px rgba(0, 0, 0, 0.58);
   --scrim: rgba(2, 6, 10, 0.72);
 
+  /* THE RULED FIELD, dark. The old radial glow-wash was the effect that read as
+     "sci-fi console"; it is replaced by the same ruled instrument grid light
+     uses, faint cyan on near-black, aligned to the 32px panel module (96px major
+     / 32px minor). Both modes now share one chassis, so the family is defined by
+     the grid, not by a glow. A whisper of vertical grade under the grid keeps the
+     ground from reading as dead-flat black. */
   --body-wash:
-    radial-gradient(circle at 73% 9%, rgba(71, 243, 255, 0.085), transparent 26rem),
-    radial-gradient(circle at 4% 34%, rgba(30, 83, 96, 0.14), transparent 32rem),
-    linear-gradient(180deg, #050a0f 0%, #061017 44%, #03070a 100%);
-  --overlay: repeating-linear-gradient(180deg, transparent 0, transparent 3px, rgba(167, 230, 235, 0.025) 4px);
-  --overlay-opacity: 0.24;
-  --overlay-blend: screen;
+    repeating-linear-gradient(90deg, rgba(120, 200, 214, 0.055) 0 1px, transparent 1px 96px),
+    repeating-linear-gradient(180deg, rgba(120, 200, 214, 0.055) 0 1px, transparent 1px 96px),
+    repeating-linear-gradient(90deg, rgba(120, 200, 214, 0.03) 0 1px, transparent 1px 32px),
+    repeating-linear-gradient(180deg, rgba(120, 200, 214, 0.03) 0 1px, transparent 1px 32px),
+    linear-gradient(180deg, #060d13 0%, #04090e 100%);
+  /* Scanlines removed — a CRT costume, not an instrument reading. */
+  --overlay: none;
+  --overlay-opacity: 0;
+  --overlay-blend: normal;
 
   --ring: rgba(71, 243, 255, 0.34);
   --focus-color: #47f3ff;
@@ -633,12 +658,11 @@
   --syn-deletion: #a8283a;
 
   --bar-bg: rgba(241, 250, 252, 0.86);
-  --glow-alpha: 0.05;
+  --glow-alpha: 0;
   /* INSET STRUCTURE, not float. An instrument panel is seated in its chassis, so
-     the soft blur becomes a hard 1px ring plus an inset top-light — the same
-     read as mission-dark's hairline-and-glow, inverted for a white ground. The
-     role shadows and any remaining utility consumers both resolve through this
-     treatment. */
+     the soft blur is a hard 1px ring plus an inset top-light — the seated read
+     that dark now mirrors with its own hairline ring. The role shadows and any
+     remaining utility consumers both resolve through this treatment. */
   --shadow-sm: 0 0 0 1px rgba(11, 82, 95, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.9);
   --shadow-md:
     0 0 0 1px rgba(11, 82, 95, 0.26), inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 10px 24px rgba(6, 48, 56, 0.1);
@@ -652,10 +676,12 @@
      behind the sidebar, the area below a short table. That is what makes the
      theme read as an instrument rather than as a page with a textured card on it.
 
-     The grid ink is the deep teal at 0.14/0.077 (major/minor), which survives
+     The grid ink is the deep teal at 0.13/0.06 (major/minor), which survives
      achromatopsia as a legible ruled field while staying far below text weight.
-     The old radials were removed: they consumed contrast budget without adding
-     a grayscale structural signal, so that budget now belongs to the grid.
+     Calmed from 0.14/0.077 and re-pitched to a 96px major / 32px minor module
+     (was 128/32) so the field reads as a precise ruled instrument rather than
+     busy graph paper, and to match dark's grid exactly — both modes now draw the
+     same chassis. The old radials were removed long ago; the budget is the grid's.
 
      `repeating-linear-gradient` on purpose rather than `linear-gradient` plus a
      `background-size`: it tiles itself, so the whole field stays inside
@@ -663,10 +689,10 @@
      `background-attachment: fixed` is already on `body`, so the grid is pinned to
      the viewport and reads as an instrument backdrop the panes travel over. */
   --body-wash:
-    repeating-linear-gradient(90deg, rgba(11, 82, 95, 0.14) 0 1px, transparent 1px 128px),
-    repeating-linear-gradient(180deg, rgba(11, 82, 95, 0.14) 0 1px, transparent 1px 128px),
-    repeating-linear-gradient(90deg, rgba(11, 82, 95, 0.077) 0 1px, transparent 1px 32px),
-    repeating-linear-gradient(180deg, rgba(11, 82, 95, 0.077) 0 1px, transparent 1px 32px);
+    repeating-linear-gradient(90deg, rgba(11, 82, 95, 0.13) 0 1px, transparent 1px 96px),
+    repeating-linear-gradient(180deg, rgba(11, 82, 95, 0.13) 0 1px, transparent 1px 96px),
+    repeating-linear-gradient(90deg, rgba(11, 82, 95, 0.06) 0 1px, transparent 1px 32px),
+    repeating-linear-gradient(180deg, rgba(11, 82, 95, 0.06) 0 1px, transparent 1px 32px);
   /* The PANEL grid, aligned to the same 32px module as the page grid above so
      the two read as one continuous field rather than a textured card sitting on a
      ruled page. The family block sets this from `--accent-rgb` at 0.05, which is
@@ -684,13 +710,12 @@
     linear-gradient(90deg, rgba(11, 82, 95, 0.075) 0 1px, transparent 1px),
     linear-gradient(180deg, rgba(11, 82, 95, 0.075) 0 1px, transparent 1px);
   --panel-texture-size: 32px 32px;
-  /* Scanlines doubled to 0.32 and the ink deepened. At 0.16 over a 5% line this
-     was ~0.8% ink — arithmetically invisible, and it read as invisible in the
-     capture. Still a hairline pattern, still `multiply`, still suppressed
-     entirely under prefers-reduced-motion. */
-  --overlay: repeating-linear-gradient(180deg, transparent 0, transparent 3px, rgba(6, 48, 56, 0.11) 4px);
-  --overlay-opacity: 0.32;
-  --overlay-blend: multiply;
+  /* Scanlines removed — the CRT overlay was the family's loudest costume tell and
+     added nothing but novelty on a tool stared at for hours. The ruled grid and
+     the seated hairlines carry the instrument read now. */
+  --overlay: none;
+  --overlay-opacity: 0;
+  --overlay-blend: normal;
 
   --ring: rgba(10, 113, 129, 0.3);
   --focus-color: #06525f;

@@ -1165,6 +1165,19 @@ body {
   color: var(--accent);
 }
 
+/* ---- details-sheet tab strip --------------------------------------------
+   The `⋯` sheet's tabs. Four labels do not always fit a 360px phone, so the
+   strip scrolls horizontally (SheetTabs scrolls the selected tab back into
+   view on change) — but the scrollbar itself is chrome the tabs do not need,
+   so it is hidden. The track hairline and gutter are borrowed from tokens the
+   sheet already uses, so no new theme tokens are introduced. */
+.kt-sheet-tabs {
+  scrollbar-width: none;
+}
+.kt-sheet-tabs::-webkit-scrollbar {
+  display: none;
+}
+
 /* ---- input / composer surface -------------------------------------------
    `--text-input` is the floor-composed token: on a phone it can never resolve
    below 16px, so iOS never focus-zooms and we never need `maximum-scale`. */
