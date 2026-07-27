@@ -12,7 +12,7 @@
 // the guard must get right are checkable without a Selection or a Node.
 
 import { describe, expect, test } from 'bun:test';
-import { pinBlockedBySelection, type SelectionLike } from './Transcript';
+import { pinBlockedBySelection, paneUsableTableWidth, type SelectionLike } from './Transcript';
 
 // Two sentinel "nodes". `contains` decides which is "inside" the viewport; the
 // guard never inspects a node itself, only asks the predicate.
@@ -65,5 +65,44 @@ describe('pinBlockedBySelection — may follow pin the viewport right now?', () 
 
   test('null endpoints are not treated as inside', () => {
     expect(pinBlockedBySelection(sel(null, null), inViewport)).toBe(false);
+  });
+});
+
+// The reading column is `max-w-[880px] mx-auto px-4` (16px each side) centred in
+// the scroller. A full-bleed table is left-anchored to the column and may grow
+// rightward to one content-pad short of the pane edge; prose keeps its measure.
+describe('paneUsableTableWidth — how wide a table may bleed', () => {
+  const PAD = 16; // sm:px-4 on .kt-content
+  const COL = 880; // max-w-[880px]
+
+  test('wide pane (1440): table bleeds well past the 848px prose measure', () => {
+    // column is 880, centred → 280px gutter each side. left-anchored table gives
+    // up only the LEFT gutter: 1440 − 16 − 16 − 280 = 1128.
+    expect(paneUsableTableWidth(1440, COL, PAD, PAD)).toBe(1128);
+    // and that is far more than prose (the column content box, 848px).
+    expect(paneUsableTableWidth(1440, COL, PAD, PAD)).toBeGreaterThan(COL - 2 * PAD);
+  });
+
+  test('1280 pane bleeds proportionally', () => {
+    // gutter = (1280 − 880)/2 = 200 → 1280 − 32 − 200 = 1048.
+    expect(paneUsableTableWidth(1280, COL, PAD, PAD)).toBe(1048);
+  });
+
+  test('at the cap (pane == column): usable is exactly the prose measure — inert', () => {
+    // No surplus, no gutter: the table can only be as wide as prose. This is the
+    // point below which the feature is a no-op (matches the old `max-width:100%`).
+    expect(paneUsableTableWidth(880, COL, PAD, PAD)).toBe(848);
+  });
+
+  test('narrow pane below the cap (readable 768 / small window): column fills the pane, so usable == its content box, no bleed', () => {
+    // In readable mode the scroller IS the surface, so paneWidth==columnWidth and
+    // the table fills that measure and no further — a deliberate, consistent
+    // choice: the narrow surface is a hard frame, nothing bleeds past it.
+    expect(paneUsableTableWidth(768, 768, PAD, PAD)).toBe(768 - 2 * PAD);
+    expect(paneUsableTableWidth(700, 700, PAD, PAD)).toBe(700 - 2 * PAD);
+  });
+
+  test('never negative, even if padding exceeds a tiny pane', () => {
+    expect(paneUsableTableWidth(20, 20, PAD, PAD)).toBe(0);
   });
 });
