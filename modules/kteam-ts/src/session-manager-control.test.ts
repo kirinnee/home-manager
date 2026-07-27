@@ -356,6 +356,80 @@ describe('in-session runtime model controls', () => {
     await expect(callRuntime(manager, { action: 'model' })).rejects.toThrow(/model turn instead of a native/);
     expect(events).toEqual([]);
   });
+
+  // OBSERVED 2026-07-27 on throwaway probes: Claude /clear is a local wipe;
+  // Claude /compact runs a model turn; Codex compacts locally.
+  test('Claude /clear injects one local command, records disposition, and does not advance the turn', async () => {
+    const { manager, view, commands, events } = runtimeManager({
+      harness: 'claude',
+      binary: 'claude-auto-loge',
+      outcome: 'handled-local',
+    });
+    const result = await callRuntime(manager, { action: 'clear' });
+
+    expect(result).toBe(view);
+    expect(commands).toEqual(['/clear']);
+    expect(result.config.turn).toBe(7);
+    expect(events).toEqual([
+      {
+        type: 'control.session_command',
+        data: { harness: 'claude', command: 'clear', disposition: 'handled-local' },
+      },
+    ]);
+  });
+
+  test('/clear that the harness turns into a model turn is refused, not silently accepted', async () => {
+    const { manager, commands, events } = runtimeManager({
+      harness: 'claude',
+      binary: 'claude-auto-loge',
+      outcome: 'turn-started',
+    });
+    await expect(callRuntime(manager, { action: 'clear' })).rejects.toThrow(/model turn instead of a local clear/);
+    expect(commands).toEqual(['/clear']);
+    expect(events).toEqual([]);
+  });
+
+  test('/compact accepts a real model turn and records turn-started', async () => {
+    const { manager, commands, events } = runtimeManager({
+      harness: 'claude',
+      binary: 'claude-auto-loge',
+      outcome: 'turn-started',
+    });
+    await callRuntime(manager, { action: 'compact' });
+    expect(commands).toEqual(['/compact']);
+    expect(events).toEqual([
+      {
+        type: 'control.session_command',
+        data: { harness: 'claude', command: 'compact', disposition: 'turn-started' },
+      },
+    ]);
+  });
+
+  test('/compact also accepts a local completion', async () => {
+    const { manager, commands, events } = runtimeManager({
+      harness: 'codex',
+      binary: 'codex-auto-loge',
+      outcome: 'handled-local',
+    });
+    await callRuntime(manager, { action: 'compact' });
+    expect(commands).toEqual(['/compact']);
+    expect(events).toEqual([
+      {
+        type: 'control.session_command',
+        data: { harness: 'codex', command: 'compact', disposition: 'handled-local' },
+      },
+    ]);
+  });
+
+  test('/clear and /compact refuse a busy pane before typing anything', async () => {
+    const clearBusy = runtimeManager({ harness: 'claude', binary: 'claude-auto-loge', promptReady: false });
+    await expect(callRuntime(clearBusy.manager, { action: 'clear' })).rejects.toThrow(/idle prompt/);
+    expect(clearBusy.commands).toEqual([]);
+
+    const compactBusy = runtimeManager({ harness: 'codex', binary: 'codex-auto-loge', promptReady: false });
+    await expect(callRuntime(compactBusy.manager, { action: 'compact' })).rejects.toThrow(/idle prompt/);
+    expect(compactBusy.commands).toEqual([]);
+  });
 });
 
 describe('send() delivery holes (turn-012 fix round)', () => {

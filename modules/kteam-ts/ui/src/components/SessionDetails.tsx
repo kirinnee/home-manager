@@ -59,6 +59,7 @@ import { buildLineage, byNewestActivity, parentDisplay, shortSessionId } from '.
 import { Link } from '../lib/router';
 import { useStore } from '../lib/store';
 import { MODE_HINT } from './ModeBadge';
+import { SessionCommandControls } from './SessionCommandControls';
 import { StatusMark } from './StatusMark';
 import { useDialogFocus } from '../hooks/useDialogFocus';
 import { SheetTabs, sheetPanelId, sheetTabId, type SheetTabSpec } from './SheetTabs';
@@ -574,6 +575,7 @@ export function SessionDetails({
                   {config.harness === 'claude' && (
                     <RuntimeEffortControls view={view} canControl={canControlRuntime} onClose={onClose} />
                   )}
+                  <SessionCommandControls view={view} open={open} canControl={canControlRuntime} />
                   {onMigrate && (
                     <div className="mt-4 border-t border-border-soft pt-3">
                       <h3 className="m-0 text-ui font-semibold text-fg">Move account + relaunch</h3>

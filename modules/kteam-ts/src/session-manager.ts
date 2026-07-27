@@ -1774,21 +1774,28 @@ export class SessionManager implements KTeamService {
     return { ...(await this.get(id)), disposition: outcome.kind };
   }
 
-  /** Native `/model` or `/effort` control that deliberately bypasses send(): it
-   * creates no user/model turn, never queues behind active work, does not
+  /** Native `/model`, `/effort`, `/clear`, or `/compact` control that
+   * deliberately bypasses send(): it never queues behind active work, does not
    * relaunch the harness, and does not optimistically rewrite observed runtime
    * state. The harness transcript remains the source of truth where available. */
   async runtime(id: string, request: RuntimeControlRequest): Promise<SessionView> {
     id = this.resolveRef(id);
     return await this.serialized(id, async () => {
       const view = await this.get(id);
+      // Every runtime control shares the same preconditions: a live, running
+      // pane sitting at an idle prompt. None of them queue, revive a terminal
+      // session, or type over live work.
       if (terminalStatuses.includes(view.state.status))
-        throw new Error('in-session model switching requires a running session');
+        throw new Error('an in-session command requires a running session');
 
       const pane = await this.tmux.state(view.config.tmuxSession);
-      if (!pane.alive || pane.dead) throw new Error('in-session model switching requires a live harness pane');
+      if (!pane.alive || pane.dead) throw new Error('an in-session command requires a live harness pane');
       if (!pane.promptReady)
-        throw new Error('in-session model switching is available only while the harness is waiting at an idle prompt');
+        throw new Error('an in-session command is available only while the harness is waiting at an idle prompt');
+
+      if (request.action === 'clear' || request.action === 'compact') {
+        return await this.runSessionCommand(id, view, request.action);
+      }
 
       const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh'] as const;
       let command: string;
@@ -1833,6 +1840,29 @@ export class SessionManager implements KTeamService {
       );
       return await this.get(id);
     });
+  }
+
+  /** `/clear` and `/compact` — harness-native context commands delivered
+   * through the same exactly-once `inject()` as `/model`. Preconditions were
+   * already checked by `runtime()`.
+   *
+   * `/clear` is purely local and must never start a model turn. `/compact` may
+   * start a summarisation turn on Claude or complete locally on Codex. Neither
+   * path advances `config.turn`; the normal watcher observes any real turn.
+   * Clearing affects only the harness's memory: kteam keeps its transcript. */
+  private async runSessionCommand(id: string, view: SessionView, action: 'clear' | 'compact'): Promise<SessionView> {
+    const command = action === 'clear' ? '/clear' : '/compact';
+    const outcome = await this.tmux.inject(view.config.tmuxSession, command);
+    if (action === 'clear' && outcome !== 'handled-local')
+      throw new Error(`the harness consumed ${command} as a model turn instead of a local clear`);
+    await this.emit(
+      id,
+      'control.session_command',
+      { harness: view.config.harness, command: action, disposition: outcome },
+      'client',
+      view.config.turn,
+    );
+    return await this.get(id);
   }
 
   /** Persist and type one native-queue entry. For file-backed delivery the

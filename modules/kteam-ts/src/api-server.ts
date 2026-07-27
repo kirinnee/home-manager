@@ -583,8 +583,13 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           }
           if (action === 'runtime' && request.method === 'POST') {
             const input = await body<RuntimeControlRequest>(request);
-            if (input.action !== 'model' && input.action !== 'effort')
-              throw new HttpError(400, 'runtime action must be "model" or "effort"');
+            if (
+              input.action !== 'model' &&
+              input.action !== 'effort' &&
+              input.action !== 'clear' &&
+              input.action !== 'compact'
+            )
+              throw new HttpError(400, 'runtime action must be "model", "effort", "clear", or "compact"');
             return await applyOnce(() => options.service.runtime(id, input));
           }
           if (action === 'answer' && request.method === 'POST') {

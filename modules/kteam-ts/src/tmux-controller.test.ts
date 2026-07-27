@@ -645,6 +645,27 @@ describe('inject() consumption outcomes are exactly-once', () => {
     expect(controller.injectionCount).toBe(1);
     expect(controller.submitCount).toBe(3);
   });
+
+  // /clear and /compact use this same exactly-once injection path.
+  test('/clear consumed as a local wipe is handled once, never retyped', async () => {
+    const clearFilled = ['› /clear', '', '  gpt-5.6-sol high · Context 0% used'].join('\n');
+    const cleared = ['  Welcome back', '', '› ', '', '  Context 0% used'].join('\n');
+    const controller = new InjectionController([idle, clearFilled], [{ pane: cleared, promptReady: true }]);
+
+    expect(await controller.inject('kteam-x-agent', '/clear')).toBe('handled-local');
+    expect(controller.injectionCount).toBe(1);
+    expect(controller.submitCount).toBe(1);
+  });
+
+  test('/compact consumed as a real model turn starts once, never retyped', async () => {
+    const compactFilled = ['› /compact', '', '  gpt-5.6-sol high · Context 24% used'].join('\n');
+    const compacting = ['✻ Compacting conversation… (16s)', '  ▰▰▰▱▱▱ 17%', '', '› '].join('\n');
+    const controller = new InjectionController([idle, compactFilled], [{ pane: compacting, promptReady: false }]);
+
+    expect(await controller.inject('kteam-x-agent', '/compact')).toBe('turn-started');
+    expect(controller.injectionCount).toBe(1);
+    expect(controller.submitCount).toBe(1);
+  });
 });
 
 describe('stop() confirms the harness process tree is gone', () => {
