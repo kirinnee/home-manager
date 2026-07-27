@@ -168,12 +168,14 @@
 // DOM (see SessionChatPage.loadOlder).
 
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import { ArrowDown } from 'lucide-react';
+import { ArrowDown, Quote } from 'lucide-react';
 import type { TranscriptBlock } from '../lib/transcript';
 import { TranscriptRow } from './TranscriptRow';
 import { useInputModality } from '../hooks/useInputModality';
 import { useTranscriptHold } from '../hooks/useLiveTick';
 import { registerJumpController, type JumpOutcome } from '../lib/pin-bridge';
+import { ContextMenu, type ContextMenuItem } from './ContextMenu';
+import { insertQuoteIntoComposer } from '../lib/quote';
 
 interface Props {
   blocks: TranscriptBlock[];
@@ -300,6 +302,32 @@ export function followPinBlocked(
   return pointerHeld || pinBlockedBySelection(sel, contains);
 }
 
+/** The `Selection` shape the Quote reader needs — {@link SelectionLike} plus the
+ *  text itself. Declared locally so the decision is testable without a DOM (this
+ *  package has no DOM impl; see Transcript.test.ts). */
+export interface QuoteSelectionLike extends SelectionLike {
+  toString(): string;
+}
+
+/** The trimmed text a "Quote" would insert for the current selection, or '' when
+ *  there is nothing to quote. Empty for a collapsed/absent selection, for one
+ *  anchored entirely OUTSIDE the transcript (the composer, another pane), or for
+ *  a whitespace-only range. `contains` is injected so the whole gate is asserted
+ *  with plain data. Either endpoint inside counts — a selection can start above
+ *  the fold and reach into the transcript, and it is still ours to quote.
+ *
+ *  READ BEFORE FOCUS. Both callers capture this the moment the menu/affordance
+ *  opens: inserting into the composer focuses it, which collapses the selection,
+ *  so the captured text — not a re-read — is what gets quoted. */
+export function quotableSelectionText(
+  sel: QuoteSelectionLike | null,
+  contains: (node: Node | null) => boolean,
+): string {
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return '';
+  if (!contains(sel.anchorNode) && !contains(sel.focusNode)) return '';
+  return sel.toString().trim();
+}
+
 /** FULL-BLEED TABLES — how wide a table may grow before it would push a page
  *  scroll. The pure geometry behind `--kt-table-bleed` (published below), kept
  *  as an exported unit so it is assertable without a DOM (this package has no
@@ -382,6 +410,18 @@ function Inner(props: Props) {
   // Resolved ONCE here and threaded into every row, so the pin affordance's
   // touch-vs-mouse choice costs one media subscription, not one per row.
   const { touchAffected } = useInputModality();
+
+  // ---- QUOTE A SELECTION -----------------------------------------------------
+  // Desktop: right-click over a transcript selection opens the shared context
+  // menu with "Quote". Touch: a small floating "Quote" affordance appears once a
+  // selection SETTLES (it must not compete with the OS long-press that MAKES the
+  // selection — see the effect below), and quotes on tap. Both capture the
+  // selection TEXT up front and quote through the same insertQuoteIntoComposer,
+  // so focusing the composer (which collapses the live selection) can never lose
+  // the text. The captured text is stored, never re-read at insert time.
+  const [quoteMenu, setQuoteMenu] = useState<{ x: number; y: number; text: string } | null>(null);
+  const [touchQuote, setTouchQuote] = useState<{ x: number; y: number; text: string } | null>(null);
+  const quoteTriggerRef = useRef<HTMLElement | null>(null);
 
   const last = blocks.length - 1;
   const lastId = blocks.length ? blocks[last]!.id : null;
@@ -834,6 +874,122 @@ function Inner(props: Props) {
     pin();
   }
 
+  // ---- QUOTE: read the selection, then hand it to the composer ---------------
+  // Only the foreground pane is interactable; a background pane is aria-hidden
+  // (App.tsx), so its selection can never be ours.
+  const isForegroundViewport = useCallback(() => {
+    const v = viewportRef.current;
+    return !!v && !v.closest('[aria-hidden="true"]');
+  }, []);
+
+  // The quotable text of the current selection AND where it sits — captured
+  // together so the touch affordance can anchor to the range and the desktop
+  // menu can quote the same text. Returns null when there is nothing to quote.
+  const readTranscriptSelection = useCallback((): { text: string; rect: DOMRect | null } | null => {
+    const v = viewportRef.current;
+    if (!v || typeof window === 'undefined') return null;
+    const sel = window.getSelection();
+    const text = quotableSelectionText(sel as QuoteSelectionLike | null, node => !!node && v.contains(node));
+    if (!text) return null;
+    let rect: DOMRect | null = null;
+    try {
+      rect = sel && sel.rangeCount > 0 ? sel.getRangeAt(0).getBoundingClientRect() : null;
+    } catch {
+      rect = null;
+    }
+    return { text, rect };
+  }, []);
+
+  const runQuote = useCallback((text: string) => {
+    setQuoteMenu(null);
+    setTouchQuote(null);
+    insertQuoteIntoComposer(text);
+  }, []);
+
+  // DESKTOP: right-click over a selection opens the shared menu. With NO
+  // selection we do nothing — the browser's own menu is left completely alone
+  // (right-click a link, an image), which is the "do not globally suppress"
+  // rule. Never attached to pointerdown/touchstart, so it cannot break making a
+  // selection in the first place.
+  const onQuoteContextMenu = useCallback(
+    (event: React.MouseEvent<HTMLElement>) => {
+      const found = readTranscriptSelection();
+      if (!found) return;
+      event.preventDefault();
+      quoteTriggerRef.current = event.currentTarget;
+      setTouchQuote(null);
+      setQuoteMenu({ x: event.clientX, y: event.clientY, text: found.text });
+    },
+    [readTranscriptSelection],
+  );
+
+  // TOUCH: the OS long-press IS the selection gesture, so the affordance must
+  // NOT compete with making a selection — it appears only once a selection
+  // EXISTS. The touch range materialises ON or AFTER release (sampling during
+  // the press sees it collapsed — the exact round-7/8 hazard), so we (a) wait a
+  // settle beat after every selectionchange and pointer release, and (b) refuse
+  // while a pointer is still down. Then a small "Quote" button sits above the
+  // range and quotes on tap, using the text captured here.
+  useEffect(() => {
+    if (!touchAffected) return undefined;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const evaluate = () => {
+      timer = null;
+      if (!isForegroundViewport() || pointerHeld.current) {
+        setTouchQuote(null);
+        return;
+      }
+      const found = readTranscriptSelection();
+      if (!found) {
+        setTouchQuote(null);
+        return;
+      }
+      const v = viewportRef.current;
+      const vr = v?.getBoundingClientRect();
+      const x = found.rect ? found.rect.left + found.rect.width / 2 : (vr?.left ?? 0) + 48;
+      const y = found.rect ? found.rect.top : (vr?.top ?? 0) + 48;
+      setTouchQuote({ x, y, text: found.text });
+    };
+    const schedule = () => {
+      if (timer !== null) clearTimeout(timer);
+      timer = setTimeout(evaluate, SELECTION_SETTLE_MS);
+    };
+    const hide = () => setTouchQuote(null);
+    document.addEventListener('selectionchange', schedule, { passive: true });
+    window.addEventListener('pointerup', schedule, { passive: true });
+    window.addEventListener('touchend', schedule, { passive: true });
+    const v = viewportRef.current;
+    v?.addEventListener('scroll', hide, { passive: true });
+    return () => {
+      if (timer !== null) clearTimeout(timer);
+      document.removeEventListener('selectionchange', schedule);
+      window.removeEventListener('pointerup', schedule);
+      window.removeEventListener('touchend', schedule);
+      v?.removeEventListener('scroll', hide);
+    };
+  }, [touchAffected, isForegroundViewport, readTranscriptSelection]);
+
+  const quoteMenuItems: ContextMenuItem[] = quoteMenu
+    ? [
+        {
+          key: 'quote',
+          label: 'Quote in composer',
+          icon: <Quote size={13} aria-hidden="true" />,
+          onSelect: () => runQuote(quoteMenu.text),
+        },
+      ]
+    : [];
+
+  // Keep the touch button on screen at 360px: clamp its left, and flip below the
+  // selection when the range is too near the top to fit the button above it.
+  const touchQuotePos = (() => {
+    if (!touchQuote || typeof window === 'undefined') return null;
+    const width = 104;
+    const left = Math.min(Math.max(8, touchQuote.x - width / 2), Math.max(8, window.innerWidth - width - 8));
+    const top = touchQuote.y > 60 ? touchQuote.y - 48 : touchQuote.y + 24;
+    return { left, top };
+  })();
+
   // ---- PIN JUMP: scroll to a pinned message, honestly ------------------------
   //
   // The Pins sheet (mounted in the header) hands a blockId to the FOREGROUND
@@ -972,6 +1128,7 @@ function Inner(props: Props) {
         data-density-region="transcript-scroller"
         className="kt-viewport min-h-0 min-w-0 flex-1 overflow-y-auto scroll-thin"
         onScroll={onScroll}
+        onContextMenu={onQuoteContextMenu}
         role="log"
         aria-label="Transcript"
       >
@@ -1028,6 +1185,33 @@ function Inner(props: Props) {
           </button>
         </div>
       )}
+
+      {/* TOUCH: the "Quote" affordance for a settled selection. A single button
+          (not a menu): tapping it quotes the text captured when it appeared, so
+          the tap collapsing the selection cannot lose it. */}
+      {touchQuote && touchQuotePos && (
+        <button
+          type="button"
+          onClick={() => runQuote(touchQuote.text)}
+          aria-label="Quote the selected text in the composer"
+          className="fixed z-40 inline-flex min-h-[44px] items-center gap-xs rounded-full border border-accent-border bg-accent px-3 text-[13px] font-semibold text-accent-fg shadow-popover"
+          style={{ left: touchQuotePos.left, top: touchQuotePos.top }}
+        >
+          <Quote size={14} aria-hidden="true" />
+          Quote
+        </button>
+      )}
+
+      {/* DESKTOP: the shared context menu, over a right-clicked selection. */}
+      <ContextMenu
+        open={quoteMenu !== null}
+        anchor={quoteMenu ?? { x: 0, y: 0 }}
+        items={quoteMenuItems}
+        onClose={() => setQuoteMenu(null)}
+        ariaLabel="Quote menu"
+        triggerRef={quoteTriggerRef}
+        touch={touchAffected}
+      />
     </div>
   );
 }

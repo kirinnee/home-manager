@@ -40,23 +40,33 @@
 // scroller, not nested inside it, so the one-scroll-region rule holds — the
 // header (search + filters) and the footer stay put while the list moves.
 
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronsLeft,
   ChevronsRight,
   Cpu,
   FolderGit2,
+  Pause,
+  Pencil,
+  Play,
   Plus,
   Radio,
   Search,
+  ServerCog,
   Settings,
   ShieldCheck,
   SlidersHorizontal,
+  StopCircle,
   User,
   Users,
   X,
 } from 'lucide-react';
 import type { SessionView } from '../types';
+import { api, ApiError, HAS_TOKEN } from '../lib/api';
+import { ContextMenu, type ContextMenuItem } from './ContextMenu';
+import { sessionActionSpecs, type SessionAction } from '../lib/session-actions';
+import { RenameSheet } from './RenameSheet';
+import { MigrateSheet } from './MigrateSheet';
 import { displayCallsign } from '../lib/callsign';
 import { Link } from '../lib/router';
 import { cn } from '../lib/utils';
@@ -85,6 +95,162 @@ import { useInputModality } from '../hooks/useInputModality';
 const EXPANDED_W = 'w-[248px]';
 /** Icon rail: one column of 28px controls plus padding. */
 const RAIL_W = 'w-[52px]';
+
+// ---------------------------------------------------------------------------
+// Session-row context menu — the shared ContextMenu, reached two ways.
+//
+// A session row is a nav `<a>`, NOT selectable prose, so a long-press here is
+// free to open a menu (unlike the transcript, where long-press IS selection).
+// Desktop opens on the native `contextmenu` (right-click); touch opens on a held
+// press — plus Android, which also fires `contextmenu` on a long-press, so both
+// paths share one opener and a click-suppression window stops the ensuing tap
+// from ALSO navigating into the session.
+// ---------------------------------------------------------------------------
+
+/** How long a finger must dwell before the row menu opens. */
+const LONG_PRESS_MS = 500;
+/** A press that drifts more than this is a scroll, not a long-press — cancel. */
+const MOVE_CANCEL_PX = 10;
+/** After the menu opens from a press, swallow the click that the same gesture
+ *  fires so it does not navigate into the session underneath the menu. */
+const CLICK_SUPPRESS_MS = 700;
+
+export type OpenSessionMenu = (view: SessionView, x: number, y: number, trigger: HTMLElement) => void;
+
+const ACTION_ICON: Record<SessionAction, React.ReactNode> = {
+  interrupt: <Pause size={13} aria-hidden="true" />,
+  stop: <StopCircle size={13} aria-hidden="true" />,
+  resume: <Play size={13} aria-hidden="true" />,
+  rename: <Pencil size={13} aria-hidden="true" />,
+  migrate: <ServerCog size={13} aria-hidden="true" />,
+};
+
+/** Row gesture handlers for the context menu, or `undefined` when the row has no
+ *  actions to offer (a read-only origin) — in which case the browser's own menu
+ *  is left completely alone. A mouse uses right-click (`contextmenu`); touch uses
+ *  a dwell timer that a scroll (a move past the threshold) cancels. */
+function useRowContextGesture(open: OpenSessionMenu | undefined, view: SessionView) {
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const startAt = useRef<{ x: number; y: number } | null>(null);
+  const triggerEl = useRef<HTMLElement | null>(null);
+  const firedAt = useRef(0);
+
+  const cancel = useCallback(() => {
+    if (timer.current !== null) {
+      clearTimeout(timer.current);
+      timer.current = null;
+    }
+    startAt.current = null;
+  }, []);
+
+  useEffect(() => cancel, [cancel]);
+
+  if (!open) return undefined;
+
+  const fire = (x: number, y: number, trigger: HTMLElement) => {
+    firedAt.current = performance.now();
+    open(view, x, y, trigger);
+  };
+
+  return {
+    // Right-click (mouse) and Android's long-press both arrive here.
+    onContextMenu: (event: React.MouseEvent<HTMLElement>) => {
+      event.preventDefault();
+      cancel();
+      fire(event.clientX, event.clientY, event.currentTarget);
+    },
+    onPointerDown: (event: React.PointerEvent<HTMLElement>) => {
+      // A mouse has right-click; only touch/pen need the dwell timer.
+      if (event.pointerType === 'mouse') return;
+      const trigger = event.currentTarget;
+      const px = event.clientX;
+      const py = event.clientY;
+      startAt.current = { x: px, y: py };
+      triggerEl.current = trigger;
+      cancel();
+      timer.current = setTimeout(() => {
+        timer.current = null;
+        if (startAt.current && triggerEl.current) fire(px, py, triggerEl.current);
+      }, LONG_PRESS_MS);
+    },
+    onPointerMove: (event: React.PointerEvent<HTMLElement>) => {
+      const s = startAt.current;
+      if (!s) return;
+      if (Math.abs(event.clientX - s.x) > MOVE_CANCEL_PX || Math.abs(event.clientY - s.y) > MOVE_CANCEL_PX) cancel();
+    },
+    onPointerUp: cancel,
+    onPointerCancel: cancel,
+    // Swallow the click that a just-fired long-press produces, so it cannot
+    // navigate into the session while the menu is open over it.
+    onClickCapture: (event: React.MouseEvent<HTMLElement>) => {
+      if (performance.now() - firedAt.current < CLICK_SUPPRESS_MS) {
+        event.preventDefault();
+        event.stopPropagation();
+        firedAt.current = 0;
+      }
+    },
+  };
+}
+
+/** The menu + Rename/Migrate sheets for the whole sidebar, hosted once. Rows ask
+ *  it to open via {@link OpenSessionMenu}; it rebuilds the actions for the picked
+ *  session and runs them through the EXISTING paths — api.interrupt/stop/resume
+ *  and the Rename/Migrate sheets, whose own confirmations it never bypasses. */
+function SessionRowMenuLayer({
+  state,
+  onClose,
+  triggerRef,
+  touch,
+  renameView,
+  migrateView,
+  onRename,
+  onMigrate,
+  onRun,
+}: {
+  state: { view: SessionView; x: number; y: number } | null;
+  onClose: () => void;
+  triggerRef: { current: HTMLElement | null };
+  touch: boolean;
+  renameView: SessionView | null;
+  migrateView: SessionView | null;
+  onRename: (view: SessionView | null) => void;
+  onMigrate: (view: SessionView | null) => void;
+  onRun: (view: SessionView, action: SessionAction) => void;
+}) {
+  const items: ContextMenuItem[] = state
+    ? sessionActionSpecs(state.view, HAS_TOKEN).map(spec => ({
+        key: spec.action,
+        label: spec.label,
+        danger: spec.danger,
+        icon: ACTION_ICON[spec.action],
+        onSelect: () => {
+          if (spec.action === 'rename') onRename(state.view);
+          else if (spec.action === 'migrate') onMigrate(state.view);
+          else onRun(state.view, spec.action);
+        },
+      }))
+    : [];
+
+  return (
+    <>
+      <ContextMenu
+        open={state !== null && items.length > 0}
+        anchor={state ? { x: state.x, y: state.y } : { x: 0, y: 0 }}
+        items={items}
+        onClose={onClose}
+        ariaLabel={
+          state
+            ? `Actions for ${displayCallsign(state.view.config.teammate) || state.view.config.name || state.view.config.id}`
+            : 'Session actions'
+        }
+        triggerRef={triggerRef}
+        touch={touch}
+      />
+      {renameView && <RenameSheet view={renameView} open onClose={() => onRename(null)} />}
+      {migrateView && <MigrateSheet view={migrateView} open onClose={() => onMigrate(null)} />}
+    </>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Controls
@@ -309,6 +475,7 @@ export function SidebarRow({
   activeId,
   byId,
   onNavigate,
+  onOpenSessionMenu,
 }: {
   row: NestedRow;
   active: boolean;
@@ -316,8 +483,17 @@ export function SidebarRow({
   byId: ReadonlyMap<string, SessionView>;
   /** Drawer only: picking a session has to shut the overlay covering it. */
   onNavigate?: () => void;
+  /** Right-click / long-press a row to open its action menu. Absent in the
+   *  static-markup tests and on a read-only origin. */
+  onOpenSessionMenu?: OpenSessionMenu;
 }) {
   const { view, depth, children, spawnedBy } = row;
+  // Only wire the gesture when there is something to offer, so a read-only
+  // origin leaves the browser's own context menu untouched.
+  const gesture = useRowContextGesture(
+    onOpenSessionMenu && sessionActionSpecs(view, HAS_TOKEN).length > 0 ? onOpenSessionMenu : undefined,
+    view,
+  );
   const cfg = view.config;
   const mark = statusMark(view);
   const label = lineageLabel(view);
@@ -349,6 +525,7 @@ export function SidebarRow({
         // fact for everyone else.
         aria-current={active ? 'page' : undefined}
         onClick={onNavigate}
+        {...gesture}
         title={[label.full, mark.label, spawnedBy && spawnedByFull, deepTitle].filter(Boolean).join('\n')}
         // `.kt-navrow` keys its active treatment off `aria-current="page"` — the
         // attribute this row already had — so the hand-rolled `border-l-2` rail
@@ -405,6 +582,7 @@ export function SidebarRow({
               activeId={activeId}
               byId={byId}
               onNavigate={onNavigate}
+              onOpenSessionMenu={onOpenSessionMenu}
             />
           ))}
         </ul>
@@ -433,6 +611,7 @@ export function GroupBlock({
   coarse,
   onFocus,
   onNavigate,
+  onOpenSessionMenu,
 }: {
   group: SessionGroup;
   lineage: LineageIndex;
@@ -445,6 +624,7 @@ export function GroupBlock({
   /** Focus this folder (folder mode). */
   onFocus: (path: string) => void;
   onNavigate?: () => void;
+  onOpenSessionMenu?: OpenSessionMenu;
 }) {
   const rows = useMemo(() => nestByLineage(group.rows, lineage), [group.rows, lineage]);
 
@@ -490,6 +670,7 @@ export function GroupBlock({
             activeId={activeId}
             byId={byId}
             onNavigate={onNavigate}
+            onOpenSessionMenu={onOpenSessionMenu}
           />
         ))}
       </ul>
@@ -692,6 +873,7 @@ function Body({
   onFocus,
   autoFocusSearch,
   onNavigate,
+  onOpenSessionMenu,
 }: {
   groups: SessionGroup[];
   count: number;
@@ -706,6 +888,7 @@ function Body({
   onFocus: (path: string) => void;
   autoFocusSearch?: boolean;
   onNavigate?: () => void;
+  onOpenSessionMenu?: OpenSessionMenu;
 }) {
   return (
     <>
@@ -731,6 +914,7 @@ function Body({
                 coarse={coarse}
                 onFocus={onFocus}
                 onNavigate={onNavigate}
+                onOpenSessionMenu={onOpenSessionMenu}
               />
             ))}
           </div>
@@ -810,6 +994,59 @@ export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSideb
   );
   const lineage = useMemo(() => buildLineage(sessions ?? []), [sessions]);
   const total = sessions?.length ?? 0;
+
+  // SESSION-ROW CONTEXT MENU. Hosted once here (not per row) so heavy sheets
+  // mount at most one at a time. Rows call `openSessionMenu`; the layer rebuilds
+  // the actions and drives the existing paths.
+  const [rowMenu, setRowMenu] = useState<{ view: SessionView; x: number; y: number } | null>(null);
+  const [renameView, setRenameView] = useState<SessionView | null>(null);
+  const [migrateView, setMigrateView] = useState<SessionView | null>(null);
+  const rowMenuTrigger = useRef<HTMLElement | null>(null);
+
+  const openSessionMenu = useCallback<OpenSessionMenu>((view, x, y, trigger) => {
+    rowMenuTrigger.current = trigger;
+    setRowMenu({ view, x, y });
+  }, []);
+  const closeSessionMenu = useCallback(() => setRowMenu(null), []);
+
+  // Interrupt / Stop / Resume reuse the same api + store.upsertSession path the
+  // header controls use; a failure surfaces plainly rather than vanishing.
+  const runSessionAction = useCallback(
+    (view: SessionView, action: SessionAction) => {
+      const id = view.config.id;
+      const settle = (p: Promise<SessionView>) =>
+        void p
+          .then(next => store.upsertSession(next))
+          .catch(error => {
+            if (typeof window !== 'undefined') window.alert(error instanceof ApiError ? error.message : String(error));
+          });
+      if (action === 'interrupt') settle(api.interrupt(id));
+      else if (action === 'resume') settle(api.resume(id));
+      else if (action === 'stop') {
+        const reason =
+          typeof window !== 'undefined'
+            ? window.prompt('Reason for stopping this session:', 'stopped from browser')
+            : null;
+        if (reason == null) return;
+        settle(api.stop(id, reason.trim() || 'stopped from browser'));
+      }
+    },
+    [store],
+  );
+
+  const sessionMenuLayer = (
+    <SessionRowMenuLayer
+      state={rowMenu}
+      onClose={closeSessionMenu}
+      triggerRef={rowMenuTrigger}
+      touch={touchAffected}
+      renameView={renameView}
+      migrateView={migrateView}
+      onRename={setRenameView}
+      onMigrate={setMigrateView}
+      onRun={runSessionAction}
+    />
+  );
 
   // Escape, focus-in, focus-restore-to-the-trigger and a real Tab trap — the
   // shared modal contract (hooks/useDialogFocus.ts), the same one the session
@@ -898,8 +1135,10 @@ export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSideb
             onFocus={onFocus}
             autoFocusSearch={focusPolicy.searchAutoFocus}
             onNavigate={onCloseDrawer}
+            onOpenSessionMenu={openSessionMenu}
           />
         </aside>
+        {sessionMenuLayer}
       </div>
     );
   }
@@ -912,6 +1151,7 @@ export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSideb
     return (
       <nav aria-label="Fleet sessions" className={cn('flex shrink-0 flex-col border-r border-border bg-bg', RAIL_W)}>
         <Rail count={visible.length} onExpand={expand} />
+        {sessionMenuLayer}
       </nav>
     );
   }
@@ -943,7 +1183,9 @@ export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSideb
         activeId={activeId}
         scope={scope}
         onFocus={onFocus}
+        onOpenSessionMenu={openSessionMenu}
       />
+      {sessionMenuLayer}
     </nav>
   );
 }
