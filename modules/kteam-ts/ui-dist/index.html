@@ -47,7 +47,7 @@
          `%…%` substitution happens at build time, so the FIRST paint of a hard
          load already points at the right file — useTheme only has to keep it
          true afterwards. -->
-    <link id="kteam-manifest" rel="manifest" href="/manifest-studio-light.255e26fc1fe8.json" />
+    <link id="kteam-manifest" rel="manifest" href="/manifest-studio-light.3daea9d30075.json" />
     <title>Kteam</title>
     <!-- Daemon substitutes the real token at serve time (loopback only). For
          non-loopback requests this stays empty and the UI shows a read-only
@@ -58,12 +58,12 @@
     <script data-cfasync="false">
       window.__KTEAM_TOKEN__ = '__KTEAM_TOKEN__';
     </script>
-    <!-- Pre-paint theme bootstrap. Resolves the stored preference to the SAME
-         single root attribute the app uses (`data-theme="<family>-<mode>"`,
-         mode already resolved) before the first paint, so the page never
-         flashes the wrong theme on a hard load. This duplicates the contract in
-         src/hooks/useTheme.ts on purpose — that file cannot run this early.
-         Keep the key, the family list and the legacy handling in step with it.
+    <!-- Pre-paint theme + text-scale bootstrap. Resolves the stored preference
+         to the SAME root attributes and text adjustment the app uses before first paint,
+         so a hard load flashes neither the wrong theme nor the wrong type size.
+         This duplicates the contract in src/hooks/useTheme.ts on purpose — that
+         file cannot run this early. Keep the key, accepted values and legacy
+         handling in step with it.
          data-cfasync=false for the same reason as the token above: a deferred
          run would lose the race with first paint. -->
     <script data-cfasync="false">
@@ -71,8 +71,10 @@
         var KEY = 'kteam-theme';
         var FAMILIES = ['studio', 'mission', 'neo', 'ember', 'contrast'];
         var MODES = ['system', 'light', 'dark'];
+        var TEXT_SCALES = { default: 1, large: 1.125, larger: 1.25 };
         var family = 'studio';
         var mode = 'system';
+        var textScale = 'default';
         try {
           var raw = localStorage.getItem(KEY);
           if (raw) {
@@ -81,6 +83,7 @@
               var o = JSON.parse(text);
               if (o && FAMILIES.indexOf(o.family) >= 0) family = o.family;
               if (o && MODES.indexOf(o.mode) >= 0) mode = o.mode;
+              if (o && Object.prototype.hasOwnProperty.call(TEXT_SCALES, o.textScale)) textScale = o.textScale;
             } else if (MODES.indexOf(text) >= 0) {
               // Legacy value: bare 'light' / 'dark' → Studio with that mode.
               mode = text;
@@ -104,6 +107,9 @@
               : 'light'
             : mode;
         document.documentElement.setAttribute('data-theme', family + '-' + resolved);
+        document.documentElement.setAttribute('data-text-scale', textScale);
+        document.documentElement.style.setProperty('text-size-adjust', TEXT_SCALES[textScale] * 100 + '%');
+        document.documentElement.style.setProperty('-webkit-text-size-adjust', TEXT_SCALES[textScale] * 100 + '%');
         // Point the manifest link at THIS theme before first paint, using the
         // same swap rule as `manifestHrefFor()` in src/hooks/useTheme.ts (keep
         // the two in step). The build stamps a studio-light href; a reader on
@@ -124,8 +130,8 @@
         }
       })();
     </script>
-    <script type="module" crossorigin src="/assets/index-C4N2Edgr.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-Co6PIgmd.css">
+    <script type="module" crossorigin src="/assets/index-CgPoviZ4.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-CvmJozbc.css">
   </head>
   <body>
     <div id="root"></div>
