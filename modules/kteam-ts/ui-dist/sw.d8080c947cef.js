@@ -46,17 +46,17 @@
   });
 
   // sw/precache.gen.ts
-  var RELEASE_ID = "b2f8c1f4cce3";
+  var RELEASE_ID = "d8080c947cef";
   var PRECACHE_URLS = [
-    "/assets/Markdown-BmhglxWY.js",
+    "/assets/Markdown-DPR1NS9Z.js",
     "/assets/SessionChatPage-Ca8FHQ6p.css",
-    "/assets/SessionChatPage-hk4-nVsp.js",
-    "/assets/TasksPage-DK1tbz2X.js",
-    "/assets/index-BFD4ckrQ.js",
-    "/assets/index-Bu_QKe-M.css",
-    "/assets/index-CGoDGKR8.js",
+    "/assets/SessionChatPage-D1nm88bJ.js",
+    "/assets/TasksPage-CI2EtPC0.js",
+    "/assets/index-BJMfEosm.js",
+    "/assets/index-C5WEL8JG.css",
+    "/assets/index-DAJD5POH.js",
     "/assets/ort.bundle.min-B0AK_E7l.js",
-    "/assets/pins-BXSTINp4.js",
+    "/assets/pins-C3bJSXFW.js",
     "/icons/apple-touch-icon.1d79d00c19.png",
     "/icons/favicon.1e0c791b41.ico",
     "/icons/favicon.fc09cfb83e.svg",
@@ -64,7 +64,7 @@
     "/icons/icon-512.4d6591da01.png",
     "/icons/maskable-192.a2dc4e508d.png",
     "/icons/maskable-512.17e4f04ec4.png",
-    "/offline.b2f8c1f4cce3.html"
+    "/offline.d8080c947cef.html"
   ];
 
   // sw/policy.ts
@@ -185,6 +185,54 @@
     return await fetch(request);
   }
 
+  // sw/notify.ts
+  function targetPath(data) {
+    if (data && typeof data === "object") {
+      const url = data.url;
+      if (typeof url === "string" && url.startsWith("/") && !url.startsWith("//"))
+        return url;
+    }
+    return "/";
+  }
+  function alreadyAt(clientUrl, path, origin) {
+    try {
+      const url = new URL(clientUrl);
+      if (url.origin !== origin)
+        return false;
+      return url.pathname === path;
+    } catch {
+      return false;
+    }
+  }
+  function planClick(clients, path, origin) {
+    for (const client of clients) {
+      try {
+        if (new URL(client.url).origin !== origin)
+          continue;
+      } catch {
+        continue;
+      }
+      return { action: "focus", client, navigate: !alreadyAt(client.url, path, origin) };
+    }
+    return { action: "open" };
+  }
+  async function runClick(plan, path, openWindow) {
+    if (plan.action === "open") {
+      await openWindow(path).catch(() => {
+        return;
+      });
+      return;
+    }
+    await plan.client.focus().catch(() => {
+      return;
+    });
+    if (plan.navigate && typeof plan.client.navigate === "function") {
+      await plan.client.navigate(path).catch(() => {
+        return;
+      });
+    }
+  }
+
   // sw/sw.ts
   var scope = self;
   async function onInstall() {
@@ -217,6 +265,15 @@
       if (event.data?.type === "SKIP_WAITING") {
         sw.skipWaiting();
       }
+    });
+    sw.addEventListener("notificationclick", (event) => {
+      event.notification.close();
+      const path = targetPath(event.notification.data);
+      event.waitUntil((async () => {
+        const clients = await sw.clients.matchAll({ type: "window", includeUncontrolled: true });
+        const plan = planClick(clients, path, sw.location.origin);
+        await runClick(plan, path, (url) => sw.clients.openWindow(url));
+      })());
     });
   }
   if (typeof ServiceWorkerGlobalScope !== "undefined" && scope instanceof ServiceWorkerGlobalScope) {
