@@ -17,7 +17,7 @@
 // neighbours — all three ran per open session, forever.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FileText, ImageOff, Loader2, MessageSquare, RotateCcw, Terminal, X } from 'lucide-react';
+import { ImageOff, Loader2, MessageSquare, RotateCcw, Terminal, X } from 'lucide-react';
 import { api, ApiError, HAS_TOKEN } from '../lib/api';
 import { useFleet, useSession, useSessionEvents, useStore, useUiControls } from '../lib/store';
 import type { ChatRecord, KTeamEvent, SessionView } from '../types';
@@ -25,12 +25,10 @@ import { Composer } from '../components/Composer';
 import { ComposerRuntime } from '../components/ComposerRuntime';
 import { QuestionForm } from '../components/QuestionForm';
 import { TerminalView } from '../components/TerminalView';
-import { FilesTab } from '../components/FilesTab';
-import { fsTabAvailable, useFsProbe } from '../components/files-api';
 import { ViewTabs } from '../components/ViewTabs';
 import { SessionHeader } from '../components/SessionHeader';
 import { Transcript } from '../components/Transcript';
-import { InAppBrowserWorkspace } from '../components/InAppBrowser';
+import { SidePaneWorkspace } from '../components/SidePane';
 import { ThinkingIndicator } from '../components/Harness';
 import { displayCallsign } from '../lib/callsign';
 import {
@@ -187,23 +185,12 @@ export function SessionChatPage({
   const [draft, setDraft] = useState('');
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [actionNotice, setActionNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
-  const [tab, setTab] = useState<'chat' | 'terminal' | 'files'>('chat');
-  // FILES TAB CAPABILITY. The daemon's `fs/*` routes ship after this UI, so the
-  // tab is probed rather than assumed: one `fs/changes` per session (cached and
-  // shared with the tab itself, so opening it costs no second request). A 404
-  // carrying `code: 'unknown_route'` — the daemon's own version-skew signal —
-  // means this build has no fs routes and the tab is not offered at all. Any
-  // OTHER failure still shows the tab, which reports the error honestly; hiding
-  // a feature because one request failed is how a reader concludes it does not
-  // exist.
-  const fsProbe = useFsProbe(sessionId);
-  const filesAvailable = fsTabAvailable(fsProbe.state);
-  // A pane is retained across navigation, so it can outlive the answer that put
-  // it on Files (a daemon downgrade, a session whose probe resolves late). Never
-  // leave the reader on a tab that no longer exists.
-  useEffect(() => {
-    if (tab === 'files' && !filesAvailable) setTab('chat');
-  }, [tab, filesAvailable]);
+  // FILES MOVED TO THE SIDE PANE. It was a third center tab here; it is now a
+  // session-scoped surface in the unified side pane (SidePane.tsx), opened from
+  // the header beside Pins, so reading the working tree no longer replaces the
+  // conversation. The capability probe moved with the trigger (SessionHeader);
+  // the probe cache in files-api.ts means neither mount costs a second request.
+  const [tab, setTab] = useState<'chat' | 'terminal'>('chat');
   // Bumped to (re-)pin the transcript to the true tail and re-engage follow.
   // Two occasions, both of which mean "the reader's attention is at the bottom":
   //   - the initial page has loaded (open a session → you want the latest)
@@ -1024,16 +1011,13 @@ export function SessionChatPage({
           // icon targets instead of ~96px of `CHAT`/`TERMINAL`, which is what
           // buys the single nowrap row.
           tabs={
-            <ViewTabs<'chat' | 'terminal' | 'files'>
+            <ViewTabs<'chat' | 'terminal'>
               tabs={[
                 { id: 'chat', label: 'Chat', icon: <MessageSquare size={compact ? 15 : 11} /> },
                 { id: 'terminal', label: 'Terminal', icon: <Terminal size={compact ? 15 : 11} /> },
-                // Third only when the daemon actually serves `fs/*`. On a phone
-                // this switch lives in the details sheet (SessionHeader moves it
-                // there), so a third entry costs the top row nothing.
-                ...(filesAvailable
-                  ? [{ id: 'files' as const, label: 'Files', icon: <FileText size={compact ? 15 : 11} /> }]
-                  : []),
+                // Files is no longer a third entry here — it opens in the side
+                // pane (see SessionHeader's surface triggers), so the chat stays
+                // on screen while the tree is read.
               ]}
               current={tab}
               onChange={setTab}
@@ -1062,8 +1046,6 @@ export function SessionChatPage({
 
       {tab === 'terminal' ? (
         <TerminalView sessionId={sessionId} tmuxSession={view?.config.tmuxSession ?? ''} />
-      ) : tab === 'files' ? (
-        <FilesTab sessionId={sessionId} cwd={view?.config.cwd} />
       ) : (
         <AttachmentImageProvider>
           {/* CHAT WIDTH SURFACE (item 5): `data-chat-width` drives the max-width.
@@ -1160,7 +1142,15 @@ export function SessionChatPage({
       )}
     </div>
   );
-  return <InAppBrowserWorkspace compact={compact}>{chatPage}</InAppBrowserWorkspace>;
+  // The unified side pane replaces the browser-only workspace: same non-modal
+  // desktop pane / mobile sheet split, now hosting browser, files, tasks and
+  // pins as session-scoped surfaces. `active` lets a retained background pane
+  // drop an open (focus-trapped) sheet; the desktop pane is safe to retain.
+  return (
+    <SidePaneWorkspace sessionId={sessionId} compact={compact} active={active !== false} cwd={view?.config.cwd}>
+      {chatPage}
+    </SidePaneWorkspace>
+  );
 }
 
 export function PendingAttachmentStrip({
