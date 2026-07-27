@@ -35,6 +35,9 @@ export interface PendingQuestion {
     options?: PendingQuestionOption[];
     multiSelect?: boolean;
   }>;
+  askedAt?: string;
+  lastSeenAt?: string;
+  missingSince?: string;
 }
 
 export interface SessionConfig {

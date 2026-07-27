@@ -141,16 +141,25 @@ export const api = {
     });
   },
   attachment: (id: string, attachmentId: string) => request<Blob>(attachmentApiPath(id, attachmentId)),
-  answer: (id: string, payload: { labels?: string[]; other?: string; responses?: string[] }, requestId?: string) =>
+  answer: (
+    id: string,
+    payload: { toolUseId: string; labels?: string[]; other?: string; responses?: string[] },
+    requestId?: string,
+  ) =>
     request<SessionView>(`/v1/sessions/${encodeURIComponent(id)}/answer`, {
       method: 'POST',
       body: JSON.stringify(payload),
       ...(requestId ? { headers: { 'x-kteam-request-id': requestId } } : {}),
     }),
-  interrupt: (id: string) =>
+  // An interrupt can be retried after its response is lost. Callers that own
+  // that logical action pass one stable id so the daemon applies it once.
+  // `toolUseId` binds the interrupt to the structured question the caller has
+  // on screen; omit it for the generic "stop what you're doing" interrupt.
+  interrupt: (id: string, requestId?: string, toolUseId?: string) =>
     request<SessionView>(`/v1/sessions/${encodeURIComponent(id)}/interrupt`, {
       method: 'POST',
-      body: '{}',
+      body: JSON.stringify(toolUseId ? { toolUseId } : {}),
+      ...(requestId ? { headers: { 'x-kteam-request-id': requestId } } : {}),
     }),
   stop: (id: string, reason: string) =>
     request<SessionView>(`/v1/sessions/${encodeURIComponent(id)}/stop`, {
