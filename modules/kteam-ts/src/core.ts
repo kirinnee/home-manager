@@ -1,6 +1,7 @@
 import { existsSync, readdirSync } from 'fs';
 import path from 'path';
 import type { Harness, Recommendation, SessionConfig } from './types';
+import { authFailureRemedy } from './usage';
 
 export function inferHarness(binary: string): Harness {
   const base = path.basename(binary);
@@ -82,6 +83,11 @@ export function discoverAutoAgents(binDir: string): string[] {
 /** Per-binary account health from `kfleet usage` (the kfleet serve /usage feed). */
 export interface AgentUsage {
   binary: string;
+  /** The account's usage provider from the kfleet feed: `anthropic`/`codex` are
+   *  OAuth logins, `zai`/`minimax` are static API keys. Drives auth-failure
+   *  remedy advice (see `authFailureRemedy`) — carried through untouched from the
+   *  kfleet `/usage` payload. */
+  provider?: string;
   ok?: boolean;
   usageBased?: boolean;
   atLimit?: boolean;
@@ -695,7 +701,10 @@ export function recommendTeam(task: string, agents: string[], options: Recommend
     else if (!account) exclusions.push({ binary, reason: 'no doctrine entry for this wrapper — routed manually only' });
     else if (health?.atLimit === true) exclusions.push({ binary, reason: 'at its usage limit' });
     else if (health?.authOk === false)
-      exclusions.push({ binary, reason: 'not logged in (kfleet usage reports auth failure)' });
+      exclusions.push({
+        binary,
+        reason: `credentials rejected (kfleet usage reports auth failure) — ${authFailureRemedy(health.provider)}`,
+      });
     else pool.push(binary);
   }
 

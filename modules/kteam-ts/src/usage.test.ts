@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  authFailureRemedy,
   compactUsageQuota,
   quotaFromUsage,
   USAGE_REFRESH_MS,
@@ -172,6 +173,47 @@ describe('session usage projection', () => {
       fiveHourResetAt: 1_785_259_371_000,
       resetAt: 1_785_259_371_000,
     });
+  });
+});
+
+describe('auth-failure remedy is achievable per account kind', () => {
+  test('OAuth accounts (anthropic/codex) → run kfleet login', () => {
+    expect(authFailureRemedy('anthropic')).toBe('run `kfleet login`');
+    expect(authFailureRemedy('codex')).toBe('run `kfleet login`');
+  });
+
+  test('minimax API-key account → rotate the key in sops, NEVER kfleet login', () => {
+    const remedy = authFailureRemedy('minimax');
+    expect(remedy).toContain('$MINIMAX_API_KEY');
+    expect(remedy).toContain('sops');
+    expect(remedy).not.toContain('kfleet login'); // login skips API-key accounts — impossible advice
+  });
+
+  test('z.ai API-key account → rotate the key in sops, NEVER kfleet login', () => {
+    const remedy = authFailureRemedy('zai');
+    expect(remedy).toContain('z.ai');
+    expect(remedy).toContain('sops');
+    expect(remedy).not.toContain('kfleet login');
+  });
+
+  test('unknown/absent provider → names both paths without guessing wrong', () => {
+    const remedy = authFailureRemedy(undefined);
+    expect(remedy).toContain('kfleet login'); // OAuth path
+    expect(remedy).toContain('sops'); // API-key path
+  });
+
+  test('quotaFromUsage carries the provider through so the remedy can be chosen', () => {
+    const quota = quotaFromUsage({
+      binary: 'claude-auto-mm3',
+      provider: 'minimax',
+      ok: false,
+      authOk: false,
+      usageBased: true,
+      atLimit: false,
+    });
+    expect(quota.authOk).toBe(false);
+    expect(quota.provider).toBe('minimax');
+    expect(authFailureRemedy(quota.provider)).toContain('$MINIMAX_API_KEY');
   });
 });
 

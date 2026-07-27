@@ -221,6 +221,9 @@ export interface SessionState {
   quota?: {
     atLimit?: boolean;
     authOk?: boolean;
+    /** Usage provider from the kfleet feed (anthropic/codex = OAuth,
+     *  zai/minimax = API key). Selects the right auth-failure remedy. */
+    provider?: string;
     fiveHourPercent?: number;
     weeklyPercent?: number;
     fiveHourResetAt?: number;

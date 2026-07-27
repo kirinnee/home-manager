@@ -256,36 +256,89 @@ interface ZaiLimit {
   nextResetTime?: number; // epoch MS
 }
 
+interface MinimaxBody {
+  model_remains?: MinimaxRemains[];
+  base_resp?: { status_code?: number; status_msg?: string };
+}
+
+/** MiniMax's `1004` ("login fail") and `2049` are its auth-verify codes. A
+ *  genuinely bad/empty key returns one on EVERY probe — but a VALID key also
+ *  receives them transiently under load/throttle (confirmed empirically: 60
+ *  spaced probes of a working key over 45 min were all `status_code:0`, yet a
+ *  single `1004` blip is what condemned the account). So one occurrence is not
+ *  proof the credential is bad; only a REPEATED one is (see `probeMinimax`). */
+const MINIMAX_AUTH_CODES = new Set([1004, 2049]);
+const MINIMAX_AUTH_ATTEMPTS = 3; // total probes that must agree before a key is declared dead
+const MINIMAX_AUTH_SPACING_MS = 2_000; // gap between corroborating probes — spaced so we never hammer MiniMax
+
+/** Classify ONE MiniMax /remains response body into a windows verdict. Pure (no
+ *  network) so the auth decision can be unit-tested with fixtures. Exported for tests. */
+export function classifyMinimaxBody(j: MinimaxBody): Windows {
+  const code = j.base_resp?.status_code;
+  if (code !== 0) {
+    const authOk = code !== undefined && MINIMAX_AUTH_CODES.has(code) ? false : undefined; // login fail / invalid key
+    return { ok: false, error: `minimax ${code ?? '?'}: ${j.base_resp?.status_msg ?? 'error'}`, authOk };
+  }
+  const gen = (j.model_remains ?? []).find(m => m.model_name === 'general') ?? j.model_remains?.[0];
+  const used = (remaining?: number): number | undefined =>
+    typeof remaining === 'number' && Number.isFinite(remaining) ? 100 - remaining : undefined;
+  return {
+    ok: true,
+    authOk: true,
+    fiveHourPercent: used(gen?.current_interval_remaining_percent),
+    weeklyPercent: used(gen?.current_weekly_remaining_percent),
+    fiveHourResetAt: numOrUndef(gen?.end_time),
+    weeklyResetAt: numOrUndef(gen?.weekly_end_time),
+  };
+}
+
+const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
+
+/** Corroborate a hard auth rejection before trusting it. An `attempt` that reports
+ *  `authOk === false` is re-run up to `attempts` times, SPACED (so we never hammer
+ *  the API); the first result that is NOT a hard rejection wins and returns at once.
+ *  A success (`authOk:true`) or an inconclusive verdict (`authOk:undefined`, e.g. a
+ *  timeout/5xx) is returned on the first try — those are never retried. This means a
+ *  transient `1004` on a valid key is cleared by the very next probe, while a
+ *  genuinely dead key (rejected on every probe) is still reported on the SAME feed
+ *  cycle, only ~`(attempts-1) * spacingMs` (≈4s) later. Exported for tests. */
+export async function corroborateAuthFailure(
+  attempt: () => Promise<Windows>,
+  opts: { attempts?: number; spacingMs?: number; sleepMs?: (ms: number) => Promise<void> } = {},
+): Promise<Windows> {
+  const attempts = Math.max(1, opts.attempts ?? MINIMAX_AUTH_ATTEMPTS);
+  const spacingMs = opts.spacingMs ?? MINIMAX_AUTH_SPACING_MS;
+  const wait = opts.sleepMs ?? sleep;
+  let last = await attempt();
+  for (let i = 1; i < attempts && last.authOk === false; i++) {
+    await wait(spacingMs);
+    last = await attempt();
+  }
+  return last;
+}
+
 /** MiniMax coding plan (sk-cp-… key, .io region). One GET returns a per-model array;
  *  the "general" entry holds the text/coding windows. NOTE: this endpoint returns
  *  HTTP 200 even on a bad key — auth is signalled by `base_resp.status_code` (0 = ok,
- *  1004/2049 = bad key). Percentages are REMAINING, so used = 100 − remaining. */
+ *  1004/2049 = bad key). Percentages are REMAINING, so used = 100 − remaining. A
+ *  single auth-verify code is NOT trusted: it is corroborated by re-probing (see
+ *  `corroborateAuthFailure`) so one transient blip can't condemn a working key. */
 async function probeMinimax(token: string, timeoutMs: number): Promise<Windows> {
-  try {
-    const j = (await getJson(
-      'https://api.minimax.io/v1/token_plan/remains',
-      { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      timeoutMs,
-    )) as { model_remains?: MinimaxRemains[]; base_resp?: { status_code?: number; status_msg?: string } };
-    const code = j.base_resp?.status_code;
-    if (code !== 0) {
-      const authOk = code === 1004 || code === 2049 ? false : undefined; // login fail / invalid key
-      return { ok: false, error: `minimax ${code ?? '?'}: ${j.base_resp?.status_msg ?? 'error'}`, authOk };
+  const attempt = async (): Promise<Windows> => {
+    try {
+      const j = (await getJson(
+        'https://api.minimax.io/v1/token_plan/remains',
+        { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        timeoutMs,
+      )) as MinimaxBody;
+      return classifyMinimaxBody(j);
+    } catch (e) {
+      // A 401/403 ⇒ rejected (false, which corroboration will re-probe); a timeout/
+      // 5xx/network error ⇒ inconclusive (undefined), returned without retry.
+      return { ok: false, error: (e as Error).message, authOk: authFromHttpError(e) };
     }
-    const gen = (j.model_remains ?? []).find(m => m.model_name === 'general') ?? j.model_remains?.[0];
-    const used = (remaining?: number): number | undefined =>
-      typeof remaining === 'number' && Number.isFinite(remaining) ? 100 - remaining : undefined;
-    return {
-      ok: true,
-      authOk: true,
-      fiveHourPercent: used(gen?.current_interval_remaining_percent),
-      weeklyPercent: used(gen?.current_weekly_remaining_percent),
-      fiveHourResetAt: numOrUndef(gen?.end_time),
-      weeklyResetAt: numOrUndef(gen?.weekly_end_time),
-    };
-  } catch (e) {
-    return { ok: false, error: (e as Error).message, authOk: authFromHttpError(e) };
-  }
+  };
+  return corroborateAuthFailure(attempt);
 }
 interface MinimaxRemains {
   model_name?: string;
