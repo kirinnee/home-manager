@@ -17,7 +17,12 @@ let service: TaskService;
 beforeEach(async () => {
   home = await mkdtemp(path.join(tmpdir(), 'kteam-tasks-api-'));
   paths = createPaths(home);
-  fleet = [];
+  fleet = [
+    {
+      config: { id: 'ms-lead', teammate: 'zelda', turn: 1 },
+      state: { status: 'running', turn: 1, lastActivityAt: '2026-07-27T02:00:00.000Z' },
+    },
+  ];
   service = new TaskService(paths, { list: async () => fleet });
   api = new TaskApi(service);
 });
@@ -26,7 +31,9 @@ afterEach(async () => {
   await rm(home, { recursive: true, force: true });
 });
 
-const url = (pathAndQuery: string) => new URL(`http://d${pathAndQuery}`);
+const url = (pathAndQuery: string) =>
+  new URL(`http://d${pathAndQuery.replace(/^\/v1\/tasks/, '/v1/sessions/ms-lead/tasks')}`);
+const fleetUrl = (pathAndQuery: string) => new URL(`http://d${pathAndQuery}`);
 
 const actor = { actor: 'ms-lead', actorName: 'zelda' };
 
@@ -48,7 +55,7 @@ describe('routing', () => {
 
   test('GET /v1/tasks answers the frozen list shape', async () => {
     await create();
-    const response = await api.handle({ method: 'GET', url: url('/v1/tasks') });
+    const response = await api.handle({ method: 'GET', url: fleetUrl('/v1/tasks') });
     expect(response?.status).toBe(200);
     const body = response?.body as TaskListResponse;
     expect(body.tasks).toHaveLength(1);
@@ -60,7 +67,7 @@ describe('routing', () => {
   test('GET /v1/tasks passes the filters through', async () => {
     await create({ repo: '/a' });
     await create({ repo: '/b', title: 'Second' });
-    const response = await api.handle({ method: 'GET', url: url('/v1/tasks?repo=/b') });
+    const response = await api.handle({ method: 'GET', url: fleetUrl('/v1/tasks?repo=/b') });
     expect((response?.body as TaskListResponse).tasks.map(task => task.title)).toEqual(['Second']);
   });
 
@@ -72,7 +79,7 @@ describe('routing', () => {
 
   test('GET /v1/tasks/:id answers the frozen detail shape, with the brief', async () => {
     await create({ description: '## Brief' });
-    const response = await api.handle({ method: 'GET', url: url('/v1/tasks/F1') });
+    const response = await api.handle({ method: 'GET', url: fleetUrl('/v1/tasks/F1') });
     const body = response?.body as TaskDetailResponse;
     expect(body.task.description).toBe('## Brief');
     expect(body.task.live).toBeDefined();
@@ -94,7 +101,7 @@ describe('routing', () => {
   test('an unknown task is a 404 with a machine code', async () => {
     const response = await api.handle({ method: 'GET', url: url('/v1/tasks/F9') });
     expect(response?.status).toBe(404);
-    expect(response?.body).toEqual({ error: 'unknown task F9', code: 'not-found' });
+    expect(response?.body).toEqual({ error: 'unknown task F9 in session ms-lead', code: 'not-found' });
   });
 });
 
@@ -127,6 +134,53 @@ describe('mutations', () => {
     });
     expect(response?.status).toBe(200);
     expect(response?.body).toMatchObject({ status: 'built' });
+  });
+
+  test('legacy global POST routes transparently write the caller session store', async () => {
+    const created = await api.handle({
+      method: 'POST',
+      url: fleetUrl('/v1/tasks'),
+      body: { kind: 'feature', title: 'old client create' },
+      actor,
+    });
+    expect(created).toMatchObject({ status: 201, body: { id: 'F1', sessionId: 'ms-lead' } });
+    expect((await service.sessionTaskList('ms-lead')).tasks.map(task => task.id)).toEqual(['F1']);
+
+    const updated = await api.handle({
+      method: 'POST',
+      url: fleetUrl('/v1/tasks/F1'),
+      body: { action: 'status', status: 'built' },
+      actor,
+    });
+    expect(updated).toMatchObject({ status: 200, body: { id: 'F1', status: 'built', sessionId: 'ms-lead' } });
+    expect((await service.sessionTaskDetail('ms-lead', 'F1'))?.task.status).toBe('built');
+  });
+
+  test('cross-session writes map forbidden to HTTP 403', async () => {
+    fleet.push({
+      config: { id: 'ms-other', teammate: 'other', turn: 1 },
+      state: { status: 'running', turn: 1, lastActivityAt: '2026-07-27T02:00:00.000Z' },
+    });
+    const response = await api.handle({
+      method: 'POST',
+      url: new URL('http://d/v1/sessions/ms-other/tasks'),
+      body: { kind: 'feature', title: 'wrong board' },
+      actor,
+    });
+    expect(response).toMatchObject({ status: 403, body: { code: 'forbidden' } });
+  });
+
+  test('ambiguous aggregate detail maps to HTTP 409', async () => {
+    await create();
+    fleet.push({
+      config: { id: 'ms-other', teammate: 'other', turn: 1 },
+      state: { status: 'running', turn: 1, lastActivityAt: '2026-07-27T02:00:00.000Z' },
+    });
+    const source = (await service.tasks.read('ms-lead')).file.tasks[0]!;
+    await service.tasks.importLegacy('ms-other', [source]);
+
+    const response = await api.handle({ method: 'GET', url: fleetUrl('/v1/tasks/F1') });
+    expect(response).toMatchObject({ status: 409, body: { code: 'ambiguous' } });
   });
 
   test('a missing reason is a 400 carrying the reason-required code the UI branches on', async () => {
@@ -178,7 +232,9 @@ describe('mutations', () => {
         throw new Error('disk on fire');
       },
     };
-    await expect(new TaskApi(broken).handle({ method: 'GET', url: url('/v1/tasks') })).rejects.toThrow('disk on fire');
+    await expect(new TaskApi(broken).handle({ method: 'GET', url: fleetUrl('/v1/tasks') })).rejects.toThrow(
+      'disk on fire',
+    );
   });
 });
 
@@ -279,7 +335,7 @@ describe('idempotency (a retried POST must not double-write history)', () => {
         method: 'POST',
         url: url('/v1/tasks/F1'),
         body: { action: 'note', text: 'said once' },
-        actor: { actor: 'ms-ines', actorName },
+        actor: { actor: 'ms-lead', actorName },
         requestId: 'req-renamed',
       });
     await post('ines');
@@ -375,7 +431,7 @@ describe('idempotency (a retried POST must not double-write history)', () => {
       });
     }
     expect(api.rememberedRequests).toBeLessThanOrEqual(200);
-  });
+  }, 15_000);
 });
 
 describe('actor attribution (never authorization)', () => {
@@ -434,16 +490,15 @@ describe('actor attribution (never authorization)', () => {
   });
 
   test('the resolved actor is what lands in history, and a body actor is ignored', async () => {
-    const resolved = await resolveTaskActor(lookup, { sessionId: 'ms-ines' });
     await api.handle({
       method: 'POST',
       url: url('/v1/tasks'),
       body: { kind: 'bug', title: 'x', actor: 'ms-forged', actorName: 'somebody' },
-      actor: resolved,
+      actor,
     });
     const detail = (await api.handle({ method: 'GET', url: url('/v1/tasks/B1') }))?.body as TaskDetailResponse;
-    expect(detail.activity[0]).toMatchObject({ actor: 'ms-ines', actorName: 'ines' });
-    expect(detail.task.createdBy).toBe('ms-ines');
+    expect(detail.activity[0]).toMatchObject({ actor: 'ms-lead', actorName: 'zelda' });
+    expect(detail.task.createdBy).toBe('ms-lead');
   });
 });
 

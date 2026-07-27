@@ -17,7 +17,7 @@ const deps: TaskDeps = { list: async () => fleet };
 beforeEach(async () => {
   home = await mkdtemp(path.join(tmpdir(), 'kteam-tasks-service-'));
   paths = createPaths(home);
-  fleet = [];
+  fleet = [session({ id: 'ms-lead', teammate: 'zelda' })];
   service = new TaskService(paths, deps);
 });
 
@@ -118,15 +118,15 @@ describe('status action', () => {
       action: 'status',
       status: 'built',
       note: '590 tests green, not deployed',
-      actor: 'ms-sasha',
-      actorName: 'sasha',
+      actor: 'ms-lead',
+      actorName: 'zelda',
     });
     expect(updated.status).toBe('built');
     const detail = await service.taskDetail('F1');
     expect(detail?.activity.at(-1)).toMatchObject({
       seq: 2,
       type: 'status',
-      actorName: 'sasha',
+      actorName: 'zelda',
       data: { from: 'todo', to: 'built', note: '590 tests green, not deployed' },
     });
   });
@@ -264,18 +264,23 @@ describe('concurrent actions on one task cannot lose an update', () => {
   // read→write→append transaction under a single hold of the task's lock.
   test('a note posted alongside a status change never reverts the status', async () => {
     await created();
-    const [, noted] = await Promise.all([
+    await Promise.all([
       service.taskAct('F1', { action: 'status', status: 'built', note: 'gates green' }),
       service.taskAct('F1', { action: 'note', text: 'concurrent note' }),
     ]);
-    expect(noted.status).toBe('built');
     const detail = await service.taskDetail('F1');
     expect(detail?.task.status).toBe('built');
-    // Both events survive — the log is the audit trail that makes last-write-wins
-    // acceptable (design §6).
-    expect(detail?.activity.map(entry => entry.type)).toEqual(['created', 'status', 'note']);
+    // Both events survive in whichever order reached the queue — scheduler
+    // order is not the invariant; one mutation undoing the other would be.
+    expect(
+      detail?.activity
+        .slice(1)
+        .map(entry => entry.type)
+        .sort(),
+    ).toEqual(['note', 'status']);
     expect(detail?.activity.map(entry => entry.seq)).toEqual([1, 2, 3]);
-    expect(JSON.parse(await readFile(service.tasks.recordFile('F1'), 'utf8')).status).toBe('built');
+    const stored = JSON.parse(await readFile(service.tasks.file('ms-lead'), 'utf8'));
+    expect(stored.tasks.find((entry: { task: { id: string } }) => entry.task.id === 'F1').task.status).toBe('built');
   });
 
   test('a burst of different actions all land, and none clobbers another field', async () => {
@@ -302,8 +307,8 @@ describe('concurrent actions on one task cannot lose an update', () => {
   test('two status writes both appear in history and the LAST one is declared', async () => {
     await created();
     await Promise.all([
-      service.taskAct('F1', { action: 'status', status: 'built', actor: 'ms-a', actorName: 'ines' }),
-      service.taskAct('F1', { action: 'status', status: 'live', actor: 'ms-b', actorName: 'sasha' }),
+      service.taskAct('F1', { action: 'status', status: 'built', actor: 'ms-lead', actorName: 'zelda' }),
+      service.taskAct('F1', { action: 'status', status: 'live', actor: 'ms-lead', actorName: 'zelda' }),
     ]);
     const detail = await service.taskDetail('F1');
     const statuses = detail?.activity.filter(entry => entry.type === 'status') ?? [];
@@ -342,10 +347,10 @@ describe('reads join derived liveness without ever storing it', () => {
       staleness: 'assignee-dead',
     });
     // The file on disk carries no derived verdict at all.
-    const raw = await readFile(service.tasks.recordFile('F1'), 'utf8');
+    const raw = await readFile(service.tasks.file('ms-lead'), 'utf8');
     expect(raw).not.toContain('live');
     expect(raw).not.toContain('assignee-dead');
-    expect(JSON.parse(raw).status).toBe('in_progress');
+    expect(JSON.parse(raw).tasks[0].task.status).toBe('in_progress');
   });
 
   test('a done marker surfaces as maybe-finished, and the status still does not move', async () => {
@@ -395,17 +400,23 @@ describe('list and detail shapes', () => {
   test('a corrupt record costs one row and is counted, never thrown', async () => {
     await created();
     await created({ title: 'Second' });
-    await writeFile(service.tasks.recordFile('F2'), '{ torn write');
+    const file = service.tasks.file('ms-lead');
+    const stored = JSON.parse(await readFile(file, 'utf8'));
+    stored.tasks.find((entry: { task: { id: string } }) => entry.task.id === 'F2').task.title = null;
+    await writeFile(file, JSON.stringify(stored));
     const listed = await service.taskList();
     expect(listed.tasks.map(task => task.id)).toEqual(['F1']);
     expect(listed.parseErrors).toBe(1);
-    expect(listed.parseErrorIds).toEqual(['F2']);
+    expect(listed.parseErrorIds).toEqual(['ms-lead:F2']);
   });
 
   test('detail is undefined for an unknown or unreadable task', async () => {
     expect(await service.taskDetail('F9')).toBeUndefined();
     await created();
-    await writeFile(service.tasks.recordFile('F1'), 'nope');
+    const file = service.tasks.file('ms-lead');
+    const stored = JSON.parse(await readFile(file, 'utf8'));
+    stored.tasks.find((entry: { task: { id: string } }) => entry.task.id === 'F1').task.title = null;
+    await writeFile(file, JSON.stringify(stored));
     expect(await service.taskDetail('F1')).toBeUndefined();
   });
 
@@ -414,14 +425,84 @@ describe('list and detail shapes', () => {
     await service.taskAct('F1', { action: 'note', text: 'one' });
     await service.taskAct('F1', { action: 'note', text: 'two' });
     expect((await service.taskDetail('F1', 2))?.activity.map(entry => entry.seq)).toEqual([3]);
-    await writeFile(service.tasks.activityFile('F1'), '{ broken\n');
+    const file = service.tasks.file('ms-lead');
+    const stored = JSON.parse(await readFile(file, 'utf8'));
+    stored.tasks.find((entry: { task: { id: string } }) => entry.task.id === 'F1').activity.push({ broken: true });
+    await writeFile(file, JSON.stringify(stored));
     const detail = await service.taskDetail('F1');
     expect(detail?.activityParseErrors).toBe(1);
-    expect(detail?.activity).toEqual([]);
+    expect(detail?.activity.map(entry => entry.seq)).toEqual([1, 2, 3]);
   });
 
   test('a lower-case id reference resolves', async () => {
     await created();
     expect((await service.taskDetail('f1'))?.task.id).toBe('F1');
+  });
+});
+
+describe('session ownership, provenance, and live convergence', () => {
+  test('an agent cannot write another session board', async () => {
+    fleet.push(session({ id: 'ms-other', teammate: 'other' }));
+    await expect(
+      service.sessionTaskCreate(
+        'ms-other',
+        { kind: 'feature', title: 'forged target' },
+        {
+          actor: 'ms-lead',
+          actorName: 'zelda',
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    expect((await service.sessionTaskList('ms-other')).tasks).toEqual([]);
+  });
+
+  test('human provenance is derived server-side and does not accept body actor fields', async () => {
+    const task = await service.sessionTaskCreate(
+      'ms-lead',
+      { kind: 'feature', title: 'human task', actor: 'forged' } as unknown as Parameters<
+        TaskService['sessionTaskCreate']
+      >[1],
+      { actor: 'user', actorName: 'forged-human-name' },
+    );
+    expect(task.createdBy).toBeNull();
+    const detail = await service.sessionTaskDetail('ms-lead', task.id);
+    expect(detail?.activity[0]).toMatchObject({ actor: 'user', actorName: 'user' });
+  });
+
+  test('each successful mutation emits a sequence-0 whole-board tasks.updated snapshot', async () => {
+    const events: import('./types').KTeamEvent[] = [];
+    const unsubscribe = service.subscribe(event => events.push(event));
+    const task = await service.sessionTaskCreate(
+      'ms-lead',
+      { kind: 'feature', title: 'live event' },
+      { actor: 'ms-lead', actorName: 'zelda' },
+    );
+    await service.sessionTaskAct(
+      'ms-lead',
+      task.id,
+      { action: 'note', text: 'converge' },
+      { actor: 'ms-lead', actorName: 'zelda' },
+    );
+    unsubscribe();
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({ sequence: 0, sessionId: 'ms-lead', type: 'tasks.updated' });
+    expect((events[1]?.data as { tasks: unknown[] }).tasks).toHaveLength(1);
+  });
+
+  test('records are session-local while fleet ids remain globally unique', async () => {
+    fleet.push(session({ id: 'ms-other', teammate: 'other' }));
+    const a = await service.sessionTaskCreate(
+      'ms-lead',
+      { kind: 'feature', title: 'a' },
+      { actor: 'ms-lead', actorName: 'zelda' },
+    );
+    const b = await service.sessionTaskCreate(
+      'ms-other',
+      { kind: 'feature', title: 'b' },
+      { actor: 'ms-other', actorName: 'other' },
+    );
+    expect([a.id, b.id]).toEqual(['F1', 'F2']);
+    expect((await service.taskList()).tasks.map(task => task.id)).toEqual(['F1', 'F2']);
+    expect((await service.taskDetail('F2'))?.sessionId).toBe('ms-other');
   });
 });

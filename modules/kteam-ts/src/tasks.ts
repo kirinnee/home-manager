@@ -1,30 +1,18 @@
-// TaskService — the daemon-side task manager, and THE import point for the
-// wiring patch. Everything the daemon, the API server, the CLI and the migration
-// script need is re-exported from here, so `api-server.ts` / `index.ts` /
-// `service.ts` each gain one import line and no knowledge of the layout:
+// TaskService — daemon-side, session-scoped task records.
 //
-//     import { TaskService, matchTaskRoute, parseTaskActionBody } from './tasks';
-//
-// Shape follows learning.ts exactly, for the same reason: the subsystem must
-// type-check and test on its own while the shared daemon files are being edited
-// by other people. It derives its own paths (tasks-store.taskPaths), declares its
-// own types (tasks-types.ts), and depends on a NARROW slice of the session world
-// (`TaskDeps` = "list the fleet"), which `SessionManager` satisfies structurally.
-//
-// THE TWO RULES IT ENFORCES:
-//
-//  1. Writes are daemon-only and serialised. The store refuses a write unless it
-//     was constructed with `role: 'daemon'`, and every mutation here is
-//     read → mutate a COPY → atomic record write → one-line activity append,
-//     ordered per task by the store's queue.
-//  2. Declared status is never derived. Every read joins on a `live` block
-//     (tasks-live.ts) that can flag a mismatch; nothing in this file writes a
-//     status the caller did not ask for.
+// Live task data is one atomic `<sessionDir>/tasks.json` snapshot per session.
+// The old fleet-global TaskStore is retained as a read-only migration source and
+// unresolved-record home; no route writes it. `GET /v1/tasks` remains an
+// aggregate read so the human can still see the whole fleet.
 
+import type { KTeamEvent } from './types';
 import type { KTeamPaths } from './paths';
 import { now } from './io';
 import {
   TaskStore,
+  compareTasks,
+  normalizeTaskId as normalizeTaskIdLocal,
+  parseTaskLinks,
   resolveStatusReason,
   toTaskSummary,
   validateTaskDescription,
@@ -34,27 +22,41 @@ import {
   validateTaskOrder,
   validateTaskStatus,
   validateTaskTitle,
-  parseTaskLinks,
   type TaskFilter,
 } from './tasks-store';
-import { annotateTasks, hasCurrentDoneMarker, type TaskAssigneeView, type TaskLiveOptions } from './tasks-live';
+import {
+  SESSION_TASK_FILE_VERSION,
+  SessionTaskStore,
+  isSafeTaskSessionId,
+  type SessionTaskStoreOptions,
+  type StoredSessionTask,
+} from './session-tasks-store';
+import { migrateLegacyTasks, type TaskMigrationReport } from './tasks-migration';
+import {
+  annotateTasks,
+  hasCurrentDoneMarker,
+  resolveAssignee,
+  type TaskAssigneeView,
+  type TaskLiveOptions,
+} from './tasks-live';
 import {
   MAX_TASK_LINKS_PER_FIELD,
   TASK_SCHEMA_VERSION,
   TaskError,
   emptyTaskLinks,
+  type FleetTaskListResponse,
+  type ScopedTaskDetailResponse,
+  type ScopedTaskView,
+  type SessionTaskListResponse,
   type Task,
   type TaskActionInput,
   type TaskActivity,
   type TaskActor,
   type TaskCreateInput,
-  type TaskDetailResponse,
   type TaskLinks,
-  type TaskListResponse,
   type TaskView,
 } from './tasks-types';
 
-// Re-exported so a wiring patch needs ONE import (see the header).
 export * from './tasks-types';
 export {
   TaskStore,
@@ -86,6 +88,8 @@ export {
   type TaskMutation,
   type ParsedActivity,
 } from './tasks-store';
+export * from './session-tasks-store';
+export * from './tasks-migration';
 export {
   annotateTask,
   annotateTasks,
@@ -98,62 +102,388 @@ export {
 } from './tasks-live';
 export * from './tasks-contract';
 
-/** The narrow slice of the session world the service needs: list the fleet so an
- *  assignee can be resolved to live state. `SessionManager.list()` satisfies it
- *  structurally, so the wiring patch passes the manager itself. */
+/** Narrow session-world dependency. `SessionManager.list()` satisfies it. */
 export interface TaskDeps {
   list(): Promise<TaskAssigneeView[]>;
 }
 
-export interface TaskServiceOptions {
-  /** Enables the `quiet` staleness flag (phase 2 by default: omitted here means
-   *  never quiet — see tasks-live.computeTaskLive). */
+export interface TaskServiceOptions extends SessionTaskStoreOptions {
   quietAfterMs?: number;
 }
 
+interface Provenance {
+  actor: string;
+  actorName: string | null;
+  session: string | null;
+}
+
 export class TaskService {
-  private readonly store: TaskStore;
+  private readonly store: SessionTaskStore;
+  private readonly legacy: TaskStore;
+  private readonly listeners = new Set<(event: KTeamEvent) => void>();
+  private initialization: Promise<TaskMigrationReport> | undefined;
 
   constructor(
     private readonly paths: KTeamPaths,
     private readonly deps: TaskDeps,
     private readonly options: TaskServiceOptions = {},
   ) {
-    // The daemon — and ONLY the daemon — gets a writable store.
-    this.store = new TaskStore(paths, { role: 'daemon' });
+    this.store = new SessionTaskStore(paths, { role: options.role ?? 'daemon' });
+    // Intentionally reader-only: live code cannot mutate the retained source.
+    this.legacy = new TaskStore(paths);
   }
 
-  /** Exposed for the migration script and tests; the service owns the only
-   *  writable handle in the process. */
-  get tasks(): TaskStore {
+  get tasks(): SessionTaskStore {
     return this.store;
   }
 
-  // ---- reads --------------------------------------------------------------
-
-  /** The board. Summaries (no briefs) plus a `live` block each, and a count of
-   *  records that were skipped because they did not parse. */
-  async taskList(filter: TaskFilter = {}): Promise<TaskListResponse> {
-    const { tasks, parseErrors, parseErrorIds } = await this.store.listTasks(filter);
-    const annotated = await this.annotate(tasks);
-    return { tasks: annotated.map(toTaskSummary), parseErrors, ...(parseErrorIds.length > 0 ? { parseErrorIds } : {}) };
+  get legacyTasks(): TaskStore {
+    return this.legacy;
   }
 
-  /** One task: the full record (brief included) plus its history. `afterSeq`
-   *  serves the UI's incremental fetch. Undefined when the task does not exist
-   *  or its record is unreadable — the caller answers 404. */
-  async taskDetail(id: string, afterSeq = 0): Promise<TaskDetailResponse | undefined> {
-    const task = await this.store.readTask(id);
-    if (task === undefined) return undefined;
-    const [view] = await this.annotate([task]);
+  /** Copy-only, idempotent startup migration. Safe to call more than once in a
+   *  process; every route also awaits it so wiring cannot accidentally serve a
+   *  half-migrated view. */
+  initialize(): Promise<TaskMigrationReport> {
+    if (this.initialization === undefined) {
+      const attempt = (async () => {
+        const views = await this.deps.list().catch(() => [] as TaskAssigneeView[]);
+        return migrateLegacyTasks(this.paths, this.legacy, this.store, views);
+      })();
+      this.initialization = attempt.catch(error => {
+        this.initialization = undefined;
+        throw error;
+      });
+    }
+    return this.initialization;
+  }
+
+  subscribe(listener: (event: KTeamEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  // ---- session reads -----------------------------------------------------
+
+  async sessionTaskList(sessionId: string, filter: TaskFilter = {}): Promise<SessionTaskListResponse> {
+    await this.initialize();
+    this.assertSessionId(sessionId);
+    const read = await this.store.list(sessionId, filter);
+    const views = await this.annotate(read.tasks.map(entry => entry.task));
+    return {
+      v: SESSION_TASK_FILE_VERSION,
+      sessionId,
+      tasks: views.map(view => ({ ...toTaskSummary(view), sessionId })),
+      parseErrors: read.parseErrors,
+      ...(read.parseErrorIds.length > 0 ? { parseErrorIds: read.parseErrorIds } : {}),
+      updatedAt: read.file.updatedAt,
+    };
+  }
+
+  async sessionTaskDetail(sessionId: string, id: string, afterSeq = 0): Promise<ScopedTaskDetailResponse | undefined> {
+    await this.initialize();
+    this.assertSessionId(sessionId);
+    const { entry, read } = await this.store.detail(sessionId, id);
+    if (entry === undefined) return undefined;
+    const [view] = await this.annotate([entry.task]);
     if (view === undefined) return undefined;
-    const { activity, parseErrors } = await this.store.readActivity(task.id, afterSeq);
-    return { task: view, activity, ...(parseErrors > 0 ? { activityParseErrors: parseErrors } : {}) };
+    const activity = afterSeq > 0 ? entry.activity.filter(item => item.seq > afterSeq) : entry.activity;
+    const activityParseErrors = read.activityParseErrors.get(entry.task.id) ?? 0;
+    return {
+      sessionId,
+      task: { ...view, sessionId },
+      activity,
+      ...(activityParseErrors > 0 ? { activityParseErrors } : {}),
+    };
   }
 
-  /** Annotate records with derived liveness. Never mutates the records; the
-   *  done-marker lookup is the only I/O and it is per DISTINCT assignee, not per
-   *  task, so a board of 40 tasks assigned to 3 teammates does 3 reads. */
+  // ---- aggregate read compatibility ------------------------------------
+
+  /** Fleet-wide READ only. Every row carries its storage scope; unresolved
+   *  legacy rows carry null and remain in the retained old store. */
+  async taskList(filter: TaskFilter = {}): Promise<FleetTaskListResponse> {
+    await this.initialize();
+    const sessionIds = await this.store.listSessionIds();
+    const scoped: Array<{ sessionId: string | null; task: Task }> = [];
+    const migrated = new Set<string>();
+    const parseErrorIds: string[] = [];
+    let parseErrors = 0;
+
+    for (const sessionId of sessionIds) {
+      const read = await this.store.list(sessionId, filter);
+      scoped.push(...read.tasks.map(entry => ({ sessionId, task: entry.task })));
+      parseErrors += read.parseErrors;
+      parseErrorIds.push(...read.parseErrorIds.map(id => `${sessionId}:${id}`));
+      // A marker proves representation only while the corresponding record is
+      // still readable. If it is damaged, the retained source becomes visible.
+      for (const id of read.file.migratedGlobalIds) {
+        if (read.file.tasks.some(entry => entry.task.id === id)) migrated.add(id);
+      }
+    }
+
+    const legacy = await this.legacy.listTasks(filter);
+    for (const task of legacy.tasks) {
+      if (!migrated.has(task.id)) scoped.push({ sessionId: null, task });
+    }
+    parseErrors += legacy.parseErrors;
+    parseErrorIds.push(...legacy.parseErrorIds.map(id => `legacy:${id}`));
+
+    scoped.sort((a, b) => compareTasks(a.task, b.task) || String(a.sessionId).localeCompare(String(b.sessionId)));
+    const annotated = await this.annotate(scoped.map(item => item.task));
+    return {
+      v: SESSION_TASK_FILE_VERSION,
+      sessionId: null,
+      tasks: annotated.map((view, index) => ({ ...toTaskSummary(view), sessionId: scoped[index]!.sessionId })),
+      parseErrors,
+      ...(parseErrorIds.length > 0 ? { parseErrorIds } : {}),
+      updatedAt: now(),
+    };
+  }
+
+  /** Compatibility detail for the existing fleet board. IDs are allocated
+   *  globally, but migration conflicts or hand-edited data can still duplicate
+   *  one; that case receives a 409 instead of an arbitrary record. */
+  async taskDetail(id: string, afterSeq = 0): Promise<ScopedTaskDetailResponse | undefined> {
+    await this.initialize();
+    const canonical = canonicalTaskId(id);
+    const sessionIds = await this.store.listSessionIds();
+    const hits: Array<{ sessionId: string | null; entry: StoredSessionTask; activityParseErrors: number }> = [];
+    let migrated = false;
+
+    for (const sessionId of sessionIds) {
+      const { entry, read } = await this.store.detail(sessionId, canonical);
+      if (entry !== undefined) {
+        hits.push({
+          sessionId,
+          entry,
+          activityParseErrors: read.activityParseErrors.get(canonical) ?? 0,
+        });
+      }
+      if (entry !== undefined && read.file.migratedGlobalIds.includes(canonical)) migrated = true;
+    }
+
+    if (!migrated) {
+      const task = await this.legacy.readTask(canonical);
+      if (task !== undefined) {
+        const history = await this.legacy.readActivity(canonical);
+        hits.push({
+          sessionId: null,
+          entry: { task, activity: history.activity },
+          activityParseErrors: history.parseErrors,
+        });
+      }
+    }
+    if (hits.length === 0) return undefined;
+    if (hits.length > 1) {
+      const scopes = hits.map(hit => hit.sessionId ?? 'legacy-unassigned').join(', ');
+      throw new TaskError(
+        'ambiguous',
+        `task ${canonical} exists in multiple scopes (${scopes}); use a session task route`,
+      );
+    }
+    const hit = hits[0]!;
+    const [view] = await this.annotate([hit.entry.task]);
+    if (view === undefined) return undefined;
+    return {
+      sessionId: hit.sessionId,
+      task: { ...view, sessionId: hit.sessionId },
+      activity: afterSeq > 0 ? hit.entry.activity.filter(item => item.seq > afterSeq) : hit.entry.activity,
+      ...(hit.activityParseErrors > 0 ? { activityParseErrors: hit.activityParseErrors } : {}),
+    };
+  }
+
+  // ---- session writes ----------------------------------------------------
+
+  async sessionTaskCreate(sessionId: string, input: TaskCreateInput, actor: TaskActor = {}): Promise<ScopedTaskView> {
+    await this.initialize();
+    const provenance = await this.authorize(sessionId, actor);
+    const kind = validateTaskKind(input.kind);
+    const title = validateTaskTitle(input.title);
+    const description = validateTaskDescription(input.description);
+    const status = input.status === undefined ? 'todo' : validateTaskStatus(input.status);
+    const statusReason = resolveStatusReason(status, input.statusReason);
+    const order = validateTaskOrder(input.order);
+    const links = createLinks(input.links);
+    const at = now();
+
+    const result = await this.store.create(sessionId, kind, id => {
+      const task: Task = {
+        v: TASK_SCHEMA_VERSION,
+        id,
+        kind,
+        title,
+        description,
+        status,
+        statusReason,
+        // The board owner is the useful default. An explicit assignee remains
+        // declared metadata (sessionId is the immutable storage scope).
+        assignee: input.assignee === undefined ? sessionId : trimOrNull(input.assignee),
+        repo: trimOrNull(input.repo),
+        links,
+        order,
+        createdAt: at,
+        createdBy: provenance.session,
+        updatedAt: at,
+      };
+      const created: TaskActivity = {
+        v: TASK_SCHEMA_VERSION,
+        seq: 1,
+        time: at,
+        actor: provenance.actor,
+        actorName: provenance.actorName,
+        type: 'created',
+        data: {
+          status,
+          kind,
+          title,
+          ...(statusReason !== null ? { reason: statusReason } : {}),
+          ...(task.assignee !== null ? { assignee: task.assignee } : {}),
+        },
+      };
+      return { task, activity: [created] };
+    });
+    const view = await this.view(result.value.task, sessionId);
+    await this.emit(sessionId, provenance);
+    return view;
+  }
+
+  async sessionTaskAct(
+    sessionId: string,
+    id: string,
+    input: TaskActionInput,
+    actor: TaskActor = {},
+  ): Promise<ScopedTaskView> {
+    await this.initialize();
+    const provenance = await this.authorize(sessionId, actor);
+    const result = await this.store.transact(sessionId, id, current => {
+      const at = now();
+      let next: Task = { ...current.task, links: parseTaskLinks(current.task.links) };
+      let activityType: TaskActivity['type'] = 'note';
+      let data: Record<string, unknown> = {};
+
+      switch (input.action) {
+        case 'status': {
+          const status = validateTaskStatus(input.status);
+          const reason = resolveStatusReason(status, input.reason);
+          const note = input.note === undefined ? null : validateTaskNote(input.note, 'note');
+          next = { ...next, status, statusReason: reason };
+          activityType = 'status';
+          data = {
+            from: current.task.status,
+            to: status,
+            ...(reason !== null ? { reason } : {}),
+            ...(note !== null ? { note } : {}),
+          };
+          break;
+        }
+        case 'note':
+        case 'feedback': {
+          activityType = input.action;
+          data = { text: validateTaskNote(input.text, input.action) };
+          break;
+        }
+        case 'link': {
+          const value = validateTaskLinkValue(input.value, input.field);
+          next = { ...next, links: applyLink(next.links, input.field, value) };
+          activityType = 'link';
+          data = { field: input.field, value };
+          break;
+        }
+        case 'assign': {
+          const assignee = trimOrNull(input.assignee);
+          next = { ...next, assignee };
+          activityType = 'assign';
+          data = { from: current.task.assignee, to: assignee };
+          break;
+        }
+        case 'order': {
+          const order = validateTaskOrder(input.order);
+          next = { ...next, order };
+          activityType = 'order';
+          data = { from: current.task.order, to: order };
+          break;
+        }
+        default: {
+          const unknown = input as { action?: unknown };
+          throw new TaskError('invalid', `unknown task action ${String(unknown.action)}`);
+        }
+      }
+
+      const highest = current.activity.reduce((value, item) => Math.max(value, item.seq), 0);
+      const activity: TaskActivity = {
+        v: TASK_SCHEMA_VERSION,
+        seq: highest + 1,
+        time: at,
+        actor: provenance.actor,
+        actorName: provenance.actorName,
+        type: activityType,
+        data,
+      };
+      return { task: { ...next, updatedAt: at }, activity: [...current.activity, activity] };
+    });
+    const view = await this.view(result.value.task, sessionId);
+    await this.emit(sessionId, provenance);
+    return view;
+  }
+
+  // ---- source-compatible service helpers (not HTTP routes) ---------------
+
+  /** Older internal callers passed actor fields in the create object. Keep that
+   *  source shape while still writing the actor's session file; API parsing does
+   *  not call this helper and never trusts those body fields. */
+  async taskCreate(input: TaskCreateInput & TaskActor): Promise<ScopedTaskView> {
+    const requested = actorSession(input) ?? trimOrNull(input.assignee);
+    if (requested === null) {
+      throw new TaskError('invalid', 'a session-scoped task create needs a target session');
+    }
+    const views = await this.deps.list().catch(() => [] as TaskAssigneeView[]);
+    const target =
+      views.find(view => view.config.id === requested)?.config.id ?? resolveAssignee(requested, views)?.config.id;
+    if (target === undefined) throw new TaskError('not-found', `no session resolves from ${requested}`);
+    const { actor, actorName, ...body } = input;
+    return this.sessionTaskCreate(target, body, { actor, actorName });
+  }
+
+  /** Compatibility aggregate-id action. It is deliberately ambiguity-safe. */
+  async taskAct(id: string, input: TaskActionInput & TaskActor): Promise<ScopedTaskView> {
+    const detail = await this.taskDetail(id);
+    if (detail === undefined) throw new TaskError('not-found', `unknown task ${canonicalTaskId(id)}`);
+    if (detail.sessionId === null) {
+      throw new TaskError(
+        'forbidden',
+        `legacy-unassigned task ${detail.task.id} is read-only; assign it to a real session and rerun migration`,
+      );
+    }
+    const { actor, actorName, ...action } = input;
+    return this.sessionTaskAct(detail.sessionId, detail.task.id, action as TaskActionInput, { actor, actorName });
+  }
+
+  // ---- internals ---------------------------------------------------------
+
+  private assertSessionId(sessionId: string): void {
+    if (!isSafeTaskSessionId(sessionId)) {
+      throw new TaskError('invalid', `not a valid session id: ${String(sessionId)}`);
+    }
+  }
+
+  private async authorize(sessionId: string, actor: TaskActor): Promise<Provenance> {
+    this.assertSessionId(sessionId);
+    const provenance = provenanceOf(actor);
+    if (provenance.session !== null && provenance.session !== sessionId) {
+      throw new TaskError('forbidden', 'an agent may only change tasks in its own session');
+    }
+    const views = await this.deps.list().catch(() => [] as TaskAssigneeView[]);
+    if (!views.some(view => view.config.id === sessionId)) {
+      throw new TaskError('not-found', `no such session ${sessionId}`);
+    }
+    return provenance;
+  }
+
+  private async view(task: Task, sessionId: string): Promise<ScopedTaskView> {
+    const [view] = await this.annotate([task]);
+    return { ...(view ?? { ...task, live: emptyLive() }), sessionId };
+  }
+
   private async annotate(tasks: readonly Task[]): Promise<TaskView[]> {
     if (tasks.length === 0) return [];
     const views = await this.deps.list().catch(() => [] as TaskAssigneeView[]);
@@ -163,7 +493,6 @@ export class TaskService {
     return annotateTasks(tasks, withMarkers, liveOptions);
   }
 
-  /** Attach `hasDoneMarker` to just the sessions some task is assigned to. */
   private async withDoneMarkers(
     tasks: readonly Task[],
     views: readonly TaskAssigneeView[],
@@ -188,146 +517,43 @@ export class TaskService {
     );
   }
 
-  // ---- writes -------------------------------------------------------------
-
-  /** Create a task: allocate the id, write the record, open the history with a
-   *  `created` line. Every cap and the reason-required rule apply here exactly as
-   *  they do to an update — a create is not a back door. */
-  async taskCreate(input: TaskCreateInput): Promise<TaskView> {
-    const kind = validateTaskKind(input.kind);
-    const title = validateTaskTitle(input.title);
-    const description = validateTaskDescription(input.description);
-    const status = input.status === undefined ? 'todo' : validateTaskStatus(input.status);
-    const statusReason = resolveStatusReason(status, input.statusReason);
-    const order = validateTaskOrder(input.order);
-    const links = createLinks(input.links);
-    const at = now();
-    const id = await this.store.allocateId(kind);
-    const record: Task = {
-      v: TASK_SCHEMA_VERSION,
-      id,
-      kind,
-      title,
-      description,
-      status,
-      statusReason,
-      assignee: trimOrNull(input.assignee),
-      repo: trimOrNull(input.repo),
-      links,
-      order,
-      createdAt: at,
-      createdBy: trimOrNull(input.actor),
-      updatedAt: at,
+  private async emit(sessionId: string, provenance: Provenance): Promise<void> {
+    const snapshot = await this.sessionTaskList(sessionId);
+    const event: KTeamEvent<SessionTaskListResponse> = {
+      sequence: 0,
+      time: now(),
+      sessionId,
+      turn: 0,
+      type: 'tasks.updated',
+      source: provenance.session ? `peer:${provenance.session}` : 'client',
+      data: snapshot,
     };
-    const written = await this.store.transact(id, async mutation => {
-      const task = await mutation.write(record, { updatedAt: at });
-      await mutation.append({
-        type: 'created',
-        actor: input.actor ?? null,
-        actorName: input.actorName ?? null,
-        time: at,
-        data: {
-          status,
-          kind,
-          title,
-          ...(statusReason !== null ? { reason: statusReason } : {}),
-          ...(task.assignee !== null ? { assignee: task.assignee } : {}),
-        },
-      });
-      return task;
-    });
-    const [view] = await this.annotate([written]);
-    // annotate() returns one view per input record, so this is defensive only.
-    return view ?? { ...written, live: { ...emptyLive() } };
-  }
-
-  /** Apply one action as ONE per-task transaction: read under the lock, mutate a
-   *  COPY, write the record atomically, append exactly one activity line — then
-   *  release. Two actions arriving together are therefore strictly ordered, and
-   *  the second one sees the first one's record.
-   *
-   *  THE LOST UPDATE THIS CLOSES: with the read outside the lock, a `note` and a
-   *  `status` posted in the same tick both read the old record and the later
-   *  write reverted the other's declared fields — a board that silently un-does a
-   *  status change. Both events are still recorded; last DECLARED write wins, and
-   *  a note can no longer clobber a status because it re-reads it under the lock.
-   *  Validation happens inside the transaction too, so a refusal writes nothing. */
-  async taskAct(id: string, input: TaskActionInput & TaskActor): Promise<TaskView> {
-    const written = await this.store.transact(id, async mutation => {
-      const current = mutation.current;
-      if (current === undefined) throw new TaskError('not-found', `unknown task ${mutation.id}`);
-
-      const at = now();
-      let next: Task = { ...current, links: parseTaskLinks(current.links) };
-      let activityType: TaskActivity['type'] = 'note';
-      let data: Record<string, unknown> = {};
-
-      switch (input.action) {
-        case 'status': {
-          const status = validateTaskStatus(input.status);
-          // A `blocked`/`dropped` write with no reason is refused, not defaulted.
-          const reason = resolveStatusReason(status, input.reason);
-          const note = input.note === undefined ? null : validateTaskNote(input.note, 'note');
-          next = { ...next, status, statusReason: reason };
-          activityType = 'status';
-          data = {
-            from: current.status,
-            to: status,
-            ...(reason !== null ? { reason } : {}),
-            ...(note !== null ? { note } : {}),
-          };
-          break;
-        }
-        case 'note':
-        case 'feedback': {
-          // Declared fields are carried over from the record just read under the
-          // lock, so a note only ever moves `updatedAt`.
-          const text = validateTaskNote(input.text, input.action);
-          activityType = input.action;
-          data = { text };
-          break;
-        }
-        case 'link': {
-          const value = validateTaskLinkValue(input.value, input.field);
-          next = { ...next, links: applyLink(next.links, input.field, value) };
-          activityType = 'link';
-          data = { field: input.field, value };
-          break;
-        }
-        case 'assign': {
-          const assignee = trimOrNull(input.assignee);
-          next = { ...next, assignee };
-          activityType = 'assign';
-          data = { from: current.assignee, to: assignee };
-          break;
-        }
-        case 'order': {
-          const order = validateTaskOrder(input.order);
-          next = { ...next, order };
-          activityType = 'order';
-          data = { from: current.order, to: order };
-          break;
-        }
-        default: {
-          // Exhaustiveness: an unknown action never silently no-ops.
-          const unknown = input as { action?: unknown };
-          throw new TaskError('invalid', `unknown task action ${String(unknown.action)}`);
-        }
+    for (const listener of this.listeners) {
+      try {
+        listener(event);
+      } catch {
+        // A socket subscriber is liveness only; it never rolls back storage.
       }
-
-      const task = await mutation.write(next, { updatedAt: at });
-      await mutation.append({
-        type: activityType,
-        actor: input.actor ?? null,
-        actorName: input.actorName ?? null,
-        time: at,
-        data,
-      });
-      return task;
-    });
-    const [view] = await this.annotate([written]);
-    return view ?? { ...written, live: { ...emptyLive() } };
+    }
   }
+}
+
+function canonicalTaskId(id: string): string {
+  const canonical = normalizeTaskIdLocal(id);
+  if (canonical === null) throw new TaskError('invalid', `not a task id: ${String(id)}`);
+  return canonical;
+}
+
+function provenanceOf(actor: TaskActor): Provenance {
+  const raw = typeof actor.actor === 'string' ? actor.actor.trim() : '';
+  if (raw === '' || raw === 'user') return { actor: 'user', actorName: 'user', session: null };
+  const actorName = typeof actor.actorName === 'string' && actor.actorName.trim() ? actor.actorName.trim() : null;
+  return { actor: raw, actorName, session: raw };
+}
+
+function actorSession(actor: TaskActor): string | null {
+  const value = typeof actor.actor === 'string' ? actor.actor.trim() : '';
+  return value && value !== 'user' ? value : null;
 }
 
 const emptyLive = () => ({
@@ -344,9 +570,6 @@ const trimOrNull = (value: unknown): string | null => {
   return trimmed.length > 0 ? trimmed : null;
 };
 
-/** Links supplied at create time, validated through the same caps as a `link`
- *  action (over-cap values are REFUSED here, not silently dropped as they are on
- *  a defensive READ of a damaged file). */
 function createLinks(input: TaskCreateInput['links']): TaskLinks {
   const links = emptyTaskLinks();
   if (!input) return links;
@@ -374,9 +597,6 @@ function createLinks(input: TaskCreateInput['links']): TaskLinks {
   return links;
 }
 
-/** Apply one link write. `branch` is singular (last write wins); the lists
- *  append, de-duplicate, and REFUSE past the per-field cap — the record is not a
- *  log, and the log is right there. */
 function applyLink(links: TaskLinks, field: 'pr' | 'branch' | 'commit' | 'doc', value: string): TaskLinks {
   const next: TaskLinks = {
     prs: [...links.prs],
@@ -390,7 +610,7 @@ function applyLink(links: TaskLinks, field: 'pr' | 'branch' | 'commit' | 'doc', 
   }
   const key = field === 'pr' ? 'prs' : field === 'commit' ? 'commits' : 'docs';
   const list = next[key];
-  if (list.includes(value)) return next; // idempotent: the same PR twice is one PR
+  if (list.includes(value)) return next;
   if (list.length >= MAX_TASK_LINKS_PER_FIELD) {
     throw new TaskError(
       'too-long',

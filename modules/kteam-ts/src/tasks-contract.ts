@@ -8,11 +8,13 @@
 // and map an error, with no task-specific validation or formatting inline. The
 // whole file is pure: no I/O, no service, no fs.
 //
-// FROZEN response shapes (agreed with ms2sdz76-f6226292):
-//   GET  /v1/tasks      => { tasks: TaskSummary[], parseErrors: number }
-//   GET  /v1/tasks/:id  => { task: TaskRecord & { live }, activity: TaskActivity[] }
-//   POST /v1/tasks      => the created TaskView
-//   POST /v1/tasks/:id  => the updated TaskView   (body: { action, … })
+// Session-scoped response shapes:
+//   GET  /v1/sessions/:sid/tasks      => SessionTaskListResponse
+//   GET  /v1/sessions/:sid/tasks/:id  => ScopedTaskDetailResponse
+//   POST /v1/sessions/:sid/tasks      => the created ScopedTaskView
+//   POST /v1/sessions/:sid/tasks/:id  => the updated ScopedTaskView
+// `/v1/tasks[/id]` survives for compatibility: GET is the fleet aggregate;
+// legacy POSTs resolve a real session and delegate to the same scoped store.
 
 import {
   TASK_ACTIONS,
@@ -24,7 +26,6 @@ import {
   type TaskActionInput,
   type TaskActionName,
   type TaskActivity,
-  type TaskActor,
   type TaskCreateInput,
   type TaskDetailResponse,
   type TaskKind,
@@ -34,6 +35,7 @@ import {
   type TaskSummary,
 } from './tasks-types';
 import { normalizeTaskId } from './tasks-store';
+import { isSafeTaskSessionId } from './session-tasks-store';
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -43,7 +45,11 @@ export type TaskRoute =
   | { kind: 'list' }
   | { kind: 'create' }
   | { kind: 'detail'; id: string }
-  | { kind: 'action'; id: string };
+  | { kind: 'action'; id: string }
+  | { kind: 'session-list'; sessionId: string }
+  | { kind: 'session-create'; sessionId: string }
+  | { kind: 'session-detail'; sessionId: string; id: string }
+  | { kind: 'session-action'; sessionId: string; id: string };
 
 /** Match the four task routes, or null when the path is not ours (so the caller
  *  falls through to its own 404 handling). The id is CANONICALISED here — `f21`
@@ -56,17 +62,42 @@ export function matchTaskRoute(method: string, pathname: string): TaskRoute | nu
     return null;
   }
   const match = pathname.match(/^\/v1\/tasks\/([^/]+)\/?$/);
-  if (!match) return null;
-  const id = normalizeTaskId(decodeURIComponent(match[1]!));
+  if (match) {
+    const id = normalizeTaskId(decode(match[1]!));
+    if (id === null) return null;
+    if (method === 'GET') return { kind: 'detail', id };
+    if (method === 'POST') return { kind: 'action', id };
+    return null;
+  }
+  const scoped = pathname.match(/^\/v1\/sessions\/([^/]+)\/tasks(?:\/([^/]+))?\/?$/);
+  if (!scoped) return null;
+  const sessionId = decode(scoped[1]!);
+  if (!isSafeTaskSessionId(sessionId)) return null;
+  const rawTaskId = scoped[2];
+  if (rawTaskId === undefined) {
+    if (method === 'GET') return { kind: 'session-list', sessionId };
+    if (method === 'POST') return { kind: 'session-create', sessionId };
+    return null;
+  }
+  const id = normalizeTaskId(decode(rawTaskId));
   if (id === null) return null;
-  if (method === 'GET') return { kind: 'detail', id };
-  if (method === 'POST') return { kind: 'action', id };
+  if (method === 'GET') return { kind: 'session-detail', sessionId, id };
+  if (method === 'POST') return { kind: 'session-action', sessionId, id };
   return null;
 }
 
+const decode = (value: string): string => {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return '';
+  }
+};
+
 /** True for any task route this build serves — used by the wiring to decide
  *  whether the 404 is "no such task route" or "not a task route at all". */
-export const isTaskPath = (pathname: string): boolean => /^\/v1\/tasks(?:\/|$)/.test(pathname);
+export const isTaskPath = (pathname: string): boolean =>
+  /^\/v1\/tasks(?:\/|$)/.test(pathname) || /^\/v1\/sessions\/[^/]+\/tasks(?:\/|$)/.test(pathname);
 
 /** Warden-scoped token policy (design §7): task READS are allowed, task WRITES
  *  are admin-only. Returns the "may not …" phrase for a denial, or null when the
@@ -163,10 +194,10 @@ const optionalString = (raw: Record<string, unknown>, key: string): string | und
   return value;
 };
 
-/** `POST /v1/tasks`. Structural parse only — caps, enums and the
+/** Task-create structural parse. Caps, enums and the
  *  reason-required rule are enforced by the service, so the CLI and the API
  *  cannot drift on them. */
-export function parseTaskCreateBody(body: unknown, actor: TaskActor = {}): TaskCreateInput {
+export function parseTaskCreateBody(body: unknown): TaskCreateInput {
   const raw = asObject(body);
   const kind = raw['kind'];
   if (typeof kind !== 'string') throw new TaskError('invalid', `kind is required (${TASK_KINDS.join(', ')})`);
@@ -176,7 +207,6 @@ export function parseTaskCreateBody(body: unknown, actor: TaskActor = {}): TaskC
   const input: TaskCreateInput = {
     kind: kind as TaskKind,
     title,
-    ...actor,
   };
   const description = optionalString(raw, 'description');
   if (description !== undefined) input.description = description;
@@ -213,9 +243,9 @@ const isActionName = (value: unknown): value is TaskActionName =>
 const isLinkField = (value: unknown): value is TaskLinkField =>
   typeof value === 'string' && (TASK_LINK_FIELDS as readonly string[]).includes(value);
 
-/** `POST /v1/tasks/:id`. Returns a discriminated action ready for
- *  `TaskService.taskAct`. */
-export function parseTaskActionBody(body: unknown, actor: TaskActor = {}): TaskActionInput & TaskActor {
+/** Task-action structural parse. Returns a discriminated action ready for the
+ *  session-scoped service mutation. */
+export function parseTaskActionBody(body: unknown): TaskActionInput {
   const raw = asObject(body);
   const action = raw['action'];
   if (!isActionName(action)) {
@@ -232,14 +262,13 @@ export function parseTaskActionBody(body: unknown, actor: TaskActor = {}): TaskA
         status: status as TaskStatus,
         ...(reason !== undefined ? { reason } : {}),
         ...(note !== undefined ? { note } : {}),
-        ...actor,
       };
     }
     case 'note':
     case 'feedback': {
       const text = optionalString(raw, 'text');
       if (text === undefined) throw new TaskError('invalid', `${action} requires text`);
-      return { action, text, ...actor };
+      return { action, text };
     }
     case 'link': {
       const field = raw['field'];
@@ -247,21 +276,21 @@ export function parseTaskActionBody(body: unknown, actor: TaskActor = {}): TaskA
         throw new TaskError('invalid', `link field must be one of ${TASK_LINK_FIELDS.join(', ')}`);
       const value = optionalString(raw, 'value');
       if (value === undefined) throw new TaskError('invalid', 'link requires a value');
-      return { action: 'link', field, value, ...actor };
+      return { action: 'link', field, value };
     }
     case 'assign': {
       const assignee = raw['assignee'];
       if (assignee !== null && typeof assignee !== 'string') {
         throw new TaskError('invalid', 'assignee must be a string, or null to unassign');
       }
-      return { action: 'assign', assignee: assignee as string | null, ...actor };
+      return { action: 'assign', assignee: assignee as string | null };
     }
     case 'order': {
       const order = raw['order'];
       if (order !== null && typeof order !== 'number') {
         throw new TaskError('invalid', 'order must be a number, or null to unrank');
       }
-      return { action: 'order', order: order as number | null, ...actor };
+      return { action: 'order', order: order as number | null };
     }
   }
 }
@@ -281,7 +310,10 @@ export function taskErrorStatus(code: TaskError['code']): number {
     case 'too-long':
       return 413;
     case 'read-only':
+    case 'forbidden':
       return 403;
+    case 'ambiguous':
+      return 409;
     case 'invalid':
     case 'reason-required':
       return 400;
