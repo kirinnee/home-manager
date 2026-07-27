@@ -303,6 +303,36 @@ describe('in-session runtime model controls', () => {
     expect(events[0]).toEqual({ type: 'control.runtime_model', data: { harness: 'codex', picker: true } });
   });
 
+  test('Claude injects one persistable effort level without advancing the turn', async () => {
+    const { manager, view, commands, events } = runtimeManager({
+      harness: 'claude',
+      binary: 'claude-auto-loge',
+    });
+    const result = await callRuntime(manager, { action: 'effort', effort: ' high ' });
+
+    expect(result).toBe(view);
+    expect(commands).toEqual(['/effort high']);
+    expect(result.config.turn).toBe(7);
+    expect(events).toEqual([
+      {
+        type: 'control.runtime_model',
+        data: { harness: 'claude', requestedEffort: 'high' },
+      },
+    ]);
+  });
+
+  test('refuses unsupported effort levels and Codex effort before typing', async () => {
+    const claude = runtimeManager({ harness: 'claude', binary: 'claude-auto-loge' });
+    await expect(callRuntime(claude.manager, { action: 'effort', effort: 'auto' })).rejects.toThrow(
+      /low, medium, high, xhigh/,
+    );
+    expect(claude.commands).toEqual([]);
+
+    const codex = runtimeManager({ harness: 'codex', binary: 'codex-auto-loge' });
+    await expect(callRuntime(codex.manager, { action: 'effort', effort: 'high' })).rejects.toThrow(/native picker/);
+    expect(codex.commands).toEqual([]);
+  });
+
   test('refuses busy panes and unsupported Claude model ids before typing', async () => {
     const busy = runtimeManager({ harness: 'claude', binary: 'claude-auto-loge', promptReady: false });
     await expect(callRuntime(busy.manager, { action: 'model', model: 'claude-sonnet-5' })).rejects.toThrow(

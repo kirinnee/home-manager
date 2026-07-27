@@ -796,7 +796,7 @@ describe('request-id idempotency for retried mutations', () => {
     expect(calls).toHaveLength(3);
   });
 
-  test('a duplicate runtime request id opens the native control only once', async () => {
+  test('a duplicate effort request id applies the native control only once', async () => {
     const service = new FakeService();
     let controls = 0;
     service.runtime = async () => {
@@ -809,7 +809,7 @@ describe('request-id idempotency for retried mutations', () => {
       fetch(`http://127.0.0.1:${server.port}/v1/sessions/s1/runtime`, {
         method: 'POST',
         headers: admin('runtime-gesture-1'),
-        body: JSON.stringify({ action: 'model' }),
+        body: JSON.stringify({ action: 'effort', effort: 'high' }),
       });
 
     expect((await request()).status).toBe(200);

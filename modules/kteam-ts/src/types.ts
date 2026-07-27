@@ -10,12 +10,13 @@ export interface RuntimeModelOption {
 }
 
 /** Semantic native-TUI control. The daemon constructs the command so this
- * endpoint cannot become an arbitrary tmux keystroke injector. Claude requires
- * an allowlisted `model`; Codex omits it and opens its own account-aware
+ * endpoint cannot become an arbitrary tmux keystroke injector. Claude accepts
+ * an allowlisted model or effort level; Codex opens its own account-aware
  * model/reasoning picker. */
 export interface RuntimeControlRequest {
-  action: 'model';
+  action: 'model' | 'effort';
   model?: string;
+  effort?: string;
 }
 export type InteractionMode = 'auto' | 'interactive';
 
@@ -240,8 +241,8 @@ export interface SessionState {
    * a local `/model` command before the selected model has been verified. */
   observedModelAt?: string;
   /** The reasoning effort Codex itself reported in thread_settings_applied.
-   *  Absent for Claude because its installed runtime exposes no reliable
-   *  in-session effort control in this environment. */
+   *  Absent for Claude because Claude does not echo its effort back after a
+   *  successful in-session `/effort` command. */
   observedReasoningEffort?: string;
   /** The harness's live activity/spinner line ("✻ Lollygagging… (34s · 2.1k
    *  tokens)") parsed from the pane — the UI's received-and-thinking signal.

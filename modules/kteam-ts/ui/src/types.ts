@@ -121,8 +121,8 @@ export interface SessionState {
    * evidence. A local `/model` command alone does not advance it. */
   observedModelAt?: string;
   /** The reasoning effort Codex itself last reported. It is not a requested
-   * setting and is deliberately absent for Claude, whose installed runtime has
-   * no reliable in-session effort control here. */
+   * setting and is absent for Claude, which does not echo the level back after
+   * a successful in-session `/effort` command. */
   observedReasoningEffort?: string;
   activity?: string;
   lastToolStartedAt?: string;
