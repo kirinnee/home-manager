@@ -947,3 +947,41 @@ export function contextWindowForModel(model: string | undefined, overrides?: Rec
   if (model?.includes('[1m]')) return 1_000_000;
   return 200_000;
 }
+
+/** Context window for a LIVE session, resolving the `[1m]` asymmetry.
+ *
+ *  `[1m]` is a wrapper-alias convention that lives ONLY in `config.model`
+ *  (`claude-opus-4-8[1m]`). The raw model id the harness records in its own
+ *  transcript/usage records is always stripped of it — a live `[1m]` session
+ *  reports `message.model = 'claude-opus-4-8'`, no suffix. So keying the 1M
+ *  determination on the served/observed model (as the naive
+ *  `contextWindowForModel(servedModel)` did) assigns every Claude `[1m]` session
+ *  a 200k window and inflates its context percentage ~5x.
+ *
+ *  Precedence, mirroring the old caller chain plus the fix:
+ *   1. `reportedWindow` — a harness that reports its own window is ground truth
+ *      (Codex reports `model_context_window` accurately); trust it verbatim.
+ *   2. `overrides` (daemon `contextWindows`) — real windows for GLM / MiniMax /
+ *      DeepSeek, matched by substring against the SERVED model (aliases already
+ *      resolved), longest pattern first. Overrides intentionally beat `[1m]`.
+ *   3. `[1m]` marker — checked on `config.model`, which is the only string that
+ *      still carries it. The served model is checked too, purely defensively.
+ *   4. default 200k. */
+export function contextWindowForSession(args: {
+  configModel?: string;
+  servedModel?: string;
+  reportedWindow?: number;
+  overrides?: Record<string, number>;
+}): number {
+  const { configModel, servedModel, reportedWindow, overrides } = args;
+  if (typeof reportedWindow === 'number' && reportedWindow > 0) return reportedWindow;
+  const forOverride = servedModel?.trim() || configModel?.trim();
+  if (forOverride && overrides) {
+    const patterns = Object.keys(overrides)
+      .filter(pattern => forOverride.includes(pattern))
+      .sort((a, b) => b.length - a.length);
+    if (patterns.length > 0) return overrides[patterns[0]!]!;
+  }
+  if (configModel?.includes('[1m]') || servedModel?.includes('[1m]')) return 1_000_000;
+  return 200_000;
+}
