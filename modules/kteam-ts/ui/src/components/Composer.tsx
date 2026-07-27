@@ -822,7 +822,11 @@ export function Composer({
 /** Desktop context shares the action line, yields width to the keyboard contract
  *  and busy controls, and never wraps — see the height note at the top. */
 function ContextStrip({ context }: { context: ComposerContext }) {
-  const { model, contextPercent, status, statusTone, liveStatus } = context;
+  const { model, contextPercent: rawContextPercent, status, statusTone, liveStatus } = context;
+  // Clamp to [0,100] for display: the stored value is honest (can momentarily
+  // exceed 100% pre-compaction), but an impossible readout must never render.
+  const contextPercent =
+    rawContextPercent == null ? rawContextPercent : Math.max(0, Math.min(100, Math.round(rawContextPercent)));
   const ctxTone =
     contextPercent == null ? 'text-faint' : contextPercent >= 90 ? 'text-err' : contextPercent >= 75 ? 'text-warn' : '';
   const socketTone = liveStatus === 'open' ? 'bg-ok' : liveStatus === 'connecting' ? 'bg-warn' : 'bg-err';
@@ -885,7 +889,9 @@ function CompactContext({
    *  already in. */
   dense?: boolean;
 }) {
-  const { contextPercent, liveStatus } = context;
+  const { contextPercent: rawContextPercent, liveStatus } = context;
+  const contextPercent =
+    rawContextPercent == null ? rawContextPercent : Math.max(0, Math.min(100, Math.round(rawContextPercent)));
   const ctxTone =
     contextPercent == null ? 'text-faint' : contextPercent >= 90 ? 'text-err' : contextPercent >= 75 ? 'text-warn' : '';
   const socketTone = liveStatus === 'open' ? 'bg-ok' : liveStatus === 'connecting' ? 'bg-warn' : 'bg-err';

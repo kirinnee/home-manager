@@ -18,6 +18,7 @@ import {
 } from './codex-transcript';
 import {
   contextWindowForModel,
+  contextWindowForSession,
   resolveDisplayModel,
   discoverAutoAgents,
   inferHarness,
@@ -2617,7 +2618,15 @@ export class SessionManager implements KTeamService {
     // Model: explicit arg > the new wrapper's kfleet default (KTEAM_MODEL) > keep.
     const nextModel = model?.trim() || (await wrapperModel(wrapper)) || view.config.model;
     const currentModel = resolveDisplayModel(view.config.binary, view.config.model, view.state.observedModel).model;
-    const currentWindow = contextWindowForModel(currentModel, this.options.contextWindows);
+    // Detect `[1m]` from config.model, not the stripped served id, so the
+    // downgrade guard sees the true current window (was mis-reading a 1M session
+    // as 200k). nextModel is a config-level id (arg / kfleet default), so it
+    // still carries `[1m]` and can stay on contextWindowForModel.
+    const currentWindow = contextWindowForSession({
+      configModel: view.config.model,
+      servedModel: currentModel,
+      overrides: this.options.contextWindows,
+    });
     const targetWindow = contextWindowForModel(nextModel, this.options.contextWindows);
     const currentContextTokens =
       view.state.contextTokens ??
@@ -4797,12 +4806,17 @@ export class SessionManager implements KTeamService {
         | undefined;
       const observedModelAt = usageEvent?.data.model ? now() : undefined;
       const contextWindowFromUsage = usageEvent
-        ? (usageEvent.data.contextWindow ??
-          contextWindowForModel(
-            usageEvent.data.model ??
+        ? contextWindowForSession({
+            // `[1m]` survives ONLY on config.model — the transcript model id is
+            // stripped, so it must drive the 1M determination. The served model
+            // (observed > wrapper-resolved) still drives the overrides table.
+            configModel: view.config.model,
+            servedModel:
+              usageEvent.data.model ??
               resolveDisplayModel(view.config.binary, view.config.model, view.state.observedModel).model,
-            this.options.contextWindows,
-          ))
+            reportedWindow: usageEvent.data.contextWindow,
+            overrides: this.options.contextWindows,
+          })
         : undefined;
       const contextPercentFromUsage = usageEvent
         ? Math.round((usageEvent.data.contextTokens / contextWindowFromUsage!) * 100)
@@ -5013,12 +5027,17 @@ export class SessionManager implements KTeamService {
         | undefined;
       const observedModelAt = usageEvent?.data.model || runtimeSettings?.data.model ? now() : undefined;
       const contextWindowFromUsage = usageEvent
-        ? (usageEvent.data.contextWindow ??
-          contextWindowForModel(
-            usageEvent.data.model ??
+        ? contextWindowForSession({
+            // `[1m]` survives ONLY on config.model — the transcript model id is
+            // stripped, so it must drive the 1M determination. The served model
+            // (observed > wrapper-resolved) still drives the overrides table.
+            configModel: view.config.model,
+            servedModel:
+              usageEvent.data.model ??
               resolveDisplayModel(view.config.binary, view.config.model, view.state.observedModel).model,
-            this.options.contextWindows,
-          ))
+            reportedWindow: usageEvent.data.contextWindow,
+            overrides: this.options.contextWindows,
+          })
         : undefined;
       const contextPercentFromUsage = usageEvent
         ? Math.round((usageEvent.data.contextTokens / contextWindowFromUsage!) * 100)
