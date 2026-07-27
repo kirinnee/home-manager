@@ -46,7 +46,7 @@ export const THEME_FAMILIES: readonly ThemeFamily[] = [
   { id: 'neo', label: 'Neo-Brutalism', blurb: 'Hard rules, flat offset shadows, AA-checked.' },
   { id: 'ember', label: 'Ember', blurb: 'Warm low-blue-light paper for long evenings.' },
   { id: 'contrast', label: 'High Contrast', blurb: 'Maximum legibility, AAA-targeted, no effects.' },
-  { id: 'notebook', label: 'Notebook', blurb: 'Ruled paper, ink-blue pen, a blackboard after dark.' },
+  { id: 'notebook', label: 'Notebook', blurb: 'Warm cream paper, terracotta ink, a serif hand for headings.' },
 ];
 
 const FAMILY_IDS: readonly string[] = THEME_FAMILIES.map(f => f.id);

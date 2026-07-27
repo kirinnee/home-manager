@@ -1451,46 +1451,66 @@
 }
 
 /* ============================================================================
-   FAMILY 6 — NOTEBOOK. A well-kept school notebook: ruled paper, a red margin
-   rule, a neat rounded hand for the display voice, ink-blue as the pen you write
-   with, and almost no elevation — paper does not float. The identity is
-   STRUCTURAL, and it survives greyscale: evenly-spaced HORIZONTAL rules across
-   the whole field (page + panels) plus a SINGLE vertical margin line reads as a
-   ruled page, not as Mission's uniform square grid.
+   FAMILY 6 — NOTEBOOK. Claude's own paper: warm cream stock, a soft terracotta
+   clay accent used sparingly, and the restraint of a printed page you can read
+   for hours. NOT the ruled exercise book that first shipped here — that reading
+   was rejected. No rules, no red margin line.
 
-   The rules live in `--body-wash` (the shell/gutters) and `--panel-texture`
-   (inside panels), both of which paint BEHIND content — never in `--overlay`,
-   which is fixed above the page and would sit on top of the text. Line inks are
-   kept faint (`--rule-ink` / `--margin-ink`, per mode) so body copy still clears
-   AA where a rule crosses under it; the audit's WASH table checks that.
+   The identity is STRUCTURAL, and it is built to survive greyscale (warmth
+   vanishes when colour is removed, so a warm palette alone would fail the ship
+   gate). What names the family with colour gone, in order of strength:
 
-   Dark is a BLACKBOARD, not an inverted page: dark slate stock, chalk ink, chalk
-   rules and chalk-pastel accents — the classroom board rather than the exercise
-   book, exactly the "dark paper stock / blackboard" the design brief asks for.
+     1. TYPE VOICE — a book SERIF for the display/heading register over a clean
+        humanist SANS body and, crucially, a SANS transcript (`--font-prose`).
+        This is Claude's masthead-serif / body-sans pairing. It is the inverse
+        of Ember, whose PROSE is serif and whose labels are small-caps; here the
+        long-form reading is sans and headings are serif. A greyscale glance at a
+        transcript shows sans paragraphs under a serif title — no other family
+        does that.
+     2. GEOMETRY — soft but MODEST, uniform radii (~9–12px). Tabs, badges and
+        controls are gently rounded RECTANGLES, never pills. That reads distinct
+        from Ember's full pills and from Neo/Contrast's hard corners even in grey.
+     3. ELEVATION — flat. Paper does not float: controls and panels carry no drop
+        shadow, only a hairline bottom seam (`--rule-inset`), so the page reads as
+        stacked sheets rather than floating cards (Studio's soft blur).
+     4. RHYTHM — a generous book measure (78ch) and loose leading; comfortable,
+        unhurried, not the dense instrument panel of Mission.
+
+   A faint warm PAPER TOOTH (`--tooth-ink`, a fine low-alpha grain on panels, and
+   a soft uneven wash on the page) adds stock warmth up close. It is honestly a
+   SECONDARY cue — subtle by design, closer to none than to a pattern — and it is
+   not what carries the greyscale read; the type and geometry above do that. It
+   paints BEHIND content via `--panel-texture` / `--body-wash`, never in
+   `--overlay` (which sits above the text).
+
+   Dark is a WARM dark: ink on dark paper under a dim reading lamp — umber-brown
+   stock, warm cream ink, and the SAME terracotta accent (lifted for legibility)
+   so the family is recognisably one object across modes. It is deliberately not
+   a cold slate and not the old blackboard.
    ============================================================================ */
 :root[data-theme^='notebook-'],
 [data-swatch^='notebook-'] {
   /* ═══ structural token layer ═══ */
 
-  /* The neat rounded hand is what makes Notebook a different TOOL, not cream
-     Studio. It is DISPLAY-only — titles, tabs, labels — so body prose stays in a
-     legible rounded humanist and the transcript is never set in a marker face. */
-  --font-display:
-    'Chalkboard SE', 'Comic Sans MS', 'Comic Neue', 'Segoe Print', 'Bradley Hand', ui-rounded, system-ui, sans-serif;
-  --font-body: 'Nunito', 'Quicksand', 'Varela Round', ui-rounded, 'Segoe UI', system-ui, -apple-system, sans-serif;
-  --font-mono: 'Comic Mono', 'Cascadia Mono', 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace;
+  /* The type pairing is what makes Notebook a different TOOL, not warm Studio and
+     not Ember: a book serif for the DISPLAY register (titles, tabs, labels) over
+     a humanist SANS body — and `--font-prose` stays SANS, so the transcript reads
+     like clean printed body copy, the mirror image of Ember's serif prose. */
+  --font-display: Charter, 'Bitstream Charter', 'Sitka Text', Cambria, 'Iowan Old Style', Georgia, serif;
+  --font-body: 'Source Sans 3', 'Source Sans Pro', Seravek, 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Mono', ui-monospace, Menlo, Consolas, monospace;
   --font-prose: var(--font-body);
   --chrome-fg: var(--faint);
 
-  /* Labels are WRITTEN words, not shouted caps — the sixth distinct treatment
-     (Ember owns small-caps, three families shout uppercase). */
+  /* Labels are set words in the serif display voice, not shouted caps and not
+     Ember's small-caps — the sixth distinct label treatment. */
   --label-transform: none;
   --label-variant: normal;
   --label-size: 11.5px;
-  --label-weight: 700;
-  --tracking-label: 0.01em;
+  --label-weight: 600;
+  --tracking-label: 0.005em;
   --display-transform: none;
-  --weight-display: 700;
+  --weight-display: 600;
 
   --text-2xs: 10.5px;
   --text-xs: 11.5px;
@@ -1498,31 +1518,31 @@
   --text-base: 13.5px;
   --text-md: 14px;
   --text-lg: 16px;
-  --text-display: 1.22rem;
+  --text-display: 1.3rem;
   --text-input-desktop: 14px;
   --font-size-base: 14px;
-  --leading-base: 1.6;
+  --leading-base: 1.62;
   --tracking-display: 0;
   --md-font-size: 14.5px;
-  --md-leading: 1.66;
+  --md-leading: 1.72;
   --code-font-size: 13px;
   --chrome-font-size: 11.5px;
-  --prose-measure: 76ch;
+  --prose-measure: 78ch;
 
-  /* Soft, rounded corners — a notebook is soft-cornered, but its rules stay
-     straight (that is the wash's job, not the radius). */
-  --radius-control: 8px;
-  --radius-panel: 13px;
-  --radius-badge: 9999px;
+  /* Soft but MODEST radii — rounded rectangles, never pills. This is the
+     geometric signature that separates Notebook from Ember (full pills) in grey. */
+  --radius-control: 9px;
+  --radius-panel: 12px;
+  --radius-badge: 7px;
   --radius-tab: 9px;
-  --radius-input: 8px;
+  --radius-input: 9px;
 
   --bubble-border: transparent;
   --bubble-stroke: 1px;
   --bubble-radius: var(--radius-panel);
   --bubble-shadow: var(--rule-inset);
 
-  /* Depth is a paper seam, not a float. */
+  /* Paper does not float: no drop shadow, depth is a hairline bottom seam. */
   --shadow-control: none;
   --rule-inset: inset 0 -1px 0 var(--border-soft);
   --rail-active: inset 3px 0 0 var(--accent);
@@ -1533,25 +1553,19 @@
   --row-min-h-desktop: 40px;
   --pad-control-x: 13px;
   --pad-badge-x: 10px;
-  --pad-panel: 14px;
+  --pad-panel: 15px;
   --pad-row-y: 9px;
   --pad-cell-x: 11px;
   --gap-xs: 6px;
   --gap-sm: 9px;
-  --gap-md: 13px;
+  --gap-md: 14px;
 
-  /* THE RULED FIELD. Horizontal rules every 30px behind the whole page and
-     inside every panel, aligned to the same 30px module so the two read as one
-     continuous sheet. `--rule-ink`/`--margin-ink` are per-mode so the feint blue
-     of an exercise book and the chalk of a blackboard both come out right. The
-     margin is ONE vertical line near the left — the thing that says "notebook
-     page" rather than "grid". repeating-linear-gradient tiles itself, so this
-     stays entirely in themes.css and needs no change to `body`. */
-  --panel-texture-size: 100% 30px;
-  --panel-texture: linear-gradient(180deg, var(--rule-ink) 0 1px, transparent 1px);
-  --body-wash:
-    linear-gradient(90deg, transparent 0 55px, var(--margin-ink) 55px 56.5px, transparent 56.5px),
-    repeating-linear-gradient(180deg, var(--rule-ink) 0 1px, transparent 1px 30px);
+  /* PAPER TOOTH — a fine, low-alpha grain on panels (a whisper, not a pattern)
+     plus a soft uneven warm wash on the page. `--tooth-ink` is per-mode. This is
+     a secondary warmth cue by design, NOT ruling and NOT Mission's square grid —
+     the greyscale read is carried by the type and geometry above, not by this. */
+  --panel-texture-size: 4px 4px;
+  --panel-texture: radial-gradient(circle at 1px 1px, var(--tooth-ink) 0.5px, transparent 1.3px);
 
   --radius-xs: 5px;
   --radius-sm: 8px;
@@ -1564,176 +1578,187 @@
 :root[data-theme='notebook-light'],
 [data-swatch='notebook-light'] {
   /* ═══ structural token layer ═══ */
-  --border-strong: #837e6d; /* 3.05:1 control edge on the lightest paper (surface-3) */
+  --border-strong: #837b68; /* 3.10:1 control edge on the lightest paper (surface-3) */
 
   color-scheme: light;
 
-  /* cream desk → paper sheet */
-  --bg: #f4f1e6;
-  --surface: #fdfbf3;
-  --surface-2: #efeadb;
-  --surface-3: #e6dfcc;
-  --fg: #22242e;
-  --fg-soft: #3d4250;
-  --muted: #545a6b;
-  --faint: #585c6e;
-  --border: #e0d9c6;
-  --border-soft: #ebe5d6;
+  /* warm cream desk → paper sheet (Claude's ivory, not grey-white, not blue-white) */
+  --bg: #f1ede2;
+  --surface: #faf7ef;
+  --surface-2: #ece7d9;
+  --surface-3: #e3ddcc;
+  --fg: #262019;
+  --fg-soft: #473f33;
+  --muted: #665d4b;
+  --faint: #655c4a;
+  --border: #e0d8c6;
+  --border-soft: #eae3d4;
 
-  /* fountain-pen ink blue — bluer than Studio's indigo */
-  --accent: #2f4ea3;
-  --accent-rgb: 47 78 163;
-  --accent-fg: #ffffff;
-  --accent-soft: #e6ebf7;
-  --accent-border: #bcc9ec;
-  --accent-strong: #263f87;
+  /* soft terracotta / clay — the accent doubles as link/mark ink AND button fill,
+     so it must clear AA both as text on the cream surfaces and under white; that
+     pins it to a deep clay. The lighter, brighter coral lives in --accent-soft,
+     --accent-border and (unconstrained by white) the dark mode. */
+  --accent: #9a4327;
+  --accent-rgb: 154 67 39;
+  --accent-fg: #fff8f2;
+  --accent-soft: #f6e4d8;
+  --accent-border: #e0b399;
+  --accent-strong: #83370f;
 
-  --user-bg: #eef1fa;
-  --user-border: #2f4ea3;
-  --user-rail: #c4cfef;
+  --user-bg: #f4e8dc;
+  --user-border: #9a4327;
+  --user-rail: #e0b399;
 
   --bubble-bg: var(--user-bg);
   --bubble-fg: var(--fg);
   --bubble-border: transparent;
 
-  --code-bg: #f1ede0;
-  --code-border: #e0d9c6;
-  --code-fg: #2e3140;
+  --code-bg: #efe9db;
+  --code-border: #e0d8c6;
+  --code-fg: #332d22;
 
-  /* ruled feint-blue + red teacher's margin */
-  --rule-ink: rgba(47, 78, 163, 0.07);
-  --margin-ink: rgba(178, 54, 54, 0.1);
+  /* warm paper grain */
+  --tooth-ink: rgba(120, 95, 60, 0.05);
 
-  --ok: #3a7040;
-  --ok-bg: #e6efe1;
-  --ok-border: #c6dcbf;
+  --ok: #4f6d2c;
+  --ok-bg: #e9efd8;
+  --ok-border: #cbd9ac;
   --warn: #8a5a12;
-  --warn-bg: #f5ecd7;
-  --warn-border: #e3d0a6;
-  --pend: #575d6e;
-  --pend-bg: #eceadf;
-  --pend-border: #ddd8c8;
-  --err: #a83232;
-  --err-bg: #f6e2df;
-  --err-border: #e6c2bd;
+  --warn-bg: #f4e9cf;
+  --warn-border: #e2c795;
+  --pend: #5f5748;
+  --pend-bg: #ece6d7;
+  --pend-border: #dcd4c1;
+  --err: #a83a28;
+  --err-bg: #f5e1da;
+  --err-border: #e4bdaf;
 
-  --tool-bash: #3a7040;
-  --tool-read: #2f4ea3;
+  --tool-bash: #4f6d2c;
+  --tool-read: #a04b28;
   --tool-edit: #8a5a12;
-  --tool-write: #6b3f9e;
-  --tool-patch: #a63a6f;
-  --tool-search: #1f6f78;
-  --tool-plan: #4a4fa0;
-  --tool-wait: #62687a;
-  --tool-generic: #575d6e;
+  --tool-write: #6d4a7a;
+  --tool-patch: #a03a52;
+  --tool-search: #3f6b62;
+  --tool-plan: #7a5a2a;
+  --tool-wait: #6f6555;
+  --tool-generic: #665d4b;
 
-  --syn-comment: #676c5b;
-  --syn-keyword: #7a3a9e;
-  --syn-string: #2f6f4a;
-  --syn-type: #1f6f78;
-  --syn-number: #8a5a12;
-  --syn-meta: #a63a6f;
-  --syn-addition: #3a7040;
-  --syn-deletion: #a83232;
+  --syn-comment: #6d6553;
+  --syn-keyword: #8a3d12;
+  --syn-string: #4f6d2c;
+  --syn-type: #3f6b62;
+  --syn-number: #8a5610;
+  --syn-meta: #a03a52;
+  --syn-addition: #4f6d2c;
+  --syn-deletion: #a83a28;
 
-  --bar-bg: rgba(244, 241, 230, 0.9);
-  --shadow-sm: 0 1px 1px rgba(60, 54, 34, 0.05);
-  --shadow-md: 0 1px 2px rgba(60, 54, 34, 0.07), 0 8px 20px rgba(60, 54, 34, 0.07);
-  --shadow-lg: 0 2px 4px rgba(60, 54, 34, 0.09), 0 18px 42px rgba(60, 54, 34, 0.11);
-  --scrim: rgba(40, 36, 22, 0.4);
+  --bar-bg: rgba(241, 237, 226, 0.9);
+  --shadow-sm: 0 1px 2px rgba(74, 54, 24, 0.06);
+  --shadow-md: 0 1px 2px rgba(74, 54, 24, 0.07), 0 8px 22px rgba(74, 54, 24, 0.08);
+  --shadow-lg: 0 2px 5px rgba(74, 54, 24, 0.09), 0 20px 46px rgba(74, 54, 24, 0.12);
+  --scrim: rgba(52, 38, 20, 0.4);
 
-  /* highlighter-yellow selection */
-  --ring: rgba(47, 78, 163, 0.3);
-  --focus-color: #263f87;
-  --selection-bg: #fbef9e;
-  --selection-fg: #22242e;
+  /* soft uneven paper wash — warm, low-contrast, no hotspots to read as glow */
+  --body-wash:
+    radial-gradient(120% 80% at 50% -10%, rgba(191, 138, 92, 0.05), transparent 60%),
+    radial-gradient(100% 70% at 100% 108%, rgba(160, 110, 70, 0.04), transparent 55%);
+
+  /* warm coral selection */
+  --ring: rgba(154, 67, 39, 0.32);
+  --focus-color: #83370f;
+  --selection-bg: #f3d8c3;
+  --selection-fg: #262019;
 }
 
 :root[data-theme='notebook-dark'],
 [data-swatch='notebook-dark'] {
   /* ═══ structural token layer ═══ */
-  --border-strong: #80848b; /* 3.06:1 control edge on the lightest slate (surface-3) */
+  --border-strong: #8d8372; /* 3.13:1 control edge on the lightest umber (surface-3) */
 
   color-scheme: dark;
 
-  /* dark slate board → chalk ink */
-  --bg: #181b1e;
-  --surface: #22262b;
-  --surface-2: #282d33;
-  --surface-3: #333940;
-  --fg: #e9e6da;
-  --fg-soft: #cdcabc;
-  --muted: #a8a598;
-  --faint: #9a978a;
-  --border: #3a4048;
-  --border-soft: #2c3138;
+  /* warm umber-brown stock → cream ink (a dim reading lamp, not a cold slate) */
+  --bg: #221d17;
+  --surface: #2a241d;
+  --surface-2: #322a22;
+  --surface-3: #3d342a;
+  --fg: #ece3d3;
+  --fg-soft: #d3c8b4;
+  --muted: #b0a086;
+  --faint: #a2937b;
+  --border: #3f362b;
+  --border-soft: #2f281f;
 
-  /* chalk-pastel blue */
-  --accent: #8fb4e6;
-  --accent-rgb: 143 180 230;
-  --accent-fg: #101418;
-  --accent-soft: #1e2732;
-  --accent-border: #38506e;
-  --accent-strong: #abc8f0;
+  /* the same terracotta, lifted to a warm coral so it clears AA on the umber */
+  --accent: #e08a67;
+  --accent-rgb: 224 138 103;
+  --accent-fg: #221008;
+  --accent-soft: #352017;
+  --accent-border: #5e3d2a;
+  --accent-strong: #eaa384;
 
-  --user-bg: #1e242b;
-  --user-border: #8fb4e6;
-  --user-rail: #38506e;
+  --user-bg: #2b2018;
+  --user-border: #e08a67;
+  --user-rail: #5e3d2a;
 
   --bubble-bg: var(--user-bg);
   --bubble-fg: var(--fg);
   --bubble-border: transparent;
 
-  --code-bg: #14171a;
-  --code-border: #2f353c;
-  --code-fg: #dad7cb;
+  --code-bg: #1c1811;
+  --code-border: #362d24;
+  --code-fg: #e3d8c4;
 
-  /* chalk rules + chalk-red margin */
-  --rule-ink: rgba(214, 224, 236, 0.06);
-  --margin-ink: rgba(232, 130, 130, 0.08);
+  /* warm paper grain, chalked up for the dark stock */
+  --tooth-ink: rgba(232, 218, 192, 0.035);
 
-  --ok: #8fca8a;
-  --ok-bg: #1b271c;
-  --ok-border: #33472f;
+  --ok: #94b96f;
+  --ok-bg: #202614;
+  --ok-border: #3a472a;
   --warn: #e0b05a;
-  --warn-bg: #2a2314;
-  --warn-border: #4c3f1f;
-  --pend: #a09d8f;
-  --pend-bg: #23272c;
-  --pend-border: #383e45;
-  --err: #e58a8a;
-  --err-bg: #2c1a1a;
-  --err-border: #4d2f2f;
+  --warn-bg: #2a2211;
+  --warn-border: #4c3d1c;
+  --pend: #a99a83;
+  --pend-bg: #262019;
+  --pend-border: #3d332a;
+  --err: #e5866b;
+  --err-bg: #2b1a13;
+  --err-border: #4d2f24;
 
-  --tool-bash: #8fca8a;
-  --tool-read: #8fb4e6;
-  --tool-edit: #e0b05a;
-  --tool-write: #c3a0e0;
-  --tool-patch: #e58ab0;
-  --tool-search: #79c2ca;
-  --tool-plan: #a9adf0;
-  --tool-wait: #a09d90;
-  --tool-generic: #a8a598;
+  --tool-bash: #94b96f;
+  --tool-read: #e0a86a;
+  --tool-edit: #e08a67;
+  --tool-write: #c39ecb;
+  --tool-patch: #e2879b;
+  --tool-search: #79b0a4;
+  --tool-plan: #cfa878;
+  --tool-wait: #a2917a;
+  --tool-generic: #a99a83;
 
-  --syn-comment: #9a978a;
-  --syn-keyword: #c3a0e0;
-  --syn-string: #8fca8a;
-  --syn-type: #79c2ca;
+  --syn-comment: #97876e;
+  --syn-keyword: #e0956f;
+  --syn-string: #94b96f;
+  --syn-type: #79b0a4;
   --syn-number: #e0b05a;
-  --syn-meta: #e6b98a;
-  --syn-addition: #8fca8a;
-  --syn-deletion: #e58a8a;
+  --syn-meta: #e2879b;
+  --syn-addition: #94b96f;
+  --syn-deletion: #e5866b;
 
-  --bar-bg: rgba(24, 27, 30, 0.88);
+  --bar-bg: rgba(34, 29, 23, 0.9);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-md: 0 2px 4px rgba(0, 0, 0, 0.44), 0 10px 26px rgba(0, 0, 0, 0.42);
   --shadow-lg: 0 3px 6px rgba(0, 0, 0, 0.5), 0 22px 50px rgba(0, 0, 0, 0.5);
-  --scrim: rgba(6, 8, 10, 0.68);
+  --scrim: rgba(10, 7, 4, 0.68);
 
-  --ring: rgba(143, 180, 230, 0.32);
-  --focus-color: #8fb4e6;
-  --selection-bg: #33455e;
-  --selection-fg: #eef1f6;
+  /* warm lamp-glow wash, kept low so ink over it still clears AA */
+  --body-wash:
+    radial-gradient(120% 90% at 50% -15%, rgba(224, 138, 103, 0.055), transparent 60%),
+    radial-gradient(90% 60% at 100% 106%, rgba(120, 70, 40, 0.05), transparent 55%);
+
+  --ring: rgba(224, 138, 103, 0.32);
+  --focus-color: #e08a67;
+  --selection-bg: #4a3120;
+  --selection-fg: #f2e8d8;
 }
 
 /* ============================================================================

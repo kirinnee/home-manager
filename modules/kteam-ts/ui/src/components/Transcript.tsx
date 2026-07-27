@@ -720,16 +720,17 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
             prepend, the settled gap-from-bottom invariant also stays exact. */}
         <div
           ref={contentRef}
-          // MOBILE SIDE PADDING IS 4px, NOT 8px. On a phone the transcript already
-          // sits inside the route pane's 4px gutter (App.tsx `px-1`); below sm the
-          // scroller card melts away entirely (SessionChatPage: border/rounding/bg
-          // are sm-only now), so this 4px content pad is the ONLY inside-the-box
-          // reserve left. An 8px pad on top of the pane gutter put assistant prose
-          // too far from each screen edge; 4px keeps a hair of breathing room
-          // without a card while staying flush enough to feel edge-to-edge. This
-          // is deliberately NOT dropped to 0 — readability wins over reclaiming the
-          // last 4px. Desktop keeps sm:px-4 (it has the width, and the card is back).
-          className="kt-content mx-auto flex min-w-0 w-full max-w-[880px] flex-col px-1 pb-2 pt-2 sm:px-4 sm:pb-8"
+          // MOBILE INSET: 8px sides / 12px top. The card melts away below sm
+          // (SessionChatPage: border/rounding/bg are sm-only), so this content pad
+          // plus the route pane's 4px gutter (App.tsx `px-1`) is the ENTIRE reserve
+          // between prose and the screen edge. A previous pass cut this to 4px
+          // (8px total per side) chasing edge-to-edge; with no card the reader read
+          // that as prose slammed against the glass, so it is back up to 8px sides
+          // (12px total) and 12px top — a little breathing room, still no card, and
+          // still deliberately tighter than the composer, which the reader asked to
+          // keep edge-close. NOT the full desktop 16px: this is a phone, not a
+          // narrow desktop. Desktop keeps sm:px-4 / sm:pt-2 unchanged.
+          className="kt-content mx-auto flex min-w-0 w-full max-w-[880px] flex-col px-2 pb-2 pt-3 sm:px-4 sm:pb-8 sm:pt-2"
         >
           {header}
           {blocks.map((b, idx) => (
