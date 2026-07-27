@@ -5,7 +5,30 @@
 
 import { describe, expect, test } from 'bun:test';
 import { MAX_NOTE_LEN } from '../lib/pins';
-import { jumpOutcomeCopy, locatingLabel, noteCharsRemaining, pinsTriggerLabel, splitLinkified } from './PinSheet';
+import {
+  jumpOutcomeCopy,
+  locatingLabel,
+  noteCharsRemaining,
+  pinProvenanceLabel,
+  pinsTriggerLabel,
+  pinsUnreachableCopy,
+  splitLinkified,
+} from './PinSheet';
+
+describe('pinProvenanceLabel', () => {
+  test('human pins carry no tag', () => {
+    expect(pinProvenanceLabel({ by: 'human', createdByName: null })).toBeNull();
+    expect(pinProvenanceLabel({ by: undefined, createdByName: null })).toBeNull();
+  });
+  test('agent pins are always tagged, with the callsign when known', () => {
+    expect(pinProvenanceLabel({ by: 'agent', createdByName: 'zoe' })).toBe('pinned by zoe');
+    expect(pinProvenanceLabel({ by: 'agent', createdByName: null })).toBe('pinned by an agent');
+  });
+});
+
+test('pinsUnreachableCopy is a plain honest line', () => {
+  expect(pinsUnreachableCopy()).toMatch(/can't reach/i);
+});
 
 describe('pinsTriggerLabel', () => {
   test('names a count only when there is one, and always carries the word Pins', () => {

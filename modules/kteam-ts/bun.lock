@@ -11,6 +11,9 @@
         "@types/bun": "latest",
         "typescript": "^5.7.0",
       },
+      "optionalDependencies": {
+        "sherpa-onnx-node": "1.13.4",
+      },
     },
   },
   "packages": {
@@ -21,6 +24,20 @@
     "bun-types": ["bun-types@1.3.14", "", { "dependencies": { "@types/node": "*" } }, "sha512-4N0ig0fEomHt5R0KCFWjovxow98rIoRwKolrYdCcknNwMekCXRnWEUvgu5soYV8QXtVsrUD8B95MBOZGPvr6KQ=="],
 
     "commander": ["commander@12.1.0", "", {}, "sha512-Vw8qHK3bZM9y/P10u3Vib8o/DdkvA2OtPtZvD871QKjy74Wj1WSKFILMPRPSdUSx5RFK1arlJzEtA4PkFgnbuA=="],
+
+    "sherpa-onnx-darwin-arm64": ["sherpa-onnx-darwin-arm64@1.13.4", "", { "os": "darwin", "cpu": "arm64" }, "sha512-QcYKzyrTzGSx6aKCD6hUODgRS1LetqfG57Z/+i5LCyfMlrgCvDc1lRcl9cdB+TozBsLha9QwLTlI0vmDcf5JKg=="],
+
+    "sherpa-onnx-darwin-x64": ["sherpa-onnx-darwin-x64@1.13.4", "", { "os": "darwin", "cpu": "x64" }, "sha512-6RGeis9K9gV/UQWOgd6Rf3iqXr2/YsBQswxHaCR4hrYkHfEIpHMfFmRWLt6nJJCOWgYW2xFxEd9yzjrafAV/Pw=="],
+
+    "sherpa-onnx-linux-arm64": ["sherpa-onnx-linux-arm64@1.13.4", "", { "os": "linux", "cpu": "arm64" }, "sha512-RMjMRqT82BgTXypNNGmLe6ZFYhc3WEvnAGl3DdkK7qB/kuXwkL3iHhV31wAecbnWPsnEpUoD+8cFovWSBzsCuw=="],
+
+    "sherpa-onnx-linux-x64": ["sherpa-onnx-linux-x64@1.13.4", "", { "os": "linux", "cpu": "x64" }, "sha512-WZh5NCkGPFHHpYSd78iN4OnmxQeSTGyt9uZskH+im/NFHQ7elQ7B0sLzCMeRpvJxiIKvd9C6WxIJ4hYaxClfsQ=="],
+
+    "sherpa-onnx-node": ["sherpa-onnx-node@1.13.4", "", { "optionalDependencies": { "sherpa-onnx-darwin-arm64": "^1.13.4", "sherpa-onnx-darwin-x64": "^1.13.4", "sherpa-onnx-linux-arm64": "^1.13.4", "sherpa-onnx-linux-x64": "^1.13.4", "sherpa-onnx-win-ia32": "^1.13.4", "sherpa-onnx-win-x64": "^1.13.4" } }, "sha512-jHWWdY9f0dbvJpdsfR/C4WNhM57+jT9Os2RyC4/qUz8HKCtj2VYFmJ9s7tue9OCFRAmdoGBkgkqD6aBZ3I8BKw=="],
+
+    "sherpa-onnx-win-ia32": ["sherpa-onnx-win-ia32@1.13.4", "", { "os": "win32", "cpu": "ia32" }, "sha512-/JbPjldrfNv+t+uIS3MlkuhfIf5l3FHUGkRC2oRXgjRqOaVmEyP3vLlQ7dTa4J7raG5oB8c3GoPjuSWSqT9GOQ=="],
+
+    "sherpa-onnx-win-x64": ["sherpa-onnx-win-x64@1.13.4", "", { "os": "win32", "cpu": "x64" }, "sha512-R0PWby1VxC14TDZPq7GcfSyXSY6SAFO8Y4JwdCdqouFmeXkZ1L7Is9m98C9KxQ0dN7ZtDzhAmE/43FUs/elXRQ=="],
 
     "typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
 

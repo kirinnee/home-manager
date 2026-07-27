@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "bun run ./src/index.ts",
-    "build": "bun build ./src/index.ts ./src/daemon-entry.ts --outdir ./dist --target bun",
+    "build": "bun build ./src/index.ts ./src/daemon-entry.ts ./src/stt-worker.ts --outdir ./dist --target bun",
     "test": "bun test",
     "check": "tsc --noEmit && bun test"
   },
@@ -18,5 +18,8 @@
   "devDependencies": {
     "@types/bun": "latest",
     "typescript": "^5.7.0"
+  },
+  "optionalDependencies": {
+    "sherpa-onnx-node": "1.13.4"
   }
 }
