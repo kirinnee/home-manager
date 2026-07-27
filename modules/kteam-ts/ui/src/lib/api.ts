@@ -118,6 +118,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   listTasks: () => request<unknown>('/v1/tasks'),
   getTask: (id: string) => request<unknown>(`/v1/tasks/${encodeURIComponent(id)}`),
+  // Session-scoped task routes (daemon work in flight alongside this UI). The
+  // session side pane consumes ONLY these; /v1/tasks stays the fleet-wide
+  // aggregate. Typed unknown like the aggregate routes — lib/tasks.ts parsers
+  // own the shape, so a daemon that predates the routes degrades to the same
+  // `unknown_route` signal the fs probe uses.
+  listSessionTasks: (sessionId: string) => request<unknown>(`/v1/sessions/${encodeURIComponent(sessionId)}/tasks`),
+  getSessionTask: (sessionId: string, taskId: string) =>
+    request<unknown>(`/v1/sessions/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(taskId)}`),
   listSessions: () => request<SessionView[]>('/v1/sessions'),
   getSession: (id: string) => request<SessionView>(`/v1/sessions/${encodeURIComponent(id)}`),
   chatHistory: (id: string, before?: number, limit = 200) => {

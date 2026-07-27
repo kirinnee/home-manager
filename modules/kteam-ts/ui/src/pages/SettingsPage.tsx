@@ -2,6 +2,7 @@ import { useEffect, useId } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { ThemeSettings } from '../components/ThemeToggle';
 import { DictationSettings } from '../components/DictationSettings';
+import { ChatWidthControl } from '../components/ChatWidthControl';
 import { NotificationSettings } from '../components/NotificationSettings';
 import { BottomSheet } from '../components/SessionDetails';
 import { DENSITY_OPTIONS, useDensity } from '../hooks/useDensity';
@@ -15,17 +16,8 @@ import {
   type SettingId,
 } from '../lib/settings';
 import { Link } from '../lib/router';
-import { useUiControls, type ChatWidth } from '../lib/store';
+import { useUiControls } from '../lib/store';
 import { cn } from '../lib/utils';
-
-/** Full-bleed is the default because it is today's behaviour, and because there
- *  is no device-derived answer to defer to the way `density` has one — a phone is
- *  narrower than the readable cap either way, so this control is effectively
- *  desktop-only and must not pretend otherwise. */
-const CHAT_WIDTH_OPTIONS: ReadonlyArray<{ id: ChatWidth; label: string; description: string }> = [
-  { id: 'full', label: 'Full-bleed', description: 'Conversation fills the whole pane.' },
-  { id: 'readable', label: 'Readable', description: 'Capped at a reading measure and centred.' },
-];
 
 export const TEXT_SCALE_OPTIONS: ReadonlyArray<{
   id: TextScale;
@@ -176,31 +168,7 @@ export function SettingsContent({ target = null }: { target?: SettingId | null }
           </>
         );
       case 'chat-width':
-        return (
-          <div role="radiogroup" aria-label="Chat width" className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            {CHAT_WIDTH_OPTIONS.map(option => {
-              const checked = controls.chatWidth === option.id;
-              return (
-                <button
-                  key={option.id}
-                  type="button"
-                  role="radio"
-                  aria-checked={checked}
-                  onClick={() => setControls({ chatWidth: option.id })}
-                  className={cn(
-                    'flex min-h-[44px] min-w-0 flex-col items-start justify-center rounded-control border px-control-x py-2 text-left transition-colors',
-                    checked
-                      ? 'border-accent bg-accent-soft text-accent'
-                      : 'border-border bg-surface-2 text-fg hover:border-accent',
-                  )}
-                >
-                  <span className="text-ui font-semibold">{option.label}</span>
-                  <span className="text-meta leading-tight text-muted">{option.description}</span>
-                </button>
-              );
-            })}
-          </div>
-        );
+        return <ChatWidthControl value={controls.chatWidth} onChange={chatWidth => setControls({ chatWidth })} />;
       case 'theme':
         return <ThemeSettings theme={theme} />;
       case 'dictation':

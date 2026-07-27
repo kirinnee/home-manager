@@ -135,7 +135,8 @@ export function PinsTrigger({
 }: {
   id: string;
   count: number;
-  onClick: () => void;
+  /** Receives the trigger element so a host can restore focus to it on close. */
+  onClick: (opener?: HTMLElement) => void;
   expanded: boolean;
   controls?: string;
 }) {
@@ -143,7 +144,7 @@ export function PinsTrigger({
     <button
       id={id}
       type="button"
-      onClick={onClick}
+      onClick={event => onClick(event.currentTarget)}
       aria-expanded={expanded}
       aria-controls={expanded ? controls : undefined}
       aria-label={pinsTriggerLabel(count)}
@@ -163,20 +164,26 @@ export function PinsTrigger({
   );
 }
 
-// ---- the sheet --------------------------------------------------------------
+// ---- the surface --------------------------------------------------------------
+//
+// The pin CONTENT, presentation-agnostic: it renders identically inside the
+// legacy BottomSheet (PinSheet below) and inside the unified session side pane
+// (SidePane.tsx), which hosts it as its `pins` surface. The extraction is
+// presentation-only — state, the store calls and the delete/undo semantics are
+// exactly what the sheet had. Mount-per-open in both hosts, so transient state
+// (an edit in progress, a stale jump notice) resets by unmounting.
 
-export function PinSheet({
-  id,
+export function PinSurface({
   sessionId,
-  open,
-  onClose,
-  labelledBy,
+  presentation,
+  titleId,
+  onRequestClose,
 }: {
-  id: string;
   sessionId: string;
-  open: boolean;
-  onClose: () => void;
-  labelledBy?: string;
+  presentation: 'pane' | 'sheet';
+  titleId?: string;
+  /** Called when a pin action wants the surface gone (a successful jump). */
+  onRequestClose: () => void;
 }) {
   const pins = useSessionPins(sessionId);
   const status = usePinsSession(sessionId);
@@ -198,16 +205,10 @@ export function PinSheet({
 
   const addInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Reset transient state whenever the sheet closes or the session changes: a
-  // stale "not found" notice or a half-typed edit must not survive a reopen.
-  useEffect(() => {
-    if (open) return;
-    setEditingId(null);
-    setEditError(null);
-    setNoteError(null);
-    setJumpState(null);
-  }, [open]);
-
+  // Transient state resets by UNMOUNT now: both hosts mount the surface only
+  // while it is open, so a stale "not found" notice or a half-typed edit can
+  // never survive a reopen. The session-change reset stays for the retained
+  // legacy sheet path.
   useEffect(() => {
     setDraft('');
     setNoteError(null);
@@ -215,12 +216,15 @@ export function PinSheet({
     setUndo(null);
   }, [sessionId]);
 
-  // Desktop only: land focus in the add-note field on open. NEVER on touch —
+  // SHEET ONLY, desktop pointer only: land focus in the add-note field on
+  // open. The sheet is a focus-trapped dialog, so focus is already being
+  // managed; the non-modal PANE must never take focus on mount — the composer
+  // keeps it, that is the entire point of the pane. NEVER on touch either:
   // summoning the on-screen keyboard the instant a sheet opens is exactly the
   // behaviour the a11y contract forbids.
   useEffect(() => {
-    if (open && !touchAffected) addInputRef.current?.focus();
-  }, [open, touchAffected]);
+    if (presentation === 'sheet' && !touchAffected) addInputRef.current?.focus();
+  }, [presentation, touchAffected]);
 
   useEffect(
     () => () => {
@@ -282,7 +286,8 @@ export function PinSheet({
 
   // Jump to a pinned message OR to the source block of a selection note — the
   // machinery is identical (exact-id, honest not-found), so it is keyed by pin
-  // id and driven by the block id the caller passes.
+  // id and driven by the block id the caller passes. A successful jump asks the
+  // HOST to dismiss the surface — the destination is behind it.
   const jumpTo = useCallback(
     async (pinId: string, blockId: string) => {
       setJumpState({ id: pinId, phase: 'locating', pages: 0 });
@@ -291,30 +296,37 @@ export function PinSheet({
       );
       if (outcome === 'jumped') {
         setJumpState(null);
-        onClose();
+        onRequestClose();
         return;
       }
       setJumpState({ id: pinId, phase: 'done', pages: 0, outcome });
     },
-    [onClose],
+    [onRequestClose],
   );
 
+  const Heading = presentation === 'pane' ? 'h2' : 'h1';
   return (
-    <BottomSheet
-      id={id}
-      open={open}
-      onClose={onClose}
-      labelledBy={labelledBy}
-      ariaLabel="Pins"
-      closeLabel="Close pins"
-      panelClassName="kt-details"
-    >
+    <>
       <div className="shrink-0 border-b border-border-soft">
         <div className="mx-auto flex w-full max-w-2xl min-w-0 items-baseline gap-sm px-panel pb-row-y">
-          <span className="min-w-0 flex-1 truncate font-display text-title font-semibold tracking-display text-fg">
+          <Heading
+            id={titleId}
+            className="m-0 min-w-0 flex-1 truncate font-display text-title font-semibold tracking-display text-fg"
+          >
             Pins
-          </span>
+          </Heading>
           <span className="kt-label shrink-0">{pins.length} pinned</span>
+          {presentation === 'pane' && (
+            <button
+              type="button"
+              onClick={onRequestClose}
+              aria-label="Close pins"
+              title="Close pins"
+              className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center self-center rounded-control text-muted hover:bg-surface-2 hover:text-fg"
+            >
+              <X size={17} aria-hidden="true" />
+            </button>
+          )}
         </div>
         {/* The cross-device truth, stated rather than discovered — now saved on
             the daemon, so pins follow the reader between devices and an agent can
@@ -428,6 +440,41 @@ export function PinSheet({
           )}
         </div>
       </div>
+    </>
+  );
+}
+
+// ---- the legacy sheet wrapper ------------------------------------------------
+//
+// Kept for callers that still own their open state and want the standalone
+// dialog (SessionHeader until the unified side pane fully replaces it, plus its
+// tests). It is now a thin shell: all content is PinSurface. Mounted only while
+// open, so the surface's unmount-resets hold here too.
+
+export function PinSheet({
+  id,
+  sessionId,
+  open,
+  onClose,
+  labelledBy,
+}: {
+  id: string;
+  sessionId: string;
+  open: boolean;
+  onClose: () => void;
+  labelledBy?: string;
+}) {
+  return (
+    <BottomSheet
+      id={id}
+      open={open}
+      onClose={onClose}
+      labelledBy={labelledBy}
+      ariaLabel="Pins"
+      closeLabel="Close pins"
+      panelClassName="kt-details"
+    >
+      {open && <PinSurface sessionId={sessionId} presentation="sheet" onRequestClose={onClose} />}
     </BottomSheet>
   );
 }

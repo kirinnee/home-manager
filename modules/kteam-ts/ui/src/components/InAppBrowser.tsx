@@ -118,7 +118,9 @@ interface InAppBrowserSurfaceProps {
   titleId: string;
 }
 
-function InAppBrowserSurface({ destination, onClose, presentation, titleId }: InAppBrowserSurfaceProps) {
+/** Exported for the unified SidePane host (SidePane.tsx), which re-hosts this
+ *  exact surface — content only; the host owns the pane/sheet shells. */
+export function InAppBrowserSurface({ destination, onClose, presentation, titleId }: InAppBrowserSurfaceProps) {
   const frameAllowed = destination.scope !== 'device-loopback';
   const Heading = presentation === 'pane' ? 'h2' : 'h1';
 
@@ -281,13 +283,17 @@ export function InAppBrowserPane({ id, destination, onClose }: InAppBrowserPaneP
   );
 }
 
-interface InAppBrowserHost {
+export interface InAppBrowserHost {
   paneId: string;
   presentation: 'pane' | 'sheet';
   openDestination: (destination: BrowserDestination, opener: HTMLElement) => void;
 }
 
-const InAppBrowserContext = createContext<InAppBrowserHost | null>(null);
+/** Exported so the unified SidePane workspace can provide this context itself:
+ *  a transcript link tap then opens the browser SURFACE inside the shared host
+ *  instead of a browser-only pane. InAppBrowserWorkspace remains for callers
+ *  without the full host. */
+export const InAppBrowserContext = createContext<InAppBrowserHost | null>(null);
 
 /**
  * Session-local browser host. Session panes are retained across app navigation,
