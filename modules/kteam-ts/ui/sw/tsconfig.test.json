@@ -42,5 +42,5 @@
      `sw.ts` is NOT here (nor is `precache.gen.ts`): the entry imports generated
      code, so including it would reintroduce the clean-checkout failure this
      whole split exists to remove. `tsc -p sw` covers the entry after a build. */
-  "include": ["./**/*.test.ts", "./policy.ts", "../scripts/release.ts"]
+  "include": ["./**/*.test.ts", "./policy.ts", "./notify.ts", "../scripts/release.ts"]
 }

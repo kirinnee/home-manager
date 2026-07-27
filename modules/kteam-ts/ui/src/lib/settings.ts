@@ -2,7 +2,7 @@
 // command palette. Labels, descriptions, anchors and search terms live here so
 // adding a setting cannot silently make its palette entry drift from the UI.
 
-export type SettingId = 'text-size' | 'density' | 'theme' | 'chat-width' | 'dictation';
+export type SettingId = 'text-size' | 'density' | 'theme' | 'chat-width' | 'dictation' | 'notifications';
 
 export interface SettingDefinition {
   id: SettingId;
@@ -43,8 +43,40 @@ export const SETTINGS_DEFINITIONS: readonly SettingDefinition[] = [
   {
     id: 'dictation',
     label: 'Dictation',
-    description: 'Speak into an editable message draft. Dictation never sends a message for you.',
-    keywords: ['voice', 'speech', 'microphone', 'mic', 'stt', 'transcribe', 'talk', 'audio', 'parakeet'],
+    description:
+      'Speak into an editable message draft. Dictation never sends a message for you. Includes enhancement: a dictionary and context that fix misheard names and jargon.',
+    keywords: [
+      'voice',
+      'speech',
+      'microphone',
+      'mic',
+      'stt',
+      'transcribe',
+      'transcription',
+      'talk',
+      'audio',
+      'parakeet',
+      // The enhancement feature lives inside this section; without its own
+      // names here, searching the palette for it by name found nothing.
+      'enhance',
+      'enhancement',
+      'dictionary',
+      'vocabulary',
+      'glossary',
+      'jargon',
+      'correction',
+      'corrections',
+      'words',
+      'names',
+      'context',
+    ],
+  },
+  {
+    id: 'notifications',
+    label: 'Notifications',
+    description:
+      'System notification when a session needs you — waiting at the prompt, asking a question, failed, or finished. Off by default; turning it on asks the browser for permission.',
+    keywords: ['notify', 'notification', 'alert', 'push', 'buzz', 'awaiting', 'needs you', 'question', 'background'],
   },
 ] as const;
 
