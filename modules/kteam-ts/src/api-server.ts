@@ -19,6 +19,8 @@ import { resolveTaskActor, taskApiRequestFrom } from './tasks-api';
 import type { PinApi } from './pins-api';
 import { isPinPath, pinWardenDenial } from './pins-api';
 import { isTaskPath, taskWardenDenial } from './tasks-contract';
+import type { AnalyticsQueryService } from './analytics-types';
+import { AnalyticsQueryError } from './analytics-query';
 
 // Built chat UI (Vite output, committed): served when present; the legacy
 // single-file shell remains the fallback so the daemon never 404s its own UI.
@@ -67,6 +69,8 @@ export interface ApiServerOptions {
   tasks?: TaskApi;
   /** Daemon-owned per-session pins. Omitted in tests that don't exercise pins. */
   pins?: PinApi;
+  /** Fleet-wide historical analytics over the daemon-owned SQLite index. */
+  analytics?: AnalyticsQueryService;
 }
 
 /** The Codex discovery baseline is private launch bookkeeping, not session
@@ -411,6 +415,15 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
             return await options.stt.handleApi(request, url);
           }
           if (url.pathname === '/v1/health' && request.method === 'GET') return json(await options.service.health());
+          if (url.pathname === '/v1/analytics' && request.method === 'GET') {
+            if (!options.analytics) return json({ error: 'analytics index is initializing or unavailable' }, 503);
+            try {
+              return json(options.analytics.query(url.searchParams.get('q') ?? undefined));
+            } catch (error) {
+              if (error instanceof AnalyticsQueryError) return json({ error: error.message }, 400);
+              throw error;
+            }
+          }
           if (url.pathname === '/v1/search' && request.method === 'GET') {
             const q = url.searchParams.get('q') ?? '';
             const limitRaw = Number(url.searchParams.get('limit') ?? '30');
