@@ -2,9 +2,36 @@ import { describe, expect, test } from 'bun:test';
 import { TEAMMATE_NAMES, displayName, normalizeTeammateName, pickTeammateName } from './names';
 
 describe('teammate names', () => {
-  test('pool has at least a thousand unique names', () => {
-    expect(new Set(TEAMMATE_NAMES).size).toBeGreaterThanOrEqual(1000);
+  test('pool has ~10,000 unique names', () => {
+    expect(new Set(TEAMMATE_NAMES).size).toBeGreaterThanOrEqual(9000);
     expect(new Set(TEAMMATE_NAMES).size).toBe(TEAMMATE_NAMES.length);
+  });
+
+  test('every pool entry survives normalizeTeammateName unchanged', () => {
+    // An entry that normalises to something else (or to null) is a latent bug
+    // that only surfaces the day that name is drawn — assert over the WHOLE pool.
+    for (const name of TEAMMATE_NAMES) {
+      expect(normalizeTeammateName(name)).toBe(name);
+    }
+  });
+
+  test('pool entries are single-word ASCII names, no initials', () => {
+    for (const name of TEAMMATE_NAMES) {
+      expect(name).toMatch(/^[a-z]{2,32}$/); // letters only: no digits, hyphens, spaces
+    }
+  });
+
+  test('drawing from the full pool stays fast', () => {
+    // pickTeammateName is O(pool + used) per draw. A draw happens once per
+    // session start (suggestNames caps at 50), so per-draw is what matters:
+    // measured 0.3-4.7ms at 10,000 names. Guard against an accidental
+    // quadratic (which would be seconds per draw), not against CI jitter.
+    const used = TEAMMATE_NAMES.slice(0, Math.floor(TEAMMATE_NAMES.length / 2));
+    const draws = 100;
+    const start = performance.now();
+    for (let i = 0; i < draws; i++) pickTeammateName(used);
+    const perDraw = (performance.now() - start) / draws;
+    expect(perDraw).toBeLessThan(50);
   });
 
   test('avoids names used within the window', () => {
