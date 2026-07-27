@@ -4,7 +4,7 @@ import { interactiveHarnessArgs } from './core';
 import { now, run } from './io';
 import type { KTeamPaths } from './paths';
 import { sessionDir } from './paths';
-import type { SessionConfig, SessionState } from './types';
+import type { PendingQuestion, SessionConfig, SessionState } from './types';
 import { WARDEN_LABEL } from './warden-detect';
 
 export interface PaneState {
@@ -422,6 +422,820 @@ export function optionVisibleOnPane(normalizedPane: string, label: string, allOp
   return normalizedPane.includes(fragment);
 }
 
+const CHECKED_MARKERS = ['☑', '☒', '●', '◉', '✓', '✔', '[x]', '[X]', '(x)', '(X)'];
+const UNCHECKED_MARKERS = ['☐', '○', '◯', '[ ]', '( )', '[]', '()'];
+
+/** The label text of a STRUCTURALLY NUMBERED menu row, or `null` when the line
+ * is not one. Chrome is stripped in the order a TUI paints it: the right-hand
+ * panel column, the native cursor glyph, the ordinal, then an optional checkbox
+ * marker. The ordinal is MANDATORY — it is the only thing separating a real menu
+ * row from a description line, a wrapped continuation, or scrollback prose that
+ * happens to read exactly like an option label. Accepting an unnumbered line
+ * let any of those masquerade as the live menu. */
+function numberedOptionRowText(line: string): string | null {
+  const left = (line.split(/[│┃]/u)[0] ?? line).trim().replace(/^[❯›>»]\s*/u, '');
+  const numbered = left.match(/^\d+[.)]\s*(.*)$/);
+  if (!numbered) return null;
+  let rest = (numbered[1] ?? '').trim();
+  const marker = [...CHECKED_MARKERS, ...UNCHECKED_MARKERS].find(candidate => rest.startsWith(candidate));
+  if (marker) rest = rest.slice(marker.length).trim();
+  return rest;
+}
+
+/** A whole labelled menu row is stronger evidence than a fleet-wide substring.
+ * In particular, `1. Enable feature` is safe to distinguish from the sibling
+ * `2. Enable feature flags` even though no prefix of the first label is unique.
+ * The row must carry its ordinal: this is the strongest evidence the matcher
+ * has, so it is only ever granted to a real menu row. Right-column panel content
+ * is discarded before comparison; a description on the same row is accepted only
+ * behind an explicit dash separator.
+ *
+ * SHAPE PREDICATE ONLY — it says a line looks like a menu row, NOT that the row
+ * belongs to the live menu. It scans the whole capture, so scrollback satisfies
+ * it. Nothing that authorizes a keystroke may call it: those paths go through
+ * `liveMenuBlock` and `blockOptionRowVisible`, which are bound to one block. */
+export function exactOptionRowVisible(pane: string, label: string): boolean {
+  return pane.split('\n').some(line => rowTextMatchesLabel(numberedOptionRowText(line), label));
+}
+
+/** Does a parsed row's label text name `label`? A description on the same row is
+ * accepted only behind an explicit dash separator. */
+function rowTextMatchesLabel(text: string | null, label: string): boolean {
+  const wanted = normalizeForMatch(label);
+  if (!wanted || text === null) return false;
+  const normalized = normalizeForMatch(text);
+  return normalized === wanted || normalized.startsWith(`${wanted}—`) || normalized.startsWith(`${wanted}-`);
+}
+
+/** An exact STANDALONE header row: a whole line carrying nothing but the header
+ * text, once its `?`/bullet chrome and any right-hand panel column are removed.
+ * A header found merely as a substring proves nothing — descriptions and
+ * scrollback quote a question's own header all the time, and a substring hit
+ * there would hand a sibling ordinal's identity to the wrong question.
+ *
+ * SHAPE PREDICATE ONLY, exactly as `exactOptionRowVisible`: authorizing paths
+ * pass a single block's text, never the whole capture. */
+export function exactHeaderRowVisible(pane: string, header: string): boolean {
+  const wanted = normalizeForMatch(header);
+  if (!wanted) return false;
+  return pane.split('\n').some(line => {
+    const left = (line.split(/[│┃]/u)[0] ?? line)
+      .trim()
+      .replace(/^[?❯›>»*•]\s*/u, '')
+      .trim();
+    return normalizeForMatch(left) === wanted;
+  });
+}
+
+const QUESTION_PROBE_CHARS = 40;
+/** Continuation lines a wrapped question may occupy below its own row. */
+const QUESTION_WRAP_LINES = 2;
+
+/** A bare input row — the composer, with nothing typed into it. Structurally
+ * important twice over: it is where a free-text page receives typing, and a
+ * composer BELOW a menu means that menu no longer owns the keyboard. */
+function isComposerRow(line: string): boolean {
+  const stripped = line.replace(/^[\s│|┃╭╰┌└]+/u, '').replace(/[\s│|┃╮╯┐┘]+$/u, '');
+  return /^[>›❯»]$/u.test(stripped);
+}
+
+/** The harness's own question glyph: `? ` starting a line. A question printed
+ * this way is a structural ROW, as opposed to the same words quoted inside
+ * prose. */
+function isQuestionAnchorLine(line: string): boolean {
+  return /^\?\s+\S/u.test((line.split(/[│┃]/u)[0] ?? line).trim());
+}
+
+function introRowText(line: string): { text: string; anchored: boolean } | null {
+  const left = (line.split(/[│┃]/u)[0] ?? line).trim();
+  if (left === '') return null;
+  const anchored = /^\?\s+\S/u.test(left);
+  return { text: anchored ? left.replace(/^\?\s+/u, '') : left, anchored };
+}
+
+/** Is this question printed as its OWN row in `intro`, and if so on which line?
+ * Returns the LOWEST such line, or -1.
+ *
+ * A first-40-character probe found anywhere in the intro is NOT enough. An
+ * unrelated live selector's intro routinely quotes an earlier question —
+ * `Earlier transcript: “Which one?” was discussed.` sitting above
+ * `Continue deployment?` with rows the pending set happens to share — and a
+ * substring probe accepted that, handing both answer and abandon a menu that is
+ * not ours. A structural row is required instead, in one of exactly two forms:
+ *  - a `?`-prefixed harness question row; or
+ *  - a standalone row the harness printed with no `?` glyph,
+ * in either case with bounded wrapped continuations, and in either case the
+ * joined text must be the WHOLE question. A prefix match is not enough: two
+ * different questions routinely share their opening clause, and matching on the
+ * first 40 characters would let a longer, DIFFERENT anchored question claim a
+ * short pending one. The single concession is an explicitly ellipsis-truncated
+ * `?` row, which the harness itself clipped — and only when what survives is
+ * long enough to mean something. Continuations are collected for at most
+ * QUESTION_WRAP_LINES lines and stop at a blank line or the next question
+ * anchor, so a wrap can never absorb unrelated text below it. */
+export function questionRowIndex(intro: string, question: string): number {
+  const full = normalizeForMatch(question);
+  if (!full) return -1;
+  const rows = intro.split('\n').map(introRowText);
+  let found = -1;
+  for (const [index, row] of rows.entries()) {
+    if (!row) continue;
+    let text = normalizeForMatch(row.text);
+    for (let extra = 0; extra <= QUESTION_WRAP_LINES; extra++) {
+      if (extra > 0) {
+        const next = rows[index + extra];
+        if (!next || next.anchored) break;
+        text += normalizeForMatch(next.text);
+      }
+      if (questionRowTextMatches(text, full, row.anchored)) {
+        found = index;
+        break;
+      }
+    }
+  }
+  return found;
+}
+
+/** Shortest surviving stem an ellipsis-clipped question row may be matched on. */
+const MIN_CLIPPED_QUESTION_CHARS = 8;
+
+function questionRowTextMatches(text: string, full: string, anchored: boolean): boolean {
+  if (text === full) return true;
+  if (!anchored) return false;
+  const clipped = text.replace(/[….]+$/u, '');
+  return clipped !== text && clipped.length >= MIN_CLIPPED_QUESTION_CHARS && full.startsWith(clipped);
+}
+
+/** One parsed numbered row of a menu block. */
+export interface MenuBlockRow {
+  /** 0-based pane line this row was read from. */
+  line: number;
+  /** The ordinal the TUI printed (`3.` ⇒ 3). */
+  ordinal: number;
+  /** The row's label text, chrome removed. */
+  text: string;
+  /** The native selection cursor (`❯`) sits on this row. */
+  cursor: boolean;
+  /** Checkbox state when the row carries a marker we recognize. */
+  checked?: boolean;
+}
+
+/** THE live structured-menu block: one contiguous region of the capture that a
+ * keystroke may legally be aimed at. Every piece of evidence any authorizing
+ * helper uses must come from this one object. */
+export interface LiveMenuBlock {
+  /** The whole block — intro + rows + footer — as pane text. */
+  text: string;
+  /** The bounded question/header region ABOVE the first numbered row. */
+  intro: string;
+  /** First numbered row through last numbered row, descriptions included. */
+  rowsText: string;
+  /** Inclusive 0-based pane line bounds of the block. */
+  startLine: number;
+  endLine: number;
+  rows: MenuBlockRow[];
+  /** 0-based OPTION index the native cursor sits on, read from THIS block only;
+   * `undefined` when no row in the block carries the cursor glyph. */
+  cursorRow?: number;
+}
+
+/** Non-row lines tolerated BETWEEN two numbered rows of one menu: Claude prints
+ * a description, sometimes a blank line, and a separator rule before the trailing
+ * "Chat about this" row. Beyond this the rows belong to different menus. */
+const MENU_ROW_GAP_LINES = 4;
+/** How far above the first numbered row the question/header region may reach. */
+const MENU_INTRO_LINES = 8;
+/** Consecutive blank lines tolerated inside the intro (header ␤ ␤ question). */
+const MENU_INTRO_BLANK_RUN = 2;
+/** How far below the last numbered row the native footer may reach. */
+const MENU_FOOTER_LINES = 4;
+
+/** A harness's own menu footer — it terminates the block above it. */
+function menuFooterLine(value: string): boolean {
+  return /(?:enter|return)\s+to\s+(?:select|submit|confirm)|esc(?:ape)?\s+to\s+cancel|to\s+navigate|space\s+to\s+toggle/iu.test(
+    value,
+  );
+}
+
+function parseMenuRow(line: string, index: number): MenuBlockRow | null {
+  const left = (line.split(/[│┃]/u)[0] ?? line).trim();
+  const cursor = /^[❯›>»]/u.test(left);
+  const withoutCursor = left.replace(/^[❯›>»]\s*/u, '');
+  const numbered = withoutCursor.match(/^(\d+)[.)]\s*(.*)$/);
+  if (!numbered) return null;
+  const ordinal = Number(numbered[1]);
+  if (!Number.isInteger(ordinal) || ordinal < 1) return null;
+  let rest = (numbered[2] ?? '').trim();
+  let checked: boolean | undefined;
+  const marker = [...CHECKED_MARKERS, ...UNCHECKED_MARKERS].find(candidate => rest.startsWith(candidate));
+  if (marker) {
+    checked = CHECKED_MARKERS.includes(marker);
+    rest = rest.slice(marker.length).trim();
+  }
+  return { line: index, ordinal, text: rest, cursor, checked };
+}
+
+/** Derive the ONE bottom/live structured-menu block, or `null` when no such
+ * block can be bound — in which case every caller refuses with zero keys.
+ *
+ * Why a block at all: a tmux capture is a scrollback, not a screen. An old,
+ * already-answered question and its numbered rows sit above whatever is live
+ * now. Pane-global evidence let the daemon combine a stale question found high
+ * in scrollback with an unrelated selector's cursor row below it, then drive
+ * Down/Enter or Escape into that unrelated selector. Binding all evidence to one
+ * contiguous region makes that combination structurally impossible.
+ *
+ * Boundaries, all conservative — when in doubt the block ENDS:
+ *  - ANCHOR: the LAST numbered row in the capture. The live menu is always the
+ *    lowest one; anything below it is footer, not another menu.
+ *  - ROWS: walk up from the anchor accepting rows whose ordinals descend by
+ *    exactly one (N, N-1, … 1). A row that breaks the run belongs to a different
+ *    menu and stops the walk, as does a run of more than MENU_ROW_GAP_LINES
+ *    non-row lines. Interleaved descriptions, blanks and separator rules inside
+ *    the gap are kept — that is the real Claude shape (options, descriptions,
+ *    "Type something", a rule, "Chat about this").
+ *  - INTRO: at most MENU_INTRO_LINES above the first row, stopping at ANY of a
+ *    previous menu's numbered row, a menu footer line, or a blank run longer
+ *    than MENU_INTRO_BLANK_RUN. This is the only region a question or header may
+ *    be read from.
+ *  - FOOTER: at most MENU_FOOTER_LINES below the last row, stopping at a
+ *    numbered row.
+ * Two further whole-block rejections: more than one cursor glyph among the rows
+ * (two menus stitched, or a half-drawn repaint — the origin is unknowable), and
+ * any bare composer row BELOW the rows (an input prompt owns the keyboard, so
+ * the menu is scrollback). */
+export function liveMenuBlock(pane: string): LiveMenuBlock | null {
+  const lines = pane.split('\n');
+  const parsed = lines.map((line, index) => parseMenuRow(line, index));
+  let anchor = -1;
+  for (let index = lines.length - 1; index >= 0; index--) {
+    if (parsed[index]) {
+      anchor = index;
+      break;
+    }
+  }
+  if (anchor < 0) return null;
+
+  const rows: MenuBlockRow[] = [parsed[anchor]!];
+  let expected = parsed[anchor]!.ordinal - 1;
+  let gap = 0;
+  for (let index = anchor - 1; index >= 0 && expected >= 1; index--) {
+    const row = parsed[index];
+    if (!row) {
+      // A footer, another question row or a composer between two numbered rows
+      // is a HARD boundary, not a description to be skipped over. Treating them
+      // as ordinary gap lines let a clipped lower menu (row 1 scrolled off) be
+      // stitched to a stale row 1 sitting above an old footer — one "block"
+      // spanning two menus, carrying two cursor glyphs.
+      const value = lines[index]!.trim();
+      if (menuFooterLine(value) || isQuestionAnchorLine(lines[index]!) || isComposerRow(lines[index]!)) break;
+      if (++gap > MENU_ROW_GAP_LINES) break;
+      continue;
+    }
+    // A row that does not continue the descending run is a DIFFERENT menu.
+    if (row.ordinal !== expected) break;
+    rows.unshift(row);
+    expected--;
+    gap = 0;
+  }
+  // Two cursor glyphs in one cluster means two menus were stitched together, or
+  // a repaint is half-drawn. Either way the navigation origin is unknowable.
+  if (rows.filter(row => row.cursor).length > 1) return null;
+
+  const firstRow = rows[0]!.line;
+  const lastRow = rows[rows.length - 1]!.line;
+  // A bare composer BELOW the rows means an input prompt has the keyboard and
+  // this menu is scrollback — the idle-prompt-under-an-old-question shape that
+  // otherwise pinned a pending question forever.
+  for (let index = lastRow + 1; index < lines.length; index++) {
+    if (isComposerRow(lines[index]!)) return null;
+  }
+  let startLine = firstRow;
+  let blanks = 0;
+  for (let index = firstRow - 1; index >= 0 && firstRow - index <= MENU_INTRO_LINES; index--) {
+    if (parsed[index]) break;
+    const value = lines[index]!.trim();
+    if (menuFooterLine(value) || isComposerRow(lines[index]!)) break;
+    if (value === '') {
+      if (++blanks > MENU_INTRO_BLANK_RUN) break;
+    } else blanks = 0;
+    startLine = index;
+  }
+  let endLine = lastRow;
+  for (let index = lastRow + 1; index < lines.length && index - lastRow <= MENU_FOOTER_LINES; index++) {
+    if (parsed[index]) break;
+    endLine = index;
+  }
+
+  // Exactly one cursor row survives the check above, so "the" cursor is unambiguous.
+  const cursor = rows.find(row => row.cursor);
+  const cursorRow = cursor ? cursor.ordinal - 1 : undefined;
+  return {
+    text: lines.slice(startLine, endLine + 1).join('\n'),
+    intro: lines.slice(startLine, firstRow).join('\n'),
+    rowsText: lines.slice(firstRow, lastRow + 1).join('\n'),
+    startLine,
+    endLine,
+    rows,
+    cursorRow,
+  };
+}
+
+/** Is `label` a real numbered row OF THIS BLOCK? The block-bound replacement for
+ * `exactOptionRowVisible` everywhere a keystroke depends on the answer. */
+export function blockOptionRowVisible(block: LiveMenuBlock, label: string): boolean {
+  return block.rows.some(row => rowTextMatchesLabel(row.text, label));
+}
+
+/** Does the live block structurally render THIS option set, in THIS order?
+ *
+ * Question text alone must never authorize a key. Freeform answers and abandon
+ * carry no selected-label gate at all, so without this a pending question phrase
+ * quoted in an unrelated live selector's intro or prose would resolve a singleton
+ * and send Enter or Escape straight into that selector. The binding demanded here
+ * is POSITIONAL and it binds the whole SET, not one label: option `i` must be
+ * the row printed at ordinal `i + 1`, and ANY row in that ordinal range that
+ * disagrees rejects the block outright. A single shared or generic label
+ * ("Yes", "Continue") therefore cannot bind an unrelated selector to us.
+ *
+ * The one concession to real captures is that a row may be a WRAPPED or
+ * ELLIPSIS-CLIPPED prefix of its label rather than the whole thing, and a row
+ * that is not on screen at all (clipped menu) is neither agreement nor conflict.
+ * At least one row must still be positively observed. A question that renders no
+ * options has nothing to bind against, so it never authorizes a key. */
+export function blockBindsOptions(block: LiveMenuBlock, labels: string[]): boolean {
+  if (labels.length === 0) return false;
+  let observed = 0;
+  for (const [index, label] of labels.entries()) {
+    const row = block.rows.find(candidate => candidate.ordinal === index + 1);
+    if (!row) continue;
+    if (!rowAgreesWithLabel(row.text, label)) return false;
+    observed++;
+  }
+  return observed > 0;
+}
+
+/** Does a row's text belong to `label` — exactly, or as the prefix a wrap or an
+ * ellipsis truncation leaves behind? Deliberately one-directional: the row must
+ * be a prefix of the LABEL, so a longer unrelated row never agrees. */
+function rowAgreesWithLabel(text: string, label: string): boolean {
+  if (rowTextMatchesLabel(text, label)) return true;
+  const row = normalizeForMatch(text).replace(/[….]+$/u, '');
+  const wanted = normalizeForMatch(label);
+  return row.length >= 4 && wanted.startsWith(row);
+}
+
+export type StructuredQuestionMatchReason =
+  | 'block_missing'
+  | 'menu_unbound'
+  | 'question_missing'
+  | 'prompt_ready'
+  | 'option_missing';
+
+export interface StructuredQuestionPaneMatch {
+  ok: boolean;
+  reason?: StructuredQuestionMatchReason;
+  questionProbe: string;
+  questionVisible: boolean;
+  promptReady: boolean;
+  /** Inclusive pane-line bounds of the block every field below was read from;
+   * `null` when no live block could be bound at all. */
+  block: { startLine: number; endLine: number; rows: number } | null;
+  selected: Array<{
+    label: string;
+    distinctiveFragment: string | null;
+    exactRowVisible: boolean;
+    fragmentVisible: boolean;
+  }>;
+}
+
+/** Detailed form of the safety gate. The journal records this object on every
+ * refusal, so the next report says what the matcher actually saw instead of
+ * collapsing all causes into “not visible”.
+ *
+ * EVERY field is read from ONE `liveMenuBlock`: the question probe from the
+ * block's intro, the option rows from the block's rows, the wrap/truncation
+ * fragment from the block's row region. Nothing is read from the wider capture,
+ * so a stale question high in scrollback can never be combined with a live
+ * unrelated selector's rows below it. No block ⇒ `block_missing` ⇒ refusal. */
+export function structuredQuestionPaneMatch(args: {
+  pane: string;
+  question: string;
+  options: string[];
+  selected: string[];
+  promptReady: boolean;
+}): StructuredQuestionPaneMatch {
+  const block = liveMenuBlock(args.pane);
+  // Intro carries the question/header; rows carry labels and their wrapped
+  // continuations. Keeping them apart stops a description inside the rows from
+  // standing in for the question, and block prose from standing in for a label.
+  const intro = block ? normalizeForMatch(block.intro) : '';
+  const rowsText = block ? normalizeForMatch(block.rowsText) : '';
+  const questionProbe = normalizeForMatch(args.question).slice(0, 40);
+  // A structural question ROW, never an intro substring: an unrelated selector's
+  // intro can quote our question in prose, and with a shared option set that was
+  // enough to hand it both answer and abandon.
+  const questionVisible = !!block && questionRowIndex(block.intro, args.question) >= 0;
+  // The block must be THIS question's menu, not merely a menu whose intro quotes
+  // its text. Freeform answers supply no selected labels, so without this the
+  // option check below would be vacuous and prose could authorize Enter.
+  const menuBound = !!block && blockBindsOptions(block, args.options);
+  const selected = args.selected.map(label => {
+    const distinctiveFragment = distinctiveOptionFragment(label, args.options);
+    return {
+      label,
+      distinctiveFragment,
+      exactRowVisible: !!block && blockOptionRowVisible(block, label),
+      fragmentVisible: !!block && distinctiveFragment !== null && rowsText.includes(distinctiveFragment),
+    };
+  });
+  const reason: StructuredQuestionMatchReason | undefined = !block
+    ? 'block_missing'
+    : !menuBound
+      ? 'menu_unbound'
+      : !questionVisible
+        ? 'question_missing'
+        : args.promptReady
+          ? 'prompt_ready'
+          : selected.some(option => !option.exactRowVisible && !option.fragmentVisible)
+            ? 'option_missing'
+            : undefined;
+  return {
+    ok: reason === undefined,
+    reason,
+    questionProbe,
+    questionVisible,
+    promptReady: args.promptReady,
+    block: block ? { startLine: block.startLine, endLine: block.endLine, rows: block.rows.length } : null,
+    selected,
+  };
+}
+
+/** Is this question the one the LIVE block is asking? Bound to a structural
+ * question row inside the block's intro region, so neither the same phrase
+ * elsewhere in the capture nor a prose quote inside the intro counts. */
+export function questionVisibleOnPane(pane: string, question: string): boolean {
+  const block = liveMenuBlock(pane);
+  return !!block && questionRowIndex(block.intro, question) >= 0;
+}
+
+export type VisibleQuestionReason = 'no_block' | 'no_candidate' | 'unbound' | 'ambiguous';
+
+/** Per-candidate evidence behind a resolution. Booleans and ordinals only — a
+ * refusal can be journalled in full without copying pane text. */
+export interface VisibleQuestionEvidence {
+  index: number;
+  /** This question's probe cannot be produced by any OTHER candidate's text. */
+  questionDistinct: boolean;
+  /** A header only this candidate owns is the live block's own header row. */
+  headerDistinct: boolean;
+  /** An option label only this candidate owns is a numbered row OF THE LIVE
+   * BLOCK. */
+  optionDistinct: boolean;
+  /** Nothing else this set could render sits BELOW it inside the block's intro
+   * (it is the live question, not an earlier one repainted above). */
+  lastRendered: boolean;
+}
+
+export interface VisibleQuestionResolution {
+  /** The uniquely identified ordinal, or -1 when it cannot be pinned down. */
+  index: number;
+  /** Every ordinal whose text could account for the LIVE BLOCK. */
+  candidates: number[];
+  reason?: VisibleQuestionReason;
+  evidence: VisibleQuestionEvidence[];
+  /** Inclusive pane-line bounds of the block the resolution was read from. */
+  block: { startLine: number; endLine: number; rows: number } | null;
+}
+
+/** A normalized signature is usable as an identifier only when nothing else the
+ * set could render on the pane contains it — the same no-sibling-collision rule
+ * `distinctiveOptionFragment` applies to option labels, applied to whole
+ * questions/headers/labels across the ordinals of one question set. */
+function distinctInCorpus(signature: string, corpus: string): boolean {
+  return signature.length >= 4 && !corpus.includes(signature);
+}
+
+/** Which pending ordinal is on screen — and, crucially, whether that can be
+ * known at all. Identifying a menu by question text alone is unsafe: a set may
+ * ask the SAME question twice (Claude allows it), so the text, its position and
+ * any tie-break over positions are all satisfied equally by two ordinals. The
+ * daemon then starts a drive at the wrong ordinal and answers the wrong menu
+ * with the wrong choice list — strictly worse than not answering at all.
+ *
+ * So an ordinal is returned only when exactly one candidate is BOTH the
+ * last-rendered one and carries a signature (its own question text, its header,
+ * or one of its option labels) that no other candidate could have produced.
+ * Otherwise the resolution is `ambiguous` and every caller must refuse before
+ * sending a key. `candidates` reports what stayed plausible so a refusal can say
+ * which ordinals collided.
+ *
+ * ALL of that is evaluated against ONE `liveMenuBlock` and nothing else:
+ *  - candidacy needs the question probe in the block's INTRO region, so a
+ *    singleton is never accepted merely because its text exists somewhere in the
+ *    capture, and the same phrase quoted in unrelated prose does not count;
+ *  - header and option signatures must be the block's own header row and the
+ *    block's own numbered rows.
+ * With no block there is nothing a key could legally be aimed at, so the
+ * resolution is `no_block` and every caller refuses. */
+export function resolveVisibleQuestion(
+  pane: string,
+  questions: PendingQuestion['questions'],
+): VisibleQuestionResolution {
+  const block = liveMenuBlock(pane);
+  if (!block) return { index: -1, candidates: [], reason: 'no_block', evidence: [], block: null };
+  const bounds = { startLine: block.startLine, endLine: block.endLine, rows: block.rows.length };
+  const texts = questions.map(question => normalizeForMatch(question.question));
+  const probes = texts.map(text => text.slice(0, QUESTION_PROBE_CHARS));
+  // Position = the intro LINE this question is printed on as its own row. A
+  // substring hit is not candidacy: prose in an unrelated selector's intro
+  // quotes earlier questions all the time.
+  const positions = questions.map(question => questionRowIndex(block.intro, question.question));
+  const spoken = questions.map((_, index) => index).filter(index => positions[index]! >= 0);
+  // Text in the intro is NECESSARY but never SUFFICIENT: the block must also be
+  // rendering this candidate's own option set at its own ordinals. Otherwise a
+  // pending question quoted in an unrelated live selector's intro would resolve
+  // as a singleton and authorize Enter/Escape into that selector — the exact
+  // cross-menu failure this binding exists to make impossible.
+  const candidates = spoken.filter(index =>
+    blockBindsOptions(
+      block,
+      (questions[index]!.options ?? []).map(option => option.label),
+    ),
+  );
+  if (candidates.length === 0)
+    return {
+      index: -1,
+      candidates,
+      reason: spoken.length > 0 ? 'unbound' : 'no_candidate',
+      evidence: [],
+      block: bounds,
+    };
+  // Only one ordinal of this set can account for the LIVE BLOCK: no sibling
+  // exists to be confused with, so the probe match IS unique (unchanged
+  // behaviour for the ordinary single-question case, now block-bound).
+  if (candidates.length === 1) return { index: candidates[0]!, candidates, evidence: [], block: bounds };
+  const lastPosition = Math.max(...candidates.map(index => positions[index]!));
+  const evidence = candidates.map<VisibleQuestionEvidence>(index => {
+    const question = questions[index]!;
+    // Everything the OTHER plausible ordinals could put on this pane. A
+    // signature found here proves nothing about which ordinal we are looking at.
+    const corpus = candidates
+      .filter(other => other !== index)
+      .flatMap(other => {
+        const sibling = questions[other]!;
+        return [
+          texts[other]!,
+          normalizeForMatch(sibling.header ?? ''),
+          ...(sibling.options ?? []).map(option => normalizeForMatch(option.label)),
+        ];
+      })
+      .join(' ');
+    // Both signatures demand STRUCTURAL evidence INSIDE THE BLOCK, never a pane
+    // substring: a description, a wrapped line or old scrollback can contain a
+    // header or a label verbatim, and a hit there would pin the ordinal on text
+    // that is not the live menu at all. A false refusal costs a retry; a guessed
+    // ordinal answers a menu we cannot see with another menu's choices.
+    const header = question.header ?? '';
+    const optionDistinct = (question.options ?? []).some(option => {
+      const label = normalizeForMatch(option.label);
+      if (!distinctInCorpus(label, corpus)) return false;
+      return blockOptionRowVisible(block, option.label);
+    });
+    return {
+      index,
+      questionDistinct: distinctInCorpus(probes[index]!, corpus),
+      headerDistinct: distinctInCorpus(normalizeForMatch(header), corpus) && exactHeaderRowVisible(block.intro, header),
+      optionDistinct,
+      lastRendered: positions[index] === lastPosition,
+    };
+  });
+  const identified = evidence.filter(
+    item => item.lastRendered && (item.questionDistinct || item.headerDistinct || item.optionDistinct),
+  );
+  if (identified.length === 1) return { index: identified[0]!.index, candidates, evidence, block: bounds };
+  return { index: -1, candidates, reason: 'ambiguous', evidence, block: bounds };
+}
+
+/** The ordinal that is on screen, or `-1` when the frame cannot pin one down.
+ * ORDINAL and PRESENCE are deliberately separate functions: an ordinal is a
+ * thing keys get driven from, so ambiguity here is a refusal, never a fallback
+ * guess. Anything asking only “is a question still up?” must call
+ * `anyQuestionVisible`, which answers that without exposing an ordinal. */
+export function visibleQuestionIndex(pane: string, questions: PendingQuestion['questions']): number {
+  return resolveVisibleQuestion(pane, questions).index;
+}
+
+/** PRESENCE probe: is ANY question of this set still rendered on the pane? This
+ * is all the self-heal and cancel gates ask, and they need it OPTIMISTIC — two
+ * identically-worded ordinals colliding must still read as “a question is up”,
+ * or they would clear live question state or fire Escape at a frame that is not
+ * theirs. No ordinal is returned precisely because none can be trusted here. */
+export function anyQuestionVisible(pane: string, questions: PendingQuestion['questions']): boolean {
+  if (resolveVisibleQuestion(pane, questions).candidates.length > 0) return true;
+  // The structured FREE-TEXT page ("Other" / "Type something") is legitimately
+  // not a menu block at all: the numbered rows are replaced by a composer. It is
+  // still this question, and a human may be mid-answer in it — reporting it as
+  // gone would let the self-heal monitor clear the pending question out from
+  // under them. But this is the ONE place presence may look outside a menu
+  // block, so it is bounded exactly as strictly: the live bottom free-text
+  // region with an explicit marker, and the question as its OWN row inside it.
+  // A pane-wide substring plus a bare `❯` reads an ordinary idle prompt under an
+  // old question as presence, which pins a closed question forever.
+  return questions.some(question => freeTextPageShowsQuestion(pane, question.question));
+}
+
+/** Structural proof that THIS set's menu — not a repaint, an idle prompt, an
+ * unrelated selector or scrollback text — is live on the pane. Escape is only
+ * safe against such a frame; at an idle Codex prompt it quits the TUI, and at an
+ * unrelated selector it answers somebody else's menu.
+ *
+ * Three things must hold IN THE SAME BLOCK: this set's question text in its
+ * intro, this set's option row order at its ordinals (both carried by candidacy),
+ * and the native selection cursor. The cursor requirement is what separates a
+ * live, focused menu from numbered OUTPUT that merely looks like one — Escape
+ * against the latter is a keystroke into whatever actually has focus. A cursor
+ * alone was never enough either: an unrelated live selector always has one. */
+export function structuredMenuVisible(pane: string, questions: PendingQuestion['questions']): boolean {
+  const block = liveMenuBlock(pane);
+  if (!block || block.cursorRow === undefined) return false;
+  return resolveVisibleQuestion(pane, questions).candidates.length > 0;
+}
+
+/** The navigation origin: the 0-based option index the native cursor sits on,
+ * read from the LIVE BLOCK only.
+ *
+ * A capture routinely holds an earlier, already-answered menu in scrollback with
+ * its own frozen cursor glyph, and may hold an unrelated live selector too.
+ * Reading either as the origin makes every subsequent `Down`/`Up` count from the
+ * wrong place and selects whatever happens to sit that far away — a silently
+ * wrong answer. Taking the cursor from the same block the question and option
+ * rows were proven in is what makes the movement count meaningful. */
+function blockMenuCursor(block: LiveMenuBlock, optionCount: number): number | undefined {
+  const index = block.cursorRow;
+  // Claude appends both “Type something” (optionCount) and “Chat about this”
+  // (optionCount + 1). A human may have moved the native cursor there before
+  // answering from the web UI; retaining that real origin lets us navigate
+  // back to the requested row instead of assuming row 1 and mis-selecting.
+  return index !== undefined && index <= optionCount + 1 ? index : undefined;
+}
+
+/** The checkbox state the pane actually shows for each option, in option order;
+ * `undefined` where the row is absent or carries no marker we recognize.
+ *
+ * Multi-select cannot be driven by toggling only the wanted rows: that assumes
+ * every box starts empty. A human at the pane (kteam attach is supported) may
+ * have ticked boxes already, in which case a blind toggle un-ticks a wanted
+ * option and leaves an unwanted one ticked — a silently wrong answer. Reading
+ * the markers lets the drive toggle exactly the mismatches, and an unreadable
+ * row makes the caller refuse instead of guessing. */
+export function visibleMultiSelectState(pane: string, labels: string[]): Array<boolean | undefined> {
+  const block = liveMenuBlock(pane);
+  return block ? blockMultiSelectState(block, labels) : labels.map(() => undefined);
+}
+
+/** The block-bound form the driver uses: checkbox state is read from the SAME
+ * rows the question and the selected options were proven in, never from a
+ * scrollback copy of the menu whose ticks are frozen at whatever they were when
+ * it scrolled past. With no live block every option reads `undefined`, which
+ * makes the caller refuse. */
+export function blockMultiSelectState(block: LiveMenuBlock, labels: string[]): Array<boolean | undefined> {
+  return labels.map(label => {
+    if (!normalizeForMatch(label)) return undefined;
+    const matches = block.rows.filter(row => rowTextMatchesLabel(row.text, label));
+    // Two rows carrying the same label are as unknowable as none.
+    if (matches.length !== 1) return undefined;
+    return matches[0]!.checked;
+  });
+}
+
+/** Evidence that the free-text page of a structured question is open and ready
+ * to receive typing: an empty composer row, or the harness's own type-your-
+ * answer hint. Typing before this page renders puts the text into the MENU. */
+export function paneShowsFreeformComposer(pane: string): boolean {
+  return freeformComposerLine(pane) !== undefined;
+}
+
+/** The LOWEST line carrying free-text-page evidence, or `undefined` for none.
+ * DIAGNOSTIC/shape helper only — it cannot tell a live free-text page from a
+ * bare idle prompt. Everything that authorizes typing or reports presence uses
+ * `freeTextQuestionRegion`. */
+export function freeformComposerLine(pane: string): number | undefined {
+  let found: number | undefined;
+  pane.split('\n').forEach((line, index) => {
+    if (isFreeTextMarkerRow(line)) {
+      found = index;
+      return;
+    }
+    if (isComposerRow(line)) found = index;
+  });
+  return found;
+}
+
+/** The harness's own "now type" hint, as a whole ROW.
+ *
+ * An explicit marker is mandatory because a bare `❯` is what an ORDINARY IDLE
+ * PROMPT looks like, so glyph-only evidence cannot tell a live free-text page
+ * from a session at rest. But the marker must be structural for the same reason
+ * the question must be: a substring scrape accepts ordinary prose — "You can
+ * type your answer later" a few lines above an idle prompt — and hands the drive
+ * a forged free-text page. So the chrome-stripped line must BE the hint: it
+ * starts with it, and carries nothing after it but punctuation or a
+ * parenthesised key hint. */
+const FREE_TEXT_MARKER_ROW =
+  /^type\s+(?:your\s+)?(?:answer|response|reply|something)\b[\s.…:!]*(?:\([^)]*\))?[\s.…]*$/i;
+
+function isFreeTextMarkerRow(line: string): boolean {
+  const stripped = (line.split(/[│┃]/u)[0] ?? line).replace(/^[\s│|┃╭╰┌└>›❯»*•‣–—-]+/u, '').trim();
+  return FREE_TEXT_MARKER_ROW.test(stripped);
+}
+/** Lines above the marker in which the question may be read. */
+const FREE_TEXT_INTRO_LINES = 4;
+/** How far above its composer the marker may sit. */
+const FREE_TEXT_MARKER_GAP = 4;
+
+export interface FreeTextRegion {
+  markerLine: number;
+  composerLine: number;
+  /** The bounded lines ending at the marker — the ONLY place the question may
+   * be read from for this region to count. */
+  intro: string;
+}
+
+/** The ONE live free-text region at the bottom of the pane, or `null`.
+ *
+ * The structured "Other"/"Type something" page is legitimately not a menu block
+ * — its rows are replaced by a composer — so it needs its own bounded proof, or
+ * the loose version of this check does real damage in both directions: it lets
+ * an old question plus any bare `❯` read as presence forever (self-heal can then
+ * never clear a closed question), and it lets the drive type a freeform answer
+ * into an ordinary idle prompt as a brand-new message.
+ *
+ * Bounds, all required:
+ *  - the BOTTOM composer row of the pane (a lower one means this region is not
+ *    the live one);
+ *  - an explicit `Type your answer`-style marker within FREE_TEXT_MARKER_GAP
+ *    lines above it, never a bare glyph, and never a numbered menu row that
+ *    merely contains the words;
+ *  - nothing but blanks and box chrome between the marker and its composer, so
+ *    an older page's hint cannot claim an unrelated composer further down;
+ *  - no live menu block at or below the marker — if a menu is still rendered
+ *    there, the free-text page is scrollback and that menu owns the keyboard. */
+export function freeTextQuestionRegion(pane: string): FreeTextRegion | null {
+  const lines = pane.split('\n');
+  let composerLine = -1;
+  for (let index = lines.length - 1; index >= 0; index--) {
+    if (isComposerRow(lines[index]!)) {
+      composerLine = index;
+      break;
+    }
+  }
+  if (composerLine < 0) return null;
+  let markerLine = -1;
+  for (let index = composerLine - 1; index >= 0 && composerLine - index <= FREE_TEXT_MARKER_GAP; index--) {
+    if (isFreeTextMarkerRow(lines[index]!) && !parseMenuRow(lines[index]!, index)) {
+      markerLine = index;
+      break;
+    }
+  }
+  if (markerLine < 0) return null;
+  for (let index = markerLine + 1; index < composerLine; index++) {
+    if (lines[index]!.replace(/[\s│|┃╭╰┌└╮╯┐┘─━]/gu, '') !== '') return null;
+  }
+  const block = liveMenuBlock(pane);
+  if (block && block.endLine >= markerLine) return null;
+  return {
+    markerLine,
+    composerLine,
+    intro: lines.slice(Math.max(0, markerLine - FREE_TEXT_INTRO_LINES), markerLine + 1).join('\n'),
+  };
+}
+
+/** Is THIS question the one the live free-text region is collecting an answer
+ * for? Structural on both axes: the region must be the live bottom one, and the
+ * question must be its own row inside that region. */
+export function freeTextPageShowsQuestion(pane: string, question: string): boolean {
+  const region = freeTextQuestionRegion(pane);
+  return !!region && questionRowIndex(region.intro, question) >= 0;
+}
+
+export interface StructuredAnswerOutcome {
+  toolUseId: string;
+  startedAtQuestion: number;
+  answeredQuestions: number;
+  confirmedBy: 'next-question' | 'turn-started' | 'prompt-ready' | 'pane-advanced';
+}
+
+export class StructuredQuestionDriveError extends Error {
+  constructor(
+    message: string,
+    readonly diagnostics: Record<string, unknown>,
+  ) {
+    super(message);
+    this.name = 'StructuredQuestionDriveError';
+  }
+}
+
 /** Pure precondition for driving the interactive structured-question menu by
  *  index. Returns a refusal message, or `null` to proceed. The daemon must
  *  never type into a menu it cannot confirm is on screen — a wrong keystroke
@@ -437,14 +1251,7 @@ export function structuredAnswerRefusal(args: {
   selected: string[];
   promptReady: boolean;
 }): string | null {
-  const normalizedPane = normalizeForMatch(args.pane);
-  const questionProbe = normalizeForMatch(args.question).slice(0, 40);
-  if (!questionProbe || !normalizedPane.includes(questionProbe)) return STRUCTURED_ANSWER_NOT_VISIBLE;
-  if (args.promptReady) return STRUCTURED_ANSWER_NOT_VISIBLE;
-  for (const label of args.selected) {
-    if (!optionVisibleOnPane(normalizedPane, label, args.options)) return STRUCTURED_ANSWER_NOT_VISIBLE;
-  }
-  return null;
+  return structuredQuestionPaneMatch(args).ok ? null : STRUCTURED_ANSWER_NOT_VISIBLE;
 }
 
 export function parsePaneMetadata(value: string): PaneMetadata {
@@ -956,11 +1763,23 @@ export class TmuxController {
    *  without sleeping. */
   protected readonly injectionPollMs: number = 500;
 
+  /** Structured menus repaint asynchronously. Tests override these fields so
+   * the real confirmation loop runs against fixtures without wall-clock waits. */
+  protected readonly questionPollMs: number = 100;
+  protected readonly questionConfirmationPolls: number = 50;
+
   /** The composer path's ONLY keystroke primitive. A single seam so landing
    *  verification (which must never press C-u over a delivered paste) can be
    *  tested against recorded frames instead of a live tmux server. */
   protected async keys(name: string, ...keys: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
     return await run(['tmux', 'send-keys', '-t', name, ...keys]);
+  }
+
+  /** Leave tmux copy-mode without sending a key to the harness. A structured
+   * menu can be perfectly healthy underneath a scrolled client; retrying after
+   * this is the safe “re-present” step before refusing an answer. */
+  protected async exitCopyMode(name: string): Promise<{ code: number; stdout: string; stderr: string }> {
+    return await run(['tmux', 'copy-mode', '-q', '-t', name]);
   }
 
   protected async pasteText(name: string, text: string): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -1003,22 +1822,139 @@ export class TmuxController {
     await this.waitReady(name, AUTOMODE_READY_TIMEOUT_MS);
   }
 
+  private async questionKey(name: string, ...keys: string[]): Promise<void> {
+    const result = await this.keys(name, ...keys);
+    if (result.code !== 0)
+      throw new StructuredQuestionDriveError(result.stderr.trim() || 'tmux structured-question key failed', {
+        phase: 'send-key',
+        keys,
+        exitCode: result.code,
+      });
+  }
+
+  private async moveQuestionCursor(name: string, from: number, to: number): Promise<void> {
+    const key = to >= from ? 'Down' : 'Up';
+    for (let cursor = 0; cursor < Math.abs(to - from); cursor++) await this.questionKey(name, key);
+  }
+
+  private async waitForQuestionAdvance(
+    name: string,
+    pending: PendingQuestion,
+    questionIndex: number,
+    beforePane: string,
+  ): Promise<{ pane: PaneState; confirmedBy: StructuredAnswerOutcome['confirmedBy'] }> {
+    let last = await this.state(name);
+    for (let poll = 0; poll < this.questionConfirmationPolls; poll++) {
+      if (poll > 0) await Bun.sleep(this.questionPollMs);
+      last = poll === 0 ? last : await this.state(name);
+      if (!last.alive || last.dead)
+        throw new StructuredQuestionDriveError('session pane died while confirming the structured answer', {
+          phase: 'confirm',
+          questionIndex,
+          paneAlive: last.alive,
+          paneDead: last.dead,
+        });
+      // Advance proof must be UNIQUE too: with duplicate wording the optimistic
+      // presence ordinal could read as "moved on" while the same menu is still
+      // up. An unresolvable frame simply is not proof, so keep polling.
+      const resolved = resolveVisibleQuestion(last.visiblePane, pending.questions);
+      const activeIndex = resolved.index;
+      if (questionIndex < pending.questions.length - 1) {
+        if (activeIndex > questionIndex && !last.promptReady) return { pane: last, confirmedBy: 'next-question' };
+      } else {
+        if (paneShowsActiveWork(last.visiblePane)) return { pane: last, confirmedBy: 'turn-started' };
+        if (last.promptReady) return { pane: last, confirmedBy: 'prompt-ready' };
+        // `pane-advanced` is the weakest tier, so it requires that this question
+        // is genuinely gone — no candidate of the set is on screen — rather than
+        // merely unresolvable (an ambiguous frame still shows a question).
+        if (resolved.candidates.length === 0 && last.visiblePane !== beforePane)
+          return { pane: last, confirmedBy: 'pane-advanced' };
+      }
+    }
+    const final = resolveVisibleQuestion(last.visiblePane, pending.questions);
+    throw new StructuredQuestionDriveError(
+      'the answer was typed, but the question pane did not advance; no success was recorded — retry or abandon the question',
+      {
+        phase: 'confirm',
+        questionIndex,
+        activeQuestionIndex: final.index,
+        candidates: final.candidates,
+        ambiguous: final.reason === 'ambiguous',
+        promptReady: last.promptReady,
+        activeWork: paneShowsActiveWork(last.visiblePane),
+      },
+    );
+  }
+
   async answerQuestion(
     config: SessionConfig,
     state: SessionState,
     labels: string[],
     other?: string,
     responses?: string[],
-  ): Promise<void> {
+  ): Promise<StructuredAnswerOutcome> {
     const pending = state.pendingQuestion;
     if (!pending) throw new Error('session has no pending structured question');
     if (other && pending.questions.length !== 1)
       throw new Error('use one --response per question when multiple questions are pending');
     if (responses && responses.length !== pending.questions.length)
       throw new Error(`expected ${pending.questions.length} --response values`);
-    for (let questionIndex = 0; questionIndex < pending.questions.length; questionIndex++) {
+    let current = await this.state(config.tmuxSession);
+    let resolution = resolveVisibleQuestion(current.visiblePane, pending.questions);
+    // A user can scroll the tmux client while the menu remains active. Exit
+    // copy-mode once and re-read before declaring the pane unanswerable.
+    if (resolution.index < 0 || current.promptReady) {
+      await this.exitCopyMode(config.tmuxSession).catch(() => undefined);
+      current = await this.state(config.tmuxSession);
+      resolution = resolveVisibleQuestion(current.visiblePane, pending.questions);
+    }
+    if (!current.alive || current.dead)
+      throw new StructuredQuestionDriveError('session pane is dead; use resume', {
+        phase: 'preflight',
+        paneAlive: current.alive,
+        paneDead: current.dead,
+      });
+    // Ambiguity is its own refusal, distinct from "no question on screen". A set
+    // that asks the same thing twice leaves two ordinals equally consistent with
+    // the pane; starting the drive at either would answer a menu we cannot see
+    // with the choices meant for the other one. Refuse with zero keys and name
+    // the colliding ordinals so the retry/abandon controls stay actionable.
+    if (resolution.reason === 'ambiguous')
+      throw new StructuredQuestionDriveError(
+        `cannot tell which of ${resolution.candidates.length} identically-worded questions is on screen (candidates ${resolution.candidates.join(', ')}); abandon the question and re-ask`,
+        {
+          phase: 'preflight',
+          reason: 'ambiguous_question',
+          candidates: resolution.candidates,
+          evidence: resolution.evidence,
+          promptReady: current.promptReady,
+          questionCount: pending.questions.length,
+        },
+      );
+    // `unbound` is its own diagnosis and the one Davis's cross-menu shape lands
+    // on: the pending question's text was found, but the live block is rendering
+    // SOMEBODY ELSE'S option set. Saying so keeps the report honest instead of
+    // claiming the question simply scrolled away.
+    if (resolution.index < 0)
+      throw new StructuredQuestionDriveError(
+        resolution.reason === 'unbound'
+          ? 'the live menu on the pane is not this question’s menu (its options are not the ones on screen); retry or abandon the question'
+          : 'the structured question is not visible after restoring the pane; retry or abandon the question',
+        {
+          phase: 'preflight',
+          reason: resolution.reason === 'unbound' ? 'menu_unbound' : 'question_missing',
+          block: resolution.block,
+          promptReady: current.promptReady,
+          questionCount: pending.questions.length,
+        },
+      );
+
+    let questionIndex = resolution.index;
+    const startedAtQuestion = questionIndex;
+    let answeredQuestions = 0;
+    let confirmedBy: StructuredAnswerOutcome['confirmedBy'] = 'pane-advanced';
+    for (; questionIndex < pending.questions.length; questionIndex++) {
       const question = pending.questions[questionIndex]!;
-      const current = await this.state(config.tmuxSession);
       const pane = current.visiblePane;
       const options = question.options ?? [];
       const response = responses?.[questionIndex];
@@ -1035,38 +1971,206 @@ export class TmuxController {
       // whose label wrapped across two lines (panel text between the fragments)
       // or was ellipsis-truncated — see structuredAnswerRefusal for the
       // wrap/truncation-safe, mis-answer-proof check.
-      const refusal = structuredAnswerRefusal({
+      let match = structuredQuestionPaneMatch({
         pane,
         question: question.question,
         options: options.map(option => option.label),
         selected,
         promptReady: current.promptReady,
       });
-      if (refusal) throw new Error(refusal);
-      if (selected.length === 0 && !freeform) throw new Error(`no supplied selection matches: ${question.question}`);
-      if (freeform) {
-        for (let cursor = 0; cursor < options.length; cursor++)
-          await run(['tmux', 'send-keys', '-t', config.tmuxSession, 'Down']);
-        await run(['tmux', 'send-keys', '-t', config.tmuxSession, 'Enter']);
-        await Bun.sleep(300);
-        await run(['tmux', 'send-keys', '-t', config.tmuxSession, '-l', freeform]);
-        await run(['tmux', 'send-keys', '-t', config.tmuxSession, 'Enter']);
-        continue;
+      if (!match.ok) {
+        await this.exitCopyMode(config.tmuxSession).catch(() => undefined);
+        current = await this.state(config.tmuxSession);
+        match = structuredQuestionPaneMatch({
+          pane: current.visiblePane,
+          question: question.question,
+          options: options.map(option => option.label),
+          selected,
+          promptReady: current.promptReady,
+        });
       }
-      if (question.multiSelect) {
-        for (let index = 0; index < options.length; index++) {
-          if (selected.includes(options[index]!.label))
-            await run(['tmux', 'send-keys', '-t', config.tmuxSession, 'Space']);
-          if (index < options.length - 1) await run(['tmux', 'send-keys', '-t', config.tmuxSession, 'Down']);
+      if (!match.ok)
+        throw new StructuredQuestionDriveError(
+          `cannot safely locate this question in the terminal (${match.reason}); retry or abandon the question`,
+          { phase: 'preflight', questionIndex, match },
+        );
+      if (selected.length === 0 && !freeform) throw new Error(`no supplied selection matches: ${question.question}`);
+      // Mid-set safety: after the first answer the pane has repainted, so the
+      // ordinal we are about to drive must still be THE uniquely identified one.
+      // A partial retry is supported precisely as far as the evidence goes —
+      // when the next page's own question text repeats an earlier one, its
+      // header or options must disambiguate it, otherwise we stop here with the
+      // questions answered so far intact rather than typing into a guess.
+      const here = resolveVisibleQuestion(current.visiblePane, pending.questions);
+      if (here.index !== questionIndex)
+        throw new StructuredQuestionDriveError(
+          here.reason === 'ambiguous'
+            ? `cannot tell which of ${here.candidates.length} identically-worded questions is on screen (candidates ${here.candidates.join(', ')}); abandon the question and re-ask`
+            : 'the visible question is no longer the one being answered; retry or abandon the question',
+          {
+            phase: 'preflight',
+            reason: here.reason === 'ambiguous' ? 'ambiguous_question' : 'question_moved',
+            questionIndex,
+            resolvedIndex: here.index,
+            candidates: here.candidates,
+            evidence: here.evidence,
+            answeredQuestions,
+          },
+        );
+      // ONE block for the whole drive of this question: the ordinal above, the
+      // option rows in `match`, the navigation origin below and the checkbox
+      // read all come from these same lines. Re-deriving per helper would be
+      // deterministic, but threading the object makes it impossible for a later
+      // edit to reach past the boundary and read the wider capture again.
+      const block = liveMenuBlock(current.visiblePane);
+      if (!block)
+        throw new StructuredQuestionDriveError(
+          'no live menu block could be bound on the pane, so no key is safe; retry or abandon the question',
+          { phase: 'preflight', reason: 'block_missing', questionIndex },
+        );
+      // The navigation origin must be OBSERVED, never assumed. `Down`×n from an
+      // imagined row 1 selects whatever happens to sit n rows below the real
+      // cursor — a wrong answer. A frame with no cursor row is simply not
+      // drivable; refuse (retryable) instead of typing blind.
+      let cursor = blockMenuCursor(block, options.length);
+      if (cursor === undefined)
+        throw new StructuredQuestionDriveError(
+          'the menu cursor row is not visible, so the selection origin is unknown; retry or abandon the question',
+          { phase: 'preflight', reason: 'cursor_missing', questionIndex, optionCount: options.length },
+        );
+      if (freeform) {
+        await this.moveQuestionCursor(config.tmuxSession, cursor, options.length);
+        await this.questionKey(config.tmuxSession, 'Enter');
+        // Wait for the free-text page to actually render. Typing into a menu
+        // that has not paged yet drives the MENU (each character is a shortcut)
+        // and leaves the set mid-mutation for the retry.
+        let composerReady = false;
+        for (let poll = 0; poll < this.questionConfirmationPolls && !composerReady; poll++) {
+          await Bun.sleep(this.questionPollMs);
+          const frame = (await this.state(config.tmuxSession)).visiblePane;
+          // Composer evidence ALONE does not authorize typing. A hint or an
+          // empty composer row from an earlier page can sit in scrollback above
+          // ANY live selector — ours, or an unrelated one that now has focus —
+          // and typing then drives that menu, every character a shortcut. A bare
+          // `❯` is worse still: that is what an ordinary IDLE PROMPT looks like,
+          // so accepting it types the freeform answer as a brand-new message
+          // after an Other that unexpectedly returned to rest.
+          // What is required is the live bottom free-text region, carrying an
+          // explicit marker, with THIS question printed as its own row in it.
+          composerReady = freeTextPageShowsQuestion(frame, question.question);
         }
+        if (!composerReady)
+          throw new StructuredQuestionDriveError(
+            'the free-text page did not open after selecting Other; retry or abandon the question',
+            { phase: 'freeform', reason: 'composer_missing', questionIndex },
+          );
+        await this.fillComposer(config.tmuxSession, freeform);
+        await this.questionKey(config.tmuxSession, 'Enter');
+      } else if (question.multiSelect) {
+        // Toggle only the rows whose CURRENT state differs from what was asked
+        // for. Blind-toggling the wanted rows assumes every box starts empty; a
+        // human at the pane may have ticked some already, which would un-tick a
+        // wanted option and submit an unwanted one.
+        const labels = options.map(option => option.label);
+        const checkboxes = blockMultiSelectState(block, labels);
+        const unreadable = checkboxes.flatMap((state, index) => (state === undefined ? [index] : []));
+        if (unreadable.length > 0)
+          throw new StructuredQuestionDriveError(
+            'the current checkbox selection is not readable on the pane, so a toggle could submit the wrong set; retry or abandon the question',
+            { phase: 'preflight', reason: 'selection_unreadable', questionIndex, unreadableOptions: unreadable },
+          );
+        const toggles = labels.flatMap((label, index) =>
+          checkboxes[index] === selected.includes(label) ? [] : [index],
+        );
+        for (const index of toggles) {
+          await this.moveQuestionCursor(config.tmuxSession, cursor, index);
+          cursor = index;
+          await this.questionKey(config.tmuxSession, 'Space');
+        }
+        await this.questionKey(config.tmuxSession, 'Enter');
       } else {
         const index = options.findIndex(option => option.label === selected[0]);
-        for (let cursor = 0; cursor < index; cursor++)
-          await run(['tmux', 'send-keys', '-t', config.tmuxSession, 'Down']);
+        await this.moveQuestionCursor(config.tmuxSession, cursor, index);
+        await this.questionKey(config.tmuxSession, 'Enter');
       }
-      await run(['tmux', 'send-keys', '-t', config.tmuxSession, 'Enter']);
-      await Bun.sleep(300);
+      const advanced = await this.waitForQuestionAdvance(config.tmuxSession, pending, questionIndex, pane);
+      current = advanced.pane;
+      confirmedBy = advanced.confirmedBy;
+      answeredQuestions++;
     }
+    return { toolUseId: pending.toolUseId, startedAtQuestion, answeredQuestions, confirmedBy };
+  }
+
+  /** Explicit structured-question abandon. Escape is sent only while a menu is
+   * STRUCTURALLY on screen (a question of this set plus a real menu row); every
+   * poll re-checks before another key. Checking only promptReady/active-work was
+   * not enough: an ambiguous repaint frame is neither, and Escape at an idle
+   * Codex prompt quits the TUI — so an unrecognizable frame refuses with zero
+   * keys and leaves the question pending for a retry. */
+  async cancelQuestion(
+    config: SessionConfig,
+    state: SessionState,
+  ): Promise<{ confirmedBy: 'already-advanced' | 'prompt-ready' | 'turn-started' | 'pane-advanced'; pane: PaneState }> {
+    const pending = state.pendingQuestion;
+    if (!pending) throw new Error('session has no pending structured question');
+    let current = await this.state(config.tmuxSession);
+    if (!current.alive || current.dead) throw new Error('session pane is dead; use resume');
+    const alreadyAdvanced = () => {
+      // Presence, not ordinal: an ambiguous frame still means a question is up,
+      // and treating it as "gone" would report the set advanced when it has not.
+      const visible = anyQuestionVisible(current.visiblePane, pending.questions);
+      if (current.promptReady) return 'prompt-ready' as const;
+      if (paneShowsActiveWork(current.visiblePane) && !visible) return 'turn-started' as const;
+      return undefined;
+    };
+    const initial = alreadyAdvanced();
+    if (initial) return { confirmedBy: 'already-advanced', pane: current };
+    await this.exitCopyMode(config.tmuxSession).catch(() => undefined);
+    current = await this.state(config.tmuxSession);
+    const before = current.visiblePane;
+    /** Escape is only safe against a frame we can positively identify as this
+     * set's live menu. Refuse rather than send a key into an unknown frame. */
+    const refuseUnlessMenu = (phase: string) => {
+      if (structuredMenuVisible(current.visiblePane, pending.questions)) return;
+      const resolution = resolveVisibleQuestion(current.visiblePane, pending.questions);
+      throw new StructuredQuestionDriveError(
+        'the pane does not show this question as a live menu, so Escape was not sent; retry or abandon the question',
+        {
+          phase,
+          reason: 'menu_not_visible',
+          candidates: resolution.candidates,
+          ambiguous: resolution.reason === 'ambiguous',
+          promptReady: current.promptReady,
+          activeWork: paneShowsActiveWork(current.visiblePane),
+        },
+      );
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const advanced = alreadyAdvanced();
+      if (advanced) return { confirmedBy: advanced, pane: current };
+      refuseUnlessMenu('cancel-preflight');
+      await this.questionKey(config.tmuxSession, 'Escape');
+      for (let poll = 0; poll < Math.max(2, Math.ceil(2_000 / Math.max(1, this.questionPollMs))); poll++) {
+        await Bun.sleep(this.questionPollMs);
+        current = await this.state(config.tmuxSession);
+        if (!current.alive || current.dead) throw new Error('session pane died while abandoning the question');
+        const confirmation = alreadyAdvanced();
+        if (confirmation) return { confirmedBy: confirmation, pane: current };
+        if (!anyQuestionVisible(current.visiblePane, pending.questions) && current.visiblePane !== before)
+          return { confirmedBy: 'pane-advanced', pane: current };
+      }
+    }
+    const remaining = resolveVisibleQuestion(current.visiblePane, pending.questions);
+    throw new StructuredQuestionDriveError(
+      'Escape was sent, but the question is still visible; it remains pending so it can be retried safely',
+      {
+        phase: 'cancel-confirm',
+        promptReady: current.promptReady,
+        activeQuestionIndex: remaining.index,
+        candidates: remaining.candidates,
+        ambiguous: remaining.reason === 'ambiguous',
+      },
+    );
   }
 
   async snapshot(config: SessionConfig, final = false): Promise<string> {

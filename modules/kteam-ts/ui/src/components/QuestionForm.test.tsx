@@ -19,6 +19,7 @@ import {
   clampPage,
   shouldFocusOtherTextarea,
   resolveRequestId,
+  interruptPendingQuestion,
   submitAnswers,
 } from './QuestionForm';
 
@@ -171,6 +172,48 @@ describe('resolveRequestId', () => {
   });
 });
 
+describe('interruptPendingQuestion', () => {
+  test('retries abandon for one question with the same nonempty request id and the same bound tool id', async () => {
+    const requestIdRef: { current: { id: string; key: string | undefined } | null } = { current: null };
+    const calls: Array<{ requestId: string; toolUseId: string }> = [];
+    let n = 0;
+    const interrupt = async (requestId: string, toolUseId: string) => {
+      calls.push({ requestId, toolUseId });
+      throw new ApiError(503, 'response lost');
+    };
+
+    await expect(
+      interruptPendingQuestion({ requestIdRef, toolUseId: 'tool-A', mint: () => `abandon-${++n}`, interrupt }),
+    ).rejects.toThrow('response lost');
+    await expect(
+      interruptPendingQuestion({ requestIdRef, toolUseId: 'tool-A', mint: () => `abandon-${++n}`, interrupt }),
+    ).rejects.toThrow('response lost');
+
+    expect(calls).toEqual([
+      { requestId: 'abandon-1', toolUseId: 'tool-A' },
+      { requestId: 'abandon-1', toolUseId: 'tool-A' },
+    ]);
+    expect(calls[0]!.requestId).not.toBe('');
+  });
+
+  test('a different pending question mints a new request id and binds to its own tool id', async () => {
+    const requestIdRef: { current: { id: string; key: string | undefined } | null } = { current: null };
+    const calls: Array<{ requestId: string; toolUseId: string }> = [];
+    let n = 0;
+    const interrupt = async (requestId: string, toolUseId: string) => {
+      calls.push({ requestId, toolUseId });
+    };
+
+    await interruptPendingQuestion({ requestIdRef, toolUseId: 'tool-A', mint: () => `abandon-${++n}`, interrupt });
+    await interruptPendingQuestion({ requestIdRef, toolUseId: 'tool-B', mint: () => `abandon-${++n}`, interrupt });
+
+    expect(calls).toEqual([
+      { requestId: 'abandon-1', toolUseId: 'tool-A' },
+      { requestId: 'abandon-2', toolUseId: 'tool-B' },
+    ]);
+  });
+});
+
 // ---- 6. submit-once ---------------------------------------------------------
 
 describe('submitAnswers guard', () => {
@@ -313,6 +356,14 @@ describe('structured-question explicit submit path', () => {
     expect(html).toContain('Submitting answer…');
     expect(describedBy).toBeDefined();
     expect(html).toContain(`id="${describedBy}"`);
+  });
+
+  test('always renders an explicit, touch-sized abandon escape hatch', () => {
+    const html = renderToStaticMarkup(<QuestionForm sessionId="s" question={record(SINGLE)} onSubmit={() => {}} />);
+    const abandon = buttonWithText(html, 'Abandon question')!;
+    expect(abandon).toBeDefined();
+    expect(isTouchTarget(abandon)).toBe(true);
+    expect(html).toContain('Question stuck? Retry the answer');
   });
 });
 

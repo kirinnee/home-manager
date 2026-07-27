@@ -4,20 +4,36 @@ import os from 'node:os';
 import path from 'node:path';
 import { createPaths } from './paths';
 import {
+  anyQuestionVisible,
+  blockBindsOptions,
   composerEvidence,
   composerHolds,
+  exactHeaderRowVisible,
+  exactOptionRowVisible,
+  freeformComposerLine,
+  freeTextPageShowsQuestion,
+  freeTextQuestionRegion,
+  liveMenuBlock,
+  questionRowIndex,
   paneShowsModelSelector,
   contextPercentUsed,
   distinctiveOptionFragment,
   optionVisibleOnPane,
   paneShowsActiveWork,
+  paneShowsFreeformComposer,
   paneWorkCounters,
   parsePaneMetadata,
+  resolveVisibleQuestion,
   resumeMenuAction,
   startupDialogAction,
   STRUCTURED_ANSWER_NOT_VISIBLE,
+  StructuredQuestionDriveError,
   structuredAnswerRefusal,
+  structuredMenuVisible,
+  structuredQuestionPaneMatch,
   TmuxController,
+  visibleMultiSelectState,
+  visibleQuestionIndex,
   workCountersAdvanced,
 } from './tmux-controller';
 import type { SessionConfig } from './types';
@@ -760,13 +776,16 @@ describe('structured-answer visibility matcher', () => {
   const QUESTION = 'Which naming theme should the fleet use?';
   const OPTIONS = ['Plain role names (Recommended)', 'East Asian mythical', 'Norse', 'Chemistry'];
 
-  // Happy path: every label rendered contiguously on its own line.
+  // Happy path: every label rendered contiguously on its own numbered row.
+  // Rows are numbered because that is the only shape the daemon can drive — the
+  // navigation origin is a `❯ N.` cursor row — and only a numbered cluster can
+  // form a live menu block for evidence to be bound to.
   const happyPane = [
     `? ${QUESTION}`,
-    '  ○ Plain role names (Recommended)',
-    '  ○ East Asian mythical',
-    '  ○ Norse',
-    '  ○ Chemistry',
+    '❯ 1. Plain role names (Recommended)',
+    '  2. East Asian mythical',
+    '  3. Norse',
+    '  4. Chemistry',
     '  ↑/↓ to move · enter to select',
   ].join('\n');
 
@@ -775,11 +794,11 @@ describe('structured-answer visibility matcher', () => {
   // contiguous substring of the pane — but "Plain role names" alone is.
   const wrappingPane = [
     `? ${QUESTION}`,
-    '  ○ Plain role names        │ recent activity',
-    '    (Recommended)           │  - built ui',
-    '  ○ East Asian mythical     │  - ran tests',
-    '  ○ Norse                   │',
-    '  ○ Chemistry               │',
+    '❯ 1. Plain role names        │ recent activity',
+    '     (Recommended)           │  - built ui',
+    '  2. East Asian mythical     │  - ran tests',
+    '  3. Norse                   │',
+    '  4. Chemistry               │',
   ].join('\n');
 
   test('happy path: a contiguous label is visible and answerable', () => {
@@ -813,9 +832,9 @@ describe('structured-answer visibility matcher', () => {
     const options = ['Blue-green with automatic rollback on health-check failure', 'Canary', 'Recreate'];
     const pane = [
       '? Pick a deployment strategy',
-      '  ○ Blue-green with automatic rollback on health-che…',
-      '  ○ Canary',
-      '  ○ Recreate',
+      '❯ 1. Blue-green with automatic rollback on health-che…',
+      '  2. Canary',
+      '  3. Recreate',
     ].join('\n');
     expect(
       structuredAnswerRefusal({
@@ -835,9 +854,9 @@ describe('structured-answer visibility matcher', () => {
     // "Enable feature flags", so no fragment can distinguish them → refuse.
     const pane = [
       '? Toggle behaviour',
-      '  ○ Enable            │ note',
-      '    feature           │ note',
-      '  ○ Enable feature flags',
+      '❯ 1. Enable            │ note',
+      '     feature           │ note',
+      '  2. Enable feature flags',
     ].join('\n');
     expect(distinctiveOptionFragment('Enable feature', options)).toBeNull();
     expect(
@@ -849,6 +868,63 @@ describe('structured-answer visibility matcher', () => {
         promptReady: false,
       }),
     ).toBe(STRUCTURED_ANSWER_NOT_VISIBLE);
+  });
+
+  test('an ambiguous-prefix option is safe when its complete numbered row is visible (live repro)', () => {
+    const options = ['Enable feature', 'Enable feature flags'];
+    const pane = [
+      '? Which rollout should we use?',
+      '❯ 1. Enable feature',
+      '     Turn it on directly.',
+      '  2. Enable feature flags',
+      '     Roll it out gradually.',
+      'Enter to select · ↑/↓ to navigate · Esc to cancel',
+    ].join('\n');
+    expect(distinctiveOptionFragment('Enable feature', options)).toBeNull();
+    expect(exactOptionRowVisible(pane, 'Enable feature')).toBe(true);
+    expect(exactOptionRowVisible(pane, 'Enable feature flags')).toBe(true);
+    expect(
+      structuredQuestionPaneMatch({
+        pane,
+        question: 'Which rollout should we use?',
+        options,
+        selected: ['Enable feature'],
+        promptReady: false,
+      }),
+    ).toMatchObject({ ok: true, reason: undefined });
+  });
+
+  test('an UNNUMBERED line equal to a label is not a menu row', () => {
+    // A description, a wrapped continuation and plain scrollback all render
+    // without an ordinal. Granting them exact-row evidence let old prose
+    // masquerade as the live menu — the strongest signal the matcher has.
+    const pane = [
+      '? Which rollout should we use?',
+      '  Enable feature',
+      '  ○ Enable feature',
+      '     Enable feature — as discussed above.',
+    ].join('\n');
+    expect(exactOptionRowVisible(pane, 'Enable feature')).toBe(false);
+  });
+
+  test('numbered rows keep working across the real menu and checkbox shapes', () => {
+    const menu = ['❯ 1. Alpha', '  2) Beta', '  3. Gamma — roll it out gradually'].join('\n');
+    expect(exactOptionRowVisible(menu, 'Alpha')).toBe(true);
+    expect(exactOptionRowVisible(menu, 'Beta')).toBe(true);
+    expect(exactOptionRowVisible(menu, 'Gamma')).toBe(true);
+    const checkboxes = ['❯ 1. ☑ Alpha', '  2. ☐ Beta', '  3. ◉ Gamma', '  4. [x] Delta'].join('\n');
+    expect(exactOptionRowVisible(checkboxes, 'Alpha')).toBe(true);
+    expect(exactOptionRowVisible(checkboxes, 'Beta')).toBe(true);
+    expect(exactOptionRowVisible(checkboxes, 'Gamma')).toBe(true);
+    expect(exactOptionRowVisible(checkboxes, 'Delta')).toBe(true);
+    // Right-hand panel content is still discarded before comparison.
+    expect(exactOptionRowVisible('  1. Alpha              │ some panel note', 'Alpha')).toBe(true);
+  });
+
+  test('a header counts only as its own whole row, never as substring prose', () => {
+    expect(exactHeaderRowVisible(['? Which one?', 'Frontend', '❯ 1. Same'].join('\n'), 'Frontend')).toBe(true);
+    expect(exactHeaderRowVisible('  Applies to the Frontend too.', 'Frontend')).toBe(false);
+    expect(exactHeaderRowVisible('? Which one?\n❯ 1. Same', 'Frontend')).toBe(false);
   });
 
   test('a genuinely absent question is refused (question text not on the pane)', () => {
@@ -877,7 +953,7 @@ describe('structured-answer visibility matcher', () => {
 
   test('an option that is simply not on screen is refused', () => {
     // Question visible, but the selected option row scrolled off entirely.
-    const pane = [`? ${QUESTION}`, '  ○ East Asian mythical', '  ○ Chemistry'].join('\n');
+    const pane = [`? ${QUESTION}`, '❯ 1. Plain role names (Recommended)', '  2. East Asian mythical'].join('\n');
     expect(
       structuredAnswerRefusal({
         pane,
@@ -914,5 +990,1113 @@ describe('structured-answer visibility matcher', () => {
     const normalized = wrappingPane.replace(/\s+/g, '').toLowerCase();
     expect(optionVisibleOnPane(normalized, 'Plain role names (Recommended)', OPTIONS)).toBe(true);
     expect(optionVisibleOnPane(normalized, 'Norse', OPTIONS)).toBe(true);
+  });
+});
+
+describe('structured answers are verified after driving the pane', () => {
+  const paths = createPaths('/tmp/kteam-structured-answer-test');
+  const questionPane = [
+    '? Which rollout should we use?',
+    '❯ 1. Enable feature',
+    '  2. Enable feature flags',
+    'Enter to select · Esc to cancel',
+  ].join('\n');
+  const activePane = ['• Working (1s • Esc to interrupt)', '', '❯ '].join('\n');
+  const readyPane = ['Answer cancelled', '', '❯ ', '? for shortcuts'].join('\n');
+  const pending = {
+    toolUseId: 'tool-q',
+    questions: [
+      {
+        question: 'Which rollout should we use?',
+        options: [{ label: 'Enable feature' }, { label: 'Enable feature flags' }],
+        multiSelect: false,
+      },
+    ],
+  };
+  const config = {
+    id: 's',
+    tmuxSession: 'kteam-s-agent',
+    harness: 'claude',
+    mode: 'interactive',
+    maxSnapshots: 5,
+  } as SessionConfig;
+
+  class QuestionController extends TmuxController {
+    readonly sent: string[][] = [];
+    readonly copyModeExits: string[] = [];
+    protected override readonly questionPollMs = 0;
+    protected override readonly questionConfirmationPolls = 3;
+    private frame = 0;
+
+    constructor(
+      private readonly frames: Array<{ pane: string; promptReady?: boolean; alive?: boolean; dead?: boolean }>,
+      private readonly failKey = false,
+    ) {
+      super(paths, 'http://127.0.0.1:7337');
+    }
+
+    override async state() {
+      const frame = this.frames[Math.min(this.frame++, this.frames.length - 1)]!;
+      return {
+        alive: frame.alive ?? true,
+        dead: frame.dead ?? false,
+        promptReady: frame.promptReady ?? false,
+        pane: frame.pane,
+        visiblePane: frame.pane,
+      };
+    }
+
+    protected override async keys(_name: string, ...keys: string[]) {
+      this.sent.push(keys);
+      return this.failKey ? { code: 1, stdout: '', stderr: 'send-keys refused' } : { code: 0, stdout: '', stderr: '' };
+    }
+
+    protected override async exitCopyMode(name: string) {
+      this.copyModeExits.push(name);
+      return { code: 0, stdout: '', stderr: '' };
+    }
+  }
+
+  test('the live ambiguous-prefix choice is answered once and confirmed by turn start', async () => {
+    const controller = new QuestionController([{ pane: questionPane }, { pane: activePane }]);
+    const result = await controller.answerQuestion(config, { pendingQuestion: pending } as never, ['Enable feature']);
+    expect(result).toMatchObject({
+      toolUseId: 'tool-q',
+      startedAtQuestion: 0,
+      answeredQuestions: 1,
+      confirmedBy: 'turn-started',
+    });
+    expect(controller.sent).toEqual([['Enter']]);
+  });
+
+  test('a native cursor left on “Chat about this” is navigated from its real row', async () => {
+    const chatSelected = questionPane
+      .replace('❯ 1. Enable feature', '  1. Enable feature')
+      .replace(
+        'Enter to select · Esc to cancel',
+        '  3. Type something.\n❯ 4. Chat about this\nEnter to select · Esc to cancel',
+      );
+    const controller = new QuestionController([{ pane: chatSelected }, { pane: activePane }]);
+    await controller.answerQuestion(config, { pendingQuestion: pending } as never, ['Enable feature']);
+    expect(controller.sent).toEqual([['Up'], ['Up'], ['Up'], ['Enter']]);
+  });
+
+  test('a swallowed Enter is an honest failure and is never retyped', async () => {
+    const controller = new QuestionController([
+      { pane: questionPane },
+      { pane: questionPane },
+      { pane: questionPane },
+      { pane: questionPane },
+    ]);
+    await expect(
+      controller.answerQuestion(config, { pendingQuestion: pending } as never, ['Enable feature']),
+    ).rejects.toThrow(/did not advance.*no success was recorded/);
+    expect(controller.sent).toEqual([['Enter']]);
+  });
+
+  test('a failed tmux key is surfaced before any success can be claimed', async () => {
+    const controller = new QuestionController([{ pane: questionPane }], true);
+    await expect(
+      controller.answerQuestion(config, { pendingQuestion: pending } as never, ['Enable feature']),
+    ).rejects.toBeInstanceOf(StructuredQuestionDriveError);
+    expect(controller.sent).toEqual([['Enter']]);
+  });
+
+  test('a scrolled/missing frame gets one copy-mode restore before retrying', async () => {
+    const controller = new QuestionController([
+      { pane: 'copy mode: old output' },
+      { pane: questionPane },
+      { pane: activePane },
+    ]);
+    expect(
+      await controller.answerQuestion(config, { pendingQuestion: pending } as never, ['Enable feature']),
+    ).toMatchObject({ confirmedBy: 'turn-started' });
+    expect(controller.copyModeExits).toEqual(['kteam-s-agent']);
+  });
+
+  test('explicit abandon sends Escape once and requires a ready/advanced pane', async () => {
+    const controller = new QuestionController([
+      { pane: questionPane },
+      { pane: questionPane },
+      { pane: readyPane, promptReady: true },
+    ]);
+    const result = await controller.cancelQuestion(config, { pendingQuestion: pending } as never);
+    expect(result.confirmedBy).toBe('prompt-ready');
+    expect(controller.sent).toEqual([['Escape']]);
+  });
+
+  test('abandon refuses with ZERO keys when the frame is not a recognizable menu', async () => {
+    // Mid-repaint: the question text is on the pane (so promptReady is false and
+    // there is no active work) but no menu row is rendered. The old gate checked
+    // only promptReady/active-work and would have sent Escape into this frame —
+    // at an idle Codex prompt that quits the TUI.
+    const repaint = ['? Which rollout should we use?', '  …', ''].join('\n');
+    const controller = new QuestionController([{ pane: repaint }, { pane: repaint }, { pane: repaint }]);
+    await expect(controller.cancelQuestion(config, { pendingQuestion: pending } as never)).rejects.toThrow(
+      /does not show this question as a live menu/,
+    );
+    expect(controller.sent).toEqual([]);
+  });
+
+  test('a frame with no menu cursor row refuses instead of navigating from an assumed origin', async () => {
+    // Options are whole-row visible (the safety gate passes) but no `❯ N.`
+    // cursor row was captured, so `Down`×n has no known starting point.
+    const noCursor = questionPane.replace('❯ 1. Enable feature', '  1. Enable feature');
+    const controller = new QuestionController([{ pane: noCursor }, { pane: noCursor }]);
+    await expect(
+      controller.answerQuestion(config, { pendingQuestion: pending } as never, ['Enable feature flags']),
+    ).rejects.toThrow(/menu cursor row is not visible/);
+    expect(controller.sent).toEqual([]);
+  });
+});
+
+describe('duplicate question text cannot drive the wrong menu', () => {
+  const paths = createPaths('/tmp/kteam-duplicate-question-test');
+  const config = {
+    id: 's',
+    tmuxSession: 'kteam-s-agent',
+    harness: 'claude',
+    mode: 'interactive',
+    maxSnapshots: 5,
+  } as SessionConfig;
+
+  /** The dangerous real shape: one set asking the SAME question twice with
+   * DIFFERENT options — so a wrong ordinal picks a real but wrong answer. */
+  const duplicateSet = {
+    toolUseId: 'tool-dup',
+    questions: [
+      {
+        question: 'Which one?',
+        options: [{ label: 'Alpha' }, { label: 'Beta' }],
+        multiSelect: false,
+      },
+      {
+        question: 'Which one?',
+        options: [{ label: 'Gamma' }, { label: 'Delta' }],
+        multiSelect: false,
+      },
+    ],
+  };
+
+  class DriveController extends TmuxController {
+    readonly sent: string[][] = [];
+    protected override readonly questionPollMs = 0;
+    protected override readonly questionConfirmationPolls = 3;
+    private frame = 0;
+
+    constructor(private readonly frames: Array<{ pane: string; promptReady?: boolean }>) {
+      super(paths, 'http://127.0.0.1:7337');
+    }
+
+    override async state() {
+      const frame = this.frames[Math.min(this.frame++, this.frames.length - 1)]!;
+      return {
+        alive: true,
+        dead: false,
+        promptReady: frame.promptReady ?? false,
+        pane: frame.pane,
+        visiblePane: frame.pane,
+      };
+    }
+
+    protected override async keys(_name: string, ...keys: string[]) {
+      this.sent.push(keys);
+      return { code: 0, stdout: '', stderr: '' };
+    }
+
+    protected override async exitCopyMode() {
+      return { code: 0, stdout: '', stderr: '' };
+    }
+  }
+
+  /** The set that stays INHERENTLY ambiguous under block binding: identical
+   * wording AND identical options, so both ordinals bind to the one live block
+   * and nothing on screen can tell them apart. */
+  const identicalSet = {
+    toolUseId: 'tool-same',
+    questions: [
+      { question: 'Confirm?', options: [{ label: 'Yes' }, { label: 'No' }], multiSelect: false },
+      { question: 'Confirm?', options: [{ label: 'Yes' }, { label: 'No' }], multiSelect: false },
+    ],
+  };
+  const identicalPane = ['? Confirm?', '  1. Yes', '  2. No', '? Confirm?', '❯ 1. Yes', '  2. No'].join('\n');
+
+  test('an answered menu in scrollback no longer clouds the live ordinal', () => {
+    // Question 1 was answered and scrolled up; question 2 is live. The text is
+    // identical, so text position alone cannot tell them apart — the old matcher
+    // resolved the tie by luck, and the previous pane-global rule then refused
+    // because BOTH ordinals' option rows were somewhere on the capture.
+    // Block binding reads only the live block: it renders Gamma/Delta, which
+    // ordinal 1 alone owns, so ordinal 0 is not even a candidate.
+    const pane = ['? Which one?', '  1. Alpha', '  2. Beta', '? Which one?', '❯ 1. Gamma', '  2. Delta'].join('\n');
+    const resolution = resolveVisibleQuestion(pane, duplicateSet.questions);
+    expect(resolution.candidates).toEqual([1]);
+    expect(resolution.index).toBe(1);
+    expect(resolution.reason).toBeUndefined();
+    // …and the block it read is the LIVE one, not the scrollback copy.
+    expect(resolution.block).toMatchObject({ startLine: 3, endLine: 5, rows: 2 });
+  });
+
+  test('the ambiguous case sends ZERO keys and refuses, naming the candidates', async () => {
+    // Both ordinals bind to the SAME live block (same wording, same options), so
+    // the frame genuinely cannot say which is on screen.
+    const controller = new DriveController([{ pane: identicalPane }, { pane: identicalPane }]);
+    await expect(
+      controller.answerQuestion(config, { pendingQuestion: identicalSet } as never, ['Yes']),
+    ).rejects.toThrow(/identically-worded questions is on screen \(candidates 0, 1\)/);
+    expect(controller.sent).toEqual([]);
+  });
+
+  test('the refusal diagnostics explain the ambiguity without quoting pane text', async () => {
+    const controller = new DriveController([{ pane: identicalPane }, { pane: identicalPane }]);
+    const error = await controller
+      .answerQuestion(config, { pendingQuestion: identicalSet } as never, ['Yes'])
+      .then(() => undefined)
+      .catch((thrown: unknown) => thrown as StructuredQuestionDriveError);
+    expect(error).toBeInstanceOf(StructuredQuestionDriveError);
+    expect(error!.diagnostics).toMatchObject({ reason: 'ambiguous_question', candidates: [0, 1] });
+    // Booleans and ordinals only — no pane content beyond what existing
+    // diagnostics already carried.
+    expect(JSON.stringify(error!.diagnostics)).not.toContain('Gamma');
+    expect(JSON.stringify(error!.diagnostics)).not.toContain('Which one?');
+  });
+
+  test('a partial retry PROCEEDS when the live page options disambiguate the ordinal', async () => {
+    // Question 1 was already answered in the TUI; only page 2's own options are
+    // on screen, so ordinal 1 is the unique candidate and the retry is safe.
+    const page2 = ['? Which one?', '❯ 1. Gamma', '  2. Delta', 'Enter to select · Esc to cancel'].join('\n');
+    const working = ['• Working (1s • Esc to interrupt)', '', '❯ '].join('\n');
+    const controller = new DriveController([{ pane: page2 }, { pane: working }]);
+    const result = await controller.answerQuestion(config, { pendingQuestion: duplicateSet } as never, ['Delta']);
+    expect(result).toMatchObject({ startedAtQuestion: 1, answeredQuestions: 1, confirmedBy: 'turn-started' });
+    // Cursor observed on row 1 → exactly one Down to reach "Delta", then Enter.
+    expect(controller.sent).toEqual([['Down'], ['Enter']]);
+  });
+
+  test('distinct HEADERS disambiguate two identically-worded questions', () => {
+    const headered = [
+      { question: 'Which one?', header: 'Backend', options: [{ label: 'Same' }] },
+      { question: 'Which one?', header: 'Frontend', options: [{ label: 'Same' }] },
+    ];
+    const pane = ['? Which one?', '  Same', '? Which one?', 'Frontend', '❯ 1. Same'].join('\n');
+    const resolution = resolveVisibleQuestion(pane, headered);
+    expect(resolution.index).toBe(1);
+    expect(resolution.evidence.find(item => item.index === 1)?.headerDistinct).toBe(true);
+  });
+
+  test('inherent ambiguity (same question, same options, no header) refuses rather than guessing', async () => {
+    const identical = {
+      toolUseId: 'tool-same',
+      questions: [
+        { question: 'Confirm?', options: [{ label: 'Yes' }, { label: 'No' }], multiSelect: false },
+        { question: 'Confirm?', options: [{ label: 'Yes' }, { label: 'No' }], multiSelect: false },
+      ],
+    };
+    const pane = ['? Confirm?', '  1. Yes', '  2. No', '? Confirm?', '❯ 1. Yes', '  2. No'].join('\n');
+    const controller = new DriveController([{ pane }, { pane }]);
+    await expect(controller.answerQuestion(config, { pendingQuestion: identical } as never, ['Yes'])).rejects.toThrow(
+      /identically-worded questions is on screen/,
+    );
+    expect(controller.sent).toEqual([]);
+  });
+
+  test('a single-question set keeps its existing exact-row/unique-prefix behavior', () => {
+    const single = [{ question: 'Which rollout should we use?', options: [{ label: 'Enable feature' }] }];
+    const pane = ['? Which rollout should we use?', '❯ 1. Enable feature'].join('\n');
+    expect(resolveVisibleQuestion(pane, single)).toMatchObject({ index: 0, candidates: [0] });
+    expect(visibleQuestionIndex(pane, single)).toBe(0);
+    expect(anyQuestionVisible(pane, single)).toBe(true);
+    expect(structuredMenuVisible(pane, single)).toBe(true);
+    expect(visibleQuestionIndex('❯ \n? for shortcuts', single)).toBe(-1);
+    expect(anyQuestionVisible('❯ \n? for shortcuts', single)).toBe(false);
+  });
+
+  test('an ambiguous frame exposes NO ordinal but still reads as “a question is up”', () => {
+    // The two consumers want different things and now get different functions:
+    // drivers must never see a guessed ordinal, while the self-heal/cancel gates
+    // must not read an ambiguous frame as "no question on screen" or they would
+    // clear live state.
+    expect(visibleQuestionIndex(identicalPane, identicalSet.questions)).toBe(-1);
+    expect(anyQuestionVisible(identicalPane, identicalSet.questions)).toBe(true);
+    expect(structuredMenuVisible(identicalPane, identicalSet.questions)).toBe(true);
+  });
+
+  test('a header that only appears inside a DESCRIPTION cannot identify an ordinal', () => {
+    // "Frontend" is quoted by ordinal 0's description line, never rendered as
+    // its own header row — substring evidence would hand ordinal 1's identity to
+    // whichever question happened to mention it.
+    const headered = [
+      { question: 'Which one?', header: 'Backend', options: [{ label: 'Same' }] },
+      { question: 'Which one?', header: 'Frontend', options: [{ label: 'Same' }] },
+    ];
+    const pane = ['? Which one?', '  1. Same', '     Applies to the Frontend too.', '? Which one?', '❯ 1. Same'].join(
+      '\n',
+    );
+    const resolution = resolveVisibleQuestion(pane, headered);
+    expect(resolution.index).toBe(-1);
+    expect(resolution.reason).toBe('ambiguous');
+    expect(resolution.evidence.find(item => item.index === 1)?.headerDistinct).toBe(false);
+  });
+
+  test('an option label that only appears as prose cannot identify an ordinal', () => {
+    // Ordinal 1's live rows are on screen, but ordinal 0's "Alpha" survives only
+    // as an unnumbered scrollback line. Under the old `includes` fallback that
+    // line made ordinal 0 look equally identified and the drive refused; the
+    // structural rule ignores it, so the live ordinal resolves cleanly and
+    // ordinal 0 never even becomes a candidate.
+    const pane = ['? Which one?', '  Alpha was chosen earlier.', '? Which one?', '❯ 1. Gamma', '  2. Delta'].join('\n');
+    const resolution = resolveVisibleQuestion(pane, duplicateSet.questions);
+    expect(resolution.index).toBe(1);
+    expect(resolution.candidates).toEqual([1]);
+  });
+});
+
+describe('multi-select reconciles the checkbox state actually on screen', () => {
+  test('preselected boxes are read, and only mismatched rows are toggled', () => {
+    const pane = ['? Pick some', '❯ 1. ☑ Alpha', '  2. ☐ Beta', '  3. ☑ Gamma'].join('\n');
+    expect(visibleMultiSelectState(pane, ['Alpha', 'Beta', 'Gamma'])).toEqual([true, false, true]);
+  });
+
+  test('an unreadable or duplicated row reports undefined so the caller refuses', () => {
+    const pane = ['? Pick some', '  1. Alpha', '  2. ☐ Beta', '  3. ☐ Beta'].join('\n');
+    // No marker on Alpha's row, and Beta appears twice → both unknowable.
+    expect(visibleMultiSelectState(pane, ['Alpha', 'Beta'])).toEqual([undefined, undefined]);
+  });
+
+  test('a human-preselected pane refuses to blind-toggle and never sends a Space', async () => {
+    const paths = createPaths('/tmp/kteam-multiselect-test');
+    const config = {
+      id: 's',
+      tmuxSession: 'kteam-s-agent',
+      harness: 'claude',
+      mode: 'interactive',
+      maxSnapshots: 5,
+    } as SessionConfig;
+    const multi = {
+      toolUseId: 'tool-multi',
+      questions: [{ question: 'Pick some', options: [{ label: 'Alpha' }, { label: 'Beta' }], multiSelect: true }],
+    };
+    class MultiController extends TmuxController {
+      readonly sent: string[][] = [];
+      protected override readonly questionPollMs = 0;
+      protected override readonly questionConfirmationPolls = 2;
+      constructor(private readonly pane: string) {
+        super(paths, 'http://127.0.0.1:7337');
+      }
+      override async state() {
+        return { alive: true, dead: false, promptReady: false, pane: this.pane, visiblePane: this.pane };
+      }
+      protected override async keys(_name: string, ...keys: string[]) {
+        this.sent.push(keys);
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      protected override async exitCopyMode() {
+        return { code: 0, stdout: '', stderr: '' };
+      }
+    }
+    // Beta's row carries no recognizable marker → the current set is unknowable.
+    const controller = new MultiController(['? Pick some', '❯ 1. ☑ Alpha', '  2. Beta'].join('\n'));
+    await expect(controller.answerQuestion(config, { pendingQuestion: multi } as never, ['Alpha'])).rejects.toThrow(
+      /checkbox selection is not readable/,
+    );
+    expect(controller.sent).toEqual([]);
+  });
+
+  test('a READABLE preselected frame drives end to end: only mismatches toggle', async () => {
+    const paths = createPaths('/tmp/kteam-multiselect-drive-test');
+    const config = {
+      id: 's',
+      tmuxSession: 'kteam-s-agent',
+      harness: 'claude',
+      mode: 'interactive',
+      maxSnapshots: 5,
+    } as SessionConfig;
+    const multi = {
+      toolUseId: 'tool-multi-ok',
+      questions: [
+        {
+          question: 'Pick some',
+          options: [{ label: 'Alpha' }, { label: 'Beta' }, { label: 'Gamma' }],
+          multiSelect: true,
+        },
+      ],
+    };
+    // A human already ticked Alpha and Gamma at the pane. The requested answer
+    // is Alpha+Beta, so Alpha must be LEFT ALONE, Beta ticked and Gamma cleared.
+    // The native cursor sits on row 2, so movement is counted from THERE — the
+    // whole point of reading the origin instead of assuming row 1.
+    const menu = [
+      '? Pick some',
+      '  1. ☑ Alpha',
+      '❯ 2. ☐ Beta',
+      '  3. ☑ Gamma',
+      'Space to toggle · Enter to submit · Esc to cancel',
+    ].join('\n');
+    const working = ['• Working (1s • Esc to interrupt)', '', '❯ '].join('\n');
+    class DrivenController extends TmuxController {
+      readonly sent: string[][] = [];
+      protected override readonly questionPollMs = 0;
+      protected override readonly questionConfirmationPolls = 3;
+      private frame = 0;
+      constructor() {
+        super(paths, 'http://127.0.0.1:7337');
+      }
+      override async state() {
+        const pane = this.frame++ === 0 ? menu : working;
+        return { alive: true, dead: false, promptReady: false, pane, visiblePane: pane };
+      }
+      protected override async keys(_name: string, ...keys: string[]) {
+        this.sent.push(keys);
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      protected override async exitCopyMode() {
+        return { code: 0, stdout: '', stderr: '' };
+      }
+    }
+    const controller = new DrivenController();
+    const result = await controller.answerQuestion(config, { pendingQuestion: multi } as never, ['Alpha', 'Beta']);
+    // Beta is already under the cursor → Space with no movement. Gamma is one
+    // row below → a single Down, then Space. Alpha never receives a key.
+    expect(controller.sent).toEqual([['Space'], ['Down'], ['Space'], ['Enter']]);
+    expect(result).toMatchObject({ startedAtQuestion: 0, answeredQuestions: 1, confirmedBy: 'turn-started' });
+  });
+
+  test('a STALE cursor row in scrollback does not become the navigation origin', async () => {
+    const paths = createPaths('/tmp/kteam-stale-cursor-test');
+    const config = {
+      id: 's',
+      tmuxSession: 'kteam-s-agent',
+      harness: 'claude',
+      mode: 'interactive',
+      maxSnapshots: 5,
+    } as SessionConfig;
+    const single = {
+      toolUseId: 'tool-stale-cursor',
+      questions: [
+        {
+          question: 'Which one?',
+          options: [{ label: 'Alpha' }, { label: 'Beta' }, { label: 'Gamma' }],
+          multiSelect: false,
+        },
+      ],
+    };
+    // An earlier answered menu is still in scrollback with its cursor frozen on
+    // row 3; the LIVE menu below sits on row 1. Taking the first cursor glyph
+    // read the origin as row 3, so asking for "Gamma" moved nothing and Enter
+    // submitted whatever the live cursor was actually on — Alpha.
+    const pane = [
+      '? Which one?',
+      '  1. Alpha',
+      '  2. Beta',
+      '❯ 3. Gamma',
+      '',
+      '? Which one?',
+      '❯ 1. Alpha',
+      '  2. Beta',
+      '  3. Gamma',
+      'Enter to select · ↑/↓ to navigate · Esc to cancel',
+    ].join('\n');
+    const working = ['• Working (1s • Esc to interrupt)', '', '❯ '].join('\n');
+    class StaleCursorController extends TmuxController {
+      readonly sent: string[][] = [];
+      protected override readonly questionPollMs = 0;
+      protected override readonly questionConfirmationPolls = 3;
+      private frame = 0;
+      constructor() {
+        super(paths, 'http://127.0.0.1:7337');
+      }
+      override async state() {
+        const visible = this.frame++ === 0 ? pane : working;
+        return { alive: true, dead: false, promptReady: false, pane: visible, visiblePane: visible };
+      }
+      protected override async keys(_name: string, ...keys: string[]) {
+        this.sent.push(keys);
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      protected override async exitCopyMode() {
+        return { code: 0, stdout: '', stderr: '' };
+      }
+    }
+    const controller = new StaleCursorController();
+    const result = await controller.answerQuestion(config, { pendingQuestion: single } as never, ['Gamma']);
+    // Origin is the LIVE row 1 → two Downs to reach Gamma. The stale row-3
+    // reading would have sent zero movement keys.
+    expect(controller.sent).toEqual([['Down'], ['Down'], ['Enter']]);
+    expect(result).toMatchObject({ startedAtQuestion: 0, answeredQuestions: 1, confirmedBy: 'turn-started' });
+  });
+});
+
+describe('freeform answers wait for the free-text page', () => {
+  test('paneShowsFreeformComposer needs an empty composer row or a type-your-answer hint', () => {
+    expect(paneShowsFreeformComposer(['? Which one?', '❯ 1. Alpha', '  2. Other'].join('\n'))).toBe(false);
+    expect(paneShowsFreeformComposer(['Type your answer', '', '│ ❯ │'].join('\n'))).toBe(true);
+    expect(paneShowsFreeformComposer(['╭──────╮', '│ ❯    │', '╰──────╯'].join('\n'))).toBe(true);
+  });
+
+  test('a menu that never pages to the composer refuses before typing into it', async () => {
+    const paths = createPaths('/tmp/kteam-freeform-test');
+    const config = {
+      id: 's',
+      tmuxSession: 'kteam-s-agent',
+      harness: 'claude',
+      mode: 'interactive',
+      maxSnapshots: 5,
+    } as SessionConfig;
+    const single = {
+      toolUseId: 'tool-free',
+      questions: [{ question: 'Which one?', options: [{ label: 'Alpha' }], multiSelect: false }],
+    };
+    const menuOnly = ['? Which one?', '❯ 1. Alpha', '  2. Other', 'Enter to select'].join('\n');
+    class FreeformController extends TmuxController {
+      readonly sent: string[][] = [];
+      readonly filled: string[] = [];
+      protected override readonly questionPollMs = 0;
+      protected override readonly questionConfirmationPolls = 2;
+      constructor() {
+        super(paths, 'http://127.0.0.1:7337');
+      }
+      override async state() {
+        return { alive: true, dead: false, promptReady: false, pane: menuOnly, visiblePane: menuOnly };
+      }
+      protected override async keys(_name: string, ...keys: string[]) {
+        this.sent.push(keys);
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      protected override async fillComposer(_name: string, text: string) {
+        this.filled.push(text);
+        return 'chars' as const;
+      }
+      protected override async exitCopyMode() {
+        return { code: 0, stdout: '', stderr: '' };
+      }
+    }
+    const controller = new FreeformController();
+    await expect(
+      controller.answerQuestion(config, { pendingQuestion: single } as never, [], 'my own answer'),
+    ).rejects.toThrow(/free-text page did not open/);
+    // The Other row was selected, but NOTHING was typed into the menu.
+    expect(controller.filled).toEqual([]);
+  });
+
+  test('a STALE composer hint above a live menu does not authorize typing', async () => {
+    const paths = createPaths('/tmp/kteam-freeform-stale-test');
+    const config = {
+      id: 's',
+      tmuxSession: 'kteam-s-agent',
+      harness: 'claude',
+      mode: 'interactive',
+      maxSnapshots: 5,
+    } as SessionConfig;
+    const single = {
+      toolUseId: 'tool-free-stale',
+      questions: [{ question: 'Which one?', options: [{ label: 'Alpha' }], multiSelect: false }],
+    };
+    // An earlier free-text page left its hint and empty composer row in
+    // scrollback; the menu we just pressed Enter on is still live underneath.
+    // Composer evidence alone would authorize typing here — and every character
+    // would land on the MENU as a shortcut instead of in a text box.
+    const staleHintOverMenu = [
+      'Type your answer',
+      '> ',
+      '? Which one?',
+      '❯ 1. Alpha',
+      '  2. Other',
+      'Enter to select · Esc to cancel',
+    ].join('\n');
+    expect(paneShowsFreeformComposer(staleHintOverMenu)).toBe(true);
+    expect(structuredMenuVisible(staleHintOverMenu, single.questions)).toBe(true);
+    class StaleHintController extends TmuxController {
+      readonly sent: string[][] = [];
+      readonly filled: string[] = [];
+      protected override readonly questionPollMs = 0;
+      protected override readonly questionConfirmationPolls = 2;
+      constructor() {
+        super(paths, 'http://127.0.0.1:7337');
+      }
+      override async state() {
+        return {
+          alive: true,
+          dead: false,
+          promptReady: false,
+          pane: staleHintOverMenu,
+          visiblePane: staleHintOverMenu,
+        };
+      }
+      protected override async keys(_name: string, ...keys: string[]) {
+        this.sent.push(keys);
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      protected override async fillComposer(_name: string, text: string) {
+        this.filled.push(text);
+        return 'chars' as const;
+      }
+      protected override async exitCopyMode() {
+        return { code: 0, stdout: '', stderr: '' };
+      }
+    }
+    const controller = new StaleHintController();
+    await expect(
+      controller.answerQuestion(config, { pendingQuestion: single } as never, [], 'my own answer'),
+    ).rejects.toThrow(/free-text page did not open/);
+    expect(controller.filled).toEqual([]);
+  });
+});
+
+describe('all evidence is bound to ONE live menu block', () => {
+  const paths = createPaths('/tmp/kteam-live-block-test');
+  const config = {
+    id: 's',
+    tmuxSession: 'kteam-s-agent',
+    harness: 'claude',
+    mode: 'interactive',
+    maxSnapshots: 5,
+  } as SessionConfig;
+
+  /** The pending set the daemon is holding. */
+  const pending = {
+    toolUseId: 'tool-block',
+    questions: [{ question: 'Which one?', options: [{ label: 'Alpha' }, { label: 'Beta' }], multiSelect: false }],
+  };
+
+  /** THE dangerous real shape: the pending question and its own numbered rows
+   * are still in scrollback, and an UNRELATED selector is live below them with
+   * the only cursor row on the pane. Pane-global evidence combined the stale
+   * question above with the live cursor below and drove keys into a menu that
+   * belongs to somebody else. */
+  const crossMenuPane = [
+    '? Which one?',
+    '  1. Alpha',
+    '  2. Beta',
+    'Enter to select · Esc to cancel',
+    '',
+    'Do you want to proceed?',
+    '❯ 1. Yes',
+    '  2. No',
+    'Enter to select · Esc to cancel',
+  ].join('\n');
+
+  /** The same danger without even a stale menu: the pending question's PHRASE
+   * appears in ordinary output prose above an unrelated live selector. */
+  const prosePane = [
+    '⏺ Earlier I asked: Which one? — and then moved on to the deploy.',
+    'Do you want to proceed?',
+    '❯ 1. Yes',
+    '  2. No',
+    'Enter to select · Esc to cancel',
+  ].join('\n');
+
+  class BlockController extends TmuxController {
+    readonly sent: string[][] = [];
+    readonly filled: string[] = [];
+    protected override readonly questionPollMs = 0;
+    protected override readonly questionConfirmationPolls = 2;
+    private frame = 0;
+    constructor(private readonly frames: string[]) {
+      super(paths, 'http://127.0.0.1:7337');
+    }
+    override async state() {
+      const pane = this.frames[Math.min(this.frame++, this.frames.length - 1)]!;
+      return { alive: true, dead: false, promptReady: false, pane, visiblePane: pane };
+    }
+    protected override async keys(_name: string, ...keys: string[]) {
+      this.sent.push(keys);
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    protected override async fillComposer(_name: string, text: string) {
+      this.filled.push(text);
+      return 'chars' as const;
+    }
+    protected override async exitCopyMode() {
+      return { code: 0, stdout: '', stderr: '' };
+    }
+  }
+
+  test('the block is the BOTTOM numbered cluster, not the stale one above it', () => {
+    const block = liveMenuBlock(crossMenuPane);
+    expect(block).not.toBeNull();
+    // Lines 4..8: the unrelated selector's own intro, rows and footer. The stale
+    // question at line 0 and its rows at 1–2 are outside the boundary, and the
+    // footer at line 3 is exactly what stops the intro walk from reaching them.
+    expect(block).toMatchObject({ startLine: 4, endLine: 8, cursorRow: 0 });
+    expect(block!.rows.map(row => row.text)).toEqual(['Yes', 'No']);
+    expect(block!.intro.trim()).toBe('Do you want to proceed?');
+    expect(block!.intro).not.toContain('Which one?');
+    expect(block!.text).not.toContain('Alpha');
+  });
+
+  test('ANSWER refuses across menus and sends exactly zero keys', async () => {
+    const controller = new BlockController([crossMenuPane, crossMenuPane]);
+    await expect(controller.answerQuestion(config, { pendingQuestion: pending } as never, ['Alpha'])).rejects.toThrow(
+      /not visible after restoring the pane|not this question’s menu/,
+    );
+    expect(controller.sent).toEqual([]);
+  });
+
+  test('CANCEL refuses across menus and sends exactly zero keys', async () => {
+    const controller = new BlockController([crossMenuPane, crossMenuPane, crossMenuPane]);
+    await expect(controller.cancelQuestion(config, { pendingQuestion: pending } as never)).rejects.toThrow(
+      /does not show this question as a live menu/,
+    );
+    expect(controller.sent).toEqual([]);
+  });
+
+  test('a question PHRASE in unrelated prose authorizes nothing — answer or cancel', async () => {
+    // The phrase lands inside the live block's intro, but only as prose — never
+    // as a question ROW — so candidacy fails before the option set is even
+    // consulted. (Its options disagree too; see the same-option-set pane below
+    // for the case where option binding cannot help.)
+    const resolution = resolveVisibleQuestion(prosePane, pending.questions);
+    expect(resolution.reason).toBe('no_candidate');
+    expect(resolution.candidates).toEqual([]);
+    expect(structuredMenuVisible(prosePane, pending.questions)).toBe(false);
+    expect(blockBindsOptions(liveMenuBlock(prosePane)!, ['Alpha', 'Beta'])).toBe(false);
+
+    const answering = new BlockController([prosePane, prosePane]);
+    await expect(answering.answerQuestion(config, { pendingQuestion: pending } as never, ['Alpha'])).rejects.toThrow(
+      /not visible after restoring the pane/,
+    );
+    expect(answering.sent).toEqual([]);
+
+    const cancelling = new BlockController([prosePane, prosePane, prosePane]);
+    await expect(cancelling.cancelQuestion(config, { pendingQuestion: pending } as never)).rejects.toThrow(
+      /does not show this question as a live menu/,
+    );
+    expect(cancelling.sent).toEqual([]);
+  });
+
+  test('a FREEFORM answer never fills a composer that sits above a live selector', async () => {
+    const single = {
+      toolUseId: 'tool-block-free',
+      questions: [{ question: 'Which one?', options: [{ label: 'Alpha' }], multiSelect: false }],
+    };
+    const ourMenu = ['? Which one?', '❯ 1. Alpha', '  2. Other', 'Enter to select · Esc to cancel'].join('\n');
+    // Our menu paged away, but the composer hint it left is ABOVE an unrelated
+    // selector that now owns the keyboard. "Composer present + our menu gone"
+    // was satisfied here; only the positional rule catches it.
+    const staleAboveOther = [
+      'Type your answer',
+      '> ',
+      'Do you want to proceed?',
+      '❯ 1. Yes',
+      '  2. No',
+      'Enter to select · Esc to cancel',
+    ].join('\n');
+    expect(paneShowsFreeformComposer(staleAboveOther)).toBe(true);
+    expect(structuredMenuVisible(staleAboveOther, single.questions)).toBe(false);
+    expect(freeformComposerLine(staleAboveOther)).toBe(1);
+    expect(liveMenuBlock(staleAboveOther)!.endLine).toBe(5);
+
+    const controller = new BlockController([ourMenu, staleAboveOther]);
+    await expect(
+      controller.answerQuestion(config, { pendingQuestion: single } as never, [], 'my own answer'),
+    ).rejects.toThrow(/free-text page did not open/);
+    // The Other row was selected, then the drive stopped: NOTHING was typed.
+    expect(controller.filled).toEqual([]);
+    expect(controller.sent).toEqual([['Down'], ['Enter']]);
+  });
+
+  test('the real Claude shape — header, blanks, descriptions, separator, footer — binds and drives', async () => {
+    const live = {
+      toolUseId: 'tool-real',
+      questions: [
+        {
+          question: 'Which rollout should we use?',
+          header: 'Deployment',
+          options: [{ label: 'Enable feature' }, { label: 'Enable feature flags' }],
+          multiSelect: false,
+        },
+      ],
+    };
+    const pane = [
+      '⏺ Some earlier tool output',
+      '  1. an old numbered line',
+      'Enter to select · Esc to cancel',
+      '',
+      'Deployment',
+      '',
+      '? Which rollout should we use?',
+      '❯ 1. Enable feature',
+      '     Turn it on directly.',
+      '  2. Enable feature flags',
+      '     Roll it out gradually.',
+      '  3. Type something.',
+      '────────────────────────────',
+      '  4. Chat about this',
+      'Enter to select · ↑/↓ to navigate · Esc to cancel',
+    ].join('\n');
+    const block = liveMenuBlock(pane);
+    // Intro stops at the earlier footer (line 2), so the old numbered line at 1
+    // is outside the block; descriptions and the separator rule stay inside.
+    expect(block).toMatchObject({ startLine: 3, endLine: 14, cursorRow: 0 });
+    expect(block!.rows.map(row => row.ordinal)).toEqual([1, 2, 3, 4]);
+    expect(block!.intro).toContain('Deployment');
+    expect(block!.intro).toContain('Which rollout should we use?');
+    expect(resolveVisibleQuestion(pane, live.questions)).toMatchObject({ index: 0, candidates: [0] });
+
+    const working = ['• Working (1s • Esc to interrupt)', '', '❯ '].join('\n');
+    const controller = new BlockController([pane, working]);
+    const result = await controller.answerQuestion(config, { pendingQuestion: live } as never, [
+      'Enable feature flags',
+    ]);
+    expect(result).toMatchObject({ startedAtQuestion: 0, answeredQuestions: 1, confirmedBy: 'turn-started' });
+    expect(controller.sent).toEqual([['Down'], ['Enter']]);
+  });
+
+  /** The hardest shape: an unrelated live selector whose option set is EXACTLY
+   * the pending one, with our question quoted in the prose above it. Option
+   * binding cannot help here — only the question-row rule can. */
+  const sameOptionsProsePane = [
+    'Earlier transcript: “Which one?” was discussed.',
+    'Continue deployment?',
+    '❯ 1. Alpha',
+    '  2. Beta',
+    'Enter to select · Esc to cancel',
+  ].join('\n');
+
+  test('a prose quote cannot claim a selector that shares the SAME option set', () => {
+    const block = liveMenuBlock(sameOptionsProsePane)!;
+    // Everything except the question agrees: same labels, same order, live cursor.
+    expect(blockBindsOptions(block, ['Alpha', 'Beta'])).toBe(true);
+    expect(block.cursorRow).toBe(0);
+    // The phrase IS in the intro — a substring probe accepted exactly this.
+    expect(block.intro).toContain('Which one?');
+    // …and it still refuses, because the quote is not a question ROW.
+    expect(questionRowIndex(block.intro, 'Which one?')).toBe(-1);
+    expect(resolveVisibleQuestion(sameOptionsProsePane, pending.questions)).toMatchObject({
+      index: -1,
+      candidates: [],
+      reason: 'no_candidate',
+    });
+    expect(structuredMenuVisible(sameOptionsProsePane, pending.questions)).toBe(false);
+    expect(anyQuestionVisible(sameOptionsProsePane, pending.questions)).toBe(false);
+  });
+
+  test('SAME-option-set prose: ANSWER sends exactly zero keys', async () => {
+    const controller = new BlockController([sameOptionsProsePane, sameOptionsProsePane]);
+    await expect(controller.answerQuestion(config, { pendingQuestion: pending } as never, ['Alpha'])).rejects.toThrow(
+      /not visible after restoring the pane/,
+    );
+    expect(controller.sent).toEqual([]);
+  });
+
+  test('SAME-option-set prose: CANCEL sends exactly zero keys', async () => {
+    const controller = new BlockController([sameOptionsProsePane, sameOptionsProsePane, sameOptionsProsePane]);
+    await expect(controller.cancelQuestion(config, { pendingQuestion: pending } as never)).rejects.toThrow(
+      /does not show this question as a live menu/,
+    );
+    expect(controller.sent).toEqual([]);
+  });
+
+  test('questionRowIndex needs the WHOLE question, not a shared opening clause', () => {
+    // Two different questions sharing their first 40 characters: a probe-prefix
+    // rule would let the longer anchored row answer for the shorter pending one.
+    const longer = '? Should we roll out the new deploy path to every region tonight?';
+    expect(questionRowIndex(longer, 'Should we roll out the new deploy path?')).toBe(-1);
+    expect(questionRowIndex(longer, 'Should we roll out the new deploy path to every region tonight?')).toBe(0);
+    // An ellipsis the harness itself printed is the one accepted clipping.
+    expect(questionRowIndex('? Should we roll out the new deploy…', 'Should we roll out the new deploy path?')).toBe(0);
+    // A bare standalone row gets no clipping leniency at all.
+    expect(questionRowIndex('Should we roll out the new deploy…', 'Should we roll out the new deploy path?')).toBe(-1);
+  });
+
+  test('the free-text marker must be its own row, not prose near an idle prompt', () => {
+    // Forged shape: ordinary output mentioning the hint, a few lines above the
+    // ordinary idle prompt, with the pending question quoted above it.
+    const forged = ['Which one?', 'You can type your answer later if you prefer.', '', '❯ ', '? for shortcuts'].join(
+      '\n',
+    );
+    expect(freeTextQuestionRegion(forged)).toBeNull();
+    expect(anyQuestionVisible(forged, pending.questions)).toBe(false);
+    expect(freeTextPageShowsQuestion(forged, 'Which one?')).toBe(false);
+    // The genuine hint row still reads as one.
+    const genuine = ['Which one?', 'Type your answer', '❯ '].join('\n');
+    expect(freeTextQuestionRegion(genuine)).toMatchObject({ markerLine: 1, composerLine: 2 });
+    expect(anyQuestionVisible(genuine, pending.questions)).toBe(true);
+  });
+
+  test('a genuine question row over the WRONG option set is `unbound`, not `no_candidate`', async () => {
+    // Our question really is the live block's question row, but the rows below
+    // it are somebody else's. The distinct reason keeps the report honest —
+    // "this is not your menu", not "your question scrolled away".
+    const swapped = ['? Which one?', '❯ 1. Yes', '  2. No', 'Enter to select · Esc to cancel'].join('\n');
+    expect(resolveVisibleQuestion(swapped, pending.questions)).toMatchObject({
+      index: -1,
+      candidates: [],
+      reason: 'unbound',
+    });
+    const controller = new BlockController([swapped, swapped]);
+    await expect(controller.answerQuestion(config, { pendingQuestion: pending } as never, ['Alpha'])).rejects.toThrow(
+      /not this question’s menu/,
+    );
+    expect(controller.sent).toEqual([]);
+  });
+
+  test('a real question ROW is still accepted, wrapped across lines and all', () => {
+    const wrapped = [
+      '? Which rollout should we use when the deploy',
+      '  window is short?',
+      '❯ 1. Alpha',
+      '  2. Beta',
+      'Enter to select · Esc to cancel',
+    ].join('\n');
+    const set = [
+      {
+        question: 'Which rollout should we use when the deploy window is short?',
+        options: [{ label: 'Alpha' }, { label: 'Beta' }],
+      },
+    ];
+    expect(questionRowIndex(liveMenuBlock(wrapped)!.intro, set[0]!.question)).toBe(0);
+    expect(resolveVisibleQuestion(wrapped, set)).toMatchObject({ index: 0, candidates: [0] });
+  });
+
+  test('a clipped lower menu is never stitched to a stale row above an old footer', () => {
+    // Row 1 of the live menu has scrolled off. The stale menu above ends in its
+    // own footer and carries its own cursor glyph. Treating that footer as an
+    // ordinary gap line built one "block" spanning both menus, with two cursors.
+    const stitched = [
+      '? Old question',
+      '❯ 1. Stale choice',
+      'Enter to select · Esc to cancel',
+      '? Live question',
+      '  2. Live second choice',
+      'Enter to select · Esc to cancel',
+    ].join('\n');
+    const block = liveMenuBlock(stitched)!;
+    expect(block.rows.map(row => row.ordinal)).toEqual([2]);
+    expect(block.rows.map(row => row.text)).toEqual(['Live second choice']);
+    expect(block.intro.trim()).toBe('? Live question');
+    expect(block.cursorRow).toBeUndefined();
+    // Two cursor glyphs inside one cluster is itself a refusal.
+    const twoCursors = ['? Q', '❯ 1. A', '❯ 2. B', 'Enter to select'].join('\n');
+    expect(liveMenuBlock(twoCursors)).toBeNull();
+  });
+
+  test('the free-text page keeps PRESENCE without authorizing any key', () => {
+    // The "Other" page replaces the numbered rows with a composer, so there is
+    // no block and nothing may be driven. It is still the question, though: the
+    // self-heal monitor must not clear it while a human types into it. Presence
+    // says yes; every key-authorizing gate says no.
+    const otherPage = ['Which one?', 'Type your answer', '❯ '].join('\n');
+    expect(liveMenuBlock(otherPage)).toBeNull();
+    expect(anyQuestionVisible(otherPage, pending.questions)).toBe(true);
+    expect(visibleQuestionIndex(otherPage, pending.questions)).toBe(-1);
+    expect(structuredMenuVisible(otherPage, pending.questions)).toBe(false);
+    // …and an unrelated composer with none of this question's text is not it.
+    expect(anyQuestionVisible(['Type your answer', '❯ '].join('\n'), pending.questions)).toBe(false);
+  });
+
+  test('PRESENCE is false for a stale question in scrollback above an idle prompt', () => {
+    // The interaction closed; the question and its rows are scrollback and the
+    // bottom of the pane is the ordinary idle prompt. Reading this as presence
+    // pinned the pending question forever — self-heal could never clear it,
+    // while every key path correctly refused to drive it.
+    const staleMenuAtIdle = [
+      '? Which one?',
+      '❯ 1. Alpha',
+      '  2. Beta',
+      '⏺ Answer recorded',
+      '',
+      '❯ ',
+      '? for shortcuts',
+    ].join('\n');
+    // The composer BELOW the rows is what disqualifies the block.
+    expect(liveMenuBlock(staleMenuAtIdle)).toBeNull();
+    expect(anyQuestionVisible(staleMenuAtIdle, pending.questions)).toBe(false);
+    expect(structuredMenuVisible(staleMenuAtIdle, pending.questions)).toBe(false);
+
+    // Same shape, free-text flavour: the hint is scrollback and the bottom
+    // composer is the idle prompt, with real output in between.
+    const staleFreeTextAtIdle = [
+      'Which one?',
+      'Type your answer',
+      'Use the guarded rollout.',
+      '⏺ Answer recorded',
+      '',
+      '❯ ',
+      '? for shortcuts',
+    ].join('\n');
+    expect(freeTextQuestionRegion(staleFreeTextAtIdle)).toBeNull();
+    expect(anyQuestionVisible(staleFreeTextAtIdle, pending.questions)).toBe(false);
+  });
+
+  test('PRESENCE is false for a stale free-text page above an unrelated composer or menu', () => {
+    const aboveComposer = [
+      'Which one?',
+      'Type your answer',
+      '❯ ',
+      '⏺ Ran tests: 12 passed',
+      '',
+      '❯ ',
+      '? for shortcuts',
+    ].join('\n');
+    // The bottom composer is the live one and carries no marker of its own.
+    expect(freeTextQuestionRegion(aboveComposer)).toBeNull();
+    expect(anyQuestionVisible(aboveComposer, pending.questions)).toBe(false);
+
+    const aboveMenu = [
+      'Which one?',
+      'Type your answer',
+      '❯ ',
+      '⏺ Ran tests: 12 passed',
+      'Do you want to proceed?',
+      '❯ 1. Yes',
+      '  2. No',
+      'Enter to select · Esc to cancel',
+    ].join('\n');
+    expect(freeTextQuestionRegion(aboveMenu)).toBeNull();
+    expect(anyQuestionVisible(aboveMenu, pending.questions)).toBe(false);
+    expect(structuredMenuVisible(aboveMenu, pending.questions)).toBe(false);
+  });
+
+  test('a FREEFORM answer is never typed into a bare idle prompt', async () => {
+    // The Other selection unexpectedly returned the pane to rest. A bare `❯` is
+    // indistinguishable from an idle prompt, so accepting it would post the
+    // freeform answer as a brand-new message to the session.
+    const single = {
+      toolUseId: 'tool-idle-free',
+      questions: [{ question: 'Which one?', options: [{ label: 'Alpha' }], multiSelect: false }],
+    };
+    const ourMenu = ['? Which one?', '❯ 1. Alpha', '  2. Other', 'Enter to select · Esc to cancel'].join('\n');
+    const idle = ['⏺ Answer recorded', '', '❯ ', '? for shortcuts'].join('\n');
+    const controller = new BlockController([ourMenu, idle]);
+    await expect(
+      controller.answerQuestion(config, { pendingQuestion: single } as never, [], 'my own answer'),
+    ).rejects.toThrow(/free-text page did not open/);
+    expect(controller.filled).toEqual([]);
+    // Only the two keys that selected the Other row — nothing extra.
+    expect(controller.sent).toEqual([['Down'], ['Enter']]);
+  });
+
+  test('a FREEFORM answer IS typed once the real free-text page renders', async () => {
+    const single = {
+      toolUseId: 'tool-free-ok',
+      questions: [{ question: 'Which one?', options: [{ label: 'Alpha' }], multiSelect: false }],
+    };
+    const ourMenu = ['? Which one?', '❯ 1. Alpha', '  2. Other', 'Enter to select · Esc to cancel'].join('\n');
+    const freeTextPage = ['? Which one?', 'Type your answer', '❯ '].join('\n');
+    const working = ['• Working (1s • Esc to interrupt)', '', '❯ '].join('\n');
+    const controller = new BlockController([ourMenu, freeTextPage, working]);
+    const result = await controller.answerQuestion(config, { pendingQuestion: single } as never, [], 'my own answer');
+    expect(controller.filled).toEqual(['my own answer']);
+    expect(controller.sent).toEqual([['Down'], ['Enter'], ['Enter']]);
+    expect(result).toMatchObject({ answeredQuestions: 1, confirmedBy: 'turn-started' });
+  });
+
+  test('no numbered cluster at all means no block, and every gate refuses', () => {
+    const prompt = ['Answer cancelled', '', '❯ ', '? for shortcuts'].join('\n');
+    expect(liveMenuBlock(prompt)).toBeNull();
+    expect(resolveVisibleQuestion(prompt, pending.questions)).toMatchObject({ reason: 'no_block', candidates: [] });
+    expect(structuredMenuVisible(prompt, pending.questions)).toBe(false);
+    expect(anyQuestionVisible(prompt, pending.questions)).toBe(false);
+    expect(visibleMultiSelectState(prompt, ['Alpha'])).toEqual([undefined]);
+    expect(
+      structuredQuestionPaneMatch({
+        pane: prompt,
+        question: 'Which one?',
+        options: ['Alpha', 'Beta'],
+        selected: ['Alpha'],
+        promptReady: false,
+      }),
+    ).toMatchObject({ ok: false, reason: 'block_missing', block: null });
   });
 });

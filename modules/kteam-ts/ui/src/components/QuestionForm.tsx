@@ -162,6 +162,29 @@ export function resolveRequestId(
 }
 
 /**
+ * Run an abandon attempt with an id owned by this pending question, rather
+ * than by the answer submission. A failed request can therefore be retried
+ * without allowing a later normal interrupt through after the daemon has
+ * already cancelled the question.
+ *
+ * The attempt also NAMES the question it is abandoning. The retained request id
+ * only makes the daemon apply the abandon once; it does not say WHICH question
+ * the user was looking at. A retry of A's abandon that lands after A was
+ * answered and B was asked would otherwise cancel B — so `toolUseId` travels
+ * with the request and the daemon refuses a mismatch.
+ */
+export async function interruptPendingQuestion(opts: {
+  requestIdRef: { current: { id: string; key: string | undefined } | null };
+  toolUseId: string;
+  mint: () => string;
+  interrupt: (requestId: string, toolUseId: string) => Promise<unknown>;
+}): Promise<void> {
+  const { requestIdRef, toolUseId, mint, interrupt } = opts;
+  requestIdRef.current = resolveRequestId(requestIdRef.current, toolUseId, mint);
+  await interrupt(requestIdRef.current.id, toolUseId);
+}
+
+/**
  * Submit orchestration with a synchronous double-fire guard. Extracted so the
  * "rapid double-tap issues exactly one api.answer" property is testable in a
  * DOM-free harness: two overlapping calls sharing `guard` run `send` once.
@@ -447,7 +470,12 @@ export function QuestionForm({ sessionId, question, onSubmit, compact = false }:
   const [page, setPage] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [abandonConfirm, setAbandonConfirm] = useState(false);
+  const [abandoning, setAbandoning] = useState(false);
   const { touchAffected } = useInputModality();
+  const submitGuard = useRef(false);
+  const requestIdRef = useRef<{ id: string; key: string | undefined } | null>(null);
+  const abandonRequestIdRef = useRef<{ id: string; key: string | undefined } | null>(null);
 
   // Degrade safely when the mount site has not (yet) keyed on `toolUseId`: a
   // NEW question set arriving while mounted resets the in-progress answers
@@ -457,11 +485,12 @@ export function QuestionForm({ sessionId, question, onSubmit, compact = false }:
     setState(initAnswerState(questions));
     setPage(0);
     setError(null);
+    setAbandonConfirm(false);
+    setAbandoning(false);
+    submitGuard.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [toolUseId]);
 
-  const submitGuard = useRef(false);
-  const requestIdRef = useRef<{ id: string; key: string | undefined } | null>(null);
   requestIdRef.current = resolveRequestId(requestIdRef.current, toolUseId, () => crypto.randomUUID());
   const requestId = requestIdRef.current.id;
 
@@ -508,6 +537,7 @@ export function QuestionForm({ sessionId, question, onSubmit, compact = false }:
     void submitAnswers({
       guard: submitGuard,
       validate: () => {
+        if (!toolUseId) return 'This question has no tool id. Refresh the session before answering.';
         if (!isMultiSet) {
           if (!isAnswered(state, 0)) return 'Pick an option or write a response first';
           return null;
@@ -516,7 +546,16 @@ export function QuestionForm({ sessionId, question, onSubmit, compact = false }:
         return null;
       },
       send: async () => {
-        await api.answer(sessionId, buildPayload(questions, state), requestId);
+        try {
+          await api.answer(sessionId, { toolUseId: toolUseId!, ...buildPayload(questions, state) }, requestId);
+        } catch (error) {
+          // A stale form is rejected by toolUseId binding. Refresh immediately
+          // even if the WebSocket is reconnecting, so question B replaces A
+          // instead of leaving the user retrying an answer the daemon will never
+          // (and must never) drive into a different menu.
+          onSubmit();
+          throw error;
+        }
         onSubmit();
       },
       setSubmitting,
@@ -524,10 +563,90 @@ export function QuestionForm({ sessionId, question, onSubmit, compact = false }:
     });
   }
 
+  async function abandonQuestion() {
+    if (abandoning) return;
+    if (!toolUseId) {
+      setError('This question has no tool id. Refresh the session before abandoning it.');
+      return;
+    }
+    setAbandoning(true);
+    setError(null);
+    try {
+      // The daemon treats interrupt specially while a pendingQuestion exists:
+      // Escape is verified, the question is lifecycle-journalled as cancelled,
+      // and only then is normal chat control restored.
+      await interruptPendingQuestion({
+        requestIdRef: abandonRequestIdRef,
+        toolUseId,
+        mint: () => crypto.randomUUID(),
+        interrupt: (requestId, boundToolUseId) => api.interrupt(sessionId, requestId, boundToolUseId),
+      });
+      onSubmit();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+      setAbandonConfirm(false);
+    } finally {
+      setAbandoning(false);
+    }
+  }
+
   if (questions.length === 0) return null;
 
   const errorRow = error && (
-    <div className="mt-2 rounded border border-err-border bg-err-bg px-2 py-1 text-[12px] text-err">{error}</div>
+    <div className="mt-2 rounded border border-err-border bg-err-bg px-2 py-1.5 text-[12px] text-err" role="alert">
+      <div>{error}</div>
+      <div className="mt-1 text-muted">
+        No success was recorded. Submitting again safely rechecks the terminal pane before sending any keys.
+      </div>
+    </div>
+  );
+
+  const recoveryRow = (
+    <div className="mt-2 rounded border border-border bg-surface px-2 py-1.5 text-[12px] text-muted">
+      {abandonConfirm ? (
+        <div>
+          <div>
+            Abandon this question and interrupt its tool call? Normal chat control returns only after the pane confirms
+            it.
+          </div>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <Button
+              className="min-h-[44px] min-w-[44px]"
+              variant="danger"
+              size="sm"
+              type="button"
+              disabled={abandoning}
+              onClick={() => void abandonQuestion()}
+            >
+              {abandoning ? 'Abandoning…' : 'Confirm abandon'}
+            </Button>
+            <Button
+              className="min-h-[44px] min-w-[44px]"
+              variant="outline"
+              size="sm"
+              type="button"
+              disabled={abandoning}
+              onClick={() => setAbandonConfirm(false)}
+            >
+              Keep question
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span>Question stuck? Retry the answer, or explicitly return control to chat.</span>
+          <Button
+            className="min-h-[44px] min-w-[44px]"
+            variant="outline"
+            size="sm"
+            type="button"
+            onClick={() => setAbandonConfirm(true)}
+          >
+            Abandon question
+          </Button>
+        </div>
+      )}
+    </div>
   );
 
   // border-accent, not border-accent-border: this block marks the transcript's
@@ -561,6 +680,7 @@ export function QuestionForm({ sessionId, question, onSubmit, compact = false }:
           />
           {errorRow}
         </div>
+        {recoveryRow}
         <QuestionNav
           page={safePage}
           pageCount={questions.length}
@@ -594,6 +714,7 @@ export function QuestionForm({ sessionId, question, onSubmit, compact = false }:
         />
       ))}
       {errorRow}
+      {recoveryRow}
       <div className="mt-2">
         <QuestionSubmitControl submitting={submitting} onClick={runSubmit} />
       </div>
