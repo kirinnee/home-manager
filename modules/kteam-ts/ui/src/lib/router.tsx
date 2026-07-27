@@ -7,17 +7,19 @@ import { forwardRef, useEffect, useState, type AnchorHTMLAttributes, type MouseE
 
 export interface Route {
   path: string;
-  // path === '/' | '/new' | '/settings' | '/warden' | '/session/:id' | unknown → list
+  // path === '/' | '/new' | '/settings' | '/warden' | '/tasks' | '/session/:id' | unknown → list
   sessionId?: string;
   isNew?: boolean;
   isSettings?: boolean;
   isWarden?: boolean;
+  isTasks?: boolean;
 }
 
 export function parseRoute(pathname: string): Route {
   if (pathname === '/new') return { path: '/new', isNew: true };
   if (pathname === '/settings') return { path: '/settings', isSettings: true };
   if (pathname === '/warden') return { path: '/warden', isWarden: true };
+  if (pathname === '/tasks') return { path: '/tasks', isTasks: true };
   if (pathname.startsWith('/session/')) {
     const rest = pathname.slice('/session/'.length);
     if (rest) {
