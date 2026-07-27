@@ -64,6 +64,8 @@ import { MigrateSheet } from './MigrateSheet';
 import { parseTaskName, TaskName, taskIsRedundant } from './TaskName';
 import type { Quota } from '../lib/usage';
 import { useStore } from '../lib/store';
+import { PinSheet, PinsTrigger } from './PinSheet';
+import { usePinCount, useDeclareForeground } from '../hooks/usePins';
 
 const COMPACT_CALLSIGN_TITLE_RATIO = 0.6;
 
@@ -217,8 +219,25 @@ export const SessionHeader = memo(function SessionHeader({
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [migrateOpen, setMigrateOpen] = useState(false);
+  const [pinsOpen, setPinsOpen] = useState(false);
   const detailsId = useId();
   const panelId = `${detailsId}-panel`;
+  const pinsTriggerId = `${detailsId}-pins`;
+  const pinsPanelId = `${detailsId}-pins-panel`;
+  const pinCount = usePinCount(config.id);
+  // Declare THIS session as the foreground one while active, so the Pins sheet
+  // reads the right session and transcript-row pins land on it. Only the active
+  // pane ever wins (see lib/pin-bridge.ts).
+  useDeclareForeground(config.id, active !== false);
+  const pinsTrigger = (
+    <PinsTrigger
+      id={pinsTriggerId}
+      count={pinCount}
+      onClick={() => setPinsOpen(open => !open)}
+      expanded={pinsOpen}
+      controls={pinsPanelId}
+    />
+  );
 
   // A retained background pane must not keep an invisible modal or its
   // open-only lineage subscription alive after route navigation.
@@ -227,6 +246,7 @@ export const SessionHeader = memo(function SessionHeader({
       setDetailsOpen(false);
       setRenameOpen(false);
       setMigrateOpen(false);
+      setPinsOpen(false);
     }
   }, [active]);
 
@@ -336,6 +356,13 @@ export const SessionHeader = memo(function SessionHeader({
       />
       <RenameSheet view={view} open={renameOpen} onClose={() => setRenameOpen(false)} />
       <MigrateSheet view={view} open={migrateOpen} onClose={() => setMigrateOpen(false)} />
+      <PinSheet
+        id={pinsPanelId}
+        sessionId={config.id}
+        open={pinsOpen}
+        onClose={() => setPinsOpen(false)}
+        labelledBy={pinsTriggerId}
+      />
     </>
   );
 
@@ -407,6 +434,8 @@ export const SessionHeader = memo(function SessionHeader({
             </span>
           </Link>
 
+          {pinsTrigger}
+
           <Button
             id={detailsId}
             size="sm"
@@ -477,6 +506,7 @@ export const SessionHeader = memo(function SessionHeader({
 
       <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-sm">
         {tabs}
+        {pinsTrigger}
         <ActionGroup>
           {actions}
           <Button
