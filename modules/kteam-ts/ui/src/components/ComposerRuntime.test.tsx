@@ -42,52 +42,90 @@ function view(
   };
 }
 
-function trigger(html: string): string {
-  const buttons = html.match(/<button\b[^>]*>[\s\S]*?<\/button>/g) ?? [];
-  const button = buttons.find(candidate => candidate.includes('aria-haspopup="dialog"'));
-  if (!button) throw new Error(`no runtime trigger button\n${html}`);
-  return button;
+function buttons(html: string): string[] {
+  return html.match(/<button\b[^>]*>[\s\S]*?<\/button>/g) ?? [];
 }
 
-describe('ComposerRuntime bar trigger', () => {
-  test('reads the observed model and offers a dialog trigger when idle', () => {
+/** The chips are told apart by the verb their aria-label opens with — "Switch
+ *  model …" vs "Set reasoning …" — so a test can target one without depending
+ *  on DOM order. */
+function chip(html: string, kind: 'model' | 'effort'): string {
+  const needle = kind === 'model' ? 'aria-label="Switch model' : 'aria-label="Set reasoning';
+  const found = buttons(html).find(candidate => candidate.includes(needle));
+  if (!found) throw new Error(`no ${kind} chip\n${html}`);
+  return found;
+}
+
+describe('ComposerRuntime bar chips', () => {
+  test('offers a model chip AND a reasoning chip, both idle dialog triggers', () => {
     const html = renderToStaticMarkup(<ComposerRuntime view={view()} canControl busy={false} />);
-    const button = trigger(html);
-    expect(button).toContain('claude-opus-5');
-    expect(button).toContain('aria-haspopup="dialog"');
-    expect(button).not.toContain('disabled=""');
-    expect(button).toContain('aria-label="Switch model — currently claude-opus-5"');
+    const triggers = buttons(html).filter(b => b.includes('aria-haspopup="dialog"'));
+    expect(triggers.length).toBe(2);
+
+    const model = chip(html, 'model');
+    expect(model).toContain('claude-opus-5');
+    expect(model).toContain('aria-label="Switch model — currently claude-opus-5"');
+    expect(model).not.toContain('disabled=""');
+
+    const effort = chip(html, 'effort');
+    expect(effort).toContain('aria-haspopup="dialog"');
+    expect(effort).not.toContain('disabled=""');
   });
 
-  test('read-only origin disables the trigger with a non-visual reason', () => {
+  test('the chip row is rest-only chrome that collapses with the keyboard', () => {
+    const html = renderToStaticMarkup(<ComposerRuntime view={view()} canControl busy={false} />);
+    expect(html).toContain('kt-composer__runtime-row');
+    // data-kb-hide lives on the ROW so both chips hide together when typing.
+    expect(html).toMatch(/kt-composer__runtime-row[^>]*data-kb-hide/);
+  });
+
+  test('a Claude reasoning chip is a neutral effort verb, not a claimed level', () => {
+    const html = renderToStaticMarkup(<ComposerRuntime view={view()} canControl busy={false} />);
+    const effort = chip(html, 'effort');
+    expect(effort).toContain('aria-label="Set reasoning effort"');
+    expect(effort).toContain('effort');
+  });
+
+  test('a Codex reasoning chip reads the observed reasoning level as truth', () => {
+    const html = renderToStaticMarkup(
+      <ComposerRuntime view={view({ observedReasoningEffort: 'high' }, 'codex')} canControl busy={false} />,
+    );
+    const effort = chip(html, 'effort');
+    expect(effort).toContain('aria-label="Set reasoning level — currently high"');
+    expect(effort).toContain('high');
+  });
+
+  test('read-only origin disables BOTH chips with a shared non-visual reason', () => {
     const html = renderToStaticMarkup(<ComposerRuntime view={view()} canControl={false} busy={false} />);
-    const button = trigger(html);
-    expect(button).toContain('disabled=""');
-    expect(button).toContain('aria-disabled="true"');
-    const reasonId = button.match(/aria-describedby="([^"]+)"/)?.[1];
+    const model = chip(html, 'model');
+    const effort = chip(html, 'effort');
+    expect(model).toContain('disabled=""');
+    expect(effort).toContain('disabled=""');
+    const reasonId = model.match(/aria-describedby="([^"]+)"/)?.[1];
     expect(reasonId).toBeDefined();
+    expect(effort).toContain(`aria-describedby="${reasonId}"`);
     expect(html).toContain(`id="${reasonId}"`);
     expect(html).toContain('Read-only origin');
   });
 
-  test('a busy session disables the switch (a switch needs an idle prompt)', () => {
+  test('a busy session disables both chips (a switch needs an idle prompt)', () => {
     const html = renderToStaticMarkup(<ComposerRuntime view={view()} canControl busy />);
-    const button = trigger(html);
-    expect(button).toContain('disabled=""');
+    expect(chip(html, 'model')).toContain('disabled=""');
+    expect(chip(html, 'effort')).toContain('disabled=""');
     expect(html).toContain('Busy: wait for an idle prompt');
   });
 
-  test('a terminal session disables the switch', () => {
+  test('a terminal session disables both chips', () => {
     const html = renderToStaticMarkup(<ComposerRuntime view={view({ status: 'completed' })} canControl busy={false} />);
-    const button = trigger(html);
-    expect(button).toContain('disabled=""');
+    expect(chip(html, 'model')).toContain('disabled=""');
+    expect(chip(html, 'effort')).toContain('disabled=""');
     expect(html).toContain('Session finished');
   });
 
-  test('falls back to the launch model only when nothing is observed yet', () => {
+  test('the model chip falls back to the launch model only when nothing is observed', () => {
     const html = renderToStaticMarkup(
       <ComposerRuntime view={view({ observedModel: undefined })} canControl busy={false} />,
     );
-    expect(trigger(html)).toContain('launch-model');
+    expect(chip(html, 'model')).toContain('launch-model');
   });
 });
