@@ -24,8 +24,8 @@
 // widest gap in the transcript, which is what makes turns readable without
 // drawing a divider between them.
 
-import { memo, useState } from 'react';
-import { ChevronRight, Brain, Info } from 'lucide-react';
+import { memo, useEffect, useReducer, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { ChevronRight, Brain, Info, Pin, PinOff } from 'lucide-react';
 import {
   isInformativeTurnBoundary,
   type TranscriptBlock,
@@ -39,6 +39,8 @@ import { TranscriptImageGallery } from './AttachmentImage';
 import type { StoredTranscriptImage, TranscriptImage } from '../lib/attachments';
 import { displayCallsign } from '../lib/callsign';
 import { cn, fmtClock } from '../lib/utils';
+import { isMessagePinned, pinsStore, type PinBlockKind } from '../lib/pins';
+import { getForegroundSession } from '../lib/pin-bridge';
 
 const PROTOCOL_HEADER = /#\s*(AGENTS\.md instructions|SYSTEM\s*PROMPT|INSTRUCTIONS)/i;
 const LONG_USER_LINES = 16;
@@ -79,6 +81,11 @@ interface Props {
   isLast: boolean;
   /** The block above this one — drives the speaker-change gap. */
   previous?: TranscriptBlock;
+  /** Input modality, resolved ONCE by Transcript and threaded down rather than
+   *  subscribed per row (thousands of rows must not each hold a media listener).
+   *  Selects the pin affordance: a tap-revealed bar on touch, a hover/focus
+   *  button on a mouse. */
+  touch?: boolean;
 }
 
 // buildTranscript() creates fresh block OBJECTS every rebuild, so default
@@ -117,7 +124,7 @@ export function transcriptImagesEqual(a?: TranscriptImage[], b?: TranscriptImage
 }
 
 function sameProps(prev: Props, next: Props): boolean {
-  if (prev.live !== next.live || prev.isLast !== next.isLast) return false;
+  if (prev.live !== next.live || prev.isLast !== next.isLast || prev.touch !== next.touch) return false;
   // Only the PREVIOUS block's kind affects this row (via the rhythm attrs), so
   // comparing kind avoids re-rendering the whole transcript when a neighbour's
   // content changes.
@@ -160,12 +167,182 @@ function tierOf(kind: TranscriptBlock['kind']): 'message' | 'chrome' {
   return kind === 'user' || kind === 'assistant' ? 'message' : 'chrome';
 }
 
-export const TranscriptRow = memo(function TranscriptRow({ block, live, isLast, previous }: Props) {
+/** The text a message pin stores as its preview, so the pin stays legible even
+ *  when its target block is not loaded (see lib/pins.ts). Kept close to the row
+ *  because it must mirror what the row actually shows. */
+export function pinPreviewOf(block: TranscriptBlock): string {
+  switch (block.kind) {
+    case 'user':
+    case 'assistant':
+    case 'thinking':
+      return block.text;
+    case 'tools':
+      return (
+        block.calls
+          .map(call => call.use?.name ?? call.key)
+          .filter(Boolean)
+          .join(', ') || 'tool calls'
+      );
+    case 'system':
+      return block.info.summary || block.info.label || block.info.raw || 'system';
+    case 'notice':
+      return block.label;
+    default:
+      return '';
+  }
+}
+
+/** Only turn boundaries are un-pinnable — they are the one row with no stable
+ *  content of its own to jump back to. */
+export function isPinnable(block: TranscriptBlock): boolean {
+  return block.kind !== 'turn';
+}
+
+// The pin affordance. TWO paths, ZERO resting cost, and NO hover-only surface —
+// the three constraints the transcript's own history spells out (TranscriptRow
+// header, the 80px lesson; pinning-design.md §5):
+//
+//   DESKTOP  — a small pin button revealed on `group-hover/pin` AND on
+//              `focus-visible`. It is always in the tab order (a keyboard user's
+//              first-class path), but `pointer-events-none` + `opacity-0` at
+//              rest so it reserves no space and cannot be tapped by accident on
+//              touch, where hover never fires.
+//   TOUCH    — a plain tap on the block toggles a slim action bar beneath it
+//              (Pin/Unpin), dismissed by scroll, an outside tap, or the action.
+//              A tap does not scroll and does not select, so it never fights the
+//              transcript's hard-won selection/scroll machinery (Transcript.tsx
+//              pinBlockedBySelection); a long-press, which IS native selection,
+//              was deliberately not used.
+//
+// The session id comes from the foreground bridge, never a prop — only the
+// foreground pane is interactable, and it is the one that declared itself.
+function PinControls({
+  block,
+  touch,
+  barOpen,
+  setBarOpen,
+}: {
+  block: TranscriptBlock;
+  touch: boolean;
+  barOpen: boolean;
+  setBarOpen: (open: boolean) => void;
+}) {
+  const [, bump] = useReducer((n: number) => n + 1, 0);
+  const sessionId = getForegroundSession();
+  const pinned = sessionId ? isMessagePinned(pinsStore.getSnapshot(), sessionId, block.id) : false;
+
+  const toggle = () => {
+    const sid = getForegroundSession();
+    if (!sid) return;
+    const ts = (block as { ts?: string }).ts;
+    pinsStore.toggleMessage(sid, {
+      blockId: block.id,
+      blockKind: block.kind as PinBlockKind,
+      preview: pinPreviewOf(block),
+      ...(ts ? { ts } : {}),
+    });
+    bump();
+    setBarOpen(false);
+  };
+
+  const label = pinned ? 'Unpin this message' : 'Pin this message';
+  const Icon = pinned ? PinOff : Pin;
+
+  return (
+    <>
+      {/* DESKTOP: hover/focus-visible reveal, in tab order, inert at rest. */}
+      <button
+        type="button"
+        onClick={toggle}
+        aria-label={label}
+        title={label}
+        aria-pressed={pinned}
+        className={cn(
+          'absolute right-0 top-0 z-10 hidden h-7 w-7 items-center justify-center rounded-control border border-border bg-surface text-muted opacity-0 transition-opacity',
+          'pointer-events-none sm:inline-flex',
+          'group-hover/pin:pointer-events-auto group-hover/pin:opacity-100',
+          'focus-visible:pointer-events-auto focus-visible:opacity-100 hover:text-accent',
+          pinned && 'text-accent',
+        )}
+      >
+        <Icon size={13} aria-hidden="true" />
+      </button>
+
+      {/* TOUCH: the tap-revealed action bar. */}
+      {touch && barOpen && (
+        <div className="mt-1 flex items-center justify-end gap-sm" data-pin-bar>
+          <button
+            type="button"
+            onClick={toggle}
+            aria-label={label}
+            className="inline-flex min-h-[44px] items-center gap-xs rounded-control border border-border px-cell-x text-cell font-medium text-fg-soft hover:border-accent-border hover:text-accent"
+          >
+            <Icon size={14} aria-hidden="true" />
+            {pinned ? 'Unpin' : 'Pin'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setBarOpen(false)}
+            aria-label="Close pin menu"
+            className="inline-flex min-h-[44px] items-center rounded-control px-cell-x text-cell text-muted hover:text-fg"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
+/** Is a tap a plain tap that should reveal the pin bar — i.e. not the reader
+ *  starting a selection and not a press on some other interactive control?
+ *  Exported and DOM-shaped-but-injectable so the decision is unit-testable. */
+export function isPlainBlockTap(target: Element | null, hasSelection: boolean): boolean {
+  if (hasSelection) return false;
+  if (!target) return true;
+  return !target.closest('a, button, input, textarea, summary, [role="button"], [data-pin-bar]');
+}
+
+export const TranscriptRow = memo(function TranscriptRow({ block, live, isLast, previous, touch = false }: Props) {
+  // Hooks run unconditionally, before the turn-noise early-return below — a given
+  // row is always noise or never, so the hook order per instance is stable.
+  const [barOpen, setBarOpen] = useState(false);
+  const rowRef = useRef<HTMLDivElement | null>(null);
+  const pinnable = isPinnable(block);
+
+  // TOUCH dismissal: once the bar is open, any scroll of the transcript or a tap
+  // outside this row closes it — the bar is a transient, not a mode.
+  useEffect(() => {
+    if (!barOpen) return undefined;
+    const close = () => setBarOpen(false);
+    const onDocDown = (event: Event) => {
+      if (rowRef.current && !rowRef.current.contains(event.target as Node)) setBarOpen(false);
+    };
+    const scroller = rowRef.current?.closest('[data-density-region="transcript-scroller"]');
+    scroller?.addEventListener('scroll', close, { passive: true });
+    document.addEventListener('pointerdown', onDocDown, { capture: true });
+    return () => {
+      scroller?.removeEventListener('scroll', close);
+      document.removeEventListener('pointerdown', onDocDown, { capture: true } as EventListenerOptions);
+    };
+  }, [barOpen]);
+
   // Suppress before creating `.kt-block`: transcript rows are flex items, so
   // an empty wrapper would still retain its speaker-rhythm margin as a gap.
   if (block.kind === 'turn' && !isInformativeTurnBoundary(block)) return null;
 
   const kind = tierOf(block.kind);
+  // TOUCH only: a plain tap on the block reveals the pin bar. Gated so it never
+  // swallows a tap meant for a link/button/disclosure inside the row, and never
+  // fires while the reader is making a selection.
+  const onBlockPointerUp =
+    touch && pinnable
+      ? (event: ReactPointerEvent<HTMLDivElement>) => {
+          const sel = typeof window !== 'undefined' ? window.getSelection() : null;
+          const hasSelection = !!sel && !sel.isCollapsed && sel.rangeCount > 0;
+          if (isPlainBlockTap(event.target as Element | null, hasSelection)) setBarOpen(open => !open);
+        }
+      : undefined;
   // A speaker change (user→assistant or back) is the widest gap in the
   // transcript. Intervening chrome does not break it: a reply that ran tools
   // first is still the other party starting to speak.
@@ -206,15 +383,22 @@ export const TranscriptRow = memo(function TranscriptRow({ block, live, isLast, 
 
   return (
     <div
-      className="kt-block min-w-0"
+      ref={rowRef}
+      // `group/pin` + `relative` scope the desktop pin button's hover/focus
+      // reveal and its absolute placement to THIS row without disturbing the
+      // assistant body's own `group` (ASSISTANT_LAYOUT.wrap).
+      className="kt-block group/pin relative min-w-0"
       // The scroll controller's prepend anchor looks a block up by id to restore
-      // its exact position when an older page loads (see Transcript.tsx).
+      // its exact position when an older page loads (see Transcript.tsx). The pin
+      // jump resolves the same attribute.
       data-block-id={block.id}
       data-kind={kind}
       data-turn={turnChange ? 'true' : undefined}
       data-after={previous ? tierOf(previous.kind) : undefined}
+      onPointerUp={onBlockPointerUp}
     >
       {body}
+      {pinnable && <PinControls block={block} touch={touch} barOpen={barOpen} setBarOpen={setBarOpen} />}
     </div>
   );
 }, sameProps);

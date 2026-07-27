@@ -118,6 +118,52 @@
 // stayed at 13.6/s during the drag against 2.7/s idle, i.e. there was no render
 // storm. The flicker was the scroll position fighting itself, not React.
 //
+// ROUND 8 — THE SCROLL WAS NEVER THE THING THAT BROKE THE SELECTION.
+//
+// Rounds 6 and 7 both attacked selection loss by stopping `scrollTop` writes
+// (and, on touch, by gating them on a held pointer). Both shipped; the reader
+// still could not highlight a live conversation. This round finally ran WebKit
+// instead of reasoning about it (headless WPE, mobile context, real drag
+// selection — full result table in hooks/useLiveTick.ts), and the answer is
+// narrower than every previous round assumed:
+//
+//   A WEBKIT SELECTION DIES IF, AND ESSENTIALLY ONLY IF, THE ELEMENT IT IS IN
+//   IS RE-RENDERED. A React text update (`nodeValue =`), a structural change
+//   from a markdown re-parse, or an unmount/remount of that one block all kill
+//   it. The same mutations in ANY other block do not. Neither does appending a
+//   block, removing one, a timer ticking elsewhere, or a scrollTop write.
+//
+// Which identifies the culprit exactly: STREAMING TEXT IN THE BLOCK THE READER
+// IS SELECTING. An assistant turn arrives token by token; every delta re-renders
+// that block; the reader is selecting from it precisely because it is the answer
+// they just watched arrive. Nothing guarded that — not the round-6 scroll fix,
+// not the round-7 timer freeze (measured to be in the harmless column, which is
+// why it changed nothing). Measured end to end: selecting inside a block
+// streaming at 4 deltas/sec lost the selection immediately; deferring the deltas
+// while the gate is held kept it alive across 3s and 12 deferred deltas.
+//
+// So the guard is no longer only "do not MOVE the transcript while a selection
+// is held" — it is "do not RE-RENDER it". While the hold gate is engaged (a held
+// selection, or a pointer down, which is the touch long-press window the
+// selection check is blind to — see hooks/useLiveTick.ts) this component keeps
+// rendering the content it had when the hold began, and flushes everything at
+// once when the reader lets go. The scroll guards below are unchanged and still
+// necessary; this sits on top of them.
+//
+// Freezing the WHOLE content is broader than the measurement strictly requires —
+// only the selected block matters — but the narrow version would put a
+// selection test in every row's render, and this is one subscription in one
+// place that is a strict superset of it.
+//
+// THE TRADE, STATED PLAINLY: while you hold a highlight, the transcript stops
+// updating. Streaming text keeps arriving in the store and is applied the
+// instant you release (follow re-pins itself through the content ResizeObserver,
+// which fires on the flush). You cannot both watch a stream and hold a selection
+// in it — but today you cannot hold the selection at all, so this only trades a
+// few seconds of visible streaming for the ability to copy anything. The hold is
+// capped (MAX_HOLD_MS) so a forgotten selection can never leave the transcript
+// looking dead.
+//
 // Not virtualized; tail-first pagination keeps only the loaded window in the
 // DOM (see SessionChatPage.loadOlder).
 
@@ -125,6 +171,9 @@ import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type R
 import { ArrowDown } from 'lucide-react';
 import type { TranscriptBlock } from '../lib/transcript';
 import { TranscriptRow } from './TranscriptRow';
+import { useInputModality } from '../hooks/useInputModality';
+import { useTranscriptHold } from '../hooks/useLiveTick';
+import { registerJumpController, type JumpOutcome } from '../lib/pin-bridge';
 
 interface Props {
   blocks: TranscriptBlock[];
@@ -161,6 +210,25 @@ const LOAD_OLDER_PX = 280;
  *  number no longer has to cover a whole gesture — only the coast after one.
  *  Erring long merely honours a detach the reader did ask for. */
 const INTENT_WINDOW_MS = 1500;
+
+/** How long after a finger/pointer is released to wait before resuming follow.
+ *
+ *  Long enough for a touch selection to actually EXIST: on a long-press the
+ *  range materialises on or shortly after `touchend`, so a guard evaluated at the
+ *  instant of release samples a collapsed selection and lets the pin through (see
+ *  the round-8 note on the `up` handler). Short enough to be imperceptible — and
+ *  it delays only the resumption of follow, never a scroll the reader asked for. */
+const SELECTION_SETTLE_MS = 220;
+
+/** How many older pages a pin jump will page in while LOCATING a message that
+ *  is not in the loaded window, before it gives up honestly (pinning-design.md
+ *  §6). Matches PinSheet's displayed cap. */
+const LOCATE_PAGE_CAP = 10;
+/** How long to wait for an older page to settle into `blocks` before treating
+ *  the load as stalled/exhausted during a locate. */
+const LOCATE_SETTLE_MS = 2500;
+/** How long the jumped-to message keeps its outline. */
+const JUMP_HIGHLIGHT_MS = 2000;
 
 /** The minimal shape of a `Selection` this module needs. Declared locally so the
  *  decision below is testable without a DOM (this package has no DOM impl; see
@@ -275,7 +343,35 @@ function pinBlockedNow(el: HTMLElement | null, pointerHeld: boolean): boolean {
   return followPinBlocked(pointerHeld, sel, node => !!node && el.contains(node));
 }
 
-function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, header, footer }: Props) {
+/** Return `value`, except while `hold` is engaged — then keep returning whatever
+ *  `value` was at the moment the hold began, and flush to the current one when it
+ *  releases.
+ *
+ *  A ref written during render, deliberately: it is a pure cache of the last
+ *  un-held value, so it is idempotent under a double render, and the release is
+ *  driven by `hold` (external-store state) changing, which re-renders this
+ *  component anyway. An effect would be a frame late — and a frame late here is
+ *  one more mutation under a live selection, which is the entire bug. */
+function useHeldStill<T>(value: T, hold: boolean): T {
+  const shown = useRef(value);
+  if (!hold) shown.current = value;
+  return shown.current;
+}
+
+function Inner(props: Props) {
+  const { hasOlder, loadingOlder, onLoadOlder, pinSignal } = props;
+  // ---- HOLD STILL WHILE THE READER IS SELECTING (round 8) -------------------
+  // The reader is holding a highlight (or a finger, mid long-press). On WebKit
+  // ANY mutation near the range collapses it, so the transcript's whole rendered
+  // content — blocks, the busy flag that mounts/unmounts the running-tool line,
+  // and the header/footer nodes — is pinned to what it was when the hold began.
+  // The store keeps receiving deltas; this just stops SHOWING them until the
+  // reader lets go (see the round-8 note in the file header for the trade).
+  const hold = useTranscriptHold();
+  const { blocks, live, header, footer } = useHeldStill(
+    { blocks: props.blocks, live: props.live, header: props.header, footer: props.footer },
+    hold,
+  );
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   /** Sticky: is the reader pinned to the bottom? The single source of truth for
@@ -283,6 +379,9 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
   const followRef = useRef(true);
   const [detached, setDetached] = useState(false);
   const [newCount, setNewCount] = useState(0);
+  // Resolved ONCE here and threaded into every row, so the pin affordance's
+  // touch-vs-mouse choice costs one media subscription, not one per row.
+  const { touchAffected } = useInputModality();
 
   const last = blocks.length - 1;
   const lastId = blocks.length ? blocks[last]!.id : null;
@@ -309,6 +408,8 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
    *  Latched for the WHOLE gesture, which is the part a timestamp cannot express
    *  — a drag emits one `pointerdown` and then scrolls for as long as it lasts. */
   const pointerHeld = useRef(false);
+  /** Pending deferred re-pin after a gesture ends (see SELECTION_SETTLE_MS). */
+  const repinTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const pin = useCallback(() => {
     const v = viewportRef.current;
@@ -362,16 +463,44 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
     // the element (very common when dragging a scrollbar) would otherwise leave
     // the latch stuck on — which is safe, but it would keep honouring "the
     // reader" long after they let go.
+    // ROUND 8 — WHY THIS RE-PIN IS DELAYED, AND WHY THAT MATTERS ON A SESSION
+    // WITH NOTHING HAPPENING.
+    //
+    // This handler releases `pointerHeld` and then re-pins, relying on the
+    // SELECTION half of the guard to veto the pin if the reader just made one.
+    // That ordering assumes the selection already EXISTS the moment the finger
+    // lifts. On a touch long-press that assumption is exactly backwards: the
+    // whole reason round 7 added `pointerHeld` is that the selection is still
+    // collapsed for the duration of the press — and if it materialises on, or a
+    // beat after, `touchend`, then at this instant the guard sees a collapsed
+    // selection, waves the pin through, and `scrollTop = scrollHeight` lands
+    // straight into the gesture that was about to produce the highlight.
+    //
+    // This fires on an IDLE session, which is what makes it worth closing here:
+    // a transcript nobody has scrolled is still `followRef.current === true`, so
+    // every finger lifted anywhere in the window runs a pin. With nothing
+    // streaming there is no other mutation and no other scroll — this is the only
+    // thing the app does during a long-press on a quiet session.
+    //
+    // So the re-pin waits a beat and re-checks the guard instead of trusting a
+    // single sample taken at the worst possible moment. Cost: follow resumes
+    // ~a fifth of a second later after a gesture, which nothing can perceive (the
+    // ResizeObserver re-pins on the next delta regardless). Benefit: a selection
+    // that appears anywhere in that window vetoes the pin, as it always should
+    // have.
     const up = () => {
       pointerHeld.current = false;
       mark();
       // Gesture over. If the reader is still following (they long-pressed or
-      // tapped without scrolling away), resume the tail now that the pin guard
-      // has released — pin() is a no-op if they left a selection standing (it
-      // stays blocked by the selection half of the guard) or scrolled off the
-      // tail (followRef is already false), so this only snaps back the cases that
-      // should snap back.
-      if (followRef.current) pin();
+      // tapped without scrolling away), resume the tail — but only once the
+      // selection state has settled, and only through pin(), which re-runs the
+      // full guard at that later moment and is a no-op if a selection now stands
+      // or the reader scrolled off the tail.
+      if (repinTimer.current !== null) clearTimeout(repinTimer.current);
+      repinTimer.current = setTimeout(() => {
+        repinTimer.current = null;
+        if (followRef.current) pin();
+      }, SELECTION_SETTLE_MS);
     };
     const SCROLL_KEYS = new Set(['PageUp', 'PageDown', 'ArrowUp', 'ArrowDown', 'Home', 'End', ' ', 'Spacebar']);
     const onKey = (e: KeyboardEvent) => {
@@ -404,6 +533,10 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
       window.removeEventListener('touchcancel', up);
       window.removeEventListener('blur', up);
       window.removeEventListener('keydown', onKey);
+      if (repinTimer.current !== null) {
+        clearTimeout(repinTimer.current);
+        repinTimer.current = null;
+      }
     };
   }, [pin]);
 
@@ -685,7 +818,13 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
     // Settled layout, all three metrics from one read: the baseline the prepend
     // correction restores.
     gapFromBottom.current = Math.max(0, el.scrollHeight - el.scrollTop - el.clientHeight);
-    if (el.scrollTop < LOAD_OLDER_PX && hasOlder && !loadingOlder) onLoadOlder();
+    // Not while holding still: the page that came back would not be RENDERED
+    // (the hold pins `blocks`), so the next scroll event would see the same
+    // scrollTop with the same `blocks` and ask for another one — paging the whole
+    // history in behind a selection nobody asked to spend. The reader is at the
+    // top of the loaded window either way, so the request simply happens on the
+    // scroll event after they release.
+    if (!hold && el.scrollTop < LOAD_OLDER_PX && hasOlder && !loadingOlder) onLoadOlder();
   }
 
   function jump() {
@@ -694,6 +833,133 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
     setNewCount(0);
     pin();
   }
+
+  // ---- PIN JUMP: scroll to a pinned message, honestly ------------------------
+  //
+  // The Pins sheet (mounted in the header) hands a blockId to the FOREGROUND
+  // transcript via the bridge; this is that transcript's executor. It integrates
+  // with the scroll controller instead of fighting it (pinning-design.md §6):
+  //
+  //   1. Detach follow FIRST. A programmatic scroll carries no reader intent, so
+  //      without an explicit detach the next streaming delta's re-pin would yank
+  //      the reader straight back to the tail. Detaching by flag (not a simulated
+  //      input) keeps the round-5 invariant — nothing writes scrollTop against
+  //      the reader — because the reader asked for this scroll.
+  //   2. Assign scrollTop directly (never scrollTo({behavior:'smooth'}) — the
+  //      file's own rule), then refresh every baseline from the settled read so
+  //      onScroll cannot misread our write as input and the prepend correction
+  //      keeps a true baseline.
+  //   3. If the block is not loaded, page older history up to the cap, re-checking
+  //      after each page settles. Exact-id match only — a wrong jump is worse than
+  //      an honest "can't find it".
+  //
+  // Latest props are read through refs so the one registered controller never
+  // closes over a stale `blocks`/`hasOlder`/`onLoadOlder`.
+  const blocksRef = useRef(blocks);
+  const hasOlderRef = useRef(hasOlder);
+  const onLoadOlderRef = useRef(onLoadOlder);
+  useEffect(() => {
+    blocksRef.current = blocks;
+    hasOlderRef.current = hasOlder;
+    onLoadOlderRef.current = onLoadOlder;
+  });
+
+  useEffect(() => {
+    const isForeground = () => {
+      const v = viewportRef.current;
+      // Retained background panes are visibility:hidden with an aria-hidden
+      // ancestor (App.tsx). The foreground transcript is the one that is not.
+      return !!v && !v.closest('[aria-hidden="true"]');
+    };
+
+    const highlight = (el: HTMLElement) => {
+      el.setAttribute('data-jump-target', 'true');
+      // Inline styles, so no shared stylesheet is touched. A static outline
+      // (not an animated flash) is correct under prefers-reduced-motion and
+      // perfectly legible otherwise.
+      const prevOutline = el.style.outline;
+      const prevOffset = el.style.outlineOffset;
+      const prevRadius = el.style.borderRadius;
+      el.style.outline = '2px solid var(--accent)';
+      el.style.outlineOffset = '2px';
+      el.style.borderRadius = '6px';
+      window.setTimeout(() => {
+        el.style.outline = prevOutline;
+        el.style.outlineOffset = prevOffset;
+        el.style.borderRadius = prevRadius;
+        el.removeAttribute('data-jump-target');
+      }, JUMP_HIGHLIGHT_MS);
+    };
+
+    const scrollToBlock = (blockId: string): boolean => {
+      const v = viewportRef.current;
+      const content = contentRef.current;
+      if (!v || !content) return false;
+      let el: HTMLElement | null = null;
+      for (const node of content.querySelectorAll<HTMLElement>('[data-block-id]')) {
+        if (node.getAttribute('data-block-id') === blockId) {
+          el = node;
+          break;
+        }
+      }
+      if (!el) return false;
+      const vRect = v.getBoundingClientRect();
+      const eRect = el.getBoundingClientRect();
+      v.scrollTop = Math.max(0, v.scrollTop + (eRect.top - vRect.top) - 8);
+      // Baselines from this settled read, exactly as onScroll would set them.
+      lastScrollTop.current = v.scrollTop;
+      prevScrollHeight.current = v.scrollHeight;
+      prevClientHeight.current = v.clientHeight;
+      gapFromBottom.current = Math.max(0, v.scrollHeight - v.scrollTop - v.clientHeight);
+      highlight(el);
+      return true;
+    };
+
+    // Resolve when an older page has settled into `blocks` (first id changed or
+    // the list grew), or when the wait times out (no more history / a stall).
+    const waitForOlder = (beforeFirstId: string | null, beforeLen: number): Promise<boolean> =>
+      new Promise(resolve => {
+        const started = performance.now();
+        const tick = () => {
+          const cur = blocksRef.current;
+          if ((cur[0]?.id ?? null) !== beforeFirstId || cur.length > beforeLen) {
+            resolve(true);
+            return;
+          }
+          if (performance.now() - started > LOCATE_SETTLE_MS) {
+            resolve(false);
+            return;
+          }
+          window.setTimeout(tick, 80);
+        };
+        window.setTimeout(tick, 80);
+      });
+
+    const controller = {
+      isForeground,
+      jumpTo: async (blockId: string, onProgress?: (pages: number) => void): Promise<JumpOutcome> => {
+        if (!isForeground()) return 'no-transcript';
+        // Detach BEFORE any scroll so a streaming re-pin cannot fight us.
+        followRef.current = false;
+        setDetached(true);
+        if (scrollToBlock(blockId)) return 'jumped';
+        let pages = 0;
+        while (pages < LOCATE_PAGE_CAP && hasOlderRef.current) {
+          const beforeFirst = blocksRef.current[0]?.id ?? null;
+          const beforeLen = blocksRef.current.length;
+          onLoadOlderRef.current();
+          pages += 1;
+          onProgress?.(pages);
+          const advanced = await waitForOlder(beforeFirst, beforeLen);
+          if (!advanced) break;
+          if (scrollToBlock(blockId)) return 'jumped';
+        }
+        return 'not-found';
+      },
+    };
+    return registerJumpController(controller);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pin]);
 
   return (
     <div className="relative flex h-full min-h-0 min-w-0 flex-col">
@@ -740,6 +1006,7 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
               live={live}
               isLast={idx === last}
               previous={idx > 0 ? blocks[idx - 1] : undefined}
+              touch={touchAffected}
             />
           ))}
           {footer}
