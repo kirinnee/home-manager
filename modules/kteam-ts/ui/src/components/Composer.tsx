@@ -91,6 +91,11 @@ interface Props {
   onFiles?(files: File[]): void;
   /** Page-owned pending upload chips, placed inside the single composer surface. */
   attachmentSlot?: ReactNode;
+  /** The model/reasoning switch, placed on the phone status line as a tap target
+   *  (see ComposerRuntime). Page-owned because it needs the live SessionView and
+   *  the Terminal-tab callback; the composer only gives it a home on the meta
+   *  line. Rest-only chrome, so it rides the same `data-kb-hide` collapse. */
+  runtimeControl?: ReactNode;
   /** Ready attachments make an otherwise empty draft submittable. */
   hasAttachments?: boolean;
   /** Uploads may continue while the reader types, but sending waits for them. */
@@ -316,6 +321,7 @@ export function Composer({
   compact,
   onFiles,
   attachmentSlot,
+  runtimeControl,
   hasAttachments,
   attachmentsPending,
 }: Props) {
@@ -610,6 +616,11 @@ export function Composer({
             <span className="sr-only" aria-live="polite" aria-atomic="true">
               {statusCopy.liveText}
             </span>
+            {/* The model, now a tap target — one tap from where the reader is to
+                switch it (ComposerRuntime owns the sheet). It carries its own
+                `data-kb-hide`, so it collapses with the rest of the meta line
+                while typing. */}
+            {runtimeControl}
             {context && <CompactContext context={context} sending={sending} />}
           </div>
         </>

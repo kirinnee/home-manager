@@ -901,6 +901,29 @@ body {
     min-height: 0;
     min-width: 0;
   }
+
+  /* THE COMPOSER'S MODEL SWITCHER keeps the transcript's trick: the model
+     readout on the phone status line is a tap target, but growing it to a 44px
+     BOX would push the meta line — and the whole composer — taller, undoing the
+     reclaimed height. So the visible chip stays its type size and an invisible
+     44px hit area is laid over it. `:root .kt-…` (0,2,0) beats the `:root button`
+     floor (0,1,1). The overlay is anchored to the chip's TOP and grows DOWNWARD
+     into the dead space below the composer, never up into the dock, so it can
+     never intersect the attach/send hit areas on the row above. */
+  :root .kt-composer__runtime {
+    min-height: 0;
+    min-width: 0;
+  }
+  :root .kt-composer__runtime::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 0;
+    width: max(100%, var(--target-floor));
+    height: var(--target-floor);
+    transform: translateX(-50%);
+    z-index: 0;
+  }
 }
 
 /* ---- DENSITY RAMP ---------------------------------------------------------

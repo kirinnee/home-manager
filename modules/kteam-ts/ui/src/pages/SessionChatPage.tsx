@@ -22,6 +22,7 @@ import { api, ApiError, HAS_TOKEN } from '../lib/api';
 import { useFleet, useSession, useSessionEvents, useStore, useUiControls } from '../lib/store';
 import type { ChatRecord, KTeamEvent, SessionView } from '../types';
 import { Composer } from '../components/Composer';
+import { ComposerRuntime } from '../components/ComposerRuntime';
 import { QuestionForm } from '../components/QuestionForm';
 import { TerminalView } from '../components/TerminalView';
 import { ViewTabs } from '../components/ViewTabs';
@@ -1080,6 +1081,24 @@ export function SessionChatPage({
                   compact={compact}
                   onFiles={addFiles}
                   attachmentSlot={attachmentSlot}
+                  // Model + reasoning switch, ON the phone status line (item 2).
+                  // Page-owned because it needs the live view and the Terminal
+                  // tab; the composer just gives it a home. Desktop keeps its
+                  // ContextStrip readout and switches from the details Runtime
+                  // tab, so this is compact-only.
+                  runtimeControl={
+                    compact && view ? (
+                      <ComposerRuntime
+                        view={view}
+                        canControl={HAS_TOKEN}
+                        busy={busy}
+                        onOpenTerminal={() => {
+                          setTab('terminal');
+                          return true;
+                        }}
+                      />
+                    ) : undefined
+                  }
                   hasAttachments={readyAttachments.length > 0}
                   attachmentsPending={hasUploadingAttachments}
                 />
