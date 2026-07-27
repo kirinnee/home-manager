@@ -35,6 +35,11 @@ export interface WardenConfig {
   /** After an assigned warden finishes for a session, don't respawn one for
    *  that same session within this cooldown (minutes). */
   assignedCooldownMinutes: number;
+  /** When a warden CLEARS a session (LEAVE verdict), bless it for this many
+   *  minutes: the sweep skips re-investigating the SAME flags until the blessing
+   *  lapses, so a healthy-but-sus session is not re-judged by a fresh warden
+   *  session every interval. Narrow (per-flag) and dropped on any status change. */
+  blessMinutes: number;
 }
 
 export interface ScratchConfig {
@@ -88,10 +93,16 @@ export interface DaemonConfig {
 
 export const defaultWardenConfig = (): WardenConfig => ({
   enabled: false,
-  // Wardens JUDGE sus sessions (A6): understand the task, deep-dive the
-  // process, verdict leave/nudge/resume/kill — judgment work that needs an
-  // Opus-class account. The lead sets the live wrapper at ship time.
-  wrapper: 'claude-auto-atomi',
+  // Wardens JUDGE sus sessions (A6): understand the task, deep-dive the process,
+  // verdict leave/nudge/resume/kill. That verdict work is triage — the mechanical
+  // tier per CLAUDE.md's routing — so wardens default to GLM-5.2 to save tokens
+  // rather than burning an Opus-class session per sweep.
+  //
+  // GLM caveat: this account resolves the `opus`/`fable` aliases to `glm-5.2` via
+  // its own env; leave `model` UNSET so KTEAM_MODEL=opus resolves correctly. Never
+  // pin `model` to a raw claude id here — a `claude-*`/`[1m]` suffix 400s the z.ai
+  // API (kfleet/config.yaml documents this).
+  wrapper: 'claude-auto-glm52a',
   intervalMinutes: 5,
   unattendedMinutes: 30,
   minSpawnGapMinutes: 15,
@@ -99,6 +110,9 @@ export const defaultWardenConfig = (): WardenConfig => ({
   susSubprocessSeconds: 900,
   maxAssignedWardens: 1,
   assignedCooldownMinutes: 30,
+  // A LEAVE verdict blesses the session for 15 minutes (per-flag, dropped on any
+  // status change) so the next sweep skips it instead of re-judging it.
+  blessMinutes: 15,
 });
 
 export const defaultScratchConfig = (): ScratchConfig => ({

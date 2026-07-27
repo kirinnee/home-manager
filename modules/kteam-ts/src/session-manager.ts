@@ -33,7 +33,14 @@ import {
   type WrapperInfo,
 } from './fleet-inventory';
 import { currentActor } from './actor-context';
-import { parseWardenReports, type WardenVerdict } from './warden-verdicts';
+import { classifyVerdict, parseWardenReports, type WardenVerdict } from './warden-verdicts';
+import {
+  blessingTtlMs,
+  isAnomalyBlessed,
+  reconcileBlessings,
+  recordBlessing,
+  type BlessingStore,
+} from './warden-bless';
 import {
   discoverCodexSession,
   codexSessionIds,
@@ -65,6 +72,7 @@ import {
   WAITING_BACKSTOP_MS,
   WARDEN_LABEL,
   type WardenAnomaly,
+  type WardenAnomalyKind,
   type WardenSessionView,
 } from './warden-detect';
 import { rankFailoverCandidates, selectFailoverCandidate } from './failover';
@@ -201,7 +209,21 @@ interface WardenRuntimeState {
    *  sessions under an active assignment. `capability` is the unguessable
    *  secret minted at spawn and exported only into that warden's pane â
    *  authorization compares capabilities, never client-chosen identities. */
-  assignments?: Record<string, { wardenId: string; spawnedAt: string; capability: string }>;
+  assignments?: Record<
+    string,
+    {
+      wardenId: string;
+      spawnedAt: string;
+      capability: string;
+      /** The flag classes this warden was assigned to judge — recorded so a LEAVE
+       *  verdict can bless exactly (and only) those flags. Absent on records
+       *  written before blessings shipped (treated as "nothing to bless"). */
+      kinds?: WardenAnomalyKind[];
+      /** The report file this warden writes its verdict to — read at reconcile
+       *  time to decide whether the verdict was LEAVE. */
+      reportPath?: string;
+    }
+  >;
   /** Per-target cooldown after an assigned warden finished (verdict given):
    *  no respawn for the same session within assignedCooldownMinutes. */
   assignedCooldowns?: Record<string, string>;
@@ -211,6 +233,11 @@ interface WardenRuntimeState {
    *  candidates and drops any that have since recovered. Full anomaly records
    *  (not just ids) so a drained target still has a prompt without re-detection. */
   assignedQueue?: WardenAnomaly[];
+  /** Active warden blessings, keyed by target session id. A LEAVE verdict adds
+   *  one with a TTL; the sweep skips a blessed session's cleared flags until it
+   *  lapses. Persisted so a kteamd restart does not drop every blessing and
+   *  re-investigate the whole fleet at once. */
+  blessings?: BlessingStore;
 }
 interface WardenSweep {
   at: string;
@@ -6030,6 +6057,18 @@ export class SessionManager implements KTeamService {
       this.wardenState.recoveryGeneration = (this.wardenState.recoveryGeneration ?? 0) + 1;
     }
     this.wardenState.lastFingerprint = result.fingerprint;
+    // Warden blessings: prune BEFORE spawning. A LEAVE verdict grants a session a
+    // short TTL during which the sweep skips its cleared flags (recorded in
+    // spawnAssignedWardens). Here we drop blessings that expired, whose session
+    // changed status, or whose session vanished — a blessing must never outlive
+    // the situation it cleared, so a session that later breaks is caught. The
+    // early revocation is journalled so a session that STOPS being skipped is
+    // explicable rather than mysterious.
+    const blessStatusById = new Map(sessions.map(view => [view.config.id, view.state.status]));
+    const blessPrune = reconcileBlessings(this.wardenState.blessings ?? {}, blessStatusById, Date.now());
+    this.wardenState.blessings = blessPrune.store;
+    for (const revokedId of blessPrune.revoked)
+      this.emitTransient('fleet.warden_bless_revoked', { sessionId: revokedId });
     await mkdir(this.paths.wardenDir, { recursive: true, mode: 0o700 });
     await atomicJson(this.paths.wardenAnomalies, {
       at,
@@ -6084,15 +6123,56 @@ export class SessionManager implements KTeamService {
     // start the cooldown clock for the target at that moment.
     const assignments = { ...(this.wardenState.assignments ?? {}) };
     const cooldowns = { ...(this.wardenState.assignedCooldowns ?? {}) };
+    let blessings: BlessingStore = { ...(this.wardenState.blessings ?? {}) };
+    const blessTtlMs = blessingTtlMs(warden.blessMinutes);
     for (const [targetId, record] of Object.entries(assignments)) {
       const wardenView = byId.get(record.wardenId);
       if (!wardenView || protectedStatuses.includes(wardenView.state.status)) {
+        // The assigned warden finished. If its verdict was LEAVE (session healthy
+        // and progressing), bless the target against the exact FLAGS it judged, so
+        // the next sweep skips it until the TTL lapses instead of spending another
+        // warden session to reach the same verdict. Non-LEAVE verdicts never bless.
+        // The blessing is dropped early if the session later changes state (see
+        // reconcileBlessings in sweepOnce).
+        const target = byId.get(targetId);
+        const kinds = record.kinds ?? [];
+        if (record.reportPath && target && kinds.length > 0) {
+          const content = await readFile(record.reportPath, 'utf8').catch(() => '');
+          if (content && classifyVerdict(content) === 'cleared') {
+            blessings = recordBlessing(
+              blessings,
+              { sessionId: targetId, kinds, status: target.state.status, wardenId: record.wardenId },
+              Date.now(),
+              blessTtlMs,
+            );
+            const granted = blessings[targetId];
+            if (granted)
+              this.emitTransient('fleet.warden_blessed', {
+                targetId,
+                wardenId: record.wardenId,
+                kinds,
+                expiresAt: granted.expiresAt,
+              });
+          }
+        }
         delete assignments[targetId];
         cooldowns[targetId] = now();
       }
     }
+    this.wardenState.blessings = blessings;
     const cooldownMs = Math.max(0, warden.assignedCooldownMinutes * 60_000);
     const nowMs = Date.now();
+
+    // A blessed session must not even become a candidate, so it never occupies the
+    // single warden slot (this filter runs BEFORE the concurrency gate). Narrow:
+    // only the exact flags the warden cleared, only while the session holds the
+    // status it was cleared in — a new flag class or a status change still spawns.
+    const blessNowMs = Date.now();
+    const candidates = susAnomalies.filter(anomaly => {
+      const target = byId.get(anomaly.sessionId);
+      if (!target) return true;
+      return !isAnomalyBlessed(blessings, anomaly, target.state.status, blessNowMs);
+    });
 
     // A target is worth a warden only if it is still present, not protected,
     // not already under a live warden, and not inside its post-assignment
@@ -6121,12 +6201,12 @@ export class SessionManager implements KTeamService {
     // Fresh anomalies supersede queued copies of the same target (more current).
     const anomalyById = new Map<string, WardenAnomaly>();
     for (const anomaly of queuedAnomalies) anomalyById.set(anomaly.sessionId, anomaly);
-    for (const anomaly of susAnomalies) anomalyById.set(anomaly.sessionId, anomaly);
+    for (const anomaly of candidates) anomalyById.set(anomaly.sessionId, anomaly);
 
     const decision = decideAssignedWardens({
       maxConcurrent: warden.maxAssignedWardens,
       live,
-      candidates: susAnomalies.map(item => item.sessionId),
+      candidates: candidates.map(item => item.sessionId),
       queued: queuedAnomalies.map(item => item.sessionId),
       isStillSuspect,
     });
@@ -6155,7 +6235,14 @@ export class SessionManager implements KTeamService {
           cwd: this.paths.home,
           stopCapability: capability,
         });
-        assignments[targetId] = { wardenId: view.config.id, spawnedAt: at, capability };
+        const assignedKinds = [...new Set(susAnomalies.filter(a => a.sessionId === targetId).map(a => a.kind))];
+        assignments[targetId] = {
+          wardenId: view.config.id,
+          spawnedAt: at,
+          capability,
+          kinds: assignedKinds,
+          reportPath,
+        };
         spawned.push(view.config.id);
         this.emitTransient('fleet.warden_assigned', {
           wardenId: view.config.id,

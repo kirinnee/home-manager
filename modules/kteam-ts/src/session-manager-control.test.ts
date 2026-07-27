@@ -168,7 +168,13 @@ describe('assigned-warden capacity (A6 fix round)', () => {
     const started: string[] = [];
     const manager = bareManager();
     manager.options = {
-      warden: { enabled: true, wrapper: 'claude-auto-x', maxAssignedWardens, assignedCooldownMinutes: 30 },
+      warden: {
+        enabled: true,
+        wrapper: 'claude-auto-x',
+        maxAssignedWardens,
+        assignedCooldownMinutes: 30,
+        blessMinutes: 15,
+      },
     };
     manager.wardenState = {};
     manager.paths = { wardenReports: '/tmp/kteam-capacity-test-reports' };
