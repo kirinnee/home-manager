@@ -70,7 +70,17 @@ export function buildManifest(themeColor: string, icons: IconEntry[]): Record<st
     start_url: '/',
     scope: '/',
     display: 'standalone',
-    orientation: 'any',
+    // PORTRAIT ONLY. Every layout decision in this app is portrait-first — the
+    // visualViewport keyboard handling, the bottom sheets, the composer's
+    // reclaimed height, the stacked control columns — and none of it has ever
+    // been measured in landscape. `any` invited a rotation that silently exits
+    // the only geometry that was designed and tested.
+    //
+    // `portrait` rather than `portrait-primary` so an upside-down tablet still
+    // works; it constrains the AXIS, not which way up. It binds only to the
+    // INSTALLED app: a browser tab ignores manifest orientation, and desktop
+    // installs are unaffected because the constraint is meaningless there.
+    orientation: 'portrait',
     theme_color: themeColor,
     background_color: themeColor,
     icons: manifestIcons(icons),
