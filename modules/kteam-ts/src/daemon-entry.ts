@@ -5,6 +5,7 @@ import { startApiServer } from './api-server';
 import { EXIT_ALREADY_RUNNING, bindWithRetry, probeExistingDaemon } from './daemon-boot';
 import { ensureDaemonToken, ensureWardenToken, loadDaemonConfig } from './daemon-config';
 import { DaemonService } from './daemon-service';
+import { LearningManager } from './learning';
 import { createPaths } from './paths';
 import { SessionManager } from './session-manager';
 import { createSttService } from './stt-service';
@@ -70,13 +71,23 @@ const manager = await SessionManager.create(paths, {
     return true;
   },
 });
+const learning = new LearningManager(paths, config.learning, manager);
 // One service and one idempotency controller for the daemon lifetime.
 const taskApi = new TaskApi(new TaskService(paths, manager));
 const stt = createSttService({ paths });
 // Retry EADDRINUSE: a dying predecessor (service-manager restart) can hold the
 // port for seconds while it drains; give it up to 30 s before failing.
 const server = await bindWithRetry(() =>
-  startApiServer({ host: config.host, port: config.port, token, wardenToken, service: manager, stt, tasks: taskApi }),
+  startApiServer({
+    host: config.host,
+    port: config.port,
+    token,
+    wardenToken,
+    service: manager,
+    learning,
+    stt,
+    tasks: taskApi,
+  }),
 ).catch(async error => {
   await Promise.allSettled([manager.close(), stt.close()]);
   throw error;
@@ -92,6 +103,7 @@ const stop = async (reason: string) => {
   stopping = true;
   console.log(`kteamd stopping (${reason})`);
   server.stop(true);
+  learning.stop();
   // BOUNDED drain: monitor loops await tmux and transcript I/O that can hang,
   // and a shutdown that outlives the service manager's timeout is SIGKILLed
   // mid-write. Give the drain a deadline and exit cleanly either way.
@@ -122,6 +134,7 @@ process.on('SIGTERM', () => {
 // must never be silent (2026-07-23 silent-partial-boot incident).
 try {
   await manager.bootstrap();
+  await learning.start().catch(error => console.error(`kteamd: learning start failed: ${String(error)}`));
   const problems = manager.bootstrapErrors.length;
   console.log(
     problems === 0

@@ -25,6 +25,7 @@ import { SessionsListPage } from './pages/SessionsListPage';
 import { NewSessionPage } from './pages/NewSessionPage';
 import { SettingsPage, SettingsSheet } from './pages/SettingsPage';
 import { WardenPage } from './pages/WardenPage';
+import { LearningPage } from './pages/LearningPage';
 import { ChunkErrorBoundary } from './components/ChunkErrorBoundary';
 import { cn } from './lib/utils';
 import { useAppViewport } from './hooks/useAppViewport';
@@ -178,7 +179,7 @@ export function App() {
   const layout = useLayoutMode();
   const compactSession = Boolean(route.sessionId) && layout === 'drawer';
   const settingsAsSheet = Boolean(route.isSettings) && layout === 'drawer';
-  const fullWidthDestination = Boolean(route.isSettings || route.isWarden || route.isTasks);
+  const fullWidthDestination = Boolean(route.isSettings || route.isWarden || route.isTasks || route.isLearning);
   const store = useStore();
   const chrome = useChrome();
 
@@ -268,9 +269,11 @@ export function App() {
         ? [{ href: '/', label: 'Sessions' }, { label: 'Warden' }]
         : route.isTasks
           ? [{ href: '/', label: 'Sessions' }, { label: 'Tasks' }]
-          : route.sessionId
-            ? [{ href: '/', label: 'Sessions' }, { label: route.sessionId }]
-            : [{ label: 'Sessions' }];
+          : route.isLearning
+            ? [{ href: '/', label: 'Sessions' }, { label: 'Learning' }]
+            : route.sessionId
+              ? [{ href: '/', label: 'Sessions' }, { label: route.sessionId }]
+              : [{ label: 'Sessions' }];
 
   // ONE SCROLL REGION (round 4). The shell is exactly the viewport — `100dvh`,
   // so it tracks mobile browser chrome collapsing instead of overflowing behind
@@ -304,6 +307,7 @@ export function App() {
           settingsActive={route.isSettings}
           wardenActive={route.isWarden}
           tasksActive={route.isTasks}
+          learningActive={route.isLearning}
           showTheme={!route.isSettings}
         />
       )}
@@ -347,6 +351,7 @@ export function App() {
               !route.isNew &&
               !route.isWarden &&
               !route.isTasks &&
+              !route.isLearning &&
               (!route.isSettings || settingsAsSheet)
             }
             onChunkError={raiseRecovery}
@@ -392,6 +397,11 @@ export function App() {
               <Suspense fallback={<TasksChunkFallback />}>
                 <TasksPage fetchTasks={api.listTasks} fetchTask={api.getTask} />
               </Suspense>
+            </SafePane>
+          )}
+          {route.isLearning && (
+            <SafePane active onChunkError={raiseRecovery} onReload={applyUpdate}>
+              <LearningPage />
             </SafePane>
           )}
         </main>

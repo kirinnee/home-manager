@@ -2,6 +2,7 @@ import { chmod, mkdir, readFile, writeFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import type { KTeamPaths } from './paths';
 import { atomicJson, readJson } from './io';
+import { defaultLearningConfig, type LearningConfig } from './learning-types';
 
 export interface WardenConfig {
   /** Deterministic detection always runs; this only gates LLM escalation. */
@@ -56,32 +57,6 @@ export interface RetentionConfig {
   perSweep: number;
 }
 
-/** Learning subsystem (mines terminal sessions into proposed fleet rules).
- *  Ships OFF by default: it spawns LLM sessions and, once accepted rules are
- *  applied, mutates the fleet's own instructions — opt-in until vetted. APPLY
- *  IS ALWAYS MANUAL in phase 1 regardless of this flag (the daemon only ever
- *  writes a patch file the human applies by hand). */
-export interface LearningConfig {
-  /** Master switch: gates the periodic scan + LLM miner spawning. */
-  enabled: boolean;
-  /** Auto-mode wrapper the miner sessions run under (judgment work — Opus-class,
-   *  per the routing table). */
-  wrapper: string;
-  /** Optional model override for miner starts. */
-  model?: string;
-  /** Scan cadence, minutes. */
-  intervalMinutes: number;
-  /** Sessions per miner session (batch). */
-  batchSize: number;
-  /** Max miner sessions spawned per run (rate limit / cost ceiling). */
-  maxMinersPerRun: number;
-  /** Max sessions scanned per run — bounds a backfill so it catches up rate-
-   *  limited rather than drowning the fleet. */
-  maxSessionsPerRun: number;
-  /** Minimum gap between miner-spawn runs (rate limit). */
-  minSpawnGapMinutes: number;
-}
-
 export interface DaemonConfig {
   host: string;
   port: number;
@@ -134,18 +109,6 @@ export const defaultRetentionConfig = (): RetentionConfig => ({
   enabled: false,
   retentionDays: 14,
   perSweep: 50,
-});
-
-export const defaultLearningConfig = (): LearningConfig => ({
-  // OFF by default — opt-in until vetted (it spawns LLM sessions). Apply stays
-  // manual even when enabled.
-  enabled: false,
-  wrapper: 'claude-auto-atomi',
-  intervalMinutes: 720, // twice a day — mining is a slow background chore
-  batchSize: 25,
-  maxMinersPerRun: 4,
-  maxSessionsPerRun: 200,
-  minSpawnGapMinutes: 180,
 });
 
 export const defaultDaemonConfig = (): DaemonConfig => ({
