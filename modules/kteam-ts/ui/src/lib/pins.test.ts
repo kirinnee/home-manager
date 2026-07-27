@@ -14,6 +14,7 @@ import {
   parseGithubPr,
   parsePin,
   parsePinStore,
+  parseServerPins,
   removePin,
   sessionPins,
   toPreview,
@@ -102,7 +103,46 @@ describe('parsePinStore — defensive', () => {
   });
 });
 
+describe('parseServerPins (daemon snapshot → clean list)', () => {
+  test('reads a snapshot body, keeps provenance, and drops malformed pins', () => {
+    const body = {
+      v: 1,
+      sessionId: 's',
+      updatedAt: 'now',
+      pins: [
+        { id: 'a', kind: 'note', text: 'human note', at: 1 },
+        { id: 'b', kind: 'note', text: 'agent note', at: 2, by: 'agent', createdBy: 'sid', createdByName: 'zoe' },
+        { id: 'bad', kind: 'note' }, // no at → dropped
+      ],
+    };
+    const pins = parseServerPins(body);
+    expect(pins.map(p => p.id)).toEqual(['a', 'b']);
+    expect(pins[0]!.by).toBeUndefined(); // absent ⇒ treated as human at render
+    expect(pins[1]).toMatchObject({ by: 'agent', createdBy: 'sid', createdByName: 'zoe' });
+  });
+  test('garbage or a missing pins array degrades to empty', () => {
+    expect(parseServerPins(null)).toEqual([]);
+    expect(parseServerPins({})).toEqual([]);
+    expect(parseServerPins({ pins: 'nope' })).toEqual([]);
+  });
+  test('de-duplicates by id', () => {
+    const pins = parseServerPins({
+      pins: [
+        { id: 'x', kind: 'note', text: 'a', at: 1 },
+        { id: 'x', kind: 'note', text: 'b', at: 2 },
+      ],
+    });
+    expect(pins).toHaveLength(1);
+  });
+});
+
 describe('parsePin', () => {
+  test('reads optional provenance', () => {
+    const p = parsePin({ id: 'a', kind: 'note', text: 'hi', at: 1, by: 'agent', createdBy: 's', createdByName: 'zoe' });
+    expect(p).toMatchObject({ by: 'agent', createdBy: 's', createdByName: 'zoe' });
+    const q = parsePin({ id: 'a', kind: 'note', text: 'hi', at: 1, by: 'bogus' });
+    expect((q as NotePin).by).toBeUndefined();
+  });
   test('rejects non-objects and unknown kinds', () => {
     expect(parsePin(null)).toBeNull();
     expect(parsePin('x')).toBeNull();

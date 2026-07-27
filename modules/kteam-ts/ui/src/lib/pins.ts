@@ -1,35 +1,35 @@
-// Per-session PINS — the SOLE owner of the `kteam-pins-v1` localStorage key.
+// Per-session PINS — now DAEMON-BACKED (phase 2).
 //
-// This codebase keeps ONE owner per storage key (`kteam-theme`,
-// `kteam-ui-controls-v1`, `kteam-drafts-v1`); this is pins' key and nothing else
-// writes it. The discipline is copied verbatim from drafts.ts, for the same
-// reasons:
-//   - This fleet has 1000+ sessions. An unbounded map eventually throws
-//     QuotaExceededError, so the store is LRU-capped by last-touched (`at`) over
-//     sessions, and each session's pin list is hard-capped.
-//   - A malformed payload must degrade to "no pins", never throw at import time,
-//     so parsing is fully defensive, field by field.
-//   - A write failure must NEVER surface to the reader: every write is wrapped,
-//     and a quota failure retries once against a hard-pruned store before giving
-//     up silently.
-//   - It is VERSIONED. A future shape change bumps the version and the old
-//     payload is discarded (a clean migration point) rather than crashing on a
-//     shape it does not understand. THIS IS ALSO THE PHASE-2 UPGRADE SEAM: pin
-//     ids are UUIDs and timestamps are epoch ms, so the daemon-backed store can
-//     one-time import these and then bump the key.
+// Phase 1 kept pins in this file's `kteam-pins-v1` localStorage key. That was
+// per-browser (pins did not follow the reader between phone and desktop) and no
+// AGENT could reach it. Phase 2 moves the source of truth to the daemon
+// (src/pins-*.ts, `GET`/`POST /v1/sessions/:id/pins`) so:
+//   - an agent can pin via `kteam pin`, and its pins are visibly tagged as
+//     agent-made (provenance) so the reader can always tell who put a pin there;
+//   - pins follow the reader across devices, converging live over the events
+//     stream (a `pins.updated` event carrying the whole snapshot).
 //
-// TWO PIN KINDS, ONE STORE (see pinning-design.md §1): a `message` pin
-// references a transcript block by its content-derived id and carries a stored
-// PREVIEW so it stays legible even when its target block is not in the loaded
-// window; a `note` pin is free text (a PR link, a status-report link) the reader
-// wants at hand. Both share the same lifetime (per session) and the same
-// surface (the Pins sheet), so they share the same key and retention rules.
+// This module keeps the SAME external-store contract the UI already consumes
+// (`pinsStore.getSnapshot()` / `.subscribe()` + the mutation method names), so
+// TranscriptRow, SessionHeader, PinSheet and pin-selection are unchanged. The
+// in-memory `PinStore` shape is now a per-session CACHE hydrated from the daemon;
+// mutations apply optimistically and then reconcile against the server snapshot
+// (the returned body, and the live `pins.updated` event). The old pure helpers
+// (parse/caps/toggle/add) still power the optimistic cache updates.
 //
-// PHASE 1 IS PER-BROWSER. localStorage does not follow the reader from phone to
-// desktop; the sheet says so plainly (PinSheet.tsx). Daemon-backed cross-device
-// sync is phase 2 and is deliberately NOT built here.
+// DEGRADATION: when the daemon is unreachable a session's status is `error`, so
+// the sheet can say "can't reach pins" rather than render an empty list that
+// looks like "you have no pins". MIGRATION: the reader's phase-1 localStorage
+// pins are imported into the daemon once, on first load of a session that has
+// none server-side (see `maybeMigrate`).
 
+import { TOKEN } from './api';
+
+/** Phase-1 localStorage key — retained READ-ONLY as the migration source. */
 export const PINS_KEY = 'kteam-pins-v1';
+/** Records which sessions have already had their localStorage pins imported, so
+ *  the one-time migration never re-runs. */
+const MIGRATED_KEY = 'kteam-pins-migrated-v1';
 export const PINS_VERSION = 1;
 /** LRU cap: at most this many sessions retain pins, newest-touched kept. */
 export const MAX_PIN_SESSIONS = 50;
@@ -48,7 +48,23 @@ export const PREVIEW_LEN = 200;
  *  without importing it, so this pure module stays free of the transcript. */
 export type PinBlockKind = 'user' | 'assistant' | 'thinking' | 'tools' | 'system' | 'notice';
 
-export interface MessagePin {
+/** Who created a pin. Stamped by the daemon from the resolved actor, never by a
+ *  client. A pin with no `by` (a legacy localStorage pin, or an optimistic local
+ *  pin awaiting the server round-trip) reads as the human — the safe default, so
+ *  an agent attribution is never invented. */
+export type PinBy = 'human' | 'agent';
+
+/** Provenance shared by both pin kinds. All optional so legacy/local pins parse
+ *  unchanged; `by` absent ⇒ human. */
+export interface PinProvenance {
+  by?: PinBy;
+  /** The authoring agent's session id (attribution only), else null/absent. */
+  createdBy?: string | null;
+  /** The authoring agent's teammate callsign when known. */
+  createdByName?: string | null;
+}
+
+export interface MessagePin extends PinProvenance {
   id: string;
   kind: 'message';
   /** TranscriptBlock.id — content-derived, stable across re-reads for Claude
@@ -66,7 +82,7 @@ export interface MessagePin {
   at: number;
 }
 
-export interface NotePin {
+export interface NotePin extends PinProvenance {
   id: string;
   kind: 'note';
   /** <= MAX_NOTE_LEN; URLs auto-linked at render. */
@@ -109,6 +125,14 @@ function isBlockKind(v: unknown): v is PinBlockKind {
 
 /** Defensive per-field parse of ONE pin. Returns null for anything malformed,
  *  so a single bad pin degrades to "that pin is gone", never to a throw. */
+function parseProvenance(p: Record<string, unknown>): PinProvenance {
+  const prov: PinProvenance = {};
+  if (p['by'] === 'agent' || p['by'] === 'human') prov.by = p['by'];
+  if (typeof p['createdBy'] === 'string' && p['createdBy']) prov.createdBy = p['createdBy'];
+  if (typeof p['createdByName'] === 'string' && p['createdByName']) prov.createdByName = p['createdByName'];
+  return prov;
+}
+
 export function parsePin(value: unknown): Pin | null {
   if (!value || typeof value !== 'object') return null;
   const p = value as Record<string, unknown>;
@@ -116,6 +140,7 @@ export function parsePin(value: unknown): Pin | null {
   const at = p['at'];
   if (typeof id !== 'string' || !id) return null;
   if (typeof at !== 'number' || !Number.isFinite(at)) return null;
+  const prov = parseProvenance(p);
   if (p['kind'] === 'message') {
     const blockId = p['blockId'];
     const preview = p['preview'];
@@ -131,6 +156,7 @@ export function parsePin(value: unknown): Pin | null {
       blockKind,
       preview,
       at,
+      ...prov,
       ...(typeof ts === 'string' && ts ? { ts } : {}),
     };
   }
@@ -149,7 +175,7 @@ export function parsePin(value: unknown): Pin | null {
       const blockId = (src as Record<string, unknown>)['blockId'];
       if (typeof blockId === 'string' && blockId) source = { blockId };
     }
-    return { id, kind: 'note', text, at, ...(source ? { source } : {}) };
+    return { id, kind: 'note', text, at, ...prov, ...(source ? { source } : {}) };
   }
   return null;
 }
@@ -363,12 +389,14 @@ export function parseGithubPr(text: string): GithubPr | null {
   return { org, repo, number: n, url: trimmed };
 }
 
-// ---- persistence ------------------------------------------------------------
+// ---- legacy localStorage (migration source only) ----------------------------
 
 function hasStorage(): boolean {
   return typeof localStorage !== 'undefined';
 }
 
+/** Read the phase-1 localStorage store. Retained ONLY so its pins can be imported
+ *  into the daemon once (see `maybeMigrate`); nothing writes this key any more. */
 export function readStore(): PinStore {
   if (!hasStorage()) return emptyStore();
   try {
@@ -378,77 +406,215 @@ export function readStore(): PinStore {
   }
 }
 
-/** Write, swallowing every failure. A full quota retries once against a
- *  hard-pruned store; if even that fails we give up quietly — a failed pin save
- *  must never surface to, or block, the reader. */
-function writeStore(store: PinStore): void {
+function migratedSessions(): Set<string> {
+  if (!hasStorage()) return new Set();
+  try {
+    const raw = JSON.parse(localStorage.getItem(MIGRATED_KEY) ?? '[]');
+    return new Set(Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string') : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function markMigrated(sessionId: string): void {
   if (!hasStorage()) return;
   try {
-    localStorage.setItem(PINS_KEY, JSON.stringify(store));
+    const set = migratedSessions();
+    set.add(sessionId);
+    localStorage.setItem(MIGRATED_KEY, JSON.stringify([...set]));
   } catch {
-    try {
-      const pruned = evictLru(store, Math.min(10, MAX_PIN_SESSIONS));
-      localStorage.setItem(PINS_KEY, JSON.stringify(pruned));
-    } catch {
-      /* out of room and out of options: drop the write rather than throw */
+    /* a full quota just means we may re-attempt the import; it dedupes server-side */
+  }
+}
+
+// ---- server transport -------------------------------------------------------
+
+/** The whole board for one session, as the daemon returns it. */
+export interface PinSnapshot {
+  v: number;
+  sessionId: string;
+  pins: Pin[];
+  updatedAt: string;
+}
+
+function pinPath(sessionId: string): string {
+  return `/v1/sessions/${encodeURIComponent(sessionId)}/pins`;
+}
+
+/** A minimal authenticated fetch to the pins routes. Kept here (not in lib/api.ts)
+ *  so the whole pins feature is self-contained. Mints an `x-kteam-request-id` per
+ *  mutation so a retried POST adds at most one pin (daemon dedupe). */
+async function pinFetch(path: string, init?: RequestInit): Promise<unknown> {
+  const headers = new Headers(init?.headers);
+  if (TOKEN) headers.set('authorization', `Bearer ${TOKEN}`);
+  const method = (init?.method ?? 'GET').toUpperCase();
+  if (init?.body && !headers.has('content-type')) headers.set('content-type', 'application/json');
+  if (method !== 'GET' && !headers.has('x-kteam-request-id')) headers.set('x-kteam-request-id', uuid());
+  const res = await fetch(path, { ...init, headers });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+/** Parse a daemon snapshot into a clean, de-duplicated pin list. Defensive: a
+ *  malformed body degrades to an empty list, never a throw. */
+export function parseServerPins(value: unknown): Pin[] {
+  if (!value || typeof value !== 'object') return [];
+  const list = (value as Record<string, unknown>)['pins'];
+  if (!Array.isArray(list)) return [];
+  const pins: Pin[] = [];
+  const seen = new Set<string>();
+  for (const raw of list) {
+    const pin = parsePin(raw);
+    if (pin && !seen.has(pin.id)) {
+      seen.add(pin.id);
+      pins.push(pin);
     }
   }
+  return pins;
 }
 
 // ---- subscribable singleton -------------------------------------------------
 //
 // The hook layer (hooks/usePins.ts) reads through this via useSyncExternalStore.
-// It keeps an in-memory snapshot so React gets a stable reference between
-// mutations, listens to the cross-tab `storage` event, and notifies local
-// subscribers on every write. Writes are last-write-wins across tabs, which is
-// acceptable at this scale (pinning-design.md §3).
+// It keeps an in-memory per-session CACHE (the same `PinStore` shape phase 1
+// used) so React gets a stable reference between mutations and the synchronous
+// readers (TranscriptRow's `isMessagePinned`) keep working. The source of truth
+// is the daemon: `hydrate()` GETs a session on demand, `applyServerSnapshot()`
+// applies a GET/POST body or a live `pins.updated` event, and every mutation
+// optimistically updates the cache, POSTs, then reconciles against the server's
+// returned snapshot.
 
 type Listener = () => void;
 
-class PinsStore {
-  private snapshot: PinStore = readStore();
-  private listeners = new Set<Listener>();
-  private bound = false;
+/** Per-session degradation state, surfaced so the sheet can be honest about a
+ *  daemon it cannot reach rather than showing an empty list. */
+export type PinSessionStatus = 'idle' | 'loading' | 'ready' | 'error';
 
-  private ensureBound(): void {
-    if (this.bound || typeof window === 'undefined') return;
-    this.bound = true;
-    window.addEventListener('storage', event => {
-      if (event.key !== null && event.key !== PINS_KEY) return;
-      this.snapshot = readStore();
-      this.emit();
-    });
-  }
+class PinsStore {
+  // Cache starts EMPTY (not from localStorage): the daemon is the source of
+  // truth now, and localStorage is imported through the migration path only.
+  private snapshot: PinStore = emptyStore();
+  private listeners = new Set<Listener>();
+  private statuses = new Map<string, PinSessionStatus>();
+  private inflight = new Map<string, Promise<void>>();
 
   subscribe = (listener: Listener): (() => void) => {
-    this.ensureBound();
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   };
 
   getSnapshot = (): PinStore => this.snapshot;
 
+  status(sessionId: string): PinSessionStatus {
+    return this.statuses.get(sessionId) ?? 'idle';
+  }
+
   private emit(): void {
     for (const l of this.listeners) l();
   }
 
-  /** Apply a pure transform, persist, and notify — the one write path. */
-  private commit(next: PinStore): void {
-    if (next === this.snapshot) return;
-    this.snapshot = next;
-    writeStore(next);
+  private setStatus(sessionId: string, status: PinSessionStatus): void {
+    if (this.statuses.get(sessionId) === status) return;
+    this.statuses.set(sessionId, status);
     this.emit();
   }
 
+  private commit(next: PinStore): void {
+    if (next === this.snapshot) return;
+    this.snapshot = next;
+    this.emit();
+  }
+
+  /** Replace one session's pins from an authoritative server snapshot (a GET/POST
+   *  body or a live `pins.updated` event). The cache order IS the daemon order. */
+  applyServerSnapshot(sessionId: string, value: unknown): void {
+    const pins = parseServerPins(value);
+    const sessions = { ...this.snapshot.sessions };
+    if (pins.length === 0) delete sessions[sessionId];
+    else sessions[sessionId] = { pins: pins.slice(0, MAX_PINS_PER_SESSION), at: Date.now() };
+    this.commit(evictLru({ v: PINS_VERSION, sessions }));
+  }
+
+  /** Fetch a session's pins from the daemon. Idempotent: a second call while the
+   *  first is in flight (or after it succeeded) is a no-op. On failure the status
+   *  becomes `error` so the sheet degrades honestly. */
+  hydrate(sessionId: string): Promise<void> {
+    if (!sessionId) return Promise.resolve();
+    const existing = this.inflight.get(sessionId);
+    if (existing) return existing;
+    if (this.statuses.get(sessionId) === 'ready') return Promise.resolve();
+    this.setStatus(sessionId, 'loading');
+    const run = (async () => {
+      try {
+        const body = await pinFetch(pinPath(sessionId));
+        this.applyServerSnapshot(sessionId, body);
+        this.setStatus(sessionId, 'ready');
+        await this.maybeMigrate(sessionId, parseServerPins(body).length);
+      } catch {
+        this.setStatus(sessionId, 'error');
+      } finally {
+        this.inflight.delete(sessionId);
+      }
+    })();
+    this.inflight.set(sessionId, run);
+    return run;
+  }
+
+  /** One-time import of the reader's phase-1 localStorage pins for a session that
+   *  has none server-side yet. Safe to retry — the daemon dedupes by id. */
+  private async maybeMigrate(sessionId: string, serverCount: number): Promise<void> {
+    if (serverCount > 0) return;
+    if (migratedSessions().has(sessionId)) return;
+    const local = sessionPins(readStore(), sessionId);
+    markMigrated(sessionId); // mark first, so a failed import never loops forever
+    if (local.length === 0) return;
+    try {
+      const body = await pinFetch(pinPath(sessionId), {
+        method: 'POST',
+        body: JSON.stringify({ action: 'import', pins: local }),
+      });
+      this.applyServerSnapshot(sessionId, body);
+    } catch {
+      /* the reader still has their localStorage copy; the sheet shows the error */
+    }
+  }
+
+  /** Optimistically apply `next` to the cache, POST `body`, then reconcile from
+   *  the server snapshot. On failure, re-hydrate to resync and flag the error. */
+  private mutate(sessionId: string, next: PinStore, body: unknown): void {
+    this.commit(next);
+    void (async () => {
+      try {
+        const result = await pinFetch(pinPath(sessionId), { method: 'POST', body: JSON.stringify(body) });
+        this.applyServerSnapshot(sessionId, result);
+        this.setStatus(sessionId, 'ready');
+      } catch {
+        this.setStatus(sessionId, 'error');
+        // Resync from the daemon so the optimistic change never lingers as a lie.
+        this.statuses.delete(sessionId);
+        void this.hydrate(sessionId);
+      }
+    })();
+  }
+
   addNote(sessionId: string, text: string, now: number = Date.now(), source?: { blockId: string }): NoteResult {
+    // Local validation gives the sheet its synchronous empty/too-long feedback.
     const result = addNote(this.snapshot, sessionId, text, uuid(), now, source);
-    if (result.ok) this.commit(result.store);
+    if (!result.ok) return result;
+    this.mutate(sessionId, result.store, {
+      action: 'add',
+      kind: 'note',
+      text,
+      ...(source ? { source } : {}),
+    });
     return result;
   }
 
   editNote(sessionId: string, id: string, text: string, now: number = Date.now()): NoteResult {
     const result = editNote(this.snapshot, sessionId, id, text, now);
-    if (result.ok) this.commit(result.store);
+    if (!result.ok) return result;
+    // A no-op edit returns the same store — skip the round-trip.
+    if (result.store !== this.snapshot) this.mutate(sessionId, result.store, { action: 'edit', id, text });
     return result;
   }
 
@@ -457,15 +623,47 @@ class PinsStore {
     input: { blockId: string; blockKind: PinBlockKind; preview: string; ts?: string },
     now: number = Date.now(),
   ): void {
-    this.commit(toggleMessagePin(this.snapshot, sessionId, { id: uuid(), ...input }, now));
+    const existing = sessionPins(this.snapshot, sessionId).find(
+      p => p.kind === 'message' && p.blockId === input.blockId,
+    );
+    if (existing) {
+      this.mutate(sessionId, removePin(this.snapshot, sessionId, existing.id, now), {
+        action: 'remove',
+        id: existing.id,
+      });
+      return;
+    }
+    this.mutate(sessionId, toggleMessagePin(this.snapshot, sessionId, { id: uuid(), ...input }, now), {
+      action: 'add',
+      kind: 'message',
+      blockId: input.blockId,
+      blockKind: input.blockKind,
+      preview: input.preview,
+      ...(input.ts ? { ts: input.ts } : {}),
+    });
   }
 
   remove(sessionId: string, id: string, now: number = Date.now()): void {
-    this.commit(removePin(this.snapshot, sessionId, id, now));
+    const next = removePin(this.snapshot, sessionId, id, now);
+    if (next !== this.snapshot) this.mutate(sessionId, next, { action: 'remove', id });
   }
 
+  /** Undo a delete. Re-adds the pin server-side (position is not restored — a
+   *  re-created pin goes to the front, matching newest-first); the optimistic
+   *  cache keeps the old index until the server snapshot reconciles. */
   insertAt(sessionId: string, pin: Pin, index: number, now: number = Date.now()): void {
-    this.commit(insertPinAt(this.snapshot, sessionId, pin, index, now));
+    const body =
+      pin.kind === 'note'
+        ? { action: 'add', kind: 'note', text: pin.text, ...(pin.source ? { source: pin.source } : {}) }
+        : {
+            action: 'add',
+            kind: 'message',
+            blockId: pin.blockId,
+            blockKind: pin.blockKind,
+            preview: pin.preview,
+            ...(pin.ts ? { ts: pin.ts } : {}),
+          };
+    this.mutate(sessionId, insertPinAt(this.snapshot, sessionId, pin, index, now), body);
   }
 }
 
