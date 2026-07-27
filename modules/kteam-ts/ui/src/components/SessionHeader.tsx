@@ -373,7 +373,16 @@ export const SessionHeader = memo(function SessionHeader({
           ref={compactRowRef}
           data-density-region="session-header"
           data-density-row="primary"
-          className="kt-session-bar mt-0.5 mb-0.5 flex min-w-0 flex-nowrap items-center gap-xs border-b border-border-soft pb-0.5"
+          // ROUND 9 — GIVE THE PHONE TOP BAR ROOM TO BREATHE. Six rounds of
+          // density cuts had squeezed this to 2px of vertical air around 44px
+          // targets (~47px tall), which read as cramped rather than as a native
+          // top bar (iOS ~44pt + inset, Android 56dp). It now carries real
+          // padding above and below the targets and a touch more gap between
+          // them — same three controls, same facts (no status pill, no fleet
+          // count re-added), just the comfortable ~56px bar a phone expects. The
+          // targets keep their 44px floor; this is air around them, not larger
+          // controls.
+          className="kt-session-bar mt-1 mb-1 flex min-w-0 flex-nowrap items-center gap-sm border-b border-border-soft pt-1 pb-1.5"
         >
           {onOpenSidebar && <FleetTrigger onOpen={onOpenSidebar} />}
 

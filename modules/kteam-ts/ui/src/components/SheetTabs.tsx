@@ -65,17 +65,14 @@ export function SheetTabs<T extends string>({
 }) {
   const refs = useRef(new Map<T, HTMLButtonElement>());
 
-  // After a selection change (arrow OR click) the newly selected tab takes focus
-  // and scrolls back into the strip — the strip scrolls horizontally at phone
-  // widths (four labels do not always fit), so a keyboard user must never lose
-  // the selected tab off-screen. Default (non-smooth) scroll needs no
-  // reduced-motion special case.
+  // After a selection change (arrow OR click) the newly selected tab takes
+  // focus. There is NO horizontal scroll to correct any more: the four tabs
+  // share the strip width as equal columns (`.kt-sheet-tabs` in index.css), so
+  // a real tab strip you never have to scroll — which was the whole point.
   const focusSelected = () => {
-    const el = refs.current.get(current);
-    el?.focus();
-    el?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    refs.current.get(current)?.focus();
   };
-  // Keep the focused tab in view when selection changes via keyboard. Click
+  // Keep focus on the selected tab when selection changes via keyboard. Click
   // handlers call focusSelected() imperatively after onChange commits.
   useEffect(() => {
     // Only pull focus back if a tab in this strip already holds it — never steal
@@ -83,9 +80,7 @@ export function SheetTabs<T extends string>({
     const active = document.activeElement;
     for (const el of refs.current.values()) {
       if (el === active) {
-        const selected = refs.current.get(current);
-        selected?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-        selected?.focus();
+        refs.current.get(current)?.focus();
         break;
       }
     }
@@ -93,11 +88,14 @@ export function SheetTabs<T extends string>({
   }, [current]);
 
   return (
-    <div
-      role="tablist"
-      aria-label={label}
-      className="kt-sheet-tabs flex items-center gap-xs overflow-x-auto border-b border-border-soft px-panel scroll-thin"
-    >
+    // A real tab strip, not a scroller. The container carries the shared
+    // baseline (`border-b`) that the selected tab's accent underline connects to;
+    // each tab is an equal-width column (`flex-1`), so four tabs always fit and
+    // there is never anything to scroll. The tab idiom itself lives in
+    // `.kt-sheet-tabs .kt-tab` (index.css): same `.kt-tab` vocabulary, specialised
+    // from a pill into an underlined tab — inactive tabs recede to muted text,
+    // the active one takes the accent and the baseline.
+    <div role="tablist" aria-label={label} className="kt-sheet-tabs flex items-stretch border-b border-border-soft">
       {tabs.map(tab => {
         const selected = tab.key === current;
         return (
@@ -124,7 +122,7 @@ export function SheetTabs<T extends string>({
               // Focus follows selection; the next render's ref holds the target.
               requestAnimationFrame(focusSelected);
             }}
-            className={cn('kt-tab shrink-0 justify-center')}
+            className={cn('kt-tab min-w-0 flex-1 justify-center')}
           >
             {tab.icon}
             {tab.label}

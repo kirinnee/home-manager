@@ -436,6 +436,15 @@ export function SessionDetails({
       ariaLabel="Session details"
       closeLabel="Close session details"
       panelClassName="kt-details"
+      // The reader asked for a taller sheet. It rose from the 72dvh shared
+      // default to 90dvh — in line with the Settings sheet, the other content-
+      // heavy one — which keeps a rest-visible strip of transcript and the scrim
+      // above it, so the sheet is still tappable-away and never buries its own
+      // context. The keyboard-safe term is UNCHANGED: `calc(--app-h - gap)` still
+      // governs whenever the keyboard shrinks the visible viewport, so a taller
+      // ceiling never lets the sheet run under the keyboard (--app-h is the
+      // visual-viewport height, not dvh).
+      maxHeight="min(90dvh, calc(var(--app-h, 100dvh) - var(--gap-sm)))"
     >
       <div className="shrink-0 border-b border-border-soft">
         <div className="mx-auto flex w-full max-w-2xl min-w-0 items-baseline gap-sm px-panel pb-row-y">
