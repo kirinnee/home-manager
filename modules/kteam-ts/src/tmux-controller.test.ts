@@ -6,6 +6,7 @@ import { createPaths } from './paths';
 import {
   composerEvidence,
   composerHolds,
+  paneShowsModelSelector,
   contextPercentUsed,
   distinctiveOptionFragment,
   optionVisibleOnPane,
@@ -586,6 +587,25 @@ describe('inject() consumption outcomes are exactly-once', () => {
     const controller = new InjectionController([idle, filled], [{ pane: localResult, promptReady: true }]);
 
     expect(await controller.inject('kteam-x-agent', input)).toBe('handled-local');
+    expect(controller.injectionCount).toBe(1);
+    expect(controller.submitCount).toBe(1);
+  });
+
+  test.each([
+    'Select Model and Effort',
+    'Select Reasoning Level for gpt-5.5',
+    'Select Reasoning Level for future-model-with-an-unknown-suffix',
+  ])('Codex model selector %s is handled locally after exactly one Enter', async heading => {
+    // Codex retains the submitted command above the selector. That makes the
+    // broad text probe true even though the composer no longer holds `/model`;
+    // the selector heading is the stronger consumption evidence.
+    const picker = ['› /model', '', heading, '  1. gpt-5.6-sol', '  2. gpt-5.5'].join('\n');
+    const modelFilled = ['› /model', '', '  gpt-5.6-sol high · Context 0% used'].join('\n');
+    expect(composerHolds(picker, '/model', 'chars')).toBe(true);
+    expect(paneShowsModelSelector(picker)).toBe(true);
+    const controller = new InjectionController([idle, modelFilled], [{ pane: picker, promptReady: false }]);
+
+    expect(await controller.inject('kteam-x-agent', '/model')).toBe('handled-local');
     expect(controller.injectionCount).toBe(1);
     expect(controller.submitCount).toBe(1);
   });

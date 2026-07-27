@@ -41,17 +41,20 @@ import {
   ExternalLink,
   Gauge,
   GitFork,
+  LoaderCircle,
   Radio,
   Pencil,
   ServerCog,
   Sparkles,
+  Terminal,
   UserRound,
   Zap,
 } from 'lucide-react';
-import type { SessionView } from '../types';
+import type { SessionView, WrapperInfo } from '../types';
 import type { Quota } from '../lib/usage';
+import { api, ApiError } from '../lib/api';
 import { displayCallsign } from '../lib/callsign';
-import { cn, fmtAbsolute, fmtAge, fmtRelative } from '../lib/utils';
+import { cn, fmtAbsolute, fmtAge, fmtRelative, TERMINAL_STATUSES } from '../lib/utils';
 import { buildLineage, byNewestActivity, parentDisplay, shortSessionId } from '../lib/lineage';
 import { Link } from '../lib/router';
 import { useStore } from '../lib/store';
@@ -85,6 +88,12 @@ interface Props {
   onRename?: () => void;
   /** Layer the destructive runtime migration flow over Details. */
   onMigrate?: () => void;
+  /** The page owns the Chat/Terminal state. The Codex native picker must open
+   * in that existing Terminal view after the daemon accepts /model. */
+  onOpenTerminal?: () => boolean;
+  /** A token-less origin is read-only. Keep the explanation visible, but never
+   * offer a control that cannot work. */
+  canControlRuntime?: boolean;
 }
 
 /** Group tones. Colour is the SECOND signal in every case — the icon and the
@@ -355,11 +364,42 @@ export function SessionDetails({
   viewSwitcher,
   onRename,
   onMigrate,
+  onOpenTerminal,
+  canControlRuntime = false,
 }: Props) {
   const { config, state } = view;
-  const observedModel = config.model?.trim();
-  const requestedModel = config.modelHint?.trim();
+  const observedModel = state.observedModel?.trim();
+  const observedReasoningEffort = config.harness === 'codex' ? state.observedReasoningEffort?.trim() : undefined;
+  // This is only what launch requested. It remains useful context, but is not
+  // a substitute for the harness-observed runtime value above.
+  const requestedModel = config.model?.trim();
   const title = displayCallsign(config.teammate) || config.name || config.id;
+  const observedAtSwitchRef = useRef<ModelObservation | undefined>(undefined);
+  const [modelVerificationPending, setModelVerificationPending] = useState(false);
+
+  // A native /model command is handled locally: the harness does not emit a
+  // new model fact until its next response. Until fresh model evidence arrives,
+  // do not imply the old fact is still current.
+  useEffect(() => {
+    const before = observedAtSwitchRef.current;
+    if (
+      modelVerificationPending &&
+      before &&
+      modelObservationChanged(before, { model: observedModel, observedAt: state.observedModelAt })
+    )
+      setModelVerificationPending(false);
+  }, [modelVerificationPending, observedModel, state.observedModelAt]);
+
+  useEffect(() => {
+    observedAtSwitchRef.current = undefined;
+    setModelVerificationPending(false);
+  }, [config.id]);
+
+  const markModelVerificationPending = useCallback(() => {
+    observedAtSwitchRef.current = { model: observedModel, observedAt: state.observedModelAt };
+    setModelVerificationPending(true);
+  }, [observedModel, state.observedModelAt]);
+  const observedPresentation = observedModelPresentation(observedModel, modelVerificationPending);
 
   return (
     <BottomSheet
@@ -457,23 +497,41 @@ export function SessionDetails({
             title="Runtime"
             tone="runtime"
             footerAction={
-              onMigrate ? (
-                <button
-                  type="button"
-                  onClick={onMigrate}
-                  className="kt-btn flex min-h-[44px] w-full items-center justify-between gap-sm text-left"
-                >
-                  <span>Change model / account…</span>
-                  <ServerCog size={15} aria-hidden="true" className="shrink-0" />
-                </button>
-              ) : undefined
+              <>
+                <RuntimeModelControls
+                  view={view}
+                  open={open}
+                  canControl={canControlRuntime}
+                  onModelSwitch={markModelVerificationPending}
+                  onOpenTerminal={onOpenTerminal}
+                  onClose={onClose}
+                />
+                {onMigrate && (
+                  <div className="mt-4 border-t border-border-soft pt-3">
+                    <h3 className="m-0 text-ui font-semibold text-fg">Move account + relaunch</h3>
+                    <p className="mt-1 text-meta leading-base text-muted">
+                      This is the existing destructive migration flow: it moves the account, stops this pane, and
+                      relaunches it. Use the in-place switch above when the account stays the same.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={onMigrate}
+                      className="kt-btn mt-3 flex min-h-[44px] w-full items-center justify-between gap-sm text-left"
+                    >
+                      <span>Move account + relaunch…</span>
+                      <ServerCog size={15} aria-hidden="true" className="shrink-0" />
+                    </button>
+                  </div>
+                )}
+              </>
             }
           >
             <Row label="CLI wrapper" value={config.binary} mono />
             <Row label="Harness" value={config.harness} />
-            <Row label="Model (observed)" value={observedModel} mono />
+            <Row label={observedPresentation.label} value={observedPresentation.value} mono />
+            {config.harness === 'codex' && <Row label="Last observed reasoning" value={observedReasoningEffort} mono />}
             <Row
-              label="Model (requested)"
+              label="Model (launch request)"
               value={requestedModel && requestedModel !== observedModel ? requestedModel : undefined}
               mono
             />
@@ -515,6 +573,324 @@ export function SessionDetails({
         </div>
       </div>
     </BottomSheet>
+  );
+}
+
+export interface ObservedModelPresentation {
+  label: 'Model (observed)' | 'Last observed model';
+  value?: string;
+}
+
+export interface ModelObservation {
+  model?: string;
+  observedAt?: string;
+}
+
+/** Only model-bearing harness evidence verifies a switch. Claude writes a
+ * local-command transcript record for `/model` before its next response, so
+ * lastTranscriptAt is intentionally not part of this comparison. */
+export function modelObservationChanged(before: ModelObservation, current: ModelObservation): boolean {
+  return before.model !== current.model || before.observedAt !== current.observedAt;
+}
+
+/** Keep runtime truth separate from launch configuration. Once /model was
+ * accepted the last transcript fact is stale until a later model response
+ * updates state.observedModel. */
+export function observedModelPresentation(observedModel: string | undefined, stale = false): ObservedModelPresentation {
+  return {
+    label: stale ? 'Last observed model' : 'Model (observed)',
+    value: observedModel?.trim() || undefined,
+  };
+}
+
+/** A route-shaped 404 is daemon/UI version skew; an ordinary 404 can still be
+ * a missing session and must retain its normal error treatment. */
+export function isRuntimeEndpointUnavailable(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404 && error.code === 'unknown_route';
+}
+
+export type ClaudeRuntimeModelsResolution =
+  | { kind: 'available'; choices: NonNullable<WrapperInfo['runtimeModels']> }
+  | { kind: 'restart-required' }
+  | { kind: 'missing-wrapper' };
+
+/** An old daemon knows /v1/wrappers but predates its runtimeModels field. That
+ * is version skew, not proof that the account has no choices. An explicit []
+ * is the daemon's honest unsupported verdict and must remain distinguishable. */
+export function resolveClaudeRuntimeModels(wrappers: WrapperInfo[], binary: string): ClaudeRuntimeModelsResolution {
+  const wrapper = wrappers.find(item => item.name === binary);
+  if (!wrapper) return { kind: 'missing-wrapper' };
+  if (wrapper.runtimeModels === undefined) return { kind: 'restart-required' };
+  return { kind: 'available', choices: wrapper.runtimeModels };
+}
+
+interface RuntimeModelControlsProps {
+  view: SessionView;
+  open: boolean;
+  canControl: boolean;
+  onModelSwitch: () => void;
+  onOpenTerminal?: () => boolean;
+  onClose: () => void;
+}
+
+/**
+ * Native /model is a small, deliberately harness-specific control surface.
+ * It does not fall back to config.model or a global catalog: provider-backed
+ * accounts may reject values that a different Claude account accepts.
+ */
+export function RuntimeModelControls({
+  view,
+  open,
+  canControl,
+  onModelSwitch,
+  onOpenTerminal,
+  onClose,
+}: RuntimeModelControlsProps) {
+  const { config, state } = view;
+  const terminal = TERMINAL_STATUSES.has(state.status);
+  const promptReady = state.promptReady === true;
+  const [claudeChoices, setClaudeChoices] = useState<NonNullable<WrapperInfo['runtimeModels']> | null>(null);
+  const [choicesError, setChoicesError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [restartRequired, setRestartRequired] = useState(false);
+
+  useEffect(() => {
+    setRestartRequired(false);
+    setFailure(null);
+    setNotice(null);
+  }, [config.id]);
+
+  // A restart-required verdict is deliberately sticky while this sheet stays
+  // open, but reopening it after the lead restarts kteamd must retry rather
+  // than trapping the reader behind an old local flag forever.
+  useEffect(() => {
+    if (open) setRestartRequired(false);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open || !canControl || terminal || config.harness !== 'claude') return;
+    let cancelled = false;
+    setClaudeChoices(null);
+    setChoicesError(null);
+    void api
+      .wrappers()
+      .then(wrappers => {
+        if (cancelled) return;
+        const resolution = resolveClaudeRuntimeModels(wrappers, config.binary);
+        if (resolution.kind === 'restart-required') {
+          setRestartRequired(true);
+          return;
+        }
+        if (resolution.kind === 'missing-wrapper') {
+          setChoicesError('The daemon did not return the current account wrapper. Refresh the session and try again.');
+          return;
+        }
+        setClaudeChoices(resolution.choices);
+      })
+      .catch(error => {
+        if (cancelled) return;
+        if (isRuntimeEndpointUnavailable(error)) setRestartRequired(true);
+        else setChoicesError(error instanceof ApiError ? error.message : String(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [canControl, config.binary, config.harness, open, terminal]);
+
+  async function runModelCommand(model?: string) {
+    if (!canControl || terminal || !promptReady || submitting || restartRequired) return;
+    const action = { action: 'model' as const, ...(model ? { model } : {}) };
+    setSubmitting(true);
+    setFailure(null);
+    setNotice(null);
+    try {
+      // A fresh id belongs to every click. The daemon applies this native
+      // command exactly once for that gesture; a later retry click is a new
+      // explicit user decision rather than an invisible transport retry.
+      await api.runtime(config.id, action, crypto.randomUUID());
+      onModelSwitch();
+      if (config.harness === 'codex') {
+        if (onOpenTerminal?.()) {
+          onClose();
+          return;
+        }
+        setNotice(
+          'Codex opened its native picker. Select Terminal, then choose a model and supported reasoning level.',
+        );
+      } else {
+        setNotice('Model command sent. Verification updates after the next model response.');
+      }
+    } catch (error) {
+      if (isRuntimeEndpointUnavailable(error)) {
+        setRestartRequired(true);
+        return;
+      }
+      setFailure(error instanceof ApiError ? error.message : String(error));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  const title = 'Switch model in place';
+  if (terminal) {
+    return (
+      <div className="border-t border-border-soft pt-3">
+        <h3 className="m-0 text-ui font-semibold text-fg">{title}</h3>
+        <p className="mt-1 text-meta leading-base text-muted">
+          In-session model switching requires a running session. Resume or relaunch this session before changing its
+          runtime model.
+        </p>
+      </div>
+    );
+  }
+  if (!canControl) {
+    return (
+      <div className="border-t border-border-soft pt-3">
+        <h3 className="m-0 text-ui font-semibold text-fg">{title}</h3>
+        <p className="mt-1 text-meta leading-base text-muted">
+          This origin is read-only, so it cannot send a native model command to the running session.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="border-t border-border-soft pt-3">
+      <h3 className="m-0 text-ui font-semibold text-fg">{title}</h3>
+      <p className="mt-1 text-meta leading-base text-muted">
+        Changes the model inside this running session. It does not move accounts, relaunch the pane, or discard its
+        context.
+      </p>
+      {!promptReady && (
+        <p className="mt-2 text-meta leading-base text-warn">
+          Wait for an idle prompt before switching model. The daemon refuses a busy pane instead of queueing this
+          command.
+        </p>
+      )}
+
+      {restartRequired ? (
+        <p role="alert" className="mt-2 rounded-control border border-warn-border bg-surface-2 p-3 text-ui text-warn">
+          Daemon restart required to enable in-session model switching.
+        </p>
+      ) : config.harness === 'claude' ? (
+        <ClaudeRuntimeChoices
+          choices={claudeChoices}
+          error={choicesError}
+          submitting={submitting}
+          disabled={submitting || !promptReady}
+          onChoose={model => void runModelCommand(model)}
+        />
+      ) : config.harness === 'codex' ? (
+        <div className="mt-3">
+          <p className="m-0 text-meta leading-base text-muted">
+            Codex owns the account-aware native picker. It asks for a model, then the reasoning level supported by that
+            model; this sheet intentionally adds no separate effort control.
+          </p>
+          <button
+            type="button"
+            disabled={submitting || !promptReady}
+            onClick={() => void runModelCommand()}
+            className="kt-btn mt-3 flex min-h-[44px] w-full items-center justify-between gap-sm text-left"
+          >
+            <span>{submitting ? 'Opening native picker…' : 'Open model + reasoning picker in Terminal'}</span>
+            {submitting ? (
+              <LoaderCircle size={15} aria-hidden="true" className="shrink-0 animate-spin" />
+            ) : (
+              <Terminal size={15} aria-hidden="true" className="shrink-0" />
+            )}
+          </button>
+        </div>
+      ) : (
+        <p className="mt-2 text-meta leading-base text-muted">
+          In-session model switching is not available for this harness, so no nonfunctional control is shown.
+        </p>
+      )}
+
+      {notice && (
+        <p role="status" className="mt-2 text-ui leading-base text-ok">
+          {notice}
+        </p>
+      )}
+      {failure && (
+        <p
+          role="alert"
+          className="mt-2 rounded-control border border-err-border bg-surface-2 p-3 text-ui leading-base text-err"
+        >
+          {failure}
+        </p>
+      )}
+    </div>
+  );
+}
+
+export function ClaudeRuntimeChoices({
+  choices,
+  error,
+  submitting,
+  disabled,
+  onChoose,
+}: {
+  choices: NonNullable<WrapperInfo['runtimeModels']> | null;
+  error: string | null;
+  submitting: boolean;
+  disabled: boolean;
+  onChoose: (model: string) => void;
+}) {
+  if (error) {
+    return (
+      <p
+        role="alert"
+        className="mt-2 rounded-control border border-err-border bg-surface-2 p-3 text-ui leading-base text-err"
+      >
+        Account-aware model choices are unavailable: {error}
+      </p>
+    );
+  }
+  if (choices === null) {
+    return (
+      <div role="status" className="mt-2 flex min-h-[44px] items-center gap-sm text-ui text-muted">
+        <LoaderCircle size={15} aria-hidden="true" className="animate-spin" />
+        Loading account-aware model choices…
+      </div>
+    );
+  }
+  if (choices.length === 0) {
+    return (
+      <p className="mt-2 text-meta leading-base text-muted">
+        This account does not advertise any in-place model choices. Claude effort tuning is not offered here because the
+        installed Claude 2.1.219 CLI cannot reliably tune it from this surface.
+      </p>
+    );
+  }
+  return (
+    <div className="mt-3">
+      <p className="m-0 text-meta leading-base text-muted">
+        Only this account’s advertised Claude choices are shown. Verification updates after the next model response;
+        Claude effort tuning is not offered because the installed Claude 2.1.219 CLI cannot reliably tune it here.
+      </p>
+      <div className="mt-2 grid gap-2" aria-label="Switch Claude model in place">
+        {choices.map(choice => (
+          <button
+            key={choice.value}
+            type="button"
+            disabled={disabled}
+            onClick={() => onChoose(choice.value)}
+            aria-label={`Switch model in place to ${choice.label}`}
+            className="kt-btn flex min-h-[44px] w-full items-center justify-between gap-sm text-left"
+          >
+            <span className="min-w-0">
+              <span className="block truncate text-ui font-semibold">{choice.label}</span>
+              {choice.label !== choice.value && (
+                <span className="mono block truncate text-meta text-muted">{choice.value}</span>
+              )}
+            </span>
+            {submitting && <LoaderCircle size={15} aria-hidden="true" className="shrink-0 animate-spin" />}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 

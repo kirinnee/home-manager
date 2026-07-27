@@ -1,4 +1,22 @@
 export type Harness = 'claude' | 'codex';
+
+/** One model value that is safe to pass to Claude Code's native `/model`
+ * command on the session's CURRENT account. Values are deliberately supplied
+ * by the daemon rather than invented by the browser: provider-backed wrappers
+ * do not share Anthropic's model ids. */
+export interface RuntimeModelOption {
+  value: string;
+  label: string;
+}
+
+/** Semantic native-TUI control. The daemon constructs the command so this
+ * endpoint cannot become an arbitrary tmux keystroke injector. Claude requires
+ * an allowlisted `model`; Codex omits it and opens its own account-aware
+ * model/reasoning picker. */
+export interface RuntimeControlRequest {
+  action: 'model';
+  model?: string;
+}
 export type InteractionMode = 'auto' | 'interactive';
 
 export type SessionStatus =
@@ -211,6 +229,14 @@ export interface SessionState {
    *  (e.g. `glm-5.2` on a wrapper whose alias is `opus`). Ground truth for
    *  display; the configured alias is only a request. */
   observedModel?: string;
+  /** When the harness last supplied model evidence (Claude usage or Codex
+   * runtime settings/usage). Unlike lastTranscriptAt, this does not advance for
+   * a local `/model` command before the selected model has been verified. */
+  observedModelAt?: string;
+  /** The reasoning effort Codex itself reported in thread_settings_applied.
+   *  Absent for Claude because its installed runtime exposes no reliable
+   *  in-session effort control in this environment. */
+  observedReasoningEffort?: string;
   /** The harness's live activity/spinner line ("✻ Lollygagging… (34s · 2.1k
    *  tokens)") parsed from the pane — the UI's received-and-thinking signal.
    *  Cleared when the pane goes idle. */

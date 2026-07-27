@@ -51,6 +51,16 @@ export interface MigrateSessionTarget {
   allowContextDowngrade?: boolean;
 }
 
+/** Dedicated native-harness command. It is intentionally separate from send:
+ * runtime commands must never queue, revive a terminal session, or become a
+ * user-chat record. */
+export interface RuntimeSessionAction {
+  action: 'model';
+  /** Claude's account-validated value. Omit for Codex so its native picker
+   * opens and combines the model with supported reasoning effort. */
+  model?: string;
+}
+
 // NO FULL DOCUMENT LOADS. A 401 used to force a one-shot document reload on
 // the theory that a stale embedded token is fixed by re-serving index.html. It
 // also threw away the entire client — draft,
@@ -164,6 +174,15 @@ export const api = {
     request<SessionView>(`/v1/sessions/${encodeURIComponent(id)}/migrate`, {
       method: 'POST',
       body: JSON.stringify(target),
+      headers: { 'x-kteam-request-id': requestId },
+    }),
+  // Runtime actions are destructive enough to need caller-owned request ids,
+  // but they are NOT chat sends: the daemon refuses a busy pane instead of
+  // queueing or reviving it. One fresh id belongs to each user gesture.
+  runtime: (id: string, action: RuntimeSessionAction, requestId: string) =>
+    request<SessionView>(`/v1/sessions/${encodeURIComponent(id)}/runtime`, {
+      method: 'POST',
+      body: JSON.stringify(action),
       headers: { 'x-kteam-request-id': requestId },
     }),
   wardenStatus: () => request<WardenStatusView>('/v1/warden/status'),

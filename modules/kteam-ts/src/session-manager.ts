@@ -24,7 +24,13 @@ import {
   shellSafeSessionName,
   startWaitMsFor,
 } from './core';
-import { listWrappers, scanProjects, type ProjectInfo, type WrapperInfo } from './fleet-inventory';
+import {
+  listWrappers,
+  runtimeModelsForWrapper,
+  scanProjects,
+  type ProjectInfo,
+  type WrapperInfo,
+} from './fleet-inventory';
 import { currentActor } from './actor-context';
 import { parseWardenReports, type WardenVerdict } from './warden-verdicts';
 import {
@@ -89,6 +95,7 @@ import type {
   Harness,
   InteractionMode,
   KTeamEvent,
+  RuntimeControlRequest,
   SendDisposition,
   SendRequest,
   SessionConfig,
@@ -1678,6 +1685,56 @@ export class SessionManager implements KTeamService {
       await this.endPeerWait(id, sender.config.id).catch(() => undefined);
     }
     return { ...(await this.get(id)), disposition: outcome.kind };
+  }
+
+  /** Native `/model` control that deliberately bypasses send(): it creates no
+   * user/model turn, never queues behind active work, does not relaunch the
+   * harness, and does not optimistically rewrite configured/observed model
+   * state. The next harness transcript remains the source of truth. */
+  async runtime(id: string, request: RuntimeControlRequest): Promise<SessionView> {
+    id = this.resolveRef(id);
+    return await this.serialized(id, async () => {
+      const view = await this.get(id);
+      if (terminalStatuses.includes(view.state.status))
+        throw new Error('in-session model switching requires a running session');
+
+      const pane = await this.tmux.state(view.config.tmuxSession);
+      if (!pane.alive || pane.dead) throw new Error('in-session model switching requires a live harness pane');
+      if (!pane.promptReady)
+        throw new Error('in-session model switching is available only while the harness is waiting at an idle prompt');
+
+      let command: string;
+      let requestedModel: string | undefined;
+      if (view.config.harness === 'claude') {
+        requestedModel = request.model?.trim();
+        if (!requestedModel) throw new Error('model is required for a Claude runtime switch');
+        const allowed = runtimeModelsForWrapper(view.config.binary);
+        if (!allowed.length)
+          throw new Error(`in-session model switching is not supported for wrapper ${view.config.binary}`);
+        if (!allowed.some(option => option.value === requestedModel))
+          throw new Error(`model ${requestedModel} is not available on wrapper ${view.config.binary}`);
+        command = `/model ${requestedModel}`;
+      } else {
+        if (request.model?.trim())
+          throw new Error('Codex model and reasoning choices must be completed in its native picker');
+        command = '/model';
+      }
+
+      const outcome = await this.tmux.inject(view.config.tmuxSession, command);
+      if (outcome !== 'handled-local')
+        throw new Error(`the harness consumed ${command} as a model turn instead of a native runtime control`);
+      await this.emit(
+        id,
+        'control.runtime_model',
+        {
+          harness: view.config.harness,
+          ...(requestedModel ? { requestedModel } : { picker: true }),
+        },
+        'client',
+        view.config.turn,
+      );
+      return await this.get(id);
+    });
   }
 
   /** Persist and type one native-queue entry. For file-backed delivery the
@@ -4252,6 +4309,7 @@ export class SessionManager implements KTeamService {
       const usageEvent = [...events].reverse().find(event => event.type === 'context.usage') as
         | { data: { contextTokens: number; model?: string; contextWindow?: number } }
         | undefined;
+      const observedModelAt = usageEvent?.data.model ? now() : undefined;
       const contextWindowFromUsage = usageEvent
         ? (usageEvent.data.contextWindow ??
           contextWindowForModel(
@@ -4332,6 +4390,7 @@ export class SessionManager implements KTeamService {
           // Ground truth for the MODEL column: the wrapper alias (`opus` on a
           // GLM account) is only what was requested â this is what answered.
           ...(usageEvent?.data.model ? { observedModel: usageEvent.data.model } : {}),
+          ...(observedModelAt ? { observedModelAt } : {}),
           retryAttempt: madeProgress ? 0 : current.retryAttempt,
           lastTranscriptAt: now(),
           lastActivityAt: now(),
@@ -4374,6 +4433,10 @@ export class SessionManager implements KTeamService {
       // journalled, which is what makes the journal small and authoritative.
       this.indexChatRecords(id, view, events, cursor);
       for (const event of events) {
+        // Runtime settings are persisted as session state below and journalled
+        // only when they CHANGE. Codex repeats the same harness record at every
+        // turn, so copying every occurrence would add history without signal.
+        if (event.type === 'runtime.settings') continue;
         if (HARNESS_DERIVED_EVENT_TYPES.has(event.type)) this.broadcastChat(id, event, view.config.turn, 'codex');
         else await this.emit(id, event.type, event.data, 'codex', view.config.turn);
         if (event.type === 'interaction.question') {
@@ -4403,6 +4466,10 @@ export class SessionManager implements KTeamService {
       const usageEvent = [...events].reverse().find(event => event.type === 'context.usage') as
         | { data: { contextTokens: number; model?: string; contextWindow?: number } }
         | undefined;
+      const runtimeSettings = [...events].reverse().find(event => event.type === 'runtime.settings') as
+        | { data: { model?: string; reasoningEffort?: string } }
+        | undefined;
+      const observedModelAt = usageEvent?.data.model || runtimeSettings?.data.model ? now() : undefined;
       const contextWindowFromUsage = usageEvent
         ? (usageEvent.data.contextWindow ??
           contextWindowForModel(
@@ -4424,7 +4491,10 @@ export class SessionManager implements KTeamService {
         );
       }
       await this.store.updateState<SessionState>(id, current => {
-        const madeProgress = events.some(event => event.type !== 'chat.user' && event.type !== 'interaction.question');
+        const madeProgress = events.some(
+          event =>
+            event.type !== 'chat.user' && event.type !== 'interaction.question' && event.type !== 'runtime.settings',
+        );
         const openTools = new Set(current.openTools ?? []);
         let status: SessionStatus = current.status;
         let pendingQuestion = current.pendingQuestion;
@@ -4485,12 +4555,25 @@ export class SessionManager implements KTeamService {
           // Ground truth for the MODEL column: the wrapper alias (`opus` on a
           // GLM account) is only what was requested â this is what answered.
           ...(usageEvent?.data.model ? { observedModel: usageEvent.data.model } : {}),
+          ...(runtimeSettings?.data.model ? { observedModel: runtimeSettings.data.model } : {}),
+          ...(observedModelAt ? { observedModelAt } : {}),
+          ...(runtimeSettings?.data.reasoningEffort
+            ? { observedReasoningEffort: runtimeSettings.data.reasoningEffort }
+            : {}),
           retryAttempt: madeProgress ? 0 : current.retryAttempt,
           lastTranscriptAt: now(),
           lastActivityAt: now(),
           promptReady: terminal ? current.promptReady : false,
         };
       });
+      if (
+        runtimeSettings &&
+        ((runtimeSettings.data.model !== undefined && runtimeSettings.data.model !== view.state.observedModel) ||
+          (runtimeSettings.data.reasoningEffort !== undefined &&
+            runtimeSettings.data.reasoningEffort !== view.state.observedReasoningEffort))
+      ) {
+        await this.emit(id, 'session.runtime_settings', runtimeSettings.data, 'watcher', view.config.turn);
+      }
       if (autoQuestion) {
         await this.tmux.snapshot(view.config, true);
         await this.stopManagedSession(view.config, 'automode structured-question protocol violation');

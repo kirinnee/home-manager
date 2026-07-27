@@ -13,7 +13,7 @@ import { stat } from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { inferHarness, modelHint } from './core';
-import type { Harness } from './types';
+import type { Harness, RuntimeModelOption } from './types';
 
 export interface WrapperInfo {
   /** Wrapper filename, e.g. `claude-auto-loge` — the value POSTed as `agent`. */
@@ -26,6 +26,49 @@ export interface WrapperInfo {
   launchable: boolean;
   /** Friendly model/account hint derived from the wrapper name. */
   modelHint: string;
+  /** Account-safe values accepted by Claude Code's native `/model` command.
+   *  Codex deliberately omits this: its native picker discovers the live
+   *  account catalog and supported effort levels itself. */
+  runtimeModels?: RuntimeModelOption[];
+}
+
+const ANTHROPIC_RUNTIME_MODELS: RuntimeModelOption[] = [
+  { value: 'fable', label: 'Fable 5 · 1M' },
+  { value: 'opus', label: 'Opus 5 · 1M' },
+  { value: 'sonnet', label: 'Sonnet 5' },
+  { value: 'haiku', label: 'Haiku 4.5' },
+];
+
+const LOGE_RUNTIME_MODELS: RuntimeModelOption[] = [
+  { value: 'claude-fable-5[1m]', label: 'Fable 5 · 1M' },
+  { value: 'claude-opus-5[1m]', label: 'Opus 5 · 1M' },
+  { value: 'claude-sonnet-5', label: 'Sonnet 5' },
+  { value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
+];
+
+const GLM_RUNTIME_MODELS: RuntimeModelOption[] = [
+  { value: 'glm-5.2', label: 'GLM-5.2' },
+  { value: 'glm-5-turbo', label: 'GLM-5 Turbo' },
+  { value: 'glm-4.7', label: 'GLM-4.7' },
+];
+
+const DEEPSEEK_RUNTIME_MODELS: RuntimeModelOption[] = [
+  { value: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
+  { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+];
+
+/** Account-aware Claude `/model` allowlist. Keep this aligned with the
+ * generated-wrapper mappings in kfleet/config.yaml. Returning no choices is an
+ * explicit unsupported verdict: callers must not guess an Anthropic id. */
+export function runtimeModelsForWrapper(binary: string): RuntimeModelOption[] {
+  const name = path.basename(binary);
+  let models: RuntimeModelOption[] | undefined;
+  if (/^claude-auto-(kirin|liftoff|atomi)$/.test(name)) models = ANTHROPIC_RUNTIME_MODELS;
+  else if (name === 'claude-auto-loge') models = LOGE_RUNTIME_MODELS;
+  else if (/^claude-auto-glm52[ab]$/.test(name)) models = GLM_RUNTIME_MODELS;
+  else if (name === 'claude-auto-mm3') models = [{ value: 'MiniMax-M3', label: 'MiniMax M3' }];
+  else if (/^claude-auto-dsv4[fp]$/.test(name)) models = DEEPSEEK_RUNTIME_MODELS;
+  return models?.map(model => ({ ...model })) ?? [];
 }
 
 export interface ProjectInfo {
@@ -60,7 +103,19 @@ export function listWrappers(binDir: string): WrapperInfo[] {
       continue;
     }
     const mode = /^(claude|codex)-auto-/.test(name) ? 'auto' : 'interactive';
-    out.push({ name, harness, mode, launchable: mode === 'auto', modelHint: modelHint(name) });
+    const runtimeModels = harness === 'claude' ? runtimeModelsForWrapper(name) : [];
+    out.push({
+      name,
+      harness,
+      mode,
+      launchable: mode === 'auto',
+      modelHint: modelHint(name),
+      // Present (even when empty) on every Claude wrapper in the current API.
+      // The browser uses ABSENCE to recognize an older daemon whose wrappers
+      // payload predates runtime controls and asks for a restart instead of
+      // misreporting "this account has no choices".
+      ...(harness === 'claude' ? { runtimeModels } : {}),
+    });
   }
   return out.sort((a, b) => {
     if (a.launchable !== b.launchable) return a.launchable ? -1 : 1;

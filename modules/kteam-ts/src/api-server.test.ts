@@ -3,7 +3,7 @@ import type { Server } from 'bun';
 import { RecentRequestIds, startApiServer } from './api-server';
 import { currentActor } from './actor-context';
 import type { AttachmentView, KTeamService, SessionView } from './service';
-import type { KTeamEvent, SendRequest, StartSessionRequest } from './types';
+import type { KTeamEvent, RuntimeControlRequest, SendRequest, StartSessionRequest } from './types';
 import { WARDEN_LABEL } from './warden-detect';
 
 const view: SessionView = {
@@ -55,6 +55,7 @@ class FakeService implements KTeamService {
     this.lastActor = currentActor();
     return { ...view, disposition: 'delivered' as const };
   };
+  runtime = async (_id: string, _input: RuntimeControlRequest) => view;
   answer = async () => view;
   interrupt = async () => view;
   stop = async () => {
@@ -468,6 +469,47 @@ describe('request-id idempotency for retried mutations', () => {
     expect(sends).toBe(1);
   });
 
+  test('a duplicate runtime request id opens the native control only once', async () => {
+    const service = new FakeService();
+    let controls = 0;
+    service.runtime = async () => {
+      controls++;
+      return view;
+    };
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const request = () =>
+      fetch(`http://127.0.0.1:${server.port}/v1/sessions/s1/runtime`, {
+        method: 'POST',
+        headers: admin('runtime-gesture-1'),
+        body: JSON.stringify({ action: 'model' }),
+      });
+
+    expect((await request()).status).toBe(200);
+    expect((await request()).status).toBe(200);
+    expect(controls).toBe(1);
+  });
+
+  test('runtime endpoint rejects arbitrary native-command actions', async () => {
+    const service = new FakeService();
+    let controls = 0;
+    service.runtime = async () => {
+      controls++;
+      return view;
+    };
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const response = await fetch(`http://127.0.0.1:${server.port}/v1/sessions/s1/runtime`, {
+      method: 'POST',
+      headers: admin('runtime-invalid'),
+      body: JSON.stringify({ action: 'send-keys', command: '/status' }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as { error: string }).error).toContain('runtime action');
+    expect(controls).toBe(0);
+  });
+
   test('distinct request ids and id-less requests both apply', async () => {
     const service = new FakeService();
     let sends = 0;
@@ -608,12 +650,13 @@ describe('warden-scoped token authorization', () => {
     expect(migrate.status).toBe(200);
   });
 
-  test('rejects start, stop, interrupt, remove, and the warden oversight routes with 403', async () => {
+  test('rejects start, stop, interrupt, runtime controls, remove, and the warden oversight routes with 403', async () => {
     const base = scopedServer();
     const post = (path: string) => fetch(`${base}${path}`, { method: 'POST', headers: scoped, body: '{}' });
     expect((await post('/v1/sessions')).status).toBe(403); // start
     expect((await post('/v1/sessions/s1/stop')).status).toBe(403);
     expect((await post('/v1/sessions/s1/interrupt')).status).toBe(403);
+    expect((await post('/v1/sessions/s1/runtime')).status).toBe(403);
     expect((await post('/v1/warden/run')).status).toBe(403);
     expect((await fetch(`${base}/v1/sessions/s1`, { method: 'DELETE', headers: scoped })).status).toBe(403);
     expect((await fetch(`${base}/v1/warden/status`, { headers: scoped })).status).toBe(403);

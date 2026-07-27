@@ -89,6 +89,17 @@ export function viewSwitcherForSheet(tabs: ReactNode, onSelected: () => void): R
   });
 }
 
+/** The SessionChatPage-owned ViewTabs already carries the live setTab callback.
+ * Reuse that exact path after Codex opens its native /model picker rather than
+ * inventing a second navigation channel or touching page-owned tab state. */
+export function openTerminalFromTabs(tabs: ReactNode): boolean {
+  if (!isValidElement(tabs)) return false;
+  const element = tabs as ReactElement<ViewSwitcherElementProps>;
+  if (typeof element.props.onChange !== 'function') return false;
+  element.props.onChange('terminal');
+  return true;
+}
+
 export interface SessionHeaderIdentity {
   /** Source passed to TaskName; task first, then callsign, then id. */
   renderName: string;
@@ -320,6 +331,8 @@ export const SessionHeader = memo(function SessionHeader({
         viewSwitcher={compactViewSwitcher}
         onRename={hasToken ? () => setRenameOpen(true) : undefined}
         onMigrate={hasToken ? () => setMigrateOpen(true) : undefined}
+        canControlRuntime={hasToken}
+        onOpenTerminal={() => openTerminalFromTabs(tabs)}
       />
       <RenameSheet view={view} open={renameOpen} onClose={() => setRenameOpen(false)} />
       <MigrateSheet view={view} open={migrateOpen} onClose={() => setMigrateOpen(false)} />

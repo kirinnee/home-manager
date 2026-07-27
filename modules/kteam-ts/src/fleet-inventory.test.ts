@@ -2,7 +2,7 @@ import { afterAll, expect, test } from 'bun:test';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
-import { expandHome, listWrappers, scanProjects } from './fleet-inventory';
+import { expandHome, listWrappers, runtimeModelsForWrapper, scanProjects } from './fleet-inventory';
 
 const tmp = mkdtempSync(path.join(os.tmpdir(), 'kteam-inv-'));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
@@ -26,13 +26,44 @@ test('listWrappers marks harness + auto/interactive and sorts launchable-first',
   expect(loge.harness).toBe('claude');
   expect(loge.mode).toBe('auto');
   expect(loge.launchable).toBe(true);
+  expect(loge.runtimeModels?.map(model => model.value)).toEqual([
+    'claude-fable-5[1m]',
+    'claude-opus-5[1m]',
+    'claude-sonnet-5',
+    'claude-haiku-4-5-20251001',
+  ]);
 
   const interactive = wrappers.find(w => w.name === 'claude-loge')!;
   expect(interactive.mode).toBe('interactive');
   expect(interactive.launchable).toBe(false);
+  expect(interactive.runtimeModels).toEqual([]); // explicit: current daemon, unsupported wrapper
+
+  const codex = wrappers.find(w => w.name === 'codex-auto-kirin')!;
+  expect(codex.runtimeModels).toBeUndefined(); // Codex owns its live native catalog
 
   // launchable ones sort first.
   expect(wrappers[0]!.launchable).toBe(true);
+});
+
+test('runtime model choices are account-aware and never leak Anthropic ids to provider wrappers', () => {
+  expect(runtimeModelsForWrapper('claude-auto-atomi').map(model => model.value)).toEqual([
+    'fable',
+    'opus',
+    'sonnet',
+    'haiku',
+  ]);
+  expect(runtimeModelsForWrapper('/fleet/bin/claude-auto-glm52a').map(model => model.value)).toEqual([
+    'glm-5.2',
+    'glm-5-turbo',
+    'glm-4.7',
+  ]);
+  expect(runtimeModelsForWrapper('claude-auto-mm3').map(model => model.value)).toEqual(['MiniMax-M3']);
+  expect(runtimeModelsForWrapper('claude-auto-dsv4f').map(model => model.value)).toEqual([
+    'deepseek-v4-flash',
+    'deepseek-v4-pro',
+  ]);
+  expect(runtimeModelsForWrapper('claude-auto-unknown')).toEqual([]);
+  expect(runtimeModelsForWrapper('codex-auto-loge')).toEqual([]);
 });
 
 test('listWrappers returns [] for a missing bin dir', () => {

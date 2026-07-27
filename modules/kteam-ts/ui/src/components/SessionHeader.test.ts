@@ -4,6 +4,7 @@ import {
   MOBILE_BACK,
   MOBILE_SETTINGS,
   compactCallsignFits,
+  openTerminalFromTabs,
   sessionHeaderIdentity,
   viewSwitcherForSheet,
 } from './SessionHeader';
@@ -39,6 +40,15 @@ describe('mobile Settings entry', () => {
     cloned.props.onChange('terminal');
     expect(selected).toBe('terminal');
     expect(closed).toBe(true);
+  });
+
+  test('reuses the page-owned tab callback to open Codex native pickers in Terminal', () => {
+    let selected = '';
+    const tabs = createElement('div', { onChange: (id: string) => (selected = id) });
+
+    expect(openTerminalFromTabs(tabs)).toBe(true);
+    expect(selected).toBe('terminal');
+    expect(openTerminalFromTabs(createElement('div'))).toBe(false);
   });
 });
 
