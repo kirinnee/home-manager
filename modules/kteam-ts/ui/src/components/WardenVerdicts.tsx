@@ -1,9 +1,15 @@
 // Fleet "Warden verdicts": which sessions the warden acted on, the verdict
-// (killed / revived / nudged / cleared / needs-human) and why. Quiet by
-// default — a collapsible section, newest-first, capped by the server (~20).
-// Polls /v1/warden/verdicts every 30s (paused when the tab is hidden) and
-// self-hides if the route is absent (older daemon). Clicking a row opens the
-// full markdown report.
+// (killed / revived / nudged / cleared / needs-human) and why. Newest-first,
+// capped by the server (~20). Polls /v1/warden/verdicts every 30s (paused when
+// the tab is hidden) and self-hides if the route is absent (older daemon).
+// Clicking a row opens the full markdown report.
+//
+// EXPANDED BY DEFAULT. This began as a collapsed strip competing for room on
+// the dashboard, where staying quiet was the point. It now renders on a
+// dedicated Warden route (`page`), and a page whose only content is a closed
+// accordion makes the reader open the thing they navigated to — a pointless
+// tap. The toggle stays so a long list can be folded away, but the resting
+// state is open.
 
 import { Suspense, lazy, useCallback, useId, useRef, useState, useEffect } from 'react';
 import { ChevronRight, Gavel, Skull, HeartPulse, Bell, Check, UserRound, X } from 'lucide-react';
@@ -11,9 +17,10 @@ import { api } from '../lib/api';
 import { useDialogFocus } from '../hooks/useDialogFocus';
 import type { WardenVerdict, WardenVerdictKind } from '../types';
 import { displayCallsign } from '../lib/callsign';
-// LAZY. Rendering the dashboard must not download the markdown + syntax
-// highlighting stack: this section is collapsed by default and most readers
-// never open a report at all. The chunk arrives when one is opened.
+// LAZY. Expanding the list only renders rows, so the markdown + syntax
+// highlighting stack is still not needed to see it. The chunk arrives when a
+// REPORT is opened, which most readers never do — so defaulting the list to
+// open costs nothing here.
 const Markdown = lazy(() => import('./Markdown').then(m => ({ default: m.Markdown })));
 import { cn, fmtRelative } from '../lib/utils';
 
@@ -43,7 +50,7 @@ export function WardenVerdicts({ page = false }: { page?: boolean } = {}) {
 function WardenVerdictsPanel() {
   const [verdicts, setVerdicts] = useState<WardenVerdict[] | null>(null);
   const [failed, setFailed] = useState(false);
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(true);
   const [report, setReport] = useState<{ path: string; title: string; body: string | null } | null>(null);
   const timer = useRef<number | null>(null);
   // Stable, so the modal's Escape listener is not torn down and re-added on
