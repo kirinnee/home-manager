@@ -184,4 +184,16 @@ describe('session administration API transport', () => {
 
     expect(JSON.parse(String(captured.init?.body))).toEqual({ action: 'model' });
   });
+
+  test('runtime Claude effort sends the dedicated effort action and level', async () => {
+    const captured = await captureRequest(
+      new Response(JSON.stringify({ config: { id: 'session' }, state: {}, directory: '/tmp/session' }), {
+        headers: { 'content-type': 'application/json' },
+      }),
+      () => api.runtime('session', { action: 'effort', effort: 'xhigh' }, 'effort-runtime-gesture'),
+    );
+
+    expect(new Headers(captured.init?.headers).get('x-kteam-request-id')).toBe('effort-runtime-gesture');
+    expect(JSON.parse(String(captured.init?.body))).toEqual({ action: 'effort', effort: 'xhigh' });
+  });
 });

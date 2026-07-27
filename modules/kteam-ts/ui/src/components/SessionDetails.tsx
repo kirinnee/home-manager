@@ -52,7 +52,7 @@ import {
 } from 'lucide-react';
 import type { SessionView, WrapperInfo } from '../types';
 import type { Quota } from '../lib/usage';
-import { api, ApiError, type RuntimeSessionAction } from '../lib/api';
+import { api, ApiError } from '../lib/api';
 import { displayCallsign } from '../lib/callsign';
 import { cn, fmtAbsolute, fmtAge, fmtRelative, TERMINAL_STATUSES } from '../lib/utils';
 import { buildLineage, byNewestActivity, parentDisplay, shortSessionId } from '../lib/lineage';
@@ -1037,14 +1037,9 @@ export function RuntimeEffortControls({
     setFailure(null);
     setNotice(null);
     try {
-      // Bridged to the effort verb until the contended lib/api.ts widens
-      // RuntimeSessionAction (see effort-bar.patch.md). A fresh id per click, so
-      // the daemon applies it exactly once and a retry is a new user decision.
-      await api.runtime(
-        config.id,
-        { action: 'effort', effort: level } as unknown as RuntimeSessionAction,
-        crypto.randomUUID(),
-      );
+      // A fresh id per click, so the daemon applies it exactly once and a retry
+      // is a new user decision.
+      await api.runtime(config.id, { action: 'effort', effort: level }, crypto.randomUUID());
       onEffortSwitch?.(level);
       setNotice(`Effort set to ${level}. Saved as this account’s default for new sessions, and the next turn uses it.`);
     } catch (error) {

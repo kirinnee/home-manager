@@ -55,10 +55,12 @@ export interface MigrateSessionTarget {
  * runtime commands must never queue, revive a terminal session, or become a
  * user-chat record. */
 export interface RuntimeSessionAction {
-  action: 'model';
+  action: 'model' | 'effort';
   /** Claude's account-validated value. Omit for Codex so its native picker
    * opens and combines the model with supported reasoning effort. */
   model?: string;
+  /** Claude effort: low|medium|high|xhigh (action:'effort'). */
+  effort?: string;
 }
 
 // NO FULL DOCUMENT LOADS. A 401 used to force a one-shot document reload on

@@ -1774,10 +1774,10 @@ export class SessionManager implements KTeamService {
     return { ...(await this.get(id)), disposition: outcome.kind };
   }
 
-  /** Native `/model` control that deliberately bypasses send(): it creates no
-   * user/model turn, never queues behind active work, does not relaunch the
-   * harness, and does not optimistically rewrite configured/observed model
-   * state. The next harness transcript remains the source of truth. */
+  /** Native `/model` or `/effort` control that deliberately bypasses send(): it
+   * creates no user/model turn, never queues behind active work, does not
+   * relaunch the harness, and does not optimistically rewrite observed runtime
+   * state. The harness transcript remains the source of truth where available. */
   async runtime(id: string, request: RuntimeControlRequest): Promise<SessionView> {
     id = this.resolveRef(id);
     return await this.serialized(id, async () => {
@@ -1790,9 +1790,18 @@ export class SessionManager implements KTeamService {
       if (!pane.promptReady)
         throw new Error('in-session model switching is available only while the harness is waiting at an idle prompt');
 
+      const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh'] as const;
       let command: string;
       let requestedModel: string | undefined;
-      if (view.config.harness === 'claude') {
+      let requestedEffort: string | undefined;
+      if (request.action === 'effort') {
+        if (view.config.harness !== 'claude')
+          throw new Error('effort is set inside Codex’s native picker, not as a runtime command');
+        requestedEffort = request.effort?.trim();
+        if (!requestedEffort || !EFFORT_LEVELS.includes(requestedEffort as (typeof EFFORT_LEVELS)[number]))
+          throw new Error(`effort must be one of ${EFFORT_LEVELS.join(', ')}`);
+        command = `/effort ${requestedEffort}`;
+      } else if (view.config.harness === 'claude') {
         requestedModel = request.model?.trim();
         if (!requestedModel) throw new Error('model is required for a Claude runtime switch');
         const allowed = runtimeModelsForWrapper(view.config.binary);
@@ -1815,7 +1824,9 @@ export class SessionManager implements KTeamService {
         'control.runtime_model',
         {
           harness: view.config.harness,
-          ...(requestedModel ? { requestedModel } : { picker: true }),
+          ...(requestedModel ? { requestedModel } : {}),
+          ...(requestedEffort ? { requestedEffort } : {}),
+          ...(!requestedModel && !requestedEffort ? { picker: true } : {}),
         },
         'client',
         view.config.turn,
