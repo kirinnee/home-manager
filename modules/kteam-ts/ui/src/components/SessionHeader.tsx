@@ -52,7 +52,18 @@ import {
   type ReactElement,
   type ReactNode,
 } from 'react';
-import { ChevronLeft, Pause, Play, StopCircle, Users, ZapOff, MoreHorizontal, Settings } from 'lucide-react';
+import {
+  ChevronLeft,
+  FolderGit2,
+  ListTodo,
+  Pause,
+  Play,
+  StopCircle,
+  Users,
+  ZapOff,
+  MoreHorizontal,
+  Settings,
+} from 'lucide-react';
 import type { SessionView } from '../types';
 import { Button, ActionGroup } from './Primitives';
 import { displayCallsign } from '../lib/callsign';
@@ -66,6 +77,8 @@ import type { Quota } from '../lib/usage';
 import { useStore } from '../lib/store';
 import { PinSheet, PinsTrigger } from './PinSheet';
 import { usePinCount, useDeclareForeground } from '../hooks/usePins';
+import { SidePaneTrigger, useSidePane } from './SidePane';
+import { fsTabAvailable, useFsProbe } from './files-api';
 
 const COMPACT_CALLSIGN_TITLE_RATIO = 0.6;
 
@@ -229,14 +242,35 @@ export const SessionHeader = memo(function SessionHeader({
   // reads the right session and transcript-row pins land on it. Only the active
   // pane ever wins (see lib/pin-bridge.ts).
   useDeclareForeground(config.id, active !== false);
+  // THE SIDE-PANE HOST, when this header is inside a SidePaneWorkspace (the
+  // chat page always is; tests and other callers may not be). Pins, Files and
+  // Tasks open as session-scoped surfaces beside the conversation instead of
+  // replacing it; the legacy standalone PinSheet below remains only for
+  // hostless callers.
+  const sidePane = useSidePane();
+  // Files capability: same probe (and cached answer) that used to gate the
+  // center Files tab — an `unknown_route` daemon simply has no Files trigger.
+  const fsProbe = useFsProbe(config.id);
+  const filesAvailable = fsTabAvailable(fsProbe.state);
   const pinsTrigger = (
     <PinsTrigger
       id={pinsTriggerId}
       count={pinCount}
-      onClick={() => setPinsOpen(open => !open)}
-      expanded={pinsOpen}
-      controls={pinsPanelId}
+      onClick={opener => {
+        if (sidePane) sidePane.toggle('pins', opener);
+        else setPinsOpen(open => !open);
+      }}
+      expanded={sidePane ? sidePane.surface === 'pins' : pinsOpen}
+      controls={sidePane ? (sidePane.surface === 'pins' ? sidePane.paneId : undefined) : pinsPanelId}
     />
+  );
+  const surfaceTriggers = sidePane && (
+    <>
+      {filesAvailable && (
+        <SidePaneTrigger surface="files" label="Files" icon={<FolderGit2 size={16} aria-hidden="true" />} />
+      )}
+      <SidePaneTrigger surface="tasks" label="Tasks" icon={<ListTodo size={16} aria-hidden="true" />} />
+    </>
   );
 
   // A retained background pane must not keep an invisible modal or its
@@ -311,6 +345,42 @@ export const SessionHeader = memo(function SessionHeader({
   const compactActions = (
     <>
       {actions}
+      {/* Files and Tasks on a phone: the top row has no width for two more
+          44px targets, so they live here with Settings — one deliberate tap
+          into the sheet the reader already uses for everything non-continuous.
+          Same two-step as Settings: let this sheet's focus trap restore first,
+          THEN open the surface sheet, so the closing dialog cannot steal focus
+          back from the opening one. */}
+      {sidePane && filesAvailable && (
+        <button
+          type="button"
+          onClick={() => {
+            setDetailsOpen(false);
+            requestAnimationFrame(() => sidePane.open('files'));
+          }}
+          aria-label="Open files"
+          title="This session's working tree: changes and browser"
+          className="kt-btn inline-flex min-h-[44px] items-center gap-sm"
+        >
+          <FolderGit2 size={14} aria-hidden="true" />
+          Files
+        </button>
+      )}
+      {sidePane && (
+        <button
+          type="button"
+          onClick={() => {
+            setDetailsOpen(false);
+            requestAnimationFrame(() => sidePane.open('tasks'));
+          }}
+          aria-label="Open tasks"
+          title="Tasks this session has recorded"
+          className="kt-btn inline-flex min-h-[44px] items-center gap-sm"
+        >
+          <ListTodo size={14} aria-hidden="true" />
+          Tasks
+        </button>
+      )}
       <button
         type="button"
         onClick={() => {
@@ -356,13 +426,17 @@ export const SessionHeader = memo(function SessionHeader({
       />
       <RenameSheet view={view} open={renameOpen} onClose={() => setRenameOpen(false)} />
       <MigrateSheet view={view} open={migrateOpen} onClose={() => setMigrateOpen(false)} />
-      <PinSheet
-        id={pinsPanelId}
-        sessionId={config.id}
-        open={pinsOpen}
-        onClose={() => setPinsOpen(false)}
-        labelledBy={pinsTriggerId}
-      />
+      {/* Standalone pins dialog ONLY when no side-pane host wraps this header —
+          with a host, pins is one of its surfaces and this never opens. */}
+      {!sidePane && (
+        <PinSheet
+          id={pinsPanelId}
+          sessionId={config.id}
+          open={pinsOpen}
+          onClose={() => setPinsOpen(false)}
+          labelledBy={pinsTriggerId}
+        />
+      )}
     </>
   );
 
@@ -515,6 +589,7 @@ export const SessionHeader = memo(function SessionHeader({
 
       <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-sm">
         {tabs}
+        {surfaceTriggers}
         {pinsTrigger}
         <ActionGroup>
           {actions}
