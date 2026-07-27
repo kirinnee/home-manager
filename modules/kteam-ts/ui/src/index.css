@@ -521,13 +521,24 @@ pre,
    its own container — never the page. */
 .md-table-scroll {
   display: block;
-  /* Shrink to the table's own width but never past the content pane. A narrow
-     table stays compact; a wide one is clamped to the pane and its cells wrap to
-     fit, so it uses the full width ("full bleed") without ever pushing a
-     horizontal scroll onto the page body. overflow-x is the last-resort catch
-     for content that genuinely cannot wrap (e.g. a wide inline image). */
+  /* Shrink to the table's own width but never past what fits. A narrow table
+     stays compact and left-aligned under its prose; a wide one is clamped and
+     its cells wrap to fit, so it never pushes a horizontal scroll onto the page
+     body. overflow-x is the last-resort catch for content that genuinely cannot
+     wrap (e.g. a wide inline image or an unbreakable token).
+
+     ACTUAL FULL-BLEED PAST THE READING MEASURE. The cap used to be `100%` — 100%
+     of the 880px reading column — so a wide table could only ever be as wide as
+     prose. `--kt-table-bleed` lets it escape that column and use the pane: it is
+     the pane-usable width measured on the transcript scroller (Transcript.tsx →
+     paneUsableTableWidth), left-anchored to the column so the table grows
+     rightward across the column's centring gutter to the pane edge. It already
+     honours chat-width: in 'readable' the scroller is the narrow surface, so the
+     value is that measure and the table bleeds no further. Falls back to `100%`
+     — today's contained layout — anywhere the variable is not published (a
+     pre-measure frame, or `.md` rendered outside the transcript). */
   width: max-content;
-  max-width: 100%;
+  max-width: var(--kt-table-bleed, 100%);
   margin: 0.75em 0;
   overflow-x: auto;
   overscroll-behavior-inline: contain;

@@ -232,6 +232,39 @@ export function followPinBlocked(
   return pointerHeld || pinBlockedBySelection(sel, contains);
 }
 
+/** FULL-BLEED TABLES — how wide a table may grow before it would push a page
+ *  scroll. The pure geometry behind `--kt-table-bleed` (published below), kept
+ *  as an exported unit so it is assertable without a DOM (this package has no
+ *  DOM impl; see Transcript.test.ts).
+ *
+ *  A wide markdown table is allowed to escape the 880px reading column and use
+ *  the pane, but prose must stay at its measure — so the column keeps its cap and
+ *  a table breaks out of it (index.css `.md-table-scroll`). Pure CSS cannot size
+ *  that break-out: the column is a fixed max-width centred in the scroller, and
+ *  `100vw` is WRONG because the shell has a sidebar. So the width is measured
+ *  from the scroller and computed here.
+ *
+ *  The table is anchored at the column's LEFT edge (flush with the prose above
+ *  it, never yanked to the pane edge or re-centred — narrow tables render exactly
+ *  as before) and may grow RIGHTWARD across the column's own centring gutter,
+ *  stopping one content-padding short of the pane's right edge so it keeps the
+ *  same breathing room as prose. `paneWidth` is the scroller's inner width
+ *  (`clientWidth`, already minus any vertical scrollbar and already reflecting the
+ *  chat-width setting — in 'readable' the scroller IS the narrow surface, so a
+ *  table fills that measure and no more). `columnWidth` is the reading column's
+ *  border-box (≤ 880, or the pane when narrower). The centred column leaves
+ *  `(paneWidth − columnWidth) / 2` empty on each side; the left one is the only
+ *  slack a left-anchored table cannot use. Never returns a negative width. */
+export function paneUsableTableWidth(
+  paneWidth: number,
+  columnWidth: number,
+  padLeft: number,
+  padRight: number,
+): number {
+  const sideGutter = Math.max(0, (paneWidth - columnWidth) / 2);
+  return Math.max(0, paneWidth - padLeft - padRight - sideGutter);
+}
+
 /** DOM adapter over {@link followPinBlocked}: is a pin unsafe right now, because
  *  a finger/pointer is held on the viewport or a non-collapsed selection is
  *  anchored inside `el`? Returns false when there is no window (SSR/tests) or no
@@ -443,6 +476,42 @@ function Inner({ blocks, live, hasOlder, loadingOlder, onLoadOlder, pinSignal, h
     ro.observe(v);
     return () => ro.disconnect();
   }, [pin]);
+
+  // ---- FULL-BLEED TABLES: publish the pane-usable width ----------------------
+  // A wide markdown table escapes the 880px reading column to use the pane
+  // (index.css `.md-table-scroll`), which pure CSS cannot express (see
+  // paneUsableTableWidth). Measure this scroller's own inner width — clientWidth,
+  // which excludes the vertical scrollbar AND already tracks the chat-width
+  // setting (in 'readable' this scroller IS the 768px surface) — and publish the
+  // width a table may occupy as `--kt-table-bleed` on the content column, which
+  // the table reads. Because clientWidth excludes the scrollbar and the value
+  // stops one content-pad short of the pane edge, a full-bleed table can never
+  // push a horizontal PAGE scroll; a table too wide to wrap still scrolls inside
+  // its own container. useLayoutEffect + an initial synchronous publish so the
+  // width is set before paint (no contained→bled flash); the ResizeObserver then
+  // keeps it current across window/sidebar/keyboard/chat-width changes. Setting a
+  // custom property never resizes the scroller, so this cannot feed the follow
+  // observers a spurious resize.
+  useLayoutEffect(() => {
+    const v = viewportRef.current;
+    const content = contentRef.current;
+    if (!v || !content) return;
+    const publish = () => {
+      const cs = getComputedStyle(content);
+      const usable = paneUsableTableWidth(
+        v.clientWidth,
+        content.offsetWidth,
+        parseFloat(cs.paddingLeft) || 0,
+        parseFloat(cs.paddingRight) || 0,
+      );
+      content.style.setProperty('--kt-table-bleed', `${usable}px`);
+    };
+    publish();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(publish);
+    ro.observe(v);
+    return () => ro.disconnect();
+  }, []);
 
   // ---- PREPEND: hold the reader's content still -----------------------------
   // Before paint, so the older page is never visible at the wrong offset.
