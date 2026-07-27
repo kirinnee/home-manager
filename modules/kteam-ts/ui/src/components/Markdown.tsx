@@ -16,22 +16,38 @@ import { memo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { fenceLanguage, highlightToHtml } from '../lib/highlight';
+import { remarkTableLabels } from '../lib/remark-table-labels';
 
 export const Markdown = memo(function Markdown({ text }: { text: string }) {
   return (
     <div className="md min-w-0 max-w-full">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        // remarkTableLabels stamps each body cell with its column header as
+        // `data-label`, which the mobile stacked-card layout prints. It must run
+        // after remark-gfm has produced the table nodes.
+        remarkPlugins={[remarkGfm, remarkTableLabels]}
         components={{
           a: ({ node: _node, ...rest }) => <a {...rest} target="_blank" rel="noreferrer" />,
-          // A table's min-content width is allowed to exceed prose width. Give
-          // that width one local, reachable scroller instead of making the
-          // entire transcript the horizontal scroll container.
+          // Tables wrap aggressively to fit the pane and may full-bleed past the
+          // prose measure (index.css `.md table` / `.md-table-scroll`). The
+          // scroller is the last-resort catch for a table that still cannot
+          // shrink, so a wide table scrolls INSIDE itself and never the page.
+          //
+          // On a phone the layout switches cells to `display:block` stacked
+          // cards, which strips the implicit ARIA table semantics. The explicit
+          // roles here (plus `scope="col"` on headers) preserve the
+          // header-to-cell association for a screen reader across that switch;
+          // on desktop they are the elements' implicit roles, so they are inert.
           table: ({ node: _node, ...rest }) => (
             <div className="md-table-scroll scroll-thin">
-              <table {...rest} />
+              <table role="table" {...rest} />
             </div>
           ),
+          thead: ({ node: _node, ...rest }) => <thead role="rowgroup" {...rest} />,
+          tbody: ({ node: _node, ...rest }) => <tbody role="rowgroup" {...rest} />,
+          tr: ({ node: _node, ...rest }) => <tr role="row" {...rest} />,
+          th: ({ node: _node, ...rest }) => <th role="columnheader" scope="col" {...rest} />,
+          td: ({ node: _node, ...rest }) => <td role="cell" {...rest} />,
           code: ({ node: _node, className, children, ...rest }) => {
             const lang = fenceLanguage(className);
             const source = lang ? String(children).replace(/\n$/, '') : '';

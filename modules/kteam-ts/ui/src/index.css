@@ -513,21 +513,30 @@ pre,
   color: var(--code-fg);
   white-space: pre;
 }
-/* tables */
+/* tables — wrap to fit the pane, full-bleed when needed, stack on a phone.
+   The previous rule was `width:max-content; min-width:100%`: the table grew to
+   its content and the reader got a horizontal scroll on every wide table. Now
+   cells WRAP (overflow-wrap:anywhere breaks long paths/ids/urls too), the table
+   fills the available width, and a table that still cannot shrink scrolls INSIDE
+   its own container — never the page. */
 .md-table-scroll {
   display: block;
-  width: 100%;
-  min-width: 0;
+  /* Shrink to the table's own width but never past the content pane. A narrow
+     table stays compact; a wide one is clamped to the pane and its cells wrap to
+     fit, so it uses the full width ("full bleed") without ever pushing a
+     horizontal scroll onto the page body. overflow-x is the last-resort catch
+     for content that genuinely cannot wrap (e.g. a wide inline image). */
+  width: max-content;
   max-width: 100%;
   margin: 0.75em 0;
   overflow-x: auto;
   overscroll-behavior-inline: contain;
 }
 .md table {
-  width: max-content;
-  min-width: 100%;
+  width: 100%;
   margin: 0;
   border-collapse: collapse;
+  table-layout: auto;
   font-size: 12.75px;
 }
 .md th,
@@ -535,6 +544,13 @@ pre,
   border: var(--border-width) solid var(--border);
   padding: 0.42em 0.7em;
   text-align: left;
+  /* Wrap aggressively: break inside a long unbroken token rather than widen the
+     column. This also drops each cell's min-content to ~1 glyph, so the table
+     can always shrink to the pane and the local scroller stays dormant. */
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  hyphens: auto;
 }
 .md th {
   background: var(--surface-2);
@@ -542,6 +558,86 @@ pre,
 }
 .md tr:nth-child(even) td {
   background: color-mix(in srgb, var(--surface-2) 55%, transparent);
+}
+
+/* PHONE: stack each row into a labelled card (item: "different on mobile").
+   A 4-5 column table cannot show a header row and its cells at 390px without
+   squashing both into unreadable slivers. Below the phone breakpoint every row
+   becomes a card and every value prints its column name via
+   `content: attr(data-label)` (stamped by remarkTableLabels). The real <thead>
+   stays in the DOM (visually clipped, not display:none) and the ARIA roles +
+   `scope=col` on the elements survive `display:block`, so a screen reader still
+   reads proper column headers. 767px is the repo's phone gate (below DRAWER_MAX,
+   the same line used by the keyboard/chrome rules above). */
+@media (max-width: 767px) {
+  .md-table-scroll {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: visible;
+  }
+  .md table,
+  .md tbody,
+  .md tr,
+  .md td {
+    display: block;
+    width: 100%;
+  }
+  .md thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+  .md tr {
+    margin: 0.55em 0;
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+  }
+  .md tr:first-child {
+    margin-top: 0;
+  }
+  .md td {
+    position: relative;
+    padding: 0.4em 0.7em 0.4em 42%;
+    border: 0;
+    border-bottom: var(--border-width) solid var(--border);
+    min-height: 1.6em;
+  }
+  .md tr td:last-child {
+    border-bottom: 0;
+  }
+  .md td::before {
+    content: attr(data-label);
+    position: absolute;
+    left: 0.7em;
+    top: 0.4em;
+    width: 38%;
+    padding-right: 0.7em;
+    box-sizing: border-box;
+    font-weight: 600;
+    color: var(--fg-soft);
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+  /* A cell with no header (row longer than the header, or a malformed table):
+     no label gutter, value spans the whole card. */
+  .md td:not([data-label]) {
+    padding-left: 0.7em;
+  }
+  .md td:not([data-label])::before {
+    content: none;
+  }
+  /* Zebra is per-card noise once rows are bordered cards. */
+  .md tr:nth-child(even) td {
+    background: transparent;
+  }
 }
 .md img {
   max-width: 100%;
