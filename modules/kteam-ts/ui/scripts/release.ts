@@ -40,7 +40,7 @@ export const OUT_DIR_ENV = 'KTEAM_OUT_DIR';
 
 export const DEFAULT_OUT_DIR = '../ui-dist';
 
-export const FAMILIES = ['studio', 'mission', 'neo', 'ember', 'contrast'] as const;
+export const FAMILIES = ['studio', 'mission', 'neo', 'ember', 'contrast', 'notebook'] as const;
 export const MODES = ['light', 'dark'] as const;
 export type Family = (typeof FAMILIES)[number];
 export type Mode = (typeof MODES)[number];

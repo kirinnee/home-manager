@@ -112,7 +112,7 @@ export function buildOfflineHtml(
       // Same contract as index.html's pre-paint bootstrap, minimised: resolve
       // the stored preference to one data-theme attribute before first paint.
       (function () {
-        var FAMILIES = ['studio', 'mission', 'neo', 'ember', 'contrast'];
+        var FAMILIES = ['studio', 'mission', 'neo', 'ember', 'contrast', 'notebook'];
         var MODES = ['system', 'light', 'dark'];
         var family = 'studio';
         var mode = 'system';

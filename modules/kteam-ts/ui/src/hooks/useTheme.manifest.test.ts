@@ -47,7 +47,8 @@ describe('manifestHrefFor', () => {
     let href = `/${manifestName('studio', 'light', RELEASE)}`;
     for (const family of FAMILIES) href = manifestHrefFor(href, family, 'dark');
     for (const family of FAMILIES) href = manifestHrefFor(href, family, 'light');
-    expect(href).toBe(`/${manifestName('contrast', 'light', RELEASE)}`);
+    const last = FAMILIES[FAMILIES.length - 1]!;
+    expect(href).toBe(`/${manifestName(last, 'light', RELEASE)}`);
   });
 
   // Returns the input rather than fabricating a URL: a dev server has no
