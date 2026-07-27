@@ -7,6 +7,7 @@ import type { KTeamEvent, RuntimeControlRequest, SendRequest, StartSessionReques
 import { WARDEN_LABEL } from './warden-detect';
 import { FsError, type FsDiffView, type FsFileView, type FsListing } from './fs';
 import { GitError, type GitChangesView } from './git';
+import type { SttService } from './stt-service';
 
 const view: SessionView = {
   directory: '/tmp/kteam/s1',
@@ -572,6 +573,91 @@ describe('kteam daemon API', () => {
       body: JSON.stringify({ agent: 'claude-auto-glm52b' }),
     });
     expect(service.lastMigrate?.allowContextDowngrade).toBeUndefined();
+  });
+});
+
+describe('STT API integration', () => {
+  function fakeStt() {
+    const publicCalls: Array<{ method: string; path: string; range: string | null }> = [];
+    const apiCalls: Array<{ method: string; path: string }> = [];
+    const service: SttService = {
+      status: async () => {
+        throw new Error('status is not used by this routing fake');
+      },
+      handlePublicModel: async (request, url) => {
+        publicCalls.push({ method: request.method, path: url.pathname, range: request.headers.get('range') });
+        return new Response(request.method === 'HEAD' ? null : 'model-bytes', { status: 200 });
+      },
+      handleApi: async (request, url) => {
+        apiCalls.push({ method: request.method, path: url.pathname });
+        return new Response(JSON.stringify({ ok: true }), {
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+      close: async () => {},
+    };
+    return { service, publicCalls, apiCalls };
+  }
+
+  test('public model GET, HEAD, and range requests bypass the SPA and authentication', async () => {
+    const stt = fakeStt();
+    const server = startApiServer({
+      host: '127.0.0.1',
+      port: 0,
+      token: 'secret',
+      service: new FakeService(),
+      stt: stt.service,
+    });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}`;
+
+    expect((await fetch(`${base}/stt-models/browser-fixture/vocab.txt`)).status).toBe(200);
+    expect((await fetch(`${base}/stt-models/browser-fixture/vocab.txt`, { method: 'HEAD' })).status).toBe(200);
+    expect(
+      (
+        await fetch(`${base}/stt-models/browser-fixture/vocab.txt`, {
+          headers: { range: 'bytes=0-3' },
+        })
+      ).status,
+    ).toBe(200);
+    expect(stt.publicCalls).toEqual([
+      { method: 'GET', path: '/stt-models/browser-fixture/vocab.txt', range: null },
+      { method: 'HEAD', path: '/stt-models/browser-fixture/vocab.txt', range: null },
+      { method: 'GET', path: '/stt-models/browser-fixture/vocab.txt', range: 'bytes=0-3' },
+    ]);
+  });
+
+  test('authenticated STT calls reach the service while unauthenticated and warden calls do not', async () => {
+    const stt = fakeStt();
+    const server = startApiServer({
+      host: '127.0.0.1',
+      port: 0,
+      token: 'secret',
+      wardenToken: 'warden',
+      service: new FakeService(),
+      stt: stt.service,
+    });
+    servers.push(server);
+    const url = `http://127.0.0.1:${server.port}/v1/stt/status`;
+
+    expect((await fetch(url)).status).toBe(401);
+    expect((await fetch(url, { headers: { authorization: 'Bearer warden' } })).status).toBe(403);
+    expect((await fetch(url, { headers: { authorization: 'Bearer secret' } })).status).toBe(200);
+    expect(stt.apiCalls).toEqual([{ method: 'GET', path: '/v1/stt/status' }]);
+  });
+
+  test('omitting STT returns the structured unknown-route response', async () => {
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service: new FakeService() });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}`;
+
+    const publicResponse = await fetch(`${base}/stt-models/browser-fixture/vocab.txt`);
+    expect(publicResponse.status).toBe(404);
+    expect(((await publicResponse.json()) as { code?: string }).code).toBe('unknown_route');
+
+    const apiResponse = await fetch(`${base}/v1/stt/status`, { headers: { authorization: 'Bearer secret' } });
+    expect(apiResponse.status).toBe(404);
+    expect(((await apiResponse.json()) as { code?: string }).code).toBe('unknown_route');
   });
 });
 

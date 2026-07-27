@@ -7,6 +7,7 @@ import { ensureDaemonToken, ensureWardenToken, loadDaemonConfig } from './daemon
 import { DaemonService } from './daemon-service';
 import { createPaths } from './paths';
 import { SessionManager } from './session-manager';
+import { createSttService } from './stt-service';
 
 const paths = createPaths();
 await mkdir(paths.daemon, { recursive: true, mode: 0o700 });
@@ -67,12 +68,13 @@ const manager = await SessionManager.create(paths, {
     return true;
   },
 });
+const stt = createSttService({ paths });
 // Retry EADDRINUSE: a dying predecessor (service-manager restart) can hold the
 // port for seconds while it drains; give it up to 30 s before failing.
 const server = await bindWithRetry(() =>
-  startApiServer({ host: config.host, port: config.port, token, wardenToken, service: manager }),
+  startApiServer({ host: config.host, port: config.port, token, wardenToken, service: manager, stt }),
 ).catch(async error => {
-  await manager.close();
+  await Promise.allSettled([manager.close(), stt.close()]);
   throw error;
 });
 // Write the pid file only AFTER the bind succeeded — a loser of the bind race
@@ -90,7 +92,7 @@ const stop = async (reason: string) => {
   // and a shutdown that outlives the service manager's timeout is SIGKILLed
   // mid-write. Give the drain a deadline and exit cleanly either way.
   const drained = await Promise.race([
-    manager.close().then(() => true),
+    Promise.all([manager.close(), stt.close()]).then(() => true),
     Bun.sleep(SHUTDOWN_GRACE_MS).then(() => false),
   ]).catch(error => {
     console.error(`kteamd: shutdown drain failed: ${String(error)}`);
