@@ -32,6 +32,7 @@ import { useLayoutMode } from './hooks/useLayoutMode';
 import { useServiceWorkerUpdate } from './hooks/useServiceWorkerUpdate';
 import { useChrome, useStore } from './lib/store';
 import { isSettingId, settingsHref, type SettingId } from './lib/settings';
+import { api } from './lib/api';
 
 // THE CHAT PAGE IS A LAZY CHUNK. It pulls in the whole reading stack — the
 // transcript, markdown, syntax highlighting, tool previews, the terminal view —
@@ -55,6 +56,13 @@ const SessionChatPage = lazy(() =>
   }),
 );
 
+const TasksPage = lazy(() =>
+  import('./pages/TasksPage').then(module => {
+    if (!module) throw new Error('kteam: the tasks chunk failed to load');
+    return { default: module.TasksPage };
+  }),
+);
+
 /** How many session pages stay mounted at once (the current one plus the one
  *  you most recently came from — enough for back-and-forth, bounded). */
 const MAX_MOUNTED_SESSIONS = 2;
@@ -74,6 +82,20 @@ function ChatChunkFallback() {
           aria-hidden="true"
         />
         Loading conversation…
+      </span>
+    </div>
+  );
+}
+
+function TasksChunkFallback() {
+  return (
+    <div role="status" aria-live="polite" className="flex h-full min-h-0 w-full items-center justify-center">
+      <span className="inline-flex items-center gap-2 text-[13px] text-muted">
+        <span
+          className="inline-block h-3 w-3 animate-spin rounded-full border border-current border-t-transparent motion-reduce:animate-none"
+          aria-hidden="true"
+        />
+        Loading tasks…
       </span>
     </div>
   );
@@ -156,7 +178,7 @@ export function App() {
   const layout = useLayoutMode();
   const compactSession = Boolean(route.sessionId) && layout === 'drawer';
   const settingsAsSheet = Boolean(route.isSettings) && layout === 'drawer';
-  const fullWidthDestination = Boolean(route.isSettings || route.isWarden);
+  const fullWidthDestination = Boolean(route.isSettings || route.isWarden || route.isTasks);
   const store = useStore();
   const chrome = useChrome();
 
@@ -244,9 +266,11 @@ export function App() {
       ? [{ href: '/', label: 'Sessions' }, { label: 'Settings' }]
       : route.isWarden
         ? [{ href: '/', label: 'Sessions' }, { label: 'Warden' }]
-        : route.sessionId
-          ? [{ href: '/', label: 'Sessions' }, { label: route.sessionId }]
-          : [{ label: 'Sessions' }];
+        : route.isTasks
+          ? [{ href: '/', label: 'Sessions' }, { label: 'Tasks' }]
+          : route.sessionId
+            ? [{ href: '/', label: 'Sessions' }, { label: route.sessionId }]
+            : [{ label: 'Sessions' }];
 
   // ONE SCROLL REGION (round 4). The shell is exactly the viewport — `100dvh`,
   // so it tracks mobile browser chrome collapsing instead of overflowing behind
@@ -279,6 +303,7 @@ export function App() {
           onApplyUpdate={applyUpdate}
           settingsActive={route.isSettings}
           wardenActive={route.isWarden}
+          tasksActive={route.isTasks}
           showTheme={!route.isSettings}
         />
       )}
@@ -317,7 +342,13 @@ export function App() {
               other pane. Warden owns its own route now, so no Warden polling or
               markdown work remains mounted here. */}
           <SafePane
-            active={!route.sessionId && !route.isNew && !route.isWarden && (!route.isSettings || settingsAsSheet)}
+            active={
+              !route.sessionId &&
+              !route.isNew &&
+              !route.isWarden &&
+              !route.isTasks &&
+              (!route.isSettings || settingsAsSheet)
+            }
             onChunkError={raiseRecovery}
             onReload={applyUpdate}
           >
@@ -354,6 +385,13 @@ export function App() {
           {route.isWarden && (
             <SafePane active onChunkError={raiseRecovery} onReload={applyUpdate}>
               <WardenPage />
+            </SafePane>
+          )}
+          {route.isTasks && (
+            <SafePane active onChunkError={raiseRecovery} onReload={applyUpdate}>
+              <Suspense fallback={<TasksChunkFallback />}>
+                <TasksPage fetchTasks={api.listTasks} fetchTask={api.getTask} />
+              </Suspense>
             </SafePane>
           )}
         </main>

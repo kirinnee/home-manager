@@ -22,6 +22,17 @@ describe('fleet drawer focus policy', () => {
   });
 });
 
+describe('Tasks destinations', () => {
+  test('appear in both the rail and drawer with touch-safe targets', async () => {
+    const source = await Bun.file(new URL('./AgentSidebar.tsx', import.meta.url).pathname).text();
+    expect(source.match(/to="\/tasks"/g)?.length).toBe(2);
+    expect(source).toContain('aria-label="Open Tasks"');
+    expect(source).toContain('className="kt-btn h-[44px] w-[44px] justify-center !px-0"');
+    expect(source).toContain('grid-cols-3');
+    expect(source).toContain('to="/tasks" onClick={onNavigate} className="kt-btn min-h-[44px]');
+  });
+});
+
 const group = (name: string, path: string): SessionGroup => ({ name, path, rows: [] });
 
 describe('pinScopedFirst', () => {

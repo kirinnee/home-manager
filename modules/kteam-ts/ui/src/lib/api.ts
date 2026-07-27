@@ -110,6 +110,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  listTasks: () => request<unknown>('/v1/tasks'),
+  getTask: (id: string) => request<unknown>(`/v1/tasks/${encodeURIComponent(id)}`),
   listSessions: () => request<SessionView[]>('/v1/sessions'),
   getSession: (id: string) => request<SessionView>(`/v1/sessions/${encodeURIComponent(id)}`),
   chatHistory: (id: string, before?: number, limit = 200) => {

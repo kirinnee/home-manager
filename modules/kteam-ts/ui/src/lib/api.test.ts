@@ -92,6 +92,32 @@ describe('attachment API transport', () => {
   });
 });
 
+describe('task API transport', () => {
+  test('lists tasks through the read-only board route', async () => {
+    const captured = await captureRequest(
+      new Response(JSON.stringify({ tasks: [], parseErrors: 0 }), {
+        headers: { 'content-type': 'application/json' },
+      }),
+      () => api.listTasks(),
+    );
+    expect(String(captured.input)).toBe('/v1/tasks');
+    expect(captured.init?.method).toBeUndefined();
+    expect(captured.init?.body).toBeUndefined();
+  });
+
+  test('escapes task ids and never turns the detail adapter into a write', async () => {
+    const captured = await captureRequest(
+      new Response(JSON.stringify({ task: {}, activity: [] }), {
+        headers: { 'content-type': 'application/json' },
+      }),
+      () => api.getTask('F/1 ?'),
+    );
+    expect(String(captured.input)).toBe('/v1/tasks/F%2F1%20%3F');
+    expect(captured.init?.method).toBeUndefined();
+    expect(captured.init?.body).toBeUndefined();
+  });
+});
+
 describe('session administration API transport', () => {
   test('rename sends the caller-owned logical request id and exact patch', async () => {
     const captured = await captureRequest(

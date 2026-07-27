@@ -10,6 +10,10 @@ describe('parseRoute', () => {
     expect(parseRoute('/warden')).toEqual({ path: '/warden', isWarden: true });
   });
 
+  test('recognises Tasks as a first-class static route', () => {
+    expect(parseRoute('/tasks')).toEqual({ path: '/tasks', isTasks: true });
+  });
+
   test('keeps the existing session and new-session routes', () => {
     expect(parseRoute('/new')).toEqual({ path: '/new', isNew: true });
     expect(parseRoute('/session/ms123')).toEqual({ path: '/session/ms123', sessionId: 'ms123' });
@@ -17,5 +21,6 @@ describe('parseRoute', () => {
 
   test('unknown paths still fall back to the dashboard', () => {
     expect(parseRoute('/not-a-page')).toEqual({ path: '/' });
+    expect(parseRoute('/tasks/not-a-task-route')).toEqual({ path: '/' });
   });
 });

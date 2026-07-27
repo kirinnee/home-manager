@@ -2,7 +2,7 @@
 // banner when the daemon didn't substitute a token (i.e. we're on a non-loopback
 // origin).
 
-import { RefreshCw, Search, Settings, ShieldCheck } from 'lucide-react';
+import { ListTodo, RefreshCw, Search, Settings, ShieldCheck } from 'lucide-react';
 import { Link } from '../lib/router';
 import { ThemeToggle } from './ThemeToggle';
 import { HAS_TOKEN } from '../lib/api';
@@ -50,6 +50,11 @@ export const WARDEN_ENTRY = {
   title: 'Open fleet supervision and verdicts',
 } as const;
 
+export const TASKS_ENTRY = {
+  label: 'Tasks',
+  title: 'Open the task board',
+} as const;
+
 export function AppBar({
   crumbs,
   onOpenSidebar,
@@ -58,6 +63,7 @@ export function AppBar({
   onApplyUpdate,
   settingsActive = false,
   wardenActive = false,
+  tasksActive = false,
   showTheme = true,
 }: {
   crumbs: Array<{ href?: string; label: string }>;
@@ -74,6 +80,7 @@ export function AppBar({
   onApplyUpdate?: () => void;
   settingsActive?: boolean;
   wardenActive?: boolean;
+  tasksActive?: boolean;
   /** The flat Settings page owns theme controls while it is active. */
   showTheme?: boolean;
 }) {
@@ -169,6 +176,16 @@ export function AppBar({
             the stylesheet than Tailwind's `.hidden`, so putting both classes
             on one anchor makes the button win and leak into 390px chrome. */}
         <nav aria-label="Destinations" className="hidden shrink-0 items-center gap-xs min-[1100px]:flex">
+          <Link
+            to="/tasks"
+            aria-current={tasksActive ? 'page' : undefined}
+            aria-label={TASKS_ENTRY.label}
+            title={TASKS_ENTRY.title}
+            className="kt-btn kt-btn--sm shrink-0 items-center gap-xs"
+          >
+            <ListTodo size={14} aria-hidden="true" />
+            <span className="text-meta font-medium">Tasks</span>
+          </Link>
           <Link
             to="/warden"
             aria-current={wardenActive ? 'page' : undefined}
