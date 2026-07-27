@@ -12,6 +12,7 @@ import { actorContext, resolveApiActor, type TokenClass } from './actor-context'
 import { KTEAM_VERSION } from './version';
 import { FsError } from './fs';
 import { GitError } from './git';
+import type { SttService } from './stt-service';
 
 // Built chat UI (Vite output, committed): served when present; the legacy
 // single-file shell remains the fallback so the daemon never 404s its own UI.
@@ -54,6 +55,8 @@ export interface ApiServerOptions {
    *  every /v1/learning/* route answers 404. Kept separate from KTeamService so
    *  the learning surface never widens the warden-scoped token. */
   learning?: LearningService;
+  /** Optional batch dictation subsystem. When omitted, STT routes are 404. */
+  stt?: SttService;
 }
 
 /** The Codex discovery baseline is private launch bookkeeping, not session
@@ -88,6 +91,7 @@ async function wardenScopeDenial(
   // Learning is admin-only (it can accept/reject rules that steer the whole
   // fleet). Deny BEFORE the generic GET allowance below.
   if (pathname.startsWith('/v1/learning')) return forbidden('use the learning routes');
+  if (pathname === '/v1/stt' || pathname.startsWith('/v1/stt/')) return forbidden('use the dictation routes');
   // Working-tree bytes are admin-only. A warden oversees session conduct; it
   // does not need repository contents. This must stay before the generic GET
   // allowance or every filesystem route silently becomes warden-readable.
@@ -287,6 +291,10 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
     idleTimeout: 255,
     async fetch(request, serverInstance) {
       const url = new URL(request.url);
+      if (url.pathname === '/stt-models' || url.pathname.startsWith('/stt-models/')) {
+        if (!options.stt) return json(unknownRoute(request.method, url.pathname), 404);
+        return await options.stt.handlePublicModel(request, url);
+      }
       const isWebSocket =
         url.pathname === '/v1/events' && request.headers.get('upgrade')?.toLowerCase() === 'websocket';
       const bearer = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
@@ -378,6 +386,10 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
               },
             });
             return upgraded ? undefined : json({ error: 'websocket upgrade failed' }, 400);
+          }
+          if (url.pathname === '/v1/stt' || url.pathname.startsWith('/v1/stt/')) {
+            if (!options.stt) return json(unknownRoute(request.method, url.pathname), 404);
+            return await options.stt.handleApi(request, url);
           }
           if (url.pathname === '/v1/health' && request.method === 'GET') return json(await options.service.health());
           if (url.pathname === '/v1/search' && request.method === 'GET') {
