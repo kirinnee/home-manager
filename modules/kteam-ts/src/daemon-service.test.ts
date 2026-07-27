@@ -46,7 +46,15 @@ describe('Linux systemd user service', () => {
     const unit = await readFile(unitFile, 'utf8');
     expect(unit).toContain('ExecStart="/opt/K Team/kteamd%%canary"');
     expect(unit).toContain(`Environment="KTEAM_HOME=${teamHome.replace('%', '%%')}"`);
-    expect(unit).toContain(`StandardOutput="append:${path.join(teamHome, 'daemon', 'daemon.log').replace('%', '%%')}"`);
+    // UNQUOTED on purpose: systemd parses this as a file specifier and rejects
+    // a quoted one, dropping the setting and freezing daemon.log forever. The
+    // previous version of this assertion asserted the quoted form and so
+    // guarded the bug rather than the behaviour. `%` is still doubled because
+    // systemd expands specifiers in this value.
+    expect(unit).toContain(
+      `StandardOutput=append:${path.join(teamHome, 'daemon', 'daemon.log').replaceAll('%', '%%')}`,
+    );
+    expect(unit).not.toContain('StandardOutput="');
     // A healthy standalone daemon owning the port must not make Restart=always
     // re-spawn the unit forever (EXIT_ALREADY_RUNNING from daemon-boot.ts).
     expect(unit).toContain('RestartSec=2');

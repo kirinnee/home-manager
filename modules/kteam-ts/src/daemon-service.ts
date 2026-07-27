@@ -16,6 +16,28 @@ export interface DaemonServiceOptions {
   runner?: Runner;
 }
 
+/** `StandardOutput=` / `StandardError=` take a FILE SPECIFIER, not a quotable
+ *  argument. systemd parses `append:/path` structurally, so wrapping it in the
+ *  quotes `systemdQuote` adds makes the whole line unparseable: the unit loads
+ *  but journald logs "Failed to parse output specifier, ignoring" and the
+ *  setting is silently dropped.
+ *
+ *  The consequence is nastier than a lost setting. Output falls back to the
+ *  journal, `daemon.log` stops being written, and it FREEZES at whatever it
+ *  last held — so anyone debugging by reading that file is reading a fossil and
+ *  does not know it. A teammate lost time to exactly that today, reasoning
+ *  about five-day-old restart lines as if they were live.
+ *
+ *  No quoting here, therefore. `%` is still doubled because systemd expands
+ *  specifiers like `%h` in this value; a literal newline would corrupt the unit
+ *  and cannot be escaped in an unquoted setting, so it is refused outright
+ *  rather than written out to fail confusingly at load. */
+function systemdOutputSpec(value: string): string {
+  if (/[\n\r]/.test(value))
+    throw new Error(`kteamd unit: log path may not contain a newline: ${JSON.stringify(value)}`);
+  return value.replaceAll('%', '%%');
+}
+
 function systemdQuote(value: string): string {
   return `"${value
     .replaceAll('\\', '\\\\')
@@ -112,8 +134,8 @@ RestartPreventExitStatus=78
 KillMode=process
 Environment=${systemdQuote(`KTEAM_HOME=${this.paths.home}`)}
 Environment=${systemdQuote(`PATH=${process.env.PATH ?? ''}`)}
-StandardOutput=${systemdQuote(`append:${this.paths.daemonLog}`)}
-StandardError=${systemdQuote(`append:${this.paths.daemonLog}`)}
+StandardOutput=append:${systemdOutputSpec(this.paths.daemonLog)}
+StandardError=append:${systemdOutputSpec(this.paths.daemonLog)}
 
 [Install]
 WantedBy=default.target
