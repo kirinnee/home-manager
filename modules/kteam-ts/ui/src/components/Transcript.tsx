@@ -168,7 +168,7 @@
 // DOM (see SessionChatPage.loadOlder).
 
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import { ArrowDown, Quote } from 'lucide-react';
+import { ArrowDown, Pin, Quote } from 'lucide-react';
 import type { TranscriptBlock } from '../lib/transcript';
 import { TranscriptRow } from './TranscriptRow';
 import { useInputModality } from '../hooks/useInputModality';
@@ -176,6 +176,7 @@ import { useTranscriptHold } from '../hooks/useLiveTick';
 import { registerJumpController, type JumpOutcome } from '../lib/pin-bridge';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { insertQuoteIntoComposer } from '../lib/quote';
+import { blockIdOfSelection, pinSelection } from '../lib/pin-selection';
 
 interface Props {
   blocks: TranscriptBlock[];
@@ -419,8 +420,12 @@ function Inner(props: Props) {
   // selection TEXT up front and quote through the same insertQuoteIntoComposer,
   // so focusing the composer (which collapses the live selection) can never lose
   // the text. The captured text is stored, never re-read at insert time.
-  const [quoteMenu, setQuoteMenu] = useState<{ x: number; y: number; text: string } | null>(null);
-  const [touchQuote, setTouchQuote] = useState<{ x: number; y: number; text: string } | null>(null);
+  const [quoteMenu, setQuoteMenu] = useState<{ x: number; y: number; text: string; blockId: string | null } | null>(
+    null,
+  );
+  const [touchQuote, setTouchQuote] = useState<{ x: number; y: number; text: string; blockId: string | null } | null>(
+    null,
+  );
   const quoteTriggerRef = useRef<HTMLElement | null>(null);
 
   const last = blocks.length - 1;
@@ -885,7 +890,11 @@ function Inner(props: Props) {
   // The quotable text of the current selection AND where it sits — captured
   // together so the touch affordance can anchor to the range and the desktop
   // menu can quote the same text. Returns null when there is nothing to quote.
-  const readTranscriptSelection = useCallback((): { text: string; rect: DOMRect | null } | null => {
+  const readTranscriptSelection = useCallback((): {
+    text: string;
+    rect: DOMRect | null;
+    blockId: string | null;
+  } | null => {
     const v = viewportRef.current;
     if (!v || typeof window === 'undefined') return null;
     const sel = window.getSelection();
@@ -897,13 +906,25 @@ function Inner(props: Props) {
     } catch {
       rect = null;
     }
-    return { text, rect };
+    // Cheap provenance: which transcript block the snippet sits in, off the
+    // row's existing data-block-id. Used only for a pin's "jump back" action.
+    const blockId = sel ? blockIdOfSelection(sel.anchorNode, sel.focusNode, v) : null;
+    return { text, rect, blockId };
   }, []);
 
   const runQuote = useCallback((text: string) => {
     setQuoteMenu(null);
     setTouchQuote(null);
     insertQuoteIntoComposer(text);
+  }, []);
+
+  // Pin the same captured snippet as a note for the foreground session. Reading
+  // it up front means a collapse-on-tap cannot lose it; blockId preserves the
+  // source jump.
+  const runPin = useCallback((text: string, blockId: string | null) => {
+    setQuoteMenu(null);
+    setTouchQuote(null);
+    pinSelection(text, blockId);
   }, []);
 
   // DESKTOP: right-click over a selection opens the shared menu. With NO
@@ -918,7 +939,7 @@ function Inner(props: Props) {
       event.preventDefault();
       quoteTriggerRef.current = event.currentTarget;
       setTouchQuote(null);
-      setQuoteMenu({ x: event.clientX, y: event.clientY, text: found.text });
+      setQuoteMenu({ x: event.clientX, y: event.clientY, text: found.text, blockId: found.blockId });
     },
     [readTranscriptSelection],
   );
@@ -948,7 +969,7 @@ function Inner(props: Props) {
       const vr = v?.getBoundingClientRect();
       const x = found.rect ? found.rect.left + found.rect.width / 2 : (vr?.left ?? 0) + 48;
       const y = found.rect ? found.rect.top : (vr?.top ?? 0) + 48;
-      setTouchQuote({ x, y, text: found.text });
+      setTouchQuote({ x, y, text: found.text, blockId: found.blockId });
     };
     const schedule = () => {
       if (timer !== null) clearTimeout(timer);
@@ -977,6 +998,12 @@ function Inner(props: Props) {
           icon: <Quote size={13} aria-hidden="true" />,
           onSelect: () => runQuote(quoteMenu.text),
         },
+        {
+          key: 'pin',
+          label: 'Pin selection',
+          icon: <Pin size={13} aria-hidden="true" />,
+          onSelect: () => runPin(quoteMenu.text, quoteMenu.blockId),
+        },
       ]
     : [];
 
@@ -984,7 +1011,7 @@ function Inner(props: Props) {
   // selection when the range is too near the top to fit the button above it.
   const touchQuotePos = (() => {
     if (!touchQuote || typeof window === 'undefined') return null;
-    const width = 104;
+    const width = 176;
     const left = Math.min(Math.max(8, touchQuote.x - width / 2), Math.max(8, window.innerWidth - width - 8));
     const top = touchQuote.y > 60 ? touchQuote.y - 48 : touchQuote.y + 24;
     return { left, top };
@@ -1186,20 +1213,33 @@ function Inner(props: Props) {
         </div>
       )}
 
-      {/* TOUCH: the "Quote" affordance for a settled selection. A single button
-          (not a menu): tapping it quotes the text captured when it appeared, so
+      {/* TOUCH: the settled-selection affordance — Quote AND Pin, side by side.
+          Buttons (not a menu) act on the text captured when they appeared, so
           the tap collapsing the selection cannot lose it. */}
       {touchQuote && touchQuotePos && (
-        <button
-          type="button"
-          onClick={() => runQuote(touchQuote.text)}
-          aria-label="Quote the selected text in the composer"
-          className="fixed z-40 inline-flex min-h-[44px] items-center gap-xs rounded-full border border-accent-border bg-accent px-3 text-[13px] font-semibold text-accent-fg shadow-popover"
+        <div
+          className="fixed z-40 inline-flex items-center gap-1"
           style={{ left: touchQuotePos.left, top: touchQuotePos.top }}
         >
-          <Quote size={14} aria-hidden="true" />
-          Quote
-        </button>
+          <button
+            type="button"
+            onClick={() => runQuote(touchQuote.text)}
+            aria-label="Quote the selected text in the composer"
+            className="inline-flex min-h-[44px] items-center gap-xs rounded-full border border-accent-border bg-accent px-3 text-[13px] font-semibold text-accent-fg shadow-popover"
+          >
+            <Quote size={14} aria-hidden="true" />
+            Quote
+          </button>
+          <button
+            type="button"
+            onClick={() => runPin(touchQuote.text, touchQuote.blockId)}
+            aria-label="Pin the selected text"
+            className="inline-flex min-h-[44px] items-center gap-xs rounded-full border border-border bg-surface px-3 text-[13px] font-semibold text-fg shadow-popover"
+          >
+            <Pin size={14} aria-hidden="true" />
+            Pin
+          </button>
+        </div>
       )}
 
       {/* DESKTOP: the shared context menu, over a right-clicked selection. */}
