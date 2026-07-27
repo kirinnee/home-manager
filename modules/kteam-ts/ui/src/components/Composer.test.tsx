@@ -465,16 +465,24 @@ describe('the mandatory touch send cluster', () => {
     expect(glyphOf(send)).not.toBe(glyphOf(queue));
   });
 
-  test('touch Interrupt & send keeps its visible word and a distinguishing danger tone', () => {
-    const button = buttonWithLabel(
-      renderComposer({ busy: true, onInterruptAndSend: () => {} }),
-      'Interrupt the current turn and send this message now',
-    );
-    // The one destructive action keeps a word (no hover tooltip on a phone) and
-    // a danger tone, unlike the icon-only Send/Queue.
-    expect(button).toContain('<span>Interrupt &amp; send</span>');
+  test('touch Interrupt & send is icon-only but keeps its name and a distinguishing danger tone', () => {
+    const html = renderComposer({ busy: true, onInterruptAndSend: () => {} });
+    const button = buttonWithLabel(html, 'Interrupt the current turn and send this message now');
+    // Icon-only on touch, like Send/Queue: the word is sr-only, never dropped.
+    expect(button).toContain('<span class="sr-only">Interrupt &amp; send</span>');
+    expect(button).not.toContain('<span>Interrupt &amp; send</span>');
+    // Distinct from the safe Queue by tone AND glyph — the two phone signals.
     expect(button).toContain('data-variant="danger"');
-    expect(button).toContain('<svg');
+    const queue = buttonWithLabel(html, 'Queue this message for the next turn');
+    const glyphOf = (b: string) => b.match(/class="lucide[^"]*"/)?.[0];
+    expect(glyphOf(button)).toBeDefined();
+    expect(glyphOf(button)).not.toBe(glyphOf(queue));
+  });
+
+  test('busy touch controls stack vertically as icons', () => {
+    const html = renderComposer({ compact: true, busy: true, onInterruptAndSend: () => {}, context: { model: 'm' } });
+    // The container flanking the textarea is a column, not a row.
+    expect(html).toContain('flex shrink-0 flex-col items-end');
   });
 
   test('busy interrupt preserves Queue as the safe Enter-equivalent action', () => {

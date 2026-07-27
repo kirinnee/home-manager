@@ -42,7 +42,7 @@ export interface ThemeFamily {
 /** Metadata for the picker. Order is the order shown. */
 export const THEME_FAMILIES: readonly ThemeFamily[] = [
   { id: 'studio', label: 'Studio', blurb: 'The house look — indigo on cool zinc.' },
-  { id: 'mission', label: 'Mission Control', blurb: 'Condensed telemetry, cyan hairlines, scanlines.' },
+  { id: 'mission', label: 'Mission Control', blurb: 'A ruled instrument grid, square mono controls, cyan hairlines.' },
   { id: 'neo', label: 'Neo-Brutalism', blurb: 'Hard rules, flat offset shadows, AA-checked.' },
   { id: 'ember', label: 'Ember', blurb: 'Warm low-blue-light paper for long evenings.' },
   { id: 'contrast', label: 'High Contrast', blurb: 'Maximum legibility, AAA-targeted, no effects.' },

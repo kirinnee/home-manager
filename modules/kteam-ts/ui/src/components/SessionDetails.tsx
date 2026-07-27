@@ -61,6 +61,8 @@ import { useStore } from '../lib/store';
 import { MODE_HINT } from './ModeBadge';
 import { StatusMark } from './StatusMark';
 import { useDialogFocus } from '../hooks/useDialogFocus';
+import { SheetTabs, sheetPanelId, sheetTabId, type SheetTabSpec } from './SheetTabs';
+import { DETAILS_TAB_ORDER, useDetailsTab, type DetailsTab } from '../hooks/useDetailsTab';
 
 export type LiveStatus = 'connecting' | 'open' | 'closed';
 
@@ -401,6 +403,30 @@ export function SessionDetails({
   }, [observedModel, state.observedModelAt]);
   const observedPresentation = observedModelPresentation(observedModel, modelVerificationPending);
 
+  // TABS. The sheet had become one long undifferentiated scroll — status,
+  // identity, runtime, progress, budget, controls all stacked — which is exactly
+  // what "it's too confusing" named. It is now four labelled tabs: Identity ·
+  // Runtime · Progress · Budget, with Lineage folded under Identity. The two
+  // things you might have opened the sheet to DO — switch view, stop/resume the
+  // session — are pinned ABOVE the tablist so they never need a tab switch.
+  //
+  // Reopen behaviour: the sheet returns to the tab you last left it on for THIS
+  // session (least surprising — you left it on Budget, it opens on Budget); a
+  // session you have not opened before starts on Identity; a reload forgets
+  // everything (the memory is in-process only, see useDetailsTab).
+  const [tab, setTab] = useDetailsTab(config.id, open);
+  const tabs: SheetTabSpec<DetailsTab>[] = [
+    { key: 'identity', label: 'Identity', icon: <UserRound size={13} aria-hidden="true" /> },
+    {
+      key: 'runtime',
+      label: 'Runtime',
+      icon:
+        config.harness === 'claude' ? <Bot size={13} aria-hidden="true" /> : <Sparkles size={13} aria-hidden="true" />,
+    },
+    { key: 'progress', label: 'Progress', icon: <Activity size={13} aria-hidden="true" /> },
+    { key: 'budget', label: 'Budget', icon: <Gauge size={13} aria-hidden="true" /> },
+  ];
+
   return (
     <BottomSheet
       id={id}
@@ -423,153 +449,187 @@ export function SessionDetails({
         </div>
       </div>
 
-      {/* The sheet's OWN scroller. The page below still owns exactly one
-          (the transcript); this one is an overlay and never nests inside it. */}
-      <div className="min-h-0 flex-1 overflow-y-auto scroll-thin">
-        <div className="mx-auto grid w-full max-w-2xl grid-cols-1 sm:grid-cols-2">
-          {viewSwitcher && (
-            <section className="kt-details__group sm:col-span-2">
-              <h2
-                className={cn(
-                  'kt-label m-0 mb-xs flex items-center gap-xs border-l-heavy pl-cell-x',
-                  GROUP_TONE.identity,
-                )}
-              >
-                <Activity size={13} aria-hidden="true" />
-                View
-              </h2>
-              <div className="flex items-center">{viewSwitcher}</div>
-            </section>
-          )}
-          {actions && (
-            <section className="kt-details__group sm:col-span-2">
-              <h2
-                className={cn(
-                  'kt-label m-0 mb-xs flex items-center gap-xs border-l-heavy pl-cell-x',
-                  GROUP_TONE.progress,
-                )}
-              >
-                <Zap size={13} aria-hidden="true" />
-                Controls
-              </h2>
-              <div className="flex flex-wrap items-center gap-sm">{actions}</div>
-            </section>
-          )}
-
-          <Group
-            icon={<UserRound size={13} aria-hidden="true" />}
-            title="Identity"
-            tone="identity"
-            headerAction={
-              onRename ? (
-                <button
-                  type="button"
-                  onClick={onRename}
-                  aria-label="Edit session identity"
-                  title="Rename task, callsign, or detach from parent"
-                  className="inline-flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-control border border-border text-muted hover:border-accent hover:text-accent"
+      {/* PINNED ABOVE THE TABLIST: view switch + session controls. A sheet opened
+          to stop a running session must not need a tab switch to reach Stop, and
+          switching Chat/Terminal is navigation, not metadata. */}
+      {(viewSwitcher || actions) && (
+        <div className="shrink-0 border-b border-border-soft">
+          <div className="mx-auto grid w-full max-w-2xl grid-cols-1 gap-sm px-panel py-row-y sm:grid-cols-2">
+            {viewSwitcher && (
+              <section className="min-w-0">
+                <h2
+                  className={cn(
+                    'kt-label m-0 mb-xs flex items-center gap-xs border-l-heavy pl-cell-x',
+                    GROUP_TONE.identity,
+                  )}
                 >
-                  <Pencil size={15} aria-hidden="true" />
-                </button>
-              ) : undefined
-            }
-          >
-            {/* Canonical copy/command value, e.g. `kteam send <teammate>`. */}
-            <Row label="Teammate" value={config.teammate} />
-            <Row label="Task" value={config.name} />
-            <Row label="Label" value={config.label} />
-            <Row label="Folder" value={config.cwd} mono />
-            <Row label="Session id" value={config.id} mono />
-            <Row label="Started" value={state.startedAt ? fmtAbsolute(state.startedAt) : undefined} mono />
-            {state.finishedAt && <Row label="Finished" value={fmtAbsolute(state.finishedAt)} mono />}
-          </Group>
+                  <Activity size={13} aria-hidden="true" />
+                  View
+                </h2>
+                <div className="flex items-center">{viewSwitcher}</div>
+              </section>
+            )}
+            {actions && (
+              <section className="min-w-0">
+                <h2
+                  className={cn(
+                    'kt-label m-0 mb-xs flex items-center gap-xs border-l-heavy pl-cell-x',
+                    GROUP_TONE.progress,
+                  )}
+                >
+                  <Zap size={13} aria-hidden="true" />
+                  Controls
+                </h2>
+                <div className="flex flex-wrap items-center gap-sm">{actions}</div>
+              </section>
+            )}
+          </div>
+        </div>
+      )}
 
-          <LineageGroup open={open} sessionId={config.id} parentId={config.parent} onNavigate={onClose} />
+      <div className="mx-auto w-full max-w-2xl shrink-0">
+        <SheetTabs sheetId={id} tabs={tabs} current={tab} order={DETAILS_TAB_ORDER} onChange={setTab} />
+      </div>
 
-          <Group
-            icon={
-              config.harness === 'claude' ? (
-                <Bot size={13} aria-hidden="true" />
-              ) : (
-                <Sparkles size={13} aria-hidden="true" />
-              )
-            }
-            title="Runtime"
-            tone="runtime"
-            footerAction={
-              <>
-                <RuntimeModelControls
-                  view={view}
-                  open={open}
-                  canControl={canControlRuntime}
-                  onModelSwitch={markModelVerificationPending}
-                  onOpenTerminal={onOpenTerminal}
-                  onClose={onClose}
-                />
-                {onMigrate && (
-                  <div className="mt-4 border-t border-border-soft pt-3">
-                    <h3 className="m-0 text-ui font-semibold text-fg">Move account + relaunch</h3>
-                    <p className="mt-1 text-meta leading-base text-muted">
-                      This is the existing destructive migration flow: it moves the account, stops this pane, and
-                      relaunches it. Use the in-place switch above when the account stays the same.
-                    </p>
+      {/* The sheet's OWN scroller, carrying the ONE selected tabpanel. The page
+          below still owns exactly one scroller (the transcript); this one is an
+          overlay and never nests inside it. Unselected panels are not rendered,
+          so their links never enter the dialog's focus trap and the Progress
+          1s ticker only runs while Progress is on screen. */}
+      <div className="min-h-0 flex-1 overflow-y-auto scroll-thin">
+        <div
+          role="tabpanel"
+          id={sheetPanelId(id, tab)}
+          aria-labelledby={sheetTabId(id, tab)}
+          tabIndex={0}
+          className="mx-auto w-full max-w-2xl focus:outline-none"
+        >
+          {tab === 'identity' && (
+            <div className="grid grid-cols-1 sm:grid-cols-2">
+              <Group
+                icon={<UserRound size={13} aria-hidden="true" />}
+                title="Identity"
+                tone="identity"
+                headerAction={
+                  onRename ? (
                     <button
                       type="button"
-                      onClick={onMigrate}
-                      className="kt-btn mt-3 flex min-h-[44px] w-full items-center justify-between gap-sm text-left"
+                      onClick={onRename}
+                      aria-label="Edit session identity"
+                      title="Rename task, callsign, or detach from parent"
+                      className="inline-flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-control border border-border text-muted hover:border-accent hover:text-accent"
                     >
-                      <span>Move account + relaunch…</span>
-                      <ServerCog size={15} aria-hidden="true" className="shrink-0" />
+                      <Pencil size={15} aria-hidden="true" />
                     </button>
-                  </div>
-                )}
-              </>
-            }
-          >
-            <Row label="CLI wrapper" value={config.binary} mono />
-            <Row label="Harness" value={config.harness} />
-            <Row label={observedPresentation.label} value={observedPresentation.value} mono />
-            {config.harness === 'codex' && <Row label="Last observed reasoning" value={observedReasoningEffort} mono />}
-            <Row
-              label="Model (launch request)"
-              value={requestedModel && requestedModel !== observedModel ? requestedModel : undefined}
-              mono
-            />
-            <Row label="Mode" value={config.mode} hint={MODE_HINT[config.mode]} />
-            <Row label="tmux session" value={config.tmuxSession} mono />
-            {config.remoteControl && (
-              <div className="flex items-baseline gap-sm">
-                <dt className="w-[104px] shrink-0 text-meta text-muted">Remote control</dt>
-                <dd className="m-0 min-w-0 flex-1 text-cell text-fg-soft">
-                  {state.remoteControlUrl ? (
-                    <a
-                      href={state.remoteControlUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      title={state.remoteControlUrl}
-                      className="inline-flex min-w-0 items-center gap-xs text-accent hover:underline"
-                    >
-                      <Radio size={11} aria-hidden="true" />
-                      <span className="min-w-0 truncate">open RC surface</span>
-                      <ExternalLink size={10} aria-hidden="true" />
-                    </a>
-                  ) : (
-                    <span className="text-faint" title="launched with --rc; the surface has not announced itself yet">
-                      enabled · link pending
-                    </span>
+                  ) : undefined
+                }
+              >
+                {/* Canonical copy/command value, e.g. `kteam send <teammate>`. */}
+                <Row label="Teammate" value={config.teammate} />
+                <Row label="Task" value={config.name} />
+                <Row label="Label" value={config.label} />
+                <Row label="Folder" value={config.cwd} mono />
+                <Row label="Session id" value={config.id} mono />
+                <Row label="Started" value={state.startedAt ? fmtAbsolute(state.startedAt) : undefined} mono />
+                {state.finishedAt && <Row label="Finished" value={fmtAbsolute(state.finishedAt)} mono />}
+              </Group>
+
+              <LineageGroup open={open} sessionId={config.id} parentId={config.parent} onNavigate={onClose} />
+            </div>
+          )}
+
+          {tab === 'runtime' && (
+            <Group
+              icon={
+                config.harness === 'claude' ? (
+                  <Bot size={13} aria-hidden="true" />
+                ) : (
+                  <Sparkles size={13} aria-hidden="true" />
+                )
+              }
+              title="Runtime"
+              tone="runtime"
+              footerAction={
+                <>
+                  <RuntimeModelControls
+                    view={view}
+                    open={open}
+                    canControl={canControlRuntime}
+                    onModelSwitch={markModelVerificationPending}
+                    onOpenTerminal={onOpenTerminal}
+                    onClose={onClose}
+                  />
+                  {onMigrate && (
+                    <div className="mt-4 border-t border-border-soft pt-3">
+                      <h3 className="m-0 text-ui font-semibold text-fg">Move account + relaunch</h3>
+                      <p className="mt-1 text-meta leading-base text-muted">
+                        This is the existing destructive migration flow: it moves the account, stops this pane, and
+                        relaunches it. Use the in-place switch above when the account stays the same.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={onMigrate}
+                        className="kt-btn mt-3 flex min-h-[44px] w-full items-center justify-between gap-sm text-left"
+                      >
+                        <span>Move account + relaunch…</span>
+                        <ServerCog size={15} aria-hidden="true" className="shrink-0" />
+                      </button>
+                    </div>
                   )}
-                </dd>
-              </div>
-            )}
-          </Group>
+                </>
+              }
+            >
+              <Row label="CLI wrapper" value={config.binary} mono />
+              <Row label="Harness" value={config.harness} />
+              <Row label={observedPresentation.label} value={observedPresentation.value} mono />
+              {config.harness === 'codex' && (
+                <Row label="Last observed reasoning" value={observedReasoningEffort} mono />
+              )}
+              <Row
+                label="Model (launch request)"
+                value={requestedModel && requestedModel !== observedModel ? requestedModel : undefined}
+                mono
+              />
+              <Row label="Mode" value={config.mode} hint={MODE_HINT[config.mode]} />
+              <Row label="tmux session" value={config.tmuxSession} mono />
+              {config.remoteControl && (
+                <div className="flex items-baseline gap-sm">
+                  <dt className="w-[104px] shrink-0 text-meta text-muted">Remote control</dt>
+                  <dd className="m-0 min-w-0 flex-1 text-cell text-fg-soft">
+                    {state.remoteControlUrl ? (
+                      <a
+                        href={state.remoteControlUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        title={state.remoteControlUrl}
+                        className="inline-flex min-w-0 items-center gap-xs text-accent hover:underline"
+                      >
+                        <Radio size={11} aria-hidden="true" />
+                        <span className="min-w-0 truncate">open RC surface</span>
+                        <ExternalLink size={10} aria-hidden="true" />
+                      </a>
+                    ) : (
+                      <span className="text-faint" title="launched with --rc; the surface has not announced itself yet">
+                        enabled · link pending
+                      </span>
+                    )}
+                  </dd>
+                </div>
+              )}
+            </Group>
+          )}
 
-          <Group icon={<Activity size={13} aria-hidden="true" />} title="Progress" tone="progress">
-            <ProgressRows view={view} liveStatus={liveStatus} />
-          </Group>
+          {tab === 'progress' && (
+            <Group icon={<Activity size={13} aria-hidden="true" />} title="Progress" tone="progress">
+              <ProgressRows view={view} liveStatus={liveStatus} />
+            </Group>
+          )}
 
-          <Group icon={<Gauge size={13} aria-hidden="true" />} title="Budget" tone="budget">
-            <BudgetRows view={view} quota={quota} />
-          </Group>
+          {tab === 'budget' && (
+            <Group icon={<Gauge size={13} aria-hidden="true" />} title="Budget" tone="budget">
+              <BudgetRows view={view} quota={quota} />
+            </Group>
+          )}
         </div>
       </div>
     </BottomSheet>
@@ -901,6 +961,7 @@ function Group({
   children,
   headerAction,
   footerAction,
+  as = 'h2',
 }: {
   icon: ReactNode;
   title: string;
@@ -908,12 +969,16 @@ function Group({
   children: ReactNode;
   headerAction?: ReactNode;
   footerAction?: ReactNode;
+  /** Lineage folds UNDER Identity inside its panel, so it is a subheading, not a
+   *  peer group. Everything else keeps the panel-level h2. Same visual class. */
+  as?: 'h2' | 'h3';
 }) {
+  const Heading = as;
   const heading = (
-    <h2 className={cn('kt-label m-0 flex items-center gap-xs border-l-heavy pl-cell-x', GROUP_TONE[tone])}>
+    <Heading className={cn('kt-label m-0 flex items-center gap-xs border-l-heavy pl-cell-x', GROUP_TONE[tone])}>
       {icon}
       {title}
-    </h2>
+    </Heading>
   );
   return (
     <section className="kt-details__group">
@@ -992,7 +1057,7 @@ function LineageGroup({
   };
 
   return (
-    <Group icon={<GitFork size={13} aria-hidden="true" />} title="Lineage" tone="lineage">
+    <Group icon={<GitFork size={13} aria-hidden="true" />} title="Lineage" tone="lineage" as="h3">
       {parent && (
         <div className="flex items-start gap-sm">
           <dt className="w-[104px] shrink-0 text-meta text-muted">Parent</dt>

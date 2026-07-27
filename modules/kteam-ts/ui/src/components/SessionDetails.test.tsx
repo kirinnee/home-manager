@@ -12,6 +12,7 @@ import {
   observedModelPresentation,
   resolveClaudeRuntimeModels,
 } from './SessionDetails';
+import { primeDetailsTab, resetDetailsTabMemory } from '../hooks/useDetailsTab';
 
 function view(harness: SessionView['config']['harness'] = 'codex'): SessionView {
   return {
@@ -213,8 +214,12 @@ describe('in-session runtime model controls', () => {
   });
 
   test('shows Codex’s reported reasoning as an observation, never as a Claude effort control', () => {
-    const details = (harness: SessionView['config']['harness']) =>
-      renderToStaticMarkup(
+    const details = (harness: SessionView['config']['harness']) => {
+      // The reasoning row lives on the Runtime tab; force it so the static
+      // render (which cannot click a tab) exercises that panel.
+      resetDetailsTabMemory();
+      primeDetailsTab('runtime-probe', 'runtime');
+      return renderToStaticMarkup(
         <SessionDetails
           id={`details-${harness}`}
           view={view(harness)}
@@ -225,9 +230,80 @@ describe('in-session runtime model controls', () => {
           canControlRuntime
         />,
       );
+    };
 
     expect(details('codex')).toContain('Last observed reasoning');
     expect(details('codex')).toContain('high');
     expect(details('claude')).not.toContain('Last observed reasoning');
+  });
+});
+
+describe('details sheet tabs', () => {
+  test('renders one tablist, four tabs, and only the selected panel', () => {
+    resetDetailsTabMemory();
+    const html = renderToStaticMarkup(
+      <SessionDetails
+        id="details-tabs"
+        view={view('codex')}
+        quota={null}
+        liveStatus="open"
+        open
+        onClose={() => undefined}
+        canControlRuntime
+      />,
+    );
+
+    expect(html).toContain('role="tablist"');
+    expect(html.match(/role="tab"/g)?.length).toBe(4);
+    // Exactly one tabpanel is in the DOM; unselected panels never render.
+    expect(html.match(/role="tabpanel"/g)?.length).toBe(1);
+    // Default is Identity: its rows are present, Budget's are not.
+    expect(html).toContain('Session id');
+    expect(html).not.toContain('5-hour window');
+    // The selected tab points at the rendered panel by id.
+    expect(html).toContain('id="details-tabs-tab-identity"');
+    expect(html).toContain('id="details-tabs-tabpanel-identity"');
+    expect(html).toContain('aria-controls="details-tabs-tabpanel-identity"');
+  });
+
+  test('two retained instances never collide on tab or panel ids', () => {
+    resetDetailsTabMemory();
+    const render = (id: string) =>
+      renderToStaticMarkup(
+        <SessionDetails
+          id={id}
+          view={view('codex')}
+          quota={null}
+          liveStatus="open"
+          open
+          onClose={() => undefined}
+          canControlRuntime
+        />,
+      );
+    const combined = render('paneA') + render('paneB');
+    const ids = [...combined.matchAll(/id="([^"]+)"/g)].map(match => match[1]);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  test('pins the view switch and controls above the tablist so Stop needs no tab', () => {
+    resetDetailsTabMemory();
+    const html = renderToStaticMarkup(
+      <SessionDetails
+        id="details-pinned"
+        view={view('codex')}
+        quota={null}
+        liveStatus="open"
+        open
+        onClose={() => undefined}
+        canControlRuntime
+        actions={<button type="button">Stop</button>}
+        viewSwitcher={<div>view-switch</div>}
+      />,
+    );
+    // Both pinned sections appear before the tablist in source order.
+    expect(html.indexOf('view-switch')).toBeGreaterThan(-1);
+    expect(html.indexOf('>Stop<')).toBeGreaterThan(-1);
+    expect(html.indexOf('view-switch')).toBeLessThan(html.indexOf('role="tablist"'));
+    expect(html.indexOf('>Stop<')).toBeLessThan(html.indexOf('role="tablist"'));
   });
 });

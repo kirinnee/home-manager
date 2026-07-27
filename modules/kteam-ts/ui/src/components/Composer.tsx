@@ -470,14 +470,13 @@ export function Composer({
       onClick={() => onInterruptAndSend?.()}
     >
       <ZapOff size={12} aria-hidden="true" />
-      {/* KEEPS ITS WORD on touch, unlike Send/Queue. This is the one
-          destructive-ish action here — it stops a running turn — and on a
-          phone there is no hover tooltip to disambiguate a lone glyph. The
-          user asked only for send/queue to go icon-only; a labelled,
-          danger-toned control is the safer default for the action that
-          can throw work away, and it only appears in the busy state so it
-          is not what eats the resting row. */}
-      <span>Interrupt &amp; send</span>
+      {/* ICON-ONLY ON TOUCH, like Send/Queue (the user asked for interrupt and
+          queue to both be icons and to stack vertically). It stays visually
+          DISTINCT from the safe Queue in two ways a phone can read without a
+          tooltip: a different glyph (ZapOff vs Clock) and the danger tone. The
+          word is moved to `sr-only`, never dropped, so `aria-label` + the hidden
+          word keep it named in every state. Desktop keeps the visible word. */}
+      <span className={cn(touchAffected && 'sr-only')}>Interrupt &amp; send</span>
     </Button>
   ) : null;
 
@@ -579,7 +578,13 @@ export function Composer({
               />
             </div>
             {(interruptControl || sendControl) && (
-              <div className="flex shrink-0 items-end gap-xs">
+              // STACKED VERTICAL ICONS on touch. Interrupt (destructive) sits on
+              // TOP and Queue/Send (the safe default) on the BOTTOM, nearest the
+              // thumb, so the reachable target is the non-destructive one. Two
+              // 44px icons in a column instead of a row leaves the textarea the
+              // full width it needs at 360px; the column only reaches its ~92px
+              // height in the busy state, when both controls are present.
+              <div className="flex shrink-0 flex-col items-end gap-xs">
                 {interruptControl}
                 {sendControl}
               </div>
