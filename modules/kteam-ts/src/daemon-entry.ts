@@ -12,6 +12,7 @@ import { createSttService } from './stt-service';
 import { PinApi, PinService } from './pins';
 import { TaskService } from './tasks';
 import { TaskApi } from './tasks-api';
+import { AnalyticsIndex } from './analytics-index';
 
 const paths = createPaths();
 await mkdir(paths.daemon, { recursive: true, mode: 0o700 });
@@ -92,21 +93,25 @@ const pinApi = new PinApi(
   }),
 );
 const stt = createSttService({ paths });
+let analytics: AnalyticsIndex | undefined;
+// Keep the bind ahead of analytics cold materialization. On a missing index,
+// session/event rows are folded by SQLite after the API is already reachable;
+// the object is then attached to this options bag in place.
+const apiOptions = {
+  host: config.host,
+  port: config.port,
+  token,
+  wardenToken,
+  service: manager,
+  learning,
+  stt,
+  tasks: taskApi,
+  pins: pinApi,
+  analytics,
+};
 // Retry EADDRINUSE: a dying predecessor (service-manager restart) can hold the
 // port for seconds while it drains; give it up to 30 s before failing.
-const server = await bindWithRetry(() =>
-  startApiServer({
-    host: config.host,
-    port: config.port,
-    token,
-    wardenToken,
-    service: manager,
-    learning,
-    stt,
-    tasks: taskApi,
-    pins: pinApi,
-  }),
-).catch(async error => {
+const server = await bindWithRetry(() => startApiServer(apiOptions)).catch(async error => {
   await Promise.allSettled([manager.close(), stt.close()]);
   throw error;
 });
@@ -114,6 +119,14 @@ const server = await bindWithRetry(() =>
 // must never overwrite the live daemon's pid.
 await writeFile(paths.pid, `${process.pid}\n`, { mode: 0o600 });
 console.log(`kteamd listening on http://${config.host}:${server.port} (pid ${process.pid})`);
+try {
+  analytics = new AnalyticsIndex({ databasePath: paths.database });
+  apiOptions.analytics = analytics;
+  analytics.start();
+} catch (error) {
+  // Analytics is additive: an index failure must not take down session control.
+  console.error(`kteamd analytics unavailable: ${error instanceof Error ? error.message : String(error)}`);
+}
 
 let stopping = false;
 const stop = async (reason: string) => {
@@ -126,7 +139,7 @@ const stop = async (reason: string) => {
   // and a shutdown that outlives the service manager's timeout is SIGKILLed
   // mid-write. Give the drain a deadline and exit cleanly either way.
   const drained = await Promise.race([
-    Promise.all([manager.close(), stt.close()]).then(() => true),
+    Promise.all([manager.close(), stt.close(), ...(analytics ? [analytics.close()] : [])]).then(() => true),
     Bun.sleep(SHUTDOWN_GRACE_MS).then(() => false),
   ]).catch(error => {
     console.error(`kteamd: shutdown drain failed: ${String(error)}`);

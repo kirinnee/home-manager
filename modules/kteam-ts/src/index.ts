@@ -43,6 +43,7 @@ import { isTaskError } from './tasks';
 import { parsePinCli, pinCliRequest, renderPinCli } from './pins-cli';
 import { isPinError } from './pins-types';
 import { parseTaskCli, renderTaskCli, taskCliRequest } from './tasks-cli';
+import { renderAnalytics } from './analytics-cli';
 
 const VERSION = KTEAM_VERSION;
 const paths = createPaths();
@@ -516,6 +517,21 @@ program
     const names = await (await client()).suggestNames(count);
     if (options.json) console.log(JSON.stringify(names, null, 2));
     else for (const name of names) console.log(name);
+  });
+
+program
+  .command('analytics')
+  .description('query historical analytics across all indexed kteam sessions')
+  .argument('[query]', 'PromQL-like query: avg by (model) {status=completed}')
+  .option('--json', 'print the complete API response as JSON')
+  .addHelpText(
+    'after',
+    `\nExamples:\n  kteam analytics\n  kteam analytics "count by (wrapper)"\n  kteam analytics "avg by (model, harness) {label=ui-r28-*}"\n`,
+  )
+  .action(async (query: string | undefined, options: { json?: boolean }) => {
+    const response = await (await client()).analytics(query);
+    if (options.json) console.log(JSON.stringify(response, null, 2));
+    else process.stdout.write(renderAnalytics(response));
   });
 
 program
