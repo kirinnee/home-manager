@@ -29,7 +29,17 @@
 // response to typing — a deliberate, user-driven change — and stops at
 // MAX_TEXTAREA_PX.
 
-import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from 'react';
 import { CornerDownLeft, Send, Clock, ZapOff, Paperclip } from 'lucide-react';
 import { Button } from './Primitives';
 import { cn, type Tone } from '../lib/utils';
@@ -38,6 +48,9 @@ import { useDebouncedEffect } from '../hooks/useDebounce';
 import { clearDraft, loadDraft, saveDraft } from '../lib/drafts';
 import { readInputModality, useInputModality } from '../hooks/useInputModality';
 import { useDictationBundle } from './DictationControl';
+import { ComposerAutocompletePopover } from './ComposerAutocomplete';
+import { useComposerAutocomplete, type ComposerAutocompleteController } from './composer-autocomplete-engine';
+import { createComposerAutocompleteProviders } from './composer-autocomplete-providers';
 
 /** Quiet window before a non-empty draft is written to storage. Debounced so a
  *  fast typist does not hit localStorage on every keystroke; short enough that a
@@ -317,6 +330,7 @@ export function ComposerTextarea({
   disabled,
   sending,
   placeholder,
+  autocomplete,
   readModality = readInputModality,
 }: {
   inputRef: RefObject<HTMLTextAreaElement | null>;
@@ -327,13 +341,29 @@ export function ComposerTextarea({
   disabled?: boolean;
   sending?: boolean;
   placeholder?: string;
+  /** The trigger engine, when this composer has one. Optional so an SSR or
+   *  test render stays a plain textarea with no behaviour change. */
+  autocomplete?: Pick<ComposerAutocompleteController, 'handleKeyDown' | 'syncSelection' | 'textareaAria'>;
   readModality?: typeof readInputModality;
 }) {
+  // The engine detects from `value` + caret, and the caret only moves in the
+  // DOM. Every event that can move it has to report, or the engine decides
+  // against a stale offset — the classic symptom being a list that opens one
+  // keystroke late.
+  const syncSelection = (target: HTMLTextAreaElement) =>
+    autocomplete?.syncSelection({ start: target.selectionStart ?? 0, end: target.selectionEnd ?? 0 });
   return (
     <textarea
       ref={inputRef}
       value={draft}
-      onChange={e => onDraftChange(e.target.value)}
+      {...(autocomplete?.textareaAria ?? {})}
+      onChange={e => {
+        onDraftChange(e.target.value);
+        syncSelection(e.target);
+      }}
+      onSelect={e => syncSelection(e.currentTarget)}
+      onClick={e => syncSelection(e.currentTarget)}
+      onKeyUp={e => syncSelection(e.currentTarget)}
       placeholder={placeholder ?? 'Message this teammate…'}
       rows={1}
       disabled={disabled || sending}
@@ -344,6 +374,12 @@ export function ComposerTextarea({
         'disabled:cursor-not-allowed',
       )}
       onKeyDown={e => {
+        // THE ENGINE GETS FIRST REFUSAL, and the early return is load-bearing.
+        // It returns true only when it consumed the key (Enter/Tab accepting a
+        // candidate, arrows moving the highlight, Escape closing). Without the
+        // return, Enter would accept a candidate AND send the message in the
+        // same keystroke.
+        if (autocomplete?.handleKeyDown(e)) return;
         handleComposerKeyDown({
           event: {
             key: e.key,
@@ -403,6 +439,30 @@ export function Composer({
       ? COMPACT_KEYBOARD_MAX_TEXTAREA_PX
       : COMPACT_MAX_TEXTAREA_PX;
 
+  // HARD REQUIREMENT: memoised on [sessionId], never built inline.
+  //
+  // The load effect in useComposerAutocomplete has `provider` in its dependency
+  // array. Passing a freshly-built array would give it new provider IDENTITIES
+  // on every render, so the effect would re-run, setState, re-render, and
+  // refetch — a network request per keystroke, with the skills and directory
+  // caches thrown away each time. That is the same shape as the per-render
+  // work that produced this session's worst bug.
+  //
+  // No sessionId (SSR, tests, a mount site that has not opted in) means no
+  // providers, and the engine is inert rather than broken.
+  const autocompleteProviders = useMemo(
+    () => (sessionId ? createComposerAutocompleteProviders({ sessionId }) : []),
+    [sessionId],
+  );
+  const autocomplete = useComposerAutocomplete({
+    value: draft,
+    onValueChange: onDraftChange,
+    inputRef: ref,
+    providers: autocompleteProviders,
+    // A disabled/sending composer is inert; a question form owns the input.
+    disabled: disabled || sending,
+  });
+
   // Keep focus on the composer across re-renders (the user types → state
   // updates → React re-renders → focus would otherwise jump to <body>).
   //
@@ -421,7 +481,11 @@ export function Composer({
         activeElementIsBody: document.activeElement === document.body,
         disabled,
         sending,
-        selectionHeld: documentSelectionHeld(),
+        // An open suggestion list is a held interaction just like a held text
+        // selection: this effect runs after EVERY render (no dep array, ~2-3×
+        // a second from fleet notifications), and refocusing mid-list is how
+        // the composer used to eat the reader's selection.
+        selectionHeld: documentSelectionHeld() || autocomplete.blocksRefocus,
       })
     ) {
       ref.current.focus();
@@ -500,7 +564,17 @@ export function Composer({
 
   const canSubmit = composerCanSubmit({ draft, disabled, sending, hasAttachments, attachmentsPending });
   const showInterrupt = Boolean(busy && !disabled && onInterruptAndSend);
-  const keyboardSubmit = selectComposerKeyboardSubmit({ busy, onSubmit, onInterruptAndSend });
+  // The agent writes files during the turn the reader just triggered, so the
+  // directory listings cached for `@` are stale the moment a message goes out.
+  const submitAndRefreshSuggestions = useCallback(() => {
+    for (const provider of autocompleteProviders) provider.reset?.();
+    onSubmit();
+  }, [autocompleteProviders, onSubmit]);
+  const keyboardSubmit = selectComposerKeyboardSubmit({
+    busy,
+    onSubmit: submitAndRefreshSuggestions,
+    onInterruptAndSend,
+  });
   const disabledReason = disabled
     ? 'Answer the question above first.'
     : sending
@@ -601,7 +675,7 @@ export function Composer({
       aria-label="Queue this message for the next turn"
       aria-describedby={disabledReason ? disabledReasonId : undefined}
       title="Deliver at the next turn boundary (safe)"
-      onClick={() => onSubmit()}
+      onClick={() => submitAndRefreshSuggestions()}
     >
       <Clock size={12} aria-hidden="true" />
       {/* Icon-only on touch (the word eats the row on a phone); desktop
@@ -624,7 +698,7 @@ export function Composer({
       aria-label="Send this message"
       aria-describedby={disabledReason ? disabledReasonId : undefined}
       title="Send now"
-      onClick={() => onSubmit()}
+      onClick={() => submitAndRefreshSuggestions()}
     >
       <Send size={12} aria-hidden="true" />
       {/* Touch-only branch, so always icon-only: the glyph carries the
@@ -638,7 +712,11 @@ export function Composer({
     <div
       data-density-region="composer"
       className={cn(
-        'kt-composer transition-colors motion-reduce:transition-none',
+        // `relative` is what lets the suggestion list anchor to the TOP edge of
+        // the composer. It opens upward, over the transcript, so it can never
+        // be covered by a software keyboard — the placement requirement the
+        // whole feature is judged on.
+        'kt-composer relative transition-colors motion-reduce:transition-none',
         compact && 'kt-composer--compact',
         disabled && 'opacity-60',
       )}
@@ -662,6 +740,10 @@ export function Composer({
         onFiles(files);
       }}
     >
+      {/* Rendered ONCE for both layouts: it is positioned against the composer
+          root, not against either textarea, so the phone dock and the desktop
+          form share it. */}
+      <ComposerAutocompletePopover controller={autocomplete} />
       {attachmentSlot}
       {/* The dictation mini panel is fixed outside the composer flow, so it
           renders once regardless of layout and paints nothing while hidden. */}
@@ -717,6 +799,7 @@ export function Composer({
                 disabled={disabled}
                 sending={sending}
                 placeholder={placeholder}
+                autocomplete={autocomplete}
               />
             </div>
             {(interruptControl || sendControl) && (
@@ -787,6 +870,7 @@ export function Composer({
             disabled={disabled}
             sending={sending}
             placeholder={placeholder}
+            autocomplete={autocomplete}
           />
 
           {disabledReason && (

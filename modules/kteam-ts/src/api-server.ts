@@ -12,6 +12,7 @@ import { actorContext, resolveApiActor, type TokenClass } from './actor-context'
 import { KTEAM_VERSION } from './version';
 import { FsError } from './fs';
 import { GitError } from './git';
+import { listSkills } from './skills';
 import type { SttService } from './stt-service';
 import type { TaskApi } from './tasks-api';
 import { resolveTaskActor, taskApiRequestFrom } from './tasks-api';
@@ -609,6 +610,20 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           };
 
           if (!action && request.method === 'GET') return json(await options.service.get(id));
+          // The composer's `/` catalog. Reports only FACTS the daemon knows:
+          // which harness owns this session's account, and what its SKILL.md
+          // manifests actually said. How a skill is INSERTED is presentation
+          // and belongs to the client — Claude invokes `/name`, Codex browses
+          // with `/skills` and invokes with `$name`, and baking either form
+          // into the wire response would make the daemon the authority on a
+          // harness convention it does not control.
+          if (action === 'skills' && request.method === 'GET') {
+            const view = await options.service.get(id);
+            return json({
+              harness: view.config.harness,
+              skills: await listSkills(view.config.harnessHome),
+            });
+          }
           if (!action && request.method === 'DELETE') {
             await options.service.remove(
               id,

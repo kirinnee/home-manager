@@ -24,7 +24,7 @@ describe('shared settings catalog', () => {
       {
         id: 'open-settings',
         label: 'Open settings',
-        description: 'Appearance, text size, theme, and dashboard density.',
+        description: 'Appearance, text size, conversation width, theme, and dashboard density.',
         settingId: null,
       },
     ]);
@@ -33,6 +33,8 @@ describe('shared settings catalog', () => {
   test('searches the same catalog and targets the matching control', () => {
     expect(settingsPaletteEntries('text size')[0]?.settingId).toBe('text-size');
     expect(settingsPaletteEntries('density')[0]?.settingId).toBe('density');
+    expect(settingsPaletteEntries('conversation width')[0]?.settingId).toBe('chat-width');
+    expect(settingsPaletteEntries('full-bleed')[0]?.settingId).toBe('chat-width');
     expect(settingsPaletteEntries('dark').map(entry => entry.settingId)).toContain('theme');
     expect(settingsPaletteEntries('microphone').map(entry => entry.settingId)).toContain('dictation');
   });
