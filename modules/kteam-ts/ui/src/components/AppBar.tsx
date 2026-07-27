@@ -2,7 +2,7 @@
 // banner when the daemon didn't substitute a token (i.e. we're on a non-loopback
 // origin).
 
-import { ListTodo, RefreshCw, Search, Settings, ShieldCheck } from 'lucide-react';
+import { GraduationCap, ListTodo, RefreshCw, Search, Settings, ShieldCheck } from 'lucide-react';
 import { Link } from '../lib/router';
 import { ThemeToggle } from './ThemeToggle';
 import { HAS_TOKEN } from '../lib/api';
@@ -55,6 +55,11 @@ export const TASKS_ENTRY = {
   title: 'Open the task board',
 } as const;
 
+export const LEARNING_ENTRY = {
+  label: 'Learning',
+  title: 'Open fleet learning proposals',
+} as const;
+
 export function AppBar({
   crumbs,
   onOpenSidebar,
@@ -64,6 +69,7 @@ export function AppBar({
   settingsActive = false,
   wardenActive = false,
   tasksActive = false,
+  learningActive = false,
   showTheme = true,
 }: {
   crumbs: Array<{ href?: string; label: string }>;
@@ -81,6 +87,7 @@ export function AppBar({
   settingsActive?: boolean;
   wardenActive?: boolean;
   tasksActive?: boolean;
+  learningActive?: boolean;
   /** The flat Settings page owns theme controls while it is active. */
   showTheme?: boolean;
 }) {
@@ -195,6 +202,16 @@ export function AppBar({
           >
             <ShieldCheck size={14} aria-hidden="true" />
             <span className="text-meta font-medium">Warden</span>
+          </Link>
+          <Link
+            to="/learning"
+            aria-current={learningActive ? 'page' : undefined}
+            aria-label={LEARNING_ENTRY.label}
+            title={LEARNING_ENTRY.title}
+            className="kt-btn kt-btn--sm shrink-0 items-center gap-xs"
+          >
+            <GraduationCap size={14} aria-hidden="true" />
+            <span className="text-meta font-medium">Learning</span>
           </Link>
           <Link
             to="/settings"
