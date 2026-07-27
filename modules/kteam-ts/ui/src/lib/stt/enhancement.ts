@@ -43,6 +43,8 @@ export type SubstitutionReason =
   | 'dictionary-alias'
   /** A near-miss against a dictionary term. */
   | 'dictionary-fuzzy'
+  /** A near-miss against a word from the reader's own free-text context. */
+  | 'user-context-fuzzy'
   /** A near-miss against a word mined from the recent conversation. */
   | 'context-fuzzy';
 
@@ -60,6 +62,12 @@ export interface EnhanceInput {
   /** The last 5–10 user/assistant messages, oldest first. Used only to mine
    *  vocabulary; never quoted, never inserted. */
   context: string[];
+  /** Free text the reader typed into settings — project jargon, names, a
+   *  pasted glossary. Mined for single-word vocabulary exactly like `context`,
+   *  but trusted more (the reader put it there deliberately) and less than the
+   *  dictionary (which names the exact spelling wanted). Never quoted, never
+   *  inserted. */
+  userContext?: string;
 }
 
 export interface EnhanceResult {
@@ -80,6 +88,15 @@ export const MIN_CONTEXT_OCCURRENCES = 2;
 /** Hard ceiling on mined vocabulary, so a pasted log cannot turn into a
  *  thousand-entry fuzzy dictionary that slows every utterance. */
 export const MAX_CONTEXT_VOCABULARY = 400;
+
+/** Longest free-text context the extractor will read. A glossary fits with
+ *  room to spare; anything longer is truncated, not refused, because the first
+ *  8 000 characters of a pasted document are still useful vocabulary. */
+export const MAX_USER_CONTEXT_CHARS = 8_000;
+
+/** Ceiling on vocabulary extracted from the free-text context. Half the mined
+ *  cap: this field is a curated paste, not a transcript dump. */
+export const MAX_USER_CONTEXT_VOCABULARY = 200;
 
 /** Longest transcript this will process. Dictation utterances are seconds
  *  long; beyond this the input is returned untouched. */
@@ -192,6 +209,402 @@ const STOPWORDS = new Set([
   'into',
   'them',
 ]);
+
+/** Ordinary English that the FREE-TEXT context extractor must never treat as
+ *  vocabulary. The mined-conversation path can stay with the short `STOPWORDS`
+ *  list because its occurrence floor (a word must be said twice) filters most
+ *  prose on its own; the context field has no such floor — a glossary names
+ *  each term once — so the common-word screen has to carry the weight instead.
+ *  Everything here is a frequent word of four letters or more; anything the
+ *  reader capitalises mid-word, hyphenates or numbers bypasses this list (see
+ *  `looksLikeTermOfArt`). */
+const COMMON_WORDS = new Set([
+  'able',
+  'above',
+  'across',
+  'actually',
+  'added',
+  'almost',
+  'along',
+  'already',
+  'always',
+  'another',
+  'answer',
+  'anything',
+  'area',
+  'around',
+  'asked',
+  'away',
+  'back',
+  'based',
+  'basically',
+  'become',
+  'begin',
+  'behind',
+  'best',
+  'better',
+  'body',
+  'book',
+  'both',
+  'bring',
+  'build',
+  'call',
+  'called',
+  'cannot',
+  'care',
+  'case',
+  'certain',
+  'change',
+  'changed',
+  'check',
+  'city',
+  'clear',
+  'close',
+  'coming',
+  'common',
+  'company',
+  'complete',
+  'consider',
+  'correct',
+  'country',
+  'course',
+  'create',
+  'current',
+  'data',
+  'days',
+  'different',
+  'difficult',
+  'directly',
+  'door',
+  'early',
+  'easy',
+  'either',
+  'else',
+  'end',
+  'enough',
+  'entire',
+  'especially',
+  'example',
+  'exactly',
+  'expect',
+  'face',
+  'fact',
+  'family',
+  'feel',
+  'field',
+  'file',
+  'final',
+  'find',
+  'fine',
+  'follow',
+  'following',
+  'form',
+  'found',
+  'free',
+  'full',
+  'general',
+  'getting',
+  'given',
+  'gives',
+  'going',
+  'gone',
+  'great',
+  'group',
+  'hand',
+  'happen',
+  'happened',
+  'hard',
+  'head',
+  'hear',
+  'help',
+  'high',
+  'hold',
+  'home',
+  'hope',
+  'hour',
+  'hours',
+  'house',
+  'however',
+  'idea',
+  'important',
+  'include',
+  'including',
+  'information',
+  'inside',
+  'instead',
+  'issue',
+  'item',
+  'keep',
+  'kind',
+  'knew',
+  'known',
+  'large',
+  'last',
+  'later',
+  'learn',
+  'least',
+  'leave',
+  'less',
+  'level',
+  'life',
+  'line',
+  'list',
+  'little',
+  'live',
+  'long',
+  'longer',
+  'looking',
+  'lost',
+  'love',
+  'main',
+  'makes',
+  'making',
+  'matter',
+  'maybe',
+  'mean',
+  'means',
+  'meet',
+  'might',
+  'mind',
+  'minute',
+  'minutes',
+  'moment',
+  'money',
+  'month',
+  'morning',
+  'move',
+  'name',
+  'near',
+  'nearly',
+  'never',
+  'news',
+  'night',
+  'nothing',
+  'number',
+  'often',
+  'open',
+  'order',
+  'others',
+  'otherwise',
+  'outside',
+  'page',
+  'paper',
+  'people',
+  'perhaps',
+  'person',
+  'place',
+  'plan',
+  'play',
+  'point',
+  'possible',
+  'power',
+  'probably',
+  'problem',
+  'process',
+  'program',
+  'provide',
+  'public',
+  'question',
+  'quite',
+  'rather',
+  'read',
+  'real',
+  'really',
+  'reason',
+  'recent',
+  'recently',
+  'remember',
+  'rest',
+  'result',
+  'return',
+  'room',
+  'running',
+  'said',
+  'says',
+  'school',
+  'second',
+  'section',
+  'seem',
+  'seemed',
+  'seems',
+  'seen',
+  'send',
+  'sense',
+  'sent',
+  'several',
+  'shall',
+  'short',
+  'show',
+  'shown',
+  'side',
+  'simple',
+  'simply',
+  'small',
+  'someone',
+  'something',
+  'sometimes',
+  'soon',
+  'sort',
+  'sound',
+  'special',
+  'stand',
+  'start',
+  'started',
+  'state',
+  'stay',
+  'step',
+  'still',
+  'stop',
+  'story',
+  'system',
+  'talk',
+  'team',
+  'tell',
+  'text',
+  'thank',
+  'thanks',
+  'thought',
+  'times',
+  'today',
+  'together',
+  'told',
+  'took',
+  'toward',
+  'tried',
+  'true',
+  'turn',
+  'type',
+  'understand',
+  'update',
+  'upon',
+  'value',
+  'version',
+  'water',
+  'ways',
+  'week',
+  'went',
+  'whatever',
+  'whether',
+  'white',
+  'whole',
+  'without',
+  'word',
+  'words',
+  'working',
+  'works',
+  'world',
+  'write',
+  'wrong',
+  'year',
+  'years',
+  'young',
+  // Ordinary words of software prose. A speech model already spells these
+  // right, so keeping them out of the vocabulary costs nothing and stops
+  // near-misses ("motel" → "model") from firing on everyday sentences.
+  'apps',
+  'branch',
+  'browser',
+  'build',
+  'builds',
+  'button',
+  'client',
+  'code',
+  'command',
+  'commands',
+  'config',
+  'deploy',
+  'deployed',
+  'desktop',
+  'device',
+  'devices',
+  'error',
+  'errors',
+  'feature',
+  'features',
+  'files',
+  'folder',
+  'function',
+  'install',
+  'installed',
+  'laptop',
+  'library',
+  'login',
+  'machine',
+  'message',
+  'messages',
+  'model',
+  'models',
+  'network',
+  'online',
+  'password',
+  'phone',
+  'pipeline',
+  'project',
+  'projects',
+  'release',
+  'repo',
+  'request',
+  'screen',
+  'script',
+  'scripts',
+  'server',
+  'servers',
+  'service',
+  'services',
+  'session',
+  'sessions',
+  'settings',
+  'setup',
+  'software',
+  'speech',
+  'storage',
+  'terminal',
+  'test',
+  'tests',
+  'tool',
+  'tools',
+  'user',
+  'users',
+  'website',
+  'window',
+  'windows',
+]);
+
+/** A single-mention word earns vocabulary status only if it looks deliberate:
+ *  inner capitals (`kTeam`, `GPU`, `OAuth`), a digit (`sha256`, `GPT4`), or
+ *  inner `-`/`_` (`sherpa-onnx`, `tool_use`). A leading capital alone is NOT a
+ *  signal — every sentence starts with one. */
+export function looksLikeTermOfArt(token: string): boolean {
+  return /\p{Lu}/u.test(token.slice(1)) || /\p{N}/u.test(token) || /[_-]/u.test(token);
+}
+
+/** Turn the reader's free-text context — prose, a glossary, a list of names —
+ *  into fuzzy-match vocabulary.
+ *
+ *  Unlike `contextVocabulary` there is no occurrence floor: the reader wrote
+ *  this field on purpose and a glossary says each term once. The screen against
+ *  "correcting" ordinary English is therefore stricter — a plain lowercase word
+ *  must clear BOTH the stoplist and `COMMON_WORDS`, while a token with a
+ *  term-of-art shape (inner caps, digits, hyphens, underscores) is kept on
+ *  sight. First appearance wins the display form, and the cap keeps the
+ *  earliest entries, so the front of the field is the part that always counts. */
+export function userContextVocabulary(text: string | null | undefined): string[] {
+  if (typeof text !== 'string' || text.length === 0) return [];
+  const clipped = text.slice(0, MAX_USER_CONTEXT_CHARS);
+  const seen = new Map<string, string>();
+  WORD_RE.lastIndex = 0;
+  for (let match = WORD_RE.exec(clipped); match !== null; match = WORD_RE.exec(clipped)) {
+    const raw = match[0];
+    if (raw.length < MIN_FUZZY_LENGTH) continue;
+    const key = raw.toLowerCase();
+    if (seen.has(key)) continue;
+    if (STOPWORDS.has(key)) continue;
+    if (!looksLikeTermOfArt(raw) && COMMON_WORDS.has(key)) continue;
+    seen.set(key, raw);
+    if (seen.size >= MAX_USER_CONTEXT_VOCABULARY) break;
+  }
+  return [...seen.values()];
+}
 
 interface Segmented {
   words: string[];
@@ -356,7 +769,17 @@ export function enhance(input: EnhanceInput): EnhanceResult {
     }
   }
 
-  const vocabulary = contextVocabulary(input.context ?? []).filter(word => !termKeys.has(word.toLowerCase()));
+  // Precedence, most deliberate first: the dictionary names exact spellings,
+  // the free-text context was typed into settings on purpose, and the mined
+  // conversation words are only inferred. Each lower tier is filtered against
+  // every tier above it, so one term never competes with itself — a tie
+  // between tiers would otherwise force an abstention on a word the reader
+  // explicitly declared.
+  const userVocabulary = userContextVocabulary(input.userContext).filter(word => !termKeys.has(word.toLowerCase()));
+  const userKeys = new Set(userVocabulary.map(word => word.toLowerCase()));
+  const vocabulary = contextVocabulary(input.context ?? []).filter(
+    word => !termKeys.has(word.toLowerCase()) && !userKeys.has(word.toLowerCase()),
+  );
 
   const { words, separators } = segment(text);
   const substitutions: Substitution[] = [];
@@ -376,6 +799,8 @@ export function enhance(input: EnhanceInput): EnhanceResult {
       const budget = fuzzyBudget(token.length);
       const term = nearest(token, terms, budget);
       if (term !== null) return { to: term, reason: 'dictionary-fuzzy' as const };
+      const userWord = nearest(token, userVocabulary, budget);
+      if (userWord !== null) return { to: userWord, reason: 'user-context-fuzzy' as const };
       const word = nearest(token, vocabulary, budget);
       if (word !== null) return { to: word, reason: 'context-fuzzy' as const };
       return null;

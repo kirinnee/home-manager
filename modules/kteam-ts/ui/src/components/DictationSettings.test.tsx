@@ -6,6 +6,8 @@ import {
   DICTATION_SAFETY_NOTE,
   DictationSettings,
   ENHANCEMENT_EXPLANATION,
+  ENHANCEMENT_SOURCES_EXPLANATION,
+  USER_CONTEXT_EXPLANATION,
   LOCAL_LANGUAGE_NOTE,
   LOCAL_MODE_SUMMARY,
   LOCAL_MODE_TRADEOFFS,
@@ -140,6 +142,13 @@ describe('enhancement', () => {
     expect(ENHANCEMENT_EXPLANATION).toContain('cannot add, remove or reorder words');
     expect(ENHANCEMENT_EXPLANATION).toContain('discards the whole thing');
   });
+
+  test('names its vocabulary sources and their order, and says there is no AI model', () => {
+    expect(text).toContain(ENHANCEMENT_SOURCES_EXPLANATION);
+    expect(ENHANCEMENT_SOURCES_EXPLANATION).toContain('always win');
+    expect(ENHANCEMENT_SOURCES_EXPLANATION).toContain('no AI model, nothing sent anywhere');
+    expect(ENHANCEMENT_SOURCES_EXPLANATION).toContain('changes nothing');
+  });
 });
 
 describe('the dictionary', () => {
@@ -151,6 +160,24 @@ describe('the dictionary', () => {
 
   test('reports the term count', () => {
     expect(text).toContain('0 terms');
+  });
+});
+
+describe('the free-text context', () => {
+  test('is a labelled textarea that invites a paste', () => {
+    expect(html).toContain('id="stt-user-context"');
+    expect(html).toContain('for="stt-user-context"');
+    expect(text).toContain(USER_CONTEXT_EXPLANATION);
+    expect(USER_CONTEXT_EXPLANATION).toContain('Paste anything');
+  });
+
+  test('states the precedence: the dictionary entry wins', () => {
+    expect(USER_CONTEXT_EXPLANATION).toContain('that entry wins');
+  });
+
+  test('echoes how many words were picked out, so the reader can see it take', () => {
+    // Default settings: empty context, zero words.
+    expect(text).toContain('0 words picked out');
   });
 });
 
