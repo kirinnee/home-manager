@@ -1477,9 +1477,14 @@
 
 /* ============================================================================
    FAMILY 6 — NOTEBOOK. Claude's own paper: warm cream stock, a soft terracotta
-   clay accent used sparingly, and the restraint of a printed page you can read
-   for hours. NOT the ruled exercise book that first shipped here — that reading
-   was rejected. No rules, no red margin line.
+   clay accent used sparingly, and the composure of a fine PRINTED page. NOT the
+   cheap ruled exercise book that first shipped here (blue feint + a red margin
+   line) — that costume was rejected. But the OPPOSITE overcorrection, a page with
+   no visible ruling at all, went mushy: cream-on-cream cards with an invisible
+   seam dissolved on a dense console, and the family leaned entirely on its type
+   voice to be legible. This rework restores COMMITTED STRUCTURE in the paper
+   idiom — the visible warm rules of a well-set ledger or book, dark ink, real
+   sheet edges — the printed-page answer to what Neo does with hard black rules.
 
    The identity is STRUCTURAL, and it is built to survive greyscale (warmth
    vanishes when colour is removed, so a warm palette alone would fail the ship
@@ -1495,9 +1500,12 @@
      2. GEOMETRY — soft but MODEST, uniform radii (~9–12px). Tabs, badges and
         controls are gently rounded RECTANGLES, never pills. That reads distinct
         from Ember's full pills and from Neo/Contrast's hard corners even in grey.
-     3. ELEVATION — flat. Paper does not float: controls and panels carry no drop
-        shadow, only a hairline bottom seam (`--rule-inset`), so the page reads as
-        stacked sheets rather than floating cards (Studio's soft blur).
+     3. ELEVATION + RULING — flat, but RULED. Paper does not float: controls and
+        panels carry no drop shadow. Depth is a VISIBLE warm bottom seam
+        (`--rule-inset`) and real row rules (`--divider-color`), both the true
+        `--border` ink now, so the page reads as crisp stacked sheets — a ledger,
+        not floating cards (Studio's soft blur) and not the invisible seam of the
+        mushy first cut.
      4. RHYTHM — a generous book measure (78ch) and loose leading; comfortable,
         unhurried, not the dense instrument panel of Mission.
 
@@ -1567,11 +1575,16 @@
   --bubble-radius: var(--radius-panel);
   --bubble-shadow: var(--rule-inset);
 
-  /* Paper does not float: no drop shadow, depth is a hairline bottom seam. */
+  /* Paper does not float — no drop shadow — but it IS ruled. Depth is a VISIBLE
+     warm bottom seam (`--border`, not the near-invisible `--border-soft`), and
+     the row dividers are the same real ink rule. This is the fix for the mushy
+     first cut: a printed ledger separates its rows with lines you can actually
+     see, so the page reads as crisp stacked sheets at console density, not
+     cream-on-cream. Still a 1px PRINTED rule, never Neo's 2–3px block. */
   --shadow-control: none;
-  --rule-inset: inset 0 -1px 0 var(--border-soft);
+  --rule-inset: inset 0 -1px 0 var(--border);
   --rail-active: inset 3px 0 0 var(--accent);
-  --divider-color: var(--border-soft);
+  --divider-color: var(--border);
 
   --control-h-desktop: 30px;
   --control-h-sm-desktop: 26px;
@@ -1607,8 +1620,10 @@
 
   color-scheme: light;
 
-  /* warm cream desk → paper sheet (Claude's ivory, not grey-white, not blue-white) */
-  --bg: #f1ede2;
+  /* warm cream desk → paper sheet (Claude's ivory, not grey-white, not blue-white).
+     The desk is stepped down a touch further from the sheet so a panel reads as a
+     lifted sheet on the desk even before the ruled edge draws it. */
+  --bg: #ece5d6;
   --surface: #faf7ef;
   --surface-2: #ece7d9;
   --surface-3: #e3ddcc;
@@ -1616,8 +1631,13 @@
   --fg-soft: #473f33;
   --muted: #665d4b;
   --faint: #655c4a;
-  --border: #e0d8c6;
-  --border-soft: #eae3d4;
+  /* THE RULE — a warm taupe ink line you can actually see, the printed-ledger
+     equivalent of Neo's committed edge (kept 1px and warm, never a black block).
+     The old #e0d8c6 was cream-on-cream and vanished; this rules the rows.
+     Decorative, so the audit tiers it `decor`; the load-bearing edge is
+     --border-strong. */
+  --border: #c6b99b;
+  --border-soft: #d9cfb8;
 
   /* soft terracotta / clay — the accent doubles as link/mark ink AND button fill,
      so it must clear AA both as text on the cream surfaces and under white; that
@@ -1711,8 +1731,12 @@
   --fg-soft: #d3c8b4;
   --muted: #b0a086;
   --faint: #a2937b;
-  --border: #3f362b;
-  --border-soft: #2f281f;
+  /* THE RULE, dark — a warm brown ink line lifted off the stock so the ruling
+     actually shows (the old #3f362b was umber-on-umber and vanished). 1px
+     printed rule, warm, never Neo's block. Decorative; load-bearing edge is
+     --border-strong. */
+  --border: #554736;
+  --border-soft: #453a2c;
 
   /* the same terracotta, lifted to a warm coral so it clears AA on the umber */
   --accent: #e08a67;
@@ -1803,12 +1827,17 @@
    family the greyscale shot IS the colour shot — there is nowhere to hide — so
    every differentiator below is a greyscale differentiator by construction:
 
-     1. BORDER WEIGHT + COLOUR — the strongest tell. Contrast and Neo both draw
+     1. BORDER WEIGHT + LAYERING — the strongest tell. Contrast and Neo both draw
         MAXIMUM-contrast HEAVY black edges (2–3px, #000/#fff). Geist draws a 1px
-        HAIRLINE in a QUIET low-contrast grey (`--border` #eaeaea light / #2a2a2a
-        dark). In greyscale a Geist screen reads as pale cards whose edges nearly
-        dissolve; Contrast reads as stark black boxes; Neo as black-outlined
-        blocks. `--border-width-heavy` stays 1px too — Geist never thickens.
+        HAIRLINE in a QUIET grey (`--border` #dcdcde light / #363636 dark) AND
+        leans on a DECISIVE surface step (page → card → raised tier) so the FILL
+        separates regions where the thin edge alone can't. The first shipped Geist
+        used a near-invisible #eaeaea/#2a2a2a hairline and NO surface step to
+        speak of; on a 30-row console the structure dissolved into mush — the
+        precise reason it was reworked. It is still unmistakable in greyscale:
+        thin quiet rules over clearly layered planes, versus Contrast's stark
+        black boxes and Neo's black-outlined blocks. `--border-width-heavy` stays
+        1px too — Geist never thickens; commitment here is layering, not weight.
      2. TYPE WEIGHT + SIZE — Geist is SMALL and LIGHT (13px base, 400/500/600,
         tight negative tracking). Contrast is large and heavy (14.5px, 500–800);
         Neo is chunky black (up to 900). Grey text that reads thin and small vs
@@ -1822,26 +1851,21 @@
         a clean flat ground (no wash, no texture, no overlay). Density carries a
         lot here — the opposite of Mission's tight instrument panel.
 
-   ── THE MARKETING LAYER (vercel.com, not the docs) ──────────────────────────
-   On top of the structural chassis above sits Vercel's MARKETING aesthetic: a
-   near-black canvas lit by an AURORA of vivid blue→cyan→violet→magenta radial
-   spotlights bled in from the edges (`--body-wash`), a gradient depth SHEEN on
-   panels (`--panel-texture`), and an accent GLOW on controls, panels and the
-   focus ring (`--shadow-*`, `--focus-shadow`, `--ring`). Dark leads; light takes
-   a much lighter-touch version of the same gradient language so the family reads
-   as one object across modes.
-
-   These are ADDITIVE, not the identity — remove every gradient and the greyscale
-   tells above still name the family. Three rules keep them tasteful and safe:
-     • Every LUMINOUS layer's intensity is `calc(<base> * var(--glow-alpha))`, and
-       index.css zeroes `--glow-alpha` under `prefers-reduced-motion` — so a reader
-       who wants less effect gets the clean near-black docs Geist back, no glow at
-       all. (Removing light only ever IMPROVES contrast.)
-     • The gradients are STATIC (no @keyframes touch them); nothing animates.
-     • The aurora brightens the dark ground, which is exactly where body text
-       contrast breaks. The two brightest stops (the top corners, under the
-       header) are transcribed into contrast-audit's WASH_PEAK and every body ink
-       is verified to clear AA at that WORST composited stop, not the average.
+   ── NO MARKETING LAYER (the DASHBOARD, not vercel.com) ──────────────────────
+   An earlier Geist wore vercel.com's MARKETING aesthetic: a near-black canvas lit
+   by an AURORA of radial spotlights (`--body-wash`), a gradient sheen on panels
+   (`--panel-texture`), and an accent GLOW on controls, panels and the focus ring.
+   It was REMOVED. On a fleet console you stare at for hours the aurora was pure
+   costume — a novelty that wears off exactly the way Mission's scanlines did — and
+   four glowing spotlights behind 30 rows of live data fought the data for
+   attention. The reference is the Vercel DASHBOARD, which is clean, flat and
+   near-black, not the homepage. So `--body-wash`, `--panel-texture` and the accent
+   glow on `--shadow-*` / `--focus-shadow` are all gone; `--glow-alpha` stays 0 and
+   the reduced-motion path is a no-op. The identity is carried entirely by
+   structure — layered surfaces, legible hairlines, small precise type, negative
+   space — which is what survives the greyscale gate anyway. A side benefit: with
+   no wash brightening the ground, every body ink is verified AA on the flat
+   surface directly, no WASH_PEAK bookkeeping to keep in step.
 
    ── FONTS ───────────────────────────────────────────────────────────────────
    Geist Sans / Geist Mono is the voice, but this is an offline PWA with a strict
@@ -1926,14 +1950,14 @@
   --bubble-radius: 10px;
   --bubble-shadow: var(--shadow-sm);
 
-  /* Elevation with DEPTH, not flatness. Controls carry a soft accent glow, panels
-     a coloured ambient, popovers really float (shadows defined per mode). The
-     luminous half of each is scaled by --glow-alpha (set to 1 below), which
-     index.css zeroes under prefers-reduced-motion — so the glow is opt-out. No
-     offset ink (Neo), no rings-instead-of-shadow (Contrast). */
+  /* Elevation is FLAT and honest. Controls rest flat on their hairline; panels
+     and popovers get a quiet neutral blur, no colour. The marketing glow was
+     removed (see header) so --glow-alpha stays 0 and the reduced-motion path is
+     a no-op. No offset ink (Neo), no rings-instead-of-shadow (Contrast) — the
+     third distinct read is planar: crisp thin edges, no float. */
   --shadow-ink: transparent;
-  --glow-alpha: 1;
-  --shadow-control: 0 1px 2px rgba(0, 0, 0, 0.4), 0 0 18px -6px rgb(var(--accent-rgb) / calc(0.5 * var(--glow-alpha)));
+  --glow-alpha: 0;
+  --shadow-control: none;
   --shadow-panel: var(--shadow-md);
   --shadow-popover: var(--shadow-lg);
   --press-translate: 0px;
@@ -1956,24 +1980,20 @@
   --gap-sm: 8px;
   --gap-md: 14px;
 
-  /* DEPTH on panels: a top-left aurora glow plus a faint top light, so a panel
-     reads as a lit pane over the canvas rather than a flat card. Gradient, not
-     animation; the luminous part scales by --glow-alpha. The page's own aurora
-     is --body-wash, set per mode. No overlay (it would sit ABOVE text). */
+  /* Panels are flat lit planes — no texture, no glow. Region separation is
+     carried by the surface STEP (a card sits a clear tint off the page) and the
+     crisp hairline around it, the way the Vercel dashboard actually works, not
+     by a painted gradient. No overlay (it would sit ABOVE text). */
   --panel-bg: var(--surface);
-  --panel-texture:
-    radial-gradient(130% 110% at 0% 0%, rgb(var(--accent-rgb) / calc(0.1 * var(--glow-alpha))), transparent 58%),
-    linear-gradient(180deg, rgb(255 255 255 / calc(0.03 * var(--glow-alpha))), transparent 42%);
-  --panel-texture-size: 100% 100%;
+  --panel-texture: none;
+  --panel-texture-size: auto;
   --overlay: none;
   --overlay-opacity: 0;
 
-  /* Focus GLOWS: a crisp 1px accent ring plus a wide accent bloom. The bloom is
-     scaled by --glow-alpha, so under reduced-motion only the crisp ring remains
-     (and contrast can only improve). Not a permanent outline, links not
-     underlined — the calm end of the spectrum, unlike Contrast. */
-  --focus-shadow:
-    0 0 0 1px rgb(var(--accent-rgb) / 0.9), 0 0 22px 2px rgb(var(--accent-rgb) / calc(0.6 * var(--glow-alpha)));
+  /* Focus is a crisp 2px accent ring — no bloom. Precise, not luminous. Not a
+     permanent outline, links not underlined — the calm end of the spectrum,
+     unlike Contrast. */
+  --focus-shadow: 0 0 0 2px rgb(var(--accent-rgb) / 0.9);
   --outline-always: none;
   --underline-links: none;
 
@@ -1994,27 +2014,32 @@
   /* Quiet control edge, not black: the lightest grey that still clears 3:1 on
      the palest surface (surface-3), so an input reads as a field without turning
      into a Contrast border. Decorative hairlines use --border below. */
-  --border-strong: #838383; /* 3.16:1 on the palest surface (surface-3) */
+  --border-strong: #838383; /* 3.35:1 on the palest surface (surface-3) */
 
   color-scheme: light;
 
-  /* Off-white desk, white cards — a subtle layered near-white, not one flat
-     sheet. Kept just off Contrast's pure #fff so the surfaces read as paper. */
-  --bg: #fafafa;
+  /* Off-white desk, white cards — a DECISIVE layered near-white. The steps are
+     wider than the docs-Geist so a card reads a clear tint off the page and a
+     raised tier off the card: on a 30-row console the FILL does the region
+     separating, not just the edge. Kept off Contrast's pure #fff so it reads as
+     paper, not a stark white box. */
+  --bg: #f4f4f5;
   --surface: #ffffff;
-  --surface-2: #f7f7f7;
-  --surface-3: #efefef;
+  --surface-2: #f0f0f1;
+  --surface-3: #e6e6e8;
   --fg: #171717;
-  --fg-soft: #404040;
-  --muted: #5f5f5f;
-  /* Darkened one step from the docs-Geist #6e6e6e: the light aurora below tints
-     the ground down a touch, and faint on plain #fafafa was already only 4.55:1,
-     so this buys the margin to keep it AA over the WORST washed stop (5.09:1). */
-  --faint: #616161;
-  /* THE HAIRLINE. #eaeaea is Vercel's signature border — decorative here, so
-     the audit tiers it `decor` and the near-invisible edge is legal. */
-  --border: #eaeaea;
-  --border-soft: #f0f0f0;
+  --fg-soft: #3d3d3d;
+  --muted: #595959;
+  /* No aurora now, so no washed-ground margin to buy — but kept punchy anyway;
+     thin light-grey secondary text on near-white was half of why the old Geist
+     read as timid. 5.9:1 on white. */
+  --faint: #5e5e5e;
+  /* THE HAIRLINE — quiet but LEGIBLE. The docs-Geist #eaeaea nearly dissolved on
+     a dense console; #dcdcde is still a restrained Vercel grey (never a Contrast
+     edge) but it actually rules the rows. Decorative, so the audit tiers it
+     `decor`; the load-bearing edge is --border-strong. */
+  --border: #dcdcde;
+  --border-soft: #e8e8ea;
 
   /* The single functional colour: Vercel blue, darkened just enough to clear
      4.5:1 as link text on every surface (incl. the palest). The brighter blue
@@ -2070,25 +2095,17 @@
   --syn-addition: #067647;
   --syn-deletion: #cc2f2f;
 
-  --bar-bg: rgba(250, 250, 250, 0.82);
+  --bar-bg: rgba(244, 244, 245, 0.85);
+  /* Quiet neutral blurs, no accent glow — panels lift a hair, controls stay flat. */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
-  --shadow-md:
-    0 1px 2px rgba(0, 0, 0, 0.05), 0 8px 24px -6px rgba(20, 40, 90, 0.1),
-    0 0 26px -8px rgb(var(--accent-rgb) / calc(0.18 * var(--glow-alpha)));
-  --shadow-lg:
-    0 2px 4px rgba(0, 0, 0, 0.06), 0 16px 40px -8px rgba(20, 40, 90, 0.14),
-    0 0 40px -8px rgb(var(--accent-rgb) / calc(0.2 * var(--glow-alpha)));
+  --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.05), 0 8px 24px -6px rgba(20, 40, 90, 0.1);
+  --shadow-lg: 0 2px 4px rgba(0, 0, 0, 0.06), 0 16px 40px -8px rgba(20, 40, 90, 0.14);
   --scrim: rgba(15, 20, 40, 0.4);
 
-  /* LIGHTER-TOUCH aurora: the same blue→cyan→violet→magenta spotlights as dark,
-     but pastel and low-alpha so near-white only tints, never shouts. It darkens
-     the ground slightly, so the worst body-ink case (faint over the two top
-     stops) is transcribed into WASH_PEAK['geist-light'] and verified (5.09:1). */
-  --body-wash:
-    radial-gradient(46% 40% at 84% -6%, rgb(0 96 223 / calc(0.06 * var(--glow-alpha))), transparent 62%),
-    radial-gradient(44% 42% at 12% -4%, rgb(139 92 246 / calc(0.06 * var(--glow-alpha))), transparent 60%),
-    radial-gradient(52% 46% at 50% -14%, rgb(6 182 212 / calc(0.05 * var(--glow-alpha))), transparent 66%),
-    radial-gradient(64% 58% at 108% 112%, rgb(232 121 249 / calc(0.05 * var(--glow-alpha))), transparent 60%);
+  /* No wash. The marketing aurora was removed (see header): a clean flat ground
+     is the Vercel DASHBOARD, and it lets the layered surfaces + hairlines carry
+     the structure without a gradient competing with 30 rows of data. */
+  --body-wash: none;
 
   --ring: rgba(0, 96, 223, 0.42);
   --focus-color: #0060df;
@@ -2106,20 +2123,23 @@
   color-scheme: dark;
 
   /* Near-absolute black, layered — kept off Contrast's pure #000 so the surfaces
-     read as stacked planes under the hairlines rather than one void. */
+     read as stacked planes under the hairlines. The step from surface to
+     surface-2/3 is what separates a raised region from the card on this ground. */
   --bg: #0a0a0a;
   --surface: #111111;
-  --surface-2: #1a1a1a;
-  --surface-3: #242424;
+  --surface-2: #1c1c1c;
+  --surface-3: #272727;
   --fg: #ededed;
   --fg-soft: #b4b4b4;
   --muted: #a1a1a1;
-  /* Lifted one step from the docs-Geist #8f8f8f for margin over the aurora's
-     brightest stop (the top corners lift the near-black ground). */
+  /* No aurora now, so no washed-ground margin needed — #979797 kept for a
+     confident secondary ink (6.0:1 on surface). */
   --faint: #979797;
-  /* THE HAIRLINE, dark: a quiet #2a2a2a that nearly dissolves — decorative. */
-  --border: #2a2a2a;
-  --border-soft: #1f1f1f;
+  /* THE HAIRLINE, dark — quiet but LEGIBLE. #2a2a2a dissolved on a dense
+     console; #363636 is still a restrained Vercel grey but rules the rows.
+     Decorative; the load-bearing edge is --border-strong. */
+  --border: #363636;
+  --border-soft: #242424;
 
   /* The same functional blue, lifted for legibility on black. Dark text on the
      bright accent (Studio/Notebook do the same) so a primary button stays
@@ -2176,27 +2196,17 @@
   --syn-deletion: #ff6166;
 
   --bar-bg: rgba(9, 9, 12, 0.72);
+  /* Quiet neutral blurs, no accent glow — deep dark shadows for real float on
+     popovers, nothing luminous. */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.6);
-  --shadow-md:
-    0 1px 2px rgba(0, 0, 0, 0.6), 0 10px 34px -8px rgba(0, 0, 0, 0.8),
-    0 0 30px -8px rgb(var(--accent-rgb) / calc(0.28 * var(--glow-alpha)));
-  --shadow-lg:
-    0 2px 4px rgba(0, 0, 0, 0.6), 0 20px 56px -10px rgba(0, 0, 0, 0.85),
-    0 0 48px -8px rgb(var(--accent-rgb) / calc(0.34 * var(--glow-alpha)));
+  --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.6), 0 10px 34px -8px rgba(0, 0, 0, 0.8);
+  --shadow-lg: 0 2px 4px rgba(0, 0, 0, 0.6), 0 20px 56px -10px rgba(0, 0, 0, 0.85);
   --scrim: rgba(0, 0, 0, 0.72);
 
-  /* THE AURORA — vercel.com's marketing backdrop: vivid blue→cyan→violet→magenta
-     radial spotlights bled in from the edges of a near-black canvas, fixed to the
-     viewport for depth (body sets background-attachment: fixed). Each stop's alpha
-     is calc(x * --glow-alpha), so reduced-motion returns the clean near-black
-     docs Geist. WORST case for the light body ink is the brightest ground, which
-     is the two top-corner stops — transcribed verbatim into contrast-audit's
-     WASH_PEAK['geist-dark'] and verified there (do not drift the two apart). */
-  --body-wash:
-    radial-gradient(46% 40% at 84% -6%, rgb(59 158 255 / calc(0.12 * var(--glow-alpha))), transparent 62%),
-    radial-gradient(44% 42% at 12% -4%, rgb(139 92 246 / calc(0.11 * var(--glow-alpha))), transparent 60%),
-    radial-gradient(52% 46% at 50% -16%, rgb(34 211 238 / calc(0.07 * var(--glow-alpha))), transparent 66%),
-    radial-gradient(64% 58% at 108% 112%, rgb(232 121 249 / calc(0.1 * var(--glow-alpha))), transparent 60%);
+  /* No wash. The marketing aurora was removed (see header): the clean near-black
+     canvas is the Vercel DASHBOARD, and the layered surfaces + legible hairlines
+     carry the structure without four radial spotlights behind the data. */
+  --body-wash: none;
 
   --ring: rgba(59, 158, 255, 0.55);
   --focus-color: #3b9eff;
