@@ -13,6 +13,9 @@ import { KTEAM_VERSION } from './version';
 import { FsError } from './fs';
 import { GitError } from './git';
 import type { SttService } from './stt-service';
+import type { TaskApi } from './tasks-api';
+import { resolveTaskActor, taskApiRequestFrom } from './tasks-api';
+import { isTaskPath, taskWardenDenial } from './tasks-contract';
 
 // Built chat UI (Vite output, committed): served when present; the legacy
 // single-file shell remains the fallback so the daemon never 404s its own UI.
@@ -57,6 +60,8 @@ export interface ApiServerOptions {
   learning?: LearningService;
   /** Optional batch dictation subsystem. When omitted, STT routes are 404. */
   stt?: SttService;
+  /** Optional for older tests; daemon-entry supplies the singleton in production. */
+  tasks?: TaskApi;
 }
 
 /** The Codex discovery baseline is private launch bookkeeping, not session
@@ -96,6 +101,8 @@ async function wardenScopeDenial(
   // does not need repository contents. This must stay before the generic GET
   // allowance or every filesystem route silently becomes warden-readable.
   if (/^\/v1\/sessions\/[^/]+\/fs(?:\/|$)/.test(pathname)) return forbidden('browse session files');
+  const taskDenial = taskWardenDenial(method, pathname);
+  if (taskDenial) return forbidden(taskDenial);
   if (method === 'GET') return undefined; // every other read is fine
   if (pathname === '/v1/sessions' && method === 'POST') return forbidden('start sessions');
   if (method === 'DELETE') return forbidden('remove sessions');
@@ -512,6 +519,23 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
             const pending = createRequests.get(key);
             if (pending) return json(await pending);
             return json({ error: 'no session was created for that request id' }, 404);
+          }
+
+          if (options.tasks && isTaskPath(url.pathname)) {
+            const actorForTask = await resolveTaskActor(options.service, {
+              sessionId: request.headers.get('x-kteam-session-id'),
+              actorSource: actor,
+            });
+            const taskResponse = await options.tasks.handle(
+              taskApiRequestFrom(
+                request,
+                url,
+                request.method === 'POST' ? await body<unknown>(request) : undefined,
+                actorForTask,
+              ),
+            );
+            if (taskResponse) return json(taskResponse.body, taskResponse.status);
+            return json(unknownRoute(request.method, url.pathname), 404);
           }
 
           const match = url.pathname.match(/^\/v1\/sessions\/([^/]+)(?:\/(.+))?$/);

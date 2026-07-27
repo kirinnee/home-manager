@@ -30,6 +30,8 @@ export interface KTeamPaths {
   learningTombstones: string;
   learningRuns: string;
   learningPatches: string;
+  /** Fleet-global daemon-owned task records. */
+  tasksDir: string;
 }
 
 export function createPaths(home = process.env.KTEAM_HOME ?? path.join(os.homedir(), '.kteam')): KTeamPaths {
@@ -56,6 +58,7 @@ export function createPaths(home = process.env.KTEAM_HOME ?? path.join(os.homedi
     learningTombstones: path.join(home, 'daemon', 'learning', 'tombstones.json'),
     learningRuns: path.join(home, 'daemon', 'learning', 'runs'),
     learningPatches: path.join(home, 'daemon', 'learning', 'patches'),
+    tasksDir: path.join(home, 'daemon', 'tasks'),
   };
 }
 

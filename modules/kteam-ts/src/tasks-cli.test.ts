@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { Command } from 'commander';
 import {
   TASK_CLI_USAGE,
   parseTaskCli,
@@ -42,6 +43,22 @@ const summary = (over: Partial<Task> = {}): TaskSummary => {
 };
 
 describe('argv splitting', () => {
+  test('Commander preserves task-specific flags in the variadic argv', async () => {
+    let captured: string[] = [];
+    const program = new Command();
+    program.exitOverride();
+    program
+      .command('task')
+      .allowUnknownOption(true)
+      .allowExcessArguments(true)
+      .argument('[args...]')
+      .action((argv: string[]) => {
+        captured = argv;
+      });
+    await program.parseAsync(['node', 'kteam', 'task', 'list', '--repo', '/tmp/repo', '--md']);
+    expect(captured).toEqual(['list', '--repo', '/tmp/repo', '--md']);
+  });
+
   test('handles `--flag value`, `--flag=value`, bare flags and repeats', () => {
     const { positional, flags } = splitTaskArgs([
       'show',

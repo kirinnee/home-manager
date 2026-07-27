@@ -8,6 +8,8 @@ import { DaemonService } from './daemon-service';
 import { createPaths } from './paths';
 import { SessionManager } from './session-manager';
 import { createSttService } from './stt-service';
+import { TaskService } from './tasks';
+import { TaskApi } from './tasks-api';
 
 const paths = createPaths();
 await mkdir(paths.daemon, { recursive: true, mode: 0o700 });
@@ -68,11 +70,13 @@ const manager = await SessionManager.create(paths, {
     return true;
   },
 });
+// One service and one idempotency controller for the daemon lifetime.
+const taskApi = new TaskApi(new TaskService(paths, manager));
 const stt = createSttService({ paths });
 // Retry EADDRINUSE: a dying predecessor (service-manager restart) can hold the
 // port for seconds while it drains; give it up to 30 s before failing.
 const server = await bindWithRetry(() =>
-  startApiServer({ host: config.host, port: config.port, token, wardenToken, service: manager, stt }),
+  startApiServer({ host: config.host, port: config.port, token, wardenToken, service: manager, stt, tasks: taskApi }),
 ).catch(async error => {
   await Promise.allSettled([manager.close(), stt.close()]);
   throw error;
