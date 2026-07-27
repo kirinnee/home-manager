@@ -131,6 +131,7 @@ class FakeService implements KTeamService {
       susSubprocessSeconds: 900,
       maxAssignedWardens: 3,
       assignedCooldownMinutes: 30,
+      blessMinutes: 15,
     },
     anomalies: [],
     fingerprint: '',
