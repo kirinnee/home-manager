@@ -391,14 +391,10 @@ const WASH_PEAK: Partial<Record<`${Family}-${Mode}`, string[]>> = {
      these in step with `--body-wash` in themes.css. */
   'notebook-light': ['rgba(191, 138, 92, 0.05)', 'rgba(160, 110, 70, 0.04)'],
   'notebook-dark': ['rgba(224, 138, 103, 0.055)', 'rgba(120, 70, 40, 0.05)'],
-  /* Geist's AURORA (--body-wash in themes.css). The wash brightens the near-black
-     canvas, which is where light body ink loses contrast, so the worst ground is
-     the two brightest TOP-CORNER stops composited together (conservative — they
-     sit in opposite corners and never fully overlap in practice). Keep these in
-     step with the top two radial stops of `--body-wash`; the `--glow-alpha`
-     multiplier is 1 in the live theme, so the literal alpha here IS the peak. */
-  'geist-dark': ['rgba(139, 92, 246, 0.11)', 'rgba(59, 158, 255, 0.12)'],
-  'geist-light': ['rgba(139, 92, 246, 0.06)', 'rgba(0, 96, 223, 0.06)'],
+  /* Geist has NO wash any more — the marketing aurora was removed (see the Geist
+     header in themes.css), so `--body-wash: none` and there is no washed ground to
+     re-check. Its body ink is verified on the flat surfaces by the normal pairs.
+     If a wash is ever reintroduced, transcribe its brightest stops back here. */
 };
 const WASH_TIERS = ['fg', 'fg-soft', 'muted', 'faint'];
 
