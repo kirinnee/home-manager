@@ -29,10 +29,23 @@ export const SETTINGS_DEFINITIONS: readonly SettingDefinition[] = [
   },
   {
     id: 'chat-width',
-    label: 'Chat width',
+    label: 'Conversation width',
     description:
-      'Choose whether the conversation fills the pane or is capped at a readable measure and centred. Mostly a desktop control — a phone is already narrower than the cap.',
-    keywords: ['chat', 'width', 'measure', 'readable', 'full', 'bleed', 'reading', 'column', 'layout'],
+      'Full-bleed is the default. Choose whether a wide conversation uses the available pane or is capped at 768px and centred; narrower panes look the same in either mode.',
+    keywords: [
+      'chat',
+      'conversation',
+      'width',
+      'measure',
+      'readable',
+      'full',
+      'full pane',
+      'full-bleed',
+      'bleed',
+      'reading',
+      'column',
+      'layout',
+    ],
   },
   {
     id: 'theme',
@@ -83,7 +96,7 @@ export const SETTINGS_DEFINITIONS: readonly SettingDefinition[] = [
 export const SETTINGS_DESTINATION = {
   id: 'open-settings',
   label: 'Open settings',
-  description: 'Appearance, text size, theme, and dashboard density.',
+  description: 'Appearance, text size, conversation width, theme, and dashboard density.',
   keywords: ['preferences', 'options', 'appearance', 'configure'],
 } as const;
 
