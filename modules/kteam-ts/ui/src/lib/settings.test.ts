@@ -9,6 +9,7 @@ describe('shared settings catalog', () => {
       'chat-width',
       'theme',
       'dictation',
+      'notifications',
     ]);
     expect(new Set(SETTINGS_DEFINITIONS.map(setting => setting.id)).size).toBe(SETTINGS_DEFINITIONS.length);
     for (const setting of SETTINGS_DEFINITIONS) {
@@ -34,6 +35,14 @@ describe('shared settings catalog', () => {
     expect(settingsPaletteEntries('density')[0]?.settingId).toBe('density');
     expect(settingsPaletteEntries('dark').map(entry => entry.settingId)).toContain('theme');
     expect(settingsPaletteEntries('microphone').map(entry => entry.settingId)).toContain('dictation');
+  });
+
+  test("the enhancement feature is findable by its own names, not just dictation's", () => {
+    // These are the words someone who knows the FEATURE (but not where it
+    // lives) actually types. Each must reach the dictation section.
+    for (const query of ['enhance', 'enhancement', 'dictionary', 'vocabulary', 'glossary', 'jargon', 'correction']) {
+      expect(settingsPaletteEntries(query).map(entry => entry.settingId)).toContain('dictation');
+    }
   });
 
   test('link rows: warden & failover is findable and points at /warden#config', () => {

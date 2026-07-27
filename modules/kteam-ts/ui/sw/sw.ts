@@ -31,6 +31,7 @@
 
 import { PRECACHE_URLS, RELEASE_ID } from './precache.gen';
 import { activateRelease, fetchPolicy, installRelease, respond } from './policy';
+import { planClick, runClick, targetPath } from './notify';
 
 /* `lib: WebWorker` types `self` as WorkerGlobalScope, which lacks
    skipWaiting/clients/the extendable events. Casting once here keeps every use
@@ -80,6 +81,25 @@ export function registerWorkerEvents(sw: ServiceWorkerGlobalScope): void {
     if ((event.data as { type?: string } | null)?.type === 'SKIP_WAITING') {
       void sw.skipWaiting();
     }
+  });
+
+  sw.addEventListener('notificationclick', event => {
+    // Notifications are SHOWN by the page (registration.showNotification, with
+    // the session's SPA path in notification.data.url — hooks/useNotifications).
+    // Clicks land here, possibly with no page open at all: focus an existing
+    // app window and deep-link it, or open a new one. Decisions in
+    // sw/notify.ts, tested without a worker scope; nothing here touches
+    // CacheStorage. `includeUncontrolled` because the first-visit page is
+    // deliberately never claimed (see the header note on clients.claim).
+    event.notification.close();
+    const path = targetPath(event.notification.data);
+    event.waitUntil(
+      (async () => {
+        const clients = await sw.clients.matchAll({ type: 'window', includeUncontrolled: true });
+        const plan = planClick(clients, path, sw.location.origin);
+        await runClick(plan, path, url => sw.clients.openWindow(url));
+      })(),
+    );
   });
 }
 

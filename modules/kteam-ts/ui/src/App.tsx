@@ -30,6 +30,7 @@ import { ChunkErrorBoundary } from './components/ChunkErrorBoundary';
 import { cn } from './lib/utils';
 import { useAppViewport } from './hooks/useAppViewport';
 import { useLayoutMode } from './hooks/useLayoutMode';
+import { useNotificationWatch } from './hooks/useNotifications';
 import { useServiceWorkerUpdate } from './hooks/useServiceWorkerUpdate';
 import { useChrome, useStore } from './lib/store';
 import { isSettingId, settingsHref, type SettingId } from './lib/settings';
@@ -199,6 +200,11 @@ export function App() {
   // life: the chip has to be reachable from every route, and a per-page hook
   // would re-register on navigation.
   const { updateReady, applyUpdate, raiseRecovery } = useServiceWorkerUpdate();
+  // Fleet → system notifications (src/hooks/useNotifications.ts). Mounted here,
+  // once, like the worker lifecycle above: it must watch from every route, and
+  // it is inert until the reader enables it in Settings AND the browser
+  // permission is granted.
+  useNotificationWatch();
 
   // Mobile drawer visibility. It lives here rather than in the sidebar because
   // the AppBar's trigger and the drawer's own close button must drive ONE piece
