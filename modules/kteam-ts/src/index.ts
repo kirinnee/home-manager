@@ -16,6 +16,14 @@ import {
 } from './core';
 import { DaemonService } from './daemon-service';
 import { resolveBinary } from './harness';
+import { now, writeTextAtomic } from './io';
+import {
+  buildInflightReport,
+  gateInflight,
+  handoffMessage,
+  renderInflightCli,
+  renderInflightReport,
+} from './migrate-preflight';
 import { createPaths } from './paths';
 import { SIGNAL_KINDS } from './types';
 import type { KTeamEvent, SessionStatus, SignalKind } from './types';
@@ -96,6 +104,16 @@ function printView(view: Awaited<ReturnType<ApiClient['get']>>): void {
       );
   }
   console.log(`  ${view.directory}`);
+}
+
+/** Parse a `--when-idle` duration (`30s`, `5m`, `1h`, or bare seconds) to ms. */
+function parseDurationMs(text: string): number {
+  const match = text.trim().match(/^(\d+)\s*(s|m|h)?$/i);
+  if (!match) throw new Error(`invalid --when-idle timeout: ${text} (use e.g. 30s, 5m, 1h)`);
+  const value = Number(match[1]);
+  const unit = (match[2] ?? 's').toLowerCase();
+  const scale = unit === 'h' ? 3_600_000 : unit === 'm' ? 60_000 : 1000;
+  return value * scale;
 }
 
 function printEvent(event: KTeamEvent, json = false): void {
@@ -586,8 +604,17 @@ program
   .action(async (id, labels: string[], options: { other?: string; response: string[] }) => {
     if (!labels.length && !options.other && !options.response.length)
       throw new Error('provide labels, --other <text>, or one --response per question');
+    const api = await client();
+    const pending = (await api.get(id)).state.pendingQuestion;
+    if (!pending) throw new Error('session has no pending structured question');
     printView(
-      await (await client()).answer(id, labels, options.other, options.response.length ? options.response : undefined),
+      await api.answer(
+        id,
+        pending.toolUseId,
+        labels,
+        options.other,
+        options.response.length ? options.response : undefined,
+      ),
     );
   });
 program
@@ -614,8 +641,101 @@ program
     '--allow-context-downgrade',
     'permit migrating onto an account with a smaller context window than the current one (normally refused)',
   )
-  .action(async (id, options: { agent: string; model?: string; allowContextDowngrade?: boolean }) =>
-    printView(await (await client()).migrate(id, options.agent, options.model, options.allowContextDowngrade)),
+  .option(
+    '--force-inflight',
+    'migrate even when in-flight work is destructive or unknown (normally refused); the override is recorded in the report',
+  )
+  .option(
+    '--when-idle [timeout]',
+    'instead of refusing on in-flight work, poll until the session is quiet (optionally up to <timeout>, e.g. 30s/5m/1h) then migrate',
+  )
+  .action(
+    async (
+      id,
+      options: {
+        agent: string;
+        model?: string;
+        allowContextDowngrade?: boolean;
+        forceInflight?: boolean;
+        whenIdle?: string | boolean;
+      },
+    ) => {
+      const api = await client();
+      let view = await api.get(id);
+      const resolvedId = view.config.id;
+      const deps = {
+        fetchChat: async (limit: number): Promise<unknown[]> => {
+          const page = await api.request<{ records?: unknown[] }>(
+            `/v1/sessions/${encodeURIComponent(resolvedId)}/chat?limit=${limit}`,
+          );
+          return page.records ?? [];
+        },
+        fetchSnapshot: () => api.snapshot(resolvedId),
+      };
+
+      let report = await buildInflightReport(view, deps);
+      let decision = gateInflight(report, { force: options.forceInflight === true });
+
+      // --when-idle: rather than refuse, poll status + inventory until quiet.
+      if (!decision.proceed && options.whenIdle !== undefined) {
+        const timeoutMs = typeof options.whenIdle === 'string' ? parseDurationMs(options.whenIdle) : undefined;
+        const startedAt = Date.now();
+        console.error(
+          `migrate: session is busy (${report.worstVerdict}); waiting for it to go quiet${timeoutMs ? ` (up to ${options.whenIdle as string})` : ''}…`,
+        );
+        while (!decision.proceed) {
+          if (timeoutMs !== undefined && Date.now() - startedAt >= timeoutMs) {
+            console.error(renderInflightCli(report));
+            throw new Error(
+              `migrate: still busy after ${options.whenIdle as string} — did not migrate. Retry, interrupt (kteam interrupt ${id}), or --force-inflight.`,
+            );
+          }
+          await Bun.sleep(3000);
+          view = await api.get(id);
+          report = await buildInflightReport(view, deps);
+          decision = gateInflight(report, { force: options.forceInflight === true });
+        }
+      }
+
+      if (!decision.proceed) {
+        console.error(renderInflightCli(report));
+        console.error('');
+        throw new Error(
+          `migrate refused: in-flight work is ${report.worstVerdict}. Migrating now would kill it. ` +
+            `Choose one: wait for idle (--when-idle [timeout]); interrupt cleanly (kteam interrupt ${id}) then migrate; ` +
+            `or override with --force-inflight (records the override in the report).`,
+        );
+      }
+
+      // Write the report BEFORE the API call, so it survives a migrate that
+      // fails and rolls back (the pane kill has already destroyed the work).
+      // Only when there is genuine in-flight work — the empty common case
+      // migrates with no new friction.
+      let reportPath: string | undefined;
+      if (!report.empty) {
+        reportPath = path.join(view.directory, 'migration-inflight.md');
+        await writeTextAtomic(
+          reportPath,
+          renderInflightReport(report, {
+            sessionId: resolvedId,
+            targetAgent: options.agent,
+            targetModel: options.model,
+            forced: decision.forced,
+            at: now(),
+          }),
+        );
+        console.error(renderInflightCli(report));
+        console.error(`migrate: wrote in-flight report to ${reportPath}`);
+      }
+
+      const migrated = await api.migrate(id, options.agent, options.model, options.allowContextDowngrade);
+
+      // Handoff: tell the relaunched agent what was running. Queued at the next
+      // turn boundary (existing mechanism). Best-effort — the migrate already
+      // succeeded, so a failed send must not fail the command.
+      if (reportPath) await api.send(resolvedId, { message: handoffMessage(reportPath) }).catch(() => {});
+      printView(migrated);
+    },
   );
 program
   .command('rename')

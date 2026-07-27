@@ -487,6 +487,24 @@ describe('precache closure (M6)', () => {
     expect(urls).toContain('/assets/font-FFF.woff2');
   });
 
+  test('keeps the lazy local-engine chunk but excludes its ORT runtime binary', () => {
+    const withOrt: ViteManifest = {
+      ...manifest,
+      'src/lib/stt/local-engine.ts': {
+        file: 'assets/local-engine-LLL.js',
+        assets: ['assets/ort-wasm-simd-threaded.jsep-a1b2c3d4.wasm'],
+      },
+      'src/pages/SessionChatPage.tsx': {
+        ...manifest['src/pages/SessionChatPage.tsx']!,
+        dynamicImports: ['src/components/Markdown.tsx', 'src/lib/stt/local-engine.ts'],
+      },
+    };
+
+    const urls = precacheClosure(withOrt);
+    expect(urls).toContain('/assets/local-engine-LLL.js');
+    expect(urls).not.toContain('/assets/ort-wasm-simd-threaded.jsep-a1b2c3d4.wasm');
+  });
+
   test('never precaches an HTML shell (token + staleness safety)', () => {
     const withHtml: ViteManifest = { ...manifest, 'extra.html': { file: 'index.html' } };
     expect(precacheClosure(withHtml).some(u => u.endsWith('.html'))).toBe(false);

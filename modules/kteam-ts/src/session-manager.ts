@@ -2,6 +2,7 @@ import { appendFile, mkdir, readFile, readdir, realpath, rename, rm, stat, write
 import { existsSync, readFileSync } from 'fs';
 import path from 'path';
 import { AttachmentStore, type StoredAttachment } from './attachments';
+import { listDirectory, readChanges, readDiff, readFileView } from './fs';
 import {
   startClaudeTranscriptWatcher,
   type ClaudeNormalizedEvent,
@@ -80,11 +81,13 @@ import {
   usageStateFromQuota,
 } from './usage';
 import {
+  anyQuestionVisible,
   contextPercentUsed,
   backgroundTerminalCount,
   foldStallLiveness,
   paneActivityLine,
   paneShowsActiveWork,
+  StructuredQuestionDriveError,
   INTERACTIVE_READY_TIMEOUT_MS,
   TmuxController,
   type PaneState,
@@ -312,6 +315,55 @@ const WAITING_HEARTBEAT_MS = 300_000;
  *  the status every few seconds. */
 export function lifecycleSuspended(state: SessionState): boolean {
   return state.waiting !== undefined || waitingStatuses.includes(state.status) || state.status === 'interrupted';
+}
+
+/** Strong pane evidence that a persisted question is no longer the active TUI
+ * menu. Unknown/non-idle frames deliberately return undefined: the monitor may
+ * diagnose them, but only retry/abandon may mutate that ambiguous state. */
+export function pendingQuestionPaneAdvance(
+  state: SessionState,
+  pane: Pick<PaneState, 'promptReady' | 'visiblePane'>,
+): 'prompt-ready' | 'turn-started' | undefined {
+  const pending = state.pendingQuestion;
+  if (!pending) return undefined;
+  // A visible question wins over the broad prompt-ready heuristic. Claude's
+  // native “Other” page contains an editable composer while the structured
+  // interaction is still live; two monitor ticks must not cancel it while a
+  // human is typing.
+  const visible = anyQuestionVisible(pane.visiblePane, pending.questions);
+  if (visible) return undefined;
+  if (pane.promptReady) return 'prompt-ready';
+  if (paneShowsActiveWork(pane.visiblePane)) return 'turn-started';
+  return undefined;
+}
+
+/** Native Claude question-menu chrome. This is intentionally diagnostic only:
+ * without a persisted tool id/questions payload the daemon cannot safely
+ * reconstruct or drive the menu, but it can make reverse divergence visible. */
+export function paneShowsStructuredQuestionMenu(pane: string): boolean {
+  return (
+    /^\s*[❯›>»]\s*\d+[.)]\s+\S/mu.test(pane) &&
+    /(?:enter|return)\s+to\s+select/iu.test(pane) &&
+    /esc(?:ape)?\s+to\s+cancel/iu.test(pane)
+  );
+}
+
+interface PendingQuestionMonitorState {
+  advancedTool?: string;
+  advancedFrames: number;
+  missingTool?: string;
+  missingFrames: number;
+  missingReported?: string;
+  orphanMenuReported?: boolean;
+}
+
+function resetPendingQuestionMonitor(state: PendingQuestionMonitorState): void {
+  state.advancedTool = undefined;
+  state.advancedFrames = 0;
+  state.missingTool = undefined;
+  state.missingFrames = 0;
+  state.missingReported = undefined;
+  state.orphanMenuReported = undefined;
 }
 
 /** IMMORTAL INTERACTIVE: an interactive session is a terminal a human drives.
@@ -1585,7 +1637,7 @@ export class SessionManager implements KTeamService {
       if (terminalStatuses.includes(view.state.status)) return { kind: 'revive' as const };
       const paneState = await this.tmux.state(view.config.tmuxSession);
       if (!paneState.alive || paneState.dead) return { kind: 'revive' as const };
-      if (view.state.status === 'awaiting_question')
+      if (view.state.status === 'awaiting_question' || view.state.pendingQuestion)
         throw new Error('answer the structured question with `kteam answer`');
       // promptReady means the TUI input box is demonstrably idle even when the
       // transcript-derived status lags (dropped end-of-turn records).
@@ -1920,6 +1972,10 @@ export class SessionManager implements KTeamService {
       return await operation();
     } catch (error) {
       const view = await this.get(id).catch(() => undefined);
+      // A structured question is a semantic control surface, not a generic
+      // “retry after pane death” operation. Relaunching here would return 200 to
+      // an answer/abandon request that never landed and reopen the same dead end.
+      if (view?.state?.pendingQuestion) throw error;
       if (view) {
         const pane = await this.tmux.state(view.config.tmuxSession);
         if (!pane.alive || pane.dead) {
@@ -1931,45 +1987,165 @@ export class SessionManager implements KTeamService {
     }
   }
 
-  async answer(id: string, labels: string[], other?: string, responses?: string[]): Promise<SessionView> {
+  async answer(
+    id: string,
+    toolUseId: string,
+    labels: string[],
+    other?: string,
+    responses?: string[],
+  ): Promise<SessionView> {
     id = this.resolveRef(id);
     await this.clearNeedsHuman(id);
-    return await this.withAutoRevive(id, 'answer', () =>
-      this.serialized(id, async () => {
-        const view = await this.get(id);
-        if (view.state.status !== 'awaiting_question')
-          throw new Error('session is not waiting on a structured question');
+    return await this.serialized(id, async () => {
+      const view = await this.get(id);
+      if (view.state.status !== 'awaiting_question' || !view.state.pendingQuestion)
+        throw new Error('session is not waiting on a structured question');
+      if (view.state.pendingQuestion.toolUseId !== toolUseId)
+        throw new Error(
+          `the displayed question changed before this answer arrived (expected ${toolUseId}, current ${view.state.pendingQuestion.toolUseId}); refresh and answer the current question`,
+        );
+      let outcome;
+      try {
+        outcome = await this.tmux.answerQuestion(view.config, view.state, labels, other, responses);
+      } catch (error) {
+        const pane = await this.tmux.state(view.config.tmuxSession).catch(() => undefined);
+        await this.tmux.snapshot(view.config).catch(() => undefined);
         await this.emit(
           id,
-          'interaction.answer',
-          { toolUseId: view.state.pendingQuestion?.toolUseId, labels, other, responses },
-          'client',
-        );
-        await this.tmux.answerQuestion(view.config, view.state, labels, other, responses);
-        await this.transition(
-          id,
+          'interaction.question_failed',
           {
-            status: 'running',
-            health: 'healthy',
-            pendingQuestion: undefined,
-            promptReady: false,
-            startedAt: now(),
-            lastActivityAt: now(),
-            turnCompleted: false,
-            nudgedAt: undefined,
+            action: 'answer',
+            toolUseId,
+            error: error instanceof Error ? error.message : String(error),
+            ...(error instanceof StructuredQuestionDriveError ? { matcher: error.diagnostics } : {}),
+            requestedLabels: labels,
+            responseCount: responses?.length,
+            hasOther: !!other,
+            snapshot: 'last-snapshot.txt',
+            ...(pane
+              ? {
+                  pane: {
+                    alive: pane.alive,
+                    dead: pane.dead,
+                    promptReady: pane.promptReady,
+                    activeWork: paneShowsActiveWork(pane.visiblePane),
+                    cursorX: pane.cursorX,
+                    cursorY: pane.cursorY,
+                    width: pane.paneWidth,
+                    height: pane.paneHeight,
+                    hash: Bun.hash(pane.visiblePane).toString(16),
+                    excerpt: pane.visiblePane.split('\n').slice(-40).join('\n').slice(-6_000),
+                  },
+                }
+              : {}),
           },
-          'turn.resumed',
-        );
-        return await this.get(id);
-      }),
-    );
+          'client',
+        ).catch(() => undefined);
+        throw error;
+      }
+      // This is the FIRST success record. The previous implementation emitted
+      // interaction.answer before any key was checked, creating false answer
+      // history for every refusal. `answerQuestion` now returns only after the
+      // pane advanced / a turn started / a ready prompt appeared.
+      const returnedToPrompt = outcome.confirmedBy === 'prompt-ready';
+      await this.transition(
+        id,
+        {
+          status: returnedToPrompt ? 'awaiting_user' : 'running',
+          health: returnedToPrompt ? 'idle' : 'healthy',
+          pendingQuestion: undefined,
+          promptReady: returnedToPrompt,
+          startedAt: now(),
+          lastActivityAt: now(),
+          turnCompleted: returnedToPrompt,
+          nudgedAt: undefined,
+        },
+        'interaction.answer',
+        { toolUseId, labels, other, responses, confirmation: outcome, pendingQuestion: null },
+        { source: currentActor() ?? 'client' },
+      );
+      return await this.get(id);
+    });
   }
 
-  async interrupt(id: string): Promise<SessionView> {
+  async interrupt(id: string, expectedToolUseId?: string): Promise<SessionView> {
     id = this.resolveRef(id);
-    return await this.withAutoRevive(id, 'interrupt', () =>
+    const operation = () =>
       this.serialized(id, async () => {
         const view = await this.get(id);
+        if (expectedToolUseId !== undefined) {
+          const currentToolUseId = view.state.pendingQuestion?.toolUseId;
+          if (currentToolUseId === undefined)
+            throw new Error(
+              `the displayed question ${expectedToolUseId} is no longer pending; refresh before abandoning`,
+            );
+          if (currentToolUseId !== expectedToolUseId)
+            throw new Error(
+              `the displayed question changed before this abandon arrived (expected ${expectedToolUseId}, current ${currentToolUseId}); refresh before abandoning the current question`,
+            );
+        }
+        if (view.state.pendingQuestion) {
+          const pending = view.state.pendingQuestion;
+          await this.emit(
+            id,
+            'interaction.question_cancel_requested',
+            { toolUseId: pending.toolUseId, reason: 'abandoned by client' },
+            'client',
+          );
+          try {
+            const result = await this.tmux.cancelQuestion(view.config, view.state);
+            await this.tmux.snapshot(view.config).catch(() => undefined);
+            const active = paneShowsActiveWork(result.pane.visiblePane);
+            await this.transition(
+              id,
+              {
+                status: active ? 'running' : 'awaiting_user',
+                health: active ? 'healthy' : 'idle',
+                promptReady: result.pane.promptReady,
+                pendingQuestion: undefined,
+                openTools: (view.state.openTools ?? []).filter(tool => tool !== pending.toolUseId),
+                reason: undefined,
+                lastActivityAt: now(),
+              },
+              'interaction.question_cancelled',
+              {
+                toolUseId: pending.toolUseId,
+                reason: 'abandoned by client',
+                confirmedBy: result.confirmedBy,
+                snapshot: 'last-snapshot.txt',
+                pendingQuestion: null,
+              },
+              { source: currentActor() ?? 'client' },
+            );
+            return await this.get(id);
+          } catch (error) {
+            const pane = await this.tmux.state(view.config.tmuxSession).catch(() => undefined);
+            await this.tmux.snapshot(view.config).catch(() => undefined);
+            await this.emit(
+              id,
+              'interaction.question_failed',
+              {
+                action: 'abandon',
+                toolUseId: pending.toolUseId,
+                error: error instanceof Error ? error.message : String(error),
+                ...(error instanceof StructuredQuestionDriveError ? { matcher: error.diagnostics } : {}),
+                snapshot: 'last-snapshot.txt',
+                ...(pane
+                  ? {
+                      pane: {
+                        promptReady: pane.promptReady,
+                        activeWork: paneShowsActiveWork(pane.visiblePane),
+                        hash: Bun.hash(pane.visiblePane).toString(16),
+                        excerpt: pane.visiblePane.split('\n').slice(-40).join('\n').slice(-6_000),
+                      },
+                    }
+                  : {}),
+              },
+              'client',
+            ).catch(() => undefined);
+            throw error;
+          }
+        }
         await this.emit(id, 'control.interrupt.requested', {}, 'client');
         await this.tmux.interrupt(view.config);
         // An interactive pane that is back (or still) at a ready prompt goes to
@@ -1992,8 +2168,12 @@ export class SessionManager implements KTeamService {
           'control.interrupted',
         );
         return await this.get(id);
-      }),
-    );
+      });
+    // A bound abandon is a semantic operation against one rendered question.
+    // If it has already cleared, a dead pane must not turn the stale retry into
+    // an automatic resume. Generic CLI interrupt keeps its established revive
+    // behavior.
+    return expectedToolUseId === undefined ? await this.withAutoRevive(id, 'interrupt', operation) : await operation();
   }
 
   async stop(id: string, reason = 'stopped by client'): Promise<SessionView> {
@@ -2134,6 +2314,13 @@ export class SessionManager implements KTeamService {
           throw new ResumeCancelled(`resume guard changed from ${guard.status}`);
         }
         const paneState = await this.tmux.state(view.config.tmuxSession);
+        if (
+          view.state.pendingQuestion &&
+          paneState.alive &&
+          !paneState.dead &&
+          !terminalStatuses.includes(view.state.status)
+        )
+          throw new Error('answer or abandon the structured question before resuming this live session');
         if (paneState.alive && !paneState.dead) {
           // A TERMINAL session's leftover live pane (daemon-restart re-adoption,
           // reconciled completion) is unmonitored â injecting into it loses the
@@ -2205,6 +2392,22 @@ export class SessionManager implements KTeamService {
           turn,
           updatedAt: now(),
         }));
+        const abandonedQuestion = view.state.pendingQuestion;
+        if (abandonedQuestion) {
+          // Relaunch replaces the native pane, so its old question cannot
+          // survive. Append the lifecycle record before the state transition
+          // clears it; a journal failure must not silently erase the evidence.
+          await this.emit(
+            id,
+            'interaction.question_cancelled',
+            {
+              toolUseId: abandonedQuestion.toolUseId,
+              reason: 'session relaunched before a daemon-confirmed answer',
+              pendingQuestion: null,
+            },
+            'daemon',
+          );
+        }
         await this.transition(
           id,
           {
@@ -3234,6 +3437,26 @@ export class SessionManager implements KTeamService {
     };
   }
 
+  async fsList(id: string, relativePath?: string) {
+    const cwd = (await this.get(id)).config.cwd;
+    return await listDirectory(cwd, relativePath);
+  }
+
+  async fsFile(id: string, relativePath: string, rev?: 'head') {
+    const cwd = (await this.get(id)).config.cwd;
+    return await readFileView(cwd, relativePath, { rev });
+  }
+
+  async fsChanges(id: string) {
+    const cwd = (await this.get(id)).config.cwd;
+    return await readChanges(cwd);
+  }
+
+  async fsDiff(id: string, relativePath: string) {
+    const cwd = (await this.get(id)).config.cwd;
+    return await readDiff(cwd, relativePath);
+  }
+
   private async recover(): Promise<void> {
     const sessions = await this.list();
     const tmuxSessions = await this.tmux.listSessions();
@@ -3510,6 +3733,194 @@ export class SessionManager implements KTeamService {
     } else void stopAll.catch(() => undefined);
   }
 
+  /** Reconcile one pane observation with structured-question state while holding
+   * the same per-session queue used by answer(), interrupt(), and transcript
+   * reducers. The pane was captured before the lock, so its associated status
+   * and tool id are revalidated inside the lock before any counter, state, or
+   * lifecycle mutation. */
+  private async reconcileStructuredQuestionFrame(
+    id: string,
+    pane: PaneState,
+    paneHash: string,
+    observedStatus: SessionState['status'],
+    observedToolUseId: string | undefined,
+    monitor: PendingQuestionMonitorState,
+  ): Promise<SessionView> {
+    return await this.serialized(id, async () => {
+      let view = await this.get(id);
+      if (view.state.status !== observedStatus || view.state.pendingQuestion?.toolUseId !== observedToolUseId) {
+        // An answer, abandon, or transcript reduction won the queue while this
+        // pane observation waited. It owns the lifecycle decision; a stale
+        // monitor frame must neither clear state nor emit a competing event.
+        resetPendingQuestionMonitor(monitor);
+        return view;
+      }
+
+      const pendingQuestion = view.state.pendingQuestion;
+      if (view.state.status === 'awaiting_question' && !pendingQuestion) {
+        const active = paneShowsActiveWork(pane.visiblePane);
+        await this.transition(
+          id,
+          {
+            status: active ? 'running' : 'awaiting_user',
+            health: active ? 'healthy' : 'idle',
+            promptReady: pane.promptReady,
+            reason: undefined,
+          },
+          'interaction.question_failed',
+          {
+            action: 'self-heal',
+            reason: 'awaiting_question had no pendingQuestion state',
+            paneHash,
+            promptReady: pane.promptReady,
+            activeWork: active,
+          },
+        );
+        return await this.get(id);
+      }
+
+      if (!pendingQuestion) {
+        const orphanMenu =
+          view.config.mode === 'interactive' &&
+          !protectedStatuses.includes(view.state.status) &&
+          paneShowsStructuredQuestionMenu(pane.visiblePane);
+        const alreadyReported = monitor.orphanMenuReported === true;
+        resetPendingQuestionMonitor(monitor);
+        monitor.orphanMenuReported = orphanMenu;
+        if (orphanMenu && !alreadyReported) {
+          await this.tmux.snapshot(view.config).catch(() => undefined);
+          await this.emit(
+            id,
+            'interaction.question_failed',
+            {
+              action: 'self-heal',
+              reason: 'structured question menu is visible but daemon state has no pendingQuestion; no keys were sent',
+              status: view.state.status,
+              promptReady: pane.promptReady,
+              paneHash,
+              snapshot: 'last-snapshot.txt',
+              excerpt: pane.visiblePane.split('\n').slice(-40).join('\n').slice(-6_000),
+            },
+            'watcher',
+          );
+        }
+        return view;
+      }
+
+      const visible = anyQuestionVisible(pane.visiblePane, pendingQuestion.questions);
+      const active = paneShowsActiveWork(pane.visiblePane);
+      if (
+        view.config.mode === 'interactive' &&
+        view.state.status !== 'awaiting_question' &&
+        !protectedStatuses.includes(view.state.status)
+      ) {
+        await this.transition(
+          id,
+          { status: 'awaiting_question', health: 'waiting' },
+          'interaction.question_reconciled',
+          {
+            toolUseId: pendingQuestion.toolUseId,
+            reason: 'pendingQuestion existed while status diverged',
+          },
+        );
+        view = await this.get(id);
+      }
+
+      const advanceEvidence = pendingQuestionPaneAdvance(view.state, pane);
+      if (advanceEvidence) {
+        if (monitor.advancedTool === pendingQuestion.toolUseId) monitor.advancedFrames++;
+        else {
+          monitor.advancedTool = pendingQuestion.toolUseId;
+          monitor.advancedFrames = 1;
+        }
+        if (monitor.advancedFrames >= 2) {
+          await this.tmux.snapshot(view.config).catch(() => undefined);
+          await this.transition(
+            id,
+            {
+              status: active ? 'running' : 'awaiting_user',
+              health: active ? 'healthy' : 'idle',
+              promptReady: pane.promptReady,
+              pendingQuestion: undefined,
+              openTools: (view.state.openTools ?? []).filter(tool => tool !== pendingQuestion.toolUseId),
+              reason: undefined,
+            },
+            // This edge clears the question without a daemon-confirmed answer.
+            // “Reconciled” alone would leave no ANSWER/CANCELLED/SUPERSEDED
+            // lifecycle record for the clear, so both pane-advance shapes are
+            // durably classified as cancellation.
+            'interaction.question_cancelled',
+            {
+              toolUseId: pendingQuestion.toolUseId,
+              reason:
+                advanceEvidence === 'prompt-ready'
+                  ? 'pane returned to an idle prompt without a daemon-confirmed answer'
+                  : 'pane started a turn without a daemon-confirmed answer',
+              confirmedBy: advanceEvidence,
+              paneHash,
+              snapshot: 'last-snapshot.txt',
+              pendingQuestion: null,
+            },
+          );
+          resetPendingQuestionMonitor(monitor);
+        }
+        return await this.get(id);
+      }
+
+      monitor.advancedTool = undefined;
+      monitor.advancedFrames = 0;
+      if (!visible) {
+        if (monitor.missingTool === pendingQuestion.toolUseId) monitor.missingFrames++;
+        else {
+          monitor.missingTool = pendingQuestion.toolUseId;
+          monitor.missingFrames = 1;
+        }
+        if (!pendingQuestion.missingSince) {
+          await this.store.updateState<SessionState>(id, current => ({
+            ...current,
+            pendingQuestion:
+              current.pendingQuestion?.toolUseId === pendingQuestion.toolUseId
+                ? { ...current.pendingQuestion, missingSince: now() }
+                : current.pendingQuestion,
+          }));
+        }
+        if (monitor.missingFrames >= 3 && monitor.missingReported !== pendingQuestion.toolUseId) {
+          monitor.missingReported = pendingQuestion.toolUseId;
+          await this.tmux.snapshot(view.config).catch(() => undefined);
+          await this.emit(
+            id,
+            'interaction.question_failed',
+            {
+              action: 'self-heal',
+              toolUseId: pendingQuestion.toolUseId,
+              reason: 'question missing from a non-idle pane; kept pending for safe retry or abandon',
+              promptReady: pane.promptReady,
+              activeWork: active,
+              paneHash,
+              snapshot: 'last-snapshot.txt',
+              excerpt: pane.visiblePane.split('\n').slice(-40).join('\n').slice(-6_000),
+            },
+            'watcher',
+          );
+        }
+      } else {
+        monitor.missingTool = undefined;
+        monitor.missingFrames = 0;
+        monitor.missingReported = undefined;
+        if (pendingQuestion.missingSince) {
+          await this.store.updateState<SessionState>(id, current => ({
+            ...current,
+            pendingQuestion:
+              current.pendingQuestion?.toolUseId === pendingQuestion.toolUseId
+                ? { ...current.pendingQuestion, missingSince: undefined, lastSeenAt: now() }
+                : current.pendingQuestion,
+          }));
+        }
+      }
+      return await this.get(id);
+    });
+  }
+
   private async monitorLoop(id: string, signal: AbortSignal): Promise<void> {
     let paneHash = '';
     let diffHash = '';
@@ -3521,6 +3932,10 @@ export class SessionManager implements KTeamService {
     // 2026-07-19) is a transcript-correlation gap, not a lost prompt â it must
     // not be reinjected or failed as turn-never-started.
     let activeWorkTurn = -1;
+    const questionMonitor: PendingQuestionMonitorState = {
+      advancedFrames: 0,
+      missingFrames: 0,
+    };
     // A stale marker remains on disk as forensic evidence until a new turn
     // writes its own marker. Journal each distinct stale/current-turn pair
     // once per monitor rather than flooding the event log every tick.
@@ -3793,6 +4208,24 @@ export class SessionManager implements KTeamService {
             if (contextTurnedHigh) await this.emit(id, 'context.high', { contextPercent }, 'watcher');
             view = await this.get(id);
           }
+
+          // Structured-question self-heal. Transcript state can say
+          // awaiting_question after the TUI has cancelled/accepted/repainted the
+          // menu. A ready prompt, or active work with no pending question visible,
+          // is strong pane evidence that the menu is no longer blocking. Require
+          // two monitor frames, then reconcile instead of preserving a permanent
+          // dead end. Ambiguous non-idle/missing panes are NOT cleared: snapshot +
+          // journal them and leave the UI's retry/abandon controls available.
+          const observedStatus = view.state.status;
+          const observedToolUseId = view.state.pendingQuestion?.toolUseId;
+          view = await this.reconcileStructuredQuestionFrame(
+            id,
+            pane,
+            paneHash,
+            observedStatus,
+            observedToolUseId,
+            questionMonitor,
+          );
 
           const diff = await this.gitFingerprint(view.config.cwd);
           const nextDiffHash = Bun.hash(diff).toString(16);
@@ -4258,6 +4691,7 @@ export class SessionManager implements KTeamService {
       await this.correlateNativeSends(id, view, events);
       view = await this.get(id);
       let autoQuestion = false;
+      const questionLifecycleEvents: Array<{ type: string; data: Record<string, unknown> }> = [];
       // The harness already wrote these records. kteam INDEXES them where they
       // live (one SQLite row each, no bytes) and broadcasts them live; it does
       // not copy them into events.jsonl or chat.jsonl. Only the records the
@@ -4266,7 +4700,25 @@ export class SessionManager implements KTeamService {
       this.indexChatRecords(id, view, events, cursor);
       for (const event of events) {
         if (HARNESS_DERIVED_EVENT_TYPES.has(event.type)) this.broadcastChat(id, event, view.config.turn, 'claude');
-        else await this.emit(id, event.type, event.data, 'claude', view.config.turn);
+        else
+          await this.emit(
+            id,
+            event.type,
+            event.type === 'interaction.question' && view.config.mode === 'interactive'
+              ? {
+                  ...event.data,
+                  status: 'awaiting_question',
+                  health: 'waiting',
+                  pendingQuestion: {
+                    toolUseId: event.data.toolUseId,
+                    questions: event.data.questions,
+                    askedAt: event.timestamp ?? now(),
+                  },
+                }
+              : event.data,
+            'claude',
+            view.config.turn,
+          );
         if (event.type === 'interaction.question') {
           await appendFile(
             path.join(view.directory, 'channel', 'outbox.jsonl'),
@@ -4345,10 +4797,35 @@ export class SessionManager implements KTeamService {
             lastToolStartedAt = now();
           } else if (event.type === 'tool.result') {
             openTools.delete(event.data.toolUseId);
-            if (pendingQuestion?.toolUseId === event.data.toolUseId) pendingQuestion = undefined;
+            if (pendingQuestion?.toolUseId === event.data.toolUseId) {
+              questionLifecycleEvents.push({
+                type: 'interaction.question_cancelled',
+                data: {
+                  toolUseId: pendingQuestion.toolUseId,
+                  reason: 'harness produced a tool result without a daemon-confirmed answer',
+                  isError: event.data.isError,
+                },
+              });
+              pendingQuestion = undefined;
+            }
             status = openTools.size ? 'tool_running' : 'running';
           } else if (event.type === 'interaction.question') {
-            pendingQuestion = { toolUseId: event.data.toolUseId, questions: event.data.questions };
+            if (pendingQuestion && pendingQuestion.toolUseId !== event.data.toolUseId) {
+              questionLifecycleEvents.push({
+                type: 'interaction.question_superseded',
+                data: {
+                  toolUseId: pendingQuestion.toolUseId,
+                  successorToolUseId: event.data.toolUseId,
+                  reason: 'a newer structured question replaced it',
+                },
+              });
+            }
+            pendingQuestion = {
+              toolUseId: event.data.toolUseId,
+              questions: event.data.questions,
+              askedAt: event.timestamp ?? now(),
+              lastSeenAt: now(),
+            };
             status = view.config.mode === 'interactive' ? 'awaiting_question' : 'running';
             turnCompleted = false;
           } else if (event.type === 'chat.assistant.thinking') {
@@ -4359,7 +4836,16 @@ export class SessionManager implements KTeamService {
             // (interrupted tools, harness id mismatches) must not wedge the
             // idle detector permanently in tool_running.
             openTools.clear();
-            pendingQuestion = undefined;
+            if (pendingQuestion) {
+              questionLifecycleEvents.push({
+                type: 'interaction.question_cancelled',
+                data: {
+                  toolUseId: pendingQuestion.toolUseId,
+                  reason: 'turn completed before a daemon-confirmed answer',
+                },
+              });
+              pendingQuestion = undefined;
+            }
             turnCompleted = true;
             status = 'running';
           } else if (event.type.startsWith('chat.')) {
@@ -4367,6 +4853,7 @@ export class SessionManager implements KTeamService {
             status = 'running';
           }
         }
+        if (pendingQuestion && view.config.mode === 'interactive') status = 'awaiting_question';
         const terminal = protectedStatuses.includes(current.status);
         return {
           ...current,
@@ -4397,6 +4884,8 @@ export class SessionManager implements KTeamService {
           promptReady: terminal ? current.promptReady : false,
         };
       });
+      for (const lifecycle of questionLifecycleEvents)
+        await this.emit(id, lifecycle.type, lifecycle.data, 'watcher', view.config.turn);
       if (autoQuestion) {
         await this.tmux.snapshot(view.config, true);
         await this.stopManagedSession(view.config, 'automode structured-question protocol violation');
@@ -4426,6 +4915,7 @@ export class SessionManager implements KTeamService {
       await this.correlateNativeSends(id, view, events);
       view = await this.get(id);
       let autoQuestion = false;
+      const questionLifecycleEvents: Array<{ type: string; data: Record<string, unknown> }> = [];
       // The harness already wrote these records. kteam INDEXES them where they
       // live (one SQLite row each, no bytes) and broadcasts them live; it does
       // not copy them into events.jsonl or chat.jsonl. Only the records the
@@ -4438,7 +4928,25 @@ export class SessionManager implements KTeamService {
         // turn, so copying every occurrence would add history without signal.
         if (event.type === 'runtime.settings') continue;
         if (HARNESS_DERIVED_EVENT_TYPES.has(event.type)) this.broadcastChat(id, event, view.config.turn, 'codex');
-        else await this.emit(id, event.type, event.data, 'codex', view.config.turn);
+        else
+          await this.emit(
+            id,
+            event.type,
+            event.type === 'interaction.question' && view.config.mode === 'interactive'
+              ? {
+                  ...event.data,
+                  status: 'awaiting_question',
+                  health: 'waiting',
+                  pendingQuestion: {
+                    toolUseId: event.data.toolUseId,
+                    questions: event.data.questions,
+                    askedAt: event.timestamp ?? now(),
+                  },
+                }
+              : event.data,
+            'codex',
+            view.config.turn,
+          );
         if (event.type === 'interaction.question') {
           await appendFile(
             path.join(view.directory, 'channel', 'outbox.jsonl'),
@@ -4508,7 +5016,19 @@ export class SessionManager implements KTeamService {
             // See the Claude handler: a finished turn must clear open tools so
             // unmatched tool ids cannot wedge the idle detector.
             openTools.clear();
-            pendingQuestion = undefined;
+            if (pendingQuestion) {
+              questionLifecycleEvents.push({
+                type: 'interaction.question_cancelled',
+                data: {
+                  toolUseId: pendingQuestion.toolUseId,
+                  reason:
+                    event.type === 'turn.aborted'
+                      ? 'turn aborted before a daemon-confirmed answer'
+                      : 'turn completed before a daemon-confirmed answer',
+                },
+              });
+              pendingQuestion = undefined;
+            }
             turnCompleted = true;
             status = 'running';
           } else if (event.type === 'tool.use') {
@@ -4518,13 +5038,38 @@ export class SessionManager implements KTeamService {
             lastToolStartedAt = now();
           } else if (event.type === 'tool.result') {
             openTools.delete(event.data.toolUseId);
-            if (pendingQuestion?.toolUseId === event.data.toolUseId) pendingQuestion = undefined;
+            if (pendingQuestion?.toolUseId === event.data.toolUseId) {
+              questionLifecycleEvents.push({
+                type: 'interaction.question_cancelled',
+                data: {
+                  toolUseId: pendingQuestion.toolUseId,
+                  reason: 'harness produced a tool result without a daemon-confirmed answer',
+                  isError: event.data.isError,
+                },
+              });
+              pendingQuestion = undefined;
+            }
             status = openTools.size ? 'tool_running' : 'running';
           } else if (event.type === 'chat.assistant.reasoning') {
             status = 'thinking';
             turnCompleted = false;
           } else if (event.type === 'interaction.question') {
-            pendingQuestion = { toolUseId: event.data.toolUseId, questions: event.data.questions };
+            if (pendingQuestion && pendingQuestion.toolUseId !== event.data.toolUseId) {
+              questionLifecycleEvents.push({
+                type: 'interaction.question_superseded',
+                data: {
+                  toolUseId: pendingQuestion.toolUseId,
+                  successorToolUseId: event.data.toolUseId,
+                  reason: 'a newer structured question replaced it',
+                },
+              });
+            }
+            pendingQuestion = {
+              toolUseId: event.data.toolUseId,
+              questions: event.data.questions,
+              askedAt: event.timestamp ?? now(),
+              lastSeenAt: now(),
+            };
             status = view.config.mode === 'interactive' ? 'awaiting_question' : 'running';
             turnCompleted = false;
           } else if (event.type.startsWith('chat.')) {
@@ -4532,6 +5077,7 @@ export class SessionManager implements KTeamService {
             status = 'running';
           }
         }
+        if (pendingQuestion && view.config.mode === 'interactive') status = 'awaiting_question';
         const terminal = protectedStatuses.includes(current.status);
         return {
           ...current,
@@ -4566,6 +5112,8 @@ export class SessionManager implements KTeamService {
           promptReady: terminal ? current.promptReady : false,
         };
       });
+      for (const lifecycle of questionLifecycleEvents)
+        await this.emit(id, lifecycle.type, lifecycle.data, 'watcher', view.config.turn);
       if (
         runtimeSettings &&
         ((runtimeSettings.data.model !== undefined && runtimeSettings.data.model !== view.state.observedModel) ||
@@ -4597,7 +5145,7 @@ export class SessionManager implements KTeamService {
     patch: Partial<SessionState>,
     eventType: string,
     eventData: Record<string, unknown> = {},
-    options: { force?: boolean } = {},
+    options: { force?: boolean; source?: KTeamEvent['source'] } = {},
   ): Promise<void> {
     let suppressed = false;
     const state = await this.store.updateState<SessionState>(id, current => {
@@ -4630,7 +5178,7 @@ export class SessionManager implements KTeamService {
       id,
       eventType,
       { status: state.status, health: state.health, ...eventData },
-      'daemon',
+      options.source ?? 'daemon',
       state.turn,
     );
     // Busy-time sends live in the TUI's NATIVE queue; a completing turn

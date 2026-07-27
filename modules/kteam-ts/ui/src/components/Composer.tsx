@@ -544,17 +544,31 @@ export function Composer({
     </>
   ) : null;
 
-  const interruptControl = showInterrupt ? (
+  // The interrupt is destructive and click-only — keyboard delivery can never
+  // reach it. `reserved` builds the SAME button in an inert, invisible form:
+  // the phone dock renders it that way when the session is NOT interruptible so
+  // the interrupt's ROW is always present and the composer height never jumps as
+  // a turn starts or ends (the user asked for the box to "always include the
+  // interrupt"). `visibility:hidden` (Tailwind `invisible`) reserves the button's
+  // exact layout box in every theme — no magic pixel value, no separate spacer —
+  // while `aria-hidden` + `tabIndex=-1` + `disabled` keep it out of the a11y tree
+  // and unreachable, because there is nothing to interrupt yet. The visible-when-
+  // active attributes (44px, labelled, glyph+danger tone, sr-only word) are the
+  // batch-1 invariant and must stay identical to the active form — one builder,
+  // so they cannot diverge.
+  const buildInterrupt = (reserved: boolean) => (
     <Button
-      className={cn(touchAffected && 'min-h-[44px] min-w-[44px]')}
+      className={cn(touchAffected && 'min-h-[44px] min-w-[44px]', reserved && 'invisible')}
       variant="danger"
       size="sm"
-      disabled={!canSubmit}
-      aria-disabled={!canSubmit}
+      disabled={reserved || !canSubmit}
+      aria-disabled={reserved || !canSubmit}
+      aria-hidden={reserved || undefined}
+      tabIndex={reserved ? -1 : undefined}
       aria-label="Interrupt the current turn and send this message now"
-      aria-describedby={disabledReason ? disabledReasonId : undefined}
+      aria-describedby={!reserved && disabledReason ? disabledReasonId : undefined}
       title="Stop the current turn safely, then deliver this message now"
-      onClick={() => onInterruptAndSend?.()}
+      onClick={reserved ? undefined : () => onInterruptAndSend?.()}
     >
       <ZapOff size={12} aria-hidden="true" />
       {/* ICON-ONLY ON TOUCH, like Send/Queue (the user asked for interrupt and
@@ -565,7 +579,12 @@ export function Composer({
           word keep it named in every state. Desktop keeps the visible word. */}
       <span className={cn(touchAffected && 'sr-only')}>Interrupt &amp; send</span>
     </Button>
-  ) : null;
+  );
+  // Active interrupt: rendered only when the session can actually be interrupted.
+  // Desktop uses this directly (its single action row has no jump to fix, so it
+  // simply omits the control when idle); the phone dock swaps in the reserved
+  // form to hold the height.
+  const interruptControl = showInterrupt ? buildInterrupt(false) : null;
 
   const sendControl = busy ? (
     <Button
@@ -650,7 +669,13 @@ export function Composer({
         <>
           <div className="kt-composer__dock flex items-end gap-xs">
             {(attachControl || dictation.control) && (
-              <div className="flex shrink-0 items-end gap-xs">
+              // STACKED VERTICAL ICONS, the same move as Interrupt/Queue on the
+              // right (the user asked "can the attach and mic be stacked?"). A
+              // column of two 44px icons costs one icon's WIDTH instead of two,
+              // which is the scarce axis at 360px — it buys the textarea back the
+              // width a side-by-side row spent, at the cost of height the dock is
+              // already paying for the interrupt column opposite it.
+              <div className="flex shrink-0 flex-col items-end gap-xs">
                 {attachControl}
                 {dictation.control}
               </div>
@@ -674,10 +699,18 @@ export function Composer({
               // TOP and Queue/Send (the safe default) on the BOTTOM, nearest the
               // thumb, so the reachable target is the non-destructive one. Two
               // 44px icons in a column instead of a row leaves the textarea the
-              // full width it needs at 360px; the column only reaches its ~92px
-              // height in the busy state, when both controls are present.
+              // full width it needs at 360px.
+              //
+              // THE INTERRUPT ROW IS ALWAYS RESERVED. When the session is not
+              // interruptible the top slot holds the inert, invisible interrupt
+              // (see buildInterrupt) instead of collapsing, so Send/Queue stays
+              // pinned to the bottom and the composer height is identical whether
+              // or not a turn is running — the height no longer jumps under the
+              // reader as a session flips busy/idle. Reserved only when an
+              // interrupt is wired at all (`onInterruptAndSend`); a composer that
+              // can never interrupt reserves nothing.
               <div className="flex shrink-0 flex-col items-end gap-xs">
-                {interruptControl}
+                {interruptControl ?? (onInterruptAndSend ? buildInterrupt(true) : null)}
                 {sendControl}
               </div>
             )}

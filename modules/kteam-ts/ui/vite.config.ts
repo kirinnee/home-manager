@@ -79,6 +79,13 @@ export default defineConfig(({ command }) => {
     server: {
       port: 5173,
       proxy: {
+        // Browser-local dictation prepares its explicitly chosen model from the
+        // box too. Unlike /v1 this endpoint is public because model loaders do
+        // plain fetches without the daemon bearer token.
+        '/stt-models': {
+          target: 'http://127.0.0.1:7337',
+          changeOrigin: true,
+        },
         // During `vite dev`, the UI talks to the real kteam daemon on loopback
         // so it can render live sessions; forward /v1 + WebSocket upgrades.
         '/v1': {

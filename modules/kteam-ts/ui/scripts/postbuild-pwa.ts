@@ -56,6 +56,7 @@
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { outDirFromArgv, releaseIdFromArgv, workerName } from './release';
+import { isOrtRuntimeAsset } from '../src/lib/stt/ort-precache';
 
 const HERE = dirname(new URL(import.meta.url).pathname);
 export const UI_ROOT = join(HERE, '..');
@@ -82,6 +83,12 @@ export type ViteManifest = Record<string, ViteManifestRecord>;
 export function precacheClosure(manifest: ViteManifest): string[] {
   const urls = new Set<string>();
   const visited = new Set<string>();
+  // The ORT runtime is an explicit per-device local-dictation download, not
+  // app-shell cost. Keep the JS chunk that imports it, but defer the binary
+  // itself until the reader chooses "Prepare this device".
+  const addAsset = (asset: string): void => {
+    if (!isOrtRuntimeAsset(asset)) urls.add(`/${asset}`);
+  };
 
   const visit = (key: string): void => {
     if (visited.has(key)) return;
@@ -89,9 +96,9 @@ export function precacheClosure(manifest: ViteManifest): string[] {
     const record = manifest[key];
     if (!record) return;
     // The HTML shell is never precached (token + staleness safety).
-    if (!record.file.endsWith('.html')) urls.add(`/${record.file}`);
-    for (const css of record.css ?? []) urls.add(`/${css}`);
-    for (const asset of record.assets ?? []) urls.add(`/${asset}`);
+    if (!record.file.endsWith('.html')) addAsset(record.file);
+    for (const css of record.css ?? []) addAsset(css);
+    for (const asset of record.assets ?? []) addAsset(asset);
     for (const next of [...(record.imports ?? []), ...(record.dynamicImports ?? [])]) visit(next);
   };
 
