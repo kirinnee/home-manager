@@ -17,7 +17,12 @@ yaml=$(sops -d "${SECRETS_FILE}")
 
 # general secrets
 [ -f "$HOME/.secrets" ] && rm "$HOME/.secrets"
-yq -r '.env | to_entries[] | "export \(.key)=\(.value)"' <<<"$yaml" >>"$HOME/.secrets"
+# Create provider credentials as 0600 from the first byte; chmod-after-write
+# would leave a world-readable window under a permissive activation umask.
+(
+  umask 077
+  yq -r '.env | to_entries[] | "export \(.key)=\(.value)"' <<<"$yaml" >>"$HOME/.secrets"
+)
 
 # nix secrets
 [ -f "$HOME/nix.conf" ] && rm "$HOME/nix.conf"

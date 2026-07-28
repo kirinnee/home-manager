@@ -31,7 +31,12 @@ const usageAccounts = (payload: unknown): AgentUsage[] | undefined => {
  *  this at most once per refresh interval for the whole daemon. */
 export async function fetchKfleetUsage(command = 'kfleet'): Promise<AgentUsage[] | undefined> {
   try {
-    const child = Bun.spawn([command, 'usage', '--json', '--no-relogin'], {
+    // `--all` is billing-critical: without it kfleet intentionally hides raw
+    // API-metered accounts (`usageBased:false`) from the human quota display.
+    // The daemon needs those explicit false rows so the cost surface can
+    // distinguish API billing from a missing/unknown account.
+    const child = Bun.spawn([command, 'usage', '--json', '--all', '--no-relogin'], {
+      env: process.env,
       stdin: 'ignore',
       stdout: 'pipe',
       stderr: 'ignore',
@@ -142,7 +147,10 @@ const timestamp = (value: unknown): number | undefined =>
  *  `ok:false` records are treated as authentication failures, matching the
  *  launch preflight contract, and their placeholder usage numbers are hidden. */
 export function quotaFromUsage(account: AgentUsage): NonNullable<SessionState['quota']> {
-  const authOk = account.ok === false ? false : account.authOk;
+  // kfleet emits raw API-metered rows as `usageBased:false, ok:false`: no
+  // quota probe was attempted because there is no subscription window. That
+  // is positive billing evidence, not an authentication failure.
+  const authOk = account.usageBased === false ? account.authOk : account.ok === false ? false : account.authOk;
   const usable = account.ok !== false && account.usageBased !== false && authOk !== false;
   const fiveHourPercent = usable ? percent(account.fiveHourPercent) : undefined;
   const weeklyPercent = usable ? percent(account.weeklyPercent) : undefined;
@@ -150,6 +158,7 @@ export function quotaFromUsage(account: AgentUsage): NonNullable<SessionState['q
   const weeklyResetAt = usable ? timestamp(account.weeklyResetAt) : undefined;
   const resets = [fiveHourResetAt, weeklyResetAt].filter((value): value is number => value !== undefined);
   return {
+    ...(typeof account.usageBased === 'boolean' ? { usageBased: account.usageBased } : {}),
     ...(usable && typeof account.atLimit === 'boolean' ? { atLimit: account.atLimit } : {}),
     ...(authOk !== undefined ? { authOk } : {}),
     ...(account.provider ? { provider: account.provider } : {}),
