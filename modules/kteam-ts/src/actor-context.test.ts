@@ -1,5 +1,13 @@
 import { describe, expect, test } from 'bun:test';
-import { actorContext, currentActor, parseActor, peerActor, resolveApiActor, wardenActor } from './actor-context';
+import {
+  actorContext,
+  currentActor,
+  isHumanAdminActor,
+  parseActor,
+  peerActor,
+  resolveApiActor,
+  wardenActor,
+} from './actor-context';
 
 describe('resolveApiActor', () => {
   test('a warden token with the warden session id names the specific warden', () => {
@@ -61,6 +69,17 @@ describe('parseActor', () => {
     expect(parsed.kind).toBe('cron');
     expect(parsed.id).toBe('nightly-sweep');
     expect(parsed.raw).toBe('cron:nightly-sweep');
+  });
+});
+
+describe('isHumanAdminActor', () => {
+  test('admits only direct human actors', () => {
+    expect(isHumanAdminActor('admin-ui')).toBe(true);
+    expect(isHumanAdminActor('admin-cli')).toBe(true);
+    expect(isHumanAdminActor(resolveApiActor({ tokenClass: 'admin', sessionId: 'georgia' }))).toBe(false);
+    expect(isHumanAdminActor('peer:admin-ui' as never)).toBe(false);
+    expect(isHumanAdminActor('warden:admin-cli' as never)).toBe(false);
+    expect(isHumanAdminActor(undefined)).toBe(false);
   });
 });
 

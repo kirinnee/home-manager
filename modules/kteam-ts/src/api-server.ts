@@ -8,7 +8,7 @@ import { WARDEN_LABEL } from './warden-detect';
 import type { LearningAction, LearningService } from './learning';
 import type { ProposalState } from './learning-types';
 import { renderShell } from './ui';
-import { actorContext, resolveApiActor, type TokenClass } from './actor-context';
+import { actorContext, isHumanAdminActor, resolveApiActor, type TokenClass } from './actor-context';
 import { KTEAM_VERSION } from './version';
 import { FsError } from './fs';
 import { GitError } from './git';
@@ -888,6 +888,14 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
             });
           }
           if (action === 'runtime' && request.method === 'POST') {
+            // Model/effort changes alter cost and behaviour; clear/compact alter
+            // live context. Refuse an honestly self-identifying peer before
+            // body parsing, dedupe bookkeeping, or any service mutation.
+            if (!isHumanAdminActor(actor))
+              return json(
+                { error: 'in-session runtime control requires the human admin token', code: 'forbidden' },
+                403,
+              );
             const input = await body<RuntimeControlRequest>(request);
             if (
               input.action !== 'model' &&
