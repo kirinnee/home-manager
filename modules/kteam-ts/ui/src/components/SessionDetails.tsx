@@ -57,6 +57,7 @@ import { api, ApiError } from '../lib/api';
 import {
   fetchRuntimeModelCatalog,
   requireRuntimeModelCatalogHarness,
+  runtimeModelCatalogErrorMessage,
   type RuntimeModelCatalog,
   type RuntimeModelChoice,
 } from '../lib/runtime-models';
@@ -738,10 +739,15 @@ export function observedModelPresentation(observedModel: string | undefined, sta
   };
 }
 
-/** A route-shaped 404 is daemon/UI version skew; an ordinary 404 can still be
- * a missing session and must retain its normal error treatment. */
+/** A missing POST /runtime action is daemon/UI version skew; an ordinary 404
+ * can still be a missing session and must retain its normal error treatment.
+ * Catalog GET failures have separate, truthful handling below. */
 export function isRuntimeEndpointUnavailable(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404 && error.code === 'unknown_route';
+}
+
+export function runtimeControlUnavailableMessage(control: 'model' | 'effort'): string {
+  return `The running daemon is older than this web UI and does not provide in-session ${control} switching. Update the daemon build to enable it; restarting the same build will not help.`;
 }
 
 /** A daemon that predates the effort runtime action rejects it with the 400 it
@@ -835,11 +841,11 @@ export function RuntimeModelControls({
   const [submittingTarget, setSubmittingTarget] = useState<{ model: string; effort?: string } | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [restartRequired, setRestartRequired] = useState(false);
+  const [runtimeControlUnavailable, setRuntimeControlUnavailable] = useState(false);
   const submitting = submittingTarget !== null;
 
   useEffect(() => {
-    setRestartRequired(false);
+    setRuntimeControlUnavailable(false);
     setFailure(null);
     setNotice(null);
     setSelectedCodexModel(null);
@@ -848,21 +854,15 @@ export function RuntimeModelControls({
 
   useEffect(() => {
     if (open) return;
-    setRestartRequired(false);
+    setRuntimeControlUnavailable(false);
     setSelectedCodexModel(null);
   }, [open]);
-
-  // Claude has no safe manual fallback for a missing catalog route. Codex
-  // does: keep its established bare native picker available on version skew.
-  useEffect(() => {
-    if (config.harness === 'claude' && isRuntimeEndpointUnavailable(catalogError)) setRestartRequired(true);
-  }, [catalogError, config.harness]);
 
   const codexPickerFallback =
     config.harness === 'codex' && codexPickerFallbackNeeded(catalog, catalogError, selectedCodexModel ?? undefined);
 
   async function runModelCommand(model?: string, effort?: string) {
-    if (!canControl || terminal || !promptReady || submitting || restartRequired) return;
+    if (!canControl || terminal || !promptReady || submitting || runtimeControlUnavailable) return;
     const targeted = Boolean(model);
     setSubmittingTarget({ model: model ?? 'native-picker', ...(effort ? { effort } : {}) });
     setFailure(null);
@@ -889,7 +889,7 @@ export function RuntimeModelControls({
     } catch (error) {
       if (targeted) onModelSwitchFailed?.();
       if (isRuntimeEndpointUnavailable(error)) {
-        setRestartRequired(true);
+        setRuntimeControlUnavailable(true);
         return;
       }
       setFailure(error instanceof ApiError ? error.message : String(error));
@@ -935,9 +935,9 @@ export function RuntimeModelControls({
         </p>
       )}
 
-      {restartRequired ? (
+      {runtimeControlUnavailable ? (
         <p role="alert" className="mt-2 rounded-control border border-warn-border bg-surface-2 p-3 text-ui text-warn">
-          Daemon restart required to enable in-session model switching.
+          {runtimeControlUnavailableMessage('model')}
         </p>
       ) : config.harness === 'claude' || config.harness === 'codex' ? (
         selectedCodexModel && config.harness === 'codex' ? (
@@ -970,7 +970,7 @@ export function RuntimeModelControls({
         </p>
       )}
 
-      {codexPickerFallback && !restartRequired && (
+      {codexPickerFallback && !runtimeControlUnavailable && (
         <button
           type="button"
           disabled={submitting || !promptReady}
@@ -1026,7 +1026,7 @@ export function RuntimeModelChoices({
         role="alert"
         className="mt-2 rounded-control border border-err-border bg-surface-2 p-3 text-ui leading-base text-err"
       >
-        Account-aware model choices are unavailable: {error instanceof ApiError ? error.message : String(error)}
+        Account-aware model choices are unavailable: {runtimeModelCatalogErrorMessage(error)}
       </p>
     );
   }
@@ -1242,7 +1242,7 @@ export function RuntimeEffortControls({
   const [codexSubmittingEffort, setCodexSubmittingEffort] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [restartRequired, setRestartRequired] = useState(false);
+  const [runtimeControlUnavailable, setRuntimeControlUnavailable] = useState(false);
   const { catalog, error: catalogError } = useRuntimeModelCatalog(
     config.id,
     canControl && !terminal && config.harness === 'codex',
@@ -1250,7 +1250,7 @@ export function RuntimeEffortControls({
   );
 
   useEffect(() => {
-    setRestartRequired(false);
+    setRuntimeControlUnavailable(false);
     setFailure(null);
     setNotice(null);
     setCodexSubmittingEffort(null);
@@ -1261,7 +1261,7 @@ export function RuntimeEffortControls({
     config.harness === 'codex' && codexPickerFallbackNeeded(catalog, catalogError, currentCodexModel, true);
 
   async function runEffortCommand(level: string) {
-    if (!canControl || terminal || !promptReady || submitting || restartRequired) return;
+    if (!canControl || terminal || !promptReady || submitting || runtimeControlUnavailable) return;
     setSubmitting(true);
     setCodexSubmittingEffort(null);
     setFailure(null);
@@ -1274,7 +1274,7 @@ export function RuntimeEffortControls({
       setNotice(`Effort set to ${level}. Saved as this account’s default for new sessions, and the next turn uses it.`);
     } catch (error) {
       if (isRuntimeEndpointUnavailable(error) || isEffortActionUnsupported(error)) {
-        setRestartRequired(true);
+        setRuntimeControlUnavailable(true);
         return;
       }
       setFailure(error instanceof ApiError ? error.message : String(error));
@@ -1285,7 +1285,7 @@ export function RuntimeEffortControls({
   }
 
   async function runCodexEffort(model: RuntimeModelChoice, effort: string) {
-    if (!canControl || terminal || !promptReady || submitting || restartRequired) return;
+    if (!canControl || terminal || !promptReady || submitting || runtimeControlUnavailable) return;
     setSubmitting(true);
     setCodexSubmittingEffort(effort);
     setFailure(null);
@@ -1297,7 +1297,7 @@ export function RuntimeEffortControls({
     } catch (error) {
       onCodexSwitchFailed?.();
       if (isRuntimeEndpointUnavailable(error)) {
-        setRestartRequired(true);
+        setRuntimeControlUnavailable(true);
         return;
       }
       setFailure(error instanceof ApiError ? error.message : String(error));
@@ -1308,7 +1308,7 @@ export function RuntimeEffortControls({
   }
 
   async function openCodexPickerFallback() {
-    if (!canControl || terminal || !promptReady || submitting || restartRequired) return;
+    if (!canControl || terminal || !promptReady || submitting || runtimeControlUnavailable) return;
     setSubmitting(true);
     setCodexSubmittingEffort(null);
     setFailure(null);
@@ -1322,7 +1322,7 @@ export function RuntimeEffortControls({
       setNotice('Codex opened its native picker in Terminal. No switch is claimed until Codex reports one.');
     } catch (error) {
       if (isRuntimeEndpointUnavailable(error)) {
-        setRestartRequired(true);
+        setRuntimeControlUnavailable(true);
         return;
       }
       setFailure(error instanceof ApiError ? error.message : String(error));
@@ -1363,9 +1363,9 @@ export function RuntimeEffortControls({
         </p>
       )}
 
-      {restartRequired ? (
+      {runtimeControlUnavailable ? (
         <p role="alert" className="mt-2 rounded-control border border-warn-border bg-surface-2 p-3 text-ui text-warn">
-          Daemon restart required to enable in-session effort switching.
+          {runtimeControlUnavailableMessage('effort')}
         </p>
       ) : config.harness === 'claude' ? (
         <ClaudeEffortChoices disabled={submitting || !promptReady} onChoose={level => void runEffortCommand(level)} />
@@ -1376,8 +1376,7 @@ export function RuntimeEffortControls({
               role="alert"
               className="m-0 rounded-control border border-err-border bg-surface-2 p-3 text-ui leading-base text-err"
             >
-              Account-aware reasoning choices are unavailable:{' '}
-              {catalogError instanceof ApiError ? catalogError.message : String(catalogError)}
+              Account-aware reasoning choices are unavailable: {runtimeModelCatalogErrorMessage(catalogError)}
             </p>
           ) : catalog === null ? (
             <div role="status" className="flex min-h-[44px] items-center gap-sm text-ui text-muted">
@@ -1405,7 +1404,7 @@ export function RuntimeEffortControls({
               );
             })()
           )}
-          {codexPickerFallback && !restartRequired && (
+          {codexPickerFallback && !runtimeControlUnavailable && (
             <button
               type="button"
               disabled={submitting || !promptReady}

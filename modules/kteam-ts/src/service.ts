@@ -17,6 +17,7 @@ import type { WardenVerdict } from './warden-verdicts';
 import type { ScratchPlan } from './session-manager';
 import type { FsDiffView, FsFileView, FsListing } from './fs';
 import type { GitChangesView } from './git';
+import type { RuntimeModelCatalog } from './codex-runtime';
 
 export interface SearchResult {
   sessionId: string;
@@ -170,9 +171,12 @@ export interface KTeamService {
   send(id: string, request: SendRequest): Promise<SessionView & { disposition: SendDisposition }>;
   /** Durable local send existence plus transcript-proven fate. */
   listSends(id: string, options?: { all?: boolean }): Promise<SendRecord[]>;
+  /** Return only the choices advertised for this session's wrapper/account.
+   * Optional keeps additive API-server test doubles and older embedders valid. */
+  runtimeModels?(id: string): Promise<RuntimeModelCatalog>;
   /** Apply a semantic native-TUI runtime control without creating a kteam
-   * turn. Claude switches to an account-allowlisted model in place; Codex opens
-   * its native account-aware model/reasoning picker. */
+   * turn. Claude uses its allowlisted command; Codex either opens its picker
+   * for a human or drives exact visible rows and waits for harness evidence. */
   runtime(id: string, request: RuntimeControlRequest): Promise<SessionView>;
   /** Answer only the exact question the caller rendered. `toolUseId` prevents a
    * stale browser/CLI response for question A from being driven into question B. */

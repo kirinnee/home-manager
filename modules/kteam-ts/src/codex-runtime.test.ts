@@ -3,6 +3,7 @@ import {
   CodexRuntimeModelCatalogCache,
   codexPickerMatchesExpectation,
   driveCodexModelPicker,
+  preflightCodexModelPicker,
   parseCodexModelListPage,
   parseCodexPickerScreen,
   parseCodexThreadSettingsAppliedLine,
@@ -90,12 +91,14 @@ describe('screen-verified Codex picker driving', () => {
 
   class ScriptedPicker implements CodexPickerTransport {
     readonly keys: string[] = [];
+    opens = 0;
     private index = 0;
     constructor(
       private readonly frames: CodexPickerPane[],
       private readonly openResult: 'handled-local' | 'turn-started' = 'handled-local',
     ) {}
     async openPicker() {
+      this.opens++;
       return this.openResult;
     }
     async readPane() {
@@ -174,6 +177,46 @@ describe('screen-verified Codex picker driving', () => {
     expect(picker.keys).toEqual([]);
   });
 
+  test('refuses a mismatched direct-default quick-picker target before sending its digit', async () => {
+    const picker = new ScriptedPicker([pane(['Select Model', '› 1. gpt-5.5', '  2. All models'].join('\n'))]);
+    await expect(
+      driveCodexModelPicker(
+        picker,
+        { model: 'gpt-5.5', effort: 'high', quickPickerDefaultEffort: 'medium' },
+        { pollMs: 0 },
+      ),
+    ).rejects.toThrow('can only select its default medium reasoning level');
+    expect(picker.keys).toEqual([]);
+  });
+
+  test('reuses a verified preflight screen without reopening the picker for selection', async () => {
+    const picker = new ScriptedPicker([
+      pane(['Select Model and Effort', '› 1. gpt-5.5'].join('\n')),
+      pane(['Select Reasoning Level for gpt-5.5', '› 1. High'].join('\n')),
+      pane('› ', true),
+    ]);
+    const target = { model: 'gpt-5.5', effort: 'high' };
+    const screen = await preflightCodexModelPicker(picker, target, { pollMs: 0 });
+    await driveCodexModelPicker(picker, target, { pollMs: 0 }, screen);
+    expect(picker.opens).toBe(1);
+    expect(picker.keys).toEqual(['1', '1']);
+  });
+
+  test('does not apply a quick-picker default guard to a target reached through All models', async () => {
+    const picker = new ScriptedPicker([
+      pane(['Select Model', '  1. codex-auto-fast', '› 2. All models'].join('\n')),
+      pane(['Select Model and Effort', '› 1. gpt-5.5'].join('\n')),
+      pane(['Select Reasoning Level for gpt-5.5', '› 1. High'].join('\n')),
+      pane('› ', true),
+    ]);
+    await driveCodexModelPicker(
+      picker,
+      { model: 'gpt-5.5', effort: 'high', quickPickerDefaultEffort: 'medium' },
+      { pollMs: 0 },
+    );
+    expect(picker.keys).toEqual(['2', '1', '1']);
+  });
+
   test('drives the explicit advanced and Plan-scope stages by their verified row labels', async () => {
     const picker = new ScriptedPicker([
       pane(['Select Model', '  1. codex-auto-fast', '› 2. All models'].join('\n')),
@@ -187,9 +230,23 @@ describe('screen-verified Codex picker driving', () => {
           '› 2. Apply to global default and Plan mode override',
         ].join('\n'),
       ),
+      pane('› ', true),
     ]);
     await driveCodexModelPicker(picker, { model: 'gpt-5.6-sol', effort: 'ultra' }, { pollMs: 0 });
     expect(picker.keys).toEqual(['2', '1', '2', '2', '2']);
+  });
+
+  test('waits for a parsed idle prompt after the Plan-scope selection', async () => {
+    const picker = new ScriptedPicker([
+      pane(['Select Model and Effort', '› 1. gpt-5.5'].join('\n')),
+      pane(['Select Reasoning Level for gpt-5.5', '› 1. High'].join('\n')),
+      pane(['Apply reasoning change', '› 1. Apply to global default and Plan mode override'].join('\n')),
+      pane('Applying settingâ¦'),
+    ]);
+    await expect(
+      driveCodexModelPicker(picker, { model: 'gpt-5.5', effort: 'high' }, { timeoutMs: 10, pollMs: 1 }),
+    ).rejects.toThrow('did not reach the applied setting to return to an idle prompt');
+    expect(picker.keys).toEqual(['1', '1', '1']);
   });
 
   test('fails visibly instead of guessing when the named row is absent or beyond digit addressing', async () => {

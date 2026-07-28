@@ -338,12 +338,24 @@ export interface CodexPickerTransport {
 export interface CodexPickerTarget {
   model: string;
   effort: string;
+  /** Catalog default for a quick-picker preset that cannot open a reasoning
+   * submenu. The driver enforces it only if this exact model is actually
+   * visible in the quick picker, never for a row reached through All models. */
+  quickPickerDefaultEffort?: string;
 }
 
 interface DriverOptions {
   timeoutMs?: number;
   pollMs?: number;
   sleep?: (ms: number) => Promise<void>;
+}
+
+function resolvedDriverOptions(options: DriverOptions): Required<DriverOptions> {
+  return {
+    timeoutMs: options.timeoutMs ?? 4_000,
+    pollMs: options.pollMs ?? 50,
+    sleep: options.sleep ?? Bun.sleep,
+  };
 }
 
 function effortLabel(effort: string): string {
@@ -363,6 +375,14 @@ function effortLabel(effort: string): string {
 function rowFor(screen: CodexPickerScreen, name: string): CodexPickerRow | undefined {
   const wanted = name.trim().toLocaleLowerCase();
   return screen.rows.find(row => row.name.toLocaleLowerCase() === wanted);
+}
+
+function assertQuickPickerTargetIsExpressible(screen: CodexPickerScreen, target: CodexPickerTarget): void {
+  const quickTarget = screen.kind === 'quick-models' ? rowFor(screen, target.model) : undefined;
+  if (quickTarget && target.quickPickerDefaultEffort !== undefined && target.quickPickerDefaultEffort !== target.effort)
+    throw new Error(
+      `Codex quick picker can only select its default ${target.quickPickerDefaultEffort} reasoning level for ${target.model}`,
+    );
 }
 
 async function waitForPicker(
@@ -401,28 +421,45 @@ async function chooseVisibleRow(
   await transport.sendKey(String(row.number), { kind: screen.kind, title: screen.title, row });
 }
 
+/** Open and inspect the live picker before selection. A target that is a
+ * visible direct-default quick row is rejected here, before the selection
+ * driver can send its digit. A target reached through All models is left
+ * eligible because its native flow can show the normal reasoning screen. */
+export async function preflightCodexModelPicker(
+  transport: CodexPickerTransport,
+  target: CodexPickerTarget,
+  options: DriverOptions = {},
+): Promise<CodexPickerScreen> {
+  const opened = await transport.openPicker();
+  if (opened !== 'handled-local')
+    throw new Error('Codex consumed /model as a model turn instead of opening its native picker');
+  const { screen } = await waitForPicker(
+    transport,
+    (candidate, pane) => !pane.promptReady && (candidate.kind === 'quick-models' || candidate.kind === 'all-models'),
+    resolvedDriverOptions(options),
+    'a model list',
+  );
+  assertQuickPickerTargetIsExpressible(screen, target);
+  return screen;
+}
+
 /** Drive Codex's native picker without arrows, Enter, or assumed ordering.
  * Every digit is derived from an exact row on a positively identified current
- * screen. The caller must still verify the resulting rollout observation. */
+ * screen. An optional preflight screen lets callers reject direct-default quick
+ * rows before this selection driver starts. Success means the picker has
+ * positively returned to a parsed idle prompt; the caller must still verify
+ * the resulting rollout observation. */
 export async function driveCodexModelPicker(
   transport: CodexPickerTransport,
   target: CodexPickerTarget,
   options: DriverOptions = {},
+  preflightScreen?: CodexPickerScreen,
 ): Promise<void> {
-  const resolved: Required<DriverOptions> = {
-    timeoutMs: options.timeoutMs ?? 4_000,
-    pollMs: options.pollMs ?? 50,
-    sleep: options.sleep ?? Bun.sleep,
-  };
-  const opened = await transport.openPicker();
-  if (opened !== 'handled-local')
-    throw new Error('Codex consumed /model as a model turn instead of opening its native picker');
-  let { screen } = await waitForPicker(
-    transport,
-    (candidate, pane) => !pane.promptReady && (candidate.kind === 'quick-models' || candidate.kind === 'all-models'),
-    resolved,
-    'a model list',
-  );
+  const resolved = resolvedDriverOptions(options);
+  let screen = preflightScreen ?? (await preflightCodexModelPicker(transport, target, options));
+  // Defend callers that supply a preflight screen directly from bypassing the
+  // direct-default invariant.
+  assertQuickPickerTargetIsExpressible(screen, target);
 
   if (screen.kind === 'quick-models' && !rowFor(screen, target.model)) {
     await chooseVisibleRow(transport, screen, 'All models', 'the quick model list');
@@ -458,7 +495,7 @@ export async function driveCodexModelPicker(
     await chooseVisibleRow(transport, next.screen, label, `reasoning choices for ${target.model}`);
     next = await waitForPicker(
       transport,
-      (candidate, pane) => candidate.kind === 'plan-scope' || candidate.kind === 'none' || pane.promptReady,
+      (candidate, pane) => candidate.kind === 'plan-scope' || (candidate.kind === 'none' && pane.promptReady),
       resolved,
       'the applied setting',
     );
@@ -469,6 +506,12 @@ export async function driveCodexModelPicker(
       next.screen,
       'Apply to global default and Plan mode override',
       'the Plan-mode scope prompt',
+    );
+    await waitForPicker(
+      transport,
+      (candidate, pane) => candidate.kind === 'none' && pane.promptReady,
+      resolved,
+      'the applied setting to return to an idle prompt',
     );
   }
 }
