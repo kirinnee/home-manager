@@ -394,6 +394,79 @@ button.kt-fs-row:active {
   tab-size: 2;
 }
 
+/* A programmatic code-reference landing is source-oriented even for Markdown:
+   a prose renderer cannot honestly map source line 42 to a DOM paragraph.
+   The compact location rail states what landed, while line rows provide a
+   stable address and a persistent (not flashing) range treatment. */
+.kt-fs-location {
+  flex: 0 0 auto;
+  padding: var(--gap-xs) var(--pad-cell-x);
+  border-block-end: var(--stroke) solid var(--accent-border);
+  border-inline-start: 2px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  line-height: var(--leading-base);
+}
+
+.kt-fs-location[data-tone='warn'] {
+  border-block-end-color: var(--warn-border);
+  border-inline-start-color: var(--warn);
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.kt-fs-pre--lines {
+  padding: var(--gap-sm) 0;
+}
+
+.kt-fs-source-line {
+  display: flex;
+  min-width: 100%;
+  align-items: baseline;
+  border-inline-start: 2px solid transparent;
+  background: var(--code-bg);
+  color: var(--code-fg);
+}
+
+.kt-fs-source-line[data-highlighted='true'] {
+  border-inline-start-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--fg);
+  box-shadow: inset 0 0 0 var(--stroke) var(--accent-border);
+}
+
+.kt-fs-source-gutter {
+  width: 6ch;
+  flex: 0 0 auto;
+  padding-inline: 2px var(--gap-xs);
+  color: var(--muted);
+  text-align: end;
+  user-select: none;
+}
+
+.kt-fs-source-line[data-highlighted='true'] .kt-fs-source-gutter {
+  color: var(--accent);
+  font-weight: var(--weight-strong);
+}
+
+.kt-fs-source-text {
+  display: block;
+  min-width: max-content;
+  flex: 1 1 auto;
+  padding-inline: var(--gap-xs) var(--pad-cell-x);
+  color: inherit;
+  font: inherit;
+  white-space: pre;
+}
+
+/* highlight.css gives `.hljs` the ordinary code background. A line owns that
+   background here so the selected range tint remains visible behind tokens. */
+.kt-fs-source-text.hljs {
+  background: transparent;
+}
+
 .kt-fs-diff {
   min-width: max-content;
   font-family: var(--font-mono);

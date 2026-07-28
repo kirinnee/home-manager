@@ -149,6 +149,41 @@ export function isMarkdownPath(rel: string): boolean {
   return MARKDOWN_EXT.has(ext);
 }
 
+/* ---- highlighted source lines -------------------------------------------
+   Highlight.js returns one safe HTML string and may keep a token span open
+   across several newlines (block comments and template strings do this). A
+   naive `.split('\n')` would create invalid fragments and lose colouring after
+   the first line. Close every live span at a line break, then reopen the same
+   stack on the next line so each row is independently renderable. */
+
+const HIGHLIGHT_TAG_OR_NEWLINE = /<span\b[^>]*>|<\/span>|\r?\n/giu;
+
+export function splitHighlightedLines(html: string): string[] {
+  const lines: string[] = [];
+  const open: string[] = [];
+  let line = '';
+  let cursor = 0;
+  for (const match of html.matchAll(HIGHLIGHT_TAG_OR_NEWLINE)) {
+    const index = match.index;
+    if (index === undefined) continue;
+    line += html.slice(cursor, index);
+    const token = match[0];
+    cursor = index + token.length;
+    if (token === '\n' || token === '\r\n') {
+      line += '</span>'.repeat(open.length);
+      lines.push(line);
+      line = open.join('');
+      continue;
+    }
+    line += token;
+    if (/^<span\b/iu.test(token)) open.push(token);
+    else if (open.length > 0) open.pop();
+  }
+  line += html.slice(cursor);
+  lines.push(line);
+  return lines;
+}
+
 /* ---- git status ----------------------------------------------------------
    `fs/changes` reports whatever `git status --porcelain=v1` said. That is an XY
    pair ('` M`', '`??`', '`R `', '`AA`'), but a daemon is free to normalise it to

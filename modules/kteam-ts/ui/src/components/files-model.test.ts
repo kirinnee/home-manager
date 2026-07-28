@@ -14,6 +14,7 @@ import {
   parentRel,
   parseUnifiedDiff,
   renderableDiffLines,
+  splitHighlightedLines,
   statusChip,
 } from './files-model';
 
@@ -23,6 +24,25 @@ const BACKSLASH = String.fromCharCode(92);
 const NEWLINE = String.fromCharCode(10);
 const NUL = String.fromCharCode(0);
 const DEL = String.fromCharCode(127);
+
+describe('highlighted source lines', () => {
+  test('carries nested highlight spans safely across LF and CRLF rows', () => {
+    expect(
+      splitHighlightedLines(
+        '<span class="hljs-comment">/* first\n<span class="inner">second\r\nthird</span> */</span>',
+      ),
+    ).toEqual([
+      '<span class="hljs-comment">/* first</span>',
+      '<span class="hljs-comment"><span class="inner">second</span></span>',
+      '<span class="hljs-comment"><span class="inner">third</span> */</span>',
+    ]);
+  });
+
+  test('preserves empty and trailing lines', () => {
+    expect(splitHighlightedLines('one\n\n')).toEqual(['one', '', '']);
+    expect(splitHighlightedLines('')).toEqual(['']);
+  });
+});
 
 describe('relative paths never escape the session root', () => {
   test('normalisation drops the segments the daemon refuses', () => {

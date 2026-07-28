@@ -142,6 +142,61 @@ export function splitFileQuery(query: string): { directory: string; leaf: string
   return { directory: normalizeRel(query.slice(0, slash)), leaf: query.slice(slash + 1) };
 }
 
+export interface ComposerFileSelector {
+  /** Canonical suffix, including its leading colon. Empty means plain @path. */
+  suffix: string;
+  complete: boolean;
+  valid: boolean;
+}
+
+export interface ComposerFileReferenceQuery {
+  directory: string;
+  leaf: string;
+  selector: ComposerFileSelector;
+}
+
+const EMPTY_FILE_SELECTOR: ComposerFileSelector = { suffix: '', complete: true, valid: true };
+const COLON_FILE_SELECTOR = /^(.*?):([0-9]*)(?:(:)([0-9]*)|(-)([0-9]*))?$/u;
+const HASH_FILE_SELECTOR = /^(.*?)#L([0-9]*)(?:-L?([0-9]*))?$/iu;
+
+const selectorNumber = (value: string): number | null => {
+  if (!/^[1-9][0-9]*$/u.test(value)) return null;
+  const number = Number(value);
+  return Number.isSafeInteger(number) ? number : null;
+};
+
+/** Strip an optional line/range selector before the ordinary lazy directory
+ * lookup. This keeps `@src/app.ts:42` searching for `app.ts`, not for a literal
+ * filename ending in `:42`. GitHub input is recognised but the replacement is
+ * always the canonical compiler-style colon form. */
+export function splitFileReferenceQuery(query: string): ComposerFileReferenceQuery {
+  const hash = HASH_FILE_SELECTOR.exec(query);
+  const colon = hash ? null : COLON_FILE_SELECTOR.exec(query);
+  const match = hash ?? colon;
+  if (!match || !(match[1] ?? '')) return { ...splitFileQuery(query), selector: EMPTY_FILE_SELECTOR };
+
+  const pathQuery = match[1] ?? '';
+  const lineText = match[2] ?? '';
+  const separator = hash ? (match[3] === undefined ? '' : '-') : (match[3] ?? match[5] ?? '');
+  const tailText = hash ? (match[3] ?? '') : (match[4] ?? match[6] ?? '');
+  const line = selectorNumber(lineText);
+  const tail = tailText ? selectorNumber(tailText) : null;
+  const complete = lineText.length > 0 && (!separator || tailText.length > 0);
+  const valid =
+    (!lineText || line !== null) &&
+    (!tailText || tail !== null) &&
+    (separator !== '-' || line === null || tail === null || tail >= line);
+  const canonicalSeparator = separator === ':' ? ':' : separator ? '-' : '';
+  return {
+    ...splitFileQuery(pathQuery),
+    selector: {
+      suffix: `:${lineText}${canonicalSeparator}${tailText}`,
+      complete,
+      valid,
+    },
+  };
+}
+
 function fileRefusal(entry: FsListing['entries'][number]): string | undefined {
   if (!isOpenableName(entry.name)) return UNOPENABLE_NAME_REASON;
   if (entry.denied) return 'blocked by the repository secrets policy';
@@ -303,7 +358,7 @@ export function createFilesProvider(sessionId: string): ComposerAutocompleteProv
     // the composer drops the cache each time it sends.
     reset: () => cache.clear(),
     async candidates({ query, signal }): Promise<ComposerProviderResult> {
-      const { directory, leaf } = splitFileQuery(query);
+      const { directory, leaf, selector } = splitFileReferenceQuery(query);
       let listing = cache.get(directory);
       if (!listing) {
         listing = await fsApi.list(sessionId, directory, signal);
@@ -313,23 +368,38 @@ export function createFilesProvider(sessionId: string): ComposerAutocompleteProv
         const path = joinRel(directory, entry.name);
         const refusal = fileRefusal(entry);
         const directoryEntry = entry.type === 'dir';
+        const selectorRefusal = !selector.valid
+          ? 'line selection must use positive lines and an end at or after its start'
+          : directoryEntry && selector.suffix
+            ? 'line selection applies to files, not folders'
+            : undefined;
+        const disabledReason = refusal ?? selectorRefusal;
         return {
-          id: `file:${path}`,
+          id: `file:${path}${directoryEntry ? '' : selector.suffix}`,
           kind: directoryEntry ? 'directory' : 'file',
-          label: entry.name,
-          detail: refusal ?? (directoryEntry ? 'Folder' : entry.type === 'symlink' ? 'Symlink' : path),
+          label: `${entry.name}${directoryEntry ? '' : selector.suffix}`,
+          detail:
+            disabledReason ??
+            (directoryEntry ? 'Folder' : entry.type === 'symlink' ? 'Symlink' : `${path}${selector.suffix}`),
           keywords: path,
-          replacement: `@${path}${directoryEntry ? '/' : ''}`,
-          append: directoryEntry ? 'none' : 'space',
-          disabled: !!refusal,
-          disabledReason: refusal,
+          replacement: `@${path}${directoryEntry ? '/' : selector.suffix}`,
+          append: directoryEntry || (selector.suffix && !selector.complete) ? 'none' : 'space',
+          disabled: !!disabledReason,
+          disabledReason,
         };
       });
+      const lineHelp = selector.suffix
+        ? selector.complete
+          ? undefined
+          : 'Finish the optional line selection (:LINE, :START-END, or :LINE:COL).'
+        : 'Optional: add :LINE or :START-END before accepting the file.';
+      const bounded = listing.truncated ? '2,000 entries shown — enter a directory or refine this segment.' : undefined;
+      const notice = [bounded, lineHelp].filter(Boolean).join(' ');
       return {
         candidates,
         filterQuery: leaf,
         contextLabel: directory ? `@${directory}/` : '@ session root',
-        notice: listing.truncated ? '2,000 entries shown — enter a directory or refine this segment.' : undefined,
+        notice: notice || undefined,
       };
     },
   };

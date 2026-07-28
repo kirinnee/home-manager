@@ -7,6 +7,7 @@ import {
   createSkillsProvider,
   createTasksProvider,
   loadSkillsCatalog,
+  splitFileReferenceQuery,
   splitFileQuery,
   type ComposerTaskSummary,
   type ComposerSkillsResponse,
@@ -277,6 +278,35 @@ describe('@ files provider', () => {
     expect(splitFileQuery('src/')).toEqual({ directory: 'src', leaf: '' });
   });
 
+  test('keeps optional line selectors out of the filesystem lookup and canonicalises GitHub ranges', () => {
+    expect(splitFileReferenceQuery('src/components/App.tsx:12-20')).toEqual({
+      directory: 'src/components',
+      leaf: 'App.tsx',
+      selector: { suffix: ':12-20', complete: true, valid: true },
+    });
+    expect(splitFileReferenceQuery('src/components/App.tsx:12:4')).toEqual({
+      directory: 'src/components',
+      leaf: 'App.tsx',
+      selector: { suffix: ':12:4', complete: true, valid: true },
+    });
+    expect(splitFileReferenceQuery('src/components/App.tsx#L12-L20')).toEqual({
+      directory: 'src/components',
+      leaf: 'App.tsx',
+      selector: { suffix: ':12-20', complete: true, valid: true },
+    });
+    expect(splitFileReferenceQuery('src/components/App.tsx#L12-20')).toEqual({
+      directory: 'src/components',
+      leaf: 'App.tsx',
+      selector: { suffix: ':12-20', complete: true, valid: true },
+    });
+    expect(splitFileReferenceQuery('src/components/App.tsx:12-')).toEqual({
+      directory: 'src/components',
+      leaf: 'App.tsx',
+      selector: { suffix: ':12-', complete: false, valid: true },
+    });
+    expect(splitFileReferenceQuery('src/components/App.tsx:20-12').selector.valid).toBe(false);
+  });
+
   test('reuses GET :id/fs for the requested directory and keeps folders open', async () => {
     responder = url => {
       expect(url).toBe('/v1/sessions/s-1/fs?path=src');
@@ -305,6 +335,43 @@ describe('@ files provider', () => {
         append: 'space',
       }),
     ]);
+  });
+
+  test('attaches a complete line/range to the picked file while leaving plain @path unchanged', async () => {
+    responder = url => {
+      expect(url).toBe('/v1/sessions/s-1/fs?path=src');
+      return Response.json({ path: 'src', entries: [{ name: 'app.ts', type: 'file' }] });
+    };
+    const provider = createFilesProvider('s-1');
+    const ranged = await provider.candidates(context('@', 'src/app.ts:12-20'));
+    expect(ranged.filterQuery).toBe('app.ts');
+    expect(ranged.candidates[0]).toMatchObject({
+      label: 'app.ts:12-20',
+      replacement: '@src/app.ts:12-20',
+      append: 'space',
+      disabled: false,
+    });
+
+    const plain = await provider.candidates(context('@', 'src/app'));
+    expect(plain.candidates[0]).toMatchObject({
+      label: 'app.ts',
+      replacement: '@src/app.ts',
+      append: 'space',
+    });
+    expect(plain.notice).toContain('Optional: add :LINE or :START-END');
+    expect(requests).toHaveLength(1);
+  });
+
+  test('keeps an unfinished selector open and refuses an invalid descending range', async () => {
+    responder = () => Response.json({ entries: [{ name: 'app.ts', type: 'file' }] });
+    const provider = createFilesProvider('s-1');
+    const unfinished = await provider.candidates(context('@', 'src/app.ts:'));
+    expect(unfinished.candidates[0]).toMatchObject({ replacement: '@src/app.ts:', append: 'none', disabled: false });
+    expect(unfinished.notice).toContain('Finish the optional line selection');
+
+    const invalid = await provider.candidates(context('@', 'src/app.ts:20-12'));
+    expect(invalid.candidates[0]).toMatchObject({ disabled: true });
+    expect(invalid.candidates[0]?.disabledReason).toContain('end at or after');
   });
 
   test('caches visited directories for the page lifetime', async () => {

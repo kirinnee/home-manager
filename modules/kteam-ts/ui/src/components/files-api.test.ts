@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { ApiError } from '../lib/api';
 import {
   changesUrl,
+  codeReferenceRelativePath,
   describeFsError,
   diffUrl,
   fileUrl,
@@ -11,6 +12,7 @@ import {
   listUrl,
   loadFsChanges,
   readFsProbe,
+  resolveFsFilePaths,
   resetFsProbes,
 } from './files-api';
 
@@ -67,6 +69,76 @@ describe('transport', () => {
     stubFetch(() => new Response('', { status: 403 }));
     const error = await fsApi.changes('ms1-a').catch(e => e);
     expect(describeFsError(error)).toContain('forbidden');
+  });
+});
+
+describe('code-reference path resolution', () => {
+  test.each([
+    ['src/app.ts', '/repo', 'src/app.ts'],
+    ['./src/app.ts', '/repo', 'src/app.ts'],
+    ['/repo/src/app.ts', '/repo', 'src/app.ts'],
+    ['/repo-ish/src/app.ts', '/repo', null],
+    ['/elsewhere/src/app.ts', '/repo', null],
+    ['../outside.ts', '/repo', null],
+    ['src/../outside.ts', '/repo', null],
+    ['src\\app.ts', '/repo', null],
+  ])('normalises candidate %s without allowing an escape', (candidate, cwd, expected) => {
+    expect(codeReferenceRelativePath(candidate, cwd)).toBe(expected);
+  });
+
+  test('lists each parent once and resolves only exact openable regular files', async () => {
+    const seen = stubFetch(url => {
+      const parsed = new URL(url, 'https://kteam.test');
+      const dir = parsed.searchParams.get('path') ?? '';
+      if (dir === 'src') {
+        return json({
+          entries: [
+            { name: 'app.ts', type: 'file' },
+            { name: 'ignored.ts', type: 'file', ignored: true },
+            { name: 'secret.ts', type: 'file', denied: true },
+            { name: 'linked.ts', type: 'symlink' },
+          ],
+        });
+      }
+      if (dir === 'docs') return json({ entries: [{ name: 'guide.md', type: 'file' }] });
+      throw new Error(`unexpected directory ${dir}`);
+    });
+
+    const resolved = await resolveFsFilePaths(
+      'ms1-a',
+      ['src/app.ts', './src/app.ts', '/repo/docs/guide.md', 'src/missing.ts', 'src/ignored.ts', 'src/secret.ts'],
+      '/repo',
+    );
+    expect([...resolved]).toEqual([
+      ['src/app.ts', 'src/app.ts'],
+      ['./src/app.ts', 'src/app.ts'],
+      ['/repo/docs/guide.md', 'docs/guide.md'],
+    ]);
+    expect(seen).toHaveLength(2);
+  });
+
+  test('coalesces concurrent Markdown lookups without sharing caller cancellation', async () => {
+    const seen = stubFetch(() =>
+      json({
+        entries: [
+          { name: 'app.ts', type: 'file' },
+          { name: 'other.ts', type: 'file' },
+        ],
+      }),
+    );
+    const cancelled = new AbortController();
+    const first = resolveFsFilePaths('ms1-shared', ['src/app.ts'], '/repo', cancelled.signal);
+    const second = resolveFsFilePaths('ms1-shared', ['src/other.ts'], '/repo');
+    cancelled.abort();
+
+    await expect(first).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(second).resolves.toEqual(new Map([['src/other.ts', 'src/other.ts']]));
+    expect(seen).toHaveLength(1);
+  });
+
+  test('a failed existence lookup leaves the candidate unresolved', async () => {
+    stubFetch(() => json({ error: 'offline' }, 503));
+    await expect(resolveFsFilePaths('ms1-a', ['src/app.ts'], '/repo')).resolves.toEqual(new Map());
   });
 });
 
