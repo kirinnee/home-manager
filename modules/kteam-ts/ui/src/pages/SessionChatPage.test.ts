@@ -1,7 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 import type { ChatRecord, KTeamEvent, PendingQuestion, SessionStatus, SessionView } from '../types';
 import { buildSendIndex, buildTranscript } from '../lib/transcript';
-import { blockConfirmsPending, hasOpenQuestion, questionSurfaceRecord, recordConfirmsPending } from './SessionChatPage';
+import {
+  blockConfirmsPending,
+  hasOpenQuestion,
+  questionSurfaceRecord,
+  recordConfirmsPending,
+  requestIdForLedgerResend,
+} from './SessionChatPage';
 import type { TranscriptBlock } from '../lib/transcript';
 
 const SENT_AT = Date.parse('2026-07-25T12:00:00.000Z');
@@ -169,6 +175,18 @@ describe('inline native-queue sends are never reaped by the turn counter', () =>
     const blocks = buildTranscript([drained], buildSendIndex([queuedEvent], SESSION), SESSION);
     const row = blocks.find(block => block.kind === 'user');
     expect(row?.kind === 'user' ? row.proofKeys : undefined).toEqual([uuid]);
+  });
+});
+
+describe('ledger resend identity', () => {
+  test('always creates a new send id instead of mutating/reusing the audit row', () => {
+    expect(requestIdForLedgerResend('old-send', () => 'new-send')).toBe('new-send');
+    const minted = ['old-send', 'new-after-collision'];
+    expect(requestIdForLedgerResend('old-send', () => minted.shift()!)).toBe('new-after-collision');
+  });
+
+  test('refuses a broken mint that would reuse the original twice', () => {
+    expect(() => requestIdForLedgerResend('old-send', () => 'old-send')).toThrow(/new send identity/);
   });
 });
 

@@ -2,9 +2,13 @@ import { describe, expect, test } from 'bun:test';
 import type { KTeamEvent, SendRecord } from '../types';
 import {
   foldSendRecords,
+  hasLedgerHardExpired,
   isSendLedgerEvent,
+  isLedgerUnconfirmed,
+  nextLedgerViewDeadline,
   parseSendRecord,
   parseSendsResponse,
+  partitionLedgerChips,
   reconcileLocalSends,
   selectLedgerChips,
   sendBadge,
@@ -562,6 +566,57 @@ describe('which durable rows get a chip — RETIREMENT REQUIRES EXACT PROOF IDEN
     expect(rows).toHaveLength(1);
     expect(rows[0]?.text).toBe('real');
     expect(rows[0]?.proofKeys).toEqual([PROOF]);
+  });
+});
+
+describe('live-view aging and footer classification', () => {
+  test('hardDeadline retires only the live row, not the durable record', () => {
+    const record = row({
+      fate: 'unaccounted',
+      hardDeadline: new Date(AT + 3_000).toISOString(),
+    });
+    expect(selectLedgerChips([record], [], AT + 2_999)).toEqual([record]);
+    expect(selectLedgerChips([record], [], AT + 3_000)).toEqual([]);
+    expect(hasLedgerHardExpired(record, AT + 3_000)).toBe(true);
+    // Selection is a view projection. The caller's audit row is untouched.
+    expect(record.fate).toBe('unaccounted');
+    expect(record.hardDeadline).toBe(new Date(AT + 3_000).toISOString());
+  });
+
+  test('missing or malformed deadlines stay visible, and held/delivered rows never expire this way', () => {
+    expect(hasLedgerHardExpired(row({ fate: 'unaccounted' }), AT + 99_000)).toBe(false);
+    expect(hasLedgerHardExpired(row({ fate: 'unaccounted', hardDeadline: 'later-ish' }), AT + 99_000)).toBe(false);
+    expect(hasLedgerHardExpired(row({ fate: 'accepted', held: true, hardDeadline: ACCEPTED_AT }), AT + 99_000)).toBe(
+      false,
+    );
+    expect(hasLedgerHardExpired(row({ fate: 'delivered', hardDeadline: ACCEPTED_AT }), AT + 99_000)).toBe(false);
+  });
+
+  test('only a current ACCEPTED row stays in the footer partition', () => {
+    const deadline = new Date(AT + 10_000).toISOString();
+    const accepted = row({ sendId: 'accepted', fate: 'accepted', unaccountedDeadline: deadline });
+    const unaccounted = row({ sendId: 'unaccounted', fate: 'unaccounted' });
+    const delivered = row({ sendId: 'delivered', fate: 'delivered' });
+    expect(partitionLedgerChips([accepted, unaccounted, delivered], AT)).toEqual({
+      inFlight: [accepted],
+      chronological: [unaccounted, delivered],
+    });
+
+    const afterDeadline = partitionLedgerChips([accepted], AT + 10_000);
+    expect(afterDeadline.inFlight).toEqual([]);
+    expect(afterDeadline.chronological).toEqual([accepted]);
+    expect(isLedgerUnconfirmed(accepted, AT + 10_000)).toBe(true);
+    expect(sendBadge(accepted, AT + 10_000).label).toBe('unconfirmed');
+  });
+
+  test('the next local wake covers both unconfirmed and hard-expiry transitions', () => {
+    const accepted = row({
+      unaccountedDeadline: new Date(AT + 10_000).toISOString(),
+      hardDeadline: new Date(AT + 30_000).toISOString(),
+    });
+    expect(nextLedgerViewDeadline([accepted], AT)).toBe(AT + 10_000);
+    expect(nextLedgerViewDeadline([accepted], AT + 10_000)).toBe(AT + 30_000);
+    expect(nextLedgerViewDeadline([accepted], AT + 30_000)).toBeUndefined();
   });
 });
 
