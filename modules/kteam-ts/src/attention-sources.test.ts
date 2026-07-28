@@ -5,7 +5,7 @@ import path from 'path';
 import { createPaths, sessionDir, type KTeamPaths } from './paths';
 import type { SessionView } from './service';
 import type { KTeamEvent } from './types';
-import type { ScopedTaskSummary, SessionTaskListResponse } from './tasks-types';
+import { MAX_TASK_NOTE_LEN, type ScopedTaskSummary, type SessionTaskListResponse } from './tasks-types';
 import { AttentionService } from './attention-service';
 import { AttentionSources } from './attention-sources';
 import type { AttentionSnapshot } from './attention-types';
@@ -281,6 +281,69 @@ describe('AttentionSources', () => {
     expect(snapshot.items.map(item => item.source)).toEqual(['question', 'task']);
     expect(snapshot.items[0]).toMatchObject({ sourceRef: 'q1', subject: 'Ship the release?' });
     expect(snapshot.items[1]).toMatchObject({ sourceRef: 'F31', why: 'Need the region.' });
+    expect(h.errors).toEqual([]);
+    h.sources.close();
+  });
+
+  test('repeated blocked-task edits refresh one reasoned item and leaving blocked resolves it', async () => {
+    const h = await harness();
+    const changed: SessionTaskListResponse = {
+      ...taskSnapshot('blocked'),
+      tasks: [{ ...task('blocked'), statusReason: 'Need the deployment region.' } as ScopedTaskSummary],
+    };
+    h.tasks.emitSnapshot(changed, `peer:${SID}`);
+    h.tasks.emitSnapshot(changed, `peer:${SID}`);
+    let snapshot = await boardWhen(
+      h.service,
+      value => value.items.find(item => item.sourceRef === 'F31')?.why === 'Need the deployment region.',
+    );
+    expect(snapshot.items.filter(item => item.source === 'task')).toEqual([
+      expect.objectContaining({ sourceRef: 'F31', why: 'Need the deployment region.' }),
+    ]);
+
+    h.tasks.emit('in_progress', `peer:${SID}`);
+    snapshot = await boardWhen(h.service, value => value.resolved.some(item => item.source === 'task'));
+    expect(snapshot.items.some(item => item.source === 'task')).toBe(false);
+    expect(snapshot.resolved.filter(item => item.source === 'task')).toHaveLength(1);
+    h.sources.close();
+  });
+
+  test('an immediate blocked then unblocked snapshot cannot leave a late stale item', async () => {
+    const h = await harness(taskSnapshot('in_progress'));
+    let releaseTaskAdd!: () => void;
+    const taskAddGate = new Promise<void>(resolve => {
+      releaseTaskAdd = resolve;
+    });
+    const addFromSource = h.service.addFromSource.bind(h.service);
+    h.service.addFromSource = async (sessionId, input) => {
+      if (input.source === 'task') await taskAddGate;
+      return addFromSource(sessionId, input);
+    };
+
+    // No delay between authoritative states: the first add stays in flight
+    // while the second event is dispatched.
+    h.tasks.emit('blocked', `peer:${SID}`);
+    h.tasks.emit('in_progress', `peer:${SID}`);
+    releaseTaskAdd();
+
+    const snapshot = await boardWhen(
+      h.service,
+      value => value.items.every(item => item.source !== 'task') && value.resolved.some(item => item.source === 'task'),
+    );
+    expect(snapshot.items.some(item => item.source === 'task')).toBe(false);
+    expect(snapshot.resolved.filter(item => item.source === 'task')).toHaveLength(1);
+    expect(h.errors).toEqual([]);
+    h.sources.close();
+  });
+
+  test('a maximum-length valid task reason still reaches Attention intact', async () => {
+    const reason = 'r'.repeat(MAX_TASK_NOTE_LEN);
+    const initial: SessionTaskListResponse = {
+      ...taskSnapshot('blocked'),
+      tasks: [{ ...task('blocked'), statusReason: reason } as ScopedTaskSummary],
+    };
+    const h = await harness(initial);
+    expect((await h.service.list(SID)).items.find(item => item.source === 'task')?.why).toBe(reason);
     expect(h.errors).toEqual([]);
     h.sources.close();
   });

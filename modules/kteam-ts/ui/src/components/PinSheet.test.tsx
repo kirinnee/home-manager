@@ -1,18 +1,19 @@
-// PinSheet's DOM-free contract: the pure helpers that decide the trigger label,
-// the honest jump copy, the locate-progress wording, the note character budget,
-// and how a note's bare URLs split for linkify. Rendering is asserted in the
-// browser matrix (this package has no DOM implementation in tests).
+// PinSheet's DOM-free contract: pure copy helpers plus server-rendered pin
+// prose. The stateful sheet remains covered by the browser matrix.
 
 import { describe, expect, test } from 'bun:test';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { MAX_NOTE_LEN } from '../lib/pins';
+import { codeReferenceHref } from '../lib/code-references';
 import {
   jumpOutcomeCopy,
   locatingLabel,
   noteCharsRemaining,
+  PinNoteContent,
+  PinProse,
   pinProvenanceLabel,
   pinsTriggerLabel,
   pinsUnreachableCopy,
-  splitLinkified,
 } from './PinSheet';
 
 describe('pinProvenanceLabel', () => {
@@ -62,22 +63,46 @@ describe('locatingLabel', () => {
   });
 });
 
-describe('splitLinkified', () => {
-  test('plain text stays one text segment', () => {
-    expect(splitLinkified('just a note')).toEqual([{ type: 'text', value: 'just a note' }]);
+describe('displayed pin prose', () => {
+  test('reuses Markdown for note/message prose and keeps unproved code hrefs inert', () => {
+    const forged = codeReferenceHref({ path: 'missing.ts', line: 2 });
+    const html = renderToStaticMarkup(
+      <PinProse
+        text={`**Ready.** See #F64 and [missing](${forged}).\n\nhttps://example.com/status`}
+        sessionId="ms-pins"
+        onTaskOpen={() => undefined}
+        onCodeReferenceOpen={() => undefined}
+      />,
+    );
+    expect(html).toContain('<strong>Ready.</strong>');
+    expect(html).toContain('data-task-reference="F64"');
+    expect(html).toContain('href="https://example.com/status"');
+    expect(html).toContain('missing');
+    expect(html).not.toContain('data-code-reference');
+    expect(html).not.toContain('#kteam-code-reference');
   });
-  test('a bare URL is isolated with its surrounding text', () => {
-    expect(splitLinkified('see https://example.com/x now')).toEqual([
-      { type: 'text', value: 'see ' },
-      { type: 'url', value: 'https://example.com/x' },
-      { type: 'text', value: ' now' },
-    ]);
+
+  test('a hostless legacy sheet leaves task delivery hrefs inert', () => {
+    const html = renderToStaticMarkup(<PinProse text="Review #F64." sessionId="ms-pins" />);
+    expect(html).toContain('Review #F64.');
+    expect(html).not.toContain('data-task-reference');
+    expect(html).not.toContain('href="/tasks/F64"');
   });
-  test('multiple URLs each split out', () => {
-    const segs = splitLinkified('http://a.com and http://b.com');
-    expect(segs.filter(s => s.type === 'url').map(s => s.value)).toEqual(['http://a.com', 'http://b.com']);
+
+  test('preserves the GitHub PR chip special case', () => {
+    const html = renderToStaticMarkup(
+      <PinNoteContent text="https://github.com/acme/widget/pull/42" sessionId="ms-pins" />,
+    );
+    expect(html).toContain('widget#42');
+    expect(html).toContain('aria-label="acme/widget pull request 42"');
+    expect(html).toContain('target="_blank"');
   });
-  test('empty text is still a single (empty) text segment', () => {
-    expect(splitLinkified('')).toEqual([{ type: 'text', value: '' }]);
+
+  test('keeps the note edit input and routes both displayed pin kinds through shared prose', async () => {
+    const source = await Bun.file(new URL('./PinSheet.tsx', import.meta.url)).text();
+    expect(source).toContain('value={editText}');
+    expect(source).toContain('<PinNoteContent');
+    expect(source.match(/<PinProse/g)).toHaveLength(2);
+    expect(source).not.toContain('function NoteText');
   });
 });

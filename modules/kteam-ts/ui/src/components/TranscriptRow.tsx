@@ -44,6 +44,7 @@ import { cn, fmtClock } from '../lib/utils';
 import { isMessagePinned, pinsStore, type PinBlockKind } from '../lib/pins';
 import { getForegroundSession } from '../lib/pin-bridge';
 import { TOUCH_SELECTION_DWELL_MS } from '../hooks/useLiveTick';
+import { useSidePane } from './SidePane';
 
 const PROTOCOL_HEADER = /#\s*(AGENTS\.md instructions|SYSTEM\s*PROMPT|INSTRUCTIONS)/i;
 const LONG_USER_LINES = 16;
@@ -140,7 +141,13 @@ export function transcriptImagesEqual(a?: TranscriptImage[], b?: TranscriptImage
 }
 
 function sameProps(prev: Props, next: Props): boolean {
-  if (prev.live !== next.live || prev.isLast !== next.isLast || prev.touch !== next.touch) return false;
+  if (
+    prev.live !== next.live ||
+    prev.isLast !== next.isLast ||
+    prev.touch !== next.touch ||
+    prev.sessionId !== next.sessionId
+  )
+    return false;
   // Only the PREVIOUS block's kind affects this row (via the rhythm attrs), so
   // comparing kind avoids re-rendering the whole transcript when a neighbour's
   // content changes.
@@ -154,6 +161,7 @@ function sameProps(prev: Props, next: Props): boolean {
       a.text === t.text &&
       a.ts === t.ts &&
       a.from?.name === t.from?.name &&
+      a.from?.replyExpected === t.from?.replyExpected &&
       transcriptImagesEqual(a.attachments, t.attachments)
     );
   }
@@ -509,7 +517,7 @@ export const TranscriptRow = memo(function TranscriptRow({
       case 'user':
         return <UserMessage text={block.text} ts={block.ts} from={block.from} attachments={block.attachments} />;
       case 'assistant':
-        return <AssistantMessage text={block.text} ts={block.ts} source={block.source} />;
+        return <AssistantMessage text={block.text} ts={block.ts} source={block.source} sessionId={sessionId} />;
       case 'thinking':
         return <ThinkingLine text={block.text} durationMs={block.durationMs} />;
       case 'tools':
@@ -633,14 +641,19 @@ export const ASSISTANT_LAYOUT = {
     'pointer-events-none absolute right-0 top-0.5 hidden w-[50px] text-right mono text-2xs tabular-nums text-faint opacity-0 transition-opacity sm:block group-hover:opacity-100',
 } as const;
 
-function AssistantMessage({ text, ts }: { text: string; ts?: string; source: string }) {
+function AssistantMessage({ text, ts, sessionId }: { text: string; ts?: string; source: string; sessionId?: string }) {
+  const sidePane = useSidePane();
   if (!text.trim()) return null;
   return (
     <div className={cn(ASSISTANT_LAYOUT.wrap, ts && ASSISTANT_LAYOUT.gutter)}>
       {ts && <span className={ASSISTANT_LAYOUT.stamp}>{clockLabel(ts)}</span>}
-      {/* Task-reference opening arrives with #F64; keeping it out here lets the
-          unconfirmed-placement fix ship without that feature's unlanded types. */}
-      <Markdown text={text} />
+      <Markdown
+        text={text}
+        sessionId={sessionId}
+        cwd={sidePane?.cwd}
+        onTaskOpen={sidePane?.openTask}
+        onCodeReferenceOpen={sidePane?.openCodeReference}
+      />
     </div>
   );
 }
@@ -680,6 +693,7 @@ function UserMessage({
   from?: PeerFrom;
   attachments?: StoredTranscriptImage[];
 }) {
+  const sidePane = useSidePane();
   const lines = text.split('\n');
   const isProtocol = PROTOCOL_HEADER.test(text) && text.length > 2000;
   const isLong = lines.length > LONG_USER_LINES || text.length > 1400;
@@ -722,9 +736,14 @@ function UserMessage({
             {preview}
           </button>
         ) : text ? (
-          <div className="kt-user-copy min-w-0 max-w-full px-panel pb-1.5 pt-0.5 text-row leading-base whitespace-pre-wrap break-words text-fg">
-            {text}
-          </div>
+          <Markdown
+            text={text}
+            // A peer may come from another repository and PeerFrom does not
+            // carry authoritative filesystem provenance. Fleet task ids are
+            // safe to route; code-shaped text deliberately stays inert.
+            onTaskOpen={sidePane?.openTask}
+            className="kt-user-copy min-w-0 max-w-full px-panel pb-1.5 pt-0.5 text-row leading-base break-words text-fg"
+          />
         ) : null}
         <TranscriptImageGallery images={attachments} className="px-panel pb-2 pt-1" />
       </div>

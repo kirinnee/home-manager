@@ -118,16 +118,17 @@ describe('ordering, dedupe and capacity', () => {
     expect(snap.items.map(item => item.subject)).toEqual(['old', 'new']);
   });
 
-  test('stable sourceRef and identical free-form adds dedupe while open', async () => {
+  test('stable sourceRef updates in place while identical free-form adds dedupe', async () => {
     const s = service();
     await s.add(SID, explicit('same'), AGENT);
     await s.add(SID, explicit('same'), AGENT);
-    await s.addFromSource(SID, {
+    const first = await s.addFromSource(SID, {
       source: 'task',
       sourceRef: 'F31',
       subject: 'first',
       why: 'x',
       howToResolve: 'y',
+      waitingSince: '2026-07-28T01:00:00.000Z',
     });
     const snap = await s.addFromSource(SID, {
       source: 'task',
@@ -135,8 +136,16 @@ describe('ordering, dedupe and capacity', () => {
       subject: 'changed display',
       why: 'z',
       howToResolve: 'q',
+      waitingSince: '2026-07-28T03:00:00.000Z',
     });
     expect(snap.items).toHaveLength(2);
+    expect(snap.items.find(item => item.sourceRef === 'F31')).toMatchObject({
+      id: first.items.find(item => item.sourceRef === 'F31')?.id,
+      subject: 'changed display',
+      why: 'z',
+      howToResolve: 'q',
+      waitingSince: '2026-07-28T01:00:00.000Z',
+    });
   });
 
   test('active cap refuses rather than evicting the oldest', async () => {

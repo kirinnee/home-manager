@@ -5,7 +5,7 @@
 // exactly one onCommit call when the drag ends. Keyboard commands commit one
 // deliberate step at a time.
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   SIDE_PANE_DEFAULT_WIDTH,
   SIDE_PANE_MAX_WIDTH,
@@ -94,12 +94,37 @@ export function SidePaneResizeHandle({
   width,
   onPreview,
   onCommit,
+  bounds: suppliedBounds,
 }: {
   width: number;
   onPreview: (width: number) => void;
   onCommit: (width: number) => void;
+  /** Optional deterministic test/embed bound. The normal workspace observes
+   * its actual width and keeps ARIA synchronized as that width changes. */
+  bounds?: SidePaneWidthBounds;
 }) {
   const dragRef = useRef<DragState | null>(null);
+  const handleRef = useRef<HTMLButtonElement | null>(null);
+  const [observedBounds, setObservedBounds] = useState<SidePaneWidthBounds>(() =>
+    sidePaneWidthBounds(SIDE_PANE_MAX_WIDTH + SIDE_PANE_MIN_CHAT_WIDTH + SIDE_PANE_WORKSPACE_GAP),
+  );
+  const accessibleBounds = suppliedBounds ?? observedBounds;
+
+  useEffect(() => {
+    if (suppliedBounds) return;
+    const handle = handleRef.current;
+    const workspace = handle?.parentElement?.parentElement;
+    if (!handle || !workspace) return;
+    const update = () => setObservedBounds(elementGeometry(handle).bounds);
+    update();
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', update);
+      return () => window.removeEventListener('resize', update);
+    }
+    const observer = new ResizeObserver(update);
+    observer.observe(workspace);
+    return () => observer.disconnect();
+  }, [suppliedBounds]);
 
   useEffect(
     () => () => {
@@ -147,14 +172,15 @@ export function SidePaneResizeHandle({
 
   return (
     <button
+      ref={handleRef}
       type="button"
       role="separator"
       aria-label="Resize session side pane"
       aria-orientation="vertical"
-      aria-valuemin={SIDE_PANE_MIN_WIDTH}
-      aria-valuemax={SIDE_PANE_MAX_WIDTH}
-      aria-valuenow={Math.round(width)}
-      aria-valuetext={`${Math.round(width)} pixels preferred; constrained to keep the conversation readable`}
+      aria-valuemin={accessibleBounds.min}
+      aria-valuemax={accessibleBounds.max}
+      aria-valuenow={clampToBounds(width, accessibleBounds)}
+      aria-valuetext={`${clampToBounds(width, accessibleBounds)} pixels; constrained to keep the conversation readable`}
       title="Resize side pane (Left/Right arrows; Shift for larger steps; double-click to reset)"
       onPointerDown={event => {
         if (event.button !== 0) return;
@@ -195,9 +221,10 @@ export function SidePaneResizeHandle({
         onPreview(next);
         onCommit(next);
       }}
-      onDoubleClick={() => {
-        onPreview(SIDE_PANE_DEFAULT_WIDTH);
-        onCommit(SIDE_PANE_DEFAULT_WIDTH);
+      onDoubleClick={event => {
+        const reset = clampToBounds(SIDE_PANE_DEFAULT_WIDTH, elementGeometry(event.currentTarget).bounds);
+        onPreview(reset);
+        onCommit(reset);
       }}
       className="group absolute inset-y-0 left-0 z-30 flex w-4 -translate-x-1/2 touch-none cursor-col-resize items-center justify-center border-0 bg-transparent p-0 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
     >

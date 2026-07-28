@@ -143,6 +143,10 @@ export function computeTaskLive(
     return live;
   }
 
+  // Identity is useful in every task phase, not only while work is active.
+  // It is derived at read time so the stored historical assignee never changes.
+  live.assigneeSessionId = assignee.config.id;
+  live.assigneeName = assignee.config.teammate?.trim() || assignee.config.name?.trim() || assignee.config.id;
   const status = assignee.state.status;
   live.assigneeStatus = status ?? null;
   live.assigneeHealth = assigneeHealthOf(status);

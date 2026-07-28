@@ -2,23 +2,26 @@
 import type { ReactNode } from 'react';
 import {
   Activity,
+  Bot,
   ExternalLink,
   FileText,
   GitBranch,
   GitCommitHorizontal,
   GitPullRequest,
   TriangleAlert,
-  UserRound,
 } from 'lucide-react';
 import { Badge, Card, Label, PanelBody, PanelHeader } from './Primitives';
 import { Markdown } from './Markdown';
 import { Link } from '../lib/router';
 import { parseGithubPr } from '../lib/pins';
+import type { CodeReference } from '../lib/code-references';
 import {
   taskActivityText,
-  taskLivenessLabel,
+  taskBoardLane,
   taskReference,
+  TASK_BOARD_LANE_META,
   TASK_PHASE_META,
+  TASK_STATUS_META,
   TASK_STALENESS_COPY,
   TASK_WORKFLOW_LABEL,
   type TaskActivity,
@@ -27,10 +30,39 @@ import {
   type TaskSummary,
 } from '../lib/tasks';
 import { fmtAbsolute, fmtRelative } from '../lib/utils';
+import { TaskAssigneeLink } from './TaskAssigneeLink';
 
 /** The one session-navigation affordance every task surface links through, so a
  *  cross-session node opens its owning session the same way the sidebar does. */
 export const sessionHref = (id: string): string => `/session/${encodeURIComponent(id)}`;
+
+/** A Files pane is session-scoped. Never resolve prose against one task owner
+ *  and deliver its path to another session's pane. */
+export function taskCodeReferencesStayInSession(
+  surfaceSessionId: string | undefined,
+  taskSessionId: string | null | undefined,
+): boolean {
+  return Boolean(surfaceSessionId && taskSessionId && surfaceSessionId === taskSessionId);
+}
+
+export interface TaskCodeReferenceContext {
+  sessionId: string;
+  cwd?: string;
+}
+
+/** The hosting Files surface is the sole authority for filesystem context.
+ *  Stored task.repo is audit data and may differ from the active worktree, so
+ *  it must never be used to resolve a path that will open in this pane. */
+export function taskCodeReferenceContext(
+  surfaceSessionId: string | undefined,
+  surfaceCwd: string | undefined,
+  taskSessionId: string | null | undefined,
+): TaskCodeReferenceContext | null {
+  return taskCodeReferencesStayInSession(surfaceSessionId, taskSessionId)
+    ? { sessionId: surfaceSessionId!, ...(surfaceCwd ? { cwd: surfaceCwd } : {}) }
+    : null;
+}
+
 export function SessionLink({ sessionId, label }: { sessionId: string; label?: string }) {
   return (
     <Link
@@ -52,7 +84,7 @@ export function TaskRow({
   conflicts?: TaskFileConflict[];
   onOpen: (id: string) => void;
 }) {
-  const phase = TASK_PHASE_META[task.phase];
+  const boardState = task.blocked ? TASK_STATUS_META.blocked : TASK_BOARD_LANE_META[taskBoardLane(task.phase)];
   const stale = task.live.staleness ? TASK_STALENESS_COPY[task.live.staleness] : null;
   const pr = task.links.prs.map(parseGithubPr).find(Boolean);
   return (
@@ -66,6 +98,7 @@ export function TaskRow({
         <span className="mono shrink-0 text-xs font-semibold text-accent">{taskReference(task.id)}</span>
         <span className="min-w-0 flex-1">
           <span className="block truncate text-ui font-medium text-fg">{task.title}</span>
+          <TaskCreatorMarker createdBy={task.createdBy} />
           {task.blocked && task.blockedReason && (
             <span className="mt-0.5 block truncate text-xs font-medium text-warn">{task.blockedReason}</span>
           )}
@@ -93,12 +126,9 @@ export function TaskRow({
               </span>
             </span>
           )}
-          <span className="mt-0.5 flex min-w-0 items-center gap-1 text-xs text-muted">
-            <LivenessDot task={task} /> <span className="truncate">{taskLivenessLabel(task)}</span>
-          </span>
         </span>
-        <Badge tone={phase.tone} className="shrink-0 whitespace-nowrap">
-          {phase.label}
+        <Badge tone={boardState.tone} className="shrink-0 whitespace-nowrap">
+          {boardState.label}
         </Badge>
         {stale && (
           <span className="inline-flex shrink-0" title={stale.reason}>
@@ -109,6 +139,7 @@ export function TaskRow({
           </span>
         )}
       </button>
+      <TaskAssigneeLink task={task} showStatus={false} className="max-w-[9rem] shrink-0" />
       {pr && (
         <a
           href={pr.url}
@@ -126,28 +157,32 @@ export function TaskRow({
   );
 }
 
-function LivenessDot({ task }: { task: Pick<TaskSummary, 'assignee' | 'live'> }) {
-  const tone = task.live.staleness ? 'bg-warn' : task.live.assigneeHealth === 'active' ? 'bg-ok' : 'bg-muted';
-  return (
-    <span
-      aria-hidden="true"
-      className={`h-2 w-2 shrink-0 rounded-full ${tone} ${task.live.staleness ? 'animate-pulse motion-reduce:animate-none' : ''}`}
-    />
-  );
-}
-
 export function TaskDetail({
   task,
   activity,
   conflicts,
+  onOpenTask,
+  onCodeReferenceOpen,
+  surfaceSessionId,
+  surfaceCwd,
 }: {
   task: TaskSummary | TaskRecord;
   activity: TaskActivity[];
   conflicts?: TaskFileConflict[];
+  onOpenTask?: (id: string, opener?: HTMLElement | null) => void;
+  onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
+  /** Session that owns the hosting Files pane. */
+  surfaceSessionId?: string;
+  /** Root of that same Files pane; task.repo is not an opening context. */
+  surfaceCwd?: string;
 }) {
-  const phase = TASK_PHASE_META[task.phase];
+  const lane = taskBoardLane(task.phase);
+  const boardState = task.blocked ? TASK_STATUS_META.blocked : TASK_BOARD_LANE_META[lane];
+  const auditPhase = lane === task.phase ? null : TASK_PHASE_META[task.phase];
   const stale = task.live.staleness ? TASK_STALENESS_COPY[task.live.staleness] : null;
   const full = 'ask' in task;
+  const codeReferenceContext = taskCodeReferenceContext(surfaceSessionId, surfaceCwd, task.sessionId);
+  const openCodeReference = codeReferenceContext ? onCodeReferenceOpen : undefined;
   return (
     <Card className="min-w-0">
       <PanelHeader className="flex min-w-0 items-start gap-2">
@@ -156,12 +191,14 @@ export function TaskDetail({
           <h2 className="m-0 text-ui font-bold text-fg">{task.title}</h2>
           <p className="mt-1 flex flex-wrap items-center gap-1 text-xs text-muted">
             <span>Workflow {TASK_WORKFLOW_LABEL[task.workflow]}</span>
-            <Badge tone={phase.tone}>{phase.label}</Badge>
+            <Badge tone={boardState.tone}>{boardState.label}</Badge>
+            <TaskCreatorMarker createdBy={task.createdBy} />
+            {auditPhase && <span>Audit phase {auditPhase.label}</span>}
           </p>
         </div>
       </PanelHeader>
       <PanelBody className="flex min-w-0 flex-col gap-4">
-        <Blocker task={task} />
+        <TaskQuickSummary task={task} />
         {stale && (
           <div role="status" className="rounded-control border border-warn/50 bg-warn/10 p-2 text-ui text-fg">
             <span className="font-semibold text-warn">Evidence: {stale.label}.</span> {stale.reason}
@@ -169,23 +206,34 @@ export function TaskDetail({
         )}
         <section>
           <Label>Assignee evidence</Label>
-          <p className="mt-1 flex min-w-0 items-center gap-1.5 text-ui text-fg">
-            <UserRound size={14} className="shrink-0 text-muted" aria-hidden="true" />
-            <span className="truncate">{taskLivenessLabel(task)}</span>
-          </p>
+          <TaskAssigneeLink task={task} className="mt-1 text-ui" />
           {task.live.assigneeLastActivityAt && (
             <p className="mt-0.5 text-xs text-muted">Last activity {fmtRelative(task.live.assigneeLastActivityAt)}</p>
           )}
         </section>
         <Dependencies ids={task.dependsOn} />
         <TaskFiles files={task.files} conflicts={conflicts} />
-        {full ? <AskAndClarifications task={task} /> : <p className="text-ui text-muted">Loading original ask…</p>}
+        {full ? (
+          <AskAndClarifications
+            task={task}
+            onOpenTask={onOpenTask}
+            codeReferenceContext={codeReferenceContext}
+            onCodeReferenceOpen={openCodeReference}
+          />
+        ) : (
+          <p className="text-ui text-muted">Loading original ask…</p>
+        )}
         {full && task.description && (
           <section>
             <Label>Working brief</Label>
-            <div className="mt-2">
-              <Markdown text={task.description} />
-            </div>
+            <TaskMarkdown
+              text={task.description}
+              sessionId={codeReferenceContext?.sessionId}
+              cwd={codeReferenceContext?.cwd}
+              onOpenTask={onOpenTask}
+              onCodeReferenceOpen={openCodeReference}
+              className="mt-2"
+            />
           </section>
         )}
         <TaskLinks links={task.links} />
@@ -195,19 +243,67 @@ export function TaskDetail({
   );
 }
 
-function Blocker({ task }: { task: TaskSummary }) {
-  if (!task.blocked) return null;
+function TaskCreatorMarker({ createdBy }: { createdBy?: string | null }) {
+  if (!createdBy) return null;
   return (
-    <section className="rounded-control border border-warn/50 bg-warn/10 p-2">
-      <Label>Blocked</Label>
-      <p className="mt-1 break-words text-ui font-medium text-warn">
-        {task.blockedReason ?? task.statusReason ?? 'Blocked; no reason recorded.'}
-      </p>
-      {task.blockedBy.length > 0 && (
-        <p className="mt-1 text-xs text-muted">Waiting on {task.blockedBy.map(taskReference).join(', ')}</p>
-      )}
-      {task.blockedSince && <p className="mt-1 text-xs text-muted">Since {fmtAbsolute(task.blockedSince)}</p>}
+    <span
+      className="mt-0.5 inline-flex w-fit items-center gap-1 rounded-control border border-accent-border bg-accent-soft px-1.5 py-0.5 text-2xs font-semibold text-accent"
+      title={`Created by agent session ${createdBy}`}
+    >
+      <Bot size={11} aria-hidden="true" />
+      Agent-created
+    </span>
+  );
+}
+
+function TaskQuickSummary({ task }: { task: TaskSummary }) {
+  const state = task.blocked ? TASK_STATUS_META.blocked : TASK_BOARD_LANE_META[taskBoardLane(task.phase)];
+  const assignee = task.live.assigneeName?.trim() || task.assignee?.trim() || null;
+  const blocker = task.blockedReason ?? task.statusReason ?? 'Blocked; no reason recorded.';
+  const headingId = `task-quick-summary-${task.id}`;
+  return (
+    <section aria-labelledby={headingId} className="rounded-control border border-accent-border bg-accent-soft p-3">
+      <Label id={headingId}>Quick summary</Label>
+      <div className="mt-2 flex flex-col gap-1.5 text-ui leading-relaxed text-fg">
+        <p>
+          <strong>{state.label}.</strong>
+        </p>
+        <p>{task.title}</p>
+        {task.blocked && <p className="whitespace-pre-wrap break-words text-warn">{blocker}</p>}
+        {task.blockedBy.length > 0 && <p>Waiting on {task.blockedBy.map(taskReference).join(', ')}.</p>}
+        {task.blockedSince && <p>Blocked since {fmtAbsolute(task.blockedSince)}.</p>}
+        <p>{assignee ? `Assigned to ${assignee}.` : 'Unassigned.'}</p>
+        {task.dependsOn.length > 0 && <p>Depends on {task.dependsOn.map(taskReference).join(', ')}.</p>}
+      </div>
     </section>
+  );
+}
+
+function TaskMarkdown({
+  text,
+  sessionId,
+  cwd,
+  onOpenTask,
+  onCodeReferenceOpen,
+  className = '',
+}: {
+  text: string;
+  sessionId?: string | null;
+  cwd?: string | null;
+  onOpenTask?: (id: string, opener?: HTMLElement | null) => void;
+  onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
+  className?: string;
+}) {
+  return (
+    <div className={`${className} min-w-0 whitespace-pre-wrap break-words text-ui text-fg`}>
+      <Markdown
+        text={text}
+        sessionId={sessionId ?? undefined}
+        cwd={cwd ?? undefined}
+        onTaskOpen={onOpenTask}
+        onCodeReferenceOpen={onCodeReferenceOpen}
+      />
+    </div>
   );
 }
 function Dependencies({ ids }: { ids: string[] }) {
@@ -260,13 +356,29 @@ function TaskFiles({ files, conflicts }: { files: string[]; conflicts?: TaskFile
     </section>
   );
 }
-function AskAndClarifications({ task }: { task: TaskRecord }) {
+function AskAndClarifications({
+  task,
+  onOpenTask,
+  codeReferenceContext,
+  onCodeReferenceOpen,
+}: {
+  task: TaskRecord;
+  onOpenTask?: (id: string, opener?: HTMLElement | null) => void;
+  codeReferenceContext: TaskCodeReferenceContext | null;
+  onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
+}) {
   return (
     <>
       <section>
         <Label>Original ask</Label>
-        <blockquote className="mt-1 border-l-2 border-accent pl-3 text-ui text-fg whitespace-pre-wrap">
-          {task.ask.text || 'No original ask recorded.'}
+        <blockquote className="mt-1 border-l-2 border-accent pl-3">
+          <TaskMarkdown
+            text={task.ask.text || 'No original ask recorded.'}
+            sessionId={codeReferenceContext?.sessionId}
+            cwd={codeReferenceContext?.cwd}
+            onOpenTask={onOpenTask}
+            onCodeReferenceOpen={onCodeReferenceOpen}
+          />
         </blockquote>
         <SourceLink source={task.ask.source} label="Open ask source" />
       </section>
@@ -281,7 +393,13 @@ function AskAndClarifications({ task }: { task: TaskRecord }) {
                 key={`${clarification.at ?? 'unknown'}-${index}`}
                 className="rounded-control border border-border-soft p-2"
               >
-                <p className="whitespace-pre-wrap text-ui text-fg">{clarification.text}</p>
+                <TaskMarkdown
+                  text={clarification.text}
+                  sessionId={codeReferenceContext?.sessionId}
+                  cwd={codeReferenceContext?.cwd}
+                  onOpenTask={onOpenTask}
+                  onCodeReferenceOpen={onCodeReferenceOpen}
+                />
                 <p className="mt-1 text-xs text-muted">
                   {clarification.byName ?? clarification.by ?? 'unknown'} · {fmtAbsolute(clarification.at)}
                 </p>

@@ -10,7 +10,8 @@ import { SIDE_PANE_MAX_WIDTH, SIDE_PANE_MIN_WIDTH } from '../lib/side-pane-prefe
 
 describe('side pane resize policy', () => {
   test('caps the pane so chat retains its minimum column', () => {
-    expect(sidePaneWidthBounds(720)).toEqual({ min: SIDE_PANE_MIN_WIDTH, max: 352 });
+    expect(sidePaneWidthBounds(720)).toEqual({ min: SIDE_PANE_MIN_WIDTH, max: 432 });
+    expect(sidePaneWidthBounds(844)).toEqual({ min: SIDE_PANE_MIN_WIDTH, max: 556 });
     expect(sidePaneWidthBounds(2000).max).toBe(SIDE_PANE_MAX_WIDTH);
   });
 
@@ -32,11 +33,17 @@ describe('side pane resize policy', () => {
 
   test('renders a focusable vertical separator with a real 16px hit area', () => {
     const html = renderToStaticMarkup(
-      <SidePaneResizeHandle width={520} onPreview={() => undefined} onCommit={() => undefined} />,
+      <SidePaneResizeHandle
+        width={520}
+        bounds={{ min: SIDE_PANE_MIN_WIDTH, max: 432 }}
+        onPreview={() => undefined}
+        onCommit={() => undefined}
+      />,
     );
     expect(html).toContain('role="separator"');
     expect(html).toContain('aria-orientation="vertical"');
-    expect(html).toContain('aria-valuenow="520"');
+    expect(html).toContain('aria-valuemax="432"');
+    expect(html).toContain('aria-valuenow="432"');
     expect(html).toContain('w-4');
     expect(html).not.toContain('tabindex="-1"');
   });

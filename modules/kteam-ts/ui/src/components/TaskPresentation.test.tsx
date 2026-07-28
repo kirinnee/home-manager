@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { TaskDetail, TaskRow } from './TaskPresentation';
+import { taskCodeReferenceContext, taskCodeReferencesStayInSession, TaskDetail, TaskRow } from './TaskPresentation';
 import type { TaskRecord, TaskSummary } from '../lib/tasks';
+import { codeReferenceHref } from '../lib/code-references';
 
 const task: TaskSummary = {
   id: 'B7',
@@ -16,7 +17,7 @@ const task: TaskSummary = {
   blockedReason: 'Waiting for #F12',
   blockedSince: '2026-07-20T10:00:00.000Z',
   blockedBy: ['F12'],
-  assignee: 'sasha',
+  assignee: 'ottis',
   repo: '/repo',
   links: { prs: ['https://github.com/acme/kteam/pull/42'], branch: null, commits: [], docs: [] },
   order: null,
@@ -25,9 +26,12 @@ const task: TaskSummary = {
   askChars: 12,
   askSource: 'https://chat.example/messages/1',
   clarificationCount: 1,
+  createdBy: 'ms-creator-12345678',
   sessionId: 'ms-b7',
   files: ['src/api-server.ts'],
   live: {
+    assigneeSessionId: 'ms4v5fu2-f2a89500',
+    assigneeName: 'ottis',
     assigneeStatus: 'failed',
     assigneeHealth: 'dead',
     assigneeDoneMarker: false,
@@ -37,14 +41,44 @@ const task: TaskSummary = {
 };
 
 describe('task-v2 presentation', () => {
-  test('row exposes # references, phase, dependency blocking, and claimed files', () => {
+  test('row exposes # references, primary blocked state, dependency blocking, and claimed files', () => {
     const html = renderToStaticMarkup(<TaskRow task={task} onOpen={() => undefined} />);
     expect(html).toContain('#B7');
-    expect(html).toContain('Build');
+    expect(html).toContain('Blocked');
     expect(html).toContain('Waiting for #F12');
     expect(html).toContain('Blocked by #F12');
     expect(html).toContain('kteam#42');
     expect(html).toContain('src/api-server.ts');
+    expect(html).toContain('Agent-created');
+    expect(html).toContain('Created by agent session ms-creator-12345678');
+    expect(html).toContain('href="/session/ms4v5fu2-f2a89500"');
+    expect(html).toContain('>ottis<');
+    expect(html).toContain('bg-warn');
+    expect(html.indexOf('</button>')).toBeLessThan(html.indexOf('href="/session/ms4v5fu2-f2a89500"'));
+  });
+  test('active audit phases share the in-progress row state', () => {
+    for (const [phase, status] of [
+      ['research', 'researched'],
+      ['design', 'designed'],
+      ['build', 'in_progress'],
+    ] as const) {
+      const html = renderToStaticMarkup(
+        <TaskRow
+          task={{
+            ...task,
+            phase,
+            status,
+            blocked: false,
+            blockedReason: null,
+            blockedSince: null,
+            blockedBy: [],
+          }}
+          onOpen={() => undefined}
+        />,
+      );
+      expect(html).toContain('In progress');
+      expect(html).not.toContain(`>${phase === 'research' ? 'Research' : phase === 'design' ? 'Design' : 'Build'}<`);
+    }
   });
   test('row surfaces an advisory file conflict without calling the task blocked', () => {
     const html = renderToStaticMarkup(
@@ -86,16 +120,39 @@ describe('task-v2 presentation', () => {
       />,
     );
     expect(html).not.toContain('>Blocked<');
+    expect(html).toContain('<strong>Dropped.</strong>');
+    expect(html).not.toContain('Superseded by #F13');
+  });
+  test('human-created and unknown legacy rows are not falsely marked as agent-created', () => {
+    for (const provenance of [null, undefined]) {
+      const candidate = { ...task, createdBy: provenance };
+      const html = renderToStaticMarkup(<TaskRow task={candidate} onOpen={() => undefined} />);
+      expect(html).not.toContain('Agent-created');
+    }
+  });
+  test('quick summary leads with one proven outcome and keeps each fact on its own line', () => {
+    const html = renderToStaticMarkup(<TaskDetail task={task} activity={[]} />);
+    expect(html.indexOf('Quick summary')).toBeLessThan(html.indexOf('Assignee evidence'));
+    expect(html).toContain('<strong>Blocked.</strong>');
+    expect(html).toContain('<p>Questions reach UI</p>');
+    expect(html).toContain('Waiting for #F12');
+    expect(html).toContain('<p>Assigned to ottis.</p>');
+    expect(html).toContain('<p>Depends on #F12.</p>');
+    expect(html.match(/Waiting for #F12/g)).toHaveLength(1);
+    expect(html.match(/<strong>/g)).toHaveLength(1);
   });
   test('detail renders verbatim ask, sources, clarifications, dependencies, and exact phase/claim history', () => {
     const record: TaskRecord = {
       ...task,
-      description: '## Working notes',
+      description: '## Working **notes**\nFirst line\nSecond line\n\n```mystery\nopaque #F99 <tag>\n```',
       createdBy: 'lead',
-      ask: { text: 'Keep this original ask exactly.', source: 'https://chat.example/messages/1' },
+      ask: {
+        text: '**Keep** this original ask exactly. See #F12.\nThen preserve this line.',
+        source: 'https://chat.example/messages/1',
+      },
       clarifications: [
         {
-          text: 'Add the source link too.',
+          text: '- Add the source link too.\n- Keep newlines.',
           source: 'https://chat.example/messages/2',
           at: '2026-07-21T01:02:03.000Z',
           by: 'user',
@@ -126,13 +183,15 @@ describe('task-v2 presentation', () => {
             data: { event: 'completion-claim', session: 'ms-sasha', turn: 5, phase: 'build' },
           },
         ]}
+        onOpenTask={() => undefined}
       />,
     );
     for (const text of [
       '#B7',
       'Research first',
+      'Audit phase Build',
       'Original ask',
-      'Keep this original ask exactly.',
+      'this original ask exactly. See',
       'Open ask source',
       'Add the source link too.',
       'Open clarification source',
@@ -144,5 +203,62 @@ describe('task-v2 presentation', () => {
     ])
       expect(html).toContain(text);
     expect(html).toContain('2026-07-21T02:03:04.000Z');
+    expect(html).toContain('<h2>Working <strong>notes</strong></h2>');
+    expect(html).toContain('whitespace-pre-wrap');
+    expect(html).toContain('<ul>');
+    expect(html).toContain('opaque #F99 &lt;tag&gt;');
+    expect(html).toContain('data-task-reference="F12"');
+    expect(html).toContain('href="/tasks/F12"');
+  });
+
+  test('a same-session task receives the hosting Files resolution context', () => {
+    const record: TaskRecord = {
+      ...task,
+      createdBy: task.createdBy ?? null,
+      description: 'Inspect src/api-server.ts:890-912.',
+      ask: { text: 'Keep the source jump.', source: 'https://chat.example/messages/1' },
+      clarifications: [],
+    };
+    const html = renderToStaticMarkup(
+      <TaskDetail
+        task={record}
+        activity={[]}
+        surfaceSessionId="ms-b7"
+        surfaceCwd="/host/worktree"
+        onCodeReferenceOpen={() => undefined}
+      />,
+    );
+
+    expect(taskCodeReferencesStayInSession('ms-b7', record.sessionId)).toBe(true);
+    expect(taskCodeReferenceContext('ms-b7', '/host/worktree', record.sessionId)).toEqual({
+      sessionId: 'ms-b7',
+      cwd: '/host/worktree',
+    });
+    expect(taskCodeReferenceContext('ms-b7', '/host/worktree', 'ms-other')).toBeNull();
+    expect(html).toContain('src/api-server.ts:890-912');
+    expect(html).not.toContain('data-code-reference');
+  });
+
+  test('never resolves a cross-session task path into the hosting session Files pane', () => {
+    expect(taskCodeReferencesStayInSession('ms-a', 'ms-a')).toBe(true);
+    expect(taskCodeReferencesStayInSession('ms-a', 'ms-b')).toBe(false);
+    expect(taskCodeReferencesStayInSession('ms-a', null)).toBe(false);
+
+    const href = codeReferenceHref({ path: 'src/api-server.ts', line: 890 });
+    const record: TaskRecord = {
+      ...task,
+      createdBy: task.createdBy ?? null,
+      sessionId: 'ms-b',
+      description: `Inspect [the handler](${href}).`,
+      ask: { text: 'Keep the source jump.', source: 'https://chat.example/messages/1' },
+      clarifications: [],
+    };
+    const html = renderToStaticMarkup(
+      <TaskDetail task={record} activity={[]} surfaceSessionId="ms-a" onCodeReferenceOpen={() => undefined} />,
+    );
+
+    expect(html).toContain('the handler');
+    expect(html).not.toContain('data-code-reference');
+    expect(html).not.toContain('#kteam-code-reference');
   });
 });

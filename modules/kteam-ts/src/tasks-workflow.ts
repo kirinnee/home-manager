@@ -8,6 +8,7 @@ import {
   taskReference,
   type Task,
   type TaskActivity,
+  type TaskBoardLane,
   type TaskPhase,
   type TaskStatus,
   type TaskView,
@@ -47,6 +48,13 @@ export function taskStatusFromPhase(phase: TaskPhase): TaskStatus {
   return PHASE_TO_STATUS[phase];
 }
 
+/** Presentation-only collapse. Stored workflow phases remain exact so history
+ * and adjacent transition gates stay honest. */
+export function taskBoardLaneFromPhase(phase: TaskPhase): TaskBoardLane {
+  if (phase === 'research' || phase === 'design' || phase === 'build') return 'in_progress';
+  return phase;
+}
+
 /** Best-effort workflow for additive parsing of v1 records. New records always
  * persist their explicit choice. */
 export function inferTaskWorkflow(phase: TaskPhase): TaskWorkflow {
@@ -78,15 +86,20 @@ export function assertTaskPhaseTransition(task: Task, to: TaskPhase, human: bool
   const toIndex = path.indexOf(to);
   if (fromIndex < 0 || toIndex !== fromIndex + 1) {
     const expected = fromIndex >= 0 ? path[fromIndex + 1] : undefined;
+    const expectedCopy =
+      expected === undefined
+        ? 'no further phase'
+        : `${expected}${taskBoardLaneFromPhase(expected) !== expected ? ` (${taskBoardLaneFromPhase(expected)} on board)` : ''}`;
     throw new TaskError(
       'transition',
-      `${taskReference(task.id)} cannot move ${from} → ${to} in ${task.workflow}; expected ${expected ?? 'no further phase'}`,
+      `${taskReference(task.id)} cannot move ${from} → ${to} in ${task.workflow}; expected ${expectedCopy}`,
     );
   }
   if ((from === 'research' || from === 'design') && !human) {
+    const boardLane = taskBoardLaneFromPhase(from);
     throw new TaskError(
       'approval-required',
-      `${taskReference(task.id)} cannot leave ${from} until the human approves it`,
+      `${taskReference(task.id)} cannot leave ${from} (${boardLane} on board) until the human approves it`,
     );
   }
 }
@@ -187,6 +200,19 @@ export function computeTaskBlocking(
   activity: readonly TaskActivity[],
   allTasks: readonly Task[],
 ): TaskBlocking {
+  // An explicit manual block is, by contract, a request for human input. Let
+  // it win over derived dependency state so a coincident unmet edge cannot
+  // suppress the task's stated reason from Attention.
+  if (task.status === 'blocked') {
+    return {
+      blocked: true,
+      blockedReason: task.statusReason ?? 'Human input is required.',
+      blockedSince:
+        latestTime(activity, entry => entry.type === 'status' && entry.data['to'] === 'blocked') ?? task.updatedAt,
+      blockedBy: [],
+    };
+  }
+
   const graph = new Map(allTasks.map(candidate => [candidate.id, candidate] as const));
   const blockedBy = task.dependsOn.filter(id => !dependencySatisfied(graph.get(id)));
   if (blockedBy.length > 0) {
@@ -203,16 +229,6 @@ export function computeTaskBlocking(
       blockedReason: `Waiting on ${blockedBy.map(taskReference).join(', ')}`,
       blockedSince,
       blockedBy,
-    };
-  }
-
-  if (task.status === 'blocked') {
-    return {
-      blocked: true,
-      blockedReason: task.statusReason ?? 'Human input is required.',
-      blockedSince:
-        latestTime(activity, entry => entry.type === 'status' && entry.data['to'] === 'blocked') ?? task.updatedAt,
-      blockedBy: [],
     };
   }
 

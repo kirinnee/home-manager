@@ -376,6 +376,35 @@ describe('create', () => {
     expect(attempt).toThrow('kteam task <command>');
     expect(() => parseTaskCli(['create', '--kind', 'bug'])).toThrow('--title is required');
   });
+
+  test('creation accepts five title words and sends longer detail to the description', () => {
+    expect(
+      parseTaskCli([
+        'create',
+        '--kind',
+        'feature',
+        '--title',
+        'One two three four five',
+        '--ask',
+        'ship it',
+        '--ask-source',
+        'message:1',
+      ]),
+    ).toMatchObject({ body: { title: 'One two three four five' } });
+    expect(() =>
+      parseTaskCli([
+        'create',
+        '--kind',
+        'feature',
+        '--title',
+        'One two three four five six',
+        '--ask',
+        'ship it',
+        '--ask-source',
+        'message:1',
+      ]),
+    ).toThrow(/6 words.*description/);
+  });
 });
 
 describe('list', () => {
@@ -591,10 +620,12 @@ describe('terminal rendering', () => {
       parseErrors: 0,
     });
     expect(text).toContain('ATTENTION');
+    expect(text).toContain('BLOCKED');
     expect(text).toContain('🚧 needs an API key from you');
     expect(text).toContain('needs an API key from you');
     expect(text).toContain('⚠ assignee-dead');
     expect(text).toContain('#B2');
+    expect(text).toMatch(/#B2\s+BLOCKED/);
     expect(text.indexOf('#F3')).toBeLessThan(text.indexOf('#F1'));
   });
 
@@ -665,21 +696,26 @@ describe('terminal rendering', () => {
     expect(detailMd).toContain('# #F21 · File browser');
   });
 
-  test('kanban render groups by phase', () => {
+  test('kanban render folds research, design, and build into the in-progress board lane', () => {
     const text = renderTaskKanbanText({
       tasks: [
         summary({ id: 'F1', phase: 'todo', status: 'todo' }),
         summary({ id: 'B2', phase: 'design', status: 'designed', blocked: true, blockedReason: 'needs input' }),
         summary({ id: 'F3', phase: 'build', status: 'in_progress' }),
+        summary({ id: 'F4', phase: 'research', status: 'researched' }),
       ],
       parseErrors: 0,
     });
     expect(text).toContain('TODO (1)');
-    expect(text).toContain('DESIGN (1)');
-    expect(text).toContain('BUILD (1)');
+    expect(text).toContain('IN PROGRESS (3)');
+    expect(text).not.toContain('DESIGN (');
+    expect(text).not.toContain('RESEARCH (');
+    expect(text).not.toContain('BUILD (');
     expect(text).toContain('#B2');
+    expect(text).toContain('#B2 BLOCKED');
     expect(text).toContain('🚧 needs input');
     expect(text).toContain('#F3');
+    expect(text).toContain('#F4');
   });
 
   test('dag render shows dependency edges', () => {

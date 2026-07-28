@@ -74,12 +74,13 @@ import {
   SIDE_PANE_WORKSPACE_GAP,
   subscribeSidePanePreferences,
 } from '../lib/side-pane-preferences';
+import type { CodeReference, CodeReferenceOpenRequest } from '../lib/code-references';
 import { BottomSheet } from './SessionDetails';
 import { Button } from './Primitives';
 import { InAppBrowserContext, type BrowserDestination, type InAppBrowserHost } from './InAppBrowser';
 import { FilesTab } from './FilesTab';
 import { PinSurface } from './PinSheet';
-import { SessionTasksSurface } from './SessionTasks';
+import { SessionTasksSurface, type TaskOpenRequest } from './SessionTasks';
 import { AnalyticsSurface } from './AnalyticsSurface';
 import { AttentionSurface } from './AttentionPanel';
 import { LineageSurface } from './LineageSurface';
@@ -209,6 +210,8 @@ export interface SidePaneHost {
   presentation: SidePanePresentation;
   /** Which surface is open right now (null when closed). */
   surface: SidePaneSurface | null;
+  /** Authoritative root of this session's Files surface. */
+  cwd?: string;
   /** Open a surface. The opener element, when given, receives focus back on
    *  close — focus is NEVER moved on open. */
   open: (surface: SidePaneSurface, opener?: HTMLElement | null) => void;
@@ -216,6 +219,10 @@ export interface SidePaneHost {
   /** The trigger gesture: open when closed or on another surface, close when
    *  this surface is already the open one. */
   toggle: (surface: SidePaneSurface, opener?: HTMLElement | null) => void;
+  /** Open one fleet-global task directly in the task surface. */
+  openTask: (taskId: string, opener?: HTMLElement | null) => void;
+  /** Open a proven session file, optionally selecting one source line/range. */
+  openCodeReference: (reference: CodeReference, opener?: HTMLElement | null) => void;
 }
 
 const SidePaneContext = createContext<SidePaneHost | null>(null);
@@ -286,7 +293,19 @@ export function SurfaceHeader({
   );
 }
 
-function FilesSurface({ sessionId, cwd, presentation, titleId, onClose }: SurfaceProps & { cwd?: string }) {
+function FilesSurface({
+  sessionId,
+  cwd,
+  presentation,
+  titleId,
+  onClose,
+  requestedReference,
+  onRequestedReferenceHandled,
+}: SurfaceProps & {
+  cwd?: string;
+  requestedReference?: CodeReferenceOpenRequest | null;
+  onRequestedReferenceHandled?: (sequence: number) => void;
+}) {
   return (
     <>
       <SurfaceHeader
@@ -300,13 +319,32 @@ function FilesSurface({ sessionId, cwd, presentation, titleId, onClose }: Surfac
       {/* FilesTab is re-hosted, not redesigned: it owns its sections, viewer
           stack, probe and error copy exactly as it did as a page tab. */}
       <div className="flex min-h-0 flex-1 flex-col px-panel pb-2 pt-2">
-        <FilesTab sessionId={sessionId} cwd={cwd} />
+        <FilesTab
+          sessionId={sessionId}
+          cwd={cwd}
+          requestedReference={requestedReference}
+          onRequestedReferenceHandled={onRequestedReferenceHandled}
+        />
       </div>
     </>
   );
 }
 
-function TasksSurface({ sessionId, presentation, titleId, onClose }: SurfaceProps) {
+function TasksSurface({
+  sessionId,
+  cwd,
+  presentation,
+  titleId,
+  onClose,
+  requestedTask,
+  onRequestedTaskHandled,
+  onCodeReferenceOpen,
+}: SurfaceProps & {
+  cwd?: string;
+  requestedTask?: TaskOpenRequest | null;
+  onRequestedTaskHandled?: (sequence: number) => void;
+  onCodeReferenceOpen?: SidePaneHost['openCodeReference'];
+}) {
   return (
     <>
       <SurfaceHeader
@@ -317,7 +355,13 @@ function TasksSurface({ sessionId, presentation, titleId, onClose }: SurfaceProp
         onClose={onClose}
         closeLabel={SIDE_PANE_SURFACES.tasks.closeLabel}
       />
-      <SessionTasksSurface sessionId={sessionId} />
+      <SessionTasksSurface
+        sessionId={sessionId}
+        cwd={cwd}
+        requestedTask={requestedTask}
+        onRequestedTaskHandled={onRequestedTaskHandled}
+        onCodeReferenceOpen={onCodeReferenceOpen}
+      />
     </>
   );
 }
@@ -380,6 +424,12 @@ function SurfaceBody({
   onClose,
   onInsertSkill,
   isActive,
+  requestedTask,
+  onRequestedTaskHandled,
+  requestedCodeReference,
+  onRequestedCodeReferenceHandled,
+  onTaskOpen,
+  onCodeReferenceOpen,
 }: {
   surface: SidePaneSurface;
   sessionId: string;
@@ -390,6 +440,12 @@ function SurfaceBody({
   onClose: () => void;
   onInsertSkill: (invocation: string) => void;
   isActive: boolean;
+  requestedTask?: TaskOpenRequest | null;
+  onRequestedTaskHandled?: (sequence: number) => void;
+  requestedCodeReference?: CodeReferenceOpenRequest | null;
+  onRequestedCodeReferenceHandled?: (sequence: number) => void;
+  onTaskOpen?: SidePaneHost['openTask'];
+  onCodeReferenceOpen?: SidePaneHost['openCodeReference'];
 }) {
   switch (surface) {
     case 'browser':
@@ -405,13 +461,40 @@ function SurfaceBody({
       );
     case 'files':
       return (
-        <FilesSurface sessionId={sessionId} cwd={cwd} presentation={presentation} titleId={titleId} onClose={onClose} />
+        <FilesSurface
+          sessionId={sessionId}
+          cwd={cwd}
+          presentation={presentation}
+          titleId={titleId}
+          onClose={onClose}
+          requestedReference={requestedCodeReference}
+          onRequestedReferenceHandled={onRequestedCodeReferenceHandled}
+        />
       );
     case 'tasks':
-      return <TasksSurface sessionId={sessionId} presentation={presentation} titleId={titleId} onClose={onClose} />;
+      return (
+        <TasksSurface
+          sessionId={sessionId}
+          cwd={cwd}
+          presentation={presentation}
+          titleId={titleId}
+          onClose={onClose}
+          requestedTask={requestedTask}
+          onRequestedTaskHandled={onRequestedTaskHandled}
+          onCodeReferenceOpen={onCodeReferenceOpen}
+        />
+      );
     case 'pins':
       return (
-        <PinSurface sessionId={sessionId} presentation={presentation} titleId={titleId} onRequestClose={onClose} />
+        <PinSurface
+          sessionId={sessionId}
+          cwd={cwd}
+          presentation={presentation}
+          titleId={titleId}
+          onRequestClose={onClose}
+          onTaskOpen={onTaskOpen}
+          onCodeReferenceOpen={onCodeReferenceOpen}
+        />
       );
     case 'skills':
       return (
@@ -751,6 +834,12 @@ export function SidePaneWorkspace({
   // Preview is local to this workspace: retained sessions do not re-render on
   // every drag tick. The global preference publishes only at drag end.
   const [previewWidth, setPreviewWidth] = useState<number | null>(null);
+  const [requestedTask, setRequestedTask] = useState<TaskOpenRequest | null>(null);
+  // Delivery requests are transient, unlike the durable surface/browser
+  // snapshot. Keep an independent monotonic sequence so clearing a handled
+  // request can never make the next click repeat an id FilesTab has seen.
+  const codeReferenceSequence = useRef(0);
+  const [requestedCodeReference, setRequestedCodeReference] = useState<CodeReferenceOpenRequest | null>(null);
   const paneWidth = previewWidth ?? storedPreferences.width;
   const commitPaneWidth = useCallback((width: number) => {
     setSidePaneWidth(width);
@@ -819,6 +908,24 @@ export function SidePaneWorkspace({
     [close, open, sessionId],
   );
 
+  const openTask = useCallback(
+    (taskId: string, opener?: HTMLElement | null) => {
+      const id = taskId.trim().replace(/^#/u, '').toUpperCase();
+      if (!/^[BFIC][0-9]{1,9}$/u.test(id)) return;
+      setRequestedTask(current => ({ id, sequence: (current?.sequence ?? 0) + 1 }));
+      open('tasks', opener);
+    },
+    [open],
+  );
+
+  const openCodeReference = useCallback(
+    (reference: CodeReference, opener?: HTMLElement | null) => {
+      setRequestedCodeReference({ reference, sequence: ++codeReferenceSequence.current });
+      open('files', opener);
+    },
+    [open],
+  );
+
   // The browser surface's payload rides in the same per-session snapshot, so a
   // revisited session restores the page it was reading.
   const openDestination = useCallback(
@@ -847,8 +954,8 @@ export function SidePaneWorkspace({
     [paneId, presentation, openDestination],
   );
   const host = useMemo<SidePaneHost>(
-    () => ({ paneId, presentation, surface: state.surface, open, close, toggle }),
-    [paneId, presentation, state.surface, open, close, toggle],
+    () => ({ paneId, presentation, surface: state.surface, cwd, open, close, toggle, openTask, openCodeReference }),
+    [paneId, presentation, state.surface, cwd, open, close, toggle, openTask, openCodeReference],
   );
 
   const surfaceOpen = state.surface !== null;
@@ -877,6 +984,14 @@ export function SidePaneWorkspace({
         onClose={close}
         onInsertSkill={onInsertSkill}
         isActive={active && state.surface === displaySurface}
+        requestedTask={requestedTask}
+        onRequestedTaskHandled={() => setRequestedTask(null)}
+        requestedCodeReference={requestedCodeReference}
+        onRequestedCodeReferenceHandled={sequence =>
+          setRequestedCodeReference(current => (current?.sequence === sequence ? null : current))
+        }
+        onTaskOpen={openTask}
+        onCodeReferenceOpen={openCodeReference}
       />
     </div>
   );
@@ -914,6 +1029,14 @@ export function SidePaneWorkspace({
             onClose={close}
             onInsertSkill={onInsertSkill}
             isActive={active && state.surface === surface}
+            requestedTask={requestedTask}
+            onRequestedTaskHandled={() => setRequestedTask(null)}
+            requestedCodeReference={requestedCodeReference}
+            onRequestedCodeReferenceHandled={sequence =>
+              setRequestedCodeReference(current => (current?.sequence === sequence ? null : current))
+            }
+            onTaskOpen={openTask}
+            onCodeReferenceOpen={openCodeReference}
           />
         </div>
       ))

@@ -112,6 +112,17 @@ describe('staleness is the mismatch detector', () => {
     expect(live.staleness).toBe('assignee-dead');
     expect(live.assigneeStatus).toBeNull();
     expect(live.assigneeHealth).toBeNull();
+    expect(live.assigneeSessionId).toBeNull();
+    expect(live.assigneeName).toBeNull();
+  });
+
+  test('resolved identity survives read-time annotation in every task phase', () => {
+    const live = computeTaskLive(
+      task({ status: 'todo', phase: 'todo' }),
+      session({ id: 'ms4v5fu2-f2a89500', teammate: 'ottis', name: 'Browser work' }),
+    );
+    expect(live.assigneeSessionId).toBe('ms4v5fu2-f2a89500');
+    expect(live.assigneeName).toBe('ottis');
   });
 
   test('in_progress with NOBODY assigned makes no claim, so there is nothing to contradict', () => {

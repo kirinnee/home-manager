@@ -1,0 +1,222 @@
+.kt-task-dag-shell {
+  min-width: 0;
+}
+
+.kt-task-dag-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.kt-task-dag-help {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.kt-task-dag-zoom {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.kt-task-dag-zoom button,
+.kt-task-dag-empty button {
+  display: inline-flex;
+  min-width: 44px;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--fg);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.kt-task-dag-zoom button:hover,
+.kt-task-dag-empty button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.kt-task-dag-zoom button:focus-visible,
+.kt-task-dag-empty button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.kt-task-dag-canvas {
+  position: relative;
+  height: clamp(420px, 64vh, 700px);
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  background:
+    radial-gradient(circle at 1px 1px, color-mix(in srgb, var(--accent) 16%, transparent) 1px, transparent 0) 0 0 / 22px
+      22px,
+    var(--surface-2);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.kt-task-dag-canvas[data-panning='true'] {
+  cursor: grabbing;
+}
+
+.kt-task-dag-canvas svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+.kt-task-dag-edge {
+  fill: none;
+  stroke: color-mix(in srgb, var(--border-strong) 72%, transparent);
+  stroke-width: 1.25;
+}
+
+.kt-task-dag-arrow {
+  fill: var(--border-strong);
+}
+
+.kt-task-dag-node {
+  cursor: pointer;
+  outline: none;
+}
+
+.kt-task-dag-node[data-task-missing='true'] {
+  cursor: default;
+}
+
+.kt-task-dag-node-box {
+  fill: var(--task-node-fill);
+  stroke: var(--task-node-color);
+  stroke-width: 1.5;
+}
+
+.kt-task-dag-node[data-task-filter='context'] .kt-task-dag-node-box,
+.kt-task-dag-node[data-task-missing='true'] .kt-task-dag-node-box {
+  stroke-dasharray: 6 4;
+}
+
+.kt-task-dag-node[data-task-filter='context'] .kt-task-dag-node-box {
+  fill: var(--surface);
+}
+
+.kt-task-dag-node-hit:focus-visible .kt-task-dag-node-box {
+  stroke: var(--accent);
+  stroke-width: 3;
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--accent) 52%, transparent));
+}
+
+.kt-task-dag-node-dot {
+  fill: var(--task-node-color);
+}
+
+.kt-task-dag-node-title {
+  fill: var(--fg);
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.kt-task-dag-node-meta,
+.kt-task-dag-node-context {
+  fill: var(--task-node-color);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.kt-task-dag-node-conflicts {
+  fill: var(--warn);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.kt-task-dag-node-context {
+  paint-order: stroke;
+  stroke: var(--task-node-fill);
+  stroke-width: 3px;
+}
+
+.kt-task-dag-node-agent {
+  fill: var(--accent);
+  font-family: var(--font-body);
+  font-size: 11px;
+  font-weight: 700;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.kt-task-dag-node a:hover .kt-task-dag-node-agent,
+.kt-task-dag-node a:focus-visible .kt-task-dag-node-agent {
+  text-decoration-color: var(--accent);
+}
+
+.kt-task-dag-node-agent--plain {
+  fill: var(--muted);
+  text-decoration: none;
+}
+
+.kt-task-dag-agent-dot {
+  fill: var(--muted);
+}
+
+.kt-task-dag-agent-dot[data-health='active'] {
+  fill: var(--ok);
+}
+
+.kt-task-dag-agent-dot[data-health='waiting'] {
+  fill: var(--warn);
+}
+
+.kt-task-dag-agent-dot[data-health='dead'] {
+  fill: var(--err);
+}
+
+.kt-task-dag-empty {
+  display: flex;
+  min-height: 100%;
+  flex-wrap: wrap;
+  align-content: center;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 1rem;
+  color: var(--muted);
+  text-align: center;
+}
+
+@media (max-width: 430px) {
+  .kt-task-dag-toolbar {
+    align-items: flex-end;
+  }
+
+  .kt-task-dag-help {
+    max-width: 23ch;
+  }
+
+  .kt-task-dag-canvas {
+    height: min(64vh, 560px);
+    min-height: 400px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kt-task-dag-node-hit:focus-visible .kt-task-dag-node-box {
+    filter: none;
+  }
+}

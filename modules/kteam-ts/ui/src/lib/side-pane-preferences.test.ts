@@ -8,6 +8,7 @@ import {
   saveSidePanePreferences,
   setSidePaneWidth,
   SIDE_PANE_MAX_WIDTH,
+  SIDE_PANE_MIN_CHAT_WIDTH,
   SIDE_PANE_MIN_WIDTH,
   SIDE_PANE_PREFERENCES_KEY,
   SIDE_PANE_PREFERENCES_VERSION,
@@ -18,6 +19,11 @@ import {
 afterEach(() => resetSidePanePreferences());
 
 describe('side pane preferences', () => {
+  test('allows a wider reading surface while retaining a usable adjacent chat floor', () => {
+    expect(SIDE_PANE_MAX_WIDTH).toBe(1024);
+    expect(SIDE_PANE_MIN_CHAT_WIDTH).toBe(280);
+  });
+
   test('uses a sane default for absent, malformed, or future payloads', () => {
     expect(parseSidePanePreferences(null)).toEqual(DEFAULT_SIDE_PANE_PREFERENCES);
     expect(parseSidePanePreferences('{nope')).toEqual(DEFAULT_SIDE_PANE_PREFERENCES);

@@ -14,6 +14,8 @@
 // breakpoint-scoped, which is exactly what a `sm:` prefix says.
 
 import { describe, expect, test } from 'bun:test';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import {
   ASSISTANT_LAYOUT,
   createBlockTapPointerHandlers,
@@ -22,6 +24,7 @@ import {
   pinPreviewOf,
   SYSTEM_DIVIDER_LAYOUT,
   transcriptImagesEqual,
+  TranscriptRow,
   type BlockTapPointerEventLike,
 } from './TranscriptRow';
 import type { TranscriptBlock } from '../lib/transcript';
@@ -56,6 +59,47 @@ describe('the assistant prose wrap', () => {
     // Long unbroken tokens must be allowed to shrink the flex/grid child
     // instead of widening the transcript.
     expect(classes(ASSISTANT_LAYOUT.wrap)).toContain('min-w-0');
+  });
+
+  test('routes task and code references through the unified side-pane host', async () => {
+    const source = await Bun.file(new URL('./TranscriptRow.tsx', import.meta.url)).text();
+    expect(source).toContain("import { useSidePane } from './SidePane';");
+    expect(source).toContain('onTaskOpen={sidePane?.openTask}');
+    expect(source).toContain('onCodeReferenceOpen={sidePane?.openCodeReference}');
+    expect(source).toContain('cwd={sidePane?.cwd}');
+  });
+});
+
+describe('agent-authored transcript prose', () => {
+  test('expanded peer messages share Markdown while ordinary human bubbles stay literal', () => {
+    const base = {
+      id: 'peer-markdown',
+      kind: 'user' as const,
+      text: '**Agent result.**\n\nNext line. `/foreign/src/app.ts:4` stays literal.',
+      source: 'peer',
+    };
+    const peer = renderToStaticMarkup(
+      createElement(TranscriptRow, {
+        block: { ...base, from: { name: 'alline', replyExpected: false } },
+        live: false,
+        isLast: false,
+        sessionId: 'ms-a',
+      }),
+    );
+    const human = renderToStaticMarkup(
+      createElement(TranscriptRow, {
+        block: { ...base, id: 'human-literal', source: 'user' },
+        live: false,
+        isLast: false,
+        sessionId: 'ms-a',
+      }),
+    );
+
+    expect(peer).toContain('<strong>Agent result.</strong>');
+    expect(peer).toContain('<p>Next line.');
+    expect(peer).not.toContain('data-code-reference');
+    expect(human).toContain('**Agent result.**');
+    expect(human).not.toContain('<strong>Agent result.</strong>');
   });
 });
 

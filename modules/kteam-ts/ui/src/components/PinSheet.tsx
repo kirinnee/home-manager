@@ -50,6 +50,8 @@ import { useSessionPins, usePinsSession } from '../hooks/usePins';
 import { requestJump, type JumpOutcome } from '../lib/pin-bridge';
 import { useInputModality } from '../hooks/useInputModality';
 import { cn, fmtClock } from '../lib/utils';
+import type { CodeReference } from '../lib/code-references';
+import { Markdown } from './Markdown';
 
 const UNDO_MS = 5_000;
 /** Cap that mirrors the transcript controller's locate cap — display only. */
@@ -90,29 +92,6 @@ export function locatingLabel(olderPagesLoaded: number): string {
   return olderPagesLoaded > 0
     ? `Locating… (loaded ${olderPagesLoaded}/${LOCATE_PAGE_CAP} older ${olderPagesLoaded === 1 ? 'page' : 'pages'})`
     : 'Locating…';
-}
-
-export interface LinkSegment {
-  type: 'text' | 'url';
-  value: string;
-}
-
-const URL_IN_TEXT = /(https?:\/\/[^\s]+)/gi;
-
-/** Split note text into plain runs and bare URLs, for linkify-on-render. Pure
- *  and DOM-free so it is unit-testable. */
-export function splitLinkified(text: string): LinkSegment[] {
-  const out: LinkSegment[] = [];
-  let last = 0;
-  for (const match of text.matchAll(URL_IN_TEXT)) {
-    const start = match.index ?? 0;
-    if (start > last) out.push({ type: 'text', value: text.slice(last, start) });
-    out.push({ type: 'url', value: match[0] });
-    last = start + match[0].length;
-  }
-  if (last < text.length) out.push({ type: 'text', value: text.slice(last) });
-  if (out.length === 0) out.push({ type: 'text', value: text });
-  return out;
 }
 
 const BLOCK_KIND_LABEL: Record<MessagePin['blockKind'], string> = {
@@ -178,12 +157,18 @@ export function PinSurface({
   presentation,
   titleId,
   onRequestClose,
+  cwd,
+  onTaskOpen,
+  onCodeReferenceOpen,
 }: {
   sessionId: string;
   presentation: 'pane' | 'sheet';
   titleId?: string;
   /** Called when a pin action wants the surface gone (a successful jump). */
   onRequestClose: () => void;
+  cwd?: string;
+  onTaskOpen?: (id: string, opener?: HTMLElement | null) => void;
+  onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
 }) {
   const pins = useSessionPins(sessionId);
   const status = usePinsSession(sessionId);
@@ -425,6 +410,10 @@ export function PinSurface({
                     }}
                     onJump={pin.source ? () => void jumpTo(pin.id, pin.source!.blockId) : undefined}
                     onDelete={() => deleteWithUndo(pin)}
+                    sessionId={sessionId}
+                    cwd={cwd}
+                    onTaskOpen={onTaskOpen}
+                    onCodeReferenceOpen={onCodeReferenceOpen}
                   />
                 ) : (
                   <MessageRow
@@ -433,6 +422,10 @@ export function PinSurface({
                     jump={jumpState && jumpState.id === pin.id ? jumpState : null}
                     onJump={() => void jumpTo(pin.id, pin.blockId)}
                     onDelete={() => deleteWithUndo(pin)}
+                    sessionId={sessionId}
+                    cwd={cwd}
+                    onTaskOpen={onTaskOpen}
+                    onCodeReferenceOpen={onCodeReferenceOpen}
                   />
                 ),
               )}
@@ -457,12 +450,18 @@ export function PinSheet({
   open,
   onClose,
   labelledBy,
+  cwd,
+  onTaskOpen,
+  onCodeReferenceOpen,
 }: {
   id: string;
   sessionId: string;
   open: boolean;
   onClose: () => void;
   labelledBy?: string;
+  cwd?: string;
+  onTaskOpen?: (id: string, opener?: HTMLElement | null) => void;
+  onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
 }) {
   return (
     <BottomSheet
@@ -474,7 +473,16 @@ export function PinSheet({
       closeLabel="Close pins"
       panelClassName="kt-details"
     >
-      {open && <PinSurface sessionId={sessionId} presentation="sheet" onRequestClose={onClose} />}
+      {open && (
+        <PinSurface
+          sessionId={sessionId}
+          cwd={cwd}
+          presentation="sheet"
+          onRequestClose={onClose}
+          onTaskOpen={onTaskOpen}
+          onCodeReferenceOpen={onCodeReferenceOpen}
+        />
+      )}
     </BottomSheet>
   );
 }
@@ -572,6 +580,10 @@ function NoteRow({
   onCancelEdit,
   onJump,
   onDelete,
+  sessionId,
+  cwd,
+  onTaskOpen,
+  onCodeReferenceOpen,
 }: {
   note: NotePin;
   editing: boolean;
@@ -586,6 +598,10 @@ function NoteRow({
    *  block — jumps back to that message. Absent for a typed note. */
   onJump?: () => void;
   onDelete: () => void;
+  sessionId: string;
+  cwd?: string;
+  onTaskOpen?: (id: string, opener?: HTMLElement | null) => void;
+  onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
 }) {
   if (editing) {
     return (
@@ -626,30 +642,18 @@ function NoteRow({
     );
   }
 
-  const pr = parseGithubPr(note.text);
   const locating = jump?.phase === 'locating';
   return (
     <RowShell>
       <div className="min-w-0 flex-1">
         <div className="break-words text-cell text-fg-soft">
-          {pr ? (
-            <a
-              href={pr.url}
-              target="_blank"
-              rel="noreferrer"
-              title={pr.url}
-              aria-label={`${pr.org}/${pr.repo} pull request ${pr.number}`}
-              className="inline-flex min-w-0 max-w-full items-center gap-xs rounded-badge border border-accent-border bg-surface-2 px-badge-x py-0.5 text-cell font-medium text-accent hover:underline"
-            >
-              <GitPullRequest size={13} aria-hidden="true" className="shrink-0" />
-              <span className="min-w-0 truncate">
-                {pr.repo}#{pr.number}
-              </span>
-              <ExternalLink size={11} aria-hidden="true" className="shrink-0" />
-            </a>
-          ) : (
-            <NoteText text={note.text} />
-          )}
+          <PinNoteContent
+            text={note.text}
+            sessionId={sessionId}
+            cwd={cwd}
+            onTaskOpen={onTaskOpen}
+            onCodeReferenceOpen={onCodeReferenceOpen}
+          />
         </div>
         {/* Provenance, only when this note was pinned FROM A SELECTION and still
             knows its source block: a quiet "from a message" tag that jumps back.
@@ -681,25 +685,76 @@ function NoteRow({
   );
 }
 
-function NoteText({ text }: { text: string }) {
+export function PinProse({
+  text,
+  sessionId,
+  cwd,
+  onTaskOpen,
+  onCodeReferenceOpen,
+  className,
+}: {
+  text: string;
+  sessionId: string;
+  cwd?: string;
+  onTaskOpen?: (id: string, opener?: HTMLElement | null) => void;
+  onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
+  className?: string;
+}) {
   return (
-    <span className="whitespace-pre-wrap break-words">
-      {splitLinkified(text).map((seg, i) =>
-        seg.type === 'url' ? (
-          <a
-            key={i}
-            href={seg.value}
-            target="_blank"
-            rel="noreferrer"
-            className="break-all text-accent hover:underline"
-          >
-            {seg.value}
-          </a>
-        ) : (
-          <span key={i}>{seg.value}</span>
-        ),
-      )}
-    </span>
+    <Markdown
+      text={text}
+      className={className}
+      sessionId={sessionId}
+      cwd={cwd}
+      onTaskOpen={onTaskOpen}
+      onCodeReferenceOpen={onCodeReferenceOpen}
+    />
+  );
+}
+
+/** Preserve the compact GitHub PR chip while all other displayed pin prose
+ *  goes through the shared Markdown/reference renderer. Exported so the
+ *  DOM-free suite can prove both branches without mounting the stateful sheet. */
+export function PinNoteContent({
+  text,
+  sessionId,
+  cwd,
+  onTaskOpen,
+  onCodeReferenceOpen,
+}: {
+  text: string;
+  sessionId: string;
+  cwd?: string;
+  onTaskOpen?: (id: string, opener?: HTMLElement | null) => void;
+  onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
+}) {
+  const pr = parseGithubPr(text);
+  if (!pr)
+    return (
+      <PinProse
+        text={text}
+        sessionId={sessionId}
+        cwd={cwd}
+        onTaskOpen={onTaskOpen}
+        onCodeReferenceOpen={onCodeReferenceOpen}
+        className="whitespace-pre-wrap break-words text-cell text-fg-soft"
+      />
+    );
+  return (
+    <a
+      href={pr.url}
+      target="_blank"
+      rel="noreferrer"
+      title={pr.url}
+      aria-label={`${pr.org}/${pr.repo} pull request ${pr.number}`}
+      className="inline-flex min-w-0 max-w-full items-center gap-xs rounded-badge border border-accent-border bg-surface-2 px-badge-x py-0.5 text-cell font-medium text-accent hover:underline"
+    >
+      <GitPullRequest size={13} aria-hidden="true" className="shrink-0" />
+      <span className="min-w-0 truncate">
+        {pr.repo}#{pr.number}
+      </span>
+      <ExternalLink size={11} aria-hidden="true" className="shrink-0" />
+    </a>
   );
 }
 
@@ -708,11 +763,19 @@ function MessageRow({
   jump,
   onJump,
   onDelete,
+  sessionId,
+  cwd,
+  onTaskOpen,
+  onCodeReferenceOpen,
 }: {
   pin: MessagePin;
   jump: JumpSlice | null;
   onJump: () => void;
   onDelete: () => void;
+  sessionId: string;
+  cwd?: string;
+  onTaskOpen?: (id: string, opener?: HTMLElement | null) => void;
+  onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
 }) {
   const locating = jump?.phase === 'locating';
   const clock = pin.ts ? fmtClock(pin.ts) : '';
@@ -723,7 +786,14 @@ function MessageRow({
           <span className="kt-label">{BLOCK_KIND_LABEL[pin.blockKind]}</span>
           {clock && <span className="mono tabular-nums">{clock}</span>}
         </div>
-        <p className="m-0 mt-0.5 line-clamp-3 break-words text-cell text-fg-soft">{pin.preview || '(empty message)'}</p>
+        <PinProse
+          text={pin.preview || '(empty message)'}
+          sessionId={sessionId}
+          cwd={cwd}
+          onTaskOpen={onTaskOpen}
+          onCodeReferenceOpen={onCodeReferenceOpen}
+          className="m-0 mt-0.5 line-clamp-3 break-words text-cell text-fg-soft"
+        />
         <ProvenanceTag pin={pin} />
         <JumpStatus jump={jump} />
       </div>
