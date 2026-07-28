@@ -30,8 +30,8 @@ import {
 } from 'react';
 import { fieldScore } from '../lib/fuzzy';
 
-export type ComposerTrigger = '/' | '@';
-export type ComposerAutocompleteKind = 'skill' | 'file' | 'directory';
+export type ComposerTrigger = '/' | '@' | '#' | '?';
+export type ComposerAutocompleteKind = 'command' | 'skill' | 'file' | 'directory' | 'task' | 'attention';
 
 export interface ComposerSelection {
   start: number;
@@ -57,6 +57,10 @@ export interface ComposerAutocompleteCandidate {
   detail?: string;
   /** Extra search terms that do not need to be rendered. */
   keywords?: string;
+  /** Visual section inside a provider's merged result list. */
+  group?: string;
+  /** Compact state/action word shown at the row's trailing edge. */
+  badge?: string;
   /** Complete replacement for the active token, including its sigil. */
   replacement: string;
   /** Final selections close with a separating space; directories stay open. */
@@ -85,6 +89,15 @@ export interface ComposerAutocompleteProvider {
   id: string;
   trigger: ComposerTrigger;
   label: string;
+  /** Identity of an already-live backing snapshot. Store-backed providers use
+   * this to refresh an open list when the store changes, without recreating
+   * network-backed providers and throwing away their caches. */
+  readonly snapshotKey?: unknown;
+  /** Immediately available subset while an asynchronous source warms. This is
+   * used by the merged slash provider so native commands never wait on (or
+   * disappear with) skills discovery. The full `candidates` result replaces it
+   * when ready. */
+  initialCandidates?(context: ComposerProviderContext): ComposerProviderResult | undefined;
   /** Providers can suppress a popover for a syntactically valid token. */
   shouldOpen?(match: ComposerTriggerMatch): boolean;
   /** Drop whatever this provider has cached. The composer calls it on send, so
@@ -195,16 +208,62 @@ function atTrigger(value: string, caret: number): ComposerTriggerMatch | null {
   return { trigger: '@', query, start, end: tokenEnd(value, caret), caret };
 }
 
+/** Reference triggers are intentionally more conservative than `/` and `@`.
+ *
+ * `#` and `?` are ordinary prose punctuation, so a bare sigil never opens the
+ * picker. The sigil must begin a token (start of input, whitespace, or opening
+ * punctuation) AND the reader must have typed the canonical uppercase family
+ * prefix: B/F/I/C for tasks, A for attention. The rest may only be digits.
+ * This excludes sentence-ending `?`, markdown `# Heading`/`## Heading`, issue
+ * refs such as `#123`, lowercase colours such as `#fff`, and `foo#L12`. Missing
+ * a lowercase or prefix-only shorthand is preferable to a popover appearing
+ * while somebody writes normal prose. */
+const WORD_BEFORE_REFERENCE = /[\p{L}\p{N}_\-.\\/#?@]/u;
+const REFERENCE_SUFFIX = /[A-Za-z0-9]/u;
+
+function referenceTokenEnd(value: string, caret: number): number {
+  let end = caret;
+  while (end < value.length && REFERENCE_SUFFIX.test(value[end]!)) end++;
+  return end;
+}
+
+function referenceTrigger(
+  value: string,
+  caret: number,
+  trigger: '#' | '?',
+  queryPattern: RegExp,
+): ComposerTriggerMatch | null {
+  const start = value.slice(0, caret).lastIndexOf(trigger);
+  if (start < 0) return null;
+  if (start > 0 && WORD_BEFORE_REFERENCE.test(value[start - 1]!)) return null;
+  const query = value.slice(start + 1, caret);
+  if (!queryPattern.test(query)) return null;
+  return { trigger, query, start, end: referenceTokenEnd(value, caret), caret };
+}
+
+function taskTrigger(value: string, caret: number): ComposerTriggerMatch | null {
+  return referenceTrigger(value, caret, '#', /^[BFIC][0-9]*$/u);
+}
+
+function attentionTrigger(value: string, caret: number): ComposerTriggerMatch | null {
+  return referenceTrigger(value, caret, '?', /^A[0-9]*$/u);
+}
+
 /** Detect the trigger at a collapsed textarea caret.
  *
- * `/` is limited to the first non-whitespace byte, while `@` is valid anywhere.
- * A non-collapsed textarea selection never opens a list. */
+ * `/` is limited to the first non-whitespace byte, `@` is valid at a token
+ * boundary, and `#`/`?` use the conservative reference rule above. A
+ * non-collapsed textarea selection never opens a list. */
 export function detectComposerTrigger(value: string, selection: ComposerSelection): ComposerTriggerMatch | null {
   const safe = clampSelection(value, selection);
   if (safe.start !== safe.end) return null;
   const caret = safe.end;
   const mention = atTrigger(value, caret);
   if (mention) return mention;
+  const task = taskTrigger(value, caret);
+  if (task) return task;
+  const attention = attentionTrigger(value, caret);
+  if (attention) return attention;
   return slashTrigger(value, caret);
 }
 
@@ -352,34 +411,50 @@ export function useComposerAutocomplete({
       return;
     }
     const abort = new AbortController();
-    setLoad({ key: requestKey, status: 'loading', candidates: [] });
-    setActiveIndex(-1);
-    Promise.resolve(provider.candidates({ query: match.query, match, signal: abort.signal })).then(
-      result => {
-        if (abort.signal.aborted) return;
-        const candidates = rankComposerCandidates(result.candidates, result.filterQuery ?? match.query);
-        setLoad({
-          key: requestKey,
-          status: 'ready',
-          candidates,
-          contextLabel: result.contextLabel,
-          notice: result.notice,
-        });
-        setActiveIndex(firstEnabled(candidates));
-      },
-      error => {
-        if (abort.signal.aborted || (error as { name?: string })?.name === 'AbortError') return;
-        setLoad({
-          key: requestKey,
-          status: 'error',
-          candidates: [],
-          error: error instanceof Error ? error.message : String(error),
-        });
+    const ready = (result: ComposerProviderResult) => {
+      if (abort.signal.aborted) return;
+      const candidates = rankComposerCandidates(result.candidates, result.filterQuery ?? match.query);
+      setLoad({
+        key: requestKey,
+        status: 'ready',
+        candidates,
+        contextLabel: result.contextLabel,
+        notice: result.notice,
+      });
+      setActiveIndex(firstEnabled(candidates));
+    };
+    const failed = (error: unknown) => {
+      if (abort.signal.aborted || (error as { name?: string })?.name === 'AbortError') return;
+      setLoad({
+        key: requestKey,
+        status: 'error',
+        candidates: [],
+        error: error instanceof Error ? error.message : String(error),
+      });
+      setActiveIndex(-1);
+    };
+    const context: ComposerProviderContext = { query: match.query, match, signal: abort.signal };
+    try {
+      const initial = provider.initialCandidates?.(context);
+      if (initial) ready(initial);
+      else {
+        setLoad({ key: requestKey, status: 'loading', candidates: [] });
         setActiveIndex(-1);
-      },
-    );
+      }
+      const result = provider.candidates(context);
+      if (result && typeof (result as PromiseLike<ComposerProviderResult>).then === 'function') {
+        void Promise.resolve(result).then(ready, failed);
+      } else {
+        // Store-backed #/? snapshots are already in memory. Settle in this
+        // effect turn instead of manufacturing a promise/microtask and a
+        // visible loading frame for data the browser already has.
+        ready(result as ComposerProviderResult);
+      }
+    } catch (error) {
+      failed(error);
+    }
     return () => abort.abort();
-  }, [match?.query, match?.start, open, provider, requestKey]);
+  }, [match?.query, match?.start, open, provider, provider?.snapshotKey, requestKey]);
 
   // Candidate insertion updates a controlled value. Restore the caret only
   // after React has committed that exact value; never focus the textarea.

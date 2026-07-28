@@ -6,6 +6,7 @@ import {
   ComposerAutocompletePopover,
   autocompleteEmptyCopy,
   createRowPointerHandlers,
+  groupAutocompleteCandidates,
   preventAutocompletePointerFocus,
 } from './ComposerAutocomplete';
 import type {
@@ -64,7 +65,7 @@ describe('ComposerAutocompletePopover', () => {
   test('opens above the composer as an active-descendant listbox', () => {
     const html = renderToStaticMarkup(<ComposerAutocompletePopover controller={controller()} />);
     expect(html).toContain('bottom-[calc(100%+var(--gap-xs))]');
-    expect(html).toContain('data-composer-autocomplete="skills"');
+    expect(html).toContain('data-composer-autocomplete="commands-skills"');
     expect(html).toContain('role="listbox"');
     expect(html).toContain('id="composer-list"');
     expect(html).toContain('role="option"');
@@ -135,6 +136,91 @@ describe('ComposerAutocompletePopover', () => {
     expect(refused).toContain('aria-disabled="true"');
     expect(refused).toContain('blocked by the repository secrets policy');
     expect(refused).toContain('2,000 entries shown');
+  });
+
+  test('merged slash results render distinct Commands and Skills groups', () => {
+    const command: ComposerAutocompleteCandidate = {
+      id: 'command:compact',
+      kind: 'command',
+      label: 'compact',
+      detail: 'Summarise the conversation so far and free up context',
+      group: 'Commands',
+      replacement: '/compact',
+    };
+    const groupedSkill = { ...skill, group: 'Skills' };
+    const html = renderToStaticMarkup(
+      <ComposerAutocompletePopover controller={controller({ candidates: [command, groupedSkill] })} />,
+    );
+
+    expect(html).toContain('role="group"');
+    expect(html).toContain('>Commands</div>');
+    expect(html).toContain('>Skills</div>');
+    expect(html.indexOf('>Commands</div>')).toBeLessThan(html.indexOf('>Skills</div>'));
+    expect(html).toContain('data-kind="command"');
+    expect(html).toContain('>run</span>');
+    expect(groupAutocompleteCandidates([command, groupedSkill]).map(group => group.label)).toEqual([
+      'Commands',
+      'Skills',
+    ]);
+  });
+
+  test('group headings never reorder fuzzy-ranked engine indices', () => {
+    const rows: ComposerAutocompleteCandidate[] = [
+      { id: 'command:compact', kind: 'command', label: 'compact', group: 'Commands', replacement: '/compact' },
+      { id: 'skill:summary', kind: 'skill', label: 'summary', group: 'Skills', replacement: '/summary' },
+      { id: 'command:clear', kind: 'command', label: 'clear', group: 'Commands', replacement: '/clear' },
+    ];
+
+    const grouped = groupAutocompleteCandidates(rows);
+    expect(grouped.map(group => group.label)).toEqual(['Commands', 'Skills', 'Commands']);
+    expect(grouped.flatMap(group => group.rows.map(row => row.index))).toEqual([0, 1, 2]);
+  });
+
+  test('task and attention rows expose identity details and task status', () => {
+    const taskHtml = renderToStaticMarkup(
+      <ComposerAutocompletePopover
+        controller={controller({
+          provider: { ...provider, trigger: '#', label: 'Tasks' },
+          match: { trigger: '#', query: 'F', start: 0, end: 2, caret: 2 },
+          candidates: [
+            {
+              id: 'task:F38',
+              kind: 'task',
+              label: '#F38',
+              detail: 'Composer autocomplete',
+              badge: 'In progress',
+              replacement: '#F38',
+            },
+          ],
+        })}
+      />,
+    );
+    expect(taskHtml).toContain('data-composer-autocomplete="tasks"');
+    expect(taskHtml).toContain('#F38');
+    expect(taskHtml).toContain('Composer autocomplete');
+    expect(taskHtml).toContain('>In progress</span>');
+    expect(taskHtml).not.toContain('aria-hidden="true">In progress');
+
+    const attentionHtml = renderToStaticMarkup(
+      <ComposerAutocompletePopover
+        controller={controller({
+          provider: { ...provider, trigger: '?', label: 'Attention' },
+          match: { trigger: '?', query: 'A', start: 0, end: 2, caret: 2 },
+          candidates: [
+            {
+              id: 'attention:A3',
+              kind: 'attention',
+              label: '?A3',
+              detail: 'Choose the rollout window',
+              replacement: '?A3',
+            },
+          ],
+        })}
+      />,
+    );
+    expect(attentionHtml).toContain('data-composer-autocomplete="attention"');
+    expect(attentionHtml).toContain('?A3');
+    expect(attentionHtml).toContain('Choose the rollout window');
   });
 
   test('pointer-down prevents focus transfer', () => {

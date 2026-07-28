@@ -7,10 +7,31 @@ import {
   composerCanSubmit,
   composerEnterDecision,
   composerStatusCopy,
+  composerTasksFromSnapshot,
   restoreComposerSelection,
   selectComposerKeyboardSubmit,
   shouldRefocusComposer,
 } from './Composer';
+
+describe('Composer reference snapshots', () => {
+  test('parses session task events into the identifying fields autocomplete consumes', () => {
+    const tasks = composerTasksFromSnapshot({
+      sessionId: 'session-one',
+      tasks: [
+        { id: 'F38', title: 'Composer autocomplete', status: 'in_progress', sessionId: 'session-one' },
+        { id: '', title: 'Malformed and skipped', status: 'todo', sessionId: 'session-one' },
+      ],
+    });
+
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]).toMatchObject({
+      id: 'F38',
+      title: 'Composer autocomplete',
+      status: 'in_progress',
+      sessionId: 'session-one',
+    });
+  });
+});
 
 function renderComposer(
   props: Partial<{

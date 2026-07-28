@@ -44,9 +44,14 @@ import { CornerDownLeft, Send, Clock, ZapOff, Paperclip } from 'lucide-react';
 import { Button } from './Primitives';
 import { cn, type Tone } from '../lib/utils';
 import { useKeyboardOpen } from '../hooks/useAppViewport';
+import { useAttentionItems, useAttentionSession } from '../hooks/useAttention';
 import { useDebouncedEffect } from '../hooks/useDebounce';
+import { api } from '../lib/api';
+import { attentionStore, sessionAttention } from '../lib/attention';
 import { clearDraft, loadDraft, saveDraft } from '../lib/drafts';
 import { readInputModality, useInputModality } from '../hooks/useInputModality';
+import { useSession, useSessionEvents } from '../lib/store';
+import { parseTaskListResponse, type TaskSummary } from '../lib/tasks';
 import { useDictationBundle } from './DictationControl';
 import { useDictationShortcut } from '../lib/stt/use-dictation-shortcut';
 import { ComposerAutocompletePopover } from './ComposerAutocomplete';
@@ -138,6 +143,81 @@ const COMPACT_MAX_TEXTAREA_PX = 160;
  *  obvious form and the wrong one: it caps a two-line draft as hard as a ten-line
  *  one. */
 const COMPACT_KEYBOARD_MAX_TEXTAREA_PX = 140;
+
+const EMPTY_COMPOSER_TASKS: readonly TaskSummary[] = [];
+
+/** Parse the same whole-session snapshot used by the Task surface and live
+ * `tasks.updated` events. Kept pure/exported so the composer integration can be
+ * covered without mounting a networked hook. */
+export function composerTasksFromSnapshot(value: unknown): TaskSummary[] {
+  return parseTaskListResponse(value).tasks;
+}
+
+/** Warm one session task snapshot when the composer mounts, then converge from
+ * the FleetStore's existing session event stream. The provider itself never
+ * fetches: by the time a reader types `#F`, it reads this in-memory snapshot.
+ * A live event wins over an older in-flight initial response. */
+function useComposerTasks(sessionId: string | undefined): {
+  tasks: readonly TaskSummary[];
+  pending: RefObject<Promise<readonly TaskSummary[]> | null>;
+  latest: RefObject<{ sessionId: string; tasks: readonly TaskSummary[] } | null>;
+} {
+  const [snapshot, setSnapshot] = useState<{ sessionId: string; tasks: readonly TaskSummary[] } | null>(null);
+  const generation = useRef(0);
+  const pending = useRef<Promise<readonly TaskSummary[]> | null>(null);
+  const pendingSessionId = useRef<string | null>(null);
+  const latest = useRef<{ sessionId: string; tasks: readonly TaskSummary[] } | null>(null);
+
+  useSessionEvents(sessionId ?? '', event => {
+    if (!sessionId || event.sessionId !== sessionId || event.type !== 'tasks.updated') return;
+    generation.current += 1;
+    const tasks = composerTasksFromSnapshot(event.data);
+    latest.current = { sessionId, tasks };
+    setSnapshot({ sessionId, tasks });
+  });
+
+  useEffect(() => {
+    const current = ++generation.current;
+    if (!sessionId) {
+      latest.current = null;
+      setSnapshot(null);
+      return;
+    }
+    setSnapshot(previous => (previous?.sessionId === sessionId ? previous : { sessionId, tasks: [] }));
+    let active = true;
+    if (!pending.current || pendingSessionId.current !== sessionId) {
+      pendingSessionId.current = sessionId;
+      pending.current = api
+        .listSessionTasks(sessionId)
+        .then(composerTasksFromSnapshot)
+        .catch(() => {
+          // Version skew or a transient read failure leaves the provider empty;
+          // the live stream can still populate it after the next task mutation.
+          return EMPTY_COMPOSER_TASKS;
+        });
+    }
+    const request = pending.current;
+    void request.then(tasks => {
+      if (!active || generation.current !== current) return;
+      latest.current = { sessionId, tasks };
+      setSnapshot({ sessionId, tasks });
+    });
+    void request.finally(() => {
+      if (pending.current !== request) return;
+      pending.current = null;
+      pendingSessionId.current = null;
+    });
+    return () => {
+      active = false;
+    };
+  }, [sessionId]);
+
+  return {
+    tasks: snapshot && snapshot.sessionId === sessionId ? snapshot.tasks : EMPTY_COMPOSER_TASKS,
+    pending,
+    latest,
+  };
+}
 const MIN_TEXTAREA_PX = 38;
 
 const TONE_TEXT: Record<Tone, string> = {
@@ -464,7 +544,18 @@ export function Composer({
       ? COMPACT_KEYBOARD_MAX_TEXTAREA_PX
       : COMPACT_MAX_TEXTAREA_PX;
 
-  // HARD REQUIREMENT: memoised on [sessionId], never built inline.
+  const taskResource = useComposerTasks(sessionId);
+  const autocompleteSession = useSession(sessionId ?? '');
+  // Attention already owns a shared SWR-style client cache and whole-snapshot
+  // live convergence. Hydrate it once with the composer instead of teaching
+  // the autocomplete provider a second request/cache path.
+  const attentionStatus = useAttentionSession(sessionId);
+  useAttentionItems(sessionId);
+  const attentionStatusRef = useRef(attentionStatus);
+  attentionStatusRef.current = attentionStatus;
+
+  // HARD REQUIREMENT: memoised on session identity + its stable harness fact,
+  // never built inline.
   //
   // The load effect in useComposerAutocomplete has `provider` in its dependency
   // array. Passing a freshly-built array would give it new provider IDENTITIES
@@ -476,8 +567,22 @@ export function Composer({
   // No sessionId (SSR, tests, a mount site that has not opted in) means no
   // providers, and the engine is inert rather than broken.
   const autocompleteProviders = useMemo(
-    () => (sessionId ? createComposerAutocompleteProviders({ sessionId }) : []),
-    [sessionId],
+    () =>
+      sessionId
+        ? createComposerAutocompleteProviders({
+            sessionId,
+            harness: autocompleteSession?.config.harness,
+            getTasks: () =>
+              taskResource.latest.current?.sessionId === sessionId
+                ? taskResource.latest.current.tasks
+                : EMPTY_COMPOSER_TASKS,
+            getAttentionItems: () => sessionAttention(attentionStore.getSnapshot(), sessionId),
+            waitForTasks: () => taskResource.pending.current?.then(() => undefined),
+            waitForAttentionItems: () =>
+              attentionStatusRef.current === 'ready' ? undefined : attentionStore.hydrate(sessionId),
+          })
+        : [],
+    [autocompleteSession?.config.harness, sessionId],
   );
   const autocomplete = useComposerAutocomplete({
     value: draft,

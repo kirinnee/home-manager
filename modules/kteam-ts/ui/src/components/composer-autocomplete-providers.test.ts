@@ -1,12 +1,21 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
+  builtinCommandsForHarness,
+  createAttentionProvider,
+  createComposerAutocompleteProviders,
   createFilesProvider,
   createSkillsProvider,
+  createTasksProvider,
   loadSkillsCatalog,
   splitFileQuery,
+  type ComposerTaskSummary,
   type ComposerSkillsResponse,
 } from './composer-autocomplete-providers';
-import type { ComposerTriggerMatch } from './composer-autocomplete-engine';
+import {
+  rankComposerCandidates,
+  type ComposerTrigger,
+  type ComposerTriggerMatch,
+} from './composer-autocomplete-engine';
 
 const realFetch = globalThis.fetch;
 let requests: string[];
@@ -26,11 +35,11 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
-function match(trigger: '/' | '@', query: string): ComposerTriggerMatch {
+function match(trigger: ComposerTrigger, query: string): ComposerTriggerMatch {
   return { trigger, query, start: 0, end: query.length + 1, caret: query.length + 1 };
 }
 
-function context(trigger: '/' | '@', query: string, signal = new AbortController().signal) {
+function context(trigger: ComposerTrigger, query: string, signal = new AbortController().signal) {
   return { query, match: match(trigger, query), signal };
 }
 
@@ -67,7 +76,7 @@ describe('/ skills provider', () => {
     const result = await createSkillsProvider('session / one').candidates(context('/', 'sum'));
     expect(requests).toEqual(['/v1/sessions/session%20%2F%20one/skills']);
     expect(result.contextLabel).toBe('Codex · inserts $name');
-    expect(result.candidates).toEqual([
+    expect(result.candidates.find(candidate => candidate.kind === 'skill')).toEqual(
       expect.objectContaining({
         kind: 'skill',
         label: 'summary',
@@ -77,7 +86,7 @@ describe('/ skills provider', () => {
         replacement: '$summary',
         append: 'space',
       }),
-    ]);
+    );
   });
 
   test('inserts what CLAUDE understands from the very same catalog', async () => {
@@ -88,13 +97,13 @@ describe('/ skills provider', () => {
       } satisfies ComposerSkillsResponse);
     const result = await createSkillsProvider('one').candidates(context('/', ''));
     expect(result.contextLabel).toBe('Claude · inserts /name');
-    expect(result.candidates[0]).toMatchObject({ replacement: '/summary' });
+    expect(result.candidates.find(candidate => candidate.kind === 'skill')).toMatchObject({ replacement: '/summary' });
   });
 
   test('an unrecognised harness falls back to the claude form rather than inserting undefined', async () => {
     responder = () => Response.json({ harness: 'zebra', skills: [{ name: 'floop', description: 'x' }] });
     const result = await createSkillsProvider('one').candidates(context('/', ''));
-    expect(result.candidates[0]).toMatchObject({ replacement: '/floop' });
+    expect(result.candidates.find(candidate => candidate.kind === 'skill')).toMatchObject({ replacement: '/floop' });
   });
 
   test('caches the catalog per mounted session provider', async () => {
@@ -115,12 +124,148 @@ describe('/ skills provider', () => {
         ],
       } satisfies ComposerSkillsResponse);
     const result = await createSkillsProvider('one').candidates(context('/', ''));
-    expect(result.candidates.map(candidate => candidate.label)).toEqual(['apple', 'Zebra']);
+    expect(result.candidates.filter(candidate => candidate.kind === 'skill').map(candidate => candidate.label)).toEqual(
+      ['apple', 'Zebra'],
+    );
   });
 
-  test('turns version skew into a readable provider error', async () => {
+  test('merges first-class Commands above Skills and keeps harness support explicit', async () => {
+    responder = () =>
+      Response.json({
+        harness: 'codex',
+        skills: [{ name: 'compact', description: 'A skill with the same quality match' }],
+      } satisfies ComposerSkillsResponse);
+
+    const result = await createSkillsProvider('one').candidates(context('/', 'compact'));
+    expect(result.candidates.slice(0, 2)).toEqual([
+      expect.objectContaining({
+        kind: 'command',
+        label: 'compact',
+        detail: 'Summarise the conversation so far and free up context',
+        group: 'Commands',
+        replacement: '/compact',
+      }),
+      expect.objectContaining({ kind: 'command', label: 'clear', group: 'Commands', replacement: '/clear' }),
+    ]);
+    expect(result.candidates.at(-1)).toMatchObject({ kind: 'skill', label: 'compact', group: 'Skills' });
+    expect(rankComposerCandidates(result.candidates, 'compact').map(candidate => candidate.id)).toEqual([
+      'command:compact',
+      'skill:compact',
+    ]);
+    expect(builtinCommandsForHarness('claude').map(command => command.name)).toEqual(['compact', 'clear']);
+    expect(builtinCommandsForHarness('codex').map(command => command.name)).toEqual(['compact', 'clear']);
+  });
+
+  test('shows harness-valid commands synchronously while the skills catalog warms', async () => {
+    let release!: (response: Response) => void;
+    responder = () =>
+      new Promise<Response>(resolve => {
+        release = resolve;
+      });
+    const provider = createSkillsProvider('slow', 'codex');
+
+    expect(provider.initialCandidates?.(context('/', ''))).toMatchObject({
+      candidates: [
+        expect.objectContaining({ id: 'command:compact', replacement: '/compact' }),
+        expect.objectContaining({ id: 'command:clear', replacement: '/clear' }),
+      ],
+      notice: 'Loading installed skills…',
+    });
+    expect(requests).toHaveLength(0);
+
+    const pending = provider.candidates(context('/', ''));
+    expect(requests).toEqual(['/v1/sessions/slow/skills']);
+    release(Response.json({ harness: 'codex', skills: [{ name: 'summary', description: 'Recap' }] }));
+    await expect(pending).resolves.toMatchObject({
+      candidates: [
+        expect.objectContaining({ id: 'command:compact' }),
+        expect.objectContaining({ id: 'command:clear' }),
+        expect.objectContaining({ id: 'skill:summary', replacement: '$summary' }),
+      ],
+    });
+  });
+
+  test('keeps built-ins available when skills discovery fails', async () => {
     responder = () => Response.json({ error: 'no route GET /skills', code: 'unknown_route' }, { status: 404 });
-    await expect(createSkillsProvider('old').candidates(context('/', ''))).rejects.toThrow('no route GET /skills');
+    const result = await createSkillsProvider('old', 'claude').candidates(context('/', ''));
+    expect(result.candidates.map(candidate => candidate.id)).toEqual(['command:compact', 'command:clear']);
+    expect(result.notice).toContain('no route GET /skills');
+    expect(result.notice).toContain('Built-in commands still work');
+  });
+});
+
+describe('store-backed reference providers', () => {
+  test('# rows show canonical references, titles, and live statuses without fetching', async () => {
+    let tasks: ComposerTaskSummary[] = [{ id: 'F38', title: 'Composer autocomplete', status: 'in_progress' }];
+    const provider = createTasksProvider(() => tasks);
+
+    const first = await provider.candidates(context('#', 'F'));
+    expect(first.candidates).toEqual([
+      expect.objectContaining({
+        kind: 'task',
+        label: '#F38',
+        detail: 'Composer autocomplete',
+        badge: 'In progress',
+        replacement: '#F38',
+      }),
+    ]);
+    expect(requests).toHaveLength(0);
+
+    tasks = [{ id: 'B7', title: 'New live snapshot', status: 'blocked' as const }];
+    const updated = await provider.candidates(context('#', 'B'));
+    expect(updated.candidates[0]).toMatchObject({ label: '#B7', badge: 'Blocked' });
+  });
+
+  test('? rows contain unresolved canonical references and identifying subjects', async () => {
+    const provider = createAttentionProvider(() => [
+      { id: 'A3', subject: 'Choose the rollout window', source: 'question' },
+      { id: 'A8', subject: 'Approve production access', source: 'permission' },
+    ]);
+    const result = await provider.candidates(context('?', 'A'));
+    expect(result.candidates).toEqual([
+      expect.objectContaining({
+        kind: 'attention',
+        label: '?A3',
+        detail: 'Choose the rollout window',
+        badge: 'question',
+        replacement: '?A3',
+      }),
+      expect.objectContaining({ label: '?A8', replacement: '?A8' }),
+    ]);
+    expect(requests).toHaveLength(0);
+  });
+
+  test('reuses an in-flight warmup on the first keystroke, then reads the live snapshot', async () => {
+    let release!: () => void;
+    const warmup = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    let tasks: Array<{ id: string; title: string; status: 'todo' }> = [];
+    const provider = createTasksProvider(
+      () => tasks,
+      'one',
+      () => warmup,
+    );
+    const before = provider.snapshotKey;
+
+    const result = provider.candidates(context('#', 'F'));
+    tasks = [{ id: 'F12', title: 'Loaded by the existing warmup', status: 'todo' }];
+    release();
+
+    await expect(result).resolves.toEqual({
+      candidates: [expect.objectContaining({ label: '#F12', detail: 'Loaded by the existing warmup' })],
+    });
+    expect(provider.snapshotKey).not.toBe(before);
+    expect(requests).toHaveLength(0);
+  });
+
+  test('the composer factory installs all four cached trigger providers', () => {
+    expect(createComposerAutocompleteProviders({ sessionId: 'one' }).map(provider => provider.trigger)).toEqual([
+      '/',
+      '@',
+      '#',
+      '?',
+    ]);
   });
 });
 

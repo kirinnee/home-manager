@@ -24,7 +24,17 @@
 //     an accept can never fire twice.
 
 import { useLayoutEffect, useMemo, useRef } from 'react';
-import { BookOpen, File, Folder, LoaderCircle, SearchX, ShieldAlert } from 'lucide-react';
+import {
+  BookOpen,
+  CircleHelp,
+  File,
+  Folder,
+  ListTodo,
+  LoaderCircle,
+  SearchX,
+  ShieldAlert,
+  Terminal,
+} from 'lucide-react';
 import type {
   ComposerAutocompleteCandidate,
   ComposerAutocompleteController,
@@ -81,9 +91,35 @@ export function createRowPointerHandlers(index: number, onAccept: (index: number
 }
 
 function iconFor(kind: ComposerAutocompleteKind) {
+  if (kind === 'command') return Terminal;
   if (kind === 'skill') return BookOpen;
   if (kind === 'directory') return Folder;
+  if (kind === 'task') return ListTodo;
+  if (kind === 'attention') return CircleHelp;
   return File;
+}
+
+export interface AutocompleteCandidateGroup {
+  label?: string;
+  rows: Array<{ candidate: ComposerAutocompleteCandidate; index: number }>;
+}
+
+/** Group without losing the engine-owned candidate indices. A row's index is
+ * the acceptance/active-descendant identity, so presentation may section the
+ * list but must never renumber it. */
+export function groupAutocompleteCandidates(
+  candidates: readonly ComposerAutocompleteCandidate[],
+): AutocompleteCandidateGroup[] {
+  const groups: AutocompleteCandidateGroup[] = [];
+  for (const [index, candidate] of candidates.entries()) {
+    // Group only adjacent rows. Fuzzy ranking may interleave sources; merging
+    // non-adjacent labels would reorder the DOM while the engine's activeIndex
+    // remained in ranked order, so ArrowDown could visibly skip backwards.
+    let group = groups.at(-1);
+    if (!group || group.label !== candidate.group) groups.push((group = { label: candidate.group, rows: [] }));
+    group.rows.push({ candidate, index });
+  }
+  return groups;
 }
 
 function resultCopy(controller: ComposerAutocompleteController): string {
@@ -115,6 +151,16 @@ function CandidateRow({
 }) {
   const Icon = iconFor(candidate.kind);
   const refused = candidate.disabled === true;
+  const action =
+    candidate.kind === 'directory'
+      ? 'open'
+      : candidate.kind === 'skill'
+        ? 'use'
+        : candidate.kind === 'command'
+          ? 'run'
+          : candidate.kind === 'file'
+            ? 'add'
+            : 'link';
   // A refused row is still shown — the path exists and the list has to be honest
   // about that — but it accepts nothing, so it gets no pointer contract at all.
   const pointer = useMemo(
@@ -166,9 +212,9 @@ function CandidateRow({
           'mono shrink-0 rounded-badge border border-border-soft bg-surface px-badge-x py-px text-2xs text-faint',
           active && !refused && 'border-accent-border text-accent',
         )}
-        aria-hidden="true"
+        aria-hidden={candidate.badge ? undefined : true}
       >
-        {candidate.kind === 'directory' ? 'open' : candidate.kind === 'skill' ? 'use' : 'add'}
+        {candidate.badge ?? action}
       </span>
     </div>
   );
@@ -206,6 +252,9 @@ export function ComposerAutocompletePopover({
   if (!controller.open || !controller.provider || !controller.match) return null;
   const copy = resultCopy(controller);
   const trigger = controller.match.trigger;
+  const groups = groupAutocompleteCandidates(controller.candidates);
+  const surface =
+    trigger === '/' ? 'commands-skills' : trigger === '@' ? 'files' : trigger === '#' ? 'tasks' : 'attention';
 
   return (
     <div
@@ -216,7 +265,7 @@ export function ComposerAutocompletePopover({
         'absolute inset-x-0 bottom-[calc(100%+var(--gap-xs))] z-40 overflow-hidden rounded-panel border-panel border-border-strong bg-surface shadow-popover',
         className,
       )}
-      data-composer-autocomplete={trigger === '/' ? 'skills' : 'files'}
+      data-composer-autocomplete={surface}
     >
       <div className="flex min-h-[34px] items-center gap-sm border-b border-border-soft bg-surface-2 px-control-x py-1">
         <span className="mono inline-flex h-6 min-w-6 items-center justify-center rounded-control border border-accent-border bg-accent-soft px-1.5 font-semibold text-accent">
@@ -274,16 +323,36 @@ export function ComposerAutocompletePopover({
           </div>
         ) : (
           <div id={controller.listboxId} role="listbox" aria-label={`${controller.provider.label} suggestions`}>
-            {controller.candidates.map((candidate, index) => (
-              <CandidateRow
-                key={candidate.id}
-                candidate={candidate}
-                index={index}
-                active={index === controller.activeIndex}
-                optionId={`${controller.listboxId}-option-${index}`}
-                onAccept={controller.accept}
-              />
-            ))}
+            {groups.map((group, groupIndex) => {
+              const headingId = group.label ? `${controller.listboxId}-group-${groupIndex}` : undefined;
+              return (
+                <div
+                  key={`${group.label ?? 'ungrouped'}-${groupIndex}`}
+                  role={group.label ? 'group' : 'presentation'}
+                  aria-labelledby={headingId}
+                >
+                  {group.label && (
+                    <div
+                      id={headingId}
+                      role="presentation"
+                      className="sticky top-0 z-10 border-y border-border-soft bg-surface-2 px-control-x py-1 text-2xs font-semibold uppercase tracking-label text-faint first:border-t-0"
+                    >
+                      {group.label}
+                    </div>
+                  )}
+                  {group.rows.map(({ candidate, index }) => (
+                    <CandidateRow
+                      key={candidate.id}
+                      candidate={candidate}
+                      index={index}
+                      active={index === controller.activeIndex}
+                      optionId={`${controller.listboxId}-option-${index}`}
+                      onAccept={controller.accept}
+                    />
+                  ))}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>

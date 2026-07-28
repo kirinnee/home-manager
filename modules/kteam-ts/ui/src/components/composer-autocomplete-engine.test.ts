@@ -51,6 +51,47 @@ describe('composer autocomplete trigger detection', () => {
     expect(detectComposerTrigger('read @src next', caret(14))).toBeNull();
   });
 
+  test.each([
+    { value: '#F', trigger: '#' as const, query: 'F', start: 0 },
+    { value: 'see #F12', trigger: '#' as const, query: 'F12', start: 4 },
+    { value: '(#B2', trigger: '#' as const, query: 'B2', start: 1 },
+    { value: '?A', trigger: '?' as const, query: 'A', start: 0 },
+    { value: 'resolve ?A3', trigger: '?' as const, query: 'A3', start: 8 },
+    { value: 'line\n?A12', trigger: '?' as const, query: 'A12', start: 5 },
+  ])('$value opens the $trigger reference picker', ({ value, trigger, query, start }) => {
+    expect(detectComposerTrigger(value, caret(value.length))).toMatchObject({
+      trigger,
+      query,
+      start,
+      end: value.length,
+    });
+  });
+
+  test.each([
+    'Is this right?',
+    'Do you know?A3',
+    '?',
+    '?a3',
+    '#',
+    '# Heading',
+    '## Heading',
+    '#fff',
+    '#FFF',
+    '#123',
+    'issue (#123)',
+    'foo#L12',
+    'see #L12',
+  ])('%s stays ordinary prose or markdown', value => {
+    expect(detectComposerTrigger(value, caret(value.length))).toBeNull();
+  });
+
+  test('reference replacement stops before prose punctuation', () => {
+    const task = detectComposerTrigger('see #F12, please', caret(8));
+    expect(task).toMatchObject({ trigger: '#', query: 'F12', start: 4, end: 8 });
+    const attention = detectComposerTrigger('resolve ?A3.', caret(11));
+    expect(attention).toMatchObject({ trigger: '?', query: 'A3', start: 8, end: 11 });
+  });
+
   test('the replace span extends beyond a caret in the middle of a token', () => {
     expect(detectComposerTrigger('read @src/old.ts please', caret(9))).toMatchObject({
       trigger: '@',
@@ -63,6 +104,8 @@ describe('composer autocomplete trigger detection', () => {
   test('a non-collapsed textarea selection never opens suggestions', () => {
     expect(detectComposerTrigger('/summary', { start: 1, end: 4 })).toBeNull();
     expect(detectComposerTrigger('@src', { start: 0, end: 4 })).toBeNull();
+    expect(detectComposerTrigger('#F12', { start: 1, end: 4 })).toBeNull();
+    expect(detectComposerTrigger('?A3', { start: 1, end: 3 })).toBeNull();
   });
 
   test('! is ordinary text until an exactly-once recorded shell action exists', () => {
@@ -136,6 +179,20 @@ describe('composer autocomplete token replacement', () => {
     expect(replaceComposerTrigger('@old file', match!, '@new.ts')).toEqual({
       value: '@new.ts file',
       selection: { start: 8, end: 8 },
+    });
+  });
+
+  test('canonical task and attention references replace their whole token', () => {
+    const task = detectComposerTrigger('track #F1', caret(9));
+    expect(replaceComposerTrigger('track #F1', task!, '#F12')).toEqual({
+      value: 'track #F12 ',
+      selection: { start: 11, end: 11 },
+    });
+
+    const attention = detectComposerTrigger('resolve ?A', caret(10));
+    expect(replaceComposerTrigger('resolve ?A', attention!, '?A3')).toEqual({
+      value: 'resolve ?A3 ',
+      selection: { start: 12, end: 12 },
     });
   });
 });
