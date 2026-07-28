@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { taskCodeReferenceContext, taskCodeReferencesStayInSession, TaskDetail, TaskRow } from './TaskPresentation';
+import {
+  taskAskOrigin,
+  taskCodeReferenceContext,
+  taskCodeReferencesStayInSession,
+  TaskDetail,
+  TaskRow,
+} from './TaskPresentation';
 import type { TaskRecord, TaskSummary } from '../lib/tasks';
 import { codeReferenceHref } from '../lib/code-references';
 
@@ -49,12 +55,60 @@ describe('task-v2 presentation', () => {
     expect(html).toContain('Blocked by #F12');
     expect(html).toContain('kteam#42');
     expect(html).toContain('src/api-server.ts');
-    expect(html).toContain('Agent-created');
-    expect(html).toContain('Created by agent session ms-creator-12345678');
+    expect(html).not.toContain('Agent-originated');
+    expect(html).not.toContain('data-task-ask-origin');
     expect(html).toContain('href="/session/ms4v5fu2-f2a89500"');
     expect(html).toContain('>ottis<');
     expect(html).toContain('bg-warn');
     expect(html.indexOf('</button>')).toBeLessThan(html.indexOf('href="/session/ms4v5fu2-f2a89500"'));
+  });
+  test('row makes the complete title dominant and allows it to wrap', () => {
+    const title = 'Filter kanban without hiding context';
+    const html = renderToStaticMarkup(<TaskRow task={{ ...task, title }} onOpen={() => undefined} />);
+    const titleClass = html.match(/data-task-title="B7" class="([^"]+)"/)?.[1];
+    expect(html).toContain(`>${title}</span>`);
+    expect(titleClass).toContain('text-row');
+    expect(titleClass).toContain('whitespace-normal');
+    expect(titleClass).toContain('break-words');
+    expect(titleClass).not.toContain('truncate');
+  });
+  test('row drops metadata already implied by its visible card group', () => {
+    const html = renderToStaticMarkup(
+      <TaskRow
+        task={{
+          ...task,
+          title: 'Live peer status stays accurate',
+          phase: 'live',
+          status: 'live',
+          blocked: false,
+          blockedReason: null,
+          blockedSince: null,
+          blockedBy: [],
+        }}
+        impliedLane="live"
+        showAssignee={false}
+        showAskOriginMarker={false}
+        onOpen={() => undefined}
+      />,
+    );
+    expect(html).toContain('Live peer status stays accurate');
+    expect(html).not.toContain('data-task-status-badge');
+    expect(html).not.toContain('data-task-assignee');
+    expect(html).not.toContain('data-task-ask-origin');
+    expect(html).not.toContain('Agent-originated');
+  });
+  test('blocked remains visible when the surrounding lane cannot imply it', () => {
+    const html = renderToStaticMarkup(
+      <TaskRow
+        task={task}
+        impliedLane="in_progress"
+        showAssignee={false}
+        showAskOriginMarker={false}
+        onOpen={() => undefined}
+      />,
+    );
+    expect(html).toContain('data-task-status-badge');
+    expect(html).toContain('>Blocked<');
   });
   test('active audit phases share the in-progress row state', () => {
     for (const [phase, status] of [
@@ -123,12 +177,30 @@ describe('task-v2 presentation', () => {
     expect(html).toContain('<strong>Dropped.</strong>');
     expect(html).not.toContain('Superseded by #F13');
   });
-  test('human-created and unknown legacy rows are not falsely marked as agent-created', () => {
-    for (const provenance of [null, undefined]) {
-      const candidate = { ...task, createdBy: provenance };
-      const html = renderToStaticMarkup(<TaskRow task={candidate} onOpen={() => undefined} />);
-      expect(html).not.toContain('Agent-created');
-    }
+  test('ask provenance follows the original source rather than the session that recorded it', () => {
+    const humanAsk = { ...task, createdBy: 'ms-agent-recorder', askChars: 24, askSource: 'chat 2026-07-28' };
+    const agentAsk = {
+      ...task,
+      createdBy: null,
+      askChars: 24,
+      askSource: '/home/kirin/.kteam/ms-agent/turns/turn-001.md',
+    };
+    const legacyAsk = { ...task, askChars: 24, askSource: 'legacy:F12' };
+    const referencedAsk = { ...task, askChars: 62, askSource: '#F77' };
+    expect(taskAskOrigin(humanAsk)).toBe('human');
+    expect(taskAskOrigin(agentAsk)).toBe('agent');
+    expect(taskAskOrigin(legacyAsk)).toBe('unknown');
+    expect(taskAskOrigin(referencedAsk)).toBe('unknown');
+
+    const humanRow = renderToStaticMarkup(<TaskRow task={humanAsk} onOpen={() => undefined} />);
+    const agentRow = renderToStaticMarkup(<TaskRow task={agentAsk} onOpen={() => undefined} />);
+    expect(humanRow).not.toContain('Agent-originated');
+    expect(agentRow).toContain('data-task-ask-origin="agent"');
+    expect(agentRow).toContain('Agent-originated');
+    expect(agentRow).toContain('Original ask came from an agent');
+
+    expect(renderToStaticMarkup(<TaskDetail task={humanAsk} activity={[]} />)).toContain('Human-asked');
+    expect(renderToStaticMarkup(<TaskDetail task={agentAsk} activity={[]} />)).toContain('Agent-originated');
   });
   test('quick summary leads with one proven outcome and keeps each fact on its own line', () => {
     const html = renderToStaticMarkup(<TaskDetail task={task} activity={[]} />);
