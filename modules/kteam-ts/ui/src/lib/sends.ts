@@ -426,12 +426,38 @@ export function selectLedgerChips(
 
   const takenRow = new Set<number>();
   const proven = new Set<string>();
+  // The transcript is PAGED. A send older than everything currently loaded can
+  // never find its row here, and keeping its chip renders the message a second
+  // time in the footer — so a long session showed every delivered send stacked
+  // below the transcript instead of in place. Out-of-window is not a
+  // disagreement: the daemon already cited the row it matched. Only rows that
+  // COULD be loaded are re-checked below.
+  const windowFloor = blocks.reduce<number>(
+    (min, row) => (Number.isFinite(row.at) && row.at < min ? row.at : min),
+    Number.POSITIVE_INFINITY,
+  );
   for (const record of delivered) {
     const key = record.evidence?.key;
     // No citation ⇒ nothing to match against ⇒ keep the chip.
     if (!key) continue;
     const rowIndex = blocks.findIndex((row, index) => !takenRow.has(index) && row.proofKeys?.includes(key) === true);
-    if (rowIndex === -1) continue;
+    if (rowIndex === -1) {
+      // Retire ONLY when the send is unambiguously off-page: older than the
+      // loaded window AND no visible row carries the same body. If an identical
+      // row IS visible the chip stays, because this send cannot be told apart
+      // from that row's own send — the case the blocker test pins down.
+      const acceptedAt = Date.parse(record.acceptedAt);
+      const body = norm(peerBody(record.message));
+      const ambiguous = blocks.some(row => norm(row.text) === body);
+      if (
+        !ambiguous &&
+        Number.isFinite(windowFloor) &&
+        Number.isFinite(acceptedAt) &&
+        acceptedAt < windowFloor - RECORD_CLOCK_SLACK_MS
+      )
+        proven.add(record.sendId);
+      continue;
+    }
     const row = blocks[rowIndex]!;
     // Consistency checks. The daemon has named this exact row, so a disagreement
     // here means the ledger and the transcript describe different things — keep
