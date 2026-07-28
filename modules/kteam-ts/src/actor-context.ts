@@ -91,3 +91,13 @@ export function parseActor(source: string): ParsedActor {
   if (idx === -1) return { kind: source, raw: source };
   return { kind: source.slice(0, idx), id: source.slice(idx + 1), raw: source };
 }
+
+/** Is this the human operating the daemon directly, rather than an agent
+ * self-identifying under the shared admin bearer? The actor must be the value
+ * derived by resolveApiActor(); request JSON and query parameters never
+ * participate. This is an operational boundary for honest clients, not a
+ * cryptographic per-session capability. */
+export function isHumanAdminActor(actor: KTeamEvent['source'] | undefined): boolean {
+  const kind = parseActor(actor ?? '').kind;
+  return kind === 'admin-ui' || kind === 'admin-cli';
+}

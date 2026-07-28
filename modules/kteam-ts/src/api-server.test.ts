@@ -1114,6 +1114,52 @@ describe('request-id idempotency for retried mutations', () => {
     expect(controls).toBe(0);
   });
 
+  test('in-session runtime control is human-admin-only before body parsing or mutation', async () => {
+    const service = new FakeService();
+    let controls = 0;
+    service.runtime = async () => {
+      controls++;
+      return view;
+    };
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}/v1/sessions/s1/runtime?actor=admin-ui`;
+
+    const peer = await fetch(base, {
+      method: 'POST',
+      headers: { ...admin('runtime-peer'), 'x-kteam-session-id': 'peer-session' },
+      body: JSON.stringify({ action: 'model', model: 'opus', actor: 'admin-ui' }),
+    });
+    expect(peer.status).toBe(403);
+    expect(await peer.json()).toEqual({
+      error: 'in-session runtime control requires the human admin token',
+      code: 'forbidden',
+    });
+
+    const malformedPeer = await fetch(base, {
+      method: 'POST',
+      headers: { ...admin('runtime-malformed'), 'x-kteam-session-id': 'peer-session' },
+      body: 'not json',
+    });
+    expect(malformedPeer.status).toBe(403);
+    expect(controls).toBe(0);
+
+    const browser = await fetch(base, {
+      method: 'POST',
+      headers: admin('runtime-peer'),
+      body: JSON.stringify({ action: 'model', model: 'opus' }),
+    });
+    expect(browser.status).toBe(200);
+
+    const cli = await fetch(base, {
+      method: 'POST',
+      headers: { ...admin('runtime-cli'), 'x-kteam-client': 'cli' },
+      body: JSON.stringify({ action: 'model', model: 'opus' }),
+    });
+    expect(cli.status).toBe(200);
+    expect(controls).toBe(2);
+  });
+
   test('distinct request ids and id-less requests both apply', async () => {
     const service = new FakeService();
     let sends = 0;
