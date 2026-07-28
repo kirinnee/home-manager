@@ -46,15 +46,17 @@
   });
 
   // sw/precache.gen.ts
-  var RELEASE_ID = "e31b00b5fd9d";
+  var RELEASE_ID = "9be2f12a017a";
   var PRECACHE_URLS = [
-    "/assets/Markdown-B3LgJoEt.js",
-    "/assets/SessionChatPage-BmAZ3FQL.js",
-    "/assets/SessionChatPage-Ca8FHQ6p.css",
-    "/assets/index-Bd2C7bnj.js",
-    "/assets/index-BgTpJkbp.css",
-    "/assets/index-DZlDImVd.js",
+    "/assets/Markdown-ngYkuWuh.js",
+    "/assets/SessionChatPage-DN0tyPrO.css",
+    "/assets/SessionChatPage-OoTdYJJv.js",
+    "/assets/addon-fit-DOCEibfw.js",
+    "/assets/index-CI2i2_7Y.js",
+    "/assets/index-CYAy-FWd.css",
+    "/assets/index-DPDGqUxT.js",
     "/assets/ort.bundle.min-B0AK_E7l.js",
+    "/assets/xterm-CASmyfyk.js",
     "/icons/apple-touch-icon.1d79d00c19.png",
     "/icons/favicon.1e0c791b41.ico",
     "/icons/favicon.fc09cfb83e.svg",
@@ -62,7 +64,7 @@
     "/icons/icon-512.4d6591da01.png",
     "/icons/maskable-192.a2dc4e508d.png",
     "/icons/maskable-512.17e4f04ec4.png",
-    "/offline.e31b00b5fd9d.html"
+    "/offline.9be2f12a017a.html"
   ];
 
   // sw/policy.ts
@@ -184,6 +186,84 @@
   }
 
   // sw/notify.ts
+  var PUSH_KINDS = new Set(["attention", "question", "failed", "completed"]);
+  function parsePushPayload(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      return null;
+    const raw = value;
+    if (raw["version"] !== 1)
+      return null;
+    const title = raw["title"];
+    const body = raw["body"];
+    const tag = raw["tag"];
+    const url = raw["url"];
+    const eventKey = raw["eventKey"];
+    const count = raw["count"];
+    if (typeof title !== "string" || !title.trim() || title.length > 120)
+      return null;
+    if (typeof body !== "string" || body.length > 240)
+      return null;
+    if (typeof tag !== "string" || !/^kteam-[A-Za-z0-9_-]+$/u.test(tag) || tag.length > 160)
+      return null;
+    if (typeof url !== "string" || targetPath({ url }) !== url)
+      return null;
+    if (typeof eventKey !== "string" || !eventKey || eventKey.length > 512)
+      return null;
+    if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 1 || count > 100)
+      return null;
+    const sessionId = raw["sessionId"];
+    if (sessionId !== undefined && (typeof sessionId !== "string" || !sessionId || sessionId.length > 160))
+      return null;
+    const wireKind = raw["kind"];
+    const kind = wireKind === "needsYou" ? "attention" : wireKind;
+    if (kind !== undefined && (typeof kind !== "string" || !PUSH_KINDS.has(kind)))
+      return null;
+    return {
+      version: 1,
+      eventKey,
+      title: title.trim(),
+      body,
+      tag,
+      url,
+      count,
+      ...sessionId === undefined ? {} : { sessionId },
+      ...kind === undefined ? {} : { kind }
+    };
+  }
+  function groupedNotificationBody(latest, count) {
+    return count > 1 ? `${latest}
++${count - 1} more` : latest;
+  }
+  function planNotificationPresentation(payload, existing) {
+    if (existing.some((item) => item.eventKey === payload.eventKey))
+      return { action: "skip" };
+    let count = payload.count;
+    if (payload.sessionId) {
+      const activeCount = existing.reduce((highest, item) => typeof item.count === "number" && Number.isSafeInteger(item.count) && item.count > highest ? item.count : highest, 0);
+      if (activeCount > 0)
+        count = Math.max(count, Math.min(100, activeCount + 1));
+    }
+    return {
+      action: "show",
+      body: groupedNotificationBody(payload.body, count),
+      count,
+      data: { url: payload.url, eventKey: payload.eventKey, count, latestBody: payload.body }
+    };
+  }
+  async function showGroupedNotification(registration, payload) {
+    const notifications = await registration.getNotifications({ tag: payload.tag });
+    const plan = planNotificationPresentation(payload, notifications.map((notification) => notification.data && typeof notification.data === "object" ? notification.data : {}));
+    if (plan.action === "skip")
+      return "duplicate";
+    const options = {
+      body: plan.body,
+      tag: payload.tag,
+      renotify: false,
+      data: plan.data
+    };
+    await registration.showNotification(payload.title, options);
+    return "shown";
+  }
   function targetPath(data) {
     if (data && typeof data === "object") {
       const url = data.url;
@@ -263,6 +343,23 @@
       if (event.data?.type === "SKIP_WAITING") {
         sw.skipWaiting();
       }
+    });
+    sw.addEventListener("push", (event) => {
+      event.waitUntil((async () => {
+        let decoded;
+        try {
+          decoded = event.data ? JSON.parse(event.data.text()) : null;
+        } catch {
+          return;
+        }
+        const payload = parsePushPayload(decoded);
+        if (!payload)
+          return;
+        const windows = await sw.clients.matchAll({ type: "window", includeUncontrolled: true });
+        if (windows.some((client) => client.visibilityState === "visible"))
+          return;
+        await showGroupedNotification(sw.registration, payload);
+      })());
     });
     sw.addEventListener("notificationclick", (event) => {
       event.notification.close();
