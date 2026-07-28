@@ -1,8 +1,15 @@
 import { describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { SessionStatus, SessionView } from '../types';
+import { buildLineage, nestByLineage } from '../lib/lineage';
 import { RETAINED_SURFACES, SIDE_PANE_SURFACES } from './SidePane';
-import { buildLineageSurfaceModel, LineageSurfaceContent } from './LineageSurface';
+import {
+  buildLineageSurfaceModel,
+  filterLineageRows,
+  lineageFilterSummary,
+  LineageSurfaceContent,
+  toggleLineageStatusFilter,
+} from './LineageSurface';
 
 function session(
   id: string,
@@ -76,10 +83,63 @@ describe('lineage surface model', () => {
     expect(model.descendants[1]?.children[0]?.view).toBe(grandchild);
     expect(model.descendantCount).toBe(3);
   });
+
+  test('does not reintroduce self or cyclic parent edges rejected by the shared index', () => {
+    const self = session('self', { parent: 'self' });
+    expect(buildLineageSurfaceModel('self', [self]).parent).toEqual({ kind: 'invalid', shortId: 'self' });
+
+    const a = session('cycle-a', { parent: 'cycle-b' });
+    const b = session('cycle-b', { parent: 'cycle-a' });
+    expect(buildLineageSurfaceModel('cycle-a', [a, b]).parent).toEqual({
+      kind: 'invalid',
+      shortId: 'cycle-b',
+    });
+  });
+});
+
+describe('lineage status filtering', () => {
+  test('retains non-matching ancestors as explicit context and prunes unrelated branches', () => {
+    const root = session('root', { status: 'running' });
+    const path = session('path', { parent: 'root', status: 'waiting' });
+    const match = session('match', { parent: 'path', status: 'completed' });
+    const unrelated = session('unrelated', { parent: 'root', status: 'failed' });
+    const sessions = [root, path, match, unrelated];
+    const rows = nestByLineage(sessions, buildLineage(sessions));
+
+    const filtered = filterLineageRows(rows, new Set<SessionStatus>(['completed']));
+
+    expect(filtered.matchCount).toBe(1);
+    expect(filtered.contextCount).toBe(2);
+    expect(filtered.rows).toHaveLength(1);
+    expect(filtered.rows[0]?.view).toBe(root);
+    expect(filtered.rows[0]?.matchesFilter).toBe(false);
+    expect(filtered.rows[0]?.children[0]?.view).toBe(path);
+    expect(filtered.rows[0]?.children[0]?.matchesFilter).toBe(false);
+    expect(filtered.rows[0]?.children[0]?.children[0]?.view).toBe(match);
+    expect(filtered.rows[0]?.children[0]?.children[0]?.matchesFilter).toBe(true);
+    expect(JSON.stringify(filtered)).not.toContain('unrelated');
+  });
+
+  test('supports exact-status multi-select and returns to All after the last removal', () => {
+    let selected = toggleLineageStatusFilter(null, 'running');
+    expect([...selected!]).toEqual(['running']);
+
+    selected = toggleLineageStatusFilter(selected, 'completed');
+    expect([...selected!]).toEqual(['running', 'completed']);
+
+    selected = toggleLineageStatusFilter(selected, 'running');
+    expect([...selected!]).toEqual(['completed']);
+    expect(toggleLineageStatusFilter(selected, 'completed')).toBeNull();
+  });
+
+  test('pluralizes matching and context-path counts', () => {
+    expect(lineageFilterSummary(1, 1)).toBe('1 match · 1 path');
+    expect(lineageFilterSummary(3, 2)).toBe('3 matches · 2 paths');
+  });
 });
 
 describe('lineage surface presentation', () => {
-  test('shows this session, its reachable parent and every nested child as touch-sized links', () => {
+  test('shows one connected compact tree with touch-sized rows and a status filter', () => {
     const parent = session('parent/id', { teammate: 'zelda', name: '[Zelda] Lead the release' });
     const current = session('current', { parent: 'parent/id', teammate: 'arthur', name: '[Arthur] Build lineage' });
     const child = session('child', { parent: 'current', teammate: 'matt', name: '[Matt] Build pane tabs' });
@@ -100,7 +160,14 @@ describe('lineage surface presentation', () => {
     expect(html).toContain('href="/session/child"');
     expect(html).toContain('href="/session/grandchild"');
     expect(html).toContain('2 descendants');
-    expect(html).toContain('min-h-[52px]');
+    expect(html).toContain('aria-label="Session lineage tree"');
+    expect(html).toContain('aria-label="Filter lineage by status"');
+    expect(html).toContain('aria-pressed="true"');
+    expect(html).toContain('min-h-[44px]');
+    expect(html.match(/min-w-\[44px\]/g)).toHaveLength(2);
+    expect(html).not.toContain('min-h-[52px]');
+    expect(html.match(/style="width:10px"/g)).toHaveLength(2);
+    expect(html.indexOf('href="/session/parent%2Fid"')).toBeLessThan(html.indexOf('href="/session/current"'));
     expect(html).not.toContain('autofocus');
   });
 
@@ -111,11 +178,23 @@ describe('lineage surface presentation', () => {
     const rootHtml = renderToStaticMarkup(<LineageSurfaceContent sessionId="root" sessions={[root]} />);
 
     expect(orphanHtml).toContain('data-lineage-role="missing-parent"');
-    expect(orphanHtml).toContain('Parent gone');
+    expect(orphanHtml).toContain('Missing parent');
     expect(orphanHtml).toContain('deleted-…');
-    expect(orphanHtml).not.toContain('Top-level session');
-    expect(rootHtml).toContain('data-lineage-role="top-level"');
-    expect(rootHtml).toContain('Top-level session');
+    expect(orphanHtml).not.toContain('data-lineage-origin="top-level"');
+    expect(rootHtml).toContain('data-lineage-origin="top-level"');
+    expect(rootHtml).toContain('top-level session; no parent was recorded');
+    expect(rootHtml).not.toContain('Missing parent');
+  });
+
+  test('renders a malformed self-parent once with an honest invalid-edge marker', () => {
+    const self = session('self', { parent: 'self' });
+    const html = renderToStaticMarkup(<LineageSurfaceContent sessionId="self" sessions={[self]} />);
+
+    expect(html).toContain('data-lineage-role="invalid-parent"');
+    expect(html).toContain('Invalid parent link');
+    expect(html.match(/href="\/session\/self"/g)).toHaveLength(1);
+    expect(html).not.toContain('data-lineage-role="parent"');
+    expect(html).not.toContain('data-lineage-origin="top-level"');
   });
 
   test('makes live and dead child states visibly different without colour alone', () => {
@@ -130,6 +209,8 @@ describe('lineage surface presentation', () => {
     expect(html).toContain('data-session-status="stopped"');
     expect(html).toContain('finished — stopped');
     expect(html).toContain('>stopped</span>');
+    expect(html).toContain('aria-label="tool running, 1 session"');
+    expect(html).toContain('aria-label="stopped, 1 session"');
   });
 
   test('keeps a deep tree complete while capping its phone-width indentation', () => {
@@ -145,10 +226,12 @@ describe('lineage surface presentation', () => {
     expect(html).toContain('4 descendants');
     expect(html).toContain('href="/session/deep"');
     expect(html).toContain('data-lineage-depth="3"');
-    expect(html).toContain('Lineage depth 4');
-    // Only the first two generations add a 10px rail (rendered as 9px
-    // margin + 1px padding); deeper rows share that final 20px footprint.
-    expect(html.match(/margin-left:9px/g)).toHaveLength(2);
+    expect(html).toContain('data-lineage-tree-depth="4"');
+    expect(html).toContain('Tree level 4');
+    expect(html).toContain('Tree level 5');
+    // Only the first two generations add a 10px step. Deeper rows keep the
+    // connector but share the final 20px footprint and print their true level.
+    expect(html.match(/margin-left:10px/g)).toHaveLength(2);
   });
 
   test('is registered as a mount-per-open side-pane surface', () => {
