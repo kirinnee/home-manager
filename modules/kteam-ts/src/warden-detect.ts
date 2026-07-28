@@ -14,11 +14,22 @@ export type WardenAnomalyKind =
   | 'peer_wait_unanswerable'
   | 'sus_thinking'
   | 'sus_subprocess'
-  | 'bootstrap_degraded';
+  | 'bootstrap_degraded'
+  | 'provider_unavailable';
 
 export interface WardenAnomaly {
   kind: WardenAnomalyKind;
   sessionId: string;
+  /** Fleet anomalies use a stable non-session identity for dedup/fingerprints. */
+  fleetKey?: string;
+  /** Provider-wide occurrence number; increments after a clean recovery. */
+  generation?: number;
+  /** Provider-outage diagnostics. The anomaly remains ONE fleet item even when
+   *  many session snapshots corroborate it. */
+  provider?: string;
+  affectedSessionIds?: string[];
+  failureClasses?: string[];
+  models?: string[];
   teammate?: string;
   label?: string;
   status: SessionStatus;
@@ -298,5 +309,5 @@ export function detectAnomalies(
  *  (kind, session) pairs fingerprint identically regardless of ordering or of
  *  volatile detail/timestamp fields. */
 export function fingerprintAnomalies(anomalies: readonly WardenAnomaly[]): string {
-  return [...anomalies.map(a => `${a.kind}:${a.sessionId}`)].sort().join('|');
+  return [...anomalies.map(a => `${a.kind}:${a.fleetKey ?? a.sessionId}`)].sort().join('|');
 }
