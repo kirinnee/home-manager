@@ -7,6 +7,7 @@ export type AnalyticsAggregation = (typeof ANALYTICS_AGGREGATIONS)[number];
  * the result keeps the spelling the caller used.
  */
 export const ANALYTICS_LABELS = [
+  'id',
   'wrapper',
   'binary',
   'model',
@@ -62,6 +63,9 @@ export interface AnalyticsAggregateResult {
   outputTokens: AnalyticsMeasure;
   cachedInputTokens: AnalyticsMeasure;
   cacheWriteInputTokens: AnalyticsMeasure;
+  /** Schema v5 always emits these; optionality keeps older typed response fixtures compatible. */
+  cacheWrite5mInputTokens?: AnalyticsMeasure;
+  cacheWrite1hInputTokens?: AnalyticsMeasure;
   turns: AnalyticsMeasure;
   durationMs: AnalyticsMeasure;
   timeToFirstOutputMs: AnalyticsMeasure;
@@ -81,17 +85,22 @@ export interface AnalyticsRawSession {
   day: string | null;
   week: string | null;
   createdAt: string | null;
+  pricingModel: string | null;
   tokens: number | null;
   inputTokens: number | null;
   outputTokens: number | null;
   cachedInputTokens: number | null;
   cacheWriteInputTokens: number | null;
+  cacheWrite5mInputTokens: number | null;
+  cacheWrite1hInputTokens: number | null;
   turns: number | null;
   durationMs: number | null;
   timeToFirstOutputMs: number | null;
   contextEndPercent: number | null;
   stalled: boolean;
   failed: boolean;
+  /** True when durable session.migrating/session.migrated evidence exists. */
+  migrated: boolean;
   completed: boolean;
 }
 

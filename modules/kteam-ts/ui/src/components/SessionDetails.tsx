@@ -51,9 +51,15 @@ import {
   UserRound,
   Zap,
 } from 'lucide-react';
-import type { SessionView, WrapperInfo } from '../types';
+import type { SessionView } from '../types';
 import type { Quota } from '../lib/usage';
 import { api, ApiError } from '../lib/api';
+import {
+  fetchRuntimeModelCatalog,
+  requireRuntimeModelCatalogHarness,
+  type RuntimeModelCatalog,
+  type RuntimeModelChoice,
+} from '../lib/runtime-models';
 import { displayCallsign } from '../lib/callsign';
 import { cn, fmtAbsolute, fmtAge, fmtRelative, TERMINAL_STATUSES } from '../lib/utils';
 import { buildLineage, byNewestActivity, parentDisplay, shortSessionId } from '../lib/lineage';
@@ -92,8 +98,8 @@ interface Props {
   onRename?: () => void;
   /** Layer the destructive runtime migration flow over Details. */
   onMigrate?: () => void;
-  /** The page owns the Chat/Terminal state. The Codex native picker must open
-   * in that existing Terminal view after the daemon accepts /model. */
+  /** The page owns the Chat/Terminal state. Used only when Codex's live model
+   * catalog is unavailable and the reader falls back to its native picker. */
   onOpenTerminal?: () => boolean;
   /** A token-less origin is read-only. Keep the explanation visible, but never
    * offer a control that cannot work. */
@@ -415,6 +421,10 @@ export function SessionDetails({
     observedAtSwitchRef.current = { model: observedModel, observedAt: state.observedModelAt };
     setModelVerificationPending(true);
   }, [observedModel, state.observedModelAt]);
+  const clearModelVerificationPending = useCallback(() => {
+    observedAtSwitchRef.current = undefined;
+    setModelVerificationPending(false);
+  }, []);
   const observedPresentation = observedModelPresentation(observedModel, modelVerificationPending);
 
   // TABS. The sheet had become one long undifferentiated scroll — status,
@@ -613,12 +623,13 @@ export function SessionDetails({
                     open={open}
                     canControl={canControlRuntime}
                     onModelSwitch={markModelVerificationPending}
+                    onModelSwitchFailed={clearModelVerificationPending}
                     onOpenTerminal={onOpenTerminal}
                     onClose={onClose}
                   />
-                  {/* Codex already tunes reasoning inside the model picker above,
-                      so a second control there would be redundant; Claude has a
-                      real in-session /effort command, so it gets its own. */}
+                  {/* Codex already chooses an advertised reasoning level after a
+                      model above, so a second details control would be redundant;
+                      Claude has a real /effort command, so it gets its own. */}
                   {config.harness === 'claude' && (
                     <RuntimeEffortControls view={view} canControl={canControlRuntime} onClose={onClose} />
                   )}
@@ -747,127 +758,143 @@ export function isEffortActionUnsupported(error: unknown): boolean {
 export const CLAUDE_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh'] as const;
 export type ClaudeEffortLevel = (typeof CLAUDE_EFFORT_LEVELS)[number];
 
-export type ClaudeRuntimeModelsResolution =
-  | { kind: 'available'; choices: NonNullable<WrapperInfo['runtimeModels']> }
-  | { kind: 'restart-required' }
-  | { kind: 'missing-wrapper' };
-
-/** An old daemon knows /v1/wrappers but predates its runtimeModels field. That
- * is version skew, not proof that the account has no choices. An explicit []
- * is the daemon's honest unsupported verdict and must remain distinguishable. */
-export function resolveClaudeRuntimeModels(wrappers: WrapperInfo[], binary: string): ClaudeRuntimeModelsResolution {
-  const wrapper = wrappers.find(item => item.name === binary);
-  if (!wrapper) return { kind: 'missing-wrapper' };
-  if (wrapper.runtimeModels === undefined) return { kind: 'restart-required' };
-  return { kind: 'available', choices: wrapper.runtimeModels };
-}
-
 interface RuntimeModelControlsProps {
   view: SessionView;
   open: boolean;
   canControl: boolean;
   onModelSwitch: () => void;
+  onModelSwitchFailed?: () => void;
   onOpenTerminal?: () => boolean;
   onClose: () => void;
 }
 
-/**
- * Native /model is a small, deliberately harness-specific control surface.
- * It does not fall back to config.model or a global catalog: provider-backed
- * accounts may reject values that a different Claude account accepts.
- */
+function useRuntimeModelCatalog(sessionId: string, enabled: boolean, expectedHarness: RuntimeModelCatalog['harness']) {
+  const [catalog, setCatalog] = useState<RuntimeModelCatalog | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const requestKey = `${sessionId}\0${expectedHarness}`;
+  const [loadedFor, setLoadedFor] = useState<string | null>(null);
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    setCatalog(null);
+    setError(null);
+    setLoadedFor(null);
+    void fetchRuntimeModelCatalog(sessionId)
+      .then(value => {
+        if (!cancelled) {
+          setCatalog(requireRuntimeModelCatalogHarness(value, expectedHarness));
+          setLoadedFor(requestKey);
+        }
+      })
+      .catch(reason => {
+        if (!cancelled) {
+          setError(reason);
+          setLoadedFor(requestKey);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled, expectedHarness, requestKey, sessionId]);
+  return loadedFor === requestKey ? { catalog, error } : { catalog: null, error: null };
+}
+
+export function codexPickerFallbackNeeded(
+  catalog: RuntimeModelCatalog | null,
+  error: unknown,
+  choice?: RuntimeModelChoice,
+  requireChoice = false,
+): boolean {
+  if (error) return true;
+  if (!catalog) return false;
+  if (catalog.choices.length === 0) return true;
+  if (requireChoice && !choice) return true;
+  return choice?.reasoningEfforts.length === 0;
+}
+
+/** One account-aware list for both harnesses. Claude's values come from its
+ * wrapper allowlist; Codex's come from that wrapper's app-server model/list. */
 export function RuntimeModelControls({
   view,
   open,
   canControl,
   onModelSwitch,
+  onModelSwitchFailed,
   onOpenTerminal,
   onClose,
 }: RuntimeModelControlsProps) {
   const { config, state } = view;
   const terminal = TERMINAL_STATUSES.has(state.status);
   const promptReady = state.promptReady === true;
-  const [claudeChoices, setClaudeChoices] = useState<NonNullable<WrapperInfo['runtimeModels']> | null>(null);
-  const [choicesError, setChoicesError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
+  const { catalog, error: catalogError } = useRuntimeModelCatalog(
+    config.id,
+    open && canControl && !terminal,
+    config.harness,
+  );
+  const [selectedCodexModel, setSelectedCodexModel] = useState<RuntimeModelChoice | null>(null);
+  const [submittingTarget, setSubmittingTarget] = useState<{ model: string; effort?: string } | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [restartRequired, setRestartRequired] = useState(false);
+  const submitting = submittingTarget !== null;
 
   useEffect(() => {
     setRestartRequired(false);
     setFailure(null);
     setNotice(null);
+    setSelectedCodexModel(null);
+    setSubmittingTarget(null);
   }, [config.id]);
 
-  // A restart-required verdict is deliberately sticky while this sheet stays
-  // open, but reopening it after the lead restarts kteamd must retry rather
-  // than trapping the reader behind an old local flag forever.
   useEffect(() => {
-    if (open) setRestartRequired(false);
+    if (open) return;
+    setRestartRequired(false);
+    setSelectedCodexModel(null);
   }, [open]);
 
+  // Claude has no safe manual fallback for a missing catalog route. Codex
+  // does: keep its established bare native picker available on version skew.
   useEffect(() => {
-    if (!open || !canControl || terminal || config.harness !== 'claude') return;
-    let cancelled = false;
-    setClaudeChoices(null);
-    setChoicesError(null);
-    void api
-      .wrappers()
-      .then(wrappers => {
-        if (cancelled) return;
-        const resolution = resolveClaudeRuntimeModels(wrappers, config.binary);
-        if (resolution.kind === 'restart-required') {
-          setRestartRequired(true);
-          return;
-        }
-        if (resolution.kind === 'missing-wrapper') {
-          setChoicesError('The daemon did not return the current account wrapper. Refresh the session and try again.');
-          return;
-        }
-        setClaudeChoices(resolution.choices);
-      })
-      .catch(error => {
-        if (cancelled) return;
-        if (isRuntimeEndpointUnavailable(error)) setRestartRequired(true);
-        else setChoicesError(error instanceof ApiError ? error.message : String(error));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [canControl, config.binary, config.harness, open, terminal]);
+    if (config.harness === 'claude' && isRuntimeEndpointUnavailable(catalogError)) setRestartRequired(true);
+  }, [catalogError, config.harness]);
 
-  async function runModelCommand(model?: string) {
+  const codexPickerFallback =
+    config.harness === 'codex' && codexPickerFallbackNeeded(catalog, catalogError, selectedCodexModel ?? undefined);
+
+  async function runModelCommand(model?: string, effort?: string) {
     if (!canControl || terminal || !promptReady || submitting || restartRequired) return;
-    const action = { action: 'model' as const, ...(model ? { model } : {}) };
-    setSubmitting(true);
+    const targeted = Boolean(model);
+    setSubmittingTarget({ model: model ?? 'native-picker', ...(effort ? { effort } : {}) });
     setFailure(null);
     setNotice(null);
+    if (targeted) onModelSwitch();
     try {
-      // A fresh id belongs to every click. The daemon applies this native
-      // command exactly once for that gesture; a later retry click is a new
-      // explicit user decision rather than an invisible transport retry.
-      await api.runtime(config.id, action, crypto.randomUUID());
-      onModelSwitch();
-      if (config.harness === 'codex') {
+      await api.runtime(
+        config.id,
+        { action: 'model', ...(model ? { model } : {}), ...(effort ? { effort } : {}) },
+        crypto.randomUUID(),
+      );
+      if (config.harness === 'codex' && !model) {
         if (onOpenTerminal?.()) {
           onClose();
           return;
         }
-        setNotice(
-          'Codex opened its native picker. Select Terminal, then choose a model and supported reasoning level.',
-        );
+        setNotice('Codex opened its native picker in Terminal. No switch is claimed until Codex reports one.');
+      } else if (config.harness === 'codex') {
+        setSelectedCodexModel(null);
+        setNotice(`Codex confirmed ${model} · ${effort} from its runtime settings.`);
       } else {
         setNotice('Model command sent. Verification updates after the next model response.');
       }
     } catch (error) {
+      if (targeted) onModelSwitchFailed?.();
       if (isRuntimeEndpointUnavailable(error)) {
         setRestartRequired(true);
         return;
       }
       setFailure(error instanceof ApiError ? error.message : String(error));
     } finally {
-      setSubmitting(false);
+      setSubmittingTarget(null);
     }
   }
 
@@ -912,38 +939,51 @@ export function RuntimeModelControls({
         <p role="alert" className="mt-2 rounded-control border border-warn-border bg-surface-2 p-3 text-ui text-warn">
           Daemon restart required to enable in-session model switching.
         </p>
-      ) : config.harness === 'claude' ? (
-        <ClaudeRuntimeChoices
-          choices={claudeChoices}
-          error={choicesError}
-          submitting={submitting}
-          disabled={submitting || !promptReady}
-          onChoose={model => void runModelCommand(model)}
-        />
-      ) : config.harness === 'codex' ? (
-        <div className="mt-3">
-          <p className="m-0 text-meta leading-base text-muted">
-            Codex owns the account-aware native picker. It asks for a model, then the reasoning level supported by that
-            model; this sheet intentionally adds no separate effort control.
-          </p>
-          <button
-            type="button"
+      ) : config.harness === 'claude' || config.harness === 'codex' ? (
+        selectedCodexModel && config.harness === 'codex' ? (
+          <RuntimeReasoningStep
+            model={selectedCodexModel}
+            currentEffort={state.observedModel === selectedCodexModel.value ? state.observedReasoningEffort : undefined}
+            submittingEffort={submittingTarget?.effort}
             disabled={submitting || !promptReady}
-            onClick={() => void runModelCommand()}
-            className="kt-btn mt-3 flex min-h-[44px] w-full items-center justify-between gap-sm text-left"
-          >
-            <span>{submitting ? 'Opening native picker…' : 'Open model + reasoning picker in Terminal'}</span>
-            {submitting ? (
-              <LoaderCircle size={15} aria-hidden="true" className="shrink-0 animate-spin" />
-            ) : (
-              <Terminal size={15} aria-hidden="true" className="shrink-0" />
-            )}
-          </button>
-        </div>
+            backDisabled={submitting}
+            onBack={() => setSelectedCodexModel(null)}
+            onChoose={effort => void runModelCommand(selectedCodexModel.value, effort)}
+          />
+        ) : (
+          <RuntimeModelChoices
+            harness={config.harness}
+            choices={catalog?.choices ?? null}
+            error={catalogError}
+            currentModel={state.observedModel}
+            submittingModel={submittingTarget?.model}
+            disabled={submitting || !promptReady}
+            onChoose={choice => {
+              if (config.harness === 'codex') setSelectedCodexModel(choice);
+              else void runModelCommand(choice.value);
+            }}
+          />
+        )
       ) : (
         <p className="mt-2 text-meta leading-base text-muted">
           In-session model switching is not available for this harness, so no nonfunctional control is shown.
         </p>
+      )}
+
+      {codexPickerFallback && !restartRequired && (
+        <button
+          type="button"
+          disabled={submitting || !promptReady}
+          onClick={() => void runModelCommand()}
+          className="kt-btn mt-3 flex min-h-[44px] min-w-[44px] w-full items-center justify-between gap-sm text-left"
+        >
+          <span>{submitting ? 'Opening native picker…' : 'Use native picker in Terminal'}</span>
+          {submitting ? (
+            <LoaderCircle size={15} aria-hidden="true" className="shrink-0 animate-spin" />
+          ) : (
+            <Terminal size={15} aria-hidden="true" className="shrink-0" />
+          )}
+        </button>
       )}
 
       {notice && (
@@ -963,18 +1003,22 @@ export function RuntimeModelControls({
   );
 }
 
-export function ClaudeRuntimeChoices({
+export function RuntimeModelChoices({
+  harness,
   choices,
   error,
-  submitting,
+  currentModel,
+  submittingModel,
   disabled,
   onChoose,
 }: {
-  choices: NonNullable<WrapperInfo['runtimeModels']> | null;
-  error: string | null;
-  submitting: boolean;
+  harness: 'claude' | 'codex';
+  choices: RuntimeModelChoice[] | null;
+  error: unknown;
+  currentModel?: string;
+  submittingModel?: string;
   disabled: boolean;
-  onChoose: (model: string) => void;
+  onChoose: (model: RuntimeModelChoice) => void;
 }) {
   if (error) {
     return (
@@ -982,7 +1026,7 @@ export function ClaudeRuntimeChoices({
         role="alert"
         className="mt-2 rounded-control border border-err-border bg-surface-2 p-3 text-ui leading-base text-err"
       >
-        Account-aware model choices are unavailable: {error}
+        Account-aware model choices are unavailable: {error instanceof ApiError ? error.message : String(error)}
       </p>
     );
   }
@@ -997,34 +1041,153 @@ export function ClaudeRuntimeChoices({
   if (choices.length === 0) {
     return (
       <p className="mt-2 text-meta leading-base text-muted">
-        This account does not advertise any in-place model choices. Reasoning effort is set separately below.
+        This account does not advertise any in-place model choices.
       </p>
     );
   }
   return (
     <div className="mt-3">
-      <p className="m-0 text-meta leading-base text-muted">
-        Only this account’s advertised Claude choices are shown. Verification updates after the next model response.
+      <p role="status" aria-live="polite" className="m-0 text-meta leading-base text-muted">
+        {harness === 'codex'
+          ? 'Live choices from this account’s Codex model catalog. Choose a model, then one of its advertised reasoning levels.'
+          : 'Only this account’s advertised Claude choices are shown. Verification updates after the next model response.'}
       </p>
-      <div className="mt-2 grid gap-2" aria-label="Switch Claude model in place">
-        {choices.map(choice => (
-          <button
-            key={choice.value}
-            type="button"
-            disabled={disabled}
-            onClick={() => onChoose(choice.value)}
-            aria-label={`Switch model in place to ${choice.label}`}
-            className="kt-btn flex min-h-[44px] w-full items-center justify-between gap-sm text-left"
-          >
-            <span className="min-w-0">
-              <span className="block truncate text-ui font-semibold">{choice.label}</span>
-              {choice.label !== choice.value && (
-                <span className="mono block truncate text-meta text-muted">{choice.value}</span>
-              )}
-            </span>
-            {submitting && <LoaderCircle size={15} aria-hidden="true" className="shrink-0 animate-spin" />}
-          </button>
-        ))}
+      <div className="mt-2 grid gap-2" aria-label={`Switch ${harness} model in place`}>
+        {choices.map(choice => {
+          const current = choice.value === currentModel;
+          const pending = choice.value === submittingModel;
+          return (
+            <button
+              key={choice.value}
+              type="button"
+              disabled={disabled}
+              onClick={() => onChoose(choice)}
+              aria-label={`Switch model in place to ${choice.label}${current ? ', current' : ''}`}
+              aria-current={current ? 'true' : undefined}
+              aria-busy={pending || undefined}
+              className="kt-btn flex min-h-[44px] min-w-[44px] w-full items-center justify-between gap-sm text-left"
+            >
+              <span className="min-w-0">
+                <span className="flex min-w-0 items-center gap-sm">
+                  <span className="truncate text-ui font-semibold">{choice.label}</span>
+                  {current && <span className="kt-label shrink-0">Current</span>}
+                  {!current && choice.isDefault && <span className="kt-label shrink-0">Default</span>}
+                </span>
+                {choice.label !== choice.value && (
+                  <span className="mono block truncate text-meta text-muted">{choice.value}</span>
+                )}
+                {choice.description && (
+                  <span className="mt-1 block text-meta leading-base text-muted">{choice.description}</span>
+                )}
+              </span>
+              {pending && <LoaderCircle size={15} aria-hidden="true" className="shrink-0 animate-spin" />}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function effortDisplayName(effort: string): string {
+  if (effort === 'xhigh') return 'Extra high';
+  return effort.charAt(0).toUpperCase() + effort.slice(1);
+}
+
+export function RuntimeReasoningStep({
+  model,
+  currentEffort,
+  submittingEffort,
+  disabled,
+  backDisabled,
+  onBack,
+  onChoose,
+}: {
+  model: RuntimeModelChoice;
+  currentEffort?: string;
+  submittingEffort?: string;
+  disabled: boolean;
+  backDisabled: boolean;
+  onBack: () => void;
+  onChoose: (effort: string) => void;
+}) {
+  return (
+    <div className="mt-3">
+      <button
+        type="button"
+        autoFocus
+        disabled={backDisabled}
+        onClick={onBack}
+        className="kt-btn flex min-h-[44px] min-w-[44px] items-center px-3"
+      >
+        Back to models
+      </button>
+      <RuntimeReasoningChoices
+        model={model}
+        currentEffort={currentEffort}
+        submittingEffort={submittingEffort}
+        disabled={disabled}
+        onChoose={onChoose}
+      />
+    </div>
+  );
+}
+
+export function RuntimeReasoningChoices({
+  model,
+  currentEffort,
+  submittingEffort,
+  disabled,
+  onChoose,
+}: {
+  model: RuntimeModelChoice;
+  currentEffort?: string;
+  submittingEffort?: string;
+  disabled: boolean;
+  onChoose: (effort: string) => void;
+}) {
+  if (model.reasoningEfforts.length === 0)
+    return (
+      <p role="alert" className="mt-2 rounded-control border border-err-border bg-surface-2 p-3 text-ui text-err">
+        {model.label} did not advertise any supported reasoning levels. Use Codex’s native Terminal picker instead.
+      </p>
+    );
+  return (
+    <div className="mt-3">
+      <p role="status" aria-live="polite" className="m-0 text-meta leading-base text-muted">
+        Reasoning for <span className="mono text-fg-soft">{model.value}</span>. The switch stays pending until Codex
+        reports this exact model and level.
+      </p>
+      <div className="mt-2 grid gap-2" aria-label={`Set reasoning for ${model.label}`}>
+        {model.reasoningEfforts.map(effort => {
+          const current = effort.value === currentEffort;
+          const pending = effort.value === submittingEffort;
+          const isDefault = effort.value === model.defaultReasoningEffort;
+          return (
+            <button
+              key={effort.value}
+              type="button"
+              disabled={disabled}
+              onClick={() => onChoose(effort.value)}
+              aria-label={`Set ${model.label} reasoning to ${effortDisplayName(effort.value)}${current ? ', current' : ''}`}
+              aria-current={current ? 'true' : undefined}
+              aria-busy={pending || undefined}
+              className="kt-btn flex min-h-[44px] min-w-[44px] w-full items-center justify-between gap-sm text-left"
+            >
+              <span className="min-w-0">
+                <span className="flex min-w-0 items-center gap-sm">
+                  <span className="truncate text-ui font-semibold">{effortDisplayName(effort.value)}</span>
+                  {current && <span className="kt-label shrink-0">Current</span>}
+                  {!current && isDefault && <span className="kt-label shrink-0">Default</span>}
+                </span>
+                {effort.description && (
+                  <span className="mt-1 block text-meta leading-base text-muted">{effort.description}</span>
+                )}
+              </span>
+              {pending && <LoaderCircle size={15} aria-hidden="true" className="shrink-0 animate-spin" />}
+            </button>
+          );
+        })}
       </div>
     </div>
   );
@@ -1037,8 +1200,11 @@ interface RuntimeEffortControlsProps {
    *  completes; the caller uses this to reflect the new value on the bar chip. */
   onEffortSwitch?: (level: string) => void;
   /** Codex tunes effort inside its native picker, which lives in the Terminal
-   *  view; the page owns that tab switch, exactly as the model control does. */
+   *  view only as a fallback when its live catalog cannot be probed. */
   onOpenTerminal?: () => boolean;
+  /** Codex's model and effort are applied as one verified native-picker action. */
+  onCodexSwitchStart?: () => void;
+  onCodexSwitchFailed?: () => void;
   onClose: () => void;
 }
 
@@ -1054,8 +1220,9 @@ interface RuntimeEffortControlsProps {
  *     there is no stale-until-evidence spinner: the persist is synchronous and
  *     confirmed by the command completing.
  *   - Codex combines model AND reasoning in one native two-stage picker; there
- *     is no `/reasoning <x>` verb. So its "effort" control is the same Terminal
- *     hand-off the model control uses, surfaced from the thinking chip too.
+ *     is no `/reasoning <x>` verb. The sheet reads the current model's ordered
+ *     efforts from model/list, then asks the daemon to drive that native picker
+ *     and wait for thread_settings_applied.
  *
  * Anything a harness cannot actually do is never rendered as a live control.
  */
@@ -1064,25 +1231,39 @@ export function RuntimeEffortControls({
   canControl,
   onEffortSwitch,
   onOpenTerminal,
+  onCodexSwitchStart,
+  onCodexSwitchFailed,
   onClose,
 }: RuntimeEffortControlsProps) {
   const { config, state } = view;
   const terminal = TERMINAL_STATUSES.has(state.status);
   const promptReady = state.promptReady === true;
   const [submitting, setSubmitting] = useState(false);
+  const [codexSubmittingEffort, setCodexSubmittingEffort] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [restartRequired, setRestartRequired] = useState(false);
+  const { catalog, error: catalogError } = useRuntimeModelCatalog(
+    config.id,
+    canControl && !terminal && config.harness === 'codex',
+    config.harness,
+  );
 
   useEffect(() => {
     setRestartRequired(false);
     setFailure(null);
     setNotice(null);
+    setCodexSubmittingEffort(null);
   }, [config.id]);
+
+  const currentCodexModel = catalog?.choices.find(choice => choice.value === state.observedModel);
+  const codexPickerFallback =
+    config.harness === 'codex' && codexPickerFallbackNeeded(catalog, catalogError, currentCodexModel, true);
 
   async function runEffortCommand(level: string) {
     if (!canControl || terminal || !promptReady || submitting || restartRequired) return;
     setSubmitting(true);
+    setCodexSubmittingEffort(null);
     setFailure(null);
     setNotice(null);
     try {
@@ -1098,13 +1279,38 @@ export function RuntimeEffortControls({
       }
       setFailure(error instanceof ApiError ? error.message : String(error));
     } finally {
+      setCodexSubmittingEffort(null);
       setSubmitting(false);
     }
   }
 
-  async function openCodexPicker() {
+  async function runCodexEffort(model: RuntimeModelChoice, effort: string) {
     if (!canControl || terminal || !promptReady || submitting || restartRequired) return;
     setSubmitting(true);
+    setCodexSubmittingEffort(effort);
+    setFailure(null);
+    setNotice(null);
+    onCodexSwitchStart?.();
+    try {
+      await api.runtime(config.id, { action: 'model', model: model.value, effort }, crypto.randomUUID());
+      setNotice(`Codex confirmed ${model.value} · ${effort} from its runtime settings.`);
+    } catch (error) {
+      onCodexSwitchFailed?.();
+      if (isRuntimeEndpointUnavailable(error)) {
+        setRestartRequired(true);
+        return;
+      }
+      setFailure(error instanceof ApiError ? error.message : String(error));
+    } finally {
+      setCodexSubmittingEffort(null);
+      setSubmitting(false);
+    }
+  }
+
+  async function openCodexPickerFallback() {
+    if (!canControl || terminal || !promptReady || submitting || restartRequired) return;
+    setSubmitting(true);
+    setCodexSubmittingEffort(null);
     setFailure(null);
     setNotice(null);
     try {
@@ -1113,7 +1319,7 @@ export function RuntimeEffortControls({
         onClose();
         return;
       }
-      setNotice('Codex opened its native picker. Select Terminal, then choose a model and its reasoning level.');
+      setNotice('Codex opened its native picker in Terminal. No switch is claimed until Codex reports one.');
     } catch (error) {
       if (isRuntimeEndpointUnavailable(error)) {
         setRestartRequired(true);
@@ -1165,23 +1371,55 @@ export function RuntimeEffortControls({
         <ClaudeEffortChoices disabled={submitting || !promptReady} onChoose={level => void runEffortCommand(level)} />
       ) : config.harness === 'codex' ? (
         <div className="mt-3">
-          <p className="m-0 text-meta leading-base text-muted">
-            Codex sets reasoning inside its native picker — it asks for a model, then the reasoning level that model
-            supports. There is no separate reasoning command, so this opens the same picker.
-          </p>
-          <button
-            type="button"
-            disabled={submitting || !promptReady}
-            onClick={() => void openCodexPicker()}
-            className="kt-btn mt-3 flex min-h-[44px] w-full items-center justify-between gap-sm text-left"
-          >
-            <span>{submitting ? 'Opening native picker…' : 'Open model + reasoning picker in Terminal'}</span>
-            {submitting ? (
-              <LoaderCircle size={15} aria-hidden="true" className="shrink-0 animate-spin" />
-            ) : (
-              <Terminal size={15} aria-hidden="true" className="shrink-0" />
-            )}
-          </button>
+          {catalogError ? (
+            <p
+              role="alert"
+              className="m-0 rounded-control border border-err-border bg-surface-2 p-3 text-ui leading-base text-err"
+            >
+              Account-aware reasoning choices are unavailable:{' '}
+              {catalogError instanceof ApiError ? catalogError.message : String(catalogError)}
+            </p>
+          ) : catalog === null ? (
+            <div role="status" className="flex min-h-[44px] items-center gap-sm text-ui text-muted">
+              <LoaderCircle size={15} aria-hidden="true" className="animate-spin" />
+              Loading account-aware reasoning choices…
+            </div>
+          ) : (
+            (() => {
+              return currentCodexModel ? (
+                <RuntimeReasoningChoices
+                  model={currentCodexModel}
+                  currentEffort={state.observedReasoningEffort}
+                  submittingEffort={codexSubmittingEffort ?? undefined}
+                  disabled={submitting || !promptReady}
+                  onChoose={effort => void runCodexEffort(currentCodexModel, effort)}
+                />
+              ) : (
+                <p
+                  role="alert"
+                  className="m-0 rounded-control border border-err-border bg-surface-2 p-3 text-ui text-err"
+                >
+                  The observed model ({state.observedModel || 'unknown'}) is not in this account’s current Codex
+                  catalog. Refresh the session or use the native Terminal picker.
+                </p>
+              );
+            })()
+          )}
+          {codexPickerFallback && !restartRequired && (
+            <button
+              type="button"
+              disabled={submitting || !promptReady}
+              onClick={() => void openCodexPickerFallback()}
+              className="kt-btn mt-3 flex min-h-[44px] min-w-[44px] w-full items-center justify-between gap-sm text-left"
+            >
+              <span>{submitting ? 'Opening native picker…' : 'Use native picker in Terminal'}</span>
+              {submitting ? (
+                <LoaderCircle size={15} aria-hidden="true" className="shrink-0 animate-spin" />
+              ) : (
+                <Terminal size={15} aria-hidden="true" className="shrink-0" />
+              )}
+            </button>
+          )}
         </div>
       ) : (
         <p className="mt-2 text-meta leading-base text-muted">
@@ -1207,7 +1445,7 @@ export function RuntimeEffortControls({
 }
 
 /** The four Claude effort levels as a 2-column grid of 44px targets, mirroring
- *  ClaudeRuntimeChoices. Presentational: the parent owns the submit + notices. */
+ *  RuntimeModelChoices. Presentational: the parent owns submit + notices. */
 export function ClaudeEffortChoices({
   disabled,
   onChoose,

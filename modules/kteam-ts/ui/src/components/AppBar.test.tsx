@@ -17,7 +17,7 @@
 // a second, drifting copy.
 
 import { describe, expect, test } from 'bun:test';
-import { SETTINGS_ENTRY, TASKS_ENTRY, UPDATE_CHIP, WARDEN_ENTRY } from './AppBar';
+import { SETTINGS_ENTRY, UPDATE_CHIP, WARDEN_ENTRY } from './AppBar';
 import type { UpdateReason } from '../hooks/useServiceWorkerUpdate';
 
 /** Words that assert a REASON the app cannot know at chip time. A title
@@ -94,15 +94,9 @@ describe('Settings entry point', () => {
     expect(source).toContain("layout !== 'drawer' && <ThemeToggle");
   });
 
-  test('adds the task board as a labelled, active-aware desktop destination', async () => {
-    expect(TASKS_ENTRY).toEqual({
-      label: 'Tasks',
-      title: 'Open the task board',
-    });
+  test('does not expose a fleet-wide Tasks destination', async () => {
     const source = await Bun.file(new URL('./AppBar.tsx', import.meta.url).pathname).text();
-    expect(source).toContain('to="/tasks"');
-    expect(source).toContain("tasksActive ? 'page'");
-    expect(source).toContain('<ListTodo size={14} aria-hidden="true" />');
-    expect(source).toContain('>Tasks</span>');
+    expect(source).not.toContain('to="/tasks"');
+    expect(source).not.toContain('TASKS_ENTRY');
   });
 });

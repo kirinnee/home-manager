@@ -143,7 +143,7 @@ describe('measured cold/warm boot regressions', () => {
     await internals.close();
   });
 
-  test('the additive v3 → v4 migration preserves the existing event index', async () => {
+  test('the additive v3 → current migration preserves the existing event index', async () => {
     const home = await temporaryHome();
     let store = await EventStore.open({ home, importExisting: false });
     await store.writeConfig('session-a', { id: 'session-a', createdAt: '2026-07-25T00:00:00.000Z' });
@@ -153,13 +153,13 @@ describe('measured cold/warm boot regressions', () => {
 
     const databaseFile = path.join(home, 'daemon', 'kteam.sqlite');
     const old = new Database(databaseFile);
-    old.exec('DROP TABLE chat_pointers; PRAGMA user_version = 3');
+    old.exec('DROP TABLE chat_sources; DROP TABLE chat_pointers; PRAGMA user_version = 3');
     old.close();
 
     store = await EventStore.open({ home, importExisting: false });
     expect(store.replay('session-a').map(event => event.type)).toEqual(['session.completed']);
     const migrated = new Database(databaseFile, { readonly: true });
-    expect(migrated.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version).toBe(4);
+    expect(migrated.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version).toBe(5);
     expect(
       migrated.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE name = 'chat_pointers'").get()?.name,
     ).toBe('chat_pointers');

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtemp, rm, writeFile } from 'fs/promises';
+import { Database } from 'bun:sqlite';
+import { mkdtemp, rm, stat, writeFile } from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { parseClaudeTranscriptLine } from './claude-transcript';
@@ -187,6 +188,41 @@ describe('chat pointers into the harness transcript', () => {
     );
     const { records } = store.resolveChatPointers(store.chatPointers('session-a', 0, 10), normalize);
     expect(records.map(record => (record as { data: { text: string } }).data.text)).toEqual(['block one', 'block two']);
+    store.close();
+  });
+
+  test('v4 migrates in place and makes an unchanged source stale exactly once', async () => {
+    const home = await temporaryHome();
+    const file = path.join(home, 'harness.jsonl');
+    const extent = (await writeTranscript(file, [assistantRecord('first', 'm1')]))[0]!;
+    const sourceInfo = await stat(file);
+    let store = await EventStore.open({ home });
+    store.appendChatPointers('session-versioned', [
+      {
+        time: '2026-07-25T00:00:00.000Z',
+        type: 'chat.assistant.text',
+        turn: 1,
+        sourceFile: file,
+        byteOffset: extent.offset,
+        byteLength: extent.length,
+        recordIndex: 0,
+        fingerprint: fingerprint(extent.line),
+      },
+    ]);
+    store.markChatSource('session-versioned', file, sourceInfo);
+    expect(store.chatSourceCurrent('session-versioned', file, sourceInfo)).toBe(true);
+    store.close();
+
+    const database = new Database(path.join(home, 'daemon', 'kteam.sqlite'));
+    database.exec('ALTER TABLE chat_sources DROP COLUMN normalizer_version');
+    database.exec('PRAGMA user_version = 4');
+    database.close();
+
+    store = await EventStore.open({ home });
+    expect(store.chatPointerCount('session-versioned')).toBe(1);
+    expect(store.chatSourceCurrent('session-versioned', file, sourceInfo)).toBe(false);
+    store.markChatSource('session-versioned', file, sourceInfo);
+    expect(store.chatSourceCurrent('session-versioned', file, sourceInfo)).toBe(true);
     store.close();
   });
 });

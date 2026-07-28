@@ -29,7 +29,7 @@ interface ClaudeEventMetadata {
 }
 
 export type ClaudeNormalizedEvent =
-  | (ClaudeEventMetadata & { type: 'chat.user'; data: { text: string } })
+  | (ClaudeEventMetadata & { type: 'chat.user'; data: { text: string; nativeQueuedHuman?: true } })
   | (ClaudeEventMetadata & { type: 'chat.assistant.text'; data: { text: string } })
   | (ClaudeEventMetadata & { type: 'chat.assistant.thinking'; data: { thinking: string } })
   | (ClaudeEventMetadata & { type: 'tool.use'; data: { toolUseId: string; name: string; input: unknown } })
@@ -231,6 +231,34 @@ export function normalizeClaudeTranscriptRecord(value: unknown): ClaudeNormalize
   const content = message.content ?? record.content;
   const blocks = Array.isArray(content) ? content : [content];
   const events: ClaudeNormalizedEvent[] = [];
+
+  // A prompt accepted from Claude's busy-input queue is not written as a
+  // normal `user` message. At the dequeue boundary Claude appends an
+  // `attachment`/`queued_command` record instead. Treat that consumed human
+  // prompt as the user turn it represents so kteam can correlate its durable
+  // pendingNativeSends entry, advance the tracked turn, and persist a chat row.
+  // `task-notification` queued commands are harness-generated and deliberately
+  // excluded: rendering those as human input would create fake user messages.
+  if (record.type === 'attachment') {
+    const attachment = object(record.attachment);
+    const origin = object(attachment?.origin);
+    const prompt = string(attachment?.prompt);
+    if (
+      attachment?.type === 'queued_command' &&
+      attachment.commandMode === 'prompt' &&
+      origin?.kind === 'human' &&
+      prompt?.trim()
+    ) {
+      return [
+        {
+          ...eventMetadata(record, message),
+          type: 'chat.user',
+          data: { text: prompt, nativeQueuedHuman: true },
+        },
+      ];
+    }
+    return [];
+  }
 
   // Remote Control announcement. Structured (`url`), so no sentence parsing —
   // and it is per-session by construction, unlike the pane line.

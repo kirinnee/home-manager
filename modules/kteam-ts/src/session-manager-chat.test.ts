@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
 import { mkdtemp, rm, stat, writeFile } from 'fs/promises';
 import os from 'os';
 import path from 'path';
@@ -36,6 +37,21 @@ const assistantRecord = (text: string, id: string) =>
     sessionId: 'e8b1f0a2-1111-4222-8333-444455556666',
     timestamp: '2026-07-25T00:00:00.000Z',
     message: { id, role: 'assistant', stop_reason: null, content: [{ type: 'text', text }] },
+  });
+
+const queuedCommandRecord = (text: string) =>
+  JSON.stringify({
+    type: 'attachment',
+    uuid: 'b4c13ff5-4dcf-40f3-b212-5c3bfb5b8bcc',
+    parentUuid: '45a35be7-0629-474f-ba2e-de7570558f0a',
+    sessionId: 'e8b1f0a2-1111-4222-8333-444455556666',
+    timestamp: '2026-07-27T02:00:31.604Z',
+    attachment: {
+      type: 'queued_command',
+      prompt: text,
+      commandMode: 'prompt',
+      origin: { kind: 'human' },
+    },
   });
 
 /** Write a harness-shaped JSONL file and return each line's byte extent. */
@@ -104,6 +120,39 @@ describe('chatHistory service layer', () => {
 
     expect(page.total).toBe(2);
     expect(texts(page.records)).toEqual(['alpha', 'beta']);
+    store.close();
+  });
+
+  test('a normalizer upgrade lazily discovers queued human commands in an unchanged transcript', async () => {
+    const home = await temporaryHome();
+    const file = path.join(home, 'harness.jsonl');
+    const id = 'session-upgrade';
+    await writeTranscript(file, [queuedCommandRecord('Continue from where you left off.')]);
+
+    let store = await EventStore.open({ home, importExisting: false });
+    await store.writeConfig(id, { id, createdAt: '2026-07-27T02:00:00.000Z' });
+    const sourceInfo = await stat(file);
+    store.markChatSource(id, file, sourceInfo);
+    store.close();
+
+    const database = new Database(path.join(home, 'daemon', 'kteam.sqlite'));
+    database
+      .query('UPDATE chat_sources SET normalizer_version = 1 WHERE session_id = ? AND source_file = ?')
+      .run(id, file);
+    database.close();
+
+    store = await EventStore.open({ home, importExisting: false });
+    const manager = bareManager(store, {
+      config: { id, harness: 'claude', turn: 2, transcriptFile: file },
+    });
+    const page = await chatHistory(manager, id);
+
+    expect(page.total).toBe(1);
+    expect(page.records[0]).toMatchObject({
+      type: 'chat.user',
+      data: { text: 'Continue from where you left off.', nativeQueuedHuman: true },
+    });
+    expect(store.chatSourceCurrent(id, file, sourceInfo)).toBe(true);
     store.close();
   });
 

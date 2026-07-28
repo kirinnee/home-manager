@@ -6,15 +6,17 @@ import {
   BottomSheet,
   CLAUDE_EFFORT_LEVELS,
   ClaudeEffortChoices,
-  ClaudeRuntimeChoices,
   RuntimeEffortControls,
   RuntimeModelControls,
+  RuntimeModelChoices,
+  RuntimeReasoningChoices,
+  RuntimeReasoningStep,
   SessionDetails,
+  codexPickerFallbackNeeded,
   isEffortActionUnsupported,
   isRuntimeEndpointUnavailable,
   modelObservationChanged,
   observedModelPresentation,
-  resolveClaudeRuntimeModels,
 } from './SessionDetails';
 import { primeDetailsTab, resetDetailsTabMemory, type DetailsTab } from '../hooks/useDetailsTab';
 
@@ -119,36 +121,124 @@ describe('in-session runtime model controls', () => {
     expect(isRuntimeEndpointUnavailable(new ApiError(409, 'runtime controls require an idle prompt'))).toBe(false);
   });
 
-  test('distinguishes an old wrapper inventory from an explicitly unsupported Claude account', () => {
-    const wrapper = {
-      name: 'claude-auto-probe',
-      harness: 'claude' as const,
-      mode: 'auto' as const,
-      launchable: true,
-      modelHint: 'probe',
-    };
-
-    expect(resolveClaudeRuntimeModels([wrapper], wrapper.name)).toEqual({ kind: 'restart-required' });
-    expect(resolveClaudeRuntimeModels([{ ...wrapper, runtimeModels: [] }], wrapper.name)).toEqual({
-      kind: 'available',
-      choices: [],
-    });
-    expect(resolveClaudeRuntimeModels([], wrapper.name)).toEqual({ kind: 'missing-wrapper' });
-  });
-
-  test('shows a Claude inventory failure instead of leaving the choices loader visible', () => {
+  test('shows a catalog failure instead of leaving the choices loader visible', () => {
     const html = renderToStaticMarkup(
-      <ClaudeRuntimeChoices
+      <RuntimeModelChoices
+        harness="claude"
         choices={null}
-        error="wrapper inventory failed"
-        submitting={false}
+        error="model catalog failed"
+        currentModel={undefined}
+        submittingModel={undefined}
         disabled={false}
         onChoose={() => undefined}
       />,
     );
 
-    expect(html).toContain('Account-aware model choices are unavailable: wrapper inventory failed');
+    expect(html).toContain('Account-aware model choices are unavailable: model catalog failed');
     expect(html).not.toContain('Loading account-aware model choices');
+  });
+
+  test('renders one shared 44px model list with observed-current and requested-row-only pending semantics', () => {
+    const html = renderToStaticMarkup(
+      <RuntimeModelChoices
+        harness="codex"
+        choices={[
+          {
+            value: 'gpt-5.6-sol',
+            label: 'GPT-5.6 Sol',
+            reasoningEfforts: [{ value: 'high' }],
+          },
+          {
+            value: 'gpt-5.5',
+            label: 'GPT-5.5',
+            reasoningEfforts: [{ value: 'medium' }],
+          },
+        ]}
+        error={null}
+        currentModel="gpt-5.6-sol"
+        submittingModel="gpt-5.5"
+        disabled={false}
+        onChoose={() => undefined}
+      />,
+    );
+    const rows = html.match(/<button\b[^>]*>[\s\S]*?<\/button>/g) ?? [];
+    const current = rows.find(row => row.includes('GPT-5.6 Sol'))!;
+    const pending = rows.find(row => row.includes('GPT-5.5'))!;
+
+    expect(current).toContain('Current');
+    expect(current).toContain('aria-current="true"');
+    expect(current).not.toContain('aria-busy="true"');
+    expect(pending).toContain('aria-busy="true"');
+    expect(pending).not.toContain('aria-current="true"');
+    for (const row of rows) {
+      expect(row).toContain('min-h-[44px]');
+      expect(row).toContain('min-w-[44px]');
+    }
+  });
+
+  test('keeps Codex reasoning in authoritative catalog order with current and pending rows distinguished', () => {
+    const html = renderToStaticMarkup(
+      <RuntimeReasoningChoices
+        model={{
+          value: 'gpt-5.6-sol',
+          label: 'GPT-5.6 Sol',
+          defaultReasoningEffort: 'medium',
+          reasoningEfforts: [
+            { value: 'low', description: 'Fast' },
+            { value: 'medium', description: 'Balanced' },
+            { value: 'ultra', description: 'Delegates' },
+          ],
+        }}
+        currentEffort="medium"
+        submittingEffort="ultra"
+        disabled={false}
+        onChoose={() => undefined}
+      />,
+    );
+    const rows = html.match(/<button\b[^>]*>[\s\S]*?<\/button>/g) ?? [];
+    expect(rows.map(row => row.match(/font-semibold[^>]*>([^<]+)/)?.[1])).toEqual(['Low', 'Medium', 'Ultra']);
+    const current = rows[1]!;
+    const pending = rows[2]!;
+    expect(current).toContain('Current');
+    expect(current).toContain('aria-current="true"');
+    expect(current).not.toContain('aria-busy="true"');
+    expect(pending).toContain('aria-busy="true"');
+    expect(pending).not.toContain('aria-current="true"');
+    expect(html).toContain('role="status"');
+    expect(html).toContain('aria-live="polite"');
+    for (const row of rows) {
+      expect(row).toContain('min-h-[44px]');
+      expect(row).toContain('min-w-[44px]');
+    }
+  });
+
+  test('moves focus into the newly rendered reasoning step and keeps a 44px way back', () => {
+    const html = renderToStaticMarkup(
+      <RuntimeReasoningStep
+        model={{ value: 'gpt-5.5', label: 'GPT-5.5', reasoningEfforts: [{ value: 'high' }] }}
+        currentEffort="high"
+        disabled={false}
+        backDisabled={false}
+        onBack={() => undefined}
+        onChoose={() => undefined}
+      />,
+    );
+    const back = (html.match(/<button\b[^>]*>[\s\S]*?<\/button>/g) ?? [])[0]!;
+    expect(back).toContain('autofocus=""');
+    expect(back).toContain('min-h-[44px]');
+    expect(back).toContain('min-w-[44px]');
+  });
+
+  test('keeps the manual picker fallback for legacy errors and successful catalogs missing the observed choice', () => {
+    const loaded = {
+      harness: 'codex' as const,
+      source: 'codex-app-server' as const,
+      choices: [{ value: 'gpt-5.5', label: 'GPT-5.5', reasoningEfforts: [{ value: 'high' }] }],
+    };
+    expect(codexPickerFallbackNeeded(null, new ApiError(404, 'unknown route', 'unknown_route'))).toBe(true);
+    expect(codexPickerFallbackNeeded(loaded, null, undefined, true)).toBe(true);
+    expect(codexPickerFallbackNeeded(loaded, null, loaded.choices[0], true)).toBe(false);
+    expect(codexPickerFallbackNeeded(null, null, undefined, true)).toBe(false); // still loading
   });
 
   test('uses the harness-observed fact and calls stale data last observed rather than falling back to config', () => {
@@ -181,7 +271,7 @@ describe('in-session runtime model controls', () => {
     ).toBe(true);
   });
 
-  test('gives Codex one labelled 44px native model-and-reasoning picker, with no independent effort control', () => {
+  test('loads Codex’s session-scoped catalog instead of handing every choice to Terminal', () => {
     const html = renderToStaticMarkup(
       <RuntimeModelControls
         view={view('codex')}
@@ -194,9 +284,9 @@ describe('in-session runtime model controls', () => {
     );
 
     expect(html).toContain('Switch model in place');
-    expect(html).toContain('Open model + reasoning picker in Terminal');
+    expect(html).toContain('Loading account-aware model choices');
     expect(html).toContain('min-h-[44px]');
-    expect(html).toContain('account-aware native picker');
+    expect(html).not.toContain('Use native picker in Terminal');
     expect(html).not.toContain('autofocus');
   });
 
@@ -242,7 +332,7 @@ describe('in-session runtime model controls', () => {
     );
 
     expect(html).toContain('Wait for an idle prompt before switching model');
-    expect(html).toContain('disabled=""');
+    expect(html).not.toContain('<button');
   });
 
   test('shows Codex’s reported reasoning as an observation, never as a Claude effort control', () => {
@@ -290,11 +380,12 @@ describe('reasoning effort controls', () => {
     expect(html).toContain('saved as the default for new sessions');
   });
 
-  test('Codex reasoning is the native picker hand-off, never a fabricated /reasoning verb', () => {
+  test('Codex reasoning loads the active model’s advertised levels, never a fabricated /reasoning verb', () => {
     const html = renderToStaticMarkup(
       <RuntimeEffortControls view={idle('codex')} canControl onOpenTerminal={() => true} onClose={() => undefined} />,
     );
-    expect(html).toContain('Open model + reasoning picker in Terminal');
+    expect(html).toContain('Loading account-aware reasoning choices');
+    expect(html).not.toContain('Use native picker in Terminal');
     // No Claude-style level grid on a Codex session.
     expect(html).not.toContain('Set reasoning effort to low');
   });

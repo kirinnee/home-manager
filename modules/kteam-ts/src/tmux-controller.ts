@@ -1,6 +1,7 @@
 import { mkdir, readdir, readFile, rm, writeFile } from 'fs/promises';
 import path from 'path';
 import { interactiveHarnessArgs } from './core';
+import { isDaemonSecretEnvironmentKey } from './daemon-secrets';
 import { now, run } from './io';
 import type { KTeamPaths } from './paths';
 import { sessionDir } from './paths';
@@ -1423,11 +1424,11 @@ export class TmuxController {
 
   async launch(config: SessionConfig): Promise<void> {
     if (await this.alive(config.tmuxSession)) throw new Error(`tmux session already exists: ${config.tmuxSession}`);
-    // Forward the daemon's environment into the pane. `tmux new-session`
-    // attaches to a possibly pre-existing tmux server whose global env lacks
-    // the wrapper secrets (MINIMAX_API_KEY, ANTHROPIC_*, ...); without this a
-    // token-based wrapper exports an EMPTY auth token and the TUI silently
-    // boots logged-out while `kteam status` keeps saying "running".
+    // Forward the daemon's non-secret environment into the pane. `tmux
+    // new-session` attaches to a possibly pre-existing server, so ordinary
+    // runtime settings must travel explicitly. Provider credentials do not:
+    // the launcher sources ~/.secrets fresh below, and persisting daemon-loaded
+    // keys here would duplicate them into every durable session directory.
     // The env travels via a generated launcher script, NOT `-e` flags: a full
     // environment as tmux arguments exceeds the server's command length limit
     // ("failed to launch tmux: command too long") on real machines.
@@ -1473,7 +1474,13 @@ export class TmuxController {
     ]);
     const pane: Record<string, string> = {};
     for (const [key, value] of Object.entries(process.env)) {
-      if (value === undefined || managedEnv.has(key) || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+      if (
+        value === undefined ||
+        managedEnv.has(key) ||
+        isDaemonSecretEnvironmentKey(key) ||
+        !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)
+      )
+        continue;
       pane[key] = value;
     }
     pane.KTEAM_HOME = this.paths.home;

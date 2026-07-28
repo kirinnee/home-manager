@@ -401,6 +401,25 @@ describe('inline native-queue synthesis', () => {
   });
 });
 
+describe('Claude native-queue provenance', () => {
+  test('a proven-human queued command bypasses system-text classification', () => {
+    const record = {
+      source: 'claude',
+      type: 'chat.user',
+      timestamp: BASE,
+      data: { text: 'Continue from where you left off.', nativeQueuedHuman: true },
+    } as ChatRecord;
+
+    const block = buildTranscript([record])[0];
+    expect(block?.kind).toBe('user');
+    expect(block?.kind === 'user' ? block.text : '').toBe('Continue from where you left off.');
+  });
+
+  test('the same text without queued-human provenance remains a system row', () => {
+    expect(buildTranscript([user('Continue from where you left off.')])[0]?.kind).toBe('system');
+  });
+});
+
 function toolUse(id: string, name = 'Bash', timestamp = BASE): ChatRecord {
   return { source: 'claude', type: 'tool.use', timestamp, data: { name, input: {}, toolUseId: id } };
 }

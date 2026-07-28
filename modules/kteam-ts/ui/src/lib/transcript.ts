@@ -493,7 +493,12 @@ export function buildTranscript(
       // A genuine human/peer message renders as a user block; a harness-injected
       // system text (classified ONLY when there is no peer attribution, so peer
       // semantics are untouched by construction) collapses to a slim system row.
-      const info = from ? null : classifySystemText(body);
+      // Claude's busy-input queue writes a structured queued-command attachment;
+      // the normalizer marks its human origin explicitly. That provenance must
+      // outrank content heuristics: a human is allowed to send "Continue…" or a
+      // turn-prompt-shaped string without it becoming a fake system row.
+      const nativeQueuedHuman = (r.data as { nativeQueuedHuman?: unknown } | undefined)?.nativeQueuedHuman === true;
+      const info = from || nativeQueuedHuman ? null : classifySystemText(body);
       const turnNumber = info?.label === 'turn prompt' ? Number(/turn-(\d+)\.md/.exec(info.summary ?? '')?.[1]) : NaN;
       const queueId = from ? undefined : queuedFileId(body);
       const merged = Number.isFinite(turnNumber)

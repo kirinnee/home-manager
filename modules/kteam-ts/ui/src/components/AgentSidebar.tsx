@@ -43,6 +43,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDown,
+  CircleAlert,
   ChevronsLeft,
   ChevronsRight,
   Cpu,
@@ -92,6 +93,7 @@ import { useDialogFocus } from '../hooks/useDialogFocus';
 import { useInputModality } from '../hooks/useInputModality';
 import { usePullToSearch } from '../hooks/usePullToSearch';
 import { requestSearchFocus, subscribeSearchFocus } from '../lib/search-focus';
+import { useNeedsYouCount } from '../hooks/useNeedsYou';
 
 /** Expanded width. Wide enough for a task line and a teammate name, narrow
  *  enough that the transcript beside it still reads comfortably at 1280px. */
@@ -523,6 +525,7 @@ export function SidebarRow({
     .split(',')
     .map(s => s.trim())
     .filter(Boolean);
+  const needsYouCount = useNeedsYouCount(cfg.id);
 
   return (
     <li>
@@ -558,6 +561,16 @@ export function SidebarRow({
               size="sm"
               className={cn('min-w-0 flex-1', active && 'text-accent')}
             />
+            {needsYouCount > 0 && (
+              <span
+                aria-label={`${needsYouCount} unresolved needs-you ${needsYouCount === 1 ? 'item' : 'items'}`}
+                title={`${needsYouCount} unresolved needs-you ${needsYouCount === 1 ? 'item' : 'items'}`}
+                className="mono inline-flex shrink-0 items-center gap-[3px] rounded-full border border-warn/40 bg-warn/10 px-1.5 text-2xs font-semibold text-warn"
+              >
+                <CircleAlert size={10} aria-hidden="true" />
+                <span aria-hidden="true">{needsYouCount > 99 ? '99+' : needsYouCount}</span>
+              </span>
+            )}
           </div>
           <div className="mt-0.5 flex min-w-0 items-center gap-xs pl-3.5">
             <span className={cn('mono min-w-0 truncate text-meta', active ? 'text-accent' : 'text-muted')}>

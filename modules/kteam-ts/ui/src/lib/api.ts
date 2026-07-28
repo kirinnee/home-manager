@@ -17,6 +17,7 @@ import type {
   SearchResponse,
   UsageFeedView,
 } from '../types';
+import type { AnalyticsResponse } from '../../../src/analytics-types';
 import { attachmentApiPath, type AttachmentView } from './attachments';
 
 declare global {
@@ -140,7 +141,7 @@ export const api = {
   // one for every delivery of the same message (first try, retry after an error,
   // the interrupt-then-send path) and the daemon applies it exactly once.
   send: (id: string, message: string, now = false, requestId?: string, attachmentIds?: string[]) =>
-    request<SessionView & { disposition?: 'delivered' | 'queued' | 'revived' }>(
+    request<SessionView & { disposition?: 'delivered' | 'queued' | 'revived' | 'queued-for-revive' }>(
       `/v1/sessions/${encodeURIComponent(id)}/send`,
       {
         method: 'POST',
@@ -220,6 +221,8 @@ export const api = {
   wardenReport: (path: string) => request<string>(`/v1/warden/report?path=${encodeURIComponent(path)}`),
   search: (q: string, limit = 30) => request<SearchResponse>(`/v1/search?q=${encodeURIComponent(q)}&limit=${limit}`),
   usage: () => request<UsageFeedView>('/v1/usage'),
+  analytics: (query?: string) =>
+    request<AnalyticsResponse>(query === undefined ? '/v1/analytics' : `/v1/analytics?q=${encodeURIComponent(query)}`),
   wrappers: () => request<WrapperInfo[]>('/v1/wrappers'),
   projects: () => request<ProjectInfo[]>('/v1/projects'),
   createSession: (payload: StartSessionPayload) =>

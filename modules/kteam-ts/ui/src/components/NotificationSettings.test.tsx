@@ -6,6 +6,7 @@ import { describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   NOTIFY_DENIED_NOTE,
+  NOTIFY_IOS_NOTE,
   NOTIFY_KIND_LABELS,
   NOTIFY_SCOPE_NOTE,
   NOTIFY_UNSUPPORTED_NOTE,
@@ -20,6 +21,9 @@ function controls(permission: NotifyPermission, prefs: Partial<NotifyPrefs> = {}
     permission,
     setEnabled: () => Promise.resolve(),
     update: () => undefined,
+    push: { mode: 'local-only', devices: [], currentDeviceId: null },
+    revokeDevice: () => Promise.resolve(),
+    refreshPush: () => Promise.resolve(),
   };
 }
 
@@ -49,6 +53,7 @@ describe('NotificationSettings — quiet by default', () => {
     expect(html).toContain('aria-checked="false"');
     for (const kind of NOTIFY_KINDS) expect(html).not.toContain(NOTIFY_KIND_LABELS[kind].label);
     expect(html).toContain(NOTIFY_SCOPE_NOTE);
+    expect(html).toContain(NOTIFY_IOS_NOTE);
   });
 
   test('enabled in prefs but permission not granted still reads OFF — the switch never lies', () => {
@@ -87,5 +92,28 @@ describe('NotificationSettings — active state', () => {
     const floors = html.match(/min-h-\[44px\]/gu) ?? [];
     expect(switches.length).toBe(7); // master + 4 kinds + 2 scoping
     expect(floors.length).toBeGreaterThanOrEqual(switches.length);
+  });
+
+  test('active Web Push and per-device revocation are stated plainly', () => {
+    const c = controls('granted', { enabled: true });
+    c.push = {
+      mode: 'active',
+      currentDeviceId: 'push-phone',
+      devices: [
+        {
+          id: 'push-phone',
+          deviceName: 'iPhone',
+          createdAt: '2026-07-28T00:00:00.000Z',
+          updatedAt: '2026-07-28T00:00:00.000Z',
+          expirationTime: null,
+          prefs: { events: DEFAULT_NOTIFY_PREFS.events, interactiveOnly: false },
+        },
+      ],
+    };
+    const html = render(c);
+    expect(html).toContain('closed-app delivery is ready');
+    expect(html).toContain('iPhone');
+    expect(html).toContain('· this device');
+    expect(html).toContain('Revoke push notifications for iPhone');
   });
 });

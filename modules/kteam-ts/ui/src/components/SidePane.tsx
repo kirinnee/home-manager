@@ -1,5 +1,6 @@
 // THE UNIFIED SESSION SIDE PANE — one host for every session-scoped companion
-// surface: the in-app browser, files, tasks and pins.
+// surface: browser, files, tasks, pins, terminals, skills, lineage and
+// analytics.
 //
 // The pattern is extracted from InAppBrowser.tsx (the first surface to get it
 // right) and is now the CANONICAL shape for session-scoped side content —
@@ -23,10 +24,12 @@
 // SESSION-SCOPED. Which surface is open (and the browser's destination) is
 // remembered PER SESSION in a module map keyed on session id, so switching
 // sessions can never carry another session's open pane, and returning to a
-// session restores what you had open there. The workspace itself mounts inside
-// each retained session pane (App.tsx keeps visited sessions mounted), so a
-// surface's own internal state — scroll, open file, selected task — survives
-// navigation exactly as long as the session's draft and transcript do.
+// session restores what you had open there. Pane width is intentionally a
+// GLOBAL reader/layout preference, avoiding layout jumps between sessions. The
+// workspace itself mounts inside each retained session pane (App.tsx keeps
+// visited sessions mounted), so a retained surface's own internal state — a
+// browser profile or terminal scrollback — survives navigation exactly as long
+// as the session's draft and transcript do.
 //
 // SURFACES ARE CONTENT, NOT CONTAINERS. Each surface renders its own chrome
 // (heading, close affordance, body) against one small contract; the host owns
@@ -42,41 +45,85 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from 'react';
-import { FolderGit2, ListTodo, X } from 'lucide-react';
+import {
+  ChartNoAxesCombined,
+  FolderGit2,
+  GitFork,
+  Globe2,
+  ListTodo,
+  Pin,
+  Sparkles,
+  SquareTerminal,
+  X,
+  type LucideIcon,
+} from 'lucide-react';
+import {
+  clampSidePaneWidth,
+  getSidePanePreferences,
+  setSidePaneWidth,
+  SIDE_PANE_DEFAULT_WIDTH,
+  SIDE_PANE_MAX_WIDTH,
+  SIDE_PANE_MIN_CHAT_WIDTH,
+  SIDE_PANE_MIN_WIDTH,
+  SIDE_PANE_WORKSPACE_GAP,
+  subscribeSidePanePreferences,
+} from '../lib/side-pane-preferences';
 import { BottomSheet } from './SessionDetails';
 import { Button } from './Primitives';
-import {
-  InAppBrowserContext,
-  InAppBrowserSurface,
-  type BrowserDestination,
-  type InAppBrowserHost,
-} from './InAppBrowser';
+import { InAppBrowserContext, type BrowserDestination, type InAppBrowserHost } from './InAppBrowser';
 import { FilesTab } from './FilesTab';
 import { PinSurface } from './PinSheet';
 import { SessionTasksSurface } from './SessionTasks';
+import { AnalyticsSurface } from './AnalyticsSurface';
+import { LineageSurface } from './LineageSurface';
+import { SkillsSurface } from './SkillsSurface';
+import { SidePaneResizeHandle } from './SidePaneResizeHandle';
+import { SidePaneTabs, sidePanePanelId, sidePaneTabId, type SidePaneTabSpec } from './SidePaneTabs';
+import { UnifiedBrowserSurface } from './UnifiedBrowserSurface';
+import { WebTerminals } from './WebTerminals';
 
-export type SidePaneSurface = 'browser' | 'files' | 'tasks' | 'pins';
+export type SidePaneSurface = 'browser' | 'files' | 'tasks' | 'pins' | 'terminals' | 'skills' | 'lineage' | 'analytics';
 export type SidePanePresentation = 'pane' | 'sheet';
 
+export interface SidePaneSurfaceMeta {
+  label: string;
+  /** Compact visible name; the full label remains the tab's accessible name. */
+  tabLabel: string;
+  closeLabel: string;
+  icon: LucideIcon;
+}
+
 /** What the reader is told opened, and how the sheet dismiss is labelled. */
-export const SIDE_PANE_SURFACES: Record<SidePaneSurface, { label: string; closeLabel: string }> = {
-  browser: { label: 'Link preview', closeLabel: 'Close in-app browser' },
-  files: { label: 'Files', closeLabel: 'Close files' },
-  tasks: { label: 'Tasks', closeLabel: 'Close tasks' },
-  pins: { label: 'Pins', closeLabel: 'Close pins' },
+export const SIDE_PANE_SURFACES: Record<SidePaneSurface, SidePaneSurfaceMeta> = {
+  browser: { label: 'Browser', tabLabel: 'Web', closeLabel: 'Close browser', icon: Globe2 },
+  files: { label: 'Files', tabLabel: 'Files', closeLabel: 'Close files', icon: FolderGit2 },
+  tasks: { label: 'Tasks', tabLabel: 'Tasks', closeLabel: 'Close tasks', icon: ListTodo },
+  pins: { label: 'Pins', tabLabel: 'Pins', closeLabel: 'Close pins', icon: Pin },
+  terminals: { label: 'Terminals', tabLabel: 'Term', closeLabel: 'Close terminals', icon: SquareTerminal },
+  skills: { label: 'Skills', tabLabel: 'Skill', closeLabel: 'Close skills', icon: Sparkles },
+  lineage: { label: 'Lineage', tabLabel: 'Tree', closeLabel: 'Close lineage', icon: GitFork },
+  analytics: {
+    label: 'Analytics',
+    tabLabel: 'Cost',
+    closeLabel: 'Close analytics',
+    icon: ChartNoAxesCombined,
+  },
 };
 
 /** Surfaces that, once opened, stay MOUNTED (hidden) on desktop when the
  *  reader switches surface or closes the pane — for surfaces whose unmount
- *  tears down something expensive or stateful (the incoming remote-browser
- *  stream is the intended member: a live Chrome the human may be logged into).
- *  Empty today on purpose: the current four surfaces are cheap to remount, and
- *  mount-per-open is what resets their transient state (pins relies on it).
- *  Retention is desktop-only — the mobile sheet is a focus-trapped dialog and
- *  must fully unmount on close. */
-export const RETAINED_SURFACES: ReadonlySet<SidePaneSurface> = new Set<SidePaneSurface>();
+ *  tears down something expensive or stateful. Members: `terminals` (each open
+ *  terminal holds a live WebSocket and an xterm scrollback buffer; unmounting
+ *  per open would drop scrollback and churn reconnects) and `browser` (a live
+ *  Chrome/profile the human may be logged into).
+ *  Everything else stays mount-per-open on purpose — that is what resets
+ *  transient state (pins relies on it). Skills likewise remounts so its dynamic
+ *  account catalog refreshes. Retention is desktop-only — the mobile sheet is
+ *  a focus-trapped dialog and must fully unmount on close. */
+export const RETAINED_SURFACES: ReadonlySet<SidePaneSurface> = new Set<SidePaneSurface>(['browser', 'terminals']);
 
 /** The spoken confirmation for a surface opening. Desktop names WHERE it
  *  opened, because the reader's context did not change — the conversation is
@@ -244,6 +291,54 @@ function TasksSurface({ sessionId, presentation, titleId, onClose }: SurfaceProp
   );
 }
 
+function LineagePaneSurface({ sessionId, presentation, titleId, onClose }: SurfaceProps) {
+  return (
+    <>
+      <SurfaceHeader
+        icon={<GitFork size={17} />}
+        label="Lineage"
+        titleId={titleId}
+        presentation={presentation}
+        onClose={onClose}
+        closeLabel={SIDE_PANE_SURFACES.lineage.closeLabel}
+      />
+      <LineageSurface sessionId={sessionId} />
+    </>
+  );
+}
+
+function AnalyticsPaneSurface({ sessionId, presentation, titleId, onClose }: SurfaceProps) {
+  return (
+    <>
+      <SurfaceHeader
+        icon={<ChartNoAxesCombined size={17} />}
+        label="Analytics"
+        titleId={titleId}
+        presentation={presentation}
+        onClose={onClose}
+        closeLabel={SIDE_PANE_SURFACES.analytics.closeLabel}
+      />
+      <AnalyticsSurface sessionId={sessionId} />
+    </>
+  );
+}
+
+function TerminalsSurface({ sessionId, cwd, presentation, titleId, onClose }: SurfaceProps & { cwd?: string }) {
+  return (
+    <>
+      <SurfaceHeader
+        icon={<SquareTerminal size={17} />}
+        label="Terminals"
+        titleId={titleId}
+        presentation={presentation}
+        onClose={onClose}
+        closeLabel={SIDE_PANE_SURFACES.terminals.closeLabel}
+      />
+      <WebTerminals sessionId={sessionId} cwd={cwd} />
+    </>
+  );
+}
+
 function SurfaceBody({
   surface,
   sessionId,
@@ -252,6 +347,8 @@ function SurfaceBody({
   presentation,
   titleId,
   onClose,
+  onInsertSkill,
+  isActive,
 }: {
   surface: SidePaneSurface;
   sessionId: string;
@@ -260,14 +357,21 @@ function SurfaceBody({
   presentation: SidePanePresentation;
   titleId: string;
   onClose: () => void;
+  onInsertSkill: (invocation: string) => void;
+  isActive: boolean;
 }) {
   switch (surface) {
     case 'browser':
-      // A browser open without a destination cannot happen through the UI
-      // (links are the only opener); render nothing rather than a broken frame.
-      return browser ? (
-        <InAppBrowserSurface destination={browser} onClose={onClose} presentation={presentation} titleId={titleId} />
-      ) : null;
+      return (
+        <UnifiedBrowserSurface
+          sessionId={sessionId}
+          destination={browser}
+          presentation={presentation}
+          titleId={titleId}
+          onClose={onClose}
+          isActive={isActive}
+        />
+      );
     case 'files':
       return (
         <FilesSurface sessionId={sessionId} cwd={cwd} presentation={presentation} titleId={titleId} onClose={onClose} />
@@ -278,50 +382,98 @@ function SurfaceBody({
       return (
         <PinSurface sessionId={sessionId} presentation={presentation} titleId={titleId} onRequestClose={onClose} />
       );
+    case 'skills':
+      return (
+        <SkillsSurface
+          sessionId={sessionId}
+          presentation={presentation}
+          titleId={titleId}
+          onClose={onClose}
+          onInsert={onInsertSkill}
+        />
+      );
+    case 'terminals':
+      return (
+        <TerminalsSurface
+          sessionId={sessionId}
+          cwd={cwd}
+          presentation={presentation}
+          titleId={titleId}
+          onClose={onClose}
+        />
+      );
+    case 'lineage':
+      return (
+        <LineagePaneSurface sessionId={sessionId} presentation={presentation} titleId={titleId} onClose={onClose} />
+      );
+    case 'analytics':
+      return (
+        <AnalyticsPaneSurface sessionId={sessionId} presentation={presentation} titleId={titleId} onClose={onClose} />
+      );
   }
 }
 
 // ---- the desktop pane shell ------------------------------------------------------
 
+const IGNORE_RESIZE = (_width: number) => undefined;
+
 /** Desktop's non-modal half of the workspace: the conversation stays visible
- *  and usable. Extracted verbatim from InAppBrowserPane — same geometry, same
- *  local-only Escape, same `role="complementary"`, no `aria-modal`. */
+ *  and usable. The resize gutter is a sibling of the semantic aside so its
+ *  16px hit target can straddle the border without being clipped. */
 export function SidePaneShell({
   id,
   titleId,
   onClose,
+  width = SIDE_PANE_DEFAULT_WIDTH,
+  onWidthPreview = IGNORE_RESIZE,
+  onWidthCommit = IGNORE_RESIZE,
   hidden = false,
   children,
 }: {
   id: string;
   titleId: string;
   onClose: () => void;
+  width?: number;
+  onWidthPreview?: (width: number) => void;
+  onWidthCommit?: (width: number) => void;
   /** True when the pane is CLOSED but still hosts retained (hidden) surfaces:
    *  it keeps their DOM alive while costing no layout, paint, or tab stop —
    *  the visibility technique App.tsx uses for retained session panes. */
   hidden?: boolean;
   children: ReactNode;
 }) {
+  const preferredWidth = clampSidePaneWidth(width);
   return (
-    <aside
-      id={id}
-      role="complementary"
-      aria-labelledby={hidden ? undefined : titleId}
-      aria-hidden={hidden ? true : undefined}
+    <div
       onKeyDown={event => {
         if (event.key !== 'Escape') return;
         event.stopPropagation();
         onClose();
       }}
       className={
-        hidden
-          ? 'pointer-events-none invisible absolute w-0 overflow-hidden'
-          : 'mb-2 flex min-h-0 shrink-0 flex-col overflow-hidden rounded-panel border border-border bg-surface shadow-panel'
+        hidden ? 'pointer-events-none invisible absolute w-0 overflow-hidden' : 'relative mb-2 min-h-0 shrink-0'
       }
-      style={hidden ? undefined : { width: 'clamp(320px, 44%, 680px)' }}
+      style={
+        hidden
+          ? undefined
+          : {
+              width: `${preferredWidth}px`,
+              minWidth: `${SIDE_PANE_MIN_WIDTH}px`,
+              maxWidth: `min(${SIDE_PANE_MAX_WIDTH}px, calc(100% - ${SIDE_PANE_MIN_CHAT_WIDTH + SIDE_PANE_WORKSPACE_GAP}px))`,
+            }
+      }
     >
-      {children}
-    </aside>
+      {!hidden && <SidePaneResizeHandle width={preferredWidth} onPreview={onWidthPreview} onCommit={onWidthCommit} />}
+      <aside
+        id={id}
+        role="complementary"
+        aria-labelledby={hidden ? undefined : titleId}
+        aria-hidden={hidden ? true : undefined}
+        className="flex h-full min-h-0 w-full flex-col overflow-hidden rounded-panel border border-border bg-surface shadow-panel"
+      >
+        {children}
+      </aside>
+    </div>
   );
 }
 
@@ -365,11 +517,14 @@ export function SidePaneTrigger({
  *   - the InAppBrowser link context, so a transcript link tap opens the
  *     browser surface through the same host.
  */
+const IGNORE_SKILL_INSERT = (_invocation: string) => undefined;
+
 export function SidePaneWorkspace({
   sessionId,
   compact,
   active = true,
   cwd,
+  onInsertSkill = IGNORE_SKILL_INSERT,
   children,
 }: {
   sessionId: string;
@@ -379,6 +534,8 @@ export function SidePaneWorkspace({
    *  presentation is non-modal and safely retained, the sheet is not. */
   active?: boolean;
   cwd?: string;
+  /** Draft-only boundary: Skills can insert an invocation but cannot submit. */
+  onInsertSkill?: (invocation: string) => void;
   children: ReactNode;
 }) {
   const generatedId = useId();
@@ -386,12 +543,38 @@ export function SidePaneWorkspace({
   const titleId = `${paneId}-title`;
   const openerRef = useRef<HTMLElement | null>(null);
   const [state, setState] = useState<SidePaneSnapshot>(() => readSidePaneState(sessionId));
+  const storedPreferences = useSyncExternalStore(
+    subscribeSidePanePreferences,
+    getSidePanePreferences,
+    getSidePanePreferences,
+  );
+  // Preview is local to this workspace: retained sessions do not re-render on
+  // every drag tick. The global preference publishes only at drag end.
+  const [previewWidth, setPreviewWidth] = useState<number | null>(null);
+  const paneWidth = previewWidth ?? storedPreferences.width;
+  const commitPaneWidth = useCallback((width: number) => {
+    setSidePaneWidth(width);
+    setPreviewWidth(null);
+  }, []);
   // RETAINED_SURFACES members that have been opened in this workspace's life.
   // They stay mounted (hidden) on desktop after the reader moves away, so
   // switching surface never tears down a live remote session. Bounded by the
   // retained set's size and reset with the workspace (session pane eviction).
   const [everRetained, setEverRetained] = useState<ReadonlySet<SidePaneSurface>>(() => new Set());
   const presentation: SidePanePresentation = compact ? 'sheet' : 'pane';
+  const tabSpecs = useMemo<readonly SidePaneTabSpec<SidePaneSurface>[]>(
+    () =>
+      (Object.entries(SIDE_PANE_SURFACES) as Array<[SidePaneSurface, SidePaneSurfaceMeta]>).map(([key, meta]) => {
+        const Icon = meta.icon;
+        return {
+          key,
+          label: meta.label,
+          shortLabel: meta.tabLabel,
+          icon: <Icon size={15} aria-hidden="true" />,
+        };
+      }),
+    [],
+  );
   useEffect(() => {
     const surface = state.surface;
     if (!surface || compact || !RETAINED_SURFACES.has(surface)) return;
@@ -476,15 +659,24 @@ export function SidePaneWorkspace({
   const sheetSurface = state.surface ?? lastSurfaceRef.current;
   const displaySurface = compact ? sheetSurface : state.surface;
   const body = displaySurface && !(RETAINED_SURFACES.has(displaySurface) && !compact) && (
-    <SurfaceBody
-      surface={displaySurface}
-      sessionId={sessionId}
-      cwd={cwd}
-      browser={state.browser}
-      presentation={presentation}
-      titleId={titleId}
-      onClose={close}
-    />
+    <div
+      id={sidePanePanelId(paneId, displaySurface)}
+      role="tabpanel"
+      aria-labelledby={sidePaneTabId(paneId, displaySurface)}
+      className="flex min-h-0 flex-1 flex-col"
+    >
+      <SurfaceBody
+        surface={displaySurface}
+        sessionId={sessionId}
+        cwd={cwd}
+        browser={state.browser}
+        presentation={presentation}
+        titleId={titleId}
+        onClose={close}
+        onInsertSkill={onInsertSkill}
+        isActive={active && state.surface === displaySurface}
+      />
+    </div>
   );
   // Retained surfaces render OUTSIDE the mount-per-open body: each one stays
   // in the DOM once opened (visibility:hidden while not the open surface, the
@@ -500,6 +692,9 @@ export function SidePaneWorkspace({
     ? retainedList.map(surface => (
         <div
           key={surface}
+          id={sidePanePanelId(paneId, surface)}
+          role="tabpanel"
+          aria-labelledby={sidePaneTabId(paneId, surface)}
           aria-hidden={state.surface === surface ? undefined : true}
           className={
             state.surface === surface
@@ -515,6 +710,8 @@ export function SidePaneWorkspace({
             presentation={presentation}
             titleId={state.surface === surface ? titleId : `${titleId}-retained-${surface}`}
             onClose={close}
+            onInsertSkill={onInsertSkill}
+            isActive={active && state.surface === surface}
           />
         </div>
       ))
@@ -527,7 +724,18 @@ export function SidePaneWorkspace({
         <div className="flex h-full min-h-0 min-w-0 w-full gap-2">
           <div className="min-h-0 min-w-0 flex-1">{children}</div>
           {paneVisible && (
-            <SidePaneShell id={paneId} titleId={titleId} onClose={close} hidden={!surfaceOpen}>
+            <SidePaneShell
+              id={paneId}
+              titleId={titleId}
+              onClose={close}
+              width={paneWidth}
+              onWidthPreview={setPreviewWidth}
+              onWidthCommit={commitPaneWidth}
+              hidden={!surfaceOpen}
+            >
+              {state.surface && (
+                <SidePaneTabs paneId={paneId} tabs={tabSpecs} current={state.surface} onSelect={open} />
+              )}
               {body}
               {retainedBodies}
             </SidePaneShell>
@@ -547,6 +755,7 @@ export function SidePaneWorkspace({
             maxHeight="calc(var(--app-h, 100dvh) - var(--gap-xs))"
             zIndexClass="z-[70]"
           >
+            <SidePaneTabs paneId={paneId} tabs={tabSpecs} current={sheetSurface} onSelect={open} />
             {body}
           </BottomSheet>
         )}

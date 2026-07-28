@@ -180,6 +180,7 @@ describe('AnalyticsIndex', () => {
     });
     insertSession(source, { id: 's2', status: 'failed', turn: 1, contextPercent: 25 });
     source.query(`INSERT INTO events VALUES ('s1', 1, '2026-07-01T00:05:00.000Z', 'session.stalled', 0, 1)`).run();
+    source.query(`INSERT INTO events VALUES ('s1', 2, '2026-07-01T00:06:00.000Z', 'session.migrated', 1, 1)`).run();
     source
       .query(
         `
@@ -215,6 +216,10 @@ describe('AnalyticsIndex', () => {
     expect(raw.results[0]?.durationMs).toBeCloseTo(602_000, -1);
     expect(raw.results[0]?.timeToFirstOutputMs).toBeCloseTo(5_000, -1);
     expect(raw.results[0]?.week).toBe('2026-W27');
+    expect(raw.results[0]?.migrated).toBe(true);
+    const selected = index.query('{id=s1}');
+    expect(selected.scope.matched).toBe(1);
+    expect(selected.kind === 'raw' && selected.results[0]?.id).toBe('s1');
 
     const state = { id: 's2', status: 'completed', startedAt: '2026-07-01T00:00:00.000Z', turn: 3 };
     source.query(`UPDATE sessions SET status = 'completed', state_json = ? WHERE id = 's2'`).run(JSON.stringify(state));
@@ -222,6 +227,13 @@ describe('AnalyticsIndex', () => {
     expect(filtered.scope.matched).toBe(2);
     expect(filtered.kind === 'aggregate' && filtered.results[0]?.rates.completion).toBe(100);
     expect(filtered.kind === 'aggregate' && filtered.results[0]?.tokens).toEqual({ value: null, known: 0, total: 0 });
+
+    const beforeMigration = index.query('{id=s2}');
+    expect(beforeMigration.kind === 'raw' && beforeMigration.results[0]?.migrated).toBe(false);
+    source.query(`INSERT INTO events VALUES ('s2', 1, '2026-07-01T00:07:00.000Z', 'session.started', 0, 1)`).run();
+    source.query(`UPDATE events SET type = 'session.migrating' WHERE session_id = 's2' AND sequence = 1`).run();
+    const afterMigration = index.query('{id=s2}');
+    expect(afterMigration.kind === 'raw' && afterMigration.results[0]?.migrated).toBe(true);
     source.close();
   });
 
@@ -247,17 +259,26 @@ describe('AnalyticsIndex', () => {
       type: 'assistant',
       message: {
         id: 'msg-a',
+        model: 'claude-transcript-model',
         usage: {
           input_tokens: 10,
           cache_read_input_tokens: 20,
           cache_creation_input_tokens: 5,
+          cache_creation: {
+            ephemeral_5m_input_tokens: 3,
+            ephemeral_1h_input_tokens: 2,
+          },
           output_tokens: 7,
         },
       },
     });
     const claudeB = JSON.stringify({
       type: 'assistant',
-      message: { id: 'msg-b', usage: { input_tokens: 1, output_tokens: 2 } },
+      message: {
+        id: 'msg-b',
+        model: 'claude-transcript-model',
+        usage: { input_tokens: 1, output_tokens: 2 },
+      },
     });
     await writeFile(claudeFile, `${claudeA}\n${claudeA}\n${claudeB}\n`);
     const codex = (input: number, output: number, cached = 0) =>
@@ -268,7 +289,8 @@ describe('AnalyticsIndex', () => {
           info: { total_token_usage: { input_tokens: input, output_tokens: output, cached_input_tokens: cached } },
         },
       });
-    await writeFile(codexFile, `${codex(10, 2)}\n${codex(20, 5, 8)}\n`);
+    const codexContext = (model: string) => JSON.stringify({ type: 'turn_context', payload: { model } });
+    await writeFile(codexFile, `${codexContext('gpt-transcript-1')}\n${codex(10, 2)}\n${codex(20, 5, 8)}\n`);
     insertSession(source, {
       id: 'claude',
       status: 'completed',
@@ -309,9 +331,15 @@ describe('AnalyticsIndex', () => {
     expect(claudeRaw.results[0]?.inputTokens).toBe(36);
     expect(claudeRaw.results[0]?.outputTokens).toBe(9);
     expect(claudeRaw.results[0]?.tokens).toBe(45);
+    expect(claudeRaw.results[0]?.cacheWriteInputTokens).toBe(5);
+    expect(claudeRaw.results[0]?.cacheWrite5mInputTokens).toBe(3);
+    expect(claudeRaw.results[0]?.cacheWrite1hInputTokens).toBe(2);
+    expect(claudeRaw.results[0]?.pricingModel).toBe('claude-transcript-model');
 
     const codexRaw = index.query('{model=gpt-5.6-sol}');
     expect(codexRaw.kind === 'raw' && codexRaw.results[0]?.tokens).toBe(25);
+    expect(codexRaw.kind === 'raw' && codexRaw.results[0]?.pricingModel).toBe('gpt-transcript-1');
+    expect(codexRaw.kind === 'raw' && codexRaw.results[0]?.cacheWrite5mInputTokens).toBeNull();
 
     // A source growth invalidates the confident value until its byte cursor catches up.
     await appendFile(codexFile, `${codex(30, 8, 12)}\n`);
@@ -329,10 +357,11 @@ describe('AnalyticsIndex', () => {
     await index.refreshTokens({ byteBudget: 1024 * 1024, sourceLimit: 10 });
     const updated = index.query('{model=gpt-5.6-sol}');
     expect(updated.kind === 'raw' && updated.results[0]?.tokens).toBe(38);
+    expect(updated.kind === 'raw' && updated.results[0]?.pricingModel).toBe('gpt-transcript-1');
 
     // Rewriting a transcript in place can preserve its inode and byte length.
     // The cursor anchor must still invalidate and rebuild the cumulative total.
-    const rewrittenTranscript = `${codex(11, 1)}\n${codex(22, 4, 7)}\n${codex(50, 9, 13)}\n`;
+    const rewrittenTranscript = `${codexContext('gpt-transcript-2')}\n${codex(11, 1)}\n${codex(22, 4, 7)}\n${codex(50, 9, 13)}\n`;
     expect(Buffer.byteLength(rewrittenTranscript)).toBe(grown.size);
     await writeFile(codexFile, rewrittenTranscript);
     const rewriteTime = new Date(grown.mtimeMs + 2_000);
@@ -357,6 +386,238 @@ describe('AnalyticsIndex', () => {
     await index.refreshTokens({ byteBudget: 1024 * 1024, sourceLimit: 10 });
     const afterRewrite = index.query('{model=gpt-5.6-sol}');
     expect(afterRewrite.kind === 'raw' && afterRewrite.results[0]?.tokens).toBe(59);
+    expect(afterRewrite.kind === 'raw' && afterRewrite.results[0]?.pricingModel).toBe('gpt-transcript-2');
+    source.close();
+  });
+
+  test('keeps gross cache writes known while tracking exact Claude TTL splits', async () => {
+    const { root, file, source } = await fixture();
+    const exactFile = path.join(root, 'ttl-exact.jsonl');
+    const unknownFile = path.join(root, 'ttl-unknown.jsonl');
+    const zeroFile = path.join(root, 'ttl-zero.jsonl');
+    const claudeUsage = (id: string, model: string, cacheWrite: number, cacheCreation?: Record<string, unknown>) =>
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          id,
+          model,
+          usage: {
+            input_tokens: 2,
+            output_tokens: 1,
+            cache_creation_input_tokens: cacheWrite,
+            ...(cacheCreation === undefined ? {} : { cache_creation: cacheCreation }),
+          },
+        },
+      });
+    const exact = claudeUsage('exact', 'claude-price-model', 10, {
+      ephemeral_5m_input_tokens: 4,
+      ephemeral_1h_input_tokens: 6,
+    });
+    await writeFile(exactFile, `${exact}\n${exact}\n`);
+    await writeFile(
+      unknownFile,
+      `${claudeUsage('known-prefix', 'claude-price-model', 1, {
+        ephemeral_5m_input_tokens: 1,
+        ephemeral_1h_input_tokens: 0,
+      })}\n${claudeUsage('unknown', 'claude-price-model', 9)}\n`,
+    );
+    await writeFile(zeroFile, `${claudeUsage('zero', 'claude-price-model', 0)}\n`);
+    insertSession(source, {
+      id: 'ttl-exact',
+      status: 'completed',
+      model: 'config-exact',
+      transcriptFile: exactFile,
+      finishedAt: '2026-07-01T00:01:00.000Z',
+    });
+    insertSession(source, {
+      id: 'ttl-unknown',
+      status: 'completed',
+      model: 'config-unknown',
+      transcriptFile: unknownFile,
+      finishedAt: '2026-07-01T00:01:00.000Z',
+    });
+    insertSession(source, {
+      id: 'ttl-zero',
+      status: 'completed',
+      model: 'config-zero',
+      transcriptFile: zeroFile,
+      finishedAt: '2026-07-01T00:01:00.000Z',
+    });
+    addChatSource(source, 'ttl-exact', exactFile, await stat(exactFile));
+
+    const index = new AnalyticsIndex({ databasePath: file });
+    opened.push(index);
+    const refreshed = await index.refreshTokens({ byteBudget: 1024 * 1024, sourceLimit: 10 });
+    expect(refreshed.errors).toBe(0);
+
+    const exactRaw = index.query('{id=ttl-exact}');
+    expect(exactRaw.kind === 'raw' && exactRaw.results[0]?.cacheWriteInputTokens).toBe(10);
+    expect(exactRaw.kind === 'raw' && exactRaw.results[0]?.cacheWrite5mInputTokens).toBe(4);
+    expect(exactRaw.kind === 'raw' && exactRaw.results[0]?.cacheWrite1hInputTokens).toBe(6);
+    const unknownRaw = index.query('{id=ttl-unknown}');
+    expect(unknownRaw.kind === 'raw' && unknownRaw.results[0]?.cacheWriteInputTokens).toBe(10);
+    expect(unknownRaw.kind === 'raw' && unknownRaw.results[0]?.cacheWrite5mInputTokens).toBeNull();
+    expect(unknownRaw.kind === 'raw' && unknownRaw.results[0]?.cacheWrite1hInputTokens).toBeNull();
+    const zeroRaw = index.query('{id=ttl-zero}');
+    expect(zeroRaw.kind === 'raw' && zeroRaw.results[0]?.cacheWriteInputTokens).toBe(0);
+    expect(zeroRaw.kind === 'raw' && zeroRaw.results[0]?.cacheWrite5mInputTokens).toBe(0);
+    expect(zeroRaw.kind === 'raw' && zeroRaw.results[0]?.cacheWrite1hInputTokens).toBe(0);
+
+    const aggregate = index.query('sum by (wrapper)');
+    expect(aggregate.kind).toBe('aggregate');
+    if (aggregate.kind !== 'aggregate') throw new Error('expected aggregate');
+    expect(aggregate.results[0]?.cacheWriteInputTokens).toEqual({ value: 20, known: 3, total: 3 });
+    expect(aggregate.results[0]?.cacheWrite5mInputTokens).toEqual({ value: null, known: 2, total: 3 });
+    expect(aggregate.results[0]?.cacheWrite1hInputTokens).toEqual({ value: null, known: 2, total: 3 });
+
+    await writeFile(exactFile, `${claudeUsage('replacement', 'claude-new-model', 0)}\n`);
+    const rewritten = await stat(exactFile);
+    source
+      .query(
+        `
+        UPDATE chat_sources SET source_size = ?, source_mtime_ms = ?, device = ?, inode = ?
+        WHERE session_id = 'ttl-exact' AND source_file = ?
+      `,
+      )
+      .run(rewritten.size, rewritten.mtimeMs, rewritten.dev.toString(), rewritten.ino.toString(), exactFile);
+    const invalidated = index.query('{id=ttl-exact}');
+    expect(invalidated.kind === 'raw' && invalidated.results[0]?.pricingModel).toBeNull();
+    expect(invalidated.kind === 'raw' && invalidated.results[0]?.cacheWrite5mInputTokens).toBeNull();
+    await index.refreshTokens({ byteBudget: 1024 * 1024, sourceLimit: 10 });
+    const afterRewrite = index.query('{id=ttl-exact}');
+    expect(afterRewrite.kind === 'raw' && afterRewrite.results[0]?.cacheWriteInputTokens).toBe(0);
+    expect(afterRewrite.kind === 'raw' && afterRewrite.results[0]?.cacheWrite5mInputTokens).toBe(0);
+    expect(afterRewrite.kind === 'raw' && afterRewrite.results[0]?.cacheWrite1hInputTokens).toBe(0);
+    expect(afterRewrite.kind === 'raw' && afterRewrite.results[0]?.pricingModel).toBe('claude-new-model');
+    source.close();
+  });
+
+  test('does not price mixed or model-less Claude and Codex usage', async () => {
+    const { root, file, source } = await fixture();
+    const claudeMixedFile = path.join(root, 'claude-mixed.jsonl');
+    const claudeMissingFile = path.join(root, 'claude-missing.jsonl');
+    const codexMixedFile = path.join(root, 'codex-mixed.jsonl');
+    const codexMissingFile = path.join(root, 'codex-missing.jsonl');
+    const claude = (id: string, model?: string) =>
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          id,
+          ...(model === undefined ? {} : { model }),
+          usage: { input_tokens: 2, output_tokens: 1 },
+        },
+      });
+    const context = (model: string) => JSON.stringify({ type: 'turn_context', payload: { model } });
+    const codex = (input: number, output: number) =>
+      JSON.stringify({
+        type: 'event_msg',
+        payload: { type: 'token_count', info: { total_token_usage: { input_tokens: input, output_tokens: output } } },
+      });
+    await writeFile(claudeMixedFile, `${claude('a', 'claude-a')}\n${claude('b', 'claude-b')}\n`);
+    await writeFile(claudeMissingFile, `${claude('missing')}\n`);
+    await writeFile(codexMixedFile, `${context('gpt-a')}\n${codex(2, 1)}\n${context('gpt-b')}\n${codex(5, 2)}\n`);
+    await writeFile(codexMissingFile, `${codex(2, 1)}\n${context('gpt-late')}\n${codex(5, 2)}\n`);
+    const cases = [
+      { id: 'claude-mixed', harness: 'claude' as const, transcriptFile: claudeMixedFile },
+      { id: 'claude-missing', harness: 'claude' as const, transcriptFile: claudeMissingFile },
+      { id: 'codex-mixed', harness: 'codex' as const, transcriptFile: codexMixedFile },
+      { id: 'codex-missing', harness: 'codex' as const, transcriptFile: codexMissingFile },
+    ];
+    for (const item of cases)
+      insertSession(source, {
+        ...item,
+        status: 'completed',
+        model: `mutable-config-${item.id}`,
+        finishedAt: '2026-07-01T00:01:00.000Z',
+      });
+
+    const index = new AnalyticsIndex({ databasePath: file });
+    opened.push(index);
+    const refreshed = await index.refreshTokens({ byteBudget: 1024 * 1024, sourceLimit: 10 });
+    expect(refreshed.errors).toBe(0);
+    for (const item of cases) {
+      const raw = index.query(`{id=${item.id}}`);
+      expect(raw.kind === 'raw' && raw.results[0]?.tokens).not.toBeNull();
+      expect(raw.kind === 'raw' && raw.results[0]?.pricingModel).toBeNull();
+    }
+    source.close();
+  });
+
+  test('persists Codex model evidence across bounded cursors and clears it on reset', async () => {
+    const { root, file, source } = await fixture();
+    const transcript = path.join(root, 'codex-cursor.jsonl');
+    const context = JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-cursor-model' } });
+    const codex = (input: number, output: number) =>
+      JSON.stringify({
+        type: 'event_msg',
+        payload: { type: 'token_count', info: { total_token_usage: { input_tokens: input, output_tokens: output } } },
+      });
+    const prefixStart = `${context}\n${codex(2, 1)}\n`;
+    const emptyPaddingLine = `${JSON.stringify({ padding: '' })}\n`;
+    const firstCursorBytes = 64 * 1024;
+    const paddingLength = firstCursorBytes - Buffer.byteLength(prefixStart) - Buffer.byteLength(emptyPaddingLine);
+    expect(paddingLength).toBeGreaterThan(0);
+    const prefix = `${prefixStart}${JSON.stringify({ padding: 'x'.repeat(paddingLength) })}\n`;
+    expect(Buffer.byteLength(prefix)).toBe(firstCursorBytes);
+    await writeFile(transcript, `${prefix}${codex(9, 3)}\n`);
+    insertSession(source, {
+      id: 'codex-cursor',
+      status: 'completed',
+      harness: 'codex',
+      model: 'mutable-config-model',
+      transcriptFile: transcript,
+      finishedAt: '2026-07-01T00:01:00.000Z',
+    });
+    addChatSource(source, 'codex-cursor', transcript, await stat(transcript));
+
+    const index = new AnalyticsIndex({ databasePath: file });
+    opened.push(index);
+    const first = await index.refreshTokens({ byteBudget: firstCursorBytes, sourceLimit: 1 });
+    expect(first.bytes).toBe(firstCursorBytes);
+    expect(first.pending).toBe(1);
+    const incomplete = index.query('{id=codex-cursor}');
+    expect(incomplete.kind === 'raw' && incomplete.results[0]?.pricingModel).toBeNull();
+    const cursorState = source
+      .query(
+        `
+        SELECT byte_offset, codex_current_model, pricing_model, pricing_model_ambiguous
+        FROM analytics_usage_sources WHERE session_id = 'codex-cursor'
+      `,
+      )
+      .get() as {
+      byte_offset: number;
+      codex_current_model: string | null;
+      pricing_model: string | null;
+      pricing_model_ambiguous: number;
+    };
+    expect(cursorState).toEqual({
+      byte_offset: firstCursorBytes,
+      codex_current_model: 'gpt-cursor-model',
+      pricing_model: 'gpt-cursor-model',
+      pricing_model_ambiguous: 0,
+    });
+
+    await index.refreshTokens({ byteBudget: firstCursorBytes, sourceLimit: 1 });
+    const complete = index.query('{id=codex-cursor}');
+    expect(complete.kind === 'raw' && complete.results[0]?.tokens).toBe(12);
+    expect(complete.kind === 'raw' && complete.results[0]?.pricingModel).toBe('gpt-cursor-model');
+
+    await writeFile(transcript, `${codex(4, 2)}\n`);
+    const rewritten = await stat(transcript);
+    source
+      .query(
+        `
+        UPDATE chat_sources SET source_size = ?, source_mtime_ms = ?, device = ?, inode = ?
+        WHERE session_id = 'codex-cursor' AND source_file = ?
+      `,
+      )
+      .run(rewritten.size, rewritten.mtimeMs, rewritten.dev.toString(), rewritten.ino.toString(), transcript);
+    const invalidated = index.query('{id=codex-cursor}');
+    expect(invalidated.kind === 'raw' && invalidated.results[0]?.pricingModel).toBeNull();
+    await index.refreshTokens({ byteBudget: firstCursorBytes, sourceLimit: 1 });
+    const afterReset = index.query('{id=codex-cursor}');
+    expect(afterReset.kind === 'raw' && afterReset.results[0]?.tokens).toBe(6);
+    expect(afterReset.kind === 'raw' && afterReset.results[0]?.pricingModel).toBeNull();
     source.close();
   });
 

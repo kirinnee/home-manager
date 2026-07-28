@@ -51,6 +51,8 @@ import { useDictationBundle } from './DictationControl';
 import { ComposerAutocompletePopover } from './ComposerAutocomplete';
 import { useComposerAutocomplete, type ComposerAutocompleteController } from './composer-autocomplete-engine';
 import { createComposerAutocompleteProviders } from './composer-autocomplete-providers';
+import { COMPOSER_TEXT_METRICS, ComposerHighlight, syncComposerHighlightViewport } from './ComposerHighlight';
+import { useMdComposePref } from '../lib/md-compose';
 
 /** Quiet window before a non-empty draft is written to storage. Debounced so a
  *  fast typist does not hit localStorage on every keystroke; short enough that a
@@ -331,6 +333,8 @@ export function ComposerTextarea({
   sending,
   placeholder,
   autocomplete,
+  highlighted,
+  syncHighlight,
   readModality = readInputModality,
 }: {
   inputRef: RefObject<HTMLTextAreaElement | null>;
@@ -344,6 +348,10 @@ export function ComposerTextarea({
   /** The trigger engine, when this composer has one. Optional so an SSR or
    *  test render stays a plain textarea with no behaviour change. */
   autocomplete?: Pick<ComposerAutocompleteController, 'handleKeyDown' | 'syncSelection' | 'textareaAria'>;
+  /** Paint comes from an aria-hidden sibling; this remains the native input. */
+  highlighted?: boolean;
+  /** Scroll/input callback for the paint-only sibling. Selection is untouched. */
+  syncHighlight?(input: HTMLTextAreaElement): void;
   readModality?: typeof readInputModality;
 }) {
   // The engine detects from `value` + caret, and the caret only moves in the
@@ -360,7 +368,10 @@ export function ComposerTextarea({
       onChange={e => {
         onDraftChange(e.target.value);
         syncSelection(e.target);
+        syncHighlight?.(e.target);
       }}
+      onInput={e => syncHighlight?.(e.currentTarget)}
+      onScroll={e => syncHighlight?.(e.currentTarget)}
       onSelect={e => syncSelection(e.currentTarget)}
       onClick={e => syncSelection(e.currentTarget)}
       onKeyUp={e => syncSelection(e.currentTarget)}
@@ -369,7 +380,9 @@ export function ComposerTextarea({
       disabled={disabled || sending}
       aria-label="Message"
       className={cn(
-        'block w-full resize-none border-0 bg-transparent py-row-y text-fg',
+        COMPOSER_TEXT_METRICS,
+        'relative z-[1] resize-none bg-transparent',
+        highlighted ? 'text-transparent [caret-color:var(--fg)]' : 'text-fg',
         'placeholder:text-faint focus:border-0 focus:shadow-none focus:outline-none focus-visible:outline-none',
         'disabled:cursor-not-allowed',
       )}
@@ -415,10 +428,15 @@ export function Composer({
   attachmentsPending,
 }: Props) {
   const ref = useRef<HTMLTextAreaElement | null>(null);
+  const highlightRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const disabledReasonId = useId();
   const keyboardOpen = useKeyboardOpen();
   const { touchAffected, enterSends } = useInputModality();
+  const markdownHighlight = useMdComposePref() === 'on';
+  const syncHighlight = useCallback((input: HTMLTextAreaElement) => {
+    syncComposerHighlightViewport(input, highlightRef.current);
+  }, []);
   const pendingDictationSelection = useRef<{ text: string; caret: number } | null>(null);
   const dictation = useDictationBundle({
     sessionId,
@@ -503,7 +521,8 @@ export function Composer({
     const next = Math.min(maxTextareaPx, Math.max(MIN_TEXTAREA_PX, el.scrollHeight));
     el.style.height = `${next}px`;
     el.style.overflowY = el.scrollHeight > maxTextareaPx ? 'auto' : 'hidden';
-  }, [draft, maxTextareaPx]);
+    syncHighlight(el);
+  }, [draft, markdownHighlight, maxTextareaPx, syncHighlight]);
 
   // Dictation updates a controlled value, so the browser cannot place the caret
   // until React has committed that value. Restore only the selection here;
@@ -708,6 +727,29 @@ export function Composer({
     </Button>
   ) : null;
 
+  // The wrapper follows the textarea's real, measured height; the overlay is
+  // absolute and therefore cannot contribute a pixel to composer growth. The
+  // same element is placed in the compact and desktop layouts below, keeping
+  // their textarea event/API contracts identical.
+  const inputLayer = (
+    <div data-composer-input-layer="" className="relative min-w-0 w-full">
+      <ComposerHighlight text={draft} overlayRef={highlightRef} enabled={markdownHighlight} />
+      <ComposerTextarea
+        inputRef={ref}
+        draft={draft}
+        onDraftChange={onDraftChange}
+        onSubmit={keyboardSubmit}
+        canSubmit={canSubmit}
+        disabled={disabled}
+        sending={sending}
+        placeholder={placeholder}
+        autocomplete={autocomplete}
+        highlighted={markdownHighlight}
+        syncHighlight={syncHighlight}
+      />
+    </div>
+  );
+
   return (
     <div
       data-density-region="composer"
@@ -790,17 +832,7 @@ export function Composer({
                   far as the eye and the focus ring are concerned. The wrapper
                   stretches to the dock height (items-stretch on the row) and the
                   textarea sits at its top, so the first line is at the top edge. */}
-              <ComposerTextarea
-                inputRef={ref}
-                draft={draft}
-                onDraftChange={onDraftChange}
-                onSubmit={keyboardSubmit}
-                canSubmit={canSubmit}
-                disabled={disabled}
-                sending={sending}
-                placeholder={placeholder}
-                autocomplete={autocomplete}
-              />
+              {inputLayer}
             </div>
             {(interruptControl || sendControl) && (
               // STACKED VERTICAL ICONS on touch. Interrupt (destructive) sits on
@@ -861,17 +893,7 @@ export function Composer({
         <>
           {/* The textarea is borderless and transparent: the WRAPPER is the input
               as far as the eye (and the focus ring) is concerned. */}
-          <ComposerTextarea
-            inputRef={ref}
-            draft={draft}
-            onDraftChange={onDraftChange}
-            onSubmit={keyboardSubmit}
-            canSubmit={canSubmit}
-            disabled={disabled}
-            sending={sending}
-            placeholder={placeholder}
-            autocomplete={autocomplete}
-          />
+          {inputLayer}
 
           {disabledReason && (
             <span id={disabledReasonId} className="sr-only">

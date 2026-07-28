@@ -180,6 +180,11 @@ export interface SessionView {
 
 export interface UsageAccountView {
   binary: string;
+  /** Exact kfleet billing evidence. true = subscription quota; false = raw
+   * API metering; absent = unknown. Never infer this from provider/auth. */
+  usageBased?: boolean;
+  /** Diagnostic/auth-provider identity only; not a billing classifier. */
+  provider?: string;
   fiveHourPercent?: number;
   weeklyPercent?: number;
   fiveHourResetAt?: number;

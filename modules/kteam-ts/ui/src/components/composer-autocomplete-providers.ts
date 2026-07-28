@@ -29,6 +29,17 @@ export interface ComposerSkillSummary {
 export interface ComposerSkillsResponse {
   /** Which harness owns the session's account, so insertion can match it. */
   harness: ComposerHarness;
+  /** Whether the daemon could resolve the persisted account home used for
+   *  discovery. Optional only for compatibility with daemons predating the
+   *  skills surface; an absent value must never be presented as "no skills". */
+  harnessHomeResolved?: boolean;
+  skills: ComposerSkillSummary[];
+}
+
+/** Normalized catalog shared by autocomplete and the side-pane surface. */
+export interface ComposerSkillsCatalog {
+  harness: ComposerHarness;
+  harnessHomeResolved?: boolean;
   skills: ComposerSkillSummary[];
 }
 
@@ -68,6 +79,21 @@ async function skillsRequest(sessionId: string, signal: AbortSignal): Promise<Co
   return (await response.json()) as ComposerSkillsResponse;
 }
 
+/** Fetch and normalize the one session-scoped catalog. Keeping this here makes
+ *  the autocomplete and the full surface share endpoint, sorting, harness
+ *  fallback, and (most importantly) invocation semantics. */
+export async function loadSkillsCatalog(sessionId: string, signal: AbortSignal): Promise<ComposerSkillsCatalog> {
+  const response = await skillsRequest(sessionId, signal);
+  const harness: ComposerHarness = response.harness === 'codex' ? 'codex' : 'claude';
+  return {
+    harness,
+    harnessHomeResolved: typeof response.harnessHomeResolved === 'boolean' ? response.harnessHomeResolved : undefined,
+    skills: [...(response.skills ?? [])].sort((a, b) =>
+      a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }),
+    ),
+  };
+}
+
 /** A path query is a lazy directory request plus a fuzzy final segment. */
 export function splitFileQuery(query: string): { directory: string; leaf: string } {
   const slash = query.lastIndexOf('/');
@@ -84,32 +110,28 @@ function fileRefusal(entry: FsListing['entries'][number]): string | undefined {
 }
 
 export function createSkillsProvider(sessionId: string): ComposerAutocompleteProvider {
-  let cached: ComposerSkillsResponse | undefined;
+  let cached: ComposerSkillsCatalog | undefined;
   return {
     id: `skills:${sessionId}`,
     trigger: '/',
     label: 'Skills',
     async candidates({ signal }): Promise<ComposerProviderResult> {
-      const response = cached ?? (await skillsRequest(sessionId, signal));
+      const catalog = cached ?? (await loadSkillsCatalog(sessionId, signal));
       // Only cache a response we actually completed. An aborted request never
       // reaches here, but a rejected one must not poison the next keystroke.
-      cached = response;
-      const harness: ComposerHarness = response.harness === 'codex' ? 'codex' : 'claude';
-      const skills = [...(response.skills ?? [])].sort((a, b) =>
-        a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }),
-      );
+      cached = catalog;
       return {
-        candidates: skills.map(
+        candidates: catalog.skills.map(
           (skill): ComposerAutocompleteCandidate => ({
             id: `skill:${skill.name}`,
             kind: 'skill',
             label: skill.name,
             detail: skill.description,
-            replacement: skillInsertText(harness, skill.name),
+            replacement: skillInsertText(catalog.harness, skill.name),
             append: 'space',
           }),
         ),
-        contextLabel: skillHarnessLabel(harness),
+        contextLabel: skillHarnessLabel(catalog.harness),
       };
     },
   };

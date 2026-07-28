@@ -10,13 +10,15 @@
 // bottom sheet built from the SAME controls the details sheet uses — one
 // implementation of the harness rules, not two:
 //   - The MODEL chip opens RuntimeModelControls (Claude: account-advertised
-//     choices; Codex: its native two-stage picker in Terminal).
+//     choices; Codex: its live app-server catalog, applied through the native
+//     picker and verified from thread_settings_applied).
 //   - The REASONING chip opens RuntimeEffortControls:
 //       · Claude effort (low|medium|high|xhigh) is set here — a real in-session
 //         `/effort` command that persists to the account's settings.json now
 //         that kfleet materialises it writable.
-//       · Codex reasoning is NOT a `/reasoning <x>` string; it is chosen inside
-//         the same native picker as its model, so the chip opens that.
+//       · Codex reasoning is NOT a `/reasoning <x>` string; the sheet lists the
+//         active model's advertised levels and the daemon drives the same native
+//         picker, then waits for Codex to echo both settings.
 //   - Only harness-OBSERVED truth is shown. The model and (Codex) reasoning
 //     readouts go stale-until-evidence after a switch; Claude effort is shown as
 //     the level last SENT this session (a confirmed persisted write), never as
@@ -57,8 +59,8 @@ export interface ComposerRuntimeProps {
   /** The session is mid-turn: a switch needs an idle prompt, so the trigger is
    *  disabled (matching the details sheet, which refuses a busy pane). */
   busy: boolean;
-  /** Codex opens its native picker in the Terminal view; the page owns that tab
-   *  switch. Returns true when the switch was accepted so the sheet can close. */
+  /** Fallback only: if Codex's live catalog cannot be probed, open its native
+   *  picker in Terminal without claiming a switch. */
   onOpenTerminal?: () => boolean;
 }
 
@@ -70,6 +72,21 @@ function barModelLabel(view: SessionView, pending: boolean): string {
   if (observed) return observed;
   const requested = view.config.model?.trim() || view.config.modelHint?.trim();
   return requested || 'set model';
+}
+
+export interface CodexReasoningObservation {
+  effort?: string;
+  observedAt?: string;
+}
+
+/** Codex echoes model + effort as one runtime-settings fact. The model
+ * observation timestamp is therefore also the freshness token for reasoning,
+ * including when the reader re-selects the already-observed effort. */
+export function codexReasoningObservationChanged(
+  before: CodexReasoningObservation,
+  current: CodexReasoningObservation,
+): boolean {
+  return before.effort !== current.effort || before.observedAt !== current.observedAt;
 }
 
 interface ChipProps {
@@ -123,7 +140,7 @@ function RuntimeChip({
       aria-describedby={disabledReason ? reasonId : undefined}
       title={disabledReason ?? title}
       className={cn(
-        'kt-composer__runtime mono inline-flex min-w-0 items-center gap-xs rounded-control px-1 text-chrome text-fg-soft',
+        'kt-composer__runtime mono inline-flex min-w-[44px] items-center gap-xs rounded-control px-1 text-chrome text-fg-soft',
         'hover:text-accent disabled:cursor-not-allowed disabled:hover:text-fg-soft',
       )}
     >
@@ -178,15 +195,24 @@ export function ComposerRuntime({ view, canControl, busy, onOpenTerminal }: Comp
       setModelPending(false);
   }, [modelPending, observedModel, state.observedModelAt]);
 
-  // Codex reports a reasoning level; there is no timestamp for it, so a switch
-  // stays pending until the reported VALUE changes (or the session changes).
-  // Claude never sets this — its effort is not observed.
+  // Codex reports model + reasoning together, and every such observation bumps
+  // observedModelAt. Include that timestamp so re-selecting the SAME effort is
+  // still confirmable; the old value-only comparison left "switching…" stuck.
   const observedReasoning = config.harness === 'codex' ? state.observedReasoningEffort?.trim() : undefined;
-  const reasoningAtSwitchRef = useRef<string | undefined>(undefined);
+  const reasoningAtSwitchRef = useRef<CodexReasoningObservation | undefined>(undefined);
   const [reasoningPending, setReasoningPending] = useState(false);
   useEffect(() => {
-    if (reasoningPending && reasoningAtSwitchRef.current !== observedReasoning) setReasoningPending(false);
-  }, [reasoningPending, observedReasoning]);
+    const before = reasoningAtSwitchRef.current;
+    if (
+      reasoningPending &&
+      before &&
+      codexReasoningObservationChanged(before, {
+        effort: observedReasoning,
+        observedAt: state.observedModelAt,
+      })
+    )
+      setReasoningPending(false);
+  }, [reasoningPending, observedReasoning, state.observedModelAt]);
 
   // Claude effort is not observable, so the chip reflects the level last SENT
   // this session (a confirmed persisted write), and resets when the session does.
@@ -206,17 +232,35 @@ export function ComposerRuntime({ view, canControl, busy, onOpenTerminal }: Comp
   }, [observedModel, state.observedModelAt]);
 
   const markReasoningPending = useCallback(() => {
-    reasoningAtSwitchRef.current = observedReasoning;
+    reasoningAtSwitchRef.current = { effort: observedReasoning, observedAt: state.observedModelAt };
     setReasoningPending(true);
-  }, [observedReasoning]);
+  }, [observedReasoning, state.observedModelAt]);
 
-  // Codex's picker (opened from either chip) can move the reasoning level, so
-  // mark reasoning pending whenever the Terminal hand-off is accepted.
+  const clearModelPending = useCallback(() => {
+    modelAtSwitchRef.current = undefined;
+    setModelPending(false);
+  }, []);
+
+  const clearReasoningPending = useCallback(() => {
+    reasoningAtSwitchRef.current = undefined;
+    setReasoningPending(false);
+  }, []);
+
+  const markCodexRuntimePending = useCallback(() => {
+    markModelPending();
+    markReasoningPending();
+  }, [markModelPending, markReasoningPending]);
+
+  const clearCodexRuntimePending = useCallback(() => {
+    clearModelPending();
+    clearReasoningPending();
+  }, [clearModelPending, clearReasoningPending]);
+
+  // Terminal hand-off is only a fallback and proves no selection. It must not
+  // create a pending state; the targeted catalog path marks pending at submit.
   const handleOpenTerminal = useCallback(() => {
-    const accepted = onOpenTerminal?.() ?? false;
-    if (accepted && config.harness === 'codex') markReasoningPending();
-    return accepted;
-  }, [onOpenTerminal, config.harness, markReasoningPending]);
+    return onOpenTerminal?.() ?? false;
+  }, [onOpenTerminal]);
 
   const terminal = TERMINAL_STATUSES.has(state.status);
   const disabledReason = !canControl
@@ -293,7 +337,8 @@ export function ComposerRuntime({ view, canControl, busy, onOpenTerminal }: Comp
               view={view}
               open={modelOpen}
               canControl={canControl}
-              onModelSwitch={markModelPending}
+              onModelSwitch={config.harness === 'codex' ? markCodexRuntimePending : markModelPending}
+              onModelSwitchFailed={config.harness === 'codex' ? clearCodexRuntimePending : clearModelPending}
               onOpenTerminal={handleOpenTerminal}
               onClose={() => setModelOpen(false)}
             />
@@ -317,6 +362,8 @@ export function ComposerRuntime({ view, canControl, busy, onOpenTerminal }: Comp
               view={view}
               canControl={canControl}
               onEffortSwitch={config.harness === 'claude' ? setSentClaudeEffort : undefined}
+              onCodexSwitchStart={config.harness === 'codex' ? markCodexRuntimePending : undefined}
+              onCodexSwitchFailed={config.harness === 'codex' ? clearCodexRuntimePending : undefined}
               onOpenTerminal={handleOpenTerminal}
               onClose={() => setEffortOpen(false)}
             />

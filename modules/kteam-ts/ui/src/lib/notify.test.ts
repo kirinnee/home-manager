@@ -9,11 +9,13 @@ import {
   DEFAULT_NOTIFY_PREFS,
   NOTIFY_BURST_LIMIT,
   NOTIFY_COOLDOWN_MS,
+  NOTIFY_GROUP_WINDOW_MS,
   NOTIFY_KINDS,
   NotifyLedger,
   SUMMARY_TAG,
   buildNotification,
   classifyTransition,
+  fleetNotificationEventKey,
   getNotifyPrefs,
   parseNotifyPrefs,
   planNotifications,
@@ -22,6 +24,7 @@ import {
   startNotificationWatch,
   subscribeNotifyPrefs,
   summaryNotification,
+  notificationEventKey,
   type NotificationSpec,
   type NotifyPrefs,
 } from './notify';
@@ -148,6 +151,20 @@ describe('NotifyLedger', () => {
     expect(ledger.shouldFire('s1', 'needsYou', 1_000 + NOTIFY_COOLDOWN_MS)).toBe(true);
   });
 
+  test('a genuinely new event key may update the session inside the cooldown', () => {
+    const ledger = new NotifyLedger();
+    expect(ledger.shouldFire('s1', 'needsYou', 1_000, 'turn-1')).toBe(true);
+    expect(ledger.shouldFire('s1', 'needsYou', 2_000, 'turn-2')).toBe(true);
+    expect(ledger.shouldFire('s1', 'needsYou', 3_000, 'turn-2')).toBe(false);
+  });
+
+  test('group count rolls within the window and resets after quiet', () => {
+    const ledger = new NotifyLedger();
+    expect(ledger.nextGroupCount('s1', 1_000)).toBe(1);
+    expect(ledger.nextGroupCount('s1', 2_000)).toBe(2);
+    expect(ledger.nextGroupCount('s1', 2_000 + NOTIFY_GROUP_WINDOW_MS + 1)).toBe(1);
+  });
+
   test('different kinds and different sessions do not share a cooldown', () => {
     const ledger = new NotifyLedger();
     expect(ledger.shouldFire('s1', 'needsYou', 1_000)).toBe(true);
@@ -170,9 +187,12 @@ describe('buildNotification', () => {
   test('deep-link, tag, and title come from the session', () => {
     const spec = buildNotification(view('ms1abc-12', 'awaiting_user', { teammate: 'zelda' }), 'needsYou');
     expect(spec.url).toBe('/session/ms1abc-12');
-    expect(spec.tag).toBe('kteam-ms1abc-12-needsYou');
-    expect(spec.title).toBe('zelda — Task ms1abc-12');
+    expect(spec.tag).toBe('kteam-ms1abc-12');
+    expect(spec.title).toBe('[Zelda] Task ms1abc-12');
     expect(spec.body).toBe('Waiting for you at the prompt.');
+    expect(spec.eventKey).toBe(
+      notificationEventKey(view('ms1abc-12', 'awaiting_user', { teammate: 'zelda' }), 'needsYou'),
+    );
   });
 
   test('question body previews the pending question and truncates long ones', () => {
@@ -194,12 +214,12 @@ describe('buildNotification', () => {
     expect(buildNotification(v, 'failed').body).toBe('Stalled — pane died');
   });
 
-  test('teammate already in the name is not repeated', () => {
+  test('an already-composed title is preserved verbatim', () => {
     const spec = buildNotification(
-      view('s1', 'completed', { teammate: 'zelda', name: 'zelda fixes scrolling' }),
+      view('s1', 'completed', { teammate: 'zelda', name: '[Zelda] Fixes Scrolling' }),
       'completed',
     );
-    expect(spec.title).toBe('zelda fixes scrolling');
+    expect(spec.title).toBe('[Zelda] Fixes Scrolling');
   });
 });
 
@@ -235,6 +255,23 @@ describe('planNotifications', () => {
     expect(fired.map(s => s.sessionId)).toEqual(['i']);
   });
 
+  test('sequential lines in one session replace under one tag and carry a count', () => {
+    const ledger = new NotifyLedger();
+    const running = view('s1', 'running', { teammate: 'noel', name: 'Diene Exec' });
+    planNotifications([running], ledger, enabledPrefs, 1_000);
+    const first = { ...running, state: { ...running.state, status: 'awaiting_user' as const, turn: 1 } };
+    const one = planNotifications([first], ledger, enabledPrefs, 2_000)[0]!;
+    const resumed = { ...running, state: { ...running.state, status: 'running' as const, turn: 2 } };
+    planNotifications([resumed], ledger, enabledPrefs, 2_100);
+    const second = { ...running, state: { ...running.state, status: 'awaiting_user' as const, turn: 2 } };
+    const two = planNotifications([second], ledger, enabledPrefs, 2_200)[0]!;
+    expect(one.tag).toBe('kteam-s1');
+    expect(two.tag).toBe(one.tag);
+    expect(two.eventKey).not.toBe(one.eventKey);
+    expect(two.count).toBe(2);
+    expect(two.title).toBe('[Noel] Diene Exec');
+  });
+
   test('a burst beyond the limit collapses into one summary pointing at the dashboard', () => {
     const ledger = new NotifyLedger();
     const many = Array.from({ length: NOTIFY_BURST_LIMIT + 2 }, (_, i) => view(`s${i}`, 'running'));
@@ -257,6 +294,12 @@ describe('planNotifications', () => {
 
   test('summaryNotification names the count', () => {
     expect(summaryNotification(7).body).toBe('7 sessions need your attention.');
+  });
+
+  test('fleet summary identity is stable across ordering and transport implementations', () => {
+    const keys = ['s1:needsYou:awaiting_user:1:', 's2:failed:failed:2:'];
+    expect(fleetNotificationEventKey(keys)).toBe('fleet:3a8fc189');
+    expect(fleetNotificationEventKey([...keys].reverse())).toBe('fleet:3a8fc189');
   });
 
   test('every notify kind is coverable by prefs toggles', () => {

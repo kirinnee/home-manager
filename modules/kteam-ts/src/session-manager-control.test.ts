@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { actorContext } from './actor-context';
 import { createPaths } from './paths';
 import { SessionManager } from './session-manager';
 import type { SessionView } from './service';
@@ -73,7 +74,7 @@ describe('withAutoRevive (F4)', () => {
     expect(revives).toBe(0);
   });
 
-  test('auto-revive refuses when a live same-label and same-cwd successor already exists', async () => {
+  test('automatic control/warden revive still dedupes a live same-label and same-cwd recovery', async () => {
     const manager = bareManager();
     const targetConfig = {
       id: 'target',
@@ -113,26 +114,263 @@ describe('withAutoRevive (F4)', () => {
     manager.stopMonitor = async () => {
       throw new Error('must refuse before relaunch teardown');
     };
-    await expect(
-      (
-        manager as unknown as {
-          withAutoRevive: (
-            id: string,
-            action: string,
-            operation: () => Promise<SessionView>,
-            message?: string,
-          ) => Promise<SessionView>;
-        }
-      ).withAutoRevive(
+    const error = await (
+      manager as unknown as {
+        withAutoRevive: (
+          id: string,
+          action: string,
+          operation: () => Promise<SessionView>,
+          message?: string,
+        ) => Promise<SessionView>;
+      }
+    )
+      .withAutoRevive(
         'target',
         'send',
         async () => {
           throw new Error('old pane died');
         },
         'continue',
-      ),
-    ).rejects.toThrow(/live successor new-worker \(successor\).*batch-a4/);
+      )
+      .then(
+        () => undefined,
+        caught => caught,
+      );
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toMatch(
+      /automatic revive suppressed for session target: live session new-worker \(successor\) shares label batch-a4.*run `kteam resume target`/,
+    );
+    expect(String(error)).not.toContain('successor new-worker');
+    expect(String(error)).not.toContain('already owns');
     expect((manager.launching as Map<string, unknown>).has('target')).toBe(false);
+  });
+});
+
+describe('manual resume vs automatic recovery dedupe', () => {
+  async function recoveryManager(status = 'stalled') {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-revive-dedupe-'));
+    temporaryDirectories.push(home);
+    await Promise.all(
+      ['turns', 'markers', 'channel'].map(directory =>
+        mkdir(path.join(home, 'target', directory), { recursive: true }),
+      ),
+    );
+    let config: Record<string, unknown> = {
+      id: 'target',
+      name: 'original-work',
+      teammate: 'old-worker',
+      label: 'batch-a4',
+      cwd: home,
+      binary: 'claude-auto-loge',
+      harness: 'claude',
+      mode: 'auto',
+      harnessSessionId: '00000000-0000-4000-8000-000000000001',
+      tmuxSession: 'kteam-target-agent',
+      turn: 3,
+    };
+    let state: Record<string, unknown> = { id: 'target', status, health: 'stalled', turn: 3 };
+    const conflictConfig = {
+      id: 'unrelated',
+      name: 'different-work',
+      teammate: 'other-worker',
+      label: 'batch-a4',
+      cwd: home,
+      tmuxSession: 'kteam-unrelated-agent',
+    };
+    let launches = 0;
+    const events: Array<{ type: string; data: Record<string, unknown> }> = [];
+    const manager = bareManager();
+    manager.paths = createPaths(home);
+    manager.closed = false;
+    manager.launching = new Map();
+    manager.monitors = new Map();
+    manager.autoContinued = new Set();
+    manager.doneDeferred = new Set();
+    manager.resolveRef = (id: string) => id;
+    manager.serialized = async (_id: string, operation: () => Promise<unknown>) => await operation();
+    manager.serializedBootstrap = async (operation: () => Promise<unknown>) => await operation();
+    manager.clearNeedsHuman = async () => undefined;
+    manager.cancelRetry = () => undefined;
+    manager.attachments = { buildImageReferenceBlock: async () => '' };
+    manager.promptInstruction = () => 'read the next turn';
+    manager.store = {
+      listSessions: () => [
+        { id: 'target', config, state },
+        { id: 'unrelated', config: conflictConfig, state: { id: 'unrelated', status: 'running' } },
+      ],
+      updateConfig: async (_id: string, mutate: (current: Record<string, unknown>) => Record<string, unknown>) => {
+        config = mutate(config);
+        return config;
+      },
+      updateState: async (_id: string, mutate: (current: Record<string, unknown>) => Record<string, unknown>) => {
+        state = mutate(state);
+        return state;
+      },
+    };
+    manager.get = async () => ({ directory: path.join(home, 'target'), config, state });
+    manager.transition = async (_id: string, patch: Record<string, unknown>) => {
+      state = { ...state, ...patch };
+    };
+    manager.tmux = {
+      state: async () => ({ alive: false, dead: true, promptReady: false, pane: '', visiblePane: '' }),
+      send: async () => undefined,
+      snapshot: async () => '',
+      subprocessAlive: async () => false,
+    };
+    manager.stopMonitor = async () => undefined;
+    manager.startMonitor = async () => undefined;
+    manager.stopTmuxWithEvidence = async () => undefined;
+    manager.launchWithRetry = async () => {
+      launches++;
+    };
+    manager.emitDeferred = () => undefined;
+    manager.emit = async (_id: string, type: string, data: Record<string, unknown>) => {
+      events.push({ type, data });
+      return {};
+    };
+    return {
+      manager,
+      home,
+      events,
+      get launches() {
+        return launches;
+      },
+    };
+  }
+
+  test('explicit admin and peer resumes bypass an unrelated session sharing only the batch label and cwd', async () => {
+    for (const actor of ['admin-cli', 'peer:lead-session'] as const) {
+      const fixture = await recoveryManager();
+      const resumed = await actorContext.run({ actor }, () =>
+        (fixture.manager as unknown as { resume: (id: string, message?: string) => Promise<SessionView> }).resume(
+          'target',
+          'continue the original task',
+        ),
+      );
+
+      expect(fixture.launches).toBe(1);
+      expect(resumed.state.status).toBe('running');
+      expect((fixture.manager.launching as Map<string, unknown>).has('target')).toBe(false);
+    }
+  });
+
+  test('a public resume from a warden actor keeps the original automatic-recovery dedupe', async () => {
+    const fixture = await recoveryManager();
+    const error = await actorContext
+      .run({ actor: 'warden:warden-session' }, () =>
+        (fixture.manager as unknown as { resume: (id: string, message?: string) => Promise<SessionView> }).resume(
+          'target',
+          'automatic recovery',
+        ),
+      )
+      .then(
+        () => undefined,
+        caught => caught,
+      );
+
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toContain('automatic revive suppressed for session target');
+    expect(fixture.launches).toBe(0);
+    expect((fixture.manager.launching as Map<string, unknown>).has('target')).toBe(false);
+  });
+
+  test('two concurrent automatic revivers launch the same target exactly once', async () => {
+    const fixture = await recoveryManager();
+    await (
+      fixture.manager.store as {
+        updateConfig: (
+          id: string,
+          mutate: (current: Record<string, unknown>) => Record<string, unknown>,
+        ) => Promise<Record<string, unknown>>;
+      }
+    ).updateConfig('target', current => ({ ...current, label: 'target-only' }));
+
+    let releaseLaunch = () => {};
+    const launchMayFinish = new Promise<void>(resolve => {
+      releaseLaunch = resolve;
+    });
+    let announceLaunch = () => {};
+    const launchStarted = new Promise<void>(resolve => {
+      announceLaunch = resolve;
+    });
+    const originalLaunch = fixture.manager.launchWithRetry as () => Promise<void>;
+    fixture.manager.launchWithRetry = async () => {
+      announceLaunch();
+      await launchMayFinish;
+      await originalLaunch();
+    };
+    fixture.manager.tmux.state = async () => ({
+      alive: fixture.launches > 0,
+      dead: fixture.launches === 0,
+      promptReady: fixture.launches > 0,
+      pane: '',
+      visiblePane: '',
+    });
+    fixture.manager.sendUnlocked = async (view: SessionView) => view;
+
+    const resume = (message: string) =>
+      (
+        fixture.manager as unknown as {
+          resume: (
+            id: string,
+            message: string,
+            policy: { automatic: boolean; dedupeSharedRecoveryScope: boolean },
+          ) => Promise<SessionView>;
+        }
+      ).resume('target', message, { automatic: true, dedupeSharedRecoveryScope: true });
+
+    const first = resume('automatic recovery one');
+    await launchStarted;
+    const second = resume('automatic recovery two');
+    releaseLaunch();
+    await Promise.all([first, second]);
+
+    expect(fixture.launches).toBe(1);
+    expect((fixture.manager.launching as Map<string, unknown>).has('target')).toBe(false);
+  });
+
+  test('terminal send revives its intended recipient despite an unrelated live batch sibling', async () => {
+    const fixture = await recoveryManager();
+    const result = await (
+      fixture.manager as unknown as {
+        send: (id: string, request: { message: string }) => Promise<SessionView & { disposition: string }>;
+      }
+    ).send('target', { message: 'final handover' });
+
+    expect(result.disposition).toBe('revived');
+    expect(fixture.launches).toBe(1);
+    expect(await readFile(path.join(fixture.home, 'target', 'turns', 'turn-004.md'), 'utf8')).toContain(
+      'final handover',
+    );
+    expect((fixture.manager.launching as Map<string, unknown>).has('target')).toBe(false);
+  });
+
+  test('terminal send is durably queued when a real revive refusal prevents delivery', async () => {
+    const fixture = await recoveryManager('kill_failed');
+    const result = await (
+      fixture.manager as unknown as {
+        send: (id: string, request: { message: string }) => Promise<SessionView & { disposition: string }>;
+      }
+    ).send('target', { message: 'final handover' });
+
+    expect(result.disposition).toBe('queued-for-revive');
+    expect(fixture.launches).toBe(0);
+    const rows = (await readFile(path.join(fixture.home, 'target', 'channel', 'inbox.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line) as Record<string, unknown>);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      type: 'message',
+      queuedForRevive: true,
+      message: 'final handover',
+      reviveRefusal: 'the previous tmux kill failed; use stop again before resume',
+    });
+    expect(typeof rows[0]?.queueId).toBe('string');
+    expect(
+      fixture.events.some(event => event.type === 'control.send_queued' && event.data['queuedForRevive'] === true),
+    ).toBe(true);
+    expect((fixture.manager.launching as Map<string, unknown>).has('target')).toBe(false);
   });
 });
 

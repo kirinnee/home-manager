@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { SessionView } from '../types';
-import { ComposerRuntime } from './ComposerRuntime';
+import { ComposerRuntime, codexReasoningObservationChanged } from './ComposerRuntime';
 
 function view(
   overrides: Partial<SessionView['state']> = {},
@@ -70,6 +70,8 @@ describe('ComposerRuntime bar chips', () => {
     const effort = chip(html, 'effort');
     expect(effort).toContain('aria-haspopup="dialog"');
     expect(effort).not.toContain('disabled=""');
+    expect(model).toContain('min-w-[44px]');
+    expect(effort).toContain('min-w-[44px]');
   });
 
   test('the chip row is rest-only chrome that collapses with the keyboard', () => {
@@ -93,6 +95,18 @@ describe('ComposerRuntime bar chips', () => {
     const effort = chip(html, 'effort');
     expect(effort).toContain('aria-label="Set reasoning level — currently high"');
     expect(effort).toContain('high');
+  });
+
+  test('a fresh Codex settings timestamp confirms re-selecting the same reasoning level', () => {
+    const before = { effort: 'high', observedAt: '2026-07-27T00:37:00.000Z' };
+    expect(codexReasoningObservationChanged(before, before)).toBe(false);
+    expect(
+      codexReasoningObservationChanged(before, {
+        effort: 'high',
+        observedAt: '2026-07-27T00:38:00.000Z',
+      }),
+    ).toBe(true);
+    expect(codexReasoningObservationChanged(before, { ...before, effort: 'ultra' })).toBe(true);
   });
 
   test('read-only origin disables BOTH chips with a shared non-visual reason', () => {

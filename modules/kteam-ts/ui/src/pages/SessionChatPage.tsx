@@ -830,7 +830,9 @@ export function SessionChatPage({
         // the folder sidebar all read the same record.
         store.upsertSession(next);
         const queued =
-          next.disposition === 'queued' || (!opts.interruptFirst && !next.disposition && (busy || isBusy(next)));
+          next.disposition === 'queued' ||
+          next.disposition === 'queued-for-revive' ||
+          (!opts.interruptFirst && !next.disposition && (busy || isBusy(next)));
         setPending(p => p.map(x => (x.key === key ? { ...x, status: queued ? 'queued' : 'delivered' } : x)));
         clearAttachments(opts.localAttachmentIds);
       } catch (e) {

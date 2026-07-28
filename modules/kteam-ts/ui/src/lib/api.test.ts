@@ -118,6 +118,42 @@ describe('task API transport', () => {
   });
 });
 
+describe('analytics API transport', () => {
+  const response = () =>
+    new Response(
+      JSON.stringify({
+        kind: 'raw',
+        query: '',
+        parsed: { groupBy: [], matchers: [] },
+        scope: { allSessions: true, indexed: 0, matched: 0 },
+        index: {
+          schemaVersion: 6,
+          sessions: 0,
+          tokenSessions: 0,
+          transcriptSources: 0,
+          indexedTranscriptSources: 0,
+          pendingTranscriptSources: 0,
+          sourceErrors: 0,
+          refreshing: false,
+        },
+        limit: 200,
+        truncated: false,
+        results: [],
+      }),
+      { headers: { 'content-type': 'application/json' } },
+    );
+
+  test('uses the default fleet query when no source is supplied', async () => {
+    const captured = await captureRequest(response(), () => api.analytics());
+    expect(String(captured.input)).toBe('/v1/analytics');
+  });
+
+  test('URL-encodes an exact selected-session query', async () => {
+    const captured = await captureRequest(response(), () => api.analytics('{id=session/odd ?}'));
+    expect(String(captured.input)).toBe('/v1/analytics?q=%7Bid%3Dsession%2Fodd%20%3F%7D');
+  });
+});
+
 describe('session administration API transport', () => {
   test('rename sends the caller-owned logical request id and exact patch', async () => {
     const captured = await captureRequest(
