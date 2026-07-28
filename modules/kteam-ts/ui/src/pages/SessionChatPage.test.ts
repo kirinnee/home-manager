@@ -43,7 +43,16 @@ ${SAME_TEXT}`);
   });
 });
 
-describe('visible-block optimistic reaper', () => {
+// WHY THESE TESTS NO LONGER DESCRIBE PAGE BEHAVIOUR.
+//
+// `blockConfirmsPending` used to drive a `useEffect` that DELETED pending rows from
+// state whenever any chat.user block matched on text + time + attachments. That reaper
+// is gone. These tests are kept because they pin down exactly what the helper does and,
+// below, exactly why content matching is not safe to retire a send — but the page no
+// longer calls it. Local retirement is owned by the exact `requestId → sendId` ledger
+// handover in `reconcileLocalSends` (lib/sends.ts), which is identity-based and
+// non-destructive. Do not wire this helper back into a reaping effect.
+describe('blockConfirmsPending — content matching, and why it cannot own retirement', () => {
   const attachmentId = `att_${'a'.repeat(64)}`;
   const image = {
     kind: 'attachment' as const,
@@ -96,14 +105,36 @@ describe('visible-block optimistic reaper', () => {
       }),
     ).toBe(false);
   });
+
+  test('THE HAZARD: a QUOTED send and a second identical send both "confirm"', () => {
+    // This is why the reaper had to go, not just be tightened. A later message that
+    // merely repeats or quotes an earlier send satisfies every check the helper makes,
+    // because text is not identity. When this drove a destructive `setPending` filter,
+    // such a row could retire an ACCEPTED or UNACCOUNTED send that it was not — and
+    // since the row was deleted from state, nothing could bring it back.
+    const laterIdentical = userBlock({ ts: '2026-07-25T12:30:00.000Z' });
+    expect(blockConfirmsPending(laterIdentical, { text: SAME_TEXT, at: SENT_AT, attachmentIds: [] })).toBe(true);
+
+    // A row is a "confirmation" purely by resembling the text, with no reference to
+    // which harness record the daemon actually cited as proof. Exact identity lives in
+    // the block's `proofKeys` and is compared against `SendEvidence.key` by
+    // `selectLedgerChips`; this helper cannot see either.
+    expect('proofKeys' in laterIdentical).toBe(false);
+  });
 });
 
-describe('inline native-queue send reaping (the "queued forever" regression)', () => {
-  // A short send to a BUSY session is journalled ONLY as a non-file-backed
-  // control.send_queued: no chat.user, no send_consumed (verified on
-  // ms1lhymf-c4051f31, turns 36→37). Before the fix the optimistic chip had no
-  // block to match, so it read "queued for next turn" forever. buildTranscript
-  // now synthesizes the delivered row once the turn closes, and THAT row reaps.
+describe('inline native-queue sends are never reaped by the turn counter', () => {
+  // WHAT THIS SUITE USED TO ASSERT, AND WHY IT IS NOW INVERTED.
+  //
+  // It used to prove that an inline queued send becomes a DELIVERED row — and so
+  // reaps its optimistic chip — once `currentTurn` passed the turn it was queued
+  // in. A corpus audit of 1,826 Claude transcripts killed the premise: the
+  // harness drains queued text MID-turn, and drains several messages into a
+  // single turn, so a turn advance is not evidence about any one message. The old
+  // assertion was a bug with a test built around it.
+  //
+  // Fate now comes only from the backend send ledger (lib/sends.ts), which matches
+  // real harness records. The transcript synthesizes nothing.
   const SESSION = 'ms1lhymf-c4051f31';
   const queuedEvent: KTeamEvent = {
     sequence: 613,
@@ -116,18 +147,28 @@ describe('inline native-queue send reaping (the "queued forever" regression)', (
   };
   const pending = { text: SAME_TEXT, at: Date.parse('2026-07-26T23:04:13.500Z'), attachmentIds: [] as string[] };
 
-  function reaps(currentTurn: number | undefined): boolean {
-    const blocks = buildTranscript([], buildSendIndex([queuedEvent], SESSION), SESSION, currentTurn);
-    return blocks.some(block => blockConfirmsPending(block, pending));
-  }
-
-  test('does not reap while the queued turn is still open (genuinely queued)', () => {
-    expect(reaps(36)).toBe(false);
-    expect(reaps(undefined)).toBe(false);
+  test('no block is produced for it, so nothing can reap the chip on an assumption', () => {
+    const blocks = buildTranscript([], buildSendIndex([queuedEvent], SESSION), SESSION);
+    expect(blocks).toEqual([]);
+    expect(blocks.some(block => blockConfirmsPending(block, pending))).toBe(false);
   });
 
-  test('reaps once the turn has advanced past the one it was queued in (delivered)', () => {
-    expect(reaps(37)).toBe(true);
+  test('a REAL harness record becomes a row that carries its PROOF IDENTITY', () => {
+    // The genuine drain, via Claude's queued_command adapter. What matters is not that
+    // the row resembles the send — it is that the row exposes the harness record's own
+    // uuid, which is verbatim what the daemon writes into `SendEvidence.key`. That id,
+    // and nothing about the text, is what lets `selectLedgerChips` retire the chip.
+    const uuid = 'b7f1c2d3-4e5a-6789-abcd-ef0123456789';
+    const drained = {
+      source: 'claude',
+      type: 'chat.user',
+      timestamp: '2026-07-26T23:06:00.000Z',
+      recordUuid: uuid,
+      data: { text: SAME_TEXT, nativeQueuedHuman: true },
+    } as ChatRecord;
+    const blocks = buildTranscript([drained], buildSendIndex([queuedEvent], SESSION), SESSION);
+    const row = blocks.find(block => block.kind === 'user');
+    expect(row?.kind === 'user' ? row.proofKeys : undefined).toEqual([uuid]);
   });
 });
 

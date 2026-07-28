@@ -2,6 +2,7 @@ import type {
   KTeamEvent,
   RuntimeControlRequest,
   SendDisposition,
+  SendRecord,
   SendRequest,
   SessionConfig,
   SessionState,
@@ -167,6 +168,8 @@ export interface KTeamService {
    *  or 'queued-for-revive' (durably retained in the session inbox because a
    *  safety refusal prevented relaunch). Additive field — older clients ignore it. */
   send(id: string, request: SendRequest): Promise<SessionView & { disposition: SendDisposition }>;
+  /** Durable local send existence plus transcript-proven fate. */
+  listSends(id: string, options?: { all?: boolean }): Promise<SendRecord[]>;
   /** Apply a semantic native-TUI runtime control without creating a kteam
    * turn. Claude switches to an account-allowlisted model in place; Codex opens
    * its native account-aware model/reasoning picker. */

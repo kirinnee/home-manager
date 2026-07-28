@@ -90,6 +90,11 @@ async function monitorHarness(input: {
   manager.closed = false;
   manager.paths = { home, sessions: home, daemon: home };
   manager.monitors = new Map();
+  // This harness bypasses the constructor. The durable-send monitor sweep now
+  // enters the normal per-session serializer before inspecting fate, so provide
+  // the two constructor-owned collections that serializer relies on.
+  manager.deleting = new Set();
+  manager.queues = new Map();
   manager.launching = new Map(
     input.launchInFlight ? [['s1', { at: Date.now(), bootstrap: new Promise<void>(() => {}) }]] : [],
   );

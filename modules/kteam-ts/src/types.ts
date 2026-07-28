@@ -1,5 +1,58 @@
 export type Harness = 'claude' | 'codex';
 
+export type SendFate = 'accepted' | 'delivered' | 'unaccounted';
+export type SendPath = 'direct' | 'turn-file' | 'native-inline' | 'native-file' | 'revive' | 'revive-queue';
+export type SendUnaccountedReason = 'timeout' | 'session_ended' | 'composer_discarded';
+
+export interface SendEvidence {
+  /** Stable identity for replay idempotency. */
+  key: string;
+  harness: Harness;
+  kind: 'chat.user' | 'queued_command' | 'response_item';
+  proof: 'normal-user-record' | 'native-queue-drain';
+  observedAt: string;
+  originatedAt?: string;
+  shapeVersion: number;
+  matchedTurn: number;
+  tier: 'queue-file-id' | 'turn-instruction' | 'exact-text';
+}
+
+/** One last-wins snapshot in channel/sends.jsonl. The local record owns
+ * existence; only SendEvidence supplied by a harness adapter may settle fate. */
+export interface SendRecord {
+  v: 1;
+  sendId: string;
+  acceptedAt: string;
+  acceptedTurn: number;
+  path: SendPath;
+  /** Logical text shown to the user (peer preamble included when applicable). */
+  message: string;
+  /** Exact text expected to appear in the harness transcript. */
+  matchText?: string;
+  /** Turn assigned by an injection path that already advanced bookkeeping. */
+  turn?: number;
+  attachmentIds: string[];
+  from?: string;
+  fromName?: string;
+  replyExpected?: boolean;
+  payloadFile?: string;
+  /** Intentionally retained for an explicit revive; never injected, timeout-exempt. */
+  held?: boolean;
+  /** Synchronous injection failed and the caller was told. Default projections
+   * retain a bounded tombstone so incremental clients can retract acceptance;
+   * renderers hide it after folding snapshots by sendId. */
+  withdrawn?: boolean;
+  fate: SendFate;
+  fateAt?: string;
+  evidence?: SendEvidence;
+  unaccountedReason?: SendUnaccountedReason;
+  /** Persisted timeout bookkeeping. acceptedAt itself is immutable. */
+  opportunityAt?: string;
+  unaccountedDeadline?: string;
+  hardDeadline?: string;
+  timeoutFrozenAt?: string;
+}
+
 /** One model value that is safe to pass to Claude Code's native `/model`
  * command on the session's CURRENT account. Values are deliberately supplied
  * by the daemon rather than invented by the browser: provider-backed wrappers
@@ -191,10 +244,9 @@ export interface SessionState {
   /** When the reflex layer nudged this zero-life-signs episode (one nudge per
    *  episode; cleared when any life-sign returns). */
   nudgedAt?: string;
-  /** Native-queue sends typed into the TUI while it was busy, awaiting their
-   *  transcript consumption boundary. Durable: the turn advances only when a
-   *  matching chat.user record appears (correlated under the session lock);
-   *  entries surviving into a terminal state are surfaced as lost. */
+  /** Native-queue injection mechanics only. Durable send existence and fate
+   *  live in channel/sends.jsonl; transcript proof removes entries here but
+   *  does not itself advance turns or mutate completion markers. */
   pendingNativeSends?: Array<{
     id: string;
     at: string;
@@ -209,6 +261,10 @@ export interface SessionState {
     /** Durable absolute file holding `message` when queueText is indirect. */
     payloadFile?: string;
   }>;
+  /** Bounded replay guard mirrored from delivered ledger evidence. The ledger
+   *  remains authoritative if a crash lands between its append and this state
+   *  update. */
+  sendEvidenceKeys?: string[];
   /** A warden delivered a needs_human verdict for this session: the reason,
    *  shown in ps/UI. While set, the sweep suppresses re-triage of the same
    *  anomaly class (needsHumanKind) — no identical report every sweep.
@@ -263,6 +319,12 @@ export interface SessionState {
     /** Exact kfleet billing evidence: true means a subscription/usage-window
      * account; false means an untracked raw API account. Missing is unknown. */
     usageBased?: boolean;
+    /** Runtime provider/pool availability, independent of subscription windows. */
+    availability?: 'available' | 'unavailable';
+    unavailable?: boolean;
+    unavailableReason?: 'cooldown' | 'spend_limit' | 'auth' | 'provider' | 'no_credentials';
+    /** Epoch milliseconds when the provider says this wrapper may recover. */
+    retryAt?: number;
     atLimit?: boolean;
     authOk?: boolean;
     /** Usage provider from the kfleet feed (anthropic/codex = OAuth,
@@ -395,6 +457,10 @@ export interface StartSessionRequest {
 export interface SendRequest {
   message: string;
   attachmentIds?: string[];
+  /** Server-supplied idempotency identity copied from x-kteam-request-id.
+   * api-server must overwrite/ignore any body value; SessionManager never
+   * treats a client-chosen body field as authoritative. */
+  requestId?: string;
   /** Immediate steer: interrupt the active turn (Escape) and deliver the
    *  message right away instead of riding the TUI's native queue. */
   now?: boolean;

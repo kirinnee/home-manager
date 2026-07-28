@@ -1,6 +1,7 @@
 import { watch as fsWatch, type FSWatcher } from 'node:fs';
 import { open, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { CLAUDE_INPUT_SHAPE_VERSION, type ObservedHumanInput } from './observed-human-input';
 
 type MaybePromise<T> = T | Promise<T>;
 
@@ -114,6 +115,11 @@ export interface ClaudeTranscriptWatcherOptions {
   /** Exact Claude session UUID. Only `<sessionId>.jsonl` is accepted. */
   sessionId: string;
   onEvents(events: readonly ClaudeNormalizedEvent[], cursor: TranscriptCursor): MaybePromise<void>;
+  /** Delivery-proof candidates, on a channel SEPARATE from `onEvents` so the
+   *  chat/history stream is unchanged. Each raw record is fed to a stateful
+   *  {@link ClaudeObservedInputAdapter}; consumers reconcile these against their
+   *  durable send records without ever treating arbitrary `chat.user` as proof. */
+  onObservedInput?(inputs: readonly ObservedHumanInput[], cursor: TranscriptCursor): MaybePromise<void>;
   onCheckpoint?(cursor: TranscriptCursor): MaybePromise<void>;
   onDiscovered?(file: string): MaybePromise<void>;
   onError?(error: Error): void;
@@ -141,6 +147,13 @@ export interface ClaudeTranscriptWatcherSnapshot {
 interface PendingRecord {
   bytes: Buffer<ArrayBufferLike>;
   cursor: TranscriptCursor;
+  /** Observed-input candidates memoized the first time this record reached the
+   *  queue head. The adapter is STATEFUL — producing a busy-drain candidate
+   *  SPLICES the paired queue-operation/remove timestamp out of a bounded ring —
+   *  so re-observing on a delivery-callback retry would find the ring drained and
+   *  fall back to a later wall-clock observedAt, back-dating an in-window proof.
+   *  Undefined until first observed. */
+  observed?: readonly ObservedHumanInput[];
 }
 
 interface FileIdentity {
@@ -186,6 +199,26 @@ function textFromContent(value: unknown): string | undefined {
   if (typeof value === 'string') return value;
   if (!Array.isArray(value)) return undefined;
   const texts = value.flatMap(item => {
+    const block = object(item);
+    return block?.type === 'text' && typeof block.text === 'string' ? [block.text] : [];
+  });
+  return texts.length > 0 ? texts.join('\n') : undefined;
+}
+
+/**
+ * Text from a user record's content that is REAL human text — plain strings and
+ * `type:'text'` blocks — excluding `tool_result` blocks (Claude writes tool
+ * results as `role:'user'` records, and those are never human input). Returns
+ * the joined text, or undefined when the record carries no human text at all.
+ */
+function realUserText(content: unknown): string | undefined {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) {
+    const block = object(content);
+    return block?.type === 'text' && typeof block.text === 'string' ? block.text : undefined;
+  }
+  const texts = content.flatMap(item => {
+    if (typeof item === 'string') return [item];
     const block = object(item);
     return block?.type === 'text' && typeof block.text === 'string' ? [block.text] : [];
   });
@@ -353,6 +386,144 @@ export function parseClaudeTranscriptLine(line: string): ClaudeNormalizedEvent[]
   return normalizeClaudeTranscriptRecord(JSON.parse(line) as unknown);
 }
 
+/** How many recent `queue-operation/remove` ops the drain matcher keeps. A busy
+ *  drain writes its `attachment` immediately after the matching `remove`, so a
+ *  small ring is ample; it only ever holds removes not yet paired to a drain. */
+const REMOVE_RING_LIMIT = 64;
+
+interface RemoveOp {
+  content: string;
+  timestamp?: string;
+}
+
+/**
+ * Stateful, adapter-LOCAL producer of {@link ObservedHumanInput} candidates from
+ * raw Claude transcript records. It is the only place that knows Claude's two
+ * human-input shapes, so a format change breaks this one adapter loudly instead
+ * of mis-reporting delivery downstream.
+ *
+ * The single piece of cross-record state is a bounded ring of recent
+ * `queue-operation/remove` ops. Those ops are the ONLY records carrying the
+ * CONSUMPTION time of a busy-drained prompt; the drain's own
+ * `attachment.timestamp` is the enqueue time and must never be used as
+ * `observedAt`. The stateless public normalizer ({@link normalizeClaudeTranscriptRecord})
+ * keeps emitting the provenance-marked `chat.user` row for rendering; this
+ * adapter runs alongside it and emits the separate proof candidate.
+ *
+ * Feed EVERY raw record (in transcript order) through {@link observe}: the ring
+ * is built from the `remove` ops that precede each drain.
+ */
+export class ClaudeObservedInputAdapter {
+  private readonly removeRing: RemoveOp[] = [];
+
+  /** Drop all buffered `remove` ops. Call when the transcript cursor is reset
+   *  (truncation / inode replacement) so a stale op cannot mis-time a replayed
+   *  drain; the ops are re-fed from the replayed bytes. */
+  reset(): void {
+    this.removeRing.length = 0;
+  }
+
+  /**
+   * Inspect one raw Claude record and return zero or more observed-human-input
+   * candidates.
+   *
+   * @param value              the parsed raw record
+   * @param cursor             the record's byte cursor (for the fallback proof key)
+   * @param observedAtFallback the watcher's read wall-clock, used as `observedAt`
+   *                           only when the harness gives no better time
+   */
+  observe(value: unknown, cursor: TranscriptCursor, observedAtFallback: string): ObservedHumanInput[] {
+    const record = object(value);
+    if (!record) return [];
+
+    // Track queue-operation/remove ops: content + consumption time. `remove`
+    // alone is NOT proof (125 corpus cases are cancellations / pane deaths); it
+    // only supplies the observedAt for a matching drain that follows.
+    if (record.type === 'queue-operation') {
+      if (string(record.operation) === 'remove') {
+        const content = string(record.content);
+        if (content !== undefined) {
+          this.removeRing.push({ content, timestamp: string(record.timestamp) });
+          if (this.removeRing.length > REMOVE_RING_LIMIT) this.removeRing.shift();
+        }
+      }
+      return [];
+    }
+
+    // Shape Q — busy drain. Same discriminator as the normalizer's chat.user
+    // path: queued_command / commandMode:'prompt' / origin.kind:'human' /
+    // non-blank prompt. task-notifications and non-human origins are excluded.
+    if (record.type === 'attachment') {
+      const attachment = object(record.attachment);
+      const origin = object(attachment?.origin);
+      const prompt = string(attachment?.prompt);
+      if (
+        attachment?.type === 'queued_command' &&
+        attachment.commandMode === 'prompt' &&
+        origin?.kind === 'human' &&
+        prompt?.trim()
+      ) {
+        const originatedAt = string(attachment.timestamp) ?? string(record.timestamp);
+        // observedAt: the matching remove op's time (real consumption), then the
+        // watcher read time. NEVER the attachment/enqueue timestamp.
+        const observedAt = this.takeRemoveTimestamp(prompt) ?? observedAtFallback;
+        return [
+          {
+            harness: 'claude',
+            text: prompt,
+            proof: 'native-queue-drain',
+            observedAt,
+            ...(originatedAt === undefined ? {} : { originatedAt }),
+            proofKey: claudeProofKey(record, cursor),
+            shapeVersion: CLAUDE_INPUT_SHAPE_VERSION,
+          },
+        ];
+      }
+      return [];
+    }
+
+    // Shape N — normal idle-submit user record: type:user, message.role:user,
+    // real text (not a tool_result). Emits exactly one candidate for the record.
+    const message = object(record.message) ?? {};
+    if (record.type === 'user' && string(message.role) === 'user') {
+      const text = realUserText(message.content ?? record.content);
+      if (text !== undefined && text.trim()) {
+        return [
+          {
+            harness: 'claude',
+            text,
+            proof: 'normal-user-record',
+            observedAt: string(record.timestamp) ?? observedAtFallback,
+            proofKey: claudeProofKey(record, cursor),
+            shapeVersion: CLAUDE_INPUT_SHAPE_VERSION,
+          },
+        ];
+      }
+    }
+
+    return [];
+  }
+
+  /** Pull the most recent buffered `remove` whose content exactly equals the
+   *  drained prompt, removing it so a later identical drain cannot reuse it
+   *  (one-to-one). Returns its timestamp, or undefined when none matches. */
+  private takeRemoveTimestamp(prompt: string): string | undefined {
+    for (let index = this.removeRing.length - 1; index >= 0; index -= 1) {
+      if (this.removeRing[index]!.content === prompt) {
+        const [removed] = this.removeRing.splice(index, 1);
+        return removed!.timestamp;
+      }
+    }
+    return undefined;
+  }
+}
+
+/** Stable-across-replay proof key: the record UUID where the harness supplies
+ *  one, otherwise a cursor-derived key stable across replays of the file. */
+function claudeProofKey(record: Record<string, unknown>, cursor: TranscriptCursor): string {
+  return string(record.uuid) ?? `${cursor.file}#${cursor.startOffset}#${cursor.endOffset}`;
+}
+
 async function directoriesBelow(root: string): Promise<string[]> {
   const rootStat = await stat(root).catch(() => undefined);
   if (!rootStat?.isDirectory()) return [];
@@ -407,6 +578,7 @@ export class ClaudeTranscriptWatcher {
   private readonly options: ClaudeTranscriptWatcherOptions;
   private readonly backend: TranscriptWatchBackend;
   private readonly directoryWatches = new Map<string, TranscriptWatchHandle>();
+  private readonly observedInput = new ClaudeObservedInputAdapter();
   private fileWatch?: TranscriptWatchHandle;
   private timer?: ReturnType<typeof setInterval>;
   private running = false;
@@ -421,8 +593,24 @@ export class ClaudeTranscriptWatcher {
   private reconcileRequested = false;
   private directoryRefreshRequested = false;
   private reconcilePromise?: Promise<void>;
-  /** Resolvers waiting for the next complete reconcile pass. */
-  private passWaiters: Array<() => void> = [];
+  /** Monotonic id stamped on each reconcile pass the instant it BEGINS reading.
+   *  A flush barrier resolves only once a pass whose id is strictly greater than
+   *  the id captured at request time has fully completed — i.e. a pass that
+   *  began after the flush request and therefore read to the then-current EOF. */
+  private passStartSeq = 0;
+  /** Barriers waiting for a reconcile pass that STARTS after `afterSeq`. Each is
+   *  released the moment such a pass completes, never waiting for later unrelated
+   *  re-requests (the coalescing loop can re-arm indefinitely under a live
+   *  writer, so awaiting the loop itself can hang `finalizeTerminalSends`).
+   *  `rejectOnError` waiters (from `flush()`) REJECT if their target pass threw,
+   *  so a consumer never records a false-successful drain; `flush` waiters do,
+   *  the nonthrowing `start` barrier does not. */
+  private passWaiters: Array<{
+    afterSeq: number;
+    rejectOnError: boolean;
+    resolve: () => void;
+    reject: (error: Error) => void;
+  }> = [];
   /** When the last full-tree discovery walk ran (throttles the expensive path). */
   private lastDiscoveryAt = 0;
   /** Consecutive walks that found nothing — the input to the search backoff. */
@@ -453,23 +641,71 @@ export class ClaudeTranscriptWatcher {
     // timer re-sets it — so on a transcript that is actively being written
     // (i.e. every freshly launched session) that promise settles late or not
     // at all, and `start()` used to inherit the delay. Callers want "the
-    // watcher is armed and has looked once", which is what a pass is.
-    const first = this.nextPass();
+    // watcher is armed and has looked once", which is what a pass is. The start
+    // barrier is nonthrowing: a transient first-pass error must not fail watcher
+    // construction — the periodic loop recovers, and errors still reach onError.
+    const first = this.nextPass(false);
     void this.requestReconcile(true);
     await first;
     return this;
   }
 
-  /** Resolves after the next COMPLETE reconcile pass (or immediately once the
-   *  watcher stops). */
-  private nextPass(): Promise<void> {
-    if (!this.running) return Promise.resolve();
-    return new Promise<void>(resolve => this.passWaiters.push(resolve));
+  /**
+   * Run one bounded reconcile pass to EOF and resolve once it has completed.
+   *
+   * Guarantees every transcript byte written before the call is parsed and
+   * delivered through `onEvents` / `onObservedInput`. Bounded by the current
+   * file size and exits within one reconcile interval, so it never deadlocks —
+   * a consumer can `await watcher.flush()` to drain final transcript evidence
+   * immediately before a terminal classification, then `stop()`. A no-op once
+   * the watcher has stopped.
+   */
+  async flush(): Promise<void> {
+    if (!this.running) return;
+    // Register the barrier BEFORE kicking the reconcile so `afterSeq` captures
+    // the pass id current at request time. We then wait for a pass that STARTS
+    // after this point to finish — not for the coalescing loop to fully drain,
+    // which a concurrent re-request (the periodic tick, a watch event) can defer
+    // forever. One bounded EOF pass is the contract, so flush stays finite even
+    // while later work remains schedulable.
+    // A flush barrier REJECTS if its target pass fails, so a caller
+    // (finalizeTerminalSends) never treats a failed EOF drain as a successful
+    // one and classifies without proof.
+    const barrier = this.nextPass(true);
+    void this.requestReconcile(true);
+    await barrier;
   }
 
+  /** Resolves after the next reconcile pass that BEGINS after this call fully
+   *  completes (or immediately once the watcher stops). When `rejectOnError`,
+   *  the barrier rejects instead if that target pass threw. */
+  private nextPass(rejectOnError: boolean): Promise<void> {
+    if (!this.running) return Promise.resolve();
+    const afterSeq = this.passStartSeq;
+    return new Promise<void>((resolve, reject) => this.passWaiters.push({ afterSeq, rejectOnError, resolve, reject }));
+  }
+
+  /** Settle every barrier a pass with start id `completedSeq` satisfies:
+   *  reject `rejectOnError` waiters if that pass threw (`error`), else resolve. */
+  private settlePassWaiters(completedSeq: number, error?: Error): void {
+    if (this.passWaiters.length === 0) return;
+    const remaining: typeof this.passWaiters = [];
+    for (const waiter of this.passWaiters) {
+      if (completedSeq > waiter.afterSeq) {
+        if (error && waiter.rejectOnError) waiter.reject(error);
+        else waiter.resolve();
+      } else {
+        remaining.push(waiter);
+      }
+    }
+    this.passWaiters = remaining;
+  }
+
+  /** Unconditionally release all barriers — used only when the watcher stops or
+   *  the reconcile loop exits, so no caller hangs past the watcher's life. */
   private releasePassWaiters(): void {
     const waiters = this.passWaiters.splice(0);
-    for (const resolve of waiters) resolve();
+    for (const waiter of waiters) waiter.resolve();
   }
 
   async stop(): Promise<void> {
@@ -510,17 +746,31 @@ export class ClaudeTranscriptWatcher {
       this.reconcilePromise = (async () => {
         while (this.running && this.reconcileRequested) {
           this.reconcileRequested = false;
+          const startSeq = (this.passStartSeq += 1);
+          let passError: Error | undefined;
           try {
             await this.reconcile();
           } catch (error) {
-            this.report(error);
+            passError = error instanceof Error ? error : new Error(String(error));
+            this.report(passError);
           }
-          this.releasePassWaiters();
+          // A failed pass rejects only its flush barriers; ordinary reporting and
+          // the coalescing loop are unchanged, so the watcher keeps recovering.
+          this.settlePassWaiters(startSeq, passError);
         }
       })().finally(() => {
         this.reconcilePromise = undefined;
-        this.releasePassWaiters();
-        if (this.running && this.reconcileRequested) void this.requestReconcile();
+        // Only STOP may release barriers a pass never satisfied. While running, a
+        // barrier still pending at settlement means its target pass has NOT run
+        // yet — e.g. a flush that armed reconcileRequested landed in the microtask
+        // gap between the loop's exit and this settlement callback. Re-request so
+        // the next generation pass resolves it by id; never release it blindly
+        // here, which would resolve flush before its EOF pass actually completed.
+        if (!this.running) {
+          this.releasePassWaiters();
+        } else if (this.reconcileRequested || this.passWaiters.length > 0) {
+          void this.requestReconcile();
+        }
       });
     }
     return this.reconcilePromise;
@@ -619,7 +869,10 @@ export class ClaudeTranscriptWatcher {
     }
 
     await this.selectFile(file);
-    if (!(await this.deliverPending())) return;
+    // Drain what is already queued before reading more; a delivery-callback
+    // failure throws out of the whole pass (fails the flush barrier) rather than
+    // silently reading on past an undelivered record.
+    await this.deliverPending();
     await this.readAvailable();
     await this.deliverPending();
   }
@@ -664,6 +917,7 @@ export class ClaudeTranscriptWatcher {
     this.partialStartOffset = 0;
     this.anchor = Buffer.alloc(0);
     this.pending = [];
+    this.observedInput.reset();
   }
 
   private async cursorStillMatches(file: string, size: number): Promise<boolean> {
@@ -732,12 +986,12 @@ export class ClaudeTranscriptWatcher {
     this.partialStartOffset = combinedStart + lineStart;
   }
 
-  private async deliverPending(): Promise<boolean> {
+  private async deliverPending(): Promise<void> {
     while (this.running && this.pending.length > 0) {
       const pending = this.pending[0]!;
-      let events: ClaudeNormalizedEvent[];
+      let record: unknown;
       try {
-        events = parseClaudeTranscriptLine(pending.bytes.toString('utf8'));
+        record = JSON.parse(pending.bytes.toString('utf8'));
       } catch (cause) {
         this.report(new ClaudeTranscriptParseError(pending.cursor, { cause }));
         this.pending.shift();
@@ -746,17 +1000,40 @@ export class ClaudeTranscriptWatcher {
         continue;
       }
 
+      // Parse once, drive both the stateless normalizer (chat/history stream)
+      // and the stateful observed-input adapter (delivery-proof stream). The
+      // adapter must see EVERY record so its remove-op ring stays current.
+      const events = normalizeClaudeTranscriptRecord(record);
+      // Run the STATEFUL adapter exactly once per record and memoize the result.
+      // Observing a busy drain SPLICES the paired queue-operation/remove
+      // timestamp out of a bounded ring; if a delivery-callback failure below
+      // leaves this record pending and a later pass re-observed it, the ring
+      // would already be drained and observedAt would fall back to the (much
+      // later) wall clock — silently back-dating an in-window proof so a send
+      // that WAS delivered gets classified UNACCOUNTED. Memoizing pins the real
+      // consumption time across every retry; the stateless normalizer above is
+      // safe to recompute.
+      if (pending.observed === undefined) {
+        pending.observed = this.observedInput.observe(record, pending.cursor, new Date().toISOString());
+      }
+      const observed = pending.observed;
+
       try {
         if (events.length > 0) await this.options.onEvents(events, pending.cursor);
+        if (observed.length > 0) await this.options.onObservedInput?.(observed, pending.cursor);
         this.pending.shift();
         this.checkpointOffset = pending.cursor.endOffset;
         await this.options.onCheckpoint?.(pending.cursor);
       } catch (error) {
-        this.report(error);
-        return false;
+        // Propagate a delivery-callback failure so the whole reconcile pass fails:
+        // the loop reports it once and any flush barrier for this pass REJECTS
+        // instead of fulfilling before this record is delivered. A pre-shift
+        // failure (onEvents/onObservedInput) leaves the record pending so the
+        // next pass retries it exactly once. Parse errors above are a SKIP, not a
+        // failure, and still advance the cursor.
+        throw error instanceof Error ? error : new Error(String(error));
       }
     }
-    return true;
   }
 }
 

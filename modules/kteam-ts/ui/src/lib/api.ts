@@ -15,6 +15,7 @@ import type {
   StartSessionPayload,
   WardenVerdict,
   SearchResponse,
+  SendsResponse,
   UsageFeedView,
 } from '../types';
 import type { AnalyticsResponse } from '../../../src/analytics-types';
@@ -231,4 +232,18 @@ export const api = {
     const qs = `after=${after}&limit=${limit}`;
     return request<KTeamEvent[]>(`/v1/sessions/${encodeURIComponent(id)}/events?${qs}`);
   },
+  // THE SEND LEDGER — the durable existence and fate of every message sent to
+  // this session, bounded and independent of journal size.
+  //
+  // This exists because badge state used to be rebuilt from a −2000 JOURNAL
+  // TAIL: a send older than that tail lost its badge AND its existence on
+  // refresh, which is the "my message vanished" report. Journals reach 19–47 MB,
+  // so widening the tail is not the fix — a dedicated bounded read is.
+  //
+  // Default: everything still open (accepted/unaccounted) plus the newest 200
+  // settled, newest-first. `all` asks for the full ledger (the daemon caps it),
+  // which is for a deliberate "show me everything" affordance, not for routine
+  // refreshes. Read-only: no request id, nothing to dedupe.
+  sends: (id: string, all = false) =>
+    request<SendsResponse>(`/v1/sessions/${encodeURIComponent(id)}/sends${all ? '?all=1' : ''}`),
 };

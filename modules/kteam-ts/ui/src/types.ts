@@ -302,6 +302,111 @@ export interface ChatHistoryPage {
   records: ChatRecord[];
 }
 
+// ============================================================================
+// SEND LEDGER — mirror of the daemon's `SendRecord` (src/types.ts).
+//
+// THE THREE-STATE EVIDENCE MODEL. A send is durable the instant it is accepted,
+// and its FATE is owned by the harness transcript, never by anything kteam
+// merely believes:
+//
+//   accepted     the daemon holds a durable record; instant, survives refresh
+//   delivered    the backend matched a real harness record — proof, not a guess
+//   unaccounted  no proof after a generous timeout; "unconfirmed", NEVER "failed"
+//
+// `unaccounted` is non-terminal UPWARD: late proof still promotes it to
+// `delivered`. `delivered` never degrades.
+//
+// WHY THIS BLOCK IS DELIBERATELY LOOSE. Every field the daemon might omit is
+// optional and every literal union is widened by the parser in lib/sends.ts
+// rather than trusted here, because the browser is served from a build that can
+// be older OR newer than the daemon it talks to. The one invariant that must
+// survive any skew: an unrecognised fate is read as `accepted` (visible, no
+// delivery claim), never as `delivered`. Preferring a false "unconfirmed" over a
+// false "delivered" is the whole point of the model — a reader who is told a
+// message landed and acts on it has been given worse information than a reader
+// who is told kteam cannot tell.
+// ============================================================================
+
+export type SendFate = 'accepted' | 'delivered' | 'unaccounted';
+
+export type SendPath = 'direct' | 'turn-file' | 'native-inline' | 'native-file' | 'revive' | 'revive-queue';
+
+export type SendUnaccountedReason = 'timeout' | 'session_ended' | 'composer_discarded';
+
+export type SendEvidenceKind = 'chat.user' | 'queued_command' | 'response_item';
+
+/** How the match was anchored. `queue-file-id` is a uuid (unforgeable by
+ *  coincidence); `exact-text` is normalized EQUALITY — never a prefix or a
+ *  substring, which is what once let a message that merely QUOTED a pending send
+ *  stand in as proof for it. */
+export type SendEvidenceTier = 'queue-file-id' | 'turn-instruction' | 'exact-text';
+
+/** Which harness record shape carried the proof. `native-queue-drain` is
+ *  Claude's busy-composer queue echo; `normal-user-record` is an ordinary user
+ *  turn (both harnesses). */
+export type SendProof = 'normal-user-record' | 'native-queue-drain';
+
+export interface SendEvidence {
+  /** Stable per-proof identity, so a re-read of the same transcript bytes cannot
+   *  prove the same send twice. */
+  key: string;
+  kind?: SendEvidenceKind;
+  tier?: SendEvidenceTier;
+  harness?: Harness;
+  proof?: SendProof;
+  /** When the text ENTERED the conversation (the harness clock). */
+  observedAt?: string;
+  /** When the human supplied it, when the harness records that separately. */
+  originatedAt?: string;
+  matchedTurn?: number;
+  shapeVersion?: number;
+}
+
+export interface SendRecord {
+  v?: number;
+  /** Stable identity: the queue id on native paths, and the client's own
+   *  request id when the caller supplied one — which is what lets an optimistic
+   *  browser row join to its durable row by ID rather than by content. */
+  sendId: string;
+  acceptedAt: string;
+  acceptedTurn?: number;
+  path?: SendPath;
+  /** The LOGICAL message, with any peer preamble — what the reader should see,
+   *  as opposed to the short harness instruction a file-backed send injects. */
+  message: string;
+  /** Exactly what the harness should echo back. Not rendered. */
+  matchText?: string;
+  turn?: number;
+  attachmentIds: string[];
+  from?: string;
+  fromName?: string;
+  replyExpected?: boolean;
+  payloadFile?: string;
+  /** Held by kteam on purpose (a send awaiting an explicit revive) — exempt from
+   *  the timeout sweep, so it must never read as unconfirmed. */
+  held?: boolean;
+  /** Tombstone: injection failed SYNCHRONOUSLY and the caller was told, so they
+   *  hold the message and may retry. Withdrawn rows are not unaccounted and are
+   *  never rendered as durable rows. */
+  withdrawn?: boolean;
+  fate: SendFate;
+  fateAt?: string;
+  /** Set iff `fate === 'delivered'`. */
+  evidence?: SendEvidence;
+  unaccountedReason?: SendUnaccountedReason;
+  // Timeout bookkeeping, persisted so a daemon restart re-derives deadlines from
+  // disk instead of restarting the clock. Read-only here.
+  opportunityAt?: string;
+  unaccountedDeadline?: string;
+  hardDeadline?: string;
+  timeoutFrozenAt?: string;
+}
+
+/** Response envelope of `GET /v1/sessions/:id/sends`. */
+export interface SendsResponse {
+  sends: SendRecord[];
+}
+
 export type EventSource = 'daemon' | 'claude' | 'codex' | 'tmux' | 'client' | 'watcher';
 
 export interface KTeamEvent<T = unknown> {
