@@ -38,14 +38,9 @@
 // MessageScroller's preserveScrollOnPrepend anchoring) survive older-page
 // prepends without remounting the visible tail.
 
-import type { ChatRecord, KTeamEvent } from '../types';
+import type { ChatRecord, KTeamEvent, SendRecord } from '../types';
 import { resultImages, type ToolResultData, type ToolUseData } from './tool-extract';
-import {
-  attachmentFromToolPath,
-  sameAttachmentIds,
-  type StoredTranscriptImage,
-  type TranscriptImage,
-} from './attachments';
+import { attachmentFromToolPath, type StoredTranscriptImage, type TranscriptImage } from './attachments';
 import { classifySystemText, type SystemBlockInfo } from './system-blocks';
 export type { SystemBlockInfo } from './system-blocks';
 
@@ -99,6 +94,19 @@ export type TranscriptBlock =
       /** Present when another session sent this, absent when a human did. */
       from?: PeerFrom;
       attachments?: StoredTranscriptImage[];
+      /** STABLE HARNESS IDENTITIES of the record that produced this row — the
+       *  same identity space the daemon writes into `SendEvidence.key`.
+       *
+       *  This exists so the send ledger can retire a DELIVERED chip only against
+       *  the row the daemon actually cited as proof, rather than against any row
+       *  that merely looks the same. Content equality is not identity: two
+       *  identical messages, or one message quoted later, are indistinguishable by
+       *  text, and matching on text let a chip be hidden while the real proof row
+       *  sat outside the loaded page. See lib/sends.ts `selectLedgerChips`.
+       *
+       *  Absent when the record carried no stable id, which is a deliberate
+       *  "cannot prove identity" signal — the ledger keeps the chip. */
+      proofKeys?: readonly string[];
     }
   | { id: string; kind: 'assistant'; text: string; ts?: string; source: string }
   // A harness-INJECTED system text that arrived on the user channel (task
@@ -174,6 +182,34 @@ function sig(rec: ChatRecord): string {
     }
   }
   return `${rec.source ?? ''}|${rec.type}|${t}|${body}`;
+}
+
+/** The stable identities by which the daemon could have cited this record as
+ *  delivery proof — the exact identity space it writes into `SendEvidence.key`.
+ *
+ *  Per-harness, verified against the adapters:
+ *    - Claude: the proof key is the RAW `record.uuid`, which
+ *      `normalizeClaudeTranscriptRecord` exposes as `recordUuid`
+ *      (`src/claude-transcript.ts:183`).
+ *    - Codex: the proof key is the RAW `payload.id`, exposed as `itemId`
+ *      (`src/codex-transcript.ts:169`).
+ *
+ *  Both are forwarded at the TOP level of the normalized chat row on the history
+ *  AND live paths, so either one names a browser row exactly. The values are used
+ *  verbatim — nothing is composed, hashed or derived, because a composed key that
+ *  the daemon never writes would silently never match.
+ *
+ *  A record with NEITHER field yields undefined, and that is the honest answer, not
+ *  a gap to paper over. It is the case for the daemon's CURSOR-FALLBACK evidence
+ *  keys (`file:offset:blockIndex`), whose components the browser never receives.
+ *  The ledger reads undefined as "identity unknown ⇒ keep the chip" and must never
+ *  fall back to content matching, which is the bug this function exists to fix. */
+function proofKeysOf(rec: ChatRecord): string[] | undefined {
+  const meta = rec as unknown as { recordUuid?: unknown; itemId?: unknown };
+  const keys: string[] = [];
+  if (typeof meta.recordUuid === 'string' && meta.recordUuid) keys.push(meta.recordUuid);
+  if (typeof meta.itemId === 'string' && meta.itemId) keys.push(meta.itemId);
+  return keys.length ? keys : undefined;
 }
 
 function tsMs(v?: string): number | undefined {
@@ -260,16 +296,6 @@ export interface SendIndex {
   byTurn: ReadonlyMap<number, SentMessage>;
   byQueueId: ReadonlyMap<string, SentMessage>;
   attachments: ReadonlyMap<string, StoredTranscriptImage>;
-  /** Inline (NON file-backed) native-queue sends. These are the only send class
-   *  the harness delivers WITHOUT leaving a chat.user transcript record: a short
-   *  message typed into a busy session's composer is folded into a turn and no
-   *  `chat.user` / `control.send_consumed` is ever emitted for it (verified on
-   *  ms1lhymf-c4051f31, turns 36→37). buildTranscript SYNTHESIZES a user block
-   *  for each once its turn has demonstrably closed, so the message is visible
-   *  after reload AND the optimistic "queued" chip has a block to reap against.
-   *  File-backed queued sends are excluded — those DO leave a "Read the queued
-   *  message file …" chat.user row that byQueueId replaces in place. */
-  queued: readonly SentMessage[];
 }
 
 function validAttachmentIds(value: unknown): string[] {
@@ -277,17 +303,32 @@ function validAttachmentIds(value: unknown): string[] {
   return value.filter((id): id is string => typeof id === 'string' && /^att_[a-f0-9]{64}$/i.test(id));
 }
 
-/** Build the send indexes. `byTurn`/`byQueueId` are REPLACEMENT indexes: the
- * direct turn-file and file-backed-queue paths both leave a real chat.user row
- * (a turn prompt / a "Read the queued message file …" instruction) that
- * buildTranscript rewrites in place. `queued` is a SYNTHESIS list: inline native
- * queue sends leave no chat.user row at all, so buildTranscript builds one for
- * them (see the SendIndex.queued note). */
-export function buildSendIndex(events: KTeamEvent[], sessionId: string): SendIndex {
+/** Build the send indexes.
+ *
+ *  `byTurn`/`byQueueId` are REPLACEMENT indexes, and replacement only. The
+ *  turn-file and file-backed-queue paths both leave a REAL chat.user row — a turn
+ *  prompt, or a "Read the queued message file …" instruction — and all these
+ *  indexes do is let buildTranscript rewrite that row's terse harness instruction
+ *  into the logical message the reader actually sent, with its attachments and
+ *  peer attribution. The harness record is the proof; this is presentation.
+ *
+ *  THERE IS NO SYNTHESIS LIST ANY MORE. `queued` used to fabricate a user block
+ *  for an inline native-queue send once the turn counter moved past the turn it
+ *  was queued in. Turn advancement is not delivery proof — the corpus shows
+ *  drains happening mid-turn and in batches — so that row could assert a delivery
+ *  that never happened. An inline queued send with no harness record now shows as
+ *  a ledger row (accepted/unaccounted) instead, which is honest about what kteam
+ *  knows. See lib/sends.ts.
+ *
+ *  `ledger` is the durable send ledger, and it exists here for ONE reason: the
+ *  journal `events` handed to this function are a bounded −2000 tail, so a send
+ *  older than that tail loses its replacement metadata and its row decays back to
+ *  a slim "turn prompt" system line. The ledger is fetched whole and bounded, so
+ *  it fills those gaps. Journal entries are applied FIRST and win, since they are
+ *  the live path; the ledger only supplies keys the tail no longer carries. */
+export function buildSendIndex(events: KTeamEvent[], sessionId: string, ledger: readonly SendRecord[] = []): SendIndex {
   const byTurn = new Map<number, SentMessage>();
   const byQueueId = new Map<string, SentMessage>();
-  const queued: SentMessage[] = [];
-  const queuedSeen = new Set<string>();
   const attachments = new Map<string, StoredTranscriptImage>();
   const seen = new Set<number>();
 
@@ -342,27 +383,73 @@ export function buildSendIndex(events: KTeamEvent[], sessionId: string): SendInd
         ...(typeof data['fromName'] === 'string' ? { fromName: data['fromName'] } : {}),
         ...(data['replyExpected'] === true ? { replyExpected: true } : {}),
       };
-      // File-backed queue sends leave a chat.user instruction row that
-      // byQueueId rewrites; inline ones leave nothing, so they go on the
-      // synthesis list instead. The two paths are mutually exclusive.
-      if (data['fileBacked'] === true) {
-        if (!byQueueId.has(queueId)) byQueueId.set(queueId, message);
-      } else if (!queuedSeen.has(queueId)) {
-        queuedSeen.add(queueId);
-        queued.push(message);
-      }
+      // Only file-backed queue sends earn an index entry: they leave a
+      // "Read the queued message file …" chat.user row for byQueueId to rewrite.
+      // An INLINE queued send leaves no row at all, and it no longer gets one
+      // invented for it — the ledger reports its state instead.
+      if (data['fileBacked'] === true && !byQueueId.has(queueId)) byQueueId.set(queueId, message);
     }
   }
-  return { byTurn, byQueueId, attachments, queued };
+
+  // Ledger backfill for keys the bounded journal tail no longer carries.
+  // `withdrawn` rows are skipped: a tombstoned send was refused synchronously and
+  // the caller still holds the message, so nothing on screen should be rewritten
+  // as if it had been sent.
+  for (const record of ledger) {
+    if (record.withdrawn === true) continue;
+    const message: SentMessage = {
+      kind: record.path === 'native-file' || record.payloadFile ? 'queued' : 'sent',
+      // Ledger rows carry no journal sequence. Rows built here are only ever read
+      // for their content, and `time` is what orders them, so 0 is honest rather
+      // than a fake ordinal that could collide with a real one.
+      sequence: 0,
+      time: record.acceptedAt,
+      ...(record.turn === undefined ? {} : { turn: record.turn }),
+      message: record.message.trim(),
+      attachmentIds: [...record.attachmentIds],
+      ...(record.from === undefined ? {} : { from: record.from }),
+      ...(record.fromName === undefined ? {} : { fromName: record.fromName }),
+      ...(record.replyExpected === true ? { replyExpected: true } : {}),
+    };
+    // A file-backed send is identified by its payload file, whatever the path
+    // label says — the uuid in the instruction row is the join key, and it is the
+    // strongest one available (a coincidental match is not possible).
+    if (record.path === 'native-file' || record.payloadFile) {
+      if (!byQueueId.has(record.sendId)) byQueueId.set(record.sendId, { ...message, queueId: record.sendId });
+      continue;
+    }
+    // Paths that inject a TURN PROMPT the reader should not have to read. `direct`
+    // is excluded because it types the message verbatim — there is nothing to
+    // replace — which is the same exclusion the journal branch above makes via
+    // `direct !== true`. `native-inline` is excluded because it leaves no row.
+    if (record.path === 'turn-file' || record.path === 'revive' || record.path === 'revive-queue') {
+      if (record.turn !== undefined && !byTurn.has(record.turn)) byTurn.set(record.turn, message);
+    }
+  }
+  return { byTurn, byQueueId, attachments };
 }
+
+/** The send id embedded in a native-file queue instruction.
+ *
+ *  THE CHARSET IS THE BACKEND'S SAFE-ID GRAMMAR, NOT A UUID. This used to match
+ *  `[0-9a-f-]{36}`, which was true only while every queue id was a generated uuid.
+ *  Send ids are now the daemon's `SAFE_SEND_REQUEST_ID` contract —
+ *  `[A-Za-z0-9_-]{1,128}` — because the send route promotes a validated
+ *  `x-kteam-request-id` to the durable send id, and the native-file path embeds
+ *  that id in the payload filename (`channel/queued-<sendId>.md`). A perfectly
+ *  valid non-uuid id such as `request_file_1` therefore failed to parse, the
+ *  byQueueId replacement never fired, and the reader was shown the raw
+ *  "Read the queued message file at …" instruction instead of the message they
+ *  actually sent. Keep this grammar byte-identical to the backend's.
+ *
+ *  `.` is deliberately absent from the charset, so the `.md` suffix remains an
+ *  unambiguous terminator and the capture cannot swallow it. */
+const QUEUE_FILE_INSTRUCTION =
+  /^Read the queued message file at .*\/\.kteam\/[\w.-]+\/channel\/queued-([A-Za-z0-9_-]{1,128})\.md completely now, then follow every instruction inside it\./i;
 
 function queuedFileId(text: string): string | undefined {
   const normalized = text.replaceAll('\\', '/');
-  const match =
-    /^Read the queued message file at .*\/\.kteam\/[\w.-]+\/channel\/queued-([0-9a-f-]{36})\.md completely now, then follow every instruction inside it\./i.exec(
-      normalized,
-    );
-  return match?.[1];
+  return QUEUE_FILE_INSTRUCTION.exec(normalized)?.[1];
 }
 
 /** Conservatively strip only the daemon's complete, trailing reference block.
@@ -424,18 +511,18 @@ interface PendingTurns {
   key: string;
 }
 
-export function buildTranscript(
-  records: ChatRecord[],
-  sends?: SendIndex,
-  sessionId?: string,
-  /** The session's live turn. Inline native-queue sends are synthesized into
-   *  user blocks only once this has advanced PAST the turn they were queued in
-   *  — the proof they left the composer (a turn cannot advance while its queued
-   *  text sits unsubmitted; a lost send dies at its turn and never advances it).
-   *  Undefined ⇒ turn unknown ⇒ synthesize nothing, so a queued chip is never
-   *  cleared on an assumption. */
-  currentTurn?: number,
-): TranscriptBlock[] {
+// NO `currentTurn` PARAMETER, DELIBERATELY.
+//
+// This function used to take the session's live turn and synthesize a delivered
+// user block for any inline native-queue send whose turn had advanced. The
+// premise was "a turn cannot advance while its queued text sits unsubmitted", and
+// the corpus disproved it: queued text is normally drained MID-turn, several
+// messages at a time, so turn advancement says nothing about whether any
+// particular message was read. A transcript is a record of what the harness
+// actually wrote — it must not contain rows the browser inferred. Un-proven sends
+// are now reported as ledger rows by lib/sends.ts, which is allowed to say
+// "unconfirmed"; a transcript row is not.
+export function buildTranscript(records: ChatRecord[], sends?: SendIndex, sessionId?: string): TranscriptBlock[] {
   const out: TranscriptBlock[] = [];
   const seen = new Map<string, number>();
   const mkId = (raw: string): string => {
@@ -498,6 +585,9 @@ export function buildTranscript(
       // outrank content heuristics: a human is allowed to send "Continue…" or a
       // turn-prompt-shaped string without it becoming a fake system row.
       const nativeQueuedHuman = (r.data as { nativeQueuedHuman?: unknown } | undefined)?.nativeQueuedHuman === true;
+      // Computed once for both user-block branches below. Only `chat.user` rows can
+      // ever be delivery proof, so this is the only branch that carries it.
+      const proofKeys = proofKeysOf(r);
       const info = from || nativeQueuedHuman ? null : classifySystemText(body);
       const turnNumber = info?.label === 'turn prompt' ? Number(/turn-(\d+)\.md/.exec(info.summary ?? '')?.[1]) : NaN;
       const queueId = from ? undefined : queuedFileId(body);
@@ -521,6 +611,10 @@ export function buildTranscript(
           source: r.source ?? 'user',
           ...(mergedFrom ? { from: mergedFrom } : {}),
           ...(attachments.length ? { attachments } : {}),
+          // Carried from the RECORD, not from the journal/ledger metadata that
+          // rewrote its text: the row's identity as delivery proof belongs to the
+          // harness record the harness actually wrote.
+          ...(proofKeys === undefined ? {} : { proofKeys }),
         });
       } else if (info || queueId) {
         const fallbackInfo: SystemBlockInfo = info ?? {
@@ -546,6 +640,7 @@ export function buildTranscript(
           source: r.source ?? 'user',
           ...(from ? { from } : {}),
           ...(attachments.length ? { attachments } : {}),
+          ...(proofKeys === undefined ? {} : { proofKeys }),
         });
       }
       prevTs = r.timestamp;
@@ -682,70 +777,7 @@ export function buildTranscript(
   }
 
   flushTurns(true);
-  return synthesizeDeliveredQueued(mergeAdjacentToolBlocks(out), sends, sessionId, currentTurn);
-}
-
-/** Weave in a user block for each inline native-queue send whose turn has
- *  closed (see SendIndex.queued). Runs on the finished block list so it never
- *  perturbs turn grouping or tool-run merging: each block is inserted at its
- *  chronological position by send time, and a send already visible as a real
- *  chat.user row (or an earlier synthesis) is skipped so nothing double-renders.
- *  Placement by time mirrors where the reader typed it — a human interjection
- *  during the agent's work — and gives the optimistic reaper a block whose ts is
- *  in-window with the pending send it must clear. */
-function synthesizeDeliveredQueued(
-  blocks: TranscriptBlock[],
-  sends: SendIndex | undefined,
-  sessionId: string | undefined,
-  currentTurn: number | undefined,
-): TranscriptBlock[] {
-  const queued = sends?.queued;
-  if (!queued?.length || currentTurn == null) return blocks;
-  const out = [...blocks];
-  for (const q of queued) {
-    // Not yet delivered: the turn it was queued in is still open (or its turn
-    // is unknown). Leave it to the sender's optimistic chip; do not fabricate a
-    // delivered row for a message that may still be sitting in the composer.
-    if (q.turn == null || currentTurn <= q.turn) continue;
-    const parsed = peerFrom(q.message);
-    const from = senderFor(q, parsed.from);
-    const text = parsed.body.trim();
-    const attachments = imagesForIds(q.attachmentIds, sends, sessionId);
-    if (!text && attachments.length === 0) continue;
-    // Already on screen (a real chat.user landed, or a duplicate queueId): the
-    // existing row and the reaper own it, so never add a second bubble.
-    const duplicate = out.some(
-      b =>
-        b.kind === 'user' &&
-        b.text.trim() === text &&
-        (b.from?.name ?? undefined) === (from?.name ?? undefined) &&
-        sameAttachmentIds(
-          (b.attachments ?? []).map(image => image.attachmentId),
-          q.attachmentIds,
-        ),
-    );
-    if (duplicate) continue;
-    const block: Extract<TranscriptBlock, { kind: 'user' }> = {
-      id: `q-${hash(q.queueId ?? String(q.sequence))}`,
-      kind: 'user',
-      text,
-      ts: q.time,
-      source: q.from ?? 'user',
-      ...(from ? { from } : {}),
-      ...(attachments.length ? { attachments } : {}),
-    };
-    const at = tsMs(q.time);
-    let idx = out.length;
-    if (at != null) {
-      const found = out.findIndex(b => {
-        const bt = 'ts' in b ? tsMs(b.ts) : undefined;
-        return bt != null && bt > at;
-      });
-      if (found !== -1) idx = found;
-    }
-    out.splice(idx, 0, block);
-  }
-  return out;
+  return mergeAdjacentToolBlocks(out);
 }
 
 /** Fold any two `tools` blocks that ended up ADJACENT in the output into one.

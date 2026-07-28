@@ -9,6 +9,7 @@ import {
   type TranscriptWatchEvent,
   type TranscriptWatchHandle,
 } from './claude-transcript';
+import { CODEX_INPUT_SHAPE_VERSION, type ObservedHumanInput } from './observed-human-input';
 
 type MaybePromise<T> = T | Promise<T>;
 
@@ -68,6 +69,11 @@ export interface CodexTranscriptWatcherOptions extends CodexNormalizationOptions
   /** Exact rollout JSONL pathname. The watcher never selects a sibling rollout. */
   transcriptFile: string;
   onEvents(events: readonly CodexNormalizedEvent[], cursor: TranscriptCursor): MaybePromise<void>;
+  /** Delivery-proof candidates, on a channel SEPARATE from `onEvents` so the
+   *  chat/history stream is unchanged. Each raw record is fed to a stateful
+   *  {@link CodexObservedInputAdapter}; consumers reconcile these against their
+   *  durable send records without ever treating arbitrary `chat.user` as proof. */
+  onObservedInput?(inputs: readonly ObservedHumanInput[], cursor: TranscriptCursor): MaybePromise<void>;
   onCheckpoint?(cursor: TranscriptCursor): MaybePromise<void>;
   onDiscovered?(file: string): MaybePromise<void>;
   onError?(error: Error): void;
@@ -92,6 +98,13 @@ export interface CodexTranscriptWatcherSnapshot {
 interface PendingRecord {
   bytes: Buffer<ArrayBufferLike>;
   cursor: TranscriptCursor;
+  /** Observed-input candidates memoized the first time this record reached the
+   *  queue head. Codex's adapter is stateless, but observing still resolves a
+   *  fallback `observedAt` from the read wall clock for a timestamp-less record;
+   *  memoizing keeps a delivery-callback retry from re-resolving that fallback to
+   *  a later time, and holds parity with the Claude watcher's remove-ring fix.
+   *  Undefined until first observed. */
+  observed?: readonly ObservedHumanInput[];
 }
 
 interface FileIdentity {
@@ -419,6 +432,88 @@ export function parseCodexTranscriptLine(
   return normalizeCodexTranscriptRecord(JSON.parse(line) as unknown, options);
 }
 
+/**
+ * The initial session/environment preamble Codex writes as the first user
+ * record of a rollout (AGENTS.md + environment block). It is structurally
+ * identifiable by its wrapping tags, so it is excluded from observed-input
+ * candidates. Downstream exact-content matching is still the real safety
+ * boundary; this only stops a future accidental substring rule from reaching it.
+ */
+function isCodexPreamble(text: string): boolean {
+  const head = text.trimStart();
+  return (
+    head.startsWith('<environment_context>') ||
+    head.startsWith('<user_instructions>') ||
+    head.startsWith('<user_environment>')
+  );
+}
+
+/**
+ * Stateless producer of {@link ObservedHumanInput} candidates from raw Codex
+ * rollout records. Codex has no busy-queue shape, so — unlike Claude — no
+ * cross-record state is needed.
+ *
+ * Only the canonical `response_item/message/role:user` record (with
+ * `input_text`, or a bare string block) is delivery proof. The mirrored
+ * `event_msg/user_message` record is deliberately never a candidate: it would
+ * double-count the same delivery. Feed every raw record through {@link observe}.
+ */
+export class CodexObservedInputAdapter {
+  /** Codex needs no buffered state; provided for interface parity with Claude. */
+  reset(): void {}
+
+  /**
+   * Inspect one raw Codex record and return zero or one observed-human-input
+   * candidate.
+   *
+   * @param value              the parsed raw record
+   * @param cursor             the record's byte cursor (for the fallback proof key)
+   * @param observedAtFallback the watcher's read wall-clock, used as `observedAt`
+   *                           only when the record carries no timestamp
+   */
+  observe(value: unknown, cursor: TranscriptCursor, observedAtFallback: string): ObservedHumanInput[] {
+    const record = object(value);
+    if (!record) return [];
+    const recordType = string(record.type);
+    const payload = object(record.payload) ?? {};
+    const itemType = string(payload.type);
+
+    // The event_msg/user_message mirror is never proof: the canonical
+    // response_item below is the single source. Emitting here would count one
+    // delivery twice.
+    if (recordType === 'event_msg' && itemType === 'user_message') return [];
+
+    if (recordType !== 'response_item' || itemType !== 'message') return [];
+    if (string(payload.role) !== 'user') return [];
+
+    const content = Array.isArray(payload.content) ? payload.content : [payload.content];
+    const texts: string[] = [];
+    for (const blockValue of content) {
+      if (typeof blockValue === 'string') {
+        texts.push(blockValue);
+        continue;
+      }
+      const block = object(blockValue);
+      const blockType = string(block?.type);
+      const text = string(block?.text) ?? string(block?.output_text);
+      if (text !== undefined && (blockType === undefined || blockType === 'input_text')) texts.push(text);
+    }
+    const text = texts.join('\n');
+    if (!text.trim() || isCodexPreamble(text)) return [];
+
+    return [
+      {
+        harness: 'codex',
+        text,
+        proof: 'normal-user-record',
+        observedAt: string(record.timestamp) ?? observedAtFallback,
+        proofKey: string(payload.id) ?? `${cursor.file}#${cursor.startOffset}#${cursor.endOffset}`,
+        shapeVersion: CODEX_INPUT_SHAPE_VERSION,
+      },
+    ];
+  }
+}
+
 export class CodexTranscriptParseError extends Error {
   constructor(
     public readonly cursor: TranscriptCursor,
@@ -456,6 +551,7 @@ export class CodexTranscriptWatcher {
   private readonly options: CodexTranscriptWatcherOptions;
   private readonly backend: TranscriptWatchBackend;
   private readonly transcriptFile: string;
+  private readonly observedInput = new CodexObservedInputAdapter();
   private directoryWatch?: TranscriptWatchHandle;
   private watchedDirectory?: string;
   private fileWatch?: TranscriptWatchHandle;
@@ -474,8 +570,24 @@ export class CodexTranscriptWatcher {
   private reconcileRequested = false;
   private directoryRefreshRequested = false;
   private reconcilePromise?: Promise<void>;
-  /** Resolvers waiting for the next complete reconcile pass. */
-  private passWaiters: Array<() => void> = [];
+  /** Monotonic id stamped on each reconcile pass the instant it BEGINS reading.
+   *  A flush barrier resolves only once a pass whose id is strictly greater than
+   *  the id captured at request time has fully completed — i.e. a pass that
+   *  began after the flush request and therefore read to the then-current EOF. */
+  private passStartSeq = 0;
+  /** Barriers waiting for a reconcile pass that STARTS after `afterSeq`. Each is
+   *  released the moment such a pass completes, never waiting for later unrelated
+   *  re-requests (the coalescing loop can re-arm indefinitely under a live
+   *  writer, so awaiting the loop itself can hang `finalizeTerminalSends`).
+   *  `rejectOnError` waiters (from `flush()`) REJECT if their target pass threw,
+   *  so a consumer never records a false-successful drain; `flush` waiters do,
+   *  the nonthrowing `start` barrier does not. */
+  private passWaiters: Array<{
+    afterSeq: number;
+    rejectOnError: boolean;
+    resolve: () => void;
+    reject: (error: Error) => void;
+  }> = [];
 
   constructor(options: CodexTranscriptWatcherOptions) {
     if (!options.transcriptFile.trim()) throw new Error('Codex transcriptFile is required');
@@ -491,22 +603,70 @@ export class CodexTranscriptWatcher {
     this.timer = setInterval(() => void this.requestReconcile(true), interval);
     this.timer.unref?.();
     // ONE pass, not the drain loop — see the same note in claude-transcript.ts.
-    const first = this.nextPass();
+    // The start barrier is nonthrowing: a transient first-pass error must not
+    // fail watcher construction — the periodic loop recovers and onError still fires.
+    const first = this.nextPass(false);
     void this.requestReconcile(true);
     await first;
     return this;
   }
 
-  /** Resolves after the next COMPLETE reconcile pass (or immediately once the
-   *  watcher stops). */
-  private nextPass(): Promise<void> {
-    if (!this.running) return Promise.resolve();
-    return new Promise<void>(resolve => this.passWaiters.push(resolve));
+  /**
+   * Run one bounded reconcile pass to EOF and resolve once it has completed.
+   *
+   * Guarantees every rollout byte written before the call is parsed and
+   * delivered through `onEvents` / `onObservedInput`. Bounded by the current
+   * file size and exits within one reconcile interval, so it never deadlocks —
+   * a consumer can `await watcher.flush()` to drain final transcript evidence
+   * immediately before a terminal classification, then `stop()`. A no-op once
+   * the watcher has stopped.
+   */
+  async flush(): Promise<void> {
+    if (!this.running) return;
+    // Register the barrier BEFORE kicking the reconcile so `afterSeq` captures
+    // the pass id current at request time. We then wait for a pass that STARTS
+    // after this point to finish — not for the coalescing loop to fully drain,
+    // which a concurrent re-request (the periodic tick, a watch event) can defer
+    // forever. One bounded EOF pass is the contract, so flush stays finite even
+    // while later work remains schedulable.
+    // A flush barrier REJECTS if its target pass fails, so a caller
+    // (finalizeTerminalSends) never treats a failed EOF drain as a successful
+    // one and classifies without proof.
+    const barrier = this.nextPass(true);
+    void this.requestReconcile(true);
+    await barrier;
   }
 
+  /** Resolves after the next reconcile pass that BEGINS after this call fully
+   *  completes (or immediately once the watcher stops). When `rejectOnError`,
+   *  the barrier rejects instead if that target pass threw. */
+  private nextPass(rejectOnError: boolean): Promise<void> {
+    if (!this.running) return Promise.resolve();
+    const afterSeq = this.passStartSeq;
+    return new Promise<void>((resolve, reject) => this.passWaiters.push({ afterSeq, rejectOnError, resolve, reject }));
+  }
+
+  /** Settle every barrier a pass with start id `completedSeq` satisfies:
+   *  reject `rejectOnError` waiters if that pass threw (`error`), else resolve. */
+  private settlePassWaiters(completedSeq: number, error?: Error): void {
+    if (this.passWaiters.length === 0) return;
+    const remaining: typeof this.passWaiters = [];
+    for (const waiter of this.passWaiters) {
+      if (completedSeq > waiter.afterSeq) {
+        if (error && waiter.rejectOnError) waiter.reject(error);
+        else waiter.resolve();
+      } else {
+        remaining.push(waiter);
+      }
+    }
+    this.passWaiters = remaining;
+  }
+
+  /** Unconditionally release all barriers — used only when the watcher stops or
+   *  the reconcile loop exits, so no caller hangs past the watcher's life. */
   private releasePassWaiters(): void {
     const waiters = this.passWaiters.splice(0);
-    for (const resolve of waiters) resolve();
+    for (const waiter of waiters) waiter.resolve();
   }
 
   async stop(): Promise<void> {
@@ -547,17 +707,31 @@ export class CodexTranscriptWatcher {
       this.reconcilePromise = (async () => {
         while (this.running && this.reconcileRequested) {
           this.reconcileRequested = false;
+          const startSeq = (this.passStartSeq += 1);
+          let passError: Error | undefined;
           try {
             await this.reconcile();
           } catch (error) {
-            this.report(error);
+            passError = error instanceof Error ? error : new Error(String(error));
+            this.report(passError);
           }
-          this.releasePassWaiters();
+          // A failed pass rejects only its flush barriers; ordinary reporting and
+          // the coalescing loop are unchanged, so the watcher keeps recovering.
+          this.settlePassWaiters(startSeq, passError);
         }
       })().finally(() => {
         this.reconcilePromise = undefined;
-        this.releasePassWaiters();
-        if (this.running && this.reconcileRequested) void this.requestReconcile();
+        // Only STOP may release barriers a pass never satisfied. While running, a
+        // barrier still pending at settlement means its target pass has NOT run
+        // yet — e.g. a flush that armed reconcileRequested landed in the microtask
+        // gap between the loop's exit and this settlement callback. Re-request so
+        // the next generation pass resolves it by id; never release it blindly
+        // here, which would resolve flush before its EOF pass actually completed.
+        if (!this.running) {
+          this.releasePassWaiters();
+        } else if (this.reconcileRequested || this.passWaiters.length > 0) {
+          void this.requestReconcile();
+        }
       });
     }
     return this.reconcilePromise;
@@ -608,7 +782,10 @@ export class CodexTranscriptWatcher {
 
     this.present = true;
     if (!(await this.selectFile(info))) return;
-    if (!(await this.deliverPending())) return;
+    // Drain what is already queued before reading more; a delivery-callback
+    // failure throws out of the whole pass (fails the flush barrier) rather than
+    // silently reading on past an undelivered record.
+    await this.deliverPending();
     await this.readAvailable();
     await this.deliverPending();
   }
@@ -659,6 +836,7 @@ export class CodexTranscriptWatcher {
     this.partialStartOffset = 0;
     this.anchor = Buffer.alloc(0);
     this.pending = [];
+    this.observedInput.reset();
   }
 
   private async cursorStillMatches(size: number): Promise<boolean> {
@@ -724,15 +902,12 @@ export class CodexTranscriptWatcher {
     this.partialStartOffset = combinedStart + lineStart;
   }
 
-  private async deliverPending(): Promise<boolean> {
+  private async deliverPending(): Promise<void> {
     while (this.running && this.pending.length > 0) {
       const pending = this.pending[0]!;
-      let events: CodexNormalizedEvent[];
+      let record: unknown;
       try {
-        events = parseCodexTranscriptLine(pending.bytes.toString('utf8'), {
-          sessionId: this.options.sessionId ?? sessionIdFromFilename(this.transcriptFile),
-          includeDiagnostics: this.options.includeDiagnostics,
-        });
+        record = JSON.parse(pending.bytes.toString('utf8'));
       } catch (cause) {
         this.report(new CodexTranscriptParseError(pending.cursor, { cause }));
         this.pending.shift();
@@ -741,17 +916,36 @@ export class CodexTranscriptWatcher {
         continue;
       }
 
+      // Parse once, drive both the stateless normalizer (chat/history stream)
+      // and the observed-input adapter (delivery-proof stream).
+      const events = normalizeCodexTranscriptRecord(record, {
+        sessionId: this.options.sessionId ?? sessionIdFromFilename(this.transcriptFile),
+        includeDiagnostics: this.options.includeDiagnostics,
+      });
+      // Observe exactly once per record and memoize: a delivery-callback retry
+      // must not re-resolve a timestamp-less record's fallback observedAt to a
+      // later wall clock (parity with the Claude watcher's remove-ring fix).
+      if (pending.observed === undefined) {
+        pending.observed = this.observedInput.observe(record, pending.cursor, new Date().toISOString());
+      }
+      const observed = pending.observed;
+
       try {
         if (events.length > 0) await this.options.onEvents(events, pending.cursor);
+        if (observed.length > 0) await this.options.onObservedInput?.(observed, pending.cursor);
         this.pending.shift();
         this.checkpointOffset = pending.cursor.endOffset;
         await this.options.onCheckpoint?.(pending.cursor);
       } catch (error) {
-        this.report(error);
-        return false;
+        // Propagate a delivery-callback failure so the whole reconcile pass fails:
+        // the loop reports it once and any flush barrier for this pass REJECTS
+        // instead of fulfilling before this record is delivered. A pre-shift
+        // failure (onEvents/onObservedInput) leaves the record pending so the
+        // next pass retries it exactly once. Parse errors above are a SKIP, not a
+        // failure, and still advance the cursor.
+        throw error instanceof Error ? error : new Error(String(error));
       }
     }
-    return true;
   }
 }
 

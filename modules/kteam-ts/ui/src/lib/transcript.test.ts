@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { Fragment, createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { ChatRecord, KTeamEvent } from '../types';
+import type { ChatRecord, KTeamEvent, SendRecord } from '../types';
 import { TranscriptRow } from '../components/TranscriptRow';
 import {
   buildSendIndex,
@@ -335,10 +335,20 @@ describe('journalled sent-message merge', () => {
   });
 });
 
-describe('inline native-queue synthesis', () => {
-  // The regression: a short send to a BUSY session leaves NO chat.user record
-  // and no send_consumed — only a non-file-backed control.send_queued. It must
-  // still become a visible, reapable row once its turn has closed.
+describe('no fate is ever synthesized from the turn counter', () => {
+  // WHAT THIS SUITE REPLACED, AND WHY.
+  //
+  // There used to be an `inline native-queue synthesis` suite here asserting the
+  // opposite of these tests: that an inline queued send BECOMES a delivered user
+  // row once `currentTurn` passes the turn it was queued in. A corpus audit
+  // (1,826 Claude transcripts) showed the premise is false — the harness drains
+  // queued text mid-turn, and drains several messages into a single turn — so
+  // that row could assert a delivery that never happened. Those tests were
+  // deleted rather than adapted: they encoded the bug.
+  //
+  // The rule now: a transcript block exists only where the HARNESS wrote a
+  // record. An unproven send is reported by the send ledger (lib/sends.ts), which
+  // is allowed to say "unconfirmed"; the transcript is not allowed to guess.
   function inlineQueued(seq: number, message: string, turn: number, over: Record<string, unknown> = {}): KTeamEvent {
     return journal(
       seq,
@@ -348,56 +358,288 @@ describe('inline native-queue synthesis', () => {
     );
   }
 
-  test('collected on the queued list, never on byQueueId or byTurn', () => {
+  test('an inline queued send earns no index entry at all', () => {
     const index = buildSendIndex([inlineQueued(2, 'remember 42', 14)], SESSION);
-    expect(index.queued).toHaveLength(1);
-    expect(index.queued[0]?.turn).toBe(14);
+    // It leaves no chat.user row, so there is nothing to REPLACE — and the
+    // synthesis list it used to land on no longer exists.
     expect(index.byQueueId.size).toBe(0);
     expect(index.byTurn.size).toBe(0);
+    expect('queued' in index).toBe(false);
   });
 
-  test('stays invisible until its turn closes, then surfaces as a user row', () => {
+  test('no user row is invented, at any turn distance', () => {
     const index = buildSendIndex([inlineQueued(2, 'remember 42', 14)], SESSION);
-    // Turn unknown ⇒ never assume delivery.
-    expect(buildTranscript([], index, SESSION, undefined)).toEqual([]);
-    // Still the queued turn ⇒ possibly still in the composer, do not fabricate.
-    expect(buildTranscript([], index, SESSION, 14)).toEqual([]);
-    // Turn advanced ⇒ delivered ⇒ a real user block.
-    const blocks = buildTranscript([], index, SESSION, 15);
-    expect(blocks).toHaveLength(1);
-    expect(blocks[0]?.kind).toBe('user');
-    expect(blocks[0]?.kind === 'user' ? blocks[0].text : '').toBe('remember 42');
-    expect(blocks[0]?.kind === 'user' ? blocks[0].from : 'x').toBeUndefined();
+    // The old code produced a row for every one of these but the first two. The
+    // turn counter is not evidence, so none of them may produce one now.
+    expect(buildTranscript([], index, SESSION)).toEqual([]);
   });
 
-  test('never double-renders a message already present as a real chat.user row', () => {
+  test('buildTranscript takes no turn argument, so no caller can reintroduce the inference', () => {
+    // Structural, not behavioural: the parameter is gone, which is what stops
+    // this from being re-enabled by a caller passing a turn again.
+    expect(buildTranscript.length).toBe(3);
+  });
+
+  test('a real harness record still renders exactly once (no duplicate, no loss)', () => {
+    // The genuine drain: Claude's queued_command adapter emits a chat.user with
+    // human provenance. That row is the delivery, and it must stand alone.
     const index = buildSendIndex([inlineQueued(2, 'remember 42', 14)], SESSION);
-    const blocks = buildTranscript([user('remember 42', '2026-07-25T12:05:00.000Z')], index, SESSION, 15);
+    const drained = {
+      source: 'claude',
+      type: 'chat.user',
+      timestamp: '2026-07-25T12:05:00.000Z',
+      data: { text: 'remember 42', nativeQueuedHuman: true },
+    } as ChatRecord;
+    const blocks = buildTranscript([drained], index, SESSION);
     expect(blocks.filter(b => b.kind === 'user')).toHaveLength(1);
+    expect(blocks[0]?.kind === 'user' ? blocks[0].text : '').toBe('remember 42');
   });
 
-  test('is woven in at its chronological position by send time', () => {
-    // Queued at 12:00:02 (turn 14); the direct turn-15 reply lands at 12:05:00.
-    // The synthesized row must sit BEFORE that reply, not tacked on at the end.
-    const index = buildSendIndex([inlineQueued(2, 'mid-turn ping', 14)], SESSION);
-    const later = user('later direct message', '2026-07-25T12:05:00.000Z');
-    const texts = buildTranscript([later], index, SESSION, 15).map(b => (b.kind === 'user' ? b.text : b.kind));
-    expect(texts).toEqual(['mid-turn ping', 'later direct message']);
+  test('file-backed queue sends keep their replacement entry (they DO own a chat.user row)', () => {
+    // Unchanged behaviour, guarded: this path is a REPLACEMENT, not a synthesis.
+    // The harness really did write a "Read the queued message file …" row; all the
+    // index does is swap the instruction for the message it stands for.
+    const index = buildSendIndex([inlineQueued(2, 'long payload', 14, { fileBacked: true })], SESSION);
+    expect(index.byQueueId.size).toBe(1);
   });
+});
 
-  test('a peer inline queue send keeps its sender chip and stripped body', () => {
-    const peerMessage = `[peer message from teammate jessica (session mspeer-12345678) — not from the human lead]\nNo reply is required; jessica has carried on.\n\npeer queued body`;
-    const index = buildSendIndex([inlineQueued(2, peerMessage, 14, { from: 'mspeer', fromName: 'jessica' })], SESSION);
-    const block = buildTranscript([], index, SESSION, 15)[0];
+describe('native-file queue ids use the backend SAFE-ID grammar, not UUIDs', () => {
+  // Larita's blocker: `queuedFileId` matched `[0-9a-f-]{36}`, i.e. UUIDs only. Send
+  // ids are now the daemon's safe-id contract `[A-Za-z0-9_-]{1,128}`, because the
+  // send route promotes a validated `x-kteam-request-id` to the durable send id and
+  // the native-file path embeds it in `channel/queued-<sendId>.md`. A valid non-uuid
+  // id therefore failed to parse and the reader saw the raw harness instruction
+  // instead of the message they sent. `request_file_1` is the backend's own fixture.
+  const SAFE_ID = 'request_file_1';
+
+  function instruction(id: string): ChatRecord {
+    return user(
+      `Read the queued message file at /home/kirin/.kteam/${SESSION}/channel/queued-${id}.md completely now, then follow every instruction inside it.`,
+    );
+  }
+
+  test('a non-UUID send id substitutes the logical payload', () => {
+    const index = buildSendIndex(
+      [
+        journal(2, 'control.send_queued', {
+          queueId: SAFE_ID,
+          message: 'the real payload',
+          attachmentIds: [ATTACHMENT_ID],
+          native: true,
+          fileBacked: true,
+        }),
+        attachmentCreated(),
+      ],
+      SESSION,
+    );
+    const block = buildTranscript([instruction(SAFE_ID)], index, SESSION)[0];
     expect(block?.kind).toBe('user');
-    expect(block?.kind === 'user' ? block.text : '').toBe('peer queued body');
+    expect(block?.kind === 'user' ? block.text : '').toBe('the real payload');
+    expect(block?.kind === 'user' ? block.attachments?.[0]?.attachmentId : undefined).toBe(ATTACHMENT_ID);
+  });
+
+  test('a non-UUID send id substitutes PEER metadata too', () => {
+    const peerMessage = `[peer message from teammate jessica (session mspeer-12345678) — not from the human lead]\nNo reply is required; jessica has carried on.\n\nsafe-id peer body`;
+    const index = buildSendIndex([], SESSION, [
+      {
+        sendId: SAFE_ID,
+        acceptedAt: BASE,
+        path: 'native-file',
+        message: peerMessage,
+        attachmentIds: [],
+        fate: 'delivered',
+        from: 'mspeer-12345678',
+        fromName: 'jessica',
+      },
+    ]);
+    const block = buildTranscript([instruction(SAFE_ID)], index, SESSION)[0];
+    expect(block?.kind).toBe('user');
+    expect(block?.kind === 'user' ? block.text : '').toBe('safe-id peer body');
     expect(block?.kind === 'user' ? block.from?.name : undefined).toBe('jessica');
   });
 
-  test('file-backed queue sends are excluded from synthesis (they own a chat.user row)', () => {
-    const index = buildSendIndex([inlineQueued(2, 'long payload', 14, { fileBacked: true })], SESSION);
-    expect(index.queued).toHaveLength(0);
-    expect(index.byQueueId.size).toBe(1);
+  test('the whole safe-id charset parses, and a dot still terminates the capture', () => {
+    for (const id of ['request_file_1', 'AbC-123_xyz', 'a', 'z'.repeat(128)]) {
+      const index = buildSendIndex(
+        [
+          journal(2, 'control.send_queued', {
+            queueId: id,
+            message: `payload ${id}`,
+            attachmentIds: [],
+            native: true,
+            fileBacked: true,
+          }),
+        ],
+        SESSION,
+      );
+      const block = buildTranscript([instruction(id)], index, SESSION)[0];
+      expect(block?.kind === 'user' ? block.text : `FAILED for ${id}`).toBe(`payload ${id}`);
+    }
+    // Over the 128 cap ⇒ NOT a recognised id. The point is that it must not
+    // mis-capture a truncated prefix and then substitute some other send's payload:
+    // the row degrades to the raw instruction (visible, wrong-looking, harmless)
+    // rather than confidently showing the wrong message.
+    const tooLong = 'z'.repeat(129);
+    const overCap = buildTranscript(
+      [instruction(tooLong)],
+      buildSendIndex(
+        [
+          journal(2, 'control.send_queued', {
+            queueId: 'z'.repeat(128),
+            message: 'someone else’s payload',
+            attachmentIds: [],
+            native: true,
+            fileBacked: true,
+          }),
+        ],
+        SESSION,
+      ),
+      SESSION,
+    )[0];
+    expect(overCap?.kind === 'user' ? overCap.text : '').toContain('Read the queued message file at');
+    expect(overCap?.kind === 'user' ? overCap.text : '').not.toContain('someone else');
+  });
+
+  test('an unmatched safe id degrades to a system row, never to a wrong payload', () => {
+    const index = buildSendIndex(
+      [
+        journal(2, 'control.send_queued', {
+          queueId: SAFE_ID,
+          message: 'mine',
+          attachmentIds: [],
+          native: true,
+          fileBacked: true,
+        }),
+      ],
+      SESSION,
+    );
+    expect(buildTranscript([instruction('request_file_2')], index, SESSION)[0]?.kind).toBe('system');
+  });
+});
+
+describe('user rows carry harness proof identity', () => {
+  // The transcript is the only place that can supply the identity the send ledger
+  // needs to retire a delivered chip against the row the daemon actually cited.
+  // Claude writes `record.uuid` into `SendEvidence.key` verbatim and bare; Codex
+  // writes `payload.id`, which the normalized historical row exposes as `itemId`.
+  const UUID = 'e0801fc1-034a-45c4-aa7d-eb5b2694c0f0';
+
+  function userWith(meta: Record<string, unknown>, text = 'hello'): ChatRecord {
+    return { source: 'claude', type: 'chat.user', timestamp: BASE, data: { text }, ...meta } as ChatRecord;
+  }
+
+  function proofKeysOfFirst(records: ChatRecord[], index?: ReturnType<typeof buildSendIndex>) {
+    const block = buildTranscript(records, index, SESSION)[0];
+    return block?.kind === 'user' ? block.proofKeys : undefined;
+  }
+
+  test('a Claude record exposes its uuid BARE — no block-index suffix', () => {
+    // The daemon's key is `record.uuid` verbatim, so a composed form would never
+    // match and the chip would never retire.
+    expect(proofKeysOfFirst([userWith({ recordUuid: UUID, blockIndex: 2 })])).toEqual([UUID]);
+  });
+
+  test('a Codex record exposes its itemId', () => {
+    expect(proofKeysOfFirst([userWith({ itemId: 'item_abc123' })])).toEqual(['item_abc123']);
+  });
+
+  test('a record with neither id carries NO proofKeys (the honest answer)', () => {
+    // This is the live-broadcast and cursor-fallback case. The ledger reads absence
+    // as "identity unknown, keep the chip" rather than falling back to content.
+    expect(proofKeysOfFirst([userWith({})])).toBeUndefined();
+    expect(proofKeysOfFirst([userWith({ recordUuid: '' })])).toBeUndefined();
+  });
+
+  test('identity survives the turn-prompt / queue-file REPLACEMENT path', () => {
+    // The replaced row's text comes from the ledger, but its identity must still be
+    // the harness record's — otherwise a substituted row could never be cited.
+    const index = buildSendIndex(
+      [journal(2, 'control.send', { message: 'the real message', attachmentIds: [] }, 14)],
+      SESSION,
+    );
+    const prompt = { ...promptRecord(14), recordUuid: UUID } as ChatRecord;
+    const block = buildTranscript([prompt], index, SESSION)[0];
+    expect(block?.kind).toBe('user');
+    expect(block?.kind === 'user' ? block.text : '').toBe('the real message');
+    expect(block?.kind === 'user' ? block.proofKeys : undefined).toEqual([UUID]);
+  });
+});
+
+describe('ledger backfill survives journal-tail eviction', () => {
+  // THE REFRESH-VANISH BUG. Badge and message state used to be rebuilt from a
+  // bounded −2000 journal tail, so a send older than the tail lost its metadata
+  // and its row decayed to a slim "turn prompt" line on reload. The durable
+  // ledger is fetched whole and bounded, so it fills exactly those gaps.
+  const QUEUE_ID = '11111111-1111-4111-8111-111111111111';
+
+  function ledgerRow(over: Partial<SendRecord> = {}): SendRecord {
+    return {
+      sendId: 'send-1',
+      acceptedAt: '2026-07-25T12:00:02.000Z',
+      message: 'the evicted message',
+      attachmentIds: [],
+      fate: 'delivered',
+      ...over,
+    };
+  }
+
+  test('a turn-file send recovers its logical message with NO journal event present', () => {
+    const index = buildSendIndex([], SESSION, [ledgerRow({ path: 'turn-file', turn: 14 })]);
+    const block = buildTranscript([promptRecord(14)], index, SESSION)[0];
+    expect(block?.kind).toBe('user');
+    expect(block?.kind === 'user' ? block.text : '').toBe('the evicted message');
+  });
+
+  test('a file-backed queue send recovers via its uuid, and peer attribution survives', () => {
+    const peerMessage = `[peer message from teammate jessica (session mspeer-12345678) — not from the human lead]\nNo reply is required; jessica has carried on.\n\nevicted peer body`;
+    const index = buildSendIndex([], SESSION, [
+      ledgerRow({ sendId: QUEUE_ID, path: 'native-file', message: peerMessage, from: 'mspeer', fromName: 'jessica' }),
+    ]);
+    const instruction = user(
+      `Read the queued message file at /home/kirin/.kteam/${SESSION}/channel/queued-${QUEUE_ID}.md completely now, then follow every instruction inside it.`,
+    );
+    const block = buildTranscript([instruction], index, SESSION)[0];
+    expect(block?.kind).toBe('user');
+    expect(block?.kind === 'user' ? block.text : '').toBe('evicted peer body');
+    expect(block?.kind === 'user' ? block.from?.name : undefined).toBe('jessica');
+  });
+
+  test('the live journal wins over the ledger for the same key', () => {
+    // Both sources describe the same send; the journal is the live path, so it
+    // must not be overwritten by a ledger row fetched a moment later.
+    const index = buildSendIndex(
+      [journal(2, 'control.send', { message: 'from the journal', attachmentIds: [] }, 14)],
+      SESSION,
+      [ledgerRow({ path: 'turn-file', turn: 14, message: 'from the ledger' })],
+    );
+    expect(index.byTurn.get(14)?.message).toBe('from the journal');
+  });
+
+  test('an inline-queued ledger row is NOT turned into a replacement entry', () => {
+    // It has no instruction row to replace. Indexing it would put a message on
+    // screen at a position the harness never wrote it to.
+    const index = buildSendIndex([], SESSION, [ledgerRow({ path: 'native-inline', turn: 14 })]);
+    expect(index.byTurn.size).toBe(0);
+    expect(index.byQueueId.size).toBe(0);
+  });
+
+  test('a withdrawn tombstone never rewrites anything', () => {
+    // Synchronous injection failure: the caller was told and still holds the
+    // message, so nothing on screen may claim it was sent.
+    const index = buildSendIndex([], SESSION, [ledgerRow({ path: 'turn-file', turn: 14, withdrawn: true })]);
+    expect(index.byTurn.size).toBe(0);
+    expect(buildTranscript([promptRecord(14)], index, SESSION)[0]?.kind).toBe('system');
+  });
+
+  test('an UNACCOUNTED row still supplies its message text', () => {
+    // Unconfirmed is not "did not happen". If the harness left an instruction row,
+    // the reader should still see what the message SAID while its fate is open.
+    const index = buildSendIndex([], SESSION, [
+      ledgerRow({ path: 'turn-file', turn: 14, fate: 'unaccounted', unaccountedReason: 'timeout' }),
+    ]);
+    const block = buildTranscript([promptRecord(14)], index, SESSION)[0];
+    expect(block?.kind === 'user' ? block.text : '').toBe('the evicted message');
   });
 });
 

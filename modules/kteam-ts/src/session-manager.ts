@@ -34,6 +34,16 @@ import {
   type WrapperInfo,
 } from './fleet-inventory';
 import { currentActor } from './actor-context';
+import type { ObservedHumanInput } from './observed-human-input';
+import {
+  advanceSendTimeout,
+  appendEvidenceKey,
+  matchObservedHumanInputs,
+  newAcceptedSend,
+  SendLedger,
+  shiftFrozenSendTimeout,
+  type SendMatch,
+} from './send-ledger';
 import { classifyVerdict, parseWardenReports, type WardenVerdict } from './warden-verdicts';
 import {
   blessingTtlMs,
@@ -50,7 +60,12 @@ import {
   wrapperModel,
   claudeTranscriptPath,
 } from './harness';
-import { defaultScratchConfig, type ScratchConfig, type WardenConfig } from './daemon-config';
+import {
+  defaultProviderOutageConfig,
+  defaultScratchConfig,
+  type ScratchConfig,
+  type WardenConfig,
+} from './daemon-config';
 import { type ScratchEntry, reclaimScratch, scanScratch, scratchEligibility, trimSnapshots } from './scratch-gc';
 import { atomicJson, now, readJson, run, writeTextAtomic } from './io';
 import { NAME_WINDOW_MS, displayName, normalizeTeammateName, pickTeammateName } from './names';
@@ -78,6 +93,13 @@ import {
   type WardenAnomalyKind,
   type WardenSessionView,
 } from './warden-detect';
+import {
+  detectProviderOutages,
+  providerEligibleSessionIds,
+  providerSnapshotEligible,
+  type ProviderOutageState,
+  type ProviderSnapshotView,
+} from './provider-outage';
 import { rankFailoverCandidates, selectFailoverCandidate } from './failover';
 import {
   classifyWardenFailure,
@@ -97,6 +119,7 @@ import { KTEAM_VERSION } from './version';
 import {
   authFailureRemedy,
   fetchKfleetUsage,
+  providerUnavailableDetail,
   quotaFromUsage,
   UsageFeed,
   usageAccountView,
@@ -123,7 +146,10 @@ import type {
   KTeamEvent,
   RuntimeControlRequest,
   SendDisposition,
+  SendPath,
+  SendRecord,
   SendRequest,
+  SendUnaccountedReason,
   SessionConfig,
   SessionState,
   SessionStatus,
@@ -256,6 +282,9 @@ interface WardenRuntimeState {
    *  last selection, exhaustion). Durable so a daemon restart cannot amnesty
    *  a demotion or reset a strike count. See warden-failover.ts. */
   failover?: WardenFailoverState;
+  /** Pending/confirmed provider failures from persisted pane snapshots. A
+   *  restart must not turn the second sighting back into the first. */
+  providerOutages?: ProviderOutageState;
 }
 interface WardenSweep {
   at: string;
@@ -358,6 +387,14 @@ const CONTROL_LAUNCH_WAIT_MS = 60_000;
  *  lost 8/8 in live repros). Keep native-queue typing below this bound and put
  *  the complete logical message in a durable file instead. */
 const NATIVE_QUEUE_INLINE_MAX_CHARS = 1_000;
+/** Browser request ids become durable ledger ids and, for file-backed native
+ * sends, part of a filename. Keep the accepted alphabet intentionally smaller
+ * than a general HTTP header token; invalid/absent ids get a fresh UUID. */
+const SAFE_SEND_REQUEST_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+function sendRequestId(value: string | undefined): string {
+  return value !== undefined && SAFE_SEND_REQUEST_ID.test(value) ? value : crypto.randomUUID();
+}
 /** How long a queued first launch is given before the self-check stops
  *  excluding it and repairs (or fails) it like any other session. */
 const LAUNCH_GRACE_MS = 10 * 60_000;
@@ -655,6 +692,15 @@ export class SessionManager implements KTeamService {
   /** In-flight journal appends per session, so close() can drain what
    *  `transition` deliberately did not await. */
   private readonly pendingEmits = new Map<string, Promise<unknown>>();
+  /** Lazy last-wins channel/sends.jsonl indexes, one per touched session. */
+  private sendLedgers = new Map<string, Promise<SendLedger>>();
+  /** Sessions whose legacy inbox/pending rows and historical proof were
+   * reconciled during this daemon lifetime. */
+  private reconciledSendLedgers = new Set<string>();
+  /** One terminal transcript-drain/classification job per session, plus the
+   * newest cutoff queued while that job is draining EOF. */
+  private terminalSendFinalizers = new Map<string, Promise<void>>();
+  private terminalSendFinalizerCutoffs = new Map<string, string>();
   private closed = false;
   /** Fleet warden (layer-3 oversight): a periodic deterministic sweep plus,
    *  when enabled, rate-limited LLM escalation. */
@@ -1125,6 +1171,466 @@ export class SessionManager implements KTeamService {
     }
   }
 
+  private async sendLedger(id: string): Promise<SendLedger> {
+    const ledgers = (this.sendLedgers ??= new Map<string, Promise<SendLedger>>());
+    let pending = ledgers.get(id);
+    if (!pending) {
+      pending = SendLedger.open(path.join(sessionDir(this.paths, id), 'channel', 'sends.jsonl'));
+      ledgers.set(id, pending);
+      void pending.catch(() => {
+        if (ledgers.get(id) === pending) ledgers.delete(id);
+      });
+    }
+    return await pending;
+  }
+
+  /** GET-ready durable send projection. Unknown ids retain get()'s normal
+   * error. The bounded history includes withdrawn tombstones so a client that
+   * already folded an ACCEPTED snapshot can remove it after a refresh. */
+  async listSends(id: string, options: { all?: boolean } = {}): Promise<SendRecord[]> {
+    id = this.resolveRef(id);
+    await this.serialized(id, async () => {
+      const view = await this.get(id);
+      await this.ensureSendLedgerReconciledUnlocked(view);
+    });
+    const ledger = await this.sendLedger(id);
+    if (options.all === true) return ledger.all({ includeWithdrawn: true }).slice(0, 2_000);
+    const records = ledger.all({ includeWithdrawn: true });
+    const active = records.filter(record => !record.withdrawn && record.fate !== 'delivered');
+    const settled = records.filter(record => record.withdrawn === true || record.fate === 'delivered').slice(0, 200);
+    return [...active, ...settled].sort((left, right) => Date.parse(right.acceptedAt) - Date.parse(left.acceptedAt));
+  }
+
+  private async acceptSendUnlocked(
+    id: string,
+    view: SessionView,
+    input: {
+      sendId: string;
+      path: SendPath;
+      message: string;
+      matchText?: string;
+      turn?: number;
+      attachmentIds: string[];
+      from?: string;
+      fromName?: string;
+      replyExpected?: boolean;
+      payloadFile?: string;
+      held?: boolean;
+    },
+  ): Promise<{ record: SendRecord; created: boolean }> {
+    await this.ensureSendLedgerReconciledUnlocked(view);
+    const ledger = await this.sendLedger(id);
+    const record = newAcceptedSend({
+      sendId: input.sendId,
+      acceptedAt: now(),
+      acceptedTurn: view.config.turn,
+      path: input.path,
+      message: input.message,
+      ...(input.matchText === undefined ? {} : { matchText: input.matchText }),
+      ...(input.turn === undefined ? {} : { turn: input.turn }),
+      attachmentIds: [...input.attachmentIds],
+      ...(input.from ? { from: input.from } : {}),
+      ...(input.fromName ? { fromName: input.fromName } : {}),
+      ...(input.replyExpected ? { replyExpected: true } : {}),
+      ...(input.payloadFile ? { payloadFile: input.payloadFile } : {}),
+      ...(input.held ? { held: true } : {}),
+    });
+    const accepted = await ledger.accept(record);
+    if (!accepted.created) return accepted;
+    try {
+      await this.emit(
+        id,
+        'control.send_accepted',
+        {
+          sendId: record.sendId,
+          path: record.path,
+          acceptedTurn: record.acceptedTurn,
+          ...(record.turn === undefined ? {} : { turn: record.turn }),
+          message: record.message.slice(0, 200),
+          attachmentIds: record.attachmentIds,
+          ...(record.from ? { from: record.from } : {}),
+          ...(record.fromName ? { fromName: record.fromName } : {}),
+          ...(record.replyExpected ? { replyExpected: true } : {}),
+          ...(record.path === 'native-file' ? { fileBacked: true } : {}),
+          ...(record.held ? { held: true } : {}),
+        },
+        'client',
+        record.turn ?? view.config.turn,
+      );
+    } catch (error) {
+      await ledger.withdraw(record.sendId, now()).catch(() => undefined);
+      throw error;
+    }
+    return accepted;
+  }
+
+  /** Revise transport facts before a retry/fallback without creating a second
+   * logical send. Only a live ACCEPTED record may change this way. */
+  private async reviseAcceptedSendUnlocked(
+    id: string,
+    sendId: string,
+    patch: Partial<Pick<SendRecord, 'path' | 'matchText' | 'payloadFile' | 'held' | 'turn'>>,
+  ): Promise<SendRecord | undefined> {
+    const ledger = await this.sendLedger(id);
+    const current = ledger.get(sendId);
+    if (!current || current.withdrawn || current.fate !== 'accepted') return undefined;
+    return await ledger.persist({ ...current, ...patch });
+  }
+
+  private sendDisposition(record: SendRecord): SendDisposition {
+    if (record.path === 'native-inline' || record.path === 'native-file') return 'queued';
+    if (record.path === 'revive-queue') return 'queued-for-revive';
+    if (record.path === 'revive') return 'revived';
+    return 'delivered';
+  }
+
+  private async withdrawSendUnlocked(id: string, sendId: string, reason: string): Promise<void> {
+    const record = await (await this.sendLedger(id)).withdraw(sendId, now());
+    if (!record) return;
+    await this.emit(id, 'control.send_withdrawn', { sendId, path: record.path, reason }, 'daemon', record.turn).catch(
+      () => undefined,
+    );
+  }
+
+  private async reconcileObservedInputsUnlocked(
+    id: string,
+    view: SessionView,
+    inputs: readonly ObservedHumanInput[],
+  ): Promise<number> {
+    if (inputs.length === 0) return 0;
+    const ledger = await this.sendLedger(id);
+    const observedTimes = inputs
+      .flatMap(input => {
+        const milliseconds = Date.parse(input.observedAt);
+        return Number.isFinite(milliseconds) ? [{ at: input.observedAt, milliseconds }] : [];
+      })
+      .sort((left, right) => left.milliseconds - right.milliseconds);
+    // A dedicated harness record is authoritative evidence that consumption
+    // resumed. It can beat the next monitor tick, so persist the freeze shift
+    // before matching rather than rejecting the first valid post-resume proof
+    // against a stale pre-freeze upper bound.
+    for (const record of ledger.all()) {
+      if (!record.timeoutFrozenAt) continue;
+      const frozenAt = Date.parse(record.timeoutFrozenAt);
+      if (!Number.isFinite(frozenAt)) continue;
+      const resumed = observedTimes.find(candidate => candidate.milliseconds >= frozenAt);
+      if (!resumed) continue;
+      const shifted = shiftFrozenSendTimeout(record, resumed.at);
+      if (shifted !== record) await ledger.persist(shifted);
+    }
+    const used = ledger.usedEvidenceKeys();
+    for (const key of view.state.sendEvidenceKeys ?? []) used.add(key);
+    const matches = matchObservedHumanInputs(ledger.all(), inputs, used);
+    let delivered = 0;
+    for (const match of matches) {
+      const current = await this.get(id);
+      if (await this.deliverSendMatchUnlocked(id, current, ledger, match)) delivered++;
+    }
+    return delivered;
+  }
+
+  private async deliverSendMatchUnlocked(
+    id: string,
+    view: SessionView,
+    ledger: SendLedger,
+    match: SendMatch,
+  ): Promise<boolean> {
+    const before = ledger.get(match.sendId);
+    if (!before) return false;
+    const deliveredAt = now();
+    const record = await ledger.deliver(match, view.config.turn, deliveredAt);
+    if (!record?.evidence) return false;
+    await this.store.updateState<SessionState>(id, current => ({
+      ...current,
+      pendingNativeSends: (current.pendingNativeSends ?? []).filter(entry => entry.id !== record.sendId),
+      sendEvidenceKeys: appendEvidenceKey(current.sendEvidenceKeys, record.evidence!.key),
+    }));
+    await this.emit(
+      id,
+      'control.send_delivered',
+      {
+        sendId: record.sendId,
+        turn: view.config.turn,
+        evidence: {
+          kind: record.evidence.kind,
+          tier: record.evidence.tier,
+          key: record.evidence.key,
+          proof: record.evidence.proof,
+          observedAt: record.evidence.observedAt,
+        },
+      },
+      'daemon',
+      view.config.turn,
+    );
+    // Compatibility for readers that still key queued placement off the old
+    // event. Fate proof itself deliberately advances no turn and clears no
+    // marker: Claude drains are commonly batched in the middle of one turn.
+    if (before.path === 'native-inline' || before.path === 'native-file') {
+      await this.emit(
+        id,
+        'control.send_consumed',
+        { queueId: record.sendId, turn: view.config.turn, message: record.message.slice(0, 200) },
+        'daemon',
+        view.config.turn,
+      );
+    }
+    return true;
+  }
+
+  private async transitionUnaccountedUnlocked(
+    id: string,
+    view: SessionView,
+    reason: SendUnaccountedReason,
+    acceptedThrough?: string,
+  ): Promise<number> {
+    const ledger = await this.sendLedger(id);
+    const cutoff = acceptedThrough ? Date.parse(acceptedThrough) : Number.POSITIVE_INFINITY;
+    const transitioned: SendRecord[] = [];
+    for (const record of ledger.all()) {
+      if (record.fate !== 'accepted' || record.held || record.withdrawn) continue;
+      if (reason === 'composer_discarded' && record.path !== 'native-inline' && record.path !== 'native-file') continue;
+      if (Date.parse(record.acceptedAt) > cutoff) continue;
+      const next = await ledger.unaccount(record.sendId, reason, now());
+      if (next) transitioned.push(next);
+    }
+    if (transitioned.length === 0) return 0;
+    const ids = new Set(transitioned.map(record => record.sendId));
+    await this.store.updateState<SessionState>(id, current => ({
+      ...current,
+      ...(reason === 'session_ended' && terminalStatuses.includes(current.status)
+        ? {
+            reason:
+              `${current.reason ? `${current.reason}; ` : ''}${transitioned.length} send(s) unconfirmed before the session ended ` +
+              '(kept durably in channel/sends.jsonl; resend with kteam send)',
+          }
+        : {}),
+      ...(reason === 'session_ended' || reason === 'composer_discarded'
+        ? { pendingNativeSends: (current.pendingNativeSends ?? []).filter(entry => !ids.has(entry.id)) }
+        : {}),
+    }));
+    for (const record of transitioned) {
+      await this.emit(
+        id,
+        'control.send_unaccounted',
+        { sendId: record.sendId, reason, path: record.path },
+        'daemon',
+        record.turn ?? view.config.turn,
+        true,
+      ).catch(() => undefined);
+    }
+    return transitioned.length;
+  }
+
+  /** Existing monitor/recovery observations drive timeout bookkeeping; there
+   * is deliberately no send-specific timer. Opportunity is record-relative:
+   * a later tracked turn or an idle prompt proves the harness had a chance to
+   * consume the queued input. */
+  private async sweepSendFatesUnlocked(
+    id: string,
+    view: SessionView,
+    context: { at?: string; promptReady?: boolean; frozen: boolean },
+  ): Promise<number> {
+    await this.ensureSendLedgerReconciledUnlocked(view);
+    const ledger = await this.sendLedger(id);
+    const at = context.at ?? now();
+    let transitioned = 0;
+    for (const record of ledger.all()) {
+      const next = advanceSendTimeout(record, {
+        now: at,
+        opportunity:
+          context.promptReady === true || view.state.promptReady === true || view.config.turn > record.acceptedTurn,
+        frozen: context.frozen,
+      });
+      if (next === record) continue;
+      await ledger.persist(next);
+      if (record.fate !== 'accepted' || next.fate !== 'unaccounted') continue;
+      transitioned++;
+      // Matching is ledger-owned now; pendingNativeSends is only pre-submit
+      // mechanics. Once timeout fate is fsynced, remove the mechanics mirror
+      // just as terminal/composer transitions do. Startup reconciliation
+      // repairs the same gap if this state write loses a crash race.
+      await this.store.updateState<SessionState>(id, current => ({
+        ...current,
+        pendingNativeSends: (current.pendingNativeSends ?? []).filter(entry => entry.id !== next.sendId),
+      }));
+      await this.emit(
+        id,
+        'control.send_unaccounted',
+        { sendId: next.sendId, reason: 'timeout', path: next.path },
+        'daemon',
+        next.turn ?? view.config.turn,
+        true,
+      ).catch(() => undefined);
+    }
+    return transitioned;
+  }
+
+  private async historicalObservedInputs(view: SessionView): Promise<ObservedHumanInput[]> {
+    const inputs: ObservedHumanInput[] = [];
+    if (view.config.harness === 'claude' && view.config.harnessHome && view.config.harnessSessionId) {
+      const watcher = await startClaudeTranscriptWatcher({
+        transcriptRoot: path.join(view.config.harnessHome, 'projects'),
+        sessionId: view.config.harnessSessionId,
+        initialOffset: 0,
+        reconcileIntervalMs: Math.max(10, this.options.transcriptReconcileSeconds * 1000),
+        onEvents: () => undefined,
+        onObservedInput: observed => {
+          inputs.push(...observed);
+        },
+        onError: () => undefined,
+      });
+      try {
+        // A fulfilled flush with zero candidates is authoritative. A rejected
+        // start/flush is not: propagate it so terminal reconciliation cannot
+        // turn an unread transcript into a false UNACCOUNTED fate.
+        await watcher.flush();
+      } finally {
+        // Best-effort cleanup must never replace the primary start/flush
+        // failure. The temporary replay watcher owns no long-lived monitor.
+        await watcher.stop().catch(() => undefined);
+      }
+    } else if (view.config.harness === 'codex' && view.config.transcriptFile) {
+      const watcher = await startCodexTranscriptWatcher({
+        transcriptFile: view.config.transcriptFile,
+        sessionId: view.config.harnessSessionId,
+        initialOffset: 0,
+        reconcileIntervalMs: Math.max(10, this.options.transcriptReconcileSeconds * 1000),
+        onEvents: () => undefined,
+        onObservedInput: observed => {
+          inputs.push(...observed);
+        },
+        onError: () => undefined,
+      });
+      try {
+        await watcher.flush();
+      } finally {
+        await watcher.stop().catch(() => undefined);
+      }
+    }
+    return inputs;
+  }
+
+  private async legacySendRecords(view: SessionView): Promise<SendRecord[]> {
+    const pending = new Map((view.state.pendingNativeSends ?? []).map(entry => [entry.id, entry]));
+    const inboxFile = path.join(view.directory, 'channel', 'inbox.jsonl');
+    const rows = (await readFile(inboxFile, 'utf8').catch(() => ''))
+      .split('\n')
+      .flatMap(line => {
+        if (!line.trim()) return [];
+        try {
+          const value = JSON.parse(line) as Record<string, unknown>;
+          return [value];
+        } catch {
+          return [];
+        }
+      })
+      .filter(row => typeof row.queueId === 'string' && (row.queued === true || row.queuedForRevive === true));
+    const rowsById = new Map(rows.map(row => [row.queueId as string, row]));
+    const ids = new Set([...pending.keys(), ...rowsById.keys()]);
+    const records: SendRecord[] = [];
+    for (const sendId of ids) {
+      const row = rowsById.get(sendId);
+      const mechanics = pending.get(sendId);
+      const held = row?.queuedForRevive === true;
+      const inferredPayload = path.join(view.directory, 'channel', `queued-${sendId}.md`);
+      const payloadFile = mechanics?.payloadFile ?? (existsSync(inferredPayload) ? inferredPayload : undefined);
+      const logicalMessage = (typeof row?.message === 'string' ? row.message : undefined) ?? mechanics?.message ?? '';
+      const acceptedAt = mechanics?.at ?? (typeof row?.at === 'string' ? row.at : now());
+      const attachmentIds = Array.isArray(row?.attachmentIds)
+        ? row.attachmentIds.filter((value): value is string => typeof value === 'string')
+        : [...(mechanics?.attachmentIds ?? [])];
+      const attachmentBlock = attachmentIds.length
+        ? await this.attachments.buildImageReferenceBlock(view.config.id, attachmentIds).catch(() => '')
+        : '';
+      const reconstructedPayload = mechanics?.message ?? [logicalMessage, attachmentBlock].filter(Boolean).join('\n\n');
+      const queueText = payloadFile
+        ? `Read the queued message file at ${payloadFile} completely now, then follow every instruction inside it.`
+        : (mechanics?.queueText ?? reconstructedPayload);
+      records.push(
+        newAcceptedSend({
+          sendId,
+          acceptedAt,
+          acceptedTurn: view.config.turn,
+          path: held ? 'revive-queue' : payloadFile ? 'native-file' : 'native-inline',
+          message: logicalMessage,
+          ...(!held && queueText ? { matchText: queueText } : {}),
+          attachmentIds,
+          ...(typeof row?.from === 'string' ? { from: row.from } : {}),
+          ...(typeof row?.fromName === 'string' ? { fromName: row.fromName } : {}),
+          ...(row?.replyExpected === true ? { replyExpected: true } : {}),
+          ...(payloadFile ? { payloadFile } : {}),
+          ...(held ? { held: true } : {}),
+        }),
+      );
+    }
+    return records;
+  }
+
+  private async ensureSendLedgerReconciledUnlocked(view: SessionView): Promise<void> {
+    const id = view.config.id;
+    const reconciled = (this.reconciledSendLedgers ??= new Set<string>());
+    if (reconciled.has(id)) return;
+    const ledger = await this.sendLedger(id);
+    for (const record of await this.legacySendRecords(view)) {
+      const accepted = await ledger.accept(record);
+      if (!accepted.created) continue;
+      await this.emit(
+        id,
+        'control.send_accepted',
+        {
+          sendId: record.sendId,
+          path: record.path,
+          acceptedTurn: record.acceptedTurn,
+          message: record.message.slice(0, 200),
+          attachmentIds: record.attachmentIds,
+          migrated: true,
+          ...(record.held ? { held: true } : {}),
+        },
+        'daemon',
+        view.config.turn,
+      ).catch(() => undefined);
+    }
+    // Crash repair: ledger.deliver() fsyncs before the mechanics/state mirror
+    // update. If the process died in that gap, the proof key is already used
+    // and replay correctly refuses to deliver twice, but the old mechanics row
+    // would otherwise live forever. Rebuild the mirror from settled snapshots.
+    const snapshots = ledger.all({ includeWithdrawn: true });
+    const settledIds = new Set(
+      snapshots.filter(record => record.withdrawn === true || record.fate !== 'accepted').map(record => record.sendId),
+    );
+    const deliveredKeys = snapshots
+      .filter(record => record.fate === 'delivered' && record.evidence?.key)
+      .reverse()
+      .map(record => record.evidence!.key);
+    if (settledIds.size > 0 || deliveredKeys.length > 0) {
+      await this.store.updateState<SessionState>(id, current => {
+        let sendEvidenceKeys = current.sendEvidenceKeys;
+        for (const key of deliveredKeys) sendEvidenceKeys = appendEvidenceKey(sendEvidenceKeys, key);
+        return {
+          ...current,
+          pendingNativeSends: (current.pendingNativeSends ?? []).filter(entry => !settledIds.has(entry.id)),
+          ...(sendEvidenceKeys === undefined ? {} : { sendEvidenceKeys }),
+        };
+      });
+    }
+    if (
+      ledger.all().some(record => !record.withdrawn && !record.held && record.fate !== 'delivered' && record.matchText)
+    ) {
+      await this.reconcileObservedInputsUnlocked(id, view, await this.historicalObservedInputs(view));
+    }
+    const current = await this.get(id).catch(() => view);
+    if (terminalStatuses.includes(current.state.status)) {
+      // First reconciliation owns only rows that already existed when this
+      // lock was entered: acceptSendUnlocked always runs ensure before adding
+      // a new acceptance, and held revive-queue rows are exempt below. Do not
+      // reuse the terminal state's old finishedAt cutoff here. Pre-fix revive
+      // failures could durably accept after that timestamp, and latching the
+      // ledger with such a row still ACCEPTED would strand it forever.
+      await this.transitionUnaccountedUnlocked(id, current, 'session_ended');
+    }
+    reconciled.add(id);
+  }
+
   /** Canonicalize a session reference: an exact id passes through; otherwise try
    *  it as a teammate name (case-insensitive) among sessions created within the
    *  name window â most recent wins. Unknown refs pass through so the caller's
@@ -1329,14 +1835,19 @@ export class SessionManager implements KTeamService {
     // Preflight 2 â quota/auth: launching on an exhausted or logged-out
     // account burns a session that can only no-op. Fail fast, wrapper named.
     const preflightQuota = await this.fetchQuota({ binary } as SessionConfig);
-    if (preflightQuota?.atLimit === true) {
-      const reset = preflightQuota.resetAt ? ` (resets ${new Date(preflightQuota.resetAt).toISOString()})` : '';
-      throw new Error(`wrapper ${binary} is at its usage limit${reset}; pick another account`);
-    }
     if (preflightQuota?.authOk === false) {
       throw new Error(
         `wrapper ${binary}'s credentials were rejected (kfleet usage reports auth failure); ${authFailureRemedy(preflightQuota.provider)}`,
       );
+    }
+    if (preflightQuota?.unavailable === true) {
+      throw new Error(
+        `wrapper ${binary} CLI/provider is unavailable: ${providerUnavailableDetail(preflightQuota)}; pick another account`,
+      );
+    }
+    if (preflightQuota?.atLimit === true) {
+      const reset = preflightQuota.resetAt ? ` (resets ${new Date(preflightQuota.resetAt).toISOString()})` : '';
+      throw new Error(`wrapper ${binary} is at its usage limit${reset}; pick another account`);
     }
 
     const id = `${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
@@ -1679,6 +2190,10 @@ export class SessionManager implements KTeamService {
 
   async send(id: string, request: SendRequest): Promise<SessionView & { disposition: SendDisposition }> {
     id = this.resolveRef(id);
+    // Defence in depth: the API validates the header before copying it, but
+    // SessionManager also has direct callers. This id can become both a ledger
+    // key and `channel/queued-<id>.md`, so never use arbitrary header/body text.
+    request = { ...request, requestId: sendRequestId(request.requestId) };
     // Preserve what the peer actually asked us to send before adding the
     // receiver-facing attribution preamble. The sender's outbox is an audit
     // record of the logical message, not of transport decoration.
@@ -1772,37 +2287,50 @@ export class SessionManager implements KTeamService {
         // Busy session: type the message into the TUI's NATIVE queue (both
         // harnesses hold text typed mid-turn and auto-submit it at the next
         // boundary â verified 2026-07-23, fixtures *-native-queue.txt). The
-        // send is recorded DURABLY in state.pendingNativeSends first; the
-        // turn advances only when the transcript's chat.user boundary is
-        // correlated (correlateNativeSend), so a queued message can never
-        // run as an untracked ghost turn.
+        // send is recorded DURABLY in the ledger before pendingNativeSends
+        // mechanics or keystrokes. Dedicated harness proof later updates fate
+        // and clears mechanics only; a mid-turn/batched drain never advances
+        // turns or clears completion markers.
         const queuedMessage = request.message?.trim();
         if (!queuedMessage && !request.attachmentIds?.length) throw new Error('message or attachment is required');
         const attachmentBlock = await this.attachments.buildImageReferenceBlock(id, request.attachmentIds ?? []);
         const payload = [queuedMessage, attachmentBlock].filter(Boolean).join('\n\n');
         const fileBacked = payload.length > NATIVE_QUEUE_INLINE_MAX_CHARS;
-        try {
-          await this.queueNativeSend(id, view, request, queuedMessage, payload, fileBacked);
-        } catch (firstError) {
-          if (!(firstError instanceof NativeQueueComposerError)) throw firstError;
-          // A short direct type gets exactly one retry through the durable
-          // file-backed route. Long payloads start there: never retype a 4KB+
-          // collapsed paste whose acceptance cannot be proved.
-          if (fileBacked) throw firstError;
-          try {
-            await this.queueNativeSend(id, view, request, queuedMessage, payload, true);
-          } catch (fallbackError) {
-            if (!(fallbackError instanceof NativeQueueComposerError)) throw fallbackError;
-            throw new AggregateError(
-              [firstError, fallbackError],
-              `native composer delivery failed and the one durable file-backed fallback also failed for session ${id}; ${String(fallbackError)}`,
-            );
-          }
-        }
-        return { kind: 'queued' as const };
+        const sendId = request.requestId!;
+        const payloadFile = fileBacked ? path.join(view.directory, 'channel', `queued-${sendId}.md`) : undefined;
+        const queueText = payloadFile
+          ? `Read the queued message file at ${payloadFile} completely now, then follow every instruction inside it.`
+          : payload;
+        const accepted = await this.acceptSendUnlocked(id, view, {
+          sendId,
+          path: fileBacked ? 'native-file' : 'native-inline',
+          message: queuedMessage ?? '',
+          matchText: queueText,
+          attachmentIds: request.attachmentIds ?? [],
+          ...(request.from ? { from: request.from } : {}),
+          ...(request.fromName ? { fromName: request.fromName } : {}),
+          ...(request.replyExpected ? { replyExpected: true } : {}),
+          ...(payloadFile ? { payloadFile } : {}),
+        });
+        if (!accepted.created)
+          return {
+            kind: 'result' as const,
+            disposition: this.sendDisposition(accepted.record),
+            applied: false,
+          };
+        // typeIntoQueue can fail after Enter/Tab. Without a typed transport
+        // phase, every error is ambiguous: preserve ACCEPTED + mechanics and
+        // never auto-retype through the file route (that duplicated Codex
+        // messages). A same-id caller retry becomes an idempotent no-op.
+        await this.queueNativeSend(id, view, request, sendId, queuedMessage, payload, fileBacked);
+        return { kind: 'result' as const, disposition: 'queued' as const, applied: true };
       }
-      await this.deliverToIdlePrompt(id, view, request);
-      return { kind: 'delivered' as const };
+      const accepted = await this.deliverToIdlePrompt(id, view, request);
+      return {
+        kind: 'result' as const,
+        disposition: this.sendDisposition(accepted.record),
+        applied: accepted.created,
+      };
     });
     if (outcome.kind === 'revive') return await this.reviveWithMessage(id, request);
     // The RECIPIENT may be parked awaiting a reply from this very sender —
@@ -1812,7 +2340,7 @@ export class SessionManager implements KTeamService {
     // request/response into a real pattern: both sides only ever call
     // `kteam send`. Runs after delivery, so a waiter is never woken for a
     // message that failed to land.
-    if (sender) {
+    if (sender && outcome.applied) {
       await appendFile(
         path.join(sender.directory, 'channel', 'outbox.jsonl'),
         `${JSON.stringify({
@@ -1821,7 +2349,7 @@ export class SessionManager implements KTeamService {
           from: sender.config.id,
           ...(sender.config.teammate ? { fromName: sender.config.teammate } : {}),
           to: id,
-          disposition: outcome.kind,
+          disposition: outcome.disposition,
           message: outboundMessage?.trim() ?? '',
           attachmentIds: outboundAttachmentIds,
         })}\n`,
@@ -1831,13 +2359,13 @@ export class SessionManager implements KTeamService {
         await this.emit(
           id,
           'control.outbox_write_failed',
-          { from: sender.config.id, to: id, disposition: outcome.kind, message: String(error) },
+          { from: sender.config.id, to: id, disposition: outcome.disposition, message: String(error) },
           'daemon',
         ).catch(() => undefined);
       });
       await this.endPeerWait(id, sender.config.id).catch(() => undefined);
     }
-    return { ...(await this.get(id)), disposition: outcome.kind };
+    return { ...(await this.get(id)), disposition: outcome.disposition };
   }
 
   /** Native `/model`, `/effort`, `/clear`, or `/compact` control that
@@ -1938,43 +2466,50 @@ export class SessionManager implements KTeamService {
     id: string,
     view: SessionView,
     request: SendRequest,
+    sendId: string,
     queuedMessage: string | undefined,
     payload: string,
     fileBacked: boolean,
   ): Promise<void> {
-    const queueId = crypto.randomUUID();
-    const payloadFile = fileBacked ? path.join(view.directory, 'channel', `queued-${queueId}.md`) : undefined;
+    const payloadFile = fileBacked ? path.join(view.directory, 'channel', `queued-${sendId}.md`) : undefined;
     const queueText = payloadFile
       ? `Read the queued message file at ${payloadFile} completely now, then follow every instruction inside it.`
       : payload;
     const entry: NonNullable<SessionState['pendingNativeSends']>[number] = {
-      id: queueId,
+      id: sendId,
       at: now(),
       message: payload,
       attachmentIds: request.attachmentIds ?? [],
       ...(payloadFile ? { queueText, payloadFile } : {}),
     };
-    if (payloadFile) await writeFile(payloadFile, `${payload}\n`, { mode: 0o600 });
-    // Durable BEFORE the keystrokes: a daemon crash between type-in and
-    // consumption must leave evidence to recover/report from.
-    await this.store.updateState<SessionState>(id, current => ({
-      ...current,
-      pendingNativeSends: [...(current.pendingNativeSends ?? []), entry],
-    }));
+    try {
+      if (payloadFile) await writeFile(payloadFile, `${payload}\n`, { mode: 0o600 });
+      // Durable BEFORE the keystrokes: a daemon crash between type-in and
+      // consumption must leave evidence to recover/report from.
+      await this.store.updateState<SessionState>(id, current => ({
+        ...current,
+        pendingNativeSends: [...(current.pendingNativeSends ?? []), entry],
+      }));
+    } catch (error) {
+      // No tmux entry method has been called yet. This is the narrow, proven
+      // no-attempt phase where a tombstone is safe and a same-id retry may
+      // resurrect a fresh ACCEPTED snapshot.
+      await this.withdrawSendUnlocked(id, sendId, 'native queue pre-submit persistence failed');
+      throw error;
+    }
     try {
       await this.tmux.typeIntoQueue(view.config.tmuxSession, queueText);
     } catch (error) {
-      await this.store.updateState<SessionState>(id, current => ({
-        ...current,
-        pendingNativeSends: (current.pendingNativeSends ?? []).filter(item => item.id !== entry.id),
-      }));
       if (payloadFile) {
         throw new NativeQueueComposerError(
-          `durable queue instruction failed; the complete payload remains at ${payloadFile} (retry with \`kteam send ${id} --message-file ${payloadFile}\`): ${String(error)}`,
+          `durable queue instruction could not be confirmed; it will not be retried automatically, and the complete payload remains at ${payloadFile}: ${String(error)}`,
           error,
         );
       }
-      throw new NativeQueueComposerError(`native queue composer delivery failed: ${String(error)}`, error);
+      throw new NativeQueueComposerError(
+        `native queue delivery could not be confirmed and will not be retried automatically: ${String(error)}`,
+        error,
+      );
     }
     await appendFile(
       path.join(view.directory, 'channel', 'inbox.jsonl'),
@@ -2004,10 +2539,28 @@ export class SessionManager implements KTeamService {
     id: string,
     request: SendRequest,
   ): Promise<SessionView & { disposition: SendDisposition }> {
+    const sendId = sendRequestId(request.requestId);
+    request = { ...request, requestId: sendId };
     const message = request.message?.trim();
     const attachmentBlock = await this.attachments.buildImageReferenceBlock(id, request.attachmentIds ?? []);
     const complete = [message, attachmentBlock].filter(Boolean).join('\n\n');
     if (!complete) throw new Error('message or attachment is required');
+    const accepted = await this.serialized(id, async () => {
+      const view = await this.get(id);
+      const turn = view.config.turn + 1;
+      return await this.acceptSendUnlocked(id, view, {
+        sendId,
+        path: 'revive',
+        message: message ?? '',
+        matchText: this.promptInstruction(id, turn),
+        turn,
+        attachmentIds: request.attachmentIds ?? [],
+        ...(request.from ? { from: request.from } : {}),
+        ...(request.fromName ? { fromName: request.fromName } : {}),
+        ...(request.replyExpected ? { replyExpected: true } : {}),
+      });
+    });
+    if (!accepted.created) return { ...(await this.get(id)), disposition: this.sendDisposition(accepted.record) };
     try {
       return {
         ...(await this.resume(id, complete, {
@@ -2017,8 +2570,29 @@ export class SessionManager implements KTeamService {
         disposition: 'revived',
       };
     } catch (error) {
-      if (!(error instanceof ReviveRefused)) throw error;
-      return await this.queueForExplicitRevive(id, request, error);
+      if (error instanceof ReviveRefused) {
+        try {
+          return await this.serialized(id, async () => this.queueForExplicitRevive(id, request, error));
+        } catch (queueError) {
+          await this.serialized(id, async () =>
+            this.withdrawSendUnlocked(id, sendId, 'explicit revive queue persistence failed'),
+          );
+          throw queueError;
+        }
+      }
+      // resume may have launched or typed before reporting failure. Preserve
+      // ACCEPTED whenever its fresh state is nonterminal; hiding it as
+      // withdrawn would invite an unsafe duplicate retry. A fresh terminal
+      // state may be either the original terminal state or a newly failed
+      // resume after an ambiguous launch/type attempt. In both cases, queue a
+      // fresh EOF pass whose cutoff includes this acceptance: proof is drained
+      // before any UNACCOUNTED classification, and nothing is withdrawn.
+      const current = await this.get(id).catch(() => undefined);
+      if (current && terminalStatuses.includes(current.state.status)) {
+        this.scheduleTerminalSendFinalization(id, now());
+        await this.terminalSendFinalizers.get(id)?.catch(() => undefined);
+      }
+      throw error;
     }
   }
 
@@ -2028,9 +2602,17 @@ export class SessionManager implements KTeamService {
     refusal: ReviveRefused,
   ): Promise<SessionView & { disposition: SendDisposition }> {
     const view = await this.get(id);
-    const queueId = crypto.randomUUID();
+    const queueId = request.requestId!;
     const message = request.message?.trim() ?? '';
     const channel = path.join(view.directory, 'channel');
+    const held = await this.reviseAcceptedSendUnlocked(id, queueId, {
+      path: 'revive-queue',
+      held: true,
+      matchText: undefined,
+      payloadFile: undefined,
+      turn: undefined,
+    });
+    if (!held) throw new Error(`could not retain accepted send ${queueId} for explicit revive`);
     await mkdir(channel, { recursive: true, mode: 0o700 });
     await appendFile(
       path.join(channel, 'inbox.jsonl'),
@@ -2068,7 +2650,11 @@ export class SessionManager implements KTeamService {
   /** Tracked idle-prompt delivery: write the turn artifacts, advance the turn,
    *  inject (direct or via the turn-file instruction), and transition. Runs
    *  UNDER the session lock (callers hold it). */
-  private async deliverToIdlePrompt(id: string, view: SessionView, request: SendRequest): Promise<void> {
+  private async deliverToIdlePrompt(
+    id: string,
+    view: SessionView,
+    request: SendRequest,
+  ): Promise<{ record: SendRecord; created: boolean }> {
     {
       const message = request.message?.trim();
       if (!message && !request.attachmentIds?.length) throw new Error('message or attachment is required');
@@ -2090,10 +2676,29 @@ export class SessionManager implements KTeamService {
         view.config.mode === 'interactive' && !request.attachmentIds?.length
           ? true
           : this.isDirectPayload(complete, view.config);
-      await writeFile(turnPrompt(this.paths, id, turn), `${complete}\n`, { mode: 0o600 });
+      const accepted = await this.acceptSendUnlocked(id, view, {
+        sendId: request.requestId!,
+        path: direct ? 'direct' : 'turn-file',
+        message: message ?? '',
+        matchText: direct ? complete : this.promptInstruction(id, turn),
+        turn,
+        attachmentIds: request.attachmentIds ?? [],
+        ...(request.from ? { from: request.from } : {}),
+        ...(request.fromName ? { fromName: request.fromName } : {}),
+        ...(request.replyExpected ? { replyExpected: true } : {}),
+      });
+      if (!accepted.created) return accepted;
       // Prove the prompt landed before recording a delivered message or
       // advancing the turn. A failed injection must leave no phantom inbox
       // row and no turn bump.
+      try {
+        await writeFile(turnPrompt(this.paths, id, turn), `${complete}\n`, { mode: 0o600 });
+      } catch (error) {
+        await this.withdrawSendUnlocked(id, request.requestId!, 'idle prompt delivery failed');
+        throw error;
+      }
+      // tmux.send may throw after keys landed or Enter was consumed. That is
+      // uncertain fate, never a withdrawn/no-attempt tombstone.
       await this.tmux.send(view.config, direct ? complete : this.promptInstruction(id, turn));
       await appendFile(
         path.join(view.directory, 'channel', 'inbox.jsonl'),
@@ -2153,6 +2758,7 @@ export class SessionManager implements KTeamService {
         },
         'turn.started',
       );
+      return accepted;
     }
   }
 
@@ -2555,6 +3161,7 @@ export class SessionManager implements KTeamService {
             },
             'daemon',
           ).catch(() => undefined);
+          await this.transitionUnaccountedUnlocked(id, view, 'composer_discarded');
           await this.stopTmuxWithEvidence(view.config, 'terminal session pane cleanup before revive');
         } else if (paneState.alive) {
           await this.stopTmuxWithEvidence(view.config, 'cleanup before resume');
@@ -3007,6 +3614,7 @@ export class SessionManager implements KTeamService {
       const running = paneState.alive && !paneState.dead;
       if (running && !force) throw new Error('session is running; stop it first or use --force');
       await this.stopMonitor(id, true);
+      await this.terminalSendFinalizers.get(id)?.catch(() => undefined);
       if (paneState.alive) {
         await this.tmux.snapshot(view.config, true);
         try {
@@ -3028,6 +3636,10 @@ export class SessionManager implements KTeamService {
       // carried 1036 sessions against 700 directories on disk).
       this.store.forgetSession(id);
       this.chatIndexChecks.delete(id);
+      this.sendLedgers.delete(id);
+      this.reconciledSendLedgers.delete(id);
+      this.terminalSendFinalizers.delete(id);
+      this.terminalSendFinalizerCutoffs.delete(id);
     } finally {
       this.deleting.delete(id);
       if (restartMonitor && !this.closed) await this.startMonitor(id).catch(() => undefined);
@@ -3667,13 +4279,35 @@ export class SessionManager implements KTeamService {
     const sessions = await this.list();
     const tmuxSessions = await this.tmux.listSessions();
     for (const session of sessions) {
-      // Terminal panes are exceptional restart wreckage. Inventory tmux ONCE
-      // and probe only names that actually exist instead of forking one
-      // `has-session` per historical session. Never use the snapshot to skip
-      // an ACTIVE session: a launch can race boot after the inventory, and its
-      // fresh state probe is the pane-safe guard against a false failure.
-      if (terminalStatuses.includes(session.state.status) && !tmuxSessions.has(session.config.tmuxSession)) continue;
+      // A client may have started/resumed this session while bootstrap was
+      // walking the imported index. Its fresh monitor owns reconciliation.
+      if (this.monitors.has(session.config.id)) continue;
       try {
+        // Reconcile every send ledger before the terminal fast-path. Historical
+        // sessions (including Evan) may have locally accepted rows whose proof
+        // lives only in an already-finished transcript.
+        await this.serialized(session.config.id, async () => {
+          await this.ensureSendLedgerReconciledUnlocked(session);
+        });
+      } catch (error) {
+        // Send-ledger repair must never prevent pane adoption. Surface the
+        // reconciliation fault, then continue with ordinary recovery.
+        const message =
+          `send reconciliation of ${session.config.id} failed during recovery: ` +
+          (error instanceof Error ? error.message : String(error));
+        this.bootstrapErrors.push(message);
+        console.error(`kteamd: ${message}`);
+        await this.emit(session.config.id, 'daemon.send_reconciliation_failed', { message }, 'daemon').catch(
+          () => undefined,
+        );
+      }
+      try {
+        // Terminal panes are exceptional restart wreckage. Inventory tmux ONCE
+        // and probe only names that actually exist instead of forking one
+        // `has-session` per historical session. Never use the snapshot to skip
+        // an ACTIVE session: a launch can race boot after the inventory, and its
+        // fresh state probe is the pane-safe guard against a false failure.
+        if (terminalStatuses.includes(session.state.status) && !tmuxSessions.has(session.config.tmuxSession)) continue;
         await this.recoverSession(session);
       } catch (error) {
         // One bad session must never abort the chain: the 06:23 boot died
@@ -3695,6 +4329,25 @@ export class SessionManager implements KTeamService {
       // would fight the fresh launch (double monitors, spurious snapshots).
       if (this.monitors.has(session.config.id)) return;
       const paneState = await this.tmux.state(session.config.tmuxSession);
+      await this.serialized(session.config.id, async () => {
+        const current = await this.get(session.config.id);
+        await this.sweepSendFatesUnlocked(session.config.id, current, {
+          promptReady: paneState.promptReady,
+          frozen:
+            !paneState.alive ||
+            paneState.dead ||
+            current.state.status === 'rate_limited' ||
+            current.state.status === 'retrying',
+        });
+      }).catch(error =>
+        this.emit(
+          session.config.id,
+          'daemon.send_reconciliation_failed',
+          { message: error instanceof Error ? error.message : String(error) },
+          'daemon',
+        ).catch(() => undefined),
+      );
+      session = await this.get(session.config.id).catch(() => session);
       if (session.state.status === 'kill_failed') {
         if (paneState.alive) {
           await this.tmux.snapshot(session.config, true);
@@ -3829,6 +4482,7 @@ export class SessionManager implements KTeamService {
           await this.emit(id, 'transcript.discovered', { file }, 'watcher');
         },
         onEvents: async (events, cursor) => await this.handleClaudeEvents(id, events, cursor),
+        onObservedInput: async inputs => await this.handleObservedInputs(id, inputs),
         onCheckpoint: async cursor => {
           await this.store.updateState<SessionState>(id, current => ({
             ...current,
@@ -3905,6 +4559,7 @@ export class SessionManager implements KTeamService {
         await this.emit(id, 'transcript.discovered', { file, harnessSessionId }, 'watcher');
       },
       onEvents: async (events, cursor) => await this.handleCodexEvents(id, events, cursor),
+      onObservedInput: async inputs => await this.handleObservedInputs(id, inputs),
       onCheckpoint: async cursor => {
         await this.store.updateState<SessionState>(id, current => ({
           ...current,
@@ -3931,7 +4586,10 @@ export class SessionManager implements KTeamService {
     // stops a watcher whose monitor died â this is the other half.)
     const stopAll = (monitor.attaching ?? Promise.resolve())
       .catch(() => undefined)
-      .then(() => monitor.transcript?.stop());
+      .then(async () => {
+        if (drain) await monitor.transcript?.flush().catch(() => undefined);
+        await monitor.transcript?.stop();
+      });
     if (drain) {
       const pending: Promise<unknown>[] = [stopAll];
       if (monitor.loop) pending.push(monitor.loop);
@@ -4250,6 +4908,10 @@ export class SessionManager implements KTeamService {
           }
           const pane = await this.tmux.state(view.config.tmuxSession);
           if (!pane.alive || pane.dead) {
+            await this.serialized(id, async () => {
+              const current = await this.get(id);
+              await this.sweepSendFatesUnlocked(id, current, { frozen: true });
+            });
             // A pane that has NEVER been launched is not a crashed pane. Until
             // the bootstrap runs `tmux new-session`, `tmux.state` reports the
             // same "not alive" as a dead harness â and a monitor started into
@@ -4369,6 +5031,15 @@ export class SessionManager implements KTeamService {
             }
             return;
           }
+
+          await this.serialized(id, async () => {
+            const current = await this.get(id);
+            await this.sweepSendFatesUnlocked(id, current, {
+              promptReady: pane.promptReady,
+              frozen: current.state.status === 'rate_limited' || current.state.status === 'retrying',
+            });
+          });
+          view = await this.get(id);
 
           const nextPaneHash = Bun.hash(pane.pane).toString(16);
           if (nextPaneHash !== paneHash) {
@@ -4790,100 +5461,139 @@ export class SessionManager implements KTeamService {
     } finally {
       const monitor = this.monitors.get(id);
       if (monitor?.abort.signal === signal) {
-        this.monitors.delete(id);
+        await monitor.transcript?.flush().catch(() => undefined);
         await monitor.transcript?.stop();
+        if (this.monitors.get(id) === monitor) this.monitors.delete(id);
       }
     }
   }
 
-  /** Correlate a transcript chat.user record against the durable
-   *  pendingNativeSends queue (runs under the session lock, called by both
-   *  transcript handlers BEFORE they process the batch). A match means the
-   *  TUI consumed a natively-queued message at a turn boundary: atomically
-   *  advance the turn (config + state), materialize the turn file, re-scope
-   *  markers, reset the liveness episode, and emit the consumption event â
-   *  exactly the bookkeeping a tracked send performs at injection time.
-   *  Matching is by normalized text prefix, oldest entry first; duplicates or
-   *  replayed transcript batches cannot double-advance because the entry is
-   *  removed with the same state update that records the consumption. */
-  private async correlateNativeSends(
-    id: string,
-    view: SessionView,
-    events: ReadonlyArray<{ type: string; data: unknown }>,
-  ): Promise<void> {
-    const pending = view.state.pendingNativeSends ?? [];
-    if (pending.length === 0) return;
-    const normalize = (value: string) => value.replace(/\s+/g, '');
-    const userTexts = events
-      .filter(event => event.type === 'chat.user')
-      .map(event => normalize(String((event.data as { text?: string }).text ?? '')));
-    if (userTexts.length === 0) return;
-    // One transcript user event consumes AT MOST one pending entry: two queued
-    // sends sharing a message (or an 80-char prefix) must each wait for their
-    // own boundary â a single "continue" record must never advance two turns
-    // and delete both entries.
-    const consumedTexts = new Set<number>();
-    for (const entry of [...pending]) {
-      const probe = normalize(entry.queueText ?? entry.message).slice(0, 80);
-      if (!probe) continue;
-      const matchIndex = userTexts.findIndex((text, index) => !consumedTexts.has(index) && text.includes(probe));
-      if (matchIndex === -1) continue;
-      consumedTexts.add(matchIndex);
-      const turn = view.config.turn + 1;
-      await writeFile(turnPrompt(this.paths, id, turn), `${entry.message}\n`, { mode: 0o600 });
-      view.config = await this.store.updateConfig<SessionConfig>(id, current => ({
-        ...current,
-        turn,
-        updatedAt: now(),
-      }));
-      // Markers written during the previous turn must not complete this one.
-      await Promise.all(['done', 'needs-help'].map(name => rm(markerFile(this.paths, id, name), { force: true })));
-      this.autoContinued.delete(id);
-      this.doneDeferred.delete(id);
-      await this.store.updateState<SessionState>(id, current => ({
-        ...current,
-        turn,
-        startedAt: now(),
-        turnCompleted: false,
-        promptReady: false,
-        reason: undefined,
-        nudgedAt: undefined,
-        pendingNativeSends: (current.pendingNativeSends ?? []).filter(item => item.id !== entry.id),
-      }));
-      await this.emit(
-        id,
-        'control.send_consumed',
-        { queueId: entry.id, turn, message: entry.message.slice(0, 200) },
-        'daemon',
-        turn,
-      );
-      view = await this.get(id);
-    }
+  /** Reconcile dedicated harness-owned input proof under the session lock.
+   * Matching is exact, windowed, FIFO, one-to-one, and replay-safe in the
+   * ledger. A match updates send fate and removes native mechanics only; it
+   * deliberately does not advance a turn, write a turn file, or touch markers. */
+  private async handleObservedInputs(id: string, inputs: readonly ObservedHumanInput[]): Promise<void> {
+    if (inputs.length === 0) return;
+    await this.serialized(id, async () => {
+      const view = await this.get(id);
+      await this.ensureSendLedgerReconciledUnlocked(view);
+      await this.reconcileObservedInputsUnlocked(id, await this.get(id), inputs);
+    });
   }
 
-  /** Native sends still pending when a session hits a terminal state were
-   *  never consumed â the pane died/completed with text in the composer or
-   *  queue. Surface the loss LOUDLY (event + state.reason); the recovery path
-   *  is status-based revive, which re-sends the recorded message. */
-  private async reportLostNativeSends(id: string): Promise<void> {
-    const view = await this.get(id).catch(() => undefined);
-    const pending = view?.state.pendingNativeSends ?? [];
-    if (!view || pending.length === 0) return;
-    await this.store
-      .updateState<SessionState>(id, current => ({
-        ...current,
-        pendingNativeSends: [],
-        reason: `${current.reason ? `${current.reason}; ` : ''}${pending.length} native-queued send(s) not consumed before the session ended (recover with: kteam send â the messages are in channel/inbox.jsonl)`,
-      }))
-      .catch(() => undefined);
-    await this.emit(
-      id,
-      'control.send_lost',
-      { entries: pending.map(entry => ({ queueId: entry.id, at: entry.at, message: entry.message.slice(0, 200) })) },
-      'daemon',
-      undefined,
-      true,
-    ).catch(() => undefined);
+  private scheduleTerminalSendFinalization(id: string, acceptedThrough: string): void {
+    const finalizers = (this.terminalSendFinalizers ??= new Map<string, Promise<void>>());
+    const cutoffs = (this.terminalSendFinalizerCutoffs ??= new Map<string, string>());
+    const pending = cutoffs.get(id);
+    // Transition timestamps are canonical ISO strings. Retain only the newest
+    // terminal epoch while EOF work is in flight; an older completion must not
+    // overwrite a later stop/failure cutoff.
+    if (pending === undefined || acceptedThrough > pending) cutoffs.set(id, acceptedThrough);
+    if (finalizers.has(id)) return;
+    let finalizing: Promise<void>;
+    const drain = async (): Promise<void> => {
+      while (true) {
+        const cutoff = cutoffs.get(id);
+        if (cutoff === undefined) return;
+        cutoffs.delete(id);
+        await this.finalizeTerminalSends(id, cutoff);
+      }
+    };
+    finalizing = drain().finally(() => {
+      if (finalizers.get(id) !== finalizing) return;
+      finalizers.delete(id);
+      // A scheduler call can land after drain() observes an empty map but
+      // before this finally callback removes the in-flight promise. Re-arm in
+      // that narrow promise-settlement window instead of dropping its cutoff.
+      const next = cutoffs.get(id);
+      if (next !== undefined) this.scheduleTerminalSendFinalization(id, next);
+    });
+    finalizers.set(id, finalizing);
+    void finalizing.catch(() => undefined);
+  }
+
+  /** Drain the existing stateful adapter to EOF before classifying the
+   * terminal remainder. If no live watcher exists (boot migration), the
+   * reconciliation helper replays the transcript once from byte zero. */
+  private async finalizeTerminalSends(id: string, acceptedThrough: string): Promise<void> {
+    const monitor = this.monitors.get(id);
+    await monitor?.attaching?.catch(() => undefined);
+    const transcript = monitor?.transcript;
+    let flushSucceeded = false;
+    if (transcript) {
+      try {
+        await transcript.flush();
+        flushSucceeded = true;
+      } catch {
+        // A failed drain is not proof that the watcher reached EOF. The
+        // historical adapter replay below is the authoritative fallback.
+      }
+    }
+
+    const watcherStillAttached = (): boolean =>
+      monitor !== undefined &&
+      transcript !== undefined &&
+      transcript.snapshot().running === true &&
+      monitor.abort.signal.aborted === false &&
+      this.monitors.get(id) === monitor &&
+      monitor.transcript === transcript;
+
+    // stopMonitor removes the handle and aborts it before its asynchronous
+    // watcher.stop() settles. A captured transcript reference can therefore
+    // still exist while flush() has become a no-op. Do not infer EOF from that
+    // stale reference: replay through the same harness-owned adapter from byte
+    // zero whenever the watcher was absent, failed its drain, or detached while
+    // the drain was in flight.
+    let replay: ObservedHumanInput[] | undefined;
+    if (!flushSucceeded || !watcherStillAttached()) {
+      try {
+        replay = await this.historicalObservedInputs(await this.get(id));
+      } catch {
+        // This EOF pass was not authoritative. Leave every row visible as
+        // ACCEPTED and clear the daemon-lifetime latch so a later list/send,
+        // finalizer, or boot reconciliation performs a real retry. Requeueing
+        // the same cutoff inside drain() would be a tight persistent-I/O loop.
+        this.reconciledSendLedgers.delete(id);
+        return;
+      }
+    }
+
+    const settle = async (observed: readonly ObservedHumanInput[], requireCapturedWatcher: boolean): Promise<boolean> =>
+      await this.serialized(id, async () => {
+        // The watcher can detach after flush() returns but before this lock is
+        // acquired. Defer classification and replay outside the lock rather
+        // than trusting the now-stale live pass or holding the lock over I/O.
+        if (requireCapturedWatcher && !watcherStillAttached()) return false;
+        const view = await this.get(id);
+        await this.ensureSendLedgerReconciledUnlocked(view);
+        await this.reconcileObservedInputsUnlocked(id, await this.get(id), observed);
+        const current = await this.get(id);
+        // A stale terminal finalizer may finish its EOF pass after an explicit
+        // revive has already launched or typed a new turn. Preserve that live
+        // send; a later real terminal transition queues its own newer cutoff.
+        if (!terminalStatuses.includes(current.state.status)) return true;
+        // stopMonitor is intentionally not serialized on this queue. It can
+        // detach the watcher while ensure/reconcile/get above are awaiting,
+        // after the entry check has already passed. Revalidate immediately
+        // before terminal fate assignment; a detach returns to the historical
+        // EOF fallback instead of classifying against the earlier bounded
+        // flush.
+        if (requireCapturedWatcher && !watcherStillAttached()) return false;
+        await this.transitionUnaccountedUnlocked(id, current, 'session_ended', acceptedThrough);
+        return true;
+      });
+
+    if (await settle(replay ?? [], replay === undefined)) return;
+    // The live watcher detached in the post-flush/pre-lock window. Complete one
+    // fresh authoritative EOF pass, still outside the session lock, then apply
+    // the normal one-to-one reconciliation and live-status guard.
+    try {
+      replay = await this.historicalObservedInputs(await this.get(id));
+    } catch {
+      this.reconciledSendLedgers.delete(id);
+      return;
+    }
+    await settle(replay, false);
   }
 
   private async handleClaudeEvents(
@@ -4894,8 +5604,6 @@ export class SessionManager implements KTeamService {
     const offset = cursor.endOffset;
     await this.serialized(id, async () => {
       let view = await this.get(id);
-      await this.correlateNativeSends(id, view, events);
-      view = await this.get(id);
       let autoQuestion = false;
       const questionLifecycleEvents: Array<{ type: string; data: Record<string, unknown> }> = [];
       // The harness already wrote these records. kteam INDEXES them where they
@@ -5123,8 +5831,6 @@ export class SessionManager implements KTeamService {
     const offset = cursor.endOffset;
     await this.serialized(id, async () => {
       let view = await this.get(id);
-      await this.correlateNativeSends(id, view, events);
-      view = await this.get(id);
       let autoQuestion = false;
       const questionLifecycleEvents: Array<{ type: string; data: Record<string, unknown> }> = [];
       // The harness already wrote these records. kteam INDEXES them where they
@@ -5397,13 +6103,11 @@ export class SessionManager implements KTeamService {
       options.source ?? 'daemon',
       state.turn,
     );
-    // Busy-time sends live in the TUI's NATIVE queue; a completing turn
-    // normally consumes them at the boundary (correlateNativeSends). If the
-    // session ends with entries still pending, the message died with the
-    // pane/queue â surface the loss loudly so the caller can re-send
-    // (status-based revive is the recovery path).
+    // Fate is finalized only after the harness adapter has drained to EOF.
+    // Scheduling outside the current session-lock holder avoids flush callback
+    // deadlock; the finalizer then serializes proof and terminal classification.
     if (patch.status !== undefined && terminalStatuses.includes(patch.status)) {
-      setTimeout(() => void this.reportLostNativeSends(id).catch(() => undefined), 0);
+      this.scheduleTerminalSendFinalization(id, patch.finishedAt ?? state.finishedAt ?? now());
     }
     // A finishing warden FREES a fleet-wide concurrency slot. If sus targets are
     // queued behind the cap, drain them now instead of waiting a full sweep
@@ -5647,24 +6351,29 @@ export class SessionManager implements KTeamService {
           current.usage5hResetAt !== usageState.usage5hResetAt ||
           current.usageWeeklyResetAt !== usageState.usageWeeklyResetAt ||
           current.usageAtLimit !== usageState.usageAtLimit ||
-          current.usageAuthOk !== usageState.usageAuthOk;
-        newlyExhausted = quota.atLimit === true && current.status !== 'rate_limited';
+          current.usageAuthOk !== usageState.usageAuthOk ||
+          current.quota?.availability !== quota.availability ||
+          current.quota?.unavailable !== quota.unavailable ||
+          current.quota?.unavailableReason !== quota.unavailableReason ||
+          current.quota?.retryAt !== quota.retryAt;
+        const blocked = quota.atLimit === true || quota.unavailable === true;
+        const available = quota.atLimit === false && quota.unavailable !== true;
+        newlyExhausted = blocked && current.status !== 'rate_limited';
         recoveredWithoutRetry =
-          quota.atLimit === false && current.status === 'rate_limited' && config.retry?.waitForQuotaReset === false;
-        readyToResume =
-          quota.atLimit === false && current.status === 'rate_limited' && config.retry?.waitForQuotaReset !== false;
+          available && current.status === 'rate_limited' && config.retry?.waitForQuotaReset === false;
+        readyToResume = available && current.status === 'rate_limited' && config.retry?.waitForQuotaReset !== false;
         return {
           ...current,
           quota,
           ...usageState,
-          status: quota.atLimit
+          status: blocked
             ? 'rate_limited'
             : recoveredWithoutRetry
               ? config.mode === 'interactive' && current.promptReady
                 ? 'awaiting_user'
                 : 'running'
               : current.status,
-          health: quota.atLimit
+          health: blocked
             ? 'rate_limited'
             : recoveredWithoutRetry
               ? config.mode === 'interactive' && current.promptReady
@@ -5681,7 +6390,8 @@ export class SessionManager implements KTeamService {
           () => undefined,
         );
       if (newlyExhausted) await this.emit(id, 'quota.exhausted', quota, 'watcher');
-      if (quota.atLimit && config.retry?.waitForQuotaReset !== false) this.scheduleQuotaWaiter(id);
+      if ((quota.atLimit === true || quota.unavailable === true) && config.retry?.waitForQuotaReset !== false)
+        this.scheduleQuotaWaiter(id);
       if (readyToResume) this.scheduleQuotaWaiter(id);
       if (recoveredWithoutRetry) await this.emit(id, 'quota.available', { ...quota, status: state.status }, 'watcher');
     } catch {}
@@ -5712,7 +6422,9 @@ export class SessionManager implements KTeamService {
     if (!view || view.state.status !== 'rate_limited') return false;
     if (view.config.retry?.allowAccountFailover !== true) return false;
     const resetAt = view.state.quota?.resetAt;
-    if (typeof resetAt !== 'number' || resetAt - Date.now() < 30 * 60_000) return false;
+    const providerRetryAt = view.state.quota?.retryAt;
+    const providerDown = view.state.quota?.unavailable === true;
+    if (!providerDown && (typeof resetAt !== 'number' || resetAt - Date.now() < 30 * 60_000)) return false;
     const usage = await this.fetchUsageAccounts(signal);
     if (signal.aborted || this.deleting.has(id)) return false;
     // Positive-confirmation gate: automatic failover happens with no human in the
@@ -5722,7 +6434,16 @@ export class SessionManager implements KTeamService {
     // (empty feed, account not scored) is treated as "not confirmed" â no
     // failover, and the session keeps waiting for its own quota to reset.
     const currentUsage = usage.find(item => item.binary === view.config.binary);
-    if (currentUsage?.atLimit !== true) return false;
+    if (currentUsage?.atLimit !== true && currentUsage?.unavailable !== true) return false;
+    const currentRetryAt = typeof currentUsage.retryAt === 'number' ? currentUsage.retryAt : providerRetryAt;
+    // A short, structured proxy cooldown uses the normal waiter; hard spend,
+    // auth, and generic provider outages can fail over immediately.
+    if (
+      currentUsage.unavailableReason === 'cooldown' &&
+      typeof currentRetryAt === 'number' &&
+      currentRetryAt - Date.now() < 30 * 60_000
+    )
+      return false;
     const candidate = selectFailoverCandidate({
       currentBinary: view.config.binary,
       harness: view.config.harness,
@@ -5731,9 +6452,18 @@ export class SessionManager implements KTeamService {
       requireConfirmedUsage: true,
     });
     if (!candidate) return false;
-    await this.emit(id, 'account.failover', { from: view.config.binary, to: candidate, resetAt }, 'watcher').catch(
-      () => undefined,
-    );
+    await this.emit(
+      id,
+      'account.failover',
+      {
+        from: view.config.binary,
+        to: candidate,
+        ...(resetAt !== undefined ? { resetAt } : {}),
+        ...(currentRetryAt !== undefined ? { retryAt: currentRetryAt } : {}),
+        ...(currentUsage.unavailableReason !== undefined ? { reason: currentUsage.unavailableReason } : {}),
+      },
+      'watcher',
+    ).catch(() => undefined);
     try {
       await this.migrate(id, candidate);
       return true;
@@ -5753,7 +6483,7 @@ export class SessionManager implements KTeamService {
       if (!view || view.state.status !== 'rate_limited') return;
       const quota = await this.fetchQuota(view.config, signal);
       if (signal.aborted || this.deleting.has(id)) return;
-      if (quota && quota.atLimit === false) {
+      if (quota && quota.atLimit === false && quota.unavailable !== true) {
         const latest = await this.get(id).catch(() => undefined);
         if (!latest || latest.state.status !== 'rate_limited' || signal.aborted) return;
         await this.emit(id, 'quota.available', quota, 'watcher');
@@ -5767,7 +6497,8 @@ export class SessionManager implements KTeamService {
         });
         return;
       }
-      const delay = quota?.resetAt ? Math.max(5_000, Math.min(60_000, quota.resetAt - Date.now())) : 60_000;
+      const retryAt = quota?.retryAt ?? quota?.resetAt;
+      const delay = retryAt ? Math.max(5_000, Math.min(60_000, retryAt - Date.now())) : 60_000;
       await interruptibleSleep(delay, signal);
     }
   }
@@ -6210,12 +6941,44 @@ export class SessionManager implements KTeamService {
     // the recent-terminal-wreckage window â an old failure that nobody handled
     // within the window ages out rather than nagging forever.
     const unattendedMs = Math.max(60_000, this.wardenConfig.unattendedMinutes * 60_000);
-    const detected = detectAnomalies(views, Date.now(), {
+    const sweepNowMs = Date.now();
+    const sessionDetected = detectAnomalies(views, sweepNowMs, {
       unattendedMs,
       terminalWindowMs: unattendedMs,
       susThinkingSeconds: Math.max(60, this.wardenConfig.susThinkingSeconds),
       susSubprocessSeconds: Math.max(60, this.wardenConfig.susSubprocessSeconds),
     });
+    // Provider failure detection reads daemon-owned snapshots directly. Bound
+    // concurrent reads so a large historical fleet cannot create an fd storm;
+    // only current auto sessions are candidates, and no live tmux/LLM work is
+    // invoked. Confirmation requires a later, time-separated sweep.
+    const providerViews: ProviderSnapshotView[] = [];
+    const providerEligible = providerEligibleSessionIds(sessions);
+    const providerCandidates = sessions.filter(
+      view => providerEligible.has(view.config.id) && providerSnapshotEligible(view),
+    );
+    for (let index = 0; index < providerCandidates.length; index += 16) {
+      providerViews.push(
+        ...(await Promise.all(
+          providerCandidates.slice(index, index + 16).map(async view => ({
+            config: view.config,
+            state: view.state,
+            snapshot: await this.lastSnapshot(view.config.id),
+          })),
+        )),
+      );
+    }
+    const providerOutage = { ...defaultProviderOutageConfig(), ...(this.wardenConfig.providerOutage ?? {}) };
+    const providerDetected = detectProviderOutages(this.wardenState.providerOutages ?? {}, providerViews, sweepNowMs, {
+      minDistinctSessions: providerOutage.minDistinctSessions,
+      persistenceSweeps: providerOutage.persistenceSweeps,
+      tailLines: providerOutage.tailLines,
+      // A forced/manual sweep cannot manufacture a second observation before
+      // the configured deterministic cadence has actually elapsed.
+      minPersistenceMs: Math.max(60_000, this.wardenConfig.intervalMinutes * 60_000),
+    });
+    this.wardenState.providerOutages = providerDetected.state;
+    const detected = { anomalies: [...sessionDetected.anomalies, ...providerDetected.anomalies] };
     // Reconcile fresh needs_human verdicts from warden reports into session
     // state, then SUPPRESS re-triage of a flagged session's same anomaly
     // class: a needs_human session already reached the human â an identical
@@ -6721,7 +7484,7 @@ export class SessionManager implements KTeamService {
     reportPath: string,
     at: string,
   ): Promise<string> {
-    const anomalousIds = new Set(anomalies.map(item => item.sessionId));
+    const anomalousIds = new Set(anomalies.flatMap(item => item.affectedSessionIds ?? [item.sessionId]));
     const perSession = sessions
       .filter(view => anomalousIds.has(view.config.id))
       .map(view => ({
@@ -7042,6 +7805,15 @@ export class SessionManager implements KTeamService {
     };
   }
 
+  /** Lightweight anomaly-only view for the in-process Attention baseline. It
+   *  deliberately avoids wardenFailoverStatus(), which may refresh kfleet usage
+   *  and must not hold daemon bootstrap on an external probe. */
+  async wardenAnomalies(): Promise<WardenAnomaly[]> {
+    if (this.lastSweep) return this.lastSweep.anomalies;
+    const disk = await readJson<{ anomalies?: WardenAnomaly[] }>(this.paths.wardenAnomalies).catch(() => undefined);
+    return disk?.anomalies ?? [];
+  }
+
   /** The failover block of wardenStatus: effective accounts with live health,
    *  the policy knobs, the last selection, and any exhaustion episode. */
   private async wardenFailoverStatus(): Promise<NonNullable<WardenStatusView['failover']>> {
@@ -7126,6 +7898,11 @@ export class SessionManager implements KTeamService {
       ...current,
       ...patch,
       failover: { ...effectiveFailoverConfig(current), ...(patch.failover ?? {}) },
+      providerOutage: {
+        ...defaultProviderOutageConfig(),
+        ...(current.providerOutage ?? {}),
+        ...(patch.providerOutage ?? {}),
+      },
     };
     validateWardenConfigPatch(next);
     const onDisk = await readJson<Record<string, unknown>>(this.paths.daemonConfig).catch(
@@ -7177,6 +7954,15 @@ function validateWardenConfigPatch(config: WardenConfig): void {
       bad('failover.failureThreshold must be a number >= 1');
     if (!Number.isFinite(failover.cooldownMinutes) || failover.cooldownMinutes < 0)
       bad('failover.cooldownMinutes must be a number >= 0');
+  }
+  const providerOutage = config.providerOutage;
+  if (providerOutage !== undefined) {
+    if (!Number.isFinite(providerOutage.minDistinctSessions) || providerOutage.minDistinctSessions < 2)
+      bad('providerOutage.minDistinctSessions must be a number >= 2');
+    if (!Number.isFinite(providerOutage.persistenceSweeps) || providerOutage.persistenceSweeps < 2)
+      bad('providerOutage.persistenceSweeps must be a number >= 2');
+    if (!Number.isFinite(providerOutage.tailLines) || providerOutage.tailLines < 8 || providerOutage.tailLines > 80)
+      bad('providerOutage.tailLines must be a number between 8 and 80');
   }
   for (const [key, minimum] of [
     ['intervalMinutes', 1],

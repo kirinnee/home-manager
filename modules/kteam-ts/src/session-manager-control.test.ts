@@ -4,7 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { actorContext } from './actor-context';
 import { createPaths } from './paths';
+import { newAcceptedSend, type SendRecord } from './send-ledger';
 import { SessionManager } from './session-manager';
+import type { ObservedHumanInput } from './observed-human-input';
 import type { SessionView } from './service';
 import type { RuntimeControlRequest, SessionConfig, SessionState } from './types';
 
@@ -21,7 +23,20 @@ afterEach(async () => {
 type Loose = Record<string, unknown>;
 
 function bareManager(): Loose {
-  return Object.create(SessionManager.prototype) as Loose;
+  const manager = Object.create(SessionManager.prototype) as Loose;
+  const home = path.join(os.tmpdir(), `kteam-control-${crypto.randomUUID()}`);
+  temporaryDirectories.push(home);
+  manager.paths = createPaths(home);
+  manager.sendLedgers = new Map();
+  manager.reconciledSendLedgers = new Set();
+  manager.terminalSendFinalizers = new Map();
+  manager.deleting = new Set();
+  manager.queues = new Map();
+  manager.monitors = new Map();
+  manager.closed = false;
+  manager.serialized = async (_id: string, work: () => Promise<unknown>) => await work();
+  manager.emit = async () => ({});
+  return manager;
 }
 
 describe('withAutoRevive (F4)', () => {
@@ -371,6 +386,33 @@ describe('manual resume vs automatic recovery dedupe', () => {
       fixture.events.some(event => event.type === 'control.send_queued' && event.data['queuedForRevive'] === true),
     ).toBe(true);
     expect((fixture.manager.launching as Map<string, unknown>).has('target')).toBe(false);
+  });
+
+  test('a pre-start revive error finalizes the newly accepted send instead of leaving it latched forever', async () => {
+    const fixture = await recoveryManager('failed');
+    fixture.manager.resume = async () => {
+      throw new Error('tmux state probe failed before resume could start');
+    };
+    await expect(
+      (
+        fixture.manager as unknown as {
+          send: (id: string, request: { message: string }) => Promise<SessionView & { disposition: string }>;
+        }
+      ).send('target', { message: 'classify this accepted row' }),
+    ).rejects.toThrow('tmux state probe failed before resume could start');
+
+    const ledger = await (
+      fixture.manager as unknown as { sendLedger: (id: string) => Promise<{ all: () => SendRecord[] }> }
+    ).sendLedger('target');
+    expect(ledger.all()).toEqual([
+      expect.objectContaining({
+        path: 'revive',
+        fate: 'unaccounted',
+        unaccountedReason: 'session_ended',
+      }),
+    ]);
+    expect(ledger.all()[0]?.withdrawn).toBeUndefined();
+    expect(fixture.events.some(event => event.type === 'control.send_unaccounted')).toBe(true);
   });
 });
 
@@ -760,12 +802,14 @@ describe('send() delivery holes (turn-012 fix round)', () => {
     expect(mailbox === null || mailbox === '').toBe(true);
   });
 
-  test('a failed type-in rolls the durable record back (no phantom pending entry)', async () => {
+  test('an ambiguous native type-in error stays ACCEPTED and a same-id retry never types twice', async () => {
     const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-send-fail-'));
     temporaryDirectories.push(home);
     await mkdir(path.join(home, 's1', 'channel'), { recursive: true });
     const { manager } = sendManager({ status: 'running', paneAlive: true, promptReady: false });
+    manager.paths = createPaths(home);
     let state: Record<string, unknown> = { id: 's1', status: 'running', turn: 3, promptReady: false };
+    let typeAttempts = 0;
     manager.get = async () => ({
       directory: path.join(home, 's1'),
       config: { id: 's1', tmuxSession: 'kteam-s1-agent', turn: 3 },
@@ -780,6 +824,7 @@ describe('send() delivery holes (turn-012 fix round)', () => {
     manager.tmux = {
       state: async () => ({ alive: true, dead: false, promptReady: false, visiblePane: '• Working (10s' }),
       typeIntoQueue: async () => {
+        typeAttempts++;
         throw new Error('text did not land in the busy composer');
       },
     };
@@ -787,11 +832,77 @@ describe('send() delivery holes (turn-012 fix round)', () => {
     manager.monitors = new Map();
     manager.launching = new Map<string, number>();
     await expect(
-      (manager as unknown as { send: (id: string, request: { message: string }) => Promise<unknown> }).send('s1', {
-        message: 'doomed',
-      }),
+      (
+        manager as unknown as {
+          send: (id: string, request: { message: string; requestId: string }) => Promise<unknown>;
+        }
+      ).send('s1', { message: 'doomed', requestId: 'ambiguous-native' }),
     ).rejects.toThrow(/did not land/);
-    expect((state.pendingNativeSends as unknown[]) ?? []).toHaveLength(0);
+    expect((state.pendingNativeSends as unknown[]) ?? []).toHaveLength(1);
+    const retry = await (
+      manager as unknown as {
+        send: (id: string, request: { message: string; requestId: string }) => Promise<{ disposition: string }>;
+      }
+    ).send('s1', { message: 'doomed', requestId: 'ambiguous-native' });
+    expect(retry.disposition).toBe('queued');
+    expect(typeAttempts).toBe(1);
+    const rows = (
+      await (manager as unknown as { sendLedger: (id: string) => Promise<{ all: () => unknown[] }> }).sendLedger('s1')
+    ).all() as Array<{ sendId: string; fate: string }>;
+    expect(rows).toEqual([expect.objectContaining({ sendId: 'ambiguous-native', fate: 'accepted' })]);
+  });
+
+  test('a proven pre-submit persistence failure tombstones, then the same id resurrects for one safe retry', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-send-pre-submit-'));
+    temporaryDirectories.push(home);
+    await mkdir(path.join(home, 's1', 'channel'), { recursive: true });
+    const { manager } = sendManager({ status: 'running', paneAlive: true, promptReady: false });
+    manager.paths = createPaths(home);
+    let state: Record<string, unknown> = { id: 's1', status: 'running', turn: 3, promptReady: false };
+    let failPersistence = true;
+    let typed = 0;
+    manager.get = async () => ({
+      directory: path.join(home, 's1'),
+      config: { id: 's1', tmuxSession: 'kteam-s1-agent', turn: 3 },
+      state,
+    });
+    manager.store = {
+      updateState: async (_id: string, mutate: (current: Record<string, unknown>) => Record<string, unknown>) => {
+        if (failPersistence) throw new Error('state disk unavailable before submit');
+        state = mutate(state);
+        return state;
+      },
+    };
+    manager.tmux = {
+      state: async () => ({ alive: true, dead: false, promptReady: false, visiblePane: '• Working (10s' }),
+      typeIntoQueue: async () => {
+        typed++;
+      },
+    };
+    const send = () =>
+      (
+        manager as unknown as {
+          send: (id: string, request: { message: string; requestId: string }) => Promise<{ disposition: string }>;
+        }
+      ).send('s1', { message: 'retry safely', requestId: 'retryable-pre-submit' });
+    await expect(send()).rejects.toThrow(/disk unavailable/);
+    expect(typed).toBe(0);
+    const ledger = await (
+      manager as unknown as {
+        sendLedger: (id: string) => Promise<{
+          all: (options?: { includeWithdrawn?: boolean }) => Array<{ sendId: string; withdrawn?: boolean }>;
+        }>;
+      }
+    ).sendLedger('s1');
+    expect(ledger.all()).toEqual([]);
+    expect(ledger.all({ includeWithdrawn: true })).toEqual([
+      expect.objectContaining({ sendId: 'retryable-pre-submit', withdrawn: true }),
+    ]);
+
+    failPersistence = false;
+    expect((await send()).disposition).toBe('queued');
+    expect(typed).toBe(1);
+    expect(ledger.all()).toEqual([expect.objectContaining({ sendId: 'retryable-pre-submit', withdrawn: undefined })]);
   });
 
   test('terminal transition BETWEEN probe and lock takes the revive path, never types', async () => {
@@ -914,7 +1025,7 @@ describe('send() delivery holes (turn-012 fix round)', () => {
     expect(typed).toEqual(['urgent steer']);
   });
 
-  test('a failed idle injection leaves no inbox row and does not bump the turn', async () => {
+  test('an ambiguous idle injection error leaves ACCEPTED visible and does not bump the turn', async () => {
     const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-send-idle-rollback-'));
     temporaryDirectories.push(home);
     await Promise.all([
@@ -937,9 +1048,11 @@ describe('send() delivery holes (turn-012 fix round)', () => {
     manager.doneDeferred = new Set();
     manager.tmux = {
       send: async () => {
+        sends++;
         throw new Error('the prompt never started');
       },
     };
+    let sends = 0;
     manager.store = {
       updateConfig: async (_id: string, mutate: (current: Record<string, unknown>) => Record<string, unknown>) => {
         config = mutate(config);
@@ -951,7 +1064,11 @@ describe('send() delivery holes (turn-012 fix round)', () => {
     await expect(
       (
         manager as unknown as {
-          deliverToIdlePrompt: (id: string, view: SessionView, request: { message: string }) => Promise<void>;
+          deliverToIdlePrompt: (
+            id: string,
+            view: SessionView,
+            request: { message: string; requestId: string },
+          ) => Promise<unknown>;
         }
       ).deliverToIdlePrompt(
         's1',
@@ -960,20 +1077,43 @@ describe('send() delivery holes (turn-012 fix round)', () => {
           config,
           state: { id: 's1', status: 'running', turn: 3 },
         } as unknown as SessionView,
-        { message: 'must be atomic' },
+        { message: 'must be atomic', requestId: 'idle-uncertain' },
       ),
     ).rejects.toThrow(/never started/);
     expect(config.turn).toBe(3);
     expect(await readFile(path.join(home, 's1', 'channel', 'inbox.jsonl'), 'utf8')).toBe('');
+    const rows = (
+      await (manager as unknown as { sendLedger: (id: string) => Promise<{ all: () => unknown[] }> }).sendLedger('s1')
+    ).all() as Array<{ sendId: string; fate: string }>;
+    expect(rows).toEqual([expect.objectContaining({ sendId: 'idle-uncertain', fate: 'accepted' })]);
+    await (
+      manager as unknown as {
+        deliverToIdlePrompt: (
+          id: string,
+          view: SessionView,
+          request: { message: string; requestId: string },
+        ) => Promise<unknown>;
+      }
+    ).deliverToIdlePrompt(
+      's1',
+      {
+        directory: path.join(home, 's1'),
+        config,
+        state: { id: 's1', status: 'running', turn: 3 },
+      } as unknown as SessionView,
+      { message: 'must be atomic', requestId: 'idle-uncertain' },
+    );
+    expect(sends).toBe(1);
   });
 
-  test('a composer rejection falls back once to a durable file-backed native queue', async () => {
+  test('a post-submit composer rejection never auto-falls back or retypes', async () => {
     const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-send-fallback-'));
     temporaryDirectories.push(home);
     await mkdir(path.join(home, 's1', 'channel'), { recursive: true });
     const typed: string[] = [];
     let state: Record<string, unknown> = { id: 's1', status: 'running', turn: 3, promptReady: false };
     const { manager } = sendManager({ status: 'running', paneAlive: true, promptReady: false });
+    manager.paths = createPaths(home);
     manager.get = async () => ({
       directory: path.join(home, 's1'),
       config: { id: 's1', tmuxSession: 'kteam-s1-agent', turn: 3 },
@@ -989,29 +1129,28 @@ describe('send() delivery holes (turn-012 fix round)', () => {
       state: async () => ({ alive: true, dead: false, promptReady: false, visiblePane: '• Working (10s' }),
       typeIntoQueue: async (_name: string, text: string) => {
         typed.push(text);
-        if (typed.length === 1) throw new Error('the message left the composer without queue evidence');
+        throw new Error('the message left the composer without queue evidence');
       },
     };
     manager.emit = async () => ({});
     manager.monitors = new Map();
     manager.launching = new Map();
-    const queued = await (
-      manager as unknown as {
-        send: (id: string, request: { message: string }) => Promise<{ disposition: string }>;
-      }
-    ).send('s1', { message: 'fallback payload' });
-    expect(queued.disposition).toBe('queued');
-    expect(typed).toHaveLength(2);
-    expect(typed[0]).toBe('fallback payload');
-    expect(typed[1]).toContain('Read the queued message file');
+    await expect(
+      (
+        manager as unknown as {
+          send: (id: string, request: { message: string; requestId: string }) => Promise<unknown>;
+        }
+      ).send('s1', { message: 'fallback payload', requestId: 'post-submit' }),
+    ).rejects.toThrow(/will not be retried automatically/);
+    expect(typed).toEqual(['fallback payload']);
     const pending = state.pendingNativeSends as Array<{ message: string; queueText?: string; payloadFile?: string }>;
     expect(pending).toHaveLength(1);
     expect(pending[0]!.message).toBe('fallback payload');
-    expect(pending[0]!.queueText).toBe(typed[1]);
-    expect(await readFile(pending[0]!.payloadFile!, 'utf8')).toBe('fallback payload\n');
+    expect(pending[0]!.queueText).toBeUndefined();
+    expect(pending[0]!.payloadFile).toBeUndefined();
   });
 
-  test('a multi-kilobyte busy send queues only a short durable file instruction', async () => {
+  test('a multi-kilobyte busy send uses a short file instruction and rejects traversal-shaped request ids', async () => {
     const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-send-long-fallback-'));
     temporaryDirectories.push(home);
     await mkdir(path.join(home, 's1', 'channel'), { recursive: true });
@@ -1019,6 +1158,7 @@ describe('send() delivery holes (turn-012 fix round)', () => {
     const typed: string[] = [];
     let state: Record<string, unknown> = { id: 's1', status: 'running', turn: 3, promptReady: false };
     const { manager } = sendManager({ status: 'running', paneAlive: true, promptReady: false });
+    manager.paths = createPaths(home);
     manager.get = async () => ({
       directory: path.join(home, 's1'),
       config: { id: 's1', tmuxSession: 'kteam-s1-agent', turn: 3 },
@@ -1041,9 +1181,9 @@ describe('send() delivery holes (turn-012 fix round)', () => {
     manager.launching = new Map();
     const queued = await (
       manager as unknown as {
-        send: (id: string, request: { message: string }) => Promise<{ disposition: string }>;
+        send: (id: string, request: { message: string; requestId: string }) => Promise<{ disposition: string }>;
       }
-    ).send('s1', { message: long });
+    ).send('s1', { message: long, requestId: '../../etc/passwd' });
     expect(queued.disposition).toBe('queued');
     expect(typed).toHaveLength(1);
     expect(typed[0]!.length).toBeLessThan(1_000);
@@ -1053,6 +1193,12 @@ describe('send() delivery holes (turn-012 fix round)', () => {
     expect(pending[0]!.message).toBe(long);
     expect(pending[0]!.queueText).toBe(typed[0]);
     expect(await readFile(pending[0]!.payloadFile!, 'utf8')).toBe(`${long}\n`);
+    expect(path.dirname(pending[0]!.payloadFile!)).toBe(path.join(home, 's1', 'channel'));
+    expect(path.basename(pending[0]!.payloadFile!)).toMatch(/^queued-[0-9a-f-]{36}\.md$/);
+    const ledger = await (
+      manager as unknown as { sendLedger: (id: string) => Promise<{ all: () => Array<{ sendId: string }> }> }
+    ).sendLedger('s1');
+    expect(ledger.all()[0]!.sendId).not.toBe('../../etc/passwd');
   });
 
   test('a successful peer send appends a sender-side outbox row', async () => {
@@ -1342,220 +1488,879 @@ describe('needs_human flag + sweep dedupe (turn-018)', () => {
   });
 });
 
-describe('native-queue consumption correlation (turn-016 P1)', () => {
-  function correlationManager(initial: {
-    turn: number;
-    pendingNativeSends: Array<{
-      id: string;
-      at: string;
-      message: string;
-      queueText?: string;
-      payloadFile?: string;
-    }>;
-  }) {
-    const events: Array<{ type: string; turn?: number }> = [];
-    let config: Record<string, unknown> = { id: 's1', tmuxSession: 'kteam-s1-agent', turn: initial.turn };
+describe('durable send evidence reconciliation (B4)', () => {
+  async function evidenceHarness(
+    records: SendRecord[],
+    options: {
+      status?: string;
+      pending?: Array<Record<string, unknown>>;
+      turn?: number;
+      finishedAt?: string;
+    } = {},
+  ) {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-send-evidence-'));
+    temporaryDirectories.push(home);
+    await Promise.all(
+      ['channel', 'markers', 'turns'].map(directory => mkdir(path.join(home, 's1', directory), { recursive: true })),
+    );
+    const turn = options.turn ?? 3;
+    const config: Record<string, unknown> = {
+      id: 's1',
+      harness: 'claude',
+      tmuxSession: 'kteam-s1-agent',
+      turn,
+    };
     let state: Record<string, unknown> = {
       id: 's1',
-      status: 'running',
-      turn: initial.turn,
-      nudgedAt: '2026-07-23T00:00:00.000Z', // stale nudge must clear on the new turn
-      pendingNativeSends: initial.pendingNativeSends,
+      status: options.status ?? 'running',
+      health: 'healthy',
+      turn,
+      ...(options.finishedAt ? { finishedAt: options.finishedAt } : {}),
+      pendingNativeSends:
+        options.pending ??
+        records.map(record => ({
+          id: record.sendId,
+          at: record.acceptedAt,
+          message: record.message,
+          ...(record.matchText && record.matchText !== record.message ? { queueText: record.matchText } : {}),
+          ...(record.payloadFile ? { payloadFile: record.payloadFile } : {}),
+          attachmentIds: record.attachmentIds,
+        })),
     };
+    const events: Array<{ type: string; data: Record<string, unknown>; turn?: number }> = [];
     const manager = bareManager();
-    manager.autoContinued = new Set(['s1']);
-    manager.doneDeferred = new Set(['s1']);
+    manager.paths = createPaths(home);
+    manager.reconciledSendLedgers = new Set(['s1']);
+    manager.get = async () => ({ directory: path.join(home, 's1'), config, state });
     manager.store = {
-      updateConfig: async (_id: string, mutate: (c: Record<string, unknown>) => Record<string, unknown>) => {
-        config = mutate(config);
-        return config;
-      },
-      updateState: async (_id: string, mutate: (c: Record<string, unknown>) => Record<string, unknown>) => {
+      updateState: async (_id: string, mutate: (current: Record<string, unknown>) => Record<string, unknown>) => {
         state = mutate(state);
         return state;
       },
     };
-    manager.emit = async (_id: string, type: string, _payload: unknown, _source: string, turn?: number) => {
-      events.push({ type, turn });
+    manager.indexChatRecords = () => undefined;
+    manager.broadcastChat = () => undefined;
+    manager.emit = async (
+      _id: string,
+      type: string,
+      data: Record<string, unknown>,
+      _source: string,
+      eventTurn?: number,
+    ) => {
+      events.push({ type, data, turn: eventTurn });
       return {};
     };
-    const call = async (batch: Array<{ type: string; data: unknown }>, home: string) => {
-      manager.paths = createPaths(home);
-      const view = {
-        directory: path.join(home, 's1'),
-        config,
-        state,
-      };
-      manager.get = async () => ({ directory: path.join(home, 's1'), config, state });
-      await (
-        manager as unknown as {
-          correlateNativeSends: (id: string, view: unknown, events: unknown[]) => Promise<void>;
-        }
-      ).correlateNativeSends('s1', view, batch);
+    const ledger = await (
+      manager as unknown as {
+        sendLedger: (id: string) => Promise<{ accept: (record: SendRecord) => Promise<unknown> }>;
+      }
+    ).sendLedger('s1');
+    for (const record of records) await ledger.accept(record);
+    return {
+      manager,
+      home,
+      events,
+      config: () => config,
+      state: () => state,
+      ledger: ledger as unknown as {
+        get: (id: string) => SendRecord | undefined;
+        all: (options?: { includeWithdrawn?: boolean }) => SendRecord[];
+        persist: (record: SendRecord) => Promise<SendRecord>;
+      },
     };
-    return { manager, call, events, config: () => config, state: () => state };
   }
 
-  test('a matching chat.user advances the turn exactly once with full bookkeeping', async () => {
-    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-correlate-'));
-    temporaryDirectories.push(home);
-    await mkdir(path.join(home, 's1', 'turns'), { recursive: true });
-    await mkdir(path.join(home, 's1', 'markers'), { recursive: true });
-    await writeFile(path.join(home, 's1', 'markers', 'done.json'), '{"type":"done","turn":3}\n');
-    const harness = correlationManager({
-      turn: 3,
-      pendingNativeSends: [{ id: 'q1', at: 'then', message: 'queued steer message' }],
+  function accepted(id: string, text: string, index = 0, overrides: Partial<SendRecord> = {}): SendRecord {
+    return newAcceptedSend({
+      sendId: id,
+      acceptedAt: new Date(Date.parse('2026-07-27T02:00:32.000Z') + index * 1_000).toISOString(),
+      acceptedTurn: 3,
+      path: 'native-inline',
+      message: text,
+      matchText: text,
+      attachmentIds: [],
+      ...overrides,
     });
-    await harness.call([{ type: 'chat.user', data: { text: 'queued steer message' } }], home);
-    // Turn advanced atomically on config AND state.
-    expect(harness.config().turn).toBe(4);
-    expect(harness.state().turn).toBe(4);
-    // Queue entry consumed; nudge episode reset; turn marked incomplete.
-    expect(harness.state().pendingNativeSends).toHaveLength(0);
-    expect(harness.state().nudgedAt).toBeUndefined();
-    expect(harness.state().turnCompleted).toBe(false);
-    // Turn file materialized; stale turn-3 done marker cleared (cannot
-    // complete queued turn 4).
-    expect(await readFile(path.join(home, 's1', 'turns', 'turn-004.md'), 'utf8')).toContain('queued steer message');
-    expect(await readFile(path.join(home, 's1', 'markers', 'done.json'), 'utf8').catch(() => 'GONE')).toBe('GONE');
-    // Consumption event tagged with the NEW turn.
-    expect(harness.events).toEqual([{ type: 'control.send_consumed', turn: 4 }]);
-  });
+  }
 
-  test('a file-backed queue matches its short instruction and materializes the full payload', async () => {
-    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-correlate-file-backed-'));
-    temporaryDirectories.push(home);
-    await mkdir(path.join(home, 's1', 'turns'), { recursive: true });
-    const fullMessage = `LONG SPEC\n${'x'.repeat(4_300)}`;
-    const queueText = `Read the queued message file at ${path.join(home, 's1', 'channel', 'queued-q1.md')}`;
-    const harness = correlationManager({
-      turn: 3,
-      pendingNativeSends: [
-        {
-          id: 'q1',
-          at: 'then',
-          message: fullMessage,
-          queueText,
-          payloadFile: path.join(home, 's1', 'channel', 'queued-q1.md'),
-        },
-      ],
-    });
-    await harness.call([{ type: 'chat.user', data: { text: queueText } }], home);
-    expect(harness.config().turn).toBe(4);
-    expect(harness.state().pendingNativeSends).toHaveLength(0);
-    expect(await readFile(path.join(home, 's1', 'turns', 'turn-004.md'), 'utf8')).toBe(`${fullMessage}\n`);
-  });
+  function proof(id: string, text: string, index = 0, harness: 'claude' | 'codex' = 'claude'): ObservedHumanInput {
+    return {
+      harness,
+      text,
+      proof: harness === 'claude' ? 'native-queue-drain' : 'normal-user-record',
+      observedAt: new Date(Date.parse('2026-07-27T02:00:40.000Z') + index * 1_000).toISOString(),
+      proofKey: `proof-${id}`,
+      shapeVersion: 1,
+    };
+  }
 
-  test('replayed/duplicate transcript batches cannot double-advance', async () => {
-    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-correlate-dup-'));
+  async function legacyMigrationHarness(withHistoricalProof: boolean) {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-send-legacy-'));
     temporaryDirectories.push(home);
-    await mkdir(path.join(home, 's1', 'turns'), { recursive: true });
-    const harness = correlationManager({
-      turn: 3,
-      pendingNativeSends: [{ id: 'q1', at: 'then', message: 'only once' }],
-    });
-    const batch = [{ type: 'chat.user', data: { text: 'only once' } }];
-    await harness.call(batch, home);
-    await harness.call(batch, home); // replay
-    expect(harness.config().turn).toBe(4); // not 5
-    expect(harness.events.filter(event => event.type === 'control.send_consumed')).toHaveLength(1);
-  });
-
-  test('an unrelated chat.user does not consume the pending entry', async () => {
-    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-correlate-nomatch-'));
-    temporaryDirectories.push(home);
-    const harness = correlationManager({
-      turn: 3,
-      pendingNativeSends: [{ id: 'q1', at: 'then', message: 'the queued message text' }],
-    });
-    await harness.call([{ type: 'chat.user', data: { text: 'a totally different prompt' } }], home);
-    expect(harness.config().turn).toBe(3);
-    expect(harness.state().pendingNativeSends).toHaveLength(1);
-    expect(harness.events).toHaveLength(0);
-  });
-
-  test('IDENTICAL queued messages: one chat.user consumes exactly one entry', async () => {
-    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-correlate-same-'));
-    temporaryDirectories.push(home);
-    await mkdir(path.join(home, 's1', 'turns'), { recursive: true });
-    const harness = correlationManager({
-      turn: 3,
-      pendingNativeSends: [
-        { id: 'q1', at: 'then', message: 'continue' },
-        { id: 'q2', at: 'later', message: 'continue' },
-      ],
-    });
-    await harness.call([{ type: 'chat.user', data: { text: 'continue' } }], home);
-    // One boundary => one consumption: turn 4 only, q2 still pending.
-    expect(harness.config().turn).toBe(4);
-    expect(harness.state().pendingNativeSends).toHaveLength(1);
-    expect(harness.events.filter(event => event.type === 'control.send_consumed')).toHaveLength(1);
-  });
-
-  test('SAME-PREFIX queued messages: shared 80-char prefix does not double-consume', async () => {
-    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-correlate-prefix-'));
-    temporaryDirectories.push(home);
-    await mkdir(path.join(home, 's1', 'turns'), { recursive: true });
-    const shared = 'x'.repeat(90); // identical first 80 chars, different tails
-    const harness = correlationManager({
-      turn: 3,
-      pendingNativeSends: [
-        { id: 'q1', at: 'then', message: `${shared} alpha` },
-        { id: 'q2', at: 'later', message: `${shared} beta` },
-      ],
-    });
-    await harness.call([{ type: 'chat.user', data: { text: `${shared} alpha` } }], home);
-    expect(harness.config().turn).toBe(4);
-    expect(harness.state().pendingNativeSends).toHaveLength(1);
-  });
-
-  test('two queued entries + two chat.user events consume both, in order', async () => {
-    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-correlate-two-'));
-    temporaryDirectories.push(home);
-    await mkdir(path.join(home, 's1', 'turns'), { recursive: true });
-    const harness = correlationManager({
-      turn: 3,
-      pendingNativeSends: [
-        { id: 'q1', at: 'then', message: 'continue' },
-        { id: 'q2', at: 'later', message: 'continue' },
-      ],
-    });
-    await harness.call(
-      [
-        { type: 'chat.user', data: { text: 'continue' } },
-        { type: 'chat.user', data: { text: 'continue' } },
-      ],
-      home,
+    await Promise.all(
+      ['channel', 'markers', 'turns'].map(directory => mkdir(path.join(home, 's1', directory), { recursive: true })),
     );
-    expect(harness.config().turn).toBe(5);
-    expect(harness.state().pendingNativeSends).toHaveLength(0);
-    expect(harness.events.filter(event => event.type === 'control.send_consumed')).toHaveLength(2);
-  });
+    const acceptedAt = ['2026-07-27T02:00:32.000Z', '2026-07-27T02:00:33.000Z', '2026-07-27T02:00:34.000Z'];
+    const attachmentBlock = '[Image attachment image-1]';
+    const payloadFile = path.join(home, 's1', 'channel', 'queued-legacy-file.md');
+    const fileInstruction = `Read the queued message file at ${payloadFile} completely now, then follow every instruction inside it.`;
+    const inboxRows = [
+      {
+        at: acceptedAt[0],
+        type: 'message',
+        queued: true,
+        queueId: 'legacy-attachment',
+        message: 'inspect the attachment',
+        attachmentIds: ['image-1'],
+        from: 'peer-session',
+        fromName: 'peer-name',
+        replyExpected: true,
+      },
+      {
+        at: acceptedAt[1],
+        type: 'message',
+        queued: true,
+        queueId: 'legacy-file',
+        message: 'the full file-backed payload',
+        attachmentIds: [],
+      },
+      {
+        at: acceptedAt[2],
+        type: 'message',
+        queued: true,
+        queueId: 'legacy-inline',
+        message: 'ordinary inline payload',
+        attachmentIds: [],
+      },
+    ];
+    await writeFile(
+      path.join(home, 's1', 'channel', 'inbox.jsonl'),
+      `${inboxRows.map(row => JSON.stringify(row)).join('\n')}\n`,
+    );
+    await writeFile(payloadFile, 'the full file-backed payload\n', { mode: 0o600 });
 
-  test('pending entries surviving into a terminal state are reported LOST (recovery: revive)', async () => {
-    const events: Array<{ type: string }> = [];
+    const config: Record<string, unknown> = {
+      id: 's1',
+      harness: 'claude',
+      tmuxSession: 'kteam-s1-agent',
+      turn: 3,
+    };
     let state: Record<string, unknown> = {
       id: 's1',
-      status: 'stopped',
+      status: 'stalled',
+      health: 'stalled',
       turn: 3,
-      pendingNativeSends: [{ id: 'q1', at: 'then', message: 'died in composer' }],
+      finishedAt: '2026-07-27T02:10:00.000Z',
+      // Evan's real legacy specimen had already lost its mechanics rows. The
+      // durable migration source here is therefore inbox.jsonl alone.
+      pendingNativeSends: [],
     };
+    const events: Array<{ type: string; data: Record<string, unknown> }> = [];
+    let historicalReads = 0;
     const manager = bareManager();
-    manager.get = async () => ({ directory: '/x/s1', config: { id: 's1', turn: 3 }, state });
+    manager.paths = createPaths(home);
+    manager.reconciledSendLedgers = new Set<string>();
+    manager.attachments = {
+      buildImageReferenceBlock: async (_id: string, attachmentIds: string[]) => {
+        expect(attachmentIds).toEqual(['image-1']);
+        return attachmentBlock;
+      },
+    };
+    manager.get = async () => ({ directory: path.join(home, 's1'), config, state });
     manager.store = {
-      updateState: async (_id: string, mutate: (c: Record<string, unknown>) => Record<string, unknown>) => {
+      updateState: async (_id: string, mutate: (current: Record<string, unknown>) => Record<string, unknown>) => {
         state = mutate(state);
         return state;
       },
     };
-    manager.emit = async (_id: string, type: string) => {
-      events.push({ type });
+    manager.indexChatRecords = () => undefined;
+    manager.broadcastChat = () => undefined;
+    manager.emit = async (_id: string, type: string, data: Record<string, unknown>) => {
+      events.push({ type, data });
       return {};
     };
-    await (manager as unknown as { reportLostNativeSends: (id: string) => Promise<void> }).reportLostNativeSends('s1');
-    expect(events).toEqual([{ type: 'control.send_lost' }]);
-    expect(state.pendingNativeSends).toHaveLength(0);
-    expect(String(state.reason)).toContain('not consumed before the session ended');
+    manager.historicalObservedInputs = async () => {
+      historicalReads++;
+      if (!withHistoricalProof) return [];
+      return [
+        proof('legacy-attachment', `inspect the attachment\n\n${attachmentBlock}`),
+        proof('legacy-file', fileInstruction, 1),
+        proof('legacy-inline', 'ordinary inline payload', 2),
+      ];
+    };
+
+    await (
+      manager as unknown as { ensureSendLedgerReconciledUnlocked: (view: SessionView) => Promise<void> }
+    ).ensureSendLedgerReconciledUnlocked(await (manager.get as () => Promise<SessionView>)());
+    const ledger = await (
+      manager as unknown as {
+        sendLedger: (id: string) => Promise<{
+          get: (id: string) => SendRecord | undefined;
+          all: (options?: { includeWithdrawn?: boolean }) => SendRecord[];
+        }>;
+      }
+    ).sendLedger('s1');
+    return {
+      acceptedAt,
+      attachmentBlock,
+      events,
+      fileInstruction,
+      historicalReads: () => historicalReads,
+      ledger,
+      payloadFile,
+      state: () => state,
+    };
+  }
+
+  test('generic chat.user remains render-only and cannot settle fate', async () => {
+    const harness = await evidenceHarness([accepted('q1', 'quoted text')]);
+    await (
+      harness.manager as unknown as {
+        handleClaudeEvents: (id: string, events: unknown[], cursor: unknown) => Promise<void>;
+      }
+    ).handleClaudeEvents('s1', [{ type: 'chat.user', data: { text: 'quoted text' } }], {
+      file: '/tmp/transcript.jsonl',
+      startOffset: 0,
+      endOffset: 10,
+    });
+    expect(harness.ledger.get('q1')?.fate).toBe('accepted');
+    expect(harness.events.filter(event => event.type.startsWith('control.send_'))).toEqual([]);
+  });
+
+  test('an Evan-style three-item drain settles all rows without advancing turns or clearing markers', async () => {
+    const records = [accepted('q1', 'first'), accepted('q2', 'second', 1), accepted('q3', 'third', 2)];
+    const harness = await evidenceHarness(records);
+    const doneFile = path.join(harness.home, 's1', 'markers', 'done.json');
+    const helpFile = path.join(harness.home, 's1', 'markers', 'needs-help.json');
+    await writeFile(doneFile, '{"type":"done","turn":3}\n');
+    await writeFile(helpFile, '{"type":"question"}\n');
+    const inputs = [proof('q1', 'first'), proof('q2', 'second', 1), proof('q3', 'third', 2)];
+
+    await (
+      harness.manager as unknown as {
+        handleObservedInputs: (id: string, inputs: ObservedHumanInput[]) => Promise<void>;
+      }
+    ).handleObservedInputs('s1', inputs);
+    expect(harness.ledger.all().map(record => record.fate)).toEqual(['delivered', 'delivered', 'delivered']);
+    expect(harness.config().turn).toBe(3);
+    expect(harness.state().turn).toBe(3);
+    expect(harness.state().pendingNativeSends).toHaveLength(0);
+    expect(harness.state().sendEvidenceKeys).toHaveLength(3);
+    expect(await readFile(doneFile, 'utf8')).toContain('"turn":3');
+    expect(await readFile(helpFile, 'utf8')).toContain('question');
+    expect(await readFile(path.join(harness.home, 's1', 'turns', 'turn-004.md'), 'utf8').catch(() => 'absent')).toBe(
+      'absent',
+    );
+    expect(harness.events.filter(event => event.type === 'control.send_delivered')).toHaveLength(3);
+    expect(harness.events.filter(event => event.type === 'control.send_consumed')).toHaveLength(3);
+
+    const eventCount = harness.events.length;
+    await (
+      harness.manager as unknown as {
+        handleObservedInputs: (id: string, inputs: ObservedHumanInput[]) => Promise<void>;
+      }
+    ).handleObservedInputs('s1', inputs);
+    expect(harness.events).toHaveLength(eventCount);
+    expect(harness.config().turn).toBe(3);
+  });
+
+  test('legacy Evan migration backfills three inbox-only rows and reconciles historical proof', async () => {
+    const harness = await legacyMigrationHarness(true);
+    expect(harness.historicalReads()).toBe(1);
+    expect(harness.ledger.all().map(record => record.fate)).toEqual(['delivered', 'delivered', 'delivered']);
+    expect(harness.ledger.get('legacy-attachment')).toMatchObject({
+      path: 'native-inline',
+      message: 'inspect the attachment',
+      matchText: `inspect the attachment\n\n${harness.attachmentBlock}`,
+      attachmentIds: ['image-1'],
+      from: 'peer-session',
+      fromName: 'peer-name',
+      replyExpected: true,
+      fate: 'delivered',
+    });
+    expect(harness.ledger.get('legacy-file')).toMatchObject({
+      path: 'native-file',
+      message: 'the full file-backed payload',
+      matchText: harness.fileInstruction,
+      payloadFile: harness.payloadFile,
+      fate: 'delivered',
+    });
+    expect(harness.ledger.get('legacy-inline')).toMatchObject({
+      path: 'native-inline',
+      message: 'ordinary inline payload',
+      matchText: 'ordinary inline payload',
+      fate: 'delivered',
+    });
+    expect(harness.state().pendingNativeSends).toEqual([]);
+    expect(harness.state().sendEvidenceKeys).toHaveLength(3);
+    expect(harness.events.filter(event => event.type === 'control.send_accepted')).toHaveLength(3);
+    expect(harness.events.filter(event => event.type === 'control.send_delivered')).toHaveLength(3);
+    expect(harness.events.filter(event => event.type === 'control.send_unaccounted')).toHaveLength(0);
+  });
+
+  test('legacy terminal migration without historical proof keeps all three rows visible as unaccounted', async () => {
+    const harness = await legacyMigrationHarness(false);
+    expect(harness.historicalReads()).toBe(1);
+    expect(harness.ledger.all()).toHaveLength(3);
+    const acceptedAtById = new Map([
+      ['legacy-attachment', harness.acceptedAt[0]],
+      ['legacy-file', harness.acceptedAt[1]],
+      ['legacy-inline', harness.acceptedAt[2]],
+    ]);
+    for (const record of harness.ledger.all()) {
+      expect(record).toMatchObject({
+        acceptedAt: acceptedAtById.get(record.sendId),
+        fate: 'unaccounted',
+        unaccountedReason: 'session_ended',
+      });
+    }
+    expect(harness.state().pendingNativeSends).toEqual([]);
+    expect(String(harness.state().reason)).toContain('3 send(s) unconfirmed');
+    expect(harness.events.filter(event => event.type === 'control.send_unaccounted')).toHaveLength(3);
+    expect(harness.events.some(event => event.type === 'control.send_lost')).toBe(false);
+  });
+
+  test('startup repair settles accepted rows newer than an old terminal finishedAt', async () => {
+    const proofed = accepted('proofed-after-finish', 'historically visible', 0, {
+      acceptedAt: '2026-07-27T02:00:32.000Z',
+    });
+    const unproven = accepted('unproven-after-finish', 'never observed', 1, {
+      acceptedAt: '2026-07-27T02:00:33.000Z',
+    });
+    const harness = await evidenceHarness([proofed, unproven], {
+      status: 'stopped',
+      finishedAt: '2026-07-27T02:00:00.000Z',
+    });
+    harness.manager.reconciledSendLedgers = new Set<string>();
+    harness.manager.historicalObservedInputs = async () => [proof('proofed-after-finish', 'historically visible')];
+
+    await (
+      harness.manager as unknown as {
+        ensureSendLedgerReconciledUnlocked: (view: SessionView) => Promise<void>;
+      }
+    ).ensureSendLedgerReconciledUnlocked(await (harness.manager.get as () => Promise<SessionView>)());
+
+    expect(harness.ledger.get('proofed-after-finish')).toMatchObject({ fate: 'delivered' });
+    expect(harness.ledger.get('unproven-after-finish')).toMatchObject({
+      fate: 'unaccounted',
+      unaccountedReason: 'session_ended',
+    });
+    expect(harness.events.filter(event => event.type === 'control.send_delivered')).toHaveLength(1);
+    expect(harness.events.filter(event => event.type === 'control.send_unaccounted')).toHaveLength(1);
+  });
+
+  test('default send projection carries a withdrawn tombstone so clients can fold away stale acceptance', async () => {
+    const live = accepted('live', 'still pending');
+    const withdrawn = accepted('withdrawn', 'never typed', 1);
+    const harness = await evidenceHarness([live, withdrawn]);
+    await harness.ledger.persist({
+      ...withdrawn,
+      withdrawn: true,
+      fateAt: '2026-07-27T02:00:40.000Z',
+    });
+    harness.manager.resolveRef = (id: string) => id;
+    harness.manager.serialized = async (_id: string, operation: () => Promise<unknown>) => await operation();
+
+    const projected = await (
+      harness.manager as unknown as {
+        listSends: (id: string, options?: { all?: boolean }) => Promise<SendRecord[]>;
+      }
+    ).listSends('s1');
+    expect(projected).toEqual([
+      expect.objectContaining({ sendId: 'withdrawn', withdrawn: true }),
+      expect.objectContaining({ sendId: 'live', fate: 'accepted' }),
+    ]);
+  });
+
+  test('Codex canonical proof settles a native-file instruction by safe file id', async () => {
+    const id = 'request_file_1';
+    const payloadFile = `/tmp/channel/queued-${id}.md`;
+    const instruction = `Read the queued message file at ${payloadFile} completely now, then follow every instruction inside it.`;
+    const harness = await evidenceHarness([
+      accepted(id, 'full logical payload', 0, {
+        path: 'native-file',
+        matchText: instruction,
+        payloadFile,
+      }),
+    ]);
+    await (
+      harness.manager as unknown as {
+        handleObservedInputs: (id: string, inputs: ObservedHumanInput[]) => Promise<void>;
+      }
+    ).handleObservedInputs('s1', [proof(id, instruction, 0, 'codex')]);
+    expect(harness.ledger.get(id)).toMatchObject({
+      fate: 'delivered',
+      evidence: { kind: 'response_item', tier: 'queue-file-id', proof: 'normal-user-record' },
+    });
+    expect(harness.config().turn).toBe(3);
+  });
+
+  test('terminal UNACCOUNTED remains visible and late in-window proof promotes it', async () => {
+    const record = accepted('q1', 'terminal input');
+    const harness = await evidenceHarness([record], { status: 'stopped' });
+    await (
+      harness.manager as unknown as {
+        transitionUnaccountedUnlocked: (
+          id: string,
+          view: SessionView,
+          reason: string,
+          acceptedThrough?: string,
+        ) => Promise<number>;
+      }
+    ).transitionUnaccountedUnlocked(
+      's1',
+      await (harness.manager.get as () => Promise<SessionView>)(),
+      'session_ended',
+      '2026-07-27T02:01:00.000Z',
+    );
+    expect(harness.ledger.get('q1')).toMatchObject({ fate: 'unaccounted', unaccountedReason: 'session_ended' });
+    expect(String(harness.state().reason)).toContain('unconfirmed');
+    expect(harness.events.some(event => event.type === 'control.send_lost')).toBe(false);
+
+    await (
+      harness.manager as unknown as {
+        handleObservedInputs: (id: string, inputs: ObservedHumanInput[]) => Promise<void>;
+      }
+    ).handleObservedInputs('s1', [proof('q1', 'terminal input')]);
+    expect(harness.ledger.get('q1')?.fate).toBe('delivered');
+    expect(harness.config().turn).toBe(3);
+  });
+
+  test('timeout fate removes native mechanics while late proof still promotes from the ledger', async () => {
+    const record = accepted('q1', 'eventually observed');
+    const harness = await evidenceHarness([record]);
+    await (
+      harness.manager as unknown as {
+        sweepSendFatesUnlocked: (
+          id: string,
+          view: SessionView,
+          context: { at: string; promptReady: boolean; frozen: boolean },
+        ) => Promise<number>;
+      }
+    ).sweepSendFatesUnlocked('s1', await (harness.manager.get as () => Promise<SessionView>)(), {
+      at: '2026-07-27T03:00:32.001Z',
+      promptReady: true,
+      frozen: false,
+    });
+    expect(harness.ledger.get('q1')).toMatchObject({ fate: 'unaccounted', unaccountedReason: 'timeout' });
+    expect(harness.state().pendingNativeSends).toEqual([]);
+
+    await (
+      harness.manager as unknown as {
+        handleObservedInputs: (id: string, inputs: ObservedHumanInput[]) => Promise<void>;
+      }
+    ).handleObservedInputs('s1', [proof('q1', 'eventually observed')]);
+    expect(harness.ledger.get('q1')).toMatchObject({ fate: 'delivered', evidence: { key: 'proof-q1' } });
+    expect(harness.state().pendingNativeSends).toEqual([]);
+  });
+
+  test('the first post-resume proof persists the freeze shift before evidence matching', async () => {
+    const record = accepted('q1', 'quota-delayed input', 0, {
+      acceptedAt: '2026-07-27T00:00:00.000Z',
+    });
+    const harness = await evidenceHarness([record]);
+    await harness.ledger.persist({ ...record, timeoutFrozenAt: '2026-07-27T00:30:00.000Z' });
+    await (
+      harness.manager as unknown as {
+        handleObservedInputs: (id: string, inputs: ObservedHumanInput[]) => Promise<void>;
+      }
+    ).handleObservedInputs('s1', [{ ...proof('q1', 'quota-delayed input'), observedAt: '2026-07-27T02:30:01.000Z' }]);
+    expect(harness.ledger.get('q1')).toMatchObject({
+      acceptedAt: '2026-07-27T00:00:00.000Z',
+      unaccountedDeadline: '2026-07-27T03:00:01.000Z',
+      hardDeadline: '2026-07-27T04:00:00.000Z',
+      fate: 'delivered',
+    });
+    expect(harness.ledger.get('q1')?.timeoutFrozenAt).toBeUndefined();
+  });
+
+  test('terminal finalization awaits watcher flush before classifying the remainder', async () => {
+    const harness = await evidenceHarness([accepted('q1', 'final bytes')], { status: 'stopped' });
+    let flushed = 0;
+    harness.manager.monitors = new Map([
+      [
+        's1',
+        {
+          abort: new AbortController(),
+          transcript: {
+            snapshot: () => ({ running: true }),
+            flush: async () => {
+              flushed++;
+              await (
+                harness.manager as unknown as {
+                  handleObservedInputs: (id: string, inputs: ObservedHumanInput[]) => Promise<void>;
+                }
+              ).handleObservedInputs('s1', [proof('q1', 'final bytes')]);
+            },
+          },
+        },
+      ],
+    ]);
+    await (
+      harness.manager as unknown as { finalizeTerminalSends: (id: string, acceptedThrough: string) => Promise<void> }
+    ).finalizeTerminalSends('s1', '2026-07-27T02:01:00.000Z');
+    expect(flushed).toBe(1);
+    expect(harness.ledger.get('q1')?.fate).toBe('delivered');
+    expect(harness.events.filter(event => event.type === 'control.send_unaccounted')).toHaveLength(0);
+  });
+
+  test('terminal finalization replays proof when its captured watcher detaches during flush', async () => {
+    const harness = await evidenceHarness([accepted('q1', 'last detached bytes')], { status: 'stopped' });
+    let historicalReads = 0;
+    let watcherStops = 0;
+    harness.manager.historicalObservedInputs = async () => {
+      historicalReads++;
+      return [proof('q1', 'last detached bytes')];
+    };
+    harness.manager.monitors = new Map([
+      [
+        's1',
+        {
+          abort: new AbortController(),
+          transcript: {
+            snapshot: () => ({ running: true }),
+            flush: async () => {
+              await (harness.manager as unknown as { stopMonitor: (id: string) => Promise<void> }).stopMonitor('s1');
+            },
+            stop: async () => {
+              watcherStops++;
+            },
+          },
+        },
+      ],
+    ]);
+
+    await (
+      harness.manager as unknown as { finalizeTerminalSends: (id: string, acceptedThrough: string) => Promise<void> }
+    ).finalizeTerminalSends('s1', '2026-07-27T02:01:00.000Z');
+    await Promise.resolve();
+    expect(historicalReads).toBe(1);
+    expect(watcherStops).toBe(1);
+    expect(harness.ledger.get('q1')?.fate).toBe('delivered');
+    expect(harness.events.filter(event => event.type === 'control.send_unaccounted')).toHaveLength(0);
+  });
+
+  test('terminal finalization replays when monitor cleanup stops its captured watcher', async () => {
+    const harness = await evidenceHarness([accepted('q1', 'proof after cleanup stop')], { status: 'stopped' });
+    let historicalReads = 0;
+    harness.manager.historicalObservedInputs = async () => {
+      historicalReads++;
+      return [proof('q1', 'proof after cleanup stop')];
+    };
+    let running = true;
+    let flushRequested: () => void = () => undefined;
+    const flushRequest = new Promise<void>(resolve => {
+      flushRequested = resolve;
+    });
+    let releaseFlush: () => void = () => undefined;
+    const flushBarrier = new Promise<void>(resolve => {
+      releaseFlush = resolve;
+    });
+    const transcript = {
+      snapshot: () => ({ running }),
+      flush: async () => {
+        flushRequested();
+        await flushBarrier;
+      },
+      // Real watcher.stop() marks running=false before releasing barriers that
+      // no later pass can satisfy. Keep the monitor mapped and un-aborted here
+      // to reproduce monitorLoop's normal-finally ordering exactly.
+      stop: async () => {
+        running = false;
+        releaseFlush();
+      },
+    };
+    harness.manager.monitors = new Map([['s1', { abort: new AbortController(), transcript }]]);
+
+    const finalizing = (
+      harness.manager as unknown as { finalizeTerminalSends: (id: string, acceptedThrough: string) => Promise<void> }
+    ).finalizeTerminalSends('s1', '2026-07-27T02:01:00.000Z');
+    await flushRequest;
+    await transcript.stop();
+    await finalizing;
+
+    expect((harness.manager.monitors as Map<string, unknown>).has('s1')).toBe(true);
+    expect(historicalReads).toBe(1);
+    expect(harness.ledger.get('q1')?.fate).toBe('delivered');
+    expect(harness.events.filter(event => event.type === 'control.send_unaccounted')).toHaveLength(0);
+  });
+
+  test('terminal finalization rechecks a watcher that detaches mid-settle before classification', async () => {
+    const harness = await evidenceHarness([accepted('q1', 'proof after bounded flush')], { status: 'stopped' });
+    let historicalReads = 0;
+    harness.manager.historicalObservedInputs = async () => {
+      historicalReads++;
+      return [proof('q1', 'proof after bounded flush')];
+    };
+    harness.manager.monitors = new Map([
+      [
+        's1',
+        {
+          abort: new AbortController(),
+          transcript: {
+            snapshot: () => ({ running: true }),
+            flush: async () => undefined,
+            stop: async () => undefined,
+          },
+        },
+      ],
+    ]);
+
+    let enteredFirstGet: () => void = () => undefined;
+    const firstGetEntered = new Promise<void>(resolve => {
+      enteredFirstGet = resolve;
+    });
+    let releaseFirstGet: () => void = () => undefined;
+    const firstGetGate = new Promise<void>(resolve => {
+      releaseFirstGet = resolve;
+    });
+    const originalGet = harness.manager.get as (id: string) => Promise<SessionView>;
+    let getCalls = 0;
+    harness.manager.get = async (id: string) => {
+      getCalls++;
+      if (getCalls === 1) {
+        enteredFirstGet();
+        await firstGetGate;
+      }
+      return await originalGet(id);
+    };
+
+    const finalizing = (
+      harness.manager as unknown as { finalizeTerminalSends: (id: string, acceptedThrough: string) => Promise<void> }
+    ).finalizeTerminalSends('s1', '2026-07-27T02:01:00.000Z');
+    await firstGetEntered;
+    await (harness.manager as unknown as { stopMonitor: (id: string) => Promise<void> }).stopMonitor('s1');
+    releaseFirstGet();
+    await finalizing;
+
+    expect(historicalReads).toBe(1);
+    expect(harness.ledger.get('q1')?.fate).toBe('delivered');
+    expect(harness.events.filter(event => event.type === 'control.send_unaccounted')).toHaveLength(0);
+  });
+
+  test('terminal finalization with a detached watcher and no replay proof reaches unaccounted', async () => {
+    const harness = await evidenceHarness([accepted('q1', 'never reached transcript')], { status: 'stopped' });
+    let historicalReads = 0;
+    harness.manager.historicalObservedInputs = async () => {
+      historicalReads++;
+      return [];
+    };
+    harness.manager.monitors = new Map([
+      [
+        's1',
+        {
+          abort: new AbortController(),
+          transcript: {
+            snapshot: () => ({ running: true }),
+            flush: async () => {
+              await (harness.manager as unknown as { stopMonitor: (id: string) => Promise<void> }).stopMonitor('s1');
+            },
+            stop: async () => undefined,
+          },
+        },
+      ],
+    ]);
+
+    const result = await Promise.race([
+      (
+        harness.manager as unknown as {
+          finalizeTerminalSends: (id: string, acceptedThrough: string) => Promise<void>;
+        }
+      )
+        .finalizeTerminalSends('s1', '2026-07-27T02:01:00.000Z')
+        .then(() => 'settled'),
+      Bun.sleep(250).then(() => 'timed-out'),
+    ]);
+    expect(result).toBe('settled');
+    expect(historicalReads).toBe(1);
+    expect(harness.ledger.get('q1')).toMatchObject({
+      fate: 'unaccounted',
+      unaccountedReason: 'session_ended',
+    });
+  });
+
+  test('terminal replay read failure defers fate and a later reconciliation recovers', async () => {
+    const harness = await evidenceHarness([accepted('q1', 'proof after read recovery')], { status: 'stopped' });
+    let historicalReads = 0;
+    harness.manager.historicalObservedInputs = async () => {
+      historicalReads++;
+      if (historicalReads === 1) throw new Error('transcript remained unreadable');
+      return [proof('q1', 'proof after read recovery')];
+    };
+    harness.manager.monitors = new Map([
+      [
+        's1',
+        {
+          abort: new AbortController(),
+          transcript: {
+            snapshot: () => ({ running: true }),
+            flush: async () => {
+              throw new Error('live watcher flush rejected');
+            },
+            stop: async () => undefined,
+          },
+        },
+      ],
+    ]);
+
+    const firstResult = await Promise.race([
+      (
+        harness.manager as unknown as {
+          finalizeTerminalSends: (id: string, acceptedThrough: string) => Promise<void>;
+        }
+      )
+        .finalizeTerminalSends('s1', '2026-07-27T02:01:00.000Z')
+        .then(() => 'settled'),
+      Bun.sleep(250).then(() => 'timed-out'),
+    ]);
+    expect(firstResult).toBe('settled');
+    expect(historicalReads).toBe(1);
+    expect(harness.ledger.get('q1')?.fate).toBe('accepted');
+    expect(harness.events.filter(event => event.type === 'control.send_unaccounted')).toHaveLength(0);
+    expect((harness.manager.reconciledSendLedgers as Set<string>).has('s1')).toBe(false);
+
+    // listSends/send/boot all enter this same unlocked reconciliation seam.
+    // Once the transcript becomes readable, its authoritative replay settles
+    // the preserved acceptance instead of requiring a daemon restart.
+    await (
+      harness.manager as unknown as {
+        ensureSendLedgerReconciledUnlocked: (view: SessionView) => Promise<void>;
+      }
+    ).ensureSendLedgerReconciledUnlocked(await (harness.manager.get as () => Promise<SessionView>)());
+    expect(historicalReads).toBe(2);
+    expect(harness.ledger.get('q1')?.fate).toBe('delivered');
+    expect((harness.manager.reconciledSendLedgers as Set<string>).has('s1')).toBe(true);
+    expect(harness.events.filter(event => event.type === 'control.send_unaccounted')).toHaveLength(0);
+  });
+
+  test('startup reconciliation does not latch or classify after historical replay failure', async () => {
+    const harness = await evidenceHarness([accepted('q1', 'unread startup proof')], { status: 'stopped' });
+    harness.manager.reconciledSendLedgers = new Set<string>();
+    harness.manager.historicalObservedInputs = async () => {
+      throw new Error('startup transcript read failed');
+    };
+
+    await expect(
+      (
+        harness.manager as unknown as {
+          ensureSendLedgerReconciledUnlocked: (view: SessionView) => Promise<void>;
+        }
+      ).ensureSendLedgerReconciledUnlocked(await (harness.manager.get as () => Promise<SessionView>)()),
+    ).rejects.toThrow('startup transcript read failed');
+    expect((harness.manager.reconciledSendLedgers as Set<string>).has('s1')).toBe(false);
+    expect(harness.ledger.get('q1')?.fate).toBe('accepted');
+    expect(harness.events.filter(event => event.type === 'control.send_unaccounted')).toHaveLength(0);
+  });
+
+  test('terminal finalizer coalesces an in-flight second terminal epoch to its newest cutoff', async () => {
+    const manager = bareManager();
+    manager.terminalSendFinalizers = new Map<string, Promise<void>>();
+    manager.terminalSendFinalizerCutoffs = new Map<string, string>();
+    let releaseFirst: () => void = () => undefined;
+    const firstGate = new Promise<void>(resolve => {
+      releaseFirst = resolve;
+    });
+    const calls: string[] = [];
+    manager.finalizeTerminalSends = async (_id: string, acceptedThrough: string) => {
+      calls.push(acceptedThrough);
+      if (calls.length === 1) await firstGate;
+    };
+    const schedule = (acceptedThrough: string) =>
+      (
+        manager as unknown as {
+          scheduleTerminalSendFinalization: (id: string, cutoff: string) => void;
+        }
+      ).scheduleTerminalSendFinalization('s1', acceptedThrough);
+
+    schedule('2026-07-27T02:01:00.000Z');
+    expect(calls).toEqual(['2026-07-27T02:01:00.000Z']);
+    schedule('2026-07-27T02:03:00.000Z');
+    schedule('2026-07-27T02:02:00.000Z');
+    releaseFirst();
+    await (manager.terminalSendFinalizers as Map<string, Promise<void>>).get('s1');
+    expect(calls).toEqual(['2026-07-27T02:01:00.000Z', '2026-07-27T02:03:00.000Z']);
+    expect((manager.terminalSendFinalizerCutoffs as Map<string, string>).size).toBe(0);
+  });
+
+  test('a stale terminal finalizer never classifies a send after the session has revived', async () => {
+    const harness = await evidenceHarness([accepted('q1', 'new live turn')], { status: 'running' });
+    harness.manager.monitors = new Map();
+    await (
+      harness.manager as unknown as { finalizeTerminalSends: (id: string, acceptedThrough: string) => Promise<void> }
+    ).finalizeTerminalSends('s1', '2026-07-27T02:01:00.000Z');
+    expect(harness.ledger.get('q1')?.fate).toBe('accepted');
+    expect(harness.state().pendingNativeSends).toHaveLength(1);
+    expect(harness.events.filter(event => event.type === 'control.send_unaccounted')).toHaveLength(0);
+  });
+
+  test('composer discard affects native mechanics only and uses unaccounted wording', async () => {
+    const native = accepted('native', 'in composer');
+    const direct = accepted('direct', 'already submitted', 1, { path: 'direct' });
+    const harness = await evidenceHarness([native, direct], { status: 'stopped' });
+    await (
+      harness.manager as unknown as {
+        transitionUnaccountedUnlocked: (id: string, view: SessionView, reason: string) => Promise<number>;
+      }
+    ).transitionUnaccountedUnlocked(
+      's1',
+      await (harness.manager.get as () => Promise<SessionView>)(),
+      'composer_discarded',
+    );
+    expect(harness.ledger.get('native')).toMatchObject({
+      fate: 'unaccounted',
+      unaccountedReason: 'composer_discarded',
+    });
+    expect(harness.ledger.get('direct')?.fate).toBe('accepted');
+    expect(harness.events).toEqual([
+      expect.objectContaining({
+        type: 'control.send_unaccounted',
+        data: expect.objectContaining({ reason: 'composer_discarded' }),
+      }),
+    ]);
+  });
+
+  test('ensure repairs a crash between delivered-ledger fsync and state mechanics cleanup', async () => {
+    const record = accepted('q1', 'settled');
+    const harness = await evidenceHarness([record]);
+    await harness.ledger.persist({
+      ...record,
+      fate: 'delivered',
+      fateAt: '2026-07-27T02:00:41.000Z',
+      evidence: {
+        key: 'proof-crash-gap',
+        harness: 'claude',
+        kind: 'queued_command',
+        proof: 'native-queue-drain',
+        observedAt: '2026-07-27T02:00:40.000Z',
+        shapeVersion: 1,
+        matchedTurn: 3,
+        tier: 'exact-text',
+      },
+    });
+    harness.manager.reconciledSendLedgers = new Set();
+    await (
+      harness.manager as unknown as { ensureSendLedgerReconciledUnlocked: (view: SessionView) => Promise<void> }
+    ).ensureSendLedgerReconciledUnlocked(await (harness.manager.get as () => Promise<SessionView>)());
+    expect(harness.state().pendingNativeSends).toHaveLength(0);
+    expect(harness.state().sendEvidenceKeys).toContain('proof-crash-gap');
+  });
+
+  test('ensure repairs a crash between unaccounted-ledger fsync and state mechanics cleanup', async () => {
+    const record = accepted('q1', 'timed out before crash');
+    const harness = await evidenceHarness([record]);
+    await harness.ledger.persist({
+      ...record,
+      fate: 'unaccounted',
+      fateAt: '2026-07-27T03:00:32.001Z',
+      unaccountedReason: 'timeout',
+    });
+    expect(harness.state().pendingNativeSends).toHaveLength(1);
+    harness.manager.reconciledSendLedgers = new Set();
+    await (
+      harness.manager as unknown as { ensureSendLedgerReconciledUnlocked: (view: SessionView) => Promise<void> }
+    ).ensureSendLedgerReconciledUnlocked(await (harness.manager.get as () => Promise<SessionView>)());
+    expect(harness.state().pendingNativeSends).toEqual([]);
+    expect(harness.ledger.get('q1')).toMatchObject({ fate: 'unaccounted', unaccountedReason: 'timeout' });
   });
 });
 
@@ -1581,12 +2386,30 @@ describe('short-direct sends (turn-013)', () => {
   });
 
   test('direct payloads are TYPED verbatim; long payloads use the turn-file instruction', async () => {
-    async function deliver(message: string): Promise<{ typed: string; turnFile: string }> {
+    async function deliver(message: string): Promise<{
+      typed: string;
+      turnFile: string;
+      config: Record<string, unknown>;
+      state: Record<string, unknown>;
+      record: SendRecord;
+    }> {
       const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-direct-'));
       temporaryDirectories.push(home);
       await mkdir(path.join(home, 's1', 'channel'), { recursive: true });
       await mkdir(path.join(home, 's1', 'turns'), { recursive: true });
       let typed = '';
+      let config: Record<string, unknown> = {
+        id: 's1',
+        tmuxSession: 'kteam-s1-agent',
+        turn: 1,
+        directSendMaxChars: 500,
+      };
+      let state: Record<string, unknown> = {
+        id: 's1',
+        status: 'awaiting_user',
+        turn: 1,
+        promptReady: true,
+      };
       const manager = bareManager();
       manager.resolveRef = (id: string) => id;
       manager.serialized = async (_id: string, work: () => Promise<unknown>) => await work();
@@ -1596,11 +2419,10 @@ describe('short-direct sends (turn-013)', () => {
       manager.doneDeferred = new Set();
       manager.monitors = new Map();
       manager.launching = new Map<string, number>();
-      manager.launching = new Map<string, number>();
       manager.get = async () => ({
         directory: path.join(home, 's1'),
-        config: { id: 's1', tmuxSession: 'kteam-s1-agent', turn: 1, directSendMaxChars: 500 },
-        state: { id: 's1', status: 'awaiting_user', turn: 1, promptReady: true },
+        config,
+        state,
       });
       manager.tmux = {
         state: async () => ({ alive: true, dead: false, promptReady: true, visiblePane: '❯ ' }),
@@ -1609,26 +2431,60 @@ describe('short-direct sends (turn-013)', () => {
         },
       };
       manager.store = {
-        updateConfig: async (_id: string, mutate: (c: Record<string, unknown>) => Record<string, unknown>) =>
-          mutate({ id: 's1', tmuxSession: 'kteam-s1-agent', turn: 1, directSendMaxChars: 500 }),
+        updateConfig: async (_id: string, mutate: (current: Record<string, unknown>) => Record<string, unknown>) => {
+          config = mutate(config);
+          return config;
+        },
+        updateState: async (_id: string, mutate: (current: Record<string, unknown>) => Record<string, unknown>) => {
+          state = mutate(state);
+          return state;
+        },
       };
       manager.emit = async () => ({});
-      manager.transition = async () => undefined;
-      await (manager as unknown as { send: (id: string, request: { message: string }) => Promise<unknown> }).send(
-        's1',
-        { message },
-      );
+      manager.transition = async (_id: string, patch: Record<string, unknown>) => {
+        state = { ...state, ...patch };
+      };
+      const requestId = message.includes('\n') ? 'turn-file-send' : 'direct-send';
+      await (
+        manager as unknown as {
+          send: (id: string, request: { message: string; requestId: string }) => Promise<unknown>;
+        }
+      ).send('s1', { message, requestId });
+      const ledger = await (
+        manager as unknown as { sendLedger: (id: string) => Promise<{ all: () => SendRecord[] }> }
+      ).sendLedger('s1');
+      const acceptedRecord = ledger.all()[0]!;
+      await (
+        manager as unknown as {
+          handleObservedInputs: (id: string, inputs: ObservedHumanInput[]) => Promise<void>;
+        }
+      ).handleObservedInputs('s1', [
+        {
+          harness: 'claude',
+          text: typed,
+          proof: 'normal-user-record',
+          observedAt: new Date(Date.parse(acceptedRecord.acceptedAt) + 1_000).toISOString(),
+          proofKey: `proof-${requestId}`,
+          shapeVersion: 1,
+        },
+      ]);
       const turnFile = await readFile(path.join(home, 's1', 'turns', 'turn-002.md'), 'utf8').catch(() => '');
-      return { typed, turnFile };
+      return { typed, turnFile, config, state, record: ledger.all()[0]! };
     }
 
     const short = await deliver('run the tests again');
     expect(short.typed).toBe('run the tests again'); // typed verbatim
     expect(short.turnFile).toContain('run the tests again'); // bookkeeping file still written
+    expect(short.record).toMatchObject({ sendId: 'direct-send', path: 'direct', fate: 'delivered', turn: 2 });
+    expect(short.config.turn).toBe(2);
+    expect(short.state.turn).toBe(2);
 
     const long = await deliver(`do these steps:\n1. one\n2. two`);
     expect(long.typed).toContain('Read the file'); // turn-file instruction
     expect(long.turnFile).toContain('do these steps');
+    expect(long.record).toMatchObject({ sendId: 'turn-file-send', path: 'turn-file', fate: 'delivered', turn: 2 });
+    expect(long.config.turn).toBe(2);
+    expect(long.state.turn).toBe(2);
   });
 });
 
