@@ -46,17 +46,17 @@
   });
 
   // sw/precache.gen.ts
-  var RELEASE_ID = "64f02ddafdac";
+  var RELEASE_ID = "433ba910682c";
   var PRECACHE_URLS = [
-    "/assets/Markdown-BDfJEcWA.js",
-    "/assets/SessionChatPage-9yvwJz43.js",
+    "/assets/Markdown-BdvQMcAx.js",
     "/assets/SessionChatPage-BNKeH95i.css",
+    "/assets/SessionChatPage-tJ_yNzh_.js",
     "/assets/addon-fit-DOCEibfw.js",
-    "/assets/index-BSPD5rYC.js",
-    "/assets/index-D_8Y0_AJ.js",
-    "/assets/index-eSXL83Yc.css",
+    "/assets/index-BBVmyjEp.js",
+    "/assets/index-BVJ-2t_n.css",
+    "/assets/index-CyG_JZXG.js",
     "/assets/ort.bundle.min-B0AK_E7l.js",
-    "/assets/remote-enhancement-DecE35AJ.js",
+    "/assets/remote-enhancement-CKRoGliF.js",
     "/assets/xterm-CASmyfyk.js",
     "/icons/apple-touch-icon.1d79d00c19.png",
     "/icons/favicon.1e0c791b41.ico",
@@ -65,7 +65,7 @@
     "/icons/icon-512.4d6591da01.png",
     "/icons/maskable-192.a2dc4e508d.png",
     "/icons/maskable-512.17e4f04ec4.png",
-    "/offline.64f02ddafdac.html"
+    "/offline.433ba910682c.html"
   ];
 
   // sw/policy.ts
