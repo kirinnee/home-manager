@@ -119,6 +119,11 @@ export interface WardenRunView {
  *  the fields it does know and omits the rest. */
 export interface UsageAccountView {
   binary: string;
+  /** Exact kfleet billing evidence. true = subscription quota; false = raw
+   * API metering; absent = unknown. Never infer this from provider/auth. */
+  usageBased?: boolean;
+  /** Diagnostic/auth-provider identity only; not a billing classifier. */
+  provider?: string;
   fiveHourPercent?: number;
   weeklyPercent?: number;
   fiveHourResetAt?: number;
@@ -158,8 +163,9 @@ export interface KTeamService {
   start(request: StartSessionRequest): Promise<SessionView>;
   /** Returns the view plus a `disposition`: 'delivered' (injected into the
    *  live turn), 'queued' (busy; delivers at the next prompt-ready boundary),
-   *  or 'revived' (terminal session relaunched with the message as its next
-   *  turn). Additive field — older clients ignore it. */
+   *  'revived' (terminal session relaunched with the message as its next turn),
+   *  or 'queued-for-revive' (durably retained in the session inbox because a
+   *  safety refusal prevented relaunch). Additive field — older clients ignore it. */
   send(id: string, request: SendRequest): Promise<SessionView & { disposition: SendDisposition }>;
   /** Apply a semantic native-TUI runtime control without creating a kteam
    * turn. Claude switches to an account-allowlisted model in place; Codex opens

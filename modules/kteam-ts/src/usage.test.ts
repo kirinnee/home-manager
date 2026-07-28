@@ -113,6 +113,7 @@ describe('session usage projection', () => {
       atLimit: false,
     });
     expect(quota).toEqual({
+      usageBased: true,
       atLimit: false,
       authOk: true,
       fiveHourPercent: 0,
@@ -167,6 +168,7 @@ describe('session usage projection', () => {
         atLimit: true,
       }),
     ).toEqual({
+      usageBased: true,
       atLimit: true,
       authOk: true,
       fiveHourPercent: 100,
@@ -212,6 +214,7 @@ describe('auth-failure remedy is achievable per account kind', () => {
       atLimit: false,
     });
     expect(quota.authOk).toBe(false);
+    expect(quota.usageBased).toBe(true);
     expect(quota.provider).toBe('minimax');
     expect(authFailureRemedy(quota.provider)).toContain('$MINIMAX_API_KEY');
   });
@@ -237,6 +240,7 @@ describe('usageAccountView (the /v1/usage wire projection)', () => {
       }),
     ).toEqual({
       binary: 'claude-auto-atomi',
+      usageBased: true,
       atLimit: false,
       authOk: true,
       fiveHourPercent: 7,
@@ -257,7 +261,7 @@ describe('usageAccountView (the /v1/usage wire projection)', () => {
         weeklyPercent: 0,
         atLimit: false,
       }),
-    ).toEqual({ binary: 'claude-auto-dsv4p', authOk: false });
+    ).toEqual({ binary: 'claude-auto-dsv4p', usageBased: true, authOk: false });
   });
 
   test('an at-limit account keeps atLimit distinct from its percentage', () => {
@@ -278,6 +282,17 @@ describe('usageAccountView (the /v1/usage wire projection)', () => {
     // `resetAt` is a CLI-side convenience derived from the two windows; the
     // wire shape carries the windows themselves so the UI can label each.
     expect(view).not.toHaveProperty('resetAt');
+  });
+
+  test('preserves raw API-metered evidence without inventing quota or auth data', () => {
+    expect(
+      usageAccountView({
+        binary: 'codex-auto-loge',
+        usageBased: false,
+        ok: false,
+        atLimit: false,
+      }),
+    ).toEqual({ binary: 'codex-auto-loge', usageBased: false });
   });
 });
 
