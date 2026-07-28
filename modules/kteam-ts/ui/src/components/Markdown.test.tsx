@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { agentMentionHref, remarkAgentMentions, type AgentMentionResolver } from '../lib/agent-mentions';
 import { codeReferenceHref, remarkCodeReferences } from '../lib/code-references';
 import { remarkTaskReferences, taskReferenceHref } from '../lib/remark-task-references';
 import { codeReferenceHasTrustedOrigin, Markdown } from './Markdown';
@@ -17,6 +18,43 @@ interface TestMdNode {
 }
 
 describe('Markdown in-app references', () => {
+  const mentions: AgentMentionResolver = lookup => {
+    if (lookup.sessionId === 'ms-ottis') return { sessionId: 'ms-ottis', name: 'ottis' };
+    if (lookup.sessionId === 'ms-mileena') return { sessionId: 'ms-mileena', name: 'mileena' };
+    if (lookup.name?.toLowerCase() === 'ottis') return { sessionId: 'ms-ottis', name: 'ottis' };
+    return null;
+  };
+
+  test('renders proven bare and canonical agent mentions as session links, using the current callsign', () => {
+    const html = renderToStaticMarkup(
+      <Markdown
+        text={`Ping @ottis. Then [@old-name](${agentMentionHref('ms-mileena')}); leave @missing, someone@example.com, and @src/ plain.`}
+        agentMentionResolver={mentions}
+      />,
+    );
+
+    expect(html.match(/data-agent-mention=/g)).toHaveLength(2);
+    expect(html).toContain('data-agent-mention="ms-ottis"');
+    expect(html).toContain('href="/session/ms-ottis"');
+    expect(html).toContain('data-agent-mention="ms-mileena"');
+    expect(html).toContain('href="/session/ms-mileena"');
+    expect(html).toContain('@mileena');
+    expect(html).not.toContain('@old-name');
+    expect(html).not.toContain('#kteam-agent-mention');
+    expect(html).toContain('@missing,');
+    expect(html).toContain('href="mailto:someone@example.com"');
+    expect(html).toContain('and @src/ plain');
+  });
+
+  test('strips an unresolvable canonical mention destination instead of painting a dead link', () => {
+    const html = renderToStaticMarkup(
+      <Markdown text={`[@gone](${agentMentionHref('ms-gone')}) and @unknown`} agentMentionResolver={() => null} />,
+    );
+    expect(html).toContain('@gone and @unknown');
+    expect(html).not.toContain('data-agent-mention');
+    expect(html).not.toContain('href=');
+  });
+
   test('routes task hrefs but leaves an unproved authored code href inert', () => {
     const codeHref = codeReferenceHref({ path: 'src/app.ts', line: 12, endLine: 18 });
     const taskHref = taskReferenceHref('F64');
@@ -95,18 +133,24 @@ describe('Markdown in-app references', () => {
     ).toBe(true);
   });
 
-  test('keeps task and code grammars disjoint, with task links transformed first', () => {
+  test('composes task, agent, and code grammars in precedence order without stealing email or paths', () => {
     const tree: TestMdNode = {
       type: 'root',
       children: [
         {
           type: 'paragraph',
-          children: [{ type: 'text', value: '#F44 src/tasks.ts:44 tasks.ts#F44' }],
+          children: [
+            {
+              type: 'text',
+              value: '#F44 @ottis src/tasks.ts:44 tasks.ts#F44 someone@example.com @src/',
+            },
+          ],
         },
       ],
     };
 
     remarkTaskReferences()(tree);
+    remarkAgentMentions({ resolveMention: mentions })(tree);
     remarkCodeReferences({ resolvePath: path => (path === 'src/tasks.ts' ? path : null) })(tree);
 
     expect(tree.children?.[0]?.children).toEqual([
@@ -119,12 +163,20 @@ describe('Markdown in-app references', () => {
       { type: 'text', value: ' ' },
       {
         type: 'link',
+        url: agentMentionHref('ms-ottis'),
+        title: "Open @ottis's session",
+        data: { hProperties: { 'data-agent-mention': 'ms-ottis' } },
+        children: [{ type: 'text', value: '@ottis' }],
+      },
+      { type: 'text', value: ' ' },
+      {
+        type: 'link',
         url: codeReferenceHref({ path: 'src/tasks.ts', line: 44 }),
         title: 'Open src/tasks.ts at line 44',
         data: { hProperties: { 'data-code-reference': 'src/tasks.ts' } },
         children: [{ type: 'text', value: 'src/tasks.ts:44' }],
       },
-      { type: 'text', value: ' tasks.ts#F44' },
+      { type: 'text', value: ' tasks.ts#F44 someone@example.com @src/' },
     ]);
   });
 });

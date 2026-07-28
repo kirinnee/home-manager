@@ -1,20 +1,25 @@
 // Candidate providers for the single composer trigger engine.
 //
 // `/` merges harness-valid built-in commands with the exact session account's
-// discovered skills. `@` reuses the Files tab's existing cwd-contained,
-// secrets-filtered listing endpoint and lazily navigates one path segment at a
-// time. `&` and `?` project already-live task and attention stores through
-// synchronous getters, so typing a reference never launches another request.
+// discovered skills. `@` is the one reference browser: agents, tasks and
+// attention come from already-live stores, while Files reuses the existing
+// cwd-contained, secrets-filtered listing endpoint and lazily navigates one
+// path segment at a time.
 
 import { ApiError, HAS_TOKEN, TOKEN } from '../lib/api';
+import { agentMentionReference } from '../lib/agent-mentions';
 import { attentionReference, type AttentionItem } from '../lib/attention';
+import { rankSessions, recentSessions, type SessionEntry } from '../lib/fuzzy';
 import { taskReference, TASK_STATUS_META, type TaskSummary } from '../lib/tasks';
+import { TERMINAL_STATUSES } from '../lib/utils';
+import type { SessionView } from '../types';
 import { fsApi, type FsListing } from './files-api';
 import { isOpenableName, joinRel, normalizeRel, UNOPENABLE_NAME_REASON } from './files-model';
-import type {
-  ComposerAutocompleteCandidate,
-  ComposerAutocompleteProvider,
-  ComposerProviderResult,
+import {
+  MAX_AUTOCOMPLETE_RESULTS,
+  type ComposerAutocompleteCandidate,
+  type ComposerAutocompleteProvider,
+  type ComposerProviderResult,
 } from './composer-autocomplete-engine';
 
 export type ComposerHarness = 'claude' | 'codex';
@@ -43,6 +48,13 @@ export const COMPOSER_BUILTIN_COMMANDS: readonly ComposerBuiltinCommand[] = [
 
 export type ComposerTaskSummary = Pick<TaskSummary, 'id' | 'title' | 'status'>;
 export type ComposerAttentionItem = Pick<AttentionItem, 'id' | 'subject' | 'source'>;
+
+const EMPTY_SESSIONS: readonly SessionView[] = [];
+const EMPTY_TASKS: readonly ComposerTaskSummary[] = [];
+const EMPTY_ATTENTION: readonly ComposerAttentionItem[] = [];
+const noSessions = () => EMPTY_SESSIONS;
+const noTasks = () => EMPTY_TASKS;
+const noAttention = () => EMPTY_ATTENTION;
 
 /** Exactly what `listSkills()` in `modules/kteam-ts/src/skills.ts` produces —
  *  no more. An earlier draft of this client expected `scope`, `invocation` and
@@ -272,77 +284,158 @@ export function createSkillsProvider(sessionId: string, harness?: ComposerHarnes
 /** Project the current store snapshot on every query. Provider identity stays
  * stable while the getter sees live data, so there is no request, stale clone,
  * or cache to invalidate. */
-export function createTasksProvider(
-  getTasks: () => readonly ComposerTaskSummary[],
-  sessionId = 'live',
-  waitForSnapshot?: () => Promise<void> | undefined,
-): ComposerAutocompleteProvider {
-  const result = (): ComposerProviderResult => ({
-    candidates: getTasks().map(task => {
-      const reference = taskReference(task.id);
-      return {
-        id: `task:${task.id}`,
-        kind: 'task',
-        label: reference,
-        detail: task.title,
-        keywords: `${task.id} ${task.title} ${task.status}`,
-        group: 'Tasks',
-        badge: TASK_STATUS_META[task.status].label,
-        replacement: reference,
-        append: 'space',
-      } satisfies ComposerAutocompleteCandidate;
-    }),
-  });
-  return {
-    id: `tasks:${sessionId}`,
-    trigger: '&',
-    label: 'Tasks',
-    get snapshotKey() {
-      return getTasks();
-    },
-    candidates: () => {
-      const pending = waitForSnapshot?.();
-      return pending ? pending.then(result) : result();
-    },
-  };
+const NAMED_REFERENCE_PRIORITY = 1;
+const MAX_AGENT_RESULTS = 8;
+const BARE_FILE_RESULT_RESERVE = 4;
+const BARE_NAMED_RESULT_BUDGET = MAX_AUTOCOMPLETE_RESULTS - BARE_FILE_RESULT_RESERVE;
+const TEAMMATE_NAME = /^[a-z][a-z0-9-]{0,31}$/iu;
+
+interface RankedAgentSession extends SessionEntry {
+  view: SessionView;
 }
 
-export function createAttentionProvider(
-  getAttentionItems: () => readonly ComposerAttentionItem[],
-  sessionId = 'live',
-  waitForSnapshot?: () => Promise<void> | undefined,
-): ComposerAutocompleteProvider {
-  const result = (): ComposerProviderResult => ({
-    // The attention store separates unresolved `items` from `resolved`; this
-    // provider deliberately reads only the unresolved side. Resolved history
-    // is useful in the panel, but noise while composing a new reference.
-    candidates: getAttentionItems().map(item => {
-      const reference = attentionReference(item.id);
-      return {
-        id: `attention:${item.id}`,
-        kind: 'attention',
-        label: reference,
-        detail: item.subject,
-        keywords: `${item.id} ${item.subject} ${item.source}`,
-        group: 'Attention',
-        badge: item.source,
-        replacement: reference,
-        append: 'space',
-      } satisfies ComposerAutocompleteCandidate;
-    }),
+function activityAt(view: SessionView): number {
+  const raw =
+    view.state.lastActivityAt ??
+    view.state.finishedAt ??
+    view.state.startedAt ??
+    view.config.updatedAt ??
+    view.config.createdAt;
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function agentEntries(sessions: readonly SessionView[]): RankedAgentSession[] {
+  return sessions.flatMap(view => {
+    const teammate = view.config.teammate?.trim().toLowerCase() ?? '';
+    if (!TEAMMATE_NAME.test(teammate)) return [];
+    const finished = TERMINAL_STATUSES.has(view.state.status);
+    return [
+      {
+        id: view.config.id,
+        teammate,
+        task: view.config.name,
+        label: view.config.label?.trim() ?? '',
+        folder: view.config.cwd,
+        activityAt: activityAt(view),
+        active: !finished,
+        finished,
+        view,
+      },
+    ];
   });
-  return {
-    id: `attention:${sessionId}`,
-    trigger: '?',
-    label: 'Attention',
-    get snapshotKey() {
-      return getAttentionItems();
-    },
-    candidates: () => {
-      const pending = waitForSnapshot?.();
-      return pending ? pending.then(result) : result();
-    },
-  };
+}
+
+function rankedAgents(sessions: readonly SessionView[], query: string): RankedAgentSession[] {
+  const entries = agentEntries(sessions);
+  if (!query) return recentSessions(entries, MAX_AGENT_RESULTS);
+  // A completed exact-name duplicate must not jump above the live holder. Rank
+  // well within each family, then keep the live family first.
+  const live = rankSessions(
+    entries.filter(entry => !entry.finished),
+    query,
+    { limit: MAX_AGENT_RESULTS },
+  );
+  const finished = rankSessions(
+    entries.filter(entry => entry.finished),
+    query,
+    { limit: MAX_AGENT_RESULTS },
+  );
+  return [...live, ...finished].slice(0, MAX_AGENT_RESULTS);
+}
+
+function agentCandidates(sessions: readonly SessionView[], query: string): ComposerAutocompleteCandidate[] {
+  return rankedAgents(sessions, query).map(({ view, teammate }) => {
+    const label = view.config.label?.trim() || 'no label';
+    const task = view.config.name.trim() || 'No task title';
+    const model = view.state.observedModel || view.config.model || view.config.modelHint;
+    const account = view.config.binary;
+    return {
+      id: `agent:${view.config.id}`,
+      kind: 'agent',
+      label: teammate,
+      detail: [label, task, [model, account].filter(Boolean).join(' · ')].filter(Boolean).join(' · '),
+      keywords: [teammate, label, task, view.state.status, model, account, view.state.activity]
+        .filter(Boolean)
+        .join(' '),
+      group: 'Agents',
+      badge: view.state.status.replaceAll('_', ' '),
+      rankPriority: NAMED_REFERENCE_PRIORITY,
+      replacement: agentMentionReference(teammate, view.config.id),
+      append: 'space',
+    } satisfies ComposerAutocompleteCandidate;
+  });
+}
+
+function taskCandidates(tasks: readonly ComposerTaskSummary[]): ComposerAutocompleteCandidate[] {
+  return tasks.map(task => {
+    const reference = taskReference(task.id);
+    return {
+      id: `task:${task.id}`,
+      kind: 'task',
+      label: reference,
+      detail: task.title,
+      keywords: `${task.id} ${task.title} ${task.status}`,
+      group: 'Tasks',
+      badge: TASK_STATUS_META[task.status].label,
+      rankPriority: NAMED_REFERENCE_PRIORITY,
+      replacement: reference,
+      append: 'space',
+    } satisfies ComposerAutocompleteCandidate;
+  });
+}
+
+function attentionCandidates(items: readonly ComposerAttentionItem[]): ComposerAutocompleteCandidate[] {
+  // The attention store separates unresolved `items` from `resolved`; callers
+  // deliberately pass only the unresolved side. Resolved history is useful in
+  // its panel, but noise while composing a new reference.
+  return items.map(item => {
+    const reference = attentionReference(item.id);
+    return {
+      id: `attention:${item.id}`,
+      kind: 'attention',
+      label: reference,
+      detail: item.subject,
+      keywords: `${item.id} ${item.subject} ${item.source}`,
+      group: 'Attention',
+      badge: item.source,
+      rankPriority: NAMED_REFERENCE_PRIORITY,
+      replacement: reference,
+      append: 'space',
+    } satisfies ComposerAutocompleteCandidate;
+  });
+}
+
+/** Keep every available named group discoverable within the bounded bare-`@`
+ * list. Taking one round from each group at a time gives small groups all their
+ * rows and shares the remainder between large groups; flattening afterward
+ * preserves the required Agents -> Tasks -> Attention order. */
+function balancedNamedCandidates(
+  groups: readonly (readonly ComposerAutocompleteCandidate[])[],
+  limit: number,
+): ComposerAutocompleteCandidate[] {
+  const counts = groups.map(() => 0);
+  let remaining = Math.max(0, Math.trunc(limit));
+  while (remaining > 0) {
+    let progressed = false;
+    for (const [index, group] of groups.entries()) {
+      if (counts[index]! >= group.length) continue;
+      counts[index] += 1;
+      remaining -= 1;
+      progressed = true;
+      if (remaining === 0) break;
+    }
+    if (!progressed) break;
+  }
+  return groups.flatMap((group, index) => group.slice(0, counts[index]));
+}
+
+/** Name/id-shaped input can refer to any small named set. A slash, dot, line
+ * selector, or other path punctuation is definitive Files grammar. Leading
+ * `#`/`?` remain accepted as optional narrowing hints even though `@` is the
+ * only trigger. */
+export function isNamedReferenceQuery(query: string): boolean {
+  return /^(?:[A-Za-z0-9-]*|[#?][A-Za-z0-9-]*)$/u.test(query);
 }
 
 export function createFilesProvider(sessionId: string): ComposerAutocompleteProvider {
@@ -382,6 +475,7 @@ export function createFilesProvider(sessionId: string): ComposerAutocompleteProv
             disabledReason ??
             (directoryEntry ? 'Folder' : entry.type === 'symlink' ? 'Symlink' : `${path}${selector.suffix}`),
           keywords: path,
+          group: 'Files',
           replacement: `@${path}${directoryEntry ? '/' : selector.suffix}`,
           append: directoryEntry || (selector.suffix && !selector.complete) ? 'none' : 'space',
           disabled: !!disabledReason,
@@ -405,16 +499,112 @@ export function createFilesProvider(sessionId: string): ComposerAutocompleteProv
   };
 }
 
+export function createReferencesProvider({
+  sessionId,
+  getSessions = noSessions,
+  getTasks = noTasks,
+  getAttentionItems = noAttention,
+  waitForTasks,
+  waitForAttentionItems,
+}: {
+  sessionId: string;
+  getSessions?: () => readonly SessionView[];
+  getTasks?: () => readonly ComposerTaskSummary[];
+  getAttentionItems?: () => readonly ComposerAttentionItem[];
+  waitForTasks?: () => Promise<void> | undefined;
+  waitForAttentionItems?: () => Promise<void> | undefined;
+}): ComposerAutocompleteProvider {
+  const files = createFilesProvider(sessionId);
+  let previousSessions: readonly SessionView[] | undefined;
+  let previousTasks: readonly ComposerTaskSummary[] | undefined;
+  let previousAttention: readonly ComposerAttentionItem[] | undefined;
+  let snapshotToken = {};
+
+  const named = (query: string, limit?: number): ComposerAutocompleteCandidate[] => {
+    if (!isNamedReferenceQuery(query)) return [];
+    const groups = [
+      agentCandidates(getSessions(), query),
+      taskCandidates(getTasks()),
+      attentionCandidates(getAttentionItems()),
+    ];
+    return limit === undefined ? groups.flat() : balancedNamedCandidates(groups, limit);
+  };
+
+  return {
+    id: `references:${sessionId}`,
+    trigger: '@',
+    label: 'References',
+    get snapshotKey() {
+      const sessions = getSessions();
+      const tasks = getTasks();
+      const attention = getAttentionItems();
+      if (sessions !== previousSessions || tasks !== previousTasks || attention !== previousAttention) {
+        previousSessions = sessions;
+        previousTasks = tasks;
+        previousAttention = attention;
+        snapshotToken = {};
+      }
+      return snapshotToken;
+    },
+    reset: files.reset,
+    initialCandidates: context =>
+      isNamedReferenceQuery(context.query)
+        ? {
+            candidates: named(context.query, context.query === '' ? BARE_NAMED_RESULT_BUDGET : undefined),
+            filterQuery: context.query,
+            contextLabel: 'Fleet references · files loading',
+          }
+        : undefined,
+    async candidates(context): Promise<ComposerProviderResult> {
+      const namedQuery = isNamedReferenceQuery(context.query);
+      const warmups = namedQuery
+        ? [waitForTasks?.(), waitForAttentionItems?.()].filter(
+            (pending): pending is Promise<void> => pending !== undefined,
+          )
+        : [];
+      const warmed = Promise.all(warmups.map(pending => pending.catch(() => undefined)));
+      let fileResult: ComposerProviderResult;
+      try {
+        fileResult = await files.candidates(context);
+      } catch (error) {
+        await warmed;
+        if ((error as { name?: string })?.name === 'AbortError') throw error;
+        const candidates = named(context.query, context.query === '' ? MAX_AUTOCOMPLETE_RESULTS : undefined);
+        if (candidates.length === 0) throw error;
+        return {
+          candidates,
+          filterQuery: context.query,
+          contextLabel: 'Fleet references',
+          notice: `Files unavailable: ${error instanceof Error ? error.message : String(error)}.`,
+        };
+      }
+      await warmed;
+      const namedLimit =
+        context.query === ''
+          ? MAX_AUTOCOMPLETE_RESULTS - Math.min(BARE_FILE_RESULT_RESERVE, fileResult.candidates.length)
+          : undefined;
+      const candidates = named(context.query, namedLimit);
+      return {
+        ...fileResult,
+        candidates: [...candidates, ...fileResult.candidates],
+        contextLabel: candidates.length > 0 ? `Fleet · ${fileResult.contextLabel ?? 'files'}` : fileResult.contextLabel,
+      };
+    },
+  };
+}
+
 export function createComposerAutocompleteProviders({
   sessionId,
   harness,
-  getTasks = () => [],
-  getAttentionItems = () => [],
+  getSessions = noSessions,
+  getTasks = noTasks,
+  getAttentionItems = noAttention,
   waitForTasks,
   waitForAttentionItems,
 }: {
   sessionId: string;
   harness?: ComposerHarness;
+  getSessions?: () => readonly SessionView[];
   getTasks?: () => readonly ComposerTaskSummary[];
   getAttentionItems?: () => readonly ComposerAttentionItem[];
   waitForTasks?: () => Promise<void> | undefined;
@@ -422,8 +612,13 @@ export function createComposerAutocompleteProviders({
 }): ComposerAutocompleteProvider[] {
   return [
     createSkillsProvider(sessionId, harness),
-    createFilesProvider(sessionId),
-    createTasksProvider(getTasks, sessionId, waitForTasks),
-    createAttentionProvider(getAttentionItems, sessionId, waitForAttentionItems),
+    createReferencesProvider({
+      sessionId,
+      getSessions,
+      getTasks,
+      getAttentionItems,
+      waitForTasks,
+      waitForAttentionItems,
+    }),
   ];
 }

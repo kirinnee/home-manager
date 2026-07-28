@@ -16,6 +16,14 @@ import { memo, useEffect, useMemo, useState, type MouseEvent } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
+  agentSessionHref,
+  parseAgentMentionHref,
+  remarkAgentMentions,
+  type AgentMentionResolver,
+  type ResolvedAgentMention,
+} from '../lib/agent-mentions';
+import { useAgentMentionResolver } from '../lib/agent-mention-context';
+import {
   findCodeReferences,
   parseCodeReferenceHref,
   remarkCodeReferences,
@@ -24,6 +32,7 @@ import {
 import { fenceLanguage, highlightToHtml } from '../lib/highlight';
 import { remarkTableLabels } from '../lib/remark-table-labels';
 import { parseTaskReferenceHref, remarkTaskReferences } from '../lib/remark-task-references';
+import { navigate } from '../lib/router';
 import { resolveFsFilePaths } from './files-api';
 import { InAppBrowserLink } from './InAppBrowser';
 
@@ -55,6 +64,9 @@ export interface MarkdownProps {
   cwd?: string;
   onTaskOpen?: (id: string, opener?: HTMLElement | null) => void;
   onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
+  /** Tests/embedders may supply an authoritative fleet resolver. The app-wide
+   * provider is used otherwise; without proof, mention-shaped text stays plain. */
+  agentMentionResolver?: AgentMentionResolver;
 }
 
 export const Markdown = memo(function Markdown({
@@ -64,7 +76,10 @@ export const Markdown = memo(function Markdown({
   cwd,
   onTaskOpen,
   onCodeReferenceOpen,
+  agentMentionResolver,
 }: MarkdownProps) {
+  const fleetAgentMentionResolver = useAgentMentionResolver();
+  const resolveAgentMention = agentMentionResolver ?? fleetAgentMentionResolver;
   const codeReferenceCandidates = useMemo(
     () => [...new Set(findCodeReferences(text).map(match => match.reference.path))],
     [text],
@@ -103,11 +118,13 @@ export const Markdown = memo(function Markdown({
           remarkGfm,
           remarkTableLabels,
           remarkTaskReferences,
+          [remarkAgentMentions, { resolveMention: resolveAgentMention }],
           [remarkCodeReferences, { resolvePath: (path: string) => resolvedPaths.get(path) ?? null }],
         ]}
         components={{
           a: ({ node, href, onClick, children, ...rest }) => {
             const taskId = parseTaskReferenceHref(href);
+            const agentSessionId = parseAgentMentionHref(href);
             const codeReference = parseCodeReferenceHref(href);
             if (codeReference !== null) {
               // A reserved fragment is not proof that its file exists. Only a
@@ -139,6 +156,45 @@ export const Markdown = memo(function Markdown({
                   {...rest}
                 >
                   {children}
+                </a>
+              );
+            }
+            if (agentSessionId !== null) {
+              let target: ResolvedAgentMention | null | undefined;
+              let destination = '';
+              try {
+                target = resolveAgentMention({ sessionId: agentSessionId });
+                destination = target ? agentSessionHref(target.sessionId) : '';
+              } catch {
+                target = null;
+                destination = '';
+              }
+              // A reserved-looking href is syntax, not existence proof. If the
+              // live fleet cannot resolve it, remove the dead destination and
+              // leave the authored @name readable as plain text.
+              if (!target) return <>{children}</>;
+              return (
+                <a
+                  href={destination}
+                  data-agent-mention={target.sessionId}
+                  title={`Open @${target.name}'s session`}
+                  onClick={(event: MouseEvent<HTMLAnchorElement>) => {
+                    onClick?.(event);
+                    if (
+                      event.defaultPrevented ||
+                      event.button !== 0 ||
+                      event.metaKey ||
+                      event.ctrlKey ||
+                      event.shiftKey ||
+                      event.altKey
+                    )
+                      return;
+                    event.preventDefault();
+                    navigate(destination);
+                  }}
+                  {...rest}
+                >
+                  @{target.name}
                 </a>
               );
             }

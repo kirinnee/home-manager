@@ -1,7 +1,8 @@
-// One composer trigger engine, shared by skills (/), files (@), tasks (&), and
-// attention (?). Trigger recognition, query tracking, fuzzy ranking, keyboard
-// navigation, and token replacement live here. Providers deliberately do less:
-// they receive the active query and return candidate data.
+// One composer trigger engine: `/` does something (commands and skills), while
+// `@` refers to something (agents, tasks, attention, and files). Trigger
+// recognition, query tracking, fuzzy ranking, keyboard navigation, and token
+// replacement live here. Providers deliberately do less: they receive the
+// active query and return candidate data.
 //
 // `!` shell mode is NOT here and is not coming back without a decision. It
 // needs a new `tmux.inject()` send path, which is the mechanism behind this
@@ -30,8 +31,8 @@ import {
 } from 'react';
 import { fieldScore } from '../lib/fuzzy';
 
-export type ComposerTrigger = '/' | '@' | '&' | '?';
-export type ComposerAutocompleteKind = 'command' | 'skill' | 'file' | 'directory' | 'task' | 'attention';
+export type ComposerTrigger = '/' | '@';
+export type ComposerAutocompleteKind = 'command' | 'skill' | 'agent' | 'file' | 'directory' | 'task' | 'attention';
 
 export interface ComposerSelection {
   start: number;
@@ -59,6 +60,9 @@ export interface ComposerAutocompleteCandidate {
   keywords?: string;
   /** Visual section inside a provider's merged result list. */
   group?: string;
+  /** Coarse source priority before fuzzy score. The unified reference picker
+   * keeps its small named sets ahead of the thousands-deep filesystem. */
+  rankPriority?: number;
   /** Compact state/action word shown at the row's trailing edge. */
   badge?: string;
   /** Complete replacement for the active token, including its sigil. */
@@ -208,83 +212,18 @@ function atTrigger(value: string, caret: number): ComposerTriggerMatch | null {
   return { trigger: '@', query, start, end: tokenEnd(value, caret), caret };
 }
 
-/** Keep the existing attention boundary exact; changing the task sigil must not
- * quietly change which `?A3` tokens open the attention picker. */
-const WORD_BEFORE_REFERENCE = /[\p{L}\p{N}_\-.\\/#?@]/u;
-/** Task references also treat ampersand as a word character so the second half
- * of `&&` cannot look like a new task token. */
-const WORD_BEFORE_TASK = /[\p{L}\p{N}_\-.\\/&#?@]/u;
-const REFERENCE_SUFFIX = /[A-Za-z0-9]/u;
-
-function referenceTokenEnd(value: string, caret: number): number {
-  let end = caret;
-  while (end < value.length && REFERENCE_SUFFIX.test(value[end]!)) end++;
-  return end;
-}
-
-function referenceTrigger(
-  value: string,
-  caret: number,
-  trigger: '?',
-  queryPattern: RegExp,
-): ComposerTriggerMatch | null {
-  const start = value.slice(0, caret).lastIndexOf(trigger);
-  if (start < 0) return null;
-  if (start > 0 && WORD_BEFORE_REFERENCE.test(value[start - 1]!)) return null;
-  const query = value.slice(start + 1, caret);
-  if (!queryPattern.test(query)) return null;
-  return { trigger, query, start, end: referenceTokenEnd(value, caret), caret };
-}
-
-/** `&` is the browseable task sigil, but the inserted task reference remains
- * canonical `#F12` provider data. Empty query is accepted so `&` can browse;
- * B/F/I/C plus digits retain the old narrowing grammar.
- *
- * The false-positive rule is deliberately lexical and local:
- * - a preceding word character rejects `R&D` and `AT&T`;
- * - either adjacent `&` rejects shell `&&`;
- * - a complete HTML entity (`&amp;`, `&nbsp;`, `&#39;`, or hex numeric form) is
- *   rejected even when the caret sits inside it; and
- * - a bare sigil opens at ANY token boundary, including mid-line. This is a
- *   deliberate browsing affordance: `Tom &` briefly opens until the following
- *   space closes it, and a trailing shell `cmd &` remains open. That small,
- *   uncommon false-positive cost is preferable to making readers know B/F/I/C
- *   before they can browse from a message already in progress. */
-const TASK_QUERY = /^(?:[BFIC][0-9]*)?$/u;
-const HTML_ENTITY = /^&(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]+);/u;
-
-function taskTrigger(value: string, caret: number): ComposerTriggerMatch | null {
-  const start = value.slice(0, caret).lastIndexOf('&');
-  if (start < 0) return null;
-  if (start > 0 && WORD_BEFORE_TASK.test(value[start - 1]!)) return null;
-  if (value[start + 1] === '&' || HTML_ENTITY.test(value.slice(start))) return null;
-  const query = value.slice(start + 1, caret);
-  if (!TASK_QUERY.test(query)) return null;
-  if (!query && value[start + 1] && TOKEN_SPACE.test(value[start + 1]!)) return null;
-  return { trigger: '&', query, start, end: referenceTokenEnd(value, caret), caret };
-}
-
-function attentionTrigger(value: string, caret: number): ComposerTriggerMatch | null {
-  return referenceTrigger(value, caret, '?', /^A[0-9]*$/u);
-}
-
 /** Detect the trigger at a collapsed textarea caret.
  *
- * `/` is limited to the first non-whitespace byte, `@` is valid at a token
- * boundary, `&` uses the browseable task rule above, and `?` remains a strict
- * canonical attention prefix. A non-collapsed textarea selection never opens
- * a list. `#` is ordinary Markdown/text; canonical task references are output,
- * never input triggers. */
+ * `/` is limited to the first non-whitespace byte and `@` is valid at a token
+ * boundary. `&`, `?`, and `#` are ordinary Markdown/prose: tasks and attention
+ * are browsed through `@`, while their canonical inserted forms remain `#F12`
+ * and `?A3`. A non-collapsed textarea selection never opens a list. */
 export function detectComposerTrigger(value: string, selection: ComposerSelection): ComposerTriggerMatch | null {
   const safe = clampSelection(value, selection);
   if (safe.start !== safe.end) return null;
   const caret = safe.end;
   const mention = atTrigger(value, caret);
   if (mention) return mention;
-  const task = taskTrigger(value, caret);
-  if (task) return task;
-  const attention = attentionTrigger(value, caret);
-  if (attention) return attention;
   return slashTrigger(value, caret);
 }
 
@@ -340,7 +279,10 @@ export function rankComposerCandidates(
   return candidates
     .map((candidate, index) => ({ candidate, index, score: candidateScore(candidate, query) }))
     .filter(item => item.score > 0)
-    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .sort(
+      (a, b) =>
+        (b.candidate.rankPriority ?? 0) - (a.candidate.rankPriority ?? 0) || b.score - a.score || a.index - b.index,
+    )
     .slice(0, limit)
     .map(item => item.candidate);
 }
@@ -466,7 +408,7 @@ export function useComposerAutocomplete({
       if (result && typeof (result as PromiseLike<ComposerProviderResult>).then === 'function') {
         void Promise.resolve(result).then(ready, failed);
       } else {
-        // Store-backed &/? snapshots are already in memory. Settle in this
+        // Store-backed reference snapshots are already in memory. Settle in this
         // effect turn instead of manufacturing a promise/microtask and a
         // visible loading frame for data the browser already has.
         ready(result as ComposerProviderResult);

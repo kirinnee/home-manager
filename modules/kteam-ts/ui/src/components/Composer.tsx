@@ -47,10 +47,10 @@ import { useKeyboardOpen } from '../hooks/useAppViewport';
 import { useAttentionItems, useAttentionSession } from '../hooks/useAttention';
 import { useDebouncedEffect } from '../hooks/useDebounce';
 import { api } from '../lib/api';
-import { attentionStore, sessionAttention } from '../lib/attention';
+import { attentionStore } from '../lib/attention';
 import { clearDraft, loadDraft, saveDraft } from '../lib/drafts';
 import { readInputModality, useInputModality } from '../hooks/useInputModality';
-import { useSession, useSessionEvents } from '../lib/store';
+import { useSession, useSessionEvents, useStore } from '../lib/store';
 import { parseTaskListResponse, type TaskSummary } from '../lib/tasks';
 import { useDictationBundle } from './DictationControl';
 import { useDictationShortcut } from '../lib/stt/use-dictation-shortcut';
@@ -145,6 +145,8 @@ const COMPACT_MAX_TEXTAREA_PX = 160;
 const COMPACT_KEYBOARD_MAX_TEXTAREA_PX = 140;
 
 const EMPTY_COMPOSER_TASKS: readonly TaskSummary[] = [];
+const EMPTY_AUTOCOMPLETE_SESSIONS = [] as const;
+const EMPTY_AUTOCOMPLETE_ATTENTION = [] as const;
 
 /** Parse the same whole-session snapshot used by the Task surface and live
  * `tasks.updated` events. Kept pure/exported so the composer integration can be
@@ -155,7 +157,7 @@ export function composerTasksFromSnapshot(value: unknown): TaskSummary[] {
 
 /** Warm one session task snapshot when the composer mounts, then converge from
  * the FleetStore's existing session event stream. The provider itself never
- * fetches: by the time a reader types `&F`, it reads this in-memory snapshot.
+ * fetches: by the time a reader types `@F`, it reads this in-memory snapshot.
  * A live event wins over an older in-flight initial response. */
 function useComposerTasks(sessionId: string | undefined): {
   tasks: readonly TaskSummary[];
@@ -546,6 +548,7 @@ export function Composer({
 
   const taskResource = useComposerTasks(sessionId);
   const autocompleteSession = useSession(sessionId ?? '');
+  const fleetStore = useStore();
   // Attention already owns a shared SWR-style client cache and whole-snapshot
   // live convergence. Hydrate it once with the composer instead of teaching
   // the autocomplete provider a second request/cache path.
@@ -572,17 +575,19 @@ export function Composer({
         ? createComposerAutocompleteProviders({
             sessionId,
             harness: autocompleteSession?.config.harness,
+            getSessions: () => fleetStore.getFleet().sessions ?? EMPTY_AUTOCOMPLETE_SESSIONS,
             getTasks: () =>
               taskResource.latest.current?.sessionId === sessionId
                 ? taskResource.latest.current.tasks
                 : EMPTY_COMPOSER_TASKS,
-            getAttentionItems: () => sessionAttention(attentionStore.getSnapshot(), sessionId),
+            getAttentionItems: () =>
+              attentionStore.getSnapshot().sessions[sessionId]?.items ?? EMPTY_AUTOCOMPLETE_ATTENTION,
             waitForTasks: () => taskResource.pending.current?.then(() => undefined),
             waitForAttentionItems: () =>
               attentionStatusRef.current === 'ready' ? undefined : attentionStore.hydrate(sessionId),
           })
         : [],
-    [autocompleteSession?.config.harness, sessionId],
+    [autocompleteSession?.config.harness, fleetStore, sessionId],
   );
   const autocomplete = useComposerAutocomplete({
     value: draft,
