@@ -33,6 +33,7 @@ import { TerminalView } from '../components/TerminalView';
 import { ViewTabs } from '../components/ViewTabs';
 import { SessionHeader } from '../components/SessionHeader';
 import { Transcript } from '../components/Transcript';
+import { LedgerMessage } from '../components/LedgerMessage';
 import { SidePaneWorkspace } from '../components/SidePane';
 import { appendSkillInvocation } from '../components/SkillsSurface';
 import { ThinkingIndicator } from '../components/Harness';
@@ -42,16 +43,18 @@ import {
   buildSendIndex,
   isTranscriptJournalEvent,
   latestPendingQuestion,
+  placeLedgerBlocks,
   peerFrom,
   type TranscriptBlock,
 } from '../lib/transcript';
 import {
   foldSendRecords,
   isSendLedgerEvent,
+  nextLedgerViewDeadline,
   parseSendsResponse,
+  partitionLedgerChips,
   reconcileLocalSends,
   selectLedgerChips,
-  sendBadge,
   visibleUserRows,
 } from '../lib/sends';
 import {
@@ -139,6 +142,17 @@ export function blockConfirmsPending(
   if (!sameAttachmentIds(blockIds, pendingIds)) return false;
   const text = pending.text.trim();
   return (text.length > 0 || pendingIds.length > 0) && block.text.trim() === text;
+}
+
+/** A resend is a new delivery attempt and therefore may never inherit the old
+ * ledger identity. The second mint handles an injected/test mint collision; a
+ * repeated collision refuses rather than quietly mutating the audit trail. */
+export function requestIdForLedgerResend(oldSendId: string, mint: () => string = () => crypto.randomUUID()): string {
+  const first = mint();
+  if (first !== oldSendId) return first;
+  const second = mint();
+  if (second !== oldSendId) return second;
+  throw new Error('could not mint a new send identity');
 }
 
 /** Is the session — as far as this client AUTHORITATIVELY knows — waiting on an
@@ -827,10 +841,30 @@ export function SessionChatPage({
   // their proof-backed row is actually on screen — chat history is paginated, so
   // retiring on fate alone would render a delivered send whose row has scrolled out
   // of the loaded page as nothing at all.
-  const ledgerChips = useMemo(() => selectLedgerChips(ledger, visibleUserRows(blocks)), [ledger, blocks]);
-  // Oldest-first for display: the footer reads top-to-bottom under the transcript,
-  // while the ledger hands rows back newest-first.
-  const ledgerRows = useMemo(() => [...ledgerChips].reverse(), [ledgerChips]);
+  const [ledgerNow, setLedgerNow] = useState(() => Date.now());
+  useEffect(() => setLedgerNow(Date.now()), [sessionId]);
+  useEffect(() => {
+    const next = nextLedgerViewDeadline(ledger, ledgerNow);
+    if (next === undefined) return undefined;
+    // Browsers clamp larger timeouts inconsistently. A capped wake simply
+    // recomputes and schedules the remainder; it is still one timer, never a poll.
+    const delay = Math.max(0, Math.min(2_147_000_000, next - Date.now() + 25));
+    const timer = setTimeout(() => setLedgerNow(Date.now()), delay);
+    return () => clearTimeout(timer);
+  }, [ledger, ledgerNow]);
+
+  const ledgerChips = useMemo(
+    () => selectLedgerChips(ledger, visibleUserRows(blocks), ledgerNow),
+    [ledger, blocks, ledgerNow],
+  );
+  const ledgerPartition = useMemo(() => partitionLedgerChips(ledgerChips, ledgerNow), [ledgerChips, ledgerNow]);
+  // Only current accepts stay at the tail. Oldest-first preserves send order
+  // among several in-flight rows.
+  const ledgerRows = useMemo(() => [...ledgerPartition.inFlight].reverse(), [ledgerPartition.inFlight]);
+  const displayedBlocks = useMemo(
+    () => placeLedgerBlocks(visibleBlocks, ledgerPartition.chronological, ledgerNow),
+    [visibleBlocks, ledgerPartition.chronological, ledgerNow],
+  );
 
   // ---- what a screen reader is told -----------------------------------------
   //
@@ -959,8 +993,8 @@ export function SessionChatPage({
         localAttachmentIds: string[];
       },
     ) => {
-      if (sendingRef.current) return;
-      if ((!msg && opts.attachmentIds.length === 0) || !HAS_TOKEN) return;
+      if (sendingRef.current) return false;
+      if ((!msg && opts.attachmentIds.length === 0) || !HAS_TOKEN) return false;
       // Fix 3 (dale, Rank 2): a plain free-text send that lands on an open
       // question is rejected by the daemon, but silently — the reader typed
       // because they could not see the form, and their message vanishes with no
@@ -974,7 +1008,7 @@ export function SessionChatPage({
           text: 'This session is waiting for an answer to a structured question. Answer it in the form below, or use interrupt-and-send to replace it.',
         });
         void store.fetchSession(sessionId).catch(() => undefined);
-        return;
+        return false;
       }
       sendingRef.current = true;
       setSending(true);
@@ -1014,6 +1048,7 @@ export function SessionChatPage({
           (!opts.interruptFirst && !next.disposition && (busy || isBusy(next)));
         setPending(p => p.map(x => (x.key === key ? { ...x, status: queued ? 'queued' : 'delivered' } : x)));
         clearAttachments(opts.localAttachmentIds);
+        return true;
       } catch (e) {
         setPending(p => p.map(x => (x.key === key ? { ...x, status: 'error' } : x)));
         setActionNotice({ kind: 'err', text: e instanceof ApiError ? e.message : String(e) });
@@ -1023,6 +1058,7 @@ export function SessionChatPage({
         // happened, the question form replaces the composer instead of leaving
         // the reader staring at a bare "message failed".
         void store.fetchSession(sessionId).catch(() => undefined);
+        return false;
       } finally {
         sendingRef.current = false;
         setSending(false);
@@ -1078,6 +1114,37 @@ export function SessionChatPage({
       });
     },
     [deliver],
+  );
+
+  /** A durable unconfirmed row is a DIFFERENT case from retrying a failed HTTP
+   * call. Its old sendId remains an immutable audit record and may still land,
+   * so LedgerMessage first exposes that duplicate risk; only the explicit
+   * second activation reaches here. The replacement then mints a fresh identity
+   * unconditionally — `identityFor` must never collapse it onto the old send. */
+  const resendLedger = useCallback(
+    async (record: SendRecord): Promise<boolean> => {
+      const attachments: StoredTranscriptImage[] = record.attachmentIds.map(attachmentId => ({
+        kind: 'attachment',
+        sessionId,
+        attachmentId,
+        filename: attachmentId,
+      }));
+      const accepted = await deliver(record.message, {
+        interruptFirst: false,
+        requestId: requestIdForLedgerResend(record.sendId),
+        attachmentIds: [...record.attachmentIds],
+        attachments,
+        localAttachmentIds: [],
+      });
+      if (accepted) {
+        setActionNotice({
+          kind: 'ok',
+          text: 'A separate resend was accepted with a new ID and is awaiting its own confirmation. The original remains unconfirmed.',
+        });
+      }
+      return accepted;
+    },
+    [deliver, sessionId],
   );
 
   const dismissPending = useCallback((key: string) => {
@@ -1157,10 +1224,17 @@ export function SessionChatPage({
   const transcriptFooter =
     ledgerRows.length || reconciled.unclaimedLocal.length || busy ? (
       <div className="space-y-1 px-1 py-1">
-        {/* DURABLE rows first: they are older than anything this browser is still
-            holding optimistically, and they are what survives a refresh. */}
+        {/* Only genuinely current durable accepts remain here. Unconfirmed and
+            exceptional delivered rows are interleaved into displayedBlocks by
+            acceptedAt, so old uncertainty can never bury the conversation. */}
         {ledgerRows.map(record => (
-          <LedgerMessage key={record.sendId} record={record} sessionId={sessionId} />
+          <LedgerMessage
+            key={record.sendId}
+            record={record}
+            sessionId={sessionId}
+            asOf={ledgerNow}
+            onResend={HAS_TOKEN ? resendLedger : undefined}
+          />
         ))}
         {reconciled.unclaimedLocal.map(p => (
           <PendingMessage
@@ -1268,12 +1342,14 @@ export function SessionChatPage({
                 <ThreadSkeleton />
               ) : (
                 <Transcript
-                  blocks={visibleBlocks}
+                  blocks={displayedBlocks}
                   live={busy}
                   hasOlder={transcriptView.hidden > 0 ? false : nextBefore != null}
                   loadingOlder={loadingOlder}
                   onLoadOlder={() => void loadOlder()}
                   pinSignal={pinSignal}
+                  sessionId={sessionId}
+                  onResendLedger={HAS_TOKEN ? resendLedger : undefined}
                   header={transcriptHeader}
                   footer={transcriptFooter}
                 />
@@ -1516,53 +1592,6 @@ const PENDING_BADGE: Record<PendingStatus, { label: string; tone: string }> = {
   delivered: { label: 'accepted — awaiting confirmation', tone: 'border-warn-border bg-warn-bg text-warn' },
   error: { label: 'failed to send', tone: 'border-err-border bg-err-bg text-err' },
 };
-
-/** A DURABLE send row: one the daemon has recorded and this browser did not have
- *  to remember. It renders the same bubble shell as the optimistic row so the
- *  handover from local to durable is invisible — the badge changes, the message
- *  does not move.
- *
- *  The badge sentence rides on `title` AND in visually-hidden text, so the state is
- *  never communicated by colour alone: "unconfirmed" in muted grey is meaningless
- *  to a screen reader without the sentence that explains it may still have landed. */
-function LedgerMessage({ record, sessionId }: { record: SendRecord; sessionId: string }) {
-  const { label, tone, detail } = sendBadge(record);
-  // Peer sends carry the daemon's attribution banner inside the text (the harness
-  // only reads text); show the prose and let the sender chip carry the author.
-  const { from, body } = peerFrom(record.message);
-  const attachments: StoredTranscriptImage[] = record.attachmentIds.map(attachmentId => ({
-    kind: 'attachment',
-    sessionId,
-    attachmentId,
-    filename: attachmentId,
-  }));
-  return (
-    <div className="kt-bubble-row">
-      <span className="sr-only">{from ? `${from.name} sent:` : 'You said:'}</span>
-      <div className="kt-bubble">
-        <div className="flex min-w-0 items-center gap-2 px-panel pt-1">
-          {from && <span className="shrink-0 text-[10.5px] font-medium text-muted">{from.name}</span>}
-          <span
-            className={cn(
-              'ml-auto inline-flex shrink-0 select-none items-center gap-1 rounded-sm border px-1.5 py-px text-[10.5px] font-medium leading-[1.5]',
-              tone,
-            )}
-            title={detail}
-          >
-            {label}
-          </span>
-        </div>
-        {body && (
-          <div className="kt-user-copy min-w-0 max-w-full whitespace-pre-wrap break-words px-panel pb-1.5 pt-0.5 text-[13px] leading-snug text-[color:var(--bubble-fg)]">
-            {body}
-          </div>
-        )}
-        <span className="sr-only">{detail}</span>
-        <TranscriptImageGallery images={attachments} className="px-panel pb-2 pt-1" />
-      </div>
-    </div>
-  );
-}
 
 function PendingMessage({
   text,

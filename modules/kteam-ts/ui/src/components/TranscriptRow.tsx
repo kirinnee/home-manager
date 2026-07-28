@@ -28,6 +28,7 @@ import { memo, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { ChevronRight, Brain, Info, Pin, PinOff } from 'lucide-react';
 import {
   isInformativeTurnBoundary,
+  peerFrom,
   type TranscriptBlock,
   type ToolCall,
   type PeerFrom,
@@ -36,12 +37,14 @@ import {
 import { Markdown } from './Markdown';
 import { ToolGroup } from './ToolGroup';
 import { TranscriptImageGallery } from './AttachmentImage';
+import { LedgerMessage } from './LedgerMessage';
 import type { StoredTranscriptImage, TranscriptImage } from '../lib/attachments';
 import { displayCallsign } from '../lib/callsign';
 import { cn, fmtClock } from '../lib/utils';
 import { isMessagePinned, pinsStore, type PinBlockKind } from '../lib/pins';
 import { getForegroundSession } from '../lib/pin-bridge';
 import { TOUCH_SELECTION_DWELL_MS } from '../hooks/useLiveTick';
+import { useSidePane } from './SidePane';
 
 const PROTOCOL_HEADER = /#\s*(AGENTS\.md instructions|SYSTEM\s*PROMPT|INSTRUCTIONS)/i;
 const LONG_USER_LINES = 16;
@@ -93,6 +96,8 @@ interface Props {
   isLast: boolean;
   /** The block above this one — drives the speaker-change gap. */
   previous?: TranscriptBlock;
+  sessionId?: string;
+  onResendLedger?: (record: Extract<TranscriptBlock, { kind: 'ledger' }>['record']) => Promise<boolean>;
   /** Input modality, resolved ONCE by Transcript and threaded down rather than
    *  subscribed per row (thousands of rows must not each hold a media listener).
    *  Selects the pin affordance: a tap-revealed bar on touch, a hover/focus
@@ -171,12 +176,27 @@ function sameProps(prev: Props, next: Props): boolean {
     return a.info.raw === t.info.raw && a.ts === t.ts;
   }
   if (a.kind === 'notice') return a.label === (b as typeof a).label;
+  if (a.kind === 'ledger') {
+    const t = b as typeof a;
+    return (
+      a.record === t.record &&
+      a.placement === t.placement &&
+      a.asOf === t.asOf &&
+      prev.sessionId === next.sessionId &&
+      prev.onResendLedger === next.onResendLedger
+    );
+  }
   return false;
 }
 
 /** Which density tier a block belongs to — prose or machine chrome. */
 function tierOf(kind: TranscriptBlock['kind']): 'message' | 'chrome' {
-  return kind === 'user' || kind === 'assistant' ? 'message' : 'chrome';
+  return kind === 'user' || kind === 'assistant' || kind === 'ledger' ? 'message' : 'chrome';
+}
+
+function speakerOf(block: TranscriptBlock): 'user' | 'assistant' | undefined {
+  if (block.kind === 'user' || block.kind === 'ledger') return 'user';
+  return block.kind === 'assistant' ? 'assistant' : undefined;
 }
 
 /** The text a message pin stores as its preview, so the pin stays legible even
@@ -188,6 +208,8 @@ export function pinPreviewOf(block: TranscriptBlock): string {
     case 'assistant':
     case 'thinking':
       return block.text;
+    case 'ledger':
+      return peerFrom(block.record.message).body;
     case 'tools':
       return (
         block.calls
@@ -204,10 +226,11 @@ export function pinPreviewOf(block: TranscriptBlock): string {
   }
 }
 
-/** Only turn boundaries are un-pinnable — they are the one row with no stable
- *  content of its own to jump back to. */
+/** Turn boundaries and live-view ledger rows are un-pinnable. A ledger row can
+ * age out at hardDeadline while remaining only in the audit log, so promising a
+ * permanent transcript jump target for it would create a knowingly broken pin. */
 export function isPinnable(block: TranscriptBlock): boolean {
-  return block.kind !== 'turn';
+  return block.kind !== 'turn' && block.kind !== 'ledger';
 }
 
 // The pin affordance. TWO paths, ZERO resting cost, and NO hover-only surface —
@@ -414,7 +437,15 @@ export function createBlockTapPointerHandlers(options: {
   };
 }
 
-export const TranscriptRow = memo(function TranscriptRow({ block, live, isLast, previous, touch = false }: Props) {
+export const TranscriptRow = memo(function TranscriptRow({
+  block,
+  live,
+  isLast,
+  previous,
+  sessionId = '',
+  onResendLedger,
+  touch = false,
+}: Props) {
   // Hooks run unconditionally, before the turn-noise early-return below — a given
   // row is always noise or never, so the hook order per instance is stable.
   const [barOpen, setBarOpen] = useState(false);
@@ -469,7 +500,10 @@ export const TranscriptRow = memo(function TranscriptRow({ block, live, isLast, 
   // transcript. Intervening chrome does not break it: a reply that ran tools
   // first is still the other party starting to speak.
   const turnChange =
-    kind === 'message' && previous !== undefined && tierOf(previous.kind) === 'message' && previous.kind !== block.kind;
+    kind === 'message' &&
+    previous !== undefined &&
+    tierOf(previous.kind) === 'message' &&
+    speakerOf(previous) !== speakerOf(block);
 
   const body = (() => {
     switch (block.kind) {
@@ -499,6 +533,16 @@ export const TranscriptRow = memo(function TranscriptRow({ block, live, isLast, 
           <div className="kt-chrome mono truncate px-2" title={block.label}>
             {block.label}
           </div>
+        );
+      case 'ledger':
+        return (
+          <LedgerMessage
+            record={block.record}
+            sessionId={sessionId}
+            placement={block.placement}
+            asOf={block.asOf}
+            onResend={onResendLedger}
+          />
         );
     }
   })();
@@ -591,11 +635,12 @@ export const ASSISTANT_LAYOUT = {
 } as const;
 
 function AssistantMessage({ text, ts }: { text: string; ts?: string; source: string }) {
+  const sidePane = useSidePane();
   if (!text.trim()) return null;
   return (
     <div className={cn(ASSISTANT_LAYOUT.wrap, ts && ASSISTANT_LAYOUT.gutter)}>
       {ts && <span className={ASSISTANT_LAYOUT.stamp}>{clockLabel(ts)}</span>}
-      <Markdown text={text} />
+      <Markdown text={text} onTaskOpen={sidePane?.openTask} />
     </div>
   );
 }

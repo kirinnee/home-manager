@@ -128,7 +128,90 @@ export type TranscriptBlock =
       /** The run contained a turn.aborted — the turn did not finish normally. */
       aborted?: boolean;
     }
+  | {
+      id: string;
+      kind: 'ledger';
+      record: SendRecord;
+      ts: string;
+      /** Where acceptedAt fell relative to the timestamped loaded page. */
+      placement: LedgerBlockPlacement;
+      /** The page clock used for deadline-derived copy in this render. */
+      asOf: number;
+    }
   | { id: string; kind: 'notice'; label: string; detail?: string };
+
+export type LedgerBlockPlacement = 'chronological' | 'before-loaded' | 'after-loaded' | 'unknown-time';
+
+/** Insert durable ledger rows into the loaded transcript by acceptance time.
+ *
+ * Placement is deliberately NOT reconciliation. It never reads message text,
+ * attachments, peer identity, or proof keys and therefore cannot imply that a
+ * nearby transcript row proves delivery. It answers only the visual question
+ * "where did kteam accept this attempt relative to the rows currently loaded?"
+ *
+ * A row older than the loaded timestamp window goes at the TOP boundary, where
+ * loading older history can later move it into place. A newer row goes at the
+ * tail boundary. With no usable acceptance/page clock, top-boundary placement
+ * is explicitly marked unknown rather than inventing an order. */
+export function placeLedgerBlocks(
+  blocks: readonly TranscriptBlock[],
+  records: readonly SendRecord[],
+  asOf = Date.now(),
+): TranscriptBlock[] {
+  if (records.length === 0) return [...blocks];
+
+  const blockTimes = blocks.map(block => Date.parse(('ts' in block ? block.ts : undefined) ?? ''));
+  const finiteTimes = blockTimes.filter(Number.isFinite);
+  const earliest = finiteTimes.length ? Math.min(...finiteTimes) : undefined;
+  const latest = finiteTimes.length ? Math.max(...finiteTimes) : undefined;
+  const buckets: Array<Array<Extract<TranscriptBlock, { kind: 'ledger' }>>> = Array.from(
+    { length: blocks.length + 1 },
+    () => [],
+  );
+
+  const oldestFirst = [...records].sort(
+    (left, right) => (Date.parse(left.acceptedAt) || 0) - (Date.parse(right.acceptedAt) || 0),
+  );
+  for (const record of oldestFirst) {
+    const acceptedAt = Date.parse(record.acceptedAt);
+    let index = 0;
+    let placement: LedgerBlockPlacement = 'unknown-time';
+    if (Number.isFinite(acceptedAt) && earliest !== undefined && latest !== undefined) {
+      if (acceptedAt < earliest) {
+        placement = 'before-loaded';
+      } else if (acceptedAt > latest) {
+        index = blocks.length;
+        placement = 'after-loaded';
+      } else {
+        // Preserve the transcript's authoritative sequence even if two harness
+        // clocks wobble: place after the LAST loaded row whose clock is not
+        // later than acceptance, never sort/reorder the transcript itself.
+        let anchor = -1;
+        for (let blockIndex = 0; blockIndex < blockTimes.length; blockIndex++) {
+          const blockAt = blockTimes[blockIndex]!;
+          if (Number.isFinite(blockAt) && blockAt <= acceptedAt) anchor = blockIndex;
+        }
+        index = anchor + 1;
+        placement = 'chronological';
+      }
+    }
+    buckets[index]!.push({
+      id: `ledger-${record.sendId}`,
+      kind: 'ledger',
+      record,
+      ts: record.acceptedAt,
+      placement,
+      asOf,
+    });
+  }
+
+  const placed: TranscriptBlock[] = [];
+  for (let index = 0; index <= blocks.length; index++) {
+    placed.push(...buckets[index]!);
+    if (index < blocks.length) placed.push(blocks[index]!);
+  }
+  return placed;
+}
 
 /** A turn separator earns a transcript row only when it communicates a fact.
  * Keep this shared between the builder and renderer so a malformed or legacy

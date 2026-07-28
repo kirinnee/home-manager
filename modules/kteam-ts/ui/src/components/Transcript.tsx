@@ -185,8 +185,18 @@ interface Props {
   loadingOlder: boolean;
   onLoadOlder: () => void;
   pinSignal: number;
+  sessionId?: string;
+  onResendLedger?: (record: Extract<TranscriptBlock, { kind: 'ledger' }>['record']) => Promise<boolean>;
   header?: ReactNode;
   footer?: ReactNode;
+}
+
+/** The first REAL transcript row owns prepend detection. A synthetic ledger
+ * boundary can remain first while an older page is inserted immediately after
+ * it; using that synthetic id would miss the prepend and let the reader's scroll
+ * position jump. Fall back to the ledger id only when no transcript row exists. */
+export function transcriptPrependAnchorId(blocks: readonly TranscriptBlock[]): string | null {
+  return blocks.find(block => block.kind !== 'ledger')?.id ?? blocks[0]?.id ?? null;
 }
 
 /** How close to the bottom counts as "back at the bottom" for RE-ENGAGING follow.
@@ -471,9 +481,10 @@ function Inner(props: Props) {
 
   const last = blocks.length - 1;
   const lastId = blocks.length ? blocks[last]!.id : null;
-  const firstId = blocks.length ? blocks[0]!.id : null;
+  const firstId = transcriptPrependAnchorId(blocks);
   const prevLastId = useRef<string | null>(null);
   const prevFirstId = useRef<string | null>(null);
+  const prevBlockCount = useRef(blocks.length);
   /** scrollHeight as of the last paint — the shrink test's baseline. */
   const prevScrollHeight = useRef(0);
   /** Distance from the bottom as of the last settled scroll or resize callback.
@@ -802,14 +813,17 @@ function Inner(props: Props) {
   // ---- DETACHED: count new tail blocks for the pill -------------------------
   useEffect(() => {
     const prev = prevLastId.current;
-    if (lastId && prev !== null && lastId !== prev && !followRef.current) {
+    // A hardDeadline removes a ledger row. That changes lastId but adds no new
+    // content, so it must not manufacture a "1 new" pill for a detached reader.
+    if (lastId && prev !== null && lastId !== prev && blocks.length >= prevBlockCount.current && !followRef.current) {
       const idx = blocks.findIndex(b => b.id === prev);
       const added = idx >= 0 ? blocks.length - 1 - idx : 1;
       setNewCount(c => c + Math.max(1, added));
     }
     prevLastId.current = lastId;
+    prevBlockCount.current = blocks.length;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lastId]);
+  }, [lastId, blocks.length]);
 
   // Follow may only be broken by a scroll-up the READER performed.
   //
@@ -1239,6 +1253,8 @@ function Inner(props: Props) {
               live={live}
               isLast={idx === last}
               previous={idx > 0 ? blocks[idx - 1] : undefined}
+              sessionId={props.sessionId}
+              onResendLedger={props.onResendLedger}
               touch={touchAffected}
             />
           ))}
